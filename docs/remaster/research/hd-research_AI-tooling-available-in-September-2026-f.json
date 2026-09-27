@@ -1,0 +1,236 @@
+{
+ "topic": "AI tooling available in September 2026 for an RA2 HD remaster (ChatGPT/OpenAI, competing image generators, upscalers, 3D generation, depth/normal/material estimation, VFX), plus a recommended tool stack and how to split the work between Claude Code, ChatGPT and local models",
+ "findings": [
+  {
+   "title": "There is no 'ChatGPT 6 Ultra'. The current models are GPT-6 Astra, Sol and Luna, and 'Ultra' is a reasoning-effort level",
+   "detail": "VERIFIED: OpenAI released GPT-6 Astra on 2026-09-03 as its flagship. GPT-6 Sol and GPT-6 Luna followed on 2026-09-22. API prices per 1M tokens, input/output: gpt-6-astra $10/$50, gpt-6-sol $2/$10, gpt-6-luna $0.10/$0.50 (OpenAI pricing page). OpenAI's ChatGPT 'Models' doc lists Astra, 6 Sol and 6 Luna. It lists reasoning efforts Low, Medium, High, Extra High, Max and 'Ultra', where Ultra 'goes beyond a single-agent run' by using subagents. So 'Ultra' is a thinking level, not a model, and it is not an image model. LIKELY (9to5Mac plus a third-party tracker updated 2026-09-25): in normal chats, 'GPT-6 Pro' runs on Astra and is available on Pro $100 (about 50 msgs/week), Pro $200 (about 200 msgs/week), Business and Enterprise. Plus gets Astra only inside ChatGPT Work/Codex. Everyday chats on paid plans run GPT-5.6 Sol, with a Pro reasoning option. So the user's 'Pro mode for planning' maps to GPT-6 Pro or Sol Pro on a Pro plan. Retired from ChatGPT in 2026: GPT-4o, GPT-4.1, o4-mini and GPT-5.1/5.2.",
+   "sources": [
+    "https://developers.openai.com/api/docs/pricing",
+    "https://learn.chatgpt.com/docs/models",
+    "https://9to5mac.com/2026/09/04/openai-releasing-major-upgrade-to-chatgpt-and-codex-with-gpt-6-astra-details-here/",
+    "https://www.ai-toolbox.co/chatgpt-models/chatgpt-models-explained-complete-comparison-2026",
+    "https://en.wikipedia.org/wiki/GPT-6_Astra"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "OpenAI's top image model is ChatGPT Images 2.5 (2026-09-08), offered in the API as gpt-image-2.5-flare and gpt-image-2.5-sunburst",
+   "detail": "VERIFIED: Images 2.5 launched 2026-09-08 for all ChatGPT, ChatGPT Work and Codex users. OpenAI says it has better lighting and textures, better preservation of reference subjects, and more reliable multi-turn edits, at up to 50% lower latency than Images 2.0. New ChatGPT features: Sketch, Templates, 'Image comments' (pin feedback to one region of an image) and prompt sharing. Two API models: Flare (fast, the default choice) and Sunburst (slower, for editing precision and production-ready work). Snapshot id: gpt-image-2.5-sunburst-2026-09-08. Outputs carry C2PA metadata and SynthID watermarks. LIKELY: ChatGPT routes routine prompts to Flare and escalates complex ones to Sunburst (dev-community post, not confirmed on an OpenAI page). OpenAI does not publish image quotas for ChatGPT plans. Third-party reports say Plus is capped by a rolling window and Pro is 'unlimited' subject to abuse guardrails. The in-app banner is the only source of truth.",
+   "sources": [
+    "https://www.unite.ai/openai-releases-chatgpt-images-2-5-with-sketch-and-two-new-api-models/",
+    "https://community.openai.com/t/introducing-chatgpt-images-2-5/1395897",
+    "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst",
+    "https://en.wikipedia.org/wiki/GPT_Image",
+    "https://www.mindstudio.ai/blog/gpt-image-25-pricing-access"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "OpenAI image API specs relevant to game assets: resolution, alpha, masks, reference images, multi-turn edits",
+   "detail": "VERIFIED from the official image-generation guide. Custom sizes are WIDTHxHEIGHT in multiples of 16, aspect ratio between 1:3 and 3:1, maximum edge 3840 px, and 655,360 to 8,294,400 total pixels. Anything above 2560x1440 is 'experimental'. Quality levels are low, medium, high, xhigh and max for the 2.5 models (older models stop at high). Transparent background works on both 2.5 models with background:'transparent' and PNG or WebP output. gpt-image-2 does not support transparency, although a preview has been announced. Inpainting uses a mask with an alpha channel, the same size and format as the image and under 50MB, and the mask applies to the first input image. Several input images are accepted (the docs show 4) with no published hard limit. The Responses API supports multi-turn editing via previous_response_id with action auto, generate or edit. Complex prompts can take up to 2 minutes. OpenAI itself warns that consistency may vary between generations. Rate limits for gpt-image-2.5-sunburst in images per minute: Tier 1 = 5, Tier 2 = 20, Tier 3 = 50, Tier 4 = 150, Tier 5 = 250. LIKELY (secondary sources): gpt-image models need OpenAI organization (ID) verification in addition to a usage tier.",
+   "sources": [
+    "https://developers.openai.com/api/docs/guides/image-generation",
+    "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst",
+    "https://community.openai.com/t/transparent-backgrounds-are-now-available-in-preview-for-gpt-image-2-in-the-api/1391541",
+    "https://www.aifreeapi.com/en/posts/gpt-image-2-api-tiers"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "OpenAI image API pricing: $30/M output tokens, roughly $0.006 to $0.21 per 1024² image, and the Batch 50% discount covers gpt-image-2 but not 2.5",
+   "detail": "VERIFIED: gpt-image-2.5-sunburst, gpt-image-2.5-flare and gpt-image-2 all cost $5/M text input, $8/M image input, $2/M cached input and $30/M image output. The Batch table gives gpt-image-2 a 50% discount ($15/M output). The 2.5 models are NOT in the Batch table. LIKELY (third-party calculator using OpenAI's token counts): per 1024x1024 image, low about $0.006, medium $0.013, high $0.053, xhigh $0.094, max $0.211. 1536x1024 is slightly cheaper (high about $0.041). Flare and Sunburst cost the same per token. Sunburst is slower, not more expensive. Other models: gpt-image-1 is deprecated on 2026-10-23, and DALL-E 2/3 were removed on 2026-05-12. INFERENCE: 5,000 production images at 2.5 'high' cost about $265, or about $130 with gpt-image-2 in Batch. Allow 2-4x that for rework.",
+   "sources": [
+    "https://developers.openai.com/api/docs/pricing",
+    "https://docs.kanaries.net/articles/gpt-image-2-5",
+    "https://costgoat.com/pricing/openai-images",
+    "https://en.wikipedia.org/wiki/GPT_Image"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "An official way to use the ChatGPT subscription from scripts: Codex CLI with $imagegen",
+   "detail": "VERIFIED (OpenAI 'ChatGPT Learn' doc): Codex has built-in image generation that uses gpt-image-2 and 'counts toward your general Codex usage limits'. It burns plan limits 3-5x faster than text turns and is not available on the Free plan. You can attach reference images with -i/--image and call the skill explicitly with $imagegen. For larger batches the doc says to set OPENAI_API_KEY so API pricing applies instead of plan limits. LIKELY (third-party Codex knowledge base): 'codex exec' runs it non-interactively, and because gpt-image-2 has no alpha, the skill makes transparency by chroma-keying. Local check: the Codex CLI is NOT installed on this Mac. The ChatGPT desktop app, Chrome, gh (authenticated), uv and Homebrew are installed. INFERENCE: Claude Code can shell out to 'codex exec' to create small batches on the user's plan through an OpenAI-supported tool. This is safer than automating the chatgpt.com UI, but it currently uses gpt-image-2, not 2.5, and the quota is small.",
+   "sources": [
+    "https://learn.chatgpt.com/docs/image-generation",
+    "https://codex.danielvaughan.com/2026/04/27/codex-cli-image-generation-gpt-image-2-visual-development-workflows/",
+    "https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Automating the ChatGPT website is low-throughput and conflicts with OpenAI's Terms of Use",
+   "detail": "VERIFIED (text appears in search snippets; OpenAI's policy page returned 403 to the fetch): OpenAI's Terms of Use forbid users to 'Automatically or programmatically extract data or Output'. A Pro-limits tracker also notes 'automated-use protection' abuse safeguards on Pro plans. INFERENCE: Claude could drive the user's logged-in ChatGPT through Claude in Chrome, whose tools exist in this environment. Each image takes about 30s-2min, plan caps are unpublished, and bulk scripted use risks account enforcement. Use the browser only for low-volume, user-visible work: style-bible exploration, sessions where the user pins feedback with Image comments, and pasting plans into GPT-6 Pro for review. Put volume through the API or Codex CLI.",
+   "sources": [
+    "https://openai.com/policies/row-terms-of-use/",
+    "https://chatgptlimit.com/chatgpt-pro-limit/",
+    "https://zylos.ai/research/2026-07-13-subscription-auth-boundaries-official-cli-agent-automation/"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "Google Gemini image models (Nano Banana 2 and Pro): strong multi-reference consistency, 4K output, Batch at half price",
+   "detail": "VERIFIED (Gemini API docs and pricing): gemini-3.1-flash-image (Nano Banana 2, launched 2026-02-26) goes up to 4K and accepts up to 10 object references, 4 character references and 3 style references. Aspect ratios run from 1:1 to 21:9. Price: $0.067 at 1K, $0.101 at 2K, $0.151 at 4K. gemini-3-pro-image (Nano Banana Pro, announced 2025-11-20) costs $0.134 at 1K/2K and $0.24 at 4K, with up to 6 object and 5 character references. gemini-3.1-flash-lite-image costs $0.0336 at 1K. Batch is 50% off, e.g. Pro at $0.067 for 1K/2K. The docs do not list transparency. LIKELY (third-party 18-model benchmark): Nano Banana Pro leads on structural coherence, mechanical detail and materials for props and vehicles, while GPT Image 2 High leads overall for game and concept art.",
+   "sources": [
+    "https://ai.google.dev/gemini-api/docs/image-generation",
+    "https://ai.google.dev/gemini-api/docs/pricing",
+    "https://blog.google/innovation-and-ai/technology/ai/nano-banana-2/",
+    "https://techcrunch.com/2025/11/20/google-releases-nano-banana-pro-its-latest-image-generation-model/",
+    "https://vibedex.ai/blog/best-ai-image-generator-game-art-2026"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Other image generators: FLUX.2 / FLUX 3, Seedream 5.0 Pro, Midjourney V8.2, Qwen-Image-Edit, Scenario",
+   "detail": "VERIFIED: Black Forest Labs has FLUX.2 [pro]/[flex] (2025-11-25, up to 8 references, 4MP, from $0.03/MP) and FLUX.2 [max] (up to 10 references). FLUX.2 [klein] (2026-01-15) ships open weights: the 4B model is Apache-2.0 and the 9B is non-commercial. FLUX 3 (2026-07-23) is a multimodal video/image/audio model whose shipped features so far are video-focused. Seedream 5.0 Pro (ByteDance, 2026-07-08) can split one render into 10+ alpha PNG layers, supports point/lasso/sketch edits and outputs natively at 2K. Midjourney V8.2 has been the default since 2026-07-24. Its new Edit Model replaced Omni/Character Reference and takes up to 4 reference images. Qwen-Image-Edit-2511 (open weights, 2025-12-23) builds on the Apache-2.0 2509 line, which accepts 1-10 input images. Qwen-Image 2.1 is research-only licensed. Scenario trains custom style models on 10-30 images, has an API, and costs $15-75/mo plus credits. PixelLab has an 8-rotation tool, but it targets pixel art. UNVERIFIED: whether Midjourney now has an official public API. It historically did not, so treat it as manual only.",
+   "sources": [
+    "https://docs.bfl.ml/release-notes",
+    "https://seed.bytedance.com/en/blog/beyond-generation-it-understands-design-introducing-seedream-5-0-pro",
+    "https://docs.midjourney.com/hc/en-us/articles/32199405667853-Version",
+    "https://updates.midjourney.com/v8-1-is-now-the-default-model/",
+    "https://github.com/QwenLM/Qwen-Image",
+    "https://www.scenario.com/pricing",
+    "https://www.pixellab.ai/docs/tools/create-8-rotations-pro"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Local generation on this M5 Pro (64 GB unified memory, 20-core GPU, 416 GB free) is practical",
+   "detail": "VERIFIED on this machine: Apple M5 Pro, 20-core GPU, Metal 4, 64 GB RAM, 18 CPU cores, about 416 GB free disk, Python 3.14 from Homebrew, and uv installed. Most ML stacks want Python 3.11/3.12, so use uv-managed venvs. VERIFIED (Apple ML Research): M5 GPU Neural Accelerators make FLUX-dev-4bit at 1024² with MLX more than 3.8x faster than on M4. Draw Things defaults to an ANE+NAX hybrid mode on M5. It supports FLUX.2 [dev], Qwen Image, ControlNet, inpainting, and LoRA training on FLUX.2 klein, Qwen Image and Z Image. mflux/MLX runs FLUX.2 klein 4B (4-bit is a 4.6 GB download). ComfyUI runs on MPS, but a 2026 Mac-mini test found Draw Things about 20% faster. INFERENCE: 64 GB fits FLUX.2 klein, Qwen-Image-Edit (quantized) and SDXL with ControlNet/IP-Adapter, and allows LoRA training on the approved style bible. That gives unlimited, private, zero-marginal-cost 'repaint' passes. Benchmark seconds per image before committing.",
+   "sources": [
+    "https://machinelearning.apple.com/research/exploring-llms-mlx-m5",
+    "https://wiki.drawthings.ai/wiki/Main_Page",
+    "https://www.heyuan110.com/posts/ai/2026-02-15-draw-things-ultimate-guide/",
+    "https://huggingface.co/Runpod/FLUX.2-klein-4B-mflux-4bit",
+    "https://www.workflowlab.dev/deploy/comfyui-mac-apple-silicon-mps-speed"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Which generator fits which job",
+   "detail": "INFERENCE, grounded in the specs above. (1) Style bible and key art: ChatGPT Images 2.5 used interactively by the user with Image comments, plus Midjourney V8.2 for mood boards and Nano Banana Pro for mechanically accurate vehicle and building concepts. (2) Tileable PBR textures: any generator with a 'seamless' prompt, or Scenario/Layer tileable tools. Then derive PBR maps with Substance 3D Sampler 'Image to Material' or locally with Marigold IID and Marigold normals. RA2 terrain is 60x30 isometric diamond tiles with many cliff and shore transition tiles, so plan terrain as material splats rather than repainting thousands of tiles one by one. (3) Consistency across 8-32 facings: no 2D generator reliably holds rotation consistency. One third-party test says 'single-call consistency across 8 views is beyond current models'. Use 3D, or ControlNet/img2img repaint of each original frame at low denoise with a style LoRA so the original silhouette pins the geometry. (4) Cameo/sidebar icons: GPT Image 2.5 or Nano Banana with the original cameo plus 2-3 approved hero icons as references, generated in bulk via API with a fixed frame template. 2.5 has native alpha if needed.",
+   "sources": [
+    "https://ludo.ai/compare/best-ai-sprite-generators",
+    "https://experienceleague.adobe.com/en/docs/substance-3d-sampler/using/filters/tools/image-to-material",
+    "https://www.scenario.com/features/generate-textures",
+    "https://www.layer.ai/tools/layer--tileable-texture"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "RA2 renders vehicles as voxels, which favors a 3D route for HD units",
+   "detail": "VERIFIED (ModEnc): RA2 and TS draw vehicles and turrets from VXL voxel models with HVA transforms (chassis, turret and barrel parts, with a palette index and normal index per voxel). Infantry and buildings are 2D SHP sprites. VERIFIED (GitHub READMEs of forks built on it): Chrono Divide is a from-scratch TypeScript simulation with a Three.js/WebGL renderer. The engine is proprietary and used non-commercially with the author's permission. INFERENCE: HD vehicles could be real 3D meshes, AI-generated or remodeled, shown through an orthographic isometric camera in Three.js or pre-rendered to 32-facing sprite sheets. That keeps the 2.5D look and solves facing consistency for free. Infantry (8 facings times many animation frames) and building animations are where 2D repaint or rigged-3D-to-sprite choices matter most.",
+   "sources": [
+    "https://modenc.renegadeprojects.com/Voxel",
+    "https://www.ppmsite.com/addvoxels/",
+    "https://github.com/zaiddwiri93-alt/RedAlert2-Mac-iOS-iPad",
+    "https://chronodivide.com/",
+    "https://github.com/chronodivide/mod-sdk"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "AI upscalers that run on Apple Silicon, and their limits on tiny palette sprites",
+   "detail": "VERIFIED: Upscayl is free, runs Real-ESRGAN-family models locally on Apple Silicon and supports custom models. OpenModelDB lists 671+ models (ESRGAN, SPAN, HAT, Real-CUGAN) with 'Game Textures', 'Game Screenshots' and 'Pixel Art' categories. 4x-UltraSharp-class models are loaded from there via chaiNNer or Upscayl. SeedVR2 (ByteDance, one-step diffusion restoration, 3B/7B) runs in ComfyUI, and its node includes MPS fixes and a CPU fallback. Topaz Gigapixel and Pixelmator Pro ML Super Resolution are commercial Mac options. VERIFIED caveat from the ESRGAN community: many game sprites were 'simply made at that size', so there is no hidden detail to recover. INFERENCE: RA2 sprites are 8-bit palettized, often 20-60 px, with separate shadow frames and player 'remap' color ranges. Use upscalers only to make a base image for a diffusion repaint. Carry the remap mask and shadows through as separate channels, and never bake house colors into the image. SUPIR (SDXL-based) is heavy and slow on MPS; not verified here.",
+   "sources": [
+    "https://sourceforge.net/directory/image-upscalers/mac/",
+    "https://openmodeldb.info/",
+    "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler",
+    "https://docs.comfy.org/tutorials/utility/seedvr2",
+    "https://www.doomworld.com/forum/topic/106611-a-simple-method-of-scaling-up-2d-sprites-with-esrgan/"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "AI 3D generation in 2026: good enough for RTS-scale hard-surface work after cleanup",
+   "detail": "VERIFIED/LIKELY (2026 comparison articles): Rodin Gen-2 (Gen-2.5 now advertises 10M+ polys) gives the best hard-surface detail: panel lines, bolts, mechanical parts. Its meshes are dense and need retopology, and one test called its textures muddy. Meshy 6 (GA 2026-01-18) adds up to about 600K faces, a Low Poly Mode for games, the best PBR out of the box (KTX2, sensible UVs), and an API/MCP. It beat Tripo 3.1 63.8% in a blind artist test run by Meshy. Tripo 3.1 is the fastest with the cleanest topology but is more stylized. StraySpark estimates only about 1 in 10 generations from any tool is client-ready without rework. Hunyuan3D 2.1 is the last open-weights version (community license that excludes EU/UK/South Korea, about 29 GB VRAM, open PBR stage). Hunyuan3D 3.0/3.1 are hosted only, at about 25 credits (about $0.50) per generation. TRELLIS.2 (Microsoft, 4B, MIT) has a community Apple Silicon port: about 5 minutes and about 18 GB peak on an M4 Pro, output GLB with base color, metallic and roughness at up to 2048 px. Its background-removal dependency RMBG-2.0 is CC-BY-NC. INFERENCE: at RTS zoom (a tank is roughly 60-150 px tall even on a 4K display) small artifacts disappear. Blender (free, not installed) is needed for cleanup, decimation, fixing the pivots of the turret, barrel and chassis parts, and orthographic batch renders.",
+   "sources": [
+    "https://www.strayspark.studio/blog/generative-3d-tools-comparison-meshy-rodin-tripo-csm-2026",
+    "https://z.tools/blog/meshy-6-vs-tripo-v3-1-3d",
+    "https://triposr.org/blog/hunyuan3d-versions",
+    "https://github.com/tencent-hunyuan/hunyuan3d-2.1",
+    "https://github.com/microsoft/TRELLIS.2",
+    "https://github.com/shivampkumar/trellis-mac",
+    "https://app.cinevva.com/guides/ai-3d-model-generators"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "Depth, normal and PBR-from-image models that make modern lighting on 2D sprites possible",
+   "detail": "VERIFIED: Depth Anything 3 (2025-11-14, ICLR 2026) beats DA2 on monocular depth. The Small, Base, Mono-Large and Metric-Large models are Apache-2.0, and the Large-1.1 and Giant models are CC-BY-NC-4.0. Marigold normals v1.1 is on Hugging Face. Marigold IID-Appearance v1.1 (Stable Diffusion 2 based, OpenRAIL++-M) outputs albedo, roughness and metallicity from one image. A Marigold V2 paper (arXiv 2609.08084, Sep 2026) extends the approach to normals and intrinsic decomposition. StableNormal (TOG 2024) gives sharp, low-variance normals. Adobe Substance 3D Sampler's Image-to-Material derives normal, height and roughness maps and strips lighting from the albedo. INFERENCE: create per-sprite normal and depth maps (or render them from 3D) and light them in the WebGL renderer. That enables dynamic lights, day/night, wet-surface sheen in rain, muzzle-flash and explosion lighting on nearby units, and correct water intersections. This is the biggest single step toward a '2026 look' that stays 2.5D.",
+   "sources": [
+    "https://github.com/ByteDance-Seed/Depth-Anything-3",
+    "https://arxiv.org/html/2511.10647v1",
+    "https://huggingface.co/prs-eth/marigold-normals-v1-1",
+    "https://huggingface.co/prs-eth/marigold-iid-appearance-v1-1",
+    "https://arxiv.org/html/2609.08084v1",
+    "https://experienceleague.adobe.com/en/docs/substance-3d-sampler/using/filters/tools/image-to-material"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "VFX tools: EmberGen does not run on this Mac yet; alternatives are Blender, RGBA video models and real-time shaders",
+   "detail": "VERIFIED: EmberGen's pricing page states 'MacOS is not supported at this time' and lists Windows 10/Linux with an NVIDIA GTX 1060+. The Indie license is $300 for the first year (under $1M revenue). JangaFX's roadmap shows 'EmberGen 2 Public Beta (Q4 2026)' and 'Production Ready (2027)'. macOS M-series support is marked 'completed internally', which the roadmap says does not mean publicly available. The product page shows a macOS download link, which conflicts with this, so the user should confirm before buying. EmberGen exports flipbooks with motion vectors, 6-point lighting, normals and depth. Wan-Alpha v2 (MIT, CVPR 2026, built on Wan2.1-T2V-14B) generates RGBA video with semi-transparency and glow, suitable for explosion and smoke elements. It is heavy for a Mac and would likely be run in the cloud. FLUX 3 video (2026-08) generates 2K/4K text-to-video and image-to-video. INFERENCE: practical Mac options are (a) Blender Mantaflow/EEVEE to render explosion and smoke flipbooks, (b) AI video on black, then luma-to-alpha with ffmpeg, then a sprite-sheet packer, and (c) best for the 2026 look: real-time GPU particles, soft particles, refraction/heat-haze and SDF-based shaders in Three.js/WebGPU, using flipbooks only for hero explosions. Water should be shader-driven (normal-map scrolling, flow maps, shoreline foam from a depth mask, reflections). AI is useful here only to author the tiling normal and foam textures.",
+   "sources": [
+    "https://jangafx.com/software/pricing",
+    "https://jangafx.com/roadmap",
+    "https://jangafx.com/software/embergen",
+    "https://github.com/WeChatCV/Wan-Alpha",
+    "https://docs.bfl.ml/release-notes",
+    "https://www.vfxapprentice.com/blog/what-are-flipbooks-in-games"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Throughput and cost comparison of the three production routes",
+   "detail": "VERIFIED inputs: OpenAI images per minute are 5 at Tier 1 up to 250 at Tier 5, with up to 2 minutes per complex image. Gemini Batch and OpenAI gpt-image-2 Batch are 50% off. Codex plan image turns cost 3-5x the quota of a text turn. INFERENCE: (1) Browser ChatGPT gives about 20-60 images/hour with the user present. It is best for exploration, not production, and scripted use conflicts with the Terms of Use. (2) API gives 300/hr at Tier 1 up to thousands/hr at Tier 3+ at about $0.01-0.21 each, and is fully scriptable by Claude Code with logging, retries, seeds/prompts in git, and contact sheets. (3) Local (FLUX.2 klein, Qwen-Image-Edit or SDXL with ControlNet and a style LoRA on the M5 Pro) costs nothing per image, has no ToS or watermark concerns, runs overnight, and preserves exact silhouettes via ControlNet. Its raw quality is below GPT Image 2.5, so use it for high-volume constrained repaints after the style is locked. Rough scale (inference; count once assets are extracted): RA2+YR has hundreds of cameos, a few hundred building SHPs with many animation frames, thousands of terrain tiles across 6 theaters, and roughly 100+ voxel vehicles, so total asset operations are in the thousands to tens of thousands.",
+   "sources": [
+    "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst",
+    "https://ai.google.dev/gemini-api/docs/pricing",
+    "https://learn.chatgpt.com/docs/image-generation",
+    "https://developers.openai.com/api/docs/pricing"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "Licensing and provenance constraints to track from day one",
+   "detail": "VERIFIED: the Chrono Divide engine is proprietary, and its forks note non-commercial use with the author's permission. FLUX.2 klein 9B is non-commercial (4B is Apache-2.0). The larger DA3 models are CC-BY-NC. The RMBG-2.0 background remover used by the TRELLIS.2 Mac port is CC-BY-NC. The Hunyuan3D 2.1 license excludes the EU, UK and South Korea. Qwen-Image 2.1 is research-only. OpenAI outputs carry C2PA and SynthID. INFERENCE: RA2 art is EA copyright, so AI repaints of it are derivative works. Keep the project non-commercial and 'bring your own game files' like the existing ports, and record each asset's generator, model version, prompt and license in a manifest.",
+   "sources": [
+    "https://github.com/zaiddwiri93-alt/RedAlert2-Mac-iOS-iPad",
+    "https://docs.bfl.ml/release-notes",
+    "https://github.com/ByteDance-Seed/Depth-Anything-3",
+    "https://github.com/shivampkumar/trellis-mac",
+    "https://triposr.org/blog/hunyuan3d-versions",
+    "https://www.unite.ai/openai-releases-chatgpt-images-2-5-with-sketch-and-two-new-api-models/"
+   ],
+   "confidence": "verified"
+  }
+ ],
+ "recommendations": [
+  "Tell the user plainly that 'ChatGPT 6 Ultra' does not exist. The real equivalents are ChatGPT Images 2.5 for images (API: gpt-image-2.5-sunburst for precision work, flare for speed) and GPT-6 Pro or 5.6 Sol Pro for planning and reviews. 'Ultra' is only a reasoning-effort setting. Pro $100 (about 50 GPT-6 Pro messages/week) is enough for design reviews, and Pro $200 only makes sense for very heavy use.",
+  "Use a hybrid stack. (a) ChatGPT (the user's own browser, the user driving): style-bible exploration, pinning feedback with Image comments, and GPT-6 Pro reviews of Claude's plans and specs. (b) Claude Code: all code, the asset-extraction pipeline (MIX/SHP/VXL/HVA/PAL to PNG, masks and manifests), API batch scripts, local model orchestration, QA contact sheets and engine integration. (c) OpenAI API: volume once the style is locked. Use 2.5 Sunburst for hero edits that need alpha and gpt-image-2 in Batch at 50% off for bulk; add Gemini Nano Banana Pro/2 in Batch as a second opinion for mechanical subjects. (d) Local on the M5 Pro: upscaling, depth/normal/material maps, a style LoRA on FLUX.2 klein 4B or Qwen-Image-Edit for unlimited ControlNet-pinned repaints, and TRELLIS.2 for local image-to-3D.",
+  "Do not use browser automation of chatgpt.com for batch production. OpenAI's Terms of Use forbid programmatically extracting Output, and throughput is only tens of images per hour. If the user wants production on their subscription quota, install the official Codex CLI and let Claude call `codex exec` with $imagegen for small batches. Use an OpenAI API key (organization verification may be needed) for real volume.",
+  "Pilot before scaling. Take one faction slice (for example Allied Grizzly tank, GI, Barracks, the Grizzly cameo, one temperate terrain patch, one explosion) through all routes. Compare quality, consistency, cost and time on screen in the web engine, then show the user side-by-side results before committing budget.",
+  "For vehicles, test the 3D route. Generate or remodel the mesh with Rodin Gen-2/2.5 or Meshy 6, or locally with TRELLIS.2. Clean it up in Blender (install it), split chassis, turret and barrel like the VXL/HVA parts, and either render live in the Three.js orthographic camera or pre-render 32 facings. This solves facing consistency, which 2D generators cannot guarantee.",
+  "For infantry, buildings and terrain, use 'upscale, then repaint pinned to the original'. Upscale with an ESRGAN/SPAN model from OpenModelDB or SeedVR2, then run a low-denoise diffusion repaint with ControlNet (tile, depth or line) and a style LoRA. Keep the player-color remap mask, shadow frames and alpha as separate channels. Draw terrain as material splats on the original tile layout rather than hand-repainting thousands of tiles.",
+  "Put the '2026 look' mostly in the renderer, not the textures. Add normal and depth maps per sprite (Marigold normals, Depth Anything 3 Apache models, or rendered from 3D), dynamic lighting, weather (rain wetness, snow accumulation, fog), shader water (flow maps, shoreline foam, reflections), GPU particle VFX and post-processing. AI is then used for base art and flipbooks, not for the dynamic effects.",
+  "Plan VFX on the assumption that EmberGen is unavailable on macOS for now (the official pricing page says unsupported, and the EmberGen 2 public beta is Q4 2026). Use Blender smoke simulations and real-time shaders on the Mac. If the user has access to a Windows/NVIDIA or cloud GPU, EmberGen Indie ($300 first year) or Wan-Alpha RGBA video can serve as a flipbook source.",
+  "Keep an asset manifest in git, one row per asset: source file, generator, model snapshot (for example gpt-image-2.5-sunburst-2026-09-08), prompt, seed, references, license, reviewer approval. This makes the user's step-by-step approval auditable and lets assets be regenerated when models change."
+ ],
+ "options_for_user": [
+  "Image production route. A) Cloud-first: ChatGPT/API and Gemini for everything. Fastest start and best raw quality, but per-image cost ($0.01-0.21), weaker control over consistency, and SynthID/C2PA watermarks. B) Hybrid (recommended): cloud for the style bible and hero assets, local LoRA/ControlNet for high-volume repaints. Best balance, with about 1-2 days of local setup. C) Local-first: FLUX.2 klein or Qwen-Image-Edit with a style LoRA. Free, unlimited and private, but quality is a notch below GPT Image 2.5 and it needs the most tuning.",
+  "Using the ChatGPT subscription vs the API. A) The user operates ChatGPT by hand for exploration and approvals (no ToS risk, low throughput). B) Official Codex CLI `codex exec` + $imagegen on the plan quota (scriptable and sanctioned, but gpt-image-2, and the quota drains 3-5x faster than text). C) OpenAI API key (fully scriptable, 2.5 Sunburst with alpha, Batch discount on gpt-image-2, pay per use, may need org verification). D) Claude drives the logged-in ChatGPT site via Chrome: not recommended beyond occasional assisted sessions (ToS clause, slow).",
+  "Unit art method. A) 2D repaint of the original sprites (keeps pixel-exact footprints and silhouettes; consistency depends on ControlNet and LoRA). B) AI or hand 3D models pre-rendered to 32/8-facing sprite sheets (consistent, relightable, more pipeline work). C) Real-time 3D models in the Three.js engine with a locked isometric camera (looks 2.5D, easiest to relight and animate, but the renderer changes most and needs careful perf/LOD work).",
+  "VFX method. A) Flipbooks (EmberGen needs Windows/NVIDIA today; Blender on the Mac; or AI RGBA video such as Wan-Alpha in the cloud). B) Real-time GPU particles and shaders in the web renderer (most modern, scales to 4K, more engineering). C) A mix: shaders for water, weather and heat-haze, flipbooks for hero explosions.",
+  "Subscription tier. Plus ($20) if the API does the production work. Pro $100 for regular GPT-6 Pro design reviews. Pro $200 only if the user wants a large ChatGPT image allowance and heavy GPT-6 Pro use."
+ ],
+ "open_questions": [
+  "Which ChatGPT plan does the user have (Plus, Pro $100 or Pro $200)? Are they willing to create an OpenAI API key, fund pay-as-you-go spending, and complete organization verification? Is a Google Gemini API key acceptable?",
+  "What budget and time does the user have for API spending and 3D-generation subscriptions (Rodin, Meshy, Tripo run about $20-150/mo)?",
+  "Target output scale: 2x, 3x or 4x the original pixel density, and a native 4K display target? This sets image sizes and whether 2.5's 'experimental' resolutions above 2560x1440 matter.",
+  "Is rendering vehicles as real 3D models in an isometric camera acceptable as '2.5D', or does the user want every unit to stay a pre-rendered sprite?",
+  "Does the user own RA2/YR game files (e.g., the EA App / Steam C&C Ultimate Collection)? They are needed before any asset extraction or pilot, and none are on this machine.",
+  "Is the project strictly non-commercial and personal/fan-shared? This decides which open-weight licenses (FLUX.2 klein 9B, DA3 Giant, RMBG-2.0, Hunyuan3D 2.1 regional exclusions) can be used, and how the Chrono Divide non-commercial permission applies.",
+  "Does the user have access to a Windows/NVIDIA machine or a cloud GPU (for EmberGen, Wan-Alpha, Hunyuan3D 2.1, heavy SUPIR)?",
+  "Unresolved facts: exact ChatGPT image quotas per plan (OpenAI does not publish them), whether the Codex $imagegen skill has moved to gpt-image-2.5, whether Midjourney has an official API, whether EmberGen's macOS download is publicly usable yet (the product and pricing pages conflict), and whether Gemini image models support native alpha. My WebSearch budget ran out, so these could not be checked further this session."
+ ]
+}

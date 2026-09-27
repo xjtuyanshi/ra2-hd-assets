@@ -9,14 +9,7 @@ export const runtimeEnglishMessages = {
   繁体中文: 'Traditional Chinese',
   全部: 'All',
   '红警2（1.006）': 'Red Alert 2 (1.006)',
-  '红警之家 红色警戒2标准版(1.006可联机)': 'UC129 Red Alert 2 Standard (1.006, multiplayer)',
-  '红警之家 红色警戒2共和国之辉联机版（纯净版）': 'UC129 Red Alert 2 Gonghui multiplayer edition (clean package)',
-  '脚本之家 红色警戒2标准版 v1.006(原版RA2纯游戏包可联机)':
-    'JB51 Red Alert 2 Standard v1.006 (original game package, multiplayer)',
-  'Archive.org（XWIS 联机版安装包）': 'Archive.org (XWIS multiplayer installer)',
   '尤里的复仇（1.001）': "Yuri's Revenge (1.001)",
-  '红警之家 红色警戒2尤里的复仇Yuri_s_v1.001': "UC129 Red Alert 2 Yuri's Revenge v1.001",
-  '脚本之家 红色警戒2 尤里的复仇 安装包 v1.001最新版': "JB51 Red Alert 2 Yuri's Revenge v1.001 installer",
   '整帧实验未启动：请先启动游戏并设置不超过 800×600 的分辨率':
     'Full-frame experiment inactive: start the game at a resolution no larger than 800x600',
   '整帧实验失败：{0}': 'Full-frame experiment failed: {0}',

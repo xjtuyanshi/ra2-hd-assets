@@ -103,7 +103,7 @@ export function createGameSourcePicker(resolve: (source: GameSource) => void) {
     }
   };
   /**
-   * Manifest gate: fetch the selected version's executable (game.exe / gamemd.exe), overlay it, then render the manifest. Return null for missing required files while retaining the checklist.
+   * Manifest gate: resolve the selected version's executable (game.exe / gamemd.exe) from the player's own files, overlay it, then render the manifest. Return null for missing required files while retaining the checklist.
    */
   const manifestGate = async (
     base: GameFileProvider,
@@ -111,19 +111,20 @@ export function createGameSourcePicker(resolve: (source: GameSource) => void) {
     gameId: SupportedGameId,
   ): Promise<GameFileProvider | null> => {
     const manifest = GAME_MANIFESTS[gameId];
-    // Always use the fixed compatible executable version; shim addresses depend on exact version-sensitive bytes.
-    const thirdPartyFiles = await loadThirdPartyFiles(manifest, (message) => {
+    // A progressive archive may still be extracting other layers, but the executable belongs to the startup layer.
+    const executables = await loadThirdPartyFiles(manifest, base, (message) => {
       state.description = message;
       publish();
     });
     if (disposed) return null;
-    // Overlay-first: the executable overrides any same-named archive file.
-    const provider = new OverlayGameFileProvider(base, thirdPartyFiles, t(' + 第三方'), false, false, false);
+    // Overlay-first so a development-cache executable fills a gap; player executables overlay identical bytes.
+    const provider = new OverlayGameFileProvider(base, executables.files, t(' + 主程序'), false, false, false);
     const present = new Set(archiveNames);
-    for (const thirdParty of manifest.thirdParty) present.add(thirdParty.name.toLowerCase());
-    const missing = manifest.playerRequired
-      .filter((file) => !present.has(file.name.toLowerCase()))
-      .map((file) => file.name);
+    for (const name of executables.files.keys()) present.add(name.toLowerCase());
+    const missing = [
+      ...executables.missing,
+      ...manifest.playerRequired.filter((file) => !present.has(file.name.toLowerCase())).map((file) => file.name),
+    ];
     const complete = missing.length === 0;
     renderManifest(manifest, present, complete);
     if (!complete) {
@@ -133,16 +134,17 @@ export function createGameSourcePicker(resolve: (source: GameSource) => void) {
       publish();
       return null;
     }
-    state.description = t('必需文件已集齐，正在启动…');
+    const unpinned = executables.checks.filter((check) => !check.pinned).map((check) => check.name);
+    state.description = unpinned.length
+      ? t('{0} 与已验证版本不同，部分兼容补丁会自动停用；正在启动…', unpinned.join('、'))
+      : t('必需文件已集齐，正在启动…');
     publish();
-    // Remember this import for automatic restoration next time without another selection; executables are persisted separately
-    // by thirdPartyFiles, so store only player-supplied files here.
+    // Remember this import, executables included, for automatic restoration next time without another selection.
     if (base instanceof SessionGameFileProvider) {
       const persist = () => {
         const playerFiles = new Map<string, Uint8Array>();
         for (const [path, bytes] of base.files) {
           const lower = path.toLowerCase();
-          if (lower === 'game.exe' || lower === 'gamemd.exe') continue;
           if (base instanceof ProgressiveGameFileProvider && !base.inventory.has(lower)) continue;
           playerFiles.set(lower, bytes);
         }
@@ -151,7 +153,9 @@ export function createGameSourcePicker(resolve: (source: GameSource) => void) {
         return saveCachedGameFiles(
           gameId,
           playerFiles,
-          base instanceof ProgressiveGameFileProvider ? [] : manifest.playerRequired.map((file) => file.name),
+          base instanceof ProgressiveGameFileProvider
+            ? []
+            : [...manifest.thirdParty, ...manifest.playerRequired].map((file) => file.name),
         );
       };
       // Wait for every other layer to succeed before replacing the cache atomically; cancellation/failure preserves the last complete asset set,
@@ -302,9 +306,9 @@ export async function restoreCachedGameSource(): Promise<GameSource | null> {
     if (!cached) continue;
     const missing = manifest.playerRequired.filter((file) => cached.hasKnownFile(file.name.toLowerCase()) !== true);
     if (missing.length) continue;
-    const thirdParty = await loadThirdPartyFiles(manifest).catch(() => null);
-    if (!thirdParty) continue;
-    const provider = new OverlayGameFileProvider(cached, thirdParty, t(' + 第三方'), false, false, false);
+    const executables = await loadThirdPartyFiles(manifest, cached).catch(() => null);
+    if (!executables || executables.missing.length) continue;
+    const provider = new OverlayGameFileProvider(cached, executables.files, t(' + 主程序'), false, false, false);
     const sources = await validateGameDirectory(provider, gameId).catch(() => []);
     if (sources[0]) return sources[0];
   }

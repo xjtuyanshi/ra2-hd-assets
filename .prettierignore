@@ -6,3 +6,6 @@ public/
 
 # Preserve copied third-party skill originals.
 .agents/skills/
+
+# Raw research exports for the remaster plan (agent JSON output, kept verbatim).
+docs/remaster/research/

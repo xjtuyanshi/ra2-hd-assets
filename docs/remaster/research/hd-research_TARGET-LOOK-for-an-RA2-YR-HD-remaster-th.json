@@ -1,0 +1,206 @@
+{
+ "topic": "TARGET LOOK for an RA2/YR HD remaster that stays 2.5D: survey of AI \"RA2 remastered\" images and videos plus fan and official HD efforts, a distilled visual target spec, and readability lessons from C&C Remastered (researched 2026-09-27)",
+ "findings": [
+  {
+   "title": "Official status: no RA2 remaster exists or has been announced as of 2026-09-26",
+   "detail": "VERIFIED: PC Gamer (2026-09-26) says there is still no Red Alert 2 remaster; only TD and RA1 got one in 2020. In 2024-2025 EA put the C&C Ultimate Collection (includes RA2+YR) on Steam (Mar 2024). On 2025-02-27 EA released GPL source for Tiberian Dawn and Red Alert 1. Its GitHub also has Renegade and Generals/Zero Hour repos. There is no Tiberian Sun or RA2 repo in EA's GitHub org (checked via the API). A community post (Aug 2026) says Petroglyph is still lobbying EA for a 'Remastered Volume 2' (TS+RA2). That post mentions an 'EA buyout'; I did not check that claim. INFERENCE: no official art exists to copy. The closest official template is the C&C Remastered (2020) method.",
+   "sources": [
+    "https://www.pcgamer.com/games/rts/after-warcraft-3s-first-new-campaign-in-23-years-lets-normalize-releasing-new-dlc-for-ancient-rts-games/",
+    "https://www.reddit.com/r/commandandconquer/comments/1izmpmb/cc_steam_workshop_support_source_code/",
+    "https://github.com/electronicarts/CnC_Red_Alert",
+    "https://github.com/electronicarts/CnC_Remastered_Collection",
+    "https://www.reddit.com/r/commandandconquer/comments/1vlpvsi/pushing_ea_for_cc_remastered_volume_2/"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Best match for 'AI-optimized images': the 洱海Adais bilibili collection 红警2红眼战役壁纸图 (28 videos, 335k plays, May-Sep 2026)",
+   "detail": "VERIFIED metadata; I viewed the covers and frames. These are AI redraws of real RA2/YR maps from the in-game high oblique camera. They are the closest public match to what the user describes. Key entries: BV1xpG16MEFU 红警2重制级画质！这还是你记忆中的那个游戏吗？ (2026-05-27, 48k): naval battle on deep-blue water with V-shaped foam wakes, tesla arcs and burning ships. BV13EN46CETV 当红警2装上重制级画质 (2026-07-11, 41k): snowy battlefield with Allied barracks and war factories, craters, snow-laden pines, volumetric fireballs and smoke. BV14pgc6kE81 我们怀念的可能不是画质 (2026-08-13, 69k): White House with a ring of tesla/prism towers, purple arcs and explosions. BV1DN4R6rEA1 这样的红警2，算不算毁掉了原版味道？ (2026-08-27): Pentagon at night on rain-wet reflective streets, Soviet paratroopers. BV1BSuH6DEqc 如果红警2画质重制到2026年 (2026-08-06): London and Big Ben, Kirovs over the Thames, YR logo. BV1Kaug6eEiT 如果EA重制红警2，大概就是这种画质 (2026-08-08, 12.5k): snowy forest, barns, Soviet flags, cliffs. BV1Hiub6CE7W: Hollywood sign with a Yuri base. BV1FrVc63Eyn / BV1P8G46DE1z 【AI重绘】红眼全景地图 (May 2026): whole-map panoramas of a harbor city and a snowy night map. BV1akKs6GEaE 《如果2000年红警2就有这画质》 (2026-07-20, 19k): more restrained, keeps saturated grass, brick walls and a visible tile grid. It is the most 'faithful' of the set. BV1ThN76CEPP 红警2重制画质，你能一眼认出几个单位？ (2026-07-10): the title itself admits units are hard to identify. INFERENCE from viewing: they share a high oblique near-ortho camera, dense micro-detail, golden-hour or overcast light with long soft shadows, heavy AO, a muted filmic grade, and faction colors that are desaturated. Units are tiny and often unreadable. Light direction and scale change from image to image, and buildings like the Pentagon and Big Ben are far larger than game scale.",
+   "sources": [
+    "https://www.bilibili.com/video/BV1xpG16MEFU/",
+    "https://www.bilibili.com/video/BV13EN46CETV/",
+    "https://www.bilibili.com/video/BV14pgc6kE81/",
+    "https://www.bilibili.com/video/BV1DN4R6rEA1/",
+    "https://www.bilibili.com/video/BV1BSuH6DEqc/",
+    "https://www.bilibili.com/video/BV1Kaug6eEiT/",
+    "https://www.bilibili.com/video/BV1Hiub6CE7W/",
+    "https://www.bilibili.com/video/BV1FrVc63Eyn/",
+    "https://www.bilibili.com/video/BV1P8G46DE1z/",
+    "https://www.bilibili.com/video/BV1akKs6GEaE/",
+    "https://www.bilibili.com/video/BV1ThN76CEPP/"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Other in-game-angle AI references: 小黑戏游记 golden-hour mission shot, plus the Xiaohongshu 'no-war RA2' images (not viewable without login)",
+   "detail": "VERIFIED: 小黑戏游记 'BV1EQjW6CEt6 想不到吧！这才是红警应有的高清画质。' (2026-06-21, 76k plays). The cover is an AI isometric redraw of the mission titled 第三关：集中攻击: warm low sun, sparkling harbor water, dense trees, clean small buildings, tanks on roads. It is closer to a readable 'EA-remaster' look than the moodier Adais images. LIKELY: an AI-written smzdm aggregation article (09-23) reports a September 2026 Xiaohongshu trend of peaceful RA2 scenes (beaches, small towns, city at night, 'City Walk'). The two posts it names are by 哈士奇个怪: '在红警2里偷一段阳光午后' (296 likes) and 'City Walk'. It says they carry the platform's AI-generated label and the author admitted 'AI跑图'. I could not open them because Xiaohongshu search requires login. These may be the exact images the user has in mind.",
+   "sources": [
+    "https://www.bilibili.com/video/BV1EQjW6CEt6/",
+    "https://post.smzdm.com/p/a4qp3de7/",
+    "https://post.smzdm.com/p/axk4r62w/"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "HD single-asset re-renders at the original angle (strongest per-asset material references)",
+   "detail": "VERIFIED existence and metadata; frames viewed where noted. (1) 宋先生Pro 'Mr. Song Pro' dossier cards, reposted with permission in BV1EWdsBuEm6 红警2所有单位高清重置！【9分钟纯享版】 (2026-04-18, 127k). Frames I captured show the Allied Battle Lab and Ore Refinery rendered at the original isometric angle: realistic concrete, glass and steel, Allied blue trim kept, soft contact shadows, silhouette faithful to the sprite. Later frames show an AI-looking carrier, destroyer and jet on a photoreal ocean with wakes. The same artist supplied unit/building 'restoration' images for HUNGER_DOG's AI film test BV1386ZBJERG (2026-01-11, 319k). (2) 1er33 【红警2K】 series (2019), e.g. BV1pJ411W7Rq Soviet power plant (512k): ray-traced 3D HD buildings with animated tesla plasma, dark studio backdrop. (3) polyLUKET BV13W4y157KV 3D高清重制 gameplay demo (2023-01-02, 305k). (4) ZOUN ZIRAR 'Red Alert 2 Allied Buildings HD - Unreal Engine 5' (Dec 2025): clean stylized ore purifier. (5) RedTieGuy 'What a RA2 REMASTER Could look like [2020]' (19k): Prism tower and nuclear reactor fan concept. (6) Zak Sham (ATTTT / Zakorsomethings) Blender+After Effects 'Nuclear Missile Silo (HD Remake)': r/commandandconquer, Jan 2026, 312 upvotes. The same creator made the YR Halloween briefing remake BV185AGzGEEH: rainy London recon view, wet stone, overcast light.",
+   "sources": [
+    "https://www.bilibili.com/video/BV1EWdsBuEm6/",
+    "https://www.bilibili.com/video/BV1386ZBJERG/",
+    "https://www.bilibili.com/video/BV1pJ411W7Rq/",
+    "https://www.bilibili.com/video/BV13W4y157KV/",
+    "https://www.youtube.com/watch?v=5_zfniWo7Ok",
+    "https://www.youtube.com/watch?v=oikl-NKcQB0",
+    "https://www.reddit.com/r/commandandconquer/comments/1qkvg92/red_alert_2_nuclear_missile_silo_hd_remake/",
+    "https://www.bilibili.com/video/BV185AGzGEEH/",
+    "https://www.youtube.com/watch?v=g59PqNHUZmE"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Cinematic and photoreal AI pieces: useful for mood, weather and explosions, not for the gameplay view",
+   "detail": "VERIFIED metadata. 编导伐木机 AI shorts 《二十二分钟》 BV1KD8q6fEXs (2026-08-21, 621k) and 《二十二分钟II》 BV1UX4R6zEHN (534k): live-action look for Kirov, Rhino, Iron Curtain and mind control, with an English repost on r/redalert2. Juns Zheng (DietrichZ) 'AI Remastered: Red Alert 2 (2000) Cutscenes' (~419k views): burning White House, Kirovs in smoky skies. 苍琅雪 '把红警阅兵变成现实风格' BV1HSaizqE7e (2025-09-06, 206k), plus a long series of AI redraws of cameo icons and buildings (e.g. BV1t7jbzHECY 2025-05-24, 99k). These are directly relevant to modernizing sidebar cameos. 無極玄 红警2全单位现实化图鉴 BV1YNbNzxE5t (2025-08-10, 135k): photoreal Apocalypse tank in Red Square. The 2024 r/redalert2 Stable-Diffusion gallery 'What if... Red Alert 2 Remake' (1bg32if), which I viewed, shows photoreal aerial shots of a Soviet-plant-like complex, a Grand-Cannon-like gun with a French flag, and a naval yard. It is an example of realism that loses RA2's identity and readability. CNCcommunity 'Red Alert 2 Icons Redrawn With AI' (Aug 2024) used Midjourney.",
+   "sources": [
+    "https://www.bilibili.com/video/BV1KD8q6fEXs/",
+    "https://www.bilibili.com/video/BV1UX4R6zEHN/",
+    "https://www.reddit.com/r/redalert2/comments/1vti7oj/red_alert_2_ai_short_22_minutes/",
+    "https://www.youtube.com/watch?v=nmZuDtk9tK4",
+    "https://www.bilibili.com/video/BV1HSaizqE7e/",
+    "https://www.bilibili.com/video/BV1t7jbzHECY/",
+    "https://www.bilibili.com/video/BV1YNbNzxE5t/",
+    "https://www.reddit.com/r/redalert2/comments/1bg32if/what_if_there_is_red_alert_2_remake_in_the_near/",
+    "https://www.reddit.com/r/commandandconquer/comments/1esdymd/red_alert_2_icons_redrawn_with_ai_part_2/"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Upscaling and post-filters on the real game have a low ceiling",
+   "detail": "VERIFIED: r/redalert2 'RA2 - Fan remaster art' (Jul 2025) ran real screenshots through the AIarty Image Enhancer to 6048px. I viewed them: sharper edges and cleaner textures, but the same palette-era art, lighting and flat ground. This is a Tier-0 upscale look. 蓝天上的流云 ReShade patch video BV1bZAYzYEH9 (2026-03-01, 76k): real-time post grading and sharpening only. DLSS 5 (NVIDIA '3D-guided neural rendering') was announced 2026-03-16 and shipped 2026-09-01 in NBA 2K27, RTX 50-series only. 红警大蚂蚁 tested an injected version on RA2 in BV1FtYx6dEW8 (2026-09-09, 46k). LIKELY (from an AI-written smzdm summary of comments): viewers called the result blurry, 'cataract', 'oily', because a neural filter guessing normals and lighting from 2D pre-rendered sprites has nothing real to work from. INFERENCE: this path does not apply on an Apple M5 / WebGPU stack anyway, and it confirms that the quality has to come from re-authored assets, not from screen-space AI.",
+   "sources": [
+    "https://www.reddit.com/r/redalert2/comments/1lvj4rt/ra2_fan_remaster_art/",
+    "https://www.bilibili.com/video/BV1bZAYzYEH9/",
+    "https://www.bilibili.com/video/BV1FtYx6dEW8/",
+    "https://nvidianews.nvidia.com/news/nvidia-dlss-5-delivers-ai-powered-breakthrough-in-visual-fidelity-for-games",
+    "https://www.nvidia.com/en-us/geforce/news/dlss-5-3d-guided-neural-rendering/",
+    "https://post.smzdm.com/p/am98628v/"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Fan engines and mods: what they teach about 2.5D limits and realism drift",
+   "detail": "VERIFIED: (1) Das5heep, 'My attempt at turning Red Alert 2 into 3D' (r/commandandconquer, Jul 2026). It is a Rust/Bevy engine using original assets. Vehicles are already 3D voxels. The author warns that maps and building art are authored for one faux-isometric angle, so rotating the camera exposes gaps and would need every side re-authored. A commenter points to a 'C&C Blender Forge' Discord that shares remastered 3D models; I have not checked that link. (2) Ádám Horváth's UE4 VR remake (2016) used 3D models by Sly_Fox built from the 2D assets, on top of OpenRA's RA2 mod. (3) OpenRA/ra2 (active, 1.1k stars) uses the original assets. (4) PPM topic 'RA2/YR-Inspired RTS Engine — Powered by AI' (Jun 2026): PNG/glTF with real-time isometric rendering and AI-generated assets; the community reaction was skeptical. (5) Bellum Æternum YR mod (v1.0 2026-05-05, v1.2.0 2026-08-23) claims remastered flames, smoke, debris and wrecks and redesigns units in a historical-military style (T-54-like tanks). INFERENCE: it shows how 'realism' quietly replaces RA2's iconic designs. (6) 网红技术 (bilibili channel focused on a web RA2) posted '高清版重制版红警2终于做好了' BV1YHw2zrEWb (2026-03-16). The footage shows a browser RA2 with original assets and lighting still being debugged.",
+   "sources": [
+    "https://www.reddit.com/r/commandandconquer/comments/1ulorhm/my_attempt_at_turning_red_alert_2_into_3d/",
+    "https://80.lv/articles/red-alert-2-remake-in-unreal-engine",
+    "https://www.youtube.com/watch?v=IGtrJaiUZaA",
+    "https://github.com/OpenRA/ra2",
+    "https://ppmforums.com/topic-74602/",
+    "https://ra2be.com",
+    "https://www.moddb.com/mods/bellum-aeternum",
+    "https://www.bilibili.com/video/BV1YHw2zrEWb/"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "How the C&C Remastered 4K art was made (primary sources)",
+   "detail": "VERIFIED quotes from Jim Vessella's EA Reddit updates and the AMAA. Lemon Sky 're-concepted, re-modeled, and re-animated every gameplay asset from scratch'. The assets were then rendered and exported 'in 2D so they lineup frame for frame with the original visuals', e.g. 'over 600 frames' for the Grenadier (Oct 2019). The workflow was concept art, then a 3D model, then 2D render (Apr 2019). Pre-production produced a 'Visual Target image' to align the team on fidelity, plus a first playable mission with 4K samples (Apr 2019). Frame parity is what made the Space-bar real-time legacy/remastered toggle possible, from 320x200 up to 3840x2160. Only cosmetic VFX such as the Nuke and Ion Cannon got extra frames (AMAA). Camera zoom is limited to between the DOS and Gold camera heights (Oct 2019, Steam page). Split of work: Petroglyph designed the sidebar frame and layout, Lemon Sky painted the build buttons (Jun 2019). The game shipped 2020-06-05 (Steam: Petroglyph, Lemon Sky Studios / EA). The simulation ran from the recovered original source code (DLLs later released under GPL). Lemon Sky interview (Geek Culture, 2020-06-11): 'The challenge is to look the same, but in 4K'. They said it was 'very similar to Starcraft', described a loop of 'reworking... rerendering... readjusting the colour', and said 'There weren't a lot of details 25 years ago, and we added a lot of details.'",
+   "sources": [
+    "https://www.reddit.com/r/commandandconquer/comments/dm28fw/remaster_update_and_first_gameplay_teaser/",
+    "https://www.reddit.com/r/commandandconquer/comments/bea82f/remaster_update_and_first_art_preview/",
+    "https://www.reddit.com/r/commandandconquer/comments/bx59ym/remaster_update_and_first_sidebar_preview/",
+    "https://www.reddit.com/r/Games/comments/gswgbw/amaa_were_the_team_behind_the_command_conquer/",
+    "https://store.steampowered.com/app/1213210/Command__Conquer_Remastered_Collection/",
+    "https://geekculture.co/geek-interview-experiencing-command-conquer-remastered-with-lemon-sky-studios/",
+    "https://github.com/electronicarts/CnC_Remastered_Collection"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Readability lessons from C&C Remastered",
+   "detail": "VERIFIED: (1) Canon rule: 'if there's a conflict between the in-game asset, cinematic asset, or UI portrait, we're always going to side with the in-game asset.' Cinematic details are only borrowed as accents, e.g. the Con Yard door pattern. (2) Tesla Tank: 'many of our earlier unit concepts included extra widgets and details, but we often found this compromised the unit's readability at camera game height', so they iterated toward 'a good balance between readability and those added details.' (3) Lemon Sky: 'If you make it too realistic, it is hard to observe. A more simple, cleaner art style suits the game better. Too many details can make it hard to see from the angle.' (4) Keep the classic sidebar but modernize it: build tabs, 18 visible buttons to reduce scrolling, icons instead of text, money and options moved above the radar. (5) Joe Bostic: 'The remaster had to fulfill not just what the legacy game was, but how players remembered the legacy game.' (6) A Community Council reviewed assets during production, e.g. the one-vs-two Tesla-ring debate. From viewing the published Con Yard and Tesla Tank renders (INFERENCE): stylized PBR with chunky readable shapes, large flat areas of faction color (the Tesla Tank is almost all Soviet red), moderate mid-frequency detail (panels, bolts, fans), a soft key light from upper-left and a neutral grade. It is deliberately not photoreal.",
+   "sources": [
+    "https://www.reddit.com/r/commandandconquer/comments/bea82f/remaster_update_and_first_art_preview/",
+    "https://www.reddit.com/r/commandandconquer/comments/cdjlh1/remaster_update_and_red_alert_preview/",
+    "https://geekculture.co/geek-interview-experiencing-command-conquer-remastered-with-lemon-sky-studios/",
+    "https://www.reddit.com/r/commandandconquer/comments/bx59ym/remaster_update_and_first_sidebar_preview/",
+    "https://www.reddit.com/r/Games/comments/gswgbw/amaa_were_the_team_behind_the_command_conquer/"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "RA2 technical baseline the HD look must respect",
+   "detail": "VERIFIED (ModEnc): RA2 terrain templates (TMP) are fixed 60x30-pixel isometric cells (TS uses 48x24). Vehicles and turrets are VXL voxels that store a per-voxel normal index, rendered 1:1 voxel-to-pixel and palette-dependent. Infantry and buildings are pre-rendered SHP sprites. A voxel turret on an SHP building gives 360-degree rotation. Each map has a [Lighting] section with Ambient, Red, Green, Blue, Ground and Level values. There are also separate Ion, Dominator and Nuke lighting states with change rates, so a per-map, event-driven global light and grade system already exists in the design. INFERENCE (math): 2:1 cells equal an orthographic camera at 45 degrees yaw and 30 degrees pitch (sin 30 = 0.5). Every HD re-render and AI concept should be locked to that camera. INFERENCE (observation of original screenshots): key light comes from screen-left and building and unit shadows fall toward screen-right. The voxel point matters: vehicles are already 3D, so they can be re-rendered or up-modeled at any resolution with real-time lighting. Buildings and infantry need re-modeling (or AI-assisted redraw plus manual cleanup) to become HD.",
+   "sources": [
+    "https://modenc.renegadeprojects.com/TMP",
+    "https://modenc.renegadeprojects.com/VXL",
+    "https://modenc.renegadeprojects.com/Lighting",
+    "https://www.reddit.com/r/redalert2/comments/1lvj4rt/ra2_fan_remaster_art/"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "(b) Distilled visual target spec: common traits of the references and what must be preserved",
+   "detail": "Synthesized from the images viewed above (INFERENCE). CAMERA: fixed orthographic 2:1 dimetric (yaw 45, pitch 30), no rotation, limited zoom (about 1x to 2x of classic, following C&C Remastered's DOS-to-Gold range). HD cell size 120x60 (2x) or 180x90 (3x); 4K-native 240x120 is probably too memory-heavy for web. LIGHT: one consistent key light matching the original (screen-left, shadows to screen-right), warm late-afternoon key (about 4500-5500K) with cool sky fill. Soft, long, contact-hardened shadows. Baked AO in crevices and a ground-contact AO skirt under every building and vehicle. Emissive windows, lamps and tesla/prism glow for night. Per-theater color LUTs (temperate, snow, urban, desert, lunar) driven by the map's [Lighting] values; Ion/Dominator/Nuke states become grade shifts. MATERIALS: stylized PBR, not photoreal. Big readable forms, mid-frequency detail (panels, rivets, brick courses, roof tiles, windows), light wear and grime, crisp specular on metal and glass. High-frequency noise stays low so units stay readable. FACTION COLOR: large remappable house-color panels kept saturated (Allied blue/steel, Soviet red/black steel, Yuri purple/brass). Desaturate the environment instead of the team colors, which is the opposite of the Adais images. TERRAIN: 2-4x tiles with grass clumps, tire-rutted dirt roads, cliff rock strata, snow on edges and roofs, road markings. Persistent decals for craters, scorch and tracks. Wind-swayed tree clusters. The same cell grid, heights, ramps and cliffs as the original. WATER: animated normal-mapped water on water cells, depth tint toward shore, shoreline foam bands, sun-glint sparkles, V-shaped foam wakes behind ships, splash columns from shells, cheap fake environment reflection. SKY/WEATHER: there is no sky in view, so weather is shown through global grade, drifting cloud shadows, rain streaks with wet-road specular and puddles at night, snowfall with accumulation, low fog, and lightning flashes for the Weather Storm. EXPLOSIONS/IMPACTS: pre-simulated volumetric fireball flipbooks rendered at the game angle, lingering dark smoke columns, debris chunks, a short dynamic point light on the terrain, heat or shockwave distortion, scorch decals, beams and arcs with bloom (tesla, prism, psychic). UI: the classic right-side RA2 sidebar layout and skin kept, redrawn at HiDPI (the Mac display is 3456x2234). Cameos redrawn in HD keeping the original composition. Optional tabs and larger grid following the C&C Remastered pattern. PRESERVE: camera angle, silhouettes and slightly exaggerated 'toy-like' proportions, unit-to-cell scale, animation timing and frame counts for gameplay-relevant actions, iconic landmarks, tone and humor. Add an optional classic/HD toggle.",
+   "sources": [
+    "https://www.bilibili.com/video/BV13EN46CETV/",
+    "https://www.bilibili.com/video/BV1xpG16MEFU/",
+    "https://www.bilibili.com/video/BV1DN4R6rEA1/",
+    "https://www.bilibili.com/video/BV1EQjW6CEt6/",
+    "https://www.bilibili.com/video/BV1akKs6GEaE/",
+    "https://www.reddit.com/r/commandandconquer/comments/dm28fw/remaster_update_and_first_gameplay_teaser/",
+    "https://modenc.renegadeprojects.com/Lighting"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "What in the AI images cannot be reproduced in a real-time web RTS",
+   "detail": "INFERENCE. (1) Every AI frame is a one-off composition with unique, non-repeating detail and bespoke lighting. Real maps are tile- and editor-driven, must tile seamlessly and must look right for any map. (2) Scale is invented: Pentagon, Big Ben and Hollywood tower over units, and units shrink to specks. Gameplay needs fixed unit-to-cell scale and clickable, identifiable units; even the Adais title asks 'can you recognize the units at a glance?'. (3) Photoreal materials and desaturated team colors destroy faction readability. (4) Path-traced GI, ray-traced wet-street reflections, true volumetric smoke simulation, depth of field and tilt-shift are not feasible for hundreds of units in a browser. Fake them with baked lighting, sprite normal maps, flipbooks and a specular term. (5) Temporal consistency: image models cannot reliably generate RA2's many facings and animation frames per unit with a stable identity. AI output is fit for concepts, cameos, loading screens and texture sources, not final animated sprites. (6) Screen-space neural filters (DLSS 5) are NVIDIA RTX 50-only and give poor results on 2D sprites. (7) Light direction changes between AI images, so a single locked light rig must be chosen and enforced.",
+   "sources": [
+    "https://www.bilibili.com/video/BV1ThN76CEPP/",
+    "https://www.bilibili.com/video/BV1DN4R6rEA1/",
+    "https://www.nvidia.com/en-us/geforce/news/dlss-5-3d-guided-neural-rendering/",
+    "https://geekculture.co/geek-interview-experiencing-command-conquer-remastered-with-lemon-sky-studios/"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "Community sentiment: players miss the 画风 (art style), not realism",
+   "detail": "LIKELY (quoted in an AI-written smzdm aggregation of the comments under 洱海Adais's 我们怀念的可能不是画质 video). Top comments include '我觉得怀念的是画风，而非画质' and a counterpoint that RA3's higher-fidelity art made buildings hard for newcomers to identify. The article argues RA2's chunky 'big-head' pixel style exists for readability (you can tell a Rhino from a Grizzly in a crowd). VERIFIED separately: Reddit comments on the Das5heep 3D post show players mostly want zoom and a fixed viewpoint on modern screens rather than rotation. INFERENCE: this matches C&C Remastered's rule. The target should read as 'RA2 as you remember it, in 4K', with realism in lighting, water, weather and VFX, not in unit design.",
+   "sources": [
+    "https://post.smzdm.com/p/axk4r62w/",
+    "https://www.bilibili.com/video/BV14pgc6kE81/",
+    "https://www.reddit.com/r/commandandconquer/comments/1ulorhm/my_attempt_at_turning_red_alert_2_into_3d/"
+   ],
+   "confidence": "likely"
+  }
+ ],
+ "recommendations": [
+  "Before any art production, copy C&C Remastered's pre-production step: create 3 'Visual Target' frames for the user to approve. Suggested scenes: temperate daytime base with water and shoreline, snow map with an ongoing explosion, rain-wet city at night. Generate them with the ChatGPT image model using a real in-game screenshot as the input image, locked to the 2:1 camera, the original light direction, and saturated faction colors. Then hand-correct unit scale and readability. Use the 洱海Adais and 小黑戏游记 frames as mood references and the C&C Remastered Con Yard and Tesla Tank renders as the material and readability reference.",
+  "Adopt a written 'canon' rule like C&C Remastered's: the in-game sprite or voxel is authoritative for silhouette, proportions and color layout. Cinematics and AI concepts only contribute accents.",
+  "Make readability a measurable gate for every HD asset. Each unit type must be identifiable at default zoom on a 1080p-equivalent view and at 50% scale in grayscale. House color must stay identifiable. The asset must stay inside the original footprint and cell scale.",
+  "Asset pipeline (INFERENCE, to confirm with the engine research). Vehicles and turrets: convert VXL to meshes and re-model or detail them in 3D, then either render to sprites or draw them in real time as 3D under the fixed ortho camera. Buildings and infantry: re-model in Blender. Look into the community 'C&C Blender Forge' models and 宋先生Pro-style references first. Render every facing and frame to match original frame counts, and bake albedo, normal, depth, emissive and house-color mask layers so the web renderer can relight for day/night and weather.",
+  "Build realism in the systems layer rather than in the unit designs: per-theater grade LUTs driven by the map's [Lighting] values, a water shader on water cells (foam, wakes, glints), weather particles with wet and snow-accumulation variants, dynamic point lights for explosions and beams, persistent decals, and pre-simulated fireball and smoke flipbooks rendered at the game angle.",
+  "Keep the RA2 sidebar layout and skin but redraw it for HiDPI. Redraw cameos in HD keeping the original composition (the 苍琅雪 AI cameo series shows demand and a possible starting point after manual cleanup).",
+  "Cap zoom to roughly 1x-2x of classic and do not add camera rotation: the original art and maps are authored for one angle.",
+  "Plan an optional classic/HD toggle. It forces frame-for-frame parity, which also protects gameplay timing and feel.",
+  "Do not rely on screen-space AI filters (DLSS 5 and similar) or on AI-upscaled screenshots as the final look. They are acceptable only as quick throwaway demos.",
+  "Keep reference copies private. Contact sheets I saved for internal review are in /private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/img/ (sheet_adais_0.jpg, sheet_adais_1.jpg, sheet_cc.jpg, sheet_bili.jpg, sheet_misc.jpg, sheet_yt.jpg, sheet_aiarty.jpg, crop_allied.jpg). They are third-party copyrighted thumbnails, for reference only and not for redistribution."
+ ],
+ "options_for_user": [
+  "A. Faithful HD (the C&C Remastered way): re-model and re-render every asset frame-for-frame at the original angle in clean stylized PBR with saturated team colors, add modern water, weather and VFX, and keep a classic toggle. Pros: most authentic and readable, proven by the 2020 remaster. Cons: the largest art workload (hundreds of assets, many facings and frames each). Less 'wow' than the AI wallpapers.",
+  "B. Cinematic 2.5D (the 洱海Adais AI-wallpaper look): push realism with dense micro-detail, a filmic muted grade, heavy atmosphere, wet night streets and volumetric-looking smoke. Pros: the most striking screenshots, and the closest to the viral AI images. Cons: units become hard to read, the RA2 identity drifts (the same criticism Bellum Æternum and photoreal concepts get), and it is expensive to keep consistent across all maps.",
+  "C. Hybrid (recommended middle): keep A's unit and building designs and readability rules, but give the environment and systems B's treatment (lighting grade, water, weather, explosions). Pros: gets most of the '2026' feel where it does not hurt gameplay. Cons: needs a relightable sprite pipeline (normal, depth and mask layers) and more renderer work in the web base.",
+  "D. Fast demo track: AI-upscale the existing sprites and add post effects (grade, bloom, AO, sharpen), like the ReShade and AIarty examples. Pros: something to show within days, which helps decide A, B or C. Cons: low ceiling, the 'oily' AI look, and it does not scale to a real remaster.",
+  "E. Real-time 3D under a fixed ortho camera, with units as meshes (voxels are already 3D) and terrain as 3D: gives true dynamic lighting and shadows. Cons: departs further from the web base's sprite renderer, needs every asset remodeled, and risks losing the pre-rendered RA2 feel. Only worth it if the chosen web base can support it."
+ ],
+ "open_questions": [
+  "Which specific AI images does the user mean? The Xiaohongshu posts (e.g. 哈士奇个怪 '在红警2里偷一段阳光午后', Sep 2026) need a login I did not use. Ask the user to send 3-5 favorites, and whether they are closer to the moody 洱海Adais style or the brighter 小黑戏游记 / 《如果2000年红警2就有这画质》 style.",
+  "Which option does the user prefer: faithful (A), cinematic (B) or hybrid (C)? Does the user want a classic/HD toggle?",
+  "What target resolution and zoom? 2x (120x60 cells) vs 3x vs 4x affects memory and download size in a browser. It needs to be sized against the chosen web base (Chrono Divide or another) and WebGPU on Safari/Chrome on the M5 Pro.",
+  "Should weather and time of day be purely cosmetic, or also affect gameplay (e.g. visibility)? Keeping it cosmetic protects fidelity to the original rules.",
+  "Licensing: all RA2 art and derived HD art remain EA IP. Is this strictly personal/non-commercial with user-supplied original game files? That affects whether AI-generated derivatives of EA assets and community models (e.g. C&C Blender Forge) can be used or shared.",
+  "Which ChatGPT image model will be used? The user said 'ChatGPT 6 Ultra'. I saw references to 'GPT Image 1.5 / 2 / 2.5' in 2025-2026 posts but did not verify current model names or img2img consistency features.",
+  "Gaps I could not verify: Mental Omega and OpenRA-specific HD art work; the exact C&C Remastered terrain workflow and per-cell pixel resolution; whether the 'C&C Blender Forge' Discord exists and what its reuse license is; the 'EA buyout' claim in the Aug 2026 community post.",
+  "Note on method: my WebSearch budget was exhausted, so I searched via Google, bilibili and YouTube in the built-in browser. I read Reddit via the Pullpush archive API because reddit.com blocked direct fetching. The three smzdm articles are AI-generated aggregations, so only claims I cross-checked are marked verified."
+ ]
+}

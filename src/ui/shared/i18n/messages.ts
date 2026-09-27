@@ -95,12 +95,7 @@ export const englishMessages = {
   向上滚动: 'Scroll up',
   向下滚动: 'Scroll down',
   选项滚动条: 'Options scrollbar',
-  '第三方分享（版本固定）': 'Third-party executable (fixed version)',
-  '当前没有已核验的下载入口。': 'No verified downloads are currently available.',
-  '当前没有已核验的 {0} 下载入口。': 'No verified {0} downloads are currently available.',
-  '当前没有已核验的下载地址，请稍后查看。': 'No verified download URLs are currently available. Check again later.',
-  '当前没有已核验的 {0} 下载地址，请选择其他语言或稍后查看。':
-    'No verified {0} download URLs are available. Choose another language or check again later.',
+  '主程序（来自你自己的游戏安装）': 'Executable (from your own installation)',
   'RA2 VM · 红色警戒': 'RA2 VM · Red Alert',
   选择要启动的游戏: 'Choose a game to start',
   选择游戏资源: 'Choose game resources',
@@ -112,18 +107,10 @@ export const englishMessages = {
   '✓ 必需文件已集齐，正在启动…': '✓ Required files ready. Starting…',
   '选择文件…': 'Select files…',
   '选择文件夹…': 'Select folder…',
-  '↓ 没有游戏文件？点击下载': '↓ Need game files? Download',
   选择检测到的游戏: 'Choose a detected game',
   开发测试: 'Development test',
-  下载游戏资源: 'Download game resources',
-  '下载入口在新窗口打开第三方来源。语言筛选只筛选已核验的下载包；“全部”会保留所有目录入口，待核验入口会标注“语言待核验”。这里不修改已导入游戏的文字，也不是网页字体选择。下载完成后回到这里，点击「选择文件…」导入启动。':
-    'Downloads open third-party sources in a new window. The language filter applies to verified packages; All retains every catalog entry, with unverified languages marked accordingly. This does not change imported game text or website fonts. Return here after downloading and choose Select files to start.',
-  游戏文字语言: 'Game text language',
-  '下载游戏资源：{0}（游戏文字语言：{1}；第三方来源，新窗口打开）':
-    'Download game resources: {0} (game text language: {1}; third-party source, opens in a new window)',
-  '↓ 下载 ·': '↓ Download ·',
-  '免责声明：本页面不提供游戏文件。游戏版权归原权利人所有，请只下载你合法拥有的内容。':
-    'Disclaimer: this page does not provide game files. Copyright belongs to the respective rights holders. Download only content you legally own.',
+  '免责声明：个人非商业粉丝项目，EA 未认可也不支持本产品（EA has not endorsed and does not support this product）。本页面不提供任何游戏文件，请只使用你合法拥有的游戏安装。':
+    'Disclaimer: a personal, non-commercial fan project. EA has not endorsed and does not support this product. This page provides no game files; use only an installation you legally own.',
   '欢迎加入我们的微信交流群，': 'Join our WeChat community:',
   点此扫码入群: 'Scan to join',
   微信交流群: 'WeChat community',
@@ -312,7 +299,9 @@ export const englishMessages = {
   '资源中包含以下游戏，请选择要启动的版本。': 'These games were detected. Choose the version to start.',
   '未找到完整游戏资源。': 'No complete game resources found.',
   ' 缺少：': ' Missing:',
-  ' + 第三方': ' + third-party',
+  ' + 主程序': ' + executable',
+  '{0} 与已验证版本不同，部分兼容补丁会自动停用；正在启动…':
+    '{0} differs from the verified build; some compatibility patches will stand down. Starting…',
   '{0} 缺少必需文件：{1}。': '{0} is missing required files: {1}.',
   '请重新选择包含这些文件的资源。': 'Select resources containing these files.',
   '必需文件已集齐，正在启动…': 'Required files ready. Starting…',

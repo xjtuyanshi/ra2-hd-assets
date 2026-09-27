@@ -104,7 +104,7 @@ Chromium network regressions explicitly grant local-network-access, covering LAN
 
 ## Real-game regressions
 
-Ordinary local resources live in game/ra2/, with exact executables in .tmp-third-party/. Shared RA2/YR directories should be complete; zero-byte placeholders still count as existing files. `pnpm run prepare:third-party` prepares executables and accesses the network. Real-game CI imports the same original packages as the frontend outside the workspace, verifies whole-package hashes, and prepares fixed executables; see [CI configuration](REAL_GAME_CI.md).
+Ordinary local resources live in game/ra2/, with exact executables in .tmp-third-party/. Shared RA2/YR directories should be complete; zero-byte placeholders still count as existing files. `pnpm run prepare:third-party -- --from <install dir>` copies executables from your own installation without network access. Real-game CI imports the same original packages as the frontend outside the workspace, verifies whole-package hashes, and prepares fixed executables; see [CI configuration](REAL_GAME_CI.md).
 
 ```bash
 VM_GAME_DIR=/path/to/ra2 pnpm exec vitest run tests/real-game/ra2 --exclude '**/gonghui.test.ts'

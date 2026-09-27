@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import {
   assertGameResources,
   assertInventory,
@@ -58,7 +58,7 @@ it('拒绝相对路径、缺资源及符号链接逃逸', async () => {
   );
 });
 
-it('产品清单覆盖 RA2/YR，主程序必须与项目登记哈希一致', () => {
+it('产品清单覆盖 RA2/YR，主程序缺失会拒绝，版本不同只警告', () => {
   const files: Record<string, string> = {};
   for (const game of SUPPORTED_GAMES) {
     const manifest = GAME_MANIFESTS[game.id];
@@ -67,9 +67,14 @@ it('产品清单覆盖 RA2/YR，主程序必须与项目登记哈希一致', () 
     for (const file of manifest.thirdParty) files[`thirdParty/${file.name}`] = file.sha256;
   }
   expect(() => assertGameResources({ version: 1, files })).not.toThrow();
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   expect(() =>
     assertGameResources({ version: 1, files: { ...files, 'thirdParty/gamemd.exe': sha256('wrong') } }),
-  ).toThrow('版本不符');
+  ).not.toThrow();
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining('与已验证版本不同'));
+  warn.mockRestore();
+  const { ['thirdParty/gamemd.exe']: _removed, ...withoutExe } = files;
+  expect(() => assertGameResources({ version: 1, files: withoutExe })).toThrow('缺少主程序');
   expect(() =>
     assertGameResources({ version: 1, files: { ...files, 'thirdParty/GAME.EXE': sha256('wrong') } }),
   ).toThrow('大小写冲突');

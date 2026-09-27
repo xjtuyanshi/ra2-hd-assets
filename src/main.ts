@@ -1,7 +1,5 @@
 import { uiLocale } from './ui/shared/i18n/translate';
 import { installNavigationGuard } from './ui/pages/game/navGuard';
-import { preloadThirdPartyFiles } from './adapter/thirdPartyFiles';
-import { GAME_MANIFESTS } from './games/manifest';
 import { createElement } from 'react';
 import { AppShell } from './ui/pages/game/AppShell';
 import { createRoot } from 'react-dom/client';
@@ -10,9 +8,6 @@ import { showEdgeMouseNotice } from './ui/pages/game/components/edgeMouseNotice'
 
 document.documentElement.lang = uiLocale;
 document.title = uiLocale === 'en' ? 'Red Alert 2 in your browser' : '红色警戒2 网页版';
-
-// Run alongside page-module initialization without waiting for package selection; startup reuses the cache or the same in-flight request.
-void preloadThirdPartyFiles(Object.values(GAME_MANIFESTS));
 
 // Page-lifetime navigation guard: keep accidental back/forward, mouse-side-button, and Alt+Left navigation on this page
 // (disable with ?nav-guard=0 for development). Install once, independently of VM lifetime.

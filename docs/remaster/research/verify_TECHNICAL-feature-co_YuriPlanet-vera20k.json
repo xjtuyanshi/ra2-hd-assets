@@ -1,0 +1,52 @@
+{
+ "candidate": "YuriPlanet/vera20k",
+ "lens": "TECHNICAL (feature completeness, build/test reproducibility, renderer and HD-extensibility claims), re-verified on the existing clone at HEAD 772808f1 (still upstream HEAD per git ls-remote on 2026-09-27)",
+ "refuted_claims": [
+  {
+   "claim": "The renderer has 15 WGSL shader files.",
+   "why_wrong": "`ls src/render/*.wgsl` lists 16. terrain_read_only_resolve.wgsl is missing from the evaluation's list.",
+   "correction": "16 WGSL files. This is cosmetic and does not change any conclusion."
+  },
+  {
+   "claim": "Nuke appears only in test fixtures.",
+   "why_wrong": "MultiMissile/NukeSpecial also appears in production code: SuperWeaponKind::MultiMissile in rules/superweapon_type.rs, EVA_NuclearMissileReady in app/match_runtime/eva_producers.rs:125, plus cursor, vox and warhead code, 28 non-test files in all. What is really missing is the launch handler. The dispatch in src/sim/world/world_commands.rs:2155-2225 handles only LightningStorm, IronCurtain, ForceShield, GeneticConverter, PsychicReveal, ParaDrop and AmerParaDrop. src/sim/combat/parasite.rs:54 says: \"VERA has no Chronosphere superweapon.\"",
+   "correction": "The Nuke, Chronosphere, ChronoWarp, Psychic Dominator and Spy Plane types are parsed and get EVA ready cues, but they cannot be launched. The conclusion stands; the evidence was mis-stated."
+  },
+  {
+   "claim": "trigger_runtime.rs supports only event 47, events 27/28/36/37 and actions 22/28/29/40/48/53/54/56/57/67–69/112/137/138.",
+   "why_wrong": "evaluate_event also handles EVENT_TECHTYPE_EXISTS (60) and EVENT_TECHTYPE_DOES_NOT_EXIST (61) at trigger_runtime.rs:188-202.",
+   "correction": "Supported events are 27, 28, 36, 37, 47, 60 and 61. The file is still only 517 lines, describes itself as \"intentionally narrow\", and campaigns cannot run."
+  },
+  {
+   "claim": "The smoke launch without assets ended on a failure screen.",
+   "why_wrong": "logs/ra2.log shows WARN \"Could not load the game archives: Asset not found: ra2md.mix\", followed by INFO \"Initialization complete — showing main menu\". Nothing in the log confirms a failure screen, and no screenshot was taken.",
+   "correction": "It fell back to the main menu after a missing-archive warning. What that screen actually shows is unverified."
+  },
+  {
+   "claim": "Most HD layers are medium difficulty, and 2x HD sprites map naturally onto zoom 2.0 on the Retina panel.",
+   "why_wrong": "This is inference, and it understates the cost. build_sprite_atlas (sprite_atlas.rs:1087) pre-renders every needed SHP frame on the CPU into palette-indexed atlases at map load, capped at 16384² per page (gpu.rs:30). A 2x or 4x HD asset set multiplies atlas memory by 4 or 16, so it needs a new streaming/atlas strategy, not just override pages. Voxels are CPU-rasterized into R8Uint palette-index atlases (batch.rs:52/320) at 32 quantized facings, so a modern voxel look means a new GPU voxel pipeline. All batch samplers are Nearest (batch.rs:770/1488/1720/1796). Combat lighting edits RGB565-encoded bytes (combat_light.wgsl header). There is no HDR target anywhere. Rgba16Float appears only in a test asserting it is rejected (shell_surface_present.rs:458).",
+   "correction": "In practice the HD goal means writing a second presentation renderer next to the parity one: HDR target, hi-res RGBA atlas streaming, GPU voxels, G-buffer, post chain. Expect medium-hard to hard for most items, not medium. The sim/render separation is real and helps a lot."
+  }
+ ],
+ "confirmed_claims": [
+  "The build is reproducible. `cargo build --release --locked --bin vera20k` with cargo 1.96.0 (Homebrew) is up to date at HEAD 772808f1. target/release/vera20k is a 29,396,192-byte Mach-O arm64 executable built after the HEAD commit time. The only warning left is the future-incompatibility note for `block v0.1.6`.",
+  "I re-ran the tests: `cargo test --locked -p vera20k --lib` gives \"test result: ok. 9564 passed; 0 failed; 177 ignored\" in 38.17s. That matches vera20k_test.log exactly.",
+  "The launch log confirms Metal: \"Using GPU adapter: Apple M5 Pro\", max_texture_dimension_2d=16384, \"GPU initialized: 800x600, format=Bgra8UnormSrgb\". config.toml.example suggests 1024x768.",
+  "The size figures hold: 853,105 lines of Rust in src/, 9,743 #[test] attributes, render/ at 58,576 lines including WGSL, edition 2024, rust-toolchain channel stable.",
+  "Dependencies match: wgpu \"27\", winit \"0.30\", egui/egui-wgpu \"0.33\", glam \"0.29\", fixed \"1\", rodio \"0.22\", memmap2 \"0.9\", Backends::PRIMARY (gpu.rs:92). There is no Three.js and no WebGL.",
+  "It is not web-ready: zero wasm32/web_sys/wasm_bindgen references. There are 320 std::fs uses and 201 Instant::now calls, memmap2 is used, and std::thread::scope runs in unit_atlas.rs:697 with a thread Builder in shell_random_map.rs:347.",
+  "src/sim/ai.rs (1,699 lines) is headed \"Minimal AI opponent\" and runs the 7-step priority loop (think every 8 frames, attack every 225). It is wired in through sim/world/mod.rs:5743 `ai::tick_ai`. house_strategy.rs says it \"intentionally does not schedule Strategy\". team_script_vm executes only \"native action bodies with closed evidence\".",
+  "The campaign screen is a shell only: shell_campaign.rs is the dialog 0x94 selection route. The README's Not-yet column lists \"Campaign and most map triggers\", \"The original AI\", Multiplayer, Nuke/Chronosphere/Psychic Dominator/Spy Plane, Chrono Legionnaire/Crazy Ivan/Magnetron, Gattling/Prism/Tesla, and Movies and credits.",
+  "Multiplayer has no transport: src/net holds only lockstep.rs plus tests, with `// pub mod protocol;` commented out. There are no UdpSocket/TcpStream/tokio/quinn uses.",
+  "Save/load exists: app/persistence/save_load_panel.rs and commands.rs, pause-menu hooks, and the README lists \"Save and load\" under Works.",
+  "The superweapon modules present are force_shield, genetic_converter, invulnerability, iron_curtain, lightning_storm, paradrop and psychic_reveal. There are none for Nuke, Chronosphere, Dominator or Spy Plane.",
+  "The sim/render split is enforced. architecture_guards.rs LAYER_RULES has (\"sim\", [render, sidebar, ui, audio, net]) and FROZEN_EXCEPTIONS is empty. grep finds no crate::render uses in src/sim.",
+  "The renderer claims check out: zoom MIN 0.25 / MAX 4.0 (camera.rs:52/54), VOXEL_FACING_STEPS=32, Depth32Float depth, R8Uint voxel atlas, Nearest samplers, an optional Catmull-Rom upscale ported from cnc-ddraw (MIT), and a single main pass with a tactical scissor in draw_passes.rs.",
+  "The HD hook points named in the evaluation all exist: SpriteInstance has separate size/uv_size fields, plus ShpSpriteKey, build_sprite_atlas, load_shp_source, render_shp_frame, AssetManager loose_files, resolved_terrain is_water, pixel_fx_sparkles.rs, sim/light_sources.rs, app/presentation/combat_lights.rs, instances/particles.rs and wave_geometry.rs.",
+  "The presentation layer interpolates entity screen positions between the 15 Hz logic ticks (RA2_LOGIC_FRAMES_PER_SECOND=15; instances/helpers.rs interpolated_screen_position_entity), so smooth HD motion needs no sim changes.",
+  "Commit counts per month match (Mar 41, Apr 227, May 783, Jun 257, Jul 332, Aug 904, Sep 1,324), with 3,868 commits in total.",
+  "HiDPI handling is minimal: window.scale_factor is used only for egui (egui_integration.rs:75) and diagnostics."
+ ],
+ "adjusted_score": 6,
+ "verdict_notes": "**Overall verdict.** Under a technical lens the evaluation holds up well. Every build, test and launch claim reproduced exactly on this M5 Pro at the current upstream HEAD (772808f1). The build is already up to date and the test suite again reports 9564 passed, 0 failed, 177 ignored. The completeness claims are accurate and, if anything, slightly generous:\n- no campaign (the trigger runtime handles 7 events and a small set of actions);\n- a placeholder AI;\n- no network transport;\n- 5 superweapon kinds (Nuke, Chronosphere, ChronoWarp, Dominator, Spy Plane) are parsed but have no launch path.\n\n**Errors found.** They are minor factual slips that do not change any conclusion:\n- 16 WGSL files, not 15;\n- \"Nuke only in test fixtures\" is wrong, although \"Nuke cannot be launched\" is right;\n- events 60/61 were omitted from the trigger list;\n- \"failure screen\" is not shown in the log.\n\n**Main correction: HD difficulty is understated.** The renderer is a parity engine throughout:\n- CPU-baked palette-index sprite atlases capped at 16384² pages;\n- CPU-rasterized R8Uint voxel atlases at 32 facings;\n- Nearest sampling everywhere;\n- RGB565 byte-level combat lighting;\n- no HDR target.\n\nThe \"2026-level\" visuals therefore require a substantial second presentation renderer in Rust/wgpu. That is closer to a rewrite of the presentation layer than to adding override pages. It is still the cleanest possible foundation for that work, because of the enforced sim→render boundary, the existing interpolation and the event outputs (SimFrameOutput, light sources, particles).\n\n**Things I could not verify.** Gameplay, frame rate at Retina resolution, and whether the main menu renders correctly without assets all need retail RA2+YR MIX files, and there are none on this machine.\n\n**Score: 6/10, unchanged.** The build and test health is excellent and reproducible, and the architecture is well suited to adding an HD layer. Step-1 completeness (campaign, real AI, multiplayer, the flagship superweapons) is weak and depends on a single maintainer's high-churn upstream. It is not a web base.\n\n**Files:**\n- Clone: /private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/repos/YuriPlanet__vera20k\n- Logs: vera20k_build.log and vera20k_test.log in the parent repos/ folder, plus logs/ra2.log in the clone."
+}

@@ -100,7 +100,7 @@ pnpm run dev
 ```
 
 Open the HTTPS address printed in the terminal and select a local game directory or archive.
-To prepare the development executable cache, run `pnpm run prepare:third-party`; this downloads files.
+To prepare the development executable cache from your own installation, run `pnpm run prepare:third-party -- --from <install dir>`; it copies files and never downloads.
 Game programs and assets are not included in this repository, and public tests do not require them.
 
 ```bash

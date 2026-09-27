@@ -1,0 +1,197 @@
+{
+ "topic": "HD asset pipeline for a Red Alert 2 remaster built on an existing web engine: RA2/YR asset formats and counts, HD strategies (AI upscaling, voxel to mesh, 3D rebuild, PBR terrain, image generators), recommended vertical slice, community tools, and whether the web engine can load replacement assets",
+ "findings": [
+  {
+   "title": "Chrono Divide (the best-known web RA2) cannot load HD assets. It is closed source and its mod SDK only accepts original formats.",
+   "detail": "VERIFIED: Chrono Divide recreates RA2 in the browser and needs the user's own .mix files. Per the Hacker News discussion, its source is not public. The mod SDK accepts *.mix, *.mmx, *.ini, *.csf, *.mpr, *.map and *.pkt. The only non-original files it takes are a PNG splash screen and a WebM menu video. HVA animation is not supported (only the first frame is used). voxels.vpl voxel lighting is not supported. The SDK states 'Yuri's Revenge mods are NOT compatible'. The docs say nothing about higher-resolution textures, glTF or PBR. INFERENCE: any HD work needs engine source code. Mods for Chrono Divide itself can only swap one 256-colour asset for another.",
+   "sources": [
+    "https://chronodivide.com/",
+    "https://github.com/chronodivide/mod-sdk",
+    "https://github.com/chronodivide/mod-sdk/blob/master/ART.md",
+    "https://news.ycombinator.com/item?id=45991853",
+    "https://ppmforums.com/topic-67790/chrono-divide-recent-updates-with-version-043-now-you-can-mod-a-rts-browser-game/"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "The practical open code base is huangkaoya/ts-redalert2, a reconstruction of the Chrono Divide/RA2WEB client. It carries a licensing caveat.",
+   "detail": "VERIFIED (cloned to scratchpad/ts-redalert2, last commit 2026-09-03): 977 stars, 252 forks. Stack is TypeScript 5.9, React 19.2, Vite 8, three.js 0.183.2, Bun 1.3, with Playwright regression tests. Its README says it was built 'based on the analysis of' RA2WEB/Chrono Divide. It says all rights, including profit rights, belong to the Chrono Divide owner, commercial use is forbidden, and the owner never open-sourced the client. The repo is nonetheless labelled GPL-3.0. Similar repos: DD-Channel/ra2-web (three.js 0.177, 5 stars, early stage) and OpenRA2/RA2Web. A precedent: ammaarreshi/RedAlert2-Mac-iOS-iPad says it builds on Chrono Divide's engine 'used with the author's permission, non-commercial only'. The importer checks ra2.mix (281,895,456 bytes), language.mix, multi.mix and theme.mix. The VFS has a Yuri's Revenge code path (it loads ra2md/langmd/cachemd/localmd.mix when engineType is YurisRevenge), but the importer only requires the RA2 files, so YR support is partial or unproven. INFERENCE: the project should stay non-commercial and ideally get Alexandru Ciucă's written permission. The first slice should use RA2 1.006 content, not YR.",
+   "sources": [
+    "https://github.com/huangkaoya/ts-redalert2",
+    "https://github.com/DD-Channel/ra2-web",
+    "https://github.com/OpenRA2/RA2Web",
+    "https://github.com/ammaarreshi/RedAlert2-Mac-iOS-iPad",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/README.md",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/gameRes/GameResImporter.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/data/vfs/VirtualFileSystem.ts"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "The engine already draws a real 3D three.js scene with a 2.5D orthographic camera. Voxels are real-time meshes; sprites and terrain use palette-indexed textures.",
+   "detail": "VERIFIED from source:\n(1) Camera: THREE.OrthographicCamera with pitch ISO_CAMERA_ALPHA=π/6 and yaw ISO_CAMERA_BETA=π/4. One cell is 256 leptons, drawn 30 px tall on screen. One height level is half a tile, i.e. 15 px (Coords.ts, WorldScene.ts).\n(2) Lighting: one DirectionalLight plus ambient light. Real shadow maps are on, sized 1024 × a quality multiplier. It uses THREE.WebGLRenderer with no post-processing composer (Renderer.ts).\n(3) SHP: every frame is packed into a THREE.DataTexture atlas that stores the palette index. Filtering is NearestFilter. PaletteBasicMaterial looks up a palette texture in the shader (paletteShaderLib.ts, index taken from the alpha or red channel) with alphaTest 0.05. House colours are extra palette rows. ShadowRenderable draws the shadow frames stored in the second half of the SHP.\n(4) VXL: meshed at runtime into one THREE.Mesh per section. There are culled, monotone (greedy) and naive builders. Vertex colour holds the palette index, normals come from the VXL normals table, and shading is Lambert or Phong (vxlGeometry/*, PaletteLambertMaterial, PalettePhongMaterial).\n(5) TMP: tiles are drawn into indexed bitmaps and atlases by TmpDrawable/MapTileLayer and use the same palette material.\n(6) No GLTFLoader or KTX2 loader is used anywhere yet.\nINFERENCE: the renderer is already a 3D scene with lights and shadows, so real-time glTF units and buildings fit naturally. The gap is materials: everything assumes 8-bit palette indices.",
+   "sources": [
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/game/Coords.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/renderable/WorldScene.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/gfx/material/paletteShaderLib.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/gfx/TextureAtlas.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/renderable/builder/ShpBuilder.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/renderable/builder/vxlGeometry/VxlGeometryCulledBuilder.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/gfx/drawable/TmpDrawable.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/gfx/Renderer.ts"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "The engine has clean extension points for runtime HD replacement, so no MIX repacking is needed.",
+   "detail": "VERIFIED: VxlBuilder is an abstract class with one method to implement, createVxlMeshes(): Map<string, THREE.Mesh>, keyed by section name. VxlBuilderFactory picks between the batched and non-batched builders. ImageFinder maps art names to SHP files by filename, including theater letter substitution. resourceConfigs.ts lists the resource bundles (isotemp.mix, anims.mix, vxl.mix, cameo.mix, ...). The repo ships visual test pages: VehicleTester, InfantryTester, BuildingTester, AircraftTester and WorldSceneTester.\nINFERENCE (proposed design):\n(a) GltfSectionBuilder extends VxlBuilder. It loads <unit>.glb whose nodes are named like the VXL sections (body/turret/barrel), so the existing turret rotation and facing code works unchanged.\n(b) HdShpBuilder plus an HdSpriteMaterial. It takes an RGBA atlas at N× resolution, a remap mask, an optional emissive mask and optional normal/depth maps. The quad keeps the original world size and frame offsets, so selection boxes and gameplay are untouched; only texel density rises.\n(c) An 'hd-manifest.json' that maps original asset names to HD files and falls back to the original.\n(d) An HD pack loaded next to the user-imported MIX files, using KTX2/Basis textures through three's KTX2Loader.\n(e) A post-processing stage (bloom, GTAO, tone mapping, colour grading), either with EffectComposer or by moving to three's WebGPURenderer.\n(f) A Classic/HD toggle key, as in C&C Remastered.",
+   "sources": [
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/renderable/builder/VxlBuilder.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/renderable/builder/VxlBuilderFactory.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/ImageFinder.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/resourceConfigs.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/tools/VehicleTester.ts"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "Format quirks that shape the HD pipeline: SHP(TS), PAL, TMP, VXL/HVA, CSF, VPL",
+   "detail": "VERIFIED:\n- SHP(TS): 8-byte header (0, FullWidth, FullHeight, NrOfFrames), then 0x18-byte frame headers (FrameX/Y, width/height, flags for transparency and RLE-zero, minimap colour, data offset). Shadows are separate frames in the second half and use only index 0/1.\n- PAL: 256 colours at 6 bits per channel. Index 0 is transparent, index 1 is shadow. Indices 16–31 are the house-colour remap ramp. Indices 240–254 ignore map brightness (used for glows and muzzle flashes).\n- TMP: diamond cells, 48×24 in TS and 60×30 in RA2. Each cell may have an 'extra' upright image and Z-data for layering. A flag bitfield (HasExtraData, HasZData, HasDamagedData) stops bridge tiles being randomised. Each cell carries height, land type (Water=9, Beach=10, Road=11–12, Cliff=15 ...), ramp type and two radar colours. Variants a–g are chosen at random.\n- VXL: an 802-byte header that includes a palette, limb headers (28 B each), span-packed voxel bodies and limb tailers (92 B each, holding bounds, scale, transform and normals mode). Each voxel stores a colour index and a normal index. The engine's normal tables have 16/36/64/245 entries for modes 1–4 (TS uses mode 2 = 36, RA2 uses mode 4 = about 244).\n- HVA: per-frame 3×4 section transforms that line up turret and barrel pivots; Chrono Divide uses frame 0 only.\n- VPL: a voxel lighting lookup table.\n- CSF: string tables.\n- Buildings: art keys Buildup (the construction SHP, usually *mk.shp; without it the building cannot be sold), ActiveAnim/Two/Three/Four, ActiveAnimPowered and ActiveAnimDamaged (house-colour remapped), plus a bib and normal/damaged frames.\n- Infantry: 8-facing sequences (Ready, Walk, Fire, Prone, Crawl, Idle, Die1–5, Cheer, Deploy, ...).\nHD implications (INFERENCE):\n- House colour must become a separate mask channel.\n- Indices 240–254 map directly to an emissive mask.\n- Shadow frames should be replaced by real-time shadows (meshes) or by a blurred, upscaled alpha (sprites).\n- Z-data and extra data are what a real heightfield/mesh terrain replaces.\n- HVA pivots must be baked into glTF section node origins.",
+   "sources": [
+    "https://moddingwiki.shikadi.net/wiki/Westwood_SHP_Format_(TS)",
+    "https://modenc.renegadeprojects.com/PAL",
+    "https://modenc.renegadeprojects.com/TMP",
+    "https://modenc.renegadeprojects.com/File_Types",
+    "https://docs.rs/cnc-formats/latest/cnc_formats/vxl/index.html",
+    "https://www.ppmsite.com/addvoxels/",
+    "https://modenc.renegadeprojects.com/Buildup",
+    "https://modenc.renegadeprojects.com/ActiveAnim",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/data/vxl/normals.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/data/TmpImage.ts"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Asset counts for workload estimates (RA2 counted from real definition files; YR additions estimated)",
+   "detail": "VERIFIED by counting the OpenRA/ra2 mod definitions (cloned in scratchpad/repos/openra-ra2) and the engine's mix database:\n- Terrain: temperate has 511 templates, 737 TMP files and 2,628 cells (3,014 counting variants). Snow has 475 / 678 / 2,519. Urban has 708 / 934 / 3,994. That is about 2.35k TMP files and about 9.1k 60×30 cells across RA2's three theaters.\n- Voxels: 62 top-level entries in voxels.yaml (57 idle bodies, 13 turret and 6 barrel sequences) for vehicles, ships and aircraft.\n- Infantry: about 45 actors (13 Allied, 11 Soviet, 17 civilian, 4 animals). For the GI (gi.shp), deploy/undeploy frames reach index 314, so a full infantry SHP holds about 315 body frames plus the same number of shadow frames.\n- Structures: 19 Allied, 18 Soviet and 4 tech, plus 189 civilian-structure entries, 46 props, 31 trees and 20 bridges.\n- Explosions: 59 explosion sequence variants in misc.yaml.\n- Cameos: cameo.mix lists 203 SHP files (160 *icon plus 40 *uico).\n- Size: ra2.mix is 281,895,456 bytes.\nINFERENCE:\n- YR adds the Yuri faction and the desert, lunar and new-urban theaters, roughly +30–50% content.\n- Rough totals for RA2+YR: about 90–100 voxel actors (about 130–160 VXL files counting turret/barrel sections), about 65 infantry (about 16–20k body frames, twice that with shadows), about 60 faction/tech buildings, about 250+ civilian structures with theater variants, about 5–6 theaters (about 4–5k TMP files, about 15k cells), about 300 animation SHPs and about 250 cameos.\nThe OpenRA mod is incomplete, so treat these as lower bounds. Exact counts should come from listing the user's own MIX files once imported.",
+   "sources": [
+    "https://github.com/OpenRA/ra2",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/repos/openra-ra2/mods/ra2/tilesets/temperat.yaml",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/repos/openra-ra2/mods/ra2/sequences/voxels.yaml",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/repos/openra-ra2/mods/ra2/sequences/allied-infantry.yaml",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/mixDatabase.ts"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "(a) AI upscaling of SHP sprites: fast full coverage, but the quality ceiling is 'sharper old game', and palette, shadow and temporal issues must be engineered around",
+   "detail": "Tools (VERIFIED):\n- chaiNNer (GPL-3.0, active September 2026) supports PyTorch MPS on Apple Silicon and NCNN.\n- Real-ESRGAN-ncnn-vulkan.\n- OpenModelDB models: 4x-UltraSharp (ESRGAN, CC-BY-NC-SA-4.0, adds lots of detail), 4x-PixelPerfectV4 (ESRGAN, WTFPL, pixel art and sprites), 4x-xbrz (CC-BY-NC-4.0).\n- SeedVR2 (ByteDance one-step diffusion video upscaler; the ComfyUI node is Apache-2.0 with explicit MPS/Apple Silicon fixes and RGBA alpha upscaling). It keeps frames consistent through batched frames and temporal overlap.\nRecommended recipe (INFERENCE):\n1. Decode each frame to indices.\n2. Build an RGB image with the remap range 16–31 replaced by a neutral grey ramp, plus separate masks: alpha (index≠0), remap (16–31), emissive (240–254) and shadow.\n3. Bleed edge colours into transparent pixels so no halo appears.\n4. Upscale the RGB 4×. Upscale the masks with edge-aware/nearest scaling and a small feather.\n5. Premultiply alpha. At runtime, tint house colour by mask × luminance.\n6. Do not AI-upscale shadow frames. Blur and upscale the mask, or use real-time shadows.\nFor animations, feed each facing's sequence to a video model (SeedVR2) or use a low-hallucination model (PixelPerfect or xBRZ style). Per-frame GAN or diffusion upscaling makes details shimmer between frames and facings. Pre-dither or denoise first, because RA2 sprites are quantised renders and upscalers treat dithering as texture.\nUse this path for the long tail (civilian buildings, props, anims, cameos) and as a universal fallback. Do not use it for hero assets.",
+   "sources": [
+    "https://github.com/chaiNNer-org/chaiNNer",
+    "https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan",
+    "https://openmodeldb.info/models/4x-UltraSharp",
+    "https://openmodeldb.info/models/4x-PixelPerfectV4",
+    "https://openmodeldb.info/models/4x-xbrz",
+    "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler",
+    "https://docs.comfy.org/tutorials/utility/seedvr2"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "(b) Voxel units: the engine already renders VXL in real 3D, so rebuilt glTF models are the highest-leverage change",
+   "detail": "VERIFIED: VXL sections become three.js meshes lit by a directional light with shadow maps under an orthographic dimetric camera. Facings are continuous; Hacker News commenters noted rotation is smoother than the original.\nTwo tiers (INFERENCE):\n- b1, cheap: export the original voxels to glTF by reusing the engine's own TypeScript VxlFile/HVA parsers and mesh builders plus three.js GLTFExporter, run offline in Node. This takes about a day. Optionally smooth the result (surface nets / marching cubes plus Laplacian smoothing) and map palette ranges to PBR roughness/metal, and indices 240–254 to emissive. The result is still low-detail because RA2 voxels are only tens of voxels long.\n- b2, recommended for heroes: rebuild as low-poly hard-surface models (about 5–20k triangles, PBR, house-colour mask) with the voxel export as a scale/proportion blockout. Split nodes into body/turret/barrel with pivots from HVA frame 0, and load through a GltfSectionBuilder.\nBenefits: sharp at any resolution or zoom, free dynamic lighting for day/night, weather and muzzle flashes, and no sprite sheets to maintain.\nTrap (VERIFIED): yvt/VxlToObj reads Voxlap/Ace of Spades .vxl, not Westwood VXL. VXLSE III (1.38/1.39) is a Windows editor and its documented exports do not include OBJ.",
+   "sources": [
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/renderable/builder/VxlBuilder.ts",
+    "https://news.ycombinator.com/item?id=45991853",
+    "https://github.com/yvt/VxlToObj",
+    "https://modenc.renegadeprojects.com/Voxel_Section_Editor_III",
+    "https://www.ppmsite.com/vxlseinfo/",
+    "https://ppmforums.com/topic-44719/vxl-to-obj/"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "(c) Buildings and infantry: rebuild in 3D. Buildings render in real time; infantry are best pre-rendered to 8-facing HD sprite sheets (the C&C Remastered method)",
+   "detail": "VERIFIED: for C&C Remastered, Lemon Sky built new 3D assets and rendered them to 2D sprites, 'usually 32 angles for all the vehicles or eight different angles for animation on a grenadier', re-animated and exported frame by frame so players could switch between classic and new graphics in real time (Game Developer, 2020).\nAI 3D state as of September 2026:\n- TRELLIS.2 (Microsoft, 4B parameters, MIT): image to textured GLB with base colour, roughness, metallic and opacity at 512³/1024³/1536³. It also has a mode that textures an existing mesh (example_texturing.py). It needs Linux and an NVIDIA GPU with 24 GB or more, so it will not run on the M5 Pro; use a cloud GPU.\n- Hunyuan3D 2.1: open weights with a PBR stage. Per third-party sources, 3.0/3.1 are hosted only. Tencent's GitHub also lists Hunyuan3D-Omni and -Part.\n- Commercial options named in a September 2026 roundup: Meshy 7, Tripo P2.0, Rodin Gen-2.5 (LIKELY; third-party).\nINFERENCE:\n- Buildings: real-time glTF, because the engine already does 3D with shadows. Buildup can be a shader dissolve or a scaffold animation. Damage states become mesh or material swaps plus decals and fire particles. Active anims use node or UV animation. This avoids re-rendering every lighting variant.\n- Infantry: about 20–30 px tall at 1×, about 300 frames × 8 facings, hundreds on screen. Rig one AI-generated base body per faction, retarget about 15 sequences, and render 8 facings at 4× into KTX2 sheets with normal and emissive maps. Real-time skinned meshes or VAT are possible later but cost more and risk losing the RA2 sprite feel.\n- AI 3D output needs cleanup (retopology, symmetric hard edges, pivots, house-colour mask). Budget about 1–2 person-days per vehicle and 2–4 per building (speculative).",
+   "sources": [
+    "https://www.gamedeveloper.com/design/ea-s-strategy-for-remastering-i-command-conquer-i-",
+    "https://en.wikipedia.org/wiki/Command_%26_Conquer_Remastered_Collection",
+    "https://github.com/microsoft/TRELLIS.2",
+    "https://huggingface.co/microsoft/TRELLIS.2-4B",
+    "https://github.com/tencent-hunyuan/hunyuan3d-2.1",
+    "https://triposr.org/blog/hunyuan3d-versions",
+    "https://www.buildmvpfast.com/articles/best-llms-2026-guide/3d-modeling-ai"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "(d) Terrain: AI-upscaling TMP tiles produces seams and huge memory use. Tileable PBR materials with splat blending, a real heightfield and a water shader deliver the '2026' look",
+   "detail": "INFERENCE, based on the verified TMP structure:\n- Upscaling 60×30 cells one at a time creates seams at runtime tile combinations.\n- Unique 4× art per cell is heavy: 240×120 px × about 3k cells ≈ 86 Mpx, about 345 MB RGBA per theater before compression.\n- Better: classify cells from TMP land type and tileset category (Clear/LAT grass, rough, sand, pavement, road, water, beach, cliff). Build a heightfield from cell height and ramp type. Render with about 8 tileable PBR sets per theater (albedo, normal, roughness, height at 1–2k, height-blended splats, road decals).\n- Cliffs: triplanar rock on generated cliff meshes, or a small modular mesh kit.\n- Water: a shader plane with depth tint, scrolling normals, shoreline foam from a distance field to non-water cells, and sky/cubemap or screen-space reflections.\n- Bridges: glTF.\n- The current MapTileLayer can be swapped for a new terrain renderable, because gameplay reads map/tile data, not pixels.\n- Keep AI-upscaled TMP as a fallback for odd pieces (waterfalls, special tiles).\nTile scale reference (VERIFIED): temperate alone has 511 templates and 2,628 cells.",
+   "sources": [
+    "https://modenc.renegadeprojects.com/TMP",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/engine/renderable/entity/map/MapTileLayer.ts",
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/repos/openra-ra2/mods/ra2/tilesets/temperat.yaml"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "(e) Where ChatGPT image generation helps, and where it does not. Note that the current model is 'ChatGPT Images 2.5', not 'ChatGPT 6 Ultra'",
+   "detail": "VERIFIED: OpenAI shipped ChatGPT Images 2.5 on 2026-09-08. The API has gpt-image-2.5-sunburst (detail and editing) and gpt-image-2.5-flare (fast), with better multi-turn consistency and better preservation of reference images. I found no image model called 'ChatGPT 6 Ultra'.\nThe Chinese community's 2026 'AI remaster' visuals are mostly one of three things: real-time neural re-rendering ('DLSS5', NeuRotic/OptiScaler on top of dgVoodoo2), offline AI video re-rendering (e.g. B站 洱海Adais 《红警2重制级画质》, which keeps the 2.5D view), or AI-generated cinematics. Reviewers note hallucinated detail, blurring in motion, and that it is really 'art style replacement'.\nINFERENCE — good uses:\n- A style bible: paint-overs of real 1:1 gameplay screenshots at the engine's exact camera.\n- Orthographic front/side/top concept sheets per unit and building to feed image-to-3D.\n- Material look-dev and texture seeds (make seamless afterwards).\n- Cameos rendered from the final 3D models and then stylised.\n- UI sidebar, loading screens and briefing art.\nPoor uses: thousands of consistent animation frames or facings, pixel-exact tiles with seams, anything that must line up with the game grid. Use ChatGPT Pro reasoning for plan and prompt reviews, not as the asset factory.",
+   "sources": [
+    "https://simonwillison.net/2026/Sep/8/introducing-chatgpt-images-25/",
+    "https://openai.com/index/introducing-chatgpt-images-2-0/",
+    "https://post.smzdm.com/p/a03qwd4r/",
+    "https://post.smzdm.com/p/ak8x586r/",
+    "https://www.bilibili.com/video/BV1YHw2zrEWb/"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "Community and offline tools for the extraction pipeline (repos checked on GitHub, September 2026)",
+   "detail": "VERIFIED via the GitHub API or docs:\n- OlafvdSpek/xcc (XCC Mixer and utilities, GPL-3.0, last push 2025-12-15; Windows).\n- iron-curtain-engine/cnc-formats (Rust, clean-room, MIT/Apache; 0.1.0-alpha.5 on docs.rs dated 2026-09-20). Parses mix, shp_ts, pal, tmp, vxl, hva, csf and map_ra2 and has PNG output features. Good for a cross-platform batch extractor.\n- zzattack/ccmaps-net (renders RA2 maps to images, GPL-3.0, pushed 2026-09-20). Useful for reference renders and A/B comparison.\n- Rampastring/WorldAlteringEditor (RA2/TS/DTA map editor, pushed 2026-07-10). For building the slice map.\n- Voxel Section Editor III (source fork hathlife/voxel_section_editor).\n- OS SHP Builder (PPM; Windows, not re-verified).\n- FS-21/Advanced-TMP-Editor (web-based TMP and Z-data editor).\n- The web engine's own TypeScript parsers (MixFile, ShpFile, VxlFile, HvaFile, TmpFile, Palette, CsfFile), reusable in Node.\n- OpenRA/ra2 (C#) as a second reference implementation.\nWindows-only tools can run under CrossOver/Wine or a VM on macOS; the TypeScript/Rust path avoids that (INFERENCE).",
+   "sources": [
+    "https://github.com/OlafvdSpek/xcc",
+    "https://docs.rs/cnc-formats/latest/cnc_formats/",
+    "https://github.com/iron-curtain-engine/cnc-formats",
+    "https://github.com/zzattack/ccmaps-net",
+    "https://github.com/Rampastring/WorldAlteringEditor",
+    "https://github.com/hathlife/voxel_section_editor",
+    "https://github.com/FS-21/Advanced-TMP-Editor",
+    "https://github.com/OpenRA/ra2"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Resolution target and memory budget for the M5 Pro Retina display and the browser",
+   "detail": "INFERENCE:\n- The original 1024×768-era view on a 3456×2234 panel is about 3.4× magnification, so 4× texel density (240×120 px per cell, 4× sprite frames) is the right HD target for crisp output at the original field of view. Real-time meshes make zoom free.\n- Use KTX2/Basis (UASTC for hero textures, ETC1S for the long tail) to keep the web download and VRAM reasonable. An uncompressed 4× infantry sheet is about 20–25 MB (about 300 frames × about 120×160 px × 4 B) before normal maps.\n- PBR terrain at about 8 materials × 3 maps × 2k is about 100 MB raw, about 25 MB compressed, per theater.\n- Stream the HD pack per theater.",
+   "sources": [
+    "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/ts-redalert2/src/game/Coords.ts"
+   ],
+   "confidence": "speculative"
+  }
+ ],
+ "recommendations": [
+  "Step 0 (legal and base): use huangkaoya/ts-redalert2 as the code base for Step 1 (original gameplay). Keep it strictly non-commercial and contact the Chrono Divide author for permission early. Stock Chrono Divide cannot take HD assets.",
+  "Step 1a, tooling (about 1 week): write an offline Node/TypeScript extractor that reuses the engine's own parsers, with cnc-formats (Rust) as a cross-check. It converts the user's legally owned MIX files into: per-SHP-frame PNGs plus JSON (offsets, sequences) and separate alpha, remap (16–31), emissive (240–254) and shadow masks; VXL+HVA to glTF with named sections and pivots from HVA frame 0, used as blockouts; TMP cells to PNG plus metadata (height, land type, ramp type, extra/Z data). The same tool prints exact asset counts from the user's files.",
+  "Step 1b, engine hooks (about 1–2 weeks): add hd-manifest.json with fallback to the originals; GltfSectionBuilder (extends VxlBuilder); HdShpBuilder plus an RGBA/remap-mask/emissive/normal sprite material; a KTX2Loader-based HD pack loader; a post-processing stage (tone mapping, bloom, GTAO, colour grading); and a Classic/HD toggle key for A/B review. Add Playwright golden screenshots for both modes using the repo's existing tester pages.",
+  "Step 2, vertical slice on one small temperate RA2 map with water, shore, cliffs, a bridge and trees. Real-time glTF: Grizzly, Rhino, a miner, MCV. Buildings: Allied Construction Yard, Power Plant, Barracks, Refinery, War Factory. Infantry pre-rendered at 4×, 8 facings: GI, Conscript. New PBR terrain (about 8 materials), a water shader with shore foam, and a VFX kit (muzzle flash, shell impact, building explosion, fire/smoke, dust). Everything else runs through the automatic AI-upscale fallback (chaiNNer/ESRGAN for static art, SeedVR2 for animation sequences) so the slice is fully playable.",
+  "Asset production loop per hero asset: (1) ChatGPT Images 2.5 paint-over of a real in-engine screenshot to lock the style; (2) orthographic concept sheet; (3) image-to-3D (Tripo, Meshy or Rodin hosted, or TRELLIS.2/Hunyuan3D 2.1 on a rented Linux NVIDIA GPU with 24 GB or more; the M5 Pro cannot run TRELLIS.2); (4) Blender cleanup, section split, house-colour mask, PBR; (5) check at the exact engine camera (pitch 30°, yaw 45°, orthographic) against the voxel/SHP blockout; (6) user approval before the next asset.",
+  "Scaling after the slice is approved: tier 1 = all faction vehicles and buildings plus the three RA2 theaters in 3D/PBR; tier 2 = infantry sheets; tier 3 = civilian structures and props, possibly as a modular 3D kit, otherwise upscaled; YR content only after the engine's YR support is proven. Rough effort for the full RA2 set is several person-months even with AI assistance (speculative); make the fallback automatic so the game is always complete."
+ ],
+ "options_for_user": [
+  "Option A, 'Classic HD' (fastest, a few weeks): AI-upscale all SHP/TMP 4×, smooth and PBR-map the voxels, add post-processing, lighting and weather. Very faithful to the original, but looks like a sharpened 2000 game, not '2026'; terrain seams and animation flicker need care.",
+  "Option B, 'Hybrid remaster' (recommended): real-time glTF for vehicles, aircraft, ships and buildings; pre-rendered 3D infantry sprite sheets; new PBR terrain, water and VFX; AI-upscaled fallback for the long tail. Best quality per unit of effort and keeps the 2.5D look; needs 3D cleanup skills or time.",
+  "Option C, 'Everything real-time 3D' (highest ceiling, highest cost): infantry also as skinned meshes or vertex-animation textures. Allows free zoom and uniform lighting, but costs more performance with hundreds of infantry in WebGL and risks losing the RA2 sprite charm.",
+  "Buildings sub-choice: real-time 3D (dynamic day/night and weather, fewer files, needs a shader-based buildup animation) versus C&C Remastered-style pre-rendered sprites with normal/depth/emissive maps (exact art control, but every animation and lighting change means re-rendering).",
+  "Terrain sub-choice: context-aware AI upscale of the original TMP tiles (most faithful, seams, large memory) versus tileable PBR splat terrain with a heightfield and water shader (modern look, less pixel-faithful)."
+ ],
+ "open_questions": [
+  "Which exact 'AI-optimized' reference images or videos does the user mean (e.g. the B站 洱海Adais 重制级画质 series, or the DLSS5 neural-render clips)? Is the target painterly and stylized (like C&C Remastered) or near-photoreal?",
+  "Is RA2 1.006 content enough for the slice and first release, or is Yuri's Revenge required? The chosen engine's YR path is only partial.",
+  "Will the project stay strictly personal and non-commercial? The reconstruction's own disclaimer requires that, and permission from the Chrono Divide author should be sought.",
+  "Does the user own a legal RA2 copy to import (EA App/Steam 'Red Alert 2 and Yuri's Revenge')? No game files are on the machine yet.",
+  "What budget is acceptable for hosted 3D generation (Meshy/Tripo/Rodin) and/or a rented Linux NVIDIA GPU (24 GB or more) for TRELLIS.2 or Hunyuan3D?",
+  "Should the HD mode keep the original camera and zoom (sprites at 4× are then enough), or allow free zoom (which pushes more assets to real-time 3D)?",
+  "Is a live Classic/HD toggle (as in C&C Remastered) a requirement? It constrains keeping gameplay footprints and sprite anchors identical."
+ ]
+}

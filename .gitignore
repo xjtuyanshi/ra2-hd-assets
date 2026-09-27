@@ -17,3 +17,20 @@ dist/
 *.pth
 *.safetensors
 __pycache__/
+# Remaster fork: original game files and anything derived from them never enter the repository.
+/gameres/
+*.mix
+*.MIX
+*.exe
+*.EXE
+*.dll
+*.DLL
+*.shp
+*.vxl
+*.hva
+*.tmp
+*.pal
+*.csf
+*.bik
+*.wav
+*.aud

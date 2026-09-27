@@ -1,7 +1,7 @@
 /**
  * Browser persistence for imported game files: once all required manifest entries are present, write the session's file set to IndexedDB (ra2-vm-game-files), restoring it automatically next time without another selection.
  *
- * thirdPartyFiles.ts persists executables (game.exe / gamemd.exe) separately; this stores only player-supplied files. If quota is insufficient, fall back to required startup files only; optional packages will still be missing next time.
+ * Executables (game.exe / gamemd.exe) are player-supplied and stored with the other files. If quota is insufficient, fall back to required startup files only; optional packages will still be missing next time.
  */
 
 import { SessionGameFileProvider } from '../platform/browser/files/sessionFiles';

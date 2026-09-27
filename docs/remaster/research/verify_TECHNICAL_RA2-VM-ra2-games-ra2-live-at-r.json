@@ -1,0 +1,67 @@
+{
+ "candidate": "RA2 VM (ra2-games/ra2, live at ra2.games): runs the original x86 RA2 game.exe 1.006 and YR gamemd.exe 1.001 in the browser on v86, with custom firmware, a PE loader and HLE Win32/DirectX shims",
+ "lens": "TECHNICAL: completeness, build result, HD extensibility. I re-inspected the existing clone at scratchpad/repos/ra2vm__ra2-games__ra2 (HEAD f25986b, which matches the remote HEAD per git ls-remote), re-ran `pnpm run check` on the M5 Mac, grepped the code for each claimed feature, and checked repo metadata through the GitHub API.",
+ "refuted_claims": [
+  {
+   "claim": "Skirmish vs the original easy/medium/brutal AI is VERIFIED in code and tests (tests/real-game/ra2/shortGame, skirmishSlots, battleStartup).",
+   "why_wrong": "None of those tests checks AI behaviour or difficulty. shortGame.test.ts is 'RA2 原始指令与快速游戏补丁': it checks a 55-byte in-memory patch to the Short Game defeat check at 0x4E4A9C (src/games/ra2/shortGame.ts) against the exe bytes. skirmishSlots.test.ts only counts red pixels in the player rows of the skirmish menu (2 vs 4 slots). battleStartupBrowserSmoke.mts only checks that battlefield pixels and the sidebar appear and that frames advance. A grep for brutal/difficulty/AIDifficulty in src, docs and README finds nothing.",
+   "correction": "Code and tests show that a skirmish can be launched and the battlefield renders and advances. That the AI plays, and plays at each difficulty, is an INFERENCE from running the original exe. No test checks it."
+  },
+  {
+   "claim": "The original game logic runs unchanged / rules are the originals by construction.",
+   "why_wrong": "The project writes patches into guest code at runtime. Examples: the Short Game base-unit counting rewrite at 0x4E4A9C (src/games/ra2/shortGame.ts), repairRa2InvalidRepairRate (docs/ARCHITECTURE.md:73), one-shot startup and battle trampolines at 0x513762 and elsewhere (docs/RA2_COMMAND_LINE_AND_SPAWNER.md), and a binkw32.dll instruction patch at RVA 0x9d2d (src/games/ra2/profile.ts). The patches are guarded and small, and the Short Game fix behaves like vanilla when there are only 2 BaseUnits, but the exe does not run untouched.",
+   "correction": "The exe runs with a small set of hash- and signature-guarded runtime patches. Almost all of the logic is original, but it is not strictly unmodified."
+  },
+  {
+   "claim": "It runs the unmodified RA2 1.006 game.exe.",
+   "why_wrong": "Unconfirmed, and there is evidence against it. The RA2 ABI and profile register the import 'XWIS.DLL!ord1' as a successful import (src/games/ra2/abi.ts:10, profile.ts:56). tests/real-game/helpers/runVmSmoke.ts:168 says 'XWIS-distributed RA2 adds startup-handshake ord1 outside the original import table; the profile supports both EXEs'. downloadCatalog.ts links the archive.org 'XWIS 联机版安装包' (XWIS multiplayer installer). From the source alone you cannot tell whether the hash-pinned exe from oldgame.store (sha256 06f99496...) is retail 1.006 or the XWIS-modified client. I did not download it, because it is a copyrighted binary from an unofficial host.",
+   "correction": "Call it 'a hash-pinned RA2 1.006-family game.exe, possibly the XWIS-distributed build'. Whether a retail, Steam (app 2229850, verified to exist) or EA App exe boots at all, and which hooks it would lose, is UNVERIFIED."
+  },
+  {
+   "claim": "The 918 passing tests (plus YR save/load and spawner-probe tests) VERIFY YR support, save/load, multiplayer and the other game features.",
+   "why_wrong": "`pnpm run check` runs only `vitest run tests/basic packages/relay/tests` (package.json test:unit). None of the tests/real-game suites ran: ra2/*, yr/boot, yr/saveLoad, yr/spawnerProbe, yr/startupPage, the browser battle-start and network smokes. They need game assets and the third-party exe. The real-game CI jobs need the secrets GAME_RA2_URL/GAME_RA2_YR_URL, and there is no public evidence that they have ever run.",
+   "correction": "The build and 918 asset-free tests pass (I re-ran them: 128 files, 918 tests, about 14 s wall time, exit 0). Real-game features are verified only as code plus the existence of real-game tests. Nothing was executed on this machine."
+  },
+  {
+   "claim": "The docs describe CI with asset-free checks on PRs and real-game jobs on private runners.",
+   "why_wrong": ".github/workflows/quality-check.yml runs every job on `ubuntu-latest`. docs/REAL_GAME_CI.md says 'Workflow files can be deployed directly without self-hosted runners'. Real-game jobs run on dev/main pushes and download the game package from secret URLs.",
+   "correction": "The real-game jobs run on GitHub-hosted ubuntu-latest runners, gated by repository secrets, after merge only. Whether they are enabled and passing cannot be seen from the repo."
+  },
+  {
+   "claim": "3 PRs (#2 merged, #3 closed).",
+   "why_wrong": "The GitHub API lists only 2 PRs. #2 was merged 2026-09-21 and #3 was closed unmerged 2026-09-27. #1 is an issue (the macOS save bug), not a PR.",
+   "correction": "2 PRs (1 merged, 1 closed) and 1 closed issue."
+  },
+  {
+   "claim": "On every page load, main.ts downloads game.exe/gamemd.exe from oldgame.store.",
+   "why_wrong": "preloadThirdPartyFiles runs on every page load, but loadThirdPartyFile first reads the IndexedDB cache ('ra2-vm-third-party-files') and fetches from the network only on a cache miss or hash mismatch (src/adapter/thirdPartyFiles.ts). A related point the evaluation understates: the user's own exe is never used. The manifest comment says not to 'replace third-party executables'.",
+   "correction": "On first visit, or when the cache is empty, the page fetches the exes automatically without user action. After that they come from cache. The legal concern still holds, and a user-supplied exe is currently ignored."
+  },
+  {
+   "claim": "The ONNX models are capped at 800x600 input in experiments/modelProbe.ts. The HLE shims in src/vm86/shim include Winsock.",
+   "why_wrong": "The 800x600 cap is in experiments/liveModel.ts:97 and modelProbeWorker.ts:92. modelProbe.ts only lists the model URLs. The Winsock/IPX shim is in src/games/ra2/winsock.ts, not in src/vm86/shim (that folder has directx, dplayx, gdi32, kernel32, ole32, user32*, winmm and others).",
+   "correction": "The facts are right but the file locations are wrong. Minor."
+  }
+ ],
+ "confirmed_claims": [
+  "The repo is public and matches the remote HEAD f25986b. 12 commits on main. Created 2026-09-12, last push 2026-09-21. 238 stars, 33 forks, 1 watcher, 0 open issues. License spdx GPL-3.0; package.json says GPL-3.0-or-later (GitHub API, re-queried 2026-09-27).",
+  "About 38.1k lines of TS/TSX in src (41.7k including packages). pnpm 11.24 is pinned, and the stack is TypeScript 5.9, Vite 6, Vitest 4, React 19, Playwright 1.60, v86 ^0.5.441 and onnxruntime-web 1.29.",
+  "Build re-run: `pnpm run check` exits 0 on Node v26.0.0. Typecheck OK, then 128 test files / 918 tests passed, then vite build (v86 wasm 2.10 MB, 7zz wasm 1.65 MB, vmWorker 742.7 kB, page chunk 871 kB), in about 14 s wall time. 13 basic test files run real x86 through v86 (withGuestMachine / V86).",
+  "There is NO Three.js anywhere (not in package.json or pnpm-lock). The renderer is hand-written WebGL2 with a Canvas2D fallback (vmFrameRenderer.ts), uploads RGB565 as an R16UI integer texture, and exposes setUpscaleMode/setPostProcess hooks.",
+  "Custom 64 KB firmware in src/vm86/boot.asm puts the CPU in protected mode with no paging, and the PE image loads at 0x400000. So guest virtual addresses equal physical v86 memory offsets, which makes host-side reads of guest memory straightforward (supports L1).",
+  "DirectDraw: GetCaps reports only software blit, colour key and palette, with no 3D or overlay (directx.ts:398). SetDisplayMode accepts 8 or 16 bpp from 320x200 to 2560x1600 (directx.ts:413). The guest Lock stub copies a cached DDSURFACEDESC, and Unlock/Blt stay as hypercalls. The directx.ts:138 quote about 'tens of thousands of VM/JS round trips per battlefield frame' is accurate.",
+  "VmFrame (win32.ts:102) carries pixels/palette/rgba/rgb565 plus a separate cursor. The host only ever receives final pixels.",
+  "Resolution presets go from 800x600 to 1920x1080 and are applied by patching RA2.INI/RA2MD.INI [Video] (src/games/resolution.ts). Guest RAM is 640 MB per game (catalog.ts:75,104).",
+  "The upscalers exist as described: FSR1 EASU+RCAS, ScaleFX 3x, Anime4K CNN_x2_S and GAN_x2_M GLSL, and ONNX/WebGPU models (UltraSharpV2 Lite, NomosUni SPAN, AnimeSharpV2) behind import.meta.env.DEV only. No onnxruntime appears in the production dist.",
+  "The ReShade production menu is a single-pass SweetFX Vibrance + LumaSharpen with no Bloom. The docs say the effects 'cover the whole final color frame, including the native sidebar'. The LaserBlit path is verified only as passthrough plus a diagnostic displacement, on RA2 main-thread only. RESHADE_ADAPTATION.md quotes the evaluation uses ('Final frames alone cannot reproduce plugin water...', TOPMASK/LIGHT/ZBUFFER/SHROUD/WATER, AnimClass_Draw_SetTexture etc.) are verbatim.",
+  "The read-only guest-memory reader pattern exists and is hash- and signature-gated: the YR frame counter at 0xa8ed84 (src/games/yr/performance.ts) and RA2 at 0xa40d2c (src/games/ra2/performance.ts). The real-game gonghui test already reads unit memory (memory.read_memory(unit+0x24)).",
+  "Campaign status matches the evaluation: Maps01/02.mix and MAPSMD03.MIX are optional, campaignMenu compatibility code exists, and there are no campaign regression tests. README: 'Short two-player regressions do not establish compatibility with every campaign...'. ARCHITECTURE.md: 'YR retains its previous campaign policy until separately validated'.",
+  "Relay limits are confirmed: 20 members per virtual LAN and 8 players per native match (RA2_NETWORK_RELIABILITY.md:33). IPX runs through the virtual Winsock (src/games/ra2/winsock.ts, AF_IPX).",
+  "Custom map import extracts .csf/.yrm/.mpr, then skips .csf when mounting. Loose .map files are not handled (customMapPackage.ts).",
+  "Ares, Phobos and Syringe: zero grep hits in src and docs. spawnerProbe.ts says the CnCNet yrpp-spawner GPL code was 'not copied' and that its version was 'independently written'.",
+  "The exes are hash-pinned (06f99496... and 7b8a0685...) and fetched from https://oldgame.store (manifest.ts:64,100). downloadCatalog.ts links the archive.org XWIS installer.",
+  "Steam app 2229850 'Command & Conquer Red Alert 2 and Yuri's Revenge' exists (Steam appdetails API). https://ra2.games returns HTTP 200."
+ ],
+ "adjusted_score": 6,
+ "verdict_notes": "The evaluation is mostly accurate on architecture, renderer and HD extensibility. I confirmed nearly every file-level renderer claim, and the L0–L3 layering is technically sound. Two technical facts strengthen it: the firmware runs without paging, so guest memory is a flat buffer the host can read directly, and a hash- and signature-gated guest-memory reader is already in use. One friction point it misses (INFERENCE): the VM runs in a Worker while the WebGL presenter is on the main thread. Any per-frame helper buffers (Z-buffer, shroud, water) or captured draw records would have to be copied or transferred across that boundary on top of the frame.\n\nWhere the evaluation goes wrong is in how much it counts as verified for Step 1:\n(1) The 918 passing tests are asset-free only. No real-game test ran, so YR, save/load, multiplayer and skirmish are verified as code, not as execution.\n(2) The cited 'skirmish vs AI' tests do not test the AI at all. shortGame is a defeat-rule patch contract test, and skirmishSlots checks menu pixels.\n(3) 'Unmodified exe' and 'rules unchanged' are overstated. There are runtime code patches, and the RA2 profile explicitly supports an XWIS-distributed game.exe variant. Whether the pinned hash is retail 1.006 is unverifiable without the binary.\n(4) The user's own exe is ignored, and the fork has to replace this. Whether a legally owned Steam or retail exe even boots is UNVERIFIED. That is the single biggest technical unknown for Step 1 in a legally clean fork.\nSmaller factual errors: private runners (they are ubuntu-latest), 3 PRs (there are 2), and a few file locations.\n\nAdjusted score: 6/10, down from 7. Step 1 is still the most faithful route, but its readiness for our fork is unproven until an owned exe is tested. Step 2, the user's core goal, is today limited to final-frame post-processing plus unbuilt reverse-engineering layers. Recommended next check before committing: import a legally owned copy, try its exe in place of the pinned one, and measure FPS at 800x600 and 1080p in a late-game skirmish on the M5."
+}

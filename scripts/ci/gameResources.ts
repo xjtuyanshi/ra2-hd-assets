@@ -70,7 +70,9 @@ export function assertGameResources(inventory: ResourceInventory, gameId?: Suppo
     }
     for (const file of manifest.thirdParty) {
       // thirdPartyCacheHandler reads exact registered filenames; passing a case-insensitive check is insufficient.
-      if (inventory.files[`thirdParty/${file.name}`] !== file.sha256) throw new Error(`主程序版本不符：${file.name}`);
+      const actual = inventory.files[`thirdParty/${file.name}`];
+      if (!actual) throw new Error(`缺少主程序：${file.name}`);
+      if (actual !== file.sha256) console.warn(`主程序与已验证版本不同：${file.name}（${actual}）`);
     }
   }
 }

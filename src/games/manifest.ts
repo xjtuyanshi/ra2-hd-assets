@@ -1,7 +1,9 @@
 /**
  * Game-file manifests: required top-level startup files, their sources, and their purposes.
  *
- * Executables (game.exe / gamemd.exe) are version-sensitive: fixed shim addresses require exact bytes, and binaries are absent from this repository. Fetch them from fixed absolute third-party URLs registered here, using browser HTTP caching and client IndexedDB persistence. Servers must allow cross-origin reads from the site and local development origins via CORS. Players supply remaining resources in local archives. The manifest panel displays present/missing files. Two-stage imports start once the full directory and startup layer are ready; other resource bytes may extract in the background but must not be treated as missing.
+ * Executables (game.exe / gamemd.exe) are version-sensitive: fixed shim addresses were verified against the exact bytes pinned here, and binaries are absent from this repository.
+ * Remaster fork policy: executables are never downloaded from third-party hosts. The player supplies them from their own installation together with the other resources; the pinned SHA-256 only identifies the verified build, and a different build is reported rather than rejected (version-sensitive patches validate their own signatures).
+ * The manifest panel displays present/missing files. Two-stage imports start once the full directory and startup layer are ready; other resource bytes may extract in the background but must not be treated as missing.
  *
  * Manifest evidence:
  * - RA2: compare game/ra2, a multiplayer-client bootable set verified by boot tests, with the full installation archive extracted from Red_Alert_2.rar. Omit full-installation-only files unused here: RegSetup.exe, Ra2.exe launcher, xwis.dll, wolapi.*, mph.exe, *.mmx, secdrv.sys, etc. Also omit nl.cfg / taunts / rmcache from the multiplayer set, shown unnecessary by RAR boot tests.
@@ -11,15 +13,11 @@ import type { SupportedGameId } from './catalog';
 
 export interface ThirdPartyFile {
   /**
-   * Top-level filename used when supplying the file to the game directory.
+   * Top-level filename of the player-supplied executable.
    */
   name: string;
   /**
-   * Download location: an absolute URL allowing cross-origin reads from the site.
-   */
-  url: string;
-  /**
-   * Registered SHA-256, verified after download to detect replaced content.
+   * SHA-256 of the build the shim addresses and patches were verified against; other builds are reported, not rejected.
    */
   sha256: string;
 }
@@ -42,7 +40,7 @@ export interface ManifestFile {
 export interface GameManifest {
   gameId: SupportedGameId;
   /**
-   * Third-party shared files, including executables.
+   * Version-pinned executables, supplied by the player from their own installation.
    */
   thirdParty: readonly ThirdPartyFile[];
   /**
@@ -61,7 +59,6 @@ export const GAME_MANIFESTS: Record<SupportedGameId, GameManifest> = {
     thirdParty: [
       {
         name: 'game.exe',
-        url: 'https://oldgame.store/game.exe',
         sha256: '06f994965ebde56116d5d53b2e8ffb0c999124166ad99032566cc33d7f83ccdb',
       },
     ],
@@ -74,7 +71,7 @@ export const GAME_MANIFESTS: Record<SupportedGameId, GameManifest> = {
     playerOptional: [
       // Top-level MOD overrides (classic Gonghui's expand01.mix / ecache01.mix /
       // ra2.csf, plus generic rules.ini / art.ini / ai.ini): retain them on local import when present;
-      // otherwise start the original game. Do not unpack MIX files or replace third-party executables; the manifest also extends the extraction allowlist automatically.
+      // otherwise start the original game. Do not unpack MIX files or replace the pinned executables; the manifest also extends the extraction allowlist automatically.
       { name: 'ai.ini', note: 'mod 顶层 AI 配置覆盖（可选）' },
       { name: 'art.ini', note: 'mod 顶层美术配置覆盖（可选）' },
       { name: 'ecache01.mix', note: '共和国之辉 MOD 图像资源（可选）' },
@@ -97,7 +94,6 @@ export const GAME_MANIFESTS: Record<SupportedGameId, GameManifest> = {
     thirdParty: [
       {
         name: 'gamemd.exe',
-        url: 'https://oldgame.store/gamemd.exe',
         sha256: '7b8a068535d6af06845edf95ae829b113d00c02909330e16f197426cd7db94b6',
       },
     ],
@@ -121,12 +117,13 @@ export const GAME_MANIFESTS: Record<SupportedGameId, GameManifest> = {
 };
 
 /**
- * Union of both games' player-supplied manifests: obtain all required names in one archive extraction, excluding executables fetched separately from third-party sources. Directory entries such as Taunts/ carry lowercase prefixes; the Worker matches them and preserves directory structure.
+ * Union of both games' player-supplied manifests, including the executables: obtain all required names in one archive extraction. Directory entries such as Taunts/ carry lowercase prefixes; the Worker matches them and preserves directory structure.
  */
 export const ARCHIVE_WANTED_NAMES: readonly string[] = [
   ...new Set(
-    Object.values(GAME_MANIFESTS).flatMap((manifest) =>
-      [...manifest.playerRequired, ...manifest.playerOptional].map((file) => file.directory ?? file.name),
-    ),
+    Object.values(GAME_MANIFESTS).flatMap((manifest) => [
+      ...manifest.thirdParty.map((file) => file.name),
+      ...[...manifest.playerRequired, ...manifest.playerOptional].map((file) => file.directory ?? file.name),
+    ]),
   ),
 ];

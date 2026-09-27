@@ -2,6 +2,14 @@
 
 These rules apply throughout the repository. The project runs original RA2/YR programs in v86 without booting Windows. Keep lasting rules here, implementation details in docs, and historical records separate from execution instructions.
 
+## Remaster fork (this checkout)
+
+- This checkout is a private, personal, non-commercial HD-remaster fork of RA2 VM on branch `remaster`, based on upstream `f25986b`. The `upstream` remote is fetch-only; never push anywhere without an explicit request.
+- The plan, decisions, and research live in docs/remaster/ (PLAN.md, research/). That directory is exempt from the no-external-links rule because it records sources.
+- Never download executables or game resources from third-party hosts. The player supplies every game file, executables included, from their own legally owned installation; a build that differs from the manifest's pinned SHA-256 is reported, not rejected.
+- Original game files and anything derived from them (extracted SHP/VXL/TMP/PAL, upscaled textures, music, video, screenshots of original art) stay outside Git, e.g. in the gitignored gameres/. Fresh clones must run `git config core.hooksPath scripts/git-hooks` so the pre-commit guard is active.
+- The UI must keep the EA non-endorsement disclaimer, and the fork must not ship C&C music.
+
 ## Getting started
 
 - Internal development and contributions use dev; never push dev to GitHub. External contributors open PRs against main.

@@ -1,0 +1,158 @@
+{
+ "topic": "Legal and IP constraints for a personal, non-commercial RA2/YR HD remaster built on an existing browser port (practical guidance, not legal advice). Researched 2026-09-27.",
+ "findings": [
+  {
+   "title": "EA has not released RA2/YR engine source. Its releases cover TD, RA1, Renegade and Generals/ZH, plus the RA2 map editor only",
+   "detail": "VERIFIED: EA released the C&C Remastered Collection DLL source (TiberianDawn.dll, RedAlert.dll, map editor) in 2020 (GitHub repo created 2020-03-30). On Feb 27 2025 it released the original Tiberian Dawn, Red Alert, Renegade and Generals/Zero Hour source. All of these use GPLv3 plus 'ADDITIONAL TERMS per GNU GPL Section 7'. Those terms say no trademark or publicity rights are granted, you may not distribute modifications using any EA trademark, and you may not claim affiliation with EA. GitHub therefore labels them 'NOASSERTION' rather than plain GPL-3.0. Red Alert 2, Yuri's Revenge and Tiberian Sun were not part of either release. The only RA2-era EA code is the FinalSun/FinalAlert2 mission editor (electronicarts/CNC_TS_and_RA2_Mission_Editor, GPL-3.0, March 2024). None of these releases include game art, audio or video. The Remastered README says 'To use the compiled binaries, you must own the game.' INFERENCE: nothing EA has released gives you a license to RA2 engine code or assets. The 4K art in the TD/RA1 Remastered Collection is still proprietary and cannot be reused.",
+   "sources": [
+    "https://www.gamingonlinux.com/2025/02/ea-just-open-sourced-command-conquer-red-alert-renegade-and-generals/",
+    "https://www.ea.com/games/command-and-conquer/command-and-conquer-remastered/news/steam-workshop-support",
+    "https://github.com/electronicarts/CnC_Red_Alert/blob/main/LICENSE.md",
+    "https://github.com/electronicarts/CnC_Remastered_Collection",
+    "https://github.com/electronicarts/CNC_TS_and_RA2_Mission_Editor",
+    "https://www.gamespot.com/articles/ea-releases-full-source-code-for-multiple-command-conquer-titles/1100-6529779/"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "EA's Franchise Modding Guidelines (Rev. 2, Feb 27 2025) cover all C&C games and grant a revocable, non-commercial license. They ban music and require a disclaimer",
+   "detail": "VERIFIED (policy text): 'This Policy applies to all modifications, alterations, or extensions of the C&C video games and universe.' The main terms: (1) Mods must be non-commercial and free. No sales, fees, ads or in-game monetization. Donations are allowed only on the mod website, give donors no perks, and only individual donors may be credited. (2) 'EA grants the Mod creator a revocable, limited, non-exclusive, non-commercial license to use the C&C Assets solely in connection with, and as a part of, the Mod.' (3) 'Your Mod must not include any music files from any C&C games.' (4) The statement 'EA has not endorsed and does not support this product' must appear prominently on the website and in a root-level license/README file. (5) No EA logos, artwork or 'Command & Conquer' branding in promotion. Plain-text 'for Red Alert' is allowed. (6) EA may revoke permission or disable any mod at any time. (7) 'Mods constitute UGC' under the EA User Agreement. INFERENCE: an HD asset or shader pack for RA2 plausibly counts as a 'Mod'. It is unclear whether a standalone third-party browser reimplementation counts as a 'modification' of EA's game.",
+   "sources": [
+    "https://www.ea.com/games/command-and-conquer/command-and-conquer-remastered/news/modding-faq",
+    "https://ppmforums.com/topic-54856/command-conquer-official-modding-guidelines/"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "EA User Agreement (last updated May 14 2026): non-commercial license, reverse-engineering and modification limits, and a broad license to EA over UGC",
+   "detail": "VERIFIED: 'You may not access, copy, modify or distribute any EA Service, Content or Entitlements ... unless expressly authorized by EA or permitted by law. You may not reverse engineer or attempt to extract or otherwise use source code or other data from EA Services, unless expressly authorized by EA or permitted by law.' Under the UGC clause, anything you contribute grants EA 'a non-exclusive, perpetual, transferable, worldwide, sublicensable license to use ... modify, create derivative works' without payment. INFERENCE: extracting sprites from your own .mix files and making HD versions technically falls under 'modify'. The modding guidelines are what authorize that for non-commercial mods, and they override the User Agreement where the two conflict. If you ever publish HD content as a mod, expect EA to hold a free license to it.",
+   "sources": [
+    "https://www.ea.com/legal/user-agreement",
+    "https://www.ea.com/games/command-and-conquer/command-and-conquer-remastered/news/modding-faq"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Enforcement climate: no EA takedowns of RA2 fan or web projects found, and no official RA2 remaster announced. EA went private in Aug 2026",
+   "detail": "VERIFIED: I listed GitHub's public DMCA repository (github/dmca) for 2024 through Sep 2026. It has three Electronic Arts notices (2024-07-22, 2026-03-26, 2026-04-09), and all three concern The Sims 4 leaks and DLC unlockers. Code search of that repo found 0 hits for 'Red Alert', 'Command & Conquer', 'chronodivide' and 'Westwood'. Chrono Divide has been public since 2018, got mainstream coverage in Nov 2025 (heise, Engadget, GIGAZINE), and shipped client v0.84.0 on Sep 3 2026. No EA action was reported. CnCNet and OpenRA have operated for years. I found no official RA2 or Tiberian Sun remaster announcement, only fan speculation from 2024. EA's take-private by PIF, Silver Lake and Affinity Partners closed on Aug 4 2026. INFERENCE: tolerance is a practice, not a license. New ownership or an official RA2 remaster could change it. A comparable case is Take-Two's 2021 DMCA and lawsuit against the re3/reVC reverse-engineered GTA code, filed shortly before its own remasters. It was settled in 2023 and the code never returned to GitHub. Caveat: the DMCA check only catches notices filed under EA's own name, and the search index is partial.",
+   "sources": [
+    "https://github.com/github/dmca/blob/master/2026/03/2026-03-26-electronic-arts.md",
+    "https://github.com/github/dmca/blob/master/2026/04/2026-04-09-electronic-arts.md",
+    "https://github.com/github/dmca/blob/master/2024/07/2024-07-22-electronic-arts.md",
+    "https://www.heise.de/en/news/Red-Alert-2-in-the-Browser-Fan-Project-Brings-Classic-to-the-Web-11087986.html",
+    "https://chronodivide.com/patch-notes.html",
+    "https://www.ea.com/news/ea-announces-completion-of-acquisition",
+    "https://www.gamingbible.com/news/platform/steam/command-conquer-red-alert-2-remaster-on-horizon-726103-20240311",
+    "https://www.pcgamer.com/take-two-dismisses-lawsuit-against-grand-theft-auto-modders/",
+    "https://torrentfreak.com/take-two-sues-enthusiasts-behind-gta-fan-projects-re3-revc-210903/"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "Chrono Divide, the main web RA2 port, is proprietary. Its author has never open-sourced the client and its terms grant no license",
+   "detail": "VERIFIED: chronodivide.com calls itself a 'non-profit fan project' 'in no way affiliated with Electronic Arts' and shows 'Copyright © 2018 Chrono Divide'. It accepts donations via Buy Me a Coffee. Its terms (tos.html, last updated Feb 6 2018) say all IP stays 'solely with Website Operator' and grant no license. The author is Alexandru Ciucă, who built it through black-box observation of the original game over about five years (36kr, Oct 2025). The github.com/chronodivide org has only mod-sdk (no license file), game-api-playground and pvpgn-server (GPL-2.0). The client itself is not published. The headless sim ships on npm as @chronodivide/game-api, licensed 'UNLICENSED' (latest 0.79.0, Sep 3 2026). The mod-sdk says the engine 'runs with the original RA2 MIX archives' and supports INI/MIX mods. INFERENCE: the only legitimate way to build on Chrono Divide without permission is its mod system, or its API as the author intends it to be used. Forking or modifying the client requires Ciucă's written permission.",
+   "sources": [
+    "https://chronodivide.com/",
+    "https://chronodivide.com/tos.html",
+    "https://github.com/orgs/chronodivide/repositories",
+    "https://github.com/chronodivide/mod-sdk",
+    "https://www.npmjs.com/package/@chronodivide/game-api",
+    "https://eu.36kr.com/en/p/3502012310166400"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "GitHub repos titled 'RA2 source code (TypeScript)' are reconstructions or decompilations of Chrono Divide, not EA code. As of Sep 3 2026 the main one says the Chrono Divide-derived code is not GPL",
+   "detail": "VERIFIED: huangkaoya/ts-redalert2 (formerly huangkaoya/redalert2) is described as '红色警戒2源代码 Red Alert2 Source Code' and has 977 stars and 252 forks. It is React 19, Three.js 0.183, Vite and Bun. Its README says it was developed from analysis of RA2WEB, that all rights including profit rights belong to Chrono Divide's owner, and that commercial use is forbidden. On 2026-09-03, commit 898d8918 ('Revise LICENSE to reflect copyright holder's terms') replaced the GPL-3.0 text with: 'This repository contains code reconstructed from the Chrono Divide client. The Chrono Divide copyright holder has not licensed Chrono Divide-derived material ... Such material is not licensed under GPL-3.0 or any other open-source license.' OpenRA2/RA2Web openly says it is an 'AI decompilation' (反编译) of game.chronodivide.com. Downstream projects still show GPL-3.0: ammaarreshi/RedAlert2-Mac-iOS-iPad (425 stars, Aug 2026), StillM8/RedAlert2-Engine and DD-Channel/ra2-web. The iOS port's own README calls the GPL grant 'unverified' and says it 'exists at Alexandru Ciucă's sufferance and comes down the day he asks'. Its repo description claims 'used with the author's permission', but I found no evidence of that permission. Its skirmish AI comes from Supalosa's bot, which has no license declared. The repos also carry EA-derived data: ts-redalert2 includes public/ini.mix, general.csf and res/ra2cd.mix. ra2web/ra2web.github.io (548 stars) includes EA rules.ini, art.ini and ra2.csf overlays, and names 北京瑞得哈希有限公司 / REDHASH Co., Ltd. as copyright holder, contradicting the other READMEs. INFERENCE: forking any of these gives you no license to the engine code. Anyone who does not own a copyright cannot grant a GPL on it, and a 'non-commercial' rider added to a GPL label has no legal effect. The ownership chain is unclear: Ciucă, RA2WEB/REDHASH, and EA for the embedded INI/CSF data.",
+   "sources": [
+    "https://github.com/huangkaoya/ts-redalert2",
+    "https://github.com/huangkaoya/ts-redalert2/commit/898d8918",
+    "https://github.com/OpenRA2/RA2Web",
+    "https://github.com/ammaarreshi/RedAlert2-Mac-iOS-iPad",
+    "https://github.com/StillM8/RedAlert2-Engine",
+    "https://github.com/DD-Channel/ra2-web",
+    "https://github.com/ra2web/ra2web.github.io",
+    "https://github.com/ra2web",
+    "https://github.com/Supalosa/supalosa-chronodivide-bot"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "Legal ways to get game files in 2026, and the exact files web engines need. Avoid Chrono Divide's default archive.org download",
+   "detail": "VERIFIED: CnCNet says 'Red Alert 2 & Yuri's Revenge are not Freeware' and that you must own a copy. EA made TD, RA1 and TS freeware; RA2 and YR never were. Legitimate sources: Steam app 2229850, 'Command & Conquer Red Alert 2 and Yuri's Revenge' (Steam release Mar 7 2024, Windows 10 only, also on EA Play). The same game is in the 'Command & Conquer The Ultimate Collection' bundle (Steam bundle 39394, and on the EA app), which often sells for about US$6. The First Decade and original CD installs also work (CnCNet and OpenRA both detect them). Files the Chrono Divide-lineage engines read, taken from the mod-sdk and the iOS port's prepare-gameres.ts: for RA2, ra2.mix, language.mix, multi.mix and theme.mix (music, converted to MP3), plus optional expand##/ecache##/elocal## mixes. For YR, ra2md.mix, langmd.mix, multimd.mix, expandmd01.mix and thememd.mix. The engine also ships its own ra2cd.mix. Important: Chrono Divide's live config.ini sets gameResArchiveUrl to https://archive.org/download/red-alert-2-multiplayer/Red-Alert-2-Multiplayer.exe, sets the YR equivalent, and pulls thememd.mix from xwis.net through its own CORS proxy. heise called that data 'legally accessible'. INFERENCE: those are third-party re-uploads of non-freeware EA files, so do not use or copy those URLs. Import only from your own install. Practical note for macOS: the Steam build is Windows-only. You would copy the .mix files from a Windows PC or VM or CrossOver, or use steamcmd with a forced Windows platform on an account that owns the game. I could not verify the steamcmd method this session.",
+   "sources": [
+    "https://cncnet.org/yuris-revenge",
+    "https://cncnet.org/buy",
+    "https://store.steampowered.com/app/2229850/",
+    "https://store.steampowered.com/bundle/39394/Command__Conquer_The_Ultimate_Collection/",
+    "https://github.com/OpenRA/OpenRA/wiki/Game-Content",
+    "https://github.com/chronodivide/mod-sdk",
+    "https://github.com/ammaarreshi/RedAlert2-Mac-iOS-iPad/blob/HEAD/scripts/prepare-gameres.ts",
+    "https://game.chronodivide.com/config.ini",
+    "https://www.heise.de/en/news/Red-Alert-2-in-the-Browser-Fan-Project-Brings-Classic-to-the-Web-11087986.html"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "AI-upscaled or AI-regenerated RA2 sprites stay EA derivative works. Making them locally is low risk; redistributing them is where the exposure is",
+   "detail": "VERIFIED (US): the right to prepare derivative works belongs to the copyright owner (17 U.S.C. §106(2)). The US Copyright Office Part 2 report (Jan 29 2025) found that prompts alone do not make a user the author. Where an input work is 'perceptible in the output', copyright in that output is 'analogous to that in a derivative work' and covers only the perceptible human expression. Purely AI-generated elements get no protection; the Supreme Court denied cert in Thaler v. Perlmutter on Mar 2 2026. VERIFIED (China): on Feb 8 2024 the Guangzhou Internet Court held that AI images substantially similar to Ultraman infringed reproduction and adaptation rights. INFERENCE: upscaling or img2img-redrawing a Prism Tank from EA's SHP/VXL keeps EA's protected expression, so the result is an EA derivative. You get no copyright in it that you could assert against EA, and 17 U.S.C. §103(a) denies protection to unlawfully used preexisting material. Generating and viewing it privately from your own purchased files, with no distribution, is the lowest-risk tier. Whether it is fair use is unsettled, and it arguably falls under EA's non-commercial mod license anyway. Publishing an HD asset pack means distributing EA derivatives. That is tolerated only under the revocable modding license (non-commercial, no music, disclaimer) and is removable at EA's discretion. Newly designed effects, shaders, water, weather and particles that do not copy EA art are your own work and are the safest part to publish later.",
+   "sources": [
+    "https://www.copyright.gov/ai/Copyright-and-Artificial-Intelligence-Part-2-Copyrightability-Report.pdf",
+    "https://copyright.gov/ai/",
+    "https://www.bakerdonelson.com/supreme-court-denies-certiorari-in-thaler-v-perlmutter-ai-cannot-be-an-author-under-the-copyright-act",
+    "https://www.twobirds.com/en/insights/2024/china/liability-of-ai-service-providers-for-copyright-infringement",
+    "https://intellectual-property-helpdesk.ec.europa.eu/news-events/news/ultraman-ai-case-china-defining-copyright-liability-generative-ai-providers-2025-02-18_en"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "ChatGPT image outputs: OpenAI assigns you only whatever rights it has, which cannot include EA's rights. You are responsible for inputs and outputs",
+   "detail": "VERIFIED via quoted excerpts (openai.com returned 403 to direct fetch): OpenAI Terms of Use, 'Ownership of content': 'As between you and OpenAI, and to the extent permitted by applicable law, you (a) retain your ownership rights in Input and (b) own the Output. We hereby assign to you all our right, title, and interest, if any, in and to Output.' The terms also say outputs may not be unique, and that you are responsible for making sure content does not violate law or third-party rights. INFERENCE: (1) Uploading EA sprites or screenshots as Input and asking for HD versions produces EA derivatives. The OpenAI assignment cannot fix that, and OpenAI's content filters may refuse or alter branded unit designs. (2) Text-only concept art 'in the spirit of' RA2 is safer. Style is not protected, but recognizable EA designs (Tanya, Prism Tank, Kirov, faction logos) are. (3) Text-only outputs are largely uncopyrightable (Copyright Office, Thaler), so others can copy them. (4) Use ChatGPT images as reference or mood boards and for designing new effects, not as distributable replacements for EA sprites. Keep a provenance log of prompt, inputs and model for every asset. I could not verify that a model called 'ChatGPT 6 Ultra' exists.",
+   "sources": [
+    "https://terms.law/2024/07/17/who-owns-chatgpt-answers-and-how-can-they-be-used-a-legal-analysis/",
+    "https://openai.com/policies/row-terms-of-use/",
+    "https://openai.com/policies/terms-of-use/",
+    "https://www.copyright.gov/ai/Copyright-and-Artificial-Intelligence-Part-2-Copyrightability-Report.pdf"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "Cleanly licensed alternatives exist, but none of them is a browser RA2 engine",
+   "detail": "VERIFIED: OpenRA (GPL-3.0, about 17.4k stars, active Sep 2026) plus the OpenRA/ra2 mod (GPL-3.0, about 1.1k stars, active Jul 2026) is a native C#/OpenGL engine that runs on macOS and uses original game files the user supplies. Phobos (GPL-3.0) extends the retail Yuri's Revenge executable on Windows. EA's GPL code for RA1 and Generals is usable as AI and design reference, as the iOS port did, but it contains no RA2 engine. INFERENCE: if the user ever wants to publish, a base with an unambiguous license (OpenRA RA2 mod, or new code written against public format documentation such as ModEnc and CNCMaps) avoids the Chrono Divide ownership problem. The cost is losing the ready-made browser port and its close fidelity to the original.",
+   "sources": [
+    "https://github.com/OpenRA/OpenRA",
+    "https://github.com/OpenRA/ra2",
+    "https://github.com/Phobos-developers/Phobos",
+    "https://github.com/electronicarts/CnC_Red_Alert"
+   ],
+   "confidence": "verified"
+  }
+ ],
+ "recommendations": [
+  "Treat this as a strictly PERSONAL, PRIVATE project. Use a private GitHub repo and run it only on localhost. Do not deploy to GitHub Pages, Vercel or EdgeOne, and do not share URLs or builds with friends, because a shared build counts as distribution.",
+  "Buy RA2+YR legitimately: Steam app 2229850 or The Ultimate Collection (Steam bundle 39394 or the EA app). Import only from that install: ra2.mix, language.mix, multi.mix and theme.mix, plus ra2md.mix, langmd.mix, multimd.mix, expandmd01.mix and thememd.mix for YR. Remove or override Chrono Divide-lineage defaults that download RA2/YR from archive.org or xwis.net.",
+  "Add a .gitignore rule, and a pre-commit check, that blocks every EA-derived artifact: *.mix, *.bag, *.idx, *.csf, extracted SHP/VXL/PAL, converted PNG/WebP/KTX2 textures, AI-upscaled outputs, music/MP3 and videos. Keep that material in a local 'gameres/' folder outside git. Commit only code and conversion scripts ('bring your own assets' pipeline).",
+  "Build on the Chrono Divide lineage, e.g. a private checkout of huangkaoya/ts-redalert2, only with the understanding that it is unlicensed (the upstream LICENSE since 2026-09-03 says so). Pin the commit, record the provenance, and do not relicense it or push a public fork. In parallel, write to Alexandru Ciucă (Chrono Divide Discord or GitHub) for written permission before any sharing.",
+  "Architect the HD remaster so new work lives in separate, cleanly authored modules: the renderer and post-processing, water, weather and lighting shaders, the particle and impact system, and the upscaling pipeline. These parts are yours and could be published or relicensed later even if the base engine cannot.",
+  "For AI art, use ChatGPT/OpenAI image generation for mood boards, style targets and new effect designs. Run bulk sprite HD conversion locally, only on your own files. Keep a provenance log (source asset, model, prompt, date) so it is always clear which assets are EA-derivative (never distributable) and which are original.",
+  "Follow EA's modding guidelines now, even while private, so the path to publishing stays open: no monetization, no EA logos or 'Command & Conquer' branding in the product name, the disclaimer 'EA has not endorsed and does not support this product' in the README, and never any C&C music files in anything shared.",
+  "If the user later wants to publish, re-evaluate before any release: (a) get written permission from Chrono Divide's owner or move to a cleanly licensed base such as the OpenRA RA2 mod or a clean-room engine; (b) ship code and the conversion pipeline only, with users generating HD assets from their own copies; (c) comply fully with EA's modding guidelines and accept that EA can revoke permission; (d) meet GPL source obligations for any GPL code used; (e) re-check whether EA has announced an official RA2 remaster, since enforcement risk rises around official launches (re3 precedent); (f) get a lawyer's review in the user's actual jurisdiction."
+ ],
+ "options_for_user": [
+  "Option A – Fork the Chrono Divide-lineage TypeScript code privately (huangkaoya/ts-redalert2: React 19 + Three.js, the most complete, includes YR through the iOS-port lineage). Fastest route to working original gameplay and a free hand over the renderer for HD work. Downside: no license, and the upstream now says so explicitly. Acceptable only for private personal use; it blocks any publishing unless Ciucă grants permission, and it could come down if he objects.",
+  "Option B – Use official Chrono Divide unmodified and do the HD work through its mod-sdk (INI/MIX mods). This is the most legitimate way to use the web port and needs no code copying. Downside: mods can only swap assets and rules. You cannot change the renderer, so modern water, weather, lighting and post-effects are out of reach, and HD textures are limited by the original format and palette pipeline.",
+  "Option C – Ask Alexandru Ciucă for written permission or collaboration, while doing private prototyping under Option A in the meantime. This is the only route that could legitimately turn a Chrono Divide-based remaster into something shareable. Downside: depends on his answer; he may refuse or impose terms.",
+  "Option D – Switch to a cleanly licensed base: OpenRA engine plus the OpenRA/ra2 mod (GPL-3.0, native macOS, not a browser). Clear license, safest to publish later, active community. Downside: not the 'web version' the user remembers, less faithful than Chrono Divide to RA2 mechanics and feel, C#/OpenGL instead of a TS/WebGL stack, and more work to reach feature parity.",
+  "Option E – Write a new browser engine that only reads RA2 file formats, using public docs (ModEnc, CNCMaps) and Chrono Divide's observable behavior but none of its code. Clean ownership. Downside: this is effectively the 'from scratch' approach the user explicitly rejected, and it would take far longer."
+ ],
+ "open_questions": [
+  "Which jurisdiction is the user in (mainland China, US, elsewhere)? Chinese law has similar adaptation and reproduction rights (Ultraman case), but fair-use and personal-use exceptions differ.",
+  "Does the user already own RA2/YR (Steam, EA app, The First Decade, or original CDs), and how will the Windows-only Steam files be copied to the Mac? The steamcmd forced-Windows-platform method was not verified this session.",
+  "Does 'personal' mean strictly the user alone, or will friends play it or will it be streamed or shown publicly? Sharing a build or URL changes the risk profile to distribution.",
+  "Would Alexandru Ciucă (Chrono Divide) grant written permission? Is the iOS port's claim that it is 'used with the author's permission' real? No evidence of that permission was found.",
+  "Who actually holds rights in the RA2WEB-branded code: Ciucă, or 北京瑞得哈希有限公司 / REDHASH Co., Ltd., which the RA2WEB deployment repo names as copyright holder?",
+  "Does EA's modding policy, which covers 'modifications, alterations, or extensions of the C&C video games', extend to a third-party standalone reimplementation, or only to mods of EA's own executables?",
+  "Which OpenAI model and plan the user has. 'ChatGPT 6 Ultra' could not be verified, and OpenAI's current terms page returned 403 to direct fetch, so clauses were checked through quoted excerpts.",
+  "Will EA's new private ownership (closed Aug 4 2026) or a future official RA2 remaster change its tolerance of fan ports? This cannot be known now; re-check before any publication."
+ ]
+}

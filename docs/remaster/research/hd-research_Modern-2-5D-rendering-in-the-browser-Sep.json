@@ -1,0 +1,279 @@
+{
+ "topic": "Modern 2.5D rendering in the browser (Sept 2026) for an HD remaster layered onto an existing Three.js-based RA2 web engine (the Chrono Divide lineage, e.g. huangkaoya/ts-redalert2): platform, sprite lighting, environment, water, VFX, post-processing, reference games and architecture",
+ "findings": [
+  {
+   "title": "VERIFIED: what the base engine's renderer actually is (ts-redalert2, read from source)",
+   "detail": "github.com/huangkaoya/redalert2 now redirects to huangkaoya/ts-redalert2. The GitHub API reports 977 stars, last push 2026-09-03, and license 'Other/NOASSERTION'. package.json pins three 0.183.2 and uses a THREE.WebGLRenderer (src/engine/gfx/Renderer.ts) with NoToneMapping, sRGB output, shadowMap enabled and autoClear off. It renders several scenes into separate viewports. The world is a THREE.OrthographicCamera with one AmbientLight and one DirectionalLight, and that light casts shadows for voxel units at High/Medium/Low quality (WorldScene.ts). Sprites use palette-indexed materials (PaletteBasicMaterial, PaletteLambertMaterial, PalettePhongMaterial). Their GLSL is spliced into THREE.ShaderChunk strings and applied through onBeforeCompile. The palette is a texture lookup on the texel's alpha or red index, plus a per-instance 'extraLight' tint. Sprites are alpha-tested (alphaTest 0.05/0.5) and sorted with renderOrder. Batching already exists: MeshBatchManager, InstancedMesh, BatchedMesh, MergedSpriteMesh and ShpTextureAtlas. FX classes already exist: TeslaFx, LaserFx, RadBeamFx, LightningStormFx, NukeLightingFx, ChronoFxHandler, WarheadDetonateFxHandler, ShipWakeTrailPlugin and Smudge. Particles come from 'shader-particle-engine' 1.0.6 and lines from 'three.meshline' 1.4.0; npm shows both last modified in June 2022. GameAnimationLoop.ts runs the deterministic sim on the main thread inside requestAnimationFrame at a fixed turn length and passes an 'interpolation' value to the renderer, so sim and render are separated logically but share one thread. The 'map lighting' concept (MapLighting.ts, MapLightingTrait.ts, LightingDirector) already exists and should drive any HD sun/ambient. The iOS port documents the pipeline as WebGL → ANGLE → Metal and fixed retail-accurate palette-domain lighting (voxels: palette × (0.8 + 1.3·dotNL) × cell light). Its authors got about 5.7x less memory bandwidth by removing unused sprite batches and colour-space conversions. Bandwidth, not ALU, was their bottleneck. IMPLICATION (inference): all three palette materials, SPE particles and meshline must be ported before WebGPURenderer can be used, because onBeforeCompile and ShaderMaterial do not work on either of its backends.",
+   "sources": [
+    "https://github.com/huangkaoya/ts-redalert2",
+    "https://github.com/huangkaoya/ts-redalert2/blob/main/src/engine/gfx/Renderer.ts",
+    "https://github.com/huangkaoya/ts-redalert2/blob/main/src/engine/gfx/material/PaletteBasicMaterial.ts",
+    "https://github.com/huangkaoya/ts-redalert2/blob/main/src/engine/gfx/material/paletteShaderLib.ts",
+    "https://github.com/huangkaoya/ts-redalert2/blob/main/src/engine/renderable/WorldScene.ts",
+    "https://github.com/huangkaoya/ts-redalert2/blob/main/src/engine/GameAnimationLoop.ts",
+    "https://github.com/huangkaoya/ts-redalert2/blob/main/package.json",
+    "https://github.com/ammaarreshi/RedAlert2-Mac-iOS-iPad",
+    "https://www.npmjs.com/package/shader-particle-engine",
+    "https://www.npmjs.com/package/three.meshline"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "VERIFIED: licensing and provenance of the base need a decision before any HD work",
+   "detail": "The ts-redalert2 README says it derives from analysis of RA2WEB, a Chinese version associated with Chrono Divide. It says all rights, including profit rights, belong to the Chrono Divide owner, and it forbids commercial use. GitHub reports the license as 'Other'. The iOS port says it inherits GPL-3.0 from upstream, but it also states that Chrono Divide was never formally open-sourced by Alexandru Ciucă and that the repo exists 'at his sufferance'. The official Chrono Divide mod SDK exposes only data files (ini/csf/map/mix, WebM for videos, PNG splash images). It has no rendering, shader or HD-asset hooks. So an HD layer can only be built on a source fork such as ts-redalert2, not through the official mod path. This affects whether the project can ever be distributed and should be raised with the user.",
+   "sources": [
+    "https://github.com/huangkaoya/ts-redalert2",
+    "https://github.com/ammaarreshi/RedAlert2-Mac-iOS-iPad",
+    "https://github.com/chronodivide/mod-sdk",
+    "https://chronodivide.com/"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "VERIFIED: WebGPU ships in every major browser; one gap remains",
+   "detail": "Chrome/Edge have shipped WebGPU since version 113 on Windows (D3D12), macOS and ChromeOS. On Linux it is partial: Intel Gen12+ in 144, NVIDIA on Wayland in 147. Firefox has it on Windows from 141 and on Apple Silicon macOS from 145 (Tahoe 26), extended to all macOS versions in 147. Firefox on Intel Mac, Linux and Android is still in progress. Safari 26 ships it on macOS/iOS/iPadOS/visionOS 26. web.dev announced cross-browser support on 2025-11-25. Utsubo cites caniuse (Aug 2026) at about 84% full + 3% partial global coverage. The practical gaps are old macOS/iOS, Firefox on Linux and older Android, so a WebGL2 fallback is still required. Chrono Divide itself advises against Firefox for performance reasons.",
+   "sources": [
+    "https://web.dev/blog/webgpu-supported-major-browsers",
+    "https://github.com/gpuweb/gpuweb/wiki/Implementation-Status",
+    "https://www.utsubo.com/blog/webgpu-threejs-migration-guide",
+    "https://www.heise.de/en/news/Red-Alert-2-in-the-Browser-Fan-Project-Brings-Classic-to-the-Web-11087986.html"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "VERIFIED: three.js is at r186 and WebGPURenderer is usable but still has caveats",
+   "detail": "npm latest is three 0.186.1 (2026-09-24); r186 was released 2026-09-08 and r183 on 2026-02-18. In r183 the PostProcessing class was renamed RenderPipeline; the old name still works in r186 but warns. WebGPURenderer tries WebGPU and falls back to WebGL2 automatically; forceWebGL forces the fallback. Its default outputBufferType is HalfFloat, and UnsignedByte saves bandwidth. What breaks on both of its backends: ShaderMaterial/RawShaderMaterial, onBeforeCompile patches, EffectComposer, pmndrs/postprocessing and @react-three/postprocessing. pmndrs/postprocessing latest is 6.39.5 (WebGL); v7 is still beta. Utsubo quotes the three.js manual: depending on the scene you may find missing features or better performance with WebGLRenderer. Real gains show up with many draw calls, compute and chained post. The r186 WebGL2 fallback emulates compute with transform feedback (WebGLBackend.compute), which is limited: 1-D dispatch and no storage textures. Some features are WebGPU-only, e.g. ClusteredLighting 'must be used with WebGPURenderer' and needs compute. An open issue proposes renaming WebGPURenderer to 'Renderer' with pluggable backends, which signals long-term direction.",
+   "sources": [
+    "https://www.npmjs.com/package/three",
+    "https://github.com/mrdoob/three.js/releases",
+    "https://www.utsubo.com/blog/webgpu-threejs-migration-guide",
+    "https://threejs.org/docs/pages/WebGPURenderer.html",
+    "https://github.com/mrdoob/three.js/blob/r186/src/renderers/webgl-fallback/WebGLBackend.js",
+    "https://github.com/pmndrs/postprocessing/releases",
+    "https://github.com/mrdoob/three.js/issues/31381"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "VERIFIED: r186 already ships most building blocks as TSL nodes and examples",
+   "detail": "examples/jsm/tsl/display at r186 contains:\n- Anti-aliasing/upscaling: FXAANode, SMAANode, TRAANode, TAAUNode (temporal AA plus upscaling in one pass), SSAAPassNode, FSR1Node (EASU + RCAS), SharpenNode (RCAS contrast-adaptive sharpening).\n- Lighting/occlusion: GTAONode, SSAONode, SSGINode, SSRNode, SSSNode (screen-space/contact shadows), GodraysNode, LensflareNode.\n- Image effects: BloomNode, Lut3DNode, FilmNode, ChromaticAberrationNode, MotionBlur, DepthOfFieldNode, OutlineNode, OITPassNode (weighted-blended order-independent transparency), Denoise/RecurrentDenoise, BilateralBlur and depthAwareBlend.\nexamples/jsm/lighting has ClusteredLighting (Forward+, default 1024 lights, 32 px tiles, 24 exponential Z slices, 64 lights per cluster, point lights only). It also has DynamicLighting, which batches lights into uniform arrays so changing the light count doesn't recompile materials (default 16 point/16 spot/8 directional), plus LightProbeGrid. (The older TiledLighting addon is not in the r186 examples/jsm/lighting folder.) Relevant examples: webgpu_compute_particles_rain and _snow, webgpu_compute_water (interactive heightfield ripples), webgpu_water, webgpu_backdrop_water, webgpu_ocean (WaterMesh + SkyMesh + bloom), webgpu_fog_height (exponentialHeightFogFactor), webgpu_custom_fog_scattering, webgpu_shadow_contact, webgpu_postprocessing_3dlut, webgpu_tonemapping, webgpu_loader_texture_ktx2, webgpu_textures_2d-array_compressed, webgpu_instance_sprites, webgpu_mesh_batch, webgpu_particles_soft, webgpu_tsl_vfx_linkedparticles and webgpu_lights_clustered. Tone-mapping constants in r186: Linear, Reinhard, Cineon, ACESFilmic, AgX, Neutral and Custom.",
+   "sources": [
+    "https://github.com/mrdoob/three.js/tree/r186/examples/jsm/tsl/display",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/jsm/lighting/ClusteredLighting.js",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/jsm/lighting/DynamicLighting.js",
+    "https://threejs.org/docs/pages/ClusteredLighting.html",
+    "https://github.com/mrdoob/three.js/blob/r186/src/constants.js",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_compute_particles_rain.html",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_compute_water.html",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_fog_height.html",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_postprocessing_3dlut.html"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "VERIFIED + INFERENCE: Apple Silicon performance — memory bandwidth is the real budget at 3456x2234",
+   "detail": "VERIFIED (Apple newsroom, March 2026): the M5 Pro has up to a 20-core GPU with a Neural Accelerator in each core, up to 307 GB/s unified memory bandwidth, and hardware mesh shading. Apple claims up to 20% more graphics performance than the M4 Pro. Toji's WebGPU best-practices page warns that WebGPU is not automatically faster than WebGL. A fair comparison needs powerPreference 'high-performance', the preferred canvas format, matching MSAA settings and so on. INFERENCE (my arithmetic): the native backbuffer at DPR 2 is 3456×2234 = 7.72 MP, and one RGBA16F full-screen target is about 62 MB. Writing and reading it once per frame at 60 fps costs about 7.4 GB/s. Twenty such full-resolution passes would use about 150 GB/s, roughly half of the theoretical 307 GB/s, before the browser compositor and texture fetches. Therefore:\n- keep the number of full-resolution passes small (roughly ≤8);\n- run AO, bloom, fog, volumetrics and distortion at half or quarter resolution;\n- pack the G-buffer tightly (RGBA8 albedo, RG8 octahedral normal, RGBA8 material);\n- use an R11G11B10-style HDR light buffer where available;\n- merge tone mapping, LUT, grain, vignette and sharpening into one final 'uber' pass.\nThis matches the iOS port's finding that bandwidth was the limit. WebGPU on Apple GPUs is tile-based under the hood, which rewards fewer, fatter passes.",
+   "sources": [
+    "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/",
+    "https://toji.dev/webgpu-best-practices/webgl-performance-comparison.html",
+    "https://github.com/ammaarreshi/RedAlert2-Mac-iOS-iPad"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "VERIFIED: HDR output to the MacBook's XDR display is possible with WebGPU",
+   "detail": "WebGPU canvas 'extended' tone mapping with an rgba16float canvas is shipped in Chrome (feature entry and explainer); another source says Safari supports it too. three.js PR #29573 ('WebGPURenderer: Add HDR Support') was merged 2025-08-06. In r186, WebGPUBackend sets toneMapping.mode to 'extended' when the renderer's outputType is HalfFloatType. INFERENCE: explosions, tesla arcs, prism beams and the nuke can exceed SDR white on an XDR display. That is a cheap and striking '2026-level' feature, but it is WebGPU-only and needs an SDR fallback path and a user toggle.",
+   "sources": [
+    "https://chromestatus.com/feature/6196313866895360",
+    "https://github.com/ccameron-chromium/webgpu-hdr/blob/main/EXPLAINER.md",
+    "https://github.com/mrdoob/three.js/pull/29573",
+    "https://github.com/mrdoob/three.js/blob/r186/src/renderers/webgpu/WebGPUBackend.js"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "VERIFIED + INFERENCE: texture formats, limits and memory for HD sprites",
+   "detail": "VERIFIED:\n- Apple Silicon Macs support WebGPU 'texture-compression-bc' (BC7/BC5); iOS uses ASTC/ETC2 instead.\n- webgpu.report shows BC at about 94% availability.\n- KTX2 + Basis Universal (UASTC for quality, ETC1S for size) transcodes at load time to whatever the device supports and stays compressed in VRAM.\n- three.js has a WebGPU KTX2 example and a compressed 2D-array-texture example.\n- WebGPU's default maxTextureDimension2D is 8192. Apple adapters expose 16384, which must be requested explicitly and may be tier-reported.\n\nINFERENCE:\n- Use 2D texture arrays (one layer per SHP frame or per frame group) rather than giant 4K/8K atlases. This avoids bleeding between neighbouring sprites, keeps mipmaps clean and stays under limits; WebGPU's default maxTextureArrayLayers is 256.\n- Rough budget: an infantry type of about 400 frames at 2x (100×80 px) is about 3.2 MP, i.e. about 12.8 MB as raw RGBA8. With BC7 albedo + BC5 normals + BC4/BC7 masks it drops to about 7–10 MB.\n- Across roughly 150 unit/building/anim types plus theater tiles, the resident GPU set should aim for ≤1–1.5 GB with per-theater streaming. Download size can still reach several GB (Age of Empires II DE went from 300 MB to 17 GB).\n- Use premultiplied alpha and mip generation on HD sprites to avoid dark fringes.",
+   "sources": [
+    "https://webgpu.report/features/texture-compression-bc",
+    "https://www.donmccurdy.com/2024/02/11/web-texture-formats/",
+    "https://github.com/BinomialLLC/basis_universal",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_loader_texture_ktx2.html",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_textures_2d-array_compressed.html",
+    "https://developer.mozilla.org/en-US/docs/Web/API/GPUSupportedLimits",
+    "https://www.forgottenempires.net/age-of-empires-definitive-edition-is-it-a-3d-or-a-2d-game"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "INFERENCE: RA2's asset types split into two lighting problems, and voxel units are the easy win",
+   "detail": "The engine builds voxel (VXL) vehicles, aircraft and ships as real 3D geometry (VxlBuilder, VxlGeometryCulled/Monotone/NaiveBuilder) and lights them with a directional light and shadow maps. So HD vehicles need no sprite normal maps. They can get:\n- higher-density voxels or smoothed/remeshed geometry;\n- or hand-made or AI-generated glTF meshes with PBR materials, lit by the same clustered/2D lights and shadowed by the sun shadow map.\nThe orthographic projection and facing counts must match the sim. SHP assets (infantry, buildings, terrain objects, animations, smudges) are flat 2D frames, and they need authored lighting data to react to dynamic lights, weather and time of day. That data is normal, height/depth, roughness, emissive and remap/house-colour masks.\nTwo RA2-specific rules follow:\n1. House colours in RA2 are palette-remap indices. HD truecolour art needs a separate remap mask channel, tinted in the shader.\n2. Palette tricks (Iron Curtain tint, cloak, chrono warp, 'extraLight' per cell) must be re-expressed as HD shader uniforms fed by the same renderable state.",
+   "sources": [
+    "https://github.com/huangkaoya/ts-redalert2/blob/main/src/engine/gfx/material/paletteShaderLib.ts",
+    "https://github.com/huangkaoya/ts-redalert2/blob/main/src/engine/renderable/WorldScene.ts",
+    "https://github.com/ammaarreshi/RedAlert2-Mac-iOS-iPad"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "VERIFIED references + INFERENCE: three ways to get normal/depth/material maps for 2D sprites",
+   "detail": "(a) Rebuild in 3D, then bake. This is the gold standard. Model each unit and building in 3D and render albedo, normal, depth, AO, emissive and shadow passes from a fixed RA2 orthographic camera. Proven precedents:\n- Age of Empires II DE: every asset modelled in 3D, rendered as 2D sprites at 3 resolutions, 32 directions;\n- Dead Cells: 3D models exported per frame with normal maps;\n- Pillars of Eternity: Maya backgrounds rendered as final/depth/normal/albedo passes, with deferred dynamic lights on top.\nImage-to-3D models can speed up blocking-out (as of May 2026): TRELLIS 2 (MIT, outputs PBR) and Hunyuan3D (strong textures). This route gives the frame-to-frame consistency that animation needs.\n(b) AI estimation straight from HD 2D frames:\n- Depth Anything 3 (ByteDance Seed, released 2025-11-14; monocular + multi-view depth);\n- Marigold Normals v1.1 (released 2025-05-15) and Marigold V2 (diffusion transformer, single-step);\n- RGB↔X (albedo/roughness/metallic decomposition, open code).\nCaveats (inference): these are trained on photos, not tiny iso sprites. Estimating frame by frame will flicker across animation frames and facings. Output needs per-facing consistency passes, temporal smoothing or estimation on a 3D proxy. Depth comes out relative and needs calibrating to RA2 world units.\n(c) Classic 2D tools: Laigter (open-source; normal/parallax/specular/occlusion from sprites) and SpriteIlluminator (algorithmic + hand-painted normal/specular/emissive). An arXiv survey compiles normal-map techniques for pixel art.\nRecommended encoding (inference): the camera is fixed, so store view-space normals (no tangent frames). Store height as 'pixels above sprite ground line' so it can be written into the depth buffer.",
+   "sources": [
+    "https://www.forgottenempires.net/age-of-empires-definitive-edition-is-it-a-3d-or-a-2d-game",
+    "https://www.gamedeveloper.com/production/art-design-deep-dive-using-a-3d-pipeline-for-2d-animation-in-i-dead-cells-i-",
+    "https://eternity.obsidian.net/eternity/news/update--79-graphics-and-rendering-",
+    "https://github.com/bytedance-seed/depth-anything-3",
+    "https://github.com/prs-eth/Marigold",
+    "https://github.com/huawei-bayerlab/marigold-v2",
+    "https://github.com/zheng95z/rgbx",
+    "https://github.com/azagaya/laigter",
+    "https://www.codeandweb.com/spriteilluminator",
+    "https://arxiv.org/pdf/2212.09692",
+    "https://www.3daistudio.com/blog/pixal3d-vs-trellis-2-vs-hunyuan-3d-comparison"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "INFERENCE (grounded in verified APIs): lighting many dynamic lights on sprites — use a 2D-deferred light buffer, optionally ClusteredLighting",
+   "detail": "Recommended core: a thin G-buffer pass writes, for all terrain, SHP sprites and voxels:\n- albedo;\n- an octahedral-encoded view-space normal;\n- roughness, emissive, remap mask and baked AO;\n- per-pixel depth, meaning the quad depth offset by the sprite's height map.\nThen a light-accumulation pass does the lighting:\n- one fullscreen sun + ambient + hemisphere term driven by the map's existing lighting (Ambient/Red/Green/Blue/Ground/Level in MapLighting);\n- one additive screen-space quad or circle per dynamic light: muzzle flashes, explosions, tesla coils and arcs, prism beams, burning buildings, headlights at night.\nThis 'classic 2D deferred' approach works identically on WebGPU and on the WebGL2 fallback (MRT). It costs about one small quad per light and scales to hundreds of short-lived lights. That fits RA2, where most lights last under 0.5 s.\nOn WebGPU, the alternative is three.js ClusteredLighting (verified: ≤1024 point lights, 32 px tiles, 24 exponential Z slices). Its depth slicing is designed for perspective 3D; with an ortho iso camera, 2D tiles with a few linear slices are enough. DynamicLighting (verified) avoids shader recompiles when light counts change, which suits a small fixed set of forward lights on voxel meshes.\nFidelity rule: keep an exact-retail 'Classic' lighting path (the iOS port found and fixed sign and gamma errors in the palette-domain lighting). HD lighting should start from the same map-lighting numbers so night maps, snow maps and so on keep their original mood. Rim light is a cheap view-space normal term (1 - N·V) tinted by sky colour, and it helps units read against busy HD terrain.",
+   "sources": [
+    "https://threejs.org/docs/pages/ClusteredLighting.html",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/jsm/lighting/DynamicLighting.js",
+    "https://github.com/huangkaoya/ts-redalert2",
+    "https://github.com/ammaarreshi/RedAlert2-Mac-iOS-iPad",
+    "https://eternity.obsidian.net/eternity/news/update--79-graphics-and-rendering-"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "INFERENCE: shadows, AO and contact on sprites — they only work if sprites write real per-pixel depth",
+   "detail": "Original SHP files contain baked shadow frames drawn at a fixed sun direction (the engine has ShadowRenderable and BlobShadow). For a faithful HD look:\n- keep those silhouettes but soften them: blur or penumbra that widens with distance from the contact point, using a distance field of the silhouette;\n- tint them by ambient colour instead of flat black.\nVoxels keep real shadow maps. SSAO/GTAO (both verified as r186 nodes) needs a believable depth buffer. Without height maps every sprite is a flat card and AO only darkens its outline. So write sprite depth in the fragment shader: quad depth minus height × k. That disables early-Z, which is acceptable at RTS overdraw, or use a depth prepass.\nScreen-space shadows (SSSNode, verified) over that depth give short contact shadows and let explosion flashes cast brief shadows. A dynamic sun (time of day) would contradict the baked shadow frames. Either (a) disallow dynamic sun direction and vary only colour and intensity, or (b) add height-map-raymarched screen-space sun shadows and fade out the baked frames. Pillars of Eternity faced the same problem: it could not shadow-map its prerendered backgrounds and matched dynamic shadow colours to the baked 2D shadows.",
+   "sources": [
+    "https://github.com/mrdoob/three.js/tree/r186/examples/jsm/tsl/display",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_shadow_contact.html",
+    "https://projectionspace.wordpress.com/2016/05/06/pillars-of-eternitys-rendering-techniques/",
+    "https://eternity.obsidian.net/eternity/news/update--79-graphics-and-rendering-"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "INFERENCE (with verified three.js building blocks): environment, weather and time of day for a fixed iso camera",
+   "detail": "- Time of day and sky: RA2 has almost no visible sky. ToD should be a lighting-and-grading curve: sun colour and intensity, ambient, fog colour, and LUT blending between keyframes. Make it cosmetic and off by default, so each map's authored lighting stays the default.\n- Cloud shadows: a world-XY-projected, scrolling, domain-warped noise multiplied into the sun term. Very cheap and very effective in iso.\n- Height/volumetric fog: reconstruct world height from depth. Use exponentialHeightFogFactor (verified webgpu_fog_height) plus low-frequency noise at half resolution. Fill river valleys and cliff bases; add light shafts through clouds with GodraysNode sparingly.\n- Rain: GPU instanced streaks (verified webgpu_compute_particles_rain) in a camera-relative volume. Spawn splashes and ripples at random screen points projected onto the depth/G-buffer, so no collision is needed. Model wetness as a global parameter that darkens albedo, lowers roughness, adds puddle masks (noise × flatness from the normal map) and gives them sky/probe reflection. Add droplet ripples on puddles.\n- Snow: compute particles (verified webgpu_compute_particles_snow) plus an accumulation mask, up-facing normal.z × coverage over time, blended to a snow albedo. The Snow theater already exists, so dynamic snow is for other theaters.\n- Wind on foliage: SHP trees are single quads, so sway them by shearing UVs with a height-from-sprite-bottom mask and gust noise, plus leaf particles.\n- Lightning storm (superweapon): hook the existing LightningStormFx/LightingDirector events and add:\n  - a darkened cloud deck and rain;\n  - procedural branching bolt meshes with HDR emissive and bloom;\n  - a sub-second global flash light;\n  - thunder delayed by distance.\n  Nuke and chronosphere use the existing NukeLightingFx/ChronoFxHandler hooks similarly.\n- Theater presets: Temperate/Urban/NewUrban (rain, fog, cloud shadows); Snow (snowfall, cold LUT); Desert (heat shimmer, dust); Lunar in YR (no atmosphere, black sky, hard shadows, no rain).",
+   "sources": [
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_fog_height.html",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_compute_particles_rain.html",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_compute_particles_snow.html",
+    "https://github.com/mrdoob/three.js/tree/r186/examples/jsm/tsl/display",
+    "https://github.com/huangkaoya/ts-redalert2"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "INFERENCE (with verified references): modern water for a fixed isometric camera",
+   "detail": "1. Build a water mask from the tile types at map load.\n2. Run a Jump Flooding Algorithm pass (a GPU distance transform) to get a signed distance field from shore. It drives shoreline foam bands, shore-breaking waves (sin(distance − time) masked by noise), shallow-to-deep colour and fake refraction depth (sand or rock visible near shore), and wave amplitude falloff.\n3. Rivers get hand-painted or auto-derived flow maps (two-phase flow-map scrolling).\n4. Waves: a small sum of Gerstner waves plus two scrolling detail normal maps is plenty (GPU Gems ch.1, Finch/Cyan). FFT ocean is overkill for a top-down fixed view.\n5. Reflections: the camera is fixed and ortho, so a sky/probe reflection with Fresnel covers most of it. Voxel ships and aircraft are real meshes and can go into a cheap mirrored planar pass. SHP sprites need a flipped 'reflection draw' or clamped SSR (SSRNode verified), because a mirrored billboard is geometrically wrong.\n6. Ship wakes: extend the existing ShipWakeTrailPlugin with a foam/decal trail. On WebGPU, optionally add an interactive heightfield ripple sim (verified webgpu_compute_water) driven by ship positions, shell impacts, Dolphin and Squid; splashes are flipbook + particles + ripple impulses.\nThe benchmark to beat: AoE DE replaced 'white pixels that occasionally sparkle' with 'crashing waves, boat reflections and schools of fish' while staying a 2D iso engine.",
+   "sources": [
+    "https://en.wikipedia.org/wiki/Jump_flooding_algorithm",
+    "https://developer.nvidia.com/gpugems/gpugems/part-i-natural-effects/chapter-1-effective-water-simulation-physical-models",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_compute_water.html",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_water.html",
+    "https://www.forgottenempires.net/age-of-empires-definitive-edition-is-it-a-3d-or-a-2d-game"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "VERIFIED tools + INFERENCE design: impacts and VFX",
+   "detail": "VERIFIED:\n- EmberGen (JangaFX) exports flipbooks and sequences with final renders, motion vectors, 6-point lighting, normal maps and depth maps (EXR/PNG/TGA), plus VDB; there is a free trial.\n- EmberGen 2.0 was announced (CG Channel, Jan 2025) with a native Apple Silicon macOS edition. Whether it has shipped by Sept 2026 is unconfirmed; check before planning on the M5 Pro.\n- Six-way lighting (6 baked directional lightmaps per smoke flipbook, blended from scene lights at runtime) is an established production technique (Unity VFX Graph docs).\n- three.quarks (npm 0.17.1, May 2026) is a maintained three.js VFX runtime.\n- r186 has compute-particle examples (particles, soft particles, linked particles).\n- Screen shake: Eiserloh's GDC 2016 'trauma' model (shake = trauma², noise-driven, decaying).\n\nINFERENCE, per effect:\n- Explosions: flipbook fireball/smoke (motion-vector frame blending, six-way lit smoke) + GPU sparks and debris + a short-lived dynamic point light + a heat-distortion/shockwave ring (a half-resolution distortion buffer applied in post) + a scorch decal (reuse the Smudge system) + screen shake scaled by warhead.\n- Tesla: procedural jittered arc strips with HDR emissive core + bloom + a flickering light.\n- Prism: beam core + glow + an end-point light + refraction sparkle.\n- Nuke: bright flash, then a fireball flipbook, mushroom smoke, shockwave distortion and dust wall.\n- Chronosphere: a blue ring shader with distortion, desaturation inside, and a sparkle compute burst.\nReplace shader-particle-engine (2022, GLSL-only) with a TSL or compute particle system. Map RA2 anim names (from art.ini) to HD effect prefabs through a table, so warhead logic stays in the sim and only presentation changes.",
+   "sources": [
+    "https://jangafx.com/software/embergen",
+    "https://www.cgchannel.com/2025/01/check-out-the-new-features-due-in-embergen-2-0/",
+    "https://docs.unity3d.com/Packages/com.unity.visualeffectgraph@17.2/manual/six-way-lighting.html",
+    "https://quarks.art/runtime",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_particles_soft.html",
+    "https://gdcvault.com/play/1023557/Math-for-Game-Programmers-Juicing",
+    "https://www.npmjs.com/package/shader-particle-engine"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "INFERENCE (verified node availability): post-processing stack for crisp sprites",
+   "detail": "Order:\n1. HDR scene/light composite\n2. half-resolution GTAO (or SSAO) + depth-aware blur/upsample\n3. fog/clouds\n4. bloom on an emissive/threshold buffer\n5. distortion\n6. a single final uber-pass: AgX or Khronos Neutral tone mapping (both in r186) → per-theater/ToD 3D LUT (Lut3DNode; artists can author .cube LUTs in DaVinci or Photoshop) → RCAS sharpen (SharpenNode) → optional FilmNode grain and vignette.\nAgX gives graceful highlight roll-off for explosions; Neutral keeps the saturated RA2 palette closer to the original.\nAnti-aliasing: temporal methods (TRAA/TAAU) jitter the projection. That softens pixel-exact sprite detail and ghosts fast units and projectiles unless every sprite and effect writes velocity. Prefer:\n- no AA on already-filtered, premultiplied, mipmapped HD sprites;\n- SMAA or FXAA for voxel and geometry edges, or alpha-to-coverage with MSAA.\nKeep TAAU/FSR1 only as a 'render scale' option for weaker GPUs; the FSR1 doc itself says it only helps when fragment-bound. Snap the ortho camera to the pixel grid at integer zoom levels to avoid shimmer while scrolling. Optional HD-2D-style tilt-shift depth of field only for cinematics or photo mode, never during play (hurts readability).",
+   "sources": [
+    "https://github.com/mrdoob/three.js/tree/r186/examples/jsm/tsl/display",
+    "https://github.com/mrdoob/three.js/blob/r186/src/constants.js",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_postprocessing_3dlut.html",
+    "https://github.com/mrdoob/three.js/blob/r186/examples/webgpu_tonemapping.html"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "VERIFIED: reference games and the techniques worth copying",
+   "detail": "- C&C Remastered Collection (Petroglyph; art by Lemon Sky): hand-redrawn 4K 2D sprites on the original engine. Spacebar toggles classic and remastered graphics in real time, which works smoothly because it is still sprite-based. This is the 'Classic vs HD' UX model.\n- Age of Empires II/I DE (Forgotten Empires/Tantalus/Wicked Witch): all units, buildings and trees modelled in 3D and rendered to 2D sprites at 3 resolutions, 32 directions, new water with waves and boat reflections, same 2D iso engine. This is the closest analogue to an RA2 HD pipeline.\n- Pillars of Eternity (Obsidian): prerendered final/depth/normal/albedo passes, per-pixel occlusion of 3D characters, key + fill directional lights, deferred dynamic lights, a low-resolution shadow map matched to baked shadows. This is the model for lighting prerendered 2D with depth and normals.\n- Octopath Traveler HD-2D (Square Enix/Acquire, UE4): pixel sprites in 3D environments with dynamic lighting, depth of field, tilt-shift and bloom for a diorama look. Borrow the grading and bloom, not the heavy DOF.\n- Songs of Conquest (Lavapotion, Unity): pixel sprites projected into 3D environments with dynamic and volumetric lighting, custom directional-light and specular shaders, DOF when zoomed. This proves pixel/2D sprites can coexist with modern lighting.\n- Dead Cells: 3D-to-2D pipeline exporting per-frame normal maps.\n- They Are Billions: custom C#/.NET engine moving up to about 20k 2D sprite units. Proof that thousands of animated sprites are an engine and batching problem, not a visual limit.\n(Northgard, Tooth and Tail and Diablo IV were not verified in this session; web search quota ran out.)",
+   "sources": [
+    "https://en.wikipedia.org/wiki/Command_%26_Conquer_Remastered_Collection",
+    "https://www.pcgamesn.com/command-conquer-remastered/gameplay",
+    "https://www.forgottenempires.net/age-of-empires-definitive-edition-is-it-a-3d-or-a-2d-game",
+    "https://en.wikipedia.org/wiki/Age_of_Empires_II:_Definitive_Edition",
+    "https://eternity.obsidian.net/eternity/news/update--79-graphics-and-rendering-",
+    "https://en.wikipedia.org/wiki/HD-2D",
+    "https://en.wikipedia.org/wiki/Songs_of_Conquest",
+    "https://80.lv/articles/mixing-2d-billboards-and-3d-environments-in-a-game",
+    "https://www.gamedeveloper.com/production/art-design-deep-dive-using-a-3d-pipeline-for-2d-animation-in-i-dead-cells-i-",
+    "https://en.wikipedia.org/wiki/They_Are_Billions"
+   ],
+   "confidence": "verified"
+  },
+  {
+   "title": "INFERENCE: minimally intrusive architecture for layering HD onto ts-redalert2",
+   "detail": "Seams already in the code:\n- src/game = deterministic sim;\n- src/engine/renderable = per-object renderables, built by RenderableFactory and ObjectBuilder/ShpBuilder/VxlBuilder, plus plugins and FX handlers;\n- src/engine/gfx/Renderer = a thin wrapper that renders the scene list.\n\nRules:\n1. The sim must never read render state. HD code uses its own RNG, never the sim's mersenne-twister stream, and weather or ToD never feeds back into gameplay. Otherwise lockstep multiplayer desyncs.\n2. Introduce an 'art resolver': SHP/VXL name + frame → classic asset or HD asset bundle (albedo/normal/height/material/remap-mask texture-array layers + metadata such as pivot, scale and frame-timing map). Add it at the builder layer (ShpBuilder/ShpTextureAtlas/VxlBuilder), not in entity logic.\n3. Give each renderable two materials: ClassicPaletteMaterial (exact retail look) and HDMaterial (G-buffer output). A global flag swaps them. This gives a C&C-Remastered-style instant toggle whenever both asset sets are resident; otherwise it triggers an asset swap with a short loading fade.\n4. Put everything else behind feature flags and quality tiers: post stack, lights, weather, water sim and VFX prefabs.\n5. Replace Renderer.render() with a small render graph (G-buffer → lights → water → transparent/FX → post → UI). On WebGPURenderer that is a RenderPipeline of TSL nodes; on WebGL, MRT targets plus fullscreen passes.\n6. Reuse the repo's existing Playwright flow scripts (debug:perftest, debug:perf-smoke, debug:superweapon, debug:nuke…) for screenshot-diff regression of Classic mode and GPU-timing budgets per quality tier.\n7. Longer term, consider moving the sim to a Web Worker (it currently shares the rAF main thread), so heavy render frames never stall turns.",
+   "sources": [
+    "https://github.com/huangkaoya/ts-redalert2",
+    "https://github.com/huangkaoya/ts-redalert2/blob/main/src/engine/GameAnimationLoop.ts",
+    "https://github.com/huangkaoya/ts-redalert2/blob/main/package.json",
+    "https://www.pcgamesn.com/command-conquer-remastered/gameplay"
+   ],
+   "confidence": "likely"
+  },
+  {
+   "title": "INFERENCE: performance budget targets and degradation tiers (M5 Pro, 3456x2234)",
+   "detail": "Target 60 fps at native DPR 2 on the M5 Pro, with GPU ≤ about 11 ms, leaving headroom for the compositor and thermals. Main-thread JS for sim + render updates ≤ about 6 ms.\n\nSuggested GPU split:\n\n| Stage | Budget |\n|---|---|\n| Terrain/sprites/voxels G-buffer | 2.5 ms |\n| Sun/ambient + ≤256 short-lived lights | 1.5 ms |\n| Water | 1.0 ms |\n| Particles/VFX at peak (nuke) | 2.0 ms |\n| AO (half resolution) | 1.0 ms |\n| Fog/clouds/weather | 0.8 ms |\n| Bloom + distortion | 0.8 ms |\n| Final uber-pass (tone map/LUT/AA/sharpen) | 0.8 ms |\n| UI | 0.5 ms |\n| Total | ≈10.9 ms |\n\nStress scene: 8 players, about 1,500 units, about 400 buildings, 10k particles, 200 simultaneous lights. Optional 120 Hz ProMotion mode: render scale 0.67–0.75 + TAAU/FSR1, relying on the renderer's existing sim-interpolation input.\n\nTiers:\n- Ultra: WebGPU, everything, HDR.\n- High: no SSGI/godrays, half-res everything.\n- Medium: WebGL2 fallback, 2D-deferred lights ≤64, no compute water, CPU/instanced particles, SMAA.\n- Classic: the original palette renderer, which must stay pixel-faithful.\n\nAuto-select by adapter features and timestamp-query measurements during the first 10 s, with a user override.",
+   "sources": [
+    "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/",
+    "https://github.com/huangkaoya/ts-redalert2/blob/main/src/engine/GameAnimationLoop.ts",
+    "https://github.com/mrdoob/three.js/tree/r186/examples/jsm/tsl/display"
+   ],
+   "confidence": "speculative"
+  }
+ ],
+ "recommendations": [
+  "Phase 1 (original functionality): leave the renderer alone. Run the base as-is (three 0.183.2, WebGLRenderer, palette materials), fix gameplay parity, and lock in a Classic-mode visual baseline with Playwright screenshot diffs, using the repo's existing debug:* flows, before any HD work.",
+  "Spike 1, about 1–2 weeks and the gate for the renderer decision. Port only PaletteBasicMaterial to a TSL NodeMaterial on WebGPURenderer (three r186), render one skirmish map with 1,000+ units, and compare frame time and pixel output against WebGLRenderer in Chrome and Safari, plus the forceWebGL fallback. Present the numbers to the user and choose Option A/B/C below.",
+  "Before large-scale art production, define the HD asset contract: a per-SHP-frame bundle with albedo (premultiplied), view-space normal, height/depth, roughness/metal/emissive, a house-colour remap mask and baked AO. Store it as KTX2 (UASTC/BC7 + BC5 normals) texture arrays, starting at 2x the original pixel density, with a 3x zoom tier later if needed (AoE DE shipped 3 resolutions).",
+  "Pilot the three lighting-data routes on the same 3 assets (e.g. GI infantry, the Allied Construction Yard, a tree): (a) 3D rebuild + Blender bake, (b) AI estimation (Depth Anything 3 / Marigold normals / RGB↔X), (c) Laigter/SpriteIlluminator. Show the user side-by-side results under a moving light, then pick per asset class.",
+  "Implement lighting as a 2D-deferred light-accumulation buffer, which works on both WebGPU and the WebGL2 fallback. Drive the sun and ambient from the existing MapLighting values so every original map keeps its mood. Consider ClusteredLighting only if profiling shows the light pass is the bottleneck.",
+  "Upgrade voxel units first. They are already real 3D meshes, so they get normals, PBR and shadow maps with no new 2D asset tooling, and they are the fastest visible win.",
+  "Build water as its own module: tile mask → JFA distance field at map load → foam/shore waves/depth colour + Gerstner/normal-map waves + probe reflection. Add planar reflection for voxel ships and a compute ripple sim (WebGPU tier) for wakes and impacts.",
+  "Replace shader-particle-engine and three.meshline (both last updated in 2022, GLSL-only) with TSL/compute particles and a warhead→HD-prefab mapping table. Explosions = flipbook (motion vectors, six-way lit smoke) + sparks/debris + short dynamic light + distortion + scorch decal + trauma screen shake.",
+  "Post stack: half-resolution AO/bloom/fog, then one full-resolution uber-pass (AgX or Neutral tone mapping → 3D LUT per theater/ToD → RCAS sharpen → optional grain/vignette). Default AA is SMAA/none; temporal AA only as a render-scale option. Offer HDR output on XDR displays as a toggle.",
+  "Keep every HD system cosmetic and deterministic-safe (separate RNG, no sim reads). Put it behind feature flags, quality tiers and a C&C-Remastered-style Classic/HD toggle key.",
+  "Budget for memory bandwidth, not shader ALU. Aim for ≤8 full-resolution passes at 3456x2234, measure with WebGPU timestamp queries, and target ≤ about 11 ms GPU at 60 fps on the M5 Pro."
+ ],
+ "options_for_user": [
+  "Renderer path A: stay on WebGLRenderer. Keep the existing GLSL palette materials and add HD passes as hand-written WebGL2 MRT + fullscreen shaders, or pmndrs/postprocessing 6.x. Lowest risk and least porting, works everywhere today. Downsides: no compute (harder GPU particles and water sim), no ready-made r186 TSL nodes (GTAO/SSR/TRAA/Lut3D/ClusteredLighting), no HDR canvas, and it builds on the legacy path.",
+  "Renderer path B: migrate the whole engine to WebGPURenderer + TSL (with its automatic WebGL2 fallback). Port the 3 palette materials, SPE and meshline once; Classic mode then becomes a TSL palette material in the same renderer, and HD uses RenderPipeline nodes, compute and HDR. Best long-term result and one code path, but a 2–6 week porting risk; the manual still warns some scenes run better on WebGLRenderer, and the Classic look must be re-verified pixel by pixel.",
+  "Renderer path C (hybrid): keep the untouched WebGL renderer as 'Classic' and build a separate HD renderer on WebGPURenderer that consumes the same renderables and sim state. Zero regression risk for Classic and freedom in HD, but two render paths to maintain, and a Classic/HD toggle means a renderer and canvas swap rather than an instant flip.",
+  "Lighting-data source: (1) 3D rebuild + bake (the AoE DE/Pillars/Dead Cells approach): best consistency across animation frames, highest art cost; (2) AI-estimated normals/depth/materials from HD 2D art: fast, but may flicker between frames and facings and needs cleanup; (3) a hybrid: 3D for buildings and hero units, AI or Laigter for infantry, trees and debris.",
+  "HD pixel density: 2x original (framing at 4K matches classic 1080p, lower memory) vs 3x/4x (sharper when zoomed, several times the memory and download) vs multi-resolution like AoE DE (best quality, biggest pipeline).",
+  "Faithfulness knobs: keep each map's original fixed lighting, with dynamic weather and time of day as optional cosmetic modes (recommended), or make dynamic time of day the default. This also decides whether baked SHP shadows stay or are replaced by height-map screen-space sun shadows.",
+  "Anti-aliasing: SMAA/none (crisp sprites, some voxel edge aliasing) vs TRAA/TAAU (smoothest edges plus upscaling headroom, but softer sprites and ghosting unless every effect writes motion vectors)."
+ ],
+ "open_questions": [
+  "Which exact base will be used (huangkaoya/ts-redalert2 vs another Chrono Divide-derived fork), and is the user comfortable with its licensing? GitHub reports 'Other/NOASSERTION', the README reserves rights to the Chrono Divide owner, and Chrono Divide was never formally open-sourced. This caps distribution to personal/non-commercial use at best.",
+  "Must Safari and Firefox be first-class targets, or is Chrome on the M5 Pro enough for now? This decides how much effort the WebGL2 fallback and the HDR path deserve.",
+  "Is multiplayer (lockstep with the original Chrono Divide clients) a goal? If so, HD must stay purely cosmetic and the sim code must stay bit-identical.",
+  "What art budget and pipeline will produce HD sprites: AI upscale plus cleanup, ChatGPT-generated concepts turned into 3D rebuilds, or hand-drawn? This determines which lighting-data route is realistic.",
+  "Has EmberGen 2.0's macOS edition actually shipped as of Sept 2026? If not, VFX flipbooks need a Windows machine, Blender simulations or purchased flipbook packs.",
+  "Does the user want dynamic time of day and weather in the default experience, or only as optional modes, given it changes the look of the original maps?",
+  "Performance of three.js WebGPURenderer on this specific engine (thousands of small instanced/batched sprites) is unknown until the Spike 1 benchmark. Published claims are mixed.",
+  "Not verified this session because web search quota ran out: StarCraft Remastered, Northgard, Tooth and Tail, Diablo IV technique details; Safari's support for WebGPU extended-range/HDR canvas on the user's current macOS; the WebGPU default maxTextureArrayLayers value (stated from memory as 256)."
+ ]
+}

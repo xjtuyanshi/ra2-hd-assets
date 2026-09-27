@@ -1,0 +1,194 @@
+{
+ "plan_markdown": "# 红警2 高清重制：项目规划 v2（按评审意见修订）\n\n- **日期**：2026-09-27\n- **依据**：本轮调研档案（11 个候选底座的克隆、构建和测试，对抗性复核，以及画面目标、资产管线、渲染技术、法律、AI 工具五个专题），加上两份评审意见（可行性评审、画面目标评审）。另外我在本地克隆（RA2 VM `f25986b`）里核对了哈希门控、WM_BEEF 握手和几项仓库清理条目。\n- **标注约定**：【已验证】表示读过代码、跑过构建或查过官方页面。【较可能】表示来源是二手的或只有片段。（推断）表示我自己的判断。\n- 法律部分只整理事实，不构成法律意见。\n\n---\n\n## 0. 相比 v1 改了什么\n\n1. **HD 架构改为\"宿主接管整个战场画面\"（L3-lite）**，不再在原版画面上叠 HD 对象。原版画面只在 Classic 模式下使用，另外用来显示侧栏。\n2. **G1 改写**。YR 的哈希门控只卡可选功能（我已核对代码），真正要查的是 exe 有没有 DRM 壳，以及能不能走完启动握手。另外加了一条法律红线：**绝不剥壳**。\n3. **新增性能关卡 G0（v86 帧率）和画面关卡 G-Look（第 3–6 周）**。G-Look 用\"场景沙盘\"提前定画面，和技术风险脱钩，这样你不用等 4–6 个月才看到像样的 HD 画面。\n4. **G2 拆成 G2a 和 G2b**，都有时间盒和止损线。工期全部重估：Spike 6–10 周，切片 4–6 个月（精简后的范围）。\n5. 事实更正：YR 没有尤里战役；Vanguard 是 11 种类型，不是 11 种单位；YRpp 没有许可证，只能用地址等事实；三处【已验证】降级；引用来源改正。\n6. 法律部分补上：**本项目自己也要逆向并钩住 gamemd.exe**；仓库清理清单也补全了。\n7. 新增：画面规范（数值版）、捕获范围清单、运动插值、遮挡测试、地形规则、英雄资产由谁来做，以及\"AI 概念图里哪些是做不到的\"。\n\n---\n\n## 1. 结论与推荐路线\n\n**推荐底座：RA2 VM**（[ra2-games/ra2](https://github.com/ra2-games/ra2)），**有条件**。它是唯一同时满足以下四点的候选：网页版、GPL-3.0-or-later 可以合法 fork、不是 Chrono Divide 衍生、跑的是原版程序。\n\n**要先讲清楚的准确说法**（替换 v1 里的\"一行不改\"\"基本不用做就有\"）：\n\n- 游戏逻辑是原版 exe 在跑，但 RA2 VM **已经在运行时打了一小批补丁**，比如 Short Game 判负、修理率修复、启动和战斗跳板、binkw32 指令补丁，YR 还跳过了开场动画。这些补丁都会先校验哈希和指令签名。之后我们的绘制钩子还会再加一些【已验证：代码】。\n- 功能是否完整，**目前只在代码层面验证过**：918 个单元测试都不需要游戏文件，真实游戏测试一次都没跑过。战役、长局、8 人对战都没有回归测试，v86 帧率也从没测过。所以\"第一步可以直接拿来用\"是**有待验证的假设**，不是事实。\n\n**HD 这一步在它上面做，实质是写一个新渲染器**（修正 v1）。CD 系列和 vera20k 在宿主侧已经能解码并画出所有 SHP/VXL/TMP，还没替换的对象可以自然回退到原版画法。RA2 VM 连资源解析器都没有，渲染全在 exe 里面。所以我们要自己补上：浏览器内解码器、原版资源回退渲染器，再加 HD 渲染器。这是选择\"合法 + 网页 + 原版逻辑\"要付出的代价。\n\n**有利条件**【已验证】：\n\n- 宿主能读取所有 DirectDraw surface（`inspectSurfaceObjects`）。\n- 客体没开分页，内存是一整块平坦 buffer，宿主可以直接读。\n- YR 1.001 的若干地址与 YRpp 吻合，例如帧计数器 `0xA8ED84`。YRpp **没有许可证**，只能用地址和结构布局这类事实，不能复制它的头文件代码。\n- 浏览器内解码器可以复用 Vanguard 的 `@vanguard/formats`：纯 TS、GPL-3.0-or-later、1,954 个测试，和我们的许可兼容。它还带一个 CPU 体素光栅器。\n\n### 关卡一览\n\n| 关卡 | 时间 | 通过标准 | 不通过怎么办 |\n|---|---|---|---|\n| **G1** 你的 exe 能不能用 | 拿到文件后 1 天 | 见 §5 Phase 0 | 看原因，见下文 |\n| **G0** v86 性能 | Phase 0 | 1152×744、YR 后期遭遇战（6 方以上、300 个以上单位）下能稳住所选游戏速度，逻辑帧率波动不超过 10%，呈现帧率不低于 30（推断的门槛，由你拍板） | Phase 2 开始前重新评估底座 |\n| **G-Look** 画面方向 | 第 3–6 周，最迟第 8 周 | 你在同一画面上签字，见 §5 | 调整画面规范，不影响技术路线 |\n| **G2a** 绘制记录可行性 | 1–2 周，第 3 周止损 | 只记录、不改客体控制流；模拟器额外开销不超过 10% | 转 vera20k，或只做 L0/L1 |\n| **G2b** 宿主接管战场 | 4–6 周，第 10 周止损 | 见 §5 | 同上 |\n\n### 备选：vera20k（[YuriPlanet/vera20k](https://github.com/YuriPlanet/vera20k)）\n\n- **现状**：Rust + wgpu（Metal）重写的 YR 引擎，GPL-3.0，本机构建和 9,564 个测试都通过【已验证】。模拟和渲染强制分离，宿主手里本来就有全部游戏数据，所以 HD 层最好做。\n- **切换过去的实际含义**：\n  1. Phase 2 写的 TS/three.js 合成器和 shader **基本作废**，要用 Rust/wgpu 重写。\n  2. **第一步同样不达标**：AI 是占位实现，没有战役，没有联网传输，核弹、超时空、心灵控制器发射不了。\n  3. 不是网页版，移植到 WebGPU 至少要几周（推断）。\n- 所以\"切换 vera20k\"的真实意思是：**先做 HD，原版玩法以后再补**。\n- 为了让美术资产在切换后还能用，Phase 2 会先定一份**与底座无关的 HD 资产契约**（见 §4）。\n\n### 有条件选项：拿到 Chrono Divide 作者的授权\n\nCD 是技术上最适合做 HD 的底座（three.js 3D 正交场景，体素是真正的网格）。前提是作者 Alexandru Ciucă 书面授权，最好附带源码。联系方式：contact@chronodivide.com、Discord、GitHub @use-strict。他以前在 2 小时内批准过一个小请求（mod-sdk issue #7）【已验证】。发信零成本，建议 Phase 0 就发。\n\n### 否决的候选（要点）\n\n- **huangkaoya/ts-redalert2 及其 fork（DD-Channel、OpenRA2/RA2Web），以及 StillM8**：都是 CD 客户端的反编译重建。上游在 2026-09-03 的 LICENSE 里明确声明不授权【已验证：[commit 898d8918](https://github.com/huangkaoya/ts-redalert2/commit/898d8918)】，代码里有 453 条 CD 字符串，包括 CD 的拼写错误 \"alredy\"。\n- **CD 官方（无授权时）**：闭源，mod SDK 改不了渲染器。\n- **TaiYouWeb/ra2**：只是 RA2 VM 的收藏式 fork，落后上游 9 个提交。\n- **OpenRA/ra2**：C# 桌面程序，pre-alpha，2026 年没有代码提交，没有战役和 YR。\n- **Vanguard（harshilmathur/openra2）**：许可最干净，但只有 11 种类型（7 种建筑、4 种单位：SMCV/HARV/HTNK/E2），2 张地图，资源解码依赖 Node。**它的格式库可以复用**。\n- **rust-alert/ra2.exe**：不是网页版，\"渲染\"其实是 CPU 合成整张图，git 提交日期是伪造的。\n\n更正：HN 帖子 [45991853](https://news.ycombinator.com/item?id=45991853) 链接的是 Chrono Divide，不是 RA2 VM【已验证】。\n\n---\n\n## 2. 候选对比（摘要）\n\n| 候选 | 许可 | 原版完整度 | HD 可扩展性 | 评分 |\n|---|---|---|---|---|\n| **RA2 VM** | GPL-3.0+。需清理 EA 图标和外部下载 | 原版 exe 在跑；只在代码层验证过 | 需要自写解码器、回退渲染器和 HD 渲染器；YR 有 YRpp 地址可用 | 复核后 5–6 |\n| **vera20k** | GPL-3.0-only；含少量零售数据和反编译文本 | YR 遭遇战，pre-alpha | 模拟与渲染分离，最容易做 HD；不是网页版 | 6 |\n| StillM8 | GPL 声明无效 | RA2/YR 遭遇战最完整 | 技术上 7–8 分 | 4（法律阻断） |\n| CD 官方 | 专有 | 在线对战、遭遇战 | 有授权约 8 分 | 3 |\n| OpenRA/ra2 | GPL-3.0 | pre-alpha | 需要 fork 引擎 | 3 |\n| Vanguard | GPL-3.0+ | 11 种类型 | 格式库可复用 | 4 |\n\n---\n\n## 3. 法律与合规边界\n\n**事实**\n\n- EA 没有开源 RA2/YR 的引擎和资产。2025-02-27 以 GPL 发布源码的只有 TD、RA1、Renegade、Generals/ZH；RA2 时代只开源了 FinalAlert2【已验证：[来源](https://www.gamingonlinux.com/2025/02/ea-just-open-sourced-command-conquer-red-alert-renegade-and-generals/)】。\n- **EA《C&C 模组指南》**（Rev.2，2025-02-27）【已验证：[来源](https://www.ea.com/games/command-and-conquer/command-and-conquer-remastered/news/modding-faq)】：\n  - 授予可撤销的非商业许可；\n  - 不得包含任何 C&C 音乐文件；\n  - 必须写明 \"EA has not endorsed and does not support this product\"；\n  - 不得收费，不得放广告；\n  - 不得规避内容保护。\n- **EA 用户协议**：除非获得授权或法律允许，否则不得逆向【已验证：[来源](https://www.ea.com/legal/user-agreement)】。\n  - **本项目自己也会反汇编并钩住 gamemd.exe**：L2 绘制钩子、读取结构体、跳过绘制都算。这部分风险由我们自己承担，不只是上游的事。\n  - 互操作例外（例如欧盟软件指令第 6 条）是否覆盖\"替换画面\"，不确定。你所在的司法辖区（可能是中国）未知（推断）。\n- **AI 放大或重绘 EA 美术，得到的仍是 EA 的衍生作品**。本地私用风险最低，分发才有风险【已验证：[美国版权局报告](https://www.copyright.gov/ai/Copyright-and-Artificial-Intelligence-Part-2-Copyrightability-Report.pdf)、广州奥特曼案】。\n- **执法现状**：截至 2026-09-25，没有发现 EA 针对 RA2 项目的 DMCA。CD 的域名和版权年份是 2018，补丁说明从 2020-10-31 的 v0.1 开始，至今未见 EA 采取行动【已验证】。EA 已于 2026-08-04 私有化，新东家的态度可能会变（推断）。\n\n**操作模式**\n\n1. 只做个人、非商业用途：私有仓库，只在 localhost 运行，不部署到公网，不给任何人 build 或网址。\n2. 自带正版：Steam [2229850](https://store.steampowered.com/app/2229850/) 或 [Ultimate Collection](https://store.steampowered.com/bundle/39394/)。只从你自己的安装目录导入文件。\n3. **DRM 红线**：如果你的 exe 带商店壳（SteamStub、EA 等）或需要启动器激活，**绝不剥壳或规避**。转用 vera20k（玩的时候不需要 exe），或者用你手上未加壳的光盘版 exe（推断）。\n4. 不使用任何第三方来源的游戏文件，包括 oldgame.store、archive.org、xwis.net。\n5. 以下内容一律不进仓库，放在仓库外的 `gameres/`，用 `.gitignore` 加 pre-commit 钩子拦截：`*.mix`、`*.exe`、`*.dll`、提取出的 SHP/VXL/TMP/PAL、转换或放大后的纹理、音乐、视频、含原版美术的截图。\n6. 每个资产写进溯源清单：来源、模型及版本、提示词、许可、审批人。\n7. 现在就按 EA 模组指南执行：写免责声明，不放音乐，名称里不用 EA 商标。\n8. **清理 fork**，以下各项都已在本地克隆核对【已验证】：\n   - 删除 `src/main.ts` 的 `preloadThirdPartyFiles`，以及 `manifest.ts` 里的 oldgame.store 地址。\n   - 删除 `downloadCatalog.ts` 里的外链。\n   - 删除 `public/icons/*`、全部 favicon 和 `apple-touch-icon.png`（都是从 game.exe 提取的 EA 图标），删除 `scripts/assets/extractIcon.mts`，删除来源不明的背景图。\n   - 重写 `src/ui/pages/game/styles.css` 里注明\"参考 Chrono Divide\"的 5 处样式（第 577、999、1019、1576、2136 行）。\n   - 停用 `.github/workflows/quality-check.yml` 里用 `GAME_RA2_URL`/`GAME_RA2_YR_URL` 秘密地址拉取游戏包的 CI 任务。\n   - 修改 `gameSourcePicker.ts`：不再用下载的 exe 覆盖玩家文件，改为使用你自己的 exe，并输出哈希报告。\n   - 7z-wasm 带有 unRAR 限制条款。私用没有影响，分发前要处理。\n9. 任何分享之前都要重新做一次合规复核，最好请你所在辖区的律师看一下。\n\n---\n\n## 4. 技术架构（修订：宿主接管战场）\n\n**核心**：原版 exe 在 Worker 里的 v86 中运行，负责模拟、AI、联机和存档。\n\n- **HD 模式**：由宿主根据三类数据合成**整个战场视图**：\n  1. 从内存读出的状态；\n  2. 绘制记录；\n  3. 浏览器内解码的原版资产，作为回退。\n- 所有对象共用**同一套深度、光照和天气模型**。\n- 原版画面只在 Classic 模式下使用，另外把侧栏按整数倍放大后显示。\n- 不在拍平的 RGB565 画面上叠 HD 对象。原因：一旦地形、水面或雨由宿主来画，未替换的对象就没法从原版画面里抠出来。这就是 v1 低估了的 L3 问题。\n\n```\n┌───────── Web Worker：v86 ─────────┐\n│ 原版 gamemd.exe 1.001（你的正版 exe） │\n│  模拟/AI/联机/存档 原样运行 + 少量签名校验补丁 │\n│  [新] 绘制钩子：先\"只记录\"，后\"记录+跳过\"     │\n│   → 客体环形缓冲（避免每次绘制一个 hypercall） │\n└──┬─────────────┬──────────────┬────┘\n   │① 最终帧(Classic/侧栏) │② 内存读取  │③ 绘制记录\n   │  postMessage 可转移对象（非 SAB）【已验证】\n   ▼\n主线程：RenderState 快照（带版本号、与底座无关）\n   ├ Classic：现有 vmFrameRenderer（WebGL2）\n   └ HD：three.js r186 WebGPURenderer（自动回退 WebGL2）\n       ├ 浏览器内解码（@vanguard/formats）→ 原版资产回退\n       ├ 地形高度场 + 逐像素材质/水面掩码\n       ├ 对象：HD 精灵纹理数组 / glTF 车辆 / 回退原版\n       ├ G-buffer → 2D 延迟光照（两个后端通用）\n       ├ 水面、天气、VFX、后处理（半分辨率 AO/Bloom/雾 → 一次合成）\n       └ 侧栏：客体帧区域按 3 倍整数放大；切片单位的 cameo 用 HD 重绘\n```\n\n**捕获范围**（G2 要逐项证明）：\n\n- **绘制类**：SHP、体素、地块，以及非 SHP 的特效类：EBolt（特斯拉电弧）、LaserDraw、RadBeam、Wave（心灵波）、ParticleSystem、Smudge、Overlay（矿石、宝石、墙、桥）、LightSource/Spotlight。这些类名都在 YRpp 头文件列表里【已验证】。\n- **每次绘制附带的状态**：半透明度、着色（铁幕红、超时空擦除、隐形/幻影、心控）、阴影绘制、阵营色。\n- **从对象内存读**：稳定的对象 ID、**连续朝向**（原版体素只有 32 个量化朝向，直接用会一跳 11.25°）、炮塔朝向、坡面倾斜、HVA 帧、飞行高度、炮口位置（FLH）。这部分要逐个字段逆向，工作量已算进 G2b。\n- **战场 UI**：选择框、血条、老兵标记、目标线、路径点、建造网格、集结旗、EVA 文字、迷雾边缘、光标。\n\n**运动质量**：客体的渲染帧率在负载高时会掉，3 倍放大后单位每次移动会跳 3 个像素。宿主要按对象 ID 在客体帧之间做插值，并做平滑卷屏。验收时专门测后期负载下的卡顿，不能只看呈现帧率。\n\n**确定性**：\n\n- 先做\"只记录 + 宿主覆盖绘制\"，不改客体控制流。\n- \"跳过原版绘制\"作为单独一步，单独做联机不同步测试，因为原版绘制路径可能碰到动画计数器或共享随机数（推断）。\n- HD 层使用自己的随机数，不回写游戏。\n\n**分辨率与侧栏**（修正 v1 的算术）：\n\n- v1 的问题：客体 1024×768 是 4:3，面板 3456×2234 约为 1.55:1，两者比例不符。\n- 改为客体用 **1152×744**，放大 3 倍正好是 3456×2232，铺满屏幕。shim 支持到 2560×1600【已验证】。RA2 本身接不接受这个分辨率，要在 Phase 0 验证。\n- 运行时密度定为 3 倍，母版可选做成 4 倍。\n- 侧栏在客体里占固定像素宽度，3 倍整数放大后依然清晰。\n\n**资产契约**（与底座无关，Phase 2 定稿）：\n\n- SHP：按 (SHP 名, 帧号) 查找，KTX2 纹理数组，内含预乘 albedo、视空间法线、高度、粗糙度/自发光、阵营色掩码（调色板索引 16–31）、自发光掩码（索引 240–254）。\n- VXL：按 (VXL 名, section) 查找 glTF，枢轴取自 HVA。\n- 这样即使切换到 vera20k，美术资产也能照用。\n\n**渲染后端事实更正**：\n\n- three.js r186 的 GTAO、Bloom、Lut3D、SMAA、RCAS 在 `tsl/display` 里【已验证】。\n- **ClusteredLighting 在 `examples/jsm/lighting`，只能配合 WebGPURenderer 使用，需要 compute**，WebGL2 回退档用不了。所以光照主方案改成两个后端都能用的 2D 延迟光照。\n\n**性能预算**（推断）：\n\n- 原生分辨率 60 fps，GPU 耗时不超过约 11 ms，全分辨率 pass 不超过 8 个。\n- 瓶颈是显存带宽：M5 Pro 为 307 GB/s【已验证：[Apple](https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/)】。\n- v86 JIT 会占满一个 CPU 核；Worker 到主线程的传输量还没测过。\n\n---\n\n## 5. 分阶段计划\n\n每周一次简报，每阶段一次演示并由你决策。报告控制在 2 页以内，可以贴给 GPT-6 Pro 要第二意见。\n\n**时间线**（推断，G-Look 之后按实测吞吐重估）：\n\n| 里程碑 | 预计时间 |\n|---|---|\n| G1 结论 | 拿到文件后 1 天 |\n| 原版在浏览器里跑通 | 拿到文件后 1–3 周（有条件） |\n| 第一张像样的 HD 画面（G-Look） | 第 3–6 周 |\n| 垂直切片 | 约第 6–9 个月 |\n| 全部内容 HD 化 | 以年计 |\n\n### Phase 0：文件、G1、G0、合规清理（1–2 周）\n\n1. **fork 与清理**：在私有仓库 fork RA2 VM，锁定 `f25986b`，**首次启动前**完成 §3 第 8 条的全部清理，加上免责声明、`.gitignore` 和溯源清单模板。\n2. **拿到文件**（在 Mac 上是阻塞项）：\n   - 先试 steamcmd 强制下载 Windows 版【未验证】；\n   - 不行就用 CrossOver 或 Windows 电脑安装，再把整个目录拷过来。\n3. **G1 一日探针**：\n   - (a) 对比哈希：RA2 VM 锁定的 `7b8a0685…`，vera20k 接受的 `1cdd1180…`。\n   - (b) **检查 PE 节区里有没有 DRM 壳**（如 `.bind`、`.ooa`）。有壳就停，**不剥**，走 vera20k 或光盘版 exe。\n   - (c) 把哈希门控改成 fail-soft，然后从正常菜单启动。\n     - 我已核对：YR 只有直达 `?start-page=` 的跳板（`startupTrampoline.ts:29`、`battleStartup.ts:28`）、开发用的 spawner 探针（`spawnerProbe.ts:45`）、性能读取器会在哈希不符时抛错；`networkTiming.ts:33` 不符时返回 false。开场动画跳过会先校验签名，失败时不报错。所以哈希不一致**大概率只会丢掉这些便利功能**，不用把所有补丁重推一遍【已验证：代码】。\n   - (d) 验证启动器握手：`yr/profile.ts` 的 WM_BEEF 共享内存握手，代码注释称它对应\"YR 的拷贝保护外壳\"【已验证】。\n   - 原版 RA2（game.exe）锁定的很可能是 XWIS 联机版【较可能】，零售 exe 的兼容性单独评估。\n4. **G0 性能**：客体 1152×744 与 1920×1080 各测一局 YR 后期遭遇战，记录逻辑帧率和呈现帧率。门槛见 §1。\n5. **本地回归**：改造 `tests/real-game`，让它读本地 `gameres/`，不再依赖 CI 的秘密地址。\n6. **并行**：构建 vera20k，用你的文件做原生对照；起草给 CD 作者的信，由你本人发送。\n- **验收**：用你的 exe 完整打一局 10 分钟遭遇战；仓库里没有 EA 文件；网络面板里没有第三方游戏文件请求。\n\n### Phase 1：原版冒烟测试（不超过 1 周，完整清单放后台跑）\n\n- **冒烟**：YR 遭遇战、存档与读档、一关带简报视频的 YR 战役（**YR 只有盟军和苏军战役，没有尤里战役**）、双浏览器中继打 20 分钟、性能测试。\n- **后台完整清单**：超武、海军、桥、驻军、老兵、间谍、自定义地图、8 人局。与 Phase 2 并行，发现问题只修 shim 层。\n- 原版 RA2 战役依赖 game.exe，零售版能不能测要看 G1 的结果。\n\n### 并行轨道：HD 渲染器\"场景沙盘\"与 G-Look（第 1–6 周）\n\n- **不依赖 G2**：用你的一张地图文件在宿主端解析，按版本化的 RenderState 契约摆放对象，先搭 HD 渲染器。没拿到游戏文件前先用程序生成的占位素材。\n- 这个渲染器无论最后走 L2 还是 L3、RA2 VM 还是 vera20k 都用得上。\n- **G-Look 验收**：在锁定的相机和光照下，同一屏画面里要有：\n  - 1 辆最终品质的英雄车辆（灰熊，全流程走一遍并**记录耗时**）；\n  - 1 栋最终品质的建筑；\n  - HD 地形块，带逐像素岸线；\n  - 水面泡沫，加一艘移动船只的尾迹；\n  - 湿地上下雨；\n  - 一次带点光源的爆炸。\n  - 白天和夜晚各一版，都以 Classic|HD 对比呈现。你签字后才开始做切片。\n- **目标图**：\n  - 用切片地图、固定存档视口的真实截图，在 ChatGPT Images 2.5 里按实际显示尺寸重绘，叠加原版轮廓作为比例参照。\n  - 图中每个元素都标明由哪一项管线实现。\n  - 如果内容过滤拦截 EA 画面，就改用本地 FLUX.2 klein 4B（Apache 许可）。\n  - 参考素材：洱海Adais 系列（[BV1xpG16MEFU](https://www.bilibili.com/video/BV1xpG16MEFU/)、[BV13EN46CETV](https://www.bilibili.com/video/BV13EN46CETV/)）、小黑戏游记 [BV1EQjW6CEt6](https://www.bilibili.com/video/BV1EQjW6CEt6/)、偏忠实风格的 [BV1akKs6GEaE](https://www.bilibili.com/video/BV1akKs6GEaE/)。\n  - 目标图做法沿用 C&C Remastered 的 Visual Target image【已验证：[EA 2019-04 更新 bea82f](https://www.reddit.com/r/commandandconquer/comments/bea82f/remaster_update_and_first_art_preview/)】。\n- **L0 滤镜演示**（FSR、Anime4K、SweetFX）只作为\"一次性基线\"给你看，**不代表方向**，避免你先入为主地记住那种\"油腻\"观感。\n\n### Phase 2：HD 渲染桥 Spike，G2a + G2b（6–10 周）\n\n- **G2a（1–2 周，第 3 周止损）**：\n  - 先用 `inspectSurfaceObjects()` 枚举客体 surface，看能不能直接拿到地形层和侧栏层，这是低成本的 L1 收获（推断）。\n  - 给 1 个 SHP 绘制和 1 个体素绘制加\"只记录\"钩子，测记录速率和模拟器开销。\n  - 宿主覆盖画 1 个 HD 精灵，不跳过原版绘制。\n- **G2b（4–6 周，第 10 周止损）**：\n  - 宿主用浏览器内解码器和绘制记录**重画整个战场**，要求与 Classic 画面一致（逐区域比对）；\n  - 然后替换美国大兵和灰熊；\n  - 加上跳过原版绘制；\n  - 完整实现 §4 列出的捕获范围和插值。\n- **G2b 验收**：\n  - 与 Classic 画面比对通过；\n  - 遮挡、阵营色、阴影正确；\n  - 1152×744 客体、100 个以上单位下，呈现帧率不低于 60，模拟逻辑帧率不低于 Classic 的 90%；\n  - 后期负载下卡顿测试通过；\n  - 一边 HD、一边 Classic 联机 20 分钟不出现不同步。\n- **止损**：到时间没过，就在\"转 vera20k（先做 HD）\"和\"停留在 L0/L1 滤镜加辅助缓冲\"之间由你决定。\n\n### Phase 3：垂直切片（精简范围 4–6 个月，推断，G-Look 后按实测重估）\n\n- **地图与固定场景**：一张小型温带地图，4–5 个黄金存档场景：白天基地、雨天、夜晚、海岸线、100 个以上单位的后期大战。**这些场景里不允许出现回退对象。**\n- **资产清单**：\n\n| 类别 | 内容 |\n|---|---|\n| 建筑 | MCV 展开成建造厂（含建造动画）、发电厂、矿场（含矿车停靠）、兵营，都要有受损和燃烧状态 |\n| 车辆（实时 glTF） | MCV、矿车、灰熊、犀牛 |\n| 步兵 | 美国大兵、动员兵：低降噪 ControlNet 重绘原版帧，逐帧对齐，不做骨骼绑定 |\n| 环境 | 树、矿石与宝石、带损毁状态的桥、弹坑焦痕 |\n| 界面 | 战场 UI，切片单位的 cameo，3 倍整数放大的侧栏 |\n| 特效 | 水面、雨、一套爆炸 |\n\n- 以后如果全量采用 3D 做步兵，只留给约 6 个英雄步兵。\n- 如果按 v1 的全量范围做，预计 4–8 个月。\n\n### Phase 4–7：资产规模化、环境、VFX、打磨\n\n- 规模化按阵营单位 → 战区 → 步兵 → 民用建筑 → 动画 → 图标的顺序分批，每批由你签字。\n- **放到切片之后再做**：XDR 屏 HDR 输出、自动画质档位、Safari/Firefox 同等支持、侧栏全面重绘。\n- 原版 RA2（game.exe 1.006）的 HD 缺少公开逆向资料，较长时间内只能保持 Classic 画面（推断）。但 HD 资产不依赖 exe，以后有了 game.exe 桥可以直接复用。\n\n---\n\n## 6. 画面规范（数值版，资产生产前定稿）\n\n- **相机**：正交 2:1（偏航 45°，俯仰 30°），不旋转，缩放范围 1–2 倍。\n- **光照**：太阳方向锁定为原版的左上方来光（推断，来自截图观察），曝光固定。\n- **LUT 与地图光照**：每个战区一套 LUT。地图 `[Lighting]` 段是调色板域数值【已验证：[ModEnc](https://modenc.renegadeprojects.com/Lighting)】，要拟合成 PBR 光照参数，并按战区用同一场景的 Classic/HD 画面对比平均亮度和色相来校准。\n- **阵营色**：规定标准色样；过色调映射后 ΔE 要在阈值内。**先对比测试 Neutral 和 AgX**（AgX 会让高饱和色发灰），我倾向 Neutral（推断）。\n- **上限**：规定 bloom 阈值、震屏幅度、HDR 闪光、特效强度的上限；规定单位在复杂地形上的描边或轮廓光规则。\n- **装饰性天气**：禁止随机闪电，以免和天气控制器混淆；雾和夜间暗度设上限（原版对战没有战争迷雾）；默认关闭，保持地图原有光照。\n- **地形**：\n  - 高度场严格复刻 RA2 的离散坡面，否则单位会浮空或陷地。\n  - 水、岸、陆地的材质权重由原版 TMP 美术逐像素分类得到，不能按格子算，否则岸线会成锯齿。\n  - 悬崖用照原版悬崖做的模块化组件。\n  - 城市战区不能硬塞进 8 套材质。\n- **水面反射**：只反射天空和网格物体（glTF 船只和车辆），**精灵不反射**。\n- **可读性门槛**：\n  - 随机抽 20 个单位裁图做盲测，识别率不低于 95%；在后期混战、雨天、夜晚、灰度下都要复测。\n  - HD 像素不能超出原版的点击框。\n  - 每个朝向的炮口位置要与 art.ini 的 FLH 对齐。\n- **遮挡测试**：步兵在 HD 建筑前后、车辆在桥下、飞机飞过建筑、船只靠在岸边悬崖旁。\n- **审阅工具**：分屏或划变对比、HD 覆盖率热图、G-buffer 调试视图、黄金存档每周自动截图、闪烁指标。\n- **AI 概念图里做不到的**（要事先说清，避免你批准一张做不出来的目标图）：\n  - 不重复的独特细节；\n  - 夸大的建筑比例；\n  - 精灵的倒影；\n  - 路径追踪级别的全局光照；\n  - 每个镜头单独打光。\n- **资产形式**：\n  - 车辆：实时 glTF，按连续朝向渲染。\n  - 建筑：3D 重建后逐帧预渲染，或者用实时 glTF。\n  - 步兵：主力单位用 3D 做 8 方向精灵表；长尾单位用 ControlNet 重绘。\n  - 地形：PBR splat 加高度场。\n  - VFX：实时特效为主，重头爆炸用 flipbook。EmberGen 官方定价页写着暂不支持 macOS【已验证：[来源](https://jangafx.com/software/pricing)】，Mac 上用 Blender 替代。\n  - 屏幕空间 AI 滤镜（如 DLSS 5）不作为最终方案：社区评价是\"油腻、糊\"【较可能：来自 AI 汇总的评论】，而且只支持 RTX 50。\n\n---\n\n## 7. AI 工具分工（修订要点）\n\n- **模型名澄清**：不存在 \"ChatGPT 6 Ultra\"。当前文本旗舰是 GPT-6 Astra；\"Ultra\" 是推理强度档位；最强图像模型是 ChatGPT Images 2.5（API 型号 `gpt-image-2.5-sunburst` 和 `flare`）【已验证：[Models](https://learn.chatgpt.com/docs/models)、[API](https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst)】。你说的\"Pro 模式\"对应 GPT-6 Pro，每周额度【较可能】。\n- **分工**：\n  - **我（Claude Code）**：全部代码、提取管线、批处理脚本、质检。\n  - **你**：在 ChatGPT 网页版定风格，用 Image comments 圈改，每个阶段用 GPT-6 Pro 审一次方案。\n  - **量产**：走 OpenAI API（gpt-image-2 的 Batch 打五折）或 Codex CLI 的 `$imagegen`。\n  - **本地（M5 Pro）**：放大、深度和法线估计（Depth Anything 3 的 Apache 版本、Marigold）、FLUX.2 klein 4B 风格 LoRA。\n- **不用浏览器自动化批量操作 chatgpt.com**：OpenAI 条款禁止程序化提取输出【较可能：条款页面返回 403，只看到片段】。\n- **英雄 3D 资产的清理**：包括重拓扑、枢轴、阵营色掩码、骨骼重定向。我可以写脚本驱动 Blender，但**没法判断美术质量、也没法手工修模**。所以需要决定由谁来做（决策 D4）。G-Look 阶段会先实测单个资产的耗时。\n- **2D 生图模型**没法稳定保持多朝向、多帧之间的一致性，需要一致性的资产一律走 3D，或者用 ControlNet 锁住原版帧。\n\n---\n\n## 8. 需要你决定的事项\n\n**现在需要回复（只有 4 项）**：\n\n1. **正版文件从哪来**：D-files。\n2. **先做 YR**：D2。\n3. **分享范围**：D6，推荐只有你自己。\n4. **是否发信给 CD 作者**：D7。\n\n**以后再定**（等有了证据再决定）：\n\n| 决策 | 什么时候定 |\n|---|---|\n| D1 底座 | G1、G0、G2 之后 |\n| D3 画面风格 | G-Look 时 |\n| D4 英雄资产由谁做、预算多少 | G-Look 实测之后 |\n| D5 像素密度 | 默认运行时 3 倍、母版 4 倍 |\n| D8 Classic/HD 切换键 | 切片前定；会强制资产与原版逐帧对齐，要先估成本 |\n| 渲染后端、天气是否默认开启 | 以后 |\n\n---\n\n## 9. 风险与对策（新增和变化的部分）\n\n| 风险 | 对策 |\n|---|---|\n| exe 带 DRM 壳或需要启动器激活 | G1 第一天就查；绝不剥壳；转 vera20k 或光盘版 exe |\n| 很可能出现哈希不一致（两个项目锁定的 YR 1.001 哈希就不同） | 哈希门控改为 fail-soft，走菜单启动；RA2 部分单独评估 |\n| v86 性能不够 | G0 设数值门槛，Phase 2 之前就判断 |\n| 在原版画面上叠 HD 会成补丁拼贴（阴影丢失、深度锯齿） | 直接走宿主接管战场（L3-lite） |\n| 跳过原版绘制导致不同步 | 先只记录；跳过作为单独一步，单独测试 |\n| 体素只有 32 个量化朝向，替换后会一跳一跳 | 从内存读连续朝向，并做插值 |\n| 美术吞吐不足（你不是美术，我不能手工修模） | G-Look 实测单个资产耗时；英雄资产外包；缩小切片范围 |\n| 切换 vera20k 会丢掉 TS 代码 | 与底座无关的资产契约，保住美术资产 |\n| 本项目自己的逆向带来的法律暴露 | 私用、不分发；分享前请律师复核 |\n| 很长时间看不到像样的画面 | 并行场景沙盘，G-Look 定在第 3–6 周 |\n| 工期估计不准 | 所有时间盒都带止损线；G-Look 后重估 |\n\n---\n\n## 10. 下一步\n\n**你批准后我马上做（这些都不需要游戏文件）**：\n\n1. 在项目目录下建立 RA2 VM 私有 fork，锁定 `f25986b`，完成 §3 第 8 条的全部清理。\n2. 把 YR 的哈希门控改为 fail-soft；写好 G1 探针脚本（哈希、PE 节区和 DRM 检查、启动日志）。\n3. 起步场景沙盘：搭 three.js r186 WebGPU 等距场景、定版本化的 RenderState 契约，先用程序生成的占位地形、水面和雨，第 1–2 周给你看第一版。\n4. 构建 vera20k 作为备选；起草给 CD 作者的英文信。\n\n**需要你提供的**：\n\n1. 购买或确认你已有 RA2+YR（Steam 2229850 或 Ultimate Collection），把**整个安装目录**拷到仓库外，比如 `~/RA2-Game`。拿不到时我先试 steamcmd。\n2. 回复\"现在需要回复\"的 4 项决策（D-files、D2、D6、D7）。\n3. 你的 ChatGPT 套餐，以及能否创建 API key、每月预算上限。\n4. 3–5 张你最喜欢的参考图（小红书的需要登录，我这边看不到）。\n",
+ "recommended_base": "RA2 VM（ra2-games/ra2，锁定 f25986b 的私有 fork），有条件：需通过 G1（非 DRM 加壳、能过 WM_BEEF 握手从菜单启动）、G0（v86 性能门槛）、G2a/G2b（宿主接管战场的 L3-lite 桥）；HD 层用浏览器内解码（@vanguard/formats）+ three.js r186 新渲染器",
+ "runner_up_base": "vera20k（YuriPlanet/vera20k，Rust+wgpu/Metal，GPL-3.0）：HD 最易做，但不是网页版、第一步不达标（占位 AI、无战役/联网/核弹等），切换意味着\"HD 先行、原版玩法后补\"并丢弃 TS 合成器代码；靠与底座无关的资产契约保住美术",
+ "decisions": [
+  {
+   "id": "D-files",
+   "question": "正版游戏文件从哪里来？",
+   "options": [
+    {
+     "label": "Steam 单品 2229850",
+     "description": "官方来源，单独购买 RA2+YR；只支持 Windows，需要用 steamcmd（未验证）、CrossOver 或 Windows 电脑安装后把目录拷过来；exe 是否带 SteamStub 壳还不知道",
+     "recommended": true
+    },
+    {
+     "label": "C&C Ultimate Collection 合集",
+     "description": "常在 6 美元左右，还包含其他作品；拷文件的方式和壳的问题与单品相同，exe 版本可能不同",
+     "recommended": false
+    },
+    {
+     "label": "已有的光盘版或 The First Decade",
+     "description": "可能是没有加壳的 exe，G1 通过概率可能更高（推断）；但你得真的有，并且能读光盘",
+     "recommended": false
+    }
+   ]
+  },
+  {
+   "id": "D1",
+   "question": "底座路线怎么选？（等 G1/G0/G2 有结果再最终定）",
+   "options": [
+    {
+     "label": "A：RA2 VM",
+     "description": "网页版、合法、跑原版逻辑；HD 相当于要新写解码器、回退渲染器和 HD 渲染器，技术风险最大",
+     "recommended": true
+    },
+    {
+     "label": "B：vera20k",
+     "description": "HD 最容易做，Metal 原生；不是网页版，第一步玩法不完整，而且要丢掉 TS 代码",
+     "recommended": false
+    },
+    {
+     "label": "C：等 CD 作者授权",
+     "description": "如果获批，HD 基础最好；结果不确定，可能要等很久",
+     "recommended": false
+    },
+    {
+     "label": "D：私下用 CD 衍生代码",
+     "description": "技术上最省事，但没有授权，存在侵权；不推荐",
+     "recommended": false
+    }
+   ]
+  },
+  {
+   "id": "D2",
+   "question": "先对哪个版本做 HD？",
+   "options": [
+    {
+     "label": "先做 YR（gamemd.exe 1.001）",
+     "description": "有 YRpp 的地址事实可以用，YR 遭遇战里也有盟军和苏军；原版 RA2 战役较长时间内保持 Classic 画面",
+     "recommended": true
+    },
+    {
+     "label": "先做原版 RA2（game.exe）",
+     "description": "符合早期玩家的情怀，但公开的逆向资料很少，锁定的 exe 很可能是 XWIS 版",
+     "recommended": false
+    },
+    {
+     "label": "两个一起做",
+     "description": "逆向工作量翻倍，Spike 风险也翻倍",
+     "recommended": false
+    }
+   ]
+  },
+  {
+   "id": "D3",
+   "question": "画面风格（在 G-Look 时拍板）？",
+   "options": [
+    {
+     "label": "A：忠实 HD（C&C Remastered 做法）",
+     "description": "可读性最好、最正宗；没有 AI 壁纸那么惊艳",
+     "recommended": false
+    },
+    {
+     "label": "B：电影感（洱海Adais 风格）",
+     "description": "截图最惊艳；单位难辨认，红警味道容易走偏",
+     "recommended": false
+    },
+    {
+     "label": "C：混合",
+     "description": "单位和建筑按 A 做，光照、水面、天气、特效按 B 做；需要可重新打光的资产管线",
+     "recommended": true
+    }
+   ]
+  },
+  {
+   "id": "D4",
+   "question": "英雄 3D 资产由谁来做、预算多少？（G-Look 实测单个资产耗时后定）",
+   "options": [
+    {
+     "label": "全部 AI 生成，我用脚本清理",
+     "description": "最便宜；质量是 AI 水平，大约 1/10 的生成结果可以直接用，你的审阅负担重",
+     "recommended": false
+    },
+    {
+     "label": "英雄资产外包给人类 3D 美术，长尾资产用 AI",
+     "description": "质量最好也可控；约 10–15 个英雄资产需要预算，需要找人和管理",
+     "recommended": true
+    },
+    {
+     "label": "社区现成模型（如 C&C Blender Forge）",
+     "description": "可能最快；是否存在、许可如何都没有验证，风格也可能不统一",
+     "recommended": false
+    }
+   ]
+  },
+  {
+   "id": "D6",
+   "question": "分享范围？",
+   "options": [
+    {
+     "label": "只有你自己",
+     "description": "风险最低；只在 localhost 运行、私有仓库",
+     "recommended": true
+    },
+    {
+     "label": "分享给朋友",
+     "description": "属于分发，必须先拿到授权并完成合规复核",
+     "recommended": false
+    },
+    {
+     "label": "公开发布",
+     "description": "风险最高，需要换成许可干净的底座并请律师审查",
+     "recommended": false
+    }
+   ]
+  },
+  {
+   "id": "D7",
+   "question": "要不要联系 Chrono Divide 作者请求授权？",
+   "options": [
+    {
+     "label": "要，我起草英文信，你本人发送",
+     "description": "零成本；万一获批，可能换到最好的 HD 底座",
+     "recommended": true
+    },
+    {
+     "label": "暂时不联系",
+     "description": "省事；放弃一个潜在的更优选项",
+     "recommended": false
+    }
+   ]
+  },
+  {
+   "id": "D8",
+   "question": "要不要做 Classic/HD 实时切换键？（切片前定）",
+   "options": [
+    {
+     "label": "要",
+     "description": "保护原版手感，方便对比审阅；所有资产都得与原版逐帧对齐，单个资产成本上升（步兵尤其明显）",
+     "recommended": true
+    },
+    {
+     "label": "不要",
+     "description": "资产自由度更大、更便宜；失去实时对比和逐帧校验",
+     "recommended": false
+    }
+   ]
+  }
+ ],
+ "immediate_next_step": "在你批准后：建立 RA2 VM 私有 fork（锁定 f25986b），完成清理（删 oldgame.store 预下载、下载外链、EA 图标和 extractIcon、CD 风格 CSS、秘密地址 CI；改为使用你自己的 exe），把 YR 哈希门控改为 fail-soft，写好 G1 一日探针脚本（哈希、PE/DRM 检查、WM_BEEF 握手日志）；同时起步不需要游戏文件的 three.js r186 场景沙盘，并起草给 CD 作者的信。你这边需要：购买或确认 RA2+YR 并拷出安装目录，回复 D-files、D2、D6、D7。",
+ "key_sources": [
+  "https://github.com/ra2-games/ra2",
+  "https://github.com/YuriPlanet/vera20k",
+  "https://github.com/harshilmathur/openra2",
+  "https://github.com/huangkaoya/ts-redalert2/commit/898d8918",
+  "https://chronodivide.com/tos.html",
+  "https://github.com/Phobos-developers/YRpp",
+  "https://www.ea.com/games/command-and-conquer/command-and-conquer-remastered/news/modding-faq",
+  "https://www.ea.com/legal/user-agreement",
+  "https://www.copyright.gov/ai/Copyright-and-Artificial-Intelligence-Part-2-Copyrightability-Report.pdf",
+  "https://www.reddit.com/r/commandandconquer/comments/bea82f/remaster_update_and_first_art_preview/",
+  "https://github.com/mrdoob/three.js/tree/r186/examples/jsm/tsl/display",
+  "https://threejs.org/docs/pages/ClusteredLighting.html",
+  "https://modenc.renegadeprojects.com/Lighting",
+  "https://learn.chatgpt.com/docs/models",
+  "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst",
+  "https://jangafx.com/software/pricing",
+  "https://store.steampowered.com/app/2229850/",
+  "https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/",
+  "https://news.ycombinator.com/item?id=45991853",
+  "/private/tmp/claude-501/-Users-lukegogogo-claude-code-projects---2----/db472532-d13c-48f5-a638-abe179791f90/scratchpad/repos/ra2-games__ra2"
+ ],
+ "change_log": "1) 架构改为 L3-lite：HD 模式下由宿主合成整个战场（浏览器内解码器 @vanguard/formats 负责原版资产回退，统一深度、光照和天气），原版画面只用于 Classic 模式和侧栏；G2 重新定义为先证明宿主重画的画面与 Classic 一致，再做替换。\n2) G1 按代码改写，已在本地克隆核对：YR 的哈希门控只卡 startupTrampoline、battleStartup、spawnerProbe、性能读取器和 networkTiming（不符时返回 false）。G1 改为 PE/DRM 壳检查 + 门控改 fail-soft 后从菜单启动 + WM_BEEF 握手；删掉\"至少几周重推补丁\"的默认后果；加入\"绝不剥壳\"的法律红线。\n3) 新增 G0（v86 性能，带数值门槛）和 G-Look（第 3–6 周，场景沙盘，英雄资产全流程并记录耗时，昼夜 Classic|HD 对比）。\n4) Spike 拆成 G2a（1–2 周，第 3 周止损，只记录、不改客体控制流）和 G2b（4–6 周，第 10 周止损）；切片精简范围估 4–6 个月（全量 4–8 个月）；Phase 1 压缩为冒烟测试，完整清单放后台跑；HDR、自动档位、多浏览器同等支持推迟到切片之后。\n5) 措辞更正：\"一行不改\"改为\"原版逻辑 + 少量签名校验补丁\"；功能完整度改为\"只在代码层验证，从未用真实资源跑过\"；v1 说\"各候选差别只在取状态方式\"是错的，更正为要自写整个回退渲染器。\n6) 事实更正：YR 没有尤里战役；Vanguard 是 11 种类型（7 种建筑 + 4 种单位）；YRpp 没有许可证，只用事实；OpenAI 条款、DLSS 5 评价、光照方向改标较可能/推断；Visual Target 引用改为 bea82f；CD 的 2018 是域名和版权年份，补丁说明从 2020-10-31 开始；ClusteredLighting 位于 examples/jsm/lighting 且只能用于 WebGPU，光照主方案改为两个后端通用的 2D 延迟光照；RA2 VM 用 postMessage 可转移对象，不用 SAB。\n7) 法律部分补充：本项目自己的逆向和钩子带来的风险；仓库清理补全（CD 风格 CSS 第 577/999/1019/1576/2136 行、quality-check.yml 的秘密地址任务、extractIcon.mts 及其产出的图标），均已核对。\n8) 如实写明 vera20k 备选的代价（丢弃 TS 合成器、第一步也不达标），新增与底座无关的资产契约。\n9) 分辨率改为客体 1152×744、3 倍放大到 3456×2232，侧栏按整数倍放大；运行时密度 3 倍、母版 4 倍。\n10) 新增捕获范围（EBolt、LaserDraw、RadBeam、Wave、ParticleSystem、Smudge、Overlay、LightSource，逐绘制状态，对象 ID，连续朝向，炮塔朝向，坡面，HVA 帧，高度，FLH）、运动插值与卡顿验收、先只记录再跳过绘制的确定性策略。\n11) 新增数值版画面规范：相机和太阳锁定；[Lighting] 校准；Neutral 与 AgX 对比测试保护阵营色；各类效果上限；装饰性天气规则；地形复刻坡面并逐像素生成掩码；水面只反射天空和网格；可读性盲测 95%、点击框、FLH；遮挡测试清单；审阅工具；\"AI 概念图做不到的\"清单。\n12) 收紧垂直切片：黄金存档场景内不允许回退对象，补齐树、矿石、桥的损毁状态、MCV 展开、矿车停靠、弹坑焦痕、战场 UI、cameo 和整数倍侧栏；步兵在切片里用 ControlNet 重绘。\n13) 决策精简为现在只需回复 4 项；新增 D4（英雄资产由谁做、预算）；新增 steamcmd 优先尝试、本地真实游戏回归测试、L0 仅作一次性基线、目标图被内容过滤拦截时用本地模型兜底。"
+}

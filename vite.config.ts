@@ -184,7 +184,8 @@ function isWithinGameDirectory(candidate: string): boolean {
 }
 
 export default defineConfig({
-  plugins: [basicSsl(), gameAssetsPlugin(), ra2NetworkRelayPlugin()],
+  // RA2_DEV_HTTP=1 serves plain HTTP for local tooling that rejects the self-signed certificate; localhost stays a secure context.
+  plugins: [...(process.env.RA2_DEV_HTTP ? [] : [basicSsl()]), gameAssetsPlugin(), ra2NetworkRelayPlugin()],
   // VM pages with hmr=false cannot rely on reloads to handle a second prebundle. Register JSX and Worker dynamic dependencies
   // up front to avoid a second React instance in lazy pages. This only builds development caches; browser experiments are not preloaded.
   optimizeDeps: {

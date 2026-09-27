@@ -7,7 +7,6 @@ import { createArchiveExtractor } from '../../src/utils/archive/archiveExtractor
 import { ARCHIVE_WANTED_NAMES, GAME_MANIFESTS } from '../../src/games/manifest';
 import type { SupportedGameId } from '../../src/games/catalog';
 import { assertGameResources, inventoryResources, sha256 } from './gameResources';
-import { downloadResources } from './downloadResources';
 
 /**
  * Use the same complete import as the frontend; CI waits for all extraction rather than starting early from the startup layer.
@@ -69,11 +68,11 @@ export async function prepareGame(
   await mkdir(gameDirectory, { recursive: true });
   await mkdir(thirdParty);
   await extractGameArchive(join(root, 'archive.bin'), gameDirectory, ARCHIVE_WANTED_NAMES);
-  // The frontend likewise overlays the package executable with the exact EXE registered in the manifest; its fixed hash is an independent version contract.
+  // Remaster fork: the executable comes from the player's own package and is never downloaded. The inventory records its hash;
+  // assertGameResources reports, rather than rejects, builds that differ from the manifest's verified one.
   for (const file of GAME_MANIFESTS[game].thirdParty) {
     console.log(`准备主程序：${file.name}`);
-    await downloadResources(file.url, file.sha256, join(thirdParty, file.name));
-    await copyFile(join(thirdParty, file.name), join(gameDirectory, file.name));
+    await copyFile(join(gameDirectory, file.name), join(thirdParty, file.name));
   }
   const inventory = await inventoryResources({ game: join(root, 'game'), thirdParty });
   assertGameResources(inventory, game);

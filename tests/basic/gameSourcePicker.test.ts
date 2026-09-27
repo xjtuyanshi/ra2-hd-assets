@@ -28,7 +28,7 @@ function prepare(ids: SupportedGameId[]) {
   );
   const provider = new SessionGameFileProvider('test', files);
   mocks.load.mockResolvedValue(provider);
-  mocks.thirdParty.mockResolvedValue(new Map());
+  mocks.thirdParty.mockResolvedValue({ files: new Map(), checks: [], missing: [] });
   mocks.validate.mockImplementation(async (_provider: GameFileProvider, game: SupportedGameId) => [
     { game: { id: game } },
   ]);
@@ -42,7 +42,7 @@ it.each(['ra2', 'yr'] as const)('单版本资源自动启动 %s，只加载对�
   await picker.importArchive(new Blob() as File);
   expect(picker.getSnapshot().games).toEqual([]);
   expect(selected).toHaveBeenCalledWith({ game: { id: game } });
-  expect(mocks.thirdParty).toHaveBeenCalledWith(GAME_MANIFESTS[game], expect.any(Function));
+  expect(mocks.thirdParty).toHaveBeenCalledWith(GAME_MANIFESTS[game], expect.anything(), expect.any(Function));
 });
 it('双版本先显示选择，选择后才加载 EXE，重复点击不重复启动', async () => {
   prepare(['ra2', 'yr']);
@@ -108,4 +108,29 @@ it.each([['ra2'], ['yr'], ['ra2', 'yr']] as SupportedGameId[][])('统一开发�
   } finally {
     listing.mockRestore();
   }
+});
+
+it('玩家文件缺主程序时不启动，并在清单里列出缺少的 EXE', async () => {
+  prepare(['yr']);
+  mocks.thirdParty.mockResolvedValue({ files: new Map(), checks: [], missing: ['gamemd.exe'] });
+  const selected = vi.fn(),
+    picker = createGameSourcePicker(selected);
+  await picker.importArchive(new Blob() as File);
+  expect(selected).not.toHaveBeenCalled();
+  expect(picker.getSnapshot().description).toContain('gamemd.exe');
+  expect(picker.getSnapshot().manifest?.complete).toBe(false);
+});
+
+it('主程序与已验证版本不同时仍启动，并提示兼容补丁会停用', async () => {
+  prepare(['yr']);
+  mocks.thirdParty.mockResolvedValue({
+    files: new Map([['gamemd.exe', new Uint8Array([9])]]),
+    checks: [{ name: 'gamemd.exe', sha256: 'f'.repeat(64), pinned: false, source: 'player' }],
+    missing: [],
+  });
+  const selected = vi.fn(),
+    picker = createGameSourcePicker(selected);
+  await picker.importArchive(new Blob() as File);
+  expect(selected).toHaveBeenCalledWith({ game: { id: 'yr' } });
+  expect(picker.getSnapshot().description).toContain('与已验证版本不同');
 });

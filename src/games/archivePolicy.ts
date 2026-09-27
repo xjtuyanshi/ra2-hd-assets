@@ -27,6 +27,8 @@ export function gameArchiveLayers(gameId?: SupportedGameId): {
   }
   const manifest = GAME_MANIFESTS[gameId];
   const required = manifest.playerRequired.map((file) => file.name.toLowerCase());
+  // The pinned executable comes from the player's own installation and must be ready before boot.
+  const executables = manifest.thirdParty.map((file) => file.name.toLowerCase());
   const other = /^(?:maps\w*\.mix|movies\d+\.mix|movmd\d+\.mix|theme(?:md)?\.mix|subtitle(?:md)?\.txt|taunts\/)$/;
   const optional = manifest.playerOptional.map((file) => file.name.toLowerCase());
   // Preserve the archive allowlist so layering cannot silently discard resources; YR installations may still depend on
@@ -34,7 +36,7 @@ export function gameArchiveLayers(gameId?: SupportedGameId): {
   const base = gameId === 'yr' ? GAME_MANIFESTS.ra2.playerRequired.map((file) => file.name.toLowerCase()) : [];
   return {
     required,
-    startup: [...new Set([...required, ...base, ...optional.filter((name) => !other.test(name))])],
+    startup: [...new Set([...executables, ...required, ...base, ...optional.filter((name) => !other.test(name))])],
     wanted: [...ARCHIVE_WANTED_NAMES],
   };
 }

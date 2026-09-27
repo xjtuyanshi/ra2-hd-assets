@@ -1,0 +1,9 @@
+#!/bin/sh
+# Remaster fork guard: refuse to commit original game files or assets derived from them.
+# Install once per clone: git config core.hooksPath scripts/git-hooks
+blocked=$(git diff --cached --name-only --diff-filter=ACMR | grep -i -E '\.(mix|exe|dll|shp|vxl|hva|tmp|pal|csf|bik|aud|wav)$|(^|/)gameres/')
+if [ -n "$blocked" ]; then
+  echo "pre-commit: refusing to commit game files or derived assets:" >&2
+  echo "$blocked" >&2
+  exit 1
+fi
