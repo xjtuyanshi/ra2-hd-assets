@@ -150,8 +150,8 @@ async function runSession(
   );
   const visible = (text: string) =>
     shim.inspectWindowState().find((window) => window.text === text && shim.isWindowVisible(window.hwnd));
-  const wait = async (label: string, condition: () => boolean) => {
-    const deadline = Date.now() + 60_000;
+  const wait = async (label: string, condition: () => boolean, timeoutMs = 60_000) => {
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (status && ['error', 'blocked', 'exited'].includes(status.phase)) throw new Error(status.detail);
       if (condition()) return;
@@ -185,7 +185,23 @@ async function runSession(
   };
   try {
     await core.start();
-    await wait('main menu', () => !!visible('GUI:SinglePlayer'));
+    // VmCore already applies the signature-validated logo skip. Full YR packages can
+    // still play an intro: dismiss it through normal keyboard messages, only until
+    // the main menu appears. Retry because startup may not yet be accepting input.
+    let nextEscape = Date.now() + 1000;
+    await wait(
+      'main menu',
+      () => {
+        if (visible('GUI:SinglePlayer')) return true;
+        if (gameId === 'yr' && Date.now() >= nextEscape) {
+          core.postMessage(0x100, 27, 1);
+          core.postMessage(0x101, 27, 0xc0000001);
+          nextEscape = Date.now() + 1000;
+        }
+        return false;
+      },
+      gameId === 'yr' ? 180_000 : 60_000,
+    );
     await delay(8000);
     await button('GUI:SinglePlayer');
     if (saved) {
@@ -242,16 +258,22 @@ async function runSession(
 export function describeSaveLoad(gameId: SupportedGameId, expectedHash: string): void {
   requireGameResources(gameId);
   describe(`${gameId} native save cold load`, () => {
-    it('saves through the normal menus, then loads persisted bytes in a fresh VM through the file port', async () => {
-      const saved = await runSession(gameId, expectedHash);
-      const directory = await mkdtemp(join(tmpdir(), 'ra2-save-load-'));
-      try {
-        const path = join(directory, 'cold.sav');
-        await writeFile(path, saved!.bytes);
-        await runSession(gameId, expectedHash, { ...saved!, bytes: new Uint8Array(await readFile(path)) });
-      } finally {
-        await rm(directory, { recursive: true, force: true });
-      }
-    }, 240_000);
+    // Both sessions may play the YR intro; budget the extra main-menu wait twice.
+    const timeoutMs = gameId === 'yr' ? 480_000 : 240_000;
+    it(
+      'saves through the normal menus, then loads persisted bytes in a fresh VM through the file port',
+      async () => {
+        const saved = await runSession(gameId, expectedHash);
+        const directory = await mkdtemp(join(tmpdir(), 'ra2-save-load-'));
+        try {
+          const path = join(directory, 'cold.sav');
+          await writeFile(path, saved!.bytes);
+          await runSession(gameId, expectedHash, { ...saved!, bytes: new Uint8Array(await readFile(path)) });
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      },
+      timeoutMs,
+    );
   });
 }

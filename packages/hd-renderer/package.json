@@ -1,0 +1,20 @@
+{
+  "name": "hd-renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Base-agnostic HD 2.5D renderer for the RA2 remaster: consumes a versioned RenderState and draws terrain, water, weather, lighting and effects with three.js WebGPURenderer (WebGL2 fallback).",
+  "scripts": {
+    "sandbox": "vite --config vite.config.ts",
+    "build:sandbox": "vite build --config vite.config.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "three": "0.186.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.186.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.3"
+  }
+}
