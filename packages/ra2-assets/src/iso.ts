@@ -170,6 +170,21 @@ export function drawOffsetFor(
   }
 }
 
+/**
+ * Draw point relative to the projection of an object's engine coordinate (CoordStruct) instead of its cell's top
+ * corner, for renderers that place live objects from lepton positions (TypeLibrary). The live reader reports mobile
+ * objects at their own coordinate (infantry: the sub-cell spot, vehicles/aircraft: their centre) -> (0, 0), and
+ * buildings at the centre of the foundation's top-left cell, half a cell below the top corner where drawOffsetFor
+ * puts their canvas centre -> (0, -15).
+ */
+export function coordDrawOffset(kind: 'building' | 'vehicle' | 'infantry' | 'aircraft'): [number, number] {
+  if (kind === 'building') {
+    const d = drawOffsetFor('building');
+    return [d[0], d[1] - CELL_H / 2];
+  }
+  return [0, 0];
+}
+
 /** [Lighting] Level used when a map omits it (engine default, as in the reference MapLighting.read). */
 export const DEFAULT_LIGHT_LEVEL = 0.032;
 

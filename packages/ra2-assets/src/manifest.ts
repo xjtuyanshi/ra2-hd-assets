@@ -12,6 +12,7 @@
  * - SpriteEntry.file, SpriteEntry.underlays, SpriteEntry.frameCount, SpriteEntry.sourceFrames, SpriteEntry.loop
  * - MapObject.drawOffset, MapObject.subCell, MapObject.flat, MapObject.health, MapObject.lighting
  * - VoxelModel.file, VoxelModel.turretOffset
+ * - SpriteFrame.page (atlas page for multi-page atlases such as the type library's; absent = 0)
  * Draw-order rules the preview (and the HD renderer) follow: tile diamonds by cell depth (x + y), then tile extra
  * graphics (cliff faces, banks) by the same depth, then `flat` objects (smudges, ore/gems, low bridges), then all
  * shadows (darken), then the remaining objects sorted by the screen Y of their draw point.
@@ -159,6 +160,11 @@ export interface SpriteFrame {
   rect: [x: number, y: number, w: number, h: number];
   /** Offset of the frame raster's top-left from the SHP canvas centre (engine draw origin), in pixels. */
   offset: [x: number, y: number];
+  /**
+   * Added: atlas page of `rect` when the sprites span several pages (TypeLibrary.spriteAtlases); absent = page 0.
+   * The single-page map cache never writes it.
+   */
+  page?: number;
 }
 
 export interface SpriteEntry {

@@ -70,3 +70,43 @@ export function applyRemap(paletteRgb: Uint8Array, ramp: readonly Rgb[]): Uint8A
 export function isRemapIndex(i: number): boolean {
   return i >= REMAP_START && i < REMAP_START + REMAP_COUNT;
 }
+
+/** One slot of the engine's runtime ColorScheme array (see colorSchemeSlots). */
+export interface ColorSchemeSlot {
+  name: string;
+  hsv: Hsv;
+  /** 0 = first copy (index 2k), 1 = second copy (index 2k + 1). */
+  copy: 0 | 1;
+}
+
+/**
+ * The runtime ColorScheme array of YR 1.001 (YRpp: DynamicVectorClass<ColorScheme*> ColorScheme::Array) built from the
+ * rules `[Colors]` entries: two consecutive schemes per entry, in file order, so entry k owns indices 2k and 2k + 1.
+ * HouseClass::ColorSchemeIndex points at the second copy.
+ *
+ * Evidence (read-only dump of the running game's array after a skirmish start on the player's install): 42 schemes for
+ * the 21 stock rulesmd [Colors] entries; each pair's remap colours have exactly the hue of entry k (e.g. pair 2 =
+ * LightGrey's pure greys, pair 10 = DarkBlue); the observed house indices 3, 11, 13, 21, 25 and 5 are all odd and a
+ * house shown blue on screen had 21 = DarkBlue. YRpp notes the same duplication (ShadeCount 1 and 53 copies).
+ *
+ * Not verified: a repeated key (kept once, at its first position, with its last value, like the INI parser) and a map
+ * with its own [Colors] section (the array would be rebuilt from the merged section). Unparsable values keep their
+ * slot with HSV 0,0,0 so later indices stay aligned.
+ */
+export function colorSchemeSlots(entries: readonly { key: string; value: string }[]): ColorSchemeSlot[] {
+  const order: string[] = [];
+  const values = new Map<string, { name: string; value: string }>();
+  for (const { key, value } of entries) {
+    const k = key.trim().toLowerCase();
+    if (!k) continue;
+    if (!values.has(k)) order.push(k);
+    values.set(k, { name: values.get(k)?.name ?? key.trim(), value });
+  }
+  const out: ColorSchemeSlot[] = [];
+  for (const k of order) {
+    const { name, value } = values.get(k)!;
+    const hsv = parseHsv(value) ?? [0, 0, 0];
+    out.push({ name, hsv, copy: 0 }, { name, hsv: [...hsv], copy: 1 });
+  }
+  return out;
+}

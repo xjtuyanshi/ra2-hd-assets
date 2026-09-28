@@ -1,7 +1,9 @@
 # ra2-assets
 
 Local "install step" for the HD remaster: reads one map and the art it references from the player's own Yuri's
-Revenge install and writes an HD cache that the HD renderer consumes. The contract is `src/manifest.ts`.
+Revenge install and writes an HD cache that the HD renderer consumes. The contract is `src/manifest.ts`. For live
+matches it also writes a per-theater type library with art for every building, vehicle, infantry and aircraft type;
+that contract is `src/library.ts`.
 
 Everything the extractor writes is derived from EA game data. It goes to the gitignored `gameres/` directory and must
 never be committed or redistributed.
@@ -18,6 +20,9 @@ pnpm hd:preview -- --map RiverRam --map IsleLand [--cache <dir>] [--models] [--f
 
 # Composite only unlit terrain, with transparency and an open-water mask (map may repeat)
 pnpm hd:terrain-map -- --map RiverRam [--cache <dir>]
+
+# Type library for live matches (defaults: all six theaters, --out <repo>/gameres/hd-cache/_library)
+pnpm hd:library -- [--game <install dir>] [--theater temperate --theater snow ...] [--out <dir>] [--preview]
 
 # Upscale the scale-1 composite with a separately installed Real-ESRGAN ncnn-vulkan executable
 pnpm hd:upscale -- --map RiverRam [--cache <dir>] [--scale 2] [--model realesrgan-x4plus] [--tile 256]
@@ -70,6 +75,40 @@ upscaled terrain on the right, both at the requested output scale.
 - `voxels/<TYPE>.json`: body/turret/barrel VXL sections with HVA frame 0 transforms, for every voxel unit or aircraft
   the map places plus MTNK, HTNK, HARV, CMIN, SMCV and AMCV.
 
+## Type library (`<out>/_library/`)
+
+`hd:library` resolves every id of rulesmd `[BuildingTypes]`, `[VehicleTypes]`, `[InfantryTypes]` and
+`[AircraftTypes]` through the same art code as the map extractor (`src/node/artSource.ts`) and writes, per theater:
+
+- `<theater>/library.json` (`TypeLibrary`): one `LibraryType` per resolved type id (kind, sprite or voxel id,
+  foundation, draw offset from the live reader's lepton coordinate, lighting class, remap flag, the atlas pages it
+  uses) with building layers (ActiveAnim..Four, IdleAnim, SpecialAnim, SuperAnim, ProductionAnim, war factory door
+  anims, their damaged variants, offsets, ZAdjust/YSort/Powered, anim timing), bibs, buildup anims and voxel turrets;
+  infantry `Sequence=` tables; SHP vehicle frame layouts; the runtime colour scheme array; ConditionYellow/Red;
+  `extractor.warnings` naming every skipped type and why.
+- `<theater>/sprites-<n>.png`: single-channel indexed atlas pages (value = palette index, 0 = transparent), each at
+  most 4096x4096. Every body/anim/bib frame is exported with its shadow frame. A sprite's frames are packed together
+  (types need one or two pages), so renderers can load pages lazily; `SpriteFrame.page` selects the page.
+- `<theater>/palettes/<key>.png` and, with `--preview`, `<theater>/library-preview.png` plus a `.json` index: a
+  contact sheet (buildings healthy and damaged over their foundation outline, infantry Ready in 8 facings, voxel and
+  SHP units in 8 facings, owner colour DarkRed, type ids in a 3x5 font).
+- `common/voxels/<ID>.json`: voxel models (`VoxelModel`, as in the map cache) shared by all theaters; library.json
+  refers to them as `../common/voxels/<ID>.json`.
+
+Colour schemes: YR 1.001 builds its runtime ColorScheme array with two consecutive schemes per rules `[Colors]`
+entry in file order, and `HouseClass::ColorSchemeIndex` points at the second one (2k + 1). This was read from the
+running game's memory (42 schemes for the 21 stock entries; each pair's remap colours carry exactly the entry's
+hue; observed house indices 3, 5, 11, 13, 21, 25; a house drawn blue had 21 = DarkBlue). The same dump shows the
+Neutral and Special houses at index 5 (LightGrey) although the map and rules name `Grey`, so renderers should trust
+`colorIndex`, not house `Color=`. The remap RGB values use `remapRamp` (the map cache's approximation); measured
+against the engine's own ramps, the engine keeps the hue exactly but is less saturated on the bright shades (about
+0.77 x the `[Colors]` saturation at index 16, rising to 1.0 by index 28), so remapped colours here look somewhat
+more saturated than in game.
+
+Per theater (stock YR 1.001 install): 379-391 of 402 buildings, 78 of 80 vehicles, 64 of 65 infantry and 11 of
+12 aircraft resolve; the rest are types with no art in that theater (snow-only civilian buildings, ZZZ dummies,
+`DeathDummy`, `YDUM`, `WEEDGUY`, `APACHE`).
+
 ## Engine rules the extractor encodes
 
 - MIX priority (highest first): expandmd##, ra2md/ra2, cache, local, language, conquer/generic/isogen, theater mixes.
@@ -87,13 +126,19 @@ upscaled terrain on the right, both at the requested output scale.
   the middle frame of their LoopStart..LoopEnd range.
 - Lighting (`MapObject.lighting`): `full` (tiles, trees, rocks, overlays, smudges), `ambient` (buildings, units,
   walls) or `none` (ore, gems, ore mines), with the reference engine's formula in `mapLightMultipliers`.
-- Art names: `Theater=yes` uses the theater extension, `NewTheater=yes` swaps a theater-letter second character
-  (A/T/U/D/L/N) for the map's letter, then G, then keeps the plain name.
+- Art names: `Theater=yes` uses the theater extension; every other image whose name starts with G/N/C/Y followed by a
+  theater letter (A/T/U/D/L/N) gets the map's letter, then G, then keeps the plain name. The engine does this whatever
+  the art `NewTheater=` says: the install ships temperate/urban/desert/lunar files for flags marked `NewTheater=no`,
+  and the shipyards have no NewTheater key but only `gg`/`ng`/`yg` files outside snow.
+- Type library only: art `Remapable=` applies to infantry and vehicles too (animals are not house-coloured); art
+  `TerrainPalette=yes` is recorded but the unit palette is kept (the lamp art is colour noise with the iso palette).
 
 ## Tests
 
 `vitest` unit tests in `tests/` cover tile-slot resolution, clear-tile substitution, projection and anchor math, the
-PNG encoder, palette remap, art naming and atlas packing; they need no game files.
+PNG encoder, palette remap, art naming and atlas packing; they need no game files. `tests/library.test.ts` covers
+infantry sequence parsing, the colour scheme order, paged atlas packing, theater art-name resolution and type library
+records built from a synthetic in-memory install (hand-made SHP files and INI text).
 Terrain tests use synthetic caches to cover painter order, alpha, origin, water classification and preview
 compatibility. Upscale tests use a tiny local fake executable and synthetic PNGs, so neither models nor a GPU are
 required. Run `pnpm --filter ra2-assets run typecheck` and `pnpm exec vitest run packages/ra2-assets` from the repo root.

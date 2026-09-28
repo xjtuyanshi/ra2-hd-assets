@@ -2,12 +2,18 @@
  * Art file-name resolution rules (pure).
  *
  * - `Theater=yes` art (trees, smudges, ore/gems, rocks, low bridges) is stored as `<image>.<theater ext>`.
- * - `NewTheater=yes` art (most buildings, some anims) swaps the image's second character for the theater letter
- *   (T/A/U/N/D/L); when that file is missing the engine falls back to the generic letter G, then the plain name.
- *   The swap only applies when the name starts with one of the engine's prefix letters (G, N, C, Y) and its second
- *   character is one of the theater letters A, T, U, D, L, N (the list in the Chrono Divide-derived reference,
- *   huangkaoya/ts-redalert2 src/engine/ImageFinder.ts applyNewTheaterIfNeeded). So `CABHUT` becomes `ctbhut.shp`
- *   on temperate (the file lives in temperat.mix), while `TSTLAMP` (T is not a prefix letter) stays untouched.
+ * - NewTheater art swaps the image's second character for the theater letter (T/A/U/N/D/L); when that file is
+ *   missing the engine falls back to the generic letter G, then the plain name. The swap only applies when the name
+ *   starts with one of the engine's prefix letters (G, N, C, Y) and its second character is one of the theater
+ *   letters A, T, U, D, L, N (the list in the Chrono Divide-derived reference, huangkaoya/ts-redalert2
+ *   src/engine/ImageFinder.ts applyNewTheaterIfNeeded). So `CABHUT` becomes `ctbhut.shp` on temperate (the file
+ *   lives in temperat.mix), while `TSTLAMP` (T is not a prefix letter) stays untouched.
+ *   The engine applies it to every such name whatever the art `NewTheater=` says (ArtSource always requests it):
+ *   YR 1.001 ships per-theater files for art marked `NewTheater=no` (country flags CAUSFGL..CAUKFGL and the guard
+ *   shack CAGARD01 have ct/cu/cn/cd/cl variants next to the snow-only ca- file), and the shipyards GAYARD/NAYARD/
+ *   YAYARD and NAPSIS/NAPSYB have no NewTheater key while only the gg-, ng- and yg- files exist outside snow. For every other
+ *   rules type (overlays, terrain, units, infantry, aircraft, smudges) the flag-based and the unconditional rule pick
+ *   the same file on all six theaters of the stock install.
  * - Everything else is `<image>.shp`.
  * - Voxels: `<image>.vxl/.hva`, turret `<image>tur`, barrel `<image>barl`.
  */
@@ -124,4 +130,153 @@ export function splitShadowHalf(frames: readonly { pixels: Uint8Array }[]): { bo
   for (let i = 0; i < half; i++) for (const v of frames[i]!.pixels) if (v > 1) bodyPixels++;
   if (bodyPixels === 0) return { body: n, hasShadows: false };
   return { body: half, hasShadows: true };
+}
+
+/** One artmd infantry sequence entry: `Name=Start,Count,FacingMultiplier[,Facing]`. */
+export interface InfantrySequence {
+  start: number;
+  count: number;
+  /** Frames per facing step (0 = the sequence does not depend on facing). */
+  facingMultiplier: number;
+  /** Optional fixed direction letters (N, NE, E, SE, S, SW, W, NW) the infantry turns to while playing it. */
+  facing?: string;
+}
+
+/**
+ * Parse every entry of an artmd `[<Sequence>]` section. Values whose first field is not a plain integer (YR's
+ * `Idle2Sounds=9 TrexDie` style sound lists) are skipped; a repeated key keeps its last value, as the INI does. Count
+ * defaults to 1 and the facing multiplier to 0 like parseSequenceEntry.
+ */
+export function parseInfantrySequences(
+  entries: readonly { key: string; value: string }[],
+): Record<string, InfantrySequence> {
+  const out: Record<string, InfantrySequence> = {};
+  for (const { key, value } of entries) {
+    const parts = value.split(',').map((p) => p.trim());
+    if (!/^-?\d+$/.test(parts[0] ?? '')) continue;
+    const num = (i: number, fallback: number): number => (/^-?\d+$/.test(parts[i] ?? '') ? Number(parts[i]) : fallback);
+    const seq: InfantrySequence = { start: num(0, 0), count: Math.max(1, num(1, 1)), facingMultiplier: num(2, 0) };
+    const dir = (parts[3] ?? '').toUpperCase();
+    if (/^(N|NE|E|SE|S|SW|W|NW)$/.test(dir)) seq.facing = dir;
+    out[key] = seq;
+  }
+  return out;
+}
+
+/**
+ * SHP frame of an infantry sequence for engine facing `facing` (0..255, 0 = north) at animation step `step`, with the
+ * same facing -> frame convention as facingFrame (8 directions).
+ */
+export function sequenceFrame(seq: InfantrySequence, facing: number, step: number): number {
+  const dir = seq.facingMultiplier > 0 ? facingFrame(facing, 8) * seq.facingMultiplier : 0;
+  const n = Math.max(1, seq.count);
+  return seq.start + dir + (((step % n) + n) % n);
+}
+
+/**
+ * Building art keys naming an anim layer drawn over the body (each may have <key>Damaged, <key>X, <key>Y,
+ * <key>ZAdjust, <key>YSort and <key>Powered companions). Collected from every BuildingTypes art section of YR 1.001's
+ * artmd.ini; ActiveAnim..ActiveAnimFour are the ones the map extractor draws as still frames.
+ */
+export const BUILDING_LAYER_KEYS = [
+  'ActiveAnim',
+  'ActiveAnimTwo',
+  'ActiveAnimThree',
+  'ActiveAnimFour',
+  'IdleAnim',
+  'IdleAnimTwo',
+  'SpecialAnim',
+  'SpecialAnimTwo',
+  'SpecialAnimThree',
+  'SpecialAnimFour',
+  'SuperAnim',
+  'SuperAnimTwo',
+  'SuperAnimThree',
+  'SuperAnimFour',
+  'ProductionAnim',
+  'DeployingAnim',
+  'UnderDoorAnim',
+  'RoofDeployingAnim',
+  'UnderRoofDoorAnim',
+  'ActiveAnimGarrisoned',
+  'LowPower',
+  'SuperLowPower',
+] as const;
+
+/** The subset the map extractor draws (one still frame each). */
+export const BUILDING_ACTIVE_ANIM_KEYS = BUILDING_LAYER_KEYS.slice(0, 4);
+
+/** Minimal INI section view (satisfied by ra2-formats' IniSection). */
+export interface ArtSectionView {
+  has(key: string): boolean;
+  getString(key: string, fallback?: string): string;
+}
+
+const intOf = (sec: ArtSectionView | undefined, key: string): number | undefined => {
+  if (!sec?.has(key)) return undefined;
+  const v = Number.parseInt(sec.getString(key, ''), 10);
+  return Number.isFinite(v) ? v : undefined;
+};
+const boolOf = (sec: ArtSectionView | undefined, key: string): boolean | undefined =>
+  sec?.has(key) ? /^(y|t|1)/i.test(sec.getString(key, '').trim()) : undefined;
+
+/** Placement companions of one building layer key (only the keys art actually sets). */
+export interface BuildingLayerArt {
+  key: string;
+  anim: string;
+  damaged?: string;
+  offset?: [number, number];
+  zAdjust?: number;
+  ySort?: number;
+  powered?: boolean;
+}
+
+/** Read layer `key` of a building art section, or undefined when the building has no such layer. */
+export function buildingLayerArt(sec: ArtSectionView | undefined, key: string): BuildingLayerArt | undefined {
+  const anim = sec?.getString(key, '').trim();
+  if (!sec || !anim) return undefined;
+  const out: BuildingLayerArt = { key, anim };
+  const damaged = sec.getString(`${key}Damaged`, '').trim();
+  if (damaged) out.damaged = damaged;
+  const x = intOf(sec, `${key}X`);
+  const y = intOf(sec, `${key}Y`);
+  if (x !== undefined || y !== undefined) out.offset = [x ?? 0, y ?? 0];
+  const z = intOf(sec, `${key}ZAdjust`);
+  if (z !== undefined) out.zAdjust = z;
+  const ys = intOf(sec, `${key}YSort`);
+  if (ys !== undefined) out.ySort = ys;
+  const powered = boolOf(sec, `${key}Powered`);
+  if (powered !== undefined) out.powered = powered;
+  return out;
+}
+
+/** Timing keys of an anim art section (only those present). */
+export function animTimingArt(sec: ArtSectionView | undefined): {
+  start?: number;
+  end?: number;
+  loopStart?: number;
+  loopEnd?: number;
+  loopCount?: number;
+  rate?: number;
+  reverse?: boolean;
+  shadow?: boolean;
+} {
+  const out: ReturnType<typeof animTimingArt> = {};
+  const ints = [
+    ['start', 'Start'],
+    ['end', 'End'],
+    ['loopStart', 'LoopStart'],
+    ['loopEnd', 'LoopEnd'],
+    ['loopCount', 'LoopCount'],
+    ['rate', 'Rate'],
+  ] as const;
+  for (const [field, key] of ints) {
+    const v = intOf(sec, key);
+    if (v !== undefined) out[field] = v;
+  }
+  const reverse = boolOf(sec, 'Reverse');
+  if (reverse !== undefined) out.reverse = reverse;
+  const shadow = boolOf(sec, 'Shadow');
+  if (shadow !== undefined) out.shadow = shadow;
+  return out;
 }

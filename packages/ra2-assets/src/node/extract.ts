@@ -19,7 +19,7 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { IniSection, ShpFile, TmpFile, VxlFile } from 'ra2-formats';
+import type { TmpFile } from 'ra2-formats';
 import type {
   AtlasRef,
   HdCacheManifest,
@@ -27,24 +27,20 @@ import type {
   MapLighting,
   MapObject,
   MapObjectKind,
-  SpriteEntry,
-  SpriteFrame,
   TileEntry,
   VoxelModel,
-  VoxelPart,
 } from '../manifest.ts';
 import { HD_CACHE_VERSION } from '../manifest.ts';
 import { packShelves } from '../atlas.ts';
 import {
   animStillFrame,
   artFileCandidates,
+  BUILDING_ACTIVE_ANIM_KEYS,
   buildingConditionFrame,
   facingFrame,
   parseFoundation,
   parseIniFraction,
   parseSequenceEntry,
-  resolveArtFile,
-  splitShadowHalf,
 } from '../art.ts';
 import {
   cutoffTileHeight,
@@ -59,6 +55,16 @@ import {
 } from '../iso.ts';
 import { parseHsv, remapRamp } from '../remap.ts';
 import { THEATERS, buildTileTable, resolveCellTile, theaterFromMap, type TemplateShape } from '../theater.ts';
+import {
+  ArtSource,
+  b64,
+  buildVoxelModel,
+  packSprites,
+  secBool,
+  SpriteCollector,
+  unitVoxelParts,
+  writePalettes,
+} from './artSource.ts';
 import { GameInstall, loadMap } from './install.ts';
 import { encodePng } from './png.ts';
 
@@ -79,28 +85,6 @@ export interface ExtractResult {
 
 export const DEFAULT_VOXELS = ['MTNK', 'HTNK', 'HARV', 'CMIN', 'SMCV', 'AMCV'];
 
-/** Palette key: the four standard ones, or a custom art `Palette=` name (e.g. "lib"). */
-type PaletteKey = string;
-
-interface PendingFrame {
-  w: number;
-  h: number;
-  offset: [number, number];
-  pixels: Uint8Array;
-}
-
-/** Chooses which source body frames of a SHP to export (by index), given its body frame count. */
-type FramePicker = (bodyFrames: number) => number[];
-
-interface PendingSprite {
-  entry: Omit<SpriteEntry, 'frames' | 'shadows'>;
-  frames: PendingFrame[];
-  shadows?: PendingFrame[];
-}
-
-const b64 = (bytes: Uint8Array): string =>
-  Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
-
 export function extractMap(opts: ExtractOptions): ExtractResult {
   const log = opts.log ?? ((m: string) => console.log(m));
   const warnings: string[] = [];
@@ -116,50 +100,14 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   const inst = GameInstall.open(opts.gameDir, theaterId);
   log(`mounted ${inst.report.mounted.length} archives; theater ${theaterId}`);
 
-  const rules = inst.ini('rulesmd.ini');
-  const art = inst.ini('artmd.ini');
   const control = inst.ini(theater.controlIni);
   const mapIni = map.ini;
-
-  /** rules value with the map's own section overriding rulesmd (as the engine merges scenario INIs). */
-  const rulesGet = (id: string, key: string): string | undefined => {
-    for (const ini of [mapIni, rules]) {
-      const sec = ini.getSection(id);
-      if (sec?.has(key)) return sec.getString(key, '');
-    }
-    return undefined;
-  };
-  const rulesBool = (id: string, key: string, fallback = false): boolean => {
-    const v = rulesGet(id, key);
-    if (v === undefined) return fallback;
-    return /^(y|t|1)/i.test(v.trim());
-  };
-  const secBool = (sec: IniSection | undefined, key: string, fallback = false): boolean =>
-    sec?.has(key) ? /^(y|t|1)/i.test(sec.getString(key, '').trim()) : fallback;
-
-  // ---------------------------------------------------------------- palettes
-  const paletteFiles: Record<PaletteKey, string> = {
-    iso: theater.isoPalette,
-    unit: theater.unitPalette,
-    theater: theater.theaterPalette,
-    anim: 'anim.pal',
-  };
-  /**
-   * YR art `Palette=<name>` (e.g. CANEWY04, the Statue of Liberty: Palette=lib) selects `<name><theater ext>.pal`,
-   * falling back to `<name>.pal`. Returns the palette key, or undefined when no such file exists.
-   */
-  const customPalette = (sec: IniSection | undefined): PaletteKey | undefined => {
-    const name = sec?.getString('Palette', '').trim().toLowerCase();
-    if (!name) return undefined;
-    const file = [`${name}${theater.ext}.pal`, `${name}.pal`].find((f) => inst.has(f));
-    if (!file) {
-      warn(`art Palette=${name}: no ${name}${theater.ext}.pal / ${name}.pal, using the unit palette`);
-      return undefined;
-    }
-    paletteFiles[name] = file;
-    return name;
-  };
-  const usedPalettes = new Set<PaletteKey>(['iso', 'unit']);
+  // Rules values: the map's own sections override rulesmd (as the engine merges scenario INIs).
+  const src = new ArtSource(inst, theater, warn, [mapIni]);
+  const { rules, art } = src;
+  const rulesBool = (id: string, key: string, fallback = false): boolean => src.rulesBool(id, key, fallback);
+  const artOf = (id: string) => src.artOf(id);
+  const shpCandidates = src.shpCandidates.bind(src);
 
   // ---------------------------------------------------------------- terrain
   const table = buildTileTable(control, theater.ext);
@@ -287,73 +235,9 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
     x >= 0 && y >= 0 && x < gridW && y < gridH ? heights[y * gridW + x]! : 0;
 
   // ---------------------------------------------------------------- sprites
-  const sprites = new Map<string, PendingSprite>();
-
-  /** Load a SHP into a pending sprite (idempotent by id). Returns undefined when no file resolves. */
-  const addShp = (
-    id: string,
-    candidates: string[],
-    palette: PaletteKey,
-    remap: boolean,
-    extra: Partial<SpriteEntry> = {},
-    pick?: FramePicker,
-  ): PendingSprite | undefined => {
-    const known = sprites.get(id);
-    if (known) return known;
-    const file = resolveArtFile(candidates, (n) => inst.has(n));
-    if (!file) {
-      warn(`${id}: no art file (${candidates.join(', ') || 'no candidates'})`);
-      return undefined;
-    }
-    const shp = inst.shp(file);
-    if (!shp) {
-      warn(`${id}: ${file} is not a readable SHP`);
-      return undefined;
-    }
-    const decoded = decodeShp(shp);
-    const split = splitShadowHalf(decoded);
-    const canvas: [number, number] = [shp.cx, shp.cy];
-    const toFrame = (f: (typeof decoded)[number]): PendingFrame => ({
-      w: f.cx,
-      h: f.cy,
-      offset: [f.x - Math.floor(shp.cx / 2), f.y - Math.floor(shp.cy / 2)],
-      pixels: f.pixels,
-    });
-    const picked = pick?.(split.body).filter((i) => i >= 0 && i < split.body);
-    const bodies = picked ? picked.map((i) => decoded[i]!) : decoded.slice(0, split.body);
-    const shadows = picked ? picked.map((i) => decoded[split.body + i]!) : decoded.slice(split.body);
-    const pending: PendingSprite = {
-      entry: {
-        palette,
-        remap,
-        canvas,
-        file,
-        frameCount: decoded.length,
-        ...(picked ? { sourceFrames: picked } : {}),
-        ...extra,
-      },
-      frames: bodies.map(toFrame),
-      ...(split.hasShadows ? { shadows: shadows.map(toFrame) } : {}),
-    };
-    usedPalettes.add(palette);
-    sprites.set(id, pending);
-    return pending;
-  };
-
-  /** art section + file stem for a rules type (rules Image= -> art section, art Image= -> file stem). */
-  const artOf = (id: string): { sec: IniSection | undefined; image: string } => {
-    const rulesImage = (rulesGet(id, 'Image') ?? '').trim() || id;
-    const sec = art.getSection(rulesImage) ?? art.getSection(id);
-    const image = sec?.getString('Image', '').trim() || rulesImage;
-    return { sec, image };
-  };
-  const shpCandidates = (image: string, sec: IniSection | undefined, forceNewTheater = false): string[] =>
-    artFileCandidates(image, {
-      theater: secBool(sec, 'Theater'),
-      newTheater: forceNewTheater || secBool(sec, 'NewTheater'),
-      theaterExt: theater.ext,
-      theaterLetter: theater.newTheaterLetter,
-    });
+  const collector = new SpriteCollector(inst, warn, ['iso', 'unit']);
+  const sprites = collector.sprites;
+  const addShp = collector.addShp.bind(collector);
 
   // ---------------------------------------------------------------- houses
   const houses: Record<string, HouseColor> = {};
@@ -508,41 +392,32 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
     const { sec, image } = artOf(e.type);
     const foundation = parseFoundation(sec?.getString('Foundation', '1x1'));
     const id = `building:${e.type}`;
-    const newTheater = secBool(sec, 'NewTheater');
     const layerIds: string[] = [];
     const underIds: string[] = [];
     if (!sprites.has(id)) {
-      for (const key of ['ActiveAnim', 'ActiveAnimTwo', 'ActiveAnimThree', 'ActiveAnimFour']) {
+      for (const key of BUILDING_ACTIVE_ANIM_KEYS) {
         const anim = sec?.getString(key, '').trim();
         if (!anim) continue;
-        const animSec = art.getSection(anim);
-        const animImage = animSec?.getString('Image', '').trim() || anim;
+        const a = src.animArt(anim);
         const lid = `anim:${anim}`;
         // Renderers draw one still frame per layer, so only that frame is exported (a looping anim such as
         // CAMOV01_A has 31 body frames); the loop range is recorded for later animation.
-        const artInt = (key: string): number | undefined => {
-          const v = Number.parseInt(animSec?.getString(key, '') ?? '', 10);
-          return Number.isFinite(v) ? v : undefined;
-        };
-        const loopArt = { start: artInt('Start'), loopStart: artInt('LoopStart'), loopEnd: artInt('LoopEnd') };
-        const layer = addShp(lid, shpCandidates(animImage, animSec, newTheater), 'unit', true, {}, (body) => [
-          animStillFrame(loopArt, body),
-        ]);
+        const layer = addShp(lid, a.candidates, 'unit', true, {}, (body) => [animStillFrame(a.timing, body)]);
         if (layer) {
-          const ls = loopArt.loopStart ?? loopArt.start;
-          if (ls !== undefined && loopArt.loopEnd !== undefined) layer.entry.loop = [ls, loopArt.loopEnd];
+          const ls = a.timing.loopStart ?? a.timing.start;
+          if (ls !== undefined && a.timing.loopEnd !== undefined) layer.entry.loop = [ls, a.timing.loopEnd];
           layerIds.push(lid);
         }
       }
       const bib = sec?.getString('BibShape', '').trim();
       if (bib) {
         const bid = `bib:${bib}`;
-        if (addShp(bid, shpCandidates(bib, art.getSection(bib), newTheater), 'unit', true)) underIds.push(bid);
+        if (addShp(bid, src.animArt(bib).candidates, 'unit', true)) underIds.push(bid);
       }
     }
     // Art Remapable=no (civilian flags, some tech buildings) keeps palette indices 16..31 unremapped.
     const remapable = secBool(sec, 'Remapable', true);
-    const s = addShp(id, shpCandidates(image, sec), customPalette(sec) ?? 'unit', remapable, {
+    const s = addShp(id, shpCandidates(image, sec), src.customPalette(sec) ?? 'unit', remapable, {
       foundation,
       ...(layerIds.length ? { layers: layerIds } : {}),
       ...(underIds.length ? { underlays: underIds } : {}),
@@ -631,7 +506,9 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   for (const t of opts.defaultVoxels ?? DEFAULT_VOXELS) voxelTypes.add(t.toUpperCase());
   const voxelModels = new Map<string, VoxelModel>();
   for (const type of [...voxelTypes].sort()) {
-    const model = buildVoxelModel(type, artOf(type), rulesBool(type, 'Turret'), inst, warn);
+    const { sec, image } = artOf(type);
+    const turretOffset = Number.parseInt(sec?.getString('TurretOffset', '0') ?? '0', 10) || 0;
+    const model = buildVoxelModel(type, unitVoxelParts(image, rulesBool(type, 'Turret')), turretOffset, inst, warn);
     if (model) {
       voxelModels.set(type, model);
       count('voxel');
@@ -655,7 +532,6 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   // ---------------------------------------------------------------- write output
   const outDir = join(opts.outDir, loaded.id);
   mkdirSync(join(outDir, 'voxels'), { recursive: true });
-  mkdirSync(join(outDir, 'palettes'), { recursive: true });
 
   const terrainAtlas: AtlasRef = { file: 'terrain.png', width: terrainPack.width, height: terrainPack.height };
   writeFileSync(
@@ -664,72 +540,17 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   );
 
   // Sprite atlas: body + shadow frames of every sprite, R = palette index, A = 255 where index != 0.
-  const spriteIds = [...sprites.keys()].sort();
-  const allFrames: PendingFrame[] = [];
-  for (const sid of spriteIds) {
-    const s = sprites.get(sid)!;
-    allFrames.push(...s.frames, ...(s.shadows ?? []));
-  }
-  const nonEmpty = allFrames.filter((f) => f.w > 0 && f.h > 0);
-  const spritePack = packShelves(
-    nonEmpty.map((f) => ({ w: f.w, h: f.h })),
-    1,
-  );
-  const rectOf = new Map<PendingFrame, [number, number, number, number]>();
-  nonEmpty.forEach((f, i) => {
-    const r = spritePack.rects[i]!;
-    rectOf.set(f, [r.x, r.y, r.w, r.h]);
-  });
-  const spriteRgba = new Uint8Array(spritePack.width * spritePack.height * 4);
-  for (const f of nonEmpty) {
-    const [rx, ry] = rectOf.get(f)!;
-    for (let py = 0; py < f.h; py++) {
-      for (let px = 0; px < f.w; px++) {
-        const v = f.pixels[py * f.w + px]!;
-        if (!v) continue;
-        const d = ((ry + py) * spritePack.width + rx + px) * 4;
-        spriteRgba[d] = v;
-        spriteRgba[d + 3] = 255;
-      }
-    }
-  }
-  const spriteAtlas: AtlasRef = { file: 'sprites.png', width: spritePack.width, height: spritePack.height };
+  const packed = packSprites(sprites, { format: 'rgba' });
+  const page = packed.pages[0]!;
+  const spriteAtlas: AtlasRef = { file: 'sprites.png', width: page.width, height: page.height };
   writeFileSync(
     join(outDir, spriteAtlas.file),
-    encodePng({ width: spritePack.width, height: spritePack.height, channels: 4, data: spriteRgba }),
+    encodePng({ width: page.width, height: page.height, channels: 4, data: page.data }),
   );
+  const spriteEntries = packed.entries;
+  const spriteIds = Object.keys(spriteEntries);
 
-  const toFrame = (f: PendingFrame): SpriteFrame => ({ rect: rectOf.get(f) ?? [0, 0, 0, 0], offset: f.offset });
-  const spriteEntries: Record<string, SpriteEntry> = {};
-  for (const sid of spriteIds) {
-    const s = sprites.get(sid)!;
-    spriteEntries[sid] = {
-      ...s.entry,
-      frames: s.frames.map(toFrame),
-      ...(s.shadows ? { shadows: s.shadows.map(toFrame) } : {}),
-    } as SpriteEntry;
-  }
-
-  const palettes: Record<string, string> = {};
-  const paletteSources: Record<string, string> = {};
-  for (const key of [...usedPalettes].sort()) {
-    const src = paletteFiles[key];
-    if (!src) continue;
-    let pal;
-    try {
-      pal = inst.palette(src);
-    } catch {
-      warn(`palette ${src} missing`);
-      continue;
-    }
-    const file = `palettes/${key}.png`;
-    writeFileSync(
-      join(outDir, file),
-      encodePng({ width: 256, height: 1, channels: 3, data: Uint8Array.from(pal.rgb) }),
-    );
-    palettes[key] = file;
-    paletteSources[key] = src;
-  }
+  const { palettes, paletteSources } = writePalettes(inst, outDir, collector.usedPalettes, src.paletteFiles, warn);
 
   const voxels: Record<string, string> = {};
   for (const [type, model] of voxelModels) {
@@ -793,82 +614,4 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 1));
   for (const w of warnings) log(`warning: ${w}`);
   return { mapId: loaded.id, dir: outDir, manifest };
-}
-
-function decodeShp(shp: ShpFile): { x: number; y: number; cx: number; cy: number; pixels: Uint8Array }[] {
-  const out: { x: number; y: number; cx: number; cy: number; pixels: Uint8Array }[] = [];
-  for (let i = 0; i < shp.count; i++) {
-    try {
-      const f = shp.frame(i);
-      out.push({ x: f.x, y: f.y, cx: f.pixels.length ? f.cx : 0, cy: f.pixels.length ? f.cy : 0, pixels: f.pixels });
-    } catch {
-      out.push({ x: 0, y: 0, cx: 0, cy: 0, pixels: new Uint8Array(0) });
-    }
-  }
-  return out;
-}
-
-function buildVoxelModel(
-  type: string,
-  artInfo: { sec: IniSection | undefined; image: string },
-  hasTurret: boolean,
-  inst: GameInstall,
-  warn: (m: string) => void,
-): VoxelModel | undefined {
-  const stem = artInfo.image.toLowerCase();
-  const parts: VoxelPart[] = [];
-  let normalsMode = 4;
-  const roles: [VoxelPart['role'], string, boolean][] = [
-    ['body', stem, true],
-    ['turret', `${stem}tur`, hasTurret],
-    ['barrel', `${stem}barl`, hasTurret],
-  ];
-  for (const [role, name, wanted] of roles) {
-    if (!wanted) continue;
-    let vxl: VxlFile | undefined;
-    try {
-      vxl = inst.vxl(`${name}.vxl`);
-    } catch (err) {
-      warn(`voxel ${type}: ${name}.vxl unreadable (${(err as Error).message})`);
-      continue;
-    }
-    if (!vxl) {
-      if (role === 'body') warn(`voxel ${type}: ${name}.vxl missing`);
-      continue;
-    }
-    let hva;
-    try {
-      hva = inst.hva(`${name}.hva`);
-    } catch {
-      hva = undefined;
-    }
-    if (!hva) warn(`voxel ${type}: ${name}.hva missing, using the VXL section transforms`);
-    const sections = vxl.sections.map((s) => {
-      let m = [...s.transform];
-      if (hva) {
-        const named = hva.sectionNames.findIndex((n) => n.toLowerCase() === s.name.toLowerCase());
-        const hi = named >= 0 ? named : s.index < hva.sectionCount ? s.index : 0;
-        m = [...hva.matrix(hi, 0)];
-      }
-      m[3] = m[3]! * s.scale;
-      m[7] = m[7]! * s.scale;
-      m[11] = m[11]! * s.scale;
-      normalsMode = s.normalsMode;
-      const buf = new Uint8Array(s.voxels.length * 5);
-      s.voxels.forEach((v, i) => buf.set([v.x, v.y, v.z, v.color, v.normal], i * 5));
-      return {
-        name: s.name,
-        size: [s.cx, s.cy, s.cz] as [number, number, number],
-        scale: s.scale,
-        minBounds: [...s.minBounds] as [number, number, number],
-        maxBounds: [...s.maxBounds] as [number, number, number],
-        transform: m,
-        voxels: b64(buf),
-      };
-    });
-    parts.push({ role, sections });
-  }
-  if (!parts.length) return undefined;
-  const turretOffset = Number.parseInt(artInfo.sec?.getString('TurretOffset', '0') ?? '0', 10) || 0;
-  return { id: type, palette: 'unit', normalsMode, parts, file: `${stem}.vxl`, turretOffset };
 }
