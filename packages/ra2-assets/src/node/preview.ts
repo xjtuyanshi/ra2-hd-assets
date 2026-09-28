@@ -15,6 +15,9 @@ import type { HdCacheManifest, LightingClass, MapObject, SpriteEntry, SpriteFram
 import { CELL_H, mapLightMultipliers, projectCorner } from '../iso.ts';
 import { applyRemap } from '../remap.ts';
 import { decodePng, encodePng, type PngImage } from './png.ts';
+import { drawTerrainTiles, terrainLayout } from './terrain.ts';
+
+export { insideDiamond } from './terrain.ts';
 
 export interface PreviewOptions {
   cacheDir: string;
@@ -75,19 +78,6 @@ class Canvas {
   }
 }
 
-/**
- * True when raster pixel (px, py) of a tile belongs to its base diamond (anchor = top corner). Matches the TMP
- * scanline layout exactly: rows 0..14 are 4, 8, .., 60 px wide, rows 15..29 are 56, 52, .., 0 px wide, all centred
- * on the anchor column.
- */
-export function insideDiamond(px: number, py: number, anchor: readonly [number, number]): boolean {
-  const dy = py - anchor[1];
-  if (dy < 0 || dy >= CELL_H) return false;
-  const half = dy < CELL_H / 2 ? 2 * (dy + 1) : 2 * (CELL_H - 1 - dy);
-  const dx = px - anchor[0];
-  return dx >= -half && dx < half;
-}
-
 export function renderPreview(opts: PreviewOptions): PreviewResult {
   const dir = opts.cacheDir;
   const m = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')) as HdCacheManifest;
@@ -101,42 +91,7 @@ export function renderPreview(opts: PreviewOptions): PreviewResult {
     drawn[k] = (drawn[k] ?? 0) + 1;
   };
 
-  const W = m.grid.width;
-  const exists = fromB64(m.cells.exists);
-  const heights = fromB64(m.cells.height);
-  const tileBytes = fromB64(m.cells.tile);
-  const tileIdx = new Uint16Array(tileBytes.buffer, tileBytes.byteOffset, tileBytes.byteLength / 2);
-
-  interface CellDraw {
-    x: number;
-    y: number;
-    z: number;
-    t: number;
-    sx: number;
-    sy: number;
-  }
-  const cells: CellDraw[] = [];
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (let i = 0; i < exists.length; i++) {
-    if (!exists[i]) continue;
-    const t = tileIdx[i]!;
-    if (t === 0xffff) continue;
-    const x = i % W;
-    const y = Math.floor(i / W);
-    const z = heights[i]!;
-    const tile = m.tiles[t]!;
-    const c = projectCorner(x, y, z);
-    const sx = c.sx - tile.anchor[0];
-    const sy = c.sy - tile.anchor[1];
-    cells.push({ x, y, z, t, sx, sy });
-    minX = Math.min(minX, sx);
-    minY = Math.min(minY, sy);
-    maxX = Math.max(maxX, sx + tile.rect[2]);
-    maxY = Math.max(maxY, sy + tile.rect[3]);
-  }
+  const { cells, minX, minY, maxX, maxY } = terrainLayout(m);
   // Room above the map for tall sprites and the optional voxel strip.
   const top = opts.modelStrip ? 220 : 120;
   const crop = !opts.full && m.visibleRect ? m.visibleRect : undefined;
@@ -170,29 +125,7 @@ export function renderPreview(opts: PreviewOptions): PreviewResult {
   };
   const clamp = (v: number): number => (v > 255 ? 255 : v);
 
-  // Pass 1 + 2: tiles, diamonds first, then everything outside the diamond (cliff faces, banks), both by depth.
-  cells.sort((a, b) => a.x + a.y - (b.x + b.y) || a.z - b.z || a.x - b.x);
-  for (const pass of [0, 1]) {
-    for (const c of cells) {
-      const tile = m.tiles[c.t]!;
-      const [rx, ry, rw, rh] = tile.rect;
-      const [lr, lg, lb] = lightAt(c.z);
-      for (let py = 0; py < rh; py++) {
-        for (let px = 0; px < rw; px++) {
-          const s = ((ry + py) * terrain.width + rx + px) * 4;
-          if (terrain.data[s + 3] === 0) continue;
-          if (insideDiamond(px, py, tile.anchor) !== (pass === 0)) continue;
-          canvas.put(
-            c.sx + px,
-            c.sy + py,
-            clamp(terrain.data[s]! * lr),
-            clamp(terrain.data[s + 1]! * lg),
-            clamp(terrain.data[s + 2]! * lb),
-          );
-        }
-      }
-    }
-  }
+  drawTerrainTiles(m, terrain, cells, canvas, lightAt);
 
   // Palette per (palette key, owner, height level, lighting class): house remap, then the cell's lighting.
   const palCache = new Map<string, Uint8Array>();

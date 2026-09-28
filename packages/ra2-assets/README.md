@@ -15,6 +15,13 @@ pnpm --filter ra2-assets extract -- --game <install dir> --map <file> [--out <di
 
 # Composite <out>/<mapId>/ into preview.png the way the original engine draws the map
 pnpm hd:preview -- --map RiverRam --map IsleLand [--cache <dir>] [--models] [--foundations] [--unlit] [--full]
+
+# Composite only unlit terrain, with transparency and an open-water mask (map may repeat)
+pnpm hd:terrain-map -- --map RiverRam [--cache <dir>]
+
+# Upscale the scale-1 composite with a separately installed Real-ESRGAN ncnn-vulkan executable
+pnpm hd:upscale -- --map RiverRam [--cache <dir>] [--scale 2] [--model realesrgan-x4plus] [--tile 256]
+pnpm hd:upscale -- --map RiverRam --bin <binary-path> --compare 1200,700,160,100
 ```
 
 `--map` accepts `.yro`/`.mmx` packages (MIX archives holding `<stem>.map` and a `.pkt`) and plain `.map/.mpr/.yrm`
@@ -22,6 +29,34 @@ INI files, as a path or a file name inside the game directory. `--models` adds a
 model, `--foundations` outlines building foundations, `--unlit` skips the map's `[Lighting]` tint. The preview is
 cropped to the playable area (`visibleRect`, the engine's camera limits from `[Map] LocalSize`); `--full` draws the
 whole `[Map] Size` area including the border strips the player never sees.
+
+Both terrain commands default to `<repo>/gameres/hd-cache` and write into `<cache>/<mapId>/`. For inspection of an
+existing cache without modifying it, first copy the map directory to a disposable cache and pass `--cache` to both
+commands. The derived outputs must stay out of Git and must not be redistributed.
+
+`terrain-map` shares the preview's depth-sorted diamond and extra-graphics passes. It includes all extracted cells,
+uses tight terrain bounds without sprite margins, ignores map lighting, and retains raw atlas RGB/alpha. It writes
+`terrain-map.png` (RGBA) and `terrain-water.png` (grayscale), then updates `manifest.terrainMap`. The stored origin is
+the engine screen coordinate of the image's top-left pixel; subtract it to get scale-1 image coordinates.
+The Node API `renderTerrainMap({ cacheDir, writeManifest: false })` writes the images without changing the manifest
+and returns pixels plus last-writer tile attribution. The pure `buildWaterMaskBytes` export (also available through
+`ra2-assets/waterMask`) works with whole-map or atlas pixels and uses no Node APIs.
+
+`upscale` defaults to scale 2, `realesrgan-x4plus`, and tile size 256. It looks for the executable at
+`<repo>/gameres/tools/realesrgan/realesrgan-ncnn-vulkan`, or at `--bin`, with models in the executable's sibling
+`models/` directory. The tool does not download the executable or models. It runs the x4plus and x4plus-anime models
+at native 4x, then uses an exact linear-light area box filter for smaller integer scales (1 through 4). The
+`realesr-animevideov3` model passes the requested scale directly to the executable and supports 2 through 4; use
+x4plus for 1x output. Suffixed names such as `realesr-animevideov3-x3` must agree with `--scale`. Transparent borders are filled
+with up to 16 four-neighbour colour-dilation passes and an opaque-pixel mean fallback before inference; alpha and
+the water mask are resized separately with pixel-centre bilinear sampling.
+
+The upscaler writes `terrain-map@<scale>x.png` and `terrain-water@<scale>x.png`, updating only `manifest.terrainMap`
+after successful processing. The original scale-1 files remain the source for subsequent runs. Binary progress is
+streamed to stderr, and temporary inference files are removed on success or failure. Outputs exceeding 8192 pixels
+on either axis produce a WebGPU texture-limit warning. `--compare x,y,w,h` selects a crop in scale-1 image pixels
+(relative to the image's top-left) and writes `upscale-compare.png`: nearest-neighbour original on the left,
+upscaled terrain on the right, both at the requested output scale.
 
 ## Output (`<out>/<mapId>/`)
 
@@ -59,3 +94,6 @@ whole `[Map] Size` area including the border strips the player never sees.
 
 `vitest` unit tests in `tests/` cover tile-slot resolution, clear-tile substitution, projection and anchor math, the
 PNG encoder, palette remap, art naming and atlas packing; they need no game files.
+Terrain tests use synthetic caches to cover painter order, alpha, origin, water classification and preview
+compatibility. Upscale tests use a tiny local fake executable and synthetic PNGs, so neither models nor a GPU are
+required. Run `pnpm --filter ra2-assets run typecheck` and `pnpm exec vitest run packages/ra2-assets` from the repo root.

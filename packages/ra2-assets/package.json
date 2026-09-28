@@ -7,11 +7,14 @@
   "license": "GPL-3.0-or-later",
   "exports": {
     ".": "./src/index.ts",
-    "./manifest": "./src/manifest.ts"
+    "./manifest": "./src/manifest.ts",
+    "./waterMask": "./src/waterMask.ts"
   },
   "scripts": {
     "extract": "tsx src/cli/extract.mts",
     "preview": "tsx src/cli/preview.mts",
+    "terrain-map": "tsx src/cli/terrainMap.mts",
+    "upscale": "tsx src/cli/upscale.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

@@ -8,3 +8,4 @@ export * from './theater.ts';
 export * from './remap.ts';
 export * from './art.ts';
 export * from './atlas.ts';
+export * from './waterMask.ts';

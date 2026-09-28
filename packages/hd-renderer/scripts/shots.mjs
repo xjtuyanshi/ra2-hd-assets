@@ -7,6 +7,12 @@ const outDir = process.argv[2] ?? 'shots';
 const base = process.argv[3] ?? 'http://localhost:15180/';
 const sets = {
   sandbox: null,
+  upscale: [
+    { name: 'u1-atlas', query: 'map=RiverRam&cx=70&cy=40&zoom=1.6&time=12&tmap=0', wait: 9000 },
+    { name: 'u2-ai2x', query: 'map=RiverRam&cx=70&cy=40&zoom=1.6&time=12', wait: 12000 },
+    { name: 'u3-atlas-wide', query: 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=12&tmap=0', wait: 9000 },
+    { name: 'u4-ai2x-wide', query: 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=12', wait: 12000 },
+  ],
   riverram: [
     { name: 'r1-day', query: 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=12', wait: 9000 },
     { name: 'r2-rain', query: 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=15&weather=rain&rain=0.85', wait: 14000 },

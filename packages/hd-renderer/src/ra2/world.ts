@@ -1,7 +1,7 @@
 import { Object3D, Vector3 } from 'three/webgpu';
 import type { MapObject } from '../../../ra2-assets/src/manifest';
 import type { TerrainBuild } from '../terrain';
-import { loadRa2Cache, paletteFor, type Ra2Cache } from './cache';
+import { loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOptions } from './cache';
 import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from './sprites';
 import { buildRa2Terrain } from './terrain';
 import { buildVoxelGeometry, createVoxelMaterial, instantiateVoxel, type VoxelGeometry } from './voxels';
@@ -24,9 +24,9 @@ export interface HdWorld {
 /** Build the original map from a local HD cache (gameres/hd-cache/<map>/, served by the sandbox dev server). */
 export async function loadRa2World(
   base: string,
-  options: { extraObjects?: (manifest: Ra2Cache['manifest']) => MapObject[] } = {},
+  options: { extraObjects?: (manifest: Ra2Cache['manifest']) => MapObject[] } & Ra2CacheOptions = {},
 ): Promise<HdWorld> {
-  const cache = await loadRa2Cache(base);
+  const cache = await loadRa2Cache(base, options);
   const { manifest } = cache;
   const objects = [...manifest.objects, ...(options.extraObjects?.(manifest) ?? [])];
   const terrain = buildRa2Terrain(cache);

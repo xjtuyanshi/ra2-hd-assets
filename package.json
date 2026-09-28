@@ -25,6 +25,8 @@
     "hd:sandbox": "pnpm --filter hd-renderer sandbox",
     "hd:extract": "pnpm --filter ra2-assets extract",
     "hd:preview": "pnpm --filter ra2-assets preview",
+    "hd:terrain-map": "pnpm --filter ra2-assets terrain-map",
+    "hd:upscale": "pnpm --filter ra2-assets upscale",
     "test": "pnpm --filter relay-package run build:lib && vitest run",
     "test:unit": "pnpm --filter relay-package run build:lib && vitest run tests/basic packages/relay/tests packages/ra2-formats packages/ra2-assets",
     "check": "pnpm run typecheck && pnpm run test:unit && vite build",

@@ -1,14 +1,15 @@
 import {
   DataTexture,
+  LinearFilter,
+  LinearMipmapLinearFilter,
   NearestFilter,
   NoColorSpace,
+  RGBAFormat,
+  RedFormat,
   SRGBColorSpace,
   Texture,
   TextureLoader,
-  LinearFilter,
   UnsignedByteType,
-  RGBAFormat,
-  RedFormat,
 } from 'three/webgpu';
 import type { HdCacheManifest, TileEntry, VoxelModel } from '../../../ra2-assets/src/manifest';
 
@@ -45,7 +46,12 @@ export function decodeBase64(text: string): Uint8Array {
   return out;
 }
 
-export async function loadRa2Cache(base: string): Promise<Ra2Cache> {
+export interface Ra2CacheOptions {
+  /** Use the manifest's whole-map terrain image (AI-upscaled when available); default true. */
+  terrainMap?: boolean;
+}
+
+export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}): Promise<Ra2Cache> {
   const url = (file: string) => `${base.replace(/\/$/, '')}/${file}`;
   const manifest = (await (await fetch(url('manifest.json'))).json()) as HdCacheManifest;
   const tileBytes = decodeBase64(manifest.cells.tile);
@@ -108,12 +114,17 @@ export async function loadRa2Cache(base: string): Promise<Ra2Cache> {
   );
 
   let terrainMap: Ra2Cache['terrainMap'];
-  const ref = manifest.terrainMap;
+  const ref = options.terrainMap === false ? undefined : manifest.terrainMap;
   if (ref) {
-    const { texture, original } = await loadDilated(url(ref.file));
+    // Upscaled composites already carry bled colours under their transparent border; only the raw scale-1 image
+    // needs the dilation pass.
+    const { texture, original } = await loadDilated(url(ref.file), ref.scale > 1 ? 0 : 10);
     texture.colorSpace = SRGBColorSpace;
     texture.magFilter = LinearFilter;
-    texture.minFilter = LinearFilter;
+    // A whole map is far larger than the screen when zoomed out: mipmaps keep it from shimmering.
+    texture.minFilter = LinearMipmapLinearFilter;
+    texture.generateMipmaps = true;
+    texture.anisotropy = 8;
     // The composite's own water mask when present; otherwise treat nothing as water rather than guessing.
     const mask = ref.waterMask ? await loadMask(url(ref.waterMask)) : emptyMask();
     void original;
@@ -191,7 +202,7 @@ export function screenToCell(sx: number, sy: number, level: number): [x: number,
  * their cell edges, so bilinear filtering there would otherwise mix in the transparent (black) surroundings and draw a
  * dark grid. Alpha is kept so wall geometry can still tell art from empty raster.
  */
-async function loadDilated(url: string): Promise<{ texture: DataTexture; original: Uint8Array }> {
+async function loadDilated(url: string, passes = 10): Promise<{ texture: DataTexture; original: Uint8Array }> {
   const bitmap = await createImageBitmap(await (await fetch(url)).blob(), {
     colorSpaceConversion: 'none',
     premultiplyAlpha: 'none',
@@ -206,7 +217,7 @@ async function loadDilated(url: string): Promise<{ texture: DataTexture; origina
   let filled = new Uint8Array(width * height);
   for (let i = 0; i < width * height; i++) filled[i] = pixels[i * 4 + 3]! >= 128 ? 1 : 0;
   // Wide enough to cover ramp cells whose geometry samples a few pixels past the painted diamond.
-  for (let pass = 0; pass < 10; pass++) {
+  for (let pass = 0; pass < passes; pass++) {
     const next = filled.slice();
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
