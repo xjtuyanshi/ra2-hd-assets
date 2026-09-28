@@ -100,7 +100,7 @@ export async function loadRa2World(
         });
     }
   }
-  const spriteLayer = new SpriteLayer(cache, sprites);
+  const spriteLayer = new SpriteLayer(cache, sprites, sprites.length, undefined, cache.spriteAtlasHd);
   root.add(spriteLayer.mesh);
 
   const waypoint = manifest.waypoints.find((w) => w.id === 0) ?? manifest.waypoints[0];

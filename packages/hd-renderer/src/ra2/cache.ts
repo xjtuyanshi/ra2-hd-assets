@@ -36,6 +36,8 @@ export interface Ra2Cache {
     ref: NonNullable<HdCacheManifest['terrainMap']>;
   };
   spriteAtlas: Texture;
+  /** 2x HD version of the sprite atlas (full colour + house-paint mask), when extracted (pnpm hd:sprites). */
+  spriteAtlasHd: { color: Texture; remap: Texture } | null;
   /** All palettes stacked into one 256xN texture; `paletteRow` maps a palette key to its row. */
   paletteAtlas: DataTexture;
   paletteRow: Map<string, number>;
@@ -56,6 +58,35 @@ export function decodeBase64(text: string): Uint8Array {
 export interface Ra2CacheOptions {
   /** Use the manifest's whole-map terrain image (AI-upscaled when available); default true. */
   terrainMap?: boolean;
+  /** Use the HD sprite atlas when the cache has one; default true. */
+  hdSprites?: boolean;
+}
+
+/** Where an HD sprite atlas is recorded (manifest.spriteAtlasHd / library spriteAtlasesHd entries). */
+export interface HdAtlasRef {
+  file: string;
+  remap: string;
+  scale: number;
+  width: number;
+  height: number;
+}
+
+/** Load an HD sprite atlas pair: colour art (sRGB, filtered) and the house-paint mask (linear data). */
+export async function loadHdAtlas(base: string, ref: HdAtlasRef): Promise<{ color: Texture; remap: Texture }> {
+  const loader = new TextureLoader();
+  const [color, remap] = await Promise.all([
+    loader.loadAsync(`${base}/${ref.file}`),
+    loader.loadAsync(`${base}/${ref.remap}`),
+  ]);
+  for (const texture of [color, remap]) {
+    texture.flipY = false;
+    texture.magFilter = LinearFilter;
+    texture.minFilter = LinearMipmapLinearFilter;
+    texture.generateMipmaps = true;
+  }
+  color.colorSpace = SRGBColorSpace;
+  remap.colorSpace = NoColorSpace;
+  return { color, remap };
 }
 
 export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}): Promise<Ra2Cache> {
@@ -83,6 +114,9 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
   spriteAtlas.magFilter = NearestFilter;
   spriteAtlas.minFilter = NearestFilter;
   spriteAtlas.generateMipmaps = false;
+  const hdRef = (manifest as HdCacheManifest & { spriteAtlasHd?: HdAtlasRef }).spriteAtlasHd;
+  const spriteAtlasHd =
+    hdRef && options.hdSprites !== false ? await loadHdAtlas(base.replace(/\/$/, ''), hdRef).catch(() => null) : null;
 
   const paletteRow = new Map<string, number>();
   const paletteRgb = new Map<string, Uint8Array>();
@@ -153,6 +187,7 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     terrainAtlas,
     waterMask,
     spriteAtlas,
+    spriteAtlasHd,
     paletteAtlas,
     paletteRow,
     paletteRgb,

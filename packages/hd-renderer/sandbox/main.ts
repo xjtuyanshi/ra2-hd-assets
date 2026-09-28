@@ -19,6 +19,7 @@ const world = mapName
   ? await loadRa2World(`/${encodeURIComponent(mapName)}`, {
       // ?tmap=0 draws the per-tile atlas instead of the (AI-upscaled) whole-map terrain image, for A/B review.
       terrainMap: params.get('tmap') !== '0',
+      hdSprites: params.get('hdsprites') !== '0',
       extraObjects: (manifest) => {
         if (!params.has('units')) return [];
         const start = manifest.waypoints.find((w) => w.id === 0) ?? manifest.waypoints[0] ?? { x: 50, y: 50 };

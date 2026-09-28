@@ -148,7 +148,7 @@ export class LiveView {
     hd.scene.add(this.root);
     this.shroud = new ShroudLayer(world.width, world.height);
     hd.scene.add(this.shroud.mesh);
-    this.sprites = new SpriteLayer(cache, [], LIVE_SPRITE_CAPACITY);
+    this.sprites = new SpriteLayer(cache, [], LIVE_SPRITE_CAPACITY, undefined, cache.spriteAtlasHd);
     this.sprites.mesh.name = 'live-sprites';
     this.root.add(this.sprites.mesh);
     this.shareSpriteUniforms(this.sprites);
@@ -333,7 +333,10 @@ export class LiveView {
     if (layer) return layer;
     const atlas = this.library?.page(page);
     if (!atlas) return null;
-    layer = new SpriteLayer(this.cache, [], LIVE_SPRITE_CAPACITY, atlas);
+    // Wait for the page's HD art when it has some, so a layer is built once with its final textures.
+    const hd = this.library!.hdPage(page);
+    if (!hd && this.library!.hasHdPage(page)) return null;
+    layer = new SpriteLayer(this.cache, [], LIVE_SPRITE_CAPACITY, atlas, hd);
     layer.mesh.name = `live-sprites-${page}`;
     this.shareSpriteUniforms(layer);
     this.root.add(layer.mesh);

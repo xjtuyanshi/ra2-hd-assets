@@ -10,10 +10,13 @@ import {
 } from 'three/webgpu';
 import {
   Fn,
+  clamp,
   float,
   floor,
   instancedBufferAttribute,
+  mix,
   positionGeometry,
+  pow,
   texture,
   uniform,
   uv,
@@ -79,6 +82,12 @@ export class SpriteLayer {
       width: cache.manifest.spriteAtlas.width,
       height: cache.manifest.spriteAtlas.height,
     },
+    /**
+     * Optional 2x HD version of the same atlas (same layout, normalized UVs unchanged): full-colour art with house-paint
+     * pixels written as a grey ramp, plus a mask of those pixels (see packages/ra2-assets spriteHd). Shadows keep using
+     * the indexed atlas.
+     */
+    hd: { color: Texture; remap: Texture } | null = null,
   ) {
     this.capacity = Math.max(1, capacity, instances.length);
     const count = this.capacity;
@@ -98,7 +107,8 @@ export class SpriteLayer {
     const material = new MeshBasicNodeMaterial();
     material.transparent = true;
     material.blending = NormalBlending;
-    material.alphaTest = 0.5;
+    // Indexed art is binary; HD art has soft, anti-aliased edges that blend.
+    material.alphaTest = hd ? 0.3 : 0.5;
     // Raster-relative coordinates from the quad's own UVs (u right, v down). positionLocal cannot be used here: once
     // positionNode is set it refers to the displaced position in the fragment stage.
     const u: ShaderNode = uv().x;
@@ -121,12 +131,24 @@ export class SpriteLayer {
     })();
     material.colorNode = Fn(() => {
       const texel = vec2(aRect.x.add(u.mul(aRect.z)), aRect.y.add(v.mul(aRect.w)));
-      const index = floor(texture(atlas.texture, texel.div(atlasSize)).r.mul(255).add(0.5));
-      const paletteUv = vec2(index.add(0.5).div(256), aParams.z.add(0.5).div(paletteRows));
-      const lit: ShaderNode = texture(cache.paletteAtlas, paletteUv).rgb.mul(this.light);
+      const atlasUv = texel.div(atlasSize);
+      const index = floor(texture(atlas.texture, atlasUv).r.mul(255).add(0.5));
+      const paletteColour = (i: ShaderNode): ShaderNode =>
+        texture(cache.paletteAtlas, vec2(i.add(0.5).div(256), aParams.z.add(0.5).div(paletteRows))).rgb;
       const isShadow = aFlat.greaterThan(1.5);
       const opaque = index.greaterThan(0.5).select(float(1), float(0));
-      return isShadow.select(vec4(0, 0, 0, opaque.mul(0.55)), vec4(lit, opaque));
+      const shadow = vec4(0, 0, 0, opaque.mul(0.55));
+      if (!hd) return isShadow.select(shadow, vec4(paletteColour(index).mul(this.light), opaque));
+      const art: ShaderNode = texture(hd.color, atlasUv);
+      const paint: ShaderNode = texture(hd.remap, atlasUv).r;
+      // House paint was written as grey(i) = 255 - (i - 16) * 15 in sRGB; invert it to a fractional remap index and
+      // take the instance's house colours from its palette row, blending between neighbouring entries.
+      const grey = pow(art.g.max(0), 1 / 2.2).mul(255);
+      const remapIndex = clamp(float(16).add(float(255).sub(grey).div(15)), 16, 31);
+      const i0 = floor(remapIndex);
+      const house = mix(paletteColour(i0), paletteColour(i0.add(1).min(31)), remapIndex.sub(i0));
+      const colour = mix(art.rgb, house, paint);
+      return isShadow.select(shadow, vec4(colour.mul(this.light), art.a));
     })();
 
     this.mesh = new InstancedMesh(new PlaneGeometry(1, 1), material, count);

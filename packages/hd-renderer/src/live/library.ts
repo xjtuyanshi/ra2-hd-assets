@@ -1,7 +1,7 @@
 import { NearestFilter, NoColorSpace, TextureLoader, type Texture } from 'three/webgpu';
 import type { LibraryType, TypeLibrary } from '../../../ra2-assets/src/library';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
-import { addPalette, readPalettePng, type Ra2Cache } from '../ra2/cache';
+import { addPalette, loadHdAtlas, readPalettePng, type HdAtlasRef, type Ra2Cache } from '../ra2/cache';
 
 /** Palette keys of the library live next to the map cache's own under this prefix. */
 export const LIBRARY_PALETTE_PREFIX = 'lib:';
@@ -14,6 +14,7 @@ export const LIBRARY_PALETTE_PREFIX = 'lib:';
 export class LiveLibrary {
   private readonly pages = new Map<number, Texture | 'loading' | 'failed'>();
   private readonly voxels = new Map<string, VoxelModel | 'loading' | 'failed'>();
+  private readonly hdPages = new Map<number, { color: Texture; remap: Texture } | 'loading' | 'failed'>();
 
   private constructor(
     readonly base: string,
@@ -69,6 +70,31 @@ export class LiveLibrary {
       return null;
     }
     return typeof entry === 'string' ? null : { texture: entry, width: ref.width, height: ref.height };
+  }
+
+  /**
+   * The page's HD atlas (pnpm hd:sprites --library), null while loading or when the page has none. Callers draw the
+   * indexed page until it arrives.
+   */
+  hdPage(index: number): { color: Texture; remap: Texture } | null {
+    const refs = (this.library as TypeLibrary & { spriteAtlasesHd?: (HdAtlasRef | null)[] }).spriteAtlasesHd;
+    const ref = refs?.[index];
+    if (!ref) return null;
+    const entry = this.hdPages.get(index);
+    if (entry === undefined) {
+      this.hdPages.set(index, 'loading');
+      loadHdAtlas(this.base, ref)
+        .then((atlas) => this.hdPages.set(index, atlas))
+        .catch(() => this.hdPages.set(index, 'failed'));
+      return null;
+    }
+    return typeof entry === 'string' ? null : entry;
+  }
+
+  /** Whether the page has an HD atlas that has not failed to load. */
+  hasHdPage(index: number): boolean {
+    const refs = (this.library as TypeLibrary & { spriteAtlasesHd?: (HdAtlasRef | null)[] }).spriteAtlasesHd;
+    return !!refs?.[index] && this.hdPages.get(index) !== 'failed';
   }
 
   /** A voxel model by library voxel id, or null while it loads. */
