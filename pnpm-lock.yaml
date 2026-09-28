@@ -89,6 +89,14 @@ importers:
         specifier: ^6.4.3
         version: 6.4.3(@types/node@26.2.0)(tsx@4.23.12)
 
+  packages/ra2-assets:
+    dependencies:
+      ra2-formats:
+        specifier: workspace:*
+        version: link:../ra2-formats
+
+  packages/ra2-formats: {}
+
   packages/relay:
     dependencies:
       ws:

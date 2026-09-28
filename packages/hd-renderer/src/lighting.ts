@@ -18,15 +18,15 @@ interface LightKey {
 const KEYS: LightKey[] = [
   {
     hour: 0,
-    sun: new Color(0.45, 0.58, 1.0),
-    sunIntensity: 0.45,
+    sun: new Color(0.5, 0.62, 1.0),
+    sunIntensity: 0.6,
     elevation: 40,
     skyZenith: new Color(0.01, 0.015, 0.04),
     skyHorizon: new Color(0.03, 0.05, 0.1),
-    hemiSky: new Color(0.14, 0.2, 0.4),
-    hemiGround: new Color(0.03, 0.035, 0.05),
-    hemiIntensity: 0.75,
-    exposure: 1.45,
+    hemiSky: new Color(0.16, 0.22, 0.42),
+    hemiGround: new Color(0.04, 0.045, 0.06),
+    hemiIntensity: 0.95,
+    exposure: 1.75,
   },
   {
     hour: 5.5,
@@ -90,27 +90,27 @@ const KEYS: LightKey[] = [
   },
   {
     hour: 21,
-    sun: new Color(0.45, 0.58, 1.0),
-    sunIntensity: 0.45,
+    sun: new Color(0.5, 0.62, 1.0),
+    sunIntensity: 0.6,
     elevation: 40,
     skyZenith: new Color(0.01, 0.015, 0.04),
     skyHorizon: new Color(0.03, 0.05, 0.1),
-    hemiSky: new Color(0.14, 0.2, 0.4),
-    hemiGround: new Color(0.03, 0.035, 0.05),
-    hemiIntensity: 0.75,
-    exposure: 1.45,
+    hemiSky: new Color(0.16, 0.22, 0.42),
+    hemiGround: new Color(0.04, 0.045, 0.06),
+    hemiIntensity: 0.95,
+    exposure: 1.75,
   },
   {
     hour: 24,
-    sun: new Color(0.45, 0.58, 1.0),
-    sunIntensity: 0.45,
+    sun: new Color(0.5, 0.62, 1.0),
+    sunIntensity: 0.6,
     elevation: 40,
     skyZenith: new Color(0.01, 0.015, 0.04),
     skyHorizon: new Color(0.03, 0.05, 0.1),
-    hemiSky: new Color(0.14, 0.2, 0.4),
-    hemiGround: new Color(0.03, 0.035, 0.05),
-    hemiIntensity: 0.75,
-    exposure: 1.45,
+    hemiSky: new Color(0.16, 0.22, 0.42),
+    hemiGround: new Color(0.04, 0.045, 0.06),
+    hemiIntensity: 0.95,
+    exposure: 1.75,
   },
 ];
 
@@ -159,6 +159,39 @@ export class Lighting {
     this.root.add(this.sun, this.sun.target, this.hemi);
   }
 
+  /** Keep the sun and its shadow frustum centred on what the camera is looking at (maps are much larger than a view). */
+  follow(target: Vector3): void {
+    this.sun.target.position.copy(target);
+    const shadowCamera = this.sun.shadow.camera;
+    if (shadowCamera.right !== 36) {
+      shadowCamera.left = -36;
+      shadowCamera.right = 36;
+      shadowCamera.top = 36;
+      shadowCamera.bottom = -36;
+      shadowCamera.updateProjectionMatrix();
+    }
+  }
+
+  /** Irradiance on flat ground from the sun and sky, per channel (linear), for the current state. */
+  flatIrradianceColor(out: Color): Color {
+    const sunHeight = Math.max(0, this.state.sunDirection.y);
+    return out
+      .copy(this.sun.color)
+      .multiplyScalar(this.sun.intensity * sunHeight)
+      .add(this.hemi.color.clone().multiplyScalar(this.hemi.intensity));
+  }
+
+  /** Flat-ground irradiance at clear noon: the reference at which original art keeps its original brightness. */
+  referenceIrradiance(): number {
+    if (this.reference === undefined) {
+      const noon = KEYS.find((key) => key.hour === 12)!;
+      const sky = (noon.hemiSky.r + noon.hemiSky.g + noon.hemiSky.b) / 3;
+      this.reference = noon.sunIntensity * Math.sin((noon.elevation * Math.PI) / 180) + sky * noon.hemiIntensity;
+    }
+    return this.reference;
+  }
+  private reference?: number;
+
   /** Blend day-cycle keys; weather darkens and desaturates the key light. */
   update(hour: number, overcast: number): void {
     const h = ((hour % 24) + 24) % 24;
@@ -188,7 +221,7 @@ export class Lighting {
       .lerp(b.sun, t)
       .lerp(grey, overcast * 0.7);
     this.sun.color.copy(this.state.sunColor);
-    this.sun.intensity = lerp(a.sunIntensity, b.sunIntensity) * (1 - overcast * 0.7);
+    this.sun.intensity = lerp(a.sunIntensity, b.sunIntensity) * (1 - overcast * 0.55);
     this.state.skyZenith
       .copy(a.skyZenith)
       .lerp(b.skyZenith, t)
@@ -202,10 +235,11 @@ export class Lighting {
       .lerp(b.hemiSky, t)
       .lerp(grey, overcast * 0.5);
     this.hemi.groundColor.copy(a.hemiGround).lerp(b.hemiGround, t);
-    this.hemi.intensity = lerp(a.hemiIntensity, b.hemiIntensity) * (1 - overcast * 0.25);
+    // Overcast skies scatter more light; keep ambient up so wet battles stay readable.
+    this.hemi.intensity = lerp(a.hemiIntensity, b.hemiIntensity) * (1 + overcast * 0.15);
     this.state.ambient.copy(this.hemi.color).multiplyScalar(this.hemi.intensity * 0.5);
     this.state.exposure = lerp(a.exposure, b.exposure);
     // Moonlight keys use sunIntensity 0.45, dusk 1.2, day 2.6+: map that onto 1 (night) .. 0 (day).
-    this.state.night = Math.min(1, Math.max(0, 1 - (lerp(a.sunIntensity, b.sunIntensity) - 0.45) / 1.0));
+    this.state.night = Math.min(1, Math.max(0, 1 - (lerp(a.sunIntensity, b.sunIntensity) - 0.6) / 0.9));
   }
 }

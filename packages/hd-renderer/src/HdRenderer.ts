@@ -20,6 +20,7 @@ import { ObjectLayer } from './objects';
 import { buildTerrain, type TerrainBuild } from './terrain';
 import { buildWater, type WaterUniforms } from './water';
 import { buildRain, type RainSystem } from './weather';
+import type { HdWorld } from './ra2/world';
 import { IsoCamera, LEVEL_HEIGHT, cellToWorld } from './world';
 
 export type ToneMapper = 'agx' | 'neutral' | 'aces';
@@ -62,8 +63,12 @@ export class HdRenderer {
   private readonly objects = new ObjectLayer();
   private readonly effects = new EffectsLayer();
   private terrain!: TerrainBuild;
-  private water!: { uniforms: WaterUniforms };
+  private water: { uniforms: WaterUniforms } | null = null;
   private rain!: RainSystem;
+  /** Present when drawing an original map; null for the procedural sandbox. */
+  private world: HdWorld | null = null;
+  private waterY = 0;
+  private bounds = { width: 0, height: 0 };
   private readonly seenEvents = new Set<number>();
   private state: RenderState;
   private startTime = performance.now();
@@ -87,24 +92,35 @@ export class HdRenderer {
     return (this.renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'WebGPU' : 'WebGL2';
   }
 
-  async init(): Promise<void> {
+  /** Build the scene from the procedural state, or from an original map when `world` is given. */
+  async init(world?: HdWorld): Promise<void> {
     await this.renderer.init();
-    const map = this.state.map;
     this.scene.background = new Color(0x0b0c0e);
-    this.terrain = buildTerrain(map);
-    const waterY = map.waterLevel * LEVEL_HEIGHT;
-    const water = buildWater(map.width, map.height, waterY, this.terrain.heightTexture);
-    this.water = water;
-    this.rain = buildRain(map.width, map.height, this.terrain.heightTexture, waterY);
-    this.scene.add(
-      this.terrain.mesh,
-      water.mesh,
-      this.lighting.root,
-      this.objects.root,
-      this.effects.root,
-      this.rain.object,
-    );
-    this.view.target.set(map.width / 2, 0, map.height / 2);
+    let waterY: number | null;
+    if (world) {
+      this.world = world;
+      this.terrain = world.terrain;
+      this.bounds = { width: world.width, height: world.height };
+      waterY = world.waterY;
+      this.scene.add(world.root);
+      this.view.target.copy(world.focus);
+    } else {
+      const map = this.state.map;
+      this.terrain = buildTerrain(map);
+      this.bounds = { width: map.width, height: map.height };
+      waterY = map.waterLevel * LEVEL_HEIGHT;
+      this.scene.add(this.objects.root);
+      this.view.target.set(map.width / 2, 0, map.height / 2);
+    }
+    this.waterY = waterY ?? -1000;
+    if (world?.water) this.water = { uniforms: world.water };
+    if (waterY !== null) {
+      const water = buildWater(this.bounds.width, this.bounds.height, waterY, this.terrain.heightTexture);
+      this.water = water;
+      this.scene.add(water.mesh);
+    }
+    this.rain = buildRain(this.bounds.width, this.bounds.height, this.terrain.heightTexture, this.waterY);
+    this.scene.add(this.terrain.mesh, this.lighting.root, this.effects.root, this.rain.object);
     this.buildPipeline();
     this.applySettings();
   }
@@ -135,7 +151,7 @@ export class HdRenderer {
 
   setState(state: RenderState): void {
     this.state = state;
-    this.objects.sync(state.objects, this.terrain.heightAt);
+    if (!this.world) this.objects.sync(state.objects, this.terrain.heightAt);
     for (const event of state.events) this.handleEvent(event);
   }
 
@@ -146,7 +162,7 @@ export class HdRenderer {
     if (this.seenEvents.size > 4096) this.seenEvents.clear();
     if (event.kind === 'explosion') {
       const ground = this.terrain.heightAt(event.x, event.y);
-      const at = cellToWorld(event.x, event.y, 0).setY(Math.max(ground, this.state.map.waterLevel * LEVEL_HEIGHT));
+      const at = cellToWorld(event.x, event.y, 0).setY(Math.max(ground, this.waterY));
       const env = this.state.environment;
       const wind = new Vector3(Math.cos(env.windDirection), 0, Math.sin(env.windDirection)).multiplyScalar(
         env.windStrength * 0.8,
@@ -174,17 +190,24 @@ export class HdRenderer {
       ? Math.min(1, wet.value + deltaSeconds * 0.25 * rainAmount)
       : Math.max(0, wet.value - deltaSeconds * 0.02);
 
+    this.lighting.follow(this.view.target);
     this.lighting.update(env.timeOfDay, raining ? 0.35 + 0.5 * rainAmount : 0);
     const light = this.lighting.state;
-    this.renderer.toneMappingExposure = this.settings.exposure * light.exposure;
-    const w = this.water.uniforms;
-    w.sunDirection.value.copy(light.sunDirection);
-    w.sunColor.value.copy(light.sunColor).multiplyScalar(this.lighting.sun.intensity / 3);
-    w.skyZenith.value.copy(light.skyZenith);
-    w.skyHorizon.value.copy(light.skyHorizon);
-    w.ambient.value.copy(light.ambient);
-    w.rain.value = rainAmount;
-    w.wind.value = env.windStrength + rainAmount * 0.3;
+    // Original maps are calibrated so flat ground at noon shows the tile art at its original brightness; other times
+    // and weather scale from there. The procedural sandbox keeps its own per-key exposure.
+    this.renderer.toneMappingExposure = this.world
+      ? (this.settings.exposure * Math.PI) / this.lighting.referenceIrradiance()
+      : this.settings.exposure * light.exposure;
+    if (this.water) {
+      const w = this.water.uniforms;
+      w.sunDirection.value.copy(light.sunDirection);
+      w.sunColor.value.copy(light.sunColor).multiplyScalar(this.lighting.sun.intensity / 3);
+      w.skyZenith.value.copy(light.skyZenith);
+      w.skyHorizon.value.copy(light.skyHorizon);
+      w.ambient.value.copy(light.ambient);
+      w.rain.value = rainAmount;
+      w.wind.value = env.windStrength + rainAmount * 0.3;
+    }
     this.objects.night.value = light.night;
 
     this.rain.intensity.value = rainAmount;
@@ -203,6 +226,14 @@ export class HdRenderer {
     const right = new Vector3().setFromMatrixColumn(this.view.camera.matrixWorld, 0);
     const up = new Vector3().setFromMatrixColumn(this.view.camera.matrixWorld, 1);
     this.effects.update(this.seconds(), right, up);
+    const sprites = this.world?.sprites;
+    if (sprites) {
+      sprites.cameraRight.value.copy(right);
+      sprites.cameraUp.value.copy(up);
+      sprites.toCamera.value.setFromMatrixColumn(this.view.camera.matrixWorld, 2);
+      // Unlit original art follows the scene's light level relative to the noon reference (1 = original look).
+      this.lighting.flatIrradianceColor(sprites.light.value).multiplyScalar(1 / this.lighting.referenceIrradiance());
+    }
     this.pipeline.render();
   }
 
@@ -215,8 +246,8 @@ export class HdRenderer {
     // March along the view ray against the height field; robust and cheap for a single click.
     for (let t = 0; t < 400; t += 0.05) {
       const p = origin.clone().addScaledVector(direction, t);
-      if (p.x < 0 || p.z < 0 || p.x > this.state.map.width || p.z > this.state.map.height) continue;
-      if (p.y <= Math.max(this.terrain.heightAt(p.x, p.z), this.state.map.waterLevel * LEVEL_HEIGHT)) return p;
+      if (p.x < 0 || p.z < 0 || p.x > this.bounds.width || p.z > this.bounds.height) continue;
+      if (p.y <= Math.max(this.terrain.heightAt(p.x, p.z), this.waterY)) return p;
     }
     return null;
   }

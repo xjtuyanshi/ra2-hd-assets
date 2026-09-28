@@ -1,0 +1,14 @@
+{
+  "name": "ra2-formats",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Loaders for Westwood RA2/YR file formats (MIX, PAL, SHP(TS), VXL/HVA, TMP(TS), CSF, AUD, INI, MAP), vendored from Vanguard packages/formats; see NOTICE.md.",
+  "license": "GPL-3.0-or-later",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

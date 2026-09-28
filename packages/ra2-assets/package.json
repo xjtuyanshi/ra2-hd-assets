@@ -1,0 +1,20 @@
+{
+  "name": "ra2-assets",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local HD-cache extraction from the player's own RA2/YR install: map terrain/sprite atlases, palettes, voxels and a manifest for the HD renderer. Output is derived game data and stays in the gitignored gameres/.",
+  "license": "GPL-3.0-or-later",
+  "exports": {
+    ".": "./src/index.ts",
+    "./manifest": "./src/manifest.ts"
+  },
+  "scripts": {
+    "extract": "tsx src/cli/extract.mts",
+    "preview": "tsx src/cli/preview.mts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "ra2-formats": "workspace:*"
+  }
+}

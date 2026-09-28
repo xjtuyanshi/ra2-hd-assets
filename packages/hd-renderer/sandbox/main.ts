@@ -2,6 +2,7 @@ import GUI from 'three/addons/libs/lil-gui.module.min.js';
 import { HdRenderer, type ToneMapper } from '../src/HdRenderer';
 import type { RenderEvent, RenderObject, RenderState, Weather } from '../src/contract';
 import { createScenario } from './scenario';
+import { loadRa2World } from '../src/ra2/world';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
 const hud = document.querySelector<HTMLElement>('#hud')!;
@@ -11,8 +12,38 @@ const state: RenderState = createScenario();
 if (params.has('time')) state.environment.timeOfDay = Number(params.get('time'));
 if (params.has('weather')) state.environment.weather = params.get('weather') as Weather;
 
+// ?map=<name> draws an original map from the local HD cache (pnpm hd:extract) instead of the procedural scenario.
+const mapName = params.get('map');
+// ?units=1 parks the extracted voxel vehicles near the start point, in all eight facings, to review them.
+const world = mapName
+  ? await loadRa2World(`/${encodeURIComponent(mapName)}`, {
+      extraObjects: (manifest) => {
+        if (!params.has('units')) return [];
+        const start = manifest.waypoints.find((w) => w.id === 0) ?? manifest.waypoints[0] ?? { x: 50, y: 50 };
+        const owner = Object.keys(manifest.houses ?? {})[0];
+        return Object.keys(manifest.voxels).flatMap((voxel, row) =>
+          Array.from({ length: 8 }, (_, i) => ({
+            kind: 'vehicle' as const,
+            type: voxel,
+            voxel,
+            owner,
+            x: start.x - 4 + i * 1.5,
+            y: start.y - 5 + row * 1.6,
+            z: 0,
+            facing: i * 32,
+          })),
+        );
+      },
+    })
+  : undefined;
+if (world) {
+  state.objects = [];
+  if (!params.has('time')) state.environment.timeOfDay = 12;
+}
 const hd = new HdRenderer(canvas, state, { forceWebGL: params.get('webgl') === '1' });
-await hd.init();
+await hd.init(world);
+// Development handle for inspecting the scene from the console.
+(window as unknown as { __hd: unknown }).__hd = { hd, world, state };
 hd.setState(state);
 
 // Fixed camera presets for comparable screenshots: ?cx=12&cy=44&zoom=0.8
@@ -177,7 +208,16 @@ function loop(now: number): void {
   if (keys.has('s') || keys.has('arrowdown')) hd.view.panPixels(0, -pan);
 
   step(dt, t);
-  if (ui.battle && t > nextShot) {
+  // ?boom=1 on original maps: periodic explosions around the view centre (no scripted armies there).
+  if (world && params.has('boom') && t > nextShot) {
+    nextShot = t + 0.7 + Math.random() * 0.9;
+    explosionAt(
+      hd.view.target.x + (Math.random() - 0.5) * 10,
+      hd.view.target.z + (Math.random() - 0.5) * 10,
+      0.8 + Math.random(),
+    );
+  }
+  if (ui.battle && t > nextShot && allied.length && enemy.length) {
     nextShot = t + 0.9 + Math.random() * 1.4;
     const targetList = Math.random() < 0.5 ? allied : enemy;
     const target = targetList[Math.floor(Math.random() * targetList.length)]!;

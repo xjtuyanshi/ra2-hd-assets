@@ -2,6 +2,8 @@
 **/pnpm-lock.yaml
 public/
 **/vendor/
+# Vanguard formats sources vendored verbatim (see packages/ra2-formats/NOTICE.md); keep upstream formatting.
+packages/ra2-formats/src/
 **/LICENSE*
 
 # Preserve copied third-party skill originals.

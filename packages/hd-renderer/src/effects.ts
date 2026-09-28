@@ -32,6 +32,7 @@ const FIREBALLS = 96;
 const SMOKE = 1536;
 const SPARKS = 1024;
 const SCORCHES = 96;
+const SHOCKWAVES = 48;
 const LIGHTS = 8;
 
 /** A ring buffer of instanced particles whose per-instance data lives in GPU attributes; only spawns touch the CPU. */
@@ -85,6 +86,7 @@ export class EffectsLayer {
   private readonly smoke: ParticlePool;
   private readonly sparks: ParticlePool;
   private readonly scorch: ParticlePool;
+  private readonly shock: ParticlePool;
   private readonly lights: { light: PointLight; born: number; peak: number }[] = [];
   private nextLight = 0;
   /** Seconds of camera shake still pending, scaled by explosion size. */
@@ -169,9 +171,30 @@ export class EffectsLayer {
     });
     this.scorch.mesh.renderOrder = 5;
 
-    for (const pool of [this.scorch, this.smoke, this.fire, this.sparks]) this.root.add(pool.mesh);
+    // Ground shockwave: a hot ring racing outward in the first half-second, the part that sells "big boom" at RTS zoom.
+    this.shock = new ParticlePool(SHOCKWAVES, ground, additive(), (pool) => {
+      const { age, life, size, origin } = particleInputs(pool, this.now);
+      const t = clamp(age.div(life), 0, 1);
+      const radius = size.mul(float(0.15).add(smoothstep(0, 1, t).mul(1.0)));
+      pool.material.positionNode = origin.add(vec3(0, 0.03, 0)).add(positionLocal.mul(radius));
+      pool.material.colorNode = Fn(() => {
+        const d = length(uv().sub(0.5).mul(2));
+        // A thin hot ring only; a filled disc reads as a coloured halo over dark water.
+        const ring = smoothstep(0.1, 0.0, d.sub(0.85).abs());
+        const fade = float(1).sub(t).mul(float(1).sub(t));
+        return vec4(
+          color(0xffe2b8).mul(1.4),
+          ring
+            .mul(fade)
+            .mul(0.8)
+            .mul(t.lessThan(1).select(float(1), float(0))),
+        );
+      })();
+    });
+
+    for (const pool of [this.scorch, this.shock, this.smoke, this.fire, this.sparks]) this.root.add(pool.mesh);
     for (let i = 0; i < LIGHTS; i++) {
-      const light = new PointLight(new Color(1.0, 0.5, 0.2), 0, 4.5, 2);
+      const light = new PointLight(new Color(1.0, 0.5, 0.2), 0, 6, 2);
       this.root.add(light);
       this.lights.push({ light, born: -1e6, peak: 0 });
     }
@@ -179,27 +202,30 @@ export class EffectsLayer {
 
   explode(now: number, at: Vector3, scale: number, wind: Vector3): void {
     const r = (spread: number) => (Math.random() - 0.5) * spread;
-    for (let i = 0; i < 3 + Math.round(scale * 2); i++) {
+    // Initial white-hot flash, then a cluster of rolling fireballs.
+    this.fire.spawn(now, at.clone().add(new Vector3(0, 0.4, 0)), new Vector3(), 2.2 * scale, 0.12);
+    for (let i = 0; i < 5 + Math.round(scale * 3); i++) {
       this.fire.spawn(
-        now + i * 0.05,
-        at.clone().add(new Vector3(r(0.5), 0.15 + Math.random() * 0.3, r(0.5)).multiplyScalar(scale)),
+        now + i * 0.045,
+        at.clone().add(new Vector3(r(0.8), 0.15 + Math.random() * 0.5, r(0.8)).multiplyScalar(scale)),
         new Vector3(),
-        1.1 * scale,
-        0.55 + Math.random() * 0.25,
+        1.5 * scale * (0.7 + Math.random() * 0.6),
+        0.6 + Math.random() * 0.35,
       );
     }
-    for (let i = 0; i < 10 + Math.round(scale * 8); i++) {
-      const velocity = new Vector3(r(1.2), 0.9 + Math.random() * 0.8, r(1.2)).multiplyScalar(scale).add(wind);
+    this.shock.spawn(now, at, new Vector3(), 3.4 * scale, 0.5);
+    for (let i = 0; i < 16 + Math.round(scale * 12); i++) {
+      const velocity = new Vector3(r(1.6), 1.0 + Math.random() * 1.1, r(1.6)).multiplyScalar(scale).add(wind);
       this.smoke.spawn(
-        now + 0.08 + Math.random() * 0.25,
-        at.clone().add(new Vector3(r(0.4), 0.2, r(0.4))),
+        now + 0.08 + Math.random() * 0.3,
+        at.clone().add(new Vector3(r(0.6), 0.25, r(0.6))),
         velocity,
-        0.9 * scale,
-        2.8 + Math.random() * 2.2,
+        1.2 * scale,
+        3.5 + Math.random() * 2.5,
       );
     }
-    for (let i = 0; i < 18 + Math.round(scale * 16); i++) {
-      const velocity = new Vector3(r(7), 3 + Math.random() * 5, r(7)).multiplyScalar(0.6 + scale * 0.4);
+    for (let i = 0; i < 30 + Math.round(scale * 24); i++) {
+      const velocity = new Vector3(r(9), 4 + Math.random() * 6, r(9)).multiplyScalar(0.6 + scale * 0.4);
       this.sparks.spawn(now, at.clone().add(new Vector3(0, 0.2, 0)), velocity, 0.06, 0.5 + Math.random() * 0.6);
     }
     this.scorch.spawn(now, at, new Vector3(), 1.4 * scale, 40);
@@ -207,8 +233,8 @@ export class EffectsLayer {
     this.nextLight = (this.nextLight + 1) % LIGHTS;
     slot.light.position.copy(at).add(new Vector3(0, 0.8, 0));
     slot.born = now;
-    slot.peak = 22 * scale;
-    this.shake = Math.max(this.shake, 0.25 * scale);
+    slot.peak = 35 * scale;
+    this.shake = Math.max(this.shake, 0.35 * scale);
   }
 
   update(now: number, cameraRight: Vector3, cameraUp: Vector3): void {
