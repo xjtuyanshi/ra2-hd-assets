@@ -61,30 +61,31 @@ export class SpriteLayer {
   readonly cameraRight = uniform(new Vector3(1, 0, 0));
   readonly cameraUp = uniform(new Vector3(0, 1, 0));
   readonly toCamera = uniform(new Vector3(0, 1, 0));
+  readonly capacity: number;
+  private readonly anchor: InstancedBufferAttribute;
+  private readonly rect: InstancedBufferAttribute;
+  private readonly params: InstancedBufferAttribute;
+  private readonly flags: InstancedBufferAttribute;
 
-  constructor(cache: Ra2Cache, instances: SpriteInstance[]) {
-    const count = Math.max(1, instances.length);
-    const anchor = new InstancedBufferAttribute(new Float32Array(count * 3), 3);
-    const rect = new InstancedBufferAttribute(new Float32Array(count * 4), 4);
-    const params = new InstancedBufferAttribute(new Float32Array(count * 4), 4);
-    const flags = new InstancedBufferAttribute(new Float32Array(count), 1);
-    // Decals first, then shadows, then upright art, so later layers sit on top of earlier ones.
-    const layer = (s: SpriteInstance) => (s.flat ? 0 : s.shadow ? 1 : 2);
-    const ordered = [...instances].sort((a, b) => layer(a) - layer(b));
-    ordered.forEach((s, i) => {
-      anchor.setXYZ(i, s.anchor.x, s.anchor.y, s.anchor.z);
-      rect.setXYZW(i, s.frame.rect[0], s.frame.rect[1], s.frame.rect[2], s.frame.rect[3]);
-      params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], cache.paletteRow.get(s.palette) ?? 0, s.push);
-      // 0 = upright card, 1 = ground decal, 2 = shadow decal.
-      flags.setX(i, s.shadow ? 2 : s.flat ? 1 : 0);
-    });
+  /** `capacity` > instances.length reserves room for setInstances (live objects). */
+  constructor(
+    private readonly cache: Ra2Cache,
+    instances: SpriteInstance[],
+    capacity = instances.length,
+  ) {
+    this.capacity = Math.max(1, capacity, instances.length);
+    const count = this.capacity;
+    this.anchor = new InstancedBufferAttribute(new Float32Array(count * 3), 3);
+    this.rect = new InstancedBufferAttribute(new Float32Array(count * 4), 4);
+    this.params = new InstancedBufferAttribute(new Float32Array(count * 4), 4);
+    this.flags = new InstancedBufferAttribute(new Float32Array(count), 1);
 
     const atlasSize = vec2(cache.manifest.spriteAtlas.width, cache.manifest.spriteAtlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
-    const aAnchor: ShaderNode = instancedBufferAttribute(anchor, 'vec3');
-    const aRect: ShaderNode = instancedBufferAttribute(rect, 'vec4');
-    const aParams: ShaderNode = instancedBufferAttribute(params, 'vec4');
-    const aFlat: ShaderNode = instancedBufferAttribute(flags, 'float');
+    const aAnchor: ShaderNode = instancedBufferAttribute(this.anchor, 'vec3');
+    const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
+    const aParams: ShaderNode = instancedBufferAttribute(this.params, 'vec4');
+    const aFlat: ShaderNode = instancedBufferAttribute(this.flags, 'float');
     const ppu = float(PIXELS_PER_CELL_EDGE);
 
     const material = new MeshBasicNodeMaterial();
@@ -122,10 +123,26 @@ export class SpriteLayer {
     })();
 
     this.mesh = new InstancedMesh(new PlaneGeometry(1, 1), material, count);
-    this.mesh.count = instances.length;
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 4;
     this.mesh.name = 'ra2-sprites';
+    this.setInstances(instances);
+  }
+
+  /** Replace every instance (up to `capacity`); cheap enough to call once per presented frame. */
+  setInstances(instances: readonly SpriteInstance[]): void {
+    // Decals first, then shadows, then upright art, so later layers sit on top of earlier ones.
+    const layer = (s: SpriteInstance) => (s.flat ? 0 : s.shadow ? 1 : 2);
+    const ordered = [...instances].sort((a, b) => layer(a) - layer(b)).slice(0, this.capacity);
+    ordered.forEach((s, i) => {
+      this.anchor.setXYZ(i, s.anchor.x, s.anchor.y, s.anchor.z);
+      this.rect.setXYZW(i, s.frame.rect[0], s.frame.rect[1], s.frame.rect[2], s.frame.rect[3]);
+      this.params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], this.cache.paletteRow.get(s.palette) ?? 0, s.push);
+      // 0 = upright card, 1 = ground decal, 2 = shadow decal.
+      this.flags.setX(i, s.shadow ? 2 : s.flat ? 1 : 0);
+    });
+    for (const attribute of [this.anchor, this.rect, this.params, this.flags]) attribute.needsUpdate = true;
+    this.mesh.count = ordered.length;
   }
 }
 

@@ -12,6 +12,7 @@ import {
   UnsignedByteType,
 } from 'three/webgpu';
 import type { HdCacheManifest, TileEntry, VoxelModel } from '../../../ra2-assets/src/manifest';
+import { buildShoreField } from './shoreField';
 
 /**
  * A loaded HD cache (see packages/ra2-assets/src/manifest.ts): decoded cell arrays plus GPU textures. The cache is
@@ -27,7 +28,13 @@ export interface Ra2Cache {
   /** R8 mask over the terrain atlas: 1 where the original art shows open water (see buildWaterMask). */
   waterMask: DataTexture;
   /** Whole-map terrain composite (possibly AI-upscaled) and its water mask, when the cache provides one. */
-  terrainMap?: { texture: DataTexture; waterMask: DataTexture; ref: NonNullable<HdCacheManifest['terrainMap']> };
+  terrainMap?: {
+    texture: DataTexture;
+    waterMask: DataTexture;
+    /** Signed distance to the shoreline in cells, encoded as in shoreField.ts (drives depth, foam and wet sand). */
+    shore: DataTexture;
+    ref: NonNullable<HdCacheManifest['terrainMap']>;
+  };
   spriteAtlas: Texture;
   /** All palettes stacked into one 256xN texture; `paletteRow` maps a palette key to its row. */
   paletteAtlas: DataTexture;
@@ -92,14 +99,14 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     }
   }
   const keys = [...paletteRgb.keys()];
-  const stacked = new Uint8Array(256 * keys.length * 4);
+  // Spare rows let a live match add house remaps after load without resizing the texture shaders index into.
+  const rows = Math.max(PALETTE_ROWS, keys.length);
+  const stacked = new Uint8Array(256 * rows * 4);
   for (const [row, key] of keys.entries()) {
-    const rgb = paletteRgb.get(key)!;
     paletteRow.set(key, row);
-    for (let i = 0; i < 256; i++)
-      stacked.set([rgb[i * 3]!, rgb[i * 3 + 1]!, rgb[i * 3 + 2]!, 255], (row * 256 + i) * 4);
+    writePaletteRow(stacked, row, paletteRgb.get(key)!);
   }
-  const paletteAtlas = new DataTexture(stacked, 256, Math.max(1, keys.length));
+  const paletteAtlas = new DataTexture(stacked, 256, rows);
   paletteAtlas.colorSpace = SRGBColorSpace;
   paletteAtlas.magFilter = NearestFilter;
   paletteAtlas.minFilter = NearestFilter;
@@ -126,9 +133,14 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     texture.generateMipmaps = true;
     texture.anisotropy = 8;
     // The composite's own water mask when present; otherwise treat nothing as water rather than guessing.
-    const mask = ref.waterMask ? await loadMask(url(ref.waterMask)) : emptyMask();
+    const mask = ref.waterMask ? await loadMask(url(ref.waterMask)) : null;
     void original;
-    terrainMap = { texture, waterMask: mask, ref };
+    terrainMap = {
+      texture,
+      waterMask: mask?.texture ?? emptyMask(),
+      shore: mask ? buildShoreField(mask.bytes, mask.width, mask.height, ref.scale).texture : emptyMask(),
+      ref,
+    };
   }
 
   return {
@@ -146,6 +158,43 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     paletteRgb,
     voxels,
   };
+}
+
+const PALETTE_ROWS = 128;
+
+function writePaletteRow(stacked: Uint8Array, row: number, rgb: Uint8Array): void {
+  for (let i = 0; i < 256; i++) stacked.set([rgb[i * 3]!, rgb[i * 3 + 1]!, rgb[i * 3 + 2]!, 255], (row * 256 + i) * 4);
+}
+
+/**
+ * Add "<palette>@<owner>" rows for a house discovered at runtime (a live match's players): palette indices 16-31 take
+ * the house's 16 remap colours, like the rows baked at load for houses named by the map. Returns false when the atlas
+ * is full; existing rows are left untouched.
+ */
+export function addHousePalettes(
+  cache: Ra2Cache,
+  owner: string,
+  remap: readonly (readonly [number, number, number])[],
+): boolean {
+  const stacked = cache.paletteAtlas.image.data as Uint8Array;
+  const capacity = cache.paletteAtlas.image.height;
+  const bases = [...cache.paletteRgb.keys()].filter((key) => !key.includes('@'));
+  let next = cache.paletteRow.size;
+  for (const key of bases) {
+    const houseKey = `${key}@${owner}`;
+    const remapped = cache.paletteRgb.get(key)!.slice();
+    remap.slice(0, 16).forEach(([r, g, b], i) => remapped.set([r, g, b], (16 + i) * 3));
+    cache.paletteRgb.set(houseKey, remapped);
+    let row = cache.paletteRow.get(houseKey);
+    if (row === undefined) {
+      if (next >= capacity) return false;
+      row = next++;
+      cache.paletteRow.set(houseKey, row);
+    }
+    writePaletteRow(stacked, row, remapped);
+  }
+  cache.paletteAtlas.needsUpdate = true;
+  return true;
 }
 
 /** Palettes are 256x1 RGB(A) PNGs; decode through a canvas to get exact bytes. */
@@ -363,7 +412,9 @@ function buildWaterMask(rgba: Uint8Array, width: number, height: number, tiles: 
   return texture;
 }
 
-async function loadMask(url: string): Promise<DataTexture> {
+async function loadMask(
+  url: string,
+): Promise<{ texture: DataTexture; bytes: Uint8Array; width: number; height: number }> {
   const bitmap = await createImageBitmap(await (await fetch(url)).blob(), {
     colorSpaceConversion: 'none',
     premultiplyAlpha: 'none',
@@ -378,7 +429,7 @@ async function loadMask(url: string): Promise<DataTexture> {
   texture.magFilter = LinearFilter;
   texture.minFilter = LinearFilter;
   texture.needsUpdate = true;
-  return texture;
+  return { texture, bytes, width: bitmap.width, height: bitmap.height };
 }
 
 function emptyMask(): DataTexture {

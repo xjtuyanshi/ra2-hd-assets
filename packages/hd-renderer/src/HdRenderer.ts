@@ -77,14 +77,32 @@ export class HdRenderer {
   constructor(
     readonly canvas: HTMLCanvasElement,
     initial: RenderState,
-    options: { forceWebGL?: boolean } = {},
+    options: { forceWebGL?: boolean; requiredLimits?: Record<string, number> } = {},
   ) {
     this.state = initial;
-    this.renderer = new WebGPURenderer({ canvas, antialias: false, forceWebGL: options.forceWebGL ?? false });
+    this.renderer = new WebGPURenderer({
+      canvas,
+      antialias: false,
+      forceWebGL: options.forceWebGL ?? false,
+      ...(options.requiredLimits ? { requiredLimits: options.requiredLimits } : {}),
+    });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = PCFSoftShadowMap;
     this.lighting = new Lighting(initial.map.width, initial.map.height);
+  }
+
+  /**
+   * WebGPU devices default to 8192 px textures; ask for what the adapter really supports (16384 on Apple GPUs) so a
+   * large map's upscaled whole-map terrain fits in one texture. Empty when WebGPU is unavailable.
+   */
+  static async adapterLimits(): Promise<Record<string, number>> {
+    const gpu = (
+      navigator as Navigator & { gpu?: { requestAdapter(): Promise<{ limits: Record<string, number> } | null> } }
+    ).gpu;
+    const adapter = await gpu?.requestAdapter().catch(() => null);
+    const max = adapter?.limits.maxTextureDimension2D;
+    return max ? { maxTextureDimension2D: max } : {};
   }
 
   /** 'WebGPU' or 'WebGL2' once init() resolved. */

@@ -7,6 +7,7 @@ import {
   Mesh,
   MeshStandardNodeMaterial,
   RedFormat,
+  type Object3D,
 } from 'three/webgpu';
 import {
   attribute,
@@ -15,21 +16,20 @@ import {
   float,
   mix,
   mx_fractal_noise_float,
-  mx_noise_float,
   positionWorld,
-  sin,
+  reflector,
   smoothstep,
   texture,
-  time,
   uniform,
   vec2,
-  vec3,
 } from 'three/tsl';
 import { createWaterUniforms, waterSurface, type WaterUniforms } from '../waterShading';
 import type { TerrainBuild } from '../terrain';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT } from '../world';
 import { NO_TILE, ra2Screen, type Ra2Cache, tileAtlasPixel } from './cache';
+import { SHORE_MAX, SHORE_MIN } from './shoreField';
+import { waterLook, waveNormal, wetShore } from './waterLook';
 
 /** Vertices per cell edge; ramps are planar per triangle in the engine, so 2 keeps slopes smooth enough. */
 const SUB = 2;
@@ -44,6 +44,8 @@ export interface Ra2TerrainBuild extends TerrainBuild {
   waterY: number | null;
   /** Inputs of the per-pixel water shading, driven by the renderer's lighting and weather each frame. */
   water: WaterUniforms;
+  /** Mirror plane of the water reflections; must be in the scene graph. Null without open water. */
+  reflectionTarget: Object3D | null;
 }
 
 /**
@@ -236,7 +238,16 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
   geometry.setAttribute('wall', new BufferAttribute(new Float32Array(walls), 1));
   geometry.setAttribute('atlasUv2', new BufferAttribute(new Float32Array(uvs2), 2));
   geometry.setAttribute('atlasRect2', new BufferAttribute(new Float32Array(rects2), 4));
-  geometry.setIndex(indices);
+  // Ground triangles first, then cliff walls, each drawn with its own material (see createMaterials).
+  const groundIndices: number[] = [];
+  const wallIndices: number[] = [];
+  for (let i = 0; i < indices.length; i += 3) {
+    const target = walls[indices[i]!] === 1 ? wallIndices : groundIndices;
+    target.push(indices[i]!, indices[i + 1]!, indices[i + 2]!);
+  }
+  geometry.setIndex([...groundIndices, ...wallIndices]);
+  geometry.addGroup(0, groundIndices.length, 0);
+  geometry.addGroup(groundIndices.length, wallIndices.length, 1);
   geometry.computeBoundingSphere();
 
   const heightTexture = new DataTexture(hGrid, W * SUB + 1, H * SUB + 1, RedFormat, FloatType);
@@ -246,7 +257,10 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
 
   const wetness = uniform(0);
   const water = createWaterUniforms();
-  const mesh = new Mesh(geometry, createMaterial(cache, wetness, water));
+  // The mirror plane sits on the lowest water level (open water in original maps is flat).
+  const waterY = Number.isFinite(waterLevel) ? waterLevel * LEVEL_HEIGHT : null;
+  const materials = createMaterials(cache, wetness, water, waterY);
+  const mesh = new Mesh(geometry, [materials.ground, materials.wall]);
   mesh.name = 'ra2-terrain';
   mesh.receiveShadow = true;
   mesh.castShadow = true;
@@ -257,8 +271,7 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
     const value = hGrid[j * (W * SUB + 1) + i]!;
     return value >= 50 ? 0 : value;
   };
-  void waterLevel;
-  return { mesh, heightTexture, heightAt, wetness, waterY: null, water };
+  return { mesh, heightTexture, heightAt, wetness, waterY: null, water, reflectionTarget: materials.reflectionTarget };
 }
 
 /** Water templates: TMP land type 9 marks open water in TS/RA2; fall back to template names for safety. */
@@ -266,54 +279,107 @@ export function isWaterTile(t: { terrainType: number; file: string }): boolean {
   return t.terrainType === 9 || /^water/i.test(t.file);
 }
 
-function createMaterial(cache: Ra2Cache, wetness: ShaderNode, water: WaterUniforms): MeshStandardNodeMaterial {
-  const material = new MeshStandardNodeMaterial();
-  const rect: ShaderNode = attribute('atlasRect', 'vec4');
-  // Clamp inside the tile's own raster so linear filtering never bleeds a neighbouring atlas entry.
+/** Ground albedo shared by both materials: wetness darkening and rain puddles on top of the original art. */
+function wetGround(albedo: ShaderNode, wetness: ShaderNode): { albedo: ShaderNode; puddle: ShaderNode } {
+  const puddleNoise = mx_fractal_noise_float(positionWorld.mul(0.55), 2, 2, 0.5, 1).mul(0.5).add(0.5);
+  const puddle = smoothstep(0.62, 0.68, puddleNoise).mul(wetness);
+  return { albedo: albedo.mul(mix(float(1), float(0.68), wetness)).mul(mix(float(1), float(0.6), puddle)), puddle };
+}
+
+/**
+ * Terrain materials. Ground and cliff walls are separate materials because the water's mirrored render hides the
+ * material that samples it: with walls on their own material, cliffs still appear in the reflection.
+ */
+function createMaterials(
+  cache: Ra2Cache,
+  wetness: ShaderNode,
+  water: WaterUniforms,
+  waterY: number | null,
+): { ground: MeshStandardNodeMaterial; wall: MeshStandardNodeMaterial; reflectionTarget: Object3D | null } {
   const colourMap = cache.terrainMap?.texture ?? cache.terrainAtlas;
-  const waterMap = cache.terrainMap?.waterMask ?? cache.waterMask;
   const size = cache.terrainMap?.ref ?? cache.manifest.terrainAtlas;
   const halfTexel = vec2(0.5 / size.width, 0.5 / size.height);
-  const uv: ShaderNode = clamp(attribute('atlasUv', 'vec2'), rect.xy.add(halfTexel), rect.zw.sub(halfTexel));
-  const primary: ShaderNode = texture(colourMap, uv);
-  const rect2: ShaderNode = attribute('atlasRect2', 'vec4');
-  const uv2: ShaderNode = clamp(attribute('atlasUv2', 'vec2'), rect2.xy.add(halfTexel), rect2.zw.sub(halfTexel));
-  const secondary: ShaderNode = texture(colourMap, uv2);
-  // Ground surfaces always use their own (dilated) raster colour. Walls take the upper tile's art, else the lower
-  // tile's, else neutral rock where neither raster covers the face.
-  const wall: ShaderNode = attribute('wall', 'float');
-  const upperCover = smoothstep(0.2, 0.6, primary.a);
-  const lowerCover = smoothstep(0.2, 0.6, secondary.a);
-  const wallColour = mix(mix(color(0x5a5248), secondary.rgb, lowerCover), primary.rgb, upperCover);
-  let albedo: ShaderNode = mix(primary.rgb, wallColour, wall);
+  // Clamp inside the tile's own raster so linear filtering never bleeds a neighbouring atlas entry.
+  const sample = (uvName: string, rectName: string) => {
+    const rect: ShaderNode = attribute(rectName, 'vec4');
+    const uv: ShaderNode = clamp(attribute(uvName, 'vec2'), rect.xy.add(halfTexel), rect.zw.sub(halfTexel));
+    return { uv, colour: texture(colourMap, uv) as ShaderNode };
+  };
 
-  const p = positionWorld;
-  const puddleNoise = mx_fractal_noise_float(p.mul(0.55), 2, 2, 0.5, 1).mul(0.5).add(0.5);
-  const puddle = smoothstep(0.62, 0.68, puddleNoise).mul(wetness);
-  albedo = albedo.mul(mix(float(1), float(0.68), wetness)).mul(mix(float(1), float(0.6), puddle));
-  // Open water from the original art: the painted colour stays as the water body (so it still reads as RA2 water),
-  // with wind waves, sky reflection, sun glints and rain rings on top, and animated foam along the painted shoreline.
-  const surface = waterSurface(water);
-  const waterness: ShaderNode = texture(waterMap, uv).r.mul(float(1).sub(wall));
-  // Foam: a thin, broken band just inside the painted waterline, pulsing as small waves wash in.
-  const band = smoothstep(0.15, 0.35, waterness).mul(smoothstep(0.7, 0.4, waterness));
-  const foamNoise = mx_noise_float(vec3(p.xz.mul(6.0), time.mul(0.45)))
-    .mul(0.5)
-    .add(0.5);
-  const surf = sin(time.mul(1.6).add(waterness.mul(12.0)).add(foamNoise.mul(4.0)))
-    .mul(0.5)
-    .add(0.5);
-  const foam = band.mul(smoothstep(0.62, 0.9, foamNoise.mul(0.6).add(surf.mul(0.55)))).mul(0.7);
-  // Shallows near the shore lean turquoise over the painted navy, which reads as depth without changing the art.
-  const shallow = smoothstep(0.95, 0.4, waterness).mul(waterness);
-  albedo = mix(albedo, albedo.mul(vec3(0.8, 1.25, 1.2)).add(vec3(0.0, 0.05, 0.06)), shallow.mul(0.8));
-  const body = albedo.mul(float(1).sub(surface.fresnel.mul(0.8)));
-  material.colorNode = mix(mix(albedo, body, waterness), color(0xe8eef0), foam.mul(0.85));
-  material.emissiveNode = surface.sky
-    .mul(surface.fresnel)
-    .add(surface.glint)
-    .mul(waterness.mul(float(1).sub(foam)));
-  material.roughnessNode = mix(mix(mix(float(0.95), float(0.5), wetness), float(0.1), puddle), float(0.25), waterness);
-  material.metalnessNode = float(0);
-  return material;
+  // Cliff walls take the upper tile's art, else the lower tile's, else neutral rock where neither raster covers the face.
+  const wall = new MeshStandardNodeMaterial();
+  {
+    const upper = sample('atlasUv', 'atlasRect').colour;
+    const lower = sample('atlasUv2', 'atlasRect2').colour;
+    const upperCover = smoothstep(0.2, 0.6, upper.a);
+    const lowerCover = smoothstep(0.2, 0.6, lower.a);
+    const colour = mix(mix(color(0x5a5248), lower.rgb, lowerCover), upper.rgb, upperCover);
+    const wet = wetGround(colour, wetness);
+    wall.colorNode = wet.albedo;
+    wall.roughnessNode = mix(float(0.95), float(0.55), wetness);
+    wall.metalnessNode = float(0);
+  }
+
+  const ground = new MeshStandardNodeMaterial();
+  const { uv, colour: art } = sample('atlasUv', 'atlasRect');
+  const wet = wetGround(art.rgb, wetness);
+  let albedo: ShaderNode = wet.albedo;
+  let roughness: ShaderNode = mix(mix(float(0.95), float(0.5), wetness), float(0.1), wet.puddle);
+  let reflectionTarget: Object3D | null = null;
+  const map = cache.terrainMap;
+  if (map) {
+    // Whole-map terrain: depth, foam and wet sand come from the signed shore distance, reflections from a mirrored
+    // render of the scene at the water's level (see waterLook.ts).
+    const shore: ShaderNode = texture(map.shore, uv)
+      .r.mul(SHORE_MAX - SHORE_MIN)
+      .add(SHORE_MIN);
+    // Water wherever the painted mask or the distance field says so; the soft painted shore band (grey foam art) is
+    // replaced by our own shoreline instead of blending with it.
+    const waterness: ShaderNode = smoothstep(0.3, 0.55, texture(map.waterMask, uv).r).max(smoothstep(0.0, 0.08, shore));
+    let reflection: { colour: ShaderNode; coverage: ShaderNode } | undefined;
+    if (waterY !== null) {
+      const mirror = reflector({ resolutionScale: 0.5, depth: true });
+      mirror.target.rotateX(-Math.PI / 2);
+      mirror.target.position.y = waterY;
+      const offset: ShaderNode = waveNormal(positionWorld.xz, water.wind, water.rain).xz.mul(0.015);
+      mirror.uvNode = (mirror.uvNode as ShaderNode).add(offset);
+      const depth = mirror.getDepthNode() as ShaderNode;
+      depth.uvNode = mirror.uvNode;
+      reflection = { colour: (mirror as ShaderNode).rgb, coverage: smoothstep(0.9999, 0.999, depth.x) };
+      reflectionTarget = mirror.target;
+    }
+    const look = waterLook({ position: positionWorld, shore, waterness, art: art.rgb, uniforms: water, reflection });
+    // The original paints a grey-blue wet band along every shore. Replace that band with the ground found a little
+    // further inland (stepping against the distance field's gradient), then darken it as wet sand, so the shoreline
+    // reads as sand -> wet sand -> foam -> shallows instead of a dark outline.
+    const texelU = 1 / map.shore.image.width;
+    const texelV = 1 / map.shore.image.height;
+    const gradU = texture(map.shore, uv.add(vec2(texelU, 0))).r.sub(texture(map.shore, uv.sub(vec2(texelU, 0))).r);
+    const gradV = texture(map.shore, uv.add(vec2(0, texelV))).r.sub(texture(map.shore, uv.sub(vec2(0, texelV))).r);
+    const towardsWater: ShaderNode = vec2(gradU, gradV).normalize();
+    // Step about 0.7 cells inland, measured in composite pixels (one cell spans roughly 42 engine pixels).
+    const reach = vec2((0.7 * 42 * map.ref.scale) / map.ref.width, (0.35 * 42 * map.ref.scale) / map.ref.height);
+    const inland: ShaderNode = texture(
+      colourMap,
+      uv.sub(towardsWater.mul(reach).mul(smoothstep(-0.7, 0.0, shore))),
+    ).rgb;
+    const band = smoothstep(-0.55, -0.12, shore);
+    const sand = wetShore(shore);
+    const land = mix(albedo, wetGround(inland, wetness).albedo, band).mul(mix(float(1), float(0.8), sand));
+    albedo = mix(land, look.body, waterness);
+    roughness = mix(mix(roughness, float(0.35), sand), float(1), waterness);
+    ground.emissiveNode = look.emission;
+  } else {
+    // Per-tile atlas fallback: the painted water with sky reflection and glints, as before.
+    const surface = waterSurface(water);
+    const waterness: ShaderNode = texture(cache.waterMask, uv).r;
+    const body = albedo.mul(float(1).sub(surface.fresnel.mul(0.8)));
+    albedo = mix(albedo, body, waterness);
+    ground.emissiveNode = surface.sky.mul(surface.fresnel).add(surface.glint).mul(waterness);
+    roughness = mix(roughness, float(0.25), waterness);
+  }
+  ground.colorNode = albedo;
+  ground.roughnessNode = roughness;
+  ground.metalnessNode = float(0);
+  return { ground, wall, reflectionTarget };
 }

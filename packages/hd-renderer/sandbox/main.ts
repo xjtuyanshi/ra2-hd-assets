@@ -42,7 +42,10 @@ if (world) {
   state.objects = [];
   if (!params.has('time')) state.environment.timeOfDay = 12;
 }
-const hd = new HdRenderer(canvas, state, { forceWebGL: params.get('webgl') === '1' });
+const hd = new HdRenderer(canvas, state, {
+  forceWebGL: params.get('webgl') === '1',
+  requiredLimits: await HdRenderer.adapterLimits(),
+});
 await hd.init(world);
 // Development handle for inspecting the scene from the console.
 (window as unknown as { __hd: unknown }).__hd = { hd, world, state };

@@ -194,7 +194,8 @@ export function createVoxelMaterial(): MeshStandardNodeMaterial {
   const material = new MeshStandardNodeMaterial();
   const paint: ShaderNode = attribute('remap', 'float').greaterThanEqual(0).select(float(1), float(0));
   material.colorNode = attribute('color', 'vec3');
-  material.metalnessNode = mix(float(0.3), float(0.15), paint);
+  // Mostly dielectric: metalness darkens the diffuse term, and the originals read as brightly lit painted metal.
+  material.metalnessNode = mix(float(0.05), float(0.12), paint);
   material.roughnessNode = mix(float(0.55), float(0.38), paint);
   return material;
 }

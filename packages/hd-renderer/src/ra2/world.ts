@@ -24,14 +24,20 @@ export interface HdWorld {
 /** Build the original map from a local HD cache (gameres/hd-cache/<map>/, served by the sandbox dev server). */
 export async function loadRa2World(
   base: string,
-  options: { extraObjects?: (manifest: Ra2Cache['manifest']) => MapObject[] } & Ra2CacheOptions = {},
+  options: {
+    extraObjects?: (manifest: Ra2Cache['manifest']) => MapObject[];
+    /** Keep only map objects passing this test (a live match draws units and buildings from game memory instead). */
+    includeObject?: (object: MapObject) => boolean;
+  } & Ra2CacheOptions = {},
 ): Promise<HdWorld> {
   const cache = await loadRa2Cache(base, options);
   const { manifest } = cache;
-  const objects = [...manifest.objects, ...(options.extraObjects?.(manifest) ?? [])];
+  const placed = options.includeObject ? manifest.objects.filter(options.includeObject) : manifest.objects;
+  const objects = [...placed, ...(options.extraObjects?.(manifest) ?? [])];
   const terrain = buildRa2Terrain(cache);
   const root = new Object3D();
   root.name = 'ra2-world';
+  if (terrain.reflectionTarget) root.add(terrain.reflectionTarget);
 
   // Voxel vehicles: one geometry set per (model, owner) because house colours are baked into vertex colours.
   const voxelMaterial = createVoxelMaterial();
