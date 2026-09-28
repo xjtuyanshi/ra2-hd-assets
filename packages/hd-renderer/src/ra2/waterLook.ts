@@ -70,7 +70,7 @@ export interface WaterLook {
 
 /** Wave normal at a ground position (xz), analytic slopes of the directional waves plus a fine noise layer. */
 export const waveNormal = Fn(([p, wind, rain]: [ShaderNode, ShaderNode, ShaderNode]): ShaderNode => {
-  const strength: ShaderNode = float(0.55).add(wind.mul(1.2));
+  const strength: ShaderNode = float(0.32).add(wind.mul(0.8));
   let gx: ShaderNode = float(0);
   let gz: ShaderNode = float(0);
   for (const [offset, wavelength, amplitude, speed] of WAVES) {
@@ -155,7 +155,7 @@ export function waterLook(inputs: WaterLookInputs): WaterLook {
   // cliffs and trees still read at RTS distance.
   const view = normalize(cameraPosition.sub(p));
   const fresnel = float(0.02).add(float(0.98).mul(pow(float(1).sub(max(dot(normal, view), 0)), 5)));
-  const strength = fresnel.mul(2.6).add(0.05).min(0.45);
+  const strength = fresnel.mul(2.0).add(0.04).min(0.28);
   const r = reflect(view.negate(), normal);
   const sky = mix(uniforms.skyHorizon, uniforms.skyZenith, smoothstep(0.0, 0.6, r.y));
   const mirrored = inputs.reflection ? mix(sky, inputs.reflection.colour, inputs.reflection.coverage) : sky;
