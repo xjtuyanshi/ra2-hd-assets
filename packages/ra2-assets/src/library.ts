@@ -25,7 +25,7 @@
  * Frame choice per kind: buildings LibraryBuilding, infantry LibraryInfantry, SHP vehicles/aircraft LibraryShpUnit;
  * voxel units only need the facings.
  */
-import type { AtlasRef, LightingClass, SpriteEntry } from './manifest.ts';
+import type { AtlasRef, LightingClass, SpriteAtlasHdRef, SpriteEntry } from './manifest.ts';
 import type { InfantrySequence } from './art.ts';
 import type { Hsv, Rgb } from './remap.ts';
 import type { TheaterId } from './theater.ts';
@@ -50,6 +50,11 @@ export interface TypeLibrary {
    * one sprite may sit on different pages, so a renderer typically uploads all pages as one texture array.
    */
   spriteAtlases: AtlasRef[];
+  /**
+   * Optional offline 2x RGBA/remap atlases, indexed exactly like spriteAtlases. Null means a page has not been
+   * processed. Normalized UVs are unchanged; shadows still come from the indexed source pages.
+   */
+  spriteAtlasesHd?: (SpriteAtlasHdRef | null)[];
   /**
    * SHP art keyed by `<class>:<art name>`: "building:<art section>", "infantry:<art section>",
    * "vehicle:<art section>", "aircraft:<art section>", "anim:<anim section>" (building layers, buildup, deploy anims)

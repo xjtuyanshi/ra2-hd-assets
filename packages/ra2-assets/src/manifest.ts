@@ -54,8 +54,10 @@ export interface HdCacheManifest {
   tiles: TileEntry[];
   /** RGBA atlas of all tile images (palette applied: the theater iso palette). */
   terrainAtlas: AtlasRef;
-  /** Indexed-colour sprite atlas (R8 palette index, 0 = transparent) for SHP art; see `palettes`. */
+  /** Indexed SHP atlas (R8, or legacy RGBA with the index in red; 0 = transparent); see `palettes`. */
   spriteAtlas: AtlasRef;
+  /** Optional offline 2x sprite colours and house-remap mask, with the source atlas's normalized UVs. */
+  spriteAtlasHd?: SpriteAtlasHdRef;
   /** 256-entry RGB palettes as 256x1 PNGs, keyed by name (e.g. "unit", "iso", "theater", "anim"). */
   palettes: Record<string, string>;
   /** SHP-based art keyed by an id such as "tree:TREE05" or "building:GACNST". */
@@ -133,6 +135,16 @@ export interface AtlasRef {
   file: string;
   width: number;
   height: number;
+}
+
+/** Optional offline sprite atlas. Source indexed art remains authoritative for shadows and palette lookup. */
+export interface SpriteAtlasHdRef extends AtlasRef {
+  /** RGBA colour atlas, with remappable indices 16..31 replaced by a neutral grey ramp. */
+  file: string;
+  /** Single-channel soft house-remap mask, matching the colour atlas dimensions. */
+  remap: string;
+  /** Frame rectangles and atlas dimensions are exactly twice their indexed source values. */
+  scale: 2;
 }
 
 export interface TileEntry {

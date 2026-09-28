@@ -16,6 +16,7 @@
     "preview": "tsx src/cli/preview.mts",
     "terrain-map": "tsx src/cli/terrainMap.mts",
     "upscale": "tsx src/cli/upscale.mts",
+    "sprites": "tsx src/cli/sprites.mts",
     "library": "tsx src/cli/library.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

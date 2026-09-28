@@ -194,7 +194,8 @@ export function resizeBilinear(image: PngImage, width: number, height: number): 
   return { width, height, channels, data };
 }
 
-async function runBinary(bin: string, args: string[]): Promise<void> {
+/** Shared local Real-ESRGAN process runner; callers may inject a fake runner in synthetic tests. */
+export async function runBinary(bin: string, args: string[]): Promise<void> {
   await new Promise<void>((resolveRun, reject) => {
     const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let tail = '';

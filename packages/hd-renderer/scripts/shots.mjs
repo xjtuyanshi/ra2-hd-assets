@@ -7,6 +7,12 @@ const outDir = process.argv[2] ?? 'shots';
 const base = process.argv[3] ?? 'http://localhost:15180/';
 const sets = {
   sandbox: null,
+  sprites: [
+    { name: 's1-ore-old', query: 'map=RiverRam&cx=70&cy=40&zoom=2&time=11&hdsprites=0', wait: 12000 },
+    { name: 's1-ore-hd', query: 'map=RiverRam&cx=70&cy=40&zoom=2&time=11', wait: 12000 },
+    { name: 's2-city-old', query: 'map=XMP29U2&cx=60&cy=62&zoom=1.6&time=13&hdsprites=0', wait: 14000 },
+    { name: 's2-city-hd', query: 'map=XMP29U2&cx=60&cy=62&zoom=1.6&time=13', wait: 14000 },
+  ],
   remat: [
     { name: 'm1-close', query: 'map=RiverRam&cx=52&cy=58&zoom=1.35&time=11', wait: 14000 },
     { name: 'm2-cliff', query: 'map=RiverRam&cx=70&cy=40&zoom=2&time=11', wait: 14000 },

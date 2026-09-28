@@ -27,6 +27,10 @@ pnpm hd:library -- [--game <install dir>] [--theater temperate --theater snow ..
 # Upscale the scale-1 composite with a separately installed Real-ESRGAN ncnn-vulkan executable
 pnpm hd:upscale -- --map RiverRam [--cache <dir>] [--scale 2] [--model realesrgan-x4plus] [--tile 256]
 pnpm hd:upscale -- --map RiverRam --bin <binary-path> --compare 1200,700,160,100
+
+# Build offline 2x sprite colours and house-remap masks from an existing indexed atlas
+pnpm hd:sprites -- --map RiverRam [--cache <dir>] [--bin <binary-path>] [--model realesrgan-x4plus]
+pnpm hd:sprites -- --library temperate --pages 0 [--cache <dir>] [--bin <binary-path>]
 ```
 
 `--map` accepts `.yro`/`.mmx` packages (MIX archives holding `<stem>.map` and a `.pkt`) and plain `.map/.mpr/.yrm`
@@ -62,6 +66,63 @@ streamed to stderr, and temporary inference files are removed on success or fail
 on either axis produce a WebGPU texture-limit warning. `--compare x,y,w,h` selects a crop in scale-1 image pixels
 (relative to the image's top-left) and writes `upscale-compare.png`: nearest-neighbour original on the left,
 upscaled terrain on the right, both at the requested output scale.
+
+## Offline HD sprite atlases
+
+`sprites` accepts exactly one `--map <id>` or `--library <theater>`. The cache root defaults to
+`<repo>/gameres/hd-cache`: maps are read from `<cache>/<id>/manifest.json`, libraries from
+`<cache>/_library/<theater>/library.json`. Map ids are cache directory names, not input map paths. Library mode
+processes every page by default; `--pages 0,3` selects distinct zero-based page indices. As with terrain upscaling,
+`--bin` selects a separately installed executable, with its sibling `models/` directory; the default binary is
+`<repo>/gameres/tools/realesrgan/realesrgan-ncnn-vulkan`. The default model is `realesrgan-x4plus`. Nothing is downloaded.
+
+The input stays indexed: R8 library pages and legacy map RGBA pages (index in red) are both supported. Each body
+frame uses its sprite's palette. Index 0 becomes transparent; remappable sprites replace indices 16 through 31
+with the neutral grey ramp `round(255 - (index - 16) * 15)` and mark them in a separate mask. Other sprites retain
+their palette colours, including indices 16 through 31. Shadow frames are omitted entirely: the renderer must
+continue drawing shadows from the original indexed atlas.
+
+Frames are packed into input sheets normally no larger than 2048x2048, each with 16 source pixels of transparent padding
+on every side. Colour bleeding is isolated per padded frame before packing, so adjacent atlas frames never share
+their bleed colours. The reused Real-ESRGAN wrapper runs each sheet at 4x; each frame is cut out and reduced to 2x
+with a linear-light box filter, then placed into its original rectangle multiplied by two. Frames larger than
+2016 pixels on either axis receive dedicated larger sheets, preserving their full inference context at additional memory cost. Alpha is bilinear-resized
+from the binary source alpha and sharpened with smoothstep over 0.35 through 0.65. The remap mask is bilinear-resized
+separately and stays soft. Uncovered pixels and shadow rectangles stay transparent. Frame offsets, indexed files,
+palettes, and normalized UVs stay unchanged.
+
+For an indexed `<stem>.png`, the step writes `<stem>@2x.png` (RGBA) and `<stem>@2x-remap.png` (single channel).
+Successful map processing updates only `manifest.spriteAtlasHd = { file, remap, scale: 2, width, height }`.
+Library processing records the same reference in `library.spriteAtlasesHd[page]`; unprocessed slots are `null`,
+and existing references for unselected pages are preserved. References are written after both page outputs
+complete. Library pages run sequentially and each completed page is recorded, so an error on a later page does
+not discard earlier completed pages. No renderer changes are included in this offline step: consumers must use
+the grey colour layer and soft mask to apply house colours, and continue using the indexed shadow frames.
+
+**Debug mode:** `--limit-frames N` limits the body frames processed on **each selected page**, writes
+`<stem>@2x-debug.png` and `<stem>@2x-debug-remap.png`, and never changes manifest/library references or normal HD
+outputs, even if N covers every frame. Unprocessed body frames are transparent. Use this mode for a quick visual
+trial; remove the option to publish complete page references in the local cache.
+
+Each page reports processed frames, batch count, inference input megapixels, total wall time (including PNG I/O),
+and binary time. A 4096x4096 page produces 8192x8192 outputs; the raw RGBA/mask pair alone occupies 320 MiB before
+PNG compression. Actual memory also includes the source page and the active batch. Real timing depends on GPU,
+model, sheet occupancy and PNG encoding. A fake nearest-neighbour binary measures orchestration and I/O only;
+estimate a theater by measuring one representative real page and scaling by total batch input megapixels, with
+per-page output encoding overhead. Fake timing does not establish Real-ESRGAN throughput or visual quality.
+
+Run from the repository root, with `SPRITE_CACHE` pointing to the cache to update and `REALESRGAN_BIN` to the
+separately installed executable:
+
+```bash
+# One map cache; the original indexed sprites.png remains unchanged.
+pnpm hd:sprites -- --map RiverRam --cache "$SPRITE_CACHE" --bin "$REALESRGAN_BIN" --model realesrgan-x4plus
+# One library page; all other page references remain unchanged.
+pnpm hd:sprites -- --library temperate --pages 0 --cache "$SPRITE_CACHE" --bin "$REALESRGAN_BIN" --model realesrgan-x4plus
+```
+
+The Node entry points are `upscaleSpriteAtlas` in `src/node/spriteHd.ts` (pixels in/out) and `upscaleSprites` in
+`src/node/spriteHdCache.ts` (cache orchestration). Both accept an injectable `run(bin, args)` for asset-free tests.
 
 ## Local terrain re-materialization (Python)
 
@@ -179,4 +240,11 @@ infantry sequence parsing, the colour scheme order, paged atlas packing, theater
 records built from a synthetic in-memory install (hand-made SHP files and INI text).
 Terrain tests use synthetic caches to cover painter order, alpha, origin, water classification and preview
 compatibility. Upscale tests use a tiny local fake executable and synthetic PNGs, so neither models nor a GPU are
-required. Run `pnpm --filter ra2-assets run typecheck` and `pnpm exec vitest run packages/ra2-assets` from the repo root.
+required. Sprite-HD tests use synthetic indexed atlases/palettes and fake 4x inference to cover neutral remap,
+per-frame batching/cut-back, alpha, shadow exclusion, and map/library reference updates without writing game data.
+Run `pnpm --filter ra2-assets run typecheck` and `pnpm exec vitest run packages/ra2-assets` from the repo root.
+
+For a reproducible CPU/I/O benchmark, run `pnpm exec node --import tsx packages/ra2-assets/tests/benchmarkSpriteHd.mts`.
+It generates a 4096x4096 indexed page with 1,800 body and 1,800 shadow frames (64x64 each), spawns the fake 4x binary,
+writes both 8192x8192 outputs, and reports page/binary times. All inputs and outputs are synthetic and are removed
+from the system temporary directory after the run. This benchmark does not measure real GPU inference.
