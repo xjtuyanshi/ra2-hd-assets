@@ -63,6 +63,44 @@ on either axis produce a WebGPU texture-limit warning. `--compare x,y,w,h` selec
 (relative to the image's top-left) and writes `upscale-compare.png`: nearest-neighbour original on the left,
 upscaled terrain on the right, both at the requested output scale.
 
+## Local terrain re-materialization (Python)
+
+`python/rematerialize.py` adds surface detail to the current `terrainMap.file` with local SDXL img2img and tile
+ControlNet. It requires an RGBA input and the matching grayscale `terrainMap.waterMask`; `--input` selects another
+image inside the map directory with the same dimensions. No models or dependencies are downloaded. The separately
+installed Python environment needs torch, diffusers, transformers, accelerate, safetensors, NumPy and Pillow;
+`--dry-run` needs only NumPy and Pillow. Model subdirectories are `sdxl-base` (fp16 safetensors variant),
+`sdxl-vae-fp16-fix` and `controlnet-tile-sdxl`. Inference uses MPS fp16, or CPU float32 with a warning.
+
+Set `RA2_MAIN_CHECKOUT` to the main checkout and `REMAT_CACHE` to a disposable copy of the cache **outside `gameres/`**.
+Run from the checkout containing this script:
+
+```bash
+"$RA2_MAIN_CHECKOUT/gameres/tools/diffusion/.venv/bin/python" -B packages/ra2-assets/python/rematerialize.py \
+  --map RiverRam --cache "$REMAT_CACHE" --models "$RA2_MAIN_CHECKOUT/gameres/tools/diffusion/models" \
+  --input terrain-map@2x.png --region 2400,1400,512,512 --resume
+# After inspecting remat-compare.png, repeat without --region for the whole map.
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_*.py'
+```
+
+Region coordinates are **current input pixels**, not scale-1 engine pixels; choose an in-bounds terrain crop.
+Region mode writes only `remat-compare.png` (input left, result right) and leaves the manifest untouched. Full mode
+writes `<input-stem>-remat.png` next to the input and changes only `terrainMap.file`; existing outputs get numbered
+successors. `--dry-run` uses identity inference but still writes outputs and, in full mode, updates the manifest.
+
+Defaults are `--strength 0.4 --steps 24 --guidance 5 --control 0.8 --tile 1024 --overlap 192 --seed 7`.
+Normalized raised-cosine overlaps blend tiles; `--color-sigma 6` restores original low-frequency colour/shading.
+Alpha and all water-mask values above 0.5 are preserved exactly, with `--water-feather 3` softening onto land.
+`--prompt` overrides the terrain prompt; the fixed negative prompt discourages objects and perspective changes.
+These constraints guide diffusion but cannot guarantee unchanged landmarks; inspect the region trial before a full run.
+`--resume` saves completed tiles under `<cache>/<map>/.remat-tiles/`, keyed by input pixels, parameters and local model
+file metadata. Repeat the same explicit `--input` to reuse them after a successful manifest update. Region and full
+runs use separate caches and tile layouts. Removing `.remat-tiles/` only discards resumable work.
+
+Without overrides, cache/models resolve to the main checkout's `gameres/hd-cache` and `gameres/tools/diffusion/models`,
+not this worktree. An explicit `--cache` or `--models` path under another checkout's `gameres/` selects that checkout
+for the omitted companion path; arbitrary external paths retain the main-checkout default for the companion.
+
 ## Output (`<out>/<mapId>/`)
 
 - `manifest.json`: grid (exists/height/tile per cell), tile entries with atlas rects and anchors, sprites, objects,
