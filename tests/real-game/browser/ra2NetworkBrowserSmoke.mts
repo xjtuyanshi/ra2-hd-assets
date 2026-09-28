@@ -1,4 +1,5 @@
 import { selectDevelopmentGame } from '../../helpers/selectDevelopmentGame';
+import { waitForMainMenu } from '../helpers/browserMainMenu';
 import type { DeployQueueEntry } from '../../../src/games/shared/commandQueue';
 import type { GamePerformanceSample } from '../../../src/games/performance';
 import { summarizeGamePerformance } from '../../helpers/gamePerformance';
@@ -497,11 +498,7 @@ async function runScenario() {
     await page.goto(pageUrl.href);
     await selectDevelopmentGame(page, game);
     if (!startPage) {
-      await page.waitForFunction(
-        () => /mainmenu/i.test(document.querySelector<HTMLCanvasElement>('#screen')?.dataset.shellPage ?? ''),
-        null,
-        { timeout: 90000 },
-      );
+      await waitForMainMenu(page, game, 90_000);
       await page.waitForTimeout(1000);
       await page.locator('#vm-controls-toggle').click();
       await click(i, 1034, 454);

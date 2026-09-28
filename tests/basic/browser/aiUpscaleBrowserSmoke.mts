@@ -9,7 +9,7 @@ try {
   await preventThirdPartyDownloads(page);
   await page.goto(process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174/');
   // Wait for page-service initialization before publishing test state through an independent renderer, so initial page state cannot overwrite it.
-  await page.getByRole('button', { name: '↓ 没有游戏文件？点击下载', exact: true }).waitFor();
+  await page.getByRole('button', { name: '选择文件…', exact: true }).waitFor();
   const result = await page.evaluate<{
     detail: string;
     status: string;

@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { request } from 'node:https';
 import { chromium, type Locator, type Page } from '@playwright/test';
+import { waitForMainMenu } from '../helpers/browserMainMenu';
 
 const ORIGIN = process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174';
 const MENU_FRAME_SAMPLES = 6;
@@ -223,12 +224,18 @@ function callsOf(raw: string | null): Record<string, number> {
 async function probeHostUi(page: Page): Promise<void> {
   const theme = await page.evaluate(() => ({
     yellow: getComputedStyle(document.documentElement).getPropertyValue('--ra2-yellow').trim(),
+    buttonText: getComputedStyle(document.documentElement).getPropertyValue('--ra2-button-text').trim(),
     debugBorder: getComputedStyle(document.querySelector<HTMLElement>('#vm-debug')!).borderLeftColor,
     sectionRadius: getComputedStyle(document.querySelector<HTMLElement>('#vm-debug .vm-debug-section')!).borderRadius,
     toolbarBackground: getComputedStyle(document.querySelector<HTMLElement>('#vm-controls .toolbar-button')!)
       .backgroundImage,
   }));
-  assert.equal(theme.yellow.toLowerCase(), '#fff600', `网页未应用 RA2 信息黄：${JSON.stringify(theme)}`);
+  assert.ok(theme.buttonText, `网页未定义按钮文字颜色：${JSON.stringify(theme)}`);
+  assert.equal(
+    theme.yellow.toLowerCase(),
+    theme.buttonText.toLowerCase(),
+    `网页信息黄与按钮文字颜色不一致：${JSON.stringify(theme)}`,
+  );
   assert.equal(theme.debugBorder, 'rgb(150, 150, 150)', `Debug 金属边框未生效：${JSON.stringify(theme)}`);
   assert.equal(theme.sectionRadius, '0px', `Debug 面板仍是普通圆角卡片：${JSON.stringify(theme)}`);
   // Toolbar buttons use three CSS states and no longer depend on game-menu sprites.
@@ -561,7 +568,7 @@ try {
 
   const canvas = page.locator('#screen');
   const problem = page.locator('h3').filter({ hasText: /运行错误|接口待实现/ });
-  await expectShellPage(page, 'mainmenu', 60_000);
+  await waitForMainMenu(page, GAME_ID);
   await waitForQuietFileReads(page, canvas);
   await waitForBinkOpen(page, 0, '首次主菜单');
   assert.equal(
@@ -835,7 +842,7 @@ try {
     .locator('.detected-games button')
     .nth(GAME_ID === 'ra2' ? 0 : 1)
     .click();
-  await expectShellPage(page, 'mainmenu', 60_000);
+  await waitForMainMenu(page, GAME_ID);
   assert.equal(
     await page.locator('#vm-resolution').inputValue(),
     '1024x768',

@@ -72,7 +72,7 @@ try {
     page.on('pageerror', (error) => errors.push(error.message));
     await preventThirdPartyDownloads(page);
     await page.goto(process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174');
-    await page.getByRole('button', { name: text('↓ 没有游戏文件？点击下载'), exact: true }).waitFor();
+    await page.getByRole('button', { name: text('选择文件…'), exact: true }).waitFor();
     await page.evaluate(`(async () => {
       const state = await import('/src/ui/pages/game/state/uiState.ts');
       const { collectPerformanceReport } = await import('/src/ui/pages/game/performanceDiagnostics.ts');

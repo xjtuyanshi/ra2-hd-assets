@@ -1320,64 +1320,6 @@ input[type='range']::-moz-range-thumb {
     padding-right: 10px;
   }
 }
-/* WeChat group QR dialog shares #vm-cheat-dialog styling. Generate the QR code locally from groupQr.ts text; only constrain its square image width here. */
-.join-group-dialog {
-  box-sizing: border-box;
-  width: min(340px, calc(100vw - 24px));
-  max-height: calc(100vh - 24px);
-  overflow: auto;
-  overscroll-behavior: contain;
-  padding: 0;
-  color: var(--ink);
-  background: var(--panel-bg);
-  border: 1px solid var(--gold-soft);
-  border-radius: 12px;
-  box-shadow:
-    0 16px 60px rgba(0, 0, 0, 0.78),
-    var(--inset-hi);
-  font:
-    14px 'Microsoft JhengHei',
-    'PingFang TC',
-    sans-serif;
-}
-.join-group-dialog[open] {
-  animation: vm-dialog-in 0.16s ease-out;
-}
-.join-group-dialog::backdrop {
-  background: rgba(0, 0, 0, 0.7);
-  backdrop-filter: blur(3px);
-}
-.join-group-dialog header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 14px;
-  border-bottom: 1px solid #493d21;
-  border-radius: 12px 12px 0 0;
-  background: linear-gradient(180deg, rgba(56, 46, 22, 0.55), rgba(24, 20, 10, 0.2));
-}
-.join-group-dialog h2 {
-  margin: 0;
-  color: var(--gold-bright);
-  font-size: 16px;
-  letter-spacing: 0.06em;
-}
-.join-group-dialog .join-group-qr {
-  display: block;
-  width: min(280px, calc(100vw - 88px));
-  height: auto;
-  margin: 14px auto 0;
-}
-.join-group-dialog .join-group-hint {
-  margin: 10px 0 14px;
-  text-align: center;
-  color: var(--ink-dim);
-  font-size: 12px;
-}
-.join-group-dialog .join-group-hint.error {
-  color: #ef7777;
-}
 #vm-touch-controls {
   position: fixed;
   z-index: 25;
@@ -1689,25 +1631,6 @@ dialog {
   font-weight: 400;
   font-size: 11px;
   line-height: 1.55;
-}
-.game-folder-panel p.join-group-hook {
-  margin-top: 4px;
-  color: #8f8f8f;
-  font-weight: 400;
-  font-size: 11px;
-}
-.game-folder-panel .join-group-link {
-  background: none;
-  border: 0;
-  padding: 0;
-  margin-left: 6px;
-  color: #9cc6e8;
-  font: inherit;
-  text-decoration: underline;
-  cursor: pointer;
-}
-.game-folder-panel .join-group-link:hover {
-  color: #fff;
 }
 .game-folder-panel .mono {
   color: #fff;

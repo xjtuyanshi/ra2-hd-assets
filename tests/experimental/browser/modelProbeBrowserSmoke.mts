@@ -22,7 +22,7 @@ try {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto(process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174');
-  await page.getByRole('button', { name: '↓ 没有游戏文件？点击下载', exact: true }).waitFor();
+  await page.getByRole('button', { name: '选择文件…', exact: true }).waitFor();
   await page.evaluate(async () => {
     const path = '/src/ui/pages/game/state/uiState.ts';
     const { toolbarState, cancelSourceRequest } = (await import(

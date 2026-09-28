@@ -22,7 +22,7 @@ try {
       const page = await context.newPage();
       await preventThirdPartyDownloads(page);
       await page.goto(origin);
-      await page.getByRole('button', { name: '↓ 没有游戏文件？点击下载', exact: true }).waitFor();
+      await page.getByRole('button', { name: '选择文件…', exact: true }).waitFor();
       expect(await page.evaluate(() => matchMedia('(any-pointer: coarse)').matches)).toBe(true);
       await page.evaluate(async () => {
         const controlsUrl = '/src/ui/pages/game/touchControls.ts';

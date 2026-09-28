@@ -1,6 +1,6 @@
 # UI directory
 
-Organize by page ownership, keeping each page's components, state, hooks, and styles together. Currently there is only a game page. Resource selection, downloads, map management, and network status are regions/dialogs within it, without separate routes.
+Organize by page ownership, keeping each page's components, state, hooks, and styles together. Currently there is only a game page. Resource selection, map management, and network status are regions/dialogs within it, without separate routes.
 
 ```text
 ui/

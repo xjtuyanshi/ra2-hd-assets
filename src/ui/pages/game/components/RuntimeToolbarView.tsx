@@ -5,7 +5,6 @@ import { createPortal } from 'react-dom';
 import { CHEAT_GUIDES, type CheatGuideGameId } from '../cheatGuides';
 import { normalizeCheatText, CHEAT_TEXT_MAX_LENGTH } from '../input';
 import { setControlsCollapsed, toggleImmersiveFullscreen } from '../gameInput';
-import { openGroupJoinDialog } from '../joinGroupDialog';
 import type { RuntimeToolbarCallbacks } from '../runtimeToolbar';
 import { Modal } from './Modal';
 import { PerformanceDiagnostics } from './PerformanceDiagnostics';
@@ -452,9 +451,6 @@ export function RuntimeToolbarView({
         onClick={() => void run('source', callbacks.onChangeSource)}
       >
         {busy === 'source' ? t('正在安全停止…') : t('更换游戏目录…')}
-      </button>
-      <button id="vm-join-group" className="toolbar-button" type="button" onClick={openGroupJoinDialog}>
-        {t('加入微信群')}{' '}
       </button>
       <a
         id="vm-open-source"

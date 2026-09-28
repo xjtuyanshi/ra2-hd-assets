@@ -5,7 +5,6 @@ import { useStore } from '../../../shared/state/useStore';
 import * as state from '../state/uiState';
 import { RuntimeToolbarView } from './RuntimeToolbarView';
 import { DebugPanel } from './DebugPanel';
-import { GroupDialog } from './GroupDialog';
 import { BootView, ExitPanel, ProblemPanel, ShortcutHelp, StatusView } from './RuntimePanels';
 import { EdgeNotice, edgeRequest } from './edgeMouseNotice';
 
@@ -73,12 +72,10 @@ export function ScreenStatus() {
   );
 }
 export function Dialogs() {
-  const group = useStore(state.groupVisible),
-    maps = useStore(state.mapRequest),
+  const maps = useStore(state.mapRequest),
     edge = useStore(edgeRequest);
   return createPortal(
     <>
-      {group && <GroupDialog close={() => state.groupVisible.set(false)} />}
       {maps && (
         <Suspense fallback={<p role="status">{t('正在加载地图管理…')}</p>}>
           <CustomMapDialog key={maps.id} gameId={maps.gameId} applyLive={maps.applyLive} finish={maps.finish} />

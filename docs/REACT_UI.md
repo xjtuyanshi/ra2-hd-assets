@@ -8,7 +8,7 @@ The directory is organized by page; see the [UI directory guide](../src/ui/READM
 
 - `index.html`: metadata and entry host.
 - `src/ui/pages/game/AppShell.tsx`: the single component tree, stable canvas ref, and VM mount/unmount entry point.
-- `src/ui/pages/game/components/`: resource selection, shared RA2/YR download dialog, map management, community group, toolbar, startup/error/exit panels, and debug panel.
+- `src/ui/pages/game/components/`: resource selection, map management, toolbar, startup/error/exit panels, and debug panel.
 - `src/ui/pages/game/styles.css`: the Red Alert client appearance and responsive rules.
 - `src/ui/pages/game/components/AppRegions.tsx`: each UI region subscribes to its own snapshot; dialogs stay within the same component tree through portals.
 - `src/ui/pages/game/hooks/`: effect/ref interfaces for file pickers and browser events; unmount cleans up listeners and asynchronous requests.
@@ -26,7 +26,7 @@ The locale stays fixed during a page session. Experimental model Workers receive
 
 ## DOM ownership and performance
 
-Only `main.ts` creates a React root. Do not use `flushSync`, root registries, or dynamic DOM hosts. Conditional rendering controls visibility; props/state provide text, selected values, and collapsed styles. Interaction state such as download-dialog visibility, volume, resolution selection, and map-edit drafts stays inside components. Only cross-component requests and VM status enter subscribable services. Services neither retain ReactNode values nor accept HTMLElement objects to update the interface.
+Only `main.ts` creates a React root. Do not use `flushSync`, root registries, or dynamic DOM hosts. Conditional rendering controls visibility; props/state provide text, selected values, and collapsed styles. Interaction state such as model-probe dialog visibility, volume, resolution selection, and map-edit drafts stays inside components. Only cross-component requests and VM status enter subscribable services. Services neither retain ReactNode values nor accept HTMLElement objects to update the interface.
 
 After mounting, an effect passes the canvas ref to the VM service. Unmount cancels pending resource requests, releases timers/input listeners/ResizeObserver, and invalidates the old startup generation; late results cannot restart the VM. The import service accepts File objects delivered by React's onChange. React input types do not yet support the native file-picker cancel event, so this browser compatibility listener remains in the hook and is cleaned up alongside the 200 ms focus-based cancellation fallback.
 
@@ -49,7 +49,7 @@ pnpm run test:custom-maps
 pnpm run test:browser:archive-layers
 ```
 
-The React browser test needs no game assets and should run locally before submission. GitHub workflows run it for dev/main PRs, pushes, and manual dispatch. It covers English and Chinese at desktop and narrow viewports, unsupported-language fallback, download dialogs, link attributes, Esc/button dismissal, focus restoration, canvas stability, state transitions, late file imports after cancellation, page-service destruction, and model Worker error language. Dedicated browser tests supplement map import and touch coverage.
+The React browser test needs no game assets and should run locally before submission. GitHub workflows run it for dev/main PRs, pushes, and manual dispatch. It covers English and Chinese at desktop and narrow viewports, unsupported-language fallback, resource selection, model-probe dialogs, link attributes, Esc dismissal, keyboard controls, canvas stability, state transitions, late file imports after cancellation, page-service destruction, and model Worker error language. Dedicated browser tests supplement map import and touch coverage.
 
 `reactUiArchitecture.test.ts` enforces a single root and prevents ordinary components/services from assembling DOM again. `uiState.test.ts` covers notification deduplication, subscription disposal, request cancellation, and stale dialog callbacks. `i18n.test.ts` covers locale selection, interpolation, diagnostic translation, and catalog consistency.
 

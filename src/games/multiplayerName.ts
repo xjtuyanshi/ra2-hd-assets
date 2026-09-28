@@ -5,7 +5,7 @@ import { gbkBytesOf } from './gbk';
 
 /**
  * Generate afresh for each VM instead of reusing shared caches/storage, preventing duplicate default names across tabs.
- * The prefix identifies site players; total length matches the original 15-byte limit: a 10-byte prefix plus 5 base36 digits.
+ * The fork prefix plus five base36 digits stays within the original 15-byte limit.
  */
 export function randomMultiplayerName(): string {
   let suffix = '';
@@ -14,7 +14,7 @@ export function randomMultiplayerName(): string {
     const value = crypto.getRandomValues(new Uint8Array(1))[0]!;
     if (value < 252) suffix += (value % 36).toString(36);
   }
-  return `ra2.games-${suffix}`;
+  return `ra2hd-${suffix}`;
 }
 
 /**

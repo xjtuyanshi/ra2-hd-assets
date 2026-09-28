@@ -14,7 +14,6 @@ import {
   cancelSourceRequest,
   mapRequest,
   gameRunning,
-  groupVisible,
 } from './state/uiState';
 import { createVmShell, type VmShell } from '../../../adapter/runtime';
 import type { VmStatus } from '../../../app/session/runtimeEvents';
@@ -602,7 +601,6 @@ export function stopVmPage(): void {
   debugState.set(null);
   debugVisible.set(false);
   helpVisible.set(false);
-  groupVisible.set(false);
   gameRunning.set(false);
   void pageController.destroy();
 }

@@ -1,6 +1,7 @@
 /** Real RA2/YR executables: verify Worker and main-thread direct startup to settings and the LAN lobby, preserving the default entry. Requires local game assets. */
 import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
+import { waitForMainMenu } from '../helpers/browserMainMenu';
 const origin = process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174';
 const relay = process.env.RA2_BROWSER_RELAY;
 assert.ok(!process.env.RA2_BROWSER_GAME || ['ra2', 'yr'].includes(process.env.RA2_BROWSER_GAME));
@@ -37,11 +38,7 @@ try {
           .locator('.detected-games button')
           .nth(game === 'ra2' ? 0 : 1)
           .click();
-        await page.waitForFunction(
-          () => document.querySelector('#screen')?.getAttribute('data-shell-page')?.includes('MainMenu'),
-          null,
-          { timeout: 90000 },
-        );
+        await waitForMainMenu(page, game, 90_000);
         await page.locator('#vm-quick-start').click();
         const dialog = page.getByRole('dialog', { name: '快速开局', exact: true });
         await dialog.getByRole('button', { name: '取消', exact: true }).click();
@@ -67,11 +64,15 @@ try {
         .nth(game === 'ra2' ? 0 : 1)
         .click();
       const target = mode === 'default' ? 'MainMenu' : lan ? 'GUI:Lobby' : 'Skirmish';
-      await page.waitForFunction(
-        (t) => (document.querySelector('#screen') as HTMLElement)?.dataset.shellPage?.includes(t),
-        target,
-        { timeout: 90000 },
-      );
+      if (mode === 'default') {
+        await waitForMainMenu(page, game, 90_000);
+      } else {
+        await page.waitForFunction(
+          (t) => (document.querySelector('#screen') as HTMLElement)?.dataset.shellPage?.includes(t),
+          target,
+          { timeout: 90000 },
+        );
+      }
       const titles = await page.evaluate(() => (window as any).__pages as string[]);
       assert.ok(titles.length > 0);
       assert.ok(titles[0]!.includes(target), JSON.stringify(titles));

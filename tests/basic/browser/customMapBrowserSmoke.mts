@@ -24,7 +24,7 @@ try {
   await page.goto(process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174/');
   // The map entry is available only after VM startup; this asset-free regression requests the same React dialog service directly.
   const openMaps = async () => {
-    await expect(page.getByRole('button', { name: '↓ 没有游戏文件？点击下载', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '选择文件…', exact: true })).toBeVisible();
     await page.evaluate(`(async () => {
       const { editCustomMapPackages } = await import('/src/ui/pages/game/customMapDialog.ts');
       void editCustomMapPackages('ra2');

@@ -111,15 +111,6 @@ export const englishMessages = {
   开发测试: 'Development test',
   '免责声明：个人非商业粉丝项目，EA 未认可也不支持本产品（EA has not endorsed and does not support this product）。本页面不提供任何游戏文件，请只使用你合法拥有的游戏安装。':
     'Disclaimer: a personal, non-commercial fan project. EA has not endorsed and does not support this product. This page provides no game files; use only an installation you legally own.',
-  '欢迎加入我们的微信交流群，': 'Join our WeChat community:',
-  点此扫码入群: 'Scan to join',
-  微信交流群: 'WeChat community',
-  关闭微信群二维码: 'Close WeChat QR code',
-  微信群二维码: 'WeChat group QR code',
-  '二维码生成失败，请稍后重试或刷新页面。': 'Could not generate the QR code. Retry later or refresh the page.',
-  '二维码暂未配置。': 'No QR code configured yet.',
-  '微信扫码加入交流群，分享游戏体验、反馈问题与建议。':
-    'Scan with WeChat to share your experience, report issues, and suggest improvements.',
   '请先下载官方模型，再选择本地文件。仅本机推理，不上传模型或游戏画面。':
     'Download the official model, then select the local file. Inference stays on your device; models and game frames are not uploaded.',
   '实验超过 120 秒已终止，游戏继续使用原来的渲染器。可减小采样尺寸后重新加载模型。':
@@ -231,7 +222,6 @@ export const englishMessages = {
   '附加地图包…': 'Add map packages…',
   '正在安全停止…': 'Stopping safely…',
   '更换游戏目录…': 'Change game directory…',
-  加入微信群: 'Join WeChat group',
   退出全屏: 'Exit fullscreen',
   全屏: 'Fullscreen',
   '正在打开模型实验…': 'Opening model experiment…',

@@ -13,7 +13,6 @@ export const upscaleStatus = createStore<string | null>(null);
 export const debugVisible = createStore(false);
 export const debugState = createStore<ComponentProps<typeof DebugPanel> | null>(null);
 export const helpVisible = createStore(false);
-export const groupVisible = createStore(false);
 export const gameRunning = createStore(false);
 export const mainPanel = createStore<{ phase: 'blocked' | 'error' | 'exited'; detail: string } | null>(null);
 export interface BootState {

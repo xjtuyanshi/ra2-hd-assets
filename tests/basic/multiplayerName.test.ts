@@ -13,10 +13,10 @@ const encode = (s: string) => Uint8Array.from(s, (c) => c.charCodeAt(0));
 const decode = (b: Uint8Array) => String.fromCharCode(...b);
 
 describe('启动用户名 INI 内存覆盖', () => {
-  it('随机默认名以 ra2.games- 开头且满足原版 15 字节限制，每次创建独立身份', () => {
+  it('随机默认名以 ra2hd- 开头且满足原版 15 字节限制，每次创建独立身份', () => {
     const names = Array.from({ length: 32 }, randomMultiplayerName);
     expect(new Set(names).size).toBe(names.length);
-    for (const name of names) expect(validateMultiplayerName(name)).toMatch(/^ra2\.games-[0-9a-z]{5}$/);
+    for (const name of names) expect(validateMultiplayerName(name)).toMatch(/^ra2hd-[0-9a-z]{5}$/);
   });
   it('校验 GBK 字节长度与代码页，不允许换行注入', () => {
     expect(validateMultiplayerName(' HostOne ')).toBe('HostOne');
@@ -29,8 +29,8 @@ describe('启动用户名 INI 内存覆盖', () => {
   });
   it('中文名编码为 GBK 十六进制字节', () => {
     expect(decode(patchMultiplayerNameIni(new Uint8Array(), '中国'))).toBe('[MultiPlayer]\nHandle=d6,d0,b9,fa,\n');
-    expect(decode(patchMultiplayerNameIni(encode('[MultiPlayer]\nColor=1\n'), 'ra2.games-A'))).toBe(
-      '[MultiPlayer]\nColor=1\n\nHandle=72,61,32,2e,67,61,6d,65,73,2d,41,\n',
+    expect(decode(patchMultiplayerNameIni(encode('[MultiPlayer]\nColor=1\n'), 'ra2hd-A'))).toBe(
+      '[MultiPlayer]\nColor=1\n\nHandle=72,61,32,68,64,2d,41,\n',
     );
   });
   it('Handle 编码为原生十六进制，并保留其他 section、CRLF 和非 ASCII 原字节', () => {

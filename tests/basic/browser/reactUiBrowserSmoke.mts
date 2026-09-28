@@ -45,7 +45,7 @@ try {
         await page.goto(process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174');
         await expect(page.locator('html')).toHaveAttribute('lang', resolveLocale([locale]));
         const canvas = await page.locator('#screen').elementHandle();
-        const entry = page.getByRole('button', { name: text('↓ 没有游戏文件？点击下载'), exact: true });
+        const entry = page.getByRole('button', { name: text('选择文件…'), exact: true });
         await expect(entry).toBeVisible();
         await expect(page.getByRole('button', { name: text('附加地图包…') })).toBeHidden();
         const background = await page.locator(viewport.width <= 560 ? '#ui' : '#stage').evaluate((node, mobile) => {
@@ -62,7 +62,6 @@ try {
         const home = page.locator('.game-source-picker');
         await expect(home.getByRole('button', { name: text('选择文件…'), exact: true })).toHaveCount(1);
         await expect(home.locator('.detected-games')).toHaveCount(0);
-        expect(await entry.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe('rgb(139, 0, 0)');
         await expect(home.getByLabel(text('联机 relay 地址（可选）'))).toHaveCount(0);
         await home.getByRole('checkbox', { name: text('联机'), exact: true }).check();
         const relay = home.getByLabel(text('联机 relay 地址（可选）'));
@@ -85,85 +84,8 @@ try {
         expect(homeBox!.x).toBeGreaterThanOrEqual(0);
         expect(homeBox!.y).toBeGreaterThanOrEqual(0);
         expect(homeBox!.x + homeBox!.width).toBeLessThanOrEqual(viewport.width);
-        await home.getByRole('button', { name: text('点此扫码入群'), exact: true }).scrollIntoViewIfNeeded();
-        await expect(home.getByRole('button', { name: text('点此扫码入群'), exact: true })).toBeInViewport();
         await entry.scrollIntoViewIfNeeded();
 
-        const dialog = page.getByRole('dialog', { name: text('下载游戏资源'), exact: true });
-        for (let pass = 0; pass < 2; pass++) {
-          await entry.click();
-          await expect(dialog).toBeVisible();
-          const languageSelect = dialog.getByRole('combobox', { name: text('游戏文字语言'), exact: true });
-          await expect(languageSelect).toHaveValue('all');
-          await expect(dialog.locator('a')).toHaveCount(6);
-          await expect(dialog.locator('.game-download-language')).toHaveCount(6);
-          await expect(dialog.locator('.game-download-language').filter({ hasText: text('简体中文') })).toHaveCount(2);
-          await expect(dialog.locator('.game-download-language').filter({ hasText: text('繁体中文') })).toHaveCount(3);
-          await expect(dialog.locator('.game-download-language').filter({ hasText: 'English' })).toHaveCount(1);
-          await expect(dialog.locator('.game-download-language').filter({ hasText: text('语言待核验') })).toHaveCount(
-            0,
-          );
-          expect(
-            await dialog
-              .locator('a.game-download-link')
-              .evaluateAll((links) => links.map((link) => link.getAttribute('href'))),
-          ).toEqual([
-            'https://www.uc129.com/xiazai/ra2/1.006.html',
-            'https://www.uc129.com/xiazai/ra2/gongheguozhihui.html',
-            'https://www.jb51.net/game/1018580.html',
-            'https://archive.org/download/red-alert-2-multiplayer/Red-Alert-2-Multiplayer.exe',
-            'https://www.uc129.com/xiazai/ra2/6615.html',
-            'https://www.jb51.net/game/26829.html',
-          ]);
-          await languageSelect.selectOption('zh-Hans');
-          await expect(dialog.locator('a')).toHaveCount(2);
-          const simplifiedLinks = dialog.locator('a.game-download-link').filter({ hasText: text('简体中文') });
-          await expect(simplifiedLinks).toHaveCount(2);
-          await expect(dialog.locator('a.game-download-link').filter({ hasText: text('繁体中文') })).toHaveCount(0);
-          expect(await simplifiedLinks.evaluateAll((links) => links.map((link) => link.getAttribute('href')))).toEqual([
-            'https://www.jb51.net/game/1018580.html',
-            'https://www.jb51.net/game/26829.html',
-          ]);
-          await languageSelect.selectOption('zh-Hant');
-          await expect(dialog.locator('a')).toHaveCount(3);
-          const traditionalLinks = dialog.locator('a.game-download-link').filter({ hasText: text('繁体中文') });
-          await expect(traditionalLinks).toHaveCount(3);
-          await expect(dialog.locator('a.game-download-link').filter({ hasText: text('简体中文') })).toHaveCount(0);
-          await expect(dialog.locator('a.game-download-link').filter({ hasText: 'English' })).toHaveCount(0);
-          expect(await traditionalLinks.evaluateAll((links) => links.map((link) => link.getAttribute('href')))).toEqual(
-            [
-              'https://www.uc129.com/xiazai/ra2/1.006.html',
-              'https://www.uc129.com/xiazai/ra2/gongheguozhihui.html',
-              'https://www.uc129.com/xiazai/ra2/6615.html',
-            ],
-          );
-          await languageSelect.selectOption('en');
-          await expect(dialog.locator('a')).toHaveCount(1);
-          const englishLinks = dialog.locator('a.game-download-link').filter({ hasText: 'English' });
-          await expect(englishLinks).toHaveCount(1);
-          await expect(dialog.locator('a.game-download-link').filter({ hasText: text('简体中文') })).toHaveCount(0);
-          await expect(dialog.locator('a.game-download-link').filter({ hasText: text('繁体中文') })).toHaveCount(0);
-          await expect(dialog.locator('.download-links-empty-global')).toHaveCount(0);
-          expect(await englishLinks.evaluateAll((links) => links.map((link) => link.getAttribute('href')))).toEqual([
-            'https://archive.org/download/red-alert-2-multiplayer/Red-Alert-2-Multiplayer.exe',
-          ]);
-          await languageSelect.selectOption('all');
-          await expect(dialog.locator('a')).toHaveCount(6);
-          for (const link of await dialog.locator('a').all()) {
-            await expect(link).toHaveAttribute('target', '_blank');
-            await expect(link).toHaveAttribute('rel', /noopener/);
-          }
-          const box = await dialog.boundingBox();
-          expect(box!.width).toBeLessThanOrEqual(viewport.width);
-          if (pass === 0)
-            await page.screenshot({
-              path: `${screenshotDirectory}/ra2-react-download-${locale}-${viewport.width}.png`,
-            });
-          if (pass === 0) await page.keyboard.press('Escape');
-          else await dialog.getByRole('button', { name: text('关闭'), exact: true }).click();
-          await expect(dialog).toBeHidden();
-          await expect(entry).toBeFocused();
-        }
         expect(await canvas!.evaluate((node) => node === document.querySelector('#screen'))).toBe(true);
         await page.evaluate(async () => {
           const stateUrl = '/src/ui/pages/game/state/uiState.ts';
@@ -243,9 +165,9 @@ try {
           await expect(openSource).toHaveAttribute('href', 'https://github.com/ra2-games/ra2');
           await expect(openSource).toHaveAttribute('rel', 'noopener noreferrer');
           const openSourceBox = (await openSource.boundingBox())!;
-          const joinGroupBox = (await page.locator('#vm-join-group').boundingBox())!;
-          expect(Math.abs(openSourceBox.x - joinGroupBox.x)).toBeLessThan(1);
-          expect(openSourceBox.width).toBe(joinGroupBox.width);
+          const changeSourceBox = (await page.locator('#vm-change-source').boundingBox())!;
+          expect(Math.abs(openSourceBox.x - changeSourceBox.x)).toBeLessThan(1);
+          expect(openSourceBox.width).toBe(changeSourceBox.width);
           const options = page.locator('#vm-resolution-options');
           await expect(options).toBeHidden();
           await expect(page.locator('#vm-custom-maps')).toBeDisabled();
@@ -320,11 +242,6 @@ try {
           expect(modelRequests).toEqual([]);
           await page.keyboard.press('Escape');
           await expect(probe).toHaveCount(0);
-          await page.locator('#vm-join-group').click();
-          const group = page.getByRole('dialog', { name: text('微信交流群'), exact: true });
-          await expect(group).toBeVisible();
-          await page.keyboard.press('Escape');
-          await expect(group).toHaveCount(0);
           await page.locator('#vm-fullscreen').scrollIntoViewIfNeeded();
           await expect(page.locator('#vm-fullscreen')).toBeInViewport();
         }

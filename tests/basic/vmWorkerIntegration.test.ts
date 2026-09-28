@@ -476,7 +476,7 @@ describe('WorkerVmClient ↔ VmWorkerController integration', () => {
       exeHash: await hashRa2Executable(source.executableBytes),
     });
     if (playerName) expect(init?.config.playerName).toBe(playerName);
-    else expect(init?.config.playerName).toMatch(/^ra2\.games-[0-9a-z]{5}$/);
+    else expect(init?.config.playerName).toMatch(/^ra2hd-[0-9a-z]{5}$/);
     await shell.destroy();
   });
 
