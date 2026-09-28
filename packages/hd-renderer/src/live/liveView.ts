@@ -1,11 +1,14 @@
 import { BoxGeometry, Color, Group, Mesh, MeshStandardNodeMaterial, Object3D, Vector3 } from 'three/webgpu';
 import { HOUSE_COLORS, RENDER_STATE_VERSION, type RenderState, type Weather } from '../contract';
 import { HdRenderer } from '../HdRenderer';
-import { addHousePalettes, paletteFor, screenToCell, type Ra2Cache } from '../ra2/cache';
-import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from '../ra2/sprites';
+import type { LibraryType } from '../../../ra2-assets/src/library';
+import { sequenceFrame } from '../../../ra2-assets/src/art';
+import { addHousePalettes, paletteFor, ra2Screen, screenToCell, type Ra2Cache } from '../ra2/cache';
+import { SpriteLayer, cardPush, type SpriteInstance } from '../ra2/sprites';
 import { buildVoxelGeometry, createVoxelMaterial, instantiateVoxel, type VoxelGeometry } from '../ra2/voxels';
 import { loadRa2World, type HdWorld } from '../ra2/world';
 import { LEVEL_HEIGHT } from '../world';
+import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { ShroudLayer, type ShroudCells } from './shroud';
 
 /**
@@ -56,6 +59,8 @@ export interface LiveSnapshot {
 export interface LiveViewOptions {
   /** URL of the map's HD cache directory (manifest.json inside). */
   mapBase: string;
+  /** URL of the type library root (holding <theater>/library.json), for art of everything players build. */
+  libraryBase?: string;
   forceWebGL?: boolean;
   /** 16 remap colours (palette indices 16..31) for a colour scheme index; defaults to ramps of HOUSE_COLORS. */
   houseRemap?: (colorIndex: number) => [number, number, number][];
@@ -80,9 +85,27 @@ interface Visual {
   paletteKey: string;
   root: Object3D;
   turret?: Group;
-  /** Original SHP art id (buildings with art in the cache) drawn through the live sprite layer instead of `root`. */
+  /** How it is drawn: a 3D voxel model, sprites from the map cache or the type library, or a stand-in block. */
+  mode: 'voxel' | 'map-sprite' | 'library-sprite' | 'placeholder';
+  /** Map-cache sprite id (mode 'map-sprite'). */
   sprite?: string;
+  libraryType?: LibraryType;
+  /** Library art still loading: the visual is rebuilt once it arrives. */
+  pending?: boolean;
+  /** When the object last changed position (ms), to tell walking infantry from standing. */
+  lastMove?: number;
 }
+
+/** Interpolated engine pose: leptons and a facing in radians. */
+interface Pose {
+  x: number;
+  y: number;
+  z: number;
+  facing: number;
+}
+
+/** Sprite instances per atlas: 'map' for the map cache's atlas, page numbers for type library pages. */
+type SpriteBatch = Map<'map' | number, SpriteInstance[]>;
 
 /** Live sprite instances (buildings: body, bib, shadow, anim layers). */
 const LIVE_SPRITE_CAPACITY = 4096;
@@ -108,6 +131,7 @@ export class LiveView {
   private readonly placeholderMaterials = new Map<string, MeshStandardNodeMaterial>();
   private readonly housePalettes = new Set<number>();
   private readonly sprites: SpriteLayer;
+  private readonly pageLayers = new Map<number, SpriteLayer>();
   private readonly shroud: ShroudLayer;
   private viewWidth = 800;
   private viewHeight = 600;
@@ -118,6 +142,7 @@ export class LiveView {
     readonly world: HdWorld,
     private readonly cache: Ra2Cache,
     private readonly options: LiveViewOptions,
+    private readonly library: LiveLibrary | null,
   ) {
     this.root.name = 'live-objects';
     hd.scene.add(this.root);
@@ -126,14 +151,7 @@ export class LiveView {
     this.sprites = new SpriteLayer(cache, [], LIVE_SPRITE_CAPACITY);
     this.sprites.mesh.name = 'live-sprites';
     this.root.add(this.sprites.mesh);
-    // Share the static layer's camera and light uniforms, which HdRenderer updates every frame.
-    const shared = world.sprites;
-    if (shared) {
-      this.sprites.cameraRight.value = shared.cameraRight.value;
-      this.sprites.cameraUp.value = shared.cameraUp.value;
-      this.sprites.toCamera.value = shared.toCamera.value;
-      this.sprites.light.value = shared.light.value;
-    }
+    this.shareSpriteUniforms(this.sprites);
   }
 
   static async create(canvas: HTMLCanvasElement, options: LiveViewOptions): Promise<LiveView> {
@@ -141,6 +159,10 @@ export class LiveView {
       includeObject: (object) => object.kind === 'tree' || object.kind === 'overlay' || object.kind === 'smudge',
     });
     const cache = world.cache!;
+    // The theater's type library (art for everything players can build), when it has been extracted.
+    const library = options.libraryBase
+      ? await LiveLibrary.load(`${options.libraryBase.replace(/\/$/, '')}/${cache.manifest.theater}`, cache)
+      : null;
     const lighting = cache.manifest.lighting ?? { ambient: 1, level: 0.032, red: 1, green: 1, blue: 1, ground: 0 };
     const state: RenderState = {
       version: RENDER_STATE_VERSION,
@@ -173,7 +195,7 @@ export class LiveView {
     // The original shows no vignette; keep the frame edge faithful to the game's own view.
     hd.settings.vignette = 0;
     hd.applySettings();
-    return new LiveView(hd, world, cache, options);
+    return new LiveView(hd, world, cache, options, library);
   }
 
   /**
@@ -236,44 +258,56 @@ export class LiveView {
   }
 
   private applyObjects(previous: Timed | null, current: Timed, alpha: number): void {
+    const now = performance.now();
     const alive = new Set<number>();
     const houses = new Map(current.snapshot.houses.map((h) => [h.index, h.colorIndex]));
-    const sprites: SpriteInstance[] = [];
+    const batch: SpriteBatch = new Map();
     for (const object of current.snapshot.objects) {
       alive.add(object.uid);
       const colorIndex = houses.get(object.owner) ?? -1;
       const visual = this.visualFor(object, colorIndex);
       // Anything standing under black shroud stays hidden, exactly as in the original (no peeking at enemy bases).
-      const hidden = this.shroud.isLocationShrouded(object.x, object.y, object.z);
+      const hidden = this.shroud.isLocationShrouded(object.x, object.y, object.z) || !!visual.libraryType?.invisible;
       visual.root.visible = !hidden;
       if (hidden) continue;
-      if (visual.sprite) {
-        this.buildingSprites(object, visual, sprites);
-        continue;
-      }
       const before = previous?.byUid.get(object.uid);
-      const moved = before
+      const near = before
         ? Math.hypot(object.x - before.x, object.y - before.y) / LEPTONS_PER_CELL < TELEPORT_CELLS
         : false;
-      const t = moved ? alpha : 1;
-      const from = moved ? before! : object;
-      const x = lerp(from.x, object.x, t) / LEPTONS_PER_CELL;
-      const y = lerp(from.y, object.y, t) / LEPTONS_PER_CELL;
-      const z = lerp(from.z, object.z, t) / LEPTONS_PER_LEVEL;
-      const facing = lerpAngle16(from.facingRaw, object.facingRaw, t);
-      visual.root.position.set(x, z * LEVEL_HEIGHT, y);
+      const t = near ? alpha : 1;
+      const from = near ? before! : object;
+      const pose: Pose = {
+        x: lerp(from.x, object.x, t),
+        y: lerp(from.y, object.y, t),
+        z: lerp(from.z, object.z, t),
+        facing: lerpAngle16(from.facingRaw, object.facingRaw, t),
+      };
+      if (before && (before.x !== object.x || before.y !== object.y)) visual.lastMove = now;
+      if (visual.mode === 'map-sprite') {
+        this.mapBuildingSprites(object, visual, batch);
+        continue;
+      }
+      if (visual.mode === 'library-sprite') {
+        if (object.kind === 'building') this.libraryBuildingSprites(object, visual, batch, now);
+        else this.libraryInfantrySprites(pose, visual, batch, now);
+        continue;
+      }
+      visual.root.position.set(
+        pose.x / LEPTONS_PER_CELL,
+        (pose.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT,
+        pose.y / LEPTONS_PER_CELL,
+      );
+      if (object.kind === 'building') continue;
+      // Engine facing 0 = north (world -z), clockwise; the model's nose is local +x. The turret yaws relative to the
+      // body.
+      visual.root.rotation.y = Math.PI / 2 - pose.facing;
       if (visual.turret) {
-        // Engine facing 0 = north (world -z), clockwise; the model's nose is local +x. The turret yaws relative to
-        // the body.
-        visual.root.rotation.y = Math.PI / 2 - facing;
         const turret = lerpAngle16(
           from.turretFacingRaw ?? from.facingRaw,
           object.turretFacingRaw ?? object.facingRaw,
           t,
         );
-        visual.turret.rotation.y = facing - turret;
-      } else if (object.kind !== 'building') {
-        visual.root.rotation.y = Math.PI / 2 - facing;
+        visual.turret.rotation.y = pose.facing - turret;
       }
     }
     for (const [uid, visual] of this.visuals) {
@@ -281,31 +315,144 @@ export class LiveView {
       this.root.remove(visual.root);
       this.visuals.delete(uid);
     }
-    this.sprites.setInstances(sprites);
+    this.flushSprites(batch);
   }
 
-  /** A building's original SHP art at its engine draw point: bib, shadow, body (damaged below yellow), anim layers. */
-  private buildingSprites(object: LiveObject, visual: Visual, out: SpriteInstance[]): void {
+  /** Hand each atlas its instances; library pages get their sprite layer when their texture has loaded. */
+  private flushSprites(batch: SpriteBatch): void {
+    this.sprites.setInstances(batch.get('map') ?? []);
+    for (const [key, instances] of batch) {
+      if (key === 'map') continue;
+      this.pageLayer(key)?.setInstances(instances);
+    }
+    for (const [page, layer] of this.pageLayers) if (!batch.has(page)) layer.setInstances([]);
+  }
+
+  private pageLayer(page: number): SpriteLayer | null {
+    let layer = this.pageLayers.get(page);
+    if (layer) return layer;
+    const atlas = this.library?.page(page);
+    if (!atlas) return null;
+    layer = new SpriteLayer(this.cache, [], LIVE_SPRITE_CAPACITY, atlas);
+    layer.mesh.name = `live-sprites-${page}`;
+    this.shareSpriteUniforms(layer);
+    this.root.add(layer.mesh);
+    this.pageLayers.set(page, layer);
+    return layer;
+  }
+
+  private shareSpriteUniforms(layer: SpriteLayer): void {
+    // The static layer's camera and light uniforms are updated by HdRenderer every frame; share their values.
+    const shared = this.world.sprites;
+    if (!shared) return;
+    layer.cameraRight.value = shared.cameraRight.value;
+    layer.cameraUp.value = shared.cameraUp.value;
+    layer.toCamera.value = shared.toCamera.value;
+    layer.light.value = shared.light.value;
+  }
+
+  /** Queue a library frame on its atlas page (skipped while the page loads). */
+  private queue(batch: SpriteBatch, instance: SpriteInstance): void {
+    const page = instance.frame.page ?? 0;
+    if (!this.library?.page(page)) return;
+    let list = batch.get(page);
+    if (!list) batch.set(page, (list = []));
+    list.push(instance);
+  }
+
+  /** A building's library art: bib, shadow, body (damaged at or below yellow) and its always-on anim layers. */
+  private libraryBuildingSprites(object: LiveObject, visual: Visual, batch: SpriteBatch, now: number): void {
+    const library = this.library!;
+    const type = visual.libraryType!;
+    const sprites = library.library.sprites;
+    const entry = sprites[type.sprite!];
+    if (!entry) return;
+    const owner = visual.paletteKey || undefined;
+    const palette = (art: { palette: string; remap: boolean }) =>
+      paletteFor(this.cache, LIBRARY_PALETTE_PREFIX + art.palette, art.remap && type.remap, owner);
+    const damaged = object.health <= library.conditionYellow;
+    const anchor = leptonAnchor(object.x, object.y, object.z, type.drawOffset);
+    const body = damaged && entry.frames.length > 1 ? 1 : 0;
+    const bib = type.building?.bib ? sprites[type.building.bib] : undefined;
+    const bibFrame = bib?.frames[damaged && bib.frames.length > 1 ? 1 : 0];
+    if (bib && bibFrame)
+      this.queue(batch, { anchor, frame: bibFrame, palette: palette(bib), push: 0, shadow: false, flat: true });
+    const shadow = entry.shadows?.[body];
+    if (shadow)
+      this.queue(batch, { anchor, frame: shadow, palette: palette(entry), push: 0, shadow: true, flat: true });
+    const frame = entry.frames[body];
+    const push = frame ? cardPush(frame) : 0.03;
+    if (frame && frame.rect[2] > 0) this.queue(batch, { anchor, frame, palette: palette(entry), push, shadow: false });
+    for (const layer of type.building?.layers ?? []) {
+      // Always-on idle animation only; production, super weapon and low-power layers need engine state not read yet.
+      if (!layer.key.startsWith('ActiveAnim') && layer.key !== 'IdleAnim') continue;
+      const art = sprites[damaged && layer.damagedSprite ? layer.damagedSprite : layer.sprite];
+      if (!art?.frames.length) continue;
+      const first = Math.min(art.frames.length - 1, layer.anim.loopStart ?? layer.anim.start ?? 0);
+      const last = Math.min(
+        art.frames.length,
+        Math.max(first + 1, layer.anim.loopEnd ?? layer.anim.end ?? art.frames.length),
+      );
+      // Rate= reads as milliseconds per frame closely enough for ambient loops (e.g. 220 for the power plant).
+      const step = Math.floor(now / Math.max(40, layer.anim.rate ?? 100));
+      const layerFrame = art.frames[first + (step % (last - first))]!;
+      const layerAnchor = layer.offset
+        ? leptonAnchor(object.x, object.y, object.z, [
+            type.drawOffset[0] + layer.offset[0],
+            type.drawOffset[1] + layer.offset[1],
+          ])
+        : anchor;
+      this.queue(batch, {
+        anchor: layerAnchor,
+        frame: layerFrame,
+        palette: palette(art),
+        push: push + 0.01,
+        shadow: false,
+      });
+    }
+  }
+
+  /** Infantry from its art sequence: walking while it moved recently, otherwise standing ready. */
+  private libraryInfantrySprites(pose: Pose, visual: Visual, batch: SpriteBatch, now: number): void {
+    const type = visual.libraryType!;
+    const entry = this.library!.library.sprites[type.sprite!];
+    const sequences = type.infantry?.sequences;
+    if (!entry || !sequences) return;
+    const walking = now - (visual.lastMove ?? -Infinity) < 250;
+    const sequence = (walking ? sequences.Walk : undefined) ?? sequences.Ready ?? sequences.Guard;
+    if (!sequence) return;
+    const facing = Math.round((pose.facing / (Math.PI * 2)) * 256) & 255;
+    const index = sequenceFrame(sequence, facing, walking ? Math.floor(now / 90) : 0);
+    const frame = entry.frames[index];
+    if (!frame) return;
+    const anchor = leptonAnchor(pose.x, pose.y, pose.z, type.drawOffset);
+    const palette = paletteFor(
+      this.cache,
+      LIBRARY_PALETTE_PREFIX + entry.palette,
+      entry.remap && type.remap,
+      visual.paletteKey || undefined,
+    );
+    const shadow = entry.shadows?.[index];
+    if (shadow) this.queue(batch, { anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
+    this.queue(batch, { anchor, frame, palette, push: cardPush(frame), shadow: false });
+  }
+
+  /** A building whose art only the map cache has (library missing): the still frames the map extractor exported. */
+  private mapBuildingSprites(object: LiveObject, visual: Visual, batch: SpriteBatch): void {
     const { manifest } = this.cache;
     const entry = manifest.sprites[visual.sprite!]!;
-    // Buildings report the centre of their foundation's top-left cell; the art is anchored at that cell's top corner.
-    const anchor = objectAnchor({
-      kind: 'building',
-      type: object.type,
-      x: Math.floor(object.x / LEPTONS_PER_CELL),
-      y: Math.floor(object.y / LEPTONS_PER_CELL),
-      z: Math.round(object.z / LEPTONS_PER_LEVEL),
-      drawOffset: [0, 0],
-    });
+    const anchor = leptonAnchor(object.x, object.y, object.z, [0, -15]);
     const owner = visual.paletteKey || undefined;
     const frameIndex = object.health > CONDITION_YELLOW || entry.frames.length < 2 ? 0 : 1;
     const frame = entry.frames[frameIndex]!;
     const palette = paletteFor(this.cache, entry.palette, entry.remap, owner);
     const push = cardPush(frame);
+    let list = batch.get('map');
+    if (!list) batch.set('map', (list = []));
     for (const underlay of entry.underlays ?? []) {
       const bib = manifest.sprites[underlay];
       if (bib?.frames[0])
-        out.push({
+        list.push({
           anchor,
           frame: bib.frames[0],
           palette: paletteFor(this.cache, bib.palette, bib.remap, owner),
@@ -315,12 +462,12 @@ export class LiveView {
         });
     }
     const shadow = entry.shadows?.[frameIndex];
-    if (shadow) out.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
-    out.push({ anchor, frame, palette, push, shadow: false });
+    if (shadow) list.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
+    list.push({ anchor, frame, palette, push, shadow: false });
     for (const layer of entry.layers ?? []) {
       const art = manifest.sprites[layer];
       if (art?.frames[0])
-        out.push({
+        list.push({
           anchor,
           frame: art.frames[0],
           palette: paletteFor(this.cache, art.palette, art.remap, owner),
@@ -333,22 +480,37 @@ export class LiveView {
   private visualFor(object: LiveObject, colorIndex: number): Visual {
     const paletteKey = colorIndex >= 0 ? `live${colorIndex}` : '';
     const existing = this.visuals.get(object.uid);
-    // Owner changes (capture, mind control) repaint the object.
-    if (existing && existing.type === object.type && existing.paletteKey === paletteKey) return existing;
+    // Owner changes (capture, mind control) repaint the object; art that was still loading is retried.
+    if (existing && existing.type === object.type && existing.paletteKey === paletteKey && !existing.pending)
+      return existing;
+    if (existing?.pending && !this.artReady(object)) return existing;
     if (existing) this.root.remove(existing.root);
     const visual = this.buildVisual(object, colorIndex, paletteKey);
+    if (existing?.lastMove !== undefined) visual.lastMove = existing.lastMove;
     this.visuals.set(object.uid, visual);
     this.root.add(visual.root);
     return visual;
   }
 
+  /** Whether a pending object's library voxel has arrived. */
+  private artReady(object: LiveObject): boolean {
+    const type = this.library?.type(object.type);
+    return !!type?.voxel && !!this.library!.voxel(type.voxel);
+  }
+
   private buildVisual(object: LiveObject, colorIndex: number, paletteKey: string): Visual {
+    const libraryType = this.library?.type(object.type);
+    if (libraryType?.sprite && (object.kind === 'building' || object.kind === 'infantry'))
+      return { type: object.type, paletteKey, root: new Group(), mode: 'library-sprite', libraryType };
     const spriteId = `${object.kind}:${object.type}`;
     if (object.kind === 'building' && this.cache.manifest.sprites[spriteId]?.frames.length)
-      return { type: object.type, paletteKey, root: new Group(), sprite: spriteId };
-    const model = this.cache.voxels.get(object.type);
+      return { type: object.type, paletteKey, root: new Group(), mode: 'map-sprite', sprite: spriteId };
+    const fromMap = this.cache.voxels.get(object.type);
+    const fromLibrary = !fromMap && libraryType?.voxel ? this.library!.voxel(libraryType.voxel) : null;
+    const model = fromMap ?? fromLibrary;
     if (model) {
-      const key = paletteFor(this.cache, model.palette, true, paletteKey || undefined);
+      const base = fromMap ? model.palette : LIBRARY_PALETTE_PREFIX + model.palette;
+      const key = paletteFor(this.cache, base, libraryType?.remap ?? true, paletteKey || undefined);
       const cacheKey = `${object.type}@${key}`;
       let parts = this.geometries.get(cacheKey);
       if (!parts) {
@@ -356,9 +518,10 @@ export class LiveView {
         this.geometries.set(cacheKey, parts);
       }
       const { root, turret } = instantiateVoxel(parts, this.voxelMaterial);
-      return { type: object.type, paletteKey, root, turret };
+      return { type: object.type, paletteKey, root, turret, mode: 'voxel', libraryType };
     }
-    // No art for this type in the cache yet: a house-coloured block keeps every live object visible and tracked.
+    // No art (yet): a house-coloured block keeps every live object visible and tracked; library voxels still loading
+    // are retried on later frames.
     const colour = colorIndex >= 0 ? HOUSE_COLORS[colorIndex % HOUSE_COLORS.length]! : 0x9a9a9a;
     const materialKey = String(colour);
     let material = this.placeholderMaterials.get(materialKey);
@@ -375,13 +538,20 @@ export class LiveView {
     const root = new Group();
     root.add(mesh);
     root.name = `live:${object.type}`;
-    return { type: object.type, paletteKey, root };
+    return {
+      type: object.type,
+      paletteKey,
+      root,
+      mode: 'placeholder',
+      libraryType,
+      pending: !!libraryType?.voxel,
+    };
   }
 
   private ensureHouse(colorIndex: number): void {
     if (colorIndex < 0 || this.housePalettes.has(colorIndex)) return;
     this.housePalettes.add(colorIndex);
-    const remap = this.options.houseRemap?.(colorIndex) ?? defaultRemap(colorIndex);
+    const remap = this.options.houseRemap?.(colorIndex) ?? this.library?.remap(colorIndex) ?? defaultRemap(colorIndex);
     addHousePalettes(this.cache, `live${colorIndex}`, remap);
   }
 }
@@ -413,4 +583,15 @@ function lerpAngle16(a: number, b: number, t: number): number {
 /** World position of an engine lepton coordinate, for hosts that place their own overlays. */
 export function leptonToWorld(x: number, y: number, z: number, out = new Vector3()): Vector3 {
   return out.set(x / LEPTONS_PER_CELL, (z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT, y / LEPTONS_PER_CELL);
+}
+
+/**
+ * World anchor of an engine draw point: the object's lepton coordinate projected like the engine, shifted by a screen
+ * offset in pixels, and lifted back onto the ground at the object's height (how the type library defines drawOffset).
+ */
+function leptonAnchor(x: number, y: number, z: number, offset: readonly [number, number]): Vector3 {
+  const level = z / LEPTONS_PER_LEVEL;
+  const [sx, sy] = ra2Screen(x / LEPTONS_PER_CELL, y / LEPTONS_PER_CELL, level);
+  const [cx, cy] = screenToCell(sx + offset[0], sy + offset[1], level);
+  return new Vector3(cx, level * LEVEL_HEIGHT, cy);
 }

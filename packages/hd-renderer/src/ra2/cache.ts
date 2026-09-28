@@ -166,6 +166,21 @@ function writePaletteRow(stacked: Uint8Array, row: number, rgb: Uint8Array): voi
   for (let i = 0; i < 256; i++) stacked.set([rgb[i * 3]!, rgb[i * 3 + 1]!, rgb[i * 3 + 2]!, 255], (row * 256 + i) * 4);
 }
 
+/** Add (or replace) a base palette row at runtime, e.g. a type library's palettes under a prefixed key. */
+export function addPalette(cache: Ra2Cache, key: string, rgb: Uint8Array): boolean {
+  const stacked = cache.paletteAtlas.image.data as Uint8Array;
+  let row = cache.paletteRow.get(key);
+  if (row === undefined) {
+    if (cache.paletteRow.size >= cache.paletteAtlas.image.height) return false;
+    row = cache.paletteRow.size;
+    cache.paletteRow.set(key, row);
+  }
+  cache.paletteRgb.set(key, rgb);
+  writePaletteRow(stacked, row, rgb);
+  cache.paletteAtlas.needsUpdate = true;
+  return true;
+}
+
 /**
  * Add "<palette>@<owner>" rows for a house discovered at runtime (a live match's players): palette indices 16-31 take
  * the house's 16 remap colours, like the rows baked at load for houses named by the map. Returns false when the atlas
@@ -198,7 +213,7 @@ export function addHousePalettes(
 }
 
 /** Palettes are 256x1 RGB(A) PNGs; decode through a canvas to get exact bytes. */
-async function readPalettePng(url: string): Promise<Uint8Array> {
+export async function readPalettePng(url: string): Promise<Uint8Array> {
   const bitmap = await createImageBitmap(await (await fetch(url)).blob(), {
     colorSpaceConversion: 'none',
     premultiplyAlpha: 'none',

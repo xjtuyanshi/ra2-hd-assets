@@ -7,7 +7,7 @@ import {
   MeshStandardNodeMaterial,
   SRGBColorSpace,
 } from 'three/webgpu';
-import { attribute, float, mix } from 'three/tsl';
+import { attribute, float, mix, uniform } from 'three/tsl';
 import { lookupNormal, normalTableFor } from '../../../ra2-formats/src/index';
 import type { VoxelModel, VoxelSection } from '../../../ra2-assets/src/manifest';
 import type { ShaderNode } from '../tsl';
@@ -190,10 +190,21 @@ export function buildVoxelGeometry(model: VoxelModel, palette: Uint8Array): Voxe
  * Voxel material. House colours are already baked into the vertex colours (the geometry is built from the house's
  * remapped palette); the remap attribute only marks team paint so it can read slightly glossier than bare metal.
  */
+/**
+ * Ambient fill shared by every voxel material, set each frame by the renderer from the scene's light level. The engine
+ * lights voxels through a lookup table that brightens faces towards the light rather than only darkening faces away
+ * from it, so original vehicles read brighter than their raw palette colours; this fill restores that level (and
+ * still follows day and night).
+ */
+export const voxelFill = uniform(new Color(0, 0, 0));
+/** Fill strength relative to the flat-ground noon level. */
+export const VOXEL_FILL = 0.45;
+
 export function createVoxelMaterial(): MeshStandardNodeMaterial {
   const material = new MeshStandardNodeMaterial();
   const paint: ShaderNode = attribute('remap', 'float').greaterThanEqual(0).select(float(1), float(0));
   material.colorNode = attribute('color', 'vec3');
+  material.emissiveNode = attribute('color', 'vec3').mul(voxelFill);
   // Mostly dielectric: metalness darkens the diffuse term, and the originals read as brightly lit painted metal.
   material.metalnessNode = mix(float(0.05), float(0.12), paint);
   material.roughnessNode = mix(float(0.55), float(0.38), paint);

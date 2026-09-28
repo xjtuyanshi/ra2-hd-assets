@@ -20,6 +20,7 @@ import { ObjectLayer } from './objects';
 import { buildTerrain, type TerrainBuild } from './terrain';
 import { buildWater, type WaterUniforms } from './water';
 import { buildRain, type RainSystem } from './weather';
+import { VOXEL_FILL, voxelFill } from './ra2/voxels';
 import type { HdWorld } from './ra2/world';
 import { IsoCamera, LEVEL_HEIGHT, cellToWorld } from './world';
 
@@ -252,6 +253,8 @@ export class HdRenderer {
       // Unlit original art follows the scene's light level relative to the noon reference (1 = original look).
       this.lighting.flatIrradianceColor(sprites.light.value).multiplyScalar(1 / this.lighting.referenceIrradiance());
     }
+    // Emissive light is not divided by pi like diffuse, so fill = irradiance * k / pi lands at k x albedo at noon.
+    this.lighting.flatIrradianceColor(voxelFill.value).multiplyScalar(VOXEL_FILL / Math.PI);
     this.pipeline.render();
   }
 

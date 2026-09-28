@@ -5,6 +5,7 @@ import {
   MeshBasicNodeMaterial,
   NormalBlending,
   PlaneGeometry,
+  type Texture,
   Vector3,
 } from 'three/webgpu';
 import {
@@ -72,6 +73,12 @@ export class SpriteLayer {
     private readonly cache: Ra2Cache,
     instances: SpriteInstance[],
     capacity = instances.length,
+    /** Indexed atlas to read frames from (a type-library page); defaults to the map cache's sprite atlas. */
+    atlas: { texture: Texture; width: number; height: number } = {
+      texture: cache.spriteAtlas,
+      width: cache.manifest.spriteAtlas.width,
+      height: cache.manifest.spriteAtlas.height,
+    },
   ) {
     this.capacity = Math.max(1, capacity, instances.length);
     const count = this.capacity;
@@ -80,7 +87,7 @@ export class SpriteLayer {
     this.params = new InstancedBufferAttribute(new Float32Array(count * 4), 4);
     this.flags = new InstancedBufferAttribute(new Float32Array(count), 1);
 
-    const atlasSize = vec2(cache.manifest.spriteAtlas.width, cache.manifest.spriteAtlas.height);
+    const atlasSize = vec2(atlas.width, atlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
     const aAnchor: ShaderNode = instancedBufferAttribute(this.anchor, 'vec3');
     const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
@@ -114,7 +121,7 @@ export class SpriteLayer {
     })();
     material.colorNode = Fn(() => {
       const texel = vec2(aRect.x.add(u.mul(aRect.z)), aRect.y.add(v.mul(aRect.w)));
-      const index = floor(texture(cache.spriteAtlas, texel.div(atlasSize)).r.mul(255).add(0.5));
+      const index = floor(texture(atlas.texture, texel.div(atlasSize)).r.mul(255).add(0.5));
       const paletteUv = vec2(index.add(0.5).div(256), aParams.z.add(0.5).div(paletteRows));
       const lit: ShaderNode = texture(cache.paletteAtlas, paletteUv).rgb.mul(this.light);
       const isShadow = aFlat.greaterThan(1.5);
