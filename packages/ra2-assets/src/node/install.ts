@@ -228,8 +228,42 @@ export interface LoadedMap {
   name: string;
 }
 
+/** Map archives nested inside the top-level MIX files (multiplayer maps ship in multimd.mix / mapsmd*.mix). */
+const NESTED_MAP_ARCHIVES = ['multimd.mix', 'mapsmd03.mix', 'maps02.mix', 'maps01.mix'];
+
 /**
- * Open a map by path or by file name relative to the game directory. `.yro`/`.mmx` packages are MIX archives holding
+ * Find a map file stored inside the install's MIX archives: first directly in a top-level archive, then one nesting
+ * level down in the known map archives. Most stock multiplayer maps (e.g. XMP29U2.MAP) only exist there.
+ */
+export function findArchivedMap(gameDir: string, name: string): { bytes: Uint8Array; source: string } | undefined {
+  const archives = readdirSync(gameDir)
+    .filter((f) => /\.mix$/i.test(f))
+    .sort();
+  for (const archive of archives) {
+    let mix: MixFile;
+    try {
+      mix = MixFile.parse(readBytes(join(gameDir, archive)));
+    } catch {
+      continue;
+    }
+    const direct = mix.read(name);
+    if (direct) return { bytes: direct, source: archive };
+    for (const inner of NESTED_MAP_ARCHIVES) {
+      const nested = mix.read(inner);
+      if (!nested) continue;
+      try {
+        const found = MixFile.parse(nested).read(name);
+        if (found) return { bytes: found, source: `${archive}/${inner}` };
+      } catch {
+        // An unreadable nested archive only means the map is not there.
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Open a map by path or by file name relative to the game directory (loose file first, then inside its MIX archives). `.yro`/`.mmx` packages are MIX archives holding
  * `<stem>.map` plus a `.pkt` index; plain `.map/.mpr/.yrm` files are INI text. A few unofficial `.yro` files are
  * plain INI text behind a short binary prefix, so as a last resort the text from the first line starting with `[`
  * is parsed.
@@ -242,9 +276,11 @@ export function loadMap(gameDir: string, mapArg: string): LoadedMap {
         const hit = readdirSync(gameDir).find((f) => f.toLowerCase() === mapArg.toLowerCase());
         return hit ? join(gameDir, hit) : undefined;
       })();
-  if (!listingHit) throw new Error(`map ${mapArg} not found (looked in the current directory and ${gameDir})`);
-  const bytes = readBytes(listingHit);
-  const file = basename(listingHit);
+  const archived = listingHit ? undefined : findArchivedMap(gameDir, basename(mapArg));
+  if (!listingHit && !archived)
+    throw new Error(`map ${mapArg} not found (looked in the current directory, ${gameDir} and its MIX archives)`);
+  const bytes = listingHit ? readBytes(listingHit) : archived!.bytes;
+  const file = listingHit ? basename(listingHit) : basename(mapArg);
   const stem = basename(file, extname(file));
   const ext = extname(file).toLowerCase();
 
