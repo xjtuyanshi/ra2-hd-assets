@@ -232,7 +232,8 @@ export interface LibraryInfantry {
   /**
    * Every entry of the sequence section (Ready, Guard, Walk, FireUp, Prone, Crawl, Die1..5, Deploy, Swim, ...).
    * Frame for engine facing f at animation step t: see sequenceFrame in art.ts
-   *   start + (facingMultiplier > 0 ? facingFrame(f, 8) * facingMultiplier : 0) + t % count.
+   *   start + direction * facingMultiplier + t % count (direction contributes only for a positive multiplier).
+   * sequenceFrame's optional raw facing preserves the infantry art's finer sector-boundary quantization.
    */
   sequences: Record<string, InfantrySequence>;
   /** art Crawls= (default yes) and FireUp= (frames before firing), recorded raw. */

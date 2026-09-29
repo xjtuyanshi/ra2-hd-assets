@@ -21,6 +21,8 @@ import {
   worldVectorToFacing,
 } from '../../src/games/yr/stateReader';
 import { YR_STARTUP_PAGE_HASH } from '../../src/games/yr/startupPage';
+import { YR_BUILDING_RENDER_OFFSETS as B } from '../../src/games/yr/buildingRenderState';
+import { YR_INFANTRY_RENDER_OFFSETS as I } from '../../src/games/yr/infantryRenderState';
 
 /** Synthetic 16 MiB guest memory: enough for every YR 1.001 global and a small heap above 0xb00000. */
 function syntheticMemory() {
@@ -51,7 +53,7 @@ function syntheticMemory() {
     u32(base + 0x10, pointers.length);
   };
   const type = (vtable: number, id: string, strength: number, turret = false) => {
-    const at = alloc(0xd00);
+    const at = alloc(0x1700);
     u32(at, vtable);
     ascii(at + O.typeId, id);
     i32(at + O.typeStrength, strength);
@@ -87,7 +89,7 @@ function syntheticMemory() {
     owner: number,
     fields: { x: number; y: number; z?: number; health: number; uid: number; facing?: number; limbo?: boolean },
   ) => {
-    const at = alloc(0x6d0);
+    const at = alloc(0x700);
     u32(at, vtable);
     u32(at + O.uniqueId, fields.uid);
     i32(at + O.health, fields.health);
@@ -98,6 +100,10 @@ function syntheticMemory() {
     u32(at + O.owner, owner);
     u32(at + typeOffset, typePointer);
     facing(at + O.primaryFacing, fields.facing ?? 0);
+    if (vtable === V.building) {
+      i32(at + B.state, 1);
+      i32(at + B.queuedState, -1);
+    }
     return at;
   };
   return { bytes, view, alloc, u8, u16, u32, i32, ascii, utf16, vector, type, house, facing, object };
@@ -155,6 +161,8 @@ function battlefield() {
   const limboMcv = m.object(V.unit, O.unitType, amcv, player, { x: 0, y: 0, health: 1000, uid: 12, limbo: true });
   const badVtable = m.object(0x12345678, O.unitType, mtnk, player, { x: 256, y: 256, health: 1, uid: 13 });
   const soldier = m.object(V.infantry, O.infantryType, e1, ai, { x: 1000, y: 2000, z: 104, health: 200, uid: 14 });
+  m.i32(soldier + I.sequence, 2);
+  m.i32(soldier + I.sequenceFrame, 3);
   const yard = m.object(V.building, O.buildingType, gacnst, ai, { x: 5000, y: 6000, health: 500, uid: 15 });
   m.vector(G.units, [tank, limboMcv, badVtable, 0]);
   m.vector(G.infantry, [soldier]);
@@ -200,6 +208,28 @@ describe('guest memory accessors', () => {
 });
 
 describe('YR 1.001 state reader', () => {
+  it('adds H2 make state and leaves failed optional reads off otherwise valid objects', () => {
+    const { m, yard, soldier } = battlefield();
+    const type = new DataView(m.bytes.buffer).getUint32(yard + O.buildingType, true);
+    m.i32(yard + B.state, 0);
+    m.u8(yard + B.hasBuildup, 1);
+    m.i32(yard + B.currentMission, 19);
+    m.i32(yard + B.queuedMission, -1);
+    m.i32(yard + B.stage, 4);
+    m.i32(type + B.makeCount, 20);
+    const read = () => readYrState(createByteViewAccessor(m.bytes));
+    expect(read().objects.find((object) => object.id === yard)).toMatchObject({
+      buildState: 'selling',
+      buildupFrame: 15,
+    });
+    m.i32(yard + B.state, 6);
+    m.i32(soldier + I.sequence, -1);
+    const invalid = read();
+    expect(invalid.objects.find((object) => object.id === yard)).not.toHaveProperty('buildState');
+    expect(invalid.objects.find((object) => object.id === soldier)).not.toHaveProperty('infantrySequence');
+    expect(invalid.objects).toHaveLength(3);
+  });
+
   it('reads map, houses and objects, skipping limbo and invalid entries', () => {
     const { m, tank, soldier, yard } = battlefield();
     const state = readYrState(createByteViewAccessor(m.bytes));
@@ -252,6 +282,7 @@ describe('YR 1.001 state reader', () => {
         facingRaw: 0,
         health: 0.5,
         isSelected: false,
+        buildState: 'done',
       },
       {
         id: tank,
@@ -282,6 +313,8 @@ describe('YR 1.001 state reader', () => {
         facingRaw: 0,
         health: 1,
         isSelected: false,
+        infantrySequence: 'Prone',
+        sequenceFrame: 3,
       },
     ]);
     // Unit vector: tank + limbo MCV + wrong vtable + null pointer.

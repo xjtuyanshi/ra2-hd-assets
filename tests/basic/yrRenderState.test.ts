@@ -279,6 +279,28 @@ function sources(
 }
 
 describe('YR 1.001 render state for the HD bridge', () => {
+  it('preserves optional H2 fields, including zero frames, in immutable thread-safe publications', () => {
+    const memory = keyMemory();
+    const harness = sources(memory);
+    const state = yrState(100);
+    state.objects[0] = {
+      ...state.objects[0]!,
+      kind: 'building',
+      buildState: 'selling',
+      buildupFrame: 0,
+    };
+    state.objects[1] = { ...state.objects[1]!, infantrySequence: 'FireProne', sequenceFrame: 0 };
+    harness.readState.mockReturnValue(state);
+    const result = harness.read()!;
+    expect(result.objects[0]).toMatchObject({ buildState: 'selling', buildupFrame: 0 });
+    expect(result.objects[1]).toMatchObject({ infantrySequence: 'FireProne', sequenceFrame: 0 });
+    expect(result.objects[1]).not.toHaveProperty('buildState');
+    expect(result.objects[0]).not.toHaveProperty('infantrySequence');
+    expect(structuredClone(result)).toEqual(result);
+    state.objects[1]!.sequenceFrame = 9;
+    expect(result.objects[1]!.sequenceFrame).toBe(0);
+  });
+
   it('polls overlays at 250 ms, publishes immutable changes and resets immediately for a new battle', () => {
     const memory = keyMemory();
     let at = 0;

@@ -164,11 +164,15 @@ export function parseInfantrySequences(
 }
 
 /**
- * SHP frame of an infantry sequence for engine facing `facing` (0..255, 0 = north) at animation step `step`, with the
- * same facing -> frame convention as facingFrame (8 directions).
+ * SHP frame of an infantry sequence for byte facing `facing` (0..255, 0 = north) at animation step `step`. Without raw
+ * input, keep the legacy facingFrame convention. Optional `facingRaw` preserves the lower eight bits of a 16-bit
+ * facing and uses infantry art's reverse-ordered directions with sector boundaries shifted by 20 byte-facing units.
+ * Sequence Facing= describes a turn performed by the animation; it does not override the current image direction.
  */
-export function sequenceFrame(seq: InfantrySequence, facing: number, step: number): number {
-  const dir = seq.facingMultiplier > 0 ? facingFrame(facing, 8) * seq.facingMultiplier : 0;
+export function sequenceFrame(seq: InfantrySequence, facing: number, step: number, facingRaw?: number): number {
+  const normalized = facingRaw === undefined ? 0 : (((facingRaw % 65536) + 65536) % 65536) / 256;
+  const direction = facingRaw === undefined ? facingFrame(facing, 8) : (7 - Math.floor((normalized + 20) / 32)) & 7;
+  const dir = seq.facingMultiplier > 0 ? direction * seq.facingMultiplier : 0;
   const n = Math.max(1, seq.count);
   return seq.start + dir + (((step % n) + n) % n);
 }

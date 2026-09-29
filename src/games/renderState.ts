@@ -60,6 +60,14 @@ export interface GameRenderObject extends GameRenderPoint {
   facingRaw: number;
   /** Only for types with a turret. */
   turretFacingRaw?: number;
+  /** Engine construction/sale state; absent when the game cannot report it. */
+  buildState?: 'building' | 'selling' | 'done';
+  /** Actual make-art frame, with the engine's sale/gate reversal already applied. */
+  buildupFrame?: number;
+  /** Current infantry art sequence key, when the game can report it. */
+  infantrySequence?: string;
+  /** Animation step within infantrySequence, before its start/facing offsets. */
+  sequenceFrame?: number;
   /** Current strength 0..1. */
   health: number;
   /** Selected by the local player. */

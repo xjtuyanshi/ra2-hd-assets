@@ -117,6 +117,33 @@ afterEach(() => {
 });
 
 describe('HD 桥状态机', () => {
+  it('forwards all H2 animation fields and keeps absent fields optional', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    const state = battle(3);
+    const common = {
+      owner: 0,
+      x: 100,
+      y: 200,
+      z: 0,
+      facingRaw: 0,
+      health: 1,
+      isSelected: false,
+    };
+    state.objects = [
+      { ...common, id: 1, uid: 11, kind: 'building', type: 'NAHAND', buildState: 'selling', buildupFrame: 0 },
+      { ...common, id: 2, uid: 12, kind: 'infantry', type: 'E1', infantrySequence: 'Deployed', sequenceFrame: 0 },
+      { ...common, id: 3, uid: 13, kind: 'vehicle', type: 'MTNK' },
+    ];
+    harness.setState(state);
+    await advance(16);
+    const pushed = view.push.mock.calls.at(-1)![0];
+    expect(pushed.objects).toEqual(state.objects);
+    expect(pushed.objects[2]).not.toHaveProperty('buildState');
+    expect(pushed.objects[2]).not.toHaveProperty('sequenceFrame');
+    harness.stop();
+  });
+
   it('forwards live overlays and the local house without copying the cell arrays', async () => {
     const harness = setup();
     const view = await goLive(harness);

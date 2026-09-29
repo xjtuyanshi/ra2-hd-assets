@@ -46,6 +46,37 @@ describe('infantry sequences', () => {
     expect(sequenceFrame(s['Idle1']!, 160, 3)).toBe(59);
     expect(sequenceFrame(s['Idle1']!, 0, -1)).toBe(70);
   });
+
+  it('preserves the exact raw-facing sector boundaries for infantry art without changing legacy byte callers', () => {
+    const ready = { start: 0, count: 1, facingMultiplier: 1 };
+    const boundaries = [
+      [3072, 7, 6],
+      [11264, 6, 5],
+      [19456, 5, 4],
+      [27648, 4, 3],
+      [35840, 3, 2],
+      [44032, 2, 1],
+      [52224, 1, 0],
+      [60416, 0, 7],
+    ];
+    for (const [raw, before, after] of boundaries) {
+      expect(sequenceFrame(ready, 0, 0, raw! - 1)).toBe(before);
+      expect(sequenceFrame(ready, 0, 0, raw)).toBe(after);
+      expect(sequenceFrame(ready, 0, 0, raw! + 1)).toBe(after);
+    }
+    expect(sequenceFrame(ready, 12, 0)).toBe(7);
+    expect(sequenceFrame(ready, 12, 0, 12 * 256)).toBe(6);
+    expect(sequenceFrame(ready, 0, 0, 65536)).toBe(7);
+    expect(sequenceFrame(ready, 0, 0, -1)).toBe(7);
+  });
+
+  it('applies raw directions to sequence frames and leaves fixed Facing behavior to the supplied pose', () => {
+    const walk = { start: 10, count: 6, facingMultiplier: 6, facing: 'E' };
+    expect(sequenceFrame(walk, 0, 7, 3071)).toBe(53);
+    expect(sequenceFrame(walk, 0, 7, 3072)).toBe(47);
+    const idle = { start: 56, count: 15, facingMultiplier: 0, facing: 'S' };
+    expect(sequenceFrame(idle, 0, 3, 3072)).toBe(59);
+  });
 });
 
 describe('colour scheme order', () => {

@@ -221,7 +221,24 @@ function publishShroud(read: YrShroud, previous: GameRenderShroud | null): GameR
 }
 
 function projectObject(object: YrObjectState): GameRenderObject {
-  const { id, uid, kind, type, owner, x, y, z, facingRaw, turretFacingRaw, health, isSelected } = object;
+  const {
+    id,
+    uid,
+    kind,
+    type,
+    owner,
+    x,
+    y,
+    z,
+    facingRaw,
+    turretFacingRaw,
+    buildState,
+    buildupFrame,
+    infantrySequence,
+    sequenceFrame,
+    health,
+    isSelected,
+  } = object;
   return {
     id,
     uid,
@@ -233,6 +250,10 @@ function projectObject(object: YrObjectState): GameRenderObject {
     z,
     facingRaw,
     ...(turretFacingRaw !== undefined ? { turretFacingRaw } : {}),
+    ...(buildState !== undefined ? { buildState } : {}),
+    ...(buildupFrame !== undefined ? { buildupFrame } : {}),
+    ...(infantrySequence !== undefined ? { infantrySequence } : {}),
+    ...(sequenceFrame !== undefined ? { sequenceFrame } : {}),
     health,
     isSelected,
   };

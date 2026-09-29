@@ -1,5 +1,7 @@
 import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { YR_STARTUP_PAGE_HASH } from './startupPage';
+import { readYrBuildingRenderState } from './buildingRenderState';
+import { readYrInfantryRenderState } from './infantryRenderState';
 
 /**
  * Read-only live battlefield state of Yuri's Revenge 1.001 (gamemd.exe, SHA-256 in YR_STARTUP_PAGE_HASH) for an
@@ -9,7 +11,9 @@ import { YR_STARTUP_PAGE_HASH } from './startupPage';
  * Source of the layout: the community YRpp headers (Phobos-developers/YRpp, reverse-engineered YR 1.001 classes) used
  * as facts only (addresses and field offsets; no code is taken from them). Offsets that YRpp only implies through field
  * order were computed from neighbouring anchors (fields YRpp names by their offset, such as `unknown_62C` or
- * `gap_AE`). scripts/remaster/bridge/verifyStateReader.mts checks every field against a running skirmish.
+ * `gap_AE`). The H2 construction/infantry observers document executable instruction evidence in
+ * buildingRenderState.ts and infantryRenderState.ts. scripts/remaster/bridge/verifyStateReader.mts checks the
+ * baseline object/map/facing fields against a running skirmish; H2 animation acceptance is a separate live check.
  *
  * Consistency: the poll runs between emulator slices, so it may observe the game half way through a logic frame (for
  * example an object already removed from one vector but not yet from another). Every pointer, count and string is
@@ -219,6 +223,14 @@ export interface YrObjectState {
   /** Turret facing 0..255 (same convention), only for types with Turret=yes. */
   turretFacing?: number;
   turretFacingRaw?: number;
+  /** Validated engine construction/sale state (H2); omitted on an implausible read. */
+  buildState?: 'building' | 'selling' | 'done';
+  /** Actual building make SHP frame, including engine sale/gate reversal. */
+  buildupFrame?: number;
+  /** Art sequence key from InfantryClass::SequenceAnim. */
+  infantrySequence?: string;
+  /** Sequence-local animation stage, excluding start/facing offsets. */
+  sequenceFrame?: number;
   /** Health / Strength clamped to 0..1. */
   health: number;
   isSelected: boolean;
@@ -557,6 +569,9 @@ export function readYrState(memory: GuestMemoryAccessor, options: ReadYrStateOpt
         object.turretFacingRaw = turretRaw;
         object.turretFacing = facingToByte(turretRaw);
       }
+      // The image/hash gate belongs to this reader; optional H2 observers validate their extra spans and fields.
+      if (spec.kind === 'building') Object.assign(object, readYrBuildingRenderState(memory, pointer));
+      else if (spec.kind === 'infantry') Object.assign(object, readYrInfantryRenderState(memory, pointer));
       objects.push(object);
     }
   }

@@ -59,10 +59,10 @@ export interface LiveObject {
   turretFacingRaw?: number;
   health: number;
   isSelected: boolean;
-  /** Bridge (H2): building construction state, and the build-up frame the engine shows. */
+  /** Bridge (H2): building construction state and the actual make SHP frame, including engine reversal. */
   buildState?: 'building' | 'selling' | 'done';
   buildupFrame?: number;
-  /** Bridge (H2): infantry sequence name (e.g. "Walk", "Die1", "FireUp") and frame within it. */
+  /** Bridge (H2): infantry sequence key (e.g. "Walk", "Die1", "FireUp") and sequence-local animation step. */
   infantrySequence?: string;
   sequenceFrame?: number;
 }
@@ -366,6 +366,8 @@ export class LiveView {
   private previous: Timed | null = null;
   private current: Timed | null = null;
   private readonly visuals = new Map<number, Visual>();
+  /** First pushed appearance by match-unique UID, retained across temporary read gaps and delayed art readiness. */
+  private readonly appearances = new Map<number, { frame: number; afterGap: boolean }>();
   private readonly spriteBatch: SpriteBatch = new Map();
   private readonly spritePool = new SpritePool();
   private readonly cellPool = new SpritePool();
@@ -612,10 +614,19 @@ export class LiveView {
     )
       return;
     this.snapshotOverlayRevision = snapshot.overlays?.revision;
+    if (current && snapshot.frame < current.snapshot.frame) {
+      // Loading an earlier save or starting another match establishes a new appearance timeline.
+      this.appearances.clear();
+      this.firstFrame = null;
+    }
     this.firstFrame ??= snapshot.frame;
     this.previous = current;
     const byUid = new Map<number, LiveObject>();
-    for (const object of snapshot.objects) byUid.set(object.uid, object);
+    const afterGap = !!current && snapshot.frame - current.snapshot.frame > BUILDUP_LOGIC_FRAMES;
+    for (const object of snapshot.objects) {
+      byUid.set(object.uid, object);
+      if (!this.appearances.has(object.uid)) this.appearances.set(object.uid, { frame: snapshot.frame, afterGap });
+    }
     this.current = { snapshot, at, byUid };
     this.objectsInterpolate = false;
     if (current) {
@@ -794,6 +805,7 @@ export class LiveView {
     this.uploadedOverlays.clear();
     this.hd.dispose();
     this.visuals.clear();
+    this.appearances.clear();
   }
 
   /** What the view could not draw (a healthy match reports no placeholders and no effects without art). */
@@ -1300,8 +1312,10 @@ export class LiveView {
 
   /**
    * Build-up frame of a building under construction, or null when it stands complete. Bridge (H2): the engine's own
-   * state and frame. Fallback: a building that appeared after the view's first BUILDUP_GRACE_FRAMES plays its make
-   * anim once, buildupStepFrames logic frames per frame. Selling (the make anim reversed) needs the bridge.
+   * state and absolute SHP frame, with engine sale/gate reversal already applied. Fallback: a building first pushed after
+   * the view's first BUILDUP_GRACE_FRAMES plays its make anim once, buildupStepFrames logic frames per frame. New
+   * objects after a snapshot gap longer than BUILDUP_LOGIC_FRAMES are assumed complete; their actual placement time
+   * is unknown. Rendering gaps and delayed art never restart this clock. Selling needs the bridge.
    */
   private buildupFrame(object: LiveObject, visual: Visual, frame: number): number | null {
     const make = visual.libraryType?.building?.buildup;
@@ -1310,11 +1324,13 @@ export class LiveView {
     const count = sprite.frames.length;
     if (object.buildState !== undefined) {
       if (object.buildState === 'done') return null;
-      const shown = object.buildupFrame ?? 0;
-      return Math.min(count - 1, Math.max(0, object.buildState === 'selling' ? count - 1 - shown : shown));
+      const shown = object.buildupFrame ?? (object.buildState === 'selling' ? count - 1 : 0);
+      return Math.min(count - 1, Math.max(0, shown));
     }
-    if (this.firstFrame === null || visual.firstFrame - this.firstFrame < BUILDUP_GRACE_FRAMES) return null;
-    const step = Math.floor((frame - visual.firstFrame) / buildupStepFrames(count, NORMALIZED.has(object.type)));
+    const appearance = this.appearances.get(object.uid);
+    if (!appearance || appearance.afterGap || this.firstFrame === null) return null;
+    if (appearance.frame - this.firstFrame < BUILDUP_GRACE_FRAMES) return null;
+    const step = Math.floor((frame - appearance.frame) / buildupStepFrames(count, NORMALIZED.has(object.type)));
     return step < count ? step : null;
   }
 
@@ -1329,26 +1345,32 @@ export class LiveView {
     const type = visual.libraryType!;
     const entry = this.library!.library.sprites[type.sprite!];
     const sequences = type.infantry?.sequences;
-    if (!entry || !sequences) return;
-    const facing = Math.round((pose.facing / (Math.PI * 2)) * 256) & 255;
+    if (!entry) return;
+    const facingRaw = Math.round((pose.facing / (Math.PI * 2)) * 65536);
+    const facing = (facingRaw >>> 8) & 255;
     let index: number | undefined;
-    const named = object.infantrySequence ? sequences[object.infantrySequence] : undefined;
-    if (named) index = sequenceFrame(named, facing, object.sequenceFrame ?? 0);
-    else if (visual.deadFrame !== undefined && sequences.Die1) {
+    const named = object.infantrySequence ? sequences?.[object.infantrySequence] : undefined;
+    if (named) index = sequenceFrame(named, facing, object.sequenceFrame ?? 0, facingRaw);
+    else if (visual.deadFrame !== undefined && sequences?.Die1) {
       // Health 0: the first death sequence from the frame it died, holding its last frame.
       const die = sequences.Die1;
-      index = sequenceFrame(die, facing, Math.min(die.count - 1, Math.floor((frame - visual.deadFrame) / 2)));
+      index = sequenceFrame(
+        die,
+        facing,
+        Math.min(die.count - 1, Math.floor((frame - visual.deadFrame) / 2)),
+        facingRaw,
+      );
     } else if (
       visual.firedFrame !== undefined &&
-      sequences.FireUp &&
+      sequences?.FireUp &&
       frame - visual.firedFrame < sequences.FireUp.count
     ) {
-      index = sequenceFrame(sequences.FireUp, facing, frame - visual.firedFrame);
+      index = sequenceFrame(sequences.FireUp, facing, frame - visual.firedFrame, facingRaw);
     } else {
       const walking = visual.lastMoveFrame !== undefined && frame - visual.lastMoveFrame <= WALK_FRAMES;
-      const sequence = (walking ? sequences.Walk : undefined) ?? sequences.Ready ?? sequences.Guard;
-      if (!sequence) return;
-      index = sequenceFrame(sequence, facing, walking ? Math.floor(frame / 2) : 0);
+      const sequence = (walking ? sequences?.Walk : undefined) ?? sequences?.Ready ?? sequences?.Guard;
+      // A legacy library without sequence metadata still draws its first body frame while awaiting regeneration.
+      index = sequence ? sequenceFrame(sequence, facing, walking ? Math.floor(frame / 2) : 0, facingRaw) : 0;
     }
     const spriteFrame = entry.frames[index];
     if (!spriteFrame) return;
@@ -1464,12 +1486,14 @@ export class LiveView {
   private visualFor(object: LiveObject, colorIndex: number, frame: number): Visual {
     const paletteKey = this.housePaletteKeys.get(colorIndex) ?? '';
     const existing = this.visuals.get(object.uid);
+    const firstFrame = this.appearances.get(object.uid)?.frame ?? frame;
+    if (existing) existing.firstFrame = firstFrame;
     // Owner changes (capture, mind control) repaint the object; art that was still loading is retried.
     if (existing && existing.type === object.type && existing.paletteKey === paletteKey && !existing.pending)
       return existing;
     if (existing?.pending && !this.artReady(object)) return existing;
     if (existing) this.root.remove(existing.root);
-    const visual = this.buildVisual(object, paletteKey, existing?.firstFrame ?? frame);
+    const visual = this.buildVisual(object, paletteKey, firstFrame);
     if (existing) {
       visual.lastMoveFrame = existing.lastMoveFrame;
       visual.firedFrame = existing.firedFrame;

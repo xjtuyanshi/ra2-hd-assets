@@ -149,9 +149,9 @@ overrides the tactical rectangle (default: the frame minus YR's 168 px sidebar a
 
 The live view's snapshot types carry optional fields beyond what the page forwards today. Each consumer is active only
 when its field is present and falls back to a documented estimate otherwise; all of them are unit-tested with
-synthetic snapshots (`tests/basic/hdLive*.test.ts`). The proposed `toSnapshot` change for H1 and the H2/H3 reader
-specifications are in `docs/remaster/research/hd-bridge-fields.md`; H1 only stops dropping fields the readers already
-read.
+synthetic snapshots (`tests/basic/hdLive*.test.ts`). Building/infantry H2 fields are now read from pinned YR 1.001 and
+forwarded end to end. Evidence, optional-read boundaries and remaining H1/H2/H3 proposals are in
+`docs/remaster/research/hd-bridge-fields.md`; H1 only stops dropping fields the readers already read.
 
 | Step | Fields                                                                                                                       | Used for                                                                                    | Fallback without it                                                                                                                                                                                                                                                        |
 | ---- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -160,8 +160,8 @@ read.
 | H1   | `voxelAnims`, `fireEvents`, laser outer colour/thickness/progress                                                            | debris voxels; firing frames of SHP units and infantry                                      | none; no firing frames                                                                                                                                                                                                                                                     |
 | H1   | particle system type, particleCount, lifetime, attachedTo, particles (with type and frame)                                   | the system's own rules and spawn window; the engine's particles as they are                 | `SmallGreySSys` rules; spawning for 48 logic frames after the first sighting, or for as long as the system is listed when it sits exactly on a vehicle                                                                                                                     |
 | H1   | `LiveHouse.civilian` (Neutral and Special houses)                                                                            | idle tech buildings                                                                         | houses owning no buildable building count as civilian                                                                                                                                                                                                                      |
-| H2   | `LiveObject` buildState, buildupFrame, infantrySequence, sequenceFrame                                                       | build-up and selling; every infantry sequence (prone, crawl, ...)                           | build-up of buildings that appear after the view's first 60 logic frames, one make frame per `floor(54 / frames)` logic frames (x1.69 for `Normalized` art); selling not shown; infantry walk/stand, Die1 at 0 health, FireUp after a shot                                 |
-| H3   | `snapshot.cells` (changed overlay and smudge cells)                                                                          | ore growth and harvesting, walls, the engine's craters                                      | the map's initial overlays and smudges; no HD scorch marks                                                                                                                                                                                                                 |
+| H2   | `LiveObject` buildState, buildupFrame, infantrySequence, sequenceFrame                                                       | engine make frame (already reversed for selling); named infantry sequence and local step    | first-seen frame recorded at snapshot push; new buildings after a push gap greater than 54 logic frames assumed complete; otherwise estimated make after initial 60-frame grace period; selling unavailable; infantry walk/stand, Die1 at 0 health, FireUp after a shot    |
+| H3   | `snapshot.overlays` (implemented); optional `snapshot.cells` tuple proposal for overlays/smudges                             | engine ore growth/depletion and wall frames; runtime smudges still proposed                 | the map's initial overlays/smudges when live data is absent; no HD scorch marks                                                                                                                                                                                            |
 
 ## Known limits
 
@@ -177,20 +177,25 @@ read.
   its owner's colours, projectiles are grey dots, and smoke columns follow the view's own particles, which match the
   engine's in rate, rise and life but not particle for particle. Building layers that depend on engine state the
   readers do not expose (production, super weapon charge, low power) are not animated.
-- Without H2, placed buildings play their make anim for an estimated time and sold buildings vanish without it;
-  infantry distinguish only walking, standing, firing and dying (no prone or crawling under fire). SHP vehicles take
+- YR 1.001 now supplies H2 building construction/selling and infantry sequence state. Invalid or partially initialized
+  fields remain optional: without them, placed buildings estimate make progress from their first pushed snapshot,
+  and sold buildings vanish without sale animation. A new building first observed after a snapshot gap longer than
+  54 logic frames is assumed complete; rendering pauses and delayed art never restart its make clock. A library
+  missing a named infantry sequence keeps walk/stand/fire/death estimates; one without sequence metadata draws its
+  first body frame. The normal type library already extracts all artmd sequences.
+- SHP vehicles take
   the object's facing (their directions run clockwise from screen-up, the mirror of the infantry order; frame-matched
   on four live terror drones, two of them at a correlation of 0.95 and more) and walk on logic frame / `WalkRate`; a
   walk step counter and body facing from H2 would make the walk and firing frames exact.
-- Without H3 ore does not grow or shrink and walls and craters built during the match are not drawn: the HD view
-  then disagrees with the match wherever ore was harvested or walls were built. This is a release blocker for the HD
-  view, owned by the page/reader side (`src/games/yr` readers and the page bridge, see
-  `docs/remaster/research/hd-bridge-fields.md`); until then the view warns once in the console and
-  `LiveView.diagnostics().cellsFromEngine` stays false.
-- Deployed infantry (a GI's sandbag bunker), prone, crawling and electrocuted infantry need H2's sequence: without it
-  they are drawn standing or walking.
+- Live overlay snapshots cover engine ore growth/depletion and wall frames (see [Live overlays](LIVE_OVERLAYS.md)).
+  When live data is absent, the map's initial overlays remain the fallback and
+  `LiveView.diagnostics().cellsFromEngine` stays false. Engine craters/burn marks are not yet forwarded; the runtime
+  smudge portion of H3 remains a proposal in `docs/remaster/research/hd-bridge-fields.md`.
+- H2 infantry sequence state covers prone/crawling/deployment/death art, but Spy disguise type substitution and some
+  jumpjet target-based facing remain unprojected. Real-game same-moment HD build/sell/infantry comparison is separate
+  acceptance from reader tests and executable disassembly.
 - The day-time brightening around the map's lamp posts and other light sources (the engine adds them to every cell's
   light, up to 1.34x next to an INGALITE post) is not part of the live view; it belongs to the renderer's map lighting.
 - The normalized anim rate (`NORMALIZED_RATE_FACTOR`), the build-up rate, the smoke kinematics and the shroud edge
   (`EDGE_INSET`, `EDGE_SOFTNESS`) were fitted on XMP29U2 skirmishes at the development settings; other game speeds may
-  need the bridge's exact values.
+  need the bridge's exact values. The build-up rate estimate is used only when engine H2 state is unavailable.
