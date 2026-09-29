@@ -32,6 +32,8 @@ export interface ShpUnitRates {
   idleRate?: number;
 }
 
+const BLOCKS = new WeakMap<LibraryShpUnit, { facings: number; walk: Block; stand: Block; fire: Block }>();
+
 interface Block {
   start: number;
   count: number;
@@ -39,17 +41,21 @@ interface Block {
 
 /** Frame blocks of one SHP unit, from its art keys with the engine defaults. */
 export function shpUnitBlocks(u: LibraryShpUnit): { facings: number; walk: Block; stand: Block; fire: Block } {
+  const known = BLOCKS.get(u);
+  if (known) return known;
   const f = Math.max(1, u.facings || 8);
   const k = u.frames;
   const walkFrames = Math.max(0, k.WalkFrames ?? 0);
   const standFrames = Math.max(0, k.StandingFrames ?? 1);
   const fireFrames = Math.max(0, k.FiringFrames ?? 0);
-  return {
+  const blocks = {
     facings: f,
     walk: { start: k.StartWalkFrame ?? 0, count: walkFrames },
     stand: { start: k.StartStandFrame ?? walkFrames * f, count: standFrames },
     fire: { start: k.StartFiringFrame ?? (walkFrames + standFrames) * f, count: fireFrames },
   };
+  BLOCKS.set(u, blocks);
+  return blocks;
 }
 
 /**
@@ -85,13 +91,23 @@ export function shpUnitPose(
   frame: number,
   moving: boolean,
   firingSince: number | null,
+  out: { state: ShpUnitState; step: number } = { state: 'stand', step: 0 },
 ): { state: ShpUnitState; step: number } {
   const blocks = shpUnitBlocks(u);
-  if (firingSince !== null && blocks.fire.count > 0 && frame - firingSince < blocks.fire.count)
-    return { state: 'fire', step: frame - firingSince };
   const walkRate = Math.max(1, rates?.walkRate ?? 1);
-  if (moving && blocks.walk.count > 0) return { state: 'walk', step: Math.floor(frame / walkRate) };
   const idleRate = rates?.idleRate ?? 0;
-  if (idleRate > 0 && blocks.walk.count > 0) return { state: 'walk', step: Math.floor(frame / idleRate) };
-  return { state: 'stand', step: 0 };
+  if (firingSince !== null && blocks.fire.count > 0 && frame - firingSince < blocks.fire.count) {
+    out.state = 'fire';
+    out.step = frame - firingSince;
+  } else if (moving && blocks.walk.count > 0) {
+    out.state = 'walk';
+    out.step = Math.floor(frame / walkRate);
+  } else if (idleRate > 0 && blocks.walk.count > 0) {
+    out.state = 'walk';
+    out.step = Math.floor(frame / idleRate);
+  } else {
+    out.state = 'stand';
+    out.step = 0;
+  }
+  return out;
 }

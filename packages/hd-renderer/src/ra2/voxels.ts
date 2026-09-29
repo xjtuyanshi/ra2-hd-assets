@@ -11,7 +11,9 @@ import { lookupNormal, normalTableFor } from '../../../ra2-formats/src/index';
 import type { VoxelModel, VoxelSection } from '../../../ra2-assets/src/manifest';
 import { sectionNormalsMode } from '../../../ra2-assets/src/voxelNormals';
 import { PIXELS_PER_CELL_EDGE } from '../world';
+import type { AtmosphereNodes } from '../atmosphere';
 import { decodeBase64 } from './cache';
+import { paletteNodes } from './mapLighting';
 import { VoxelShadowMesh, groundOf } from './voxelShadow';
 import { voxelFill, voxelMaterialFor } from './vpl';
 
@@ -96,32 +98,67 @@ const FACES: { dir: [number, number, number]; corners: [number, number, number][
   },
 ];
 
-/** Padded-cell offset of the voxel just outside each face, for row pitch px and slice pitch pxy. */
-const FACE_OFFSET = FACES.map(
-  ({ dir: [dx, dy, dz] }) =>
-    (px: number, pxy: number) =>
-      dx + px * dy + pxy * dz,
-);
-
-/**
- * Per face and corner, the two in-plane unit steps (towards the corner along each of the face's two lattice axes) whose
- * cells, with their diagonal, decide that corner's ambient occlusion.
- */
-const FACE_AO = FACES.map((face) => {
+/** Fixed topology; section-specific pitches are applied once before walking the exposed faces. */
+const FACE_CORNERS = new Uint8Array(FACES.flatMap((face) => face.corners.flat()));
+const FACE_AO = FACES.flatMap((face) => {
   const axes = [0, 1, 2].filter((a) => face.dir[a] === 0);
-  return face.corners.map((corner) => {
-    const u: [number, number, number] = [0, 0, 0];
-    const w: [number, number, number] = [0, 0, 0];
+  return face.corners.flatMap((corner) => {
+    const u = [0, 0, 0];
+    const w = [0, 0, 0];
     u[axes[0]!] = corner[axes[0]!] ? 1 : -1;
     w[axes[1]!] = corner[axes[1]!] ? 1 : -1;
-    return [u, w] as const;
+    return [...u, ...w];
   });
 });
 
-/** The 26-neighbourhood (normal blending weighs each by normalBlend / distance). */
-const NEIGHBOURS: [number, number, number][] = [];
-for (let dz = -1; dz <= 1; dz++)
-  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (dx || dy || dz) NEIGHBOURS.push([dx, dy, dz]);
+/** The 26-neighbourhood, in the original accumulation order to preserve floating-point results. */
+const NEIGHBOURS: number[] = [];
+const NEIGHBOUR_DISTANCE = new Float64Array(26);
+for (let dz = -1; dz <= 1; dz++) {
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy && !dz) continue;
+      NEIGHBOUR_DISTANCE[NEIGHBOURS.length / 3] = Math.hypot(dx, dy, dz);
+      NEIGHBOURS.push(dx, dy, dz);
+    }
+  }
+}
+
+/**
+ * Surface nets only depend on the eight occupied cells touching a corner. Precompute the 256 results, including
+ * the original Float32 rounding, instead of repeating twelve edge tests and allocating a lookup closure per corner.
+ */
+const CORNER_OFFSETS = new Float32Array(256 * 3);
+for (let mask = 0; mask < 256; mask++) {
+  let n = 0;
+  let ax = 0;
+  let ay = 0;
+  let az = 0;
+  for (let a = 0; a < 2; a++) {
+    for (let b = 0; b < 2; b++) {
+      if (((mask >> (2 * a + 4 * b)) & 1) !== ((mask >> (1 + 2 * a + 4 * b)) & 1)) {
+        ay += a - 0.5;
+        az += b - 0.5;
+        n++;
+      }
+      if (((mask >> (a + 4 * b)) & 1) !== ((mask >> (a + 2 + 4 * b)) & 1)) {
+        ax += a - 0.5;
+        az += b - 0.5;
+        n++;
+      }
+      if (((mask >> (a + 2 * b)) & 1) !== ((mask >> (a + 2 * b + 4)) & 1)) {
+        ax += a - 0.5;
+        ay += b - 0.5;
+        n++;
+      }
+    }
+  }
+  if (n) {
+    CORNER_OFFSETS[mask * 3] = ax / n;
+    CORNER_OFFSETS[mask * 3 + 1] = ay / n;
+    CORNER_OFFSETS[mask * 3 + 2] = az / n;
+  }
+}
 
 /*
  * Model-local frame used by the renderer: +x forward (the vehicle's nose), +y up, +z to the vehicle's right. Voxel
@@ -139,9 +176,27 @@ for (let dz = -1; dz <= 1; dz++)
  *   original's highlights and creases, so it stays small.
  * - Occlusion per corner from the three outside neighbours touching it (AO_LEVELS), stored raw in the 'occlusion'
  *   attribute; the material applies it with its own strength (vpl.ts voxelOcclusion).
- * Review tooling may change these before the first model is built (geometry is cached per model).
+ * Legacy tooling may change the defaults below; worlds snapshot them before asynchronous loading starts. Geometry
+ * is shared only when both the model and refinement values match.
  */
-export const voxelShape = { cornerRelax: 0.6, normalBlend: 0.15 };
+export interface VoxelShape {
+  cornerRelax: number;
+  normalBlend: number;
+}
+export const voxelShape: VoxelShape = { cornerRelax: 0.6, normalBlend: 0.15 };
+const shapes = new WeakMap<AtmosphereNodes, Readonly<VoxelShape>>();
+
+/** Capture one world's shape options; later edits to the caller's settings cannot change its model builds. */
+export function setVoxelShapeFor(nodes: AtmosphereNodes, shape: Readonly<VoxelShape>): Readonly<VoxelShape> {
+  const value = Object.freeze({ cornerRelax: shape.cornerRelax, normalBlend: shape.normalBlend });
+  shapes.set(nodes, value);
+  return value;
+}
+
+/** A renderer's immutable refinement options, lazily copied from the legacy defaults for standalone callers. */
+export function voxelShapeFor(nodes: AtmosphereNodes): Readonly<VoxelShape> {
+  return shapes.get(nodes) ?? setVoxelShapeFor(nodes, voxelShape);
+}
 const AO_LEVELS = [0.35, 0.6, 0.8, 1] as const;
 
 interface SharedPart {
@@ -149,7 +204,7 @@ interface SharedPart {
   geometry: BufferGeometry;
 }
 /** Palette-independent geometry per model: vertices carry palette indices, the material maps them to colours. */
-const sharedParts = new WeakMap<VoxelModel, SharedPart[]>();
+const sharedParts = new WeakMap<VoxelModel, Map<string, SharedPart[]>>();
 
 /**
  * Merge a part's sections into one geometry: exposed voxel faces only, lit by the original per-voxel normals. Each
@@ -157,117 +212,177 @@ const sharedParts = new WeakMap<VoxelModel, SharedPart[]>();
  * see vpl.ts) and ambient occlusion. The geometry is built once per model and shared by every palette; each returned
  * part carries the material of `palette` (house remaps included).
  */
-export function buildVoxelGeometry(model: VoxelModel, palette: Uint8Array | null): VoxelGeometry[] {
-  let parts = sharedParts.get(model);
-  if (!parts) {
-    parts = model.parts.map((part) => ({ role: part.role, geometry: buildPartGeometry(part.sections) }));
-    sharedParts.set(model, parts);
+export function buildVoxelGeometry(
+  model: VoxelModel,
+  palette: Uint8Array | null,
+  nodes?: AtmosphereNodes,
+  shape?: Readonly<VoxelShape>,
+): VoxelGeometry[] {
+  const context = nodes ?? paletteNodes(palette);
+  const refinement = shape ?? (context ? voxelShapeFor(context) : voxelShape);
+  // String keys keep numerically equal options shared across renderer contexts; preserve signed zero as well.
+  const relax = refinement.cornerRelax;
+  const blend = refinement.normalBlend;
+  const key = `${Object.is(relax, -0) ? '-0' : relax}:${Object.is(blend, -0) ? '-0' : blend}`;
+  let variants = sharedParts.get(model);
+  if (!variants) {
+    variants = new Map();
+    sharedParts.set(model, variants);
   }
-  const material = voxelMaterialFor(palette);
+  let parts = variants.get(key);
+  if (!parts) {
+    parts = model.parts.map((part) => ({ role: part.role, geometry: buildPartGeometry(part.sections, refinement) }));
+    variants.set(key, parts);
+  }
+  const material = voxelMaterialFor(palette, context);
   const turretOffset = (model.turretOffset ?? 0) / LEPTONS_PER_CELL;
   return parts.map(({ role, geometry }) => ({ role, geometry, turretOffset, material }));
 }
 
-function buildPartGeometry(sections: readonly VoxelSection[]): BufferGeometry {
-  const positions: number[] = [];
-  const normals: number[] = [];
-  const pindices: number[] = [];
-  const occlusion: number[] = [];
-  const indices: number[] = [];
-  for (const section of sections) addSection(section);
+interface SectionGrid {
+  section: VoxelSection;
+  raw: Uint8Array;
+  filled: Uint8Array;
+  cells: Int32Array;
+  faces: Uint8Array;
+  faceOffsets: Int32Array;
+  faceCount: number;
+  px: number;
+  pxy: number;
+}
+
+function sectionGrid(section: VoxelSection): SectionGrid {
+  const raw = decodeBase64(section.voxels);
+  const [sx, sy, sz] = section.size;
+  // The two-cell empty border includes neighbours of a face's outside cell, avoiding inner-loop bounds checks.
+  const px = sx + 4;
+  const pxy = px * (sy + 4);
+  const origin = 2 + 2 * px + 2 * pxy;
+  const filled = new Uint8Array(pxy * (sz + 4));
+  const cells = new Int32Array(raw.length / 5);
+  const faces = new Uint8Array(cells.length);
+  const faceOffsets = new Int32Array([1, -1, px, -px, pxy, -pxy]);
+  for (let v = 0; v < cells.length; v++) {
+    const i = v * 5;
+    const k = origin + raw[i]! + px * raw[i + 1]! + pxy * raw[i + 2]!;
+    cells[v] = k;
+    filled[k] = 1;
+  }
+  let faceCount = 0;
+  for (let v = 0; v < cells.length; v++) {
+    const k = cells[v]!;
+    let mask = 0;
+    for (let f = 0; f < 6; f++) {
+      if (filled[k + faceOffsets[f]!]) continue;
+      mask |= 1 << f;
+      faceCount++;
+    }
+    faces[v] = mask;
+  }
+  return { section, raw, filled, cells, faces, faceOffsets, faceCount, px, pxy };
+}
+
+function buildPartGeometry(sections: readonly VoxelSection[], shape: Readonly<VoxelShape>): BufferGeometry {
+  const grids = sections.map(sectionGrid);
+  let vertexCount = 0;
+  for (const grid of grids) vertexCount += grid.faceCount * 4;
+  // Count visible faces first: write GPU-ready arrays directly, without growing and then copying five JS arrays.
+  const positions = new Float32Array(vertexCount * 3);
+  const normals = new Float32Array(vertexCount * 3);
+  const pindices = new Float32Array(vertexCount);
+  const occlusion = new Float32Array(vertexCount);
+  const indices = vertexCount > 65535 ? new Uint32Array((vertexCount / 4) * 6) : new Uint16Array((vertexCount / 4) * 6);
+  let vertex = 0;
+  let index = 0;
+  for (const grid of grids) addSection(grid);
   const geometry = new BufferGeometry();
-  geometry.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3));
-  geometry.setAttribute('normal', new BufferAttribute(new Float32Array(normals), 3));
-  geometry.setAttribute('pindex', new BufferAttribute(new Float32Array(pindices), 1));
-  geometry.setAttribute('occlusion', new BufferAttribute(new Float32Array(occlusion), 1));
-  geometry.setIndex(indices);
+  geometry.setAttribute('position', new BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new BufferAttribute(normals, 3));
+  geometry.setAttribute('pindex', new BufferAttribute(pindices, 1));
+  geometry.setAttribute('occlusion', new BufferAttribute(occlusion, 1));
+  geometry.setIndex(new BufferAttribute(indices, 1));
   geometry.computeBoundingSphere();
   return geometry;
 
-  function addSection(section: VoxelSection) {
-    const raw = decodeBase64(section.voxels);
+  function addSection({ section, raw, filled, cells, faces, faceOffsets, px, pxy }: SectionGrid) {
     // Each section has its own normal table; models such as the Rhino mix them (see voxelNormals.ts).
     const table = normalTableFor(sectionNormalsMode(section, raw));
     const [sx, sy, sz] = section.size;
-    // Dense occupancy with a two-voxel empty border, so every lookup below (neighbours of a face's outside voxel
-    // included) stays in range without bounds checks.
-    const px = sx + 4;
-    const py = sy + 4;
-    const pxy = px * py;
-    const cell = (x: number, y: number, z: number) => x + 2 + px * (y + 2 + py * (z + 2));
-    const filled = new Uint8Array(pxy * (sz + 4));
-    for (let i = 0; i < raw.length; i += 5) filled[cell(raw[i]!, raw[i + 1]!, raw[i + 2]!)] = 1;
     const step0 = (section.maxBounds[0] - section.minBounds[0]) / Math.max(1, sx);
     const step1 = (section.maxBounds[1] - section.minBounds[1]) / Math.max(1, sy);
     const step2 = (section.maxBounds[2] - section.minBounds[2]) / Math.max(1, sz);
     const m = section.transform;
-
-    // Surface-nets corner offsets (voxel units), cached per lattice corner so neighbouring faces stay watertight.
+    const relax = shape.cornerRelax;
     const cx1 = sx + 1;
-    const cy1 = sy + 1;
-    const cornerDone = new Uint8Array(cx1 * cy1 * (sz + 1));
-    const cornerOff = new Float32Array(cornerDone.length * 3);
-    const cornerOffset = (cx: number, cy: number, cz: number): number => {
-      const k = cx + cx1 * (cy + cy1 * cz);
-      if (cornerDone[k]) return k * 3;
-      let n = 0;
-      let ax = 0;
-      let ay = 0;
-      let az = 0;
-      const o = cell(cx - 1, cy - 1, cz - 1);
-      const v = (dx: number, dy: number, dz: number) => filled[o + dx + px * dy + pxy * dz];
-      for (let a = 0; a < 2; a++) {
-        for (let b = 0; b < 2; b++) {
-          if (v(0, a, b) !== v(1, a, b)) {
-            ay += a - 0.5;
-            az += b - 0.5;
-            n++;
-          }
-          if (v(a, 0, b) !== v(a, 1, b)) {
-            ax += a - 0.5;
-            az += b - 0.5;
-            n++;
-          }
-          if (v(a, b, 0) !== v(a, b, 1)) {
-            ax += a - 0.5;
-            ay += b - 0.5;
-            n++;
-          }
-        }
-      }
-      if (n) {
-        cornerOff[k * 3] = ax / n;
-        cornerOff[k * 3 + 1] = ay / n;
-        cornerOff[k * 3 + 2] = az / n;
-      }
+    const cxy = cx1 * (sy + 1);
+    const cornerDone = new Uint8Array(cxy * (sz + 1));
+    // Adjacent faces share the same final position as well as the same rounded corner offset.
+    const cornerPositions = new Float32Array(cornerDone.length * 3);
+    const cornerOrigin = 1 + px + pxy;
+    const cornerPosition = (cx: number, cy: number, cz: number): number => {
+      const k = cx + cx1 * cy + cxy * cz;
+      const p = k * 3;
+      if (cornerDone[k]) return p;
+      const o = cornerOrigin + cx + px * cy + pxy * cz;
+      const mask =
+        filled[o]! |
+        (filled[o + 1]! << 1) |
+        (filled[o + px]! << 2) |
+        (filled[o + px + 1]! << 3) |
+        (filled[o + pxy]! << 4) |
+        (filled[o + pxy + 1]! << 5) |
+        (filled[o + pxy + px]! << 6) |
+        (filled[o + pxy + px + 1]! << 7);
+      const off = mask * 3;
+      const bxp = section.minBounds[0] + (cx + relax * CORNER_OFFSETS[off]!) * step0;
+      const byp = section.minBounds[1] + (cy + relax * CORNER_OFFSETS[off + 1]!) * step1;
+      const bzp = section.minBounds[2] + (cz + relax * CORNER_OFFSETS[off + 2]!) * step2;
+      const X = m[0]! * bxp + m[1]! * byp + m[2]! * bzp + m[3]!;
+      const Y = m[4]! * bxp + m[5]! * byp + m[6]! * bzp + m[7]!;
+      const Z = m[8]! * bxp + m[9]! * byp + m[10]! * bzp + m[11]!;
+      cornerPositions[p] = X * VOXEL_TO_WORLD;
+      cornerPositions[p + 1] = Z * VOXEL_TO_WORLD;
+      cornerPositions[p + 2] = -Y * VOXEL_TO_WORLD;
       cornerDone[k] = 1;
-      return k * 3;
+      return p;
     };
 
-    // Stored normals of exposed voxels, for neighbour blending (dense, by padded cell; unset = not exposed).
+    // Keep the original Float32 rounding before blending neighbouring stored normals.
     const exposedNormal = new Float32Array(filled.length * 3);
     const isExposed = new Uint8Array(filled.length);
-    for (let i = 0; i < raw.length; i += 5) {
-      const k = cell(raw[i]!, raw[i + 1]!, raw[i + 2]!);
-      if (filled[k + 1] && filled[k - 1] && filled[k + px] && filled[k - px] && filled[k + pxy] && filled[k - pxy])
-        continue;
-      const n = lookupNormal(table, raw[i + 4]!);
+    for (let v = 0; v < cells.length; v++) {
+      if (!faces[v]) continue;
+      const k = cells[v]!;
+      const n = lookupNormal(table, raw[v * 5 + 4]!);
       exposedNormal[k * 3] = n[0];
       exposedNormal[k * 3 + 1] = n[1];
       exposedNormal[k * 3 + 2] = n[2];
       isExposed[k] = 1;
     }
-    const neighbourOffsets = NEIGHBOURS.map(([dx, dy, dz]) => dx + px * dy + pxy * dz);
-    const neighbourWeights = NEIGHBOURS.map(([dx, dy, dz]) => voxelShape.normalBlend / Math.hypot(dx, dy, dz));
-    const relax = voxelShape.cornerRelax;
+    const neighbourOffsets = new Int32Array(26);
+    const neighbourWeights = new Float64Array(26);
+    for (let j = 0; j < neighbourOffsets.length; j++) {
+      const t = j * 3;
+      neighbourOffsets[j] = NEIGHBOURS[t]! + px * NEIGHBOURS[t + 1]! + pxy * NEIGHBOURS[t + 2]!;
+      neighbourWeights[j] = shape.normalBlend / NEIGHBOUR_DISTANCE[j]!;
+    }
+    const aoOffsets = new Int32Array(6 * 4 * 2);
+    for (let j = 0; j < aoOffsets.length; j++) {
+      const t = j * 3;
+      aoOffsets[j] = FACE_AO[t]! + px * FACE_AO[t + 1]! + pxy * FACE_AO[t + 2]!;
+    }
 
-    for (let i = 0; i < raw.length; i += 5) {
+    for (let v = 0; v < cells.length; v++) {
+      const mask = faces[v]!;
+      // Fully internal voxels contribute neither vertices nor normals to exposed-neighbour blending.
+      if (!mask) continue;
+      const i = v * 5;
       const vx = raw[i]!;
       const vy = raw[i + 1]!;
       const vz = raw[i + 2]!;
       const c = raw[i + 3]!;
       const own = lookupNormal(table, raw[i + 4]!);
-      const k = cell(vx, vy, vz);
+      const k = cells[v]!;
       let bx = own[0];
       let by = own[1];
       let bz = own[2];
@@ -287,33 +402,38 @@ function buildPartGeometry(sections: readonly VoxelSection[]): BufferGeometry {
       const nx0 = rx / nl;
       const ny0 = rz / nl;
       const nz0 = -ry / nl;
-      for (let f = 0; f < FACES.length; f++) {
-        const face = FACES[f]!;
-        const outside = k + FACE_OFFSET[f]!(px, pxy);
-        if (filled[outside]) continue;
-        const base = positions.length / 3;
+      for (let f = 0; f < 6; f++) {
+        if (!(mask & (1 << f))) continue;
+        const outside = k + faceOffsets[f]!;
+        const base = vertex;
         for (let corner = 0; corner < 4; corner++) {
-          const [cx, cy, cz] = face.corners[corner]!;
-          const o = cornerOffset(vx + cx, vy + cy, vz + cz);
-          const bxp = section.minBounds[0] + (vx + cx + relax * cornerOff[o]!) * step0;
-          const byp = section.minBounds[1] + (vy + cy + relax * cornerOff[o + 1]!) * step1;
-          const bzp = section.minBounds[2] + (vz + cz + relax * cornerOff[o + 2]!) * step2;
-          const X = m[0]! * bxp + m[1]! * byp + m[2]! * bzp + m[3]!;
-          const Y = m[4]! * bxp + m[5]! * byp + m[6]! * bzp + m[7]!;
-          const Z = m[8]! * bxp + m[9]! * byp + m[10]! * bzp + m[11]!;
-          positions.push(X * VOXEL_TO_WORLD, Z * VOXEL_TO_WORLD, -Y * VOXEL_TO_WORLD);
-          // The engine lights a voxel by its stored normal, not its cube faces: this keeps the smooth retail look.
-          normals.push(nx0, ny0, nz0);
-          pindices.push(c);
-          // Corner ambient occlusion: the two edge neighbours and the diagonal one, just outside this face.
-          const [u, w] = FACE_AO[f]![corner]!;
-          const s1 = filled[outside + u[0] + px * u[1] + pxy * u[2]]!;
-          const s2 = filled[outside + w[0] + px * w[1] + pxy * w[2]]!;
-          const sc = filled[outside + u[0] + w[0] + px * (u[1] + w[1]) + pxy * (u[2] + w[2])]!;
+          const cornerIndex = f * 4 + corner;
+          const t = cornerIndex * 3;
+          const o = cornerPosition(vx + FACE_CORNERS[t]!, vy + FACE_CORNERS[t + 1]!, vz + FACE_CORNERS[t + 2]!);
+          const p = vertex * 3;
+          positions[p] = cornerPositions[o]!;
+          positions[p + 1] = cornerPositions[o + 1]!;
+          positions[p + 2] = cornerPositions[o + 2]!;
+          // The engine lights a voxel by its stored normal, not its cube faces: keep the smooth retail look.
+          normals[p] = nx0;
+          normals[p + 1] = ny0;
+          normals[p + 2] = nz0;
+          pindices[vertex] = c;
+          const u = aoOffsets[cornerIndex * 2]!;
+          const w = aoOffsets[cornerIndex * 2 + 1]!;
+          const s1 = filled[outside + u]!;
+          const s2 = filled[outside + w]!;
+          const sc = filled[outside + u + w]!;
           const level = s1 && s2 ? 0 : 3 - (s1 + s2 + sc);
-          occlusion.push(1 - AO_LEVELS[level]!);
+          occlusion[vertex] = 1 - AO_LEVELS[level]!;
+          vertex++;
         }
-        indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+        indices[index++] = base;
+        indices[index++] = base + 1;
+        indices[index++] = base + 2;
+        indices[index++] = base;
+        indices[index++] = base + 2;
+        indices[index++] = base + 3;
       }
     }
   }
@@ -323,8 +443,8 @@ function buildPartGeometry(sections: readonly VoxelSection[]): BufferGeometry {
  * Shared material for callers that pass one to instantiateVoxel. Geometries carry their own palette material (see
  * vpl.ts); this one is used only for geometries that lack it.
  */
-export function createVoxelMaterial(): MeshStandardNodeMaterial {
-  return voxelMaterialFor(null);
+export function createVoxelMaterial(nodes?: AtmosphereNodes): MeshStandardNodeMaterial {
+  return voxelMaterialFor(null, nodes);
 }
 /** Voxel light level relative to the flat-ground noon level: 1 shows exactly the table colours at clear noon. */
 export const VOXEL_FILL = 1;

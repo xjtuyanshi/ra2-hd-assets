@@ -38,8 +38,9 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
-import { objectLight, referenceLevel, sceneBrightness } from './atmosphere';
+import { DEFAULT_ATMOSPHERE_NODES, objectLight } from './atmosphere';
 import type { LightField } from './lightField';
+import { DirtyAttribute } from './dirtyAttribute';
 import type { ShaderNode } from './tsl';
 
 const FIREBALLS = 96;
@@ -115,6 +116,7 @@ class ParticlePool {
   /** First slot written since the last flush, and how many slots (capped at the pool size). */
   private dirtyFrom = 0;
   private dirtyCount = 0;
+  private readonly attributes: readonly InstancedBufferAttribute[];
   /** Seconds (effect clock) at which the last spawned particle dies; the pool draws nothing after that. */
   until = -Infinity;
 
@@ -129,6 +131,7 @@ class ParticlePool {
     this.velocity = new InstancedBufferAttribute(new Float32Array(count * 3), 3);
     // x = size, y = lifetime, z = seed, w = per-pool extra (smoke: soot; sparks: garnish; garnish fire: ground cover)
     this.params = new InstancedBufferAttribute(new Float32Array(count * 4), 4);
+    this.attributes = [this.start, this.origin, this.velocity, this.params];
     this.material = material;
     this.mesh = new InstancedMesh(geometry, material, count);
     this.mesh.frustumCulled = false;
@@ -150,10 +153,14 @@ class ParticlePool {
   /** Upload what spawns wrote since the last flush. */
   flush(): void {
     if (this.dirtyCount === 0) return;
-    for (const attribute of [this.start, this.origin, this.velocity, this.params]) {
+    const count = this.dirtyCount;
+    const size = this.start.count;
+    const from = count >= size ? 0 : this.dirtyFrom;
+    const first = Math.min(count, size - from);
+    for (const attribute of this.attributes) {
       attribute.clearUpdateRanges();
-      for (const [from, count] of dirtySpans(this.dirtyFrom, this.dirtyCount, this.start.count))
-        attribute.addUpdateRange(from * attribute.itemSize, count * attribute.itemSize);
+      attribute.addUpdateRange(from * attribute.itemSize, first * attribute.itemSize);
+      if (first < count) attribute.addUpdateRange(0, (count - first) * attribute.itemSize);
       attribute.needsUpdate = true;
     }
     this.dirtyCount = 0;
@@ -242,10 +249,11 @@ export class EffectsLayer {
   private readonly fireEmit = new Map<string, number>();
   /** Every pool, in draw order. */
   private readonly pools: readonly ParticlePool[];
+  private readonly zeroVelocity = new Vector3();
   /** Seconds of camera shake still pending, scaled by explosion size (the live view never shakes). */
   shake = 0;
 
-  constructor() {
+  constructor(readonly nodes = DEFAULT_ATMOSPHERE_NODES) {
     const quad = new PlaneGeometry(1, 1);
 
     this.fireballs = new ParticlePool(FIREBALLS, quad, additive(), (pool) => {
@@ -349,7 +357,9 @@ export class EffectsLayer {
         // Unlit smoke follows the scene's light level (1 at clear noon) and glows near fires and explosions, lit from
         // below at half the light's saturation (objectLight), so a blast next to water never paints it deep red.
         // Soot glows more from the fire under it (lit from below).
-        const lit = sceneBrightness.add(objectLight(positionWorld.xz).div(referenceLevel).mul(float(0.5).add(soot)));
+        const lit = this.nodes.sceneBrightness.add(
+          objectLight(positionWorld.xz, this.nodes).div(this.nodes.referenceLevel).mul(float(0.5).add(soot)),
+        );
         // Neutral greys like the original smoke art (anim.pal 68..137, R = G = B); soot is near black.
         const grey = mix(mix(color(0x3a3a3a), color(0x858585), seed), color(0x141210), soot);
         const shade = grey.mul(mix(float(1.6), float(0.9), smoothstep(0, 0.25, t))).mul(lit);
@@ -765,13 +775,11 @@ export class EffectsLayer {
    * short light at its target.
    */
   setBeams(now: number, beams: readonly BeamSpec[]): void {
-    const segments: [Vector3, Vector3, Vector3][] = [];
+    this.beams.setBeams(beams);
     const light = GARNISH_LIGHTS.beam;
-    for (const beam of beams) {
-      const pieces = beamSegments(beam.from, beam.to, beam.bolt, beam.seed);
-      // A bolt's first strand is white, the other two take its colour, like the engine's white and blue lines.
-      const perStrand = beam.bolt ? pieces.length / 3 : Infinity;
-      pieces.forEach(([a, b], i) => segments.push([a, b, i < perStrand ? WHITE : beam.colour]));
+    // Only the last 256 pulses survive the light field's flash ring. Avoid processing discarded pulses.
+    for (let i = Math.max(0, beams.length - BEAM_LIGHTS); i < beams.length; i++) {
+      const beam = beams[i]!;
       const { x, y, z } = beam.colour;
       const max = Math.max(x, y, z, 1e-3);
       this.lightField?.pulse(
@@ -785,7 +793,6 @@ export class EffectsLayer {
         'flash',
       );
     }
-    this.beams.set(segments);
   }
 
   /** Beam segments drawn at the moment (diagnostics and tests). */
@@ -795,7 +802,7 @@ export class EffectsLayer {
 
   /** A projectile whose art is unknown: a small grey dot for one presented frame. */
   bulletDot(now: number, at: Vector3): void {
-    this.dots.spawn(now, at, new Vector3(), 3 / (60 / Math.SQRT2), 0.034);
+    this.dots.spawn(now, at, this.zeroVelocity, 3 / (60 / Math.SQRT2), 0.034);
   }
 
   /** Shake the camera (super weapons only). */
@@ -873,8 +880,9 @@ export function beamSegments(
   return out;
 }
 
-const BEAM_SEGMENTS = 4096;
-const WHITE = new Vector3(1, 1, 1);
+export const BEAM_SEGMENTS = 4096;
+/** Only this many beam pulses survive the light field's flash ring, regardless of the source beam count. */
+export const BEAM_LIGHTS = 256;
 /** Glow width of a beam segment (world units, about 2.5 engine pixels) and its white-hot core, as a fraction. */
 const BEAM_WIDTH = 0.06;
 const BEAM_CORE = 0.42;
@@ -887,18 +895,16 @@ const BEAM_CORE = 0.42;
  */
 export class BeamLayer {
   readonly mesh: InstancedMesh;
-  private readonly from = new InstancedBufferAttribute(new Float32Array(BEAM_SEGMENTS * 3), 3);
-  private readonly to = new InstancedBufferAttribute(new Float32Array(BEAM_SEGMENTS * 3), 3);
-  private readonly colour = new InstancedBufferAttribute(new Float32Array(BEAM_SEGMENTS * 3), 3);
+  private readonly buffer = new BeamSegmentBuffer();
 
   constructor(cameraRight: ShaderNode, cameraUp: ShaderNode) {
     const material = additive();
     // The quad's winding depends on the segment's direction on screen (the side vector is a cross product), so half of
     // all segments would face away from the camera: draw both sides.
     material.side = DoubleSide;
-    const a: ShaderNode = instancedBufferAttribute(this.from, 'vec3');
-    const b: ShaderNode = instancedBufferAttribute(this.to, 'vec3');
-    const tint: ShaderNode = instancedBufferAttribute(this.colour, 'vec3');
+    const a: ShaderNode = instancedBufferAttribute(this.buffer.from, 'vec3');
+    const b: ShaderNode = instancedBufferAttribute(this.buffer.to, 'vec3');
+    const tint: ShaderNode = instancedBufferAttribute(this.buffer.colour, 'vec3');
     const width = float(BEAM_WIDTH);
     const span: ShaderNode = length(b.sub(a)).max(1e-5);
     material.positionNode = Fn(() => {
@@ -934,17 +940,93 @@ export class BeamLayer {
     if (n === 0 && this.mesh.count === 0) return;
     for (let i = 0; i < n; i++) {
       const [p, q, c] = segments[i]!;
-      this.from.setXYZ(i, p.x, p.y, p.z);
-      this.to.setXYZ(i, q.x, q.y, q.z);
-      this.colour.setXYZ(i, c.x, c.y, c.z);
+      this.buffer.from.setXYZ(i, p.x, p.y, p.z);
+      this.buffer.to.setXYZ(i, q.x, q.y, q.z);
+      this.buffer.colour.setXYZ(i, c.x, c.y, c.z);
     }
-    for (const attribute of [this.from, this.to, this.colour]) {
-      attribute.clearUpdateRanges();
-      if (n > 0) attribute.addUpdateRange(0, n * 3);
-      attribute.needsUpdate = n > 0;
-    }
+    this.buffer.flush();
     this.mesh.count = n;
     this.mesh.visible = n > 0;
+  }
+
+  /** Stream only the fixed-capacity visible prefix; long/many bolts never allocate discarded geometry. */
+  setBeams(beams: readonly BeamSpec[]): void {
+    this.buffer.set(beams);
+    this.buffer.flush();
+    this.mesh.count = this.buffer.count;
+    this.mesh.visible = this.buffer.count > 0;
+  }
+}
+
+/** Reusable beam geometry, exactly matching beamSegments up to the renderer's existing capacity. */
+export class BeamSegmentBuffer {
+  readonly from = new DirtyAttribute(new Float32Array(BEAM_SEGMENTS * 3), 3);
+  readonly to = new DirtyAttribute(new Float32Array(BEAM_SEGMENTS * 3), 3);
+  readonly colour = new DirtyAttribute(new Float32Array(BEAM_SEGMENTS * 3), 3);
+  count = 0;
+  private seed = 0;
+
+  private random(): number {
+    this.seed = (this.seed + 0x6d2b79f5) >>> 0;
+    let t = this.seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  set(beams: readonly BeamSpec[]): void {
+    let n = 0;
+    for (let beamIndex = 0; beamIndex < beams.length && n < BEAM_SEGMENTS; beamIndex++) {
+      const { from, to, colour, bolt, seed } = beams[beamIndex]!;
+      if (!bolt) {
+        this.from.setXYZ(n, from.x, from.y, from.z);
+        this.to.setXYZ(n, to.x, to.y, to.z);
+        // Preserve the existing straight beam's white strand (its target light carries the beam colour).
+        this.colour.setXYZ(n++, 1, 1, 1);
+        continue;
+      }
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const dz = to.z - from.z;
+      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const pieces = Math.max(1, Math.round(distance / BOLT_STEP));
+      const inverseSide = 1 / (Math.sqrt(dz * dz + dx * dx) || 1);
+      const sideX = dz * inverseSide;
+      const sideZ = -dx * inverseSide;
+      this.seed = seed >>> 0;
+      for (let strand = 0; strand < 3 && n < BEAM_SEGMENTS; strand++) {
+        let ax = from.x;
+        let ay = from.y;
+        let az = from.z;
+        const white = strand === 0;
+        for (let i = 1; i <= pieces && n < BEAM_SEGMENTS; i++) {
+          const t = i / pieces;
+          let bx = dx * t + from.x;
+          let by = dy * t + from.y;
+          let bz = dz * t + from.z;
+          if (i < pieces) {
+            const jitter = (this.random() - 0.5) * BOLT_JITTER;
+            bx += sideX * jitter;
+            bz += sideZ * jitter;
+            by += (this.random() - 0.5) * BOLT_JITTER;
+          }
+          this.from.setXYZ(n, ax, ay, az);
+          this.to.setXYZ(n, bx, by, bz);
+          this.colour.setXYZ(n, white ? 1 : colour.x, white ? 1 : colour.y, white ? 1 : colour.z);
+          n++;
+          ax = bx;
+          ay = by;
+          az = bz;
+        }
+      }
+    }
+    this.count = n;
+  }
+
+  flush(): void {
+    this.from.flush();
+    this.to.flush();
+    this.colour.flush();
   }
 }
 

@@ -36,21 +36,10 @@ import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
 import { sharpen } from 'three/addons/tsl/display/SharpenNode.js';
 import {
+  AtmosphereNodes,
   DEFAULT_ATMOSPHERE,
+  DEFAULT_ATMOSPHERE_NODES,
   DEFAULT_ATMOSPHERE_SETTINGS,
-  lightFieldScale,
-  lightFieldSize,
-  lightFieldTexture,
-  moonDesaturation,
-  moonNeutral,
-  night as nightNode,
-  rainAmount as rainNode,
-  referenceLevel,
-  sceneBrightness,
-  sceneLevel,
-  surfaceSize,
-  surfaceTexture,
-  windowGain,
   type AtmosphereSettings,
   type FrameAtmosphere,
 } from './atmosphere';
@@ -61,14 +50,14 @@ import { LightField, type DynamicLight } from './lightField';
 import { Lighting, noonFlatLuminance } from './lighting';
 import { Mist, MIST_CAP } from './mist';
 import { ObjectLayer } from './objects';
-import { faithfulDisplay, faithfulToneMap } from './post';
+import { faithfulToneMap } from './post';
 import { buildTerrain, type TerrainBuild } from './terrain';
 import type { ShaderNode } from './tsl';
 import { buildWater, type WaterUniforms } from './water';
 import { buildRain, type RainSystem } from './weather';
-import { VOXEL_FILL, voxelFill } from './ra2/voxels';
+import { VOXEL_FILL } from './ra2/voxels';
 import { groundFromHeights, setShadowGround } from './ra2/voxelShadow';
-import { voxelDebug } from './ra2/vpl';
+import { voxelLightingFor } from './ra2/vpl';
 import type { HdWorld } from './ra2/world';
 import { IsoCamera, LEVEL_HEIGHT, cellToWorld } from './world';
 
@@ -234,12 +223,17 @@ export class HdRenderer {
   private readonly lighting: Lighting;
   private readonly objects = new ObjectLayer();
   /** HD effects; live views spawn into it from the game's own effect list. */
-  readonly effects = new EffectsLayer();
+  readonly effects: EffectsLayer;
   /** Lamp heads and wet-ground reflections. */
-  readonly emitters = new EmitterLayer();
+  readonly emitters: EmitterLayer;
   /** Every local light as irradiance on the ground; created in init() once the map size is known. */
   lightField!: LightField;
-  private readonly mist = new Mist();
+  private readonly mist: Mist;
+  /** Existing public layers retain their shader nodes if init() adopts a world loaded later. */
+  private readonly layerNodes: AtmosphereNodes;
+  /** Shader inputs owned by this renderer and its world materials. */
+  nodes: AtmosphereNodes;
+  private disposed = false;
   /** Whether the current pipeline composites the mist (rebuilt when the mist starts or stops). */
   private mistInPipeline = false;
   /**
@@ -295,8 +289,18 @@ export class HdRenderer {
   constructor(
     readonly canvas: HTMLCanvasElement,
     initial: RenderState,
-    options: { forceWebGL?: boolean; requiredLimits?: Record<string, number>; trackTimestamp?: boolean } = {},
+    options: {
+      forceWebGL?: boolean;
+      requiredLimits?: Record<string, number>;
+      trackTimestamp?: boolean;
+      nodes?: AtmosphereNodes;
+    } = {},
   ) {
+    this.nodes = options.nodes ?? new AtmosphereNodes();
+    this.layerNodes = this.nodes;
+    this.effects = new EffectsLayer(this.layerNodes);
+    this.emitters = new EmitterLayer(this.layerNodes);
+    this.mist = new Mist(this.layerNodes);
     this.state = initial;
     this.trackTimestamp = options.trackTimestamp ?? false;
     this.renderer = new WebGPURenderer({
@@ -333,6 +337,8 @@ export class HdRenderer {
   /** Build the scene from the procedural state, or from an original map when `world` is given. */
   async init(world?: HdWorld): Promise<void> {
     await this.renderer.init();
+    const worldNodes = world ? (world.nodes ?? world.cache?.nodes ?? DEFAULT_ATMOSPHERE_NODES) : this.nodes;
+    this.nodes = worldNodes;
     this.scene.background = new Color(0x0b0c0e);
     let waterY: number | null;
     if (world) {
@@ -344,7 +350,7 @@ export class HdRenderer {
       this.view.target.copy(world.focus);
     } else {
       const map = this.state.map;
-      this.terrain = buildTerrain(map);
+      this.terrain = buildTerrain(map, this.nodes);
       this.bounds = { width: map.width, height: map.height };
       waterY = map.waterLevel * LEVEL_HEIGHT;
       this.scene.add(this.objects.root);
@@ -363,22 +369,25 @@ export class HdRenderer {
       this.water = water;
       this.scene.add(water.mesh);
     }
-    this.rain = buildRain(this.bounds.width, this.bounds.height, this.terrain.heightTexture, this.waterY);
-    referenceLevel.value = this.lighting.referenceIrradiance();
+    this.rain = buildRain(this.bounds.width, this.bounds.height, this.terrain.heightTexture, this.waterY, this.nodes);
+    this.nodes.referenceLevel.value = this.lighting.referenceIrradiance();
     this.lightField = new LightField(this.bounds.width, this.bounds.height, {
       halfFloat: LightField.supportsHalfFloat(this.renderer),
+      nodes: this.nodes,
     });
     this.effects.attachLightField(this.lightField);
     if (world?.surfaceTexture) {
-      surfaceTexture.value = world.surfaceTexture;
-      surfaceSize.value.set(world.width, world.height);
+      this.nodes.surfaceTexture.value = world.surfaceTexture;
+      this.nodes.surfaceSize.value.set(world.width, world.height);
     }
+    if (this.layerNodes !== this.nodes) this.layerNodes.copyValuesFrom(this.nodes);
     // Flat-ground irradiance at clear noon (day keys never depend on the map's profile): the day exposure's white point.
     this.lighting.update(12, 0);
     this.lighting.flatIrradianceColor(this.noonIrradiance);
     this.scene.add(this.terrain.mesh, this.lighting.root, this.effects.root, this.rain.object, this.emitters.root);
     world?.dressing?.attach({
       scene: this.scene,
+      nodes: this.nodes,
       lightField: this.lightField,
       emitters: this.emitters,
       reference: this.lighting.referenceIrradiance(),
@@ -440,7 +449,7 @@ export class HdRenderer {
     this.pipeline = new RenderPipeline(this.renderer);
     // Anti-aliasing and sharpening run on the display-referred image.
     this.pipeline.outputColorTransform = false;
-    voxelDebug.value = debugView === 'voxel-xy' ? 1 : debugView === 'voxel-z' ? 2 : 0;
+    voxelLightingFor(this.nodes).voxelDebug.value = debugView === 'voxel-xy' ? 1 : debugView === 'voxel-z' ? 2 : 0;
     if (debugView === 'overbright') {
       const luminance = dot(hdr.rgb.mul(this.exposure), vec3(0.2126, 0.7152, 0.0722));
       this.pipeline.outputNode = vec4(vec3(luminance.greaterThan(1).select(float(1), float(0))), 1);
@@ -520,11 +529,19 @@ export class HdRenderer {
   }
 
   /** The profile the lighting follows: the map's (with any night-level override), none for the procedural sandbox. */
+  private readonly adjustedProfile: AtmosphereProfile = { ...DEFAULT_ATMOSPHERE };
+
   private profile(): AtmosphereProfile | null {
     if (!this.world) return null;
     const profile = this.state.map.atmosphere ?? DEFAULT_ATMOSPHERE;
     const level = this.atmosphere.nightLevel;
-    return level === undefined ? profile : { ...profile, nightLevel: level };
+    if (level === undefined) return profile;
+    const adjusted = this.adjustedProfile;
+    adjusted.kind = profile.kind;
+    adjusted.hour = profile.hour;
+    adjusted.tint = profile.tint;
+    adjusted.nightLevel = level;
+    return adjusted;
   }
 
   frame(deltaSeconds: number): void {
@@ -544,7 +561,6 @@ export class HdRenderer {
       ? Math.min(1, wet.value + deltaSeconds * 0.25 * rainAmount)
       : Math.max(0, wet.value - deltaSeconds * 0.02);
 
-    this.bindSharedTextures();
     const profile = this.profile();
     this.lighting.setProfile(profile);
     this.lighting.follow(this.view.target);
@@ -561,8 +577,11 @@ export class HdRenderer {
     if (this.world) {
       const noon = this.noonIrradiance;
       const k = Math.PI * this.settings.exposure;
-      const mixed = (c: number) => k * (1 / c + (1 / reference - 1 / c) * nightGrade);
-      exposure.setRGB(mixed(noon.r), mixed(noon.g), mixed(noon.b));
+      exposure.setRGB(
+        k * (1 / noon.r + (1 / reference - 1 / noon.r) * nightGrade),
+        k * (1 / noon.g + (1 / reference - 1 / noon.g) * nightGrade),
+        k * (1 / noon.b + (1 / reference - 1 / noon.b) * nightGrade),
+      );
     } else {
       exposure.setScalar(this.settings.exposure * light.exposure);
     }
@@ -571,7 +590,7 @@ export class HdRenderer {
     const dayThreshold = BLOOM_THRESHOLD / Math.max(1e-3, (exposure.r + exposure.g + exposure.b) / 3);
     this.bloomThreshold.value = dayThreshold + (NIGHT_BLOOM_THRESHOLD - dayThreshold) * nightGrade;
     this.nightDisplay.value = nightGrade;
-    faithfulDisplay.value = this.settings.toneMapper === 'faithful' ? 1 - nightGrade : 0;
+    this.nodes.faithfulDisplay.value = this.settings.toneMapper === 'faithful' ? 1 - nightGrade : 0;
     // The map's own light by day ([Lighting] and light sources, mapLighting.ts); the night presentation owns maps staged
     // as night or dusk and the night hours of day maps.
     this.world?.mapLight?.setWeight(profile?.kind === 'day' ? 1 - light.night : 0);
@@ -588,15 +607,15 @@ export class HdRenderer {
     this.objects.night.value = light.night;
 
     // Shared atmosphere inputs (atmosphere.ts): scene light level, night, rain.
-    this.lighting.flatIrradianceColor(sceneLevel.value).multiplyScalar(1 / reference);
-    const level = sceneLevel.value;
-    sceneBrightness.value =
+    this.lighting.flatIrradianceColor(this.nodes.sceneLevel.value).multiplyScalar(1 / reference);
+    const level = this.nodes.sceneLevel.value;
+    this.nodes.sceneBrightness.value =
       ((0.2126 * level.r + 0.7152 * level.g + 0.0722 * level.b) * reference) / noonFlatLuminance();
-    nightNode.value = light.night;
-    rainNode.value = rainAmount;
-    moonDesaturation.value = NIGHT_DESATURATION * nightGrade;
+    this.nodes.night.value = light.night;
+    this.nodes.rainAmount.value = rainAmount;
+    this.nodes.moonDesaturation.value = NIGHT_DESATURATION * nightGrade;
     const levelLuminance = 0.2126 * level.r + 0.7152 * level.g + 0.0722 * level.b;
-    moonNeutral.value.setRGB(
+    this.nodes.moonNeutral.value.setRGB(
       levelLuminance / Math.max(1e-4, level.r),
       levelLuminance / Math.max(1e-4, level.g),
       levelLuminance / Math.max(1e-4, level.b),
@@ -608,7 +627,7 @@ export class HdRenderer {
     );
     this.staticGain = smooth(0.2, 0.8, light.night);
     this.emitters.lampGain.value = smooth(0.3, 0.8, light.night);
-    windowGain.value = this.atmosphere.windows ? smooth(WINDOW_NIGHT[0], WINDOW_NIGHT[1], light.night) : 0;
+    this.nodes.windowGain.value = this.atmosphere.windows ? smooth(WINDOW_NIGHT[0], WINDOW_NIGHT[1], light.night) : 0;
     this.emitters.wet.value = wet.value;
     this.emitters.sync();
     // Mist: none on a clear day, a trace in day rain, a thin veil at night (thicker in night rain). Capped.
@@ -652,7 +671,9 @@ export class HdRenderer {
       this.lighting.flatIrradianceColor(sprites.light.value).multiplyScalar(spriteScale);
     }
     // Emissive light is not divided by pi like diffuse, so fill = irradiance * k / pi lands at k x albedo at noon.
-    this.lighting.flatIrradianceColor(voxelFill.value).multiplyScalar(VOXEL_FILL / Math.PI);
+    this.lighting
+      .flatIrradianceColor(voxelLightingFor(this.nodes).voxelFill.value)
+      .multiplyScalar(VOXEL_FILL / Math.PI);
 
     const frame = this.frameInfo;
     frame.now = now;
@@ -664,27 +685,12 @@ export class HdRenderer {
     frame.cameraUp.copy(up);
     frame.toCamera.copy(toCamera);
     this.world?.dressing?.update(frame);
+    if (this.layerNodes !== this.nodes) this.layerNodes.copyValuesFrom(this.nodes);
     this.lightField.update(now, this.renderer, this.staticGain);
     this.mirrorDynamicEmitters(now);
     this.pipeline!.render();
     this.frames++;
     if (this.trackTimestamp && this.frames % 2 === 0) void this.collectGpuTimes();
-  }
-
-  /**
-   * The light field and surface textures are module-level nodes every material samples; claim them for this renderer
-   * each frame, so two renderers alive at once (a live view replaced mid-load) never draw with the other's field.
-   */
-  private bindSharedTextures(): void {
-    lightFieldTexture.value = this.lightField.target.texture;
-    lightFieldSize.value.set(this.lightField.width, this.lightField.height);
-    lightFieldScale.value = this.lightField.encodeScale;
-    referenceLevel.value = this.lighting.referenceIrradiance();
-    const surface = this.world?.surfaceTexture;
-    if (surface) {
-      surfaceTexture.value = surface;
-      surfaceSize.value.set(this.world!.width, this.world!.height);
-    }
   }
 
   /** Fires and explosions also show as glows and wet reflections, mirrored from the light field. */
@@ -762,10 +768,10 @@ export class HdRenderer {
       emitters: this.emitters.staticEmitters,
       mist: this.mist.amount.value,
       wet: this.terrain.wetness.value,
-      rain: rainNode.value,
+      rain: this.nodes.rainAmount.value,
       pointLights,
-      sceneBrightness: sceneBrightness.value,
-      windowGain: windowGain.value,
+      sceneBrightness: this.nodes.sceneBrightness.value,
+      windowGain: this.nodes.windowGain.value,
       lampGain: this.emitters.lampGain.value,
       dressing: this.world?.dressing?.stats() ?? {},
       frameMs: summary(this.frameIntervals.slice(-300)),
@@ -803,6 +809,19 @@ export class HdRenderer {
    */
   windowsWanted(): boolean {
     return this.atmosphere.windows && this.lighting.nightAt(this.state.environment.timeOfDay) > WINDOW_NIGHT[0];
+  }
+
+  /** Release this renderer's shader resources and GPU targets; call once the view stops presenting. */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.pipeline?.dispose();
+    for (const node of this.pipelineNodes) node.dispose();
+    this.pipelineNodes.length = 0;
+    this.lightField?.dispose();
+    if (this.nodes !== DEFAULT_ATMOSPHERE_NODES) this.nodes.dispose();
+    if (this.layerNodes !== this.nodes && this.layerNodes !== DEFAULT_ATMOSPHERE_NODES) this.layerNodes.dispose();
+    this.renderer.dispose();
   }
 
   /** Ground point under a CSS-pixel position, for sandbox interaction. */

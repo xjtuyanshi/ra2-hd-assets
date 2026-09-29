@@ -1,6 +1,6 @@
+import { DirtyAttribute } from '../dirtyAttribute';
 import {
   Color,
-  InstancedBufferAttribute,
   InstancedMesh,
   MeshBasicNodeMaterial,
   NormalBlending,
@@ -31,10 +31,10 @@ import {
   vec4,
 } from 'three/tsl';
 import type { LightingClass, MapObject, SpriteFrame } from '../../../ra2-assets/src/manifest';
-import { moonlit, objectLight, referenceLevel, windowGain } from '../atmosphere';
+import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLight } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
-import { ra2Screen, screenToCell, type Ra2Cache } from './cache';
+import { type Ra2Cache } from './cache';
 import { objectLevelAt, srgbScale, terrainGradeAt } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
 
@@ -91,14 +91,14 @@ export class SpriteLayer {
   readonly cameraUp = uniform(new Vector3(0, 1, 0));
   readonly toCamera = uniform(new Vector3(0, 1, 0));
   readonly capacity: number;
-  private readonly anchor: InstancedBufferAttribute;
-  private readonly rect: InstancedBufferAttribute;
-  private readonly params: InstancedBufferAttribute;
+  private readonly anchor: DirtyAttribute;
+  private readonly rect: DirtyAttribute;
+  private readonly params: DirtyAttribute;
   /**
    * x: 0 = upright card, 1 = ground decal, 2 = shadow decal; y: object light; z: map lighting class (LIGHTING_CODE).
    * One buffer: WebGPU allows 8 vertex buffers.
    */
-  private readonly flags: InstancedBufferAttribute;
+  private readonly flags: DirtyAttribute;
 
   /** `capacity` > instances.length reserves room for setInstances (live objects). */
   constructor(
@@ -123,12 +123,14 @@ export class SpriteLayer {
      */
     windows: Texture | null = null,
   ) {
+    const nodes = cache.nodes ?? DEFAULT_ATMOSPHERE_NODES;
+    const { referenceLevel, windowGain } = nodes;
     this.capacity = Math.max(1, capacity, instances.length);
     const count = this.capacity;
-    this.anchor = new InstancedBufferAttribute(new Float32Array(count * 3), 3);
-    this.rect = new InstancedBufferAttribute(new Float32Array(count * 4), 4);
-    this.params = new InstancedBufferAttribute(new Float32Array(count * 4), 4);
-    this.flags = new InstancedBufferAttribute(new Float32Array(count * 3), 3);
+    this.anchor = new DirtyAttribute(new Float32Array(count * 3), 3);
+    this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
+    this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
+    this.flags = new DirtyAttribute(new Float32Array(count * 3), 3);
 
     const atlasSize = vec2(atlas.width, atlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
@@ -231,14 +233,14 @@ export class SpriteLayer {
       const down = select(flat, py, max(py, 0));
       const ground = aAnchor.xz.add(vec2(px.div(60).add(down.div(30)), down.div(30).sub(px.div(60))));
       const height = select(flat, float(0), max(py.negate(), 0).div(ppu));
-      const local: ShaderNode = objectLight(ground)
+      const local: ShaderNode = objectLight(ground, nodes)
         .div(referenceLevel)
         .mul(exp(height.mul(-0.45)));
       // The map's light, then the scene light on the night-desaturated colour (house paint keeps its colour) and local
       // lights on the full colour.
       const shade = (c: ShaderNode, paint: ShaderNode): ShaderNode => {
         const lit: ShaderNode = objectLit(c);
-        return mix(moonlit(lit), lit, paint).mul(this.light).add(lit.mul(local));
+        return mix(moonlit(lit, nodes), lit, paint).mul(this.light).add(lit.mul(local));
       };
       // Lit windows at night: warm amber panes (85 %) or a dimmer cool white (15 %) by the window's variant, each pane
       // with its own brightness; variants above 0.85 stay dark. Kept below the tone mapper's shoulder so panes stay
@@ -291,22 +293,24 @@ export class SpriteLayer {
 
   /** Replace every instance (up to `capacity`); cheap enough to call once per presented frame. */
   setInstances(instances: readonly SpriteInstance[]): void {
-    // Decals first, then shadows, then upright art, so later layers sit on top of earlier ones.
-    const layer = (s: SpriteInstance) => (s.flat ? 0 : s.shadow ? 1 : 2);
-    const ordered = [...instances].sort((a, b) => layer(a) - layer(b)).slice(0, this.capacity);
-    ordered.forEach((s, i) => {
-      this.anchor.setXYZ(i, s.anchor.x, s.anchor.y, s.anchor.z);
-      this.rect.setXYZW(i, s.frame.rect[0], s.frame.rect[1], s.frame.rect[2], s.frame.rect[3]);
-      this.params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], this.cache.paletteRow.get(s.palette) ?? 0, s.push);
-      this.flags.setXYZ(i, s.shadow ? 2 : s.flat ? 1 : 0, s.light ?? 1, LIGHTING_CODE[s.lighting ?? 'ambient']);
-    });
-    for (const attribute of [this.anchor, this.rect, this.params, this.flags]) attribute.needsUpdate = true;
-    this.mesh.count = ordered.length;
-    // Upload only the live range (instances past `count` are never drawn), not the whole capacity every frame.
-    for (const attribute of [this.anchor, this.rect, this.params, this.flags]) {
-      attribute.clearUpdateRanges();
-      attribute.addUpdateRange(0, Math.max(1, ordered.length) * attribute.itemSize);
+    // Stable three-way partition: the former stable sort's exact order, without a copied/sorted array.
+    let count = 0;
+    for (let rank = 0; rank < 3 && count < this.capacity; rank++) {
+      for (let j = 0; j < instances.length && count < this.capacity; j++) {
+        const s = instances[j]!;
+        if ((s.flat ? 0 : s.shadow ? 1 : 2) !== rank) continue;
+        const i = count++;
+        this.anchor.setXYZ(i, s.anchor.x, s.anchor.y, s.anchor.z);
+        this.rect.setXYZW(i, s.frame.rect[0], s.frame.rect[1], s.frame.rect[2], s.frame.rect[3]);
+        this.params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], this.cache.paletteRow.get(s.palette) ?? 0, s.push);
+        this.flags.setXYZ(i, s.shadow ? 2 : s.flat ? 1 : 0, s.light ?? 1, LIGHTING_CODE[s.lighting ?? 'ambient']);
+      }
     }
+    this.mesh.count = count;
+    this.anchor.flush();
+    this.rect.flush();
+    this.params.flush();
+    this.flags.flush();
   }
 }
 
@@ -314,9 +318,12 @@ export class SpriteLayer {
  * World anchor for a map object's engine draw point: the projected top corner of its cell plus `drawOffset`, lifted
  * back onto the ground plane at the object's level so the card sits where the engine draws it.
  */
-export function objectAnchor(object: MapObject): Vector3 {
-  const [sx, sy] = ra2Screen(object.x, object.y, object.z);
-  const [dx, dy] = object.drawOffset ?? [0, 15];
-  const [x, y] = screenToCell(sx + dx, sy + dy, object.z);
-  return new Vector3(x, object.z * LEVEL_HEIGHT, y);
+export function objectAnchor(object: MapObject, out = new Vector3()): Vector3 {
+  const sx = (object.x - object.y) * 30;
+  const sy = (object.x + object.y) * 15 - object.z * 15;
+  const dx = object.drawOffset?.[0] ?? 0;
+  const dy = object.drawOffset?.[1] ?? 15;
+  const diff = (sx + dx) / 30;
+  const sum = (sy + dy + object.z * 15) / 15;
+  return out.set((sum + diff) / 2, object.z * LEVEL_HEIGHT, (sum - diff) / 2);
 }

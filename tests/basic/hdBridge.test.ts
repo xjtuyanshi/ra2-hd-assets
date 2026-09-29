@@ -33,6 +33,7 @@ function battle(frame: number, fileName = 'XMP29U2.MAP'): GameRenderState {
     houses: [],
     objects: [],
     shroud: null,
+    overlays: null,
     effects: null,
   } as unknown as GameRenderState;
 }
@@ -116,6 +117,31 @@ afterEach(() => {
 });
 
 describe('HD 桥状态机', () => {
+  it('forwards live overlays and the local house without copying the cell arrays', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    const state = battle(3);
+    state.localHouse = 2;
+    state.overlays = {
+      originX: 1,
+      originY: 2,
+      width: 2,
+      height: 1,
+      index: new Int16Array([0, -1]),
+      data: new Uint8Array([7, 0]),
+      types: ['GAWALL'],
+      revision: 3,
+    };
+    harness.setState(state);
+    await advance(16);
+    const pushed = view.push.mock.calls.at(-1)![0];
+    expect(pushed.localHouse).toBe(2);
+    expect(pushed.overlays).toBe(state.overlays);
+    harness.setState({ ...state, frame: 4, overlays: null });
+    await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].overlays).toBeNull();
+    harness.stop();
+  });
   it('游戏接受直通：只让键色透明，关闭后键色保留一小段再清除', async () => {
     const harness = setup();
     const view = await goLive(harness);

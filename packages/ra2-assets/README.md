@@ -294,14 +294,16 @@ for the omitted companion path; arbitrary external paths retain the main-checkou
 ## Type library (`<out>/_library/`)
 
 `hd:library` resolves every id of rulesmd `[BuildingTypes]`, `[VehicleTypes]`, `[InfantryTypes]` and
-`[AircraftTypes]` through the same art code as the map extractor (`src/node/artSource.ts`) and writes, per theater:
+`[AircraftTypes]`, plus every `[OverlayTypes]` entry with art, through the same art code as the map extractor
+(`src/node/artSource.ts`) and writes, per theater:
 
 - `<theater>/library.json` (`TypeLibrary`): one `LibraryType` per resolved type id (kind, sprite or voxel id,
   foundation, draw offset from the live reader's lepton coordinate, lighting class, remap flag, the atlas pages it
   uses) with building layers (ActiveAnim..Four, IdleAnim, SpecialAnim, SuperAnim, ProductionAnim, war factory door
   anims, their damaged variants, offsets, ZAdjust/YSort/Powered, anim timing), bibs, buildup anims and voxel turrets;
   infantry `Sequence=` tables; SHP vehicle frame layouts; the runtime colour scheme array; ConditionYellow/Red;
-  `extractor.warnings` naming every skipped type and why.
+  `extractor.warnings` naming every skipped type and why. `overlays` maps ids to sprite ids, body-frame counts,
+  palette, Wall/Tiberium flags, draw offsets, flat/lighting rules and remap; `OverlayData` selects the frame directly.
 - `<theater>/sprites-<n>.png`: single-channel indexed atlas pages (value = palette index, 0 = transparent), each at
   most 4096x4096. Every body/anim/bib frame is exported with its shadow frame. A sprite's frames are packed together
   (types need one or two pages), so renderers can load pages lazily; `SpriteFrame.page` selects the page.
@@ -310,6 +312,25 @@ for the omitted companion path; arbitrary external paths retain the main-checkou
   SHP units in 8 facings, owner colour DarkRed, type ids in a 3x5 font).
 - `common/voxels/<ID>.json`: voxel models (`VoxelModel`, as in the map cache) shared by all theaters; library.json
   refers to them as `../common/voxels/<ID>.json`.
+
+Add or refresh only overlay art in an existing library, without extracting units or rewriting existing atlas pages:
+
+```bash
+pnpm hd:library -- --game "$YR_INSTALL" --out "$HD_CACHE/_library" --theater urban --only overlays
+```
+
+The existing theater/version must match. This appends `sprites-overlays-<n>.png` pages and replaces the `overlays`
+records and their sprite references. Existing TechnoTypes, voxel paths, colour schemes, palettes, sprite frames,
+HD page references and the original `extractor` diagnostics are preserved; only missing palettes are written.
+New page slots have no HD reference until processed by `hd:sprites`. `overlayExtractor` records this append's
+counts and missing-art warnings. Repeated runs append new pages; old pages remain intact for existing references.
+The library JSON is replaced only after the new files exist. A failed extraction can leave unreferenced new files
+but retains the old JSON. `--only overlays` requires an existing library and does not run `--preview`.
+
+Ore and gems use the theater palette; walls use the unit palette with the current player's remap. In the pinned
+YR 1.001 executable, `DrawOverlay` tests `Wall` at `0x47F96A` and reads the current player's colour scheme at
+`0x47F9B2`; the wall-owner field is not the remap source. Other overlays use the iso palette. Shared draw rules keep
+ordinary overlays at the cell top corner, rocks at `[0, 15]`, and high bridges at `[0, -60]`.
 
 Colour schemes: YR 1.001 builds its runtime ColorScheme array with two consecutive schemes per rules `[Colors]`
 entry in file order, and `HouseClass::ColorSchemeIndex` points at the second one (2k + 1). This was read from the

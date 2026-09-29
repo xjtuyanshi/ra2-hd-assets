@@ -21,6 +21,8 @@ export interface GameRenderState {
   objects: GameRenderObject[];
   /** The local player's per-cell shroud (and fog), null while it cannot be read. */
   shroud: GameRenderShroud | null;
+  /** Live cell decorations, null while unavailable (the renderer may use its static map cache). */
+  overlays: GameRenderOverlays | null;
   /** Live effects the engine is playing, null while they cannot be read. */
   effects: GameRenderEffects | null;
 }
@@ -83,6 +85,20 @@ export interface GameRenderShroud {
   height: number;
   /** GAME_RENDER_SHROUD value per cell, row-major: cells[(y - originY) * width + (x - originX)]. */
   cells: Uint8Array;
+}
+
+export interface GameRenderOverlays {
+  originX: number;
+  originY: number;
+  width: number;
+  height: number;
+  /** Row-major type indices into `types`; -1 means no overlay. */
+  index: Int16Array;
+  /** Native sprite frame (growth/connection state), in the same cell order. */
+  data: Uint8Array;
+  types: string[];
+  /** Increases when published content changes, including a new battle, for this reader's lifetime. */
+  revision: number;
 }
 
 export interface GameRenderAnim extends GameRenderPoint {

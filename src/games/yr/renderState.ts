@@ -2,12 +2,14 @@ import type { GuestMemory } from '../../vm86/win32';
 import type {
   GameRenderEffects,
   GameRenderObject,
+  GameRenderOverlays,
   GameRenderShroud,
   GameRenderState,
   GameRenderStateReader,
 } from '../renderState';
 import { createByteViewAccessor, type GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { createYrEffectsReader, type ReadYrEffectsOptions, type YrEffects } from './effectsReader';
+import { createYrOverlayReader, type ReadYrOverlayOptions, type YrOverlays } from './overlayReader';
 import { createYrShroudReader, type ReadYrShroudOptions, type YrShroud } from './shroudReader';
 import {
   YR_STATE_GLOBALS,
@@ -22,7 +24,7 @@ import {
 
 /**
  * YR 1.001 implementation of the game-neutral render-state contract (src/games/renderState.ts) for the HD bridge. It
- * combines the state, shroud and effects readers and projects their output onto the fields the external renderer
+ * combines the state, shroud, overlay and effects readers and projects their output onto the fields the external renderer
  * consumes; everything else the readers report (reader statistics, house names, weapon and warhead ids, voxel debris,
  * fire events) stays here. HD bridge only: src/games/yr/runtimeHooks.ts loads this module on demand in development
  * builds.
@@ -40,7 +42,12 @@ export interface YrRenderStateSources {
   /** Called on first use inside a battle, because the shroud reader validates tables the loaded image fills in. */
   createShroudReader: () => ((options?: ReadYrShroudOptions) => YrShroud | null) | null;
   createEffectsReader: () => ((options?: ReadYrEffectsOptions) => YrEffects | null) | null;
+  createOverlayReader: () => ((options?: ReadYrOverlayOptions) => YrOverlays | null) | null;
+  /** Host polling clock only; never changes the guest's clock or logic frame. */
+  now?: () => number;
 }
+
+export const YR_OVERLAY_POLL_MS = 250;
 
 /** Guarded factory over the live guest memory; null unless the image is the pinned YR 1.001 build. */
 export function createYrRenderStateReader(
@@ -56,28 +63,60 @@ export function createYrRenderStateReader(
     readState: () => readState(),
     createShroudReader: () => createYrShroudReader(accessor, hash),
     createEffectsReader: () => createYrEffectsReader(accessor, hash),
+    createOverlayReader: () => createYrOverlayReader(accessor, hash),
   });
 }
 
 export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): GameRenderStateReader {
   let readShroud: ReturnType<YrRenderStateSources['createShroudReader']> = null;
   let readEffects: ReturnType<YrRenderStateSources['createEffectsReader']> = null;
+  let readOverlays: ReturnType<YrRenderStateSources['createOverlayReader']> = null;
   let lastKey: number[] | null = null;
   let last: GameRenderState | null = null;
   // The shroud reader fills this result's arrays in place. It is never handed out, so reusing it is safe whether the
   // snapshot is structured-cloned to another thread or used directly on this one.
   let scratch: YrShroud | null = null;
   let shroud: GameRenderShroud | null = null;
+  let overlayScratch: YrOverlays | null = null;
+  let overlays: GameRenderOverlays | null = null;
+  let overlayRevision = 0;
+  let lastOverlayPoll = -Infinity;
+  const now = sources.now ?? (() => performance.now());
   return () => {
     const key = readChangeKey(sources.memory);
-    if (last && key && lastKey && sameKey(key, lastKey)) return last;
+    const at = now();
+    const overlayDue = at - lastOverlayPoll >= YR_OVERLAY_POLL_MS;
+    const unchangedKey = key && lastKey && sameKey(key, lastKey);
+    if (last && unchangedKey && (!last.map || !overlayDue)) return last;
     const state = sources.readState();
     if (!state) {
       last = lastKey = null;
+      overlayScratch = overlays = null;
+      lastOverlayPoll = -Infinity;
       return null;
     }
     let effects: GameRenderEffects | null = null;
     if (state.map) {
+      const newBattle =
+        !last?.map ||
+        state.map.fileName !== last.map.fileName ||
+        (key && lastKey && (key[1] !== lastKey[1] || key[0]! < lastKey[0]!));
+      if (newBattle) {
+        overlayScratch = overlays = null;
+        lastOverlayPoll = -Infinity;
+      }
+      if (newBattle || overlayDue) {
+        readOverlays ??= sources.createOverlayReader();
+        const previousRevision = overlayScratch?.revision;
+        overlayScratch = readOverlays?.({ reuse: overlayScratch }) ?? null;
+        if (!overlayScratch) overlays = null;
+        else if (!overlays || overlayScratch.revision !== previousRevision) {
+          overlays = publishOverlays(overlayScratch, ++overlayRevision);
+        }
+        lastOverlayPoll = at;
+      }
+      // A due overlay poll need not republish the rest of a paused/unchanged battlefield.
+      if (last && !newBattle && unchangedKey && overlays === last.overlays) return last;
       readShroud ??= sources.createShroudReader();
       readEffects ??= sources.createEffectsReader();
       scratch = readShroud?.({ reuse: scratch }) ?? null;
@@ -85,6 +124,9 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
       // fireWindow 0 skips the per-techno fire scan: the renderer does not use fire events.
       const read = readEffects?.({ fireWindow: 0 });
       effects = read ? projectEffects(read) : null;
+    } else {
+      overlayScratch = overlays = null;
+      lastOverlayPoll = -Infinity;
     }
     last = {
       frame: state.frame,
@@ -94,10 +136,25 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
       localHouse: state.localHouse,
       objects: state.objects.map(projectObject),
       shroud: state.map ? shroud : null,
+      overlays,
       effects,
     };
     lastKey = key;
     return last;
+  };
+}
+
+/** Scratch arrays never escape to a main-thread consumer or a Worker message. Copy only changed publications. */
+function publishOverlays(read: YrOverlays, revision: number): GameRenderOverlays {
+  return {
+    originX: read.originX,
+    originY: read.originY,
+    width: read.width,
+    height: read.height,
+    index: read.index.slice(),
+    data: read.data.slice(),
+    types: read.types.slice(),
+    revision,
   };
 }
 

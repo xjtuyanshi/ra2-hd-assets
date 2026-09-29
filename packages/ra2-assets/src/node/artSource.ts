@@ -18,6 +18,8 @@ import type { IniFile, IniSection, ShpFile, VxlFile } from 'ra2-formats';
 import type { SpriteEntry, SpriteFrame, VoxelModel, VoxelPart } from '../manifest.ts';
 import { chooseAtlasWidth, packShelves, packShelvesPaged } from '../atlas.ts';
 import { animTimingArt, artFileCandidates, resolveArtFile, splitShadowHalf } from '../art.ts';
+import { drawOffsetFor } from '../iso.ts';
+import type { LibraryOverlay } from '../library.ts';
 import type { TheaterInfo } from '../theater.ts';
 import type { GameInstall } from './install.ts';
 
@@ -118,6 +120,28 @@ export class ArtSource {
       theaterExt: this.theater.ext,
       theaterLetter: this.theater.newTheaterLetter,
     });
+  }
+
+  /**
+   * Overlay art rules shared by map and live-library extraction. Draw offsets/lighting preserve the map extractor's
+   * conventions. YR 1.001 DrawOverlay tests Wall at 0x47F96A and selects the current player's ColorSchemeIndex at
+   * 0x47F9B2; walls therefore use the unit palette with current-player remap, rather than WallOwnerIndex.
+   */
+  overlayArt(id: string): Omit<LibraryOverlay, 'sprite' | 'frames'> & { candidates: string[] } {
+    const { sec, image } = this.artOf(id);
+    const wall = this.rulesBool(id, 'Wall');
+    const tiberium = this.rulesBool(id, 'Tiberium');
+    const highBridge = /^(BRIDGE|BRIDGEB|RAILBRDG)[12]$/i.test(id);
+    return {
+      candidates: this.shpCandidates(image, sec),
+      palette: wall ? 'unit' : tiberium ? 'theater' : 'iso',
+      wall,
+      tiberium,
+      remap: wall,
+      flat: !wall && !highBridge && (tiberium || this.rulesBool(id, 'DrawFlat', true)),
+      drawOffset: highBridge ? [0, -60] : drawOffsetFor('overlay', { isARock: this.rulesBool(id, 'IsARock') }),
+      lighting: tiberium ? 'none' : wall ? 'ambient' : 'full',
+    };
   }
 
   /** An anim section (building layer, bib, buildup): its file candidates and timing. */

@@ -205,6 +205,7 @@ describe('WorkerVmClient RPC lifecycle', () => {
       localHouse: -1,
       objects: [],
       shroud: null,
+      overlays: null,
       effects: null,
     };
     const first = client.getRenderState();
@@ -213,6 +214,31 @@ describe('WorkerVmClient RPC lifecycle', () => {
     const second = client.getRenderState();
     worker.emit({ type: 'render-state-unchanged', requestId: requestId(worker, 'render-state') });
     await expect(second).resolves.toBe(snapshot);
+    const overlays = {
+      originX: 0,
+      originY: 0,
+      width: 1,
+      height: 1,
+      index: new Int16Array([0]),
+      data: new Uint8Array([3]),
+      types: ['GAWALL'],
+      revision: 1,
+    };
+    const gridState = { ...snapshot, overlays };
+    const full = client.getRenderState();
+    worker.emit({ type: 'render-state-reply', requestId: requestId(worker, 'render-state'), value: gridState });
+    await expect(full).resolves.toBe(gridState);
+    const { overlays: _grid, ...rest } = gridState;
+    const delta = client.getRenderState();
+    worker.emit({
+      type: 'render-state-overlays-unchanged',
+      requestId: requestId(worker, 'render-state'),
+      value: { ...rest, frame: 8 },
+    });
+    const updated = await delta;
+    expect(updated?.overlays).toBe(overlays);
+    expect(updated?.frame).toBe(8);
+    expect(gridState.frame).toBe(7);
     const outside = client.getRenderState();
     worker.emit({ type: 'render-state-reply', requestId: requestId(worker, 'render-state'), value: null });
     await expect(outside).resolves.toBeNull();
@@ -241,6 +267,7 @@ describe('WorkerVmClient RPC lifecycle', () => {
       localHouse: -1,
       objects: [],
       shroud: null,
+      overlays: null,
       effects: null,
     };
     const late = client.getRenderState();

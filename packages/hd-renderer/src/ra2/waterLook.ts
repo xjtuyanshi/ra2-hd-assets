@@ -20,7 +20,7 @@ import {
   vec2,
   vec3,
 } from 'three/tsl';
-import { moonlit, night, sceneBrightness } from '../atmosphere';
+import { DEFAULT_ATMOSPHERE_NODES, moonlit } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import type { WaterUniforms } from '../waterShading';
 
@@ -129,7 +129,8 @@ const caustics = Fn(([p]: [ShaderNode]): ShaderNode => {
   return pow(float(1).sub(min(a, b)), 5);
 });
 
-export function waterLook(inputs: WaterLookInputs): WaterLook {
+export function waterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_NODES): WaterLook {
+  const { night, sceneBrightness } = nodes;
   const { position: p, shore, waterness, art, uniforms } = inputs;
   const depth = max(shore, 0);
   const normal: ShaderNode = waveNormal(p.xz, uniforms.wind, uniforms.rain);
@@ -165,7 +166,9 @@ export function waterLook(inputs: WaterLookInputs): WaterLook {
   const sky = mix(uniforms.skyHorizon, uniforms.skyZenith, smoothstep(0.0, 0.6, r.y)).mul(skyLevel);
   // At night the mirrored scene is graded like the moonlit land (desaturated, a little darker), so a reddish cliff
   // over blue water never smears magenta.
-  const reflected = inputs.reflection ? moonlit(inputs.reflection.colour).mul(mix(float(1), float(0.8), night)) : null;
+  const reflected = inputs.reflection
+    ? moonlit(inputs.reflection.colour, nodes).mul(mix(float(1), float(0.8), night))
+    : null;
   const mirrored = reflected && inputs.reflection ? mix(sky, reflected, inputs.reflection.coverage) : sky;
   // Tight, sparse sun glints only; a broad sheen is what reads as plastic.
   const sunDot = max(dot(r, uniforms.sunDirection), 0);

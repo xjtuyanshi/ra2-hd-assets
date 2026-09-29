@@ -267,8 +267,15 @@ export class VmWorkerController {
             this.post({ type: 'render-state-unchanged', requestId: message.requestId });
             break;
           }
+          const sameOverlays = value?.overlays && value.overlays === this.lastRenderState?.overlays;
           this.lastRenderState = value;
-          this.post({ type: 'render-state-reply', requestId: message.requestId, value });
+          if (value && sameOverlays) {
+            // Moving units do not require cloning the much slower-changing cell grid on every logic frame.
+            const { overlays: _overlays, ...rest } = value;
+            this.post({ type: 'render-state-overlays-unchanged', requestId: message.requestId, value: rest });
+          } else {
+            this.post({ type: 'render-state-reply', requestId: message.requestId, value });
+          }
           break;
         }
         case 'diagnostics':

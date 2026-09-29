@@ -1,13 +1,4 @@
-import {
-  BoxGeometry,
-  Color,
-  Group,
-  Mesh,
-  MeshStandardNodeMaterial,
-  Object3D,
-  type Texture,
-  Vector3,
-} from 'three/webgpu';
+import { BoxGeometry, Color, Group, Mesh, MeshStandardNodeMaterial, type Texture, Vector3 } from 'three/webgpu';
 import { mapAtmosphere, medianHeight, sidecarAtmosphere } from '../../../ra2-assets/src/lights';
 import type { AtmosphereSettings } from '../atmosphere';
 import { HOUSE_COLORS, RENDER_STATE_VERSION, type RenderState, type Weather } from '../contract';
@@ -19,7 +10,7 @@ import type { WindowBuilding } from '../ra2/nightDressing';
 import { sequenceFrame } from '../../../ra2-assets/src/art';
 import type { MapObject } from '../../../ra2-assets/src/manifest';
 import type { TheaterId } from '../../../ra2-assets/src/theater';
-import { addHousePalettes, paletteFor, ra2Screen, screenToCell, type Ra2Cache } from '../ra2/cache';
+import { addHousePalettes, paletteFor, type Ra2Cache } from '../ra2/cache';
 import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from '../ra2/sprites';
 import { loadRa2World, type HdWorld } from '../ra2/world';
 import { LEVEL_HEIGHT } from '../world';
@@ -28,10 +19,14 @@ import { EffectSpriteLayer, animAlpha, type EffectInstance } from './effectSprit
 import { LiveEffectsDriver, smokeOnVehicle, type LiveAnim, type LiveEffects } from './effects';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
+import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
 import { Projectiles } from './projectiles';
 import { shpUnitPose, shpUnitFrame } from './shpUnits';
+import { SpritePool } from './spritePool';
 import { ShroudLayer, type ShroudCells } from './shroud';
 import { VoxelUnits, type VoxelUnit } from './voxelUnits';
+
+export type { LiveOverlayCells } from './overlays';
 
 /**
  * Live view: draws a running original match (read from game memory by the host page) with the HD renderer, framed
@@ -99,11 +94,15 @@ export interface LiveSnapshot {
   /** Engine screen pixel of the tactical view's top-left corner. */
   view: { x: number; y: number } | null;
   houses: LiveHouse[];
+  /** Local player's house index; native walls use this house's colour scheme. */
+  localHouse?: number;
   objects: LiveObject[];
   /** The local player's per-cell visibility (see ShroudLayer), when the host can read it. */
   shroud?: ShroudCells | null;
   /** The engine's live effects (anims, projectiles, particle systems, beams), when the host reads them. */
   effects?: LiveEffects | null;
+  /** Full live overlay grid; null/absent or a legacy library without overlay art keeps map-cache overlays. */
+  overlays?: LiveOverlayCells | null;
   /** Bridge (H3): runtime overlay/smudge cells. */
   cells?: LiveCells | null;
 }
@@ -144,8 +143,7 @@ export interface LiveDiagnostics {
   /** Measured logic frames per second. */
   logicFps: number;
   /**
-   * False while the host has reported no overlay/smudge cells (bridge H3): ore, walls and craters are then the map's
-   * initial state, not the match's.
+   * True when live overlays or the legacy overlay/smudge bridge are active. Smudges still need the legacy bridge.
    */
   cellsFromEngine: boolean;
 }
@@ -193,7 +191,7 @@ interface Timed {
 interface Visual {
   type: string;
   paletteKey: string;
-  root: Object3D;
+  root: Group;
   turret?: Group;
   /** How it is drawn: a 3D voxel model, sprites from the map cache or the type library, or nothing (no art). */
   mode: 'voxel' | 'map-sprite' | 'library-sprite' | 'placeholder';
@@ -231,6 +229,9 @@ type CellSprite = SpriteInstance & { lighting?: MapObject['lighting'] };
 
 /** Sprite instances per atlas: 'map' for the map cache's atlas, page numbers for type library pages. */
 type SpriteBatch = Map<'map' | number, SpriteInstance[]>;
+const EMPTY_SPRITES: readonly SpriteInstance[] = [];
+const EMPTY_LAYERS: readonly LibraryAnimLayer[] = [];
+const EMPTY_IDS: readonly string[] = [];
 
 /**
  * A sprite instance with its object light: ra2/sprites.ts multiplies the art by `light` (SpriteInstance.light, 1 when
@@ -334,9 +335,14 @@ export function fallbackLayer(layer: Pick<LibraryAnimLayer, 'key'>, storesOre: b
 }
 
 /** Refinery-like layer set (a numbered ActiveAnim series such as NAREFNL1..L4), for when the rules flag is unknown. */
+const STORAGE_LAYERS = new WeakMap<readonly Pick<LibraryAnimLayer, 'key' | 'sprite'>[], boolean>();
 export function looksLikeStorage(layers: readonly Pick<LibraryAnimLayer, 'key' | 'sprite'>[]): boolean {
+  const known = STORAGE_LAYERS.get(layers);
+  if (known !== undefined) return known;
   const series = layers.filter((l) => /^ActiveAnim(Two|Three|Four)?$/.test(l.key)).map((l) => l.sprite);
-  return series.length > 1 && series.every((s, i) => new RegExp(`${i + 1}$`).test(s));
+  const result = series.length > 1 && series.every((s, i) => new RegExp(`${i + 1}$`).test(s));
+  STORAGE_LAYERS.set(layers, result);
+  return result;
 }
 
 /**
@@ -360,11 +366,31 @@ export class LiveView {
   private previous: Timed | null = null;
   private current: Timed | null = null;
   private readonly visuals = new Map<number, Visual>();
+  private readonly spriteBatch: SpriteBatch = new Map();
+  private readonly spritePool = new SpritePool();
+  private readonly cellPool = new SpritePool();
+  private readonly cellInstances: CellSprite[] = [];
+  private readonly effectInstances: EffectInstance[] = [];
+  private readonly pose: Pose = { x: 0, y: 0, z: 0, facing: 0 };
+  private readonly shpPose: ReturnType<typeof shpUnitPose> = { state: 'stand', step: 0 };
+  private readonly hidden = (x: number, y: number, z: number): boolean => this.shroud.isLocationShrouded(x, y, z);
+  private readonly effectPalette = (resolved: ResolvedAnim, owner: number | undefined): string =>
+    this.animPalette(resolved, owner);
+  private readonly buildingAnimMatches = new Map<number, LiveAnim[]>();
+  private objectsFor: Timed | null = null;
+  private objectsAlpha = -1;
+  private objectsInterpolate = false;
+  private objectLibraryRevision = -1;
+  private objectArtRevision = -1;
+  private objectsWindows = false;
+  private effectArtRevision = -1;
   private readonly root = new Group();
   private readonly voxelUnits: VoxelUnits;
   private readonly placeholderGeometry = new BoxGeometry(1, 1, 1);
   private placeholderMaterial: MeshStandardNodeMaterial | null = null;
   private readonly housePalettes = new Set<number>();
+  private readonly housePaletteKeys = new Map<number, string>();
+  private readonly libraryPaletteKeys = new Map<string, string>();
   private readonly houseColour = new Map<number, number>();
   private readonly sprites: SpriteLayer;
   private readonly pageLayers = new Map<number, { layer: SpriteLayer; windows: boolean }>();
@@ -377,6 +403,14 @@ export class LiveView {
   private readonly cellLayer: SpriteLayer;
   private readonly cellObjects = new Map<number, MapObject[]>();
   private cellsDirty = true;
+  private readonly overlayInstances: OverlayInstanceCache;
+  private readonly overlayLayers = new Map<number, SpriteLayer>();
+  private readonly uploadedOverlays = new Map<number, readonly SpriteInstance[]>();
+  private overlayPagesDirty = false;
+  private snapshotOverlayRevision: number | undefined;
+  private readonly warnedOverlayTypes = new Set<string>();
+  private readonly warnedOverlayPages = new Set<number>();
+  private warnedOverlayLibrary = false;
   /** Whether the host has reported engine cells (bridge H3); without them ore and walls stay as the map started. */
   private cellsFromEngine = false;
   private warnedCells = false;
@@ -398,9 +432,8 @@ export class LiveView {
     cells: Map<number, [number, LiveAnim][]>;
     attached: Map<number, [number, LiveAnim][]>;
   } | null = null;
-  /** Snapshot whose effect cards are on screen, and whether some art was still loading when they were built. */
+  /** Snapshot whose effect cards are on screen; asynchronous art has its own revision. */
   private effectsFor: Timed | null = null;
-  private effectsPending = true;
   /**
    * Identity of the light-emitting and window-lit building sets last handed to the night dressing. Null until the
    * first snapshot, which always replaces the sidecar's map-placed sources (even when it has none).
@@ -479,6 +512,12 @@ export class LiveView {
     if (this.effectSprites) this.shareSpriteUniforms(this.effectSprites);
     for (const object of cache.manifest.objects)
       if (object.kind === 'overlay' || object.kind === 'smudge') this.cellList(object.x, object.y).push(object);
+    this.overlayInstances = new OverlayInstanceCache({
+      width: cache.manifest.grid.width,
+      height: cache.manifest.grid.height,
+      levels: cache.height,
+      exists: cache.exists,
+    });
   }
 
   static async create(canvas: HTMLCanvasElement, options: LiveViewOptions): Promise<LiveView> {
@@ -519,6 +558,7 @@ export class LiveView {
       },
     };
     const hd = new HdRenderer(canvas, state, {
+      nodes: world.nodes,
       forceWebGL: options.forceWebGL ?? false,
       requiredLimits: await HdRenderer.adapterLimits(),
     });
@@ -566,28 +606,52 @@ export class LiveView {
       current &&
       current.snapshot.frame === snapshot.frame &&
       current.snapshot.view?.x === snapshot.view?.x &&
-      current.snapshot.view?.y === snapshot.view?.y
+      current.snapshot.view?.y === snapshot.view?.y &&
+      current.snapshot.localHouse === snapshot.localHouse &&
+      this.snapshotOverlayRevision === snapshot.overlays?.revision
     )
       return;
+    this.snapshotOverlayRevision = snapshot.overlays?.revision;
     this.firstFrame ??= snapshot.frame;
     this.previous = current;
-    this.current = { snapshot, at, byUid: new Map(snapshot.objects.map((o) => [o.uid, o])) };
+    const byUid = new Map<number, LiveObject>();
+    for (const object of snapshot.objects) byUid.set(object.uid, object);
+    this.current = { snapshot, at, byUid };
+    this.objectsInterpolate = false;
+    if (current) {
+      for (const object of snapshot.objects) {
+        const before = current.byUid.get(object.uid);
+        if (
+          before &&
+          (before.x !== object.x ||
+            before.y !== object.y ||
+            before.z !== object.z ||
+            before.facingRaw !== object.facingRaw ||
+            before.turretFacingRaw !== object.turretFacingRaw)
+        ) {
+          this.objectsInterpolate = true;
+          break;
+        }
+      }
+    }
     for (const house of snapshot.houses) this.ensureHouse(house.colorIndex);
     this.houseColour.clear();
     for (const house of snapshot.houses) this.houseColour.set(house.index, house.colorIndex);
     const library = this.library;
     this.civilian = civilianHouses(snapshot, library ? (type) => !!library.type(type)?.building?.buildup : null);
     this.buildingAnims = indexBuildingAnims(snapshot.effects?.anims);
+    this.buildingAnimMatches.clear();
     if (snapshot.shroud) this.shroud.update(snapshot.shroud);
-    this.trackMotion(snapshot, current?.snapshot ?? null);
+    this.trackMotion(snapshot, current);
     // A damaged vehicle's smoke system sits on the vehicle (see smokeUnlimited).
     const vehicles = snapshot.objects.filter((o) => o.kind === 'vehicle');
     this.effectDriver.vehicleAt = (x, y, z) => smokeOnVehicle(vehicles, x, y, z);
     if (snapshot.effects) this.effectDriver.push(snapshot.effects, snapshot.frame, this.hd.seconds(), this.wind);
+    this.updateOverlays(snapshot);
     if (snapshot.cells) {
       this.cellsFromEngine = true;
       this.applyCells(snapshot.cells);
-    } else if (!this.cellsFromEngine && !this.warnedCells) {
+    } else if (!snapshot.overlays && !this.cellsFromEngine && !this.warnedCells) {
       this.warnedCells = true;
       console.warn(
         '[HD] the host reports no overlay/smudge cells (bridge H3): ore, walls and craters show the map as it started ' +
@@ -692,21 +756,43 @@ export class LiveView {
       // Draw one logic frame behind, blending towards the newest snapshot: smooth motion at any display rate.
       const alpha = previous ? Math.min(1, Math.max(0, (now - current.at) / interval)) : 1;
       this.applyCamera(previous?.snapshot.view ?? null, current.snapshot.view, alpha);
-      this.applyObjects(previous, current, alpha);
+      const libraryRevision = this.library?.revision ?? 0;
+      const artRevision = this.effectArt?.revision ?? 0;
+      const windows = this.hd.windowsWanted();
+      const objectAlpha = this.objectsInterpolate ? alpha : 1;
+      if (
+        this.objectsFor !== current ||
+        this.objectsAlpha !== objectAlpha ||
+        this.objectLibraryRevision !== libraryRevision ||
+        this.objectArtRevision !== artRevision ||
+        this.objectsWindows !== windows
+      ) {
+        this.applyObjects(previous, current, objectAlpha);
+        this.objectsFor = current;
+        this.objectsAlpha = objectAlpha;
+        this.objectLibraryRevision = libraryRevision;
+        this.objectArtRevision = artRevision;
+        this.objectsWindows = windows;
+      }
       // Effect cards change with the logic frame only: rebuilt per snapshot (and while art is still loading).
-      if (this.effectsFor !== current || this.effectsPending) {
+      if (this.effectsFor !== current || this.effectArtRevision !== artRevision) {
         this.effectsFor = current;
+        this.effectArtRevision = artRevision;
         this.applyEffects(current.snapshot);
       }
     }
     if (this.cellsDirty) this.flushCells();
+    if (this.overlayPagesDirty) this.flushOverlayPages();
     this.effectDriver.frame(this.hd.seconds(), this.wind);
     this.hd.frame(dt);
   }
 
   dispose(): void {
     this.hd.renderer.setAnimationLoop(null);
-    this.hd.renderer.dispose();
+    for (const layer of this.overlayLayers.values()) this.disposeOverlayLayer(layer);
+    this.overlayLayers.clear();
+    this.uploadedOverlays.clear();
+    this.hd.dispose();
     this.visuals.clear();
   }
 
@@ -733,7 +819,7 @@ export class LiveView {
       effectsWithoutArt: this.effectStats.missing,
       effectTypesWithoutArt: [...this.effectDriver.unknownTypes].sort(),
       logicFps: Math.round(this.effectDriver.logicFps * 10) / 10,
-      cellsFromEngine: this.cellsFromEngine,
+      cellsFromEngine: this.overlayInstances.active || this.cellsFromEngine,
     };
   }
 
@@ -743,13 +829,14 @@ export class LiveView {
     const x = jump || !from ? to.x : from.x + (to.x - from.x) * alpha;
     const y = jump || !from ? to.y : from.y + (to.y - from.y) * alpha;
     // The camera looks at the ground point (level 0) under the view's centre; orthographic, so height is irrelevant.
-    const [cx, cy] = screenToCell(x + this.viewWidth / 2, y + this.viewHeight / 2, 0);
-    this.hd.view.target.set(cx, 0, cy);
+    const diff = (x + this.viewWidth / 2) / 30;
+    const sum = (y + this.viewHeight / 2) / 15;
+    this.hd.view.target.set((sum + diff) / 2, 0, (sum - diff) / 2);
   }
 
   /** Logic-frame bookkeeping per object: first appearance, last move, last shot, death. */
-  private trackMotion(snapshot: LiveSnapshot, previous: LiveSnapshot | null): void {
-    const before = previous ? new Map(previous.objects.map((o) => [o.uid, o])) : null;
+  private trackMotion(snapshot: LiveSnapshot, previous: Timed | null): void {
+    const before = previous?.byUid;
     const fired = new Map((snapshot.effects?.fireEvents ?? []).map((e) => [e.uid, e.frame]));
     for (const object of snapshot.objects) {
       const visual = this.visuals.get(object.uid);
@@ -763,11 +850,11 @@ export class LiveView {
   }
 
   private applyObjects(previous: Timed | null, current: Timed, alpha: number): void {
-    const alive = new Set<number>();
     const frame = current.snapshot.frame;
-    const batch: SpriteBatch = new Map();
+    const batch = this.spriteBatch;
+    for (const list of batch.values()) list.length = 0;
+    this.spritePool.begin();
     for (const object of current.snapshot.objects) {
-      alive.add(object.uid);
       const colorIndex = this.houseColour.get(object.owner) ?? -1;
       const visual = this.visualFor(object, colorIndex, frame);
       // Anything standing under black shroud stays hidden, exactly as in the original (no peeking at enemy bases).
@@ -784,12 +871,11 @@ export class LiveView {
         : false;
       const t = near ? alpha : 1;
       const from = near ? before! : object;
-      const pose: Pose = {
-        x: lerp(from.x, object.x, t),
-        y: lerp(from.y, object.y, t),
-        z: lerp(from.z, object.z, t),
-        facing: lerpAngle16(from.facingRaw, object.facingRaw, t),
-      };
+      const pose = this.pose;
+      pose.x = lerp(from.x, object.x, t);
+      pose.y = lerp(from.y, object.y, t);
+      pose.z = lerp(from.z, object.z, t);
+      pose.facing = lerpAngle16(from.facingRaw, object.facingRaw, t);
       if (visual.mode === 'placeholder') {
         visual.root.position.set(
           pose.x / LEPTONS_PER_CELL,
@@ -812,18 +898,19 @@ export class LiveView {
         else this.libraryShpUnitSprites(object, pose, visual, batch, frame);
         continue;
       }
-      const unit = { root: visual.root as Group, turret: visual.turret };
+      const unit = visual;
       // Buildings are never turned (facing pi/2 is the identity rotation).
       if (object.kind === 'building') {
-        this.voxelUnits.pose(unit, { ...pose, facing: Math.PI / 2 }, null);
+        pose.facing = Math.PI / 2;
+        this.voxelUnits.pose(unit, pose, null);
         continue;
       }
       const turret = lerpAngle16(from.turretFacingRaw ?? from.facingRaw, object.turretFacingRaw ?? object.facingRaw, t);
       this.voxelUnits.pose(unit, pose, turret);
     }
-    for (const [uid, visual] of this.visuals) {
-      if (alive.has(uid)) continue;
-      this.root.remove(visual.root);
+    for (const uid of this.visuals.keys()) {
+      if (current.byUid.has(uid)) continue;
+      this.root.remove(this.visuals.get(uid)!.root);
       this.visuals.delete(uid);
     }
     this.flushSprites(batch);
@@ -831,27 +918,17 @@ export class LiveView {
 
   /** Native effect art: anims, smoke particles, projectiles and debris, on the logic frame of the newest snapshot. */
   private applyEffects(snapshot: LiveSnapshot): void {
-    this.effectsPending = false;
     if (!this.effectArt || !this.effectSprites) return;
-    const instances: EffectInstance[] = [];
-    this.effectStats = this.effectDriver.cards(
-      this.effectArt,
-      (resolved, owner) => this.animPalette(resolved, owner),
-      instances,
-    );
+    const instances = this.effectInstances;
+    instances.length = 0;
+    this.effectStats = this.effectDriver.cards(this.effectArt, this.effectPalette, instances);
     this.effectDriver.smokeCards(this.effectArt, instances);
     const effects = snapshot.effects;
     if (effects && this.projectiles)
-      this.projectiles.update(
-        effects.bullets,
-        effects.voxelAnims ?? [],
-        (x, y, z) => this.shroud.isLocationShrouded(x, y, z),
-        instances,
-      );
+      this.projectiles.update(effects.bullets, effects.voxelAnims ?? [], this.hidden, instances);
     if (effects) this.particleCards(effects, instances);
-    // Rebuild on later frames too while the sidecar or an atlas page is still loading (pages that failed are settled).
-    const complete = this.effectSprites.setInstances(instances, this.hd.seconds());
-    this.effectsPending = (!this.effectArt.ready && !this.effectArt.failed) || !complete;
+    // An async art revision, rather than every presentation frame, schedules the next rebuild.
+    this.effectSprites.setInstances(instances, this.hd.seconds());
   }
 
   /** Particles the host reports one by one (bridge): their ParticleType art. */
@@ -865,7 +942,7 @@ export class LiveView {
         if (!frame || frame.rect[2] <= 0) continue;
         const anim: LiveAnim = { id: 0, uid: 0, type: particle.type, ...particle };
         out.push({
-          anchor: leptonAnchor(anim.x, anim.y, anim.z, [0, 0]),
+          anchor: leptonAnchor(anim.x, anim.y, anim.z, 0, 0, this.spritePool.anchor()),
           frame,
           palette: 'fx:anim',
           // Particles (ParticleClass, not AnimClass) take their type's constant Translucency; none of the YR particle
@@ -900,13 +977,17 @@ export class LiveView {
    * were empty and stay empty are not touched (every setInstances uploads the layer's buffers).
    */
   private flushSprites(batch: SpriteBatch): void {
-    const map = batch.get('map') ?? [];
+    const map = batch.get('map') ?? EMPTY_SPRITES;
     if (map.length || this.sprites.mesh.count) this.sprites.setInstances(map);
-    for (const [key, instances] of batch) {
-      if (key === 'map') continue;
+    for (const key of batch.keys()) {
+      const instances = batch.get(key)!;
+      if (key === 'map' || !instances.length) continue;
       this.pageLayer(key)?.setInstances(instances);
     }
-    for (const [page, { layer }] of this.pageLayers) if (!batch.has(page) && layer.mesh.count) layer.setInstances([]);
+    for (const page of this.pageLayers.keys()) {
+      const layer = this.pageLayers.get(page)!.layer;
+      if (!batch.get(page)?.length && layer.mesh.count) layer.setInstances(EMPTY_SPRITES);
+    }
   }
 
   /** Sprite layer of a library page; negative keys (-1 - page) are the page's indexed-only layer (see queue). */
@@ -989,10 +1070,15 @@ export class LiveView {
     const sprites = library.library.sprites;
     const entry = sprites[type.sprite!];
     if (!entry) return false;
-    const owner = visual.paletteKey || undefined;
-    const palette = (art: { palette: string }) =>
-      paletteFor(this.cache, LIBRARY_PALETTE_PREFIX + art.palette, true, owner);
-    const anchor = leptonAnchor(object.x, object.y, object.z, type.drawOffset);
+
+    const anchor = leptonAnchor(
+      object.x,
+      object.y,
+      object.z,
+      type.drawOffset[0],
+      type.drawOffset[1],
+      this.spritePool.anchor(),
+    );
     const frame = snapshot.frame;
     const civilian = object.owner < 0 || this.civilian.has(object.owner);
 
@@ -1003,9 +1089,17 @@ export class LiveView {
       const shadow = make.shadows?.[buildup];
       const plain = !make.remap;
       if (shadow)
-        this.queue(batch, { anchor, frame: shadow, palette: palette(make), push: 0, shadow: true, flat: true }, plain);
+        this.queue(
+          batch,
+          this.spritePool.take(anchor, shadow, this.buildingPalette(make, visual.paletteKey), 0, true, true),
+          plain,
+        );
       if (mk && mk.rect[2] > 0)
-        this.queue(batch, { anchor, frame: mk, palette: palette(make), push: cardPush(mk), shadow: false }, plain);
+        this.queue(
+          batch,
+          this.spritePool.take(anchor, mk, this.buildingPalette(make, visual.paletteKey), cardPush(mk), false),
+          plain,
+        );
       return false;
     }
 
@@ -1016,70 +1110,122 @@ export class LiveView {
     if (bib && bibFrame)
       this.queue(
         batch,
-        { anchor, frame: bibFrame, palette: palette(bib), push: 0, shadow: false, flat: true },
+        this.spritePool.take(anchor, bibFrame, this.buildingPalette(bib, visual.paletteKey), 0, false, true),
         !bib.remap,
       );
     const shadow = entry.shadows?.[body];
     if (shadow)
       this.queue(
         batch,
-        { anchor, frame: shadow, palette: palette(entry), push: 0, shadow: true, flat: true },
+        this.spritePool.take(anchor, shadow, this.buildingPalette(entry, visual.paletteKey), 0, true, true),
         !entry.remap,
       );
     const bodyFrame = entry.frames[body];
     const push = bodyFrame ? cardPush(bodyFrame) : 0.03;
     if (bodyFrame && bodyFrame.rect[2] > 0)
-      this.queue(batch, { anchor, frame: bodyFrame, palette: palette(entry), push, shadow: false }, !entry.remap);
-
-    const layers = type.building?.layers ?? [];
-    const native = this.nativeBuildingAnims(object, type);
-    const drawLayer = (layer: LibraryAnimLayer, index: number | null) => {
-      const art = sprites[damaged && layer.damagedSprite ? layer.damagedSprite : layer.sprite];
-      if (!art?.frames.length) return;
-      const timing = this.effectArt?.anim(animId(layer.sprite))?.art;
-      const shown = Math.min(
-        art.frames.length - 1,
-        Math.max(
-          0,
-          index ?? layerFrame(layer, art.frames.length, frame, timing?.rateFrames, timing?.normalized ?? false),
-        ),
-      );
-      const layerFrameArt = art.frames[shown];
-      const layerAnchor = layer.offset
-        ? leptonAnchor(object.x, object.y, object.z, [
-            type.drawOffset[0] + layer.offset[0],
-            type.drawOffset[1] + layer.offset[1],
-          ])
-        : anchor;
-      // Art Shadow=yes layers (the derrick's pump, flags, radar dishes) cast their own shadow frames.
-      const layerShadow = layer.anim.shadow ? art.shadows?.[shown] : undefined;
-      if (layerShadow && layerShadow.rect[2] > 0)
-        this.queue(
-          batch,
-          { anchor: layerAnchor, frame: layerShadow, palette: palette(art), push: 0, shadow: true, flat: true },
-          !art.remap,
-        );
-      if (!layerFrameArt || layerFrameArt.rect[2] <= 0) return;
       this.queue(
         batch,
-        { anchor: layerAnchor, frame: layerFrameArt, palette: palette(art), push: push + 0.01, shadow: false },
-        !art.remap,
+        this.spritePool.take(anchor, bodyFrame, this.buildingPalette(entry, visual.paletteKey), push, false),
+        !entry.remap,
       );
-    };
+
+    const layers = type.building?.layers ?? EMPTY_LAYERS;
+    const native = this.nativeBuildingAnims(object, type);
+
     if (native) {
       // Bridge: exactly the layers the engine plays, at the engine's frame.
       for (const anim of native) {
-        const layer = layers.find((l) => l.sprite === `anim:${anim.type}` || l.damagedSprite === `anim:${anim.type}`);
-        if (layer) drawLayer(layer, anim.frame ?? null);
+        for (const layer of layers) {
+          if (animId(layer.sprite) !== anim.type && (!layer.damagedSprite || animId(layer.damagedSprite) !== anim.type))
+            continue;
+          this.buildingLayerSprites(object, visual, batch, frame, damaged, anchor, push, layer, anim.frame ?? null);
+          break;
+        }
       }
       return true;
     }
     const storesOre = this.effectArt?.storesOre(object.type) ?? looksLikeStorage(layers);
     for (const layer of layers) {
       if (!fallbackLayer(layer, storesOre)) continue;
-      drawLayer(layer, layerIdle(layer, object.type, civilian && object.owner >= 0) ? (layer.anim.start ?? 0) : null);
+      this.buildingLayerSprites(
+        object,
+        visual,
+        batch,
+        frame,
+        damaged,
+        anchor,
+        push,
+        layer,
+        layerIdle(layer, object.type, civilian && object.owner >= 0) ? (layer.anim.start ?? 0) : null,
+      );
     }
     return true;
+  }
+
+  private libraryPalette(palette: string): string {
+    let key = this.libraryPaletteKeys.get(palette);
+    if (!key) this.libraryPaletteKeys.set(palette, (key = LIBRARY_PALETTE_PREFIX + palette));
+    return key;
+  }
+
+  private buildingPalette(art: { palette: string }, owner: string): string {
+    return paletteFor(this.cache, this.libraryPalette(art.palette), true, owner || undefined);
+  }
+
+  private buildingLayerSprites(
+    object: LiveObject,
+    visual: Visual,
+    batch: SpriteBatch,
+    frame: number,
+    damaged: boolean,
+    anchor: Vector3,
+    push: number,
+    layer: LibraryAnimLayer,
+    index: number | null,
+  ): void {
+    const type = visual.libraryType!;
+    const sprites = this.library!.library.sprites;
+    const art = sprites[damaged && layer.damagedSprite ? layer.damagedSprite : layer.sprite];
+    if (!art?.frames.length) return;
+    const timing = this.effectArt?.anim(animId(layer.sprite))?.art;
+    const shown = Math.min(
+      art.frames.length - 1,
+      Math.max(
+        0,
+        index ?? layerFrame(layer, art.frames.length, frame, timing?.rateFrames, timing?.normalized ?? false),
+      ),
+    );
+    const layerFrameArt = art.frames[shown];
+    const layerAnchor = layer.offset
+      ? leptonAnchor(
+          object.x,
+          object.y,
+          object.z,
+          type.drawOffset[0] + layer.offset[0],
+          type.drawOffset[1] + layer.offset[1],
+          this.spritePool.anchor(),
+        )
+      : anchor;
+    // Art Shadow=yes layers (the derrick's pump, flags, radar dishes) cast their own shadow frames.
+    const layerShadow = layer.anim.shadow ? art.shadows?.[shown] : undefined;
+    if (layerShadow && layerShadow.rect[2] > 0)
+      this.queue(
+        batch,
+        this.spritePool.take(layerAnchor, layerShadow, this.buildingPalette(art, visual.paletteKey), 0, true, true),
+        !art.remap,
+      );
+    if (!layerFrameArt || layerFrameArt.rect[2] <= 0) return;
+    this.queue(
+      batch,
+      this.spritePool.take(
+        layerAnchor,
+        layerFrameArt,
+        this.buildingPalette(art, visual.paletteKey),
+        push + 0.01,
+        false,
+      ),
+      !art.remap,
+    );
   }
 
   /**
@@ -1100,7 +1246,7 @@ export class LiveView {
       if (!model) return;
       const key = paletteFor(
         this.cache,
-        LIBRARY_PALETTE_PREFIX + model.palette,
+        this.libraryPalette(model.palette),
         visual.libraryType!.remap,
         visual.paletteKey || undefined,
       );
@@ -1111,24 +1257,24 @@ export class LiveView {
     unit.root.visible = turretFacing !== null;
     if (turretFacing === null) return;
     const type = visual.libraryType!;
-    const at = leptonAnchor(object.x, object.y, object.z, [
+    const at = leptonAnchor(
+      object.x,
+      object.y,
+      object.z,
       type.drawOffset[0] + spec.offset[0],
       type.drawOffset[1] + spec.offset[1],
-    ]);
+      this.spritePool.anchor(),
+    );
     const body = this.library!.library.sprites[type.sprite!]?.frames[0];
     const push = (body ? cardPush(body) : 0.5) + TURRET_DEPTH;
     const toCamera = this.world.sprites?.toCamera.value;
     if (toCamera) at.addScaledVector(toCamera, push);
-    this.voxelUnits.pose(
-      unit,
-      {
-        x: at.x * LEPTONS_PER_CELL,
-        y: at.z * LEPTONS_PER_CELL,
-        z: (at.y / LEVEL_HEIGHT) * LEPTONS_PER_LEVEL,
-        facing: Math.PI / 2,
-      },
-      turretFacing,
-    );
+    const pose = this.pose;
+    pose.x = at.x * LEPTONS_PER_CELL;
+    pose.y = at.z * LEPTONS_PER_CELL;
+    pose.z = (at.y / LEVEL_HEIGHT) * LEPTONS_PER_LEVEL;
+    pose.facing = Math.PI / 2;
+    this.voxelUnits.pose(unit, pose, turretFacing);
   }
 
   /**
@@ -1138,6 +1284,8 @@ export class LiveView {
   private nativeBuildingAnims(object: LiveObject, type: LibraryType): LiveAnim[] | null {
     const index = this.buildingAnims;
     if (!index) return null;
+    const cached = this.buildingAnimMatches.get(object.uid);
+    if (cached) return cached;
     const [w, h] = type.foundation ?? [1, 1];
     const x0 = Math.floor(object.x / LEPTONS_PER_CELL);
     const y0 = Math.floor(object.y / LEPTONS_PER_CELL);
@@ -1145,7 +1293,9 @@ export class LiveView {
     for (let y = y0; y < y0 + h; y++)
       for (let x = x0; x < x0 + w; x++) for (const entry of index.cells.get(y * 4096 + x) ?? []) found.push(entry);
     // In the engine's list order, like the list itself.
-    return found.sort((a, b) => a[0] - b[0]).map(([, anim]) => anim);
+    const matched = found.sort((a, b) => a[0] - b[0]).map(([, anim]) => anim);
+    this.buildingAnimMatches.set(object.uid, matched);
+    return matched;
   }
 
   /**
@@ -1202,17 +1352,27 @@ export class LiveView {
     }
     const spriteFrame = entry.frames[index];
     if (!spriteFrame) return;
-    const anchor = leptonAnchor(pose.x, pose.y, pose.z, type.drawOffset);
+    const anchor = leptonAnchor(
+      pose.x,
+      pose.y,
+      pose.z,
+      type.drawOffset[0],
+      type.drawOffset[1],
+      this.spritePool.anchor(),
+    );
     const palette = paletteFor(
       this.cache,
-      LIBRARY_PALETTE_PREFIX + entry.palette,
+      this.libraryPalette(entry.palette),
       entry.remap && type.remap,
       visual.paletteKey || undefined,
     );
     const shadow = entry.shadows?.[index];
-    if (shadow) this.queue(batch, { anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
+    if (shadow) this.queue(batch, this.spritePool.take(anchor, shadow, palette, 0, true, true));
     const light = objectLight('infantry');
-    this.queue(batch, { anchor, frame: spriteFrame, palette, push: cardPush(spriteFrame), shadow: false, light });
+    this.queue(
+      batch,
+      this.spritePool.take(anchor, spriteFrame, palette, cardPush(spriteFrame), false, undefined, light),
+    );
   }
 
   /** SHP vehicles and aircraft (terror drone, squid, dolphin): directional frames per state (shpUnits.ts). */
@@ -1234,30 +1394,40 @@ export class LiveView {
       frame,
       moving,
       visual.firedFrame ?? null,
+      this.shpPose,
     );
     const index = Math.min(entry.frames.length - 1, shpUnitFrame(type.shpUnit, facing, state.state, state.step));
     const spriteFrame = entry.frames[index];
     if (!spriteFrame) return;
-    const anchor = leptonAnchor(pose.x, pose.y, pose.z, type.drawOffset);
+    const anchor = leptonAnchor(
+      pose.x,
+      pose.y,
+      pose.z,
+      type.drawOffset[0],
+      type.drawOffset[1],
+      this.spritePool.anchor(),
+    );
     const palette = paletteFor(
       this.cache,
-      LIBRARY_PALETTE_PREFIX + entry.palette,
+      this.libraryPalette(entry.palette),
       entry.remap && type.remap,
       visual.paletteKey || undefined,
     );
     const shadow = entry.shadows?.[index];
-    if (shadow && shadow.rect[2] > 0)
-      this.queue(batch, { anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
+    if (shadow && shadow.rect[2] > 0) this.queue(batch, this.spritePool.take(anchor, shadow, palette, 0, true, true));
     const light = objectLight(object.kind);
     if (spriteFrame.rect[2] > 0)
-      this.queue(batch, { anchor, frame: spriteFrame, palette, push: cardPush(spriteFrame), shadow: false, light });
+      this.queue(
+        batch,
+        this.spritePool.take(anchor, spriteFrame, palette, cardPush(spriteFrame), false, undefined, light),
+      );
   }
 
   /** A building whose art only the map cache has (library missing): the still frames the map extractor exported. */
   private mapBuildingSprites(object: LiveObject, visual: Visual, batch: SpriteBatch): void {
     const { manifest } = this.cache;
     const entry = manifest.sprites[visual.sprite!]!;
-    const anchor = leptonAnchor(object.x, object.y, object.z, [0, -15]);
+    const anchor = leptonAnchor(object.x, object.y, object.z, 0, -15, this.spritePool.anchor());
     const owner = visual.paletteKey || undefined;
     const frameIndex = object.health > CONDITION_YELLOW || entry.frames.length < 2 ? 0 : 1;
     const frame = entry.frames[frameIndex]!;
@@ -1266,36 +1436,33 @@ export class LiveView {
     const push = cardPush(frame);
     let list = batch.get('map');
     if (!list) batch.set('map', (list = []));
-    for (const underlay of entry.underlays ?? []) {
+    for (const underlay of entry.underlays ?? EMPTY_IDS) {
       const bib = manifest.sprites[underlay];
       if (bib?.frames[0])
-        list.push({
-          anchor,
-          frame: bib.frames[0],
-          palette: paletteFor(this.cache, bib.palette, true, owner),
-          push: 0,
-          shadow: false,
-          flat: true,
-        });
+        list.push(
+          this.spritePool.take(anchor, bib.frames[0], paletteFor(this.cache, bib.palette, true, owner), 0, false, true),
+        );
     }
     const shadow = entry.shadows?.[frameIndex];
-    if (shadow) list.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
-    list.push({ anchor, frame, palette, push, shadow: false });
-    for (const layer of entry.layers ?? []) {
+    if (shadow) list.push(this.spritePool.take(anchor, shadow, palette, 0, true, true));
+    list.push(this.spritePool.take(anchor, frame, palette, push, false));
+    for (const layer of entry.layers ?? EMPTY_IDS) {
       const art = manifest.sprites[layer];
       if (art?.frames[0])
-        list.push({
-          anchor,
-          frame: art.frames[0],
-          palette: paletteFor(this.cache, art.palette, true, owner),
-          push: push + 0.01,
-          shadow: false,
-        });
+        list.push(
+          this.spritePool.take(
+            anchor,
+            art.frames[0],
+            paletteFor(this.cache, art.palette, true, owner),
+            push + 0.01,
+            false,
+          ),
+        );
     }
   }
 
   private visualFor(object: LiveObject, colorIndex: number, frame: number): Visual {
-    const paletteKey = colorIndex >= 0 ? `live${colorIndex}` : '';
+    const paletteKey = this.housePaletteKeys.get(colorIndex) ?? '';
     const existing = this.visuals.get(object.uid);
     // Owner changes (capture, mind control) repaint the object; art that was still loading is retried.
     if (existing && existing.type === object.type && existing.paletteKey === paletteKey && !existing.pending)
@@ -1334,7 +1501,7 @@ export class LiveView {
     const fromLibrary = !fromMap && libraryType?.voxel ? this.library!.voxel(libraryType.voxel) : null;
     const model = fromMap ?? fromLibrary;
     if (model) {
-      const basePalette = fromMap ? model.palette : LIBRARY_PALETTE_PREFIX + model.palette;
+      const basePalette = fromMap ? model.palette : this.libraryPalette(model.palette);
       const key = paletteFor(this.cache, basePalette, libraryType?.remap ?? true, paletteKey || undefined);
       const { root, turret } = this.voxelUnits.build(model, key, `${object.type}@${key}`);
       return { ...base, root, turret, mode: 'voxel', libraryType };
@@ -1366,12 +1533,91 @@ export class LiveView {
   private ensureHouse(colorIndex: number): void {
     if (colorIndex < 0 || this.housePalettes.has(colorIndex)) return;
     this.housePalettes.add(colorIndex);
+    this.housePaletteKeys.set(colorIndex, `live${colorIndex}`);
     const remap = this.options.houseRemap?.(colorIndex) ?? this.library?.remap(colorIndex) ?? defaultRemap(colorIndex);
-    if (!addHousePalettes(this.cache, `live${colorIndex}`, remap))
+    if (!addHousePalettes(this.cache, this.housePaletteKeys.get(colorIndex)!, remap))
       console.warn(`[HD] palette atlas full: house colours ${colorIndex} not added`);
   }
 
   // ---------------------------------------------------------------- overlays and smudges
+
+  private updateOverlays(snapshot: LiveSnapshot): void {
+    if (snapshot.overlays && !this.library?.library.overlays && !this.warnedOverlayLibrary) {
+      this.warnedOverlayLibrary = true;
+      console.warn('[HD] the theater library has no overlays section; using static map overlays until extracted.');
+    }
+    const color = this.houseColour.get(snapshot.localHouse ?? -1);
+    const house = color === undefined ? undefined : `live${color}`;
+    const wasActive = this.overlayInstances.active;
+    const changed = this.overlayInstances.update(
+      snapshot.overlays ?? null,
+      this.library?.library ?? null,
+      house ?? '',
+      (palette, remap) => paletteFor(this.cache, LIBRARY_PALETTE_PREFIX + palette, remap, house),
+    );
+    if (!changed) return;
+    if (wasActive !== this.overlayInstances.active) this.cellsDirty = true;
+    this.overlayPagesDirty = true;
+    for (const type of this.overlayInstances.instances.missingTypes) {
+      if (this.warnedOverlayTypes.has(type)) continue;
+      this.warnedOverlayTypes.add(type);
+      console.warn(`[HD] live overlay ${type} has no library frame; extract the theater's overlay library.`);
+    }
+  }
+
+  /**
+   * Overlay pages have their own meshes, so unchanged cells never join the per-frame unit uploads. Pending textures
+   * retry only these page lookups; the grid and instances are not rebuilt. The scene's common shroud post pass masks
+   * these meshes exactly as it masks the map's terrain and static overlays.
+   */
+  private flushOverlayPages(): void {
+    this.overlayPagesDirty = false;
+    const pages = this.overlayInstances.instances.pages;
+    for (const [page, layer] of this.overlayLayers) {
+      if (pages.has(page)) continue;
+      if (layer.mesh.count) layer.setInstances([]);
+      this.uploadedOverlays.delete(page);
+    }
+    for (const [page, instances] of pages) {
+      if (this.uploadedOverlays.get(page) === instances) continue;
+      const atlas = this.library?.page(page);
+      if (!atlas) {
+        if (this.library && !this.library.pageFailed(page)) this.overlayPagesDirty = true;
+        else if (!this.warnedOverlayPages.has(page)) {
+          this.warnedOverlayPages.add(page);
+          console.warn(`[HD] live overlay atlas page ${page} failed to load.`);
+        }
+        continue;
+      }
+      const hd = this.library!.hdPage(page);
+      if (!hd && this.library!.hasHdPage(page)) {
+        this.overlayPagesDirty = true;
+        continue;
+      }
+      let layer = this.overlayLayers.get(page);
+      if (layer && layer.capacity < instances.length) {
+        this.disposeOverlayLayer(layer);
+        layer = undefined;
+      }
+      if (!layer) {
+        const capacity = Math.max(64, 2 ** Math.ceil(Math.log2(instances.length)));
+        layer = new SpriteLayer(this.cache, [], capacity, atlas, hd);
+        layer.mesh.name = `live-overlays-${page}`;
+        this.shareSpriteUniforms(layer);
+        this.root.add(layer.mesh);
+        this.overlayLayers.set(page, layer);
+      }
+      layer.setInstances(instances);
+      this.uploadedOverlays.set(page, instances);
+    }
+  }
+
+  private disposeOverlayLayer(layer: SpriteLayer): void {
+    this.root.remove(layer.mesh);
+    layer.mesh.geometry.dispose();
+    (layer.mesh.material as { dispose(): void }).dispose();
+    layer.mesh.dispose();
+  }
 
   private cellList(x: number, y: number): MapObject[] {
     const key = y * 4096 + x;
@@ -1419,29 +1665,35 @@ export class LiveView {
   private flushCells(): void {
     this.cellsDirty = false;
     const { manifest } = this.cache;
-    const instances: CellSprite[] = [];
+    const instances = this.cellInstances;
+    instances.length = 0;
+    this.cellPool.begin();
     for (const list of this.cellObjects.values())
       for (const object of list) {
+        if (object.kind === 'overlay' && this.overlayInstances.active) continue;
         const entry = object.sprite ? manifest.sprites[object.sprite] : undefined;
         if (!entry?.frames.length) continue;
         const index = Math.min(object.frame ?? 0, entry.frames.length - 1);
         const frame = entry.frames[index]!;
-        const anchor = objectAnchor(object);
+        const anchor = objectAnchor(object, this.cellPool.anchor());
         const palette = paletteFor(this.cache, entry.palette, entry.remap, object.owner);
         // The map object's lighting class (smudges take the full terrain light, ore none), as the static world
         // passes it (ra2/world.ts): absent means 'full'.
         const lighting = object.lighting ?? 'full';
         const shadow = entry.shadows?.[index];
-        if (shadow) instances.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true, lighting });
-        instances.push({
-          anchor,
-          frame,
-          palette,
-          push: object.flat ? 0 : cardPush(frame),
-          shadow: false,
-          flat: !!object.flat,
-          lighting,
-        });
+        if (shadow) instances.push(this.cellPool.take(anchor, shadow, palette, 0, true, true, undefined, lighting));
+        instances.push(
+          this.cellPool.take(
+            anchor,
+            frame,
+            palette,
+            object.flat ? 0 : cardPush(frame),
+            false,
+            !!object.flat,
+            undefined,
+            lighting,
+          ),
+        );
       }
     this.cellLayer.setInstances(instances);
   }
@@ -1510,9 +1762,13 @@ export function leptonToWorld(x: number, y: number, z: number, out = new Vector3
  * World anchor of an engine draw point: the object's lepton coordinate projected like the engine, shifted by a screen
  * offset in pixels, and lifted back onto the ground at the object's height (how the type library defines drawOffset).
  */
-function leptonAnchor(x: number, y: number, z: number, offset: readonly [number, number]): Vector3 {
+function leptonAnchor(x: number, y: number, z: number, dx: number, dy: number, out: Vector3): Vector3 {
   const level = z / LEPTONS_PER_LEVEL;
-  const [sx, sy] = ra2Screen(x / LEPTONS_PER_CELL, y / LEPTONS_PER_CELL, level);
-  const [cx, cy] = screenToCell(sx + offset[0], sy + offset[1], level);
-  return new Vector3(cx, level * LEVEL_HEIGHT, cy);
+  const cx = x / LEPTONS_PER_CELL;
+  const cy = y / LEPTONS_PER_CELL;
+  const sx = (cx - cy) * 30;
+  const sy = (cx + cy) * 15 - level * 15;
+  const diff = (sx + dx) / 30;
+  const sum = (sy + dy + level * 15) / 15;
+  return out.set((sum + diff) / 2, level * LEVEL_HEIGHT, (sum - diff) / 2);
 }

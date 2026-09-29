@@ -1,4 +1,5 @@
-import { exp, float, max, uniform, vec3 } from 'three/tsl';
+import { exp, float, max, vec3 } from 'three/tsl';
+import { DEFAULT_ATMOSPHERE_NODES } from './atmosphere';
 import type { ShaderNode } from './tsl';
 
 /**
@@ -19,7 +20,7 @@ import type { ShaderNode } from './tsl';
  * day shows the palette colours. Materials that compensate their own look for the faithful transform (the HD water)
  * fade that compensation with it.
  */
-export const faithfulDisplay = uniform(1);
+export const faithfulDisplay = DEFAULT_ATMOSPHERE_NODES.faithfulDisplay;
 
 /** Linear value up to which the curve is the identity (sRGB ~231). */
 export const FAITHFUL_KNEE = 0.8;

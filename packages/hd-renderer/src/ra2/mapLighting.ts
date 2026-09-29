@@ -8,6 +8,7 @@ import {
   type EngineLight,
   type EngineLighting,
 } from '../../../ra2-assets/src/lights';
+import type { AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 
 /**
@@ -156,11 +157,22 @@ export function srgbScale(colour: ShaderNode, k: ShaderNode | number): ShaderNod
 
 /** The map grade each palette's art is drawn under (palettes belong to one map cache; see cache.ts). */
 const gradeOfPalette = new WeakMap<Uint8Array, MapLightGrade>();
+const nodesOfPalette = new WeakMap<Uint8Array, AtmosphereNodes>();
 
 export function setPaletteGrade(palette: Uint8Array, grade: MapLightGrade | null): void {
   if (grade) gradeOfPalette.set(palette, grade);
+  else gradeOfPalette.delete(palette);
 }
 
 export function paletteGrade(palette: Uint8Array | null | undefined): MapLightGrade | null {
   return (palette && gradeOfPalette.get(palette)) || null;
+}
+
+/** Bind CPU palettes to their renderer context so existing voxel-builder calls inherit the correct shader inputs. */
+export function setPaletteNodes(palette: Uint8Array, nodes: AtmosphereNodes): void {
+  nodesOfPalette.set(palette, nodes);
+}
+
+export function paletteNodes(palette: Uint8Array | null): AtmosphereNodes | undefined {
+  return palette ? nodesOfPalette.get(palette) : undefined;
 }

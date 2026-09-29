@@ -11,6 +11,7 @@ import type { SpriteEntry, VoxelModel } from '../../../ra2-assets/src/manifest';
 import type { TheaterId } from '../../../ra2-assets/src/theater';
 import { addPalette, readPalettePng, type Ra2Cache } from '../ra2/cache';
 import { LIBRARY_PALETTE_PREFIX, loadIndexedPage } from './library';
+import type { EffectPage } from './effectSprites';
 
 /** Seconds before a page that failed to load is requested again. */
 export const PAGE_RETRY_SECONDS = 30;
@@ -38,11 +39,13 @@ export interface ResolvedAnim {
 export class EffectArt {
   private library: EffectLibrary | null = null;
   private state: 'idle' | 'loading' | 'ready' | 'failed' = 'idle';
-  private readonly pages = new Map<number, Texture | 'loading' | { failedAt: number }>();
+  private readonly pages = new Map<number, EffectPage | 'loading' | { failedAt: number }>();
+  private settledRevision = 0;
   /** Pages requested by preload(): kept when idle (every battle needs them again). */
   private readonly pinned = new Set<number>();
   private readonly voxels = new Map<string, VoxelModel | 'loading' | 'failed'>();
   private readonly resolved = new Map<string, ResolvedAnim | null>();
+  private readonly resolvedBullets = new Map<string, { art: EffectBullet; sprite?: SpriteEntry } | null>();
   /** Anim ids without art, for diagnostics. */
   readonly missing = new Set<string>();
   /** Uploads a freshly decoded page straight to the GPU (the renderer's initTexture); see loadIndexedPage. */
@@ -76,9 +79,11 @@ export class EffectArt {
         }
         this.library = library;
         this.state = 'ready';
+        this.settledRevision++;
       })
       .catch((error) => {
         this.state = 'failed';
+        this.settledRevision++;
         console.info('[HD] no effect art sidecar (pnpm hd:effects); native effects are not drawn', error);
       });
   }
@@ -89,6 +94,11 @@ export class EffectArt {
 
   get failed(): boolean {
     return this.state === 'failed';
+  }
+
+  /** Changes only when asynchronous art settles; presentation frames need not rebuild while requests are pending. */
+  get revision(): number {
+    return this.settledRevision;
   }
 
   private sprite(ref: EffectSpriteRef | undefined): SpriteEntry | undefined {
@@ -122,9 +132,13 @@ export class EffectArt {
   }
 
   bullet(type: string): { art: EffectBullet; sprite?: SpriteEntry } | null {
-    const art = this.library?.bullets[type] ?? this.library?.bullets[type.toUpperCase()];
-    if (!art) return null;
-    return { art, sprite: this.sprite(art.sprite) };
+    if (!this.library) return null;
+    const known = this.resolvedBullets.get(type);
+    if (known !== undefined) return known;
+    const art = this.library.bullets[type] ?? this.library.bullets[type.toUpperCase()];
+    const found = art ? { art, sprite: this.sprite(art.sprite) } : null;
+    this.resolvedBullets.set(type, found);
+    return found;
   }
 
   particle(type: string): { art: EffectParticle; sprite: SpriteEntry } | null {
@@ -178,13 +192,19 @@ export class EffectArt {
       this.pages.set(index, 'loading');
       // Single-channel R8 (the pages hold palette indices only).
       loadIndexedPage(`${this.base}/${ref.file}`, this.uploadPage ?? undefined)
-        .then((texture) => this.pages.set(index, texture))
-        .catch(() => this.pages.set(index, { failedAt: seconds() }));
+        .then((texture) => {
+          this.pages.set(index, { texture, width: ref.width, height: ref.height });
+          this.settledRevision++;
+        })
+        .catch(() => {
+          this.pages.set(index, { failedAt: seconds() });
+          this.settledRevision++;
+        });
       return 'loading';
     }
     if (entry === 'loading') return 'loading';
     if ('failedAt' in entry) return null;
-    return { texture: entry, width: ref.width, height: ref.height };
+    return entry;
   }
 
   /** Free an idle page's texture (it is loaded again on its next use); preloaded pages stay. */
@@ -192,7 +212,7 @@ export class EffectArt {
     if (this.pinned.has(index)) return;
     const entry = this.pages.get(index);
     if (!entry || entry === 'loading' || 'failedAt' in entry) return;
-    entry.dispose();
+    entry.texture.dispose();
     this.pages.delete(index);
   }
 
@@ -232,8 +252,14 @@ export class EffectArt {
       this.voxels.set(id, 'loading');
       fetch(`${this.base}/${file}`)
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.statusText))))
-        .then((model: VoxelModel) => this.voxels.set(id, model))
-        .catch(() => this.voxels.set(id, 'failed'));
+        .then((model: VoxelModel) => {
+          this.voxels.set(id, model);
+          this.settledRevision++;
+        })
+        .catch(() => {
+          this.voxels.set(id, 'failed');
+          this.settledRevision++;
+        });
       return null;
     }
     return typeof entry === 'string' ? null : entry;

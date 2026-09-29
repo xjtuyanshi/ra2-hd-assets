@@ -38,11 +38,15 @@ const FOG_DARKNESS = 0.5;
  * four cells around it are mapped (R: not shrouded) and visible (G: not fogged). Missing cells count as shrouded.
  * Pure, for tests: returns (width + 1) x (height + 1) RG bytes (255 = yes).
  */
-export function shroudCorners(width: number, height: number, state: (x: number, y: number) => number): Uint8Array {
-  const flags = new Uint8Array((width + 2) * (height + 2));
+export function shroudCorners(
+  width: number,
+  height: number,
+  state: (x: number, y: number) => number,
+  out = new Uint8Array((width + 1) * (height + 1) * 2),
+  flags = new Uint8Array((width + 2) * (height + 2)),
+): Uint8Array {
   for (let y = -1; y <= height; y++)
     for (let x = -1; x <= width; x++) flags[(y + 1) * (width + 2) + x + 1] = cellFlags(state(x, y));
-  const out = new Uint8Array((width + 1) * (height + 1) * 2);
   cornersFromFlags(flags, width, height, out);
   return out;
 }
@@ -56,12 +60,22 @@ function cellFlags(state: number): number {
  * Corners from per-cell flags on a grid padded by one cell on every side ((width + 2) x (height + 2), cell (x, y) at
  * (x + 1, y + 1)): a corner keeps a flag only when all four cells around it have it. Integer work only.
  */
-function cornersFromFlags(flags: Uint8Array, width: number, height: number, out: Uint8Array): void {
+function cornersFromFlags(
+  flags: Uint8Array,
+  width: number,
+  height: number,
+  out: Uint8Array,
+  x0 = 0,
+  y0 = 0,
+  x1 = width,
+  y1 = height,
+): void {
   const stride = width + 2;
-  for (let j = 0, o = 0; j <= height; j++) {
-    let top = j * stride;
+  for (let j = y0; j <= y1; j++) {
+    let top = j * stride + x0;
     let bottom = top + stride;
-    for (let i = 0; i <= width; i++, o += 2, top++, bottom++) {
+    let o = (j * (width + 1) + x0) * 2;
+    for (let i = x0; i <= x1; i++, o += 2, top++, bottom++) {
       const all = flags[top]! & flags[top + 1]! & flags[bottom]! & flags[bottom + 1]!;
       out[o] = all & 1 ? 255 : 0;
       out[o + 1] = all & 2 ? 255 : 0;
@@ -154,9 +168,52 @@ export class ShroudLayer {
   /** Apply the reader's cells (once per logic frame at most); an unchanged shroud costs one comparison. */
   update(shroud: ShroudCells): void {
     this.latest = shroud;
-    if (this.applied && sameCells(this.applied, shroud)) return;
-    this.applied = { ...shroud, cells: shroud.cells.slice() };
+    let applied = this.applied;
     const { width, height, flags } = this;
+    if (
+      applied &&
+      applied.originX === shroud.originX &&
+      applied.originY === shroud.originY &&
+      applied.width === shroud.width &&
+      applied.height === shroud.height &&
+      applied.cells.length === shroud.cells.length
+    ) {
+      // Usually only a few cells change. Update their flags and the containing corner rectangle in place.
+      let x0 = width + 1,
+        y0 = height + 1,
+        x1 = -1,
+        y1 = -1;
+      for (let i = 0; i < shroud.cells.length; i++) {
+        const state = shroud.cells[i]!;
+        if (applied.cells[i] === state) continue;
+        applied.cells[i] = state;
+        const x = (i % shroud.width) + shroud.originX;
+        const y = Math.floor(i / shroud.width) + shroud.originY;
+        if (x < -1 || y < -1 || x > width || y > height) continue;
+        const offset = (y + 1) * (width + 2) + x + 1;
+        const next = cellFlags(state);
+        if (flags[offset] === next) continue;
+        flags[offset] = next;
+        x0 = Math.min(x0, Math.max(0, x));
+        y0 = Math.min(y0, Math.max(0, y));
+        x1 = Math.max(x1, Math.min(width, x + 1));
+        y1 = Math.max(y1, Math.min(height, y + 1));
+      }
+      if (x1 >= x0 && y1 >= y0) {
+        cornersFromFlags(flags, width, height, this.data, x0, y0, x1, y1);
+        this.texture.needsUpdate = true;
+      }
+      return;
+    }
+    if (!applied || applied.cells.length !== shroud.cells.length) {
+      applied = { ...shroud, cells: new Uint8Array(shroud.cells.length) };
+      this.applied = applied;
+    }
+    applied.originX = shroud.originX;
+    applied.originY = shroud.originY;
+    applied.width = shroud.width;
+    applied.height = shroud.height;
+    applied.cells.set(shroud.cells);
     const stride = width + 2;
     flags.fill(0);
     // Only cells inside the padded grid matter; everything else is shrouded.
@@ -195,14 +252,6 @@ export class ShroudLayer {
     const shift = Math.trunc(level / 2);
     return !mapped(cx - shift, cy - shift);
   }
-}
-
-function sameCells(a: ShroudCells, b: ShroudCells): boolean {
-  if (a.originX !== b.originX || a.originY !== b.originY || a.width !== b.width || a.height !== b.height) return false;
-  const n = a.cells.length;
-  if (n !== b.cells.length) return false;
-  for (let i = 0; i < n; i++) if (a.cells[i] !== b.cells[i]) return false;
-  return true;
 }
 
 function cellState(shroud: ShroudCells, x: number, y: number): number {

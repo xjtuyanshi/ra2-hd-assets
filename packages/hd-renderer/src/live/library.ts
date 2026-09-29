@@ -1,5 +1,6 @@
 import { DataTexture, NearestFilter, NoColorSpace, RedFormat, Texture, UnsignedByteType } from 'three/webgpu';
 import type { LibraryType, TypeLibrary } from '../../../ra2-assets/src/library';
+import { indexedBitmapPixels } from './indexedPixels';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
 import {
   addPalette,
@@ -21,7 +22,12 @@ export const LIBRARY_PALETTE_PREFIX = 'lib:';
  * callers ask again on a later frame until they are ready.
  */
 export class LiveLibrary {
-  private readonly pages = new Map<number, Texture | 'loading' | 'failed'>();
+  private readonly pages = new Map<
+    number,
+    { texture: Texture; width: number; height: number } | 'loading' | 'failed'
+  >();
+  /** Changes when asynchronous art settles; presentation can sleep while nothing has arrived. */
+  revision = 0;
   private readonly voxels = new Map<string, VoxelModel | 'loading' | 'failed'>();
   private readonly hdPages = new Map<number, { color: Texture; remap: Texture } | 'loading' | 'failed'>();
   private readonly windowPages = new Map<number, Texture | 'loading' | 'failed'>();
@@ -70,7 +76,10 @@ export class LiveLibrary {
     const entry = this.windowPages.get(index);
     if (entry === undefined) {
       this.windowPages.set(index, 'loading');
-      void loadMaskTexture(`${this.base}/${file}`).then((texture) => this.windowPages.set(index, texture ?? 'failed'));
+      void loadMaskTexture(`${this.base}/${file}`).then((texture) => {
+        this.windowPages.set(index, texture ?? 'failed');
+        this.revision++;
+      });
       return null;
     }
     return typeof entry === 'string' ? null : entry;
@@ -115,11 +124,22 @@ export class LiveLibrary {
     if (entry === undefined) {
       this.pages.set(index, 'loading');
       loadIndexedPage(`${this.base}/${ref.file}`, this.uploadPage ?? undefined)
-        .then((texture) => this.pages.set(index, texture))
-        .catch(() => this.pages.set(index, 'failed'));
+        .then((texture) => {
+          this.pages.set(index, { texture, width: ref.width, height: ref.height });
+          this.revision++;
+        })
+        .catch(() => {
+          this.pages.set(index, 'failed');
+          this.revision++;
+        });
       return null;
     }
-    return typeof entry === 'string' ? null : { texture: entry, width: ref.width, height: ref.height };
+    return typeof entry === 'string' ? null : entry;
+  }
+
+  /** A missing/failed page is settled, so infrequently changing cell layers need not retry it every frame. */
+  pageFailed(index: number): boolean {
+    return !this.library.spriteAtlases[index] || this.pages.get(index) === 'failed';
   }
 
   /**
@@ -134,8 +154,14 @@ export class LiveLibrary {
     if (entry === undefined) {
       this.hdPages.set(index, 'loading');
       loadHdAtlas(this.base, ref)
-        .then((atlas) => this.hdPages.set(index, atlas))
-        .catch(() => this.hdPages.set(index, 'failed'));
+        .then((atlas) => {
+          this.hdPages.set(index, atlas);
+          this.revision++;
+        })
+        .catch(() => {
+          this.hdPages.set(index, 'failed');
+          this.revision++;
+        });
       return null;
     }
     return typeof entry === 'string' ? null : entry;
@@ -156,8 +182,14 @@ export class LiveLibrary {
       this.voxels.set(id, 'loading');
       fetch(`${this.base}/${file}`)
         .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-        .then((model: VoxelModel) => this.voxels.set(id, model))
-        .catch(() => this.voxels.set(id, 'failed'));
+        .then((model: VoxelModel) => {
+          this.voxels.set(id, model);
+          this.revision++;
+        })
+        .catch(() => {
+          this.voxels.set(id, 'failed');
+          this.revision++;
+        });
       return null;
     }
     return typeof entry === 'string' ? null : entry;
@@ -177,7 +209,7 @@ export class LiveLibrary {
  * With `upload` (the renderer's initTexture) the decoded bitmap goes to the GPU as it is: WebGPU's
  * copyExternalImageToTexture (WebGL: texImage2D with RED) writes its red channel into the R8 texture, so the main
  * thread never touches the 16.7 M pixels, and the bitmap is released right after the upload. Without it (tests, other
- * hosts) the red channel is repacked on the CPU (about 45 ms per 4096 x 4096 page).
+ * hosts), bounded strips yield between reads; the R8 CPU copy is released after the renderer's first upload.
  */
 export async function loadIndexedPage(url: string, upload?: (texture: Texture) => void): Promise<Texture> {
   const response = await fetch(url);
@@ -187,31 +219,38 @@ export async function loadIndexedPage(url: string, upload?: (texture: Texture) =
     premultiplyAlpha: 'none',
   });
   const { width, height } = bitmap;
-  if (upload) {
-    const texture = new Texture(bitmap as unknown as HTMLImageElement);
+  try {
+    if (upload) {
+      const texture = new Texture(bitmap as unknown as HTMLImageElement);
+      indexedSettings(texture);
+      texture.format = RedFormat;
+      texture.type = UnsignedByteType;
+      texture.premultiplyAlpha = false;
+      texture.needsUpdate = true;
+      try {
+        upload(texture);
+      } catch (error) {
+        texture.dispose();
+        throw error;
+      }
+      // Only dimensions survive: this immutable page is never uploaded again.
+      texture.image = { width, height } as unknown as HTMLImageElement;
+      return texture;
+    }
+    const indices = await indexedBitmapPixels(bitmap);
+    const texture = new DataTexture(indices, width, height, RedFormat, UnsignedByteType);
     indexedSettings(texture);
-    texture.format = RedFormat;
-    texture.type = UnsignedByteType;
-    texture.premultiplyAlpha = false;
+    texture.unpackAlignment = 1;
+    texture.onUpdate = () => {
+      // Both renderer backends have copied these immutable bytes when onUpdate runs.
+      texture.image.data = null;
+      texture.onUpdate = null;
+    };
     texture.needsUpdate = true;
-    upload(texture);
-    // The GPU copy has read the bitmap; keep only its size (the texture is never uploaded again).
-    bitmap.close();
-    texture.image = { width, height } as unknown as HTMLImageElement;
     return texture;
+  } finally {
+    bitmap.close();
   }
-  const canvas = new OffscreenCanvas(width, height);
-  const context = canvas.getContext('2d', { willReadFrequently: true })!;
-  context.drawImage(bitmap, 0, 0);
-  bitmap.close();
-  const rgba = context.getImageData(0, 0, width, height).data;
-  const indices = new Uint8Array(width * height);
-  for (let i = 0; i < indices.length; i++) indices[i] = rgba[i * 4]!;
-  const texture = new DataTexture(indices, width, height, RedFormat, UnsignedByteType);
-  indexedSettings(texture);
-  texture.unpackAlignment = 1;
-  texture.needsUpdate = true;
-  return texture;
 }
 
 function indexedSettings(texture: Texture): void {

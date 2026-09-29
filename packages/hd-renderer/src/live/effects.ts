@@ -1,6 +1,6 @@
 import { Vector3 } from 'three/webgpu';
 import { animFrameAt, type EffectAnim } from '../../../ra2-assets/src/effects';
-import type { BeamSpec, EffectsLayer, GarnishOptions } from '../effects';
+import { BEAM_LIGHTS, BEAM_SEGMENTS, type BeamSpec, type EffectsLayer, type GarnishOptions } from '../effects';
 import { cardPush } from '../ra2/sprites';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import type { EffectArt, ResolvedAnim } from './effectArt';
@@ -251,6 +251,9 @@ export class LiveEffectsDriver {
   private readonly systems = new Map<string, TrackedSystem>();
   private bullets: LiveBullet[] = [];
   private beams: LiveBeam[] = [];
+  private readonly beamTail: LiveBeam[] = [];
+  private beamFrame = NaN;
+  private readonly bulletAt = new Vector3();
   private generation = 0;
   private lastPush: { frame: number; seconds: number } | null = null;
   /** Logic frames per second, an EMA of the snapshot frame rate (the engine's GameSpeed and emulation speed vary). */
@@ -328,9 +331,28 @@ export class LiveEffectsDriver {
       if (system.behaviour === 'smoke') advanceSmoke(tracked, frame);
     }
     for (const [key, tracked] of this.systems) if (tracked.lastSeen !== generation) this.systems.delete(key);
-    this.bullets = effects.bullets.filter((b) => !this.hidden(b.x, b.y, b.z));
-    this.beams = (effects.beams ?? []).filter((beam) => !this.hidden(beam.target.x, beam.target.y, beam.target.z));
-    this.effects.setBeams(now, this.beamSpecs());
+    this.bullets.length = 0;
+    for (const bullet of effects.bullets) if (!this.hidden(bullet.x, bullet.y, bullet.z)) this.bullets.push(bullet);
+    if (frame !== this.beamFrame) {
+      this.beamFrame = frame;
+      this.beams.length = 0;
+      let tailCount = 0;
+      let tailCursor = 0;
+      if (effects.beams)
+        for (const beam of effects.beams) {
+          if (this.hidden(beam.target.x, beam.target.y, beam.target.z)) continue;
+          if (this.beams.length < BEAM_SEGMENTS) this.beams.push(beam);
+          else {
+            this.beamTail[tailCursor] = beam;
+            tailCursor = (tailCursor + 1) % BEAM_LIGHTS;
+            tailCount = Math.min(tailCount + 1, BEAM_LIGHTS);
+          }
+        }
+      // The first segments and last flash lights are the exact subsets the two existing fixed pools can draw.
+      for (let i = 0; i < tailCount; i++)
+        this.beams.push(this.beamTail[(tailCursor - tailCount + i + BEAM_LIGHTS) % BEAM_LIGHTS]!);
+      this.effects.setBeams(now, this.beamSpecs());
+    }
   }
 
   /**
@@ -344,7 +366,7 @@ export class LiveEffectsDriver {
       return {
         from: world(beam.source, new Vector3()),
         to: world(beam.target, new Vector3()),
-        colour: new Vector3(...(srgb.map((c) => Math.pow(c / 255, 2.2)) as [number, number, number])),
+        colour: new Vector3(Math.pow(srgb[0] / 255, 2.2), Math.pow(srgb[1] / 255, 2.2), Math.pow(srgb[2] / 255, 2.2)),
         bolt,
         seed: (Math.floor(this.logicFrame / 2) * 7919 + Math.round(beam.target.x + beam.target.y * 3)) >>> 0,
       };
@@ -374,10 +396,9 @@ export class LiveEffectsDriver {
         this.effects.fireLight(tracked.lightKey, now, tracked.at, row.s);
         tracked.nextEmit = now + 1 / 5;
       }
-    const at = new Vector3();
     for (const bullet of this.bullets) {
       if (bullet.type && this.bulletArt(bullet.type)) continue;
-      this.effects.bulletDot(now, world(bullet, at));
+      this.effects.bulletDot(now, world(bullet, this.bulletAt));
     }
   }
 
@@ -627,7 +648,9 @@ export function advanceSmoke(
       (system.lifetime !== undefined ? system.lifetime > 0 : at - tracked.since < SMOKE_SPAWN_WINDOW);
     if (!spawning) break;
     const index = tracked.spawned++;
-    if (tracked.smoke.filter((p) => at - p.born < life).length >= rules.cap) continue;
+    let alive = 0;
+    for (const particle of tracked.smoke) if (at - particle.born < life) alive++;
+    if (alive >= rules.cap) continue;
     const r = rules.radius * Math.sqrt(hash01(system.uid, index, 0));
     const a = hash01(system.uid, index, 1) * Math.PI * 2;
     const speed = SMOKE_DRIFT * hash01(system.uid, index, 2);
@@ -642,7 +665,9 @@ export function advanceSmoke(
       driftY: speed * Math.sin(d),
     });
   }
-  tracked.smoke = tracked.smoke.filter((p) => frame - p.born < life);
+  let count = 0;
+  for (const particle of tracked.smoke) if (frame - particle.born < life) tracked.smoke[count++] = particle;
+  tracked.smoke.length = count;
 }
 
 /** Violet (alternate) bolt colour as the host reports it. */

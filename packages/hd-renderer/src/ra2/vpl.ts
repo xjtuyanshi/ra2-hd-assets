@@ -36,9 +36,9 @@ import {
   vec4,
 } from 'three/tsl';
 import type { VoxelLightingFile } from '../../../ra2-assets/src/vpl';
-import { moonlit, objectLight } from '../atmosphere';
+import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLight, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
-import { objectLevelAt, paletteGrade, srgbScale, type MapLightGrade } from './mapLighting';
+import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrade } from './mapLighting';
 
 /**
  * Voxel shading the way the engine does it (YR 1.001). Before drawing a voxel unit, TechnoClass (@0x706F4D) has
@@ -127,37 +127,51 @@ const OCCLUSION_STRENGTH = 0.15;
  * Scene light level for voxels, set every frame by the renderer: flat-ground irradiance / pi, which the exposure turns
  * into 1 at clear noon (so noon shows exactly the table colours).
  */
-export const voxelFill = uniform(new Color(0, 0, 0));
-/** Diagnostics: 1 writes (palette index, normal x, normal y), 2 writes (palette index, normal z, occlusion). */
-export const voxelDebug = uniform(0);
-/**
- * Review tooling: extra object light, occlusion strength, HD sheen weight and HD sun diffuse (defaults above). The GGX
- * sheen is off: with the engine's own VPL highlights back it only paled the hulls (mean saturation 0.25 against the
- * original's 0.31; 0.27 without it).
- */
-export const voxelExtraLight = uniform(VOXEL_EXTRA_LIGHT);
-export const voxelOcclusion = uniform(OCCLUSION_STRENGTH);
-export const voxelSheen = uniform(0);
-export const voxelSunDiffuse = uniform(SUN_DIFFUSE);
-const lightDirection = uniform(derivedVoxelLight());
+export class VoxelLightingState {
+  readonly voxelFill = uniform(new Color(0, 0, 0));
+  readonly voxelDebug = uniform(0);
+  readonly voxelExtraLight = uniform(VOXEL_EXTRA_LIGHT);
+  readonly voxelOcclusion = uniform(OCCLUSION_STRENGTH);
+  readonly voxelSheen = uniform(0);
+  readonly voxelSunDiffuse = uniform(SUN_DIFFUSE);
+  readonly lightDirection = uniform(derivedVoxelLight());
+  loaded: LoadedTable | null = null;
+  loading: Promise<boolean> | null = null;
+  loadingUrl = '';
+  readonly byPalette = new WeakMap<Uint8Array, MeshStandardNodeMaterial>();
+}
+
+const states = new WeakMap<AtmosphereNodes, VoxelLightingState>();
+
+/** Per-renderer voxel uniforms, material cache and selected VPL table. */
+export function voxelLightingFor(nodes: AtmosphereNodes = DEFAULT_ATMOSPHERE_NODES): VoxelLightingState {
+  let state = states.get(nodes);
+  if (!state) {
+    state = new VoxelLightingState();
+    states.set(nodes, state);
+  }
+  return state;
+}
+
+/** Legacy standalone-material controls; renderers use voxelLightingFor(renderer.nodes). */
+export const { voxelFill, voxelDebug, voxelExtraLight, voxelOcclusion, voxelSheen, voxelSunDiffuse } =
+  voxelLightingFor();
 
 interface LoadedTable {
   table: Uint8Array;
   sections: number;
 }
-let loaded: LoadedTable | null = null;
-let loading: Promise<boolean> | null = null;
-let loadingUrl = '';
 
 /**
  * Load the voxel lighting sidecar (voxels-vpl.json + .png). The table is install-wide (the same for every map), so a
  * page loads it once; a different URL loads again. Resolves false, and voxels use the fallback curve, when it is
  * missing or unreadable.
  */
-export function loadVoxelLighting(jsonUrl: string): Promise<boolean> {
-  if (loading && loadingUrl === jsonUrl) return loading;
-  loadingUrl = jsonUrl;
-  loading = (async () => {
+export function loadVoxelLighting(jsonUrl: string, nodes = DEFAULT_ATMOSPHERE_NODES): Promise<boolean> {
+  const state = voxelLightingFor(nodes);
+  if (state.loading && state.loadingUrl === jsonUrl) return state.loading;
+  state.loadingUrl = jsonUrl;
+  state.loading = (async () => {
     try {
       const response = await fetch(jsonUrl);
       if (!response.ok) return false;
@@ -174,23 +188,26 @@ export function loadVoxelLighting(jsonUrl: string): Promise<boolean> {
       context.drawImage(bitmap, 0, 0);
       const rgba = context.getImageData(0, 0, bitmap.width, bitmap.height).data;
       const sections = bitmap.height;
-      if (bitmap.width !== 256 || sections < 1) return false;
+      const width = bitmap.width;
+      bitmap.close();
+      if (width !== 256 || sections < 1) return false;
       const table = new Uint8Array(256 * sections);
       for (let i = 0; i < table.length; i++) table[i] = rgba[i * 4]!;
-      loaded = { table, sections };
-      if (file.fit?.light) lightDirection.value.fromArray(file.fit.light).normalize();
+      state.loaded = { table, sections };
+      if (file.fit?.light) state.lightDirection.value.fromArray(file.fit.light).normalize();
       return true;
     } catch {
       return false;
     }
   })();
-  return loading;
+  return state.loading;
 }
 
 class VoxelLightingModel extends PhysicalLightingModel {
   constructor(
     private readonly raw: ShaderNode,
     private readonly matp: ShaderNode,
+    private readonly state: VoxelLightingState,
   ) {
     super();
   }
@@ -200,7 +217,7 @@ class VoxelLightingModel extends PhysicalLightingModel {
     lightColor,
     reflectedLight,
   }: Parameters<PhysicalLightingModel['direct']>[0]): void {
-    const live: ShaderNode = float(1).sub(step(0.5, voxelDebug));
+    const live: ShaderNode = float(1).sub(step(0.5, this.state.voxelDebug));
     const dotNL: ShaderNode = (normalView as ShaderNode).dot(l).clamp();
     const irradiance: ShaderNode = dotNL.mul(lightColor);
     (reflectedLight.directDiffuse as ShaderNode).addAssign(
@@ -210,7 +227,7 @@ class VoxelLightingModel extends PhysicalLightingModel {
     const specular: ShaderNode = irradiance
       .mul(BRDF_GGX({ lightDirection: l, f0, f90: 1, roughness } as never))
       .mul(this.matp.z)
-      .mul(voxelSheen)
+      .mul(this.state.voxelSheen)
       .mul(live);
     (reflectedLight.directSpecular as ShaderNode).addAssign(min(specular, vec3(SPECULAR_CAP)));
   }
@@ -222,8 +239,9 @@ class VoxelLightingModel extends PhysicalLightingModel {
 class VoxelMaterial extends MeshStandardNodeMaterial {
   raw!: ShaderNode;
   matp!: ShaderNode;
+  state!: VoxelLightingState;
   override setupLightingModel(): PhysicalLightingModel {
-    return new VoxelLightingModel(this.raw, this.matp);
+    return new VoxelLightingModel(this.raw, this.matp, this.state);
   }
 }
 
@@ -282,8 +300,18 @@ function lookupTexture(palette: Uint8Array, table: LoadedTable | null): DataText
   return lut;
 }
 
-function createMaterial(lut: DataTexture, sections: number, grade: MapLightGrade | null): MeshStandardNodeMaterial {
+function createMaterial(
+  lut: DataTexture,
+  sections: number,
+  grade: MapLightGrade | null,
+  nodes: AtmosphereNodes,
+): MeshStandardNodeMaterial {
+  const state = voxelLightingFor(nodes);
+  const { voxelFill, voxelDebug, voxelExtraLight, voxelOcclusion, voxelSunDiffuse, lightDirection } = state;
   const material = new VoxelMaterial();
+  material.state = state;
+  nodes.own(material);
+  nodes.own(lut);
   material.name = sections ? 'voxel-vpl' : 'voxel-fallback';
   const rows = sections + 2;
   const occlusion: ShaderNode = attribute('occlusion', 'float');
@@ -327,10 +355,10 @@ function createMaterial(lut: DataTexture, sections: number, grade: MapLightGrade
   // Scene light on the night-desaturated colour (house paint keeps its colour), local lights (lamps, fires,
   // explosions) on the full colour, strongest on faces turned up towards the lit ground's glow.
   const paint: ShaderNode = step(15.5, pindex).mul(step(pindex, 31.5));
-  const local: ShaderNode = objectLight(positionWorld.xz)
+  const local: ShaderNode = objectLight(positionWorld.xz, nodes)
     .mul(1 / Math.PI)
     .mul(float(0.55).add(max(n.y, 0).mul(0.45)));
-  const shaded: ShaderNode = mix(moonlit(lit), lit, paint).mul(voxelFill).add(lit.mul(local)).mul(ao);
+  const shaded: ShaderNode = mix(moonlit(lit, nodes), lit, paint).mul(voxelFill).add(lit.mul(local)).mul(ao);
   material.emissiveNode = mix(shaded, debugColour, debugOn);
   material.colorNode = raw.mul(voxelSunDiffuse).mul(ao).mul(live);
   material.roughnessNode = matp.x;
@@ -341,17 +369,20 @@ function createMaterial(lut: DataTexture, sections: number, grade: MapLightGrade
 
 /** Palette for callers without one: a grey ramp. */
 const GREY = new Uint8Array(768).map((_, i) => Math.floor(i / 3));
-const byPalette = new WeakMap<Uint8Array, MeshStandardNodeMaterial>();
 
 /**
  * The material for voxels drawn with `palette` (a house-remapped palette gets its own lookup texture), cached per
  * palette. Uses the fallback curve when the lighting table was not loaded before the palette's first use.
  */
-export function voxelMaterialFor(palette: Uint8Array | null): MeshStandardNodeMaterial {
+export function voxelMaterialFor(
+  palette: Uint8Array | null,
+  nodes = paletteNodes(palette) ?? DEFAULT_ATMOSPHERE_NODES,
+): MeshStandardNodeMaterial {
+  const { byPalette, loaded } = voxelLightingFor(nodes);
   const key = palette ?? GREY;
   let material = byPalette.get(key);
   if (!material) {
-    material = createMaterial(lookupTexture(key, loaded), loaded?.sections ?? 0, paletteGrade(palette));
+    material = createMaterial(lookupTexture(key, loaded), loaded?.sections ?? 0, paletteGrade(palette), nodes);
     byPalette.set(key, material);
   }
   return material;

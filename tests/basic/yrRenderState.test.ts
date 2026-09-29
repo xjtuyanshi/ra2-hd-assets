@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { GAME_RENDER_SHROUD } from '../../src/games/renderState';
 import { createByteViewAccessor } from '../../src/games/shared/memoryAccessor';
 import type { ReadYrEffectsOptions, YrEffects } from '../../src/games/yr/effectsReader';
+import type { ReadYrOverlayOptions, YrOverlays } from '../../src/games/yr/overlayReader';
 import { createYrRenderStateReader, createYrRenderStateReaderFrom } from '../../src/games/yr/renderState';
 import { YR_RUNTIME_HOOKS } from '../../src/games/yr/runtimeHooks';
 import { YR_SHROUD_STATE, type ReadYrShroudOptions, type YrShroud } from '../../src/games/yr/shroudReader';
@@ -240,23 +241,128 @@ function shroudReader(cells: () => number[]) {
   });
 }
 
-function sources(memory: ReturnType<typeof keyMemory>, options: { map?: () => boolean; cells?: () => number[] } = {}) {
+function sources(
+  memory: ReturnType<typeof keyMemory>,
+  options: {
+    map?: () => boolean;
+    cells?: () => number[];
+    overlays?: (options?: ReadYrOverlayOptions) => YrOverlays | null;
+    now?: () => number;
+  } = {},
+) {
   let frame = 0;
   const readState = vi.fn(() => yrState(++frame, options.map?.() ?? true));
   const readShroud = shroudReader(options.cells ?? (() => [0, 1, 2, 0xff]));
   const readEffects = vi.fn((_options?: ReadYrEffectsOptions) => yrEffects(frame));
   const createShroudReader = vi.fn((): typeof readShroud | null => readShroud);
   const createEffectsReader = vi.fn(() => readEffects);
+  const readOverlays = vi.fn((reuse?: ReadYrOverlayOptions) => options.overlays?.(reuse) ?? null);
+  const createOverlayReader = vi.fn((): typeof readOverlays | null => readOverlays);
   const read = createYrRenderStateReaderFrom({
     memory: () => createByteViewAccessor(memory.bytes),
     readState,
     createShroudReader,
     createEffectsReader,
+    createOverlayReader,
+    now: options.now ?? (() => 0),
   });
-  return { read, readState, readShroud, readEffects, createShroudReader, createEffectsReader };
+  return {
+    read,
+    readState,
+    readShroud,
+    readEffects,
+    readOverlays,
+    createShroudReader,
+    createEffectsReader,
+    createOverlayReader,
+  };
 }
 
 describe('YR 1.001 render state for the HD bridge', () => {
+  it('polls overlays at 250 ms, publishes immutable changes and resets immediately for a new battle', () => {
+    const memory = keyMemory();
+    let at = 0;
+    let data = 3;
+    let inBattle = true;
+    let available = true;
+    const overlay = (options?: ReadYrOverlayOptions): YrOverlays | null => {
+      if (!available) return null;
+      const reuse = options?.reuse;
+      const changed = !reuse || reuse.data[0] !== data;
+      const index = reuse?.index ?? new Int16Array([0, -1]);
+      const frames = reuse?.data ?? new Uint8Array(2);
+      frames[0] = data;
+      return {
+        frame: 0,
+        originX: 1,
+        originY: 2,
+        width: 2,
+        height: 1,
+        index,
+        data: frames,
+        types: reuse?.types ?? ['GAWALL'],
+        revision: (reuse?.revision ?? 0) + Number(changed),
+        counts: { cells: 2, overlays: 1, invalidCells: 0, invalidTypes: 0, invalidIndices: 0 },
+      };
+    };
+    const { read, readOverlays } = sources(memory, { overlays: overlay, now: () => at, map: () => inBattle });
+    const first = read()!;
+    const scratch = readOverlays.mock.results[0]!.value!;
+    expect(first.overlays!.index).not.toBe(scratch.index);
+    expect(first.overlays!.data).not.toBe(scratch.data);
+    expect(first.overlays!.types).not.toBe(scratch.types);
+    at = 249;
+    data = 7;
+    memory.frame(101);
+    expect(read()!.overlays).toBe(first.overlays);
+    expect(readOverlays).toHaveBeenCalledTimes(1);
+    at = 250;
+    const changed = read()!;
+    expect(readOverlays).toHaveBeenLastCalledWith({ reuse: scratch });
+    expect(changed.overlays!.data[0]).toBe(7);
+    expect(changed.overlays!.revision).toBe(2);
+    expect(first.overlays!.data[0]).toBe(3);
+    at = 500;
+    expect(read()).toBe(changed);
+    expect(readOverlays).toHaveBeenCalledTimes(3);
+
+    // A same-map restart can retain the scenario singleton but rewinds its logic frame.
+    memory.frame(1);
+    at = 501;
+    const restarted = read()!;
+    expect(restarted.overlays!.revision).toBe(3);
+    expect(readOverlays).toHaveBeenLastCalledWith({ reuse: null });
+    inBattle = false;
+    memory.frame(2);
+    expect(read()!.overlays).toBeNull();
+    inBattle = true;
+    memory.frame(3);
+    expect(read()!.overlays!.revision).toBe(4);
+    available = false;
+    at = 751;
+    expect(read()!.overlays).toBeNull();
+    available = true;
+    at = 1001;
+    expect(read()!.overlays!.revision).toBe(5);
+    expect(structuredClone(first)).toEqual(first);
+  });
+
+  it('retries an unavailable overlay factory only when the next overlay poll is due', () => {
+    const memory = keyMemory();
+    let at = 0;
+    const { read, readOverlays, createOverlayReader } = sources(memory, { now: () => at });
+    createOverlayReader.mockReturnValueOnce(null);
+    expect(read()!.overlays).toBeNull();
+    memory.frame(101);
+    at = 249;
+    read();
+    expect(createOverlayReader).toHaveBeenCalledTimes(1);
+    at = 250;
+    read();
+    expect(createOverlayReader).toHaveBeenCalledTimes(2);
+    expect(readOverlays).toHaveBeenCalledTimes(1);
+  });
+
   it('shroud cells use the contract encoding unchanged', () => {
     expect({ ...YR_SHROUD_STATE }).toEqual({ ...GAME_RENDER_SHROUD });
   });

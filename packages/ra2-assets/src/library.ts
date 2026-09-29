@@ -66,6 +66,10 @@ export interface TypeLibrary {
   voxels: Record<string, string>;
   /** Every TechnoType whose art resolved, keyed by rules type id (e.g. "GAPOWR", "HTNK", "E1", "ORCA"). */
   types: Record<string, LibraryType>;
+  /** Every rules [OverlayTypes] entry whose art resolved; absent in older libraries. */
+  overlays?: Record<string, LibraryOverlay>;
+  /** Diagnostics of a later overlays-only append; the original extraction record is preserved. */
+  overlayExtractor?: { tool: string; counts: Record<string, number>; warnings: string[] };
   /**
    * The game's runtime ColorScheme array in order, so the live reader's HouseClass::ColorSchemeIndex (`colorIndex`)
    * indexes it directly. See ColorSchemeEntry and colorSchemeSlots in remap.ts for the ordering evidence.
@@ -77,6 +81,22 @@ export interface TypeLibrary {
   conditionYellow: number;
   conditionRed: number;
   extractor: { tool: string; counts: Record<string, number>; warnings: string[] };
+}
+
+/** Cell art uses the engine's OverlayData directly as its body-frame index, without animation or facing logic. */
+export interface LibraryOverlay {
+  sprite: string;
+  /** Number of body frames, excluding a detected shadow half. */
+  frames: number;
+  palette: 'unit' | 'theater' | 'iso';
+  wall: boolean;
+  tiberium: boolean;
+  /** Stock YR walls use the current player's colour scheme, not the cell's wall-owner index. */
+  remap: boolean;
+  flat: boolean;
+  /** Offset from the projected cell top corner, shared with the map extractor. */
+  drawOffset: [x: number, y: number];
+  lighting: LightingClass;
 }
 
 /**

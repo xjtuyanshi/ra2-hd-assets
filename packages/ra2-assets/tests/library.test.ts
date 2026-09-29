@@ -1,5 +1,8 @@
 /** Type library: sequences, colour scheme order, paged atlases, art-name resolution and type records (synthetic data). */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { cpSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Palette, ShpFile, parseIni, type IniFile } from 'ra2-formats';
 import { animTimingArt, buildingLayerArt, parseInfantrySequences, sequenceFrame, facingFrame } from '../src/art.ts';
 import { packShelves, packShelvesPaged } from '../src/atlas.ts';
@@ -7,7 +10,8 @@ import { coordDrawOffset } from '../src/iso.ts';
 import { colorSchemeSlots } from '../src/remap.ts';
 import { THEATERS } from '../src/theater.ts';
 import { ArtSource, packSprites, type InstallView } from '../src/node/artSource.ts';
-import { collectTypeLibrary } from '../src/node/library.ts';
+import { appendOverlayLibrary, collectOverlayLibrary, collectTypeLibrary, readLibrary } from '../src/node/library.ts';
+import type { TypeLibrary } from '../src/library.ts';
 
 describe('infantry sequences', () => {
   const entries = [
@@ -401,5 +405,180 @@ describe('type library records', () => {
     const page = packed.pages[f.page ?? 0]!;
     expect(page.data[f.rect[1] * page.width + f.rect[0]]).toBe(40);
     expect(e1.shadows).toHaveLength(120);
+  });
+});
+
+describe('live overlay library', () => {
+  const rules = `
+[OverlayTypes]
+0=GAWALL
+1=TIB01
+2=GEM01
+3=FENCE
+4=ROCK
+5=BRIDGE1
+6=MISSING
+7=TIB01
+[GAWALL]
+Wall=yes
+[TIB01]
+Tiberium=yes
+[GEM01]
+Tiberium=yes
+[ROCK]
+IsARock=yes
+`;
+  const inst = fakeInstall(
+    {
+      'gtwall.shp': bodyAndShadow(16),
+      'tib01.tem': bodyAndShadow(12),
+      'gem01.tem': bodyAndShadow(8),
+      'fence.shp': bodyAndShadow(16),
+      'rock.shp': bodyAndShadow(2),
+      'bridge1.shp': bodyAndShadow(4),
+    },
+    { 'rulesmd.ini': rules, 'artmd.ini': '[TIB01]\nTheater=yes\n[GEM01]\nTheater=yes\n' },
+  );
+  const temp: string[] = [];
+  afterEach(() => {
+    for (const dir of temp.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const makeCopy = () => {
+    const root = mkdtempSync(join(tmpdir(), 'ra2-overlay-library-'));
+    temp.push(root);
+    const source = join(root, 'source', 'temperate');
+    mkdirSync(join(source, 'palettes'), { recursive: true });
+    const original = {
+      version: 1,
+      theater: 'temperate',
+      palettes: { unit: 'palettes/unit.png' },
+      paletteSources: { unit: 'unittem.pal' },
+      spriteAtlases: [{ file: 'sprites-0.png', width: 8, height: 8 }],
+      spriteAtlasesHd: [{ file: 'sprites-0@2x.png', remap: 'sprites-0@2x-remap.png', scale: 2, width: 16, height: 16 }],
+      sprites: {
+        'building:KEEP': {
+          palette: 'unit',
+          remap: true,
+          canvas: [2, 2],
+          file: 'keep.shp',
+          frameCount: 1,
+          frames: [{ rect: [1, 1, 2, 2], offset: [-1, -1] }],
+        },
+      },
+      voxels: { KEEP: '../common/voxels/KEEP.json' },
+      types: {
+        KEEP: {
+          kind: 'building',
+          image: 'KEEP',
+          sprite: 'building:KEEP',
+          drawOffset: [0, -15],
+          lighting: 'ambient',
+          remap: true,
+        },
+      },
+      colorSchemes: [],
+      colorSchemesByName: {},
+      conditionYellow: 0.5,
+      conditionRed: 0.25,
+      extractor: { tool: 'fixture', counts: { sprites: 1 }, warnings: ['keep'] },
+      customMetadata: { preserve: true },
+    };
+    writeFileSync(join(source, 'library.json'), JSON.stringify(original));
+    for (const file of ['sprites-0.png', 'sprites-0@2x.png', 'sprites-0@2x-remap.png', 'palettes/unit.png'])
+      writeFileSync(join(source, file), `unchanged fixture ${file}`);
+    const out = join(root, 'copy');
+    cpSync(join(root, 'source'), out, { recursive: true });
+    return { original, out, source, dir: join(out, 'temperate') };
+  };
+
+  it('collects every available overlay and its complete native frame range with shared palette/draw rules', () => {
+    const collected = collectOverlayLibrary(inst, 'temperate');
+    expect(Object.keys(collected.overlays)).toEqual(['GAWALL', 'TIB01', 'GEM01', 'FENCE', 'ROCK', 'BRIDGE1']);
+    expect(collected.overlays['GAWALL']).toEqual({
+      sprite: 'overlay:GAWALL',
+      frames: 16,
+      palette: 'unit',
+      wall: true,
+      tiberium: false,
+      remap: true,
+      flat: false,
+      drawOffset: [0, 0],
+      lighting: 'ambient',
+    });
+    expect(collected.overlays['TIB01']).toMatchObject({
+      frames: 12,
+      palette: 'theater',
+      tiberium: true,
+      remap: false,
+      flat: true,
+      lighting: 'none',
+    });
+    expect(collected.overlays['GEM01']).toMatchObject({ frames: 8, palette: 'theater', tiberium: true });
+    expect(collected.overlays['FENCE']).toMatchObject({ palette: 'iso', wall: false, remap: false });
+    expect(collected.overlays['ROCK']!.drawOffset).toEqual([0, 15]);
+    expect(collected.overlays['BRIDGE1']).toMatchObject({ flat: false, drawOffset: [0, -60] });
+    expect(collected.collector.sprites.get('overlay:GAWALL')!.shadows).toHaveLength(16);
+    expect(collected.collector.sprites.get('overlay:TIB01')!.entry.file).toBe('tib01.tem');
+    expect(collected.counts).toEqual({ 'listed:overlay': 7, 'types:overlay': 6, 'skipped:overlay': 1 });
+    expect(collected.warnings).toEqual(['overlay:MISSING: no art file (missing.shp)']);
+    expect(collectTypeLibrary(inst, 'temperate').overlays).toEqual(collected.overlays);
+  });
+
+  it('appends only new pages to a temp copy and preserves original metadata, pages, palettes and HD references', () => {
+    const { original, out, source, dir } = makeCopy();
+    const result = appendOverlayLibrary(inst, 'temperate', out);
+    const library = readLibrary(dir);
+    for (const key of ['types', 'voxels', 'colorSchemes', 'colorSchemesByName', 'extractor'] as const)
+      expect(library[key]).toEqual(original[key]);
+    expect((library as TypeLibrary & { customMetadata: unknown }).customMetadata).toEqual(original.customMetadata);
+    expect(library.sprites['building:KEEP']).toEqual(original.sprites['building:KEEP']);
+    expect(library.spriteAtlases[0]).toEqual(original.spriteAtlases[0]);
+    expect(library.spriteAtlasesHd).toEqual([...original.spriteAtlasesHd, null]);
+    expect(library.spriteAtlases).toHaveLength(2);
+    expect(library.spriteAtlases[1]!.file).toBe('sprites-overlays-0.png');
+    for (const file of ['sprites-0.png', 'sprites-0@2x.png', 'sprites-0@2x-remap.png', 'palettes/unit.png'])
+      expect(readFileSync(join(dir, file))).toEqual(readFileSync(join(source, file)));
+    expect(readFileSync(join(source, 'library.json'), 'utf8')).toBe(JSON.stringify(original));
+    for (const overlay of Object.values(library.overlays!)) {
+      const sprite = library.sprites[overlay.sprite]!;
+      expect([...sprite.frames, ...sprite.shadows!].every((frame) => frame.page === 1)).toBe(true);
+    }
+    expect(library.palettes).toEqual({
+      unit: 'palettes/unit.png',
+      iso: 'palettes/iso.png',
+      theater: 'palettes/theater.png',
+    });
+    expect(result.library).toEqual(library);
+    expect(library.overlayExtractor?.warnings).toContain('overlay:MISSING: no art file (missing.shp)');
+    expect(readdirSync(dir).some((file) => file.endsWith('.tmp'))).toBe(false);
+    const firstPage = readFileSync(join(dir, 'sprites-overlays-0.png'));
+    const repeat = appendOverlayLibrary(inst, 'temperate', out).library;
+    expect(repeat.spriteAtlases).toHaveLength(3);
+    expect(repeat.sprites['overlay:GAWALL']!.frames[0]!.page).toBe(2);
+    expect(readFileSync(join(dir, 'sprites-overlays-0.png'))).toEqual(firstPage);
+    expect(repeat.spriteAtlasesHd).toEqual([...original.spriteAtlasesHd, null, null]);
+  });
+
+  it('does not read TechnoType files during an overlay-only append and rejects incompatible existing metadata', () => {
+    const { out, dir, original } = makeCopy();
+    const isolated = {
+      ...inst,
+      vxl: () => {
+        throw new Error('unrelated voxel read');
+      },
+      hva: () => {
+        throw new Error('unrelated HVA read');
+      },
+    };
+    expect(() => appendOverlayLibrary(isolated, 'temperate', out)).not.toThrow();
+    writeFileSync(join(dir, 'library.json'), JSON.stringify({ ...original, theater: 'urban' }));
+    const before = readFileSync(join(dir, 'library.json'));
+    expect(() => appendOverlayLibrary(inst, 'temperate', out)).toThrow('temperate library');
+    expect(readFileSync(join(dir, 'library.json'))).toEqual(before);
+    writeFileSync(join(dir, 'library.json'), JSON.stringify({ ...original, paletteSources: { unit: 'other.pal' } }));
+    const conflict = readFileSync(join(dir, 'library.json'));
+    expect(() => appendOverlayLibrary(inst, 'temperate', out)).toThrow('palette unit conflicts');
+    expect(readFileSync(join(dir, 'library.json'))).toEqual(conflict);
   });
 });

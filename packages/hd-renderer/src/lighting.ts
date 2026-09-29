@@ -285,10 +285,13 @@ export class Lighting {
   /** Irradiance on flat ground from the sun and sky, per channel (linear), for the current state. */
   flatIrradianceColor(out: Color): Color {
     const sunHeight = Math.max(0, this.state.sunDirection.y);
-    return out
-      .copy(this.sun.color)
-      .multiplyScalar(this.sun.intensity * sunHeight)
-      .add(this.hemi.color.clone().multiplyScalar(this.hemi.intensity));
+    const sun = this.sun.intensity * sunHeight;
+    const sky = this.hemi.intensity;
+    return out.setRGB(
+      this.sun.color.r * sun + this.hemi.color.r * sky,
+      this.sun.color.g * sun + this.hemi.color.g * sky,
+      this.sun.color.b * sun + this.hemi.color.b * sky,
+    );
   }
 
   /** Flat-ground irradiance at clear noon: the reference at which original art keeps its original brightness. */
@@ -318,7 +321,9 @@ export class Lighting {
         !!this.profile &&
         profile.kind === this.profile.kind &&
         profile.nightLevel === this.profile.nightLevel &&
-        profile.tint.every((v, i) => v === this.profile!.tint[i]));
+        profile.tint[0] === this.profile.tint[0] &&
+        profile.tint[1] === this.profile.tint[1] &&
+        profile.tint[2] === this.profile.tint[2]);
     if (same) return;
     this.profile = profile ? { ...profile, tint: [...profile.tint] } : null;
     this.keys = profile ? profileKeys(profile) : KEYS;
@@ -351,10 +356,9 @@ export class Lighting {
     const a = keys[i]!;
     const b = keys[i + 1]!;
     const t = (h - a.hour) / (b.hour - a.hour);
-    const lerp = (x: number, y: number) => x + (y - x) * t;
 
     // Shadows longer than ~2x object height hurt RTS readability, so the sun never drops below 28°.
-    const elevation = (Math.max(28, lerp(a.elevation, b.elevation)) * Math.PI) / 180;
+    const elevation = (Math.max(28, lerp(a.elevation, b.elevation, t)) * Math.PI) / 180;
     // Screen upper-left in world space is -x (see IsoCamera): the classic RA2 light direction.
     const azimuth = Math.PI;
     const dir = this.state.sunDirection
@@ -370,17 +374,17 @@ export class Lighting {
       return;
     }
 
-    const grey = new Color(0.55, 0.58, 0.62);
+    const grey = this.grey.copy(OVERCAST_GREY);
     this.state.sunColor
       .copy(a.sun)
       .lerp(b.sun, t)
       .lerp(grey, overcast * 0.7);
     this.sun.color.copy(this.state.sunColor);
-    this.sun.intensity = lerp(a.sunIntensity, b.sunIntensity) * (1 - overcast * 0.55);
+    this.sun.intensity = lerp(a.sunIntensity, b.sunIntensity, t) * (1 - overcast * 0.55);
     this.state.skyZenith
       .copy(a.skyZenith)
       .lerp(b.skyZenith, t)
-      .lerp(grey.clone().multiplyScalar(0.5), overcast * 0.8);
+      .lerp(this.halfGrey.copy(grey).multiplyScalar(0.5), overcast * 0.8);
     this.state.skyHorizon
       .copy(a.skyHorizon)
       .lerp(b.skyHorizon, t)
@@ -391,12 +395,12 @@ export class Lighting {
       .lerp(grey, overcast * 0.5);
     this.hemi.groundColor.copy(a.hemiGround).lerp(b.hemiGround, t);
     // Overcast skies scatter more light; keep ambient up so wet battles stay readable.
-    this.hemi.intensity = lerp(a.hemiIntensity, b.hemiIntensity) * (1 + overcast * 0.15);
+    this.hemi.intensity = lerp(a.hemiIntensity, b.hemiIntensity, t) * (1 + overcast * 0.15);
     this.state.ambient.copy(this.hemi.color).multiplyScalar(this.hemi.intensity * 0.5);
-    this.state.exposure = lerp(a.exposure, b.exposure);
+    this.state.exposure = lerp(a.exposure, b.exposure, t);
     // Moonlight keys use sunIntensity 0.6, dusk 1.2, day 2.6+: map that onto 1 (night) .. 0 (day). At the keys this
     // equals their explicit `night`; the procedural sandbox keeps this curve between keys.
-    this.state.night = Math.min(1, Math.max(0, 1 - (lerp(a.sunIntensity, b.sunIntensity) - 0.6) / 0.9));
+    this.state.night = Math.min(1, Math.max(0, 1 - (lerp(a.sunIntensity, b.sunIntensity, t) - 0.6) / 0.9));
   }
 
   /**
@@ -406,15 +410,14 @@ export class Lighting {
    * night (never below NIGHT_RAIN_FLOOR of noon).
    */
   private updateProfiled(a: LightKey, b: LightKey, t: number, overcast: number): void {
-    const lerp = (x: number, y: number) => x + (y - x) * t;
-    const night = lerp(a.night, b.night);
+    const night = lerp(a.night, b.night, t);
     const sunColor = this.state.sunColor.copy(a.sun).lerp(b.sun, t);
-    let sunIntensity = lerp(a.sunIntensity, b.sunIntensity);
+    let sunIntensity = lerp(a.sunIntensity, b.sunIntensity, t);
     this.state.skyZenith.copy(a.skyZenith).lerp(b.skyZenith, t);
     this.state.skyHorizon.copy(a.skyHorizon).lerp(b.skyHorizon, t);
     const hemiColor = this.hemi.color.copy(a.hemiSky).lerp(b.hemiSky, t);
     this.hemi.groundColor.copy(a.hemiGround).lerp(b.hemiGround, t);
-    let hemiIntensity = lerp(a.hemiIntensity, b.hemiIntensity);
+    let hemiIntensity = lerp(a.hemiIntensity, b.hemiIntensity, t);
     if (overcast > 0) {
       const clearFlat = this.flatLuminance(sunColor, sunIntensity, hemiColor, hemiIntensity);
       // Scratch colours: this runs every frame in rain.
@@ -434,7 +437,7 @@ export class Lighting {
     this.sun.intensity = sunIntensity;
     this.hemi.intensity = hemiIntensity;
     this.state.ambient.copy(this.hemi.color).multiplyScalar(this.hemi.intensity * 0.5);
-    this.state.exposure = lerp(a.exposure, b.exposure);
+    this.state.exposure = lerp(a.exposure, b.exposure, t);
     this.state.night = Math.min(1, Math.max(0, night));
   }
 
@@ -442,4 +445,8 @@ export class Lighting {
   get nightLevel(): number | null {
     return this.profile?.nightLevel ?? null;
   }
+}
+
+function lerp(x: number, y: number, t: number): number {
+  return x + (y - x) * t;
 }

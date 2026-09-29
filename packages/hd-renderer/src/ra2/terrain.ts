@@ -37,14 +37,20 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
-import { moonlit, night, pavedAt, puddleNoise, sampleLightField, sceneBrightness } from '../atmosphere';
+import {
+  DEFAULT_ATMOSPHERE_NODES,
+  moonlit,
+  pavedAt,
+  puddleNoise,
+  sampleLightField,
+  type AtmosphereNodes,
+} from '../atmosphere';
 import { createWaterUniforms, waterSurface, type WaterUniforms } from '../waterShading';
 import type { TerrainBuild } from '../terrain';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT } from '../world';
 import { NO_TILE, ra2Screen, type Ra2Cache, tileAtlasPixel } from './cache';
 import { srgbScale, terrainGradeAt } from './mapLighting';
-import { faithfulDisplay } from '../post';
 import { SHORE_MAX, SHORE_MIN } from './shoreField';
 import { waterLook, waveNormal, wetShore } from './waterLook';
 
@@ -59,10 +65,10 @@ import { waterLook, waveNormal, wetShore } from './waterLook';
 const WATER_LEVEL = 0.67;
 const WATER_SATURATION = 1.8;
 
-function waterForDisplay(body: ShaderNode): ShaderNode {
+function waterForDisplay(body: ShaderNode, nodes: AtmosphereNodes): ShaderNode {
   const level: ShaderNode = body.mul(WATER_LEVEL);
   const luma: ShaderNode = dot(level, vec3(0.2126, 0.7152, 0.0722));
-  return mix(body, mix(vec3(luma), level, WATER_SATURATION).max(0), faithfulDisplay);
+  return mix(body, mix(vec3(luma), level, WATER_SATURATION).max(0), nodes.faithfulDisplay);
 }
 
 /** Vertices per cell edge; ramps are planar per triangle in the engine, so 2 keeps slopes smooth enough. */
@@ -385,7 +391,9 @@ function wetGround(
   albedo: ShaderNode,
   wetness: ShaderNode,
   paved: ShaderNode,
+  nodes: AtmosphereNodes,
 ): { albedo: ShaderNode; puddle: ShaderNode; roughness: ShaderNode } {
+  const { night } = nodes;
   const puddle = puddleNoise(positionWorld).mul(wetness).mul(paved);
   const darken = mix(float(1), mix(float(0.93), mix(float(0.86), float(0.76), night), paved), wetness);
   return {
@@ -417,10 +425,12 @@ function wetSheen(
   wetness: ShaderNode,
   paved: ShaderNode,
   puddle: ShaderNode,
+  nodes: AtmosphereNodes,
 ): ShaderNode {
+  const { night, sceneBrightness } = nodes;
   const wetPaved = wetness.mul(paved);
   const skyLevel = mix(float(1), sceneBrightness.min(1).mul(0.5), night);
-  const mirroredLight: ShaderNode = sampleLightField(positionWorld.xz.sub(TOWARDS_CAMERA.mul(GLINT_REACH)));
+  const mirroredLight: ShaderNode = sampleLightField(positionWorld.xz.sub(TOWARDS_CAMERA.mul(GLINT_REACH)), nodes);
   // Glint cells are thin across the view and long towards the camera, so each sparkle reads as a tiny upright streak.
   const xz: ShaderNode = positionWorld.xz;
   const cell = floor(vec2(dot(xz, vec2(Math.SQRT1_2, -Math.SQRT1_2)).mul(16), dot(xz, TOWARDS_CAMERA).mul(5)));
@@ -487,6 +497,7 @@ function createMaterials(
   water: WaterUniforms,
   waterY: number | null,
 ): { ground: MeshStandardNodeMaterial; wall: MeshStandardNodeMaterial; reflectionTarget: Object3D | null } {
+  const nodes = cache.nodes ?? DEFAULT_ATMOSPHERE_NODES;
   const colourMap = cache.terrainMap?.texture ?? cache.terrainAtlas;
   const size = cache.terrainMap?.ref ?? cache.manifest.terrainAtlas;
   const halfTexel = vec2(0.5 / size.width, 0.5 / size.height);
@@ -508,14 +519,14 @@ function createMaterials(
       mix(mix(color(0x5a5248), lower.rgb, lowerCover), upper.rgb, upperCover),
       terrainGradeAt(cache.mapLight, positionWorld.xz),
     );
-    const wet = wetGround(colour, wetness, float(0));
+    const wet = wetGround(colour, wetness, float(0), nodes);
     // The sun and sky see the night-desaturated albedo; local lights (emissive) the full colour.
-    wall.colorNode = moonlit(wet.albedo);
+    wall.colorNode = moonlit(wet.albedo, nodes);
     wall.gloss = wetness;
     wall.roughnessNode = wet.roughness;
     wall.metalnessNode = float(0);
     // Local lights (map light sources, lamps, fires, explosions) from the light field, as diffuse irradiance.
-    wall.emissiveNode = wet.albedo.mul(sampleLightField(positionWorld.xz)).mul(1 / Math.PI);
+    wall.emissiveNode = wet.albedo.mul(sampleLightField(positionWorld.xz, nodes)).mul(1 / Math.PI);
   }
 
   const ground = new ArtMaterial();
@@ -523,12 +534,12 @@ function createMaterials(
   // Tile art under the map's own light (see mapLighting.ts), as the engine draws it.
   const grade: ShaderNode = terrainGradeAt(cache.mapLight, positionWorld.xz);
   const art: ShaderNode = vec4(srgbScale(raw.rgb, grade), raw.a);
-  const paved: ShaderNode = pavedAt(positionWorld.xz);
-  const localLight: ShaderNode = sampleLightField(positionWorld.xz);
-  const wet = wetGround(art.rgb, wetness, paved);
+  const paved: ShaderNode = pavedAt(positionWorld.xz, nodes);
+  const localLight: ShaderNode = sampleLightField(positionWorld.xz, nodes);
+  const wet = wetGround(art.rgb, wetness, paved, nodes);
   let albedo: ShaderNode = wet.albedo;
   let roughness: ShaderNode = wet.roughness;
-  let sheen: ShaderNode = wetSheen(localLight, water.skyHorizon, wetness, paved, wet.puddle);
+  let sheen: ShaderNode = wetSheen(localLight, water.skyHorizon, wetness, paved, wet.puddle, nodes);
   let reflectionTarget: Object3D | null = null;
   const map = cache.terrainMap;
   if (map) {
@@ -561,7 +572,10 @@ function createMaterials(
       reflection = { colour: (mirror as ShaderNode).rgb, coverage: smoothstep(0.9999, 0.999, depth.x) };
       reflectionTarget = mirror.target;
     }
-    const look = waterLook({ position: positionWorld, shore, waterness, art: art.rgb, uniforms: water, reflection });
+    const look = waterLook(
+      { position: positionWorld, shore, waterness, art: art.rgb, uniforms: water, reflection },
+      nodes,
+    );
     // The original paints a grey-blue wet band along every shore. Replace that band with the ground found a little
     // further inland (stepping against the distance field's gradient), then darken it as wet sand, so the shoreline
     // reads as sand -> wet sand -> foam -> shallows instead of a dark outline.
@@ -578,11 +592,13 @@ function createMaterials(
     );
     const band = smoothstep(-0.55, -0.12, shore);
     const sand = wetShore(shore);
-    const land = mix(albedo, wetGround(inland, wetness, paved).albedo, band).mul(mix(float(1), float(0.8), sand));
-    albedo = mix(land, waterForDisplay(look.body), waterness);
+    const land = mix(albedo, wetGround(inland, wetness, paved, nodes).albedo, band).mul(
+      mix(float(1), float(0.8), sand),
+    );
+    albedo = mix(land, waterForDisplay(look.body, nodes), waterness);
     roughness = mix(mix(roughness, float(0.35), sand), float(1), waterness);
     sheen = sheen.mul(float(1).sub(waterness));
-    ground.emissiveNode = look.emission.mul(mix(float(1), float(WATER_LEVEL), faithfulDisplay));
+    ground.emissiveNode = look.emission.mul(mix(float(1), float(WATER_LEVEL), nodes.faithfulDisplay));
   } else {
     // Per-tile atlas fallback: the painted water with sky reflection and glints, as before.
     const surface = waterSurface(water);
@@ -595,7 +611,7 @@ function createMaterials(
   // Contact shading darkens every light at cliff feet (an occlusion term); the sun and sky see the night-desaturated
   // albedo, local lights (emissive, below) the full colour.
   albedo = albedo.mul(attribute('contact', 'float'));
-  ground.colorNode = moonlit(albedo);
+  ground.colorNode = moonlit(albedo, nodes);
   // Dry original art has no sheen of its own; wet ground and puddles reflect the sun.
   ground.gloss = max(wetness, wet.puddle);
   ground.roughnessNode = roughness;

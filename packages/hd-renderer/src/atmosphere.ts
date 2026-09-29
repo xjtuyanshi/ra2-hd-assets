@@ -15,57 +15,89 @@ import type { EmitterLayer } from './emitters';
 import type { LightField } from './lightField';
 import type { ShaderNode } from './tsl';
 
-/**
- * Scene-wide atmosphere inputs shared by every material (terrain, sprites, voxels, rain, smoke, mist). Like voxelFill,
- * these are module singletons: one HdRenderer per page drives them each frame.
- */
+/** Shader inputs owned by one renderer/world. Legacy exports below remain for standalone material callers. */
+export class AtmosphereNodes {
+  private disposed = false;
+  private readonly resources = new Set<{ dispose(): void }>();
+  /** Materials and lookup textures created for this context share its lifetime. */
+  own<T extends { dispose(): void }>(resource: T): T {
+    this.resources.add(resource);
+    return resource;
+  }
+  readonly sceneLevel = uniform(new Color(1, 1, 1));
+  readonly sceneBrightness = uniform(1);
+  readonly night = uniform(0);
+  readonly moonDesaturation = uniform(0);
+  readonly windowGain = uniform(0);
+  readonly rainAmount = uniform(0);
+  readonly referenceLevel = uniform(1);
+  private readonly black = new DataTexture(new Float32Array(4), 1, 1, RGBAFormat, FloatType);
+  private readonly noSurface = new DataTexture(new Uint8Array(2), 1, 1, RGFormat, UnsignedByteType);
+  readonly lightFieldTexture = texture(this.black);
+  readonly lightFieldSize = uniform(new Vector2(1, 1));
+  readonly lightFieldScale = uniform(1);
+  readonly surfaceTexture = texture(this.noSurface);
+  readonly surfaceSize = uniform(new Vector2(1, 1));
+  readonly moonNeutral = uniform(new Color(1, 1, 1));
+  readonly faithfulDisplay = uniform(1);
 
-/** Flat-ground irradiance of the sun and sky relative to clear noon, per channel (1 = the original's daylight). */
-export const sceneLevel = uniform(new Color(1, 1, 1));
-/** Luminance of sceneLevel relative to clear noon (1 at clear noon exactly): unlit effects (smoke, rain) scale by it. */
-export const sceneBrightness = uniform(1);
-/** 0 = day, 1 = night. */
-export const night = uniform(0);
-/**
- * Desaturation of the moonlit (sun and sky) term at night, 0 by day: concept C keeps the unlit city a muted blue-grey
- * so lamps, windows and fires stand out as the saturated accents. Materials apply it to the albedo that meets the sun
- * and sky only (moonlit()); local lights (the light field), lit windows and fires keep full colour.
- */
-export const moonDesaturation = uniform(0);
-/** Lit-window strength: smoothstep(0.25, 0.85, night) while windows are enabled, else 0. */
-export const windowGain = uniform(0);
-/** 0..1 rain intensity. */
-export const rainAmount = uniform(0);
-/** Flat-ground noon irradiance (the exposure reference): light-field values divided by it are relative to noon. */
-export const referenceLevel = uniform(1);
+  constructor() {
+    this.black.needsUpdate = true;
+    this.noSurface.needsUpdate = true;
+  }
 
-const black = new DataTexture(new Float32Array(4), 1, 1, RGBAFormat, FloatType);
-black.needsUpdate = true;
-/**
- * The light field: every local light (map light sources, lamps, explosions, fires) as irradiance on the ground, one
- * whole-map texture addressed by world x/z. The renderer swaps its value for the LightField render target; the default
- * is black, so every consumer adds exactly nothing until a light field exists.
- */
-export const lightFieldTexture = texture(black);
-/** World extent (x, z) the light field covers. */
-export const lightFieldSize = uniform(new Vector2(1, 1));
-/** Encoding scale (1 for float targets; 8 when an 8-bit target stores irradiance / 8). */
-export const lightFieldScale = uniform(1);
+  /** Mirror a renderer's inputs into layers created before its world was known, without replacing their nodes. */
+  copyValuesFrom(source: AtmosphereNodes): void {
+    this.sceneLevel.value.copy(source.sceneLevel.value);
+    this.sceneBrightness.value = source.sceneBrightness.value;
+    this.night.value = source.night.value;
+    this.moonDesaturation.value = source.moonDesaturation.value;
+    this.windowGain.value = source.windowGain.value;
+    this.rainAmount.value = source.rainAmount.value;
+    this.referenceLevel.value = source.referenceLevel.value;
+    this.lightFieldTexture.value = source.lightFieldTexture.value;
+    this.lightFieldSize.value.copy(source.lightFieldSize.value);
+    this.lightFieldScale.value = source.lightFieldScale.value;
+    this.surfaceTexture.value = source.surfaceTexture.value;
+    this.surfaceSize.value.copy(source.surfaceSize.value);
+    this.moonNeutral.value.copy(source.moonNeutral.value);
+    this.faithfulDisplay.value = source.faithfulDisplay.value;
+  }
+
+  /** Only the fallback textures belong here; worlds and light fields own the textures they bind. */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const resource of this.resources) resource.dispose();
+    this.resources.clear();
+    this.black.dispose();
+    this.noSurface.dispose();
+  }
+}
+
+/** Compatibility context for callers constructing standalone materials without a renderer. */
+export const DEFAULT_ATMOSPHERE_NODES = new AtmosphereNodes();
+export const {
+  sceneLevel,
+  sceneBrightness,
+  night,
+  moonDesaturation,
+  windowGain,
+  rainAmount,
+  referenceLevel,
+  lightFieldTexture,
+  lightFieldSize,
+  lightFieldScale,
+  surfaceTexture,
+  surfaceSize,
+  moonNeutral,
+} = DEFAULT_ATMOSPHERE_NODES;
 /** Irradiance lamps and fires carry on objects, half-way between their colour and its luminance. */
 export const OBJECT_TINT = 0.5;
 
-const noSurface = new DataTexture(new Uint8Array(2), 1, 1, RGFormat, UnsignedByteType);
-noSurface.needsUpdate = true;
-/**
- * Per-cell surface texture (R: paved 0..1, linear-filtered; G: open water), addressed by world x/z like the light
- * field. Default: nothing paved, so wet sheen, puddles and reflection streaks stay off without a map.
- */
-export const surfaceTexture = texture(noSurface);
-export const surfaceSize = uniform(new Vector2(1, 1));
-
 /** 0..1 how paved (asphalt, concrete, brick) the ground is at a world xz. */
-export function pavedAt(xz: ShaderNode): ShaderNode {
-  return texture(surfaceTexture, xz.div(surfaceSize)).r;
+export function pavedAt(xz: ShaderNode, nodes = DEFAULT_ATMOSPHERE_NODES): ShaderNode {
+  return texture(nodes.surfaceTexture, xz.div(nodes.surfaceSize)).r;
 }
 
 /** Puddle mask 0..1 on wet paved ground (the same noise the terrain uses, so streaks brighten over puddles). */
@@ -78,25 +110,24 @@ export function puddleNoise(position: ShaderNode): ShaderNode {
  * by the renderer. Desaturating towards plain grey let the blue night sky take over the grey share (yellow-green grass
  * turned teal); towards this grey the desaturated share is lit neutral and the night keeps its hues, only muted.
  */
-export const moonNeutral = uniform(new Color(1, 1, 1));
 
 /** `colour` as the moonlit term sees it: pulled towards moonNeutral grey by moonDesaturation (a no-op by day). */
-export function moonlit(colour: ShaderNode): ShaderNode {
+export function moonlit(colour: ShaderNode, nodes = DEFAULT_ATMOSPHERE_NODES): ShaderNode {
   const l: ShaderNode = luminance(colour);
-  return mix(colour, (moonNeutral as ShaderNode).mul(l), moonDesaturation);
+  return mix(colour, (nodes.moonNeutral as ShaderNode).mul(l), nodes.moonDesaturation);
 }
 
 /** Local light irradiance at a ground point (world xz), linear RGB. */
-export function sampleLightField(xz: ShaderNode): ShaderNode {
-  return texture(lightFieldTexture, xz.div(lightFieldSize)).rgb.mul(lightFieldScale);
+export function sampleLightField(xz: ShaderNode, nodes = DEFAULT_ATMOSPHERE_NODES): ShaderNode {
+  return texture(nodes.lightFieldTexture, xz.div(nodes.lightFieldSize)).rgb.mul(nodes.lightFieldScale);
 }
 
 /**
  * Local light as objects take it: the engine lights objects without the tint of light sources, so art keeps half of
  * the light's colour (OBJECT_TINT) and gets the rest as neutral brightness.
  */
-export function objectLight(xz: ShaderNode): ShaderNode {
-  const lf: ShaderNode = sampleLightField(xz);
+export function objectLight(xz: ShaderNode, nodes = DEFAULT_ATMOSPHERE_NODES): ShaderNode {
+  const lf: ShaderNode = sampleLightField(xz, nodes);
   const l: ShaderNode = luminance(lf);
   return mix(vec3(l, l, l), lf, float(OBJECT_TINT));
 }
@@ -122,6 +153,7 @@ export const DEFAULT_ATMOSPHERE: AtmosphereProfile = { kind: 'day', hour: 12, ni
 
 /** What a world's night dressing gets once the renderer is ready. */
 export interface AtmosphereContext {
+  nodes?: AtmosphereNodes;
   scene: Scene;
   lightField: LightField;
   emitters: EmitterLayer;

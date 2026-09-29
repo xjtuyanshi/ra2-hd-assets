@@ -29,7 +29,7 @@ import {
   vec4,
   vertexStage,
 } from 'three/tsl';
-import { night, referenceLevel, sampleLightField, sceneBrightness, surfaceTexture, surfaceSize } from './atmosphere';
+import { DEFAULT_ATMOSPHERE_NODES, sampleLightField } from './atmosphere';
 import type { ShaderNode } from './tsl';
 
 const RAIN_DROPS = 9000;
@@ -47,7 +47,14 @@ export interface RainSystem {
   windZ: ShaderNode;
 }
 
-export function buildRain(mapWidth: number, mapHeight: number, heightTexture: DataTexture, waterY: number): RainSystem {
+export function buildRain(
+  mapWidth: number,
+  mapHeight: number,
+  heightTexture: DataTexture,
+  waterY: number,
+  nodes = DEFAULT_ATMOSPHERE_NODES,
+): RainSystem {
+  const { night, referenceLevel, sceneBrightness, surfaceTexture, surfaceSize } = nodes;
   const group = new Object3D();
   group.name = 'rain';
   const center = uniform(new Vector3());
@@ -69,7 +76,7 @@ export function buildRain(mapWidth: number, mapHeight: number, heightTexture: Da
   const rainColour = vec3(0.72, 0.78, 0.85);
   const litAt = (x: ShaderNode, z: ShaderNode, height: ShaderNode, local: number, level: ShaderNode) =>
     level.add(
-      sampleLightField(vec2(x, z))
+      sampleLightField(vec2(x, z), nodes)
         .div(referenceLevel)
         .mul(local)
         .mul(exp(height.max(0).mul(-0.35))),

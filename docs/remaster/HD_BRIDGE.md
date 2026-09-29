@@ -9,7 +9,7 @@ Production builds contain only inert plumbing: the page's `hdBridgeRequested` is
 development-only dynamic imports and resolve to null, and nothing calls the remaining pieces: the VM/Worker
 `render-state` and `tactical-passthrough` messages, the VM core's opt-in (`renderPassthrough`) handling and the frame
 renderer's key and transparent-rectangle paths. The page bridge, three.js and `packages/hd-renderer`, the YR state,
-shroud and effects readers, the guest gate engine with the YR passthrough patch table, and the development server's
+shroud, overlay and effects readers, the guest gate engine with the YR passthrough patch table, and the development server's
 `/hd-cache` route are not part of production builds or `vite preview`. `tests/basic/architecture/dependencies.test.ts`
 walks the production import graph from `index.html` (Worker and worklet entries included) and fails if the YR readers,
 the passthrough patch table or the guest gate engine become reachable outside an `import.meta.env.DEV` branch. The
@@ -19,10 +19,11 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
 ## How it fits together
 
 1. **Game state.** `VmShell.getRenderState()` (main thread and VM Worker alike) returns a game-neutral
-   `GameRenderState` (`src/games/renderState.ts`: logic frame, tactical view position, map, houses, objects, shroud and
+   `GameRenderState` (`src/games/renderState.ts`: logic frame, tactical view position, map, houses, objects, shroud, overlays and
    effects) produced by the game's `GameRuntimeHooks.createRenderStateReader`. For YR 1.001 that is
    `src/games/yr/renderState.ts`, which combines `src/games/yr/stateReader.ts` (objects, houses, map, tactical view
-   position), `src/games/yr/shroudReader.ts` (the local player's shroud) and `src/games/yr/effectsReader.ts` (anims,
+   position), `src/games/yr/shroudReader.ts` (the local player's shroud), `src/games/yr/overlayReader.ts` (cell overlays),
+   and `src/games/yr/effectsReader.ts` (anims,
    projectiles, lasers, electric bolts and particle systems); the shroud and effects readers are created once a map is
    loaded. All of them only read guest memory, validate every pointer and refuse any executable other than the pinned
    YR 1.001 build. The VM core returns null while a shell page (menus, in-game options, score screen) owns the screen.
@@ -40,8 +41,8 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    including when the game exits or the boot is cancelled. `__hdBridge.toggle()` in the console switches between the
    HD view and the original picture; `__hdBridge.passthrough` shows the state.
 3. **Live view.** `packages/hd-renderer/src/live/liveView.ts` draws the snapshot: static map content (terrain, water,
-   trees) from the map cache; ore, walls and smudges from the map cache too but owned by the view so the engine's cell
-   changes can replace them (bridge H3); every building/vehicle/infantry/aircraft from the snapshot using the
+   trees and smudges) from the map cache; overlays (walls, fences, ore, gems and other overlay types) from the live
+   cell snapshot when present, otherwise from the map cache; every building/vehicle/infantry/aircraft from the snapshot using the
    per-theater type library (voxel units through `live/voxelUnits.ts`, SHP vehicles such as the terror drone, squid
    and dolphin through `live/shpUnits.ts`, and the voxel turrets of defences with `TurretAnimIsVoxel=yes` such as the
    sentry gun, flak cannon, Patriot, Grand Cannon and Gattling cannon, placed at the art's `TurretAnimX/Y` and drawn over
@@ -57,6 +58,12 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    whose art is missing is tracked but drawn as nothing (`LiveView.diagnostics()` lists such types and counts missing
    voxel turrets; `?hd-debug=placeholders` shows a small grey box instead). Light sources and lit windows of the
    buildings standing in the match feed the night dressing (map light sources, HD street lamps, windows).
+   Overlay polls run at most once per 250 ms, with an immediate reset for a new battle. The reader reuses scratch
+   arrays, compares contents exactly, and only copies changed publications. Worker replies omit an unchanged overlay
+   grid even when other objects move; the page retains its previous immutable grid. LiveView retains overlay instances
+   and GPU batches while their revision and presentation inputs stay unchanged. The complete engine frame byte selects
+   both wall connections/damage and resource growth; walls use the local player's unit-palette remap. The existing
+   shroud post pass masks these sprites as well. See [Live overlays](LIVE_OVERLAYS.md) for cache upgrade and acceptance.
 4. **Effects.** `live/effects.ts` (`LiveEffectsDriver`) draws the engine's effect list in two layers. The base layer is
    the ORIGINAL art: every anim the engine plays is drawn with its own SHP frames from the effect art sidecar
    (`live/effectArt.ts`, `live/effectSprites.ts`) at the engine's position, frame, layer and translucency, with

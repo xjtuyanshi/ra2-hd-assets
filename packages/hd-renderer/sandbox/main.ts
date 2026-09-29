@@ -7,7 +7,7 @@ import type { RenderEvent, RenderObject, RenderState, Weather } from '../src/con
 import { createScenario } from './scenario';
 import { SpriteLayer } from '../src/ra2/sprites';
 import { loadRa2World } from '../src/ra2/world';
-import { voxelExtraLight, voxelOcclusion, voxelSheen } from '../src/ra2/vpl';
+import { voxelLightingFor } from '../src/ra2/vpl';
 import { voxelShape } from '../src/ra2/voxels';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
@@ -25,14 +25,16 @@ if (params.has('weather')) state.environment.weather = params.get('weather') as 
 // ?map=<name> draws an original map from the local HD cache (pnpm hd:extract) instead of the procedural scenario.
 const mapName = params.get('map');
 // ?units=1 parks the extracted voxel vehicles near the start point, in all eight facings, to review them.
-// ?vshape=<corner relax>,<normal blend>: voxel shape refinement for review (before any model is built).
+// ?vshape=<corner relax>,<normal blend>: this world's voxel refinement, independent of other renderers.
+const shape = { ...voxelShape };
 if (params.has('vshape')) {
   const [relax, blend] = params.get('vshape')!.split(',').map(Number);
-  if (Number.isFinite(relax)) voxelShape.cornerRelax = relax!;
-  if (Number.isFinite(blend)) voxelShape.normalBlend = blend!;
+  if (Number.isFinite(relax)) shape.cornerRelax = relax!;
+  if (Number.isFinite(blend)) shape.normalBlend = blend!;
 }
 const world = mapName
   ? await loadRa2World(`/${encodeURIComponent(mapName)}`, {
+      voxelShape: shape,
       // ?tmap=0 draws the per-tile atlas instead of the (AI-upscaled) whole-map terrain image, for A/B review.
       terrainMap: params.get('tmap') !== '0',
       hdSprites: params.get('hdsprites') !== '0',
@@ -101,6 +103,7 @@ function unitGrid(manifest: HdCacheManifest): MapObject[] {
     );
 }
 const hd = new HdRenderer(canvas, state, {
+  nodes: world?.nodes,
   forceWebGL: params.get('webgl') === '1',
   requiredLimits: await HdRenderer.adapterLimits(),
   // ?perf=1: GPU timestamp queries (window.__hd.stats().gpuMs).
@@ -123,6 +126,7 @@ if (params.has('shadows')) hd.settings.shadows = params.get('shadows') !== '0';
 if (params.has('debug')) hd.settings.debugView = params.get('debug') as HdSettings['debugView'];
 // Voxel material review (see src/ra2/vpl.ts): ?vpl=<extra light>,<occlusion>,<sheen>.
 if (params.has('vpl')) {
+  const { voxelExtraLight, voxelOcclusion, voxelSheen } = voxelLightingFor(hd.nodes);
   const [extra, occlusion, sheen] = params.get('vpl')!.split(',').map(Number);
   if (Number.isFinite(extra)) voxelExtraLight.value = extra!;
   if (Number.isFinite(occlusion)) voxelOcclusion.value = occlusion!;

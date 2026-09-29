@@ -239,7 +239,7 @@ it('生产构建不可达 HD 桥接的开发期模块', () => {
   // in index.html, through Worker and worklet entries, and require that none of them is reachable. Only src/ is
   // walked; packages are separate projects that must not reach back into the app.
   const devOnly =
-    /^src\/games\/(?:yr\/(?:renderState|tacticalPassthrough|stateReader|shroudReader|effectsReader)|shared\/guestGates)\.ts$/;
+    /^src\/games\/(?:yr\/(?:renderState|tacticalPassthrough|stateReader|shroudReader|effectsReader|overlayReader)|shared\/guestGates)\.ts$/;
   const html = readFileSync('index.html', 'utf8');
   const entries = [...html.matchAll(/<script\b[^>]*\btype="module"[^>]*\bsrc="\/([^"]+)"/g)].map((match) => match[1]!);
   expect(entries).toContain('src/main.ts');

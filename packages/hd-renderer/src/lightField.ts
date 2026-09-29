@@ -36,7 +36,7 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
-import { lightFieldScale, lightFieldSize, lightFieldTexture } from './atmosphere';
+import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from './atmosphere';
 import type { ShaderNode } from './tsl';
 
 /** Falloff of a light-field entry: the engine's linear 1 - d, or a tighter pool (1 - d^2)^2 / (1 + 10 d^2). */
@@ -68,6 +68,7 @@ interface Pulse {
 }
 
 interface Kept {
+  key: string;
   x: number;
   z: number;
   colour: [number, number, number];
@@ -133,6 +134,7 @@ export class LightField {
   private readonly pulses: Record<PulsePool, Pulse[]> = { explosion: [], flash: [] };
   private readonly cursor: Record<PulsePool, number> = { explosion: 0, flash: 0 };
   private readonly kept = new Map<string, Kept>();
+  private readonly mirrored = new WeakMap<DynamicLight[], DynamicLight[]>();
   private baseStrength = 0;
   /** Whether the base grid fades with the night (static gain) or is always on (see MapLightStaging). */
   private baseFollowsNight = true;
@@ -148,7 +150,7 @@ export class LightField {
   constructor(
     readonly width: number,
     readonly height: number,
-    options: { halfFloat?: boolean } = {},
+    options: { halfFloat?: boolean; nodes?: AtmosphereNodes } = {},
   ) {
     this.texelsPerCell = Math.max(1, Math.min(8, Math.floor(2048 / Math.max(width, height))));
     const halfFloat = options.halfFloat ?? true;
@@ -189,9 +191,10 @@ export class LightField {
     this.dynamics = this.buildLights(DYNAMIC, float(1));
     this.scene.add(this.statics.mesh, this.dynamics.mesh);
 
-    lightFieldTexture.value = this.target.texture;
-    lightFieldSize.value.set(width, height);
-    lightFieldScale.value = this.encodeScale;
+    const nodes = options.nodes ?? DEFAULT_ATMOSPHERE_NODES;
+    nodes.lightFieldTexture.value = this.target.texture;
+    nodes.lightFieldSize.value.set(width, height);
+    nodes.lightFieldScale.value = this.encodeScale;
   }
 
   private buildLights(capacity: number, gain: ShaderNode): LightInstances {
@@ -329,6 +332,7 @@ export class LightField {
     }
     if (this.kept.size >= KEPT) return;
     this.kept.set(key, {
+      key,
       x: at.x,
       z: at.z,
       colour: [...colour],
@@ -381,9 +385,9 @@ export class LightField {
       if (k <= 0) continue;
       this.writeLight(dyn, n++, p.x, p.z, p.radius, SHAPE_POOL, p.colour, k, 0, 0);
     }
-    for (const [key, f] of this.kept) {
+    for (const f of this.kept.values()) {
       if (now - f.seen > f.ttl) {
-        this.kept.delete(key);
+        this.kept.delete(f.key);
         continue;
       }
       const k = f.peak * LightField.keptFade(f, now);
@@ -440,23 +444,18 @@ export class LightField {
    */
   dynamicLights(now: number, out: DynamicLight[]): DynamicLight[] {
     let n = 0;
-    const put = (x: number, z: number, colour: readonly number[], k: number, kind: DynamicLight['kind']) => {
-      const e = (out[n] ??= { x: 0, z: 0, colour: [0, 0, 0], kind });
-      e.x = x;
-      e.z = z;
-      e.colour[0] = colour[0]! * k;
-      e.colour[1] = colour[1]! * k;
-      e.colour[2] = colour[2]! * k;
-      e.kind = kind;
-      n++;
-    };
+    let pool = this.mirrored.get(out);
+    if (!pool) {
+      pool = [];
+      this.mirrored.set(out, pool);
+    }
     for (const p of this.pulses.explosion) {
       const k = LightField.pulseIntensity(p, now);
-      if (k > 0) put(p.x, p.z, p.colour, k, 'pulse');
+      if (k > 0) out[n] = writeDynamicLight(pool, n++, p.x, p.z, p.colour, k, 'pulse');
     }
     for (const f of this.kept.values()) {
       if (now - f.seen > f.ttl) continue;
-      put(f.x, f.z, f.colour, f.peak * Math.min(1, (now - f.born) / 0.25), 'fire');
+      out[n] = writeDynamicLight(pool, n++, f.x, f.z, f.colour, f.peak * Math.min(1, (now - f.born) / 0.25), 'fire');
     }
     out.length = n;
     return out;
@@ -465,6 +464,18 @@ export class LightField {
   dispose(): void {
     this.target.dispose();
     this.baseTexture.dispose();
+    this.scene.traverse((object) => {
+      if (object instanceof Mesh) {
+        object.geometry.dispose();
+        if (Array.isArray(object.material)) object.material.forEach((material) => material.dispose());
+        else object.material.dispose();
+        if (object instanceof InstancedMesh) object.dispose();
+      }
+    });
+    this.scene.clear();
+    this.kept.clear();
+    this.pulses.explosion.length = 0;
+    this.pulses.flash.length = 0;
   }
 }
 
@@ -482,4 +493,23 @@ function hashString(text: string): number {
   let h = 2166136261;
   for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619);
   return h >>> 0;
+}
+
+function writeDynamicLight(
+  pool: DynamicLight[],
+  index: number,
+  x: number,
+  z: number,
+  colour: readonly number[],
+  k: number,
+  kind: DynamicLight['kind'],
+): DynamicLight {
+  const entry = (pool[index] ??= { x: 0, z: 0, colour: [0, 0, 0], kind });
+  entry.x = x;
+  entry.z = z;
+  entry.colour[0] = colour[0]! * k;
+  entry.colour[1] = colour[1]! * k;
+  entry.colour[2] = colour[2]! * k;
+  entry.kind = kind;
+  return entry;
 }

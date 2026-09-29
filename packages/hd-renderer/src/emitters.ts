@@ -26,7 +26,7 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
-import { pavedAt, puddleNoise, rainAmount } from './atmosphere';
+import { DEFAULT_ATMOSPHERE_NODES, pavedAt, puddleNoise } from './atmosphere';
 import type { ShaderNode } from './tsl';
 
 /** One visible light source: a glowing head above its base and, on wet paved ground, its reflection. */
@@ -84,7 +84,7 @@ export class EmitterLayer {
   private readonly headCount = [0, 0];
   private readonly streakCount = [0, 0];
 
-  constructor() {
+  constructor(readonly nodes = DEFAULT_ATMOSPHERE_NODES) {
     this.root.name = 'emitters';
     this.layers = [STATIC_CAPACITY, DYNAMIC_CAPACITY].map((capacity, index) => this.build(capacity, index === 0));
   }
@@ -116,7 +116,7 @@ export class EmitterLayer {
       const d = length(uv().sub(0.5).mul(2));
       // A modest core keeps sodium heads orange below the tone mapper's shoulder instead of cream-white.
       const core = smoothstep(0.2, 0.0, d).mul(2.5);
-      const halo = pow(smoothstep(1.0, 0.0, d), 3).mul(float(0.3).add(rainAmount.mul(0.2)));
+      const halo = pow(smoothstep(1.0, 0.0, d), 3).mul(float(0.3).add(this.nodes.rainAmount.mul(0.2)));
       return vec4(g.rgb.mul(core.add(halo)).mul(gain), 1);
     })();
     const headMesh = new InstancedMesh(new PlaneGeometry(1, 1), heads, capacity);
@@ -161,7 +161,7 @@ export class EmitterLayer {
       const gloss = mix(float(0.6), float(1.8), puddleNoise(positionWorld));
       const bands = smoothstep(0.1, 0.9, along.mul(30).add(wobble.mul(3)).add(time.mul(2.5)).sin().mul(0.5).add(0.5));
       const ripple = mix(float(0.45), float(1), bands);
-      const surface = pavedAt(positionWorld.xz).mul(this.wet);
+      const surface = pavedAt(positionWorld.xz, this.nodes).mul(this.wet);
       return vec4(s.rgb.mul(shape).mul(gloss).mul(ripple).mul(surface).mul(gain), 1);
     })();
     const streakMesh = new InstancedMesh(new PlaneGeometry(1, 1), streaks, capacity);

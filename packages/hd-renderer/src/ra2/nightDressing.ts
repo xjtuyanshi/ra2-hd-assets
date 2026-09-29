@@ -9,7 +9,7 @@ import {
 import { instancedBufferAttribute, positionGeometry, vec3, vec4 } from 'three/tsl';
 import type { MapLightsSidecar } from '../../../ra2-assets/src/lights';
 import type { MapObject, SpriteFrame } from '../../../ra2-assets/src/manifest';
-import { sceneLevel, type AtmosphereContext, type FrameAtmosphere, type WorldDressing } from '../atmosphere';
+import { type AtmosphereContext, type FrameAtmosphere, type WorldDressing } from '../atmosphere';
 import type { Emitter, EmitterLayer } from '../emitters';
 import { SHAPE_POOL, type LightEntry } from '../lightField';
 import type { ShaderNode } from '../tsl';
@@ -414,7 +414,7 @@ function buildPoles(bases: readonly Vector3[], head: number, camera: EmitterLaye
     .add(camera.cameraRight.mul(positionGeometry.x.mul(0.06)))
     .add(vec3(0, positionGeometry.y.add(0.5).mul(head), 0))
     .add(camera.toCamera.mul(POLE_PUSH));
-  material.colorNode = vec4(vec3(0.07, 0.07, 0.075).mul(sceneLevel), 1);
+  material.colorNode = vec4(vec3(0.07, 0.07, 0.075).mul(camera.nodes.sceneLevel), 1);
   const mesh = new InstancedMesh(new PlaneGeometry(1, 1), material, bases.length);
   mesh.frustumCulled = false;
   mesh.renderOrder = 4;

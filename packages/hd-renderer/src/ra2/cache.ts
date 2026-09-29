@@ -14,7 +14,8 @@ import {
 import type { HdCacheManifest, TileEntry, VoxelModel } from '../../../ra2-assets/src/manifest';
 import { validateMapLights, type MapLightsSidecar } from '../../../ra2-assets/src/lights';
 import { MAP_MATERIALS_FILE, type MapMaterials } from '../../../ra2-assets/src/mapMaterials';
-import { MapLightGrade, setPaletteGrade } from './mapLighting';
+import { MapLightGrade, setPaletteGrade, setPaletteNodes } from './mapLighting';
+import { AtmosphereNodes } from '../atmosphere';
 import { buildShoreField } from './shoreField';
 
 /** windows.json next to a lit-window mask (packages/ra2-assets src/node/lights.ts WindowsSidecar). */
@@ -38,6 +39,8 @@ export interface WindowsIndex {
  * produced locally from the player's own game files and served from gameres/hd-cache by the sandbox dev server.
  */
 export interface Ra2Cache {
+  /** Material inputs of the renderer/world owning this cache. */
+  nodes?: AtmosphereNodes;
   base: string;
   manifest: HdCacheManifest;
   exists: Uint8Array;
@@ -170,6 +173,7 @@ export async function loadMaskTexture(url: string): Promise<Texture | null> {
 }
 
 export interface Ra2CacheOptions {
+  nodes?: AtmosphereNodes;
   /** Use the manifest's whole-map terrain image (AI-upscaled when available); default true. */
   terrainMap?: boolean;
   /** Use the HD sprite atlas when the cache has one; default true. */
@@ -209,6 +213,7 @@ export async function loadHdAtlas(base: string, ref: HdAtlasRef): Promise<{ colo
 }
 
 export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}): Promise<Ra2Cache> {
+  const nodes = options.nodes ?? new AtmosphereNodes();
   const url = (file: string) => `${base.replace(/\/$/, '')}/${file}`;
   const manifestBytes = await (await fetch(url('manifest.json'))).arrayBuffer();
   const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as HdCacheManifest;
@@ -318,10 +323,14 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
         lights?.lights ?? [],
       )
     : null;
-  for (const rgb of paletteRgb.values()) setPaletteGrade(rgb, mapLight);
+  for (const rgb of paletteRgb.values()) {
+    setPaletteGrade(rgb, mapLight);
+    setPaletteNodes(rgb, nodes);
+  }
 
   return {
     base,
+    nodes,
     manifest,
     lights,
     mapLight,
@@ -370,6 +379,7 @@ export function addPalette(cache: Ra2Cache, key: string, rgb: Uint8Array): boole
   }
   cache.paletteRgb.set(key, rgb);
   setPaletteGrade(rgb, cache.mapLight);
+  if (cache.nodes) setPaletteNodes(rgb, cache.nodes);
   writePaletteRow(stacked, row, rgb);
   cache.paletteAtlas.needsUpdate = true;
   return true;
@@ -395,6 +405,7 @@ export function addHousePalettes(
     remap.slice(0, 16).forEach(([r, g, b], i) => remapped.set([r, g, b], (16 + i) * 3));
     cache.paletteRgb.set(houseKey, remapped);
     setPaletteGrade(remapped, cache.mapLight);
+    if (cache.nodes) setPaletteNodes(remapped, cache.nodes);
     let row = cache.paletteRow.get(houseKey);
     if (row === undefined) {
       if (next >= capacity) return false;
@@ -444,9 +455,18 @@ export function tileAtlasPixel(
 }
 
 /** Palette key for an object's art: the house-remapped row when the art is remappable and the owner is known. */
+const remapKeys = new WeakMap<Ra2Cache, Map<string, Map<string, string>>>();
+
 export function paletteFor(cache: Ra2Cache, palette: string, remap: boolean, owner?: string): string {
-  const key = `${palette}@${owner}`;
-  return remap && owner && cache.paletteRow.has(key) ? key : palette;
+  if (!remap || !owner) return palette;
+  let owners = remapKeys.get(cache);
+  if (!owners) remapKeys.set(cache, (owners = new Map()));
+  let palettes = owners.get(owner);
+  if (!palettes) owners.set(owner, (palettes = new Map()));
+  let key = palettes.get(palette);
+  if (!key) palettes.set(palette, (key = `${palette}@${owner}`));
+  // Palette rows may arrive after the first lookup, so cache only the key, never its availability.
+  return cache.paletteRow.has(key) ? key : palette;
 }
 
 /** World point on the ground at `level` whose engine projection is the screen point (sx, sy). */

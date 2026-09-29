@@ -1,7 +1,6 @@
 import {
   Color,
   Group,
-  InstancedBufferAttribute,
   InstancedMesh,
   MeshBasicNodeMaterial,
   NormalBlending,
@@ -32,6 +31,7 @@ import {
   viewportSharedTexture,
 } from 'three/tsl';
 import type { SpriteFrame } from '../../../ra2-assets/src/manifest';
+import { DirtyAttribute } from '../dirtyAttribute';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import type { Ra2Cache } from '../ra2/cache';
@@ -68,6 +68,13 @@ const CAPACITY = 4096;
 /** Quads are one texel larger on every side, so the filtered edge can fade out instead of being cut. */
 const MARGIN = 1;
 const RENDER_ORDER: Record<EffectPass, number> = { ground: 6, air: 7, top: 8 };
+const DRAW_RANK: Record<EffectDraw, number> = { flat: 0, shadow: 1, card: 2 };
+const compareCards = (a: EffectInstance, b: EffectInstance): number =>
+  DRAW_RANK[a.draw] - DRAW_RANK[b.draw] || a.depth - b.depth;
+interface PageGroup {
+  key: string;
+  instances: EffectInstance[];
+}
 
 /**
  * The engine's own anim art (explosions, muzzle flashes, smoke, corpses, debris) as camera-facing cards or ground
@@ -98,6 +105,10 @@ export class EffectSpriteLayer {
   private readonly meshes = new Map<string, PageMesh>();
   /** Pages that failed to load and were already reported (their instances are skipped, not retried per frame). */
   private readonly failedPages = new Set<number>();
+  private readonly pageGroups = new Map<number, Record<EffectPass, PageGroup>>();
+  private readonly groups: PageGroup[] = [];
+  private readonly idle: string[] = [];
+  private readonly releaseCandidates = new Set<number>();
 
   constructor(
     private readonly cache: Ra2Cache,
@@ -119,27 +130,32 @@ export class EffectSpriteLayer {
    * disposed, and its page released when no other mesh uses it.
    */
   setInstances(instances: readonly EffectInstance[], now = performance.now() / 1000): boolean {
-    const groups = new Map<string, EffectInstance[]>();
+    for (const group of this.groups) group.instances.length = 0;
     for (const instance of instances) {
       const page = instance.frame.page ?? 0;
-      const key = `${page}:${instance.pass}`;
-      let list = groups.get(key);
-      if (!list) groups.set(key, (list = []));
-      list.push(instance);
+      let groups = this.pageGroups.get(page);
+      if (!groups) {
+        groups = {
+          ground: { key: `${page}:ground`, instances: [] },
+          air: { key: `${page}:air`, instances: [] },
+          top: { key: `${page}:top`, instances: [] },
+        };
+        this.pageGroups.set(page, groups);
+        this.groups.push(groups.ground, groups.air, groups.top);
+      }
+      groups[instance.pass].instances.push(instance);
     }
     let complete = true;
-    for (const [key, list] of groups) {
-      const mesh = this.mesh(key);
+    this.idle.length = 0;
+    for (const { key, instances: list } of this.groups) {
+      const mesh = list.length ? this.mesh(key) : this.meshes.get(key);
       if (mesh === 'loading') complete = false;
-      else if (mesh) mesh.set(list, this.cache, now);
+      else if (mesh) {
+        mesh.set(list, this.cache, now);
+        if (!list.length && now - mesh.lastUsed > MESH_IDLE_SECONDS) this.idle.push(key);
+      }
     }
-    const idle: string[] = [];
-    for (const [key, mesh] of this.meshes) {
-      if (groups.has(key)) continue;
-      mesh.set([], this.cache, now);
-      if (now - mesh.lastUsed > MESH_IDLE_SECONDS) idle.push(key);
-    }
-    if (idle.length) this.evict(idle);
+    if (this.idle.length) this.evict(this.idle);
     return complete;
   }
 
@@ -184,7 +200,8 @@ export class EffectSpriteLayer {
 
   /** Dispose idle meshes; release pages that no remaining mesh draws from. */
   private evict(keys: readonly string[]): void {
-    const pages = new Set<number>();
+    const pages = this.releaseCandidates;
+    pages.clear();
     for (const key of keys) {
       const mesh = this.meshes.get(key)!;
       this.meshes.delete(key);
@@ -213,10 +230,10 @@ class PageMesh {
   translucent = false;
   /** Seconds (setInstances clock) the mesh last drew anything; set on its first instances. */
   lastUsed = -Infinity;
-  private readonly anchor: InstancedBufferAttribute;
-  private readonly rect: InstancedBufferAttribute;
-  private readonly params: InstancedBufferAttribute;
-  private readonly style: InstancedBufferAttribute;
+  private readonly anchor: DirtyAttribute;
+  private readonly rect: DirtyAttribute;
+  private readonly params: DirtyAttribute;
+  private readonly style: DirtyAttribute;
   private readonly opaqueMaterial: MeshBasicNodeMaterial;
   /** Built on the first translucent card (pages of opaque art never compile it). */
   private translucentMaterial: MeshBasicNodeMaterial | null = null;
@@ -227,12 +244,12 @@ class PageMesh {
     private readonly atlas: EffectPage,
     private readonly pass: EffectPass,
   ) {
-    this.anchor = new InstancedBufferAttribute(new Float32Array(CAPACITY * 3), 3);
-    this.rect = new InstancedBufferAttribute(new Float32Array(CAPACITY * 4), 4);
+    this.anchor = new DirtyAttribute(new Float32Array(CAPACITY * 3), 3);
+    this.rect = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
     // x, y = frame offset from the canvas centre (px); z = palette row; w = push.
-    this.params = new InstancedBufferAttribute(new Float32Array(CAPACITY * 4), 4);
+    this.params = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
     // x = opacity; y = 0 card, 1 decal, 2 shadow decal; z = glow allowed.
-    this.style = new InstancedBufferAttribute(new Float32Array(CAPACITY * 4), 4);
+    this.style = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
     this.opaqueMaterial = this.buildMaterial(false);
     this.mesh = new InstancedMesh(new PlaneGeometry(1, 1), this.opaqueMaterial, CAPACITY);
     this.mesh.frustumCulled = false;
@@ -348,34 +365,31 @@ class PageMesh {
     return material;
   }
 
-  set(instances: readonly EffectInstance[], cache: Ra2Cache, now: number): void {
+  set(instances: EffectInstance[], cache: Ra2Cache, now: number): void {
     if (instances.length) this.lastUsed = now;
     // An idle mesh that stays idle uploads nothing.
     if (instances.length === 0 && this.mesh.count === 0) return;
     // Decals first, then shadows, then cards; each in the engine's painter order (screen y).
-    const rank = (s: EffectInstance) => (s.draw === 'flat' ? 0 : s.draw === 'shadow' ? 1 : 2);
-    const ordered = [...instances].sort((a, b) => rank(a) - rank(b) || a.depth - b.depth).slice(0, CAPACITY);
+    instances.sort(compareCards);
+    const count = Math.min(instances.length, CAPACITY);
     let translucent = false;
-    ordered.forEach((s, i) => {
+    for (let i = 0; i < count; i++) {
+      const s = instances[i]!;
       this.anchor.setXYZ(i, s.anchor.x, s.anchor.y, s.anchor.z);
       this.rect.setXYZW(i, s.frame.rect[0], s.frame.rect[1], s.frame.rect[2], s.frame.rect[3]);
       this.params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], cache.paletteRow.get(s.palette) ?? 0, s.push);
       this.style.setXYZW(i, s.alpha, s.draw === 'shadow' ? 2 : s.draw === 'flat' ? 1 : 0, s.glow ? 1 : 0, 0);
       if (s.alpha < 1 && s.draw !== 'shadow') translucent = true;
-    });
-    // Only the live range is uploaded (instances past `count` are never drawn).
-    for (const attribute of [this.anchor, this.rect, this.params, this.style]) {
-      attribute.clearUpdateRanges();
-      if (ordered.length) {
-        attribute.addUpdateRange(0, ordered.length * attribute.itemSize);
-        attribute.needsUpdate = true;
-      }
     }
+    this.anchor.flush();
+    this.rect.flush();
+    this.params.flush();
+    this.style.flush();
     this.translucent = translucent;
     if (translucent) this.translucentMaterial ??= this.buildMaterial(true);
     this.mesh.material = translucent ? this.translucentMaterial! : this.opaqueMaterial;
-    this.mesh.count = ordered.length;
-    this.mesh.visible = ordered.length > 0;
+    this.mesh.count = count;
+    this.mesh.visible = count > 0;
   }
 
   dispose(): void {

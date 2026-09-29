@@ -337,6 +337,7 @@ describe('VmWorkerController request-scoped errors', () => {
       localHouse: 0,
       objects: [],
       shroud: null,
+      overlays: null,
       effects: null,
     };
     core.renderState = snapshot;
@@ -355,6 +356,30 @@ describe('VmWorkerController request-scoped errors', () => {
     await controller.handleMessage({ type: 'render-state', requestId: 8 });
     expect(messages).toContainEqual({ type: 'render-state-reply', requestId: 7, value: null });
     expect(messages).toContainEqual({ type: 'render-state-reply', requestId: 8, value: next });
+    const overlays = {
+      originX: 0,
+      originY: 0,
+      width: 1,
+      height: 1,
+      index: new Int16Array([0]),
+      data: new Uint8Array([3]),
+      types: ['GAWALL'],
+      revision: 1,
+    };
+    core.renderState = { ...snapshot, overlays };
+    await controller.handleMessage({ type: 'render-state', requestId: 9 });
+    expect(messages).toContainEqual({ type: 'render-state-reply', requestId: 9, value: core.renderState });
+    core.renderState = { ...core.renderState, frame: 44 };
+    await controller.handleMessage({ type: 'render-state', requestId: 10 });
+    const { overlays: _grid, ...withoutGrid } = core.renderState;
+    expect(messages).toContainEqual({ type: 'render-state-overlays-unchanged', requestId: 10, value: withoutGrid });
+    expect(messages.at(-1)).not.toHaveProperty('value.overlays');
+    core.renderState = { ...core.renderState, overlays: { ...overlays, data: new Uint8Array([7]), revision: 2 } };
+    await controller.handleMessage({ type: 'render-state', requestId: 11 });
+    expect(messages).toContainEqual({ type: 'render-state-reply', requestId: 11, value: core.renderState });
+    core.renderState = { ...core.renderState, overlays: null };
+    await controller.handleMessage({ type: 'render-state', requestId: 12 });
+    expect(messages).toContainEqual({ type: 'render-state-reply', requestId: 12, value: core.renderState });
     controller.dispose();
   });
   it('uses one request id for init/start and preserves their order', async () => {

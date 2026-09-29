@@ -1,6 +1,6 @@
 import { Color, Matrix4, Vector2, Vector3, type Camera } from 'three/webgpu';
 import { exp, float, getViewPosition, min, mix, mx_noise_float, time, uniform, vec3, vec4 } from 'three/tsl';
-import { night, referenceLevel, sampleLightField, sceneBrightness } from './atmosphere';
+import { DEFAULT_ATMOSPHERE_NODES, sampleLightField } from './atmosphere';
 import type { ShaderNode } from './tsl';
 
 /** Mist never covers more than this fraction of a pixel (readability cap, docs/remaster/PLAN.md). */
@@ -14,6 +14,7 @@ export const MIST_CAP = 0.2;
  * pipeline when the mist starts or stops.
  */
 export class Mist {
+  constructor(readonly nodes = DEFAULT_ATMOSPHERE_NODES) {}
   /** 0..MIST_CAP overall density (set per frame from weather and night). */
   readonly amount = uniform(0);
   readonly tint = uniform(new Color(0.62, 0.68, 0.78));
@@ -63,8 +64,8 @@ export class Mist {
     // In-scattered light: the sky's level (dimmer at night, so the veil never lifts dark wet streets to grey) and the
     // lamps' glow around them.
     const colour = this.tint
-      .mul(sceneBrightness.mul(mix(float(0.45), float(0.26), night)))
-      .add(sampleLightField(world.xz).div(referenceLevel).mul(0.25));
+      .mul(this.nodes.sceneBrightness.mul(mix(float(0.45), float(0.26), this.nodes.night)))
+      .add(sampleLightField(world.xz, this.nodes).div(this.nodes.referenceLevel).mul(0.25));
     return vec4(mix(hdr.rgb, colour, density), hdr.a);
   }
 }

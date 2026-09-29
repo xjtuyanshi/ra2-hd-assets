@@ -5,6 +5,37 @@ Base-agnostic HD 2.5D renderer for the RA2 remaster (three.js r186 `WebGPURender
 It consumes a versioned `RenderState` snapshot (`src/contract.ts`) and never reads or writes engine state, so the same
 renderer and assets can sit behind any base: the RA2 VM memory bridge, a reimplementation, or the procedural sandbox.
 
+## Renderer state and ownership
+
+Each world loaded by `loadRa2World()` owns an `AtmosphereNodes` context, carried by `world.nodes` and `cache.nodes`.
+`HdRenderer.init(world)` adopts that context; a procedural renderer creates its own. Effects and emitters remain
+available from construction. If a world is supplied later with another context, its values are copied into those
+existing layers without reallocating or discarding their state; passing `nodes: world.nodes` to the constructor
+avoids that copy. Material helpers accept an optional context, and `SpriteLayer` inherits the cache's context.
+Light-field and surface textures, day/night uniforms, water display compensation and voxel controls therefore remain
+independent when two worlds render on the same page. Use `voxelLightingFor(hd.nodes)` for that renderer's voxel controls.
+The former named uniform exports remain available for standalone materials using the compatibility context. Legacy custom
+`HdWorld` objects without `nodes` or `cache.nodes` also use that context to keep their existing materials working; pass an
+explicit context to custom material builders and their world to isolate multiple such custom worlds.
+
+Call `hd.dispose()` after stopping presentation. It releases the post pipeline, light-field targets and meshes, and
+context-owned fallback textures, voxel materials and lookup textures. A context belongs to one world/renderer lifetime;
+pass the same `nodes` option to loaders and constructors when explicitly composing them. Map grades remain per cache,
+and palette associations preserve existing voxel-builder signatures. CPU geometry can still be shared across contexts.
+
+Asset-free state-isolation tests and the irradiance microbenchmark can be run with the existing root tools:
+
+```bash
+pnpm exec vitest run packages/hd-renderer/tests/rendererState.test.ts
+pnpm exec node --import tsx packages/hd-renderer/benchmarks/rendererState.ts
+```
+
+The benchmark compares the original helper against the allocation-free implementation; it does not measure GPU cost,
+full-match FPS, or visual equivalence on a physical device.
+
+See [CPU performance and equivalence checks](benchmarks/README.md) for beam/card uploads, indexed atlas lifetime,
+shroud and voxel baselines, regression commands and hardware acceptance boundaries.
+
 ## Run the sandbox
 
 ```bash

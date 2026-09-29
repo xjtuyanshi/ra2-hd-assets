@@ -1,18 +1,27 @@
 import { DataTexture, LinearFilter, Object3D, RGFormat, UnsignedByteType, Vector3 } from 'three/webgpu';
 import { SURFACE, surfaceFromLandType } from '../../../ra2-assets/src/lights';
 import type { MapObject } from '../../../ra2-assets/src/manifest';
-import type { WorldDressing } from '../atmosphere';
+import { AtmosphereNodes, type WorldDressing } from '../atmosphere';
 import type { TerrainBuild } from '../terrain';
 import { decodeBase64, loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOptions } from './cache';
 import type { MapLightGrade } from './mapLighting';
 import { Ra2NightDressing } from './nightDressing';
 import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from './sprites';
 import { buildRa2Terrain } from './terrain';
-import { buildVoxelGeometry, createVoxelMaterial, instantiateVoxel, type VoxelGeometry } from './voxels';
+import {
+  buildVoxelGeometry,
+  createVoxelMaterial,
+  instantiateVoxel,
+  setVoxelShapeFor,
+  voxelShapeFor,
+  type VoxelGeometry,
+  type VoxelShape,
+} from './voxels';
 import { loadVoxelLighting } from './vpl';
 
 /** A battlefield the HD renderer can draw: terrain, optional water, and everything standing on it. */
 export interface HdWorld {
+  nodes?: AtmosphereNodes;
   width: number;
   height: number;
   terrain: TerrainBuild;
@@ -67,15 +76,20 @@ export async function loadRa2World(
   base: string,
   options: {
     extraObjects?: (manifest: Ra2Cache['manifest']) => MapObject[];
+    /** Immutable per-world voxel refinement; defaults are captured before asynchronous resource loading starts. */
+    voxelShape?: Readonly<VoxelShape>;
     /** Keep only map objects passing this test (a live match draws units and buildings from game memory instead). */
     includeObject?: (object: MapObject) => boolean;
   } & Ra2CacheOptions = {},
 ): Promise<HdWorld> {
+  const nodes = options.nodes ?? new AtmosphereNodes();
+  if (options.voxelShape) setVoxelShapeFor(nodes, options.voxelShape);
+  else voxelShapeFor(nodes);
   // The engine's voxel lighting table lives next to the map caches, in the type library's common directory; without
   // it voxels use a fitted fallback curve.
   const [cache] = await Promise.all([
-    loadRa2Cache(base, options),
-    loadVoxelLighting(`${base.replace(/\/$/, '')}/../_library/common/voxels-vpl.json`),
+    loadRa2Cache(base, { ...options, nodes }),
+    loadVoxelLighting(`${base.replace(/\/$/, '')}/../_library/common/voxels-vpl.json`, nodes),
   ]);
   const { manifest } = cache;
   // InvisibleInGame objects (lamp-post dummies such as INGALITE) are never drawn by the engine.
@@ -89,8 +103,8 @@ export async function loadRa2World(
   root.name = 'ra2-world';
   if (terrain.reflectionTarget) root.add(terrain.reflectionTarget);
 
-  // Voxel vehicles: one geometry set per (model, owner) because house colours are baked into vertex colours.
-  const voxelMaterial = createVoxelMaterial();
+  // Geometry is shared per model/refinement; each owner gets its palette material.
+  const voxelMaterial = createVoxelMaterial(nodes);
   const geometries = new Map<string, VoxelGeometry[]>();
   const sprites: SpriteInstance[] = [];
   for (const object of objects) {
@@ -102,7 +116,7 @@ export async function loadRa2World(
       const cacheKey = `${object.voxel}@${paletteKey}`;
       let parts = geometries.get(cacheKey);
       if (!parts) {
-        parts = buildVoxelGeometry(model, cache.paletteRgb.get(paletteKey)!);
+        parts = buildVoxelGeometry(model, cache.paletteRgb.get(paletteKey)!, nodes);
         geometries.set(cacheKey, parts);
       }
       const { root: vehicle } = instantiateVoxel(parts, voxelMaterial);
@@ -178,6 +192,7 @@ export async function loadRa2World(
     ? new Vector3(waypoint.x + 0.5, terrain.heightAt(waypoint.x + 0.5, waypoint.y + 0.5), waypoint.y + 0.5)
     : new Vector3(manifest.grid.width / 2, 0, manifest.grid.height / 2);
   return {
+    nodes,
     width: manifest.grid.width,
     height: manifest.grid.height,
     terrain,

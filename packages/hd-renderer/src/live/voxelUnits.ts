@@ -29,7 +29,7 @@ export interface VoxelPose {
  * the bookkeeping (which object uses which unit); everything about how a voxel unit looks lives here.
  */
 export class VoxelUnits {
-  private readonly material = createVoxelMaterial();
+  private readonly material: ReturnType<typeof createVoxelMaterial>;
   private readonly geometries = new Map<string, VoxelGeometry[]>();
 
   constructor(
@@ -37,7 +37,9 @@ export class VoxelUnits {
     readonly world: HdWorld,
     private readonly cache: Ra2Cache,
     readonly libraryBase?: string,
-  ) {}
+  ) {
+    this.material = createVoxelMaterial(hd.nodes);
+  }
 
   /**
    * A new instance of `model` drawn with palette row `paletteKey` (already resolved with paletteFor, so house-remapped

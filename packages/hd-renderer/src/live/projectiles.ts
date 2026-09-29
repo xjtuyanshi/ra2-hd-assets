@@ -35,6 +35,9 @@ export function bulletFrame(bullet: LiveBullet, frames: number, rotates: boolean
 
 export class Projectiles {
   private readonly meshes = new Map<string, { root: Group; type: string }>();
+  private readonly alive = new Set<string>();
+  private readonly direction = new Vector3();
+  private readonly nose = new Vector3(1, 0, 0);
 
   constructor(
     private readonly art: EffectArt,
@@ -51,7 +54,8 @@ export class Projectiles {
     hidden: (x: number, y: number, z: number) => boolean,
     out: EffectInstance[],
   ): void {
-    const alive = new Set<string>();
+    const alive = this.alive;
+    alive.clear();
     for (const bullet of bullets) {
       if (!bullet.type || hidden(bullet.x, bullet.y, bullet.z)) continue;
       const found = this.art.bullet(bullet.type);
@@ -65,8 +69,8 @@ export class Projectiles {
         const v = bullet.velocity;
         if (v && (v.x || v.y || v.z)) {
           // The model's nose is local +x; aim it along the flight direction in world space.
-          const dir = new Vector3(v.x / 256, (v.z / 104) * LEVEL_HEIGHT, v.y / 256).normalize();
-          mesh.root.quaternion.setFromUnitVectors(new Vector3(1, 0, 0), dir);
+          this.direction.set(v.x / 256, (v.z / 104) * LEVEL_HEIGHT, v.y / 256).normalize();
+          mesh.root.quaternion.setFromUnitVectors(this.nose, this.direction);
         }
         continue;
       }
@@ -94,7 +98,7 @@ export class Projectiles {
       if (!mesh) continue;
       alive.add(key);
       mesh.root.position.set(piece.x / 256, (piece.z / 104) * LEVEL_HEIGHT, piece.y / 256);
-      mesh.root.quaternion.copy(engineQuaternion(piece.rotation));
+      engineQuaternion(piece.rotation, mesh.root.quaternion);
     }
     for (const [key, mesh] of this.meshes)
       if (!alive.has(key)) {
@@ -122,6 +126,9 @@ export class Projectiles {
  * y = up, z = map y). Swapping Y and Z is a reflection, which reverses the rotation's sense. Not yet compared with a
  * live capture (the bridge does not pass VoxelAnims yet).
  */
-export function engineQuaternion([x, y, z, w]: readonly [number, number, number, number]): Quaternion {
-  return new Quaternion(-x, -z, -y, w).normalize();
+export function engineQuaternion(
+  [x, y, z, w]: readonly [number, number, number, number],
+  out = new Quaternion(),
+): Quaternion {
+  return out.set(-x, -z, -y, w).normalize();
 }

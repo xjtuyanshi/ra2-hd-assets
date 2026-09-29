@@ -341,25 +341,16 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
       warn(`overlay index ${idx} not in [OverlayTypes]`);
       continue;
     }
-    const { sec, image } = artOf(type);
-    const wall = rulesBool(type, 'Wall');
-    const tiberium = rulesBool(type, 'Tiberium');
+    const art = src.overlayArt(type);
+    const { wall, tiberium } = art;
     const id = `overlay:${type}`;
-    const s = addShp(id, shpCandidates(image, sec), wall ? 'unit' : tiberium ? 'theater' : 'iso', wall);
+    const s = addShp(id, art.candidates, art.palette, art.remap);
     if (!s) continue;
     let frame = od[i]!;
     if (frame >= s.frames.length) {
       warn(`${id}: OverlayData ${frame} beyond ${s.frames.length} body frames (clamped)`);
       frame = s.frames.length - 1;
     }
-    // High bridges (BRIDGE1/2, BRIDGEB1/2, RAILBRDG1/2) are drawn BridgeLevels (4) levels above their cell. They have
-    // no DrawFlat key, so the DrawFlat default must not put their raised deck into the ground pass.
-    const highBridge = /^(BRIDGE|BRIDGEB|RAILBRDG)[12]$/i.test(type);
-    const drawFlat = rulesBool(type, 'DrawFlat', true);
-    const flat = !wall && !highBridge && (tiberium || drawFlat);
-    const off: [number, number] = highBridge
-      ? [0, -4 * 15]
-      : drawOffsetFor('overlay', { isARock: rulesBool(type, 'IsARock') });
     objects.push({
       kind: 'overlay',
       type,
@@ -368,9 +359,9 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
       z: heightAt(x, y),
       sprite: id,
       frame,
-      flat,
-      drawOffset: off,
-      lighting: tiberium ? 'none' : wall ? 'ambient' : 'full',
+      flat: art.flat,
+      drawOffset: art.drawOffset,
+      lighting: art.lighting,
     });
     count(
       tiberium
