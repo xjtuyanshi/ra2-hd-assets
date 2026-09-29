@@ -11,6 +11,10 @@ never be committed or redistributed.
 ## Commands
 
 ```bash
+# Prepare one map through extraction, terrain, upscaling, map sprites and its shared theater library
+pnpm hd:prepare -- --map XMP29U2.MAP --cache "$HD_CACHE"
+pnpm hd:prepare -- --map RiverRam.yro --game "$RA2_INSTALL" --cache "$HD_CACHE" --dry-run
+
 # Extract (defaults: --game <repo>/game/ra2, --out <repo>/gameres/hd-cache; --map may repeat)
 pnpm hd:extract -- --map RiverRam.yro --map IsleLand.yro
 pnpm --filter ra2-assets extract -- --game <install dir> --map <file> [--out <dir>] [--voxels MTNK,HTNK]
@@ -32,6 +36,62 @@ pnpm hd:upscale -- --map RiverRam --bin <binary-path> --compare 1200,700,160,100
 pnpm hd:sprites -- --map RiverRam [--cache <dir>] [--bin <binary-path>] [--model realesrgan-x4plus]
 pnpm hd:sprites -- --library temperate --pages 0 [--cache <dir>] [--bin <binary-path>]
 ```
+
+## Prepare a complete map cache
+
+`prepare-map` runs the existing Node steps in order: `extract,terrain,upscale,sprites,library,library-sprites`.
+`remat` is opt-in. `--steps` selects an exact subset, always executed in that order, with `remat` last; prerequisites
+must already exist when their steps are omitted. The package command is `pnpm --filter ra2-assets prepare-map -- ...`.
+Relative CLI paths resolve against the directory from which pnpm was invoked.
+
+`--map` accepts one supported map file/path or cache id (the file's stem). For extraction by id, the command reuses
+the cached source name, searches loose map filenames, then tries the stock archived `<id>.map`. Ambiguous loose ids
+require an explicit filename. Defaults are this checkout's `game/ra2`, `gameres/hd-cache`, and
+`gameres/tools/realesrgan/realesrgan-ncnn-vulkan`; override with `--game`, `--cache`, and `--bin`.
+Nothing is downloaded. Use an external disposable cache for testing or inspection.
+
+An existing map directory always skips extraction unless `--force` is given, even when the original map is newer.
+Use `--force` to refresh it (including an incomplete extraction). Re-extraction keeps existing `terrainMap`,
+`spriteAtlasHd`, and unknown top-level extensions whose cache-relative file references still exist; freshly
+extracted fields take precedence. Extensions without file references are retained. File references are recognized
+by `file`/`files`, `path`/`paths`, `waterMask`, `remap`, and image/JSON/binary suffixes, including nested values.
+Selected dependent steps rerun, and invalidation persists for dependencies omitted from this invocation.
+
+`--force` rebuilds selected map steps. The shared theater library is extracted only when its `library.json` is
+missing, including under `--force`. Library sprite processing selects only incomplete or outdated pages, retaining
+completed pages. Incremental checks compare input/output existence and modification times, plus recorded input
+metadata signatures. Changes to generated manifest references alone do not invalidate unrelated steps.
+
+`--scale` defaults to 2 and accepts integers 1 through 4, matching the existing x4plus wrapper. The planner chooses
+the largest scale no greater than the request that fits within 16384 pixels on both axes; it fails if 1x cannot fit.
+Outputs above 8192 pixels produce a warning because that is WebGPU's default limit; the renderer requests the
+adapter maximum. Sprite output remains 2x regardless of terrain scale.
+
+Each step prints its action, reason, and elapsed time. `<cache>/<mapId>/prepare.json` records the latest invocation,
+step results (including failures), timings, Node/package/cache format versions, and reusable input signatures.
+An interrupted step remains invalidated until successful completion. `--dry-run` prints the plan without creating
+directories, writing logs or assets, or starting any runner. For new caches, dimensions/theater/pages are reported
+as deferred until extraction; real execution re-evaluates each step against the preceding results.
+
+```bash
+# Inspect the plan without invoking tools or writing a cache.
+pnpm hd:prepare -- --map RiverRam --cache "$HD_CACHE" --dry-run
+# Refresh a map and its selected dependent outputs, using a separately installed executable.
+pnpm hd:prepare -- --map RiverRam.yro --game "$RA2_INSTALL" --cache "$HD_CACHE" --bin "$REALESRGAN_BIN" --force
+# Opt into diffusion after the ordinary pipeline, or use --steps remat on an already prepared cache.
+pnpm hd:prepare -- --map RiverRam --cache "$HD_CACHE" --steps extract,terrain,upscale,sprites,library,library-sprites,remat
+```
+
+Rematerialization runs `python/rematerialize.py` with this checkout's
+`gameres/tools/diffusion/.venv/bin/python` and explicit `gameres/tools/diffusion/models`, using strength 0.55,
+control 0.7, guidance 5.5, 28 steps, and `--resume`. It always identifies the pre-rematerialization input explicitly
+so reruns do not diffuse an already rematerialized image. Urban/newurban retain the Python default negative prompt;
+other theaters append `cracked earth, dried mud cracks, cobblestones, paving stones, tiles, bricks`.
+The Python script's own `--dry-run` is never invoked by this command, since that mode writes outputs.
+
+The injectable Node API is `prepareMap(options, runners)` in `src/node/prepareMap.ts`; `planPrepareMap(options)` is
+read-only. `src/node/prepareMapRunners.ts` contains the production adapters. `tests/prepareMap.test.ts` uses temporary
+synthetic manifests, PNGs, and fake runners to verify planning, preservation, freshness, failure recovery and limits.
 
 `--map` accepts `.yro`/`.mmx` packages (MIX archives holding `<stem>.map` and a `.pkt`) and plain `.map/.mpr/.yrm`
 INI files, as a path or a file name inside the game directory. `--models` adds a strip with every extracted voxel

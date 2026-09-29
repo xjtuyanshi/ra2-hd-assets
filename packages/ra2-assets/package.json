@@ -12,6 +12,7 @@
     "./library": "./src/library.ts"
   },
   "scripts": {
+    "prepare-map": "node --import tsx src/cli/prepareMap.mts",
     "extract": "tsx src/cli/extract.mts",
     "preview": "tsx src/cli/preview.mts",
     "terrain-map": "tsx src/cli/terrainMap.mts",

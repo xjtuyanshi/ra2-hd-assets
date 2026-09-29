@@ -23,6 +23,7 @@
     "probe:game": "node scripts/remaster/g1-probe/g1-probe.mjs",
     "test:probe": "node --test scripts/remaster/g1-probe/g1-probe.test.mjs",
     "hd:sandbox": "pnpm --filter hd-renderer sandbox",
+    "hd:prepare": "pnpm --filter ra2-assets prepare-map",
     "hd:extract": "pnpm --filter ra2-assets extract",
     "hd:preview": "pnpm --filter ra2-assets preview",
     "hd:terrain-map": "pnpm --filter ra2-assets terrain-map",
