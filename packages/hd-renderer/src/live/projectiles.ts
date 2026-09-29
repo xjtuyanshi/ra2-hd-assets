@@ -1,6 +1,7 @@
 import { Group, Quaternion, Vector3 } from 'three/webgpu';
 import { facingFrame } from '../../../ra2-assets/src/art';
 import { cardPush } from '../ra2/sprites';
+import { painterObject, type PainterObject } from '../ra2/painterOrder';
 import { LEVEL_HEIGHT } from '../world';
 import type { EffectArt } from './effectArt';
 import type { LiveBullet, LiveVoxelAnim } from './effects';
@@ -34,7 +35,7 @@ export function bulletFrame(bullet: LiveBullet, frames: number, rotates: boolean
 }
 
 export class Projectiles {
-  private readonly meshes = new Map<string, { root: Group; type: string }>();
+  private readonly meshes = new Map<string, { root: Group; type: string; painter: PainterObject }>();
   private readonly alive = new Set<string>();
   private readonly direction = new Vector3();
   private readonly nose = new Vector3(1, 0, 0);
@@ -46,6 +47,11 @@ export class Projectiles {
     /** Palette row key for voxel art (house-remapped when the owner is known). */
     private readonly voxelPalette: (owner: number | undefined) => string,
   ) {}
+
+  /** Voxel effects participate in the same scene-wide depth slots as live units, without changing their poses. */
+  painterEntries(): Iterable<{ root: Group; painter: PainterObject }> {
+    return this.meshes.values();
+  }
 
   /** SHP projectile cards for this frame; voxel projectiles and debris are placed as meshes. */
   update(
@@ -65,6 +71,7 @@ export class Projectiles {
         const mesh = this.mesh(key, found.art.voxel, undefined);
         if (!mesh) continue;
         alive.add(key);
+        mesh.painter.ySort = bullet.x + bullet.y;
         mesh.root.position.set(bullet.x / 256, (bullet.z / 104) * LEVEL_HEIGHT, bullet.y / 256);
         const v = bullet.velocity;
         if (v && (v.x || v.y || v.z)) {
@@ -97,6 +104,7 @@ export class Projectiles {
       const mesh = this.mesh(key, piece.type, piece.owner);
       if (!mesh) continue;
       alive.add(key);
+      mesh.painter.ySort = piece.x + piece.y;
       mesh.root.position.set(piece.x / 256, (piece.z / 104) * LEVEL_HEIGHT, piece.y / 256);
       engineQuaternion(piece.rotation, mesh.root.quaternion);
     }
@@ -107,14 +115,20 @@ export class Projectiles {
       }
   }
 
-  private mesh(key: string, voxel: string, owner: number | undefined): { root: Group; type: string } | null {
+  private mesh(
+    key: string,
+    voxel: string,
+    owner: number | undefined,
+  ): { root: Group; type: string; painter: PainterObject } | null {
     const known = this.meshes.get(key);
     if (known) return known;
     const model = this.art.voxel(voxel);
     if (!model) return null;
     const palette = this.voxelPalette(owner);
     const unit = this.voxels.build(model, palette, `fx:${voxel}@${palette}`);
-    const entry = { root: unit.root, type: voxel };
+    // The bridge does not report projectile/debris layer registrations. Use Air like the existing SHP shell pass;
+    // native index order remains unknown rather than being guessed from a uid or the mesh's draw-call order.
+    const entry = { root: unit.root, type: voxel, painter: painterObject(3, 0) };
     this.parent.add(unit.root);
     this.meshes.set(key, entry);
     return entry;

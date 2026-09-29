@@ -12,6 +12,7 @@ import type { VoxelModel, VoxelSection } from '../../../ra2-assets/src/manifest'
 import { sectionNormalsMode } from '../../../ra2-assets/src/voxelNormals';
 import { PIXELS_PER_CELL_EDGE } from '../world';
 import type { AtmosphereNodes } from '../atmosphere';
+import { createPainterDepth, meshPainterDepthNode } from '../painterDepth';
 import { decodeBase64 } from './cache';
 import { paletteNodes } from './mapLighting';
 import { VoxelShadowMesh, groundOf } from './voxelShadow';
@@ -462,6 +463,25 @@ const ON_GROUND = 0.05;
  * ramps (applied in world space, after the yaw).
  */
 export class VoxelUnit extends Group {
+  private readonly painterDepth = createPainterDepth();
+
+  /** Real meshes share one physical origin; shadow twins retain ordinary ground depth. */
+  addSourceMesh(mesh: Mesh): void {
+    mesh.userData.painterDepth = this.painterDepth;
+  }
+
+  /** Object depth slot; component offsets must stay below half a slot. Negative depth restores physical depth. */
+  setPainterDepth(slotDepth: number, slotWidth: number, part = 0): void {
+    this.painterDepth.depth = slotDepth;
+    this.painterDepth.slotWidth = slotWidth;
+    this.painterDepth.part = part;
+  }
+
+  override updateMatrixWorld(force?: boolean): void {
+    super.updateMatrixWorld(force);
+    this.painterDepth.origin.setFromMatrixPosition(this.matrixWorld);
+  }
+
   override updateMatrix(): void {
     const ground = groundOf(this);
     const { x, y, z } = this.position;
@@ -484,12 +504,16 @@ export class VoxelUnit extends Group {
 export function instantiateVoxel(
   parts: VoxelGeometry[],
   material: MeshStandardNodeMaterial,
-): { root: Group; turret?: Group } {
+): { root: VoxelUnit; turret?: Group } {
   const root = new VoxelUnit();
   let turret: Group | undefined;
   const meshes: Mesh[] = [];
   for (const part of parts) {
     const mesh = new Mesh(part.geometry, part.material ?? material);
+    const sourceMaterial = part.material ?? material;
+    // Palette materials are shared. The node reads the currently rendered mesh's depth slot.
+    if (!sourceMaterial.depthNode) sourceMaterial.depthNode = meshPainterDepthNode();
+    root.addSourceMesh(mesh);
     mesh.castShadow = false;
     mesh.receiveShadow = false;
     meshes.push(mesh);

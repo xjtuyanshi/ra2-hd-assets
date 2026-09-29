@@ -37,6 +37,8 @@ import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { type Ra2Cache } from './cache';
 import { objectLevelAt, srgbScale, terrainGradeAt } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
+import { painterDepthNode } from '../painterDepth';
+import { spritePainterDepth, type PainterObject } from './painterOrder';
 
 export interface SpriteInstance {
   /** World-space anchor: the engine's draw point for this object (canvas centre goes here). */
@@ -60,6 +62,9 @@ export interface SpriteInstance {
    * 'none' = unlit (ore, gems).
    */
   lighting?: LightingClass;
+  /** Optional object painter slot; decals and shadows always retain their physical ground depth. */
+  painter?: PainterObject;
+  painterPart?: number;
 }
 
 const LIGHTING_CODE: Record<LightingClass, number> = { ambient: 0, full: 1, none: 2 };
@@ -68,7 +73,8 @@ const LIGHTING_CODE: Record<LightingClass, number> = { ambient: 0, full: 1, none
 const SHADOW_OPACITY = ENGINE_SHADOW_OPACITY;
 
 /**
- * Push that makes a camera-facing card draw over its own footprint, as the engine's painter order does. A pixel d world
+ * Physical push that keeps a camera-facing card over its own footprint. Live object ordering is assigned separately
+ * by painterOrder.ts, so frame dimensions cannot change which object hides another. A pixel d world
  * units below the anchor on screen sees ground d * cot(30°) nearer to the camera than the anchor, so the card must come
  * forward at least that far for its lowest pixel.
  */
@@ -95,10 +101,17 @@ export class SpriteLayer {
   private readonly rect: DirtyAttribute;
   private readonly params: DirtyAttribute;
   /**
-   * x: 0 = upright card, 1 = ground decal, 2 = shadow decal; y: object light; z: map lighting class (LIGHTING_CODE).
+   * x: card/decal/shadow; y: object light; z: map lighting class; w: painter depth (-1 = physical).
    * One buffer: WebGPU allows 8 vertex buffers.
    */
   private readonly flags: DirtyAttribute;
+  private instances: readonly SpriteInstance[] = [];
+  private readonly orderedCards: SpriteInstance[] = [];
+
+  /** Current records, shared with the live view's scene-wide painter slot assignment. */
+  getInstances(): readonly SpriteInstance[] {
+    return this.instances;
+  }
 
   /** `capacity` > instances.length reserves room for setInstances (live objects). */
   constructor(
@@ -130,14 +143,14 @@ export class SpriteLayer {
     this.anchor = new DirtyAttribute(new Float32Array(count * 3), 3);
     this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
     this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
-    this.flags = new DirtyAttribute(new Float32Array(count * 3), 3);
+    this.flags = new DirtyAttribute(new Float32Array(count * 4), 4);
 
     const atlasSize = vec2(atlas.width, atlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
     const aAnchor: ShaderNode = instancedBufferAttribute(this.anchor, 'vec3');
     const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
     const aParams: ShaderNode = instancedBufferAttribute(this.params, 'vec4');
-    const aFlags: ShaderNode = instancedBufferAttribute(this.flags, 'vec3');
+    const aFlags: ShaderNode = instancedBufferAttribute(this.flags, 'vec4');
     const aFlat: ShaderNode = aFlags.x;
     // The map's light for this instance's class, times its own extra light, in the palette's sRGB scale (see
     // mapLighting.ts): 'ambient' takes the level, 'full' the per-channel grade, 'none' nothing.
@@ -157,6 +170,7 @@ export class SpriteLayer {
     // Edges are soft (filtered coverage, see colorNode) and blend; only fully clear fragments are discarded. No
     // alpha-to-coverage: under MSAA it turns the translucent shadows opaque.
     material.alphaTest = 0.04;
+    material.depthNode = painterDepthNode(aFlags.w);
     // Raster-relative coordinates from the quad's own UVs (u right, v down). positionLocal cannot be used here: once
     // positionNode is set it refers to the displaced position in the fragment stage.
     const u: ShaderNode = uv().x;
@@ -293,17 +307,31 @@ export class SpriteLayer {
 
   /** Replace every instance (up to `capacity`); cheap enough to call once per presented frame. */
   setInstances(instances: readonly SpriteInstance[]): void {
+    this.instances = instances;
+    const cards = this.orderedCards;
+    cards.length = 0;
+    for (const instance of instances) if (!instance.flat && !instance.shadow) cards.push(instance);
+    // Instanced meshes are not sorted by Three. Back-to-front within each page preserves soft-edge blending;
+    // the shared depth slots resolve opaque overlaps between pages and voxel meshes independently of draw calls.
+    cards.sort((a, b) => spritePainterDepth(b.painter, b.painterPart) - spritePainterDepth(a.painter, a.painterPart));
     // Stable three-way partition: the former stable sort's exact order, without a copied/sorted array.
     let count = 0;
     for (let rank = 0; rank < 3 && count < this.capacity; rank++) {
-      for (let j = 0; j < instances.length && count < this.capacity; j++) {
-        const s = instances[j]!;
+      const list = rank === 2 ? cards : instances;
+      for (let j = 0; j < list.length && count < this.capacity; j++) {
+        const s = list[j]!;
         if ((s.flat ? 0 : s.shadow ? 1 : 2) !== rank) continue;
         const i = count++;
         this.anchor.setXYZ(i, s.anchor.x, s.anchor.y, s.anchor.z);
         this.rect.setXYZW(i, s.frame.rect[0], s.frame.rect[1], s.frame.rect[2], s.frame.rect[3]);
         this.params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], this.cache.paletteRow.get(s.palette) ?? 0, s.push);
-        this.flags.setXYZ(i, s.shadow ? 2 : s.flat ? 1 : 0, s.light ?? 1, LIGHTING_CODE[s.lighting ?? 'ambient']);
+        this.flags.setXYZW(
+          i,
+          s.shadow ? 2 : s.flat ? 1 : 0,
+          s.light ?? 1,
+          LIGHTING_CODE[s.lighting ?? 'ambient'],
+          s.flat || s.shadow ? -1 : spritePainterDepth(s.painter, s.painterPart),
+        );
       }
     }
     this.mesh.count = count;

@@ -40,6 +40,8 @@ export const YR_STATE_GLOBALS = Object.freeze({
   map: 0x87f7e8,
   /** TacticalClass::Instance (pointer). */
   tactical: 0x887324,
+  /** Five LayerClass vectors, in painter order (stride 0x18; TacticalClass::Render at 0x6D8DB0). */
+  renderLayers: 0x8a0360,
 });
 
 /** DynamicVectorClass: Items pointer at +4, Count at +0x10. */
@@ -78,6 +80,10 @@ export const YR_STATE_OFFSETS = Object.freeze({
   typeStrength: 0xa0,
   /** TechnoTypeClass::Turret (bool). */
   typeTurret: 0xca1,
+  /** BuildingTypeClass::Gate (bool); BuildingClass::GetYSort at 0x449410 subtracts 16. */
+  buildingTypeGate: 0x16b7,
+  /** BuildingTypeClass::TurretAnimIsVoxel (bool); the same sort virtual adds 32. */
+  buildingTypeVoxelTurret: 0x16c5,
   /** HouseClass::ArrayIndex. */
   houseArrayIndex: 0x30,
   /** HouseClass::Type (HouseTypeClass*; its AbstractTypeClass::ID is the country, e.g. "Americans"). */
@@ -134,6 +140,8 @@ export const YR_STATE_LIMITS = Object.freeze({
   houses: 32,
   /** Per object vector. */
   objectsPerKind: 16384,
+  /** A layer can contain every techno kind as well as effects. */
+  objectsPerLayer: 65536,
   /** Lowest plausible heap pointer; the PE image sits at 0x400000 and the heap arena above it. */
   minPointer: 0x10000,
   /** |X|, |Y| in leptons: 512 cells is far beyond the largest map (MapClass allows at most 511 per axis). */
@@ -231,6 +239,8 @@ export interface YrObjectState {
   infantrySequence?: string;
   /** Sequence-local animation stage, excluding start/facing offsets. */
   sequenceFrame?: number;
+  /** Native registered painter position; absent when the layer list cannot be read reliably. */
+  renderOrder?: { layer: number; index: number; ySort: number };
   /** Health / Strength clamped to 0..1. */
   health: number;
   isSelected: boolean;
@@ -511,6 +521,22 @@ export function readYrState(memory: GuestMemoryAccessor, options: ReadYrStateOpt
   };
 
   const objects: YrObjectState[] = [];
+  // Ground insertion (0x551A90) and its stable adjacent sort (0x551A30) compare GetYSort only; equal
+  // keys keep registration order. Read the actual lists for their ties and locomotor-specific air layers.
+  const renderOrders = new Map<number, { layer: number; index: number } | null>();
+  for (let layer = 0; layer < 5; layer++) {
+    const pointers = readPointerVector(
+      memory,
+      YR_STATE_GLOBALS.renderLayers + layer * 0x18,
+      YR_STATE_LIMITS.objectsPerLayer,
+    );
+    if (!pointers) continue;
+    for (const [index, pointer] of pointers.entries()) {
+      if (!isPlausiblePointer(memory, pointer)) continue;
+      // A poll between emulator slices can see registration in two lists; neither index is authoritative.
+      renderOrders.set(pointer, renderOrders.has(pointer) ? null : { layer, index });
+    }
+  }
   const seen = new Set<number>();
   for (const spec of KINDS) {
     const count = memory.u32(spec.vector + VECTOR_COUNT);
@@ -535,7 +561,8 @@ export function readYrState(memory: GuestMemoryAccessor, options: ReadYrStateOpt
         stats.limbo[spec.kind]++;
         continue;
       }
-      const type = readType(memory.u32(pointer + spec.typeOffset), spec.typeVtable);
+      const typePointer = memory.u32(pointer + spec.typeOffset);
+      const type = readType(typePointer, spec.typeVtable);
       const x = memory.i32(pointer + o.location),
         y = memory.i32(pointer + o.location + 4),
         z = memory.i32(pointer + o.location + 8);
@@ -572,6 +599,21 @@ export function readYrState(memory: GuestMemoryAccessor, options: ReadYrStateOpt
       // The image/hash gate belongs to this reader; optional H2 observers validate their extra spans and fields.
       if (spec.kind === 'building') Object.assign(object, readYrBuildingRenderState(memory, pointer));
       else if (spec.kind === 'infantry') Object.assign(object, readYrInfantryRenderState(memory, pointer));
+      const renderOrder = renderOrders.get(pointer);
+      if (
+        renderOrder &&
+        (spec.kind !== 'building' || isPlausiblePointer(memory, typePointer, o.buildingTypeVoxelTurret + 1))
+      ) {
+        // ObjectClass::GetYSort (0x5F6BD0) is X+Y, without Z. Buildings use GetPosition_2
+        // (0x459EF0), Location minus half a cell on both axes, independently of foundation size.
+        const adjustment =
+          spec.kind === 'building'
+            ? -256 +
+              (memory.u8(typePointer + o.buildingTypeVoxelTurret) ? 32 : 0) -
+              (memory.u8(typePointer + o.buildingTypeGate) ? 16 : 0)
+            : 0;
+        object.renderOrder = { ...renderOrder, ySort: x + y + adjustment };
+      }
       objects.push(object);
     }
   }

@@ -70,6 +70,8 @@ export interface GameRenderObject extends GameRenderPoint {
   infantrySequence?: string;
   /** Animation step within infantrySequence, before its start/facing offsets. */
   sequenceFrame?: number;
+  /** Native painter layer, position within that layer and game-defined sort key, when available. */
+  renderOrder?: { layer: number; index: number; ySort: number };
   /** Current strength 0..1. */
   health: number;
   /** Selected by the local player. */

@@ -175,7 +175,9 @@ Call `applySettings()` after changing a setting; it rebuilds the post pipeline a
 GPU memory of the post targets at 2400x1500 device pixels (estimated from their formats): with `'msaa4'` the scene
 colour takes about 115 MB multisampled (RGBA16F) plus a 29 MB resolve texture and its depth about 58 MB; with
 `'fxaa'` or `'none'` about 29 MB and 14 MB. The bloom chain (half resolution and below, RGBA16F) adds about 20 MB and
-the sharpening target about 29 MB. Every mid-pass copy of the scene colour (three's viewport textures, e.g. a
+the sharpening target about 29 MB. Live painter ordering adds an RGBA16F physical-depth attachment: about 29 MB
+single-sampled, or 115 MB multisampled plus 29 MB resolve with `'msaa4'`, at the same resolution. These are format
+estimates, not measured full-match memory or performance. Every mid-pass copy of the scene colour (three's viewport textures, e.g. a
 backdrop-sampling effect material) ends and restarts the scene pass; under `'msaa4'` that stores, resolves and reloads
 the multisampled target, about 0.5 ms per copy at 2400x1500 on an Apple M-series GPU against about 0.1 ms
 single-sampled, so layers should copy at most once per frame and only while they draw.
@@ -196,7 +198,10 @@ single-sampled, so layers should copy at most once per frame and only while they
 - Sprites (`sprites.ts`): filtered coverage of the indexed mask for soft edges; within about one original texel of
   transparent texels HD atlas colours keep their hue but are never brighter than the original texel there (the
   upscaler's pale background fringe goes without a rim of raw palette colours). SHP shadows halve the displayed
-  colour, like the engine's.
+  colour, like the engine's. Live object occlusion uses scene-wide painter depth slots (`ra2/painterOrder.ts`),
+  independently of art placement and per-frame `cardPush`; all atlas pages and voxel parts share the same order.
+  Physical depth remains available to atmospheric post processing, while ground decals and shadows keep their
+  existing depth paths. See `docs/remaster/HD_BRIDGE.md`, "Object occlusion", for the native rule and fallback limits.
 - Voxels (`voxels.ts`, `vpl.ts`, `voxelShadow.ts`): geometry is built once per model (palette indices, normals, corner
   occlusion) and shared by every house colour; each palette gets a small lookup texture and material. Every section is
   decoded with its own normal table (`ra2-assets` `voxelNormals.ts`). Colour comes from the engine's `voxels.vpl` table

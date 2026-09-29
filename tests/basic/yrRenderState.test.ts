@@ -42,6 +42,13 @@ function keyMemory() {
     },
     select: (pointer: number, selected: boolean) => view.setUint8(pointer + O.isSelected, selected ? 1 : 0),
     corruptTechnos: () => u32(G.technos + 0x10, 4 * YR_STATE_LIMITS.objectsPerKind + 1),
+    layer: (layer: number, pointers: number[]) => {
+      const base = G.renderLayers + layer * 0x18;
+      const at = 0xb4_0000 + layer * 0x1000;
+      pointers.forEach((pointer, index) => u32(at + index * 4, pointer));
+      u32(base + 4, at);
+      u32(base + 0x10, pointers.length);
+    },
   };
 }
 
@@ -558,6 +565,29 @@ describe('YR 1.001 render state for the HD bridge', () => {
     });
     // The snapshot must survive a structured clone (the Worker reply).
     expect(structuredClone(state)).toEqual(state);
+  });
+
+  it('publishes native painter metadata and refreshes after same-frame layer reordering', () => {
+    const memory = keyMemory();
+    const { read, readState } = sources(memory);
+    const initial = yrState(100);
+    initial.objects[0]!.renderOrder = { layer: 2, index: 1, ySort: 768 };
+    readState.mockReturnValue(initial);
+    memory.layer(2, [...memory.technos].reverse());
+    const first = read()!;
+    expect(first.objects[0]!.renderOrder).toEqual(initial.objects[0]!.renderOrder);
+    expect(first.objects[0]!.renderOrder).not.toBe(initial.objects[0]!.renderOrder);
+    expect(first.objects[1]).not.toHaveProperty('renderOrder');
+    expect(structuredClone(first)).toEqual(first);
+    expect(read()).toBe(first);
+    const reordered = yrState(100);
+    reordered.objects[0]!.renderOrder = { layer: 2, index: 0, ySort: 768 };
+    readState.mockReturnValue(reordered);
+    memory.layer(2, memory.technos);
+    const next = read()!;
+    expect(next).not.toBe(first);
+    expect(next.objects[0]!.renderOrder).toEqual({ layer: 2, index: 0, ySort: 768 });
+    expect(first.objects[0]!.renderOrder).toEqual({ layer: 2, index: 1, ySort: 768 });
   });
 
   it('reads effects without the fire scan and reuses the shroud scratch without handing it out', () => {

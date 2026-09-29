@@ -1,9 +1,12 @@
 import { Vector3 } from 'three/webgpu';
 import type { LightingClass, SpriteFrame } from '../../../ra2-assets/src/manifest';
 import type { SpriteInstance } from '../ra2/sprites';
+import type { PainterObject } from '../ra2/painterOrder';
 
 /** Reuses the live high-water mark; no instance or position allocation after a scene reaches steady occupancy. */
 export class SpritePool {
+  /** Painter owner of subsequent upright records; reset by begin so reused records never keep an old owner. */
+  painter?: PainterObject;
   private readonly instances: SpriteInstance[] = [];
   private used = 0;
   private readonly anchors: Vector3[] = [];
@@ -11,6 +14,7 @@ export class SpritePool {
 
   begin(): void {
     this.used = this.anchorsUsed = 0;
+    this.painter = undefined;
   }
 
   anchor(): Vector3 {
@@ -27,6 +31,7 @@ export class SpritePool {
     flat = false,
     light = 1,
     lighting: LightingClass = 'ambient',
+    painterPart = 0,
   ): SpriteInstance {
     const i = this.used++;
     let instance = this.instances[i];
@@ -42,6 +47,8 @@ export class SpritePool {
     instance.flat = flat;
     instance.light = light;
     instance.lighting = lighting;
+    instance.painter = !flat && !shadow ? this.painter : undefined;
+    instance.painterPart = painterPart;
     return instance;
   }
 }

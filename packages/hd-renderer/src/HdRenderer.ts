@@ -1,9 +1,11 @@
 import {
   ACESFilmicToneMapping,
   AgXToneMapping,
+  BlendMode,
   Color,
   DataTexture,
   NeutralToneMapping,
+  NormalBlending,
   NoColorSpace,
   NoToneMapping,
   PCFSoftShadowMap,
@@ -16,13 +18,18 @@ import {
   WebGPURenderer,
   type Texture,
   type ToneMapping,
+  type NodeBuilder,
 } from 'three/webgpu';
 import {
+  Fn,
+  depth as physicalDepth,
   dot,
   float,
   length,
   mix,
+  mrt,
   neutralToneMapping,
+  output as materialOutput,
   pass,
   renderOutput,
   screenUV,
@@ -236,6 +243,7 @@ export class HdRenderer {
   private disposed = false;
   /** Whether the current pipeline composites the mist (rebuilt when the mist starts or stops). */
   private mistInPipeline = false;
+  private painterDepthEnabled = false;
   /**
    * Per-cell visibility on the flat y = 0 plane (1 visible .. 0 black shroud), applied after the mist and before bloom
    * so nothing under shroud (terrain, lights, mist, glow) shows through. Set by live views; everything visible
@@ -413,6 +421,13 @@ export class HdRenderer {
     if (this.pipeline) this.buildPipeline();
   }
 
+  /** Preserve physical scene depth for atmosphere when object layers use independent painter-order depth. */
+  enablePainterDepth(): void {
+    if (this.painterDepthEnabled) return;
+    this.painterDepthEnabled = true;
+    if (this.pipeline) this.buildPipeline();
+  }
+
   private buildPipeline(): void {
     const { antialias, toneMapper, sharpness, debugView } = this.settings;
     // Release the previous pipeline's render targets and output material before building the new one (the MSAA scene
@@ -421,9 +436,23 @@ export class HdRenderer {
     for (const node of this.pipelineNodes) node.dispose();
     const nodes: { dispose(): void }[] = (this.pipelineNodes = []);
     const scenePass = pass(this.scene, this.view.camera, { samples: antialias === 'msaa4' ? 4 : 0 });
+    if (this.painterDepthEnabled) {
+      // Store inverse physical depth: a black clear texel represents the untouched far plane. Alpha is a write
+      // mask, independent of the art's coverage, matching which fragments write the scene's depth attachment.
+      const preserved = Fn(([], builder: NodeBuilder) =>
+        vec4(float(1).sub(physicalDepth), 0, 0, builder.material.depthWrite ? 1 : 0),
+      )();
+      scenePass.setMRT(
+        mrt({ output: materialOutput, physicalDepth: preserved })
+          .setBlendMode('physicalDepth', new BlendMode(NormalBlending))
+          .setClearColor('physicalDepth', 0x000000, 0),
+      );
+    }
     nodes.push(scenePass);
     const hdr: ShaderNode = scenePass.getTextureNode('output');
-    const depth: ShaderNode = scenePass.getTextureNode('depth');
+    const depth: ShaderNode = this.painterDepthEnabled
+      ? float(1).sub(scenePass.getTextureNode('physicalDepth').r)
+      : scenePass.getTextureNode('depth');
     const world = this.mist.worldPosition(depth, screenUV);
     // Mist sits in the scene before bloom so lamp halos in it glow like the lamps themselves. With no mist the
     // pipeline leaves it out entirely (frame() rebuilds it when the mist starts or stops).

@@ -7,6 +7,7 @@ import { decodeBase64, loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOpt
 import type { MapLightGrade } from './mapLighting';
 import { Ra2NightDressing } from './nightDressing';
 import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from './sprites';
+import { objectYSort, painterObject } from './painterOrder';
 import { buildRa2Terrain } from './terrain';
 import {
   buildVoxelGeometry,
@@ -138,6 +139,10 @@ export async function loadRa2World(
     const push = cardPush(frame);
     // The extractor records how the engine lights each object (absent = 'full', terrain-class art).
     const lighting = object.lighting ?? 'full';
+    const painter = painterObject(
+      2,
+      objectYSort((object.x + 0.5) * 256, (object.y + 0.5) * 256, object.kind === 'building'),
+    );
     for (const underlay of entry.underlays ?? []) {
       const bib = manifest.sprites[underlay];
       if (bib?.frames[0])
@@ -154,7 +159,7 @@ export async function loadRa2World(
     // Shadows are cast on the ground: draw them as decals too.
     const shadow = entry.shadows?.[frameIndex];
     if (shadow) sprites.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
-    sprites.push({ anchor, frame, palette, push, shadow: false, flat, lighting });
+    sprites.push({ anchor, frame, palette, push, shadow: false, flat, lighting, painter });
     for (const layer of entry.layers ?? []) {
       const art = manifest.sprites[layer];
       if (art?.frames[0])
@@ -165,6 +170,8 @@ export async function loadRa2World(
           push: push + 0.01,
           shadow: false,
           lighting,
+          painter,
+          painterPart: 0.1,
         });
     }
   }

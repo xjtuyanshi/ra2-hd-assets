@@ -2,7 +2,13 @@ import type { Group } from 'three/webgpu';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
 import type { HdRenderer } from '../HdRenderer';
 import type { Ra2Cache } from '../ra2/cache';
-import { buildVoxelGeometry, createVoxelMaterial, instantiateVoxel, type VoxelGeometry } from '../ra2/voxels';
+import {
+  buildVoxelGeometry,
+  createVoxelMaterial,
+  instantiateVoxel,
+  VoxelUnit as VoxelRoot,
+  type VoxelGeometry,
+} from '../ra2/voxels';
 import type { HdWorld } from '../ra2/world';
 import { LEVEL_HEIGHT } from '../world';
 
@@ -66,6 +72,11 @@ export class VoxelUnits {
     );
     unit.root.rotation.y = Math.PI / 2 - pose.facing;
     if (unit.turret) unit.turret.rotation.y = pose.facing - (turretFacing ?? pose.facing);
+  }
+
+  /** Keep physical poses/shadows unchanged while all of an object's meshes share its painter slot. */
+  setPainterDepth(unit: VoxelUnit, depth: number, width: number, part = 0): void {
+    if (unit.root instanceof VoxelRoot) unit.root.setPainterDepth(depth, width, part);
   }
 
   /** Take a unit out of the scene (geometry stays cached for the next instance of its type). */

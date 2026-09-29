@@ -180,11 +180,11 @@ function publishCells(read: GameRenderCellSprites, revision: number): GameRender
 }
 
 /**
- * What a snapshot depends on, read cheaply: the logic frame, the scenario pointer, the tactical view position, and
- * every techno pointer with its selection flag. Objects, shroud and effects move with the game logic, which advances
- * the frame counter; the view and the selection are in the key as well, so a scroll or a selection change is never
- * hidden behind a frame counter that stands still (for example while the logic is paused). Null (no caching for this
- * poll) when the techno vector is not plausible.
+ * What a snapshot depends on, read cheaply: the logic frame, the scenario pointer, the tactical view position,
+ * every techno pointer with its selection flag, and the native painter lists. Objects, shroud and effects move with
+ * the game logic, which advances the frame counter; the view, selection and painter ordering are in the key as well,
+ * so a scroll, selection or registered tie-order change is never hidden behind a frame counter that stands still
+ * (for example while the logic is paused). Null (no caching for this poll) when a scanned vector is not plausible.
  */
 function readChangeKey(memory: () => GuestMemoryAccessor): number[] | null {
   try {
@@ -198,6 +198,18 @@ function readChangeKey(memory: () => GuestMemoryAccessor): number[] | null {
       const selected = isPlausiblePointer(m, pointer, o.isSelected + 1) ? m.u8(pointer + o.isSelected) : 0;
       hash = Math.imul(hash ^ pointer, 0x01000193);
       hash = Math.imul(hash ^ selected, 0x01000193);
+    }
+    // Layer sorting may finish after the logic frame counter changed. Do not retain a stale registered tie order
+    // just because a later poll observes that same frame, including while the match is paused.
+    for (let layer = 0; layer < 5; layer++) {
+      const pointers = readPointerVector(
+        m,
+        YR_STATE_GLOBALS.renderLayers + layer * 0x18,
+        YR_STATE_LIMITS.objectsPerLayer,
+      );
+      if (!pointers) return null;
+      hash = Math.imul(hash ^ pointers.length, 0x01000193);
+      for (const pointer of pointers) hash = Math.imul(hash ^ pointer, 0x01000193);
     }
     const tactical = m.u32(YR_STATE_GLOBALS.tactical);
     const view = isPlausiblePointer(m, tactical, o.tacticalPos + 8);
@@ -253,6 +265,7 @@ function projectObject(object: YrObjectState): GameRenderObject {
     z,
     facingRaw,
     turretFacingRaw,
+    renderOrder,
     buildState,
     buildupFrame,
     infantrySequence,
@@ -275,6 +288,7 @@ function projectObject(object: YrObjectState): GameRenderObject {
     ...(buildupFrame !== undefined ? { buildupFrame } : {}),
     ...(infantrySequence !== undefined ? { infantrySequence } : {}),
     ...(sequenceFrame !== undefined ? { sequenceFrame } : {}),
+    ...(renderOrder !== undefined ? { renderOrder: { ...renderOrder } } : {}),
     health,
     isSelected,
   };

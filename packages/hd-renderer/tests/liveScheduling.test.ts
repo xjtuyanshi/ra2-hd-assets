@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { LiveView } from '../src/live/liveView';
+import { LiveView, type LiveSnapshot } from '../src/live/liveView';
 
 /** Exercise presentation scheduling without a GPU, after construction has attached the scene's collaborators. */
 function presentation(interpolating: boolean) {
@@ -26,6 +26,60 @@ function presentation(interpolating: boolean) {
 }
 
 describe('live presentation scheduling', () => {
+  it('accepts native painter reorder and layer changes while the engine frame is frozen', () => {
+    const internals = {
+      current: null as { snapshot: LiveSnapshot } | null,
+      houseColour: new Map(),
+      buildingAnimMatches: new Map(),
+      effectDriver: {},
+      warnedCells: true,
+      ensureHouse: vi.fn(),
+      trackMotion: vi.fn(),
+      updateOverlays: vi.fn(),
+      updateNightSources: vi.fn(),
+    };
+    const view = Object.assign(Object.create(LiveView.prototype), internals) as LiveView;
+    const state = view as unknown as typeof internals;
+    const snapshot: LiveSnapshot = {
+      frame: 14,
+      view: { x: 0, y: 0 },
+      houses: [],
+      objects: [
+        {
+          id: 1,
+          uid: 2,
+          kind: 'aircraft',
+          type: 'TEST',
+          owner: 0,
+          x: 256,
+          y: 256,
+          z: 0,
+          facingRaw: 0,
+          health: 1,
+          isSelected: false,
+          renderOrder: { layer: 2, index: 1, ySort: 512 },
+        },
+      ],
+    };
+    view.push(snapshot, 10);
+    const original = state.current;
+    view.push(structuredClone(snapshot), 20);
+    expect(state.current).toBe(original);
+    const reordered = structuredClone(snapshot);
+    reordered.objects[0]!.renderOrder!.index = 3;
+    view.push(reordered, 30);
+    expect(state.current?.snapshot).toBe(reordered);
+    const airborne = structuredClone(reordered);
+    airborne.objects[0]!.renderOrder!.layer = 4;
+    view.push(airborne, 40);
+    expect(state.current?.snapshot).toBe(airborne);
+    const resorted = structuredClone(airborne);
+    resorted.objects[0]!.renderOrder!.ySort = 513;
+    view.push(resorted, 50);
+    expect(state.current?.snapshot).toBe(resorted);
+    expect(state.trackMotion).toHaveBeenCalledTimes(4);
+  });
+
   it('holds unchanged cards while art loads, and rebuilds once when art succeeds or fails', () => {
     const p = presentation(false);
     for (let i = 0; i < 144; i++) p.view.render(10 + i * (1000 / 144));

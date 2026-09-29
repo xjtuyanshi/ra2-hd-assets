@@ -104,6 +104,32 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    Details and evidence: `docs/remaster/research/tactical-passthrough.md`,
    `scripts/remaster/bridge/verifyPassthrough.mts`.
 
+## Object occlusion
+
+`ra2/painterOrder.ts` separates the object's tactical painter order from its screen placement and `cardPush`.
+The YR reader publishes optional `renderOrder { layer, index, ySort }` from the five native layer vectors;
+registered objects retain their actual traversal order, including equal-key registrations and locomotor-specific
+air layers. Ground insertion compares `GetYSort`: ordinary units use raw `Location.X + Location.Y`; buildings use
+`Location.X + Location.Y - 256`, plus 32 for `TurretAnimIsVoxel` and minus 16 for `Gate`. Neither altitude nor
+foundation dimensions enter this key. The building's drawing centre and art offsets are separate coordinates.
+YR 1.001 evidence: `GetYSort` at `0x5F6BD0`, building position at `0x459EF0`, building override at `0x449410`,
+layer traversal at `0x6D8DB0`; the layer vectors start at `0x8A0360` with stride `0x18`.
+
+All upright atlas pages, static tree/wall cards and live voxel meshes share object depth slots. Building anims
+and voxel turrets stay inside their owner's slot, and voxel geometry keeps bounded self-depth for its own
+articulated parts. Screen positions, `cardPush`, ground decals, ore and shadow transforms retain their existing
+paths. A separate physical-depth render attachment keeps the mist and shroud post pass independent of these
+ordering slots. Underground/surface objects retain physical terrain depth. Older snapshots fall back to the Ground key (and terrain-relative flight height for aircraft);
+without native registration metadata, exact ties and unusual locomotor layers remain unverified. Static cache
+trees and wall overlays use their cell key, rather than claiming native registration metadata.
+Ground effect cards share these slots so explosions and fire can still draw over foreground units; equal-key
+fallback effects follow registered bodies. Voxel missiles/debris use the existing Air-pass fallback because their
+bridge contract does not yet provide native registration metadata. Flat effects retain terrain depth.
+
+This reproduces object-level painter traversal. Original software SHP/voxel Z-buffer gradients and individual
+art `ZAdjust` interactions are not fully reconstructed by this rule; synthetic rendering and source-level tests
+do not replace a same-moment live comparison.
+
 ## Local data it needs
 
 All of it is derived from the player's own install and lives in the gitignored `gameres/hd-cache/` (served by the

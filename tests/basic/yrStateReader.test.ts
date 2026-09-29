@@ -53,7 +53,7 @@ function syntheticMemory() {
     u32(base + 0x10, pointers.length);
   };
   const type = (vtable: number, id: string, strength: number, turret = false) => {
-    const at = alloc(0x1700);
+    const at = alloc(vtable === V.buildingType ? 0x1800 : 0x1700);
     u32(at, vtable);
     ascii(at + O.typeId, id);
     i32(at + O.typeStrength, strength);
@@ -336,6 +336,71 @@ describe('YR 1.001 state reader', () => {
     const before = m.bytes.slice();
     readYrState(createByteViewAccessor(m.bytes), { includeLimbo: true });
     expect(Buffer.compare(m.bytes, before)).toBe(0);
+  });
+
+  it('reads registered painter layers and stable tie indices independently of kind, height and UID', () => {
+    const { m, tank, soldier, yard, ai } = battlefield();
+    m.i32(soldier + O.location, 13248);
+    m.i32(soldier + O.location + 4, 20544);
+    m.i32(tank + O.location, 13440);
+    m.i32(tank + O.location + 4, 20352);
+    m.i32(tank + O.location + 8, 1040);
+    m.i32(yard + O.location, 13696);
+    m.i32(yard + O.location + 4, 20864);
+    const effect = m.alloc(0x100);
+    const planeType = m.type(V.aircraftType, 'ORCA', 200);
+    const plane = m.object(V.aircraft, O.aircraftType, planeType, ai, { x: 1, y: 2, z: 208, health: 200, uid: 1 });
+    m.vector(G.aircraft, [plane]);
+    m.vector(G.renderLayers + 2 * 0x18, [effect, soldier, tank, yard]);
+    m.vector(G.renderLayers + 4 * 0x18, [plane]);
+    const read = readYrState(createByteViewAccessor(m.bytes));
+    const order = (id: number) => read.objects.find((object) => object.id === id)?.renderOrder;
+    expect(order(soldier)).toEqual({ layer: 2, index: 1, ySort: 33792 });
+    expect(order(tank)).toEqual({ layer: 2, index: 2, ySort: 33792 });
+    expect(order(yard)).toEqual({ layer: 2, index: 3, ySort: 34304 });
+    expect(order(plane)).toEqual({ layer: 4, index: 0, ySort: 3 });
+    // A layer registration, including an air/ground transition, can change without changing the kind vector.
+    m.vector(G.renderLayers + 4 * 0x18, []);
+    m.vector(G.renderLayers + 2 * 0x18, [plane, effect, soldier, tank, yard]);
+    expect(
+      readYrState(createByteViewAccessor(m.bytes)).objects.find((object) => object.id === plane)?.renderOrder,
+    ).toEqual({ layer: 2, index: 0, ySort: 3 });
+  });
+
+  it.each([
+    [false, false, 10744],
+    [true, false, 10776],
+    [false, true, 10728],
+    [true, true, 10760],
+  ])('applies building voxel-turret=%s and gate=%s sort adjustments', (voxelTurret, gate, ySort) => {
+    const { m, yard } = battlefield();
+    const type = m.view.getUint32(yard + O.buildingType, true);
+    m.u8(type + O.buildingTypeVoxelTurret, voxelTurret ? 1 : 0);
+    m.u8(type + O.buildingTypeGate, gate ? 1 : 0);
+    m.vector(G.renderLayers + 2 * 0x18, [yard]);
+    expect(
+      readYrState(createByteViewAccessor(m.bytes)).objects.find((object) => object.id === yard)?.renderOrder,
+    ).toEqual({ layer: 2, index: 0, ySort });
+  });
+
+  it('omits uncertain painter metadata while retaining valid objects and other readable layers', () => {
+    const { m, tank, soldier, yard } = battlefield();
+    const layer = G.renderLayers + 2 * 0x18;
+    const read = () => readYrState(createByteViewAccessor(m.bytes));
+    expect(read().objects.every((object) => object.renderOrder === undefined)).toBe(true);
+    m.vector(layer, [soldier, tank, yard]);
+    m.vector(G.renderLayers + 4 * 0x18, [tank]);
+    const duplicate = read();
+    expect(duplicate.objects).toHaveLength(3);
+    expect(duplicate.objects.find((object) => object.id === tank)).not.toHaveProperty('renderOrder');
+    expect(duplicate.objects.find((object) => object.id === yard)?.renderOrder?.index).toBe(2);
+    m.u32(layer + 0x10, YR_STATE_LIMITS.objectsPerLayer + 1);
+    expect(read().objects.find((object) => object.id === yard)).not.toHaveProperty('renderOrder');
+    expect(read().objects.find((object) => object.id === tank)?.renderOrder?.layer).toBe(4);
+    m.u32(layer + 0x10, 1);
+    m.u32(layer + 4, 0xfffffff0);
+    expect(read().objects).toHaveLength(3);
+    expect(read().objects.find((object) => object.id === soldier)).not.toHaveProperty('renderOrder');
   });
 
   it('returns an empty state outside a battle', () => {

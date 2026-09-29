@@ -145,6 +145,35 @@ describe('HD 桥状态机', () => {
     harness.stop();
   });
 
+  it('forwards optional native painter order without inventing metadata for older snapshots', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    const state = battle(3);
+    const object = {
+      id: 1,
+      uid: 2,
+      kind: 'infantry' as const,
+      type: 'SHK',
+      owner: 0,
+      x: 13248,
+      y: 20544,
+      z: 208,
+      facingRaw: 0,
+      health: 1,
+      isSelected: false,
+    };
+    state.objects = [
+      { ...object, renderOrder: { layer: 2, index: 3, ySort: 33792 } },
+      { ...object, id: 3, uid: 4 },
+    ];
+    harness.setState(state);
+    await advance(16);
+    const pushed = view.push.mock.calls.at(-1)![0];
+    expect(pushed.objects[0].renderOrder).toEqual({ layer: 2, index: 3, ySort: 33792 });
+    expect(pushed.objects[1]).not.toHaveProperty('renderOrder');
+    harness.stop();
+  });
+
   it('forwards independent live overlays, smudges and the local house without copying the cell arrays', async () => {
     const harness = setup();
     const view = await goLive(harness);
