@@ -10,7 +10,14 @@ import { coordDrawOffset } from '../src/iso.ts';
 import { colorSchemeSlots } from '../src/remap.ts';
 import { THEATERS } from '../src/theater.ts';
 import { ArtSource, packSprites, type InstallView } from '../src/node/artSource.ts';
-import { appendOverlayLibrary, collectOverlayLibrary, collectTypeLibrary, readLibrary } from '../src/node/library.ts';
+import {
+  appendOverlayLibrary,
+  appendSmudgeLibrary,
+  collectOverlayLibrary,
+  collectSmudgeLibrary,
+  collectTypeLibrary,
+  readLibrary,
+} from '../src/node/library.ts';
 import type { TypeLibrary } from '../src/library.ts';
 
 describe('infantry sequences', () => {
@@ -439,7 +446,7 @@ describe('type library records', () => {
   });
 });
 
-describe('live overlay library', () => {
+describe('live cell-art library', () => {
   const rules = `
 [OverlayTypes]
 0=GAWALL
@@ -469,6 +476,18 @@ IsARock=yes
       'bridge1.shp': bodyAndShadow(4),
     },
     { 'rulesmd.ini': rules, 'artmd.ini': '[TIB01]\nTheater=yes\n[GEM01]\nTheater=yes\n' },
+  );
+  const smudgeInst = fakeInstall(
+    {
+      'crater.tem': bodyAndShadow(3),
+      'crater.sno': bodyAndShadow(2),
+      'burn01.shp': bodyAndShadow(1),
+    },
+    {
+      'rulesmd.ini':
+        '[SmudgeTypes]\n0=CR1\n1=BURN01\n2=MISSING\n3=CR1\n[CR1]\nImage=CRATER_ART\n[BURN01]\nWidth=3\nHeight=2\n',
+      'artmd.ini': '[CRATER_ART]\nImage=crater\nTheater=no\n',
+    },
   );
   const temp: string[] = [];
   afterEach(() => {
@@ -611,5 +630,120 @@ IsARock=yes
     const conflict = readFileSync(join(dir, 'library.json'));
     expect(() => appendOverlayLibrary(inst, 'temperate', out)).toThrow('palette unit conflicts');
     expect(readFileSync(join(dir, 'library.json'))).toEqual(conflict);
+  });
+
+  it('collects smudges absent from the map with theater art, footprint dimensions and complete body/shadow frames', () => {
+    const collected = collectSmudgeLibrary(smudgeInst, 'temperate');
+    expect(Object.keys(collected.smudges)).toEqual(['CR1', 'BURN01']);
+    expect(collected.smudges['CR1']).toEqual({
+      sprite: 'smudge:CR1',
+      frames: 3,
+      width: 1,
+      height: 1,
+      palette: 'iso',
+      remap: false,
+      flat: true,
+      drawOffset: [0, 0],
+      lighting: 'full',
+    });
+    expect(collected.smudges['BURN01']).toMatchObject({ width: 3, height: 2, frames: 1 });
+    const crater = collected.collector.sprites.get('smudge:CR1')!;
+    expect(crater.entry).toMatchObject({ file: 'crater.tem', palette: 'iso', remap: false });
+    expect(crater.entry.sourceFrames).toBeUndefined();
+    expect(crater.frames).toHaveLength(3);
+    expect(crater.shadows).toHaveLength(3);
+    expect(collected.collector.sprites.get('smudge:BURN01')!.entry.file).toBe('burn01.shp');
+    const snow = collectSmudgeLibrary(smudgeInst, 'snow');
+    expect(snow.collector.sprites.get('smudge:CR1')!.entry.file).toBe('crater.sno');
+    expect(snow.smudges['CR1']!.frames).toBe(2);
+    expect(collected.counts).toEqual({ 'listed:smudge': 3, 'types:smudge': 2, 'skipped:smudge': 1 });
+    expect(collected.warnings).toEqual(['smudge:MISSING: no art file (missing.tem, missing.shp)']);
+    expect(collectTypeLibrary(smudgeInst, 'temperate').smudges).toEqual(collected.smudges);
+  });
+
+  it('appends smudges without changing old library records, overlay pages, palettes or HD references', () => {
+    const { out, dir } = makeCopy();
+    const original = appendOverlayLibrary(inst, 'temperate', out).library;
+    const unchanged = [
+      'library.json',
+      'sprites-0.png',
+      'sprites-0@2x.png',
+      'sprites-0@2x-remap.png',
+      'sprites-overlays-0.png',
+      'palettes/unit.png',
+      'palettes/iso.png',
+      'palettes/theater.png',
+    ];
+    const before = Object.fromEntries(unchanged.map((file) => [file, readFileSync(join(dir, file))]));
+    const library = appendSmudgeLibrary(smudgeInst, 'temperate', out).library;
+    expect(readLibrary(dir)).toEqual(library);
+    for (const key of [
+      'types',
+      'voxels',
+      'colorSchemes',
+      'colorSchemesByName',
+      'extractor',
+      'overlays',
+      'overlayExtractor',
+      'palettes',
+      'paletteSources',
+    ] as const)
+      expect(library[key]).toEqual(original[key]);
+    for (const [id, sprite] of Object.entries(original.sprites)) expect(library.sprites[id]).toEqual(sprite);
+    expect(library.spriteAtlases.slice(0, 2)).toEqual(original.spriteAtlases);
+    expect(library.spriteAtlases[2]!.file).toBe('sprites-smudges-0.png');
+    expect(library.spriteAtlasesHd).toEqual([...original.spriteAtlasesHd!, null]);
+    for (const file of unchanged.filter((file) => file !== 'library.json'))
+      expect(readFileSync(join(dir, file))).toEqual(before[file]);
+    for (const smudge of Object.values(library.smudges!)) {
+      const sprite = library.sprites[smudge.sprite]!;
+      expect([...sprite.frames, ...sprite.shadows!].every((frame) => frame.page === 2)).toBe(true);
+    }
+    expect(library.smudgeExtractor).toMatchObject({
+      tool: 'ra2-assets library --only smudges',
+      counts: { 'types:smudge': 2, sprites: 2, frames: 8, atlasPages: 1 },
+      warnings: ['smudge:MISSING: no art file (missing.tem, missing.shp)'],
+    });
+    const firstPage = readFileSync(join(dir, 'sprites-smudges-0.png'));
+    const repeat = appendSmudgeLibrary(smudgeInst, 'temperate', out).library;
+    expect(repeat.spriteAtlases).toHaveLength(4);
+    expect(repeat.sprites['smudge:CR1']!.frames[0]!.page).toBe(3);
+    expect(readFileSync(join(dir, 'sprites-smudges-0.png'))).toEqual(firstPage);
+    expect(repeat.spriteAtlasesHd).toEqual([...original.spriteAtlasesHd!, null, null]);
+    expect(readdirSync(dir).some((file) => file.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('adds smudges to old libraries without unrelated reads and refuses incompatible metadata or palette sources', () => {
+    const { out, dir, original } = makeCopy();
+    const isolated = {
+      ...smudgeInst,
+      palette: (file: string) => {
+        expect(file).toBe('isotem.pal');
+        return smudgeInst.palette(file);
+      },
+      vxl: () => {
+        throw new Error('unrelated voxel read');
+      },
+      hva: () => {
+        throw new Error('unrelated HVA read');
+      },
+    };
+    expect(() => appendSmudgeLibrary(isolated, 'temperate', out)).not.toThrow();
+    expect(readLibrary(dir).palettes.iso).toBe('palettes/iso.png');
+    for (const change of [
+      { version: 2 },
+      { theater: 'snow' },
+      {
+        palettes: { iso: 'palettes/iso.png' },
+        paletteSources: { iso: 'other.pal' },
+      },
+    ]) {
+      writeFileSync(join(dir, 'library.json'), JSON.stringify({ ...original, ...change }));
+      const before = readFileSync(join(dir, 'library.json'));
+      expect(() => appendSmudgeLibrary(smudgeInst, 'temperate', out)).toThrow(
+        /temperate library|palette iso conflicts/,
+      );
+      expect(readFileSync(join(dir, 'library.json'))).toEqual(before);
+    }
   });
 });

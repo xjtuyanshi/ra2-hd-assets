@@ -338,6 +338,7 @@ describe('VmWorkerController request-scoped errors', () => {
       objects: [],
       shroud: null,
       overlays: null,
+      smudges: null,
       effects: null,
     };
     core.renderState = snapshot;
@@ -372,7 +373,7 @@ describe('VmWorkerController request-scoped errors', () => {
     core.renderState = { ...core.renderState, frame: 44 };
     await controller.handleMessage({ type: 'render-state', requestId: 10 });
     const { overlays: _grid, ...withoutGrid } = core.renderState;
-    expect(messages).toContainEqual({ type: 'render-state-overlays-unchanged', requestId: 10, value: withoutGrid });
+    expect(messages).toContainEqual({ type: 'render-state-cells-unchanged', requestId: 10, value: withoutGrid });
     expect(messages.at(-1)).not.toHaveProperty('value.overlays');
     core.renderState = { ...core.renderState, overlays: { ...overlays, data: new Uint8Array([7]), revision: 2 } };
     await controller.handleMessage({ type: 'render-state', requestId: 11 });
@@ -380,6 +381,29 @@ describe('VmWorkerController request-scoped errors', () => {
     core.renderState = { ...core.renderState, overlays: null };
     await controller.handleMessage({ type: 'render-state', requestId: 12 });
     expect(messages).toContainEqual({ type: 'render-state-reply', requestId: 12, value: core.renderState });
+    const smudges = { ...overlays, types: ['CR1'] };
+    core.renderState = { ...snapshot, overlays, smudges };
+    await controller.handleMessage({ type: 'render-state', requestId: 13 });
+    expect(messages.at(-1)).toEqual({ type: 'render-state-reply', requestId: 13, value: core.renderState });
+    core.renderState = { ...core.renderState, frame: 45 };
+    await controller.handleMessage({ type: 'render-state', requestId: 14 });
+    expect(messages.at(-1)?.type).toBe('render-state-cells-unchanged');
+    expect(messages.at(-1)).not.toHaveProperty('value.overlays');
+    expect(messages.at(-1)).not.toHaveProperty('value.smudges');
+    // Clearing either layer must reach the client even when the sibling is unchanged.
+    core.renderState = { ...core.renderState, smudges: null };
+    await controller.handleMessage({ type: 'render-state', requestId: 15 });
+    expect(messages.at(-1)).toHaveProperty('value.smudges', null);
+    expect(messages.at(-1)).not.toHaveProperty('value.overlays');
+    core.renderState = { ...core.renderState, smudges };
+    await controller.handleMessage({ type: 'render-state', requestId: 16 });
+    expect(messages.at(-1)).toHaveProperty('value.smudges', smudges);
+    expect(messages.at(-1)).not.toHaveProperty('value.overlays');
+    core.renderState = { ...core.renderState, overlays: null };
+    await controller.handleMessage({ type: 'render-state', requestId: 17 });
+    expect(messages.at(-1)).toHaveProperty('value.overlays', null);
+    expect(messages.at(-1)).not.toHaveProperty('value.smudges');
+
     controller.dispose();
   });
   it('uses one request id for init/start and preserves their order', async () => {

@@ -19,7 +19,7 @@ import type { SpriteEntry, SpriteFrame, VoxelModel, VoxelPart } from '../manifes
 import { chooseAtlasWidth, packShelves, packShelvesPaged } from '../atlas.ts';
 import { animTimingArt, artFileCandidates, resolveArtFile, splitShadowHalf } from '../art.ts';
 import { drawOffsetFor } from '../iso.ts';
-import type { LibraryOverlay } from '../library.ts';
+import type { LibraryOverlay, LibrarySmudge } from '../library.ts';
 import type { TheaterInfo } from '../theater.ts';
 import type { GameInstall } from './install.ts';
 
@@ -141,6 +141,26 @@ export class ArtSource {
       flat: !wall && !highBridge && (tiberium || this.rulesBool(id, 'DrawFlat', true)),
       drawOffset: highBridge ? [0, -60] : drawOffsetFor('overlay', { isARock: this.rulesBool(id, 'IsARock') }),
       lighting: tiberium ? 'none' : wall ? 'ambient' : 'full',
+    };
+  }
+
+  /** SmudgeTypes always use theater art, including types with no art Theater=yes entry. */
+  smudgeArt(id: string): Omit<LibrarySmudge, 'sprite' | 'frames'> & { candidates: string[] } {
+    const { image } = this.artOf(id);
+    return {
+      candidates: artFileCandidates(image, {
+        theater: true,
+        newTheater: false,
+        theaterExt: this.theater.ext,
+        theaterLetter: this.theater.newTheaterLetter,
+      }),
+      palette: 'iso',
+      width: Math.max(1, this.rulesInt(id, 'Width') ?? 1),
+      height: Math.max(1, this.rulesInt(id, 'Height') ?? 1),
+      remap: false,
+      flat: true,
+      drawOffset: drawOffsetFor('smudge'),
+      lighting: 'full',
     };
   }
 

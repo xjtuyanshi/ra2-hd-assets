@@ -1,15 +1,18 @@
 import type { GuestMemory } from '../../vm86/win32';
 import type {
+  GameRenderCellSprites,
   GameRenderEffects,
   GameRenderObject,
   GameRenderOverlays,
   GameRenderShroud,
+  GameRenderSmudges,
   GameRenderState,
   GameRenderStateReader,
 } from '../renderState';
 import { createByteViewAccessor, type GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { createYrEffectsReader, type ReadYrEffectsOptions, type YrEffects } from './effectsReader';
 import { createYrOverlayReader, type ReadYrOverlayOptions, type YrOverlays } from './overlayReader';
+import { createYrSmudgeReader, type ReadYrSmudgeOptions, type YrSmudges } from './smudgeReader';
 import { createYrShroudReader, type ReadYrShroudOptions, type YrShroud } from './shroudReader';
 import {
   YR_STATE_GLOBALS,
@@ -24,7 +27,7 @@ import {
 
 /**
  * YR 1.001 implementation of the game-neutral render-state contract (src/games/renderState.ts) for the HD bridge. It
- * combines the state, shroud, overlay and effects readers and projects their output onto the fields the external renderer
+ * combines the state, shroud, overlay, smudge and effects readers and projects their output onto the fields the external renderer
  * consumes; everything else the readers report (reader statistics, house names, weapon and warhead ids, voxel debris,
  * fire events) stays here. HD bridge only: src/games/yr/runtimeHooks.ts loads this module on demand in development
  * builds.
@@ -43,10 +46,12 @@ export interface YrRenderStateSources {
   createShroudReader: () => ((options?: ReadYrShroudOptions) => YrShroud | null) | null;
   createEffectsReader: () => ((options?: ReadYrEffectsOptions) => YrEffects | null) | null;
   createOverlayReader: () => ((options?: ReadYrOverlayOptions) => YrOverlays | null) | null;
+  createSmudgeReader: () => ((options?: ReadYrSmudgeOptions) => YrSmudges | null) | null;
   /** Host polling clock only; never changes the guest's clock or logic frame. */
   now?: () => number;
 }
 
+/** Both cell decoration layers share this cadence, independently of the logic frame. */
 export const YR_OVERLAY_POLL_MS = 250;
 
 /** Guarded factory over the live guest memory; null unless the image is the pinned YR 1.001 build. */
@@ -64,6 +69,7 @@ export function createYrRenderStateReader(
     createShroudReader: () => createYrShroudReader(accessor, hash),
     createEffectsReader: () => createYrEffectsReader(accessor, hash),
     createOverlayReader: () => createYrOverlayReader(accessor, hash),
+    createSmudgeReader: () => createYrSmudgeReader(accessor, hash),
   });
 }
 
@@ -71,6 +77,7 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
   let readShroud: ReturnType<YrRenderStateSources['createShroudReader']> = null;
   let readEffects: ReturnType<YrRenderStateSources['createEffectsReader']> = null;
   let readOverlays: ReturnType<YrRenderStateSources['createOverlayReader']> = null;
+  let readSmudges: ReturnType<YrRenderStateSources['createSmudgeReader']> = null;
   let lastKey: number[] | null = null;
   let last: GameRenderState | null = null;
   // The shroud reader fills this result's arrays in place. It is never handed out, so reusing it is safe whether the
@@ -80,19 +87,23 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
   let overlayScratch: YrOverlays | null = null;
   let overlays: GameRenderOverlays | null = null;
   let overlayRevision = 0;
-  let lastOverlayPoll = -Infinity;
+  let smudgeScratch: YrSmudges | null = null;
+  let smudges: GameRenderSmudges | null = null;
+  let smudgeRevision = 0;
+  let lastCellPoll = -Infinity;
   const now = sources.now ?? (() => performance.now());
   return () => {
     const key = readChangeKey(sources.memory);
     const at = now();
-    const overlayDue = at - lastOverlayPoll >= YR_OVERLAY_POLL_MS;
+    const cellsDue = at - lastCellPoll >= YR_OVERLAY_POLL_MS;
     const unchangedKey = key && lastKey && sameKey(key, lastKey);
-    if (last && unchangedKey && (!last.map || !overlayDue)) return last;
+    if (last && unchangedKey && (!last.map || !cellsDue)) return last;
     const state = sources.readState();
     if (!state) {
       last = lastKey = null;
       overlayScratch = overlays = null;
-      lastOverlayPoll = -Infinity;
+      smudgeScratch = smudges = null;
+      lastCellPoll = -Infinity;
       return null;
     }
     let effects: GameRenderEffects | null = null;
@@ -103,20 +114,28 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
         (key && lastKey && (key[1] !== lastKey[1] || key[0]! < lastKey[0]!));
       if (newBattle) {
         overlayScratch = overlays = null;
-        lastOverlayPoll = -Infinity;
+        smudgeScratch = smudges = null;
+        lastCellPoll = -Infinity;
       }
-      if (newBattle || overlayDue) {
+      if (newBattle || cellsDue) {
         readOverlays ??= sources.createOverlayReader();
         const previousRevision = overlayScratch?.revision;
         overlayScratch = readOverlays?.({ reuse: overlayScratch }) ?? null;
         if (!overlayScratch) overlays = null;
         else if (!overlays || overlayScratch.revision !== previousRevision) {
-          overlays = publishOverlays(overlayScratch, ++overlayRevision);
+          overlays = publishCells(overlayScratch, ++overlayRevision);
         }
-        lastOverlayPoll = at;
+        readSmudges ??= sources.createSmudgeReader();
+        const previousSmudgeRevision = smudgeScratch?.revision;
+        smudgeScratch = readSmudges?.({ reuse: smudgeScratch }) ?? null;
+        if (!smudgeScratch) smudges = null;
+        else if (!smudges || smudgeScratch.revision !== previousSmudgeRevision) {
+          smudges = publishCells(smudgeScratch, ++smudgeRevision);
+        }
+        lastCellPoll = at;
       }
-      // A due overlay poll need not republish the rest of a paused/unchanged battlefield.
-      if (last && !newBattle && unchangedKey && overlays === last.overlays) return last;
+      // A due cell poll need not republish the rest of a paused/unchanged battlefield.
+      if (last && !newBattle && unchangedKey && overlays === last.overlays && smudges === last.smudges) return last;
       readShroud ??= sources.createShroudReader();
       readEffects ??= sources.createEffectsReader();
       scratch = readShroud?.({ reuse: scratch }) ?? null;
@@ -126,7 +145,8 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
       effects = read ? projectEffects(read) : null;
     } else {
       overlayScratch = overlays = null;
-      lastOverlayPoll = -Infinity;
+      smudgeScratch = smudges = null;
+      lastCellPoll = -Infinity;
     }
     last = {
       frame: state.frame,
@@ -137,6 +157,7 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
       objects: state.objects.map(projectObject),
       shroud: state.map ? shroud : null,
       overlays,
+      smudges,
       effects,
     };
     lastKey = key;
@@ -145,7 +166,7 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
 }
 
 /** Scratch arrays never escape to a main-thread consumer or a Worker message. Copy only changed publications. */
-function publishOverlays(read: YrOverlays, revision: number): GameRenderOverlays {
+function publishCells(read: GameRenderCellSprites, revision: number): GameRenderCellSprites {
   return {
     originX: read.originX,
     originY: read.originY,

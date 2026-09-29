@@ -1,6 +1,6 @@
-# Live cell overlays
+# Live cell overlays and smudges
 
-The development HD bridge reads YR 1.001's cell overlays instead of retaining the map's initial walls and resources.
+The development HD bridge reads YR 1.001's cell overlays and smudges, including walls, resources, craters and burn marks.
 The game still owns placement, damage, harvesting, regrowth, visibility and simulation. Nothing in this path writes
 guest memory. It remains inside the existing development-only dynamic import in `src/games/yr/runtimeHooks.ts`.
 
@@ -13,17 +13,35 @@ Placement, wall connection updates, ore reduction/growth and native drawing inde
 The complete frame byte includes wall damage bits: it is not just a four-neighbour mask.
 The vanilla wall drawing branch selects the **current player's** colour scheme, rather than the cell's wall owner.
 
-The game-neutral publication contains bounds, a row-major `Int16Array` of type indices (`-1` for no overlay), a
-`Uint8Array` of frames, a type-ID table, and a revision. The reader checks table ranges, cell coordinates and concrete
+`src/games/yr/smudgeReader.ts` records the corresponding smudge evidence against the same pinned image:
+`SmudgeTypeIndex` is i32 at `Cell+0x48`, `SmudgeData` is u8 at `Cell+0x11F`, and `SmudgeTypes` is at `0xA8EC18`
+(items `+4`, capacity `+8`, count `+0x10`; ID at `+0x24`, type vtable `0x7F3528`). The constructor initializes these
+fields at `0x47BC24` / `0x47BD22`; placement writes them at `0x6B60EA` / `0x6B60F5`; removal clears them at
+`0x543573` / `0x54357D`. Only `-1` denotes no smudge, unlike the overlay pack's additional sentinels.
+
+**SmudgeData is a footprint selector, not an animation frame.** Placement stores `dy * Width + dx`; drawing divides
+it by Width at `0x6B562C` / `0x6B5637` to recover the origin and draws SHP body frame 0 at `0x6B56B1`. LiveView
+reconstructs that origin from the library's Width/Height and deduplicates the same type/origin/elevation. Native draw
+uses the tactical redraw rectangle, not a per-cell diamond mask: a multi-cell smudge remains a complete sprite while
+any of its footprint cells still refers to it. Invalid selectors are omitted and reported.
+
+Each independent game-neutral publication (`overlays`, `smudges`) contains bounds, a row-major `Int16Array` of type indices (`-1` for empty), a
+`Uint8Array` of native data, a type-ID table, and a revision. The reader checks table ranges, cell coordinates and concrete
 vtables, dereferences only existing cells, and compares every output value during the scan. Invalid cells/types are
 omitted and counted; invalid global tables return null. Callers must discard scratch reuse after a null result.
 
 The bridge polls every 250 ms, resets on scenario/map change or logic-frame rewind, and copies only changes into
 immutable publications. Revisions increase across battles for the reader's lifetime. Worker replies retain unchanged
-overlay publications without cloning the grid on every moving-unit snapshot. LiveView uses the library's original
-SHP frames, offsets, palettes and remap policy and rebuilds overlay instances only when their inputs change. A live
-empty grid removes all static overlays; null enables the static fallback. Smudges retain their existing map behavior.
-Terrain elevation still comes from the map cache; dynamic terrain deformation is outside this contract.
+cell publications without cloning the grid on every moving-unit snapshot. LiveView uses the library's original
+SHP frames, offsets, palettes and remap policy and rebuilds cell instances only when their inputs change. A live
+empty grid removes all static objects of that layer; null enables its static fallback. Smudges use the theater's iso
+palette with full terrain lighting and no house remap, below overlays and objects; the existing shroud masks them.
+A library without `smudges` triggers one section warning and falls back to known map-cache art for selector 0;
+nonzero selectors without footprint metadata and absent art are omitted with per-type warnings. The grid remains
+authoritative even with an old library, so removed map-start smudges do not linger. Diagnostics expose
+`overlaysFromEngine` and `smudgesFromEngine` separately; `cellsFromEngine` means at least one live cell path is active.
+Terrain elevation still comes from the map cache; dynamic terrain deformation is outside this contract. Footprint
+dimensions come from the theater library rules; custom-map Width/Height overrides require matching metadata.
 
 ## Upgrade existing caches
 
@@ -34,7 +52,19 @@ root, with `YR_INSTALL` set to that installation and `HD_CACHE` to the existing 
 pnpm hd:library -- --game "$YR_INSTALL" --out "$HD_CACHE/_library" --theater urban --only overlays
 ```
 
-Repeat for each theater used, or omit `--theater urban` to process all six existing theater libraries. `--only overlays`
+Add the smudge section to existing caches independently:
+
+```bash
+pnpm hd:library -- --game "$YR_INSTALL" --out "$HD_CACHE/_library" --only smudges
+```
+
+This processes all six theater libraries. Add `--theater urban` (or another theater ID) when only a subset exists.
+The smudges-only mode includes all rules `SmudgeTypes`, including types absent from the map, uses their theater
+extension with SHP fallback, and records Width/Height. It preserves existing overlays, types, palettes, HD references
+and atlas files, appending new atlas pages. A missing library must first be built with the ordinary `hd:library`
+command. No map-cache regeneration is needed.
+
+For the overlay command above, repeat for each theater used, or omit `--theater urban` to process all six existing theater libraries. `--only overlays`
 requires an existing `library.json`; a missing theater library must first be extracted with the ordinary `hd:library`
 command. The overlay-only mode appends atlas pages and replaces the overlay section, preserving existing type records,
 palettes, voxel paths and atlas files. Do not run a full extraction merely to update overlays. Missing art is reported
@@ -52,12 +82,18 @@ upgrade so the per-theater library is reloaded. Existing map manifests do not ne
 ## Acceptance
 
 Asset-free regressions exercise malformed memory, typed-array reuse/change detection, bridge timing/immutability,
-Worker forwarding, atlas append preservation and overlay instance selection. The synthetic polling benchmark is
+Worker forwarding with independently unchanged grids, atlas append preservation, exact overlay frames and smudge footprint selection. The synthetic polling benchmark is
 `scripts/benchmarks/benchmarkYrOverlays.mts`; it does not establish full-match FPS.
 
 ```bash
 pnpm exec node --import tsx scripts/benchmarks/benchmarkYrOverlays.mts
+pnpm exec node --import tsx scripts/benchmarks/benchmarkYrSmudges.mts
 ```
+
+The smudge benchmark scans 262,144 bounded slots (786,432 output bytes), comparing 200 unchanged polls with
+200 changes. A synthetic Node 26.0.0 run measured median/p95 of 0.805/0.919 ms with 16,384 allocated cells and
+6.988/8.014 ms with all 262,144 allocated; changed polls were 0.808/0.948 ms and 6.878/7.610 ms. These are reader-only
+measurements, excluding Worker copies, rendering and the existing overlay scan; they do not establish match FPS.
 
 In a real match, retain screenshots or a recording outside Git and check:
 
@@ -67,7 +103,13 @@ In a real match, retain screenshots or a recording outside Git and check:
 3. Compare wall remap colours with the native view, including an enemy wall, and compare ore/gem theater palettes.
 4. Reveal and re-shroud overlay cells; neither walls nor bright resources may shine through black shroud. Check elevated
    terrain, overlaps with trees/buildings, scrolling and the native selection/placement graphics.
-5. Restart the same map and switch maps; no overlays from the previous match may remain. Check Worker and main-thread
-   operation. Legacy caches without the overlay section must still use the static fallback.
+5. Trigger shell craters and scorch marks, destroy buildings that leave multi-cell burn marks, then place buildings
+   over them or otherwise let the engine remove/replace them. Compare native and HD at the same moment, including
+   types absent from the map-start cache, frame 0, footprint origin, elevation, lighting, shroud and overlay overlap.
+6. Restart the same map and switch maps; no overlays from the previous match may remain. Check Worker and main-thread
+   operation. Legacy caches without the overlay section must still use the static fallback; without smudge metadata they must
+   warn once, retain known map art where interpretable, and still honor live removals.
 
 Unit tests, a successful build and a synthetic benchmark are separate evidence from these real-match checks.
+
+Live-match visual comparison and real installation/cache extraction are **UNVERIFIED** by the synthetic tests.

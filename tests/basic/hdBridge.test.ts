@@ -34,6 +34,7 @@ function battle(frame: number, fileName = 'XMP29U2.MAP'): GameRenderState {
     objects: [],
     shroud: null,
     overlays: null,
+    smudges: null,
     effects: null,
   } as unknown as GameRenderState;
 }
@@ -144,7 +145,7 @@ describe('HD 桥状态机', () => {
     harness.stop();
   });
 
-  it('forwards live overlays and the local house without copying the cell arrays', async () => {
+  it('forwards independent live overlays, smudges and the local house without copying the cell arrays', async () => {
     const harness = setup();
     const view = await goLive(harness);
     const state = battle(3);
@@ -159,14 +160,17 @@ describe('HD 桥状态机', () => {
       types: ['GAWALL'],
       revision: 3,
     };
+    state.smudges = { ...state.overlays, types: ['CR1'], data: new Uint8Array([2, 0]) };
     harness.setState(state);
     await advance(16);
     const pushed = view.push.mock.calls.at(-1)![0];
     expect(pushed.localHouse).toBe(2);
     expect(pushed.overlays).toBe(state.overlays);
-    harness.setState({ ...state, frame: 4, overlays: null });
+    expect(pushed.smudges).toBe(state.smudges);
+    harness.setState({ ...state, frame: 4, overlays: null, smudges: null });
     await advance(16);
     expect(view.push.mock.calls.at(-1)![0].overlays).toBeNull();
+    expect(view.push.mock.calls.at(-1)![0].smudges).toBeNull();
     harness.stop();
   });
   it('游戏接受直通：只让键色透明，关闭后键色保留一小段再清除', async () => {

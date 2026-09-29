@@ -268,11 +268,16 @@ export class VmWorkerController {
             break;
           }
           const sameOverlays = value?.overlays && value.overlays === this.lastRenderState?.overlays;
+          const sameSmudges = value?.smudges && value.smudges === this.lastRenderState?.smudges;
           this.lastRenderState = value;
-          if (value && sameOverlays) {
-            // Moving units do not require cloning the much slower-changing cell grid on every logic frame.
-            const { overlays: _overlays, ...rest } = value;
-            this.post({ type: 'render-state-overlays-unchanged', requestId: message.requestId, value: rest });
+          if (value && (sameOverlays || sameSmudges)) {
+            // Each cell layer changes independently; moving units need neither unchanged grid cloned again.
+            const { overlays, smudges, ...rest } = value;
+            this.post({
+              type: 'render-state-cells-unchanged',
+              requestId: message.requestId,
+              value: { ...rest, ...(!sameOverlays && { overlays }), ...(!sameSmudges && { smudges }) },
+            });
           } else {
             this.post({ type: 'render-state-reply', requestId: message.requestId, value });
           }

@@ -23,6 +23,8 @@ export interface GameRenderState {
   shroud: GameRenderShroud | null;
   /** Live cell decorations, null while unavailable (the renderer may use its static map cache). */
   overlays: GameRenderOverlays | null;
+  /** Engine-owned ground marks; null enables the renderer's map-cache fallback. */
+  smudges: GameRenderSmudges | null;
   /** Live effects the engine is playing, null while they cannot be read. */
   effects: GameRenderEffects | null;
 }
@@ -95,19 +97,23 @@ export interface GameRenderShroud {
   cells: Uint8Array;
 }
 
-export interface GameRenderOverlays {
+/** Shared publication format for independent layers of cell decorations. */
+export interface GameRenderCellSprites {
   originX: number;
   originY: number;
   width: number;
   height: number;
-  /** Row-major type indices into `types`; -1 means no overlay. */
+  /** Row-major type indices into `types`; -1 means no decoration. */
   index: Int16Array;
-  /** Native sprite frame (growth/connection state), in the same cell order. */
+  /** Native cell data: overlay frame or smudge footprint offset, in the same cell order. */
   data: Uint8Array;
   types: string[];
   /** Increases when published content changes, including a new battle, for this reader's lifetime. */
   revision: number;
 }
+
+export type GameRenderOverlays = GameRenderCellSprites;
+export type GameRenderSmudges = GameRenderCellSprites;
 
 export interface GameRenderAnim extends GameRenderPoint {
   id: number;

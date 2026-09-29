@@ -30,6 +30,7 @@ import {
   type LibraryBuilding,
   type LibraryKind,
   type LibraryOverlay,
+  type LibrarySmudge,
   type LibraryType,
   type TypeLibrary,
 } from '../library.ts';
@@ -58,8 +59,8 @@ export interface LibraryOptions {
   /** Library root (default <repo>/gameres/hd-cache/_library in the CLI). */
   outDir: string;
   theaters?: readonly TheaterId[];
-  /** Append only overlay art to each existing library; never repack its other sprites or voxels. */
-  only?: 'overlays';
+  /** Append only the selected cell art to each existing library; never repack its other sprites or voxels. */
+  only?: 'overlays' | 'smudges';
   log?: (msg: string) => void;
 }
 
@@ -107,6 +108,7 @@ export interface CollectedLibrary {
   collector: SpriteCollector;
   types: Record<string, LibraryType>;
   overlays: Record<string, LibraryOverlay>;
+  smudges: Record<string, LibrarySmudge>;
   voxelModels: Map<string, VoxelModel>;
   colorSchemes: ColorSchemeEntry[];
   colorSchemesByName: Record<string, number>;
@@ -126,6 +128,7 @@ function extractTheater(
   const t0 = Date.now();
   const inst = GameInstall.open(opts.gameDir, theaterId);
   if (opts.only === 'overlays') return appendOverlayLibrary(inst, theaterId, opts.outDir, log);
+  if (opts.only === 'smudges') return appendSmudgeLibrary(inst, theaterId, opts.outDir, log);
   const lib = collectTypeLibrary(inst, theaterId);
   return writeTypeLibrary(inst, theaterId, lib, opts.outDir, commonVoxels, log, t0);
 }
@@ -158,8 +161,49 @@ function collectOverlays(
   return overlays;
 }
 
+/** Collect all native smudge frames, including crater/burn types absent from the map's initial placements. */
+function collectSmudges(
+  src: ArtSource,
+  collector: SpriteCollector,
+  counts: Record<string, number>,
+): Record<string, LibrarySmudge> {
+  const smudges: Record<string, LibrarySmudge> = {};
+  const ids = [
+    ...new Set(
+      src.rules
+        .readRegistry('SmudgeTypes')
+        .map((v) => v.trim())
+        .filter(Boolean),
+    ),
+  ];
+  counts['listed:smudge'] = ids.length;
+  for (const id of ids) {
+    const { candidates, ...art } = src.smudgeArt(id);
+    const sprite = `smudge:${id}`;
+    const pending = collector.addShp(sprite, candidates, art.palette, art.remap);
+    if (!pending) continue;
+    smudges[id] = { sprite, frames: pending.frames.length, ...art };
+  }
+  counts['types:smudge'] = Object.keys(smudges).length;
+  counts['skipped:smudge'] = ids.length - counts['types:smudge'];
+  return smudges;
+}
+
 /** Overlay-only collection avoids reading unrelated TechnoType art, palettes, colour schemes or voxels. */
 export function collectOverlayLibrary(inst: InstallView, theaterId: TheaterId) {
+  const base = cellLibrarySource(inst, theaterId);
+  const overlays = collectOverlays(base.src, base.collector, base.counts);
+  return { ...base, overlays };
+}
+
+/** Smudge-only collection never reads unrelated overlay or TechnoType art. */
+export function collectSmudgeLibrary(inst: InstallView, theaterId: TheaterId) {
+  const base = cellLibrarySource(inst, theaterId);
+  const smudges = collectSmudges(base.src, base.collector, base.counts);
+  return { ...base, smudges };
+}
+
+function cellLibrarySource(inst: InstallView, theaterId: TheaterId) {
   const warnings: string[] = [];
   const warn = (m: string): void => {
     if (!warnings.includes(m)) warnings.push(m);
@@ -167,8 +211,7 @@ export function collectOverlayLibrary(inst: InstallView, theaterId: TheaterId) {
   const src = new ArtSource(inst, THEATERS[theaterId], warn);
   const collector = new SpriteCollector(inst, warn);
   const counts: Record<string, number> = {};
-  const overlays = collectOverlays(src, collector, counts);
-  return { src, collector, overlays, counts, warnings };
+  return { src, collector, counts, warnings };
 }
 
 /**
@@ -181,18 +224,41 @@ export function appendOverlayLibrary(
   outDir: string,
   log: (m: string) => void = () => {},
 ): LibraryResult {
+  return appendCellLibrary(inst, theaterId, outDir, 'overlays', log);
+}
+
+/** Append all smudge types and frames while preserving the existing library and its atlas page indices. */
+export function appendSmudgeLibrary(
+  inst: InstallView,
+  theaterId: TheaterId,
+  outDir: string,
+  log: (m: string) => void = () => {},
+): LibraryResult {
+  return appendCellLibrary(inst, theaterId, outDir, 'smudges', log);
+}
+
+function appendCellLibrary(
+  inst: InstallView,
+  theaterId: TheaterId,
+  outDir: string,
+  section: 'overlays' | 'smudges',
+  log: (m: string) => void,
+): LibraryResult {
   const t0 = Date.now();
   const dir = join(outDir, theaterId);
   const existing = readLibrary(dir);
+  const kind = section === 'overlays' ? 'overlay' : 'smudge';
   if (existing.version !== TYPE_LIBRARY_VERSION || existing.theater !== theaterId)
-    throw new Error(`overlay append requires a version ${TYPE_LIBRARY_VERSION} ${theaterId} library`);
-  const { src, collector, overlays, counts, warnings } = collectOverlayLibrary(inst, theaterId);
+    throw new Error(`${kind} append requires a version ${TYPE_LIBRARY_VERSION} ${theaterId} library`);
+  const collected =
+    section === 'overlays' ? collectOverlayLibrary(inst, theaterId) : collectSmudgeLibrary(inst, theaterId);
+  const { src, collector, counts, warnings } = collected;
   const packed = packSprites(collector.sprites, { format: 'indexed', maxPage: LIBRARY_ATLAS_MAX });
   const pageOffset = existing.spriteAtlases.length;
   let nextName = 0;
   const addedPages = packed.pages.map((p) => {
-    while (existsSync(join(dir, `sprites-overlays-${nextName}.png`))) nextName++;
-    const file = `sprites-overlays-${nextName++}.png`;
+    while (existsSync(join(dir, `sprites-${section}-${nextName}.png`))) nextName++;
+    const file = `sprites-${section}-${nextName++}.png`;
     writeFileSync(join(dir, file), encodePng({ width: p.width, height: p.height, channels: 1, data: p.data }), {
       flag: 'wx',
     });
@@ -205,21 +271,21 @@ export function appendOverlayLibrary(
   const missingPalettes = [...collector.usedPalettes].filter((key) => {
     if (!existing.palettes[key]) return true;
     if (existing.paletteSources[key] !== src.paletteFiles[key])
-      throw new Error(`overlay palette ${key} conflicts with the existing library source`);
+      throw new Error(`${kind} palette ${key} conflicts with the existing library source`);
     return false;
   });
   const { palettes, paletteSources } = writePalettes(inst, dir, missingPalettes, src.paletteFiles, (m) => {
     if (!warnings.includes(m)) warnings.push(m);
   });
   for (const key of collector.usedPalettes) {
-    if (!existing.palettes[key] && !palettes[key]) throw new Error(`overlay palette ${key} could not be written`);
+    if (!existing.palettes[key] && !palettes[key]) throw new Error(`${kind} palette ${key} could not be written`);
   }
   counts['sprites'] = Object.keys(packed.entries).length;
   counts['frames'] = Object.values(packed.entries).reduce((n, e) => n + e.frames.length + (e.shadows?.length ?? 0), 0);
   counts['atlasPages'] = addedPages.length;
   const library: TypeLibrary = {
     ...existing,
-    overlays,
+    ...('overlays' in collected ? { overlays: collected.overlays } : { smudges: collected.smudges }),
     sprites: { ...existing.sprites, ...packed.entries },
     spriteAtlases: [...existing.spriteAtlases, ...addedPages],
     ...(existing.spriteAtlasesHd
@@ -232,9 +298,9 @@ export function appendOverlayLibrary(
       : {}),
     palettes: { ...existing.palettes, ...palettes },
     paletteSources: { ...existing.paletteSources, ...paletteSources },
-    overlayExtractor: { tool: 'ra2-assets library --only overlays', counts, warnings },
+    [`${kind}Extractor`]: { tool: `ra2-assets library --only ${section}`, counts, warnings },
   };
-  const staging = join(dir, `library.overlays-${process.pid}.tmp`);
+  const staging = join(dir, `library.${section}-${process.pid}.tmp`);
   try {
     writeFileSync(staging, JSON.stringify(library, null, 1), { flag: 'wx' });
     renameSync(staging, join(dir, 'library.json'));
@@ -242,7 +308,7 @@ export function appendOverlayLibrary(
     rmSync(staging, { force: true });
   }
   log(
-    `${theaterId}: appended ${counts['types:overlay']} overlays on ${addedPages.length} new pages; ${warnings.length} warnings`,
+    `${theaterId}: appended ${counts[`types:${kind}`]} ${section} on ${addedPages.length} new pages; ${warnings.length} warnings`,
   );
   return { theater: theaterId, dir, library, bytes: dirBytes(dir), ms: Date.now() - t0 };
 }
@@ -522,11 +588,13 @@ export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): Col
 
   const av = rules.getSection('AudioVisual');
   const overlays = collectOverlays(src, collector, counts);
+  const smudges = collectSmudges(src, collector, counts);
   return {
     src,
     collector,
     types,
     overlays,
+    smudges,
     voxelModels,
     colorSchemes,
     colorSchemesByName,
@@ -613,6 +681,7 @@ function writeTypeLibrary(
     voxels,
     types,
     overlays: lib.overlays,
+    smudges: lib.smudges,
     colorSchemes: lib.colorSchemes,
     colorSchemesByName: lib.colorSchemesByName,
     conditionYellow: lib.conditionYellow,

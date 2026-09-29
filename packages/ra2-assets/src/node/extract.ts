@@ -34,7 +34,6 @@ import { HD_CACHE_VERSION } from '../manifest.ts';
 import { packShelves } from '../atlas.ts';
 import {
   animStillFrame,
-  artFileCandidates,
   BUILDING_ACTIVE_ANIM_KEYS,
   buildingConditionFrame,
   facingFrame,
@@ -262,7 +261,6 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   };
   // Engine draw points (see drawOffsetFor): overlays, smudges, buildings and tiberium trees put their canvas centre on
   // the cell's top corner; rocks, other terrain objects and movable objects on the cell centre (or their coord).
-  const cellCorner = drawOffsetFor('overlay');
   const cellCentre = drawOffsetFor('vehicle');
   // YR writes these as percentages ("50%"); parseIniFraction reads them as the engine does.
   const conditionYellow = parseIniFraction(rules.getSection('AudioVisual')?.getString('ConditionYellow', ''), 0.5);
@@ -294,16 +292,9 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
     const x = Number.parseInt(xs ?? '', 10);
     const y = Number.parseInt(ys ?? '', 10);
     if (!type || !Number.isFinite(x) || !Number.isFinite(y)) continue;
-    const { image } = artOf(type);
+    const { candidates, palette, remap, flat, drawOffset, lighting } = src.smudgeArt(type);
     const id = `smudge:${type}`;
-    // SmudgeTypes are always theater art (cr1.tem, burn01.tem, ...) even without an art Theater=yes entry.
-    const candidates = artFileCandidates(image, {
-      theater: true,
-      newTheater: false,
-      theaterExt: theater.ext,
-      theaterLetter: theater.newTheaterLetter,
-    });
-    const s = addShp(id, candidates, 'iso', false);
+    const s = addShp(id, candidates, palette, remap);
     if (!s) continue;
     objects.push({
       kind: 'smudge',
@@ -313,9 +304,9 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
       z: heightAt(x, y),
       sprite: id,
       frame: 0,
-      flat: true,
-      drawOffset: cellCorner,
-      lighting: 'full',
+      flat,
+      drawOffset,
+      lighting,
     });
     count('smudge');
   }

@@ -4,8 +4,8 @@ The HD live view (`packages/hd-renderer/src/live`) accepts optional snapshot fie
 present; without them it falls back to the estimates listed in `docs/remaster/HD_BRIDGE.md` ("Bridge fields"). The
 types to fill are `LiveSnapshot`, `LiveHouse`, `LiveObject`, `LiveCells` (`live/liveView.ts`) and `LiveAnim`,
 `LiveBullet`, `LiveParticleSystem`, `LiveVoxelAnim`, `LiveFireEvent`, `LiveBeam`, `LiveEffects` (`live/effects.ts`).
-H2 building and infantry state is implemented end to end. H1 and the remaining SHP-vehicle H2 fields below are
-proposals; live cell overlays already use the separate `GameRenderOverlays` contract.
+H2 building and infantry state and H3 runtime cells (overlays and smudges, published as independent live
+grids) are implemented end to end. H1 and the remaining SHP-vehicle H2 fields below are proposals.
 
 ## H1: pass through what the readers already read
 
@@ -165,15 +165,29 @@ SHP vehicles (terror drone, squid, dolphin) still need `UnitClass::WalkedFramesS
 body art. Those fields are not implemented or assigned offsets here. The view uses primary facing and estimates
 walk progress from logic frame / `WalkRate`.
 
-## H3: remaining runtime smudges and tuple proposal
+## H3: runtime cells (implemented)
 
-`snapshot.cells = { full, cells: [x, y, overlay, overlayData, smudge, smudgeData][], overlayTypes?, smudgeTypes? }`:
-read the MapClass cells (CellClass OverlayTypeIndex, OverlayData, SmudgeTypeIndex, SmudgeData), keep the previous
-poll's copy in the reader and report only changed cells (`full: true` on the first poll); `overlayTypes` and
-`smudgeTypes` are the rules ids by index (OverlayTypeClass / SmudgeTypeClass arrays), sent once.
+The page forwards `snapshot.overlays` and `snapshot.smudges` from `GameRenderState`. Both contain bounds, row-major
+`Int16Array index`, `Uint8Array data`, a rules-ID `types` table and a lifetime-monotonic `revision`. They replace the
+proposed tuple-diff `snapshot.cells` path, which remains only as a legacy renderer input; the page does not populate it.
 
-The overlay portion is already implemented through `src/games/yr/overlayReader.ts`, `GameRenderOverlays` and the
-page bridge: ore growth/depletion and wall connections use the engine's full frame byte. See
-`docs/remaster/LIVE_OVERLAYS.md`. The tuple contract above remains a proposal for an alternative publication format
-and runtime smudges; this H2 change does not add engine craters/burn marks. Without either live overlay contract,
-the view still uses the map's initial overlays, warns once and reports `cellsFromEngine: false`.
+`src/games/yr/overlayReader.ts` reads `Cell+0x44` / `+0x11E` and `OverlayTypes` at `0xA83D80`.
+`src/games/yr/smudgeReader.ts` reads `Cell+0x48` / `+0x11F` and `SmudgeTypes` at `0xA8EC18`. The reader comments
+record the pinned SHA-256, validation rules, header leads and independent instruction evidence. Placement writes the
+smudge index/data at `0x6B60EA` / `0x6B60F5`; clearing is at `0x543573` / `0x54357D`.
+
+The engine's smudge byte is `dy * Width + dx`, not an SHP animation frame: `DrawIt` decodes it at `0x6B562C` /
+`0x6B5637` and draws body frame 0 at `0x6B56B1`. The per-theater library's `smudges` section includes Width/Height
+and all rules types, allowing the renderer to reconstruct and deduplicate multi-cell burn marks. Its draw rectangle
+is the native tactical redraw rectangle, not per-cell clipping, so remaining footprint cells retain the same sprite.
+
+Both readers scan on the existing 250 ms cell cadence, reuse scratch arrays and compare exact contents. Only changed
+layers are copied into immutable publications; ordered Worker replies omit independently unchanged grids. New
+scenarios, map changes and logic rewinds reset scratch state. A valid empty grid removes all map-start objects in
+that layer; null restores its map-cache fallback. This includes same-frame updates while paused.
+
+H3 now carries harvesting, wall placement/destruction, craters and burn marks. Old libraries without `smudges` warn
+once and use interpretable map-cache art, but cannot draw every new type until upgraded. `overlaysFromEngine` and
+`smudgesFromEngine` diagnostics distinguish each layer; the legacy `cellsFromEngine` reports any active live cell path.
+See [Live overlays and smudges](../LIVE_OVERLAYS.md) for exact cache commands, polling measurements and acceptance.
+Real-match comparison remains unverified by reader/mapping/library/view unit tests.

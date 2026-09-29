@@ -20,6 +20,7 @@ import { LiveEffectsDriver, smokeOnVehicle, type LiveAnim, type LiveEffects } fr
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
+import { SmudgeInstanceCache, type LiveSmudgeCells, type SmudgePage } from './smudges';
 import { Projectiles } from './projectiles';
 import { shpUnitPose, shpUnitFrame } from './shpUnits';
 import { SpritePool } from './spritePool';
@@ -27,6 +28,7 @@ import { ShroudLayer, type ShroudCells } from './shroud';
 import { VoxelUnits, type VoxelUnit } from './voxelUnits';
 
 export type { LiveOverlayCells } from './overlays';
+export type { LiveSmudgeCells } from './smudges';
 
 /**
  * Live view: draws a running original match (read from game memory by the host page) with the HD renderer, framed
@@ -103,6 +105,8 @@ export interface LiveSnapshot {
   effects?: LiveEffects | null;
   /** Full live overlay grid; null/absent or a legacy library without overlay art keeps map-cache overlays. */
   overlays?: LiveOverlayCells | null;
+  /** Full live smudge grid; null/absent keeps map-cache smudges. Older libraries use available map-cache art. */
+  smudges?: LiveSmudgeCells | null;
   /** Bridge (H3): runtime overlay/smudge cells. */
   cells?: LiveCells | null;
 }
@@ -142,10 +146,12 @@ export interface LiveDiagnostics {
   effectTypesWithoutArt: string[];
   /** Measured logic frames per second. */
   logicFps: number;
-  /**
-   * True when live overlays or the legacy overlay/smudge bridge are active. Smudges still need the legacy bridge.
-   */
+  /** True when any live cell bridge is active; the per-kind fields distinguish incomplete coverage. */
   cellsFromEngine: boolean;
+  overlaysFromEngine: boolean;
+  smudgesFromEngine: boolean;
+  /** Smudge types whose art or footprint could not be resolved in the current live grid. */
+  smudgeTypesWithoutArt: string[];
 }
 
 /** Runtime presentation changes (no reload): time, weather and the night dressing switches. */
@@ -413,6 +419,14 @@ export class LiveView {
   private readonly warnedOverlayTypes = new Set<string>();
   private readonly warnedOverlayPages = new Set<number>();
   private warnedOverlayLibrary = false;
+  private readonly smudgeInstances: SmudgeInstanceCache;
+  private readonly smudgeLayers = new Map<SmudgePage, SpriteLayer>();
+  private readonly uploadedSmudges = new Map<SmudgePage, readonly SpriteInstance[]>();
+  private smudgePagesDirty = false;
+  private snapshotSmudgeRevision: number | undefined;
+  private readonly warnedSmudgeTypes = new Set<string>();
+  private readonly warnedSmudgePages = new Set<number>();
+  private warnedSmudgeLibrary = false;
   /** Whether the host has reported engine cells (bridge H3); without them ore and walls stay as the map started. */
   private cellsFromEngine = false;
   private warnedCells = false;
@@ -514,12 +528,14 @@ export class LiveView {
     if (this.effectSprites) this.shareSpriteUniforms(this.effectSprites);
     for (const object of cache.manifest.objects)
       if (object.kind === 'overlay' || object.kind === 'smudge') this.cellList(object.x, object.y).push(object);
-    this.overlayInstances = new OverlayInstanceCache({
+    const cellTerrain = {
       width: cache.manifest.grid.width,
       height: cache.manifest.grid.height,
       levels: cache.height,
       exists: cache.exists,
-    });
+    };
+    this.overlayInstances = new OverlayInstanceCache(cellTerrain);
+    this.smudgeInstances = new SmudgeInstanceCache(cellTerrain, cache.manifest.sprites);
   }
 
   static async create(canvas: HTMLCanvasElement, options: LiveViewOptions): Promise<LiveView> {
@@ -610,7 +626,8 @@ export class LiveView {
       current.snapshot.view?.x === snapshot.view?.x &&
       current.snapshot.view?.y === snapshot.view?.y &&
       current.snapshot.localHouse === snapshot.localHouse &&
-      this.snapshotOverlayRevision === snapshot.overlays?.revision
+      this.snapshotOverlayRevision === snapshot.overlays?.revision &&
+      this.snapshotSmudgeRevision === snapshot.smudges?.revision
     )
       return;
     this.snapshotOverlayRevision = snapshot.overlays?.revision;
@@ -619,6 +636,7 @@ export class LiveView {
       this.appearances.clear();
       this.firstFrame = null;
     }
+    this.snapshotSmudgeRevision = snapshot.smudges?.revision;
     this.firstFrame ??= snapshot.frame;
     this.previous = current;
     const byUid = new Map<number, LiveObject>();
@@ -659,10 +677,11 @@ export class LiveView {
     this.effectDriver.vehicleAt = (x, y, z) => smokeOnVehicle(vehicles, x, y, z);
     if (snapshot.effects) this.effectDriver.push(snapshot.effects, snapshot.frame, this.hd.seconds(), this.wind);
     this.updateOverlays(snapshot);
+    this.updateSmudges(snapshot);
     if (snapshot.cells) {
       this.cellsFromEngine = true;
       this.applyCells(snapshot.cells);
-    } else if (!snapshot.overlays && !this.cellsFromEngine && !this.warnedCells) {
+    } else if (!snapshot.overlays && !snapshot.smudges && !this.cellsFromEngine && !this.warnedCells) {
       this.warnedCells = true;
       console.warn(
         '[HD] the host reports no overlay/smudge cells (bridge H3): ore, walls and craters show the map as it started ' +
@@ -794,6 +813,7 @@ export class LiveView {
     }
     if (this.cellsDirty) this.flushCells();
     if (this.overlayPagesDirty) this.flushOverlayPages();
+    if (this.smudgePagesDirty) this.flushSmudgePages();
     this.effectDriver.frame(this.hd.seconds(), this.wind);
     this.hd.frame(dt);
   }
@@ -803,6 +823,9 @@ export class LiveView {
     for (const layer of this.overlayLayers.values()) this.disposeOverlayLayer(layer);
     this.overlayLayers.clear();
     this.uploadedOverlays.clear();
+    for (const layer of this.smudgeLayers.values()) this.disposeOverlayLayer(layer);
+    this.smudgeLayers.clear();
+    this.uploadedSmudges.clear();
     this.hd.dispose();
     this.visuals.clear();
     this.appearances.clear();
@@ -831,7 +854,10 @@ export class LiveView {
       effectsWithoutArt: this.effectStats.missing,
       effectTypesWithoutArt: [...this.effectDriver.unknownTypes].sort(),
       logicFps: Math.round(this.effectDriver.logicFps * 10) / 10,
-      cellsFromEngine: this.overlayInstances.active || this.cellsFromEngine,
+      cellsFromEngine: this.overlayInstances.active || this.smudgeInstances.active || this.cellsFromEngine,
+      overlaysFromEngine: this.overlayInstances.active || this.cellsFromEngine,
+      smudgesFromEngine: this.smudgeInstances.active || this.cellsFromEngine,
+      smudgeTypesWithoutArt: [...this.smudgeInstances.instances.missingTypes].sort(),
     };
   }
 
@@ -1565,6 +1591,78 @@ export class LiveView {
 
   // ---------------------------------------------------------------- overlays and smudges
 
+  private updateSmudges(snapshot: LiveSnapshot): void {
+    if (snapshot.smudges && !this.library?.library.smudges && !this.warnedSmudgeLibrary) {
+      this.warnedSmudgeLibrary = true;
+      console.warn('[HD] the theater library has no smudges section; using available map-cache smudge art.');
+    }
+    const wasActive = this.smudgeInstances.active;
+    const changed = this.smudgeInstances.update(
+      snapshot.smudges ?? null,
+      this.library?.library ?? null,
+      (palette, fromLibrary) => paletteFor(this.cache, (fromLibrary ? LIBRARY_PALETTE_PREFIX : '') + palette, false),
+    );
+    if (!changed) return;
+    if (wasActive !== this.smudgeInstances.active) this.cellsDirty = true;
+    this.smudgePagesDirty = true;
+    for (const type of this.smudgeInstances.instances.missingTypes) {
+      if (this.warnedSmudgeTypes.has(type)) continue;
+      this.warnedSmudgeTypes.add(type);
+      console.warn(`[HD] live smudge ${type} has no usable art/footprint; extract the theater's smudge library.`);
+    }
+  }
+
+  /** Smudges draw before overlay/object cards, sharing terrain light and the renderer's common shroud pass. */
+  private flushSmudgePages(): void {
+    this.smudgePagesDirty = false;
+    const pages = this.smudgeInstances.instances.pages;
+    for (const [page, layer] of this.smudgeLayers) {
+      if (pages.has(page)) continue;
+      if (layer.mesh.count) layer.setInstances([]);
+      this.uploadedSmudges.delete(page);
+    }
+    for (const [page, instances] of pages) {
+      if (this.uploadedSmudges.get(page) === instances) continue;
+      const atlas =
+        page === 'map'
+          ? {
+              texture: this.cache.spriteAtlas,
+              width: this.cache.manifest.spriteAtlas.width,
+              height: this.cache.manifest.spriteAtlas.height,
+            }
+          : this.library?.page(page);
+      if (!atlas) {
+        if (page !== 'map' && this.library && !this.library.pageFailed(page)) this.smudgePagesDirty = true;
+        else if (page !== 'map' && !this.warnedSmudgePages.has(page)) {
+          this.warnedSmudgePages.add(page);
+          console.warn(`[HD] live smudge atlas page ${page} failed to load.`);
+        }
+        continue;
+      }
+      const hd = page === 'map' ? this.cache.spriteAtlasHd : this.library!.hdPage(page);
+      if (page !== 'map' && !hd && this.library!.hasHdPage(page)) {
+        this.smudgePagesDirty = true;
+        continue;
+      }
+      let layer = this.smudgeLayers.get(page);
+      if (layer && layer.capacity < instances.length) {
+        this.disposeOverlayLayer(layer);
+        layer = undefined;
+      }
+      if (!layer) {
+        const capacity = Math.max(64, 2 ** Math.ceil(Math.log2(instances.length)));
+        layer = new SpriteLayer(this.cache, [], capacity, atlas, hd);
+        layer.mesh.name = `live-smudges-${page}`;
+        layer.mesh.renderOrder = 3;
+        this.shareSpriteUniforms(layer);
+        this.root.add(layer.mesh);
+        this.smudgeLayers.set(page, layer);
+      }
+      layer.setInstances(instances);
+      this.uploadedSmudges.set(page, instances);
+    }
+  }
+
   private updateOverlays(snapshot: LiveSnapshot): void {
     if (snapshot.overlays && !this.library?.library.overlays && !this.warnedOverlayLibrary) {
       this.warnedOverlayLibrary = true;
@@ -1651,9 +1749,8 @@ export class LiveView {
   }
 
   /**
-   * Bridge (H3): the engine's overlay and smudge cells replace the map's (ore growing and being harvested, walls
-   * built and destroyed, craters and burn marks the engine leaves). Art comes from the map cache when it has the type,
-   * which covers what the map places; other types need the effect sidecar and are skipped until they are wired in.
+   * Legacy tuple bridge: replaces map cells using only art already in the map cache. The page uses independent
+   * overlays/smudges grids above, which resolve additional types through the theater library instead.
    */
   private applyCells(cells: LiveCells): void {
     if (cells.full) this.cellObjects.clear();
@@ -1695,6 +1792,7 @@ export class LiveView {
     for (const list of this.cellObjects.values())
       for (const object of list) {
         if (object.kind === 'overlay' && this.overlayInstances.active) continue;
+        if (object.kind === 'smudge' && this.smudgeInstances.active) continue;
         const entry = object.sprite ? manifest.sprites[object.sprite] : undefined;
         if (!entry?.frames.length) continue;
         const index = Math.min(object.frame ?? 0, entry.frames.length - 1);

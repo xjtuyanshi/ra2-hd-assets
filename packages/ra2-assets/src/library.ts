@@ -70,6 +70,10 @@ export interface TypeLibrary {
   overlays?: Record<string, LibraryOverlay>;
   /** Diagnostics of a later overlays-only append; the original extraction record is preserved. */
   overlayExtractor?: { tool: string; counts: Record<string, number>; warnings: string[] };
+  /** Every rules [SmudgeTypes] entry whose theater art resolved; absent in older libraries. */
+  smudges?: Record<string, LibrarySmudge>;
+  /** Diagnostics of a later smudges-only append; the original extraction record is preserved. */
+  smudgeExtractor?: { tool: string; counts: Record<string, number>; warnings: string[] };
   /**
    * The game's runtime ColorScheme array in order, so the live reader's HouseClass::ColorSchemeIndex (`colorIndex`)
    * indexes it directly. See ColorSchemeEntry and colorSchemeSlots in remap.ts for the ordering evidence.
@@ -97,6 +101,22 @@ export interface LibraryOverlay {
   /** Offset from the projected cell top corner, shared with the map extractor. */
   drawOffset: [x: number, y: number];
   lighting: LightingClass;
+}
+
+/** Ground decals draw body frame 0; the engine's SmudgeData is an index within this type's footprint. */
+export interface LibrarySmudge {
+  sprite: string;
+  /** Number of body frames, excluding a detected shadow half. */
+  frames: number;
+  /** Rules Width/Height in cells. SmudgeData = dy * width + dx reconstructs the multi-cell origin. */
+  width: number;
+  height: number;
+  palette: 'iso';
+  remap: false;
+  flat: true;
+  /** Offset from the projected cell top corner, shared with the map extractor. */
+  drawOffset: [x: number, y: number];
+  lighting: 'full';
 }
 
 /**

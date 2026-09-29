@@ -294,7 +294,7 @@ for the omitted companion path; arbitrary external paths retain the main-checkou
 ## Type library (`<out>/_library/`)
 
 `hd:library` resolves every id of rulesmd `[BuildingTypes]`, `[VehicleTypes]`, `[InfantryTypes]` and
-`[AircraftTypes]`, plus every `[OverlayTypes]` entry with art, through the same art code as the map extractor
+`[AircraftTypes]`, plus every `[OverlayTypes]` and `[SmudgeTypes]` entry with art, through the same art code as the map extractor
 (`src/node/artSource.ts`) and writes, per theater:
 
 - `<theater>/library.json` (`TypeLibrary`): one `LibraryType` per resolved type id (kind, sprite or voxel id,
@@ -304,6 +304,8 @@ for the omitted companion path; arbitrary external paths retain the main-checkou
   infantry `Sequence=` tables; SHP vehicle frame layouts; the runtime colour scheme array; ConditionYellow/Red;
   `extractor.warnings` naming every skipped type and why. `overlays` maps ids to sprite ids, body-frame counts,
   palette, Wall/Tiberium flags, draw offsets, flat/lighting rules and remap; `OverlayData` selects the frame directly.
+  `smudges` maps ids to sprite ids, body-frame counts and Width/Height footprints. The engine draws smudge body
+  frame 0; `SmudgeData` selects a cell within the footprint (`dy * Width + dx`), not an animation frame.
 - `<theater>/sprites-<n>.png`: single-channel indexed atlas pages (value = palette index, 0 = transparent), each at
   most 4096x4096. Every body/anim/bib frame is exported with its shadow frame. A sprite's frames are packed together
   (types need one or two pages), so renderers can load pages lazily; `SpriteFrame.page` selects the page.
@@ -326,6 +328,26 @@ New page slots have no HD reference until processed by `hd:sprites`. `overlayExt
 counts and missing-art warnings. Repeated runs append new pages; old pages remain intact for existing references.
 The library JSON is replaced only after the new files exist. A failed extraction can leave unreferenced new files
 but retains the old JSON. `--only overlays` requires an existing library and does not run `--preview`.
+
+Add or refresh all smudge art in existing theater libraries, including craters and burns absent from a map's initial
+placements:
+
+```bash
+pnpm hd:library -- --game "$YR_INSTALL" --out "$HD_CACHE/_library" --only smudges
+```
+
+This selects all six theaters; use `--theater urban` (or a comma-separated list) when only those libraries exist.
+It appends `sprites-smudges-<n>.png` pages, replaces the `smudges` records and their sprite references, and records
+diagnostics in `smudgeExtractor`. It applies the same preservation, validation and publication rules as the overlay
+append, including retaining existing overlay records and pages. Neither append performs the full library extraction
+or its preview. New full extractions include both sections; older libraries may omit them.
+
+Smudges always resolve `<image>.<theater extension>` before `<image>.shp`, regardless of `Theater=yes`, and use
+the iso palette without remap, the cell-top draw origin and full terrain lighting. Every native body frame and its
+detected shadow frame is kept. Rules Width/Height default to one cell. YR 1.001 `SmudgeTypeClass::Place` writes the
+footprint selector at `0x6B60F5`; `DrawIt` divides it by Width at `0x6B562C`/`0x6B5637`, repositions to the footprint
+origin and passes body frame 0 at `0x6B56B1`. The live renderer must retain the cell selector separately from the
+sprite frame so multi-cell burn marks align correctly.
 
 Ore and gems use the theater palette; walls use the unit palette with the current player's remap. In the pinned
 YR 1.001 executable, `DrawOverlay` tests `Wall` at `0x47F96A` and reads the current player's colour scheme at

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { GAME_RENDER_SHROUD } from '../../src/games/renderState';
 import { createByteViewAccessor } from '../../src/games/shared/memoryAccessor';
 import type { ReadYrEffectsOptions, YrEffects } from '../../src/games/yr/effectsReader';
+import type { ReadYrSmudgeOptions, YrSmudges } from '../../src/games/yr/smudgeReader';
 import type { ReadYrOverlayOptions, YrOverlays } from '../../src/games/yr/overlayReader';
 import { createYrRenderStateReader, createYrRenderStateReaderFrom } from '../../src/games/yr/renderState';
 import { YR_RUNTIME_HOOKS } from '../../src/games/yr/runtimeHooks';
@@ -247,6 +248,7 @@ function sources(
     map?: () => boolean;
     cells?: () => number[];
     overlays?: (options?: ReadYrOverlayOptions) => YrOverlays | null;
+    smudges?: (options?: ReadYrSmudgeOptions) => YrSmudges | null;
     now?: () => number;
   } = {},
 ) {
@@ -258,12 +260,15 @@ function sources(
   const createEffectsReader = vi.fn(() => readEffects);
   const readOverlays = vi.fn((reuse?: ReadYrOverlayOptions) => options.overlays?.(reuse) ?? null);
   const createOverlayReader = vi.fn((): typeof readOverlays | null => readOverlays);
+  const readSmudges = vi.fn((reuse?: ReadYrSmudgeOptions) => options.smudges?.(reuse) ?? null);
+  const createSmudgeReader = vi.fn((): typeof readSmudges | null => readSmudges);
   const read = createYrRenderStateReaderFrom({
     memory: () => createByteViewAccessor(memory.bytes),
     readState,
     createShroudReader,
     createEffectsReader,
     createOverlayReader,
+    createSmudgeReader,
     now: options.now ?? (() => 0),
   });
   return {
@@ -272,9 +277,11 @@ function sources(
     readShroud,
     readEffects,
     readOverlays,
+    readSmudges,
     createShroudReader,
     createEffectsReader,
     createOverlayReader,
+    createSmudgeReader,
   };
 }
 
@@ -383,6 +390,90 @@ describe('YR 1.001 render state for the HD bridge', () => {
     read();
     expect(createOverlayReader).toHaveBeenCalledTimes(2);
     expect(readOverlays).toHaveBeenCalledTimes(1);
+  });
+
+  it('polls smudges at 250 ms, publishes immutable changes and resets immediately for a new battle', () => {
+    const memory = keyMemory();
+    let at = 0;
+    let data = 3;
+    let inBattle = true;
+    let available = true;
+    const smudge = (options?: ReadYrSmudgeOptions): YrSmudges | null => {
+      if (!available) return null;
+      const reuse = options?.reuse;
+      const changed = !reuse || reuse.data[0] !== data;
+      const index = reuse?.index ?? new Int16Array([0, -1]);
+      const frames = reuse?.data ?? new Uint8Array(2);
+      frames[0] = data;
+      return {
+        frame: 0,
+        originX: 1,
+        originY: 2,
+        width: 2,
+        height: 1,
+        index,
+        data: frames,
+        types: reuse?.types ?? ['CR1'],
+        revision: (reuse?.revision ?? 0) + Number(changed),
+        counts: { cells: 2, smudges: 1, invalidCells: 0, invalidTypes: 0, invalidIndices: 0 },
+      };
+    };
+    const { read, readSmudges } = sources(memory, { smudges: smudge, now: () => at, map: () => inBattle });
+    const first = read()!;
+    const scratch = readSmudges.mock.results[0]!.value!;
+    expect(first.smudges!.index).not.toBe(scratch.index);
+    expect(first.smudges!.data).not.toBe(scratch.data);
+    expect(first.smudges!.types).not.toBe(scratch.types);
+    at = 249;
+    data = 7;
+    memory.frame(101);
+    expect(read()!.smudges).toBe(first.smudges);
+    expect(readSmudges).toHaveBeenCalledTimes(1);
+    at = 250;
+    const changed = read()!;
+    expect(readSmudges).toHaveBeenLastCalledWith({ reuse: scratch });
+    expect(changed.smudges!.data[0]).toBe(7);
+    expect(changed.smudges!.revision).toBe(2);
+    expect(first.smudges!.data[0]).toBe(3);
+    at = 500;
+    expect(read()).toBe(changed);
+    expect(readSmudges).toHaveBeenCalledTimes(3);
+
+    // A same-map restart can retain the scenario singleton but rewinds its logic frame.
+    memory.frame(1);
+    at = 501;
+    const restarted = read()!;
+    expect(restarted.smudges!.revision).toBe(3);
+    expect(readSmudges).toHaveBeenLastCalledWith({ reuse: null });
+    inBattle = false;
+    memory.frame(2);
+    expect(read()!.smudges).toBeNull();
+    inBattle = true;
+    memory.frame(3);
+    expect(read()!.smudges!.revision).toBe(4);
+    available = false;
+    at = 751;
+    expect(read()!.smudges).toBeNull();
+    available = true;
+    at = 1001;
+    expect(read()!.smudges!.revision).toBe(5);
+    expect(structuredClone(first)).toEqual(first);
+  });
+
+  it('retries an unavailable smudge factory only when the next smudge poll is due', () => {
+    const memory = keyMemory();
+    let at = 0;
+    const { read, readSmudges, createSmudgeReader } = sources(memory, { now: () => at });
+    createSmudgeReader.mockReturnValueOnce(null);
+    expect(read()!.smudges).toBeNull();
+    memory.frame(101);
+    at = 249;
+    read();
+    expect(createSmudgeReader).toHaveBeenCalledTimes(1);
+    at = 250;
+    read();
+    expect(createSmudgeReader).toHaveBeenCalledTimes(2);
+    expect(readSmudges).toHaveBeenCalledTimes(1);
   });
 
   it('shroud cells use the contract encoding unchanged', () => {

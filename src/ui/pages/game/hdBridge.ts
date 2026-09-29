@@ -349,6 +349,7 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
     localHouse: state.localHouse,
     shroud: state.shroud,
     overlays: state.overlays,
+    smudges: state.smudges,
     effects: state.effects && {
       // Building layers and invisible or art-less anims are not combat effects.
       anims: state.effects.anims
