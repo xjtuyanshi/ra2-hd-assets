@@ -1,10 +1,33 @@
-// Capture fixed sandbox presets for review. Usage: node scripts/shots.mjs <outDir> [baseUrl]
-// Needs the sandbox dev server running (pnpm --filter hd-renderer sandbox).
+// Capture fixed sandbox presets for review. Usage: node scripts/shots.mjs <outDir> [baseUrl] [presetSet]
+// Needs the sandbox dev server running (pnpm --filter hd-renderer sandbox). Presets with `json: true` also write
+// <name>.json with the renderer's window.__hd.stats() (exposure, night level, light counts, GPU time), when present.
 import { chromium } from '@playwright/test';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 
 const outDir = process.argv[2] ?? 'shots';
 const base = process.argv[3] ?? 'http://localhost:15180/';
+
+// Atmosphere review (night, rain, map light sources): XMP29U2 a01..a10, RiverRam b01..b08, in this order.
+const ATMO = [
+  ['a01', 'map=XMP29U2&cx=60&cy=62&zoom=1.1&time=12'],
+  ['a02', 'map=XMP29U2&cx=60&cy=62&zoom=1.6&time=13'],
+  ['a03', 'map=XMP29U2&cx=60&cy=62&zoom=1.1'],
+  ['a04', 'map=XMP29U2&cx=60&cy=62&zoom=1.1&time=18.4'],
+  ['a05', 'map=XMP29U2&cx=60&cy=62&zoom=1.1&time=22'],
+  ['a06', 'map=XMP29U2&cx=60&cy=62&zoom=1.1&time=22&weather=rain&rain=0.8&wet=1'],
+  ['a07', 'map=XMP29U2&cx=50&cy=50&zoom=1.6&time=22&weather=rain&rain=0.8&wet=1'],
+  ['a08', 'map=XMP29U2&cx=60&cy=62&zoom=1.1&time=22&weather=rain&rain=0.8&wet=1&fires=4&boom=1'],
+  ['a09', 'map=XMP29U2&cx=60&cy=62&zoom=1.1&time=15&weather=rain&rain=0.8&wet=1'],
+  ['a10', 'map=XMP29U2&cx=60&cy=62&zoom=1.1&time=22&weather=rain&rain=0.8&wet=1&lamps=off&windows=0'],
+  ['b01', 'map=RiverRam&cx=52&cy=58&zoom=1.35&time=11'],
+  ['b02', 'map=RiverRam&cx=52&cy=58&zoom=1.35&time=12'],
+  ['b03', 'map=RiverRam&cx=52&cy=58&zoom=1.35'],
+  ['b04', 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=18.4'],
+  ['b05', 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=22&boom=1'],
+  ['b06', 'map=RiverRam&cx=52&cy=58&zoom=1.35&time=22&weather=rain&rain=0.85&wet=1'],
+  ['b07', 'map=RiverRam&cx=52&cy=58&zoom=1.35&time=15&weather=rain&rain=0.85&wet=1'],
+  ['b08', 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=22&weather=rain&rain=0.85&wet=1&fires=3&boom=1'],
+].map(([name, query]) => ({ name, query, wait: name.startsWith('a') ? 16000 : 14000, json: true }));
 const sets = {
   sandbox: null,
   city: [
@@ -34,6 +57,24 @@ const sets = {
     { name: 'u3-atlas-wide', query: 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=12&tmap=0', wait: 9000 },
     { name: 'u4-ai2x-wide', query: 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=12', wait: 12000 },
   ],
+  atmo: ATMO,
+  // The same framings without parameters older renderers ignore (wet, fires, lamps, windows): a before/after baseline.
+  atmobase: ATMO.filter((p) => !/fires=|lamps=/.test(p.query)).map((p) => ({
+    ...p,
+    query: p.query.replace('&wet=1', ''),
+  })),
+  // Day regression subset: noon/early-afternoon and map-driven default framings.
+  atmoday: ATMO.filter((p) => ['a01', 'a02', 'a03', 'b01', 'b02', 'b03'].includes(p.name)),
+  // GPU frame time at 2400x1500 (1600x1000 at DPR 1.5): night rain with fires and explosions, and clear noon.
+  atmoperf: [
+    {
+      name: 'perf-night',
+      query: 'map=XMP29U2&cx=60&cy=62&zoom=1.1&time=22&weather=rain&rain=0.8&wet=1&fires=4&boom=1&perf=1',
+      wait: 20000,
+      json: true,
+    },
+    { name: 'perf-day', query: 'map=XMP29U2&cx=60&cy=62&zoom=1.1&time=12&perf=1', wait: 20000, json: true },
+  ],
   riverram: [
     { name: 'r1-day', query: 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=12', wait: 9000 },
     { name: 'r2-rain', query: 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=15&weather=rain&rain=0.85', wait: 14000 },
@@ -53,10 +94,12 @@ const presets = sets[presetSet] ?? [
 
 await mkdir(outDir, { recursive: true });
 // SHOTS_CHROME may point at any installed Chrome/Chromium; full Chrome in new-headless mode keeps GPU access.
+// Performance sets run with vsync and the frame-rate limit off, so frame intervals measure the frame cost.
+const uncapped = presetSet === 'atmoperf' ? ['--disable-gpu-vsync', '--disable-frame-rate-limit'] : [];
 const browser = await chromium.launch({
   headless: true,
   executablePath: process.env.SHOTS_CHROME || undefined,
-  args: ['--enable-unsafe-webgpu', '--enable-gpu', '--use-angle=metal', '--ignore-gpu-blocklist'],
+  args: ['--enable-unsafe-webgpu', '--enable-gpu', '--use-angle=metal', '--ignore-gpu-blocklist', ...uncapped],
 });
 const page = await browser.newPage({ viewport: { width: 1600, height: 1000 }, deviceScaleFactor: 1.5 });
 for (const preset of presets) {
@@ -65,6 +108,10 @@ for (const preset of presets) {
   const path = `${outDir}/${preset.name}.png`;
   await page.screenshot({ path });
   console.log(path);
+  if (preset.json) {
+    const stats = await page.evaluate(() => window.__hd?.stats?.() ?? null);
+    if (stats) await writeFile(`${outDir}/${preset.name}.json`, JSON.stringify(stats, null, 1));
+  }
 }
 console.log('backend:', await page.evaluate(() => document.querySelector('#hud')?.textContent));
 await browser.close();

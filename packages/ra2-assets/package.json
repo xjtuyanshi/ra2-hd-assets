@@ -9,7 +9,9 @@
     ".": "./src/index.ts",
     "./manifest": "./src/manifest.ts",
     "./waterMask": "./src/waterMask.ts",
-    "./library": "./src/library.ts"
+    "./library": "./src/library.ts",
+    "./lights": "./src/lights.ts",
+    "./windows": "./src/windows.ts"
   },
   "scripts": {
     "prepare-map": "node --import tsx src/cli/prepareMap.mts",
@@ -19,6 +21,7 @@
     "upscale": "tsx src/cli/upscale.mts",
     "sprites": "tsx src/cli/sprites.mts",
     "library": "tsx src/cli/library.mts",
+    "lights": "tsx src/cli/lights.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

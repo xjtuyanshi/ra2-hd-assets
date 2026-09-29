@@ -23,6 +23,20 @@ export interface MapLighting {
   ground: number;
 }
 
+/**
+ * How a presenter stages a map by default (structurally the same as ra2-assets' AtmosphereProfile, derived from the
+ * map's own [Lighting]; the contract stays base-agnostic).
+ */
+export interface AtmosphereProfile {
+  kind: 'day' | 'dusk' | 'night';
+  /** Default hour of day. */
+  hour: number;
+  /** Unlit flat ground at night as a fraction of clear noon, in linear light. */
+  nightLevel: number;
+  /** The map's light tint normalised by its largest channel. */
+  tint: [r: number, g: number, b: number];
+}
+
 export interface RenderMap {
   /** Width/height in cells. */
   width: number;
@@ -35,6 +49,8 @@ export interface RenderMap {
   /** Water surface elevation in height levels. */
   waterLevel: number;
   lighting: MapLighting;
+  /** Default staging; absent = day at noon with the default night level. */
+  atmosphere?: AtmosphereProfile;
 }
 
 export type ObjectKind = 'vehicle' | 'infantry' | 'building' | 'aircraft' | 'ship' | 'tree';

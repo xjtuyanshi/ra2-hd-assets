@@ -22,6 +22,7 @@ import {
   smoothstep,
   uniform,
 } from 'three/tsl';
+import { sampleLightField } from './atmosphere';
 import type { RenderMap, TerrainClass } from './contract';
 import { LEVEL_HEIGHT } from './world';
 import type { ShaderNode } from './tsl';
@@ -206,6 +207,11 @@ function createTerrainMaterial(
   // Border shroud: fade to black over the outermost 1.5 cells (matches the water plane).
   const border = smoothstep(0.0, 1.5, p.x.min(p.z).min(float(width).sub(p.x)).min(float(height).sub(p.z)));
   material.colorNode = albedo.mul(border);
+  // Local lights (explosions, fires) from the light field, as diffuse irradiance on the albedo.
+  material.emissiveNode = albedo
+    .mul(border)
+    .mul(sampleLightField(p.xz))
+    .mul(1 / Math.PI);
   material.roughnessNode = mix(float(1), roughness, border);
   material.metalnessNode = float(0);
   // Micro relief from noise; puddles stay mirror-flat.

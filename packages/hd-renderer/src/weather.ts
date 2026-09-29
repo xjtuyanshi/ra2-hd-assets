@@ -10,21 +10,26 @@ import {
 } from 'three/webgpu';
 import {
   Fn,
-  color,
+  exp,
   float,
   hash,
   instanceIndex,
+  length,
   max,
+  mix,
   mod,
   positionLocal,
   smoothstep,
   texture,
   time,
   uniform,
+  uv,
   vec2,
   vec3,
   vec4,
+  vertexStage,
 } from 'three/tsl';
+import { night, referenceLevel, sampleLightField, sceneBrightness, surfaceTexture, surfaceSize } from './atmosphere';
 import type { ShaderNode } from './tsl';
 
 const RAIN_DROPS = 9000;
@@ -58,34 +63,66 @@ export function buildRain(mapWidth: number, mapHeight: number, heightTexture: Da
   const groundAt = (x: ShaderNode, z: ShaderNode) =>
     max(texture(heightTexture, vec2(x.div(mapWidth), z.div(mapHeight))).level(float(0)).r, float(waterY));
 
+  // Rain is lit, not glowing: drops take the scene's light level (1 at clear noon; squared for streaks, so thin rain
+  // all but vanishes in the dark away from lamps) and the local lights of the light field, fading with height above
+  // the lit ground. Sampled per vertex (the light field is smooth).
+  const rainColour = vec3(0.72, 0.78, 0.85);
+  const litAt = (x: ShaderNode, z: ShaderNode, height: ShaderNode, local: number, level: ShaderNode) =>
+    level.add(
+      sampleLightField(vec2(x, z))
+        .div(referenceLevel)
+        .mul(local)
+        .mul(exp(height.max(0).mul(-0.35))),
+    );
+
   // --- falling streaks: thin quads stretched along the fall direction, facing the fixed camera ---
   const streakGeometry = new PlaneGeometry(0.018, 0.55);
   const streakMaterial = new MeshBasicNodeMaterial();
   streakMaterial.transparent = true;
   streakMaterial.depthWrite = false;
   streakMaterial.blending = AdditiveBlending;
+  const streakI = float(instanceIndex);
+  const streakX = wrapped(hash(streakI.add(1.1)), center.x);
+  const streakZ = wrapped(hash(streakI.add(7.3)), center.z);
+  const speed = float(11).add(hash(streakI.add(9.1)).mul(4));
+  const fall = mod(hash(streakI.add(3.7)).mul(RAIN_TOP).sub(time.mul(speed)), RAIN_TOP);
   streakMaterial.positionNode = Fn(() => {
-    const i = float(instanceIndex);
-    const sx = hash(i.add(1.1));
-    const sz = hash(i.add(7.3));
-    const sy = hash(i.add(3.7));
-    const speed = float(11).add(hash(i.add(9.1)).mul(4));
-    const fall = mod(sy.mul(RAIN_TOP).sub(time.mul(speed)), RAIN_TOP);
-    const x = wrapped(sx, center.x);
-    const z = wrapped(sz, center.z);
-    const ground = groundAt(x, z);
+    const ground = groundAt(streakX, streakZ);
     // Drops slant with the wind. The quad's own offset is turned 45° about +y so it faces the fixed isometric
     // camera; the mesh transform stays identity because the instance position above is already in world space.
     const drift = vec3(windX, 0, windZ).mul(fall);
-    const inside = x.greaterThan(0).and(z.greaterThan(0)).and(x.lessThan(mapWidth)).and(z.lessThan(mapHeight));
+    const inside = streakX
+      .greaterThan(0)
+      .and(streakZ.greaterThan(0))
+      .and(streakX.lessThan(mapWidth))
+      .and(streakZ.lessThan(mapHeight));
     const visible = intensity
-      .greaterThan(hash(i.add(5.5)))
+      .greaterThan(hash(streakI.add(5.5)))
       .and(inside)
       .select(float(1), float(0));
-    const facing = vec3(positionLocal.x.mul(Math.SQRT1_2), positionLocal.y, positionLocal.x.mul(-Math.SQRT1_2));
-    return vec3(x, ground.add(fall), z).add(drift).add(facing.mul(visible));
+    // Each drop has its own length (0.7..1.3 x).
+    const stretch = float(0.7).add(hash(streakI.add(11.1)).mul(0.6));
+    const facing = vec3(
+      positionLocal.x.mul(Math.SQRT1_2),
+      positionLocal.y.mul(stretch),
+      positionLocal.x.mul(-Math.SQRT1_2),
+    );
+    return vec3(streakX, ground.add(fall), streakZ).add(drift).add(facing.mul(visible));
   })();
-  streakMaterial.colorNode = vec4(color(0xb8c8d8), float(0.22).mul(smoothstep(0, 0.3, intensity)));
+  const streakLight: ShaderNode = vertexStage(
+    litAt(streakX, streakZ, fall, 0.6, sceneBrightness.mul(sceneBrightness).mul(0.7)),
+  );
+  // Daylight streaks are lit by the bright sky only faintly (unlit, like smoke): a little more opacity keeps day rain
+  // as visible as night rain, where lamps light the drops.
+  const streakAlpha = float(0.1)
+    .add(hash(streakI.add(13.3)).mul(0.14))
+    .mul(mix(float(1.35), float(1), night));
+  // Tapered ends: a streak is a motion-blurred drop, brightest in its lower half.
+  const taper = smoothstep(0.0, 0.25, uv().y).mul(smoothstep(1.0, 0.55, uv().y));
+  streakMaterial.colorNode = vec4(
+    rainColour.mul(streakLight),
+    streakAlpha.mul(taper).mul(smoothstep(0, 0.3, intensity)),
+  );
   const streaks = new InstancedMesh(streakGeometry, streakMaterial, RAIN_DROPS);
   streaks.frustumCulled = false;
   group.add(streaks);
@@ -104,28 +141,43 @@ export function buildRain(mapWidth: number, mapHeight: number, heightTexture: Da
       .add(hash(i.add(4.4)))
       .fract();
   });
+  const splashI = float(instanceIndex);
+  // Re-seed position every cycle so splashes do not repeat in place.
+  const cycle = time
+    .mul(float(1.6).add(hash(splashI.add(2.2))))
+    .add(hash(splashI.add(4.4)))
+    .floor();
+  const splashX = wrapped(hash(splashI.add(cycle.mul(13.1))), center.x);
+  const splashZ = wrapped(hash(splashI.add(cycle.mul(17.7)).add(0.5)), center.z);
+  // Hard ground throws full rings; grass and soil swallow most of them; open water has its own rain rings.
+  const surface: ShaderNode = texture(surfaceTexture, vec2(splashX, splashZ).div(surfaceSize)).level(float(0));
+  const paved = surface.r;
   splashMaterial.positionNode = Fn(() => {
-    const i = float(instanceIndex);
-    // Re-seed position every cycle so splashes do not repeat in place.
-    const cycle = time
-      .mul(float(1.6).add(hash(i.add(2.2))))
-      .add(hash(i.add(4.4)))
-      .floor();
-    const x = wrapped(hash(i.add(cycle.mul(13.1))), center.x);
-    const z = wrapped(hash(i.add(cycle.mul(17.7)).add(0.5)), center.z);
-    const inside = x.greaterThan(0).and(z.greaterThan(0)).and(x.lessThan(mapWidth)).and(z.lessThan(mapHeight));
+    const inside = splashX
+      .greaterThan(0)
+      .and(splashZ.greaterThan(0))
+      .and(splashX.lessThan(mapWidth))
+      .and(splashZ.lessThan(mapHeight));
     const visible = intensity
-      .greaterThan(hash(i.add(8.8)))
+      .greaterThan(hash(splashI.add(8.8)))
       .and(inside)
       .select(float(1), float(0));
-    const scale = splashAge().mul(1.4).add(0.2).mul(visible);
-    return vec3(x, groundAt(x, z).add(0.01), z).add(positionLocal.mul(scale));
+    const size = mix(float(0.6), float(1), paved);
+    const scale = splashAge().mul(1.4).add(0.2).mul(visible).mul(size);
+    return vec3(splashX, groundAt(splashX, splashZ).add(0.01), splashZ).add(positionLocal.mul(scale));
   })();
+  const splashLight: ShaderNode = vertexStage(litAt(splashX, splashZ, float(0), 0.8, sceneBrightness.mul(0.6)));
+  const splashFade = vertexStage(mix(float(0.35), float(1), paved).mul(float(1).sub(surface.g)));
+  const d = length(uv().sub(0.5).mul(2));
+  const ring = smoothstep(0.55, 0.8, d).mul(smoothstep(1.0, 0.85, d));
   splashMaterial.colorNode = vec4(
-    color(0xd8e4ee),
+    vec3(0.85, 0.89, 0.93).mul(splashLight),
     float(1)
       .sub(splashAge())
       .mul(0.35)
+      .mul(ring)
+      .mul(2.2)
+      .mul(splashFade)
       .mul(smoothstep(0, 0.3, intensity)),
   );
   const splashes = new InstancedMesh(splashGeometry, splashMaterial, SPLASHES);
@@ -133,5 +185,6 @@ export function buildRain(mapWidth: number, mapHeight: number, heightTexture: Da
   group.add(splashes);
 
   group.visible = true;
+
   return { object: group, center, intensity, windX, windZ };
 }

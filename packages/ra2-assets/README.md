@@ -32,6 +32,11 @@ pnpm hd:library -- [--game <install dir>] [--theater temperate --theater snow ..
 pnpm hd:upscale -- --map RiverRam [--cache <dir>] [--scale 2] [--model realesrgan-x4plus] [--tile 256]
 pnpm hd:upscale -- --map RiverRam --bin <binary-path> --compare 1200,700,160,100
 
+# Map light sidecars next to an existing cache: lights.json always; lit-window masks with --windows; review images
+# with --preview; per-page window masks of a type library with --library <theater> (never rewrites manifests)
+pnpm hd:lights -- --map XMP29U2 --map RiverRam [--game <install dir>] [--cache <dir>] [--windows] [--preview]
+pnpm hd:lights -- --library urban [--cache <dir>]
+
 # Build offline 2x sprite colours and house-remap masks from an existing indexed atlas
 pnpm hd:sprites -- --map RiverRam [--cache <dir>] [--bin <binary-path>] [--model realesrgan-x4plus]
 pnpm hd:sprites -- --library temperate --pages 0 [--cache <dir>] [--bin <binary-path>]
@@ -184,6 +189,50 @@ pnpm hd:sprites -- --library temperate --pages 0 --cache "$SPRITE_CACHE" --bin "
 The Node entry points are `upscaleSpriteAtlas` in `src/node/spriteHd.ts` (pixels in/out) and `upscaleSprites` in
 `src/node/spriteHdCache.ts` (cache orchestration). Both accept an injectable `run(bin, args)` for asset-free tests.
 
+## Map lights and lit windows (`hd:lights`)
+
+`hd:lights` reads a cached map's `[Lighting]`, its light-source buildings and the rules/art they use from the player's
+own install and writes sidecars next to the cache. It refuses to run without `manifest.json`, never writes
+`manifest.json` or `library.json`, and records the manifest's sha256 in `lights.json` (`extractor.manifestSha256`).
+The contract is `src/lights.ts` (`MapLightsSidecar`, version `MAP_LIGHTS_VERSION`); the engine behaviour it encodes,
+with disassembly addresses, is in `docs/remaster/research/yr-scene-lighting.md`.
+
+- `lights.json`: the engine-rounded `[Lighting]` (normal, Ion Storm, Dominator, and which keys took constructor
+  defaults); the map's atmosphere profile (`mapAtmosphere`: day, dusk or night from the authored `Ambient - Ground`,
+  tint and lamp posts; default hour, night level, tint; renderers recompute it with `sidecarAtmosphere`);
+  every BuildingType with `LightIntensity != 0` (map sections override rules); the map's light sources with their
+  lepton centre and matching `manifest.objects` index; inert TerrainType lights (TIBTRE); `hiddenObjects`
+  (`InvisibleInGame=yes` objects such as `INGALITE`, which the engine never draws); a per-cell surface class
+  (`classifyTileSurface`: land type plus the tile diamond's mean colour) and the median height; and HD street lamp
+  spots (`placeStreetLamps`, city theaters only, seeded and deterministic, at least 4.5 cells apart, next to roads,
+  off buildings and trees, inside the playable rectangle).
+- `windows.png` / `windows.json` (`--windows`): an RGBA mask with the layout of `sprites.png` (R = lit window,
+  G = per-window variant) from `detectBuildingWindows` (`src/windows.ts`) on each building's healthy frame; the damaged
+  frame keeps only windows the healthy frame has at the same canvas point. The pane detector lights a pane whole (its
+  bounding box), and only when its dark pixels with the highlights they enclose fill at least `PANE_FILL` (60 %) of
+  that box, so fragments that straddle mullions never light up as glyph-like shapes. Where it covers less than
+  `FALLBACK_COVERAGE` of the facade and a large-pane profile finds clearly more (wider contrast box, larger and slanted
+  panes, a minimum size), that profile is used instead, with candidates on the roof dropped (`roofBottom`: the
+  silhouette top plus the roof diamond's depth at each column), so rooftop vents and fans stay dark. `windows.json`
+  (version 2) lists lit pixels, their centroid and the lit-pane columns (`windowColumns`: centre x, panes, lowest lit
+  y) per frame; renderers place wet reflections under the columns. Only civilian art (`CA*` types) gets lit windows;
+  faction buildings stay dark, as do the types in `data/window-deny.json`.
+- `lights-preview.png` / `windows-preview.png` (`--preview`): the surface classes and the map at its default night
+  (engine light of its sources, light and street lamp markers), and a contact sheet of building frames with every
+  window candidate filled cyan and outlined magenta.
+- `--library <theater>`: `_library/<theater>/windows-<n>.png` for the atlas pages holding lit building frames, plus
+  `windows.json` (`pages` maps page numbers to files).
+
+Window review (the gate for lit windows by default): on XMP29U2's contact sheet the facade repetition test
+(`hasSiblings`) removed nearly all roof, ladder and ornament detections; after denying the lamp posts, the airfield,
+the Alamo ruin, storage tanks, the oil derrick and the warehouse (`data/window-deny.json`), the remaining false
+detections are isolated specks, well under 5 % of detected windows, so lit windows are on by default at night. The
+type library's faction buildings showed scattered specks on military art (GATECH, NAWEAP, NAREFN, the YACOMD
+lattice), which read as embers at night, so windows are limited to civilian `CA*` types. The large-pane profile lights
+the facades the pane detector missed on XMP29U2 (CASTL01, CASTL02, CASTL03, CAWASH03, CAWASH05's window bands,
+CAWASH07, CAWASH10, CAMIAM01, CACHIG01/02); CACHIG's tall mullioned panes are still only partly lit, and a few
+parapet specks remain on CAWASH03.
+
 ## Local terrain re-materialization (Python)
 
 `python/rematerialize.py` adds surface detail to the current `terrainMap.file` with local SDXL img2img and tile
@@ -302,6 +351,13 @@ Terrain tests use synthetic caches to cover painter order, alpha, origin, water 
 compatibility. Upscale tests use a tiny local fake executable and synthetic PNGs, so neither models nor a GPU are
 required. Sprite-HD tests use synthetic indexed atlases/palettes and fake 4x inference to cover neutral remap,
 per-frame batching/cut-back, alpha, shadow exclusion, and map/library reference updates without writing game data.
+`tests/lights.test.ts` covers engine number parsing and storage rounding, `[Lighting]` defaults, light types from
+synthetic INI text, the exact engine cell formula (centre, falloff, radius, Ground/Level, clamps, negative lights),
+the linear light delta, the atmosphere table, surface classes from the probed tile colours, deterministic street lamp
+placement and sidecar validation, and the stock night maps' real lighting (all staged as night);
+`tests/windows.test.ts` covers window detection on synthetic facades (windows found; hollow pane outlines lit whole;
+L-shaped fragments, roofs, edge-touching and isolated specks rejected; glass indices; determinism; the large-pane
+fallback and its roof band; lit-pane columns).
 Run `pnpm --filter ra2-assets run typecheck` and `pnpm exec vitest run packages/ra2-assets` from the repo root.
 
 For a reproducible CPU/I/O benchmark, run `pnpm exec node --import tsx packages/ra2-assets/tests/benchmarkSpriteHd.mts`.

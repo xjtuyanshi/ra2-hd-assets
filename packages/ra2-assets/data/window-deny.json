@@ -1,0 +1,4 @@
+{
+  "comment": "Building types whose art has no lit windows at night; the lit-window heuristic (src/windows.ts) skips them. Type ids only, no art. Decided from XMP29U2's windows-preview.png: lamp posts, the airfield, the Alamo ruin, storage tanks, the oil derrick and the warehouse only produced false detections on roofs, ladders and ornaments.",
+  "types": ["CAAIRP", "CANEWY20", "CAOILD", "CATEXS02", "CATS01", "GALITE", "INGALITE"]
+}

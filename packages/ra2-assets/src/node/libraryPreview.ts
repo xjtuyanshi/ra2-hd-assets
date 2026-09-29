@@ -89,7 +89,8 @@ const FONT_SCALE = 2;
 const textWidth = (s: string): number => s.length * 4 * FONT_SCALE;
 const TEXT_H = 5 * FONT_SCALE;
 
-class Sheet {
+/** RGBA drawing surface with a 3x5 pixel font (also used by the lights/windows previews in lights.ts). */
+export class Sheet {
   readonly rgba: Uint8Array;
   constructor(
     readonly width: number,

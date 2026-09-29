@@ -188,7 +188,8 @@ export function startHdBridge(host: HdBridgeHost): () => void {
           : LiveView.create(canvas, {
               mapBase: `/hd-cache/${encodeURIComponent(mapId)}`,
               libraryBase: '/hd-cache/_library',
-              timeOfDay: params.has('hd-time') ? Number(params.get('hd-time')) : 12,
+              // Without hd-time the map's own [Lighting] decides day, dusk or night (see LiveView.create).
+              ...(params.has('hd-time') ? { timeOfDay: Number(params.get('hd-time')) } : {}),
               weather: params.get('hd-weather') === 'rain' ? 'rain' : 'clear',
               weatherIntensity: params.get('hd-weather') === 'rain' ? 0.8 : 0,
             }),

@@ -1,12 +1,16 @@
 import { BoxGeometry, Color, Group, Mesh, MeshStandardNodeMaterial, Object3D, Vector3 } from 'three/webgpu';
+import { mapAtmosphere, medianHeight, sidecarAtmosphere } from '../../../ra2-assets/src/lights';
+import type { AtmosphereSettings } from '../atmosphere';
 import { HOUSE_COLORS, RENDER_STATE_VERSION, type RenderState, type Weather } from '../contract';
 import { HdRenderer } from '../HdRenderer';
+import type { SourceLight } from '../ra2/mapLights';
+import type { WindowBuilding } from '../ra2/nightDressing';
 import type { LibraryType } from '../../../ra2-assets/src/library';
 import { sequenceFrame } from '../../../ra2-assets/src/art';
 import { addHousePalettes, paletteFor, ra2Screen, screenToCell, type Ra2Cache } from '../ra2/cache';
 import { SpriteLayer, cardPush, type SpriteInstance } from '../ra2/sprites';
 import { buildVoxelGeometry, createVoxelMaterial, instantiateVoxel, type VoxelGeometry } from '../ra2/voxels';
-import { loadRa2World, type HdWorld } from '../ra2/world';
+import { loadRa2World, shareSpriteUniforms, type HdWorld } from '../ra2/world';
 import { LEVEL_HEIGHT } from '../world';
 import { LiveEffectsDriver, type LiveEffects } from './effects';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
@@ -67,9 +71,21 @@ export interface LiveViewOptions {
   forceWebGL?: boolean;
   /** 16 remap colours (palette indices 16..31) for a colour scheme index; defaults to ramps of HOUSE_COLORS. */
   houseRemap?: (colorIndex: number) => [number, number, number][];
+  /** Hour of day; undefined = the map's own staging (its [Lighting]: noon for day maps, 22:00 for night maps). */
   timeOfDay?: number;
   weather?: Weather;
   weatherIntensity?: number;
+}
+
+/** Runtime presentation changes (no reload): time, weather and the night dressing switches. */
+export interface LiveEnvironment {
+  timeOfDay?: number;
+  weather?: Weather;
+  weatherIntensity?: number;
+  lamps?: AtmosphereSettings['lamps'];
+  windows?: boolean;
+  lights?: boolean;
+  mist?: number;
 }
 
 const LEPTONS_PER_CELL = 256;
@@ -134,13 +150,20 @@ export class LiveView {
   private readonly placeholderMaterials = new Map<string, MeshStandardNodeMaterial>();
   private readonly housePalettes = new Set<number>();
   private readonly sprites: SpriteLayer;
-  private readonly pageLayers = new Map<number, SpriteLayer>();
+  private readonly pageLayers = new Map<number, { layer: SpriteLayer; windows: boolean }>();
   private readonly shroud: ShroudLayer;
   private readonly effectDriver: LiveEffectsDriver;
   private readonly wind = new Vector3(Math.cos(0.6), 0, Math.sin(0.6)).multiplyScalar(0.3 * 0.8);
   private viewWidth = 800;
   private viewHeight = 600;
   private lastRender = performance.now();
+  /**
+   * Identity of the light-emitting and window-lit building sets last handed to the night dressing. Null until the
+   * first snapshot, which always replaces the sidecar's map-placed sources (even when it has none).
+   */
+  private lightKey: string | null = null;
+  private windowKey: string | null = null;
+  private blockedKey: string | null = null;
 
   private constructor(
     readonly hd: HdRenderer,
@@ -148,13 +171,21 @@ export class LiveView {
     private readonly cache: Ra2Cache,
     private readonly options: LiveViewOptions,
     private readonly library: LiveLibrary | null,
+    private readonly state: RenderState,
   ) {
     this.root.name = 'live-objects';
     hd.scene.add(this.root);
     this.shroud = new ShroudLayer(world.width, world.height);
-    hd.scene.add(this.shroud.mesh);
+    hd.setVisibility(this.shroud.texture, world.width, world.height);
     this.effectDriver = new LiveEffectsDriver(hd.effects, (x, y, z) => this.shroud.isLocationShrouded(x, y, z));
-    this.sprites = new SpriteLayer(cache, [], LIVE_SPRITE_CAPACITY, undefined, cache.spriteAtlasHd);
+    this.sprites = new SpriteLayer(
+      cache,
+      [],
+      LIVE_SPRITE_CAPACITY,
+      undefined,
+      cache.spriteAtlasHd,
+      cache.windows?.texture ?? null,
+    );
     this.sprites.mesh.name = 'live-sprites';
     this.root.add(this.sprites.mesh);
     this.shareSpriteUniforms(this.sprites);
@@ -169,7 +200,12 @@ export class LiveView {
     const library = options.libraryBase
       ? await LiveLibrary.load(`${options.libraryBase.replace(/\/$/, '')}/${cache.manifest.theater}`, cache)
       : null;
-    const lighting = cache.manifest.lighting ?? { ambient: 1, level: 0.032, red: 1, green: 1, blue: 1, ground: 0 };
+    // The map's own [Lighting] stages the view (engine-exact from the light sidecar when present).
+    const lighting = cache.lights?.lighting.normal ??
+      cache.manifest.lighting ?? { ambient: 1, level: 0.032, red: 1, green: 1, blue: 1, ground: 0 };
+    const atmosphere = cache.lights
+      ? sidecarAtmosphere(cache.lights)
+      : mapAtmosphere(lighting, medianHeight(cache.height, cache.exists));
     const state: RenderState = {
       version: RENDER_STATE_VERSION,
       tick: 0,
@@ -181,11 +217,12 @@ export class LiveView {
         terrain: [],
         waterLevel: 0,
         lighting,
+        atmosphere,
       },
       objects: [],
       events: [],
       environment: {
-        timeOfDay: options.timeOfDay ?? 12,
+        timeOfDay: options.timeOfDay ?? atmosphere.hour,
         weather: options.weather ?? 'clear',
         weatherIntensity: options.weatherIntensity ?? 0,
         windDirection: 0.6,
@@ -201,7 +238,20 @@ export class LiveView {
     // The original shows no vignette; keep the frame edge faithful to the game's own view.
     hd.settings.vignette = 0;
     hd.applySettings();
-    return new LiveView(hd, world, cache, options, library);
+    return new LiveView(hd, world, cache, options, library, state);
+  }
+
+  /** Change time, weather or the night dressing at runtime (no reload). */
+  setEnvironment(change: LiveEnvironment): void {
+    const env = this.state.environment;
+    if (change.timeOfDay !== undefined) env.timeOfDay = change.timeOfDay;
+    if (change.weather !== undefined) env.weather = change.weather;
+    if (change.weatherIntensity !== undefined) env.weatherIntensity = change.weatherIntensity;
+    const atmosphere = this.hd.atmosphere;
+    if (change.lamps !== undefined) atmosphere.lamps = change.lamps;
+    if (change.windows !== undefined) atmosphere.windows = change.windows;
+    if (change.lights !== undefined) atmosphere.lights = change.lights;
+    if (change.mist !== undefined) atmosphere.mist = change.mist;
   }
 
   /**
@@ -231,6 +281,92 @@ export class LiveView {
     for (const house of snapshot.houses) this.ensureHouse(house.colorIndex);
     if (snapshot.shroud) this.shroud.update(snapshot.shroud);
     if (snapshot.effects) this.effectDriver.push(snapshot.effects, this.hd.seconds(), this.wind);
+    this.updateNightSources(snapshot);
+  }
+
+  /**
+   * Light sources and lit windows follow the buildings standing in the match: the engine creates a building's light
+   * source with the building and removes it with it (no power gating), so the engine grid is recomputed whenever the
+   * set of light-emitting buildings changes. Nothing under black shroud may give its position away: lit windows (an
+   * HD addition) of shrouded buildings stay dark, and so do the light sources of shrouded buildings, except the map's
+   * invisible lamp-post dummies (INGALITE and the like), which belong to the map layout every player knows and which
+   * the engine lights whatever the shroud.
+   */
+  private updateNightSources(snapshot: LiveSnapshot): void {
+    const dressing = this.world.dressing;
+    const types = this.cache.lights?.types;
+    if (!dressing) return;
+    const buildings = snapshot.objects.filter((o) => o.kind === 'building');
+    const shrouded = (b: LiveObject) => this.shroud.isLocationShrouded(b.x, b.y, b.z);
+    if (types) {
+      const sources: SourceLight[] = [];
+      for (const b of buildings) {
+        const t = types[b.type];
+        if (!t || (!t.invisible && shrouded(b))) continue;
+        const cell: [number, number] = [Math.floor(b.x / LEPTONS_PER_CELL), Math.floor(b.y / LEPTONS_PER_CELL)];
+        const z = Math.round(b.z / LEPTONS_PER_LEVEL);
+        sources.push({
+          type: b.type,
+          cell,
+          z,
+          foundation: t.foundation,
+          position: [
+            cell[0] * LEPTONS_PER_CELL + t.foundation[0] * 128,
+            cell[1] * LEPTONS_PER_CELL + t.foundation[1] * 128,
+            b.z,
+          ],
+          radius: t.radius,
+          intensity: t.intensity,
+          tint: t.tint,
+          invisible: t.invisible,
+        });
+      }
+      const key = sources.map((s) => `${s.type}@${s.cell[0]},${s.cell[1]}`).join(';');
+      if (key !== this.lightKey) {
+        this.lightKey = key;
+        dressing.setSources(sources);
+      }
+    }
+    // HD street lamps never stand inside a building: foundations of the visible buildings standing now block their
+    // spots (shrouded ones do not, so a missing lamp never gives an unseen base away; the shroud hides that lamp).
+    const blocked = new Set<number>();
+    const width = this.world.width;
+    for (const b of buildings) {
+      if (shrouded(b) || types?.[b.type]?.invisible) continue;
+      const [w, h] = this.library?.type(b.type)?.foundation ?? types?.[b.type]?.foundation ?? [1, 1];
+      const x0 = Math.floor(b.x / LEPTONS_PER_CELL);
+      const y0 = Math.floor(b.y / LEPTONS_PER_CELL);
+      for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) blocked.add(y * width + x);
+    }
+    const blockedKey = [...blocked].sort((a, b) => a - b).join(',');
+    if (blockedKey !== this.blockedKey) {
+      this.blockedKey = blockedKey;
+      dressing.setBlockedCells(blocked);
+    }
+    const lit: WindowBuilding[] = [];
+    for (const b of buildings) {
+      const type = this.library?.type(b.type);
+      const sprite = type?.sprite;
+      if (!type || !sprite || shrouded(b)) continue;
+      const frame = b.health <= this.library!.conditionYellow ? 1 : 0;
+      const count = this.library!.litWindows(sprite, frame);
+      if (!count) continue;
+      const [w, h] = type.foundation ?? [1, 1];
+      lit.push({
+        x: Math.floor(b.x / LEPTONS_PER_CELL),
+        y: Math.floor(b.y / LEPTONS_PER_CELL),
+        w,
+        h,
+        lit: count,
+        // Library draw points are the foundation's top corner too (drawOffset only undoes the cell-centre lepton).
+        columns: this.library!.windowColumns(sprite, frame).map(([dx, panes]) => [dx + type.drawOffset[0], panes]),
+      });
+    }
+    const windowKey = lit.map((b) => `${b.x},${b.y},${b.lit}`).join(';');
+    if (windowKey !== this.windowKey) {
+      this.windowKey = windowKey;
+      dressing.setWindowBuildings(lit);
+    }
   }
 
   render(now = performance.now()): void {
@@ -275,7 +411,11 @@ export class LiveView {
       const colorIndex = houses.get(object.owner) ?? -1;
       const visual = this.visualFor(object, colorIndex);
       // Anything standing under black shroud stays hidden, exactly as in the original (no peeking at enemy bases).
-      const hidden = this.shroud.isLocationShrouded(object.x, object.y, object.z) || !!visual.libraryType?.invisible;
+      // InvisibleInGame types (lamp-post dummies such as INGALITE) are never drawn, with or without a type library.
+      const hidden =
+        this.shroud.isLocationShrouded(object.x, object.y, object.z) ||
+        !!visual.libraryType?.invisible ||
+        !!this.cache.lights?.types[object.type]?.invisible;
       visual.root.visible = !hidden;
       if (hidden) continue;
       const before = previous?.byUid.get(object.uid);
@@ -333,33 +473,43 @@ export class LiveView {
       if (key === 'map') continue;
       this.pageLayer(key)?.setInstances(instances);
     }
-    for (const [page, layer] of this.pageLayers) if (!batch.has(page)) layer.setInstances([]);
+    for (const [page, { layer }] of this.pageLayers) if (!batch.has(page)) layer.setInstances([]);
   }
 
   private pageLayer(page: number): SpriteLayer | null {
-    let layer = this.pageLayers.get(page);
-    if (layer) return layer;
+    const existing = this.pageLayers.get(page);
+    // Window masks are atlas-sized (a 4096 page costs 64 MB on the GPU): load a page's mask only once night falls,
+    // then rebuild its layer with it; by day and while the mask loads the layer draws without. Decided from the hour
+    // (not windowGain, which hd.frame only sets after this), so a match starting at night builds each layer once.
+    const wantWindows = this.hd.windowsWanted() && this.library!.hasWindowsPage(page);
+    if (existing && (existing.windows || !wantWindows)) return existing.layer;
     const atlas = this.library?.page(page);
-    if (!atlas) return null;
-    // Wait for the page's HD art when it has some, so a layer is built once with its final textures.
+    if (!atlas) return existing?.layer ?? null;
+    // Wait for the page's HD art when it has it, so a layer is never built twice for its colour texture.
     const hd = this.library!.hdPage(page);
-    if (!hd && this.library!.hasHdPage(page)) return null;
-    layer = new SpriteLayer(this.cache, [], LIVE_SPRITE_CAPACITY, atlas, hd);
+    if (!hd && this.library!.hasHdPage(page)) return existing?.layer ?? null;
+    const windows = wantWindows ? this.library!.windowsPage(page) : null;
+    // While a wanted mask loads, keep drawing what exists (or wait, like for HD art) instead of building twice.
+    if (wantWindows && !windows) return existing?.layer ?? null;
+    if (existing && !windows) return existing.layer;
+    if (existing) {
+      const mesh = existing.layer.mesh;
+      this.root.remove(mesh);
+      mesh.geometry.dispose();
+      (mesh.material as { dispose(): void }).dispose();
+      mesh.dispose();
+    }
+    const layer = new SpriteLayer(this.cache, [], LIVE_SPRITE_CAPACITY, atlas, hd, windows);
     layer.mesh.name = `live-sprites-${page}`;
     this.shareSpriteUniforms(layer);
     this.root.add(layer.mesh);
-    this.pageLayers.set(page, layer);
+    this.pageLayers.set(page, { layer, windows: !!windows });
     return layer;
   }
 
   private shareSpriteUniforms(layer: SpriteLayer): void {
     // The static layer's camera and light uniforms are updated by HdRenderer every frame; share their values.
-    const shared = this.world.sprites;
-    if (!shared) return;
-    layer.cameraRight.value = shared.cameraRight.value;
-    layer.cameraUp.value = shared.cameraUp.value;
-    layer.toCamera.value = shared.toCamera.value;
-    layer.light.value = shared.light.value;
+    if (this.world.sprites) shareSpriteUniforms(this.world.sprites, layer);
   }
 
   /** Queue a library frame on its atlas page (skipped while the page loads). */

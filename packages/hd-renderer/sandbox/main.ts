@@ -1,4 +1,6 @@
 import GUI from 'three/addons/libs/lil-gui.module.min.js';
+import { Vector3 } from 'three/webgpu';
+import { mapAtmosphere, medianHeight, sidecarAtmosphere } from '../../ra2-assets/src/lights';
 import { HdRenderer, type ToneMapper } from '../src/HdRenderer';
 import type { RenderEvent, RenderObject, RenderState, Weather } from '../src/contract';
 import { createScenario } from './scenario';
@@ -39,17 +41,40 @@ const world = mapName
       },
     })
   : undefined;
-if (world) {
+if (world?.cache) {
   state.objects = [];
-  if (!params.has('time')) state.environment.timeOfDay = 12;
+  // The map's own [Lighting] (engine-exact from the light sidecar, else the manifest's) stages it: day, dusk or night.
+  const { manifest, lights } = world.cache;
+  const lighting = lights?.lighting.normal ?? manifest.lighting ?? state.map.lighting;
+  state.map.lighting = lighting;
+  // Recomputed from the sidecar's raw [Lighting] and lamp posts, so a sidecar written by an older classifier stages
+  // the map like the current one.
+  state.map.atmosphere = lights
+    ? sidecarAtmosphere(lights)
+    : mapAtmosphere(lighting, medianHeight(world.cache.height, world.cache.exists));
+  // Without ?time the map decides (noon for day maps, as before).
+  if (!params.has('time')) state.environment.timeOfDay = state.map.atmosphere.hour;
 }
 const hd = new HdRenderer(canvas, state, {
   forceWebGL: params.get('webgl') === '1',
   requiredLimits: await HdRenderer.adapterLimits(),
+  // ?perf=1: GPU timestamp queries (window.__hd.stats().gpuMs).
+  trackTimestamp: params.get('perf') === '1',
 });
+// Night presentation: ?lights=0 (map light sources off), ?lamps=auto|on|off, ?windows=0|1, ?mist=<x>, ?nightlevel=<x>.
+const atmosphere = hd.atmosphere;
+if (params.get('lights') === '0') atmosphere.lights = false;
+const lamps = params.get('lamps');
+if (lamps === 'on' || lamps === 'off' || lamps === 'auto') atmosphere.lamps = lamps;
+if (params.has('windows')) atmosphere.windows = params.get('windows') !== '0';
+if (params.has('mist')) atmosphere.mist = Number(params.get('mist'));
+if (params.has('nightlevel')) atmosphere.nightLevel = Number(params.get('nightlevel'));
 await hd.init(world);
+// ?wet=<0..1>: start with wet ground (rain wets surfaces over a few seconds otherwise).
+if (params.has('wet') && world) world.terrain.wetness.value = Math.min(1, Math.max(0, Number(params.get('wet'))));
 // Development handle for inspecting the scene from the console.
-(window as unknown as { __hd: unknown }).__hd = { hd, world, state };
+const handle = { hd, world, state, stats: () => hd.stats(), fires: [] as { at: Vector3; scale: number }[] };
+(window as unknown as { __hd: unknown }).__hd = handle;
 hd.setState(state);
 
 // Fixed camera presets for comparable screenshots: ?cx=12&cy=44&zoom=0.8
@@ -61,6 +86,27 @@ if (params.has('rain')) state.environment.weatherIntensity = Number(params.get('
 const resize = () => hd.resize(canvas.clientWidth, canvas.clientHeight);
 new ResizeObserver(resize).observe(canvas);
 resize();
+
+// ?fires=N: persistent fires (burning wrecks) at seeded spots within 6 cells of the view centre.
+const fires: { at: Vector3; scale: number }[] = [];
+{
+  let seed = 12345;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const count = Math.min(32, Math.max(0, Number(params.get('fires') ?? 0) || 0));
+  for (let i = 0; i < count; i++) {
+    const angle = random() * Math.PI * 2;
+    const distance = 1.5 + random() * 4.5;
+    const x = hd.view.target.x + Math.cos(angle) * distance;
+    const z = hd.view.target.z + Math.sin(angle) * distance;
+    const y = world ? world.terrain.heightAt(x, z) : 0;
+    fires.push({ at: new Vector3(x, y + 0.05, z), scale: 0.8 + random() * 0.4 });
+  }
+}
+const fireWind = new Vector3(0.15, 0, 0.05);
+handle.fires = fires;
 
 // --- scripted motion: allied tanks patrol, turrets track the nearest enemy, enemy tanks idle-rotate ---
 const allied = state.objects.filter((o) => o.kind === 'vehicle' && o.house === 1);
@@ -171,6 +217,13 @@ gui.add(env, 'weather', { 晴: 'clear', 雨: 'rain', 暴雨: 'storm' }).name('�
 gui.add(env, 'weatherIntensity', 0, 1, 0.01).name('雨量');
 gui.add(env, 'windStrength', 0, 1, 0.01).name('风力');
 gui.add(ui, 'battle').name('自动交火');
+const night = gui.addFolder('夜景');
+night.add(atmosphere, 'lights').name('地图光源');
+night.add(atmosphere, 'lamps', { 自动: 'auto', 开: 'on', 关: 'off' }).name('HD 路灯');
+night.add(atmosphere, 'windows').name('窗户灯光');
+night.add(atmosphere, 'mist', 0, 3, 0.05).name('薄雾倍数');
+const wetness = world?.terrain.wetness;
+if (wetness) night.add(wetness, 'value', 0, 1, 0.01).name('地面湿度').listen();
 const look = gui.addFolder('画质');
 look
   .add(hd.settings, 'toneMapper', { Neutral: 'neutral', AgX: 'agx', ACES: 'aces' } satisfies Record<string, ToneMapper>)
@@ -214,6 +267,8 @@ function loop(now: number): void {
   if (keys.has('s') || keys.has('arrowdown')) hd.view.panPixels(0, -pan);
 
   step(dt, t);
+  for (const [i, fire] of fires.entries())
+    hd.effects.fire(hd.seconds(), fire.at, fire.scale, `sandbox-fire-${i}`, fireWind);
   // ?boom=1 on original maps: periodic explosions around the view centre (no scripted armies there).
   if (world && params.has('boom') && t > nextShot) {
     nextShot = t + 0.7 + Math.random() * 0.9;
@@ -242,6 +297,20 @@ function loop(now: number): void {
     fpsTime = 0;
     hud.textContent = `${hd.backend} · ${fps.toFixed(0)} fps · ${canvas.width}×${canvas.height}px · 拖动平移 · 滚轮缩放 · 点击地面=爆炸`;
   }
-  requestAnimationFrame(loop);
+  schedule();
 }
-requestAnimationFrame(loop);
+
+// ?perf=1 on WebGPU: frames run back to back, each waiting for the GPU to finish, so the frame interval
+// (hd.stats().frameMs) is the frame's full cost, independent of the display's refresh rate.
+const queue = (hd.renderer.backend as { device?: { queue: { onSubmittedWorkDone(): Promise<void> } } }).device?.queue;
+const benchmark = params.get('perf') === '1' && !!queue;
+const channel = new MessageChannel();
+channel.port1.onmessage = () => loop(performance.now());
+function schedule(): void {
+  if (!benchmark) {
+    requestAnimationFrame(loop);
+    return;
+  }
+  void queue!.onSubmittedWorkDone().then(() => channel.port2.postMessage(0));
+}
+schedule();

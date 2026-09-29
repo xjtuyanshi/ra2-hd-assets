@@ -96,7 +96,7 @@ under `gameres/tools/diffusion/`) is the opt-in `remat` step of `hd:prepare` (ad
 
 Start a development server whose game root holds a skirmish setup (a scratch copy of the installation with an edited
 `RA2MD.INI` `[Skirmish]` section, as described in `scripts/remaster/perf/README.md`), then open
-`/?start-page=battle&hd=1`. `hd-time=<hours>` and `hd-weather=rain` change the HD lighting; `hd-rect=x,y,w,h`
+`/?start-page=battle&hd=1`. By default the HD lighting follows the map's own `[Lighting]` (day, dusk or night maps, see `pnpm hd:lights`); `hd-time=<hours>` and `hd-weather=rain` override it; `hd-rect=x,y,w,h`
 overrides the tactical rectangle (default: the frame minus YR's 168 px sidebar and 32 px command bar).
 
 ## Known limits

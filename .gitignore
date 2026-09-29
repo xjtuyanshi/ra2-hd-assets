@@ -18,7 +18,7 @@ dist/
 *.safetensors
 __pycache__/
 # Remaster fork: original game files and anything derived from them never enter the repository.
-/gameres/
+/gameres
 *.mix
 *.MIX
 *.exe

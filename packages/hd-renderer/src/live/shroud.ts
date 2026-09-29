@@ -1,14 +1,4 @@
-import {
-  DataTexture,
-  LinearFilter,
-  Mesh,
-  MeshBasicNodeMaterial,
-  PlaneGeometry,
-  RedFormat,
-  UnsignedByteType,
-} from 'three/webgpu';
-import { float, positionWorld, texture, vec2, vec3 } from 'three/tsl';
-import type { ShaderNode } from '../tsl';
+import { DataTexture, LinearFilter, RedFormat, UnsignedByteType } from 'three/webgpu';
 
 /** Per-cell state as the live reader reports it: 0 = shroud, 1 = fog, 2 = visible, 0xff = no cell. */
 export interface ShroudCells {
@@ -25,14 +15,18 @@ const LEPTONS_PER_CELL = 256;
 const LEPTONS_PER_LEVEL = 104;
 
 /**
- * The local player's shroud and fog, drawn like the engine: a darkening layer on the flat Z = 0 plane (not following
- * the terrain), applied after everything else so it covers terrain, objects and effects alike. On an elevated map a
- * cell's shroud therefore lands on the terrain one row "behind" it on screen, exactly as in the original. One texel per
- * cell with linear filtering gives the soft darkened band the engine's edge pieces produce.
+ * The local player's shroud and fog, applied like the engine: a darkening layer on the flat Z = 0 plane (not following
+ * the terrain) that covers terrain, objects and effects alike. On an elevated map a cell's shroud therefore lands on
+ * the terrain one row "behind" it on screen, exactly as in the original. One texel per cell with linear filtering
+ * gives the soft darkened band the engine's edge pieces produce.
+ *
+ * The layer is a visibility mask (`texture`) the HD renderer applies in its post pass (HdRenderer.setVisibility),
+ * after the mist and before bloom: drawn inside the scene it would sit under the mist, whose light-field glow would
+ * then show lit buildings and lamps through black shroud.
  */
 export class ShroudLayer {
-  readonly mesh: Mesh;
-  private readonly texture: DataTexture;
+  /** R: 255 visible, 128 fog, 0 shroud; texel i is centred on cell i + 0.5 (world x / width addresses it). */
+  readonly texture: DataTexture;
   private readonly data: Uint8Array;
   private latest: ShroudCells | null = null;
 
@@ -46,22 +40,6 @@ export class ShroudLayer {
     this.texture.magFilter = LinearFilter;
     this.texture.minFilter = LinearFilter;
     this.texture.needsUpdate = true;
-
-    const material = new MeshBasicNodeMaterial();
-    material.transparent = true;
-    material.depthTest = false;
-    material.depthWrite = false;
-    // Texel i is centred on cell i + 0.5, so world x / width addresses it directly.
-    const light: ShaderNode = texture(this.texture, vec2(positionWorld.x.div(width), positionWorld.z.div(height))).r;
-    material.colorNode = vec3(0, 0, 0);
-    material.opacityNode = float(1).sub(light);
-    const plane = new PlaneGeometry(width, height);
-    plane.rotateX(-Math.PI / 2);
-    plane.translate(width / 2, 0, height / 2);
-    this.mesh = new Mesh(plane, material);
-    this.mesh.name = 'live-shroud';
-    this.mesh.renderOrder = 50;
-    this.mesh.frustumCulled = false;
   }
 
   update(shroud: ShroudCells): void {

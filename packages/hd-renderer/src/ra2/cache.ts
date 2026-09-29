@@ -12,7 +12,24 @@ import {
   UnsignedByteType,
 } from 'three/webgpu';
 import type { HdCacheManifest, TileEntry, VoxelModel } from '../../../ra2-assets/src/manifest';
+import { validateMapLights, type MapLightsSidecar } from '../../../ra2-assets/src/lights';
 import { buildShoreField } from './shoreField';
+
+/** windows.json next to a lit-window mask (packages/ra2-assets src/node/lights.ts WindowsSidecar). */
+export interface WindowsIndex {
+  version: number;
+  /** Library only: mask file per atlas page. */
+  pages?: Record<string, string>;
+  /**
+   * Per building frame: lit pixels, their centroid and (version 2) the lit-pane columns [centre x, panes, lowest lit
+   * y], frame-relative.
+   */
+  frames: Record<
+    string,
+    Record<string, { lit: number; centroid: [number, number]; columns?: [number, number, number][] }>
+  >;
+  denied?: string[];
+}
 
 /**
  * A loaded HD cache (see packages/ra2-assets/src/manifest.ts): decoded cell arrays plus GPU textures. The cache is
@@ -44,6 +61,10 @@ export interface Ra2Cache {
   /** Raw RGB palettes (0..255) by key, for CPU-side colour resolution (voxels). */
   paletteRgb: Map<string, Uint8Array>;
   voxels: Map<string, VoxelModel>;
+  /** The map's light sidecar (pnpm hd:lights), or null when the cache has none (or it failed to load). */
+  lights: MapLightsSidecar | null;
+  /** Lit-window mask over the sprite atlas (same layout) and its index, when extracted. */
+  windows: { texture: Texture; index: WindowsIndex } | null;
 }
 
 export const NO_TILE = 0xffff;
@@ -53,6 +74,75 @@ export function decodeBase64(text: string): Uint8Array {
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
   return out;
+}
+
+/**
+ * Fetch an optional sidecar. A missing file (404, or the dev server's HTML fallback) resolves to null with an info
+ * message; a file that exists but fails to parse or validate resolves to null with a warning. The two are never
+ * confused, and nothing is fabricated.
+ */
+export async function fetchOptionalJson<T>(
+  url: string,
+  validate: (json: unknown) => T = (j) => j as T,
+): Promise<T | null> {
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (error) {
+    console.warn(`${url}: request failed`, error);
+    return null;
+  }
+  const type = response.headers.get('content-type') ?? '';
+  if (response.status === 404 || (response.ok && type.includes('text/html'))) {
+    console.info(`${url}: not present (optional)`);
+    return null;
+  }
+  if (!response.ok) {
+    console.warn(`${url}: HTTP ${response.status}`);
+    return null;
+  }
+  try {
+    return validate(await response.json());
+  } catch (error) {
+    console.warn(`${url}: invalid`, error);
+    return null;
+  }
+}
+
+/**
+ * Light sidecars refer to manifest.objects by index (hidden lamp dummies, light sources). When the manifest changed
+ * since `pnpm hd:lights` ran (its recorded sha256 differs), those indices are dropped with a warning; positions and
+ * lighting stay valid.
+ */
+async function sidecarForManifest(
+  lights: MapLightsSidecar | null,
+  manifestBytes: ArrayBuffer,
+): Promise<MapLightsSidecar | null> {
+  if (!lights) return null;
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return lights;
+  const digest = new Uint8Array(await subtle.digest('SHA-256', manifestBytes));
+  const hex = [...digest].map((b) => b.toString(16).padStart(2, '0')).join('');
+  if (hex === lights.extractor.manifestSha256) return lights;
+  console.warn('lights.json was written for another manifest.json: ignoring its object indices (rerun pnpm hd:lights)');
+  return { ...lights, hiddenObjects: [], lights: lights.lights.map(({ objectIndex: _unused, ...light }) => light) };
+}
+
+/** Load a data mask (lit windows): no colour conversion, linear filtering, no mipmaps. */
+export async function loadMaskTexture(url: string): Promise<Texture | null> {
+  try {
+    const texture = await new TextureLoader().loadAsync(url);
+    texture.flipY = false;
+    texture.colorSpace = NoColorSpace;
+    // Nearest: a pane's variant (G) must never blend with its dark surroundings (the panes follow the original pixels).
+    texture.magFilter = NearestFilter;
+    texture.minFilter = NearestFilter;
+    texture.generateMipmaps = false;
+    return texture;
+  } catch (error) {
+    console.warn(`${url}: failed to load`, error);
+    return null;
+  }
 }
 
 export interface Ra2CacheOptions {
@@ -91,7 +181,8 @@ export async function loadHdAtlas(base: string, ref: HdAtlasRef): Promise<{ colo
 
 export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}): Promise<Ra2Cache> {
   const url = (file: string) => `${base.replace(/\/$/, '')}/${file}`;
-  const manifest = (await (await fetch(url('manifest.json'))).json()) as HdCacheManifest;
+  const manifestBytes = await (await fetch(url('manifest.json'))).arrayBuffer();
+  const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as HdCacheManifest;
   const tileBytes = decodeBase64(manifest.cells.tile);
   const tile = new Uint16Array(tileBytes.buffer, tileBytes.byteOffset, tileBytes.byteLength / 2);
 
@@ -177,9 +268,20 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     };
   }
 
+  // Optional sidecars (pnpm hd:lights): the map's light sources and lit-window masks.
+  const lights = await sidecarForManifest(
+    await fetchOptionalJson(url('lights.json'), validateMapLights),
+    manifestBytes,
+  );
+  const windowsIndex = await fetchOptionalJson<WindowsIndex>(url('windows.json'));
+  const windowsTexture = windowsIndex ? await loadMaskTexture(url('windows.png')) : null;
+  const windows = windowsIndex && windowsTexture ? { texture: windowsTexture, index: windowsIndex } : null;
+
   return {
     base,
     manifest,
+    lights,
+    windows,
     terrainMap,
     exists: decodeBase64(manifest.cells.exists),
     height: decodeBase64(manifest.cells.height),

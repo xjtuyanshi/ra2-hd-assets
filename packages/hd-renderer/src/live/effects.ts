@@ -85,6 +85,8 @@ interface Tracked {
   lastSeen: number;
   nextEmit: number;
   at: Vector3;
+  /** Identity of a fire's kept light in the light field (built once, not per frame). */
+  lightKey: string;
 }
 
 export class LiveEffectsDriver {
@@ -107,7 +109,13 @@ export class LiveEffectsDriver {
       const key = `${anim.id}:${anim.uid}`;
       let tracked = this.anims.get(key);
       if (!tracked) {
-        tracked = { look: classifyAnim(anim.type), lastSeen: generation, nextEmit: now, at: new Vector3() };
+        tracked = {
+          look: classifyAnim(anim.type),
+          lastSeen: generation,
+          nextEmit: now,
+          at: new Vector3(),
+          lightKey: `anim:${key}`,
+        };
         this.anims.set(key, tracked);
         world(anim, tracked.at);
         if (!this.hidden(anim.x, anim.y, anim.z)) this.spawnOnce(tracked, now, wind);
@@ -122,7 +130,13 @@ export class LiveEffectsDriver {
       const kind = system.behaviour === 'fire' ? 'fire' : system.behaviour === 'smoke' ? 'smoke' : null;
       if (!kind) continue;
       if (!tracked) {
-        tracked = { look: { kind, scale: 0.7 }, lastSeen: generation, nextEmit: now, at: new Vector3() };
+        tracked = {
+          look: { kind, scale: 0.7 },
+          lastSeen: generation,
+          nextEmit: now,
+          at: new Vector3(),
+          lightKey: `system:${key}`,
+        };
         this.systems.set(key, tracked);
       }
       tracked.lastSeen = generation;
@@ -154,15 +168,16 @@ export class LiveEffectsDriver {
     else if (look.kind === 'impact') this.effects.impact(now, at, look.scale, wind);
   }
 
+  /** Continuous emitters; the tracked light key (the anim's identity) keeps a fire's light alive in the light field. */
   private emit(tracked: Tracked, now: number, wind: Vector3, rateScale: number): void {
     const { look } = tracked;
     if (look.kind !== 'fire' && look.kind !== 'smoke') return;
     if (now < tracked.nextEmit) return;
     if (look.kind === 'fire') {
-      this.effects.flame(now, tracked.at, look.scale);
-      // Burning things smoke too.
-      if (Math.random() < 0.25)
-        this.effects.smokePuff(now, tracked.at.clone().setY(tracked.at.y + 0.3), look.scale, wind);
+      this.effects.flame(now, tracked.at, look.scale, tracked.lightKey);
+      // Burning things smoke too: a steady dark column.
+      if (Math.random() < 0.45)
+        this.effects.smokePuff(now, tracked.at.clone().setY(tracked.at.y + 0.5), look.scale, wind, true);
       tracked.nextEmit = now + EMIT_INTERVAL.fire / rateScale;
     } else {
       this.effects.smokePuff(now, tracked.at, look.scale, wind);

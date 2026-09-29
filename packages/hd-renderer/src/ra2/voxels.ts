@@ -7,7 +7,8 @@ import {
   MeshStandardNodeMaterial,
   SRGBColorSpace,
 } from 'three/webgpu';
-import { attribute, float, mix, uniform } from 'three/tsl';
+import { attribute, float, max, mix, normalWorld, positionWorld, uniform } from 'three/tsl';
+import { moonlit, objectLight } from '../atmosphere';
 import { lookupNormal, normalTableFor } from '../../../ra2-formats/src/index';
 import type { VoxelModel, VoxelSection } from '../../../ra2-assets/src/manifest';
 import type { ShaderNode } from '../tsl';
@@ -203,8 +204,13 @@ export const VOXEL_FILL = 0.45;
 export function createVoxelMaterial(): MeshStandardNodeMaterial {
   const material = new MeshStandardNodeMaterial();
   const paint: ShaderNode = attribute('remap', 'float').greaterThanEqual(0).select(float(1), float(0));
-  material.colorNode = attribute('color', 'vec3');
-  material.emissiveNode = attribute('color', 'vec3').mul(voxelFill);
+  // Night desaturation on the sun and sky term only; house paint keeps its colour (readability).
+  material.colorNode = mix(moonlit(attribute('color', 'vec3')), attribute('color', 'vec3'), paint);
+  // Fill plus local lights (lamps, fires, explosions), strongest on faces turned up towards the lit ground's glow.
+  const local = objectLight(positionWorld.xz)
+    .mul(1 / Math.PI)
+    .mul(float(0.55).add(max(normalWorld.y, 0).mul(0.45)));
+  material.emissiveNode = attribute('color', 'vec3').mul(voxelFill.add(local));
   // Mostly dielectric: metalness darkens the diffuse term, and the originals read as brightly lit painted metal.
   material.metalnessNode = mix(float(0.05), float(0.12), paint);
   material.roughnessNode = mix(float(0.55), float(0.38), paint);

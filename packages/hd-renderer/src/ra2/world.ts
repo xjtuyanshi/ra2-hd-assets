@@ -1,7 +1,10 @@
-import { Object3D, Vector3 } from 'three/webgpu';
+import { DataTexture, LinearFilter, Object3D, RGFormat, UnsignedByteType, Vector3 } from 'three/webgpu';
+import { SURFACE, surfaceFromLandType } from '../../../ra2-assets/src/lights';
 import type { MapObject } from '../../../ra2-assets/src/manifest';
+import type { WorldDressing } from '../atmosphere';
 import type { TerrainBuild } from '../terrain';
-import { loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOptions } from './cache';
+import { decodeBase64, loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOptions } from './cache';
+import { Ra2NightDressing } from './nightDressing';
 import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from './sprites';
 import { buildRa2Terrain } from './terrain';
 import { buildVoxelGeometry, createVoxelMaterial, instantiateVoxel, type VoxelGeometry } from './voxels';
@@ -19,6 +22,40 @@ export interface HdWorld {
   focus: Vector3;
   sprites?: SpriteLayer;
   cache?: Ra2Cache;
+  /** Per-cell surface (RG8, linear): R = paved (asphalt, concrete, brick, roads), G = open water. */
+  surfaceTexture?: DataTexture;
+  /** Per-cell SurfaceClass (ra2-assets lights.ts), from the light sidecar or the land-type fallback. */
+  surface?: Uint8Array;
+  /** Night dressing: map light sources, HD street lamps, window glows. */
+  dressing?: WorldDressing & Ra2NightDressing;
+}
+
+/** Surface classes per cell: the sidecar's (tile colours) when present, else land types only. */
+function cellSurface(cache: Ra2Cache): Uint8Array {
+  const { manifest } = cache;
+  const W = manifest.grid.width;
+  const H = manifest.grid.height;
+  const fromSidecar = cache.lights ? decodeBase64(cache.lights.cells.surface) : null;
+  if (fromSidecar && fromSidecar.length === W * H) return fromSidecar;
+  return surfaceFromLandType(
+    { width: W, height: H, exists: cache.exists, tile: cache.tile },
+    manifest.tiles,
+    manifest.theater,
+  );
+}
+
+function surfaceTexture(surface: Uint8Array, width: number, height: number): DataTexture {
+  const data = new Uint8Array(width * height * 2);
+  for (let i = 0; i < width * height; i++) {
+    const s = surface[i]!;
+    data[i * 2] = s === SURFACE.paved || s === SURFACE.road ? 255 : 0;
+    data[i * 2 + 1] = s === SURFACE.water ? 255 : 0;
+  }
+  const texture = new DataTexture(data, width, height, RGFormat, UnsignedByteType);
+  texture.magFilter = LinearFilter;
+  texture.minFilter = LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
 }
 
 /** Build the original map from a local HD cache (gameres/hd-cache/<map>/, served by the sandbox dev server). */
@@ -32,7 +69,11 @@ export async function loadRa2World(
 ): Promise<HdWorld> {
   const cache = await loadRa2Cache(base, options);
   const { manifest } = cache;
-  const placed = options.includeObject ? manifest.objects.filter(options.includeObject) : manifest.objects;
+  // InvisibleInGame objects (lamp-post dummies such as INGALITE) are never drawn by the engine.
+  const hidden = new Set(cache.lights?.hiddenObjects ?? []);
+  const placed = manifest.objects.filter(
+    (object, i) => !hidden.has(i) && (options.includeObject ? options.includeObject(object) : true),
+  );
   const objects = [...placed, ...(options.extraObjects?.(manifest) ?? [])];
   const terrain = buildRa2Terrain(cache);
   const root = new Object3D();
@@ -100,8 +141,22 @@ export async function loadRa2World(
         });
     }
   }
-  const spriteLayer = new SpriteLayer(cache, sprites, sprites.length, undefined, cache.spriteAtlasHd);
+  const spriteLayer = new SpriteLayer(
+    cache,
+    sprites,
+    sprites.length,
+    undefined,
+    cache.spriteAtlasHd,
+    cache.windows?.texture ?? null,
+  );
   root.add(spriteLayer.mesh);
+  const surface = cellSurface(cache);
+  const dressing = new Ra2NightDressing({
+    cache,
+    heightAt: terrain.heightAt,
+    root,
+    objects,
+  });
 
   const waypoint = manifest.waypoints.find((w) => w.id === 0) ?? manifest.waypoints[0];
   const focus = waypoint
@@ -117,5 +172,16 @@ export async function loadRa2World(
     focus,
     sprites: spriteLayer,
     cache,
+    surface,
+    surfaceTexture: surfaceTexture(surface, manifest.grid.width, manifest.grid.height),
+    dressing,
   };
+}
+
+/** Point another sprite layer's camera and light uniforms at the world layer's (updated by HdRenderer each frame). */
+export function shareSpriteUniforms(shared: SpriteLayer, layer: SpriteLayer): void {
+  layer.cameraRight.value = shared.cameraRight.value;
+  layer.cameraUp.value = shared.cameraUp.value;
+  layer.toCamera.value = shared.toCamera.value;
+  layer.light.value = shared.light.value;
 }

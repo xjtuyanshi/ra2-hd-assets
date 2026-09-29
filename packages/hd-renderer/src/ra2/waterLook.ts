@@ -20,6 +20,7 @@ import {
   vec2,
   vec3,
 } from 'three/tsl';
+import { moonlit, night, sceneBrightness } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import type { WaterUniforms } from '../waterShading';
 
@@ -150,6 +151,8 @@ export function waterLook(inputs: WaterLookInputs): WaterLook {
     .mul(0.9);
   const seabed = bed.mul(float(0.72).add(light));
   let body: ShaderNode = mix(column, seabed, clarity.mul(0.55));
+  // At night the water column swallows the (cool) moonlight: darker than the land around it, not a glowing blue.
+  body = body.mul(mix(float(1), float(0.7), night));
 
   // Reflection: Schlick Fresnel for water (F0 = 0.02) at the fixed viewing angle, lifted slightly so reflections of
   // cliffs and trees still read at RTS distance.
@@ -157,8 +160,13 @@ export function waterLook(inputs: WaterLookInputs): WaterLook {
   const fresnel = float(0.02).add(float(0.98).mul(pow(float(1).sub(max(dot(normal, view), 0)), 5)));
   const strength = fresnel.mul(2.0).add(0.04).min(0.28);
   const r = reflect(view.negate(), normal);
-  const sky = mix(uniforms.skyHorizon, uniforms.skyZenith, smoothstep(0.0, 0.6, r.y));
-  const mirrored = inputs.reflection ? mix(sky, inputs.reflection.colour, inputs.reflection.coverage) : sky;
+  // The analytic sky follows the scene's light level at night (the overcast grey of night rain is not a lit sky).
+  const skyLevel = mix(float(1), sceneBrightness.min(1).mul(0.6), night);
+  const sky = mix(uniforms.skyHorizon, uniforms.skyZenith, smoothstep(0.0, 0.6, r.y)).mul(skyLevel);
+  // At night the mirrored scene is graded like the moonlit land (desaturated, a little darker), so a reddish cliff
+  // over blue water never smears magenta.
+  const reflected = inputs.reflection ? moonlit(inputs.reflection.colour).mul(mix(float(1), float(0.8), night)) : null;
+  const mirrored = reflected && inputs.reflection ? mix(sky, reflected, inputs.reflection.coverage) : sky;
   // Tight, sparse sun glints only; a broad sheen is what reads as plastic.
   const sunDot = max(dot(r, uniforms.sunDirection), 0);
   const glint = pow(sunDot, 2400).mul(1.2).mul(uniforms.sunColor).mul(float(1).sub(uniforms.rain));
@@ -178,7 +186,9 @@ export function waterLook(inputs: WaterLookInputs): WaterLook {
     .mul(0.75)
     .min(1);
 
-  body = mix(body.mul(float(1).sub(strength)), color(0xe9efef), foam);
+  // Foam is lit like the ground, but kept greyer at night so shorelines do not outline every water body in white.
+  const foamColour = color(0xe9efef).mul(mix(float(1), float(0.5), night));
+  body = mix(body.mul(float(1).sub(strength)), foamColour, foam);
   const emission = mirrored.mul(strength).add(glint).mul(float(1).sub(foam)).mul(waterness);
   return { normal, body, emission, foam };
 }

@@ -11,12 +11,16 @@ import {
 import {
   Fn,
   clamp,
+  exp,
   float,
   floor,
   instancedBufferAttribute,
+  max,
   mix,
   positionGeometry,
   pow,
+  select,
+  step,
   texture,
   uniform,
   uv,
@@ -25,6 +29,7 @@ import {
   vec4,
 } from 'three/tsl';
 import type { MapObject, SpriteFrame } from '../../../ra2-assets/src/manifest';
+import { moonlit, objectLight, referenceLevel, windowGain } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { ra2Screen, screenToCell, type Ra2Cache } from './cache';
@@ -88,6 +93,11 @@ export class SpriteLayer {
      * the indexed atlas.
      */
     hd: { color: Texture; remap: Texture } | null = null,
+    /**
+     * Lit-window mask over the same atlas (R = lit, G = variant; ra2-assets windows.ts), same normalized UVs as the
+     * indexed and HD atlases. Null: no windows.
+     */
+    windows: Texture | null = null,
   ) {
     this.capacity = Math.max(1, capacity, instances.length);
     const count = this.capacity;
@@ -138,7 +148,36 @@ export class SpriteLayer {
       const isShadow = aFlat.greaterThan(1.5);
       const opaque = index.greaterThan(0.5).select(float(1), float(0));
       const shadow = vec4(0, 0, 0, opaque.mul(0.55));
-      if (!hd) return isShadow.select(shadow, vec4(paletteColour(index).mul(this.light), opaque));
+      // Local light at the ground point under this pixel (decals: the pixel itself; upright art: straight below it on
+      // screen, down to the anchor's ground line), fading with the pixel's height above that ground.
+      const px = aParams.x.add(u.mul(aRect.z));
+      const py = aParams.y.add(v.mul(aRect.w));
+      const flat = aFlat.greaterThan(0.5);
+      const down = select(flat, py, max(py, 0));
+      const ground = aAnchor.xz.add(vec2(px.div(60).add(down.div(30)), down.div(30).sub(px.div(60))));
+      const height = select(flat, float(0), max(py.negate(), 0).div(ppu));
+      const local: ShaderNode = objectLight(ground)
+        .div(referenceLevel)
+        .mul(exp(height.mul(-0.45)));
+      // Scene light on the night-desaturated colour (house paint keeps its colour), local lights on the full colour.
+      const shade = (c: ShaderNode, paint: ShaderNode): ShaderNode =>
+        mix(moonlit(c), c, paint).mul(this.light).add(c.mul(local));
+      // Lit windows at night: warm amber panes (85 %) or a dimmer cool white (15 %) by the window's variant, each pane
+      // with its own brightness; variants above 0.85 stay dark. Kept below the tone mapper's shoulder so panes stay
+      // amber instead of washing out to white.
+      let glow: ShaderNode = vec3(0, 0, 0);
+      if (windows) {
+        const mask: ShaderNode = texture(windows, atlasUv);
+        const variant = mask.g.div(0.85);
+        const brightness = float(0.9).add(variant.mul(7.3).fract().mul(0.4));
+        const tint = mix(vec3(1.0, 0.64, 0.27), vec3(0.62, 0.68, 0.8), step(0.85, variant));
+        const upright = select(flat, float(0), float(1));
+        glow = tint.mul(brightness).mul(mask.r).mul(step(mask.g, 0.85)).mul(windowGain).mul(upright);
+      }
+      if (!hd) {
+        const remap = step(15.5, index).mul(step(index, 31.5));
+        return isShadow.select(shadow, vec4(shade(paletteColour(index), remap).add(glow.mul(opaque)), opaque));
+      }
       const art: ShaderNode = texture(hd.color, atlasUv);
       const paint: ShaderNode = texture(hd.remap, atlasUv).r;
       // House paint was written as grey(i) = 255 - (i - 16) * 15 in sRGB; invert it to a fractional remap index and
@@ -148,7 +187,7 @@ export class SpriteLayer {
       const i0 = floor(remapIndex);
       const house = mix(paletteColour(i0), paletteColour(i0.add(1).min(31)), remapIndex.sub(i0));
       const colour = mix(art.rgb, house, paint);
-      return isShadow.select(shadow, vec4(colour.mul(this.light), art.a));
+      return isShadow.select(shadow, vec4(shade(colour, paint).add(glow), art.a));
     })();
 
     this.mesh = new InstancedMesh(new PlaneGeometry(1, 1), material, count);

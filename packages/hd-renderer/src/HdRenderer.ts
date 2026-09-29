@@ -2,20 +2,47 @@ import {
   ACESFilmicToneMapping,
   AgXToneMapping,
   Color,
+  DataTexture,
   NeutralToneMapping,
   PCFSoftShadowMap,
+  RedFormat,
   RenderPipeline,
   Scene,
+  UnsignedByteType,
+  Vector2,
   Vector3,
   WebGPURenderer,
+  type Texture,
   type ToneMapping,
 } from 'three/webgpu';
-import { float, length, pass, renderOutput, screenUV, smoothstep, uniform } from 'three/tsl';
+import { float, length, pass, renderOutput, screenUV, smoothstep, texture, uniform, vec4 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
-import type { RenderEvent, RenderState } from './contract';
+import {
+  DEFAULT_ATMOSPHERE,
+  DEFAULT_ATMOSPHERE_SETTINGS,
+  lightFieldScale,
+  lightFieldSize,
+  lightFieldTexture,
+  moonDesaturation,
+  moonNeutral,
+  night as nightNode,
+  rainAmount as rainNode,
+  referenceLevel,
+  sceneBrightness,
+  sceneLevel,
+  surfaceSize,
+  surfaceTexture,
+  windowGain,
+  type AtmosphereSettings,
+  type FrameAtmosphere,
+} from './atmosphere';
+import type { AtmosphereProfile, RenderEvent, RenderState } from './contract';
 import { EffectsLayer } from './effects';
-import { Lighting } from './lighting';
+import { EmitterLayer, type Emitter } from './emitters';
+import { LightField, type DynamicLight } from './lightField';
+import { Lighting, noonFlatLuminance } from './lighting';
+import { Mist, MIST_CAP } from './mist';
 import { ObjectLayer } from './objects';
 import { buildTerrain, type TerrainBuild } from './terrain';
 import { buildWater, type WaterUniforms } from './water';
@@ -41,6 +68,64 @@ const TONE_MAPPERS: Record<ToneMapper, ToneMapping> = {
   aces: ACESFilmicToneMapping,
 };
 
+/** Everything visible: the default visibility mask (no shroud). */
+const ALL_VISIBLE = new DataTexture(new Uint8Array([255]), 1, 1, RedFormat, UnsignedByteType);
+ALL_VISIBLE.needsUpdate = true;
+
+const smooth = (edge0: number, edge1: number, x: number): number => {
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+};
+
+/** Share of the moonlit term's saturation removed at full night (see moonDesaturation). */
+const NIGHT_DESATURATION = 0.3;
+/**
+ * Display toe lift at full night (encoded output, cool moonlit grey): out + lift x (1 - out / NIGHT_TOE)^2 below
+ * NIGHT_TOE. The tone mapper's toe crushes scene values below about 0.03 quadratically, so shadows and dark facades fell
+ * to 6-9 of 255 (5th luminance percentile); this raises them to about 12-15 (concept C: 18) and leaves mid-tones,
+ * their saturation and white untouched (a flat lift veiled wide night views in grey). Never under shroud.
+ */
+const NIGHT_BLACK_LIFT = [0.03, 0.034, 0.042] as const;
+const NIGHT_TOE = 0.3;
+
+/** Night weights over which lit windows fade in. */
+const WINDOW_NIGHT = [0.25, 0.85] as const;
+
+/** Diagnostics for screenshots and performance runs (window.__hd.stats() in the sandbox). */
+export interface HdStats {
+  backend: string;
+  exposure: number;
+  hour: number;
+  night: number;
+  nightLevel: number | null;
+  staticGain: number;
+  staticLights: number;
+  dynamicLights: { explosion: number; flash: number; kept: number };
+  lightFieldRenders: number;
+  emitters: number;
+  mist: number;
+  wet: number;
+  rain: number;
+  pointLights: number;
+  /** Scene light level relative to clear noon (rain streaks and smoke scale with it). */
+  sceneBrightness: number;
+  /** Lit-window and lamp-head strength (0 by day). */
+  windowGain: number;
+  lampGain: number;
+  dressing: Record<string, number>;
+  /**
+   * Interval between presented frames (ms): pacing, not cost. The sandbox's ?perf=1 loop drives frames faster than
+   * three's own animation loop advances its node frame, so not every interval re-renders every pass. Measure cost with
+   * benchmark() (scripts/gpubench.mjs).
+   */
+  frameMs: { median: number; p95: number; frames: number } | null;
+  /**
+   * Sum of per-pass GPU timestamp durations per sandbox frame (?perf=1). Unusable on Apple GPUs (hundreds of ms per
+   * frame: passes overlap, include queueing, and three keys its queries by its own frame counter); diagnostics only.
+   */
+  gpuTimestampMs: { median: number; p95: number; frames: number } | null;
+}
+
 /**
  * Consumes RenderState snapshots and draws the HD battlefield. It owns no game rules and never writes game state:
  * visual randomness, interpolation and effects live entirely on this side of the contract.
@@ -57,13 +142,32 @@ export class HdRenderer {
     shadows: true,
     antialias: true,
   };
-  private pipeline!: RenderPipeline;
+  /** Night presentation: map lights, HD lamps, windows, mist, night level (changeable at runtime). */
+  readonly atmosphere: AtmosphereSettings = { ...DEFAULT_ATMOSPHERE_SETTINGS };
+  private pipeline: RenderPipeline | undefined;
+  /** Nodes of the current pipeline that own render targets. */
+  private pipelineNodes: { dispose(): void }[] = [];
   private readonly bloomStrength = uniform(0.55);
+  private readonly blackLift = uniform(new Color(0, 0, 0));
   private readonly vignetteStrength = uniform(0.25);
   private readonly lighting: Lighting;
   private readonly objects = new ObjectLayer();
   /** HD effects; live views spawn into it from the game's own effect list. */
   readonly effects = new EffectsLayer();
+  /** Lamp heads and wet-ground reflections. */
+  readonly emitters = new EmitterLayer();
+  /** Every local light as irradiance on the ground; created in init() once the map size is known. */
+  lightField!: LightField;
+  private readonly mist = new Mist();
+  /** Whether the current pipeline composites the mist (rebuilt when the mist starts or stops). */
+  private mistInPipeline = false;
+  /**
+   * Per-cell visibility on the flat y = 0 plane (1 visible .. 0 black shroud), applied after the mist and before bloom
+   * so nothing under shroud (terrain, lights, mist, glow) shows through. Set by live views; everything visible
+   * otherwise.
+   */
+  private readonly visibility = texture(ALL_VISIBLE);
+  private readonly visibilitySize = uniform(new Vector2(1, 1));
   private terrain!: TerrainBuild;
   private water: { uniforms: WaterUniforms } | null = null;
   private rain!: RainSystem;
@@ -75,17 +179,48 @@ export class HdRenderer {
   private state: RenderState;
   private startTime = performance.now();
   private readonly shakeOffset = new Vector3();
+  private readonly trackTimestamp: boolean;
+  private readonly gpuTimes: number[] = [];
+  private frames = 0;
+  private resolvedFrames = 0;
+  private readonly frameIntervals: number[] = [];
+  private lastFrameAt = 0;
+  private resolving = false;
+  private staticGain = 0;
+  private readonly dynamicLights: DynamicLight[] = [];
+  private readonly dynamicEmitters: Emitter[] = [];
+  /** Reused per frame (no allocation per light). */
+  private readonly dynamicEmitterPool: (Emitter & {
+    glow: [number, number, number];
+    streak: [number, number, number];
+  })[] = [];
+  private readonly cameraRight = new Vector3();
+  private readonly cameraUp = new Vector3();
+  private readonly toCamera = new Vector3();
+  private readonly frameInfo: FrameAtmosphere = {
+    now: 0,
+    night: 0,
+    rain: 0,
+    wet: 0,
+    profile: DEFAULT_ATMOSPHERE,
+    settings: this.atmosphere,
+    cameraRight: new Vector3(1, 0, 0),
+    cameraUp: new Vector3(0, 1, 0),
+    toCamera: new Vector3(0, 1, 0),
+  };
 
   constructor(
     readonly canvas: HTMLCanvasElement,
     initial: RenderState,
-    options: { forceWebGL?: boolean; requiredLimits?: Record<string, number> } = {},
+    options: { forceWebGL?: boolean; requiredLimits?: Record<string, number>; trackTimestamp?: boolean } = {},
   ) {
     this.state = initial;
+    this.trackTimestamp = options.trackTimestamp ?? false;
     this.renderer = new WebGPURenderer({
       canvas,
       antialias: false,
       forceWebGL: options.forceWebGL ?? false,
+      trackTimestamp: this.trackTimestamp,
       ...(options.requiredLimits ? { requiredLimits: options.requiredLimits } : {}),
     });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -140,24 +275,65 @@ export class HdRenderer {
       this.scene.add(water.mesh);
     }
     this.rain = buildRain(this.bounds.width, this.bounds.height, this.terrain.heightTexture, this.waterY);
-    this.scene.add(this.terrain.mesh, this.lighting.root, this.effects.root, this.rain.object);
+    referenceLevel.value = this.lighting.referenceIrradiance();
+    this.lightField = new LightField(this.bounds.width, this.bounds.height, {
+      halfFloat: LightField.supportsHalfFloat(this.renderer),
+    });
+    this.effects.attachLightField(this.lightField);
+    if (world?.surfaceTexture) {
+      surfaceTexture.value = world.surfaceTexture;
+      surfaceSize.value.set(world.width, world.height);
+    }
+    this.scene.add(this.terrain.mesh, this.lighting.root, this.effects.root, this.rain.object, this.emitters.root);
+    world?.dressing?.attach({
+      scene: this.scene,
+      lightField: this.lightField,
+      emitters: this.emitters,
+      reference: this.lighting.referenceIrradiance(),
+    });
     this.buildPipeline();
     this.applySettings();
   }
 
+  /**
+   * Shroud (or any flat visibility mask) drawn on the ground plane y = 0: one texel per cell, R = 255 visible, 128
+   * fog, 0 black, linear-filtered; `width` x `height` cells. Null shows everything.
+   */
+  setVisibility(mask: Texture | null, width = 1, height = 1): void {
+    this.visibility.value = mask ?? ALL_VISIBLE;
+    this.visibilitySize.value.set(width, height);
+  }
+
   private buildPipeline(): void {
+    // Release the previous pipeline's render targets and output material before building the new one.
+    this.pipeline?.dispose();
+    for (const node of this.pipelineNodes) node.dispose();
     const scenePass = pass(this.scene, this.view.camera);
     const hdr = scenePass.getTextureNode('output');
-    const glow = bloom(hdr, 1, 0.45, 0.85);
+    const depth = scenePass.getTextureNode('depth');
+    const world = this.mist.worldPosition(depth, screenUV);
+    // Mist sits in the scene before bloom so lamp halos in it glow like the lamps themselves. With no mist the
+    // pipeline leaves it out entirely (frame() rebuilds it when the mist starts or stops).
+    this.mistInPipeline = this.mist.amount.value > 0;
+    const misted = this.mistInPipeline ? this.mist.apply(hdr, depth, world) : hdr;
+    // The shroud covers the mist and everything under it, and what it hides never feeds the bloom.
+    const visible = texture(this.visibility, this.mist.groundPlanePoint(world).div(this.visibilitySize)).r;
+    // Colour only: the canvas stays opaque, so shroud is black and not the page behind it.
+    const shown = vec4(misted.rgb.mul(visible), misted.a);
+    const glow = bloom(shown, 1, 0.45, 0.85);
     glow.strength = this.bloomStrength;
+    this.pipelineNodes = [scenePass, glow];
     const vignette = float(1).sub(
       smoothstep(0.45, 1.05, length(screenUV.sub(0.5).mul(1.6))).mul(this.vignetteStrength),
     );
-    const composite = hdr.add(glow).mul(vignette);
+    // Opaque output: the vignette darkens colour only (it used to scale alpha too, letting the page show in corners).
+    const composite = vec4(shown.rgb.add(glow.rgb.mul(visible)).mul(vignette), 1);
     this.pipeline = new RenderPipeline(this.renderer);
     // Anti-aliasing must run on the tone-mapped, display-referred image.
     this.pipeline.outputColorTransform = false;
-    const display = renderOutput(composite);
+    const output = renderOutput(composite);
+    const toe = float(1).sub(output.rgb.div(NIGHT_TOE)).max(0);
+    const display = vec4(output.rgb.add(this.blackLift.mul(visible).mul(toe.mul(toe))), 1);
     this.pipeline.outputNode = this.settings.antialias ? fxaa(display) : display;
   }
 
@@ -201,23 +377,42 @@ export class HdRenderer {
     this.view.resize(cssWidth, cssHeight);
   }
 
+  /** The profile the lighting follows: the map's (with any night-level override), none for the procedural sandbox. */
+  private profile(): AtmosphereProfile | null {
+    if (!this.world) return null;
+    const profile = this.state.map.atmosphere ?? DEFAULT_ATMOSPHERE;
+    const level = this.atmosphere.nightLevel;
+    return level === undefined ? profile : { ...profile, nightLevel: level };
+  }
+
   frame(deltaSeconds: number): void {
+    const started = performance.now();
+    if (this.lastFrameAt) {
+      this.frameIntervals.push(started - this.lastFrameAt);
+      if (this.frameIntervals.length > 600) this.frameIntervals.shift();
+    }
+    this.lastFrameAt = started;
     const env = this.state.environment;
     const raining = env.weather === 'rain' || env.weather === 'storm';
-    const rainAmount = raining ? env.weatherIntensity : 0;
+    // A storm is heavier rain (and wind); no lightning (decorative weather rule, docs/remaster/PLAN.md).
+    const rainAmount = raining ? Math.min(1, env.weatherIntensity * (env.weather === 'storm' ? 1.3 : 1)) : 0;
     // Surfaces wet quickly under rain and dry slowly after it stops.
     const wet = this.terrain.wetness;
     wet.value = raining
       ? Math.min(1, wet.value + deltaSeconds * 0.25 * rainAmount)
       : Math.max(0, wet.value - deltaSeconds * 0.02);
 
+    this.bindSharedTextures();
+    const profile = this.profile();
+    this.lighting.setProfile(profile);
     this.lighting.follow(this.view.target);
     this.lighting.update(env.timeOfDay, raining ? 0.35 + 0.5 * rainAmount : 0);
     const light = this.lighting.state;
+    const reference = this.lighting.referenceIrradiance();
     // Original maps are calibrated so flat ground at noon shows the tile art at its original brightness; other times
     // and weather scale from there. The procedural sandbox keeps its own per-key exposure.
     this.renderer.toneMappingExposure = this.world
-      ? (this.settings.exposure * Math.PI) / this.lighting.referenceIrradiance()
+      ? (this.settings.exposure * Math.PI) / reference
       : this.settings.exposure * light.exposure;
     if (this.water) {
       const w = this.water.uniforms;
@@ -231,6 +426,39 @@ export class HdRenderer {
     }
     this.objects.night.value = light.night;
 
+    // Shared atmosphere inputs (atmosphere.ts): scene light level, night, rain.
+    this.lighting.flatIrradianceColor(sceneLevel.value).multiplyScalar(1 / reference);
+    const level = sceneLevel.value;
+    sceneBrightness.value =
+      ((0.2126 * level.r + 0.7152 * level.g + 0.0722 * level.b) * reference) / noonFlatLuminance();
+    nightNode.value = light.night;
+    rainNode.value = rainAmount;
+    // Original maps only: the procedural sandbox keeps its own look.
+    const nightGrade = this.world ? light.night : 0;
+    moonDesaturation.value = NIGHT_DESATURATION * nightGrade;
+    const levelLuminance = 0.2126 * level.r + 0.7152 * level.g + 0.0722 * level.b;
+    moonNeutral.value.setRGB(
+      levelLuminance / Math.max(1e-4, level.r),
+      levelLuminance / Math.max(1e-4, level.g),
+      levelLuminance / Math.max(1e-4, level.b),
+    );
+    this.blackLift.value.setRGB(
+      NIGHT_BLACK_LIFT[0] * nightGrade,
+      NIGHT_BLACK_LIFT[1] * nightGrade,
+      NIGHT_BLACK_LIFT[2] * nightGrade,
+    );
+    this.staticGain = smooth(0.2, 0.8, light.night);
+    this.emitters.lampGain.value = smooth(0.3, 0.8, light.night);
+    windowGain.value = this.atmosphere.windows ? smooth(WINDOW_NIGHT[0], WINDOW_NIGHT[1], light.night) : 0;
+    this.emitters.wet.value = wet.value;
+    this.emitters.sync();
+    // Mist: none on a clear day, a trace in day rain, a thin veil at night (thicker in night rain). Capped.
+    const baseMist = raining
+      ? (1 - light.night) * 0.06 * rainAmount + light.night * (0.045 + 0.04 * rainAmount)
+      : 0.05 * light.night;
+    this.mist.amount.value = Math.min(MIST_CAP, baseMist * this.atmosphere.mist);
+    if (this.mist.amount.value > 0 !== this.mistInPipeline) this.buildPipeline();
+
     this.rain.intensity.value = rainAmount;
     this.rain.windX.value = Math.cos(env.windDirection) * env.windStrength * 0.4;
     this.rain.windZ.value = Math.sin(env.windDirection) * env.windStrength * 0.4;
@@ -243,21 +471,176 @@ export class HdRenderer {
     this.view.update();
     this.view.camera.position.add(this.shakeOffset);
     this.view.camera.updateMatrixWorld();
+    this.mist.update(this.view.camera);
 
-    const right = new Vector3().setFromMatrixColumn(this.view.camera.matrixWorld, 0);
-    const up = new Vector3().setFromMatrixColumn(this.view.camera.matrixWorld, 1);
-    this.effects.update(this.seconds(), right, up);
+    const now = this.seconds();
+    const right = this.cameraRight.setFromMatrixColumn(this.view.camera.matrixWorld, 0);
+    const up = this.cameraUp.setFromMatrixColumn(this.view.camera.matrixWorld, 1);
+    const toCamera = this.toCamera.setFromMatrixColumn(this.view.camera.matrixWorld, 2);
+    this.effects.update(now, right, up, toCamera);
+    this.emitters.cameraRight.value.copy(right);
+    this.emitters.cameraUp.value.copy(up);
+    this.emitters.toCamera.value.copy(toCamera);
     const sprites = this.world?.sprites;
     if (sprites) {
       sprites.cameraRight.value.copy(right);
       sprites.cameraUp.value.copy(up);
-      sprites.toCamera.value.setFromMatrixColumn(this.view.camera.matrixWorld, 2);
+      sprites.toCamera.value.copy(toCamera);
       // Unlit original art follows the scene's light level relative to the noon reference (1 = original look).
-      this.lighting.flatIrradianceColor(sprites.light.value).multiplyScalar(1 / this.lighting.referenceIrradiance());
+      sprites.light.value.copy(sceneLevel.value);
     }
     // Emissive light is not divided by pi like diffuse, so fill = irradiance * k / pi lands at k x albedo at noon.
     this.lighting.flatIrradianceColor(voxelFill.value).multiplyScalar(VOXEL_FILL / Math.PI);
-    this.pipeline.render();
+
+    const frame = this.frameInfo;
+    frame.now = now;
+    frame.night = light.night;
+    frame.rain = rainAmount;
+    frame.wet = wet.value;
+    frame.profile = profile ?? DEFAULT_ATMOSPHERE;
+    frame.cameraRight.copy(right);
+    frame.cameraUp.copy(up);
+    frame.toCamera.copy(toCamera);
+    this.world?.dressing?.update(frame);
+    this.lightField.update(now, this.renderer, this.staticGain);
+    this.mirrorDynamicEmitters(now);
+    this.pipeline!.render();
+    this.frames++;
+    if (this.trackTimestamp && this.frames % 2 === 0) void this.collectGpuTimes();
+  }
+
+  /**
+   * The light field and surface textures are module-level nodes every material samples; claim them for this renderer
+   * each frame, so two renderers alive at once (a live view replaced mid-load) never draw with the other's field.
+   */
+  private bindSharedTextures(): void {
+    lightFieldTexture.value = this.lightField.target.texture;
+    lightFieldSize.value.set(this.lightField.width, this.lightField.height);
+    lightFieldScale.value = this.lightField.encodeScale;
+    referenceLevel.value = this.lighting.referenceIrradiance();
+    const surface = this.world?.surfaceTexture;
+    if (surface) {
+      surfaceTexture.value = surface;
+      surfaceSize.value.set(this.world!.width, this.world!.height);
+    }
+  }
+
+  /** Fires and explosions also show as glows and wet reflections, mirrored from the light field. */
+  private mirrorDynamicEmitters(now: number): void {
+    const lights = this.lightField.dynamicLights(now, this.dynamicLights);
+    const pool = this.dynamicEmitterPool;
+    const out = this.dynamicEmitters;
+    out.length = 0;
+    const k = 1 / this.lighting.referenceIrradiance();
+    for (let i = 0; i < lights.length; i++) {
+      const l = lights[i]!;
+      const e = (pool[i] ??= { x: 0, y: 0, z: 0, head: 0, glow: [0, 0, 0], streak: [0, 0, 0] });
+      e.x = l.x;
+      e.y = Math.max(this.terrain.heightAt(l.x, l.z), this.waterY);
+      e.z = l.z;
+      // Fires show as flames: only their wet reflection is mirrored here. Explosions also get a glow at their heart.
+      const fire = l.kind === 'fire';
+      e.head = fire ? 0.5 : 0.8;
+      for (let c = 0; c < 3; c++) {
+        e.glow[c] = fire ? 0 : l.colour[c]! * k * 0.12;
+        e.streak[c] = l.colour[c]! * k * (fire ? 0.45 : 0.35);
+      }
+      out.push(e);
+    }
+    this.emitters.setDynamic(out);
+  }
+
+  /**
+   * Resolve GPU timestamps of every render pass since the last call and record the average GPU time per presented
+   * frame over that span (the sandbox drives frames itself, so three's own frame counter does not advance).
+   */
+  private async collectGpuTimes(): Promise<void> {
+    if (this.resolving) return;
+    this.resolving = true;
+    const frames = this.frames - this.resolvedFrames;
+    this.resolvedFrames = this.frames;
+    try {
+      await this.renderer.resolveTimestampsAsync('render');
+      const pool = (this.renderer.backend as { timestampQueryPool?: { render?: { timestamps?: Map<string, number> } } })
+        .timestampQueryPool?.render;
+      let total = 0;
+      for (const ms of pool?.timestamps?.values() ?? []) total += ms;
+      if (frames > 0 && total > 0) this.gpuTimes.push(total / frames);
+      if (this.gpuTimes.length > 600) this.gpuTimes.splice(0, this.gpuTimes.length - 600);
+    } catch {
+      // Timestamp queries unavailable: stats() reports gpuMs null.
+    } finally {
+      this.resolving = false;
+    }
+  }
+
+  stats(): HdStats {
+    const now = this.seconds();
+    const lf = this.lightField.stats(now);
+    const summary = (values: readonly number[]) => {
+      if (!values.length) return null;
+      const sorted = [...values].sort((a, b) => a - b);
+      const q = (f: number) => sorted[Math.min(sorted.length - 1, Math.floor(f * sorted.length))]!;
+      return { median: q(0.5), p95: q(0.95), frames: sorted.length };
+    };
+    let pointLights = 0;
+    this.scene.traverse((o) => {
+      if ((o as { isPointLight?: boolean }).isPointLight) pointLights++;
+    });
+    return {
+      backend: this.backend,
+      exposure: this.renderer.toneMappingExposure,
+      hour: this.state.environment.timeOfDay,
+      night: this.lighting.state.night,
+      nightLevel: this.lighting.nightLevel,
+      staticGain: this.staticGain,
+      staticLights: lf.static,
+      dynamicLights: { explosion: lf.explosion, flash: lf.flash, kept: lf.kept },
+      lightFieldRenders: this.lightField.renders,
+      emitters: this.emitters.staticEmitters,
+      mist: this.mist.amount.value,
+      wet: this.terrain.wetness.value,
+      rain: rainNode.value,
+      pointLights,
+      sceneBrightness: sceneBrightness.value,
+      windowGain: windowGain.value,
+      lampGain: this.emitters.lampGain.value,
+      dressing: this.world?.dressing?.stats() ?? {},
+      frameMs: summary(this.frameIntervals.slice(-300)),
+      gpuTimestampMs: summary(this.gpuTimes.slice(-300)),
+    };
+  }
+
+  /**
+   * GPU-bound cost of one frame in milliseconds (WebGPU only, else null): one frame() to apply the current state, then
+   * `frames` renders of the pipeline back to back, each with the node frame advanced so every pass really re-renders
+   * (three re-renders a pass once per node frame, and only its own animation loop advances it), then the wait for the
+   * GPU queue, divided by `frames`. Unlike frame intervals this measures neither vsync nor presentation, and unlike
+   * per-pass timestamps it does not over-count passes that overlap on tile-based GPUs. The effect clock keeps running,
+   * so particles and lights age as in a real frame.
+   */
+  async benchmark(frames = 10): Promise<number | null> {
+    const queue = (this.renderer.backend as { device?: { queue: { onSubmittedWorkDone(): Promise<void> } } }).device
+      ?.queue;
+    if (!queue) return null;
+    const nodeFrame = (this.renderer as unknown as { _nodes: { nodeFrame: { update(): void } } })._nodes.nodeFrame;
+    this.frame(1 / 60);
+    await queue.onSubmittedWorkDone();
+    const started = performance.now();
+    for (let i = 0; i < frames; i++) {
+      nodeFrame.update();
+      this.pipeline!.render();
+    }
+    await queue.onSubmittedWorkDone();
+    return (performance.now() - started) / frames;
+  }
+
+  /**
+   * Whether lit windows will show at the current hour (windowGain > 0), known before frame() runs: live views decide
+   * from it whether an atlas page's layer needs its window mask.
+   */
+  windowsWanted(): boolean {
+    return this.atmosphere.windows && this.lighting.nightAt(this.state.environment.timeOfDay) > WINDOW_NIGHT[0];
   }
 
   /** Ground point under a CSS-pixel position, for sandbox interaction. */

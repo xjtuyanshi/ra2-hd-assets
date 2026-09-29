@@ -1,7 +1,8 @@
 import { Color, DirectionalLight, HemisphereLight, Object3D, Vector3 } from 'three/webgpu';
+import type { AtmosphereProfile } from './contract';
 
 /** One key of the day cycle: sun/sky colours and intensities in linear space. */
-interface LightKey {
+export interface LightKey {
   hour: number;
   sun: Color;
   sunIntensity: number;
@@ -13,6 +14,8 @@ interface LightKey {
   hemiGround: Color;
   hemiIntensity: number;
   exposure: number;
+  /** 0 = day, 1 = night: drives the night dressing (lamps, windows, mist) and how a map profile adjusts the key. */
+  night: number;
 }
 
 const KEYS: LightKey[] = [
@@ -27,6 +30,7 @@ const KEYS: LightKey[] = [
     hemiGround: new Color(0.04, 0.045, 0.06),
     hemiIntensity: 0.95,
     exposure: 1.75,
+    night: 1,
   },
   {
     hour: 5.5,
@@ -39,6 +43,7 @@ const KEYS: LightKey[] = [
     hemiGround: new Color(0.2, 0.15, 0.12),
     hemiIntensity: 0.5,
     exposure: 1.2,
+    night: 0.667,
   },
   {
     hour: 8,
@@ -51,6 +56,7 @@ const KEYS: LightKey[] = [
     hemiGround: new Color(0.3, 0.26, 0.2),
     hemiIntensity: 0.9,
     exposure: 1.0,
+    night: 0,
   },
   {
     hour: 12,
@@ -63,6 +69,7 @@ const KEYS: LightKey[] = [
     hemiGround: new Color(0.32, 0.28, 0.22),
     hemiIntensity: 1.0,
     exposure: 1.0,
+    night: 0,
   },
   {
     hour: 16,
@@ -75,6 +82,7 @@ const KEYS: LightKey[] = [
     hemiGround: new Color(0.32, 0.26, 0.2),
     hemiIntensity: 0.9,
     exposure: 1.0,
+    night: 0,
   },
   {
     hour: 18.5,
@@ -87,6 +95,7 @@ const KEYS: LightKey[] = [
     hemiGround: new Color(0.2, 0.13, 0.1),
     hemiIntensity: 0.55,
     exposure: 1.15,
+    night: 0.333,
   },
   {
     hour: 21,
@@ -99,6 +108,7 @@ const KEYS: LightKey[] = [
     hemiGround: new Color(0.04, 0.045, 0.06),
     hemiIntensity: 0.95,
     exposure: 1.75,
+    night: 1,
   },
   {
     hour: 24,
@@ -111,8 +121,108 @@ const KEYS: LightKey[] = [
     hemiGround: new Color(0.04, 0.045, 0.06),
     hemiIntensity: 0.95,
     exposure: 1.75,
+    night: 1,
   },
 ];
+
+/** Moonlight and night sky are pulled 30 % towards this grey (luminance-matched) so night keeps the art readable. */
+const MOON_GREY = new Color(0.72, 0.74, 0.78);
+/**
+ * Moonlight tint (linear, used luminance-normalised): nights are cool whatever the map's day grade (concept C: a dark
+ * blue-grey base under warm lamps). A map authored as a night map adds its own [Lighting] tint on top; a day map's
+ * warm grade (XMP29U2: 1/0.8/0.68) is a daylight choice and never tints its moonlight.
+ */
+export const MOON_TINT = new Color(0.78, 0.86, 1.0);
+/** Overcast sun and sky colour (scaled to each key's sky luminance). */
+const OVERCAST_GREY = new Color(0.55, 0.58, 0.62);
+/**
+ * Flat-ground brightness lost per unit overcast by day (overcast = 0.35 + 0.5 x rain). 0.08 keeps day rain at about
+ * 0.94 of clear light, so a rainy afternoon stays above 0.85 of clear noon's frame brightness with wet ground.
+ */
+const OVERCAST_DIMMING = 0.08;
+/**
+ * Neutral tone mapping subtracts about 0.04 from mid-tones and bends everything below 0.08 into a quadratic toe, so
+ * ground lit at nightLevel x noon in linear light would display about 30 % darker than that relative to noon
+ * (measured on RiverRam: 0.21 instead of 0.30). The night keys aim this much higher so the displayed night ground
+ * keeps the profile's night level.
+ */
+export const NIGHT_TONE_COMPENSATION = 1.15;
+/**
+ * Night rain keeps this fraction of the clear night level: the overcast grey is less blue than moonlight, so the same
+ * luminance reads a little brighter on the warm original palettes; wet paving darkens on its own (terrain.ts).
+ */
+const NIGHT_RAIN = 0.95;
+/** Night rain keeps at least this fraction of noon on flat ground. */
+const NIGHT_RAIN_FLOOR = 0.26;
+
+const luminanceOf = (c: Color): number => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+
+/**
+ * Height (y) of the unit sun direction Lighting.update builds for a key elevation: the elevation is floored at 28° and
+ * the classic RA2 light comes from screen upper-left, slightly towards the camera, so y is a little below sin(e).
+ */
+export function sunHeight(elevationDegrees: number): number {
+  const e = (Math.max(28, elevationDegrees) * Math.PI) / 180;
+  const x = -Math.cos(e);
+  const z = -0.35 * Math.cos(e);
+  return Math.sin(e) / Math.hypot(x, Math.sin(e), z);
+}
+
+/** Luminance of flat-ground irradiance at clear noon (what "noon" shows; the exposure reference is channel-averaged). */
+export function noonFlatLuminance(): number {
+  const noon = KEYS.find((key) => key.hour === 12)!;
+  return (
+    luminanceOf(noon.sun) * noon.sunIntensity * sunHeight(noon.elevation) +
+    luminanceOf(noon.hemiSky) * noon.hemiIntensity
+  );
+}
+/** `grey` scaled to the luminance of `like`. */
+const matchedGrey = (grey: Color, like: Color): Color =>
+  grey.clone().multiplyScalar(luminanceOf(like) / Math.max(1e-6, luminanceOf(grey)));
+
+/**
+ * Light keys adjusted to a map's atmosphere profile. Day keys (night = 0) are the very same objects, so daytime
+ * lighting is unchanged bit for bit. Night-weighted keys get:
+ *   - moon and night sky desaturated 30 % towards a luminance-matched grey (the original palettes stay readable);
+ *   - the cool MOON_TINT, times the map's [Lighting] tint (square root) when the map was built as a night map, both
+ *     normalised to luminance 1 and applied in proportion to the key's night weight;
+ *   - intensities so flat unlit ground receives nightLevel x noon, split 40 % moon / 60 % sky (full-night keys), or
+ *     at least that much (dawn/dusk keys, which keep their own balance).
+ */
+export function profileKeys(profile: AtmosphereProfile): LightKey[] {
+  const target = profile.nightLevel * NIGHT_TONE_COMPENSATION * noonFlatLuminance();
+  const moon = MOON_TINT.clone();
+  if (profile.kind === 'night')
+    moon.multiply(new Color(Math.sqrt(profile.tint[0]), Math.sqrt(profile.tint[1]), Math.sqrt(profile.tint[2])));
+  moon.multiplyScalar(1 / Math.max(1e-6, luminanceOf(moon)));
+  return KEYS.map((key) => {
+    const n = key.night;
+    if (n === 0) return key;
+    const tint = new Color(1, 1, 1).lerp(moon, n);
+    const sun = key.sun
+      .clone()
+      .lerp(matchedGrey(MOON_GREY, key.sun), 0.3 * n)
+      .multiply(tint);
+    const hemiSky = key.hemiSky
+      .clone()
+      .lerp(matchedGrey(MOON_GREY, key.hemiSky), 0.3 * n)
+      .multiply(tint);
+    const sinElevation = sunHeight(key.elevation);
+    let sunIntensity: number;
+    let hemiIntensity: number;
+    if (n >= 1) {
+      sunIntensity = (0.4 * target) / (luminanceOf(sun) * sinElevation);
+      hemiIntensity = (0.6 * target) / luminanceOf(hemiSky);
+    } else {
+      const flat = luminanceOf(sun) * key.sunIntensity * sinElevation + luminanceOf(hemiSky) * key.hemiIntensity;
+      // Dawn and dusk stay brighter than the night they lead into (up to 1.67x at dusk's 0.333).
+      const scale = Math.max(1, (target * (2 - n)) / flat);
+      sunIntensity = key.sunIntensity * scale;
+      hemiIntensity = key.hemiIntensity * scale;
+    }
+    return { ...key, sun, hemiSky, sunIntensity, hemiIntensity };
+  });
+}
 
 export interface LightingState {
   sunDirection: Vector3;
@@ -192,13 +302,54 @@ export class Lighting {
   }
   private reference?: number;
 
-  /** Blend day-cycle keys; weather darkens and desaturates the key light. */
-  update(hour: number, overcast: number): void {
+  private keys: LightKey[] = KEYS;
+  private profile: AtmosphereProfile | null = null;
+  private readonly grey = new Color();
+  private readonly halfGrey = new Color();
+
+  /**
+   * Stage the day cycle for a map's atmosphere profile (see profileKeys), or null for the procedural sandbox's
+   * original keys and weather. Cheap when the profile did not change.
+   */
+  setProfile(profile: AtmosphereProfile | null): void {
+    const same =
+      profile === this.profile ||
+      (!!profile &&
+        !!this.profile &&
+        profile.kind === this.profile.kind &&
+        profile.nightLevel === this.profile.nightLevel &&
+        profile.tint.every((v, i) => v === this.profile!.tint[i]));
+    if (same) return;
+    this.profile = profile ? { ...profile, tint: [...profile.tint] } : null;
+    this.keys = profile ? profileKeys(profile) : KEYS;
+  }
+
+  /** Night weight (0 day .. 1 night) of the day cycle at `hour`, without changing any state. */
+  nightAt(hour: number): number {
+    const keys = this.keys;
     const h = ((hour % 24) + 24) % 24;
     let i = 0;
-    while (i < KEYS.length - 2 && KEYS[i + 1]!.hour <= h) i++;
-    const a = KEYS[i]!;
-    const b = KEYS[i + 1]!;
+    while (i < keys.length - 2 && keys[i + 1]!.hour <= h) i++;
+    const a = keys[i]!;
+    const b = keys[i + 1]!;
+    const t = (h - a.hour) / (b.hour - a.hour);
+    return Math.min(1, Math.max(0, a.night + (b.night - a.night) * t));
+  }
+
+  /** Luminance of the flat-ground irradiance of the current sun and sky. */
+  private flatLuminance(sunColor: Color, sunIntensity: number, hemiColor: Color, hemiIntensity: number): number {
+    const height = Math.max(0, this.state.sunDirection.y);
+    return luminanceOf(sunColor) * sunIntensity * height + luminanceOf(hemiColor) * hemiIntensity;
+  }
+
+  /** Blend day-cycle keys; weather darkens and desaturates the key light. */
+  update(hour: number, overcast: number): void {
+    const keys = this.keys;
+    const h = ((hour % 24) + 24) % 24;
+    let i = 0;
+    while (i < keys.length - 2 && keys[i + 1]!.hour <= h) i++;
+    const a = keys[i]!;
+    const b = keys[i + 1]!;
     const t = (h - a.hour) / (b.hour - a.hour);
     const lerp = (x: number, y: number) => x + (y - x) * t;
 
@@ -214,6 +365,10 @@ export class Lighting {
       )
       .normalize();
     this.sun.position.copy(this.sun.target.position).addScaledVector(dir, 80);
+    if (this.profile) {
+      this.updateProfiled(a, b, t, overcast);
+      return;
+    }
 
     const grey = new Color(0.55, 0.58, 0.62);
     this.state.sunColor
@@ -239,7 +394,52 @@ export class Lighting {
     this.hemi.intensity = lerp(a.hemiIntensity, b.hemiIntensity) * (1 + overcast * 0.15);
     this.state.ambient.copy(this.hemi.color).multiplyScalar(this.hemi.intensity * 0.5);
     this.state.exposure = lerp(a.exposure, b.exposure);
-    // Moonlight keys use sunIntensity 0.45, dusk 1.2, day 2.6+: map that onto 1 (night) .. 0 (day).
+    // Moonlight keys use sunIntensity 0.6, dusk 1.2, day 2.6+: map that onto 1 (night) .. 0 (day). At the keys this
+    // equals their explicit `night`; the procedural sandbox keeps this curve between keys.
     this.state.night = Math.min(1, Math.max(0, 1 - (lerp(a.sunIntensity, b.sunIntensity) - 0.6) / 0.9));
+  }
+
+  /**
+   * Map profile path. Overcast moves light from the sun to the sky instead of darkening the frame: the overcast grey is
+   * scaled to the key's own sky luminance (night rain stays blue-grey), the sun loses 60 % x overcast, and the sky is
+   * solved so flat ground keeps (1 - OVERCAST_DIMMING x overcast) of its clear brightness by day and NIGHT_RAIN of it at
+   * night (never below NIGHT_RAIN_FLOOR of noon).
+   */
+  private updateProfiled(a: LightKey, b: LightKey, t: number, overcast: number): void {
+    const lerp = (x: number, y: number) => x + (y - x) * t;
+    const night = lerp(a.night, b.night);
+    const sunColor = this.state.sunColor.copy(a.sun).lerp(b.sun, t);
+    let sunIntensity = lerp(a.sunIntensity, b.sunIntensity);
+    this.state.skyZenith.copy(a.skyZenith).lerp(b.skyZenith, t);
+    this.state.skyHorizon.copy(a.skyHorizon).lerp(b.skyHorizon, t);
+    const hemiColor = this.hemi.color.copy(a.hemiSky).lerp(b.hemiSky, t);
+    this.hemi.groundColor.copy(a.hemiGround).lerp(b.hemiGround, t);
+    let hemiIntensity = lerp(a.hemiIntensity, b.hemiIntensity);
+    if (overcast > 0) {
+      const clearFlat = this.flatLuminance(sunColor, sunIntensity, hemiColor, hemiIntensity);
+      // Scratch colours: this runs every frame in rain.
+      const grey = this.grey.copy(OVERCAST_GREY).multiplyScalar(luminanceOf(hemiColor) / luminanceOf(OVERCAST_GREY));
+      sunColor.lerp(grey, overcast * 0.7);
+      sunIntensity *= 1 - overcast * 0.6;
+      this.state.skyZenith.lerp(this.halfGrey.copy(grey).multiplyScalar(0.5), overcast * 0.8);
+      this.state.skyHorizon.lerp(grey, overcast * 0.8);
+      hemiColor.lerp(grey, overcast * 0.5);
+      const factor = 1 - OVERCAST_DIMMING * overcast + (NIGHT_RAIN - (1 - OVERCAST_DIMMING * overcast)) * night;
+      const noonFlat = noonFlatLuminance();
+      const target = Math.max(clearFlat * factor, Math.min(clearFlat, NIGHT_RAIN_FLOOR * noonFlat) * night);
+      const sunFlat = this.flatLuminance(sunColor, sunIntensity, hemiColor, 0);
+      hemiIntensity = Math.max(0, (target - sunFlat) / Math.max(1e-6, luminanceOf(hemiColor)));
+    }
+    this.sun.color.copy(sunColor);
+    this.sun.intensity = sunIntensity;
+    this.hemi.intensity = hemiIntensity;
+    this.state.ambient.copy(this.hemi.color).multiplyScalar(this.hemi.intensity * 0.5);
+    this.state.exposure = lerp(a.exposure, b.exposure);
+    this.state.night = Math.min(1, Math.max(0, night));
+  }
+
+  /** The active profile's night level (unlit ground at night relative to noon), or null for the legacy keys. */
+  get nightLevel(): number | null {
+    return this.profile?.nightLevel ?? null;
   }
 }

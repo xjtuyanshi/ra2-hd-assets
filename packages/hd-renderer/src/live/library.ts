@@ -1,7 +1,16 @@
 import { NearestFilter, NoColorSpace, TextureLoader, type Texture } from 'three/webgpu';
 import type { LibraryType, TypeLibrary } from '../../../ra2-assets/src/library';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
-import { addPalette, loadHdAtlas, readPalettePng, type HdAtlasRef, type Ra2Cache } from '../ra2/cache';
+import {
+  addPalette,
+  fetchOptionalJson,
+  loadHdAtlas,
+  loadMaskTexture,
+  readPalettePng,
+  type HdAtlasRef,
+  type Ra2Cache,
+  type WindowsIndex,
+} from '../ra2/cache';
 
 /** Palette keys of the library live next to the map cache's own under this prefix. */
 export const LIBRARY_PALETTE_PREFIX = 'lib:';
@@ -15,10 +24,13 @@ export class LiveLibrary {
   private readonly pages = new Map<number, Texture | 'loading' | 'failed'>();
   private readonly voxels = new Map<string, VoxelModel | 'loading' | 'failed'>();
   private readonly hdPages = new Map<number, { color: Texture; remap: Texture } | 'loading' | 'failed'>();
+  private readonly windowPages = new Map<number, Texture | 'loading' | 'failed'>();
 
   private constructor(
     readonly base: string,
     readonly library: TypeLibrary,
+    /** Lit-window masks per atlas page (pnpm hd:lights -- --library <theater>), when extracted. */
+    readonly windows: WindowsIndex | null,
   ) {}
 
   /** Null when the theater has no extracted library (pnpm hd:library), in which case the map cache is used alone. */
@@ -29,7 +41,41 @@ export class LiveLibrary {
     const library = (await response.json()) as TypeLibrary;
     for (const [key, file] of Object.entries(library.palettes))
       addPalette(cache, LIBRARY_PALETTE_PREFIX + key, await readPalettePng(`${root}/${file}`));
-    return new LiveLibrary(root, library);
+    const windows = await fetchOptionalJson<WindowsIndex>(`${root}/windows.json`);
+    return new LiveLibrary(root, library, windows);
+  }
+
+  /** Whether the page has a lit-window mask (loaded or loading). */
+  hasWindowsPage(index: number): boolean {
+    return !!this.windows?.pages?.[String(index)] && this.windowPages.get(index) !== 'failed';
+  }
+
+  /** The page's lit-window mask, null while it loads or when the page has none. */
+  windowsPage(index: number): Texture | null {
+    const file = this.windows?.pages?.[String(index)];
+    if (!file) return null;
+    const entry = this.windowPages.get(index);
+    if (entry === undefined) {
+      this.windowPages.set(index, 'loading');
+      void loadMaskTexture(`${this.base}/${file}`).then((texture) => this.windowPages.set(index, texture ?? 'failed'));
+      return null;
+    }
+    return typeof entry === 'string' ? null : entry;
+  }
+
+  /** Lit window pixels of a building sprite's frame (0 when none or unknown). */
+  litWindows(sprite: string, frame: number): number {
+    return this.windows?.frames[sprite]?.[String(frame)]?.lit ?? 0;
+  }
+
+  /**
+   * Lit-pane columns of a building sprite's frame as [screen x from the draw point, panes] (see windowPaneColumns),
+   * empty when none or unknown.
+   */
+  windowColumns(sprite: string, frame: number): [number, number][] {
+    const art = this.library.sprites[sprite]?.frames[frame];
+    const columns = this.windows?.frames[sprite]?.[String(frame)]?.columns;
+    return art && columns ? columns.map(([x, panes]) => [art.offset[0] + x, panes]) : [];
   }
 
   type(id: string): LibraryType | undefined {
