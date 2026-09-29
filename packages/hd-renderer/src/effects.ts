@@ -34,6 +34,7 @@ const SPARKS = 1024;
 const SCORCHES = 96;
 const SHOCKWAVES = 48;
 const LIGHTS = 8;
+const GLOWS = 4096;
 
 /** A ring buffer of instanced particles whose per-instance data lives in GPU attributes; only spawns touch the CPU. */
 class ParticlePool {
@@ -87,6 +88,8 @@ export class EffectsLayer {
   private readonly sparks: ParticlePool;
   private readonly scorch: ParticlePool;
   private readonly shock: ParticlePool;
+  /** Coloured glow points (beams, bolts): colour rides in the velocity attribute, which glows do not use. */
+  private readonly glow: ParticlePool;
   private readonly lights: { light: PointLight; born: number; peak: number }[] = [];
   private nextLight = 0;
   /** Seconds of camera shake still pending, scaled by explosion size. */
@@ -192,7 +195,21 @@ export class EffectsLayer {
       })();
     });
 
-    for (const pool of [this.scorch, this.shock, this.smoke, this.fire, this.sparks]) this.root.add(pool.mesh);
+    this.glow = new ParticlePool(GLOWS, quad, additive(), (pool) => {
+      const { age, life, size, origin, velocity } = particleInputs(pool, this.now);
+      const t = clamp(age.div(life), 0, 1);
+      pool.material.positionNode = billboard(origin, size, this.cameraRight, this.cameraUp);
+      pool.material.colorNode = Fn(() => {
+        const d = length(uv().sub(0.5).mul(2));
+        const core = smoothstep(1.0, 0.0, d);
+        const hot = smoothstep(0.35, 0.0, d);
+        const tint = mix(velocity, vec3(1, 1, 1), hot.mul(0.7));
+        return vec4(tint.mul(3.5), core.mul(float(1).sub(t)).mul(t.lessThan(1).select(float(1), float(0))));
+      })();
+    });
+
+    for (const pool of [this.scorch, this.shock, this.smoke, this.fire, this.sparks, this.glow])
+      this.root.add(pool.mesh);
     for (let i = 0; i < LIGHTS; i++) {
       const light = new PointLight(new Color(1.0, 0.5, 0.2), 0, 6, 2);
       this.root.add(light);
@@ -269,6 +286,30 @@ export class EffectsLayer {
       0.3 * scale,
     );
     this.fire.spawn(now, at.clone().add(jitter), new Vector3(), 0.55 * scale * (0.7 + Math.random() * 0.6), 0.45);
+  }
+
+  /**
+   * One frame of an energy beam from `from` to `to` (linear RGB colour): a straight laser, or for `bolt` a jagged,
+   * flickering lightning path regenerated every call. Drawn as dense glow points, with a light at the impact end.
+   */
+  beam(now: number, from: Vector3, to: Vector3, colour: Vector3, bolt: boolean): void {
+    const length = from.distanceTo(to);
+    const steps = Math.max(6, Math.min(80, Math.round(length * 18)));
+    const side = new Vector3(to.z - from.z, 0, from.x - to.x).normalize();
+    let offset = 0;
+    const at = new Vector3();
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      at.lerpVectors(from, to, t);
+      if (bolt) {
+        // A random walk pinned at both ends reads as lightning.
+        offset += (Math.random() - 0.5) * 0.12;
+        offset *= Math.sin(Math.PI * t) > 0.05 ? 1 : 0;
+        at.addScaledVector(side, offset * Math.sin(Math.PI * t)).add(new Vector3(0, (Math.random() - 0.5) * 0.06, 0));
+      }
+      this.glow.spawn(now, at, colour, bolt ? 0.1 : 0.08, bolt ? 0.07 : 0.05);
+    }
+    this.flashLight(now, to, bolt ? 5 : 3);
   }
 
   /** A glowing tracer sample along a projectile's flight. */

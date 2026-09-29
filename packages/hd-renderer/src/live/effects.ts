@@ -37,10 +37,20 @@ export interface LiveParticleSystem {
   z: number;
 }
 
+/** An energy beam the engine is drawing this frame (laser, prism, electric/psychic bolt), lepton endpoints. */
+export interface LiveBeam {
+  source: { x: number; y: number; z: number };
+  target: { x: number; y: number; z: number };
+  kind: 'laser' | 'bolt';
+  /** sRGB colour 0..255. */
+  colour: [number, number, number];
+}
+
 export interface LiveEffects {
   anims: LiveAnim[];
   bullets: LiveBullet[];
   particleSystems: LiveParticleSystem[];
+  beams?: LiveBeam[];
 }
 
 type AnimLook = { kind: 'explosion' | 'muzzle' | 'impact' | 'fire' | 'smoke'; scale: number } | { kind: 'ignore' };
@@ -81,6 +91,7 @@ export class LiveEffectsDriver {
   private readonly anims = new Map<string, Tracked>();
   private readonly systems = new Map<string, Tracked>();
   private bullets: LiveBullet[] = [];
+  private beams: LiveBeam[] = [];
   private generation = 0;
 
   constructor(
@@ -119,6 +130,7 @@ export class LiveEffectsDriver {
     }
     for (const [key, tracked] of this.systems) if (tracked.lastSeen !== generation) this.systems.delete(key);
     this.bullets = effects.bullets.filter((bullet) => !this.hidden(bullet.x, bullet.y, bullet.z));
+    this.beams = (effects.beams ?? []).filter((beam) => !this.hidden(beam.target.x, beam.target.y, beam.target.z));
   }
 
   /** Per presented frame: continuous emitters (fire, smoke, tracers). */
@@ -127,6 +139,12 @@ export class LiveEffectsDriver {
     for (const tracked of this.systems.values()) this.emit(tracked, now, wind, 0.6);
     const at = new Vector3();
     for (const bullet of this.bullets) this.effects.tracer(now, world(bullet, at));
+    const from = new Vector3();
+    const colour = new Vector3();
+    for (const beam of this.beams) {
+      colour.set(...(beam.colour.map((c) => Math.pow(c / 255, 2.2)) as [number, number, number]));
+      this.effects.beam(now, world(beam.source, from), world(beam.target, at), colour, beam.kind === 'bolt');
+    }
   }
 
   private spawnOnce(tracked: Tracked, now: number, wind: Vector3): void {
