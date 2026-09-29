@@ -91,18 +91,20 @@ the same art (`gglite.shp`).
   with the full 15.6-cell radius the seven `INGALITE` washes on XMP29U2 lit the park lawn to 0.77 of noon, a floodlit
   field, while the moon alone gives 0.26; there each source is a pool (0.45 x `LightVisibility`, the engine falloff
   squared via `engineLightDelta`'s `falloffPower`, 0.8 of the engine's strength): about 3.1x the moonlit ground at the
-  post, 1.5x three cells out, nothing past seven. Day maps show no light-source light by day yet (XMP29U2's `INGALITE`
-  would add about 57 % display brightness at each post at noon; needs a faithfulness decision). No night-map cache has
-  been rendered yet, so the night-map staging is unverified on screen.
+  post, 1.5x three cells out, nothing past seven. By day the light sources are part of the map's day grade instead
+  (next item). No night-map cache has been rendered yet, so the night-map staging is unverified on screen.
 - The night keys aim 1.15x above the night level (`NIGHT_TONE_COMPENSATION` in `packages/hd-renderer/src/lighting.ts`)
   to offset the Neutral tone mapper's toe, so the displayed ground keeps the intended fraction of noon. Moonlight is
   cool (`MOON_TINT`); only maps built as night maps tint it with their own `[Lighting]`, a day map's grade stays a
   daylight choice.
 - Objects take the light at half saturation (`OBJECT_TINT`), a compromise with the engine's untinted object lighting.
-- By day the renderer does not yet apply a map's own `[Lighting]` tint, `Level` or light-source washes, which the
-  engine applies at all times (XMP29U2's 1/0.8/0.68 warm cast and its `INGALITE` washes over the park show in the
-  original by day). `mapLightMultipliers` in `packages/ra2-assets/src/iso.ts` is not used by the renderer. A per-map
-  day tint and wash behind a flag, with a new day baseline, is the follow-up.
+- By day the renderer applies the engine's cell light itself (`packages/hd-renderer/src/ra2/mapLighting.ts`): per
+  cell `engineCellLight` with the map's `[Lighting]` and light sources, multiplied into the palette colours in their
+  own sRGB scale, level x tint for terrain-class art and the level only for objects, as the engine draws them at all
+  times. Checked on XMP29U2 against same-moment captures: terrain 1.00/0.81/0.66 of the palette per channel, 1.345x
+  next to the `INGALITE` posts (1.340 predicted). Its weight fades with the night weight on day maps and is 0 on maps
+  staged as night or dusk, whose light the night presentation above derives from the same data (one owner at a
+  time). `mapLightMultipliers` in `packages/ra2-assets/src/iso.ts` (offline previews) uses the same formula.
 
 ## Open questions
 

@@ -128,23 +128,38 @@ describe('mapSizeCells', () => {
 });
 
 describe('map lighting', () => {
+  // RiverRam: Ground is not zero, so the engine's Ambient - Ground + Level * z differs from an Ambient + Ground reading.
   const l = { ambient: 0.9, red: 1, green: 0.9, blue: 0.9, ground: 0.05, level: 0.008 };
 
-  it('lights full-class art by (ambient + ground + level * (z - 1)) * RGB', () => {
-    const [r1, g1, b1] = mapLightMultipliers(l, 1);
-    expect(r1).toBeCloseTo(0.95);
-    expect(g1).toBeCloseTo(0.855);
-    expect(b1).toBeCloseTo(0.855);
-    expect(mapLightMultipliers(l, 0)[0]).toBeCloseTo(0.942);
-    expect(mapLightMultipliers(l, 11, 'full')[0]).toBeCloseTo(1.03);
+  it('lights full-class art by the engine cell formula (Ambient - Ground + Level * z) x normalised RGB', () => {
+    const [r4, g4, b4] = mapLightMultipliers(l, 4);
+    expect(r4).toBeCloseTo(0.882, 6);
+    expect(g4).toBeCloseTo(0.882 * 0.9, 6);
+    expect(b4).toBeCloseTo(0.882 * 0.9, 6);
+    expect(mapLightMultipliers(l, 0)[0]).toBeCloseTo(0.85, 6);
+    expect(mapLightMultipliers(l, 11, 'full')[0]).toBeCloseTo(0.938, 6);
     expect(mapLightMultipliers({ ambient: 1, red: 1, green: 1, blue: 1, ground: 0, level: 0 }, 7)).toEqual([1, 1, 1]);
+    // XMP29U2 "The Alamo": a warm tint, no height term.
+    const alamo = mapLightMultipliers({ ambient: 1, red: 1, green: 0.8, blue: 0.68, ground: 0, level: 0 }, 2);
+    [1, 0.8, 0.68].forEach((v, i) => expect(alamo[i]).toBeCloseTo(v, 6));
+  });
+
+  it('truncates like the engine and normalises the tint by its largest channel', () => {
+    // 0.0089 reads as 8 per-mille; a tint above 1 raises the intensity instead of the channel.
+    const [r, g, b] = mapLightMultipliers(
+      { ambient: 0.8, red: 0.75, green: 0.75, blue: 1.5, ground: 0, level: 0.0089 },
+      5,
+    );
+    expect(b).toBeCloseTo((0.8 + 0.04) * 1.5, 6);
+    expect(r).toBeCloseTo((0.8 + 0.04) * 0.75, 6);
+    expect(g).toBeCloseTo(r, 6);
   });
 
   it('skips the RGB tint for ambient-class art and all lighting for unlit art', () => {
-    const [r, g, b] = mapLightMultipliers(l, 1, 'ambient');
-    expect(r).toBeCloseTo(0.95);
-    expect(g).toBeCloseTo(0.95);
-    expect(b).toBeCloseTo(0.95);
+    const [r, g, b] = mapLightMultipliers(l, 4, 'ambient');
+    expect(r).toBeCloseTo(0.882, 6);
+    expect(g).toBeCloseTo(0.882, 6);
+    expect(b).toBeCloseTo(0.882, 6);
     expect(mapLightMultipliers(l, 5, 'none')).toEqual([1, 1, 1]);
   });
 });

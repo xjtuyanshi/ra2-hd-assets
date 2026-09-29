@@ -1,26 +1,48 @@
-import { BoxGeometry, Color, Group, Mesh, MeshStandardNodeMaterial, Object3D, Vector3 } from 'three/webgpu';
+import {
+  BoxGeometry,
+  Color,
+  Group,
+  Mesh,
+  MeshStandardNodeMaterial,
+  Object3D,
+  type Texture,
+  Vector3,
+} from 'three/webgpu';
 import { mapAtmosphere, medianHeight, sidecarAtmosphere } from '../../../ra2-assets/src/lights';
 import type { AtmosphereSettings } from '../atmosphere';
 import { HOUSE_COLORS, RENDER_STATE_VERSION, type RenderState, type Weather } from '../contract';
 import { HdRenderer } from '../HdRenderer';
+import type { LibraryAnimLayer, LibraryType } from '../../../ra2-assets/src/library';
+import { NORMALIZED_RATE_FACTOR, animRateFrames } from '../../../ra2-assets/src/effects';
 import type { SourceLight } from '../ra2/mapLights';
 import type { WindowBuilding } from '../ra2/nightDressing';
-import type { LibraryType } from '../../../ra2-assets/src/library';
 import { sequenceFrame } from '../../../ra2-assets/src/art';
+import type { MapObject } from '../../../ra2-assets/src/manifest';
+import type { TheaterId } from '../../../ra2-assets/src/theater';
 import { addHousePalettes, paletteFor, ra2Screen, screenToCell, type Ra2Cache } from '../ra2/cache';
-import { SpriteLayer, cardPush, type SpriteInstance } from '../ra2/sprites';
-import { buildVoxelGeometry, createVoxelMaterial, instantiateVoxel, type VoxelGeometry } from '../ra2/voxels';
-import { loadRa2World, shareSpriteUniforms, type HdWorld } from '../ra2/world';
+import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from '../ra2/sprites';
+import { loadRa2World, type HdWorld } from '../ra2/world';
 import { LEVEL_HEIGHT } from '../world';
-import { LiveEffectsDriver, type LiveEffects } from './effects';
+import { EffectArt, type ResolvedAnim } from './effectArt';
+import { EffectSpriteLayer, animAlpha, type EffectInstance } from './effectSprites';
+import { LiveEffectsDriver, smokeOnVehicle, type LiveAnim, type LiveEffects } from './effects';
+import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
+import { Projectiles } from './projectiles';
+import { shpUnitPose, shpUnitFrame } from './shpUnits';
 import { ShroudLayer, type ShroudCells } from './shroud';
+import { VoxelUnits, type VoxelUnit } from './voxelUnits';
 
 /**
  * Live view: draws a running original match (read from game memory by the host page) with the HD renderer, framed
  * exactly like the game's own tactical view. The host polls snapshots and pushes them here; this module never talks to
- * the game. Static map content (terrain, trees, ore, smudges) comes from the local HD cache; every building, vehicle,
- * infantry and aircraft comes from the snapshots.
+ * the game. Static map content (terrain, trees) comes from the local HD cache; ore, walls and smudges start from the
+ * cache and follow the engine's cells when the host reports them; every building, vehicle, infantry and aircraft, and
+ * every effect, comes from the snapshots.
+ *
+ * Everything that animates is clocked on the engine's logic frames (snapshot.frame), not on the wall clock, so HD art
+ * keeps the original's timing at any game speed. Fields marked "bridge" are optional: without them the view falls back
+ * to documented estimates (see docs/remaster/HD_BRIDGE.md, "Bridge fields").
  */
 
 export type LiveKind = 'building' | 'vehicle' | 'infantry' | 'aircraft';
@@ -42,12 +64,33 @@ export interface LiveObject {
   turretFacingRaw?: number;
   health: number;
   isSelected: boolean;
+  /** Bridge (H2): building construction state, and the build-up frame the engine shows. */
+  buildState?: 'building' | 'selling' | 'done';
+  buildupFrame?: number;
+  /** Bridge (H2): infantry sequence name (e.g. "Walk", "Die1", "FireUp") and frame within it. */
+  infantrySequence?: string;
+  sequenceFrame?: number;
 }
 
 export interface LiveHouse {
   index: number;
   /** The game's colour scheme index for this house. */
   colorIndex: number;
+  /**
+   * Bridge (H1): a civilian house (the map's Neutral and Special houses, HouseClass::PlainName "Neutral"/"Special").
+   * Without it `civilianHouses` infers them from what they own.
+   */
+  civilian?: boolean;
+}
+
+/** Bridge (H3): map cells whose overlay or smudge changed (or every cell when `full`). */
+export interface LiveCells {
+  full: boolean;
+  /** [x, y, overlay index (0xff none), overlay frame, smudge index (-1 none), smudge frame]. */
+  cells: [number, number, number, number, number, number][];
+  /** Rules [OverlayTypes] / [SmudgeTypes] ids by index, when the host resolves them. */
+  overlayTypes?: string[];
+  smudgeTypes?: string[];
 }
 
 export interface LiveSnapshot {
@@ -59,14 +102,16 @@ export interface LiveSnapshot {
   objects: LiveObject[];
   /** The local player's per-cell visibility (see ShroudLayer), when the host can read it. */
   shroud?: ShroudCells | null;
-  /** The engine's live effects (explosions, muzzle flashes, fire, smoke, projectiles), when the host reads them. */
+  /** The engine's live effects (anims, projectiles, particle systems, beams), when the host reads them. */
   effects?: LiveEffects | null;
+  /** Bridge (H3): runtime overlay/smudge cells. */
+  cells?: LiveCells | null;
 }
 
 export interface LiveViewOptions {
   /** URL of the map's HD cache directory (manifest.json inside). */
   mapBase: string;
-  /** URL of the type library root (holding <theater>/library.json), for art of everything players build. */
+  /** URL of the type library root (holding <theater>/library.json and common/effects/), for players' art. */
   libraryBase?: string;
   forceWebGL?: boolean;
   /** 16 remap colours (palette indices 16..31) for a colour scheme index; defaults to ramps of HOUSE_COLORS. */
@@ -75,6 +120,34 @@ export interface LiveViewOptions {
   timeOfDay?: number;
   weather?: Weather;
   weatherIntensity?: number;
+  /**
+   * Development: draw a neutral grey box (never a house colour) for objects without art. Defaults to the page's
+   * `?hd-debug=placeholders`.
+   */
+  debugPlaceholders?: boolean;
+}
+
+export interface LiveDiagnostics {
+  /** Objects tracked without any art to draw (drawn as nothing). */
+  placeholders: number;
+  /** Rules types that have no art at all (each warned about once). */
+  missingTypes: string[];
+  /** Objects whose library art is still loading. */
+  pendingArt: number;
+  /** Buildings whose voxel turret (TurretAnimIsVoxel) has no model, and whose model is still loading. */
+  missingTurrets: number;
+  pendingTurrets: number;
+  /** Native effect cards drawn this frame, anims in the list without art, and their types. */
+  effectCards: number;
+  effectsWithoutArt: number;
+  effectTypesWithoutArt: string[];
+  /** Measured logic frames per second. */
+  logicFps: number;
+  /**
+   * False while the host has reported no overlay/smudge cells (bridge H3): ore, walls and craters are then the map's
+   * initial state, not the match's.
+   */
+  cellsFromEngine: boolean;
 }
 
 /** Runtime presentation changes (no reload): time, weather and the night dressing switches. */
@@ -92,6 +165,24 @@ const LEPTONS_PER_CELL = 256;
 const LEPTONS_PER_LEVEL = 104;
 /** A logic-frame move longer than this (cells) is a teleport (chrono, reinforcement) and is not interpolated. */
 const TELEPORT_CELLS = 3;
+/** An object that moved within this many logic frames is walking (its walk frames play). */
+const WALK_FRAMES = 2;
+/** Buildings first seen after this many logic frames of the view were just placed (their build-up plays). */
+const BUILDUP_GRACE_FRAMES = 60;
+/**
+ * Build-up length without the bridge's build state (H2): rules [General] BuildupTime=0.06 min is 54 logic frames at
+ * 900 per minute, spread over the make anim with a whole number of logic frames per frame (floor(54 / frames), at least
+ * one), stretched like a Normalized anim (NORMALIZED_RATE_FACTOR) only for buildings whose art says Normalized=yes.
+ * Measured on an MCV deploy with the guest frame counter read around each screenshot: the construction yard (29-frame
+ * GACNSTMK, art not Normalized) went from its first make frame to the finished building in 23 to 35 logic frames,
+ * i.e. one logic frame per make frame; a normalized power plant (GAPOWRMK) placed shortly before frame 32064 had
+ * finished by about 32155. H2 gives the engine's own frame.
+ */
+const BUILDUP_LOGIC_FRAMES = 54;
+export function buildupStepFrames(makeFrames: number, normalized = false): number {
+  const plain = Math.max(1, Math.floor(BUILDUP_LOGIC_FRAMES / Math.max(1, makeFrames)));
+  return normalized ? Math.max(1, Math.round(plain * NORMALIZED_RATE_FACTOR)) : plain;
+}
 
 interface Timed {
   snapshot: LiveSnapshot;
@@ -104,15 +195,24 @@ interface Visual {
   paletteKey: string;
   root: Object3D;
   turret?: Group;
-  /** How it is drawn: a 3D voxel model, sprites from the map cache or the type library, or a stand-in block. */
+  /** How it is drawn: a 3D voxel model, sprites from the map cache or the type library, or nothing (no art). */
   mode: 'voxel' | 'map-sprite' | 'library-sprite' | 'placeholder';
   /** Map-cache sprite id (mode 'map-sprite'). */
   sprite?: string;
   libraryType?: LibraryType;
   /** Library art still loading: the visual is rebuilt once it arrives. */
   pending?: boolean;
-  /** When the object last changed position (ms), to tell walking infantry from standing. */
-  lastMove?: number;
+  /** Logic frame the object was first seen on, and when it last changed position. */
+  firstFrame: number;
+  lastMoveFrame?: number;
+  /** Logic frame of the object's last shot (bridge fire events), for firing frames. */
+  firedFrame?: number;
+  /** Logic frame its health first read 0 (infantry death fallback). */
+  deadFrame?: number;
+  /** A building's voxel turret (library turretVoxel), once its model has loaded. */
+  buildingTurret?: VoxelUnit;
+  /** Whether the building's turret model is drawn, still loading or missing (diagnostics). */
+  turretState?: 'ready' | 'loading' | 'missing';
 }
 
 /** Interpolated engine pose: leptons and a facing in radians. */
@@ -123,40 +223,184 @@ interface Pose {
   facing: number;
 }
 
+/**
+ * A map cell's sprite (overlay, smudge) with its lighting class (MapObject.lighting), for sprite layers that light by
+ * class; layers without map lighting ignore it.
+ */
+type CellSprite = SpriteInstance & { lighting?: MapObject['lighting'] };
+
 /** Sprite instances per atlas: 'map' for the map cache's atlas, page numbers for type library pages. */
 type SpriteBatch = Map<'map' | number, SpriteInstance[]>;
+
+/**
+ * A sprite instance with its object light: ra2/sprites.ts multiplies the art by `light` (SpriteInstance.light, 1 when
+ * absent) where the sprite layer supports it.
+ */
+type ObjectSprite = SpriteInstance & { light?: number };
+
+/**
+ * Extra object light of SHP art on top of the map's: rules [AudioVisual] ExtraInfantryLight / ExtraUnitLight /
+ * ExtraAircraftLight (0.2 in YR) for infantry, SHP vehicles and aircraft; buildings get none (the rules have no
+ * building value). Same-moment XMP29U2 captures, screen colour over palette colour on the engine's framebuffer: player
+ * and AI infantry 1.16-1.29x, while the player's construction yard sits at 0.96x next to civilian buildings at
+ * 0.96-1.01x. Brighter buildings elsewhere on that map (a construction yard at 1.25x) stand near lamp posts: map
+ * light sources, not object light.
+ */
+export function objectLight(kind: LiveKind): number {
+  if (kind === 'infantry') return 1 + EXTRA_LIGHT.infantry;
+  if (kind === 'aircraft') return 1 + EXTRA_LIGHT.aircraft;
+  if (kind === 'vehicle') return 1 + EXTRA_LIGHT.unit;
+  return 1;
+}
+
+/**
+ * Houses that are civilian: the bridge's flag where given; otherwise houses that own buildings none of which players
+ * build (no make anim). Players own at least one buildable building once their base stands and none before it (an MCV
+ * is a vehicle), so they never qualify; a player left with nothing but captured tech buildings would. Without the type
+ * library nothing can be inferred and no house counts as civilian.
+ */
+export function civilianHouses(
+  snapshot: Pick<LiveSnapshot, 'houses' | 'objects'>,
+  buildable: ((type: string) => boolean | undefined) | null,
+): Set<number> {
+  const out = new Set<number>();
+  const flagged = new Set<number>();
+  for (const house of snapshot.houses)
+    if (house.civilian !== undefined) {
+      flagged.add(house.index);
+      if (house.civilian) out.add(house.index);
+    }
+  if (!buildable) return out;
+  const owners = new Set<number>();
+  const builders = new Set<number>();
+  for (const object of snapshot.objects) {
+    if (object.kind !== 'building' || object.owner < 0 || flagged.has(object.owner)) continue;
+    owners.add(object.owner);
+    if (buildable(object.type)) builders.add(object.owner);
+  }
+  for (const owner of owners) if (!builders.has(owner)) out.add(owner);
+  return out;
+}
+
+const CAPTURABLE = new Set(CAPTURABLE_BUILDINGS);
+const NORMALIZED = new Set(NORMALIZED_BUILDINGS);
+
+/** Anims every battle shows (explosions, impacts, muzzle flashes, trail smoke, fires): their pages are preloaded. */
+const COMBAT_ANIMS = /^(TWLT|S_|EXPLO|GUNFIRE|PIFF|MGUN|VTMUZZLE|SMOKEY|FIRE0)/;
+
+/**
+ * Whether a building layer stands still on its first frame although the fallback would play it. Capturable tech
+ * buildings (oil derrick, airport, tech power plant ...) owned by a civilian house keep their powered layers (art
+ * <key>Powered, default yes) still until a player captures them: in every reader dump CAOILD_A and CAAIRP_A only ever
+ * showed frame 0 under the Neutral house, while their unpowered flames (CAOILD_F, CAAIRP_F) and the civilian flag
+ * CAUSFGL_A (not capturable) cycle.
+ */
+export function layerIdle(layer: Pick<LibraryAnimLayer, 'powered'>, type: string, civilianOwner: boolean): boolean {
+  return civilianOwner && layer.powered !== false && CAPTURABLE.has(type);
+}
+
+/**
+ * World units a building's voxel turret is pulled towards the camera beyond its body card's own push: about its half
+ * depth, so the part of the turret behind its pivot still draws over the body (the engine draws it after the body).
+ */
+const TURRET_DEPTH = 0.45;
 
 /** Live sprite instances (buildings: body, bib, shadow, anim layers). */
 const LIVE_SPRITE_CAPACITY = 4096;
 /** Engine rule (rules [AudioVisual] ConditionYellow): at or below half health a building shows its damaged frame. */
 const CONDITION_YELLOW = 0.5;
 
-/** Placeholder sizes (world units) for types whose art is not in the cache yet. */
+/** Stand-in sizes (world units) for the development placeholder of objects without art. */
 const PLACEHOLDER: Record<LiveKind, [number, number, number]> = {
   building: [0.9, 0.55, 0.9],
   vehicle: [0.55, 0.25, 0.38],
   infantry: [0.14, 0.3, 0.14],
   aircraft: [0.6, 0.12, 0.6],
 };
+/** The development placeholder is neutral grey at 40 % size: it must never read as a house-coloured unit. */
+const DEBUG_PLACEHOLDER_COLOUR = 0x808080;
+const DEBUG_PLACEHOLDER_SCALE = 0.4;
+
+/**
+ * Building layers the fallback draws (without the bridge's building anim list): the always-on ones. ActiveAnim and
+ * IdleAnim always; ActiveAnimTwo..Four too, except on ore storage buildings (refineries, silos), where they are the
+ * house's storage level (an idle NAREFN's native list holds only NAREFNL1, run3) while on other buildings they run
+ * constantly (CAOILD_F, CAAIRP_F and NACNST_C are in every native list). Production, special, super-weapon and
+ * low-power layers need engine state and stay off.
+ */
+export function fallbackLayer(layer: Pick<LibraryAnimLayer, 'key'>, storesOre: boolean): boolean {
+  if (layer.key === 'ActiveAnim' || layer.key === 'IdleAnim') return true;
+  return !storesOre && /^ActiveAnim(Two|Three|Four)$/.test(layer.key);
+}
+
+/** Refinery-like layer set (a numbered ActiveAnim series such as NAREFNL1..L4), for when the rules flag is unknown. */
+export function looksLikeStorage(layers: readonly Pick<LibraryAnimLayer, 'key' | 'sprite'>[]): boolean {
+  const series = layers.filter((l) => /^ActiveAnim(Two|Three|Four)?$/.test(l.key)).map((l) => l.sprite);
+  return series.length > 1 && series.every((s, i) => new RegExp(`${i + 1}$`).test(s));
+}
+
+/**
+ * Stage of a building layer at logic frame `frame` without the bridge: the anim's own step length (animRateFrames from
+ * art Rate=/Normalized=, the sidecar's value when known) over its loop. Returns the SHP frame.
+ */
+export function layerFrame(
+  layer: Pick<LibraryAnimLayer, 'anim'>,
+  frames: number,
+  frame: number,
+  rateFrames?: number,
+  normalized = false,
+): number {
+  const first = Math.min(frames - 1, Math.max(0, layer.anim.loopStart ?? layer.anim.start ?? 0));
+  const last = Math.min(frames, Math.max(first + 1, layer.anim.loopEnd ?? layer.anim.end ?? frames));
+  const step = Math.floor(frame / Math.max(1, rateFrames ?? animRateFrames(layer.anim.rate, normalized)));
+  return first + (step % (last - first));
+}
 
 export class LiveView {
   private previous: Timed | null = null;
   private current: Timed | null = null;
   private readonly visuals = new Map<number, Visual>();
   private readonly root = new Group();
-  private readonly voxelMaterial = createVoxelMaterial();
-  private readonly geometries = new Map<string, VoxelGeometry[]>();
+  private readonly voxelUnits: VoxelUnits;
   private readonly placeholderGeometry = new BoxGeometry(1, 1, 1);
-  private readonly placeholderMaterials = new Map<string, MeshStandardNodeMaterial>();
+  private placeholderMaterial: MeshStandardNodeMaterial | null = null;
   private readonly housePalettes = new Set<number>();
+  private readonly houseColour = new Map<number, number>();
   private readonly sprites: SpriteLayer;
   private readonly pageLayers = new Map<number, { layer: SpriteLayer; windows: boolean }>();
   private readonly shroud: ShroudLayer;
   private readonly effectDriver: LiveEffectsDriver;
+  private readonly effectArt: EffectArt | null;
+  private readonly effectSprites: EffectSpriteLayer | null;
+  private readonly projectiles: Projectiles | null;
+  /** Map overlays and smudges (ore, walls, craters), owned here so runtime cell changes can replace them. */
+  private readonly cellLayer: SpriteLayer;
+  private readonly cellObjects = new Map<number, MapObject[]>();
+  private cellsDirty = true;
+  /** Whether the host has reported engine cells (bridge H3); without them ore and walls stay as the map started. */
+  private cellsFromEngine = false;
+  private warnedCells = false;
   private readonly wind = new Vector3(Math.cos(0.6), 0, Math.sin(0.6)).multiplyScalar(0.3 * 0.8);
+  private readonly warnedTypes = new Set<string>();
   private viewWidth = 800;
   private viewHeight = 600;
   private lastRender = performance.now();
+  private firstFrame: number | null = null;
+  private effectStats = { drawn: 0, missing: 0 };
+  /** Civilian houses of the newest snapshot (see civilianHouses). */
+  private civilian = new Set<number>();
+  /**
+   * The newest snapshot's building anims (bridge flag buildingAnim) by the cell they stand on and by the object they
+   * are attached to, with their list index; null when the host flags none (the fallback layers are drawn then).
+   * Built once per snapshot, read by every building on every presented frame.
+   */
+  private buildingAnims: {
+    cells: Map<number, [number, LiveAnim][]>;
+    attached: Map<number, [number, LiveAnim][]>;
+  } | null = null;
+  /** Snapshot whose effect cards are on screen, and whether some art was still loading when they were built. */
+  private effectsFor: Timed | null = null;
+  private effectsPending = true;
   /**
    * Identity of the light-emitting and window-lit building sets last handed to the night dressing. Null until the
    * first snapshot, which always replaces the sidecar's map-placed sources (even when it has none).
@@ -175,9 +419,46 @@ export class LiveView {
   ) {
     this.root.name = 'live-objects';
     hd.scene.add(this.root);
+    this.voxelUnits = new VoxelUnits(hd, world, cache, options.libraryBase);
+    // Atlas pages go to the GPU as decoded bitmaps (no main-thread repack of their 16.7 M pixels).
+    const upload = (texture: Texture) => hd.renderer.initTexture(texture);
+    if (library) library.uploadPage = upload;
     this.shroud = new ShroudLayer(world.width, world.height);
-    hd.setVisibility(this.shroud.texture, world.width, world.height);
-    this.effectDriver = new LiveEffectsDriver(hd.effects, (x, y, z) => this.shroud.isLocationShrouded(x, y, z));
+    // The shroud darkens in the renderer's post pass, after the mist and before bloom (see ShroudLayer).
+    hd.setVisibility(this.shroud.mask);
+    const base = options.libraryBase?.replace(/\/$/, '');
+    this.effectArt = base
+      ? new EffectArt(`${base}/common/effects`, cache, cache.manifest.theater as TheaterId, !!library)
+      : null;
+    if (this.effectArt) this.effectArt.uploadPage = upload;
+    // The pages of the common combat anims and smoke particles load up front, the rest on first use.
+    void this.effectArt
+      ?.load()
+      .then(() =>
+        this.effectArt?.preload(COMBAT_ANIMS, [...new Set(Object.values(SMOKE_SYSTEMS).map((r) => r.particle))]),
+      );
+    this.effectSprites = this.effectArt
+      ? new EffectSpriteLayer(
+          cache,
+          (page) => this.effectArt!.pageState(page),
+          (page) => this.effectArt!.release(page),
+        )
+      : null;
+    if (this.effectSprites) this.root.add(this.effectSprites.root);
+    this.projectiles = this.effectArt
+      ? new Projectiles(this.effectArt, this.voxelUnits, this.root, (owner) => this.unitPalette(owner))
+      : null;
+    this.effectDriver = new LiveEffectsDriver(
+      hd.effects,
+      (x, y, z) => this.shroud.isLocationShrouded(x, y, z),
+      (type) => !!this.effectArt?.bullet(type),
+    );
+    this.effectDriver.artWidth = (type) => {
+      const w = this.effectArt?.anim(type)?.art.visW;
+      return w ? w / (60 / Math.SQRT2) : undefined;
+    };
+    // Smoke, dust and soot are lit like the original art: share the sprite layer's light level.
+    if (world.sprites) hd.effects.sceneLight.value = world.sprites.light.value;
     this.sprites = new SpriteLayer(
       cache,
       [],
@@ -189,12 +470,20 @@ export class LiveView {
     this.sprites.mesh.name = 'live-sprites';
     this.root.add(this.sprites.mesh);
     this.shareSpriteUniforms(this.sprites);
+    // Room for the map's own cells (each may add a shadow) plus as many again for cells the engine adds (bridge H3).
+    const mapCells = cache.manifest.objects.filter((o) => o.kind === 'overlay' || o.kind === 'smudge').length;
+    this.cellLayer = new SpriteLayer(cache, [], Math.max(4096, mapCells * 4), undefined, cache.spriteAtlasHd);
+    this.cellLayer.mesh.name = 'live-cells';
+    this.root.add(this.cellLayer.mesh);
+    this.shareSpriteUniforms(this.cellLayer);
+    if (this.effectSprites) this.shareSpriteUniforms(this.effectSprites);
+    for (const object of cache.manifest.objects)
+      if (object.kind === 'overlay' || object.kind === 'smudge') this.cellList(object.x, object.y).push(object);
   }
 
   static async create(canvas: HTMLCanvasElement, options: LiveViewOptions): Promise<LiveView> {
-    const world = await loadRa2World(options.mapBase, {
-      includeObject: (object) => object.kind === 'tree' || object.kind === 'overlay' || object.kind === 'smudge',
-    });
+    // Only trees are static: overlays and smudges change during a match and are drawn by the view (cellLayer).
+    const world = await loadRa2World(options.mapBase, { includeObject: (object) => object.kind === 'tree' });
     const cache = world.cache!;
     // The theater's type library (art for everything players can build), when it has been extracted.
     const library = options.libraryBase
@@ -238,7 +527,11 @@ export class LiveView {
     // The original shows no vignette; keep the frame edge faithful to the game's own view.
     hd.settings.vignette = 0;
     hd.applySettings();
-    return new LiveView(hd, world, cache, options, library, state);
+    const debug =
+      options.debugPlaceholders ??
+      new URLSearchParams(globalThis.location?.search ?? '').get('hd-debug')?.split(',').includes('placeholders') ??
+      false;
+    return new LiveView(hd, world, cache, { ...options, debugPlaceholders: debug }, library, state);
   }
 
   /** Change time, weather or the night dressing at runtime (no reload). */
@@ -276,11 +569,31 @@ export class LiveView {
       current.snapshot.view?.y === snapshot.view?.y
     )
       return;
+    this.firstFrame ??= snapshot.frame;
     this.previous = current;
     this.current = { snapshot, at, byUid: new Map(snapshot.objects.map((o) => [o.uid, o])) };
     for (const house of snapshot.houses) this.ensureHouse(house.colorIndex);
+    this.houseColour.clear();
+    for (const house of snapshot.houses) this.houseColour.set(house.index, house.colorIndex);
+    const library = this.library;
+    this.civilian = civilianHouses(snapshot, library ? (type) => !!library.type(type)?.building?.buildup : null);
+    this.buildingAnims = indexBuildingAnims(snapshot.effects?.anims);
     if (snapshot.shroud) this.shroud.update(snapshot.shroud);
-    if (snapshot.effects) this.effectDriver.push(snapshot.effects, this.hd.seconds(), this.wind);
+    this.trackMotion(snapshot, current?.snapshot ?? null);
+    // A damaged vehicle's smoke system sits on the vehicle (see smokeUnlimited).
+    const vehicles = snapshot.objects.filter((o) => o.kind === 'vehicle');
+    this.effectDriver.vehicleAt = (x, y, z) => smokeOnVehicle(vehicles, x, y, z);
+    if (snapshot.effects) this.effectDriver.push(snapshot.effects, snapshot.frame, this.hd.seconds(), this.wind);
+    if (snapshot.cells) {
+      this.cellsFromEngine = true;
+      this.applyCells(snapshot.cells);
+    } else if (!this.cellsFromEngine && !this.warnedCells) {
+      this.warnedCells = true;
+      console.warn(
+        '[HD] the host reports no overlay/smudge cells (bridge H3): ore, walls and craters show the map as it started ' +
+          '(harvested ore stays, walls built in the match are missing). See docs/remaster/HD_BRIDGE.md.',
+      );
+    }
     this.updateNightSources(snapshot);
   }
 
@@ -380,7 +693,13 @@ export class LiveView {
       const alpha = previous ? Math.min(1, Math.max(0, (now - current.at) / interval)) : 1;
       this.applyCamera(previous?.snapshot.view ?? null, current.snapshot.view, alpha);
       this.applyObjects(previous, current, alpha);
+      // Effect cards change with the logic frame only: rebuilt per snapshot (and while art is still loading).
+      if (this.effectsFor !== current || this.effectsPending) {
+        this.effectsFor = current;
+        this.applyEffects(current.snapshot);
+      }
     }
+    if (this.cellsDirty) this.flushCells();
     this.effectDriver.frame(this.hd.seconds(), this.wind);
     this.hd.frame(dt);
   }
@@ -389,6 +708,33 @@ export class LiveView {
     this.hd.renderer.setAnimationLoop(null);
     this.hd.renderer.dispose();
     this.visuals.clear();
+  }
+
+  /** What the view could not draw (a healthy match reports no placeholders and no effects without art). */
+  diagnostics(): LiveDiagnostics {
+    let placeholders = 0;
+    let pendingArt = 0;
+    let missingTurrets = 0;
+    let pendingTurrets = 0;
+    for (const visual of this.visuals.values()) {
+      if (visual.turretState === 'missing') missingTurrets++;
+      else if (visual.turretState === 'loading') pendingTurrets++;
+      if (visual.mode !== 'placeholder') continue;
+      if (visual.pending) pendingArt++;
+      else placeholders++;
+    }
+    return {
+      placeholders,
+      missingTypes: [...this.warnedTypes].sort(),
+      pendingArt,
+      missingTurrets,
+      pendingTurrets,
+      effectCards: this.effectStats.drawn,
+      effectsWithoutArt: this.effectStats.missing,
+      effectTypesWithoutArt: [...this.effectDriver.unknownTypes].sort(),
+      logicFps: Math.round(this.effectDriver.logicFps * 10) / 10,
+      cellsFromEngine: this.cellsFromEngine,
+    };
   }
 
   private applyCamera(from: LiveSnapshot['view'], to: LiveSnapshot['view'], alpha: number): void {
@@ -401,15 +747,29 @@ export class LiveView {
     this.hd.view.target.set(cx, 0, cy);
   }
 
+  /** Logic-frame bookkeeping per object: first appearance, last move, last shot, death. */
+  private trackMotion(snapshot: LiveSnapshot, previous: LiveSnapshot | null): void {
+    const before = previous ? new Map(previous.objects.map((o) => [o.uid, o])) : null;
+    const fired = new Map((snapshot.effects?.fireEvents ?? []).map((e) => [e.uid, e.frame]));
+    for (const object of snapshot.objects) {
+      const visual = this.visuals.get(object.uid);
+      if (!visual) continue;
+      const last = before?.get(object.uid);
+      if (last && (last.x !== object.x || last.y !== object.y)) visual.lastMoveFrame = snapshot.frame;
+      const shot = fired.get(object.uid);
+      if (shot !== undefined) visual.firedFrame = shot;
+      if (object.health <= 0) visual.deadFrame ??= snapshot.frame;
+    }
+  }
+
   private applyObjects(previous: Timed | null, current: Timed, alpha: number): void {
-    const now = performance.now();
     const alive = new Set<number>();
-    const houses = new Map(current.snapshot.houses.map((h) => [h.index, h.colorIndex]));
+    const frame = current.snapshot.frame;
     const batch: SpriteBatch = new Map();
     for (const object of current.snapshot.objects) {
       alive.add(object.uid);
-      const colorIndex = houses.get(object.owner) ?? -1;
-      const visual = this.visualFor(object, colorIndex);
+      const colorIndex = this.houseColour.get(object.owner) ?? -1;
+      const visual = this.visualFor(object, colorIndex, frame);
       // Anything standing under black shroud stays hidden, exactly as in the original (no peeking at enemy bases).
       // InvisibleInGame types (lamp-post dummies such as INGALITE) are never drawn, with or without a type library.
       const hidden =
@@ -430,33 +790,36 @@ export class LiveView {
         z: lerp(from.z, object.z, t),
         facing: lerpAngle16(from.facingRaw, object.facingRaw, t),
       };
-      if (before && (before.x !== object.x || before.y !== object.y)) visual.lastMove = now;
+      if (visual.mode === 'placeholder') {
+        visual.root.position.set(
+          pose.x / LEPTONS_PER_CELL,
+          (pose.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT,
+          pose.y / LEPTONS_PER_CELL,
+        );
+        continue;
+      }
       if (visual.mode === 'map-sprite') {
         this.mapBuildingSprites(object, visual, batch);
         continue;
       }
       if (visual.mode === 'library-sprite') {
-        if (object.kind === 'building') this.libraryBuildingSprites(object, visual, batch, now);
-        else this.libraryInfantrySprites(pose, visual, batch, now);
+        if (object.kind === 'building') {
+          const standing = this.libraryBuildingSprites(object, visual, batch, current.snapshot);
+          // A building's turret aims with its PrimaryFacing (the reader's facingRaw): recorded sentry guns turned it
+          // (5793 .. 28312) while their SecondaryFacing (turretFacingRaw) stayed 0.
+          this.buildingTurret(object, visual, standing ? pose.facing : null);
+        } else if (object.kind === 'infantry') this.libraryInfantrySprites(object, pose, visual, batch, frame);
+        else this.libraryShpUnitSprites(object, pose, visual, batch, frame);
         continue;
       }
-      visual.root.position.set(
-        pose.x / LEPTONS_PER_CELL,
-        (pose.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT,
-        pose.y / LEPTONS_PER_CELL,
-      );
-      if (object.kind === 'building') continue;
-      // Engine facing 0 = north (world -z), clockwise; the model's nose is local +x. The turret yaws relative to the
-      // body.
-      visual.root.rotation.y = Math.PI / 2 - pose.facing;
-      if (visual.turret) {
-        const turret = lerpAngle16(
-          from.turretFacingRaw ?? from.facingRaw,
-          object.turretFacingRaw ?? object.facingRaw,
-          t,
-        );
-        visual.turret.rotation.y = pose.facing - turret;
+      const unit = { root: visual.root as Group, turret: visual.turret };
+      // Buildings are never turned (facing pi/2 is the identity rotation).
+      if (object.kind === 'building') {
+        this.voxelUnits.pose(unit, { ...pose, facing: Math.PI / 2 }, null);
+        continue;
       }
+      const turret = lerpAngle16(from.turretFacingRaw ?? from.facingRaw, object.turretFacingRaw ?? object.facingRaw, t);
+      this.voxelUnits.pose(unit, pose, turret);
     }
     for (const [uid, visual] of this.visuals) {
       if (alive.has(uid)) continue;
@@ -466,18 +829,91 @@ export class LiveView {
     this.flushSprites(batch);
   }
 
-  /** Hand each atlas its instances; library pages get their sprite layer when their texture has loaded. */
+  /** Native effect art: anims, smoke particles, projectiles and debris, on the logic frame of the newest snapshot. */
+  private applyEffects(snapshot: LiveSnapshot): void {
+    this.effectsPending = false;
+    if (!this.effectArt || !this.effectSprites) return;
+    const instances: EffectInstance[] = [];
+    this.effectStats = this.effectDriver.cards(
+      this.effectArt,
+      (resolved, owner) => this.animPalette(resolved, owner),
+      instances,
+    );
+    this.effectDriver.smokeCards(this.effectArt, instances);
+    const effects = snapshot.effects;
+    if (effects && this.projectiles)
+      this.projectiles.update(
+        effects.bullets,
+        effects.voxelAnims ?? [],
+        (x, y, z) => this.shroud.isLocationShrouded(x, y, z),
+        instances,
+      );
+    if (effects) this.particleCards(effects, instances);
+    // Rebuild on later frames too while the sidecar or an atlas page is still loading (pages that failed are settled).
+    const complete = this.effectSprites.setInstances(instances, this.hd.seconds());
+    this.effectsPending = (!this.effectArt.ready && !this.effectArt.failed) || !complete;
+  }
+
+  /** Particles the host reports one by one (bridge): their ParticleType art. */
+  private particleCards(effects: LiveEffects, out: EffectInstance[]): void {
+    for (const system of effects.particleSystems) {
+      for (const particle of system.particles ?? []) {
+        if (!particle.type || this.shroud.isLocationShrouded(particle.x, particle.y, particle.z)) continue;
+        const found = this.effectArt!.particle(particle.type);
+        if (!found) continue;
+        const frame = found.sprite.frames[(particle.frame ?? 0) % found.sprite.frames.length];
+        if (!frame || frame.rect[2] <= 0) continue;
+        const anim: LiveAnim = { id: 0, uid: 0, type: particle.type, ...particle };
+        out.push({
+          anchor: leptonAnchor(anim.x, anim.y, anim.z, [0, 0]),
+          frame,
+          palette: 'fx:anim',
+          // Particles (ParticleClass, not AnimClass) take their type's constant Translucency; none of the YR particle
+          // types is Translucent=yes, the anim-only staged fade (animAlpha).
+          alpha: animAlpha({ translucency: found.art.translucency }),
+          push: cardPush(frame),
+          draw: 'card',
+          pass: 'air',
+          depth: ((anim.x + anim.y) * 15) / 256 - (anim.z / 104) * 15,
+          glow: false,
+        });
+      }
+    }
+  }
+
+  /** Palette row of an anim: AltPalette art takes its owner's colours when the owner is known. */
+  private animPalette(resolved: ResolvedAnim, owner: number | undefined): string {
+    if (!resolved.remap) return resolved.palette;
+    const colorIndex = owner !== undefined && owner >= 0 ? this.houseColour.get(owner) : undefined;
+    return paletteFor(this.cache, resolved.palette, true, colorIndex !== undefined ? `live${colorIndex}` : undefined);
+  }
+
+  /** Voxel palette (debris, missiles): the library unit palette, house-remapped when the owner is known. */
+  private unitPalette(owner: number | undefined): string {
+    const base = this.library ? `${LIBRARY_PALETTE_PREFIX}unit` : 'unit';
+    const colorIndex = owner !== undefined && owner >= 0 ? this.houseColour.get(owner) : undefined;
+    return paletteFor(this.cache, base, true, colorIndex !== undefined ? `live${colorIndex}` : undefined);
+  }
+
+  /**
+   * Hand each atlas its instances; library pages get their sprite layer when their texture has loaded. Layers that
+   * were empty and stay empty are not touched (every setInstances uploads the layer's buffers).
+   */
   private flushSprites(batch: SpriteBatch): void {
-    this.sprites.setInstances(batch.get('map') ?? []);
+    const map = batch.get('map') ?? [];
+    if (map.length || this.sprites.mesh.count) this.sprites.setInstances(map);
     for (const [key, instances] of batch) {
       if (key === 'map') continue;
       this.pageLayer(key)?.setInstances(instances);
     }
-    for (const [page, { layer }] of this.pageLayers) if (!batch.has(page)) layer.setInstances([]);
+    for (const [page, { layer }] of this.pageLayers) if (!batch.has(page) && layer.mesh.count) layer.setInstances([]);
   }
 
-  private pageLayer(page: number): SpriteLayer | null {
-    const existing = this.pageLayers.get(page);
+  /** Sprite layer of a library page; negative keys (-1 - page) are the page's indexed-only layer (see queue). */
+  private pageLayer(key: number): SpriteLayer | null {
+    const indexedOnly = key < 0;
+    const page = indexedOnly ? -1 - key : key;
+    const existing = this.pageLayers.get(key);
     // Window masks are atlas-sized (a 4096 page costs 64 MB on the GPU): load a page's mask only once night falls,
     // then rebuild its layer with it; by day and while the mask loads the layer draws without. Decided from the hour
     // (not windowGain, which hd.frame only sets after this), so a match starting at night builds each layer once.
@@ -486,8 +922,8 @@ export class LiveView {
     const atlas = this.library?.page(page);
     if (!atlas) return existing?.layer ?? null;
     // Wait for the page's HD art when it has it, so a layer is never built twice for its colour texture.
-    const hd = this.library!.hdPage(page);
-    if (!hd && this.library!.hasHdPage(page)) return existing?.layer ?? null;
+    const hd = indexedOnly ? null : this.library!.hdPage(page);
+    if (!indexedOnly && !hd && this.library!.hasHdPage(page)) return existing?.layer ?? null;
     const windows = wantWindows ? this.library!.windowsPage(page) : null;
     // While a wanted mask loads, keep drawing what exists (or wait, like for HD art) instead of building twice.
     if (wantWindows && !windows) return existing?.layer ?? null;
@@ -500,92 +936,272 @@ export class LiveView {
       mesh.dispose();
     }
     const layer = new SpriteLayer(this.cache, [], LIVE_SPRITE_CAPACITY, atlas, hd, windows);
-    layer.mesh.name = `live-sprites-${page}`;
+    layer.mesh.name = `live-sprites-${key}`;
     this.shareSpriteUniforms(layer);
     this.root.add(layer.mesh);
-    this.pageLayers.set(page, { layer, windows: !!windows });
+    this.pageLayers.set(key, { layer, windows: !!windows });
     return layer;
   }
 
-  private shareSpriteUniforms(layer: SpriteLayer): void {
+  private shareSpriteUniforms(layer: {
+    cameraRight: SpriteLayer['cameraRight'];
+    cameraUp: SpriteLayer['cameraUp'];
+    toCamera: SpriteLayer['toCamera'];
+    light: SpriteLayer['light'];
+  }): void {
     // The static layer's camera and light uniforms are updated by HdRenderer every frame; share their values.
-    if (this.world.sprites) shareSpriteUniforms(this.world.sprites, layer);
+    const shared = this.world.sprites;
+    if (!shared) return;
+    layer.cameraRight.value = shared.cameraRight.value;
+    layer.cameraUp.value = shared.cameraUp.value;
+    layer.toCamera.value = shared.toCamera.value;
+    layer.light.value = shared.light.value;
   }
 
-  /** Queue a library frame on its atlas page (skipped while the page loads). */
-  private queue(batch: SpriteBatch, instance: SpriteInstance): void {
+  /**
+   * Queue a library frame on its atlas page (skipped while the page loads). `indexed` art is drawn from the indexed page
+   * with its palette even when the page has HD art: the offline HD pages bake house paint into the colours of art
+   * extracted as Remapable=no, so buildings that the engine remaps anyway (civilian CAOILD's roof in the Neutral grey)
+   * would keep the raw palette's red there.
+   */
+  private queue(batch: SpriteBatch, instance: ObjectSprite, indexed = false): void {
     const page = instance.frame.page ?? 0;
     if (!this.library?.page(page)) return;
-    let list = batch.get(page);
-    if (!list) batch.set(page, (list = []));
+    const key = indexed && this.library.hasHdPage(page) ? -1 - page : page;
+    let list = batch.get(key);
+    if (!list) batch.set(key, (list = []));
     list.push(instance);
   }
 
-  /** A building's library art: bib, shadow, body (damaged at or below yellow) and its always-on anim layers. */
-  private libraryBuildingSprites(object: LiveObject, visual: Visual, batch: SpriteBatch, now: number): void {
+  /**
+   * A building's library art: bib, shadow, body (damaged at or below yellow) and its anim layers with their shadows;
+   * while it is being built, its make anim instead. Buildings always wear their owner's colour scheme (the engine
+   * remaps every building, e.g. civilian CAOILD shows the Neutral scheme's light grey), whatever art Remapable= says.
+   */
+  private libraryBuildingSprites(
+    object: LiveObject,
+    visual: Visual,
+    batch: SpriteBatch,
+    snapshot: LiveSnapshot,
+  ): boolean {
     const library = this.library!;
     const type = visual.libraryType!;
     const sprites = library.library.sprites;
     const entry = sprites[type.sprite!];
-    if (!entry) return;
+    if (!entry) return false;
     const owner = visual.paletteKey || undefined;
-    const palette = (art: { palette: string; remap: boolean }) =>
-      paletteFor(this.cache, LIBRARY_PALETTE_PREFIX + art.palette, art.remap && type.remap, owner);
-    const damaged = object.health <= library.conditionYellow;
+    const palette = (art: { palette: string }) =>
+      paletteFor(this.cache, LIBRARY_PALETTE_PREFIX + art.palette, true, owner);
     const anchor = leptonAnchor(object.x, object.y, object.z, type.drawOffset);
+    const frame = snapshot.frame;
+    const civilian = object.owner < 0 || this.civilian.has(object.owner);
+
+    const buildup = this.buildupFrame(object, visual, frame);
+    if (buildup !== null) {
+      const make = sprites[type.building!.buildup!]!;
+      const mk = make.frames[buildup];
+      const shadow = make.shadows?.[buildup];
+      const plain = !make.remap;
+      if (shadow)
+        this.queue(batch, { anchor, frame: shadow, palette: palette(make), push: 0, shadow: true, flat: true }, plain);
+      if (mk && mk.rect[2] > 0)
+        this.queue(batch, { anchor, frame: mk, palette: palette(make), push: cardPush(mk), shadow: false }, plain);
+      return false;
+    }
+
+    const damaged = object.health <= library.conditionYellow;
     const body = damaged && entry.frames.length > 1 ? 1 : 0;
     const bib = type.building?.bib ? sprites[type.building.bib] : undefined;
     const bibFrame = bib?.frames[damaged && bib.frames.length > 1 ? 1 : 0];
     if (bib && bibFrame)
-      this.queue(batch, { anchor, frame: bibFrame, palette: palette(bib), push: 0, shadow: false, flat: true });
+      this.queue(
+        batch,
+        { anchor, frame: bibFrame, palette: palette(bib), push: 0, shadow: false, flat: true },
+        !bib.remap,
+      );
     const shadow = entry.shadows?.[body];
     if (shadow)
-      this.queue(batch, { anchor, frame: shadow, palette: palette(entry), push: 0, shadow: true, flat: true });
-    const frame = entry.frames[body];
-    const push = frame ? cardPush(frame) : 0.03;
-    if (frame && frame.rect[2] > 0) this.queue(batch, { anchor, frame, palette: palette(entry), push, shadow: false });
-    for (const layer of type.building?.layers ?? []) {
-      // Always-on idle animation only; production, super weapon and low-power layers need engine state not read yet.
-      if (!layer.key.startsWith('ActiveAnim') && layer.key !== 'IdleAnim') continue;
-      const art = sprites[damaged && layer.damagedSprite ? layer.damagedSprite : layer.sprite];
-      if (!art?.frames.length) continue;
-      const first = Math.min(art.frames.length - 1, layer.anim.loopStart ?? layer.anim.start ?? 0);
-      const last = Math.min(
-        art.frames.length,
-        Math.max(first + 1, layer.anim.loopEnd ?? layer.anim.end ?? art.frames.length),
+      this.queue(
+        batch,
+        { anchor, frame: shadow, palette: palette(entry), push: 0, shadow: true, flat: true },
+        !entry.remap,
       );
-      // Rate= reads as milliseconds per frame closely enough for ambient loops (e.g. 220 for the power plant).
-      const step = Math.floor(now / Math.max(40, layer.anim.rate ?? 100));
-      const layerFrame = art.frames[first + (step % (last - first))]!;
+    const bodyFrame = entry.frames[body];
+    const push = bodyFrame ? cardPush(bodyFrame) : 0.03;
+    if (bodyFrame && bodyFrame.rect[2] > 0)
+      this.queue(batch, { anchor, frame: bodyFrame, palette: palette(entry), push, shadow: false }, !entry.remap);
+
+    const layers = type.building?.layers ?? [];
+    const native = this.nativeBuildingAnims(object, type);
+    const drawLayer = (layer: LibraryAnimLayer, index: number | null) => {
+      const art = sprites[damaged && layer.damagedSprite ? layer.damagedSprite : layer.sprite];
+      if (!art?.frames.length) return;
+      const timing = this.effectArt?.anim(animId(layer.sprite))?.art;
+      const shown = Math.min(
+        art.frames.length - 1,
+        Math.max(
+          0,
+          index ?? layerFrame(layer, art.frames.length, frame, timing?.rateFrames, timing?.normalized ?? false),
+        ),
+      );
+      const layerFrameArt = art.frames[shown];
       const layerAnchor = layer.offset
         ? leptonAnchor(object.x, object.y, object.z, [
             type.drawOffset[0] + layer.offset[0],
             type.drawOffset[1] + layer.offset[1],
           ])
         : anchor;
-      this.queue(batch, {
-        anchor: layerAnchor,
-        frame: layerFrame,
-        palette: palette(art),
-        push: push + 0.01,
-        shadow: false,
-      });
+      // Art Shadow=yes layers (the derrick's pump, flags, radar dishes) cast their own shadow frames.
+      const layerShadow = layer.anim.shadow ? art.shadows?.[shown] : undefined;
+      if (layerShadow && layerShadow.rect[2] > 0)
+        this.queue(
+          batch,
+          { anchor: layerAnchor, frame: layerShadow, palette: palette(art), push: 0, shadow: true, flat: true },
+          !art.remap,
+        );
+      if (!layerFrameArt || layerFrameArt.rect[2] <= 0) return;
+      this.queue(
+        batch,
+        { anchor: layerAnchor, frame: layerFrameArt, palette: palette(art), push: push + 0.01, shadow: false },
+        !art.remap,
+      );
+    };
+    if (native) {
+      // Bridge: exactly the layers the engine plays, at the engine's frame.
+      for (const anim of native) {
+        const layer = layers.find((l) => l.sprite === `anim:${anim.type}` || l.damagedSprite === `anim:${anim.type}`);
+        if (layer) drawLayer(layer, anim.frame ?? null);
+      }
+      return true;
     }
+    const storesOre = this.effectArt?.storesOre(object.type) ?? looksLikeStorage(layers);
+    for (const layer of layers) {
+      if (!fallbackLayer(layer, storesOre)) continue;
+      drawLayer(layer, layerIdle(layer, object.type, civilian && object.owner >= 0) ? (layer.anim.start ?? 0) : null);
+    }
+    return true;
   }
 
-  /** Infantry from its art sequence: walking while it moved recently, otherwise standing ready. */
-  private libraryInfantrySprites(pose: Pose, visual: Visual, batch: SpriteBatch, now: number): void {
+  /**
+   * A building's voxel turret (rules TurretAnimIsVoxel=yes: sentry gun, flak cannon, Patriot, Grand Cannon, Gattling
+   * cannon ...), turned by the building's facing (`turretFacing` in radians; null while the building is being built or
+   * sold, when its make anim shows instead). The engine draws the turret at the building's draw point plus
+   * TurretAnimX/Y pixels, after the body (TurretAnimZAdjust < 0): here it stands at that screen point on the
+   * building's level and is pulled towards the camera past the body card (cardPush) plus its own depth, so the body
+   * never cuts it while whatever covers the body also covers it. The model loads on first use; until then (and when it
+   * is missing) it counts in diagnostics().
+   */
+  private buildingTurret(object: LiveObject, visual: Visual, turretFacing: number | null): void {
+    const spec = visual.libraryType?.building?.turretVoxel;
+    if (!spec) return;
+    if (!visual.buildingTurret) {
+      const model = this.library!.voxel(spec.voxel);
+      visual.turretState = model ? 'ready' : this.library!.voxelFailed(spec.voxel) ? 'missing' : 'loading';
+      if (!model) return;
+      const key = paletteFor(
+        this.cache,
+        LIBRARY_PALETTE_PREFIX + model.palette,
+        visual.libraryType!.remap,
+        visual.paletteKey || undefined,
+      );
+      visual.buildingTurret = this.voxelUnits.build(model, key, `${spec.voxel}@${key}`);
+      visual.root.add(visual.buildingTurret.root);
+    }
+    const unit = visual.buildingTurret;
+    unit.root.visible = turretFacing !== null;
+    if (turretFacing === null) return;
+    const type = visual.libraryType!;
+    const at = leptonAnchor(object.x, object.y, object.z, [
+      type.drawOffset[0] + spec.offset[0],
+      type.drawOffset[1] + spec.offset[1],
+    ]);
+    const body = this.library!.library.sprites[type.sprite!]?.frames[0];
+    const push = (body ? cardPush(body) : 0.5) + TURRET_DEPTH;
+    const toCamera = this.world.sprites?.toCamera.value;
+    if (toCamera) at.addScaledVector(toCamera, push);
+    this.voxelUnits.pose(
+      unit,
+      {
+        x: at.x * LEPTONS_PER_CELL,
+        y: at.z * LEPTONS_PER_CELL,
+        z: (at.y / LEVEL_HEIGHT) * LEPTONS_PER_LEVEL,
+        facing: Math.PI / 2,
+      },
+      turretFacing,
+    );
+  }
+
+  /**
+   * The building's own anims from the engine list (bridge: entries flagged buildingAnim). The reader leaves their
+   * attachment empty, so they are matched by position: an anim belongs to the building whose foundation holds it.
+   */
+  private nativeBuildingAnims(object: LiveObject, type: LibraryType): LiveAnim[] | null {
+    const index = this.buildingAnims;
+    if (!index) return null;
+    const [w, h] = type.foundation ?? [1, 1];
+    const x0 = Math.floor(object.x / LEPTONS_PER_CELL);
+    const y0 = Math.floor(object.y / LEPTONS_PER_CELL);
+    const found: [number, LiveAnim][] = [...(index.attached.get(object.uid) ?? [])];
+    for (let y = y0; y < y0 + h; y++)
+      for (let x = x0; x < x0 + w; x++) for (const entry of index.cells.get(y * 4096 + x) ?? []) found.push(entry);
+    // In the engine's list order, like the list itself.
+    return found.sort((a, b) => a[0] - b[0]).map(([, anim]) => anim);
+  }
+
+  /**
+   * Build-up frame of a building under construction, or null when it stands complete. Bridge (H2): the engine's own
+   * state and frame. Fallback: a building that appeared after the view's first BUILDUP_GRACE_FRAMES plays its make
+   * anim once, buildupStepFrames logic frames per frame. Selling (the make anim reversed) needs the bridge.
+   */
+  private buildupFrame(object: LiveObject, visual: Visual, frame: number): number | null {
+    const make = visual.libraryType?.building?.buildup;
+    const sprite = make ? this.library!.library.sprites[make] : undefined;
+    if (!sprite?.frames.length) return null;
+    const count = sprite.frames.length;
+    if (object.buildState !== undefined) {
+      if (object.buildState === 'done') return null;
+      const shown = object.buildupFrame ?? 0;
+      return Math.min(count - 1, Math.max(0, object.buildState === 'selling' ? count - 1 - shown : shown));
+    }
+    if (this.firstFrame === null || visual.firstFrame - this.firstFrame < BUILDUP_GRACE_FRAMES) return null;
+    const step = Math.floor((frame - visual.firstFrame) / buildupStepFrames(count, NORMALIZED.has(object.type)));
+    return step < count ? step : null;
+  }
+
+  /** Infantry: the bridge's sequence when given, else walking, dying or standing by logic-frame bookkeeping. */
+  private libraryInfantrySprites(
+    object: LiveObject,
+    pose: Pose,
+    visual: Visual,
+    batch: SpriteBatch,
+    frame: number,
+  ): void {
     const type = visual.libraryType!;
     const entry = this.library!.library.sprites[type.sprite!];
     const sequences = type.infantry?.sequences;
     if (!entry || !sequences) return;
-    const walking = now - (visual.lastMove ?? -Infinity) < 250;
-    const sequence = (walking ? sequences.Walk : undefined) ?? sequences.Ready ?? sequences.Guard;
-    if (!sequence) return;
     const facing = Math.round((pose.facing / (Math.PI * 2)) * 256) & 255;
-    const index = sequenceFrame(sequence, facing, walking ? Math.floor(now / 90) : 0);
-    const frame = entry.frames[index];
-    if (!frame) return;
+    let index: number | undefined;
+    const named = object.infantrySequence ? sequences[object.infantrySequence] : undefined;
+    if (named) index = sequenceFrame(named, facing, object.sequenceFrame ?? 0);
+    else if (visual.deadFrame !== undefined && sequences.Die1) {
+      // Health 0: the first death sequence from the frame it died, holding its last frame.
+      const die = sequences.Die1;
+      index = sequenceFrame(die, facing, Math.min(die.count - 1, Math.floor((frame - visual.deadFrame) / 2)));
+    } else if (
+      visual.firedFrame !== undefined &&
+      sequences.FireUp &&
+      frame - visual.firedFrame < sequences.FireUp.count
+    ) {
+      index = sequenceFrame(sequences.FireUp, facing, frame - visual.firedFrame);
+    } else {
+      const walking = visual.lastMoveFrame !== undefined && frame - visual.lastMoveFrame <= WALK_FRAMES;
+      const sequence = (walking ? sequences.Walk : undefined) ?? sequences.Ready ?? sequences.Guard;
+      if (!sequence) return;
+      index = sequenceFrame(sequence, facing, walking ? Math.floor(frame / 2) : 0);
+    }
+    const spriteFrame = entry.frames[index];
+    if (!spriteFrame) return;
     const anchor = leptonAnchor(pose.x, pose.y, pose.z, type.drawOffset);
     const palette = paletteFor(
       this.cache,
@@ -595,7 +1211,46 @@ export class LiveView {
     );
     const shadow = entry.shadows?.[index];
     if (shadow) this.queue(batch, { anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
-    this.queue(batch, { anchor, frame, palette, push: cardPush(frame), shadow: false });
+    const light = objectLight('infantry');
+    this.queue(batch, { anchor, frame: spriteFrame, palette, push: cardPush(spriteFrame), shadow: false, light });
+  }
+
+  /** SHP vehicles and aircraft (terror drone, squid, dolphin): directional frames per state (shpUnits.ts). */
+  private libraryShpUnitSprites(
+    object: LiveObject,
+    pose: Pose,
+    visual: Visual,
+    batch: SpriteBatch,
+    frame: number,
+  ): void {
+    const type = visual.libraryType!;
+    const entry = this.library!.library.sprites[type.sprite!];
+    if (!entry || !type.shpUnit) return;
+    const facing = Math.round((pose.facing / (Math.PI * 2)) * 256) & 255;
+    const moving = visual.lastMoveFrame !== undefined && frame - visual.lastMoveFrame <= WALK_FRAMES;
+    const state = shpUnitPose(
+      type.shpUnit,
+      this.effectArt?.shpUnitRates(object.type),
+      frame,
+      moving,
+      visual.firedFrame ?? null,
+    );
+    const index = Math.min(entry.frames.length - 1, shpUnitFrame(type.shpUnit, facing, state.state, state.step));
+    const spriteFrame = entry.frames[index];
+    if (!spriteFrame) return;
+    const anchor = leptonAnchor(pose.x, pose.y, pose.z, type.drawOffset);
+    const palette = paletteFor(
+      this.cache,
+      LIBRARY_PALETTE_PREFIX + entry.palette,
+      entry.remap && type.remap,
+      visual.paletteKey || undefined,
+    );
+    const shadow = entry.shadows?.[index];
+    if (shadow && shadow.rect[2] > 0)
+      this.queue(batch, { anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
+    const light = objectLight(object.kind);
+    if (spriteFrame.rect[2] > 0)
+      this.queue(batch, { anchor, frame: spriteFrame, palette, push: cardPush(spriteFrame), shadow: false, light });
   }
 
   /** A building whose art only the map cache has (library missing): the still frames the map extractor exported. */
@@ -606,7 +1261,8 @@ export class LiveView {
     const owner = visual.paletteKey || undefined;
     const frameIndex = object.health > CONDITION_YELLOW || entry.frames.length < 2 ? 0 : 1;
     const frame = entry.frames[frameIndex]!;
-    const palette = paletteFor(this.cache, entry.palette, entry.remap, owner);
+    // Buildings always wear their owner's colours (see libraryBuildingSprites).
+    const palette = paletteFor(this.cache, entry.palette, true, owner);
     const push = cardPush(frame);
     let list = batch.get('map');
     if (!list) batch.set('map', (list = []));
@@ -616,7 +1272,7 @@ export class LiveView {
         list.push({
           anchor,
           frame: bib.frames[0],
-          palette: paletteFor(this.cache, bib.palette, bib.remap, owner),
+          palette: paletteFor(this.cache, bib.palette, true, owner),
           push: 0,
           shadow: false,
           flat: true,
@@ -631,14 +1287,14 @@ export class LiveView {
         list.push({
           anchor,
           frame: art.frames[0],
-          palette: paletteFor(this.cache, art.palette, art.remap, owner),
+          palette: paletteFor(this.cache, art.palette, true, owner),
           push: push + 0.01,
           shadow: false,
         });
     }
   }
 
-  private visualFor(object: LiveObject, colorIndex: number): Visual {
+  private visualFor(object: LiveObject, colorIndex: number, frame: number): Visual {
     const paletteKey = colorIndex >= 0 ? `live${colorIndex}` : '';
     const existing = this.visuals.get(object.uid);
     // Owner changes (capture, mind control) repaint the object; art that was still loading is retried.
@@ -646,8 +1302,12 @@ export class LiveView {
       return existing;
     if (existing?.pending && !this.artReady(object)) return existing;
     if (existing) this.root.remove(existing.root);
-    const visual = this.buildVisual(object, colorIndex, paletteKey);
-    if (existing?.lastMove !== undefined) visual.lastMove = existing.lastMove;
+    const visual = this.buildVisual(object, paletteKey, existing?.firstFrame ?? frame);
+    if (existing) {
+      visual.lastMoveFrame = existing.lastMoveFrame;
+      visual.firedFrame = existing.firedFrame;
+      visual.deadFrame = existing.deadFrame;
+    }
     this.visuals.set(object.uid, visual);
     this.root.add(visual.root);
     return visual;
@@ -659,62 +1319,162 @@ export class LiveView {
     return !!type?.voxel && !!this.library!.voxel(type.voxel);
   }
 
-  private buildVisual(object: LiveObject, colorIndex: number, paletteKey: string): Visual {
+  private buildVisual(object: LiveObject, paletteKey: string, firstFrame: number): Visual {
     const libraryType = this.library?.type(object.type);
+    const base = { type: object.type, paletteKey, firstFrame };
     if (libraryType?.sprite && (object.kind === 'building' || object.kind === 'infantry'))
-      return { type: object.type, paletteKey, root: new Group(), mode: 'library-sprite', libraryType };
+      return { ...base, root: new Group(), mode: 'library-sprite', libraryType };
+    // SHP vehicles and aircraft (terror drone, squid, dolphin) have directional sprites, not voxels.
+    if (libraryType?.sprite && libraryType.shpUnit && (object.kind === 'vehicle' || object.kind === 'aircraft'))
+      return { ...base, root: new Group(), mode: 'library-sprite', libraryType };
     const spriteId = `${object.kind}:${object.type}`;
     if (object.kind === 'building' && this.cache.manifest.sprites[spriteId]?.frames.length)
-      return { type: object.type, paletteKey, root: new Group(), mode: 'map-sprite', sprite: spriteId };
+      return { ...base, root: new Group(), mode: 'map-sprite', sprite: spriteId };
     const fromMap = this.cache.voxels.get(object.type);
     const fromLibrary = !fromMap && libraryType?.voxel ? this.library!.voxel(libraryType.voxel) : null;
     const model = fromMap ?? fromLibrary;
     if (model) {
-      const base = fromMap ? model.palette : LIBRARY_PALETTE_PREFIX + model.palette;
-      const key = paletteFor(this.cache, base, libraryType?.remap ?? true, paletteKey || undefined);
-      const cacheKey = `${object.type}@${key}`;
-      let parts = this.geometries.get(cacheKey);
-      if (!parts) {
-        parts = buildVoxelGeometry(model, this.cache.paletteRgb.get(key)!);
-        this.geometries.set(cacheKey, parts);
-      }
-      const { root, turret } = instantiateVoxel(parts, this.voxelMaterial);
-      return { type: object.type, paletteKey, root, turret, mode: 'voxel', libraryType };
+      const basePalette = fromMap ? model.palette : LIBRARY_PALETTE_PREFIX + model.palette;
+      const key = paletteFor(this.cache, basePalette, libraryType?.remap ?? true, paletteKey || undefined);
+      const { root, turret } = this.voxelUnits.build(model, key, `${object.type}@${key}`);
+      return { ...base, root, turret, mode: 'voxel', libraryType };
     }
-    // No art (yet): a house-coloured block keeps every live object visible and tracked; library voxels still loading
-    // are retried on later frames.
-    const colour = colorIndex >= 0 ? HOUSE_COLORS[colorIndex % HOUSE_COLORS.length]! : 0x9a9a9a;
-    const materialKey = String(colour);
-    let material = this.placeholderMaterials.get(materialKey);
-    if (!material) {
-      material = new MeshStandardNodeMaterial({ color: new Color(colour), roughness: 0.6, metalness: 0.1 });
-      this.placeholderMaterials.set(materialKey, material);
+    // No art (yet): the object stays tracked but draws nothing (a stand-in block would read as a real, oddly
+    // coloured unit); library voxels still loading are retried on later frames.
+    const pending = !!libraryType?.voxel;
+    if (!pending && !this.warnedTypes.has(object.type)) {
+      this.warnedTypes.add(object.type);
+      console.warn(`[HD] no art for ${object.kind} ${object.type}: not drawn (see LiveView.diagnostics())`);
     }
-    const [w, h, d] = PLACEHOLDER[object.kind];
-    const mesh = new Mesh(this.placeholderGeometry, material);
-    mesh.scale.set(w, h, d);
-    mesh.position.y = h / 2;
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
     const root = new Group();
-    root.add(mesh);
     root.name = `live:${object.type}`;
-    return {
-      type: object.type,
-      paletteKey,
-      root,
-      mode: 'placeholder',
-      libraryType,
-      pending: !!libraryType?.voxel,
-    };
+    if (this.options.debugPlaceholders) {
+      this.placeholderMaterial ??= new MeshStandardNodeMaterial({
+        color: new Color(DEBUG_PLACEHOLDER_COLOUR),
+        roughness: 0.8,
+        metalness: 0,
+      });
+      const [w, h, d] = PLACEHOLDER[object.kind].map((v) => v * DEBUG_PLACEHOLDER_SCALE) as [number, number, number];
+      const mesh = new Mesh(this.placeholderGeometry, this.placeholderMaterial);
+      mesh.scale.set(w, h, d);
+      mesh.position.y = h / 2;
+      root.add(mesh);
+    }
+    return { ...base, root, mode: 'placeholder', libraryType, pending };
   }
 
   private ensureHouse(colorIndex: number): void {
     if (colorIndex < 0 || this.housePalettes.has(colorIndex)) return;
     this.housePalettes.add(colorIndex);
     const remap = this.options.houseRemap?.(colorIndex) ?? this.library?.remap(colorIndex) ?? defaultRemap(colorIndex);
-    addHousePalettes(this.cache, `live${colorIndex}`, remap);
+    if (!addHousePalettes(this.cache, `live${colorIndex}`, remap))
+      console.warn(`[HD] palette atlas full: house colours ${colorIndex} not added`);
   }
+
+  // ---------------------------------------------------------------- overlays and smudges
+
+  private cellList(x: number, y: number): MapObject[] {
+    const key = y * 4096 + x;
+    let list = this.cellObjects.get(key);
+    if (!list) this.cellObjects.set(key, (list = []));
+    return list;
+  }
+
+  /**
+   * Bridge (H3): the engine's overlay and smudge cells replace the map's (ore growing and being harvested, walls
+   * built and destroyed, craters and burn marks the engine leaves). Art comes from the map cache when it has the type,
+   * which covers what the map places; other types need the effect sidecar and are skipped until they are wired in.
+   */
+  private applyCells(cells: LiveCells): void {
+    if (cells.full) this.cellObjects.clear();
+    const { manifest } = this.cache;
+    for (const [x, y, overlay, overlayFrame, smudge, smudgeFrame] of cells.cells) {
+      const key = y * 4096 + x;
+      const list: MapObject[] = [];
+      const z = this.cache.height[y * manifest.grid.width + x] ?? 0;
+      const overlayType = overlay !== 0xff ? cells.overlayTypes?.[overlay] : undefined;
+      const smudgeType = smudge >= 0 ? cells.smudgeTypes?.[smudge] : undefined;
+      if (smudgeType && manifest.sprites[`smudge:${smudgeType}`])
+        list.push({
+          kind: 'smudge',
+          type: smudgeType,
+          x,
+          y,
+          z,
+          sprite: `smudge:${smudgeType}`,
+          frame: smudgeFrame,
+          flat: true,
+          drawOffset: [0, 0],
+          lighting: 'full',
+        });
+      if (overlayType) {
+        const known = manifest.objects.find((o) => o.kind === 'overlay' && o.type === overlayType);
+        if (known && manifest.sprites[known.sprite ?? '']) list.push({ ...known, x, y, z, frame: overlayFrame });
+      }
+      this.cellObjects.set(key, list);
+    }
+    this.cellsDirty = true;
+  }
+
+  private flushCells(): void {
+    this.cellsDirty = false;
+    const { manifest } = this.cache;
+    const instances: CellSprite[] = [];
+    for (const list of this.cellObjects.values())
+      for (const object of list) {
+        const entry = object.sprite ? manifest.sprites[object.sprite] : undefined;
+        if (!entry?.frames.length) continue;
+        const index = Math.min(object.frame ?? 0, entry.frames.length - 1);
+        const frame = entry.frames[index]!;
+        const anchor = objectAnchor(object);
+        const palette = paletteFor(this.cache, entry.palette, entry.remap, object.owner);
+        // The map object's lighting class (smudges take the full terrain light, ore none), as the static world
+        // passes it (ra2/world.ts): absent means 'full'.
+        const lighting = object.lighting ?? 'full';
+        const shadow = entry.shadows?.[index];
+        if (shadow) instances.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true, lighting });
+        instances.push({
+          anchor,
+          frame,
+          palette,
+          push: object.flat ? 0 : cardPush(frame),
+          shadow: false,
+          flat: !!object.flat,
+          lighting,
+        });
+      }
+    this.cellLayer.setInstances(instances);
+  }
+}
+
+/**
+ * Building anims (bridge flag buildingAnim) by the cell they stand on (y * 4096 + x) and by the uid of the object they
+ * are attached to, with their index in the list; null when there are none. The reader leaves a building anim's
+ * attachment empty, so it is matched by position (the building whose foundation holds it).
+ */
+export function indexBuildingAnims(
+  anims: readonly LiveAnim[] | undefined,
+): { cells: Map<number, [number, LiveAnim][]>; attached: Map<number, [number, LiveAnim][]> } | null {
+  if (!anims?.some((a) => a.buildingAnim)) return null;
+  const cells = new Map<number, [number, LiveAnim][]>();
+  const attached = new Map<number, [number, LiveAnim][]>();
+  anims.forEach((anim, i) => {
+    if (!anim.buildingAnim) return;
+    const key = anim.attachedTo ? anim.attachedTo.uid : Math.floor(anim.y / 256) * 4096 + Math.floor(anim.x / 256);
+    const map = anim.attachedTo ? attached : cells;
+    let list = map.get(key);
+    if (!list) map.set(key, (list = []));
+    list.push([i, anim]);
+  });
+  return { cells, attached };
+}
+
+const ANIM_IDS = new Map<string, string>();
+/** Anim type id of a library layer sprite ("anim:NAREFNL1" -> "NAREFNL1"), memoised (read every frame). */
+function animId(sprite: string): string {
+  let id = ANIM_IDS.get(sprite);
+  if (id === undefined) ANIM_IDS.set(sprite, (id = sprite.replace(/^anim:/, '')));
+  return id;
 }
 
 /** Bright-to-dark ramp of a house colour, shaped like the engine's 16-entry remap range. */

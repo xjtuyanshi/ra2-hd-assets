@@ -11,17 +11,20 @@
     "./waterMask": "./src/waterMask.ts",
     "./library": "./src/library.ts",
     "./lights": "./src/lights.ts",
-    "./windows": "./src/windows.ts"
+    "./windows": "./src/windows.ts",
+    "./vpl": "./src/vpl.ts"
   },
   "scripts": {
     "prepare-map": "node --import tsx src/cli/prepareMap.mts",
     "extract": "tsx src/cli/extract.mts",
+    "effects": "tsx src/cli/effects.mts",
     "preview": "tsx src/cli/preview.mts",
     "terrain-map": "tsx src/cli/terrainMap.mts",
     "upscale": "tsx src/cli/upscale.mts",
     "sprites": "tsx src/cli/sprites.mts",
     "library": "tsx src/cli/library.mts",
     "lights": "tsx src/cli/lights.mts",
+    "materials": "tsx src/cli/materials.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

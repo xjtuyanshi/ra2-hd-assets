@@ -27,8 +27,12 @@ Maps are staged from their own `[Lighting]` (`RenderMap.atmosphere`: `sidecarAtm
 `[Lighting]` and lamp posts in the `lights.json` sidecar written by `pnpm hd:lights`, else `mapAtmosphere` from the
 manifest): day maps default to noon, warm mid-ambient maps to dusk, stock night maps to 22:00. The class comes from the
 authored `Ambient - Ground` and tint plus lamp posts as evidence, not from the height term (see
-`docs/remaster/research/yr-scene-lighting.md`). Clear noon is unchanged: exposure stays `pi / referenceIrradiance()`
-and every night-only term is exactly zero by day.
+`docs/remaster/research/yr-scene-lighting.md`). Every night-only term is exactly zero by day. By day the map's own
+`[Lighting]` and light sources grade the original art as the engine does (see Original maps below); the night
+presentation below keeps the calibration it was tuned with: the day's per-channel exposure, faithful display transform,
+bloom threshold and sprite level blend into `pi / referenceIrradiance()`, PBR Neutral, the 0.85 threshold and the scene
+level with the night weight, and the day map grade fades out with it (the night keys already derive their level and
+tint from the same `[Lighting]`).
 
 - **Night level.** Night light keys are scaled so unlit flat ground shows the profile's night level (30 % of noon
   for a typical stock night, 26-40 % for night maps), 40 % from a desaturated moon and 60 % from the sky. Moonlight is
@@ -96,9 +100,11 @@ Other GPU work on the machine inflates every number, so compare configurations w
 **Live view.** `LiveView.create` without `timeOfDay` follows the map's staging; `liveView.setEnvironment({ timeOfDay,
 weather, weatherIntensity, lamps, windows, lights, mist })` changes it without a reload. Light sources follow the
 buildings standing in the match (light-emitting types from `lights.json`; the engine grid is recomputed when that set
-changes), lit windows use the type library's masks (`pnpm hd:lights -- --library <theater>`), and fires keep their
+changes), lit windows use the type library's masks (`pnpm hd:lights -- --library <theater>`), and fires keep a small
 light alive keyed by the engine anim. The shroud is a visibility mask the renderer applies after the mist and before
-bloom (`HdRenderer.setVisibility`), so nothing under black shroud glows through; shrouded buildings light no windows
+bloom (`HdRenderer.setVisibility`, which also takes a `VisibilityMask` with its own extent and shaping function: the
+live view's per-corner field with the engine-fitted edge), so nothing under black shroud glows through; shrouded
+buildings light no windows
 and cast no light, except the map's invisible lamp-post dummies, which every player knows from the map. Without a
 sidecar the view falls back to land-type surfaces and no map light sources.
 
@@ -110,9 +116,62 @@ sidecar the view falls back to land-type surfaces and no map light sources.
 - Water: analytic sky reflection, sun sheen, depth tint from the terrain height texture, shoreline foam, rain rings
   (`src/water.ts`).
 - Weather: world-anchored GPU rain streaks and splashes (`src/weather.ts`).
-- Lighting: fixed classic sun azimuth, time-of-day keys, overcast, soft shadows (`src/lighting.ts`).
-- Effects: instanced fireballs, smoke, sparks, scorch decals, pooled flash lights, camera shake (`src/effects.ts`).
-- Post: bloom, Neutral/AgX/ACES tone mapping, vignette, FXAA (`src/HdRenderer.ts`).
+- Lighting: fixed classic sun azimuth, time-of-day keys, overcast, soft shadows for the procedural scenario
+  (`src/lighting.ts`). Original maps take no sun shadows (see below).
+- Effects: instanced fireballs, flame tongues, smoke, sparks, scorch decals, light-field flashes, camera shake; with
+  garnish options (the live view) only a small flash, sparks and light on top of the original art (`src/effects.ts`).
+- Post (`src/HdRenderer.ts`, `src/post.ts`): per-channel exposure, mist and the visibility (shroud) mask, bloom, the
+  display transform, the night toe lift, anti-aliasing and sharpening; see HdSettings below.
 
 Units and buildings are placeholders (`src/objects.ts`) until real assets exist; the art pipeline replaces them by
 `RenderObject.type`.
+
+## Settings (`HdSettings`)
+
+| Setting      | Default      | Meaning                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------ | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `toneMapper` | `'faithful'` | Display transform. `'faithful'` is the identity up to linear 0.8 and a hue-preserving shoulder above (`src/post.ts`), so original palette colours reach the screen unchanged by day; on original maps it blends into PBR Neutral with the night weight (the night presentation's calibration). `'neutral'`, `'agx'` and `'aces'` are three's filmic curves for comparison. |
+| `exposure`   | `1`          | Multiplier on the scene exposure. For original maps the day exposure is pi / (flat-ground irradiance at clear noon) per channel, so lit art shows its own colour at noon (blending into the night's pi / reference with the night weight).                                                                                                                                 |
+| `bloom`      | `0.55`       | Bloom strength. By day only exposed luminance above 1 (effect cores, glints) blooms; the night keeps its 0.85 threshold on the unexposed scene.                                                                                                                                                                                                                            |
+| `vignette`   | `0.25`       | Screen-edge darkening (the live view sets 0, like the original).                                                                                                                                                                                                                                                                                                           |
+| `shadows`    | `true`       | Sun shadows of the procedural scenario; original maps never cast them.                                                                                                                                                                                                                                                                                                     |
+| `antialias`  | `'msaa4'`    | `'msaa4'` (4x multisampled scene pass), `'fxaa'` or `'none'`. `defaultAntialias()` picks `'fxaa'` on devices reporting 4 GB of memory or less.                                                                                                                                                                                                                             |
+| `sharpness`  | `1`          | RCAS sharpening after the display transform (0 strongest, 2 off, below 0 disabled).                                                                                                                                                                                                                                                                                        |
+| `debugView`  | `'none'`     | `'overbright'` marks exposed luminance above 1; `'voxel-xy'` / `'voxel-z'` write voxel palette index, world normal and corner occlusion raw to the screen, for fitting the voxel lighting against captures of the original.                                                                                                                                                |
+
+Call `applySettings()` after changing a setting; it rebuilds the post pipeline and frees the previous one's targets.
+
+GPU memory of the post targets at 2400x1500 device pixels (estimated from their formats): with `'msaa4'` the scene
+colour takes about 115 MB multisampled (RGBA16F) plus a 29 MB resolve texture and its depth about 58 MB; with
+`'fxaa'` or `'none'` about 29 MB and 14 MB. The bloom chain (half resolution and below, RGBA16F) adds about 20 MB and
+the sharpening target about 29 MB. Every mid-pass copy of the scene colour (three's viewport textures, e.g. a
+backdrop-sampling effect material) ends and restarts the scene pass; under `'msaa4'` that stores, resolves and reloads
+the multisampled target, about 0.5 ms per copy at 2400x1500 on an Apple M-series GPU against about 0.1 ms
+single-sampled, so layers should copy at most once per frame and only while they draw.
+
+## Original maps (`src/ra2`)
+
+- Map lighting (`mapLighting.ts`): the map's `[Lighting]` and light sources as the engine applies them by day, per cell
+  (`MapLightGrade`, one texel per cell from `engineCellLight` in `ra2-assets` `lights.ts`: Ambient - Ground + Level x z
+  plus lamp posts such as `INGALITE`, normalised tint). Terrain-class art (tiles, overlays, smudges, trees) takes the
+  level x per-channel colour, objects (buildings, units, infantry, aircraft) the level only, both on the palette's own
+  sRGB values. `SpriteInstance.lighting` selects the class per sprite (`'ambient'` by default, `'full'`, `'none'`); map
+  objects take `MapObject.lighting`. Each map cache owns its grade (`Ra2Cache.mapLight`), live light sources update it
+  through the night dressing, and the renderer weights it with the day (`setWeight`, baked into the texels). The HD
+  water look takes no grade of its own (it mixes the graded tile art's hue in already).
+- Terrain (`terrain.ts`): original tile art is lit by plain Lambert diffuse from the sun and sky, with specular only on
+  wet ground, so flat ground at clear noon shows exactly composite x map lighting. Contact shading from the height
+  field darkens ground and water at the feet of cliffs; no sun shadows are cast.
+- Sprites (`sprites.ts`): filtered coverage of the indexed mask for soft edges; within about one original texel of
+  transparent texels HD atlas colours keep their hue but are never brighter than the original texel there (the
+  upscaler's pale background fringe goes without a rim of raw palette colours). SHP shadows halve the displayed
+  colour, like the engine's.
+- Voxels (`voxels.ts`, `vpl.ts`, `voxelShadow.ts`): geometry is built once per model (palette indices, normals, corner
+  occlusion) and shared by every house colour; each palette gets a small lookup texture and material. Every section is
+  decoded with its own normal table (`ra2-assets` `voxelNormals.ts`). Colour comes from the engine's `voxels.vpl` table
+  (the `pnpm hd:materials` sidecar) with the engine's own shade rule (YR 1.001 @0x7586F0: section = int(16 x
+  (max(0, N.L) + max(0, b / (3 - 2b)))), b = N.H, H between the voxel light and the model's up axis), lit by the cell's
+  object level plus the units' extra light (rules `ExtraUnitLight`). Shadows are the model flattened onto the ground
+  along a fixed light, halving the displayed colour once per pixel (depth-tested, see `voxelShadow.ts`); airborne units
+  drop theirs straight down, shrunk with height. Review parameters (sandbox and replays): `?vpl=<extra>,<occlusion>,
+<sheen>`, `?vshape=<corner relax>,<normal blend>`, `?ml=0` (no map day light).

@@ -1,4 +1,4 @@
-import { NearestFilter, NoColorSpace, TextureLoader, type Texture } from 'three/webgpu';
+import { DataTexture, NearestFilter, NoColorSpace, RedFormat, Texture, UnsignedByteType } from 'three/webgpu';
 import type { LibraryType, TypeLibrary } from '../../../ra2-assets/src/library';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
 import {
@@ -25,6 +25,8 @@ export class LiveLibrary {
   private readonly voxels = new Map<string, VoxelModel | 'loading' | 'failed'>();
   private readonly hdPages = new Map<number, { color: Texture; remap: Texture } | 'loading' | 'failed'>();
   private readonly windowPages = new Map<number, Texture | 'loading' | 'failed'>();
+  /** Uploads a freshly decoded page straight to the GPU (the renderer's initTexture); see loadIndexedPage. */
+  uploadPage: ((texture: Texture) => void) | null = null;
 
   private constructor(
     readonly base: string,
@@ -39,6 +41,17 @@ export class LiveLibrary {
     const response = await fetch(`${root}/library.json`).catch(() => null);
     if (!response?.ok) return null;
     const library = (await response.json()) as TypeLibrary;
+    // HD pages recorded outside library.json (a sidecar written by a later tool, same shape as spriteAtlasesHd), so
+    // library.json itself never has to be rewritten.
+    if (!library.spriteAtlasesHd) {
+      const sidecar = await fetch(`${root}/sprites-hd.json`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null);
+      const pages = Array.isArray(sidecar)
+        ? sidecar
+        : (sidecar as { spriteAtlasesHd?: unknown } | null)?.spriteAtlasesHd;
+      if (Array.isArray(pages)) library.spriteAtlasesHd = pages as TypeLibrary['spriteAtlasesHd'];
+    }
     for (const [key, file] of Object.entries(library.palettes))
       addPalette(cache, LIBRARY_PALETTE_PREFIX + key, await readPalettePng(`${root}/${file}`));
     const windows = await fetchOptionalJson<WindowsIndex>(`${root}/windows.json`);
@@ -101,17 +114,8 @@ export class LiveLibrary {
     if (!ref) return null;
     if (entry === undefined) {
       this.pages.set(index, 'loading');
-      new TextureLoader()
-        .loadAsync(`${this.base}/${ref.file}`)
-        .then((texture) => {
-          // Palette indices: never filtered, flipped or colour-converted.
-          texture.flipY = false;
-          texture.colorSpace = NoColorSpace;
-          texture.magFilter = NearestFilter;
-          texture.minFilter = NearestFilter;
-          texture.generateMipmaps = false;
-          this.pages.set(index, texture);
-        })
+      loadIndexedPage(`${this.base}/${ref.file}`, this.uploadPage ?? undefined)
+        .then((texture) => this.pages.set(index, texture))
         .catch(() => this.pages.set(index, 'failed'));
       return null;
     }
@@ -158,6 +162,64 @@ export class LiveLibrary {
     }
     return typeof entry === 'string' ? null : entry;
   }
+
+  /** Whether a voxel model is missing from the library or failed to load (as opposed to still loading). */
+  voxelFailed(id: string): boolean {
+    return !this.library.voxels[id] || this.voxels.get(id) === 'failed';
+  }
+}
+
+/**
+ * An indexed atlas page (8-bit grayscale PNG: the value is a palette index) as a single-channel R8 texture: a quarter
+ * of the GPU memory of the RGBA8 texture an image loader makes (16 MiB instead of 64 MiB for a 4096 x 4096 page).
+ * Decoded without colour conversion or premultiplication, never filtered, flipped or mipmapped.
+ *
+ * With `upload` (the renderer's initTexture) the decoded bitmap goes to the GPU as it is: WebGPU's
+ * copyExternalImageToTexture (WebGL: texImage2D with RED) writes its red channel into the R8 texture, so the main
+ * thread never touches the 16.7 M pixels, and the bitmap is released right after the upload. Without it (tests, other
+ * hosts) the red channel is repacked on the CPU (about 45 ms per 4096 x 4096 page).
+ */
+export async function loadIndexedPage(url: string, upload?: (texture: Texture) => void): Promise<Texture> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: ${response.status}`);
+  const bitmap = await createImageBitmap(await response.blob(), {
+    colorSpaceConversion: 'none',
+    premultiplyAlpha: 'none',
+  });
+  const { width, height } = bitmap;
+  if (upload) {
+    const texture = new Texture(bitmap as unknown as HTMLImageElement);
+    indexedSettings(texture);
+    texture.format = RedFormat;
+    texture.type = UnsignedByteType;
+    texture.premultiplyAlpha = false;
+    texture.needsUpdate = true;
+    upload(texture);
+    // The GPU copy has read the bitmap; keep only its size (the texture is never uploaded again).
+    bitmap.close();
+    texture.image = { width, height } as unknown as HTMLImageElement;
+    return texture;
+  }
+  const canvas = new OffscreenCanvas(width, height);
+  const context = canvas.getContext('2d', { willReadFrequently: true })!;
+  context.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const rgba = context.getImageData(0, 0, width, height).data;
+  const indices = new Uint8Array(width * height);
+  for (let i = 0; i < indices.length; i++) indices[i] = rgba[i * 4]!;
+  const texture = new DataTexture(indices, width, height, RedFormat, UnsignedByteType);
+  indexedSettings(texture);
+  texture.unpackAlignment = 1;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function indexedSettings(texture: Texture): void {
+  texture.flipY = false;
+  texture.colorSpace = NoColorSpace;
+  texture.magFilter = NearestFilter;
+  texture.minFilter = NearestFilter;
+  texture.generateMipmaps = false;
 }
 
 /** Scale an sRGB colour's HSV saturation, keeping hue and value. */

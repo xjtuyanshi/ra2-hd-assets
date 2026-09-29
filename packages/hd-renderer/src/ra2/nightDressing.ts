@@ -15,6 +15,7 @@ import { SHAPE_POOL, type LightEntry } from '../lightField';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT } from '../world';
 import type { Ra2Cache } from './cache';
+import type { MapLightGrade } from './mapLighting';
 import { MapLights, type SourceLight } from './mapLights';
 import { cardPush } from './sprites';
 
@@ -67,6 +68,8 @@ export interface NightDressingOptions {
   root: Object3D;
   /** Map objects drawn by the world (buildings with lit windows get a glow in front). */
   objects: readonly MapObject[];
+  /** The map's day light (mapLighting.ts): it follows the same light sources as the night presentation. */
+  mapLight?: MapLightGrade;
 }
 
 /**
@@ -161,6 +164,7 @@ export class Ra2NightDressing implements WorldDressing {
   /** Live matches: the light-emitting buildings currently standing. */
   setSources(sources: readonly SourceLight[]): void {
     this.mapLights?.setSources(sources);
+    this.options.mapLight?.setSources(sources);
     this.version++;
   }
 

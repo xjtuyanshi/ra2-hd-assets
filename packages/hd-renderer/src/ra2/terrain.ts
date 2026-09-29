@@ -6,20 +6,27 @@ import {
   LinearFilter,
   Mesh,
   MeshStandardNodeMaterial,
+  PhysicalLightingModel,
   RedFormat,
   type Object3D,
 } from 'three/webgpu';
 import {
+  BRDF_GGX,
+  BRDF_Lambert,
   attribute,
   clamp,
   color,
+  diffuseColor,
   dot,
   float,
   floor,
   fract,
+  max,
   mix,
+  normalView,
   positionWorld,
   reflector,
+  roughness,
   sin,
   smoothstep,
   step,
@@ -27,6 +34,8 @@ import {
   time,
   uniform,
   vec2,
+  vec3,
+  vec4,
 } from 'three/tsl';
 import { moonlit, night, pavedAt, puddleNoise, sampleLightField, sceneBrightness } from '../atmosphere';
 import { createWaterUniforms, waterSurface, type WaterUniforms } from '../waterShading';
@@ -34,8 +43,27 @@ import type { TerrainBuild } from '../terrain';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT } from '../world';
 import { NO_TILE, ra2Screen, type Ra2Cache, tileAtlasPixel } from './cache';
+import { srgbScale, terrainGradeAt } from './mapLighting';
+import { faithfulDisplay } from '../post';
 import { SHORE_MAX, SHORE_MIN } from './shoreField';
 import { waterLook, waveNormal, wetShore } from './waterLook';
+
+/**
+ * Display compensation of the HD water look. The water (waterLook.ts) was tuned on screen under PBR Neutral, which
+ * darkens and saturates dark colours; the faithful display transform (post.ts) shows them as they are, which lifted
+ * open water by about 40 %. By day the water body and its reflections are scaled by WATER_LEVEL and the body's
+ * saturation by WATER_SATURATION so the water keeps its tuned look, measured against the Neutral renders on RiverRam
+ * (the approved concept); at night the display is Neutral again (HdRenderer) and the compensation fades out with it.
+ * The water takes no map grade of its own: waterLook already mixes the (graded) tile art's hue into the water column.
+ */
+const WATER_LEVEL = 0.67;
+const WATER_SATURATION = 1.8;
+
+function waterForDisplay(body: ShaderNode): ShaderNode {
+  const level: ShaderNode = body.mul(WATER_LEVEL);
+  const luma: ShaderNode = dot(level, vec3(0.2126, 0.7152, 0.0722));
+  return mix(body, mix(vec3(luma), level, WATER_SATURATION).max(0), faithfulDisplay);
+}
 
 /** Vertices per cell edge; ramps are planar per triangle in the engine, so 2 keeps slopes smooth enough. */
 const SUB = 2;
@@ -235,6 +263,10 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
   const geometry = new BufferGeometry();
   const count = positions.length / 3;
   geometry.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3));
+  geometry.setAttribute(
+    'contact',
+    new BufferAttribute(contactShade(positions, walls, hGrid, W * SUB + 1, H * SUB + 1), 1),
+  );
   // The tile art already contains the engine's slope shading; flat shading normals avoid lighting it twice.
   const normals = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) normals[i * 3 + 1] = 1;
@@ -269,7 +301,9 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
   const mesh = new Mesh(geometry, [materials.ground, materials.wall]);
   mesh.name = 'ra2-terrain';
   mesh.receiveShadow = true;
-  mesh.castShadow = true;
+  // The tile art already paints every cliff's and hill's own shading; a sun shadow cast by the cell-stepped cliff
+  // geometry only adds a zig-zag edge the original never shows.
+  mesh.castShadow = false;
 
   const heightAt = (wx: number, wz: number) => {
     const i = Math.min(W * SUB, Math.max(0, Math.round(wx * SUB)));
@@ -278,6 +312,62 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
     return value >= 50 ? 0 : value;
   };
   return { mesh, heightTexture, heightAt, wetness, waterY: null, water, reflectionTarget: materials.reflectionTarget };
+}
+
+/** Extra shore distance (cells) given to water right at a cliff foot, so it reads as deep water (see waterLook). */
+const CLIFF_WATER_DEPTH = 1.5;
+
+/**
+ * Contact shading at the feet of cliffs and raised ground (no sun shadow: original maps take none, see the mesh's
+ * castShadow). For each ground vertex, every one of eight directions contributes its strongest rise within
+ * CONTACT_REACH cells: full at CONTACT_RISE levels or more, fading with distance over CONTACT_FALLOFF cells. The mean,
+ * times CONTACT_STRENGTH, darkens the ground (never below CONTACT_FLOOR), so water and shore at a cliff base read deeper
+ * and the cliff stands on its base instead of floating over smeared shore art; open ground and plateau tops keep
+ * exactly their art. A straight cliff darkens the ground at its foot by about a third, one cell out by a sixth.
+ */
+const CONTACT_REACH = 2;
+const CONTACT_RISE = 1.5;
+const CONTACT_FALLOFF = 0.8;
+const CONTACT_STRENGTH = 2.0;
+const CONTACT_FLOOR = 0.5;
+
+function contactShade(positions: number[], walls: number[], grid: Float32Array, gw: number, gh: number): Float32Array {
+  const count = positions.length / 3;
+  const out = new Float32Array(count).fill(1);
+  const reach = CONTACT_REACH * SUB;
+  const dirs: [number, number][] = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+    [1, 1],
+    [1, -1],
+    [-1, 1],
+    [-1, -1],
+  ];
+  for (let v = 0; v < count; v++) {
+    if (walls[v] === 1) continue;
+    const gx = Math.round(positions[v * 3]! * SUB);
+    const gz = Math.round(positions[v * 3 + 2]! * SUB);
+    const own = positions[v * 3 + 1]!;
+    let sum = 0;
+    for (const [dx, dz] of dirs) {
+      const step = Math.hypot(dx, dz) / SUB;
+      let best = 0;
+      for (let d = 1; d <= reach; d++) {
+        const x = gx + dx * d;
+        const z = gz + dz * d;
+        if (x < 0 || z < 0 || x >= gw || z >= gh) break;
+        const h = grid[z * gw + x]!;
+        if (h >= 50) continue; // missing cell
+        const rise = Math.min(1, Math.max(0, (h - own) / LEVEL_HEIGHT / CONTACT_RISE));
+        best = Math.max(best, rise * Math.exp(-(d * step) / CONTACT_FALLOFF));
+      }
+      sum += best;
+    }
+    out[v] = Math.max(CONTACT_FLOOR, 1 - (CONTACT_STRENGTH * sum) / dirs.length);
+  }
+  return out;
 }
 
 /** Water templates: TMP land type 9 marks open water in TS/RA2; fall back to template names for safety. */
@@ -344,6 +434,50 @@ function wetSheen(
 }
 
 /**
+ * Lighting for original tile art: plain Lambert diffuse from the sun and sky, and specular only where the ground is wet
+ * (`gloss`). three's physical model takes the Fresnel share out of the diffuse light and adds a 4 % dielectric
+ * highlight everywhere; on painted tiles that lifted every dark colour by about 0.02 (linear) and cut the rest by 5 %,
+ * which read as haze over the whole battlefield (flat ground is calibrated to show the art exactly at clear noon).
+ */
+class ArtLightingModel extends PhysicalLightingModel {
+  constructor(private readonly gloss: ShaderNode) {
+    super();
+  }
+
+  override direct({
+    lightDirection,
+    lightColor,
+    reflectedLight,
+  }: Parameters<PhysicalLightingModel['direct']>[0]): void {
+    const irradiance: ShaderNode = (normalView as ShaderNode).dot(lightDirection).clamp().mul(lightColor);
+    (reflectedLight.directDiffuse as ShaderNode).addAssign(
+      irradiance.mul(BRDF_Lambert({ diffuseColor: (diffuseColor as ShaderNode).rgb })),
+    );
+    (reflectedLight.directSpecular as ShaderNode).addAssign(
+      irradiance.mul(BRDF_GGX({ lightDirection, f0: vec3(0.04), f90: 1, roughness } as never)).mul(this.gloss),
+    );
+  }
+
+  override indirect(builder: Parameters<PhysicalLightingModel['indirect']>[0]): void {
+    const { irradiance, reflectedLight } = builder.context as unknown as {
+      irradiance: ShaderNode;
+      reflectedLight: { indirectDiffuse: ShaderNode };
+    };
+    reflectedLight.indirectDiffuse.addAssign(
+      irradiance.mul(BRDF_Lambert({ diffuseColor: (diffuseColor as ShaderNode).rgb })),
+    );
+  }
+}
+
+class ArtMaterial extends MeshStandardNodeMaterial {
+  /** 0 = dry art (diffuse only) .. 1 = full wet specular. */
+  gloss: ShaderNode = float(0);
+  override setupLightingModel(): PhysicalLightingModel {
+    return new ArtLightingModel(this.gloss);
+  }
+}
+
+/**
  * Terrain materials. Ground and cliff walls are separate materials because the water's mirrored render hides the
  * material that samples it: with walls on their own material, cliffs still appear in the reflection.
  */
@@ -364,24 +498,31 @@ function createMaterials(
   };
 
   // Cliff walls take the upper tile's art, else the lower tile's, else neutral rock where neither raster covers the face.
-  const wall = new MeshStandardNodeMaterial();
+  const wall = new ArtMaterial();
   {
     const upper = sample('atlasUv', 'atlasRect').colour;
     const lower = sample('atlasUv2', 'atlasRect2').colour;
     const upperCover = smoothstep(0.2, 0.6, upper.a);
     const lowerCover = smoothstep(0.2, 0.6, lower.a);
-    const colour = mix(mix(color(0x5a5248), lower.rgb, lowerCover), upper.rgb, upperCover);
+    const colour = srgbScale(
+      mix(mix(color(0x5a5248), lower.rgb, lowerCover), upper.rgb, upperCover),
+      terrainGradeAt(cache.mapLight, positionWorld.xz),
+    );
     const wet = wetGround(colour, wetness, float(0));
     // The sun and sky see the night-desaturated albedo; local lights (emissive) the full colour.
     wall.colorNode = moonlit(wet.albedo);
+    wall.gloss = wetness;
     wall.roughnessNode = wet.roughness;
     wall.metalnessNode = float(0);
     // Local lights (map light sources, lamps, fires, explosions) from the light field, as diffuse irradiance.
     wall.emissiveNode = wet.albedo.mul(sampleLightField(positionWorld.xz)).mul(1 / Math.PI);
   }
 
-  const ground = new MeshStandardNodeMaterial();
-  const { uv, colour: art } = sample('atlasUv', 'atlasRect');
+  const ground = new ArtMaterial();
+  const { uv, colour: raw } = sample('atlasUv', 'atlasRect');
+  // Tile art under the map's own light (see mapLighting.ts), as the engine draws it.
+  const grade: ShaderNode = terrainGradeAt(cache.mapLight, positionWorld.xz);
+  const art: ShaderNode = vec4(srgbScale(raw.rgb, grade), raw.a);
   const paved: ShaderNode = pavedAt(positionWorld.xz);
   const localLight: ShaderNode = sampleLightField(positionWorld.xz);
   const wet = wetGround(art.rgb, wetness, paved);
@@ -393,12 +534,21 @@ function createMaterials(
   if (map) {
     // Whole-map terrain: depth, foam and wet sand come from the signed shore distance, reflections from a mirrored
     // render of the scene at the water's level (see waterLook.ts).
-    const shore: ShaderNode = texture(map.shore, uv)
+    // Water at the foot of a cliff is deep in the original art (the wall drops straight into it). There the painted
+    // mask leaves small islands of shore rock that the upscaled art smears into pale blotches ringed with foam, so
+    // water and land within a few tenths of a cell of it at a cliff foot become deep water: no islands, sandy bed,
+    // caustics or lapping foam. Land further from the water keeps its art.
+    const nearCliff: ShaderNode = clamp(float(1).sub(attribute('contact', 'float')).mul(6), 0, 1);
+    const painted: ShaderNode = texture(map.shore, uv)
       .r.mul(SHORE_MAX - SHORE_MIN)
       .add(SHORE_MIN);
+    const cliffWater: ShaderNode = nearCliff.mul(smoothstep(-0.45, -0.15, painted));
+    const shore: ShaderNode = painted.add(cliffWater.mul(CLIFF_WATER_DEPTH));
     // Water wherever the painted mask or the distance field says so; the soft painted shore band (grey foam art) is
     // replaced by our own shoreline instead of blending with it.
-    const waterness: ShaderNode = smoothstep(0.3, 0.55, texture(map.waterMask, uv).r).max(smoothstep(0.0, 0.08, shore));
+    const waterness: ShaderNode = smoothstep(0.3, 0.55, texture(map.waterMask, uv).r)
+      .max(smoothstep(0.0, 0.08, shore))
+      .max(cliffWater);
     let reflection: { colour: ShaderNode; coverage: ShaderNode } | undefined;
     if (waterY !== null) {
       const mirror = reflector({ resolutionScale: 0.5, depth: true });
@@ -422,17 +572,17 @@ function createMaterials(
     const towardsWater: ShaderNode = vec2(gradU, gradV).normalize();
     // Step about 0.7 cells inland, measured in composite pixels (one cell spans roughly 42 engine pixels).
     const reach = vec2((0.7 * 42 * map.ref.scale) / map.ref.width, (0.35 * 42 * map.ref.scale) / map.ref.height);
-    const inland: ShaderNode = texture(
-      colourMap,
-      uv.sub(towardsWater.mul(reach).mul(smoothstep(-0.7, 0.0, shore))),
-    ).rgb;
+    const inland: ShaderNode = srgbScale(
+      texture(colourMap, uv.sub(towardsWater.mul(reach).mul(smoothstep(-0.7, 0.0, shore)))).rgb,
+      grade,
+    );
     const band = smoothstep(-0.55, -0.12, shore);
     const sand = wetShore(shore);
     const land = mix(albedo, wetGround(inland, wetness, paved).albedo, band).mul(mix(float(1), float(0.8), sand));
-    albedo = mix(land, look.body, waterness);
+    albedo = mix(land, waterForDisplay(look.body), waterness);
     roughness = mix(mix(roughness, float(0.35), sand), float(1), waterness);
     sheen = sheen.mul(float(1).sub(waterness));
-    ground.emissiveNode = look.emission;
+    ground.emissiveNode = look.emission.mul(mix(float(1), float(WATER_LEVEL), faithfulDisplay));
   } else {
     // Per-tile atlas fallback: the painted water with sky reflection and glints, as before.
     const surface = waterSurface(water);
@@ -442,8 +592,12 @@ function createMaterials(
     ground.emissiveNode = surface.sky.mul(surface.fresnel).add(surface.glint).mul(waterness);
     roughness = mix(roughness, float(0.25), waterness);
   }
-  // The sun and sky see the night-desaturated albedo; local lights (emissive, below) the full colour.
+  // Contact shading darkens every light at cliff feet (an occlusion term); the sun and sky see the night-desaturated
+  // albedo, local lights (emissive, below) the full colour.
+  albedo = albedo.mul(attribute('contact', 'float'));
   ground.colorNode = moonlit(albedo);
+  // Dry original art has no sheen of its own; wet ground and puddles reflect the sun.
+  ground.gloss = max(wetness, wet.puddle);
   ground.roughnessNode = roughness;
   ground.metalnessNode = float(0);
   // Local lights from the light field (exactly zero by day without explosions), plus the wet paved sheen.

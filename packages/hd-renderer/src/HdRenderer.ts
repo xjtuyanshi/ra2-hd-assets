@@ -4,6 +4,8 @@ import {
   Color,
   DataTexture,
   NeutralToneMapping,
+  NoColorSpace,
+  NoToneMapping,
   PCFSoftShadowMap,
   RedFormat,
   RenderPipeline,
@@ -15,9 +17,24 @@ import {
   type Texture,
   type ToneMapping,
 } from 'three/webgpu';
-import { float, length, pass, renderOutput, screenUV, smoothstep, texture, uniform, vec4 } from 'three/tsl';
+import {
+  dot,
+  float,
+  length,
+  mix,
+  neutralToneMapping,
+  pass,
+  renderOutput,
+  screenUV,
+  smoothstep,
+  texture,
+  uniform,
+  vec3,
+  vec4,
+} from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
+import { sharpen } from 'three/addons/tsl/display/SharpenNode.js';
 import {
   DEFAULT_ATMOSPHERE,
   DEFAULT_ATMOSPHERE_SETTINGS,
@@ -44,14 +61,33 @@ import { LightField, type DynamicLight } from './lightField';
 import { Lighting, noonFlatLuminance } from './lighting';
 import { Mist, MIST_CAP } from './mist';
 import { ObjectLayer } from './objects';
+import { faithfulDisplay, faithfulToneMap } from './post';
 import { buildTerrain, type TerrainBuild } from './terrain';
+import type { ShaderNode } from './tsl';
 import { buildWater, type WaterUniforms } from './water';
 import { buildRain, type RainSystem } from './weather';
 import { VOXEL_FILL, voxelFill } from './ra2/voxels';
+import { groundFromHeights, setShadowGround } from './ra2/voxelShadow';
+import { voxelDebug } from './ra2/vpl';
 import type { HdWorld } from './ra2/world';
 import { IsoCamera, LEVEL_HEIGHT, cellToWorld } from './world';
 
-export type ToneMapper = 'agx' | 'neutral' | 'aces';
+/** 'faithful' (default): identity below the knee, hue-preserving shoulder above (see post.ts). */
+export type ToneMapper = 'faithful' | 'agx' | 'neutral' | 'aces';
+
+/**
+ * 'msaa4': 4x multisampled scene pass (default); 'fxaa': single-sample pass plus FXAA, the cheaper fallback. At
+ * 2400x1500 device pixels the multisampled scene colour (RGBA16F) and depth take about 115 MB and 58 MB (plus a
+ * 29 MB resolve texture), against about 29 MB and 14 MB single-sampled; devices reporting 4 GB of memory or less
+ * (navigator.deviceMemory) default to 'fxaa'.
+ */
+export type Antialias = 'msaa4' | 'fxaa' | 'none';
+
+/** Default anti-aliasing for this device (see Antialias). */
+export function defaultAntialias(): Antialias {
+  const memory = (globalThis.navigator as { deviceMemory?: number } | undefined)?.deviceMemory;
+  return memory !== undefined && memory <= 4 ? 'fxaa' : 'msaa4';
+}
 
 export interface HdSettings {
   toneMapper: ToneMapper;
@@ -59,10 +95,18 @@ export interface HdSettings {
   bloom: number;
   vignette: number;
   shadows: boolean;
-  antialias: boolean;
+  antialias: Antialias;
+  /** RCAS sharpening after the display transform: 0 = strongest, 2 = off (three's SharpenNode scale); < 0 disables. */
+  sharpness: number;
+  /**
+   * Diagnostics: 'overbright' shows white where the exposed scene (before bloom and tone map) exceeds luminance 1;
+   * 'voxel-xy' / 'voxel-z' write raw voxel attributes (see ra2/vpl.ts voxelDebug) straight to the screen, for fitting
+   * the voxel lighting against captures of the original.
+   */
+  debugView: 'none' | 'overbright' | 'voxel-xy' | 'voxel-z';
 }
 
-const TONE_MAPPERS: Record<ToneMapper, ToneMapping> = {
+const TONE_MAPPERS: Record<Exclude<ToneMapper, 'faithful'>, ToneMapping> = {
   agx: AgXToneMapping,
   neutral: NeutralToneMapping,
   aces: ACESFilmicToneMapping,
@@ -71,6 +115,19 @@ const TONE_MAPPERS: Record<ToneMapper, ToneMapping> = {
 /** Everything visible: the default visibility mask (no shroud). */
 const ALL_VISIBLE = new DataTexture(new Uint8Array([255]), 1, 1, RedFormat, UnsignedByteType);
 ALL_VISIBLE.needsUpdate = true;
+
+/**
+ * A flat visibility mask on the ground plane y = 0 (a live view's shroud), for setVisibility: a linear-filtered texture
+ * covering the world rectangle `origin` .. `origin + size` (x, z) edge to edge, and how a filtered texel turns into
+ * visibility 0..1 (default: its red channel).
+ */
+export interface VisibilityMask {
+  texture: Texture;
+  origin: readonly [number, number];
+  size: readonly [number, number];
+  /** Shader function of the sampled texel (vec4); changing it rebuilds the post pipeline. */
+  shape?: (texel: ShaderNode) => ShaderNode;
+}
 
 const smooth = (edge0: number, edge1: number, x: number): number => {
   const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
@@ -127,6 +184,14 @@ export interface HdStats {
 }
 
 /**
+ * Bloom only picks up light above this exposed luminance. Original art at clear noon stays at or below 1 (see post.ts),
+ * so only effect cores and specular glints glow; white cars and concrete do not.
+ */
+const BLOOM_THRESHOLD = 1.0;
+/** Bloom threshold of the night presentation, on the unexposed scene (as it was tuned). */
+const NIGHT_BLOOM_THRESHOLD = 0.85;
+
+/**
  * Consumes RenderState snapshots and draws the HD battlefield. It owns no game rules and never writes game state:
  * visual randomness, interpolation and effects live entirely on this side of the contract.
  */
@@ -135,21 +200,37 @@ export class HdRenderer {
   readonly scene = new Scene();
   readonly view = new IsoCamera();
   readonly settings: HdSettings = {
-    toneMapper: 'neutral',
+    toneMapper: 'faithful',
     exposure: 1,
     bloom: 0.55,
     vignette: 0.25,
     shadows: true,
-    antialias: true,
+    antialias: defaultAntialias(),
+    // Mild: stronger RCAS (toward 0) turns upscaled grass and gravel crunchy at zoom 1.6.
+    sharpness: 1,
+    debugView: 'none',
   };
   /** Night presentation: map lights, HD lamps, windows, mist, night level (changeable at runtime). */
   readonly atmosphere: AtmosphereSettings = { ...DEFAULT_ATMOSPHERE_SETTINGS };
   private pipeline: RenderPipeline | undefined;
-  /** Nodes of the current pipeline that own render targets. */
+  /** Nodes of the current pipeline that own render targets (pass targets, bloom, FXAA and sharpen), freed on rebuild. */
   private pipelineNodes: { dispose(): void }[] = [];
   private readonly bloomStrength = uniform(0.55);
+  /** Bloom threshold on the unexposed scene (see frame()). */
+  private readonly bloomThreshold = uniform(NIGHT_BLOOM_THRESHOLD);
   private readonly blackLift = uniform(new Color(0, 0, 0));
+  /** Share of PBR Neutral in the faithful display transform: the night weight on original maps (see post.ts). */
+  private readonly nightDisplay = uniform(0);
   private readonly vignetteStrength = uniform(0.25);
+  /**
+   * Scene exposure per channel, applied before bloom and the display transform (the built-in tone mappers get
+   * exposure 1). For original maps it is pi / (flat-ground irradiance at clear noon), per channel: a white balance
+   * to the noon reference, so terrain, sprites and voxels show exactly their original colours at noon although the
+   * noon sun is slightly warm and the sky blue.
+   */
+  private readonly exposure = uniform(new Color(1, 1, 1));
+  /** Flat-ground irradiance at clear noon (per channel), measured once from the lighting model. */
+  private readonly noonIrradiance = new Color();
   private readonly lighting: Lighting;
   private readonly objects = new ObjectLayer();
   /** HD effects; live views spawn into it from the game's own effect list. */
@@ -167,7 +248,9 @@ export class HdRenderer {
    * otherwise.
    */
   private readonly visibility = texture(ALL_VISIBLE);
+  private readonly visibilityOrigin = uniform(new Vector2(0, 0));
   private readonly visibilitySize = uniform(new Vector2(1, 1));
+  private visibilityShape: VisibilityMask['shape'] | null = null;
   private terrain!: TerrainBuild;
   private water: { uniforms: WaterUniforms } | null = null;
   private rain!: RainSystem;
@@ -268,6 +351,12 @@ export class HdRenderer {
       this.view.target.set(map.width / 2, 0, map.height / 2);
     }
     this.waterY = waterY ?? -1000;
+    // Voxel units stand on (and tilt with) the ground or the water surface under them, and their flattened shadows
+    // fall there (see ra2/voxelShadow.ts). Ramps rise one level per cell; anything steeper is a cliff edge.
+    setShadowGround(
+      this.scene,
+      groundFromHeights((x, z) => Math.max(this.terrain.heightAt(x, z), this.waterY), LEVEL_HEIGHT * 1.5),
+    );
     if (world?.water) this.water = { uniforms: world.water };
     if (waterY !== null) {
       const water = buildWater(this.bounds.width, this.bounds.height, waterY, this.terrain.heightTexture);
@@ -284,6 +373,9 @@ export class HdRenderer {
       surfaceTexture.value = world.surfaceTexture;
       surfaceSize.value.set(world.width, world.height);
     }
+    // Flat-ground irradiance at clear noon (day keys never depend on the map's profile): the day exposure's white point.
+    this.lighting.update(12, 0);
+    this.lighting.flatIrradianceColor(this.noonIrradiance);
     this.scene.add(this.terrain.mesh, this.lighting.root, this.effects.root, this.rain.object, this.emitters.root);
     world?.dressing?.attach({
       scene: this.scene,
@@ -296,52 +388,102 @@ export class HdRenderer {
   }
 
   /**
-   * Shroud (or any flat visibility mask) drawn on the ground plane y = 0: one texel per cell, R = 255 visible, 128
-   * fog, 0 black, linear-filtered; `width` x `height` cells. Null shows everything.
+   * Shroud (or any flat visibility mask) drawn on the ground plane y = 0. A plain texture has one texel per cell, R =
+   * 255 visible, 128 fog, 0 black, linear-filtered, over `width` x `height` cells; a VisibilityMask brings its own
+   * extent and shaping. Null shows everything.
    */
-  setVisibility(mask: Texture | null, width = 1, height = 1): void {
-    this.visibility.value = mask ?? ALL_VISIBLE;
-    this.visibilitySize.value.set(width, height);
+  setVisibility(mask: Texture | VisibilityMask | null, width = 1, height = 1): void {
+    const full: VisibilityMask | null =
+      mask && 'isTexture' in mask ? { texture: mask, origin: [0, 0], size: [width, height] } : mask;
+    this.visibility.value = full?.texture ?? ALL_VISIBLE;
+    this.visibilityOrigin.value.set(full?.origin[0] ?? 0, full?.origin[1] ?? 0);
+    this.visibilitySize.value.set(full?.size[0] ?? 1, full?.size[1] ?? 1);
+    const shape = full?.shape ?? null;
+    if (shape === this.visibilityShape) return;
+    this.visibilityShape = shape;
+    if (this.pipeline) this.buildPipeline();
   }
 
   private buildPipeline(): void {
-    // Release the previous pipeline's render targets and output material before building the new one.
+    const { antialias, toneMapper, sharpness, debugView } = this.settings;
+    // Release the previous pipeline's render targets and output material before building the new one (the MSAA scene
+    // target alone is over 100 MB at 2400x1500).
     this.pipeline?.dispose();
     for (const node of this.pipelineNodes) node.dispose();
-    const scenePass = pass(this.scene, this.view.camera);
-    const hdr = scenePass.getTextureNode('output');
-    const depth = scenePass.getTextureNode('depth');
+    const nodes: { dispose(): void }[] = (this.pipelineNodes = []);
+    const scenePass = pass(this.scene, this.view.camera, { samples: antialias === 'msaa4' ? 4 : 0 });
+    nodes.push(scenePass);
+    const hdr: ShaderNode = scenePass.getTextureNode('output');
+    const depth: ShaderNode = scenePass.getTextureNode('depth');
     const world = this.mist.worldPosition(depth, screenUV);
     // Mist sits in the scene before bloom so lamp halos in it glow like the lamps themselves. With no mist the
     // pipeline leaves it out entirely (frame() rebuilds it when the mist starts or stops).
     this.mistInPipeline = this.mist.amount.value > 0;
-    const misted = this.mistInPipeline ? this.mist.apply(hdr, depth, world) : hdr;
+    const misted: ShaderNode = this.mistInPipeline ? this.mist.apply(hdr, depth, world) : hdr;
     // The shroud covers the mist and everything under it, and what it hides never feeds the bloom.
-    const visible = texture(this.visibility, this.mist.groundPlanePoint(world).div(this.visibilitySize)).r;
+    const texel: ShaderNode = texture(
+      this.visibility,
+      this.mist.groundPlanePoint(world).sub(this.visibilityOrigin).div(this.visibilitySize),
+    );
+    const visible: ShaderNode = this.visibilityShape ? this.visibilityShape(texel) : texel.r;
     // Colour only: the canvas stays opaque, so shroud is black and not the page behind it.
-    const shown = vec4(misted.rgb.mul(visible), misted.a);
-    const glow = bloom(shown, 1, 0.45, 0.85);
+    const shown: ShaderNode = vec4(misted.rgb.mul(visible), misted.a);
+    // Bloom reads the unexposed scene; frame() sets its threshold from the exposure.
+    const glow: ShaderNode = bloom(shown, 1, 0.45, this.bloomThreshold);
     glow.strength = this.bloomStrength;
-    this.pipelineNodes = [scenePass, glow];
+    nodes.push(glow);
     const vignette = float(1).sub(
       smoothstep(0.45, 1.05, length(screenUV.sub(0.5).mul(1.6))).mul(this.vignetteStrength),
     );
     // Opaque output: the vignette darkens colour only (it used to scale alpha too, letting the page show in corners).
-    const composite = vec4(shown.rgb.add(glow.rgb.mul(visible)).mul(vignette), 1);
+    const composite: ShaderNode = shown.rgb.add(glow.rgb.mul(visible)).mul(this.exposure).mul(vignette);
     this.pipeline = new RenderPipeline(this.renderer);
-    // Anti-aliasing must run on the tone-mapped, display-referred image.
+    // Anti-aliasing and sharpening run on the display-referred image.
     this.pipeline.outputColorTransform = false;
-    const output = renderOutput(composite);
+    voxelDebug.value = debugView === 'voxel-xy' ? 1 : debugView === 'voxel-z' ? 2 : 0;
+    if (debugView === 'overbright') {
+      const luminance = dot(hdr.rgb.mul(this.exposure), vec3(0.2126, 0.7152, 0.0722));
+      this.pipeline.outputNode = vec4(vec3(luminance.greaterThan(1).select(float(1), float(0))), 1);
+      return;
+    }
+    if (debugView !== 'none') {
+      // Raw values, no exposure, tone map or colour conversion: screenshots read them back byte for byte.
+      this.pipeline.outputNode = renderOutput(vec4(hdr.rgb, 1), NoToneMapping, NoColorSpace);
+      return;
+    }
+    // 'faithful': the palette's own colours by day, PBR Neutral at night (the night presentation's calibration).
+    const faithful: ShaderNode = faithfulToneMap(composite);
+    const neutral: ShaderNode = neutralToneMapping(composite, float(1));
+    // (TSL's chained a.mix(b, t) is mix(b, t, a); call mix() directly.)
+    const mixed: ShaderNode = mix(faithful, neutral, this.nightDisplay);
+    const output: ShaderNode =
+      toneMapper === 'faithful'
+        ? renderOutput(vec4(mixed, 1), NoToneMapping)
+        : renderOutput(vec4(composite, 1), TONE_MAPPERS[toneMapper]);
     const toe = float(1).sub(output.rgb.div(NIGHT_TOE)).max(0);
-    const display = vec4(output.rgb.add(this.blackLift.mul(visible).mul(toe.mul(toe))), 1);
-    this.pipeline.outputNode = this.settings.antialias ? fxaa(display) : display;
+    let display: ShaderNode = vec4(output.rgb.add(this.blackLift.mul(visible).mul(toe.mul(toe))), 1);
+    if (antialias === 'fxaa') {
+      display = fxaa(display);
+      nodes.push(display);
+    }
+    if (sharpness >= 0 && sharpness < 2) {
+      display = sharpen(display, sharpness);
+      nodes.push(display);
+    }
+    this.pipeline.outputNode = display;
   }
 
   applySettings(): void {
-    this.renderer.toneMapping = TONE_MAPPERS[this.settings.toneMapper];
+    // Exposure is applied in the pipeline for every tone mapper.
+    this.renderer.toneMapping =
+      this.settings.toneMapper === 'faithful' ? NoToneMapping : TONE_MAPPERS[this.settings.toneMapper];
+    this.renderer.toneMappingExposure = 1;
     this.bloomStrength.value = this.settings.bloom;
     this.vignetteStrength.value = this.settings.vignette;
-    this.lighting.sun.castShadow = this.settings.shadows;
+    // Original maps have no sun-shadow casters: the tile art paints terrain shading, sprites carry their own shadow
+    // frames and voxels draw engine-style flattened shadows. Skipping the empty shadow map saves a full depth pass
+    // and the per-pixel shadow lookups of every receiver.
+    this.lighting.sun.castShadow = this.settings.shadows && !this.world;
     this.buildPipeline();
   }
 
@@ -409,11 +551,30 @@ export class HdRenderer {
     this.lighting.update(env.timeOfDay, raining ? 0.35 + 0.5 * rainAmount : 0);
     const light = this.lighting.state;
     const reference = this.lighting.referenceIrradiance();
-    // Original maps are calibrated so flat ground at noon shows the tile art at its original brightness; other times
-    // and weather scale from there. The procedural sandbox keeps its own per-key exposure.
-    this.renderer.toneMappingExposure = this.world
-      ? (this.settings.exposure * Math.PI) / reference
-      : this.settings.exposure * light.exposure;
+    // Original maps only: the procedural sandbox keeps its own look.
+    const nightGrade = this.world ? light.night : 0;
+    // Original maps are calibrated so flat ground at clear noon shows the tile art at its original colour: by day the
+    // exposure is pi / (noon flat-ground irradiance) per channel, a white balance to the noon reference (the noon sun
+    // is slightly warm and the sky blue). The night presentation keeps the scalar pi / reference it was tuned with;
+    // hours in between blend. The procedural sandbox keeps its own per-key exposure.
+    const exposure: Color = this.exposure.value;
+    if (this.world) {
+      const noon = this.noonIrradiance;
+      const k = Math.PI * this.settings.exposure;
+      const mixed = (c: number) => k * (1 / c + (1 / reference - 1 / c) * nightGrade);
+      exposure.setRGB(mixed(noon.r), mixed(noon.g), mixed(noon.b));
+    } else {
+      exposure.setScalar(this.settings.exposure * light.exposure);
+    }
+    // Bloom picks up exposed luminance above 1 by day (effect cores and glints only, never lit art); the night keeps
+    // its tuned threshold on the unexposed scene.
+    const dayThreshold = BLOOM_THRESHOLD / Math.max(1e-3, (exposure.r + exposure.g + exposure.b) / 3);
+    this.bloomThreshold.value = dayThreshold + (NIGHT_BLOOM_THRESHOLD - dayThreshold) * nightGrade;
+    this.nightDisplay.value = nightGrade;
+    faithfulDisplay.value = this.settings.toneMapper === 'faithful' ? 1 - nightGrade : 0;
+    // The map's own light by day ([Lighting] and light sources, mapLighting.ts); the night presentation owns maps staged
+    // as night or dusk and the night hours of day maps.
+    this.world?.mapLight?.setWeight(profile?.kind === 'day' ? 1 - light.night : 0);
     if (this.water) {
       const w = this.water.uniforms;
       w.sunDirection.value.copy(light.sunDirection);
@@ -433,8 +594,6 @@ export class HdRenderer {
       ((0.2126 * level.r + 0.7152 * level.g + 0.0722 * level.b) * reference) / noonFlatLuminance();
     nightNode.value = light.night;
     rainNode.value = rainAmount;
-    // Original maps only: the procedural sandbox keeps its own look.
-    const nightGrade = this.world ? light.night : 0;
     moonDesaturation.value = NIGHT_DESATURATION * nightGrade;
     const levelLuminance = 0.2126 * level.r + 0.7152 * level.g + 0.0722 * level.b;
     moonNeutral.value.setRGB(
@@ -486,8 +645,11 @@ export class HdRenderer {
       sprites.cameraRight.value.copy(right);
       sprites.cameraUp.value.copy(up);
       sprites.toCamera.value.copy(toCamera);
-      // Unlit original art follows the scene's light level relative to the noon reference (1 = original look).
-      sprites.light.value.copy(sceneLevel.value);
+      // Unlit original art takes the light a flat Lambert surface would: irradiance / pi, which the day exposure
+      // (pi / noon irradiance) turns into colour x E / Enoon, exactly the original colour at clear noon and the same
+      // level as the terrain around it. The night keeps the level it was tuned with (irradiance / reference).
+      const spriteScale = 1 / Math.PI + (1 / reference - 1 / Math.PI) * nightGrade;
+      this.lighting.flatIrradianceColor(sprites.light.value).multiplyScalar(spriteScale);
     }
     // Emissive light is not divided by pi like diffuse, so fill = irradiance * k / pi lands at k x albedo at noon.
     this.lighting.flatIrradianceColor(voxelFill.value).multiplyScalar(VOXEL_FILL / Math.PI);
@@ -589,7 +751,7 @@ export class HdRenderer {
     });
     return {
       backend: this.backend,
-      exposure: this.renderer.toneMappingExposure,
+      exposure: (this.exposure.value.r + this.exposure.value.g + this.exposure.value.b) / 3,
       hour: this.state.environment.timeOfDay,
       night: this.lighting.state.night,
       nightLevel: this.lighting.nightLevel,

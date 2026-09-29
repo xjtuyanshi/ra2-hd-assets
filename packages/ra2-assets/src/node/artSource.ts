@@ -255,7 +255,7 @@ export function buildVoxelModel(
   warn: (m: string) => void,
 ): VoxelModel | undefined {
   const parts: VoxelPart[] = [];
-  let normalsMode = 4;
+  let normalsMode: number | undefined;
   for (const { role, stem: name, required } of specs) {
     let vxl: VxlFile | undefined;
     try {
@@ -285,7 +285,7 @@ export function buildVoxelModel(
       m[3] = m[3]! * s.scale;
       m[7] = m[7]! * s.scale;
       m[11] = m[11]! * s.scale;
-      normalsMode = s.normalsMode;
+      normalsMode ??= s.normalsMode;
       const buf = new Uint8Array(s.voxels.length * 5);
       s.voxels.forEach((v, i) => buf.set([v.x, v.y, v.z, v.color, v.normal], i * 5));
       return {
@@ -296,12 +296,14 @@ export function buildVoxelModel(
         maxBounds: [...s.maxBounds] as [number, number, number],
         transform: m,
         voxels: b64(buf),
+        normalsMode: s.normalsMode,
       };
     });
     parts.push({ role, sections });
   }
   if (!parts.length) return undefined;
-  return { id, palette: 'unit', normalsMode, parts, file: `${specs[0]!.stem}.vxl`, turretOffset };
+  // The model-level mode is the first (body) section's; each section carries its own.
+  return { id, palette: 'unit', normalsMode: normalsMode ?? 4, parts, file: `${specs[0]!.stem}.vxl`, turretOffset };
 }
 
 export interface PackedSprites {

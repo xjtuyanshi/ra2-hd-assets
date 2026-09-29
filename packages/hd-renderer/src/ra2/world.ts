@@ -4,10 +4,12 @@ import type { MapObject } from '../../../ra2-assets/src/manifest';
 import type { WorldDressing } from '../atmosphere';
 import type { TerrainBuild } from '../terrain';
 import { decodeBase64, loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOptions } from './cache';
+import type { MapLightGrade } from './mapLighting';
 import { Ra2NightDressing } from './nightDressing';
 import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from './sprites';
 import { buildRa2Terrain } from './terrain';
 import { buildVoxelGeometry, createVoxelMaterial, instantiateVoxel, type VoxelGeometry } from './voxels';
+import { loadVoxelLighting } from './vpl';
 
 /** A battlefield the HD renderer can draw: terrain, optional water, and everything standing on it. */
 export interface HdWorld {
@@ -28,6 +30,8 @@ export interface HdWorld {
   surface?: Uint8Array;
   /** Night dressing: map light sources, HD street lamps, window glows. */
   dressing?: WorldDressing & Ra2NightDressing;
+  /** The engine's per-cell light of the map ([Lighting] plus light sources), applied by day (see mapLighting.ts). */
+  mapLight?: MapLightGrade;
 }
 
 /** Surface classes per cell: the sidecar's (tile colours) when present, else land types only. */
@@ -67,7 +71,12 @@ export async function loadRa2World(
     includeObject?: (object: MapObject) => boolean;
   } & Ra2CacheOptions = {},
 ): Promise<HdWorld> {
-  const cache = await loadRa2Cache(base, options);
+  // The engine's voxel lighting table lives next to the map caches, in the type library's common directory; without
+  // it voxels use a fitted fallback curve.
+  const [cache] = await Promise.all([
+    loadRa2Cache(base, options),
+    loadVoxelLighting(`${base.replace(/\/$/, '')}/../_library/common/voxels-vpl.json`),
+  ]);
   const { manifest } = cache;
   // InvisibleInGame objects (lamp-post dummies such as INGALITE) are never drawn by the engine.
   const hidden = new Set(cache.lights?.hiddenObjects ?? []);
@@ -113,6 +122,8 @@ export async function loadRa2World(
     const frame = entry.frames[frameIndex]!;
     const flat = !!object.flat;
     const push = cardPush(frame);
+    // The extractor records how the engine lights each object (absent = 'full', terrain-class art).
+    const lighting = object.lighting ?? 'full';
     for (const underlay of entry.underlays ?? []) {
       const bib = manifest.sprites[underlay];
       if (bib?.frames[0])
@@ -123,12 +134,13 @@ export async function loadRa2World(
           push: 0,
           shadow: false,
           flat: true,
+          lighting,
         });
     }
     // Shadows are cast on the ground: draw them as decals too.
     const shadow = entry.shadows?.[frameIndex];
     if (shadow) sprites.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
-    sprites.push({ anchor, frame, palette, push, shadow: false, flat });
+    sprites.push({ anchor, frame, palette, push, shadow: false, flat, lighting });
     for (const layer of entry.layers ?? []) {
       const art = manifest.sprites[layer];
       if (art?.frames[0])
@@ -138,6 +150,7 @@ export async function loadRa2World(
           palette: paletteFor(cache, art.palette, art.remap, object.owner),
           push: push + 0.01,
           shadow: false,
+          lighting,
         });
     }
   }
@@ -151,11 +164,13 @@ export async function loadRa2World(
   );
   root.add(spriteLayer.mesh);
   const surface = cellSurface(cache);
+  const mapLight = cache.mapLight ?? undefined;
   const dressing = new Ra2NightDressing({
     cache,
     heightAt: terrain.heightAt,
     root,
     objects,
+    mapLight,
   });
 
   const waypoint = manifest.waypoints.find((w) => w.id === 0) ?? manifest.waypoints[0];
@@ -175,6 +190,7 @@ export async function loadRa2World(
     surface,
     surfaceTexture: surfaceTexture(surface, manifest.grid.width, manifest.grid.height),
     dressing,
+    mapLight,
   };
 }
 

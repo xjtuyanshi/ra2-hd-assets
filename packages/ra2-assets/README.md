@@ -28,6 +28,10 @@ pnpm hd:terrain-map -- --map RiverRam [--cache <dir>]
 # Type library for live matches (defaults: all six theaters, --out <repo>/gameres/hd-cache/_library)
 pnpm hd:library -- [--game <install dir>] [--theater temperate --theater snow ...] [--out <dir>] [--preview]
 
+# Effect art sidecar for live matches (defaults: all six theaters, --out <repo>/gameres/hd-cache/_library/common/effects);
+# --table also writes the HD garnish table the live renderer imports
+pnpm hd:effects -- [--game <install dir>] [--theater urban ...] [--out <dir>] [--table packages/hd-renderer/src/live/effectTable.ts]
+
 # Upscale the scale-1 composite with a separately installed Real-ESRGAN ncnn-vulkan executable
 pnpm hd:upscale -- --map RiverRam [--cache <dir>] [--scale 2] [--model realesrgan-x4plus] [--tile 256]
 pnpm hd:upscale -- --map RiverRam --bin <binary-path> --compare 1200,700,160,100
@@ -40,6 +44,10 @@ pnpm hd:lights -- --library urban [--cache <dir>]
 # Build offline 2x sprite colours and house-remap masks from an existing indexed atlas
 pnpm hd:sprites -- --map RiverRam [--cache <dir>] [--bin <binary-path>] [--model realesrgan-x4plus]
 pnpm hd:sprites -- --library temperate --pages 0 [--cache <dir>] [--bin <binary-path>]
+
+# Material sidecars: the voxel lighting table into <library>/common/, colour-matched HD terrain per map
+pnpm hd:materials -- [--game <install dir>] [--out <library dir>]
+pnpm hd:materials -- --terrain XMP29U2 --terrain RiverRam [--cache <dir>] [--sigma 2]
 ```
 
 ## Prepare a complete map cache
@@ -317,9 +325,29 @@ Per theater (stock YR 1.001 install): 379-391 of 402 buildings, 78 of 80 vehicle
 12 aircraft resolve; the rest are types with no art in that theater (snow-only civilian buildings, ZZZ dummies,
 `DeathDummy`, `YDUM`, `WEEDGUY`, `APACHE`).
 
+## Material sidecars (`hd:materials`)
+
+New files only; map manifests and `library.json` are never rewritten.
+
+- `<library>/common/voxels-vpl.png` + `voxels-vpl.json` (`src/vpl.ts`): the engine's voxel lighting table
+  (`voxels.vpl`: 32 rows remapping each palette index for a lighting level) as a 256x32 greyscale image, and the
+  engine's rule for picking a row per voxel normal, recorded for reference (YR 1.001 @0x7586F0:
+  `section = int(16 * (max(0, N.L) + max(0, b / (3 - 2b))))`, `b = N.H`, `H = normalize(L + up)`, light in HD world
+  axes; see `src/node/materials.ts`). Re-running the command rewrites only this pair.
+- `<cache>/<map>/<terrain file>-cm.png` + `materials.json` (`src/mapMaterials.ts`), with `--terrain`: the manifest's
+  HD terrain image with its low-frequency colour (CIE Lab, Gaussian of `--sigma` original pixels) taken from the
+  original composite `terrain-map.png`, keeping the HD image's own detail (`src/node/terrainColour.ts`). AI upscaling
+  and re-materialisation drift colours by up to about 10 % in luma and 0.05 in saturation per material; the matched
+  image is within 1 % at that scale. The renderer prefers it when `materials.json` names it.
+
 ## Engine rules the extractor encodes
 
 - MIX priority (highest first): expandmd##, ra2md/ra2, cache, local, language, conquer/generic/isogen, theater mixes.
+- Voxel normals: every VXL section names its own normal table (tailer normalsMode 2 = TS, 4 = RA2), and models mix
+  them (HTNK, HTK, LTNK, UTNK, XCOMET in YR 1.001). `VoxelSection.normalsMode` records each; older caches carry only
+  `VoxelModel.normalsMode` (the last section's), so readers call `sectionNormalsMode` (`src/voxelNormals.ts`), which
+  infers the table from the stored normals when the section has none (matches the install on all 129 library
+  sections).
 - Tiles: engine tile-set walk from `[TileSet0000]`; `0xffff`, out-of-range tiles, empty sub-tiles and cells missing
   from IsoMapPack5 inside the `[Map] Size` rhombus become the `[General] ClearTile` template.
 - Palettes: tiles, trees, rocks, low bridges and smudges use `iso<th>.pal`; ore and gems use `<theater>.pal`;
@@ -333,7 +361,7 @@ Per theater (stock YR 1.001 install): 379-391 of 402 buildings, 78 of 80 vehicle
   frame 0; SHP facings map as the engine does (facing 0 = map north = frame 7 of 8); building anim layers export only
   the middle frame of their LoopStart..LoopEnd range.
 - Lighting (`MapObject.lighting`): `full` (tiles, trees, rocks, overlays, smudges), `ambient` (buildings, units,
-  walls) or `none` (ore, gems, ore mines), with the reference engine's formula in `mapLightMultipliers`.
+  walls) or `none` (ore, gems, ore mines), with the engine's cell formula (`engineCellLight` in `src/lights.ts`) in `mapLightMultipliers`.
 - Art names: `Theater=yes` uses the theater extension; every other image whose name starts with G/N/C/Y followed by a
   theater letter (A/T/U/D/L/N) gets the map's letter, then G, then keeps the plain name. The engine does this whatever
   the art `NewTheater=` says: the install ships temperate/urban/desert/lunar files for flags marked `NewTheater=no`,
@@ -341,12 +369,42 @@ Per theater (stock YR 1.001 install): 379-391 of 402 buildings, 78 of 80 vehicle
 - Type library only: art `Remapable=` applies to infantry and vehicles too (animals are not house-coloured); art
   `TerrainPalette=yes` is recorded but the unit palette is kept (the lamp art is colour noise with the iso palette).
 
+## Effect art sidecar (`<out>/_library/common/effects/`)
+
+`hd:effects` (`src/node/effectsLibrary.ts`, contract `src/effects.ts`) collects the original art of everything a live
+match draws besides its units and buildings, so the live renderer can draw the engine's own effects as its base layer:
+
+- every rulesmd `[Animations]` entry plus every anim id a rules or art key creates (weapon `Anim=`, warhead
+  `AnimList=`, techno `Explosion=`/`DebrisAnims=`, building `DestroyAnim=`, projectile `Trailer=`, the anim keys of
+  `[General]`/`[CombatDamage]`/`[AudioVisual]`, and every `Next=`/`ExpireAnim=`/`TrailerAnim=`/`Spawns=` chain),
+  with the timing the engine derives (`frameCount` = art `End=` or the SHP's frame count, halved for `Shadow=yes`;
+  `rateFrames` from `Rate=`/`Normalized=`, see `animRateFrames`), translucency, layer, flat and draw-offset flags,
+  and the widths of its visible and hot pixels;
+- projectiles with art (SHP frames, `Rotates=`, or a voxel model), VoxelAnims debris models, particle art, every
+  `[OverlayTypes]` and `[SmudgeTypes]` entry, WalkRate/IdleRate of SHP vehicles and the ore storage buildings.
+
+Output: `effects.json` (`EffectLibrary`), indexed pages `effects-<n>.png` (same format as the type library's; combat
+anims first so a battle needs few pages, then one page family per theater variant), `palettes/<key>.png` (`anim`, and
+`unit|iso|theater.<theater>`) and `voxels/<ID>.json`. Art that resolves to different files per theater is stored once
+per distinct file with `<id>@<theater>` sprite ids. The whole sidecar for six theaters is about 80 MiB; nothing else
+writes into this directory.
+
+`--table <file>` writes the HD garnish table (`classifyAnim`): per anim id a category, the garnish kind, its scale
+(matched to the art's footprint), one iteration's lifetime in logic frames, loop/scorch flags, the art's smoke share
+and a light colour/radius. It also lists the rules facts the live view needs without the bridge: the capturable
+building types (`Capturable=yes`), the building types whose art is `Normalized=yes`, the smoke particle systems
+(`SMOKE_SYSTEMS`: particle type, SpawnFrames, ParticleCap, SpawnRadius, Velocity, Deacc, StateAIAdvance, EndStateAI
+and translucency) and `[AudioVisual]` ExtraUnitLight/ExtraInfantryLight/ExtraAircraftLight. It holds ids and numbers
+only.
+
 ## Tests
 
 `vitest` unit tests in `tests/` cover tile-slot resolution, clear-tile substitution, projection and anchor math, the
 PNG encoder, palette remap, art naming and atlas packing; they need no game files. `tests/library.test.ts` covers
 infantry sequence parsing, the colour scheme order, paged atlas packing, theater art-name resolution and type library
-records built from a synthetic in-memory install (hand-made SHP files and INI text).
+records built from a synthetic in-memory install (hand-made SHP files and INI text). `tests/effectsLibrary.test.ts`
+does the same for the effect sidecar: anim timing and flags, theater variants, projectiles, overlays, smudges, the
+classification and the generated table.
 Terrain tests use synthetic caches to cover painter order, alpha, origin, water classification and preview
 compatibility. Upscale tests use a tiny local fake executable and synthetic PNGs, so neither models nor a GPU are
 required. Sprite-HD tests use synthetic indexed atlases/palettes and fake 4x inference to cover neutral remap,

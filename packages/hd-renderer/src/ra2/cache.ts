@@ -13,6 +13,8 @@ import {
 } from 'three/webgpu';
 import type { HdCacheManifest, TileEntry, VoxelModel } from '../../../ra2-assets/src/manifest';
 import { validateMapLights, type MapLightsSidecar } from '../../../ra2-assets/src/lights';
+import { MAP_MATERIALS_FILE, type MapMaterials } from '../../../ra2-assets/src/mapMaterials';
+import { MapLightGrade, setPaletteGrade } from './mapLighting';
 import { buildShoreField } from './shoreField';
 
 /** windows.json next to a lit-window mask (packages/ra2-assets src/node/lights.ts WindowsSidecar). */
@@ -63,11 +65,33 @@ export interface Ra2Cache {
   voxels: Map<string, VoxelModel>;
   /** The map's light sidecar (pnpm hd:lights), or null when the cache has none (or it failed to load). */
   lights: MapLightsSidecar | null;
+  /**
+   * The engine's per-cell light of the map ([Lighting] and light sources, see mapLighting.ts), from the light sidecar
+   * when present, else the manifest's [Lighting]; null when the map records neither.
+   */
+  mapLight: MapLightGrade | null;
   /** Lit-window mask over the sprite atlas (same layout) and its index, when extracted. */
   windows: { texture: Texture; index: WindowsIndex } | null;
 }
 
 export const NO_TILE = 0xffff;
+
+/** Median base height level of the map's existing cells (the typical terrain height, e.g. for map lighting). */
+export function medianLevel(cache: Pick<Ra2Cache, 'exists' | 'height'>): number {
+  const counts = new Array<number>(256).fill(0);
+  let total = 0;
+  for (let i = 0; i < cache.height.length; i++) {
+    if (!cache.exists[i]) continue;
+    counts[cache.height[i]!]!++;
+    total++;
+  }
+  let seen = 0;
+  for (let level = 0; level < 256; level++) {
+    seen += counts[level]!;
+    if (seen * 2 >= total && total) return level;
+  }
+  return 0;
+}
 
 export function decodeBase64(text: string): Uint8Array {
   const binary = atob(text);
@@ -150,6 +174,11 @@ export interface Ra2CacheOptions {
   terrainMap?: boolean;
   /** Use the HD sprite atlas when the cache has one; default true. */
   hdSprites?: boolean;
+  /**
+   * Prefer the colour-matched terrain image named by the map's materials.json sidecar (pnpm hd:materials --terrain)
+   * when there is one; default true.
+   */
+  colourMatched?: boolean;
 }
 
 /** Where an HD sprite atlas is recorded (manifest.spriteAtlasHd / library spriteAtlasesHd entries). */
@@ -247,10 +276,12 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
 
   let terrainMap: Ra2Cache['terrainMap'];
   const ref = options.terrainMap === false ? undefined : manifest.terrainMap;
+  const materials = ref && options.colourMatched !== false ? await loadMapMaterials(url(MAP_MATERIALS_FILE)) : null;
   if (ref) {
     // Upscaled composites already carry bled colours under their transparent border; only the raw scale-1 image
     // needs the dilation pass.
-    const { texture, original } = await loadDilated(url(ref.file), ref.scale > 1 ? 0 : 10);
+    // The colour-matched image has the same size and layout as ref.file.
+    const { texture, original } = await loadDilated(url(materials?.terrainMap ?? ref.file), ref.scale > 1 ? 0 : 10);
     texture.colorSpace = SRGBColorSpace;
     texture.magFilter = LinearFilter;
     // A whole map is far larger than the screen when zoomed out: mipmaps keep it from shimmering.
@@ -277,14 +308,27 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
   const windowsTexture = windowsIndex ? await loadMaskTexture(url('windows.png')) : null;
   const windows = windowsIndex && windowsTexture ? { texture: windowsTexture, index: windowsIndex } : null;
 
+  const exists = decodeBase64(manifest.cells.exists);
+  const height = decodeBase64(manifest.cells.height);
+  const lighting = lights?.lighting.normal ?? manifest.lighting;
+  const mapLight = lighting
+    ? new MapLightGrade(
+        { width: manifest.grid.width, height: manifest.grid.height, z: height, exists },
+        lighting,
+        lights?.lights ?? [],
+      )
+    : null;
+  for (const rgb of paletteRgb.values()) setPaletteGrade(rgb, mapLight);
+
   return {
     base,
     manifest,
     lights,
+    mapLight,
     windows,
     terrainMap,
-    exists: decodeBase64(manifest.cells.exists),
-    height: decodeBase64(manifest.cells.height),
+    exists,
+    height,
     tile,
     terrainAtlas,
     waterMask,
@@ -298,6 +342,18 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
 }
 
 const PALETTE_ROWS = 128;
+
+/** The optional per-map materials sidecar; null when absent or unreadable (dev servers may answer 404 or HTML). */
+async function loadMapMaterials(url: string): Promise<MapMaterials | null> {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const json = (await response.json()) as MapMaterials;
+    return json && json.version === 1 ? json : null;
+  } catch {
+    return null;
+  }
+}
 
 function writePaletteRow(stacked: Uint8Array, row: number, rgb: Uint8Array): void {
   for (let i = 0; i < 256; i++) stacked.set([rgb[i * 3]!, rgb[i * 3 + 1]!, rgb[i * 3 + 2]!, 255], (row * 256 + i) * 4);
@@ -313,6 +369,7 @@ export function addPalette(cache: Ra2Cache, key: string, rgb: Uint8Array): boole
     cache.paletteRow.set(key, row);
   }
   cache.paletteRgb.set(key, rgb);
+  setPaletteGrade(rgb, cache.mapLight);
   writePaletteRow(stacked, row, rgb);
   cache.paletteAtlas.needsUpdate = true;
   return true;
@@ -337,6 +394,7 @@ export function addHousePalettes(
     const remapped = cache.paletteRgb.get(key)!.slice();
     remap.slice(0, 16).forEach(([r, g, b], i) => remapped.set([r, g, b], (16 + i) * 3));
     cache.paletteRgb.set(houseKey, remapped);
+    setPaletteGrade(remapped, cache.mapLight);
     let row = cache.paletteRow.get(houseKey);
     if (row === undefined) {
       if (next >= capacity) return false;

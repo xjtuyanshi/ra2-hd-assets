@@ -75,6 +75,32 @@ const sets = {
     },
     { name: 'perf-day', query: 'map=XMP29U2&cx=60&cy=62&zoom=1.1&time=12&perf=1', wait: 20000, json: true },
   ],
+  // Materials and grounding review: voxel close-ups, city sprites, cliff shadows, water regressions and palette cards.
+  materials: [
+    {
+      name: 'v1-xmp-z2.5',
+      query: 'map=XMP29U2&ugrid=1&utypes=MTNK,HTNK,AMCV&ux=52&uy=95&cx=55.5&cy=94.5&zoom=2.5&time=12',
+      wait: 12000,
+    },
+    {
+      name: 'v2-xmp-z5',
+      query: 'map=XMP29U2&ugrid=1&utypes=MTNK,HTNK,AMCV&ux=52&uy=95&cx=53.9&cy=93.6&zoom=5&time=12',
+      wait: 12000,
+    },
+    {
+      name: 'v3-rr-z2.5',
+      query: 'map=RiverRam&ugrid=1&utypes=MTNK,HTNK,AMCV,HARV,CMIN&ux=56&uy=88&cx=60&cy=88&zoom=2.5&time=12',
+      wait: 12000,
+    },
+    { name: 'c1', query: 'map=XMP29U2&cx=60&cy=62&zoom=1.6&time=13', wait: 14000 },
+    { name: 'c2', query: 'map=XMP29U2&cx=48&cy=52&zoom=1.1&time=13', wait: 14000 },
+    { name: 'e1-edges-z2.5', query: 'map=XMP29U2&cx=48&cy=52&zoom=2.5&time=12', wait: 14000 },
+    { name: 'cliff', query: 'map=RiverRam&cx=70&cy=40&zoom=2&time=11', wait: 14000 },
+    { name: 'w1-close', query: 'map=RiverRam&cx=52&cy=58&zoom=1.35&time=11', wait: 12000 },
+    { name: 'w2-wide', query: 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=11', wait: 12000 },
+    { name: 'pal-unit-rr', query: 'map=RiverRam&palcard=unit&cx=62&cy=84&zoom=4&time=12', wait: 10000 },
+    { name: 'pal-iso-rr', query: 'map=RiverRam&palcard=iso&cx=62&cy=84&zoom=4&time=12', wait: 10000 },
+  ],
   riverram: [
     { name: 'r1-day', query: 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=12', wait: 9000 },
     { name: 'r2-rain', query: 'map=RiverRam&cx=56&cy=60&zoom=0.62&time=15&weather=rain&rain=0.85', wait: 14000 },
