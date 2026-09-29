@@ -226,6 +226,7 @@ function presentation(withLibrary = true) {
     current: null,
     previous: null,
     firstFrame: null,
+    appearances: new Map(),
     houseColour: new Map(),
     buildingAnimMatches: new Map(),
     visuals: new Map(),
@@ -256,6 +257,8 @@ function presentation(withLibrary = true) {
     effectStats: { drawn: 0, missing: 0 },
     cellsFromEngine: false,
     cellsDirty: true,
+    painterObjects: [],
+    painterDirty: false,
     lastRender: 0,
     ensureHouse: vi.fn(),
     trackMotion: vi.fn(),
@@ -264,6 +267,8 @@ function presentation(withLibrary = true) {
     applyCamera: vi.fn(),
     applyObjects: vi.fn(),
     applyEffects: vi.fn(),
+    // Painter-order assignment is covered by packages/hd-renderer/tests/painterOrder.test.ts.
+    applyPainterOrder: vi.fn(),
   };
   const view = Object.assign(Object.create(LiveView.prototype), backing) as LiveView;
   const state = (): LiveSnapshot => ({ frame: 1, view: null, houses: [], objects: [], smudges: cells() });

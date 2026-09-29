@@ -72,6 +72,7 @@ function view(makeFrames = 25): ViewState {
       library: { sprites: { make: { frames: Array.from({ length: makeFrames }, () => ({})) } } },
     },
     updateOverlays() {},
+    updateSmudges() {},
     updateNightSources() {},
   }) as ViewState;
 }
