@@ -1,7 +1,7 @@
 import { defineConfig, type Plugin } from 'vite';
 import basicSsl from '@vitejs/plugin-basic-ssl';
-import { createReadStream, readdirSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { createReadStream, readdirSync, statSync, type Stats } from 'node:fs';
+import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
@@ -32,6 +32,8 @@ function gameAssetsPlugin(): Plugin {
         ),
       );
       server.middlewares.use('/game', serveGameAsset);
+      // HD remaster bridge (dev only): the locally extracted HD cache, derived from the player's own files.
+      server.middlewares.use('/hd-cache', serveHdCache);
     },
     configurePreviewServer(server) {
       server.middlewares.use('/game', serveGameAsset);
@@ -82,6 +84,63 @@ function attachRa2NetworkRelay(server: RelayHostServer): void {
   };
 }
 
+const HD_CACHE_DIR = resolve(
+  process.env.RA2_HD_CACHE_DIR || fileURLToPath(new URL('./gameres/hd-cache', import.meta.url)),
+);
+const HD_CACHE_TYPES: Record<string, string> = { '.json': 'application/json', '.png': 'image/png' };
+
+/** Serve gameres/hd-cache (map names arrive in the game's own casing, e.g. RIVERRAM); never outside that root. */
+function serveHdCache(req: IncomingMessage, res: ServerResponse): void {
+  let urlPath: string;
+  try {
+    urlPath = decodeURIComponent((req.url ?? '').split('?')[0]!);
+  } catch {
+    res.statusCode = 400;
+    res.end('bad path');
+    return;
+  }
+  const parts = urlPath.split('/').filter(Boolean);
+  let current = HD_CACHE_DIR;
+  try {
+    if (!parts.length || parts.some((part) => part === '.' || part === '..')) throw new Error('bad path');
+    for (const part of parts) {
+      const actual = readdirSync(current).find((name) => name.toLowerCase() === part.toLowerCase());
+      if (!actual) throw new Error('missing');
+      current = join(current, actual);
+    }
+    const inside = relative(HD_CACHE_DIR, current);
+    if (inside.startsWith('..') || isAbsolute(inside) || !statSync(current).isFile()) throw new Error('missing');
+  } catch {
+    res.statusCode = 404;
+    res.end('not found');
+    return;
+  }
+  res.setHeader('Content-Type', HD_CACHE_TYPES[extname(current).toLowerCase()] ?? 'application/octet-stream');
+  sendFile(res, current);
+}
+
+/**
+ * Stream a file that was just resolved. It can still vanish or become unreadable before it is opened (an hd:* command
+ * rewriting the cache, the game directory being edited, a permission change); without an error listener the stream's
+ * error event is uncaught and takes the whole development server down, including the VM's /game assets.
+ */
+function sendFile(res: ServerResponse, path: string, range?: { start: number; end: number }): void {
+  const stream = createReadStream(path, range);
+  res.once('close', () => stream.destroy());
+  stream.once('error', () => {
+    if (res.headersSent) {
+      // Part of the body is out: cut the response so the client sees a truncated transfer, not a short file.
+      res.destroy();
+      return;
+    }
+    for (const name of ['Content-Length', 'Content-Range', 'Accept-Ranges', 'Cache-Control']) res.removeHeader(name);
+    res.statusCode = 404;
+    res.setHeader('Content-Type', 'text/plain');
+    res.end('not found');
+  });
+  stream.pipe(res);
+}
+
 function serveGameAsset(req: IncomingMessage, res: ServerResponse): void {
   const rawUrl = req.url ?? '';
   const query = rawUrl.split('?')[1] ?? '';
@@ -118,7 +177,14 @@ function serveGameAsset(req: IncomingMessage, res: ServerResponse): void {
     res.end('not found');
     return;
   }
-  const st = statSync(resolved);
+  let st: Stats;
+  try {
+    st = statSync(resolved);
+  } catch {
+    res.statusCode = 404;
+    res.end('not found');
+    return;
+  }
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Cache-Control', 'max-age=86400');
   const range = req.headers.range;
@@ -132,14 +198,14 @@ function serveGameAsset(req: IncomingMessage, res: ServerResponse): void {
         res.setHeader('Content-Range', `bytes ${start}-${end}/${st.size}`);
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Content-Length', String(end - start + 1));
-        createReadStream(resolved, { start, end }).pipe(res);
+        sendFile(res, resolved, { start, end });
         return;
       }
     }
   }
   res.statusCode = 200;
   res.setHeader('Content-Length', String(st.size));
-  createReadStream(resolved).pipe(res);
+  sendFile(res, resolved);
 }
 
 /** Directory counterpart of resolveGameFile: resolve each level case-insensitively; the result must be a directory within GAME_DIR. */

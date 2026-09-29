@@ -1,4 +1,5 @@
 import type { GamePerformanceSample } from '../games/performance';
+import type { GameRenderState } from '../games/renderState';
 import type { VmDiagnosticAction, VmDiagnostics } from './vmDiagnostics';
 import type { PcmPlayOptions, PcmWaveFormat } from '../vm86/audio';
 import type { VmFrame, Win32Call, VmNetworkStatus } from '../vm86/win32';
@@ -21,6 +22,8 @@ export interface GameFileEntry {
 
 export interface VmInitConfig {
   startupPage?: string;
+  /** HD bridge opt-in: install the game's inert native overlay passthrough patches before the entry point. */
+  renderPassthrough?: boolean;
   /**
    * File backend: directory handles (transferred/cloned), session-package memory files (online ZIP extraction results transferred with the message), or a development HTTP provider marker.
    * Provider instances cannot be structured-cloned; rebuild and rediscover in the Worker, also rebuilding the game's sourceTransform. Directory overlays contain online-package layers above the directory, innermost first with later layers overriding earlier ones, matching the page's Overlay-chain precedence.
@@ -57,6 +60,7 @@ export interface VmInitConfig {
 export type MainToWorkerMessage =
   | { type: 'diagnostics'; action: VmDiagnosticAction; requestId: number }
   | { type: 'game-performance'; requestId: number }
+  | { type: 'render-state'; requestId: number }
   | { type: 'attach-maps'; files: GameFileEntry[]; requestId: number }
   | { type: 'init'; config: VmInitConfig; requestId: number }
   | { type: 'wm'; m: number; w: number; l: number }
@@ -67,6 +71,7 @@ export type MainToWorkerMessage =
   | { type: 'call-tracing'; enabled: boolean }
   | { type: 'state'; kind: 'pointer'; requestId: number }
   | { type: 'guest-speed-flag'; value: number; requestId: number }
+  | { type: 'tactical-passthrough'; flags: number; requestId: number }
   | { type: 'mem-record-start'; requestId: number }
   | { type: 'mem-record-stop'; requestId: number }
   /** The main thread consumed this frame at a display-refresh boundary; the Worker may release the next frame. */
@@ -80,6 +85,12 @@ export type MainToWorkerMessage =
 export type WorkerToMainMessage =
   | { type: 'diagnostics-reply'; requestId: number; value: VmDiagnostics }
   | { type: 'game-performance-reply'; requestId: number; value: GamePerformanceSample | null }
+  | { type: 'render-state-reply'; requestId: number; value: GameRenderState | null }
+  /**
+   * The core returned the same snapshot object as the last render-state reply this Worker posted: the client answers
+   * with its copy of that reply instead of receiving another structured clone.
+   */
+  | { type: 'render-state-unchanged'; requestId: number }
   | { type: 'network-status'; status: VmNetworkStatus }
   | { type: 'attach-maps-done'; result: VmAttachResult; requestId: number }
   | { type: 'probe'; ready: true }
@@ -95,6 +106,7 @@ export type WorkerToMainMessage =
       value: VmPointerState | null;
     }
   | { type: 'guest-speed-flag-reply'; requestId: number; value: number | null }
+  | { type: 'tactical-passthrough-reply'; requestId: number; value: boolean }
   | { type: 'mem-record-start-reply'; requestId: number; ok: boolean }
   | { type: 'mem-record-stop-reply'; requestId: number; result: GuestMemRecordResult | null }
   | { type: 'audio'; op: AudioOp }

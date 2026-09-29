@@ -1,4 +1,5 @@
 import type { GamePerformanceSample } from '../games/performance';
+import type { GameRenderState } from '../games/renderState';
 import { PortRelaySocket } from 'relay-package/client';
 import { createBrowserEmulator } from '../platform/browser/emulator';
 import { BrowserEmulatorProbe } from '../platform/browser/emulatorProbe';
@@ -37,7 +38,9 @@ export interface VmWorkerCore {
   setMasterVolume(linear: number): void;
   getPointerState(): VmPointerState | null;
   getGamePerformance(): Promise<GamePerformanceSample | null>;
+  getRenderState(): Promise<GameRenderState | null>;
   setGameSpeedFlag(value: number): number | null;
+  setTacticalPassthrough(flags: number): boolean;
   startMemRecord(): boolean;
   stopMemRecord(): GuestMemRecordResult | null;
   setFileProvider(files: GameFileProvider): void;
@@ -147,9 +150,11 @@ function requestIdOf(message: MainToWorkerMessage): number | undefined {
   switch (message.type) {
     case 'diagnostics':
     case 'game-performance':
+    case 'render-state':
     case 'init':
     case 'state':
     case 'guest-speed-flag':
+    case 'tactical-passthrough':
     case 'mem-record-start':
     case 'mem-record-stop':
     case 'flush':
@@ -164,6 +169,8 @@ function requestIdOf(message: MainToWorkerMessage): number | undefined {
 
 export class VmWorkerController {
   private core: VmWorkerCore | null = null;
+  /** Snapshot object of the last render-state reply posted (see 'render-state-unchanged'). */
+  private lastRenderState: GameRenderState | null = null;
   private sourceTemplate: GameFileProvider | null = null;
   private started = false;
   private initReady: Promise<void> = Promise.resolve();
@@ -252,6 +259,18 @@ export class VmWorkerController {
             value: (await this.core?.getGamePerformance()) ?? null,
           });
           break;
+        case 'render-state': {
+          const value = (await this.core?.getRenderState()) ?? null;
+          // The reader returns the identical object while nothing changed (GameRenderStateReader); the client still
+          // holds the clone of the last reply, so post only a marker instead of cloning the snapshot again.
+          if (value && value === this.lastRenderState) {
+            this.post({ type: 'render-state-unchanged', requestId: message.requestId });
+            break;
+          }
+          this.lastRenderState = value;
+          this.post({ type: 'render-state-reply', requestId: message.requestId, value });
+          break;
+        }
         case 'diagnostics':
           if (!this.core) throw new Error('VM 尚未 init');
           this.post({
@@ -273,6 +292,13 @@ export class VmWorkerController {
             type: 'guest-speed-flag-reply',
             requestId: message.requestId,
             value: this.core?.setGameSpeedFlag(message.value) ?? null,
+          });
+          break;
+        case 'tactical-passthrough':
+          this.post({
+            type: 'tactical-passthrough-reply',
+            requestId: message.requestId,
+            value: this.core?.setTacticalPassthrough(message.flags) ?? false,
           });
           break;
         case 'mem-record-start':
@@ -429,6 +455,7 @@ export class VmWorkerController {
         config.relayPort ? (url) => new PortRelaySocket(config.relayPort!, url) : undefined,
       ),
       startupPage: config.startupPage,
+      renderPassthrough: config.renderPassthrough,
       fetchBytes: this.dependencies.fetchBytes,
       scheduleFrame: (emit) => this.scheduleFrameWithBackpressure(emit),
       deferFrameSnapshot: true,

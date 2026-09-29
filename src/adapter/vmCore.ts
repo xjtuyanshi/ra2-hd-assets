@@ -1,4 +1,5 @@
 import { GamePerformanceMeter, type GameFrameReader, type GamePerformanceSample } from './gamePerformance';
+import type { GameRenderState, GameRenderStateReader, RenderPassthroughControl } from './renderState';
 import { V86 } from 'v86';
 import { RangePrefetch } from './rangePrefetch';
 import { readGuestFileSearch } from './fileSearch';
@@ -64,9 +65,13 @@ const GUEST_MEMORY_MARGIN = 2 * 1024 * 1024;
 // The RA2 image ends at 0xb46000; staging must cover the highest image address rather than relying only on file size.
 const STAGING_SIZE = 16 * 1024 * 1024;
 const STUB_BASE = 0x0008_0000;
-// Multithreaded import stubs include register/SEH/TLS context switches; RA2's 369 imports exceed
-// the original 64KiB range. Reserve 0x80000..0xc0000 for static stubs, still far below the PE image at 0x400000.
+// Multithreaded import stubs include register/SEH/TLS context switches; RA2's 369 imports exceed the original 64KiB
+// range. Static stubs start at 0x80000, far below the PE image at 0x400000; STUB_LIMIT is the dynamic-stub base.
 const STUB_LIMIT = 0x000c_0000;
+// v86 maps 0xa0000..0xbffff to the VGA adapter: the CPU reads video memory there, not the bytes write_memory stored,
+// so code or data placed there by the host is not what the guest sees. Startup-page stubs share the static-stub tail
+// after the import stubs and must end below it; opt-in HD bridge patches take RAM from the top of guest memory instead.
+const RESERVE_LIMIT = 0x000a_0000;
 /** After a small run of hypercalls, yield to a host macrotask so microtask chains cannot starve input/network events. */
 const HYPERCALLS_PER_HOST_YIELD = 128;
 /** Yielding by call count is not yielding by time: complex guest frames can stretch 128 calls into tens of milliseconds. */
@@ -87,6 +92,8 @@ export interface VmCorePlatform {
   /** Inject game-resource policies at composition time; the core does not infer policies from extensions, game names, or URLs. */
   resourcePolicy: ResourcePolicy<GameSource>;
   startupPage?: string;
+  /** HD bridge opt-in: install the game's inert native overlay passthrough patches (GameRuntimeHooks). */
+  renderPassthrough?: boolean;
   /** Fetch boot.bin firmware bytes with matching main-thread and Worker semantics. */
   fetchBytes(url: string): Promise<Uint8Array>;
   /** Frame emission scheduling: coalesce with rAF on the main thread; emit directly in Workers since postMessage is asynchronous. */
@@ -123,6 +130,11 @@ export class VmCore {
   private pendingFileWriteError: Error | null = null;
   private gameClockRate = 1;
   private frameReader: Promise<GameFrameReader | null> | null = null;
+  private executableHash: Promise<string> | null = null;
+  /** Created on the first HD bridge poll in a running game; resolves to null (and is retried) when unsupported. */
+  private renderStateReader: Promise<GameRenderStateReader | null> | null = null;
+  /** Control of the game's native overlay passthrough patches; null unless the platform opted in and they installed. */
+  private renderPassthrough: RenderPassthroughControl | null = null;
   private readonly gamePerformance = new GamePerformanceMeter();
   private guestMemoryBytes = DEFAULT_GUEST_MEMORY_SIZE;
   private memRecordBase: Uint8Array | null = null;
@@ -239,16 +251,38 @@ export class VmCore {
       emulator.write_memory(staging.subarray(HYPERCALL_STACK, stubNext), HYPERCALL_STACK);
       emulator.write_memory(staging.subarray(image.imageBase, image.imageBase + image.sizeOfImage), image.imageBase);
       game.runtimeHooks?.prepareImage?.(emulator);
+      // Startup patches own the static-stub tail after the import stubs, below the VGA window (see RESERVE_LIMIT).
+      const reserve = (size: number): number => {
+        const address = stubNext;
+        if (!Number.isInteger(size) || size <= 0 || address + size > RESERVE_LIMIT) throw new Error('启动导航桩区不足');
+        stubNext = (address + size + 15) & ~15;
+        return address;
+      };
+      this.renderPassthrough = null;
+      if (this.platform.renderPassthrough) {
+        // Larger opt-in patches (stubs plus a data page of their own) take RAM from the top of guest memory, above the
+        // heap/virtual arena and the configured fast-file mirror, where nothing else is ever placed.
+        let patchNext = guestMemoryBytes;
+        const patchFloor = Math.max(
+          game.arenaTop ?? guestMemoryBytes - GUEST_MEMORY_MARGIN,
+          game.fastFileMirrorTop === undefined ? 0 : Math.min(game.fastFileMirrorTop, guestMemoryBytes),
+        );
+        const reservePatchMemory = (size: number, alignment = 16): number => {
+          if (!Number.isInteger(size) || size <= 0 || !Number.isInteger(alignment) || alignment < 16)
+            throw new Error('补丁内存请求无效');
+          const address = Math.floor((patchNext - size) / alignment) * alignment;
+          if (address < patchFloor) throw new Error('补丁内存区不足');
+          patchNext = address;
+          return address;
+        };
+        this.renderPassthrough =
+          (await game.runtimeHooks?.prepareRenderPassthrough?.(emulator, reservePatchMemory)) ?? null;
+      }
       if (this.platform.startupPage) {
         const prepare = game.runtimeHooks?.prepareStartupPage;
         if (!prepare) throw new Error(`${game.id} 尚不支持启动页面直达`);
         const { sha256Hex } = await import('../utils/sha256');
-        prepare(emulator, this.platform.startupPage, await sha256Hex(exe), (size) => {
-          const address = stubNext;
-          if (!Number.isInteger(size) || size <= 0 || address + size > STUB_LIMIT) throw new Error('启动导航桩区不足');
-          stubNext = (address + size + 15) & ~15;
-          return address;
-        });
+        prepare(emulator, this.platform.startupPage, await sha256Hex(exe), reserve);
       }
       this.writeU32(HYPERCALL_ENTRY, image.entry);
       this.writeU32(HYPERCALL_CALLBACK_DEPTH, 0);
@@ -382,6 +416,39 @@ export class VmCore {
     );
   }
 
+  /**
+   * Live battlefield snapshot for the HD renderer bridge (dev only). Reads guest memory through a view, never writes it.
+   * The reader is created lazily and only once the game's own image validates, so polling during startup is harmless.
+   * While the snapshot has not changed the reader returns the identical object (see GameRenderStateReader).
+   */
+  async getRenderState(): Promise<GameRenderState | null> {
+    const emulator = this.emulator;
+    const create = this.source.game.runtimeHooks?.createRenderStateReader;
+    if (!emulator || !this.image || !create || this.currentPhase !== 'running') return null;
+    // A shell page (main menu, in-game options, score screen) owns the screen: the battlefield is not what is shown.
+    if (this.shim?.inspectShellPageTitle() !== '') return null;
+    const pending = (this.renderStateReader ??= (async () => {
+      this.executableHash ??= import('../utils/sha256').then(({ sha256Hex }) => sha256Hex(this.source.executableBytes));
+      const hash = await this.executableHash;
+      return this.emulator === emulator ? create(emulator, this.guestMemoryBytes, hash) : null;
+    })());
+    let reader: GameRenderStateReader | null;
+    try {
+      reader = await pending;
+    } catch (error) {
+      // A failed creation (for example a module that did not load) is retried by the next poll, not cached.
+      if (this.renderStateReader === pending) this.renderStateReader = null;
+      throw error;
+    }
+    if (this.emulator !== emulator || this.currentPhase !== 'running') return null;
+    if (!reader) {
+      // Not supported (yet): forget the attempt so a later poll can try again, as long as no newer one started.
+      if (this.renderStateReader === pending) this.renderStateReader = null;
+      return null;
+    }
+    return reader();
+  }
+
   async getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics> {
     if (action === 'start') {
       this.gamePerformance.reset();
@@ -410,6 +477,16 @@ export class VmCore {
     const hooks = this.source.game.runtimeHooks;
     if (!this.emulator || !hooks?.writeGameSpeedFlag) return null;
     return hooks.writeGameSpeedFlag(this.emulator, value);
+  }
+
+  /**
+   * HD bridge: switch native overlay passthrough categories (game-defined bit flags, 0 = off) by writing the patches'
+   * configuration block; the guest applies them from its next frame. False when not installed, the game is not running
+   * (stopped, exited, blocked or failed) or the flags are invalid.
+   */
+  setTacticalPassthrough(flags: number): boolean {
+    if (!this.emulator || !this.renderPassthrough || this.currentPhase !== 'running') return false;
+    return this.renderPassthrough.set(this.emulator, flags);
   }
 
   /** Memory-change recording: snapshot current guest RAM as the baseline and start periodic sampling counts. */
@@ -501,6 +578,8 @@ export class VmCore {
     const shim = this.shim;
     this.emulator = null;
     this.frameReader = null;
+    this.renderStateReader = null;
+    this.renderPassthrough = null;
     this.gamePerformance.reset();
     this.shim = null;
     this.image = null;

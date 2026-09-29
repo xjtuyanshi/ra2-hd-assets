@@ -1,5 +1,6 @@
 import type { SessionRuntime } from '../app/session/runtime';
 import type { GamePerformanceSample } from '../games/performance';
+import type { GameRenderState } from '../games/renderState';
 import type { GuestMemRecordResult } from './memRecord';
 import type { VmDiagnosticAction, VmDiagnostics, VmRuntimeInfo } from './vmDiagnostics';
 
@@ -53,8 +54,19 @@ export interface VmShell extends SessionRuntime {
   getPointerState(): Promise<VmPointerState | null>;
   /** Read the actual logic frame rate on demand; return null if unsupported or unloaded. */
   getGamePerformance(): Promise<GamePerformanceSample | null>;
+  /**
+   * Live battlefield snapshot for the HD renderer bridge; null when unsupported or not in a battle. While the snapshot
+   * has not changed it resolves to the identical object again, so callers can skip their work by comparing references.
+   */
+  getRenderState(): Promise<GameRenderState | null>;
   /** Set the current RA2/YR game-speed setting; return the value actually written to the guest. */
   setGameSpeedFlag(value: number): Promise<number | null>;
+  /**
+   * HD bridge: switch the game's native overlay passthrough categories (see src/games/renderPassthrough.ts; 0 = off).
+   * False when the session did not opt in, the game has no passthrough, its patches did not install, the game is not
+   * running, or the flags are invalid.
+   */
+  setTacticalPassthrough(flags: number): Promise<boolean>;
   /** Memory-change recording: snapshot guest RAM as a baseline; return false if the VM is not ready. */
   startMemRecord(): Promise<boolean>;
   /** Finish recording and return change statistics sorted by modification count plus region summaries; null if not recording. */

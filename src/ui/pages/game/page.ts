@@ -48,6 +48,9 @@ let activeResourceCleanup: (() => void) | null = null;
 let activeNetworkCleanup: (() => void) | null = null;
 let pageGeneration = 0;
 let activeRendererCleanup: (() => void) | null = null;
+/** HD remaster bridge (dev, ?hd=1): see hdBridge.ts. Stopped before the VM it polls is destroyed. */
+let activeHdCleanup: (() => void) | null = null;
+const hdBridgeRequested = import.meta.env.DEV && new URLSearchParams(window.location.search).get('hd') === '1';
 
 // Actual frames update guest logical coordinates; 800x600 is only a compatibility default before the first frame.
 let gameFrameWidth = 800;
@@ -59,6 +62,8 @@ let activeFitCleanup: (() => void) | null = null;
 export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const generation = ++pageGeneration;
   // Release the old presentation and size listeners before switching sessions so resize callbacks cannot retain prior closures.
+  activeHdCleanup?.();
+  activeHdCleanup = null;
   activeRendererCleanup?.();
   activeRendererCleanup = null;
   activeFitCleanup?.();
@@ -92,7 +97,16 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     scalefxUpscaleEnabled(window.location.search),
     aiUpscaleEnabled(window.location.search),
     new URLSearchParams(window.location.search).get('sr-model') === 'fast' ? 'fast' : 'gan',
+    hdBridgeRequested,
   );
+  // The bridge composites through the WebGL2 renderer's alpha channel. Canvas 2D (?webgl=0, or no WebGL2 context) draws
+  // every frame opaque, so the key-coloured tactical view would show as solid magenta: keep the bridge and the game's
+  // passthrough patches off there.
+  const hdBridgeEnabled = hdBridgeRequested && frameRenderer.backend === 'WebGL2';
+  if (hdBridgeRequested && !hdBridgeEnabled) console.warn('[HD] ?hd=1 needs the WebGL2 frame renderer; HD bridge off');
+  /** This session's HD bridge; releaseRuntime stops it, and a bridge whose import resolves after release never starts. */
+  let hdCleanup: (() => void) | null = null;
+  let runtimeReleased = false;
   const calls: string[] = [];
   /** Cumulative calls per Win32 API; the backtick panel shows top hotspots for performance diagnosis. */
   const callHistogram = new Map<string, number>();
@@ -385,6 +399,12 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   };
 
   const releaseRuntime = async () => {
+    runtimeReleased = true;
+    // Stop the HD bridge while the VM still runs: it switches the game's passthrough off and must not keep polling (and
+    // holding its GPU view) after the VM is gone.
+    hdCleanup?.();
+    if (activeHdCleanup === hdCleanup) activeHdCleanup = null;
+    hdCleanup = null;
     effects.stop();
     activeNetworkCleanup?.();
     activeNetworkCleanup = null;
@@ -497,6 +517,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
           {
             resolution: requestedResolution,
             startupPage: new URLSearchParams(window.location.search).get('start-page') || undefined,
+            // The HD bridge switches the game's native overlay passthrough; normal play installs no patches.
+            renderPassthrough: hdBridgeEnabled,
             recycleFrames: true,
           },
         ),
@@ -517,6 +539,23 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   vm.setMasterVolume(requestedVolume);
   activeVm = vm;
   toolbar.setMapsAvailable(status.phase === 'running');
+  if (hdBridgeEnabled) {
+    const bridgeVm = vm;
+    void import('./hdBridge')
+      .then(({ startHdBridge }) => {
+        // The session may have been replaced, or released (game exit, boot cancel), while the module loaded.
+        if (generation !== pageGeneration || runtimeReleased) return;
+        activeHdCleanup?.();
+        hdCleanup = activeHdCleanup = startHdBridge({
+          vm: bridgeVm,
+          screen: canvas,
+          frameRenderer,
+          invalidate: () => presenter.invalidate(),
+          frameSize: () => (presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null),
+        });
+      })
+      .catch((error) => console.warn('[HD] bridge failed to start', error));
+  }
   // Overlay RA2's Win32 hardware cursor as a small independent framebuffer texture; it remains visible after Pointer Lock
   // hides the system cursor and moves without retransmitting the whole frame. At screen edges, clamp the logical
   // cursor to current guest-frame bounds for sustained edge scrolling; ?mouse-lock=0 restores absolute coordinates.
@@ -592,6 +631,8 @@ export function stopVmPage(): void {
   activeInputCleanup = null;
   activeToolbarCleanup?.();
   activeToolbarCleanup = null;
+  activeHdCleanup?.();
+  activeHdCleanup = null;
   activeRendererCleanup?.();
   activeRendererCleanup = null;
   activeFitCleanup?.();

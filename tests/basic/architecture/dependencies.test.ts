@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 import ts from 'typescript';
 import { expect, it } from 'vitest';
@@ -105,6 +105,169 @@ it('RA2 不引用 YR，YR 只按登记继承 RA2 的公共表', () => {
           target,
         );
     }
+});
+
+it('共享游戏契约不引用具体游戏模块', () => {
+  // Contract modules at the top of src/games describe capabilities any game may implement (frame counters, runtime
+  // hooks, render state, render passthrough). Game directories implement them, never the reverse: a contract that
+  // reuses a game's types would make every other game (and the VM/Worker protocol) depend on that game. Checked
+  // transitively through everything the contracts import inside src/games.
+  const contracts = ['performance', 'renderPassthrough', 'renderState', 'runtimeHooks'].map(
+    (name) => `src/games/${name}`,
+  );
+  const visited = new Set<string>();
+  const pending = [...contracts];
+  while (pending.length) {
+    const module = pending.pop()!;
+    if (visited.has(module)) continue;
+    visited.add(module);
+    const path = [`${module}.ts`, `${module}/index.ts`].map((candidate) => resolve(candidate)).find(existsSync);
+    expect(path, `${module} 未找到`).toBeDefined();
+    for (const specifier of imports(readFileSync(path!, 'utf8'))) {
+      const target = dependency(path!, specifier);
+      expect(target, `${module} → ${specifier}`).not.toMatch(/^src\/games\/(?:yr|ra2)(?:\/|$)/);
+      if (target.startsWith('src/games/')) pending.push(target);
+    }
+  }
+});
+
+const DEV_FLAG = 'import.meta.env.DEV';
+
+function isDevCondition(node: ts.Expression): boolean {
+  if (ts.isParenthesizedExpression(node)) return isDevCondition(node.expression);
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken)
+    return isDevCondition(node.left) || isDevCondition(node.right);
+  return node.getText() === DEV_FLAG;
+}
+
+function onlyTypes(elements: ts.NodeArray<ts.ImportSpecifier | ts.ExportSpecifier>): boolean {
+  return elements.length > 0 && elements.every((element) => element.isTypeOnly);
+}
+
+/**
+ * Module edges a production build keeps: value imports and re-exports, side-effect imports, `import()` and
+ * `new URL(..., import.meta.url)` entries (Workers, worklets). Left out are type-only forms, which the TypeScript
+ * transform erases, and anything lexically under an `import.meta.env.DEV` condition (if branch, `&&` right side,
+ * `?:` true branch): Vite replaces the flag with `false` in production and Rollup drops the branch. A named import
+ * used only as a type but written without `type` still counts; mark it `type` if a rule below flags it.
+ */
+function productionImports(source: string): string[] {
+  const file = ts.createSourceFile('module.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const result: string[] = [];
+  function visit(node: ts.Node, devOnly: boolean): void {
+    if (ts.isIfStatement(node) && isDevCondition(node.expression)) {
+      visit(node.expression, devOnly);
+      visit(node.thenStatement, true);
+      if (node.elseStatement) visit(node.elseStatement, devOnly);
+      return;
+    }
+    if (ts.isConditionalExpression(node) && isDevCondition(node.condition)) {
+      visit(node.condition, devOnly);
+      visit(node.whenTrue, true);
+      visit(node.whenFalse, devOnly);
+      return;
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken &&
+      isDevCondition(node.left)
+    ) {
+      visit(node.left, devOnly);
+      visit(node.right, true);
+      return;
+    }
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+      const clause = node.importClause;
+      const bindings = clause?.namedBindings;
+      const erased =
+        clause?.isTypeOnly ||
+        (clause && !clause.name && bindings && ts.isNamedImports(bindings) && onlyTypes(bindings.elements));
+      if (!erased && !devOnly) result.push(node.moduleSpecifier.text);
+      return;
+    }
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      const clause = node.exportClause;
+      const erased = node.isTypeOnly || (clause && ts.isNamedExports(clause) && onlyTypes(clause.elements));
+      if (!erased && !devOnly) result.push(node.moduleSpecifier.text);
+      return;
+    }
+    if (ts.isImportTypeNode(node)) return;
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments[0] &&
+      ts.isStringLiteral(node.arguments[0]) &&
+      !devOnly
+    ) {
+      result.push(node.arguments[0].text);
+    } else if (
+      ts.isNewExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'URL' &&
+      node.arguments?.length === 2 &&
+      ts.isStringLiteral(node.arguments[0]!) &&
+      node.arguments[1]!.getText() === 'import.meta.url' &&
+      !devOnly
+    ) {
+      result.push(node.arguments[0].text);
+    }
+    ts.forEachChild(node, (child) => visit(child, devOnly));
+  }
+  visit(file, false);
+  return result;
+}
+
+it('生产依赖扫描器跳过类型导入与开发期分支，保留 Worker 入口', () => {
+  expect(
+    productionImports(`import type { A } from './a'; import { type B } from './b'; import { C, type D } from './c';
+    import './side'; export type { E } from './e'; export { F } from './f';
+    type G = import('./g').G;
+    if (import.meta.env.DEV) { void import('./dev-if'); }
+    if (import.meta.env.DEV && flag) void import('./dev-and-if');
+    const h = import.meta.env.DEV ? () => import('./dev-ternary') : () => import('./prod-ternary');
+    const i = import.meta.env.DEV && import('./dev-and');
+    if (!import.meta.env.DEV) void import('./negated');
+    new Worker(new URL('./worker.ts', import.meta.url));`),
+  ).toEqual(['./c', './side', './f', './prod-ternary', './negated', './worker.ts']);
+});
+
+it('生产构建不可达 HD 桥接的开发期模块', () => {
+  // The HD bridge's YR render-state readers, overlay passthrough patches and the guest gate builder they use are
+  // development-only (docs/remaster/HD_BRIDGE.md): src/games/yr/runtimeHooks.ts loads them only through dynamic
+  // imports behind import.meta.env.DEV. One static import anywhere on the production graph (a shared constant, a
+  // value-and-type import) would ship them again with nothing else failing, so walk that graph from the page entry
+  // in index.html, through Worker and worklet entries, and require that none of them is reachable. Only src/ is
+  // walked; packages are separate projects that must not reach back into the app.
+  const devOnly =
+    /^src\/games\/(?:yr\/(?:renderState|tacticalPassthrough|stateReader|shroudReader|effectsReader)|shared\/guestGates)\.ts$/;
+  const html = readFileSync('index.html', 'utf8');
+  const entries = [...html.matchAll(/<script\b[^>]*\btype="module"[^>]*\bsrc="\/([^"]+)"/g)].map((match) => match[1]!);
+  expect(entries).toContain('src/main.ts');
+  const from = new Map<string, string | null>(entries.map((entry) => [entry, null]));
+  const pending = [...entries];
+  const chain = (module: string): string => {
+    const steps = [module];
+    for (let at = from.get(module); at; at = from.get(at)) steps.unshift(at);
+    return steps.join(' → ');
+  };
+  while (pending.length) {
+    const module = pending.pop()!;
+    expect(module, chain(module)).not.toMatch(devOnly);
+    for (const specifier of productionImports(readFileSync(module, 'utf8'))) {
+      const target = dependency(resolve(module), specifier);
+      if (!target.startsWith('src/')) continue;
+      const path = ['', '.ts', '.tsx', '.mts', '/index.ts', '/index.tsx']
+        .map((suffix) => `${target}${suffix}`)
+        .find((candidate) => existsSync(candidate) && statSync(candidate).isFile());
+      expect(path, `${module} → ${specifier} 未找到`).toBeDefined();
+      if (from.has(path!) || !/\.(?:[cm]?[jt]s|tsx)$/.test(path!)) continue;
+      from.set(path!, module);
+      pending.push(path!);
+    }
+  }
+  // The walk must actually reach the Worker and the YR hooks, or the rule above proves nothing.
+  for (const reached of ['src/adapter/vmWorker.ts', 'src/games/catalog.ts', 'src/games/yr/runtimeHooks.ts'])
+    expect(from.has(reached), reached).toBe(true);
 });
 
 it('纯文件 provider 不依赖游戏识别、浏览器存储、VM 实现或 React', () => {

@@ -9,6 +9,44 @@ import { RGB565_TO_RGBA32 as rgb565Colors } from '../../../vm86/pixels';
 // Use local references in pixel loops to avoid per-pixel ESM getter access in development.
 const RGB565_TO_RGBA32 = rgb565Colors;
 
+/** A rectangle in guest frame pixels. */
+export interface FrameRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Key-colour transparency (HD bridge native overlay passthrough): inside `rect`, frame pixels equal to the key become
+ * fully transparent; everything else stays opaque and unchanged.
+ */
+export interface FrameKey {
+  rect: FrameRect;
+  /** Packed RGB565 value the guest fills with. 16-bit frames compare it exactly; RGBA and indexed frames compare its
+   * bit-replicated RGB888 expansion, which is how the shim and palettes turn 5/6-bit channels into bytes. */
+  rgb565: number;
+}
+
+/** RGB888 expansion of a packed RGB565 value, replicating high bits like the shim's RGB565_TO_RGBA32 table. */
+export function rgb565ToRgb888(value: number): [number, number, number] {
+  const r = (value >>> 11) & 31;
+  const g = (value >>> 5) & 63;
+  const b = value & 31;
+  return [(r << 3) | (r >>> 2), (g << 2) | (g >>> 4), (b << 3) | (b >>> 2)];
+}
+
+/** Key rectangle as texture coordinates (x0, y0, x1, y1), clamped to the frame. */
+export function keyRectUv(rect: FrameRect, width: number, height: number): [number, number, number, number] {
+  const clamp = (value: number, limit: number) => Math.max(0, Math.min(limit, value));
+  return [
+    clamp(rect.x, width) / width,
+    clamp(rect.y, height) / height,
+    clamp(rect.x + rect.width, width) / width,
+    clamp(rect.y + rect.height, height) / height,
+  ];
+}
+
 export interface VmCursorPresentation {
   x: number;
   y: number;
@@ -50,6 +88,17 @@ interface FrameBackend {
   readonly upscaleStatus: string | null;
   clear(): void;
   destroy(): void;
+  /**
+   * HD remaster bridge (dev): leave this frame rectangle transparent so a renderer layered under the canvas shows
+   * through, while everything else (sidebar, cursor) still comes from the game. Needs a `transparent` renderer.
+   */
+  setTransparentRect(rect: FrameRect | null): void;
+  /**
+   * HD bridge native overlay passthrough (dev): make key-coloured pixels inside the rectangle transparent instead of the
+   * whole rectangle. While a key is set, upscaling and post-processing are bypassed (the frame is drawn 1:1 filtered
+   * nearest), and the cursor pass still draws on top. Takes precedence over setTransparentRect.
+   */
+  setTransparentKey(key: FrameKey | null): void;
   draw(
     frame: VmFrame,
     targetWidth: number,
@@ -70,10 +119,12 @@ export function createVmFrameRenderer(
   scalefx = false,
   aiUpscale = false,
   aiModel: AiModel = 'gan',
+  transparent = false,
 ): VmFrameRenderer {
   const gl = preferWebGl
     ? canvas.getContext('webgl2', {
-        alpha: false,
+        // Only the HD bridge composites another canvas underneath; normal play keeps an opaque drawing buffer.
+        alpha: transparent,
         antialias: false,
         depth: false,
         preserveDrawingBuffer: false,
@@ -100,6 +151,8 @@ export function createVmFrameRenderer(
   let mode: UpscaleMode = aiUpscale ? aiModel : scalefx ? 'scalefx' : (fsr ?? (spatialUpscale ? 'bicubic' : 'off'));
   let backend = createBackend(mode);
   let destroyed = false;
+  let transparentRect: FrameRect | null = null;
+  let transparentKey: FrameKey | null = null;
   return {
     get backend() {
       return backend.backend;
@@ -125,6 +178,8 @@ export function createVmFrameRenderer(
       // Reuse one browser context, replacing only the display pipeline without restarting the VM or changing game frames.
       // Release old model GPU memory and frame caches to avoid accumulated resources or stale results after repeated switches.
       const replacement = createBackend(next);
+      replacement.setTransparentRect(transparentRect);
+      replacement.setTransparentKey(transparentKey);
       backend.destroy();
       backend = replacement;
       mode = next;
@@ -132,6 +187,14 @@ export function createVmFrameRenderer(
     },
     clear() {
       if (!destroyed) backend.clear();
+    },
+    setTransparentRect(rect) {
+      transparentRect = rect;
+      if (!destroyed) backend.setTransparentRect(rect);
+    },
+    setTransparentKey(key) {
+      transparentKey = key;
+      if (!destroyed) backend.setTransparentKey(key);
     },
     draw(...args) {
       if (!destroyed) backend.draw(...args);
@@ -186,6 +249,10 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
   private readonly ai: AiUpscale | null;
   private readonly scalefx: ScalefxUpscale | null;
   private spatialStatus = t('插值放大：等待游戏画面（非 AI）');
+  private transparentRect: FrameRect | null = null;
+  private transparentKey: FrameKey | null = null;
+  /** Created on first use of a key; one program per frame format. */
+  private keyPrograms: Record<'indexed' | 'rgba' | 'rgb565', KeyProgram> | null = null;
 
   get upscaleStatus(): string | null {
     return this.ai?.status ?? (this.spatialUpscale || this.fsr || this.scalefx ? this.spatialStatus : null);
@@ -424,6 +491,11 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
   ): void {
     if (this.destroyed) return;
     const { gl } = this;
+    if (this.transparentKey) {
+      this.drawKeyed(frame, this.transparentKey, targetWidth, targetHeight);
+      this.drawCursor(frameCursor(cursorFrame), cursorFrame, cursorPresentation);
+      return;
+    }
     const useAi = this.ai?.prepare(frame.width, frame.height, targetWidth, targetHeight) ?? false;
     const upscaling =
       targetWidth >= frame.width &&
@@ -447,6 +519,7 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
       // Cursor redraws/window resizing reuse inference results without rerunning CNN or delaying the independent cursor.
       this.ai!.draw(targetWidth, targetHeight);
       this.postProcess(targetWidth, targetHeight);
+      this.punchTransparentRect(frame, targetWidth, targetHeight);
       this.drawCursor(frameCursor(cursorFrame), cursorFrame, cursorPresentation);
       return;
     }
@@ -461,34 +534,10 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
     }
     if (frame.rgba || frame.rgb565) {
       const packed = !frame.rgba && !!frame.rgb565;
-      const pixels = frame.rgba ?? frame.rgb565!;
-      const format = packed ? gl.RED_INTEGER : gl.RGBA;
-      const type = packed ? gl.UNSIGNED_SHORT : gl.UNSIGNED_BYTE;
       const program = packed ? this.rgb565Program : this.rgbaProgram;
       gl.useProgram(program);
       this.setUpscale(program, upscaling);
-      gl.activeTexture(gl.TEXTURE2);
-      gl.bindTexture(gl.TEXTURE_2D, this.rgbaTexture);
-      if (this.uploadedFrame !== frame) {
-        if (frame.width !== this.rgbaWidth || frame.height !== this.rgbaHeight || packed !== this.rgbaTexturePacked) {
-          this.rgbaWidth = frame.width;
-          this.rgbaHeight = frame.height;
-          this.rgbaTexturePacked = packed;
-          gl.texImage2D(
-            gl.TEXTURE_2D,
-            0,
-            packed ? gl.R16UI : gl.RGBA,
-            frame.width,
-            frame.height,
-            0,
-            format,
-            type,
-            pixels,
-          );
-        } else {
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.width, frame.height, format, type, pixels);
-        }
-      }
+      this.uploadFrame(frame);
       if (this.scalefx && upscaling) {
         this.scalefx.resize(frame.width, frame.height);
         this.scalefx.draw(this.rgbaTexture, packed ? 'rgb565' : 'rgba', null, targetWidth, targetHeight);
@@ -498,20 +547,7 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
     } else {
       gl.useProgram(this.program);
       this.setUpscale(this.program, upscaling);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.indexTexture);
-      if (this.uploadedFrame !== frame) {
-        if (frame.width !== this.frameWidth || frame.height !== this.frameHeight) {
-          this.frameWidth = frame.width;
-          this.frameHeight = frame.height;
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, frame.width, frame.height, 0, gl.RED, gl.UNSIGNED_BYTE, frame.pixels);
-        } else {
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.width, frame.height, gl.RED, gl.UNSIGNED_BYTE, frame.pixels);
-        }
-        gl.activeTexture(gl.TEXTURE1);
-        gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, frame.palette);
-      }
+      this.uploadFrame(frame);
       if (this.scalefx && upscaling) {
         this.scalefx.resize(frame.width, frame.height);
         this.scalefx.draw(this.indexTexture, 'indexed', this.paletteTexture, targetWidth, targetHeight);
@@ -533,7 +569,134 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
       this.ai!.draw(targetWidth, targetHeight);
     }
     this.postProcess(targetWidth, targetHeight);
+    this.punchTransparentRect(frame, targetWidth, targetHeight);
     this.drawCursor(frameCursor(cursorFrame), cursorFrame, cursorPresentation);
+  }
+
+  setTransparentRect(rect: FrameRect | null): void {
+    this.transparentRect = rect;
+  }
+
+  setTransparentKey(key: FrameKey | null): void {
+    this.transparentKey = key;
+  }
+
+  /**
+   * Bind the frame's texture(s) (units 0/1 for indexed + palette, unit 2 for RGBA/RGB565) and upload them when the frame
+   * object changed since the last upload. Shared by the normal and keyed paths so either can follow the other.
+   */
+  private uploadFrame(frame: VmFrame): void {
+    const { gl } = this;
+    if (frame.rgba || frame.rgb565) {
+      const packed = !frame.rgba && !!frame.rgb565;
+      const pixels = frame.rgba ?? frame.rgb565!;
+      const format = packed ? gl.RED_INTEGER : gl.RGBA;
+      const type = packed ? gl.UNSIGNED_SHORT : gl.UNSIGNED_BYTE;
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, this.rgbaTexture);
+      if (this.uploadedFrame === frame) return;
+      if (frame.width !== this.rgbaWidth || frame.height !== this.rgbaHeight || packed !== this.rgbaTexturePacked) {
+        this.rgbaWidth = frame.width;
+        this.rgbaHeight = frame.height;
+        this.rgbaTexturePacked = packed;
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          packed ? gl.R16UI : gl.RGBA,
+          frame.width,
+          frame.height,
+          0,
+          format,
+          type,
+          pixels,
+        );
+      } else {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.width, frame.height, format, type, pixels);
+      }
+      return;
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.indexTexture);
+    if (this.uploadedFrame === frame) return;
+    if (frame.width !== this.frameWidth || frame.height !== this.frameHeight) {
+      this.frameWidth = frame.width;
+      this.frameHeight = frame.height;
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, frame.width, frame.height, 0, gl.RED, gl.UNSIGNED_BYTE, frame.pixels);
+    } else {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.width, frame.height, gl.RED, gl.UNSIGNED_BYTE, frame.pixels);
+    }
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, frame.palette);
+  }
+
+  /** Keyed passthrough: one 1:1 pass straight to the canvas; key pixels inside the rectangle get alpha 0. */
+  private drawKeyed(frame: VmFrame, key: FrameKey, targetWidth: number, targetHeight: number): void {
+    const { gl } = this;
+    this.keyPrograms ??= createKeyPrograms(gl);
+    const kind = frame.rgba ? 'rgba' : frame.rgb565 ? 'rgb565' : 'indexed';
+    const entry = this.keyPrograms[kind];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, targetWidth, targetHeight);
+    gl.useProgram(entry.program);
+    this.uploadFrame(frame);
+    this.uploadedFrame = frame;
+    gl.uniform4f(entry.rect, ...keyRectUv(key.rect, frame.width, frame.height));
+    if (kind === 'rgb565') gl.uniform1ui(entry.packed, key.rgb565 & 0xffff);
+    else
+      gl.uniform3f(
+        entry.rgb,
+        ...(rgb565ToRgb888(key.rgb565).map((channel) => channel / 255) as [number, number, number]),
+      );
+    this.bindQuad(entry.program);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // Restore the attribute layout the other programs were set up with.
+    this.bindQuad(this.program);
+  }
+
+  private bindQuad(program: WebGLProgram): void {
+    const { gl } = this;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vertices);
+    for (const [name, offset] of [
+      ['position', 0],
+      ['texturePosition', 2],
+    ] as const) {
+      const location = gl.getAttribLocation(program, name);
+      if (location < 0) continue;
+      gl.enableVertexAttribArray(location);
+      gl.vertexAttribPointer(location, 2, gl.FLOAT, false, 16, offset * 4);
+    }
+  }
+
+  /**
+   * Force the whole frame opaque (palette entries may carry alpha 0), then clear the requested rectangle to transparent
+   * before the cursor is drawn on top. Only has a visible effect with an alpha drawing buffer.
+   */
+  private punchTransparentRect(frame: VmFrame, targetWidth: number, targetHeight: number): void {
+    const rect = this.transparentRect;
+    if (!rect) return;
+    const { gl } = this;
+    const sx = targetWidth / frame.width;
+    const sy = targetHeight / frame.height;
+    const x0 = Math.max(0, Math.round(rect.x * sx));
+    const x1 = Math.min(targetWidth, Math.round((rect.x + rect.width) * sx));
+    const y0 = Math.max(0, Math.round(rect.y * sy));
+    const y1 = Math.min(targetHeight, Math.round((rect.y + rect.height) * sy));
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, targetWidth, targetHeight);
+    gl.colorMask(false, false, false, true);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.colorMask(true, true, true, true);
+    if (x1 > x0 && y1 > y0) {
+      gl.enable(gl.SCISSOR_TEST);
+      // GL scissor rectangles start at the bottom-left corner.
+      gl.scissor(x0, targetHeight - y1, x1 - x0, y1 - y0);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.disable(gl.SCISSOR_TEST);
+    }
+    gl.clearColor(9 / 255, 11 / 255, 16 / 255, 1);
   }
 
   private ensureRcasTarget(width: number, height: number): void {
@@ -561,6 +724,8 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
     this.gl.deleteProgram(this.rgbaProgram);
     this.gl.deleteProgram(this.rgb565Program);
     this.gl.deleteProgram(this.cursorProgram);
+    for (const entry of Object.values(this.keyPrograms ?? {})) this.gl.deleteProgram(entry.program);
+    this.keyPrograms = null;
     if (this.rcas) {
       this.gl.deleteProgram(this.rcas.program);
       this.gl.deleteTexture(this.rcas.texture);
@@ -635,6 +800,13 @@ class CanvasFrameRenderer implements FrameBackend {
   ) {
     this.upscaleStatus = requestedUpscale ? t('超分未启动：当前使用 Canvas 2D，已回退原图') : null;
   }
+
+  /**
+   * Canvas 2D always draws the full frame opaque, so it can neither key nor punch a rectangle; the page and
+   * startHdBridge therefore run the HD bridge (and the game's passthrough patches) only with the WebGL2 backend.
+   */
+  setTransparentRect(): void {}
+  setTransparentKey(): void {}
 
   clear(): void {
     if (this.destroyed) return;
@@ -745,6 +917,93 @@ class CanvasFrameRenderer implements FrameBackend {
     }
     return cache.canvas;
   }
+}
+
+interface KeyProgram {
+  program: WebGLProgram;
+  rect: WebGLUniformLocation | null;
+  rgb: WebGLUniformLocation | null;
+  packed: WebGLUniformLocation | null;
+}
+
+const KEY_VERTEX_SHADER = `#version 300 es
+      in vec2 position;
+      in vec2 texturePosition;
+      out vec2 uv;
+      void main() {
+        gl_Position = vec4(position, 0.0, 1.0);
+        uv = texturePosition;
+      }
+    `;
+
+/**
+ * Key programs: sample exactly like the plain 1:1 programs, then output (0, 0, 0, 0) for key pixels inside keyRect.
+ * Texture coordinates of pixel (x, y) lie strictly inside the texel, so `uv >= rect.xy && uv < rect.zw` selects the
+ * same texels NEAREST sampling reads. 16-bit frames compare the packed value, others compare RGB888 within half a step.
+ */
+function createKeyPrograms(gl: WebGL2RenderingContext): Record<'indexed' | 'rgba' | 'rgb565', KeyProgram> {
+  const inside = 'all(greaterThanEqual(uv, keyRect.xy)) && all(lessThan(uv, keyRect.zw))';
+  const sources = {
+    indexed: `#version 300 es
+      precision highp float;
+      uniform sampler2D indexedFrame;
+      uniform sampler2D palette;
+      uniform vec4 keyRect;
+      uniform vec3 keyRgb;
+      in vec2 uv;
+      out vec4 color;
+      void main() {
+        int paletteIndex = int(texture(indexedFrame, uv).r * 255.0 + 0.5);
+        vec3 rgb = texelFetch(palette, ivec2(paletteIndex, 0), 0).rgb;
+        color = ${inside} && all(lessThan(abs(rgb - keyRgb), vec3(0.5 / 255.0))) ? vec4(0.0) : vec4(rgb, 1.0);
+      }
+    `,
+    rgba: `#version 300 es
+      precision highp float;
+      uniform sampler2D rgbaFrame;
+      uniform vec4 keyRect;
+      uniform vec3 keyRgb;
+      in vec2 uv;
+      out vec4 color;
+      void main() {
+        vec3 rgb = texture(rgbaFrame, uv).rgb;
+        color = ${inside} && all(lessThan(abs(rgb - keyRgb), vec3(0.5 / 255.0))) ? vec4(0.0) : vec4(rgb, 1.0);
+      }
+    `,
+    rgb565: `#version 300 es
+      precision highp float;
+      precision highp int;
+      uniform highp usampler2D packedFrame;
+      uniform vec4 keyRect;
+      uniform uint keyPacked;
+      in vec2 uv;
+      out vec4 color;
+      void main() {
+        uint p = texture(packedFrame, uv).r;
+        uvec3 rgb = uvec3((p >> 11u) & 31u, (p >> 5u) & 63u, p & 31u);
+        rgb = (rgb << uvec3(3u, 2u, 3u)) | (rgb >> uvec3(2u, 4u, 2u));
+        color = ${inside} && p == keyPacked ? vec4(0.0) : vec4(vec3(rgb) / 255.0, 1.0);
+      }
+    `,
+  } as const;
+  const programs = {} as Record<'indexed' | 'rgba' | 'rgb565', KeyProgram>;
+  for (const kind of ['indexed', 'rgba', 'rgb565'] as const) {
+    const program = linkProgram(gl, KEY_VERTEX_SHADER, sources[kind]);
+    gl.useProgram(program);
+    if (kind === 'indexed') {
+      gl.uniform1i(gl.getUniformLocation(program, 'indexedFrame'), 0);
+      gl.uniform1i(gl.getUniformLocation(program, 'palette'), 1);
+    } else {
+      gl.uniform1i(gl.getUniformLocation(program, kind === 'rgba' ? 'rgbaFrame' : 'packedFrame'), 2);
+    }
+    programs[kind] = {
+      program,
+      rect: gl.getUniformLocation(program, 'keyRect'),
+      rgb: gl.getUniformLocation(program, 'keyRgb'),
+      packed: gl.getUniformLocation(program, 'keyPacked'),
+    };
+  }
+  return programs;
 }
 
 function configureTexture(gl: WebGL2RenderingContext, texture: WebGLTexture, unit: number): void {

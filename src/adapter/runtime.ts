@@ -1,4 +1,5 @@
 import type { GamePerformanceSample } from '../games/performance';
+import type { GameRenderState } from '../games/renderState';
 import { serveRelayPort, relayAddressCandidates, relayRoomFromPath } from 'relay-package/client';
 import { createBrowserEmulator } from '../platform/browser/emulator';
 import { BrowserEmulatorProbe } from '../platform/browser/emulatorProbe';
@@ -107,6 +108,7 @@ export async function createVmShell(
         workerProbeMs: null,
         fallbackReason: null,
       },
+      options.renderPassthrough,
     );
   }
   const handle = directoryHandleOf(source.files);
@@ -153,6 +155,7 @@ export async function createVmShell(
     ...(options.resolution ? { resolution: options.resolution } : {}),
     playerName,
     startupPage: options.startupPage,
+    ...(options.renderPassthrough ? { renderPassthrough: true } : {}),
     ...(ra2Network ? { ra2Network } : {}),
     fastFileRead:
       typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('fast-files') !== '0',
@@ -209,6 +212,7 @@ export async function createVmShell(
       ra2Network,
       options.startupPage,
       runtimeInfo,
+      options.renderPassthrough,
     );
   }
 }
@@ -235,6 +239,7 @@ export class Win32GameVm implements VmShell {
       workerProbeMs: null,
       fallbackReason: null,
     },
+    renderPassthrough = false,
   ) {
     this.fileProvider = source.files;
     const probe = new BrowserEmulatorProbe();
@@ -243,6 +248,7 @@ export class Win32GameVm implements VmShell {
       executionProbe: probe,
       ...gameVmConfiguration(source.game, callbacks.onNetworkStatus, ra2Network),
       startupPage,
+      renderPassthrough,
       fetchBytes,
       scheduleFrame: (emit) => {
         window.requestAnimationFrame(emit);
@@ -315,6 +321,10 @@ export class Win32GameVm implements VmShell {
     return this.core.getGamePerformance();
   }
 
+  getRenderState(): Promise<GameRenderState | null> {
+    return this.core.getRenderState();
+  }
+
   getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics> {
     return this.core.getDiagnostics(action);
   }
@@ -325,6 +335,10 @@ export class Win32GameVm implements VmShell {
 
   async setGameSpeedFlag(value: number): Promise<number | null> {
     return this.core.setGameSpeedFlag(value);
+  }
+
+  async setTacticalPassthrough(flags: number): Promise<boolean> {
+    return this.core.setTacticalPassthrough(flags);
   }
 
   async startMemRecord(): Promise<boolean> {

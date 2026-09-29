@@ -1,4 +1,5 @@
 import type { GamePerformanceSample } from '../games/performance';
+import type { GameRenderState } from '../games/renderState';
 import type { VmDiagnosticAction, VmDiagnostics, VmRuntimeInfo } from './vmDiagnostics';
 import { normalizeGameClockRate } from '../vm86/clock';
 import { AUDIO_DIAGNOSTICS_INTERVAL_MS, WebAudioPcmSink } from './audio';
@@ -23,6 +24,8 @@ export interface WorkerVmClientOptions {
   onTerminated?: () => void;
   /** Explicit experimental navigation; preserve original startup by default. */
   startupPage?: string;
+  /** HD bridge opt-in: install the game's inert native overlay passthrough patches (dev `?hd=1`). */
+  renderPassthrough?: boolean;
   /** In-memory resolution overlay injected into RA2.INI/RA2MD.INI at startup. */
   resolution?: GameResolution | null;
   /** Native [MultiPlayer] Handle for this VM; never shared with other tabs. */
@@ -76,6 +79,8 @@ export class WorkerVmClient implements VmShell {
   private frameAckRaf: number | null = null;
   private pendingFrameAck = 0;
   private previousFrameBuffer: ArrayBuffer | null = null;
+  /** Clone of the last 'render-state-reply', returned again for 'render-state-unchanged'. */
+  private lastRenderState: GameRenderState | null = null;
   private readonly recycleFrames: boolean;
 
   constructor(callbacks: GameVmCallbacks, initConfig: VmInitConfig, options: WorkerVmClientOptions = {}) {
@@ -184,12 +189,21 @@ export class WorkerVmClient implements VmShell {
     return this.request((requestId) => ({ type: 'game-performance', requestId }));
   }
 
+  /** Resolves to the identical object again while the Worker reports the snapshot unchanged. */
+  async getRenderState(): Promise<GameRenderState | null> {
+    return this.request((requestId) => ({ type: 'render-state', requestId }));
+  }
+
   async getPointerState(): Promise<VmPointerState | null> {
     return this.request((requestId) => ({ type: 'state', kind: 'pointer', requestId }));
   }
 
   async setGameSpeedFlag(value: number): Promise<number | null> {
     return this.request((requestId) => ({ type: 'guest-speed-flag', value, requestId }));
+  }
+
+  async setTacticalPassthrough(flags: number): Promise<boolean> {
+    return this.request((requestId) => ({ type: 'tactical-passthrough', flags, requestId }));
   }
 
   async startMemRecord(): Promise<boolean> {
@@ -333,12 +347,21 @@ export class WorkerVmClient implements VmShell {
           this.ackFrameAtPresentationBoundary(message.frameId);
         }
         break;
+      case 'render-state-reply':
+        // Kept even when the request already timed out: the Worker compares later snapshots against this reply.
+        this.lastRenderState = message.value;
+        this.resolveRequest(message.requestId, message.value);
+        break;
+      case 'render-state-unchanged':
+        this.resolveRequest(message.requestId, this.lastRenderState);
+        break;
       case 'game-performance-reply':
       case 'diagnostics-reply':
       case 'state-reply':
         this.resolveRequest(message.requestId, message.value);
         break;
       case 'guest-speed-flag-reply':
+      case 'tactical-passthrough-reply':
         this.resolveRequest(message.requestId, message.value);
         break;
       case 'mem-record-start-reply':
@@ -374,6 +397,9 @@ export class WorkerVmClient implements VmShell {
           this.handleFatal(new Error(message.message));
         }
         break;
+      default:
+        // Every Worker message needs a case: a dropped reply case would otherwise surface only as a request timeout.
+        message satisfies never;
     }
   }
 

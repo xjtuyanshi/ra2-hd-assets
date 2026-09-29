@@ -16,6 +16,7 @@ import { SessionGameFileProvider } from '../../src/platform/browser/files/sessio
 import type { GameVmCallbacks } from '../../src/app/session/runtimeEvents';
 import type { VmFrame } from '../../src/vm86/win32';
 import type { VmDiagnosticAction, VmDiagnostics } from '../../src/adapter/vmDiagnostics';
+import type { GameRenderState } from '../../src/games/renderState';
 
 class FakeProvider implements GameFileProvider {
   readonly label = 'controller-test';
@@ -132,6 +133,8 @@ class FakeCore implements VmWorkerCore {
   fail: string | null = null;
   clock = 0;
   volume = 0;
+  readonly passthroughFlags: number[] = [];
+  renderState: GameRenderState | null = null;
 
   async start(): Promise<void> {
     this.calls.push('start');
@@ -161,9 +164,18 @@ class FakeCore implements VmWorkerCore {
   getPointerState(): null {
     return null;
   }
+  async getRenderState(): Promise<GameRenderState | null> {
+    return this.renderState;
+  }
+
   async getGamePerformance(): Promise<null> {
     return null;
   }
+  setTacticalPassthrough(flags: number): boolean {
+    this.passthroughFlags.push(flags);
+    return flags === 3;
+  }
+
   setGameSpeedFlag(): null {
     return null;
   }
@@ -294,6 +306,56 @@ describe('VmWorkerController request-scoped errors', () => {
     const second = harness();
     await second.controller.handleMessage({ type: 'init', config: config(), requestId: 2 });
     expect(second.core.platform?.startupPage).toBeUndefined();
+  });
+  it('原生叠加层直通：init 选择加入，开关请求带回写入结果', async () => {
+    const first = harness();
+    await first.controller.handleMessage({
+      type: 'init',
+      config: { ...config(), renderPassthrough: true },
+      requestId: 1,
+    });
+    expect(first.core.platform?.renderPassthrough).toBe(true);
+    await first.controller.handleMessage({ type: 'tactical-passthrough', flags: 3, requestId: 5 });
+    await first.controller.handleMessage({ type: 'tactical-passthrough', flags: 0, requestId: 6 });
+    expect(first.core.passthroughFlags).toEqual([3, 0]);
+    expect(first.messages).toContainEqual({ type: 'tactical-passthrough-reply', requestId: 5, value: true });
+    expect(first.messages).toContainEqual({ type: 'tactical-passthrough-reply', requestId: 6, value: false });
+    const second = harness();
+    await second.controller.handleMessage({ type: 'init', config: config(), requestId: 2 });
+    expect(second.core.platform?.renderPassthrough).toBeUndefined();
+  });
+  it('HD 渲染状态：init 前回复 null；同一快照对象再次请求时只回“未变化”，不再克隆', async () => {
+    const { controller, messages, core } = harness();
+    await controller.handleMessage({ type: 'render-state', requestId: 3 });
+    expect(messages).toContainEqual({ type: 'render-state-reply', requestId: 3, value: null });
+    await controller.handleMessage({ type: 'init', config: config(), requestId: 1 });
+    const snapshot: GameRenderState = {
+      frame: 42,
+      view: { x: 10, y: 20 },
+      map: { fileName: 'TEST.MAP' },
+      houses: [{ index: 0, colorIndex: 3 }],
+      localHouse: 0,
+      objects: [],
+      shroud: null,
+      effects: null,
+    };
+    core.renderState = snapshot;
+    await controller.handleMessage({ type: 'render-state', requestId: 4 });
+    await controller.handleMessage({ type: 'render-state', requestId: 5 });
+    expect(messages).toContainEqual({ type: 'render-state-reply', requestId: 4, value: snapshot });
+    expect(messages).toContainEqual({ type: 'render-state-unchanged', requestId: 5 });
+    core.renderState = { ...snapshot, frame: 43 };
+    await controller.handleMessage({ type: 'render-state', requestId: 6 });
+    expect(messages).toContainEqual({ type: 'render-state-reply', requestId: 6, value: core.renderState });
+    // Leaving the battle (null) is always a full reply, and the next snapshot is posted again in full.
+    const next = core.renderState;
+    core.renderState = null;
+    await controller.handleMessage({ type: 'render-state', requestId: 7 });
+    core.renderState = next;
+    await controller.handleMessage({ type: 'render-state', requestId: 8 });
+    expect(messages).toContainEqual({ type: 'render-state-reply', requestId: 7, value: null });
+    expect(messages).toContainEqual({ type: 'render-state-reply', requestId: 8, value: next });
+    controller.dispose();
   });
   it('uses one request id for init/start and preserves their order', async () => {
     const { controller, messages, core } = harness();

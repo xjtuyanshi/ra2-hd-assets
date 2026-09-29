@@ -1,6 +1,7 @@
 import '../helpers/chineseLocale';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createVmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
+import { createVmFrameRenderer, keyRectUv, rgb565ToRgb888 } from '../../src/ui/pages/game/vmFrameRenderer';
+import { parsePassthroughFlags } from '../../src/ui/pages/game/hdBridge';
 import { fsrUpscaleMode, spatialUpscaleEnabled } from '../../src/ui/pages/game/spatialUpscale';
 import type { VmFrame } from '../../src/vm86/win32';
 
@@ -179,8 +180,22 @@ class FakeWebGl {
   drawArrays(): void {
     this.calls.push('drawArrays');
   }
-  uniform4f(): void {}
+  uniform4f(location: { name: string }, ...values: number[]): void {
+    this.calls.push(`uniform4f:${location.name}:${values.join(',')}`);
+  }
+  uniform3f(location: { name: string }, ...values: number[]): void {
+    this.calls.push(`uniform3f:${location.name}:${values.map((v) => v.toFixed(3)).join(',')}`);
+  }
+  uniform1ui(location: { name: string }, value: number): void {
+    this.calls.push(`uniform1ui:${location.name}:${value}`);
+  }
   enable(): void {}
+  colorMask(...mask: boolean[]): void {
+    this.calls.push(`colorMask:${mask.join(',')}`);
+  }
+  scissor(x: number, y: number, width: number, height: number): void {
+    this.calls.push(`scissor:${x},${y},${width},${height}`);
+  }
   blendFunc(): void {}
   disable(): void {}
   deleteTexture(texture: unknown): void {
@@ -324,6 +339,110 @@ describe('VmFrameRenderer 生命周期', () => {
     renderer.clear();
     renderer.draw(indexedFrame(), 320, 200);
     expect(gl.calls.length).toBe(callsBeforeDestroy);
+  });
+
+  it('关键色直通：只有矩形内的键色透明，旁路放大与后处理，同帧不重复上传', () => {
+    const gl = new FakeWebGl();
+    const renderer = createVmFrameRenderer(
+      { getContext: () => gl } as unknown as HTMLCanvasElement,
+      true,
+      false,
+      'fsr',
+    );
+    const frame = { ...indexedFrame(4, 2), rgb565: new Uint16Array(8) };
+    renderer.setTransparentKey({ rect: { x: 1, y: 0, width: 2, height: 2 }, rgb565: 0xf81f });
+    renderer.draw(frame, 8, 4);
+    expect(gl.calls).toContain('uniform4f:keyRect:0.25,0,0.75,1');
+    expect(gl.calls).toContain('uniform1ui:keyPacked:63519');
+    renderer.draw(frame, 8, 4);
+    expect(gl.uploads).toHaveLength(1);
+    expect(gl.calls.some((call) => call.startsWith('uniform:upscale'))).toBe(false);
+    renderer.draw({ ...indexedFrame(4, 2), rgba: new Uint8Array(32) }, 8, 4);
+    expect(gl.calls).toContain('uniform3f:keyRgb:1.000,0.000,1.000');
+    renderer.setTransparentKey(null);
+    renderer.draw(frame, 8, 4);
+    expect(gl.calls.some((call) => call.startsWith('uniform:upscale'))).toBe(true);
+    renderer.destroy();
+    // indexed/rgba/rgb565/cursor plus the three key programs.
+    expect(gl.deletedPrograms).toHaveLength(7);
+  });
+
+  it('切换放大档位时键色与透明矩形交给新管线', () => {
+    const gl = new FakeWebGl();
+    const renderer = createVmFrameRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement);
+    const frame = { ...indexedFrame(4, 2), rgb565: new Uint16Array(8) };
+    renderer.setTransparentKey({ rect: { x: 1, y: 0, width: 2, height: 2 }, rgb565: 0xf81f });
+    // A mid-session switch (toolbar, or the live model's beforeLoad) must not drop the key: the battlefield would turn
+    // solid magenta under a steady HD view.
+    renderer.setUpscaleMode('bicubic');
+    renderer.draw(frame, 8, 4);
+    expect(gl.calls).toContain('uniform1ui:keyPacked:63519');
+    expect(gl.calls).toContain('uniform4f:keyRect:0.25,0,0.75,1');
+    expect(gl.calls.some((call) => call.startsWith('uniform:upscale'))).toBe(false);
+    renderer.setTransparentKey(null);
+    renderer.setTransparentRect({ x: 1, y: 0, width: 2, height: 1 });
+    renderer.setUpscaleMode('off');
+    gl.calls.length = 0;
+    renderer.draw(frame, 8, 4);
+    expect(gl.calls.some((call) => call.startsWith('uniform1ui:keyPacked'))).toBe(false);
+    // Alpha forced opaque first, then the scaled rectangle (x 2..6, y 0..2 of 8x4) cleared, scissor origin bottom-left.
+    const punch = gl.calls.slice(gl.calls.indexOf('colorMask:false,false,false,true'));
+    expect(punch.slice(0, 3)).toEqual(['colorMask:false,false,false,true', 'clear', 'colorMask:true,true,true,true']);
+    expect(punch).toContain('scissor:2,2,4,2');
+    renderer.destroy();
+  });
+
+  it('透明矩形按目标尺寸缩放并裁到画布内', () => {
+    const gl = new FakeWebGl();
+    const renderer = createVmFrameRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement);
+    renderer.setTransparentRect({ x: -1, y: 1, width: 10, height: 5 });
+    renderer.draw(indexedFrame(4, 2), 8, 4);
+    expect(gl.calls).toContain('scissor:0,0,8,2');
+    // An empty intersection still forces the frame opaque but clears nothing.
+    renderer.setTransparentRect({ x: 5, y: 0, width: 2, height: 2 });
+    gl.calls.length = 0;
+    renderer.draw(indexedFrame(4, 2), 8, 4);
+    expect(gl.calls).toContain('colorMask:false,false,false,true');
+    expect(gl.calls.some((call) => call.startsWith('scissor:'))).toBe(false);
+    renderer.setTransparentRect(null);
+    gl.calls.length = 0;
+    renderer.draw(indexedFrame(4, 2), 8, 4);
+    expect(gl.calls.some((call) => call.startsWith('colorMask:'))).toBe(false);
+    renderer.destroy();
+  });
+
+  it('调色板帧的键色直通上传调色板并比较 RGB888 键值', () => {
+    const gl = new FakeWebGl();
+    const renderer = createVmFrameRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement);
+    renderer.setTransparentKey({ rect: { x: 0, y: 0, width: 2, height: 1 }, rgb565: 0xf81f });
+    const frame = indexedFrame();
+    renderer.draw(frame, 2, 1);
+    expect(gl.calls).toContain('uniform3f:keyRgb:1.000,0.000,1.000');
+    expect(gl.calls).toContain('uniform4f:keyRect:0,0,1,1');
+    // Index texture, then the 256x1 palette.
+    expect(gl.uploads.map((args) => [args[3], args[4]])).toEqual([
+      [2, 1],
+      [256, 1],
+    ]);
+    expect(gl.uploads[1]![8]).toBe(frame.palette);
+    renderer.draw(frame, 2, 1);
+    expect(gl.uploads).toHaveLength(2);
+    renderer.destroy();
+  });
+
+  it('键色换算与 HD 桥参数', () => {
+    expect(rgb565ToRgb888(0xf81f)).toEqual([255, 0, 255]);
+    expect(rgb565ToRgb888(0x07e0)).toEqual([0, 255, 0]);
+    expect(rgb565ToRgb888(0x0841)).toEqual([8, 8, 8]);
+    expect(keyRectUv({ x: -10, y: 5, width: 1000, height: 10 }, 100, 20)).toEqual([0, 0.25, 1, 0.75]);
+    expect(parsePassthroughFlags(null)).toBe(7);
+    expect(parsePassthroughFlags('terrain,objects')).toBe(3);
+    expect(parsePassthroughFlags('all')).toBe(7);
+    expect(parsePassthroughFlags('none')).toBe(0);
+    // Parsed as given; without terrain the bridge cannot key and uses the transparent rectangle (hdBridge.test.ts).
+    expect(parsePassthroughFlags('objects,effects')).toBe(6);
+    expect(parsePassthroughFlags('5')).toBe(5);
+    expect(parsePassthroughFlags('15')).toBe(7);
   });
 
   it('RGB565 Canvas 回退准确转色，同一帧光标重画不重复转换', () => {

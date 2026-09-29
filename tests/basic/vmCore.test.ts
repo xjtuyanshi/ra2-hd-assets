@@ -7,6 +7,10 @@ import { type GameSource } from '../../src/games/source';
 import { SUPPORTED_GAMES, type SupportedGame } from '../../src/games/catalog';
 import { EMPTY_GAME_SHIM_PROFILE } from '../../src/vm86/shim/gameProfile';
 import type { V86 } from 'v86';
+import type { GameRenderState, GameRenderStateReader } from '../../src/games/renderState';
+import type { RenderPassthroughControl } from '../../src/games/renderPassthrough';
+import type { GameRuntimeHooks } from '../../src/games/runtimeHooks';
+import type { GuestMemory } from '../../src/vm86/win32';
 import type { Win32Shim } from '../../src/games/win32Shim';
 import { HYPERCALL_EXCEPTION, HYPERCALL_HALTED, HYPERCALL_REQUEST, HYPERCALL_STACK } from '../../src/vm86/pe';
 import { FIXTURE_FILE_BYTES, FIXTURE_FILE_PATH, FIXTURE_ABI, buildFixturePe } from '../fixture/fixtureProgram';
@@ -520,5 +524,185 @@ describe('VmCore lifecycle orchestration', () => {
     await vi.waitFor(() => expect(statuses.at(-1)).toBe(expected), { timeout: 500 });
     if (expected === 'blocked') expect(blocked).toHaveBeenCalledTimes(1);
     await core.destroy();
+  });
+});
+
+describe('VmCore HD bridge opt-in', () => {
+  const GUEST_MEMORY = 32 * 1024 * 1024;
+  type Reserve = (size: number, alignment?: number) => number;
+
+  function hooked(hooks: GameRuntimeHooks, game: Partial<SupportedGame> = {}): GameSource {
+    const fixture = source();
+    fixture.game = { ...fixture.game, ...game, runtimeHooks: hooks };
+    return fixture;
+  }
+
+  function control(configAddress = 0): RenderPassthroughControl & { set: ReturnType<typeof vi.fn> } {
+    return {
+      supported: 7,
+      keyRgb565: 0xf81f,
+      configAddress,
+      set: vi.fn(() => true),
+      read: () => ({ flags: 0, applied: 0, counters: {} }),
+    };
+  }
+
+  it('未选择加入时不安装直通补丁，开关请求返回 false', async () => {
+    const prepare = vi.fn(async () => control());
+    const core = new VmCore(
+      {},
+      hooked({ prepareRenderPassthrough: prepare }),
+      platform(new FakeEmulator(), new FakeAudio(), () => fakeShim()),
+    );
+    try {
+      await core.start();
+      expect(prepare).not.toHaveBeenCalled();
+      expect(core.setTacticalPassthrough(3)).toBe(false);
+    } finally {
+      await core.destroy();
+    }
+  });
+
+  it.each([
+    ['堆区顶端', undefined, 0x00e0_0000],
+    ['快速文件镜像顶端', 0x01f8_0000, 0x01f8_0000],
+  ] as const)(
+    '选择加入时从客体内存顶端分配补丁内存：对齐、不低于%s、耗尽时报错；停止后开关无效',
+    async (_label, fastFileMirrorTop, floor) => {
+      const emulator = new FakeEmulator();
+      const reservations: Array<{ address: number; size: number; alignment: number }> = [];
+      const errors: string[] = [];
+      const installed = control();
+      const prepare = vi.fn(async (_memory: GuestMemory, reserve: Reserve) => {
+        for (const [size, alignment] of [
+          [0x1000, 0x1000],
+          [0x2345, 0x1000],
+          [40, 16],
+        ] as const)
+          reservations.push({ address: reserve(size, alignment), size, alignment });
+        for (const request of [() => reserve(GUEST_MEMORY), () => reserve(0), () => reserve(16, 8)]) {
+          try {
+            request();
+          } catch (error) {
+            errors.push((error as Error).message);
+          }
+        }
+        // Exactly the rest down to the floor still fits; one more byte does not.
+        const last = reservations.at(-1)!.address;
+        reservations.push({ address: reserve(last - floor, 16), size: last - floor, alignment: 16 });
+        try {
+          reserve(16);
+        } catch (error) {
+          errors.push((error as Error).message);
+        }
+        return installed;
+      });
+      const core = new VmCore({}, hooked({ prepareRenderPassthrough: prepare }, { fastFileMirrorTop }), {
+        ...platform(emulator, new FakeAudio(), () => fakeShim()),
+        renderPassthrough: true,
+      });
+      try {
+        await core.start();
+        expect(prepare).toHaveBeenCalledOnce();
+        expect(prepare.mock.calls[0]![0]).toBe(emulator);
+        let previous = GUEST_MEMORY;
+        for (const { address, size, alignment } of reservations) {
+          expect(address % alignment).toBe(0);
+          expect(address).toBeGreaterThanOrEqual(floor);
+          expect(address + size).toBeLessThanOrEqual(previous);
+          previous = address;
+        }
+        expect(reservations[0]!.address).toBe(GUEST_MEMORY - 0x1000);
+        expect(reservations.at(-1)!.address).toBe(floor);
+        expect(errors).toEqual(['补丁内存区不足', '补丁内存请求无效', '补丁内存请求无效', '补丁内存区不足']);
+
+        expect(core.setTacticalPassthrough(3)).toBe(true);
+        expect(installed.set).toHaveBeenCalledWith(emulator, 3);
+        await core.stop();
+        expect(core.setTacticalPassthrough(0)).toBe(false);
+        expect(installed.set).toHaveBeenCalledOnce();
+      } finally {
+        await core.destroy();
+      }
+    },
+  );
+
+  it('补丁未安装（钩子返回 null）时照常启动，开关请求返回 false', async () => {
+    const core = new VmCore({}, hooked({ prepareRenderPassthrough: async () => null }), {
+      ...platform(new FakeEmulator(), new FakeAudio(), () => fakeShim()),
+      renderPassthrough: true,
+    });
+    try {
+      await core.start();
+      expect(core.setTacticalPassthrough(1)).toBe(false);
+    } finally {
+      await core.destroy();
+    }
+  });
+
+  it('启动页桩必须止于 0xA0000（v86 VGA 窗口）之前', async () => {
+    const statuses: string[] = [];
+    let first = 0;
+    let filled = 0;
+    const prepareStartupPage = vi.fn((_memory: GuestMemory, _page: string, _hash: string, reserve: Reserve) => {
+      first = reserve(16);
+      filled = reserve(0xa_0000 - (first + 16));
+      reserve(1);
+    });
+    const core = new VmCore({ onStatus: (status) => statuses.push(status.phase) }, hooked({ prepareStartupPage }), {
+      ...platform(new FakeEmulator(), new FakeAudio(), () => fakeShim()),
+      startupPage: 'skirmish',
+    });
+    await expect(core.start()).rejects.toThrow('启动导航桩区不足');
+    expect(prepareStartupPage).toHaveBeenCalledOnce();
+    expect(first).toBeGreaterThanOrEqual(0x8_0000);
+    expect(filled).toBe(first + 16);
+    expect(statuses.at(-1)).toBe('error');
+  });
+
+  it('渲染状态：运行前与外壳页面返回 null；运行中只创建一次读取器，不支持或加载失败时下次重试', async () => {
+    const emulator = new FakeEmulator();
+    const snapshot: GameRenderState = {
+      frame: 5,
+      view: { x: 0, y: 0 },
+      map: { fileName: 'TEST.MAP' },
+      houses: [],
+      localHouse: -1,
+      objects: [],
+      shroud: null,
+      effects: null,
+    };
+    const reader = vi.fn(() => snapshot);
+    const create = vi.fn(async (): Promise<GameRenderStateReader | null> => reader);
+    let title = '';
+    const shim = Object.assign(fakeShim(), { inspectShellPageTitle: () => title });
+    const core = new VmCore(
+      {},
+      hooked({ createRenderStateReader: create }),
+      platform(emulator, new FakeAudio(), () => shim),
+    );
+    try {
+      expect(await core.getRenderState()).toBeNull();
+      await core.start();
+      title = 'MainMenu';
+      expect(await core.getRenderState()).toBeNull();
+      expect(create).not.toHaveBeenCalled();
+      title = '';
+      create.mockResolvedValueOnce(null);
+      expect(await core.getRenderState()).toBeNull();
+      create.mockRejectedValueOnce(new Error('module failed to load'));
+      await expect(core.getRenderState()).rejects.toThrow('module failed to load');
+      const [a, b] = await Promise.all([core.getRenderState(), core.getRenderState()]);
+      expect(a).toBe(snapshot);
+      expect(b).toBe(snapshot);
+      expect(create).toHaveBeenCalledTimes(3);
+      expect(create).toHaveBeenLastCalledWith(emulator, GUEST_MEMORY, expect.stringMatching(/^[0-9a-f]{64}$/));
+      expect(reader).toHaveBeenCalledTimes(2);
+      await core.stop();
+      expect(await core.getRenderState()).toBeNull();
+      expect(reader).toHaveBeenCalledTimes(2);
+    } finally {
+      await core.destroy();
+    }
   });
 });

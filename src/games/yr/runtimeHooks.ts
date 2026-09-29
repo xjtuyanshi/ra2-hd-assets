@@ -29,8 +29,32 @@ export function skipYrStartupMovies(memory: GuestMemory): boolean {
   );
 }
 
+/**
+ * HD bridge extensions (the render-state readers and the native overlay passthrough patches) are development-only.
+ * Each hook loads its module on first use through a dynamic import behind `import.meta.env.DEV`, a build-time
+ * constant, so production bundles contain none of that code and the hooks resolve to null there. A static import of
+ * any of those modules elsewhere would ship them again; tests/basic/architecture/dependencies.test.ts rejects that.
+ */
+const YR_HD_BRIDGE_HOOKS: Pick<GameRuntimeHooks, 'createRenderStateReader' | 'prepareRenderPassthrough'> = {
+  async createRenderStateReader(memory, size, hash) {
+    if (import.meta.env.DEV) {
+      const { createYrRenderStateReader } = await import('./renderState');
+      return createYrRenderStateReader(memory, size, hash);
+    }
+    return null;
+  },
+  async prepareRenderPassthrough(memory, reserve) {
+    if (import.meta.env.DEV) {
+      const { prepareYrRenderPassthrough } = await import('./tacticalPassthrough');
+      return prepareYrRenderPassthrough(memory, reserve);
+    }
+    return null;
+  },
+};
+
 export const YR_RUNTIME_HOOKS: GameRuntimeHooks = Object.freeze({
   createFrameReader: createYrFrameReader,
+  ...YR_HD_BRIDGE_HOOKS,
   prepareStartupPage(memory: GuestMemory, page: string, hash: string, reserve: (size: number) => number): void {
     if (page === 'battle') {
       installYrBattleStartup(memory, reserve, hash);

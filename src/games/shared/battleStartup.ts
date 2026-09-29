@@ -1,5 +1,6 @@
 import type { GuestMemory } from '../../vm86/win32';
 import { le32 } from './bytes';
+import { STARTUP_STUB_REGION } from './startupTrampoline';
 
 /** Version parameters for single-player test entry: jump target, start handler, and the matching direct-page installer. */
 export interface BattleStartupSpec {
@@ -31,7 +32,7 @@ export function installBattleStartup(
     throw new Error(`${label}：指令签名不匹配或重复安装`);
   }
   const base = reserve(96);
-  if (!Number.isInteger(base) || base % 16 || base < 0x80000 || base + 96 > 0xc0000) {
+  if (!Number.isInteger(base) || base % 16 || base < STARTUP_STUB_REGION.start || base + 96 > STARTUP_STUB_REGION.end) {
     throw new Error(`${label}：启动桩分配越界`);
   }
   const storage = memory.read_memory(base, 96);

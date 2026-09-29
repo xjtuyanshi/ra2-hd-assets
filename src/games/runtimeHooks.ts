@@ -1,4 +1,6 @@
 import type { GameFrameReader } from './performance';
+import type { RenderPassthroughControl } from './renderPassthrough';
+import type { CreateGameRenderStateReader } from './renderState';
 import type { GuestMemory } from '../vm86/win32';
 
 /**
@@ -8,8 +10,23 @@ import type { GuestMemory } from '../vm86/win32';
 export interface GameRuntimeHooks {
   /** Create a read-only native frame counter for explicit performance sampling; null for unsupported versions. */
   createFrameReader?(memory: GuestMemory, hash: string): GameFrameReader | null;
+  /**
+   * Opt-in (HD bridge only): read-only live battlefield snapshots; see renderState.ts. Asynchronous so a game can load
+   * its readers on demand and leave them out of production builds.
+   */
+  createRenderStateReader?: CreateGameRenderStateReader;
   /** Apply narrow version-specific compatibility patches after copying the PE image into guest memory and before executing its entry point. */
   prepareImage?(memory: GuestMemory): void;
+  /**
+   * Opt-in (HD bridge only): install the inert native overlay passthrough patches before the entry point; categories
+   * are switched later through the returned control. See renderPassthrough.ts (PrepareRenderPassthrough documents
+   * `reserve` and the null result). Asynchronous for the same reason as createRenderStateReader; the core awaits it
+   * before the entry point runs.
+   */
+  prepareRenderPassthrough?(
+    memory: GuestMemory,
+    reserve: (size: number, alignment?: number) => number,
+  ): Promise<RenderPassthroughControl | null>;
   /** Explicit startup navigation; the game verifies the target/EXE, and the allocator exclusively owns the static-import-stub tail. */
   prepareStartupPage?(memory: GuestMemory, page: string, hash: string, reserve: (size: number) => number): void;
   writeGameSpeedFlag?(memory: GuestMemory, value: number): number | null;

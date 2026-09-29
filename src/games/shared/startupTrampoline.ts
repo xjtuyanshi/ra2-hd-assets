@@ -1,6 +1,14 @@
 import type { GuestMemory } from '../../vm86/win32';
 import { le32 } from './bytes';
 
+/**
+ * Where startup-page stubs may live: the static-stub tail the VM core hands out after the import stubs (from 0x80000).
+ * They must end below 0xA0000, because v86 maps 0xA0000..0xBFFFF to the VGA adapter and the guest reads video memory
+ * there instead of the bytes the host wrote. The core's allocator enforces the same bound; the installers re-check it
+ * so a stub can never land in the VGA window whichever allocator they are given.
+ */
+export const STARTUP_STUB_REGION = Object.freeze({ start: 0x0008_0000, end: 0x000a_0000 });
+
 /** Direct-page trampoline version parameters: fixed addresses, instruction signatures, and initial registers belong to each game. */
 export interface StartupTrampolineSpec {
   /** Human-readable game/page label for errors; not used in code generation. */
@@ -32,7 +40,7 @@ export function installStartupTrampoline(
     throw new Error(`${label}：EXE 指令签名不匹配或重复安装`);
   }
   const base = reserve(48);
-  if (!Number.isInteger(base) || base % 16 || base < 0x80000 || base + 48 > 0xc0000) {
+  if (!Number.isInteger(base) || base % 16 || base < STARTUP_STUB_REGION.start || base + 48 > STARTUP_STUB_REGION.end) {
     throw new Error(`${label}：启动桩分配越界`);
   }
   const storage = memory.read_memory(base, 48);

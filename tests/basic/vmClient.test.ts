@@ -4,6 +4,7 @@ import type { WebAudioPcmSink } from '../../src/adapter/audio';
 import type { VmInitConfig, WorkerToMainMessage } from '../../src/adapter/vmProtocol';
 import type { GameVmCallbacks, VmStatus } from '../../src/app/session/runtimeEvents';
 import type { VmFrame } from '../../src/vm86/win32';
+import type { GameRenderState } from '../../src/games/renderState';
 
 class FakeWorker {
   onmessage: ((event: MessageEvent<WorkerToMainMessage>) => void) | null = null;
@@ -192,6 +193,68 @@ describe('WorkerVmClient RPC lifecycle', () => {
     worker.emitMessageError();
     await destroying;
     await expect(client.getGamePerformance()).rejects.toThrow('worker 消息反序列化失败');
+  });
+
+  it('HD 渲染状态 RPC：“未变化”回复复用上一份快照；直通开关带回写入结果', async () => {
+    const { worker, client } = setup();
+    const snapshot: GameRenderState = {
+      frame: 7,
+      view: { x: 1, y: 2 },
+      map: { fileName: 'TEST.MAP' },
+      houses: [],
+      localHouse: -1,
+      objects: [],
+      shroud: null,
+      effects: null,
+    };
+    const first = client.getRenderState();
+    worker.emit({ type: 'render-state-reply', requestId: requestId(worker, 'render-state'), value: snapshot });
+    await expect(first).resolves.toBe(snapshot);
+    const second = client.getRenderState();
+    worker.emit({ type: 'render-state-unchanged', requestId: requestId(worker, 'render-state') });
+    await expect(second).resolves.toBe(snapshot);
+    const outside = client.getRenderState();
+    worker.emit({ type: 'render-state-reply', requestId: requestId(worker, 'render-state'), value: null });
+    await expect(outside).resolves.toBeNull();
+
+    const accepted = client.setTacticalPassthrough(3);
+    expect(worker.posts.at(-1)).toMatchObject({ type: 'tactical-passthrough', flags: 3 });
+    worker.emit({
+      type: 'tactical-passthrough-reply',
+      requestId: requestId(worker, 'tactical-passthrough'),
+      value: true,
+    });
+    await expect(accepted).resolves.toBe(true);
+    const destroying = client.destroy();
+    worker.emitMessageError();
+    await destroying;
+  });
+
+  it('HD 渲染状态：超时后才到的回复仍是之后“未变化”回复所指的快照', async () => {
+    vi.useFakeTimers();
+    const { worker, client } = setup();
+    const snapshot: GameRenderState = {
+      frame: 9,
+      view: null,
+      map: null,
+      houses: [],
+      localHouse: -1,
+      objects: [],
+      shroud: null,
+      effects: null,
+    };
+    const late = client.getRenderState();
+    const lateId = requestId(worker, 'render-state');
+    const timedOut = expect(late).rejects.toThrow('worker 请求超时');
+    vi.advanceTimersByTime(10_001);
+    await timedOut;
+    worker.emit({ type: 'render-state-reply', requestId: lateId, value: snapshot });
+    const next = client.getRenderState();
+    worker.emit({ type: 'render-state-unchanged', requestId: requestId(worker, 'render-state') });
+    await expect(next).resolves.toBe(snapshot);
+    const destroying = client.destroy();
+    worker.emitMessageError();
+    await destroying;
   });
 
   it('reports actual Worker mode and routes diagnostic captures through the existing request lifecycle', async () => {
