@@ -62,7 +62,8 @@ export class HdRenderer {
   private readonly vignetteStrength = uniform(0.25);
   private readonly lighting: Lighting;
   private readonly objects = new ObjectLayer();
-  private readonly effects = new EffectsLayer();
+  /** HD effects; live views spawn into it from the game's own effect list. */
+  readonly effects = new EffectsLayer();
   private terrain!: TerrainBuild;
   private water: { uniforms: WaterUniforms } | null = null;
   private rain!: RainSystem;
@@ -190,7 +191,8 @@ export class HdRenderer {
     }
   }
 
-  private seconds(): number {
+  /** Seconds since the renderer started: the clock effects are spawned and animated on. */
+  seconds(): number {
     return (performance.now() - this.startTime) / 1000;
   }
 

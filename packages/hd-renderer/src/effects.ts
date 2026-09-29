@@ -237,6 +237,53 @@ export class EffectsLayer {
     this.shake = Math.max(this.shake, 0.35 * scale);
   }
 
+  /** Weapon muzzle flash: a brief white-hot flash, a few sparks and a small light. */
+  muzzleFlash(now: number, at: Vector3, scale: number): void {
+    this.fire.spawn(now, at, new Vector3(), 0.9 * scale, 0.08);
+    for (let i = 0; i < 4; i++) {
+      const velocity = new Vector3(Math.random() - 0.5, 0.6 + Math.random(), Math.random() - 0.5).multiplyScalar(3);
+      this.sparks.spawn(now, at, velocity, 0.04, 0.2 + Math.random() * 0.2);
+    }
+    this.flashLight(now, at, 6 * scale);
+  }
+
+  /** Small impact (bullets hitting ground or armour): a dust puff and a few sparks. */
+  impact(now: number, at: Vector3, scale: number, wind: Vector3): void {
+    this.smoke.spawn(now, at, new Vector3(0, 0.4, 0).add(wind), 0.45 * scale, 1.2 + Math.random() * 0.6);
+    for (let i = 0; i < 6; i++) {
+      const velocity = new Vector3(Math.random() - 0.5, 0.8 + Math.random(), Math.random() - 0.5).multiplyScalar(2.5);
+      this.sparks.spawn(now, at, velocity, 0.035, 0.25 + Math.random() * 0.25);
+    }
+  }
+
+  /** One puff of a continuous smoke column (burning buildings, damaged vehicles). */
+  smokePuff(now: number, at: Vector3, scale: number, wind: Vector3): void {
+    const jitter = new Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).multiplyScalar(0.25 * scale);
+    const velocity = new Vector3(0, 0.9 + Math.random() * 0.5, 0).add(wind);
+    this.smoke.spawn(now, at.clone().add(jitter), velocity, 0.9 * scale, 3 + Math.random() * 2);
+  }
+
+  /** One tongue of a continuous fire (burning buildings, napalm). */
+  flame(now: number, at: Vector3, scale: number): void {
+    const jitter = new Vector3(Math.random() - 0.5, Math.random() * 0.2, Math.random() - 0.5).multiplyScalar(
+      0.3 * scale,
+    );
+    this.fire.spawn(now, at.clone().add(jitter), new Vector3(), 0.55 * scale * (0.7 + Math.random() * 0.6), 0.45);
+  }
+
+  /** A glowing tracer sample along a projectile's flight. */
+  tracer(now: number, at: Vector3): void {
+    this.fire.spawn(now, at, new Vector3(), 0.16, 0.1);
+  }
+
+  private flashLight(now: number, at: Vector3, peak: number): void {
+    const slot = this.lights[this.nextLight]!;
+    this.nextLight = (this.nextLight + 1) % LIGHTS;
+    slot.light.position.copy(at).add(new Vector3(0, 0.5, 0));
+    slot.born = now;
+    slot.peak = peak;
+  }
+
   update(now: number, cameraRight: Vector3, cameraUp: Vector3): void {
     this.now.value = now;
     this.cameraRight.value.copy(cameraRight);

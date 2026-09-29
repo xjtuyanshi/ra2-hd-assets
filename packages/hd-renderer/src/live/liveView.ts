@@ -8,6 +8,7 @@ import { SpriteLayer, cardPush, type SpriteInstance } from '../ra2/sprites';
 import { buildVoxelGeometry, createVoxelMaterial, instantiateVoxel, type VoxelGeometry } from '../ra2/voxels';
 import { loadRa2World, type HdWorld } from '../ra2/world';
 import { LEVEL_HEIGHT } from '../world';
+import { LiveEffectsDriver, type LiveEffects } from './effects';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { ShroudLayer, type ShroudCells } from './shroud';
 
@@ -54,6 +55,8 @@ export interface LiveSnapshot {
   objects: LiveObject[];
   /** The local player's per-cell visibility (see ShroudLayer), when the host can read it. */
   shroud?: ShroudCells | null;
+  /** The engine's live effects (explosions, muzzle flashes, fire, smoke, projectiles), when the host reads them. */
+  effects?: LiveEffects | null;
 }
 
 export interface LiveViewOptions {
@@ -133,6 +136,8 @@ export class LiveView {
   private readonly sprites: SpriteLayer;
   private readonly pageLayers = new Map<number, SpriteLayer>();
   private readonly shroud: ShroudLayer;
+  private readonly effectDriver: LiveEffectsDriver;
+  private readonly wind = new Vector3(Math.cos(0.6), 0, Math.sin(0.6)).multiplyScalar(0.3 * 0.8);
   private viewWidth = 800;
   private viewHeight = 600;
   private lastRender = performance.now();
@@ -148,6 +153,7 @@ export class LiveView {
     hd.scene.add(this.root);
     this.shroud = new ShroudLayer(world.width, world.height);
     hd.scene.add(this.shroud.mesh);
+    this.effectDriver = new LiveEffectsDriver(hd.effects, (x, y, z) => this.shroud.isLocationShrouded(x, y, z));
     this.sprites = new SpriteLayer(cache, [], LIVE_SPRITE_CAPACITY, undefined, cache.spriteAtlasHd);
     this.sprites.mesh.name = 'live-sprites';
     this.root.add(this.sprites.mesh);
@@ -224,6 +230,7 @@ export class LiveView {
     this.current = { snapshot, at, byUid: new Map(snapshot.objects.map((o) => [o.uid, o])) };
     for (const house of snapshot.houses) this.ensureHouse(house.colorIndex);
     if (snapshot.shroud) this.shroud.update(snapshot.shroud);
+    if (snapshot.effects) this.effectDriver.push(snapshot.effects, this.hd.seconds(), this.wind);
   }
 
   render(now = performance.now()): void {
@@ -238,6 +245,7 @@ export class LiveView {
       this.applyCamera(previous?.snapshot.view ?? null, current.snapshot.view, alpha);
       this.applyObjects(previous, current, alpha);
     }
+    this.effectDriver.frame(this.hd.seconds(), this.wind);
     this.hd.frame(dt);
   }
 
