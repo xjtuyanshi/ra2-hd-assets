@@ -584,7 +584,10 @@ class HdPageMesh {
       const s0 = pow(rgb.max(0), vec3(1 / 2.2));
       const fire = smoothstep(0.42, 0.85, max(s0.r, max(s0.g, s0.b))).mul(smoothstep(0.06, 0.3, s0.r.sub(s0.b)));
       const glow = float(1).sub(smoothstep(0.1, 0.6, rgba.a));
-      const e = max(fire, glow);
+      // White-hot cores (every display channel near 1) carry no red-over-blue excess, so the fire test above misses
+      // them; scene-lit they turned grey by day and moonlit blue at night. Lit smoke tops stay below this threshold.
+      const whiteHot = smoothstep(0.86, 0.96, min(s0.r, min(s0.g, s0.b)));
+      const e = max(max(fire, glow), whiteHot);
       // Flame grade: the redrawn fireballs (like the original's) spend their first frames as a pale yellow-white blob.
       // Re-map flame pixels through a temperature ramp with a gamma on their heat, so only the hottest texels stay
       // white-yellow and the rest spread over yellow, orange and red while keeping the drawn texture. Pixels with

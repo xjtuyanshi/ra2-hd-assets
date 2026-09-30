@@ -130,9 +130,11 @@ export const ENHANCED = {
   light: {
     colour: [1, 0.42, 0.14],
     radius: 1.8,
-    radiusPerScale: 3.8,
+    // Tighter than the sample-2 blast light (3.8 / 10): a wide pulse washed whole lawns and plazas yellow, which reads
+    // as a warm grade; the heat now stays on the blast's own neighbourhood and the objects next to it.
+    radiusPerScale: 2.8,
     peak: 4,
-    peakPerScale: 10,
+    peakPerScale: 6.5,
     life: 1.8,
     decay: 1.7,
   },
@@ -152,8 +154,11 @@ export const ENHANCED = {
   },
   /** Fireball over the native art: width and lifetime relative to the art's, share of the art it covers. */
   fireball: { width: 0.95, life: 0.95, cover: 0.82 },
-  /** Start temperatures and streak aspect ratios; projected speed in cells/s reaches the longest streak at `speed`. */
-  sparks: { count: 26, perScale: 44, temperature: [0.75, 1], stretch: [2, 6], speed: 8 },
+  /**
+   * Start temperatures and streak aspect ratios; projected speed in cells/s reaches the longest streak at `speed`.
+   * Starts of 0.5..0.85 give yellow-orange streaks; hotter starts clipped to pale cream lines over bright ground.
+   */
+  sparks: { count: 26, perScale: 44, temperature: [0.5, 0.85], stretch: [2, 6], speed: 8 },
   /**
    * Airborne embers: fixed pool, count per blast, delayed births, life and slowing convection in seconds/cells.
    * `volume` and `height` scale the blast's width; wind/drift are horizontal speeds, wobble is displacement, and
