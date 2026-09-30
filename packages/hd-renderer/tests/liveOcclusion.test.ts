@@ -54,7 +54,7 @@ function presentation() {
   const visual = { root, mode: 'voxel', type: 'TEST', paletteKey: '', firstFrame: 1 };
   const shroud = { hidden: false, isLocationShrouded: () => shroud.hidden };
   const effectDriver = { frame: vi.fn(), cards: vi.fn(() => ({ drawn: 0, missing: 0 })), smokeCards: vi.fn() };
-  const effectSprites = { setInstances: vi.fn() };
+  const effectSprites = { setInstances: vi.fn(), now: { value: 0 } };
   const hd = { seconds: () => 1, frame: vi.fn(), windowsWanted: () => false, view: new IsoCamera() };
   const effectArt = { revision: 0, particle: () => ({ sprite: { frames: [frame] }, art: { translucency: 0 } }) };
   const state = {
@@ -129,12 +129,14 @@ describe('LiveView physical occlusion scheduling', () => {
     const sorts = sort.mock.calls.length;
     expect(sorts).toBeGreaterThan(0);
     p.effectSprites.setInstances.mockClear();
+    p.hd.seconds = () => 1.5;
     for (const at of [140, 160, 180, 200]) p.view.render(at);
     expect(p.visual.root.position.x).toBeCloseTo(356 / 256);
     expect(p.order).toHaveBeenCalledTimes(count);
     expect(sort).toHaveBeenCalledTimes(sorts);
     expect(p.mesh.userData.painterDepth.bias).toBe(bias);
     expect(p.effectSprites.setInstances).not.toHaveBeenCalled();
+    expect(p.effectSprites.now.value).toBe(p.hd.seconds());
     for (const upload of p.uploads) expect(upload).not.toHaveBeenCalled();
     p.effectArt.revision++;
     p.view.render(210);

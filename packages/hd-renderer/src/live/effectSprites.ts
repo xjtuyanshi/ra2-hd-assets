@@ -1,15 +1,19 @@
 import {
   Color,
+  CustomBlending,
   Group,
   InstancedMesh,
   MeshBasicNodeMaterial,
   NormalBlending,
+  OneFactor,
+  OneMinusSrcAlphaFactor,
   PlaneGeometry,
   type Texture,
   Vector3,
 } from 'three/webgpu';
 import {
   Fn,
+  clamp,
   float,
   floor,
   instancedBufferAttribute,
@@ -30,6 +34,7 @@ import {
   vec4,
   viewportSharedTexture,
 } from 'three/tsl';
+import type { EffectHdFrame } from '../../../ra2-assets/src/effects';
 import type { SpriteFrame } from '../../../ra2-assets/src/manifest';
 import { DirtyAttribute } from '../dirtyAttribute';
 import type { ShaderNode } from '../tsl';
@@ -65,10 +70,21 @@ export interface EffectInstance {
   /** Ground effects use the same physical card depth profile as trees and units. */
   painter?: PainterObject;
   painterPart?: number;
+  /** Optional RGBA replacement: engine frames remain the clock, with a presentation-rate blend within one stage. */
+  hd?: {
+    frame: EffectHdFrame;
+    next: EffectHdFrame | null;
+    scale: number;
+    blend0: number;
+    t0: number;
+    stageSeconds: number;
+  };
 }
 
 /** Fire-coloured pixels (hue 15..65 degrees, value > 0.7) are brightened by this, just over the bloom threshold. */
 export const FX_GLOW = 1.25;
+/** Warm, bright pixels of redrawn RGBA fire are self-lit; smoke and debris retain the scene's sprite light. */
+export const HD_FX_EMISSIVE = 2.2;
 const CAPACITY = 4096;
 /** Quads are one texel larger on every side, so the filtered edge can fade out instead of being cut. */
 const MARGIN = 1;
@@ -105,6 +121,8 @@ export class EffectSpriteLayer {
   readonly cameraRight = uniform(new Vector3(1, 0, 0));
   readonly cameraUp = uniform(new Vector3(0, 1, 0));
   readonly toCamera = uniform(new Vector3(0, 1, 0));
+  /** Renderer seconds, updated each presentation without rebuilding the engine's card instances. */
+  readonly now = uniform(0);
   /**
    * The scene drawn so far, for the display-space mix of translucent cards. One node shared by every page mesh: three
    * copies the framebuffer once per render for each distinct node (NodeUpdateType.RENDER, keyed by the node), and each
@@ -114,13 +132,13 @@ export class EffectSpriteLayer {
    * it, and empty meshes are hidden, so a frame without translucent cards copies nothing.
    */
   readonly backdrop: ShaderNode = viewportSharedTexture(screenUV);
-  private readonly meshes = new Map<string, PageMesh>();
+  private readonly meshes = new Map<string, PageMesh | HdPageMesh>();
   /** Pages that failed to load and were already reported (their instances are skipped, not retried per frame). */
-  private readonly failedPages = new Set<number>();
-  private readonly pageGroups = new Map<number, Record<EffectPass, PageGroup>>();
+  private readonly failedPages = new Set<string>();
+  private readonly pageGroups = new Map<string, Record<EffectPass, PageGroup>>();
   private readonly groups: PageGroup[] = [];
   private readonly idle: string[] = [];
-  private readonly releaseCandidates = new Set<number>();
+  private readonly releaseCandidates = new Set<string>();
 
   constructor(
     private readonly cache: Ra2Cache,
@@ -131,6 +149,9 @@ export class EffectSpriteLayer {
     private readonly pageSource: (page: number) => EffectPage | 'loading' | null,
     /** Called with pages no mesh has drawn for MESH_IDLE_SECONDS, so their textures can be released. */
     private readonly releasePage: (page: number) => void = () => {},
+    /** Optional RGBA pages; HD instances are skipped entirely when this source is absent. */
+    private readonly hdPageSource?: (page: number) => EffectPage | 'loading' | null,
+    private readonly releaseHdPage: (page: number) => void = () => {},
   ) {
     this.root.name = 'live-effect-sprites';
   }
@@ -144,7 +165,8 @@ export class EffectSpriteLayer {
   setInstances(instances: readonly EffectInstance[], now = performance.now() / 1000): boolean {
     for (const group of this.groups) group.instances.length = 0;
     for (const instance of instances) {
-      const page = instance.frame.page ?? 0;
+      if (instance.hd && !this.hdPageSource) continue;
+      const page = instance.hd ? `hd:${instance.hd.frame.page}` : `${instance.frame.page ?? 0}`;
       let groups = this.pageGroups.get(page);
       if (!groups) {
         groups = {
@@ -189,22 +211,25 @@ export class EffectSpriteLayer {
     return { meshes: this.meshes.size, visible, translucent };
   }
 
-  private mesh(key: string): PageMesh | 'loading' | null {
+  private mesh(key: string): PageMesh | HdPageMesh | 'loading' | null {
     const known = this.meshes.get(key);
     if (known) return known;
-    const [pageText, pass] = key.split(':') as [string, EffectPass];
-    const page = Number(pageText);
-    const atlas = this.pageSource(page);
+    const split = key.lastIndexOf(':');
+    const pageKey = key.slice(0, split);
+    const pass = key.slice(split + 1) as EffectPass;
+    const hd = pageKey.startsWith('hd:');
+    const page = Number(hd ? pageKey.slice(3) : pageKey);
+    const atlas = hd ? this.hdPageSource?.(page) : this.pageSource(page);
     if (atlas === 'loading') return 'loading';
     if (!atlas) {
-      if (!this.failedPages.has(page)) {
-        this.failedPages.add(page);
-        console.warn(`[HD] effect atlas page ${page} could not be loaded: its effects are not drawn`);
+      if (!this.failedPages.has(pageKey)) {
+        this.failedPages.add(pageKey);
+        console.warn(`[HD] effect atlas page ${pageKey} could not be loaded: its effects are not drawn`);
       }
       return null;
     }
-    this.failedPages.delete(page);
-    const mesh = new PageMesh(this, this.cache, atlas, pass);
+    this.failedPages.delete(pageKey);
+    const mesh = hd ? new HdPageMesh(this, atlas, pass) : new PageMesh(this, this.cache, atlas, pass);
     this.meshes.set(key, mesh);
     this.root.add(mesh.mesh);
     return mesh;
@@ -219,10 +244,12 @@ export class EffectSpriteLayer {
       this.meshes.delete(key);
       this.root.remove(mesh.mesh);
       mesh.dispose();
-      pages.add(Number(key.split(':')[0]));
+      pages.add(key.slice(0, key.lastIndexOf(':')));
     }
-    for (const key of this.meshes.keys()) pages.delete(Number(key.split(':')[0]));
-    for (const page of pages) this.releasePage(page);
+    for (const key of this.meshes.keys()) pages.delete(key.slice(0, key.lastIndexOf(':')));
+    for (const page of pages)
+      if (page.startsWith('hd:')) this.releaseHdPage(Number(page.slice(3)));
+      else this.releasePage(Number(page));
   }
 }
 
@@ -426,6 +453,147 @@ class PageMesh {
   }
 }
 
+/**
+ * Redrawn RGBA cards use the native card projection and depth profile, but never read a palette or the scene backdrop.
+ * Both frames share an atlas page and are sampled at the same native-pixel position inside their union, so changes in
+ * crop or offset cannot stretch either frame during a blend. A different-page successor is held until the next engine
+ * stage; the presentation clock interpolates only, and never chooses or advances an engine frame.
+ */
+class HdPageMesh {
+  readonly mesh: InstancedMesh;
+  /** HD alpha uses linear premultiplied blending, never the indexed path's display-space backdrop copy. */
+  readonly translucent = false;
+  lastUsed = -Infinity;
+  // WebGPU allows 8 vertex buffers per pipeline: the card geometry keeps only its positions (uv is derived from them)
+  // and the instance matrix takes one more, so the per-instance data is packed into six vec4 attributes.
+  /** xyz = world anchor; w = opacity. */
+  private readonly anchor = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
+  private readonly rect = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
+  private readonly nextRect = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
+  /** Current and next frame offsets (native pixels). */
+  private readonly offsets = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
+  /** x = card/decal; y = push; z = the same bounded painter bias as native cards; w = HD scale. */
+  private readonly style = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
+  /** x = blend at push; y = push time; z = seconds per engine stage. */
+  private readonly timing = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
+  private readonly material: MeshBasicNodeMaterial;
+
+  constructor(layer: EffectSpriteLayer, atlas: EffectPage, pass: EffectPass) {
+    const aAnchor: ShaderNode = instancedBufferAttribute(this.anchor, 'vec4');
+    const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
+    const aNextRect: ShaderNode = instancedBufferAttribute(this.nextRect, 'vec4');
+    const aOffsets: ShaderNode = instancedBufferAttribute(this.offsets, 'vec4');
+    const aStyle: ShaderNode = instancedBufferAttribute(this.style, 'vec4');
+    const aTiming: ShaderNode = instancedBufferAttribute(this.timing, 'vec4');
+    const scale: ShaderNode = aStyle.w;
+    // Union of the current and next frame rects in native pixels (top-left, size).
+    const lo: ShaderNode = min(aOffsets.xy, aOffsets.zw);
+    const hi: ShaderNode = max(aOffsets.xy.add(aRect.zw.div(scale)), aOffsets.zw.add(aNextRect.zw.div(scale)));
+    const aBounds: ShaderNode = vec4(lo, hi.sub(lo));
+    const atlasSize = vec2(atlas.width, atlas.height);
+    const ppu = float(PIXELS_PER_CELL_EDGE);
+    const margin = float(MARGIN);
+    const material = (this.material = new MeshBasicNodeMaterial());
+    material.transparent = true;
+    material.depthWrite = false;
+    material.depthTest = pass === 'ground';
+    material.blending = CustomBlending;
+    material.blendSrc = OneFactor;
+    material.blendDst = OneMinusSrcAlphaFactor;
+    material.blendSrcAlpha = OneFactor;
+    material.blendDstAlpha = OneMinusSrcAlphaFactor;
+    material.premultipliedAlpha = false;
+    const gu: ShaderNode = positionGeometry.x.add(0.5);
+    const gv: ShaderNode = float(0.5).sub(positionGeometry.y);
+    const px: ShaderNode = aBounds.x.sub(margin).add(gu.mul(aBounds.z.add(margin.mul(2))));
+    const py: ShaderNode = aBounds.y.sub(margin).add(gv.mul(aBounds.w.add(margin.mul(2))));
+    material.depthNode = cardDepthNode(px, py, vec4(0), aStyle.y, aStyle.z, aStyle.x.greaterThan(0.5));
+    material.positionNode = Fn(() => {
+      const x = aBounds.x.sub(margin).add(gu.mul(aBounds.z.add(margin.mul(2))));
+      const y = aBounds.y.sub(margin).add(gv.mul(aBounds.w.add(margin.mul(2))));
+      const card = aAnchor.xyz
+        .add(layer.cameraRight.mul(x.div(ppu)))
+        .sub(layer.cameraUp.mul(y.div(ppu)))
+        .add(layer.toCamera.mul(aStyle.y));
+      const decal = aAnchor.xyz.add(vec3(x.div(60).add(y.div(30)), 0.025, y.div(30).sub(x.div(60))));
+      return aStyle.x.greaterThan(0.5).select(decal, card);
+    })();
+    material.colorNode = Fn(() => {
+      const sample = (rect: ShaderNode, offset: ShaderNode): ShaderNode => {
+        const local: ShaderNode = vec2(px, py).sub(offset).mul(scale);
+        const inside = local.x
+          .greaterThanEqual(0)
+          .and(local.y.greaterThanEqual(0))
+          .and(local.x.lessThan(rect.z))
+          .and(local.y.lessThan(rect.w));
+        const at = rect.xy.add(clamp(local, vec2(0.5), rect.zw.sub(0.5))).div(atlasSize);
+        // Clamp to texel centres and use the base level: automatically generated atlas mipmaps can already contain
+        // neighbouring frames, even when their sampling UV is clamped. The PNGs need no special mip-safe gutters.
+        // The pages hold PREMULTIPLIED colour (sRGB-encoded) and coverage: light a redrawn frame adds over the grey it
+        // was painted on (fire glow, electric arcs) has colour with little or no coverage, which straight alpha cannot
+        // store.
+        const rgba: ShaderNode = texture(atlas.texture, at).level(float(0));
+        return inside.select(rgba, vec4(0));
+      };
+      const current = sample(aRect, aOffsets.xy);
+      const next = sample(aNextRect, aOffsets.zw);
+      const blend = clamp(aTiming.x.add(layer.now.sub(aTiming.y).div(max(aTiming.z, 1e-4))), 0, 1);
+      const rgba: ShaderNode = mix(current, next, blend);
+      // Judge fire on the straight display-referred colour; light with little coverage (glow, arcs) is emissive too.
+      const rgb = rgba.rgb.div(max(rgba.a, 0.02)).min(1);
+      const s = pow(rgb.max(0), vec3(1 / 2.2));
+      const fire = smoothstep(0.42, 0.85, max(s.r, max(s.g, s.b))).mul(smoothstep(0.06, 0.3, s.r.sub(s.b)));
+      const glow = float(1).sub(smoothstep(0.1, 0.6, rgba.a));
+      const e = max(fire, glow);
+      const lit = rgba.rgb.mul(mix(layer.light, vec3(HD_FX_EMISSIVE), e));
+      return vec4(lit.mul(aAnchor.w), rgba.a.mul(aAnchor.w));
+    })();
+    const quad = new PlaneGeometry(1, 1);
+    quad.deleteAttribute('normal');
+    quad.deleteAttribute('uv');
+    this.mesh = new InstancedMesh(quad, material, CAPACITY);
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = RENDER_ORDER[pass];
+    this.mesh.name = `live-effects-hd-${pass}`;
+    this.mesh.count = 0;
+    this.mesh.visible = false;
+  }
+
+  set(instances: EffectInstance[], _cache: Ra2Cache, now: number): void {
+    if (instances.length) this.lastUsed = now;
+    if (instances.length === 0 && this.mesh.count === 0) return;
+    instances.sort(compareCards);
+    const count = Math.min(instances.length, CAPACITY);
+    for (let i = 0; i < count; i++) {
+      const s = instances[i]!;
+      const hd = s.hd!;
+      const frame = hd.frame;
+      // No successor (or a different atlas page) means hold the current frame, never fade it to transparent.
+      const next = hd.next?.page === frame.page ? hd.next : frame;
+      this.anchor.setXYZW(i, s.anchor.x, s.anchor.y, s.anchor.z, s.alpha);
+      this.rect.setXYZW(i, ...frame.rect);
+      this.nextRect.setXYZW(i, ...next.rect);
+      this.offsets.setXYZW(i, ...frame.offset, ...next.offset);
+      this.style.setXYZW(i, s.draw === 'flat' ? 1 : 0, s.push, cardPainterBias(s), hd.scale);
+      this.timing.setXYZW(i, hd.blend0, hd.t0, hd.stageSeconds, 0);
+    }
+    this.anchor.flush();
+    this.rect.flush();
+    this.nextRect.flush();
+    this.offsets.flush();
+    this.style.flush();
+    this.timing.flush();
+    this.mesh.count = count;
+    this.mesh.visible = count > 0;
+  }
+
+  dispose(): void {
+    this.mesh.geometry.dispose();
+    this.material.dispose();
+    this.mesh.dispose();
+  }
+}
+
 const LEPTONS_PER_CELL = 256;
 const LEPTONS_PER_LEVEL = 104;
 
@@ -474,4 +642,17 @@ export function animAlpha(art: { translucent?: boolean; translucency?: number },
   if (art.translucency === 50) return 0.5;
   if (art.translucency === 75) return 0.25;
   return 1;
+}
+
+/**
+ * Continuous Translucent=yes opacity for HD flipbooks: retain the opaque first fifth, then linearly join the native
+ * step centres (0.2 End, 1), (0.4 End, 0.75), (0.6 End, 0.5) and the softly held tail (End, 0.3). Stages past End keep
+ * that tail until the engine removes the anim. Explicit Translucency= and non-translucent art retain animAlpha exactly.
+ */
+export function animAlphaSmooth(art: { translucent?: boolean; translucency?: number }, stage = 0, end = 1): number {
+  if (!art.translucent) return animAlpha(art, stage, end);
+  const phase = Math.max(0, Math.min(1, stage / Math.max(1, end)));
+  if (phase <= 0.2) return 1;
+  if (phase <= 0.6) return 1.25 - phase * 1.25;
+  return 0.5 - ((phase - 0.6) / 0.4) * 0.2;
 }

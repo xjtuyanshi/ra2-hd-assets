@@ -271,6 +271,8 @@ export interface GarnishOptions {
   scorch?: boolean;
   /** The 'enhanced' effect style: the modern effects around the native art (see ENHANCED). */
   enhanced?: boolean;
+  /** An HD flipbook replaces the native art; the enhanced explosion draws no procedural fireball over it. */
+  hdArt?: boolean;
   /** Enhanced style: the anim leaves the engine's crater or scorch, so the crater glows hot for a moment. */
   hotCrater?: boolean;
 }
@@ -1031,16 +1033,17 @@ export class EffectsLayer {
     const width = Math.max(0.3, Math.min(options.maxSize ?? 1.2 * s, 4 * Math.max(0.3, s)));
     const e = ENHANCED;
     // Hot core inside the art, the detailed fireball over it for the art's own duration, then the halo around it.
-    this.garnishFire.spawn(now, at, this.zeroVelocity, 0.7 * width, 0.14, 0.6);
+    this.garnishFire.spawn(now, at, this.zeroVelocity, (options.hdArt ? 0.35 : 0.7) * width, 0.14, 0.6);
     const artLife = Math.max(0.35, Math.min(options.maxLife ?? 1.2, 3));
-    this.blast.spawn(
-      now,
-      at.clone().add(new Vector3(0, 0.08 * width, 0)),
-      this.zeroVelocity,
-      e.fireball.width * width,
-      e.fireball.life * artLife,
-      e.fireball.cover,
-    );
+    if (!options.hdArt)
+      this.blast.spawn(
+        now,
+        at.clone().add(new Vector3(0, 0.08 * width, 0)),
+        this.zeroVelocity,
+        e.fireball.width * width,
+        e.fireball.life * artLife,
+        e.fireball.cover,
+      );
     this.halo.spawn(now, at, this.zeroVelocity, e.halo.width * width, e.halo.life, e.halo.intensity);
     const light = e.light;
     const colour = options.light ?? [...light.colour, 0];

@@ -3,7 +3,8 @@ import { fileURLToPath } from 'node:url';
 
 // The HD cache (gameres/hd-cache/<map>/) is derived from the player's own game files: serve it in development only and
 // never copy it into a build.
-const hdCache = fileURLToPath(new URL('../../gameres/hd-cache', import.meta.url));
+// HD_CACHE_DIR serves a variant cache (e.g. a symlink farm of hd-cache with some files replaced) instead.
+const hdCache = process.env.HD_CACHE_DIR ?? fileURLToPath(new URL('../../gameres/hd-cache', import.meta.url));
 
 export default defineConfig(({ command }) => ({
   root: 'sandbox',
