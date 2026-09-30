@@ -19,7 +19,10 @@ import type { Ra2Cache } from '../src/ra2/cache';
 import { syntheticModel, syntheticSection } from './fixtures/syntheticVoxels';
 
 /** A box with outward artist normals and identity bounds, independent of proprietary voxel art. */
-function box(size: [number, number, number], palette = (x: number) => (x < 2 ? 20 : 70)): VoxelSection {
+function box(
+  size: [number, number, number],
+  palette: (x: number, y: number, z: number) => number = (x) => (x < 2 ? 20 : 70),
+): VoxelSection {
   const bytes: number[] = [];
   const table = normalTableFor(4);
   for (let z = 0; z < size[2]; z++)
@@ -36,7 +39,7 @@ function box(size: [number, number, number], palette = (x: number) => (x < 2 ? 2
             normal = n;
           }
         }
-        bytes.push(x, y, z, palette(x), normal);
+        bytes.push(x, y, z, palette(x, y, z), normal);
       }
   return {
     ...syntheticSection(1),
@@ -215,6 +218,94 @@ describe.each(['occupancy', 'imls'] as const)('smooth voxel %s', (shape) => {
   });
 });
 
+describe('palette-independent shade smoothing', () => {
+  const options = { ...DEFAULT_SMOOTH_VOXEL, aoRays: 0 };
+  it('preserves a uniform block and its original material indices', () => {
+    const m = buildSmoothSection(
+      box([3, 3, 3], () => 36),
+      options,
+    );
+    expect(m.pshade.length).toBeGreaterThan(0);
+    expect(m.pshade).toEqual(m.pindex);
+    expect(m.pshade.every((index) => index === 36)).toBe(true);
+  });
+  it('averages alternating shades without changing geometry or material classes', () => {
+    const section = box([3, 3, 3], (x, y, z) => ((x + y + z) % 2 ? 36 : 38));
+    const m = buildSmoothSection(section, options);
+    const disabled = buildSmoothSection(section, { ...options, shadeRadius: 0 });
+    expect(disabled.pshade).toEqual(disabled.pindex);
+    expect(m.pshade.every((index) => index > 36 && index < 38)).toBe(true);
+    expect(m.pshade.some((index) => !Number.isInteger(index))).toBe(true);
+    for (const name of ['position', 'normal', 'pindex', 'occlusion', 'curvature', 'vpos', 'indices'] as const)
+      expect(m[name], name).toEqual(disabled[name]);
+  });
+  it('uses the vertex-to-centre Gaussian distance and a unit-weight owning voxel', () => {
+    const radius = 1.5;
+    const m = buildSmoothSection(
+      box([2, 1, 1], (x) => (x ? 38 : 36)),
+      { ...options, shadeRadius: radius },
+    );
+    let blended = 0;
+    for (let v = 0; v < m.pindex.length; v++) {
+      const own = m.pindex[v]!;
+      const other = own === 36 ? 38 : 36;
+      const d = Math.hypot(
+        m.vpos[v * 3]! - (own === 36 ? 1.5 : 0.5),
+        m.vpos[v * 3 + 1]! - 0.5,
+        m.vpos[v * 3 + 2]! - 0.5,
+      );
+      const w = d <= radius ? Math.exp(-(d * d) / (2 * (radius / 2) ** 2)) : 0;
+      expect(m.pshade[v]).toBeCloseTo((own + other * w) / (1 + w), 5);
+      if (w) blended++;
+    }
+    expect(blended).toBeGreaterThan(0);
+  });
+  it.each([
+    { indices: [36, 60], shadeRamp: 16, shadeThreshold: 255 },
+    { indices: [31, 32], shadeRamp: 16, shadeThreshold: 3 },
+    { indices: [34, 36], shadeRamp: 7, shadeThreshold: 3 },
+    { indices: [36, 40], shadeRamp: 16, shadeThreshold: 3 },
+    { indices: [36, 38], shadeRamp: 16, shadeThreshold: 0 },
+    { indices: [36, 38], shadeRamp: 1, shadeThreshold: 255 },
+  ])('preserves ramp boundaries and deliberately separated details: %j', ({ indices, ...overrides }) => {
+    const m = buildSmoothSection(
+      box([2, 1, 1], (x) => indices[x]!),
+      { ...options, ...overrides },
+    );
+    expect(new Set(m.pindex)).toEqual(new Set(indices));
+    expect(m.pshade).toEqual(m.pindex);
+  });
+  it('does not let hidden interior voxels change the exposed paint', () => {
+    const m = buildSmoothSection(
+      box([3, 3, 3], (x, y, z) => (x === 1 && y === 1 && z === 1 ? 38 : 36)),
+      {
+        ...options,
+        shadeRadius: 5,
+      },
+    );
+    expect(m.pindex.every((index) => index === 36)).toBe(true);
+    expect(m.pshade).toEqual(m.pindex);
+  });
+  it('keeps endpoint shades inside custom ramps, including a partial last ramp', () => {
+    for (const [first, last, shadeRamp] of [
+      [33, 34, 7],
+      [254, 255, 7],
+      [0, 255, 256],
+    ]) {
+      const m = buildSmoothSection(
+        box([2, 1, 1], (x) => (x ? last! : first!)),
+        {
+          ...options,
+          shadeRamp: shadeRamp!,
+          shadeThreshold: 255,
+        },
+      );
+      expect(m.pshade.every((index) => index >= first! && index <= last!)).toBe(true);
+      expect(m.pshade.some((index) => index > first! && index < last!)).toBe(true);
+    }
+  });
+});
+
 it('shares equal options across houses and worlds, keeps depth/shadow twins, and widens merged indices', () => {
   const a = new AtmosphereNodes();
   const b = new AtmosphereNodes();
@@ -237,12 +328,22 @@ it('shares equal options across houses and worlds, keeps depth/shadow twins, and
   expect(first[0]!.material!.depthNode).toBeTruthy();
   const changed = buildSmoothVoxelGeometry(model, null, a, { aoRays: 0, bandOut: 0.1 });
   expect(changed[0]!.geometry).not.toBe(first[0]!.geometry);
+  for (const shadeOptions of [{ shadeRadius: 0 }, { shadeThreshold: 1 }, { shadeRamp: 8 }]) {
+    const variant = buildSmoothVoxelGeometry(model, null, a, { ...options, ...shadeOptions });
+    expect(variant[0]!.geometry).not.toBe(first[0]!.geometry);
+    variant[0]!.geometry.dispose();
+  }
   const merged = buildSmoothPartGeometry(
     Array.from({ length: 24 }, () => section),
     smoothVoxelOptions(options),
   );
   expect(merged.getIndex()!.array).toBeInstanceOf(Uint32Array);
   expect(merged.boundingSphere!.radius).toBeGreaterThan(0);
+  expect(merged.getAttribute('pshade').itemSize).toBe(1);
+  expect(merged.getAttribute('pshade').count).toBe(merged.getAttribute('pindex').count);
+  expect(merged.getAttribute('pshade').array.slice(0, first[0]!.geometry.getAttribute('pshade').count)).toEqual(
+    first[0]!.geometry.getAttribute('pshade').array,
+  );
   first[0]!.geometry.dispose();
   changed[0]!.geometry.dispose();
   merged.dispose();
@@ -258,6 +359,12 @@ it('rejects invalid geometry knobs before allocating', () => {
     { supersample: 2.5 },
     { bandIn: 0.5 },
     { aoRays: -1 },
+    ...(['shadeRadius', 'shadeThreshold', 'shadeRamp'] as const).flatMap((name) =>
+      [-1, NaN, Infinity, -Infinity].map((value) => ({ [name]: value })),
+    ),
+    { shadeRamp: 0 },
+    { shadeRamp: 257 },
+    { shadeRamp: 1.5 },
   ])
     expect(() => smoothVoxelOptions(options)).toThrow(RangeError);
 });
@@ -283,6 +390,7 @@ it('selects the live look at construction, inherits world options and snapshots 
   const engine = new VoxelUnits(hd, world, cache, undefined, { voxelLook: 'engine' }).build(model, 'unit', 'engine');
   const engineSource = engine.root.children.find((o) => o instanceof Mesh && !(o instanceof VoxelShadowMesh)) as Mesh;
   expect(engineSource.geometry.getAttribute('curvature')).toBeUndefined();
+  expect(engineSource.geometry.getAttribute('pshade')).toBeUndefined();
   expect(engineSource.material).not.toBe(source.material);
   source.geometry.dispose();
   engineSource.geometry.dispose();

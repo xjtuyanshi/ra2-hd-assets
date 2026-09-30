@@ -14,11 +14,14 @@ export interface SmoothVoxelOptions {
   aoRays: number;
   aoLength: number;
   groundOcclusion: boolean;
+  shadeRadius: number;
+  shadeThreshold: number;
+  shadeRamp: number;
 }
 
 export const DEFAULT_SMOOTH_VOXEL: Readonly<SmoothVoxelOptions> = Object.freeze({
   supersample: 3,
-  shape: 'imls',
+  shape: 'occupancy',
   smoothSigma: 0.55,
   imlsRadius: 1.1,
   bandIn: 0.3,
@@ -27,13 +30,17 @@ export const DEFAULT_SMOOTH_VOXEL: Readonly<SmoothVoxelOptions> = Object.freeze(
   aoRays: 48,
   aoLength: 10,
   groundOcclusion: true,
+  shadeRadius: 1.5,
+  shadeThreshold: 3,
+  shadeRamp: 16,
 });
 
-/** GPU-independent output. Each consecutive group of four vertices is one palette-constant quad. */
+/** GPU-independent output. Each quad owns four vertices with constant pindex and smoothly varying pshade. */
 export interface SmoothMeshData {
   position: Float32Array;
   normal: Float32Array;
   pindex: Float32Array;
+  pshade: Float32Array;
   occlusion: Float32Array;
   curvature: Float32Array;
   vpos: Float32Array;
@@ -52,6 +59,9 @@ export function smoothVoxelOptions(options: Partial<SmoothVoxelOptions> = {}): R
     'storedNormals',
     'aoRays',
     'aoLength',
+    'shadeRadius',
+    'shadeThreshold',
+    'shadeRamp',
   ] as const) {
     if (!Number.isFinite(result[name]) || result[name] < 0) throw new RangeError(`Invalid smooth voxel ${name}`);
   }
@@ -69,6 +79,9 @@ export function smoothVoxelOptions(options: Partial<SmoothVoxelOptions> = {}): R
     result.bandIn >= 0.5 ||
     result.bandOut > 1 ||
     result.aoLength > 256 ||
+    !Number.isInteger(result.shadeRamp) ||
+    result.shadeRamp < 1 ||
+    result.shadeRamp > 256 ||
     (result.shape !== 'imls' && result.shape !== 'occupancy') ||
     typeof result.groundOcclusion !== 'boolean'
   )
@@ -386,6 +399,44 @@ export function buildSmoothSection(section: VoxelSection, options: SmoothVoxelOp
         }
     return best;
   };
+  const shadeRadius2 = o.shadeRadius * o.shadeRadius;
+  const shade = (x: number, y: number, z: number, own: number, index: number): number => {
+    if (!o.shadeRadius || o.shadeThreshold < 1 || o.shadeRamp === 1) return index;
+    const rampStart = Math.floor(index / o.shadeRamp) * o.shadeRamp;
+    const rampEnd = Math.min(255, rampStart + o.shadeRamp - 1);
+    const low = Math.max(rampStart, index - o.shadeThreshold);
+    const high = Math.min(rampEnd, index + o.shadeThreshold);
+    // The owning voxel anchors every output vertex at unit weight, even outside the search radius.
+    let sum = index;
+    let weight = 1;
+    const x0 = Math.max(0, Math.ceil(x - o.shadeRadius - 0.5));
+    const x1 = Math.min(sx - 1, Math.floor(x + o.shadeRadius - 0.5));
+    const y0 = Math.max(0, Math.ceil(y - o.shadeRadius - 0.5));
+    const y1 = Math.min(sy - 1, Math.floor(y + o.shadeRadius - 0.5));
+    const z0 = Math.max(0, Math.ceil(z - o.shadeRadius - 0.5));
+    const z1 = Math.min(sz - 1, Math.floor(z + o.shadeRadius - 0.5));
+    // Reuse the occupancy grid: the query visits only nearby exposed voxel centres, never the whole section.
+    for (let iz = z0; iz <= z1; iz++) {
+      const dz2 = (iz + 0.5 - z) ** 2;
+      for (let iy = y0; iy <= y1; iy++) {
+        const dyz2 = (iy + 0.5 - y) ** 2 + dz2;
+        if (dyz2 > shadeRadius2) continue;
+        const base = 1 + gx * (iy + 1) + gxy * (iz + 1);
+        for (let ix = x0; ix <= x1; ix++) {
+          const j = cells[base + ix]! - 1;
+          if (j < 0 || j === own || !exposed[j / 5]) continue;
+          const neighbour = raw[j + 3]!;
+          if (neighbour < low || neighbour > high) continue;
+          const d2 = (ix + 0.5 - x) ** 2 + dyz2;
+          if (d2 > shadeRadius2) continue;
+          const w = d2 === 0 ? 1 : Math.exp((-2 * d2) / shadeRadius2);
+          sum += neighbour * w;
+          weight += w;
+        }
+      }
+    }
+    return Math.max(rampStart, Math.min(rampEnd, sum / weight));
+  };
   const modelP = new Float32Array(vertices * 3);
   const modelN = new Float32Array(vertices * 3);
   const ao = new Float32Array(vertices);
@@ -497,6 +548,7 @@ export function buildSmoothSection(section: VoxelSection, options: SmoothVoxelOp
     position: new Float32Array(quads * 12),
     normal: new Float32Array(quads * 12),
     pindex: new Float32Array(quads * 4),
+    pshade: new Float32Array(quads * 4),
     occlusion: new Float32Array(quads * 4),
     curvature: new Float32Array(quads * 4),
     vpos: new Float32Array(quads * 12),
@@ -519,7 +571,7 @@ export function buildSmoothSection(section: VoxelSection, options: SmoothVoxelOp
         cy += vp[v * 3 + 1]!;
         cz += vp[v * 3 + 2]!;
       }
-      // Palette indices cannot interpolate: every quad owns four vertices, even though geometry/AO are shared.
+      // Material indices cannot interpolate: every quad owns four vertices, even though geometry/AO are shared.
       const a = ids[0]! * 3;
       const b = ids[1]! * 3;
       const c = ids[2]! * 3;
@@ -546,6 +598,7 @@ export function buildSmoothSection(section: VoxelSection, options: SmoothVoxelOp
           out.vpos[dst * 3 + axis] = vp[v * 3 + axis]!;
         }
         out.pindex[dst] = pal < 0 ? 0 : raw[pal + 3]!;
+        out.pshade[dst] = shade(vp[v * 3]!, vp[v * 3 + 1]!, vp[v * 3 + 2]!, pal, out.pindex[dst]!);
         out.occlusion[dst] = ao[v]!;
         out.curvature[dst] = curvature[v]!;
       }

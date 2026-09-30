@@ -18,6 +18,7 @@ export function buildSmoothPartGeometry(
     ['position', 3],
     ['normal', 3],
     ['pindex', 1],
+    ['pshade', 1],
     ['occlusion', 1],
     ['curvature', 1],
     ['vpos', 3],

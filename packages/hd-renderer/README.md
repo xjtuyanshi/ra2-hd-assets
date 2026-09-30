@@ -279,19 +279,34 @@ house palettes share geometry but own different LUT materials, scoped to their `
   boundary is exact on this aligned lattice; its occupancy sign gives the inside and outside fields in one
   transform. This avoids the corner error of subtracting half a sample from a binary centre-distance EDT.
   IMLS estimates the artist's planes from stored normals; the optional occupancy mode blurs signed distance.
-  Both clamp displacement to a band, preserving one-voxel features. Palette-constant quads have separate
+  Both clamp displacement to a band, preserving one-voxel features. Material-index-constant quads have separate
   vertices; normals, curvature and ray AO are computed once per surface-net vertex before duplication.
+- Material classes still use the original `pindex`. A separate fractional `pshade` averages exposed voxel
+  indices within `shadeRadius` (default 1.5 voxels), weighted by a Gaussian with sigma `shadeRadius / 2`.
+  Only neighbours within `shadeThreshold` (default 3 index steps) and the same `floor(index / shadeRamp)`
+  group (default ramp size 16) contribute; the owning voxel always has unit weight. This reduces palette
+  dithering while preserving separated details and house stripes. Radius 0 disables it. Radius/threshold
+  accept finite nonnegative values; ramp size must be an integer 1–256. All three are geometry cache keys.
 - AO uses deterministic cosine-distributed rays, starting 0.6 voxel off the surface. Half-voxel marching
   stops at occupied voxels or the transformed part's model ground plane. A hit at distance `t` contributes
   `sqrt(1 - t / aoLength)`. Zero rays or zero length disables AO. The maximum inward band is below 0.5 voxel,
   preserving a negative core in a one-voxel rod; supersampling accepts integers 2–8 (an aligned lattice needs an
-  interior sample). Sigma/radius are limited to 4 voxels, the outward band to 1 voxel, and rays/length to 256.
+  interior sample). `smoothSigma`/`imlsRadius` are limited to 4 voxels, the outward band to 1 voxel,
+  and rays/length to 256.
 - `voxelClasses.ts` owns the RA2 palette policy. `voxelPbr.ts` uses a 256×3 nearest-filtered LUT, GGX with the
   scene sun, diffuse HemisphereLight, and a procedural reflection sky. The sky adds no second diffuse term.
   Lambert lighting already divides irradiance by pi, so the existing noon exposure supplies the same flat
   diffuse reference as terrain. Metallic energy conservation, wear and reflections deliberately alter the
   final surface response; `brightness` trims it without an additional exposure or emissive daylight fill.
   Glass shading is available, but no stock palette ramp is guessed to be glass (the blue ramp stays paint).
+- Armour and house colours use rough military paint; the historical `metal` class is painted steel
+  (roughness 0.52, metalness 0.25). Neutral reflections replace the strong blue sky. `shadeSmooth` blends
+  raw colour with the interpolated `pshade` LUT colour, keeping both taps within the owning palette ramp.
+  `edgeLight` adds convex bevel highlights independently of wear. Dark/rubber surfaces below `treadHeight`
+  receive soft track ridges along voxel x, including view-space normal relief; `treadPeriod` is in voxels.
+  `dust` tints upward faces and the lower hull with low-frequency noise and raises roughness towards 0.9.
+  `streaks` adds thin vertical grime on near-vertical faces. Heights use the same transformed model ground
+  as grime. All detail layers are procedural and affect only the remaster look.
 
 Geometry review parameters, captured before loading:
 
@@ -299,24 +314,35 @@ Geometry review parameters, captured before loading:
 ?vlook=remaster&vsmooth=supersample:3,shape:imls,imlsRadius:1.1,bandIn:0.3,bandOut:0.3,storedNormals:0.35,aoRays:48
 ```
 
-Other geometry defaults: `smoothSigma:0.55`, `aoLength:10`, `groundOcclusion:true`. `shape:occupancy` selects
+Other geometry defaults: `smoothSigma:0.55`, `aoLength:10`, `groundOcclusion:true`, `shadeRadius:1.5`,
+`shadeThreshold:3`, `shadeRamp:16`. `shape:occupancy` selects
 Gaussian smoothing. Uniforms can be changed through `?vk=aoStrength:0.8,wear:0.5` or, without reloading,
 `window.__hd.voxelPbr.wear.value = 0.5`. The complete defaults are:
 
 | Uniform     | Default | Uniform       | Default |
 | ----------- | ------: | ------------- | ------: |
 | brightness  |       1 | aoStrength    |     0.8 |
-| envStrength |     0.6 | specular      |       1 |
+| envStrength |    0.35 | specular      |       1 |
+| shadeSmooth |       1 | edgeLight     |    0.25 |
+| tread       |     0.8 | treadPeriod   |     0.8 |
+| treadHeight |     3.5 | dust          |    0.35 |
+| streaks     |    0.25 |               |         |
 | wear        |     0.5 | wearStart     |     0.6 |
 | cavity      |     0.4 | cavityStart   |     0.6 |
 | grime       |    0.35 | grimeHeight   |       4 |
 | microNoise  |    0.06 | lightStrength |       1 |
 
+For example, `?vlook=remaster&vk=shadeSmooth:1,edgeLight:0.25,tread:0.8,dust:0.35,streaks:0.25`.
+Each detail strength accepts 0 to disable that layer. `dustColour` is a separate colour uniform, initialized
+from sRGB `(0.55, 0.48, 0.38)` and stored in linear space; change it live with
+`window.__hd.voxelPbr.dustColour.value.set('#8c7a61')`. Reflection colours are zenith `(0.42, 0.47, 0.55)`,
+horizon `(0.62, 0.64, 0.66)`, and ground `(0.12, 0.11, 0.10)` in linear space.
+
 Asset-free acceptance:
 
 ```bash
 pnpm --filter hd-renderer run typecheck
-pnpm vitest run packages/hd-renderer/tests
+pnpm --filter hd-renderer test
 ```
 
 Read-only CPU benchmark against a user-supplied voxel JSON directory (all parts, default options; first build

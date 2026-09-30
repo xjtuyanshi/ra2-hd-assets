@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DirectionalLight, HemisphereLight, Mesh, PerspectiveCamera, Scene, WebGPURenderer } from 'three/webgpu';
 import { lights } from 'three/tsl';
 import { AtmosphereNodes } from '../src/atmosphere';
-import { voxelPbrFor, voxelPbrLookupTexture, voxelPbrMaterialFor } from '../src/ra2/voxelPbr';
+import { VOXEL_PBR_DEFAULTS, voxelPbrFor, voxelPbrLookupTexture, voxelPbrMaterialFor } from '../src/ra2/voxelPbr';
 import { ra2VoxelClass, VOXEL_CLASS_ID } from '../src/ra2/voxelClasses';
 import { buildSmoothPartGeometry } from '../src/ra2/voxelSmoothGeometry';
 import { smoothVoxelOptions } from '../src/ra2/voxelSmooth';
@@ -23,6 +23,8 @@ describe('remaster palette material', () => {
       expect(Array.from(bytes.subarray(i * 4, i * 4 + 3))).toEqual(Array.from(palette.subarray(i * 3, i * 3 + 3)));
       const p = ra2VoxelClass(i, ...(Array.from(palette.subarray(i * 3, i * 3 + 3)) as [number, number, number]));
       expect(bytes[(256 + i) * 4 + 2]).toBe(VOXEL_CLASS_ID[p.kind]);
+      expect(bytes[(256 + i) * 4]).toBe(Math.round(p.roughness * 255));
+      expect(bytes[(256 + i) * 4 + 1]).toBe(Math.round(p.metalness * 255));
       expect(bytes[(256 + i) * 4 + 3]).toBe(Math.round(p.emissive * 255));
     }
     expect(bytes.subarray(512 * 4).every((v) => v === 0)).toBe(true);
@@ -48,6 +50,20 @@ describe('remaster palette material', () => {
       expect(ra2VoxelClass(index, 255, 255, 255).kind).toBe(kind);
     lut.dispose();
   });
+  it.each([
+    ['paint', [15, 64, 176, 199, 200, 203], 0.62, 0, 0],
+    ['house', [16, 31], 0.5, 0, 0],
+    ['metal', [12, 14, 32, 47], 0.52, 0.25, 0],
+    ['dark', [48, 56], 0.55, 0.45, 0],
+    ['rubber', [57, 63, 160, 167], 0.9, 0, 0],
+    ['light', [240, 255], 0.3, 0.1, 0.6],
+  ] as const)(
+    'uses painted armour and matte tracks while retaining lights: %s',
+    (kind, indices, roughness, metalness, emissive) => {
+      for (const index of indices)
+        expect(ra2VoxelClass(index, 255, 255, 255)).toEqual({ kind, roughness, metalness, emissive });
+    },
+  );
   it('isolates uniforms/materials by atmosphere and disposes owned GPU resources', () => {
     const a = new AtmosphereNodes();
     const b = new AtmosphereNodes();
@@ -58,6 +74,25 @@ describe('remaster palette material', () => {
     expect(voxelPbrMaterialFor(palette, b)).not.toBe(m);
     voxelPbrFor(a).wear.value = 0.9;
     expect(voxelPbrFor(b).wear.value).toBe(0.5);
+    for (const knob of [
+      'shadeSmooth',
+      'edgeLight',
+      'tread',
+      'treadPeriod',
+      'treadHeight',
+      'dust',
+      'streaks',
+    ] as const) {
+      voxelPbrFor(a)[knob].value = 0;
+      expect(voxelPbrFor(b)[knob].value).toBe(VOXEL_PBR_DEFAULTS[knob]);
+    }
+    const dustSrgb = voxelPbrFor(b).dustColour.value.clone().convertLinearToSRGB();
+    // Three's transfer functions approximate the inverse; tolerate their sub-byte round-trip error.
+    expect(dustSrgb.r).toBeCloseTo(0.55, 4);
+    expect(dustSrgb.g).toBeCloseTo(0.48, 4);
+    expect(dustSrgb.b).toBeCloseTo(0.38, 4);
+    voxelPbrFor(a).dustColour.value.setRGB(0, 0, 0);
+    expect(voxelPbrFor(b).dustColour.value.r).toBeGreaterThan(0);
     a.dispose();
     b.dispose();
     expect(dispose).toHaveBeenCalledOnce();
@@ -89,6 +124,9 @@ describe('remaster palette material', () => {
     expect(builder.fragmentShader).toContain('radiance');
     expect(builder.fragmentShader).not.toMatch(/\b(?:NaN|undefined)\b/);
     expect(builder.vertexShader).toContain('vpos');
+    expect(builder.vertexShader).toContain('pshade');
+    expect(builder.fragmentShader).toMatch(/\b(?:dFdx|dpdx)\b/);
+    expect(material.normalNode).toBeTruthy();
     geometry.dispose();
     nodes.dispose();
   });
@@ -97,7 +135,7 @@ describe('remaster palette material', () => {
 it('parses remaster geometry and shader parameters without changing engine defaults', () => {
   expect(voxelLookParams(new URLSearchParams()).voxelLook).toBe('engine');
   const params = new URLSearchParams(
-    'vlook=remaster&vsmooth=supersample:2,shape:occupancy,groundOcclusion:false,bandOut:0.1&vk=wear:0.8,brightness:1.1,unknown:2,aoStrength:NaN',
+    'vlook=remaster&vsmooth=supersample:2,shape:occupancy,groundOcclusion:false,bandOut:0.1,shadeRadius:2,shadeThreshold:2,shadeRamp:8&vk=wear:0.8,brightness:1.1,shadeSmooth:0.5,edgeLight:0.4,tread:1,treadPeriod:1.2,treadHeight:4,dust:0.6,streaks:0.7,unknown:2,aoStrength:NaN',
   );
   const options = voxelLookParams(params);
   expect(options.voxelLook).toBe('remaster');
@@ -106,6 +144,9 @@ it('parses remaster geometry and shader parameters without changing engine defau
     shape: 'occupancy',
     groundOcclusion: false,
     bandOut: 0.1,
+    shadeRadius: 2,
+    shadeThreshold: 2,
+    shadeRamp: 8,
   });
   const nodes = new AtmosphereNodes();
   const hd = { nodes, settings: {} } as HdRenderer;
@@ -113,6 +154,16 @@ it('parses remaster geometry and shader parameters without changing engine defau
   expect(voxelPbrFor(nodes).wear.value).toBe(0.8);
   expect(voxelPbrFor(nodes).brightness.value).toBe(1.1);
   expect(voxelPbrFor(nodes).aoStrength.value).toBe(0.8);
+  for (const [knob, value] of Object.entries({
+    shadeSmooth: 0.5,
+    edgeLight: 0.4,
+    tread: 1,
+    treadPeriod: 1.2,
+    treadHeight: 4,
+    dust: 0.6,
+    streaks: 0.7,
+  }))
+    expect(voxelPbrFor(nodes)[knob as keyof typeof VOXEL_PBR_DEFAULTS].value).toBe(value);
   expect(hd.settings.voxelLook).toBe('remaster');
   nodes.dispose();
 });
