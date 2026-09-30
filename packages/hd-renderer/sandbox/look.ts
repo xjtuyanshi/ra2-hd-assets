@@ -3,11 +3,20 @@ import { applyLookPreset, LOOK_PRESETS, type HdRenderer, type HdSettings, type L
 import type { RenderState } from '../src/contract';
 import { smoothVoxelOptions, DEFAULT_SMOOTH_VOXEL, type SmoothVoxelOptions } from '../src/ra2/voxelSmooth';
 import { VOXEL_PBR_DEFAULTS, voxelPbrFor, type VoxelPbrKnob } from '../src/ra2/voxelPbr';
+import { voxelProjectionFor } from '../src/ra2/voxelProjection';
 
-/** Parse only known geometry knobs, before asynchronous world loading captures its immutable options. */
+const PROJECTION_KNOBS = ['relight', 'blend', 'strength', 'gain', 'saturation', 'levelRef'] as const;
+type ProjectionKnob = (typeof PROJECTION_KNOBS)[number];
+
+/**
+ * Capture load-time vehicle options: ?vlook=engine|remaster, ?vsmooth=key:value and ?vproj=vehicles-hd.
+ * vproj is relative to the HD cache root served by Vite; ?vlook=remaster&vproj=vehicles-hd is recommended.
+ * Projection knobs are uniforms at window.__hd.voxelProjection.{relight,blend,strength}.value.
+ */
 export function voxelLookParams(params: URLSearchParams): {
   voxelLook: 'engine' | 'remaster';
   smoothVoxel: Readonly<SmoothVoxelOptions>;
+  voxelProjection?: string;
 } {
   const options: Partial<SmoothVoxelOptions> = {};
   for (const entry of (params.get('vsmooth') ?? '').split(',')) {
@@ -24,6 +33,12 @@ export function voxelLookParams(params: URLSearchParams): {
   return {
     voxelLook: params.get('vlook') === 'remaster' ? 'remaster' : 'engine',
     smoothVoxel: smoothVoxelOptions(options),
+    voxelProjection: params.get('vproj')?.trim()
+      ? `/${params
+          .get('vproj')!
+          .trim()
+          .replace(/^\/+|\/+$/g, '')}`
+      : undefined,
   };
 }
 
@@ -39,6 +54,15 @@ export function applyLookParams(hd: HdRenderer, params: URLSearchParams, state: 
     const [key, value] = entry.split(':');
     if (key && Object.hasOwn(VOXEL_PBR_DEFAULTS, key) && value?.trim() && Number.isFinite(Number(value))) {
       pbr[key as VoxelPbrKnob].value = Number(value);
+    }
+  }
+  // ?vpk=relight:0.5,gain:1,saturation:1,levelRef:1.7,blend:1,strength:1 sets projected-redraw uniforms.
+  const projection = voxelProjectionFor(hd.nodes);
+  for (const entry of (params.get('vpk') ?? '').split(',')) {
+    const [key, value] = entry.split(':');
+    const knob = projection[key as ProjectionKnob];
+    if (key && PROJECTION_KNOBS.includes(key as ProjectionKnob) && value?.trim() && Number.isFinite(Number(value))) {
+      knob.value = Number(value);
     }
   }
   const preset = params.get('look') as LookPreset | null;

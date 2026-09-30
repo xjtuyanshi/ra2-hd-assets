@@ -51,10 +51,10 @@ describe('remaster palette material', () => {
     lut.dispose();
   });
   it.each([
-    ['paint', [15, 64, 176, 199, 200, 203], 0.62, 0, 0],
-    ['house', [16, 31], 0.5, 0, 0],
-    ['metal', [12, 14, 32, 47], 0.52, 0.25, 0],
-    ['dark', [48, 56], 0.55, 0.45, 0],
+    ['paint', [15, 64, 176, 199, 200, 203], 0.45, 0.15, 0],
+    ['house', [16, 31], 0.38, 0.1, 0],
+    ['metal', [12, 14, 32, 47], 0.42, 0.12, 0],
+    ['dark', [48, 56], 0.5, 0.35, 0],
     ['rubber', [57, 63, 160, 167], 0.9, 0, 0],
     ['light', [240, 255], 0.3, 0.1, 0.6],
   ] as const)(
@@ -73,7 +73,7 @@ describe('remaster palette material', () => {
     expect(voxelPbrMaterialFor(palette, a)).toBe(m);
     expect(voxelPbrMaterialFor(palette, b)).not.toBe(m);
     voxelPbrFor(a).wear.value = 0.9;
-    expect(voxelPbrFor(b).wear.value).toBe(0.5);
+    expect(voxelPbrFor(b).wear.value).toBe(0.2);
     for (const knob of [
       'shadeSmooth',
       'edgeLight',

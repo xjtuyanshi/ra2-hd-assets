@@ -35,7 +35,7 @@ import { Projectiles } from './projectiles';
 import { shpUnitPose, shpUnitFrame } from './shpUnits';
 import { SpritePool } from './spritePool';
 import { ShroudLayer, type ShroudCells } from './shroud';
-import { VoxelUnits, type VoxelUnit } from './voxelUnits';
+import { VoxelUnits, type VoxelUnit, type VoxelUnitsOptions } from './voxelUnits';
 
 export type { LiveOverlayCells } from './overlays';
 export type { LiveSmudgeCells } from './smudges';
@@ -125,7 +125,7 @@ export interface LiveSnapshot {
   cells?: LiveCells | null;
 }
 
-export interface LiveViewOptions {
+export interface LiveViewOptions extends VoxelUnitsOptions {
   /** URL of the map's HD cache directory (manifest.json inside). */
   mapBase: string;
   /** URL of the type library root (holding <theater>/library.json and common/effects/), for players' art. */
@@ -493,7 +493,7 @@ export class LiveView {
     hd.enablePainterDepth();
     this.root.name = 'live-objects';
     hd.scene.add(this.root);
-    this.voxelUnits = new VoxelUnits(hd, world, cache, options.libraryBase);
+    this.voxelUnits = new VoxelUnits(hd, world, cache, options.libraryBase, options);
     // Atlas pages go to the GPU as decoded bitmaps (no main-thread repack of their 16.7 M pixels).
     const upload = (texture: Texture) => hd.renderer.initTexture(texture);
     if (library) library.uploadPage = upload;
@@ -567,7 +567,12 @@ export class LiveView {
   static async create(canvas: HTMLCanvasElement, options: LiveViewOptions): Promise<LiveView> {
     waterPreset.style = options.water ?? 'classic';
     // Only trees are static: overlays and smudges change during a match and are drawn by the view (cellLayer).
-    const world = await loadRa2World(options.mapBase, { includeObject: (object) => object.kind === 'tree' });
+    const world = await loadRa2World(options.mapBase, {
+      includeObject: (object) => object.kind === 'tree',
+      voxelLook: options.voxelLook,
+      smoothVoxel: options.smoothVoxel,
+      voxelProjection: options.voxelProjection,
+    });
     const cache = world.cache!;
     // The theater's type library (art for everything players can build), when it has been extracted.
     const library = options.libraryBase

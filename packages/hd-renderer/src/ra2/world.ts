@@ -16,6 +16,7 @@ import {
   buildVoxelGeometry,
   createVoxelMaterial,
   instantiateVoxel,
+  projectVoxelMaterials,
   setVoxelShapeFor,
   voxelShapeFor,
   type VoxelGeometry,
@@ -24,6 +25,7 @@ import {
 import { loadVoxelLighting } from './vpl';
 import { smoothVoxelOptions, type SmoothVoxelOptions } from './voxelSmooth';
 import { buildSmoothVoxelGeometry } from './voxelSmoothGeometry';
+import { projectionParts, voxelProjectionLibrary, type VoxelProjectionLibrary } from './voxelProjection';
 
 /** A battlefield the HD renderer can draw: terrain, optional water, and everything standing on it. */
 export interface HdWorld {
@@ -31,6 +33,8 @@ export interface HdWorld {
   /** Load-time geometry choice, also inherited by units created later in live matches. */
   voxelLook?: 'engine' | 'remaster';
   smoothVoxel?: Readonly<SmoothVoxelOptions>;
+  voxelProjection?: string;
+  projections?: VoxelProjectionLibrary;
   width: number;
   height: number;
   terrain: TerrainBuild;
@@ -89,6 +93,8 @@ export async function loadRa2World(
     voxelShape?: Readonly<VoxelShape>;
     voxelLook?: 'engine' | 'remaster';
     smoothVoxel?: Partial<SmoothVoxelOptions>;
+    /** Optional base URL of view-dependent vehicle redraw atlases; absent/failed types keep their current look. */
+    voxelProjection?: string;
     /** Keep only map objects passing this test (a live match draws units and buildings from game memory instead). */
     includeObject?: (object: MapObject) => boolean;
     /** Load the optional sprite material atlas (normals.json) for the enhanced look; default true. */
@@ -103,6 +109,7 @@ export async function loadRa2World(
   const nodes = options.nodes ?? new AtmosphereNodes();
   const voxelLook = options.voxelLook ?? 'engine';
   const smoothVoxel = smoothVoxelOptions(options.smoothVoxel);
+  const projections = options.voxelProjection ? voxelProjectionLibrary(options.voxelProjection, nodes) : undefined;
   if (options.voxelShape) setVoxelShapeFor(nodes, options.voxelShape);
   else voxelShapeFor(nodes);
   // The engine's voxel lighting table lives next to the map caches, in the type library's common directory; without
@@ -112,6 +119,11 @@ export async function loadRa2World(
     loadVoxelLighting(`${base.replace(/\/$/, '')}/../_library/common/voxels-vpl.json`, nodes),
   ]);
   const { manifest } = cache;
+  // Include cached map models even when static objects are filtered out for a live match.
+  if (projections)
+    await Promise.all(
+      [...cache.voxels.values()].map((model) => projections.loadType(model.id, projectionParts(model.parts))),
+    );
   const unitPalette = cache.paletteRgb.get('unit');
   for (const [owner, hsv] of Object.entries(options.extraHouses ?? {}))
     if (unitPalette) addHousePalettes(cache, owner, remapRamp(unitPalette, hsv));
@@ -151,6 +163,12 @@ export async function loadRa2World(
           voxelLook === 'remaster'
             ? buildSmoothVoxelGeometry(model, cache.paletteRgb.get(paletteKey)!, nodes, smoothVoxel)
             : buildVoxelGeometry(model, cache.paletteRgb.get(paletteKey)!, nodes);
+        projectVoxelMaterials(
+          parts,
+          cache.paletteRgb.get(paletteKey)!,
+          projections?.get(model.id, projectionParts(model.parts)) ?? null,
+          nodes,
+        );
         geometries.set(cacheKey, parts);
       }
       const { root: vehicle } = instantiateVoxel(parts, voxelMaterial);
@@ -283,6 +301,8 @@ export async function loadRa2World(
     nodes,
     voxelLook,
     smoothVoxel,
+    voxelProjection: options.voxelProjection,
+    projections,
     width: manifest.grid.width,
     height: manifest.grid.height,
     terrain,

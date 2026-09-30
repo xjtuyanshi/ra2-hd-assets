@@ -15,7 +15,8 @@ import { createPainterDepth, meshPainterDepthNode } from '../painterDepth';
 import { decodeBase64 } from './cache';
 import { paletteNodes } from './mapLighting';
 import { VoxelShadowMesh, groundOf } from './voxelShadow';
-import { voxelFill, voxelMaterialFor } from './vpl';
+import { voxelFill, voxelMaterialFor, voxelProjectedMaterialFor } from './vpl';
+import type { VoxelProjectionAsset } from './voxelProjection';
 import { CARD_CLEARANCE } from './cardDepth';
 import { VOXEL_TO_WORLD } from './voxelScale';
 
@@ -41,6 +42,21 @@ export interface VoxelGeometry {
   turretOffset: number;
   /** Material for this geometry's palette (engine lighting table), when known. */
   material?: MeshStandardNodeMaterial;
+}
+
+/** Apply only complete part sets. Turret and barrel share both the projected material and the turret pivot. */
+export function projectVoxelMaterials(
+  parts: VoxelGeometry[],
+  palette: Uint8Array | null,
+  asset: VoxelProjectionAsset | null,
+  nodes: AtmosphereNodes,
+): boolean {
+  if (!asset || parts.some((part) => !asset.parts[part.role === 'body' ? 'body' : 'turret'])) return false;
+  for (const part of parts) {
+    part.material = voxelProjectedMaterialFor(palette, asset.parts[part.role === 'body' ? 'body' : 'turret']!, nodes);
+    if (!part.material.depthNode) part.material.depthNode = meshPainterDepthNode();
+  }
+  return true;
 }
 
 const FACES: { dir: [number, number, number]; corners: [number, number, number][] }[] = [

@@ -375,6 +375,39 @@ cornices, light and shade) while the structure rules stay; `--style-lock-l <0..1
 lock's low-frequency lightness target from the reference where it shows the object cleanly (hue and saturation stay
 the original's). Because lightness may now move, loosen `lf_dE_mean` / `lf_dE_p95` with `--thresholds` accordingly.
 
+## Vehicle projection atlases (Python)
+
+`python/vehicle_projection.py` registers image-model redraw sheets against player-supplied voxel bakes and
+packs view-dependent colour/coverage and house-paint atlases. It requires Python 3 with numpy, Pillow and cv2;
+it does not download game resources or run an image model. Set `VEHICLE_WORK` to the external working
+directory containing `bake/` and `rb/`. All input and generated art, palettes and review sheets must stay outside Git.
+
+```sh
+python3 packages/ra2-assets/python/vehicle_projection.py build --type HTNK \
+  --bake "$VEHICLE_WORK/bake/HTNK" \
+  --sheets "$VEHICLE_WORK/rb/HTNK_body_A" "$VEHICLE_WORK/rb/HTNK_body_B" \
+    "$VEHICLE_WORK/rb/HTNK_tur_A" "$VEHICLE_WORK/rb/HTNK_tur_B" \
+  --palettes "$VEHICLE_WORK/bake/palettes.json" --house-key unit@BakeA \
+  --out "$VEHICLE_WORK/proj/vehicles-hd" --review "$VEHICLE_WORK/proj/review/HTNK"
+python3 packages/ra2-assets/python/vehicle_projection.py build-index --out "$VEHICLE_WORK/proj/vehicles-hd"
+python3 -m unittest discover -s packages/ra2-assets/python -p test_vehicle_projection.py -v
+```
+
+A type requires a complete, uniformly spaced set of 32 or 16 facings for every part (`all` maps to `body`,
+`tur` to `turret`). Missing outputs and partial types fail the build; they never publish a new manifest. Sheets
+must share a scale. `output.png` is resized to the input sheet dimensions, input alpha comes from the bake's
+black/white pair, and grey-keyed redraw coverage is closed/hole-filled before registration. The bounded
+similarity search uses scale 0.94..1.06 and translations within 16 pixels; IoU below 0.85 emits a warning.
+Review sheets show the registered redraw, original silhouette outline, and registration parameters.
+
+`<TYPE>.json` version 1 records frame count/step, sheet scale, a two-row atlas-pixel Jacobian, house ramp,
+per-part atlas size, sorted frame rects/pivots, and registration results. Pivots pass through the sheet mapping,
+registration transform and packing offset. Atlas rects exclude the 12-pixel colour-dilated gutters; coverage
+remains the registered redraw alpha. Colour is sRGB; paint channels are linear data: mask, fractional ramp
+position (index 16 to 31), and half the residual linear-light luminance ratio. Civilian masks can be empty.
+`build-index` indexes completed manifests whose atlases exist. Serve the output directory as `vehicles-hd/`
+under the HD cache root; see [renderer controls](../hd-renderer/README.md#projected-vehicle-redraws).
+
 ## Sprite material atlas (Python, experimental)
 
 `python/sprite_normals.py` writes the material atlas the renderer's opt-in enhanced look relights sprites with

@@ -11,6 +11,7 @@ import { voxelLightingFor } from '../src/ra2/vpl';
 import { voxelShape } from '../src/ra2/voxels';
 import { addLookGui, applyLookParams, voxelLookParams } from './look';
 import { voxelPbrFor } from '../src/ra2/voxelPbr';
+import { voxelProjectionFor } from '../src/ra2/voxelProjection';
 import { waterPreset } from '../src/ra2/waterLook';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
@@ -198,6 +199,7 @@ const handle = {
   world,
   state,
   voxelPbr: voxelPbrFor(hd.nodes),
+  voxelProjection: voxelProjectionFor(hd.nodes),
   stats: () => hd.stats(),
   fires: [] as { at: Vector3; scale: number }[],
 };

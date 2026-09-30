@@ -34,6 +34,9 @@ import { LiveView, type LiveObject, type LiveSmudgeCells, type LiveSnapshot } fr
 import { effectRow, type LiveAnim } from '../src/live/effects';
 import { ra2Screen } from '../src/ra2/cache';
 import { applyLookPreset, LOOK_PRESETS, type LookPreset } from '../src/HdRenderer';
+import { voxelLookParams } from './look';
+import { voxelProjectionFor } from '../src/ra2/voxelProjection';
+import { voxelPbrFor } from '../src/ra2/voxelPbr';
 
 const params = new URLSearchParams(location.search);
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
@@ -59,12 +62,20 @@ const fps = Number(params.get('fps') ?? 15);
 const time = Number(params.get('time') ?? 0);
 const house = Number(params.get('house') ?? 15);
 const live = await LiveView.create(canvas, {
+  ...voxelLookParams(params),
   mapBase: `/${encodeURIComponent(mapName)}`,
   libraryBase: '/_library',
   timeOfDay: Number(params.get('hours') ?? 12),
   effects: params.get('effects') === 'enhanced' ? 'enhanced' : 'faithful',
   water: params.get('water') === 'enhanced' ? 'enhanced' : 'classic',
 });
+(window as unknown as { __hd: unknown }).__hd = {
+  hd: live.hd,
+  world: live.world,
+  voxelProjection: voxelProjectionFor(live.hd.nodes),
+  voxelPbr: voxelPbrFor(live.hd.nodes),
+  stats: () => live.hd.stats(),
+};
 // &look=golden: the enhanced look preset (src/HdRenderer.ts LOOK_PRESETS; pair it with &hours=16.5), for effect reviews
 // in the lighting they will be seen with.
 const lookPreset = params.get('look') as LookPreset | null;

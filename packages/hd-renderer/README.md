@@ -272,6 +272,8 @@ accepts `voxelLook` and `smoothVoxel: Partial<SmoothVoxelOptions>`. `VoxelUnits`
 or accepts overrides as its fifth constructor argument. Geometry is shared by model and normalized options;
 house palettes share geometry but own different LUT materials, scoped to their `AtmosphereNodes` lifetime.
 
+Use `?vlook=remaster&vproj=vehicles-hd` for [projected vehicle redraws](#projected-vehicle-redraws) on the same mesh.
+
 - `src/ra2/voxelSmooth.ts` is renderer-independent, returning typed arrays from `buildSmoothSection`.
   The thin `voxelSmoothGeometry.ts` wrapper merges sections in `buildSmoothPartGeometry`. Original bounds,
   section transforms, normal tables, voxel scale, turret pivots and flattened shadow geometry are retained.
@@ -355,3 +357,46 @@ pnpm exec tsx packages/hd-renderer/scripts/benchmarkVoxelSmooth.ts "$VOXEL_JSON_
 The synthetic tests check geometry topology, thin features, palette boundaries, normals, ground AO,
 determinism, cache isolation, shadows, depth compatibility and CPU shader generation. These checks and the
 build benchmark do not establish GPU rendering, visual quality, noon pixel matching or live-match FPS.
+
+### Projected vehicle redraws
+
+For pre-lit image-model redraws on those meshes, use `?vlook=remaster&vproj=vehicles-hd` (recommended), or
+`?vlook=engine&vproj=vehicles-hd` for the original geometry. `vproj` is relative to the HD cache root served by
+Vite. The map viewer and live bench (`?fx=units&vlook=remaster&vproj=vehicles-hd`) both support it.
+`loadRa2World`, `LiveViewOptions` and `VoxelUnitsOptions` accept `voxelProjection: string` as the atlas URL base.
+An absent index, missing type, invalid manifest or incomplete part set logs once and retains that type's selected
+engine/PBR look. Live types load asynchronously and update existing instances once the complete set arrives.
+
+The projection layer reads `<base>/index.json`, each listed type's manifest, and colour/paint atlases. It uses
+the mesh's complete world matrix (including parent turret yaw, scale and ground tilt) to select adjacent baked
+facings and project local positions through the recorded orthographic Jacobian. Turret and barrel share the
+turret atlas and pivot. Four atlas reads per fragment blend coverage-weighted colour and house paint; no
+per-unit JavaScript update is added to the frame loop. Texture coordinates have a top-left origin, `flipY=false`,
+and explicit sRGB decoding matching the VPL LUT. Frame metadata uses uniform arrays; atlases use trilinear
+mip filtering and clamp wrapping. Materials are cached per atmosphere, palette and projection part. Atlases,
+decoded bitmaps, palette LUTs and materials are released with the atmosphere, including cancelled/failed loads.
+
+The projected material uses the engine pre-lit lighting path on either geometry: map object light, extra unit
+light, night desaturation (excluding house paint), local light and `voxelFill`. Mesh AO and the extra diffuse/sheen
+affect only uncovered engine art. Depth, silhouettes, turret articulation and shadow twins still come from the
+mesh; the redraw does not create geometry outside it. At intermediate facings, differently drawn details can
+ghost during the cross-fade. GPU alignment, paint, mip seams, motion and performance need Chrome review.
+
+Both entries expose the following uniforms:
+
+```js
+window.__hd.voxelProjection.relight.value = 0; // Default 0; 1 enables directional relighting.
+window.__hd.voxelProjection.blend.value = 1; // Default 1; 0 selects only the nearest facing.
+window.__hd.voxelProjection.strength.value = 1; // Default 1; 0 shows plain engine shading on the chosen mesh.
+window.__hd.voxelProjection.levelRef.value = 1.7; // Object light level the redraws were baked under.
+window.__hd.voxelProjection.gain.value = 1; // Linear-light gain of the redraw colour (grading review).
+window.__hd.voxelProjection.saturation.value = 1; // Saturation of the redraw colour (grading review).
+```
+
+The sandbox also takes them in the URL: `?vpk=relight:0.5,levelRef:1.7,gain:1,saturation:1`. The bakes are
+screenshots of the engine look at the XMP29U2 noon object level, so their colours already carry that level: the
+projected colour is scaled by `level / levelRef` rather than `level`, and 1.7 reproduces the redraw frames' median
+brightness at noon on that map (measured in Chrome). relight, blend and strength are clamped to 0..1 in the shader. Optional relighting uses the existing sprite sun-direction uniform
+for the current sun and the VPL light direction as its reference. It is disabled by default. Omitting `vproj`
+retains the original material path and defaults. Build player-supplied assets using
+[the projection builder](../ra2-assets/README.md#vehicle-projection-atlases-python); keep all derived images outside Git.
