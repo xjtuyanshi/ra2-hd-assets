@@ -3,7 +3,8 @@ import { SURFACE, surfaceFromLandType } from '../../../ra2-assets/src/lights';
 import type { MapObject } from '../../../ra2-assets/src/manifest';
 import { AtmosphereNodes, type WorldDressing } from '../atmosphere';
 import type { TerrainBuild } from '../terrain';
-import { decodeBase64, loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOptions } from './cache';
+import { remapRamp, type Hsv } from '../../../ra2-assets/src/remap';
+import { addHousePalettes, decodeBase64, loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOptions } from './cache';
 import type { MapLightGrade } from './mapLighting';
 import { Ra2NightDressing } from './nightDressing';
 import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from './sprites';
@@ -85,6 +86,11 @@ export async function loadRa2World(
     includeObject?: (object: MapObject) => boolean;
     /** Load the optional sprite material atlas (normals.json) for the enhanced look; default true. */
     spriteMaterials?: boolean;
+    /**
+     * Review houses the map does not name (owner -> rules [Colors] HSV): their remap rows are added before any object
+     * is built, so extra objects owned by them draw in that house colour.
+     */
+    extraHouses?: Record<string, Hsv>;
   } & Ra2CacheOptions = {},
 ): Promise<HdWorld> {
   const nodes = options.nodes ?? new AtmosphereNodes();
@@ -97,6 +103,9 @@ export async function loadRa2World(
     loadVoxelLighting(`${base.replace(/\/$/, '')}/../_library/common/voxels-vpl.json`, nodes),
   ]);
   const { manifest } = cache;
+  const unitPalette = cache.paletteRgb.get('unit');
+  for (const [owner, hsv] of Object.entries(options.extraHouses ?? {}))
+    if (unitPalette) addHousePalettes(cache, owner, remapRamp(unitPalette, hsv));
   const hdRef = manifest.spriteAtlasHd;
   const materials =
     options.spriteMaterials === false || !cache.spriteAtlasHd
