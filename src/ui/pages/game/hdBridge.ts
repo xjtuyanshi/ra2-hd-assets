@@ -192,6 +192,10 @@ export function startHdBridge(host: HdBridgeHost): () => void {
               ...(params.has('hd-time') ? { timeOfDay: Number(params.get('hd-time')) } : {}),
               weather: params.get('hd-weather') === 'rain' ? 'rain' : 'clear',
               weatherIntensity: params.get('hd-weather') === 'rain' ? 0.8 : 0,
+              // hd-fx=enhanced: the remaster's modern effects around the engine's own anims (default: faithful).
+              effects: params.get('hd-fx') === 'enhanced' ? 'enhanced' : 'faithful',
+              // hd-water=enhanced: the remaster's modern water (default: the earlier HD water).
+              water: params.get('hd-water') === 'enhanced' ? 'enhanced' : 'classic',
             }),
       )
       .then((view) => {

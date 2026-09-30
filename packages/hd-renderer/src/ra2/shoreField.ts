@@ -4,6 +4,13 @@ import { DataTexture, LinearFilter, RedFormat, UnsignedByteType } from 'three/we
 export const SHORE_MIN = -3;
 export const SHORE_MAX = 9;
 
+/**
+ * Land specks of at most this many field texels (8-connected, 4 x 4 mask pixels each at the default step: about
+ * 6 x 6 engine pixels) inside open water count as water: they are single rocks or mask noise, and as land each one
+ * got a turquoise halo and a ring of foam (white speckles across a lake, owner feedback).
+ */
+export const SPECK_TEXELS = 8;
+
 /** Engine pixels per world cell along the ground once the 2:1 screen squash is undone (60 / sqrt 2). */
 const ISO_PIXELS_PER_CELL = 60 / Math.SQRT2;
 const FAR = 1e20;
@@ -40,6 +47,7 @@ export function buildShoreField(
         }
       water[y * w + x] = n && sum / n >= 128 ? 1 : 0;
     }
+  fillSpecks(water, w, h, SPECK_TEXELS);
   const texel = step / scale;
   const toWater = distanceField(water, w, h, 1, texel, texel * 2);
   const toLand = distanceField(water, w, h, 0, texel, texel * 2);
@@ -55,6 +63,45 @@ export function buildShoreField(
   texture.minFilter = LinearFilter;
   texture.needsUpdate = true;
   return { texture, data, width: w, height: h };
+}
+
+/**
+ * Turn 8-connected land components of at most `maxTexels` texels that do not touch the field's border into water
+ * (in place). Returns the number of texels changed.
+ */
+export function fillSpecks(water: Uint8Array, width: number, height: number, maxTexels: number): number {
+  const seen = new Uint8Array(water.length);
+  const stack: number[] = [];
+  const component: number[] = [];
+  let changed = 0;
+  for (let start = 0; start < water.length; start++) {
+    if (water[start] || seen[start]) continue;
+    seen[start] = 1;
+    stack.push(start);
+    component.length = 0;
+    let border = false;
+    while (stack.length) {
+      const i = stack.pop()!;
+      component.push(i);
+      const x = i % width;
+      const y = (i - x) / width;
+      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) border = true;
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          const j = ny * width + nx;
+          if (water[j] || seen[j]) continue;
+          seen[j] = 1;
+          stack.push(j);
+        }
+    }
+    if (border || component.length > maxTexels) continue;
+    for (const i of component) water[i] = 1;
+    changed += component.length;
+  }
+  return changed;
 }
 
 /**

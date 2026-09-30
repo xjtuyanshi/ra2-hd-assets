@@ -22,10 +22,11 @@ import {
 import { foundationPointPush } from '../ra2/cardDepth';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 import { loadRa2World, type HdWorld } from '../ra2/world';
+import { waterPreset, type WaterStyle } from '../ra2/waterLook';
 import { LEVEL_HEIGHT } from '../world';
 import { EffectArt, type ResolvedAnim } from './effectArt';
 import { EffectSpriteLayer, animAlpha, type EffectInstance } from './effectSprites';
-import { LiveEffectsDriver, smokeOnVehicle, type LiveAnim, type LiveEffects } from './effects';
+import { LiveEffectsDriver, smokeOnVehicle, type EffectStyle, type LiveAnim, type LiveEffects } from './effects';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
@@ -141,6 +142,10 @@ export interface LiveViewOptions {
    * `?hd-debug=placeholders`.
    */
   debugPlaceholders?: boolean;
+  /** HD around the engine's own effects: 'faithful' (default) or 'enhanced' (see LiveEffectsDriver.style). */
+  effects?: EffectStyle;
+  /** Water look (ra2/waterLook.ts): 'classic' (default) or the modern 'enhanced' water. */
+  water?: WaterStyle;
 }
 
 export interface LiveDiagnostics {
@@ -522,6 +527,7 @@ export class LiveView {
       (x, y, z) => this.shroud.isLocationShrouded(x, y, z),
       (type) => !!this.effectArt?.bullet(type),
     );
+    this.effectDriver.style = options.effects ?? 'faithful';
     this.effectDriver.artWidth = (type) => {
       const w = this.effectArt?.anim(type)?.art.visW;
       return w ? w / (60 / Math.SQRT2) : undefined;
@@ -559,6 +565,7 @@ export class LiveView {
   }
 
   static async create(canvas: HTMLCanvasElement, options: LiveViewOptions): Promise<LiveView> {
+    waterPreset.style = options.water ?? 'classic';
     // Only trees are static: overlays and smudges change during a match and are drawn by the view (cellLayer).
     const world = await loadRa2World(options.mapBase, { includeObject: (object) => object.kind === 'tree' });
     const cache = world.cache!;
@@ -873,6 +880,11 @@ export class LiveView {
     if (this.painterDirty) this.applyPainterOrder();
     this.effectDriver.frame(this.hd.seconds(), this.wind);
     this.hd.frame(dt);
+  }
+
+  /** Switch how much HD adds around the engine's own effects (see LiveViewOptions.effects); applies to new effects. */
+  setEffectStyle(style: EffectStyle): void {
+    this.effectDriver.style = style;
   }
 
   dispose(): void {

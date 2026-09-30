@@ -15,9 +15,13 @@ import {
 } from 'three/webgpu';
 import {
   Fn,
+  abs,
   clamp,
   color,
+  cos,
   cross,
+  dot,
+  exp,
   float,
   instancedBufferAttribute,
   length,
@@ -30,17 +34,23 @@ import {
   positionLocal,
   positionWorld,
   pow,
+  screenUV,
+  sin,
   smoothstep,
+  sqrt,
   step,
+  texture,
   uniform,
   uv,
   vec2,
   vec3,
   vec4,
+  viewportSharedTexture,
 } from 'three/tsl';
 import { DEFAULT_ATMOSPHERE_NODES, objectLight } from './atmosphere';
 import type { LightField } from './lightField';
 import { DirtyAttribute } from './dirtyAttribute';
+import { waterTextures } from './proceduralTextures';
 import type { ShaderNode } from './tsl';
 
 const FIREBALLS = 96;
@@ -53,6 +63,15 @@ const EMBERS = 256;
 /** Garnish flashes of the live view (a hot core inside the native art, muzzle and spark flashes). */
 const GARNISH_FLASHES = 128;
 const DOTS = 512;
+/** Enhanced garnish pools (live view, 'enhanced' effect style): glow halos, rolling smoke, debris, heat haze, dust. */
+const HALOS = 128;
+const BILLOWS = 1024;
+const DEBRIS = 1024;
+const SHIMMERS = 64;
+const DUST_RINGS = 64;
+/** Enhanced fireballs drawn over the native art, and the puffs of the smoke columns that outlive a blast. */
+const BLASTS = 96;
+const COLUMN_PUFFS = 768;
 
 /**
  * Local light of each effect, drawn into the light field (irradiance; the exposure reference is noon flat ground, about
@@ -74,6 +93,43 @@ export const GARNISH_LIGHTS = {
   beam: { radius: 1.5, peak: 1.5, life: 0.1, decay: 12 },
   fire: { colour: [1.0, 0.6, 0.26], radius: 1.4, peak: 1.6, flicker: 0.25, ttl: 0.6 },
 } as const;
+/**
+ * The live view's 'enhanced' effect style (GarnishOptions.enhanced): the original anim stays the base layer with its
+ * own timing and size, and the remaster's modern effects play around it. Per unit of the effect table's garnish scale
+ * `s` (about 0.2 for a small bang, 0.9 for TWLT070, up to 3.5 for building collapses) and of the native art's width W:
+ *   - a real flash of light on the ground, buildings and units around it (light field pulse: radius, peak, life, decay;
+ *     the exposure reference is noon flat ground, about 3.4);
+ *   - an additive glow halo about 2 W wide for a third of a second (bloom picks it up), over a hotter core;
+ *   - hot sparks and tumbling debris chunks that land;
+ *   - rolling smoke puffs with sunlit tops, sky-lit rims and the fire's glow underneath, rising after the flash and
+ *     outliving the art by a couple of seconds;
+ *   - a heat shimmer over the blast and a dust ring racing out over the ground;
+ *   - for anims that leave the engine's crater or scorch (Scorch=yes / Crater=yes), the crater glowing hot and cooling
+ *     for a few seconds.
+ * Round two of the style (the first read as the original with a flash): a detailed, boiling fireball drawn over the
+ * native art for its own duration and footprint (it covers most of the pixel art and cools into soot, in the original
+ * palette's fire colours); a longer, stronger light; a smoke column that keeps rising and drifting for about ten
+ * seconds after a big blast; charred ground around craters that fades over most of a minute (the engine's own crater
+ * smudge stays underneath); more and longer sparks; debris that lands and stays on the ground for a few seconds.
+ */
+export const ENHANCED = {
+  light: { colour: [1, 0.6, 0.26], radius: 1.8, radiusPerScale: 3.8, peak: 4, peakPerScale: 10, life: 1.8, decay: 1.7 },
+  halo: { width: 1.6, life: 0.4, intensity: 1.8 },
+  /** Fireball over the native art: width and lifetime relative to the art's, share of the art it covers. */
+  fireball: { width: 0.95, life: 0.95, cover: 0.82 },
+  sparks: { count: 26, perScale: 44 },
+  /** Debris: chunks per blast; `rest` seconds on the ground after landing. */
+  debris: { count: 5, perScale: 10, rest: 5 },
+  smoke: { count: 2, perScale: 5, delay: 0.14, life: 2.8, size: 0.42, opacity: 0.85 },
+  /** Smoke column (blasts of scale >= `from`): puffs emitted over `span` seconds, each rising for `life` seconds. */
+  column: { from: 0.35, count: 4, perScale: 8, span: 6, life: 11, rise: 0.32, size: 0.55 },
+  shimmer: { width: 1.5, life: 1.0 },
+  dust: { width: 2.2, life: 0.9 },
+  crater: { width: 0.6, life: 3.5 },
+  /** Charred ground around a crater: width relative to the art, seconds until it has faded. */
+  char: { width: 1.8, life: 45 },
+} as const;
+
 /**
  * Opacity of a live-view garnish smoke puff relative to the renderer's own smoke: the original trail art under it is
  * already the smoke, so the HD puff only softens it.
@@ -213,6 +269,10 @@ export interface GarnishOptions {
   light?: readonly [number, number, number, number] | null;
   /** Leave a scorch decal (only when the engine's own crater is not drawn). */
   scorch?: boolean;
+  /** The 'enhanced' effect style: the modern effects around the native art (see ENHANCED). */
+  enhanced?: boolean;
+  /** Enhanced style: the anim leaves the engine's crater or scorch, so the crater glows hot for a moment. */
+  hotCrater?: boolean;
 }
 
 export class EffectsLayer {
@@ -243,6 +303,20 @@ export class EffectsLayer {
   private readonly dots: ParticlePool;
   /** Energy beams (lasers, bolts) of the current logic frame, as soft-edged segments. */
   private readonly beams: BeamLayer;
+  /** Enhanced style: additive glow halos (bloomed) around a blast. */
+  private readonly halo: ParticlePool;
+  /** Enhanced style: rolling smoke puffs, sunlit and glowing from the fire below. */
+  private readonly billow: ParticlePool;
+  /** Enhanced style: tumbling debris chunks. */
+  private readonly debris: ParticlePool;
+  /** Enhanced style: heat shimmer (refracts the frame drawn so far). */
+  private readonly shimmer: ParticlePool;
+  /** Enhanced style: dust rings over the ground. */
+  private readonly dust: ParticlePool;
+  /** Enhanced style: boiling fireballs over the native art. */
+  private readonly blast: ParticlePool;
+  /** Enhanced style: long-lived puffs of rising smoke columns. */
+  private readonly column: ParticlePool;
   /** Where effect lights go; null until the renderer attaches its light field (effects then cast no light). */
   private lightField: LightField | null = null;
   /** Next flame emission per persistent fire key. */
@@ -395,20 +469,40 @@ export class EffectsLayer {
 
     const ground = new PlaneGeometry(1, 1);
     ground.rotateX(-Math.PI / 2);
+    // Scorch decal. params.w = 1: the enhanced style's charred ground (see enhancedExplosion): soot streaks thrown out
+    // radially around the crater, darkest near it, lit by the scene, fading over most of a minute.
     this.scorch = new ParticlePool(SCORCHES, ground, blended(), (pool) => {
-      const { age, life, size, seed, origin, alive } = particleInputs(pool, this.now);
+      const { age, life, size, seed, origin, alive, extra: charred } = particleInputs(pool, this.now);
       const t = clamp(age.div(life), 0, 1);
       pool.material.positionNode = origin.add(vec3(0, 0.015, 0)).add(positionLocal.mul(size.mul(alive)));
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
+        const r = length(p);
         const n = mx_noise_float(vec3(p.mul(3.0), seed.mul(30))).mul(0.35);
-        const mask = smoothstep(1.0, 0.3, length(p).add(n));
+        const mask = smoothstep(1.0, 0.3, r.add(n));
         const ember: ShaderNode = color(0xff5a1a).mul(
-          smoothstep(0.35, 0.0, length(p))
+          smoothstep(0.35, 0.0, r)
             .mul(smoothstep(0.08, 0.0, t))
             .mul(4),
         );
-        return vec4(color(0x0d0b09).add(ember), mask.mul(0.8).mul(smoothstep(1.0, 0.6, t)));
+        const plain = vec4(color(0x0d0b09).add(ember), mask.mul(0.8).mul(smoothstep(1.0, 0.6, t)));
+        // Charred ground: rays of soot (noise along the angle, stretched along the radius) over a dark disc.
+        const angle = p.y.atan(p.x);
+        const rays = mx_noise_float(vec3(angle.cos().mul(2.6), angle.sin().mul(2.6), seed.mul(40).add(r.mul(0.7))));
+        const fine = mx_noise_float(vec3(p.mul(9.0), seed.mul(11)));
+        // (MaterialX noise stays mostly within +-0.4: stretch it to reach the rim with the longest rays.)
+        const reach = clamp(float(0.5).add(rays.mul(1.1)).add(fine.mul(0.1)), 0.25, 0.98);
+        const soot = smoothstep(reach, reach.mul(0.4), r)
+          .mul(0.55)
+          .add(smoothstep(0.6, 0.15, r.add(fine.mul(0.08))).mul(0.5));
+        const shade: ShaderNode = mix(color(0x120e0b), color(0x2e251c), fine.mul(0.5).add(0.5)).mul(this.sceneLight);
+        const char = vec4(
+          shade.add(ember.mul(0.6)),
+          clamp(soot, 0, 0.88)
+            .mul(smoothstep(0.0, 0.02, t))
+            .mul(smoothstep(1.0, 0.35, t)),
+        );
+        return mix(plain, char, step(0.5, charred));
       })();
     });
     this.scorch.mesh.renderOrder = 5;
@@ -496,19 +590,321 @@ export class EffectsLayer {
 
     this.beams = new BeamLayer(this.cameraRight, this.cameraUp);
 
+    const noise = waterTextures().noise;
+    // Enhanced glow halo: a soft Gaussian of fire light around the blast, white-yellow at the centre, orange outside,
+    // bright enough for the bloom and gone within a third of a second.
+    this.halo = new ParticlePool(HALOS, quad, additive(), (pool) => {
+      const { age, life, size, origin, alive, extra: intensity } = particleInputs(pool, this.now);
+      const t = clamp(age.div(life), 0, 1);
+      const grow = size.mul(float(0.6).add(smoothstep(0, 0.3, t).mul(0.4)));
+      pool.material.positionNode = billboard(
+        origin.add(this.toCamera.mul(grow.mul(0.6))),
+        grow.mul(alive),
+        this.cameraRight,
+        this.cameraUp,
+      );
+      pool.material.colorNode = Fn(() => {
+        const d = length(uv().sub(0.5).mul(2));
+        const falloff = exp(d.mul(d).mul(-5.5)).mul(smoothstep(1.0, 0.8, d));
+        const tint = mix(vec3(1.0, 0.5, 0.16), vec3(1.0, 0.86, 0.55), exp(d.mul(d).mul(-18)));
+        const fade = pow(float(1).sub(t), 2).mul(smoothstep(0.0, 0.03, age));
+        return vec4(tint.mul(falloff).mul(fade).mul(intensity), t.lessThan(1).select(float(1), float(0)));
+      })();
+    });
+
+    // Enhanced rolling smoke: puffs that rise and spread with drag, turn slowly (rolling), and are shaded as lumpy
+    // spheres: lit from the upper left like the original art, a sky-lit rim, the local light field (fires,
+    // explosions), and the fire's glow underneath while they are young (params.w = heat). Premultiplied: the glow adds
+    // light, the soot covers what is behind.
+    this.billow = new ParticlePool(BILLOWS, quad, premultiplied(), (pool) => {
+      const { age, life, size, seed, origin, velocity, alive, extra: heat } = particleInputs(pool, this.now);
+      const t = clamp(age.div(life), 0, 1);
+      const flight = min(age, life);
+      const drift = velocity.mul(float(1).sub(exp(flight.mul(-1.1)))).div(1.1);
+      const grow = size
+        .mul(
+          float(0.4).add(
+            float(1)
+              .sub(exp(flight.mul(-1.3)))
+              .mul(1.15),
+          ),
+        )
+        .mul(alive);
+      pool.material.positionNode = billboard(
+        origin.add(drift).add(this.toCamera.mul(grow.mul(0.5))),
+        grow,
+        this.cameraRight,
+        this.cameraUp,
+      );
+      pool.material.colorNode = Fn(() => {
+        const p = uv().sub(0.5).mul(2);
+        const angle = seed.mul(6.283).add(age.mul(seed.sub(0.5).mul(1.2)));
+        const c = cos(angle);
+        const s = sin(angle);
+        const q = vec2(p.x.mul(c).sub(p.y.mul(s)), p.x.mul(s).add(p.y.mul(c)));
+        const lumps = texture(noise, q.mul(0.32).add(vec2(seed.mul(3.7), seed.mul(1.9).add(age.mul(0.025))))).g;
+        const fine = texture(noise, q.mul(0.9).add(vec2(seed.mul(5.3), age.mul(-0.04)))).b;
+        const bump = lumps.sub(0.5).mul(1.2).add(fine.sub(0.5).mul(0.4));
+        const r = length(p).add(bump.mul(0.6));
+        // A defined, lumpy silhouette over a dense core (a puff, not a haze).
+        const density = smoothstep(1.0, 0.72, r).mul(float(0.55).add(smoothstep(0.9, 0.2, r).mul(0.45)));
+        // Lumpy sphere normal in billboard space (x right, y up, z towards the camera).
+        const z = sqrt(clamp(float(1).sub(dot(p, p)), 0.04, 1));
+        const nrm = normalize(vec3(p.x.add(bump.mul(1.1)), p.y.add(bump.mul(1.1)), z));
+        const sun = dot(nrm, vec3(-0.5, 0.68, 0.53)).max(0);
+        const rim = pow(float(1).sub(nrm.z), 3).mul(0.35);
+        const shade = float(0.28).add(sun.mul(1.05)).add(rim);
+        const lit = this.nodes.sceneBrightness
+          .mul(shade)
+          .add(objectLight(positionWorld.xz, this.nodes).div(this.nodes.referenceLevel).mul(0.45));
+        // Black-brown soot while young and dense, dispersing to grey.
+        const base = mix(color(0x1d1a17), color(0x5f5a54), clamp(t.mul(0.9).add(seed.mul(0.25)), 0, 1));
+        // The fire's glow: underneath the young puff, and inside it for the first moments (black-orange smoke).
+        const under = smoothstep(0.15, -0.8, nrm.y)
+          .mul(pow(float(1).sub(t), 4))
+          .mul(1.8);
+        const inner = exp(dot(p, p).mul(-3))
+          .mul(pow(clamp(float(1).sub(t.mul(4)), 0, 1), 2))
+          .mul(1.6);
+        const glow = mix(vec3(1.0, 0.36, 0.08), vec3(1.0, 0.66, 0.3), inner.min(1))
+          .mul(heat)
+          .mul(under.add(inner));
+        const alpha = density
+          .mul(smoothstep(0.0, 0.08, t))
+          .mul(smoothstep(1.0, 0.45, t))
+          .mul(ENHANCED.smoke.opacity)
+          .mul(t.lessThan(1).select(float(1), float(0)));
+        return vec4(base.mul(lit).mul(alpha).add(glow.mul(alpha)), alpha);
+      })();
+    });
+
+    // Enhanced debris: small dark chunks thrown out ballistically, tumbling, landing on the ground they started from;
+    // some glow hot while they fly (params.w).
+    this.debris = new ParticlePool(DEBRIS, quad, blended(), (pool) => {
+      const { age, life, size, seed, origin, velocity, alive, extra: hot } = particleInputs(pool, this.now);
+      const t = clamp(age.div(life), 0, 1);
+      // Ballistic until the chunk is back at its start height, then it lies still (no sliding, no spin).
+      const landed = velocity.y.div(4.9).add(0.02);
+      const flight = min(min(age, life), landed);
+      const flying = origin.add(velocity.mul(flight)).add(vec3(0, flight.mul(flight).mul(-4.9), 0));
+      const at = vec3(flying.x, max(flying.y, origin.y.sub(0.02)), flying.z);
+      const spin = seed.mul(20).add(flight.mul(seed.mul(10).add(7)));
+      const c = cos(spin);
+      const s = sin(spin);
+      const corner = vec2(positionLocal.x, positionLocal.y.mul(0.65));
+      const turned = vec2(corner.x.mul(c).sub(corner.y.mul(s)), corner.x.mul(s).add(corner.y.mul(c))).mul(
+        size.mul(alive),
+      );
+      pool.material.positionNode = at
+        .add(this.toCamera.mul(0.08))
+        .add(this.cameraRight.mul(turned.x))
+        .add(this.cameraUp.mul(turned.y));
+      pool.material.colorNode = Fn(() => {
+        const p = uv().sub(0.5).mul(2);
+        const chunk = smoothstep(1.0, 0.65, max(abs(p.x), abs(p.y)));
+        const shade: ShaderNode = (color(0x3b342d) as ShaderNode)
+          .mul(this.sceneLight)
+          .mul(float(0.8).add(p.y.mul(0.25)));
+        // Hot chunks glow for their first second, however long they then lie on the ground.
+        const ember = vec3(1.0, 0.5, 0.15)
+          .mul(hot)
+          .mul(smoothstep(1.1, 0.0, age))
+          .mul(2.2);
+        return vec4(
+          shade.add(ember),
+          chunk.mul(smoothstep(life, life.sub(0.8), age)).mul(t.lessThan(1).select(float(1), float(0))),
+        );
+      })();
+    });
+
+    // Enhanced heat shimmer: the frame drawn so far, refracted by rising noise over the blast for about a second.
+    this.shimmer = new ParticlePool(SHIMMERS, quad, blended(), (pool) => {
+      const { age, life, size, seed, origin, alive } = particleInputs(pool, this.now);
+      const t = clamp(age.div(life), 0, 1);
+      const grow = size.mul(float(0.7).add(t.mul(0.5)));
+      pool.material.positionNode = billboard(
+        origin.add(vec3(0, t.mul(0.5).add(0.25), 0)).add(this.toCamera.mul(grow)),
+        grow.mul(alive),
+        this.cameraRight,
+        this.cameraUp,
+      );
+      pool.material.colorNode = Fn(() => {
+        const p = uv().sub(0.5).mul(2);
+        const mask = smoothstep(1.0, 0.25, length(p))
+          .mul(smoothstep(0.0, 0.08, t))
+          .mul(pow(float(1).sub(t), 1.5));
+        const flow = uv()
+          .mul(1.3)
+          .add(vec2(seed.mul(7.1), this.now.mul(-0.45)));
+        const bend = vec2(texture(noise, flow).b.sub(0.5), texture(noise, flow.add(vec2(0.37, 0.61))).b.sub(0.5));
+        const refracted = viewportSharedTexture(screenUV.add(bend.mul(mask).mul(0.009)));
+        return vec4(refracted.rgb, mask.mul(t.lessThan(1).select(float(1), float(0))));
+      })();
+    });
+
+    // Enhanced dust ring: a brownish ring of dust racing out over the ground and settling.
+    this.dust = new ParticlePool(DUST_RINGS, ground, blended(), (pool) => {
+      const { age, life, size, seed, origin, alive } = particleInputs(pool, this.now);
+      const t = clamp(age.div(life), 0, 1);
+      const radius = size
+        .mul(
+          float(0.2).add(
+            float(1)
+              .sub(pow(float(1).sub(t), 2.5))
+              .mul(0.8),
+          ),
+        )
+        .mul(alive);
+      pool.material.positionNode = origin.add(vec3(0, 0.02, 0)).add(positionLocal.mul(radius));
+      pool.material.colorNode = Fn(() => {
+        const p = uv().sub(0.5).mul(2);
+        const d = length(p);
+        const lumps = texture(noise, p.mul(0.45).add(vec2(seed.mul(9.1), seed.mul(3.3)))).g;
+        const ring = smoothstep(0.55, 0.88, d.add(lumps.sub(0.5).mul(0.35))).mul(smoothstep(1.0, 0.88, d));
+        const haze = smoothstep(0.95, 0.3, d).mul(0.18);
+        const dustColour: ShaderNode = (color(0xa08e74) as ShaderNode).mul(this.sceneLight);
+        const alpha = ring
+          .add(haze)
+          .mul(pow(float(1).sub(t), 1.4))
+          .mul(0.7)
+          .mul(t.lessThan(1).select(float(1), float(0)));
+        return vec4(dustColour, alpha);
+      })();
+    });
+    this.dust.mesh.renderOrder = 5;
+
+    // Enhanced fireball over the native art (premultiplied: fire adds light and hides `cover` of what is behind, so
+    // the pixel art under it reads as a detailed, boiling ball). Three octaves of evolving noise shape a lumpy ball
+    // whose hot core cools outwards and with age through the original palette's fire colours into lit soot.
+    this.blast = new ParticlePool(BLASTS, quad, premultiplied(), (pool) => {
+      const { age, life, size, seed, origin, alive, extra: cover } = particleInputs(pool, this.now);
+      const t = clamp(age.div(life), 0, 1);
+      const grow = size.mul(
+        float(0.5)
+          .add(smoothstep(0, 0.18, t).mul(0.38))
+          .add(t.mul(0.22)),
+      );
+      const rise: ShaderNode = t.mul(size).mul(0.22);
+      pool.material.positionNode = billboard(
+        origin.add(vec3(0, rise, 0)).add(this.toCamera.mul(grow.mul(0.6))),
+        grow.mul(alive),
+        this.cameraRight,
+        this.cameraUp,
+      );
+      pool.material.colorNode = Fn(() => {
+        const p = uv().sub(0.5).mul(2);
+        const q = vec3(p.mul(1.7), seed.mul(17).add(t.mul(1.6)));
+        const n1 = mx_noise_float(q);
+        const n2 = mx_noise_float(q.mul(2.1).add(vec3(3.1, 1.7, 0.4)));
+        const n3 = mx_noise_float(q.mul(4.4).add(vec3(7.7, 2.3, 5.1)));
+        const turbulence = n1.mul(0.5).add(n2.mul(0.25)).add(n3.mul(0.13));
+        const r = length(p).add(turbulence.mul(0.5));
+        const density = smoothstep(1.0, 0.62, r);
+        const temperature = clamp(
+          smoothstep(0.95, 0.05, r)
+            .mul(float(1.3).sub(t.mul(1.45)))
+            .add(n2.mul(0.22)),
+          0,
+          1,
+        );
+        const z = sqrt(clamp(float(1).sub(dot(p, p)), 0.04, 1));
+        const nrm = normalize(vec3(p.x.add(n1.mul(0.9)), p.y.add(n1.mul(0.9)), z));
+        const sun = dot(nrm, vec3(-0.5, 0.68, 0.53)).max(0);
+        const soot: ShaderNode = mix(color(0x241c16), color(0x6a5b4e), sun)
+          .mul(this.sceneLight.mul(0.7).add(0.3))
+          .add(color(0xff7a2a).mul(smoothstep(0.02, 0.2, temperature).mul(0.5)));
+        const fire = fireRamp(temperature, this.sceneLight).mul(float(0.9).add(temperature.mul(1.2)));
+        const rgb = mix(soot, fire, smoothstep(0.12, 0.4, temperature));
+        const alpha = density
+          .mul(smoothstep(0.0, 0.03, age))
+          .mul(smoothstep(1.0, 0.55, t))
+          .mul(smoothstep(1.0, 0.86, length(p)))
+          .mul(t.lessThan(1).select(float(1), float(0)));
+        return vec4(rgb.mul(alpha), alpha.mul(cover));
+      })();
+    });
+
+    // Enhanced smoke column: puffs that keep rising (no drag) and spreading for about ten seconds, lumpy and lit like
+    // the rolling smoke, glowing from the fire below while young (params.w = heat), dispersing to a thin grey.
+    this.column = new ParticlePool(COLUMN_PUFFS, quad, premultiplied(), (pool) => {
+      const { age, life, size, seed, origin, velocity, alive, extra: heat } = particleInputs(pool, this.now);
+      const t = clamp(age.div(life), 0, 1);
+      const flight = min(age, life);
+      const grow = size
+        .mul(
+          float(0.55).add(
+            float(1)
+              .sub(exp(flight.mul(-0.35)))
+              .mul(1.9),
+          ),
+        )
+        .mul(alive);
+      pool.material.positionNode = billboard(
+        origin.add(velocity.mul(flight)).add(this.toCamera.mul(grow.mul(0.5))),
+        grow,
+        this.cameraRight,
+        this.cameraUp,
+      );
+      pool.material.colorNode = Fn(() => {
+        const p = uv().sub(0.5).mul(2);
+        const angle = seed.mul(6.283).add(age.mul(seed.sub(0.5).mul(0.4)));
+        const c = cos(angle);
+        const sn = sin(angle);
+        const q = vec2(p.x.mul(c).sub(p.y.mul(sn)), p.x.mul(sn).add(p.y.mul(c)));
+        const lumps = texture(noise, q.mul(0.3).add(vec2(seed.mul(3.7), seed.mul(1.9).add(age.mul(0.012))))).g;
+        const fine = texture(noise, q.mul(0.85).add(vec2(seed.mul(5.3), age.mul(-0.02)))).b;
+        const bump = lumps.sub(0.5).mul(1.2).add(fine.sub(0.5).mul(0.4));
+        const r = length(p).add(bump.mul(0.6));
+        const density = smoothstep(1.0, 0.65, r).mul(float(0.5).add(smoothstep(0.9, 0.2, r).mul(0.5)));
+        const z = sqrt(clamp(float(1).sub(dot(p, p)), 0.04, 1));
+        const nrm = normalize(vec3(p.x.add(bump.mul(1.1)), p.y.add(bump.mul(1.1)), z));
+        const sun = dot(nrm, vec3(-0.5, 0.68, 0.53)).max(0);
+        const rim = pow(float(1).sub(nrm.z), 3).mul(0.3);
+        const lit = this.nodes.sceneBrightness
+          .mul(float(0.32).add(sun.mul(0.95)).add(rim))
+          .add(objectLight(positionWorld.xz, this.nodes).div(this.nodes.referenceLevel).mul(0.4));
+        const base = mix(color(0x2a2622), color(0x77726b), clamp(t.mul(1.1).add(seed.mul(0.2)), 0, 1));
+        const glow = vec3(1.0, 0.42, 0.12)
+          .mul(heat)
+          .mul(smoothstep(0.1, -0.8, nrm.y))
+          .mul(pow(clamp(float(1).sub(t.mul(5)), 0, 1), 2))
+          .mul(1.4);
+        const alpha = density
+          .mul(smoothstep(0.0, 0.06, t))
+          .mul(smoothstep(1.0, 0.4, t))
+          .mul(0.62)
+          .mul(t.lessThan(1).select(float(1), float(0)));
+        return vec4(base.mul(lit).mul(alpha).add(glow.mul(alpha)), alpha);
+      })();
+    });
+
     // Fire and sparks always draw over smoke (the smoke of a fire rises above and behind its flames).
     this.smoke.mesh.renderOrder = 6;
-    for (const pool of [this.flames, this.fireballs, this.sparks, this.garnishFire]) pool.mesh.renderOrder = 7;
+    this.billow.mesh.renderOrder = 6;
+    this.column.mesh.renderOrder = 6;
+    // Over the native anim art (the 'air' pass draws at 7).
+    this.blast.mesh.renderOrder = 7.5;
+    for (const pool of [this.flames, this.fireballs, this.sparks, this.garnishFire, this.debris, this.halo])
+      pool.mesh.renderOrder = 7;
+    // The heat shimmer refracts everything drawn before it, fire included.
+    this.shimmer.mesh.renderOrder = 8;
     this.pools = [
       this.scorch,
       this.shock,
+      this.dust,
       this.embers,
       this.smoke,
+      this.column,
+      this.billow,
       this.dots,
       this.flames,
       this.fireballs,
       this.garnishFire,
+      this.blast,
+      this.debris,
+      this.halo,
       this.sparks,
+      this.shimmer,
     ];
     for (const pool of this.pools) {
       pool.mesh.visible = false;
@@ -580,6 +976,10 @@ export class EffectsLayer {
    * native anim's footprint and lifetime (GarnishOptions).
    */
   private garnishExplosion(now: number, at: Vector3, scale: number, wind: Vector3, options: GarnishOptions): void {
+    if (options.enhanced) {
+      this.enhancedExplosion(now, at, scale, wind, options);
+      return;
+    }
     const r = (spread: number) => (Math.random() - 0.5) * spread;
     const s = scale * FX_GARNISH;
     const cap = (size: number) => Math.min(size, 0.6 * (options.maxSize ?? Infinity));
@@ -617,10 +1017,121 @@ export class EffectsLayer {
   }
 
   /**
+   * The enhanced style's explosion around the native art (ENHANCED): a flash of light, a glow halo over a hot core,
+   * sparks and debris, rolling lit smoke, heat shimmer, a dust ring and, for crater-leaving anims, a cooling hot crater.
+   * `options.maxSize` is the native art's width (world units); the core stays inside it, the halo, smoke and dust
+   * spread around it.
+   */
+  private enhancedExplosion(now: number, at: Vector3, scale: number, wind: Vector3, options: GarnishOptions): void {
+    const r = (spread: number) => (Math.random() - 0.5) * spread;
+    // Building collapses reach a scale of 3.5: their light and particle counts stop growing past these.
+    const s = Math.min(2, scale * FX_GARNISH);
+    const lightScale = Math.min(1.6, s);
+    // Width of the native art (world units); tables without art fall back to the scale.
+    const width = Math.max(0.3, Math.min(options.maxSize ?? 1.2 * s, 4 * Math.max(0.3, s)));
+    const e = ENHANCED;
+    // Hot core inside the art, the detailed fireball over it for the art's own duration, then the halo around it.
+    this.garnishFire.spawn(now, at, this.zeroVelocity, 0.7 * width, 0.14, 0.6);
+    const artLife = Math.max(0.35, Math.min(options.maxLife ?? 1.2, 3));
+    this.blast.spawn(
+      now,
+      at.clone().add(new Vector3(0, 0.08 * width, 0)),
+      this.zeroVelocity,
+      e.fireball.width * width,
+      e.fireball.life * artLife,
+      e.fireball.cover,
+    );
+    this.halo.spawn(now, at, this.zeroVelocity, e.halo.width * width, e.halo.life, e.halo.intensity);
+    const light = e.light;
+    const colour = options.light ?? [...light.colour, 0];
+    this.lightField?.pulse(
+      now,
+      at,
+      [colour[0]!, colour[1]!, colour[2]!],
+      light.radius + light.radiusPerScale * lightScale,
+      light.peak + light.peakPerScale * lightScale,
+      light.life,
+      light.decay,
+      'explosion',
+    );
+    const lifted = at.clone().add(new Vector3(0, 0.12, 0));
+    for (let i = 0, n = Math.round(e.sparks.count + e.sparks.perScale * s); i < n; i++) {
+      // Most sparks stay near the blast; one in four is a long tracer.
+      const far = Math.random() < 0.25;
+      const velocity = new Vector3(r(10), 3 + Math.random() * 6, r(10)).multiplyScalar(
+        (0.35 + 0.35 * s) * (far ? 1.6 : 1),
+      );
+      this.sparks.spawn(now, lifted, velocity, far ? 0.055 : 0.045, (far ? 0.8 : 0.4) + Math.random() * 0.6, 0.35);
+    }
+    for (let i = 0, n = Math.round(e.debris.count + e.debris.perScale * s); i < n; i++) {
+      const velocity = new Vector3(r(5), 2.5 + Math.random() * 3.5, r(5)).multiplyScalar(0.5 + 0.35 * s);
+      // Flight time (back to the start height), then a few seconds on the ground.
+      const flight = velocity.y / 4.9;
+      this.debris.spawn(
+        now,
+        lifted,
+        velocity,
+        0.03 + Math.random() * 0.055 * Math.min(2, 0.6 + s),
+        flight + e.debris.rest * (0.5 + Math.random()),
+        Math.random() < 0.35 ? 1 : 0,
+      );
+    }
+    // A smoke column after bigger blasts: puffs emitted over a few seconds from the blast, rising with the wind.
+    if (s >= e.column.from) {
+      const n = Math.round(e.column.count + e.column.perScale * Math.min(1.5, s));
+      for (let i = 0; i < n; i++) {
+        const delay = 0.25 + (i / n) * e.column.span * (0.7 + 0.3 * Math.random());
+        const velocity = new Vector3(r(0.12), e.column.rise * (0.8 + Math.random() * 0.4), r(0.12))
+          .multiplyScalar(0.8 + 0.3 * s)
+          .add(wind.clone().multiplyScalar(0.6));
+        this.column.spawn(
+          now + delay,
+          at.clone().add(new Vector3(r(0.4 * width), 0.2 * width, r(0.4 * width))),
+          velocity,
+          e.column.size * width * (0.8 + Math.random() * 0.4),
+          e.column.life * (0.8 + Math.random() * 0.4),
+          Math.max(0, 1 - delay / 2.5),
+        );
+      }
+    }
+    for (let i = 0, n = Math.round(e.smoke.count + e.smoke.perScale * s); i < n; i++) {
+      const velocity = new Vector3(r(0.5), 0.45 + Math.random() * 0.45, r(0.5)).multiplyScalar(0.6 + 0.4 * s).add(wind);
+      this.billow.spawn(
+        now + e.smoke.delay + Math.random() * 0.3,
+        at.clone().add(new Vector3(r(0.5 * width), 0.1 + Math.random() * 0.25 * width, r(0.5 * width))),
+        velocity,
+        e.smoke.size * (0.8 + Math.random() * 0.5) * width,
+        e.smoke.life * (0.8 + Math.random() * 0.4),
+        1,
+      );
+    }
+    this.shimmer.spawn(now + 0.05, at, this.zeroVelocity, e.shimmer.width * width, e.shimmer.life);
+    this.dust.spawn(now, at, this.zeroVelocity, e.dust.width * width, e.dust.life);
+    if (options.hotCrater) {
+      this.embers.spawn(now + 0.05, at, this.zeroVelocity, e.crater.width * width, e.crater.life);
+      // Charred ground around the engine's crater smudge (which stays underneath), fading over most of a minute.
+      this.scorch.spawn(now + 0.1, at, this.zeroVelocity, e.char.width * width, e.char.life, 1);
+    }
+  }
+
+  /**
    * Weapon muzzle flash: a brief flash, a few sparks and a small light. With options (live view) a smaller garnish
    * flash capped at the native art's width, with a dimmer light.
    */
   muzzleFlash(now: number, at: Vector3, scale: number, options?: GarnishOptions): void {
+    if (options?.enhanced) {
+      // Enhanced: a bloomed halo around the native flash and a light that reaches the ground and nearby units.
+      const width = Math.max(0.25, Math.min(options.maxSize ?? 0.9 * scale, 1.5));
+      this.garnishFire.spawn(now, at, this.zeroVelocity, 0.8 * width, 0.08, 0.5);
+      this.halo.spawn(now, at, this.zeroVelocity, 1.8 * width, 0.12, 1.2);
+      for (let i = 0; i < 6; i++) {
+        const velocity = new Vector3(Math.random() - 0.5, 0.6 + Math.random(), Math.random() - 0.5).multiplyScalar(3.5);
+        this.sparks.spawn(now, at, velocity, 0.04, 0.2 + Math.random() * 0.25, 0.5);
+      }
+      const colour = options.light ?? GARNISH_LIGHTS.muzzle.colour;
+      this.lightField?.pulse(now, at, [colour[0]!, colour[1]!, colour[2]!], 2.2, 2.8, 0.14, 14, 'flash');
+      return;
+    }
     if (options) {
       const s = scale * FX_GARNISH;
       this.garnishFire.spawn(now, at, new Vector3(), Math.min(0.9 * s, options.maxSize ?? Infinity), 0.08, 0.5);

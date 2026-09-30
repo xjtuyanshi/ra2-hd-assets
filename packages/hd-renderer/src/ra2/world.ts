@@ -7,6 +7,7 @@ import { decodeBase64, loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOpt
 import type { MapLightGrade } from './mapLighting';
 import { Ra2NightDressing } from './nightDressing';
 import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from './sprites';
+import { loadSpriteMaterials } from './spriteMaterials';
 import { objectYSort, painterObject } from './painterOrder';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from './bridgeDepth';
 import { buildRa2Terrain } from './terrain';
@@ -82,6 +83,8 @@ export async function loadRa2World(
     voxelShape?: Readonly<VoxelShape>;
     /** Keep only map objects passing this test (a live match draws units and buildings from game memory instead). */
     includeObject?: (object: MapObject) => boolean;
+    /** Load the optional sprite material atlas (normals.json) for the enhanced look; default true. */
+    spriteMaterials?: boolean;
   } & Ra2CacheOptions = {},
 ): Promise<HdWorld> {
   const nodes = options.nodes ?? new AtmosphereNodes();
@@ -94,6 +97,11 @@ export async function loadRa2World(
     loadVoxelLighting(`${base.replace(/\/$/, '')}/../_library/common/voxels-vpl.json`, nodes),
   ]);
   const { manifest } = cache;
+  const hdRef = manifest.spriteAtlasHd;
+  const materials =
+    options.spriteMaterials === false || !cache.spriteAtlasHd
+      ? null
+      : await loadSpriteMaterials(base, hdRef ? { width: hdRef.width, height: hdRef.height } : null);
   // InvisibleInGame objects (lamp-post dummies such as INGALITE) are never drawn by the engine.
   const hidden = new Set(cache.lights?.hiddenObjects ?? []);
   const placed = manifest.objects.filter(
@@ -109,6 +117,9 @@ export async function loadRa2World(
   const voxelMaterial = createVoxelMaterial(nodes);
   const geometries = new Map<string, VoxelGeometry[]>();
   const sprites: SpriteInstance[] = [];
+  // Enhanced-look decals (spriteLook.ts; drawn only while their effect is on): ground contact shades first, under
+  // every other decal, and wet-paving mirror images of upright art.
+  const lookDecals: SpriteInstance[] = [];
   for (const object of objects) {
     const anchor = objectAnchor(object);
     if (object.voxel) {
@@ -163,9 +174,39 @@ export async function loadRa2World(
           lighting,
         });
     }
-    // Shadows are cast on the ground: draw them as decals too.
+    // Shadows are cast on the ground: draw them as decals too. The painter carries the foundation the enhanced look
+    // turns them about (flat decals take no depth from it).
     const shadow = entry.shadows?.[frameIndex];
-    if (shadow) sprites.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
+    if (shadow) sprites.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true, painter });
+    if (object.kind === 'building' && entry.foundation) {
+      const [w, h] = entry.foundation;
+      const margin = 30;
+      lookDecals.push({
+        anchor,
+        frame: {
+          rect: [0, 0, 30 * (w + h) + 2 * margin, 15 * (w + h) + 2 * margin],
+          offset: [-30 * h - margin, -margin],
+        },
+        palette,
+        push: 0,
+        shadow: false,
+        flat: true,
+        kind: 'contact',
+        painter,
+      });
+    }
+    if (!flat && object.kind !== 'overlay')
+      sprites.push({
+        anchor,
+        frame,
+        palette,
+        push: 0,
+        shadow: false,
+        flat: true,
+        lighting,
+        painter,
+        kind: 'reflection',
+      });
     sprites.push({
       anchor,
       frame,
@@ -192,6 +233,7 @@ export async function loadRa2World(
         });
     }
   }
+  sprites.unshift(...lookDecals);
   const spriteLayer = new SpriteLayer(
     cache,
     sprites,
@@ -199,6 +241,7 @@ export async function loadRa2World(
     undefined,
     cache.spriteAtlasHd,
     cache.windows?.texture ?? null,
+    materials,
   );
   root.add(spriteLayer.mesh);
   const surface = cellSurface(cache);

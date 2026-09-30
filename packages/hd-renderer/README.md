@@ -115,7 +115,9 @@ tint from the same `[Lighting]`).
 Sandbox parameters: `time=<hours>` (default: the map's hour), `weather=clear|rain|storm`, `rain=<0..1>`, `wet=<0..1>`
 (start wet), `lights=0` (map light sources off), `lamps=auto|on|off` (`auto`: urban and newurban only),
 `windows=0|1`, `mist=<multiplier>`, `nightlevel=<fraction of noon>`, `fires=<N>` (persistent fires around the view
-centre), `boom=1` (periodic explosions), `perf=1` (frames back to back plus GPU timestamps; diagnostics only). `lamps=off&windows=0` gives a night lit only by
+centre), `boom=1` (periodic explosions), `water=enhanced|classic` (the modern water on original maps, opt-in; `look=golden` turns
+it on unless `water=` is given; default `classic`, the earlier HD water), `perf=1` (frames
+back to back plus GPU timestamps; diagnostics only). `lamps=off&windows=0` gives a night lit only by
 the map's own light sources and effects. `window.__hd.stats()` reports exposure, night, light counts, mist, wetness
 and frame times; `window.__hd.hd.effects.lightStats(window.__hd.hd.seconds())` the active effect lights.
 
@@ -127,6 +129,12 @@ advanced (otherwise passes are not re-rendered), divided by the time until the G
 at most 12 ms and at most 2.5 ms above clear noon. `stats().frameMs` under `perf=1` is a presentation interval, not a
 cost, and `stats().gpuTimestampMs` is unusable on Apple GPUs (hundreds of ms per frame); neither measures the budget.
 Other GPU work on the machine inflates every number, so compare configurations within one run.
+
+**Live-view bench** (`sandbox/fx.ts`, `?fx=<anim ids>`): deterministic clock and randomness; `fx=units` or
+`fx=squad` add objects, `effects=enhanced` the enhanced effect style, `look=golden` the enhanced look preset,
+`water=enhanced` the modern water, `stagger=<s>`, `repeat=<s>`, `at=dx,dy;...` and
+`spread=<cells>` place and time the listed anims, `crater=1` emulates the engine's crater smudges, and
+`window.__fx.advance(ms)` steps the clock for frame-by-frame capture (header of `sandbox/fx.ts`).
 
 **Live view.** `LiveView.create` without `timeOfDay` follows the map's staging; `liveView.setEnvironment({ timeOfDay,
 weather, weatherIntensity, lamps, windows, lights, mist })` changes it without a reload. Light sources follow the
@@ -145,12 +153,16 @@ sidecar the view falls back to land-type surfaces and no map light sources.
 - Terrain: height field with smoothed shading normals, per-pixel procedural materials, soft class borders, wet
   surfaces, puddles, wet shore band, border shroud (`src/terrain.ts`).
 - Water: analytic sky reflection, sun sheen, depth tint from the terrain height texture, shoreline foam, rain rings
-  (`src/water.ts`).
+  (`src/water.ts`). Original maps shade their water per pixel on the terrain (`src/ra2/waterLook.ts`, below).
 - Weather: world-anchored GPU rain streaks and splashes (`src/weather.ts`).
 - Lighting: fixed classic sun azimuth, time-of-day keys, overcast, soft shadows for the procedural scenario
   (`src/lighting.ts`). Original maps take no sun shadows (see below).
 - Effects: instanced fireballs, flame tongues, smoke, sparks, scorch decals, light-field flashes, camera shake; with
   garnish options (the live view) only a small flash, sparks and light on top of the original art (`src/effects.ts`).
+  The live view's opt-in `enhanced` effect style (`ENHANCED`) adds, around the engine's own anim: a boiling fireball
+  over the native art for its duration (original fire colours), a longer light, sparks and landing debris, rolling
+  smoke and, after bigger blasts, a smoke column rising for about ten seconds, heat shimmer, a dust ring, and around
+  craters a hot glow and charred ground that fades over most of a minute (the engine's crater smudge stays).
 - Post (`src/HdRenderer.ts`, `src/post.ts`): per-channel exposure, mist and the visibility (shroud) mask, bloom, the
   display transform, the night toe lift, anti-aliasing and sharpening; see HdSettings below.
 
@@ -182,6 +194,31 @@ backdrop-sampling effect material) ends and restarts the scene pass; under `'msa
 the multisampled target, about 0.5 ms per copy at 2400x1500 on an Apple M-series GPU against about 0.1 ms
 single-sampled, so layers should copy at most once per frame and only while they draw.
 
+## Enhanced look (opt-in, `src/ra2/spriteLook.ts`)
+
+Modern light on the original art, off by default: with every setting below at 0 the frame is the faithful one bit for
+bit (the sprite shader skips the whole branch; checked by render hash on XMP29U2). `LOOK_PRESETS` / `applyLookPreset`
+name two looks: `faithful` and `golden` (golden afternoon: every effect on, the sun arc, exposure adaptation, hour
+16.5). Sandbox: `?look=golden`, single overrides `?relight= ?contrast= ?spec= ?glass= ?ao= ?shfollow= ?shsoft= ?wetrefl=
+?sunpath=fixed|arc ?adapt= ?vsheen= ?vsheencap= ?vao=` and the "现代光影" GUI folder (`sandbox/look.ts`).
+
+| Setting                                         | Meaning                                                                                                                                                                                                                                                              |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `relight`, `lightContrast`                      | Building and tree art relit by the sun as a delta on its baked shading: each pixel scales by (irradiance of its normal under the current sun and sky, relative to flat ground) / (the same under the art's own light, `ART_LIGHT`). Exactly 1 under the art's light. |
+| `specular`                                      | GGX sun highlights on facades and roofs (and the sheen of wet surfaces).                                                                                                                                                                                             |
+| `glass`                                         | Window panes of the material atlas mirror the sky (stylised street-level mirror, tinted by the pane, a smooth tilt field over the facade) with a sun glint on the inside of full panes.                                                                              |
+| `occlusion`                                     | Baked occlusion of the material atlas (wall feet, roofs next to higher tiers) and soft ground contact decals around foundations.                                                                                                                                     |
+| `shadowFollow`, `shadowSoftness`                | SHP shadow decals turn and stretch about their object's base with the sun (voxel shadows turn with them); their penumbra grows with distance.                                                                                                                        |
+| `wetReflections`                                | Upright art mirrored about its base line on wet paving (short, rippled, strongest in puddles).                                                                                                                                                                       |
+| `sunPath`                                       | `'arc'`: `Lighting.sunArc`, east in the morning, over the camera side at noon, west in the evening (the art's azimuth at 15:00); `'fixed'`: the classic azimuth.                                                                                                     |
+| `adaptExposure`                                 | Lifts early and late daylight towards noon's flat-ground brightness (the colour of the light stays).                                                                                                                                                                 |
+| `voxelSheen`, `voxelSheenCap`, `voxelOcclusion` | Voxel highlight strength and cap and crease occlusion (`vpl.ts`); null leaves the voxel material as configured.                                                                                                                                                      |
+
+Per-pixel normals come from an optional material atlas next to the HD sprite atlas (`normals.json` +
+`sprites@2x-normals.png`, written by `packages/ra2-assets/python/sprite_normals.py`, loaded by `spriteMaterials.ts`);
+without it the relighting has no normals and sprites keep their baked shading, while shadows, contact decals and
+reflections still follow the settings.
+
 ## Original maps (`src/ra2`)
 
 - Map lighting (`mapLighting.ts`): the map's `[Lighting]` and light sources as the engine applies them by day, per cell
@@ -195,6 +232,14 @@ single-sampled, so layers should copy at most once per frame and only while they
 - Terrain (`terrain.ts`): original tile art is lit by plain Lambert diffuse from the sun and sky, with specular only on
   wet ground, so flat ground at clear noon shows exactly composite x map lighting. Contact shading from the height
   field darkens ground and water at the feet of cliffs; no sun shadows are cast.
+- Water (`waterLook.ts`, `shoreField.ts`, `../proceduralTextures.ts`): open water is shaded per pixel from the signed
+  shore distance (land specks of at most `SPECK_TEXELS` field texels count as water). The opt-in `enhanced` look:
+  a narrow turquoise shallow band with caustics over a sandy bed, dark blue-teal depths, a wind sea from three
+  scrolled layers of a tileable ripple normal map plus two swells under drifting gust patches, sun glitter in ripple
+  facets, rippled reflections of the mirrored scene, explosions and lamps mirrored from the light field, a swash that
+  laps up and back with a thin foam line, breaker lines and wet sand, no surf at cliff feet, and rain rings. The default
+  is the earlier `classic` look; sandbox `water=enhanced` (or `look=golden`), `LiveViewOptions.water` and in game
+  `hd-water=enhanced` select the modern one (`waterPreset`, chosen before the world is built).
 - Sprites (`sprites.ts`): filtered coverage of the indexed mask for soft edges; within about one original texel of
   transparent texels HD atlas colours keep their hue but are never brighter than the original texel there (the
   upscaler's pale background fringe goes without a rim of raw palette colours). SHP shadows halve the displayed
@@ -202,6 +247,12 @@ single-sampled, so layers should copy at most once per frame and only while they
   independently of art placement and per-frame `cardPush`; all atlas pages and voxel parts share the same order.
   Physical depth remains available to atmospheric post processing, while ground decals and shadows keep their
   existing depth paths. See `docs/remaster/HD_BRIDGE.md`, "Object occlusion", for the native rule and fallback limits.
+  With the enhanced look on, a layer draws its ground art in two extra passes just before its cards
+  (`SpriteLayer.groundPasses`): decals and contact shades without depth writes, then SHP shadows and wet reflections
+  against an exact per-pixel depth of their ground plane pulled forward by less than a card's clearance
+  (`GROUND_PULL`), so coplanar decals cannot z-fight (turning shadows used to pop hour by hour) and a turned shadow
+  cannot hide the foot of a card (fence rails). Overlapping shadows darken a pixel once. The faithful look keeps the
+  single pass.
 - Voxels (`voxels.ts`, `vpl.ts`, `voxelShadow.ts`): geometry is built once per model (palette indices, normals, corner
   occlusion) and shared by every house colour; each palette gets a small lookup texture and material. Every section is
   decoded with its own normal table (`ra2-assets` `voxelNormals.ts`). Colour comes from the engine's `voxels.vpl` table

@@ -115,7 +115,10 @@ export const VOXEL_EXTRA_LIGHT = 0.1;
  * time of day, on top of the engine's fixed voxel light.
  */
 const SUN_DIFFUSE = 0.06;
-/** Cap on the optional GGX sheen (linear, before exposure); off by default (voxelSheen 0). */
+/**
+ * Cap on the optional GGX sheen (linear, before exposure); off by default (voxelSheen 0). The enhanced look raises it
+ * (voxelSheenCap) so paint and bare metal catch real glints.
+ */
 const SPECULAR_CAP = 0.05;
 /**
  * Strength of the corner occlusion (0 = none): HD-only crease darkening at close zoom, kept mild (the engine has none;
@@ -133,6 +136,7 @@ export class VoxelLightingState {
   readonly voxelExtraLight = uniform(VOXEL_EXTRA_LIGHT);
   readonly voxelOcclusion = uniform(OCCLUSION_STRENGTH);
   readonly voxelSheen = uniform(0);
+  readonly voxelSheenCap = uniform(SPECULAR_CAP);
   readonly voxelSunDiffuse = uniform(SUN_DIFFUSE);
   readonly lightDirection = uniform(derivedVoxelLight());
   loaded: LoadedTable | null = null;
@@ -229,7 +233,7 @@ class VoxelLightingModel extends PhysicalLightingModel {
       .mul(this.matp.z)
       .mul(this.state.voxelSheen)
       .mul(live);
-    (reflectedLight.directSpecular as ShaderNode).addAssign(min(specular, vec3(SPECULAR_CAP)));
+    (reflectedLight.directSpecular as ShaderNode).addAssign(min(specular, vec3(this.state.voxelSheenCap)));
   }
 
   // No sky or environment term: the table colour already carries the original's ambient level.

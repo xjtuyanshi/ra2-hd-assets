@@ -4,22 +4,36 @@
  *
  *   ?fx=TWLT070[,GUNFIRE...]  spawn these anims at the view centre (spread along a diagonal) and show them `time` later
  *   ?fx=units                 voxel tanks, SHP drones and infantry at eight facings, plus a few buildings
+ *   ?fx=squad                 a small battle line: Grizzlies and GIs (house &house) facing Rhinos (house &house2),
+ *                             a power plant and a refinery behind them (combine with anims: ?fx=squad,TWLT070,...)
+ *   &at=dx,dy;dx,dy           cell offsets from the centre for the listed anims (instead of the diagonal)
  *   &map=XMP29U2&cx=60&cy=62  map cache and centre cell (default: the map's first waypoint)
  *   &zoom=3                   CSS pixels per engine pixel
  *   &time=0.4                 seconds after the spawn to show (logic frames advance at &fps=, default 15)
  *   &hours=12                 time of day
+ *   &look=golden              the enhanced look preset (sun arc, relit art, shadows following the sun)
+ *   &water=enhanced           the modern water (default: the earlier HD water)
  *   &native=1                 pass the bridge fields (exact anim frame) instead of relying on the fallback timing
  *   &garnish=0                the original art alone, without HD light, sparks or smoke
+ *   &effects=enhanced         the enhanced effect style (LiveViewOptions.effects) instead of the faithful garnish
+ *   &stagger=0.5              spawn the listed anims this many seconds apart instead of all at once
+ *   &repeat=3                 play the list again every this many seconds (new anim identities each round)
+ *   &spread=1.6               cells between the listed anims along the diagonal
+ *   &crater=1                 emulate the engine's craters (bridge H3 smudge grid: the map's own smudges plus a
+ *                             CRATER/BURNT smudge where a Scorch=yes / Crater=yes anim reaches its middle)
  *   &house=15                 colour scheme index of the owning house
  *   ?fx=replay&replay=<url>   replay recorded snapshots ({ snapshots: LiveSnapshot[], fps }) at 1 engine px per CSS
  *                             px (the tactical view's own framing), then hold the last one `time` seconds later
  *
  * `performance.now` and `Math.random` are replaced by a controllable clock and a seeded generator before the renderer
- * exists, so the same query always renders the same picture. `window.__fx` exposes the view and a `step` helper.
+ * exists, so the same query always renders the same picture. `window.__fx` exposes the view, a `step` helper (whole
+ * logic frames) and `advance(ms)` (any presentation interval: logic frames are pushed as the clock passes them), so a
+ * capture script can record the same scenario frame by frame at any frame rate.
  */
-import { LiveView, type LiveObject, type LiveSnapshot } from '../src/live/liveView';
-import type { LiveAnim } from '../src/live/effects';
+import { LiveView, type LiveObject, type LiveSmudgeCells, type LiveSnapshot } from '../src/live/liveView';
+import { effectRow, type LiveAnim } from '../src/live/effects';
 import { ra2Screen } from '../src/ra2/cache';
+import { applyLookPreset, LOOK_PRESETS, type LookPreset } from '../src/HdRenderer';
 
 const params = new URLSearchParams(location.search);
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
@@ -48,7 +62,16 @@ const live = await LiveView.create(canvas, {
   mapBase: `/${encodeURIComponent(mapName)}`,
   libraryBase: '/_library',
   timeOfDay: Number(params.get('hours') ?? 12),
+  effects: params.get('effects') === 'enhanced' ? 'enhanced' : 'faithful',
+  water: params.get('water') === 'enhanced' ? 'enhanced' : 'classic',
 });
+// &look=golden: the enhanced look preset (src/HdRenderer.ts LOOK_PRESETS; pair it with &hours=16.5), for effect reviews
+// in the lighting they will be seen with.
+const lookPreset = params.get('look') as LookPreset | null;
+if (lookPreset && lookPreset in LOOK_PRESETS) {
+  applyLookPreset(live.hd.settings, lookPreset);
+  live.hd.applySettings();
+}
 // &garnish=0: the original art alone (no HD light, sparks or smoke), for side-by-side checks.
 if (params.get('garnish') === '0')
   (live as unknown as { effectDriver: { garnishEnabled: boolean } }).effectDriver.garnishEnabled = false;
@@ -125,7 +148,7 @@ function at(x: number, y: number): { x: number; y: number; z: number } {
 
 const houses = [
   { index: 0, colorIndex: house },
-  { index: 1, colorIndex: 3 },
+  { index: 1, colorIndex: Number(params.get('house2') ?? 3) },
   // The Neutral house of a skirmish (colour scheme LightGrey).
   { index: 2, colorIndex: 5 },
 ];
@@ -180,6 +203,51 @@ function unitSet(): LiveObject[] {
   return objects;
 }
 
+/** A small battle line for effect reviews (?fx=squad). */
+function squadSet(): LiveObject[] {
+  const objects: LiveObject[] = [];
+  const add = (kind: LiveObject['kind'], type: string, x: number, y: number, facing: number, owner: number) => {
+    const uid = nextUid++;
+    objects.push({
+      id: uid,
+      uid,
+      kind,
+      type,
+      owner,
+      ...at(cx + x, cy + y),
+      facingRaw: facing,
+      ...(kind === 'vehicle' ? { turretFacingRaw: facing } : {}),
+      health: 1,
+      isSelected: false,
+    });
+  };
+  // Facing 0 is north (screen up-right); a quarter turn per 16384.
+  const east = 16384;
+  const west = 49152;
+  for (const [x, y] of [
+    [-3.2, -1.4],
+    [-3.6, 0.4],
+    [-2.8, 2.0],
+  ])
+    add('vehicle', 'MTNK', x!, y!, east, 0);
+  for (const [x, y] of [
+    [-4.6, -0.6],
+    [-4.8, 0.9],
+    [-4.2, 1.9],
+    [-4.4, -1.8],
+  ])
+    add('infantry', 'E1', x!, y!, east, 0);
+  for (const [x, y] of [
+    [3.2, -2.0],
+    [3.6, -0.2],
+    [3.0, 1.6],
+  ])
+    add('vehicle', 'HTNK', x!, y!, west, 1);
+  add('building', 'GAPOWR', -7.5, 1, 0, 0);
+  add('building', 'NAREFN', 5.5, -5, 0, 1);
+  return objects;
+}
+
 /** Engine timing of an anim type from the effect art sidecar (pnpm hd:effects), when it exists. */
 interface FxArt {
   frames: number;
@@ -200,16 +268,108 @@ for (const [id, a] of Object.entries(effectsJson?.anims ?? {}))
   });
 
 const fxIds = (params.get('fx') ?? 'units').split(',').filter(Boolean);
-const units = fxIds.includes('units') ? unitSet() : [];
+const units = [...(fxIds.includes('units') ? unitSet() : []), ...(fxIds.includes('squad') ? squadSet() : [])];
+const spread = Number(params.get('spread') ?? 1.6);
+const offsets = params
+  .get('at')
+  ?.split(';')
+  .map((pair) => pair.split(',').map(Number) as [number, number])
+  .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
 const anims: LiveAnim[] = fxIds
-  .filter((id) => id !== 'units')
+  .filter((id) => id !== 'units' && id !== 'squad')
   .map((type, i, list) => {
-    const d = (i - (list.length - 1) / 2) * 1.6;
-    return { id: 9000 + i, uid: 9000 + i, type, ...at(cx + 0.5 + d, cy + 0.5 - d) };
+    const offset = offsets?.length ? offsets[i % offsets.length]! : null;
+    const d = (i - (list.length - 1) / 2) * spread;
+    const [x, y] = offset ? [cx + 0.5 + offset[0], cy + 0.5 + offset[1]] : [cx + 0.5 + d, cy + 0.5 - d];
+    return { id: 9000 + i, uid: 9000 + i, type, ...at(x, y) };
   });
+const stagger = Math.max(0, Number(params.get('stagger') ?? 0));
+const repeat = Math.max(0, Number(params.get('repeat') ?? 0));
 
 let frame = 100_000;
 let spawned: number | null = null;
+
+/**
+ * Anim `i` of the list as the engine list holds it now, or null (not spawned yet, or ended): its own start after the
+ * stagger, and a new identity every `repeat` seconds (the engine creates a new AnimClass for every blast).
+ */
+function listedAnim(anim: LiveAnim, i: number): LiveAnim | null {
+  if (spawned === null) return null;
+  let age = frame - spawned - Math.round(i * stagger * fps);
+  if (age < 0) return null;
+  let round = 0;
+  if (repeat > 0) {
+    const period = Math.max(1, Math.round(repeat * fps));
+    round = Math.floor(age / period);
+    age %= period;
+  }
+  const listed = benchAnim(anim, age);
+  const current = listed && round ? { ...listed, id: anim.id + round * 1000, uid: anim.uid + round * 1000 } : listed;
+  if (current) craterAt(current, age);
+  return current;
+}
+
+// --- engine craters (&crater=1): the map's own smudges plus one where each scorching anim reaches its middle ----------
+const smudgeLibrary = params.get('crater') === '1' ? await loadSmudgeLibrary() : null;
+const craterCells = new Map<number, { type: string; age: number }>();
+let smudgeRevision = 1;
+
+async function loadSmudgeLibrary(): Promise<Record<string, { width: number; height: number }>> {
+  const library = (await fetch(`/_library/${cache.manifest.theater}/library.json`)
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null)) as { smudges?: Record<string, { width: number; height: number }> } | null;
+  return library?.smudges ?? {};
+}
+
+/** The engine's crater for a scorching anim: a random CRATER (big blasts) or BURNT (small ones) 1x1 smudge. */
+function craterType(anim: LiveAnim, scale: number): string {
+  const n = 1 + (anim.uid % 6);
+  return `${scale >= 0.6 ? 'CRATER' : 'BURNT'}0${n}`;
+}
+
+function smudgeGrid(): LiveSmudgeCells | null {
+  if (!smudgeLibrary) return null;
+  const width = grid.width;
+  const height = grid.height;
+  const types: string[] = [];
+  const typeIndex = (type: string) => {
+    let i = types.indexOf(type);
+    if (i < 0) i = types.push(type) - 1;
+    return i;
+  };
+  const index = new Int16Array(width * height).fill(-1);
+  const data = new Uint8Array(width * height);
+  for (const object of cache.manifest.objects) {
+    if (object.kind !== 'smudge') continue;
+    const size = smudgeLibrary[object.type] ?? { width: 1, height: 1 };
+    for (let dy = 0; dy < size.height; dy++)
+      for (let dx = 0; dx < size.width; dx++) {
+        const x = object.x + dx;
+        const y = object.y + dy;
+        if (x < 0 || y < 0 || x >= width || y >= height) continue;
+        index[y * width + x] = typeIndex(object.type);
+        data[y * width + x] = dy * size.width + dx;
+      }
+  }
+  for (const [cell, crater] of craterCells) {
+    index[cell] = typeIndex(crater.type);
+    data[cell] = 0;
+  }
+  return { originX: 0, originY: 0, width, height, index, data, types, revision: smudgeRevision };
+}
+
+/** Record the crater of a scorching anim once it reaches its middle (`age` logic frames after its start). */
+function craterAt(anim: LiveAnim, age: number): void {
+  if (!smudgeLibrary) return;
+  const row = effectRow(anim.type);
+  if (!row.scorch || row.fx !== 'explosion') return;
+  const art = fxArt.get(anim.type);
+  if (age < Math.floor(((art?.frames ?? 20) * (art?.rate ?? 2)) / 2)) return;
+  const cell = Math.floor(anim.y / 256) * grid.width + Math.floor(anim.x / 256);
+  if (craterCells.has(cell)) return;
+  craterCells.set(cell, { type: craterType(anim, row.s), age });
+  smudgeRevision++;
+}
 
 /** The anim as the engine list would hold it `age` logic frames after its creation, or null once it has ended. */
 function benchAnim(anim: LiveAnim, age: number): LiveAnim | null {
@@ -225,17 +385,18 @@ function benchAnim(anim: LiveAnim, age: number): LiveAnim | null {
 }
 
 function snapshot(): LiveSnapshot {
-  const age = spawned === null ? -1 : frame - spawned;
+  const listed = anims.map((a, i) => listedAnim(a, i)).filter((a): a is LiveAnim => !!a);
   return {
     frame,
     view,
     houses,
     objects: units,
     effects: {
-      anims: age < 0 ? [] : anims.map((a) => benchAnim(a, age)).filter((a): a is LiveAnim => !!a),
+      anims: listed,
       bullets: [],
       particleSystems: [],
     },
+    ...(smudgeLibrary ? { smudges: smudgeGrid() } : {}),
   };
 }
 
@@ -257,6 +418,19 @@ for (let i = 0; i < Number(params.get('warm') ?? 120); i++) {
 }
 spawned = frame + 1;
 step(1 / fps + time);
+/** Renderer clock of the newest logic frame. */
+let logicClock = clock;
+
+/** Advance the presentation clock by `ms`, pushing every logic frame it passes, and render once (video capture). */
+function advance(ms: number): void {
+  clock += ms;
+  while (clock - logicClock >= 1000 / fps - 1e-6) {
+    logicClock += 1000 / fps;
+    frame++;
+    live.push(snapshot(), logicClock);
+  }
+  live.render(clock);
+}
 let presented = 0;
 function loop(): void {
   live.render(clock);
@@ -265,4 +439,4 @@ function loop(): void {
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
-(window as unknown as { __fx: unknown }).__fx = { live, step, snapshot, ready: true };
+(window as unknown as { __fx: unknown }).__fx = { live, step, advance, snapshot, ready: true };

@@ -81,6 +81,12 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    art's centre, a few sparks, a small light in the renderer's light field and, for big smoky blasts, some smoke, capped
    at the native art's width and 1.2x its lifetime; looping fires (FIRE01..03) get no HD flame, their art is the whole
    flame, only a small flickering light. The renderer's own explosion events (sandbox) keep the full procedural blast.
+   `LiveViewOptions.effects: 'enhanced'` (or `LiveView.setEffectStyle`; default `'faithful'`) plays the remaster's
+   modern effects around the same native art instead (`ENHANCED` in `src/effects.ts`): a real flash in the light field
+   that lights ground, buildings and units, a bloomed glow halo, hot sparks and tumbling debris, rolling black-orange
+   smoke lit by the sun and the fire below, heat shimmer, a dust ring and, for anims that leave a crater, the crater
+   glowing hot for about two seconds. The native frames, their timing and size, and the persistent crater (the engine's
+   own smudge) stay as they are.
    Smoke particle systems (damaged and burning units and buildings, refinery chimneys) are drawn with their
    ParticleType's original SHP frames: the view runs the system's particles itself from its rules (spawn rate, cap,
    radius, velocity, deceleration, life; `SMOKE_SYSTEMS` in the table) with rise and drift measured on the engine's own
@@ -181,7 +187,7 @@ under `gameres/tools/diffusion/`) is the opt-in `remat` step of `hd:prepare` (ad
 
 Start a development server whose game root holds a skirmish setup (a scratch copy of the installation with an edited
 `RA2MD.INI` `[Skirmish]` section, as described in `scripts/remaster/perf/README.md`), then open
-`/?start-page=battle&hd=1`. By default the HD lighting follows the map's own `[Lighting]` (day, dusk or night maps, see `pnpm hd:lights`); `hd-time=<hours>` and `hd-weather=rain` override it; `hd-rect=x,y,w,h`
+`/?start-page=battle&hd=1`. By default the HD lighting follows the map's own `[Lighting]` (day, dusk or night maps, see `pnpm hd:lights`); `hd-time=<hours>` and `hd-weather=rain` override it; `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=enhanced` the modern water; `hd-rect=x,y,w,h`
 overrides the tactical rectangle (default: the frame minus YR's 168 px sidebar and 32 px command bar).
 
 ## Bridge fields

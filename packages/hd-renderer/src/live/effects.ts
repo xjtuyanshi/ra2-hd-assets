@@ -25,6 +25,9 @@ import { EFFECT_TABLE, SMOKE_SYSTEMS, type EffectTableRow, type SmokeSystemRow }
  * anim frame the fallback frame follows the engine's stage rule from the anim's first appearance.
  */
 
+/** How much HD adds around the engine's own effects (LiveEffectsDriver.style). */
+export type EffectStyle = 'faithful' | 'enhanced';
+
 /** Anim data the live view needs (lepton coordinates, stable identity); the optional fields are the bridge's H1. */
 export interface LiveAnim {
   id: number;
@@ -264,6 +267,13 @@ export class LiveEffectsDriver {
   readonly unknownTypes = new Set<string>();
   /** HD garnish on top of the native art (off = the original effects only, for comparisons). */
   garnishEnabled = true;
+  /**
+   * 'faithful' (default): the garnish stays inside the native art's footprint and lifetime. 'enhanced': the remaster's
+   * modern effects around it (EffectsLayer ENHANCED: a real flash of light, glow halo and bloom, rolling lit smoke,
+   * sparks and debris, heat shimmer, dust ring, a cooling hot crater); the native art, its timing and size stay the
+   * same, and the persistent crater stays the engine's own smudge.
+   */
+  style: EffectStyle = 'faithful';
 
   constructor(
     private readonly effects: EffectsLayer,
@@ -531,15 +541,20 @@ export class LiveEffectsDriver {
     // game's own selection boxes, health bars and cursor, which do not shake.
     if (row.fx === 'none' || row.fx === 'bolt') return;
     const seconds = row.life / Math.max(1, this.logicFps);
+    const enhanced = this.style === 'enhanced';
     const options: GarnishOptions = {
       maxSize: this.widthOf(tracked.anim.type),
       maxLife: Math.max(0.05, 1.2 * seconds),
       light: row.light ?? null,
       // The engine leaves its own smudge (bridge H3); HD never paints a scorch on its own.
       scorch: false,
-      // No HD smoke: the native art's own late frames are the blast's smoke (fading by stage like the engine's), and HD
-      // puffs on top drew dense grey columns where frozen live pairs show the original's faint haze.
+      // No HD smoke in the faithful style: the native art's own late frames are the blast's smoke (fading by stage like
+      // the engine's), and HD puffs on top drew dense grey columns where frozen live pairs show the original's faint
+      // haze. The enhanced style adds its own rolling smoke around the art on purpose.
       smoke: 0,
+      enhanced,
+      // Enhanced: the engine's crater (Scorch=yes / Crater=yes art) glows hot for a moment; the mark itself stays native.
+      hotCrater: enhanced && row.scorch === 1,
     };
     if (row.fx === 'explosion') this.effects.explode(now, at, row.s, wind, options);
     else if (row.fx === 'muzzle') this.effects.muzzleFlash(now, at, row.s, options);

@@ -54,7 +54,7 @@ import type { AtmosphereProfile, RenderEvent, RenderState } from './contract';
 import { EffectsLayer } from './effects';
 import { EmitterLayer, type Emitter } from './emitters';
 import { LightField, type DynamicLight } from './lightField';
-import { Lighting, noonFlatLuminance } from './lighting';
+import { Lighting, clearLightAt, noonFlatLuminance } from './lighting';
 import { Mist, MIST_CAP } from './mist';
 import { ObjectLayer } from './objects';
 import { faithfulToneMap } from './post';
@@ -63,8 +63,15 @@ import type { ShaderNode } from './tsl';
 import { buildWater, type WaterUniforms } from './water';
 import { buildRain, type RainSystem } from './weather';
 import { VOXEL_FILL } from './ra2/voxels';
-import { groundFromHeights, setShadowGround } from './ra2/voxelShadow';
+import { groundFromHeights, setShadowGround, shadowShear } from './ra2/voxelShadow';
 import { voxelLightingFor } from './ra2/vpl';
+import {
+  ART_LIGHT_ELEVATION,
+  ART_REFERENCE_HOUR,
+  ART_SKY_SHARE,
+  shadowTransform,
+  spriteLookFor,
+} from './ra2/spriteLook';
 import type { HdWorld } from './ra2/world';
 import { IsoCamera, LEVEL_HEIGHT, cellToWorld } from './world';
 
@@ -100,7 +107,90 @@ export interface HdSettings {
    * the voxel lighting against captures of the original.
    */
   debugView: 'none' | 'overbright' | 'voxel-xy' | 'voxel-z';
+  /**
+   * Enhanced look on original art (ra2/spriteLook.ts), opt-in: with every value 0 the frame is the faithful one, bit
+   * for bit. relight: the sun relights building and tree art as a delta on its baked shading (needs the map's sprite
+   * material atlas); specular: sun highlights on facades and roofs; glass: sky reflection and glints on window panes;
+   * occlusion: baked occlusion and soft ground
+   * contact under buildings; shadowFollow: SHP shadows turn and stretch with the sun; shadowSoftness: their penumbra
+   * grows with distance; wetReflections: buildings and trees mirrored on wet paving.
+   */
+  relight: number;
+  specular: number;
+  /** Window glass of the material atlas: sky reflection and sun glints (0 = the art's panes as drawn). */
+  glass: number;
+  occlusion: number;
+  shadowFollow: number;
+  shadowSoftness: number;
+  wetReflections: number;
+  /**
+   * Directional contrast of the relighting: 1 keeps the scene's own sky-to-sun ratio; above 1 the sun dominates the
+   * sky (sunlit faces brighter and warmer, shaded faces darker and cooler), as in low evening light.
+   */
+  lightContrast: number;
+  /** 'fixed': the classic light azimuth at every hour; 'arc': the sun travels east to west (Lighting.sunArc). */
+  sunPath: 'fixed' | 'arc';
+  /** 0: daylight keeps noon's exposure (faithful); 1: flat ground keeps noon's brightness at every daylight hour. */
+  adaptExposure: number;
+  /** Voxel sheen strength, sheen cap and crease occlusion (ra2/vpl.ts); null leaves the voxel material as it is. */
+  voxelSheen: number | null;
+  voxelSheenCap: number | null;
+  voxelOcclusion: number | null;
 }
+
+/** Named looks: the faithful default and the enhanced "golden afternoon" (settings plus a suggested hour). */
+export type LookPreset = 'faithful' | 'golden';
+
+export const LOOK_PRESETS: Record<LookPreset, { settings: Partial<HdSettings>; hour?: number }> = {
+  faithful: {
+    settings: {
+      relight: 0,
+      specular: 0,
+      glass: 0,
+      occlusion: 0,
+      shadowFollow: 0,
+      shadowSoftness: 0,
+      wetReflections: 0,
+      lightContrast: 1,
+      sunPath: 'fixed',
+      adaptExposure: 0,
+      bloom: 0.55,
+      voxelSheen: 0,
+      voxelSheenCap: 0.05,
+      voxelOcclusion: 0.15,
+    },
+  },
+  golden: {
+    hour: 16.5,
+    settings: {
+      relight: 1,
+      specular: 1,
+      glass: 1,
+      occlusion: 1,
+      shadowFollow: 1,
+      shadowSoftness: 1,
+      wetReflections: 1,
+      lightContrast: 1.5,
+      sunPath: 'arc',
+      adaptExposure: 0.85,
+      bloom: 0.5,
+      voxelSheen: 1,
+      voxelSheenCap: 0.35,
+      voxelOcclusion: 0.35,
+    },
+  },
+};
+
+/** Apply a named look to renderer settings (call applySettings() afterwards); returns its suggested hour. */
+export function applyLookPreset(settings: HdSettings, preset: LookPreset): number | undefined {
+  Object.assign(settings, LOOK_PRESETS[preset].settings);
+  return LOOK_PRESETS[preset].hour;
+}
+
+/** Shadows of the sun arc never stretch beyond this factor of the art's own length (readability). */
+const MAX_SHADOW_STRETCH = 2;
+/** Exposure adaptation never lifts the frame by more than this factor. */
+const MAX_ADAPT = 2.2;
 
 const TONE_MAPPERS: Record<Exclude<ToneMapper, 'faithful'>, ToneMapping> = {
   agx: AgXToneMapping,
@@ -205,6 +295,19 @@ export class HdRenderer {
     // Mild: stronger RCAS (toward 0) turns upscaled grass and gravel crunchy at zoom 1.6.
     sharpness: 1,
     debugView: 'none',
+    relight: 0,
+    specular: 0,
+    glass: 0,
+    occlusion: 0,
+    shadowFollow: 0,
+    shadowSoftness: 0,
+    wetReflections: 0,
+    lightContrast: 1,
+    sunPath: 'fixed',
+    adaptExposure: 0,
+    voxelSheen: null,
+    voxelSheenCap: null,
+    voxelOcclusion: null,
   };
   /** Night presentation: map lights, HD lamps, windows, mist, night level (changeable at runtime). */
   readonly atmosphere: AtmosphereSettings = { ...DEFAULT_ATMOSPHERE_SETTINGS };
@@ -524,6 +627,11 @@ export class HdRenderer {
     // frames and voxels draw engine-style flattened shadows. Skipping the empty shadow map saves a full depth pass
     // and the per-pixel shadow lookups of every receiver.
     this.lighting.sun.castShadow = this.settings.shadows && !this.world;
+    this.lighting.sunArc = this.settings.sunPath === 'arc';
+    const voxels = voxelLightingFor(this.nodes);
+    if (this.settings.voxelSheen !== null) voxels.voxelSheen.value = this.settings.voxelSheen;
+    if (this.settings.voxelSheenCap !== null) voxels.voxelSheenCap.value = this.settings.voxelSheenCap;
+    if (this.settings.voxelOcclusion !== null) voxels.voxelOcclusion.value = this.settings.voxelOcclusion;
     this.buildPipeline();
   }
 
@@ -613,6 +721,15 @@ export class HdRenderer {
         k * (1 / noon.g + (1 / reference - 1 / noon.g) * nightGrade),
         k * (1 / noon.b + (1 / reference - 1 / noon.b) * nightGrade),
       );
+      // Enhanced look: lift late and early daylight towards noon's brightness (the colour of the light stays).
+      const adapt = this.settings.adaptExposure * (1 - nightGrade);
+      if (adapt > 0) {
+        const flat = this.lighting.flatIrradianceColor(this.scratchColor);
+        const now = 0.2126 * flat.r + 0.7152 * flat.g + 0.0722 * flat.b;
+        const noonLum = 0.2126 * noon.r + 0.7152 * noon.g + 0.0722 * noon.b;
+        const lift = Math.min(MAX_ADAPT, Math.max(1, noonLum / Math.max(1e-6, now)));
+        exposure.multiplyScalar(1 + (lift - 1) * adapt);
+      }
     } else {
       exposure.setScalar(this.settings.exposure * light.exposure);
     }
@@ -700,6 +817,7 @@ export class HdRenderer {
       // level as the terrain around it. The night keeps the level it was tuned with (irradiance / reference).
       const spriteScale = 1 / Math.PI + (1 / reference - 1 / Math.PI) * nightGrade;
       this.lighting.flatIrradianceColor(sprites.light.value).multiplyScalar(spriteScale);
+      this.updateSpriteLook(spriteScale, wet.value);
     }
     // Emissive light is not divided by pi like diffuse, so fill = irradiance * k / pi lands at k x albedo at noon.
     this.lighting
@@ -722,6 +840,95 @@ export class HdRenderer {
     this.pipeline!.render();
     this.frames++;
     if (this.trackTimestamp && this.frames % 2 === 0) void this.collectGpuTimes();
+  }
+
+  private readonly scratchColor = new Color();
+  private readonly referenceSun = new Color();
+  private readonly referenceSky = new Color();
+
+  /** Enhanced sprite look uniforms (ra2/spriteLook.ts) from the settings and the current sun and sky. */
+  private updateSpriteLook(spriteScale: number, wetness: number): void {
+    const s = this.settings;
+    const look = spriteLookFor(this.nodes);
+    const on =
+      s.relight > 0 ||
+      s.specular > 0 ||
+      s.glass > 0 ||
+      s.occlusion > 0 ||
+      s.shadowFollow > 0 ||
+      s.shadowSoftness > 0 ||
+      s.wetReflections > 0;
+    look.enabled.value = on ? 1 : 0;
+    for (const pass of look.groundPasses) pass.visible = on;
+    if (!on) {
+      this.restoreVoxelShear();
+      return;
+    }
+    const state = this.lighting.state;
+    const day = 1 - state.night;
+    const sun = this.lighting.sun;
+    const hemi = this.lighting.hemi;
+    const lum = (c: Color) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    // The art's light stands for the clear sky of the reference hour; weights are normalised to its sun, with the
+    // art's own sky share (see spriteLook.ts relightFactor).
+    clearLightAt(ART_REFERENCE_HOUR, this.referenceSun, this.referenceSky);
+    const sunNorm = 1 / Math.max(1e-6, lum(this.referenceSun));
+    const skyNorm = ART_SKY_SHARE / Math.max(1e-6, lum(this.referenceSky));
+    look.artSunWeight.value.copy(this.referenceSun).multiplyScalar(sunNorm);
+    look.artSkyWeight.value.copy(this.referenceSky).multiplyScalar(skyNorm);
+    look.sunWeight.value.copy(sun.color).multiplyScalar(sun.intensity * sunNorm);
+    look.skyWeight.value.copy(hemi.color).multiplyScalar((hemi.intensity * skyNorm) / Math.max(0.2, s.lightContrast));
+    look.sunLight.value.copy(sun.color).multiplyScalar(sun.intensity * spriteScale * Math.PI);
+    look.skyLight.value.copy(hemi.color).multiplyScalar(hemi.intensity * spriteScale);
+    look.skyHorizon.value.copy(state.skyHorizon);
+    look.skyZenith.value.copy(state.skyZenith);
+    // The sun the sprites see: the arc's, or the art's own azimuth at the current elevation.
+    const dir = look.sunDirection.value;
+    if (this.lighting.sunArc) dir.copy(state.sunDirection);
+    else {
+      const e = Math.asin(Math.min(1, Math.max(-1, state.sunDirection.y)));
+      dir.set(0, Math.sin(e), Math.cos(e));
+    }
+    look.relight.value = s.relight * day;
+    look.specular.value = s.specular;
+    look.glass.value = s.glass;
+    look.occlusion.value = s.occlusion;
+    look.reflections.value = s.wetReflections;
+    look.wetness.value = wetness;
+    // Shadow length from the key elevation (below the lighting's 28 degree floor: golden hours cast long shadows),
+    // relative to the art's own, capped for readability.
+    const elevation = (Math.max(12, state.keyElevation) * Math.PI) / 180;
+    const stretch = Math.min(
+      MAX_SHADOW_STRETCH,
+      Math.max(0.75, Math.tan((ART_LIGHT_ELEVATION * Math.PI) / 180) / Math.tan(elevation)),
+    );
+    const follow = s.shadowFollow * day;
+    look.shadowFollow.value = follow;
+    look.shadowSoftness.value = s.shadowSoftness * day * Math.max(1, stretch);
+    shadowTransform(dir, stretch, follow, look.shadowMatrix.value);
+    // Voxel units' engine-style shadows (voxelShadow.ts) turn and stretch by the same amount, about their own
+    // direction, so vehicles agree with the buildings around them.
+    if (follow > 0) {
+      const base = (this.voxelShearBase ??= { x: shadowShear.x, z: shadowShear.z });
+      const m = look.shadowMatrix.value;
+      // M = R(turn) x (stretch along the art's direction): its determinant is the stretch.
+      const k = Math.abs(m.x * m.w - m.z * m.y);
+      const turn = Math.atan2(m.y, m.x);
+      const c = Math.cos(turn) * k;
+      const sn = Math.sin(turn) * k;
+      shadowShear.x = c * base.x - sn * base.z;
+      shadowShear.z = sn * base.x + c * base.z;
+    } else this.restoreVoxelShear();
+  }
+
+  /** Shear of voxel shadows before the enhanced look turned them (review tooling may have set its own). */
+  private voxelShearBase: { x: number; z: number } | null = null;
+
+  private restoreVoxelShear(): void {
+    if (!this.voxelShearBase) return;
+    shadowShear.x = this.voxelShearBase.x;
+    shadowShear.z = this.voxelShearBase.z;
+    this.voxelShearBase = null;
   }
 
   /** Fires and explosions also show as glows and wet reflections, mirrored from the light field. */

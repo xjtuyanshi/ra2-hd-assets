@@ -226,6 +226,8 @@ export function profileKeys(profile: AtmosphereProfile): LightKey[] {
 
 export interface LightingState {
   sunDirection: Vector3;
+  /** Key elevation of the sun in degrees before the 28 degree readability floor (shadow length of the sun arc). */
+  keyElevation: number;
   sunColor: Color;
   skyZenith: Color;
   skyHorizon: Color;
@@ -239,8 +241,15 @@ export class Lighting {
   readonly root = new Object3D();
   readonly sun: DirectionalLight;
   readonly hemi: HemisphereLight;
+  /**
+   * Sun path. false (default): the classic fixed azimuth from screen upper-left, whatever the hour. true: the azimuth
+   * follows the hour along sunArcDirection (east in the morning, over the camera side at noon, west in the evening),
+   * for the enhanced look's moving highlights and shadows.
+   */
+  sunArc = false;
   readonly state: LightingState = {
     sunDirection: new Vector3(),
+    keyElevation: 55,
     sunColor: new Color(),
     skyZenith: new Color(),
     skyHorizon: new Color(),
@@ -358,16 +367,23 @@ export class Lighting {
     const t = (h - a.hour) / (b.hour - a.hour);
 
     // Shadows longer than ~2x object height hurt RTS readability, so the sun never drops below 28°.
-    const elevation = (Math.max(28, lerp(a.elevation, b.elevation, t)) * Math.PI) / 180;
+    this.state.keyElevation = lerp(a.elevation, b.elevation, t);
+    const elevation = (Math.max(28, this.state.keyElevation) * Math.PI) / 180;
     // Screen upper-left in world space is -x (see IsoCamera): the classic RA2 light direction.
     const azimuth = Math.PI;
-    const dir = this.state.sunDirection
-      .set(
-        Math.cos(azimuth) * Math.cos(elevation),
-        Math.sin(elevation),
-        Math.sin(azimuth) * Math.cos(elevation) - 0.35 * Math.cos(elevation),
-      )
-      .normalize();
+    const dir = this.state.sunDirection;
+    if (this.sunArc) {
+      const night = Math.min(1, Math.max(0, lerp(a.night, b.night, t)));
+      sunArcDirection(h, night, elevation, dir);
+    } else {
+      dir
+        .set(
+          Math.cos(azimuth) * Math.cos(elevation),
+          Math.sin(elevation),
+          Math.sin(azimuth) * Math.cos(elevation) - 0.35 * Math.cos(elevation),
+        )
+        .normalize();
+    }
     this.sun.position.copy(this.sun.target.position).addScaledVector(dir, 80);
     if (this.profile) {
       this.updateProfiled(a, b, t, overcast);
@@ -449,4 +465,40 @@ export class Lighting {
 
 function lerp(x: number, y: number, t: number): number {
   return x + (y - x) * t;
+}
+
+/**
+ * Sun direction of the arc path at `hour` (world, unit, towards the sun) for an elevation in radians. The azimuth runs
+ * from screen right (world +x-z, 6:00) over the camera side (+x+z, 12:00) to screen left (-x+z, 18:00), so the visible
+ * walls are lit by day and the art's own light direction (from +z, see ra2/spriteLook.ts ART_LIGHT) is passed at 15:00.
+ * Night hours (by the key's night weight) return to that art direction, which the night presentation was tuned with.
+ */
+export function sunArcDirection(hour: number, night: number, elevation: number, out: Vector3): Vector3 {
+  const day = Math.min(1, Math.max(0, (hour - 6) / 12));
+  const alpha = lerp(Math.PI * day, 0.75 * Math.PI, night);
+  const c = Math.cos(alpha) * Math.SQRT1_2;
+  const s = Math.sin(alpha) * Math.SQRT1_2;
+  // cos(alpha) * right (1, 0, -1)/sqrt2 + sin(alpha) * towards camera (1, 0, 1)/sqrt2.
+  const hx = c + s;
+  const hz = s - c;
+  return out.set(hx * Math.cos(elevation), Math.sin(elevation), hz * Math.cos(elevation)).normalize();
+}
+
+/** Clear-sky sun and sky irradiance (colour x intensity, linear) of the day keys at `hour`, without any state. */
+export function clearLightAt(hour: number, sun = new Color(), sky = new Color()): { sun: Color; sky: Color } {
+  const h = ((hour % 24) + 24) % 24;
+  let i = 0;
+  while (i < KEYS.length - 2 && KEYS[i + 1]!.hour <= h) i++;
+  const a = KEYS[i]!;
+  const b = KEYS[i + 1]!;
+  const t = (h - a.hour) / (b.hour - a.hour);
+  sun
+    .copy(a.sun)
+    .lerp(b.sun, t)
+    .multiplyScalar(lerp(a.sunIntensity, b.sunIntensity, t));
+  sky
+    .copy(a.hemiSky)
+    .lerp(b.hemiSky, t)
+    .multiplyScalar(lerp(a.hemiIntensity, b.hemiIntensity, t));
+  return { sun, sky };
 }

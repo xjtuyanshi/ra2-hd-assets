@@ -279,6 +279,124 @@ Without overrides, cache/models resolve to the main checkout's `gameres/hd-cache
 not this worktree. An explicit `--cache` or `--models` path under another checkout's `gameres/` selects that checkout
 for the omitted companion path; arbitrary external paths retain the main-checkout default for the companion.
 
+## Supersampled terrain re-detail (Python, experimental)
+
+`rematerialize.py` diffuses the Real-ESRGAN 2x terrain at 2x, and on XMP29U2 its output is smoother than the original
+art: Real-ESRGAN removes the tiles' texture first, and SDXL cannot draw features below its 8 px latent cell. Measured on
+a 1024 px test tile, lawn texture at the 2-8 px scale dropped to about a third of the original's.
+`python/redetail_terrain.py` instead diffuses at 4x of the scale-1 composite (`terrain-map.png`): Real-ESRGAN 4x for
+clean markings and kerbs, plus the original tiles' own high-pass texture re-added on flat ground (not near strong
+edges), so the model turns it into grass blades, grain and cracks. The result is area-averaged back to the base scale
+in linear light and colour-matched to the original in CIE Lab like `hd:materials` (sigma 2 source pixels, 0.5 on thin
+structures). Water-mask pixels and alpha come from the base image; with `--region` (base-scale pixels) the result is
+pasted into a full-size copy of the base with a raised-cosine feather over `--margin`. It never modifies the manifest
+or `materials.json`; point `materials.json` at the output after review. Run it under the shared GPU lock when other
+local jobs use the GPU; completed tiles resume from `--work`.
+
+```bash
+"$RA2_MAIN_CHECKOUT/gameres/tools/diffusion/.venv/bin/python" -B packages/ra2-assets/python/redetail_terrain.py \
+  --map XMP29U2 --region 1500,670,3360,2100 --margin 256 --work "$WORK" --output "$WORK/terrain-map@2x-final.png"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_redetail_terrain.py'
+```
+
+Defaults: `--gen-scale 4 --hybrid-alpha 1 --hybrid-sigma 4 --strength 0.6 --control 0.6 --guidance 6.5 --steps 30
+--seed 7 --tile 1024 --overlap 192 --blend 96 --color-sigma 2 --structure-color-sigma 0.5` with `rematerialize.py`'s
+prompts. `--blend` limits each tile cross-fade to a band centred in the overlap, so the edge-anchored last row and
+column do not average two generations over most of a tile. Omit `--region` for the whole map (about 160 tiles of
+roughly 37 s on an M5 Pro for XMP29U2). `--dry-run` replaces diffusion with identity for pipeline checks; post-processing
+options (`--blend`, colour sigmas, `--margin`) reuse the cached tiles, so they can be changed without the GPU.
+
+## Local sprite re-detailing (Python, experimental)
+
+`python/redetail_sprites.py` repaints selected body frames of a map cache's HD sprite atlas (`hd:sprites` output) with
+the same local SDXL + tile ControlNet, so buildings and trees gain material detail instead of only losing aliasing.
+Frames are packed per category into sheets (overlay types each get their own), upscaled 4x with the local Real-ESRGAN
+binary, composited on flat grey and repainted at 4x; `compose` then downsamples to the atlas's 2x, replaces low
+frequencies with the original palette art in CIE Lab (mask-normalised Gaussian, so the background never leaks in),
+copies the base HD atlas's alpha bit for bit (silhouettes cannot change), re-encodes house-paint pixels on the grey ramp
+the renderer inverts (the remap mask stays valid) and leaves shadow frames untouched. It never modifies the cache or
+its manifest: `--out` writes a separate atlas with the same size and layout, and `metrics.json` records per frame the
+silhouette IoU, content shift (phase correlation), edge correlation, low-frequency colour delta E and texture gain
+against the current HD atlas.
+
+```bash
+PY="$RA2_MAIN_CHECKOUT/gameres/tools/diffusion/.venv/bin/python"
+# GPU stage (hold the machine's GPU lock if several jobs share it); sheets are cached under --work.
+"$PY" -B packages/ra2-assets/python/redetail_sprites.py generate --map XMP29U2 --work "$WORK" \
+  --region-box 630,260,2310,1310 --describe "$WORK/describe.json" --strength 0.8 --control 0.9 --guidance 7
+# CPU stage: colour/alpha restore, atlas copy and metrics.
+"$PY" -B packages/ra2-assets/python/redetail_sprites.py compose --map XMP29U2 --work "$WORK" \
+  --region-box 630,260,2310,1310 --sigma-l 3 --sigma-ab 2.5 --detail 1.3 --out "$WORK/sprites@2x-final.png"
+```
+
+`--region-box` selects the objects drawn inside a `preview.png` pixel box (`--sprites id[:frames]` selects explicitly,
+`--frames all` or an index list adds frames), `--describe` maps sprite ids (or `<category>:*`) to short prompt
+descriptions, `--override prefix=sigma_l,sigma_ab,detail` tunes the colour restore per sprite-id prefix, and
+`--upscaler lanczos --strength 0` is a CPU-only dry run. Work directories hold derived art and belong outside Git.
+
+## Hybrid per-object redraw (Python, experimental)
+
+`python/hybrid_redraw.py` lets an external image-editing model redraw one object frame at a time (buildings, trees,
+fence overlays), then decides automatically whether the redraw may replace the faithful frame. `prepare` writes each
+frame's model input (Real-ESRGAN 4x on flat grey, small objects enlarged); `run` calls the image model through the
+Codex CLI (`--codex`, one directory per attempt with prompt, output and log), registers the output to the input
+(axis-aligned scale + translation, Gauss-Newton on blurred luminance), resamples it in linear light, copies the HD
+atlas's alpha bit for bit, locks low-frequency Lab colour to the original art and re-encodes house paint. The checks
+compare against the original art: edge-structure correlation (global and per tile), surface-decoration retention,
+facade-grid projection profiles (both isometric floor directions and the vertical), internal structural edges, low-
+frequency colour delta E, content outside the silhouette and model rescaling. A failing frame is redrawn with a prompt
+that names the failure; after `--max-attempts` it is flagged and keeps the faithful frame. With `--damaged`, frame 1 of
+each accepted building is redrawn with the accepted frame 0 as a material reference and checked for consistency with
+it. `compose` writes a copy of the faithful atlas with accepted frames replaced; `decisions.json` records every attempt.
+
+```bash
+PY=python3  # numpy + Pillow; the diffusion venv works as well
+"$PY" -B packages/ra2-assets/python/hybrid_redraw.py prepare --map XMP29U2 --work "$WORK" \
+  --region-box 630,260,2310,1310 --describe "$WORK/describe.json" --damaged --lock "$GPU_LOCK"
+"$PY" -B packages/ra2-assets/python/hybrid_redraw.py run --map XMP29U2 --work "$WORK" \
+  --region-box 630,260,2310,1310 --describe "$WORK/describe.json" --damaged --faithful "$FAITHFUL_ATLAS" \
+  --codex "$CODEX_BIN" --parallel 4 --max-attempts 4
+"$PY" -B packages/ra2-assets/python/hybrid_redraw.py compose --map XMP29U2 --work "$WORK" \
+  --region-box 630,260,2310,1310 --describe "$WORK/describe.json" --damaged --faithful "$FAITHFUL_ATLAS" \
+  --out "$WORK/sprites@2x-hybrid.png"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_hybrid_redraw.py'
+```
+
+`--describe` maps sprite ids to `{subject, colours[, noun, subject_damaged]}` (sprites without an entry are skipped),
+`--attempts tree=1` limits attempts per category, `--thresholds` overrides the calibrated `DEFAULT_THRESHOLDS`, and
+`--dry-run` re-evaluates existing attempts without new model calls. The thresholds were calibrated on one map region
+(XMP29U2 city buildings); treat them as a starting point elsewhere. Work directories hold derived art and model
+outputs and belong outside Git.
+
+`--style-ref <image>` adds a style reference: an image covering `--region-box` exactly at 1x (for example an approved
+concept painting of that region, aligned to the preview crop). Each frame gets the crop of its cleanest placement in the
+reference as `style_reference.png`, and the prompt asks for that rendering style (materials, recessed windows, bevelled
+cornices, light and shade) while the structure rules stay; `--style-lock-l <0..1>` takes that share of the colour
+lock's low-frequency lightness target from the reference where it shows the object cleanly (hue and saturation stay
+the original's). Because lightness may now move, loosen `lf_dE_mean` / `lf_dE_p95` with `--thresholds` accordingly.
+
+## Sprite material atlas (Python, experimental)
+
+`python/sprite_normals.py` writes the material atlas the renderer's opt-in enhanced look relights sprites with
+(`packages/hd-renderer` README, Enhanced look): `sprites@2x-normals.png` with the HD atlas's layout (RG world normal
+x/z, B specular class, A occlusion with 0 = no data) and `normals.json`. Buildings are classified into roofs, +z walls
+and +x walls from oriented line energies, a foundation-corner prior and a guided filter over the baked shading; trees
+get dome normals. With `--assist`, camera-space normal renders from an image model (one per frame, named
+`<sprite id, ':' as '_'>#<frame>.png` at the frame's 2x size, standard normal-map colours) replace the classification
+where they pass the checks against the original art: best-shift silhouette IoU, the art's baked light (+z walls must be
+brighter than +x walls), and the foundation-corner side prior; failures are flagged in `normals.json` and keep the
+classification. Glass (specular class 1) is found pane by pane: dark or blue wall pixels that are not warm-coloured
+(plus the night-window extractor's panes) form candidate components after closing small holes and growing along smooth
+shading; a component is a pane (glass all over, no hollow centre) when it is thin (`PANE_MAX_THICKNESS`), clearly
+darker than the frame around it and not among roof pixels, so arcades, shop fronts, rooftop units and stains are not
+glass.
+
+```bash
+python3 -B packages/ra2-assets/python/sprite_normals.py --cache gameres/hd-cache/XMP29U2 --assist "$WORK/assist" \
+  --debug-dir "$WORK/normals-debug"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_sprite_normals.py'
+```
+
 ## Output (`<out>/<mapId>/`)
 
 - `manifest.json`: grid (exists/height/tile per cell), tile entries with atlas rects and anchors, sprites, objects,

@@ -9,6 +9,8 @@ import { SpriteLayer } from '../src/ra2/sprites';
 import { loadRa2World } from '../src/ra2/world';
 import { voxelLightingFor } from '../src/ra2/vpl';
 import { voxelShape } from '../src/ra2/voxels';
+import { addLookGui, applyLookParams } from './look';
+import { waterPreset } from '../src/ra2/waterLook';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
 const hud = document.querySelector<HTMLElement>('#hud')!;
@@ -32,6 +34,10 @@ if (params.has('vshape')) {
   if (Number.isFinite(relax)) shape.cornerRelax = relax!;
   if (Number.isFinite(blend)) shape.normalBlend = blend!;
 }
+// ?water=enhanced draws the remaster's modern water (src/ra2/waterLook.ts), as ?look=golden does unless ?water= says
+// otherwise; the default is the earlier HD water ('classic').
+const water = params.get('water') ?? (params.get('look') === 'golden' ? 'enhanced' : 'classic');
+waterPreset.style = water === 'enhanced' ? 'enhanced' : 'classic';
 const world = mapName
   ? await loadRa2World(`/${encodeURIComponent(mapName)}`, {
       voxelShape: shape,
@@ -137,6 +143,8 @@ if (world && params.get('ml') === '0') {
   world.cache?.mapLight?.setWeight(0);
   world.mapLight = undefined;
 }
+// Enhanced look (src/ra2/spriteLook.ts): ?look=golden and single overrides, see sandbox/look.ts.
+applyLookParams(hd, params, state);
 await hd.init(world);
 // ?wet=<0..1>: start with wet ground (rain wets surfaces over a few seconds otherwise).
 if (params.has('wet') && world) world.terrain.wetness.value = Math.min(1, Math.max(0, Number(params.get('wet'))));
@@ -354,6 +362,7 @@ look
   .add(hd.settings, 'sharpness', -1, 2, 0.05)
   .name('锐化（0 最强，<0 关）')
   .onChange(() => hd.applySettings());
+addLookGui(gui, hd, state);
 if (params.has('nogui')) gui.hide();
 if (params.has('nohud')) hud.hidden = true;
 
