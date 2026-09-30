@@ -233,7 +233,11 @@ reflections still follow the settings.
   wet ground, so flat ground at clear noon shows exactly composite x map lighting. Contact shading from the height
   field darkens ground and water at the feet of cliffs; no sun shadows are cast.
 - Water (`waterLook.ts`, `shoreField.ts`, `../proceduralTextures.ts`): open water is shaded per pixel from the signed
-  shore distance (land specks of at most `SPECK_TEXELS` field texels count as water). The opt-in `enhanced` look:
+  shore distance (land specks of at most `SPECK_TEXELS` field texels count as water). An optional `shoreIgnore` image
+  in the map's `materials.json` uses the water mask's size/layout; greyscale values >= 128 mark cliff tops and walls
+  that must stay dry and not create a beach beside water in screen space. At least half a field texel's pixels must
+  be marked, and it must remain land after speck filling. Missing or mismatched images warn once and leave the
+  field unchanged; the image is only loaded when a water mask is available. The opt-in `enhanced` look:
   a narrow turquoise shallow band with caustics over a sandy bed, dark blue-teal depths, a wind sea from three
   scrolled layers of a tileable ripple normal map plus two swells under drifting gust patches, sun glitter in ripple
   facets, rippled reflections of the mirrored scene, explosions and lamps mirrored from the light field, a swash that

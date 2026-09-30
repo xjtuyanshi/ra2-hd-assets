@@ -27,6 +27,10 @@ const FAR = 1e20;
  * normalised value as a half float instead of 8 bits (one 8-bit step is 0.047 cells, which drew contour lines along
  * the waterline), and moves every distance half a texel towards the shoreline so the field crosses zero on the mask's
  * edge instead of jumping from -1 to +1 texel across it. The default 8-bit field is unchanged.
+ *
+ * `ignore` has the mask's size and layout; values >= 128 mark land that must not form a shoreline (cliff tops and
+ * walls can sit next to water at their feet in screen space). A texel is ignored when at least half its mask pixels
+ * are marked and it remains land after speck filling. Ignored land stays dry and is excluded from water depth.
  */
 export function buildShoreField(
   mask: Uint8Array,
@@ -35,35 +39,49 @@ export function buildShoreField(
   scale: number,
   step = 4,
   precise = false,
+  ignore?: Uint8Array,
 ): { texture: DataTexture; data: Uint8Array; width: number; height: number } {
   const w = Math.ceil(width / step);
   const h = Math.ceil(height / step);
   const water = new Uint8Array(w * h);
+  const ignored = ignore ? new Uint8Array(w * h) : null;
   for (let y = 0; y < h; y++)
     for (let x = 0; x < w; x++) {
       let sum = 0;
       let n = 0;
+      let ignoredPixels = 0;
       for (let dy = 0; dy < step; dy++)
         for (let dx = 0; dx < step; dx++) {
           const px = x * step + dx;
           const py = y * step + dy;
           if (px >= width || py >= height) continue;
           sum += mask[py * width + px]!;
+          if (ignore && ignore[py * width + px]! >= 128) ignoredPixels++;
           n++;
         }
       water[y * w + x] = n && sum / n >= 128 ? 1 : 0;
+      if (ignored) ignored[y * w + x] = n && ignoredPixels * 2 >= n ? 1 : 0;
     }
   fillSpecks(water, w, h, SPECK_TEXELS);
   const texel = step / scale;
   const toWater = distanceField(water, w, h, 1, texel, texel * 2);
-  const toLand = distanceField(water, w, h, 0, texel, texel * 2);
+  const toLand = distanceField(
+    ignored ? water.map((value, i) => value || ignored[i]!) : water,
+    w,
+    h,
+    0,
+    texel,
+    texel * 2,
+  );
   const data = new Uint8Array(w * h);
   const half = precise ? new Uint16Array(w * h) : null;
   const inset = precise ? texel / 2 : 0;
   for (let i = 0; i < data.length; i++) {
     const cells = water[i]
       ? (Math.sqrt(toLand[i]!) - inset) / ISO_PIXELS_PER_CELL
-      : -(Math.sqrt(toWater[i]!) - inset) / ISO_PIXELS_PER_CELL;
+      : ignored?.[i]
+        ? SHORE_MIN
+        : -(Math.sqrt(toWater[i]!) - inset) / ISO_PIXELS_PER_CELL;
     const unit = Math.min(1, Math.max(0, (cells - SHORE_MIN) / (SHORE_MAX - SHORE_MIN)));
     data[i] = Math.round(unit * 255);
     if (half) half[i] = DataUtils.toHalfFloat(unit);

@@ -18,6 +18,11 @@ export interface MapMaterials {
    */
   waterMask?: string;
   /**
+   * Same size/layout as the water mask; greyscale values >= 128 exclude land (cliff tops and walls beside water in
+   * screen space) from the shoreline distance field. Ignored land stays dry; water keeps its original classification.
+   */
+  shoreIgnore?: string;
+  /**
    * True when terrainMap paints a lake bed under the water mask (shore sand grading into deeper silt), rather than
    * painted water. Opts into transmitted/refracted bed shading only with the enhanced water style; default false.
    */

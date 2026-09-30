@@ -298,6 +298,19 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     texture.anisotropy = 8;
     // The composite's own water mask when present; otherwise treat nothing as water rather than guessing.
     const mask = material.waterMask ? await loadMask(url(material.waterMask)) : null;
+    let shoreIgnore: Uint8Array | undefined;
+    if (mask && material.shoreIgnore) {
+      const ignoreUrl = url(material.shoreIgnore);
+      try {
+        const ignore = await loadMask(ignoreUrl);
+        if (ignore.width === mask.width && ignore.height === mask.height) shoreIgnore = ignore.bytes;
+        else console.warn(`${ignoreUrl}: shore-ignore size differs from the water mask; ignoring it`);
+        // Only the CPU bytes feed the distance field; this mask is never sampled by a material.
+        ignore.texture.dispose();
+      } catch (error) {
+        console.warn(`${ignoreUrl}: failed to load shore-ignore mask; ignoring it`, error);
+      }
+    }
     void original;
     terrainMap = {
       texture,
@@ -312,6 +325,7 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
             ref.scale,
             material.waterBed ? 2 : 4,
             material.waterBed,
+            shoreIgnore,
           ).texture
         : emptyMask(),
       ref,
@@ -370,10 +384,11 @@ const PALETTE_ROWS = 128;
 export function resolveTerrainMaterials(
   ref: NonNullable<HdCacheManifest['terrainMap']>,
   materials: MapMaterials | null,
-): { file: string; waterMask: string | undefined; waterBed: boolean } {
+): { file: string; waterMask: string | undefined; shoreIgnore: string | undefined; waterBed: boolean } {
   return {
     file: materials?.terrainMap ?? ref.file,
     waterMask: materials?.waterMask ?? ref.waterMask,
+    shoreIgnore: typeof materials?.shoreIgnore === 'string' ? materials.shoreIgnore : undefined,
     waterBed: materials?.waterBed === true,
   };
 }
@@ -384,6 +399,7 @@ async function loadMapMaterials(url: string): Promise<MapMaterials | null> {
     const response = await fetch(url);
     if (!response.ok) return null;
     const json = (await response.json()) as MapMaterials;
+    // Resolve optional shoreIgnore types without rejecting legacy sidecars or their other overrides.
     return json && json.version === 1 ? json : null;
   } catch {
     return null;

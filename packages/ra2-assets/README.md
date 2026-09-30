@@ -507,6 +507,12 @@ that mask. Include the old painted shallow band in the replacement mask. Togethe
 the bed flag enables refracted bed optics, wet sand and swash onto land. Omitted/false `waterBed` and the `classic`
 style retain their existing shaders. `colourMatched: false` bypasses the entire sidecar, including these overrides.
 
+Optional `shoreIgnore` names an 8-bit greyscale image with the water mask's size/layout. Values >= 128 mark land
+that never forms a shoreline, such as cliff tops and walls beside water in screen space. A field texel must have at
+least half its pixels marked and remain land after speck filling; it stays dry and is excluded from water depth.
+The renderer loads this image only alongside a water mask. A load failure or size mismatch warns once and uses the
+unchanged distance field; omitting the field preserves existing behavior.
+
 ## Engine rules the extractor encodes
 
 - MIX priority (highest first): expandmd##, ra2md/ra2, cache, local, language, conquer/generic/isogen, theater mixes.
