@@ -1,7 +1,7 @@
 import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
 
 /**
- * Read-only H2 make-animation state, called by the hash/image-gated YR 1.001 state reader. YRpp
+ * Read-only H2 building-art state, called by the hash/image-gated YR 1.001 state reader. YRpp
  * BuildingClass.h, BuildingTypeClass.h, TechnoClass.h and MissionClass.h supplied layout leads;
  * these facts were confirmed in the player's gamemd.exe (YR_STARTUP_PAGE_HASH):
  *
@@ -32,7 +32,7 @@ import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
  *   LaserFence +0x16BF / FirestormWall +0x16C0 (stores 0x460ABA / 0x460ADA, keys 0x81AA30 /
  *   0x81AA20) override the frame at 0x43EFAA / 0x43EFBD; their make state is left unavailable.
  *
- * No new indirect pointer is followed beyond the BuildingType pointer. Invalid or partially
+ * The completed-body branch also reads the loaded Rules pointer (see readBodyState). Invalid or partially
  * initialized active-make fields yield no H2 state, allowing the view's snapshot-age fallback.
  */
 export const YR_BUILDING_RENDER_OFFSETS = Object.freeze({
@@ -48,12 +48,23 @@ export const YR_BUILDING_RENDER_OFFSETS = Object.freeze({
   gate: 0x16b7,
   laserFence: 0x16bf,
   firestormWall: 0x16c0,
+  health: 0x6c,
+  strength: 0xa0,
+  canBeOccupied: 0x157b,
+  techLevel: 0x634,
+  occupants: 0x694,
+  gateStages: 0x16f8,
+  modes: 0xf04,
 });
+
+export const YR_BUILDING_RULES = Object.freeze({ instance: 0x8871e0, yellow: 0x1700, red: 0x1708 });
 
 export interface YrBuildingRenderState {
   buildState: 'building' | 'selling' | 'done';
   /** Actual make SHP frame; selling/gate reversal is already applied. */
   buildupFrame?: number;
+  buildingFrame?: number;
+  buildingDamaged?: boolean;
 }
 
 const pointerFits = (memory: GuestMemoryAccessor, pointer: number, span: number) =>
@@ -72,7 +83,7 @@ export function readYrBuildingRenderState(memory: GuestMemoryAccessor, pointer: 
     if (!validMode(state) || !validMode(queued)) return null;
     // Constructor sentinel: a queued construction mode does not establish that a body is already complete.
     if (state === -1) return null;
-    if (state !== 0) return { buildState: 'done' };
+    if (state !== 0) return { buildState: 'done', ...readBodyState(memory, pointer, state) };
     if (memory.u8(pointer + o.hasBuildup) !== 1) return null;
     const type = memory.u32(pointer + o.type);
     if (!pointerFits(memory, type, o.firestormWall + 1) || memory.u32(type) !== 0x7e4570) return null;
@@ -102,5 +113,89 @@ export function readYrBuildingRenderState(memory: GuestMemoryAccessor, pointer: 
     return { buildState: mission === 19 ? 'selling' : 'building', buildupFrame };
   } catch {
     return null;
+  }
+}
+
+/**
+ * BuildingClass::GetCurrentFrame 0x43EF90, completed-body branches 0x43F02C..0x43F16F.
+ * CanBeOccupied (+0x157B, INI store 0x4600DF) selects red; TechLevel (+0x634, store 0x714584)
+ * above zero also selects yellow. Occupant count (virtual +0x408 -> 0x4581F0, +0x694) adds two;
+ * TechLevel=-1 maps occupied/damaged frame 3 back to 1. Ordinary idle buildings add one at yellow.
+ * Object::GetHealthPercentage 0x5F5C60 divides integer Health by integer Strength without truncating
+ * the ratio. Rules [AudioVisual] ConditionRed/Yellow load doubles at 0x66B358/0x66B37F; no per-type
+ * threshold or [General] lookup occurs here. Read the loaded rules to retain scenario overrides.
+ * Active modes add the maximum end of modes 1,2,4,5 when damaged (0x43F11D..0x43F16D).
+ * Damage animation layers use yellow separately (e.g. 0x4477E8), not the civilian body threshold.
+ */
+function readBodyState(
+  memory: GuestMemoryAccessor,
+  pointer: number,
+  state: number,
+): Pick<YrBuildingRenderState, 'buildingFrame' | 'buildingDamaged'> {
+  const o = YR_BUILDING_RENDER_OFFSETS;
+  try {
+    const type = memory.u32(pointer + o.type);
+    const rules = memory.u32(YR_BUILDING_RULES.instance);
+    if (
+      !pointerFits(memory, type, o.gateStages + 4) ||
+      memory.u32(type) !== 0x7e4570 ||
+      !pointerFits(memory, rules, YR_BUILDING_RULES.red + 8)
+    )
+      return {};
+    const fraction = (offset: number) => {
+      const bytes = memory.bytes(rules + offset, 8);
+      return bytes.length === 8 ? new DataView(bytes.buffer, bytes.byteOffset, 8).getFloat64(0, true) : NaN;
+    };
+    const yellow = fraction(YR_BUILDING_RULES.yellow);
+    const red = fraction(YR_BUILDING_RULES.red);
+    const strength = memory.i32(type + o.strength);
+    const health = memory.i32(pointer + o.health);
+    const occupied = memory.u8(type + o.canBeOccupied);
+    const gate = memory.u8(type + o.gate);
+    const stage = memory.i32(pointer + o.stage);
+    if (
+      ![yellow, red].every((n) => Number.isFinite(n) && n >= 0 && n <= 1) ||
+      !Number.isInteger(strength) ||
+      strength <= 0 ||
+      !Number.isInteger(health) ||
+      health < 0 ||
+      occupied > 1 ||
+      gate > 1 ||
+      !Number.isInteger(stage) ||
+      stage < 0 ||
+      stage > 0x7fff ||
+      memory.u8(type + o.laserFence) !== 0 ||
+      memory.u8(type + o.firestormWall) !== 0
+    )
+      return {};
+    const ratio = health / strength;
+    const buildingDamaged = ratio <= yellow;
+    let buildingFrame = stage;
+    if (occupied) {
+      const count = memory.i32(pointer + o.occupants);
+      if (!Number.isInteger(count) || count < 0 || count > 1024) return {};
+      const techLevel = memory.i32(type + o.techLevel);
+      buildingFrame = (count > 0 ? 2 : 0) + (ratio <= red || (techLevel > 0 && buildingDamaged) ? 1 : 0);
+      if (techLevel === -1 && buildingFrame === 3) buildingFrame = 1;
+    } else if (gate) {
+      const stages = memory.i32(type + o.gateStages);
+      if (!Number.isInteger(stages) || stages < 0 || stages > 0x7ffe) return {};
+      buildingFrame = buildingDamaged ? stages + 1 : 0;
+    } else if (buildingDamaged) {
+      if (state === 1) buildingFrame++;
+      else {
+        const ends = [1, 2, 4, 5].map((mode) => {
+          const start = memory.i32(type + o.modes + mode * 12);
+          const count = memory.i32(type + o.modes + mode * 12 + 4);
+          return start >= 0 && count >= 0 ? start + count : NaN;
+        });
+        buildingFrame += Math.max(...ends);
+      }
+    }
+    return Number.isInteger(buildingFrame) && buildingFrame >= 0 && buildingFrame <= 0x7fff
+      ? { buildingFrame, buildingDamaged }
+      : {};
+  } catch {
+    return {};
   }
 }

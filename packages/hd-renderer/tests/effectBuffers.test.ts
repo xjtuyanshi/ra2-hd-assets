@@ -218,6 +218,25 @@ describe('bounded beam geometry', () => {
     expect(setBeams).toHaveBeenCalledTimes(2);
   });
 
+  it('clears an expired native bolt in the same logic frame and accepts a replacement bolt', () => {
+    const setBeams = vi.fn();
+    const driver = new LiveEffectsDriver({ setBeams } as unknown as EffectsLayer, () => false);
+    const wind = new Vector3();
+    const bolt = {
+      source: { x: 0, y: 0, z: 0 },
+      target: { x: 256, y: 256, z: 0 },
+      kind: 'bolt' as const,
+      colour: [150, 200, 255] as [number, number, number],
+    };
+    const snapshot = { anims: [], bullets: [], particleSystems: [], beams: [bolt] };
+    driver.push(snapshot, 100, 0, wind);
+    driver.push({ ...snapshot, beams: [] }, 100, 0.01, wind);
+    expect(setBeams.mock.calls.at(-1)![1]).toEqual([]);
+    driver.push({ ...snapshot, beams: [{ ...bolt, target: { x: 512, y: 256, z: 0 } }] }, 100, 0.02, wind);
+    expect(setBeams.mock.calls.at(-1)![1][0].to.x).toBe(2);
+    expect(setBeams).toHaveBeenCalledTimes(3);
+  });
+
   it('bounds beam specs while preserving both the visible geometry prefix and surviving light tail', () => {
     const setBeams = vi.fn();
     const driver = new LiveEffectsDriver({ setBeams } as unknown as EffectsLayer, () => false);

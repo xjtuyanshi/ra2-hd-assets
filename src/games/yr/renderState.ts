@@ -10,7 +10,14 @@ import type {
   GameRenderStateReader,
 } from '../renderState';
 import { createByteViewAccessor, type GuestMemoryAccessor } from '../shared/memoryAccessor';
-import { createYrEffectsReader, type ReadYrEffectsOptions, type YrEffects } from './effectsReader';
+import { YR_BUILDING_RULES } from './buildingRenderState';
+import {
+  createYrEffectsReader,
+  YR_EFFECTS_GLOBALS,
+  YR_EFFECTS_LIMITS,
+  type ReadYrEffectsOptions,
+  type YrEffects,
+} from './effectsReader';
 import { createYrOverlayReader, type ReadYrOverlayOptions, type YrOverlays } from './overlayReader';
 import { createYrSmudgeReader, type ReadYrSmudgeOptions, type YrSmudges } from './smudgeReader';
 import { createYrShroudReader, type ReadYrShroudOptions, type YrShroud } from './shroudReader';
@@ -18,6 +25,7 @@ import {
   YR_STATE_GLOBALS,
   YR_STATE_LIMITS,
   YR_STATE_OFFSETS,
+  YR_STATE_VTABLES,
   createYrStateReader,
   isPlausiblePointer,
   readPointerVector,
@@ -181,10 +189,10 @@ function publishCells(read: GameRenderCellSprites, revision: number): GameRender
 
 /**
  * What a snapshot depends on, read cheaply: the logic frame, the scenario pointer, the tactical view position,
- * every techno pointer with its selection flag, and the native painter lists. Objects, shroud and effects move with
- * the game logic, which advances the frame counter; the view, selection and painter ordering are in the key as well,
- * so a scroll, selection or registered tie-order change is never hidden behind a frame counter that stands still
- * (for example while the logic is paused). Null (no caching for this poll) when a scanned vector is not plausible.
+ * mutable techno render fields, effect objects and native painter lists. The frame counter is incremented only at
+ * 0x55DE81; animation AI can change stages before that, and EBolt::Draw halves lifetime at 0x4C2821 independently.
+ * A frame number alone must never keep a pre-update death step or an expired beam. Null disables caching on an
+ * implausible vector. Type/configuration data is read again whenever one of these live fields changes.
  */
 function readChangeKey(memory: () => GuestMemoryAccessor): number[] | null {
   try {
@@ -192,12 +200,52 @@ function readChangeKey(memory: () => GuestMemoryAccessor): number[] | null {
     const o = YR_STATE_OFFSETS;
     const technos = readPointerVector(m, YR_STATE_GLOBALS.technos, 4 * YR_STATE_LIMITS.objectsPerKind);
     if (!technos) return null;
-    // FNV-1a over (pointer, selected) pairs.
+    // FNV-1a over bounded native fields; no copied guest memory escapes the reader.
     let hash = 0x811c9dc5;
+    const word = (value: number) => {
+      hash = Math.imul(hash ^ value, 0x01000193);
+    };
+    const span = (pointer: number, start: number, end: number) => {
+      if (!isPlausiblePointer(m, pointer, end)) throw new Error('unavailable render key');
+      for (let at = start; at < end; at += 4) word(m.u32(pointer + at));
+    };
     for (const pointer of technos) {
-      const selected = isPlausiblePointer(m, pointer, o.isSelected + 1) ? m.u8(pointer + o.isSelected) : 0;
-      hash = Math.imul(hash ^ pointer, 0x01000193);
-      hash = Math.imul(hash ^ selected, 0x01000193);
+      word(pointer);
+      const vtable = m.u32(pointer);
+      word(vtable);
+      span(pointer, 0x10, 0x14); // UniqueID, including pointer reuse.
+      span(pointer, 0x6c, 0xa8); // Health, limbo/selection, location.
+      span(pointer, 0xac, 0xb8); // Current/queued mission, including sale reversal.
+      span(pointer, 0xf8, 0xfc); // Techno animation stage.
+      span(pointer, 0x21c, 0x220); // Owner.
+      span(pointer, 0x2b4, 0x2b8); // Target used by the infantry draw-facing branch.
+      span(pointer, 0x388, 0x3b8); // Both facing interpolators.
+      span(pointer, 0x520, 0x53c); // Building type and current/queued mode.
+      span(pointer, 0x674, 0x678); // Locomotor interface.
+      span(pointer, 0x694, 0x698); // Building occupants.
+      span(pointer, 0x6c0, 0x6c8); // Infantry type/sequence (unit/aircraft type).
+      if (vtable === YR_STATE_VTABLES.building) span(pointer, 0x6e8, 0x6ec); // HasBuildUp.
+    }
+    const rules = m.u32(YR_BUILDING_RULES.instance);
+    word(rules);
+    if (isPlausiblePointer(m, rules, YR_BUILDING_RULES.red + 8))
+      span(rules, YR_BUILDING_RULES.yellow, YR_BUILDING_RULES.red + 8);
+    // Effects can expire during a draw without a new logic frame. Hash their bounded instance state, including
+    // type pointers, stages, visibility flags and attachment pointers. These spans match effectsReader's fields.
+    for (const [kind, size] of [
+      ['anims', 0x1a0],
+      ['bullets', 0x14c],
+      ['particleSystems', 0x100],
+      ['lasers', 0x58],
+      ['electricBolts', 0x30],
+    ] as const) {
+      const pointers = readPointerVector(m, YR_EFFECTS_GLOBALS[kind], YR_EFFECTS_LIMITS[kind]);
+      if (!pointers) return null;
+      word(pointers.length);
+      for (const pointer of pointers) {
+        word(pointer);
+        span(pointer, 0, size);
+      }
     }
     // Layer sorting may finish after the logic frame counter changed. Do not retain a stale registered tie order
     // just because a later poll observes that same frame, including while the match is paused.
@@ -268,6 +316,8 @@ function projectObject(object: YrObjectState): GameRenderObject {
     renderOrder,
     buildState,
     buildupFrame,
+    buildingFrame,
+    buildingDamaged,
     infantrySequence,
     sequenceFrame,
     infantryDrawFacingRaw,
@@ -287,6 +337,8 @@ function projectObject(object: YrObjectState): GameRenderObject {
     ...(turretFacingRaw !== undefined ? { turretFacingRaw } : {}),
     ...(buildState !== undefined ? { buildState } : {}),
     ...(buildupFrame !== undefined ? { buildupFrame } : {}),
+    ...(buildingFrame !== undefined ? { buildingFrame } : {}),
+    ...(buildingDamaged !== undefined ? { buildingDamaged } : {}),
     ...(infantrySequence !== undefined ? { infantrySequence } : {}),
     ...(sequenceFrame !== undefined ? { sequenceFrame } : {}),
     ...(infantryDrawFacingRaw !== undefined ? { infantryDrawFacingRaw } : {}),
@@ -300,28 +352,69 @@ const point = ({ x, y, z }: { x: number; y: number; z: number }) => ({ x, y, z }
 
 function projectEffects(effects: YrEffects): GameRenderEffects {
   return {
-    anims: effects.anims.map(({ id, uid, type, x, y, z, frameCount, buildingAnim, invisible }) => ({
+    anims: effects.anims.map(
+      ({
+        id,
+        uid,
+        type,
+        x,
+        y,
+        z,
+        frameCount,
+        buildingAnim,
+        invisible,
+        frame,
+        stage,
+        translucent,
+        translucency,
+        flat,
+        layer,
+        owner,
+        attachedTo,
+      }) => ({
+        id,
+        uid,
+        type,
+        x,
+        y,
+        z,
+        frameCount,
+        buildingAnim,
+        invisible,
+        frame,
+        stage,
+        translucent,
+        translucency,
+        flat,
+        layer,
+        owner,
+        attachedTo: attachedTo && { ...attachedTo },
+      }),
+    ),
+    bullets: effects.bullets.map(({ id, uid, x, y, z, inviso, type, frame, velocity }) => ({
       id,
       uid,
-      type,
       x,
       y,
       z,
-      frameCount,
-      buildingAnim,
-      invisible,
+      inviso,
+      type,
+      frame,
+      velocity: point(velocity),
     })),
-    bullets: effects.bullets.map(({ id, uid, x, y, z, inviso }) => ({ id, uid, x, y, z, inviso })),
     lasers: effects.lasers.map(({ source, target, innerColor }) => ({
       source: point(source),
       target: point(target),
       innerColor,
     })),
-    electricBolts: effects.electricBolts.map(({ source, target, alternateColor }) => ({
-      source: point(source),
-      target: point(target),
-      alternateColor,
-    })),
+    // EBolt::Draw 0x4C2797..0x4C279C skips lifetime zero even before DrawAll removes the object.
+    electricBolts: effects.electricBolts
+      .filter((bolt) => bolt.lifetime > 0)
+      .map(({ source, target, alternateColor }) => ({
+        source: point(source),
+        target: point(target),
+        alternateColor,
+      })),
     particleSystems: effects.particleSystems.map(({ id, uid, behavesLike, x, y, z }) => ({
       id,
       uid,

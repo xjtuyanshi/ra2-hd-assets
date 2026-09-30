@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { createByteViewAccessor } from '../../src/games/shared/memoryAccessor';
-import { readYrBuildingRenderState, YR_BUILDING_RENDER_OFFSETS as O } from '../../src/games/yr/buildingRenderState';
+import {
+  readYrBuildingRenderState,
+  YR_BUILDING_RENDER_OFFSETS as O,
+  YR_BUILDING_RULES as R,
+} from '../../src/games/yr/buildingRenderState';
 
-function makeMemory() {
-  const bytes = new Uint8Array(0x50000);
+function makeMemory(size = 0x50000) {
+  const bytes = new Uint8Array(size);
   const view = new DataView(bytes.buffer);
   const building = 0x10000;
   const type = 0x20000;
@@ -146,5 +150,90 @@ describe('YR 1.001 building render state', () => {
         expect(readYrBuildingRenderState(memory, m.building)).toBeNull();
       }
     }
+  });
+});
+
+describe('YR native completed-building art', () => {
+  function body() {
+    const m = makeMemory(0x900000);
+    const rules = 0x30000;
+    const data = new DataView(m.bytes.buffer);
+    m.i32(R.instance, rules);
+    data.setFloat64(rules + R.yellow, 0.5, true);
+    data.setFloat64(rules + R.red, 0.25, true);
+    m.i32(m.building + O.state, 1);
+    m.i32(m.type + O.strength, 1000);
+    m.i32(m.type + O.techLevel, -1);
+    return { ...m, rules, data };
+  }
+
+  it('keeps civilian bodies intact at 49.6% and 47.5%, independently of yellow damage layers', () => {
+    const m = body();
+    m.u8(m.type + O.canBeOccupied, 1);
+    for (const hp of [496, 475, 251]) {
+      m.i32(m.building + O.health, hp);
+      expect(m.read()).toEqual({ buildState: 'done', buildingFrame: 0, buildingDamaged: true });
+    }
+    for (const hp of [250, 249, 0]) {
+      m.i32(m.building + O.health, hp);
+      expect(m.read()?.buildingFrame).toBe(1);
+    }
+  });
+
+  it('uses integer HP/Strength as a real ratio and honors loaded scenario rules', () => {
+    const m = body();
+    m.i32(m.type + O.strength, 101);
+    m.i32(m.building + O.health, 51);
+    expect(m.read()?.buildingFrame).toBe(0);
+    m.i32(m.building + O.health, 50);
+    expect(m.read()?.buildingFrame).toBe(1);
+    m.data.setFloat64(m.rules + R.yellow, 0.4, true);
+    expect(m.read()?.buildingFrame).toBe(0);
+    m.u8(m.type + O.canBeOccupied, 1);
+    m.data.setFloat64(m.rules + R.red, 0.6, true);
+    expect(m.read()).toMatchObject({ buildingFrame: 1, buildingDamaged: false });
+  });
+
+  it('selects occupancy variants and the TechLevel branch, including the civilian frame-3 remap', () => {
+    const m = body();
+    m.u8(m.type + O.canBeOccupied, 1);
+    m.i32(m.building + O.occupants, 3);
+    m.i32(m.building + O.health, 475);
+    expect(m.read()?.buildingFrame).toBe(2);
+    m.i32(m.type + O.techLevel, 1);
+    expect(m.read()?.buildingFrame).toBe(3);
+    m.i32(m.type + O.techLevel, 0);
+    expect(m.read()?.buildingFrame).toBe(2);
+    m.i32(m.building + O.health, 250);
+    expect(m.read()?.buildingFrame).toBe(3);
+    m.i32(m.type + O.techLevel, -1);
+    expect(m.read()?.buildingFrame).toBe(1);
+  });
+
+  it('keeps gate and active-mode frame offsets separate from ordinary idle bodies', () => {
+    const m = body();
+    m.i32(m.building + O.health, 500);
+    m.u8(m.type + O.gate, 1);
+    m.i32(m.type + O.gateStages, 9);
+    expect(m.read()?.buildingFrame).toBe(10);
+    m.u8(m.type + O.gate, 0);
+    m.i32(m.building + O.state, 2);
+    m.i32(m.building + O.stage, 3);
+    m.i32(m.type + O.modes + 4 * 12, 12);
+    m.i32(m.type + O.modes + 4 * 12 + 4, 8);
+    expect(m.read()?.buildingFrame).toBe(23);
+    m.i32(m.building + O.health, 501);
+    expect(m.read()?.buildingFrame).toBe(3);
+  });
+
+  it('omits unvalidated body state without losing known construction completion', () => {
+    const m = body();
+    m.data.setFloat64(m.rules + R.red, NaN, true);
+    expect(m.read()).toEqual({ buildState: 'done' });
+    m.data.setFloat64(m.rules + R.red, 0.25, true);
+    m.i32(m.type + O.strength, 0);
+    expect(m.read()).toEqual({ buildState: 'done' });
+    m.i32(R.instance, m.bytes.length - 4);
+    expect(m.read()).toEqual({ buildState: 'done' });
   });
 });

@@ -351,13 +351,11 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
     overlays: state.overlays,
     smudges: state.smudges,
     effects: state.effects && {
-      // Building layers and invisible or art-less anims are not combat effects.
-      anims: state.effects.anims
-        .filter((anim) => !anim.buildingAnim && !anim.invisible && anim.frameCount > 0)
-        .map(({ id, uid, type, x, y, z }) => ({ id, uid, type, x, y, z })),
+      // The view routes building layers separately; preserve native frame/alpha and attachment metadata.
+      anims: state.effects.anims.filter((anim) => !anim.invisible && anim.frameCount > 0),
       bullets: state.effects.bullets
         .filter((bullet) => !bullet.inviso)
-        .map(({ id, uid, x, y, z }) => ({ id, uid, x, y, z })),
+        .map(({ id, uid, x, y, z, type, frame, velocity }) => ({ id, uid, x, y, z, type, frame, velocity })),
       beams: [
         ...state.effects.lasers.map(({ source, target, innerColor }) => ({
           source,
@@ -395,6 +393,8 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
       ...(object.turretFacingRaw !== undefined ? { turretFacingRaw: object.turretFacingRaw } : {}),
       ...(object.buildState !== undefined ? { buildState: object.buildState } : {}),
       ...(object.buildupFrame !== undefined ? { buildupFrame: object.buildupFrame } : {}),
+      ...(object.buildingFrame !== undefined ? { buildingFrame: object.buildingFrame } : {}),
+      ...(object.buildingDamaged !== undefined ? { buildingDamaged: object.buildingDamaged } : {}),
       ...(object.infantrySequence !== undefined ? { infantrySequence: object.infantrySequence } : {}),
       ...(object.sequenceFrame !== undefined ? { sequenceFrame: object.sequenceFrame } : {}),
       ...(object.infantryDrawFacingRaw !== undefined ? { infantryDrawFacingRaw: object.infantryDrawFacingRaw } : {}),

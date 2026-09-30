@@ -73,6 +73,8 @@ export interface LiveObject {
   /** Bridge (H2): building construction state and the actual make SHP frame, including engine reversal. */
   buildState?: 'building' | 'selling' | 'done';
   buildupFrame?: number;
+  buildingFrame?: number;
+  buildingDamaged?: boolean;
   /** Bridge (H2): infantry sequence key (e.g. "Walk", "Die1", "FireUp") and sequence-local animation step. */
   infantrySequence?: string;
   sequenceFrame?: number;
@@ -328,7 +330,7 @@ const TURRET_DEPTH = 0.45;
 
 /** Live sprite instances (buildings: body, bib, shadow, anim layers). */
 const LIVE_SPRITE_CAPACITY = 4096;
-/** Engine rule (rules [AudioVisual] ConditionYellow): at or below half health a building shows its damaged frame. */
+/** Legacy fallback only; native buildingFrame includes civilian, occupancy and gate policies. */
 const CONDITION_YELLOW = 0.5;
 
 /** Stand-in sizes (world units) for the development placeholder of objects without art. */
@@ -431,7 +433,6 @@ export class LiveView {
   private readonly overlayLayers = new Map<number, SpriteLayer>();
   private readonly uploadedOverlays = new Map<number, readonly SpriteInstance[]>();
   private overlayPagesDirty = false;
-  private snapshotOverlayRevision: number | undefined;
   private readonly warnedOverlayTypes = new Set<string>();
   private readonly warnedOverlayPages = new Set<number>();
   private warnedOverlayLibrary = false;
@@ -439,13 +440,14 @@ export class LiveView {
   private readonly smudgeLayers = new Map<SmudgePage, SpriteLayer>();
   private readonly uploadedSmudges = new Map<SmudgePage, readonly SpriteInstance[]>();
   private smudgePagesDirty = false;
-  private snapshotSmudgeRevision: number | undefined;
   private readonly warnedSmudgeTypes = new Set<string>();
   private readonly warnedSmudgePages = new Set<number>();
   private warnedSmudgeLibrary = false;
   /** Whether the host has reported engine cells (bridge H3); without them ore and walls stay as the map started. */
   private cellsFromEngine = false;
   private warnedCells = false;
+  private firstMissingCellsAt: number | undefined;
+  private publishedCells = false;
   private readonly wind = new Vector3(Math.cos(0.6), 0, Math.sin(0.6)).multiplyScalar(0.3 * 0.8);
   private readonly warnedTypes = new Set<string>();
   private viewWidth = 800;
@@ -637,51 +639,22 @@ export class LiveView {
     this.hd.view.resize(viewWidth, viewHeight);
   }
 
-  /** Ignore unchanged presentations, but accept native painter registration changes within a frozen frame. */
+  /** A logic frame is not a publication revision: AI and draw passes can still change it between polls. */
   push(snapshot: LiveSnapshot, at = performance.now()): void {
     const current = this.current;
-    const samePresentation =
-      current &&
-      current.snapshot.frame === snapshot.frame &&
-      current.snapshot.view?.x === snapshot.view?.x &&
-      current.snapshot.view?.y === snapshot.view?.y &&
-      current.snapshot.localHouse === snapshot.localHouse &&
-      this.snapshotOverlayRevision === snapshot.overlays?.revision &&
-      this.snapshotSmudgeRevision === snapshot.smudges?.revision &&
-      current.byUid.size === snapshot.objects.length &&
-      snapshot.objects.every((object) => current.byUid.has(object.uid));
-    if (samePresentation) {
-      const changed = snapshot.objects.some((object) => {
-        const before = current.byUid.get(object.uid)!;
-        return (
-          before.renderOrder?.layer !== object.renderOrder?.layer ||
-          before.renderOrder?.index !== object.renderOrder?.index ||
-          before.renderOrder?.ySort !== object.renderOrder?.ySort
-        );
-      });
-      if (!changed) return;
-      // The Ground sort (0x55DBC8) precedes the frame increment (0x55DE81). A poll between them may report new
-      // registration with the same logic frame. Update metadata only; preserve both pose endpoints and their times.
-      const objects = snapshot.objects.map((object) => ({
-        ...current.byUid.get(object.uid)!,
-        renderOrder: object.renderOrder,
-      }));
-      current.snapshot = { ...current.snapshot, objects };
-      for (const object of objects) current.byUid.set(object.uid, object);
-      this.objectsFor = null;
-      this.painterDirty = true;
-      return;
-    }
+    const hadEffects = !!current?.snapshot.effects;
+    if (current?.snapshot === snapshot) return;
+    const sameFrame = current?.snapshot.frame === snapshot.frame;
     this.painterDirty = true;
-    this.snapshotOverlayRevision = snapshot.overlays?.revision;
     if (current && snapshot.frame < current.snapshot.frame) {
       // Loading an earlier save or starting another match establishes a new appearance timeline.
       this.appearances.clear();
       this.firstFrame = null;
+      this.firstMissingCellsAt = undefined;
+      this.publishedCells = this.warnedCells = false;
     }
-    this.snapshotSmudgeRevision = snapshot.smudges?.revision;
     this.firstFrame ??= snapshot.frame;
-    this.previous = current;
+    if (!sameFrame) this.previous = current;
     const byUid = new Map<number, LiveObject>();
     const afterGap = !!current && snapshot.frame - current.snapshot.frame > BUILDUP_LOGIC_FRAMES;
     for (const object of snapshot.objects) {
@@ -694,11 +667,17 @@ export class LiveView {
     }
     for (const [uid, appearance] of this.appearances)
       if (snapshot.frame - appearance.lastSeen > BUILDUP_LOGIC_FRAMES) this.appearances.delete(uid);
-    this.current = { snapshot, at, byUid };
+    if (sameFrame) {
+      // Replace all discrete state (including removal, death steps and effects), without restarting interpolation.
+      current.snapshot = snapshot;
+      current.byUid = byUid;
+      this.objectsFor = this.effectsFor = null;
+    } else this.current = { snapshot, at, byUid };
     this.objectsInterpolate = false;
-    if (current) {
+    const motionStart = sameFrame ? this.previous : current;
+    if (motionStart) {
       for (const object of snapshot.objects) {
-        const before = current.byUid.get(object.uid);
+        const before = motionStart.byUid.get(object.uid);
         if (
           before &&
           (before.x !== object.x ||
@@ -720,22 +699,34 @@ export class LiveView {
     this.buildingAnims = indexBuildingAnims(snapshot.effects?.anims);
     this.buildingAnimMatches.clear();
     if (snapshot.shroud) this.shroud.update(snapshot.shroud);
-    this.trackMotion(snapshot, current);
+    if (!sameFrame) this.trackMotion(snapshot, current);
     // A damaged vehicle's smoke system sits on the vehicle (see smokeUnlimited).
     const vehicles = snapshot.objects.filter((o) => o.kind === 'vehicle');
     this.effectDriver.vehicleAt = (x, y, z) => smokeOnVehicle(vehicles, x, y, z);
-    if (snapshot.effects) this.effectDriver.push(snapshot.effects, snapshot.frame, this.hd.seconds(), this.wind);
+    if (snapshot.effects || hadEffects)
+      this.effectDriver.push(
+        snapshot.effects ?? { anims: [], bullets: [], particleSystems: [] },
+        snapshot.frame,
+        this.hd.seconds(),
+        this.wind,
+      );
     this.updateOverlays(snapshot);
     this.updateSmudges(snapshot);
     if (snapshot.cells) {
       this.cellsFromEngine = true;
       this.applyCells(snapshot.cells);
-    } else if (!snapshot.overlays && !snapshot.smudges && !this.cellsFromEngine && !this.warnedCells) {
-      this.warnedCells = true;
-      console.warn(
-        '[HD] the host reports no overlay/smudge cells (bridge H3): ore, walls and craters show the map as it started ' +
-          '(harvested ore stays, walls built in the match are missing). See docs/remaster/HD_BRIDGE.md.',
-      );
+    }
+    if (snapshot.cells || snapshot.overlays || snapshot.smudges) this.publishedCells = true;
+    if (!this.publishedCells && !this.warnedCells) {
+      this.firstMissingCellsAt ??= at;
+      // Cell readers publish on a slower cadence and can still be initializing when the first objects arrive.
+      if (at - this.firstMissingCellsAt >= 5000) {
+        this.warnedCells = true;
+        console.warn(
+          '[HD] the host reports no overlay/smudge cells (bridge H3): ore, walls and craters show the map as it started ' +
+            '(harvested ore stays, walls built in the match are missing). See docs/remaster/HD_BRIDGE.md.',
+        );
+      }
     }
     this.updateNightSources(snapshot);
   }
@@ -804,7 +795,7 @@ export class LiveView {
       const type = this.library?.type(b.type);
       const sprite = type?.sprite;
       if (!type || !sprite || shrouded(b)) continue;
-      const frame = b.health <= this.library!.conditionYellow ? 1 : 0;
+      const frame = b.buildingFrame ?? (b.health <= this.library!.conditionYellow ? 1 : 0);
       const count = this.library!.litWindows(sprite, frame);
       if (!count) continue;
       const [w, h] = type.foundation ?? [1, 1];
@@ -952,12 +943,9 @@ export class LiveView {
     for (const object of current.snapshot.objects) {
       const colorIndex = this.houseColour.get(object.owner) ?? -1;
       const visual = this.visualFor(object, colorIndex, frame);
-      // Anything standing under black shroud stays hidden, exactly as in the original (no peeking at enemy bases).
-      // InvisibleInGame types (lamp-post dummies such as INGALITE) are never drawn, with or without a type library.
-      const hidden =
-        this.shroud.isLocationShrouded(object.x, object.y, object.z) ||
-        !!visual.libraryType?.invisible ||
-        !!this.cache.lights?.types[object.type]?.invisible;
+      // Native techno rendering does not reject the anchor's shroud cell. The common per-pixel mask covers the
+      // whole sprite/voxel, including tall art crossing the edge. InvisibleInGame types still never draw.
+      const hidden = !!visual.libraryType?.invisible || !!this.cache.lights?.types[object.type]?.invisible;
       if (visual.root.visible === hidden) this.painterDirty = true;
       visual.root.visible = !hidden;
       if (hidden) continue;
@@ -1074,8 +1062,7 @@ export class LiveView {
     this.effectStats = this.effectDriver.cards(this.effectArt, this.effectPalette, instances);
     this.effectDriver.smokeCards(this.effectArt, instances);
     const effects = snapshot.effects;
-    if (effects && this.projectiles)
-      this.projectiles.update(effects.bullets, effects.voxelAnims ?? [], this.hidden, instances);
+    this.projectiles?.update(effects?.bullets ?? [], effects?.voxelAnims ?? [], this.hidden, instances);
     if (effects) this.particleCards(effects, instances);
     // An async art revision, rather than every presentation frame, schedules the next rebuild.
     this.painterDirty = true;
@@ -1205,7 +1192,7 @@ export class LiveView {
   }
 
   /**
-   * A building's library art: bib, shadow, body (damaged at or below yellow) and its anim layers with their shadows;
+   * A building's library art: bib, shadow, native body frame and its independently damaged animation layers;
    * while it is being built, its make anim instead. Buildings always wear their owner's colour scheme (the engine
    * remaps every building, e.g. civilian CAOILD shows the Neutral scheme's light grey), whatever art Remapable= says.
    */
@@ -1253,8 +1240,8 @@ export class LiveView {
       return false;
     }
 
-    const damaged = object.health <= library.conditionYellow;
-    const body = damaged && entry.frames.length > 1 ? 1 : 0;
+    const damaged = object.buildingDamaged ?? object.health <= library.conditionYellow;
+    const body = object.buildingFrame ?? (damaged && entry.frames.length > 1 ? 1 : 0);
     const bib = type.building?.bib ? sprites[type.building.bib] : undefined;
     const bibFrame = bib?.frames[damaged && bib.frames.length > 1 ? 1 : 0];
     if (bib && bibFrame)
@@ -1604,8 +1591,9 @@ export class LiveView {
     const entry = manifest.sprites[visual.sprite!]!;
     const anchor = leptonAnchor(object.x, object.y, object.z, 0, -15, this.spritePool.anchor());
     const owner = visual.paletteKey || undefined;
-    const frameIndex = object.health > CONDITION_YELLOW || entry.frames.length < 2 ? 0 : 1;
-    const frame = entry.frames[frameIndex]!;
+    const frameIndex = object.buildingFrame ?? (object.health > CONDITION_YELLOW || entry.frames.length < 2 ? 0 : 1);
+    const frame = entry.frames[frameIndex];
+    if (!frame) return;
     // Buildings always wear their owner's colours (see libraryBuildingSprites).
     const palette = paletteFor(this.cache, entry.palette, true, owner);
     const push = cardPush(frame);

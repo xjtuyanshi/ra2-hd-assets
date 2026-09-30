@@ -234,6 +234,8 @@ export class ShroudLayer {
    * The engine's MapClass::IsLocationShrouded for a lepton location: the shroud is a flat Z = 0 layer, so an object at
    * height level L is tested against the flat cell it covers on screen, (X - L/2, Y - L/2); an odd level straddles two
    * cells and is hidden only when both are shrouded. Everything is visible before the first update.
+   * This is a point query for effect/light policy, not techno draw eligibility. Native building/unit rendering
+   * clips its art through the alpha-lighting buffer; rejecting a whole object here loses revealed roofs and edges.
    */
   isLocationShrouded(x: number, y: number, z: number): boolean {
     const shroud = this.latest;

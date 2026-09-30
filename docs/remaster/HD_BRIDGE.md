@@ -59,7 +59,8 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    voxel turrets; `?hd-debug=placeholders` shows a small grey box instead). Light sources and lit windows of the
    buildings standing in the match feed the night dressing (map light sources, HD street lamps, windows).
    Overlay and smudge polls run at most once per 250 ms, with an immediate reset for a new battle. The reader reuses scratch
-   arrays, compares contents exactly, and only copies changed publications. Worker replies omit each unchanged cell
+   arrays, compares contents exactly, and only copies changed publications. Missing host cells warn only after five
+   seconds without any publication in that match; a valid empty grid counts as publication. Worker replies omit each unchanged cell
    grid even when other objects move; the page retains its previous immutable grid. LiveView retains overlay and smudge instances
    and GPU batches while their revision and presentation inputs stay unchanged. The complete engine frame byte selects
    both wall connections/damage and resource growth; walls use the local player's unit-palette remap. The
@@ -86,7 +87,8 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    radius, velocity, deceleration, life; `SMOKE_SYSTEMS` in the table) with rise and drift measured on the engine's own
    particles, because the page does not forward particle positions. Fire systems add a small HD flame; gas and spark
    systems draw nothing. Projectiles with known art are drawn natively (`live/projectiles.ts`), others as small grey
-   dots. Lasers and electric bolts are rebuilt once per logic frame as soft-edged segments in the bolt's own colour.
+   dots. Lasers and electric bolts are rebuilt for changed logic frames or beam publications, including same-frame
+   expiration, as soft-edged segments in the bolt's own colour. Zero-lifetime native bolts are omitted.
    The live view never shakes the camera, so the HD picture stays aligned with the game's own selection boxes, health
    bars and cursor. Atlas pages are single-channel R8 textures (they hold palette indices), uploaded from the decoded
    image straight into the GPU texture; the pages of the common combat anims and smoke particles are requested when the
@@ -131,8 +133,11 @@ pass policy; voxel missiles/debris use a bounded Air bias because the bridge doe
 
 Ordering is refreshed only for snapshot/registration, art, cell or visibility changes. Interpolation reuses card
 order and updates poses; it does not rescan or rewrite static trees, cells, overlays or effects. Particle cards own
-a separate anchor pool. A same-frame registration-only update preserves both pose/camera interpolation endpoints
-and their timestamps.
+a separate anchor pool. Same-frame publications replace discrete object/effect state and the current pose endpoint
+without restarting its timestamp or replacing the previous interpolation endpoint. The reader's change key includes
+native animation stages, health, occupancy and effect instance state: a logic frame number is not a render revision.
+Techno art is not culled by its anchor's shroud cell; the common pixel mask clips revealed roofs and vehicle edges.
+See [native presentation evidence](research/native-presentation.md) for the pinned draw paths and damage-body rule.
 
 The native building path also consumes `BUILDNGZ.SHA` and software integer Z gradients. The foundation ramp is
 an approximation, not a decoded per-art Z shape: roofs, recesses, nonrectangular foundations, custom bridges and
@@ -190,8 +195,9 @@ The live view's snapshot types carry optional fields beyond what the page forwar
 when its field is present and falls back to a documented estimate otherwise; all of them are unit-tested with
 synthetic snapshots (`tests/basic/hdLive*.test.ts`, `tests/basic/liveSmudges.test.ts`). Building/infantry H2 fields
 and the H3 overlay and smudge grids are read from pinned YR 1.001 and forwarded end to end. Evidence, optional-read
-boundaries and the remaining H1/H2 proposals are in `docs/remaster/research/hd-bridge-fields.md`; H1 only stops
-dropping fields the readers already read.
+boundaries and the remaining H1/H2 proposals are in `docs/remaster/research/hd-bridge-fields.md`. H1 is partial:
+native anim frame/stage/alpha/layer/owner/attachment/buildingAnim and bullet type/frame/velocity are forwarded;
+the table also lists the remaining optional fields. These additions forward data the readers already read.
 
 | Step | Fields                                                                                                                       | Used for                                                                                                       | Fallback without it                                                                                                                                                                                                                                                        |
 | ---- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -203,6 +209,10 @@ dropping fields the readers already read.
 | H2   | `LiveObject` buildState, buildupFrame, infantrySequence, sequenceFrame, infantryDrawFacingRaw                                | engine make frame (already reversed for selling); named infantry sequence, local step and optional draw facing | first-seen frame recorded at snapshot push; new buildings after a push gap greater than 54 logic frames assumed complete; otherwise estimated make after initial 60-frame grace period; selling unavailable; infantry walk/stand, Die1 at 0 health, FireUp after a shot    |
 | H3   | `snapshot.overlays`, `snapshot.smudges` (implemented independent grids)                                                      | ore growth and harvesting, walls, the engine's craters                                                         | the map's initial overlays and smudges; no HD scorch marks                                                                                                                                                                                                                 |
 
+Completed-building H2 also supplies `buildingFrame` and `buildingDamaged`: the engine-selected body/shadow frame
+(including occupancy) is independent of the yellow condition used for bibs and damage-animation variants.
+Without these optional fields the view retains its library-yellow body/layer estimate.
+
 ## Known limits
 
 - The page skips native effects by default (`?hd-passthrough=` all) and the live view draws them itself from their
@@ -212,11 +222,13 @@ dropping fields the readers already read.
 - HD effects cover what the page forwards to the live view: invisible anims and anims without art, and projectiles the
   original never draws (`Inviso`) are left out; beam colours are approximated (lasers use their inner colour, electric
   bolts one of two fixed colours); non-combat anims such as the move-order ring or ore glints are ignored.
-- Without H1 the native effect frames are estimates: anims whose engine rate differs from the art's (a few building
-  anims) drift, AltPalette art (corpses, civilian building collapses) shows the palette's default red remap instead of
-  its owner's colours, projectiles are grey dots, and smoke columns follow the view's own particles, which match the
-  engine's in rate, rise and life but not particle for particle. Building layers that depend on engine state the
-  readers do not expose (production, super weapon charge, low power) are not animated.
+- YR publishes native anim frame/stage, alpha, layer, owner and attachment data, including building anims, and
+  projectile type/frame/velocity. Older hosts retain the timing and grey-dot fallbacks. Smoke columns still follow
+  the view's particles rather than native particle frames; full H1 beam/debris/particle metadata remains incomplete.
+- Completed YR building bodies use `buildingFrame` from the native chooser, while bibs and animation variants use
+  the independent `buildingDamaged` yellow condition. Civilian `CanBeOccupied` bodies normally damage at red;
+  occupancy, TechLevel, gates and active mode offsets are included. Invalid rules/type reads and special
+  LaserFence/FirestormWall bodies retain the legacy library threshold fallback. Old hosts also retain that fallback.
 - YR 1.001 now supplies H2 building construction/selling and infantry sequence state. Invalid or partially initialized
   fields remain optional: without them, placed buildings estimate make progress from their first pushed snapshot,
   and sold buildings vanish without sale animation. A new building first observed after a snapshot gap longer than

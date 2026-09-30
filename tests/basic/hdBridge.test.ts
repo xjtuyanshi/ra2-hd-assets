@@ -132,7 +132,17 @@ describe('HD 桥状态机', () => {
       isSelected: false,
     };
     state.objects = [
-      { ...common, id: 1, uid: 11, kind: 'building', type: 'NAHAND', buildState: 'selling', buildupFrame: 0 },
+      {
+        ...common,
+        id: 1,
+        uid: 11,
+        kind: 'building',
+        type: 'NAHAND',
+        buildState: 'selling',
+        buildupFrame: 0,
+        buildingFrame: 0,
+        buildingDamaged: false,
+      },
       {
         ...common,
         id: 2,
@@ -148,9 +158,70 @@ describe('HD 桥状态机', () => {
     harness.setState(state);
     await advance(16);
     const pushed = view.push.mock.calls.at(-1)![0];
+    expect(pushed.objects[0]).toMatchObject({ buildingFrame: 0, buildingDamaged: false });
     expect(pushed.objects).toEqual(state.objects);
     expect(pushed.objects[2]).not.toHaveProperty('buildState');
     expect(pushed.objects[2]).not.toHaveProperty('sequenceFrame');
+    harness.stop();
+  });
+
+  it('forwards same-frame death progress and native effect stages, then an empty effect publication', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    const state = battle(20);
+    state.objects = [
+      {
+        id: 1,
+        uid: 1,
+        kind: 'infantry',
+        type: 'TEST',
+        owner: 0,
+        x: 0,
+        y: 0,
+        z: 0,
+        facingRaw: 0,
+        health: 0,
+        isSelected: false,
+        infantrySequence: 'Die1',
+        sequenceFrame: 0,
+      },
+    ];
+    const effect = {
+      id: 2,
+      uid: 2,
+      type: 'TEST',
+      x: 0,
+      y: 0,
+      z: 0,
+      frameCount: 15,
+      frame: 8,
+      stage: 8,
+      buildingAnim: false,
+      invisible: false,
+      translucent: true,
+      translucency: 25,
+    };
+    state.effects = {
+      anims: [effect, { ...effect, uid: 3, buildingAnim: true }],
+      bullets: [],
+      lasers: [],
+      electricBolts: [],
+      particleSystems: [],
+    };
+    harness.setState(state);
+    await advance(16);
+    const next = structuredClone(state);
+    next.objects[0]!.sequenceFrame = 2;
+    next.effects!.anims[0]!.frame = 10;
+    harness.setState(next);
+    await advance(16);
+    const pushed = view.push.mock.calls.at(-1)![0];
+    expect(pushed.objects[0]).toMatchObject({ health: 0, infantrySequence: 'Die1', sequenceFrame: 2 });
+    expect(pushed.effects!.anims[0]).toMatchObject({ frame: 10, stage: 8, translucency: 25 });
+    expect(pushed.effects!.anims[1]!.buildingAnim).toBe(true);
+    harness.setState({ ...next, effects: { ...next.effects!, anims: [] } });
+    await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].effects!.anims).toEqual([]);
     harness.stop();
   });
 

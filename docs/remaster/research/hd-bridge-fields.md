@@ -5,13 +5,16 @@ present; without them it falls back to the estimates listed in `docs/remaster/HD
 types to fill are `LiveSnapshot`, `LiveHouse`, `LiveObject`, `LiveCells` (`live/liveView.ts`) and `LiveAnim`,
 `LiveBullet`, `LiveParticleSystem`, `LiveVoxelAnim`, `LiveFireEvent`, `LiveBeam`, `LiveEffects` (`live/effects.ts`).
 H2 building and infantry state and H3 runtime cells (overlays and smudges, published as independent live
-grids) are implemented end to end. H1 and the remaining SHP-vehicle H2 fields below are proposals.
+grids) are implemented end to end. H1 is partially implemented; remaining fields below are proposals.
 
 ## H1: pass through what the readers already read
 
 Everything below already exists in `YrEffects` (`src/games/yr/effectsReader.ts`) or `YrHouseState`
 (`src/games/yr/stateReader.ts`); H1 only stops `toSnapshot` in `src/ui/pages/game/hdBridge.ts` (and, for houses, the
-game-neutral `GameRenderHouse`) from dropping it. Proposed `effects` member of `toSnapshot`:
+game-neutral `GameRenderHouse`) from dropping it. Implemented: anim frame/stage/frameCount, flat/layer/alpha,
+owner/attachment/buildingAnim and projectile type/frame/velocity. Zero-lifetime electric bolts are filtered by the
+YR projection, and the view accepts changed effects without requiring a new logic frame. The following is the full
+target projection, not the current game-neutral contract (debris, fire events, detailed beams and particles remain):
 
 ```ts
 effects: state.effects && {
@@ -84,16 +87,16 @@ animation values. An unavailable H2 read leaves the otherwise valid object in th
 
 ### Buildings
 
-| Field                               | Offset                             | Pinned executable evidence                                                                                                                                                                                                                     |
-| ----------------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Current `BState`                    | Building `+0x534`                  | Constructor `0x43B777` initializes -1; `BeginMode` (`0x447780`) stores `mov [esi+0x534], edi` at `0x4477C1`; AI promotes the queue at `0x43FFD5`.                                                                                              |
-| `QueueBState`                       | Building `+0x538`                  | Initialized -1 at `0x43B77D`; requested mode stored at `0x447794`; cleared at `0x4477B6` / `0x44003C`. It is validated but never substituted for the drawn mode.                                                                               |
-| Current / queued mission            | Building `+0xAC` / `+0xB4`         | `ForceMission` stores current at `0x5B2FE9`; getter `0x5B3040` falls back to queued at `0x5B304B` only if current is -1. Mission name table `0x816CAC`: Construction=18, Selling=19; AI bounds missions to 0..31 at `0x5B30B8`.                |
-| `Animation.Value`                   | Building `+0xF8`                   | `GetCurrentFrame` (`0x43EF90`) reads at `0x43EF9A`; animation AI (`0x4509D0`) adds Step `+0x110` at `0x450A05`, stores Value at `0x450A0E`.                                                                                                    |
-| Make Start / Count                  | BuildingType `+0xF04` / `+0xF08`   | `LoadBuildup` (`0x45F230`) stores Start=0 at `0x45F2FE`, foreground Count at `0x45F304`, halving SHP foreground/shadow frames at `0x45F2B4..0x45F2C8`. For Gate=yes, `0x45F2D2..0x45F2D9` replaces Count with `GateStages + 1` (type `+0x16F8`, key `0x81A6F4`, INI store `0x4612E8`, default 9 at `0x45E1F0`). `BeginMode` initializes Value from Start at `0x447AA7`.                                 |
-| `HasBuildUp`                        | Building `+0x6E9`                  | Cleared at `0x43B990`; set at `0x442CCF` after successful make loading. Mode 0 with no loaded make is unavailable, not proof of completion: `GetImageData` (`0x4513D0`) still asks for make art; `DrawIt` exits at `0x43D2BB` if it is absent. |
-| Type `Gate`                         | BuildingType `+0x16B7`             | INI store `0x460A13`, key `0x81AA8C`; `GetCurrentFrame` checks at `0x43EFD0` and reverses at `0x43EFDA..0x43EFEB`.                                                                                                                             |
-| Type `LaserFence` / `FirestormWall` | BuildingType `+0x16BF` / `+0x16C0` | INI stores `0x460ABA` / `0x460ADA`, keys `0x81AA30` / `0x81AA20`; frame overrides at `0x43EFAA` / `0x43EFBD` precede make calculation. H2 make state is omitted for these special types.                                                       |
+| Field                               | Offset                             | Pinned executable evidence                                                                                                                                                                                                                                                                                                                                              |
+| ----------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Current `BState`                    | Building `+0x534`                  | Constructor `0x43B777` initializes -1; `BeginMode` (`0x447780`) stores `mov [esi+0x534], edi` at `0x4477C1`; AI promotes the queue at `0x43FFD5`.                                                                                                                                                                                                                       |
+| `QueueBState`                       | Building `+0x538`                  | Initialized -1 at `0x43B77D`; requested mode stored at `0x447794`; cleared at `0x4477B6` / `0x44003C`. It is validated but never substituted for the drawn mode.                                                                                                                                                                                                        |
+| Current / queued mission            | Building `+0xAC` / `+0xB4`         | `ForceMission` stores current at `0x5B2FE9`; getter `0x5B3040` falls back to queued at `0x5B304B` only if current is -1. Mission name table `0x816CAC`: Construction=18, Selling=19; AI bounds missions to 0..31 at `0x5B30B8`.                                                                                                                                         |
+| `Animation.Value`                   | Building `+0xF8`                   | `GetCurrentFrame` (`0x43EF90`) reads at `0x43EF9A`; animation AI (`0x4509D0`) adds Step `+0x110` at `0x450A05`, stores Value at `0x450A0E`.                                                                                                                                                                                                                             |
+| Make Start / Count                  | BuildingType `+0xF04` / `+0xF08`   | `LoadBuildup` (`0x45F230`) stores Start=0 at `0x45F2FE`, foreground Count at `0x45F304`, halving SHP foreground/shadow frames at `0x45F2B4..0x45F2C8`. For Gate=yes, `0x45F2D2..0x45F2D9` replaces Count with `GateStages + 1` (type `+0x16F8`, key `0x81A6F4`, INI store `0x4612E8`, default 9 at `0x45E1F0`). `BeginMode` initializes Value from Start at `0x447AA7`. |
+| `HasBuildUp`                        | Building `+0x6E9`                  | Cleared at `0x43B990`; set at `0x442CCF` after successful make loading. Mode 0 with no loaded make is unavailable, not proof of completion: `GetImageData` (`0x4513D0`) still asks for make art; `DrawIt` exits at `0x43D2BB` if it is absent.                                                                                                                          |
+| Type `Gate`                         | BuildingType `+0x16B7`             | INI store `0x460A13`, key `0x81AA8C`; `GetCurrentFrame` checks at `0x43EFD0` and reverses at `0x43EFDA..0x43EFEB`.                                                                                                                                                                                                                                                      |
+| Type `LaserFence` / `FirestormWall` | BuildingType `+0x16BF` / `+0x16C0` | INI stores `0x460ABA` / `0x460ADA`, keys `0x81AA30` / `0x81AA20`; frame overrides at `0x43EFAA` / `0x43EFBD` precede make calculation. H2 make state is omitted for these special types.                                                                                                                                                                                |
 
 Construction mode 0 is requested at `0x44D6BD` and in `Mission_Construction` (`0x449A50`, call
 `0x449B32/0x449B36`). Completed construction requests idle mode 1 at `0x449AC5/0x449AC9`; repair requests active
@@ -158,7 +161,7 @@ infantry and effects on the same read-only dispatch, including building foundati
 unknown implementations are omitted. Only bounded integer coordinates are accepted for direction calculation.
 The atan helper `0x4CAE30` truncates the absolute slope/step index into the float table `0x8610B4`, with step at
 `0x8650B8`, handles axes/zero displacement and applies quadrant signs. The reader samples that same guest table.
-`0x5F3DFF..0x5F3E13` subtracts pi/2 (`0x7E2820`), multiplies by **-65534/(2*pi)** (`0x7E2818`), truncates via
+`0x5F3DFF..0x5F3E13` subtracts pi/2 (`0x7E2820`), multiplies by **-65534/(2\*pi)** (`0x7E2818`), truncates via
 `0x7C5F00` and stores the low word. Continuous host atan2 and rounding at a 65536 scale are not equivalent near
 frame boundaries. PrimaryFacing remains the travel heading; older snapshots without the override retain pose interpolation.
 
@@ -166,6 +169,10 @@ frame boundaries. PrimaryFacing remains the travel heading; older snapshots with
 schema change or regeneration is required for libraries that already carry `LibraryInfantry.sequences`.
 The view prefers a named engine sequence to inferred movement/fire/death. An old library missing a named sequence
 keeps those estimates; one with no sequence metadata at all draws its first body frame.
+
+Publication freshness, zero-health death art and the completed-building body fields `buildingFrame` and
+`buildingDamaged` are detailed in [native presentation evidence](native-presentation.md). Body-frame selection is
+independent of the make-frame path above and of yellow-condition damage animation layers.
 
 Limits: native Spy/disguise type substitution (`0x518DDF..0x518DF0`) is not projected. These fields do not provide locomotor bobbing or additional SHP vehicle
 walk/firing state. Real-game same-moment HD build/sell/infantry acceptance remains separate from disassembly and

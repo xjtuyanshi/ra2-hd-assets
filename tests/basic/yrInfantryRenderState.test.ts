@@ -56,6 +56,13 @@ function jumpjet() {
 }
 
 describe('YR H2 infantry animation state', () => {
+  it('retains a zero-health infantry until native removal and reads its current death stage', () => {
+    const f = fixture(11, 0);
+    f.i32(0x6c, 0);
+    expect(readYrInfantryRenderState(f.memory, f.pointer)).toEqual({ infantrySequence: 'Die1', sequenceFrame: 0 });
+    f.i32(O.sequenceFrame, 2);
+    expect(readYrInfantryRenderState(f.memory, f.pointer)).toEqual({ infantrySequence: 'Die1', sequenceFrame: 2 });
+  });
   it('publishes the target draw direction independently of travel facing using native word truncation', () => {
     const f = jumpjet();
     f.i32(0x388, 0x8000);

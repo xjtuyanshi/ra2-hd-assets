@@ -66,6 +66,10 @@ export interface GameRenderObject extends GameRenderPoint {
   buildState?: 'building' | 'selling' | 'done';
   /** Actual make-art frame, with the engine's sale/gate reversal already applied. */
   buildupFrame?: number;
+  /** Engine-selected completed-building body frame, including occupancy and damage variants. */
+  buildingFrame?: number;
+  /** Engine damage condition for bibs and animation layers; independent of the body-frame policy. */
+  buildingDamaged?: boolean;
   /** Current infantry art sequence key, when the game can report it. */
   infantrySequence?: string;
   /** Animation step within infantrySequence, before its start/facing offsets. */
@@ -130,6 +134,14 @@ export interface GameRenderAnim extends GameRenderPoint {
   buildingAnim: boolean;
   /** Updated by the engine but not drawn. */
   invisible: boolean;
+  frame?: number;
+  stage?: number;
+  translucent?: boolean;
+  translucency?: number;
+  flat?: boolean;
+  layer?: 'underground' | 'surface' | 'ground' | 'air' | 'top' | null;
+  owner?: number;
+  attachedTo?: { id: number; uid: number; kind: string } | null;
 }
 
 export interface GameRenderBullet extends GameRenderPoint {
@@ -137,6 +149,9 @@ export interface GameRenderBullet extends GameRenderPoint {
   uid: number;
   /** Never drawn by the original game (instant-hit weapons). */
   inviso: boolean;
+  type?: string;
+  frame?: number;
+  velocity?: GameRenderPoint;
 }
 
 export interface GameRenderLaser {
