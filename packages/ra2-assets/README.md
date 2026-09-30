@@ -306,6 +306,53 @@ column do not average two generations over most of a tile. Omit `--region` for t
 roughly 37 s on an M5 Pro for XMP29U2). `--dry-run` replaces diffusion with identity for pipeline checks; post-processing
 options (`--blend`, colour sigmas, `--margin`) reuse the cached tiles, so they can be changed without the GPU.
 
+## Tiled terrain, lake shores and cliff feet (Python)
+
+These tools require NumPy, Pillow and OpenCV (`cv2`). All source images, cache and work directories are explicit
+arguments; keep generated art outside Git. They preserve terrain alpha and do not edit manifests or material sidecars.
+
+- `python/terrain_tiles.py`: `prep` cuts `--source` using `--water-mask` and `--prompt` into `--tiles`, writing
+  `input.png`, `prompt.txt`, `tile.json` and a default `queue.txt`. `run` invokes a supplied CLI; `check` writes per-tile
+  `check.json` registration/colour diagnostics. `assemble` aligns, colour-locks and quilts `output.png` tiles into
+  `--output`; absent outputs retain the source. The result feeds `materials.json.terrainMap`.
+- `python/lake_shore.py`: takes the colour-matched original `--classification`, repainted `--terrain` and original
+  `--water-mask`, all at 2x composite resolution. It extends connected painted shallows and paints a dry lake bed,
+  producing `--output` for `terrainMap` and `--output-mask` for `waterMask`; set `waterBed: true` (a boolean, not a file).
+- `python/cliff_foot.py`: reads `<cache>/manifest.json` cell levels/ramps and composite scale/origin, plus the bed
+  `--terrain` and extended `--water-mask`. It produces wet rock/foam in `--output` (`terrainMap`), `--output-ignore`
+  (`shoreIgnore`), and optionally `--output-mask` (`waterMask`) with flooded foot strips. Retain `waterBed: true`.
+
+Set the path variables below to your local inputs and output directories. Supply the external CLI's argv template as
+`TERRAIN_TILES_COMMAND` or `run --command`; there is no default binary. Quote template arguments normally: placeholders
+`{tile}`, `{input}`, `{output}`, `{prompt_file}`, `{prompt}` and `{last}` expand **after** argument splitting, with no
+shell evaluation. The CLI runs in each tile directory and must save `output.png`. Use a fresh tile directory for a
+different source or prompt. Completed tiles are skipped; queues
+are interleaved with 3 concurrent processes, a 1500-second timeout and at most 2 attempts. Polling defaults to 10 seconds.
+`<work>/PAUSE` stops new launches while active jobs finish; a quota/rate-limit log writes `<work>/LIMIT_HIT.txt` and
+also stops launches. `<work>/sched.log` records progress; incomplete queues return a nonzero exit code.
+
+```bash
+python3 -B packages/ra2-assets/python/terrain_tiles.py prep --source "$SOURCE" --water-mask "$WATER_MASK" \
+  --prompt packages/ra2-assets/python/terrain_tiles_prompt.example.txt --tiles "$TILES"
+python3 -B packages/ra2-assets/python/terrain_tiles.py run "$TILES/queue.txt" --work "$WORK"
+python3 -B packages/ra2-assets/python/terrain_tiles.py check --tiles "$TILES"
+python3 -B packages/ra2-assets/python/terrain_tiles.py assemble --source "$SOURCE" --tiles "$TILES" \
+  --output "$WORK/terrain.png"
+python3 -B packages/ra2-assets/python/lake_shore.py --classification "$CLASSIFICATION" --terrain "$WORK/terrain.png" \
+  --water-mask "$WATER_MASK" --output "$WORK/bed.png" --output-mask "$WORK/shore-water.png"
+python3 -B packages/ra2-assets/python/cliff_foot.py --cache "$CACHE" --terrain "$WORK/bed.png" \
+  --water-mask "$WORK/shore-water.png" --output "$WORK/terrain-final.png" \
+  --output-ignore "$WORK/shore-ignore.png" --output-mask "$WORK/water-final.png"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_*.py'
+```
+
+The tuned defaults remain 1536x1024 composite-pixel tiles, 1280x768 strides, water coverage > 0.85 skipped, Lab blur
+sigmas 20/10 px with lightness/chroma lock 0.75/1.0, and a 3 px seam feather. Small composites use their actual crop
+size; adapt the example prompt's dimensions for those. Lake-bed distances use 84 composite px/cell; cliff heights
+use 15 × manifest scale composite px/level and ignore plateaus at least 2 levels above nearby water. Module docstrings
+and `--help` describe the remaining tuned constants and optional diagnostics. Review the outputs before assigning
+the final filenames, relative to the map cache, to `terrainMap`, `waterMask` and `shoreIgnore` in `materials.json`.
+
 ## Local sprite re-detailing (Python, experimental)
 
 `python/redetail_sprites.py` repaints selected body frames of a map cache's HD sprite atlas (`hd:sprites` output) with

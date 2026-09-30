@@ -1,0 +1,14 @@
+Task: image editing only. Do not write code other than what is needed to save/resize the image. Do not browse the web.
+
+input.png (1536x1024 px) is a piece of the GROUND TEXTURE of a map from the classic 2000 isometric real-time-strategy game Red Alert 2 (temperate theatre): a 2.5D isometric view looking down at about 30 degrees (2:1 diamond grid). It contains ONLY ground and may show: grassland (light yellow-green and darker green patches), sandy beaches and dirt, tall orange sandstone cliff faces (vertical walls seen from the front with the grassy plateau on top), shallow fords of flat river stones, and dark blue river water with a grey-green shallow band along the shore. There are no objects in it.
+
+Use your image generation / image editing tool with input.png as the reference image and produce the SAME piece of ground, re-rendered as a REALISTIC MODERN REMASTER ground texture, like a high-end modern 3D remake of this real-time-strategy game (photoreal PBR materials, crisp high-resolution detail, soft natural afternoon daylight from the upper left):
+- grass: a real meadow seen from above: many small clumps and tufts, fine blades, subtle mottling of lighter dry grass and darker lush grass following the input's light/dark patches, a few tiny bare soil spots; NOT painterly strokes, NOT straw, NOT a flat noise pattern;
+- sand and dirt: real fine beach sand and packed earth with very subtle wind ripples, sparse tiny pebbles and grains; NOT cracked mud, NOT crazing lines;
+- cliffs: real weathered orange-red sandstone with layered strata, vertical cracks, ledges and small fallen scree at the foot; the same cliff outline and height;
+- river stones in fords: real smooth wet river stones;
+- water and the shallow band: keep them exactly as in the input (plain water, it is replaced later); no foam, no waves.
+
+STRICT RULES: identical camera angle and framing (do not zoom, pan or rotate); every boundary stays exactly where it is: grass/sand borders, the shoreline, cliff top edges and cliff feet, and the shape of every patch; keep the same colours and brightness as the input (same greens, same sand colour, same orange cliffs), only more realistic and more detailed; do NOT add any objects: no trees, bushes, boulders, buildings, roads, vehicles, people or animals; no text, no border, no vignette, no cast shadows of things that are not in the input.
+
+Save the result as output.png in this directory with exactly 1536x1024 pixels: if the tool returns another size, resize the whole generated image to 1536x1024 (never crop, no letterbox). Then reply with one line saying the tool used and the generated size before resizing.
