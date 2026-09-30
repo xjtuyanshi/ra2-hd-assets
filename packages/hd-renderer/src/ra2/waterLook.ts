@@ -2,6 +2,7 @@ import {
   Fn,
   abs,
   cameraPosition,
+  cameraProjectionMatrix,
   clamp,
   color,
   cos,
@@ -21,13 +22,16 @@ import {
   smoothstep,
   texture,
   time,
+  uniform,
   vec2,
   vec3,
 } from 'three/tsl';
+import type { ReflectorNode } from 'three/webgpu';
 import { DEFAULT_ATMOSPHERE_NODES, moonlit, sampleLightField } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import type { WaterUniforms } from '../waterShading';
 import { RIPPLE_SLOPE_RANGE, WATER_TEXTURE_SIZE, waterTextures } from '../proceduralTextures';
+import { LEVEL_HEIGHT } from '../world';
 
 /**
  * Open water for original maps, built to read as real water rather than a glossy sheet. Two looks share one interface
@@ -514,6 +518,93 @@ export function wetShore(shore: ShaderNode): ShaderNode {
 }
 
 // ------------------------------------------------------------------------------------ painted lake-bed look
+
+/**
+ * World units per raw mirror depth for an orthographic WebGPU reflector (three r186, clipBias = 0).
+ * ReflectorNode replaces projection row 3 with a positive multiple of the unit water plane in view space.
+ * Row 4 stays (0, 0, 0, 1), so depth = clip.z / clip.w = height * length(row3.xyz). Row3.w locates the
+ * water plane: it cancels at the waterline, including at nonzero water elevations. There is no depth offset or
+ * WebGL-style 0.5 remapping. Cleared depth = 1 is sky, not a height measurement. Keep the last valid scale if
+ * a projection is temporarily degenerate; the caller starts at zero until the mirror has rendered.
+ */
+export function reflectionWorldPerDepth(elements: ArrayLike<number>, previous = 0): number {
+  const scale = 1 / Math.hypot(elements[2]!, elements[6]!, elements[10]!);
+  return Number.isFinite(scale) && scale > 0 ? scale : previous;
+}
+
+/**
+ * Lake-bed mirror only. Heights are world units above the water (one RA2 level = 0.40825 units).
+ * Across/along gains are screen-plane world units per (unit slope * unit height); projection converts them to UV.
+ * At zoom 1 (42.426 CSS px/world unit), a moderate-wind peak slope of 0.2 at 2-3 levels adds 6.93-10.39 px
+ * vertically and 1.04-1.56 px horizontally. Spread is screen-plane units per unit height: the three taps span
+ * 4.50-6.75 CSS px at those heights. These scales follow zoom, independently of DPR and the half-size mirror.
+ * The old UV offset still probes height, but its final contribution fades in with height and is capped at
+ * baseRippleMax screen-plane world units (0.51 CSS px at zoom 1): total displacement is zero at height zero,
+ * and the vertical peaks above remain within 6.42-10.90 px including that residual offset.
+ * Contrast reaches keepTop at fadeHeight; maxHeight bounds both sky-side edge breakup and very tall objects.
+ */
+const RIPPLED_REFLECTION = {
+  across: 0.15,
+  along: 1,
+  spread: 0.065,
+  baseRippleMax: 0.012,
+  fadeHeight: 3 * LEVEL_HEIGHT,
+  maxHeight: 4 * LEVEL_HEIGHT,
+  keepTop: 0.6,
+} as const;
+
+/** Height-dependent distortion and three-tap vertical blur, using the bed normal's full ripple/swell/rain slope. */
+export function rippledReflection(
+  mirror: ReflectorNode,
+  position: ShaderNode,
+  uniforms: WaterUniforms,
+): { colour: ShaderNode; coverage: ShaderNode } {
+  const worldPerDepth = uniform(0).onRenderUpdate(({ camera }, self) => {
+    // Do not read the unmodified camera clone before the first reflected render. A previous-frame scale is fine.
+    if (!camera || !mirror.reflector.hasOutput) return self.value;
+    return reflectionWorldPerDepth(mirror.reflector.getVirtualCamera(camera).projectionMatrix.elements, self.value);
+  });
+  const p: ShaderNode = position.xz;
+  const slope = enhancedSlope(p, uniforms.wind, uniforms.rain, gustAt(p));
+  const baseUv: ShaderNode = mirror.uvNode;
+  const offset: ShaderNode = reflectionOffset(p, uniforms.wind, uniforms.rain);
+  const uv0: ShaderNode = baseUv.add(offset);
+  const depth = mirror.getDepthNode();
+  const coverageAt = (uv: ShaderNode): ShaderNode => smoothstep(0.9999, 0.999, depth.sample(uv).x);
+  const seedDepth: ShaderNode = depth.sample(uv0).x;
+  const h: ShaderNode = smoothstep(0.9999, 0.999, seedDepth)
+    .greaterThan(0)
+    .select(clamp(seedDepth.mul(worldPerDepth), 0, RIPPLED_REFLECTION.maxHeight), float(RIPPLED_REFLECTION.maxHeight));
+  // The fixed camera's ground axes are across (-x + z) and along (x + z); mirror UV flips screen X.
+  const across: ShaderNode = slope.y.sub(slope.x).mul(Math.SQRT1_2);
+  const along: ShaderNode = dot(slope, TOWARDS_CAMERA);
+  const projection: ShaderNode = cameraProjectionMatrix;
+  const uvPerWorld: ShaderNode = vec2(projection.element(0).x, projection.element(1).y).abs().mul(0.5);
+  const heightFade: ShaderNode = smoothstep(0, RIPPLED_REFLECTION.fadeHeight, h);
+  // Keeping the full old ~4 px shift in uv1 would move even a zero-height cliff foot. Retain only a bounded,
+  // height-faded residual there; the unmodified offset above remains the depth probe requested by the bed path.
+  const offsetWorld: ShaderNode = offset.div(uvPerWorld);
+  const residual: ShaderNode = offsetWorld
+    .mul(float(RIPPLED_REFLECTION.baseRippleMax).div(max(offsetWorld.length(), RIPPLED_REFLECTION.baseRippleMax)))
+    .mul(heightFade)
+    .mul(uvPerWorld);
+  const uv1: ShaderNode = baseUv
+    .add(residual)
+    .add(vec2(across.mul(RIPPLED_REFLECTION.across), along.mul(RIPPLED_REFLECTION.along)).mul(h).mul(uvPerWorld));
+  let colour: ShaderNode = vec3(0);
+  let coverage: ShaderNode = float(0);
+  for (const k of [-1, 0, 1]) {
+    const uv: ShaderNode = uv1.add(vec2(0, h.mul(k * RIPPLED_REFLECTION.spread).mul(uvPerWorld.y)));
+    const covered = coverageAt(uv);
+    // Average premultiplied taps so cleared/sky texels cannot darken the silhouette before coverage is applied.
+    colour = colour.add(mirror.sample(uv).rgb.mul(covered));
+    coverage = coverage.add(covered);
+  }
+  const keep: ShaderNode = mix(float(1), float(RIPPLED_REFLECTION.keepTop), heightFade);
+  // Folding keep into average coverage is exactly mix(waterSky, mix(waterSky, reflected, keep), coverage).
+  // bedWaterLook supplies its own sky AFTER the existing moonlight grade, avoiding a second grade on that sky.
+  return { colour: colour.div(max(coverage, 0.00001)), coverage: coverage.div(3).mul(keep) };
+}
 
 /** Beach profile: shelf width (cells), initial optical-depth slope, then quadratic deepening beyond the shelf. */
 export const BEACH_PROFILE = { shelf: 0.35, slope: 1.9, drop: 20 } as const;

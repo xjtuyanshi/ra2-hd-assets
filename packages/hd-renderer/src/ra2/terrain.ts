@@ -52,7 +52,7 @@ import { LEVEL_HEIGHT } from '../world';
 import { NO_TILE, ra2Screen, type Ra2Cache, tileAtlasPixel } from './cache';
 import { srgbScale, terrainGradeAt } from './mapLighting';
 import { SHORE_MAX, SHORE_MIN } from './shoreField';
-import { bedWaterLook, reflectionOffset, waterLook, waterPreset, wetShore } from './waterLook';
+import { bedWaterLook, reflectionOffset, rippledReflection, waterLook, waterPreset, wetShore } from './waterLook';
 
 /**
  * Display compensation of the HD water look. The water (waterLook.ts) was tuned on screen under PBR Neutral, which
@@ -567,11 +567,15 @@ function createMaterials(
       const mirror = reflector({ resolutionScale: 0.5, depth: true });
       mirror.target.rotateX(-Math.PI / 2);
       mirror.target.position.y = waterY;
-      const offset: ShaderNode = reflectionOffset(positionWorld.xz, water.wind, water.rain);
-      mirror.uvNode = (mirror.uvNode as ShaderNode).add(offset);
-      const depth = mirror.getDepthNode() as ShaderNode;
-      depth.uvNode = mirror.uvNode;
-      reflection = { colour: (mirror as ShaderNode).rgb, coverage: smoothstep(0.9999, 0.999, depth.x) };
+      if (map.waterBed && waterPreset.style === 'enhanced') {
+        reflection = rippledReflection(mirror, positionWorld, water);
+      } else {
+        const offset: ShaderNode = reflectionOffset(positionWorld.xz, water.wind, water.rain);
+        mirror.uvNode = (mirror.uvNode as ShaderNode).add(offset);
+        const depth = mirror.getDepthNode() as ShaderNode;
+        depth.uvNode = mirror.uvNode;
+        reflection = { colour: (mirror as ShaderNode).rgb, coverage: smoothstep(0.9999, 0.999, depth.x) };
+      }
       reflectionTarget = mirror.target;
     }
     // Sheltered water within about 1.5 cells of a cliff: no surf there, so the scree the art paints at a cliff foot is
