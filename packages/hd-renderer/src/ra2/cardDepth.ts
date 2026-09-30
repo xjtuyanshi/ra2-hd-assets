@@ -7,7 +7,11 @@ import { PIXELS_PER_CELL_EDGE } from '../world';
 const VERTICAL_DEPTH = Math.tan(Math.PI / 6) / PIXELS_PER_CELL_EDGE;
 const GROUND_DEPTH = Math.sqrt(3) / PIXELS_PER_CELL_EDGE;
 const FOUNDATION_DEPTH = 1 / (Math.SQRT2 * Math.cos(Math.PI / 6));
-export const CARD_CLEARANCE = 0.03;
+export const SPRITE_DECAL_LIFT = 0.02;
+export const EFFECT_DECAL_LIFT = 0.025;
+// At the SAME screen pixel, raising a horizontal decal by h pulls its depth forward by h / sin(30 degrees),
+// not h * sin(30 degrees). Upright lower rows must clear that plane: 0.03 let SHP shadows cut holes in walls.
+export const CARD_CLEARANCE = EFFECT_DECAL_LIFT / Math.sin(Math.PI / 6) + 0.01;
 
 /**
  * Camera-space displacement from the unpushed billboard. w/h describe a rectangular foundation; dx/ds move a

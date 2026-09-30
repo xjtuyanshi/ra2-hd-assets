@@ -12,7 +12,7 @@ import {
 import { EffectSpriteLayer, type EffectInstance } from '../src/live/effectSprites';
 import { LiveEffectsDriver } from '../src/live/effects';
 import type { Ra2Cache } from '../src/ra2/cache';
-import { assignPainterBias, painterObject, spritePainterBias } from '../src/ra2/painterOrder';
+import { assignPainterBias, MAX_PAINTER_BIAS, painterObject, spritePainterBias } from '../src/ra2/painterOrder';
 
 describe('dirty instance uploads', () => {
   it('compares float32 values and retains pending ranges across multiple writes before rendering', () => {
@@ -77,7 +77,7 @@ describe('dirty instance uploads', () => {
     expect(layer.count).toBe(0);
   });
 
-  it('shares bounded ground card biases across pages while leaving decals, shadows and air/top passes physical', () => {
+  it('shares bounded card biases across pages, tests Air Z and retains the untested Top pass', () => {
     const atlas = new DataTexture();
     const cache = {
       paletteAtlas: { image: { height: 1 } },
@@ -145,8 +145,9 @@ describe('dirty instance uploads', () => {
       );
       for (const key of ['0:air', '0:top']) {
         const page = meshes.get(key)!;
-        expect(page.style.array[3]).toBe(0);
-        expect(page.mesh.material).toMatchObject({ depthTest: false, depthWrite: false });
+        expect(page.style.array[3]).toBeCloseTo(key === '0:air' ? MAX_PAINTER_BIAS : 0, 7);
+        expect(page.mesh.material).toMatchObject({ depthTest: key === '0:air', depthWrite: false });
+        expect(page.mesh.material.depthNode).not.toBeNull();
       }
       expect(ground.style.array[3]).toBe(0);
     } finally {
@@ -216,6 +217,25 @@ describe('bounded beam geometry', () => {
     expect(setBeams).toHaveBeenCalledTimes(1);
     driver.push(snapshot, 101, 1, wind);
     expect(setBeams).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears an expired native bolt in the same logic frame and accepts a replacement bolt', () => {
+    const setBeams = vi.fn();
+    const driver = new LiveEffectsDriver({ setBeams } as unknown as EffectsLayer, () => false);
+    const wind = new Vector3();
+    const bolt = {
+      source: { x: 0, y: 0, z: 0 },
+      target: { x: 256, y: 256, z: 0 },
+      kind: 'bolt' as const,
+      colour: [150, 200, 255] as [number, number, number],
+    };
+    const snapshot = { anims: [], bullets: [], particleSystems: [], beams: [bolt] };
+    driver.push(snapshot, 100, 0, wind);
+    driver.push({ ...snapshot, beams: [] }, 100, 0.01, wind);
+    expect(setBeams.mock.calls.at(-1)![1]).toEqual([]);
+    driver.push({ ...snapshot, beams: [{ ...bolt, target: { x: 512, y: 256, z: 0 } }] }, 100, 0.02, wind);
+    expect(setBeams.mock.calls.at(-1)![1][0].to.x).toBe(2);
+    expect(setBeams).toHaveBeenCalledTimes(3);
   });
 
   it('bounds beam specs while preserving both the visible geometry prefix and surviving light tail', () => {

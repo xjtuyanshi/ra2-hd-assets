@@ -153,8 +153,6 @@ describe('LiveView physical occlusion scheduling', () => {
     const previous = p.live.previous;
     const reordered = snapshot(2, 356);
     reordered.objects[0]!.renderOrder!.index = 8;
-    // A poll can also observe partially updated native coordinates. Registration-only acceptance keeps the pose.
-    reordered.objects[0]!.x = 999;
     p.view.push(reordered, 140);
     p.view.render(150);
     expect(p.live.current).toBe(current);
@@ -171,21 +169,51 @@ describe('LiveView physical occlusion scheduling', () => {
     expect(p.hd.view.target.x).toBeCloseTo(406 / 60);
   });
 
-  it('refreshes visibility on a new logic snapshot and leaves static layers out of the update', () => {
+  it('updates a same-frame pose endpoint without restarting interpolation', () => {
+    const p = presentation();
+    p.view.push(snapshot(1, 256), 0);
+    p.view.push(snapshot(2, 356), 100);
+    p.view.push(snapshot(2, 456), 140);
+    p.view.render(150);
+    expect(p.live.current?.at).toBe(100);
+    expect(p.live.previous?.snapshot.objects[0]!.x).toBe(256);
+    expect(p.visual.root.position.x).toBeCloseTo(356 / 256);
+    p.view.render(200);
+    expect(p.visual.root.position.x).toBeCloseTo(456 / 256);
+  });
+
+  it('keeps shrouded-anchor art for the per-pixel mask and still hides InvisibleInGame types', () => {
     const p = presentation();
     p.view.push(snapshot(1, 256), 0);
     p.view.render(0);
     p.shroud.hidden = true;
     p.view.push(snapshot(2, 256), 100);
     p.view.render(100);
-    expect(p.visual.root.visible).toBe(false);
-    expect(p.live.painterObjects).toHaveLength(0);
+    expect(p.visual.root.visible).toBe(true);
+    expect(p.live.painterObjects).toHaveLength(1);
     p.shroud.hidden = false;
     p.view.push(snapshot(3, 256), 200);
     p.view.render(200);
     expect(p.visual.root.visible).toBe(true);
     expect(p.live.painterObjects).toHaveLength(1);
+    Object.assign(p.visual, { libraryType: { invisible: true } });
+    p.view.push(snapshot(4, 256), 300);
+    p.view.render(300);
+    expect(p.visual.root.visible).toBe(false);
+    expect(p.live.painterObjects).toHaveLength(0);
     for (const upload of p.uploads) expect(upload).not.toHaveBeenCalled();
+  });
+
+  it('sweeps old native projectiles when the effects publication becomes unavailable', () => {
+    const p = presentation();
+    const update = vi.fn();
+    Object.assign(p.live, { projectiles: { update } });
+    const snap = snapshot(1, 256);
+    const bullets = [{ id: 2, uid: 2, type: 'TEST', x: 0, y: 0, z: 0 }];
+    p.live.applyEffects({ ...snap, effects: { anims: [], bullets, particleSystems: [] } });
+    expect(update.mock.calls[0]![0]).toBe(bullets);
+    p.live.applyEffects({ ...snap, effects: null });
+    expect(update.mock.calls[1]!.slice(0, 2)).toEqual([[], []]);
   });
 
   it('keeps particle positions when an object/turret rebuild borrows more sprite anchors', () => {

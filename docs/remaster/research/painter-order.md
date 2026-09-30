@@ -149,7 +149,7 @@ d = px / 30
 sFront = max(0, min(2*w - d, 2*h + d))
 groundPush = py * sqrt(3) / P
 facadePush = sFront / (sqrt(2) * cos(30°)) - py * tan(30°) / P
-push = max(groundPush, facadePush) + 0.03
+push = max(groundPush, facadePush) + CARD_CLEARANCE
 depth = geometryDepth - (push - placementPush + traversalBias) / (far - near)
 ```
 
@@ -157,6 +157,19 @@ Each screen column intersects the two front faces of the foundation extrusion. O
 shifted building animation cards on the same profile. Ordinary trees, infantry and effects use `sFront = 0`:
 vertical above their draw point and ground-following below it. This removes frame-padding-dependent tree/explosion
 ordering and prevents surrounding ground from cutting the lower rows of a unit card.
+
+The clearance must exceed the lifted decal plane **at the same screen pixel**. At this camera pitch,
+a horizontal plane raised by `h` advances depth by `h / sin(30 degrees)`, not `h * sin(30 degrees)`.
+SHP shadows/decals retain their `0.02` lift, and effect decals retain `0.025`; `CARD_CLEARANCE` is
+the latter's camera-depth displacement plus `0.01` (currently `0.06`). A `0.03` clearance allowed
+ground-following wall pixels to fail against their own or neighboring shadows, leaving dark holes.
+Frame selection, wall connection data, placement and shadow opacity are unchanged.
+
+Ground and Air effect cards both test this reconstructed depth and do not write depth. Air still
+composites after Ground and uses a bounded traversal bias over coincident unit pixels; it cannot
+bypass a tree or building facade. Animation, SHP projectile and particle producers share this material
+policy, including the translucent variant. Top remains the explicit untested pass. This preserves
+physical occlusion rather than reconstructing every native read-only unit/translucency interaction.
 
 High-bridge cards instead use a horizontal plane at `4 * LEVEL_HEIGHT`; neighboring pieces have identical
 depth at the same screen pixel. Their draw offsets remain unchanged. Voxel geometry retains its complete depth,
@@ -192,7 +205,8 @@ A same-frame registration-only push replaces metadata on the existing timed snap
 `previous`, `current.at`, object poses and camera endpoints. It invalidates object ordering, not the effects clock.
 
 Asset-free coverage is in `packages/hd-renderer/tests/painterOrder.test.ts`, `liveOcclusion.test.ts`,
-`liveScheduling.test.ts`, `effectBuffers.test.ts`, `projectiles.test.ts`, and `tests/basic/liveSmudges.test.ts`.
+`liveScheduling.test.ts`, `effectBuffers.test.ts`, `effectOcclusion.test.ts`, `projectiles.test.ts`,
+`vertexBuffers.test.ts`, and `tests/basic/liveSmudges.test.ts`.
 The LiveView regression executes the real push/render/object/effect/order methods with GPU/resource boundaries
 replaced, and checks interpolation, unchanged static layers, shroud visibility and particle anchor ownership.
 The root `test:unit` entry includes the whole HD renderer test directory. None of these tests claims a live match,

@@ -235,6 +235,9 @@ export interface YrObjectState {
   buildState?: 'building' | 'selling' | 'done';
   /** Actual building make SHP frame, including engine sale/gate reversal. */
   buildupFrame?: number;
+  /** Native completed-building frame and independently selected damage layers. */
+  buildingFrame?: number;
+  buildingDamaged?: boolean;
   /** Art sequence key from InfantryClass::SequenceAnim. */
   infantrySequence?: string;
   /** Sequence-local animation stage, excluding start/facing offsets. */

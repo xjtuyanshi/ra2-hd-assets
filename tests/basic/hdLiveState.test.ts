@@ -281,6 +281,13 @@ function infantryView(metadata: Record<string, InfantrySequence> | null = sequen
 }
 
 describe('infantry engine sequences', () => {
+  it('draws the native death step with health zero and holds it while renderer time advances', () => {
+    const target = infantryView();
+    const dying = { ...infantry, health: 0, infantrySequence: 'Die1', sequenceFrame: 2 };
+    target.visual.lastMoveFrame = target.visual.firedFrame = 100;
+    expect(target.draw(dying, 0, 100)).toBe(sequences.Die1!.start + 2);
+    expect(target.draw(dying, 0, 9000)).toBe(sequences.Die1!.start + 2);
+  });
   it('uses the engine draw facing for target-directed frames, including zero and sector boundaries', () => {
     const target = infantryView({ FireFly: { start: 8, count: 6, facingMultiplier: 6 } });
     const native = { ...infantry, infantrySequence: 'FireFly', sequenceFrame: 2 };
@@ -353,5 +360,36 @@ describe('infantry engine sequences', () => {
     expect(guard.draw(infantry)).toBe(5 + facingFrame(0, 8));
     const legacy = infantryView(null);
     expect(legacy.draw({ ...infantry, infantrySequence: 'Prone', sequenceFrame: 8 })).toBe(0);
+  });
+});
+
+describe('native building body selection', () => {
+  it('uses frame zero below yellow and occupancy frames while keeping damaged bib art independent', () => {
+    const frames: SpriteFrame[] = Array.from({ length: 4 }, (_, i) => ({ rect: [i, 0, 1, 1], offset: [0, 0] }));
+    const bib = frames.map((f) => ({ ...f, rect: [10 + f.rect[0], 0, 1, 1] as [number, number, number, number] }));
+    const type: LibraryType = { ...buildingType, building: { bodyFrames: 4, layers: [], bib: 'bib' } };
+    const target = Object.assign(Object.create(LiveView.prototype), {
+      library: {
+        conditionYellow: 0.5,
+        library: {
+          sprites: {
+            body: { frames, remap: true },
+            bib: { frames: bib, remap: true },
+          },
+        },
+        page: () => ({}),
+      },
+      spritePool: new SpritePool(),
+      civilian: new Set(),
+      buildingPalette: () => 'test',
+      buildupFrame: () => null,
+      nativeBuildingAnims: () => null,
+    });
+    for (const nativeFrame of [0, 1, 2, 3]) {
+      const batch = new Map<number, SpriteInstance[]>();
+      const object = { ...building, health: 0.475, buildingFrame: nativeFrame, buildingDamaged: true };
+      target.libraryBuildingSprites(object, { libraryType: type, paletteKey: '' }, batch, { frame: 1 });
+      expect(batch.get(0)!.map((s) => s.frame)).toEqual([bib[1], frames[nativeFrame]]);
+    }
   });
 });

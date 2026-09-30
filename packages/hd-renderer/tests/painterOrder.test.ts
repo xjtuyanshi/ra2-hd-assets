@@ -5,7 +5,13 @@ import type { DirtyAttribute } from '../src/dirtyAttribute';
 import { SpritePool } from '../src/live/spritePool';
 import { biasedDepth, createPainterDepth } from '../src/painterDepth';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../src/ra2/bridgeDepth';
-import { CARD_CLEARANCE, cardDepthPush, foundationPointPush } from '../src/ra2/cardDepth';
+import {
+  CARD_CLEARANCE,
+  EFFECT_DECAL_LIFT,
+  SPRITE_DECAL_LIFT,
+  cardDepthPush,
+  foundationPointPush,
+} from '../src/ra2/cardDepth';
 import type { Ra2Cache } from '../src/ra2/cache';
 import { Ra2NightDressing } from '../src/ra2/nightDressing';
 import {
@@ -155,6 +161,49 @@ describe('YR traversal and physical occlusion', () => {
     expect(cardDepthPush(0, py)).toBeGreaterThan(groundPush);
   });
 
+  it.each([SPRITE_DECAL_LIFT, EFFECT_DECAL_LIFT])(
+    'keeps connected wall lower rows ahead of shadow/decal planes lifted by %s',
+    (lift) => {
+      // Synthetic end/middle/end wall cards, with the same NW draw-point convention as live wall overlays.
+      // Above py=0 the card stands vertically; below it the depth model follows the ground. Both must pass.
+      for (const x of [50, 51, 52]) {
+        const anchor = objectAnchor({ kind: 'overlay', type: 'WALL', x, y: 50, z: 0, drawOffset: [0, 0] });
+        for (const px of [-15, 0, 15])
+          for (const py of [-12, 0, 12, 24]) {
+            const pixel: [number, number] = [screen(anchor)[0] + px, screen(anchor)[1] + py];
+            // Intersect the SAME view ray with the lifted ground plane, including the projected height shift.
+            // Comparing depth at the same world X/Z instead would miss the original 0.03 vs 0.04 failure.
+            const sum = (pixel[1] + lift * Math.cos(Math.PI / 6) * PIXELS_PER_CELL_EDGE) / 15;
+            const diff = pixel[0] / 30;
+            const shadow = new Vector3((sum + diff) / 2, lift, (sum - diff) / 2);
+            expect(screen(shadow)[0]).toBeCloseTo(pixel[0], 8);
+            expect(screen(shadow)[1]).toBeCloseTo(pixel[1], 8);
+            expect(cardAt(anchor, pixel)).toBeLessThan(depthAt(shadow));
+          }
+      }
+    },
+  );
+
+  it('composites Air over coincident Ground units but still hides it behind trees and both building faces', () => {
+    const anchor = new Vector3(50, 0, 50);
+    const pixel = screen(new Vector3(50, 0.3, 50));
+    const unit = painterObject(2, 25600, 1000);
+    assignPainterBias([unit]);
+    const air = cardAt(anchor, pixel, 0, 0, MAX_PAINTER_BIAS);
+    expect(air).toBeLessThan(cardAt(anchor, pixel, 0, 0, spritePainterBias(unit, 1)));
+    expect(air).toBeLessThan(biasedDepth(depthAt(new Vector3(50, 0.3, 50)), VOXEL_CLEARANCE + unit.bias, range));
+    const far = new Vector3(49.5, 0, 49.5);
+    expect(cardAt(far, pixel, 0, 0, MAX_PAINTER_BIAS)).toBeGreaterThan(cardAt(anchor, pixel));
+    for (const [x, z] of [
+      [49.5, 52.5],
+      [52.5, 49.5],
+    ]) {
+      const behind = new Vector3(x!, 0, z!);
+      const at = screen(new Vector3(x!, 0.3, z!));
+      expect(cardAt(behind, at, 0, 0, MAX_PAINTER_BIAS)).toBeGreaterThan(cardAt(anchor, at, 4, 4));
+    }
+  });
+
   it('tests under/on bridge units against one elevated plane across neighbouring deck cells', () => {
     const deck = (x: number) =>
       objectAnchor({ kind: 'overlay', type: 'BRIDGE1', x, y: 10, z: 0, drawOffset: [0, -60] });
@@ -212,7 +261,7 @@ describe('YR traversal and physical occlusion', () => {
   });
 });
 
-type Buffers = { anchor: DirtyAttribute; params: DirtyAttribute; flags: DirtyAttribute; occlusion: DirtyAttribute };
+type Buffers = { anchor: DirtyAttribute; params: DirtyAttribute; flags: DirtyAttribute };
 
 describe('sprite depth attributes', () => {
   it('uploads foundation profiles and biases across atlases while keeping shadows, ore and placement physical', () => {
@@ -239,7 +288,7 @@ describe('sprite depth attributes', () => {
     const layer = new SpriteLayer(cache, [card]);
     try {
       const buffers = layer as unknown as Buffers;
-      expect(Array.from(buffers.occlusion.array)).toEqual([4, 2, 0, 0]);
+      expect(Array.from(buffers.flags.array.slice(4, 8))).toEqual([4, 2, 0, 0]);
       const placement = Array.from(buffers.params.array);
       layer.setInstances([{ ...card, painterPart: 0.1 }]);
       expect(buffers.flags.array[3]).toBeGreaterThan(0);
@@ -249,8 +298,8 @@ describe('sprite depth attributes', () => {
         expect(buffers.flags.array[3]).toBe(0);
       }
       layer.setInstances([{ ...card, painter: undefined, deckHeight: HIGH_BRIDGE_HEIGHT }]);
-      expect(buffers.occlusion.array[0]).toBe(-1);
-      expect(buffers.occlusion.array[1]).toBeCloseTo(HIGH_BRIDGE_HEIGHT, 6);
+      expect(buffers.flags.array[4]).toBe(-1);
+      expect(buffers.flags.array[5]).toBeCloseTo(HIGH_BRIDGE_HEIGHT, 6);
       const material = layer.mesh.material as MeshBasicNodeMaterial;
       expect(material.depthTest && material.depthWrite).toBe(true);
       expect(material.depthNode).not.toBeNull();

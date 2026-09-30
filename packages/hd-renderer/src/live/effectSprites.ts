@@ -1,13 +1,4 @@
-import {
-  Color,
-  Group,
-  InstancedMesh,
-  MeshBasicNodeMaterial,
-  NormalBlending,
-  PlaneGeometry,
-  type Texture,
-  Vector3,
-} from 'three/webgpu';
+import { Color, Group, MeshBasicNodeMaterial, NormalBlending, type Texture, Vector3 } from 'three/webgpu';
 import {
   Fn,
   float,
@@ -32,17 +23,18 @@ import {
 } from 'three/tsl';
 import type { SpriteFrame } from '../../../ra2-assets/src/manifest';
 import { DirtyAttribute } from '../dirtyAttribute';
+import { InstancedQuad } from '../instancedQuad';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import type { Ra2Cache } from '../ra2/cache';
-import { cardDepthNode } from '../ra2/cardDepth';
-import { spritePainterBias, type PainterObject } from '../ra2/painterOrder';
+import { cardDepthNode, EFFECT_DECAL_LIFT } from '../ra2/cardDepth';
+import { MAX_PAINTER_BIAS, spritePainterBias, type PainterObject } from '../ra2/painterOrder';
 
 /** How an effect frame is drawn. */
 export type EffectDraw = 'card' | 'flat' | 'shadow';
 /**
- * Draw pass, following the engine's layers: `ground` is depth-tested against units and buildings (and decals lie on
- * the terrain), `air` is drawn after every ground object like the engine's air layer, `top` over everything.
+ * Draw pass, following the engine's layers: Ground and Air both test object/terrain Z. Air composites later,
+ * without writing depth, so its registration layer never bypasses a tree or building's occlusion. Top is untested.
  */
 export type EffectPass = 'ground' | 'air' | 'top';
 
@@ -74,10 +66,12 @@ const CAPACITY = 4096;
 const MARGIN = 1;
 const RENDER_ORDER: Record<EffectPass, number> = { ground: 6, air: 7, top: 8 };
 const DRAW_RANK: Record<EffectDraw, number> = { flat: 0, shadow: 1, card: 2 };
-const cardPainterBias = (instance: EffectInstance): number =>
-  instance.pass === 'ground' && instance.draw === 'card'
-    ? spritePainterBias(instance.painter, instance.painterPart)
-    : 0;
+const cardPainterBias = (instance: EffectInstance): number => {
+  if (instance.draw !== 'card' || instance.pass === 'top') return 0;
+  // Air composites over coincident Ground/unit pixels, but never receives an unconditional foreground plane.
+  // Stay inside the existing traversal budget so a farther impact still fails a tree/facade's physical Z test.
+  return instance.pass === 'air' ? MAX_PAINTER_BIAS : spritePainterBias(instance.painter, instance.painterPart);
+};
 const compareCards = (a: EffectInstance, b: EffectInstance): number => {
   const rank = DRAW_RANK[a.draw] - DRAW_RANK[b.draw];
   if (rank) return rank;
@@ -237,7 +231,7 @@ export interface EffectPage {
 export const MESH_IDLE_SECONDS = 90;
 
 class PageMesh {
-  readonly mesh: InstancedMesh;
+  readonly mesh: InstancedQuad;
   /** Whether the current instances include translucent cards (the mesh then uses the display-space mix). */
   translucent = false;
   /** Seconds (setInstances clock) the mesh last drew anything; set on its first instances. */
@@ -263,8 +257,7 @@ class PageMesh {
     // x = opacity; y = card/decal/shadow; z = glow allowed; w = bounded traversal bias in world units.
     this.style = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
     this.opaqueMaterial = this.buildMaterial(false);
-    this.mesh = new InstancedMesh(new PlaneGeometry(1, 1), this.opaqueMaterial, CAPACITY);
-    this.mesh.frustumCulled = false;
+    this.mesh = new InstancedQuad(this.opaqueMaterial, CAPACITY);
     this.mesh.renderOrder = RENDER_ORDER[pass];
     this.mesh.name = `live-effects-${pass}`;
     this.mesh.count = 0;
@@ -290,7 +283,7 @@ class PageMesh {
     const material = new MeshBasicNodeMaterial();
     material.transparent = true;
     material.depthWrite = false;
-    material.depthTest = this.pass === 'ground';
+    material.depthTest = this.pass !== 'top';
     material.blending = NormalBlending;
     const u: ShaderNode = uv().x;
     const v: ShaderNode = float(1).sub(uv().y);
@@ -312,7 +305,7 @@ class PageMesh {
         .sub(layer.cameraUp.mul(py.div(ppu)))
         .add(layer.toCamera.mul(aParams.w));
       // Ground decal: invert the engine projection at the anchor's height (see ra2/sprites.ts).
-      const decal = aAnchor.add(vec3(px.div(60).add(py.div(30)), 0.025, py.div(30).sub(px.div(60))));
+      const decal = aAnchor.add(vec3(px.div(60).add(py.div(30)), EFFECT_DECAL_LIFT, py.div(30).sub(px.div(60))));
       return aStyle.y.greaterThan(0.5).select(decal, card);
     })();
     material.colorNode = Fn(() => {

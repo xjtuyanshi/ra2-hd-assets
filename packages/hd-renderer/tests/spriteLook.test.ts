@@ -7,6 +7,7 @@ import { clearLightAt, sunArcDirection } from '../src/lighting';
 import type { Ra2Cache } from '../src/ra2/cache';
 import { painterObject } from '../src/ra2/painterOrder';
 import { ART_LIGHT, shadowTransform } from '../src/ra2/spriteLook';
+import { InstancedQuad } from '../src/instancedQuad';
 import { GROUND_PULL, SpriteLayer, groundPlaneDepth, type SpriteInstance } from '../src/ra2/sprites';
 import { CARD_CLEARANCE } from '../src/ra2/cardDepth';
 
@@ -82,13 +83,31 @@ describe('enhanced look: presets', () => {
   });
 });
 
-type Buffers = { anchor: DirtyAttribute; flags: DirtyAttribute; occlusion: DirtyAttribute };
+type Buffers = { anchor: DirtyAttribute; flags: DirtyAttribute };
 
 describe('enhanced look: sprite instances', () => {
-  it('keeps the per-instance matrix a single uniform however large the layer', () => {
+  it('shares matrix-free geometry and synchronizes all pass counts at large capacity', () => {
     const layer = new SpriteLayer(cache, [], 5000);
-    expect(layer.mesh.instanceMatrix.count).toBe(1);
     expect(layer.capacity).toBe(5000);
+    const instance: SpriteInstance = {
+      frame: { rect: [0, 0, 8, 8], offset: [-4, -8] },
+      palette: 'unit',
+      push: 0,
+      anchor: new Vector3(),
+      shadow: false,
+    };
+    for (const count of [0, 1, 5000, 7, 0]) {
+      layer.setInstances(Array.from({ length: count }, () => instance));
+      for (const mesh of [layer.mesh, ...layer.groundPasses]) {
+        expect(mesh).toBeInstanceOf(InstancedQuad);
+        expect('instanceMatrix' in mesh).toBe(false);
+        expect(mesh.geometry).toBe(layer.mesh.geometry);
+        expect(mesh.count).toBe(count);
+      }
+    }
+    layer.mesh.geometry.dispose();
+    layer.mesh.material.dispose();
+    layer.mesh.dispose();
   });
 
   it('draws contact shades with decals, reflections after shadows and before upright cards', () => {
@@ -119,14 +138,20 @@ describe('enhanced look: sprite instances', () => {
     // Rank 0 keeps insertion order (shadow, contact, decal), then the reflection, then the card.
     expect(order).toEqual([3, 4, 5, 2, 1]);
     const codes = Array.from(buffers.flags.array)
-      .filter((_, i) => i % 4 === 0)
+      .filter((_, i) => i % buffers.flags.itemSize === 0)
       .slice(0, 5);
     expect(codes).toEqual([2, 3, 1, 4, 0]);
     // Every look decal carries the foundation; none of them takes a traversal bias.
-    expect(Array.from(buffers.occlusion.array).slice(4, 6)).toEqual([3, 2]);
+    for (const i of [0, 1, 3, 4]) {
+      const at = i * buffers.flags.itemSize;
+      expect(Array.from(buffers.flags.array).slice(at + 4, at + 6)).toEqual([3, 2]);
+      const dx = order[i]! - building.x;
+      const dz = -building.z;
+      expect(Array.from(buffers.flags.array).slice(at + 6, at + 8)).toEqual([dx - dz, -dx - dz]);
+    }
     expect(
       Array.from(buffers.flags.array)
-        .filter((_, i) => i % 4 === 3)
+        .filter((_, i) => i % buffers.flags.itemSize === 3)
         .slice(0, 4),
     ).toEqual([0, 0, 0, 0]);
   });

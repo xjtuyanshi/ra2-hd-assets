@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { GAME_RENDER_SHROUD } from '../../src/games/renderState';
 import { createByteViewAccessor } from '../../src/games/shared/memoryAccessor';
 import type { ReadYrEffectsOptions, YrEffects } from '../../src/games/yr/effectsReader';
+import { YR_EFFECTS_GLOBALS as E } from '../../src/games/yr/effectsReader';
+import { YR_BUILDING_RULES as R } from '../../src/games/yr/buildingRenderState';
 import type { ReadYrSmudgeOptions, YrSmudges } from '../../src/games/yr/smudgeReader';
 import type { ReadYrOverlayOptions, YrOverlays } from '../../src/games/yr/overlayReader';
 import { createYrRenderStateReader, createYrRenderStateReaderFrom } from '../../src/games/yr/renderState';
@@ -16,8 +18,8 @@ import {
 import { createGuestMemory } from '../helpers/guestMemory';
 
 /**
- * Only the globals the change key reads: logic frame, scenario pointer, tactical view and the techno vector with each
- * techno's selection flag. The readers themselves are injected, so no YR image is needed.
+ * Memory for the change key's globals and mutable native render fields. The readers themselves are injected,
+ * so no YR image or original game art is needed.
  */
 function keyMemory() {
   const bytes = new Uint8Array(0x100_0000);
@@ -34,6 +36,7 @@ function keyMemory() {
   view.setInt32(G.frame, 100, true);
   return {
     bytes,
+    u32,
     technos,
     frame: (value: number) => view.setInt32(G.frame, value, true),
     scroll: (x: number, y: number) => {
@@ -302,6 +305,8 @@ describe('YR 1.001 render state for the HD bridge', () => {
       kind: 'building',
       buildState: 'selling',
       buildupFrame: 0,
+      buildingFrame: 0,
+      buildingDamaged: false,
     };
     state.objects[1] = {
       ...state.objects[1]!,
@@ -311,7 +316,12 @@ describe('YR 1.001 render state for the HD bridge', () => {
     };
     harness.readState.mockReturnValue(state);
     const result = harness.read()!;
-    expect(result.objects[0]).toMatchObject({ buildState: 'selling', buildupFrame: 0 });
+    expect(result.objects[0]).toMatchObject({
+      buildState: 'selling',
+      buildupFrame: 0,
+      buildingFrame: 0,
+      buildingDamaged: false,
+    });
     expect(result.objects[1]).toMatchObject({
       infantrySequence: 'FireProne',
       sequenceFrame: 0,
@@ -563,7 +573,7 @@ describe('YR 1.001 render state for the HD bridge', () => {
       },
     ]);
     expect(state.objects[1]).not.toHaveProperty('turretFacingRaw');
-    expect(state.effects).toEqual({
+    expect(state.effects).toMatchObject({
       anims: [
         { id: 1, uid: 2, type: 'TWLT070', x: 10, y: 20, z: 30, frameCount: 20, buildingAnim: false, invisible: false },
       ],
@@ -574,6 +584,77 @@ describe('YR 1.001 render state for the HD bridge', () => {
     });
     // The snapshot must survive a structured clone (the Worker reply).
     expect(structuredClone(state)).toEqual(state);
+  });
+
+  it('invalidates a same-frame cached infantry step and preserves health zero through publication', () => {
+    const memory = keyMemory();
+    const h = sources(memory);
+    const state = yrState(100);
+    Object.assign(state.objects[1]!, { infantrySequence: 'Die1', sequenceFrame: 0, health: 0 });
+    h.readState.mockReturnValue(state);
+    memory.u32(memory.technos[1]! + 0x6c4, 11);
+    const first = h.read()!;
+    expect(h.read()).toBe(first);
+    memory.u32(memory.technos[1]! + 0xf8, 2);
+    state.objects[1]!.sequenceFrame = 2;
+    const next = h.read()!;
+    expect(next).not.toBe(first);
+    expect(next.frame).toBe(first.frame);
+    expect(next.objects[1]).toMatchObject({ infantrySequence: 'Die1', sequenceFrame: 2, health: 0 });
+    expect(first.objects[1]!.sequenceFrame).toBe(0);
+    memory.u32(memory.technos[1]! + 0x6c4, 8);
+    state.objects[1]!.infantrySequence = 'FireProne';
+    expect(h.read()!.objects[1]!.infantrySequence).toBe('FireProne');
+  });
+
+  it('observes same-frame effect progress and suppresses an expired bolt still in its native vector', () => {
+    const memory = keyMemory();
+    const h = sources(memory);
+    const fx = yrEffects(100);
+    h.readEffects.mockReturnValue(fx);
+    const items = 0xb60000,
+      bolt = 0xb61000,
+      anim = 0xb62000;
+    memory.u32(E.electricBolts + 4, items);
+    memory.u32(E.electricBolts + 0x10, 1);
+    memory.u32(items, bolt);
+    memory.u32(bolt + 0x28, 1);
+    memory.u32(E.anims + 4, items + 4);
+    memory.u32(E.anims + 0x10, 1);
+    memory.u32(items + 4, anim);
+    const first = h.read()!;
+    expect(first.effects!.anims[0]).toMatchObject({ frame: 4, stage: 4 });
+    memory.u32(anim + 0xac, 7);
+    fx.anims[0]!.frame = fx.anims[0]!.stage = 7;
+    const advanced = h.read()!;
+    expect(advanced.effects!.anims[0]!.frame).toBe(7);
+    expect(first.effects!.anims[0]!.frame).toBe(4);
+    memory.u32(bolt + 0x28, 0);
+    fx.electricBolts[0]!.lifetime = 0;
+    expect(h.read()!.effects!.electricBolts).toEqual([]);
+    memory.u32(E.anims + 0x10, 0);
+    fx.anims = [];
+    expect(h.read()!.effects!.anims).toEqual([]);
+  });
+
+  it('invalidates completed-building art after same-frame health, occupancy or loaded-rule changes', () => {
+    const memory = keyMemory();
+    const { read } = sources(memory);
+    const rules = 0xb70000;
+    memory.u32(R.instance, rules);
+    let previous = read()!;
+    for (const [at, value] of [
+      [memory.technos[0]! + O.health, 475],
+      [memory.technos[0]! + 0x694, 2],
+      [rules + R.red + 4, 0x3fd00000],
+      [rules + R.yellow + 4, 0x3fe00000],
+    ]) {
+      memory.u32(at!, value!);
+      const next = read()!;
+      expect(next).not.toBe(previous);
+      expect(read()).toBe(next);
+      previous = next;
+    }
   });
 
   it('publishes native painter metadata and refreshes after same-frame layer reordering', () => {

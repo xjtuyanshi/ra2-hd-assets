@@ -256,6 +256,7 @@ export class LiveEffectsDriver {
   private beams: LiveBeam[] = [];
   private readonly beamTail: LiveBeam[] = [];
   private beamFrame = NaN;
+  private beamState = '';
   private readonly bulletAt = new Vector3();
   private generation = 0;
   private lastPush: { frame: number; seconds: number } | null = null;
@@ -343,8 +344,12 @@ export class LiveEffectsDriver {
     for (const [key, tracked] of this.systems) if (tracked.lastSeen !== generation) this.systems.delete(key);
     this.bullets.length = 0;
     for (const bullet of effects.bullets) if (!this.hidden(bullet.x, bullet.y, bullet.z)) this.bullets.push(bullet);
-    if (frame !== this.beamFrame) {
+    // EBolt lifetime is decremented by a draw pass, not solely by logic AI. A replacement publication can remove
+    // beams while CurrentFrame is unchanged; display refreshes alone still leave their shape untouched.
+    const beamState = JSON.stringify(effects.beams ?? []);
+    if (frame !== this.beamFrame || beamState !== this.beamState) {
       this.beamFrame = frame;
+      this.beamState = beamState;
       this.beams.length = 0;
       let tailCount = 0;
       let tailCursor = 0;
@@ -366,8 +371,8 @@ export class LiveEffectsDriver {
   }
 
   /**
-   * Beams of the newest snapshot, set once per logic frame and kept while the engine lists them (also while the game
-   * is paused); the bolt shape changes every two logic frames, like the engine's own redrawn bolts.
+   * Beams of the newest publication, kept until replaced or removed (also while logic is paused).
+   * The HD bolt shape uses a stable seed for each pair of logic frames; it does not reproduce native random paths.
    */
   private beamSpecs(): BeamSpec[] {
     return this.beams.map((beam) => {

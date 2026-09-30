@@ -1,12 +1,10 @@
 import { DirtyAttribute } from '../dirtyAttribute';
+import { InstancedQuad } from '../instancedQuad';
 import {
   Color,
-  InstancedBufferAttribute,
-  InstancedMesh,
   LessDepth,
   MeshBasicNodeMaterial,
   NormalBlending,
-  PlaneGeometry,
   type OrthographicCamera,
   type Texture,
   Vector2,
@@ -51,7 +49,7 @@ import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { type Ra2Cache } from './cache';
 import { objectLevelAt, srgbScale, terrainGradeAt } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
-import { cardDepthNode } from './cardDepth';
+import { cardDepthNode, SPRITE_DECAL_LIFT } from './cardDepth';
 import { comparePainterOrder, spritePainterBias, type PainterObject } from './painterOrder';
 import {
   GLASS_REFLECTANCE,
@@ -117,14 +115,12 @@ function instanceRank(s: SpriteInstance): number {
   return s.flat || s.kind === 'contact' ? 0 : s.shadow ? 1 : 3;
 }
 
-const IDENTITY_MATRIX = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
-
 /** Draw passes of a sprite layer: the main one, and the enhanced look's ground passes (SpriteLayer.groundPasses). */
 type GroundPass = 'main' | 'under' | 'over';
 
 /**
  * How far (world units along the view) the enhanced look's 'over' pass pulls SHP shadows and wet reflections in front
- * of their ground plane. Everything stays behind an upright card's base (CARD_CLEARANCE 0.03) and ahead of the ground
+ * of their ground plane. Everything stays behind an upright card's base (CARD_CLEARANCE) and ahead of the ground
  * at every sample of 4x MSAA down to 1 engine px per pixel (the farthest sample, 0.375 px from the pixel centre, sees
  * ground 0.0153 nearer); zoomed further out, the nearest samples of a pixel can miss its shadow. Shadows step up with
  * their coverage (five levels): a later, denser shadow still darkens an earlier fringe.
@@ -201,12 +197,12 @@ export function cardPush(frame: SpriteFrame): number {
  * replacements will later plug in.
  */
 export class SpriteLayer {
-  readonly mesh: InstancedMesh;
+  readonly mesh: InstancedQuad;
   /**
    * The enhanced look's ground passes ('under', 'over'; children of `mesh`, shown by HdRenderer only while the look is
    * on). They share this layer's instance buffers.
    */
-  readonly groundPasses: InstancedMesh[];
+  readonly groundPasses: InstancedQuad[];
   /** Ground-plane depth coefficients of the 'over' pass (see groundPlaneDepth), set per draw. */
   private readonly planeCoefficients = uniform(new Vector4());
   /** Scene light level applied to unlit sprites (1 = the original's full-bright daylight). */
@@ -221,11 +217,10 @@ export class SpriteLayer {
   /**
    * x: card/decal/shadow/contact/reflection (instanceCode); y: object light; z: map lighting class; w: bounded
    * traversal bias in world units.
-   * One buffer: WebGPU allows 8 vertex buffers.
+   * The second vec4 holds foundation width/height and draw-point offsets; width -1 selects an elevated deck.
+   * Both vec4 attributes share one buffer: WebGPU allows 8 vertex buffers.
    */
   private readonly flags: DirtyAttribute;
-  /** Foundation width/height and draw-point offsets; width -1 selects an elevated horizontal deck. */
-  private readonly occlusion: DirtyAttribute;
   private instances: readonly SpriteInstance[] = [];
   private readonly orderedCards: SpriteInstance[] = [];
   private instanceCount = 0;
@@ -269,12 +264,11 @@ export class SpriteLayer {
     const look = spriteLookFor(nodes);
     this.capacity = Math.max(1, capacity, instances.length);
     const count = this.capacity;
-    // Draw XYZ and light-sample X/Z share a buffer to retain the eight-buffer WebGPU limit at large capacities.
+    // Pack related fields into shared vertex buffers. Capacity never introduces an unused instance matrix.
     this.anchor = new DirtyAttribute(new Float32Array(count * 5), 5);
     this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
     this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
-    this.flags = new DirtyAttribute(new Float32Array(count * 4), 4);
-    this.occlusion = new DirtyAttribute(new Float32Array(count * 4), 4);
+    this.flags = new DirtyAttribute(new Float32Array(count * 8), 8);
 
     const atlasSize = vec2(atlas.width, atlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
@@ -282,8 +276,8 @@ export class SpriteLayer {
     const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
     const aParams: ShaderNode = instancedBufferAttribute(this.params, 'vec4');
     const aLightSample: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec2', 5, 3);
-    const aFlags: ShaderNode = instancedBufferAttribute(this.flags, 'vec4');
-    const aOcclusion: ShaderNode = instancedBufferAttribute(this.occlusion, 'vec4');
+    const aFlags: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', 8, 0);
+    const aOcclusion: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', 8, 4);
     const aFlat: ShaderNode = aFlags.x;
     // The map's light for this instance's class, times its own extra light, in the palette's sRGB scale (see
     // mapLighting.ts): 'ambient' takes the level, 'full' the per-channel grade, 'none' nothing.
@@ -387,7 +381,7 @@ export class SpriteLayer {
           .add(this.toCamera.mul(pushAmount));
         // Ground decal: invert the engine projection at the anchor's height (1 px right = (1/60, -1/60) cells,
         // 1 px down = (1/30, 1/30) cells), so the art covers exactly the same screen pixels while lying on the ground.
-        const decal = aAnchor.add(vec3(px.div(60).add(py.div(30)), 0.02, py.div(30).sub(px.div(60))));
+        const decal = aAnchor.add(vec3(px.div(60).add(py.div(30)), SPRITE_DECAL_LIFT, py.div(30).sub(px.div(60))));
         const placed = aFlat.greaterThan(0.5).select(decal, card);
         // Enhanced look (spriteLook.ts). Shadows follow the sun: their ground offsets turn and stretch about the object's
         // base (the foundation's centre, or the draw point); the faithful path keeps the untouched decal.
@@ -398,12 +392,12 @@ export class SpriteLayer {
         const turned: ShaderNode = centre.add(
           vec2(m.x.mul(offset.x).add(m.z.mul(offset.y)), m.y.mul(offset.x).add(m.w.mul(offset.y))),
         );
-        const followed = aAnchor.add(vec3(turned.x, 0.02, turned.y));
+        const followed = aAnchor.add(vec3(turned.x, SPRITE_DECAL_LIFT, turned.y));
         const follow: ShaderNode = isShadowKind.mul(step(1e-4, look.shadowFollow)).mul(look.enabled);
         // Contact shades and reflections exist only while their effect is on; otherwise they collapse to a point.
         const rows: ShaderNode = reflectionRows();
         const qy = rows.x.add(gv.mul(rows.y.sub(rows.x)));
-        const mirrored = aAnchor.add(vec3(px.div(60).add(qy.div(30)), 0.02, qy.div(30).sub(px.div(60))));
+        const mirrored = aAnchor.add(vec3(px.div(60).add(qy.div(30)), SPRITE_DECAL_LIFT, qy.div(30).sub(px.div(60))));
         const contactOn: ShaderNode = step(1e-4, look.occlusion).mul(look.enabled);
         const reflectionOn: ShaderNode = step(1e-4, look.reflections.mul(look.wetness)).mul(look.enabled);
         const hidden: ShaderNode = isContact
@@ -624,13 +618,7 @@ export class SpriteLayer {
       })();
     material.colorNode = colourNode();
 
-    this.mesh = new InstancedMesh(new PlaneGeometry(1, 1), material, count);
-    // Cards place themselves (positionNode) and never read the per-instance matrix, but three still declares it: as a
-    // uniform array up to 1024 instances and as a fifth-plus vertex buffer beyond, which took a map's sprite layer past
-    // WebGPU's limit of 8 vertex buffers (the pipeline failed and no sprite was drawn). One identity matrix keeps it a
-    // tiny uniform at any capacity; the instance count comes from mesh.count.
-    this.mesh.instanceMatrix = new InstancedBufferAttribute(new Float32Array(IDENTITY_MATRIX), 16);
-    this.mesh.frustumCulled = false;
+    this.mesh = new InstancedQuad(material, count);
     this.mesh.renderOrder = 4;
     this.mesh.name = 'ra2-sprites';
 
@@ -645,7 +633,7 @@ export class SpriteLayer {
     //    anchor's ground plane (identical for every instance on that plane), pulled forward by less than a card's
     //    clearance and by more for denser shadow (LessDepth): overlapping shadows darken a pixel once, a denser one
     //    may darken a fringe further, and nothing on the ground can hide a card.
-    // The faithful look keeps the single pass bit for bit (both ground passes are hidden, see HdRenderer).
+    // The faithful look keeps the single pass (both ground passes are hidden, see HdRenderer).
     // The ground plane's depth under a pixel is affine in the pixel's coordinates and the plane's height for the
     // orthographic camera: depth = c0 + cx * x + cy * y + cY * height. The coefficients are set per draw from the
     // camera and target actually rendering (onBeforeRender below), so a pass with another camera (a reflection's
@@ -687,9 +675,7 @@ export class SpriteLayer {
       return m;
     };
     this.groundPasses = (['under', 'over'] as const).map((pass, i) => {
-      const passMesh = new InstancedMesh(this.mesh.geometry, passMaterial(pass), count);
-      passMesh.instanceMatrix = new InstancedBufferAttribute(new Float32Array(IDENTITY_MATRIX), 16);
-      passMesh.frustumCulled = false;
+      const passMesh = new InstancedQuad(passMaterial(pass), count, this.mesh.geometry);
       passMesh.visible = false;
       passMesh.name = `ra2-sprites-${pass}`;
       // Just before this layer's own pass, whatever renderOrder its owner gives the layer later.
@@ -757,13 +743,10 @@ export class SpriteLayer {
         const foundation = s.painter?.foundation;
         const dx = foundation ? s.anchor.x - s.painter!.x : 0;
         const dz = foundation ? s.anchor.z - s.painter!.z : 0;
-        this.occlusion.setXYZW(
-          i,
-          s.deckHeight !== undefined ? -1 : (foundation?.[0] ?? 0),
-          s.deckHeight ?? foundation?.[1] ?? 0,
-          dx - dz,
-          -dx - dz,
-        );
+        this.flags.setComponent(i, 4, s.deckHeight !== undefined ? -1 : (foundation?.[0] ?? 0));
+        this.flags.setComponent(i, 5, s.deckHeight ?? foundation?.[1] ?? 0);
+        this.flags.setComponent(i, 6, dx - dz);
+        this.flags.setComponent(i, 7, -dx - dz);
       }
     }
     this.mesh.count = count;
@@ -772,7 +755,6 @@ export class SpriteLayer {
     this.rect.flush();
     this.params.flush();
     this.flags.flush();
-    this.occlusion.flush();
   }
 }
 
