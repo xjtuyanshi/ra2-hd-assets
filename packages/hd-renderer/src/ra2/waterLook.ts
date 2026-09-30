@@ -610,8 +610,9 @@ export function rippledReflection(
 export const BEACH_PROFILE = { shelf: 0.35, slope: 1.9, drop: 20 } as const;
 /** Beer-Lambert absorption per unit optical depth (RGB): red disappears first; the bed is lost by 0.8-1 cells. */
 export const BED_ABSORPTION = [3.2, 1.2, 0.85] as const;
-/** In-scattered colour of the thin water over the shelf (turquoise), faded towards the enhanced MID/DEEP offshore. */
-const BED_SCATTER = { colour: 0x1f9e93, near: 0.08, far: 0.6, amount: 0.7 } as const;
+/** In-scattered colour of the water over the shelf (turquoise, about one cell wide as in the approved target), faded
+ * towards the enhanced MID/DEEP offshore. */
+const BED_SCATTER = { colour: 0x1f9e93, near: 0.1, far: 0.95, amount: 0.85 } as const;
 /** Refraction in world cells per ripple slope per depth, bounded to about 2.5 engine pixels in any direction. */
 const BED_REFRACTION = 0.18;
 const BED_REFRACTION_MAX = 0.06;
@@ -625,7 +626,7 @@ const BEACH_WET = {
   reach: 0.22,
   jitter: 0.08,
   full: 0.03,
-  brightness: 0.74,
+  brightness: 0.8,
   saturation: 1.1,
   roughness: 0.32,
   sheen: 0.018,
@@ -646,8 +647,8 @@ const BED_SWASH = {
 /** Foam widths/reach in cells, opacity caps and noise thresholds; no line is tied to the static mask edge. */
 const BED_FOAM = {
   frontWidth: 0.03,
-  frontOpacity: 0.6,
-  waterOpacity: 0.22,
+  frontOpacity: 0.8,
+  waterOpacity: 0.3,
   laceLow: 0.42,
   laceHigh: 0.62,
   bubbleLow: 0.5,

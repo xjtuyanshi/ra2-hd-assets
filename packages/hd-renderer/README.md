@@ -240,7 +240,9 @@ reflections still follow the settings.
   field unchanged; the image is only loaded when a water mask is available. The opt-in `enhanced` look:
   a narrow turquoise shallow band with caustics over a sandy bed, dark blue-teal depths, a wind sea from three
   scrolled layers of a tileable ripple normal map plus two swells under drifting gust patches, sun glitter in ripple
-  facets, rippled reflections of the mirrored scene, explosions and lamps mirrored from the light field, a swash that
+  facets, rippled reflections of the mirrored scene (one mirror plane at the lowest water level; with a lake bed, lakes
+  on higher terraces keep only the sky reflection instead of displaced ghost cliffs), explosions and lamps mirrored
+  from the light field, a swash that
   laps up and back with a thin foam line, breaker lines and wet sand, no surf at cliff feet, and rain rings. The default
   is the earlier `classic` look; sandbox `water=enhanced` (or `look=golden`), `LiveViewOptions.water` and in game
   `hd-water=enhanced` select the modern one (`waterPreset`, chosen before the world is built).

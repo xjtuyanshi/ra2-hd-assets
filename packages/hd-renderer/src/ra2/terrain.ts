@@ -13,6 +13,7 @@ import {
 import {
   BRDF_GGX,
   BRDF_Lambert,
+  abs,
   attribute,
   clamp,
   color,
@@ -568,7 +569,12 @@ function createMaterials(
       mirror.target.rotateX(-Math.PI / 2);
       mirror.target.position.y = waterY;
       if (map.waterBed && waterPreset.style === 'enhanced') {
-        reflection = rippledReflection(mirror, positionWorld, water);
+        const rippled = rippledReflection(mirror, positionWorld, water);
+        // One mirror plane serves the lowest water level. Lakes on higher terraces (RiverRam steps down in 4-level
+        // cliffs) would show that plane's reflections displaced by twice their height: ghost cliffs mid-lake. They
+        // keep only the sky reflection; the lowest lakes keep the mirrored scene.
+        const onPlane: ShaderNode = smoothstep(0.3 * LEVEL_HEIGHT, 0.1 * LEVEL_HEIGHT, abs(positionWorld.y.sub(waterY)));
+        reflection = { colour: rippled.colour, coverage: rippled.coverage.mul(onPlane) };
       } else {
         const offset: ShaderNode = reflectionOffset(positionWorld.xz, water.wind, water.rain);
         mirror.uvNode = (mirror.uvNode as ShaderNode).add(offset);
