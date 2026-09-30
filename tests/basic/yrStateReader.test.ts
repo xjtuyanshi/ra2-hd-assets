@@ -208,6 +208,28 @@ describe('guest memory accessors', () => {
 });
 
 describe('YR 1.001 state reader', () => {
+  it('carries a validated JumpJet target facing without replacing primary facing', () => {
+    const { m, soldier, tank } = battlefield();
+    const data = new DataView(m.bytes.buffer);
+    const type = data.getUint32(soldier + O.infantryType, true);
+    const base = m.alloc(0xa0);
+    m.u8(type + I.jumpJet, 1);
+    m.u32(soldier + I.locomotor, base + 4);
+    m.u32(base, 0x7ece34);
+    m.u32(base + 4, 0x7ecd68);
+    m.u32(0x7ece40, 0x54b710);
+    m.u32(soldier + I.target, tank);
+    m.u32(V.infantry + 0x48, 0x5f65a0);
+    m.u32(V.unit + 0x48, 0x5f65a0);
+    m.i32(tank + O.location, 1256);
+    m.i32(tank + O.location + 4, 2000);
+    data.setFloat32(0x8650b8, 0.024413354694843292, true);
+    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects.find((o) => o.id === soldier);
+    expect(read()).toMatchObject({ infantryDrawFacingRaw: 0x3fff, facingRaw: 0, infantrySequence: 'Prone' });
+    m.u8(type + I.jumpJetTurn, 1);
+    expect(read()).not.toHaveProperty('infantryDrawFacingRaw');
+  });
+
   it('adds H2 make state and leaves failed optional reads off otherwise valid objects', () => {
     const { m, yard, soldier } = battlefield();
     const type = new DataView(m.bytes.buffer).getUint32(yard + O.buildingType, true);

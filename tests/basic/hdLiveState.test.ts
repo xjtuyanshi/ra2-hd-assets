@@ -50,7 +50,7 @@ interface ViewState {
     batch: Map<number, SpriteInstance[]>,
     frame: number,
   ): void;
-  appearances: Map<number, { frame: number; afterGap: boolean }>;
+  appearances: Map<number, { frame: number; afterGap: boolean; lastSeen: number }>;
 }
 
 /** Exercise the real snapshot/visual methods while leaving unrelated GPU and environment work outside this fixture. */
@@ -104,7 +104,7 @@ describe('building build-up', () => {
     push(target, 0, []);
     push(target, 50, []);
     push(target, 100);
-    expect(target.appearances.get(building.uid)).toEqual({ frame: 100, afterGap: false });
+    expect(target.appearances.get(building.uid)).toEqual({ frame: 100, afterGap: false, lastSeen: 100 });
     // First render arrives only after the whole 25-frame make animation (2 logic frames per step).
     push(target, 150);
     const visual = target.visualFor(building, -1, 150);
@@ -128,7 +128,7 @@ describe('building build-up', () => {
     push(target, 0, []);
     push(target, 100);
     const visual = target.visualFor(building, -1, 100);
-    expect(target.appearances.get(building.uid)).toEqual({ frame: 100, afterGap: true });
+    expect(target.appearances.get(building.uid)).toEqual({ frame: 100, afterGap: true, lastSeen: 100 });
     expect(target.buildupFrame(building, visual, 100)).toBeNull();
     // Engine state still takes precedence over the conservative fallback after a gap.
     expect(target.buildupFrame({ ...building, buildState: 'building', buildupFrame: 3 }, visual, 100)).toBe(3);
@@ -151,7 +151,7 @@ describe('building build-up', () => {
     push(target, 50, []);
     push(target, 100);
     push(target, 155);
-    expect(target.appearances.get(building.uid)).toEqual({ frame: 100, afterGap: false });
+    expect(target.appearances.get(building.uid)).toEqual({ frame: 100, afterGap: false, lastSeen: 155 });
   });
 
   it('keeps first-snapshot buildings finished and distinguishes a reused pointer by its new uid', () => {
@@ -178,6 +178,37 @@ describe('building build-up', () => {
     expect(target.buildupFrame(building, visual, 200)).toBeNull();
   });
 
+  it('tracks only buildings and expires missing entries strictly after the omission tolerance', () => {
+    const target = view();
+    const others = (['vehicle', 'infantry', 'aircraft'] as const).map((kind, i) => ({
+      ...building,
+      uid: 20 + i,
+      kind,
+    }));
+    push(target, 100, [building, ...others]);
+    expect([...target.appearances.keys()]).toEqual([building.uid]);
+    push(target, 154, []);
+    expect(target.appearances.has(building.uid)).toBe(true);
+    push(target, 155, []);
+    expect(target.appearances.size).toBe(0);
+    // A new UID reusing the dead object's address receives a new clock.
+    const replacement = { ...building, uid: 100 };
+    push(target, 156, [replacement]);
+    expect([...target.appearances]).toEqual([[100, { frame: 156, lastSeen: 156, afterGap: false }]]);
+  });
+
+  it('refreshes presence without changing first appearance and bounds retention during repeated losses', () => {
+    const target = view();
+    push(target, 0);
+    for (let frame = 1; frame <= 200; frame++) push(target, frame, [building, { ...building, uid: 1000 + frame }]);
+    expect(target.appearances.get(building.uid)).toEqual({ frame: 0, lastSeen: 200, afterGap: false });
+    expect(target.appearances.size).toBe(56);
+    push(target, 254, []);
+    expect([...target.appearances.keys()]).toEqual([building.uid, 1200]);
+    push(target, 255, []);
+    expect(target.appearances.size).toBe(0);
+  });
+
   it('starts a new appearance timeline when the engine logic frame rewinds', () => {
     const target = view();
     push(target, 100);
@@ -187,7 +218,7 @@ describe('building build-up', () => {
     const after = target.visualFor(building, -1, 10);
     expect(after).toBe(before);
     expect(after.firstFrame).toBe(10);
-    expect(target.appearances.get(building.uid)).toEqual({ frame: 10, afterGap: false });
+    expect(target.appearances.get(building.uid)).toEqual({ frame: 10, afterGap: false, lastSeen: 10 });
     expect(target.buildupFrame(building, after, 10)).toBeNull();
     push(target, 60);
     const replacement = { ...building, uid: building.uid + 1 };
@@ -250,6 +281,16 @@ function infantryView(metadata: Record<string, InfantrySequence> | null = sequen
 }
 
 describe('infantry engine sequences', () => {
+  it('uses the engine draw facing for target-directed frames, including zero and sector boundaries', () => {
+    const target = infantryView({ FireFly: { start: 8, count: 6, facingMultiplier: 6 } });
+    const native = { ...infantry, infantrySequence: 'FireFly', sequenceFrame: 2 };
+    expect(target.draw({ ...native, infantryDrawFacingRaw: 0x3fff })).toBe(8 + 5 * 6 + 2);
+    expect(target.draw({ ...native, infantryDrawFacingRaw: 0 }, Math.PI / 2)).toBe(8 + 7 * 6 + 2);
+    expect(target.draw({ ...native, infantryDrawFacingRaw: 3071 })).toBe(8 + 7 * 6 + 2);
+    expect(target.draw({ ...native, infantryDrawFacingRaw: 3072 })).toBe(8 + 6 * 6 + 2);
+    // Older snapshots still use the interpolated travel pose.
+    expect(target.draw(native)).toBe(8 + 7 * 6 + 2);
+  });
   it('preserves raw-facing boundaries instead of rounding the pose to a byte direction', () => {
     const target = infantryView();
     const native = { ...infantry, infantrySequence: 'Walk', sequenceFrame: 2 };

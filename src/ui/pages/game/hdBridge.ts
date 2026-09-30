@@ -397,6 +397,7 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
       ...(object.buildupFrame !== undefined ? { buildupFrame: object.buildupFrame } : {}),
       ...(object.infantrySequence !== undefined ? { infantrySequence: object.infantrySequence } : {}),
       ...(object.sequenceFrame !== undefined ? { sequenceFrame: object.sequenceFrame } : {}),
+      ...(object.infantryDrawFacingRaw !== undefined ? { infantryDrawFacingRaw: object.infantryDrawFacingRaw } : {}),
       ...(object.renderOrder !== undefined ? { renderOrder: object.renderOrder } : {}),
       health: object.health,
       isSelected: object.isSelected,

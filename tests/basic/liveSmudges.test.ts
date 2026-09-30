@@ -64,6 +64,7 @@ describe('native smudge instances', () => {
     const mark = instances(built)[0]!;
     expect(mark.frame).toBe(art.sprites['smudge:CR1'].frames[0]);
     expect(mark.anchor.toArray()).toEqual([1, 2 * LEVEL_HEIGHT, 2]);
+    expect(mark.lightSample).toEqual([1.5, 2.5]);
     expect(mark).toMatchObject({ flat: true, push: 0, palette: 'lib:iso', lighting: 'full', shadow: false });
     expect(built.missingTypes.size).toBe(0);
   });
@@ -77,6 +78,7 @@ describe('native smudge instances', () => {
     expect(instances(built)).toHaveLength(1);
     expect(instances(built)[0]!.frame).toBe(art.sprites['smudge:BURN'].frames[0]);
     expect(instances(built)[0]!.anchor.toArray()).toEqual([1, 2 * LEVEL_HEIGHT, 2]);
+    expect(instances(built)[0]!.lightSample).toEqual([2.5, 3.5]);
     // Native DrawIt clips to a tactical/dirty rectangle, not the current footprint cell. The remaining cell still
     // draws the complete source image. Removing every selector is required to remove the complete burn mark.
     state.index.set([-1, -1, -1, 1]);
@@ -94,6 +96,21 @@ describe('native smudge instances', () => {
     const built = buildSmudgeInstances(state, library(), terrain(), {}, palette);
     expect(instances(built)).toHaveLength(0);
     expect([...built.missingTypes]).toEqual(['CR1', 'BURN']);
+  });
+
+  it('samples the bottommost surviving footprint cell rather than the last row-major entry', () => {
+    const state = cells();
+    state.width = 3;
+    state.index = new Int16Array([1, 1, 1, 1, -1, -1]);
+    state.data = new Uint8Array([0, 1, 2, 3, 0, 0]);
+    const art = library();
+    art.smudges.BURN.width = 3;
+    const built = buildSmudgeInstances(state, art, terrain(), {}, palette);
+    expect(instances(built)).toHaveLength(1);
+    expect(instances(built)[0]!.lightSample).toEqual([3.5, 2.5]);
+    state.index[2] = -1;
+    state.index[3] = -1;
+    expect(instances(buildSmudgeInstances(state, art, terrain(), {}, palette))[0]!.lightSample).toEqual([2.5, 2.5]);
   });
 
   it('keeps independently anchored marks and height planes distinct', () => {
@@ -143,6 +160,8 @@ describe('native smudge instances', () => {
     expect(built.pages.get(9)).toHaveLength(1);
     expect(built.pages.get(9)![0]).toMatchObject({ shadow: true, flat: true, lighting: 'full' });
     expect(built.pages.get(9)![0]!.anchor).toBe(built.pages.get(2)![0]!.anchor);
+    expect(built.pages.get(9)![0]!.lightSample).toBe(built.pages.get(2)![0]!.lightSample);
+    expect(built.pages.get(2)![0]!.lightSample).toEqual([2.5, 3.5]);
   });
 });
 

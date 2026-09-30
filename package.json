@@ -34,7 +34,7 @@
     "hd:lights": "pnpm --filter ra2-assets lights",
     "hd:materials": "pnpm --filter ra2-assets materials",
     "test": "pnpm --filter relay-package run build:lib && vitest run",
-    "test:unit": "pnpm --filter relay-package run build:lib && vitest run tests/basic packages/relay/tests packages/ra2-formats packages/ra2-assets",
+    "test:unit": "pnpm --filter relay-package run build:lib && vitest run tests/basic packages/relay/tests packages/ra2-formats packages/ra2-assets packages/hd-renderer/tests",
     "check": "pnpm run typecheck && pnpm run test:unit && vite build",
     "test:graphics": "tsx tests/basic/browser/graphicsBrowserSmoke.mts",
     "test:graphics:upscale": "tsx tests/basic/browser/spatialUpscaleBrowserSmoke.mts",

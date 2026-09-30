@@ -133,7 +133,16 @@ describe('HD 桥状态机', () => {
     };
     state.objects = [
       { ...common, id: 1, uid: 11, kind: 'building', type: 'NAHAND', buildState: 'selling', buildupFrame: 0 },
-      { ...common, id: 2, uid: 12, kind: 'infantry', type: 'E1', infantrySequence: 'Deployed', sequenceFrame: 0 },
+      {
+        ...common,
+        id: 2,
+        uid: 12,
+        kind: 'infantry',
+        type: 'E1',
+        infantrySequence: 'Deployed',
+        sequenceFrame: 0,
+        infantryDrawFacingRaw: 0,
+      },
       { ...common, id: 3, uid: 13, kind: 'vehicle', type: 'MTNK' },
     ];
     harness.setState(state);

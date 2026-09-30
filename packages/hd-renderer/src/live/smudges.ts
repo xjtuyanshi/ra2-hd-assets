@@ -28,7 +28,7 @@ export function buildSmudgeInstances(
 ): SmudgeInstances {
   const pages = new Map<SmudgePage, SpriteInstance[]>();
   const missingTypes = new Set<string>();
-  const drawn = new Set<string>();
+  const drawn = new Map<string, [number, number]>();
   if (
     !Number.isSafeInteger(cells.width) ||
     cells.width <= 0 ||
@@ -77,8 +77,18 @@ export function buildSmudgeInstances(
     const originY = y - Math.floor(footprintCell / width);
     const z = terrain.levels[cell] ?? 0;
     const key = `${id}:${originX}:${originY}:${z}`;
-    if (drawn.has(key)) continue;
-    drawn.add(key);
+    const previousLight = drawn.get(key);
+    if (previousLight) {
+      // Each native copy uses its drawing cell's LightConvert (0x4804D1, 0x6B566F).
+      // Keep the bottommost surviving copy's texel centre, as after a full redraw.
+      if (x + y + 1 > previousLight[0] + previousLight[1]) {
+        previousLight[0] = x + 0.5;
+        previousLight[1] = y + 0.5;
+      }
+      continue;
+    }
+    const lightSample: [number, number] = [x + 0.5, y + 0.5];
+    drawn.set(key, lightSample);
     const anchor = objectAnchor({
       kind: 'smudge',
       type: id,
@@ -91,10 +101,22 @@ export function buildSmudgeInstances(
     const shadow = sprite.shadows?.[frameIndex];
     if (shadow)
       add(
-        { anchor, frame: shadow, palette: paletteKey, push: 0, shadow: true, flat: true, lighting: 'full' },
+        {
+          anchor,
+          frame: shadow,
+          palette: paletteKey,
+          push: 0,
+          shadow: true,
+          flat: true,
+          lighting: 'full',
+          lightSample,
+        },
         fromLibrary,
       );
-    add({ anchor, frame, palette: paletteKey, push: 0, shadow: false, flat: true, lighting: 'full' }, fromLibrary);
+    add(
+      { anchor, frame, palette: paletteKey, push: 0, shadow: false, flat: true, lighting: 'full', lightSample },
+      fromLibrary,
+    );
   }
   return { pages, missingTypes };
 }

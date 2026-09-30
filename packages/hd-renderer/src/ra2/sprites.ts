@@ -62,6 +62,8 @@ export interface SpriteInstance {
    * 'none' = unlit (ore, gems).
    */
   lighting?: LightingClass;
+  /** Map-light sample in world X/Z; defaults to the draw anchor. Cell copies can select a texel centre. */
+  lightSample?: readonly [number, number];
   /** Optional object painter slot; decals and shadows always retain their physical ground depth. */
   painter?: PainterObject;
   painterPart?: number;
@@ -140,16 +142,18 @@ export class SpriteLayer {
     const { referenceLevel, windowGain } = nodes;
     this.capacity = Math.max(1, capacity, instances.length);
     const count = this.capacity;
-    this.anchor = new DirtyAttribute(new Float32Array(count * 3), 3);
+    // Draw XYZ and light-sample X/Z share a buffer to retain the eight-buffer WebGPU limit at large capacities.
+    this.anchor = new DirtyAttribute(new Float32Array(count * 5), 5);
     this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
     this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
     this.flags = new DirtyAttribute(new Float32Array(count * 4), 4);
 
     const atlasSize = vec2(atlas.width, atlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
-    const aAnchor: ShaderNode = instancedBufferAttribute(this.anchor, 'vec3');
+    const aAnchor: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec3', 5, 0);
     const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
     const aParams: ShaderNode = instancedBufferAttribute(this.params, 'vec4');
+    const aLightSample: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec2', 5, 3);
     const aFlags: ShaderNode = instancedBufferAttribute(this.flags, 'vec4');
     const aFlat: ShaderNode = aFlags.x;
     // The map's light for this instance's class, times its own extra light, in the palette's sRGB scale (see
@@ -157,7 +161,7 @@ export class SpriteLayer {
     const isFull: ShaderNode = step(0.5, aFlags.z).mul(float(1).sub(step(1.5, aFlags.z)));
     const isNone: ShaderNode = step(1.5, aFlags.z);
     const grade: ShaderNode = mix(
-      mix(vec3(objectLevelAt(cache.mapLight, aAnchor.xz)), terrainGradeAt(cache.mapLight, aAnchor.xz), isFull),
+      mix(vec3(objectLevelAt(cache.mapLight, aLightSample)), terrainGradeAt(cache.mapLight, aLightSample), isFull),
       vec3(1),
       isNone,
     ).mul(aFlags.y);
@@ -323,6 +327,8 @@ export class SpriteLayer {
         if ((s.flat ? 0 : s.shadow ? 1 : 2) !== rank) continue;
         const i = count++;
         this.anchor.setXYZ(i, s.anchor.x, s.anchor.y, s.anchor.z);
+        this.anchor.setComponent(i, 3, s.lightSample?.[0] ?? s.anchor.x);
+        this.anchor.setComponent(i, 4, s.lightSample?.[1] ?? s.anchor.z);
         this.rect.setXYZW(i, s.frame.rect[0], s.frame.rect[1], s.frame.rect[2], s.frame.rect[3]);
         this.params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], this.cache.paletteRow.get(s.palette) ?? 0, s.push);
         this.flags.setXYZW(

@@ -90,7 +90,7 @@ animation values. An unavailable H2 read leaves the otherwise valid object in th
 | `QueueBState`                       | Building `+0x538`                  | Initialized -1 at `0x43B77D`; requested mode stored at `0x447794`; cleared at `0x4477B6` / `0x44003C`. It is validated but never substituted for the drawn mode.                                                                               |
 | Current / queued mission            | Building `+0xAC` / `+0xB4`         | `ForceMission` stores current at `0x5B2FE9`; getter `0x5B3040` falls back to queued at `0x5B304B` only if current is -1. Mission name table `0x816CAC`: Construction=18, Selling=19; AI bounds missions to 0..31 at `0x5B30B8`.                |
 | `Animation.Value`                   | Building `+0xF8`                   | `GetCurrentFrame` (`0x43EF90`) reads at `0x43EF9A`; animation AI (`0x4509D0`) adds Step `+0x110` at `0x450A05`, stores Value at `0x450A0E`.                                                                                                    |
-| Make Start / Count                  | BuildingType `+0xF04` / `+0xF08`   | `LoadBuildup` (`0x45F230`) stores Start=0 at `0x45F2FE`, foreground Count at `0x45F304`, halving SHP foreground/shadow frames at `0x45F2B4..0x45F2C8`. `BeginMode` initializes Value from Start at `0x447AA7`.                                 |
+| Make Start / Count                  | BuildingType `+0xF04` / `+0xF08`   | `LoadBuildup` (`0x45F230`) stores Start=0 at `0x45F2FE`, foreground Count at `0x45F304`, halving SHP foreground/shadow frames at `0x45F2B4..0x45F2C8`. For Gate=yes, `0x45F2D2..0x45F2D9` replaces Count with `GateStages + 1` (type `+0x16F8`, key `0x81A6F4`, INI store `0x4612E8`, default 9 at `0x45E1F0`). `BeginMode` initializes Value from Start at `0x447AA7`.                                 |
 | `HasBuildUp`                        | Building `+0x6E9`                  | Cleared at `0x43B990`; set at `0x442CCF` after successful make loading. Mode 0 with no loaded make is unavailable, not proof of completion: `GetImageData` (`0x4513D0`) still asks for make art; `DrawIt` exits at `0x43D2BB` if it is absent. |
 | Type `Gate`                         | BuildingType `+0x16B7`             | INI store `0x460A13`, key `0x81AA8C`; `GetCurrentFrame` checks at `0x43EFD0` and reverses at `0x43EFDA..0x43EFEB`.                                                                                                                             |
 | Type `LaserFence` / `FirestormWall` | BuildingType `+0x16BF` / `+0x16C0` | INI stores `0x460ABA` / `0x460ADA`, keys `0x81AA30` / `0x81AA20`; frame overrides at `0x43EFAA` / `0x43EFBD` precede make calculation. H2 make state is omitted for these special types.                                                       |
@@ -109,7 +109,8 @@ Current mode 0 with valid loaded make art maps to `building`, or `selling` when 
 `buildupFrame` is this actual foreground SHP index, not elapsed sale time. Gates apply the same reversal first,
 followed independently by sale reversal. LiveView clamps to available make art and never reverses this frame again.
 The library's `SpriteCollector.addShp` (`packages/ra2-assets/src/node/artSource.ts`) separates foreground `frames`
-from `shadows`, so the make index addresses the foreground half, matching the native count.
+from `shadows`, so ordinary make indices address the foreground half. Gate counts instead follow GateStages and
+need not equal the available art count. The reader's `0x7FFF` count bound is a sanity limit, not an SHP-derived bound.
 The pinned construction loader uses Start=0; other starts, invalid counts/stages, partial initialization and missing
 make art leave H2 unavailable.
 
@@ -143,23 +144,42 @@ eight-facing lookup table at `0x7EAEFC`, equivalent to `(7 - floor((raw16 + 5120
 the general-purpose `facingFrame()` for other art is unchanged. Fixed Sequence.Facing metadata describes an engine
 turn (`0x520CFA..0x520D16` updates primary facing), not a replacement for the image's current direction.
 
+The optional `infantryDrawFacingRaw` overrides only sequence-frame facing. At `0x518E27..0x518F2E` the image chooser
+uses Target (`+0x2B4`) instead of PrimaryFacing when InfantryType.JumpJet (`+0xD94`, INI store `0x715200`) is true,
+JumpJetTurn (`+0xECB`, key `0x8258FC`, store `0x524668`, default false at `0x5237E2`) is false, and locomotor
+`+0x674` resolves to the Jumpjet CLSID `{92612C46-F71F-11D1-AC9F-006008055BB5}` at `0x7E9AC0`.
+The read-only observer validates the concrete ILocomotion vtable `0x7ECD68` and adjacent IPersist vtable `0x7ECE34`
+(constructor stores `0x54ACC3..0x54ACD0`, ILocomotion is base+4), whose GetClassID slot is `0x54B710`.
+It never calls guest COM. Other locomotors, invalid pointers/types/coordinates and absent targets omit the override.
+The sequence and stage remain usable when only this optional read fails.
+
+`0x5F3DB0` obtains both positions through GetCoords (`vtable +0x48`). Shared `src/games/yr/objectCoords.ts` keeps
+infantry and effects on the same read-only dispatch, including building foundation centres and cell centres;
+unknown implementations are omitted. Only bounded integer coordinates are accepted for direction calculation.
+The atan helper `0x4CAE30` truncates the absolute slope/step index into the float table `0x8610B4`, with step at
+`0x8650B8`, handles axes/zero displacement and applies quadrant signs. The reader samples that same guest table.
+`0x5F3DFF..0x5F3E13` subtracts pi/2 (`0x7E2820`), multiplies by **-65534/(2*pi)** (`0x7E2818`), truncates via
+`0x7C5F00` and stores the low word. Continuous host atan2 and rounding at a 65536 scale are not equivalent near
+frame boundaries. PrimaryFacing remains the travel heading; older snapshots without the override retain pose interpolation.
+
 `hd:library` already extracts every artmd Sequence entry in `packages/ra2-assets/src/node/library.ts`; no cache
 schema change or regeneration is required for libraries that already carry `LibraryInfantry.sequences`.
 The view prefers a named engine sequence to inferred movement/fire/death. An old library missing a named sequence
 keeps those estimates; one with no sequence metadata at all draws its first body frame.
 
-Limits: native Spy/disguise type substitution (`0x518DDF..0x518DF0`) and some jumpjet target-based facing
-(`0x518E39..0x518F29`) are not projected. These fields do not provide locomotor bobbing or additional SHP vehicle
+Limits: native Spy/disguise type substitution (`0x518DDF..0x518DF0`) is not projected. These fields do not provide locomotor bobbing or additional SHP vehicle
 walk/firing state. Real-game same-moment HD build/sell/infantry acceptance remains separate from disassembly and
 synthetic guest-memory tests.
 
 ### Fallback and remaining H2 scope
 
-Without H2, LiveView records each UID's first logic frame in `push()`, independently of rendering or art readiness.
+Without H2, LiveView records each building UID's first logic frame and last seen frame in `push()`, independently of
+rendering or art readiness. Other object kinds do not allocate appearance records.
 After the initial 60-frame grace period it estimates make progress from that pushed frame. A newly seen building
 following a pushed-snapshot gap **greater than 54 logic frames** is treated as complete because its placement time
-is unknown. History survives temporary object omissions, uses match-unique UIDs rather than reusable pointers, and
-resets on a logic-frame rewind. Engine state, when available, takes precedence over this conservative fallback.
+is unknown. Missing building records are evicted when the current logic frame exceeds their last seen frame by more
+than 54; shorter omissions preserve the first-seen clock. Objects still present retain it even across a snapshot gap.
+History uses match-unique UIDs rather than reusable pointers and resets on a logic-frame rewind. Engine state, when available, takes precedence over this conservative fallback.
 
 SHP vehicles (terror drone, squid, dolphin) still need `UnitClass::WalkedFramesSoFar` and the facing used for their
 body art. Those fields are not implemented or assigned offsets here. The view uses primary facing and estimates

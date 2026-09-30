@@ -22,6 +22,8 @@ import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
  *   computes Start + Count - Value - 1. Thus the published make frame is already reversed.
  * - Type.LoadBuildup (0x45F230) writes construction Start +0xF04 = 0 at 0x45F2FE and foreground
  *   Count +0xF08 at 0x45F304 (SHP foreground/shadow count halved at 0x45F2B4..0x45F2C8).
+ *   For Gate=yes, 0x45F2D2..0x45F2D9 replaces that count with GateStages +0x16F8 plus one;
+ *   the INI loader stores GateStages at 0x4612E8 (key 0x81A6F4, default 9 at 0x45E1F0).
  *   BeginMode initializes Value from Start at 0x447AA7. HasBuildUp +0x6E9 is cleared at
  *   0x43B990 and set after successful loading at 0x442CCF. A missing make is not a done state:
  *   GetImageData 0x4513D0 still requests it in mode 0; DrawIt exits at 0x43D2BB when absent.
@@ -84,7 +86,7 @@ export function readYrBuildingRenderState(memory: GuestMemoryAccessor, pointer: 
     const start = memory.i32(type + o.makeStart);
     const count = memory.i32(type + o.makeCount);
     const stage = memory.i32(pointer + o.stage);
-    // The pinned make loader always uses start 0; bound foreground counts by the SHP's 16-bit count.
+    // The pinned loader uses start 0. 0x7FFF is a sanity limit, not an SHP bound: gates use GateStages + 1.
     if (
       start !== 0 ||
       !Number.isInteger(count) ||

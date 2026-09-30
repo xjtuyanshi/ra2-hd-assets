@@ -239,6 +239,8 @@ export interface YrObjectState {
   infantrySequence?: string;
   /** Sequence-local animation stage, excluding start/facing offsets. */
   sequenceFrame?: number;
+  /** Optional engine-selected 16-bit infantry art direction; leaves body/travel facing unchanged. */
+  infantryDrawFacingRaw?: number;
   /** Native registered painter position; absent when the layer list cannot be read reliably. */
   renderOrder?: { layer: number; index: number; ySort: number };
   /** Health / Strength clamped to 0..1. */

@@ -25,6 +25,14 @@ reconstructs that origin from the library's Width/Height and deduplicates the sa
 uses the tactical redraw rectangle, not a per-cell diamond mask: a multi-cell smudge remains a complete sprite while
 any of its footprint cells still refers to it. Invalid selectors are omitted and reported.
 
+Each native copy uses its drawing cell's LightConvert: `0x4804D1` supplies that cell's MapCoords, and `0x6B566F`
+looks it up before loading `+0x34` at `0x6B56AD`. The deduplicated live instance samples map lighting at the texel
+centre of the bottommost surviving footprint cell (maximum x+y), preserving its original origin/geometry. This also
+keeps a 1x1 mark from blending light from neighbouring cells at the origin corner. Shadows share the sample point.
+This models a full redraw's final copy. A single persistent HD instance cannot reproduce native dirty-rectangle or
+scroll-strip history, where only some copies are repainted; equal-row partial footprints and native per-copy clipping
+remain an approximation. Night lighting retains the renderer's existing per-pixel light model.
+
 Each independent game-neutral publication (`overlays`, `smudges`) contains bounds, a row-major `Int16Array` of type indices (`-1` for empty), a
 `Uint8Array` of native data, a type-ID table, and a revision. The reader checks table ranges, cell coordinates and concrete
 vtables, dereferences only existing cells, and compares every output value during the scan. Invalid cells/types are

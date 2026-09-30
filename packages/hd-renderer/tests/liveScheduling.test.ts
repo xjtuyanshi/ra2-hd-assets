@@ -31,11 +31,13 @@ describe('live presentation scheduling', () => {
       current: null as { snapshot: LiveSnapshot } | null,
       houseColour: new Map(),
       buildingAnimMatches: new Map(),
+      appearances: new Map(),
       effectDriver: {},
       warnedCells: true,
       ensureHouse: vi.fn(),
       trackMotion: vi.fn(),
       updateOverlays: vi.fn(),
+      updateSmudges: vi.fn(),
       updateNightSources: vi.fn(),
     };
     const view = Object.assign(Object.create(LiveView.prototype), internals) as LiveView;

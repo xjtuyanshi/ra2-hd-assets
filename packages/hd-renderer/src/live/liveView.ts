@@ -68,6 +68,8 @@ export interface LiveObject {
   /** Bridge (H2): infantry sequence key (e.g. "Walk", "Die1", "FireUp") and sequence-local animation step. */
   infantrySequence?: string;
   sequenceFrame?: number;
+  /** Optional engine-selected 16-bit infantry art direction; leaves body/travel facing unchanged. */
+  infantryDrawFacingRaw?: number;
   /** Native tactical layer registration; absent in older snapshots. Ground keys exclude altitude/art offsets. */
   renderOrder?: { layer: number; index: number; ySort: number };
 }
@@ -376,8 +378,8 @@ export class LiveView {
   private previous: Timed | null = null;
   private current: Timed | null = null;
   private readonly visuals = new Map<number, Visual>();
-  /** First pushed appearance by match-unique UID, retained across temporary read gaps and delayed art readiness. */
-  private readonly appearances = new Map<number, { frame: number; afterGap: boolean }>();
+  /** Building appearance by match-unique UID; tolerate brief omissions without retaining every dead object. */
+  private readonly appearances = new Map<number, { frame: number; afterGap: boolean; lastSeen: number }>();
   private readonly spriteBatch: SpriteBatch = new Map();
   private readonly spritePool = new SpritePool();
   private readonly painterObjects: PainterObject[] = [];
@@ -660,8 +662,14 @@ export class LiveView {
     const afterGap = !!current && snapshot.frame - current.snapshot.frame > BUILDUP_LOGIC_FRAMES;
     for (const object of snapshot.objects) {
       byUid.set(object.uid, object);
-      if (!this.appearances.has(object.uid)) this.appearances.set(object.uid, { frame: snapshot.frame, afterGap });
+      if (object.kind === 'building') {
+        const appearance = this.appearances.get(object.uid);
+        if (appearance) appearance.lastSeen = snapshot.frame;
+        else this.appearances.set(object.uid, { frame: snapshot.frame, afterGap, lastSeen: snapshot.frame });
+      }
     }
+    for (const [uid, appearance] of this.appearances)
+      if (snapshot.frame - appearance.lastSeen > BUILDUP_LOGIC_FRAMES) this.appearances.delete(uid);
     this.current = { snapshot, at, byUid };
     this.objectsInterpolate = false;
     if (current) {
@@ -1455,7 +1463,7 @@ export class LiveView {
     const entry = this.library!.library.sprites[type.sprite!];
     const sequences = type.infantry?.sequences;
     if (!entry) return;
-    const facingRaw = Math.round((pose.facing / (Math.PI * 2)) * 65536);
+    const facingRaw = object.infantryDrawFacingRaw ?? Math.round((pose.facing / (Math.PI * 2)) * 65536);
     const facing = (facingRaw >>> 8) & 255;
     let index: number | undefined;
     const named = object.infantrySequence ? sequences?.[object.infantrySequence] : undefined;

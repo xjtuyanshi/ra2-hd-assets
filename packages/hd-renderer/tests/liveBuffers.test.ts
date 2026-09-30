@@ -41,7 +41,9 @@ describe('live sprite buffers', () => {
     const cards = [sprite(1), sprite(2, true), sprite(3, false, true), sprite(4, true), sprite(5)];
     layer.setInstances(cards);
     const buffers = layer as unknown as Buffers;
-    expect(Array.from(buffers.anchor.array).filter((_, i) => i % 3 === 0)).toEqual([2, 4, 3, 1, 5]);
+    expect(Array.from(buffers.anchor.array).filter((_, i) => i % buffers.anchor.itemSize === 0)).toEqual([
+      2, 4, 3, 1, 5,
+    ]);
     const attrs = [buffers.anchor, buffers.rect, buffers.params, buffers.flags];
     const versions = attrs.map((a) => a.version);
     attrs.forEach((a) => a.clearUpdateRanges());
@@ -50,7 +52,8 @@ describe('live sprite buffers', () => {
     expect(attrs.every((a) => a.updateRanges.length === 0)).toBe(true);
     cards[0]!.anchor.x += 0.25;
     layer.setInstances(cards);
-    expect(buffers.anchor.updateRanges).toEqual([{ start: 9, count: 1 }]);
+    // Moving the anchor also moves its default light sample in the shared five-component buffer.
+    expect(buffers.anchor.updateRanges).toEqual([{ start: 15, count: 4 }]);
     expect(attrs.slice(1).map((a) => a.version)).toEqual(versions.slice(1));
     attrs.forEach((a) => a.clearUpdateRanges());
     const moved = attrs.map((a) => a.version);

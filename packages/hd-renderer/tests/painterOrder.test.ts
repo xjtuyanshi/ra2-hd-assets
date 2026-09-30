@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Texture, Vector3, type MeshBasicNodeMaterial } from 'three/webgpu';
 import type { SpriteFrame } from '../../ra2-assets/src/manifest';
 import type { DirtyAttribute } from '../src/dirtyAttribute';
 import { SpritePool } from '../src/live/spritePool';
+import { LiveView } from '../src/live/liveView';
 import { createPainterDepth, meshPainterDepth, VOXEL_PAINTER_SPAN } from '../src/painterDepth';
 import type { Ra2Cache } from '../src/ra2/cache';
 import {
@@ -237,6 +238,124 @@ describe('YR object painter order', () => {
 type Buffers = { anchor: DirtyAttribute; params: DirtyAttribute; flags: DirtyAttribute };
 
 describe('painter depth across sprite atlas layers', () => {
+  it('runs LiveView scene-wide assignment across pages and voxel bodies, excluding decals and shadows', () => {
+    const cache = {
+      paletteAtlas: { image: { height: 1 } },
+      paletteRow: new Map([['unit', 0]]),
+      manifest: { spriteAtlas: { width: 32, height: 32 } },
+      spriteAtlas: new Texture(),
+    } as unknown as Ra2Cache;
+    const behind = painterObject(2, 100, 1);
+    const front = painterObject(2, 200, 2);
+    const air = painterObject(4, 0, 0);
+    const make = (painter: typeof behind, extra: Partial<SpriteInstance> = {}): SpriteInstance => ({
+      anchor: new Vector3(1, 0, 1),
+      frame: { rect: [0, 0, 8, 8], offset: [0, 0] },
+      palette: 'unit',
+      push: 0,
+      shadow: false,
+      painter,
+      ...extra,
+    });
+    const a = [make(behind), make(front, { shadow: true }), make(front, { flat: true })];
+    const b = [make(front), make(behind, { painterPart: 0.1 })];
+    const layerA = new SpriteLayer(cache, a);
+    const layerB = new SpriteLayer(cache, b);
+    const voxel = { root: { visible: true }, painter: air, mode: 'voxel' };
+    const state = {
+      painterDirty: true,
+      painterObjects: [],
+      visuals: new Map([[1, voxel]]),
+      world: {},
+      cellInstances: [],
+      cellLayer: { setInstances: vi.fn() },
+      overlayInstances: { instances: { pages: new Map() } },
+      overlayLayers: new Map(),
+      spriteBatch: new Map([
+        [0, a],
+        [1, b],
+      ]),
+      effectInstances: [],
+      voxelUnits: { setPainterDepth: vi.fn() },
+      flushSprites: () => {
+        layerA.setInstances(a);
+        layerB.setInstances(b);
+      },
+    };
+    const view = Object.assign(Object.create(LiveView.prototype), state) as typeof state & {
+      applyPainterOrder(): void;
+    };
+    try {
+      view.applyPainterOrder();
+      expect(view.painterDirty).toBe(false);
+      expect(view.painterObjects).toEqual([behind, front, air]);
+      expect(behind.depth).toBeGreaterThan(front.depth);
+      expect(front.depth).toBeGreaterThan(air.depth);
+      expect(state.voxelUnits.setPainterDepth).toHaveBeenCalledWith(voxel, air.depth, air.slotWidth);
+      const flagsA = (layerA as unknown as Buffers).flags;
+      const flagsB = (layerB as unknown as Buffers).flags;
+      expect(flagsA.array[3]).toBe(-1);
+      expect(flagsA.array[7]).toBe(-1);
+      expect(flagsA.array[11]).toBeCloseTo(behind.depth, 7);
+      expect(flagsB.array[7]).toBeCloseTo(front.depth, 7);
+      // Frozen-frame native reordering must reach each atlas buffer on the next assignment.
+      behind.index = 3;
+      view.applyPainterOrder();
+      expect(view.painterObjects).toEqual([front, behind, air]);
+      expect(flagsA.array[11]).toBeLessThan(flagsB.array[3]!);
+    } finally {
+      for (const layer of [layerA, layerB]) {
+        layer.mesh.geometry.dispose();
+        (layer.mesh.material as MeshBasicNodeMaterial).dispose();
+      }
+      cache.spriteAtlas.dispose();
+    }
+  });
+
+  it('uploads a cell-centred lighting override independently of geometry and clears it on reuse', () => {
+    const cache = {
+      paletteAtlas: { image: { height: 1 } },
+      paletteRow: new Map([['iso', 0]]),
+      manifest: { spriteAtlas: { width: 32, height: 32 } },
+      spriteAtlas: new Texture(),
+    } as unknown as Ra2Cache;
+    const instance: SpriteInstance = {
+      anchor: new Vector3(10, 2, 20),
+      frame: { rect: [0, 0, 8, 8], offset: [0, 0] },
+      palette: 'iso',
+      push: 0,
+      flat: true,
+      shadow: false,
+      lighting: 'full',
+      lightSample: [11.5, 21.5],
+    };
+    const layer = new SpriteLayer(cache, [instance]);
+    try {
+      const buffers = layer as unknown as Buffers;
+      const position = Array.from(buffers.anchor.array).slice(0, 3);
+      const sample = () => Array.from(buffers.anchor.array).slice(3, 5);
+      const shared = buffers.anchor.interleaved();
+      expect(sample()).toEqual([11.5, 21.5]);
+      expect(shared.array).toBe(buffers.anchor.array);
+      expect(shared.updateRanges).toBe(buffers.anchor.updateRanges);
+      const version = shared.version;
+      layer.setInstances([instance]);
+      expect(shared.version).toBe(version);
+      shared.clearUpdateRanges();
+      layer.setInstances([{ ...instance, lightSample: [10.5, 20.5] }]);
+      expect(sample()).toEqual([10.5, 20.5]);
+      expect(shared.version).toBe(version + 1);
+      expect(shared.updateRanges).toEqual([{ start: 3, count: 2 }]);
+      layer.setInstances([{ ...instance, lightSample: undefined }]);
+      expect(sample()).toEqual([10, 20]);
+      expect(Array.from(buffers.anchor.array).slice(0, 3)).toEqual(position);
+    } finally {
+      layer.mesh.geometry.dispose();
+      (layer.mesh.material as MeshBasicNodeMaterial).dispose();
+      cache.spriteAtlas.dispose();
+    }
+  });
+
   it('clears reused sprite painter owners and component offsets before the next frame', () => {
     const pool = new SpritePool();
     const frame: SpriteFrame = { rect: [0, 0, 16, 24], offset: [-8, -18] };

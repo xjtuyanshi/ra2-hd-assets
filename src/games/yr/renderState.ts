@@ -270,6 +270,7 @@ function projectObject(object: YrObjectState): GameRenderObject {
     buildupFrame,
     infantrySequence,
     sequenceFrame,
+    infantryDrawFacingRaw,
     health,
     isSelected,
   } = object;
@@ -288,6 +289,7 @@ function projectObject(object: YrObjectState): GameRenderObject {
     ...(buildupFrame !== undefined ? { buildupFrame } : {}),
     ...(infantrySequence !== undefined ? { infantrySequence } : {}),
     ...(sequenceFrame !== undefined ? { sequenceFrame } : {}),
+    ...(infantryDrawFacingRaw !== undefined ? { infantryDrawFacingRaw } : {}),
     ...(renderOrder !== undefined ? { renderOrder: { ...renderOrder } } : {}),
     health,
     isSelected,

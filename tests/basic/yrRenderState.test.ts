@@ -303,11 +303,20 @@ describe('YR 1.001 render state for the HD bridge', () => {
       buildState: 'selling',
       buildupFrame: 0,
     };
-    state.objects[1] = { ...state.objects[1]!, infantrySequence: 'FireProne', sequenceFrame: 0 };
+    state.objects[1] = {
+      ...state.objects[1]!,
+      infantrySequence: 'FireProne',
+      sequenceFrame: 0,
+      infantryDrawFacingRaw: 0,
+    };
     harness.readState.mockReturnValue(state);
     const result = harness.read()!;
     expect(result.objects[0]).toMatchObject({ buildState: 'selling', buildupFrame: 0 });
-    expect(result.objects[1]).toMatchObject({ infantrySequence: 'FireProne', sequenceFrame: 0 });
+    expect(result.objects[1]).toMatchObject({
+      infantrySequence: 'FireProne',
+      sequenceFrame: 0,
+      infantryDrawFacingRaw: 0,
+    });
     expect(result.objects[1]).not.toHaveProperty('buildState');
     expect(result.objects[0]).not.toHaveProperty('infantrySequence');
     expect(structuredClone(result)).toEqual(result);
