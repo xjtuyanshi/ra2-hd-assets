@@ -1,6 +1,31 @@
 import type GUI from 'three/addons/libs/lil-gui.module.min.js';
 import { applyLookPreset, LOOK_PRESETS, type HdRenderer, type HdSettings, type LookPreset } from '../src/HdRenderer';
 import type { RenderState } from '../src/contract';
+import { smoothVoxelOptions, DEFAULT_SMOOTH_VOXEL, type SmoothVoxelOptions } from '../src/ra2/voxelSmooth';
+import { VOXEL_PBR_DEFAULTS, voxelPbrFor, type VoxelPbrKnob } from '../src/ra2/voxelPbr';
+
+/** Parse only known geometry knobs, before asynchronous world loading captures its immutable options. */
+export function voxelLookParams(params: URLSearchParams): {
+  voxelLook: 'engine' | 'remaster';
+  smoothVoxel: Readonly<SmoothVoxelOptions>;
+} {
+  const options: Partial<SmoothVoxelOptions> = {};
+  for (const entry of (params.get('vsmooth') ?? '').split(',')) {
+    const [key, value] = entry.split(':');
+    if (!key || value === undefined || !Object.hasOwn(DEFAULT_SMOOTH_VOXEL, key)) continue;
+    if (key === 'shape') {
+      if (value === 'imls' || value === 'occupancy') options.shape = value;
+    } else if (key === 'groundOcclusion') {
+      if (['true', 'false', '0', '1'].includes(value)) options.groundOcclusion = value === 'true' || value === '1';
+    } else if (value.trim() && Number.isFinite(Number(value))) {
+      (options as Record<string, unknown>)[key] = Number(value);
+    }
+  }
+  return {
+    voxelLook: params.get('vlook') === 'remaster' ? 'remaster' : 'engine',
+    smoothVoxel: smoothVoxelOptions(options),
+  };
+}
 
 /**
  * Sandbox parameters of the enhanced look (src/ra2/spriteLook.ts): ?look=faithful|golden picks a preset (golden also
@@ -8,6 +33,14 @@ import type { RenderState } from '../src/contract';
  * ?shfollow= ?shsoft= ?wetrefl= ?contrast= ?sunpath=fixed|arc ?adapt= ?vsheen= ?vsheencap= ?vao=. Call before HdRenderer.init().
  */
 export function applyLookParams(hd: HdRenderer, params: URLSearchParams, state: RenderState): void {
+  hd.settings.voxelLook = params.get('vlook') === 'remaster' ? 'remaster' : 'engine';
+  const pbr = voxelPbrFor(hd.nodes);
+  for (const entry of (params.get('vk') ?? '').split(',')) {
+    const [key, value] = entry.split(':');
+    if (key && Object.hasOwn(VOXEL_PBR_DEFAULTS, key) && value?.trim() && Number.isFinite(Number(value))) {
+      pbr[key as VoxelPbrKnob].value = Number(value);
+    }
+  }
   const preset = params.get('look') as LookPreset | null;
   if (preset && preset in LOOK_PRESETS) {
     const hour = applyLookPreset(hd.settings, preset);

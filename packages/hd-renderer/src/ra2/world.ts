@@ -22,10 +22,15 @@ import {
   type VoxelShape,
 } from './voxels';
 import { loadVoxelLighting } from './vpl';
+import { smoothVoxelOptions, type SmoothVoxelOptions } from './voxelSmooth';
+import { buildSmoothVoxelGeometry } from './voxelSmoothGeometry';
 
 /** A battlefield the HD renderer can draw: terrain, optional water, and everything standing on it. */
 export interface HdWorld {
   nodes?: AtmosphereNodes;
+  /** Load-time geometry choice, also inherited by units created later in live matches. */
+  voxelLook?: 'engine' | 'remaster';
+  smoothVoxel?: Readonly<SmoothVoxelOptions>;
   width: number;
   height: number;
   terrain: TerrainBuild;
@@ -82,6 +87,8 @@ export async function loadRa2World(
     extraObjects?: (manifest: Ra2Cache['manifest']) => MapObject[];
     /** Immutable per-world voxel refinement; defaults are captured before asynchronous resource loading starts. */
     voxelShape?: Readonly<VoxelShape>;
+    voxelLook?: 'engine' | 'remaster';
+    smoothVoxel?: Partial<SmoothVoxelOptions>;
     /** Keep only map objects passing this test (a live match draws units and buildings from game memory instead). */
     includeObject?: (object: MapObject) => boolean;
     /** Load the optional sprite material atlas (normals.json) for the enhanced look; default true. */
@@ -94,6 +101,8 @@ export async function loadRa2World(
   } & Ra2CacheOptions = {},
 ): Promise<HdWorld> {
   const nodes = options.nodes ?? new AtmosphereNodes();
+  const voxelLook = options.voxelLook ?? 'engine';
+  const smoothVoxel = smoothVoxelOptions(options.smoothVoxel);
   if (options.voxelShape) setVoxelShapeFor(nodes, options.voxelShape);
   else voxelShapeFor(nodes);
   // The engine's voxel lighting table lives next to the map caches, in the type library's common directory; without
@@ -138,7 +147,10 @@ export async function loadRa2World(
       const cacheKey = `${object.voxel}@${paletteKey}`;
       let parts = geometries.get(cacheKey);
       if (!parts) {
-        parts = buildVoxelGeometry(model, cache.paletteRgb.get(paletteKey)!, nodes);
+        parts =
+          voxelLook === 'remaster'
+            ? buildSmoothVoxelGeometry(model, cache.paletteRgb.get(paletteKey)!, nodes, smoothVoxel)
+            : buildVoxelGeometry(model, cache.paletteRgb.get(paletteKey)!, nodes);
         geometries.set(cacheKey, parts);
       }
       const { root: vehicle } = instantiateVoxel(parts, voxelMaterial);
@@ -269,6 +281,8 @@ export async function loadRa2World(
     : new Vector3(manifest.grid.width / 2, 0, manifest.grid.height / 2);
   return {
     nodes,
+    voxelLook,
+    smoothVoxel,
     width: manifest.grid.width,
     height: manifest.grid.height,
     terrain,

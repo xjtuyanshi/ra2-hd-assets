@@ -9,7 +9,8 @@ import { SpriteLayer } from '../src/ra2/sprites';
 import { loadRa2World } from '../src/ra2/world';
 import { voxelLightingFor } from '../src/ra2/vpl';
 import { voxelShape } from '../src/ra2/voxels';
-import { addLookGui, applyLookParams } from './look';
+import { addLookGui, applyLookParams, voxelLookParams } from './look';
+import { voxelPbrFor } from '../src/ra2/voxelPbr';
 import { waterPreset } from '../src/ra2/waterLook';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
@@ -40,6 +41,7 @@ const water = params.get('water') ?? (params.get('look') === 'golden' ? 'enhance
 waterPreset.style = water === 'enhanced' ? 'enhanced' : 'classic';
 const world = mapName
   ? await loadRa2World(`/${encodeURIComponent(mapName)}`, {
+      ...voxelLookParams(params),
       voxelShape: shape,
       // ?tmap=0 draws the per-tile atlas instead of the (AI-upscaled) whole-map terrain image, for A/B review.
       terrainMap: params.get('tmap') !== '0',
@@ -191,7 +193,14 @@ if (world?.cache && world.sprites && palcard) {
   hd.scene.add(layer.mesh);
 }
 // Development handle for inspecting the scene from the console.
-const handle = { hd, world, state, stats: () => hd.stats(), fires: [] as { at: Vector3; scale: number }[] };
+const handle = {
+  hd,
+  world,
+  state,
+  voxelPbr: voxelPbrFor(hd.nodes),
+  stats: () => hd.stats(),
+  fires: [] as { at: Vector3; scale: number }[],
+};
 (window as unknown as { __hd: unknown }).__hd = handle;
 hd.setState(state);
 

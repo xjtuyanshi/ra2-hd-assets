@@ -11,6 +11,13 @@ import {
 } from '../ra2/voxels';
 import type { HdWorld } from '../ra2/world';
 import { LEVEL_HEIGHT } from '../world';
+import { smoothVoxelOptions, type SmoothVoxelOptions } from '../ra2/voxelSmooth';
+import { buildSmoothVoxelGeometry } from '../ra2/voxelSmoothGeometry';
+
+export interface VoxelUnitsOptions {
+  voxelLook?: 'engine' | 'remaster';
+  smoothVoxel?: Partial<SmoothVoxelOptions>;
+}
 
 const LEPTONS_PER_CELL = 256;
 const LEPTONS_PER_LEVEL = 104;
@@ -30,20 +37,26 @@ export interface VoxelPose {
 }
 
 /**
- * Voxel vehicles and aircraft of the live view: builds meshes from VXL models (one geometry set per type and palette
- * row, because house colours are baked into the vertex colours) and places them from engine poses. LiveView keeps
+ * Voxel vehicles and aircraft of the live view: geometry is shared across house palettes; each palette gets its own
+ * LUT material. Places the models from engine poses. LiveView keeps
  * the bookkeeping (which object uses which unit); everything about how a voxel unit looks lives here.
  */
 export class VoxelUnits {
   private readonly material: ReturnType<typeof createVoxelMaterial>;
   private readonly geometries = new Map<string, VoxelGeometry[]>();
+  private readonly voxelLook: 'engine' | 'remaster';
+  private readonly smoothVoxel: Readonly<SmoothVoxelOptions>;
 
   constructor(
     readonly hd: HdRenderer,
     readonly world: HdWorld,
     private readonly cache: Ra2Cache,
     readonly libraryBase?: string,
+    options: VoxelUnitsOptions = {},
   ) {
+    this.voxelLook = options.voxelLook ?? world.voxelLook ?? hd.settings.voxelLook;
+    this.smoothVoxel = smoothVoxelOptions({ ...world.smoothVoxel, ...options.smoothVoxel });
+    if (this.voxelLook === 'remaster') hd.settings.voxelLook = 'remaster';
     this.material = createVoxelMaterial(hd.nodes);
   }
 
@@ -54,7 +67,10 @@ export class VoxelUnits {
   build(model: VoxelModel, paletteKey: string, cacheKey: string): VoxelUnit {
     let parts = this.geometries.get(cacheKey);
     if (!parts) {
-      parts = buildVoxelGeometry(model, this.cache.paletteRgb.get(paletteKey)!);
+      parts =
+        this.voxelLook === 'remaster'
+          ? buildSmoothVoxelGeometry(model, this.cache.paletteRgb.get(paletteKey)!, this.hd.nodes, this.smoothVoxel)
+          : buildVoxelGeometry(model, this.cache.paletteRgb.get(paletteKey)!, this.hd.nodes);
       this.geometries.set(cacheKey, parts);
     }
     return instantiateVoxel(parts, this.material);

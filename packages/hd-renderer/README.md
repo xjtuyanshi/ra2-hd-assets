@@ -262,3 +262,70 @@ reflections still follow the settings.
   along a fixed light, halving the displayed colour once per pixel (depth-tested, see `voxelShadow.ts`); airborne units
   drop theirs straight down, shrunk with height. Review parameters (sandbox and replays): `?vpl=<extra>,<occlusion>,
 <sheen>`, `?vshape=<corner relax>,<normal blend>`, `?ml=0` (no map day light).
+
+### Optional remaster voxel look
+
+The default `HdSettings.voxelLook = 'engine'` retains the existing geometry and VPL material. Select
+`?vlook=remaster` before loading the sandbox map to use smooth, physically lit vehicles. This is a load-time
+geometry choice; changing the setting on an already built world does not rebuild its units. `loadRa2World`
+accepts `voxelLook` and `smoothVoxel: Partial<SmoothVoxelOptions>`. `VoxelUnits` inherits those world options,
+or accepts overrides as its fifth constructor argument. Geometry is shared by model and normalized options;
+house palettes share geometry but own different LUT materials, scoped to their `AtmosphereNodes` lifetime.
+
+- `src/ra2/voxelSmooth.ts` is renderer-independent, returning typed arrays from `buildSmoothSection`.
+  The thin `voxelSmoothGeometry.ts` wrapper merges sections in `buildSmoothPartGeometry`. Original bounds,
+  section transforms, normal tables, voxel scale, turret pivots and flattened shadow geometry are retained.
+- The exact separable boundary EDT uses samples on exposed cube faces. The distance to a union-of-cubes
+  boundary is exact on this aligned lattice; its occupancy sign gives the inside and outside fields in one
+  transform. This avoids the corner error of subtracting half a sample from a binary centre-distance EDT.
+  IMLS estimates the artist's planes from stored normals; the optional occupancy mode blurs signed distance.
+  Both clamp displacement to a band, preserving one-voxel features. Palette-constant quads have separate
+  vertices; normals, curvature and ray AO are computed once per surface-net vertex before duplication.
+- AO uses deterministic cosine-distributed rays, starting 0.6 voxel off the surface. Half-voxel marching
+  stops at occupied voxels or the transformed part's model ground plane. A hit at distance `t` contributes
+  `sqrt(1 - t / aoLength)`. Zero rays or zero length disables AO. The maximum inward band is below 0.5 voxel,
+  preserving a negative core in a one-voxel rod; supersampling accepts integers 2–8 (an aligned lattice needs an
+  interior sample). Sigma/radius are limited to 4 voxels, the outward band to 1 voxel, and rays/length to 256.
+- `voxelClasses.ts` owns the RA2 palette policy. `voxelPbr.ts` uses a 256×3 nearest-filtered LUT, GGX with the
+  scene sun, diffuse HemisphereLight, and a procedural reflection sky. The sky adds no second diffuse term.
+  Lambert lighting already divides irradiance by pi, so the existing noon exposure supplies the same flat
+  diffuse reference as terrain. Metallic energy conservation, wear and reflections deliberately alter the
+  final surface response; `brightness` trims it without an additional exposure or emissive daylight fill.
+  Glass shading is available, but no stock palette ramp is guessed to be glass (the blue ramp stays paint).
+
+Geometry review parameters, captured before loading:
+
+```text
+?vlook=remaster&vsmooth=supersample:3,shape:imls,imlsRadius:1.1,bandIn:0.3,bandOut:0.3,storedNormals:0.35,aoRays:48
+```
+
+Other geometry defaults: `smoothSigma:0.55`, `aoLength:10`, `groundOcclusion:true`. `shape:occupancy` selects
+Gaussian smoothing. Uniforms can be changed through `?vk=aoStrength:0.8,wear:0.5` or, without reloading,
+`window.__hd.voxelPbr.wear.value = 0.5`. The complete defaults are:
+
+| Uniform     | Default | Uniform       | Default |
+| ----------- | ------: | ------------- | ------: |
+| brightness  |       1 | aoStrength    |     0.8 |
+| envStrength |     0.6 | specular      |       1 |
+| wear        |     0.5 | wearStart     |     0.6 |
+| cavity      |     0.4 | cavityStart   |     0.6 |
+| grime       |    0.35 | grimeHeight   |       4 |
+| microNoise  |    0.06 | lightStrength |       1 |
+
+Asset-free acceptance:
+
+```bash
+pnpm --filter hd-renderer run typecheck
+pnpm vitest run packages/hd-renderer/tests
+```
+
+Read-only CPU benchmark against a user-supplied voxel JSON directory (all parts, default options; first build
+and median of three subsequent uncached builds, excluding JSON I/O):
+
+```bash
+pnpm exec tsx packages/hd-renderer/scripts/benchmarkVoxelSmooth.ts "$VOXEL_JSON_DIRECTORY"
+```
+
+The synthetic tests check geometry topology, thin features, palette boundaries, normals, ground AO,
+determinism, cache isolation, shadows, depth compatibility and CPU shader generation. These checks and the
+build benchmark do not establish GPU rendering, visual quality, noon pixel matching or live-match FPS.
