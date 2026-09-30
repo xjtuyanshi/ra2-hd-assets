@@ -377,6 +377,40 @@ CD 是技术上最适合做 HD 的底座（three.js 3D 正交场景，体素是�
 - 以后如果全量采用 3D 做步兵，只留给约 6 个英雄步兵。
 - 如果按 v1 的全量范围做，预计 4–8 个月。
 
+#### Infantry sheet asset tool
+
+`packages/ra2-assets/python/infantry_sheets.py` groups frames by animation and facing block so the image model
+redraws a coherent cycle. It reuses the registration and colour helpers from `hybrid_redraw.py`,
+`redetail_sprites.py` and `rematerialize.py`. NumPy and Pillow are required. Run from the repository root, with
+`LIBRARY` set to a theater library directory, `WORK` to an untracked work directory, `VARIANT` to a separate
+variant library directory, and `CODEX` to the image-capable agent executable:
+
+```bash
+python3 -B packages/ra2-assets/python/infantry_sheets.py prepare --library "$LIBRARY" --work "$WORK" --units E1,E2,SHK,ENGINEER,DOG,ADOG
+python3 -B packages/ra2-assets/python/infantry_sheets.py run --work "$WORK" --codex "$CODEX" --parallel 3 --limit-file "$WORK/LIMIT_HIT.txt"
+python3 -B packages/ra2-assets/python/infantry_sheets.py compose --library "$LIBRARY" --work "$WORK"
+python3 -B packages/ra2-assets/python/infantry_sheets.py build --library "$LIBRARY" --work "$WORK" --page 21 --variant-dir "$VARIANT" --suffix l3inf --min-sil 0.6
+```
+
+Preparation writes `sheets/<name>/{input.png,job.json,prompt.txt}`. `run` skips finished sheets, makes at most three
+attempts per sheet, and stops launching on usage/rate limits, HTTP 429 or quota messages; already running
+jobs finish. An existing limit file also prevents launches. `--names a,b` selects prepared sheets; `--redo a,b`
+archives their previous results under `tryN` before rerunning. Composition prefers `full.png` over `output.png`
+and writes `review.png` plus `metrics.json` per sheet. Body alpha is kept except for an inward trim band; ground
+shadows have a separate opacity/softness treatment. The default `--paint shaded` takes house paint only from
+saturated texels close to the house hue (so faces and brown cloth beside a red area stay unpainted) and encodes it
+by value rather than luminance, because a lit team colour is lighter than its ramp's brightest luminance and would
+otherwise clamp to one flat slab; `--paint model` keeps the earlier encoding. `--sharpen` (default 0.6) is a mild
+unsharp mask on the body interior, never on the antialiased rim. `compose --help` lists the colour, band, shadow,
+paint and sharpening options, which `build` also accepts. Use matching options for review and build.
+
+Build writes colour/remap pages and `report.json` under `WORK/pages`, keeping unprocessed or rejected frames
+unchanged. The variant directory links other library files and merges only the selected HD page's `file` and
+`remap` fields into its existing real `library.json` (otherwise the source manifest). It also writes
+`library.l3-infantry.json`. Missing outputs and rejected frames remain explicit in the report; installation is
+not visual acceptance. All game-derived inputs and outputs remain untracked. Asset-free regression:
+`cd packages/ra2-assets/python && python3 -B -m unittest test_infantry_sheets -v`.
+
 #### Phase 4–7：资产规模化、环境、VFX、打磨
 
 - 规模化按阵营单位 → 战区 → 步兵 → 民用建筑 → 动画 → 图标的顺序分批，每批由你签字。
