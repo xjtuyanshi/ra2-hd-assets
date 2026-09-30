@@ -6,6 +6,11 @@
  *   ?fx=units                 voxel tanks, SHP drones and infantry at eight facings, plus a few buildings
  *   ?fx=squad                 a small battle line: Grizzlies and GIs (house &house) facing Rhinos (house &house2),
  *                             a power plant and a refinery behind them (combine with anims: ?fx=squad,TWLT070,...)
+ *   ?fx=bldgs&bldgs=NACNST:0:0:0,NAPOWR:4:0:1  TYPE:dx:dy[:owner] buildings, cell offsets from cx,cy;
+ *                             owner indexes the bench houses (default 0); combine with anims: ?fx=bldgs,TWLT070
+ *   &health=0.4               health of all listed buildings (default 1; <= 0.5 uses damaged art)
+ *   &make=1&time=0.4          omit listed buildings during warm-up, then spawn them to play the engine-style
+ *                             build-up; time selects seconds after spawn (keep the default warm-up for make)
  *   &at=dx,dy;dx,dy           cell offsets from the centre for the listed anims (instead of the diagonal)
  *   &map=XMP29U2&cx=60&cy=62  map cache and centre cell (default: the map's first waypoint)
  *   &zoom=3                   CSS pixels per engine pixel
@@ -248,6 +253,46 @@ function squadSet(): LiveObject[] {
   return objects;
 }
 
+/** An explicit building layout for comparing intact, damaged and make art at the same camera/lighting. */
+function buildingSet(): LiveObject[] {
+  const health = Number(params.get('health') ?? 1);
+  if (!Number.isFinite(health) || health < 0 || health > 1) throw new Error('health must be between 0 and 1');
+  return (params.get('bldgs') ?? '')
+    .split(',')
+    .filter(Boolean)
+    .map((spec) => {
+      const fields = spec.split(':');
+      const [type, dx, dy] = fields;
+      const x = Number(dx);
+      const y = Number(dy);
+      const owner = Number(fields[3] ?? 0);
+      if (
+        fields.length < 3 ||
+        fields.length > 4 ||
+        !type ||
+        !dx ||
+        !dy ||
+        !Number.isFinite(x) ||
+        !Number.isFinite(y) ||
+        !Number.isInteger(owner) ||
+        !houses.some((h) => h.index === owner)
+      )
+        throw new Error(`Invalid building spec: ${spec}; expected TYPE:dx:dy[:owner]`);
+      const uid = nextUid++;
+      return {
+        id: uid,
+        uid,
+        kind: 'building',
+        type,
+        owner,
+        ...at(cx + x, cy + y),
+        facingRaw: 0,
+        health,
+        isSelected: false,
+      };
+    });
+}
+
 /** Engine timing of an anim type from the effect art sidecar (pnpm hd:effects), when it exists. */
 interface FxArt {
   frames: number;
@@ -269,6 +314,9 @@ for (const [id, a] of Object.entries(effectsJson?.anims ?? {}))
 
 const fxIds = (params.get('fx') ?? 'units').split(',').filter(Boolean);
 const units = [...(fxIds.includes('units') ? unitSet() : []), ...(fxIds.includes('squad') ? squadSet() : [])];
+const buildings = fxIds.includes('bldgs') ? buildingSet() : [];
+const allObjects = [...units, ...buildings];
+const makeBuildings = params.get('make') === '1';
 const spread = Number(params.get('spread') ?? 1.6);
 const offsets = params
   .get('at')
@@ -276,7 +324,7 @@ const offsets = params
   .map((pair) => pair.split(',').map(Number) as [number, number])
   .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
 const anims: LiveAnim[] = fxIds
-  .filter((id) => id !== 'units' && id !== 'squad')
+  .filter((id) => id !== 'units' && id !== 'squad' && id !== 'bldgs')
   .map((type, i, list) => {
     const offset = offsets?.length ? offsets[i % offsets.length]! : null;
     const d = (i - (list.length - 1) / 2) * spread;
@@ -390,7 +438,8 @@ function snapshot(): LiveSnapshot {
     frame,
     view,
     houses,
-    objects: units,
+    // Delaying first appearance lets LiveView's normal make timeline start at the spawn frame.
+    objects: makeBuildings && (spawned === null || frame < spawned) ? units : allObjects,
     effects: {
       anims: listed,
       bullets: [],

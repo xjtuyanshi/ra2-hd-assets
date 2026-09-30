@@ -375,6 +375,102 @@ cornices, light and shade) while the structure rules stay; `--style-lock-l <0..1
 lock's low-frequency lightness target from the reference where it shows the object cleanly (hue and saturation stay
 the original's). Because lightness may now move, loosen `lf_dE_mean` / `lf_dE_p95` with `--thresholds` accordingly.
 
+## Level 3 building redraw sheets (Python, experimental)
+
+`python/l3_redraw.py` reuses the hybrid registration, checks and paint encoding for map caches and paged type
+libraries. A JSON plan is a **list of jobs**, for example:
+
+```json
+[
+  {
+    "id": "NACNST",
+    "source": "library",
+    "house": "DarkBlue",
+    "panels": [
+      {
+        "label": "intact",
+        "parts": [
+          { "sprite": "building:NACNST", "frame": 0 },
+          { "sprite": "anim:NACNST_C", "frame": 0 }
+        ]
+      },
+      {
+        "label": "damaged",
+        "parts": [
+          { "sprite": "building:NACNST", "frame": 1 },
+          { "sprite": "anim:NACNST_CD", "frame": 0 }
+        ]
+      }
+    ],
+    "prompt_file": "/path/to/full-prompt.txt"
+  }
+]
+```
+
+Parts use their anchor offsets and draw in list order. `paste: false` keeps a part in the input and checks but excludes
+it from the atlas. Each panel has an 8 px original-scale margin and a 4x upscale; the sheet has 48 px grey gaps and
+vertically centred panels. Only sheets shorter than 640 px on their long side are enlarged by an integer factor toward
+1024 px. `layout.json` records canvas `[x,y,w,h]` panel boxes and original-scale part rectangles excluding margins.
+Optional job fields: `style_reference` (copied as `style_reference.png`), `extra_images` (filename-to-path map), `lock`
+and `thresholds`. Prompts are caller-written in full, including output instructions; retries only append named failures.
+
+For make animations, add `"layout": {"cols": 5, "align": "anchor", "gap": 48, "sequence": true, "stabilize": true}`
+and one ordered panel per frame. Every cell uses the union of all panel rectangles in original anchor coordinates,
+so frames grow in place; parts retain their exact offsets, dimensions and alpha. Cells include the usual 4x margin,
+are arranged row-major with grey gaps (default 48 px), and are never enlarged. `layout.json` adds `grid` with `cols`,
+`rows`, `cell` dimensions, the original-scale `common_box`, alignment and sequence settings. Jobs without `layout`
+retain the existing horizontal layout and output format. `sequence` and `stabilize` both default to false.
+
+`sequence` adds consecutive-frame `temporal.pairs` to each attempt's metrics: `static_flicker_dE` measures CIEDE76
+mean/p95 where both original nearest-neighbour 2x composites are opaque and exactly the same displayed colour;
+`all_dE` covers every opaque overlap. Each reports pixel count and fraction of the current frame's original opaque
+pixels; empty comparisons have null mean/p95. `stabilize` borrows the previous frame's final locked colour only where
+original colour and paint index match, propagating in panel order before paint re-encoding. The innermost result is
+fully shared; the one-pixel boundary inside the static region at 2x blends halfway. Per-panel `stabilized_fraction`
+and `temporal.stabilized_fraction` count borrowed pixels, including that feathered boundary.
+
+```bash
+python3 packages/ra2-assets/python/l3_redraw.py prepare --plan "$PLAN" --work "$WORK" --library "$LIBRARY" \
+  --realesrgan "$REALESRGAN" --gpu-lock "$GPU_LOCK"
+python3 packages/ra2-assets/python/l3_redraw.py run --plan "$PLAN" --work "$WORK" --library "$LIBRARY" \
+  --codex "$CODEX_BIN" --parallel 2 --max-attempts 2 --timeout 1200 --limit-file "$WORK/limit.txt"
+python3 packages/ra2-assets/python/l3_redraw.py run --plan "$PLAN" --work "$WORK" --library "$LIBRARY" --no-model
+python3 packages/ra2-assets/python/l3_redraw.py compose --plan "$PLAN" --work "$WORK" --library "$LIBRARY" \
+  --out-root "$OUT_ROOT"
+python3 packages/ra2-assets/python/l3_redraw.py delta --source library --library "$LIBRARY" \
+  --body building:NAPOWR:0 --anim anim:NAPOWR_A --frames 0-17 --new-atlas-root "$OUT_ROOT" --out-root "$OUT_ROOT"
+python3 -m pytest packages/ra2-assets/python -q
+```
+
+For map jobs, supply `--cache <hd-cache root> --map <name>`; compose optionally takes `--out-map <name>` and
+`--base-atlas <PNG>` to explicitly reset the map atlas. Otherwise an existing regular variant `sprites@2x.png` is
+the base; a missing file or symlink starts from the source atlas. `--upscaler lanczos` is the CPU-only prepare
+path. `prepare` preserves existing inputs unless `--force`; `run` evaluates existing `attemptK/raw.png` (preferred) or
+`output.png` without another call. A completed call's quota/rate-limit log stops new calls only if both images are
+missing or the call exited nonzero; `429` must denote an HTTP error, not a token count. Running calls finish, and a
+confirmed limit writes the limit file and exits nonzero. Missing outputs also exit nonzero. `decisions.json` records all attempts and the first passing
+one, or the attempt with fewest failures as `FLAGGED`. **Compose includes both ACCEPTED and FLAGGED results**; inspect
+each attempt's `panel_K_2x.png` and `metrics.json` before using them. Later jobs overwrite earlier overlapping frames.
+
+The relaxed Lab lock defaults to `--lock 0.35,12,0.7,4` (wL,sL,wab,sab), with `--edge-hf 0.75`; per-job settings win.
+The GPU command prefix uses `--gpu-lock`, separate from this colour lock. Checks retain hybrid thresholds except
+`lf_dE_mean=12`, `lf_dE_p95=28`, `decoration_ratio=0.9`; `--thresholds '{"lf_dE_mean":15}'` overrides them. Lightness,
+chroma and non-paint hue shift are also reported. Alpha is copied bit for bit; paint masks remain unchanged.
+
+Composition and delta write touched map/library pages atomically, starting from existing regular variant pages so
+other tracks' edits survive. Patches are loaded before reading the target; if its mtime/size or identity changes before
+replacement, the target is re-read and patched again (at most three attempts, then an error). Missing files become
+symlinks, including other maps, theaters and common assets. Directory symlinks are detached before writing; source
+files are never modified. `l3_frames.json` merges this tool's final pasted 2x rectangles; an explicit map reset replaces
+its records. Other tracks' reports are untouched.
+`delta` aligns the old body/anim by their offsets, transfers glow in linear light onto the new body, and preserves the
+original anim alpha and pixels outside the body. `--unrelated add` (default) also transfers strong non-glow differences
+additively; `--unrelated keep` retains those original animation pixels bit for bit, useful for flags and doors.
+`--body` accepts any `sprite:frame`: use `--body anim:NAPOWR_A:0 --anim anim:NAPOWR_A --frames 1-18 --unrelated keep`
+to transfer a redrawn animation reference from the variant pages to later frames. Add `--body-dmg <sprite:frame> --anim-dmg <sprite>` for the damaged
+pair; the same frame range applies. Delta merges existing variant pages and records status `DELTA`; it needs no plan
+or model call. Keep all plans, work directories, generated images and variant caches outside Git.
+
 ## Sprite material atlas (Python, experimental)
 
 `python/sprite_normals.py` writes the material atlas the renderer's opt-in enhanced look relights sprites with

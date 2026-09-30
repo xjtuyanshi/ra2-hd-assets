@@ -131,10 +131,17 @@ cost, and `stats().gpuTimestampMs` is unusable on Apple GPUs (hundreds of ms per
 Other GPU work on the machine inflates every number, so compare configurations within one run.
 
 **Live-view bench** (`sandbox/fx.ts`, `?fx=<anim ids>`): deterministic clock and randomness; `fx=units` or
-`fx=squad` add objects, `effects=enhanced` the enhanced effect style, `look=golden` the enhanced look preset,
+`fx=squad` add objects. `?fx=bldgs&bldgs=NACNST:0:0,NAPOWR:4:0:1` lists buildings as `TYPE:dx:dy[:owner]`:
+cell offsets from `cx,cy`, with owner indexing the bench houses (default 0). `health=0.4` selects damaged art
+(health <= 0.5); `make=1&time=0.4` omits these buildings during warm-up and shows their build-up 0.4 seconds after
+spawn. Keep the default warm-up for build-up timing. Combine with anims using `fx=bldgs,TWLT070`.
+`effects=enhanced` selects the enhanced effect style, `look=golden` the enhanced look preset,
 `water=enhanced` the modern water, `stagger=<s>`, `repeat=<s>`, `at=dx,dy;...` and
 `spread=<cells>` place and time the listed anims, `crater=1` emulates the engine's crater smudges, and
 `window.__fx.advance(ms)` steps the clock for frame-by-frame capture (header of `sandbox/fx.ts`).
+
+Set `HD_CACHE` to an absolute variant-cache root when starting the development sandbox to review L3 redraws;
+the default remains `gameres/hd-cache`. For example, `HD_CACHE="$OUT_ROOT" pnpm hd:sandbox --port 15215`.
 
 **Live view.** `LiveView.create` without `timeOfDay` follows the map's staging; `liveView.setEnvironment({ timeOfDay,
 weather, weatherIntensity, lamps, windows, lights, mist })` changes it without a reload. Light sources follow the
