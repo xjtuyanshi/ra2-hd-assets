@@ -36,6 +36,18 @@ Classify by required resources, not whether filenames contain “game”:
 
 `pnpm run test:e2e` executes real-game VM files serially. CI additionally orders jobs so YR follows completed RA2 acceptance. Basic includes formatting, `check`, firmware consistency, and asset-free browser regressions; see [CI configuration](REAL_GAME_CI.md) for standalone entry points.
 
+HD renderer binding budgets are covered by `packages/hd-renderer/tests/vertexBuffers.test.ts`. It builds real
+three.js r186 node shaders and feeds their attributes to the WebGPU backend's vertex-layout builder without
+initializing a device. It checks the eight-buffer limit, the sixteen-attribute limit and each uniform binding's
+byte length at allocated capacities (including zero visible instances). The 64 KiB matrix boundary is 1024
+instances; r186's fallback uses four interleaved columns sharing **one** vertex buffer. The suite also tests
+a smaller uniform limit so it cannot silently assume the matrix always fits. Sprite and effect card batches
+use plain `Mesh.count` with no instance matrix; grown cell, overlay and smudge pages keep the same binding count.
+Other fixtures cover procedural effects/beams, emitters, light fields, rain/splashes, data-sized night poles,
+terrain/cliffs/water/reflections, voxel units/projectiles/debris/shadows, sandbox objects/windows and custom
+full-screen mist/tone mapping. These are shader-layout checks,
+not WebGPU pipeline validation, rendered-pixel acceptance or performance measurements.
+
 Current asset-enabled CI requires original-executable startup, the RA2 quick-game and RA2/YR save/cold-load regressions, and Worker/main-thread direct battlefield startup. Same-host two-client network tests remain manual and are excluded from CI until Chromium cleanup and runner memory capacity are confirmed. Select other real-game cases according to changes. Gonghui requires separate MOD resources; cache restoration requires original packages. Neither is implicitly covered by Basic.
 
 ## Select regressions by change

@@ -12,7 +12,7 @@ import {
 import { EffectSpriteLayer, type EffectInstance } from '../src/live/effectSprites';
 import { LiveEffectsDriver } from '../src/live/effects';
 import type { Ra2Cache } from '../src/ra2/cache';
-import { assignPainterBias, painterObject, spritePainterBias } from '../src/ra2/painterOrder';
+import { assignPainterBias, MAX_PAINTER_BIAS, painterObject, spritePainterBias } from '../src/ra2/painterOrder';
 
 describe('dirty instance uploads', () => {
   it('compares float32 values and retains pending ranges across multiple writes before rendering', () => {
@@ -77,7 +77,7 @@ describe('dirty instance uploads', () => {
     expect(layer.count).toBe(0);
   });
 
-  it('shares bounded ground card biases across pages while leaving decals, shadows and air/top passes physical', () => {
+  it('shares bounded card biases across pages, tests Air Z and retains the untested Top pass', () => {
     const atlas = new DataTexture();
     const cache = {
       paletteAtlas: { image: { height: 1 } },
@@ -145,8 +145,9 @@ describe('dirty instance uploads', () => {
       );
       for (const key of ['0:air', '0:top']) {
         const page = meshes.get(key)!;
-        expect(page.style.array[3]).toBe(0);
-        expect(page.mesh.material).toMatchObject({ depthTest: false, depthWrite: false });
+        expect(page.style.array[3]).toBeCloseTo(key === '0:air' ? MAX_PAINTER_BIAS : 0, 7);
+        expect(page.mesh.material).toMatchObject({ depthTest: key === '0:air', depthWrite: false });
+        expect(page.mesh.material.depthNode).not.toBeNull();
       }
       expect(ground.style.array[3]).toBe(0);
     } finally {

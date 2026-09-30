@@ -1,13 +1,6 @@
 import { DirtyAttribute } from '../dirtyAttribute';
-import {
-  Color,
-  InstancedMesh,
-  MeshBasicNodeMaterial,
-  NormalBlending,
-  PlaneGeometry,
-  type Texture,
-  Vector3,
-} from 'three/webgpu';
+import { InstancedQuad } from '../instancedQuad';
+import { Color, MeshBasicNodeMaterial, NormalBlending, type Texture, Vector3 } from 'three/webgpu';
 import {
   Fn,
   clamp,
@@ -37,7 +30,7 @@ import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { type Ra2Cache } from './cache';
 import { objectLevelAt, srgbScale, terrainGradeAt } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
-import { cardDepthNode } from './cardDepth';
+import { cardDepthNode, SPRITE_DECAL_LIFT } from './cardDepth';
 import { comparePainterOrder, spritePainterBias, type PainterObject } from './painterOrder';
 
 export interface SpriteInstance {
@@ -94,7 +87,7 @@ export function cardPush(frame: SpriteFrame): number {
  * replacements will later plug in.
  */
 export class SpriteLayer {
-  readonly mesh: InstancedMesh;
+  readonly mesh: InstancedQuad;
   /** Scene light level applied to unlit sprites (1 = the original's full-bright daylight). */
   readonly light = uniform(new Color(1, 1, 1));
   readonly cameraRight = uniform(new Vector3(1, 0, 0));
@@ -106,11 +99,9 @@ export class SpriteLayer {
   private readonly params: DirtyAttribute;
   /**
    * x: card/decal/shadow; y: object light; z: map lighting class; w: bounded traversal bias in world units.
-   * One buffer: WebGPU allows 8 vertex buffers.
+   * The second vec4 holds foundation width/height and draw-point offsets; width -1 selects an elevated deck.
    */
   private readonly flags: DirtyAttribute;
-  /** Foundation width/height and draw-point offsets; width -1 selects an elevated horizontal deck. */
-  private readonly occlusion: DirtyAttribute;
   private instances: readonly SpriteInstance[] = [];
   private readonly orderedCards: SpriteInstance[] = [];
   private instanceCount = 0;
@@ -147,12 +138,11 @@ export class SpriteLayer {
     const { referenceLevel, windowGain } = nodes;
     this.capacity = Math.max(1, capacity, instances.length);
     const count = this.capacity;
-    // Draw XYZ and light-sample X/Z share a buffer to retain the eight-buffer WebGPU limit at large capacities.
+    // Pack related fields into shared vertex buffers. Capacity never introduces an unused instance matrix.
     this.anchor = new DirtyAttribute(new Float32Array(count * 5), 5);
     this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
     this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
-    this.flags = new DirtyAttribute(new Float32Array(count * 4), 4);
-    this.occlusion = new DirtyAttribute(new Float32Array(count * 4), 4);
+    this.flags = new DirtyAttribute(new Float32Array(count * 8), 8);
 
     const atlasSize = vec2(atlas.width, atlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
@@ -160,8 +150,8 @@ export class SpriteLayer {
     const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
     const aParams: ShaderNode = instancedBufferAttribute(this.params, 'vec4');
     const aLightSample: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec2', 5, 3);
-    const aFlags: ShaderNode = instancedBufferAttribute(this.flags, 'vec4');
-    const aOcclusion: ShaderNode = instancedBufferAttribute(this.occlusion, 'vec4');
+    const aFlags: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', 8, 0);
+    const aOcclusion: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', 8, 4);
     const aFlat: ShaderNode = aFlags.x;
     // The map's light for this instance's class, times its own extra light, in the palette's sRGB scale (see
     // mapLighting.ts): 'ambient' takes the level, 'full' the per-channel grade, 'none' nothing.
@@ -206,7 +196,7 @@ export class SpriteLayer {
         .add(this.toCamera.mul(pushAmount));
       // Ground decal: invert the engine projection at the anchor's height (1 px right = (1/60, -1/60) cells,
       // 1 px down = (1/30, 1/30) cells), so the art covers exactly the same screen pixels while lying on the ground.
-      const decal = aAnchor.add(vec3(px.div(60).add(py.div(30)), 0.02, py.div(30).sub(px.div(60))));
+      const decal = aAnchor.add(vec3(px.div(60).add(py.div(30)), SPRITE_DECAL_LIFT, py.div(30).sub(px.div(60))));
       return aFlat.greaterThan(0.5).select(decal, card);
     })();
     material.colorNode = Fn(() => {
@@ -316,8 +306,7 @@ export class SpriteLayer {
       return mix(art, shadow, isShadow);
     })();
 
-    this.mesh = new InstancedMesh(new PlaneGeometry(1, 1), material, count);
-    this.mesh.frustumCulled = false;
+    this.mesh = new InstancedQuad(material, count);
     this.mesh.renderOrder = 4;
     this.mesh.name = 'ra2-sprites';
     this.setInstances(instances);
@@ -358,13 +347,10 @@ export class SpriteLayer {
         const foundation = s.painter?.foundation;
         const dx = foundation ? s.anchor.x - s.painter!.x : 0;
         const dz = foundation ? s.anchor.z - s.painter!.z : 0;
-        this.occlusion.setXYZW(
-          i,
-          s.deckHeight !== undefined ? -1 : (foundation?.[0] ?? 0),
-          s.deckHeight ?? foundation?.[1] ?? 0,
-          dx - dz,
-          -dx - dz,
-        );
+        this.flags.setComponent(i, 4, s.deckHeight !== undefined ? -1 : (foundation?.[0] ?? 0));
+        this.flags.setComponent(i, 5, s.deckHeight ?? foundation?.[1] ?? 0);
+        this.flags.setComponent(i, 6, dx - dz);
+        this.flags.setComponent(i, 7, -dx - dz);
       }
     }
     this.mesh.count = count;
@@ -372,7 +358,6 @@ export class SpriteLayer {
     this.rect.flush();
     this.params.flush();
     this.flags.flush();
-    this.occlusion.flush();
   }
 }
 
