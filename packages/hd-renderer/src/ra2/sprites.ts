@@ -37,8 +37,8 @@ import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { type Ra2Cache } from './cache';
 import { objectLevelAt, srgbScale, terrainGradeAt } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
-import { painterDepthNode } from '../painterDepth';
-import { spritePainterDepth, type PainterObject } from './painterOrder';
+import { cardDepthNode } from './cardDepth';
+import { comparePainterOrder, spritePainterBias, type PainterObject } from './painterOrder';
 
 export interface SpriteInstance {
   /** World-space anchor: the engine's draw point for this object (canvas centre goes here). */
@@ -64,9 +64,11 @@ export interface SpriteInstance {
   lighting?: LightingClass;
   /** Map-light sample in world X/Z; defaults to the draw anchor. Cell copies can select a texel centre. */
   lightSample?: readonly [number, number];
-  /** Optional object painter slot; decals and shadows always retain their physical ground depth. */
+  /** Optional traversal tie-break and building foundation. Decals/shadows retain physical ground depth. */
   painter?: PainterObject;
   painterPart?: number;
+  /** Horizontal high-bridge depth at this height above the draw anchor; leaves screen placement unchanged. */
+  deckHeight?: number;
 }
 
 const LIGHTING_CODE: Record<LightingClass, number> = { ambient: 0, full: 1, none: 2 };
@@ -75,8 +77,8 @@ const LIGHTING_CODE: Record<LightingClass, number> = { ambient: 0, full: 1, none
 const SHADOW_OPACITY = ENGINE_SHADOW_OPACITY;
 
 /**
- * Physical push that keeps a camera-facing card over its own footprint. Live object ordering is assigned separately
- * by painterOrder.ts, so frame dimensions cannot change which object hides another. A pixel d world
+ * Placement push for camera-facing geometry (also used by lighting/shadows). Fragment occlusion is reconstructed
+ * independently by cardDepth.ts, so frame dimensions cannot change which object hides another. A pixel d world
  * units below the anchor on screen sees ground d * cot(30°) nearer to the camera than the anchor, so the card must come
  * forward at least that far for its lowest pixel.
  */
@@ -103,14 +105,17 @@ export class SpriteLayer {
   private readonly rect: DirtyAttribute;
   private readonly params: DirtyAttribute;
   /**
-   * x: card/decal/shadow; y: object light; z: map lighting class; w: painter depth (-1 = physical).
+   * x: card/decal/shadow; y: object light; z: map lighting class; w: bounded traversal bias in world units.
    * One buffer: WebGPU allows 8 vertex buffers.
    */
   private readonly flags: DirtyAttribute;
+  /** Foundation width/height and draw-point offsets; width -1 selects an elevated horizontal deck. */
+  private readonly occlusion: DirtyAttribute;
   private instances: readonly SpriteInstance[] = [];
   private readonly orderedCards: SpriteInstance[] = [];
+  private instanceCount = 0;
 
-  /** Current records, shared with the live view's scene-wide painter slot assignment. */
+  /** Current records; static layers keep these and their depth profiles until the layer itself changes. */
   getInstances(): readonly SpriteInstance[] {
     return this.instances;
   }
@@ -147,6 +152,7 @@ export class SpriteLayer {
     this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
     this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
     this.flags = new DirtyAttribute(new Float32Array(count * 4), 4);
+    this.occlusion = new DirtyAttribute(new Float32Array(count * 4), 4);
 
     const atlasSize = vec2(atlas.width, atlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
@@ -155,6 +161,7 @@ export class SpriteLayer {
     const aParams: ShaderNode = instancedBufferAttribute(this.params, 'vec4');
     const aLightSample: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec2', 5, 3);
     const aFlags: ShaderNode = instancedBufferAttribute(this.flags, 'vec4');
+    const aOcclusion: ShaderNode = instancedBufferAttribute(this.occlusion, 'vec4');
     const aFlat: ShaderNode = aFlags.x;
     // The map's light for this instance's class, times its own extra light, in the palette's sRGB scale (see
     // mapLighting.ts): 'ambient' takes the level, 'full' the per-channel grade, 'none' nothing.
@@ -174,12 +181,19 @@ export class SpriteLayer {
     // Edges are soft (filtered coverage, see colorNode) and blend; only fully clear fragments are discarded. No
     // alpha-to-coverage: under MSAA it turns the translucent shadows opaque.
     material.alphaTest = 0.04;
-    material.depthNode = painterDepthNode(aFlags.w);
     // Raster-relative coordinates from the quad's own UVs (u right, v down). positionLocal cannot be used here: once
     // positionNode is set it refers to the displaced position in the fragment stage.
     const u: ShaderNode = uv().x;
     const v: ShaderNode = float(1).sub(uv().y);
     const pushAmount: ShaderNode = aParams.w;
+    material.depthNode = cardDepthNode(
+      aParams.x.add(u.mul(aRect.z)),
+      aParams.y.add(v.mul(aRect.w)),
+      aOcclusion,
+      pushAmount,
+      aFlags.w,
+      aFlat.greaterThan(0.5),
+    );
     // Vertex stage: corners from the untouched geometry attribute (+-0.5).
     const gu: ShaderNode = positionGeometry.x.add(0.5);
     const gv: ShaderNode = float(0.5).sub(positionGeometry.y);
@@ -309,15 +323,18 @@ export class SpriteLayer {
     this.setInstances(instances);
   }
 
-  /** Replace every instance (up to `capacity`); cheap enough to call once per presented frame. */
-  setInstances(instances: readonly SpriteInstance[]): void {
+  /** With unchanged membership/metadata, interpolation only updates the retained records and skips ordering. */
+  setInstances(instances: readonly SpriteInstance[], reorder = true): void {
     this.instances = instances;
     const cards = this.orderedCards;
-    cards.length = 0;
-    for (const instance of instances) if (!instance.flat && !instance.shadow) cards.push(instance);
     // Instanced meshes are not sorted by Three. Back-to-front within each page preserves soft-edge blending;
-    // the shared depth slots resolve opaque overlaps between pages and voxel meshes independently of draw calls.
-    cards.sort((a, b) => spritePainterDepth(b.painter, b.painterPart) - spritePainterDepth(a.painter, a.painterPart));
+    // physical fragment depth resolves opaque overlaps between pages and voxel meshes independently of draw calls.
+    if (reorder || instances.length !== this.instanceCount) {
+      cards.length = 0;
+      for (const instance of instances) if (!instance.flat && !instance.shadow) cards.push(instance);
+      cards.sort(compareCards);
+    }
+    this.instanceCount = instances.length;
     // Stable three-way partition: the former stable sort's exact order, without a copied/sorted array.
     let count = 0;
     for (let rank = 0; rank < 3 && count < this.capacity; rank++) {
@@ -336,7 +353,17 @@ export class SpriteLayer {
           s.shadow ? 2 : s.flat ? 1 : 0,
           s.light ?? 1,
           LIGHTING_CODE[s.lighting ?? 'ambient'],
-          s.flat || s.shadow ? -1 : spritePainterDepth(s.painter, s.painterPart),
+          s.flat || s.shadow ? 0 : spritePainterBias(s.painter, s.painterPart),
+        );
+        const foundation = s.painter?.foundation;
+        const dx = foundation ? s.anchor.x - s.painter!.x : 0;
+        const dz = foundation ? s.anchor.z - s.painter!.z : 0;
+        this.occlusion.setXYZW(
+          i,
+          s.deckHeight !== undefined ? -1 : (foundation?.[0] ?? 0),
+          s.deckHeight ?? foundation?.[1] ?? 0,
+          dx - dz,
+          -dx - dz,
         );
       }
     }
@@ -345,7 +372,15 @@ export class SpriteLayer {
     this.rect.flush();
     this.params.flush();
     this.flags.flush();
+    this.occlusion.flush();
   }
+}
+
+function compareCards(a: SpriteInstance, b: SpriteInstance): number {
+  if (a.painter && b.painter)
+    return comparePainterOrder(a.painter, b.painter) || (a.painterPart ?? 0) - (b.painterPart ?? 0);
+  if (a.painter || b.painter) return Number(!!a.painter) - Number(!!b.painter);
+  return a.anchor.x + a.anchor.z - b.anchor.x - b.anchor.z;
 }
 
 /**

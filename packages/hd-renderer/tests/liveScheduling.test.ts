@@ -21,6 +21,7 @@ function presentation(interpolating: boolean) {
     applyCamera: vi.fn(),
     applyObjects,
     applyEffects,
+    applyPainterOrder: vi.fn(),
   }) as unknown as LiveView;
   return { view, art, library, applyObjects, applyEffects, hd };
 }
@@ -28,7 +29,8 @@ function presentation(interpolating: boolean) {
 describe('live presentation scheduling', () => {
   it('accepts native painter reorder and layer changes while the engine frame is frozen', () => {
     const internals = {
-      current: null as { snapshot: LiveSnapshot } | null,
+      current: null as { snapshot: LiveSnapshot; at: number } | null,
+      appearances: new Map(),
       houseColour: new Map(),
       buildingAnimMatches: new Map(),
       appearances: new Map(),
@@ -70,16 +72,18 @@ describe('live presentation scheduling', () => {
     const reordered = structuredClone(snapshot);
     reordered.objects[0]!.renderOrder!.index = 3;
     view.push(reordered, 30);
-    expect(state.current?.snapshot).toBe(reordered);
+    expect(state.current).toBe(original);
+    expect(state.current?.at).toBe(10);
+    expect(state.current?.snapshot).toEqual(reordered);
     const airborne = structuredClone(reordered);
     airborne.objects[0]!.renderOrder!.layer = 4;
     view.push(airborne, 40);
-    expect(state.current?.snapshot).toBe(airborne);
+    expect(state.current?.snapshot).toEqual(airborne);
     const resorted = structuredClone(airborne);
     resorted.objects[0]!.renderOrder!.ySort = 513;
     view.push(resorted, 50);
-    expect(state.current?.snapshot).toBe(resorted);
-    expect(state.trackMotion).toHaveBeenCalledTimes(4);
+    expect(state.current?.snapshot).toEqual(resorted);
+    expect(state.trackMotion).toHaveBeenCalledTimes(1);
   });
 
   it('holds unchanged cards while art loads, and rebuilds once when art succeeds or fails', () => {

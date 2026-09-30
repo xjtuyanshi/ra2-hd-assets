@@ -1,6 +1,6 @@
 import type { TypeLibrary } from '../../../ra2-assets/src/library';
 import { cardPush, objectAnchor, type SpriteInstance } from '../ra2/sprites';
-import { painterObject } from '../ra2/painterOrder';
+import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 
 /** Row-major live cell overlays. A negative index is empty; data is the engine's exact sprite frame. */
 export interface LiveOverlayCells {
@@ -88,7 +88,7 @@ export function buildOverlayInstances(
       shadow: false,
       flat: type.flat,
       lighting: type.lighting,
-      painter: type.flat ? undefined : painterObject(2, (x + y + 1) * 256),
+      deckHeight: isHighBridge(id) ? HIGH_BRIDGE_HEIGHT : undefined,
     });
   }
   return { pages, missingTypes };

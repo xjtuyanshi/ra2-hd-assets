@@ -7,6 +7,7 @@ import type { PainterObject } from '../ra2/painterOrder';
 export class SpritePool {
   /** Painter owner of subsequent upright records; reset by begin so reused records never keep an old owner. */
   painter?: PainterObject;
+  deckHeight?: number;
   private readonly instances: SpriteInstance[] = [];
   private used = 0;
   private readonly anchors: Vector3[] = [];
@@ -15,6 +16,7 @@ export class SpritePool {
   begin(): void {
     this.used = this.anchorsUsed = 0;
     this.painter = undefined;
+    this.deckHeight = undefined;
   }
 
   anchor(): Vector3 {
@@ -49,6 +51,7 @@ export class SpritePool {
     instance.lighting = lighting;
     instance.painter = !flat && !shadow ? this.painter : undefined;
     instance.painterPart = painterPart;
+    instance.deckHeight = !flat && !shadow ? this.deckHeight : undefined;
     return instance;
   }
 }

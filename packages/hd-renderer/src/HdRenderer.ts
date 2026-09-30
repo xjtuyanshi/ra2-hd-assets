@@ -345,6 +345,8 @@ export class HdRenderer {
   /** Build the scene from the procedural state, or from an original map when `world` is given. */
   async init(world?: HdWorld): Promise<void> {
     await this.renderer.init();
+    // Static map previews use the same analytic cards as live matches; atmosphere must retain geometry depth there too.
+    if (world?.sprites) this.painterDepthEnabled = true;
     const worldNodes = world ? (world.nodes ?? world.cache?.nodes ?? DEFAULT_ATMOSPHERE_NODES) : this.nodes;
     this.nodes = worldNodes;
     this.scene.background = new Color(0x0b0c0e);
@@ -421,7 +423,7 @@ export class HdRenderer {
     if (this.pipeline) this.buildPipeline();
   }
 
-  /** Preserve physical scene depth for atmosphere when object layers use independent painter-order depth. */
+  /** Preserve geometry depth for atmosphere when cards reconstruct analytic occlusion depth in the fragment shader. */
   enablePainterDepth(): void {
     if (this.painterDepthEnabled) return;
     this.painterDepthEnabled = true;

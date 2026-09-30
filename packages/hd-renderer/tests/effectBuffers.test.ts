@@ -12,7 +12,7 @@ import {
 import { EffectSpriteLayer, type EffectInstance } from '../src/live/effectSprites';
 import { LiveEffectsDriver } from '../src/live/effects';
 import type { Ra2Cache } from '../src/ra2/cache';
-import { assignPainterDepth, painterObject, spritePainterDepth } from '../src/ra2/painterOrder';
+import { assignPainterBias, painterObject, spritePainterBias } from '../src/ra2/painterOrder';
 
 describe('dirty instance uploads', () => {
   it('compares float32 values and retains pending ranges across multiple writes before rendering', () => {
@@ -77,17 +77,17 @@ describe('dirty instance uploads', () => {
     expect(layer.count).toBe(0);
   });
 
-  it('shares ground card slots across pages while leaving decals, shadows and air/top passes physical', () => {
+  it('shares bounded ground card biases across pages while leaving decals, shadows and air/top passes physical', () => {
     const atlas = new DataTexture();
     const cache = {
       paletteAtlas: { image: { height: 1 } },
       paletteRow: new Map([['fx:anim', 0]]),
     } as unknown as Ra2Cache;
     const layer = new EffectSpriteLayer(cache, () => ({ texture: atlas, width: 64, height: 64 }));
-    const behind = painterObject(2, 100);
-    const building = painterObject(2, 150);
-    const front = painterObject(2, 200);
-    assignPainterDepth([front, building, behind]);
+    const behind = painterObject(2, 100, 1);
+    const building = painterObject(2, 150, 2);
+    const front = painterObject(2, 200, 3);
+    assignPainterBias([front, building, behind]);
     const card = (x: number, painter = behind): EffectInstance => ({
       anchor: new Vector3(x, 0.1, 1),
       frame: { rect: [0, 0, 8, 8], offset: [-4, -4], page: 0 },
@@ -96,7 +96,7 @@ describe('dirty instance uploads', () => {
       push: 0.1,
       draw: 'card',
       pass: 'ground',
-      depth: 100 - x,
+      depth: x,
       glow: false,
       painter,
     });
@@ -118,20 +118,20 @@ describe('dirty instance uploads', () => {
       const ground = meshes.get('0:ground')!;
       const other = meshes.get('1:ground')!;
       expect(Array.from(ground.anchor.array.slice(0, 12)).filter((_, index) => index % 3 === 0)).toEqual([3, 4, 1, 2]);
-      expect(ground.style.array[3]).toBe(-1);
-      expect(ground.style.array[7]).toBe(-1);
-      expect(ground.style.array[11]).toBeCloseTo(behind.depth, 7);
-      expect(ground.style.array[15]).toBeCloseTo(front.depth, 7);
-      expect(ground.style.array[11]).toBeGreaterThan(building.depth);
-      expect(ground.style.array[15]).toBeLessThan(building.depth);
-      expect(other.style.array[3]).toBeCloseTo(spritePainterDepth(front, 0.1), 7);
+      expect(ground.style.array[3]).toBe(0);
+      expect(ground.style.array[7]).toBe(0);
+      expect(ground.style.array[11]).toBeCloseTo(behind.bias, 7);
+      expect(ground.style.array[15]).toBeCloseTo(front.bias, 7);
+      expect(ground.style.array[11]).toBeLessThan(building.bias);
+      expect(ground.style.array[15]).toBeGreaterThan(building.bias);
+      expect(other.style.array[3]).toBeCloseTo(spritePainterBias(front, 0.1), 7);
       expect(ground.mesh.material).toMatchObject({ depthTest: true, depthWrite: false });
       expect(ground.mesh.material.depthNode).not.toBeNull();
       const placement = [Array.from(ground.anchor.array), Array.from(ground.params.array)];
       second.painterPart = 0.1;
       second.alpha = 0.5;
       layer.setInstances([second, shadow, otherPage, first, flat], 1);
-      expect(ground.style.array[15]).toBeCloseTo(spritePainterDepth(front, 0.1), 7);
+      expect(ground.style.array[15]).toBeCloseTo(spritePainterBias(front, 0.1), 7);
       expect(ground.mesh.material).toMatchObject({ depthTest: true, depthWrite: false });
       expect(ground.mesh.material.depthNode).not.toBeNull();
       expect([Array.from(ground.anchor.array), Array.from(ground.params.array)]).toEqual(placement);
@@ -145,10 +145,10 @@ describe('dirty instance uploads', () => {
       );
       for (const key of ['0:air', '0:top']) {
         const page = meshes.get(key)!;
-        expect(page.style.array[3]).toBe(-1);
+        expect(page.style.array[3]).toBe(0);
         expect(page.mesh.material).toMatchObject({ depthTest: false, depthWrite: false });
       }
-      expect(ground.style.array[3]).toBe(-1);
+      expect(ground.style.array[3]).toBe(0);
     } finally {
       for (const page of meshes.values()) page.dispose();
       atlas.dispose();

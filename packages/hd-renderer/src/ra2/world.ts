@@ -8,6 +8,7 @@ import type { MapLightGrade } from './mapLighting';
 import { Ra2NightDressing } from './nightDressing';
 import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from './sprites';
 import { objectYSort, painterObject } from './painterOrder';
+import { HIGH_BRIDGE_HEIGHT, isHighBridge } from './bridgeDepth';
 import { buildRa2Terrain } from './terrain';
 import {
   buildVoxelGeometry,
@@ -143,6 +144,12 @@ export async function loadRa2World(
       2,
       objectYSort((object.x + 0.5) * 256, (object.y + 0.5) * 256, object.kind === 'building'),
     );
+    if (object.kind === 'building') {
+      painter.foundation = entry.foundation;
+      painter.x = object.x;
+      painter.z = object.y;
+    }
+    const deckHeight = object.kind === 'overlay' && isHighBridge(object.type) ? HIGH_BRIDGE_HEIGHT : undefined;
     for (const underlay of entry.underlays ?? []) {
       const bib = manifest.sprites[underlay];
       if (bib?.frames[0])
@@ -159,7 +166,17 @@ export async function loadRa2World(
     // Shadows are cast on the ground: draw them as decals too.
     const shadow = entry.shadows?.[frameIndex];
     if (shadow) sprites.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
-    sprites.push({ anchor, frame, palette, push, shadow: false, flat, lighting, painter });
+    sprites.push({
+      anchor,
+      frame,
+      palette,
+      push,
+      shadow: false,
+      flat,
+      lighting,
+      painter: object.kind === 'overlay' ? undefined : painter,
+      deckHeight,
+    });
     for (const layer of entry.layers ?? []) {
       const art = manifest.sprites[layer];
       if (art?.frames[0])

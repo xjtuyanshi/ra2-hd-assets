@@ -17,6 +17,7 @@ import { decodeBase64 } from './cache';
 import { paletteNodes } from './mapLighting';
 import { VoxelShadowMesh, groundOf } from './voxelShadow';
 import { voxelFill, voxelMaterialFor } from './vpl';
+import { CARD_CLEARANCE } from './cardDepth';
 
 /**
  * Original VXL units, rendered as real meshes. The engine draws voxels through a pure rotation (the default voxel
@@ -456,6 +457,8 @@ const groundNormal = new Vector3();
 const tilt = new Quaternion();
 /** A unit whose origin is within this height of the ground stands on it and follows its slope. */
 const ON_GROUND = 0.05;
+/** Keep contact pixels ahead of the deck card's small clearance; never lift the mesh or its shadow. */
+export const VOXEL_CLEARANCE = CARD_CLEARANCE + 0.005;
 
 /**
  * Root of a placed voxel unit. Callers set position and rotation (yaw) as for any Object3D; on sloped ground the
@@ -465,21 +468,18 @@ const ON_GROUND = 0.05;
 export class VoxelUnit extends Group {
   private readonly painterDepth = createPainterDepth();
 
-  /** Real meshes share one physical origin; shadow twins retain ordinary ground depth. */
+  constructor() {
+    super();
+    this.painterDepth.bias = VOXEL_CLEARANCE;
+  }
+
+  /** Real meshes share a bounded physical-depth bias; shadow twins retain ordinary ground depth. */
   addSourceMesh(mesh: Mesh): void {
     mesh.userData.painterDepth = this.painterDepth;
   }
 
-  /** Object depth slot; component offsets must stay below half a slot. Negative depth restores physical depth. */
-  setPainterDepth(slotDepth: number, slotWidth: number, part = 0): void {
-    this.painterDepth.depth = slotDepth;
-    this.painterDepth.slotWidth = slotWidth;
-    this.painterDepth.part = part;
-  }
-
-  override updateMatrixWorld(force?: boolean): void {
-    super.updateMatrixWorld(force);
-    this.painterDepth.origin.setFromMatrixPosition(this.matrixWorld);
+  setPainterBias(bias: number): void {
+    this.painterDepth.bias = VOXEL_CLEARANCE + bias;
   }
 
   override updateMatrix(): void {

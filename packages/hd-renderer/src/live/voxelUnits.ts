@@ -74,9 +74,9 @@ export class VoxelUnits {
     if (unit.turret) unit.turret.rotation.y = pose.facing - (turretFacing ?? pose.facing);
   }
 
-  /** Keep physical poses/shadows unchanged while all of an object's meshes share its painter slot. */
-  setPainterDepth(unit: VoxelUnit, depth: number, width: number, part = 0): void {
-    if (unit.root instanceof VoxelRoot) unit.root.setPainterDepth(depth, width, part);
+  /** Preserve full mesh depth; no slot compression or override of physical overlays. */
+  setPainterBias(unit: VoxelUnit, bias: number): void {
+    if (unit.root instanceof VoxelRoot) unit.root.setPainterBias(bias);
   }
 
   /** Take a unit out of the scene (geometry stays cached for the next instance of its type). */

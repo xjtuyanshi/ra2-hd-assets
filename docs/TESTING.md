@@ -10,7 +10,7 @@ pnpm run format:check
 pnpm run check
 ```
 
-`check` includes TypeScript, unit tests, synthetic PE/real v86 instruction tests, architecture checks, and the production build. It explicitly selects tests/basic/, packages/relay/tests/, packages/ra2-formats/, packages/ra2-assets/ and packages/hd-renderer/tests/ without reading local executables or implicitly downloading games. `pnpm test` includes all local cases, real-game regressions among them: a missing executable fails the run instead of skipping, so every developer needs the game resources to run the full suite. No test may remove itself from the report. Asset-free download tests also use Node/TypeScript. package.json and lockfiles define dependency/command versions.
+`check` includes TypeScript, unit tests, synthetic PE/real v86 instruction tests, architecture checks, and the production build. It explicitly selects `tests/basic/`, `packages/relay/tests/`, `packages/ra2-formats/`, `packages/ra2-assets/` and `packages/hd-renderer/tests/` without reading local executables or implicitly downloading games. `pnpm test` includes all local cases, real-game regressions among them: a missing executable fails the run instead of skipping, so every developer needs the game resources to run the full suite. No test may remove itself from the report. Asset-free download tests also use Node/TypeScript. package.json and lockfiles define dependency/command versions.
 
 Formatting uses the Prettier version pinned in package.json. `pnpm run format` maintains source, tests, scripts, configuration, and documentation. `.prettierignore` excludes original third-party text, resources, and generated lockfiles. Unsupported languages such as Python/assembly are not checked by Prettier.
 
@@ -20,18 +20,19 @@ All tests prohibit `.only`. After editing boot.asm, run `pnpm run build:boot` an
 
 Classify by required resources, not whether filenames contain “game”:
 
-| Directory                                            | Level and resource requirements                                                                        |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `tests/basic/`                                       | Asset-free unit/integration tests, including synthetic game-policy and resource-contract fixtures      |
-| `tests/basic/architecture/`                          | Module dependency acceptance                                                                           |
-| `tests/basic/vm/`                                    | Synthetic PE and real v86 instruction regressions without original executables                         |
-| `tests/basic/browser/`, `tests/basic/smoke/`         | Asset-free browser and standalone protocol smoke tests; browsers use Playwright                        |
-| `packages/relay/tests/`                              | Relay-owned asset-free tests included in Basic                                                         |
-| `packages/hd-renderer/tests/`                        | Asset-free HD renderer scheduling, painter order, buffers and projectile regressions included in Basic |
-| `tests/real-game/ra2/`, `tests/real-game/yr/`        | VM regressions requiring each game's original executable/resources                                     |
-| `tests/real-game/browser/`, `tests/real-game/smoke/` | Real-game browser, download, and startup smoke tests                                                   |
-| `tests/experimental/browser/`                        | External-model experimental regressions excluded from public Basic                                     |
-| `tests/helpers/`, `tests/fixture/`                   | Shared helpers/synthetic fixtures, not independent test entries                                        |
+| Directory                                            | Level and resource requirements                                                                                 |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `tests/basic/`                                       | Asset-free unit/integration tests, including synthetic game-policy and resource-contract fixtures               |
+| `tests/basic/architecture/`                          | Module dependency acceptance                                                                                    |
+| `tests/basic/vm/`                                    | Synthetic PE and real v86 instruction regressions without original executables                                  |
+| `tests/basic/browser/`, `tests/basic/smoke/`         | Asset-free browser and standalone protocol smoke tests; browsers use Playwright                                 |
+| `packages/relay/tests/`                              | Relay-owned asset-free tests included in Basic                                                                  |
+| `packages/hd-renderer/tests/`                        | Asset-free renderer math, buffers and LiveView integration included in Basic; no GPU or live-match claim        |
+| `packages/ra2-formats/`, `packages/ra2-assets/`      | Synthetic format/asset tests included in Basic; real-install integration files excluded by Vitest configuration |
+| `tests/real-game/ra2/`, `tests/real-game/yr/`        | VM regressions requiring each game's original executable/resources                                              |
+| `tests/real-game/browser/`, `tests/real-game/smoke/` | Real-game browser, download, and startup smoke tests                                                            |
+| `tests/experimental/browser/`                        | External-model experimental regressions excluded from public Basic                                              |
+| `tests/helpers/`, `tests/fixture/`                   | Shared helpers/synthetic fixtures, not independent test entries                                                 |
 
 `pnpm run test:e2e` executes real-game VM files serially. CI additionally orders jobs so YR follows completed RA2 acceptance. Basic includes formatting, `check`, firmware consistency, and asset-free browser regressions; see [CI configuration](REAL_GAME_CI.md) for standalone entry points.
 

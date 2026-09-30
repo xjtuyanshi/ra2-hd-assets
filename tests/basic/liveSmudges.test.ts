@@ -286,8 +286,10 @@ function presentation(withLibrary = true) {
     applyCamera: vi.fn(),
     applyObjects: vi.fn(),
     applyEffects: vi.fn(),
-    // Painter-order assignment is covered by packages/hd-renderer/tests/painterOrder.test.ts.
-    applyPainterOrder: vi.fn(),
+    effectInstances: [],
+    spriteBatch: new Map(),
+    sprites: { mesh: { count: 0 } },
+    pageLayers: new Map(),
   };
   const view = Object.assign(Object.create(LiveView.prototype), backing) as LiveView;
   const state = (): LiveSnapshot => ({ frame: 1, view: null, houses: [], objects: [], smudges: cells() });

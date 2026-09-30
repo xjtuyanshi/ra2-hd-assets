@@ -12,7 +12,15 @@ import type { MapObject } from '../../../ra2-assets/src/manifest';
 import type { TheaterId } from '../../../ra2-assets/src/theater';
 import { addHousePalettes, paletteFor, type Ra2Cache } from '../ra2/cache';
 import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from '../ra2/sprites';
-import { assignPainterDepth, objectYSort, painterObject, type PainterObject } from '../ra2/painterOrder';
+import {
+  assignPainterBias,
+  objectYSort,
+  painterObject,
+  spritePainterBias,
+  type PainterObject,
+} from '../ra2/painterOrder';
+import { foundationPointPush } from '../ra2/cardDepth';
+import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 import { loadRa2World, type HdWorld } from '../ra2/world';
 import { LEVEL_HEIGHT } from '../world';
 import { EffectArt, type ResolvedAnim } from './effectArt';
@@ -458,6 +466,9 @@ export class LiveView {
   } | null = null;
   /** Snapshot whose effect cards are on screen; asynchronous art has its own revision. */
   private effectsFor: Timed | null = null;
+  private effectsDirty = false;
+  /** Particle anchors have the effect snapshot lifetime, never the interpolated object batch lifetime. */
+  private readonly particlePool = new SpritePool();
   /**
    * Identity of the light-emitting and window-lit building sets last handed to the night dressing. Null until the
    * first snapshot, which always replaces the sidecar's map-placed sources (even when it has none).
@@ -629,7 +640,7 @@ export class LiveView {
   /** Ignore unchanged presentations, but accept native painter registration changes within a frozen frame. */
   push(snapshot: LiveSnapshot, at = performance.now()): void {
     const current = this.current;
-    if (
+    const samePresentation =
       current &&
       current.snapshot.frame === snapshot.frame &&
       current.snapshot.view?.x === snapshot.view?.x &&
@@ -638,17 +649,30 @@ export class LiveView {
       this.snapshotOverlayRevision === snapshot.overlays?.revision &&
       this.snapshotSmudgeRevision === snapshot.smudges?.revision &&
       current.byUid.size === snapshot.objects.length &&
-      snapshot.objects.every((object) => {
-        const before = current.byUid.get(object.uid);
+      snapshot.objects.every((object) => current.byUid.has(object.uid));
+    if (samePresentation) {
+      const changed = snapshot.objects.some((object) => {
+        const before = current.byUid.get(object.uid)!;
         return (
-          before &&
-          before.renderOrder?.layer === object.renderOrder?.layer &&
-          before.renderOrder?.index === object.renderOrder?.index &&
-          before.renderOrder?.ySort === object.renderOrder?.ySort
+          before.renderOrder?.layer !== object.renderOrder?.layer ||
+          before.renderOrder?.index !== object.renderOrder?.index ||
+          before.renderOrder?.ySort !== object.renderOrder?.ySort
         );
-      })
-    )
+      });
+      if (!changed) return;
+      // The Ground sort (0x55DBC8) precedes the frame increment (0x55DE81). A poll between them may report new
+      // registration with the same logic frame. Update metadata only; preserve both pose endpoints and their times.
+      const objects = snapshot.objects.map((object) => ({
+        ...current.byUid.get(object.uid)!,
+        renderOrder: object.renderOrder,
+      }));
+      current.snapshot = { ...current.snapshot, objects };
+      for (const object of objects) current.byUid.set(object.uid, object);
+      this.objectsFor = null;
+      this.painterDirty = true;
       return;
+    }
+    this.painterDirty = true;
     this.snapshotOverlayRevision = snapshot.overlays?.revision;
     if (current && snapshot.frame < current.snapshot.frame) {
       // Loading an earlier save or starting another match establishes a new appearance timeline.
@@ -822,6 +846,13 @@ export class LiveView {
         this.objectArtRevision !== artRevision ||
         this.objectsWindows !== windows
       ) {
+        if (
+          this.objectsFor !== current ||
+          this.objectLibraryRevision !== libraryRevision ||
+          this.objectArtRevision !== artRevision ||
+          this.objectsWindows !== windows
+        )
+          this.painterDirty = true;
         this.applyObjects(previous, current, objectAlpha);
         this.objectsFor = current;
         this.objectsAlpha = objectAlpha;
@@ -927,6 +958,7 @@ export class LiveView {
         this.shroud.isLocationShrouded(object.x, object.y, object.z) ||
         !!visual.libraryType?.invisible ||
         !!this.cache.lights?.types[object.type]?.invisible;
+      if (visual.root.visible === hidden) this.painterDirty = true;
       visual.root.visible = !hidden;
       if (hidden) continue;
       const before = previous?.byUid.get(object.uid);
@@ -940,17 +972,26 @@ export class LiveView {
       pose.y = lerp(from.y, object.y, t);
       pose.z = lerp(from.z, object.z, t);
       pose.facing = lerpAngle16(from.facingRaw, object.facingRaw, t);
-      const registered = object.renderOrder;
-      const airborne =
-        object.kind === 'aircraft' &&
-        (pose.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT >
-          this.world.terrain.heightAt(pose.x / LEPTONS_PER_CELL, pose.y / LEPTONS_PER_CELL) + 0.01;
       const painter = (visual.painter ??= painterObject(2, 0));
-      painter.layer = registered?.layer ?? (airborne ? 4 : 2);
-      painter.ySort =
-        registered?.ySort ??
-        objectYSort(pose.x, pose.y, object.kind === 'building', !!visual.libraryType?.building?.turretVoxel);
-      painter.index = registered?.index;
+      if (this.painterDirty) {
+        const registered = object.renderOrder;
+        const airborne =
+          object.kind === 'aircraft' &&
+          (object.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT >
+            this.world.terrain.heightAt(object.x / LEPTONS_PER_CELL, object.y / LEPTONS_PER_CELL) + 0.01;
+        painter.layer = registered?.layer ?? (airborne ? 4 : 2);
+        painter.ySort =
+          registered?.ySort ??
+          objectYSort(object.x, object.y, object.kind === 'building', !!visual.libraryType?.building?.turretVoxel);
+        painter.index = registered?.index;
+        painter.foundation =
+          object.kind === 'building'
+            ? (visual.libraryType?.foundation ??
+              (visual.sprite ? this.cache.manifest.sprites[visual.sprite]?.foundation : undefined))
+            : undefined;
+        painter.x = Math.floor(object.x / LEPTONS_PER_CELL);
+        painter.z = Math.floor(object.y / LEPTONS_PER_CELL);
+      }
       this.spritePool.painter = painter;
       if (visual.mode === 'placeholder') {
         visual.root.position.set(
@@ -989,55 +1030,37 @@ export class LiveView {
       this.root.remove(this.visuals.get(uid)!.root);
       this.visuals.delete(uid);
     }
-    this.painterDirty = true;
+    if (!this.painterDirty) this.flushSprites(batch, false);
   }
 
-  /** Assign across atlas pages AND voxel meshes; mesh-level transparent sorting cannot order their instances. */
+  /** Refresh only logic/art/visibility inputs. Static cards have physical depth and never join unit uploads. */
   private applyPainterOrder(): void {
     this.painterDirty = false;
     const objects = this.painterObjects;
     objects.length = 0;
-    const seen = new Set<PainterObject>();
-    const add = (painter: PainterObject): void => {
-      if (seen.has(painter)) return;
-      seen.add(painter);
-      objects.push(painter);
-    };
-    const cards = (instances: readonly SpriteInstance[]): void => {
-      for (const sprite of instances) {
-        if (sprite.flat || sprite.shadow) continue;
-        sprite.painter ??= painterObject(2, (sprite.anchor.x + sprite.anchor.z) * LEPTONS_PER_CELL);
-        add(sprite.painter);
-      }
-    };
-    for (const visual of this.visuals.values()) if (visual.root.visible && visual.painter) add(visual.painter);
-    cards(this.world.sprites?.getInstances() ?? EMPTY_SPRITES);
-    cards(this.cellInstances);
-    for (const instances of this.overlayInstances.instances.pages.values()) cards(instances);
-    for (const instances of this.spriteBatch.values()) cards(instances);
+    for (const visual of this.visuals.values()) if (visual.root.visible && visual.painter) objects.push(visual.painter);
     for (const effect of this.effectInstances) {
       if (effect.pass !== 'ground' || effect.draw !== 'card') continue;
       const painter = (effect.painter ??= painterObject(2, (effect.anchor.x + effect.anchor.z) * LEPTONS_PER_CELL));
       painter.afterEqual = true;
-      add(painter);
+      objects.push(painter);
     }
-    for (const entry of this.projectiles?.painterEntries() ?? []) add(entry.painter);
-    assignPainterDepth(objects);
+    if (this.projectiles) for (const entry of this.projectiles.painterEntries()) objects.push(entry.painter);
+    assignPainterBias(objects);
     for (const visual of this.visuals.values()) {
       const painter = visual.painter;
       if (!painter || !visual.root.visible) continue;
-      if (visual.mode === 'voxel') this.voxelUnits.setPainterDepth(visual, painter.depth, painter.slotWidth);
-      if (visual.buildingTurret)
-        this.voxelUnits.setPainterDepth(visual.buildingTurret, painter.depth, painter.slotWidth, 0.4);
+      if (visual.mode === 'voxel') this.voxelUnits.setPainterBias(visual, spritePainterBias(painter));
+      if (visual.buildingTurret) this.voxelUnits.setPainterBias(visual.buildingTurret, spritePainterBias(painter, 0.4));
     }
-    const staticSprites = this.world.sprites;
-    if (staticSprites) staticSprites.setInstances(staticSprites.getInstances());
-    this.cellLayer.setInstances(this.cellInstances);
-    for (const [page, layer] of this.overlayLayers)
-      layer.setInstances(this.overlayInstances.instances.pages.get(page) ?? EMPTY_SPRITES);
-    for (const entry of this.projectiles?.painterEntries() ?? [])
-      this.voxelUnits.setPainterDepth(entry, entry.painter.depth, entry.painter.slotWidth);
-    this.effectSprites?.setInstances(this.effectInstances, this.hd.seconds());
+    if (this.projectiles)
+      for (const entry of this.projectiles.painterEntries())
+        this.voxelUnits.setPainterBias(entry, spritePainterBias(entry.painter));
+    // Effects are uploaded only by their own snapshot/art rebuild, never by an interpolated unit upload.
+    if (this.effectsDirty) {
+      this.effectsDirty = false;
+      this.effectSprites?.setInstances(this.effectInstances, this.hd.seconds());
+    }
     this.flushSprites(this.spriteBatch);
   }
 
@@ -1046,6 +1069,8 @@ export class LiveView {
     if (!this.effectArt || !this.effectSprites) return;
     const instances = this.effectInstances;
     instances.length = 0;
+    this.particlePool.begin();
+    this.effectsDirty = true;
     this.effectStats = this.effectDriver.cards(this.effectArt, this.effectPalette, instances);
     this.effectDriver.smokeCards(this.effectArt, instances);
     const effects = snapshot.effects;
@@ -1067,7 +1092,7 @@ export class LiveView {
         if (!frame || frame.rect[2] <= 0) continue;
         const anim: LiveAnim = { id: 0, uid: 0, type: particle.type, ...particle };
         out.push({
-          anchor: leptonAnchor(anim.x, anim.y, anim.z, 0, 0, this.spritePool.anchor()),
+          anchor: leptonAnchor(anim.x, anim.y, anim.z, 0, 0, this.particlePool.anchor()),
           frame,
           palette: 'fx:anim',
           // Particles (ParticleClass, not AnimClass) take their type's constant Translucency; none of the YR particle
@@ -1099,15 +1124,15 @@ export class LiveView {
 
   /**
    * Hand each atlas its instances; library pages get their sprite layer when their texture has loaded. Layers that
-   * were empty and stay empty are not touched (every setInstances uploads the layer's buffers).
+   * were empty and stay empty are not touched; retained layers compare and upload only dirty attribute ranges.
    */
-  private flushSprites(batch: SpriteBatch): void {
+  private flushSprites(batch: SpriteBatch, reorder = true): void {
     const map = batch.get('map') ?? EMPTY_SPRITES;
-    if (map.length || this.sprites.mesh.count) this.sprites.setInstances(map);
+    if (map.length || this.sprites.mesh.count) this.sprites.setInstances(map, reorder);
     for (const key of batch.keys()) {
       const instances = batch.get(key)!;
       if (key === 'map' || !instances.length) continue;
-      this.pageLayer(key)?.setInstances(instances);
+      this.pageLayer(key)?.setInstances(instances, reorder);
     }
     for (const page of this.pageLayers.keys()) {
       const layer = this.pageLayers.get(page)!.layer;
@@ -1362,9 +1387,9 @@ export class LiveView {
    * cannon ...), turned by the building's facing (`turretFacing` in radians; null while the building is being built or
    * sold, when its make anim shows instead). The engine draws the turret at the building's draw point plus
    * TurretAnimX/Y pixels, after the body (TurretAnimZAdjust < 0): here it stands at that screen point on the
-   * building's level and is pulled towards the camera past the body card (cardPush) plus its own depth, so the body
-   * never cuts it while whatever covers the body also covers it. The model loads on first use; until then (and when it
-   * is missing) it counts in diagnostics().
+   * building's level and is pulled past the body's foundation depth at that screen point, plus its own depth. This
+   * preserves the established turret-over-body placement without a global depth slot. The model loads on first use;
+   * until then (and when it is missing) it counts in diagnostics().
    */
   private buildingTurret(object: LiveObject, visual: Visual, turretFacing: number | null): void {
     const spec = visual.libraryType?.building?.turretVoxel;
@@ -1395,7 +1420,18 @@ export class LiveView {
       this.spritePool.anchor(),
     );
     const body = this.library!.library.sprites[type.sprite!]?.frames[0];
-    const push = (body ? cardPush(body) : 0.5) + TURRET_DEPTH;
+    const foundation = type.foundation;
+    const push =
+      (foundation
+        ? foundationPointPush(
+            at.x - Math.floor(object.x / LEPTONS_PER_CELL),
+            at.z - Math.floor(object.y / LEPTONS_PER_CELL),
+            foundation[0],
+            foundation[1],
+          )
+        : body
+          ? cardPush(body)
+          : 0.5) + TURRET_DEPTH;
     const toCamera = this.world.sprites?.toCamera.value;
     if (toCamera) at.addScaledVector(toCamera, push);
     const pose = this.pose;
@@ -1788,7 +1824,6 @@ export class LiveView {
    * these meshes exactly as it masks the map's terrain and static overlays.
    */
   private flushOverlayPages(): void {
-    this.painterDirty = true;
     this.overlayPagesDirty = false;
     const pages = this.overlayInstances.instances.pages;
     for (const [page, layer] of this.overlayLayers) {
@@ -1895,7 +1930,9 @@ export class LiveView {
         const index = Math.min(object.frame ?? 0, entry.frames.length - 1);
         const frame = entry.frames[index]!;
         const anchor = objectAnchor(object, this.cellPool.anchor());
-        this.cellPool.painter = painterObject(2, (object.x + object.y + 1) * LEPTONS_PER_CELL);
+        // Overlays are drawn by the native cell pass, not inserted into the object layer vectors.
+        this.cellPool.painter = undefined;
+        this.cellPool.deckHeight = isHighBridge(object.type) ? HIGH_BRIDGE_HEIGHT : undefined;
         const palette = paletteFor(this.cache, entry.palette, entry.remap, object.owner);
         // The map object's lighting class (smudges take the full terrain light, ore none), as the static world
         // passes it (ra2/world.ts): absent means 'full'.

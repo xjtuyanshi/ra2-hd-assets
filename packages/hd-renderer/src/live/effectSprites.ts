@@ -35,8 +35,8 @@ import { DirtyAttribute } from '../dirtyAttribute';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import type { Ra2Cache } from '../ra2/cache';
-import { painterDepthNode } from '../painterDepth';
-import { spritePainterDepth, type PainterObject } from '../ra2/painterOrder';
+import { cardDepthNode } from '../ra2/cardDepth';
+import { spritePainterBias, type PainterObject } from '../ra2/painterOrder';
 
 /** How an effect frame is drawn. */
 export type EffectDraw = 'card' | 'flat' | 'shadow';
@@ -58,11 +58,11 @@ export interface EffectInstance {
   push: number;
   draw: EffectDraw;
   pass: EffectPass;
-  /** Legacy effect-only ordering (projected screen y); live Ground cards can instead share object painter slots. */
+  /** Legacy effect-only ordering (projected screen y); kept for back-to-front transparency within an effect page. */
   depth: number;
   /** Fire-coloured pixels may glow slightly (anim palette art). */
   glow: boolean;
-  /** Upright Ground effects share the live objects' depth band; decals and air/top passes stay physical. */
+  /** Ground effects use the same physical card depth profile as trees and units. */
   painter?: PainterObject;
   painterPart?: number;
 }
@@ -74,16 +74,14 @@ const CAPACITY = 4096;
 const MARGIN = 1;
 const RENDER_ORDER: Record<EffectPass, number> = { ground: 6, air: 7, top: 8 };
 const DRAW_RANK: Record<EffectDraw, number> = { flat: 0, shadow: 1, card: 2 };
-const cardPainterDepth = (instance: EffectInstance): number =>
+const cardPainterBias = (instance: EffectInstance): number =>
   instance.pass === 'ground' && instance.draw === 'card'
-    ? spritePainterDepth(instance.painter, instance.painterPart)
-    : -1;
+    ? spritePainterBias(instance.painter, instance.painterPart)
+    : 0;
 const compareCards = (a: EffectInstance, b: EffectInstance): number => {
   const rank = DRAW_RANK[a.draw] - DRAW_RANK[b.draw];
   if (rank) return rank;
-  const aDepth = cardPainterDepth(a);
-  const bDepth = cardPainterDepth(b);
-  return aDepth >= 0 && bDepth >= 0 ? bDepth - aDepth : a.depth - b.depth;
+  return a.depth - b.depth;
 };
 interface PageGroup {
   key: string;
@@ -262,7 +260,7 @@ class PageMesh {
     this.rect = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
     // x, y = frame offset from the canvas centre (px); z = palette row; w = push.
     this.params = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
-    // x = opacity; y = card/decal/shadow; z = glow allowed; w = painter depth (-1 = physical).
+    // x = opacity; y = card/decal/shadow; z = glow allowed; w = bounded traversal bias in world units.
     this.style = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
     this.opaqueMaterial = this.buildMaterial(false);
     this.mesh = new InstancedMesh(new PlaneGeometry(1, 1), this.opaqueMaterial, CAPACITY);
@@ -293,10 +291,17 @@ class PageMesh {
     material.transparent = true;
     material.depthWrite = false;
     material.depthTest = this.pass === 'ground';
-    material.depthNode = painterDepthNode(aStyle.w);
     material.blending = NormalBlending;
     const u: ShaderNode = uv().x;
     const v: ShaderNode = float(1).sub(uv().y);
+    material.depthNode = cardDepthNode(
+      aParams.x.sub(margin).add(u.mul(aRect.z.add(margin.mul(2)))),
+      aParams.y.sub(margin).add(v.mul(aRect.w.add(margin.mul(2)))),
+      vec4(0),
+      aParams.w,
+      aStyle.w,
+      aStyle.y.greaterThan(0.5),
+    );
     const gu: ShaderNode = positionGeometry.x.add(0.5);
     const gv: ShaderNode = float(0.5).sub(positionGeometry.y);
     material.positionNode = Fn(() => {
@@ -398,7 +403,7 @@ class PageMesh {
         s.alpha,
         s.draw === 'shadow' ? 2 : s.draw === 'flat' ? 1 : 0,
         s.glow ? 1 : 0,
-        cardPainterDepth(s),
+        cardPainterBias(s),
       );
       if (s.alpha < 1 && s.draw !== 'shadow') translucent = true;
     }

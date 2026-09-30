@@ -115,20 +115,30 @@ foundation dimensions enter this key. The building's drawing centre and art offs
 YR 1.001 evidence: `GetYSort` at `0x5F6BD0`, building position at `0x459EF0`, building override at `0x449410`,
 layer traversal at `0x6D8DB0`; the layer vectors start at `0x8A0360` with stride `0x18`.
 
-All upright atlas pages, static tree/wall cards and live voxel meshes share object depth slots. Building anims
-and voxel turrets stay inside their owner's slot, and voxel geometry keeps bounded self-depth for its own
-articulated parts. Screen positions, `cardPush`, ground decals, ore and shadow transforms retain their existing
-paths. A separate physical-depth render attachment keeps the mist and shroud post pass independent of these
-ordering slots. Underground/surface objects retain physical terrain depth. Older snapshots fall back to the Ground key (and terrain-relative flight height for aircraft);
-without native registration metadata, exact ties and unusual locomotor layers remain unverified. Static cache
-trees and wall overlays use their cell key, rather than claiming native registration metadata.
-Ground effect cards share these slots so explosions and fire can still draw over foreground units; equal-key
-fallback effects follow registered bodies. Voxel missiles/debris use the existing Air-pass fallback because their
-bridge contract does not yet provide native registration metadata. Flat effects retain terrain depth.
+Traversal breaks near-equal physical depth ties with a bounded camera-space bias; it never assigns a global NDC
+band. Voxel meshes retain their full depth range. Sprite fragment depth is reconstructed independently of frame
+padding: ordinary cards stand vertically above their anchor and follow the ground below it; buildings use a
+per-column front-facade ramp derived from their foundation. Shifted building animation cards share the owner's
+profile. Turrets and lamp heads clear that profile, while physical beams, rain, emitters and garnish test in the
+same depth space. Stock high-bridge overlays use a horizontal depth plane four height levels above the cell,
+so neighboring deck pieces cannot sort ahead of an on-deck unit merely because of their cell keys.
 
-This reproduces object-level painter traversal. Original software SHP/voxel Z-buffer gradients and individual
-art `ZAdjust` interactions are not fully reconstructed by this rule; synthetic rendering and source-level tests
-do not replace a same-moment live comparison.
+Ground decals, ore and shadow transforms retain their existing paths. The separate geometry-depth attachment
+keeps mist and shroud independent of the card's analytic occlusion depth. Older snapshots retain the Ground-key
+fallback and terrain-relative flight layer; exact ties and unusual locomotor layers without native metadata remain
+unverified. Ground effect cards use physical depth and a small tie bias. Air/Top effect cards retain their existing
+pass policy; voxel missiles/debris use a bounded Air bias because the bridge does not yet publish their registration.
+
+Ordering is refreshed only for snapshot/registration, art, cell or visibility changes. Interpolation reuses card
+order and updates poses; it does not rescan or rewrite static trees, cells, overlays or effects. Particle cards own
+a separate anchor pool. A same-frame registration-only update preserves both pose/camera interpolation endpoints
+and their timestamps.
+
+The native building path also consumes `BUILDNGZ.SHA` and software integer Z gradients. The foundation ramp is
+an approximation, not a decoded per-art Z shape: roofs, recesses, nonrectangular foundations, custom bridges and
+individual `ZAdjust` interactions require live comparison. See [tactical occlusion research](research/painter-order.md)
+for verified read/write blitters, addresses, formulas and the precise limitations. CPU regressions do not establish
+WebGPU execution or same-moment original-art parity.
 
 ## Local data it needs
 

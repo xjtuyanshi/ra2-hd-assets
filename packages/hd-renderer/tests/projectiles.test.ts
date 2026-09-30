@@ -6,7 +6,7 @@ import type { LiveBullet, LiveVoxelAnim } from '../src/live/effects';
 import type { EffectInstance } from '../src/live/effectSprites';
 import { Projectiles } from '../src/live/projectiles';
 import type { VoxelUnits } from '../src/live/voxelUnits';
-import { assignPainterDepth, painterObject } from '../src/ra2/painterOrder';
+import { assignPainterBias, painterObject } from '../src/ra2/painterOrder';
 import { LEVEL_HEIGHT } from '../src/world';
 
 function fixture() {
@@ -53,14 +53,14 @@ const debris = (fields: Partial<LiveVoxelAnim> = {}): LiveVoxelAnim => ({
 });
 
 describe('voxel projectile painter entries', () => {
-  it('exposes separate missile and debris slots without changing their physical transforms', () => {
+  it('exposes separate missile and debris biases without changing their physical transforms', () => {
     const f = fixture();
     f.projectiles.update([bullet()], [debris()], () => false, []);
     const entries = [...f.projectiles.painterEntries()];
     expect(entries).toHaveLength(2);
     expect(entries.map((entry) => entry.painter)).toMatchObject([
-      { layer: 3, ySort: 768, depth: -1, slotWidth: 0 },
-      { layer: 3, ySort: 1792, depth: -1, slotWidth: 0 },
+      { layer: 3, ySort: 768, bias: 0 },
+      { layer: 3, ySort: 1792, bias: 0 },
     ]);
     expect(entries[0]!.root.position.toArray()).toEqual([1, LEVEL_HEIGHT, 2]);
     expect(entries[1]!.root.position.toArray()).toEqual([3, LEVEL_HEIGHT * 2, 4]);
@@ -68,18 +68,18 @@ describe('voxel projectile painter entries', () => {
     expect(entries[1]!.root.quaternion.toArray()).toEqual([-0, -0, -0, 1]);
     const placement = entries.map((entry) => entry.root.position.toArray());
     const ground = painterObject(2, 100000);
-    assignPainterDepth([ground, ...entries.map((entry) => entry.painter)]);
-    expect(entries.every((entry) => entry.painter.depth < ground.depth)).toBe(true);
+    assignPainterBias([ground, ...entries.map((entry) => entry.painter)]);
+    expect(entries.every((entry) => entry.painter.bias > ground.bias)).toBe(true);
     expect(entries.map((entry) => entry.root.position.toArray())).toEqual(placement);
     expect(f.parent.children).toEqual(entries.map((entry) => entry.root));
     expect(f.palette.mock.calls).toEqual([[undefined], [3]]);
   });
 
-  it('refreshes keys on retained meshes and discards the previous slot when a uid disappears and returns', () => {
+  it('refreshes keys on retained meshes and discards the previous bias when a uid disappears and returns', () => {
     const f = fixture();
     f.projectiles.update([bullet()], [], () => false, []);
     const first = [...f.projectiles.painterEntries()][0]!;
-    assignPainterDepth([first.painter]);
+    assignPainterBias([first.painter]);
     f.projectiles.update([bullet({ x: 2048, y: 4096, z: 1040 })], [], () => false, []);
     const moved = [...f.projectiles.painterEntries()][0]!;
     expect(moved).toBe(first);
@@ -93,7 +93,7 @@ describe('voxel projectile painter entries', () => {
     f.projectiles.update([bullet()], [], () => false, []);
     const returned = [...f.projectiles.painterEntries()][0]!;
     expect(returned.painter).not.toBe(first.painter);
-    expect(returned.painter).toMatchObject({ layer: 3, ySort: 768, depth: -1, slotWidth: 0 });
+    expect(returned.painter).toMatchObject({ layer: 3, ySort: 768, bias: 0 });
     expect(f.build).toHaveBeenCalledTimes(2);
   });
 
