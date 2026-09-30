@@ -1,0 +1,153 @@
+{
+  "rounds": "Round 1 redraws the originals; round 2 refines the previous sheets with --refine-from. Selection uses processed round-2 outputs.",
+  "build_cfg": {
+    "note": "Adopted build settings (pass as --cfg): a partial lightness lock keeps the redraw's sun-side highlights and crown shade, a stronger volume pass gives the crown mass at RTS size; hue family and chroma stay locked to each map's original.",
+    "cfg": {
+      "kL": 0.6,
+      "kc": 0.9,
+      "volume": {
+        "strength": 1.6,
+        "density": 0.11,
+        "rim": 0.18
+      }
+    }
+  },
+  "sheets": {
+    "A": [
+      [
+        [
+          "TREE06",
+          512
+        ],
+        [
+          "TREE08",
+          512
+        ],
+        [
+          "TREE05",
+          512
+        ]
+      ],
+      [
+        [
+          "TREE02",
+          512
+        ],
+        [
+          "TREE04",
+          512
+        ],
+        [
+          "TREE03",
+          512
+        ]
+      ]
+    ],
+    "B": [
+      [
+        [
+          "TREE13",
+          512
+        ],
+        [
+          "TREE14",
+          512
+        ],
+        [
+          "TREE01",
+          512
+        ]
+      ],
+      [
+        [
+          "TREE09",
+          512
+        ],
+        [
+          "TREE07",
+          512
+        ],
+        [
+          "TREE10",
+          512
+        ]
+      ]
+    ],
+    "C": [
+      [
+        [
+          "TREE11",
+          512
+        ],
+        [
+          "TREE12",
+          512
+        ],
+        [
+          "TREE15",
+          512
+        ]
+      ],
+      [
+        [
+          "TREE16",
+          384
+        ],
+        [
+          "TREE17",
+          384
+        ],
+        [
+          "TREE18",
+          384
+        ],
+        [
+          "TREE19",
+          384
+        ]
+      ]
+    ]
+  },
+  "descriptions": {
+    "TREE01": "a tall narrow poplar-like tree with a dense, slightly ovate olive-green column of foliage and a thin trunk with a few upward branches at the base",
+    "TREE02": "a broad low fruit tree (crabapple / hawthorn) with an airy, twiggy rounded crown of small fresh-green leaves and a few tiny red fruits",
+    "TREE03": "a young deciduous tree with a forked trunk and two clumped, dark olive-green crowns",
+    "TREE04": "a wide windswept tree with long near-horizontal branches and bright yellow-green leaf clusters",
+    "TREE05": "a dense round broadleaf tree with a compact dark-green crown",
+    "TREE06": "a large spreading oak with a broad dome crown of big dark-green leaf clusters and a short thick trunk",
+    "TREE07": "a sparse young deciduous tree with an open, see-through crown of small olive-green leaf clusters",
+    "TREE08": "a broad dense elm-like tree with olive / khaki-green foliage",
+    "TREE09": "a very narrow columnar Lombardy poplar, bright green, with a thin trunk",
+    "TREE10": "an open branching tree whose leaves grow in separate clumps at the branch tips, fresh green, thin dark branches",
+    "TREE11": "a dense maple in early autumn: olive-green crown mixed with rusty red-brown leaves",
+    "TREE12": "a small ornamental tree (photinia-like) with green leaves and reddish-bronze young leaves at the top",
+    "TREE13": "a large weeping willow with long hanging curtains of thin yellow-green leaves and a thick dark trunk",
+    "TREE14": "a smaller weeping willow with drooping yellow-green foliage",
+    "TREE15": "a dense tree with dull autumn olive-brown / khaki foliage",
+    "TREE16": "a round dark-green boxwood-like bush",
+    "TREE17": "a round olive-green bush with small leaves",
+    "TREE18": "a small round dark-green bush",
+    "TREE19": "a low twiggy shrub with many thin upright olive-green twigs (broom / heather-like)"
+  },
+  "selection": {
+    "TREE01": "B-2o",
+    "TREE02": "A-2o",
+    "TREE03": "A-2o",
+    "TREE04": "A-2o",
+    "TREE05": "A-2o",
+    "TREE06": "A-2o",
+    "TREE07": "B-2o",
+    "TREE08": "A-2o",
+    "TREE09": "B-2o",
+    "TREE10": "B-2o",
+    "TREE11": "C-2o",
+    "TREE12": "C-2o",
+    "TREE13": "B-2o",
+    "TREE14": "B-2o",
+    "TREE15": "C-2o",
+    "TREE16": "C-2o",
+    "TREE17": "C-2o",
+    "TREE18": "C-2o",
+    "TREE19": "C-2o"
+  }
+}
