@@ -893,7 +893,10 @@ export class LiveView {
     if (this.smudgePagesDirty) this.flushSmudgePages();
     if (this.painterDirty) this.applyPainterOrder();
     this.effectDriver.frame(this.hd.seconds(), this.wind);
-    if (this.effectSprites) this.effectSprites.now.value = this.hd.seconds();
+    if (this.effectSprites) {
+      this.effectSprites.now.value = this.hd.seconds();
+      this.effectSprites.displayScale.value = 1 / Math.max(1e-3, this.hd.meanExposure);
+    }
     this.hd.frame(dt);
   }
 

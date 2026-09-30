@@ -72,6 +72,12 @@ const DUST_RINGS = 64;
 /** Enhanced fireballs drawn over the native art, and the puffs of the smoke columns that outlive a blast. */
 const BLASTS = 96;
 const COLUMN_PUFFS = 768;
+/** Particle modes, separate from the original sandbox (0) and faithful garnish (1) spark values. */
+const SPARK_HOT = 2;
+const SPARK_ELECTRIC = 3;
+/** Positive halo extras retain the original intensity; negative values select the enhanced colour treatments. */
+const HALO_HD = -1;
+const HALO_ELECTRIC = -2;
 
 /**
  * Local light of each effect, drawn into the light field (irradiance; the exposure reference is noon flat ground, about
@@ -113,22 +119,168 @@ export const GARNISH_LIGHTS = {
  * smudge stays underneath); more and longer sparks; debris that lands and stays on the ground for a few seconds.
  */
 export const ENHANCED = {
-  light: { colour: [1, 0.6, 0.26], radius: 1.8, radiusPerScale: 3.8, peak: 4, peakPerScale: 10, life: 1.8, decay: 1.7 },
-  halo: { width: 1.6, life: 0.4, intensity: 1.8 },
+  /** Temperature, linear RGB and HDR gain. Interpolate the gained colours, never sRGB hex colours. */
+  ramp: [
+    { temperature: 0, colour: [0.25, 0.03, 0], gain: 0.12 },
+    { temperature: 0.25, colour: [1, 0.12, 0.02], gain: 0.6 },
+    { temperature: 0.5, colour: [1, 0.38, 0.06], gain: 1.2 },
+    { temperature: 0.75, colour: [1, 0.7, 0.25], gain: 2 },
+    { temperature: 1, colour: [1, 0.93, 0.75], gain: 3 },
+  ],
+  light: {
+    colour: [1, 0.42, 0.14],
+    radius: 1.8,
+    radiusPerScale: 3.8,
+    peak: 4,
+    peakPerScale: 10,
+    life: 1.8,
+    decay: 1.7,
+  },
+  /** The first light pulse: ramp temperature, radius/peak relative to the longer glow, seconds and inverse seconds. */
+  flash: { temperature: 0.8, radius: 0.7, peak: 1, life: 0.18, decay: 24 },
+  /** HD art carries the fireball: its narrower halo grades from a hot centre to a red rim, cooling over its life. */
+  halo: {
+    width: 1.6,
+    life: 0.4,
+    intensity: 1.8,
+    hdWidth: 0.9,
+    hdIntensity: 0.35,
+    hdCore: 0.6,
+    rim: 0.25,
+    cooling: 0.3,
+    falloff: 3,
+  },
   /** Fireball over the native art: width and lifetime relative to the art's, share of the art it covers. */
   fireball: { width: 0.95, life: 0.95, cover: 0.82 },
-  sparks: { count: 26, perScale: 44 },
-  /** Debris: chunks per blast; `rest` seconds on the ground after landing. */
-  debris: { count: 5, perScale: 10, rest: 5 },
+  /** Start temperatures and streak aspect ratios; projected speed in cells/s reaches the longest streak at `speed`. */
+  sparks: { count: 26, perScale: 44, temperature: [0.75, 1], stretch: [2, 6], speed: 8 },
+  /**
+   * Airborne embers: fixed pool, count per blast, delayed births, life and slowing convection in seconds/cells.
+   * `volume` and `height` scale the blast's width; wind/drift are horizontal speeds, wobble is displacement, and
+   * flicker is noise amplitude. Wobble ramps in over `wobbleIn` seconds; fades are fractions of particle lifetime.
+   * Fires emit `fireRate` per second at scale 1; catch-up is bounded after a stalled frame.
+   */
+  embers: {
+    pool: 512,
+    count: 10,
+    perScale: 20,
+    delay: 0.6,
+    life: [1.5, 3.5],
+    temperature: [0.7, 0.95],
+    size: [0.018, 0.035],
+    rise: [0.4, 0.9],
+    drag: 0.65,
+    wind: 0.7,
+    drift: 0.12,
+    volume: 0.65,
+    height: 0.5,
+    wobble: 0.12,
+    wobbleRate: 2.5,
+    wobbleIn: 0.25,
+    flicker: 0.45,
+    flickerRate: 16,
+    fadeIn: 0.06,
+    fadeOut: 0.65,
+    fireRate: [2, 4],
+    fireWidth: 0.45,
+    catchup: 0.5,
+  },
+  /** Debris: chunks per blast; `rest` seconds on the ground, `glowLife` seconds cooling from core to rim temperature. */
+  debris: { count: 5, perScale: 10, rest: 5, glowLife: 1.1, rim: 0.65 },
   smoke: { count: 2, perScale: 5, delay: 0.14, life: 2.8, size: 0.42, opacity: 0.85 },
   /** Smoke column (blasts of scale >= `from`): puffs emitted over `span` seconds, each rising for `life` seconds. */
   column: { from: 0.35, count: 4, perScale: 8, span: 6, life: 11, rise: 0.32, size: 0.55 },
   shimmer: { width: 1.5, life: 1.0 },
   dust: { width: 2.2, life: 0.9 },
-  crater: { width: 0.6, life: 3.5 },
+  /** Ember-bed width/lifetime and edge temperature; the centre starts at temperature 1 and cools to zero. */
+  crater: { width: 0.6, life: 3.5, rim: 0.25 },
   /** Charred ground around a crater: width relative to the art, seconds until it has faded. */
   char: { width: 1.8, life: 45 },
+  /**
+   * Muzzle star: art-relative width with the existing world-size caps, life in seconds, ray count, radial reach and
+   * angular jitter (fraction of ray spacing). Core/ray widths use the unit disc; `rayFade` is the solid share of reach.
+   * Temperature falls radially and in time.
+   */
+  muzzle: {
+    width: 0.8,
+    minWidth: 0.25,
+    maxWidth: 1.5,
+    fallbackWidth: 0.9,
+    life: [0.06, 0.09],
+    rays: [5, 7],
+    rayLength: [0.45, 1],
+    rayWidth: 0.055,
+    rayJitter: 0.3,
+    rayFade: 0.65,
+    core: 0.2,
+    rim: 0.5,
+    cooling: 0.3,
+    intensity: 1.2,
+    haloWidth: 1.8,
+    haloLife: 0.12,
+    haloIntensity: 1.2,
+    light: { colour: [1, 0.78, 0.45], radius: 2.2, peak: 2.8, life: 0.14, decay: 14 },
+  },
+  /**
+   * Bolt widths are fractions of the existing segment quad (no wider geometry); HDR gains separate the white core,
+   * beam-coloured inner glow and violet/cyan fringe. Noise varies with position and the presented-frame effect clock.
+   * Branch lengths are fractions of BOLT_STEP; impacts use world-cell width, seconds and linear blue-white colour.
+   */
+  bolts: {
+    core: 0.14,
+    inner: 0.55,
+    coreGain: 2.6,
+    innerGain: 1.4,
+    outerGain: 0.6,
+    violet: [0.55, 0.45, 1],
+    violetMix: 0.5,
+    flicker: 0.65,
+    flickerRate: 48,
+    noiseScale: 14,
+    branchEvery: 3,
+    branchLength: [0.25, 0.5],
+    impact: {
+      colour: [0.65, 0.82, 1],
+      width: 0.6,
+      life: 0.12,
+      intensity: 1.6,
+      sparks: 3,
+      sparkSize: 0.035,
+      sparkLife: [0.18, 0.35],
+      sparkSpeed: 1.8,
+    },
+  },
 } as const;
+
+/**
+ * Enhanced incandescent colour in linear HDR light. The five stops include their brightness, so both CPU and TSL
+ * interpolate exactly the same radiance and cooling cannot become brighter between stops. The original fireRamp is
+ * deliberately separate: native-art garnish and sandbox effects retain their existing palette and exposure.
+ */
+export function emberRamp(temperature: ShaderNode): ShaderNode {
+  const stops = ENHANCED.ramp;
+  let rgb: ShaderNode = vec3(...stops[0].colour).mul(stops[0].gain);
+  for (let i = 1; i < stops.length; i++) {
+    const before = stops[i - 1]!;
+    const next = stops[i]!;
+    const blend = clamp(temperature.sub(before.temperature).div(next.temperature - before.temperature), 0, 1);
+    rgb = mix(rgb, vec3(...next.colour).mul(next.gain), blend);
+  }
+  return rgb;
+}
+
+/** Plain TypeScript twin of emberRamp, including clamping outside the temperature interval [0, 1]. */
+export function emberRampRgb(t: number): [number, number, number] {
+  const stops = ENHANCED.ramp;
+  const rgb: [number, number, number] = stops[0].colour.map((c) => c * stops[0].gain) as [number, number, number];
+  for (let i = 1; i < stops.length; i++) {
+    const before = stops[i - 1]!;
+    const next = stops[i]!;
+    const blend = Math.max(0, Math.min(1, (t - before.temperature) / (next.temperature - before.temperature)));
+    for (let c = 0; c < 3; c++) rgb[c] = rgb[c]! + (next.colour[c]! * next.gain - rgb[c]!) * blend;
+  }
+  return rgb;
+}
 
 /**
  * Opacity of a live-view garnish smoke puff relative to the renderer's own smoke: the original trail art under it is
@@ -185,7 +337,7 @@ class ParticlePool {
     this.start = new InstancedBufferAttribute(new Float32Array(count).fill(-1e6), 1);
     this.origin = new InstancedBufferAttribute(new Float32Array(count * 3), 3);
     this.velocity = new InstancedBufferAttribute(new Float32Array(count * 3), 3);
-    // x = size, y = lifetime, z = seed, w = per-pool extra (smoke: soot; sparks: garnish; garnish fire: ground cover)
+    // x = size, y = lifetime, z = seed, w = per-pool extra (smoke: soot; sparks: style; garnish fire: ground cover)
     this.params = new InstancedBufferAttribute(new Float32Array(count * 4), 4);
     this.attributes = [this.start, this.origin, this.velocity, this.params];
     this.material = material;
@@ -290,11 +442,18 @@ export class EffectsLayer {
    * and the unknown-projectile dots are lit, not emissive. A live view shares the sprite layer's Color here.
    */
   readonly sceneLight = uniform(new Color(1, 1, 1));
+  /** Enhanced heat halo around HD-art blasts: gain and centre temperature (ENHANCED.halo; uniforms for look reviews). */
+  readonly hdHaloGain = uniform(ENHANCED.halo.hdIntensity);
+  readonly hdHaloCore = uniform(ENHANCED.halo.hdCore);
   private readonly fireballs: ParticlePool;
   /** Flame tongues of persistent fires (burning wrecks, napalm). */
   private readonly flames: ParticlePool;
   private readonly smoke: ParticlePool;
   private readonly sparks: ParticlePool;
+  /** Enhanced style only: airborne, cooling specks, independent of the original ground ember bed. */
+  private readonly airborneEmbers: ParticlePool;
+  /** Enhanced muzzle star, kept separate so faithful garnish retains its fire mask and timing. */
+  private readonly muzzleStar: ParticlePool;
   private readonly scorch: ParticlePool;
   private readonly shock: ParticlePool;
   /** Hot bed of a persistent fire on the ground: the base its flame tongues rise from. */
@@ -305,6 +464,8 @@ export class EffectsLayer {
   private readonly dots: ParticlePool;
   /** Energy beams (lasers, bolts) of the current logic frame, as soft-edged segments. */
   private readonly beams: BeamLayer;
+  /** Live driver opt-in; sandbox and faithful beams retain their original geometry and shading. */
+  enhancedBeams = false;
   /** Enhanced style: additive glow halos (bloomed) around a blast. */
   private readonly halo: ParticlePool;
   /** Enhanced style: rolling smoke puffs, sunlit and glowing from the fire below. */
@@ -323,6 +484,8 @@ export class EffectsLayer {
   private lightField: LightField | null = null;
   /** Next flame emission per persistent fire key. */
   private readonly fireEmit = new Map<string, number>();
+  /** Tracked fire positions are stable objects; weak ownership releases the schedule when an anim disappears. */
+  private readonly emberEmit = new WeakMap<Vector3, number>();
   /** Every pool, in draw order. */
   private readonly pools: readonly ParticlePool[];
   private readonly zeroVelocity = new Vector3();
@@ -450,22 +613,107 @@ export class EffectsLayer {
     });
 
     this.sparks = new ParticlePool(SPARKS, new PlaneGeometry(1, 1), additive(), (pool) => {
-      const { age, life, size, origin, velocity, alive, extra: garnish } = particleInputs(pool, this.now);
+      const { age, life, size, seed, origin, velocity, alive, extra: garnish } = particleInputs(pool, this.now);
       const t = clamp(age.div(life), 0, 1);
       const flight = min(age, life);
       const gravity = vec3(0, -9.0, 0).mul(flight.mul(flight).mul(0.5));
       const position = origin.add(velocity.mul(flight)).add(gravity);
-      pool.material.positionNode = billboard(
-        position,
-        size.mul(float(1).sub(t)).mul(alive),
-        this.cameraRight,
-        this.cameraUp,
+      const width = size.mul(float(1).sub(t)).mul(alive);
+      const enhanced = step(1.5, garnish);
+      const currentVelocity = velocity.add(vec3(0, flight.mul(-9), 0));
+      const projected = vec2(dot(currentVelocity, this.cameraRight), dot(currentVelocity, this.cameraUp));
+      const speed = length(projected);
+      // A spark travelling into the camera has no screen direction; use a finite horizontal streak in that case.
+      const direction = speed.greaterThan(1e-4).select(projected.div(max(speed, 1e-4)), vec2(1, 0));
+      const along = this.cameraRight.mul(direction.x).add(this.cameraUp.mul(direction.y));
+      const across = this.cameraRight.mul(direction.y.negate()).add(this.cameraUp.mul(direction.x));
+      const streak = mix(...ENHANCED.sparks.stretch, clamp(speed.div(ENHANCED.sparks.speed), 0, 1));
+      const stretched = position
+        .add(along.mul(positionLocal.x.mul(width).mul(streak)))
+        .add(across.mul(positionLocal.y.mul(width)));
+      pool.material.positionNode = mix(
+        billboard(position, width, this.cameraRight, this.cameraUp),
+        stretched,
+        enhanced,
       );
       pool.material.colorNode = Fn(() => {
         const mask = smoothstep(1.0, 0.0, length(uv().sub(0.5).mul(2)));
         // Garnish sparks (live view) are a pale gold just over the bloom threshold; the renderer's own blasts glow hot.
-        const tint = mix(color(0xffc070).mul(8), color(0xffd27a).mul(3), garnish);
+        const original = mix(color(0xffc070).mul(8), color(0xffd27a).mul(3), clamp(garnish, 0, 1));
+        const temperature = mix(...ENHANCED.sparks.temperature, seed).mul(float(1).sub(t));
+        const hot = emberRamp(temperature);
+        // Electrical particles keep their blue-white hue while sharing the hot ramp's cooling radiance.
+        const electric = vec3(...ENHANCED.bolts.impact.colour).mul(hot.x);
+        const tint = mix(original, garnish.equal(SPARK_ELECTRIC).select(electric, hot), enhanced);
         return vec4(tint, mask.mul(float(1).sub(t)).mul(t.lessThan(1).select(float(1), float(0))));
+      })();
+    });
+
+    // Enhanced airborne embers rise with decaying convection, follow the spawn's wind and wobble across it. Births
+    // can be delayed inside a blast; clamped age keeps their hidden vertices finite before they start. All motion,
+    // flicker and cooling stay on the GPU, and this pool never receives sandbox or faithful particles.
+    this.airborneEmbers = new ParticlePool(ENHANCED.embers.pool, quad, additive(), (pool) => {
+      const e = ENHANCED.embers;
+      const { age, life, size, seed, origin, velocity, alive, extra: temperature } = particleInputs(pool, this.now);
+      const flight = clamp(age, 0, life);
+      const t = flight.div(life);
+      const rise = velocity.y.mul(float(1).sub(exp(flight.mul(-e.drag)))).div(e.drag);
+      const wobble = vec3(
+        mx_noise_float(vec3(seed.mul(31), flight.mul(e.wobbleRate), 0)),
+        0,
+        mx_noise_float(vec3(seed.mul(17), flight.mul(e.wobbleRate), 7)),
+      )
+        .mul(e.wobble)
+        .mul(smoothstep(0, e.wobbleIn, flight));
+      const at = origin.add(vec3(velocity.x.mul(flight), rise, velocity.z.mul(flight))).add(wobble);
+      pool.material.positionNode = billboard(at, size.mul(alive), this.cameraRight, this.cameraUp);
+      pool.material.colorNode = Fn(() => {
+        const mask = smoothstep(1, 0, length(uv().sub(0.5).mul(2)));
+        const flicker = float(1).add(mx_noise_float(vec3(seed.mul(43), this.now.mul(e.flickerRate), 0)).mul(e.flicker));
+        const fade = smoothstep(0, e.fadeIn, t).mul(smoothstep(1, e.fadeOut, t));
+        return vec4(emberRamp(temperature.mul(float(1).sub(t))).mul(flicker), mask.mul(fade));
+      })();
+    });
+
+    // A short muzzle star with independently varied rays inside the old flash's footprint. A bounded unrolled mask
+    // draws five to seven rays, with no extra geometry or material per ray; only the enhanced muzzle path spawns it.
+    this.muzzleStar = new ParticlePool(GARNISH_FLASHES, quad, additive(), (pool) => {
+      const e = ENHANCED.muzzle;
+      const { age, life, size, seed, origin, alive } = particleInputs(pool, this.now);
+      const t = clamp(age.div(life), 0, 1);
+      pool.material.positionNode = billboard(
+        origin.add(this.toCamera.mul(size.mul(0.5))),
+        size.mul(alive),
+        this.cameraRight,
+        this.cameraUp,
+      );
+      pool.material.colorNode = Fn(() => {
+        const p = uv().sub(0.5).mul(2);
+        const radius = length(p);
+        const count = seed
+          .mul(e.rays[1] - e.rays[0] + 1)
+          .floor()
+          .add(e.rays[0])
+          .min(e.rays[1]);
+        const spacing = float(Math.PI * 2).div(count);
+        let mask: ShaderNode = smoothstep(e.core, 0, radius);
+        for (let i = 0; i < e.rays[1]; i++) {
+          const noise = mx_noise_float(vec3(seed.mul(53), i * 17, 0));
+          const angle = seed.mul(Math.PI * 2).add(spacing.mul(float(i).add(noise.mul(e.rayJitter))));
+          const direction = vec2(cos(angle), sin(angle));
+          const along = dot(p, direction);
+          const across = abs(dot(p, vec2(direction.y.negate(), direction.x)));
+          const reach = mix(...e.rayLength, clamp(noise.add(0.5), 0, 1));
+          const ray = smoothstep(e.rayWidth, 0, across)
+            .mul(smoothstep(0, e.core, along))
+            .mul(smoothstep(reach, reach.mul(e.rayFade), along))
+            .mul(float(i).lessThan(count).select(float(1), float(0)));
+          mask = max(mask, ray);
+        }
+        const temperature = float(1)
+          .sub(radius.mul(1 - e.rim))
+          .sub(t.mul(e.cooling));
+        return vec4(emberRamp(temperature).mul(e.intensity), mask.mul(float(1).sub(t)));
       })();
     });
 
@@ -533,7 +781,7 @@ export class EffectsLayer {
     // Ember bed: a flat, flickering, white-yellow core on the ground under a persistent fire (additive), refreshed with
     // every flame beat.
     this.embers = new ParticlePool(EMBERS, ground, additive(), (pool) => {
-      const { age, life, size, seed, origin, alive } = particleInputs(pool, this.now);
+      const { age, life, size, seed, origin, alive, extra: cooling } = particleInputs(pool, this.now);
       const t = clamp(age.div(life), 0, 1);
       pool.material.positionNode = origin.add(vec3(0, 0.025, 0)).add(positionLocal.mul(size.mul(alive)));
       pool.material.colorNode = Fn(() => {
@@ -542,7 +790,8 @@ export class EffectsLayer {
         const d = length(p).add(n);
         const bed = smoothstep(1.0, 0.2, d);
         const core = smoothstep(0.45, 0.0, d);
-        const tint = mix(FLAME_EDGE, vec3(1.0, 0.9, 0.6), core);
+        const temperature = mix(float(1), float(ENHANCED.crater.rim), clamp(d, 0, 1)).mul(float(1).sub(t));
+        const tint = mix(mix(FLAME_EDGE, vec3(1.0, 0.9, 0.6), core), emberRamp(temperature), cooling);
         const fade = smoothstep(0.0, 0.15, t).mul(smoothstep(1.0, 0.5, t));
         return vec4(tint.mul(bed.mul(0.5).add(core.mul(0.9))), fade.mul(0.55));
       })();
@@ -590,13 +839,13 @@ export class EffectsLayer {
       })();
     });
 
-    this.beams = new BeamLayer(this.cameraRight, this.cameraUp);
+    this.beams = new BeamLayer(this.cameraRight, this.cameraUp, this.now);
 
     const noise = waterTextures().noise;
     // Enhanced glow halo: a soft Gaussian of fire light around the blast, white-yellow at the centre, orange outside,
     // bright enough for the bloom and gone within a third of a second.
     this.halo = new ParticlePool(HALOS, quad, additive(), (pool) => {
-      const { age, life, size, origin, alive, extra: intensity } = particleInputs(pool, this.now);
+      const { age, life, size, origin, alive, extra: mode } = particleInputs(pool, this.now);
       const t = clamp(age.div(life), 0, 1);
       const grow = size.mul(float(0.6).add(smoothstep(0, 0.3, t).mul(0.4)));
       pool.material.positionNode = billboard(
@@ -607,10 +856,19 @@ export class EffectsLayer {
       );
       pool.material.colorNode = Fn(() => {
         const d = length(uv().sub(0.5).mul(2));
-        const falloff = exp(d.mul(d).mul(-5.5)).mul(smoothstep(1.0, 0.8, d));
-        const tint = mix(vec3(1.0, 0.5, 0.16), vec3(1.0, 0.86, 0.55), exp(d.mul(d).mul(-18)));
+        const hd = mode.equal(HALO_HD);
+        const falloff = exp(d.mul(d).mul(hd.select(float(-ENHANCED.halo.falloff), float(-5.5)))).mul(
+          smoothstep(1.0, 0.8, d),
+        );
+        const original = mix(vec3(1.0, 0.5, 0.16), vec3(1.0, 0.86, 0.55), exp(d.mul(d).mul(-18))).mul(mode);
+        const temperature = mix(this.hdHaloCore, float(ENHANCED.halo.rim), clamp(d, 0, 1)).mul(
+          float(1).sub(t.mul(ENHANCED.halo.cooling)),
+        );
+        const warm = hd.select(emberRamp(temperature).mul(this.hdHaloGain), original);
+        const electric = vec3(...ENHANCED.bolts.impact.colour).mul(ENHANCED.bolts.impact.intensity);
+        const tint = mode.equal(HALO_ELECTRIC).select(electric, warm);
         const fade = pow(float(1).sub(t), 2).mul(smoothstep(0.0, 0.03, age));
-        return vec4(tint.mul(falloff).mul(fade).mul(intensity), t.lessThan(1).select(float(1), float(0)));
+        return vec4(tint.mul(falloff).mul(fade), t.lessThan(1).select(float(1), float(0)));
       })();
     });
 
@@ -708,10 +966,11 @@ export class EffectsLayer {
           .mul(this.sceneLight)
           .mul(float(0.8).add(p.y.mul(0.25)));
         // Hot chunks glow for their first second, however long they then lie on the ground.
-        const ember = vec3(1.0, 0.5, 0.15)
+        const heat = clamp(float(1).sub(age.div(ENHANCED.debris.glowLife)), 0, 1);
+        const temperature = mix(float(1), float(ENHANCED.debris.rim), clamp(length(p), 0, 1)).mul(heat);
+        const ember = emberRamp(temperature)
           .mul(hot)
-          .mul(smoothstep(1.1, 0.0, age))
-          .mul(2.2);
+          .mul(smoothstep(ENHANCED.debris.glowLife, 0, age));
         return vec4(
           shade.add(ember),
           chunk.mul(smoothstep(life, life.sub(0.8), age)).mul(t.lessThan(1).select(float(1), float(0))),
@@ -886,7 +1145,16 @@ export class EffectsLayer {
     this.column.mesh.renderOrder = 6;
     // Over the native anim art (the 'air' pass draws at 7).
     this.blast.mesh.renderOrder = 7.5;
-    for (const pool of [this.flames, this.fireballs, this.sparks, this.garnishFire, this.debris, this.halo])
+    for (const pool of [
+      this.flames,
+      this.fireballs,
+      this.sparks,
+      this.airborneEmbers,
+      this.muzzleStar,
+      this.garnishFire,
+      this.debris,
+      this.halo,
+    ])
       pool.mesh.renderOrder = 7;
     // The heat shimmer refracts everything drawn before it, fire included.
     this.shimmer.mesh.renderOrder = 8;
@@ -906,6 +1174,8 @@ export class EffectsLayer {
       this.debris,
       this.halo,
       this.sparks,
+      this.airborneEmbers,
+      this.muzzleStar,
       this.shimmer,
     ];
     for (const pool of this.pools) {
@@ -1044,19 +1314,31 @@ export class EffectsLayer {
         e.fireball.life * artLife,
         e.fireball.cover,
       );
-    this.halo.spawn(now, at, this.zeroVelocity, e.halo.width * width, e.halo.life, e.halo.intensity);
+    this.halo.spawn(
+      now,
+      at,
+      this.zeroVelocity,
+      (options.hdArt ? e.halo.hdWidth : e.halo.width) * width,
+      e.halo.life,
+      options.hdArt ? HALO_HD : e.halo.intensity,
+    );
     const light = e.light;
-    const colour = options.light ?? [...light.colour, 0];
+    const radius = light.radius + light.radiusPerScale * lightScale;
+    const peak = light.peak + light.peakPerScale * lightScale;
+    const flash = emberRampRgb(e.flash.temperature);
+    const brightest = Math.max(...flash);
+    // Enhanced lighting owns this hot-to-orange progression, including rows with a native pale-yellow light colour.
     this.lightField?.pulse(
       now,
       at,
-      [colour[0]!, colour[1]!, colour[2]!],
-      light.radius + light.radiusPerScale * lightScale,
-      light.peak + light.peakPerScale * lightScale,
-      light.life,
-      light.decay,
+      [flash[0] / brightest, flash[1] / brightest, flash[2] / brightest],
+      radius * e.flash.radius,
+      peak * e.flash.peak,
+      e.flash.life,
+      e.flash.decay,
       'explosion',
     );
+    this.lightField?.pulse(now, at, light.colour, radius, peak, light.life, light.decay, 'explosion');
     const lifted = at.clone().add(new Vector3(0, 0.12, 0));
     for (let i = 0, n = Math.round(e.sparks.count + e.sparks.perScale * s); i < n; i++) {
       // Most sparks stay near the blast; one in four is a long tracer.
@@ -1064,8 +1346,10 @@ export class EffectsLayer {
       const velocity = new Vector3(r(10), 3 + Math.random() * 6, r(10)).multiplyScalar(
         (0.35 + 0.35 * s) * (far ? 1.6 : 1),
       );
-      this.sparks.spawn(now, lifted, velocity, far ? 0.055 : 0.045, (far ? 0.8 : 0.4) + Math.random() * 0.6, 0.35);
+      this.sparks.spawn(now, lifted, velocity, far ? 0.055 : 0.045, (far ? 0.8 : 0.4) + Math.random() * 0.6, SPARK_HOT);
     }
+    for (let i = 0, n = Math.round(e.embers.count + e.embers.perScale * s); i < n; i++)
+      this.spawnEmber(now + Math.random() * e.embers.delay, at, width, wind);
     for (let i = 0, n = Math.round(e.debris.count + e.debris.perScale * s); i < n; i++) {
       const velocity = new Vector3(r(5), 2.5 + Math.random() * 3.5, r(5)).multiplyScalar(0.5 + 0.35 * s);
       // Flight time (back to the start height), then a few seconds on the ground.
@@ -1111,7 +1395,7 @@ export class EffectsLayer {
     this.shimmer.spawn(now + 0.05, at, this.zeroVelocity, e.shimmer.width * width, e.shimmer.life);
     this.dust.spawn(now, at, this.zeroVelocity, e.dust.width * width, e.dust.life);
     if (options.hotCrater) {
-      this.embers.spawn(now + 0.05, at, this.zeroVelocity, e.crater.width * width, e.crater.life);
+      this.embers.spawn(now + 0.05, at, this.zeroVelocity, e.crater.width * width, e.crater.life, 1);
       // Charred ground around the engine's crater smudge (which stays underneath), fading over most of a minute.
       this.scorch.spawn(now + 0.1, at, this.zeroVelocity, e.char.width * width, e.char.life, 1);
     }
@@ -1124,15 +1408,16 @@ export class EffectsLayer {
   muzzleFlash(now: number, at: Vector3, scale: number, options?: GarnishOptions): void {
     if (options?.enhanced) {
       // Enhanced: a bloomed halo around the native flash and a light that reaches the ground and nearby units.
-      const width = Math.max(0.25, Math.min(options.maxSize ?? 0.9 * scale, 1.5));
-      this.garnishFire.spawn(now, at, this.zeroVelocity, 0.8 * width, 0.08, 0.5);
-      this.halo.spawn(now, at, this.zeroVelocity, 1.8 * width, 0.12, 1.2);
+      const e = ENHANCED.muzzle;
+      const width = Math.max(e.minWidth, Math.min(options.maxSize ?? e.fallbackWidth * scale, e.maxWidth));
+      this.muzzleStar.spawn(now, at, this.zeroVelocity, e.width * width, randomBetween(e.life));
+      this.halo.spawn(now, at, this.zeroVelocity, e.haloWidth * width, e.haloLife, e.haloIntensity);
       for (let i = 0; i < 6; i++) {
         const velocity = new Vector3(Math.random() - 0.5, 0.6 + Math.random(), Math.random() - 0.5).multiplyScalar(3.5);
-        this.sparks.spawn(now, at, velocity, 0.04, 0.2 + Math.random() * 0.25, 0.5);
+        this.sparks.spawn(now, at, velocity, 0.04, 0.2 + Math.random() * 0.25, SPARK_HOT);
       }
-      const colour = options.light ?? GARNISH_LIGHTS.muzzle.colour;
-      this.lightField?.pulse(now, at, [colour[0]!, colour[1]!, colour[2]!], 2.2, 2.8, 0.14, 14, 'flash');
+      const light = e.light;
+      this.lightField?.pulse(now, at, light.colour, light.radius, light.peak, light.life, light.decay, 'flash');
       return;
     }
     if (options) {
@@ -1265,6 +1550,48 @@ export class EffectsLayer {
   }
 
   /**
+   * A few airborne embers from a looping enhanced fire, next to its kept light. The caller retains `at` for the anim's
+   * lifetime; each position has its own emission schedule, so presentation rate and the number of other fires do not
+   * multiply emissions. Wind is sampled at birth. After a long gap only the current beat is emitted, without a backlog.
+   */
+  fireEmbers(now: number, at: Vector3, scale: number, wind = this.zeroVelocity): void {
+    if (scale <= 0) return;
+    const e = ENHANCED.embers;
+    let next = this.emberEmit.get(at) ?? now;
+    if (now - next > e.catchup) next = now;
+    let emitted = 0;
+    while (next <= now && emitted < e.pool) {
+      this.spawnEmber(now, at, e.fireWidth * scale, wind);
+      next += 1 / (randomBetween(e.fireRate) * scale);
+      emitted++;
+    }
+    this.emberEmit.set(at, next);
+  }
+
+  /** Shared enhanced ember launch volume; vertical convection stays independent of horizontal wind strength. */
+  private spawnEmber(now: number, at: Vector3, width: number, wind: Vector3): void {
+    const e = ENHANCED.embers;
+    const offset = new Vector3(
+      (Math.random() - 0.5) * e.volume * width,
+      Math.random() * e.height * width,
+      (Math.random() - 0.5) * e.volume * width,
+    );
+    const velocity = new Vector3(
+      wind.x * e.wind + (Math.random() - 0.5) * e.drift,
+      randomBetween(e.rise),
+      wind.z * e.wind + (Math.random() - 0.5) * e.drift,
+    );
+    this.airborneEmbers.spawn(
+      now,
+      at.clone().add(offset),
+      velocity,
+      randomBetween(e.size),
+      randomBetween(e.life),
+      randomBetween(e.temperature),
+    );
+  }
+
+  /**
    * A persistent fire (a burning wreck), called every frame: flame tongues at a steady rate, a continuous column of
    * dark smoke and a kept-alive light. Stops (and its light fades) when the calls stop.
    */
@@ -1285,11 +1612,11 @@ export class EffectsLayer {
   /**
    * The energy beams the engine draws this logic frame (lasers, electric and psychic bolts), replacing the previous
    * set; an empty list clears them. They stay until the next call, so the caller sets them once per logic frame and
-   * they persist unchanged while the game is paused, like the engine's own redrawn beams. Each beam also flashes a
-   * short light at its target.
+   * their geometry persists while the game is paused, like the engine's own redrawn beams. Each beam also flashes a
+   * short light at its target. Enhanced bolts flicker with the presentation clock and add a blue-white impact pulse.
    */
   setBeams(now: number, beams: readonly BeamSpec[]): void {
-    this.beams.setBeams(beams);
+    this.beams.setBeams(beams, this.enhancedBeams);
     const light = GARNISH_LIGHTS.beam;
     // Only the last 256 pulses survive the light field's flash ring. Avoid processing discarded pulses.
     for (let i = Math.max(0, beams.length - BEAM_LIGHTS); i < beams.length; i++) {
@@ -1306,6 +1633,23 @@ export class EffectsLayer {
         light.decay,
         'flash',
       );
+    }
+    if (this.enhancedBeams) {
+      const impact = ENHANCED.bolts.impact;
+      // Only the newest HALOS bolt impacts can survive the halo ring. Lasers must not displace that visible subset.
+      let emitted = 0;
+      for (let i = beams.length - 1; i >= 0 && emitted < HALOS; i--) {
+        const beam = beams[i]!;
+        if (!beam.bolt) continue;
+        emitted++;
+        this.halo.spawn(now, beam.to, this.zeroVelocity, impact.width, impact.life, HALO_ELECTRIC);
+        for (let j = 0; j < impact.sparks; j++) {
+          const velocity = new Vector3(Math.random() - 0.5, Math.random() + 0.5, Math.random() - 0.5).multiplyScalar(
+            impact.sparkSpeed,
+          );
+          this.sparks.spawn(now, beam.to, velocity, impact.sparkSize, randomBetween(impact.sparkLife), SPARK_ELECTRIC);
+        }
+      }
     }
   }
 
@@ -1362,13 +1706,15 @@ const BOLT_JITTER = 0.24;
 
 /**
  * Straight pieces of a beam: one for a laser; for a bolt three strands of BOLT_STEP-long pieces whose inner joints are
- * moved up to +-BOLT_JITTER / 2 sideways and vertically, the same for the same seed.
+ * moved up to +-BOLT_JITTER / 2 sideways and vertically, the same for the same seed. Enhanced bolts interleave short
+ * side branches, bounded by BEAM_SEGMENTS. A second copy of the same seeded generator preserves the original trunk.
  */
 export function beamSegments(
   start: { x: number; y: number; z: number },
   end: { x: number; y: number; z: number },
   bolt: boolean,
   seed: number,
+  enhanced = false,
 ): [Vector3, Vector3][] {
   const from = new Vector3(start.x, start.y, start.z);
   const to = new Vector3(end.x, end.y, end.z);
@@ -1377,21 +1723,36 @@ export function beamSegments(
   const side = new Vector3(to.z - from.z, 0, from.x - to.x);
   if (side.lengthSq() > 0) side.normalize();
   const random = mulberry(seed);
+  const branchRandom = mulberry(seed);
+  const branch = new Vector3();
   const out: [Vector3, Vector3][] = [];
   const pieces = Math.max(1, Math.round(distance / BOLT_STEP));
-  for (let strand = 0; strand < 3; strand++) {
+  const capacity = enhanced ? BEAM_SEGMENTS : Infinity;
+  for (let strand = 0; strand < 3 && out.length < capacity; strand++) {
     let previous = from.clone();
-    for (let i = 1; i <= pieces; i++) {
+    for (let i = 1; i <= pieces && out.length < capacity; i++) {
       const point = new Vector3().lerpVectors(from, to, i / pieces);
       if (i < pieces)
         point
           .addScaledVector(side, (random() - 0.5) * BOLT_JITTER)
           .add(new Vector3(0, (random() - 0.5) * BOLT_JITTER, 0));
       out.push([previous, point]);
+      if (enhanced && i % ENHANCED.bolts.branchEvery === 0 && out.length < capacity)
+        out.push([point, point.clone().add(boltBranchOffset(branchRandom, branch))]);
       previous = point;
     }
   }
   return out;
+}
+
+/** Uniform branch direction and bounded reach; both builders consume the same three random values per branch. */
+function boltBranchOffset(random: () => number, target: Vector3): Vector3 {
+  const angle = random() * Math.PI * 2;
+  const y = random() * 2 - 1;
+  const horizontal = Math.sqrt(Math.max(0, 1 - y * y));
+  const [short, long] = ENHANCED.bolts.branchLength;
+  const reach = BOLT_STEP * (short + (long - short) * random());
+  return target.set(Math.cos(angle) * horizontal, y, Math.sin(angle) * horizontal).multiplyScalar(reach);
 }
 
 export const BEAM_SEGMENTS = 4096;
@@ -1411,7 +1772,7 @@ export class BeamLayer {
   readonly mesh: InstancedMesh;
   private readonly buffer = new BeamSegmentBuffer();
 
-  constructor(cameraRight: ShaderNode, cameraUp: ShaderNode) {
+  constructor(cameraRight: ShaderNode, cameraUp: ShaderNode, now: ShaderNode = uniform(0)) {
     const material = additive();
     // The quad's winding depends on the segment's direction on screen (the side vector is a cross product), so half of
     // all segments would face away from the camera: draw both sides.
@@ -1419,6 +1780,7 @@ export class BeamLayer {
     const a: ShaderNode = instancedBufferAttribute(this.buffer.from, 'vec3');
     const b: ShaderNode = instancedBufferAttribute(this.buffer.to, 'vec3');
     const tint: ShaderNode = instancedBufferAttribute(this.buffer.colour, 'vec3');
+    const enhanced: ShaderNode = instancedBufferAttribute(this.buffer.enhanced, 'float');
     const width = float(BEAM_WIDTH);
     const span: ShaderNode = length(b.sub(a)).max(1e-5);
     material.positionNode = Fn(() => {
@@ -1435,7 +1797,19 @@ export class BeamLayer {
       const r: ShaderNode = length(vec2(cap, uv().y.sub(0.5).abs().mul(2)));
       const glow: ShaderNode = smoothstep(1.0, 0.0, r);
       const core: ShaderNode = smoothstep(BEAM_CORE, BEAM_CORE * 0.3, r);
-      return vec4(tint.mul(glow.mul(glow).mul(0.4).add(core.mul(0.9))), 1);
+      const original = tint.mul(glow.mul(glow).mul(0.4).add(core.mul(0.9)));
+      const e = ENHANCED.bolts;
+      const hotCore = smoothstep(e.core, 0, r).mul(e.coreGain);
+      const inner = smoothstep(e.inner, 0, r).mul(e.innerGain);
+      const outer = mix(tint, vec3(...e.violet), e.violetMix)
+        .mul(glow.mul(glow))
+        .mul(e.outerGain);
+      const position = mix(a, b, clamp(uv().x, 0, 1));
+      const flicker = float(1).add(
+        mx_noise_float(position.mul(e.noiseScale).add(vec3(now.mul(e.flickerRate), 0, 0))).mul(e.flicker),
+      );
+      const electric = vec3(hotCore).add(tint.mul(inner)).add(outer).mul(flicker);
+      return vec4(mix(original, electric, enhanced), 1);
     })();
     this.mesh = new InstancedMesh(new PlaneGeometry(1, 1), material, BEAM_SEGMENTS);
     this.mesh.frustumCulled = false;
@@ -1457,6 +1831,7 @@ export class BeamLayer {
       this.buffer.from.setXYZ(i, p.x, p.y, p.z);
       this.buffer.to.setXYZ(i, q.x, q.y, q.z);
       this.buffer.colour.setXYZ(i, c.x, c.y, c.z);
+      this.buffer.enhanced.setX(i, 0);
     }
     this.buffer.flush();
     this.mesh.count = n;
@@ -1464,8 +1839,8 @@ export class BeamLayer {
   }
 
   /** Stream only the fixed-capacity visible prefix; long/many bolts never allocate discarded geometry. */
-  setBeams(beams: readonly BeamSpec[]): void {
-    this.buffer.set(beams);
+  setBeams(beams: readonly BeamSpec[], enhanced = false): void {
+    this.buffer.set(beams, enhanced);
     this.buffer.flush();
     this.mesh.count = this.buffer.count;
     this.mesh.visible = this.buffer.count > 0;
@@ -1477,8 +1852,11 @@ export class BeamSegmentBuffer {
   readonly from = new DirtyAttribute(new Float32Array(BEAM_SEGMENTS * 3), 3);
   readonly to = new DirtyAttribute(new Float32Array(BEAM_SEGMENTS * 3), 3);
   readonly colour = new DirtyAttribute(new Float32Array(BEAM_SEGMENTS * 3), 3);
+  /** Zero for faithful bolts and all lasers; one selects the layered electric shader. */
+  readonly enhanced = new DirtyAttribute(new Float32Array(BEAM_SEGMENTS), 1);
   count = 0;
   private seed = 0;
+  private readonly branch = new Vector3();
 
   private random(): number {
     this.seed = (this.seed + 0x6d2b79f5) >>> 0;
@@ -1488,13 +1866,14 @@ export class BeamSegmentBuffer {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }
 
-  set(beams: readonly BeamSpec[]): void {
+  set(beams: readonly BeamSpec[], enhanced = false): void {
     let n = 0;
     for (let beamIndex = 0; beamIndex < beams.length && n < BEAM_SEGMENTS; beamIndex++) {
       const { from, to, colour, bolt, seed } = beams[beamIndex]!;
       if (!bolt) {
         this.from.setXYZ(n, from.x, from.y, from.z);
         this.to.setXYZ(n, to.x, to.y, to.z);
+        this.enhanced.setX(n, 0);
         // Preserve the existing straight beam's white strand (its target light carries the beam colour).
         this.colour.setXYZ(n++, 1, 1, 1);
         continue;
@@ -1508,11 +1887,12 @@ export class BeamSegmentBuffer {
       const sideX = dz * inverseSide;
       const sideZ = -dx * inverseSide;
       this.seed = seed >>> 0;
+      const branchRandom = mulberry(seed);
       for (let strand = 0; strand < 3 && n < BEAM_SEGMENTS; strand++) {
         let ax = from.x;
         let ay = from.y;
         let az = from.z;
-        const white = strand === 0;
+        const white = strand === 0 && !enhanced;
         for (let i = 1; i <= pieces && n < BEAM_SEGMENTS; i++) {
           const t = i / pieces;
           let bx = dx * t + from.x;
@@ -1527,7 +1907,16 @@ export class BeamSegmentBuffer {
           this.from.setXYZ(n, ax, ay, az);
           this.to.setXYZ(n, bx, by, bz);
           this.colour.setXYZ(n, white ? 1 : colour.x, white ? 1 : colour.y, white ? 1 : colour.z);
+          this.enhanced.setX(n, enhanced ? 1 : 0);
           n++;
+          if (enhanced && i % ENHANCED.bolts.branchEvery === 0 && n < BEAM_SEGMENTS) {
+            const branch = boltBranchOffset(branchRandom, this.branch);
+            this.from.setXYZ(n, bx, by, bz);
+            this.to.setXYZ(n, bx + branch.x, by + branch.y, bz + branch.z);
+            this.colour.setXYZ(n, colour.x, colour.y, colour.z);
+            this.enhanced.setX(n, 1);
+            n++;
+          }
           ax = bx;
           ay = by;
           az = bz;
@@ -1541,6 +1930,7 @@ export class BeamSegmentBuffer {
     this.from.flush();
     this.to.flush();
     this.colour.flush();
+    this.enhanced.flush();
   }
 }
 
@@ -1568,6 +1958,11 @@ function particleInputs(pool: ParticlePool, now: ShaderNode) {
 /** Camera-facing quad around `center`, sized in world units. */
 function billboard(center: ShaderNode, size: ShaderNode, right: ShaderNode, up: ShaderNode) {
   return center.add(right.mul(positionLocal.x.mul(size))).add(up.mul(positionLocal.y.mul(size)));
+}
+
+/** Sample an enhanced tuning interval; the particle's independent shader seed still comes from ParticlePool. */
+function randomBetween(range: readonly [number, number]): number {
+  return range[0] + Math.random() * (range[1] - range[0]);
 }
 
 /** Small seeded generator (mulberry32), so a bolt keeps its shape for the frames the caller chooses. */

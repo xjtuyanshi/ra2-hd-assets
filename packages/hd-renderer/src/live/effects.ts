@@ -374,6 +374,7 @@ export class LiveEffectsDriver {
       // The first segments and last flash lights are the exact subsets the two existing fixed pools can draw.
       for (let i = 0; i < tailCount; i++)
         this.beams.push(this.beamTail[(tailCursor - tailCount + i + BEAM_LIGHTS) % BEAM_LIGHTS]!);
+      this.effects.enhancedBeams = this.garnishEnabled && this.style === 'enhanced';
       this.effects.setBeams(now, this.beamSpecs());
     }
   }
@@ -399,11 +400,16 @@ export class LiveEffectsDriver {
   /**
    * Per presented frame: continuous garnish (fire particle systems, unknown projectiles). Looping fires (FIRE01..03,
    * burning buildings) get no HD flame: their original art is the whole flame, and an HD tongue on top doubled its
-   * size; they only keep a small flickering light alive in the light field (it matters at night). Smoke systems are
-   * drawn as native particles (smokeCards).
+   * size. They keep a small flickering light alive in the light field (it matters at night), plus a few drifting embers
+   * in enhanced style. Smoke systems are drawn as native particles (smokeCards).
    */
   frame(now: number, wind: Vector3): void {
-    void wind;
+    const enhancedBeams = this.garnishEnabled && this.style === 'enhanced';
+    if (this.effects.enhancedBeams !== enhancedBeams) {
+      this.effects.enhancedBeams = enhancedBeams;
+      // A style switch also redraws a paused bolt; ordinary presented frames only advance its shader clock.
+      this.effects.setBeams(now, this.beamSpecs());
+    }
     for (const tracked of this.systems.values()) {
       const { system } = tracked;
       if (system.behaviour !== 'fire' || now < tracked.nextEmit || this.hidden(system.x, system.y, system.z)) continue;
@@ -417,6 +423,7 @@ export class LiveEffectsDriver {
         const { row, anim } = tracked;
         if (row.fx !== 'fire' || !row.loop || now < tracked.nextEmit || this.hidden(anim.x, anim.y, anim.z)) continue;
         this.effects.fireLight(tracked.lightKey, now, tracked.at, row.s);
+        if (this.style === 'enhanced') this.effects.fireEmbers(now, tracked.at, row.s, wind);
         tracked.nextEmit = now + 1 / 5;
       }
     for (const bullet of this.bullets) {

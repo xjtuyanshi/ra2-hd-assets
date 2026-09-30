@@ -83,8 +83,40 @@ export interface EffectInstance {
 
 /** Fire-coloured pixels (hue 15..65 degrees, value > 0.7) are brightened by this, just over the bloom threshold. */
 export const FX_GLOW = 1.25;
-/** Warm, bright pixels of redrawn RGBA fire are self-lit; smoke and debris retain the scene's sprite light. */
-export const HD_FX_EMISSIVE = 2.2;
+/**
+ * Redrawn RGBA fire is self-lit (smoke and debris keep the scene's sprite light), in two tiers. Orange and red flame is
+ * shown at about its painted colour (HD_FX_FIRE): the display clips each channel at 1, so any HDR gain on a saturated
+ * orange raises green towards red and turns the whole fireball pale yellow with a hard orange outline (the look the art
+ * director rejected as "too few colours"). Only the white-yellow core (display green and blue both high) is pushed
+ * into HDR (HD_FX_EMISSIVE), where it clips to white-hot and feeds the bloom. Both are display-referred: the material
+ * divides them by the renderer's exposure (EffectSpriteLayer.displayScale).
+ */
+export const HD_FX_FIRE = 1.0;
+/** Flame grade of redrawn fire: share of the temperature re-map (0 = the redraw's own colours) and the heat gamma. */
+export const HD_FX_GRADE = 0.85;
+export const HD_FX_GAMMA = 1.9;
+/**
+ * Display-referred (sRGB) flame colour by heat 0..1: dark red-brown, deep red, orange, yellow-orange, white-yellow.
+ * The stops sit where heat = dot(display colour, (0.25, 0.5, 0.25)) puts those colours, so a gamma of 1 leaves
+ * saturated flame nearly as painted and a larger gamma cools pale flame towards orange and red.
+ */
+const FLAME_STOPS: readonly [number, [number, number, number]][] = [
+  [0, [0.16, 0.03, 0.01]],
+  [0.3, [0.72, 0.14, 0.03]],
+  [0.55, [0.98, 0.42, 0.07]],
+  [0.75, [1.0, 0.72, 0.22]],
+  [1, [1.0, 0.96, 0.84]],
+];
+function flameRampDisplay(heat: ShaderNode): ShaderNode {
+  let rgb: ShaderNode = vec3(...FLAME_STOPS[0]![1]);
+  for (let i = 1; i < FLAME_STOPS.length; i++) {
+    const [t0] = FLAME_STOPS[i - 1]!;
+    const [t1, c1] = FLAME_STOPS[i]!;
+    rgb = mix(rgb, vec3(...c1), clamp(heat.sub(t0).div(t1 - t0), 0, 1));
+  }
+  return rgb;
+}
+export const HD_FX_EMISSIVE = 2.0;
 const CAPACITY = 4096;
 /** Quads are one texel larger on every side, so the filtered edge can fade out instead of being cut. */
 const MARGIN = 1;
@@ -123,6 +155,14 @@ export class EffectSpriteLayer {
   readonly toCamera = uniform(new Vector3(0, 1, 0));
   /** Renderer seconds, updated each presentation without rebuilding the engine's card instances. */
   readonly now = uniform(0);
+  /** Self-light of redrawn flame and of its white-hot core (HD_FX_FIRE, HD_FX_EMISSIVE; uniforms for look reviews). */
+  readonly hdFireGain = uniform(HD_FX_FIRE);
+  readonly hdHotGain = uniform(HD_FX_EMISSIVE);
+  /** 1 / the renderer's mean exposure (HdRenderer.meanExposure): the self-lit gains above are display-referred. */
+  readonly displayScale = uniform(1);
+  /** Flame grade of redrawn fire (see HdPageMesh): share of the temperature re-map and the gamma on flame heat. */
+  readonly hdFireGrade = uniform(HD_FX_GRADE);
+  readonly hdFireGamma = uniform(HD_FX_GAMMA);
   /**
    * The scene drawn so far, for the display-space mix of translucent cards. One node shared by every page mesh: three
    * copies the framebuffer once per render for each distinct node (NodeUpdateType.RENDER, keyed by the node), and each
@@ -541,12 +581,28 @@ class HdPageMesh {
       const rgba: ShaderNode = mix(current, next, blend);
       // Judge fire on the straight display-referred colour; light with little coverage (glow, arcs) is emissive too.
       const rgb = rgba.rgb.div(max(rgba.a, 0.02)).min(1);
-      const s = pow(rgb.max(0), vec3(1 / 2.2));
-      const fire = smoothstep(0.42, 0.85, max(s.r, max(s.g, s.b))).mul(smoothstep(0.06, 0.3, s.r.sub(s.b)));
+      const s0 = pow(rgb.max(0), vec3(1 / 2.2));
+      const fire = smoothstep(0.42, 0.85, max(s0.r, max(s0.g, s0.b))).mul(smoothstep(0.06, 0.3, s0.r.sub(s0.b)));
       const glow = float(1).sub(smoothstep(0.1, 0.6, rgba.a));
       const e = max(fire, glow);
-      const lit = rgba.rgb.mul(mix(layer.light, vec3(HD_FX_EMISSIVE), e));
-      return vec4(lit.mul(aAnchor.w), rgba.a.mul(aAnchor.w));
+      // Flame grade: the redrawn fireballs (like the original's) spend their first frames as a pale yellow-white blob.
+      // Re-map flame pixels through a temperature ramp with a gamma on their heat, so only the hottest texels stay
+      // white-yellow and the rest spread over yellow, orange and red while keeping the drawn texture. Pixels with
+      // little coverage (additive glow) keep their colour: their straight colour is not recoverable.
+      const heat = s0.dot(vec3(0.25, 0.5, 0.25));
+      const graded: ShaderNode = flameRampDisplay(pow(heat, layer.hdFireGamma));
+      const gradeWeight = fire.mul(smoothstep(0.15, 0.45, rgba.a)).mul(layer.hdFireGrade);
+      const s = mix(s0, graded, gradeWeight);
+      const colour = mix(rgba.rgb, pow(s, vec3(2.2)).mul(rgba.a), gradeWeight.greaterThan(0).select(float(1), float(0)));
+      // White-hot: the pale core of the flame (display green and blue both high); orange and red keep their hue.
+      const hot = smoothstep(0.72, 0.95, s.g).mul(smoothstep(0.35, 0.75, s.b));
+      const gain: ShaderNode = mix(layer.hdFireGain, layer.hdHotGain, hot).mul(layer.displayScale);
+      const lit = colour.mul(mix(layer.light, vec3(gain), e));
+      // The anim's translucency fade (animAlphaSmooth) is the engine's stand-in for a dissipating cloud; the redrawn
+      // frames already thin out, so smoke keeps more body (sqrt of the fade) and flame most of it (fourth root): a
+      // half-transparent fireball over grass mixes to an olive murk, and half-transparent smoke reads as a grey veil.
+      const fade: ShaderNode = pow(aAnchor.w, mix(float(0.5), float(0.25), e));
+      return vec4(lit.mul(fade), rgba.a.mul(fade));
     })();
     const quad = new PlaneGeometry(1, 1);
     quad.deleteAttribute('normal');

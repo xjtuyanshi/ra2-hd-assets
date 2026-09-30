@@ -441,6 +441,15 @@ export class HdRenderer {
   }
 
   /** 'WebGPU' or 'WebGL2' once init() resolved. */
+  /**
+   * Mean of the current per-channel scene exposure (see `exposure`). Self-lit effect art divides its display-referred
+   * colour by it, so flame shows at its painted hue by day and by night instead of clipping to yellow.
+   */
+  get meanExposure(): number {
+    const e = this.exposure.value;
+    return (e.r + e.g + e.b) / 3;
+  }
+
   get backend(): string {
     return (this.renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'WebGPU' : 'WebGL2';
   }

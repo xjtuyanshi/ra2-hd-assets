@@ -16,7 +16,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EffectHdAnim, EffectHdLibrary } from '../../ra2-assets/src/effects';
 import type { DirtyAttribute } from '../src/dirtyAttribute';
-import { EffectsLayer } from '../src/effects';
+import { EffectsLayer, ENHANCED } from '../src/effects';
 import { EffectArt, PAGE_RETRY_SECONDS, type ResolvedAnim } from '../src/live/effectArt';
 import {
   animAlpha,
@@ -233,12 +233,13 @@ describe('live HD flipbook selection', () => {
     expect(f.explode.mock.calls[2]![4]).toMatchObject({ enhanced: false, hdArt: false });
   });
 
-  it('removes the procedural blast and halves only the garnish core for an HD explosion', () => {
+  it('removes the procedural blast, halves the garnish core and narrows the graded halo for an HD explosion', () => {
     const names = [
       'garnishFire',
       'blast',
       'halo',
       'sparks',
+      'airborneEmbers',
       'debris',
       'column',
       'billow',
@@ -254,16 +255,30 @@ describe('live HD flipbook selection', () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
     const at = new Vector3(1, 2, 3);
     const wind = new Vector3();
-    layer.explode(1, at, 1, wind, { enhanced: true, maxSize: 2 });
+    const width = 2;
+    layer.explode(1, at, 1, wind, { enhanced: true, maxSize: width });
+    expect(pools.blast!.spawn).toHaveBeenCalledTimes(1);
+    expect(pools.airborneEmbers!.spawn).toHaveBeenCalled();
     const core = pools.garnishFire!.spawn.mock.calls[0]!;
     const halo = pools.halo!.spawn.mock.calls[0]!;
+    expect(halo.slice(3)).toEqual([width * ENHANCED.halo.width, ENHANCED.halo.life, ENHANCED.halo.intensity]);
+    const unchanged = names.filter((name) => !['garnishFire', 'blast', 'halo'].includes(name));
+    const garnish = unchanged.map((name) => pools[name]!.spawn.mock.calls.slice());
     for (const pool of Object.values(pools)) pool.spawn.mockClear();
-    layer.explode(1, at, 1, wind, { enhanced: true, hdArt: true, maxSize: 2 });
+    layer.explode(1, at, 1, wind, { enhanced: true, hdArt: true, maxSize: width });
     expect(pools.blast!.spawn).not.toHaveBeenCalled();
     const hdCore = pools.garnishFire!.spawn.mock.calls[0]!;
+    expect(hdCore.slice(0, 3)).toEqual(core.slice(0, 3));
     expect(hdCore[3]).toBe(core[3] / 2);
     expect(hdCore.slice(4)).toEqual(core.slice(4));
-    expect(pools.halo!.spawn.mock.calls[0]).toEqual(halo);
+    const hdHalo = pools.halo!.spawn.mock.calls[0]!;
+    expect(hdHalo.slice(0, 3)).toEqual(halo.slice(0, 3));
+    expect(hdHalo[3]).toBe(width * ENHANCED.halo.hdWidth);
+    expect(hdHalo[3]).toBeLessThan(halo[3]);
+    expect(hdHalo[4]).toBe(ENHANCED.halo.life);
+    // The negative mode selects the HD temperature grade instead of a positive native-halo intensity.
+    expect(hdHalo[5]).toBe(-1);
+    expect(unchanged.map((name) => pools[name]!.spawn.mock.calls)).toEqual(garnish);
   });
 });
 
@@ -393,7 +408,7 @@ describe('optional HD sidecar and page lifecycle', () => {
 
 type PageInternals = {
   mesh: InstancedMesh & { material: MeshBasicNodeMaterial };
-  bounds: DirtyAttribute;
+  offsets: DirtyAttribute;
   rect: DirtyAttribute;
   nextRect: DirtyAttribute;
   style: DirtyAttribute;
@@ -401,6 +416,20 @@ type PageInternals = {
 };
 
 describe('HD page routing and placement buffers', () => {
+  // The shader derives the union from packed frame offsets, atlas rects and HD scale; no bounds buffer is uploaded.
+  const nativeBounds = (page: PageInternals) => {
+    const x = page.offsets.getX(0);
+    const y = page.offsets.getY(0);
+    const nextX = page.offsets.getZ(0);
+    const nextY = page.offsets.getW(0);
+    const scale = page.style.getW(0);
+    const left = Math.min(x, nextX);
+    const top = Math.min(y, nextY);
+    const right = Math.max(x + page.rect.getZ(0) / scale, nextX + page.nextRect.getZ(0) / scale);
+    const bottom = Math.max(y + page.rect.getW(0) / scale, nextY + page.nextRect.getW(0) / scale);
+    return [left, top, right - left, bottom - top];
+  };
+
   const card = (): EffectInstance => {
     const f = fixture();
     f.push({ frame: 1 });
@@ -457,8 +486,12 @@ describe('HD page routing and placement buffers', () => {
     const meshes = (layer as unknown as { meshes: Map<string, PageInternals> }).meshes;
     const page = meshes.get('hd:0:ground')!;
     // Frame 1: [-5.5,-7 .. 3.5,5]; frame 2: [-6.5,-6 .. 3.5,6]. One-pixel margins are added in the shader.
-    expect(Array.from(page.bounds.array.slice(0, 4))).toEqual([-6.5, -7, 10, 13]);
-    expect(page.style.array[3]).toBeCloseTo(instance.painter.bias, 7);
+    expect(Array.from(page.rect.array.slice(0, 4))).toEqual(instance.hd!.frame.rect);
+    expect(Array.from(page.nextRect.array.slice(0, 4))).toEqual(instance.hd!.next!.rect);
+    expect(Array.from(page.offsets.array.slice(0, 4))).toEqual([-5.5, -7, -6.5, -6]);
+    expect(page.style.getW(0)).toBe(instance.hd!.scale);
+    expect(nativeBounds(page)).toEqual([-6.5, -7, 10, 13]);
+    expect(page.style.getZ(0)).toBeCloseTo(instance.painter.bias, 7);
     expect(page.mesh.material).toMatchObject({
       transparent: true,
       depthWrite: false,
@@ -477,16 +510,18 @@ describe('HD page routing and placement buffers', () => {
       meshes.get('hd:0:top')!.mesh.renderOrder,
     ]).toEqual([6, 7, 8]);
     expect(meshes.get('hd:0:air')!.mesh.material.depthTest).toBe(false);
-    expect(meshes.get('hd:0:top')!.style.array[3]).toBe(0);
+    expect(meshes.get('hd:0:top')!.style.getZ(0)).toBe(0);
     expect(layer.meshStats().translucent).toBe(0);
-    const versions = [page.bounds.version, page.timing.version];
+    const attributes = [page.rect, page.nextRect, page.offsets, page.style, page.timing];
+    const versions = attributes.map((attribute) => attribute.version);
     layer.now.value = 4.5;
     layer.setInstances([instance], 2);
-    expect([page.bounds.version, page.timing.version]).toEqual(versions);
+    expect(attributes.map((attribute) => attribute.version)).toEqual(versions);
     instance.hd!.next = { ...instance.hd!.next!, page: 7 };
     layer.setInstances([instance], 3);
     expect(page.nextRect.array.slice(0, 4)).toEqual(page.rect.array.slice(0, 4));
-    expect(Array.from(page.bounds.array.slice(0, 4))).toEqual([-5.5, -7, 9, 12]);
+    expect(Array.from(page.offsets.array.slice(0, 4))).toEqual([-5.5, -7, -5.5, -7]);
+    expect(nativeBounds(page)).toEqual([-5.5, -7, 9, 12]);
     layer.setInstances([], MESH_IDLE_SECONDS + 4);
     atlas.texture.dispose();
   });
