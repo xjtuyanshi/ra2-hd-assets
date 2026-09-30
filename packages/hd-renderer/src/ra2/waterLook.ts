@@ -512,3 +512,261 @@ function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_N
 export function wetShore(shore: ShaderNode): ShaderNode {
   return smoothstep(-0.25, -0.02, shore).mul(smoothstep(0.08, -0.02, shore));
 }
+
+// ------------------------------------------------------------------------------------ painted lake-bed look
+
+/** Beach profile: shelf width (cells), initial optical-depth slope, then quadratic deepening beyond the shelf. */
+export const BEACH_PROFILE = { shelf: 0.35, slope: 1.9, drop: 20 } as const;
+/** Beer-Lambert absorption per unit optical depth (RGB): red disappears first; the bed is lost by 0.8-1 cells. */
+export const BED_ABSORPTION = [3.2, 1.2, 0.85] as const;
+/** In-scattered colour of the thin water over the shelf (turquoise), faded towards the enhanced MID/DEEP offshore. */
+const BED_SCATTER = { colour: 0x1f9e93, near: 0.08, far: 0.6, amount: 0.7 } as const;
+/** Refraction in world cells per ripple slope per depth, bounded to about 2.5 engine pixels in any direction. */
+const BED_REFRACTION = 0.18;
+const BED_REFRACTION_MAX = 0.06;
+/** Blend from the exact land sample over these cells, avoiding a zero-depth seam from implicit texture LOD changes. */
+const BED_REFRACTION_FADE = 0.04;
+/** Bed illumination: unit ambient preserves the shore colour; caustics fade in, then out across the shallow shelf. */
+const BED_AMBIENT = 1;
+const BED_CAUSTICS = { gain: 0.65, start: 0.04, peak: 0.18, end: 0.55 } as const;
+/** Fully wet through maximum run-up, drying towards a noisy edge 0.25-0.35 cells inland. */
+const BEACH_WET = {
+  reach: 0.22,
+  jitter: 0.08,
+  full: 0.03,
+  brightness: 0.74,
+  saturation: 1.1,
+  roughness: 0.32,
+  sheen: 0.018,
+} as const;
+/** Swash distances are cells; period is seconds, depth is optical depth, phase spread is radians. */
+const BED_SWASH = {
+  runup: 0.09,
+  retreat: 0.04,
+  period: 6.2,
+  feather: 0.018,
+  depth: 0.025,
+  phaseScale: 0.11,
+  phaseSpread: 14,
+  tintFade: 0.035,
+  roughness: 0.2,
+  sheen: 0.04,
+} as const;
+/** Foam widths/reach in cells, opacity caps and noise thresholds; no line is tied to the static mask edge. */
+const BED_FOAM = {
+  frontWidth: 0.03,
+  frontOpacity: 0.6,
+  waterOpacity: 0.22,
+  laceLow: 0.42,
+  laceHigh: 0.62,
+  bubbleLow: 0.5,
+  bubbleHigh: 0.7,
+  breakerFar: 0.3,
+  breakerWidth: 0.022,
+} as const;
+/** Shore distance over which reflections replace the faint wet-sand sheen; glitter starts farther offshore. */
+const BED_REFLECTION_REACH = { start: 0.05, full: 0.4 } as const;
+const BED_GLITTER_START = 0.1;
+const BED_GLITTER_FULL = 0.25;
+/** Texture scales (tiles/cell) and drift (tiles/s) for the wet edge, broken foam and fine draining bubbles. */
+const BEACH_NOISE = { wetScale: 0.35, laceScale: 0.3, driftX: 0.012, driftZ: -0.009 } as const;
+
+/**
+ * Optical depth, not geometry height: continuous with a continuous slope at the shelf's end, zero on land.
+ * The numeric form is also useful for testing/tuning transmittance without a GPU; both forms share the profile.
+ */
+export function beachDepth(shore: number): number;
+export function beachDepth(shore: ShaderNode): ShaderNode;
+export function beachDepth(shore: ShaderNode): ShaderNode {
+  if (typeof shore === 'number') {
+    const distance = Math.max(shore, 0);
+    return distance * BEACH_PROFILE.slope + Math.max(distance - BEACH_PROFILE.shelf, 0) ** 2 * BEACH_PROFILE.drop;
+  }
+  const distance: ShaderNode = max(shore, 0);
+  return distance
+    .mul(BEACH_PROFILE.slope)
+    .add(pow(max(distance.sub(BEACH_PROFILE.shelf), 0), 2).mul(BEACH_PROFILE.drop));
+}
+
+export interface BedWaterInputs extends WaterLookInputs {
+  /** Graded linear bed colour at a world xz offset, with the same rain wetness as art (the adjacent land albedo). */
+  bedAt: (offsetXZ: ShaderNode) => ShaderNode;
+  /** Display compensation belongs only to in-scattered water, never to transmitted bed colour or foam. */
+  columnForDisplay: (column: ShaderNode) => ShaderNode;
+  /** The existing display level compensation for water reflections and glitter. */
+  reflectionLevel: ShaderNode;
+}
+
+export interface BedWaterLook extends WaterLook {
+  /** Wet land before the transparent swash sheet; body is the bed plus the in-scattered water above it. */
+  land: ShaderNode;
+  /** Union of the static water mask and the swash sheet, including negative shore distances. */
+  coverage: ShaderNode;
+  /** Offshore weight for fading the existing rain sheen without cutting it off at the static mask. */
+  openWater: ShaderNode;
+  /** Foam is composited over BOTH land and water, avoiding a mask seam when its front crosses zero. */
+  foamColour: ShaderNode;
+  /** Shore wetness, roughness and specular weight, also used by the land material. */
+  wetness: ShaderNode;
+  roughness: ShaderNode;
+  gloss: ShaderNode;
+}
+
+/**
+ * Opt-in lake-bed shoreline. The old enhanced and classic graphs above deliberately remain separate: their painted
+ * water assets need the original hue mix, inland replacement and whole-body display compensation.
+ */
+export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_NODES): BedWaterLook {
+  const { position: p, shore, waterness, art, uniforms, bedAt, columnForDisplay, reflectionLevel } = inputs;
+  const { night, sceneBrightness } = nodes;
+  const tex = waterTextures();
+  const xz: ShaderNode = p.xz;
+  const surf: ShaderNode = float(1).sub(inputs.calm ?? float(0));
+  const gust = gustAt(xz);
+  const slope = enhancedSlope(xz, uniforms.wind, uniforms.rain, gust);
+  const normal: ShaderNode = normalize(vec3(slope.x.negate(), 1, slope.y.negate()));
+
+  const along: ShaderNode = texture(tex.noise, xz.mul(BED_SWASH.phaseScale)).r;
+  const cycle: ShaderNode = time.mul((Math.PI * 2) / BED_SWASH.period).add(along.mul(BED_SWASH.phaseSpread));
+  const rise: ShaderNode = sin(cycle).mul(0.5).add(0.5);
+  const front: ShaderNode = mix(float(BED_SWASH.retreat), float(-BED_SWASH.runup), rise);
+  // Negative front velocity is run-up. During drainage, only sparse bubbles remain behind the moving edge.
+  const advancing: ShaderNode = smoothstep(-0.15, 0.45, cos(cycle));
+  const sheet: ShaderNode = smoothstep(front, front.add(BED_SWASH.feather), shore)
+    .mul(smoothstep(BED_SWASH.retreat, 0, shore))
+    .mul(surf);
+  const coverage: ShaderNode = waterness.max(sheet);
+  const wetNoise: ShaderNode = texture(tex.noise, xz.mul(BEACH_NOISE.wetScale)).r.mul(2).sub(1);
+  const wetReach: ShaderNode = float(BEACH_WET.reach).add(wetNoise.mul(BEACH_WET.jitter));
+  const wetness: ShaderNode = smoothstep(wetReach.negate(), -BEACH_WET.full, shore).mul(surf);
+  const wetSand = (bed: ShaderNode): ShaderNode => {
+    const luma: ShaderNode = dot(bed, vec3(0.2126, 0.7152, 0.0722));
+    const saturated: ShaderNode = mix(vec3(luma), bed, BEACH_WET.saturation).max(0);
+    return mix(bed, saturated.mul(BEACH_WET.brightness), wetness);
+  };
+  const land: ShaderNode = wetSand(art);
+
+  // Both sides approach the same wet sand at shore = 0. The very thin land film adds a little tint away from that
+  // join; no whole-body grade, blanket night multiplier or nonzero refraction is allowed at zero depth.
+  const filmFade: ShaderNode = smoothstep(0, BED_SWASH.tintFade, shore.negate());
+  const depth: ShaderNode = beachDepth(shore).add(sheet.mul(BED_SWASH.depth).mul(filmFade));
+  const transmission: ShaderNode = exp(vec3(...BED_ABSORPTION).mul(depth.negate()));
+  const offset: ShaderNode = slope.mul(depth).mul(BED_REFRACTION);
+  const boundedOffset: ShaderNode = offset.mul(float(BED_REFRACTION_MAX).div(max(offset.length(), BED_REFRACTION_MAX)));
+  const c1: ShaderNode = texture(
+    tex.caustics,
+    xz
+      .div(1.35)
+      .add(slope.mul(0.3))
+      .add(vec2(time.mul(0.035), time.mul(0.021))),
+  ).r;
+  const c2: ShaderNode = texture(
+    tex.caustics,
+    xz
+      .div(1.9)
+      .sub(slope.mul(0.25))
+      .add(vec2(time.mul(-0.027), time.mul(0.03))),
+  ).r;
+  const caustics: ShaderNode = pow(c1.add(c2).mul(0.5), 1.6)
+    .mul(BED_CAUSTICS.gain)
+    .mul(smoothstep(0, BED_CAUSTICS.start, shore))
+    .mul(smoothstep(BED_CAUSTICS.end, BED_CAUSTICS.peak, shore))
+    .mul(surf);
+  const refracted: ShaderNode = mix(art, bedAt(boundedOffset), smoothstep(0, BED_REFRACTION_FADE, abs(shore)));
+  const bedLit: ShaderNode = wetSand(refracted).mul(float(BED_AMBIENT).add(caustics));
+  // Preserve the enhanced deep/mid character; the sand supplies the shallow colour, never ART_HUE or a constant BED.
+  const offshore: ShaderNode = max(shore, 0);
+  const column: ShaderNode = mix(
+    mix(color(DEEP), color(MID), smoothstep(1.3, 0.35, offshore)),
+    color(BED_SCATTER.colour),
+    smoothstep(BED_SCATTER.far, BED_SCATTER.near, offshore).mul(BED_SCATTER.amount),
+  ).mul(mix(float(1), float(0.7), night));
+  let body: ShaderNode = bedLit.mul(transmission).add(columnForDisplay(column).mul(vec3(1).sub(transmission)));
+
+  // Reuse the enhanced reflection, glitter, mirrored lights and rain-ripple model, fading it to zero at the sand join.
+  const open: ShaderNode = smoothstep(BED_REFLECTION_REACH.start, BED_REFLECTION_REACH.full, shore);
+  const view: ShaderNode = normalize(cameraPosition.sub(p));
+  const fresnel: ShaderNode = float(0.02).add(float(0.98).mul(pow(float(1).sub(max(dot(normal, view), 0)), 5)));
+  const strength: ShaderNode = fresnel.mul(REFLECT_GAIN).add(REFLECT_BASE).min(REFLECT_MAX).mul(open);
+  const r: ShaderNode = reflect(view.negate(), normal);
+  const skyLevel: ShaderNode = mix(float(1), sceneBrightness.min(1).mul(0.6), night);
+  const sky: ShaderNode = mix(uniforms.skyHorizon, uniforms.skyZenith, smoothstep(0.0, 0.6, r.y)).mul(skyLevel);
+  const waterSky: ShaderNode = sky.mul(SKY_IN_WATER);
+  const reflected = inputs.reflection
+    ? moonlit(inputs.reflection.colour, nodes).mul(mix(float(1), float(0.8), night))
+    : null;
+  const mirrored: ShaderNode =
+    reflected && inputs.reflection ? mix(waterSky, reflected, inputs.reflection.coverage) : waterSky;
+  const sunDot: ShaderNode = max(dot(r, uniforms.sunDirection), 0);
+  const glitter: ShaderNode = pow(sunDot, 600)
+    .mul(6)
+    .add(pow(sunDot, 110).mul(0.3))
+    .mul(mix(float(0.3), float(1.35), gust))
+    .mul(float(1).sub(uniforms.rain))
+    .mul(float(1).sub(night.mul(0.75)))
+    .mul(smoothstep(BED_GLITTER_START, BED_GLITTER_FULL, shore));
+  const rippleEnergy: ShaderNode = abs(slope.x).add(abs(slope.y));
+  const lights: ShaderNode = sampleLightField(xz.sub(TOWARDS_CAMERA.mul(LIGHT_MIRROR_REACH)).add(slope.mul(0.5)), nodes)
+    .mul(LIGHT_MIRROR)
+    .mul(float(0.5).add(rippleEnergy.mul(4)))
+    .mul(open);
+  body = body.mul(float(1).sub(strength));
+
+  const drift: ShaderNode = vec2(time.mul(BEACH_NOISE.driftX), time.mul(BEACH_NOISE.driftZ));
+  const lace: ShaderNode = texture(tex.noise, xz.mul(BEACH_NOISE.laceScale).add(drift)).g;
+  const fine: ShaderNode = texture(tex.noise, xz.mul(BEACH_NOISE.laceScale).sub(drift)).b;
+  const gaps: ShaderNode = smoothstep(BED_FOAM.laceLow, BED_FOAM.laceHigh, lace);
+  const bubbles: ShaderNode = smoothstep(BED_FOAM.bubbleLow, BED_FOAM.bubbleHigh, fine);
+  const line: ShaderNode = smoothstep(BED_FOAM.frontWidth, 0, abs(shore.sub(front)))
+    .mul(gaps)
+    .mul(mix(bubbles.mul(BED_FOAM.waterOpacity), float(BED_FOAM.frontOpacity), advancing))
+    .mul(mix(float(0.45), float(1), bubbles));
+  // Fading bubbles occupy the drained strip, not a second stationary outline at maximum run-up.
+  const drainage: ShaderNode = smoothstep(-BED_SWASH.runup, -BED_SWASH.runup + BED_SWASH.feather, shore)
+    .mul(smoothstep(front, front.sub(BED_FOAM.frontWidth), shore))
+    .mul(float(1).sub(rise))
+    .mul(float(1).sub(advancing))
+    .mul(gaps)
+    .mul(bubbles)
+    .mul(BED_FOAM.waterOpacity);
+  const roll: ShaderNode = fract(cycle.div(Math.PI * 2).add(0.35));
+  const breakerAt: ShaderNode = mix(float(BED_FOAM.breakerFar), float(0), roll);
+  const breaker: ShaderNode = smoothstep(BED_FOAM.breakerWidth, 0, abs(shore.sub(breakerAt)))
+    .mul(smoothstep(0, 0.2, roll))
+    .mul(smoothstep(1, 0.7, roll))
+    .mul(gaps)
+    .mul(BED_FOAM.waterOpacity);
+  const surfLace: ShaderNode = bubbles
+    .mul(gaps)
+    .mul(smoothstep(0, BED_SWASH.retreat, shore))
+    .mul(smoothstep(BED_FOAM.breakerFar, 0.1, shore))
+    .mul(BED_FOAM.waterOpacity);
+  const foam: ShaderNode = line.max(drainage).max(breaker).max(surfLace).mul(surf);
+  const foamColour: ShaderNode = color(0xeef3f2).mul(mix(float(1), float(0.5), night));
+  const sandSheen: ShaderNode = sky.mul(wetness).mul(float(1).sub(open)).mul(BEACH_WET.sheen);
+  const sheetSheen: ShaderNode = sky.mul(sheet).mul(filmFade).mul(BED_SWASH.sheen);
+  const emission: ShaderNode = mirrored
+    .mul(strength)
+    .add(uniforms.sunColor.mul(glitter))
+    .add(lights)
+    .mul(waterness)
+    .mul(reflectionLevel)
+    .add(sandSheen)
+    .add(sheetSheen)
+    .mul(float(1).sub(foam));
+  const roughness: ShaderNode = mix(mix(float(BEACH_WET.roughness), float(BED_SWASH.roughness), sheet), float(1), open);
+  const gloss: ShaderNode = wetness.mul(float(1).sub(open)).mul(float(1).sub(foam));
+  return {
+    normal,
+    body,
+    emission,
+    foam,
+    foamColour,
+    land,
+    coverage,
+    openWater: open.mul(waterness),
+    wetness,
+    roughness,
+    gloss,
+  };
+}

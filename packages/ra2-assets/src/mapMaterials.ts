@@ -12,6 +12,16 @@ export interface MapMaterials {
    * colour taken from the original composite (terrain-map.png), keeping the HD image's own detail.
    */
   terrainMap?: string;
+  /**
+   * Replacement for manifest.terrainMap.waterMask, with the same size, layout and 8-bit greyscale encoding
+   * (255 = open water). Include the painted shallow band so the waterline meets the sand, not the old blue water.
+   */
+  waterMask?: string;
+  /**
+   * True when terrainMap paints a lake bed under the water mask (shore sand grading into deeper silt), rather than
+   * painted water. Opts into transmitted/refracted bed shading only with the enhanced water style; default false.
+   */
+  waterBed?: boolean;
   /** How the files were made (source images, filter width), for review. */
   notes?: string;
 }

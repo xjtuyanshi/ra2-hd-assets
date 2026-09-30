@@ -501,6 +501,12 @@ New files only; map manifests and `library.json` are never rewritten.
   and re-materialisation drift colours by up to about 10 % in luma and 0.05 in saturation per material; the matched
   image is within 1 % at that scale. The renderer prefers it when `materials.json` names it.
 
+Version 1 map sidecars also accept `waterMask` (a replacement for `manifest.terrainMap.waterMask`, same size/layout,
+8-bit greyscale, 255 = open water) and `waterBed: true` when `terrainMap` paints shore sand and deeper silt under
+that mask. Include the old painted shallow band in the replacement mask. Together with the `enhanced` water style,
+the bed flag enables refracted bed optics, wet sand and swash onto land. Omitted/false `waterBed` and the `classic`
+style retain their existing shaders. `colourMatched: false` bypasses the entire sidecar, including these overrides.
+
 ## Engine rules the extractor encodes
 
 - MIX priority (highest first): expandmd##, ra2md/ra2, cache, local, language, conquer/generic/isogen, theater mixes.

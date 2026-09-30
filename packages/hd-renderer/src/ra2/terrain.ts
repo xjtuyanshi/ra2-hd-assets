@@ -52,7 +52,7 @@ import { LEVEL_HEIGHT } from '../world';
 import { NO_TILE, ra2Screen, type Ra2Cache, tileAtlasPixel } from './cache';
 import { srgbScale, terrainGradeAt } from './mapLighting';
 import { SHORE_MAX, SHORE_MIN } from './shoreField';
-import { reflectionOffset, waterLook, wetShore } from './waterLook';
+import { bedWaterLook, reflectionOffset, waterLook, waterPreset, wetShore } from './waterLook';
 
 /**
  * Display compensation of the HD water look. The water (waterLook.ts) was tuned on screen under PBR Neutral, which
@@ -60,7 +60,8 @@ import { reflectionOffset, waterLook, wetShore } from './waterLook';
  * open water by about 40 %. By day the water body and its reflections are scaled by WATER_LEVEL and the body's
  * saturation by WATER_SATURATION so the water keeps its tuned look, measured against the Neutral renders on RiverRam
  * (the approved concept); at night the display is Neutral again (HdRenderer) and the compensation fades out with it.
- * The water takes no map grade of its own: waterLook already mixes the (graded) tile art's hue into the water column.
+ * The legacy water takes no map grade of its own: waterLook mixes the (graded) tile art's hue into the water column.
+ * With a painted lake bed, only the in-scattered column receives this compensation; transmitted sand keeps its grade.
  */
 const WATER_LEVEL = 0.67;
 const WATER_SATURATION = 1.8;
@@ -539,6 +540,7 @@ function createMaterials(
   const wet = wetGround(art.rgb, wetness, paved, nodes);
   let albedo: ShaderNode = wet.albedo;
   let roughness: ShaderNode = wet.roughness;
+  let gloss: ShaderNode = max(wetness, wet.puddle);
   let sheen: ShaderNode = wetSheen(localLight, water.skyHorizon, wetness, paved, wet.puddle, nodes);
   let reflectionTarget: Object3D | null = null;
   const map = cache.terrainMap;
@@ -575,33 +577,71 @@ function createMaterials(
     // Sheltered water within about 1.5 cells of a cliff: no surf there, so the scree the art paints at a cliff foot is
     // not outlined in foam (the enhanced look's `calm`).
     const calm: ShaderNode = clamp(float(1).sub(attribute('contact', 'float')).mul(12), 0, 1);
-    const look = waterLook(
-      { position: positionWorld, shore, waterness, art: art.rgb, uniforms: water, reflection, calm },
-      nodes,
-    );
-    // The original paints a grey-blue wet band along every shore. Replace that band with the ground found a little
-    // further inland (stepping against the distance field's gradient), then darken it as wet sand, so the shoreline
-    // reads as sand -> wet sand -> foam -> shallows instead of a dark outline.
-    const texelU = 1 / map.shore.image.width;
-    const texelV = 1 / map.shore.image.height;
-    const gradU = texture(map.shore, uv.add(vec2(texelU, 0))).r.sub(texture(map.shore, uv.sub(vec2(texelU, 0))).r);
-    const gradV = texture(map.shore, uv.add(vec2(0, texelV))).r.sub(texture(map.shore, uv.sub(vec2(0, texelV))).r);
-    const towardsWater: ShaderNode = vec2(gradU, gradV).normalize();
-    // Step about 0.7 cells inland, measured in composite pixels (one cell spans roughly 42 engine pixels).
-    const reach = vec2((0.7 * 42 * map.ref.scale) / map.ref.width, (0.35 * 42 * map.ref.scale) / map.ref.height);
-    const inland: ShaderNode = srgbScale(
-      texture(colourMap, uv.sub(towardsWater.mul(reach).mul(smoothstep(-0.7, 0.0, shore)))).rgb,
-      grade,
-    );
-    const band = smoothstep(-0.55, -0.12, shore);
-    const sand = wetShore(shore);
-    const land = mix(albedo, wetGround(inland, wetness, paved, nodes).albedo, band).mul(
-      mix(float(1), float(0.8), sand),
-    );
-    albedo = mix(land, waterForDisplay(look.body, nodes), waterness);
-    roughness = mix(mix(roughness, float(0.35), sand), float(1), waterness);
-    sheen = sheen.mul(float(1).sub(waterness));
-    ground.emissiveNode = look.emission.mul(mix(float(1), float(WATER_LEVEL), nodes.faithfulDisplay));
+    if (map.waterBed && waterPreset.style === 'enhanced') {
+      // No inland band replacement: the mask includes the old shallows and the composite already paints real sand.
+      const bedAt = (offsetXZ: ShaderNode): ShaderNode => {
+        // World xz -> original engine screen pixels -> composite UV; height does not change under refraction.
+        const offsetUv = vec2(
+          offsetXZ.x.sub(offsetXZ.y).mul((30 * map.ref.scale) / map.ref.width),
+          offsetXZ.x.add(offsetXZ.y).mul((15 * map.ref.scale) / map.ref.height),
+        );
+        const bed = srgbScale(
+          texture(colourMap, clamp(uv.add(offsetUv), halfTexel, vec2(1).sub(halfTexel))).rgb,
+          grade,
+        );
+        // Share rain darkening with the adjacent land, including at exactly zero optical depth.
+        return wetGround(bed, wetness, paved, nodes).albedo;
+      };
+      const look = bedWaterLook(
+        {
+          position: positionWorld,
+          shore,
+          waterness,
+          art: albedo,
+          uniforms: water,
+          reflection,
+          calm,
+          bedAt,
+          columnForDisplay: (column) => waterForDisplay(column, nodes),
+          reflectionLevel: mix(float(1), float(WATER_LEVEL), nodes.faithfulDisplay),
+        },
+        nodes,
+      );
+      // The same sheet and foam cross onto land, independently of the static water mask.
+      albedo = mix(mix(look.land, look.body, look.coverage), look.foamColour, look.foam);
+      roughness = mix(roughness, look.roughness, look.wetness.max(waterness));
+      gloss = max(gloss, look.gloss);
+      sheen = sheen.mul(float(1).sub(look.openWater));
+      ground.emissiveNode = look.emission;
+    } else {
+      const look = waterLook(
+        { position: positionWorld, shore, waterness, art: art.rgb, uniforms: water, reflection, calm },
+        nodes,
+      );
+      // The original paints a grey-blue wet band along every shore. Replace that band with the ground found a little
+      // further inland (stepping against the distance field's gradient), then darken it as wet sand, so the shoreline
+      // reads as sand -> wet sand -> foam -> shallows instead of a dark outline.
+      const texelU = 1 / map.shore.image.width;
+      const texelV = 1 / map.shore.image.height;
+      const gradU = texture(map.shore, uv.add(vec2(texelU, 0))).r.sub(texture(map.shore, uv.sub(vec2(texelU, 0))).r);
+      const gradV = texture(map.shore, uv.add(vec2(0, texelV))).r.sub(texture(map.shore, uv.sub(vec2(0, texelV))).r);
+      const towardsWater: ShaderNode = vec2(gradU, gradV).normalize();
+      // Step about 0.7 cells inland, measured in composite pixels (one cell spans roughly 42 engine pixels).
+      const reach = vec2((0.7 * 42 * map.ref.scale) / map.ref.width, (0.35 * 42 * map.ref.scale) / map.ref.height);
+      const inland: ShaderNode = srgbScale(
+        texture(colourMap, uv.sub(towardsWater.mul(reach).mul(smoothstep(-0.7, 0.0, shore)))).rgb,
+        grade,
+      );
+      const band = smoothstep(-0.55, -0.12, shore);
+      const sand = wetShore(shore);
+      const land = mix(albedo, wetGround(inland, wetness, paved, nodes).albedo, band).mul(
+        mix(float(1), float(0.8), sand),
+      );
+      albedo = mix(land, waterForDisplay(look.body, nodes), waterness);
+      roughness = mix(mix(roughness, float(0.35), sand), float(1), waterness);
+      sheen = sheen.mul(float(1).sub(waterness));
+      ground.emissiveNode = look.emission.mul(mix(float(1), float(WATER_LEVEL), nodes.faithfulDisplay));
+    }
   } else {
     // Per-tile atlas fallback: the painted water with sky reflection and glints, as before.
     const surface = waterSurface(water);
@@ -616,7 +656,7 @@ function createMaterials(
   albedo = albedo.mul(attribute('contact', 'float'));
   ground.colorNode = moonlit(albedo, nodes);
   // Dry original art has no sheen of its own; wet ground and puddles reflect the sun.
-  ground.gloss = max(wetness, wet.puddle);
+  ground.gloss = gloss;
   ground.roughnessNode = roughness;
   ground.metalnessNode = float(0);
   // Local lights from the light field (exactly zero by day without explosions), plus the wet paved sheen.

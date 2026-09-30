@@ -1,4 +1,4 @@
-import { DataTexture, LinearFilter, RedFormat, UnsignedByteType } from 'three/webgpu';
+import { DataTexture, DataUtils, HalfFloatType, LinearFilter, RedFormat, UnsignedByteType } from 'three/webgpu';
 
 /** Encoded range of the signed shore distance, in cells: texel value 0..1 maps to SHORE_MIN..SHORE_MAX. */
 export const SHORE_MIN = -3;
@@ -22,6 +22,11 @@ const FAR = 1e20;
  * and wet sand are all derived from this one field, so they follow the painted shoreline exactly.
  *
  * `scale` is the mask's pixels per engine pixel; `step` downsamples (one texel per `step` mask pixels).
+ *
+ * `precise` (the lake-bed shoreline, whose wet sand, swash and foam work at a few hundredths of a cell) stores the same
+ * normalised value as a half float instead of 8 bits (one 8-bit step is 0.047 cells, which drew contour lines along
+ * the waterline), and moves every distance half a texel towards the shoreline so the field crosses zero on the mask's
+ * edge instead of jumping from -1 to +1 texel across it. The default 8-bit field is unchanged.
  */
 export function buildShoreField(
   mask: Uint8Array,
@@ -29,6 +34,7 @@ export function buildShoreField(
   height: number,
   scale: number,
   step = 4,
+  precise = false,
 ): { texture: DataTexture; data: Uint8Array; width: number; height: number } {
   const w = Math.ceil(width / step);
   const h = Math.ceil(height / step);
@@ -52,13 +58,19 @@ export function buildShoreField(
   const toWater = distanceField(water, w, h, 1, texel, texel * 2);
   const toLand = distanceField(water, w, h, 0, texel, texel * 2);
   const data = new Uint8Array(w * h);
+  const half = precise ? new Uint16Array(w * h) : null;
+  const inset = precise ? texel / 2 : 0;
   for (let i = 0; i < data.length; i++) {
     const cells = water[i]
-      ? Math.sqrt(toLand[i]!) / ISO_PIXELS_PER_CELL
-      : -Math.sqrt(toWater[i]!) / ISO_PIXELS_PER_CELL;
-    data[i] = Math.round(Math.min(1, Math.max(0, (cells - SHORE_MIN) / (SHORE_MAX - SHORE_MIN))) * 255);
+      ? (Math.sqrt(toLand[i]!) - inset) / ISO_PIXELS_PER_CELL
+      : -(Math.sqrt(toWater[i]!) - inset) / ISO_PIXELS_PER_CELL;
+    const unit = Math.min(1, Math.max(0, (cells - SHORE_MIN) / (SHORE_MAX - SHORE_MIN)));
+    data[i] = Math.round(unit * 255);
+    if (half) half[i] = DataUtils.toHalfFloat(unit);
   }
-  const texture = new DataTexture(data, w, h, RedFormat, UnsignedByteType);
+  const texture = half
+    ? new DataTexture(half, w, h, RedFormat, HalfFloatType)
+    : new DataTexture(data, w, h, RedFormat, UnsignedByteType);
   texture.magFilter = LinearFilter;
   texture.minFilter = LinearFilter;
   texture.needsUpdate = true;

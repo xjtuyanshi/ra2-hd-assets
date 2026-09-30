@@ -53,6 +53,8 @@ export interface Ra2Cache {
   terrainMap?: {
     texture: DataTexture;
     waterMask: DataTexture;
+    /** The terrain image contains a painted lake bed; only the enhanced water style uses bed optics. */
+    waterBed: boolean;
     /** Signed distance to the shoreline in cells, encoded as in shoreField.ts (drives depth, foam and wet sand). */
     shore: DataTexture;
     ref: NonNullable<HdCacheManifest['terrainMap']>;
@@ -283,10 +285,11 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
   const ref = options.terrainMap === false ? undefined : manifest.terrainMap;
   const materials = ref && options.colourMatched !== false ? await loadMapMaterials(url(MAP_MATERIALS_FILE)) : null;
   if (ref) {
+    const material = resolveTerrainMaterials(ref, materials);
     // Upscaled composites already carry bled colours under their transparent border; only the raw scale-1 image
     // needs the dilation pass.
     // The colour-matched image has the same size and layout as ref.file.
-    const { texture, original } = await loadDilated(url(materials?.terrainMap ?? ref.file), ref.scale > 1 ? 0 : 10);
+    const { texture, original } = await loadDilated(url(material.file), ref.scale > 1 ? 0 : 10);
     texture.colorSpace = SRGBColorSpace;
     texture.magFilter = LinearFilter;
     // A whole map is far larger than the screen when zoomed out: mipmaps keep it from shimmering.
@@ -294,12 +297,23 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     texture.generateMipmaps = true;
     texture.anisotropy = 8;
     // The composite's own water mask when present; otherwise treat nothing as water rather than guessing.
-    const mask = ref.waterMask ? await loadMask(url(ref.waterMask)) : null;
+    const mask = material.waterMask ? await loadMask(url(material.waterMask)) : null;
     void original;
     terrainMap = {
       texture,
       waterMask: mask?.texture ?? emptyMask(),
-      shore: mask ? buildShoreField(mask.bytes, mask.width, mask.height, ref.scale).texture : emptyMask(),
+      waterBed: material.waterBed,
+      // The lake-bed shoreline needs a finer, higher-precision distance field (see buildShoreField).
+      shore: mask
+        ? buildShoreField(
+            mask.bytes,
+            mask.width,
+            mask.height,
+            ref.scale,
+            material.waterBed ? 2 : 4,
+            material.waterBed,
+          ).texture
+        : emptyMask(),
       ref,
     };
   }
@@ -351,6 +365,18 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
 }
 
 const PALETTE_ROWS = 128;
+
+/** Resolve the optional material overrides together, so the mask and the distance field always use the same asset. */
+export function resolveTerrainMaterials(
+  ref: NonNullable<HdCacheManifest['terrainMap']>,
+  materials: MapMaterials | null,
+): { file: string; waterMask: string | undefined; waterBed: boolean } {
+  return {
+    file: materials?.terrainMap ?? ref.file,
+    waterMask: materials?.waterMask ?? ref.waterMask,
+    waterBed: materials?.waterBed === true,
+  };
+}
 
 /** The optional per-map materials sidecar; null when absent or unreadable (dev servers may answer 404 or HTML). */
 async function loadMapMaterials(url: string): Promise<MapMaterials | null> {
