@@ -18,8 +18,12 @@ Stages (run this file with the named subcommand; each also accepts --help):
   objects and materials are composed at 4x and area-reduced to 2x. Writes sprites-ore-l5.png (1x indexed mask),
   sprites-ore-l5@2x.png (straight RGBA), sprites-ore-l5@2x-remap.png (zeros), sprites-ore-l5@2x-normals.png
   (material RGBA), and frames.json (rectangles, offset, size, dimensions, soilIndex).
-  Defaults are the approved L5 set (v8): soil-target=.46 .325 .19, gold-scale=1.16, gold-gain=.95,
+  Colour defaults are the approved L5 set (v8): soil-target=.46 .325 .19, gold-scale=1.16, gold-gain=.95,
   gold-knee=.84, gold-gamma=1.2, clarity=.2, gem-scale=1.25, gem-gamma=.78; soil-contrast=.7, gold-sat=.85.
+  Bed defaults are L5F (--bed contact, BED_L5F: alpha .25 halo only under each nugget/gem plus its contact shadow;
+  gem-sat .72, gem-pastel .1); --bed carpet --gem-sat 1 --gem-pastel 0 reproduces v8 exactly. The installed L5F
+  page used --gold-scale 1.35 --gold-gain 1.0 --gem-sat .64 --gem-pastel .16 --gem-scale 1.4 --gem-bed-alpha .25
+  --gem-bed-shadow .6 (gold coverage at or above the original's; gem saturation near the target's ~.45).
   Every parameter has its own CLI flag (the first scratch build, v5, used soil .37 .262 .16, gold scale 1.08, gain .9,
   knee .8, gold gamma 1.45, clarity .55 and the fixed gem scale 1.45).
   All 20 TIB and 12 GEM families / 12 stages are built by default; --families selects a subset.
@@ -68,6 +72,12 @@ N1 = CANVAS + 2 * PAD
 EXT_OFF = (-34, -12)  # Headroom above the cell's top corner keeps tall nuggets from being cut flat.
 EXT_W, EXT_H = 68, 46
 SOIL_TARGET = np.array([0.46, 0.325, 0.19], np.float32)
+# L5F contact bed (art review 2026-10-01): the L5 soil carpet (alpha ~0.95 over the whole cell diamond) read as a brown
+# patch with saw-tooth cell edges and hid the grass; the original reads gold on green. The bed is now a faint halo
+# (alpha <= 0.25) directly under each nugget or gem, plus the contact shadow, so terrain shows between objects.
+BED_L5F = {'alpha': 0.25, 'gem_alpha': 0.22, 'spread': 0.42, 'margin': 1.0, 'gain': 1.7, 'floor': 0.2,
+           'shadow': 0.55, 'gem_shadow': 0.45}
+GEM_SAT_L5F, GEM_PASTEL_L5F = 0.72, 0.1
 ORE = tuple(f'TIB{i:02d}' for i in range(1, 21))
 GEMS = tuple(f'GEM{i:02d}' for i in range(1, 13))
 FAMILIES = ORE + GEMS
@@ -539,8 +549,10 @@ DIAMOND = padded_diamond()
 class ExtComposer(Composer):
     def __init__(self, lib, overlays, soil_target=SOIL_TARGET, soil_contrast=0.7, gold_sat=0.85,
                  gold_gamma=1.2, gold_scale=1.16, clarity=0.2, gold_gain=0.95, gold_knee=0.84,
-                 gem_scale=1.25, gem_gamma=0.78):
+                 gem_scale=1.25, gem_gamma=0.78, bed=None, gem_sat=1.0, gem_pastel=0.0):
         super().__init__(lib, overlays)
+        # bed=None keeps the L5 (v8) soil carpet; a dict selects the contact bed (see BED_L5F).
+        self.bed = dict(bed) if bed is not None else None
         self.soil_target = np.array(soil_target, np.float32)
         self.soil_contrast = soil_contrast
         self.gold_scale = gold_scale
@@ -585,6 +597,17 @@ class ExtComposer(Composer):
                 lum = np.maximum(rgb @ np.array([0.2126, 0.7152, 0.0722], np.float32), 1e-4)
                 spr['rgba'][..., :3] = np.clip(rgb * (np.power(lum, gem_gamma) / lum)[..., None], 0, 1)
                 spr['_ggamma'] = gem_gamma
+        if gem_sat != 1 or gem_pastel:
+            # L5F: the target's gems are pale glassy beads (HSV saturation ~0.45) rather than deep faceted crystals
+            # (~0.63): pull chroma toward luminance, then lift toward white so they read translucent, not confetti.
+            for spr in lib.gem:
+                if spr.get('_gsat') == (gem_sat, gem_pastel):
+                    continue
+                rgb = spr['rgba'][..., :3]
+                lum = rgb @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+                rgb = lum[..., None] + (rgb - lum[..., None]) * gem_sat
+                spr['rgba'][..., :3] = np.clip(rgb + (1 - rgb) * gem_pastel, 0, 1)
+                spr['_gsat'] = (gem_sat, gem_pastel)
 
     def soil_patch(self, otype, n):
         soil = self.lib.soil
@@ -651,8 +674,14 @@ class ExtComposer(Composer):
         # Young/depleted stages carry a smaller, fainter soil stain, so removing a cell's last frame never pops a
         # full-size dirt patch (and a freshly spread cell does not appear as bare dirt first)
         grow = min(1.0, (frame + 1) / 6)
+        bed = self.bed
         for i, it, cx, cy, width, s in placed:
-            sig = width * 0.6 + ((2.5 + 2.5 * grow) if not gem else 0.6) * S
+            if bed is None:
+                sig = width * 0.6 + ((2.5 + 2.5 * grow) if not gem else 0.6) * S
+            else:
+                # L5F contact bed: a tight halo directly under each nugget/gem, so grass shows between them and the
+                # field never forms a carpet with cell-shaped (staircase) edges.
+                sig = width * bed['spread'] + bed['margin'] * (0.5 + 0.5 * grow) * S
             yy0, yy1 = int(max(cy - 3 * sig, 0)), int(min(cy + 3 * sig, n))
             xx0, xx1 = int(max(cx - 3 * sig, 0)), int(min(cx + 3 * sig, n))
             yy, xx = np.mgrid[yy0:yy1, xx0:xx1].astype(np.float32)
@@ -662,7 +691,15 @@ class ExtComposer(Composer):
                  + value_noise((n, n), 2.5 * S / 4, h32('soil2', otype)) * 0.4)
         # adjacent cells: both fade over the diamond edge and overlap a little, so a dense field reads continuous
         cellfade = np.clip((1.07 - DIAMOND) / 0.13, 0, 1)
-        if not gem:
+        if bed is not None:
+            cap = bed['gem_alpha'] if gem else bed['alpha']
+            bed_a = np.clip(field * bed['gain'] - bed['floor'] + (noise - 0.5) * 0.35, 0, 1)
+            bed_a = cv2.GaussianBlur(bed_a, (0, 0), 0.8) * cap * cellfade * (0.6 + 0.4 * grow)
+            soil = self.soil_patch(otype, n)
+            prem = soil * bed_a[..., None]
+            alpha = bed_a.copy()
+            gloss[:] = 0.12
+        elif not gem:
             soil_a = np.clip(field * 2.3 - 0.15 + (noise - 0.5) * 0.6, 0, 1)
             soil_a = cv2.GaussianBlur(soil_a, (0, 0), 1.0) * 0.95 * cellfade * (0.5 + 0.5 * grow)
             soil = self.soil_patch(otype, n)
@@ -685,7 +722,10 @@ class ExtComposer(Composer):
             yy, xx = np.mgrid[yy0:yy1, xx0:xx1].astype(np.float32)
             g = np.exp(-(((xx - sx) / ax) ** 2 + ((yy - sy) / ay) ** 2) * 1.6)
             shadow[yy0:yy1, xx0:xx1] = np.maximum(shadow[yy0:yy1, xx0:xx1], g)
-        sh_a = shadow * (0.62 if not gem else 0.5)
+        if bed is None:
+            sh_a = shadow * (0.62 if not gem else 0.5)
+        else:
+            sh_a = shadow * (bed['shadow'] if not gem else bed['gem_shadow'])
         prem = prem * (1 - sh_a[..., None])
         alpha = sh_a + alpha * (1 - sh_a)
         # --- objects back to front
@@ -797,7 +837,8 @@ def build(library_root: Path, theatre: str, gold: Path, gem: Path, soil: Path, o
           families: tuple[str, ...] = FAMILIES, page_width: int = PAGE_W, soil_target=SOIL_TARGET,
           soil_contrast: float = 0.7, gold_sat: float = 0.85, gold_gamma: float = 1.2,
           gold_scale: float = 1.16, clarity: float = 0.2, gold_gain: float = 0.95, gold_knee: float = 0.84,
-          gem_scale: float = 1.25, gem_gamma: float = 0.78, strict_mask_coverage: bool = False) -> dict:
+          gem_scale: float = 1.25, gem_gamma: float = 0.78, strict_mask_coverage: bool = False,
+          bed: dict | None = BED_L5F, gem_sat: float = GEM_SAT_L5F, gem_pastel: float = GEM_PASTEL_L5F) -> dict:
     if not families or len(set(families)) != len(families) or set(families) - set(FAMILIES):
         raise ValueError('families must be a nonempty, unique selection of TIB01..TIB20 / GEM01..GEM12')
     if page_width < CELL_W:
@@ -808,11 +849,17 @@ def build(library_root: Path, theatre: str, gold: Path, gem: Path, soil: Path, o
         raise ValueError('soil-target must contain three finite sRGB values in 0..1')
     if not np.isfinite(values).all() or min(values) < 0 or min(gold_gamma, gold_scale, gem_scale, gem_gamma) <= 0 or gold_knee > 1:
         raise ValueError('parameters must be finite and nonnegative; gamma/scale positive; knee in 0..1')
+    if not (np.isfinite([gem_sat, gem_pastel]).all() and gem_sat >= 0 and 0 <= gem_pastel <= 1):
+        raise ValueError('gem-sat must be nonnegative and gem-pastel in 0..1')
+    if bed is not None:
+        bed = {**BED_L5F, **bed}
+        if not np.isfinite(list(bed.values())).all() or min(bed.values()) < 0 or max(bed['alpha'], bed['gem_alpha']) > 1:
+            raise ValueError('bed parameters must be finite and nonnegative, alphas at most 1')
     t0 = time.time()
     overlays = OverlayLibrary(library_root, theatre)
     lib = Library(gold, gem, soil)
     comp = ExtComposer(lib, overlays, target, soil_contrast, gold_sat, gold_gamma, gold_scale, clarity,
-                       gold_gain, gold_knee, gem_scale, gem_gamma)
+                       gold_gain, gold_knee, gem_scale, gem_gamma, bed=bed, gem_sat=gem_sat, gem_pastel=gem_pastel)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     soil_idx = soil_index(overlays, comp.soil_target * 255)
@@ -1093,6 +1140,15 @@ def build_parser() -> argparse.ArgumentParser:
                           ('gold-scale', 1.16), ('clarity', 0.2), ('gold-gain', 0.95), ('gold-knee', 0.84),
                           ('gem-scale', 1.25), ('gem-gamma', 0.78)):
         p.add_argument('--' + name, type=float, default=default, help=f'default: {default}')
+    p.add_argument('--bed', choices=('contact', 'carpet'), default='contact',
+                   help='contact: L5F faint halo under each object (default); carpet: the L5 v8 soil field')
+    for name, key in (('bed-alpha', 'alpha'), ('gem-bed-alpha', 'gem_alpha'), ('bed-spread', 'spread'),
+                      ('bed-margin', 'margin'), ('bed-shadow', 'shadow'), ('gem-bed-shadow', 'gem_shadow')):
+        p.add_argument('--' + name, type=float, default=BED_L5F[key], help=f'contact bed (default: {BED_L5F[key]})')
+    p.add_argument('--gem-sat', type=float, default=GEM_SAT_L5F,
+                   help=f'gem chroma factor, 1 = L5 v8 (default: {GEM_SAT_L5F})')
+    p.add_argument('--gem-pastel', type=float, default=GEM_PASTEL_L5F,
+                   help=f'gem lift toward white, 0 = L5 v8 (default: {GEM_PASTEL_L5F})')
     p.add_argument('--families', choices=FAMILIES, nargs='+', default=FAMILIES,
                    help='families to build (default: all 32)')
     p.add_argument('--page-width', type=int, default=PAGE_W, help='1x page width (default: 2048)')
@@ -1124,7 +1180,11 @@ def main(argv: list[str] | None = None) -> int:
                   families=tuple(args.families), page_width=args.page_width, soil_target=args.soil_target,
                   soil_contrast=args.soil_contrast, gold_sat=args.gold_sat, gold_gamma=args.gold_gamma,
                   gold_scale=args.gold_scale, clarity=args.clarity, gold_gain=args.gold_gain, gold_knee=args.gold_knee,
-                  gem_scale=args.gem_scale, gem_gamma=args.gem_gamma, strict_mask_coverage=args.strict_mask_coverage)
+                  gem_scale=args.gem_scale, gem_gamma=args.gem_gamma, strict_mask_coverage=args.strict_mask_coverage,
+                  bed=None if args.bed == 'carpet' else {
+                      'alpha': args.bed_alpha, 'gem_alpha': args.gem_bed_alpha, 'spread': args.bed_spread,
+                      'margin': args.bed_margin, 'shadow': args.bed_shadow, 'gem_shadow': args.gem_bed_shadow},
+                  gem_sat=args.gem_sat, gem_pastel=args.gem_pastel)
         elif args.command == 'install':
             install(args.build_dir, args.cache_root, args.theatre)
         elif args.command == 'sheet':
