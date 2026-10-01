@@ -48,7 +48,24 @@ pnpm hd:sprites -- --library temperate --pages 0 [--cache <dir>] [--bin <binary-
 # Material sidecars: the voxel lighting table into <library>/common/, colour-matched HD terrain per map
 pnpm hd:materials -- [--game <install dir>] [--out <library dir>]
 pnpm hd:materials -- --terrain XMP29U2 --terrain RiverRam [--cache <dir>] [--sigma 2]
+
+# Local YR interface art, separate from curated HD cameos
+pnpm hd:ui -- cameos --game "$RA2_INSTALL" --out "$HD_CACHE/_ui/cameos-cli-test"
+pnpm hd:ui -- cursor --game "$RA2_INSTALL" --out "$HD_CACHE/_ui/cursor"
 ```
+
+The `ui` subcommands require explicit input/output directories. `cameos` writes 60x48 RGBA originals into `orig/`
+and `cameos.json` with type ID/kind, primary/alternate image, localized CSF name, UIName, owners, tech level,
+palette, file, dimensions and buildability. It does not update the curated `_ui/cameos/index.json`. Missing images
+remain explicit metadata entries; malformed images fail extraction. The caller supplies the slot size;
+larger shapes are clipped and smaller shapes padded at their original origin without resampling.
+
+`cursor` exports every SHP-format frame into `cursor.png` plus `cursor.json` (`version: 1`, `frames` rectangles).
+Transparent padding and cropped offsets stay intact, including empty frames; no shadow-half convention is applied.
+The native reader supplies dynamic hotspots. YR policy in `src/games/yrUi.ts` selects INI registries, CSF and
+base/add-on cameo palettes by archive presence, and this build's `MOUSE.SHA` / `MOUSEPAL.PAL` cursor files.
+`--shape` and `--palette` override the cursor files. Generic raster/atlas helpers and Node writers receive policies
+and art from callers; they do not select game filenames or INI registries.
 
 ## Prepare a complete map cache
 

@@ -24,6 +24,14 @@ export const YR_SIDEBAR = Object.freeze({
   labelCount: 0xb1cf6c,
   values: 0xb1cf78,
   valueCount: 0xb1cf70,
+  mouse: 0x887640,
+  mouseShape: 0xabf294,
+  mouseControls: 0x82d028,
+  tooltip: 0x887368,
+  tooltipFont: 0x89c4d0,
+  sidebarOnRight: 0xa8eb7c,
+  sidebarSurface: 0x887300,
+  compositeSurface: 0x88731c,
 });
 
 const S = YR_SIDEBAR.singleton;
@@ -138,6 +146,206 @@ function utf16(m: GuestMemoryAccessor, p: number): string | null {
 function imageName(m: GuestMemoryAccessor, at: number, max: number): string | null {
   const name = readAsciiZ(m, at, max);
   return name && /^[a-z0-9_-]+(?:\.shp)?$/i.test(name) ? name.toLowerCase().replace(/\.shp$/, '') : null;
+}
+
+function pointer(m: GuestMemoryAccessor, width: number, height: number): GameRenderSidebar['pointer'] {
+  const p = m.u32(YR_SIDEBAR.mouse),
+    shape = m.u32(YR_SIDEBAR.mouseShape);
+  // Read the final WWMouse SetCursor result: it includes animated/small frames and resolved hotspot sentinels.
+  if (
+    !isPlausiblePointer(m, p, 0x44) ||
+    m.u32(p) !== 0x7f7b2c ||
+    !isPlausiblePointer(m, shape, 8) ||
+    m.u32(p + 4) !== shape ||
+    m.i32(p + 0xc) < 0
+  )
+    return null;
+  const frame = m.i32(p + 8),
+    x = m.i32(p + 0x14),
+    y = m.i32(p + 0x18);
+  const hx = m.i32(p + 0x3c),
+    hy = m.i32(p + 0x40),
+    w = m.u16(shape + 2),
+    h = m.u16(shape + 4);
+  if (
+    m.u16(shape) !== 0 ||
+    w < 1 ||
+    w > 256 ||
+    h < 1 ||
+    h > 256 ||
+    frame < 0 ||
+    frame >= m.u16(shape + 6) ||
+    x < 0 ||
+    x >= width ||
+    y < 0 ||
+    y >= height ||
+    hx < 0 ||
+    hx > w ||
+    hy < 0 ||
+    hy > h
+  )
+    return null;
+  if (
+    m.u32(YR_SIDEBAR.mouse) !== p ||
+    m.u32(p + 4) !== shape ||
+    m.i32(p + 8) !== frame ||
+    m.i32(p + 0xc) < 0 ||
+    m.i32(p + 0x14) !== x ||
+    m.i32(p + 0x18) !== y ||
+    m.i32(p + 0x3c) !== hx ||
+    m.i32(p + 0x40) !== hy
+  )
+    return null;
+  return { x, y, frame, hotspot: { x: hx, y: hy } };
+}
+
+/** Read-only equivalent of 0x433CF0; host fonts cannot determine the native tooltip's actual fill rectangle. */
+function tooltipMetrics(
+  m: GuestMemoryAccessor,
+  text: string,
+  maxWidth: number,
+): { width: number; height: number } | null {
+  const font = m.u32(YR_SIDEBAR.tooltipFont);
+  if (!isPlausiblePointer(m, font, 0x30)) return null;
+  const glyphs = m.u32(font + 4),
+    fallback = m.u32(font + 8);
+  const lineHeight = m.i32(font + 0x1c),
+    tabWidth = m.i32(font + 0x28),
+    spacing = m.i32(font + 0x2c);
+  if (
+    !isPlausiblePointer(m, glyphs, 0x20) ||
+    lineHeight < 1 ||
+    lineHeight > 256 ||
+    tabWidth < 1 ||
+    tabWidth > 1024 ||
+    spacing < -32 ||
+    spacing > 32
+  )
+    return null;
+  const table = m.u32(glyphs + 0x18),
+    records = m.u32(glyphs + 0x1c),
+    stride = m.i32(glyphs + 0x14);
+  if (!isPlausiblePointer(m, table, 65536 * 2) || !isPlausiblePointer(m, records) || stride < 1 || stride > 4096)
+    return null;
+  let x = 0,
+    width = 0,
+    height = lineHeight,
+    count = 0,
+    previous = 0,
+    word: number | null = null,
+    wordWidth = 0;
+  // Native wrapping can rewind to a word boundary. Bound work independently of corrupt glyph data.
+  for (let i = 0, work = 0; i < text.length; work++) {
+    if (work > 4096) return null;
+    const code = text.charCodeAt(i++);
+    if (code === 10 || code === 13) {
+      if (previous !== 13) {
+        x = 0;
+        count = 0;
+        height += lineHeight;
+      }
+    } else if (code === 9) {
+      x = Math.floor((x + tabWidth) / tabWidth) * tabWidth;
+    } else {
+      if (code === 32) {
+        word = i;
+        wordWidth = width;
+      }
+      const index = m.u16(table + code * 2);
+      const record = index ? records + (index - 1) * stride : fallback;
+      // Glyph records contain bytes and their stride need not preserve pointer alignment.
+      if (record && (record < 0x10000 || record >= m.size)) return null;
+      if (record) {
+        const advance = m.u8(record) + spacing;
+        if (advance < 0) return null;
+        x += advance;
+        count++;
+        if (x > maxWidth) {
+          if (word !== null && count > 1) {
+            i = word;
+            width = wordWidth;
+          } else {
+            if (count > 1) {
+              x -= advance;
+              i--;
+            }
+            width = Math.max(width, x);
+          }
+          x = 0;
+          count = 0;
+          word = null;
+          height += lineHeight;
+        } else width = Math.max(width, x);
+      }
+    }
+    previous = code;
+    if (height > MAX_SCREEN || width > MAX_SCREEN) return null;
+  }
+  return { width, height };
+}
+
+/** 0x478E30 measures again, adds 8/4 pixels and clamps x to its selected native surface. */
+function tooltipDrawRect(
+  m: GuestMemoryAccessor,
+  measured: GameRenderRect,
+  text: string,
+  frameWidth: number,
+  frameHeight: number,
+): GameRenderRect | null {
+  const right = m.u8(YR_SIDEBAR.sidebarOnRight) === 1;
+  const splitRect = rect(m, right ? YR_SIDEBAR.viewBounds : YR_SIDEBAR.sidebarBounds);
+  if (!splitRect) return null;
+  const split = splitRect.x + splitRect.width;
+  const composite = right ? measured.x + measured.width <= split : measured.x >= split;
+  if (!composite && (right ? measured.x < split : measured.x + measured.width >= split)) return null;
+  const origin = (right ? !composite : composite) ? split : 0;
+  const surface = m.u32(composite ? YR_SIDEBAR.compositeSurface : YR_SIDEBAR.sidebarSurface);
+  if (!isPlausiblePointer(m, surface, 12)) return null;
+  const width = m.i32(surface + 4),
+    height = m.i32(surface + 8);
+  if (width < 1 || width > frameWidth || height < 1 || height > frameHeight) return null;
+  const metrics = tooltipMetrics(m, text, width);
+  if (!metrics) return null;
+  const drawWidth = metrics.width + 8,
+    drawHeight = metrics.height + 4;
+  const x = origin + Math.min(measured.x - origin, width - drawWidth),
+    y = measured.y;
+  const left = Math.max(origin, x),
+    bottom = Math.min(height, frameHeight, y + drawHeight);
+  const end = Math.min(origin + width, frameWidth, x + drawWidth);
+  return end > left && bottom > y ? { x: left, y, width: end - left, height: bottom - y } : null;
+}
+
+function tooltip(m: GuestMemoryAccessor, width: number, height: number): GameRenderSidebar['tooltip'] {
+  const p = m.u32(YR_SIDEBAR.tooltip);
+  // CCToolTip keeps the shown ToolTipData pointer at +4, the measured rect at +18 and a copied UTF-16[256] at +28.
+  if (!isPlausiblePointer(m, p, 0x268) || m.u32(p) !== 0x7f74c4 || !m.u8(p + 0xc) || !m.u32(p + 4)) return null;
+  const shown = m.u32(p + 4),
+    bounds = rect(m, p + 0x18);
+  if (!isPlausiblePointer(m, shown, 0x1c)) return null;
+  if (!bounds || bounds.x + bounds.width > width || bounds.y + bounds.height > height) return null;
+  const wide = m.bytes(p + 0x28, 512);
+  let end = 0;
+  while (end < wide.length && (wide[end] || wide[end + 1])) end += 2;
+  if (end === wide.length) return null;
+  let text: string;
+  try {
+    // The name reader forbids controls; native tooltip text deliberately contains CR/LF and may contain tabs.
+    text = new TextDecoder('utf-16le', { fatal: true }).decode(wide.subarray(0, end));
+  } catch {
+    return null;
+  }
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(text)) return null;
+  if (
+    !text ||
+    m.u32(YR_SIDEBAR.tooltip) !== p ||
+    m.u32(p + 4) !== shown ||
+    !m.u8(p + 0xc) ||
+    JSON.stringify(rect(m, p + 0x18)) !== JSON.stringify(bounds)
+  )
+    return null;
+  const drawRect = tooltipDrawRect(m, bounds, text, width, height);
+  return drawRect ? { rect: drawRect, text } : null;
 }
 
 /** Mirrors 0x734E60's binary search without calling its allocating missing-label path. */
@@ -474,6 +682,8 @@ export function createYrSidebarReader(
         radarActive: radarStage === 2 || radarStage === 3 || (radarStage === 1 && activation === 1),
         modes: { repair: !!m.u8(S + 0x11b0), sell: !!m.u8(S + 0x11b1) },
         labels: { ready: label(m, 'TXT_READY'), hold: label(m, 'TXT_HOLD') },
+        pointer: pointer(m, frameWidth, frameHeight),
+        tooltip: tooltip(m, frameWidth, frameHeight),
       };
       if (
         m.u32(YR_SIDEBAR.scenario) !== scenario ||

@@ -8,7 +8,15 @@ export interface CameoIndex {
 
 export interface ChromeManifest {
   frame: { width: number; height: number };
+  /** Rect x/y are frame-pixel offsets from the live anchor; width/height are frame-pixel sizes, independent of PNG scale. */
   pieces: { file: string; rect: Rect; anchor: 'sidebar' | 'commandBar' }[];
+}
+
+export interface CursorManifest {
+  version: 1;
+  /** Relative atlas file; defaults to cursor.png. Frames include their transparent SHP bounding-box padding. */
+  file?: string;
+  frames: Rect[];
 }
 
 export interface ChromeAssets {
@@ -20,6 +28,7 @@ export interface ChromeAssets {
 export interface UiAssets {
   cameo(id: string, image: string | null): ImageBitmap | null;
   chrome(side: number): ChromeAssets | null;
+  cursor(frame: number): { bitmap: ImageBitmap; rect: Rect } | null;
 }
 
 /** One UI controller owns this cache and closes its bitmaps, including late results, on disposal. */
@@ -31,6 +40,8 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
   let index: CameoIndex | null = null;
   let indexStarted = false;
   let disposed = false;
+  let cursorStarted = false;
+  let cursor: { bitmap: ImageBitmap; frames: Rect[] } | null = null;
 
   // Both failures and 404s are cached for this controller's lifetime; no per-frame retry loops.
   const json = async <T>(path: string): Promise<T | null> => {
@@ -65,6 +76,35 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
     return request;
   };
   return {
+    cursor(frame) {
+      if (disposed) return null;
+      if (!cursorStarted) {
+        cursorStarted = true;
+        void json<CursorManifest>(`${base}/cursor/cursor.json`).then(async (manifest) => {
+          if (disposed || manifest?.version !== 1 || !Array.isArray(manifest.frames) || !manifest.frames.length) return;
+          const image = await bitmap(`${base}/cursor/${manifest.file ?? 'cursor.png'}`);
+          if (disposed || !image) return;
+          if (
+            manifest.frames.every(
+              (r) =>
+                r &&
+                typeof r === 'object' &&
+                [r.x, r.y, r.width, r.height].every(Number.isInteger) &&
+                r.x >= 0 &&
+                r.y >= 0 &&
+                r.width > 0 &&
+                r.height > 0 &&
+                r.x + r.width <= image.width &&
+                r.y + r.height <= image.height,
+            )
+          ) {
+            cursor = { bitmap: image, frames: manifest.frames };
+          }
+        });
+      }
+      const rect = Number.isInteger(frame) && frame >= 0 ? cursor?.frames[frame] : null;
+      return cursor && rect ? { bitmap: cursor.bitmap, rect } : null;
+    },
     cameo(id, image) {
       if (disposed) return null;
       if (!indexStarted) {
@@ -123,6 +163,7 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
       pending.clear();
       chrome.clear();
       index = null;
+      cursor = null;
     },
   };
 }

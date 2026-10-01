@@ -212,7 +212,12 @@ The `#hd-ui` canvas sits immediately before `#screen`, at z-index 0 above `#hd-s
 and device pixel ratio, and receives no input. The WebGL2 frame renderer clears the covered rectangles after every
 frame path (plain, upscaled or keyed), before its independent native cursor pass. These extra rectangles are
 independent of the tactical key/hole. All pointer and keyboard input continues to reach the original game.
-Native cameo tooltips in covered areas are replaced with an HD name/cost tooltip inside the sidebar column.
+The read-only native `sidebar.pointer` supplies cursor sheet frame and resolved hotspot; the input controller's
+read-only position accessor supplies low-latency guest coordinates when available. The cursor is drawn last,
+clipped to the exact covered union, including partial intersections at its edges. Outside that union the native
+software cursor remains visible. Missing cursor art uses a vector arrow; unknown/hidden pointer state draws none.
+The optional `sidebar.tooltip` supplies the native frame rectangle and copied UTF-16 text, including native cost
+lines and line breaks. That rectangle is added to the transparent regions while shown and filled with an HD tooltip.
 
 Optional art lives under the local HD cache's `_ui/` directory:
 
@@ -220,10 +225,15 @@ Optional art lives under the local HD cache's `_ui/` directory:
 "byId": { "TYPE_ID": "image" } }`. Both image paths are optional and relative to `_ui/cameos/`.
   The type-ID mapping takes precedence over the snapshot's image name; missing HD art falls back to original art.
 - `_ui/chrome/<side>/chrome.json`: `{ "frame": { "width": 800, "height": 600 }, "pieces": [
-{ "file": "sidebar.png", "rect": { "x": 632, "y": 0, "width": 168, "height": 600 },
+{ "file": "sidebar.png", "rect": { "x": 0, "y": 0, "width": 168, "height": 600 },
 "anchor": "sidebar" } ] }`. Side is `0` Allied, `1` Soviet, `2` Yuri, or `-1` unknown. Files are relative to
-  that side's chrome directory. Sidebar pieces translate their frame-space origin to the live sidebar origin;
-  `commandBar` pieces map onto the live command bar, stretching its width.
+  that side's chrome directory. `rect.x/y` are frame-pixel offsets from the live anchor's origin and `width/height`
+  are frame-pixel sizes. PNG scale does not affect geometry. Three 168x248 sidebar pieces use y=0/248/496;
+  two 492x32 command halves use x=0/492, y=0. Loaded chrome replaces procedural tab icons while retaining overlays.
+- `_ui/cursor/cursor.json`: `{ "version": 1, "frames": [{ "x": 0, "y": 0, "width": 55, "height": 43 }] }`.
+  Rectangles index `cursor.png` (or optional relative `file`). Each frame includes transparent bounding-box padding;
+  hotspots remain runtime data. Export with `pnpm hd:ui -- cursor --game "$RA2_INSTALL" --out "$HD_CACHE/_ui/cursor"`.
+  This YR build uses `MOUSE.SHA` and `MOUSEPAL.PAL`; CLI `--shape`/`--palette` can select other supplied files.
 
 Manifests and bitmaps load lazily. Missing files (including 404 responses) are remembered for the controller's
 lifetime; reload to pick up newly created assets. A complete loaded chrome set covers the sidebar and command bar,
@@ -234,7 +244,8 @@ ready/hold labels, availability shading, flashing and hover outlines. All extrac
 
 `__hdBridge.toggle()` toggles both battlefield and interface for original/HD A/B checks.
 `__hdBridge.ui.enabled` reports the effective interface switch and `__hdBridge.ui.toggle()` independently toggles
-only the interface. The controller owns its animation request, canvas and bitmap cache; session cleanup cancels
+only the interface. `__hdBridge.ui.state` returns a detached read-only-access snapshot of the last sidebar publication
+(null when unavailable), so inspection cannot mutate the bridge's live state. The controller owns its animation request, canvas and bitmap cache; session cleanup cancels
 animation, removes its canvas, closes bitmaps (including late results) and clears the extra frame rectangles.
 
 Asset-free regressions are in `tests/basic/hdUi.test.ts`, `tests/basic/vmFrameRenderer.test.ts` and

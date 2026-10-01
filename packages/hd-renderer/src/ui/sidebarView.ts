@@ -33,6 +33,8 @@ export interface Sidebar {
   radarActive: boolean;
   modes: { repair: boolean; sell: boolean };
   labels: { ready: string | null; hold: string | null };
+  pointer?: { x: number; y: number; frame: number; hotspot: { x: number; y: number } } | null;
+  tooltip?: { rect: Rect; text: string } | null;
 }
 export interface Cameo {
   x: number;
@@ -73,13 +75,15 @@ function without(rect: Rect, hole: Rect): Rect[] {
 
 export function transparentRects(sidebar: Sidebar, assets: UiAssets): Rect[] {
   const l = sidebar.layout;
+  const tooltip = sidebar.tooltip ? [sidebar.tooltip.rect] : [];
   if (assets.chrome(sidebar.side)) {
     return [
       ...(sidebar.radarActive ? without(l.sidebar, l.radar) : [l.sidebar]),
       ...(l.commandBar ? [l.commandBar] : []),
+      ...tooltip,
     ].filter(valid);
   }
-  return [l.strip, { ...l.power, height: l.power.slotHeight * l.power.slots }, l.credits, ...l.tabs]
+  return [l.strip, { ...l.power, height: l.power.slotHeight * l.power.slots }, l.credits, ...l.tabs, ...tooltip]
     .filter(valid)
     .map(({ x, y, width, height }) => ({ x, y, width, height }));
 }
@@ -89,7 +93,7 @@ export function drawSidebar(
   ctx: CanvasRenderingContext2D,
   sidebar: Sidebar,
   assets: UiAssets,
-  opts: { scale: number; time: number },
+  opts: { scale: number; time: number; pointerPosition?: Readonly<{ x: number; y: number }> | null },
 ): void {
   if (!(opts.scale > 0)) return;
   const { layout: l } = sidebar;
@@ -136,6 +140,14 @@ export function drawSidebar(
     ctx.fillStyle = color;
     ctx.fillText(value, snap(x), snap(y));
   };
+  const outlinedText = (value: string, x: number, y: number, color: string | CanvasGradient) => {
+    ctx.strokeStyle = '#090b10';
+    // A centred 2px stroke leaves a 1-frame-pixel dark outline outside the fill.
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.strokeText(value, snap(x), snap(y));
+    text(value, x, y, color);
+  };
   ctx.save();
   ctx.scale(opts.scale, opts.scale);
   ctx.imageSmoothingEnabled = true;
@@ -154,11 +166,9 @@ export function drawSidebar(
     fill(l.sidebar, '#101216');
     if (l.commandBar) fill(l.commandBar, '#101216');
     for (const piece of chrome.pieces) {
-      const target =
-        piece.anchor === 'sidebar'
-          ? { x: l.sidebar.x, y: l.sidebar.y, width: piece.rect.width, height: piece.rect.height }
-          : l.commandBar;
-      if (!target) continue;
+      const anchor = piece.anchor === 'sidebar' ? l.sidebar : l.commandBar;
+      if (!anchor) continue;
+      const target = { ...piece.rect, x: anchor.x + piece.rect.x, y: anchor.y + piece.rect.y };
       const p = rect(target);
       ctx.drawImage(piece.bitmap, p.x, p.y, p.width, p.height);
     }
@@ -251,6 +261,9 @@ export function drawSidebar(
   ctx.clip();
   for (const c of sidebar.cameos) {
     const r = rect({ x: c.x, y: c.y, ...l.cameo });
+    ctx.save();
+    rounded(r, 2);
+    ctx.clip();
     const image = assets.cameo(c.id, c.image);
     if (image) {
       const ratio = Math.max(r.width / image.width, r.height / image.height);
@@ -265,22 +278,17 @@ export function drawSidebar(
     const caption = { x: r.x, y: r.y + r.height - 12, width: r.width, height: 12 };
     fill(caption, gradient(caption, 'rgba(0,0,0,0)', 'rgba(0,0,0,0.80)'));
     let size = 8.5;
-    font(600, size);
+    font(700, size);
     while (ctx.measureText(c.name).width > r.width - 4 && size > 6.5) {
       size -= 0.25;
-      font(600, size);
+      font(700, size);
     }
     let name = c.name;
     if (ctx.measureText(name).width > r.width - 4) {
       while (name.length && ctx.measureText(name + '…').width > r.width - 4) name = name.slice(0, -1);
       name += '…';
     }
-    ctx.save();
-    ctx.shadowColor = '#000';
-    ctx.shadowBlur = 1.5 * opts.scale;
-    ctx.shadowOffsetY = opts.scale;
-    text(name, r.x + r.width / 2, r.y + r.height - 2.5, '#f4f1e8');
-    ctx.restore();
+    outlinedText(name, r.x + r.width / 2, r.y + r.height - 2.5, '#f4f1e8');
     if (c.darkened) fill(r, 'rgba(8,10,14,0.62)');
     if (c.progress !== null) {
       const progress = Math.max(0, Math.min(1, c.progress));
@@ -312,16 +320,14 @@ export function drawSidebar(
     if (c.ready) {
       ctx.save();
       font(700, 11);
-      ctx.globalAlpha = pulse(1.2, 0.75, 1);
-      ctx.shadowColor = accent;
-      ctx.shadowBlur = 6 * opts.scale;
+      ctx.globalAlpha = pulse(1.2, 0.85, 1);
       ctx.textBaseline = 'middle';
-      text(sidebar.labels.ready ?? 'Ready', r.x + r.width / 2, r.y + 19, '#fff6c8');
+      outlinedText(sidebar.labels.ready ?? 'Ready', r.x + r.width / 2, r.y + 19, '#fff6c8');
       ctx.restore();
       outline(r, accent, 1.5);
     }
     if (c.hold) {
-      font(700, 9.5);
+      font(700, 11);
       const label = sidebar.labels.hold ?? 'On Hold';
       const width = Math.min(r.width - 6, ctx.measureText(label).width + 6);
       const x = c.queued > 0 ? r.x + 3 : r.x + (r.width - width) / 2;
@@ -329,8 +335,9 @@ export function drawSidebar(
       ctx.fillStyle = 'rgba(0,0,0,0.55)';
       ctx.fill();
       ctx.save();
+      ctx.globalAlpha = pulse(1.2, 0.85, 1);
       ctx.textBaseline = 'middle';
-      text(label, x + width / 2, r.y + 20, '#ffb84a');
+      outlinedText(label, x + width / 2, r.y + 20, '#fff6c8');
       ctx.restore();
     }
     if (c.queued > 0) {
@@ -350,6 +357,9 @@ export function drawSidebar(
       outline(r, `rgb(${light.join(',')})`, 1.5);
       fill(r, 'rgba(255,255,255,0.08)');
     }
+    outline(r, 'rgba(0,0,0,0.70)', 0.75);
+    fill({ x: r.x + 2, y: r.y + 1, width: r.width - 4, height: 0.75 }, 'rgba(255,255,255,0.15)');
+    ctx.restore();
   }
   ctx.restore();
 
@@ -416,36 +426,86 @@ export function drawSidebar(
   ctx.save();
   font(700, 12, true);
   ctx.textBaseline = 'top';
-  ctx.shadowColor = '#000';
-  ctx.shadowBlur = 2 * opts.scale;
-  ctx.shadowOffsetY = opts.scale;
   const credits = { x: l.creditsAnchor.x, y: l.creditsAnchor.y, width: 0, height: 12 };
-  text(String(sidebar.credits), credits.x, credits.y, gradient(credits, '#fff3a0', '#f1c232'));
+  outlinedText(String(sidebar.credits), credits.x, credits.y, gradient(credits, '#fff3a0', '#f1c232'));
   ctx.restore();
 
-  const hovered = sidebar.cameos.find((c) => c.hovered);
-  if (hovered) {
-    const width = l.sidebar.width - 8;
-    const height = hovered.cost === null ? 20 : 33;
-    const below = hovered.y + l.cameo.height + 2;
-    const y = Math.max(l.sidebar.y, below + height <= l.sidebar.y + l.sidebar.height ? below : hovered.y - height - 2);
-    const panel = { x: l.sidebar.x + 4, y, width, height };
-    rounded(panel, 3);
-    ctx.fillStyle = 'rgba(12,14,18,0.92)';
-    ctx.fill();
-    outline(panel, accent, 1);
+  if (sidebar.tooltip) {
+    const panel = rect(sidebar.tooltip.rect);
     ctx.save();
     ctx.beginPath();
-    ctx.rect(panel.x + 4, y, width - 8, height);
+    ctx.rect(panel.x, panel.y, panel.width, panel.height);
     ctx.clip();
+    fill(panel, '#0c0e12');
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(panel.x + 0.5, panel.y + 0.5, panel.width - 1, panel.height - 1);
     ctx.textAlign = 'left';
-    font(600, 9);
-    text(hovered.name, panel.x + 4, y + 13, '#f4f1e8');
-    if (hovered.cost !== null) {
-      font(700, 9, true);
-      text(`$${hovered.cost}`, panel.x + 4, y + 26, '#f1c232');
+    ctx.textBaseline = 'top';
+    const lines = sidebar.tooltip.text.split(/\r\n|\r|\n/);
+    const lineHeight = Math.min(13, (panel.height - 4) / lines.length);
+    font(700, Math.max(1, Math.min(11, lineHeight - 1)));
+    for (const [i, line] of lines.entries()) {
+      ctx.fillStyle = /^\s*\$/.test(line) ? '#fff3a0' : '#f4f1e8';
+      ctx.fillText(line, snap(panel.x + 4), snap(panel.y + 2 + i * lineHeight), Math.max(1, panel.width - 8));
     }
     ctx.restore();
+  }
+  drawPointer(ctx, sidebar, assets, transparentRects(sidebar, assets), opts.pointerPosition);
+  ctx.restore();
+}
+
+/** Restore only the software-cursor pixels erased by the same union of native-frame holes. */
+export function drawPointer(
+  ctx: CanvasRenderingContext2D,
+  sidebar: Sidebar,
+  assets: UiAssets,
+  covered: readonly Rect[],
+  position?: Readonly<{ x: number; y: number }> | null,
+): void {
+  const pointer = sidebar.pointer;
+  if (!pointer || !covered.length) return;
+  const local =
+    position &&
+    Number.isFinite(position.x) &&
+    Number.isFinite(position.y) &&
+    position.x >= 0 &&
+    position.y >= 0 &&
+    position.x < sidebar.frame.width &&
+    position.y < sidebar.frame.height
+      ? position
+      : pointer;
+  const art = assets.cursor(pointer.frame);
+  const x = art ? local.x - pointer.hotspot.x : local.x;
+  const y = art ? local.y - pointer.hotspot.y : local.y;
+  const width = art?.rect.width ?? 16,
+    height = art?.rect.height ?? 22;
+  if (!covered.some((r) => x < r.x + r.width && x + width > r.x && y < r.y + r.height && y + height > r.y)) return;
+  ctx.save();
+  ctx.beginPath();
+  for (const r of covered) ctx.rect(r.x, r.y, r.width, r.height);
+  ctx.clip();
+  if (art) {
+    const r = art.rect;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(art.bitmap, r.x, r.y, r.width, r.height, x, y, width, height);
+  } else {
+    ctx.translate(x, y);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(0, 18);
+    ctx.lineTo(4, 14);
+    ctx.lineTo(8, 21);
+    ctx.lineTo(11, 19);
+    ctx.lineTo(7, 12);
+    ctx.lineTo(14, 12);
+    ctx.closePath();
+    ctx.fillStyle = '#fff6d5';
+    ctx.strokeStyle = '#090b10';
+    ctx.lineWidth = 1;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+    ctx.fill();
   }
   ctx.restore();
 }

@@ -95,6 +95,143 @@ function fixture(tab = 0, count = 1) {
 }
 
 describe('YR 1.001 read-only sidebar', () => {
+  const MOUSE = 0xca0000,
+    SHAPE = 0xcb0000,
+    TOOLTIP = 0xcc0000;
+  const cursor = (f: ReturnType<typeof fixture>) => {
+    f.i32(G.mouse, MOUSE);
+    f.i32(G.mouseShape, SHAPE);
+    f.i32(MOUSE, 0x7f7b2c);
+    f.i32(MOUSE + 4, SHAPE);
+    f.i32(MOUSE + 8, 12);
+    f.i32(MOUSE + 0x14, 1006);
+    f.i32(MOUSE + 0x18, 230);
+    f.i32(MOUSE + 0x3c, 26);
+    f.i32(MOUSE + 0x40, 13);
+    [0, 52, 52, 300].forEach((n, i) => f.data.setUint16(SHAPE + i * 2, n, true));
+  };
+  const nativeTooltip = (f: ReturnType<typeof fixture>) => {
+    f.i32(G.tooltip, TOOLTIP);
+    f.i32(TOOLTIP, 0x7f74c4);
+    f.i32(TOOLTIP + 4, 0xcd1000);
+    f.u8(TOOLTIP + 0xc, 1);
+    f.rect(TOOLTIP + 0x18, 880, 260, 90, 27);
+    f.wide(TOOLTIP + 0x28, '發電廠\r\n$600');
+    f.u8(G.sidebarOnRight, 1);
+    f.i32(G.tooltipFont, 0xce6000);
+    f.i32(0xce6000 + 4, 0xce6100);
+    f.i32(0xce6000 + 8, 0xce6250);
+    f.u8(0xce6250, 6);
+    f.i32(0xce6000 + 0x1c, 12);
+    f.i32(0xce6000 + 0x28, 24);
+    f.i32(0xce6100 + 0x14, 4);
+    f.i32(0xce6100 + 0x18, 0xd00000);
+    f.i32(0xce6100 + 0x1c, 0xce6200);
+    ['發', '電', '廠'].forEach((code, i) => {
+      f.data.setUint16(0xd00000 + code.charCodeAt(0) * 2, i + 1, true);
+      f.u8(0xce6200 + i * 4, i ? 29 : 28);
+    });
+    f.i32(G.compositeSurface, 0xce6300);
+    f.i32(0xce6300 + 4, 984);
+    f.i32(0xce6300 + 8, 744);
+    f.i32(G.sidebarSurface, 0xce6400);
+    f.i32(0xce6400 + 4, 168);
+    f.i32(0xce6400 + 8, 744);
+  };
+
+  it('decodes the final cursor frame/position/resolved hotspot and native multiline tooltip without writes', () => {
+    const f = fixture();
+    cursor(f);
+    nativeTooltip(f);
+    const before = f.bytes.slice();
+    expect(f.read()).toMatchObject({
+      pointer: { x: 1006, y: 230, frame: 12, hotspot: { x: 26, y: 13 } },
+      tooltip: { rect: { x: 880, y: 260, width: 94, height: 28 }, text: '發電廠\r\n$600' },
+    });
+    expect(f.bytes.every((byte, index) => byte === before[index])).toBe(true);
+    // WWMouse's final frame can differ from MouseClass's next animation sample; it is authoritative for presentation.
+    f.i32(MOUSE + 8, 43);
+    f.i32(S + 0x5568, 7);
+    expect(f.read()?.pointer?.frame).toBe(43);
+  });
+
+  it('uses native glyph metrics/padding and the selected surface edge instead of the cached measurement size', () => {
+    const f = fixture();
+    nativeTooltip(f);
+    f.rect(TOOLTIP + 0x18, 894, 260, 90, 27);
+    expect(f.read()?.tooltip?.rect).toEqual({ x: 890, y: 260, width: 94, height: 28 });
+    f.rect(TOOLTIP + 0x18, 1062, 260, 90, 27);
+    expect(f.read()?.tooltip?.rect).toEqual({ x: 1058, y: 260, width: 94, height: 28 });
+    f.wide(TOOLTIP + 0x28, 'A\tB\r\n\n$600');
+    expect(f.read()?.tooltip).toEqual({ rect: { x: 1062, y: 260, width: 38, height: 40 }, text: 'A\tB\r\n\n$600' });
+    f.i32(G.tooltipFont, 0);
+    expect(f.read()?.tooltip).toBeNull();
+  });
+
+  it('mirrors native word/character wrapping with bounded reads', () => {
+    const f = fixture();
+    nativeTooltip(f);
+    f.i32(0xce6400 + 4, 24);
+    f.rect(TOOLTIP + 0x18, 984, 260, 24, 27);
+    f.wide(TOOLTIP + 0x28, 'AB CD EF');
+    expect(f.read()?.tooltip?.rect).toEqual({ x: 984, y: 260, width: 20, height: 40 });
+    f.wide(TOOLTIP + 0x28, 'ABCDE');
+    expect(f.read()?.tooltip?.rect).toEqual({ x: 984, y: 260, width: 24, height: 28 });
+    f.i32(0xce6000 + 0x2c, -32);
+    expect(f.read()?.tooltip).toBeNull();
+  });
+
+  it('returns null for absent or hidden pointers and tooltips without discarding valid sidebar state', () => {
+    const f = fixture();
+    expect(f.read()).toMatchObject({ pointer: null, tooltip: null });
+    cursor(f);
+    nativeTooltip(f);
+    f.i32(MOUSE + 0xc, -1);
+    f.u8(TOOLTIP + 0xc, 0);
+    expect(f.read()).toMatchObject({ pointer: null, tooltip: null });
+    f.i32(MOUSE + 0xc, 0);
+    f.u8(TOOLTIP + 0xc, 1);
+    f.i32(TOOLTIP + 4, 0);
+    expect(f.read()?.pointer).not.toBeNull();
+    expect(f.read()?.tooltip).toBeNull();
+  });
+
+  it('rejects corrupt cursor frames/shapes/hotspots and out-of-frame positions independently', () => {
+    for (const [at, value] of [
+      [MOUSE, 1],
+      [MOUSE + 4, 0],
+      [MOUSE + 8, 300],
+      [MOUSE + 8, -1],
+      [MOUSE + 0x3c, 53],
+      [MOUSE + 0x40, -1],
+      [MOUSE + 0x14, 1152],
+      [MOUSE + 0x18, 744],
+    ]) {
+      const f = fixture();
+      cursor(f);
+      f.i32(at!, value!);
+      expect(f.read()).not.toBeNull();
+      expect(f.read()?.pointer).toBeNull();
+    }
+  });
+
+  it('rejects invalid tooltip rectangles, nonterminated/invalid wide strings and unknown objects', () => {
+    const f = fixture();
+    nativeTooltip(f);
+    f.rect(TOOLTIP + 0x18, 1100, 260, 90, 28);
+    expect(f.read()?.tooltip).toBeNull();
+    nativeTooltip(f);
+    f.wide(TOOLTIP + 0x28, 'X'.repeat(256));
+    expect(f.read()?.tooltip).toBeNull();
+    f.wide(TOOLTIP + 0x28, '\ud800');
+    expect(f.read()?.tooltip).toBeNull();
+    f.wide(TOOLTIP + 0x28, '\u0001');
+    expect(f.read()?.tooltip).toBeNull();
+    nativeTooltip(f);
+    f.i32(TOOLTIP, 0x7f57ac);
+    expect(f.read()?.tooltip).toBeNull();
+  });
+
   it('guards the build and battle roots, including exceptions and truncated memory', () => {
     const f = fixture();
     expect(createYrSidebarReader(() => createByteViewAccessor(f.bytes), 'other')).toBeNull();

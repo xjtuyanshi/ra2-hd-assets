@@ -21,8 +21,9 @@ Sidebar (`0x69DF12`). Dirty surfaces can persist between draws.
 A Composite key fill cannot remove these pixels; a late Primary fill can erase
 tooltips and cursor save-under. The page therefore covers the existing native
 interface rather than changing native surface composition. This reader does not
-implement keying, cursor suppression, tooltips or input interception. Tooltip and
-cursor appearance under the page layer require separate C2/runtime acceptance.
+implement keying, cursor suppression or input interception. It publishes the final
+software cursor and native tooltip for the development page layer to restore only
+pixels erased by its transparent rectangles.
 
 ## Layout recipe
 
@@ -100,6 +101,59 @@ evidence, not a live memory capture. Community YRpp headers supplied leads only.
 | Armed repair/sell | S bytes `+0x11B0/+0x11B1` | setters `0x4AC8C8`, `0x4AC668` | V |
 | Localized Ready/Hold | Labels ptr `0xB1CF74`, Count `0xB1CF6C`; Values ptr `0xB1CF78`, Count `0xB1CF70`; label stride0x28,name[32],num+0x20,valueIndex+0x24 | `0x734E70..0x734EBC`, case-insensitive comparator `0x7C8D20`; `0x6A983B`, `0x6A9ED8` | V |
 
+## Software cursor and native tooltip (C3)
+
+These operands were checked in the supplied YR 1.001 executable and disassembly.
+The reader remains hash-guarded and never calls a guest method or changes memory.
+
+| Input | Address / offset | Instruction evidence |
+| --- | --- | --- |
+| WWMouse singleton / vtable | pointer `0x887640`, vtable `0x7F7B2C` | constructor `0x7B8730`, final vtable store `0x7B8850`; published at `0x560D67` |
+| Final cursor SHP / sheet frame | WWMouse `+4/+8` | SetCursor `0x7B8B1C: mov [esi+4],ebx`, `0x7B8B1F: mov [esi+8],edx` |
+| Current hotspot position | WWMouse `+0x14/+0x18` (client/guest-frame pixels) | mouse update `0x7B9F62/0x7B9F69`; drawing `0x7B9849/0x7B9857` |
+| Resolved hotspot inside SHP bounding box | WWMouse `+0x3C/+0x40` | SetCursor `0x7B8B24/0x7B8B2E`; drawing subtracts them at `0x7B984C/0x7B985A` |
+| Software visibility | signed WWMouse `+0x0C`, hidden if negative | getter `0x7B89F0`; tooltip tests getter at `0x478BAF/0x478BB2`; mouse draws gate at `0x7B9904` |
+| MouseClass current type / animation frame / small flag | S `+0x5560/+0x5568/+0x555C` | type/flag stores `0x5BDD9F/0x5BDDA5`; animation increment/modulo `0x5BDE1B..0x5BDE3D` |
+| MouseClass requested default type | S `+0x5564` | setter `0x5BDA8D`; differs from current presentation type |
+| MouseStruct table | `0x82D028`, stride `0x1C` | `0x5BDC8C..0x5BDC95` computes `28*type+table` |
+| Table fields | StartFrame `+0`, FrameCount `+4`, FrameRate `+8`, SmallFrame `+0xC`, SmallFrameCount `+0x10`, HotspotX/Y `+0x14/+0x18` | frame selection `0x5BDD14..0x5BDD22`; rate `0x5BDCEB`, `0x5BDE43`; modulo `0x5BDE35/0x5BDE3A`; hotspots `0x5BDD22..0x5BDD78` |
+| Hotspot sentinels | `0x3039` centre, `0xD431` full width/height, otherwise zero | `0x5BDD27..0x5BDD78`: compare sentinels, read signed SHP header dimensions `+2/+4`, halve for centre; resolved values passed at `0x5BDD86..0x5BDD93` |
+| Live cursor SHP | pointer `0xABF294` | `0x5BDF3A` loads filename string `0x82604C`, `0x5BDF44` stores result |
+| Cursor files | **`MOUSE.SHA` (SHP/TS format)**, **`MOUSEPAL.PAL`** | null-terminated executable strings `0x82604C/0x826084`; palette read at `0x52C13D..0x52C155`, 6-bit channels shifted at `0x52C182..0x52C18B`. The supplied installation has these files; `MOUSE.SHP` is not this build's filename. No INI cursor filename lookup is used by this loader. |
+| Native tooltip singleton / vtable | pointer `0x887368`, vtable `0x7F74C4` | allocation/constructor/publication `0x77778D..0x7777B8` |
+| Tooltip enabled / shown data | byte `+0xC`, pointer `+4` | enabled gate `0x724206`; Draw `0x724B90..0x724B9F` passes rect only while shown pointer exists |
+| Tooltip measured frame rectangle | `+0x18/+0x1C/+0x20/+0x24` | update `0x724B2E..0x724B3E`; CCToolTip layout `0x478BA0`; native draw `0x478E30`; clear/hide zeros all fields and shown pointer at `0x724AB2..0x724ABE` |
+| Tooltip copied wide text | inline UTF-16[256] `+0x28` | `0x724B19..0x724B23` copies the native text, including cost lines supplied by `0x6D1800` through `0x479064..0x47906E`; draw uses rect `+0x10` at `0x478EDB` (tooltip `+0x28`) |
+| Final tooltip dimensions / edge clamp | measured again, padding width+8 / height+4 | `0x478EF5..0x478F30`; layout uses width+4 / height+3 at `0x478C46/0x478C49`; draw clamps x at `0x478F40..0x478F56` |
+| Tooltip target surface | right-sidebar byte `0xA8EB7C`; `*0x887300` Sidebar / `*0x88731C` Composite | `0x478E45..0x478ECB` selects surface and converts frame x to local x; width/height getters vtable+0x7C/+0x80 resolve to `0x411540/0x411550`, reading surface+4/+8 |
+| Native tooltip font metrics | font `*0x89C4D0`; glyph set+4, fallback+8, line height+0x1C, tab width+0x28, spacing+0x2C | `0x478EE1/0x478F04`; measure `0x433CF0..0x433E85`, including CR/LF, tabs, word/character wrap |
+| Native glyph widths | glyph set: record stride+0x14, UTF-16 index map+0x18, records+0x1C; first record byte is advance | `0x433DAF..0x433DEA`; zero map index uses the font fallback glyph |
+
+The sheet export preserves each frame's complete SHP bounding box and its cropped
+pixel offsets. It exports all frames, including placeholders, without treating the
+second half as shadows. Runtime hotspots come from WWMouse, including the native
+resolved sentinel values. The reader checks its shape against `*0xABF294`, frame
+against the live SHP frame count, vtable, visibility, bounds and hotspot range. It
+does not advance the animation from host time. Unknown/hidden cursor data publishes
+null; valid cursor data with unavailable art uses a clipped vector arrow.
+
+Tooltip decoding preserves CR/LF, blank lines and cost text; malformed, unterminated,
+disabled, unshown or out-of-frame tooltip state publishes null. The HD layer never
+constructs a tooltip from hover/name/cost fields. It fills the supplied rectangle
+and adds precisely that rectangle to the covered union until the tooltip disappears.
+The cached measurement is only the placement input. The reader mirrors the native
+font-width lookup and wrapping, adds the draw routine's 8/4-pixel padding, clamps x
+to the selected surface edge, and clips its publication to that surface/frame.
+This also handles cached measurement dimensions that differ from the current text.
+Unavailable font/surface data publishes null. Synthetic fixtures verify the operand
+reconstruction; real-match screenshots remain necessary to establish final pixel alignment.
+
+The input controller's read-only accessor copies the latest locally tracked guest
+coordinates (absolute pointer events, accumulated lock motion, resolution rescale).
+HD drawing prefers those coordinates without adding listeners, consuming events,
+changing the snapshot or replacing the guest's shape/frame. The cursor clips to
+the covered union even when only its picture, not its hotspot, crosses a hole.
+
 ## Predicates, validation and approximations
 
 Factory IsDone is exactly Value54 and (Object exists or SpecialItem!=-1). An
@@ -150,14 +204,22 @@ the due-cell-poll early-return path. Outside a battle it publishes null.
 
 Synthetic guest-memory tests cover geometry at two frame sizes, scrolling/clipping,
 production and queue branches, build limits, superweapon clocks, CSF lookup, corruption,
-read-only memory and same-frame publication identity. They require no game assets.
+read-only memory and same-frame publication identity. They also cover final software
+cursor frames/hotspots and native tooltip UTF-16, font widths, padding, wrapping,
+surface edge clamps and hidden/corrupt data. They require no game assets.
 The supplied original executable and art were read only for static evidence; none
 are added to Git.
 
-**UNVERIFIED runtime:** real-match memory sampling, left-sidebar/hidden-sidebar
+The normal right-sidebar layout recipe retains the prior C1/C2 live-match acceptance.
+The C3 cursor/tooltip and text-polish additions have not gained real-match acceptance.
+The browser smoke harness covers their page-side composition, restoration and UI/full
+A/B switches; a blocked browser launch is not a pass.
+
+**UNVERIFIED runtime:** final partial-edge cursor alignment and latency, native tooltip
+pixel alignment, localized text legibility, left-sidebar/hidden-sidebar
 layouts, observer cameo behavior (the observer draws a separate slot treatment),
 modded power art when no live header exists, all availability approximations,
-actual localized text placement, native clock/art alignment and timing, radar
-transitions, tooltips/cursor save-under, page-layer toggling and real user interaction.
+native clock/art alignment and timing, radar transitions, tooltips/cursor save-under,
+page-layer toggling and real user interaction with the new drawing.
 The normal frame recipe is not certified for left-sidebar or hidden-sidebar modes.
 These limits do not turn synthetic tests or a successful build into UI acceptance.

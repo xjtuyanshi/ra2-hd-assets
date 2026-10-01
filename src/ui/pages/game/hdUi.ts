@@ -15,6 +15,7 @@ export function startHdUi(host: {
   frameRenderer: VmFrameRenderer;
   invalidate(): void;
   frameSize(): { width: number; height: number } | null;
+  pointerPosition?(): Readonly<{ x: number; y: number }> | null;
 }): HdUi {
   const canvas = document.createElement('canvas');
   canvas.id = 'hd-ui';
@@ -72,7 +73,7 @@ export function startHdUi(host: {
       ctx.save();
       // Match even a nonuniformly sized screen box without changing the snapshot's frame coordinates.
       ctx.scale(1, canvas.height / size.height / scale);
-      drawSidebar(ctx, sidebar, assets, { scale, time });
+      drawSidebar(ctx, sidebar, assets, { scale, time, pointerPosition: host.pointerPosition?.() ?? null });
       ctx.restore();
     }
   };

@@ -1,0 +1,16 @@
+Task: image generation / image editing only. Do not write code other than what is needed to save or resize the image. Do not browse the web.
+
+input.png ({WIDTH}x{HEIGHT}) is the DESIGN REFERENCE: the in-game interface frame of the classic real-time-strategy game Command & Conquer: Red Alert 2 / Yuri's Revenge, {SIDE} faction, enlarged {SCALE}x so it is soft and blurry. It is cut into parts laid out on a dark sheet:
+- {SIDEBAR_COUNT} tall panels side by side at the top = the right-hand SIDEBAR cut into {SIDEBAR_COUNT} vertical pieces (left panel = top piece: money counter band, two small buttons, the big square radar window showing the faction emblem, the repair (wrench) and sell (dollar) buttons, and four tab buttons; following panels = subsequent pieces; right panel = bottom piece with the scroll buttons). The sidebar has a narrow power-bar channel along its left edge and a grid of 2 columns of square black build-icon slots framed by ornate trim;
+- two long thin strips below = the bottom COMMAND BAR cut into a left half and a right half, with its small round command buttons.
+
+Use your image generation tool with input.png as the reference image to produce a REMASTERED version of the whole sheet, as a 2020s AAA remaster would ship this interface: the same frame rendered as real, high-end materials with crisp fine detail - {MATERIALS}. Invent the fine detail the blurry original could not show: bevels, machined edges, screws and rivets, seams, subtle wear and scratches, brushed-metal grain, glossy black glass in the empty slots with a soft inner bevel and faint reflection, clean specular highlights, deep ambient occlusion in the recesses. The faction emblem in the radar window keeps exactly its design and colours but becomes a crisp, detailed, realistic metal and enamel emblem. Crisp, clean, sharp, realistic; NOT cartoon, NOT painterly, no blur, no noise.
+
+EXTREMELY IMPORTANT - THIS ART IS OVERLAID PIXEL-EXACTLY ON THE LIVE GAME INTERFACE:
+- keep the sheet layout exactly: every part at exactly the same position and size, with the same dark gaps between parts;
+- inside every part keep the exact geometry: every slot, button, window, tab, bar and trim element at the same position, with the same size and outline - do not move, add, remove, merge or resize any element; keep the same number of build-icon slots (2 columns) and the same horizontal and vertical lines;
+- keep the colour scheme of the original ({COLOURS});
+- the empty build-icon slots stay EMPTY dark glass (no pictures in them); the radar window shows only the emblem; the money band at the very top stays EMPTY (no digits).
+ABSOLUTELY NO TEXT: no letters, numbers, logos with letters or watermarks.
+
+Save the result as output.png in this directory at exactly {WIDTH}x{HEIGHT} pixels (if the tool returns another size, resize the whole generated image to {WIDTH}x{HEIGHT}; do not crop). Also copy the generated image before resizing to raw.png. Then reply with one line saying the tool used and the generated size before resizing.

@@ -344,6 +344,17 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(first.sidebar!.credits).toBe(100);
     expect(harness.read()).toBe(changed);
     expect(harness.readState).toHaveBeenCalledTimes(1);
+    next = {
+      ...next,
+      pointer: { x: 660, y: 250, frame: 1, hotspot: { x: 0, y: 0 } },
+      tooltip: { rect: { x: 600, y: 260, width: 90, height: 30 }, text: 'Native\n$600' },
+    };
+    const pointerChanged = harness.read()!;
+    expect(pointerChanged).not.toBe(changed);
+    expect(pointerChanged.objects).toBe(changed.objects);
+    expect(pointerChanged.sidebar?.pointer?.frame).toBe(1);
+    expect(pointerChanged.sidebar?.tooltip?.text).toBe('Native\n$600');
+    expect(harness.read()).toBe(pointerChanged);
     at = 250; // Due cell poll takes a second cache-return path.
     next = { ...next, radarActive: true };
     const due = harness.read()!;

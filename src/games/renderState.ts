@@ -241,6 +241,10 @@ export interface GameRenderSidebar {
   modes: { repair: boolean; sell: boolean };
   /** Cameo captions in the game's language (e.g. "Ready", "On Hold"), null when they could not be read. */
   labels: { ready: string | null; hold: string | null };
+  /** Software cursor: frame-pixel hotspot position, sheet frame and offset inside that frame. Null when unknown/hidden. */
+  pointer?: { x: number; y: number; frame: number; hotspot: { x: number; y: number } } | null;
+  /** Shown native tooltip, including its exact frame-pixel bounds and original wide-string line breaks. */
+  tooltip?: { rect: GameRenderRect; text: string } | null;
 }
 
 export interface GameRenderSidebarLayout {

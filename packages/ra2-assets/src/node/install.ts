@@ -149,6 +149,11 @@ export class GameInstall {
     return this.vfs.openFile(name);
   }
 
+  /** Read one mounted archive explicitly, without exposing mutable mount state or changing file precedence. */
+  readArchive(archive: string, name: string): Uint8Array | undefined {
+    return this.archives.get(archive.toLowerCase())?.read(name.toLowerCase());
+  }
+
   ini(name: string): IniFile {
     const key = name.toLowerCase();
     let ini = this.iniCache.get(key);

@@ -19,7 +19,7 @@ vi.mock('../../src/ui/pages/game/hdUi', () => ({ startHdUi: hdUi.start }));
 
 interface BridgeHandle {
   toggle(): boolean;
-  readonly ui: { enabled: boolean; toggle(): boolean };
+  readonly ui: { enabled: boolean; readonly state: GameRenderState['sidebar']; toggle(): boolean };
   readonly live: unknown;
   readonly passthrough: { flags: number; unsupported: boolean; keyed: boolean };
 }
@@ -599,6 +599,12 @@ describe('HD interface bridge wiring', () => {
     await vi.waitFor(() => expect(hdUi.start).toHaveBeenCalledOnce());
     await advance(16);
     expect(ui.update).toHaveBeenLastCalledWith(state.sidebar);
+    const published = h.bridge()!.ui.state!;
+    expect(published).toEqual(state.sidebar);
+    expect(published).not.toBe(state.sidebar);
+    published.credits = -1;
+    expect(h.bridge()!.ui.state!.credits).toBe(state.sidebar.credits);
+    expect(Object.getOwnPropertyDescriptor(h.bridge()!.ui, 'state')?.set).toBeUndefined();
     await advance(49);
     expect(h.polls()).toBe(1);
     await advance(1);

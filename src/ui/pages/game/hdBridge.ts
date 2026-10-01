@@ -37,6 +37,8 @@ export interface HdBridgeHost {
   invalidate(): void;
   /** Current guest frame size, or null before the first frame. */
   frameSize(): { width: number; height: number } | null;
+  /** Read-only local input position; cursor shape always comes from the guest snapshot. */
+  pointerPosition?(): Readonly<{ x: number; y: number }> | null;
 }
 
 /** YR's in-game layout around the tactical view: sidebar on the right, command bar at the bottom (engine pixels). */
@@ -360,6 +362,10 @@ export function startHdBridge(host: HdBridgeHost): () => void {
       return enabled;
     },
     ui: {
+      get state() {
+        // Return a detached copy so console/test drivers cannot mutate the live bridge's retained snapshot.
+        return latestState?.sidebar ? structuredClone(latestState.sidebar) : null;
+      },
       get enabled() {
         return enabled && uiEnabled && !!ui;
       },
