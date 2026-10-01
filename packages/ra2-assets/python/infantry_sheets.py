@@ -27,6 +27,9 @@ sprite frames on that page. NumPy and Pillow suffice for every stage except ``ru
 configurable cache farm, with locked manifest updates and optional donor-filled base pages. ``copy-pages`` installs
 another theater's staged build into this theater by copying each accepted frame rectangle (theaters with an identical
 unit palette compose to the same pixels, so recomposing every sheet per theater is unnecessary).
+``repaint-pages`` restores original-index house-paint extent/tone and soft contact shadows from read-only source
+pages, stages new PNGs, and installs them with locked farm manifest updates. Named sprites select their own pages
+and retain each page's current house-paint saturation.
 All actual inputs and outputs are derived game art and must remain in gameres/ or another untracked directory.
 """
 
@@ -639,6 +642,132 @@ def model_paint_shaded(final, pw0, body2, ramp, hue_full=8.0, hue_zero=16.0, sat
     return p, enc
 
 
+def up2(a):
+    """Bilinear 2x upsample with pixel-centre alignment (edge clamp)."""
+    a = a.astype(np.float32)
+    h, w = a.shape
+    ys = (np.arange(2 * h) + 0.5) / 2 - 0.5
+    xs = (np.arange(2 * w) + 0.5) / 2 - 0.5
+    y0 = np.clip(np.floor(ys).astype(int), 0, h - 1)
+    y1 = np.clip(y0 + 1, 0, h - 1)
+    x0 = np.clip(np.floor(xs).astype(int), 0, w - 1)
+    x1 = np.clip(x0 + 1, 0, w - 1)
+    fy = np.clip(ys - np.floor(ys), 0, 1)[:, None]
+    fx = np.clip(xs - np.floor(xs), 0, 1)[None, :]
+    top = a[y0][:, x0] * (1 - fx) + a[y0][:, x1] * fx
+    bot = a[y1][:, x0] * (1 - fx) + a[y1][:, x1] * fx
+    return top * (1 - fy) + bot * fy
+
+
+def value_index(rgb, ramp):
+    """Fractional original ramp index by value; float32 matches the reviewed detail-transfer encoding."""
+    v = rgb.max(-1)
+    ramp_v = ramp.max(-1)
+    return np.interp(-v, -ramp_v, np.arange(len(ramp_v), dtype=np.float32)).astype(np.float32)
+
+
+def smoothstep(e0, e1, x):
+    t = np.clip((x - e0) / (e1 - e0), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def repaint_frame(rgba2, paint2, idx1, ramp, detail=0.4, low_sigma=1.0, detail_sigma=2.0, edge=(0.05, 0.42)):
+    """Restore house paint at full strength from the original remap indices inside the HD silhouette.
+
+    The model can shrink or omit the house area, so the original indices drive its extent and low-frequency tone.
+    The redraw's high-frequency folds supply detail; newly painted colour is neutralised to avoid house fringes.
+    Existing model paint is retained where it extends beyond the original area.
+    """
+    rgb = rgba2[..., :3].astype(np.float32)
+    alpha = rgba2[..., 3].astype(np.float32) / 255
+    m1 = ((idx1 >= 16) & (idx1 <= 31)).astype(np.float32)
+    if not m1.any():
+        return rgba2, paint2
+    k1 = np.where(m1 > 0, idx1.astype(np.float32) - 16, 0)
+    mb = up2(m1)
+    area = smoothstep(edge[0], edge[1], mb) * (alpha > 0.5)
+    # Low-frequency original tone: normalised convolution of the remap index over the remap area only.
+    num = gaussian_blur(up2(k1 * m1), low_sigma)
+    den = gaussian_blur(mb, low_sigma)
+    k_low = num / np.maximum(den, 1e-3)
+    # Old encoding: inside model paint the G channel already holds the grey ramp; elsewhere the model's raw colour.
+    p_old = paint2.astype(np.float32) / 255
+    k_hd = value_index(rgb, ramp)
+    k_enc = np.clip((255 - rgb[..., 1]) / 15, 0, 15)
+    k_art = k_enc * p_old + k_hd * (1 - p_old)
+    hp = k_art - gaussian_blur(k_art * area, detail_sigma) / np.maximum(gaussian_blur(area, detail_sigma), 1e-3)
+    k = np.clip(k_low + detail * hp, 0, 15)
+    p_new = np.maximum(p_old, area)
+    grey = 255 - 15 * k
+    # Texels newly painted: neutral remainder (no red fringe for other houses) + grey ramp code by paint share.
+    lum = (rgb @ np.array([0.2126, 0.7152, 0.0722], np.float32))[..., None]
+    add = np.clip(p_new - p_old, 0, 1)[..., None]
+    rest = rgb + (lum - rgb) * add
+    w = area[..., None]
+    enc = rest * (1 - w) + grey[..., None] * w
+    out = rgba2.copy()
+    out[..., :3] = np.clip(np.rint(enc), 0, 255).astype(np.uint8)
+    return out, np.clip(np.rint(p_new * 255), 0, 255).astype(np.uint8)
+
+
+def _dist_to(mask, iters=12):
+    """Chessboard-ish distance (in texels) from every texel to the nearest True texel of mask, capped at iters."""
+    d = np.full(mask.shape, float(iters), np.float32)
+    cur = mask.copy()
+    d[cur] = 0
+    for i in range(1, iters):
+        nxt = cur.copy()
+        nxt[1:] |= cur[:-1]
+        nxt[:-1] |= cur[1:]
+        nxt[:, 1:] |= cur[:, :-1]
+        nxt[:, :-1] |= cur[:, 1:]
+        d[nxt & ~cur] = i
+        cur = nxt
+    return d
+
+
+def reshadow_frame(rgba2, idx1, peak=0.78, far=0.5, falloff=10.0, inset=(0.55, 0.95), sigma=1.1):
+    """Soft contact shadow for an HD infantry frame: the original shadow texels (index 12) upsampled smoothly, faded to
+    zero just inside the original silhouette (so the renderer's 1x coverage clip never cuts a visible edge), blurred,
+    darkest at the feet (peak) and lighter away from the body (far). Zero padding also fades it inside the frame
+    rectangle, and a border ramp forces it to zero on the rectangle's outer texels, hiding the renderer's quad bounds.
+    Body texels keep their colour and alpha."""
+    sh1 = (idx1 == 12).astype(np.float32)
+    if not sh1.any():
+        return rgba2
+    a = rgba2[..., 3].astype(np.float32) / 255
+    rgb = rgba2[..., :3].astype(np.float32)
+    body1 = ((idx1 > 0) & (idx1 != 12))
+    body2 = np.kron(body1, np.ones((2, 2), bool)) & (a > 0)
+    # HD body: the redraw's own opaque, non-black texels (its silhouette may differ slightly from the 1x body).
+    body_hd = (a > 0.5) & (rgb.max(-1) > 24) | (body2 & (a > 0.85))
+    # Zero padding: a shadow cut by the frame rectangle fades out before the rectangle instead of ending in a straight
+    # edge (the quad bounds were visible in live play).
+    s = up2(np.pad(sh1, 1))
+    core = smoothstep(inset[0], inset[1], s)
+    soft = gaussian_blur(core, sigma)
+    soft = np.minimum(soft, smoothstep(0.3, 0.6, s))[2:-2, 2:-2]  # never beyond the original silhouette
+    dist = _dist_to(body_hd, 24)
+    strength = far + (peak - far) * np.exp(-dist / falloff)
+    # The frame rectangle is the quad the renderer draws: fade the shadow to zero over its outer four texels, so a shadow
+    # the original cut at the rectangle never ends in a straight visible edge.
+    h, w = soft.shape
+    edge_y = np.minimum(np.arange(h), np.arange(h)[::-1])[:, None]
+    edge_x = np.minimum(np.arange(w), np.arange(w)[::-1])[None, :]
+    border = smoothstep(0.0, 4.0, np.minimum(edge_y, edge_x).astype(np.float32))
+    sa = np.clip(soft * strength * border, 0, 1)
+    # Old shadow texels (black, outside the HD body) are replaced; coloured antialiased rim texels outside the body are
+    # composited over the new shadow; body texels stay as they are.
+    old_shadow = ~body_hd & (rgb.max(-1) <= 24)
+    a_keep = np.where(old_shadow, 0.0, a)
+    out_a = np.where(body_hd, a, a_keep + sa * (1 - a_keep))
+    out_rgb = np.where(body_hd[..., None], rgb, rgb * (a_keep / np.maximum(out_a, 1e-4))[..., None])
+    out = np.empty_like(rgba2)
+    out[..., :3] = np.clip(np.rint(out_rgb), 0, 255).astype(np.uint8)
+    out[..., 3] = np.clip(np.rint(out_a * 255), 0, 255).astype(np.uint8)
+    return out
+
+
 def sharpen_interior(final, body2, amount, sigma):
     """Unsharp mask on body texels at least two texels inside the silhouette (the rim keeps its antialiasing)."""
     if amount <= 0:
@@ -1175,6 +1304,96 @@ def install_pages(lib: Library, work: Path, out: Path, farm: Path, rel_dir: str,
               f"{accepted}/{len(report['frames'])} frames accepted, {time.monotonic() - start:.0f}s", flush=True)
 
 
+def repaint_pages(lib: Library, farm: Path, theater: str, stage: Path, pages=None, suffix="l5finf",
+                  paint_saturation=1.0, detail=0.4, edge=(0.05, 0.42), reshadow=True,
+                  sprites_prefix=("infantry:", "vehicle:"), sprites=None):
+    """Repaint immutable source pages, then install new files and patch only selected farm page entries.
+
+    Always start from the source rather than the farm: repeated finishing must not accumulate paint or shadows.
+    Named sprites discover their pages from the manifest and keep the farm's existing paint saturation.
+    """
+    import cache_farm
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", theater):
+        raise ValueError("theater must contain only letters, digits, hyphens and underscores")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", suffix):
+        raise ValueError("suffix must contain only letters, digits, hyphens and underscores")
+    if not math.isfinite(detail) or detail < 0:
+        raise ValueError("detail must be finite and non-negative")
+    if not 0 <= paint_saturation <= 1:
+        raise ValueError("paint-saturation must be between 0 and 1")
+    if not 0 <= edge[0] < edge[1] <= 1:
+        raise ValueError("edge must be an increasing lo,hi pair between 0 and 1")
+    relative = Path("_library") / theater
+    source = lib.root.resolve()
+    # Normalise '..' without resolving farm symlinks: cache_farm realises those before writing.
+    farm_path = Path(os.path.abspath(farm))
+    if (stage.resolve().is_relative_to(source) or farm_path.is_relative_to(source)
+            or (farm_path / relative).is_relative_to(source)):
+        raise ValueError("staging and farm directories must be outside the source library")
+    if sprites is not None:
+        selected = {name: lib.data["sprites"][name] for name in sprites}
+        sprite_pages = {frame["page"] for sprite in selected.values() for frame in sprite["frames"]
+                        if frame.get("page") is not None}
+        pages = sorted(sprite_pages if pages is None else sprite_pages.intersection(pages))
+    else:
+        selected = {name: sprite for name, sprite in lib.data["sprites"].items()
+                    if name.startswith(tuple(sprites_prefix))}
+        pages = (21, 22) if pages is None else pages
+    pages = list(dict.fromkeys(pages))
+    for page in pages:
+        if not 0 <= page < len(lib.data["spriteAtlasesHd"]):
+            raise ValueError(f"page {page} is outside the source library")
+    ramp = lib.scheme("Red")[:16]
+    stage.mkdir(parents=True, exist_ok=True)
+    for page in pages:
+        if not lib.data["spriteAtlasesHd"][page]:
+            continue
+        start = time.monotonic()
+        color, remap, p1 = lib.page2(page).copy(), lib.remap2(page).copy(), lib.page1(page)
+        seen, count = set(), 0
+        for name, sprite in selected.items():
+            for frame in sprite["frames"]:
+                if frame.get("page") != page:
+                    continue
+                x, y, w, h = frame["rect"]
+                rect = (x, y, w, h)
+                if w <= 0 or h <= 0 or rect in seen:
+                    continue
+                seen.add(rect)
+                idx = p1[y:y + h, x:x + w].astype(np.int32)
+                has_paint = ((idx >= 16) & (idx <= 31)).any()
+                has_shadow = (idx == 12).any()
+                if not (has_paint or (reshadow and has_shadow)):
+                    continue
+                crop = np.s_[2 * y:2 * (y + h), 2 * x:2 * (x + w)]
+                if color[crop].shape[:2] != (2 * h, 2 * w):
+                    continue
+                if has_paint:
+                    color[crop], remap[crop] = repaint_frame(color[crop], remap[crop], idx, ramp,
+                                                           detail=detail, edge=edge)
+                if reshadow and has_shadow and name.startswith("infantry:"):
+                    color[crop] = reshadow_frame(color[crop], idx)
+                count += 1
+        page_path = stage / f"sprites-{page}@2x-{suffix}.png"
+        remap_path = stage / f"sprites-{page}@2x-remap-{suffix}.png"
+        for pixels, path in ((color, page_path), (remap, remap_path)):
+            # install_file can hard-link staging images; replacement must never rewrite a served inode.
+            with atomic_output(path, suffix=".part") as tmp:
+                Image.fromarray(pixels).save(tmp, format="PNG", compress_level=1)
+        cache_farm.install_file(farm, str(relative / page_path.name), page_path)
+        cache_farm.install_file(farm, str(relative / remap_path.name), remap_path)
+
+        def patch(data):
+            entry = data["spriteAtlasesHd"][page]
+            entry.update(file=page_path.name, remap=remap_path.name)
+            if sprites is None:
+                entry["paintSaturation"] = paint_saturation
+
+        cache_farm.patch_json(farm, str(relative / "library.json"), patch)
+        print(f"{theater} page {page}: {count} frames, {time.monotonic() - start:.0f}s", flush=True)
+
+
 def copy_pages(source: Library, staged: Path, lib: Library, out: Path, farm: Path, rel_dir: str,
                fill_dir=None, pages=None, suffix="l5inf", paint_saturation=0.7):
     """Install a staged install-pages build of another theater by copying its accepted frame rectangles.
@@ -1385,6 +1604,16 @@ def unit_interval(text):
     return value
 
 
+def edge_pair(text):
+    try:
+        lo, hi = map(float, text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError("edge must be a comma-separated lo,hi pair")
+    if not 0 <= lo < hi <= 1:
+        raise argparse.ArgumentTypeError("edge must be an increasing lo,hi pair between 0 and 1")
+    return lo, hi
+
+
 def add_polish_options(ap, rim_soften=0.0, paint_saturation=1.0):
     rim_default = f"{rim_soften:g}" + (", unchanged" if rim_soften == 0 else "")
     ap.add_argument("--rim-soften", type=unit_interval, default=rim_soften,
@@ -1453,6 +1682,20 @@ def parser():
     sub.add_argument("--pages", type=csv_pages)
     sub.add_argument("--suffix", default="l5inf")
     sub.add_argument("--paint-saturation", type=unit_interval, default=0.7)
+    sub = commands.add_parser("repaint-pages", help="restore original-index house paint and contact shadows")
+    for name in ("source", "farm", "stage"):
+        sub.add_argument("--" + name, type=Path, required=True)
+    sub.add_argument("--theater", required=True)
+    sub.add_argument("--pages", type=csv_pages, help="default: 21,22; named sprites discover their pages")
+    sub.add_argument("--suffix", default="l5finf")
+    sub.add_argument("--paint-saturation", type=unit_interval, default=1.0,
+                     help="house-paint saturation; named sprites leave the page's current value unchanged")
+    sub.add_argument("--detail", type=float, default=0.4)
+    sub.add_argument("--edge", type=edge_pair, default=(0.05, 0.42), help="soft paint-area thresholds lo,hi")
+    sub.add_argument("--no-reshadow", action="store_true")
+    selection = sub.add_mutually_exclusive_group()
+    selection.add_argument("--sprites-prefix", type=csv_names, default=["infantry:", "vehicle:"])
+    selection.add_argument("--sprites", type=csv_names, help="exact sprite names, e.g. building:GAPILL")
     return ap
 
 
@@ -1469,6 +1712,17 @@ def main(argv=None):
         if opts.command == "run":
             return run(opts.work, opts.codex, opts.parallel, opts.limit_file, opts.names, opts.redo,
                        reasoning=opts.reasoning, order_by=opts.order)
+        if opts.command == "repaint-pages":
+            # Large atlas reads are intentional here; restore Pillow's guard for other callers.
+            pixel_limit = Image.MAX_IMAGE_PIXELS
+            try:
+                Image.MAX_IMAGE_PIXELS = None
+                repaint_pages(Library(opts.source.resolve()), opts.farm, opts.theater, opts.stage, opts.pages,
+                              opts.suffix, opts.paint_saturation, opts.detail, opts.edge, not opts.no_reshadow,
+                              opts.sprites_prefix, opts.sprites)
+            finally:
+                Image.MAX_IMAGE_PIXELS = pixel_limit
+            return 0
         if opts.command == "copy-pages":
             copy_pages(Library(opts.source_library.resolve()), opts.staged, Library(opts.library.resolve()), opts.out,
                        opts.farm, opts.rel_dir, opts.fill_dir, opts.pages, opts.suffix, opts.paint_saturation)

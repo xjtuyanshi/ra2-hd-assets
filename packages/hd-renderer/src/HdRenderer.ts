@@ -67,7 +67,7 @@ import type { ShaderNode } from './tsl';
 import { buildWater, type WaterUniforms } from './water';
 import { buildRain, type RainSystem } from './weather';
 import { VOXEL_FILL } from './ra2/voxels';
-import { groundFromHeights, setShadowGround, shadowShear } from './ra2/voxelShadow';
+import { groundFromHeights, setShadowGround, shadowShear, voxelShadowFor } from './ra2/voxelShadow';
 import { voxelLightingFor } from './ra2/vpl';
 import { voxelPbrFor } from './ra2/voxelPbr';
 import {
@@ -680,10 +680,12 @@ export class HdRenderer {
     this.waterY = waterY ?? -1000;
     // Voxel units stand on (and tilt with) the ground or the water surface under them, and their flattened shadows
     // fall there (see ra2/voxelShadow.ts). Ramps rise one level per cell; anything steeper is a cliff edge.
-    setShadowGround(
-      this.scene,
-      groundFromHeights((x, z) => Math.max(this.terrain.heightAt(x, z), this.waterY), LEVEL_HEIGHT * 1.5),
+    const shadowGround = groundFromHeights(
+      (x, z) => Math.max(this.terrain.heightAt(x, z), this.waterY),
+      LEVEL_HEIGHT * 1.5,
     );
+    shadowGround.waterHeight = this.terrain.waterHeightAt;
+    setShadowGround(this.scene, shadowGround);
     if (world?.water) this.water = { uniforms: world.water };
     if (waterY !== null) {
       const water = buildWater(this.bounds.width, this.bounds.height, waterY, this.terrain.heightTexture);
@@ -1112,6 +1114,9 @@ export class HdRenderer {
     const right = this.cameraRight.setFromMatrixColumn(this.view.camera.matrixWorld, 0);
     const up = this.cameraUp.setFromMatrixColumn(this.view.camera.matrixWorld, 1);
     const toCamera = this.toCamera.setFromMatrixColumn(this.view.camera.matrixWorld, 2);
+    const shadows = voxelShadowFor(this.nodes);
+    shadows.time = now;
+    shadows.toCamera.copy(toCamera);
     this.effects.update(now, right, up, toCamera);
     this.emitters.cameraRight.value.copy(right);
     this.emitters.cameraUp.value.copy(up);

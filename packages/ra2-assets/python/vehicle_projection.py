@@ -2,6 +2,8 @@
 
 Only builder code belongs in source control. Inputs, generated manifests, atlases
 and review images stay in an external asset directory. Pixels use a top-left origin.
+``lock`` restores design chroma; optional camouflage controls also transfer band-passed
+lightness, low-frequency lightness and chroma gain without changing the sheet layout.
 """
 from __future__ import annotations
 
@@ -278,6 +280,11 @@ def review_sheet(frames: list[Frame], path: Path):
     sheet.save(path)
 
 
+def file_stem(type_name: str) -> str:
+    """File name stem of a projection type: library voxel ids of building turrets ('NAFLAK:turret') use '_'."""
+    return type_name.replace(':', '_')
+
+
 def build(type_name: str, bake: Path, sheets: list[Path], palettes: Path, house_key: str,
           out: Path, review: Path | None = None) -> dict:
     meta = json.loads((bake / 'meta.json').read_text())
@@ -330,6 +337,10 @@ def build(type_name: str, bake: Path, sheets: list[Path], palettes: Path, house_
             if registration.iou < 0.85:
                 warnings.warn(f'{type_name}/{part}/{k:03d}: registration IoU {registration.iou:.4f} < 0.85', stacklevel=2)
     required = {'body', 'turret'} if engine.get('turreted', any(f['part'] == 'turret' for f in engine['frames'])) else {'body'}
+    # A building's voxel turret (rules TurretAnimIsVoxel, library voxel id 'NAFLAK:turret') has only turret/barrel
+    # sections: the renderer asks for the 'turret' atlas alone, so a sheet set of just that part is complete.
+    if ':' in type_name and set(parts) == {'turret'}:
+        required = {'turret'}
     if set(parts) != required:
         raise ValueError(f'Incomplete part set: expected {sorted(required)}, got {sorted(parts)}')
     facings = None
@@ -349,9 +360,10 @@ def build(type_name: str, bake: Path, sheets: list[Path], palettes: Path, house_
                 'scale': scale, 'jacobian': (BAKE_JACOBIAN * scale).tolist(),
                 'house': {'first': 16, 'count': 16} if any(np.any(f.paint[..., 0]) for fs in parts.values() for f in fs) else None,
                 'parts': {}, 'registration': []}
+    stem = file_stem(type_name)
     for part, frames in parts.items():
         colour, paint, packed = pack_frames(frames)
-        colour_name, paint_name = f'{type_name}_{part}.png', f'{type_name}_{part}_paint.png'
+        colour_name, paint_name = f'{stem}_{part}.png', f'{stem}_{part}_paint.png'
         Image.fromarray(colour).save(out / colour_name)
         Image.fromarray(paint).save(out / paint_name)
         manifest['parts'][part] = {'colour': colour_name, 'paint': paint_name,
@@ -360,11 +372,11 @@ def build(type_name: str, bake: Path, sheets: list[Path], palettes: Path, house_
             r = f.registration
             manifest['registration'].append({'part': part, 'k': f.k, 'iou': r.iou, 'scale': r.scale, 'dx': r.dx, 'dy': r.dy})
         if review:
-            review_sheet(frames, review / f'{type_name}_{part}.png')
+            review_sheet(frames, review / f'{stem}_{part}.png')
     # Publish only complete types; an interrupted build must not add a partial manifest to the index.
-    temporary = out / f'{type_name}.json.tmp'
+    temporary = out / f'{stem}.json.tmp'
     temporary.write_text(json.dumps(manifest, indent=2) + '\n')
-    temporary.replace(out / f'{type_name}.json')
+    temporary.replace(out / f'{stem}.json')
     return manifest
 
 
@@ -538,7 +550,42 @@ def chroma_lock(design, redraw, background=(118, 118, 118), sigma: float = 6.0, 
     return result
 
 
-def main():
+def camo_lock(design, redraw, sigma_ab=2.5, l_lo=1.5, l_hi=8.0, l_strength=0.6, l_base=0.0,
+              l_base_sigma=6.0, paint_chroma=42.0, chroma_gain=1.0):
+    """Restore camouflage lightness and hull chroma that an image-model redraw turned into steel grey.
+
+    Soviet aircraft lost their camouflage blotches and the Kirov's tan envelope. Band-passed design lightness
+    brings back the blotches without voxel stair-steps or baked shading; low-pass chroma restores the tan hue.
+    The prototype's final Lab round-trip is retained even at zero transfer (it can change a channel by one byte).
+    """
+    design = np.asarray(design, np.uint8)[..., :3]
+    bg = tuple(int(v) for v in design[0, 0])
+    locked = chroma_lock(design, redraw, bg, sigma_ab, 1.0, paint_chroma)
+    rgb = locked[..., :3]
+    bga = np.asarray(bg, np.int32)
+    fg_d = (np.abs(design.astype(np.int32) - bga).max(-1) > 6).astype(np.float32)
+    fg_r = (np.abs(rgb.astype(np.int32) - bga).max(-1) > 6).astype(np.float32)
+    lab_d = cv2.cvtColor(design.astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+    lab_r = cv2.cvtColor(rgb.astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+    src = fg_d * (np.hypot(lab_d[..., 1], lab_d[..., 2]) < paint_chroma)
+    tgt = fg_r * np.clip((paint_chroma + 8 - np.hypot(lab_r[..., 1], lab_r[..., 2])) / 8, 0, 1)
+
+    def lp(x, w, s):
+        return cv2.GaussianBlur(x * w, (0, 0), s) / np.maximum(cv2.GaussianBlur(w, (0, 0), s), 1e-4)
+
+    band = lp(lab_d[..., 0], src, l_lo) - lp(lab_d[..., 0], src, l_hi)
+    cover = np.clip(cv2.GaussianBlur(src, (0, 0), l_lo) * 1.5, 0, 1)
+    out = lab_r.copy()
+    base = lp(lab_d[..., 0], src, l_base_sigma) - lp(lab_r[..., 0], (tgt > 0.99).astype(np.float32), l_base_sigma)
+    out[..., 0] = np.clip(out[..., 0] + (l_strength * band * cover + l_base * base) * tgt, 0, 100)
+    out[..., 1:] *= (1 + (chroma_gain - 1) * tgt)[..., None]
+    res = np.clip(cv2.cvtColor(out, cv2.COLOR_LAB2RGB) * 255 + 0.5, 0, 255).astype(np.uint8)
+    result = np.asarray(redraw, np.uint8).copy()
+    result[..., :3] = np.where(fg_r[..., None] > 0, res, np.asarray(redraw)[..., :3])
+    return result
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     builder = commands.add_parser('build')
@@ -565,23 +612,33 @@ def main():
     grader.add_argument('--keep', type=float, default=0.3)
     grader.add_argument('--hue', type=float, default=40.0, help='centre of the graded hue band, degrees')
     grader.add_argument('--half', type=float, default=20.0, help='half width of the band at full effect, degrees')
-    locker = commands.add_parser('lock', help='restore the design colours on a redraw sheet (chroma_lock)')
+    locker = commands.add_parser('lock', help='restore design colours and optionally camouflage on a redraw sheet')
     locker.add_argument('--design', type=Path, required=True, help='image-model input sheet (input.png)')
     locker.add_argument('--redraw', type=Path, required=True, help='image-model result (output.png)')
     locker.add_argument('--out', type=Path, required=True)
     locker.add_argument('--sigma', type=float, default=6.0)
-    locker.add_argument('--strength', type=float, default=1.0)
-    args = parser.parse_args()
+    locker.add_argument('--strength', type=float, default=1.0, help='chroma-only lock weight (default: 1)')
+    locker.add_argument('--l-strength', type=float, default=0.0, help='design lightness band-pass weight (default: 0)')
+    locker.add_argument('--l-lo', type=float, default=1.5, help='fine lightness cutoff, sheet pixels (default: 1.5)')
+    locker.add_argument('--l-hi', type=float, default=8.0, help='coarse lightness cutoff, sheet pixels (default: 8)')
+    locker.add_argument('--l-base', type=float, default=0.0, help='low-pass lightness transfer weight (default: 0)')
+    locker.add_argument('--chroma-gain', type=float, default=1.0, help='hull chroma multiplier (default: 1)')
+    args = parser.parse_args(argv)
     if args.command == 'lock':
-        design = np.asarray(Image.open(args.design).convert('RGB'))
+        with Image.open(args.design) as im:
+            design = np.asarray(im.convert('RGB'))
         with Image.open(args.redraw) as im:
             mode = 'RGBA' if im.mode in ('RGBA', 'LA', 'P') else 'RGB'
             redraw = np.asarray(im.convert(mode))
         if design.shape[:2] != redraw.shape[:2]:
             raise SystemExit(f'size mismatch: design {design.shape[:2]} vs redraw {redraw.shape[:2]}')
         # Keep the redraw's mode so downstream registration sees the same file layout.
-        Image.fromarray(chroma_lock(design, redraw, tuple(int(v) for v in design[0, 0]), args.sigma, args.strength),
-                        mode).save(args.out)
+        if (args.l_strength, args.l_lo, args.l_hi, args.l_base, args.chroma_gain) != (0.0, 1.5, 8.0, 0.0, 1.0):
+            locked = camo_lock(design, redraw, sigma_ab=args.sigma, l_lo=args.l_lo, l_hi=args.l_hi,
+                               l_strength=args.l_strength, l_base=args.l_base, chroma_gain=args.chroma_gain)
+        else:
+            locked = chroma_lock(design, redraw, tuple(int(v) for v in design[0, 0]), args.sigma, args.strength)
+        Image.fromarray(locked, mode).save(args.out)
         return
     if args.command == 'sheet':
         if '-' in args.facings:

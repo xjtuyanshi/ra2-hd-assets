@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Mesh, PlaneGeometry } from 'three/webgpu';
+import { PlaneGeometry } from 'three/webgpu';
 import { HdRenderer, applyLookPreset, LOOK_PRESETS } from '../src/HdRenderer';
 import { AtmosphereNodes } from '../src/atmosphere';
 import { Lighting } from '../src/lighting';
@@ -10,7 +10,13 @@ import {
   shadowStretch,
   spriteLookFor,
 } from '../src/ra2/spriteLook';
-import { ENGINE_SHADOW_OPACITY, voxelShadowMaterial } from '../src/ra2/voxelShadow';
+import {
+  ENGINE_SHADOW_OPACITY,
+  VoxelShadowMesh,
+  VoxelWaterMesh,
+  voxelShadowMaterial,
+  voxelWaterMaterial,
+} from '../src/ra2/voxelShadow';
 import { instantiateVoxel } from '../src/ra2/voxels';
 import { voxelMaterialFor } from '../src/ra2/vpl';
 import { createScenario } from '../sandbox/scenario';
@@ -167,7 +173,19 @@ describe('voxel shadow context ownership', () => {
     expect(shadow.opacityNode).toBeTruthy();
     const material = voxelMaterialFor(null, a);
     const unit = instantiateVoxel([{ role: 'body', turretOffset: 0, geometry }], material, a);
-    expect((unit.root.children.at(-1) as Mesh).material).toBe(shadow);
+    const twins = unit.root.children.filter((o): o is VoxelShadowMesh => o instanceof VoxelShadowMesh);
+    expect(twins.every((t) => t.material === shadow)).toBe(true);
+    const waterDisposals = (['foam', 'reflection'] as const).map((layer) => {
+      const material = voxelWaterMaterial(a, layer);
+      const water = unit.root.children.filter(
+        (o): o is VoxelWaterMesh => o instanceof VoxelWaterMesh && o.layer === layer,
+      );
+      expect(water.length).toBe(layer === 'foam' ? 5 : 1);
+      expect(water.every((t) => t.material === material && t.geometry === geometry)).toBe(true);
+      expect(material.forceSinglePass).toBe(true);
+      expect(voxelWaterMaterial(b, layer)).not.toBe(material);
+      return vi.spyOn(material, 'dispose');
+    });
     spriteLookFor(a).shadowDarkness.value = 1.15;
     expect(spriteLookFor(b).shadowDarkness.value).toBe(1);
     a.dispose();
@@ -175,5 +193,6 @@ describe('voxel shadow context ownership', () => {
     b.dispose();
     geometry.dispose();
     expect(dispose).toHaveBeenCalledOnce();
+    waterDisposals.forEach((dispose) => expect(dispose).toHaveBeenCalledOnce());
   });
 });

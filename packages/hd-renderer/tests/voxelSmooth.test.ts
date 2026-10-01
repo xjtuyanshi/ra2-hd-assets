@@ -323,7 +323,7 @@ it('shares equal options across houses and worlds, keeps depth/shadow twins, and
   unit.root.traverse((o) => {
     if (o instanceof VoxelShadowMesh) twins.push(o);
   });
-  expect(twins).toHaveLength(1);
+  expect(twins).toHaveLength(5);
   expect(twins[0]!.geometry).toBe(first[0]!.geometry);
   expect(first[0]!.material!.depthNode).toBeTruthy();
   const changed = buildSmoothVoxelGeometry(model, null, a, { aoRays: 0, bandOut: 0.1 });

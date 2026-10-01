@@ -14,7 +14,7 @@ import type { AtmosphereNodes } from '../atmosphere';
 import { createPainterDepth, meshPainterDepthNode } from '../painterDepth';
 import { decodeBase64 } from './cache';
 import { paletteNodes } from './mapLighting';
-import { VoxelShadowMesh, groundOf } from './voxelShadow';
+import { SHADOW_COPIES, VoxelShadowMesh, VoxelWaterMesh, groundOf } from './voxelShadow';
 import { voxelFill, voxelMaterialFor, voxelProjectedMaterialFor } from './vpl';
 import type { VoxelProjectionAsset } from './voxelProjection';
 import { CARD_CLEARANCE } from './cardDepth';
@@ -514,8 +514,8 @@ export class VoxelUnit extends Group {
 
 /**
  * A placed vehicle: parts share the body transform; turret and barrel yaw together around the turret offset. Voxel
- * meshes neither cast nor receive the scene's sun shadows: like the original, every part instead gets a flattened
- * shadow twin on the ground below the unit (see voxelShadow.ts).
+ * meshes neither cast nor receive the scene's sun shadows: every part instead gets flattened contact-shadow twins
+ * on the ground below the unit, plus water-only foam/reflection twins (see voxelShadow.ts).
  */
 export function instantiateVoxel(
   parts: VoxelGeometry[],
@@ -545,7 +545,11 @@ export function instantiateVoxel(
     }
     turret.add(mesh);
   }
-  // Shadow twins last: the scene graph updates children in order, so their sources' world matrices are current.
-  for (const mesh of meshes) root.add(new VoxelShadowMesh(mesh, nodes));
+  // Surface twins after all parts: the scene graph updates children in order, so source world matrices are current.
+  for (let copy = 0; copy < SHADOW_COPIES.length; copy++)
+    for (const mesh of meshes) root.add(new VoxelShadowMesh(mesh, nodes, copy));
+  for (let copy = 0; copy < SHADOW_COPIES.length; copy++)
+    for (const mesh of meshes) root.add(new VoxelWaterMesh(mesh, nodes, 'foam', copy));
+  for (const mesh of meshes) root.add(new VoxelWaterMesh(mesh, nodes, 'reflection'));
   return { root, turret };
 }

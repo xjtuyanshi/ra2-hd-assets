@@ -94,6 +94,20 @@ function terrain(waterBed = true, counts = [1, 12, 13, 14, 15, 16], hasCliff = f
 }
 
 describe('terrain water mirrors', () => {
+  it('exposes water levels only for existing water cells, including elevated water and map boundaries', () => {
+    const { build } = terrain(true, [1, 12]);
+    expect(build.waterHeightAt!(0.5, 0.5)).toBe(0);
+    expect(build.waterHeightAt!(4.5, 8.5)).toBe(4 * LEVEL_HEIGHT);
+    for (const [x, z] of [
+      [-0.1, 0],
+      [0, -0.1],
+      [12, 8],
+      [0, 16],
+      [1.5, 0.5],
+      [0.5, 1.5],
+    ])
+      expect(build.waterHeightAt!(x!, z!)).toBeUndefined();
+  });
   it.each([false, true])(
     'passes the optional cliff distance to bed water with composite UVs (cliff=%s)',
     (hasCliff) => {

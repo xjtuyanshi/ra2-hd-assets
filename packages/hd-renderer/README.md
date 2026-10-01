@@ -508,8 +508,23 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   (the `pnpm hd:materials` sidecar) with the engine's own shade rule (YR 1.001 @0x7586F0: section = int(16 x
   (max(0, N.L) + max(0, b / (3 - 2b)))), b = N.H, H between the voxel light and the model's up axis), lit by the cell's
   object level plus the units' extra light (rules `ExtraUnitLight`). Shadows are the model flattened onto the ground
-  along a fixed light, halving the displayed colour once per pixel (depth-tested, see `voxelShadow.ts`); airborne units
-  drop theirs straight down, shrunk with height. Review parameters (sandbox and replays): `?vpl=<extra>,<occlusion>,
+  along a fixed light, with a 0.04-cell contact penumbra from five shared-geometry/material twins whose overlapping
+  core keeps the original darkness (depth-tested once per layer, see `voxelShadow.ts`); `?vshadow=hard` restores one
+  crisp twin in the sandbox and replays. Grounded voxel origins on water are identified by the terrain's surface
+  lookup, regardless of unit type: five straight-down twins give 0.3 core contact darkness; five blue-white foam twins
+  retain only source points near the waterline (smooth fade from 0.06 to 0.14 world units above it), scale 1.06 across
+  the hull and 1.14 along its forward axis, and break their 0.3 core alpha with drifting 0.1/0.2-cell value noise
+  (±0.02 scale and ±3% alpha breathing over two seconds on the renderer clock). One mid blue-grey reflection
+  silhouette mirrors each part about the water and flattens it along the camera view ray; its 0.3 waterline alpha
+  ripples horizontally and fades to zero by 0.5 world units below it. The silhouette avoids
+  applying projected colour/normal nodes to a singular flattened model matrix. All twins share source geometry and
+  renderer-owned materials, with no per-frame allocations; water draws at most eleven twins per part, land five.
+  Contact depth masks the foam core so only the enlarged soft rim shows; all layers sit just above the water,
+  behind upright art. `?vnaval=old` restores the ordinary water drop shadow for before/after review, independently
+  of `vshadow=hard`. Airborne units drop theirs straight down, shrunk with height. Building voxel
+  turrets cast from a bounded physical point on their
+  view ray nearest the foundation centre, using the same ground shear as vehicles rather than their pulled render
+  altitude. Review parameters (sandbox and replays): `?vpl=<extra>,<occlusion>,
 <sheen>`, `?vshape=<corner relax>,<normal blend>`, `?ml=0` (no map day light).
 
 ### Optional remaster voxel look

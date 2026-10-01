@@ -96,6 +96,116 @@ def read_image(path, mode=None):
         return np.array(im.convert(mode) if mode else im)
 
 
+# Frozen reviewed prototype formulas: byte-for-byte regression oracles on synthetic data.
+def _prototype_up2(a):
+    """Bilinear 2x upsample with pixel-centre alignment (edge clamp)."""
+    a = a.astype(np.float32)
+    h, w = a.shape
+    ys = (np.arange(2 * h) + 0.5) / 2 - 0.5
+    xs = (np.arange(2 * w) + 0.5) / 2 - 0.5
+    y0 = np.clip(np.floor(ys).astype(int), 0, h - 1); y1 = np.clip(y0 + 1, 0, h - 1)
+    x0 = np.clip(np.floor(xs).astype(int), 0, w - 1); x1 = np.clip(x0 + 1, 0, w - 1)
+    fy = np.clip(ys - np.floor(ys), 0, 1)[:, None]; fx = np.clip(xs - np.floor(xs), 0, 1)[None, :]
+    top = a[y0][:, x0] * (1 - fx) + a[y0][:, x1] * fx
+    bot = a[y1][:, x0] * (1 - fx) + a[y1][:, x1] * fx
+    return top * (1 - fy) + bot * fy
+
+
+def _prototype_value_index(rgb, ramp):
+    v = rgb.max(-1)
+    ramp_v = ramp.max(-1)
+    return np.interp(-v, -ramp_v, np.arange(len(ramp_v), dtype=np.float32)).astype(np.float32)
+
+
+def _prototype_smoothstep(e0, e1, x):
+    t = np.clip((x - e0) / (e1 - e0), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def _prototype_repaint_frame(rgba2, paint2, idx1, ramp, detail=0.8, low_sigma=1.0, detail_sigma=2.0, edge=(0.3, 0.7)):
+    rgb = rgba2[..., :3].astype(np.float32)
+    alpha = rgba2[..., 3].astype(np.float32) / 255
+    m1 = ((idx1 >= 16) & (idx1 <= 31)).astype(np.float32)
+    if not m1.any():
+        return rgba2, paint2
+    k1 = np.where(m1 > 0, idx1.astype(np.float32) - 16, 0)
+    mb = _prototype_up2(m1)
+    area = _prototype_smoothstep(edge[0], edge[1], mb) * (alpha > 0.5)
+    # Low-frequency original tone: normalised convolution of the remap index over the remap area only.
+    num = inf.gaussian_blur(_prototype_up2(k1 * m1), low_sigma)
+    den = inf.gaussian_blur(mb, low_sigma)
+    k_low = num / np.maximum(den, 1e-3)
+    # Old encoding: inside model paint the G channel already holds the grey ramp; elsewhere the model's raw colour.
+    p_old = paint2.astype(np.float32) / 255
+    k_hd = _prototype_value_index(rgb, ramp)
+    k_enc = np.clip((255 - rgb[..., 1]) / 15, 0, 15)
+    k_art = k_enc * p_old + k_hd * (1 - p_old)
+    hp = k_art - inf.gaussian_blur(k_art * area, detail_sigma) / np.maximum(inf.gaussian_blur(area, detail_sigma), 1e-3)
+    k = np.clip(k_low + detail * hp, 0, 15)
+    p_new = np.maximum(p_old, area)
+    grey = 255 - 15 * k
+    # Texels newly painted: neutral remainder (no red fringe for other houses) + grey ramp code by paint share.
+    lum = (rgb @ np.array([0.2126, 0.7152, 0.0722], np.float32))[..., None]
+    add = np.clip(p_new - p_old, 0, 1)[..., None]
+    rest = rgb + (lum - rgb) * add
+    w = area[..., None]
+    enc = rest * (1 - w) + grey[..., None] * w
+    out = rgba2.copy()
+    out[..., :3] = np.clip(np.rint(enc), 0, 255).astype(np.uint8)
+    return out, np.clip(np.rint(p_new * 255), 0, 255).astype(np.uint8)
+
+
+def _prototype_dist_to(mask, iters=12):
+    """Chessboard-ish distance (in texels) from every texel to the nearest True texel of mask, capped at iters."""
+    d = np.full(mask.shape, float(iters), np.float32)
+    cur = mask.copy()
+    d[cur] = 0
+    for i in range(1, iters):
+        nxt = cur.copy()
+        nxt[1:] |= cur[:-1]; nxt[:-1] |= cur[1:]; nxt[:, 1:] |= cur[:, :-1]; nxt[:, :-1] |= cur[:, 1:]
+        d[nxt & ~cur] = i
+        cur = nxt
+    return d
+
+
+def _prototype_reshadow_frame(rgba2, idx1, peak=0.78, far=0.5, falloff=10.0, inset=(0.55, 0.95), sigma=1.1):
+    """Soft contact shadow for an HD infantry frame: the original shadow texels (index 12) upsampled smoothly, faded to
+    zero just inside the original silhouette (so the renderer's 1x coverage clip never cuts a visible edge), blurred,
+    darkest at the feet (peak) and lighter away from the body (far). Body texels keep their colour and alpha."""
+    sh1 = (idx1 == 12).astype(np.float32)
+    if not sh1.any():
+        return rgba2
+    a = rgba2[..., 3].astype(np.float32) / 255
+    rgb = rgba2[..., :3].astype(np.float32)
+    body1 = ((idx1 > 0) & (idx1 != 12))
+    body2 = np.kron(body1, np.ones((2, 2), bool)) & (a > 0)
+    # HD body: the redraw's own opaque, non-black texels (its silhouette may differ slightly from the 1x body).
+    body_hd = (a > 0.5) & (rgb.max(-1) > 24) | (body2 & (a > 0.85))
+    # Zero padding: a shadow cut by the frame rectangle fades out before the rectangle instead of ending in a straight
+    # edge (the quad bounds were visible in live play).
+    s = _prototype_up2(np.pad(sh1, 1))
+    core = _prototype_smoothstep(inset[0], inset[1], s)
+    soft = inf.gaussian_blur(core, sigma)
+    soft = np.minimum(soft, _prototype_smoothstep(0.3, 0.6, s))[2:-2, 2:-2]  # never beyond the original silhouette
+    dist = _prototype_dist_to(body_hd, 24)
+    strength = far + (peak - far) * np.exp(-dist / falloff)
+    h, w = soft.shape
+    edge_y = np.minimum(np.arange(h), np.arange(h)[::-1])[:, None]
+    edge_x = np.minimum(np.arange(w), np.arange(w)[::-1])[None, :]
+    border = _prototype_smoothstep(0.0, 4.0, np.minimum(edge_y, edge_x).astype(np.float32))
+    sa = np.clip(soft * strength * border, 0, 1)
+    # Old shadow texels (black, outside the HD body) are replaced; coloured antialiased rim texels outside the body are
+    # composited over the new shadow; body texels stay as they are.
+    old_shadow = ~body_hd & (rgb.max(-1) <= 24)
+    a_keep = np.where(old_shadow, 0.0, a)
+    out_a = np.where(body_hd, a, a_keep + sa * (1 - a_keep))
+    out_rgb = np.where(body_hd[..., None], rgb, rgb * (a_keep / np.maximum(out_a, 1e-4))[..., None])
+    out = np.empty_like(rgba2)
+    out[..., :3] = np.clip(np.rint(out_rgb), 0, 255).astype(np.uint8)
+    out[..., 3] = np.clip(np.rint(out_a * 255), 0, 255).astype(np.uint8)
+    return out
+
+
 class LibraryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix=".tmp-infantry-", dir=Path(__file__).parent)
@@ -790,6 +900,240 @@ class CopyPagesTests(unittest.TestCase):
         self.assertFalse((self.out / f"sprites-{PAGE}@2x-l5inf.png").exists())
 
 
+class RepaintFrameTests(unittest.TestCase):
+    def setUp(self):
+        self.ramp = np.stack([np.linspace(240, 30, 16), np.linspace(60, 8, 16),
+                              np.linspace(50, 6, 16)], -1).astype(np.float32)
+
+    def test_original_remap_area_has_full_weight_inside_hd_silhouette(self):
+        idx = np.zeros((8, 10), np.int32)
+        idx[2:6, 3:7] = 20
+        rgba = np.full((16, 20, 4), [190, 40, 20, 255], np.uint8)
+        rgba[7, 9, 3] = 127  # outside the HD silhouette even though the original is painted
+        paint = np.zeros((16, 20), np.uint8)
+        color, weight = inf.repaint_frame(rgba, paint, idx, self.ramp)
+        area = _prototype_smoothstep(0.05, 0.42, _prototype_up2((idx == 20).astype(np.float32)))
+        area *= rgba[..., 3] > 127.5
+        np.testing.assert_array_equal(weight, np.rint(area * 255).astype(np.uint8))
+        original = np.repeat(np.repeat(idx == 20, 2, 0), 2, 1) & (rgba[..., 3] > 127.5)
+        np.testing.assert_array_equal(weight[original], 255)
+        np.testing.assert_array_equal(color[..., 3], rgba[..., 3])
+        np.testing.assert_array_equal(color[area == 0], rgba[area == 0])
+        paint[0, 0] = 173  # model paint is retained by union, not removed by the original mask
+        self.assertEqual(inf.repaint_frame(rgba, paint, idx, self.ramp)[1][0, 0], 173)
+
+    def test_no_original_remap_is_an_exact_noop(self):
+        rng = np.random.default_rng(31)
+        rgba = rng.integers(0, 256, (8, 12, 4), dtype=np.uint8)
+        paint = rng.integers(0, 256, (8, 12), dtype=np.uint8)
+        color, weight = inf.repaint_frame(rgba, paint, np.full((4, 6), 40), self.ramp)
+        self.assertIs(color, rgba)
+        self.assertIs(weight, paint)
+
+    def test_darker_original_index_encodes_a_darker_ramp_code(self):
+        idx = np.full((12, 24), 16, np.int32)
+        idx[:, 12:] = 31
+        rgba = np.full((24, 48, 4), [180, 40, 25, 255], np.uint8)
+        color, weight = inf.repaint_frame(rgba, np.zeros((24, 48), np.uint8), idx, self.ramp, detail=0)
+        self.assertEqual(color[12, 8, 1], 255)
+        self.assertEqual(color[12, 40, 1], 30)
+        np.testing.assert_array_equal(weight, 255)
+
+    def test_reshadow_preserves_body_and_fades_towards_silhouette_and_frame_bounds(self):
+        idx = np.zeros((16, 24), np.int32)
+        idx[3:6, 4:7] = 40
+        idx[6:12, 3:21] = 12
+        body = np.repeat(np.repeat(idx == 40, 2, 0), 2, 1)
+        shadow = np.repeat(np.repeat(idx == 12, 2, 0), 2, 1)
+        rgba = np.zeros((32, 48, 4), np.uint8)
+        rgba[body] = [120, 80, 50, 255]
+        rgba[shadow] = [0, 0, 0, 255]
+        out = inf.reshadow_frame(rgba, idx)
+        np.testing.assert_array_equal(out[body], rgba[body])
+        np.testing.assert_array_equal(out[..., 3][~(shadow | body)], 0)
+        np.testing.assert_array_equal(out[[0, -1], :, 3], 0)
+        np.testing.assert_array_equal(out[:, [0, -1], 3], 0)
+        self.assertGreater(out[15, 10, 3], out[15, 36, 3])  # darkest near the feet
+        self.assertGreater(out[15, 36, 3], 0)
+        self.assertIs(inf.reshadow_frame(rgba, np.zeros_like(idx)), rgba)
+
+    def test_random_frames_are_bit_identical_to_reviewed_prototypes(self):
+        rng = np.random.default_rng(20261001)
+        for shape in ((4, 6), (9, 13), (1, 3)):
+            idx = rng.integers(0, 50, shape, dtype=np.int32)
+            idx.flat[:2] = [12, 23]
+            rgba = rng.integers(0, 256, (2 * shape[0], 2 * shape[1], 4), dtype=np.uint8)
+            rgba[rng.random(rgba.shape[:2]) < 0.4, :3] = 0  # exercise shadow replacement as well as body retention
+            paint = rng.integers(0, 256, rgba.shape[:2], dtype=np.uint8)
+            original_rgba, original_paint, original_idx = rgba.copy(), paint.copy(), idx.copy()
+            for kwargs in ({"detail": 0.4, "edge": (0.05, 0.42)},
+                           {"detail": 0.8, "edge": (0.3, 0.7)},
+                           {"detail": 1.2, "low_sigma": 0.7, "detail_sigma": 1.3, "edge": (0.2, 0.8)}):
+                with self.subTest(shape=shape, kwargs=kwargs):
+                    expected = _prototype_repaint_frame(rgba, paint, idx, self.ramp, **kwargs)
+                    actual = inf.repaint_frame(rgba, paint, idx, self.ramp, **kwargs)
+                    for got, want in zip(actual, expected):
+                        np.testing.assert_array_equal(got, want)
+            np.testing.assert_array_equal(inf.repaint_frame(rgba, paint, idx, self.ramp)[0],
+                                          _prototype_repaint_frame(rgba, paint, idx, self.ramp,
+                                                                   detail=0.4, edge=(0.05, 0.42))[0])
+            for kwargs in ({}, {"peak": 0.9, "far": 0.2, "falloff": 3.0, "inset": (0.6, 0.9), "sigma": 0.6}):
+                np.testing.assert_array_equal(inf.reshadow_frame(rgba, idx, **kwargs),
+                                              _prototype_reshadow_frame(rgba, idx, **kwargs))
+            np.testing.assert_array_equal(rgba, original_rgba)
+            np.testing.assert_array_equal(paint, original_paint)
+            np.testing.assert_array_equal(idx, original_idx)
+
+    def test_shadow_touching_frame_fades_to_zero_at_the_rectangle(self):
+        idx = np.full((8, 8), 12, np.int32)
+        rgba = np.zeros((16, 16, 4), np.uint8)
+        out = inf.reshadow_frame(rgba, idx)
+        np.testing.assert_array_equal(out, _prototype_reshadow_frame(rgba, idx))
+        # The renderer's quad is the frame rectangle: no straight shadow edge may remain on it.
+        np.testing.assert_array_equal(out[[0, -1], :, 3], 0)
+        np.testing.assert_array_equal(out[:, [0, -1], 3], 0)
+        self.assertLess(out[1, 8, 3], out[3, 8, 3])
+        self.assertGreater(out[8, 8, 3], 0)
+
+
+class RepaintPagesTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        self.idx = np.zeros((6, 24), np.uint8)
+        for x, index in ((0, 20), (6, 28), (12, 16), (18, 40)):
+            self.idx[1:3, x + 1:x + 5] = index
+            self.idx[3:5, x + 1:x + 5] = 12
+        idx2 = np.repeat(np.repeat(self.idx, 2, 0), 2, 1)
+        self.color = np.zeros((12, 48, 4), np.uint8)
+        self.color[idx2 > 0, 3] = 255
+        self.color[(idx2 > 0) & (idx2 != 12), :3] = [170, 50, 25]
+        self.paint = np.zeros((12, 48), np.uint8)
+        for pixels, name in ((self.idx, "indexed.png"), (self.color, "color.png"), (self.paint, "paint.png")):
+            Image.fromarray(pixels).save(self.source / name)
+        self.ramp = np.stack([np.linspace(240, 30, 16), np.linspace(60, 8, 16), np.linspace(50, 6, 16)], -1)
+        entry = {"file": "color.png", "remap": "paint.png", "paintSaturation": 0.9,
+                 "scale": 2, "width": 48, "height": 12}
+        self.data = {
+            "spriteAtlases": [{"file": "indexed.png"} for _ in range(23)],
+            "spriteAtlasesHd": [copy.deepcopy(entry) for _ in range(23)],
+            "colorSchemes": [{"remap": self.ramp.tolist()}], "colorSchemesByName": {"Red": 0},
+            "sprites": {
+                "infantry:TEST": {"frames": [{"page": p, "rect": [0, 0, 6, 6]} for p in (21, 21, 22)]},
+                "vehicle:TEST": {"frames": [{"page": 21, "rect": [6, 0, 6, 6]}]},
+                "building:GAPILL": {"frames": [{"page": p, "rect": [12, 0, 6, 6]} for p in (0, 22)]},
+                "infantry:NO_REMAP": {"frames": [{"page": 21, "rect": [18, 0, 6, 6]}]}},
+            "unrelated": {"keep": [False, 0]}}
+        (self.source / "library.json").write_text(json.dumps(self.data))
+        self.source_files = {p.name: (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_ino)
+                             for p in self.source.iterdir()}
+        self.current = self.root / "current"
+        self.current.mkdir()
+        self.merged = copy.deepcopy(self.data)
+        self.merged["spriteAtlasesHd"][0]["paintSaturation"] = 0.36
+        self.merged["farmOnly"] = "preserve"
+        (self.current / "library.json").write_text(json.dumps(self.merged))
+        for name in ("indexed.png", "color.png", "paint.png"):
+            (self.current / name).symlink_to(self.source / name)
+        self.farm = self.root / "farm"
+        (self.farm / "_library").mkdir(parents=True)
+        (self.farm / "_library/test").symlink_to(self.current)
+        self.stage = self.root / "stage"
+
+    def run_cli(self, *extra):
+        return subprocess.run([sys.executable, "-B", str(Path(inf.__file__)), "repaint-pages",
+                               "--source", str(self.source), "--farm", str(self.farm), "--theater", "test",
+                               "--stage", str(self.stage), *extra], check=True, capture_output=True, text=True)
+
+    def assert_source_untouched(self):
+        self.assertEqual({p.name: (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_ino)
+                          for p in self.source.iterdir()}, self.source_files)
+        self.assertEqual(json.loads((self.current / "library.json").read_text()), self.merged)
+
+    def test_cli_installs_prefix_frames_and_patches_only_selected_pages_from_source(self):
+        result = self.run_cli()
+        self.assertIn("page 21: 3 frames", result.stdout)  # duplicate rectangles are processed once
+        expected_color, expected_paint = self.color.copy(), self.paint.copy()
+        for name, x in (("infantry:TEST", 0), ("vehicle:TEST", 6), ("infantry:NO_REMAP", 18)):
+            crop = np.s_[:, 2 * x:2 * (x + 6)]
+            idx = self.idx[:, x:x + 6].astype(np.int32)
+            expected_color[crop], expected_paint[crop] = inf.repaint_frame(
+                expected_color[crop], expected_paint[crop], idx, self.ramp.astype(np.float32))
+            if name.startswith("infantry:"):
+                expected_color[crop] = inf.reshadow_frame(expected_color[crop], idx)
+        target = self.farm / "_library/test"
+        self.assertFalse(target.is_symlink())
+        self.assertFalse((target / "library.json").is_symlink())
+        np.testing.assert_array_equal(read_image(target / "sprites-21@2x-l5finf.png"), expected_color)
+        np.testing.assert_array_equal(read_image(target / "sprites-21@2x-remap-l5finf.png"), expected_paint)
+        np.testing.assert_array_equal(read_image(self.stage / "sprites-21@2x-l5finf.png"), expected_color)
+        want = copy.deepcopy(self.merged)
+        for page in (21, 22):
+            want["spriteAtlasesHd"][page].update(file=f"sprites-{page}@2x-l5finf.png",
+                                                remap=f"sprites-{page}@2x-remap-l5finf.png", paintSaturation=1.0)
+        self.assertEqual(json.loads((target / "library.json").read_text()), want)
+        self.assert_source_untouched()
+        # The farm may contain a prior finishing pass; a repeat always starts from immutable source pixels.
+        replacement = self.root / "changed.png"
+        Image.fromarray(np.zeros_like(self.color)).save(replacement)
+        replacement.replace(target / "sprites-21@2x-l5finf.png")
+        self.run_cli()
+        np.testing.assert_array_equal(read_image(target / "sprites-21@2x-l5finf.png"), expected_color)
+        self.assert_source_untouched()
+
+    def test_named_sprites_discover_all_frame_pages_and_preserve_farm_saturation(self):
+        self.run_cli("--sprites", "building:GAPILL", "--edge", "0.3,0.7", "--suffix", "pill")
+        crop = np.s_[:, 24:36]
+        expected_color, expected_paint = self.color.copy(), self.paint.copy()
+        expected_color[crop], expected_paint[crop] = inf.repaint_frame(
+            self.color[crop], self.paint[crop], self.idx[:, 12:18].astype(np.int32),
+            self.ramp.astype(np.float32), edge=(0.3, 0.7))
+        target = self.farm / "_library/test"
+        want = copy.deepcopy(self.merged)
+        for page in (0, 22):
+            want["spriteAtlasesHd"][page].update(file=f"sprites-{page}@2x-pill.png",
+                                                remap=f"sprites-{page}@2x-remap-pill.png")
+            np.testing.assert_array_equal(read_image(target / f"sprites-{page}@2x-pill.png"), expected_color)
+            np.testing.assert_array_equal(read_image(target / f"sprites-{page}@2x-remap-pill.png"), expected_paint)
+        self.assertEqual(json.loads((target / "library.json").read_text()), want)
+        self.assertFalse((target / "sprites-21@2x-pill.png").exists())
+        self.assert_source_untouched()
+
+    def test_custom_prefix_page_detail_saturation_and_no_reshadow(self):
+        self.run_cli("--pages", "21", "--sprites-prefix", "infantry:TEST", "--no-reshadow",
+                     "--detail", "0.8", "--edge", "0.3,0.7", "--paint-saturation", "0.75")
+        expected = self.color.copy()
+        expected[:, :12] = inf.repaint_frame(self.color[:, :12], self.paint[:, :12],
+                                             self.idx[:, :6].astype(np.int32), self.ramp.astype(np.float32),
+                                             detail=0.8, edge=(0.3, 0.7))[0]
+        target = self.farm / "_library/test"
+        np.testing.assert_array_equal(read_image(target / "sprites-21@2x-l5finf.png"), expected)
+        data = json.loads((target / "library.json").read_text())
+        self.assertEqual(data["spriteAtlasesHd"][21]["paintSaturation"], 0.75)
+        self.assertEqual(data["spriteAtlasesHd"][22], self.merged["spriteAtlasesHd"][22])
+        self.assert_source_untouched()
+
+    def test_source_staging_and_invalid_edges_are_rejected_before_writing(self):
+        args = ["repaint-pages", "--source", str(self.source), "--farm", str(self.farm),
+                "--theater", "test", "--stage", str(self.source)]
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            inf.main(args)
+        self.assert_source_untouched()
+        # A farm root can be outside source while its _library/<theater> destination is the source itself.
+        direct = self.root / "direct" / "_library" / "test"
+        direct.mkdir(parents=True)
+        shutil.copyfile(self.source / "library.json", direct / "library.json")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            inf.main(["repaint-pages", "--source", str(direct), "--farm", str(self.root / "direct"),
+                      "--theater", "test", "--stage", str(self.stage)])
+        for edge in ("0.7,0.3", "nan,0.5", "0.3", "0.1,0.3,0.7"):
+            with self.subTest(edge=edge), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                inf.parser().parse_args([*args, "--edge", edge])
+
+
 class SchedulerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix=".tmp-infantry-run-", dir=Path(__file__).parent)
@@ -890,7 +1234,7 @@ shutil.copyfile(d / "input.png", d / "output.png")
     def test_cli_help_needs_no_library(self):
         result = subprocess.run([sys.executable, "-B", str(Path(inf.__file__)), "--help"],
                                 capture_output=True, text=True, check=True)
-        self.assertIn("{prepare,run,compose,build,polish,install-pages,copy-pages}", result.stdout)
+        self.assertIn("{prepare,run,compose,build,polish,install-pages,copy-pages,repaint-pages}", result.stdout)
 
 
 if __name__ == "__main__":
