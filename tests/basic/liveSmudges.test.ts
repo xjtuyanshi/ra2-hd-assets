@@ -1,3 +1,4 @@
+import { BuildingLightGate } from '../../packages/hd-renderer/src/live/buildingLights';
 import { describe, expect, it, vi } from 'vitest';
 import type { LibraryOverlay, LibrarySmudge, TypeLibrary } from '../../packages/ra2-assets/src/library';
 import type { MapObject, SpriteEntry, SpriteFrame } from '../../packages/ra2-assets/src/manifest';
@@ -242,6 +243,7 @@ function presentation(withLibrary = true) {
   };
   const cellLayer = new SpriteLayer(cache, [], 8);
   const backing = {
+    buildingLightGate: new BuildingLightGate(),
     cache,
     library: liveLibrary,
     current: null,

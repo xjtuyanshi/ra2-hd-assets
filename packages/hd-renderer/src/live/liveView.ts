@@ -32,7 +32,7 @@ import { EffectSpriteLayer, animAlpha, type EffectInstance } from './effectSprit
 import { LiveEffectsDriver, smokeOnVehicle, type EffectStyle, type LiveAnim, type LiveEffects } from './effects';
 import { LiveBeams } from './beams';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
-import { buildingLightArcs, buildingLightSources, lampLitGain } from './buildingLights';
+import { BuildingLightGate, buildingLightOverlay, buildingLightSources } from './buildingLights';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
 import { SmudgeInstanceCache, type LiveSmudgeCells, type SmudgePage } from './smudges';
@@ -876,13 +876,19 @@ export class LiveView {
   }
 
   private sourceLightsActive = false;
+  private readonly buildingLightGate = new BuildingLightGate();
+  private readonly activeSourceKeys = new Set<string>();
 
   /** Refresh only visible, completed building sources; a faithful switch clears the enhanced layer immediately. */
   private updateBuildingLights(snapshot: LiveSnapshot | undefined): void {
+    const now = this.hd.seconds();
+    // Observe real logic frames even while the look is faithful; repeated presentation frames cannot age a sentinel.
+    if (snapshot) this.buildingLightGate.update(snapshot.objects, snapshot.frame, now);
     if (!(this.hd.settings.sourceLights > 0)) {
       if (this.sourceLightsActive) {
         this.hd.lightField.clearSources();
-        this.effectDriver.setDecorativeBeams(this.hd.seconds(), []);
+        this.hd.emissiveOverlay.setDiscs([]);
+        this.hd.emissiveOverlay.setStrokes([]);
         this.sourceLightsActive = false;
       }
       return;
@@ -893,24 +899,18 @@ export class LiveView {
       (type) => this.library?.type(type)?.foundation,
       (building) => this.shroud.isLocationShrouded(building.x, building.y, building.z),
       this.library?.conditionYellow,
+      this.buildingLightGate,
     );
-    const now = this.hd.seconds();
-    const grade = this.world?.mapLight;
+    this.activeSourceKeys.clear();
     for (const light of lights) {
-      // Lamp-lit ground (the engine's own light sources) leaves less headroom for a source light (lampLitGain).
-      if (grade) {
-        const k = lampLitGain(1 + (grade.at(light.x, light.z).objects - 1) * grade.currentWeight);
-        if (k < 1) {
-          light.colour = [light.colour[0] * k, light.colour[1] * k, light.colour[2] * k];
-          if (light.glow) light.glow = [light.glow[0] * k, light.glow[1] * k, light.glow[2] * k];
-        }
-      }
       this.hd.lightField.source(light.key, now, light);
+      this.activeSourceKeys.add(light.key);
+      light.fade = this.hd.lightField.sourceFade(light.key, now);
     }
-    this.effectDriver.setDecorativeBeams(
-      now,
-      buildingLightArcs(lights, snapshot?.frame ?? 0, this.hd.emitters.lampGain.value),
-    );
+    this.hd.lightField.retainSources(this.activeSourceKeys);
+    const overlay = buildingLightOverlay(lights, snapshot?.frame ?? 0, now);
+    this.hd.emissiveOverlay.setDiscs(overlay.discs);
+    this.hd.emissiveOverlay.setStrokes(overlay.strokes);
     this.sourceLightsActive = true;
   }
 
