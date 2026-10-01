@@ -178,9 +178,65 @@ const PX_PER_UNIT = PIXELS_PER_CELL_EDGE;
 const TESLA: [number, number, number] = [82, 80, 255];
 const ALTERNATE: [number, number, number] = [190, 90, 255];
 
+/**
+ * Merging of clustered explosions (enhanced style with HD flipbooks). A building's death spawns its whole Explosion=
+ * list at once over the foundation (live oil derrick: three S_BANG48, two S_TUMU60, S_BRNL58 and S_CLSN22 on one logic
+ * frame, spread over 3 x 4 cells), and staggered collapses spawn a dozen within a second. Drawn one by one, the
+ * enlarged flipbooks read as a chain of small star-shaped bursts. Instead, the blasts of one snapshot that chain within
+ * `radius` cells of each other form a group whose most fiery blast (scale x flame share of its art) leads: it is drawn
+ * at the group's centroid and grows by `perMember` per member (up to `maxSize`, over `grow` seconds); the others are
+ * absorbed (no card, no garnish: the lead's garnish carries the cluster). Later blasts within `joinRadius` cells of a
+ * member join the cluster for `window` seconds; after that a later group starts a second lead (at most `maxLeads`
+ * within `hold` seconds) and further blasts are absorbed while a lead still plays. A lone blast is unchanged.
+ */
+export const FIREBALL_MERGE = {
+  radius: 2.5,
+  joinRadius: 1.6,
+  window: 0.5,
+  hold: 2.5,
+  maxLeads: 2,
+  perMember: 0.15,
+  maxSize: 1.7,
+  grow: 0.25,
+  /** World units a merged lead's depth comes forward beyond its farthest member (see EffectInstance.depthBias). */
+  engulf: 0.5,
+  /** Blasts born together that make a building's death (and the engulfing depth bias). */
+  engulfMembers: 3,
+};
+
+/** A clustered explosion's role (FIREBALL_MERGE). */
+export interface MergeRole {
+  absorbed: boolean;
+  /**
+   * Lead only: display-size factor (`born` = the factor it was drawn with at birth, `size` = the one it grows to from
+   * `since`), its draw point (leptons) and the world-unit depth bias that lets it engulf its own members' footprint.
+   */
+  size: number;
+  born: number;
+  since: number;
+  x: number;
+  y: number;
+  z: number;
+  depthBias: number;
+}
+
+interface FireballCluster {
+  lead: TrackedAnim;
+  /** Renderer clock of the cluster's first lead and of its current lead. */
+  t0: number;
+  leadAt: number;
+  leads: number;
+  /** Blasts merged into the current lead, itself included. */
+  count: number;
+  /** World positions of every member so far (joinRadius linkage). */
+  members: Vector3[];
+}
+
 interface TrackedAnim {
   anim: LiveAnim;
   row: EffectTableRow;
+  /** Set when the anim joined a fireball cluster (FIREBALL_MERGE). */
+  merge?: MergeRole;
   /** Identity of a looping fire's kept light in the light field (built once, not per frame). */
   lightKey: string;
   /** Logic frame the anim (or its current type) appeared on. */
@@ -274,6 +330,7 @@ function hash01(a: number, b: number, c: number): number {
 
 export class LiveEffectsDriver {
   private readonly anims = new Map<string, TrackedAnim>();
+  private clusters: FireballCluster[] = [];
   private readonly systems = new Map<string, TrackedSystem>();
   private bullets: LiveBullet[] = [];
   private beams: LiveBeam[] = [];
@@ -325,6 +382,7 @@ export class LiveEffectsDriver {
     }
     if (!this.lastPush || frame !== this.lastPush.frame) this.lastPush = { frame, seconds: now };
     this.logicFrame = frame;
+    const fresh: TrackedAnim[] = [];
     for (const anim of effects.anims) {
       if (anim.buildingAnim) continue;
       const key = `${anim.id}:${anim.uid}`;
@@ -343,13 +401,19 @@ export class LiveEffectsDriver {
         };
         this.anims.set(key, tracked);
         world(anim, tracked.at);
-        if (!this.hidden(anim.x, anim.y, anim.z)) this.garnish(tracked, now, wind);
+        fresh.push(tracked);
       }
       tracked.anim = anim;
       tracked.lastSeen = generation;
       world(anim, tracked.at);
     }
     for (const [key, tracked] of this.anims) if (tracked.lastSeen !== generation) this.anims.delete(key);
+    this.mergeFireballs(fresh, now);
+    for (const tracked of fresh) {
+      const { anim } = tracked;
+      if (tracked.merge?.absorbed || this.hidden(anim.x, anim.y, anim.z)) continue;
+      this.garnish(tracked, now, wind);
+    }
     for (const system of effects.particleSystems) {
       if (system.behaviour !== 'smoke' && system.behaviour !== 'fire') continue;
       const key = `${system.id}:${system.uid}`;
@@ -522,6 +586,8 @@ export class LiveEffectsDriver {
         continue;
       }
       if (this.volumePolicy(anim.type)) continue;
+      // Absorbed into a merged fireball (FIREBALL_MERGE): the lead draws the cluster.
+      if (tracked.merge?.absorbed && this.style === 'enhanced' && this.hdEnabled) continue;
       const { art: a, sprite } = resolved;
       let index = anim.frame;
       if (index === undefined) {
@@ -531,12 +597,14 @@ export class LiveEffectsDriver {
       }
       const frame = sprite.frames[index];
       if (!frame || frame.rect[2] <= 0) continue;
-      const anchor = engineAnchor(anim.x, anim.y, anim.z, a.drawOffset ?? [0, 0]);
+      const lead = tracked.merge && !tracked.merge.absorbed ? tracked.merge : null;
+      const drawAt = lead ?? anim;
+      const anchor = engineAnchor(drawAt.x, drawAt.y, drawAt.z, a.drawOffset ?? [0, 0]);
       const flat = anim.flat ?? a.flat ?? false;
       const layer = anim.layer ?? a.layer;
       const pass: EffectPass = flat ? 'ground' : layer === 'top' ? 'top' : layer === 'air' ? 'air' : 'ground';
       const key = palette(resolved, anim.owner);
-      const depth = engineDepth(anim.x, anim.y, anim.z) + (a.zAdjust ?? 0) * 0.001;
+      const depth = engineDepth(drawAt.x, drawAt.y, drawAt.z) + (a.zAdjust ?? 0) * 0.001;
       // Translucent=yes art fades by stage (animAlpha): the bridge's stage, or the fallback frame's.
       const end = anim.frameCount || a.frameCount;
       const hd = this.hdEnabled && this.style === 'enhanced' ? art.hdAnim(anim.type) : null;
@@ -545,7 +613,7 @@ export class LiveEffectsDriver {
         // Empty native stages stay empty, including their shadow. Unknown or failed HD pages retain native art.
         if (hdFrame === null) continue;
         if (hdFrame && art.hdPageState(hdFrame.page) !== null) {
-          const size = hdSize(tracked.row);
+          const size = hdSize(tracked.row) * this.mergeSize(tracked, this.pushedAt);
           const rate = Math.max(1, anim.rate ?? a.rateFrames);
           const blend0 = anim.stage === undefined ? ((this.logicFrame - tracked.since) % rate) / rate : 0;
           const loops = anim.loopsLeft ?? a.loopCount;
@@ -570,6 +638,7 @@ export class LiveEffectsDriver {
             pass,
             depth,
             glow: false,
+            ...(lead?.depthBias ? { depthBias: lead.depthBias } : {}),
             hd: {
               frame: hdFrame,
               next: next?.page === hdFrame.page ? next : null,
@@ -616,6 +685,92 @@ export class LiveEffectsDriver {
       drawn++;
     }
     return { drawn, missing };
+  }
+
+  /**
+   * Assigns FIREBALL_MERGE roles to the explosions that appeared in this snapshot (enhanced style with HD flipbooks
+   * only; the faithful style and native-only art keep every blast as the engine draws it).
+   */
+  private mergeFireballs(fresh: readonly TrackedAnim[], now: number): void {
+    if (this.style !== 'enhanced' || !this.garnishEnabled || !this.hdEnabled) return;
+    const m = FIREBALL_MERGE;
+    this.clusters = this.clusters.filter((c) => now - c.t0 <= m.hold && now >= c.t0);
+    const blasts = fresh.filter(
+      (t) => t.row.c === 'explosion' && t.row.fx === 'explosion' && !this.hidden(t.anim.x, t.anim.y, t.anim.z),
+    );
+    if (!blasts.length) return;
+    const near2 = (a: Vector3, b: Vector3, r: number) => (a.x - b.x) ** 2 + (a.z - b.z) ** 2 <= r * r;
+    // This snapshot's blasts, grouped by single linkage: a building's whole Explosion= list is one group.
+    const parent = blasts.map((_, i) => i);
+    const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i]!)));
+    for (let i = 0; i < blasts.length; i++)
+      for (let j = i + 1; j < blasts.length; j++)
+        if (near2(blasts[i]!.at, blasts[j]!.at, m.radius)) parent[find(i)] = find(j);
+    const groups = new Map<number, TrackedAnim[]>();
+    for (let i = 0; i < blasts.length; i++) {
+      const root = find(i);
+      groups.set(root, [...(groups.get(root) ?? []), blasts[i]!]);
+    }
+    const fire = (t: TrackedAnim) => t.row.s * (1 - (t.row.smoke ?? 0));
+    const hd = (t: TrackedAnim) => !!this.hasHdArt?.(t.anim.type);
+    const alive = (t: TrackedAnim) => this.anims.get(`${t.anim.id}:${t.anim.uid}`) === t;
+    const absorb = (t: TrackedAnim) => {
+      t.merge = { absorbed: true, size: 1, born: 1, since: now, x: t.anim.x, y: t.anim.y, z: t.anim.z, depthBias: 0 };
+    };
+    for (const group of groups.values()) {
+      // HD art first (only an HD flipbook can be enlarged), then the most fiery blast leads.
+      group.sort((a, b) => Number(hd(b)) - Number(hd(a)) || fire(b) - fire(a));
+      const near = this.clusters.find(
+        (c) => alive(c.lead) && group.some((t) => c.members.some((p) => near2(p, t.at, m.joinRadius))),
+      );
+      if (near && (now - near.leadAt <= m.window || near.leads >= m.maxLeads)) {
+        for (const t of group) {
+          absorb(t);
+          near.members.push(t.at.clone());
+        }
+        near.count += group.length;
+        const role = near.lead.merge!;
+        // Later members make the lead grow from the size it shows now.
+        role.born = this.mergeSize(near.lead, now);
+        role.since = now;
+        role.size = Math.min(m.maxSize, 1 + m.perMember * (near.count - 1));
+        continue;
+      }
+      const lead = group[0]!;
+      if (!hd(lead)) continue;
+      for (const t of group.slice(1)) absorb(t);
+      // A lead born with its members is drawn at their centroid, at once at the group's size.
+      const size = Math.min(m.maxSize, 1 + m.perMember * (group.length - 1));
+      const role: MergeRole = {
+        absorbed: false,
+        size,
+        born: size,
+        since: now,
+        x: group.reduce((sum, t) => sum + t.anim.x, 0) / group.length,
+        y: group.reduce((sum, t) => sum + t.anim.y, 0) / group.length,
+        z: group.reduce((sum, t) => sum + t.anim.z, 0) / group.length,
+        depthBias: 0,
+      };
+      lead.merge = role;
+      world(role, lead.at);
+      // A building's death (its Explosion= list, three or more blasts at once) engulfs the building at its centre, but
+      // not units beyond the members' spread; smaller merges keep the plain anchor depth (a tank in front stays in front).
+      if (group.length >= m.engulfMembers)
+        role.depthBias = m.engulf + Math.max(...group.map((t) => Math.hypot(t.at.x - lead.at.x, t.at.z - lead.at.z)));
+      const members = group.map((t) => t.at.clone());
+      if (near && near.leads < m.maxLeads) {
+        Object.assign(near, { lead, leadAt: now, leads: near.leads + 1, count: group.length });
+        near.members.push(...members);
+      } else this.clusters.push({ lead, t0: now, leadAt: now, leads: 1, count: group.length, members });
+    }
+  }
+
+  /** Display-size factor of a merge lead at renderer clock `now` (1 for every other anim). */
+  private mergeSize(tracked: TrackedAnim, now: number): number {
+    const role = tracked.merge;
+    if (!role || role.absorbed) return 1;
+    const t = Math.max(0, Math.min(1, (now - role.since) / FIREBALL_MERGE.grow));
+    return role.born + (role.size - role.born) * t * t * (3 - 2 * t);
   }
 
   /** Same selection gate for cards, volumes and the retained HD garnish. */
@@ -712,8 +867,10 @@ export class LiveEffectsDriver {
       // Enhanced: the engine's crater (Scorch=yes / Crater=yes art) glows hot for a moment; the mark itself stays native.
       hotCrater: enhanced && row.scorch === 1,
     };
-    if (options.hdArt && options.maxSize !== undefined) options.maxSize *= hdSize(row);
-    if (row.fx === 'explosion') this.effects.explode(now, at, row.s, wind, options);
+    // A merge lead carries its cluster: its garnish is sized for the fireball it grows to.
+    const merged = tracked.merge && !tracked.merge.absorbed ? tracked.merge.size : 1;
+    if (options.hdArt && options.maxSize !== undefined) options.maxSize *= hdSize(row) * merged;
+    if (row.fx === 'explosion') this.effects.explode(now, at, row.s * merged, wind, options);
     else if (row.fx === 'muzzle') this.effects.muzzleFlash(now, at, row.s, options);
     else if (row.fx === 'spark') this.effects.sparkFlash(now, at, row.s, options);
     else if (row.fx === 'impact') this.effects.impact(now, at, row.s, wind, options);

@@ -61,7 +61,11 @@
  *   &bolts=i:dx,dy,h;...      an electric bolt (engine beam, Tesla colour) from cell offset (dx, dy) at h leptons
  *                             above the ground to listed anim i, during its first &boltfor= seconds (default 0.4)
  *   ?fx=replay&replay=<url>   replay recorded snapshots ({ snapshots: LiveSnapshot[], fps }) at 1 engine px per CSS
- *                             px (the tactical view's own framing), then hold the last one `time` seconds later
+ *                             px (the tactical view's own framing), then hold the last one `time` seconds later;
+ *                             a snapshot without shroud/overlays/smudges/cells keeps the previous snapshot's (dense
+ *                             replays from packages/ra2-assets/python/live_replay.py write them only on change);
+ *                             &rstart=N pushes only the first N snapshots before `ready`, and __fx.advance(ms) pushes
+ *                             the rest as the clock passes their frames (frame sequences of one replay)
  *
  * `performance.now` and `Math.random` are replaced by a controllable clock and a seeded generator before the renderer
  * exists, so the same query always renders the same picture. `window.__fx` exposes the view, a `step` helper (whole
@@ -187,15 +191,30 @@ async function replay(): Promise<never> {
     live.render(clock);
     await new Promise((r) => setTimeout(r, 25));
   }
-  let previous = first.frame - 1;
-  for (const snapshot of snapshots) {
-    clock += (Math.max(1, snapshot.frame - previous) * 1000) / rate;
-    previous = snapshot.frame;
-    live.push(snapshot, clock);
+  // Snapshots that omit the large per-cell grids keep the previous ones (null would mean "not read" to the view).
+  const carried: Partial<LiveSnapshot> = {};
+  const withCarried = (snapshot: LiveSnapshot): LiveSnapshot => {
+    for (const key of ['shroud', 'overlays', 'smudges', 'cells'] as const)
+      if (snapshot[key]) (carried as Record<string, unknown>)[key] = snapshot[key];
+    return { ...carried, ...snapshot } as LiveSnapshot;
+  };
+  // Scheduled clock of each snapshot: the first one a logic frame after the warm-up, then by its frame distance.
+  const start = clock + 1000 / rate;
+  const due = (index: number) => start + ((snapshots[index]!.frame - first.frame) * 1000) / rate;
+  let next = 0;
+  const pushDue = () => {
+    while (next < snapshots.length && due(next) <= clock + 1e-6)
+      live.push(withCarried(snapshots[next++]!), due(next - 1));
+  };
+  const initial = Math.min(snapshots.length, Math.max(1, Number(params.get('rstart') ?? snapshots.length)));
+  for (let i = 0; i < initial; i++) {
+    clock = Math.max(clock, due(i));
+    pushDue();
     live.render(clock);
   }
   for (let i = 0, n = Math.round(time * rate); i < n; i++) {
     clock += 1000 / rate;
+    pushDue();
     live.render(clock);
   }
   const loop = () => {
@@ -203,7 +222,20 @@ async function replay(): Promise<never> {
     requestAnimationFrame(loop);
   };
   requestAnimationFrame(loop);
-  (window as unknown as { __fx: unknown }).__fx = { live, ready: true };
+  /** Presentation step for frame captures: later snapshots arrive as the clock passes their frames. */
+  const advance = (ms: number) => {
+    const end = clock + ms;
+    // Push in logic-frame steps so each snapshot is presented at its own clock, like the live page.
+    while (clock + 1000 / rate < end) {
+      clock += 1000 / rate;
+      pushDue();
+      live.render(clock);
+    }
+    clock = end;
+    pushDue();
+    live.render(clock);
+  };
+  (window as unknown as { __fx: unknown }).__fx = { live, advance, ready: true };
   return new Promise<never>(() => {});
 }
 

@@ -291,6 +291,7 @@ describe('live HD flipbook selection', () => {
       'sparks',
       'airborneEmbers',
       'debris',
+      'debrisShadow',
       'column',
       'billow',
       'shimmer',
@@ -316,6 +317,8 @@ describe('live HD flipbook selection', () => {
     const unchanged = names.filter((name) => !['garnishFire', 'blast', 'halo'].includes(name));
     const garnish = unchanged.map((name) => pools[name]!.spawn.mock.calls.slice());
     for (const pool of Object.values(pools)) pool.spawn.mockClear();
+    // Compare independent blasts: the cluster budget is intentionally exhausted by repeated births at one point.
+    Object.assign(layer, { crowd: new BlastCrowd() });
     layer.explode(1, at, 1, wind, { enhanced: true, hdArt: true, maxSize: width });
     expect(pools.blast!.spawn).not.toHaveBeenCalled();
     const hdCore = pools.garnishFire!.spawn.mock.calls[0]!;
@@ -561,7 +564,7 @@ describe('HD page routing and placement buffers', () => {
       meshes.get('hd:0:air')!.mesh.renderOrder,
       meshes.get('hd:0:top')!.mesh.renderOrder,
     ]).toEqual([6, 7, 8]);
-    expect(meshes.get('hd:0:air')!.mesh.material.depthTest).toBe(false);
+    expect(meshes.get('hd:0:air')!.mesh.material.depthTest).toBe(true);
     expect(meshes.get('hd:0:top')!.style.getZ(0)).toBe(0);
     expect(layer.meshStats().translucent).toBe(0);
     const attributes = [page.rect, page.nextRect, page.offsets, page.style, page.timing];

@@ -68,6 +68,11 @@ export interface EffectInstance {
   depth: number;
   /** Fire-coloured pixels may glow slightly (anim palette art). */
   glow: boolean;
+  /**
+   * Extra world units the card's depth comes towards the camera (a merged building-death fireball engulfs the building
+   * it stands in, see FIREBALL_MERGE in effects.ts). Placement is unchanged.
+   */
+  depthBias?: number;
   /** Ground effects use the same physical card depth profile as trees and units. */
   painter?: PainterObject;
   painterPart?: number;
@@ -97,18 +102,22 @@ export const FX_GLOW = 1.25;
 export const HD_FX_FIRE = 1.0;
 /** Flame grade of redrawn fire: share of the temperature re-map (0 = the redraw's own colours) and the heat gamma. */
 export const HD_FX_GRADE = 0.85;
-export const HD_FX_GAMMA = 2.3;
+export const HD_FX_GAMMA = 1.25;
 /**
- * Display-referred (sRGB) flame colour by heat 0..1: dark red-brown, deep red, orange, yellow-orange, white-yellow.
- * The stops sit where heat = dot(display colour, (0.25, 0.5, 0.25)) puts those colours, so a gamma of 1 leaves
- * saturated flame nearly as painted and a larger gamma cools pale flame towards orange and red.
+ * Display-referred (sRGB) flame colour by heat 0..1: dark red-brown, deep red, orange, yellow-orange, yellow, white-hot.
+ * The stops sit where heat = dot(display colour, (0.25, 0.5, 0.25)) puts those colours. L5 used a red-heavy ramp with
+ * a heat gamma of 2.3, which turned the redraws' whole mid-life fireball red-orange around a dark core (review crop at
+ * 0.7 s: mean flame hue 23.6 degrees, 58 % red, against the target painting's 29.1 degrees and 40 %). The fix-round
+ * ramp keeps red for the coolest flame only (the fringe), spends the middle heats on orange and yellow-orange, and
+ * reaches a warm white for the core, as in the target painting.
  */
 const FLAME_STOPS: readonly [number, [number, number, number]][] = [
   [0, [0.16, 0.03, 0.01]],
-  [0.3, [0.72, 0.14, 0.03]],
-  [0.55, [0.98, 0.42, 0.07]],
-  [0.75, [1.0, 0.72, 0.22]],
-  [1, [1.0, 0.96, 0.84]],
+  [0.24, [0.72, 0.16, 0.03]],
+  [0.4, [1.0, 0.5, 0.09]],
+  [0.56, [1.0, 0.64, 0.16]],
+  [0.74, [1.0, 0.83, 0.4]],
+  [1, [1.0, 0.97, 0.86]],
 ];
 function flameRampDisplay(heat: ShaderNode): ShaderNode {
   let rgb: ShaderNode = vec3(...FLAME_STOPS[0]![1]);
@@ -560,7 +569,10 @@ class HdPageMesh {
     const material = (this.material = new MeshBasicNodeMaterial());
     material.transparent = true;
     material.depthWrite = false;
-    material.depthTest = pass === 'ground';
+    // Like the native cards: ground and air cards are depth-tested against the card depth of their ground anchor
+    // (cardDepthNode), only the top layer draws unconditionally. Air was untested here, so an enlarged HD fireball
+    // covered units standing in front of its anchor (a terror drone 1.5 cells south of a blast lost its body at 0.7 s).
+    material.depthTest = pass !== 'top';
     material.blending = CustomBlending;
     material.blendSrc = OneFactor;
     material.blendDst = OneMinusSrcAlphaFactor;
@@ -608,7 +620,13 @@ class HdPageMesh {
       const rgb = rgba.rgb.div(max(rgba.a, 0.02)).min(1);
       const s0 = pow(rgb.max(0), vec3(1 / 2.2));
       const fire = smoothstep(0.42, 0.85, max(s0.r, max(s0.g, s0.b))).mul(smoothstep(0.06, 0.3, s0.r.sub(s0.b)));
-      const glow = float(1).sub(smoothstep(0.1, 0.6, rgba.a));
+      // Low coverage means added light (fire glow over grey, electric arcs) only when it is coloured: the soft rim of
+      // redrawn smoke has low coverage too, and self-lit neutral grey there drew a white outline around every smoke
+      // cap and fragment (fix-round crops of the collapse bench at 1.6 s).
+      const chroma = max(s0.r, max(s0.g, s0.b)).sub(min(s0.r, min(s0.g, s0.b)));
+      const glow = float(1)
+        .sub(smoothstep(0.1, 0.6, rgba.a))
+        .mul(smoothstep(0.08, 0.25, chroma));
       // White-hot cores (every display channel near 1) carry no red-over-blue excess, so the fire test above misses
       // them; scene-lit they turned grey by day and moonlit blue at night. Lit smoke tops stay below this threshold.
       const whiteHot = smoothstep(0.86, 0.96, min(s0.r, min(s0.g, s0.b)));
@@ -662,7 +680,7 @@ class HdPageMesh {
       this.rect.setXYZW(i, ...frame.rect);
       this.nextRect.setXYZW(i, ...next.rect);
       this.offsets.setXYZW(i, ...frame.offset, ...next.offset);
-      this.style.setXYZW(i, s.draw === 'flat' ? 1 : 0, s.push, cardPainterBias(s), hd.scale);
+      this.style.setXYZW(i, s.draw === 'flat' ? 1 : 0, s.push, cardPainterBias(s) + (s.depthBias ?? 0), hd.scale);
       this.timing.setXYZW(i, hd.blend0, hd.t0, hd.stageSeconds, hd.size ?? 1);
     }
     this.anchor.flush();

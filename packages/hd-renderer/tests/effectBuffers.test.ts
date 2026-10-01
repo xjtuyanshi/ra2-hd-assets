@@ -1,4 +1,4 @@
-import { DataTexture, Vector3 } from 'three/webgpu';
+import { DataTexture, Vector3, type InterleavedBufferAttribute, type InstancedBufferAttribute } from 'three/webgpu';
 import { describe, expect, it, vi } from 'vitest';
 import { DirtyAttribute } from '../src/dirtyAttribute';
 import {
@@ -7,7 +7,7 @@ import {
   BeamSegmentBuffer,
   beamSegments,
   type BeamSpec,
-  type EffectsLayer,
+  EffectsLayer,
 } from '../src/effects';
 import { EffectSpriteLayer, type EffectInstance } from '../src/live/effectSprites';
 import { LiveEffectsDriver } from '../src/live/effects';
@@ -15,6 +15,59 @@ import type { Ra2Cache } from '../src/ra2/cache';
 import { assignPainterBias, MAX_PAINTER_BIAS, painterObject, spritePainterBias } from '../src/ra2/painterOrder';
 
 describe('dirty instance uploads', () => {
+  it('uploads ground heights with origins, preserves explicit/default heights, and flushes a wrapped pool', () => {
+    const layer = new EffectsLayer();
+    type Pool = {
+      origin: InterleavedBufferAttribute;
+      ground: InterleavedBufferAttribute;
+      start: InstancedBufferAttribute;
+      spawn(
+        now: number,
+        origin: Vector3,
+        velocity: Vector3,
+        size: number,
+        life: number,
+        extra?: number,
+        ground?: number,
+      ): void;
+      flush(): void;
+    };
+    const pool = (layer as unknown as { garnishFire: Pool }).garnishFire;
+    try {
+      const origin = new Vector3(4, 3, 6);
+      const velocity = new Vector3();
+      pool.spawn(0, origin, velocity, 1, 1);
+      pool.spawn(0, origin, velocity, 1, 1, 0, 2);
+      expect(pool.ground.getX(0)).toBe(3);
+      expect(pool.ground.getX(1)).toBe(2);
+      expect(pool.ground.data).toBe(pool.origin.data);
+      pool.flush();
+      expect(pool.ground.data.updateRanges).toEqual([{ start: 0, count: 8 }]);
+      const version = pool.ground.data.version;
+      pool.flush();
+      expect(pool.ground.data.version).toBe(version);
+      // Advance to the last slot, flush, then write across the boundary in one presentation frame.
+      for (let i = 2; i < pool.start.count - 1; i++) pool.spawn(0, origin, velocity, 1, 1);
+      pool.flush();
+      pool.spawn(1, origin, velocity, 1, 1, 0, 1);
+      pool.spawn(1, origin, velocity, 1, 1, 0, 0.5);
+      pool.flush();
+      expect(pool.ground.getX(pool.start.count - 1)).toBe(1);
+      expect(pool.ground.getX(0)).toBe(0.5);
+      expect(pool.ground.data.updateRanges).toEqual([
+        { start: (pool.start.count - 1) * 4, count: 4 },
+        { start: 0, count: 4 },
+      ]);
+    } finally {
+      for (const child of layer.root.children) {
+        const mesh = child as import('three/webgpu').InstancedMesh;
+        mesh.geometry.dispose();
+        (mesh.material as import('three/webgpu').MeshBasicNodeMaterial).dispose();
+        mesh.dispose();
+      }
+    }
+  });
+
   it('compares float32 values and retains pending ranges across multiple writes before rendering', () => {
     const attribute = new DirtyAttribute(new Float32Array(12), 3);
     attribute.setXYZ(0, 0.1, 0, 0);

@@ -23,7 +23,7 @@ import { SpriteLayer } from '../src/ra2/sprites';
 import { spriteLookFor } from '../src/ra2/spriteLook';
 import { waterPreset } from '../src/ra2/waterLook';
 import { EffectSpriteLayer, MESH_IDLE_SECONDS, type EffectInstance } from '../src/live/effectSprites';
-import { EffectsLayer } from '../src/effects';
+import { ENHANCED, EffectsLayer } from '../src/effects';
 import { EmitterLayer } from '../src/emitters';
 import { LightField } from '../src/lightField';
 import { buildRain } from '../src/weather';
@@ -305,9 +305,9 @@ describe('r186 vertex and uniform binding budget', () => {
     const rain = buildRain(2, 2, texture(), 0, nodes);
     const groups = [effects.root, emitters.root, (lights as unknown as { scene: Scene }).scene, rain.object];
     const audited = groups.flatMap(meshes);
-    // Eighteen particle pools (including nine enhanced pools), beams; four emitter batches;
+    // Nineteen particle pools (including the enhanced contact-shadow pool), beams; four emitter batches;
     // base grid + two light batches; rain + splashes. Check every named pool's actual allocation below.
-    expect(audited.length).toBe(28);
+    expect(audited.length).toBe(29);
     const capacities = {
       fireballs: 96,
       flames: 768,
@@ -322,8 +322,9 @@ describe('r186 vertex and uniform binding budget', () => {
       dots: 512,
       halo: 128,
       billow: 1536,
-      // L5 volumetric blasts throw more, larger chunks (22 + 40 per scale), so the pool holds 1536 like smoke.
+      // Keep capacity for independent blasts; shadows allocate the same slots as their matching chunks.
       debris: 1536,
+      debrisShadow: 1536,
       shimmer: 64,
       dust: 64,
       blast: 96,
@@ -338,7 +339,8 @@ describe('r186 vertex and uniform binding budget', () => {
       const mesh = pools[key].mesh;
       mesh.name = `effects-${key}`;
       expect(mesh.instanceMatrix.count, key).toBe(capacities[key]);
-      expect(mesh.material).toMatchObject({ depthTest: true, depthWrite: false });
+      expect(mesh.material).toMatchObject({ depthTest: true, depthWrite: key === 'debris' });
+      if (key === 'debris') expect(mesh.material).toMatchObject({ alphaTest: ENHANCED.debris.alphaTest });
     }
     for (const mesh of audited) {
       assertLimits(mesh);

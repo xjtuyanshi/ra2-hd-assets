@@ -201,25 +201,50 @@ sidecar the view falls back to land-type surfaces and no map light sources.
 - Effects: instanced fireballs, flame tongues, smoke, sparks, scorch decals, light-field flashes, camera shake; with
   garnish options (the live view) only a small flash, sparks and light on top of the original art (`src/effects.ts`).
   The live view's opt-in `enhanced` effect style (`ENHANCED`) adds, around the engine's own anim: a boiling fireball
-  over the native art for its duration (original fire colours), a longer light, sparks and landing debris, rolling
-  smoke building over the first second and lingering for about five seconds, a smoke column rising for about thirteen
-  seconds after bigger blasts, heat shimmer, a ragged ring of dark soil kicked out over the ground, and around
-  craters a hot glow and charred ground that fades over most of a minute (the engine's crater smudge stays).
-  Smoke opacity smoothly reaches a 0.62 multiplier over puff ages 1.2-3.0 seconds; column puffs reach 0.6 over
+  over native art for its duration (original fire colours), a warm light on the ground and on units next to the blast
+  (strongest over the first 0.8 seconds, gone by about 1.2), fewer sparks and brief airborne embers,
+  heat shimmer, a ragged ground dust ring, and a few large smoke billows with sunlit tops and darker undersides.
+  Billows form over the first second and linger for about five seconds; bigger blasts emit a few larger column puffs
+  over 3.5 seconds with a nominal nine-second life. Wider feathered silhouettes and noise-eroded alpha soften overlaps.
+  Smoke opacity smoothly reaches a 0.8 multiplier over puff ages 1.2-3.0 seconds; column puffs reach 0.78 over
   1.5-4.0 seconds. The same age ramp shifts both radial silhouette edges inward by 0.15 in normalized radius
-  (`lateOpacity`, `lateFrom`, `lateEdge`), keeping the early smoke unchanged while the older rims thin faster.
+  (`lateOpacity`, `lateFrom`, `lateEdge`), thinning the older rims while retaining the fire glow underneath young smoke.
+  Billows, column puffs, halos, garnish flashes and procedural blast cards take depth from a vertical card through
+  their centre's ground point, switching to the ground plane below its base. This depth uses the shared card clearance
+  plus `anchorBias` (0.5 world units), so lift and growth do not pull smoke over foreground units; shadow passes keep
+  physical depth. Ground heights are interleaved with particle origins to stay within the WebGPU vertex-buffer budget.
   Optional HD flipbooks enlarge explosions, collapses and debris by 1.3 and impacts by 1.15 around the native draw
-  point, with matching garnish footprints; other categories and native cards keep their size. Enhanced debris uses
-  lit polygonal chunks, including a few larger, slower pieces, that rest on the ground for about eight seconds.
-  Blasts within 2.5 cells and 2.5 seconds of each other (a building collapse) share one debris and smoke-puff
-  budget (`BLAST_CROWD` in `src/effects.ts`); a lone blast never reaches it.
+  point, with matching garnish footprints; other categories and native cards keep their size. Enhanced debris throws
+  6 + 12 chunks per scale, slightly larger than L5's (`ENHANCED.debris.size` 1.35) and dark faceted rubble colours that
+  read as silhouettes against the fire (bright sunlit facets read as grey slabs floating in the fireball). Airborne
+  chunks stretch along projected velocity with thinner streak ends, then stop, rest for 0.9 seconds (0.7-1.3 times)
+  and fade over 0.6 seconds. Capped flight speed keeps the complete lifetime below 2.5 seconds. Each chunk has a soft
+  ground contact ellipse that follows its ballistics and weakens with height. Shadows draw at 5.5 and cut-out rubble
+  writes depth at 5.9 (`alphaTest` 0.5), before smoke at 6 and effect cards at 7, allowing later smoke to cover rubble.
+  Blasts within 2.5 cells and 2.5 seconds share hard ceilings of 36 chunks and 14 smoke puffs (`BLAST_CROWD`), including
+  later-blast floors of two chunks and one puff while allowance remains. A twelve-blast collapse stays within 20-40
+  chunks rather than accumulating a rubble swarm. Craters receive only a smooth orange-yellow ground glow for 0.45
+  seconds, with alpha at most 0.4; charred ground still fades over most of a minute and the engine's crater smudge stays.
   Redrawn HD frames are graded in the shader: flame pixels are self-lit and re-mapped through a temperature ramp with
   a heat gamma (`HD_FX_GAMMA`), only the white-hot core gets a modest HDR gain for the bloom (`HD_FX_EMISSIVE`), the
   anim's translucency fade is softened by separate smoke and flame exponents (`HD_FX_FADE`), and consecutive frames
   crossfade only around mid-stage (`HD_FX_BLEND_WIDTH`), so chaotic flame does not read as a double exposure. The
   matching `EffectSpriteLayer` uniforms (`hdHotGain`, `hdFireGamma`, `hdSmokeFade`, `hdFlameFade`, `hdBlendWidth`)
   support look reviews. The L5 explosion flipbooks (`packages/ra2-assets/python/volumetric_explosions.py`) are drawn
-  as layered volumetric fireballs and rely on these values.
+  as layered volumetric fireballs and rely on these values. The fix-round ramp keeps red for the coolest flame (the
+  fringe), spends the middle heats on orange and yellow-orange and ends in a warm white, with a heat gamma of 1.25
+  (L5: a red-heavy ramp with gamma 2.3 turned the mid-life fireball red-orange around a dark core). Low-coverage
+  pixels count as added light only when they are coloured (fire glow, arcs); neutral low-coverage smoke rims are
+  scene-lit, which removed a white outline around redrawn smoke. HD cards of the ground and air layers are
+  depth-tested against their anchor's card depth like the native cards (only the top layer draws unconditionally),
+  so an enlarged fireball no longer covers a unit standing in front of its anchor.
+  Clustered explosions merge (`FIREBALL_MERGE` in `src/live/effects.ts`, enhanced style with HD flipbooks): the
+  blasts one snapshot spawns within 2.5 cells of each other (a building's Explosion= list) form a group whose most
+  fiery blast is drawn at the group's centroid, enlarged by 0.15 per member up to 1.7, with one garnish for the
+  whole group; the others draw nothing. Later blasts within 1.6 cells of a member join for 0.5 s (the lead grows
+  smoothly), after which a later group starts a second lead (at most two per 2.5 s). A merged lead's depth comes
+  forward by its members' spread plus 0.5 world units (`EffectInstance.depthBias`), so it engulfs the dying
+  building without covering units beyond it. A lone blast is unchanged.
 - Post (`src/HdRenderer.ts`, `src/post.ts`): per-channel exposure, mist and the visibility (shroud) mask, bloom, the
   display transform, the night toe lift, anti-aliasing and sharpening; see HdSettings below.
 

@@ -928,6 +928,34 @@ python3 -B packages/ra2-assets/python/volumetric_explosions.py pack EXPLOLRG,TWL
 python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_volumetric_explosions.py'
 ```
 
+Fix round (after the L5 review): the mid-life frames (about 0.3-1.0 s) of the packed redraws were re-lit, not
+redrawn. A job sheet of the approved redraw cells (same layout and footprints, so `cut_sheet` and `pack` apply
+unchanged) went to the image model with the target crop plus an approved hot early frame as the style reference, asking
+to keep every shape and replace the dark sooty centre with a white-hot core, yellow-orange tongues and red only at the
+fringe; a second pass on EXPLOLRG 8-13 added lobes and a smoke cap at the same size. `python/effect_cleanup.py` then
+removes two matte artefacts from the packed pages: the light outline along smoke silhouettes, and small dark debris
+specks in the smoke phase of each anim (installed through `cache_farm.install_file`, rects unchanged).
+
+```sh
+python3 -B packages/ra2-assets/python/effect_cleanup.py --farm "$VARIANT" effects-hd-fx5-0.png effects-hd-fx6-0.png
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_effect_cleanup.py'
+```
+
+## Live snapshot replays (Python)
+
+`python/live_replay.py` turns a few frozen live snapshots (bridge `LiveSnapshot`s or live-pair records holding one
+under `state`, for example a building's death, +0.7 s and +3 s) into one snapshot per logic frame for the sandbox's
+`?fx=replay` (which carries shroud, overlays and smudges forward and, with `&rstart=N`, pushes the rest as
+`__fx.advance(ms)` passes their frames). One-shot anims are re-timed from their observed stages, moving debris anims
+fly a fitted ballistic arc, anims listed unchanged in every snapshot are copied, `--restore UID` keeps an object from
+`--pre` until the first snapshot, and projectiles are dropped. It reads no game art.
+
+```sh
+python3 -B packages/ra2-assets/python/live_replay.py --states native-12.json native-13.json native-14.json \
+  --pre native-10.json --restore "$UID" --first 7098 --last 7200 --out "$VARIANT/_research/death.json"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_live_replay.py'
+```
+
 ## Sprite material atlas (Python, experimental)
 
 `python/sprite_normals.py` writes the material atlas the renderer's opt-in enhanced look relights sprites with

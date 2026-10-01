@@ -4,7 +4,9 @@ import {
   CustomBlending,
   DoubleSide,
   InstancedBufferAttribute,
+  InstancedInterleavedBuffer,
   InstancedMesh,
+  InterleavedBufferAttribute,
   MeshBasicNodeMaterial,
   NormalBlending,
   Object3D,
@@ -12,15 +14,19 @@ import {
   OneMinusSrcAlphaFactor,
   PlaneGeometry,
   Vector3,
+  type NodeBuilder,
 } from 'three/webgpu';
 import {
   Fn,
   abs,
   clamp,
+  cameraFar,
+  cameraNear,
   color,
   cos,
   cross,
   dot,
+  depth,
   exp,
   float,
   floor,
@@ -45,6 +51,7 @@ import {
   texture,
   uniform,
   uv,
+  varying,
   vec2,
   vec3,
   vec4,
@@ -54,6 +61,8 @@ import { DEFAULT_ATMOSPHERE_NODES, objectLight } from './atmosphere';
 import type { LightField } from './lightField';
 import { DirtyAttribute } from './dirtyAttribute';
 import { waterTextures } from './proceduralTextures';
+import { isShadowPass } from './painterDepth';
+import { CARD_CLEARANCE } from './ra2/cardDepth';
 import type { ShaderNode } from './tsl';
 
 const FIREBALLS = 96;
@@ -114,23 +123,28 @@ export const GARNISH_LIGHTS = {
  *     outliving the art by a couple of seconds;
  *   - a heat shimmer over the blast and a dust ring racing out over the ground;
  *   - for anims that leave the engine's crater or scorch (Scorch=yes / Crater=yes), the crater glowing hot and cooling
- *     for a few seconds.
- * Round two of the style (the first read as the original with a flash): a detailed, boiling fireball drawn over the
- * native art for its own duration and footprint (it covers most of the pixel art and cools into soot, in the original
- * palette's fire colours); a longer, stronger light; a smoke column with puffs rising and drifting for about thirteen
- * seconds; charred ground around craters that fades over most of a minute (the engine's own crater
- * smudge stays underneath); more and longer sparks; debris that lands and stays on the ground for a few seconds.
+ *     briefly, with charred ground fading over most of a minute while the engine's smudge stays underneath.
+ * Ground-anchored depth keeps rising smoke behind foreground units; sparse rubble and short ground rests keep a
+ * building collapse readable after its fireball has gone. All enhanced look tuning lives here for visual reviews.
  */
 /**
  * Shared particle budget of a blast cluster. A building collapse is a dozen or more explosion anims over its
  * foundation within a second or two; with every blast throwing its own debris (up to ~100 chunks resting for seconds)
  * and a thirteen-second smoke column, a collapse buried the base under a black swarm of chunks and a smoke wall in live
  * matches (L5 compose, frozen pairs of a construction yard's death). Blasts within `radius` world units and `window`
- * seconds of each other therefore share `debris` chunks and `smoke` puffs (billows plus column); each blast keeps at
- * least `floor` of its own. A lone blast (at most ~100 chunks, ~35 puffs) never reaches the budget, so single
- * explosions keep their look.
+ * seconds of each other therefore share `debris` chunks and `smoke` puffs (billows plus column); each blast keeps
+ * a small `floor` while budget remains. The ceiling includes that floor: otherwise a twelve-blast collapse still
+ * exceeds the rubble target even after spending its shared budget. A lone blast keeps its requested chunk count.
  */
-export const BLAST_CROWD = { window: 2.5, radius: 2.5, debris: 170, smoke: 90, floor: { debris: 6, smoke: 3 } };
+export const BLAST_CROWD = {
+  window: 2.5,
+  radius: 2.5,
+  debris: 36,
+  smoke: 14,
+  floor: { debris: 2, smoke: 1 },
+  /** Reserve some of the remaining allowance for later anims in the same collapse. */
+  followupShare: 0.5,
+};
 
 /** Recent enhanced blasts by place, for BLAST_CROWD. */
 export class BlastCrowd {
@@ -147,9 +161,14 @@ export class BlastCrowd {
         usedDebris += r.debris;
         usedSmoke += r.smoke;
       }
+    const grant = (wanted: number, used: number, limit: number, floor: number) => {
+      const remaining = Math.max(0, limit - used);
+      const share = used > 0 ? Math.max(floor, Math.floor(remaining * b.followupShare)) : remaining;
+      return Math.min(wanted, remaining, share);
+    };
     const granted = {
-      debris: Math.min(debris, Math.max(b.floor.debris, b.debris - usedDebris)),
-      smoke: Math.min(smoke, Math.max(b.floor.smoke, b.smoke - usedSmoke)),
+      debris: grant(debris, usedDebris, b.debris, b.floor.debris),
+      smoke: grant(smoke, usedSmoke, b.smoke, b.floor.smoke),
     };
     this.recent.push({ t: now, x: at.x, z: at.z, ...granted });
     return granted;
@@ -157,6 +176,9 @@ export class BlastCrowd {
 }
 
 export const ENHANCED = {
+  /** Extra ground-card clearance envelops the anchor's own unit without reaching the next foreground cell. */
+  anchorBias: 0.5,
+  anchorEpsilon: 1e-6,
   /** HD display size by effect-table category; native art and all other categories retain their size. */
   hdSize: { explosion: 1.3, collapse: 1.3, debris: 1.3, impact: 1.15 },
   /** Temperature, linear RGB and HDR gain. Interpolate the gained colours, never sRGB hex colours. */
@@ -169,14 +191,16 @@ export const ENHANCED = {
   ],
   light: {
     colour: [1, 0.42, 0.14],
-    radius: 1.8,
     // Tighter than the sample-2 blast light (3.8 / 10): a wide pulse washed whole lawns and plazas yellow, which reads
-    // as a warm grade; the heat now stays on the blast's own neighbourhood and the objects next to it.
-    radiusPerScale: 2.8,
-    peak: 4,
-    peakPerScale: 6.5,
-    life: 1.8,
-    decay: 1.7,
+    // as a warm grade; the heat stays on the blast's own neighbourhood and the objects next to it. The fix round made
+    // it stronger and shorter (review: "the ground is barely lit"; the target painting's pavement and grass next to
+    // the fireball are lit orange): about +1x noon light at 0.7 s, mostly gone by 1 s.
+    radius: 2.4,
+    radiusPerScale: 3.2,
+    peak: 6,
+    peakPerScale: 10,
+    life: 1.2,
+    decay: 2.0,
   },
   /** The first light pulse: ramp temperature, radius/peak relative to the longer glow, seconds and inverse seconds. */
   flash: { temperature: 0.8, radius: 0.7, peak: 1, life: 0.18, decay: 24 },
@@ -199,7 +223,7 @@ export const ENHANCED = {
    * Start temperatures and streak aspect ratios; projected speed in cells/s reaches the longest streak at `speed`.
    * Starts of 0.5..0.85 give yellow-orange streaks; hotter starts clipped to pale cream lines over bright ground.
    */
-  sparks: { count: 26, perScale: 44, temperature: [0.5, 0.85], stretch: [2, 6], speed: 8 },
+  sparks: { count: 14, perScale: 20, temperature: [0.5, 0.85], stretch: [2, 6], speed: 8 },
   /**
    * Airborne embers: fixed pool, count per blast, delayed births, life and slowing convection in seconds/cells.
    * `volume` and `height` scale the blast's width; wind/drift are horizontal speeds, wobble is displacement, and
@@ -208,10 +232,10 @@ export const ENHANCED = {
    */
   embers: {
     pool: 512,
-    count: 10,
-    perScale: 20,
-    delay: 0.6,
-    life: [1.5, 3.5],
+    count: 3,
+    perScale: 6,
+    delay: 0.25,
+    life: [0.5, 1.2],
     temperature: [0.7, 0.95],
     size: [0.018, 0.035],
     rise: [0.4, 0.9],
@@ -231,25 +255,81 @@ export const ENHANCED = {
     fireWidth: 0.45,
     catchup: 0.5,
   },
-  /** Debris: chunks per blast; `rest` seconds on the ground, `glowLife` seconds cooling from core to rim temperature. */
-  // L5: denser and chunkier, like the target painting's blasts (dozens of dark fragments around every fireball).
-  debris: { count: 22, perScale: 40, size: 1.25, rest: 8, glowLife: 1.1, rim: 0.65 },
+  /** Short flights and rests avoid floating rubble after the fireball; shared ballistics also drive contact shadows. */
+  debris: {
+    count: 6,
+    perScale: 12,
+    size: 1.35,
+    rest: 0.9,
+    restRange: [0.7, 1.3],
+    fade: 0.6,
+    blur: 0.25,
+    blurTail: 0.55,
+    aspect: 0.65,
+    velocityEpsilon: 1e-6,
+    gravity: 9.8,
+    lift: 0.12,
+    spread: 8,
+    rise: [2, 3.5],
+    // Cap flight height at every scale so flight + maximum rest + fade remains below 2.5 seconds.
+    maxRise: 3.2,
+    speedBase: 0.5,
+    speedPerScale: 0.35,
+    bigChance: 0.2,
+    bigSpeed: 0.6,
+    bigSize: 1.25,
+    sizeBase: 0.07,
+    sizeJitter: 0.09,
+    sizeScaleBase: 0.6,
+    sizeScaleMax: 2,
+    hotChance: 0.35,
+    colours: [0x3e342b, 0x4e4337, 0x2f2820, 0x5a4b3c],
+    ambient: 0.14,
+    sun: 0.5,
+    rimLight: 0.1,
+    colourBreaks: [0.4, 0.72, 0.94],
+    glowLife: 1.1,
+    rim: 0.65,
+    renderOrder: 5.9,
+    alphaTest: 0.5,
+    cameraPush: 0.08,
+    shadow: {
+      renderOrder: 5.5,
+      lift: 0.02,
+      radius: 1.3,
+      aspect: 0.7,
+      opacity: 0.45,
+      airborneOpacity: 0.1,
+      height: 1.5,
+      edge: [1, 0.15],
+      colour: 0x17120e,
+    },
+  },
   /**
    * Billows keep forming over `spread` seconds after the first birth at `delay`. Across `lateFrom` seconds of puff
    * age, opacity smoothly reaches the `lateOpacity` multiplier and both radial silhouette edges move inward by
    * `lateEdge` in normalized radius. Before that interval, opacity and edges retain their original values.
    */
   smoke: {
-    count: 3,
-    perScale: 7,
+    count: 2,
+    perScale: 3,
     delay: 0.1,
     spread: 0.9,
     life: 5.0,
-    size: 0.5,
-    opacity: 0.85,
-    lateOpacity: 0.62,
+    size: 0.8,
+    opacity: 0.9,
+    lateOpacity: 0.8,
     lateFrom: [1.2, 3.0],
     lateEdge: 0.15,
+    edge: [0.95, 0.5],
+    boundary: [1, 0.6],
+    lumpiness: 0.8,
+    erosion: 0.3,
+    erosionRange: [0.15, 0.85],
+    ambient: 0.1,
+    sun: 1.6,
+    underside: 0.55,
+    undersideRange: [-0.6, 0.6],
   },
   /**
    * Smoke column (blasts of scale >= `from`): puffs emitted over `span` seconds, each rising for `life` seconds.
@@ -257,20 +337,40 @@ export const ENHANCED = {
    */
   column: {
     from: 0.35,
-    count: 5,
-    perScale: 8,
-    span: 6,
-    life: 13,
+    count: 3,
+    perScale: 3,
+    span: 3.5,
+    life: 9,
     rise: 0.32,
-    size: 0.55,
-    lateOpacity: 0.6,
+    size: 0.9,
+    lateOpacity: 0.78,
     lateFrom: [1.5, 4.0],
     lateEdge: 0.15,
+    edge: [0.95, 0.5],
+    boundary: [1, 0.6],
+    lumpiness: 0.8,
+    erosion: 0.3,
+    erosionRange: [0.15, 0.85],
+    ambient: 0.12,
+    sun: 1.5,
+    underside: 0.55,
+    undersideRange: [-0.6, 0.6],
   },
   shimmer: { width: 1.5, life: 1.0 },
   dust: { width: 2.2, life: 0.9 },
-  /** Ember-bed width/lifetime and edge temperature; the centre starts at temperature 1 and cools to zero. */
-  crater: { width: 0.6, life: 3.5, rim: 0.25 },
+  /** A brief smooth light spill; persistent red crust competes with the engine's own crater/scorch. */
+  crater: {
+    width: 0.6,
+    life: 0.45,
+    delay: 0,
+    opacity: 0.4,
+    edge: [1, 0],
+    core: [0.55, 0],
+    colourCore: [1, 0.85, 0.3],
+    colourEdge: [1, 0.45, 0.08],
+    fadeIn: 0.08,
+    fadeOut: 0.2,
+  },
   /** Charred ground around a crater: width relative to the art, seconds until it has faded. */
   char: { width: 1.8, life: 45 },
   /**
@@ -360,6 +460,64 @@ export function emberRampRgb(t: number): [number, number, number] {
 }
 
 /**
+ * Camera-space push relative to the physical fragment. viewDir points away from the orthographic camera.
+ * Intersect its ray with an upright card at the centre's ground point, switching to the ground below the card.
+ * Billboard lift and growth must not advance this depth: otherwise smoke hides units in front of the blast.
+ */
+export function anchoredDepthShift(fragment: Vector3, centre: Vector3, ground: number, viewDir: Vector3): number {
+  const direction = viewDir.clone().normalize();
+  const horizontal = direction.x * direction.x + direction.z * direction.z;
+  const vertical =
+    horizontal > ENHANCED.anchorEpsilon
+      ? ((centre.x - fragment.x) * direction.x + (centre.z - fragment.z) * direction.z) / horizontal
+      : Infinity;
+  const floor = Math.abs(direction.y) > ENHANCED.anchorEpsilon ? (ground - fragment.y) / direction.y : Infinity;
+  return CARD_CLEARANCE + ENHANCED.anchorBias - Math.min(vertical, floor);
+}
+
+/** Same ray intersection as anchoredDepthShift; orthographic depth is linear in camera-space world units. */
+function anchoredDepthNode(centre: ShaderNode, ground: ShaderNode, toCamera: ShaderNode): ShaderNode {
+  return Fn(([], builder: NodeBuilder) => {
+    // Shadow cameras have different rays: their pass must retain physical geometry depth.
+    if (isShadowPass(builder)) return depth;
+    const anchor: ShaderNode = varying(centre);
+    const groundHeight: ShaderNode = varying(ground);
+    const direction: ShaderNode = normalize(toCamera).negate();
+    const horizontal = dot(direction.xz, direction.xz);
+    const vertical = dot(anchor.xz.sub(positionWorld.xz), direction.xz).div(max(horizontal, ENHANCED.anchorEpsilon));
+    const verticalSpeed = max(abs(direction.y), ENHANCED.anchorEpsilon);
+    const denominator = direction.y.lessThan(0).select(verticalSpeed.negate(), verticalSpeed);
+    const floor = groundHeight.sub(positionWorld.y).div(denominator);
+    // Parallel rays omit that plane, matching the CPU mirror without dividing by zero in either select branch.
+    const both = abs(direction.y).greaterThan(ENHANCED.anchorEpsilon).select(min(vertical, floor), vertical);
+    const intersection = horizontal.greaterThan(ENHANCED.anchorEpsilon).select(both, floor);
+    const push = float(CARD_CLEARANCE + ENHANCED.anchorBias).sub(intersection);
+    return depth.sub(push.div(cameraFar.sub(cameraNear)));
+  })();
+}
+
+/** Exact ground contact time, including the spawn lift; the shadow must not stop at the lifted origin. */
+function debrisFlightTime(rise: number, height: number): number {
+  return (rise + Math.sqrt(rise * rise + 2 * ENHANCED.debris.gravity * Math.max(0, height))) / ENHANCED.debris.gravity;
+}
+
+/** Shared GPU trajectory prevents rubble and its shadow from separating at landing or while the chunk fades. */
+function debrisMotion(age: ShaderNode, origin: ShaderNode, velocity: ShaderNode, ground: ShaderNode) {
+  const gravity = ENHANCED.debris.gravity;
+  const landed = velocity.y
+    .add(sqrt(velocity.y.mul(velocity.y).add(max(0, origin.y.sub(ground)).mul(2 * gravity))))
+    .div(gravity);
+  const flight = clamp(age, 0, landed);
+  const at = origin.add(velocity.mul(flight)).add(vec3(0, flight.mul(flight).mul(-gravity / 2), 0));
+  const airborne = age.lessThan(landed);
+  return { at: vec3(at.x, max(at.y, ground), at.z), flight, landed, airborne };
+}
+
+function debrisFade(age: ShaderNode, life: ShaderNode): ShaderNode {
+  return smoothstep(life, life.sub(ENHANCED.debris.fade), age);
+}
+
+/**
  * Opacity of a live-view garnish smoke puff relative to the renderer's own smoke: the original trail art under it is
  * already the smoke, so the HD puff only softens it.
  */
@@ -394,14 +552,15 @@ class ParticlePool {
   readonly mesh: InstancedMesh;
   readonly material: MeshBasicNodeMaterial;
   readonly start: InstancedBufferAttribute;
-  readonly origin: InstancedBufferAttribute;
+  readonly origin: InterleavedBufferAttribute;
   readonly velocity: InstancedBufferAttribute;
   readonly params: InstancedBufferAttribute;
+  readonly ground: InterleavedBufferAttribute;
   private cursor = 0;
   /** First slot written since the last flush, and how many slots (capped at the pool size). */
   private dirtyFrom = 0;
   private dirtyCount = 0;
-  private readonly attributes: readonly InstancedBufferAttribute[];
+  private readonly attributes: readonly (InstancedBufferAttribute | InstancedInterleavedBuffer)[];
   /** Seconds (effect clock) at which the last spawned particle dies; the pool draws nothing after that. */
   until = -Infinity;
 
@@ -412,24 +571,37 @@ class ParticlePool {
     build: (pool: ParticlePool) => void,
   ) {
     this.start = new InstancedBufferAttribute(new Float32Array(count).fill(-1e6), 1);
-    this.origin = new InstancedBufferAttribute(new Float32Array(count * 3), 3);
+    // Ground is a separate float attribute, interleaved with origin so large matrix-fallback pools stay at 8 buffers.
+    const placement = new InstancedInterleavedBuffer(new Float32Array(count * 4), 4);
+    this.origin = new InterleavedBufferAttribute(placement, 3, 0);
+    this.ground = new InterleavedBufferAttribute(placement, 1, 3);
     this.velocity = new InstancedBufferAttribute(new Float32Array(count * 3), 3);
     // x = size, y = lifetime, z = seed, w = per-pool extra (smoke: soot; sparks: style; garnish fire: ground cover)
     this.params = new InstancedBufferAttribute(new Float32Array(count * 4), 4);
-    this.attributes = [this.start, this.origin, this.velocity, this.params];
+    this.attributes = [this.start, placement, this.velocity, this.params];
     this.material = material;
     this.mesh = new InstancedMesh(geometry, material, count);
     this.mesh.frustumCulled = false;
     build(this);
   }
 
-  spawn(now: number, origin: Vector3, velocity: Vector3, size: number, lifetime: number, extra = 0): void {
+  spawn(
+    now: number,
+    origin: Vector3,
+    velocity: Vector3,
+    size: number,
+    lifetime: number,
+    extra = 0,
+    ground = origin.y,
+    seed = Math.random(),
+  ): void {
     const i = this.cursor;
     this.cursor = (this.cursor + 1) % this.start.count;
     this.start.setX(i, now);
     this.origin.setXYZ(i, origin.x, origin.y, origin.z);
     this.velocity.setXYZ(i, velocity.x, velocity.y, velocity.z);
-    this.params.setXYZW(i, size, lifetime, Math.random(), extra);
+    this.params.setXYZW(i, size, lifetime, seed, extra);
+    this.ground.setX(i, ground);
     this.until = Math.max(this.until, now + lifetime);
     if (this.dirtyCount === 0) this.dirtyFrom = i;
     this.dirtyCount = Math.min(this.start.count, this.dirtyCount + 1);
@@ -443,9 +615,10 @@ class ParticlePool {
     const from = count >= size ? 0 : this.dirtyFrom;
     const first = Math.min(count, size - from);
     for (const attribute of this.attributes) {
+      const stride = 'stride' in attribute ? attribute.stride : attribute.itemSize;
       attribute.clearUpdateRanges();
-      attribute.addUpdateRange(from * attribute.itemSize, first * attribute.itemSize);
-      if (first < count) attribute.addUpdateRange(0, (count - first) * attribute.itemSize);
+      attribute.addUpdateRange(from * stride, first * stride);
+      if (first < count) attribute.addUpdateRange(0, (count - first) * stride);
       attribute.needsUpdate = true;
     }
     this.dirtyCount = 0;
@@ -549,6 +722,8 @@ export class EffectsLayer {
   private readonly billow: ParticlePool;
   /** Enhanced style: tumbling debris chunks. */
   private readonly debris: ParticlePool;
+  /** Ground contact cues share every chunk's seed, clock and ballistic inputs. */
+  private readonly debrisShadow: ParticlePool;
   /** Particle budget shared by clustered enhanced blasts (BLAST_CROWD). */
   private readonly crowd = new BlastCrowd();
   /** Enhanced style: heat shimmer (refracts the frame drawn so far). */
@@ -869,10 +1044,19 @@ export class EffectsLayer {
         const d = length(p).add(n);
         const bed = smoothstep(1.0, 0.2, d);
         const core = smoothstep(0.45, 0.0, d);
-        const temperature = mix(float(1), float(ENHANCED.crater.rim), clamp(d, 0, 1)).mul(float(1).sub(t));
-        const tint = mix(mix(FLAME_EDGE, vec3(1.0, 0.9, 0.6), core), emberRamp(temperature), cooling);
+        const tint = mix(FLAME_EDGE, vec3(1.0, 0.9, 0.6), core);
         const fade = smoothstep(0.0, 0.15, t).mul(smoothstep(1.0, 0.5, t));
-        return vec4(tint.mul(bed.mul(0.5).add(core.mul(0.9))), fade.mul(0.55));
+        const original = vec4(tint.mul(bed.mul(0.5).add(core.mul(0.9))), fade.mul(0.55));
+        // A crater is illuminated briefly, not filled with cooling lava. Keep the persistent-fire bed unchanged.
+        const e = ENHANCED.crater;
+        const radius = length(p);
+        const glow = smoothstep(...e.edge, radius);
+        const rgb = mix(vec3(...e.colourEdge), vec3(...e.colourCore), smoothstep(...e.core, radius));
+        const alpha = glow
+          .mul(e.opacity)
+          .mul(smoothstep(0, e.fadeIn, t))
+          .mul(smoothstep(1, e.fadeOut, t));
+        return cooling.greaterThan(0).select(vec4(rgb, alpha), original);
       })();
     });
     this.embers.mesh.renderOrder = 6;
@@ -880,15 +1064,12 @@ export class EffectsLayer {
     // Live garnish flash: centred on the native card (no lift, pulled towards the camera so it sits in front of it),
     // hottest in the middle of a young flash, cooling through the original's oranges to lit soot at the rim.
     this.garnishFire = new ParticlePool(GARNISH_FLASHES, quad, premultiplied(), (pool) => {
-      const { age, life, size, seed, origin, alive, extra: cover } = particleInputs(pool, this.now);
+      const { age, life, size, seed, origin, ground, alive, extra: cover } = particleInputs(pool, this.now);
       const t = clamp(age.div(life), 0, 1);
       const grow = size.mul(float(0.35).add(smoothstep(0, 0.35, t).mul(0.9)));
-      pool.material.positionNode = billboard(
-        origin.add(this.toCamera.mul(grow.mul(0.5))),
-        grow.mul(alive),
-        this.cameraRight,
-        this.cameraUp,
-      );
+      const centre = origin;
+      pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera);
+      pool.material.positionNode = billboard(centre, grow.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
         const turbulence = mx_noise_float(vec3(p.mul(2.2), seed.mul(10).add(t.mul(2)))).mul(0.35);
@@ -924,15 +1105,12 @@ export class EffectsLayer {
     // Enhanced glow halo: a soft Gaussian of fire light around the blast, white-yellow at the centre, orange outside,
     // bright enough for the bloom and gone within a third of a second.
     this.halo = new ParticlePool(HALOS, quad, additive(), (pool) => {
-      const { age, life, size, origin, alive, extra: mode } = particleInputs(pool, this.now);
+      const { age, life, size, origin, ground, alive, extra: mode } = particleInputs(pool, this.now);
       const t = clamp(age.div(life), 0, 1);
       const grow = size.mul(float(0.6).add(smoothstep(0, 0.3, t).mul(0.4)));
-      pool.material.positionNode = billboard(
-        origin.add(this.toCamera.mul(grow.mul(0.6))),
-        grow.mul(alive),
-        this.cameraRight,
-        this.cameraUp,
-      );
+      const centre = origin;
+      pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera);
+      pool.material.positionNode = billboard(centre, grow.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const d = length(uv().sub(0.5).mul(2));
         const hd = mode.equal(HALO_HD);
@@ -956,7 +1134,7 @@ export class EffectsLayer {
     // explosions), and the fire's glow underneath while they are young (params.w = heat). Premultiplied: the glow adds
     // light, the soot covers what is behind.
     this.billow = new ParticlePool(BILLOWS, quad, premultiplied(), (pool) => {
-      const { age, life, size, seed, origin, velocity, alive, extra: heat } = particleInputs(pool, this.now);
+      const { age, life, size, seed, origin, velocity, ground, alive, extra: heat } = particleInputs(pool, this.now);
       const t = clamp(age.div(life), 0, 1);
       const flight = min(age, life);
       // The initial surge slows, but convection and wind keep carrying the cloud through its longer tail.
@@ -975,12 +1153,9 @@ export class EffectsLayer {
           ),
         )
         .mul(alive);
-      pool.material.positionNode = billboard(
-        origin.add(drift).add(this.toCamera.mul(grow.mul(0.5))),
-        grow,
-        this.cameraRight,
-        this.cameraUp,
-      );
+      const centre = origin.add(drift);
+      pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera);
+      pool.material.positionNode = billboard(centre, grow, this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
         const angle = seed.mul(6.283).add(age.mul(seed.sub(0.5).mul(1.2)));
@@ -991,25 +1166,32 @@ export class EffectsLayer {
         const broad = texture(noise, q.mul(0.16).add(vec2(seed.mul(7.1), seed.mul(2.3).add(age.mul(0.018))))).r;
         const fine = texture(noise, q.mul(0.9).add(vec2(seed.mul(5.3), age.mul(-0.04)))).b;
         const bump = lumps.sub(0.5).mul(1.2).add(broad.sub(0.5).mul(0.6)).add(fine.sub(0.5).mul(0.4));
-        const r = length(p).add(bump.mul(0.6));
-        // A defined, lumpy silhouette over a dense core (a puff, not a haze).
-        // Puff age leaves the early billow intact; the old rim reaches zero at a smaller radius.
+        const e = ENHANCED.smoke;
+        const r = length(p).add(bump.mul(e.lumpiness));
+        // Erode the broad feathered rim and reach zero before the quad boundary: overlaps must not reveal a sheet.
+        // Puff age retains the existing late thinning independently of silhouette softness.
         const late = smoothstep(ENHANCED.smoke.lateFrom[0], ENHANCED.smoke.lateFrom[1], age);
         const edge = late.mul(ENHANCED.smoke.lateEdge);
-        const density = smoothstep(float(1.0).sub(edge), float(0.72).sub(edge), r).mul(
-          float(0.55).add(smoothstep(0.9, 0.2, r).mul(0.45)),
-        );
+        const density = smoothstep(float(e.edge[0]).sub(edge), float(e.edge[1]).sub(edge), r)
+          .mul(float(0.55).add(smoothstep(0.9, 0.2, r).mul(0.45)))
+          .mul(smoothstep(...e.boundary, length(p)))
+          .mul(mix(1 - e.erosion, 1, smoothstep(...e.erosionRange, lumps)));
         // Lumpy sphere normal in billboard space (x right, y up, z towards the camera).
         const z = sqrt(clamp(float(1).sub(dot(p, p)), 0.04, 1));
         const nrm = normalize(vec3(p.x.add(bump.mul(1.1)), p.y.add(bump.mul(1.1)), z));
         const sun = dot(nrm, vec3(-0.5, 0.68, 0.53)).max(0);
         const rim = pow(float(1).sub(nrm.z), 3).mul(0.35);
-        const shade = float(0.16).add(sun.mul(1.25)).add(rim);
+        const shade = float(e.ambient)
+          .add(sun.mul(e.sun))
+          .add(rim)
+          .mul(mix(e.underside, 1, smoothstep(...e.undersideRange, nrm.y)));
         const lit = this.nodes.sceneBrightness
           .mul(shade)
           .add(objectLight(positionWorld.xz, this.nodes).div(this.nodes.referenceLevel).mul(0.45));
         // Black-brown soot while young, ageing to a warm grey-brown haze (dust mixed in) as the cloud lingers.
-        const base = mix(color(0x1d1a17), color(0x6f675d), clamp(t.mul(1.25).add(seed.mul(0.25)), 0, 1));
+        // Ageing faster towards a lighter grey-brown than L5 (0x6f675d over the whole life): with the darker soot, the
+        // sunlit tops of the few large fix-round billows did not read and the cloud became a dark haze.
+        const base = mix(color(0x1d1a17), color(0x8a8275), clamp(t.mul(1.6).add(seed.mul(0.25)), 0, 1));
         // The fire's glow: underneath the young puff, and inside it for the first moments (black-orange smoke).
         // The fire's glow fades in seconds, not in shares of the (long) life: a lingering cloud is cold soot.
         const under = smoothstep(0.15, -0.8, nrm.y)
@@ -1031,27 +1213,47 @@ export class EffectsLayer {
       })();
     });
 
-    // Enhanced debris: small dark chunks thrown out ballistically, tumbling, landing on the ground they started from;
-    // some glow hot while they fly (params.w).
+    this.debrisShadow = new ParticlePool(DEBRIS, ground, blended(), (pool) => {
+      const { age, life, size, origin, velocity, ground, alive } = particleInputs(pool, this.now);
+      const e = ENHANCED.debris.shadow;
+      const { at } = debrisMotion(age, origin, velocity, ground);
+      // Follow the chunk's horizontal flight; height weakens contact rather than lifting the decal into the smoke.
+      const radius = size.mul(2 * e.radius).mul(alive);
+      pool.material.positionNode = vec3(at.x, ground.add(e.lift), at.z).add(
+        positionLocal.mul(vec3(radius, 0, radius.mul(e.aspect))),
+      );
+      pool.material.colorNode = Fn(() => {
+        const ellipse = smoothstep(...e.edge, length(uv().sub(0.5).mul(2)));
+        const opacity = mix(e.opacity, e.airborneOpacity, clamp(at.y.sub(ground).div(e.height), 0, 1));
+        const tint: ShaderNode = color(e.colour);
+        return vec4(tint, ellipse.mul(opacity).mul(debrisFade(age, life)));
+      })();
+    });
+    this.debrisShadow.mesh.renderOrder = ENHANCED.debris.shadow.renderOrder;
+
+    // Sparse rubble is depth-tested before smoke. Coverage cut-outs write only the polygon, never its empty quad.
     this.debris = new ParticlePool(DEBRIS, quad, blended(), (pool) => {
-      const { age, life, size, seed, origin, velocity, alive, extra: hot } = particleInputs(pool, this.now);
+      const { age, life, size, seed, origin, velocity, ground, alive, extra: hot } = particleInputs(pool, this.now);
+      const e = ENHANCED.debris;
       const t = clamp(age.div(life), 0, 1);
-      // Ballistic until the chunk is back at its start height, then it lies still (no sliding, no spin).
-      const landed = velocity.y.div(4.9).add(0.02);
-      const flight = min(min(age, life), landed);
-      const flying = origin.add(velocity.mul(flight)).add(vec3(0, flight.mul(flight).mul(-4.9), 0));
-      const at = vec3(flying.x, max(flying.y, origin.y.sub(0.02)), flying.z);
+      const { at, flight, landed, airborne } = debrisMotion(age, origin, velocity, ground);
+      const currentVelocity = vec3(velocity.x, velocity.y.sub(flight.mul(e.gravity)), velocity.z);
+      const projected = vec2(dot(currentVelocity, this.cameraRight), dot(currentVelocity, this.cameraUp));
+      const speed = length(projected);
+      const direction = projected.div(max(speed, e.velocityEpsilon));
+      const stretch = airborne.select(float(1).add(speed.mul(e.blur)), float(1));
       const spin = seed.mul(20).add(flight.mul(seed.mul(10).add(7)));
       const c = cos(spin);
       const s = sin(spin);
-      const corner = vec2(positionLocal.x, positionLocal.y.mul(0.65));
+      const corner = vec2(positionLocal.x, positionLocal.y.mul(e.aspect));
       const turned = vec2(corner.x.mul(c).sub(corner.y.mul(s)), corner.x.mul(s).add(corner.y.mul(c))).mul(
         size.mul(alive),
       );
+      const blurred = turned.add(direction.mul(dot(turned, direction)).mul(stretch.sub(1)));
       pool.material.positionNode = at
-        .add(this.toCamera.mul(0.08))
-        .add(this.cameraRight.mul(turned.x))
-        .add(this.cameraUp.mul(turned.y));
+        .add(this.toCamera.mul(e.cameraPush))
+        .add(this.cameraRight.mul(blurred.x))
+        .add(this.cameraUp.mul(blurred.y));
       pool.material.colorNode = Fn(() => {
         const p: ShaderNode = uv().sub(0.5).mul(2);
         // A seeded 5-7 vertex polygon, intersected by the fragment's radial ray. Wrapping the last vertex keeps
@@ -1083,30 +1285,43 @@ export class EffectsLayer {
         const sun = dot(turnedNormal, vec3(-0.5, 0.68, 0.53)).max(0);
         const material = hash(float(11));
         const base = mix(
-          mix(color(0x4a4239), color(0x857f75), step(0.4, material)),
-          mix(color(0x5a4636), color(0x6a4a32), step(0.94, material)),
-          step(0.72, material),
+          mix(color(e.colours[0]), color(e.colours[1]), step(e.colourBreaks[0], material)),
+          mix(color(e.colours[2]), color(e.colours[3]), step(e.colourBreaks[2], material)),
+          step(e.colourBreaks[1], material),
         );
         const edge = float(1).sub(smoothstep(0, aa.mul(0.9), edgeDistance.negate()));
         const upperEdge = dot(vec2(p.x.mul(c).sub(p.y.mul(s)), p.x.mul(s).add(p.y.mul(c))), vec2(-0.59, 0.81)).max(0);
+        // Mostly dark silhouettes against the fire (the target painting's rubble), with a faint lit facet: bright
+        // sunlit faces and pale rims read as grey slabs floating in the fireball.
         const shade = base
-          .mul(float(0.24).add(sun.mul(1.05)))
+          .mul(float(e.ambient).add(sun.mul(e.sun)))
           .mul(float(1).sub(edge.mul(0.65)))
-          .add(color(0xa49988).mul(edge).mul(upperEdge).mul(0.65))
+          .add(color(0xa49988).mul(edge).mul(upperEdge).mul(e.rimLight))
           .mul(this.sceneLight);
-        // Hot chunks keep their ember ramp while airborne and cool before their long ground rest ends.
+        // Hot chunks keep their ember ramp while airborne and cool before their short ground rest ends.
         const heat = clamp(float(1).sub(age.div(ENHANCED.debris.glowLife)), 0, 1);
         const temperature = mix(float(1), float(ENHANCED.debris.rim), clamp(length(p), 0, 1)).mul(heat);
         const ember = emberRamp(temperature)
           .mul(hot)
           .mul(smoothstep(ENHANCED.debris.glowLife, 0, age))
           .mul(age.lessThan(landed).select(float(1), float(0)));
+        const screenP = vec2(p.x, p.y.mul(e.aspect));
+        const turnedP = vec2(screenP.x.mul(c).sub(screenP.y.mul(s)), screenP.x.mul(s).add(screenP.y.mul(c)));
+        // Thin the streak ends while preserving cut-out coverage in its core; landed chunks regain their facets.
+        const streakAlpha = airborne.select(mix(1, e.blurTail, clamp(abs(dot(turnedP, direction)), 0, 1)), float(1));
+        const rgb: ShaderNode = shade.add(ember);
         return vec4(
-          shade.add(ember),
-          chunk.mul(smoothstep(life, life.sub(0.8), age)).mul(t.lessThan(1).select(float(1), float(0))),
+          rgb,
+          chunk
+            .mul(streakAlpha)
+            .mul(debrisFade(age, life))
+            .mul(t.lessThan(1).select(float(1), float(0))),
         );
       })();
     });
+    this.debris.material.depthWrite = true;
+    this.debris.material.alphaTest = ENHANCED.debris.alphaTest;
+    this.debris.mesh.renderOrder = ENHANCED.debris.renderOrder;
 
     // Enhanced heat shimmer: the frame drawn so far, refracted by rising noise over the blast for about a second.
     this.shimmer = new ParticlePool(SHIMMERS, quad, blended(), (pool) => {
@@ -1182,7 +1397,7 @@ export class EffectsLayer {
     // the pixel art under it reads as a detailed, boiling ball). Three octaves of evolving noise shape a lumpy ball
     // whose hot core cools outwards and with age through the original palette's fire colours into lit soot.
     this.blast = new ParticlePool(BLASTS, quad, premultiplied(), (pool) => {
-      const { age, life, size, seed, origin, alive, extra: cover } = particleInputs(pool, this.now);
+      const { age, life, size, seed, origin, ground, alive, extra: cover } = particleInputs(pool, this.now);
       const t = clamp(age.div(life), 0, 1);
       const grow = size.mul(
         float(0.5)
@@ -1190,12 +1405,9 @@ export class EffectsLayer {
           .add(t.mul(0.22)),
       );
       const rise: ShaderNode = t.mul(size).mul(0.22);
-      pool.material.positionNode = billboard(
-        origin.add(vec3(0, rise, 0)).add(this.toCamera.mul(grow.mul(0.6))),
-        grow.mul(alive),
-        this.cameraRight,
-        this.cameraUp,
-      );
+      const centre = origin.add(vec3(0, rise, 0));
+      pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera);
+      pool.material.positionNode = billboard(centre, grow.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
         const q = vec3(p.mul(1.7), seed.mul(17).add(t.mul(1.6)));
@@ -1229,10 +1441,10 @@ export class EffectsLayer {
       })();
     });
 
-    // Enhanced smoke column: puffs rise (no drag) and spread for about thirteen seconds, lumpy and lit like the rolling
+    // Enhanced smoke column: a few large puffs rise and spread, lumpy and lit like the rolling
     // smoke, glowing from the fire below while young (params.w = heat), dispersing to a thin grey.
     this.column = new ParticlePool(COLUMN_PUFFS, quad, premultiplied(), (pool) => {
-      const { age, life, size, seed, origin, velocity, alive, extra: heat } = particleInputs(pool, this.now);
+      const { age, life, size, seed, origin, velocity, ground, alive, extra: heat } = particleInputs(pool, this.now);
       const t = clamp(age.div(life), 0, 1);
       const flight = min(age, life);
       const grow = size
@@ -1244,12 +1456,9 @@ export class EffectsLayer {
           ),
         )
         .mul(alive);
-      pool.material.positionNode = billboard(
-        origin.add(velocity.mul(flight)).add(this.toCamera.mul(grow.mul(0.5))),
-        grow,
-        this.cameraRight,
-        this.cameraUp,
-      );
+      const centre = origin.add(velocity.mul(flight));
+      pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera);
+      pool.material.positionNode = billboard(centre, grow, this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
         const angle = seed.mul(6.283).add(age.mul(seed.sub(0.5).mul(0.4)));
@@ -1259,21 +1468,28 @@ export class EffectsLayer {
         const lumps = texture(noise, q.mul(0.3).add(vec2(seed.mul(3.7), seed.mul(1.9).add(age.mul(0.012))))).g;
         const fine = texture(noise, q.mul(0.85).add(vec2(seed.mul(5.3), age.mul(-0.02)))).b;
         const bump = lumps.sub(0.5).mul(1.2).add(fine.sub(0.5).mul(0.4));
-        const r = length(p).add(bump.mul(0.6));
+        const e = ENHANCED.column;
+        const r = length(p).add(bump.mul(e.lumpiness));
         // The column uses its own puff-age interval for the same opacity and silhouette thinning.
         const late = smoothstep(ENHANCED.column.lateFrom[0], ENHANCED.column.lateFrom[1], age);
         const edge = late.mul(ENHANCED.column.lateEdge);
-        const density = smoothstep(float(1.0).sub(edge), float(0.65).sub(edge), r).mul(
-          float(0.5).add(smoothstep(0.9, 0.2, r).mul(0.5)),
-        );
+        const density = smoothstep(float(e.edge[0]).sub(edge), float(e.edge[1]).sub(edge), r)
+          .mul(float(0.5).add(smoothstep(0.9, 0.2, r).mul(0.5)))
+          .mul(smoothstep(...e.boundary, length(p)))
+          .mul(mix(1 - e.erosion, 1, smoothstep(...e.erosionRange, lumps)));
         const z = sqrt(clamp(float(1).sub(dot(p, p)), 0.04, 1));
         const nrm = normalize(vec3(p.x.add(bump.mul(1.1)), p.y.add(bump.mul(1.1)), z));
         const sun = dot(nrm, vec3(-0.5, 0.68, 0.53)).max(0);
         const rim = pow(float(1).sub(nrm.z), 3).mul(0.3);
         const lit = this.nodes.sceneBrightness
-          .mul(float(0.32).add(sun.mul(0.95)).add(rim))
+          .mul(
+            float(e.ambient)
+              .add(sun.mul(e.sun))
+              .add(rim)
+              .mul(mix(e.underside, 1, smoothstep(...e.undersideRange, nrm.y))),
+          )
           .add(objectLight(positionWorld.xz, this.nodes).div(this.nodes.referenceLevel).mul(0.4));
-        const base = mix(color(0x2a2622), color(0x857d72), clamp(t.mul(1.2).add(seed.mul(0.2)), 0, 1));
+        const base = mix(color(0x2a2622), color(0x958d80), clamp(t.mul(1.5).add(seed.mul(0.2)), 0, 1));
         const glow = vec3(1.0, 0.42, 0.12)
           .mul(heat)
           .mul(smoothstep(0.1, -0.8, nrm.y))
@@ -1302,7 +1518,6 @@ export class EffectsLayer {
       this.airborneEmbers,
       this.muzzleStar,
       this.garnishFire,
-      this.debris,
       this.halo,
     ])
       pool.mesh.renderOrder = 7;
@@ -1313,6 +1528,8 @@ export class EffectsLayer {
       this.shock,
       this.dust,
       this.embers,
+      this.debrisShadow,
+      this.debris,
       this.smoke,
       this.column,
       this.billow,
@@ -1321,7 +1538,6 @@ export class EffectsLayer {
       this.fireballs,
       this.garnishFire,
       this.blast,
-      this.debris,
       this.halo,
       this.sparks,
       this.airborneEmbers,
@@ -1463,6 +1679,7 @@ export class EffectsLayer {
         e.fireball.width * width,
         e.fireball.life * artLife,
         e.fireball.cover,
+        at.y,
       );
     this.halo.spawn(
       now,
@@ -1489,7 +1706,7 @@ export class EffectsLayer {
       'explosion',
     );
     this.lightField?.pulse(now, at, light.colour, radius, peak, light.life, light.decay, 'explosion');
-    const lifted = at.clone().add(new Vector3(0, 0.12, 0));
+    const lifted = at.clone().add(new Vector3(0, e.debris.lift, 0));
     for (let i = 0, n = Math.round(e.sparks.count + e.sparks.perScale * s); i < n; i++) {
       // Most sparks stay near the blast; one in four is a long tracer.
       const far = Math.random() < 0.25;
@@ -1507,20 +1724,22 @@ export class EffectsLayer {
     const granted = this.crowd.grant(now, at, wantDebris, wantColumn + wantBillows);
     const smokeShare = granted.smoke / Math.max(1, wantColumn + wantBillows);
     for (let i = 0, n = granted.debris; i < n; i++) {
-      const big = Math.random() < 0.2;
-      const velocity = new Vector3(r(8), 2.5 + Math.random() * 3.5, r(8)).multiplyScalar(
-        (0.5 + 0.35 * s) * (big ? 0.6 : 1),
+      const d = e.debris;
+      const big = Math.random() < d.bigChance;
+      const velocity = new Vector3(r(d.spread), randomBetween(d.rise), r(d.spread)).multiplyScalar(
+        (d.speedBase + d.speedPerScale * s) * (big ? d.bigSpeed : 1),
       );
-      // Flight time (back to the start height), then a few seconds on the ground.
-      const flight = velocity.y / 4.9;
-      this.debris.spawn(
-        now,
-        lifted,
-        velocity,
-        (0.07 + Math.random() * 0.09 * Math.min(2, 0.6 + s)) * (big ? 1.6 : 1) * e.debris.size,
-        flight + e.debris.rest * (0.5 + Math.random()),
-        Math.random() < 0.35 ? 1 : 0,
-      );
+      velocity.y = Math.min(velocity.y, d.maxRise);
+      const size =
+        (d.sizeBase + Math.random() * d.sizeJitter * Math.min(d.sizeScaleMax, d.sizeScaleBase + s)) *
+        (big ? d.bigSize : 1) *
+        d.size;
+      const lifetime = debrisFlightTime(velocity.y, lifted.y - at.y) + d.rest * randomBetween(d.restRange) + d.fade;
+      const hot = Math.random() < d.hotChance ? 1 : 0;
+      const seed = Math.random();
+      // Identical inputs give the shadow the exact same flight, landing and fade, without per-frame CPU updates.
+      this.debris.spawn(now, lifted, velocity, size, lifetime, hot, at.y, seed);
+      this.debrisShadow.spawn(now, lifted, velocity, size, lifetime, hot, at.y, seed);
     }
     // A smoke column after bigger blasts: puffs emitted over a few seconds from the blast, rising with the wind.
     if (wantColumn > 0) {
@@ -1537,10 +1756,13 @@ export class EffectsLayer {
           e.column.size * width * (0.8 + Math.random() * 0.4),
           e.column.life * (0.8 + Math.random() * 0.4),
           Math.max(0, 1 - delay / 2.5),
+          at.y,
         );
       }
     }
-    for (let i = 0, n = Math.round(wantBillows * smokeShare); i < n; i++) {
+    // Assign the remainder rather than rounding twice: a one-puff grant must never become two puffs.
+    const billowCount = granted.smoke - Math.round(wantColumn * smokeShare);
+    for (let i = 0, n = billowCount; i < n; i++) {
       const velocity = new Vector3(r(0.5), 0.45 + Math.random() * 0.45, r(0.5)).multiplyScalar(0.6 + 0.4 * s).add(wind);
       const x = r(0.7 * width);
       const z = r(0.7 * width);
@@ -1553,12 +1775,13 @@ export class EffectsLayer {
         e.smoke.size * (0.8 + Math.random() * 0.5) * width,
         e.smoke.life * (0.8 + Math.random() * 0.4),
         1,
+        at.y,
       );
     }
     this.shimmer.spawn(now + 0.05, at, this.zeroVelocity, e.shimmer.width * width, e.shimmer.life);
     this.dust.spawn(now, at, this.zeroVelocity, e.dust.width * width, e.dust.life);
     if (options.hotCrater) {
-      this.embers.spawn(now + 0.05, at, this.zeroVelocity, e.crater.width * width, e.crater.life, 1);
+      this.embers.spawn(now + e.crater.delay, at, this.zeroVelocity, e.crater.width * width, e.crater.life, 1);
       // Charred ground around the engine's crater smudge (which stays underneath), fading over most of a minute.
       this.scorch.spawn(now + 0.1, at, this.zeroVelocity, e.char.width * width, e.char.life, 1);
     }
@@ -2119,7 +2342,18 @@ function particleInputs(pool: ParticlePool, now: ShaderNode) {
     life,
     seed: params.z as ShaderNode,
     extra: params.w as ShaderNode,
-    origin: instancedBufferAttribute(pool.origin, 'vec3') as ShaderNode,
+    origin: instancedBufferAttribute(
+      pool.origin.data,
+      'vec3',
+      pool.origin.data.stride,
+      pool.origin.offset,
+    ) as ShaderNode,
+    ground: instancedBufferAttribute(
+      pool.ground.data,
+      'float',
+      pool.ground.data.stride,
+      pool.ground.offset,
+    ) as ShaderNode,
     velocity: instancedBufferAttribute(pool.velocity, 'vec3') as ShaderNode,
   };
 }
