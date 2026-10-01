@@ -7,6 +7,11 @@ import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
 // The bridge loads LiveView (three.js, WebGPU) through a dynamic import; a stub stands in for it.
 const liveView = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock('../../packages/hd-renderer/src/live/liveView', () => ({ LiveView: { create: liveView.create } }));
+const hdRenderer = vi.hoisted(() => ({ applyLookPreset: vi.fn() }));
+vi.mock('../../packages/hd-renderer/src/HdRenderer', () => ({
+  LOOK_PRESETS: { faithful: {}, golden: { hour: 16.5 }, cinematic: { hour: 16.5 } },
+  applyLookPreset: hdRenderer.applyLookPreset,
+}));
 
 interface BridgeHandle {
   toggle(): boolean;
@@ -23,6 +28,10 @@ let frames: Array<() => void> = [];
 
 function fakeView() {
   return { push: vi.fn(), render: vi.fn(), resize: vi.fn(), dispose: vi.fn() };
+}
+
+function fakeLookView() {
+  return { ...fakeView(), hd: { settings: {}, applySettings: vi.fn() } };
 }
 
 function battle(frame: number, fileName = 'XMP29U2.MAP'): GameRenderState {
@@ -115,6 +124,78 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   liveView.create.mockReset();
+  hdRenderer.applyLookPreset.mockReset();
+});
+
+describe('HD bridge look parameters', () => {
+  it('applies the cinematic preset and vehicle options before the first snapshot push and render', async () => {
+    const harness = setup('?hd=1&hd-look=cinematic&hd-vlook=remaster&hd-vproj=/vehicles-hd/');
+    const view = fakeLookView();
+    await goLive(harness, view);
+    await advance(16);
+    expect(liveView.create).toHaveBeenCalledWith(
+      harness.hdCanvas,
+      expect.objectContaining({ timeOfDay: 16.5, voxelLook: 'remaster', voxelProjection: '/hd-cache/vehicles-hd' }),
+    );
+    expect(hdRenderer.applyLookPreset).toHaveBeenCalledExactlyOnceWith(view.hd.settings, 'cinematic');
+    expect(view.hd.applySettings).toHaveBeenCalledTimes(1);
+    expect(view.push).toHaveBeenCalledTimes(1);
+    expect(view.render).toHaveBeenCalled();
+    expect(hdRenderer.applyLookPreset.mock.invocationCallOrder[0]).toBeLessThan(
+      view.hd.applySettings.mock.invocationCallOrder[0]!,
+    );
+    expect(view.hd.applySettings.mock.invocationCallOrder[0]).toBeLessThan(view.push.mock.invocationCallOrder[0]!);
+    expect(view.hd.applySettings.mock.invocationCallOrder[0]).toBeLessThan(view.render.mock.invocationCallOrder[0]!);
+    harness.stop();
+  });
+
+  it('lets hd-time override the preset hour', async () => {
+    const harness = setup('?hd=1&hd-look=cinematic&hd-time=12');
+    const view = fakeLookView();
+    await goLive(harness, view);
+    expect(liveView.create).toHaveBeenCalledWith(harness.hdCanvas, expect.objectContaining({ timeOfDay: 12 }));
+    expect(hdRenderer.applyLookPreset).toHaveBeenCalledWith(view.hd.settings, 'cinematic');
+    expect(view.hd.applySettings).toHaveBeenCalledTimes(1);
+    harness.stop();
+  });
+
+  it('ignores unknown looks, engine voxel look and traversal in the projection directory', async () => {
+    const harness = setup('?hd=1&hd-look=neon&hd-vlook=engine&hd-vproj=../x');
+    await goLive(harness);
+    const options = liveView.create.mock.calls[0]![1];
+    expect(options).not.toHaveProperty('timeOfDay');
+    expect(options).not.toHaveProperty('voxelLook');
+    expect(options).not.toHaveProperty('voxelProjection');
+    expect(hdRenderer.applyLookPreset).not.toHaveBeenCalled();
+    harness.stop();
+  });
+
+  it('keeps map staging when the faithful preset has no suggested hour', async () => {
+    const harness = setup('?hd=1&hd-look=faithful');
+    const view = fakeLookView();
+    await goLive(harness, view);
+    expect(liveView.create.mock.calls[0]![1]).not.toHaveProperty('timeOfDay');
+    expect(hdRenderer.applyLookPreset).toHaveBeenCalledWith(view.hd.settings, 'faithful');
+    expect(view.hd.applySettings).toHaveBeenCalledTimes(1);
+    harness.stop();
+  });
+
+  it.each([
+    ['  /vehicles-hd/  ', '/hd-cache/vehicles-hd'],
+    ['', undefined],
+    ['  ///  ', undefined],
+    ['vehicles..hd', undefined],
+    ['vehicles\\hd', undefined],
+    ['https://example', undefined],
+  ])('sanitizes the projection directory %j', async (directory, expected) => {
+    const harness = setup(`?hd=1&hd-vproj=${encodeURIComponent(directory!)}`);
+    await goLive(harness);
+    const options = liveView.create.mock.calls[0]![1];
+    if (expected === undefined) expect(options).not.toHaveProperty('voxelProjection');
+    else expect(options.voxelProjection).toBe(expected);
+    expect(hdRenderer.applyLookPreset).not.toHaveBeenCalled();
+    harness.stop();
+  });
 });
 
 describe('HD 桥状态机', () => {

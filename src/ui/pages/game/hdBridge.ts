@@ -6,6 +6,7 @@ import {
   RENDER_PASSTHROUGH_KEY_RGB565,
 } from '../../../games/renderPassthrough';
 import type { FrameRect, VmFrameRenderer } from './vmFrameRenderer';
+import type { LookPreset } from '../../../../packages/hd-renderer/src/HdRenderer';
 import type { LiveSnapshot, LiveView } from '../../../../packages/hd-renderer/src/live/liveView';
 
 /**
@@ -180,24 +181,47 @@ export function startHdBridge(host: HdBridgeHost): () => void {
   const load = (mapId: string) => {
     if (loading === mapId || performance.now() < (failed.get(mapId) ?? -Infinity)) return;
     loading = mapId;
-    void import('../../../../packages/hd-renderer/src/live/liveView')
-      .then(({ LiveView }) =>
+    const look = params.get('hd-look');
+    const preset: LookPreset | undefined =
+      look === 'faithful' || look === 'golden' || look === 'cinematic' ? look : undefined;
+    const projectionDir = params
+      .get('hd-vproj')
+      ?.trim()
+      .replace(/^\/+|\/+$/g, '');
+    void Promise.all([
+      import('../../../../packages/hd-renderer/src/live/liveView'),
+      preset ? import('../../../../packages/hd-renderer/src/HdRenderer') : null,
+    ])
+      .then(async ([{ LiveView }, renderer]) => {
         // A stopped bridge must not create a GPU device for its detached canvas.
-        stopped
-          ? null
-          : LiveView.create(canvas, {
-              mapBase: `/hd-cache/${encodeURIComponent(mapId)}`,
-              libraryBase: '/hd-cache/_library',
-              // Without hd-time the map's own [Lighting] decides day, dusk or night (see LiveView.create).
-              ...(params.has('hd-time') ? { timeOfDay: Number(params.get('hd-time')) } : {}),
-              weather: params.get('hd-weather') === 'rain' ? 'rain' : 'clear',
-              weatherIntensity: params.get('hd-weather') === 'rain' ? 0.8 : 0,
-              // hd-fx=enhanced: the remaster's modern effects around the engine's own anims (default: faithful).
-              effects: params.get('hd-fx') === 'enhanced' ? 'enhanced' : 'faithful',
-              // hd-water=enhanced: the remaster's modern water (default: the earlier HD water).
-              water: params.get('hd-water') === 'enhanced' ? 'enhanced' : 'classic',
-            }),
-      )
+        if (stopped) return null;
+        const timeOfDay = params.has('hd-time')
+          ? Number(params.get('hd-time'))
+          : preset && renderer
+            ? renderer.LOOK_PRESETS[preset].hour
+            : undefined;
+        const view = await LiveView.create(canvas, {
+          mapBase: `/hd-cache/${encodeURIComponent(mapId)}`,
+          libraryBase: '/hd-cache/_library',
+          // Without hd-time or a preset hour, the map's own [Lighting] decides day, dusk or night.
+          ...(timeOfDay !== undefined ? { timeOfDay } : {}),
+          weather: params.get('hd-weather') === 'rain' ? 'rain' : 'clear',
+          weatherIntensity: params.get('hd-weather') === 'rain' ? 0.8 : 0,
+          // hd-fx=enhanced: the remaster's modern effects around the engine's own anims (default: faithful).
+          effects: params.get('hd-fx') === 'enhanced' ? 'enhanced' : 'faithful',
+          // hd-water=enhanced: the remaster's modern water (default: the earlier HD water).
+          water: params.get('hd-water') === 'enhanced' ? 'enhanced' : 'classic',
+          ...(params.get('hd-vlook') === 'remaster' ? { voxelLook: 'remaster' } : {}),
+          ...(projectionDir && !/\.\.|[\\:]/.test(projectionDir)
+            ? { voxelProjection: `/hd-cache/${projectionDir}` }
+            : {}),
+        });
+        if (preset && renderer) {
+          renderer.applyLookPreset(view.hd.settings, preset);
+          view.hd.applySettings();
+        }
+        return view;
+      })
       .then((view) => {
         if (!view) return;
         // Stopped, or superseded by a load for another map while this one was in flight.
