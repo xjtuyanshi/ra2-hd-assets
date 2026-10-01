@@ -395,7 +395,8 @@ PY=python3  # numpy + Pillow + OpenCV
 SPEC=packages/ra2-assets/python/tree_redraw_spec.example.json
 "$PY" -B packages/ra2-assets/python/tree_redraw.py build --spec "$SPEC" --cache-root gameres/hd-cache --map XMP29U2 \
   --orig-dir "$WORK/orig" --proc-dir "$WORK/proc" --patch-dir "$WORK/patch" \
-  --cfg '{"kL":0.6,"kc":0.9,"volume":{"strength":1.6,"density":0.11,"rim":0.18}}'
+  --cfg '{"kL":0.6,"kc":0.9,"volume":{"strength":1.6,"density":0.11,"rim":0.18},
+          "grade":{"a":-20,"b":36,"k":0.45,"chroma":1.2,"lift":4}}'
 "$PY" -B packages/ra2-assets/python/tree_redraw.py shadows --cache-root gameres/hd-cache --map XMP29U2 \
   --patch-dir "$WORK/patch" --fit "$WORK/shadow_fit.json"
 "$PY" -B packages/ra2-assets/python/tree_redraw.py apply --map XMP29U2 --patch-dir "$WORK/patch" \
@@ -404,7 +405,9 @@ python3 -m pytest packages/ra2-assets/python/test_tree_redraw.py -q
 ```
 
 The `--cfg` above is the adopted setting (also recorded as `build_cfg` in the example spec): the partial lightness
-lock keeps the redraw's sun-side highlights and crown shade while hue family and chroma stay the original's. Sheets,
+lock keeps the redraw's sun-side highlights and crown shade while hue family and chroma stay the original's. The optional `grade` then moves only green foliage (Lab hue 75-165 degrees, feathered; bark, autumn rust and
+near-neutral texels untouched) a share `k` towards a fresh grass-green Lab a/b, scales its chroma and lifts it, so
+trees are graded together with the repainted lawn instead of keeping each map's olive original. Sheets,
 model outputs, patches and variant caches are derived art and belong outside Git.
 
 ## Sprite material atlas (Python, experimental)

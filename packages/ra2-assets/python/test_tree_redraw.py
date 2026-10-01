@@ -475,3 +475,19 @@ def test_spec_tolerates_round_notes_and_unknown_top_level_keys(cache):
     spec.update(rounds='Refine the first model output in round 2.', future_metadata={'round': 2})
     cache['spec_path'].write_text(json.dumps(spec))
     assert tr.load_spec(cache['spec_path']) == spec
+
+
+def test_grade_moves_only_green_foliage_and_keeps_alpha():
+    px = np.zeros((1, 4, 4), np.uint8)
+    px[0, 0] = (92, 110, 52, 255)    # olive leaf: inside the green hue window
+    px[0, 1] = (150, 72, 38, 200)    # rust/bark: outside the window
+    px[0, 2] = (120, 120, 120, 128)  # neutral grey: no chroma
+    px[0, 3] = (60, 130, 40, 0)      # transparent leaf: colour graded, alpha untouched
+    out = tr.grade(px, a=-20, b=36, k=0.35, chroma=1.15, lift=3)
+    assert np.array_equal(out[..., 3], px[..., 3])
+    assert np.abs(out[0, 1].astype(int) - px[0, 1].astype(int)).max() <= 1
+    assert np.abs(out[0, 2].astype(int) - px[0, 2].astype(int)).max() <= 1
+    before, after = tr.to_lab(px[0, :1, :3][None])[0, 0], tr.to_lab(out[0, :1, :3][None])[0, 0]
+    assert after[1] < before[1]  # greener (more negative a*)
+    assert after[0] > before[0]  # lifted
+    assert np.array_equal(tr.grade(px, a=-20, b=36, k=0.0, chroma=1.0, lift=0.0)[..., 3], px[..., 3])

@@ -1,7 +1,7 @@
 {
   "rounds": "Round 1 redraws the originals; round 2 refines the previous sheets with --refine-from. Selection uses processed round-2 outputs.",
   "build_cfg": {
-    "note": "Adopted build settings (pass as --cfg): a partial lightness lock keeps the redraw's sun-side highlights and crown shade, a stronger volume pass gives the crown mass at RTS size; hue family and chroma stay locked to each map's original.",
+    "note": "Adopted build settings (pass as --cfg): a partial lightness lock keeps the redraw's sun-side highlights and crown shade, a stronger volume pass gives the crown mass at RTS size; hue family and chroma stay locked to each map's original, then grade pulls green foliage towards the repainted lawn's fresh green.",
     "cfg": {
       "kL": 0.6,
       "kc": 0.9,
@@ -9,6 +9,13 @@
         "strength": 1.6,
         "density": 0.11,
         "rim": 0.18
+      },
+      "grade": {
+        "a": -20,
+        "b": 36,
+        "k": 0.45,
+        "chroma": 1.2,
+        "lift": 4
       }
     }
   },

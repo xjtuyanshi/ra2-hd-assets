@@ -196,6 +196,33 @@ def lock(new_rgba: np.ndarray, ref_rgba: np.ndarray, kL: float = 0.85, kab: floa
     return res
 
 
+def grade(rgba: np.ndarray, a: float, b: float, k: float = 0.35, chroma: float = 1.0, lift: float = 0.0,
+          hue: tuple[float, float] = (75.0, 165.0)) -> np.ndarray:
+    """Foliage grade applied after the colour lock: pulls green leaves towards a target Lab colour (a, b).
+
+    The lock keeps each map's original (often olive) mood; this moves only green foliage texels (Lab hue inside `hue`
+    degrees, feathered by 15 degrees, and some chroma) a share `k` towards the target's a/b, scales their chroma
+    around neutral by `chroma` and lifts lightness by `lift`, so trees can be graded together with a repainted lawn.
+    Bark, autumn foliage (rust hues) and near-neutral texels are untouched. Alpha is unchanged.
+    """
+    lab = to_lab(rgba[..., :3])
+    av, bv = lab[..., 1], lab[..., 2]
+    h = np.degrees(np.arctan2(bv, av)) % 360
+    lo, hi = hue
+    w = np.clip((h - (lo - 15)) / 15, 0, 1) * np.clip(((hi + 15) - h) / 15, 0, 1)
+    w *= np.clip((np.hypot(av, bv) - 4) / 8, 0, 1)
+    out = lab.copy()
+    na = av + k * (a - av)
+    nb = bv + k * (b - bv)
+    out[..., 1] = av + w * (na * chroma - av)
+    out[..., 2] = bv + w * (nb * chroma - bv)
+    out[..., 0] = np.clip(lab[..., 0] + w * lift, 0, 100)
+    rgb = cv2.cvtColor(out.astype(np.float32), cv2.COLOR_LAB2RGB)
+    res = rgba.copy()
+    res[..., :3] = np.clip(rgb * 255 + 0.5, 0, 255).astype(np.uint8)
+    return res
+
+
 def to_lab(rgb: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(rgb.astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB)
 
@@ -743,7 +770,7 @@ def fit_shadows(cache_root: Path, map_name: str, orig_dir: Path, work_dir: Path,
 def build(cache_root: Path, map_name: str, orig_dir: Path, proc_dir: Path, patch_dir: Path,
           spec: dict, kL: float = 1.0, cfg: dict | None = None) -> None:
     cfg = cfg or {}
-    unknown = cfg.keys() - {'ref', 'kab', 'kc', 'lift', 'densify', 'volume', 'kL'}
+    unknown = cfg.keys() - {'ref', 'kab', 'kc', 'lift', 'densify', 'volume', 'kL', 'grade'}
     if unknown:
         raise ValueError(f'unknown --cfg keys: {sorted(unknown)}')
     ref_kind = cfg.get('ref', REF)
@@ -755,6 +782,9 @@ def build(cache_root: Path, map_name: str, orig_dir: Path, proc_dir: Path, patch
     if volume_kwargs is not None and not isinstance(volume_kwargs, dict):
         raise ValueError('cfg.volume must be an object or null')
     kL = cfg.get('kL', kL)
+    grade_kwargs = cfg.get('grade')
+    if grade_kwargs is not None and not isinstance(grade_kwargs, dict):
+        raise ValueError('cfg.grade must be an object or null')
     man = read_json(cache_root / map_name / 'manifest.json')
     idx = read_image(cache_root / map_name / 'sprites.png')[..., 0]
     pal = read_image(cache_root / map_name / man['palettes']['iso'])[0].astype(np.uint8)
@@ -784,6 +814,8 @@ def build(cache_root: Path, map_name: str, orig_dir: Path, proc_dir: Path, patch
         if volume_kwargs is not None:
             new = volume(new, **volume_kwargs)
         new = lock(new, ref, kL=kL, kab=kab, kc=kc, lift=lift)
+        if grade_kwargs:
+            new = grade(new, **grade_kwargs)
         a2 = new[..., 3].astype(np.float32) / 255.0
         a2[a2 < 8 / 255] = 0
         rgb = new[..., :3].copy()
@@ -812,6 +844,7 @@ def build(cache_root: Path, map_name: str, orig_dir: Path, proc_dir: Path, patch
             'mask1x_px': int(mask.sum()), 'orig1x_px': int(orig_mask.sum()),
             'iou_mask_vs_orig': round(float((mask & orig_mask).sum() / max((mask | orig_mask).sum(), 1)), 3),
             'hd_alpha_mean': round(float(a2.mean()), 3), 'densify': dens, 'volume': volume_kwargs,
+            'grade': grade_kwargs,
         }
         print(map_name, tree, report[tree], flush=True)
     write_json(report, out / 'build.json')
