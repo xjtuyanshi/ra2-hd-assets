@@ -523,6 +523,110 @@ def walls_xfer(lib, name, *, patches):
     return count
 
 
+def sheet_patch(sprite, frame, patches):
+    """True when the patch was posted from a model animation sheet (provenance 'sheet ...')."""
+    source = Path(patches) / f'{patch_name(sprite, frame)}.src'
+    return source.exists() and source.read_text(encoding='utf-8').startswith('sheet')
+
+
+def damaged_from_sheet(lib, intact, damaged, *, patches, log=None):
+    """Damaged loop frame k <- the model-drawn intact frame k of the same layer. Damaged loops share most pixels with
+    their intact loop, so a sheet redraw of the intact loop also details the damaged one (where 1x indices match)
+    instead of the static damaged body. Model-owned damaged frames stay untouched."""
+    sprites = lib.lib['sprites']
+    transfer = Xfer(lib, patches)
+    count = 0
+    for frame in range(min(len(sprites[intact]['frames']), len(sprites[damaged]['frames']))):
+        if not sheet_patch(intact, frame, patches) or model_patch(damaged, frame, patches):
+            continue
+        result = transfer.transfer(transfer.reference([f'{intact}:{frame}']), damaged, frame)
+        if save_xfer_patch(damaged, frame, result, f'xfer:sheet {intact}', patches):
+            count += 1
+            if log is not None:
+                log.append(f'{damaged}#{frame} {result[2]:.2f}')
+    return count
+
+
+def restore_paint_hue(design, redraw, hue=38.0, *, min_chroma=30.0, tolerance=35.0):
+    """Undo a generated sheet's hue drift on fixed (non-remap) paint, e.g. red Tesla fins redrawn violet.
+
+    design/redraw are RGB uint8 (design is resized to the redraw). Where the design shows chromatic paint near `hue`
+    (Lab degrees), redraw pixels of a blue-violet hue (-150..-10 degrees) within a small dilation get the design's
+    median paint hue; lightness is kept and chroma kept or raised towards the design's. Returns (rgb, count)."""
+    grow = max(2, int(round(3 * redraw.shape[1] / design.shape[1])))
+    design = cv2.resize(np.ascontiguousarray(design[..., :3]), (redraw.shape[1], redraw.shape[0]),
+                        interpolation=cv2.INTER_NEAREST)
+    lab_d = cv2.cvtColor(design, cv2.COLOR_RGB2LAB).astype(np.float32)
+    lab_r = cv2.cvtColor(np.ascontiguousarray(redraw[..., :3]), cv2.COLOR_RGB2LAB).astype(np.float32)
+    def polar(lab):
+        a, b = lab[..., 1] - 128, lab[..., 2] - 128
+        return np.hypot(a, b), np.degrees(np.arctan2(b, a))
+    c_d, h_d = polar(lab_d)
+    paint = (c_d > min_chroma) & (np.abs((h_d - hue + 180) % 360 - 180) < tolerance)
+    if not paint.any():
+        return np.ascontiguousarray(redraw[..., :3]).copy(), 0
+    near = cv2.dilate(paint.astype(np.uint8), np.ones((2 * grow + 1, 2 * grow + 1), np.uint8)) > 0
+    c_r, h_r = polar(lab_r)
+    sel = near & (c_r > 8) & (h_r < -10) & (h_r > -150)
+    target = np.radians(np.median(h_d[paint]))
+    chroma = np.maximum(c_r * 1.2, np.median(c_d[paint]) * 0.8)
+    lab_r[..., 1] = np.where(sel, 128 + chroma * np.cos(target), lab_r[..., 1])
+    lab_r[..., 2] = np.where(sel, 128 + chroma * np.sin(target), lab_r[..., 2])
+    rgb = cv2.cvtColor(np.clip(lab_r, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
+    rgb = np.where(sel[..., None], rgb, redraw[..., :3]).astype(np.uint8)
+    return rgb, int(sel.sum())
+
+
+def fix_sheet_hue(jobdir, hue=38.0):
+    """Apply restore_paint_hue to a job's raw.png (or output.png), keeping the first original as *_prefix.png."""
+    jobdir = Path(jobdir)
+    source = jobdir / ('raw.png' if (jobdir / 'raw.png').exists() else 'output.png')
+    backup = source.with_name(source.stem + '_prefix.png')
+    if not backup.exists():
+        shutil.copy(source, backup)
+    rgb, count = restore_paint_hue(read_image(jobdir / 'input.png', 'RGB'), read_image(backup, 'RGB'), hue)
+    atomic_image(source, Image.fromarray(rgb))
+    return count
+
+
+def index_paint(lib, sprite, *, patches, min_chroma=10.0):
+    """Encode house paint in existing patches of `sprite` from the 1x palette indices 16..31.
+
+    The live renderer draws every building sprite (body, layers, bib, build-up) with the owner's remap, so pixels that
+    are house paint in the original must be paint in HD too. Posting only keeps paint where the baseline remap page has
+    it, which is empty for some sprites (e.g. Tesla fins, prism tower bands, some build-ups): their redraw bakes the
+    default red. Chromatic, not yet painted texels over index 16..31 are re-encoded on the grey ramp of the sprite's
+    own unremapped palette ramp (luminance kept), so they decode to the same red for the default house.
+    Returns the number of texels encoded."""
+    entry = lib.lib['sprites'][sprite]
+    ramp = lib.pal[entry['palette']][16:32].astype(np.float32)
+    count = 0
+    for frame, f in enumerate(entry['frames']):
+        x, y, w, h = f['rect']
+        path = Path(patches) / f'{patch_name(sprite, frame)}.png'
+        if not w or not path.exists():
+            continue
+        idx = lib.idx_page(f.get('page', 0))[y:y + h, x:x + w]
+        house = np.repeat(np.repeat((idx >= 16) & (idx < 32), 2, 0), 2, 1)
+        rgba = read_image(path, 'RGBA').copy()
+        remap_path = path.with_name(path.stem + '-remap.png')
+        remap = read_image(remap_path, 'L').copy()
+        if house.shape != remap.shape:
+            raise ValueError(f'patch size differs from the frame: {path}')
+        lab = cv2.cvtColor(np.ascontiguousarray(rgba[..., :3]), cv2.COLOR_RGB2LAB).astype(np.float32)
+        chroma = np.hypot(lab[..., 1] - 128, lab[..., 2] - 128)
+        sel = house & (rgba[..., 3] > 0) & (chroma > min_chroma) & (remap == 0)
+        if not sel.any():
+            continue
+        grey = rd.neutral_to_grey(rgba[..., :3].astype(np.float32), ramp)
+        rgba[..., :3] = np.where(sel[..., None], np.clip(np.rint(grey), 0, 255), rgba[..., :3]).astype(np.uint8)
+        remap[sel] = 255
+        atomic_image(path, Image.fromarray(rgba, 'RGBA'))
+        atomic_image(remap_path, Image.fromarray(remap))
+        count += int(sel.sum())
+    return count
+
+
 def job_comp(lib, jobdir):
     lay = json.loads((Path(jobdir) / 'layout.json').read_text())
     x0, y0 = lay['origin']
@@ -1325,6 +1429,19 @@ def parser():
             library_options(p)
             p.add_argument('--out', type=Path, required=True)
             p.add_argument('--extra', type=json_option, help='JSON mapping source sprite to sibling sprites')
+    p = commands.add_parser('dmg-xfer', help='detail damaged loop frames from model-drawn intact loop frames')
+    p.add_argument('--library-root', type=Path, required=True, help='variant root containing _library/<theater>')
+    p.add_argument('--theater', default='urban')
+    p.add_argument('--patches', type=Path, required=True)
+    p.add_argument('pairs', nargs='+', help='INTACT_SPRITE,DAMAGED_SPRITE (e.g. anim:GAAIRC_A,anim:GAAIRC_AD)')
+    p = commands.add_parser('fix-hue', help='restore fixed paint hue drift in generated sheets (raw.png)')
+    p.add_argument('--hue', type=float, default=38.0, help='Lab hue of the design paint in degrees (red ~38)')
+    p.add_argument('jobdirs', type=Path, nargs='+')
+    p = commands.add_parser('index-paint', help='encode house paint in patches from 1x indices 16..31')
+    p.add_argument('--library-root', type=Path, required=True, help='variant root containing _library/<theater>')
+    p.add_argument('--theater', default='urban')
+    p.add_argument('--patches', type=Path, required=True)
+    p.add_argument('sprites', nargs='+')
     p = commands.add_parser('pack')
     sub = p.add_subparsers(dest='action', required=True)
     q = sub.add_parser('make')
@@ -1377,6 +1494,18 @@ def main(argv=None):
                 for state in ([state] if state else ['i', 'd', 'mk']):
                     parts = overrides.get(f'{name}:{state}', overrides.get(name))
                     print(name, state, xfer(lib, name, state, patches=args.patches, parts=parts, delta=args.delta))
+        elif args.command == 'dmg-xfer':
+            lib = Lib(args.theater, args.library_root)
+            for pair in args.pairs:
+                intact, damaged = pair.split(',')
+                print(intact, '->', damaged, damaged_from_sheet(lib, intact, damaged, patches=args.patches))
+        elif args.command == 'fix-hue':
+            for jobdir in args.jobdirs:
+                print(jobdir.name, 'recoloured', fix_sheet_hue(jobdir, args.hue))
+        elif args.command == 'index-paint':
+            lib = Lib(args.theater, args.library_root)
+            for sprite in args.sprites:
+                print(sprite, 'paint texels', index_paint(lib, sprite, patches=args.patches))
         elif args.command == 'normals-job':
             normals_job(args.work, args.jobs)
         elif args.command == 'normals-assist':

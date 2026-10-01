@@ -545,8 +545,14 @@ model outputs, patches and variant caches are derived art and belong outside Git
 transfers accepted idle redraws to animation, damaged and build-up frames (all three states when omitted);
 `xfer --delta` also keeps the redraw, shifted by the 1x palette colour change, on colour-cycling pixels whose
 silhouette does not move. `walls-xfer` accepts the same options followed by wall types and maps damaged frame `k` to
-piece `k % 16`.
-Both preserve model-owned patches, including patches without a `.src`; only sources starting with `xfer` may be
+piece `k % 16`. `dmg-xfer` (same options) takes `INTACT,DAMAGED` sprite pairs and details each damaged loop frame
+from the model-sheet patch of the same intact frame (sources starting with `sheet`) where the 1x indices match.
+`index-paint` (same options) takes sprites and re-encodes chromatic, unpainted texels over 1x palette indices 16-31
+as house paint on the grey ramp of the sprite's own palette ramp: the live renderer draws every building sprite with
+the owner's remap, while posting only keeps paint where the baseline remap page had it. `fix-hue [--hue 38] JOBDIR...`
+restores a fixed paint hue that an image model drifted to blue or violet in a sheet's `raw.png` (else `output.png`),
+keeping the first original as `*_prefix.png`.
+The transfers preserve model-owned patches, including patches without a `.src`; only sources starting with `xfer` may be
 overwritten. `xfer --parts <JSON file>` overrides reference parts with ordered `sprite:frame` lists keyed by `NAME`
 or `NAME:state`, including bibs and special idle layers. `python/theatre_pages.py xfer "$THEATRE" "$URBAN" "$BASELINE"
 --pages 0,1` fills missing HD entries from shared urban art (all theatre pages by default), symlinking identical pages

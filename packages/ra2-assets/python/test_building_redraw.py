@@ -496,6 +496,73 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(br.idle_parts(lib, 'TEST', damaged=True, include_auxiliary=True),
                          ['bib:TEST:1', f'{BODY}:1', f'{ANIM}:0', f'{DAMAGE}:0'])
 
+    def test_damaged_loop_takes_sheet_drawn_intact_frames_only(self):
+        self.indices[:, 40:44] = 40  # damaged frame 0 shares the intact frame's 1x indices
+        Image.fromarray(self.indices).save(self.directory / 'index.png')
+
+        def run():
+            result = subprocess.run([sys.executable, '-B', br.__file__, 'dmg-xfer', '--library-root', str(self.root),
+                                     '--theater', 'snow', '--patches', str(self.patches), f'{ANIM},{DAMAGE}'],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+
+        self.patch(ANIM, 0, (12, 200, 90), tag='model:accepted')  # not from a sheet: no transfer
+        self.assertIn(f'-> {DAMAGE} 0', run())
+        self.patch(ANIM, 0, (12, 200, 90), tag='sheet A_TEST_A')
+        self.assertIn(f'-> {DAMAGE} 1', run())
+        out = br.read_image(self.patches / 'anim_TEST_AD#0.png')
+        np.testing.assert_array_equal(out[4, 2, :3], [12, 200, 90])
+        self.assertEqual((self.patches / 'anim_TEST_AD#0.src').read_text(), f'xfer:sheet {ANIM}')
+        protected = self.patch(DAMAGE, 0, (5, 6, 7), tag='sheet A_TEST_AD')
+        self.assertIn(f'-> {DAMAGE} 0', run())
+        np.testing.assert_array_equal(br.read_image(self.patches / 'anim_TEST_AD#0.png'), protected)
+
+    def test_index_paint_encodes_remap_range_texels_once(self):
+        self.indices[:, 2:5] = 20  # house paint indices inside the body's first frame
+        Image.fromarray(self.indices).save(self.directory / 'index.png')
+        palette = np.full((1, 256, 3), 128, np.uint8)
+        palette[0, 16:32] = [[250 - 12 * i, 40, 30] for i in range(16)]
+        Image.fromarray(palette).save(self.directory / 'palette.png')
+        self.patch(BODY, 0, (180, 40, 30))
+
+        def run():
+            result = subprocess.run([sys.executable, '-B', br.__file__, 'index-paint', '--library-root', str(self.root),
+                                     '--theater', 'snow', '--patches', str(self.patches), BODY],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+
+        self.assertIn('paint texels 48', run())
+        rgba = br.read_image(self.patches / 'building_TEST#0.png')
+        remap = br.read_image(self.patches / 'building_TEST#0-remap.png', 'L')
+        self.assertTrue((remap[:, 4:10] == 255).all())
+        self.assertTrue((remap[:, :4] == 0).all() and (remap[:, 10:] == 0).all())
+        self.assertTrue((rgba[:, 4:10, 0] == rgba[:, 4:10, 1]).all())  # grey-ramp encoded
+        np.testing.assert_array_equal(rgba[:, 12, :3], np.tile([180, 40, 30], (8, 1)))
+        self.assertIn('paint texels 0', run())
+
+    def test_restore_paint_hue_recolours_violet_drift_on_design_paint_only(self):
+        design = np.full((40, 40, 3), 118, np.uint8)
+        design[10:30, 10:20] = (200, 30, 30)
+        redraw = np.full((80, 80, 3), 118, np.uint8)
+        redraw[20:60, 20:40] = (110, 70, 190)  # violet drift on the paint
+        redraw[20:60, 60:75] = (40, 90, 220)  # genuine blue elsewhere stays
+        rgb, count = br.restore_paint_hue(design, redraw, 38)
+        self.assertGreater(count, 600)
+        lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        hue = np.degrees(np.arctan2(lab[40, 30, 2] - 128, lab[40, 30, 1] - 128))
+        self.assertLess(abs(hue - 38), 12)
+        self.assertGreater(rgb[40, 30, 0], rgb[40, 30, 2])
+        np.testing.assert_array_equal(rgb[40, 65], redraw[40, 65])
+        job = self.root / 'job'
+        job.mkdir()
+        Image.fromarray(design).save(job / 'input.png')
+        Image.fromarray(redraw).save(job / 'raw.png')
+        self.assertEqual(br.fix_sheet_hue(job), count)
+        np.testing.assert_array_equal(br.read_image(job / 'raw_prefix.png', 'RGB'), redraw)
+        self.assertEqual(br.fix_sheet_hue(job), count)  # idempotent: always restarts from the backup
+
     def test_walls_frame_17_takes_piece_1_and_keeps_model_damage(self):
         sprite = 'building:WALL'
         self.data['sprites'][sprite] = dict(palette='unit', frames=[
