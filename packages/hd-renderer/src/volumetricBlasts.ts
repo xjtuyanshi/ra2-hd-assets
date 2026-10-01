@@ -485,7 +485,11 @@ export class VolumetricBlastLayer {
               .add(fbm.sub(0.5).mul(this.temperatureFbm))
               .add(n.a.sub(0.5).mul(this.temperatureDetail))
               // Ridged high-frequency noise: thin white-hot flame filaments instead of a smooth colour gradient.
-              .sub(pow(float(1).sub(n2.a.mul(2).sub(1).abs()), 3).sub(0.3).mul(this.temperatureRidge));
+              .sub(
+                pow(float(1).sub(n2.a.mul(2).sub(1).abs()), 3)
+                  .sub(0.3)
+                  .mul(this.temperatureRidge),
+              );
             const soot: ShaderNode = smoothstep(this.pocketLow, this.pocketHigh, pocketNoise)
               .mul(heat.w)
               .mul(mix(this.pocketEarly, 1, float(1).sub(heat0)))
@@ -524,9 +528,7 @@ export class VolumetricBlastLayer {
               1,
               smoothstep(this.shadowLow, this.shadowHigh, sunSide.add(n.g.sub(0.5).mul(this.shadowNoise))),
             ).toVar();
-            const sky = this.skyBase.add(
-              this.skyGain.mul(smoothstep(this.skyLow, this.skyHigh, q.y.sub(c.y).div(rf))),
-            );
+            const sky = this.skyBase.add(this.skyGain.mul(smoothstep(this.skyLow, this.skyHigh, q.y.sub(c.y).div(rf))));
             const albedo: ShaderNode = mix(this.sootLight, this.sootDark, heat.z.mul(mix(0.6, 1, soot))).toVar();
             // The fire lights its own smoke from inside: strongest near the hot core, fading as the blast cools.
             const glow = heat0.mul(exp(radial.mul(this.glowFalloff).negate())).mul(this.bounceGain);
@@ -538,14 +540,24 @@ export class VolumetricBlastLayer {
               .toVar();
             const fireShare = smoothstep(this.fireLow, this.fireHigh, temperature);
             const alpha: ShaderNode = float(1)
-              .sub(exp(this.extinction.mul(density).mul(mix(1, this.fireOpacity, fireShare)).mul(ds).negate()))
+              .sub(
+                exp(
+                  this.extinction
+                    .mul(density)
+                    .mul(mix(1, this.fireOpacity, fireShare))
+                    .mul(ds)
+                    .negate(),
+                ),
+              )
               .toVar();
             colour.addAssign(
-              transmittance.mul(alpha).mul(
-                scattered.mul(float(1).sub(fireShare.mul(0.7))).add(
-                  emission.mul(this.emissionGain).mul(this.displayScale),
+              transmittance
+                .mul(alpha)
+                .mul(
+                  scattered
+                    .mul(float(1).sub(fireShare.mul(0.7)))
+                    .add(emission.mul(this.emissionGain).mul(this.displayScale)),
                 ),
-              ),
             );
             transmittance.mulAssign(float(1).sub(alpha));
           });

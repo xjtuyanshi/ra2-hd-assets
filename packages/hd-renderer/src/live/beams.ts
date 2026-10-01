@@ -263,9 +263,7 @@ export class LiveBeams {
       const laserLight = tint
         .mul(halo.mul(halo).mul(mix(0.5, 1.1, this.enhanced)))
         .add(vec3(1, 0.98, 0.96).mul(core.mul(1.8)));
-      const laserFlicker = sin(now.mul(23).add(seedV))
-        .mul(0.04)
-        .add(0.96);
+      const laserFlicker = sin(now.mul(23).add(seedV)).mul(0.04).add(0.96);
       return vec4(
         legacy
           .select(laserLight, light)
