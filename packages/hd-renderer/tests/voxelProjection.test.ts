@@ -24,7 +24,13 @@ import {
   projectionFramePair,
   type VoxelProjectionManifest,
 } from '../src/ra2/voxelProjectionMath';
-import { createVoxelProjectionPart, voxelProjectionFor, voxelProjectionLibrary } from '../src/ra2/voxelProjection';
+import {
+  createVoxelProjectionPart,
+  manifestPartsFor,
+  projectionParts,
+  voxelProjectionFor,
+  voxelProjectionLibrary,
+} from '../src/ra2/voxelProjection';
 import { voxelMaterialFor, voxelProjectedMaterialFor } from '../src/ra2/vpl';
 import { buildVoxelGeometry, instantiateVoxel, projectVoxelMaterials } from '../src/ra2/voxels';
 import { buildSmoothVoxelGeometry } from '../src/ra2/voxelSmoothGeometry';
@@ -64,12 +70,23 @@ function manifest(turret = true): VoxelProjectionManifest {
   };
 }
 
+function turretManifest(type = 'X:turret'): VoxelProjectionManifest {
+  const spec = manifest();
+  return { ...spec, type, parts: { turret: spec.parts.turret! } };
+}
+
 const model: VoxelModel = {
   id: 'HTNK',
   palette: 'unit',
   normalsMode: 4,
   turretOffset: 48,
   parts: (['body', 'turret', 'barrel'] as const).map((role) => ({ role, sections: [syntheticSection(2, true)] })),
+};
+
+const turretModel: VoxelModel = {
+  ...model,
+  id: 'X:turret',
+  parts: model.parts.filter(({ role }) => role !== 'body'),
 };
 
 function worldMatrix(facing: number): Matrix4 {
@@ -112,7 +129,7 @@ describe('voxel projection coordinate contract', () => {
       .multiply(worldMatrix(53))
       .scale(new Vector3(2, 0.8, 1.3));
     m.setPosition(66.5, 0.8165, 53.5);
-    const frame = spec.parts.body.frames[6]!;
+    const frame = spec.parts.body!.frames[6]!;
     const local: [number, number, number] = [0.4, 0.15, -0.22];
     const translated = new Vector3(...local).applyMatrix4(m).sub(new Vector3().setFromMatrixPosition(m));
     const theta = Math.atan2(-m.elements[2]!, m.elements[0]!);
@@ -131,26 +148,46 @@ describe('projection manifest validation', () => {
     civilian.house = null;
     expect(parseVoxelProjectionManifest(civilian).house).toBeNull();
   });
+  it('accepts turret-only manifests when requested and still requires body by default', () => {
+    const spec = turretManifest();
+    expect(parseVoxelProjectionManifest(spec, ['turret'])).toBe(spec);
+    expect(parseVoxelProjectionManifest(spec, [])).toBe(spec);
+    expect(() => parseVoxelProjectionManifest(spec)).toThrow('Missing projection part: body');
+  });
+  it('requires at least one known part even without requested parts', () => {
+    const spec = { ...manifest(), parts: {} };
+    expect(() => parseVoxelProjectionManifest(spec, [])).toThrow('Missing projection part');
+    expect(() => parseVoxelProjectionManifest({ ...spec, parts: { barrel: manifest().parts.turret } }, [])).toThrow(
+      'Unknown projection part: barrel',
+    );
+  });
+  it.each([
+    { type: 'NAFLAK:turret', required: ['turret'] },
+    { type: 'HTNK', required: ['body'] },
+    { type: 'HTNK:turret-extra', required: ['body'] },
+  ])('requires the manifest parts implied by type $type', ({ type, required }) => {
+    expect(manifestPartsFor(type)).toEqual(required);
+  });
   it('rejects missing parts, incomplete/nonuniform facing sets, and duplicate bake IDs', () => {
     expect(() => parseVoxelProjectionManifest(manifest(false), ['body', 'turret'])).toThrow('Missing projection part');
     const missing = manifest();
-    delete (missing.parts as Partial<typeof missing.parts>).body;
+    delete missing.parts.body;
     expect(() => parseVoxelProjectionManifest(missing)).toThrow('Missing projection part');
     const short = manifest();
-    short.parts.body.frames.pop();
+    short.parts.body!.frames.pop();
     expect(() => parseVoxelProjectionManifest(short)).toThrow('Incomplete');
     const spacing = manifest();
-    spacing.parts.body.frames[1]!.facing = 8;
+    spacing.parts.body!.frames[1]!.facing = 8;
     expect(() => parseVoxelProjectionManifest(spacing)).toThrow('uniformly');
     const duplicates = manifest();
-    duplicates.parts.body.frames[1]!.k = 0;
+    duplicates.parts.body!.frames[1]!.k = 0;
     expect(() => parseVoxelProjectionManifest(duplicates)).toThrow('duplicate');
   });
   it('rejects invalid dimensions, geometry values and escaping asset paths', () => {
     const bad = manifest();
-    bad.parts.body.frames[0]!.rect = [319, 0, 16, 16];
+    bad.parts.body!.frames[0]!.rect = [319, 0, 16, 16];
     expect(() => parseVoxelProjectionManifest(bad)).toThrow('outside');
-    bad.parts.body.colour = '../secret.png';
+    bad.parts.body!.colour = '../secret.png';
     expect(() => parseVoxelProjectionManifest(bad)).toThrow('path');
     const nan = manifest();
     nan.jacobian[0][0] = NaN;
@@ -168,6 +205,20 @@ describe('projection manifest validation', () => {
 });
 
 describe('projected materials and shader compilation', () => {
+  it('assigns a turret-only atlas material to both turret and barrel geometry', () => {
+    const nodes = new AtmosphereNodes();
+    const spec = turretManifest();
+    const turret = createVoxelProjectionPart(spec, 'turret', nodes.own(new Texture()), nodes.own(new Texture()));
+    const palette = new Uint8Array(768);
+    const parts = buildVoxelGeometry(turretModel, palette, nodes);
+    expect(parts.map(({ role }) => role)).toEqual(['turret', 'barrel']);
+    expect(projectionParts(parts)).toEqual(['turret']);
+    expect(projectVoxelMaterials(parts, palette, { manifest: spec, parts: { turret } }, nodes)).toBe(true);
+    const material = voxelProjectedMaterialFor(palette, turret, nodes);
+    for (const part of parts) expect(part.material).toBe(material);
+    expect(material.depthNode).toBeTruthy();
+    nodes.dispose();
+  });
   it('caches per palette and projection part/context, with turret and barrel sharing one material', () => {
     const nodes = new AtmosphereNodes(),
       other = new AtmosphereNodes();
@@ -269,10 +320,10 @@ function mockAssets(options: { indexMissing?: boolean; missingPaint?: boolean; s
   const bitmaps: { width: number; height: number; close: ReturnType<typeof vi.fn> }[] = [];
   const fetchMock = vi.fn(async (url: string) => {
     if (url.endsWith('index.json'))
-      return new Response(JSON.stringify({ version: 1, types: { HTNK: 'HTNK.json' } }), {
+      return new Response(JSON.stringify({ version: 1, types: { [spec.type]: 'model.json' } }), {
         status: options.indexMissing ? 404 : 200,
       });
-    if (url.endsWith('HTNK.json')) return new Response(JSON.stringify(spec));
+    if (url.endsWith('model.json')) return new Response(JSON.stringify(spec));
     return new Response('', { status: options.missingPaint && url.endsWith('_paint.png') ? 404 : 200 });
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -297,14 +348,46 @@ describe('projection loading and disposal', () => {
     expect(a).toBe(b);
     expect(a).not.toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(6);
-    expect(a!.parts.body.colour.flipY).toBe(false);
-    expect(a!.parts.body.colour.generateMipmaps).toBe(true);
-    const dispose = vi.spyOn(a!.parts.body.colour, 'dispose');
+    const body = a!.parts.body!;
+    expect(body.colour.flipY).toBe(false);
+    expect(body.colour.generateMipmaps).toBe(true);
+    const dispose = vi.spyOn(body.colour, 'dispose');
     nodes.dispose();
     nodes.dispose();
     expect(dispose).toHaveBeenCalledOnce();
     for (const bitmap of bitmaps) expect(bitmap.close).toHaveBeenCalledOnce();
     expect(await library.loadType('HTNK')).toBeNull();
+  });
+  it("loads turret-only assets while checking each caller's required parts", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { fetchMock, bitmaps } = mockAssets({ spec: turretManifest() });
+    const nodes = new AtmosphereNodes();
+    const library = voxelProjectionLibrary('/vehicles-hd', nodes);
+    const asset = await library.loadType('X:turret', ['turret']);
+    expect(asset).not.toBeNull();
+    expect(asset!.parts.body).toBeUndefined();
+    expect(asset!.parts.turret).toBeDefined();
+    expect(library.get('X:turret', ['turret'])).toBe(asset);
+    expect(library.get('X:turret', ['body'])).toBeNull();
+    expect(await library.loadType('X:turret', ['body'])).toBeNull();
+    expect(await library.loadType('X:turret', ['turret'])).toBe(asset);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(warn).toHaveBeenCalledOnce();
+    nodes.dispose();
+    expect(bitmaps).toHaveLength(2);
+    for (const bitmap of bitmaps) expect(bitmap.close).toHaveBeenCalledOnce();
+  });
+  it('rejects a vehicle manifest without body even when the caller only requests turret', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { fetchMock, bitmaps } = mockAssets({ spec: turretManifest('HTNK') });
+    const nodes = new AtmosphereNodes();
+    const library = voxelProjectionLibrary('/vehicles-hd', nodes);
+    expect(await library.loadType('HTNK', ['turret'])).toBeNull();
+    expect(library.get('HTNK', ['turret'])).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(bitmaps).toHaveLength(0);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Missing projection part: body'));
+    nodes.dispose();
   });
   it('warns once for an absent index or type and preserves fallback materials', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -362,26 +445,32 @@ describe('projection loading and disposal', () => {
     expect(await loading).toBeNull();
     for (const close of closes) expect(close).toHaveBeenCalledOnce();
   });
-  it('updates live units when a type arrives, retaining turret pivots and shadow twins', async () => {
-    mockAssets();
-    const nodes = new AtmosphereNodes();
-    const hd = { nodes, settings: { voxelLook: 'engine' } } as HdRenderer;
-    const world = { nodes, voxelProjection: '/vehicles-hd' } as HdWorld;
-    const cache = { paletteRgb: new Map([['unit', new Uint8Array(768)]]) } as Ra2Cache;
-    const units = new VoxelUnits(hd, world, cache);
-    const unit = units.build(model, 'unit', 'HTNK@unit');
-    const meshes: Mesh[] = [];
-    unit.root.traverse((object) => {
-      if (object instanceof Mesh) meshes.push(object);
-    });
-    const originals = meshes.map((mesh) => mesh.material);
-    await vi.waitFor(() => expect((meshes[0]!.material as { name: string }).name).toContain('-projected'));
-    for (let i = 0; i < meshes.length; i++) {
-      if (meshes[i]!.userData.painterDepth) expect(meshes[i]!.material).not.toBe(originals[i]);
-      else expect(meshes[i]!.material).toBe(originals[i]);
-    }
-    expect(unit.turret!.position.x).toBe(48 / 256);
-    expect((unit.turret!.children[0] as Mesh).material).toBe((unit.turret!.children[1] as Mesh).material);
-    nodes.dispose();
-  });
+  it.each([
+    { model, spec: manifest() },
+    { model: turretModel, spec: turretManifest() },
+  ])(
+    'updates live $model.id units when a type arrives, retaining turret pivots and shadow twins',
+    async ({ model: liveModel, spec }) => {
+      mockAssets({ spec });
+      const nodes = new AtmosphereNodes();
+      const hd = { nodes, settings: { voxelLook: 'engine' } } as HdRenderer;
+      const world = { nodes, voxelProjection: '/vehicles-hd' } as HdWorld;
+      const cache = { paletteRgb: new Map([['unit', new Uint8Array(768)]]) } as Ra2Cache;
+      const units = new VoxelUnits(hd, world, cache);
+      const unit = units.build(liveModel, 'unit', `${liveModel.id}@unit`);
+      const meshes: Mesh[] = [];
+      unit.root.traverse((object) => {
+        if (object instanceof Mesh) meshes.push(object);
+      });
+      const originals = meshes.map((mesh) => mesh.material);
+      await vi.waitFor(() => expect((meshes[0]!.material as { name: string }).name).toContain('-projected'));
+      for (let i = 0; i < meshes.length; i++) {
+        if (meshes[i]!.userData.painterDepth) expect(meshes[i]!.material).not.toBe(originals[i]);
+        else expect(meshes[i]!.material).toBe(originals[i]);
+      }
+      expect(unit.turret!.position.x).toBe(48 / 256);
+      expect((unit.turret!.children[0] as Mesh).material).toBe((unit.turret!.children[1] as Mesh).material);
+      nodes.dispose();
+    },
+  );
 });

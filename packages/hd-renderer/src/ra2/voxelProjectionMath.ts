@@ -27,7 +27,7 @@ export interface VoxelProjectionManifest {
   scale: number;
   jacobian: ProjectionJacobian;
   house: { first: 16; count: 16 } | null;
-  parts: { body: ProjectionPartManifest; turret?: ProjectionPartManifest };
+  parts: { body?: ProjectionPartManifest; turret?: ProjectionPartManifest };
   registration: { part: ProjectionPartName; k: number; iou: number; scale: number; dx: number; dy: number }[];
 }
 
@@ -65,9 +65,10 @@ export function parseVoxelProjectionManifest(
     if (house.first !== 16 || house.count !== 16) throw new Error('Invalid projection house ramp');
   }
   const parts = record(m.parts, 'projection parts');
-  for (const name of new Set(['body', ...requiredParts])) {
+  for (const name of requiredParts) {
     if (!parts[name]) throw new Error(`Missing projection part: ${name}`);
   }
+  if (Object.keys(parts).length === 0) throw new Error('Missing projection part: body or turret');
   for (const [name, value] of Object.entries(parts)) {
     if (name !== 'body' && name !== 'turret') throw new Error(`Unknown projection part: ${name}`);
     const part = record(value, `projection ${name}`);

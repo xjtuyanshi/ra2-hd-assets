@@ -29,7 +29,12 @@ export interface VoxelProjectionPart {
 
 export interface VoxelProjectionAsset {
   manifest: VoxelProjectionManifest;
-  parts: { body: VoxelProjectionPart; turret?: VoxelProjectionPart };
+  parts: { body?: VoxelProjectionPart; turret?: VoxelProjectionPart };
+}
+
+/** Building bodies use sprites; their voxel projection manifests only require the turret atlas. */
+export function manifestPartsFor(type: string): ProjectionPartName[] {
+  return type.endsWith(':turret') ? ['turret'] : ['body'];
 }
 
 /** Frame tables are uniforms, so only the two colour and two paint atlas reads cost texture samples. */
@@ -203,7 +208,7 @@ export class VoxelProjectionLibrary {
         this.warn(type, 'type is absent from index');
         return null;
       }
-      const manifest = parseVoxelProjectionManifest(await this.json(`${this.base}/${file}`));
+      const manifest = parseVoxelProjectionManifest(await this.json(`${this.base}/${file}`), manifestPartsFor(type));
       if (manifest.type !== type) throw new Error('manifest type mismatch');
       const directory = `${this.base}/${file.slice(0, file.lastIndexOf('/') + 1)}`;
       const names = Object.keys(manifest.parts) as ProjectionPartName[];
@@ -224,7 +229,7 @@ export class VoxelProjectionLibrary {
         if (failure) throw failure.reason;
         return null;
       }
-      const parts = {} as VoxelProjectionAsset['parts'];
+      const parts: VoxelProjectionAsset['parts'] = {};
       names.forEach((name, i) => {
         parts[name] = createVoxelProjectionPart(manifest, name, textures[i * 2]!, textures[i * 2 + 1]!);
       });

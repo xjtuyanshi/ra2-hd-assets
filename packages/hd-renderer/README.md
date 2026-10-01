@@ -646,6 +646,7 @@ Vite. The map viewer and live bench (`?fx=units&vlook=remaster&vproj=vehicles-hd
 `loadRa2World`, `LiveViewOptions` and `VoxelUnitsOptions` accept `voxelProjection: string` as the atlas URL base.
 An absent index, missing type, invalid manifest or incomplete part set logs once and retains that type's selected
 engine/PBR look. Live types load asynchronously and update existing instances once the complete set arrives.
+Building turrets (`TYPE:turret`) use turret-only manifests in `vehicles-hd`, with the building body remaining a sprite.
 
 The projection layer reads `<base>/index.json`, each listed type's manifest, and colour/paint atlases. It uses
 the mesh's complete world matrix (including parent turret yaw, scale and ground tilt) to select adjacent baked
