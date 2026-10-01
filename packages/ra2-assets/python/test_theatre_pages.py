@@ -162,6 +162,150 @@ class TheatreTests(unittest.TestCase):
         self.cli('xfer', self.theatre, self.urban, self.baseline, '--pages', '0')
         self.assertIsNone(tp.read_json(self.theatre / 'library.json')['spriteAtlasesHd'][0])
 
+    def test_mixed_material_scales_resample_shared_blocks_to_each_target_scale(self):
+        scaled = materials(self.urban, self.source, pages=(0,), factor=2)
+        self.source_materials['pages']['0'] = scaled['pages']['0']
+        write_json(self.urban / 'normals.json', self.source_materials)
+        pixels = {}
+        for page, shape in ((0, (8, 16, 4)), (1, (4, 8, 4))):
+            pixels[page] = (np.arange(np.prod(shape)).reshape(shape) % 251).astype(np.uint8)
+            Image.fromarray(pixels[page]).save(self.urban / f'material-{page}.png')
+        for sid, source_page in ((SELECTED, 0), (OTHER, 1)):
+            frame = self.source['sprites'][sid]['frames'][source_page]
+            self.source['sprites'][sid]['frames'] = [copy.deepcopy(frame), copy.deepcopy(frame)]
+            self.target['sprites'][sid]['frames'] = [dict(frame, page=page) for page in (0, 1)]
+        for page in (0, 1):
+            index = tp.read_image(self.theatre / f'index-{page}.png')
+            index[:, :4], index[:, 4:] = 40, 41
+            Image.fromarray(index).save(self.theatre / f'index-{page}.png')
+        write_json(self.urban / 'library.json', self.source)
+        write_json(self.theatre / 'library.json', self.target)
+        self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0, 1]), [0, 1])
+        entries = tp.read_json(self.theatre / 'normals.json')['pages']
+        for page, factor in ((0, 2), (1, 1)):
+            with self.subTest(page=page):
+                self.assertEqual(tp.material_scale(entries[str(page)]), factor)
+                expected = np.zeros((4 * factor, 8 * factor, 4), np.uint8)
+                expected[:, :4 * factor] = pixels[0][:, :8] if factor == 2 else pixels[0][1::2, 1:8:2]
+                expected[:, 4 * factor:] = (pixels[1][:, 4:].repeat(2, axis=0).repeat(2, axis=1)
+                                             if factor == 2 else pixels[1][:, 4:])
+                np.testing.assert_array_equal(tp.read_image(self.theatre / entries[str(page)]['file']), expected)
+
+    def test_refresh_owned_regenerates_shared_colour_and_matching_material_without_mutating_old_files(self):
+        # Repack one shared frame so the output is a snapshot, rather than a symlink.
+        self.target['sprites'] = {SELECTED: dict(palette='unit', frames=[
+            dict(rect=[4, 0, 4, 4], offset=[-2, -3], page=0)])}
+        index = tp.read_image(self.theatre / 'index-0.png')
+        index[:, :4] = 95
+        Image.fromarray(index).save(self.theatre / 'index-0.png')
+        write_json(self.theatre / 'library.json', self.target)
+        self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0]), [0])
+        old = tp.read_json(self.theatre / 'library.json')['spriteAtlasesHd'][0]
+        old_material = tp.read_json(self.theatre / 'normals.json')['pages']['0']
+        before = {name: (self.theatre / name).read_bytes()
+                  for name in ('library.json', 'normals.json', old['file'], old['remap'], old_material['file'])}
+        colour = tp.read_image(self.urban / 'hd-0.png')
+        colour[:, :8] = [210, 25, 35, 255]
+        Image.fromarray(colour).save(self.urban / 'hd-0.png')
+        material = tp.read_image(self.urban / 'material-0.png')
+        material[:, :4] = [15, 220, 45, 255]
+        Image.fromarray(material).save(self.urban / 'material-0.png')
+        result = self.cli('xfer', self.theatre, self.urban, self.baseline, '--pages', '0')
+        self.assertIn('theatre already has HD entry, skipped', result.stdout)
+        for name, content in before.items():
+            self.assertEqual((self.theatre / name).read_bytes(), content)
+        self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0], refresh_owned=True), [0])
+        after = tp.read_json(self.theatre / 'library.json')
+        new = after['spriteAtlasesHd'][0]
+        new_material = tp.read_json(self.theatre / 'normals.json')['pages']['0']
+        self.assertNotEqual(new['file'], old['file'])
+        self.assertNotEqual(new_material['file'], old_material['file'])
+        self.assertEqual(new_material['atlas'], new['file'])
+        expected_colour = np.zeros_like(colour)
+        expected_colour[:, 8:] = colour[:, :8]
+        expected_material = np.zeros_like(material)
+        expected_material[:, 4:] = material[:, :4]
+        np.testing.assert_array_equal(tp.read_image(self.theatre / new['file']), expected_colour)
+        np.testing.assert_array_equal(tp.read_image(self.theatre / new_material['file']), expected_material)
+        np.testing.assert_array_equal(tp.read_image(self.theatre / new['remap']), tp.read_image(self.theatre / old['remap']))
+        for name in (old['file'], old['remap'], old_material['file']):
+            self.assertEqual((self.theatre / name).read_bytes(), before[name])
+        self.assert_unowned_library_data(self.target, after)
+
+    def test_refresh_owned_fills_missing_material_and_preserves_foreign_entries(self):
+        self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0]), [0])
+        normals = tp.read_json(self.theatre / 'normals.json')
+        del normals['pages']['0']
+        write_json(self.theatre / 'normals.json', normals)
+        self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0], refresh_owned=True), [0])
+        latest = tp.read_json(self.theatre / 'library.json')
+        normals = tp.read_json(self.theatre / 'normals.json')
+        self.assertEqual(normals['pages']['0']['atlas'], latest['spriteAtlasesHd'][0]['file'])
+        foreign = dict(file='other.png', remap='other-remap.png')
+        latest['spriteAtlasesHd'][1] = foreign
+        write_json(self.theatre / 'library.json', latest)
+        normals['pages']['0'] = dict(file='other-material.png', atlas='other.png', custom='keep')
+        normals['pages']['1'] = dict(normals['pages']['0'])
+        write_json(self.theatre / 'normals.json', normals)
+        before = (self.theatre / 'normals.json').read_bytes()
+        self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0, 1], refresh_owned=True), [0])
+        after = tp.read_json(self.theatre / 'library.json')
+        self.assertNotEqual(after['spriteAtlasesHd'][0]['file'], latest['spriteAtlasesHd'][0]['file'])
+        self.assertEqual(after['spriteAtlasesHd'][1], foreign)
+        self.assertEqual((self.theatre / 'normals.json').read_bytes(), before)
+
+    def test_refresh_owned_rereads_hd_entry_and_does_not_replace_a_changed_claim(self):
+        self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0]), [0])
+        start = tp.read_json(self.theatre / 'library.json')
+        old = start['spriteAtlasesHd'][0]
+        original = tp.atomic_symlink
+        for claim in (dict(old, file='other.png'), dict(old, file='sprites-0@2x-xfer-other.png'),
+                      dict(old, owner='another writer'), None):
+            with self.subTest(claim=claim):
+                write_json(self.theatre / 'library.json', start)
+                claimed_materials = dict(version=1, pages={'0': dict(file='other-material.png', atlas='other.png')})
+                def link_and_claim(source, destination):
+                    original(source, destination)
+                    latest = tp.read_json(self.theatre / 'library.json')
+                    latest['spriteAtlasesHd'][0] = claim
+                    latest['marker'] = 'new metadata'
+                    write_json(self.theatre / 'library.json', latest)
+                    write_json(self.theatre / 'normals.json', claimed_materials)
+                with mock.patch.object(tp, 'atomic_symlink', side_effect=link_and_claim):
+                    self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0], refresh_owned=True), [])
+                after = tp.read_json(self.theatre / 'library.json')
+                self.assertEqual(after['spriteAtlasesHd'][0], claim)
+                self.assertEqual(after['marker'], 'new metadata')
+                self.assertEqual(tp.read_json(self.theatre / 'normals.json'), claimed_materials)
+
+    def test_refresh_owned_preserves_material_claimed_during_page_work(self):
+        self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0]), [0])
+        old = tp.read_json(self.theatre / 'library.json')['spriteAtlasesHd'][0]
+        claimed = dict(version=1, custom='keep', pages={'0': dict(file='other-material.png', atlas='other.png')})
+        original = tp.atomic_symlink
+        def link_and_claim(source, destination):
+            original(source, destination)
+            write_json(self.theatre / 'normals.json', claimed)
+        with mock.patch.object(tp, 'atomic_symlink', side_effect=link_and_claim):
+            self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0], refresh_owned=True), [0])
+        new = tp.read_json(self.theatre / 'library.json')['spriteAtlasesHd'][0]
+        self.assertNotEqual(new['file'], old['file'])
+        self.assertEqual(tp.read_json(self.theatre / 'normals.json'), claimed)
+
+    def test_cli_refresh_owned_without_page_selection_replaces_only_owned_entries(self):
+        self.cli('xfer', self.theatre, self.urban, self.baseline)
+        before = tp.read_json(self.theatre / 'library.json')
+        before['spriteAtlasesHd'][2] = dict(file='other.png', remap='other-remap.png')
+        write_json(self.theatre / 'library.json', before)
+        result = self.cli('xfer', self.theatre, self.urban, self.baseline, '--refresh-owned')
+        self.assertIn('THEATRE_XFER_DONE [0, 1]', result.stdout)
+        after = tp.read_json(self.theatre / 'library.json')
+        normals = tp.read_json(self.theatre / 'normals.json')['pages']
+        for page in (0, 1):
+            self.assertNotEqual(after['spriteAtlasesHd'][page]['file'], before['spriteAtlasesHd'][page]['file'])
+            self.assertEqual(normals[str(page)]['atlas'], after['spriteAtlasesHd'][page]['file'])
+        self.assertEqual(after['spriteAtlasesHd'][2], before['spriteAtlasesHd'][2])
+
     def test_json_reread_preserves_entries_added_during_page_work(self):
         original = tp.atomic_symlink
         def link_and_update(source, destination):

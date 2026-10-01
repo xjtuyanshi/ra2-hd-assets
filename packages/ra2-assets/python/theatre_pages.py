@@ -130,8 +130,8 @@ def same_frames(urban, theatre, udir, tdir, page, cache, palettes_same, palettes
     return pairs, different
 
 
-def xfer(theatre, urban, baseline, pages=None):
-    """Populate missing HD entries from shared SHP data without claiming existing pages."""
+def xfer(theatre, urban, baseline, pages=None, refresh_owned=False):
+    """Populate missing HD entries, optionally refreshing pages from earlier transfers."""
     tdir, udir, base = Path(theatre), Path(urban), Path(baseline)
     if tdir.resolve() == udir.resolve():
         raise ValueError('theatre and urban directories must differ')
@@ -144,13 +144,16 @@ def xfer(theatre, urban, baseline, pages=None):
         target_palettes = {k: read_image(tdir / v, 'RGB').reshape(-1, 3) for k, v in target['palettes'].items()}
         palettes_same = {k: np.array_equal(v, target_palettes.get(k)) for k, v in source_palettes.items()}
         pages = range(len(target['spriteAtlases'])) if pages is None else pages
-        cache, hd_entries, material_entries = {}, {}, {}
+        cache, hd_entries, material_entries, owned_entries = {}, {}, {}, {}
         for page in dict.fromkeys(pages):
             if page < 0 or page >= len(target['spriteAtlases']):
                 raise ValueError(f'theatre has no indexed page {page}')
-            if page_entry(target.get('spriteAtlasesHd') or [], page):
-                print(f'page {page}: theatre already has HD entry, skipped')
-                continue
+            old_hd = page_entry(target.get('spriteAtlasesHd') or [], page)
+            if old_hd:
+                if not refresh_owned or '@2x-xfer-' not in old_hd.get('file', ''):
+                    print(f'page {page}: theatre already has HD entry, skipped')
+                    continue
+                owned_entries[page] = old_hd
             hd = page_entry(source.get('spriteAtlasesHd') or [], page)
             if not hd:
                 print(f'page {page}: urban has no HD page, skipped')
@@ -163,7 +166,11 @@ def xfer(theatre, urban, baseline, pages=None):
             # Unique output names keep pages and other sidecars that share a file untouched.
             stem = f'sprites-{page}@2x-xfer-{uuid4().hex}'
             colour_name, remap_name, material_name = f'{stem}.png', f'{stem}-remap.png', f'{stem}-normals.png'
-            material = source_materials.get(str(page)) if str(page) not in materials else None
+            material = source_materials.get(str(page))
+            if str(page) in materials:
+                old_material = materials[str(page)]
+                if not old_hd or (old_material and old_material.get('atlas') != old_hd['file']):
+                    material = None
             if identical:
                 # Shared SHP pixels and palettes are identical across these theatres.
                 atomic_symlink(udir / hd['file'], tdir / colour_name)
@@ -201,10 +208,13 @@ def xfer(theatre, urban, baseline, pages=None):
                     src = (slice(2 * oy, 2 * (oy + oh)), slice(2 * ox, 2 * (ox + ow)))
                     colour[dest], remap[dest] = uc[src], ur[src]
                     if mat is not None and um is not None:
-                        if material_scale(source_materials[str(up)]) != factor:
-                            raise ValueError('shared material pages use different output scales')
-                        mat[factor*y:factor*(y+h), factor*x:factor*(x+w)] = um[
-                            factor*oy:factor*(oy+oh), factor*ox:factor*(ox+ow)]
+                        source_factor = material_scale(source_materials[str(up)])
+                        block = um[source_factor*oy:source_factor*(oy+oh),
+                                   source_factor*ox:source_factor*(ox+ow)]
+                        if source_factor != factor:
+                            block = np.array(Image.fromarray(block).resize(
+                                (factor*w, factor*h), Image.Resampling.NEAREST))
+                        mat[factor*y:factor*(y+h), factor*x:factor*(x+w)] = block
                 atomic_image(tdir / colour_name, colour)
                 atomic_image(tdir / remap_name, remap)
                 entry = dict(hd, file=colour_name, remap=remap_name, width=colour.shape[1], height=colour.shape[0])
@@ -223,7 +233,8 @@ def xfer(theatre, urban, baseline, pages=None):
                 for page, entry in hd_entries.items():
                     while len(entries) <= page:
                         entries.append(None)
-                    if not entries[page]:
+                    old_hd = owned_entries.get(page)
+                    if (old_hd is None and not entries[page]) or (old_hd is not None and entries[page] == old_hd):
                         entries[page] = entry
                         published.add(page)
                 current['spriteAtlasesHd'] = entries
@@ -233,8 +244,14 @@ def xfer(theatre, urban, baseline, pages=None):
         material_entries = {page: entry for page, entry in material_entries.items() if page in published}
         if material_entries:
             def put_materials(current):
+                entries = current.setdefault('pages', {})
                 for page, entry in material_entries.items():
-                    current.setdefault('pages', {}).setdefault(str(page), entry)
+                    key = str(page)
+                    old_hd = owned_entries.get(page)
+                    old_material = entries.get(key)
+                    if key not in entries or (old_hd and (
+                            not old_material or old_material.get('atlas') == old_hd['file'])):
+                        entries[key] = entry
             patch_json(tdir / 'normals.json', put_materials, {'version': 1, 'pages': {}})
         return sorted(published)
 
@@ -420,6 +437,7 @@ def parser():
     p.add_argument('urban', type=Path)
     p.add_argument('baseline', type=Path)
     p.add_argument('--pages', type=page_indices, help='comma-separated indices (default: all theatre pages)')
+    p.add_argument('--refresh-owned', action='store_true', help='regenerate HD pages written by an earlier xfer')
     p = commands.add_parser('overlay-walls', help='redirect wall overlays to HD building frames')
     p.add_argument('library', type=Path)
     p.add_argument('types', nargs='*', default=WALL_TYPES)
@@ -442,7 +460,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     try:
         if args.command == 'xfer':
-            print('THEATRE_XFER_DONE', xfer(args.theatre, args.urban, args.baseline, args.pages))
+            print('THEATRE_XFER_DONE', xfer(args.theatre, args.urban, args.baseline, args.pages, args.refresh_owned))
         elif args.command == 'overlay-walls':
             print('patched', len(overlay_walls(args.library, args.types)))
         elif args.command == 'copy-patches':

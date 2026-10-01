@@ -556,7 +556,10 @@ The transfers preserve model-owned patches, including patches without a `.src`; 
 overwritten. `xfer --parts <JSON file>` overrides reference parts with ordered `sprite:frame` lists keyed by `NAME`
 or `NAME:state`, including bibs and special idle layers. `python/theatre_pages.py xfer "$THEATRE" "$URBAN" "$BASELINE"
 --pages 0,1` fills missing HD entries from shared urban art (all theatre pages by default), symlinking identical pages
-and retaining baseline pixels for differing frames. Its `overlay-walls "$LIBRARY" TYPE...` redirects wall overlays
+and retaining baseline pixels for differing frames. `--refresh-owned` regenerates only entries whose colour filename
+contains `@2x-xfer-`, replacing unchanged owned entries and their matching material entries while leaving old files on disk.
+Mixed 1x/2x material blocks use nearest-neighbour resampling to the urban material scale at the target page index.
+Its `overlay-walls "$LIBRARY" TYPE...` redirects wall overlays
 to HD building frames; `normals-merge "$SRC" "$LIBRARY" "$SPRITES_FILE"` merges only the selected sprites' material
 rectangles, using a whitespace-separated sprite list and preserving incompatible existing layouts. `copy-patches SRC_LIB DST_LIB
 SRC_PATCHES DST_PATCHES` copies redraw patches to another theatre only where the frame's 1x indices, offset and used
