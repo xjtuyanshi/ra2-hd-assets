@@ -3,14 +3,43 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import cv2
 import numpy as np
 from PIL import Image
 
-from vehicle_projection import (BAKE_JACOBIAN, Frame, Registration, affine_point, build, build_index, chroma_lock, compose_sheet,
+import vehicle_projection as projection
+from vehicle_projection import (BAKE_JACOBIAN, Frame, Registration, affine_point, build, build_index, camo_lock, chroma_lock, compose_sheet,
                                 linear_rgb, pack_frames, paint_channels, ramp_position, redraw_alpha, register,
                                 sheet_matrix, similarity, steel_grade, warp)
+
+
+# Frozen reviewed prototype formula; keep arithmetic independent of camo_lock.
+def _prototype_camo_lock(design, redraw, sigma_ab=2.5, l_lo=1.5, l_hi=8.0, l_strength=0.6, l_base=0.0, l_base_sigma=6.0, paint_chroma=42.0, chroma_gain=1.0):
+    design = np.asarray(design, np.uint8)[..., :3]
+    bg = tuple(int(v) for v in design[0, 0])
+    locked = chroma_lock(design, redraw, bg, sigma_ab, 1.0, paint_chroma)
+    rgb = locked[..., :3]
+    bga = np.asarray(bg, np.int32)
+    fg_d = (np.abs(design.astype(np.int32) - bga).max(-1) > 6).astype(np.float32)
+    fg_r = (np.abs(rgb.astype(np.int32) - bga).max(-1) > 6).astype(np.float32)
+    lab_d = cv2.cvtColor(design.astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+    lab_r = cv2.cvtColor(rgb.astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+    src = fg_d * (np.hypot(lab_d[..., 1], lab_d[..., 2]) < paint_chroma)
+    tgt = fg_r * np.clip((paint_chroma + 8 - np.hypot(lab_r[..., 1], lab_r[..., 2])) / 8, 0, 1)
+    def lp(x, w, s):
+        return cv2.GaussianBlur(x * w, (0, 0), s) / np.maximum(cv2.GaussianBlur(w, (0, 0), s), 1e-4)
+    band = lp(lab_d[..., 0], src, l_lo) - lp(lab_d[..., 0], src, l_hi)
+    cover = np.clip(cv2.GaussianBlur(src, (0, 0), l_lo) * 1.5, 0, 1)
+    out = lab_r.copy()
+    base = lp(lab_d[..., 0], src, l_base_sigma) - lp(lab_r[..., 0], (tgt > 0.99).astype(np.float32), l_base_sigma)
+    out[..., 0] = np.clip(out[..., 0] + (l_strength * band * cover + l_base * base) * tgt, 0, 100)
+    out[..., 1:] *= (1 + (chroma_gain - 1) * tgt)[..., None]
+    res = np.clip(cv2.cvtColor(out, cv2.COLOR_LAB2RGB) * 255 + 0.5, 0, 255).astype(np.uint8)
+    result = np.asarray(redraw, np.uint8).copy()
+    result[..., :3] = np.where(fg_r[..., None] > 0, res, np.asarray(redraw)[..., :3])
+    return result
 
 
 class VehicleProjectionTests(unittest.TestCase):
@@ -242,6 +271,89 @@ class VehicleProjectionTests(unittest.TestCase):
         self.assertLess(np.abs(lo[hull][..., 0] - lr[hull][..., 0]).max(), 4.0)  # lightness ramp kept
         np.testing.assert_array_equal(out[30:34, 30:34], redraw[30:34, 30:34])  # paint untouched
         np.testing.assert_array_equal(out[:8, :8], redraw[:8, :8])  # background untouched
+
+class CamoLockTests(unittest.TestCase):
+    def hull(self):
+        design = np.full((48, 64, 3), 118, np.uint8)
+        redraw = np.full((48, 64, 4), [118, 118, 118, 255], np.uint8)
+        design[8:40, 8:56] = [170, 160, 130]
+        redraw[8:40, 8:56, :3] = [140, 145, 150]
+        redraw[..., 3] = np.arange(64, dtype=np.uint8)[None] * 4
+        return design, redraw
+
+    def test_zero_transfer_equals_chroma_lock_on_uniform_hull(self):
+        design, redraw = self.hull()
+        expected = chroma_lock(design, redraw, (118, 118, 118), 2.5)
+        actual = camo_lock(design, redraw, l_strength=0, l_base=0, chroma_gain=1)
+        np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_array_equal(actual[..., 3], redraw[..., 3])
+
+    def test_chroma_gain_increases_hull_chroma_and_preserves_alpha_background(self):
+        design, redraw = self.hull()
+        base = camo_lock(design, redraw, l_strength=0)
+        boosted = camo_lock(design, redraw, l_strength=0, chroma_gain=1.5)
+        def chroma(rgb):
+            lab = cv2.cvtColor(rgb[..., :3].astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+            return np.hypot(lab[..., 1], lab[..., 2])
+        self.assertGreater(chroma(boosted)[12:36, 12:52].mean(), chroma(base)[12:36, 12:52].mean() * 1.4)
+        np.testing.assert_array_equal(boosted[..., 3], redraw[..., 3])
+        np.testing.assert_array_equal(boosted[:8], redraw[:8])
+
+    def test_design_camouflage_lightness_returns_without_repainting_house_colour(self):
+        design, redraw = self.hull()
+        design[12:24, 12:28] = [120, 112, 90]
+        design[28:36, 32:48] = [200, 190, 155]
+        design[20:28, 28:36] = [220, 20, 20]
+        redraw[20:28, 28:36, :3] = [200, 30, 30]
+        base = camo_lock(design, redraw, l_strength=0)
+        locked = camo_lock(design, redraw)
+        lab = lambda rgb: cv2.cvtColor(rgb[..., :3].astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+        self.assertLess(lab(locked)[16:20, 16:24, 0].mean(), lab(base)[16:20, 16:24, 0].mean() - 2)
+        np.testing.assert_array_equal(locked[22:26, 30:34], redraw[22:26, 30:34])
+
+    def test_random_inputs_are_bit_identical_to_prototype_including_zero_transfer_rounding(self):
+        rng = np.random.default_rng(2026)
+        for channels in (3, 4):
+            design = rng.integers(0, 256, (32, 32, 3), dtype=np.uint8)
+            redraw = rng.integers(0, 256, (32, 32, channels), dtype=np.uint8)
+            original_design, original_redraw = design.copy(), redraw.copy()
+            for kwargs in ({}, {"l_strength": 0, "l_base": 0, "chroma_gain": 1},
+                           {"sigma_ab": 1.2, "l_lo": 0.8, "l_hi": 4.0, "l_strength": 0.9,
+                            "l_base": 0.3, "l_base_sigma": 2.0, "paint_chroma": 35.0, "chroma_gain": 1.4}):
+                with self.subTest(channels=channels, kwargs=kwargs):
+                    np.testing.assert_array_equal(camo_lock(design, redraw, **kwargs),
+                                                  _prototype_camo_lock(design, redraw, **kwargs))
+            np.testing.assert_array_equal(design, original_design)
+            np.testing.assert_array_equal(redraw, original_redraw)
+            # The reviewed formula makes one extra Lab round-trip even with transfer disabled.
+            expected = chroma_lock(design, redraw, tuple(int(v) for v in design[0, 0]), 2.5)
+            actual = camo_lock(design, redraw, l_strength=0, l_base=0, chroma_gain=1)
+            self.assertLessEqual(np.abs(actual.astype(int) - expected).max(), 1)
+
+    def test_lock_cli_keeps_legacy_defaults_and_routes_each_new_option_to_camo(self):
+        design, redraw = self.hull()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.fromarray(design).save(root / 'design.png')
+            Image.fromarray(redraw).save(root / 'redraw.png')
+            args = ['lock', '--design', str(root / 'design.png'), '--redraw', str(root / 'redraw.png'),
+                    '--out', str(root / 'locked.png'), '--sigma', '2.5']
+            projection.main([*args, '--strength', '0.3'])
+            with Image.open(root / 'locked.png') as image:
+                self.assertEqual(image.mode, 'RGBA')
+                np.testing.assert_array_equal(np.array(image), chroma_lock(design, redraw, sigma=2.5, strength=0.3))
+            for flag, value in (('--l-strength', 0.6), ('--l-lo', 2.0), ('--l-hi', 5.0),
+                                ('--l-base', 0.4), ('--chroma-gain', 1.5)):
+                with self.subTest(flag=flag), mock.patch.object(projection, 'camo_lock', wraps=camo_lock) as camo:
+                    projection.main([*args, flag, str(value)])
+                    kwargs = {'sigma_ab': 2.5, 'l_strength': 0.0, 'l_lo': 1.5, 'l_hi': 8.0,
+                              'l_base': 0.0, 'chroma_gain': 1.0}
+                    kwargs[flag[2:].replace('-', '_')] = value
+                    camo.assert_called_once()
+                    self.assertEqual(camo.call_args.kwargs, kwargs)
+                    with Image.open(root / 'locked.png') as image:
+                        np.testing.assert_array_equal(np.array(image), camo_lock(design, redraw, **kwargs))
+
 
 if __name__ == '__main__':
     unittest.main()

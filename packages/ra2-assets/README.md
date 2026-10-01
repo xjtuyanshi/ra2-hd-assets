@@ -615,6 +615,32 @@ reinstalling an identical hard link leaves no temporary name. JSON patchers read
 the current manifest under an exclusive `fcntl` lock beside it. Lock files persist to keep concurrent waiters on
 the same lock inode. Other manifest entries and the base cache's files are preserved.
 
+`repaint-pages` restores house paint from original 1x remap indices 16..31 at full weight inside the HD silhouette,
+unioned with existing model paint. Normalised low-frequency original indices retain the original tone, while the
+redraw's high-frequency ramp detail keeps folds and highlights. It always reads the immutable `--source` library
+directory, so reruns do not accumulate finishing. Defaults are `--pages 21,22 --suffix l5finf --paint-saturation 1.0
+--detail 0.4 --edge 0.05,0.42 --sprites-prefix infantry:,vehicle:`. Only matching sprite frames on selected pages
+are processed; duplicate rectangles are processed once. Infantry frames with index 12 also get a soft contact
+shadow, darkest near the body and faded inside the original shadow silhouette and frame rectangle. Body texels
+keep their bytes; `--no-reshadow` preserves existing shadows. Zero padding fades a shadow that reaches the frame
+rectangle but does not force its border alpha to zero.
+
+The command stages `sprites-P@2x-<suffix>.png` and `sprites-P@2x-remap-<suffix>.png` in `--stage`, then uses
+`cache_farm.install_file` and `patch_json` to update only `file`, `remap` and `paintSaturation` in the farm's current
+`_library/<theater>/library.json`. The farm must already have a readable manifest. Staging and farm directories
+must stay outside the source library. `--sprites` selects exact names instead of prefixes and discovers pages
+from all their frames; optional `--pages` restricts that set. Named sprites keep each farm page's current
+`paintSaturation`. Buildings can use the wider `--edge 0.3,0.7` paint transition.
+
+```bash
+python3 packages/ra2-assets/python/infantry_sheets.py repaint-pages \
+  --source "$L5_LIBRARY" --farm "$FARM" --theater temperate --stage "$STAGING" --pages 21,22
+python3 packages/ra2-assets/python/infantry_sheets.py repaint-pages \
+  --source "$L5_LIBRARY" --farm "$FARM" --theater temperate --stage "$STAGING" \
+  --sprites building:GAPILL --edge 0.3,0.7 --suffix l5fpill
+(cd packages/ra2-assets/python && python3 -m unittest test_infantry_sheets test_vehicle_projection)
+```
+
 ## Tree and vegetation redraw (Python, experimental)
 
 `python/tree_redraw.py` redraws a map's tree/bush TerrainTypes (`tree:TREE*` frame 0 and its shadow) in batches: one
@@ -890,6 +916,23 @@ python3 -m unittest discover -s packages/ra2-assets/python -p test_vehicle_proje
 `grade` is an optional post-build step for parts whose redraw drifted from steel to tan/beige: pixels in the
 orange-yellow hue band keep only `--keep` of their chroma at unchanged linear luminance (slightly cool grey), and
 house paint and alpha stay untouched. It rewrites the colour atlases in place, so run it once per build.
+
+`lock --design INPUT --redraw OUTPUT --out LOCKED` restores the design sheet's low-pass Lab chroma while keeping
+the redraw's lightness and fine chroma detail. Legacy defaults remain `--sigma 6 --strength 1`; background and
+alpha are preserved. Optional `--l-strength 0 --l-lo 1.5 --l-hi 8 --l-base 0 --chroma-gain 1` controls enable
+`camo_lock` when any differs from these defaults, using `--sigma` for chroma blur (`--strength` applies only to the
+legacy chroma-only path). Band-passed design lightness brings back camouflage blotches lost when Soviet aircraft
+were repainted steel grey; low-pass chroma restores the Kirov's tan envelope. `--l-base` transfers low-pass
+lightness at sigma 6, and `--chroma-gain` scales hull chroma without targeting saturated house paint. The Python
+`camo_lock` function defaults to sigma 2.5 and lightness strength 0.6. Its reviewed formula retains an extra Lab
+round-trip even at zero transfer, which can differ from `chroma_lock` by one byte; unchanged CLI options continue
+to call `chroma_lock` directly.
+
+```bash
+python3 packages/ra2-assets/python/vehicle_projection.py lock \
+  --design "$DESIGN" --redraw "$REDRAW" --out "$LOCKED" \
+  --sigma 2.5 --l-strength 0.6 --l-lo 1.5 --l-hi 8 --l-base 0 --chroma-gain 1.2
+```
 
 A type requires a complete, uniformly spaced set of 32 or 16 facings for every part (`all` maps to `body`,
 `tur` to `turret`). Missing outputs and partial types fail the build; they never publish a new manifest. Sheets
