@@ -1358,7 +1358,9 @@ def coverage(library, patches, records=COVERAGE_RECORDS, prefix=COVERAGE_PREFIXE
             continue
         building = entry['building']
         body = entry['sprite']
-        selected = {body: played_frames(frames(body))}
+        # the renderer shows body frame 0 (intact) or 1 (damaged) only (ra2-assets art.ts buildingConditionFrame); later
+        # body frames (rubble states of civil buildings) are never drawn, so they are not counted
+        selected = {body: {k for k in played_frames(frames(body)) if k < 2}}
         for layer in building.get('layers', []):
             for sprite in (layer['sprite'], layer.get('damagedSprite')):
                 if sprite:

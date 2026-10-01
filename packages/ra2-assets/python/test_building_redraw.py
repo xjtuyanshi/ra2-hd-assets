@@ -645,6 +645,13 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(len(report.splitlines()), 2)
         self.assertEqual(len(self.cli('--prefix', 'UNKNOWN').splitlines()), 1)
 
+    def test_body_counts_only_intact_and_damaged_frames(self):
+        self.data['sprites'][BODY]['frames'] += [dict(rect=[k, 1, 1, 1]) for k in range(2)]  # civil rubble states
+        br.write_json(self.library / 'library.json', self.data)
+        row = br.coverage(self.library, self.patches)[0]
+        self.assertEqual(row['played_frames'], 10)
+        self.assertNotIn('TEST:', row['gaps'])
+
     def test_layer_only_body_and_shared_layer_ranges_are_counted_once(self):
         for frame in self.data['sprites'][BODY]['frames']:
             frame['rect'][2] = 0
