@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from vehicle_projection import (BAKE_JACOBIAN, Frame, Registration, affine_point, build, build_index, compose_sheet,
+from vehicle_projection import (BAKE_JACOBIAN, Frame, Registration, affine_point, build, build_index, chroma_lock, compose_sheet,
                                 linear_rgb, pack_frames, paint_channels, ramp_position, redraw_alpha, register,
                                 sheet_matrix, similarity, steel_grade, warp)
 
@@ -189,6 +189,23 @@ class VehicleProjectionTests(unittest.TestCase):
         self.assertLess(int(red[:3].max()) - int(red[:3].min()), 30)
         np.testing.assert_array_equal(tan, rgba[0, 1])
         np.testing.assert_array_equal(blue, rgba[0, 2])
+
+    def test_chroma_lock_restores_design_hue_keeps_lightness_detail_and_paint(self):
+        bg = np.full((64, 64, 3), 118, np.uint8)
+        design, redraw = bg.copy(), bg.copy()
+        design[16:48, 16:48] = (190, 180, 120)  # olive khaki hull
+        design[28:36, 28:36] = (220, 20, 20)  # saturated house paint
+        grey = np.linspace(90, 210, 32).astype(np.uint8)
+        redraw[16:48, 16:48] = grey[None, :, None]  # neutral steel with a lightness ramp (the detail to keep)
+        redraw[28:36, 28:36] = (200, 30, 30)
+        out = chroma_lock(design, redraw)
+        lab = lambda a: cv2.cvtColor(a.astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+        lo, ld, lr = lab(out), lab(design), lab(redraw)
+        hull = np.s_[18:26, 18:46]
+        self.assertGreater(lo[hull][..., 2].mean(), 0.7 * ld[hull][..., 2].mean())  # yellow (b*) restored
+        self.assertLess(np.abs(lo[hull][..., 0] - lr[hull][..., 0]).max(), 4.0)  # lightness ramp kept
+        np.testing.assert_array_equal(out[30:34, 30:34], redraw[30:34, 30:34])  # paint untouched
+        np.testing.assert_array_equal(out[:8, :8], redraw[:8, :8])  # background untouched
 
 if __name__ == '__main__':
     unittest.main()

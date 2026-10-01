@@ -502,6 +502,42 @@ def grade(atlases: Path, parts: list[str], keep: float, centre: float = 40.0, ha
     return changed
 
 
+def chroma_lock(design, redraw, background=(118, 118, 118), sigma: float = 6.0, strength: float = 1.0,
+                paint_chroma: float = 42.0) -> np.ndarray:
+    """Restore the design sheet's low-frequency hue/saturation on an aligned image-model redraw sheet.
+
+    The image model sometimes repaints a faction's hull colour (Yuri's olive khaki came back as neutral steel). In
+    CIE Lab the redraw keeps its lightness and its fine chroma detail (panel lines, wear, highlights) while the
+    Gaussian low-pass of a*/b* (sigma in sheet pixels, normalised over the foreground) is replaced by the design's.
+    Strongly saturated texels (house paint, lamps, chroma above paint_chroma) are neither sources nor targets: the
+    paint becomes the house colour later and lamps keep the redraw's colour. Background = the sheet's flat fill.
+    """
+    design = np.asarray(design, np.uint8)[..., :3]
+    redraw = np.asarray(redraw, np.uint8)
+    rgb = redraw[..., :3]
+    bg = np.asarray(background, np.int32)
+    fg_design = (np.abs(design.astype(np.int32) - bg).max(-1) > 6).astype(np.float32)
+    fg_redraw = (np.abs(rgb.astype(np.int32) - bg).max(-1) > 6).astype(np.float32)
+    lab_d = cv2.cvtColor(design.astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+    lab_r = cv2.cvtColor(rgb.astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+    src = fg_design * (np.hypot(lab_d[..., 1], lab_d[..., 2]) < paint_chroma)
+    # Full correction below paint_chroma, fading out over 8 chroma units above it.
+    target = fg_redraw * np.clip((paint_chroma + 8 - np.hypot(lab_r[..., 1], lab_r[..., 2])) / 8, 0, 1)
+
+    def low_pass(ab, weight):
+        num = cv2.GaussianBlur(ab * weight[..., None], (0, 0), sigma)
+        den = cv2.GaussianBlur(weight, (0, 0), sigma)[..., None]
+        return num / np.maximum(den, 1e-4)
+
+    shift = low_pass(lab_d[..., 1:], src) - low_pass(lab_r[..., 1:], (target > 0.99).astype(np.float32))
+    out = lab_r.copy()
+    out[..., 1:] += strength * shift * target[..., None]
+    locked = np.clip(cv2.cvtColor(out, cv2.COLOR_LAB2RGB) * 255 + 0.5, 0, 255).astype(np.uint8)
+    result = redraw.copy()
+    result[..., :3] = np.where(fg_redraw[..., None] > 0, locked, rgb)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -529,7 +565,24 @@ def main():
     grader.add_argument('--keep', type=float, default=0.3)
     grader.add_argument('--hue', type=float, default=40.0, help='centre of the graded hue band, degrees')
     grader.add_argument('--half', type=float, default=20.0, help='half width of the band at full effect, degrees')
+    locker = commands.add_parser('lock', help='restore the design colours on a redraw sheet (chroma_lock)')
+    locker.add_argument('--design', type=Path, required=True, help='image-model input sheet (input.png)')
+    locker.add_argument('--redraw', type=Path, required=True, help='image-model result (output.png)')
+    locker.add_argument('--out', type=Path, required=True)
+    locker.add_argument('--sigma', type=float, default=6.0)
+    locker.add_argument('--strength', type=float, default=1.0)
     args = parser.parse_args()
+    if args.command == 'lock':
+        design = np.asarray(Image.open(args.design).convert('RGB'))
+        with Image.open(args.redraw) as im:
+            mode = 'RGBA' if im.mode in ('RGBA', 'LA', 'P') else 'RGB'
+            redraw = np.asarray(im.convert(mode))
+        if design.shape[:2] != redraw.shape[:2]:
+            raise SystemExit(f'size mismatch: design {design.shape[:2]} vs redraw {redraw.shape[:2]}')
+        # Keep the redraw's mode so downstream registration sees the same file layout.
+        Image.fromarray(chroma_lock(design, redraw, tuple(int(v) for v in design[0, 0]), args.sigma, args.strength),
+                        mode).save(args.out)
+        return
     if args.command == 'sheet':
         if '-' in args.facings:
             first, last = map(int, args.facings.split('-'))
