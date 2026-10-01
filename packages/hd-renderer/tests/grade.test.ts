@@ -161,6 +161,7 @@ describe('cinematic preset and sandbox parameters', () => {
         [
           'whiteAdapt',
           'mapTintAdapt',
+          'mapSourcesByDay',
           'sunGain',
           'specularSize',
           'aoPower',
@@ -179,6 +180,8 @@ describe('cinematic preset and sandbox parameters', () => {
     expect(cinematic.settings).toMatchObject({
       whiteAdapt: 1,
       mapTintAdapt: 0.3,
+      // Street lamps keep 30 % of their daytime engine light (park lawn L* 53 -> 40 before the foliage grade).
+      mapSourcesByDay: 0.3,
       gradeBalance: [0.955, 1, 1.085],
       gradeContrast: 0.14,
       gradePivotLift: 0.045,

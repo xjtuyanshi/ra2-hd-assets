@@ -47,8 +47,11 @@ export class MapLightGrade {
   readonly lighting: EngineLighting;
   private readonly grid: CellGrid;
   private light: CellLight;
+  /** The map's [Lighting] alone, without light sources (see setSourceWeight). */
+  private readonly plain: CellLight;
   private key = '';
   private weight = 1;
+  private sourceWeight = 1;
 
   /** `lighting` in raw INI or engine precision (both accepted); `sources`: the map's light sources. */
   constructor(grid: CellGrid, lighting: EngineLighting, sources: readonly EngineLight[] = []) {
@@ -72,6 +75,7 @@ export class MapLightGrade {
       intensity: new Float32Array(grid.width * grid.height),
       tint: new Float32Array(grid.width * grid.height * 3),
     };
+    this.plain = engineCellLight(this.grid, this.lighting, []);
     this.setSources(sources, true);
   }
 
@@ -93,6 +97,18 @@ export class MapLightGrade {
     this.encode();
   }
 
+  /**
+   * Share of the light sources' own contribution (1 = the engine's light, 0 = the map's [Lighting] alone); a look's
+   * daytime choice (HdSettings.mapSourcesByDay). Re-encodes only on a visible change, like setWeight.
+   */
+  setSourceWeight(weight: number): void {
+    const w = Math.min(1, Math.max(0, weight));
+    if (w === this.sourceWeight) return;
+    if (Math.abs(w - this.sourceWeight) < WEIGHT_STEP && w !== 0 && w !== 1) return;
+    this.sourceWeight = w;
+    this.encode();
+  }
+
   /** The current weight (see setWeight). */
   get currentWeight(): number {
     return this.weight;
@@ -102,11 +118,17 @@ export class MapLightGrade {
     const data = this.texture.image.data as Uint8Array;
     const w = this.weight;
     const encode = (v: number) => Math.max(0, Math.min(255, Math.round(((1 + (v - 1) * w) / MAP_LIGHT_RANGE) * 255)));
+    const s = this.sourceWeight;
+    const { intensity, tint } = this.light;
+    const plain = this.plain;
     for (let c = 0; c < this.width * this.height; c++) {
-      const i = this.light.intensity[c]!;
-      data[c * 4] = encode(i * this.light.tint[c * 3]!);
-      data[c * 4 + 1] = encode(i * this.light.tint[c * 3 + 1]!);
-      data[c * 4 + 2] = encode(i * this.light.tint[c * 3 + 2]!);
+      const i = intensity[c]!;
+      const p = plain.intensity[c]!;
+      for (let k = 0; k < 3; k++) {
+        const full = i * tint[c * 3 + k]!;
+        // Exactly the engine's value at the default share of 1.
+        data[c * 4 + k] = encode(s === 1 ? full : p * plain.tint[c * 3 + k]! + (full - p * plain.tint[c * 3 + k]!) * s);
+      }
       data[c * 4 + 3] = 255;
     }
     this.texture.needsUpdate = true;

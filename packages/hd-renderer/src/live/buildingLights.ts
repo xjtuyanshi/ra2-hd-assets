@@ -1,6 +1,6 @@
 import { Vector3 } from 'three/webgpu';
-import type { BeamSpec } from '../effects';
-import { SHAPE_LINEAR, SHAPE_POOL, type SourceSpec } from '../lightField';
+import type { EmissiveDisc, EmissiveStroke, OverlayRgb, PlasmaOrb } from '../emissiveOverlay';
+import { flicker, SHAPE_LINEAR, SHAPE_POOL, SHAPE_SOFT, type SourceSpec } from '../lightField';
 import { foundationPointPush } from '../ra2/cardDepth';
 import { LEVEL_HEIGHT } from '../world';
 import type { LiveObject } from './liveView';
@@ -35,7 +35,10 @@ export interface BuildingLightSpec {
   damaged: number;
   arcs: number;
   /** Ground falloff: 'wide' reaches beyond a large hole (SHAPE_LINEAR), 'pool' is the compact fire pool. */
-  falloff?: 'wide' | 'pool';
+  falloff?: 'wide' | 'pool' | 'soft';
+  orb?: PlasmaOrb;
+  arcStyle?: BuildingArcStyle;
+  fadeIn?: number;
   /**
    * Share of the pool that upright building art takes only inside its own foundation (SourceSpec.groundOnly, default
    * 0). The reactor's own facades and orb glass sample the ground just in front of the art and took the full pool: a
@@ -50,37 +53,71 @@ export interface BuildingLightSpec {
   day?: number;
 }
 
+export interface BuildingArcStyle {
+  core: OverlayRgb;
+  edge: OverlayRgb;
+  width: number;
+  forkWidth: number;
+  reach: readonly [number, number];
+  crawl: number;
+}
+
+/** Colour-picker values are sRGB; the overlay attachment and post composite are display-linear. */
+function displayLinear(r: number, g: number, b: number): OverlayRgb {
+  const linear = (v: number) => (v / 255 <= 0.04045 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4);
+  return [linear(r), linear(g), linear(b)];
+}
+
 export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
-  // Soviet Tesla reactor: the active NAPOWR_A orb, with the foundation excluded from its blue pool.
+  // The measured daytime pool lifted pavement L* 36 -> 53. Keep only a contained blue tint (day luma 0.173),
+  // and present the saturated sphere/arcs after the grade so neither can feed bloom's lavender-white veil.
   NAPOWR: [
     {
-      // The orb hangs a little right of and behind the foundation centre (XMP29U2 bench at zoom 2: the head lands on
-      // the orb's centre with at [0.57, 0.40] and 29 px); the pool around it is too small to notice the offset.
-      at: [0.57, 0.4],
-      height: 29,
-      // The target's ground light (battle framing, L*a*b* rings around the orb at the bench scale) is an electric blue
-      // next to the base that fades out about two cells away. The light's colour sets the hue on grey asphalt: a pure
-      // deep blue ([0.3, 1.6, 24]) tone-mapped to dark navy and bloomed into a lavender veil over the whole base, a
-      // cornflower blue (about the target's lit asphalt, linear 0.08 : 0.26 : 1) reads as light, not paint.
-      colour: [1.8, 6.0, 24],
-      radius: 3.5,
-      flicker: 0.3,
-      // The orb glass and the reactor's facades take none of the pool (they sample the ground in front of the art and
-      // turned dark pure blue, L* 36 for a white orb); the ground, the pads, units and neighbours do.
+      // The overlay orb must sit on the art's glass sphere (radius about 16.5 engine px): measured on the battle and
+      // live-replay framings, [0.57, 0.40] put the disc about 6 engine px right of and 2.5 below the art's centre.
+      at: [0.47, 0.4],
+      height: 27,
+      // Night value; by day only `day` of it (luminance about 0.17 of noon flat ground: measured +16 % luminance on the
+      // grass beside two live reactors, the target's contained tint). At a third of this the night pool vanished
+      // (pavement next to the reactors unchanged at hour 21).
+      colour: [0.75, 2.1, 12.75],
+      radius: 2.6,
+      flicker: 0.12,
+      day: 0.066,
       groundOnly: 1,
-      // A white-hot head about the orb's size over the sprite's own lit glass: near-white, so the tone mapper keeps it
-      // bright (a saturated blue head drew a flat blue disc), and modest, so the bloom stays a halo instead of hazing the
-      // towers (rings at the bench: orb L* 87-89, b* -11 to -15; target 98, -2).
-      glow: [1.0, 1.1, 1.4],
-      glowSize: 0.8,
-      glowCore: 0.55,
-      glowHot: 1.0,
-      hole: true,
+      glow: null,
+      glowSize: 0,
+      hole: false,
       damaged: 0.6,
-      arcs: 6,
-      // Compact pool measured from the foundation's edge (see LightField holes): a linear falloff from the centre
-      // washed the concrete three cells away lavender.
-      falloff: 'pool',
+      arcs: 7,
+      falloff: 'soft',
+      fadeIn: 0.5,
+      orb: {
+        // Covers the art's whole sphere; a smaller disc left a pale glass ring round a dark-blue 'eye'.
+        radius: 0.55,
+        // A soft hot centre fading into the body (a hard 0.3 R white disc read as a pupil).
+        // Cyan-white centre like the target's (hue ~193 deg); a lavender-white one read as the veil again.
+        hot: displayLinear(195, 245, 255),
+        body: displayLinear(60, 120, 255),
+        // A lighter rim gives the sphere its glassy edge (the target's orb is brightest at the core and the rim).
+        limb: displayLinear(95, 155, 255),
+        filaments: displayLinear(150, 190, 255),
+        halo: displayLinear(45, 95, 255),
+        coreRadius: 0,
+        bodyStart: 0.55,
+        bodyEnd: 0.86,
+        alpha: 0.9,
+        haloAlpha: 0.4,
+        haloScale: 1.4,
+      },
+      arcStyle: {
+        core: displayLinear(205, 240, 255),
+        edge: displayLinear(45, 105, 255),
+        width: 2.2,
+        forkWidth: 1.6,
+        reach: [0.45, 1.1],
+        crawl: 0.4,
+      },
     },
   ],
   // Soviet Tesla coil (image NATESL, 1x1): the charged coil head throws a small flickering blue pool; unlike the
@@ -166,6 +203,9 @@ export interface BuildingLightPlacement extends SourceSpec {
   headPosition: Vector3;
   damaged: number;
   arcs: number;
+  orb?: PlasmaOrb;
+  arcStyle?: BuildingArcStyle;
+  fade?: number;
 }
 
 /** Pure placement policy; the foundation is supplied by the type library, never inferred from the art. */
@@ -186,8 +226,8 @@ export function buildingLightPlacements(
     const head = (spec.height / 15) * LEVEL_HEIGHT;
     return {
       key: `building:${building.uid ?? building.id ?? `${type}@${x0},${z0}`}:${index}`,
-      x,
-      z,
+      x: spec.falloff === 'soft' ? x0 + w / 2 : x,
+      z: spec.falloff === 'soft' ? z0 + h / 2 : z,
       groundY,
       head,
       headPosition: new Vector3(x, groundY + head, z),
@@ -198,7 +238,10 @@ export function buildingLightPlacements(
       glowSize: spec.glowSize,
       glowCore: spec.glowCore,
       glowHot: spec.glowHot,
-      shape: spec.falloff === 'wide' ? SHAPE_LINEAR : SHAPE_POOL,
+      shape: spec.falloff === 'soft' ? SHAPE_SOFT : spec.falloff === 'wide' ? SHAPE_LINEAR : SHAPE_POOL,
+      fadeIn: spec.fadeIn,
+      orb: spec.orb,
+      arcStyle: spec.arcStyle,
       groundOnly: spec.groundOnly,
       hole: spec.hole ? [w / 2, h / 2] : undefined,
       holeOffset: spec.hole ? [w / 2 - lx, h / 2 - lz] : undefined,
@@ -207,20 +250,9 @@ export function buildingLightPlacements(
       damaged: spec.damaged,
       arcs: spec.arcs,
       ttl: 0.6,
+      seed: (hashString(`building:${building.uid ?? building.id ?? `${type}@${x0},${z0}`}:${index}`) % 1000) / 1000,
     };
   });
-}
-
-/**
- * Gain of a building light standing in cells the engine's own light sources already brighten (map lamp posts such as
- * INGALITE: radius about 15 cells, +50 % at the post, by day too). `engineLight` is the engine's weighted object light
- * multiplier at the source (1 = plain map light). The source lights are calibrated on plainly lit ground; on lamp-lit
- * ground the same pool clipped into a lavender-white veil over a Tesla reactor and its neighbours in live matches
- * (L5 compose, XMP29U2 next to a lamp dummy), so the gain falls with the square of the extra engine light.
- */
-export function lampLitGain(engineLight: number): number {
-  if (!(engineLight > 1)) return 1;
-  return Math.max(0.35, 1 / (engineLight * engineLight));
 }
 
 /** Per-frame source selection; disabled sources perform no library or visibility queries. */
@@ -231,6 +263,7 @@ export function buildingLightSources(
   foundation: (type: string) => readonly [number, number] | undefined,
   shrouded: (building: Building) => boolean,
   conditionYellow = 0.5,
+  gate?: BuildingLightGate,
 ): BuildingLightPlacement[] {
   if (!(settings.sourceLights > 0)) return [];
   const out: BuildingLightPlacement[] = [];
@@ -239,7 +272,7 @@ export function buildingLightSources(
       building.kind !== 'building' ||
       !BUILDING_LIGHTS[building.type] ||
       building.health <= 0 ||
-      (building.buildState !== undefined && building.buildState !== 'done') ||
+      !(gate ? gate.allowed(building) : building.buildState === 'done') ||
       shrouded(building)
     )
       continue;
@@ -265,6 +298,7 @@ export function buildingLightSources(
         rgb[1] * k,
         rgb[2] * k,
       ];
+      light.fadeStart = gate?.fadeStart(building);
       light.colour = scale(light.colour);
       light.glow = light.glow ? scale(light.glow, gain * glowGain) : null;
       out.push(light);
@@ -273,39 +307,110 @@ export function buildingLightSources(
   return out;
 }
 
-/** Radius of the NAPOWR orb in world units (about 17 engine px at the bench's zoom). */
-const ORB_RADIUS = 0.28;
+function hashString(key: string): number {
+  let hash = 2166136261;
+  for (const c of key) hash = Math.imul(hash ^ c.charCodeAt(0), 16777619);
+  return hash >>> 0;
+}
+function buildingKey(building: Building): string {
+  return String(building.uid ?? building.id ?? `${building.type}@${building.x},${building.y}`);
+}
 
-/**
- * Decorative arc style: radiance at night and in full daylight (linear RGB, see buildingLightArcs), the reach of the
- * outgoing arcs past the orb's surface (world units) and the share of arcs that crawl over the glass instead.
- */
-export const ARC_STYLE = {
-  night: [0.15, 0.35, 3.2] as [number, number, number],
-  // By day a modest blue: brighter arcs bloomed into a white band across the towers that hid the strokes themselves.
-  day: [0.25, 0.45, 1.4] as [number, number, number],
-  reach: [0.35, 0.8] as [number, number],
-  crawl: 0.4,
-};
+interface GateState {
+  frame: number;
+  undefinedFrames: number;
+  blocked: boolean;
+  allowed: boolean;
+  born: number;
+}
 
-/**
- * Short decorative arcs, stable for pairs of logic frames; they never spawn impact flashes or particles. `night` is the
- * renderer's lamp gain (0 by day, 1 at night) blending ARC_STYLE.day into ARC_STYLE.night. By day the bloom decides how
- * they read: a saturated bright blue ([0.6, 1.1, 9]) tone-mapped to dark lines inside a lavender haze and a white one
- * ([2, 2.4, 4]) to a white fog band, while a modest blue keeps thin bright strokes with a small halo.
- */
-export function buildingLightArcs(lights: readonly BuildingLightPlacement[], frame: number, night = 1): BeamSpec[] {
-  const out: BeamSpec[] = [];
-  const k = Math.min(1, Math.max(0, night));
-  const { day, night: dark, reach, crawl } = ARC_STYLE;
-  const colour = new Vector3(
-    day[0] + (dark[0] - day[0]) * k,
-    day[1] + (dark[1] - day[1]) * k,
-    day[2] + (dark[2] - day[2]) * k,
-  );
+/** Constructor sentinels must not flash before build-up; sandbox objects in the first snapshot are already present. */
+export class BuildingLightGate {
+  private first = true;
+  private lastFrame = -Infinity;
+  private readonly states = new Map<string, GateState>();
+  private readonly seen = new Set<string>();
+
+  update(buildings: readonly Building[], frame: number, now: number): void {
+    if (frame < this.lastFrame) {
+      this.states.clear();
+      this.first = true;
+    }
+    this.lastFrame = frame;
+    this.seen.clear();
+    for (const b of buildings) {
+      if (b.kind !== 'building') continue;
+      const key = buildingKey(b);
+      this.seen.add(key);
+      let state = this.states.get(key);
+      if (!state) {
+        state = { frame, undefinedFrames: 0, blocked: false, allowed: false, born: now };
+        this.states.set(key, state);
+        if (this.first && b.buildState === undefined) {
+          state.allowed = true;
+          state.born = now - (BUILDING_LIGHTS[b.type]?.[0]?.fadeIn ?? 0.25);
+        }
+      }
+      const elapsed = Math.max(0, frame - state.frame);
+      state.frame = frame;
+      if (b.health <= 0 || b.buildState === 'building' || b.buildState === 'selling') {
+        state.allowed = false;
+        state.blocked = true;
+        state.undefinedFrames = 0;
+      } else if (b.buildState === 'done') {
+        if (!state.allowed) state.born = now;
+        state.allowed = true;
+        state.undefinedFrames = 0;
+      } else {
+        state.undefinedFrames += state.undefinedFrames === 0 ? 1 : elapsed;
+        if (!state.allowed && !state.blocked && state.undefinedFrames >= 30) {
+          state.allowed = true;
+          state.born = now;
+        }
+      }
+    }
+    for (const key of this.states.keys()) if (!this.seen.has(key)) this.states.delete(key);
+    this.first = false;
+  }
+  allowed(building: Building): boolean {
+    return this.states.get(buildingKey(building))?.allowed ?? false;
+  }
+  fadeStart(building: Building): number | undefined {
+    return this.states.get(buildingKey(building))?.born;
+  }
+}
+
+/** Extra depth pull of the arcs past the orb's own (world units). */
+const ARC_PUSH = 0.8;
+/** Width and opacity of the soft glow stroke drawn under each arc and fork. */
+const ARC_GLOW_WIDTH = 3;
+const ARC_GLOW_ALPHA = 0.5;
+
+/** Pure decorative policy: shapes reseed every two logic frames, presentation alpha and orb brightness remain live. */
+export function buildingLightOverlay(
+  lights: readonly BuildingLightPlacement[],
+  frame: number,
+  now: number,
+): { discs: EmissiveDisc[]; strokes: EmissiveStroke[] } {
+  const discs: EmissiveDisc[] = [];
+  const strokes: EmissiveStroke[] = [];
   for (const light of lights) {
-    let hash = 2166136261;
-    for (const c of light.key) hash = Math.imul(hash ^ c.charCodeAt(0), 16777619);
+    const orb = light.orb;
+    const fade = light.fade ?? 1;
+    if (!orb) continue;
+    const hash = hashString(light.key);
+    discs.push({
+      centre: light.headPosition,
+      orb,
+      // The disc and its halo reach radius x haloScale round the head; with only the head's own pull the owner's
+      // foundation depth (a wedge whose ridge is the front corner) cut a pie slice out of the right half of the orb.
+      push: (light.push ?? 0) + orb.radius * orb.haloScale,
+      seed: light.seed ?? 0,
+      alpha: fade,
+      brightness: flicker(light.seed ?? 0, now, light.flicker),
+    });
+    const style = light.arcStyle;
+    if (!style || fade <= 0.5) continue;
     for (let index = 0; index < light.arcs; index++) {
       const seed = (hash ^ Math.imul(Math.floor(frame / 2), 7919) ^ Math.imul(index + 1, 104729)) >>> 0;
       let state = seed;
@@ -314,39 +419,90 @@ export function buildingLightArcs(lights: readonly BuildingLightPlacement[], fra
         return state / 4294967296;
       };
       const angle = random() * Math.PI * 2;
-      // Arcs leave the orb's surface (not its centre, which drew a net of lines across the glass) in every direction
-      // but straight up. Even arcs strike the pad, the towers or the air around it; odd ones crawl over the glass to
-      // another surface point, the tangle of discharges the target wraps round the sphere.
       const down = -0.55 + 0.8 * random();
       const horizontal = Math.sqrt(1 - down * down);
-      const distance = reach[0] + (reach[1] - reach[0]) * random();
       const dir = new Vector3(Math.cos(angle) * horizontal, down, Math.sin(angle) * horizontal);
-      const centre = light.headPosition.clone();
-      // Match the glow's depth pull; shifting along the view direction preserves its screen position.
-      const push = light.push ?? 0;
-      centre.add(new Vector3(Math.sqrt(3 / 8), 0.5, Math.sqrt(3 / 8)).multiplyScalar(push));
-      const from = centre.clone().addScaledVector(dir, ORB_RADIUS);
+      const centre = light.headPosition;
+      const from = centre.clone().addScaledVector(dir, orb.radius);
+      const crawling = Math.floor((index + 1) * style.crawl) > Math.floor(index * style.crawl);
+      const distance = style.reach[0] + (style.reach[1] - style.reach[0]) * random();
       let to: Vector3;
-      // Crawling arcs are spread evenly over the indices (crawl 0.5: every odd arc).
-      if (Math.floor((index + 1) * crawl) > Math.floor(index * crawl)) {
+      if (crawling) {
         const turn = (random() < 0.5 ? -1 : 1) * (0.9 + random());
         const down2 = Math.max(-0.7, Math.min(0.6, down + (random() - 0.5) * 0.9));
         const h2 = Math.sqrt(1 - down2 * down2);
-        const dir2 = new Vector3(Math.cos(angle + turn) * h2, down2, Math.sin(angle + turn) * h2);
-        to = centre.clone().addScaledVector(dir2, ORB_RADIUS * 1.12);
-      } else {
-        to = from.clone().addScaledVector(dir, distance);
+        to = centre
+          .clone()
+          .addScaledVector(
+            new Vector3(Math.cos(angle + turn) * h2, down2, Math.sin(angle + turn) * h2),
+            orb.radius * 1.12,
+          );
+      } else to = from.clone().addScaledVector(dir, distance);
+      const points: Vector3[] = [];
+      const count = 7 + Math.floor(random() * 4);
+      const onGlass = (p: Vector3): Vector3 =>
+        crawling
+          ? p
+              .sub(centre)
+              .normalize()
+              .multiplyScalar(orb.radius * 1.04)
+              .add(centre)
+          : p;
+      for (let j = 0; j < count; j++) {
+        const p = from.clone().lerp(to, j / (count - 1));
+        if (j > 0 && j < count - 1)
+          p.add(new Vector3((random() - 0.5) * 0.1, (random() - 0.5) * 0.1, (random() - 0.5) * 0.1));
+        points.push(onGlass(p));
       }
-      out.push({
-        from,
-        to,
-        // Deep blue like the orb: the bolt shader's own white core and violet fringe would otherwise wash it lavender.
-        colour: colour.clone(),
-        bolt: true,
-        seed,
-        flash: false,
+      // Alpha changes with presentation time even while paused; geometry never depends on presentation time.
+      const alpha = (0.7 + 0.3 * ((hashString(`${seed}:${Math.floor(now * 1000)}`) % 10000) / 9999)) * fade;
+      const stroke = (points: Vector3[], width: number): EmissiveStroke => ({
+        points,
+        width,
+        core: style.core,
+        edge: style.edge,
+        alpha,
+        // Arcs strike the pads and towers in front of the orb: pull them further towards the camera than the orb so the
+        // reactor's own tower cards do not swallow them (units standing in front stay nearer still).
+        push: (light.push ?? 0) + ARC_PUSH,
       });
+      // A wide, faint saturated glow under each crisp bolt: the electric halo the bloom used to add (as lavender haze).
+      strokes.push({
+        ...stroke(points, style.width * ARC_GLOW_WIDTH),
+        core: style.edge,
+        alpha: alpha * ARC_GLOW_ALPHA,
+      });
+      strokes.push(stroke(points, style.width));
+      const cumulative = [0];
+      for (let j = 1; j < points.length; j++)
+        cumulative.push(cumulative[j - 1]! + points[j]!.distanceTo(points[j - 1]!));
+      const total = cumulative[cumulative.length - 1]!;
+      const joints = cumulative.flatMap((length, j) => (length / total >= 0.3 && length / total <= 0.5 ? [j] : []));
+      const forks = 1 + Math.floor(random() * 2);
+      for (let f = 0; f < forks; f++) {
+        const joint = joints[Math.floor(random() * joints.length)] ?? Math.round(0.4 * (count - 1));
+        const start = points[joint]!;
+        const end = start
+          .clone()
+          .add(new Vector3((random() - 0.5) * 0.28, -0.08 - random() * 0.16, (random() - 0.5) * 0.28));
+        const fork = [
+          start,
+          onGlass(
+            start
+              .clone()
+              .lerp(end, 0.5)
+              .add(new Vector3((random() - 0.5) * 0.1, (random() - 0.5) * 0.1, (random() - 0.5) * 0.1)),
+          ),
+          onGlass(end),
+        ];
+        strokes.push({
+          ...stroke(fork, style.forkWidth * ARC_GLOW_WIDTH),
+          core: style.edge,
+          alpha: alpha * ARC_GLOW_ALPHA,
+        });
+        strokes.push(stroke(fork, style.forkWidth));
+      }
     }
   }
-  return out;
+  return { discs, strokes };
 }

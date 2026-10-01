@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Group, Mesh, Texture, Vector3 } from 'three/webgpu';
+import { BuildingLightGate } from '../src/live/buildingLights';
 import { LiveView, type LiveObject, type LiveSnapshot } from '../src/live/liveView';
 import type { EffectInstance } from '../src/live/effectSprites';
 import { SpritePool } from '../src/live/spritePool';
@@ -72,6 +73,7 @@ function presentation() {
   };
   const effectArt = { revision: 0, particle: () => ({ sprite: { frames: [frame] }, art: { translucency: 0 } }) };
   const state = {
+    buildingLightGate: new BuildingLightGate(),
     current: null as null | { snapshot: LiveSnapshot; at: number; byUid: Map<number, LiveObject> },
     previous: null as null | { snapshot: LiveSnapshot; at: number; byUid: Map<number, LiveObject> },
     appearances: new Map(),

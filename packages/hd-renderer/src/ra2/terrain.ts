@@ -49,6 +49,7 @@ import {
 import {
   DEFAULT_ATMOSPHERE_NODES,
   moonlit,
+  localLightHeadroom,
   pavedAt,
   puddleNoise,
   sampleLightField,
@@ -573,7 +574,14 @@ function createMaterials(
     wall.roughnessNode = wet.roughness;
     wall.metalnessNode = float(0);
     // Local lights (map light sources, lamps, fires, explosions) from the light field, as diffuse irradiance.
-    wall.emissiveNode = wet.albedo.mul(sampleLightField(positionWorld.xz, nodes)).mul(1 / Math.PI);
+    wall.emissiveNode = localLightHeadroom(
+      wet.albedo
+        .mul(nodes.sceneLevel)
+        .mul(nodes.referenceLevel)
+        .mul(1 / Math.PI),
+      wet.albedo.mul(sampleLightField(positionWorld.xz, nodes)).mul(1 / Math.PI),
+      nodes.localLightCap,
+    );
   }
 
   const ground = new ArtMaterial();
@@ -745,6 +753,17 @@ function createMaterials(
   ground.roughnessNode = roughness;
   ground.metalnessNode = float(0);
   // Local lights from the light field (exactly zero by day without explosions), plus the wet paved sheen.
-  ground.emissiveNode = (ground.emissiveNode as ShaderNode).add(albedo.mul(localLight).mul(1 / Math.PI)).add(sheen);
+  ground.emissiveNode = (ground.emissiveNode as ShaderNode)
+    .add(
+      localLightHeadroom(
+        albedo
+          .mul(nodes.sceneLevel)
+          .mul(nodes.referenceLevel)
+          .mul(1 / Math.PI),
+        albedo.mul(localLight).mul(1 / Math.PI),
+        nodes.localLightCap,
+      ),
+    )
+    .add(sheen);
   return { ground, wall, reflectionTarget };
 }

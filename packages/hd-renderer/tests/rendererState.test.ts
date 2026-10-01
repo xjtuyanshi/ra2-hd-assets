@@ -53,6 +53,7 @@ describe('renderer shader state isolation', () => {
     const sizeValue = layers.lightFieldSize.value;
     world.sceneLevel.value.setRGB(0.4, 0.6, 0.8);
     world.night.value = 0.75;
+    world.localLightCap.value = 1;
     world.rainAmount.value = 0.9;
     world.windowGain.value = 0.8;
     world.faithfulDisplay.value = 0.25;
@@ -65,6 +66,7 @@ describe('renderer shader state isolation', () => {
     expect(levelValue.toArray()).toEqual([0.4, 0.6, 0.8]);
     expect(sizeValue.toArray()).toEqual([30, 20]);
     expect(layers.night.value).toBe(0.75);
+    expect(layers.localLightCap.value).toBe(1);
     expect(layers.rainAmount.value).toBe(0.9);
     expect(layers.windowGain.value).toBe(0.8);
     expect(layers.faithfulDisplay.value).toBe(0.25);

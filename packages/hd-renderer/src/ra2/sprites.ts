@@ -44,7 +44,14 @@ import {
   vec4,
 } from 'three/tsl';
 import type { LightingClass, MapObject, SpriteFrame } from '../../../ra2-assets/src/manifest';
-import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLightAt, pavedAt, puddleNoise } from '../atmosphere';
+import {
+  DEFAULT_ATMOSPHERE_NODES,
+  moonlit,
+  localLightHeadroom,
+  objectLightAt,
+  pavedAt,
+  puddleNoise,
+} from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { type HdAtlas, type Ra2Cache } from './cache';
@@ -506,7 +513,8 @@ export class SpriteLayer {
         // lights on the full colour.
         const shade = (c: ShaderNode, paint: ShaderNode): ShaderNode => {
           const lit: ShaderNode = objectLit(c);
-          return mix(moonlit(lit, nodes), lit, paint).mul(this.light).add(lit.mul(local));
+          const base = mix(moonlit(lit, nodes), lit, paint).mul(this.light);
+          return base.add(localLightHeadroom(base, lit.mul(local), nodes.localLightCap));
         };
         // Lit windows at night: warm amber panes (85 %) or a dimmer cool white (15 %) by the window's variant, each pane
         // with its own brightness; variants above 0.85 stay dark. Kept below the tone mapper's shoulder so panes stay

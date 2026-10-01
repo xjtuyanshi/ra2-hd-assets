@@ -428,6 +428,19 @@ use 15 × manifest scale composite px/level and ignore plateaus at least 2 level
 and `--help` describe the remaining tuned constants and optional diagnostics. Review the outputs before assigning
 the final filenames, relative to the map cache, to `terrainMap`, `waterMask` and `shoreIgnore` in `materials.json`.
 
+### Foliage grade of a terrain map
+
+`python/foliage_grade.py in.png out.png [--L --kL --hue --kH --C --kC --sigma]` pulls grass and lawn texels of a whole
+terrain map towards one vegetation look in CIELAB: each foliage texel's local mean (a foliage-weighted Gaussian of
+`sigma` texels) moves the share `kL`/`kH`/`kC` of the way to the target lightness, hue angle and chroma, and the texel's
+own deviation from that mean is kept, so mowing stripes and clumps keep their contrast. Texels outside the feathered
+green-yellow band (Lab hue about 85–165 degrees), with little chroma or no alpha are untouched. The L5F cinematic grade
+of XMP29U2 used `--L 47.5 --kL 0.9 --hue 106 --kH 0.95 --C 36 --kC 0.8 --sigma 40` on the L4 lawn-graded map: the
+battle area's cool blue-green wild grass (rendered L* 35, HSV hue 77) and the park lawn (L* 53 under daytime lamp
+light) both move towards the approved targets' golden sunlit grass (battle 43.5 / hue 52, park 45 / hue 62). A whole
+map (7200 x 3630) takes about 7 s and 8 GB in float32. Install the result through `cache_farm.install_file` and point
+`terrainMap` in `materials.json` at it. Test: `python3 -m unittest test_foliage_grade` (synthetic, asset-free).
+
 ## Water surface, detail and cliff-foot stripe tools (Python)
 
 These NumPy/Pillow/OpenCV tools take all input and output paths as arguments, generate PNGs outside Git, and never

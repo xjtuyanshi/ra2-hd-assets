@@ -132,15 +132,24 @@ if (lookPreset && lookPreset in LOOK_PRESETS) {
   applyLookPreset(live.hd.settings, lookPreset);
   live.hd.applySettings();
 }
-// &set=key:value,...: numeric setting overrides after the look (A/B reviews of one knob at the same camera/lighting).
+// &set=key:value,...: numeric setting overrides after the look (A/B reviews of one knob at the same camera/lighting);
+// RGB triples (gradeBalance, gradeShadowTint, gradeHighlightTint) as key:r/g/b.
 const overrides = (params.get('set') ?? '').split(',').filter(Boolean);
 if (overrides.length) {
   const settings = live.hd.settings as unknown as Record<string, unknown>;
   for (const item of overrides) {
     const [key, raw] = item.split(':');
+    // RGB triples (grade balance and tints) as r/g/b, e.g. gradeHighlightTint:1.1/1/0.9.
+    if (key && Array.isArray(settings[key]) && raw?.includes('/')) {
+      const triple = raw.split('/').map(Number);
+      if (triple.length !== 3 || !triple.every(Number.isFinite))
+        throw new Error(`Invalid setting override: ${item}; expected key:r/g/b`);
+      settings[key] = triple;
+      continue;
+    }
     const value = Number(raw);
     if (!key || typeof settings[key] !== 'number' || !Number.isFinite(value))
-      throw new Error(`Invalid setting override: ${item}; expected numericKey:value`);
+      throw new Error(`Invalid setting override: ${item}; expected numericKey:value or key:r/g/b`);
     settings[key] = value;
   }
   live.hd.applySettings();

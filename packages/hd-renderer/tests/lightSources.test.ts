@@ -1,9 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Mesh, Vector3, type InstancedBufferAttribute, type InstancedMesh, type WebGPURenderer } from 'three/webgpu';
+import {
+  Mesh,
+  Vector3,
+  LinearFilter,
+  type InstancedBufferAttribute,
+  type InstancedMesh,
+  type WebGPURenderer,
+} from 'three/webgpu';
 import { HdRenderer } from '../src/HdRenderer';
 import { AtmosphereNodes } from '../src/atmosphere';
 import { EmitterLayer } from '../src/emitters';
-import { LightField, flicker, type DynamicLight, type SourceSpec } from '../src/lightField';
+import { LightField, SHAPE_SOFT, flicker, type DynamicLight, type SourceSpec } from '../src/lightField';
 
 const spec: SourceSpec = {
   x: 3,
@@ -36,6 +43,7 @@ function fixture() {
     field as unknown as {
       dynamics: {
         mesh: InstancedMesh;
+        aPos: InstancedBufferAttribute;
         aCol: InstancedBufferAttribute;
         aExtra: InstancedBufferAttribute;
         aHoleOffset: InstancedBufferAttribute;
@@ -104,6 +112,51 @@ describe('kept source lights', () => {
       expect(field.dynamicLights(3.01, out)).toEqual([]);
       field.update(3.01, renderer, 0);
       expect(field.stats(3.01).sources).toBe(0);
+      expect(dynamics.mesh.count).toBe(0);
+    } finally {
+      dispose();
+    }
+  });
+
+  it('uploads a continuous soft shape without a rectangle and preserves linear field filtering', () => {
+    const { field, renderer, dynamics, dispose } = fixture();
+    try {
+      expect(field.texelsPerCell).toBe(8);
+      expect(field.target.texture.minFilter).toBe(LinearFilter);
+      expect(field.target.texture.magFilter).toBe(LinearFilter);
+      field.source('radial', 0, { ...spec, shape: SHAPE_SOFT, hole: undefined, holeOffset: undefined });
+      field.update(0.5, renderer, 0);
+      expect(dynamics.aPos.getW(0)).toBe(SHAPE_SOFT);
+      expect(dynamics.aExtra.getY(0)).toBe(0);
+      expect(dynamics.aExtra.getZ(0)).toBe(0);
+    } finally {
+      dispose();
+    }
+  });
+
+  it('shares a custom half-second fade with overlays and preserves it across refreshes', () => {
+    const { field, renderer, dynamics, dispose } = fixture();
+    try {
+      const source = { ...spec, peak: 1, flicker: 0, fadeIn: 0.5, fadeStart: 3 };
+      field.source('new', 3, source);
+      for (const [now, expected] of [
+        [3, 0],
+        [3.25, 0.5],
+        [3.5, 1],
+      ]) {
+        field.source('new', now!, source);
+        expect(field.sourceFade('new', now!)).toBeCloseTo(expected!);
+        field.update(now!, renderer, 0);
+        expect(dynamics.aCol.getZ(0)).toBeCloseTo(source.colour[2] * expected!);
+        expect(field.dynamicLights(now!, [])[0]!.glow![2]).toBeCloseTo(source.glow![2] * expected!);
+      }
+      field.source('existing', 3.5, { ...source, fadeStart: 3 });
+      expect(field.sourceFade('existing', 3.5)).toBe(1);
+      field.retainSources(new Set(['existing']));
+      expect(field.sourceFade('new', 3.5)).toBe(0);
+      expect(field.dynamicLights(3.5, [])).toHaveLength(1);
+      field.retainSources(new Set());
+      field.update(3.5, renderer, 0);
       expect(dynamics.mesh.count).toBe(0);
     } finally {
       dispose();
