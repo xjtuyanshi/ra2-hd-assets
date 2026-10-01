@@ -144,11 +144,20 @@ export function objectLight(xz: ShaderNode, nodes = DEFAULT_ATMOSPHERE_NODES): S
 }
 
 /**
+ * Share of a neighbour's ground-only light (a Tesla reactor's blue pool) that upright building art takes inside its
+ * own foundation. The pool is ground light; at full strength two adjacent reactors (a common base layout) washed each
+ * other's facades and orbs lavender-white and bloomed into a veil over the base in live matches (L5 compose, frozen
+ * pairs), while a lone reactor looked right. Neighbours keep a clear blue tint at this share.
+ */
+export const NEIGHBOUR_GROUND_SHARE = 0.3;
+
+/**
  * objectLight for sprite art. `building` (0 or 1) marks upright building art: it takes the ground-only share of the
  * field (SourceSpec.groundOnly, carried in the field's alpha as luminance) at `own`, a point inside its own foundation,
  * instead of at `xz`, the ground in front of the art that its pixels otherwise sample. A building's own source has a
  * hole over that foundation, so its facades and the reactor's orb glass stay unwashed, while a neighbouring building
- * inside the pool still takes the light. Without a ground-only share (alpha 0) this equals objectLight(xz) exactly.
+ * inside the pool still takes part of the light (NEIGHBOUR_GROUND_SHARE). Without a ground-only share (alpha 0) this
+ * equals objectLight(xz) exactly.
  */
 export function objectLightAt(
   xz: ShaderNode,
@@ -164,7 +173,7 @@ export function objectLightAt(
   const insideRgb: ShaderNode = inside.rgb.mul(nodes.lightFieldScale);
   const lf: ShaderNode = frontRgb
     .mul(float(1).sub(share(front, frontRgb)))
-    .add(insideRgb.mul(share(inside, insideRgb)));
+    .add(insideRgb.mul(share(inside, insideRgb)).mul(NEIGHBOUR_GROUND_SHARE));
   const l: ShaderNode = luminance(lf);
   return mix(vec3(l, l, l), lf, float(OBJECT_TINT));
 }

@@ -121,6 +121,41 @@ export const GARNISH_LIGHTS = {
  * seconds; charred ground around craters that fades over most of a minute (the engine's own crater
  * smudge stays underneath); more and longer sparks; debris that lands and stays on the ground for a few seconds.
  */
+/**
+ * Shared particle budget of a blast cluster. A building collapse is a dozen or more explosion anims over its
+ * foundation within a second or two; with every blast throwing its own debris (up to ~100 chunks resting for seconds)
+ * and a thirteen-second smoke column, a collapse buried the base under a black swarm of chunks and a smoke wall in live
+ * matches (L5 compose, frozen pairs of a construction yard's death). Blasts within `radius` world units and `window`
+ * seconds of each other therefore share `debris` chunks and `smoke` puffs (billows plus column); each blast keeps at
+ * least `floor` of its own. A lone blast (at most ~100 chunks, ~35 puffs) never reaches the budget, so single
+ * explosions keep their look.
+ */
+export const BLAST_CROWD = { window: 2.5, radius: 2.5, debris: 170, smoke: 90, floor: { debris: 6, smoke: 3 } };
+
+/** Recent enhanced blasts by place, for BLAST_CROWD. */
+export class BlastCrowd {
+  private recent: { t: number; x: number; z: number; debris: number; smoke: number }[] = [];
+  constructor(private readonly budget = BLAST_CROWD) {}
+  /** Grants up to `debris` chunks and `smoke` puffs to a blast at `at`, given what its cluster already used. */
+  grant(now: number, at: Vector3, debris: number, smoke: number): { debris: number; smoke: number } {
+    const b = this.budget;
+    this.recent = this.recent.filter((r) => now - r.t <= b.window && r.t <= now);
+    let usedDebris = 0;
+    let usedSmoke = 0;
+    for (const r of this.recent)
+      if ((r.x - at.x) ** 2 + (r.z - at.z) ** 2 <= b.radius * b.radius) {
+        usedDebris += r.debris;
+        usedSmoke += r.smoke;
+      }
+    const granted = {
+      debris: Math.min(debris, Math.max(b.floor.debris, b.debris - usedDebris)),
+      smoke: Math.min(smoke, Math.max(b.floor.smoke, b.smoke - usedSmoke)),
+    };
+    this.recent.push({ t: now, x: at.x, z: at.z, ...granted });
+    return granted;
+  }
+}
+
 export const ENHANCED = {
   /** HD display size by effect-table category; native art and all other categories retain their size. */
   hdSize: { explosion: 1.3, collapse: 1.3, debris: 1.3, impact: 1.15 },
@@ -514,6 +549,8 @@ export class EffectsLayer {
   private readonly billow: ParticlePool;
   /** Enhanced style: tumbling debris chunks. */
   private readonly debris: ParticlePool;
+  /** Particle budget shared by clustered enhanced blasts (BLAST_CROWD). */
+  private readonly crowd = new BlastCrowd();
   /** Enhanced style: heat shimmer (refracts the frame drawn so far). */
   private readonly shimmer: ParticlePool;
   /** Enhanced style: dust rings over the ground. */
@@ -1461,7 +1498,13 @@ export class EffectsLayer {
     }
     for (let i = 0, n = Math.round(e.embers.count + e.embers.perScale * s); i < n; i++)
       this.spawnEmber(now + Math.random() * e.embers.delay, at, width, wind);
-    for (let i = 0, n = Math.round(e.debris.count + e.debris.perScale * s); i < n; i++) {
+    // Clustered blasts (a building collapse) share one particle budget (BLAST_CROWD); a lone blast keeps all of its own.
+    const wantDebris = Math.round(e.debris.count + e.debris.perScale * s);
+    const wantColumn = s >= e.column.from ? Math.round(e.column.count + e.column.perScale * Math.min(1.5, s)) : 0;
+    const wantBillows = Math.round(e.smoke.count + e.smoke.perScale * s);
+    const granted = this.crowd.grant(now, at, wantDebris, wantColumn + wantBillows);
+    const smokeShare = granted.smoke / Math.max(1, wantColumn + wantBillows);
+    for (let i = 0, n = granted.debris; i < n; i++) {
       const big = Math.random() < 0.2;
       const velocity = new Vector3(r(8), 2.5 + Math.random() * 3.5, r(8)).multiplyScalar(
         (0.5 + 0.35 * s) * (big ? 0.6 : 1),
@@ -1478,8 +1521,8 @@ export class EffectsLayer {
       );
     }
     // A smoke column after bigger blasts: puffs emitted over a few seconds from the blast, rising with the wind.
-    if (s >= e.column.from) {
-      const n = Math.round(e.column.count + e.column.perScale * Math.min(1.5, s));
+    if (wantColumn > 0) {
+      const n = Math.round(wantColumn * smokeShare);
       for (let i = 0; i < n; i++) {
         const delay = 0.25 + (i / n) * e.column.span * (0.7 + 0.3 * Math.random());
         const velocity = new Vector3(r(0.12), e.column.rise * (0.8 + Math.random() * 0.4), r(0.12))
@@ -1495,7 +1538,7 @@ export class EffectsLayer {
         );
       }
     }
-    for (let i = 0, n = Math.round(e.smoke.count + e.smoke.perScale * s); i < n; i++) {
+    for (let i = 0, n = Math.round(wantBillows * smokeShare); i < n; i++) {
       const velocity = new Vector3(r(0.5), 0.45 + Math.random() * 0.45, r(0.5)).multiplyScalar(0.6 + 0.4 * s).add(wind);
       const x = r(0.7 * width);
       const z = r(0.7 * width);
