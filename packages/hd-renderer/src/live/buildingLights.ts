@@ -58,6 +58,7 @@ export interface BuildingArcStyle {
   edge: OverlayRgb;
   width: number;
   forkWidth: number;
+  coreFraction: number;
   reach: readonly [number, number];
   crawl: number;
 }
@@ -89,33 +90,37 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
       glowSize: 0,
       hole: false,
       damaged: 0.6,
-      arcs: 7,
+      arcs: 5,
       falloff: 'soft',
       fadeIn: 0.5,
       orb: {
-        // Covers the art's whole sphere; a smaller disc left a pale glass ring round a dark-blue 'eye'.
+        // Cover the painted sphere while revealing its glass through a partially transparent body ring.
         radius: 0.55,
-        // A soft hot centre fading into the body (a hard 0.3 R white disc read as a pupil).
-        // Cyan-white centre like the target's (hue ~193 deg); a lavender-white one read as the veil again.
-        hot: displayLinear(195, 245, 255),
-        body: displayLinear(60, 120, 255),
-        // A lighter rim gives the sphere its glassy edge (the target's orb is brightest at the core and the rim).
-        limb: displayLinear(95, 155, 255),
-        filaments: displayLinear(150, 190, 255),
+        // Cyan-white heat must pass through saturated cyan-blue, avoiding pale blue/lavender in the colour ramp.
+        hot: displayLinear(215, 248, 255),
+        mid: displayLinear(120, 205, 255),
+        body: displayLinear(55, 115, 255),
+        limb: displayLinear(110, 175, 255),
+        filaments: displayLinear(175, 235, 255),
         halo: displayLinear(45, 95, 255),
-        coreRadius: 0,
-        bodyStart: 0.55,
-        bodyEnd: 0.86,
-        alpha: 0.9,
+        coreRadius: 0.42,
+        bodyStart: 0.68,
+        bodyEnd: 0.88,
+        alpha: 1,
+        coreAlpha: 0.97,
+        bodyAlpha: 0.62,
+        limbAlpha: 0.85,
+        filamentMix: 0.75,
         haloAlpha: 0.4,
         haloScale: 1.4,
       },
       arcStyle: {
-        core: displayLinear(205, 240, 255),
-        edge: displayLinear(45, 105, 255),
-        width: 2.2,
-        forkWidth: 1.6,
-        reach: [0.45, 1.1],
+        core: displayLinear(225, 250, 255),
+        edge: displayLinear(45, 110, 255),
+        width: 2.8,
+        forkWidth: 2.0,
+        coreFraction: 0.45,
+        reach: [0.5, 1.15],
         crawl: 0.4,
       },
     },
@@ -383,14 +388,38 @@ export class BuildingLightGate {
 /** Extra depth pull of the arcs past the orb's own (world units). */
 const ARC_PUSH = 0.8;
 /** Width and opacity of the soft glow stroke drawn under each arc and fork. */
-const ARC_GLOW_WIDTH = 3;
-const ARC_GLOW_ALPHA = 0.5;
+const ARC_GLOW_WIDTH = 3.2;
+const ARC_GLOW_ALPHA = 0.42;
+
+function screenDirection(direction: Vector3, toCamera?: Vector3): Vector3 {
+  const cameraLengthSq = toCamera?.lengthSq() ?? 0;
+  // Suppress view depth before normalising so outgoing glow starts at the silhouette, not over the core as an eye.
+  if (toCamera && cameraLengthSq > 0) {
+    direction.addScaledVector(toCamera, (-0.85 * direction.dot(toCamera)) / cameraLengthSq);
+    const cameraLength = Math.sqrt(cameraLengthSq);
+    const depth = direction.dot(toCamera) / cameraLength;
+    // Nearly axial seeds can still exceed |dot| 0.5 after 85 % suppression; cap only those residual directions.
+    if (Math.abs(depth) > direction.length() * 0.5) {
+      direction.addScaledVector(toCamera, -depth / cameraLength);
+      if (direction.lengthSq() < 1e-12) {
+        if (toCamera.x !== 0 || toCamera.z !== 0) direction.set(-toCamera.z, 0, toCamera.x);
+        else direction.set(1, 0, 0);
+      }
+      direction
+        .normalize()
+        .multiplyScalar(Math.sqrt(0.75))
+        .addScaledVector(toCamera, (Math.sign(depth) * 0.5) / cameraLength);
+    }
+  }
+  return direction.normalize();
+}
 
 /** Pure decorative policy: shapes reseed every two logic frames, presentation alpha and orb brightness remain live. */
 export function buildingLightOverlay(
   lights: readonly BuildingLightPlacement[],
   frame: number,
   now: number,
+  toCamera?: Vector3,
 ): { discs: EmissiveDisc[]; strokes: EmissiveStroke[] } {
   const discs: EmissiveDisc[] = [];
   const strokes: EmissiveStroke[] = [];
@@ -421,7 +450,10 @@ export function buildingLightOverlay(
       const angle = random() * Math.PI * 2;
       const down = -0.55 + 0.8 * random();
       const horizontal = Math.sqrt(1 - down * down);
-      const dir = new Vector3(Math.cos(angle) * horizontal, down, Math.sin(angle) * horizontal);
+      const dir = screenDirection(
+        new Vector3(Math.cos(angle) * horizontal, down, Math.sin(angle) * horizontal),
+        toCamera,
+      );
       const centre = light.headPosition;
       const from = centre.clone().addScaledVector(dir, orb.radius);
       const crawling = Math.floor((index + 1) * style.crawl) > Math.floor(index * style.crawl);
@@ -434,7 +466,7 @@ export function buildingLightOverlay(
         to = centre
           .clone()
           .addScaledVector(
-            new Vector3(Math.cos(angle + turn) * h2, down2, Math.sin(angle + turn) * h2),
+            screenDirection(new Vector3(Math.cos(angle + turn) * h2, down2, Math.sin(angle + turn) * h2), toCamera),
             orb.radius * 1.12,
           );
       } else to = from.clone().addScaledVector(dir, distance);
@@ -462,6 +494,7 @@ export function buildingLightOverlay(
         core: style.core,
         edge: style.edge,
         alpha,
+        coreFraction: style.coreFraction,
         // Arcs strike the pads and towers in front of the orb: pull them further towards the camera than the orb so the
         // reactor's own tower cards do not swallow them (units standing in front stay nearer still).
         push: (light.push ?? 0) + ARC_PUSH,
@@ -471,6 +504,7 @@ export function buildingLightOverlay(
         ...stroke(points, style.width * ARC_GLOW_WIDTH),
         core: style.edge,
         alpha: alpha * ARC_GLOW_ALPHA,
+        coreFraction: 0,
       });
       strokes.push(stroke(points, style.width));
       const cumulative = [0];
@@ -499,6 +533,7 @@ export function buildingLightOverlay(
           ...stroke(fork, style.forkWidth * ARC_GLOW_WIDTH),
           core: style.edge,
           alpha: alpha * ARC_GLOW_ALPHA,
+          coreFraction: 0,
         });
         strokes.push(stroke(fork, style.forkWidth));
       }

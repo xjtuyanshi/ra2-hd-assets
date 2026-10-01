@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { Vector3 } from 'three/webgpu';
 import {
   BuildingLightGate,
   buildingLightOverlay,
@@ -71,11 +72,45 @@ describe('building light policy', () => {
     expect(hue).toBeGreaterThanOrEqual(215);
     expect(hue).toBeLessThanOrEqual(235);
     expect((b - r) / b).toBeGreaterThanOrEqual(0.6);
-    expect(body.map((v) => Math.round(v * 255))).toEqual([60, 120, 255]);
+    expect(body.map((v) => Math.round(v * 255))).toEqual([55, 115, 255]);
     expect(0.2126 * light.colour[0] + 0.7152 * light.colour[1] + 0.0722 * light.colour[2]).toBeLessThanOrEqual(0.2);
     // The disc covers the art's whole glass sphere (about 16.5 engine px) with a contained halo.
-    expect(light.orb).toMatchObject({ radius: 0.55, alpha: 0.9, haloScale: 1.4, haloAlpha: 0.4 });
+    expect(light.orb).toMatchObject({
+      radius: 0.55,
+      coreRadius: 0.42,
+      bodyStart: 0.68,
+      bodyEnd: 0.88,
+      alpha: 1,
+      coreAlpha: 0.97,
+      bodyAlpha: 0.62,
+      limbAlpha: 0.85,
+      filamentMix: 0.75,
+      haloScale: 1.4,
+      haloAlpha: 0.4,
+    });
     expect(select([reactor], 1, 1)[0]!.colour).toEqual([0.75, 2.1, 12.75]);
+  });
+  it('keeps the hot core cyan-white and authors saturated body, limb and filament colours', () => {
+    const orb = select()[0]!.orb!;
+    const colours = {
+      hot: [215, 248, 255],
+      mid: [120, 205, 255],
+      body: [55, 115, 255],
+      limb: [110, 175, 255],
+      filaments: [175, 235, 255],
+      halo: [45, 95, 255],
+    } as const;
+    for (const name of Object.keys(colours) as (keyof typeof colours)[])
+      expect(orb[name].map((v) => Math.round(srgb(v) * 255))).toEqual(colours[name]);
+    expect(ARC.core.map((v) => Math.round(srgb(v) * 255))).toEqual([225, 250, 255]);
+    expect(ARC.edge.map((v) => Math.round(srgb(v) * 255))).toEqual([45, 110, 255]);
+    expect(ARC).toMatchObject({ width: 2.8, forkWidth: 2, coreFraction: 0.45, reach: [0.5, 1.15], crawl: 0.4 });
+    const [r, g, b] = orb.hot.map(srgb) as [number, number, number];
+    expect(60 * ((r - g) / (b - r) + 4)).toBeLessThanOrEqual(195);
+    const luminance = 0.2126 * orb.hot[0] + 0.7152 * orb.hot[1] + 0.0722 * orb.hot[2];
+    expect(116 * Math.cbrt(luminance) - 16).toBeGreaterThan(92);
+    const mid = orb.mid.map(srgb) as [number, number, number];
+    expect((mid[2] - mid[0]) / mid[2]).toBeGreaterThanOrEqual(0.5);
   });
   it('creates nothing at zero gain without querying foundations or visibility', () => {
     const size = vi.fn(foundation);
@@ -121,6 +156,7 @@ describe('building light policy', () => {
     const setDiscs = vi.fn();
     const setStrokes = vi.fn();
     const setDecorativeBeams = vi.fn();
+    const toCamera = new Vector3(1, Math.SQRT2, 1).normalize();
     const settings = { sourceLights: 0 };
     const view = Object.assign(Object.create(LiveView.prototype), {
       hd: {
@@ -128,7 +164,7 @@ describe('building light policy', () => {
         seconds: () => 2,
         lightField: { source, clearSources, retainSources, sourceFade: () => 1 },
         emitters: { lampGain: { value: 0 } },
-        emissiveOverlay: { setDiscs, setStrokes },
+        emissiveOverlay: { setDiscs, setStrokes, toCamera: { value: toCamera } },
       },
       library: { type: () => ({ foundation: foundation() }), conditionYellow: 0.5 },
       shroud: { isLocationShrouded: () => false },
@@ -144,7 +180,9 @@ describe('building light policy', () => {
     view.updateBuildingLights(snapshot);
     expect(source).toHaveBeenCalledWith('building:42:0', 2, expect.objectContaining({ glow: null }));
     expect(setDiscs.mock.calls[0]![0]).toHaveLength(1);
-    expect(setStrokes.mock.calls[0]![0].filter((s: { width: number }) => s.width === ARC.width)).toHaveLength(7);
+    expect(setStrokes.mock.calls[0]![0].filter((s: { width: number }) => s.width === ARC.width)).toHaveLength(5);
+    const lights = select().map((light) => ({ ...light, fade: 1 }));
+    expect(setStrokes.mock.calls[0]![0]).toEqual(buildingLightOverlay(lights, snapshot.frame, 2, toCamera).strokes);
     expect(setDecorativeBeams).not.toHaveBeenCalled();
     view.updateBuildingLights({ ...snapshot, objects: [{ ...reactor, health: 0 }] });
     expect(retainSources).toHaveBeenLastCalledWith(new Set());
@@ -206,7 +244,7 @@ describe('building state gate', () => {
 });
 
 describe('decorative unbloomed source overlay', () => {
-  it('builds seven jagged arcs with inner-joint forks, glow strokes and stable shapes for frame pairs', () => {
+  it('builds five jagged arcs with inner-joint forks, glow strokes and stable shapes for frame pairs', () => {
     const lights = select();
     const a = buildingLightOverlay(lights, 10, 1);
     expect(a).toEqual(buildingLightOverlay(lights, 10, 1));
@@ -216,12 +254,24 @@ describe('decorative unbloomed source overlay', () => {
     const arcs = a.strokes.filter((s) => s.width === ARC.width);
     const forks = a.strokes.filter((s) => s.width === ARC.forkWidth);
     const glows = a.strokes.filter((s) => s.width > ARC.width);
-    expect(arcs).toHaveLength(7);
-    expect(forks.length).toBeGreaterThanOrEqual(7);
-    expect(forks.length).toBeLessThanOrEqual(14);
+    expect(arcs).toHaveLength(5);
+    expect(forks.length).toBeGreaterThanOrEqual(5);
+    expect(forks.length).toBeLessThanOrEqual(10);
     // Every crisp arc and fork has a wider, fainter glow stroke in the edge colour drawn before it.
     expect(glows).toHaveLength(arcs.length + forks.length);
-    glows.forEach((g) => expect(g.core).toEqual(ARC.edge));
+    glows.forEach((g) => {
+      expect(g.core).toEqual(ARC.edge);
+      expect(g.edge).toEqual(ARC.edge);
+      expect(g.coreFraction).toBe(0);
+    });
+    for (let i = 0; i < a.strokes.length; i += 2) {
+      const glow = a.strokes[i]!;
+      const crisp = a.strokes[i + 1]!;
+      expect(glow.points).toBe(crisp.points);
+      expect(glow.width).toBeCloseTo(crisp.width * 3.2);
+      expect(glow.alpha).toBeCloseTo(crisp.alpha * 0.42);
+      expect(crisp.coreFraction).toBe(ARC.coreFraction);
+    }
     arcs.forEach((s) => {
       expect(s.points.length).toBeGreaterThanOrEqual(7);
       expect(s.points.length).toBeLessThanOrEqual(10);
@@ -242,14 +292,14 @@ describe('decorative unbloomed source overlay', () => {
       expect(s.alpha).toBeLessThanOrEqual(1);
     }
     for (const s of glows) {
-      expect(s.alpha).toBeGreaterThanOrEqual(0.35);
-      expect(s.alpha).toBeLessThanOrEqual(0.5);
+      expect(s.alpha).toBeGreaterThanOrEqual(0.7 * 0.42);
+      expect(s.alpha).toBeLessThanOrEqual(0.42);
     }
   });
   it('keeps crawling arcs over the glass and outgoing arcs within the authored reach with downward bias', () => {
     const l = select()[0]!;
     const arcs = buildingLightOverlay([l], 10, 1).strokes.filter((s) => s.width === ARC.width);
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 5; i++) {
       const s = arcs[i]!;
       const a = s.points[0]!;
       const b = s.points.at(-1)!;
@@ -259,6 +309,9 @@ describe('decorative unbloomed source overlay', () => {
             l.orb!.radius * 1.04,
           );
       } else {
+        expect(Math.hypot(a.x - l.headPosition.x, a.y - l.headPosition.y, a.z - l.headPosition.z)).toBeCloseTo(
+          l.orb!.radius,
+        );
         const d = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
         expect(d).toBeGreaterThanOrEqual(ARC.reach[0]);
         expect(d).toBeLessThanOrEqual(ARC.reach[1]);
@@ -266,6 +319,38 @@ describe('decorative unbloomed source overlay', () => {
       }
     }
   });
+  it.each([new Vector3(0, 0, 1), new Vector3(1, Math.SQRT2, 1).normalize()])(
+    'keeps outgoing arcs in the screen plane without changing camera or frame-pair seeding (%j)',
+    (toCamera) => {
+      const l = select()[0]!;
+      const originalCamera = toCamera.clone();
+      for (let frame = 0; frame < 100; frame += 2) {
+        const a = buildingLightOverlay([l], frame, 1, toCamera);
+        expect(a).toEqual(buildingLightOverlay([l], frame + 1, 1, toCamera));
+        const scaled = buildingLightOverlay([l], frame, 1, toCamera.clone().multiplyScalar(3));
+        expect(scaled.strokes).toHaveLength(a.strokes.length);
+        a.strokes.forEach((s, i) => {
+          expect(scaled.strokes[i]!.points).toHaveLength(s.points.length);
+          s.points.forEach((p, j) => {
+            const q = scaled.strokes[i]!.points[j]!;
+            expect(p.x).toBeCloseTo(q.x, 12);
+            expect(p.y).toBeCloseTo(q.y, 12);
+            expect(p.z).toBeCloseTo(q.z, 12);
+          });
+        });
+        const arcs = a.strokes.filter((s) => s.width === ARC.width);
+        arcs.forEach((s, i) => {
+          if (Math.floor((i + 1) * ARC.crawl) > Math.floor(i * ARC.crawl)) return;
+          const start = new Vector3().copy(s.points[0]!);
+          const end = new Vector3().copy(s.points.at(-1)!);
+          expect(Math.abs(end.sub(start).normalize().dot(toCamera))).toBeLessThanOrEqual(0.5 + 1e-12);
+          expect(start.distanceTo(l.headPosition)).toBeCloseTo(l.orb!.radius);
+        });
+      }
+      expect(toCamera).toEqual(originalCamera);
+      expect(buildingLightOverlay([l], 10, 1, new Vector3())).toEqual(buildingLightOverlay([l], 10, 1));
+    },
+  );
   it('shares field flicker, fades the orb alpha, and starts arcs only after half fade', () => {
     const l = select()[0]!;
     for (const fade of [0, 0.5, 1]) {

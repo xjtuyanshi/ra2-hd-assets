@@ -910,7 +910,7 @@ export class LiveView {
       light.fade = this.hd.lightField.sourceFade(light.key, now);
     }
     this.hd.lightField.retainSources(this.activeSourceKeys);
-    const overlay = buildingLightOverlay(lights, snapshot?.frame ?? 0, now);
+    const overlay = buildingLightOverlay(lights, snapshot?.frame ?? 0, now, this.hd.emissiveOverlay.toCamera.value);
     this.hd.emissiveOverlay.setDiscs(overlay.discs);
     this.hd.emissiveOverlay.setStrokes(overlay.strokes);
     this.sourceLightsActive = true;

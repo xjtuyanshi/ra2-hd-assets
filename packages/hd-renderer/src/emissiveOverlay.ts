@@ -36,6 +36,7 @@ export type OverlayPoint = Readonly<{ x: number; y: number; z: number }>;
 export interface PlasmaOrb {
   radius: number;
   hot: OverlayRgb;
+  mid: OverlayRgb;
   body: OverlayRgb;
   limb: OverlayRgb;
   filaments: OverlayRgb;
@@ -44,6 +45,10 @@ export interface PlasmaOrb {
   bodyStart: number;
   bodyEnd: number;
   alpha: number;
+  coreAlpha: number;
+  bodyAlpha: number;
+  limbAlpha: number;
+  filamentMix: number;
   haloAlpha: number;
   haloScale: number;
 }
@@ -62,6 +67,8 @@ export interface EmissiveStroke {
   core: OverlayRgb;
   edge: OverlayRgb;
   alpha: number;
+  /** Fraction of the half-width occupied by the core (default 0.25); zero keeps only the edge colour. */
+  coreFraction?: number;
   push?: number;
 }
 
@@ -137,25 +144,31 @@ export class EmissiveOverlay {
   ) {
     this.root.name = 'unbloomed-emissive';
     this.root.visible = false;
-    const discs = batch(discCapacity, 7);
+    const discs = batch(discCapacity, 9);
     this.discData = discs.data;
-    const [p, extra, hot, body, limb, filaments, halo] = discs.nodes;
+    const [p, extra, hot, body, limb, filaments, halo, mid, opacity] = discs.nodes;
     const xy: ShaderNode = uv().sub(0.5).mul(2).mul(extra!.z);
     const d = length(xy);
     const turbulence = mx_noise_float(vec3(xy.mul(7), this.now.mul(0.9).add(extra!.y.mul(17))));
-    // Sparse moving filaments preserve the saturated body; a hot centre covering the whole sphere caused a veil.
+    // Saturated cyan between the white-hot core and blue body avoids a desaturated blue/lavender veil.
     const streak = smoothstep(0.88, 0.98, xy.x.mul(19).add(xy.y.mul(9)).add(turbulence.mul(4)).sin())
       .mul(smoothstep(0.15, 0.55, turbulence))
       .mul(smoothstep(0.3, 0.45, d))
       .mul(float(1).sub(smoothstep(0.85, 1, d)));
     const sphere = mix(
-      mix(hot!.rgb, body!.rgb, smoothstep(hot!.w, limb!.w, d)),
+      mix(mix(hot!.rgb, mid!.rgb, smoothstep(hot!.w.mul(0.5), hot!.w, d)), body!.rgb, smoothstep(hot!.w, limb!.w, d)),
       limb!.rgb,
       smoothstep(filaments!.w, 1, d),
     );
-    const rgb = mix(sphere, filaments!.rgb, streak.mul(0.45));
+    const rgb = mix(sphere, filaments!.rgb, streak.mul(mid!.w));
+    // Keep the core nearly opaque, reveal the painted glass through the body, then strengthen the glassy limb.
+    const sphereAlpha = mix(
+      mix(opacity!.x, opacity!.y, smoothstep(hot!.w, limb!.w, d)),
+      opacity!.z,
+      smoothstep(limb!.w, 1, d),
+    ).mul(body!.w);
     const outside = smoothstep(0.99, 1.01, d);
-    const alpha = mix(body!.w, halo!.w.mul(float(1).sub(smoothstep(1, extra!.z, d))), outside).mul(
+    const alpha = mix(sphereAlpha, halo!.w.mul(float(1).sub(smoothstep(1, extra!.z, d))), outside).mul(
       d.lessThan(extra!.z).select(float(1), float(0)),
     );
     const discMaterial = material(mix(rgb, halo!.rgb, outside).mul(extra!.w), alpha);
@@ -175,10 +188,11 @@ export class EmissiveOverlay {
     const projected = this.cameraRight
       .mul(dot(delta, this.cameraRight))
       .add(this.cameraUp.mul(dot(delta, this.cameraUp)));
-    const span = length(projected).max(1e-6);
-    // A segment pointing (almost) along the view direction has no screen axis: draw it as a round dot along
-    // cameraRight instead of a quad stretched from a noisy direction (it showed as a white wedge over the orb).
-    const axis = span.greaterThan(width.mul(0.05)).select(projected.div(span), this.cameraRight);
+    const projectedSpan = length(projected);
+    const span = projectedSpan.max(1e-6);
+    // View-aligned segments must contribute no alpha: stacked glow dots painted a dark-blue eye over the hot core.
+    const visible = projectedSpan.greaterThanEqual(width.mul(0.05));
+    const axis = visible.select(projected.div(span), this.cameraRight);
     const side = this.cameraRight
       .mul(dot(axis, this.cameraUp).negate())
       .add(this.cameraUp.mul(dot(axis, this.cameraRight)));
@@ -187,11 +201,16 @@ export class EmissiveOverlay {
     const r = length(vec2(cap, uv().y.sub(0.5).mul(2)));
     // fwidth supplies a one-device-pixel edge at any zoom/DPR; capsules overlap at every polyline joint.
     const cover = float(1).sub(smoothstep(float(1).sub(fwidth(r)), 1, r));
-    // A white-blue core over the inner third, then the saturated edge fading to 45 % at the rim: an electric glow
-    // drawn here instead of by the bloom (which turned the arcs into a lavender band).
+    // Preserve the legacy 0.18/0.3 ramp at coreFraction 0.25; glow strokes use zero for a pure saturated edge.
+    const coreMix = edge!.w
+      .greaterThan(0)
+      .select(float(1).sub(smoothstep(edge!.w.mul(0.72), edge!.w.mul(1.2).max(1e-6), r)), float(0));
     const strokeMaterial = material(
-      mix(edge!.rgb, core!.rgb, float(1).sub(smoothstep(0.18, 0.3, r))),
-      cover.mul(core!.w).mul(mix(float(1), float(0.7), smoothstep(0.3, 1, r))),
+      mix(edge!.rgb, core!.rgb, coreMix),
+      cover
+        .mul(core!.w)
+        .mul(mix(float(1), float(0.7), smoothstep(0.3, 1, r)))
+        .mul(visible.select(float(1), float(0))),
     );
     strokeMaterial.positionNode = Fn(() => {
       const distance = positionGeometry.x.add(0.5).mul(span.add(width)).sub(width.mul(0.5));
@@ -248,6 +267,8 @@ export class EmissiveOverlay {
       write4(this.discData, i, 4, o.limb[0], o.limb[1], o.limb[2], o.bodyStart);
       write4(this.discData, i, 5, o.filaments[0], o.filaments[1], o.filaments[2], o.bodyEnd);
       write4(this.discData, i, 6, o.halo[0], o.halo[1], o.halo[2], o.haloAlpha * d.alpha);
+      write4(this.discData, i, 7, o.mid[0], o.mid[1], o.mid[2], o.filamentMix);
+      write4(this.discData, i, 8, o.coreAlpha, o.bodyAlpha, o.limbAlpha, 0);
     }
     flush(this.discData, this.discRange);
     this.discs.count = n;
@@ -262,7 +283,7 @@ export class EmissiveOverlay {
         write4(this.strokeData, n, 0, a.x, a.y, a.z, strokeWorldWidth(s.width, this.pixelsPerWorldUnit));
         write4(this.strokeData, n, 1, b.x, b.y, b.z, s.push ?? 0);
         write4(this.strokeData, n, 2, s.core[0], s.core[1], s.core[2], s.alpha);
-        write4(this.strokeData, n, 3, s.edge[0], s.edge[1], s.edge[2], 0);
+        write4(this.strokeData, n, 3, s.edge[0], s.edge[1], s.edge[2], s.coreFraction ?? 0.25);
         n++;
       }
       if (n === this.segmentCapacity) break;

@@ -96,10 +96,58 @@ describe('emissive primitive buffers and render exclusion', () => {
       expect(internal.discData.updateRanges[0]).toBe(discRange);
       expect(internal.strokeData.updateRanges[0]).toBe(strokeRange);
       expect(strokes[3]).toBeCloseTo(1.3 / PIXELS_PER_CELL_EDGE);
+      expect(strokes[15]).toBe(0.25);
       overlay.setDiscs([]);
       overlay.setStrokes([]);
       expect(overlay.discs.count).toBe(0);
       expect(overlay.strokes.count).toBe(0);
+    } finally {
+      overlay.dispose();
+    }
+  });
+  it('packs the orb colour, filament mix and alpha profile at the fixed disc stride', () => {
+    const overlay = new EmissiveOverlay(PIXELS_PER_CELL_EDGE, 2, 1);
+    const internal = overlay as unknown as { discData: { array: Float32Array } };
+    try {
+      overlay.setDiscs([disc, { ...disc, alpha: 0.5, orb: { ...disc.orb, alpha: 0.8, filamentMix: 0.6 } }]);
+      const data = internal.discData.array;
+      expect(data).toHaveLength(2 * 9 * 4);
+      for (const [index, fade, globalAlpha, filamentMix] of [
+        [0, 1, 1, 0.75],
+        [1, 0.5, 0.8, 0.6],
+      ]) {
+        const base = index! * 36;
+        for (let channel = 0; channel < 3; channel++)
+          expect(data[base + 28 + channel]).toBeCloseTo(disc.orb.mid[channel]!);
+        expect(data[base + 11]).toBeCloseTo(disc.orb.coreRadius);
+        expect(data[base + 15]).toBeCloseTo(globalAlpha! * fade!);
+        expect(data[base + 19]).toBeCloseTo(disc.orb.bodyStart);
+        expect(data[base + 23]).toBeCloseTo(disc.orb.bodyEnd);
+        expect(data[base + 27]).toBeCloseTo(disc.orb.haloAlpha * fade!);
+        expect(data[base + 31]).toBeCloseTo(filamentMix!);
+        expect(data[base + 32]).toBeCloseTo(disc.orb.coreAlpha);
+        expect(data[base + 33]).toBeCloseTo(disc.orb.bodyAlpha);
+        expect(data[base + 34]).toBeCloseTo(disc.orb.limbAlpha);
+        expect(data[base + 35]).toBe(0);
+      }
+    } finally {
+      overlay.dispose();
+    }
+  });
+  it('packs optional stroke core fractions, preserving zero glow and the legacy default', () => {
+    const overlay = new EmissiveOverlay(PIXELS_PER_CELL_EDGE, 1, 6);
+    const internal = overlay as unknown as { strokeData: { array: Float32Array } };
+    try {
+      overlay.setStrokes([stroke, { ...stroke, coreFraction: 0 }, { ...stroke, coreFraction: 0.45 }]);
+      const data = internal.strokeData.array;
+      expect([15, 31, 47, 63, 79, 95].map((offset) => data[offset])).toEqual([
+        0.25,
+        0.25,
+        0,
+        0,
+        Math.fround(0.45),
+        Math.fround(0.45),
+      ]);
     } finally {
       overlay.dispose();
     }
