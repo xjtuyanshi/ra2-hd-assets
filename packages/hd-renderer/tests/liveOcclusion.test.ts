@@ -54,8 +54,8 @@ function presentation() {
   const visual = { root, mode: 'voxel', type: 'TEST', paletteKey: '', firstFrame: 1 };
   const shroud = { hidden: false, isLocationShrouded: () => shroud.hidden };
   const effectDriver = { frame: vi.fn(), cards: vi.fn(() => ({ drawn: 0, missing: 0 })), smokeCards: vi.fn() };
-  const effectSprites = { setInstances: vi.fn() };
-  const hd = { seconds: () => 1, frame: vi.fn(), windowsWanted: () => false, view: new IsoCamera() };
+  const effectSprites = { setInstances: vi.fn(), now: { value: 0 }, displayScale: { value: 1 } };
+  const hd = { seconds: () => 1, meanExposure: 2, frame: vi.fn(), windowsWanted: () => false, view: new IsoCamera() };
   const effectArt = { revision: 0, particle: () => ({ sprite: { frames: [frame] }, art: { translucency: 0 } }) };
   const state = {
     current: null as null | { snapshot: LiveSnapshot; at: number; byUid: Map<number, LiveObject> },
@@ -121,6 +121,7 @@ describe('LiveView physical occlusion scheduling', () => {
     const sort = vi.spyOn((p.live.sprites as unknown as { orderedCards: unknown[] }).orderedCards, 'sort');
     p.view.push(withBuilding(1, 256), 0);
     p.view.render(0);
+    expect(p.effectSprites.displayScale.value).toBeCloseTo(1 / p.hd.meanExposure);
     p.view.push(withBuilding(2, 356), 100);
     p.view.render(120);
     expect(p.visual.root.position.x).toBeCloseTo(276 / 256);
@@ -129,12 +130,23 @@ describe('LiveView physical occlusion scheduling', () => {
     const sorts = sort.mock.calls.length;
     expect(sorts).toBeGreaterThan(0);
     p.effectSprites.setInstances.mockClear();
-    for (const at of [140, 160, 180, 200]) p.view.render(at);
+    p.hd.seconds = () => 1.5;
+    for (const [at, exposure] of [
+      [140, 2],
+      [160, 0.5],
+      [180, 4],
+      [200, 1],
+    ] as const) {
+      p.hd.meanExposure = exposure;
+      p.view.render(at);
+      expect(p.effectSprites.displayScale.value).toBeCloseTo(1 / exposure);
+    }
     expect(p.visual.root.position.x).toBeCloseTo(356 / 256);
     expect(p.order).toHaveBeenCalledTimes(count);
     expect(sort).toHaveBeenCalledTimes(sorts);
     expect(p.mesh.userData.painterDepth.bias).toBe(bias);
     expect(p.effectSprites.setInstances).not.toHaveBeenCalled();
+    expect(p.effectSprites.now.value).toBe(p.hd.seconds());
     for (const upload of p.uploads) expect(upload).not.toHaveBeenCalled();
     p.effectArt.revision++;
     p.view.render(210);

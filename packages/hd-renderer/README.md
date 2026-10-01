@@ -161,8 +161,12 @@ sidecar the view falls back to land-type surfaces and no map light sources.
   garnish options (the live view) only a small flash, sparks and light on top of the original art (`src/effects.ts`).
   The live view's opt-in `enhanced` effect style (`ENHANCED`) adds, around the engine's own anim: a boiling fireball
   over the native art for its duration (original fire colours), a longer light, sparks and landing debris, rolling
-  smoke and, after bigger blasts, a smoke column rising for about ten seconds, heat shimmer, a dust ring, and around
+  smoke building over the first second and lingering for about five seconds, a smoke column rising for about thirteen
+  seconds after bigger blasts, heat shimmer, a dust ring, and around
   craters a hot glow and charred ground that fades over most of a minute (the engine's crater smudge stays).
+  Optional HD flipbooks enlarge explosions, collapses and debris by 1.3 and impacts by 1.15 around the native draw
+  point, with matching garnish footprints; other categories and native cards keep their size. Enhanced debris uses
+  lit polygonal chunks, including a few larger, slower pieces, that rest on the ground for about eight seconds.
 - Post (`src/HdRenderer.ts`, `src/post.ts`): per-channel exposure, mist and the visibility (shroud) mask, bloom, the
   display transform, the night toe lift, anti-aliasing and sharpening; see HdSettings below.
 

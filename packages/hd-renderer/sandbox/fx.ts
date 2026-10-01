@@ -19,12 +19,21 @@
  *   &native=1                 pass the bridge fields (exact anim frame) instead of relying on the fallback timing
  *   &garnish=0                the original art alone, without HD light, sparks or smoke
  *   &effects=enhanced         the enhanced effect style (LiveViewOptions.effects) instead of the faithful garnish
+ *   &fxhd=0                  keep native effect frames even in enhanced style (disable optional HD flipbooks)
+ *   &fxhdbase=<url>           directory holding effects-hd.json and its RGBA atlas pages
  *   &stagger=0.5              spawn the listed anims this many seconds apart instead of all at once
  *   &repeat=3                 play the list again every this many seconds (new anim identities each round)
+ *   &delay=0,0.5,...          per-anim start delay in seconds (overrides &stagger for the anims it lists)
+ *   &period=0,2,...           per-anim repeat period in seconds, 0 = once (overrides &repeat for the anims it lists)
  *   &spread=1.6               cells between the listed anims along the diagonal
  *   &crater=1                 emulate the engine's craters (bridge H3 smudge grid: the map's own smudges plus a
  *                             CRATER/BURNT smudge where a Scorch=yes / Crater=yes anim reaches its middle)
  *   &house=15                 colour scheme index of the owning house
+ *   &objects=T@dx,dy[@owner[@health[@facing]]];...
+ *                             extra units/buildings (rules type T, kind from the type library) at cell offsets from
+ *                             the centre, e.g. TESLA@4,-2@1 or GAPOWR@-6,2@0@0.3 (a damaged power plant)
+ *   &bolts=i:dx,dy,h;...      an electric bolt (engine beam, Tesla colour) from cell offset (dx, dy) at h leptons
+ *                             above the ground to listed anim i, during its first &boltfor= seconds (default 0.4)
  *   ?fx=replay&replay=<url>   replay recorded snapshots ({ snapshots: LiveSnapshot[], fps }) at 1 engine px per CSS
  *                             px (the tactical view's own framing), then hold the last one `time` seconds later
  *
@@ -66,6 +75,8 @@ const live = await LiveView.create(canvas, {
   libraryBase: '/_library',
   timeOfDay: Number(params.get('hours') ?? 12),
   effects: params.get('effects') === 'enhanced' ? 'enhanced' : 'faithful',
+  effectsHd: params.get('fxhd') !== '0',
+  effectsHdBase: params.get('fxhdbase') ?? undefined,
   water: params.get('water') === 'enhanced' ? 'enhanced' : 'classic',
 });
 // &look=golden: the enhanced look preset (src/HdRenderer.ts LOOK_PRESETS; pair it with &hours=16.5), for effect reviews
@@ -302,11 +313,48 @@ for (const [id, a] of Object.entries(effectsJson?.anims ?? {}))
   });
 
 const fxIds = (params.get('fx') ?? 'units').split(',').filter(Boolean);
+/** Kind of every rules type in the map theater's type library (for &objects=). */
+const libraryKinds: Record<string, string> = params.has('objects')
+  ? Object.fromEntries(
+      Object.entries(
+        ((await fetch(`/_library/${cache.manifest.theater}/library.json`)
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null)) as { types?: Record<string, { kind: string }> } | null)?.types ?? {},
+      ).map(([id, t]) => [id, t.kind]),
+    )
+  : {};
 const units = [
   ...(fxIds.includes('units') ? unitSet() : []),
   ...(fxIds.includes('squad') ? squadSet() : []),
   ...(fxIds.includes('infantry') ? infantrySet() : []),
+  ...extraObjects(),
 ];
+
+/** &objects=: extra units and buildings for effect scenarios (kind looked up in the type library). */
+function extraObjects(): LiveObject[] {
+  const spec = params.get('objects');
+  if (!spec) return [];
+  const objects: LiveObject[] = [];
+  for (const item of spec.split(';').filter(Boolean)) {
+    const [type, offset, owner, health, facing] = item.split('@');
+    const [dx, dy] = (offset ?? '0,0').split(',').map(Number);
+    const kind = (libraryKinds[type!] ?? 'building') as LiveObject['kind'];
+    const uid = nextUid++;
+    objects.push({
+      id: uid,
+      uid,
+      kind,
+      type: type!,
+      owner: Number(owner ?? 0),
+      ...at(cx + (dx ?? 0), cy + (dy ?? 0)),
+      facingRaw: Number(facing ?? 0),
+      ...(kind === 'vehicle' ? { turretFacingRaw: Number(facing ?? 0) } : {}),
+      health: Number(health ?? 1),
+      isSelected: false,
+    });
+  }
+  return objects;
+}
 const spread = Number(params.get('spread') ?? 1.6);
 const offsets = params
   .get('at')
@@ -322,7 +370,21 @@ const anims: LiveAnim[] = fxIds
     return { id: 9000 + i, uid: 9000 + i, type, ...at(x, y) };
   });
 const stagger = Math.max(0, Number(params.get('stagger') ?? 0));
+/** &bolts=: electric bolts from a point to listed anims (anim index -> source cell offset and height in leptons). */
+const bolts = new Map<number, { x: number; y: number; z: number }>();
+for (const item of (params.get('bolts') ?? '').split(';').filter(Boolean)) {
+  const [index, rest] = item.split(':');
+  const [dx, dy, h] = (rest ?? '').split(',').map(Number);
+  const ground = at(cx + 0.5 + (dx ?? 0), cy + 0.5 + (dy ?? 0));
+  bolts.set(Number(index), { ...ground, z: ground.z + (h ?? 0) });
+}
+const boltFor = Number(params.get('boltfor') ?? 0.4);
 const repeat = Math.max(0, Number(params.get('repeat') ?? 0));
+const delays = (params.get('delay') ?? '').split(',').filter((v) => v !== '').map(Number);
+const periods = (params.get('period') ?? '').split(',').filter((v) => v !== '').map(Number);
+/** Start delay and repeat period (seconds) of listed anim `i`. */
+const delayOf = (i: number) => (Number.isFinite(delays[i]) ? delays[i]! : i * stagger);
+const periodOf = (i: number) => Math.max(0, Number.isFinite(periods[i]) ? periods[i]! : repeat);
 
 let frame = 100_000;
 let spawned: number | null = null;
@@ -333,11 +395,11 @@ let spawned: number | null = null;
  */
 function listedAnim(anim: LiveAnim, i: number): LiveAnim | null {
   if (spawned === null) return null;
-  let age = frame - spawned - Math.round(i * stagger * fps);
+  let age = frame - spawned - Math.round(delayOf(i) * fps);
   if (age < 0) return null;
   let round = 0;
-  if (repeat > 0) {
-    const period = Math.max(1, Math.round(repeat * fps));
+  if (periodOf(i) > 0) {
+    const period = Math.max(1, Math.round(periodOf(i) * fps));
     round = Math.floor(age / period);
     age %= period;
   }
@@ -424,6 +486,25 @@ function benchAnim(anim: LiveAnim, age: number): LiveAnim | null {
 
 /** &animate=N: infantry of ?fx=infantry step their sequence every N logic frames (0 = frozen at &step=). */
 const animateInfantry = Number(params.get('animate') ?? 0);
+/** Logic frames since anim `i` of the list started its current round, or null before its first start. */
+function roundAge(i: number): number | null {
+  if (spawned === null) return null;
+  const age = frame - spawned - Math.round(delayOf(i) * fps);
+  if (age < 0) return null;
+  return periodOf(i) > 0 ? age % Math.max(1, Math.round(periodOf(i) * fps)) : age;
+}
+
+/** Engine beams of the bench's bolts this logic frame. */
+function benchBeams(): NonNullable<LiveSnapshot['effects']>['beams'] {
+  const beams: NonNullable<NonNullable<LiveSnapshot['effects']>['beams']> = [];
+  for (const [i, source] of bolts) {
+    const anim = anims[i];
+    const age = roundAge(i);
+    if (!anim || age === null || age >= Math.round(boltFor * fps)) continue;
+    beams.push({ source, target: { x: anim.x, y: anim.y, z: anim.z }, kind: 'bolt', colour: [82, 80, 255] });
+  }
+  return beams;
+}
 
 function snapshot(): LiveSnapshot {
   const listed = anims.map((a, i) => listedAnim(a, i)).filter((a): a is LiveAnim => !!a);
@@ -438,6 +519,7 @@ function snapshot(): LiveSnapshot {
       anims: listed,
       bullets: [],
       particleSystems: [],
+      beams: benchBeams(),
     },
     ...(smudgeLibrary ? { smudges: smudgeGrid() } : {}),
   };

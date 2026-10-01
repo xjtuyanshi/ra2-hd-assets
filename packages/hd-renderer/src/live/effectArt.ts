@@ -1,8 +1,10 @@
-import type { Texture } from 'three/webgpu';
+import { LinearFilter, LinearMipmapLinearFilter, SRGBColorSpace, Texture } from 'three/webgpu';
 import type {
   EffectAnim,
   EffectBullet,
   EffectCellArt,
+  EffectHdAnim,
+  EffectHdLibrary,
   EffectLibrary,
   EffectParticle,
   EffectSpriteRef,
@@ -35,11 +37,17 @@ export interface ResolvedAnim {
  * projectile, debris voxel, particle, overlay and smudge. effects.json is fetched on first use and atlas pages and
  * voxel models on demand, like LiveLibrary: callers ask again on a later frame until the art is there. Without the
  * sidecar every lookup stays null and the live view simply draws no native effect art.
+ * A separate optional effects-hd.json supplies RGBA replacement frames; its index and pages settle independently and
+ * never change native lookups, palette ownership or page numbering.
  */
 export class EffectArt {
   private library: EffectLibrary | null = null;
   private state: 'idle' | 'loading' | 'ready' | 'failed' = 'idle';
   private readonly pages = new Map<number, EffectPage | 'loading' | { failedAt: number }>();
+  private hdLibrary: EffectHdLibrary | null = null;
+  private hdLoading: Promise<void> | null = null;
+  private readonly hdPages = new Map<number, EffectPage | 'loading' | { failedAt: number }>();
+  private readonly hdPinned = new Set<number>();
   private settledRevision = 0;
   /** Pages requested by preload(): kept when idle (every battle needs them again). */
   private readonly pinned = new Set<number>();
@@ -58,6 +66,8 @@ export class EffectArt {
     readonly theater: TheaterId,
     /** Whether the type library's palettes (lib:unit with house rows) are loaded. */
     private readonly libraryPalettes: boolean,
+    /** Optional RGBA flipbooks, alongside the native effect sidecar by default. */
+    readonly hdBase: string = `${base}/../effects-hd`,
   ) {}
 
   /** Start loading effects.json (idempotent); resolves when it is loaded or known to be missing. */
@@ -86,6 +96,31 @@ export class EffectArt {
         this.settledRevision++;
         console.info('[HD] no effect art sidecar (pnpm hd:effects); native effects are not drawn', error);
       });
+  }
+
+  /** Fetch the optional HD index once; absence is informational and never prevents native effect art from loading. */
+  loadHd(): Promise<void> {
+    return (this.hdLoading ??= fetch(`${this.hdBase}/effects-hd.json`)
+      .then((r) => (r.ok ? (r.json() as Promise<EffectHdLibrary>) : Promise.reject(new Error(r.statusText))))
+      .then((library) => {
+        if (library.version !== 1) throw new Error(`Unsupported HD effect library version: ${library.version}`);
+        this.hdLibrary = library;
+      })
+      .catch(() => {
+        console.info('[HD] no HD effect flipbook sidecar; effects keep their native art');
+      })
+      .finally(() => {
+        this.settledRevision++;
+      }));
+  }
+
+  /** Redrawn frames of an anim, or null until the optional index loads (or when it has no replacement). */
+  hdAnim(type: string): EffectHdAnim | null {
+    if (!this.hdLibrary) {
+      void this.loadHd();
+      return null;
+    }
+    return this.hdLibrary.anims[type] ?? this.hdLibrary.anims[type.toUpperCase()] ?? null;
   }
 
   get ready(): boolean {
@@ -216,6 +251,39 @@ export class EffectArt {
     this.pages.delete(index);
   }
 
+  /** RGBA atlas page with the same settled/failure/retry contract as pageState(), in a separate page namespace. */
+  hdPageState(index: number): EffectPage | 'loading' | null {
+    const ref = this.hdLibrary?.pages[index];
+    if (!ref) return null;
+    const entry = this.hdPages.get(index);
+    const retry = typeof entry === 'object' && 'failedAt' in entry && seconds() - entry.failedAt > PAGE_RETRY_SECONDS;
+    if (entry === undefined || retry) {
+      this.hdPages.set(index, 'loading');
+      loadHdPage(`${this.hdBase}/${ref.file}`, this.uploadPage ?? undefined)
+        .then((texture) => {
+          this.hdPages.set(index, { texture, width: ref.width, height: ref.height });
+          this.settledRevision++;
+        })
+        .catch(() => {
+          this.hdPages.set(index, { failedAt: seconds() });
+          this.settledRevision++;
+        });
+      return 'loading';
+    }
+    if (entry === 'loading') return 'loading';
+    if ('failedAt' in entry) return null;
+    return entry;
+  }
+
+  /** Free an idle RGBA page; combat pages pinned by preloadHd() stay resident like the native combat pages. */
+  releaseHd(index: number): void {
+    if (this.hdPinned.has(index)) return;
+    const entry = this.hdPages.get(index);
+    if (!entry || entry === 'loading' || 'failedAt' in entry) return;
+    entry.texture.dispose();
+    this.hdPages.delete(index);
+  }
+
   /** Pages whose textures are loaded now (diagnostics). */
   get loadedPages(): number {
     let n = 0;
@@ -239,6 +307,19 @@ export class EffectArt {
     for (const page of pages) {
       this.pinned.add(page);
       this.page(page);
+    }
+    return [...pages].sort((a, b) => a - b);
+  }
+
+  /** Pin and request every HD page used by matching anims after loadHd() settles, skipping empty frames. */
+  preloadHd(anims: RegExp): number[] {
+    if (!this.hdLibrary) return [];
+    const pages = new Set<number>();
+    for (const [id, anim] of Object.entries(this.hdLibrary.anims))
+      if (anims.test(id)) for (const frame of anim.frames) if (frame) pages.add(frame.page);
+    for (const page of pages) {
+      this.hdPinned.add(page);
+      this.hdPageState(page);
     }
     return [...pages].sort((a, b) => a - b);
   }
@@ -270,6 +351,47 @@ export class EffectArt {
     const pages = new Set<number>();
     for (const f of [...sprite.frames, ...(sprite.shadows ?? [])]) if (f.rect[2] > 0) pages.add(f.page ?? 0);
     return [...pages];
+  }
+}
+
+/**
+ * Decode straight-alpha sRGB art without conversion. The texture owns its bitmap until upload (or disposal before
+ * first use); eager renderer uploads release it immediately, just like loadIndexedPage, without a CPU pixel copy.
+ */
+async function loadHdPage(url: string, upload?: (texture: Texture) => void): Promise<Texture> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: ${response.status}`);
+  const bitmap = await createImageBitmap(await response.blob(), {
+    colorSpaceConversion: 'none',
+    premultiplyAlpha: 'none',
+  });
+  const { width, height } = bitmap;
+  const texture = new Texture(bitmap as unknown as HTMLImageElement);
+  texture.colorSpace = SRGBColorSpace;
+  texture.magFilter = LinearFilter;
+  texture.minFilter = LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.flipY = false;
+  texture.premultiplyAlpha = false;
+  const release = () => {
+    bitmap.close();
+    texture.image = { width, height } as unknown as HTMLImageElement;
+    texture.onUpdate = null;
+    texture.removeEventListener('dispose', release);
+  };
+  texture.addEventListener('dispose', release);
+  texture.onUpdate = release;
+  texture.needsUpdate = true;
+  try {
+    if (upload) {
+      upload(texture);
+      // initTexture may already have called onUpdate synchronously.
+      texture.onUpdate?.(texture);
+    }
+    return texture;
+  } catch (error) {
+    texture.dispose();
+    throw error;
   }
 }
 

@@ -146,6 +146,10 @@ export interface LiveViewOptions {
   debugPlaceholders?: boolean;
   /** HD around the engine's own effects: 'faithful' (default) or 'enhanced' (see LiveEffectsDriver.style). */
   effects?: EffectStyle;
+  /** Optional RGBA flipbooks, enabled by default in enhanced style; false keeps native effect art. */
+  effectsHd?: boolean;
+  /** Directory holding effects-hd.json (default: <libraryBase>/common/effects-hd). */
+  effectsHdBase?: string;
   /** Water look (ra2/waterLook.ts): 'classic' (default) or the modern 'enhanced' water. */
   water?: WaterStyle;
 }
@@ -160,7 +164,7 @@ export interface LiveDiagnostics {
   /** Buildings whose voxel turret (TurretAnimIsVoxel) has no model, and whose model is still loading. */
   missingTurrets: number;
   pendingTurrets: number;
-  /** Native effect cards drawn this frame, anims in the list without art, and their types. */
+  /** Effect cards drawn this frame (native or HD), anims in the list without art, and their types. */
   effectCards: number;
   effectsWithoutArt: number;
   effectTypesWithoutArt: string[];
@@ -504,20 +508,28 @@ export class LiveView {
     hd.setVisibility(this.shroud.mask);
     const base = options.libraryBase?.replace(/\/$/, '');
     this.effectArt = base
-      ? new EffectArt(`${base}/common/effects`, cache, cache.manifest.theater as TheaterId, !!library)
+      ? new EffectArt(
+          `${base}/common/effects`,
+          cache,
+          cache.manifest.theater as TheaterId,
+          !!library,
+          options.effectsHdBase ?? `${base}/common/effects-hd`,
+        )
       : null;
     if (this.effectArt) this.effectArt.uploadPage = upload;
     // The pages of the common combat anims and smoke particles load up front, the rest on first use.
-    void this.effectArt
-      ?.load()
-      .then(() =>
-        this.effectArt?.preload(COMBAT_ANIMS, [...new Set(Object.values(SMOKE_SYSTEMS).map((r) => r.particle))]),
-      );
+    void this.effectArt?.load().then(() => {
+      this.effectArt?.preload(COMBAT_ANIMS, [...new Set(Object.values(SMOKE_SYSTEMS).map((r) => r.particle))]);
+      if (this.effectDriver.style === 'enhanced' && this.effectDriver.hdEnabled)
+        void this.effectArt?.loadHd().then(() => this.effectArt?.preloadHd(COMBAT_ANIMS));
+    });
     this.effectSprites = this.effectArt
       ? new EffectSpriteLayer(
           cache,
           (page) => this.effectArt!.pageState(page),
           (page) => this.effectArt!.release(page),
+          (page) => this.effectArt!.hdPageState(page),
+          (page) => this.effectArt!.releaseHd(page),
         )
       : null;
     if (this.effectSprites) this.root.add(this.effectSprites.root);
@@ -530,6 +542,8 @@ export class LiveView {
       (type) => !!this.effectArt?.bullet(type),
     );
     this.effectDriver.style = options.effects ?? 'faithful';
+    this.effectDriver.hdEnabled = options.effectsHd !== false;
+    this.effectDriver.hasHdArt = (type) => !!this.effectArt?.hdAnim(type);
     this.effectDriver.artWidth = (type) => {
       const w = this.effectArt?.anim(type)?.art.visW;
       return w ? w / (60 / Math.SQRT2) : undefined;
@@ -870,12 +884,18 @@ export class LiveView {
     if (this.smudgePagesDirty) this.flushSmudgePages();
     if (this.painterDirty) this.applyPainterOrder();
     this.effectDriver.frame(this.hd.seconds(), this.wind);
+    if (this.effectSprites) {
+      this.effectSprites.now.value = this.hd.seconds();
+      this.effectSprites.displayScale.value = 1 / Math.max(1e-3, this.hd.meanExposure);
+    }
     this.hd.frame(dt);
   }
 
-  /** Switch how much HD adds around the engine's own effects (see LiveViewOptions.effects); applies to new effects. */
+  /** Switch garnish for new effects and card art on the next snapshot (see LiveViewOptions.effects). */
   setEffectStyle(style: EffectStyle): void {
     this.effectDriver.style = style;
+    if (style === 'enhanced' && this.effectDriver.hdEnabled)
+      void this.effectArt?.loadHd().then(() => this.effectArt?.preloadHd(COMBAT_ANIMS));
   }
 
   dispose(): void {

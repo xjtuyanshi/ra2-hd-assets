@@ -25,6 +25,32 @@ import type { TheaterId } from './theater.ts';
 
 export const EFFECT_LIBRARY_VERSION = 1;
 
+/** Optional redrawn flipbooks in common/effects-hd/effects-hd.json, indexed by the native SHP frame numbers. */
+export interface EffectHdLibrary {
+  version: 1;
+  /** RGBA atlas pages: PREMULTIPLIED colour (sRGB-encoded, so light with no coverage can be stored) and coverage. */
+  pages: { file: string; width: number; height: number }[];
+  anims: Record<string, EffectHdAnim>;
+}
+
+export interface EffectHdAnim {
+  /** HD texels per native (engine) pixel, e.g. 2. */
+  scale: number;
+  /** One entry per native SHP frame index (same length as the native frame list); null = an empty native frame. */
+  frames: (EffectHdFrame | null)[];
+}
+
+export interface EffectHdFrame {
+  page: number;
+  /** Texel rect in the page: x, y, w, h (HD texels). */
+  rect: [number, number, number, number];
+  /**
+   * Top-left relative to the native SHP canvas centre, in NATIVE pixels (possibly fractional), like SpriteFrame.offset.
+   * The rect covers rect.w / scale by rect.h / scale native pixels.
+   */
+  offset: [number, number];
+}
+
 /** Engine draw layer of an anim (AnimTypeClass::Layer; attached anims are drawn in `ground`). */
 export type EffectLayer = 'underground' | 'surface' | 'ground' | 'air' | 'top';
 
