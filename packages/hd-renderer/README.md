@@ -196,7 +196,8 @@ Units and buildings are placeholders (`src/objects.ts`) until real assets exist;
 | `sharpness`  | `1`          | RCAS sharpening after the display transform (0 strongest, 2 off, below 0 disabled).                                                                                                                                                                                                                                                                                        |
 | `debugView`  | `'none'`     | `'overbright'` marks exposed luminance above 1; `'voxel-xy'` / `'voxel-z'` write voxel palette index, world normal and corner occlusion raw to the screen, for fitting the voxel lighting against captures of the original.                                                                                                                                                |
 
-Call `applySettings()` after changing a setting; it rebuilds the post pipeline and frees the previous one's targets.
+Call `applySettings()` after changing a setting; structural changes rebuild the post pipeline and free its previous
+targets, while uniform changes update the existing pipeline.
 
 GPU memory of the post targets at 2400x1500 device pixels (estimated from their formats): with `'msaa4'` the scene
 colour takes about 115 MB multisampled (RGBA16F) plus a 29 MB resolve texture and its depth about 58 MB; with
@@ -212,9 +213,21 @@ single-sampled, so layers should copy at most once per frame and only while they
 
 Modern light on the original art, off by default: with every setting below at 0 the frame is the faithful one bit for
 bit (the sprite shader skips the whole branch; checked by render hash on XMP29U2). `LOOK_PRESETS` / `applyLookPreset`
-name two looks: `faithful` and `golden` (golden afternoon: every effect on, the sun arc, exposure adaptation, hour
+name `faithful`, `golden` and `cinematic` (golden afternoon: every effect on, the sun arc, exposure adaptation, hour
 16.5). Sandbox: `?look=golden`, single overrides `?relight= ?contrast= ?spec= ?glass= ?ao= ?shfollow= ?shsoft= ?wetrefl=
 ?sunpath=fixed|arc ?adapt= ?vsheen= ?vsheencap= ?vao=` and the "现代光影" GUI folder (`sandbox/look.ts`).
+
+`?look=cinematic` adds the approved S2 direction with medium cooling to `golden` at 16.5; both enhanced presets select
+enhanced water unless `water=` overrides it. Calibration controls in "现代光影" also accept URL overrides after the preset:
+`wbadapt` (`whiteAdapt`, 0..1), `gbal=r,g,b`, `gcon` (-0.5..1), `glift`, `gsat`, `gshadow=r,g,b`, `ghigh=r,g,b`.
+White adaptation geometrically balances exposure toward the current flat-ground irradiance without changing its
+luminance. The display grade runs after tone mapping, before sRGB encoding and the night toe lift; it skips debug
+views and fades out with the night weight, as white adaptation does. Defaults and the `faithful`/`golden` presets are
+neutral and omit the grade node entirely. Grade values update uniforms; only switching between neutral and active
+grading rebuilds the pipeline. The `cinematic` values are calibrated by material class (neutral greys, greens, warm
+surfaces, blue/teal) against the three approved target framings (XMP29U2 city park and battle, RiverRam river): neutral
+greys land within about 1-3 b* units of the targets (golden: 7-9 units warmer); the remaining gap in local contrast is
+in the art and lighting, not in the grade.
 
 | Setting                                         | Meaning                                                                                                                                                                                                                                                              |
 | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -281,13 +294,39 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   wet ground, so flat ground at clear noon shows exactly composite x map lighting. Contact shading from the height
   field darkens ground and water at the feet of cliffs; no sun shadows are cast.
 - Water (`waterLook.ts`, `shoreField.ts`, `../proceduralTextures.ts`): open water is shaded per pixel from the signed
-  shore distance (land specks of at most `SPECK_TEXELS` field texels count as water). The opt-in `enhanced` look:
+  shore distance (land specks of at most `SPECK_TEXELS` field texels count as water). An optional `shoreIgnore` image
+  in the map's `materials.json` uses the water mask's size/layout; greyscale values >= 128 mark cliff tops and walls
+  that must stay dry and not create a beach beside water in screen space. At least half a field texel's pixels must
+  be marked, and it must remain land after speck filling. Missing or mismatched images warn once and leave the
+  field unchanged; the image is only loaded when a water mask is available. The same loaded bytes also produce
+  `terrainMap.cliff`, an unsigned distance to marked texels using the shore field's isometric metric and majority
+  downsampling (2 composite pixels per texel for lake beds, otherwise 4). Its R16F texture uses linear filtering,
+  no mipmaps and a normalised 0..1 range capped at `CLIFF_FIELD_MAX` (1.5 cells); wall texels are zero. Marked water
+  and specks remain cliff targets. The enhanced bed path receives the red channel as `BedWaterInputs.cliff`;
+  without a valid loaded ignore mask the cache field is null and the shader input is absent.
+  The opt-in `enhanced` look:
   a narrow turquoise shallow band with caustics over a sandy bed, dark blue-teal depths, a wind sea from three
   scrolled layers of a tileable ripple normal map plus two swells under drifting gust patches, sun glitter in ripple
   facets, rippled reflections of the mirrored scene, explosions and lamps mirrored from the light field, a swash that
   laps up and back with a thin foam line, breaker lines and wet sand, no surf at cliff feet, and rain rings. The default
   is the earlier `classic` look; sandbox `water=enhanced` (or `look=golden`), `LiveViewOptions.water` and in game
   `hd-water=enhanced` select the modern one (`waterPreset`, chosen before the world is built).
+  With `waterBed: true`, enhanced water uses one half-resolution colour/depth mirror per base water level with at
+  least 12 open-water cells, keeping the four largest levels. Each mirror renders only while its padded cell bounds
+  intersect the camera frustum; fragment height selects the matching plane, and other levels keep sky only. Classic
+  and legacy enhanced water retain the single lowest mirror. Optional `materials.json.waterDetail` supplies sRGB
+  apparent water colour and alpha roughness/glitter weight over the composite's area (same aspect, any resolution).
+  It shares the mask's top-down UVs and uses linear/mipmap filtering with clamped edges; load failures warn and leave it unused.
+  `WATER_DETAIL` in `waterLook.ts` controls column blending, retained shallow turquoise and alpha modulation. Only the
+  constant column receives display compensation; the mixed column then dims at night. Without detail, the bed shader
+  keeps its original calculation order.
+  Optional `materials.json.waterSurface` names a seamless RGBA8 painted water surface tile with linear data channels:
+  R = relief luminance ratio / 2 (0.5 neutral), G = crest glints, B = foam lace, A = unused. The tile repeats in
+  screen-aligned ground space; one tile spans `waterSurfaceScale` screen units of 30 engine px on each axis
+  (positive number, default 13). It uses `NoColorSpace`, repeat wrapping on both axes, linear/mipmap filtering and
+  anisotropy 8. Only enhanced lake-bed water (`waterBed: true`) with a `waterDetail` layer samples it; absent tiles
+  leave the existing shading intact, and load failures warn once and leave the surface null. Tiles are made from
+  image-model texture tiles by a scratch tool outside the repository.
 - Sprites (`sprites.ts`): filtered coverage of the indexed mask for soft edges; within about one original texel of
   transparent texels HD atlas colours keep their hue but are never brighter than the original texel there (the
   upscaler's pale background fringe goes without a rim of raw palette colours). An HD page's optional

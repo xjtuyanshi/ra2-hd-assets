@@ -1,4 +1,5 @@
 import {
+  ClampToEdgeWrapping,
   DataTexture,
   LinearFilter,
   LinearMipmapLinearFilter,
@@ -6,6 +7,7 @@ import {
   NoColorSpace,
   RGBAFormat,
   RedFormat,
+  RepeatWrapping,
   SRGBColorSpace,
   Texture,
   TextureLoader,
@@ -16,7 +18,7 @@ import { validateMapLights, type MapLightsSidecar } from '../../../ra2-assets/sr
 import { MAP_MATERIALS_FILE, type MapMaterials } from '../../../ra2-assets/src/mapMaterials';
 import { MapLightGrade, setPaletteGrade, setPaletteNodes } from './mapLighting';
 import { AtmosphereNodes } from '../atmosphere';
-import { buildShoreField } from './shoreField';
+import { buildCliffField, buildShoreField } from './shoreField';
 
 /** windows.json next to a lit-window mask (packages/ra2-assets src/node/lights.ts WindowsSidecar). */
 export interface WindowsIndex {
@@ -53,8 +55,16 @@ export interface Ra2Cache {
   terrainMap?: {
     texture: DataTexture;
     waterMask: DataTexture;
+    /** The terrain image contains a painted lake bed; only the enhanced water style uses bed optics. */
+    waterBed: boolean;
+    /** Composite-space apparent water colour (sRGB) and roughness (A); null when absent or unreadable. */
+    waterDetail: Texture | null;
+    /** Repeating painted open-water surface tile (see MapMaterials.waterSurface) and its size; null when absent. */
+    waterSurface: { texture: Texture; scale: number } | null;
     /** Signed distance to the shoreline in cells, encoded as in shoreField.ts (drives depth, foam and wet sand). */
     shore: DataTexture;
+    /** Normalised cliff contact distance (CLIFF_FIELD_MAX cells = 1); null without a loaded shore-ignore mask. */
+    cliff: DataTexture | null;
     ref: NonNullable<HdCacheManifest['terrainMap']>;
   };
   spriteAtlas: Texture;
@@ -293,10 +303,11 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
   const ref = options.terrainMap === false ? undefined : manifest.terrainMap;
   const materials = ref && options.colourMatched !== false ? await loadMapMaterials(url(MAP_MATERIALS_FILE)) : null;
   if (ref) {
+    const material = resolveTerrainMaterials(ref, materials);
     // Upscaled composites already carry bled colours under their transparent border; only the raw scale-1 image
     // needs the dilation pass.
     // The colour-matched image has the same size and layout as ref.file.
-    const { texture, original } = await loadDilated(url(materials?.terrainMap ?? ref.file), ref.scale > 1 ? 0 : 10);
+    const { texture, original } = await loadDilated(url(material.file), ref.scale > 1 ? 0 : 10);
     texture.colorSpace = SRGBColorSpace;
     texture.magFilter = LinearFilter;
     // A whole map is far larger than the screen when zoomed out: mipmaps keep it from shimmering.
@@ -304,12 +315,70 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     texture.generateMipmaps = true;
     texture.anisotropy = 8;
     // The composite's own water mask when present; otherwise treat nothing as water rather than guessing.
-    const mask = ref.waterMask ? await loadMask(url(ref.waterMask)) : null;
+    const mask = material.waterMask ? await loadMask(url(material.waterMask)) : null;
+    let waterDetail: Texture | null = null;
+    if (material.waterDetail) {
+      try {
+        waterDetail = await load(material.waterDetail);
+        // load() keeps PNG rows top-down (flipY = false), matching loadMask/loadDilated DataTextures and atlasUv.
+        // Alpha is roughness data, not transparency; RGB is decoded from sRGB only when the shader samples it.
+        waterDetail.colorSpace = SRGBColorSpace;
+        waterDetail.magFilter = LinearFilter;
+        waterDetail.minFilter = LinearMipmapLinearFilter;
+        waterDetail.generateMipmaps = true;
+        waterDetail.wrapS = ClampToEdgeWrapping;
+        waterDetail.wrapT = ClampToEdgeWrapping;
+      } catch (error) {
+        console.warn(`${url(material.waterDetail)}: failed to load water detail; ignoring it`, error);
+      }
+    }
+    let waterSurface: { texture: Texture; scale: number } | null = null;
+    if (material.waterSurface) {
+      try {
+        const surface = await load(material.waterSurface);
+        // Data channels (relief ratio, glints, foam lace): no sRGB decode; a seamless tile repeats in both axes.
+        surface.colorSpace = NoColorSpace;
+        surface.magFilter = LinearFilter;
+        surface.minFilter = LinearMipmapLinearFilter;
+        surface.generateMipmaps = true;
+        surface.anisotropy = 8;
+        surface.wrapS = RepeatWrapping;
+        surface.wrapT = RepeatWrapping;
+        waterSurface = { texture: surface, scale: material.waterSurfaceScale };
+      } catch (error) {
+        console.warn(`${url(material.waterSurface)}: failed to load water surface; ignoring it`, error);
+      }
+    }
+    let shoreIgnore: Uint8Array | undefined;
+    if (mask && material.shoreIgnore) {
+      const ignoreUrl = url(material.shoreIgnore);
+      try {
+        const ignore = await loadMask(ignoreUrl);
+        if (ignore.width === mask.width && ignore.height === mask.height) shoreIgnore = ignore.bytes;
+        else console.warn(`${ignoreUrl}: shore-ignore size differs from the water mask; ignoring it`);
+        // Only the CPU bytes feed the distance fields; this mask is never sampled by a material.
+        ignore.texture.dispose();
+      } catch (error) {
+        console.warn(`${ignoreUrl}: failed to load shore-ignore mask; ignoring it`, error);
+      }
+    }
     void original;
+    const downsample = material.waterBed ? 2 : 4;
     terrainMap = {
       texture,
       waterMask: mask?.texture ?? emptyMask(),
-      shore: mask ? buildShoreField(mask.bytes, mask.width, mask.height, ref.scale).texture : emptyMask(),
+      waterBed: material.waterBed,
+      waterDetail,
+      waterSurface,
+      // The lake-bed shoreline needs a finer, higher-precision distance field (see buildShoreField).
+      shore: mask
+        ? buildShoreField(mask.bytes, mask.width, mask.height, ref.scale, downsample, material.waterBed, shoreIgnore)
+            .texture
+        : emptyMask(),
+      cliff:
+        mask && shoreIgnore
+          ? buildCliffField(mask.bytes, shoreIgnore, mask.width, mask.height, ref.scale, downsample).texture
+          : null,
       ref,
     };
   }
@@ -362,12 +431,43 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
 
 const PALETTE_ROWS = 128;
 
+/** Default width of one painted water-surface tile, in screen units of 30 engine px (MapMaterials.waterSurfaceScale). */
+export const DEFAULT_WATER_SURFACE_SCALE = 13;
+
+/** Resolve the optional material overrides together, so the mask and the distance field always use the same asset. */
+export function resolveTerrainMaterials(
+  ref: NonNullable<HdCacheManifest['terrainMap']>,
+  materials: MapMaterials | null,
+): {
+  file: string;
+  waterMask: string | undefined;
+  shoreIgnore: string | undefined;
+  waterBed: boolean;
+  waterDetail: string | undefined;
+  waterSurface: string | undefined;
+  waterSurfaceScale: number;
+} {
+  return {
+    file: materials?.terrainMap ?? ref.file,
+    waterMask: materials?.waterMask ?? ref.waterMask,
+    shoreIgnore: typeof materials?.shoreIgnore === 'string' ? materials.shoreIgnore : undefined,
+    waterBed: materials?.waterBed === true,
+    waterDetail: typeof materials?.waterDetail === 'string' ? materials.waterDetail : undefined,
+    waterSurface: typeof materials?.waterSurface === 'string' ? materials.waterSurface : undefined,
+    waterSurfaceScale:
+      typeof materials?.waterSurfaceScale === 'number' && materials.waterSurfaceScale > 0
+        ? materials.waterSurfaceScale
+        : DEFAULT_WATER_SURFACE_SCALE,
+  };
+}
+
 /** The optional per-map materials sidecar; null when absent or unreadable (dev servers may answer 404 or HTML). */
 async function loadMapMaterials(url: string): Promise<MapMaterials | null> {
   try {
     const response = await fetch(url);
     if (!response.ok) return null;
     const json = (await response.json()) as MapMaterials;
+    // Resolve optional shoreIgnore/waterDetail types without rejecting legacy sidecars or their other overrides.
     return json && json.version === 1 ? json : null;
   } catch {
     return null;

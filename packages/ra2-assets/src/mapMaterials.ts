@@ -12,6 +12,41 @@ export interface MapMaterials {
    * colour taken from the original composite (terrain-map.png), keeping the HD image's own detail.
    */
   terrainMap?: string;
+  /**
+   * Replacement for manifest.terrainMap.waterMask, with the same size, layout and 8-bit greyscale encoding
+   * (255 = open water). Include the painted shallow band so the waterline meets the sand, not the old blue water.
+   */
+  waterMask?: string;
+  /**
+   * Same size/layout as the water mask; greyscale values >= 128 exclude land (cliff tops and walls beside water in
+   * screen space) from the shoreline distance field. Ignored land stays dry; water keeps its original classification.
+   */
+  shoreIgnore?: string;
+  /**
+   * True when terrainMap paints a lake bed under the water mask (shore sand grading into deeper silt), rather than
+   * painted water. Opts into transmitted/refracted bed shading only with the enhanced water style; default false.
+   */
+  waterBed?: boolean;
+  /**
+   * RGBA8 PNG covering exactly the terrain composite's area, at any resolution with the same aspect ratio
+   * (typically a quarter of the composite's resolution). RGB is the sRGB apparent colour of open water: low/mid
+   * frequencies from an image-model repaint of the map's water, extrapolated over land so bilinear filtering never
+   * bleeds land colour into water. A is 0..1 surface roughness / sun-glitter weight (128 = neutral), carrying wind
+   * patches and current streaks. Used only by the enhanced water style with waterBed.
+   */
+  waterDetail?: string;
+  /**
+   * Seamless RGBA8 tile of the open-water surface as the fixed isometric camera sees it (its x runs along the screen
+   * x axis, its y down the screen), any square size, repeated over every water level in screen-aligned ground space
+   * (one tile is waterSurfaceScale x waterSurfaceScale screen units of 30 engine px). Linear data, not colour:
+   * R = luminance ratio of the painted chop to its local mean / 2 (0.5 = neutral),
+   * G = sun-glint strength on wave crests (0..1),
+   * B = surf / foam lace mask (0..1),
+   * A = 1. Used only by the enhanced water style with waterBed.
+   */
+  waterSurface?: string;
+  /** Width of one waterSurface tile in screen units of 30 engine px (default 13). */
+  waterSurfaceScale?: number;
   /** How the files were made (source images, filter width), for review. */
   notes?: string;
 }
