@@ -612,6 +612,43 @@ JSON entries without writing through symlinks, preserves other tracks' data, and
 `sheet` compares original/L4/L5 with Chinese labels at the same cell anchor. Game art and all derived images stay
 outside Git; numerical tests do not establish renderer or visual acceptance.
 
+## Building redraw transfers (Python)
+
+`python/building_redraw.py xfer --library-root "$VARIANT" --theater urban --patches "$PATCHES" NAME[:i|:d|:mk]`
+transfers accepted idle redraws to animation, damaged and build-up frames (all three states when omitted);
+`xfer --delta` also keeps the redraw, shifted by the 1x palette colour change, on colour-cycling pixels whose
+silhouette does not move. `walls-xfer` accepts the same options followed by wall types and maps damaged frame `k` to
+piece `k % 16`. `dmg-xfer` (same options) takes `INTACT,DAMAGED` sprite pairs and details each damaged loop frame
+from the model-sheet patch of the same intact frame (sources starting with `sheet`) where the 1x indices match.
+`index-paint` (same options) takes sprites and re-encodes chromatic, unpainted texels over 1x palette indices 16-31
+as house paint on the grey ramp of the sprite's own palette ramp: the live renderer draws every building sprite with
+the owner's remap, while posting only keeps paint where the baseline remap page had it. `fix-hue [--hue 38] JOBDIR...`
+restores a fixed paint hue that an image model drifted to blue or violet in a sheet's `raw.png` (else `output.png`),
+keeping the first original as `*_prefix.png`.
+The transfers preserve model-owned patches, including patches without a `.src`; only sources starting with `xfer` may be
+overwritten. `xfer --parts <JSON file>` overrides reference parts with ordered `sprite:frame` lists keyed by `NAME`
+or `NAME:state`, including bibs and special idle layers. `python/theatre_pages.py xfer "$THEATRE" "$URBAN" "$BASELINE"
+--pages 0,1` fills missing HD entries from shared urban art (all theatre pages by default), symlinking identical pages
+and retaining baseline pixels for differing frames. `--refresh-owned` regenerates only entries whose colour filename
+contains `@2x-xfer-`, replacing unchanged owned entries and their matching material entries while leaving old files on disk.
+Mixed 1x/2x material blocks use nearest-neighbour resampling to the urban material scale at the target page index.
+Its `overlay-walls "$LIBRARY" TYPE...` redirects wall overlays
+to HD building frames; `normals-merge "$SRC" "$LIBRARY" "$SPRITES_FILE"` merges only the selected sprites' material
+rectangles, using a whitespace-separated sprite list and preserving incompatible existing layouts. `copy-patches SRC_LIB DST_LIB
+SRC_PATCHES DST_PATCHES` copies redraw patches to another theatre only where the frame's 1x indices, offset and used
+palette colours are identical (tech buildings share their art across theatres). `map-paste MAPDIR PATCHES SPRITE...`
+pastes library frame patches into a variant map cache's HD/remap atlas (map-placed objects draw from the map atlas),
+materialising symlinked atlases and changing only the matched frame rectangles (`sourceFrames` maps map frames to
+library frames). `map-copy-patches MAPDIR LIBRARY SRC_PATCHES DST_PATCHES [--tag TEXT]` is the reverse direction: it copies
+patches made for a map cache into a library patch set under the same identity test, because the live view draws every
+building that has a library type from the type library rather than the map atlas.
+`building_redraw.py coverage --library LIBRARY --patches PATCHES [--prefix GA,NA,...] [--out TSV]` reports, per
+building type, the frames the renderer actually plays (body, each layer's played range intact and damaged, build-up)
+as earlier records, L5 model patches, L5 transfers or baseline gaps. These tools use
+atomic JSON/PNG replacements and copy-on-write pages; all supplied libraries, baselines and patches stay outside Git.
+Run their asset-free acceptance from `packages/ra2-assets/python` with
+`python3 -B -m unittest test_building_redraw test_theatre_pages -v`.
+
 ## Level 3 building redraw sheets (Python, experimental)
 
 `python/l3_redraw.py` reuses the hybrid registration, checks and paint encoding for map caches and paged type

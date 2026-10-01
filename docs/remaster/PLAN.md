@@ -411,6 +411,42 @@ unchanged. The variant directory links other library files and merges only the s
 not visual acceptance. All game-derived inputs and outputs remain untracked. Asset-free regression:
 `cd packages/ra2-assets/python && python3 -B -m unittest test_infantry_sheets -v`.
 
+#### Building redraw asset tool
+
+`packages/ra2-assets/python/building_redraw.py` consolidates the buildings-v4 body, animation, build-up,
+patch composition and normal-assist workflow. It requires NumPy, Pillow and OpenCV and reuses
+`hybrid_redraw.py` and `redetail_sprites.py`. `--root` (or `HD_CACHE_DIR`) selects an HD cache containing
+`_library/<theater>/library.json`; `--theater` defaults to `urban`. All work, patches, references and variant
+pages are game-derived and must remain untracked. The tool prepares prompts but does not invoke an image model.
+
+```bash
+python3 -B packages/ra2-assets/python/building_redraw.py body --root "$HD_CACHE_DIR" --kind intact --specs "$SPECS" --work "$WORK" --style-dir "$STYLE" --sibling "$SIBLING" NAREFN
+python3 -B packages/ra2-assets/python/building_redraw.py post "$WORK/NAREFN_i" --root "$HD_CACHE_DIR"
+python3 -B packages/ra2-assets/python/building_redraw.py patches --root "$HD_CACHE_DIR" --work "$WORK" --patches "$PATCHES" NAREFN_i
+python3 -B packages/ra2-assets/python/building_redraw.py compose --library "$VARIANT" --patches "$PATCHES" --only building:NAREFN anim:NAREFN
+```
+
+Specs are a JSON object keyed by type name, each containing `name`, `design`, `details` (a string array),
+`keep`, `colours` and `style` (null or an image filename relative to `--style-dir`). Damaged jobs use the intact
+job's `output.png`. `--storage NAREFN,GAREFN` excludes storage-level ActiveAnimTwo–Four from idle composites.
+Post prefers `raw.png` over `output.png`; `--finish` accepts inline JSON or a JSON file of finish overrides.
+`anim make JOB BODYJOB SPRITE a-b COLS F "moving parts"` and `anim make_multi` (comma-separated
+`sprite:frame` cells) prepare coherent sheets; `buildup make NAME BODYJOB a-b COLS F [SUFFIX]` prepares
+construction sheets with no static body blend. Both take `--work`, `--root`, `--theater`, and optional `--specs`
+for display names in older layouts; their `post JOB...` commands also require `--patches`.
+
+`normals-job --work WORK JOB...` prepares `<JOB>_N`; `normals-assist --work WORK --out ASSISTDIR --root ROOT JOB...`
+registers normal renders for `sprite_normals.py --assist`. Optional `--extra` JSON maps source sprites to sibling
+sprite lists; no storage sibling map is implicit. `pack make PACKDIR --prompt PROMPTFILE [--max-width 2600]
+[--ref NAME=PATH] SUBJOBDIR...` batches equal-factor inputs with 48-pixel grey gaps, expanding `{n}` and `{cells}`
+from optional `cell.txt` descriptions. `pack split PACKDIR` resizes `raw.png` (else `output.png`) to the pack
+canvas and writes each sub-job's `output.png` and `packed_from.txt`.
+
+Compose holds `LIBDIR/.compose.lock` across page reads, atomic replacements and record updates; concurrent
+writers must use the same lock. Only selected frame rects change, symlink targets stay untouched, and
+`--record` defaults to `l4_frames_bldg.json`. Installation is not visual acceptance. Asset-free regression:
+`cd packages/ra2-assets/python && python3 -B -m unittest test_building_redraw -v`.
+
 #### Phase 4–7：资产规模化、环境、VFX、打磨
 
 - 规模化按阵营单位 → 战区 → 步兵 → 民用建筑 → 动画 → 图标的顺序分批，每批由你签字。
