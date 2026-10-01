@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { Color, Vector3 } from 'three/webgpu';
+import { uniform } from 'three/tsl';
+import { VolumetricBlastLayer } from '../src/volumetricBlasts';
 import { LiveView, type LiveSnapshot } from '../src/live/liveView';
 
 function pushView() {
@@ -26,8 +29,20 @@ function presentation(interpolating: boolean) {
   const library = { revision: 0 };
   const applyObjects = vi.fn();
   const applyEffects = vi.fn();
-  const hd = { seconds: () => 1, frame: vi.fn(), windowsWanted: () => false, materialsWanted: vi.fn(() => false) };
+  const hd = {
+    meanExposure: 2,
+    seconds: () => 1,
+    frame: vi.fn(),
+    windowsWanted: () => false,
+    materialsWanted: vi.fn(() => false),
+  };
+  const volumetricBlasts = new VolumetricBlastLayer({
+    light: uniform(new Color(1, 1, 1)),
+    sunDirection: uniform(new Vector3(0, 1, 0)),
+  });
+  const updateVolumes = vi.spyOn(volumetricBlasts, 'update');
   const view = Object.assign(Object.create(LiveView.prototype) as object, {
+    volumetricBlasts,
     current: { snapshot: { frame: 2 }, at: 10 },
     previous: { snapshot: { frame: 1 }, at: 0 },
     lastRender: 10,
@@ -42,7 +57,7 @@ function presentation(interpolating: boolean) {
     applyEffects,
     applyPainterOrder: vi.fn(),
   }) as unknown as LiveView;
-  return { view, art, library, applyObjects, applyEffects, hd };
+  return { view, art, library, applyObjects, applyEffects, hd, volumetricBlasts, updateVolumes };
 }
 
 describe('live presentation scheduling', () => {
@@ -191,6 +206,8 @@ describe('live presentation scheduling', () => {
     expect(p.applyEffects).toHaveBeenCalledTimes(1);
     expect(p.applyObjects).toHaveBeenCalledTimes(1);
     expect(p.hd.frame).toHaveBeenCalledTimes(144);
+    expect(p.updateVolumes).toHaveBeenCalledTimes(144);
+    expect(p.volumetricBlasts.displayScale.value).toBe(0.5);
     p.art.revision++;
     p.view.render(1100);
     p.view.render(1110);

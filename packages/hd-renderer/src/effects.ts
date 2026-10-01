@@ -69,7 +69,7 @@ const DOTS = 512;
 /** Enhanced garnish pools (live view, 'enhanced' effect style): glow halos, rolling smoke, debris, heat haze, dust. */
 const HALOS = 128;
 const BILLOWS = 1536;
-const DEBRIS = 1024;
+const DEBRIS = 1536;
 const SHIMMERS = 64;
 const DUST_RINGS = 64;
 /** Enhanced fireballs drawn over the native art, and the puffs of the smoke columns that outlive a blast. */
@@ -151,7 +151,8 @@ export const ENHANCED = {
     life: 0.4,
     intensity: 1.8,
     hdWidth: 0.9,
-    hdIntensity: 0.35,
+    // L5 volumetric redraws carry their own flash: a wide additive glow washed their soot into an orange haze.
+    hdIntensity: 0.12,
     hdCore: 0.6,
     rim: 0.25,
     cooling: 0.3,
@@ -196,7 +197,8 @@ export const ENHANCED = {
     catchup: 0.5,
   },
   /** Debris: chunks per blast; `rest` seconds on the ground, `glowLife` seconds cooling from core to rim temperature. */
-  debris: { count: 16, perScale: 28, rest: 8, glowLife: 1.1, rim: 0.65 },
+  // L5: denser and chunkier, like the target painting's blasts (dozens of dark fragments around every fireball).
+  debris: { count: 22, perScale: 40, size: 1.25, rest: 8, glowLife: 1.1, rim: 0.65 },
   /**
    * Billows keep forming over `spread` seconds after the first birth at `delay`. Across `lateFrom` seconds of puff
    * age, opacity smoothly reaches the `lateOpacity` multiplier and both radial silhouette edges move inward by
@@ -1111,14 +1113,26 @@ export class EffectsLayer {
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
         const d = length(p);
-        const lumps = texture(noise, p.mul(0.45).add(vec2(seed.mul(9.1), seed.mul(3.3)))).g;
-        const ring = smoothstep(0.55, 0.88, d.add(lumps.sub(0.5).mul(0.35))).mul(smoothstep(1.0, 0.88, d));
-        const haze = smoothstep(0.95, 0.3, d).mul(0.18);
-        const dustColour: ShaderNode = (color(0xa08e74) as ShaderNode).mul(this.sceneLight);
+        // Kicked-up soil, not a disc: a ragged front whose radius wobbles with direction (noise read along the unit
+        // circle), broken into clumps, with a thin trailing skirt. The earlier pale filled ellipse read as a flat
+        // grey decal beside the fireball.
+        const dir = p.div(max(d, 1e-3));
+        const offset = vec2(seed.mul(9.1), seed.mul(3.3));
+        const lumps = texture(noise, dir.mul(0.3).add(offset)).g;
+        const clumps = texture(noise, p.mul(0.9).add(offset.yx)).r;
+        const front = float(0.8).add(lumps.sub(0.5).mul(0.32));
+        const ring = smoothstep(front.sub(0.42), front.sub(0.04), d).mul(smoothstep(front.add(0.05), front.sub(0.02), d));
+        const broken = smoothstep(0.32, 0.62, clumps.add(lumps.sub(0.5).mul(0.5)));
+        const skirt = smoothstep(front, front.sub(0.6), d).mul(0.12);
+        // Dark, slightly warm soil; the inner skirt is scorched darker still.
+        const dustColour: ShaderNode = mix(color(0x3e342a), color(0x75644f), smoothstep(0.3, 0.75, d)).mul(
+          this.sceneLight,
+        );
         const alpha = ring
-          .add(haze)
-          .mul(pow(float(1).sub(t), 1.4))
-          .mul(0.7)
+          .mul(mix(float(0.35), float(1), broken))
+          .add(skirt)
+          .mul(pow(float(1).sub(t), 1.5))
+          .mul(0.62)
           .mul(t.lessThan(1).select(float(1), float(0)));
         return vec4(dustColour, alpha);
       })();
@@ -1458,7 +1472,7 @@ export class EffectsLayer {
         now,
         lifted,
         velocity,
-        (0.07 + Math.random() * 0.09 * Math.min(2, 0.6 + s)) * (big ? 1.6 : 1),
+        (0.07 + Math.random() * 0.09 * Math.min(2, 0.6 + s)) * (big ? 1.6 : 1) * e.debris.size,
         flight + e.debris.rest * (0.5 + Math.random()),
         Math.random() < 0.35 ? 1 : 0,
       );

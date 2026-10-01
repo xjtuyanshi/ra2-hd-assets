@@ -1,4 +1,5 @@
 import { BoxGeometry, Color, Group, Mesh, MeshStandardNodeMaterial, type Texture, Vector3 } from 'three/webgpu';
+import { uniform } from 'three/tsl';
 import { mapAtmosphere, medianHeight, sidecarAtmosphere } from '../../../ra2-assets/src/lights';
 import type { AtmosphereSettings } from '../atmosphere';
 import { HOUSE_COLORS, RENDER_STATE_VERSION, type RenderState, type Weather } from '../contract';
@@ -24,6 +25,8 @@ import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 import { loadRa2World, type HdWorld } from '../ra2/world';
 import { waterPreset, type WaterStyle } from '../ra2/waterLook';
 import { LEVEL_HEIGHT } from '../world';
+import { VolumetricBlastLayer, type VolumetricBlast } from '../volumetricBlasts';
+import { spriteLookFor } from '../ra2/spriteLook';
 import { EffectArt, type ResolvedAnim } from './effectArt';
 import { EffectSpriteLayer, animAlpha, type EffectInstance } from './effectSprites';
 import { LiveEffectsDriver, smokeOnVehicle, type EffectStyle, type LiveAnim, type LiveEffects } from './effects';
@@ -150,6 +153,8 @@ export interface LiveViewOptions extends VoxelUnitsOptions {
   effects?: EffectStyle;
   /** Optional RGBA flipbooks, enabled by default in enhanced style; false keeps native effect art. */
   effectsHd?: boolean;
+  /** Opt-in raymarched blasts in enhanced style; defaults to off. */
+  volumetricEffects?: 'off' | 'ray';
   /** Directory holding effects-hd.json (default: <libraryBase>/common/effects-hd). */
   effectsHdBase?: string;
   /** Water look (ra2/waterLook.ts): 'classic' (default) or the modern 'enhanced' water. */
@@ -168,6 +173,7 @@ export interface LiveDiagnostics {
   pendingTurrets: number;
   /** Effect cards drawn this frame (native or HD), anims in the list without art, and their types. */
   effectCards: number;
+  volumetricBlasts: number;
   effectsWithoutArt: number;
   effectTypesWithoutArt: string[];
   /** Measured logic frames per second. */
@@ -408,6 +414,8 @@ export class LiveView {
   private readonly cellPool = new SpritePool();
   private readonly cellInstances: CellSprite[] = [];
   private readonly effectInstances: EffectInstance[] = [];
+  private readonly volumeInstances: VolumetricBlast[] = [];
+  readonly volumetricBlasts: VolumetricBlastLayer;
   private readonly pose: Pose = { x: 0, y: 0, z: 0, facing: 0 };
   private readonly shpPose: ReturnType<typeof shpUnitPose> = { state: 'stand', step: 0 };
   private readonly hidden = (x: number, y: number, z: number): boolean => this.shroud.isLocationShrouded(x, y, z);
@@ -536,6 +544,12 @@ export class LiveView {
         )
       : null;
     if (this.effectSprites) this.root.add(this.effectSprites.root);
+    this.volumetricBlasts = new VolumetricBlastLayer({
+      light: this.effectSprites?.light ?? world.sprites?.light ?? uniform(new Color(1, 1, 1)),
+      sunDirection: spriteLookFor(hd.nodes).sunDirection,
+      displayScale: this.effectSprites?.displayScale,
+    });
+    this.root.add(this.volumetricBlasts.root);
     this.projectiles = this.effectArt
       ? new Projectiles(this.effectArt, this.voxelUnits, this.root, (owner) => this.unitPalette(owner))
       : null;
@@ -546,6 +560,7 @@ export class LiveView {
     );
     this.effectDriver.style = options.effects ?? 'faithful';
     this.effectDriver.hdEnabled = options.effectsHd !== false;
+    this.effectDriver.volumetric = options.volumetricEffects ?? 'off';
     this.effectDriver.hasHdArt = (type) => !!this.effectArt?.hdAnim(type);
     this.effectDriver.artWidth = (type) => {
       const w = this.effectArt?.anim(type)?.art.visW;
@@ -571,6 +586,7 @@ export class LiveView {
     this.root.add(this.cellLayer.mesh);
     this.shareSpriteUniforms(this.cellLayer);
     if (this.effectSprites) this.shareSpriteUniforms(this.effectSprites);
+    this.shareSpriteUniforms(this.volumetricBlasts);
     for (const object of cache.manifest.objects)
       if (object.kind === 'overlay' || object.kind === 'smudge') this.cellList(object.x, object.y).push(object);
     const cellTerrain = {
@@ -900,6 +916,13 @@ export class LiveView {
       this.effectSprites.now.value = this.hd.seconds();
       this.effectSprites.displayScale.value = 1 / Math.max(1e-3, this.hd.meanExposure);
     }
+    this.volumetricBlasts.displayScale.value = 1 / Math.max(1e-3, this.hd.meanExposure);
+    this.volumetricBlasts.update(
+      this.hd.seconds(),
+      this.volumetricBlasts.cameraRight.value,
+      this.volumetricBlasts.cameraUp.value,
+      this.volumetricBlasts.toCamera.value,
+    );
     this.hd.frame(dt);
   }
 
@@ -920,6 +943,7 @@ export class LiveView {
     this.uploadedSmudges.clear();
     for (const { layer } of this.pageLayers.values()) this.disposeOverlayLayer(layer);
     this.pageLayers.clear();
+    this.volumetricBlasts.dispose();
     this.library?.disposeMaterials();
     this.hd.dispose();
     this.visuals.clear();
@@ -946,6 +970,7 @@ export class LiveView {
       missingTurrets,
       pendingTurrets,
       effectCards: this.effectStats.drawn,
+      volumetricBlasts: this.volumetricBlasts.stats().count,
       effectsWithoutArt: this.effectStats.missing,
       effectTypesWithoutArt: [...this.effectDriver.unknownTypes].sort(),
       logicFps: Math.round(this.effectDriver.logicFps * 10) / 10,
@@ -1107,6 +1132,9 @@ export class LiveView {
     this.particlePool.begin();
     this.effectsDirty = true;
     this.effectStats = this.effectDriver.cards(this.effectArt, this.effectPalette, instances);
+    this.volumeInstances.length = 0;
+    this.effectDriver.volumes(this.effectArt, this.volumeInstances);
+    this.volumetricBlasts.setBlasts(this.volumeInstances);
     this.effectDriver.smokeCards(this.effectArt, instances);
     const effects = snapshot.effects;
     this.projectiles?.update(effects?.bullets ?? [], effects?.voxelAnims ?? [], this.hidden, instances);

@@ -721,6 +721,28 @@ position (index 16 to 31), and half the residual linear-light luminance ratio. C
 `build-index` indexes completed manifests whose atlases exist. Serve the output directory as `vehicles-hd/`
 under the HD cache root; see [renderer controls](../hd-renderer/README.md#projected-vehicle-redraws).
 
+## Volumetric explosion redraws (Python)
+
+`python/volumetric_explosions.py` redraws explosion anims as volumetric fireballs for the optional RGBA flipbooks
+(`effects-hd.json`, see `python/effect_flipbooks.py` for the sheet layout, matte and atlas format). `jobs` writes
+layout-locked sheets of the original frames (the DESIGN reference: position, size and phase of every frame), a
+style reference built from two crops of the approved target painting, and a prompt that asks for an irregular,
+layered fireball (white-hot core patches, yellow, orange, crimson, interleaved soot, chunky debris) on flat grey.
+Later chunks of one anim pass the previous chunk's `output.png` as `reference_previous.png`; the first chunk of other
+anims can take an approved sibling redraw (`--sibling`) so all blasts read as one family. Run the image model in each
+job directory so it saves `output.png`. `pack` cuts and mattes the finished sheets (for explosions, faint neutral haze
+in the native footprint stays transparent instead of becoming a grey outline), applies a light unsharp mask
+(`--sharpen`, default 0.8), falls back per frame to the base library, and patches only the packed anims of a variant
+`effects-hd.json` under a file lock (pages of the same `--tag` are replaced, every other anim keeps its pixels).
+
+```sh
+python3 -B packages/ra2-assets/python/volumetric_explosions.py jobs EXPLOLRG 0-8,9-20 --library "$LIB/common/effects" \
+  --jobs "$JOBS" --big "$TARGET_BIG" --small "$TARGET_SMALL"
+python3 -B packages/ra2-assets/python/volumetric_explosions.py pack EXPLOLRG,TWLT070 --library "$LIB/common/effects" \
+  --jobs "$JOBS" --hd "$VARIANT/_library/common/effects-hd" --base "$BASE/_library/common/effects-hd"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_volumetric_explosions.py'
+```
+
 ## Sprite material atlas (Python, experimental)
 
 `python/sprite_normals.py` writes the material atlas the renderer's opt-in enhanced look relights sprites with

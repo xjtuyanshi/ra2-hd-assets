@@ -31,6 +31,7 @@
  *   &native=1                 pass the bridge fields (exact anim frame) instead of relying on the fallback timing
  *   &garnish=0                the original art alone, without HD light, sparks or smoke
  *   &effects=enhanced         the enhanced effect style (LiveViewOptions.effects) instead of the faithful garnish
+ *   &fxvol=ray|off            raymarched 3D blasts in enhanced style (default off)
  *   &fxhd=0                  keep native effect frames even in enhanced style (disable optional HD flipbooks)
  *   &fxhdbase=<url>           directory holding effects-hd.json and its RGBA atlas pages
  *   &stagger=0.5              spawn the listed anims this many seconds apart instead of all at once
@@ -93,6 +94,7 @@ const live = await LiveView.create(canvas, {
   timeOfDay: Number(params.get('hours') ?? 12),
   effects: params.get('effects') === 'enhanced' ? 'enhanced' : 'faithful',
   effectsHd: params.get('fxhd') !== '0',
+  volumetricEffects: params.get('fxvol') === 'ray' ? 'ray' : 'off',
   effectsHdBase: params.get('fxhdbase') ?? undefined,
   water: params.get('water') === 'enhanced' ? 'enhanced' : 'classic',
 });

@@ -143,6 +143,18 @@ spawn. Keep the default warm-up for build-up timing. Combine with anims using `f
 `spread=<cells>` place and time the listed anims, `crater=1` emulates the engine's crater smudges, and
 `window.__fx.advance(ms)` steps the clock for frame-by-frame capture (header of `sandbox/fx.ts`).
 
+`src/volumetricBlasts.ts` adds opt-in procedural 3D fireballs with turbulent lobes, dark internal soot,
+a white flash and sun-lit rolling smoke. Use `effects=enhanced&fxvol=ray` in the bench,
+`LiveViewOptions.volumetricEffects = 'ray'`, or `hd-fx=enhanced&hd-fxvol=ray` in the development bridge.
+The default `off` retains the existing HD/native cards. The layer is exposed as `live.volumetricBlasts`;
+its public uniforms support runtime look review. Each blast uses one depth-tested card and at most 28 ray steps,
+with two main noise reads and one soot-pocket read per step; self-shadowing is analytic (sun side lit, far side and
+underside shaded, broken up by the large-scale noise) because extra density taps toward the sun tripled the step cost.
+In the L5 review (four blast types side by side with the redrawn flipbooks, at the target painting's scale) the
+procedural volume read as soft, cotton-like lobes without the crisp flame tongues, soot pockets and debris of the
+target, and 20 simultaneous blasts cost more GPU time than the flipbooks; it therefore stays an opt-in experiment and
+the redrawn flipbooks are the enhanced default.
+
 Set `HD_CACHE_DIR` (or its older alias `HD_CACHE`) to an absolute variant-cache root when starting the development
 sandbox to review L3 redraws; the default remains `gameres/hd-cache`. For example,
 `HD_CACHE_DIR="$OUT_ROOT" pnpm hd:sandbox --port 15215`.
@@ -191,7 +203,7 @@ sidecar the view falls back to land-type surfaces and no map light sources.
   The live view's opt-in `enhanced` effect style (`ENHANCED`) adds, around the engine's own anim: a boiling fireball
   over the native art for its duration (original fire colours), a longer light, sparks and landing debris, rolling
   smoke building over the first second and lingering for about five seconds, a smoke column rising for about thirteen
-  seconds after bigger blasts, heat shimmer, a dust ring, and around
+  seconds after bigger blasts, heat shimmer, a ragged ring of dark soil kicked out over the ground, and around
   craters a hot glow and charred ground that fades over most of a minute (the engine's crater smudge stays).
   Smoke opacity smoothly reaches a 0.62 multiplier over puff ages 1.2-3.0 seconds; column puffs reach 0.6 over
   1.5-4.0 seconds. The same age ramp shifts both radial silhouette edges inward by 0.15 in normalized radius
@@ -199,6 +211,13 @@ sidecar the view falls back to land-type surfaces and no map light sources.
   Optional HD flipbooks enlarge explosions, collapses and debris by 1.3 and impacts by 1.15 around the native draw
   point, with matching garnish footprints; other categories and native cards keep their size. Enhanced debris uses
   lit polygonal chunks, including a few larger, slower pieces, that rest on the ground for about eight seconds.
+  Redrawn HD frames are graded in the shader: flame pixels are self-lit and re-mapped through a temperature ramp with
+  a heat gamma (`HD_FX_GAMMA`), only the white-hot core gets a modest HDR gain for the bloom (`HD_FX_EMISSIVE`), the
+  anim's translucency fade is softened by separate smoke and flame exponents (`HD_FX_FADE`), and consecutive frames
+  crossfade only around mid-stage (`HD_FX_BLEND_WIDTH`), so chaotic flame does not read as a double exposure. The
+  matching `EffectSpriteLayer` uniforms (`hdHotGain`, `hdFireGamma`, `hdSmokeFade`, `hdFlameFade`, `hdBlendWidth`)
+  support look reviews. The L5 explosion flipbooks (`packages/ra2-assets/python/volumetric_explosions.py`) are drawn
+  as layered volumetric fireballs and rely on these values.
 - Post (`src/HdRenderer.ts`, `src/post.ts`): per-channel exposure, mist and the visibility (shroud) mask, bloom, the
   display transform, the night toe lift, anti-aliasing and sharpening; see HdSettings below.
 

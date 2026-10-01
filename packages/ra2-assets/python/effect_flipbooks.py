@@ -559,7 +559,13 @@ def matte(cell, region, wide, kind):
     neutral = smoothstep(0.22, 0.12, sat)
     lighter = smoothstep(0, 6, pixels.mean(axis=2) - bg.mean())
     a_min = np.clip(((bgl - Il) / np.maximum(bgl, 1e-6)).max(axis=2), 0, 1)
-    a_body = region * smoothstep(6, 24, dist) * OPAQUE[kind]
+    body = smoothstep(6, 24, dist)
+    if kind == "explosion":
+        # Faint neutral haze the image model paints around the flame inside the native footprint is background, not
+        # smoke: kept opaque it reads as a grey sticker outline in the scene. Neutral pixels need a clearer difference
+        # from the grey to count as body; saturated flame keeps the original ramp.
+        body = neutral * smoothstep(14, 42, dist) + (1 - neutral) * body
+    a_body = region * body * OPAQUE[kind]
     # Light rims around isolated dark fragments: neutral, lighter than the grey, next to a dark pixel, in a sparse
     # neighbourhood (inside dense smoke, light and dark lumps next to each other are real shading).
     dark = ((bg.mean() - pixels.mean(axis=2)) > 25).astype(np.uint8)

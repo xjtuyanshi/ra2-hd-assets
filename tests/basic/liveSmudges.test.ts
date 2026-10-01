@@ -13,6 +13,7 @@ import {
   type LiveSmudgeCells,
   type SmudgePage,
 } from '../../packages/hd-renderer/src/live/smudges';
+import { VolumetricBlastLayer } from '../../packages/hd-renderer/src/volumetricBlasts';
 import { LEVEL_HEIGHT } from '../../packages/hd-renderer/src/world';
 
 const frame = (page: number, n = 0): SpriteFrame => ({ rect: [n * 8, 0, 8, 8], offset: [-4, 0], page });
@@ -267,6 +268,7 @@ function presentation(withLibrary = true) {
     cellLayer,
     root: { add: vi.fn(), remove: vi.fn() },
     hd: {
+      meanExposure: 2,
       seconds: () => 1,
       frame: vi.fn(),
       windowsWanted: () => false,
@@ -275,6 +277,7 @@ function presentation(withLibrary = true) {
       renderer: { setAnimationLoop: vi.fn() },
     },
     effectDriver: { frame: vi.fn(), unknownTypes: new Set(), logicFps: 30 },
+    volumetricBlasts: new VolumetricBlastLayer({ light: cellLayer.light, sunDirection: cellLayer.toCamera }),
     effectStats: { drawn: 0, missing: 0 },
     cellsFromEngine: false,
     cellsDirty: true,
