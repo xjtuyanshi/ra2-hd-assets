@@ -41,7 +41,7 @@ import type { ShaderNode } from '../tsl';
 import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrade } from './mapLighting';
 import { voxelProjectionFor, type VoxelProjectionPart } from './voxelProjection';
 import { projectedVoxelColour } from './voxelProjectionNodes';
-import { spriteLookFor } from './spriteLook';
+import { highlightRoughness, poweredOcclusion, spriteLookFor, type SpriteLookState } from './spriteLook';
 
 /**
  * Voxel shading the way the engine does it (YR 1.001). Before drawing a voxel unit, TechnoClass (@0x706F4D) has
@@ -216,6 +216,7 @@ class VoxelLightingModel extends PhysicalLightingModel {
     private readonly raw: ShaderNode,
     private readonly matp: ShaderNode,
     private readonly state: VoxelLightingState,
+    private readonly look: SpriteLookState,
   ) {
     super();
   }
@@ -227,15 +228,23 @@ class VoxelLightingModel extends PhysicalLightingModel {
   }: Parameters<PhysicalLightingModel['direct']>[0]): void {
     const live: ShaderNode = float(1).sub(step(0.5, this.state.voxelDebug));
     const dotNL: ShaderNode = (normalView as ShaderNode).dot(l).clamp();
-    const irradiance: ShaderNode = dotNL.mul(lightColor);
+    const irradiance: ShaderNode = dotNL.mul(lightColor).mul(this.look.sunGain);
     (reflectedLight.directDiffuse as ShaderNode).addAssign(
       irradiance.mul(BRDF_Lambert({ diffuseColor: (diffuseColor as ShaderNode).rgb })),
     );
     const f0: ShaderNode = mix(vec3(0.04), this.raw, this.matp.y);
     const specular: ShaderNode = irradiance
-      .mul(BRDF_GGX({ lightDirection: l, f0, f90: 1, roughness } as never))
+      .mul(
+        BRDF_GGX({
+          lightDirection: l,
+          f0,
+          f90: 1,
+          roughness: highlightRoughness(roughness, this.look.specularSize),
+        } as never),
+      )
       .mul(this.matp.z)
       .mul(this.state.voxelSheen)
+      .mul(this.look.specularSize.mul(this.look.specularSize))
       .mul(live);
     (reflectedLight.directSpecular as ShaderNode).addAssign(min(specular, vec3(this.state.voxelSheenCap)));
   }
@@ -248,8 +257,9 @@ class VoxelMaterial extends MeshStandardNodeMaterial {
   raw!: ShaderNode;
   matp!: ShaderNode;
   state!: VoxelLightingState;
+  look!: SpriteLookState;
   override setupLightingModel(): PhysicalLightingModel {
-    return new VoxelLightingModel(this.raw, this.matp, this.state);
+    return new VoxelLightingModel(this.raw, this.matp, this.state, this.look);
   }
 }
 
@@ -319,13 +329,14 @@ function createMaterial(
   const { voxelFill, voxelDebug, voxelExtraLight, voxelOcclusion, voxelSunDiffuse, lightDirection } = state;
   const material = new VoxelMaterial();
   material.state = state;
+  const look = (material.look = spriteLookFor(nodes));
   nodes.own(material);
   nodes.own(lut);
   material.name = sections ? 'voxel-vpl' : 'voxel-fallback';
   if (projection) material.name += '-projected';
   const rows = sections + 2;
   const occlusion: ShaderNode = attribute('occlusion', 'float');
-  const ao: ShaderNode = float(1).sub(occlusion.mul(voxelOcclusion));
+  const ao: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(voxelOcclusion)), look.aoPower);
   const pindex: ShaderNode = attribute('pindex', 'float');
   const u: ShaderNode = pindex.add(0.5).div(256);
   const row = (r: ShaderNode | number): ShaderNode => texture(lut, vec2(u, float(r).add(0.5).div(rows))).rgb;
@@ -377,10 +388,11 @@ function createMaterial(
       voxelProjectionFor(nodes),
       (index) => sRGBTransferEOTF(texture(lut, vec2(index.add(0.5).div(256), (sections + 0.5) / rows)).rgb),
       lightDirection,
-      spriteLookFor(nodes).sunDirection,
+      look.sunDirection,
+      look,
     );
     const projState = voxelProjectionFor(nodes);
-    const formAo: ShaderNode = float(1).sub(occlusion.mul(projState.formAO.clamp()));
+    const formAo: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(projState.formAO.clamp())), look.aoPower);
     const colour: ShaderNode = srgbScale(projected.colour, level.div(projState.levelRef.max(0.01))).mul(formAo);
     const projectedShade: ShaderNode = mix(moonlit(colour, nodes), colour, projected.paint)
       .mul(voxelFill)

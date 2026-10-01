@@ -171,7 +171,7 @@ export async function loadRa2World(
         );
         geometries.set(cacheKey, parts);
       }
-      const { root: vehicle } = instantiateVoxel(parts, voxelMaterial);
+      const { root: vehicle } = instantiateVoxel(parts, voxelMaterial, nodes);
       vehicle.position.copy(anchor);
       vehicle.position.y = Math.max(anchor.y, terrain.heightAt(anchor.x, anchor.z));
       // Engine facing 0 = north (world -z), clockwise; the model's nose is local +x.

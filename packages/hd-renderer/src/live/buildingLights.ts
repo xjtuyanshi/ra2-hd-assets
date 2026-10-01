@@ -1,6 +1,6 @@
 import { Vector3 } from 'three/webgpu';
 import type { BeamSpec } from '../effects';
-import type { SourceSpec } from '../lightField';
+import { SHAPE_LINEAR, SHAPE_POOL, type SourceSpec } from '../lightField';
 import { foundationPointPush } from '../ra2/cardDepth';
 import { LEVEL_HEIGHT } from '../world';
 import type { LiveObject } from './liveView';
@@ -20,22 +20,32 @@ export interface BuildingLightSpec {
   hole: boolean;
   damaged: number;
   arcs: number;
+  /** Ground falloff: 'wide' reaches beyond a large hole (SHAPE_LINEAR), 'pool' is the compact fire pool. */
+  falloff?: 'wide' | 'pool';
 }
 
 export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
   // Soviet Tesla reactor: the active NAPOWR_A orb, with the foundation excluded from its blue pool.
   NAPOWR: [
     {
-      at: [0.5, 0.5],
-      height: 44,
-      colour: [0.35, 0.75, 2.6],
-      radius: 3.6,
+      // The orb hangs a little right of and behind the foundation centre (XMP29U2 bench at zoom 2: the head lands on
+      // the orb's centre with at [0.57, 0.40] and 29 px); the pool around it is too small to notice the offset.
+      at: [0.57, 0.4],
+      height: 29,
+      // Strong enough to read on dark asphalt in full sun (the target's blue pool); the concrete pad around a base
+      // takes about twice the asphalt's share and still stays below white.
+      colour: [0.3, 1.0, 12],
+      radius: 4.5,
       flicker: 0.3,
-      glow: [0.9, 1.6, 4.0],
-      glowSize: 1.5,
+      // A head about the orb's own size: a wider quad hazed the left tower white-blue.
+      glow: [0.5, 1.2, 4.0],
+      glowSize: 0.9,
       hole: true,
       damaged: 0.6,
       arcs: 3,
+      // Compact pool measured from the foundation's edge (see LightField holes): a linear falloff from the centre
+      // washed the concrete three cells away lavender.
+      falloff: 'pool',
     },
   ],
 };
@@ -79,6 +89,7 @@ export function buildingLightPlacements(
       flicker: spec.flicker,
       glow: spec.glow,
       glowSize: spec.glowSize,
+      shape: spec.falloff === 'wide' ? SHAPE_LINEAR : SHAPE_POOL,
       hole: spec.hole ? [w / 2, h / 2] : undefined,
       holeOffset: spec.hole ? [w / 2 - lx, h / 2 - lz] : undefined,
       // Clear the owner's facade depth without moving the head on screen (fixed orthographic camera).
@@ -127,6 +138,9 @@ export function buildingLightSources(
   return out;
 }
 
+/** Radius of the NAPOWR orb in world units (about 17 engine px at the bench's zoom). */
+const ORB_RADIUS = 0.28;
+
 /** Short decorative arcs, stable for pairs of logic frames; they never spawn impact flashes or particles. */
 export function buildingLightArcs(lights: readonly BuildingLightPlacement[], frame: number): BeamSpec[] {
   const out: BeamSpec[] = [];
@@ -141,20 +155,23 @@ export function buildingLightArcs(lights: readonly BuildingLightPlacement[], fra
         return state / 4294967296;
       };
       const angle = random() * Math.PI * 2;
-      const down = -0.15 - 0.5 * random();
+      // Arcs leave the orb's surface (not its centre, which drew a net of lines across the glass) in every direction
+      // but straight up, and strike the pad, the towers or the air around it.
+      const down = -0.55 + 0.8 * random();
       const horizontal = Math.sqrt(1 - down * down);
-      const distance = 0.5 + 0.6 * random();
+      const distance = 0.35 + 0.5 * random();
+      const dir = new Vector3(Math.cos(angle) * horizontal, down, Math.sin(angle) * horizontal);
       const from = light.headPosition.clone();
       // Match the glow's depth pull; shifting along the view direction preserves its screen position.
       const push = light.push ?? 0;
       from.add(new Vector3(Math.sqrt(3 / 8), 0.5, Math.sqrt(3 / 8)).multiplyScalar(push));
-      const to = from
-        .clone()
-        .add(new Vector3(Math.cos(angle) * horizontal, down, Math.sin(angle) * horizontal).multiplyScalar(distance));
+      from.addScaledVector(dir, ORB_RADIUS);
+      const to = from.clone().addScaledVector(dir, distance);
       out.push({
         from,
         to,
-        colour: new Vector3(Math.pow(82 / 255, 2.2), Math.pow(80 / 255, 2.2), 1),
+        // Brighter than the weapon bolt's palette blue so the white-hot core reads in daylight next to the orb.
+        colour: new Vector3(0.16, 0.2, 1.6),
         bolt: true,
         seed,
         flash: false,

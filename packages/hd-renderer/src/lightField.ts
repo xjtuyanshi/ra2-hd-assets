@@ -30,6 +30,7 @@ import {
   positionWorld,
   select,
   smoothstep,
+  clamp,
   texture,
   time,
   uniform,
@@ -71,6 +72,8 @@ export interface SourceSpec extends Omit<LightEntry, 'shape'> {
   glow?: readonly [number, number, number] | null;
   glowSize?: number;
   push?: number;
+  /** Falloff of the ground pool (default SHAPE_POOL, the compact fire pool; SHAPE_LINEAR reaches further out). */
+  shape?: typeof SHAPE_LINEAR | typeof SHAPE_POOL;
 }
 
 interface Source extends Kept {
@@ -258,16 +261,20 @@ export class LightField {
     const holeOffset: ShaderNode = instancedBufferAttribute(aHoleOffset, 'vec2');
     material.positionNode = vec3(p.xy.add(positionGeometry.xy.mul(p.z.mul(2))), 0);
     material.colorNode = Fn(() => {
-      const d = length(uv().sub(0.5).mul(2));
+      const local = uv().sub(0.5).mul(p.z.mul(2)).sub(holeOffset);
+      const border = max(abs(local.x).sub(extra.y), abs(local.y).sub(extra.z));
+      const holed = extra.y.greaterThan(0).and(extra.z.greaterThan(0));
+      // A light with a hole (a building's own source) falls off from the hole's edge rather than from its centre, so
+      // the pool hugs the foundation outline instead of washing the open ground far beyond a large foundation.
+      const range = max(p.z.sub(max(extra.y, extra.z)), 0.25);
+      const d = select(holed, clamp(max(border, 0).div(range), 0, 1), length(uv().sub(0.5).mul(2)));
       const linear = max(float(1).sub(d), 0);
       const window = max(float(1).sub(d.mul(d)), 0);
       const pool = window.mul(window).div(float(1).add(d.mul(d).mul(10)));
       const shape = select(p.w.greaterThan(0.5), pool, linear);
       const flicker = float(1).add(c.w.mul(mx_noise_float(vec2(time.mul(9).add(seed.mul(17.3)), seed.mul(3.1)))));
-      const local = uv().sub(0.5).mul(p.z.mul(2)).sub(holeOffset);
-      const border = max(abs(local.x).sub(extra.y), abs(local.y).sub(extra.z));
       // No hole is exactly one, preserving all legacy fire, pulse and lamp colours.
-      const hole = select(extra.y.greaterThan(0).and(extra.z.greaterThan(0)), smoothstep(0, 0.25, border), float(1));
+      const hole = select(holed, smoothstep(0, 0.25, border), float(1));
       return vec4(c.rgb.mul(shape).mul(flicker.max(0)).mul(gain).div(this.encodeScale).mul(hole), 1);
     })();
     const mesh = new InstancedMesh(new PlaneGeometry(1, 1), material, capacity);
@@ -492,7 +499,7 @@ export class LightField {
         source.x,
         source.z,
         source.radius,
-        SHAPE_POOL,
+        source.spec.shape ?? SHAPE_POOL,
         source.colour,
         LightField.sourceIntensity(source, now),
         0,

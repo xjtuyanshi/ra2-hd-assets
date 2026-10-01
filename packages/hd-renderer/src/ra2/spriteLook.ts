@@ -1,5 +1,7 @@
 import { Color, Texture, Vector3, Vector4, type Object3D } from 'three/webgpu';
 import {
+  Fn,
+  If,
   abs,
   clamp,
   dot,
@@ -59,6 +61,24 @@ export const ART_REFERENCE_HOUR = 15;
 /** Relight factors are clamped to this range so no face turns black or blows out. */
 const FACTOR_RANGE = [0.3, 2.4] as const;
 
+/** The sun gain may lift faces above the original relight ceiling, but never lowers that ceiling. */
+export function relightFactorUpper(sunGain: number): number {
+  return FACTOR_RANGE[1] * Math.max(1, sunGain);
+}
+
+/** Maximum sun-following stretch at neutral shadowLength, relative to the art's own shadow (readability). */
+export const MAX_SHADOW_STRETCH = 2;
+
+/** Sun-elevation stretch with the original floor/cap; shadowLength scales both the result and its cap. */
+export function shadowStretch(keyElevation: number, shadowLength = 1): number {
+  const elevation = (Math.max(12, keyElevation) * Math.PI) / 180;
+  const stretch = Math.min(
+    MAX_SHADOW_STRETCH,
+    Math.max(0.75, Math.tan((ART_LIGHT_ELEVATION * Math.PI) / 180) / Math.tan(elevation)),
+  );
+  return shadowLength === 1 ? stretch : stretch * shadowLength;
+}
+
 /** Per-renderer uniforms of the enhanced sprite look (see spriteLookFor). HdRenderer sets them every frame. */
 export class SpriteLookState {
   /** 0 = faithful (the enhanced branch is skipped entirely), 1 = on. */
@@ -71,6 +91,14 @@ export class SpriteLookState {
   readonly glass = uniform(0);
   /** Baked occlusion of the material atlas and ground contact decals. */
   readonly occlusion = uniform(0);
+  readonly sunGain = uniform(1);
+  readonly factorUpper = uniform(FACTOR_RANGE[1]);
+  readonly specularSize = uniform(1);
+  readonly aoPower = uniform(1);
+  readonly contactShade = uniform(1);
+  /** CPU-side stretch input; the resulting SHP transform is uploaded through shadowMatrix. */
+  readonly shadowLength = uniform(1);
+  readonly shadowDarkness = uniform(1);
   /** SHP shadow decals follow the sun: 0 = the art's own shadows, 1 = fully turned and stretched. */
   readonly shadowFollow = uniform(0);
   /** Penumbra growth of those shadows with distance from their object (0 = the art's crisp shadow). */
@@ -160,7 +188,34 @@ export function relightFactor(n: ShaderNode, state: SpriteLookState): ShaderNode
     state.artSunWeight,
     state.artSkyWeight,
   );
-  return clamp(now.div(max(art, 1e-3)), FACTOR_RANGE[0], FACTOR_RANGE[1]);
+  return clamp(now.div(max(art, 1e-3)), FACTOR_RANGE[0], state.factorUpper);
+}
+
+/** Preserve the original value at power 1; an explicit variable avoids TSL select's shared-expression branches. */
+export function poweredOcclusion(ao: ShaderNode, power: ShaderNode): ShaderNode {
+  return Fn(() => {
+    const value: ShaderNode = ao.toVar();
+    If(power.notEqual(1), () => value.assign(pow(value, power)));
+    return value;
+  })();
+}
+
+/** Broaden a GGX lobe without clamping or recomputing its original roughness at size 1. */
+export function highlightRoughness(roughness: ShaderNode, size: ShaderNode): ShaderNode {
+  return Fn(() => {
+    const value: ShaderNode = roughness.toVar();
+    If(size.notEqual(1), () => value.assign(min(value.mul(size), 0.9)));
+    return value;
+  })();
+}
+
+/** Width of a power lobe, preserving its literal exponent at neutral width. */
+export function highlightExponent(exponent: number, width: ShaderNode): ShaderNode {
+  return Fn(() => {
+    const value: ShaderNode = float(exponent).toVar();
+    If(width.notEqual(1), () => value.assign(float(exponent).div(max(width, 1e-6))));
+    return value;
+  })();
 }
 
 /** Roughness of a specular class (glass 1 -> 0.12, facade -> 0.62), glossier when wet. */
@@ -248,10 +303,12 @@ export function glassReflection(
   const sky: ShaderNode = gradient.div(reference).mul(luminance(state.skyLight)).mul(streaks).mul(tinted).mul(0.75);
   const alignment: ShaderNode = max(dot(r, l), 0);
   // A glint (the sun's disc blurred by the panes' waviness) over a faint halo; both vanish as the sun sets.
-  const glint: ShaderNode = pow(alignment, 400)
+  // Glass keeps a tight lobe: sqrt(size) roughness corresponds to size in the inverse-power lobe width.
+  const glint: ShaderNode = pow(alignment, highlightExponent(400, state.specularSize))
     .mul(0.7)
-    .add(pow(alignment, 60).mul(0.02))
-    .mul(max(l.y, 0).mul(4).min(1));
+    .add(pow(alignment, highlightExponent(60, state.specularSize)).mul(0.02))
+    .mul(max(l.y, 0).mul(4).min(1))
+    .mul(state.specularSize.mul(state.specularSize));
   return { sky, glint };
 }
 

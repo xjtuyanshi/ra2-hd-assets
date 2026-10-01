@@ -43,11 +43,16 @@ function disposeMeshes(root: Mesh['parent']) {
 }
 
 describe('building light policy', () => {
-  it('places the orb at the foundation centre, above the snapshot ground height, with a full foundation hole', () => {
+  it('places the orb near the foundation centre, above the snapshot ground height, with a full foundation hole', () => {
     const light = buildingLightPlacements('NAPOWR', reactor, [3, 2])[0]!;
-    expect(light).toMatchObject({ x: 6.5, z: 8, hole: [1.5, 1], holeOffset: [0, 0], key: 'building:42:0' });
+    expect(light).toMatchObject({ hole: [1.5, 1], key: 'building:42:0' });
+    expect(light.x).toBeCloseTo(5 + 0.57 * 3);
+    expect(light.z).toBeCloseTo(7 + 0.4 * 2);
+    // The hole stays on the foundation centre (6.5, 8) although the orb sits off it.
+    expect(light.x + light.holeOffset![0]).toBeCloseTo(6.5);
+    expect(light.z + light.holeOffset![1]).toBeCloseTo(8);
     expect(light.groundY).toBeCloseTo(2 * LEVEL_HEIGHT);
-    expect(light.head).toBeCloseTo((44 / 15) * LEVEL_HEIGHT);
+    expect(light.head).toBeCloseTo((29 / 15) * LEVEL_HEIGHT);
     expect(light.headPosition.toArray()).toEqual([light.x, light.groundY + light.head!, light.z]);
     expect(buildingLightPlacements('UNKNOWN', reactor, [3, 2])).toEqual([]);
   });
@@ -100,7 +105,9 @@ describe('building light policy', () => {
       expect(damaged.colour[c]).toBeCloseTo(normal.colour[c]! * 2 * 0.6);
       expect(damaged.glow![c]).toBeCloseTo(normal.glow![c]! * 2 * 0.6);
     }
-    expect(select([{ ...reactor, health: 0.9, buildingDamaged: true }])[0]!.colour[2]).toBeCloseTo(2.6 * 0.6);
+    expect(select([{ ...reactor, health: 0.9, buildingDamaged: true }])[0]!.colour[2]).toBeCloseTo(
+      BUILDING_LIGHTS.NAPOWR![0]!.colour[2] * 0.6,
+    );
   });
 
   it('refreshes in the live presentation and clears the enhanced layer on a faithful switch', () => {
@@ -133,7 +140,7 @@ describe('building light policy', () => {
 });
 
 describe('decorative source arcs', () => {
-  it('is deterministic, stable for two logic frames and within the short downward reach', () => {
+  it('is deterministic, stable for two logic frames and within the short reach from the orb surface', () => {
     const lights = select();
     const first = buildingLightArcs(lights, 10);
     expect(first).toHaveLength(3);
@@ -145,9 +152,10 @@ describe('decorative source arcs', () => {
     for (const beam of first) {
       expect(beam.bolt).toBe(true);
       expect(beam.flash).toBe(false);
-      expect(beam.to.distanceTo(beam.from)).toBeGreaterThanOrEqual(0.5);
-      expect(beam.to.distanceTo(beam.from)).toBeLessThanOrEqual(1.1);
-      expect(beam.to.y).toBeLessThan(beam.from.y);
+      expect(beam.to.distanceTo(beam.from)).toBeGreaterThanOrEqual(0.35);
+      expect(beam.to.distanceTo(beam.from)).toBeLessThanOrEqual(0.85);
+      // Never straight up: at most a shallow upward slant.
+      expect(beam.to.y - beam.from.y).toBeLessThanOrEqual(0.25 * beam.to.distanceTo(beam.from) + 1e-9);
     }
   });
 

@@ -22,6 +22,7 @@ import {
 } from 'three/tsl';
 import type { ShaderNode } from '../tsl';
 import type { VoxelProjectionPart, VoxelProjectionState } from './voxelProjection';
+import { highlightExponent, type SpriteLookState } from './spriteLook';
 
 /** Exactly four atlas samples, independent of instance count. Positions and yaw follow the complete mesh matrix. */
 export function projectedVoxelColour(
@@ -30,6 +31,7 @@ export function projectedVoxelColour(
   rawPalette: (index: ShaderNode) => ShaderNode,
   referenceLight: ShaderNode,
   currentLight: ShaderNode,
+  look: SpriteLookState,
 ): { colour: ShaderNode; coverage: ShaderNode; paint: ShaderNode } {
   const { manifest, spec } = part;
   const axis: ShaderNode = modelWorldMatrix.mul(vec4(1, 0, 0, 0)).xyz;
@@ -84,6 +86,7 @@ export function projectedVoxelColour(
   const paintWeight: ShaderNode = ma.add(mb);
   const mask: ShaderNode = paintWeight.div(max(coverage, 1e-5));
   const n: ShaderNode = normalWorld;
+  const highlightGain: ShaderNode = look.specularSize.mul(look.specularSize);
   if (manifest.house) {
     const ramp: ShaderNode = a.paint.gb.mul(ma).add(b.paint.gb.mul(mb)).div(max(paintWeight, 1e-5));
     const index: ShaderNode = ramp.x.mul(15).add(16);
@@ -93,29 +96,47 @@ export function projectedVoxelColour(
     // sticker next to the shaded redraw. Give it form from the mesh: Lambert against the current sun, normalised to
     // 1 at a typical lit face (n.l = 0.65), plus a Blinn-Phong glint toward the fixed iso camera.
     const lambert: ShaderNode = max(n.dot(currentLight), 0);
-    const shade: ShaderNode = lambert.mul(0.75).add(0.35).div(0.35 + 0.75 * 0.65);
+    const shade: ShaderNode = lambert
+      .mul(0.75)
+      .mul(look.sunGain)
+      .add(0.35)
+      .div(0.35 + 0.75 * 0.65);
     const view: ShaderNode = cameraWorldMatrix.mul(vec4(0, 0, 1, 0)).xyz.normalize();
-    const glint: ShaderNode = pow(max(n.dot(currentLight.add(view).normalize()), 0), 28).mul(state.paintSpec.max(0));
+    const glint: ShaderNode = pow(
+      max(n.dot(currentLight.add(view).normalize()), 0),
+      highlightExponent(28, highlightGain),
+    )
+      .mul(state.paintSpec.max(0))
+      .mul(highlightGain);
     house = house.mul(mix(1, shade, state.paintShade.clamp())).add(glint);
     colour = mix(colour, house, mask);
   }
   // Form light from the smooth mesh on the whole redraw (house paint already has its own shade above).
   const lit: ShaderNode = max(n.dot(currentLight), 0);
-  const form: ShaderNode = lit.mul(0.8).add(0.3).div(0.3 + 0.8 * 0.65);
+  const form: ShaderNode = lit
+    .mul(0.8)
+    .mul(look.sunGain)
+    .add(0.3)
+    .div(0.3 + 0.8 * 0.65);
   colour = colour.mul(mix(1, form, state.formShade.clamp().mul(float(1).sub(mask))));
-  const luma: ShaderNode = colour.dot(vec3(0.2126, 0.7152, 0.0722)).max(1e-4).toVar();
+  const luma: ShaderNode = colour
+    .dot(vec3(0.2126, 0.7152, 0.0722))
+    .max(1e-4)
+    .toVar();
   // Shadows take the full power, highlights about a third of it: the redraws are bright, and a symmetric power
   // pushed light hulls to clipped white; the glint below supplies the bright edges instead.
   const power: ShaderNode = state.contrast.sub(1).mul(mix(1, 0.35, step(0.18, luma)));
   colour = colour.mul(pow(luma.div(0.18), power));
   const eye: ShaderNode = cameraWorldMatrix.mul(vec4(0, 0, 1, 0)).xyz.normalize();
-  const sheen: ShaderNode = pow(max(n.dot(currentLight.add(eye).normalize()), 0), 24)
+  const sheen: ShaderNode = pow(max(n.dot(currentLight.add(eye).normalize()), 0), highlightExponent(24, highlightGain))
     .mul(smoothstep(0.03, 0.35, luma))
     .mul(step(1e-4, lit))
-    .mul(state.spec.max(0));
+    .mul(state.spec.max(0))
+    .mul(highlightGain);
   colour = colour.add(vec3(1, 0.97, 0.92).mul(sheen));
   const ratio: ShaderNode = max(n.dot(currentLight), 0)
     .mul(0.4)
+    .mul(look.sunGain)
     .add(0.6)
     .div(max(n.dot(referenceLight), 0).mul(0.4).add(0.6));
   const grey: ShaderNode = colour.dot(vec3(0.2126, 0.7152, 0.0722));
