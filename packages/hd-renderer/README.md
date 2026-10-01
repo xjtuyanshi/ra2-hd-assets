@@ -211,6 +211,8 @@ sidecar the view falls back to land-type surfaces and no map light sources.
   Optional HD flipbooks enlarge explosions, collapses and debris by 1.3 and impacts by 1.15 around the native draw
   point, with matching garnish footprints; other categories and native cards keep their size. Enhanced debris uses
   lit polygonal chunks, including a few larger, slower pieces, that rest on the ground for about eight seconds.
+  Blasts within 2.5 cells and 2.5 seconds of each other (a building collapse) share one debris and smoke-puff
+  budget (`BLAST_CROWD` in `src/effects.ts`); a lone blast never reaches it.
   Redrawn HD frames are graded in the shader: flame pixels are self-lit and re-mapped through a temperature ramp with
   a heat gamma (`HD_FX_GAMMA`), only the white-hot core gets a modest HDR gain for the bloom (`HD_FX_EMISSIVE`), the
   anim's translucency fade is softened by separate smoke and flame exponents (`HD_FX_FADE`), and consecutive frames
@@ -309,8 +311,11 @@ the refinery furnace) is summed as luminance in the field's alpha channel (plain
 every other light writes zero, which leaves colour and all other consumers unchanged). Upright building sprites take
 that share at their own foundation's interior (the pixel's ground projection clamped 0.35 cells inside it) instead of
 at the ground in front of the art that their pixels otherwise sample (`objectLightAt` in `src/atmosphere.ts`): the
-owner's hole keeps its facades and the orb glass unwashed, while the ground, pads, units and neighbouring buildings
-take the pool. Decorative arc colour, reach and the crawling share are `ARC_STYLE` in `buildingLights.ts`.
+owner's hole keeps its facades and the orb glass unwashed, while the ground, pads and units take the pool and
+neighbouring buildings take `NEIGHBOUR_GROUND_SHARE` of it. In live matches a source light's gain falls with the square
+of the engine's own weighted cell light at the source (`lampLitGain`): map lamp dummies such as INGALITE brighten cells
+by up to about 50 % by day, and a full pool on top clipped into a white veil. Decorative arc colour, reach and the
+crawling share are `ARC_STYLE` in `buildingLights.ts`.
 
 `packages/ra2-assets/python/look_metrics.py` compares renders of one bench framing with the approved targets (L*
 percentiles, local contrast at pixel and mid scale, sun/shade separation, highlight and deep-shade shares, chroma;
