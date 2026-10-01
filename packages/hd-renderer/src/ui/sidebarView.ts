@@ -57,6 +57,11 @@ export const UI_FONT =
 export const NUM_FONT = '"DIN Alternate","Bahnschrift","Roboto Condensed","Arial Narrow",' + UI_FONT;
 const ACCENTS = ['#4a9dff', '#e0402f', '#b45cff'];
 const accentOf = (side: number) => ACCENTS[side] ?? '#9aa4b2';
+// The native progress clock washes the unbuilt part 50% toward a colour from the side's sidebar palette. Mean-colour
+// regression on frozen YR 1.001 pairs (original cameo vs native frame, covered sector only): Allied ~(64,173,238),
+// Soviet ~(244,225,112), Yuri ~(241,222,113) - Yuri shares the Soviet sidebar art and palette.
+const CLOCK_WASHES = ['rgba(64,173,238,0.5)', 'rgba(243,224,111,0.5)', 'rgba(243,224,111,0.5)'];
+export const clockWashOf = (side: number) => CLOCK_WASHES[side] ?? 'rgba(243,224,111,0.5)';
 const valid = (r: Rect) => r.width > 0 && r.height > 0;
 
 function without(rect: Rect, hole: Rect): Rect[] {
@@ -73,12 +78,21 @@ function without(rect: Rect, hole: Rect): Rect[] {
   ].filter(valid);
 }
 
+const inflate = (r: Rect, by: number): Rect => ({
+  x: r.x - by,
+  y: r.y - by,
+  width: r.width + 2 * by,
+  height: r.height + 2 * by,
+});
+
 export function transparentRects(sidebar: Sidebar, assets: UiAssets): Rect[] {
   const l = sidebar.layout;
   const tooltip = sidebar.tooltip ? [sidebar.tooltip.rect] : [];
   if (assets.chrome(sidebar.side)) {
     return [
-      ...(sidebar.radarActive ? without(l.sidebar, l.radar) : [l.sidebar]),
+      // The native radar strokes the map outline one row outside its aperture (YR 1.001: yellow rows at aperture
+      // y-1 and y+height in a live pair), so the hole is padded by one frame pixel to keep that outline visible.
+      ...(sidebar.radarActive ? without(l.sidebar, inflate(l.radar, 1)) : [l.sidebar]),
       ...(l.commandBar ? [l.commandBar] : []),
       ...tooltip,
     ].filter(valid);
@@ -331,7 +345,8 @@ export function drawSidebar(
         ctx.moveTo(cx, cy);
         ctx.arc(cx, cy, radius, angle, Math.PI * 1.5);
         ctx.closePath();
-        ctx.fillStyle = 'rgba(0,0,0,0.58)';
+        // A building cameo reads brighter than the dimmed unavailable ones, as in the native strip.
+        ctx.fillStyle = clockWashOf(sidebar.side);
         ctx.fill();
       }
       ctx.beginPath();

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { drawPointer, drawSidebar, transparentRects } from '../../packages/hd-renderer/src/ui/sidebarView';
+import { clockWashOf, drawPointer, drawSidebar, transparentRects } from '../../packages/hd-renderer/src/ui/sidebarView';
 import { createUiAssets, type ChromeAssets, type UiAssets } from '../../packages/hd-renderer/src/ui/uiAssets';
 import { startHdUi } from '../../src/ui/pages/game/hdUi';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
@@ -101,10 +101,11 @@ describe('HD sidebar covered regions', () => {
   it('chrome decomposes the column around active radar and also covers the command bar', () => {
     const s = hdSidebar();
     expect(transparentRects(s, withChrome)).toEqual([
-      { x: 632, y: 0, width: 168, height: 20 },
-      { x: 632, y: 150, width: 168, height: 450 },
-      { x: 632, y: 20, width: 12, height: 130 },
-      { x: 788, y: 20, width: 12, height: 130 },
+      // The radar hole is padded by one frame pixel for the native outline row.
+      { x: 632, y: 0, width: 168, height: 19 },
+      { x: 632, y: 151, width: 168, height: 449 },
+      { x: 632, y: 19, width: 11, height: 132 },
+      { x: 789, y: 19, width: 11, height: 132 },
       s.layout.commandBar,
     ]);
     s.radarActive = false;
@@ -115,8 +116,8 @@ describe('HD sidebar covered regions', () => {
     s.layout.commandBar = null;
     s.layout.radar = { x: 600, y: -20, width: 100, height: 60 };
     expect(transparentRects(s, withChrome)).toEqual([
-      { x: 632, y: 40, width: 168, height: 560 },
-      { x: 700, y: 0, width: 100, height: 40 },
+      { x: 632, y: 41, width: 168, height: 559 },
+      { x: 701, y: 0, width: 99, height: 41 },
     ]);
     s.layout.radar = { ...s.layout.sidebar };
     expect(transparentRects(s, withChrome)).toEqual([]);
@@ -276,6 +277,20 @@ describe('HD sidebar drawing', () => {
     const arc = calls.find((c) => c.name === 'arc')!;
     expect(arc.args[3]).toBeCloseTo(-Math.PI / 2 + 0.4 * Math.PI * 2);
     expect(arc.args[4]).toBeCloseTo(Math.PI * 1.5);
+    // The wash colour follows the side's sidebar palette (Allied blue, Soviet and Yuri yellow).
+    const washOf = () =>
+      calls.slice(calls.findIndex((c) => c.name === 'arc')).find((c) => c.name === 'fill')?.style.fillStyle;
+    expect(washOf()).toBe(clockWashOf(s.side));
+    for (const [side, wash] of [
+      [0, 'rgba(64,173,238,0.5)'],
+      [1, 'rgba(243,224,111,0.5)'],
+      [2, 'rgba(243,224,111,0.5)'],
+    ] as const) {
+      s.side = side;
+      calls.length = 0;
+      drawSidebar(ctx, s, withChrome, { scale: 1, time: 0 });
+      expect(washOf()).toBe(wash);
+    }
     s.cameos[0]!.progress = null;
     calls.length = 0;
     drawSidebar(ctx, s, withChrome, { scale: 1, time: 0 });
@@ -309,12 +324,12 @@ describe('HD sidebar drawing', () => {
       calls
         .filter((c) => c.name === 'rect')
         .slice(0, 4)
-        .map((c) => c.args),
+        .map((c) => c.args.map((v) => Math.round(Number(v) * 1000) / 1000)),
     ).toEqual([
-      [632, 0, 168, 20],
-      [632, 150.4, 168, 449.6],
-      [632, 20, 12, 130.4],
-      [788, 20, 12, 130.4],
+      [632, 0, 168, 19.2],
+      [632, 151.2, 168, 448.8],
+      [632, 19.2, 11.2, 132],
+      [788.8, 19.2, 11.2, 132],
     ]);
   });
   it('cover-fits art with rounded clipping and ellipsizes captions without inventing a hovered tooltip', () => {
