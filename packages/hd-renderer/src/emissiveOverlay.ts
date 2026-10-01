@@ -202,9 +202,12 @@ export class EmissiveOverlay {
     // fwidth supplies a one-device-pixel edge at any zoom/DPR; capsules overlap at every polyline joint.
     const cover = float(1).sub(smoothstep(float(1).sub(fwidth(r)), 1, r));
     // Preserve the legacy 0.18/0.3 ramp at coreFraction 0.25; glow strokes use zero for a pure saturated edge.
+    // The core follows the distance ACROSS the stroke, not the capsule radius: with a radial core every segment's
+    // round start cap painted edge blue over the previous segment's core end, which broke each bolt into dashes.
+    const across = uv().y.sub(0.5).mul(2).abs();
     const coreMix = edge!.w
       .greaterThan(0)
-      .select(float(1).sub(smoothstep(edge!.w.mul(0.72), edge!.w.mul(1.2).max(1e-6), r)), float(0));
+      .select(float(1).sub(smoothstep(edge!.w.mul(0.72), edge!.w.mul(1.2).max(1e-6), across)), float(0));
     const strokeMaterial = material(
       mix(edge!.rgb, core!.rgb, coreMix),
       cover

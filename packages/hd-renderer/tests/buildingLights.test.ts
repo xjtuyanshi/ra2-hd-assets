@@ -81,9 +81,9 @@ describe('building light policy', () => {
       bodyStart: 0.68,
       bodyEnd: 0.88,
       alpha: 1,
-      coreAlpha: 0.97,
-      bodyAlpha: 0.62,
-      limbAlpha: 0.85,
+      coreAlpha: 1,
+      bodyAlpha: 0.7,
+      limbAlpha: 0.88,
       filamentMix: 0.75,
       haloScale: 1.4,
       haloAlpha: 0.4,
@@ -93,18 +93,18 @@ describe('building light policy', () => {
   it('keeps the hot core cyan-white and authors saturated body, limb and filament colours', () => {
     const orb = select()[0]!.orb!;
     const colours = {
-      hot: [215, 248, 255],
-      mid: [120, 205, 255],
+      hot: [205, 250, 255],
+      mid: [100, 200, 255],
       body: [55, 115, 255],
       limb: [110, 175, 255],
-      filaments: [175, 235, 255],
+      filaments: [165, 235, 255],
       halo: [45, 95, 255],
     } as const;
     for (const name of Object.keys(colours) as (keyof typeof colours)[])
       expect(orb[name].map((v) => Math.round(srgb(v) * 255))).toEqual(colours[name]);
-    expect(ARC.core.map((v) => Math.round(srgb(v) * 255))).toEqual([225, 250, 255]);
+    expect(ARC.core.map((v) => Math.round(srgb(v) * 255))).toEqual([210, 250, 255]);
     expect(ARC.edge.map((v) => Math.round(srgb(v) * 255))).toEqual([45, 110, 255]);
-    expect(ARC).toMatchObject({ width: 2.8, forkWidth: 2, coreFraction: 0.45, reach: [0.5, 1.15], crawl: 0.4 });
+    expect(ARC).toMatchObject({ width: 3.2, forkWidth: 2.2, coreFraction: 0.45, reach: [0.5, 1.15], crawl: 0.4 });
     const [r, g, b] = orb.hot.map(srgb) as [number, number, number];
     expect(60 * ((r - g) / (b - r) + 4)).toBeLessThanOrEqual(195);
     const luminance = 0.2126 * orb.hot[0] + 0.7152 * orb.hot[1] + 0.0722 * orb.hot[2];
@@ -268,8 +268,8 @@ describe('decorative unbloomed source overlay', () => {
       const glow = a.strokes[i]!;
       const crisp = a.strokes[i + 1]!;
       expect(glow.points).toBe(crisp.points);
-      expect(glow.width).toBeCloseTo(crisp.width * 3.2);
-      expect(glow.alpha).toBeCloseTo(crisp.alpha * 0.42);
+      expect(glow.width).toBeCloseTo(crisp.width * 3.5);
+      expect(glow.alpha).toBeCloseTo(crisp.alpha * 0.5);
       expect(crisp.coreFraction).toBe(ARC.coreFraction);
     }
     arcs.forEach((s) => {
@@ -292,8 +292,8 @@ describe('decorative unbloomed source overlay', () => {
       expect(s.alpha).toBeLessThanOrEqual(1);
     }
     for (const s of glows) {
-      expect(s.alpha).toBeGreaterThanOrEqual(0.7 * 0.42);
-      expect(s.alpha).toBeLessThanOrEqual(0.42);
+      expect(s.alpha).toBeGreaterThanOrEqual(0.7 * 0.5);
+      expect(s.alpha).toBeLessThanOrEqual(0.5);
     }
   });
   it('keeps crawling arcs over the glass and outgoing arcs within the authored reach with downward bias', () => {

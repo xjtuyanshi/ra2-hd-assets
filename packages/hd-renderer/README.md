@@ -331,7 +331,7 @@ shadow stretch takes the original calculation, and other neutral gains multiply 
 | `occlusion`                                     | Baked occlusion of the material atlas (wall feet, roofs next to higher tiers) and soft ground contact decals around foundations.                                                                                                                                                                                                                                                                        |
 | `shadowFollow`, `shadowSoftness`                | SHP shadow decals turn and stretch about their object's base with the sun (voxel shadows turn with them); their penumbra grows with distance.                                                                                                                                                                                                                                                           |
 | `wetReflections`                                | Upright art mirrored about its base line on wet paving (short, rippled, strongest in puddles).                                                                                                                                                                                                                                                                                                          |
-| `sourceLights`                                  | HD building emitter gain: default and `faithful` 0; `golden` / `cinematic` 1. The Tesla reactor emits blue ground/object light outside its foundation, an unbloomed saturated plasma orb and forked arcs (emissive overlay); the Tesla coil, war factory doors and Soviet refinery furnace add smaller lights (mostly after dusk).                                                                      |
+| `sourceLights`                                  | HD building emitter gain: default and `faithful` 0; `golden` / `cinematic` 1. The Tesla reactor emits blue ground/object light outside its foundation, an unbloomed white-hot plasma orb and forked arcs (emissive overlay); the Tesla coil, war factory doors and Soviet refinery furnace add smaller lights (mostly after dusk).                                                                      |
 | `mapSourcesByDay`                               | Share of the map's light sources (lamp posts such as `INGALITE`) in the map's day light: default, `faithful` and `golden` 1 (the engine's); `cinematic` 0.3. At full share a city park framing rendered its lawn at L* 53 against the approved target's 45 (34 without lamps), and a Tesla reactor beside a lamp stood on near-white pavement. The night presentation owns lamps after dusk either way. |
 | `sunPath`                                       | `'arc'`: `Lighting.sunArc`, east in the morning, over the camera side at noon, west in the evening (the art's azimuth at 15:00); `'fixed'`: the classic azimuth.                                                                                                                                                                                                                                        |
 | `adaptExposure`                                 | Lifts early and late daylight towards noon's flat-ground brightness (the colour of the light stays).                                                                                                                                                                                                                                                                                                    |
@@ -374,21 +374,29 @@ lit colour in the same units. Lamp-lit sandstone cannot accumulate a white veil;
 within dark-ground headroom remain unscaled. This replaces per-source lamp gains; the clamp is dormant with
 `sourceLights=0`, retaining faithful local-light rendering.
 
-The reactor's head and seven decorative arcs use the generic `src/emissiveOverlay.ts`, never bloomed head glows or
+The reactor's head and five decorative arcs use the generic `src/emissiveOverlay.ts`, never bloomed head glows or
 `BeamLayer`. The camera-facing plasma orb covers the art's glass sphere (0.55 world units, about 16.5 engine px, at
 foundation [0.47, 0.40] and 27 px up: measured on the battle and live-replay framings, a 0.30 disc at [0.57, 0.40] left
-a pale glass ring round a dark-blue "eye"). Its display-linear, sRGB-authored colours run from a soft cyan-white core
-(195, 245, 255; hue about 193 degrees, so the centre never reads as the lavender veil) through the saturated body
-(60, 120, 255; HSV S 0.76) to a lighter glassy rim (95, 155, 255), with sparse animated filaments and a halo ending at
-1.4 radii. The disc is pulled towards the camera by its halo radius past the head's own push (with only the head's
-push the owner's foundation depth wedge cut a pie slice out of the orb), arcs by 0.8 world units (so the reactor's own
-tower cards do not swallow them). Each arc has 7–10 jagged points and 1–2 forks from inner joints, with the existing
-downward/crawling endpoint policy (reach 0.45–1.1 world units past the glass); crawling paths stay on the glass.
-Capsule segments provide round joints/caps, widths 2.2 engine pixels (forks 1.6) with a cyan-white core over the inner
-third and the saturated edge (45, 105, 255) fading to 70 % at the rim; under every arc and fork a three-times-wider
-glow stroke in the edge colour at half opacity stands in for the bloom halo. Segments with no screen-space length draw
-as round dots instead of a quad stretched from a noisy axis. Shapes reseed every two logic frames; alpha flickers
-0.7–1.0 with presentation time. Day/night use the same orb and stroke colours. Plain-data setters reuse fixed buffers
+a pale glass ring round a dark-blue "eye"). Its display-linear, sRGB-authored colours run from a white-hot cyan core
+(205, 250, 255; hue about 186 degrees) through a saturated cyan-blue `mid` (100, 200, 255) to the saturated body
+(55, 115, 255) and a lighter glassy rim (110, 175, 255), with animated internal filaments (`filamentMix` 0.75) and a halo
+ending at 1.4 radii. The ramp passes through saturated cyan rather than pale blue on purpose: pixels of HSV hue
+200-290 degrees with S 0.03-0.3 are what reviews counted as the lavender veil. The orb's alpha is radial: opaque core
+(`coreAlpha` 1) to `coreRadius` 0.42, a partly transparent body (`bodyAlpha` 0.7 from `bodyStart` 0.68) so the painted
+glass sphere shows through, and a stronger limb (`limbAlpha` 0.88). The disc is pulled towards the camera by its halo
+radius past the head's own push (with only the head's push the owner's foundation depth wedge cut a pie slice out of
+the orb), arcs by 0.8 world units (so the reactor's own tower cards do not swallow them). Arc directions lose 85 % of
+their component along the view direction (the live view passes the camera's `toCamera`), so bolts radiate from the
+orb's silhouette in the screen plane: an outgoing arc pointing at the camera used to collapse into stacked glow dots,
+the dark-blue "eye" over the white core. Each arc has 7–10 jagged points and 1–2 forks from inner joints, reach
+0.5–1.15 world units past the glass; crawling paths stay on the glass. Capsule segments provide round joints/caps,
+widths 3.2 engine pixels (forks 2.2) with a cyan-white core over the inner 45 % of the width (`coreFraction`) and the
+saturated edge (45, 110, 255) fading to 70 % at the rim; under every arc and fork a 3.5 times wider glow stroke in the
+edge colour at half opacity stands in for the bloom halo. The core follows the distance across the stroke, not the
+capsule radius: with a radial core each segment's round start cap painted edge blue over the previous segment's core
+end and broke every bolt into dashes. Segments with no screen-space length draw nothing. Shapes reseed every two logic
+frames; alpha flickers 0.7–1.0 with presentation time. Day/night use the same orb and stroke colours. Plain-data
+setters reuse fixed buffers
 (256 discs, 16384 segments); HdRenderer owns and disposes the layer. Native attack beams and their impact effects retain their existing pipeline.
 
 `packages/ra2-assets/python/look_metrics.py` compares renders of one bench framing with the approved targets (L*

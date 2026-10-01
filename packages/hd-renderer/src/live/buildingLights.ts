@@ -97,28 +97,28 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
         // Cover the painted sphere while revealing its glass through a partially transparent body ring.
         radius: 0.55,
         // Cyan-white heat must pass through saturated cyan-blue, avoiding pale blue/lavender in the colour ramp.
-        hot: displayLinear(215, 248, 255),
-        mid: displayLinear(120, 205, 255),
+        hot: displayLinear(205, 250, 255),
+        mid: displayLinear(100, 200, 255),
         body: displayLinear(55, 115, 255),
         limb: displayLinear(110, 175, 255),
-        filaments: displayLinear(175, 235, 255),
+        filaments: displayLinear(165, 235, 255),
         halo: displayLinear(45, 95, 255),
         coreRadius: 0.42,
         bodyStart: 0.68,
         bodyEnd: 0.88,
         alpha: 1,
-        coreAlpha: 0.97,
-        bodyAlpha: 0.62,
-        limbAlpha: 0.85,
+        coreAlpha: 1,
+        bodyAlpha: 0.7,
+        limbAlpha: 0.88,
         filamentMix: 0.75,
         haloAlpha: 0.4,
         haloScale: 1.4,
       },
       arcStyle: {
-        core: displayLinear(225, 250, 255),
+        core: displayLinear(210, 250, 255),
         edge: displayLinear(45, 110, 255),
-        width: 2.8,
-        forkWidth: 2.0,
+        width: 3.2,
+        forkWidth: 2.2,
         coreFraction: 0.45,
         reach: [0.5, 1.15],
         crawl: 0.4,
@@ -388,8 +388,8 @@ export class BuildingLightGate {
 /** Extra depth pull of the arcs past the orb's own (world units). */
 const ARC_PUSH = 0.8;
 /** Width and opacity of the soft glow stroke drawn under each arc and fork. */
-const ARC_GLOW_WIDTH = 3.2;
-const ARC_GLOW_ALPHA = 0.42;
+const ARC_GLOW_WIDTH = 3.5;
+const ARC_GLOW_ALPHA = 0.5;
 
 function screenDirection(direction: Vector3, toCamera?: Vector3): Vector3 {
   const cameraLengthSq = toCamera?.lengthSq() ?? 0;
