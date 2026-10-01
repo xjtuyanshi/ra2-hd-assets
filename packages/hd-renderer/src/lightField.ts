@@ -1,5 +1,6 @@
 import {
-  AdditiveBlending,
+  AddEquation,
+  CustomBlending,
   DataTexture,
   DataUtils,
   DoubleSide,
@@ -9,6 +10,7 @@ import {
   LinearFilter,
   Mesh,
   MeshBasicNodeMaterial,
+  OneFactor,
   OrthographicCamera,
   PlaneGeometry,
   RGBAFormat,
@@ -31,6 +33,7 @@ import {
   select,
   smoothstep,
   clamp,
+  dot,
   texture,
   time,
   uniform,
@@ -71,9 +74,20 @@ export interface SourceSpec extends Omit<LightEntry, 'shape'> {
   head?: number;
   glow?: readonly [number, number, number] | null;
   glowSize?: number;
+  /** Core radius of the visible head as a fraction of its half-size (Emitter.core). */
+  glowCore?: number;
+  /** White-hot centre gain of the visible head (Emitter.hot). */
+  glowHot?: number;
   push?: number;
   /** Falloff of the ground pool (default SHAPE_POOL, the compact fire pool; SHAPE_LINEAR reaches further out). */
   shape?: typeof SHAPE_LINEAR | typeof SHAPE_POOL;
+  /**
+   * Share of this light that upright building art takes only inside its own foundation (default 0; see
+   * objectLightAt). A building's own source (the reactor's orb) sets it to 1: the ground, pads, units and neighbouring
+   * buildings take its pool, while the owner's facades and orb glass, whose pixels sample the ground in front of the
+   * art, sit in its hole instead of taking the full pool.
+   */
+  groundOnly?: number;
 }
 
 interface Source extends Kept {
@@ -135,7 +149,10 @@ const SOURCES = 256;
 /** Dynamic instances: every pool has its own reserved share, so a burst of flashes never starves fires. */
 const DYNAMIC = POOLS.explosion + POOLS.flash + KEPT + SOURCES;
 
-/** Per-instance attributes of one light mesh: aPos = (x, z, radius, shape), aCol = (r, g, b, flicker), aExtra = (seed, hole half-x, half-z), aHoleOffset = light-local hole centre. */
+/**
+ * Per-instance attributes of one light mesh: aPos = (x, z, radius, shape), aCol = (r, g, b, flicker), aExtra = (seed,
+ * hole half-x, half-z, ground-only share), aHoleOffset = light-local hole centre.
+ */
 interface LightInstances {
   mesh: InstancedMesh;
   aPos: InstancedBufferAttribute;
@@ -154,6 +171,8 @@ export interface DynamicLight {
   head?: number;
   glow?: [number, number, number];
   glowSize?: number;
+  glowCore?: number;
+  glowHot?: number;
   push?: number;
 }
 
@@ -230,7 +249,7 @@ export class LightField {
     const baseMaterial = additiveMaterial();
     baseMaterial.colorNode = vec4(
       texture(this.baseTexture, vec2(positionWorld.x.div(width), positionWorld.y.div(height))).rgb.mul(this.baseGain),
-      1,
+      0,
     );
     const base = new Mesh(new PlaneGeometry(width, height), baseMaterial);
     base.position.set(width / 2, height / 2, -1);
@@ -251,12 +270,12 @@ export class LightField {
   private buildLights(capacity: number, gain: ShaderNode): LightInstances {
     const aPos = new InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
     const aCol = new InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
-    const aExtra = new InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
+    const aExtra = new InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
     const aHoleOffset = new InstancedBufferAttribute(new Float32Array(capacity * 2), 2);
     const material = additiveMaterial();
     const p: ShaderNode = instancedBufferAttribute(aPos, 'vec4');
     const c: ShaderNode = instancedBufferAttribute(aCol, 'vec4');
-    const extra: ShaderNode = instancedBufferAttribute(aExtra, 'vec3');
+    const extra: ShaderNode = instancedBufferAttribute(aExtra, 'vec4');
     const seed = extra.x;
     const holeOffset: ShaderNode = instancedBufferAttribute(aHoleOffset, 'vec2');
     material.positionNode = vec3(p.xy.add(positionGeometry.xy.mul(p.z.mul(2))), 0);
@@ -275,7 +294,10 @@ export class LightField {
       const flicker = float(1).add(c.w.mul(mx_noise_float(vec2(time.mul(9).add(seed.mul(17.3)), seed.mul(3.1)))));
       // No hole is exactly one, preserving all legacy fire, pulse and lamp colours.
       const hole = select(holed, smoothstep(0, 0.25, border), float(1));
-      return vec4(c.rgb.mul(shape).mul(flicker.max(0)).mul(gain).div(this.encodeScale).mul(hole), 1);
+      const rgb = c.rgb.mul(shape).mul(flicker.max(0)).mul(gain).div(this.encodeScale).mul(hole);
+      // Alpha carries the luminance of the light's ground-only share (zero for every light but a building's own source),
+      // which upright building art takes inside its own foundation (objectLightAt); colour blending ignores alpha.
+      return vec4(rgb, dot(rgb, vec3(0.2126, 0.7152, 0.0722)).mul(extra.w));
     })();
     const mesh = new InstancedMesh(new PlaneGeometry(1, 1), material, capacity);
     mesh.frustumCulled = false;
@@ -298,10 +320,11 @@ export class LightField {
     seed: number,
     hole?: readonly [number, number],
     holeOffset?: readonly [number, number],
+    groundOnly = 0,
   ): void {
     target.aPos.setXYZW(i, x, z, radius, shape);
     target.aCol.setXYZW(i, colour[0]! * scale, colour[1]! * scale, colour[2]! * scale, flicker);
-    target.aExtra.setXYZ(i, seed, hole?.[0] ?? 0, hole?.[1] ?? 0);
+    target.aExtra.setXYZW(i, seed, hole?.[0] ?? 0, hole?.[1] ?? 0, groundOnly);
     target.aHoleOffset.setXY(i, holeOffset?.[0] ?? 0, holeOffset?.[1] ?? 0);
   }
 
@@ -506,6 +529,7 @@ export class LightField {
         source.seed,
         source.spec.hole,
         source.spec.holeOffset,
+        Math.min(1, Math.max(0, source.spec.groundOnly ?? 0)),
       );
     }
     const needs =
@@ -524,9 +548,13 @@ export class LightField {
     dyn.mesh.count = n;
     dyn.mesh.visible = n > 0;
     const previous = renderer.getRenderTarget();
+    // Alpha accumulates the ground-only share from zero (the renderer's own clear alpha is 1); colour is unchanged.
+    const clearAlpha = renderer.getClearAlpha();
+    renderer.setClearAlpha(0);
     renderer.setRenderTarget(this.target);
     renderer.render(this.scene, this.camera);
     renderer.setRenderTarget(previous);
+    renderer.setClearAlpha(clearAlpha);
     this.renders++;
     return true;
   }
@@ -586,6 +614,8 @@ export class LightField {
       const entry = writeDynamicLight(pool, n, source.x, source.z, source.colour, k, 'source');
       entry.head = source.spec.head;
       entry.glowSize = source.spec.glowSize;
+      entry.glowCore = source.spec.glowCore;
+      entry.glowHot = source.spec.glowHot;
       entry.push = source.spec.push;
       const glow = (entry.glow ??= [0, 0, 0]);
       for (let c = 0; c < 3; c++) glow[c] = (source.spec.glow?.[c] ?? 0) * k;
@@ -619,7 +649,15 @@ function additiveMaterial(): MeshBasicNodeMaterial {
   material.transparent = true;
   material.depthTest = false;
   material.depthWrite = false;
-  material.blending = AdditiveBlending;
+  // Plain sums in colour and alpha. The former additive blending scaled colour by the source alpha, which was always 1,
+  // so colour is bit-identical; alpha now sums the ground-only luminance instead of counting lights (see buildLights).
+  material.blending = CustomBlending;
+  material.blendEquation = AddEquation;
+  material.blendSrc = OneFactor;
+  material.blendDst = OneFactor;
+  material.blendEquationAlpha = AddEquation;
+  material.blendSrcAlpha = OneFactor;
+  material.blendDstAlpha = OneFactor;
   material.side = DoubleSide;
   return material;
 }
@@ -650,6 +688,8 @@ function writeDynamicLight(
     entry.head = undefined;
     entry.glow = undefined;
     entry.glowSize = undefined;
+    entry.glowCore = undefined;
+    entry.glowHot = undefined;
     entry.push = undefined;
   }
   return entry;

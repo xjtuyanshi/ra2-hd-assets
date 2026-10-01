@@ -167,6 +167,7 @@ describe('cinematic preset and sandbox parameters', () => {
           'contactShade',
           'shadowLength',
           'shadowDarkness',
+          'clarity',
         ].includes(key) ||
         key in neutralGrade()
       )
@@ -179,9 +180,9 @@ describe('cinematic preset and sandbox parameters', () => {
       whiteAdapt: 1,
       mapTintAdapt: 0.3,
       gradeBalance: [0.955, 1, 1.085],
-      gradeContrast: 0.21,
-      gradePivotLift: 0.02,
-      gradeSaturation: 1.06,
+      gradeContrast: 0.14,
+      gradePivotLift: 0.045,
+      gradeSaturation: 1.08,
       gradeShadowTint: [0.8, 1, 1.2],
       gradeHighlightTint: [1.15, 1, 0.85],
       sunGain: 1.25,
@@ -190,7 +191,11 @@ describe('cinematic preset and sandbox parameters', () => {
       contactShade: 1.5,
       shadowLength: 1.4,
       shadowDarkness: 1.15,
+      clarity: 0.55,
     });
+    // The faithful default and golden leave the clarity pass out entirely.
+    expect(LOOK_PRESETS.faithful.settings.clarity).toBe(0);
+    expect(LOOK_PRESETS.golden.settings.clarity).toBe(0);
   });
 
   it.each(['faithful', 'golden'] as const)('restores all neutral grade settings when switching to %s', (preset) => {

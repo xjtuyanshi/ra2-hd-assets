@@ -29,6 +29,8 @@ function fixture() {
     getRenderTarget: () => null,
     setRenderTarget: vi.fn(),
     render: vi.fn(),
+    getClearAlpha: () => 1,
+    setClearAlpha: vi.fn(),
   } as unknown as WebGPURenderer;
   const dynamics = (
     field as unknown as {
@@ -92,6 +94,8 @@ describe('kept source lights', () => {
         expect(dynamics.aCol.getW(0)).toBe(0);
         expect(dynamics.aExtra.getY(0)).toBe(1.5);
         expect(dynamics.aExtra.getZ(0)).toBe(1);
+        // No ground-only share by default: the field's alpha stays zero (objectLightAt is then plain objectLight).
+        expect(dynamics.aExtra.getW(0)).toBe(0);
         expect(dynamics.aHoleOffset.getX(0)).toBeCloseTo(0.2);
         expect(field.stats(now).sources).toBe(1);
       }
@@ -210,6 +214,24 @@ describe('kept source lights', () => {
         }
       });
       nodes.dispose();
+    }
+  });
+});
+
+describe('ground-only source share', () => {
+  it('writes the clamped share per instance and renders the field from a zero clear alpha', () => {
+    const { field, renderer, dynamics, dispose } = fixture();
+    try {
+      field.source('orb', 1, { ...spec, groundOnly: 1 });
+      field.source('half', 1, { ...spec, x: 6, groundOnly: 2 });
+      field.update(1, renderer, 0);
+      expect(dynamics.aExtra.getW(0)).toBe(1);
+      expect(dynamics.aExtra.getW(1)).toBe(1);
+      const r = renderer as unknown as { setClearAlpha: ReturnType<typeof vi.fn> };
+      // Zero while the field renders, then the renderer's own clear alpha again.
+      expect(r.setClearAlpha.mock.calls).toEqual([[0], [1]]);
+    } finally {
+      dispose();
     }
   });
 });

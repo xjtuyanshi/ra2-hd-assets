@@ -266,7 +266,7 @@ shadow stretch takes the original calculation, and other neutral gains multiply 
 | `occlusion`                                     | Baked occlusion of the material atlas (wall feet, roofs next to higher tiers) and soft ground contact decals around foundations.                                                                                                                                                                                            |
 | `shadowFollow`, `shadowSoftness`                | SHP shadow decals turn and stretch about their object's base with the sun (voxel shadows turn with them); their penumbra grows with distance.                                                                                                                                                                               |
 | `wetReflections`                                | Upright art mirrored about its base line on wet paving (short, rippled, strongest in puddles).                                                                                                                                                                                                                              |
-| `sourceLights`                                  | HD building emitter gain: default and `faithful` 0; `golden` / `cinematic` 1. The Tesla reactor emits blue ground/object light outside its foundation, a matching flickering HDR head and short decorative arcs.                                                                                                            |
+| `sourceLights`                                  | HD building emitter gain: default and `faithful` 0; `golden` / `cinematic` 1. The Tesla reactor emits blue ground/object light outside its foundation, a white-hot flickering HDR head and short decorative arcs; the Tesla coil, war factory doors and Soviet refinery furnace add smaller lights (mostly after dusk).     |
 | `sunPath`                                       | `'arc'`: `Lighting.sunArc`, east in the morning, over the camera side at noon, west in the evening (the art's azimuth at 15:00); `'fixed'`: the classic azimuth.                                                                                                                                                            |
 | `adaptExposure`                                 | Lifts early and late daylight towards noon's flat-ground brightness (the colour of the light stays).                                                                                                                                                                                                                        |
 | `voxelSheen`, `voxelSheenCap`, `voxelOcclusion` | Voxel highlight strength and cap and crease occlusion (`vpl.ts`); null leaves the voxel material as configured.                                                                                                                                                                                                             |
@@ -276,6 +276,7 @@ shadow stretch takes the original calculation, and other neutral gains multiply 
 | `contactShade` (neutral 1; cinematic 1.5)       | Multiplies foundation contact alpha (`0.42 * contactShade`, final alpha capped at 0.85) and the terrain's contact darkening only while the enhanced look is enabled (darkening cap 0.85). Faithful terrain keeps its original contact attribute.                                                                            |
 | `shadowLength` (neutral 1; cinematic 1.4)       | Multiplies the elevation-derived SHP/voxel stretch and its cap (`MAX_SHADOW_STRETCH * shadowLength`), only with `shadowFollow > 0`; partial follow still blends from the original transform.                                                                                                                                |
 | `shadowDarkness` (neutral 1; cinematic 1.15)    | Multiplies enhanced crisp/soft SHP and voxel shadow opacity (cap 0.9). Faithful keeps `ENGINE_SHADOW_OPACITY`; voxel shadow materials and their uniforms share one renderer context and its lifetime.                                                                                                                       |
+| `clarity` (neutral 0; cinematic 0.55)           | Mid-scale local contrast on the display image: the luminance band between Gaussian blurs of 1.25 and 5 CSS px is added back this many times (shaded side at half strength, mid-tones only). 0 leaves the pass out of the pipeline.                                                                                          |
 
 Building emitters are authored in `src/live/buildingLights.ts` (`BUILDING_LIGHTS`); more buildings need only table
 entries. Foundation fractions and engine-pixel head heights are converted to world coordinates using the live type
@@ -284,7 +285,18 @@ sources alive while refreshed, fades in over 0.25 seconds and fades out over its
 light-local rectangle (half-extents plus centre offset) masks the emitting foundation with a 0.25-cell outer edge.
 CPU electrical flicker drives both irradiance and glow; decorative beams skip target flashes and impact garnish.
 Switching source gain to zero clears sources and arcs immediately. These use the existing top-down light field,
-not volumetric point-light shadowing; visual alignment and bloom need rendered review.
+not volumetric point-light shadowing. A source's `groundOnly` share (`SourceSpec.groundOnly`, 1 for the reactor and
+the refinery furnace) is summed as luminance in the field's alpha channel (plain one/one blending, cleared to zero;
+every other light writes zero, which leaves colour and all other consumers unchanged). Upright building sprites take
+that share at their own foundation's interior (the pixel's ground projection clamped 0.35 cells inside it) instead of
+at the ground in front of the art that their pixels otherwise sample (`objectLightAt` in `src/atmosphere.ts`): the
+owner's hole keeps its facades and the orb glass unwashed, while the ground, pads, units and neighbouring buildings
+take the pool. Decorative arc colour, reach and the crawling share are `ARC_STYLE` in `buildingLights.ts`.
+
+`packages/ra2-assets/python/look_metrics.py` compares renders of one bench framing with the approved targets (L*
+percentiles, local contrast at pixel and mid scale, sun/shade separation, highlight and deep-shade shares, chroma;
+`--rings` gives the b*/L* spill profile around a light), which is how the `cinematic` grade, `clarity` and the
+reactor's light were calibrated.
 
 Per-pixel normals come from an optional material atlas next to the HD sprite atlas (`normals.json` +
 `sprites@2x-normals.png`, written by `packages/ra2-assets/python/sprite_normals.py`, loaded by `spriteMaterials.ts`);

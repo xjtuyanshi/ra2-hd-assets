@@ -860,14 +860,17 @@ export class LiveView {
     }
     const lights = buildingLightSources(
       snapshot?.objects ?? [],
-      this.hd.settings,
+      { sourceLights: this.hd.settings.sourceLights, night: this.hd.emitters.lampGain.value },
       (type) => this.library?.type(type)?.foundation,
       (building) => this.shroud.isLocationShrouded(building.x, building.y, building.z),
       this.library?.conditionYellow,
     );
     const now = this.hd.seconds();
     for (const light of lights) this.hd.lightField.source(light.key, now, light);
-    this.effectDriver.setDecorativeBeams(now, buildingLightArcs(lights, snapshot?.frame ?? 0));
+    this.effectDriver.setDecorativeBeams(
+      now,
+      buildingLightArcs(lights, snapshot?.frame ?? 0, this.hd.emitters.lampGain.value),
+    );
     this.sourceLightsActive = true;
   }
 

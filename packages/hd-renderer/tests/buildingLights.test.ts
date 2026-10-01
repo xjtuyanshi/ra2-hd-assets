@@ -3,6 +3,7 @@ import { Mesh, Vector3 } from 'three/webgpu';
 import { AtmosphereNodes } from '../src/atmosphere';
 import { EffectsLayer } from '../src/effects';
 import {
+  ARC_STYLE,
   buildingLightArcs,
   buildingLightPlacements,
   buildingLightSources,
@@ -45,7 +46,8 @@ function disposeMeshes(root: Mesh['parent']) {
 describe('building light policy', () => {
   it('places the orb near the foundation centre, above the snapshot ground height, with a full foundation hole', () => {
     const light = buildingLightPlacements('NAPOWR', reactor, [3, 2])[0]!;
-    expect(light).toMatchObject({ hole: [1.5, 1], key: 'building:42:0' });
+    // The reactor's own facades and orb glass take none of its pool (objectLightAt); the ground and neighbours do.
+    expect(light).toMatchObject({ hole: [1.5, 1], key: 'building:42:0', groundOnly: 1 });
     expect(light.x).toBeCloseTo(5 + 0.57 * 3);
     expect(light.z).toBeCloseTo(7 + 0.4 * 2);
     // The hole stays on the foundation centre (6.5, 8) although the orb sits off it.
@@ -116,7 +118,7 @@ describe('building light policy', () => {
     const setDecorativeBeams = vi.fn();
     const settings = { sourceLights: 0 };
     const view = Object.assign(Object.create(LiveView.prototype), {
-      hd: { settings, seconds: () => 2, lightField: { source, clearSources } },
+      hd: { settings, seconds: () => 2, lightField: { source, clearSources }, emitters: { lampGain: { value: 0 } } },
       library: { type: () => ({ foundation: foundation() }), conditionYellow: 0.5 },
       shroud: { isLocationShrouded: () => false },
       effectDriver: { setDecorativeBeams },
@@ -131,7 +133,7 @@ describe('building light policy', () => {
     view.updateBuildingLights(snapshot);
     expect(source).toHaveBeenCalledTimes(2);
     expect(source.mock.calls[0]![0]).toBe('building:42:0');
-    expect(setDecorativeBeams.mock.calls[0]![1]).toHaveLength(3);
+    expect(setDecorativeBeams.mock.calls[0]![1]).toHaveLength(BUILDING_LIGHTS.NAPOWR![0]!.arcs);
     settings.sourceLights = 0;
     view.updateBuildingLights(snapshot);
     expect(clearSources).toHaveBeenCalledTimes(1);
@@ -143,20 +145,41 @@ describe('decorative source arcs', () => {
   it('is deterministic, stable for two logic frames and within the short reach from the orb surface', () => {
     const lights = select();
     const first = buildingLightArcs(lights, 10);
-    expect(first).toHaveLength(3);
+    expect(first).toHaveLength(BUILDING_LIGHTS.NAPOWR![0]!.arcs);
     expect(first).toEqual(buildingLightArcs(lights, 10));
     expect(first).toEqual(buildingLightArcs(lights, 11));
     expect(first).not.toEqual(buildingLightArcs(lights, 12));
     expect(buildingLightArcs([{ ...lights[0]!, key: 'other' }], 10)).not.toEqual(first);
     expect(buildingLightArcs([{ ...lights[0]!, arcs: 0 }], 10)).toEqual([]);
-    for (const beam of first) {
+    const { reach, crawl } = ARC_STYLE;
+    let crawling = 0;
+    first.forEach((beam, index) => {
       expect(beam.bolt).toBe(true);
       expect(beam.flash).toBe(false);
-      expect(beam.to.distanceTo(beam.from)).toBeGreaterThanOrEqual(0.35);
-      expect(beam.to.distanceTo(beam.from)).toBeLessThanOrEqual(0.85);
+      const length = beam.to.distanceTo(beam.from);
+      if (Math.floor((index + 1) * crawl) > Math.floor(index * crawl)) {
+        // Crawling arcs stay on the glass: a chord of the slightly enlarged orb.
+        crawling++;
+        expect(length).toBeLessThanOrEqual(2 * 0.28 * 1.12 + 1e-9);
+        return;
+      }
+      expect(length).toBeGreaterThanOrEqual(reach[0] - 1e-9);
+      expect(length).toBeLessThanOrEqual(reach[1] + 1e-9);
       // Never straight up: at most a shallow upward slant.
-      expect(beam.to.y - beam.from.y).toBeLessThanOrEqual(0.25 * beam.to.distanceTo(beam.from) + 1e-9);
-    }
+      expect(beam.to.y - beam.from.y).toBeLessThanOrEqual(0.25 * length + 1e-9);
+    });
+    expect(crawling).toBeGreaterThan(0);
+    expect(crawling).toBeLessThan(first.length);
+  });
+
+  it('blends the day colour into the night colour with the lamp gain', () => {
+    const lights = select();
+    const day = buildingLightArcs(lights, 10, 0)[0]!.colour;
+    const night = buildingLightArcs(lights, 10, 1)[0]!.colour;
+    const dusk = buildingLightArcs(lights, 10, 0.5)[0]!.colour;
+    expect(day.toArray()).toEqual(ARC_STYLE.day);
+    expect(night.toArray()).toEqual(ARC_STYLE.night);
+    for (let c = 0; c < 3; c++) expect(dusk.getComponent(c)).toBeCloseTo((ARC_STYLE.day[c]! + ARC_STYLE.night[c]!) / 2);
   });
 
   it('appends to native beams without extra flash lights or impact garnish, and preserves the native beams when removed', () => {

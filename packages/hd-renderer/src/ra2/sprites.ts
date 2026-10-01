@@ -24,6 +24,7 @@ import {
   instancedBufferAttribute,
   length,
   max,
+  min,
   mix,
   positionGeometry,
   positionWorld,
@@ -43,7 +44,7 @@ import {
   vec4,
 } from 'three/tsl';
 import type { LightingClass, MapObject, SpriteFrame } from '../../../ra2-assets/src/manifest';
-import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLight, pavedAt, puddleNoise } from '../atmosphere';
+import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLightAt, pavedAt, puddleNoise } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { type HdAtlas, type Ra2Cache } from './cache';
@@ -473,7 +474,15 @@ export class SpriteLayer {
         const down = select(flat, py, max(py, 0));
         const ground = aAnchor.xz.add(vec2(px.div(60).add(down.div(30)), down.div(30).sub(px.div(60)))).toVar();
         const height = select(flat, float(0), max(py.negate(), 0).div(ppu));
-        const local: ShaderNode = objectLight(ground, nodes)
+        // Upright building art takes ground-only light (a building's own source) inside its own foundation: the
+        // pixel's ground projection, clamped a little inside the foundation (objectLightAt).
+        const building: ShaderNode = step(0.5, aOcclusion.x).mul(float(1).sub(step(0.5, aFlat)));
+        const inset: ShaderNode = min(aOcclusion.xy.mul(0.5), 0.35);
+        const projected: ShaderNode = vec2(px.div(60).add(py.div(30)), py.div(30).sub(px.div(60)));
+        const own: ShaderNode = aAnchor.xz
+          .add(foundationOrigin)
+          .add(clamp(projected.sub(foundationOrigin), inset, max(aOcclusion.xy.sub(inset), inset)));
+        const local: ShaderNode = objectLightAt(ground, own, building, nodes)
           .div(referenceLevel)
           .mul(exp(height.mul(-0.45)));
         // The map's light, then the scene light on the night-desaturated colour (house paint keeps its colour) and local
