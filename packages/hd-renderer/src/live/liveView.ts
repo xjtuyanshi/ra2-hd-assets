@@ -32,7 +32,7 @@ import { EffectSpriteLayer, animAlpha, type EffectInstance } from './effectSprit
 import { LiveEffectsDriver, smokeOnVehicle, type EffectStyle, type LiveAnim, type LiveEffects } from './effects';
 import { LiveBeams } from './beams';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
-import { buildingLightArcs, buildingLightSources } from './buildingLights';
+import { buildingLightArcs, buildingLightSources, lampLitGain } from './buildingLights';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
 import { SmudgeInstanceCache, type LiveSmudgeCells, type SmudgePage } from './smudges';
@@ -895,7 +895,18 @@ export class LiveView {
       this.library?.conditionYellow,
     );
     const now = this.hd.seconds();
-    for (const light of lights) this.hd.lightField.source(light.key, now, light);
+    const grade = this.world?.mapLight;
+    for (const light of lights) {
+      // Lamp-lit ground (the engine's own light sources) leaves less headroom for a source light (lampLitGain).
+      if (grade) {
+        const k = lampLitGain(1 + (grade.at(light.x, light.z).objects - 1) * grade.currentWeight);
+        if (k < 1) {
+          light.colour = [light.colour[0] * k, light.colour[1] * k, light.colour[2] * k];
+          if (light.glow) light.glow = [light.glow[0] * k, light.glow[1] * k, light.glow[2] * k];
+        }
+      }
+      this.hd.lightField.source(light.key, now, light);
+    }
     this.effectDriver.setDecorativeBeams(
       now,
       buildingLightArcs(lights, snapshot?.frame ?? 0, this.hd.emitters.lampGain.value),

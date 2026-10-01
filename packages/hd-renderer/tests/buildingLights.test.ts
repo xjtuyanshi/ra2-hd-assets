@@ -8,6 +8,7 @@ import {
   buildingLightPlacements,
   buildingLightSources,
   BUILDING_LIGHTS,
+  lampLitGain,
 } from '../src/live/buildingLights';
 import { LiveEffectsDriver } from '../src/live/effects';
 import { LiveView, type LiveObject, type LiveSnapshot } from '../src/live/liveView';
@@ -225,5 +226,15 @@ describe('decorative source arcs', () => {
       disposeMeshes(effects.root);
       nodes.dispose();
     }
+  });
+});
+
+describe('lamp-lit building light gain', () => {
+  it('leaves plainly lit ground alone and dims lights on lamp-lit cells with the square of the engine light', () => {
+    expect(lampLitGain(1)).toBe(1);
+    expect(lampLitGain(0.8)).toBe(1);
+    expect(lampLitGain(1.25)).toBeCloseTo(0.64, 6);
+    expect(lampLitGain(1.5)).toBeCloseTo(1 / 2.25, 6);
+    expect(lampLitGain(3)).toBe(0.35);
   });
 });

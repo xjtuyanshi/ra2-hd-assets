@@ -211,6 +211,18 @@ export function buildingLightPlacements(
   });
 }
 
+/**
+ * Gain of a building light standing in cells the engine's own light sources already brighten (map lamp posts such as
+ * INGALITE: radius about 15 cells, +50 % at the post, by day too). `engineLight` is the engine's weighted object light
+ * multiplier at the source (1 = plain map light). The source lights are calibrated on plainly lit ground; on lamp-lit
+ * ground the same pool clipped into a lavender-white veil over a Tesla reactor and its neighbours in live matches
+ * (L5 compose, XMP29U2 next to a lamp dummy), so the gain falls with the square of the extra engine light.
+ */
+export function lampLitGain(engineLight: number): number {
+  if (!(engineLight > 1)) return 1;
+  return Math.max(0.35, 1 / (engineLight * engineLight));
+}
+
 /** Per-frame source selection; disabled sources perform no library or visibility queries. */
 export function buildingLightSources(
   buildings: readonly Building[],
