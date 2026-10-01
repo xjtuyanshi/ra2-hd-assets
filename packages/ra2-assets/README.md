@@ -935,7 +935,11 @@ python3 packages/ra2-assets/python/vehicle_projection.py lock \
 ```
 
 A type requires a complete, uniformly spaced set of 32 or 16 facings for every part (`all` maps to `body`,
-`tur` to `turret`). Missing outputs and partial types fail the build; they never publish a new manifest. Sheets
+`tur` to `turret`). A building's voxel turret is built under its library voxel id (`--type NAFLAK:turret`, bake
+the manifest key `NAFLAK_turret`): its sheet set is the `turret` part alone, files use `_` for `:`
+(`NAFLAK_turret.json`, `NAFLAK_turret_turret.png`), and `build-index` maps the id to that manifest, which the live
+view requests for buildings with `TurretAnimIsVoxel`. Missing outputs and partial types fail the build; they never
+publish a new manifest. Sheets
 must share a scale. `output.png` is resized to the input sheet dimensions, input alpha comes from the bake's
 black/white pair, and grey-keyed redraw coverage is closed/hole-filled before registration. The bounded
 similarity search uses scale 0.94..1.06 and translations within 16 pixels; IoU below 0.85 emits a warning.
