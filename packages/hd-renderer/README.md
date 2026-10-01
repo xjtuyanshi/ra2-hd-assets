@@ -188,6 +188,11 @@ buildings light no windows
 and cast no light, except the map's invisible lamp-post dummies, which every player knows from the map. Without a
 sidecar the view falls back to land-type surfaces and no map light sources.
 
+Live cell overlays (`src/live/overlays.ts`) draw each overlay's library frame at its cell. Rubble overlays
+(`LibraryOverlay.rubble`, rules IsRubble) never draw their own image: the carrier cell named in the snapshot's
+`overlays.rubble` draws its destroyed building's body frame 3 and shadow with the overlay's ISO palette, lighting and
+flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`); other rubble cells stay empty.
+
 ## What v0 covers
 
 - RA2-exact projection: 2:1 dimetric orthographic camera, 60x30 px cells, 15 px height levels (`src/world.ts`).
@@ -416,7 +421,10 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   painted-bed water the warm sun glints thin out offshore (`glintNear`/`glintFar`) and gather on the wavelets within a
   cell of beaches; three breaker lines and fbm iso-line lace threads form the surf band. Water without a detail layer
   (every other map) uses the same sheen beyond `enhanced.openNear..openFar` cells from the bank. The shallow shelf
-  (`BEACH_PROFILE`) keeps the sand visible to about half a cell. Tools: `packages/ra2-assets/python/water_metrics.py`
+  (`BEACH_PROFILE`) keeps the sand visible to about half a cell. Within about 1.6 cells of the bank
+  `BED_SHALLOW_DESAT` pulls the water body's chroma 30 % toward its own luminance (Rec.709, brightness kept) and shifts
+  it slightly from blue to green, so the luminous shallows read as the target's muted teal rather than tropical cyan
+  (river framing: chroma of the first 0.6 cells 19.6 -> 16.4, lightness unchanged, open water untouched). Tools: `packages/ra2-assets/python/water_metrics.py`
   (water metrics at the river framing) and `shallow_bed.py` (lifts the painted waterline stroke on the land side).
 - Sprites (`sprites.ts`): filtered coverage of the indexed mask for soft edges; within about one original texel of
   transparent texels HD atlas colours keep their hue but are never brighter than the original texel there (the

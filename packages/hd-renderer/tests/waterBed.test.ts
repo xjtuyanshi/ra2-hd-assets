@@ -2,7 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { float, uniform, vec3, vec4 } from 'three/tsl';
 import { Vector3 } from 'three/webgpu';
 import { AtmosphereNodes } from '../src/atmosphere';
-import { BEACH_PROFILE, BED_ABSORPTION, beachDepth, bedWaterLook, WATER_SHEEN } from '../src/ra2/waterLook';
+import {
+  BEACH_PROFILE,
+  BED_ABSORPTION,
+  BED_SHALLOW_DESAT,
+  beachDepth,
+  bedWaterLook,
+  WATER_SHEEN,
+} from '../src/ra2/waterLook';
 import type { ShaderNode } from '../src/tsl';
 import { createWaterUniforms } from '../src/waterShading';
 
@@ -83,6 +90,19 @@ describe('painted-bed beach profile', () => {
         expect(channel).toBeLessThan(0.01);
       }
     }
+  });
+});
+
+describe('painted-bed shallow chroma (L5F art review)', () => {
+  it('desaturates only the near-shore band, keeping luminance within 1 %', () => {
+    expect(BED_SHALLOW_DESAT.amount).toBeGreaterThanOrEqual(0.15);
+    expect(BED_SHALLOW_DESAT.amount).toBeLessThanOrEqual(0.35);
+    expect(BED_SHALLOW_DESAT.near).toBeLessThan(BED_SHALLOW_DESAT.far);
+    // Open water (beyond about 1.5 cells) keeps the approved sheen colour untouched.
+    expect(BED_SHALLOW_DESAT.far).toBeLessThanOrEqual(1.8);
+    const [r, g, b] = BED_SHALLOW_DESAT.tint;
+    expect(Math.abs(0.2126 * r + 0.7152 * g + 0.0722 * b - 1)).toBeLessThan(0.01);
+    expect(g).toBeGreaterThan(b);
   });
 });
 
