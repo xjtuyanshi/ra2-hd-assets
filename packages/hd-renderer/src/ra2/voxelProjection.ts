@@ -59,6 +59,8 @@ export function createVoxelProjectionPart(
 
 /** Object light level of the XMP29U2 noon bakes (see VoxelProjectionState.levelRef). */
 export const VOXEL_PROJECTION_LEVEL_REF = 1.7;
+/** Default mip LOD bias magnitude for the projected redraw atlases (see VoxelProjectionState.sharpen). */
+export const VOXEL_PROJECTION_SHARPEN = 0.5;
 
 export class VoxelProjectionState {
   readonly relight = uniform(0);
@@ -67,6 +69,15 @@ export class VoxelProjectionState {
   /** Linear-light gain and saturation of the redraw before the engine's light level (review/grading knobs). */
   readonly gain = uniform(1);
   readonly saturation = uniform(1);
+  /**
+   * Negative mip LOD bias (in levels) for the redraw atlases. The redraws are drawn about three times larger than the
+   * game shows them, so trilinear filtering lands between mips and softens the invented detail; a half-level bias
+   * keeps edges and highlights crisp at game scale without visible shimmer.
+   */
+  readonly sharpen = uniform(VOXEL_PROJECTION_SHARPEN);
+  /** Mesh-normal form shading (0..1) and camera glint strength applied to the projected house paint only. */
+  readonly paintShade = uniform(0.85);
+  readonly paintSpec = uniform(0.5);
   /**
    * Light level the redraws were baked under. The bakes are screenshots of the engine look, so their colours already
    * carry the bake map's object light level; the projected colour is scaled by level / levelRef instead of level.

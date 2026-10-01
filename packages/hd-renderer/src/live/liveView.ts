@@ -32,7 +32,7 @@ import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
 import { SmudgeInstanceCache, type LiveSmudgeCells, type SmudgePage } from './smudges';
 import { Projectiles } from './projectiles';
-import { shpUnitPose, shpUnitFrame } from './shpUnits';
+import { shpUnitPose, shpUnitFrame, type ShpUnitState } from './shpUnits';
 import { SpritePool } from './spritePool';
 import { ShroudLayer, type ShroudCells } from './shroud';
 import { VoxelUnits, type VoxelUnit, type VoxelUnitsOptions } from './voxelUnits';
@@ -77,6 +77,8 @@ export interface LiveObject {
   /** Bridge (H2): infantry sequence key (e.g. "Walk", "Die1", "FireUp") and sequence-local animation step. */
   infantrySequence?: string;
   sequenceFrame?: number;
+  /** Explicit SHP vehicle art pose for deterministic reviews; absent snapshots retain rules/event timing. */
+  shpUnitPose?: { state: ShpUnitState; step: number };
   /** Optional engine-selected 16-bit infantry art direction; leaves body/travel facing unchanged. */
   infantryDrawFacingRaw?: number;
   /** Native tactical layer registration; absent in older snapshots. Ground keys exclude altitude/art offsets. */
@@ -1580,14 +1582,16 @@ export class LiveView {
     if (!entry || !type.shpUnit) return;
     const facing = Math.round((pose.facing / (Math.PI * 2)) * 256) & 255;
     const moving = visual.lastMoveFrame !== undefined && frame - visual.lastMoveFrame <= WALK_FRAMES;
-    const state = shpUnitPose(
-      type.shpUnit,
-      this.effectArt?.shpUnitRates(object.type),
-      frame,
-      moving,
-      visual.firedFrame ?? null,
-      this.shpPose,
-    );
+    const state =
+      object.shpUnitPose ??
+      shpUnitPose(
+        type.shpUnit,
+        this.effectArt?.shpUnitRates(object.type),
+        frame,
+        moving,
+        visual.firedFrame ?? null,
+        this.shpPose,
+      );
     const index = Math.min(entry.frames.length - 1, shpUnitFrame(type.shpUnit, facing, state.state, state.step));
     const spriteFrame = entry.frames[index];
     if (!spriteFrame) return;

@@ -136,6 +136,24 @@ Other GPU work on the machine inflates every number, so compare configurations w
 `spread=<cells>` place and time the listed anims, `crater=1` emulates the engine's crater smudges, and
 `window.__fx.advance(ms)` steps the clock for frame-by-frame capture (header of `sandbox/fx.ts`).
 
+### SHP vehicle review bench
+
+Serve either cache root with `HD_CACHE_DIR="$SHP_SOURCE" pnpm hd:sandbox` or
+`HD_CACHE_DIR="$SHP_VARIANT" pnpm hd:sandbox` (restart the server between roots). Open the printed local origin
+with `?fx=shpunits&stypes=DRON&map=XMP29U2&seq=Stand&step=0&zoom=4`. Each type occupies one screen row with
+eight clockwise facings, starting at screen-up, matching the redraw sheets. DarkRed (house index 11) is the default
+for this bench; `house=<index>` overrides it. Existing `units` and `squad` bench defaults remain unchanged.
+
+`seq=Stand|Walk|Fire` and zero-based `step=<n>` select an explicit pose; `sspace=1` controls spacing.
+`animate=2` adds one step every two logic frames after warm-up; `time=0.4` or `window.__fx.advance(ms)` advances
+the deterministic bench clock. The ordinary animation loop holds that clock still for screenshots. Steps wrap
+inside each facing's sequence. `LiveObject.shpUnitPose` supplies this explicit art pose; when absent, the renderer
+continues using movement, fire events and rules timing. Body and shadow always use the same selected frame.
+
+Use identical query parameters and viewport for both cache roots. The bench uses synthetic snapshots and is a
+visual review surface, not evidence of native gameplay. The [SHP sheet CLI](../ra2-assets/README.md#shp-vehicle-redraw-sheets-python)
+documents preparation and the manual image-editing handoff.
+
 **Live view.** `LiveView.create` without `timeOfDay` follows the map's staging; `liveView.setEnvironment({ timeOfDay,
 weather, weatherIntensity, lamps, windows, lights, mist })` changes it without a reload. Light sources follow the
 buildings standing in the match (light-emitting types from `lights.json`; the engine grid is recomputed when that set
@@ -391,9 +409,12 @@ window.__hd.voxelProjection.strength.value = 1; // Default 1; 0 shows plain engi
 window.__hd.voxelProjection.levelRef.value = 1.7; // Object light level the redraws were baked under.
 window.__hd.voxelProjection.gain.value = 1; // Linear-light gain of the redraw colour (grading review).
 window.__hd.voxelProjection.saturation.value = 1; // Saturation of the redraw colour (grading review).
+window.__hd.voxelProjection.sharpen.value = 0.5; // Negative mip LOD bias (levels) for the redraw atlases.
+window.__hd.voxelProjection.paintShade.value = 0.85; // Mesh-normal form shading of the house paint (0..1).
+window.__hd.voxelProjection.paintSpec.value = 0.5; // Camera glint on the house paint.
 ```
 
-The sandbox also takes them in the URL: `?vpk=relight:0.5,levelRef:1.7,gain:1,saturation:1`. The bakes are
+The sandbox also takes them in the URL: `?vpk=relight:0.5,levelRef:1.7,gain:1,saturation:1`. The redraws are drawn about three times larger than the game shows them, so trilinear filtering lands between mips; `sharpen` biases the colour and paint reads toward the finer mip (0 restores plain trilinear sampling). Image models paint the remappable house colour almost flat, so the paint alone receives Lambert shading from the mesh normal against the current sun (normalised to 1 at n.l = 0.65) and a Blinn-Phong glint toward the iso camera; `vpk=sharpen:0,paintShade:0,paintSpec:0` reproduces the earlier projection look for A/B reviews. The bakes are
 screenshots of the engine look at the XMP29U2 noon object level, so their colours already carry that level: the
 projected colour is scaled by `level / levelRef` rather than `level`, and 1.7 reproduces the redraw frames' median
 brightness at noon on that map (measured in Chrome). relight, blend and strength are clamped to 0..1 in the shader. Optional relighting uses the existing sprite sun-direction uniform

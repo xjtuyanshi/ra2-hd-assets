@@ -5,7 +5,7 @@ import { smoothVoxelOptions, DEFAULT_SMOOTH_VOXEL, type SmoothVoxelOptions } fro
 import { VOXEL_PBR_DEFAULTS, voxelPbrFor, type VoxelPbrKnob } from '../src/ra2/voxelPbr';
 import { voxelProjectionFor } from '../src/ra2/voxelProjection';
 
-const PROJECTION_KNOBS = ['relight', 'blend', 'strength', 'gain', 'saturation', 'levelRef'] as const;
+const PROJECTION_KNOBS = ['relight', 'blend', 'strength', 'gain', 'saturation', 'levelRef', 'sharpen', 'paintShade', 'paintSpec'] as const;
 type ProjectionKnob = (typeof PROJECTION_KNOBS)[number];
 
 /**

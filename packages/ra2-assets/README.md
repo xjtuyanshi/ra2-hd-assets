@@ -375,6 +375,53 @@ cornices, light and shade) while the structure rules stay; `--style-lock-l <0..1
 lock's low-frequency lightness target from the reference where it shows the object cleanly (hue and saturation stay
 the original's). Because lightness may now move, loosen `lf_dE_mean` / `lf_dE_p95` with `--thresholds` accordingly.
 
+## SHP vehicle redraw sheets (Python)
+
+`python/shp_vehicle_sheets.py` prepares DRON (the Soviet terror drone), an SHP vehicle rather than a voxel.
+It imports the unchanged `python/infantry_sheets.py` CPU image pipeline. Python 3 with numpy, Pillow and cv2 is
+sufficient; the vehicle CLI never invokes an image model. Supply your own extracted library. `--library` is the
+cache root; `--theater` selects `_library/<theater>/library.json` (XMP29U2 uses `urban`). Keep `SHP_WORK` outside Git.
+
+```sh
+SHP_SOURCE="$PWD/gameres/hd-cache"
+SHP_VARIANT="$PWD/gameres/hd-cache-l3-veh"
+SHP_WORK=/private/tmp/dron-redraw
+SHP_TOOL=packages/ra2-assets/python/shp_vehicle_sheets.py
+python3 -B "$SHP_TOOL" prepare --library "$SHP_SOURCE" --theater urban --units DRON --work "$SHP_WORK"
+# Run your image editor manually for each sheets/<name>/prompt.txt and input.png.
+# Save output.png alongside input.png, at exactly the same dimensions.
+python3 -B "$SHP_TOOL" compose --library "$SHP_SOURCE" --theater urban --work "$SHP_WORK"
+python3 -B "$SHP_TOOL" build --library "$SHP_SOURCE" --theater urban --work "$SHP_WORK"
+python3 -B "$SHP_TOOL" install --library "$SHP_SOURCE" --theater urban --work "$SHP_WORK" --variant-root "$SHP_VARIANT"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_*sheets.py' -v
+```
+
+`prepare` writes `prepare.json` and `sheets/<name>/{input.png,prompt.txt,job.json}`. It refuses to overwrite a
+prepared work directory. Each sheet is exactly 1536x1024 or 1024x1536 on RGB (118,118,118), with decoded DarkRed
+house paint. It groups all eight clockwise facings of Stand, Walk or Fire, splitting consecutive step ranges only
+when required to keep at least 4x the indexed frame size. If one step cannot fit all facings, facing blocks split
+as a fallback. Frame offsets remain the per-row anchors. The frame policy mirrors renderer `shpUnitBlocks`:
+DRON walks on 0..47, stands on 48..55 and attacks on 56..87; separate shadow cards never enter the sheets.
+
+`compose` uses `output.png` exclusively, even if an older `full.png` exists. It writes per-frame `metrics.json` and
+`review.png` (existing HD | redraw). The imported pipeline registers frames, samples in linear light, locks
+low-frequency Lab colour, preserves HD alpha with inward trimming, and encodes house-paint shading by value on the
+grey remap ramp. `compose` and `build` accept the same colour/trim/paint options as the infantry tool; pass the same
+options to both. `--names DRON_Walk,DRON_Fire` selects sheets, and misspelled names fail.
+
+`build` recomposes the selected sheets into `pages/`, discovers all affected HD pages automatically and writes
+`report.json`. Missing or wrong-sized outputs fail. A frame below `--min-sil` (default 0.6) keeps its source pixels
+in the diagnostic page, fails the build and prevents publication of `build.json`; fix the output before installing.
+`install` requires a successful build with unchanged inputs/pages. It detaches only the cache root, `_library` and
+selected theater directory when they are links, leaving other entries linked. It copies accepted body rectangles
+into the current variant pages, preserving other tracks' edits even on shared pages, then merges only the selected
+HD colour/remap filenames into `library.json`. Original cache files, indexed pages, shadow cards, other sprites and
+unrelated manifest entries remain intact. Install into a separate variant cache; the source is always read-only.
+
+See the [SHP vehicle review bench](../hd-renderer/README.md#shp-vehicle-review-bench) for deterministic eight-facing
+before/after views. Unit tests validate CPU image and installation contracts; they do not establish redraw quality
+or browser/GPU rendering acceptance.
+
 ## Vehicle projection atlases (Python)
 
 `python/vehicle_projection.py` registers image-model redraw sheets against player-supplied voxel bakes and

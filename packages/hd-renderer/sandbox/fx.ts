@@ -4,6 +4,9 @@
  *
  *   ?fx=TWLT070[,GUNFIRE...]  spawn these anims at the view centre (spread along a diagonal) and show them `time` later
  *   ?fx=units                 voxel tanks, SHP drones and infantry at eight facings, plus a few buildings
+ *   ?fx=shpunits&stypes=DRON  one screen row per SHP vehicle, eight clockwise facings from screen-up, DarkRed house;
+ *                             &seq=Stand|Walk|Fire&step=0 selects a pose; &animate=N advances every N logic frames
+ *                             after warm-up (with &time= or __fx.advance). &sspace=1 controls row/column spacing.
  *   ?fx=squad                 a small battle line: Grizzlies and GIs (house &house) facing Rhinos (house &house2),
  *                             a power plant and a refinery behind them (combine with anims: ?fx=squad,TWLT070,...)
  *   &at=dx,dy;dx,dy           cell offsets from the centre for the listed anims (instead of the diagonal)
@@ -37,6 +40,7 @@ import { applyLookPreset, LOOK_PRESETS, type LookPreset } from '../src/HdRendere
 import { voxelLookParams } from './look';
 import { voxelProjectionFor } from '../src/ra2/voxelProjection';
 import { voxelPbrFor } from '../src/ra2/voxelPbr';
+import { advanceShpReview, shpUnitReview } from './shpUnitReview';
 
 const params = new URLSearchParams(location.search);
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
@@ -60,7 +64,7 @@ const mapName = params.get('map') ?? 'XMP29U2';
 const zoom = Number(params.get('zoom') ?? 1);
 const fps = Number(params.get('fps') ?? 15);
 const time = Number(params.get('time') ?? 0);
-const house = Number(params.get('house') ?? 15);
+const house = Number(params.get('house') ?? (params.get('fx')?.split(',').includes('shpunits') ? 11 : 15));
 const live = await LiveView.create(canvas, {
   ...voxelLookParams(params),
   mapBase: `/${encodeURIComponent(mapName)}`,
@@ -280,6 +284,9 @@ for (const [id, a] of Object.entries(effectsJson?.anims ?? {}))
 
 const fxIds = (params.get('fx') ?? 'units').split(',').filter(Boolean);
 const units = [...(fxIds.includes('units') ? unitSet() : []), ...(fxIds.includes('squad') ? squadSet() : [])];
+const shpReview = fxIds.includes('shpunits') ? shpUnitReview(params, cx, cy, levelAt(cx, cy) * 104, nextUid) : [];
+nextUid += shpReview.length;
+const animateShp = Number(params.get('animate') ?? 0);
 const spread = Number(params.get('spread') ?? 1.6);
 const offsets = params
   .get('at')
@@ -287,7 +294,7 @@ const offsets = params
   .map((pair) => pair.split(',').map(Number) as [number, number])
   .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
 const anims: LiveAnim[] = fxIds
-  .filter((id) => id !== 'units' && id !== 'squad')
+  .filter((id) => id !== 'units' && id !== 'squad' && id !== 'shpunits')
   .map((type, i, list) => {
     const offset = offsets?.length ? offsets[i % offsets.length]! : null;
     const d = (i - (list.length - 1) / 2) * spread;
@@ -401,7 +408,9 @@ function snapshot(): LiveSnapshot {
     frame,
     view,
     houses,
-    objects: units,
+    objects: shpReview.length
+      ? [...units, ...advanceShpReview(shpReview, spawned === null ? 0 : frame - spawned, animateShp)]
+      : units,
     effects: {
       anims: listed,
       bullets: [],
