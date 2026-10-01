@@ -283,21 +283,23 @@ describe('r186 vertex and uniform binding budget', () => {
     const rain = buildRain(2, 2, texture(), 0, nodes);
     const groups = [effects.root, emitters.root, (lights as unknown as { scene: Scene }).scene, rain.object];
     const audited = groups.flatMap(meshes);
-    // Sixteen particle pools (including seven enhanced pools), beams; four emitter batches;
+    // Eighteen particle pools (including nine enhanced pools), beams; four emitter batches;
     // base grid + two light batches; rain + splashes. Check every named pool's actual allocation below.
-    expect(audited.length).toBe(26);
+    expect(audited.length).toBe(28);
     const capacities = {
       fireballs: 96,
       flames: 768,
       smoke: 1536,
       sparks: 1024,
+      airborneEmbers: 512,
+      muzzleStar: 128,
       scorch: 96,
       shock: 48,
       embers: 256,
       garnishFire: 128,
       dots: 512,
       halo: 128,
-      billow: 1024,
+      billow: 1536,
       debris: 1024,
       shimmer: 64,
       dust: 64,

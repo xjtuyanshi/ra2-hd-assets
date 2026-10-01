@@ -20,6 +20,8 @@ async function bench(query: string) {
         height: new Uint8Array(32 * 32).fill(2),
       },
     },
+    // The bench reads the renderer's node set for the vehicle look state; undefined selects the default set.
+    hd: { nodes: undefined, stats: vi.fn() },
     resize: vi.fn(),
     render: vi.fn(),
     push: (snapshot: LiveSnapshot) => snapshots.push(snapshot),
