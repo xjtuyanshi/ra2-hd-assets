@@ -73,40 +73,49 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
   // and present the saturated sphere/arcs after the grade so neither can feed bloom's lavender-white veil.
   NAPOWR: [
     {
-      at: [0.57, 0.4],
-      height: 29,
-      colour: [0.15, 0.42, 2.55],
+      // The overlay orb must sit on the art's glass sphere (radius about 16.5 engine px): measured on the battle and
+      // live-replay framings, [0.57, 0.40] put the disc about 6 engine px right of and 2.5 below the art's centre.
+      at: [0.47, 0.4],
+      height: 27,
+      // Night value; by day only `day` of it (luminance about 0.17 of noon flat ground: measured +16 % luminance on the
+      // grass beside two live reactors, the target's contained tint). At a third of this the night pool vanished
+      // (pavement next to the reactors unchanged at hour 21).
+      colour: [0.75, 2.1, 12.75],
       radius: 2.6,
       flicker: 0.12,
-      day: 0.33,
+      day: 0.066,
       groundOnly: 1,
       glow: null,
       glowSize: 0,
       hole: false,
       damaged: 0.6,
-      arcs: 5,
+      arcs: 7,
       falloff: 'soft',
       fadeIn: 0.5,
       orb: {
-        radius: 0.3,
-        hot: displayLinear(225, 240, 255),
-        body: displayLinear(60, 110, 255),
-        limb: displayLinear(40, 80, 230),
+        // Covers the art's whole sphere; a smaller disc left a pale glass ring round a dark-blue 'eye'.
+        radius: 0.55,
+        // A soft hot centre fading into the body (a hard 0.3 R white disc read as a pupil).
+        // Cyan-white centre like the target's (hue ~193 deg); a lavender-white one read as the veil again.
+        hot: displayLinear(195, 245, 255),
+        body: displayLinear(60, 120, 255),
+        // A lighter rim gives the sphere its glassy edge (the target's orb is brightest at the core and the rim).
+        limb: displayLinear(95, 155, 255),
         filaments: displayLinear(150, 190, 255),
         halo: displayLinear(45, 95, 255),
-        coreRadius: 0.3,
-        bodyStart: 0.45,
-        bodyEnd: 0.85,
-        alpha: 0.92,
-        haloAlpha: 0.55,
-        haloScale: 1.75,
+        coreRadius: 0,
+        bodyStart: 0.55,
+        bodyEnd: 0.86,
+        alpha: 0.9,
+        haloAlpha: 0.4,
+        haloScale: 1.4,
       },
       arcStyle: {
-        core: displayLinear(215, 232, 255),
-        edge: displayLinear(55, 105, 255),
-        width: 1.3,
-        forkWidth: 1.0,
-        reach: [0.35, 0.9],
+        core: displayLinear(205, 240, 255),
+        edge: displayLinear(45, 105, 255),
+        width: 2.2,
+        forkWidth: 1.6,
+        reach: [0.45, 1.1],
         crawl: 0.4,
       },
     },
@@ -371,6 +380,12 @@ export class BuildingLightGate {
   }
 }
 
+/** Extra depth pull of the arcs past the orb's own (world units). */
+const ARC_PUSH = 0.8;
+/** Width and opacity of the soft glow stroke drawn under each arc and fork. */
+const ARC_GLOW_WIDTH = 3;
+const ARC_GLOW_ALPHA = 0.5;
+
 /** Pure decorative policy: shapes reseed every two logic frames, presentation alpha and orb brightness remain live. */
 export function buildingLightOverlay(
   lights: readonly BuildingLightPlacement[],
@@ -387,7 +402,9 @@ export function buildingLightOverlay(
     discs.push({
       centre: light.headPosition,
       orb,
-      push: light.push ?? 0,
+      // The disc and its halo reach radius x haloScale round the head; with only the head's own pull the owner's
+      // foundation depth (a wedge whose ridge is the front corner) cut a pie slice out of the right half of the orb.
+      push: (light.push ?? 0) + orb.radius * orb.haloScale,
       seed: light.seed ?? 0,
       alpha: fade,
       brightness: flicker(light.seed ?? 0, now, light.flicker),
@@ -445,7 +462,15 @@ export function buildingLightOverlay(
         core: style.core,
         edge: style.edge,
         alpha,
-        push: light.push,
+        // Arcs strike the pads and towers in front of the orb: pull them further towards the camera than the orb so the
+        // reactor's own tower cards do not swallow them (units standing in front stay nearer still).
+        push: (light.push ?? 0) + ARC_PUSH,
+      });
+      // A wide, faint saturated glow under each crisp bolt: the electric halo the bloom used to add (as lavender haze).
+      strokes.push({
+        ...stroke(points, style.width * ARC_GLOW_WIDTH),
+        core: style.edge,
+        alpha: alpha * ARC_GLOW_ALPHA,
       });
       strokes.push(stroke(points, style.width));
       const cumulative = [0];
@@ -470,6 +495,11 @@ export function buildingLightOverlay(
           ),
           onGlass(end),
         ];
+        strokes.push({
+          ...stroke(fork, style.forkWidth * ARC_GLOW_WIDTH),
+          core: style.edge,
+          alpha: alpha * ARC_GLOW_ALPHA,
+        });
         strokes.push(stroke(fork, style.forkWidth));
       }
     }

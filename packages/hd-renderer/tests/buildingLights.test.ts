@@ -32,6 +32,8 @@ function srgb(v: number) {
   return v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055;
 }
 
+const ARC = BUILDING_LIGHTS.NAPOWR![0]!.arcStyle!;
+
 describe('building light policy', () => {
   it('centres the soft pool on the foundation while retaining the head position and depth push', () => {
     const light = buildingLightPlacements('NAPOWR', reactor, [3, 2])[0]!;
@@ -47,9 +49,10 @@ describe('building light policy', () => {
     });
     expect(light.hole).toBeUndefined();
     expect(light.holeOffset).toBeUndefined();
-    expect(light.headPosition.x).toBeCloseTo(5 + 0.57 * 3);
-    expect(light.headPosition.z).toBeCloseTo(7 + 0.4 * 2);
-    expect(light.headPosition.y).toBeCloseTo(2 * LEVEL_HEIGHT + (29 / 15) * LEVEL_HEIGHT);
+    const spec = BUILDING_LIGHTS.NAPOWR![0]!;
+    expect(light.headPosition.x).toBeCloseTo(5 + spec.at[0] * 3);
+    expect(light.headPosition.z).toBeCloseTo(7 + spec.at[1] * 2);
+    expect(light.headPosition.y).toBeCloseTo(2 * LEVEL_HEIGHT + (spec.height / 15) * LEVEL_HEIGHT);
     expect(light.push).toBeGreaterThan(0.15);
     expect(buildingLightPlacements('UNKNOWN', reactor, [3, 2])).toEqual([]);
   });
@@ -68,10 +71,11 @@ describe('building light policy', () => {
     expect(hue).toBeGreaterThanOrEqual(215);
     expect(hue).toBeLessThanOrEqual(235);
     expect((b - r) / b).toBeGreaterThanOrEqual(0.6);
-    expect(body.map((v) => Math.round(v * 255))).toEqual([60, 110, 255]);
+    expect(body.map((v) => Math.round(v * 255))).toEqual([60, 120, 255]);
     expect(0.2126 * light.colour[0] + 0.7152 * light.colour[1] + 0.0722 * light.colour[2]).toBeLessThanOrEqual(0.2);
-    expect(light.orb).toMatchObject({ radius: 0.3, alpha: 0.92, haloScale: 1.75, haloAlpha: 0.55 });
-    expect(select([reactor], 1, 1)[0]!.colour).toEqual([0.15, 0.42, 2.55]);
+    // The disc covers the art's whole glass sphere (about 16.5 engine px) with a contained halo.
+    expect(light.orb).toMatchObject({ radius: 0.55, alpha: 0.9, haloScale: 1.4, haloAlpha: 0.4 });
+    expect(select([reactor], 1, 1)[0]!.colour).toEqual([0.75, 2.1, 12.75]);
   });
   it('creates nothing at zero gain without querying foundations or visibility', () => {
     const size = vi.fn(foundation);
@@ -140,7 +144,7 @@ describe('building light policy', () => {
     view.updateBuildingLights(snapshot);
     expect(source).toHaveBeenCalledWith('building:42:0', 2, expect.objectContaining({ glow: null }));
     expect(setDiscs.mock.calls[0]![0]).toHaveLength(1);
-    expect(setStrokes.mock.calls[0]![0].filter((s: { width: number }) => s.width === 1.3)).toHaveLength(5);
+    expect(setStrokes.mock.calls[0]![0].filter((s: { width: number }) => s.width === ARC.width)).toHaveLength(7);
     expect(setDecorativeBeams).not.toHaveBeenCalled();
     view.updateBuildingLights({ ...snapshot, objects: [{ ...reactor, health: 0 }] });
     expect(retainSources).toHaveBeenLastCalledWith(new Set());
@@ -202,18 +206,22 @@ describe('building state gate', () => {
 });
 
 describe('decorative unbloomed source overlay', () => {
-  it('builds five jagged arcs with inner-joint forks and stable shapes for frame pairs', () => {
+  it('builds seven jagged arcs with inner-joint forks, glow strokes and stable shapes for frame pairs', () => {
     const lights = select();
     const a = buildingLightOverlay(lights, 10, 1);
     expect(a).toEqual(buildingLightOverlay(lights, 10, 1));
     expect(a).toEqual(buildingLightOverlay(lights, 11, 1));
     expect(a).not.toEqual(buildingLightOverlay(lights, 12, 1));
     expect(a).not.toEqual(buildingLightOverlay([{ ...lights[0]!, key: 'other' }], 10, 1));
-    const arcs = a.strokes.filter((s) => s.width === 1.3);
-    const forks = a.strokes.filter((s) => s.width === 1);
-    expect(arcs).toHaveLength(5);
-    expect(forks.length).toBeGreaterThanOrEqual(5);
-    expect(forks.length).toBeLessThanOrEqual(10);
+    const arcs = a.strokes.filter((s) => s.width === ARC.width);
+    const forks = a.strokes.filter((s) => s.width === ARC.forkWidth);
+    const glows = a.strokes.filter((s) => s.width > ARC.width);
+    expect(arcs).toHaveLength(7);
+    expect(forks.length).toBeGreaterThanOrEqual(7);
+    expect(forks.length).toBeLessThanOrEqual(14);
+    // Every crisp arc and fork has a wider, fainter glow stroke in the edge colour drawn before it.
+    expect(glows).toHaveLength(arcs.length + forks.length);
+    glows.forEach((g) => expect(g.core).toEqual(ARC.edge));
     arcs.forEach((s) => {
       expect(s.points.length).toBeGreaterThanOrEqual(7);
       expect(s.points.length).toBeLessThanOrEqual(10);
@@ -229,27 +237,31 @@ describe('decorative unbloomed source overlay', () => {
       expect(t).toBeGreaterThanOrEqual(0.3);
       expect(t).toBeLessThanOrEqual(0.5);
     });
-    for (const s of a.strokes) {
+    for (const s of [...arcs, ...forks]) {
       expect(s.alpha).toBeGreaterThanOrEqual(0.7);
       expect(s.alpha).toBeLessThanOrEqual(1);
+    }
+    for (const s of glows) {
+      expect(s.alpha).toBeGreaterThanOrEqual(0.35);
+      expect(s.alpha).toBeLessThanOrEqual(0.5);
     }
   });
   it('keeps crawling arcs over the glass and outgoing arcs within the authored reach with downward bias', () => {
     const l = select()[0]!;
-    const arcs = buildingLightOverlay([l], 10, 1).strokes.filter((s) => s.width === 1.3);
-    for (let i = 0; i < 5; i++) {
+    const arcs = buildingLightOverlay([l], 10, 1).strokes.filter((s) => s.width === ARC.width);
+    for (let i = 0; i < 7; i++) {
       const s = arcs[i]!;
       const a = s.points[0]!;
       const b = s.points.at(-1)!;
       if ([2, 4].includes(i)) {
         for (const p of s.points)
           expect(Math.hypot(p.x - l.headPosition.x, p.y - l.headPosition.y, p.z - l.headPosition.z)).toBeCloseTo(
-            0.3 * 1.04,
+            l.orb!.radius * 1.04,
           );
       } else {
         const d = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
-        expect(d).toBeGreaterThanOrEqual(0.35);
-        expect(d).toBeLessThanOrEqual(0.9);
+        expect(d).toBeGreaterThanOrEqual(ARC.reach[0]);
+        expect(d).toBeLessThanOrEqual(ARC.reach[1]);
         expect(b.y - a.y).toBeLessThanOrEqual(d * 0.25);
       }
     }
