@@ -9,6 +9,10 @@
  *   ?fx=bldgs&bldgs=NACNST:0:0:0,NAPOWR:4:0:1  TYPE:dx:dy[:owner] buildings, cell offsets from cx,cy;
  *                             owner indexes the bench houses (default 0); combine with anims: ?fx=bldgs,TWLT070
  *   &health=0.4               health of all listed buildings (default 1; <= 0.5 uses damaged art)
+ *   &banims=NAREFNL1:0:3:4,NAREFNOR:0:20:3  SPRITE:start:frames:rate building layers played as the bridge's
+ *                             building anim list (buildingAnim entries attached to every listed building, looping
+ *                             from the spawn), e.g. the refinery's ore unloading that the fallback never shows;
+ *                             a building then draws only the listed layers that it has
  *   &make=1&time=0.4          omit listed buildings during warm-up, then spawn them to play the engine-style
  *                             build-up; time selects seconds after spawn (keep the default warm-up for make)
  *   &at=dx,dy;dx,dy           cell offsets from the centre for the listed anims (instead of the diagonal)
@@ -432,8 +436,45 @@ function benchAnim(anim: LiveAnim, age: number): LiveAnim | null {
   return { ...anim, ...native };
 }
 
+/** &banims: the listed building layers as the engine's building anim list would hold them now (looping). */
+const buildingLayerSpecs = (params.get('banims') ?? '')
+  .split(',')
+  .filter(Boolean)
+  .map((spec) => {
+    const [type, start, frames, rate] = spec.split(':');
+    const parsed = { type: type ?? '', start: Number(start), frames: Number(frames), rate: Number(rate) };
+    if (!parsed.type || !(parsed.start >= 0) || !(parsed.frames >= 1) || !(parsed.rate >= 1))
+      throw new Error(`Invalid building anim spec: ${spec}; expected SPRITE:start:frames:rate`);
+    return parsed;
+  });
+function buildingLayerAnims(): LiveAnim[] {
+  if (!buildingLayerSpecs.length || spawned === null || frame < spawned) return [];
+  const age = frame - spawned;
+  return buildings.flatMap((b, bi) =>
+    buildingLayerSpecs.map((s, i) => {
+      const stage = Math.floor(age / s.rate) % s.frames;
+      const uid = 50_000 + bi * 64 + i;
+      return {
+        id: uid,
+        uid,
+        type: s.type,
+        x: b.x,
+        y: b.y,
+        z: b.z,
+        frame: s.start + stage,
+        stage,
+        frameCount: s.frames,
+        rate: s.rate,
+        buildingAnim: true,
+        attachedTo: { id: b.id, uid: b.uid, kind: 'building' },
+      };
+    }),
+  );
+}
+
 function snapshot(): LiveSnapshot {
   const listed = anims.map((a, i) => listedAnim(a, i)).filter((a): a is LiveAnim => !!a);
+  listed.push(...buildingLayerAnims());
   return {
     frame,
     view,

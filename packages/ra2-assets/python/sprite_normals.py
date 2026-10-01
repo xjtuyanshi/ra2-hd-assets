@@ -491,6 +491,8 @@ def tree_material(rgb: np.ndarray, alpha: np.ndarray) -> tuple[np.ndarray, np.nd
 def shift(image: np.ndarray, dx: int, dy: int, fill: float = 0.0) -> np.ndarray:
     out = np.full_like(image, fill)
     h, w = image.shape[:2]
+    if abs(dx) >= w or abs(dy) >= h:
+        return out  # shifted entirely outside a tiny frame
     ys, yd = (slice(0, h - dy), slice(dy, h)) if dy >= 0 else (slice(-dy, h), slice(0, h + dy))
     xs, xd = (slice(0, w - dx), slice(dx, w)) if dx >= 0 else (slice(-dx, w), slice(0, w + dx))
     out[yd, xd] = image[ys, xs]
