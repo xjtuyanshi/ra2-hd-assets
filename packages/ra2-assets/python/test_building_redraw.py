@@ -159,6 +159,13 @@ class BuildingTests(unittest.TestCase):
         np.testing.assert_allclose(np.array(params)[[0, 2]], np.array(expected)[[0, 2]], atol=0.006)
         np.testing.assert_allclose(np.array(params)[[1, 3]], np.array(expected)[[1, 3]], atol=0.6)
 
+    def test_guard_registration_rejects_far_scales(self):
+        ok = (1.02, -1.5, 0.97, 2.0)
+        self.assertEqual(br.guard_registration(ok), ok)
+        with mock.patch('builtins.print'):
+            self.assertEqual(br.guard_registration((4.12, -351.0, 2.28, -238.5), 'pack cell'), (1.0, 0.0, 1.0, 0.0))
+            self.assertEqual(br.guard_registration((1.0, 0.0, 0.5, 0.0)), (1.0, 0.0, 1.0, 0.0))
+
     def test_post_identity_and_split_patches(self):
         d, c = self.body_job()
         _, rgba, remap, shown = br.post(d, root=self.root)

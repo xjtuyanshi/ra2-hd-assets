@@ -240,6 +240,15 @@ def register_out(inp, raw):
     return params, diag
 
 
+def guard_registration(params, label=''):
+    """Identity when a registration scale leaves 0.8..1.25. The image model keeps the input canvas, so a far-off fit
+    (seen: x4 on a pack cell with a large empty margin) is a failed solve that would smear the redraw over the frame."""
+    if 0.8 < params[0] < 1.25 and 0.8 < params[2] < 1.25:
+        return params
+    print(f'{label}: registration rejected {[round(float(x), 4) for x in params]}, using identity')
+    return (1.0, 0.0, 1.0, 0.0)
+
+
 def sample(raw, canvas, params, F, scale):
     """Registered image at `scale` x of 1x (canvas is F x of 1x), box filtered in linear light from the model image."""
     cw, ch = canvas
@@ -833,6 +842,7 @@ def post(d, over=None, *, root=None, theater='urban'):
     inp = load(d / 'input.png')
     raw = load(d / ('raw.png' if (d / 'raw.png').exists() else 'output.png'))
     params, diag = register_out(inp, raw)
+    params = guard_registration(params, d.name)
     F = lay['factor']
     ch, cw = inp.shape[:2]
     rep2m = sample(raw, (cw, ch), params, F, 2)
