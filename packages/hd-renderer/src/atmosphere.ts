@@ -37,6 +37,8 @@ export class AtmosphereNodes {
   }
   readonly sceneLevel = uniform(new Color(1, 1, 1));
   readonly sceneBrightness = uniform(1);
+  /** Preserve legacy local-light rendering while source-light enhancements are disabled. */
+  readonly localLightCap = uniform(0);
   readonly night = uniform(0);
   readonly moonDesaturation = uniform(0);
   readonly windowGain = uniform(0);
@@ -61,6 +63,7 @@ export class AtmosphereNodes {
   copyValuesFrom(source: AtmosphereNodes): void {
     this.sceneLevel.value.copy(source.sceneLevel.value);
     this.sceneBrightness.value = source.sceneBrightness.value;
+    this.localLightCap.value = source.localLightCap.value;
     this.night.value = source.night.value;
     this.moonDesaturation.value = source.moonDesaturation.value;
     this.windowGain.value = source.windowGain.value;
@@ -154,10 +157,9 @@ export const NEIGHBOUR_GROUND_SHARE = 0.3;
 /**
  * objectLight for sprite art. `building` (0 or 1) marks upright building art: it takes the ground-only share of the
  * field (SourceSpec.groundOnly, carried in the field's alpha as luminance) at `own`, a point inside its own foundation,
- * instead of at `xz`, the ground in front of the art that its pixels otherwise sample. A building's own source has a
- * hole over that foundation, so its facades and the reactor's orb glass stay unwashed, while a neighbouring building
- * inside the pool still takes part of the light (NEIGHBOUR_GROUND_SHARE). Without a ground-only share (alpha 0) this
- * equals objectLight(xz) exactly.
+ * instead of at `xz`, the ground in front of the art that its pixels otherwise sample. The interior sample takes only
+ * NEIGHBOUR_GROUND_SHARE, including soft radial sources without a hole; rectangle sources can still mask their owner.
+ * Without a ground-only share (alpha 0) this equals objectLight(xz) exactly.
  */
 export function objectLightAt(
   xz: ShaderNode,
@@ -176,6 +178,22 @@ export function objectLightAt(
     .add(insideRgb.mul(share(inside, insideRgb)).mul(NEIGHBOUR_GROUND_SHARE));
   const l: ShaderNode = luminance(lf);
   return mix(vec3(l, l, l), lf, float(OBJECT_TINT));
+}
+
+/** Scale only the summed local contribution into remaining display-white headroom, preserving its hue. */
+export function localLightHeadroom(base: ShaderNode, added: ShaderNode, enabled?: ShaderNode): ShaderNode {
+  const brightest = (rgb: ShaderNode): ShaderNode => max(rgb.r, max(rgb.g, rgb.b));
+  const k = float(1).sub(brightest(base)).div(brightest(added).max(1e-4)).clamp(0, 1);
+  return enabled ? enabled.greaterThan(0).select(added.mul(k), added) : added.mul(k);
+}
+
+/** JavaScript twin; dark surfaces retain ordinary fire/explosion light while lamp-lit sandstone cannot clip. */
+export function localLightHeadroomRgb(
+  base: readonly [number, number, number],
+  added: readonly [number, number, number],
+): [number, number, number] {
+  const k = Math.min(1, Math.max(0, (1 - Math.max(...base)) / Math.max(Math.max(...added), 1e-4)));
+  return [added[0] * k, added[1] * k, added[2] * k];
 }
 
 /** Presentation settings of the atmosphere (sandbox parameters, live view environment). */

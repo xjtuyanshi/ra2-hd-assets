@@ -5,6 +5,7 @@ import {
   Color,
   DataTexture,
   NeutralToneMapping,
+  MaterialBlending,
   NormalBlending,
   NoColorSpace,
   NoToneMapping,
@@ -55,6 +56,7 @@ import {
 import type { AtmosphereProfile, RenderEvent, RenderState } from './contract';
 import { EffectsLayer } from './effects';
 import { EmitterLayer, type Emitter } from './emitters';
+import { EmissiveOverlay, emissiveMrtSupported } from './emissiveOverlay';
 import { LightField, type DynamicLight } from './lightField';
 import { Lighting, clearLightAt, noonFlatLuminance } from './lighting';
 import { Mist, MIST_CAP } from './mist';
@@ -77,7 +79,7 @@ import {
   spriteLookFor,
 } from './ra2/spriteLook';
 import type { HdWorld } from './ra2/world';
-import { IsoCamera, LEVEL_HEIGHT, cellToWorld } from './world';
+import { IsoCamera, LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE, cellToWorld } from './world';
 
 /** 'faithful' (default): identity below the knee, hue-preserving shoulder above (see post.ts). */
 export type ToneMapper = 'faithful' | 'agx' | 'neutral' | 'aces';
@@ -89,6 +91,14 @@ export type ToneMapper = 'faithful' | 'agx' | 'neutral' | 'aces';
  * (navigator.deviceMemory) default to 'fxaa'.
  */
 export type Antialias = 'msaa4' | 'fxaa' | 'none';
+
+/** Without supported MRT blending, keep the legacy scene graph and omit the overlay entirely. */
+export function emissiveOverlayEnabled(
+  settings: Pick<HdSettings, 'sourceLights' | 'debugView'>,
+  supportsMrt: boolean,
+): boolean {
+  return supportsMrt && settings.sourceLights > 0 && settings.debugView === 'none';
+}
 
 /** Default anti-aliasing for this device (see Antialias). */
 export function defaultAntialias(): Antialias {
@@ -508,6 +518,7 @@ export class HdRenderer {
   readonly effects: EffectsLayer;
   /** Lamp heads and wet-ground reflections. */
   readonly emitters: EmitterLayer;
+  readonly emissiveOverlay: EmissiveOverlay;
   /** Every local light as irradiance on the ground; created in init() once the map size is known. */
   lightField!: LightField;
   private readonly mist: Mist;
@@ -583,6 +594,9 @@ export class HdRenderer {
     this.layerNodes = this.nodes;
     this.effects = new EffectsLayer(this.layerNodes);
     this.emitters = new EmitterLayer(this.layerNodes);
+    this.emissiveOverlay = new EmissiveOverlay(PIXELS_PER_CELL_EDGE);
+    this.scene.onBeforeRender = () => this.emissiveOverlay.beginRender(this.renderer);
+    this.scene.onAfterRender = () => this.emissiveOverlay.endRender();
     this.mist = new Mist(this.layerNodes);
     this.state = initial;
     this.trackTimestamp = options.trackTimestamp ?? false;
@@ -679,7 +693,14 @@ export class HdRenderer {
     // Flat-ground irradiance at clear noon (day keys never depend on the map's profile): the day exposure's white point.
     this.lighting.update(12, 0);
     this.lighting.flatIrradianceColor(this.noonIrradiance);
-    this.scene.add(this.terrain.mesh, this.lighting.root, this.effects.root, this.rain.object, this.emitters.root);
+    this.scene.add(
+      this.terrain.mesh,
+      this.lighting.root,
+      this.effects.root,
+      this.rain.object,
+      this.emitters.root,
+      this.emissiveOverlay.root,
+    );
     world?.dressing?.attach({
       scene: this.scene,
       nodes: this.nodes,
@@ -717,7 +738,7 @@ export class HdRenderer {
 
   private settingsPipelineKey(): string {
     const { antialias, toneMapper, sharpness, debugView } = this.settings;
-    return JSON.stringify([
+    const key: unknown[] = [
       antialias,
       toneMapper,
       sharpness,
@@ -725,11 +746,16 @@ export class HdRenderer {
       debugView === 'none' && hasCinematicGrade(this.settings),
       // The clarity pass exists only while it is on; its blur radius follows the drawing buffer's pixel ratio.
       this.settings.clarity > 0 ? Math.round(this.renderer.getPixelRatio() * 4) : 0,
-    ]);
+    ];
+    // No extra key/graph branch for faithful: preserve its original output path exactly.
+    if (emissiveOverlayEnabled(this.settings, emissiveMrtSupported(this.renderer))) key.push('emissive');
+    return JSON.stringify(key);
   }
 
   private buildPipeline(): void {
     const { antialias, toneMapper, sharpness, debugView } = this.settings;
+    const overlay = emissiveOverlayEnabled(this.settings, emissiveMrtSupported(this.renderer));
+    this.emissiveOverlay.setEnabled(overlay);
     this.pipelineKey = this.settingsPipelineKey();
     // Release the previous pipeline's render targets and output material before building the new one (the MSAA scene
     // target alone is over 100 MB at 2400x1500).
@@ -737,17 +763,24 @@ export class HdRenderer {
     for (const node of this.pipelineNodes) node.dispose();
     const nodes: { dispose(): void }[] = (this.pipelineNodes = []);
     const scenePass = pass(this.scene, this.view.camera, { samples: antialias === 'msaa4' ? 4 : 0 });
-    if (this.painterDepthEnabled) {
-      // Store inverse physical depth: a black clear texel represents the untouched far plane. Alpha is a write
-      // mask, independent of the art's coverage, matching which fragments write the scene's depth attachment.
-      const preserved = Fn(([], builder: NodeBuilder) =>
-        vec4(float(1).sub(physicalDepth), 0, 0, builder.material.depthWrite ? 1 : 0),
-      )();
-      scenePass.setMRT(
-        mrt({ output: materialOutput, physicalDepth: preserved })
+    if (this.painterDepthEnabled || overlay) {
+      const outputs: Record<string, ShaderNode> = { output: materialOutput };
+      if (this.painterDepthEnabled) {
+        // Physical-depth alpha follows depth writes, independently of art coverage; overlays never write depth.
+        outputs.physicalDepth = Fn(([], builder: NodeBuilder) =>
+          vec4(float(1).sub(physicalDepth), 0, 0, builder.material.depthWrite ? 1 : 0),
+        )();
+      }
+      if (overlay) outputs.emissive = vec4(0, 0, 0, materialOutput.a);
+      const attachments = mrt(outputs);
+      if (this.painterDepthEnabled)
+        attachments
           .setBlendMode('physicalDepth', new BlendMode(NormalBlending))
-          .setClearColor('physicalDepth', 0x000000, 0),
-      );
+          .setClearColor('physicalDepth', 0x000000, 0);
+      // Use each foreground material's blending: opaque art clears emission, alpha art covers it, additive FX add zero.
+      if (overlay)
+        attachments.setBlendMode('emissive', new BlendMode(MaterialBlending)).setClearColor('emissive', 0x000000, 0);
+      scenePass.setMRT(attachments);
     }
     nodes.push(scenePass);
     const hdr: ShaderNode = scenePass.getTextureNode('output');
@@ -795,13 +828,19 @@ export class HdRenderer {
     const neutral: ShaderNode = neutralToneMapping(composite, float(1));
     // (TSL's chained a.mix(b, t) is mix(b, t, a); call mix() directly.)
     const mixed: ShaderNode = mix(faithful, neutral, this.nightDisplay);
+    const emission: ShaderNode | null = overlay ? scenePass.getTextureNode('emissive').rgb.mul(visible) : null;
+    const addEmission = (linear: ShaderNode): ShaderNode => (emission ? linear.add(emission) : linear);
     let output: ShaderNode;
     if (hasCinematicGrade(this.settings)) {
       // Grade display-linear colour after the tone map, before renderOutput encodes sRGB and the night toe lift.
       const linear: ShaderNode =
         toneMapper === 'faithful' ? mixed : toneMapping(TONE_MAPPERS[toneMapper], float(1), vec4(composite, 1)).rgb;
       const graded: ShaderNode = mix(cinematicGrade(linear, this.gradeUniforms), linear, this.nightDisplay);
-      output = renderOutput(vec4(graded, 1), NoToneMapping);
+      output = renderOutput(vec4(addEmission(graded), 1), NoToneMapping);
+    } else if (overlay) {
+      const linear: ShaderNode =
+        toneMapper === 'faithful' ? mixed : toneMapping(TONE_MAPPERS[toneMapper], float(1), vec4(composite, 1)).rgb;
+      output = renderOutput(vec4(addEmission(linear), 1), NoToneMapping);
     } else {
       // Keep the original graph untouched when all display-grade controls are neutral.
       output =
@@ -846,6 +885,7 @@ export class HdRenderer {
     this.renderer.toneMapping =
       this.settings.toneMapper === 'faithful' ? NoToneMapping : TONE_MAPPERS[this.settings.toneMapper];
     this.renderer.toneMappingExposure = 1;
+    this.nodes.localLightCap.value = this.settings.sourceLights > 0 ? 1 : 0;
     this.bloomStrength.value = this.settings.bloom;
     this.clarityAmount.value = this.settings.clarity;
     this.vignetteStrength.value = this.settings.vignette;
@@ -1063,6 +1103,10 @@ export class HdRenderer {
     this.emitters.cameraRight.value.copy(right);
     this.emitters.cameraUp.value.copy(up);
     this.emitters.toCamera.value.copy(toCamera);
+    this.emissiveOverlay.cameraRight.value.copy(right);
+    this.emissiveOverlay.cameraUp.value.copy(up);
+    this.emissiveOverlay.toCamera.value.copy(toCamera);
+    this.emissiveOverlay.now.value = now;
     const sprites = this.world?.sprites;
     const spriteScale = 1 / Math.PI + (1 / reference - 1 / Math.PI) * nightGrade;
     if (sprites) {
@@ -1329,6 +1373,7 @@ export class HdRenderer {
     for (const node of this.pipelineNodes) node.dispose();
     this.pipelineNodes.length = 0;
     this.lightField?.dispose();
+    this.emissiveOverlay.dispose();
     if (this.nodes !== DEFAULT_ATMOSPHERE_NODES) this.nodes.dispose();
     if (this.layerNodes !== this.nodes && this.layerNodes !== DEFAULT_ATMOSPHERE_NODES) this.layerNodes.dispose();
     this.renderer.dispose();

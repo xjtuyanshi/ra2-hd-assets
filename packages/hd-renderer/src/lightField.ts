@@ -48,13 +48,26 @@ import type { ShaderNode } from './tsl';
 /** Falloff of a light-field entry: the engine's linear 1 - d, or a tighter pool (1 - d^2)^2 / (1 + 10 d^2). */
 export const SHAPE_LINEAR = 0;
 export const SHAPE_POOL = 1;
+/** Smooth world-space radial pool, independent of foundation rectangles and cell boundaries. */
+export const SHAPE_SOFT = 2;
+
+/** JavaScript twin of the radial shader profile (world-space Euclidean distance). */
+export function softLightWeight(x: number, z: number, radius: number): number {
+  const t = Math.min(1, Math.max(0, Math.hypot(x, z) / Math.max(radius, 1e-6)));
+  return (1 - t * t * (3 - 2 * t)) ** 2;
+}
+
+/** Shared source/overlay lifetime ramp, with the legacy quarter-second default. */
+export function sourceFade(now: number, born: number, fadeIn = 0.25): number {
+  return Math.min(1, Math.max(0, (now - born) / Math.max(fadeIn, 1e-6)));
+}
 
 export interface LightEntry {
   x: number;
   z: number;
   /** World units (cells). */
   radius: number;
-  shape: typeof SHAPE_LINEAR | typeof SHAPE_POOL;
+  shape: typeof SHAPE_LINEAR | typeof SHAPE_POOL | typeof SHAPE_SOFT;
   /** Irradiance at the centre, linear RGB (the exposure reference is noon flat-ground irradiance). */
   colour: readonly [number, number, number];
   /** Flicker amplitude (0 = steady): intensity x (1 + amp * noise(t)). */
@@ -66,6 +79,10 @@ export interface LightEntry {
 export interface SourceSpec extends Omit<LightEntry, 'shape'> {
   /** Peak intensity before CPU flicker and lifetime fading (default 1). */
   peak?: number;
+  /** Seconds to full strength (default 0.25). */
+  fadeIn?: number;
+  /** Presentation time at which the fade starts; useful for already-present sources. */
+  fadeStart?: number;
   /** Seconds after the last refresh; fades during the second half (default 0.6). */
   ttl?: number;
   /** Axis-aligned exclusion half-extents in world units; absent or [0, 0] leaves every fragment unchanged. */
@@ -80,12 +97,12 @@ export interface SourceSpec extends Omit<LightEntry, 'shape'> {
   glowHot?: number;
   push?: number;
   /** Falloff of the ground pool (default SHAPE_POOL, the compact fire pool; SHAPE_LINEAR reaches further out). */
-  shape?: typeof SHAPE_LINEAR | typeof SHAPE_POOL;
+  shape?: typeof SHAPE_LINEAR | typeof SHAPE_POOL | typeof SHAPE_SOFT;
   /**
    * Share of this light that upright building art takes only inside its own foundation (default 0; see
    * objectLightAt). A building's own source (the reactor's orb) sets it to 1: the ground, pads, units and neighbouring
-   * buildings take its pool, while the owner's facades and orb glass, whose pixels sample the ground in front of the
-   * art, sit in its hole instead of taking the full pool.
+   * buildings take its pool, while upright facades use a reduced interior sample rather than the full front sample.
+   * Rectangle sources can additionally exclude the owner's foundation; soft sources have no hole.
    */
   groundOnly?: number;
 }
@@ -136,6 +153,7 @@ interface Kept {
   born: number;
   seen: number;
   ttl: number;
+  fadeIn?: number;
 }
 
 const POOLS = { explosion: 128, flash: 256 } as const;
@@ -290,10 +308,15 @@ export class LightField {
       const linear = max(float(1).sub(d), 0);
       const window = max(float(1).sub(d.mul(d)), 0);
       const pool = window.mul(window).div(float(1).add(d.mul(d).mul(10)));
-      const shape = select(p.w.greaterThan(0.5), pool, linear);
+      const radial = length(uv().sub(0.5).mul(2));
+      const soft = float(1)
+        .sub(smoothstep(0, 1, radial))
+        .pow(2);
+      const isSoft = p.w.greaterThan(1.5);
+      const shape = select(isSoft, soft, select(p.w.greaterThan(0.5), pool, linear));
       const flicker = float(1).add(c.w.mul(mx_noise_float(vec2(time.mul(9).add(seed.mul(17.3)), seed.mul(3.1)))));
       // No hole is exactly one, preserving all legacy fire, pulse and lamp colours.
-      const hole = select(holed, smoothstep(0, 0.25, border), float(1));
+      const hole = select(holed.and(isSoft.not()), smoothstep(0, 0.25, border), float(1));
       const rgb = c.rgb.mul(shape).mul(flicker.max(0)).mul(gain).div(this.encodeScale).mul(hole);
       // Alpha carries the luminance of the light's ground-only share (zero for every light but a building's own source),
       // which upright building art takes inside its own foundation (objectLightAt); colour blending ignores alpha.
@@ -447,7 +470,8 @@ export class LightField {
       peak: spec.peak ?? 1,
       flicker: spec.flicker ?? 0,
       seed: spec.seed ?? (hashString(key) % 1000) / 1000,
-      born: existing?.born ?? now,
+      born: existing?.born ?? spec.fadeStart ?? now,
+      fadeIn: spec.fadeIn,
       seen: now,
       ttl: spec.ttl ?? 0.6,
       spec,
@@ -458,6 +482,21 @@ export class LightField {
   clearSources(): void {
     if (this.sources.size) this.dirty = true;
     this.sources.clear();
+  }
+
+  /** Remove disappeared, hidden or destroyed owners without a TTL tail. */
+  retainSources(keys: ReadonlySet<string>): void {
+    for (const key of this.sources.keys()) {
+      if (!keys.has(key)) {
+        this.sources.delete(key);
+        this.dirty = true;
+      }
+    }
+  }
+
+  sourceFade(key: string, now: number): number {
+    const source = this.sources.get(key);
+    return source ? Math.max(0, LightField.keptFade(source, now)) : 0;
   }
 
   private static sourceIntensity(source: Source, now: number): number {
@@ -559,9 +598,9 @@ export class LightField {
     return true;
   }
 
-  /** A kept light fades in over 0.25 s and out over the second half of its ttl after the last keep(). */
+  /** Kept/source fade-in defaults to 0.25 s; fade-out occupies the second half of TTL after the last refresh. */
   private static keptFade(f: Kept, now: number): number {
-    return Math.min(1, (now - f.born) / 0.25) * Math.min(1, (f.ttl - (now - f.seen)) / (f.ttl * 0.5));
+    return sourceFade(now, f.born, f.fadeIn) * Math.min(1, (f.ttl - (now - f.seen)) / (f.ttl * 0.5));
   }
 
   /** Active light counts (for tests and stats). */

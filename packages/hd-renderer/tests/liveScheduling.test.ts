@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Color, Vector3 } from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import { VolumetricBlastLayer } from '../src/volumetricBlasts';
+import { BuildingLightGate } from '../src/live/buildingLights';
 import { LiveView, type LiveSnapshot } from '../src/live/liveView';
 
 function pushView() {
@@ -48,8 +49,9 @@ function presentation(interpolating: boolean) {
   const updateVolumes = vi.spyOn(volumetricBlasts, 'update');
   const view = Object.assign(Object.create(LiveView.prototype) as object, {
     volumetricBlasts,
-    current: { snapshot: { frame: 2 }, at: 10 },
-    previous: { snapshot: { frame: 1 }, at: 0 },
+    buildingLightGate: new BuildingLightGate(),
+    current: { snapshot: { frame: 2, objects: [] }, at: 10 },
+    previous: { snapshot: { frame: 1, objects: [] }, at: 0 },
     lastRender: 10,
     library,
     effectArt: art,

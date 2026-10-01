@@ -220,8 +220,20 @@ sidecar the view falls back to land-type surfaces and no map light sources.
   matching `EffectSpriteLayer` uniforms (`hdHotGain`, `hdFireGamma`, `hdSmokeFade`, `hdFlameFade`, `hdBlendWidth`)
   support look reviews. The L5 explosion flipbooks (`packages/ra2-assets/python/volumetric_explosions.py`) are drawn
   as layered volumetric fireballs and rely on these values.
-- Post (`src/HdRenderer.ts`, `src/post.ts`): per-channel exposure, mist and the visibility (shroud) mask, bloom, the
-  display transform, the night toe lift, anti-aliasing and sharpening; see HdSettings below.
+- Post (`src/HdRenderer.ts`, `src/post.ts`): per-channel exposure, mist and shroud visibility, bloom of the scene
+  `output` only, the display transform and cinematic grade, then the unbloomed emissive overlay in display-linear
+  colour **before** `renderOutput` encodes sRGB. The same composite applies at night and with neutral grading;
+  emission is multiplied by pixel shroud visibility. Night toe lift, anti-aliasing and sharpening follow as before.
+  With positive `sourceLights`, debug view `none` and supported MRT blending, the scene adds an `emissive` attachment
+  alongside painter physical depth when enabled. Overlay materials attenuate the scene underneath by alpha and
+  alpha-over their colour into emission. Other materials write zero emission RGB with their final output alpha and
+  `MaterialBlending`: opaque foreground art clears it, transparent foreground art attenuates it, additive effects
+  add zero. Faithful (`sourceLights=0`) retains the original pipeline key and graph without an emissive attachment.
+  WebGL2 without indexed draw-buffer blending and diagnostic views omit the overlay.
+  Before each scene render list is built, the overlay checks the renderer's actual MRT for `emissive`, restoring
+  visibility after nested renders. In three r186, `src/nodes/utils/ReflectorNode.js` clones the camera (including its
+  layers) but explicitly sets MRT to null for mirrors; the attachment check therefore excludes both meshes from
+  reflections and any other no-emissive pass without punching dark holes. See HdSettings below.
 
 Units and buildings are placeholders (`src/objects.ts`) until real assets exist; the art pipeline replaces them by
 `RenderObject.type`.
@@ -246,7 +258,9 @@ GPU memory of the post targets at 2400x1500 device pixels (estimated from their 
 colour takes about 115 MB multisampled (RGBA16F) plus a 29 MB resolve texture and its depth about 58 MB; with
 `'fxaa'` or `'none'` about 29 MB and 14 MB. The bloom chain (half resolution and below, RGBA16F) adds about 20 MB and
 the sharpening target about 29 MB. Live painter ordering adds an RGBA16F physical-depth attachment: about 29 MB
-single-sampled, or 115 MB multisampled plus 29 MB resolve with `'msaa4'`, at the same resolution. These are format
+single-sampled, or 115 MB multisampled plus 29 MB resolve with `'msaa4'`, at the same resolution. When enabled,
+the emissive overlay adds another RGBA16F attachment of the same size (29 MB single-sampled, or 115 MB plus 29 MB
+resolve with MSAA). These are format
 estimates, not measured full-match memory or performance. Every mid-pass copy of the scene colour (three's viewport textures, e.g. a
 backdrop-sampling effect material) ends and restarts the scene pass; under `'msaa4'` that stores, resolves and reloads
 the multisampled target, about 0.5 ms per copy at 2400x1500 on an Apple M-series GPU against about 0.1 ms
@@ -299,23 +313,43 @@ shadow stretch takes the original calculation, and other neutral gains multiply 
 | `shadowDarkness` (neutral 1; cinematic 1.15)    | Multiplies enhanced crisp/soft SHP and voxel shadow opacity (cap 0.9). Faithful keeps `ENGINE_SHADOW_OPACITY`; voxel shadow materials and their uniforms share one renderer context and its lifetime.                                                                                                                       |
 | `clarity` (neutral 0; cinematic 0.55)           | Mid-scale local contrast on the display image: the luminance band between Gaussian blurs of 1.25 and 5 CSS px is added back this many times (shaded side at half strength, mid-tones only). 0 leaves the pass out of the pipeline.                                                                                          |
 
-Building emitters are authored in `src/live/buildingLights.ts` (`BUILDING_LIGHTS`); more buildings need only table
-entries. Foundation fractions and engine-pixel head heights are converted to world coordinates using the live type
-library. Dead, shrouded, building/selling and unknown-foundation objects emit nothing. `LightField.source()` keeps
-sources alive while refreshed, fades in over 0.25 seconds and fades out over its TTL after refreshes stop. Its
-light-local rectangle (half-extents plus centre offset) masks the emitting foundation with a 0.25-cell outer edge.
-CPU electrical flicker drives both irradiance and glow; decorative beams skip target flashes and impact garnish.
-Switching source gain to zero clears sources and arcs immediately. These use the existing top-down light field,
-not volumetric point-light shadowing. A source's `groundOnly` share (`SourceSpec.groundOnly`, 1 for the reactor and
-the refinery furnace) is summed as luminance in the field's alpha channel (plain one/one blending, cleared to zero;
-every other light writes zero, which leaves colour and all other consumers unchanged). Upright building sprites take
-that share at their own foundation's interior (the pixel's ground projection clamped 0.35 cells inside it) instead of
-at the ground in front of the art that their pixels otherwise sample (`objectLightAt` in `src/atmosphere.ts`): the
-owner's hole keeps its facades and the orb glass unwashed, while the ground, pads and units take the pool and
-neighbouring buildings take `NEIGHBOUR_GROUND_SHARE` of it. In live matches a source light's gain falls with the square
-of the engine's own weighted cell light at the source (`lampLitGain`): map lamp dummies such as INGALITE brighten cells
-by up to about 50 % by day, and a full pool on top clipped into a white veil. Decorative arc colour, reach and the
-crawling share are `ARC_STYLE` in `buildingLights.ts`.
+Building emitters are authored in `src/live/buildingLights.ts` (`BUILDING_LIGHTS`); foundation fractions and
+engine-pixel head heights come from the live type library. `LiveView` owns a pure `BuildingLightGate`: completed
+(`done`) buildings are eligible; undefined state is eligible only for buildings already in the first snapshot or
+following 30 consecutive logic frames of undefined state without a building/selling state. Repeated presentation
+frames cannot advance that wait. This suppresses the engine constructor sentinel's placement flash before build-up.
+Dead, shrouded and unknown-foundation objects emit nothing; disappearance/shroud removes their sources immediately.
+First-snapshot sandbox objects with undefined state start fully lit, including the 0.7-second review bench.
+
+`LightField.source()` keeps refreshed sources alive and shares its configurable `SourceSpec.fadeIn` ramp with the
+visible overlay (default 0.25 seconds; NAPOWR 0.5 seconds). The NAPOWR orb fades its alpha with that ramp and starts
+arcs only above half fade. CPU electrical flicker drives both pool intensity and orb brightness (amplitude 0.12).
+Other building glow specifications remain unchanged. Switching source gain to zero clears the sources and overlay.
+
+The reactor uses `SHAPE_SOFT`: a Euclidean, world-space radial pool centred on the foundation centre, radius 2.6
+cells, no exclusion hole, weight `(1 - smoothstep(0, 1, distance / radius))^2`. The field's existing up-to-eight
+texels per cell and linear min/mag filtering keep the profile continuous across cell boundaries. Its night irradiance
+is `[0.15, 0.42, 2.55]`, with day share 0.33 (day luminance about 0.173 before flicker). This replaces the measured
+lavender-white pool that raised pavement from L* 36 to 53. Rectangle-edge pools and foundation holes remain available
+for other sources, including the refinery.
+
+A source's `groundOnly` share is summed as luminance in the field's alpha channel, independently of RGB. Upright
+building sprites sample this share inside their own foundation instead of the ground in front of the card
+(`objectLightAt`), retaining `NEIGHBOUR_GROUND_SHARE` (0.3). Ground, pads and units still take the pool. Ground,
+cliff walls and sprite diffuse lighting clamp the **summed** added local term to display-white headroom, scaling its
+RGB equally: `k = clamp((1 - max(base)) / max(max(added), 1e-4), 0, 1)`. The base estimates the surface's own current
+lit colour in the same units. Lamp-lit sandstone cannot accumulate a white veil; pools and fire/explosion light
+within dark-ground headroom remain unscaled. This replaces per-source lamp gains; the clamp is dormant with
+`sourceLights=0`, retaining faithful local-light rendering.
+
+The reactor's head and five decorative arcs use the generic `src/emissiveOverlay.ts`, never bloomed head glows or
+`BeamLayer`. The camera-facing plasma orb has a 0.30-world-unit radius, display-linear sRGB-authored blue body
+(60, 110, 255), white-cyan core, darker limb, sparse animated filaments and a halo ending at 1.75 radii. Each arc has
+7–10 jagged points and 1–2 forks from inner joints, with the existing downward/crawling endpoint policy; crawling
+paths stay on the glass. Capsule segments provide round joints/caps, widths 1.3 engine pixels (forks 1.0) and a
+one-device-pixel soft edge. Shapes reseed every two logic frames; alpha flickers 0.7–1.0 with presentation time.
+Day/night use the same orb and stroke colours. Plain-data setters reuse fixed buffers (256 discs, 16384 segments);
+HdRenderer owns and disposes the layer. Native attack beams and their impact effects retain their existing pipeline.
 
 `packages/ra2-assets/python/look_metrics.py` compares renders of one bench framing with the approved targets (L*
 percentiles, local contrast at pixel and mid scale, sun/shade separation, highlight and deep-shade shares, chroma;
