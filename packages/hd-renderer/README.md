@@ -42,6 +42,9 @@ shroud and voxel baselines, regression commands and hardware acceptance boundari
 pnpm hd:sandbox        # http://localhost:15180
 ```
 
+`HD_CACHE_DIR=<absolute dir>` makes the sandbox serve another cache root instead of `gameres/hd-cache` (for
+example a directory of variant map caches built as symlink farms for side-by-side comparisons).
+
 Drag to pan, wheel to zoom, click the ground to detonate. URL presets make screenshots comparable:
 `?nogui&nohud&cx=13&cy=42&zoom=0.9&time=9.5&weather=rain&rain=0.9&battle=0&webgl=1`.
 

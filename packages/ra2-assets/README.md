@@ -414,6 +414,41 @@ targets. Other page entries and manifest metadata survive. Repeated softening ac
 current variant. Source and variant directories must differ; derived art stays outside Git. Python stages need
 NumPy and Pillow; the synthetic regression command additionally needs pytest.
 
+## Tree and vegetation redraw (Python, experimental)
+
+`python/tree_redraw.py` redraws a map's tree/bush TerrainTypes (`tree:TREE*` frame 0 and its shadow) in batches: one
+image-model sheet per family (six to eight plants on flat grey 118, laid out by the spec) so a family is redrawn
+coherently. `extract` pulls frame 0 and shadow 0 of each tree; `sheet` prepares the model input and prompt
+(`--refine-from` feeds a previous model sheet back for a second, lighting-focused round); `process` fits the grey
+background, mattes and unmixes the plants, registers each to its original frame (anisotropic scale + translation by
+blurred-mask correlation) and area-resamples to the 2x frame size; `build` fills internal crown holes, adds crown-scale
+volume shading (light penetration towards the art's sun, dome Lambert, crown-bottom occlusion) and locks Lab colour to
+each destination map's original (lightness quantiles by `kL`, hue means, chroma spread by `kc`), then writes the 2x
+patch and a 1x palette-index coverage mask; `fit-shadows` and `shadows` regenerate the shadow frames from the new
+alpha by delta transfer through a billboard projection fitted to the original shadows; `apply` pastes only those
+rects into a variant cache (a symlink farm; regular atlases already there keep other edits) and optionally writes dome
+normals into the material atlas. The model call itself is made by the operator (see the module docstring).
+
+```bash
+PY=python3  # numpy + Pillow + OpenCV
+SPEC=packages/ra2-assets/python/tree_redraw_spec.example.json
+"$PY" -B packages/ra2-assets/python/tree_redraw.py build --spec "$SPEC" --cache-root gameres/hd-cache --map XMP29U2 \
+  --orig-dir "$WORK/orig" --proc-dir "$WORK/proc" --patch-dir "$WORK/patch" \
+  --cfg '{"kL":0.6,"kc":0.9,"volume":{"strength":1.6,"density":0.11,"rim":0.18},
+          "grade":{"a":-20,"b":36,"k":0.45,"chroma":1.2,"lift":4}}'
+"$PY" -B packages/ra2-assets/python/tree_redraw.py shadows --cache-root gameres/hd-cache --map XMP29U2 \
+  --patch-dir "$WORK/patch" --fit "$WORK/shadow_fit.json"
+"$PY" -B packages/ra2-assets/python/tree_redraw.py apply --map XMP29U2 --patch-dir "$WORK/patch" \
+  --base gameres/hd-cache/XMP29U2 --variant-dir "$VARIANT/XMP29U2" --normals
+python3 -m pytest packages/ra2-assets/python/test_tree_redraw.py -q
+```
+
+The `--cfg` above is the adopted setting (also recorded as `build_cfg` in the example spec): the partial lightness
+lock keeps the redraw's sun-side highlights and crown shade while hue family and chroma stay the original's. The optional `grade` then moves only green foliage (Lab hue 75-165 degrees, feathered; bark, autumn rust and
+near-neutral texels untouched) a share `k` towards a fresh grass-green Lab a/b, scales its chroma and lifts it, so
+trees are graded together with the repainted lawn instead of keeping each map's olive original. Sheets,
+model outputs, patches and variant caches are derived art and belong outside Git.
+
 ## Sprite material atlas (Python, experimental)
 
 `python/sprite_normals.py` writes the material atlas the renderer's opt-in enhanced look relights sprites with
