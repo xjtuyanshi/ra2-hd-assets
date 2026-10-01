@@ -663,7 +663,11 @@ or model call. Keep all plans, work directories, generated images and variant ca
 
 ## SHP vehicle redraw sheets (Python)
 
-`python/shp_vehicle_sheets.py` prepares DRON (the Soviet terror drone), an SHP vehicle rather than a voxel.
+`python/shp_vehicle_sheets.py` prepares SHP vehicles rather than voxels: DRON (the Soviet terror drone), DLPH (the
+Allied dolphin) and SQD (the Soviet giant squid). Each unit has a prompt profile (materials, parts to keep, colours);
+the sea creatures get organic skin instead of steel. `--min-scale` (default 4) lowers the minimum redraw scale so large
+sprites need fewer sheets (SQD at 2.5 needs 39 sheets instead of about 70); anything from 2.5 still oversamples the
+2x atlas.
 It imports the unchanged `python/infantry_sheets.py` CPU image pipeline. Python 3 with numpy, Pillow and cv2 is
 sufficient; the vehicle CLI never invokes an image model. Supply your own extracted library. `--library` is the
 cache root; `--theater` selects `_library/<theater>/library.json` (XMP29U2 uses `urban`). Keep `SHP_WORK` outside Git.
