@@ -55,6 +55,7 @@ export interface Cameo {
 export const UI_FONT =
   '"PingFang TC","PingFang SC","Hiragino Sans","Microsoft JhengHei","Noto Sans CJK TC","Segoe UI",system-ui,sans-serif';
 export const NUM_FONT = '"DIN Alternate","Bahnschrift","Roboto Condensed","Arial Narrow",' + UI_FONT;
+export const CREDITS_COLOR = 'rgb(206,192,54)';
 const ACCENTS = ['#4a9dff', '#e0402f', '#b45cff'];
 const accentOf = (side: number) => ACCENTS[side] ?? '#9aa4b2';
 // The native progress clock washes the unbuilt part 50% toward a colour from the side's sidebar palette. Mean-colour
@@ -154,12 +155,17 @@ export function drawSidebar(
     ctx.fillStyle = color;
     ctx.fillText(value, snap(x), snap(y));
   };
-  const outlinedText = (value: string, x: number, y: number, color: string | CanvasGradient) => {
+  const outlinedText = (value: string, x: number, y: number, color: string | CanvasGradient, inkWidth = 0) => {
     ctx.strokeStyle = '#090b10';
     // A centred 2px stroke leaves a 1-frame-pixel dark outline outside the fill.
     ctx.lineWidth = 2;
     ctx.lineJoin = 'round';
     ctx.strokeText(value, snap(x), snap(y));
+    if (inkWidth > 0) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = inkWidth;
+      ctx.strokeText(value, snap(x), snap(y));
+    }
     text(value, x, y, color);
   };
   const statusCaption = (value: string, r: Rect, left: boolean) => {
@@ -205,12 +211,17 @@ export function drawSidebar(
     ctx.clip();
     fill(l.sidebar, '#101216');
     if (l.commandBar) fill(l.commandBar, '#101216');
+    const drawn = new Set<string>();
     for (const piece of chrome.pieces) {
       const anchor = piece.anchor === 'sidebar' ? l.sidebar : l.commandBar;
       if (!anchor) continue;
-      const target = { ...piece.rect, x: anchor.x + piece.rect.x, y: anchor.y + piece.rect.y };
+      const composite = chrome.composites?.[piece.anchor];
+      if (composite && drawn.has(piece.anchor)) continue;
+      const source = composite ?? piece;
+      const target = { ...source.rect, x: anchor.x + source.rect.x, y: anchor.y + source.rect.y };
       const p = rect(target);
-      ctx.drawImage(piece.bitmap, p.x, p.y, p.width, p.height);
+      ctx.drawImage(source.bitmap, p.x, p.y, p.width, p.height);
+      if (composite) drawn.add(piece.anchor);
     }
     // Soviet metal trim is subdued so faction artwork remains dominant.
     if (sidebar.side === 1) fill({ x: l.sidebar.x, y: l.sidebar.y, width: l.sidebar.width, height: 1 }, '#d4a548');
@@ -305,6 +316,7 @@ export function drawSidebar(
     rounded(r, 2);
     ctx.clip();
     const image = assets.cameo(c.id, c.image);
+    const captionText = assets.caption(c.id, c.image) ?? c.name;
     if (image) {
       const ratio = Math.max(r.width / image.width, r.height / image.height);
       const sw = r.width / ratio;
@@ -313,17 +325,17 @@ export function drawSidebar(
     } else {
       fill(r, '#15181d');
       font(600, 8.5);
-      text(c.name, r.x + r.width / 2, r.y + r.height / 2, '#9aa4b2');
+      text(captionText, r.x + r.width / 2, r.y + r.height / 2, '#9aa4b2');
     }
     const caption = { x: r.x, y: r.y + r.height - 12, width: r.width, height: 12 };
     fill(caption, gradient(caption, 'rgba(0,0,0,0)', 'rgba(0,0,0,0.80)'));
     let size = 8.5;
     font(700, size);
-    while (ctx.measureText(c.name).width > r.width - 4 && size > 6.5) {
+    while (ctx.measureText(captionText).width > r.width - 4 && size > 6.5) {
       size -= 0.25;
       font(700, size);
     }
-    let name = c.name;
+    let name = captionText;
     if (ctx.measureText(name).width > r.width - 4) {
       while (name.length && ctx.measureText(name + '…').width > r.width - 4) name = name.slice(0, -1);
       name += '…';
@@ -476,10 +488,9 @@ export function drawSidebar(
   );
 
   ctx.save();
-  font(700, 12, true);
+  font(900, 12, true);
   ctx.textBaseline = 'top';
-  const credits = { x: l.creditsAnchor.x, y: l.creditsAnchor.y, width: 0, height: 12 };
-  outlinedText(String(sidebar.credits), credits.x, credits.y, gradient(credits, '#fff3a0', '#f1c232'));
+  outlinedText(String(sidebar.credits), l.creditsAnchor.x, l.creditsAnchor.y + 3.5, CREDITS_COLOR, 0.6);
   ctx.restore();
 
   if (sidebar.tooltip) {
