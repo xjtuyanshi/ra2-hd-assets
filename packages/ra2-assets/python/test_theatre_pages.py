@@ -468,6 +468,70 @@ if __name__ == '__main__':
     unittest.main()
 
 
+class MapCopyPatchTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='.tmp-map-copy-', dir=Path(__file__).parent)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.map_dir, self.library, self.src, self.dst = (self.root / n for n in ('map', 'library', 'src', 'dst'))
+        for directory in (self.map_dir, self.library, self.src):
+            directory.mkdir()
+        palette = np.full((1, 256, 3), [90, 100, 110], np.uint8)
+        Image.fromarray(palette).save(self.map_dir / 'palette.png')
+        palette[0, 250] = [1, 2, 3]  # Unused palette colours do not block a copy.
+        Image.fromarray(palette).save(self.library / 'palette.png')
+        Image.fromarray(np.array([[0, 16, 40, 40, 41, 41]], np.uint8)).save(self.map_dir / 'index.png')
+        target = np.array([[40, 42, 41, 0, 16, 40]], np.uint8)
+        Image.fromarray(np.repeat(target[..., None], 3, axis=2)).save(self.library / 'sprites-1.png')
+        manifest = dict(spriteAtlas=dict(file='index.png'), palettes={'map': 'palette.png'}, sprites={
+            'building:GA_TEST': dict(palette='map', frames=[
+                dict(rect=[x, 0, 3, 1], offset=[-2, -3]) for x in (0, 3)])})
+        self.data = dict(spriteAtlases=[dict(file='unused.png'), dict(file='sprites-1.png')],
+                         palettes={'unit': 'palette.png'}, sprites={
+                             'building:GA_TEST': dict(palette='unit', frames=[
+                                 dict(rect=[x, 0, 3, 1], offset=[-2, -3], page=1) for x in (3, 0)])})
+        write_json(self.map_dir / 'manifest.json', manifest)
+        write_json(self.library / 'library.json', self.data)
+        for stem in ('building_GA_TEST#0', 'building_GA_TEST#1', 'building_MISSING#0'):
+            Image.new('RGBA', (6, 2), (200, 10, 30, 255)).save(self.src / f'{stem}.png')
+            Image.new('L', (6, 2), 127).save(self.src / f'{stem}-remap.png')
+
+    def test_matching_map_frame_copies_colour_remap_and_default_provenance(self):
+        self.assertEqual(tp.map_copy_patches(self.map_dir, self.library, self.src, self.dst), (1, 2))
+        for suffix in ('.png', '-remap.png'):
+            name = 'building_GA_TEST#0' + suffix
+            self.assertEqual((self.dst / name).read_bytes(), (self.src / name).read_bytes())
+        self.assertEqual((self.dst / 'building_GA_TEST#0.src').read_text(), 'map-copy map')
+        self.assertEqual(len(list(self.dst.iterdir())), 3)
+
+    def test_cli_prints_counts_and_uses_custom_tag(self):
+        result = subprocess.run([sys.executable, '-B', tp.__file__, 'map-copy-patches', str(self.map_dir),
+                                 str(self.library), str(self.src), str(self.dst), '--tag', 'l4civ synthetic'],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'copied 1 skipped 2\n')
+        self.assertEqual((self.dst / 'building_GA_TEST#0.src').read_text(), 'l4civ synthetic')
+
+    def test_shape_offset_and_every_used_palette_colour_must_match(self):
+        original = copy.deepcopy(self.data)
+        palette = tp.read_image(self.library / 'palette.png')
+        for mismatch in ('shape', 'offset', 0, 16, 40):
+            with self.subTest(mismatch=mismatch):
+                self.data = copy.deepcopy(original)
+                changed = palette.copy()
+                frame = self.data['sprites']['building:GA_TEST']['frames'][0]
+                if mismatch == 'shape':
+                    frame['rect'][2] = 2
+                elif mismatch == 'offset':
+                    frame['offset'][0] += 1
+                else:
+                    changed[0, mismatch] = [1, 2, 3]
+                write_json(self.library / 'library.json', self.data)
+                Image.fromarray(changed).save(self.library / 'palette.png')
+                self.assertEqual(tp.map_copy_patches(self.map_dir, self.library, self.src, self.dst), (0, 3))
+                self.assertEqual(list(self.dst.iterdir()), [])
+
+
 class PatchToolTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='.tmp-theatre-patch-', dir=Path(__file__).parent)

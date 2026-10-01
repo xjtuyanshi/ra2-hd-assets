@@ -37,6 +37,10 @@ GREY = 118.0
 GAP = 32
 PAD = 6
 STORAGE = frozenset({'NAREFN', 'GAREFN'})
+COVERAGE_RECORDS = ('l3_frames.json', 'l4_frames_bldg.json')
+COVERAGE_PREFIXES = ('GA', 'NA', 'YA', 'GT', 'AT', 'NT', 'TESLA')
+COVERAGE_COLUMNS = ('name', 'played_frames', 'earlier', 'l5_model', 'l5_xfer', 'coverage_percent',
+                    'body_intact', 'body_damaged', 'buildup', 'gaps')
 
 
 def cache_root(root=None):
@@ -1281,6 +1285,119 @@ def read_image(path, mode=None):
         return np.array(im.convert(mode) if mode else im)
 
 
+def coverage_records(library, patches, records):
+    """Read frame provenance without decoding atlas pages or patch images."""
+    earlier, model, xfer = {}, {}, {}
+    for name in records:
+        if Path(name).name != name:
+            raise ValueError('records must be filenames inside the library directory')
+        path = Path(library) / name
+        if not path.exists():
+            continue
+        data = read_json(path)
+        if isinstance(data, dict):
+            for sprite, frames in data.items():
+                if isinstance(frames, list):
+                    earlier.setdefault(sprite, set()).update(frames)
+        else:
+            for entry in data:
+                if entry.get('status') != 'REVERTED_TO_ORIGINAL':
+                    earlier.setdefault(entry['sprite'], set()).add(entry['frame'])
+    for source in sorted(Path(patches).glob('*.src')):
+        try:
+            stem, frame = source.stem.rsplit('#', 1)
+            kind, sep, name = stem.partition('_')
+            frame = int(frame)
+        except ValueError:
+            continue
+        if not sep or not kind or not name or frame < 0:
+            continue
+        tag = source.read_text(encoding='utf-8')
+        target = earlier if tag.startswith(('l4civ', 'map-copy')) else (
+            xfer if tag.startswith('xfer') and not tag.startswith('xfer:theatre') else model)
+        target.setdefault(f'{kind}:{name}', set()).add(frame)
+    return earlier, model, xfer
+
+
+def played_frames(frames, anim=None):
+    """Select nonempty frames, clipping layer animation ranges to the sprite's frame count."""
+    start, end = 0, len(frames)
+    if anim is not None:
+        start = min(anim.get('start', 0), anim.get('loopStart', 0))
+        end = min(end, max(anim.get('end', -1) + 1, anim.get('loopEnd', 0), start + 1))
+    return {k for k in range(max(0, start), end) if frames[k]['rect'][2]}
+
+
+def coverage(library, patches, records=COVERAGE_RECORDS, prefix=COVERAGE_PREFIXES):
+    """Report redraw coverage over each building type's unique, nonempty played frames."""
+    data = read_json(Path(library) / 'library.json')
+    earlier, model, xfer = coverage_records(library, patches, records)
+    sprites = data['sprites']
+
+    def frames(sprite):
+        return sprites.get(sprite, {}).get('frames', [])
+
+    def category(sprite, frame):
+        if frame in model.get(sprite, ()):
+            return 'l5_model'
+        if frame in xfer.get(sprite, ()):
+            return 'l5_xfer'
+        if frame in earlier.get(sprite, ()):
+            return 'earlier'
+        return 'gap'
+
+    def body_status(sprite, frame):
+        if frame not in played_frames(frames(sprite)):
+            return '-'
+        kind = category(sprite, frame)
+        return 'L5' if kind in ('l5_model', 'l5_xfer') else ('L4' if kind == 'earlier' else '-')
+
+    rows = []
+    for name, entry in sorted(data['types'].items()):
+        if 'building' not in entry or not name.startswith(tuple(prefix)):
+            continue
+        building = entry['building']
+        body = entry['sprite']
+        selected = {body: played_frames(frames(body))}
+        for layer in building.get('layers', []):
+            for sprite in (layer['sprite'], layer.get('damagedSprite')):
+                if sprite:
+                    selected.setdefault(sprite, set()).update(played_frames(frames(sprite), layer.get('anim', {})))
+        buildup = building.get('buildup')
+        buildup_frames = played_frames(frames(buildup)) if buildup else set()
+        if buildup:
+            selected.setdefault(buildup, set()).update(buildup_frames)
+        counts = dict(played_frames=0, earlier=0, l5_model=0, l5_xfer=0)
+        gaps = []
+        for sprite, chosen in selected.items():
+            missing = 0
+            for frame in chosen:
+                counts['played_frames'] += 1
+                kind = category(sprite, frame)
+                if kind == 'gap':
+                    missing += 1
+                else:
+                    counts[kind] += 1
+            if missing:
+                gaps.append(f'{sprite.split(":", 1)[-1]}:{missing}')
+        if not played_frames(frames(body)) and building.get('layers'):
+            body = building['layers'][0]['sprite']
+        covered = counts['earlier'] + counts['l5_model'] + counts['l5_xfer']
+        buildup_covered = sum(category(buildup, k) != 'gap' for k in buildup_frames)
+        rows.append(dict(name=name, **counts, coverage_percent=100 * covered / max(counts['played_frames'], 1),
+                         body_intact=body_status(body, 0), body_damaged=body_status(body, 1),
+                         buildup=f'{buildup_covered}/{len(buildup_frames)}' if buildup else '-', gaps=' '.join(gaps)))
+    return rows
+
+
+def coverage_tsv(rows):
+    lines = ['\t'.join(COVERAGE_COLUMNS)]
+    for row in rows:
+        lines.append('\t'.join(f'{row[key]:.0f}%' if key == 'coverage_percent' else str(row[key])
+                               for key in COVERAGE_COLUMNS))
+    return '\n'.join(lines) + '\n'
+
+
 def pack_make(packdir, prompt, jobs, *, max_width=2600, refs=()):
     """Pack equal-factor job canvases with 48-pixel grey gaps; retain absolute job destinations."""
     if not jobs or max_width < 1:
@@ -1429,6 +1546,12 @@ def parser():
     p.add_argument('--patches', type=Path, required=True)
     p.add_argument('--only', nargs='+')
     p.add_argument('--record', default='l4_frames_bldg.json')
+    p = commands.add_parser('coverage', help='report redraw coverage over played building frames as TSV')
+    p.add_argument('--library', type=Path, required=True)
+    p.add_argument('--patches', type=Path, required=True)
+    p.add_argument('--records', default=','.join(COVERAGE_RECORDS), help='comma-separated record filenames')
+    p.add_argument('--prefix', default=','.join(COVERAGE_PREFIXES), help='comma-separated building name prefixes')
+    p.add_argument('--out', type=Path, help='also write the TSV report to a file')
     for command in ('xfer', 'walls-xfer'):
         p = commands.add_parser(command, help='transfer accepted redraws to animation or damaged wall frames')
         p.add_argument('--library-root', type=Path, required=True, help='variant root containing _library/<theater>')
@@ -1500,6 +1623,13 @@ def main(argv=None):
                           specs=read_json(args.specs) if args.specs else None, buildup=buildup)
         elif args.command == 'compose':
             compose(args.library, args.patches, args.only, args.record)
+        elif args.command == 'coverage':
+            rows = coverage(args.library, args.patches, tuple(filter(None, args.records.split(','))),
+                            tuple(filter(None, args.prefix.split(','))))
+            report = coverage_tsv(rows)
+            if args.out:
+                args.out.write_text(report, encoding='utf-8')
+            print(report, end='')
         elif args.command in ('xfer', 'walls-xfer'):
             lib = Lib(args.theater, args.library_root)
             for selector in args.names:

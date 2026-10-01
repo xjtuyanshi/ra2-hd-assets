@@ -566,7 +566,12 @@ SRC_PATCHES DST_PATCHES` copies redraw patches to another theatre only where the
 palette colours are identical (tech buildings share their art across theatres). `map-paste MAPDIR PATCHES SPRITE...`
 pastes library frame patches into a variant map cache's HD/remap atlas (map-placed objects draw from the map atlas),
 materialising symlinked atlases and changing only the matched frame rectangles (`sourceFrames` maps map frames to
-library frames). These tools use
+library frames). `map-copy-patches MAPDIR LIBRARY SRC_PATCHES DST_PATCHES [--tag TEXT]` is the reverse direction: it copies
+patches made for a map cache into a library patch set under the same identity test, because the live view draws every
+building that has a library type from the type library rather than the map atlas.
+`building_redraw.py coverage --library LIBRARY --patches PATCHES [--prefix GA,NA,...] [--out TSV]` reports, per
+building type, the frames the renderer actually plays (body, each layer's played range intact and damaged, build-up)
+as earlier records, L5 model patches, L5 transfers or baseline gaps. These tools use
 atomic JSON/PNG replacements and copy-on-write pages; all supplied libraries, baselines and patches stay outside Git.
 Run their asset-free acceptance from `packages/ra2-assets/python` with
 `python3 -B -m unittest test_building_redraw test_theatre_pages -v`.

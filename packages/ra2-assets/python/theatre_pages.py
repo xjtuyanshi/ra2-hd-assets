@@ -344,22 +344,25 @@ def normals_merge(src, library, sprites_file):
     return sorted(additions, key=int)
 
 
-def copy_patches(src_dir, dst_dir, src_patches, dst_patches):
-    """Copy building-redraw patches (``<kind>_<name>#<frame>.png`` + ``-remap.png``) from one theatre to another when the
-    destination frame uses the same 1x indices, offset and palette colours (the same SHP art drawn for both theatres,
-    e.g. tech buildings). Differing or missing frames are left alone. Returns (copied, skipped)."""
-    src_dir, dst_dir, src_patches, dst_patches = map(Path, (src_dir, dst_dir, src_patches, dst_patches))
-    a_lib, b_lib = read_json(src_dir / 'library.json'), read_json(dst_dir / 'library.json')
-    pal = lambda d, lib, key: read_image(d / lib['palettes'][key], 'RGB')[0]
+def patch_frame_reader(directory, library):
+    """Read indexed frame blocks through a paged library contract, caching only pages."""
+    directory = Path(directory)
     pages = {}
-    def frame(d, lib, tag, sprite, k):
-        entry = lib['sprites'][sprite]
+    def frame(sprite, k):
+        entry = library['sprites'][sprite]
         f = entry['frames'][k]
         x, y, w, h = f['rect']
-        key = (tag, f.get('page', 0))
-        if key not in pages:
-            pages[key] = idx_page(d, lib, f.get('page', 0))
-        return pages[key][y:y + h, x:x + w], tuple(f['offset']), pal(d, lib, entry['palette'])
+        page = f.get('page', 0)
+        if page not in pages:
+            pages[page] = idx_page(directory, library, page)
+        palette = read_image(directory / library['palettes'][entry['palette']], 'RGB')[0]
+        return pages[page][y:y + h, x:x + w], tuple(f['offset']), palette
+    return frame
+
+
+def matching_patches(source_frame, target_frame, src_patches, dst_patches, tag):
+    """Copy only patches whose indexed frames, anchors and used palette colours match."""
+    src_patches, dst_patches = Path(src_patches), Path(dst_patches)
     dst_patches.mkdir(parents=True, exist_ok=True)
     copied = skipped = 0
     for png in sorted(src_patches.glob('*#*.png')):
@@ -369,8 +372,8 @@ def copy_patches(src_dir, dst_dir, src_patches, dst_patches):
         name, _, k = rest.rpartition('#')
         sprite = f'{kind}:{name}'
         try:
-            a, oa, pa = frame(src_dir, a_lib, 'a', sprite, int(k))
-            b, ob, pb = frame(dst_dir, b_lib, 'b', sprite, int(k))
+            a, oa, pa = source_frame(sprite, int(k))
+            b, ob, pb = target_frame(sprite, int(k))
         except (KeyError, IndexError, ValueError):
             skipped += 1
             continue
@@ -380,9 +383,32 @@ def copy_patches(src_dir, dst_dir, src_patches, dst_patches):
             continue
         for suffix in ('.png', '-remap.png'):
             atomic_write(dst_patches / (png.stem + suffix), lambda t, f=src_patches / (png.stem + suffix): shutil.copyfile(f, t))
-        (dst_patches / f'{png.stem}.src').write_text(f'xfer:theatre {src_dir.name}', encoding='utf-8')
+        (dst_patches / f'{png.stem}.src').write_text(tag, encoding='utf-8')
         copied += 1
     return copied, skipped
+
+
+def copy_patches(src_dir, dst_dir, src_patches, dst_patches):
+    """Copy building-redraw patches (``<kind>_<name>#<frame>.png`` + ``-remap.png``) from one theatre to another when the
+    destination frame uses the same 1x indices, offset and palette colours (the same SHP art drawn for both theatres,
+    e.g. tech buildings). Differing or missing frames are left alone. Returns (copied, skipped)."""
+    src_dir, dst_dir = Path(src_dir), Path(dst_dir)
+    a_lib, b_lib = read_json(src_dir / 'library.json'), read_json(dst_dir / 'library.json')
+    return matching_patches(patch_frame_reader(src_dir, a_lib), patch_frame_reader(dst_dir, b_lib),
+                            src_patches, dst_patches, f'xfer:theatre {src_dir.name}')
+
+
+def map_copy_patches(map_dir, library_dir, src_patches, dst_patches, tag=None):
+    """Copy map-cache redraw patches into a theatre library patch set where the library frame is the same art (same 1x
+    indices, offset and used palette colours). The live view draws every building that has a library type from the
+    type library, so redraws composed only into a map atlas (e.g. civil buildings) never show in a match otherwise."""
+    map_dir, library_dir = Path(map_dir), Path(library_dir)
+    manifest = read_json(map_dir / 'manifest.json')
+    source = dict(sprites=manifest['sprites'], palettes=manifest['palettes'],
+                  spriteAtlases=[manifest['spriteAtlas']])
+    target = read_json(library_dir / 'library.json')
+    return matching_patches(patch_frame_reader(map_dir, source), patch_frame_reader(library_dir, target),
+                            src_patches, dst_patches, tag if tag is not None else f'map-copy {map_dir.name}')
 
 
 def map_paste(map_dir, patches, sprites):
@@ -448,6 +474,10 @@ def parser():
     p = commands.add_parser('copy-patches', help='copy redraw patches to another theatre where the art is identical')
     for name in ('src_dir', 'dst_dir', 'src_patches', 'dst_patches'):
         p.add_argument(name, type=Path)
+    p = commands.add_parser('map-copy-patches', help='copy matching map-cache patches to a theatre library patch set')
+    for name in ('map_dir', 'library_dir', 'src_patches', 'dst_patches'):
+        p.add_argument(name, type=Path)
+    p.add_argument('--tag', help='patch provenance (default: map-copy <map directory name>)')
     p = commands.add_parser('map-paste', help='paste library frame patches into a variant map atlas')
     p.add_argument('map_dir', type=Path)
     p.add_argument('patches', type=Path)
@@ -465,6 +495,9 @@ def main(argv=None):
             print('patched', len(overlay_walls(args.library, args.types)))
         elif args.command == 'copy-patches':
             print('copied %d skipped %d' % copy_patches(args.src_dir, args.dst_dir, args.src_patches, args.dst_patches))
+        elif args.command == 'map-copy-patches':
+            print('copied %d skipped %d' % map_copy_patches(args.map_dir, args.library_dir, args.src_patches,
+                                                          args.dst_patches, args.tag))
         elif args.command == 'map-paste':
             print('pasted', map_paste(args.map_dir, args.patches, args.sprites))
         else:

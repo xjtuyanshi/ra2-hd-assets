@@ -586,6 +586,92 @@ class TransferTests(unittest.TestCase):
         self.assertEqual((self.patches / 'building_WALL#16.png').read_bytes(), protected)
 
 
+class CoverageTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='.tmp-coverage-', dir=Path(__file__).parent)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.library, self.patches = self.root / 'library', self.root / 'patches'
+        self.library.mkdir()
+        self.patches.mkdir()
+        sprites = {}
+        for sprite, count in ((BODY, 2), (ANIM, 4), (DAMAGE, 4), (BUILDUP, 3)):
+            sprites[sprite] = dict(frames=[dict(rect=[k, 0, 1, 1]) for k in range(count)])
+        sprites[BUILDUP]['frames'][1]['rect'][2] = 0
+        self.data = dict(sprites=sprites, types={'GATEST': dict(sprite=BODY, building=dict(
+            layers=[dict(sprite=ANIM, damagedSprite=DAMAGE, anim=dict(loopEnd=3))], buildup=BUILDUP))})
+        br.write_json(self.library / 'library.json', self.data)
+        br.write_json(self.library / 'l3_frames.json', [dict(sprite=DAMAGE, frame=0, status='ACCEPTED'),
+                                                       dict(sprite=DAMAGE, frame=1, status='REVERTED_TO_ORIGINAL')])
+        br.write_json(self.library / 'l4_frames_bldg.json', {BODY: [0], ANIM: [0]})
+        for sprite, frame, tag in ((BODY, 0, 'model:accepted'), (BODY, 1, 'l4civ synthetic'),
+                                   (ANIM, 0, 'xfer:TEST_i'), (ANIM, 1, 'xfer:theatre temperate'),
+                                   (ANIM, 2, 'map-copy map'), (ANIM, 3, 'model:unplayed'),
+                                   (DAMAGE, 3, 'l4civ unplayed'), (BUILDUP, 0, 'xfer:TEST_mk'),
+                                   (BUILDUP, 1, 'model:empty')):
+            (self.patches / f'{br.patch_name(sprite, frame)}.src').write_text(tag, encoding='utf-8')
+
+    def cli(self, *arguments):
+        result = subprocess.run([sys.executable, '-B', br.__file__, 'coverage', '--library', str(self.library),
+                                 '--patches', str(self.patches), *map(str, arguments)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_played_frame_counts_provenance_empty_buildup_and_tsv(self):
+        with mock.patch.object(br, 'read_image', side_effect=AssertionError('coverage must read metadata only')):
+            rows = br.coverage(self.library, self.patches)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row['name'], 'GATEST')
+        self.assertEqual((row['played_frames'], row['earlier'], row['l5_model'], row['l5_xfer']), (10, 3, 2, 2))
+        self.assertEqual(row['coverage_percent'], 70)
+        self.assertEqual((row['body_intact'], row['body_damaged'], row['buildup']), ('L5', 'L4', '1/2'))
+        self.assertEqual(row['gaps'], 'TEST_AD:2 TESTMK:1')
+        output = self.root / 'coverage.tsv'
+        report = self.cli('--out', output)
+        self.assertEqual(report, output.read_text(encoding='utf-8'))
+        self.assertEqual(report.splitlines()[0].split('\t'), list(br.COVERAGE_COLUMNS))
+        self.assertEqual(report.splitlines()[1].split('\t'),
+                         ['GATEST', '10', '3', '2', '2', '70%', 'L5', 'L4', '1/2', 'TEST_AD:2 TESTMK:1'])
+
+    def test_record_and_prefix_options_filter_building_types(self):
+        self.data['types']['CATEST'] = self.data['types']['GATEST']
+        self.data['types']['GAVEHICLE'] = dict(sprite=BODY)
+        br.write_json(self.library / 'library.json', self.data)
+        br.write_json(self.library / 'custom.json', {DAMAGE: [1, 2]})
+        report = self.cli('--records', 'custom.json,missing.json', '--prefix', 'CA,YA')
+        self.assertEqual(report.splitlines()[1].split('\t'),
+                         ['CATEST', '10', '4', '2', '2', '80%', 'L5', 'L4', '1/2', 'TEST_AD:1 TESTMK:1'])
+        self.assertEqual(len(report.splitlines()), 2)
+        self.assertEqual(len(self.cli('--prefix', 'UNKNOWN').splitlines()), 1)
+
+    def test_layer_only_body_and_shared_layer_ranges_are_counted_once(self):
+        for frame in self.data['sprites'][BODY]['frames']:
+            frame['rect'][2] = 0
+        building = self.data['types']['GATEST']['building']
+        building['layers'].append(dict(sprite=ANIM, anim=dict(start=2, loopStart=2, end=9)))
+        br.write_json(self.library / 'library.json', self.data)
+        row = br.coverage(self.library, self.patches)[0]
+        self.assertEqual((row['played_frames'], row['earlier'], row['l5_model'], row['l5_xfer']), (9, 2, 2, 2))
+        self.assertAlmostEqual(row['coverage_percent'], 100 * 6 / 9)
+        self.assertEqual((row['body_intact'], row['body_damaged']), ('L5', 'L5'))
+        self.assertEqual(row['gaps'], 'TEST_AD:2 TESTMK:1')
+
+    def test_played_range_defaults_clipping_and_empty_report(self):
+        frames = self.data['sprites'][ANIM]['frames']
+        self.assertEqual(br.played_frames(frames, {}), {0})
+        self.assertEqual(br.played_frames(frames, dict(start=2, loopStart=1, end=1, loopEnd=3)), {1, 2})
+        self.assertEqual(br.played_frames(frames, dict(start=-3, loopStart=-2, end=8)), {0, 1, 2, 3})
+        self.assertEqual(br.played_frames(frames, dict(start=8, loopStart=8)), set())
+        for sprite in self.data['sprites'].values():
+            for frame in sprite['frames']:
+                frame['rect'][2] = 0
+        br.write_json(self.library / 'library.json', self.data)
+        row = br.coverage(self.library, self.patches)[0]
+        self.assertEqual((row['played_frames'], row['coverage_percent'], row['buildup'], row['gaps']), (0, 0, '0/0', ''))
+        self.assertEqual((row['body_intact'], row['body_damaged']), ('-', '-'))
+
+
 if __name__ == '__main__':
     unittest.main()
 
