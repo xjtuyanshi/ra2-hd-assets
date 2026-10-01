@@ -752,6 +752,7 @@ python3 -B packages/ra2-assets/python/rubble_pages.py install --build "$WORK/rub
   --theatre urban
 python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_rubble_pages.py'
 ```
+
 `sheet` compares original/L4/L5 with Chinese labels at the same cell anchor. Game art and all derived images stay
 outside Git; numerical tests do not establish renderer or visual acceptance.
 
