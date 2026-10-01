@@ -628,6 +628,12 @@ reinstalling an identical hard link leaves no temporary name. JSON patchers read
 the current manifest under an exclusive `fcntl` lock beside it. Lock files persist to keep concurrent waiters on
 the same lock inode. Other manifest entries and the base cache's files are preserved.
 
+`python/farm_check.py FARM BASE [BASE...]` checks a farm after a round of installs: broken links, write-through (a
+base cache's real file or a link target modified after the farm was created, or a farm file hard-linked to a base
+file) and library pages the renderer would ignore. A `normals.json` page must name the library's current HD page file
+as its `atlas`; replacing an HD page (for example a recoloured `sprites-9@2x-*.png`) without updating that name makes
+the renderer drop the page's normal maps. Exit status 1 on any problem; test: `python3 -m unittest test_farm_check`.
+
 `repaint-pages` restores house paint from original 1x remap indices 16..31 at full weight inside the HD silhouette,
 unioned with existing model paint. Normalised low-frequency original indices retain the original tone, while the
 redraw's high-frequency ramp detail keeps folds and highlights. It always reads the immutable `--source` library
