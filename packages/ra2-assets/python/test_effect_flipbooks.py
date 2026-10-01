@@ -198,6 +198,26 @@ class CutTests(TemporaryTests):
                     self.assertAlmostEqual(frame["offset"][0] + xs.min() / target, x - 15)
                     self.assertAlmostEqual(frame["offset"][1] + ys.min() / target, y - 14)
 
+    def test_layout_overrides_pack_scale_and_footprint_reach(self):
+        indices = [np.zeros((29, 31), np.uint8)]
+        indices[0][14:15, 15:16] = 1
+        palette = np.zeros((256, 3), np.uint8)
+        sheet, layout = fx.make_sheet("SPARK", indices, palette, [0], scale=10, cols=1, bbox=(5, 4, 25, 24))
+        sheet.paste((118, 118, 118), (0, 0, *sheet.size))
+        cell = layout["cells"][0]
+        # A spark streak drawn 7 native pixels right of the one-pixel native footprint.
+        left, top = cell["x"] + (22 - 5) * 10, cell["y"] + (14 - 4) * 10
+        sheet.paste((255, 200, 80), (left, top, left + 10, top + 10))
+        default = fx.cut_sheet(sheet, layout, indices, "impact")[0]
+        self.assertEqual(default["scale"], 3)
+        wide = dict(layout, pack_scale=4, footprint_grow=8)
+        frame = fx.cut_sheet(sheet, wide, indices, "impact")[0]
+        self.assertEqual(frame["scale"], 4)
+        # The default reach (5 native pixels around the footprint) fades the far streak; the wider one keeps it.
+        self.assertLess(int(default["rgba"][..., 3].max()), 0.6 * int(frame["rgba"][..., 3].max()))
+        ys, xs = np.nonzero(frame["rgba"][..., 3] > 32)
+        self.assertGreater(frame["offset"][0] + xs.max() / 4, 22 - 15 - 0.5)
+
     def test_cut_anim_preserves_native_list_length_and_accepts_resized_output(self):
         library = synthetic_library(self.root / "effects")
         jobs_dir = self.root / "jobs"

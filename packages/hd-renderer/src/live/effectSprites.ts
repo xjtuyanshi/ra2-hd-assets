@@ -75,6 +75,8 @@ export interface EffectInstance {
     frame: EffectHdFrame;
     next: EffectHdFrame | null;
     scale: number;
+    /** Display size around the native canvas centre; atlas sampling stays in native pixels. Defaults to 1. */
+    size?: number;
     blend0: number;
     t0: number;
     stageSeconds: number;
@@ -514,7 +516,7 @@ class HdPageMesh {
   private readonly offsets = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
   /** x = card/decal; y = push; z = the same bounded painter bias as native cards; w = HD scale. */
   private readonly style = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
-  /** x = blend at push; y = push time; z = seconds per engine stage. */
+  /** x = blend at push; y = push time; z = seconds per engine stage; w = display size. */
   private readonly timing = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
   private readonly material: MeshBasicNodeMaterial;
 
@@ -547,10 +549,10 @@ class HdPageMesh {
     const gv: ShaderNode = float(0.5).sub(positionGeometry.y);
     const px: ShaderNode = aBounds.x.sub(margin).add(gu.mul(aBounds.z.add(margin.mul(2))));
     const py: ShaderNode = aBounds.y.sub(margin).add(gv.mul(aBounds.w.add(margin.mul(2))));
-    material.depthNode = cardDepthNode(px, py, vec4(0), aStyle.y, aStyle.z, aStyle.x.greaterThan(0.5));
+    const x = px.mul(aTiming.w);
+    const y = py.mul(aTiming.w);
+    material.depthNode = cardDepthNode(x, y, vec4(0), aStyle.y, aStyle.z, aStyle.x.greaterThan(0.5));
     material.positionNode = Fn(() => {
-      const x = aBounds.x.sub(margin).add(gu.mul(aBounds.z.add(margin.mul(2))));
-      const y = aBounds.y.sub(margin).add(gv.mul(aBounds.w.add(margin.mul(2))));
       const card = aAnchor.xyz
         .add(layer.cameraRight.mul(x.div(ppu)))
         .sub(layer.cameraUp.mul(y.div(ppu)))
@@ -596,7 +598,11 @@ class HdPageMesh {
       const graded: ShaderNode = flameRampDisplay(pow(heat, layer.hdFireGamma));
       const gradeWeight = fire.mul(smoothstep(0.15, 0.45, rgba.a)).mul(layer.hdFireGrade);
       const s = mix(s0, graded, gradeWeight);
-      const colour = mix(rgba.rgb, pow(s, vec3(2.2)).mul(rgba.a), gradeWeight.greaterThan(0).select(float(1), float(0)));
+      const colour = mix(
+        rgba.rgb,
+        pow(s, vec3(2.2)).mul(rgba.a),
+        gradeWeight.greaterThan(0).select(float(1), float(0)),
+      );
       // White-hot: the pale core of the flame (display green and blue both high); orange and red keep their hue.
       const hot = smoothstep(0.72, 0.95, s.g).mul(smoothstep(0.35, 0.75, s.b));
       const gain: ShaderNode = mix(layer.hdFireGain, layer.hdHotGain, hot).mul(layer.displayScale);
@@ -634,7 +640,7 @@ class HdPageMesh {
       this.nextRect.setXYZW(i, ...next.rect);
       this.offsets.setXYZW(i, ...frame.offset, ...next.offset);
       this.style.setXYZW(i, s.draw === 'flat' ? 1 : 0, s.push, cardPainterBias(s), hd.scale);
-      this.timing.setXYZW(i, hd.blend0, hd.t0, hd.stageSeconds, 0);
+      this.timing.setXYZW(i, hd.blend0, hd.t0, hd.stageSeconds, hd.size ?? 1);
     }
     this.anchor.flush();
     this.rect.flush();

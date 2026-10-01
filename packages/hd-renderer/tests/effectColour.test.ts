@@ -1,4 +1,7 @@
 import {
+  CustomBlending,
+  OneFactor,
+  OneMinusSrcAlphaFactor,
   OrthographicCamera,
   Scene,
   Vector3,
@@ -91,6 +94,100 @@ describe('enhanced ember radiance', () => {
 });
 
 describe('enhanced particle routing and lights', () => {
+  it('builds a dense smoke dome over the first second, then retains drifting billows and the longer column', () => {
+    let seed = 123;
+    vi.spyOn(Math, 'random').mockImplementation(() => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 2 ** 32;
+    });
+    const layer = makeLayer();
+    const at = new Vector3(4, 2, 6);
+    const wind = new Vector3(0.4, 0, -0.2);
+    const width = 2;
+    layer.explode(2, at, 1, wind, { enhanced: true, hdArt: true, maxSize: width, maxLife: 0.3 });
+    const smoke = pool(layer, 'billow');
+    const e = ENHANCED;
+    const billows = Math.round(e.smoke.count + e.smoke.perScale);
+    expect(spawned(smoke)).toBe(billows);
+    expect(smoke.mesh.material).toMatchObject({
+      blending: CustomBlending,
+      blendSrc: OneFactor,
+      blendDst: OneMinusSrcAlphaFactor,
+    });
+    for (let i = 0; i < billows; i++) {
+      // Stratification keeps births building through the full 0.1..1.0 second window, even at low counts.
+      expect(smoke.start.getX(i)).toBeGreaterThanOrEqual(
+        Math.fround(2 + e.smoke.delay + (i / billows) * e.smoke.spread),
+      );
+      expect(smoke.start.getX(i)).toBeLessThanOrEqual(
+        Math.fround(2 + e.smoke.delay + ((i + 1) / billows) * e.smoke.spread),
+      );
+      const x = smoke.origin.getX(i) - at.x;
+      const y = smoke.origin.getY(i) - at.y;
+      const z = smoke.origin.getZ(i) - at.z;
+      expect(Math.abs(x)).toBeLessThanOrEqual(0.35 * width);
+      expect(Math.abs(z)).toBeLessThanOrEqual(0.35 * width);
+      expect(y).toBeGreaterThanOrEqual(0.1 - 1e-6);
+      expect(x * x + y * y + z * z).toBeLessThanOrEqual((0.55 * width) ** 2 + 1e-6);
+      expect(smoke.params.getX(i)).toBeGreaterThanOrEqual(Math.fround(e.smoke.size * 0.8 * width));
+      expect(smoke.params.getX(i)).toBeLessThanOrEqual(Math.fround(e.smoke.size * 1.3 * width));
+      expect(smoke.params.getY(i)).toBeGreaterThanOrEqual(Math.fround(e.smoke.life * 0.8));
+      expect(smoke.params.getY(i)).toBeLessThanOrEqual(Math.fround(e.smoke.life * 1.2));
+      expect(smoke.params.getW(i)).toBe(1);
+      expect(smoke.velocity.getX(i)).toBeGreaterThan(0);
+      expect(smoke.velocity.getY(i)).toBeGreaterThan(0);
+    }
+    const column = pool(layer, 'column');
+    const puffs = Math.round(e.column.count + e.column.perScale);
+    expect(spawned(column)).toBe(puffs);
+    for (let i = 0; i < puffs; i++) {
+      expect(column.params.getY(i)).toBeGreaterThanOrEqual(Math.fround(e.column.life * 0.8));
+      expect(column.params.getY(i)).toBeLessThanOrEqual(Math.fround(e.column.life * 1.2));
+    }
+    layer.update(6, new Vector3(1, 0, 0), new Vector3(0, 1, 0));
+    expect(smoke.mesh.visible).toBe(true);
+    expect(column.mesh.visible).toBe(true);
+    layer.update(smoke.until + 0.01, new Vector3(1, 0, 0), new Vector3(0, 1, 0));
+    expect(smoke.mesh.visible).toBe(false);
+    expect(column.mesh.visible).toBe(true);
+  });
+
+  it.each([0.1, 0.5])('throws visible chunks with an eight-second nominal rest (random=%s)', (random) => {
+    vi.spyOn(Math, 'random').mockReturnValue(random);
+    const layer = makeLayer();
+    layer.explode(2, new Vector3(), 1, new Vector3(), { enhanced: true, hdArt: true, maxSize: 2 });
+    const debris = pool(layer, 'debris');
+    const chunks = ENHANCED.debris.count + ENHANCED.debris.perScale;
+    expect(spawned(debris)).toBe(chunks);
+    const big = random < 0.2;
+    const speed = 0.85 * (big ? 0.6 : 1);
+    for (let i = 0; i < chunks; i++) {
+      expect(debris.params.getX(i)).toBeCloseTo((0.07 + random * 0.09 * 1.6) * (big ? 1.6 : 1));
+      expect(debris.velocity.getX(i)).toBeCloseTo((random - 0.5) * 8 * speed);
+      expect(debris.velocity.getZ(i)).toBeCloseTo((random - 0.5) * 8 * speed);
+      expect(debris.velocity.getY(i)).toBeCloseTo((2.5 + random * 3.5) * speed);
+      expect(debris.params.getY(i) - debris.velocity.getY(i) / 4.9).toBeCloseTo(8 * (0.5 + random));
+      expect(debris.params.getW(i)).toBe(random < 0.35 ? 1 : 0);
+    }
+  });
+
+  it('retains every billow, column puff and chunk across twelve simultaneous maximum-scale blasts', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const layer = makeLayer();
+    for (let i = 0; i < 12; i++)
+      layer.explode(1, new Vector3(i * 10, 0, 0), 3.5, new Vector3(), { enhanced: true, hdArt: true, maxSize: 4 });
+    for (const [name, perBlast] of [
+      ['billow', ENHANCED.smoke.count + 2 * ENHANCED.smoke.perScale],
+      ['column', ENHANCED.column.count + 1.5 * ENHANCED.column.perScale],
+      ['debris', ENHANCED.debris.count + 2 * ENHANCED.debris.perScale],
+    ] as const) {
+      const particles = pool(layer, name);
+      expect(particles.start.count).toBeGreaterThanOrEqual(12 * perBlast);
+      expect(spawned(particles)).toBe(12 * perBlast);
+      for (let i = 0; i < 12 * perBlast; i++) expect(particles.origin.getX(i)).toBe(Math.floor(i / perBlast) * 10);
+    }
+  });
+
   it('emits delayed cooling embers from a blast volume, two light pulses and a narrower HD halo', () => {
     const layer = makeLayer();
     const pulse = vi.fn();
@@ -333,7 +430,7 @@ describe('enhanced bolt geometry', () => {
 });
 
 describe('effect colour shader construction', () => {
-  it('expands spark, ember, halo, crater, debris, muzzle and bolt shaders into WGSL without a GPU or browser', () => {
+  it('expands spark, ember, halo, smoke, crater, debris, muzzle and bolt shaders into WGSL without a GPU or browser', () => {
     // Compiler capability queries only: this checks lazy TSL graph construction, not a driver or rendered image.
     const canvas = { width: 1, height: 1, style: {}, addEventListener() {} } as unknown as HTMLCanvasElement;
     const renderer = new WebGPURenderer({ canvas });
@@ -344,7 +441,7 @@ describe('effect colour shader construction', () => {
     renderer.hasFeature = () => false;
     renderer.hasCompatibility = () => false;
     const layer = makeLayer();
-    const meshes = ['sparks', 'airborneEmbers', 'muzzleStar', 'halo', 'embers', 'debris'].map(
+    const meshes = ['sparks', 'airborneEmbers', 'muzzleStar', 'halo', 'embers', 'debris', 'billow', 'column'].map(
       (name) => pool(layer, name).mesh,
     );
     meshes.push(layer.root.children.find((mesh) => mesh.name === 'hd-beams') as Pool['mesh']);

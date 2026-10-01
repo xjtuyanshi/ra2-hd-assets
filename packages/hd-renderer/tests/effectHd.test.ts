@@ -91,7 +91,12 @@ function fixture() {
   const hdPageState = vi.fn((): EffectPage | 'loading' | null => 'loading');
   const art = { ready: true, anim: () => resolved, hdAnim, hdPageState } as unknown as EffectArt;
   const explode = vi.fn();
-  const driver = new LiveEffectsDriver({ setBeams: vi.fn(), explode } as unknown as EffectsLayer, () => false);
+  const muzzleFlash = vi.fn();
+  const sparkFlash = vi.fn();
+  const driver = new LiveEffectsDriver(
+    { setBeams: vi.fn(), explode, muzzleFlash, sparkFlash } as unknown as EffectsLayer,
+    () => false,
+  );
   driver.style = 'enhanced';
   driver.hasHdArt = (type) => !!art.hdAnim(type);
   const push = (fields: Partial<LiveAnim> = {}, logicFrame = 100, now = 4) =>
@@ -110,7 +115,7 @@ function fixture() {
     const stats = driver.cards(art, () => 'fx:anim', out);
     return { out, stats };
   };
-  return { driver, hd, resolved, hdAnim, hdPageState, push, cards, explode };
+  return { driver, hd, resolved, hdAnim, hdPageState, push, cards, explode, muzzleFlash, sparkFlash };
 }
 
 describe('HD anim opacity', () => {
@@ -148,11 +153,56 @@ describe('live HD flipbook selection', () => {
       pass: 'air',
       draw: 'card',
       alpha: 1,
-      hd: { frame: f.hd.frames[2], next: f.hd.frames[3], scale: 2, blend0: 0, t0: 4, stageSeconds: 5 / 15 },
+      hd: { frame: f.hd.frames[2], next: f.hd.frames[3], scale: 2, size: 1.3, blend0: 0, t0: 4, stageSeconds: 5 / 15 },
     });
     expect(out[0]!.anchor).toEqual(engineAnchor(768, 512, 104, [1.5, -2]));
     expect(out[0]!.depth).toBe(engineDepth(768, 512, 104) + 0.003);
-    expect(out[0]!.push).toBe(cardPush({ rect: [0, 0, 10, 12], offset: [-6.5, -6] }));
+    expect(out[0]!.push).toBe(cardPush({ rect: [0, 0, 10 * 1.3, 12 * 1.3], offset: [-6.5 * 1.3, -6 * 1.3] }));
+  });
+
+  it.each([
+    ['TWLT070', 1.3, 'explode', 4],
+    ['CACH06DM', 1.3, 'explode', 4],
+    ['BIGBLUE', 1.15, 'sparkFlash', 3],
+    ['APMUZZLE', 1, 'muzzleFlash', 3],
+  ] as const)(
+    'scales %s HD placement and garnish together while retaining native fallbacks',
+    (type, size, fx, optionIndex) => {
+      const f = fixture();
+      f.driver.artWidth = () => 2;
+      f.push({ type, frame: 2 });
+      const card = f.cards().out[0]!;
+      expect(card.hd!.size).toBe(size);
+      expect(card.anchor).toEqual(engineAnchor(768, 512, 104, [1.5, -2]));
+      expect(card.push).toBe(cardPush({ rect: [0, 0, 10 * size, 12 * size], offset: [-6.5 * size, -6 * size] }));
+      expect(f[fx].mock.calls[0]![optionIndex]).toMatchObject({ hdArt: true, maxSize: 2 * size });
+      for (const mode of ['disabled', 'missing', 'faithful'] as const) {
+        f.driver.hdEnabled = mode !== 'disabled';
+        f.hdAnim.mockReturnValue(mode === 'missing' ? null : f.hd);
+        f.driver.style = mode === 'faithful' ? 'faithful' : 'enhanced';
+        f[fx].mockClear();
+        f.push({ type, frame: 2, uid: { disabled: 2, missing: 3, faithful: 4 }[mode] });
+        expect(f.cards().out.every((instance) => instance.hd === undefined)).toBe(true);
+        expect(f.cards().out[1]!.push).toBe(cardPush(f.resolved.sprite.frames[2]!));
+        expect(f[fx].mock.calls[0]![optionIndex]).toMatchObject({ hdArt: false, maxSize: 2 });
+      }
+    },
+  );
+
+  it('leaves unknown HD garnish widths uncapped', () => {
+    const f = fixture();
+    f.push();
+    expect(f.explode.mock.calls[0]![4]).toMatchObject({ hdArt: true, maxSize: undefined });
+  });
+
+  it.each([
+    ['CRYSTAL1', 1.3],
+    ['UNKNOWN_HD', 1],
+  ] as const)('sizes %s by category even when no garnish is emitted', (type, size) => {
+    const f = fixture();
+    f.push({ type, frame: 2 });
+    expect(f.cards().out[0]!.hd!.size).toBe(size);
+    expect(f.explode).not.toHaveBeenCalled();
   });
 
   it.each(['ground', 'air', 'top'] as const)('keeps the native %s pass and flat/decal handling', (layer) => {
@@ -490,6 +540,7 @@ describe('HD page routing and placement buffers', () => {
     expect(Array.from(page.nextRect.array.slice(0, 4))).toEqual(instance.hd!.next!.rect);
     expect(Array.from(page.offsets.array.slice(0, 4))).toEqual([-5.5, -7, -6.5, -6]);
     expect(page.style.getW(0)).toBe(instance.hd!.scale);
+    expect(page.timing.getW(0)).toBeCloseTo(1.3);
     expect(nativeBounds(page)).toEqual([-6.5, -7, 10, 13]);
     expect(page.style.getZ(0)).toBeCloseTo(instance.painter.bias, 7);
     expect(page.mesh.material).toMatchObject({
@@ -517,6 +568,16 @@ describe('HD page routing and placement buffers', () => {
     layer.now.value = 4.5;
     layer.setInstances([instance], 2);
     expect(attributes.map((attribute) => attribute.version)).toEqual(versions);
+    // Display-only changes use timing.w; frame crops, interpolation and all six vertex buffers stay the same.
+    instance.hd!.size = undefined;
+    layer.setInstances([instance], 2.5);
+    expect(page.timing.getW(0)).toBe(1);
+    expect([page.rect, page.nextRect, page.offsets, page.style].map((attribute) => attribute.version)).toEqual(
+      versions.slice(0, 4),
+    );
+    expect(Array.from(page.timing.array.slice(0, 3))).toEqual(
+      Array.from(Float32Array.from([instance.hd!.blend0, instance.hd!.t0, instance.hd!.stageSeconds])),
+    );
     instance.hd!.next = { ...instance.hd!.next!, page: 7 };
     layer.setInstances([instance], 3);
     expect(page.nextRect.array.slice(0, 4)).toEqual(page.rect.array.slice(0, 4));

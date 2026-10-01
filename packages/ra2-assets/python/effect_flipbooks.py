@@ -11,7 +11,9 @@ the previous output (or its first sheet's sibling) as reference_previous.png.
 ``pack`` cuts the redraw using layout.json, estimates grey from the cell border,
 and uses the native footprint to separate coverage from emitted light. It
 resamples premultiplied linear RGB and coverage to 2 or 3 HD texels per native
-pixel, stores the colour sRGB-encoded, and shelf-packs effects-hd.json and PNGs
+pixel (a sheet's layout.json may override this with pack_scale, and the footprint
+reach of 5 native pixels with footprint_grow, for small anims redrawn with more
+freedom), stores the colour sRGB-encoded, and shelf-packs effects-hd.json and PNGs
 for EffectHdLibrary. Do not unpremultiply: light may have colour at zero alpha.
 
 Job JSON is a list of {anim, kind, chunks: [[first, last], ...], scale, cols,
@@ -602,7 +604,10 @@ def cut_sheet(output: Image.Image, layout: dict, indices: list[np.ndarray], kind
         out = out.resize(tuple(layout["size"]), Image.Resampling.LANCZOS)
     pixels = np.array(out)
     scale = layout["scale"]
-    target = target_scale(scale)
+    # Optional per-sheet overrides (written into layout.json by hand for re-drawn small anims): stored HD texels per
+    # native pixel, and how far (native pixels) the redraw may reach beyond the native footprint.
+    target = int(layout.get("pack_scale", target_scale(scale)))
+    grow = int(layout.get("footprint_grow", 5))
     bx0, by0, _, _ = layout["bbox"]
     frames = {}
     for cell_info in layout["cells"]:
@@ -610,7 +615,7 @@ def cut_sheet(output: Image.Image, layout: dict, indices: list[np.ndarray], kind
         x, y, w, h = (cell_info[key] for key in ("x", "y", "w", "h"))
         cell = pixels[y : y + h, x : x + w]
         region = footprint(indices[f], layout["bbox"], scale, cell.shape[:2], 1, 1.0)
-        wide = footprint(indices[f], layout["bbox"], scale, cell.shape[:2], 5, 2.0)
+        wide = footprint(indices[f], layout["bbox"], scale, cell.shape[:2], grow, 2.0)
         premultiplied, alpha, _ = matte(cell, region, wide, kind)
         # Resample to target texels per native pixel, before encoding linear colour as sRGB.
         k = target / scale
