@@ -242,7 +242,9 @@ reflections still follow the settings.
   `hd-water=enhanced` select the modern one (`waterPreset`, chosen before the world is built).
 - Sprites (`sprites.ts`): filtered coverage of the indexed mask for soft edges; within about one original texel of
   transparent texels HD atlas colours keep their hue but are never brighter than the original texel there (the
-  upscaler's pale background fringe goes without a rim of raw palette colours). SHP shadows halve the displayed
+  upscaler's pale background fringe goes without a rim of raw palette colours). An HD page's optional
+  `paintSaturation` (0..1, absent = 1) grades only the decoded house colour in linear light, preserving Rec.709
+  luminance before the coverage-mask mix. A value of 1 or absent adds no shader nodes. SHP shadows halve the displayed
   colour, like the engine's. Live object occlusion uses scene-wide painter depth slots (`ra2/painterOrder.ts`),
   independently of art placement and per-frame `cardPush`; all atlas pages and voxel parts share the same order.
   Physical depth remains available to atmospheric post processing, while ground decals and shadows keep their

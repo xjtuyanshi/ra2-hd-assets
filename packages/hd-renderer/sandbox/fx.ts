@@ -6,6 +6,9 @@
  *   ?fx=units                 voxel tanks, SHP drones and infantry at eight facings, plus a few buildings
  *   ?fx=squad                 a small battle line: Grizzlies and GIs (house &house) facing Rhinos (house &house2),
  *                             a power plant and a refinery behind them (combine with anims: ?fx=squad,TWLT070,...)
+ *   ?fx=infantry              infantry art review: one row per type (&itypes=E1,E2,SHK,...), eight facings each, all
+ *                             showing sequence &seq= (default Ready) at step &step= (default 0; &animate=N steps it
+ *                             every N logic frames). Types listed in &itypes2= belong to house &house2.
  *   &at=dx,dy;dx,dy           cell offsets from the centre for the listed anims (instead of the diagonal)
  *   &map=XMP29U2&cx=60&cy=62  map cache and centre cell (default: the map's first waypoint)
  *   &zoom=3                   CSS pixels per engine pixel
@@ -248,6 +251,37 @@ function squadSet(): LiveObject[] {
   return objects;
 }
 
+/** Infantry art review (?fx=infantry): a row of eight facings per type, all in one sequence at one step. */
+function infantrySet(): LiveObject[] {
+  const types = (params.get('itypes') ?? 'E1,E2,SHK,ENGINEER,DOG,ADOG').split(',').filter(Boolean);
+  const second = new Set((params.get('itypes2') ?? '').split(',').filter(Boolean));
+  const seq = params.get('seq') ?? 'Ready';
+  const step = Number(params.get('step') ?? 0);
+  const spacing = Number(params.get('ispace') ?? 1);
+  const objects: LiveObject[] = [];
+  types.forEach((type, row) => {
+    for (let i = 0; i < 8; i++) {
+      const uid = nextUid++;
+      objects.push({
+        id: uid,
+        uid,
+        kind: 'infantry',
+        type,
+        owner: second.has(type) ? 1 : 0,
+        // Screen rows: +1 map x and -1 map y is one step right on screen, +1 on both one step down.
+        ...at(cx + (i - 3.5) * 0.6 * spacing + (row - types.length / 2) * 0.9 * spacing,
+          cy - (i - 3.5) * 0.6 * spacing + (row - types.length / 2) * 0.9 * spacing),
+        facingRaw: i * 8192,
+        infantrySequence: seq,
+        sequenceFrame: step,
+        health: 1,
+        isSelected: false,
+      });
+    }
+  });
+  return objects;
+}
+
 /** Engine timing of an anim type from the effect art sidecar (pnpm hd:effects), when it exists. */
 interface FxArt {
   frames: number;
@@ -268,7 +302,11 @@ for (const [id, a] of Object.entries(effectsJson?.anims ?? {}))
   });
 
 const fxIds = (params.get('fx') ?? 'units').split(',').filter(Boolean);
-const units = [...(fxIds.includes('units') ? unitSet() : []), ...(fxIds.includes('squad') ? squadSet() : [])];
+const units = [
+  ...(fxIds.includes('units') ? unitSet() : []),
+  ...(fxIds.includes('squad') ? squadSet() : []),
+  ...(fxIds.includes('infantry') ? infantrySet() : []),
+];
 const spread = Number(params.get('spread') ?? 1.6);
 const offsets = params
   .get('at')
@@ -276,7 +314,7 @@ const offsets = params
   .map((pair) => pair.split(',').map(Number) as [number, number])
   .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
 const anims: LiveAnim[] = fxIds
-  .filter((id) => id !== 'units' && id !== 'squad')
+  .filter((id) => id !== 'units' && id !== 'squad' && id !== 'infantry')
   .map((type, i, list) => {
     const offset = offsets?.length ? offsets[i % offsets.length]! : null;
     const d = (i - (list.length - 1) / 2) * spread;
@@ -384,13 +422,18 @@ function benchAnim(anim: LiveAnim, age: number): LiveAnim | null {
   return { ...anim, ...native };
 }
 
+/** &animate=N: infantry of ?fx=infantry step their sequence every N logic frames (0 = frozen at &step=). */
+const animateInfantry = Number(params.get('animate') ?? 0);
+
 function snapshot(): LiveSnapshot {
   const listed = anims.map((a, i) => listedAnim(a, i)).filter((a): a is LiveAnim => !!a);
   return {
     frame,
     view,
     houses,
-    objects: units,
+    objects: animateInfantry
+      ? units.map((u) => (u.infantrySequence ? { ...u, sequenceFrame: Math.floor(frame / animateInfantry) } : u))
+      : units,
     effects: {
       anims: listed,
       bullets: [],

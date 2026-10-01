@@ -144,6 +144,8 @@ export interface SpriteAtlasHdRef extends AtlasRef {
   remap: string;
   /** Frame rectangles and atlas dimensions are exactly twice their indexed source values. */
   scale: 2;
+  /** House-paint saturation in linear light, 0..1; absent means 1. Preserves Rec.709 luminance. */
+  paintSaturation?: number;
 }
 
 export interface TileEntry {
