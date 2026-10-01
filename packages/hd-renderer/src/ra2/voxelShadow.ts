@@ -1,4 +1,5 @@
 import {
+  Color,
   DoubleSide,
   LessDepth,
   Matrix4,
@@ -10,8 +11,23 @@ import {
   type Object3D,
   type OrthographicCamera,
 } from 'three/webgpu';
-import { abs, float, floor, positionLocal, screenCoordinate, uniform, vec4 } from 'three/tsl';
+import {
+  abs,
+  float,
+  floor,
+  fract,
+  mix,
+  positionLocal,
+  positionWorld,
+  screenCoordinate,
+  sin,
+  smoothstep,
+  uniform,
+  vec2,
+  vec4,
+} from 'three/tsl';
 import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
+import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT } from '../world';
 import { spriteLookFor } from './spriteLook';
 
@@ -35,7 +51,7 @@ import { spriteLookFor } from './spriteLook';
  * triangle depth introduced a stippled fringe; analytic coefficients keep identical depths across voxel edges.)
  * Review tooling can restore a single hard twin. Shadows draw after the sprites'
  * decals and before upright art is blended over them only where they are in front (renderOrder and SHADOW_LIFT).
- * Grounded water origins instead use straight-down contact twins, a breathing foam footprint and a faint mirrored
+ * Grounded water origins instead use straight-down contact twins, broken waterline foam and a rippled mirrored
  * silhouette flattened along the view ray. Their analytic depth layers keep the foam outside the contact core;
  * aircraft and physical-origin overrides retain the original projection. All twins share their source geometry.
  */
@@ -83,9 +99,10 @@ export function shadowCopyOpacity(target: number, copies: number = SHADOW_COPIES
 }
 
 export const WATER_CONTACT_OPACITY = 0.3;
-export const WATER_FOAM_OPACITY = 0.4;
-export const WATER_FOAM_SCALE = 1.1;
-export const WATER_REFLECTION_OPACITY = 0.25;
+export const WATER_FOAM_OPACITY = 0.3;
+export const WATER_FOAM_SCALE = 1.06;
+export const WATER_FOAM_FORWARD_SCALE = 1.14;
+export const WATER_REFLECTION_OPACITY = 0.3;
 export const WATER_REFLECTION_FADE = 0.5;
 /** Contact must write ahead of every foam layer, so foam fails depth inside the hull rather than whitening it. */
 const WATER_CONTACT_LIFT = (SHADOW_COPIES.length + 1) * SHADOW_COPY_LIFT;
@@ -210,6 +227,57 @@ export function waterContactProjection(point: Vector3, scale = 1, out = new Matr
     0,
     1,
   );
+}
+
+/** Extend bow/wake along the source's +x nose, retaining a narrower rim across the hull at every facing. */
+export function waterFoamProjection(point: Vector3, source: Matrix4, pulse = 0, out = new Matrix4()): Matrix4 {
+  const e = source.elements;
+  const length = Math.hypot(e[0]!, e[2]!);
+  const fx = length > 0 ? e[0]! / length : 1;
+  const fz = length > 0 ? e[2]! / length : 0;
+  const side = WATER_FOAM_SCALE + 0.02 * pulse;
+  const extra = WATER_FOAM_FORWARD_SCALE - WATER_FOAM_SCALE;
+  const xx = side + extra * fx * fx;
+  const xz = extra * fx * fz;
+  const zz = side + extra * fz * fz;
+  return out.set(
+    xx,
+    0,
+    xz,
+    point.x * (1 - xx) - point.z * xz,
+    0,
+    0,
+    0,
+    point.y + SHADOW_LIFT,
+    xz,
+    0,
+    zz,
+    point.z * (1 - zz) - point.x * xz,
+    0,
+    0,
+    0,
+    1,
+  );
+}
+
+/** Smooth value noise: two cell sizes keep the rim patchy without textures or a wall-clock dependency. */
+function waterFoamNoise(p: ShaderNode, clock: ShaderNode): ShaderNode {
+  const drifting = p.add(vec2(clock.mul(0.018), clock.mul(-0.012)));
+  const noise = (scale: number): ShaderNode => {
+    const v: ShaderNode = drifting.mul(scale);
+    const i: ShaderNode = floor(v);
+    const f: ShaderNode = fract(v);
+    const u: ShaderNode = f.mul(f).mul(float(3).sub(f.mul(2)));
+    const hash = (q: ShaderNode): ShaderNode => fract(sin(q.dot(vec2(127.1, 311.7))).mul(43758.5453));
+    return mix(
+      mix(hash(i), hash(i.add(vec2(1, 0))), u.x),
+      mix(hash(i.add(vec2(0, 1))), hash(i.add(vec2(1, 1))), u.x),
+      u.y,
+    );
+  };
+  return noise(5)
+    .mul(2 / 3)
+    .add(noise(10).mul(1 / 3));
 }
 
 /** Mirror about water, then intersect the view ray with the lifted plane: screen xy equals the mirrored point. */
@@ -371,7 +439,7 @@ function voxelSurfaceMaterial(nodes: AtmosphereNodes, layer: SurfaceLayer): Mesh
   const shared = materials.get(layer);
   if (shared) return shared;
   const material = new MeshBasicNodeMaterial({
-    color: layer === 'foam' ? 0xf3f8ff : layer === 'reflection' ? 0x162633 : 0x000000,
+    color: layer === 'foam' ? 0xddeef5 : layer === 'reflection' ? new Color(0.16, 0.19, 0.22) : 0x000000,
   });
   material.name = `voxel-${layer}`;
   material.transparent = true;
@@ -393,16 +461,29 @@ function voxelSurfaceMaterial(nodes: AtmosphereNodes, layer: SurfaceLayer): Mesh
   if (layer !== 'shadow') {
     material.side = DoubleSide;
     material.forceSinglePass = true; // Analytic depth already rejects duplicate faces; avoid transparent back/front passes.
-  }
-  if (layer === 'reflection') {
-    // Projected colour and lighting nodes depend on the unflattened model basis. Use a dark blue-grey silhouette
-    // instead, retaining source world height for the fade even though the drawn matrix has no vertical dimension.
+    // Retain source world height: the drawn matrix has no vertical dimension, so decks must not generate foam.
+    // Projected colour/lighting nodes also require that unflattened basis; reflection stays a blue-grey silhouette.
     const sourceMatrix = uniform(new Matrix4()).onObjectUpdate(({ object }) => {
       if (object instanceof VoxelSurfaceMesh) sourceMatrix.value.copy(object.source.matrixWorld);
     });
     const waterY = uniform(0).onObjectUpdate(({ object }) => (object instanceof VoxelSurfaceMesh ? object.waterY : 0));
+    const clock = uniform(0).onRenderUpdate(() => mode.time);
     const height = sourceMatrix.mul(vec4(positionLocal, 1)).y.sub(waterY);
-    material.opacityNode = opacity.mul(float(1).sub(abs(height).div(WATER_REFLECTION_FADE)).clamp());
+    if (layer === 'foam') {
+      const waterline = float(1).sub(smoothstep(0.06, 0.14, height));
+      const patches = smoothstep(0.4, 0.7, waterFoamNoise(positionWorld.xz, clock));
+      material.opacityNode = opacity.mul(waterline).mul(patches);
+    } else {
+      const ripple = sin(
+        positionWorld.z
+          .mul(36)
+          .add(clock.mul(0.8))
+          .add(sin(positionWorld.x.mul(20).add(clock.mul(0.5))).mul(0.6)),
+      )
+        .mul(0.12)
+        .add(0.88);
+      material.opacityNode = opacity.mul(float(1).sub(abs(height).div(WATER_REFLECTION_FADE)).clamp()).mul(ripple);
+    }
     material.alphaTest = 0.001;
   }
   material.depthWrite = true;
@@ -505,8 +586,8 @@ class VoxelSurfaceMesh extends Mesh {
       point.y = this.waterY;
       normal.copy(UP);
       if (this.layer === 'reflection') waterReflectionProjection(point, this.mode.toCamera, projection);
-      else
-        waterContactProjection(point, this.layer === 'foam' ? WATER_FOAM_SCALE + 0.02 * this.foamPulse : 1, projection);
+      else if (this.layer === 'foam') waterFoamProjection(point, this.source.matrixWorld, this.foamPulse, projection);
+      else waterContactProjection(point, 1, projection);
       if (this.layer === 'shadow') projection.elements[13] += WATER_CONTACT_LIFT;
       // Reflection is the lowest decal. Moving along the view ray keeps its screen position unchanged.
       if (this.layer === 'reflection') {

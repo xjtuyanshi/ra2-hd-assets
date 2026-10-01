@@ -442,10 +442,12 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   along a fixed light, with a 0.04-cell contact penumbra from five shared-geometry/material twins whose overlapping
   core keeps the original darkness (depth-tested once per layer, see `voxelShadow.ts`); `?vshadow=hard` restores one
   crisp twin in the sandbox and replays. Grounded voxel origins on water are identified by the terrain's surface
-  lookup, regardless of unit type: five straight-down twins give 0.3 core contact darkness, five light foam twins
-  scale 1.1 about the origin (±0.02 scale and ±3% of 0.4 core alpha over two seconds on the renderer clock), and one
-  dark blue-grey reflection silhouette mirrors each part about the water and flattens it along the camera view ray.
-  Reflection alpha is 0.25 at the waterline and fades to zero by 0.5 world units below it. The silhouette avoids
+  lookup, regardless of unit type: five straight-down twins give 0.3 core contact darkness; five blue-white foam twins
+  retain only source points near the waterline (smooth fade from 0.06 to 0.14 world units above it), scale 1.06 across
+  the hull and 1.14 along its forward axis, and break their 0.3 core alpha with drifting 0.1/0.2-cell value noise
+  (±0.02 scale and ±3% alpha breathing over two seconds on the renderer clock). One mid blue-grey reflection
+  silhouette mirrors each part about the water and flattens it along the camera view ray; its 0.3 waterline alpha
+  ripples horizontally and fades to zero by 0.5 world units below it. The silhouette avoids
   applying projected colour/normal nodes to a singular flattened model matrix. All twins share source geometry and
   renderer-owned materials, with no per-frame allocations; water draws at most eleven twins per part, land five.
   Contact depth masks the foam core so only the enlarged soft rim shows; all layers sit just above the water,

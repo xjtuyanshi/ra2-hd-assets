@@ -4,6 +4,7 @@ import {
   Group,
   Matrix4,
   Mesh,
+  MeshBasicNodeMaterial,
   MeshStandardNodeMaterial,
   NodeFrame,
   Vector3,
@@ -11,7 +12,9 @@ import {
   WebGLCoordinateSystem,
   WebGPUCoordinateSystem,
 } from 'three/webgpu';
+import { positionLocal, positionWorld } from 'three/tsl';
 import { AtmosphereNodes } from '../src/atmosphere';
+import type { ShaderNode } from '../src/tsl';
 import { IsoCamera } from '../src/world';
 import { spriteLookFor } from '../src/ra2/spriteLook';
 import { instantiateVoxel } from '../src/ra2/voxels';
@@ -33,6 +36,7 @@ import {
   WATER_CONTACT_OPACITY,
   WATER_FOAM_OPACITY,
   WATER_FOAM_SCALE,
+  WATER_FOAM_FORWARD_SCALE,
   WATER_REFLECTION_FADE,
   WATER_REFLECTION_OPACITY,
   setShadowGround,
@@ -45,8 +49,81 @@ import {
   voxelShadowMaterial,
   voxelWaterMaterial,
   waterContactProjection,
+  waterFoamProjection,
   waterReflectionProjection,
 } from '../src/ra2/voxelShadow';
+
+/** Evaluate the material's actual alpha graph at a source vertex; shader compilation is covered by vertexBuffers. */
+function sampleWaterAlpha(mesh: VoxelWaterMesh, local: Vector3): number {
+  const frame = new NodeFrame();
+  frame.object = mesh;
+  const alpha = (mesh.material as MeshBasicNodeMaterial).opacityNode!;
+  const visited = new Set<ShaderNode>();
+  const update = (node: ShaderNode) => {
+    if (visited.has(node)) return;
+    visited.add(node);
+    if (node.isUniformNode && node.updateType !== 'none') node.update(frame);
+    for (const child of node.getChildren()) update(child);
+  };
+  update(alpha);
+  const cache = new Map<ShaderNode, number[]>();
+  const evaluate = (node: ShaderNode): number[] => {
+    const cached = cache.get(node);
+    if (cached) return cached;
+    let result: number[];
+    if (node === positionLocal) result = local.toArray();
+    else if (node === positionWorld) result = local.clone().applyMatrix4(mesh.matrixWorld).toArray();
+    else if (node.isInputNode) result = typeof node.value === 'number' ? [node.value] : node.value.toArray();
+    else if (node.nodes) result = node.nodes.flatMap(evaluate);
+    else if (node.components) result = [...node.components].map((c) => evaluate(node.node)['xyzw'.indexOf(c)]!);
+    else if (node.isOperatorNode || node.isMathNode) {
+      const a = evaluate(node.aNode);
+      const b = node.bNode ? evaluate(node.bNode) : [];
+      const c = node.cNode ? evaluate(node.cNode) : [];
+      if (node.op === '*' && a.length === 16) {
+        result = [0, 1, 2, 3].map((row) => b.reduce((sum, v, col) => sum + a[col * 4 + row]! * v, 0));
+      } else if (node.method === 'dot') result = [a.reduce((sum, v, i) => sum + v * b[i]!, 0)];
+      else
+        result = Array.from({ length: Math.max(a.length, b.length, c.length) }, (_, i) => {
+          const x = a[i % a.length]!,
+            y = b[i % b.length]!,
+            z = c[i % c.length]!;
+          switch (node.op ?? node.method) {
+            case '+':
+              return x + y;
+            case '-':
+              return x - y;
+            case '*':
+              return x * y;
+            case '/':
+              return x / y;
+            case 'abs':
+              return Math.abs(x);
+            case 'sin':
+              return Math.sin(x);
+            case 'floor':
+              return Math.floor(x);
+            case 'fract':
+              return x - Math.floor(x);
+            case 'mix':
+              return x * (1 - z) + y * z;
+            case 'clamp':
+              return Math.max(y, Math.min(z, x));
+            case 'smoothstep': {
+              const t = Math.max(0, Math.min(1, (z - x) / (y - x)));
+              return t * t * (3 - 2 * t);
+            }
+            default:
+              throw new Error(`Unsupported alpha operation: ${node.op ?? node.method}`);
+          }
+        });
+    } else if (node.node) result = evaluate(node.node);
+    else throw new Error(`Unsupported alpha node: ${node.constructor.name}`);
+    cache.set(node, result);
+    return result;
+  };
+  return evaluate(alpha)[0]!;
+}
 
 describe('voxel water contact', () => {
   it('keeps x/z straight down and scales foam about the water origin, independent of height', () => {
@@ -63,6 +140,95 @@ describe('voxel water contact', () => {
         expect(point.z).toBeCloseTo(origin.z - 0.2 * scale, 12);
         expect(point.y).toBe(origin.y + SHADOW_LIFT);
       }
+    }
+  });
+
+  it.each([0, Math.PI / 2, 0.7])('widens foam along the source forward axis at facing %s', (facing) => {
+    const origin = new Vector3(12, 1.4, 23);
+    const source = new Matrix4().makeRotationY(facing).scale(new Vector3(2, 3, 0.5));
+    const forward = new Vector3().setFromMatrixColumn(source, 0).normalize();
+    const side = new Vector3().setFromMatrixColumn(source, 2).normalize();
+    for (const pulse of [-1, 0, 1]) {
+      const out = new Matrix4();
+      expect(waterFoamProjection(origin, source, pulse, out)).toBe(out);
+      for (const [axis, scale] of [
+        [forward, WATER_FOAM_FORWARD_SCALE],
+        [side, WATER_FOAM_SCALE],
+      ] as const) {
+        const projected = origin
+          .clone()
+          .add(axis)
+          .setY(origin.y + 0.3)
+          .applyMatrix4(out);
+        const expected = origin
+          .clone()
+          .addScaledVector(axis, scale + 0.02 * pulse)
+          .setY(origin.y + SHADOW_LIFT);
+        expect(projected.distanceTo(expected)).toBeLessThan(1e-12);
+      }
+    }
+  });
+
+  it('gates foam by unflattened source height with a smooth waterline fade', () => {
+    const nodes = new AtmosphereNodes();
+    const source = new Mesh();
+    const foam = new VoxelWaterMesh(source, nodes, 'foam');
+    const unit = new Group();
+    const scene = new Group();
+    unit.position.set(12, 1.4, 23);
+    source.position.y = 0.2;
+    unit.add(source, foam);
+    scene.add(unit);
+    setShadowGround(scene, { height: () => 1.4, waterHeight: () => 1.4 });
+    try {
+      scene.updateMatrixWorld(true);
+      const samples = Array.from(
+        { length: 256 },
+        (_, i) => new Vector3((i % 16) * 0.025, -0.2, Math.floor(i / 16) * 0.025),
+      );
+      const at = samples.reduce((a, b) => (sampleWaterAlpha(foam, a) > sampleWaterAlpha(foam, b) ? a : b));
+      const full = sampleWaterAlpha(foam, at);
+      expect(full).toBeGreaterThan(0);
+      for (const [height, gate] of [
+        [0.02, 1],
+        [0.06, 1],
+        [0.1, 0.5],
+        [0.14, 0],
+        [0.3, 0],
+      ]) {
+        expect(sampleWaterAlpha(foam, at.clone().setY(height! - 0.2))).toBeCloseTo(full * gate!, 12);
+      }
+    } finally {
+      source.geometry.dispose();
+      source.material.dispose();
+      nodes.dispose();
+    }
+  });
+
+  it('keeps noise deterministic on the renderer clock, with broad gaps and slow drift', () => {
+    const nodes = new AtmosphereNodes();
+    const source = new Mesh();
+    const foam = new VoxelWaterMesh(source, nodes, 'foam');
+    const mode = voxelShadowFor(nodes);
+    const points = Array.from(
+      { length: 256 },
+      (_, i) => new Vector3((i % 16) * 0.025, 0.02, Math.floor(i / 16) * 0.025),
+    );
+    try {
+      mode.time = 4;
+      const first = points.map((p) => sampleWaterAlpha(foam, p));
+      expect(points.map((p) => sampleWaterAlpha(foam, p))).toEqual(first);
+      expect(first.filter((a) => a === 0).length).toBeGreaterThan(points.length / 5);
+      expect(Math.max(...first)).toBeCloseTo(shadowCopyOpacity(WATER_FOAM_OPACITY), 12);
+      expect(first.every((a) => a >= 0 && a <= shadowCopyOpacity(WATER_FOAM_OPACITY))).toBe(true);
+      mode.time += 1;
+      expect(points.map((p) => sampleWaterAlpha(foam, p))).not.toEqual(first);
+      mode.time = 4;
+      expect(points.map((p) => sampleWaterAlpha(foam, p))).toEqual(first);
+    } finally {
+      source.geometry.dispose();
+      source.material.dispose();
+      nodes.dispose();
     }
   });
 
@@ -200,15 +366,16 @@ describe('voxel water contact', () => {
       const opacity = voxelShadowMaterial(nodes).opacityNode!;
       opacity.update(frame);
       expect(1 - (1 - (opacity as unknown as { value: number }).value) ** 5).toBeCloseTo(WATER_CONTACT_OPACITY, 14);
-      const foamOpacity = voxelWaterMaterial(nodes, 'foam').opacityNode!;
-      frame.object = foam;
+      const points = Array.from(
+        { length: 256 },
+        (_, i) => new Vector3((i % 16) * 0.025, 0.02, Math.floor(i / 16) * 0.025),
+      );
       for (const pulse of [-1, 0, 1]) {
         foam.foamPulse = pulse;
-        foamOpacity.update(frame);
-        const alpha = (foamOpacity as unknown as { value: number }).value;
+        const alpha = Math.max(...points.map((p) => sampleWaterAlpha(foam, p)));
         expect(1 - (1 - alpha) ** 5).toBeCloseTo(WATER_FOAM_OPACITY * (1 + 0.03 * pulse), 14);
       }
-      expect(WATER_REFLECTION_OPACITY).toBe(0.25);
+      expect(WATER_REFLECTION_OPACITY).toBe(0.3);
     } finally {
       source.geometry.dispose();
       source.material.dispose();
