@@ -25,6 +25,29 @@ implement keying, cursor suppression or input interception. It publishes the fin
 software cursor and native tooltip for the development page layer to restore only
 pixels erased by its transparent rectangles.
 
+## Sidebar archive and tab-art policy
+
+YR 1.001 `gamemd` loads sidebar archives at `0x534FA0` with ECX equal to the side index.
+The `cmp esi,2 / jne / mov esi,1` sequence maps Yuri (side 2) to Soviet (side 1),
+then `lea esi,[ebx+1]` supplies the archive number. `SIDEC%02dMD.MIX` is stored at
+`0x827E0C` and pushed at `0x5350DB`; `SIDEC%02d.MIX` is stored at `0x827DE4` and
+pushed at `0x53517E`. The resulting policy is Allied 0 → 01, Soviet 1 → 02, Yuri 2 → 02.
+It belongs in `packages/ra2-assets/src/games/yrUi.ts`, independently of generic rasterization.
+
+For each requested tab SHP and `SIDEBAR.PAL`, extraction reads the MD archive first,
+then the base archive, within that side's archive set. A missing MD member can fall
+back; a present malformed member is an error. Explicit nested archive lookup does
+not mount new files into the shared install namespace or alter its precedence.
+
+In the supplied installation, `sidec01.mix` and `sidec02.mix` inside `ra2.mix` contain
+`tab00.shp` through `tab03.shp` and `sidebar.pal`. Allied canvases are 28×27, Soviet
+32×28; each has five frames. `sidec02md.mix` exists but contains no tab art. Frame 0
+is normal, 1 active/selected/lit, 2 disabled/blank, 3 pressed, and 4 matches normal.
+Every frame is exported side by side with original SHP crop offsets and index-zero
+transparency. The C5 local extraction compared all four Allied strips against the
+supervisor's s1 references and all four Soviet/Yuri strips against s2: every RGBA
+pixel matched. This verifies asset extraction separately from live-match rendering.
+
 ## Layout recipe
 
 `S = 0x87F7E8`, `SC = *0xA8B230`, `H = *0xA83D4C`.
@@ -71,7 +94,7 @@ evidence, not a live memory capture. Community YRpp headers supplied leads only.
 | Optional buttons | repair `0xB0B3A0`, sell `0xB07DF8`, down `0xB0B328`, up `0xB0B408`, options `0xB04978`, diplomacy `0xB04910` | `0x6A5382`, `0x6A53C5`, `0x6ABEB8`, `0x6ABEED`, `0x653038`, `0x6530A3` | V |
 | Gadget construction/rect | vtable `+0`, X/Y/W/H `+0x0C/+0x10/+0x14/+0x18` | `0x69DE32..0x69DE3D`, `0x69DF33..0x69DF68`; vtable is a host sanity guard | V |
 | Record type/index/category | entry `+0/+4/+8` (category is DWORD, defense=5) | `0x6A879B..0x6A87AA`, `0x6ABCA5` | V |
-| Type arrays | building `0xA83C68`, infantry `0xA83CE0`, unit `0xA8E348`, aircraft `0xA8B218`; Items+4, Count+0x10 | resolver `0x48DCD0..0x48DD4B` (dispatch bytes); super Items `0xA8E334`, Count `0xA8E340` at `0x6A9939..0x6A9948` | V |
+| Type arrays | building `0xA83C68`, infantry `0xA8E348`, unit `0xA83CE0`, aircraft `0xA8B218`; Items+4, Count+0x10 | resolver `0x48DCD0..0x48DD4B`: byte table `0x48DD24[type-1]` selects jump `0x48DD10`; Unit/UnitType -> `0x48DCE7` (`[0xA83CE4]`), Infantry/InfantryType -> `0x48DCFA` (`[0xA8E34C]`); live YR 1.001 match: `0xA8E348` items start E1, E2, SHK and `0xA83CE0` AMCV, HARV, APOC (an earlier draft of this row had the two swapped, which put vehicle cameos on the infantry tab); super Items `0xA8E334`, Count `0xA8E340` at `0x6A9939..0x6A9948` | V |
 | Type ID / localized name | type `+0x24` bounded ASCII[24]; UIName pointer `+0x60` for both techno and SW | existing state reader ID; `0x6A9779`, `0x6A9941` | V |
 | Techno picture filename | type `+0x6D6`, ASCII[25]; AltCameoFile `+0x6F5` | `Cameo` string `0x843350`, load `0x71599F..0x715A05`; alternate `0x715A9C..0x715AA9` | V |
 | Alternate picture choice | H `+0x2BF/+0x2C0`; type AltCameo pointer `+0x710`, flag `+0xC8E`, building `+0x408` | `0x712040..0x7120C5` | V |

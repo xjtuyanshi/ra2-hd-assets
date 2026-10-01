@@ -149,9 +149,22 @@ export class GameInstall {
     return this.vfs.openFile(name);
   }
 
-  /** Read one mounted archive explicitly, without exposing mutable mount state or changing file precedence. */
+  /** Resolve an explicitly requested nested archive without mounting it into the shared file namespace. */
   readArchive(archive: string, name: string): Uint8Array | undefined {
-    return this.archives.get(archive.toLowerCase())?.read(name.toLowerCase());
+    const key = archive.toLowerCase();
+    let mix = this.archives.get(key);
+    if (!mix) {
+      for (const parent of [...this.archives.values()]) {
+        const bytes = parent.read(key);
+        if (bytes !== undefined) {
+          // A present but malformed archive is an extraction failure, not a missing override.
+          mix = MixFile.parse(bytes);
+          this.archives.set(key, mix);
+          break;
+        }
+      }
+    }
+    return mix?.read(name.toLowerCase());
   }
 
   ini(name: string): IniFile {

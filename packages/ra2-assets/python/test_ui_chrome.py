@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -103,6 +104,104 @@ class ChromeTests(unittest.TestCase):
         reports = json.loads((output / "registration.json").read_text())["pieces"]
         self.assertEqual(len(reports), 5)
         self.assertLess(max(report["residual"] for report in reports), 2)
+
+    def test_seams_remove_bright_edge_rows_and_colour_step_without_changing_far_rows(self):
+        a = np.full((80, 96, 3), (65, 80, 95), np.uint8)
+        b = np.full((80, 96, 3), (105, 120, 135), np.uint8)
+        a[-1] = b[0] = 250
+        result = chrome.level_seams([a, b])
+        joined = np.concatenate(result, 0).astype(float)
+        self.assertLess(np.abs(joined[79] - joined[80]).mean(), 4)
+        self.assertLess(joined[76:84].max(), 150)
+        self.assertLess(np.abs(np.diff(joined[70:90], axis=0)).max(), 6)
+        np.testing.assert_array_equal(result[0][:44], a[:44])
+        np.testing.assert_array_equal(result[1][36:], b[36:])
+        np.testing.assert_array_equal(a[-1], 250)  # Inputs remain read-only.
+
+    def test_pack_runs_seams_by_default_and_cli_can_skip(self):
+        self.make_sheet()
+        cameos.load_image(self.job / "input.png").save(self.job / "output.png")
+        with patch.object(chrome, "level_seams", wraps=chrome.level_seams) as seams:
+            chrome.pack(self.job, self.root / "with-seams")
+            seams.assert_called_once()
+            self.assertEqual(len(seams.call_args.args[0]), 3)
+        with patch.object(chrome, "level_seams") as seams:
+            self.assertEqual(chrome.main(["pack", "--job-dir", str(self.job), "--output", str(self.root / "no-seams"), "--no-seams"]), 0)
+            seams.assert_not_called()
+        self.assertFalse(json.loads((self.root / "no-seams/registration.json").read_text())["seams"])
+
+    def make_tabs(self):
+        paths = []
+        for tab in range(4):
+            strip = np.zeros((48, 64 * 5, 4), np.uint8)
+            for frame in range(5):
+                strip[:, frame * 64:(frame + 1) * 64, :3] = texture(64, 48)
+                strip[4:44, frame * 64 + 4:(frame + 1) * 64 - 4, 3] = 255
+                strip[12:18, frame * 64 + 12:frame * 64 + 18, 3] = (frame + tab) * 30
+            path = self.root / f"strip{tab}.png"
+            Image.fromarray(strip).save(path)
+            paths.append(path)
+        return paths
+
+    def test_tabs_ecc_recovers_shift_restores_native_alpha_and_only_patches_tabs(self):
+        paths = self.make_tabs()
+        layout = chrome.tabs_sheet({"Test": paths}, self.job, scale=2)
+        self.assertEqual(layout["states"], ["normal", "active", "pressed"])
+        self.assertEqual(len(layout["cells"]), 12)
+        self.assertNotIn("{GRID}", (self.job / "prompt.txt").read_text())
+        reference = cameos.load_image(self.job / "input.png")
+        shift = np.float32([[1, 0, 3], [0, 1, 2]])
+        Image.fromarray(cv2.warpAffine(np.array(reference), shift, reference.size,
+                                      flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)).save(self.job / "output.png")
+        directories = [self.root / "chrome1", self.root / "chrome2"]
+        old = {"frame": {"width": 800, "height": 600}, "scale": 3, "pieces": [{"file": "untouched.png"}],
+               "extension": {"keep": True}, "tabs": {"old": True}}
+        for directory in directories:
+            directory.mkdir()
+            cameos.write_json(directory / "chrome.json", old)
+            (directory / "untouched.png").write_bytes(b"untouched")
+        result = chrome.tabs_pack(self.job, {"Test": directories}, output_scale=3)
+        report = json.loads((self.job / "tabs-registration.json").read_text())["pieces"]
+        for cell, fit in zip(layout["cells"], report):
+            x, y = cell["dst"][:2]
+            offset = np.array([min(20, x), min(20, y)])
+            np.testing.assert_allclose(np.array(fit["warp"])[:, 2] - offset, [3, 2], atol=0.4)
+            self.assertGreater(fit["correlation"], 0.98)
+        for directory in directories:
+            manifest = json.loads((directory / "chrome.json").read_text())
+            self.assertEqual({k: v for k, v in manifest.items() if k != "tabs"}, {k: v for k, v in old.items() if k != "tabs"})
+            self.assertEqual(manifest["tabs"], result["Test"])
+            self.assertEqual((directory / "untouched.png").read_bytes(), b"untouched")
+            atlas = np.array(Image.open(directory / "tabs.png"))
+            for cell, frame in zip(layout["cells"], manifest["tabs"]["frames"]):
+                rect = frame["rect"]
+                native = np.array(Image.open(paths[cell["tab"]]))[:, cell["frame"] * 64:(cell["frame"] + 1) * 64, 3]
+                expected = cv2.GaussianBlur(cv2.resize(native.astype(np.float32), (192, 144), interpolation=cv2.INTER_NEAREST), (0, 0), 0.8).astype(np.uint8)
+                alpha = atlas[rect["y"]:rect["y"] + rect["height"], rect["x"]:rect["x"] + rect["width"], 3]
+                np.testing.assert_array_equal(alpha, expected)
+
+    def test_tabs_cli_accepts_custom_frame_count_states_scale_and_explicit_destinations(self):
+        paths = self.make_tabs()
+        for path in paths:
+            with Image.open(path) as strip:
+                four_frames = strip.crop((0, 0, 64 * 4, 48))
+            four_frames.save(path)
+        self.assertEqual(chrome.main(["tabs-sheet", "--strip-set", "Set", *map(str, paths), "--job-dir", str(self.job),
+                                      "--states", "0:normal,3:active", "--scale", "2", "--frame-count", "4"]), 0)
+        layout = json.loads((self.job / "layout.json").read_text())
+        self.assertEqual(layout["states"], ["normal", "active"])
+        self.assertEqual(layout["scale"], 2)
+        self.assertEqual(layout["frameCount"], 4)
+        cameos.load_image(self.job / "input.png").save(self.job / "output.png")
+        output = self.root / "output"
+        output.mkdir()
+        cameos.write_json(output / "chrome.json", {"pieces": [], "custom": 123})
+        self.assertEqual(chrome.main(["tabs-pack", "--job-dir", str(self.job), "--side-dir", "Set", str(output), "--output-scale", "2"]), 0)
+        self.assertEqual(json.loads((output / "chrome.json").read_text())["tabs"]["scale"], 2)
+        with self.assertRaisesRegex(ValueError, "divisible"):
+            chrome.tabs_sheet({"Bad": paths}, self.root / "bad-tabs", frame_count=3, states=[(0, "normal"), (1, "active")])
+        with self.assertRaisesRegex(ValueError, "Unknown strip set"):
+            chrome.tabs_pack(self.job, {"Other": [output]})
 
     def test_cli_json_geometry_overrides_and_default_layout_dimensions(self):
         Image.fromarray(texture(360, 192)).save(self.root / "frame.png")

@@ -10,6 +10,12 @@ export interface ChromeManifest {
   frame: { width: number; height: number };
   /** Rect x/y are frame-pixel offsets from the live anchor; width/height are frame-pixel sizes, independent of PNG scale. */
   pieces: { file: string; rect: Rect; anchor: 'sidebar' | 'commandBar' }[];
+  /** Atlas rectangles are image pixels; the live layout supplies each button's frame-pixel destination. */
+  tabs?: {
+    file: string;
+    scale: number;
+    frames: { tab: number; state: 'normal' | 'active' | 'pressed'; rect: Rect }[];
+  };
 }
 
 export interface CursorManifest {
@@ -22,6 +28,7 @@ export interface CursorManifest {
 export interface ChromeAssets {
   frame: { width: number; height: number };
   pieces: (ChromeManifest['pieces'][number] & { bitmap: ImageBitmap })[];
+  tabs?: NonNullable<ChromeManifest['tabs']> & { bitmap: ImageBitmap };
 }
 
 /** Getters are nonblocking: unavailable assets retain procedural drawing until a later frame. */
@@ -145,7 +152,50 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
             );
             // Do not erase native chrome unless its complete replacement is available.
             if (!disposed && pieces.every((piece) => piece.bitmap)) {
-              chrome.set(side, { frame: manifest.frame, pieces: pieces as ChromeAssets['pieces'] });
+              const assets: ChromeAssets = { frame: manifest.frame, pieces: pieces as ChromeAssets['pieces'] };
+              chrome.set(side, assets);
+              // Publish complete chrome first. Optional tab failures must never hide the other pieces.
+              const tabs = manifest.tabs;
+              if (
+                !tabs ||
+                typeof tabs.file !== 'string' ||
+                !Number.isInteger(tabs.scale) ||
+                tabs.scale < 1 ||
+                !Array.isArray(tabs.frames)
+              )
+                return;
+              const image = await bitmap(`${dir}/${tabs.file}`);
+              if (disposed || !image) return;
+              const keys = new Set<string>();
+              const valid = tabs.frames.every((frame) => {
+                if (
+                  !frame ||
+                  !Number.isInteger(frame.tab) ||
+                  frame.tab < 0 ||
+                  frame.tab > 3 ||
+                  !['normal', 'active', 'pressed'].includes(frame.state)
+                )
+                  return false;
+                const r = frame.rect,
+                  key = `${frame.tab}:${frame.state}`;
+                if (
+                  !r ||
+                  ![r.x, r.y, r.width, r.height].every(Number.isInteger) ||
+                  r.x < 0 ||
+                  r.y < 0 ||
+                  r.width < 1 ||
+                  r.height < 1 ||
+                  r.x + r.width > image.width ||
+                  r.y + r.height > image.height ||
+                  keys.has(key)
+                )
+                  return false;
+                keys.add(key);
+                return true;
+              });
+              if (valid && [0, 1, 2, 3].every((tab) => keys.has(`${tab}:normal`) && keys.has(`${tab}:active`))) {
+                assets.tabs = { ...tabs, bitmap: image };
+              }
             }
           } catch {
             // Malformed optional manifests retain the fallback.

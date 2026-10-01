@@ -148,6 +148,32 @@ export function drawSidebar(
     ctx.strokeText(value, snap(x), snap(y));
     text(value, x, y, color);
   };
+  const statusCaption = (value: string, r: Rect, left: boolean) => {
+    ctx.save();
+    let size = 13;
+    font(700, size);
+    const available = r.width - 6;
+    while (ctx.measureText(value).width > available && size > 10) {
+      size -= 0.25;
+      font(700, size);
+    }
+    const width = Math.min(available, ctx.measureText(value).width) + 6;
+    const x = left ? r.x + 3 : r.x + (r.width - width) / 2;
+    const centerY = r.y + 20;
+    rounded({ x, y: centerY - (size + 6) / 2, width, height: size + 6 });
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fill();
+    ctx.globalAlpha = pulse(1.2, 0.85, 1);
+    ctx.textBaseline = 'middle';
+    ctx.strokeStyle = '#090b10';
+    ctx.lineWidth = 1.25;
+    ctx.lineJoin = 'round';
+    // At the minimum font size, constrain unusually long translations to the same text box.
+    ctx.strokeText(value, snap(x + width / 2), snap(centerY), available);
+    ctx.fillStyle = '#ffd84a';
+    ctx.fillText(value, snap(x + width / 2), snap(centerY), available);
+    ctx.restore();
+  };
   ctx.save();
   ctx.scale(opts.scale, opts.scale);
   ctx.imageSmoothingEnabled = true;
@@ -318,27 +344,11 @@ export function drawSidebar(
       ctx.restore();
     }
     if (c.ready) {
-      ctx.save();
-      font(700, 11);
-      ctx.globalAlpha = pulse(1.2, 0.85, 1);
-      ctx.textBaseline = 'middle';
-      outlinedText(sidebar.labels.ready ?? 'Ready', r.x + r.width / 2, r.y + 19, '#fff6c8');
-      ctx.restore();
+      statusCaption(sidebar.labels.ready ?? 'Ready', r, false);
       outline(r, accent, 1.5);
     }
     if (c.hold) {
-      font(700, 11);
-      const label = sidebar.labels.hold ?? 'On Hold';
-      const width = Math.min(r.width - 6, ctx.measureText(label).width + 6);
-      const x = c.queued > 0 ? r.x + 3 : r.x + (r.width - width) / 2;
-      rounded({ x, y: r.y + 13, width, height: 14 });
-      ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fill();
-      ctx.save();
-      ctx.globalAlpha = pulse(1.2, 0.85, 1);
-      ctx.textBaseline = 'middle';
-      outlinedText(label, x + width / 2, r.y + 20, '#fff6c8');
-      ctx.restore();
+      statusCaption(sidebar.labels.hold ?? 'On Hold', r, c.queued > 0);
     }
     if (c.queued > 0) {
       font(700, 8.5, true);
@@ -366,6 +376,33 @@ export function drawSidebar(
   l.tabs.forEach((r, i) => {
     const tab = sidebar.tabs[i];
     if (!tab) return;
+    if (chrome?.tabs) {
+      if (tab.count <= 0) return;
+      const state = tab.flashing
+        ? Math.floor(opts.time / 500) % 2 === 0
+          ? 'active'
+          : 'normal'
+        : sidebar.activeTab === i
+          ? 'active'
+          : 'normal';
+      const frame = chrome.tabs.frames.find((frame) => frame.tab === i && frame.state === state);
+      if (frame) {
+        const source = frame.rect,
+          target = rect(r);
+        ctx.drawImage(
+          chrome.tabs.bitmap,
+          source.x,
+          source.y,
+          source.width,
+          source.height,
+          target.x,
+          target.y,
+          target.width,
+          target.height,
+        );
+      }
+      return;
+    }
     if (!tab.count) fill(r, 'rgba(0,0,0,0.6)');
     if (tab.flashing) {
       ctx.save();

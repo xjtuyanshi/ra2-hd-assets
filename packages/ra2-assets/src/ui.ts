@@ -39,6 +39,22 @@ export interface CursorIndex {
   types?: readonly unknown[];
 }
 
+/** Export all canvases side by side, retaining cropped offsets and empty frames. */
+export function rasterizeUiStrip(shape: ShpFile, palette: Palette): UiRaster {
+  const width = shape.cx * shape.count,
+    height = shape.cy;
+  if (!shape.count || width < 1 || height < 1 || width > 16384 || height > 16384 || width * height > 64 * 1024 * 1024)
+    throw new Error('UI strip exceeds bounds');
+  const image: UiRaster = { width, height, channels: 4, data: new Uint8Array(width * height * 4) };
+  for (let i = 0; i < shape.count; i++) {
+    const frame = rasterizeUiFrame(shape, palette, i);
+    for (let y = 0; y < height; y++) {
+      image.data.set(frame.data.subarray(y * shape.cx * 4, (y + 1) * shape.cx * 4), (y * width + i * shape.cx) * 4);
+    }
+  }
+  return image;
+}
+
 /** Pack every frame, including empty placeholders, without assuming body/shadow pairs. */
 export function buildCursorAtlas(
   shape: ShpFile,

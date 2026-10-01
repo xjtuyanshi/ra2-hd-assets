@@ -24,6 +24,20 @@ const chrome: ChromeAssets = {
   ],
 };
 const withChrome: UiAssets = { ...fallback, chrome: () => chrome };
+const tabBitmap = { width: 336, height: 400 } as ImageBitmap;
+const tabArt: NonNullable<ChromeAssets['tabs']> = {
+  file: 'tabs.png',
+  scale: 4,
+  bitmap: tabBitmap,
+  frames: Array.from({ length: 4 }, (_, tab) =>
+    (['normal', 'active', 'pressed'] as const).map((state, column) => ({
+      tab,
+      state,
+      rect: { x: column * 112, y: tab * 100, width: 112, height: 100 },
+    })),
+  ).flat(),
+};
+const withTabs: UiAssets = { ...fallback, chrome: () => ({ ...chrome, tabs: tabArt }) };
 
 function recording() {
   const calls: { name: string; args: unknown[]; style: Record<string, unknown> }[] = [];
@@ -136,18 +150,121 @@ describe('HD sidebar drawing', () => {
     );
     expect(calls.some((c) => c.name === 'fillRect' && c.style.fillStyle === 'rgba(8,10,14,0.62)')).toBe(true);
     const ready = calls.find((c) => c.name === 'fillText' && c.args[0] === '就緒')!;
-    expect(ready.style).toMatchObject({ textBaseline: 'middle', fillStyle: '#fff6c8' });
-    expect(String(ready.style.font)).toMatch(/^700 11px/);
+    expect(ready.style).toMatchObject({ textBaseline: 'middle', fillStyle: '#ffd84a' });
+    expect(String(ready.style.font)).toMatch(/^700 13px/);
     expect(ready.style.globalAlpha as number).toBeGreaterThanOrEqual(0.85);
     for (const label of ['就緒', '暫停', '12345']) {
       expect(calls.find((c) => c.name === 'strokeText' && c.args[0] === label)?.style).toMatchObject({
         strokeStyle: '#090b10',
-        lineWidth: 2,
+        lineWidth: label === '12345' ? 2 : 1.25,
       });
     }
     expect(labels).not.toContain('$800');
     expect(calls.find((c) => c.name === 'fillText' && c.args[0] === '12345')?.args.slice(1)).toEqual([716, 156]);
     expect(calls.filter((c) => c.name === 'clip').length).toBeGreaterThan(2);
+  });
+  it('centres fitted yellow Ready/Hold captions on text-sized dark boxes and keeps queued Hold left aligned', () => {
+    const s = hdSidebar();
+    s.labels = { ready: 'Ready', hold: 'Hold' };
+    const { ctx, calls } = recording();
+    drawSidebar(ctx, s, withChrome, { scale: 4, time: 625 });
+    for (const [label, c, left] of [
+      ['Ready', s.cameos[1]!, false],
+      ['Hold', s.cameos[2]!, true],
+    ] as const) {
+      const width = label.length * 13 * 0.55 + 6;
+      const x = left ? c.x + 3 : c.x + (60 - width) / 2;
+      const snap = (value: number) => Math.round(value * 4) / 4;
+      const boxIndex = calls.findIndex(
+        (call) => call.name === 'roundRect' && call.args[0] === snap(x) && call.args[1] === c.y + 10.5,
+      );
+      expect(calls[boxIndex]?.args).toEqual([snap(x), c.y + 10.5, snap(x + width) - snap(x), 19, 2]);
+      expect(calls[boxIndex + 1]?.style.fillStyle).toBe('rgba(0,0,0,0.6)');
+      const fill = calls.find((call) => call.name === 'fillText' && call.args[0] === label)!;
+      expect(fill.args).toEqual([label, snap(x + width / 2), c.y + 20, 54]);
+      expect(fill.style).toMatchObject({ fillStyle: '#ffd84a', textBaseline: 'middle', globalAlpha: 0.85 });
+      const stroke = calls[calls.indexOf(fill) - 1]!;
+      expect(stroke.name).toBe('strokeText');
+      expect(stroke.style).toMatchObject({ lineWidth: 1.25, strokeStyle: '#090b10' });
+    }
+    s.labels.ready = 'Translation far too long to fit';
+    s.labels.hold = 'Long Hold';
+    s.cameos[2]!.queued = 0;
+    calls.length = 0;
+    drawSidebar(ctx, s, withChrome, { scale: 1, time: 0 });
+    const ready = calls.find((call) => call.name === 'fillText' && call.args[0] === s.labels.ready)!;
+    expect(String(ready.style.font)).toMatch(/^700 10px/);
+    expect(ready.args.slice(1)).toEqual([756, 250, 54]);
+    const hold = calls.find((call) => call.name === 'fillText' && call.args[0] === s.labels.hold)!;
+    expect(parseFloat(String(hold.style.font).split(' ')[1]!)).toBeLessThan(13);
+    expect(parseFloat(String(hold.style.font).split(' ')[1]!)).toBeGreaterThanOrEqual(10);
+    expect(hold.args.slice(1)).toEqual([692, 300, 54]);
+  });
+  it.each([0, 499, 500, 999, 1000])(
+    'selects tab atlas frames at time %i without drawing disabled tabs or state overlays',
+    (time) => {
+      const s = hdSidebar();
+      s.cameos = [];
+      s.activeTab = 3;
+      // Even a selected, flashing empty tab must retain the chrome's blank disabled button.
+      s.tabs[2]!.flashing = true;
+      const { ctx, calls } = recording();
+      drawSidebar(ctx, s, withTabs, { scale: 1, time });
+      const expected = [
+        [0, 'normal'],
+        [1, time < 500 || time >= 1000 ? 'active' : 'normal'],
+        [3, 'active'],
+      ] as const;
+      expect(
+        calls.filter((call) => call.name === 'drawImage' && call.args[0] === tabBitmap).map((call) => call.args),
+      ).toEqual(
+        expected.map(([tab, state]) => {
+          const source = tabArt.frames.find((frame) => frame.tab === tab && frame.state === state)!.rect;
+          const target = s.layout.tabs[tab]!;
+          return [
+            tabBitmap,
+            source.x,
+            source.y,
+            source.width,
+            source.height,
+            target.x,
+            target.y,
+            target.width,
+            target.height,
+          ];
+        }),
+      );
+      expect(calls.some((call) => call.style.shadowBlur || (call.name === 'fillRect' && call.args[1] === 197))).toBe(
+        false,
+      );
+      s.activeTab = 1;
+      calls.length = 0;
+      drawSidebar(ctx, s, withTabs, { scale: 1, time: 500 });
+      expect(
+        calls.find((call) => call.name === 'drawImage' && call.args[0] === tabBitmap && call.args[2] === 100)?.args[1],
+      ).toBe(0);
+    },
+  );
+  it('retains existing tab pulse/glow/disabled shading when chrome has no tab atlas', () => {
+    const s = hdSidebar();
+    s.cameos = [];
+    const { ctx, calls } = recording();
+    drawSidebar(ctx, s, withChrome, { scale: 1, time: 0 });
+    expect(
+      calls.some(
+        (call) =>
+          call.name === 'fillRect' &&
+          call.args[0] === s.layout.tabs[2]!.x &&
+          call.style.fillStyle === 'rgba(0,0,0,0.6)',
+      ),
+    ).toBe(true);
+    expect(calls.some((call) => call.style.shadowBlur === 4)).toBe(true);
+    expect(
+      calls.some(
+        (call) =>
+          call.name === 'fillRect' && call.args[0] === s.layout.tabs[1]!.x && call.style.fillStyle === '#e0402f',
+      ),
+    ).toBe(true);
   });
   it('only draws clock sectors for non-null progress, with the remaining clockwise arc', () => {
     const s = hdSidebar();
@@ -299,6 +416,82 @@ describe('HD software cursor', () => {
 });
 
 describe('optional HD UI art cache', () => {
+  it.each(['absent', '404', 'decode', 'bounds', 'incomplete', 'duplicate', 'state'])(
+    'keeps complete chrome when optional tabs are broken: %s',
+    async (failure) => {
+      const close = vi.fn();
+      const image = { width: 336, height: 400, close } as unknown as ImageBitmap;
+      const frames = tabArt.frames.map((frame) => ({ ...frame, rect: { ...frame.rect } }));
+      if (failure === 'bounds') frames[0]!.rect.width = 999;
+      if (failure === 'incomplete') frames.splice(0, 1);
+      if (failure === 'duplicate') frames.push(frames[0]!);
+      if (failure === 'state') (frames[0] as { state: string }).state = 'disabled';
+      const fetcher = vi.fn(async (path: string) => ({
+        ok: !(failure === '404' && path.endsWith('tabs.png')),
+        json: async () => ({
+          frame: chrome.frame,
+          pieces: [{ ...chrome.pieces[0], bitmap: undefined }],
+          ...(failure === 'absent' ? {} : { tabs: { file: 'tabs.png', scale: 4, frames } }),
+        }),
+        blob: async () => new Blob([path]),
+      }));
+      vi.stubGlobal('fetch', fetcher);
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn(async (blob: Blob) => {
+          if (failure === 'decode' && (await blob.text()).endsWith('tabs.png')) throw new Error('Broken atlas');
+          return image;
+        }),
+      );
+      const assets = createUiAssets();
+      assets.chrome(1);
+      await settle();
+      const loaded = assets.chrome(1)!;
+      expect(loaded.pieces).toHaveLength(1);
+      expect(loaded.tabs).toBeUndefined();
+      const requests = fetcher.mock.calls.length;
+      assets.chrome(1);
+      await settle();
+      expect(fetcher).toHaveBeenCalledTimes(requests);
+      assets.dispose();
+    },
+  );
+  it('publishes chrome while tabs are still loading and owns the atlas through disposal', async () => {
+    const pieceClose = vi.fn(),
+      tabClose = vi.fn();
+    let resolve!: (image: ImageBitmap) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (path: string) => ({
+        ok: true,
+        json: async () => ({ frame: chrome.frame, pieces: [{ ...chrome.pieces[0], bitmap: undefined }], tabs: tabArt }),
+        blob: async () => new Blob([path]),
+      })),
+    );
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async (blob: Blob) =>
+        (await blob.text()).endsWith('tabs.png')
+          ? new Promise<ImageBitmap>((done) => {
+              resolve = done;
+            })
+          : ({ close: pieceClose } as unknown as ImageBitmap),
+      ),
+    );
+    const assets = createUiAssets();
+    assets.chrome(0);
+    await settle();
+    expect(assets.chrome(0)?.pieces).toHaveLength(1);
+    expect(assets.chrome(0)?.tabs).toBeUndefined();
+    const image = { ...tabBitmap, close: tabClose } as unknown as ImageBitmap;
+    resolve(image);
+    await settle();
+    expect(assets.chrome(0)?.tabs).toEqual({ ...tabArt, bitmap: image });
+    assets.dispose();
+    expect(pieceClose).toHaveBeenCalledOnce();
+    expect(tabClose).toHaveBeenCalledOnce();
+    expect(assets.chrome(0)).toBeNull();
+  });
   it.each([null, { x: 0, y: 0, width: 99, height: 1 }])(
     'keeps malformed cursor frames unavailable without retries: %j',
     async (frame) => {

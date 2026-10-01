@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Palette, ShpFile } from 'ra2-formats';
-import { buildCursorAtlas, rasterizeUiFrame } from '../ui.ts';
+import { buildCursorAtlas, rasterizeUiFrame, rasterizeUiStrip } from '../ui.ts';
 import { encodePng } from './png.ts';
 
 export interface CameoDefinition {
@@ -74,4 +74,21 @@ export function writeCursor(options: { out: string; shape: ShpFile; palette: Pal
   writeFileSync(join(options.out, 'cursor.png'), encodePng(image));
   writeFileSync(join(options.out, 'cursor.json'), JSON.stringify(index, null, 2));
   return { frames: index.frames.length, width: image.width, height: image.height };
+}
+
+/** File names and archive metadata are supplied by the game policy, never selected by the raster writer. */
+export function writeUiStrip(options: { out: string; file: string; shape: ShpFile; palette: Palette }): {
+  file: string;
+  frameSize: { width: number; height: number };
+  frameCount: number;
+} {
+  if (!/^[a-z0-9_-]+\.png$/i.test(options.file)) throw new Error('Invalid UI strip output name');
+  const image = rasterizeUiStrip(options.shape, options.palette);
+  mkdirSync(options.out, { recursive: true });
+  writeFileSync(join(options.out, options.file), encodePng(image));
+  return {
+    file: options.file,
+    frameSize: { width: options.shape.cx, height: options.shape.cy },
+    frameCount: options.shape.count,
+  };
 }

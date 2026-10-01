@@ -317,6 +317,30 @@ describe('YR 1.001 read-only sidebar', () => {
     expect(f.read()!.cameos.every((c) => !c.hovered)).toBe(true);
   });
 
+  it('resolves infantry entries through InfantryTypeClass::Array and vehicles through UnitTypeClass::Array', () => {
+    // Regression: the two arrays were swapped once, which drew vehicle cameos on the infantry tab in a live match.
+    const f = fixture(2, 2);
+    const INF = 0xc30000,
+      UNIT = 0xc40000;
+    for (const [at, id] of [
+      [INF, 'E2'],
+      [UNIT, 'HARV'],
+    ] as const) {
+      f.bytes.copyWithin(at, TYPE, TYPE + 0xe00);
+      f.bytes.fill(0, at + 0x24, at + 0x3c);
+      f.ascii(at + 0x24, id);
+    }
+    f.vector(0xa8e348, 0xce1000, [INF]);
+    f.vector(0xa83ce0, 0xce2000, [UNIT]);
+    f.i32(f.entry(0) + 4, 16);
+    f.i32(f.entry(1) + 4, 40);
+    const r = f.read()!;
+    expect(r.cameos.map((c) => [c.id, c.kind])).toEqual([
+      ['E2', 'infantry'],
+      ['HARV', 'vehicle'],
+    ]);
+  });
+
   it('reproduces production clocks, factory ready, hold, state overrides and native queue display', () => {
     const f = fixture(0, 2),
       e = f.entry();

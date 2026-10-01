@@ -61,8 +61,9 @@ const building: TypeSpec = {
   owned: 0x5500,
   produced: 0x55a0,
 };
+// InfantryTypeClass::Array; the resolver jump table at 0x48DD10 sends Infantry/InfantryType (15/16) to Items 0xA8E34C.
 const infantry: TypeSpec = {
-  vector: 0xa83ce0,
+  vector: 0xa8e348,
   abstract: 16,
   kind: 'infantry',
   objectVtable: YR_STATE_VTABLES.infantry,
@@ -71,8 +72,9 @@ const infantry: TypeSpec = {
   owned: 0x5528,
   produced: 0x55c8,
 };
+// UnitTypeClass::Array; Unit/UnitType (1/40) resolve through Items 0xA83CE4 (0x48DCE7).
 const unit: TypeSpec = {
-  vector: 0xa8e348,
+  vector: 0xa83ce0,
   abstract: 40,
   kind: 'vehicle',
   objectVtable: YR_STATE_VTABLES.unit,

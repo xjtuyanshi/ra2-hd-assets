@@ -1,12 +1,13 @@
 /** Extract local interface art; all derived PNGs/JSON stay outside Git. */
-import { resolve } from 'node:path';
+import { writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { ShpFile } from 'ra2-formats';
-import { YR_UI, yrCameos } from '../games/yrUi.ts';
+import { YR_UI, yrCameos, yrTabStrips } from '../games/yrUi.ts';
 import { GameInstall } from '../node/install.ts';
-import { writeCameos, writeCursor } from '../node/ui.ts';
+import { writeCameos, writeCursor, writeUiStrip } from '../node/ui.ts';
 
-const usage = 'usage: ui <cameos|cursor> --game <install> --out <dir> [--shape <file>] [--palette <file>]';
+const usage = 'usage: ui <cameos|cursor|tabs> --game <install> --out <dir> [--shape <file>] [--palette <file>]';
 try {
   const { values, positionals } = parseArgs({
     args: process.argv.slice(2).filter((a) => a !== '--'),
@@ -25,7 +26,7 @@ try {
     !values.game ||
     !values.out ||
     positionals.length !== 1 ||
-    !['cameos', 'cursor'].includes(command ?? '')
+    !['cameos', 'cursor', 'tabs'].includes(command ?? '')
   ) {
     console.log(usage);
     if (!values.help) process.exitCode = 2;
@@ -42,6 +43,29 @@ try {
           out,
         }),
       );
+    } else if (command === 'tabs') {
+      const strips = yrTabStrips(install);
+      const index: Record<
+        string,
+        {
+          tab: number;
+          mix: string;
+          paletteMix: string;
+          file: string;
+          frameSize: { width: number; height: number };
+          frameCount: number;
+        }[]
+      > = {};
+      for (const strip of strips) {
+        (index[strip.side] ??= []).push({
+          tab: strip.tab,
+          mix: strip.mix,
+          paletteMix: strip.paletteMix,
+          ...writeUiStrip({ out, ...strip }),
+        });
+      }
+      writeFileSync(join(out, 'tabs.json'), JSON.stringify(index, null, 2));
+      console.log(JSON.stringify({ strips: strips.length, sides: index, out }));
     } else {
       const file = values.shape ?? YR_UI.cursorShape,
         palette = values.palette ?? YR_UI.cursorPalette;

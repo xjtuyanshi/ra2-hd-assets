@@ -52,6 +52,7 @@ pnpm hd:materials -- --terrain XMP29U2 --terrain RiverRam [--cache <dir>] [--sig
 # Local YR interface art, separate from curated HD cameos
 pnpm hd:ui -- cameos --game "$RA2_INSTALL" --out "$HD_CACHE/_ui/cameos-cli-test"
 pnpm hd:ui -- cursor --game "$RA2_INSTALL" --out "$HD_CACHE/_ui/cursor"
+pnpm hd:ui -- tabs --game "$RA2_INSTALL" --out "$UI_WORK/tabs-orig"
 ```
 
 The `ui` subcommands require explicit input/output directories. `cameos` writes 60x48 RGBA originals into `orig/`
@@ -66,6 +67,59 @@ The native reader supplies dynamic hotspots. YR policy in `src/games/yrUi.ts` se
 base/add-on cameo palettes by archive presence, and this build's `MOUSE.SHA` / `MOUSEPAL.PAL` cursor files.
 `--shape` and `--palette` override the cursor files. Generic raster/atlas helpers and Node writers receive policies
 and art from callers; they do not select game filenames or INI registries.
+
+`tabs` writes `side<N>_tab0<k>.png` for sides 0–2 and tabs 0–3: all SHP canvases side by side, RGBA with index 0
+transparent. `tabs.json` maps each side to tab records (`tab`, `file`, `mix`, `paletteMix`, `frameSize`, `frameCount`).
+YR policy maps Allied/Soviet/Yuri to sidebar archive numbers 01/02/02. It explicitly reads nested `SIDEC%02dMD.MIX`
+before `SIDEC%02d.MIX` for each SHP and `SIDEBAR.PAL`; other factions' palettes are never used as a fallback.
+Missing members fall back within the pair; malformed present resources fail. The evidence is in
+[Sidebar UI research](../../docs/remaster/research/sidebar-ui.md#sidebar-archive-and-tab-art-policy).
+
+## Interface redraw tools (Python)
+
+`python/ui_chrome.py` requires Pillow, NumPy and OpenCV. Inputs, jobs and output caches stay outside Git.
+`sheet` prepares native chrome pieces for a redraw, with configurable geometry and a prompt template;
+`pack` registers each piece with ECC. Packing also fixes outlier edge rows, levels colour steps with a linear
+falloff and Telea-inpaints a thin band across adjacent stacked sidebar joins. `--no-seams` skips all three seam steps;
+command-bar halves are unaffected. `registration.json` retains warp/residual measurements and whether seams ran.
+
+```bash
+python3 -B packages/ra2-assets/python/ui_chrome.py sheet --frame "$UI_WORK/native.png" \
+  --side Soviet --job-dir "$UI_WORK/chrome-job"
+python3 -B packages/ra2-assets/python/ui_chrome.py pack --job-dir "$UI_WORK/chrome-job" \
+  --output "$HD_CACHE/_ui/chrome/1"
+
+python3 -B packages/ra2-assets/python/ui_chrome.py tabs-sheet --job-dir "$UI_WORK/tabs-job" \
+  --strip-set Allied "$UI_WORK/tabs-orig/side0_tab00.png" "$UI_WORK/tabs-orig/side0_tab01.png" \
+    "$UI_WORK/tabs-orig/side0_tab02.png" "$UI_WORK/tabs-orig/side0_tab03.png" \
+  --strip-set Soviet "$UI_WORK/tabs-orig/side1_tab00.png" "$UI_WORK/tabs-orig/side1_tab01.png" \
+    "$UI_WORK/tabs-orig/side1_tab02.png" "$UI_WORK/tabs-orig/side1_tab03.png" \
+  --style-piece "$HD_CACHE/_ui/chrome/1/sidebar0.png" --style-piece "$HD_CACHE/_ui/chrome/0/sidebar0.png"
+# Place the redrawn output.png next to input.png before packing.
+python3 -B packages/ra2-assets/python/ui_chrome.py tabs-pack --job-dir "$UI_WORK/tabs-job" \
+  --side-dir Allied "$HD_CACHE/_ui/chrome/0" --side-dir Soviet "$HD_CACHE/_ui/chrome/1" \
+  --side-dir Soviet "$HD_CACHE/_ui/chrome/2"
+```
+
+`tabs-sheet` accepts named strip sets (four tab strips each), `--frame-count` (default 5),
+`--states` (default `0:normal,1:active,3:pressed`) and design `--scale` (default 7). It writes `input.png`, `layout.json`,
+native RGBA strip copies and a prompt based on `python/ui_tabs_prompt.example.txt`; optional `--prompt` replaces it.
+The sheet grows for larger canvases or more sets. Optional repeated `--style-piece` crops native-scaled HD chrome
+at `--style-rect X Y W H` (default `0 480 504 210`) and stacks the crops into `style.png`.
+Existing jobs with `start` or `output.png` must be prepared under a new directory.
+
+`tabs-pack` requires explicit repeated `--side-dir SET DIR` mappings to existing chrome directories; one strip set
+may target several sides. It uses per-cell ECC affine registration with a search margin (default 20), resizes to
+`--output-scale` (default 4), and restores alpha from the native strip with nearest resizing and a 0.8 px Gaussian
+edge softening. Failed or implausible fits fail before publication. `tabs-registration.json` stays in the job directory.
+Only `tabs.png` and the existing manifest's `tabs` key are replaced; other keys and piece files are preserved.
+
+The optional chrome manifest key is `{ "tabs": { "file": "tabs.png", "scale": 4, "frames": [
+{ "tab": 0, "state": "normal", "rect": { "x": 0, "y": 0, "width": 112, "height": 108 } } ] } }`.
+Rects index atlas pixels, including transparency, and are drawn into the live tab rectangle. Normal/active frames
+for all four tabs are needed by the renderer; pressed art is reserved until held-button state is available.
+Missing or broken tab art retains the loaded chrome and existing tab overlays. See
+[HD bridge](../../docs/remaster/HD_BRIDGE.md) for frame selection and the dev-only rendering boundary.
 
 ## Prepare a complete map cache
 

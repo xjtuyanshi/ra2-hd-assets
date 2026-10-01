@@ -22,6 +22,12 @@ try {
     const png = (width, height, color, title) => {
       const c = document.createElement('canvas'); c.width = width; c.height = height;
       const ctx = c.getContext('2d');
+      if (width===336) {
+        for (let tab=0;tab<4;tab++) for (let state=0;state<3;state++) {
+          ctx.fillStyle=['#3355aa','#33cc66','#aa3344'][state]; ctx.fillRect(state*112,tab*100,112,100);
+        }
+        return c.toDataURL('image/png').split(',')[1];
+      }
       if (width===16) { ctx.fillStyle='#f544ff'; ctx.fillRect(0,0,width,height); return c.toDataURL('image/png').split(',')[1]; }
       const g = ctx.createLinearGradient(0,0,width,height);
       g.addColorStop(0,color); g.addColorStop(1,'#0d1016'); ctx.fillStyle=g; ctx.fillRect(0,0,width,height);
@@ -30,8 +36,8 @@ try {
       if (width===120) { ctx.fillStyle='#4a9dff'; ctx.fillRect(30,30,60,30); ctx.fillStyle='#eee'; ctx.fillRect(50,20,10,15); }
       return c.toDataURL('image/png').split(',')[1];
     };
-    return { cameo: png(120,96,'#345677','Synthetic'), sidebar: png(168,600,'#262c38','SOVIET'), bar: png(632,32,'#333945','COMMAND'), cursor: png(16,16,'#f544ff','') };
-  })()`)) as { cameo: string; sidebar: string; bar: string; cursor: string };
+    return { cameo: png(120,96,'#345677','Synthetic'), sidebar: png(168,600,'#262c38','SOVIET'), bar: png(632,32,'#333945','COMMAND'), cursor: png(16,16,'#f544ff',''), tabs: png(336,400,'','') };
+  })()`)) as { cameo: string; sidebar: string; bar: string; cursor: string; tabs: string };
   const requests: string[] = [];
   let chromeOn = false;
   await page.route('**/hd-cache/**', async (route) => {
@@ -55,17 +61,30 @@ try {
             { file: 'sidebar.png', rect: { x: 0, y: 0, width: 168, height: 600 }, anchor: 'sidebar' },
             { file: 'bar.png', rect: { x: 0, y: 0, width: 632, height: 32 }, anchor: 'commandBar' },
           ],
+          tabs: {
+            file: 'tabs.png',
+            scale: 4,
+            frames: Array.from({ length: 4 }, (_, tab) =>
+              ['normal', 'active', 'pressed'].map((state, column) => ({
+                tab,
+                state,
+                rect: { x: column * 112, y: tab * 100, width: 112, height: 100 },
+              })),
+            ).flat(),
+          },
         },
       });
-    const key = path.endsWith('/cursor.png')
-      ? 'cursor'
-      : path.endsWith('/cameo.png')
-        ? 'cameo'
-        : path.endsWith('/sidebar.png')
-          ? 'sidebar'
-          : path.endsWith('/bar.png')
-            ? 'bar'
-            : null;
+    const key = path.endsWith('/tabs.png')
+      ? 'tabs'
+      : path.endsWith('/cursor.png')
+        ? 'cursor'
+        : path.endsWith('/cameo.png')
+          ? 'cameo'
+          : path.endsWith('/sidebar.png')
+            ? 'sidebar'
+            : path.endsWith('/bar.png')
+              ? 'bar'
+              : null;
     if (key) return route.fulfill({ body: Buffer.from(pictures[key], 'base64'), contentType: 'image/png' });
     return route.fulfill({ status: 404, body: 'Optional cache absent' });
   });
@@ -95,7 +114,13 @@ try {
     const draw=()=>renderer.draw(frame,800,600);
     const stop=startHdBridge({screen,frameRenderer:renderer,invalidate:draw,frameSize:()=>({width:800,height:600}),
       vm:{getRenderState:async()=>{polls++;return state},setTacticalPassthrough:async()=>true}});
-    screen.addEventListener('click',()=>{clicks++;document.getElementById('result').textContent='Input reached #screen: '+clicks});
+    // Synthetic selection only: verify real pointer passthrough and resulting canvas state without guest memory.
+    screen.addEventListener('click',(event)=>{
+      const bounds=screen.getBoundingClientRect(), x=event.clientX-bounds.left, y=event.clientY-bounds.top;
+      const tab=sidebar.layout.tabs.findIndex(r=>x>=r.x&&x<r.x+r.width&&y>=r.y&&y<r.y+r.height);
+      if(tab>=0&&sidebar.tabs[tab].count>0) sidebar.activeTab=tab;
+      clicks++;document.getElementById('result').textContent='Input reached #screen: '+clicks
+    });
     document.getElementById('ui-toggle').onclick=()=>window.__hdBridge.ui.toggle();
     document.getElementById('all-toggle').onclick=()=>window.__hdBridge.toggle();
     const tick=()=>{if(stopped)return;draw();request=requestAnimationFrame(tick)};tick();
@@ -145,6 +170,16 @@ try {
     if (evidence) await page.screenshot({ path: `${evidence}/${chrome ? 'chrome' : 'fallback'}.png` });
     await page.locator('#screen').click({ position: { x: 670, y: 400 } });
     assert.match(await page.locator('#result').innerText(), /Input reached #screen: 1/);
+    if (chrome) {
+      await page.waitForFunction('__uiAcceptance.uiPixel(760,210).slice(0,3).join(",")==="51,85,170"');
+      await page.locator('#screen').click({ position: { x: 760, y: 210 } });
+      await page.waitForFunction('__uiAcceptance.uiPixel(760,210).slice(0,3).join(",")==="51,204,102"');
+      await page.locator('#screen').click({ position: { x: 730, y: 210 } });
+      assert.equal(await page.evaluate('window.__hdBridge.ui.state.activeTab'), 3);
+      assert.deepEqual(await page.evaluate('__uiAcceptance.uiPixel(760,210).slice(0,3)'), [51, 204, 102]);
+      assert.notDeepEqual(await page.evaluate('__uiAcceptance.uiPixel(730,210).slice(0,3)'), [51, 85, 170]);
+      if (evidence) await page.screenshot({ path: `${evidence}/tabs-selected-disabled.png` });
+    }
     await page.locator('#ui-toggle').click();
     await page.waitForFunction('document.getElementById("hd-ui").style.display === "none"');
     assert.equal(await page.evaluate('__uiAcceptance.pixel(670,400)[3]'), 255);
@@ -172,6 +207,7 @@ try {
       cleanup: true,
       softwareCursor: 'atlas clipped at covered boundary',
       tooltip: 'native rect shown/hidden',
+      tabs: chrome ? 'normal/active art after screen click; disabled sibling retains selection' : 'procedural fallback',
     });
   }
   assert.equal(requests.filter((path) => path.endsWith('/chrome/1/chrome.json')).length, 2);

@@ -1,0 +1,12 @@
+Task: image generation / image editing only. Do not write code other than what is needed to save or resize the image. Do not browse the web.
+
+input.png ({WIDTH}x{HEIGHT}) is the DESIGN REFERENCE: the {COUNT} small sidebar TAB BUTTONS of the classic real-time-strategy game Command & Conquer: Red Alert 2 / Yuri's Revenge, enlarged {SCALE}x so they are soft and blurry, laid out in a grid on a near-black sheet. Strip sets: {GRID}. Each row holds two tabs; each tab has these states left to right: {STATES}. Allied buttons are glossy blue glass with a dark-blue icon; Soviet buttons are brushed steel with a red icon. ACTIVE is lit/brighter; PRESSED has a darker icon. The four icons are: a HOUSE (buildings tab), a SHIELD (defences tab), a STANDING SOLDIER (infantry tab), a FLASK in a bracket (vehicles/special tab).
+
+style.png is the STYLE REFERENCE: the already approved high-definition redraw of the same interface (top = Soviet steel-and-gold sidebar with red wrench/dollar icons embossed into polished steel buttons; bottom = Allied chrome-and-blue sidebar with glossy blue glass buttons). Match its rendering exactly: realistic polished/brushed metal, crisp machined bevels, glossy glass with soft internal highlights, sharp clean icon edges, subtle specular highlights, no painterly blur.
+
+Produce ONE image, output.png, exactly {WIDTH}x{HEIGHT}, that redraws EVERY button of input.png in that HD style, in place:
+- Keep the grid, the position, size and outline of every button exactly as in input.png (each redrawn button must sit on its original pixels so it can be cut out and laid over the game). Keep the near-black gutters between buttons clean and empty.
+- Keep each button's silhouette, colours and its icon's shape, size and position; render the icon as a crisp embossed/enamel inlay (Soviet: red enamel; ACTIVE = glowing yellow-orange enamel; PRESSED = darker red), (Allied: deep-blue inset icon on blue glass; ACTIVE = lighter, brighter glass; PRESSED = darker icon).
+- The states of the same tab must be the same button with only the lighting/colour change described above.
+- Invent fine realistic detail the low-res original could not show (machined edges, tiny screws only where a bevel is, glass depth), but no text, no letters, no new symbols, no extra objects.
+Save the result as output.png in the current directory (also keep raw.png if you resize).

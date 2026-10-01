@@ -229,7 +229,17 @@ Optional art lives under the local HD cache's `_ui/` directory:
 "anchor": "sidebar" } ] }`. Side is `0` Allied, `1` Soviet, `2` Yuri, or `-1` unknown. Files are relative to
   that side's chrome directory. `rect.x/y` are frame-pixel offsets from the live anchor's origin and `width/height`
   are frame-pixel sizes. PNG scale does not affect geometry. Three 168x248 sidebar pieces use y=0/248/496;
-  two 492x32 command halves use x=0/492, y=0. Loaded chrome replaces procedural tab icons while retaining overlays.
+  two 492x32 command halves use x=0/492, y=0. Loaded chrome replaces procedural tab icons.
+  Optional `tabs` is `{ "file": "tabs.png", "scale": 4, "frames": [
+{ "tab": 0, "state": "normal", "rect": { "x": 0, "y": 0, "width": 112, "height": 108 } } ] }`.
+  Each rectangle is in atlas pixels and includes the whole native tab canvas with transparency; it is scaled into
+  `layout.tabs[tab]`. A usable atlas has unique, bounded normal/active frames for tabs 0–3; pressed frames are optional.
+  Nonempty tabs select active art when selected, or alternate active/normal every 500 ms when flashing; empty tabs
+  leave the chrome's blank disabled plate visible. Art replaces tab pulse/glow/outline overlays. Pressed art is reserved
+  until the page exposes held-button state; no input listeners are added. Missing/malformed manifests, missing PNGs,
+  decode errors or invalid frames disable only tab art, retaining complete chrome and the prior tab overlays.
+  Extract native strips with `pnpm hd:ui -- tabs --game "$RA2_INSTALL" --out "$UI_WORK/tabs-orig"`, then use
+  `packages/ra2-assets/python/ui_chrome.py tabs-sheet` / `tabs-pack` as described in the asset package README.
 - `_ui/cursor/cursor.json`: `{ "version": 1, "frames": [{ "x": 0, "y": 0, "width": 55, "height": 43 }] }`.
   Rectangles index `cursor.png` (or optional relative `file`). Each frame includes transparent bounding-box padding;
   hotspots remain runtime data. Export with `pnpm hd:ui -- cursor --game "$RA2_INSTALL" --out "$HD_CACHE/_ui/cursor"`.
@@ -240,7 +250,11 @@ lifetime; reload to pick up newly created assets. A complete loaded chrome set c
 with an active radar aperture preserved by up to four rectangles around it. Without complete chrome, only the cameo
 strip, power column, credits band and tab rectangles are replaced procedurally; native radar, buttons and command
 bar remain visible. Missing cameo art uses a named dark tile. Cameos retain captions, progress sectors, queue badges,
-ready/hold labels, availability shading, flashing and hover outlines. All extracted or derived art stays outside Git.
+ready/hold labels, availability shading, flashing and hover outlines. Ready/Hold use bold 13 frame-pixel warm yellow
+text (`#ffd84a`), a 1.25 px dark stroke below the fill and a text-sized translucent black rounded box with 3 px padding.
+The vertical centre is cameo y+20; long translations shrink to 10 px and then fit the available width. The pulse floor
+is 85%; queued Hold stays left aligned so its badge remains visible. Name captions retain their existing styling.
+All extracted or derived art stays outside Git.
 
 `__hdBridge.toggle()` toggles both battlefield and interface for original/HD A/B checks.
 `__hdBridge.ui.enabled` reports the effective interface switch and `__hdBridge.ui.toggle()` independently toggles
