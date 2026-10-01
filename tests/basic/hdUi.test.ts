@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  CREDITS_COLOR,
+  CREDITS_BOTTOM,
+  CREDITS_TOP,
   clockWashOf,
   drawPointer,
   drawSidebar,
@@ -237,18 +238,21 @@ describe('HD sidebar drawing', () => {
     const { ctx, calls } = recording();
     const scale = 2.018;
     drawSidebar(ctx, s, withChrome, { scale, time: 0 });
-    expect(CREDITS_COLOR).toBe('rgb(206,192,54)');
+    expect([CREDITS_TOP, CREDITS_BOTTOM]).toEqual(['rgb(255,255,0)', 'rgb(228,228,6)']);
     const x = Math.round(s.layout.creditsAnchor.x * scale) / scale;
     const y = Math.round((s.layout.creditsAnchor.y + 3.5) * scale) / scale;
     const strokes = calls.filter((call) => call.name === 'strokeText' && call.args[0] === '12345');
-    expect(strokes.map((call) => [call.style.strokeStyle, call.style.lineWidth])).toEqual([
-      ['#090b10', 2],
-      [CREDITS_COLOR, 0.6],
+    expect(strokes.map((call) => call.style.lineWidth)).toEqual([2, 0.6]);
+    expect(strokes[0]!.style.strokeStyle).toBe('#090b10');
+    const ink = strokes[1]!.style.strokeStyle as unknown as { stops: unknown[][] };
+    expect(ink.stops).toEqual([
+      [0, CREDITS_TOP],
+      [1, CREDITS_BOTTOM],
     ]);
     expect(strokes.every((call) => call.args[1] === x && call.args[2] === y)).toBe(true);
     const fill = calls.find((call) => call.name === 'fillText' && call.args[0] === '12345')!;
     expect(fill.args).toEqual(['12345', x, y]);
-    expect(fill.style).toMatchObject({ fillStyle: CREDITS_COLOR, textAlign: 'center', textBaseline: 'top' });
+    expect(fill.style).toMatchObject({ fillStyle: ink, textAlign: 'center', textBaseline: 'top' });
     expect(String(fill.style.font)).toMatch(/^900 12px/);
     expect(calls.indexOf(strokes[1]!)).toBeLessThan(calls.indexOf(fill));
   });

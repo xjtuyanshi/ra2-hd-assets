@@ -55,7 +55,13 @@ export interface Cameo {
 export const UI_FONT =
   '"PingFang TC","PingFang SC","Hiragino Sans","Microsoft JhengHei","Noto Sans CJK TC","Segoe UI",system-ui,sans-serif';
 export const NUM_FONT = '"DIN Alternate","Bahnschrift","Roboto Condensed","Arial Narrow",' + UI_FONT;
-export const CREDITS_COLOR = 'rgb(206,192,54)';
+/**
+ * Native credits digits (YR 1.001 frozen pair, digit rows only): palette yellow 255,255,0 at the top fading to about
+ * 190,190,7 at the bottom, mean 238,238,2. The digits use a slightly brighter ramp because canvas anti-aliasing
+ * darkens glyph edges (measured HD mean 209,209,4 with a 196 bottom); ink weight and baseline match the pair.
+ */
+export const CREDITS_TOP = 'rgb(255,255,0)';
+export const CREDITS_BOTTOM = 'rgb(228,228,6)';
 const ACCENTS = ['#4a9dff', '#e0402f', '#b45cff'];
 const accentOf = (side: number) => ACCENTS[side] ?? '#9aa4b2';
 // The native progress clock washes the unbuilt part 50% toward a colour from the side's sidebar palette. Mean-colour
@@ -490,7 +496,9 @@ export function drawSidebar(
   ctx.save();
   font(900, 12, true);
   ctx.textBaseline = 'top';
-  outlinedText(String(sidebar.credits), l.creditsAnchor.x, l.creditsAnchor.y + 3.5, CREDITS_COLOR, 0.6);
+  const creditsBox = { x: l.creditsAnchor.x, y: l.creditsAnchor.y + 3.5, width: 0, height: 9 };
+  const creditsInk = gradient(creditsBox, CREDITS_TOP, CREDITS_BOTTOM);
+  outlinedText(String(sidebar.credits), creditsBox.x, creditsBox.y, creditsInk, 0.6);
   ctx.restore();
 
   if (sidebar.tooltip) {
