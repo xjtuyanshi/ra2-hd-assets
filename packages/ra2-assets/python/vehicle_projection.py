@@ -368,6 +368,78 @@ def build(type_name: str, bake: Path, sheets: list[Path], palettes: Path, house_
     return manifest
 
 
+SHEET_SIZE = (1536, 1024)
+
+
+def compose_sheet(bake: Path, part: str, out: Path, facings: list[int], cols: int = 4, rows: int = 4,
+                  scale: float | None = None, margin: int = 22, scale_part: str = 'all') -> dict:
+    """Write an image-model input sheet (input.png + input.json) from a bake's engine renders.
+
+    Each listed facing's black/white pair is un-matted, resampled premultiplied at ``scale`` (Lanczos) and composited
+    over flat grey, centred in its grid cell on that facing's bounding box. Without ``scale`` the largest scale (at most
+    2) that fits every facing of ``scale_part`` in a cell with ``margin`` is used, so body and turret sheets of one
+    vehicle share a scale. input.json records sheet_xy = dst_origin + scale * (bake_xy - src_centre) per cell, which
+    ``build`` inverts.
+    """
+    meta = json.loads((bake / 'meta.json').read_text())
+    width, height = SHEET_SIZE
+    cw, ch = width // cols, height // rows
+    if len(facings) > cols * rows:
+        raise ValueError(f'{len(facings)} facings do not fit a {cols}x{rows} sheet')
+
+    def load(name: str, k: int) -> tuple[np.ndarray, np.ndarray]:
+        colour, alpha = unmatte(rgb(bake / 'engine' / f'{name}_{k:03d}_k.png'),
+                                rgb(bake / 'engine' / f'{name}_{k:03d}_w.png'))
+        return np.where(alpha[..., None] > 0, colour, 0), alpha
+
+    def bbox(alpha: np.ndarray) -> tuple[int, int, int, int]:
+        ys, xs = np.nonzero(alpha > 0.02)
+        if not len(xs):
+            raise ValueError('empty bake frame')
+        return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+    if scale is None:
+        ks = sorted({int(f['k']) for f in meta['looks']['engine']['frames'] if f.get('part', scale_part) == scale_part})
+        ks = ks or sorted({int(f['k']) for f in meta['looks']['engine']['frames']})
+        mw = mh = 1
+        for k in ks:
+            x0, y0, x1, y1 = bbox(load(scale_part, k)[1])
+            mw, mh = max(mw, x1 - x0), max(mh, y1 - y0)
+        scale = min(2.0, (cw - 2 * margin) / mw, (ch - 2 * margin) / mh)
+    count = len({int(f['k']) for f in meta['looks']['engine']['frames']}) or 1
+    facing_of = {int(f['k']): int(f['facing']) for f in meta['looks']['engine']['frames'] if 'facing' in f}
+    sheet = np.full((height, width, 3), GREY, np.float32)
+    cells = []
+    pad = 4
+    for i, k in enumerate(facings):
+        colour, alpha = load(part, k)
+        x0, y0, x1, y1 = bbox(alpha)
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        col, row = i % cols, i // cols
+        ox, oy = col * cw + cw / 2, row * ch + ch / 2
+        ys, xs = slice(max(0, y0 - pad), y1 + pad), slice(max(0, x0 - pad), x1 + pad)
+        sx, sy = xs.start, ys.start
+        crop, crop_alpha = (colour * alpha[..., None])[ys, xs], alpha[ys, xs]
+        w2, h2 = max(1, round(crop.shape[1] * scale)), max(1, round(crop.shape[0] * scale))
+        resize = lambda a: np.asarray(Image.fromarray(a.astype(np.float32), 'F').resize((w2, h2), Image.LANCZOS))
+        premultiplied = np.stack([resize(crop[..., j]) for j in range(3)], -1)
+        coverage = np.clip(resize(crop_alpha), 0, 1)
+        ix, iy = int(round(ox + scale * (sx - cx))), int(round(oy + scale * (sy - cy)))
+        tx0, ty0 = max(ix, 0), max(iy, 0)
+        tx1, ty1 = min(ix + w2, width), min(iy + h2, height)
+        region = sheet[ty0:ty1, tx0:tx1]
+        src = (slice(ty0 - iy, ty1 - iy), slice(tx0 - ix, tx1 - ix))
+        region[:] = np.clip(premultiplied[src], 0, 255) + region * (1 - coverage[src][..., None])
+        cells.append({'k': int(k), 'facing': facing_of.get(int(k), round(k * 256 / count) % 256),
+                      'src_centre': [float(cx), float(cy)],
+                      'dst_origin': [ix - scale * (sx - cx), iy - scale * (sy - cy)], 'cell': [col * cw, row * ch, cw, ch]})
+    out.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.clip(sheet, 0, 255).astype(np.uint8)).save(out / 'input.png')
+    spec = {'bake': str(bake), 'part': part, 'scale': float(scale), 'size': [width, height], 'cells': cells}
+    (out / 'input.json').write_text(json.dumps(spec, indent=1))
+    return spec
+
+
 def build_index(out: Path) -> dict:
     types = {}
     for path in sorted(out.glob('*.json')):
@@ -437,6 +509,14 @@ def main():
     builder.add_argument('--house-key', default='unit@BakeA')
     builder.add_argument('--out', type=Path, required=True)
     builder.add_argument('--review', type=Path)
+    sheeter = commands.add_parser('sheet', help='compose an image-model input sheet from a bake')
+    sheeter.add_argument('--bake', type=Path, required=True)
+    sheeter.add_argument('--part', required=True)
+    sheeter.add_argument('--out', type=Path, required=True)
+    sheeter.add_argument('--facings', required=True, help='bake frame indices: k0,k1,... or a-b')
+    sheeter.add_argument('--cols', type=int, default=4)
+    sheeter.add_argument('--rows', type=int, default=4)
+    sheeter.add_argument('--scale', type=float)
     index = commands.add_parser('build-index')
     index.add_argument('--out', type=Path, required=True)
     grader = commands.add_parser('grade', help='steel_grade built colour atlases in place')
@@ -444,7 +524,15 @@ def main():
     grader.add_argument('--parts', nargs='+', required=True)
     grader.add_argument('--keep', type=float, default=0.3)
     args = parser.parse_args()
-    if args.command == 'build-index':
+    if args.command == 'sheet':
+        if '-' in args.facings:
+            first, last = map(int, args.facings.split('-'))
+            facings = list(range(first, last + 1))
+        else:
+            facings = [int(v) for v in args.facings.split(',')]
+        spec = compose_sheet(args.bake, args.part, args.out, facings, args.cols, args.rows, args.scale)
+        print(json.dumps({'scale': spec['scale'], 'cells': len(spec['cells'])}))
+    elif args.command == 'build-index':
         print(json.dumps(build_index(args.out), indent=2))
     elif args.command == 'grade':
         print(json.dumps(grade(args.out, args.parts, args.keep), indent=2))
