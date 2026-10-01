@@ -1,4 +1,5 @@
 import {
+  DoubleSide,
   LessDepth,
   Matrix4,
   Mesh,
@@ -9,7 +10,7 @@ import {
   type Object3D,
   type OrthographicCamera,
 } from 'three/webgpu';
-import { floor, screenCoordinate, uniform } from 'three/tsl';
+import { abs, float, floor, positionLocal, screenCoordinate, uniform, vec4 } from 'three/tsl';
 import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
 import { LEVEL_HEIGHT } from '../world';
 import { spriteLookFor } from './spriteLook';
@@ -34,6 +35,9 @@ import { spriteLookFor } from './spriteLook';
  * triangle depth introduced a stippled fringe; analytic coefficients keep identical depths across voxel edges.)
  * Review tooling can restore a single hard twin. Shadows draw after the sprites'
  * decals and before upright art is blended over them only where they are in front (renderOrder and SHADOW_LIFT).
+ * Grounded water origins instead use straight-down contact twins, a breathing foam footprint and a faint mirrored
+ * silhouette flattened along the view ray. Their analytic depth layers keep the foam outside the contact core;
+ * aircraft and physical-origin overrides retain the original projection. All twins share their source geometry.
  */
 
 /**
@@ -78,11 +82,35 @@ export function shadowCopyOpacity(target: number, copies: number = SHADOW_COPIES
   return 1 - Math.pow(1 - target, 1 / copies);
 }
 
-const shadowModes = new WeakMap<AtmosphereNodes, { soft: boolean }>();
-/** Renderer-local review switch; hard mode hides the four extra twins and restores single-layer opacity. */
-export function voxelShadowFor(nodes = DEFAULT_ATMOSPHERE_NODES): { soft: boolean } {
+export const WATER_CONTACT_OPACITY = 0.3;
+export const WATER_FOAM_OPACITY = 0.4;
+export const WATER_FOAM_SCALE = 1.1;
+export const WATER_REFLECTION_OPACITY = 0.25;
+export const WATER_REFLECTION_FADE = 0.5;
+/** Contact must write ahead of every foam layer, so foam fails depth inside the hull rather than whitening it. */
+const WATER_CONTACT_LIFT = (SHADOW_COPIES.length + 1) * SHADOW_COPY_LIFT;
+
+interface VoxelShadowState {
+  soft: boolean;
+  naval: boolean;
+  /** Seconds on the renderer's presentation clock, including frozen sandbox captures. */
+  time: number;
+  toCamera: Vector3;
+}
+const shadowModes = new WeakMap<AtmosphereNodes, VoxelShadowState>();
+/** Renderer-local review switches and frame inputs; old naval mode restores ordinary shadows on water. */
+export function voxelShadowFor(nodes = DEFAULT_ATMOSPHERE_NODES): VoxelShadowState {
   let mode = shadowModes.get(nodes);
-  if (!mode) shadowModes.set(nodes, (mode = { soft: true }));
+  if (!mode)
+    shadowModes.set(
+      nodes,
+      (mode = {
+        soft: true,
+        naval: true,
+        time: 0,
+        toCamera: new Vector3(Math.sqrt(1.5), 1, Math.sqrt(1.5)).normalize(),
+      }),
+    );
   return mode;
 }
 /** A unit whose origin is higher than this above the ground (world units) is airborne: aircraft, jumpjets. */
@@ -111,6 +139,8 @@ export function airborneShadowScale(height: number): number {
 /** Ground under a world position: height of the terrain or the water surface there, and optionally its normal. */
 export interface ShadowGround {
   height(x: number, z: number): number;
+  /** Surface water at the origin, or undefined on land; absent preserves ordinary shadows. */
+  waterHeight?(x: number, z: number): number | undefined;
   /** Unit surface normal of the ground at (x, z) written to `out`; absent = flat. */
   normal?(x: number, z: number, out: Vector3): Vector3;
 }
@@ -159,6 +189,52 @@ export function groundOf(object: Object3D): ShadowGround | undefined {
 }
 
 const UP = new Vector3(0, 1, 0);
+
+/** Straight-down footprint, optionally scaled in xz about the unit origin, lifted above its water plane. */
+export function waterContactProjection(point: Vector3, scale = 1, out = new Matrix4()): Matrix4 {
+  return out.set(
+    scale,
+    0,
+    0,
+    point.x * (1 - scale),
+    0,
+    0,
+    0,
+    point.y + SHADOW_LIFT,
+    0,
+    0,
+    scale,
+    point.z * (1 - scale),
+    0,
+    0,
+    0,
+    1,
+  );
+}
+
+/** Mirror about water, then intersect the view ray with the lifted plane: screen xy equals the mirrored point. */
+export function waterReflectionProjection(point: Vector3, toCamera: Vector3, out = new Matrix4()): Matrix4 {
+  const x = toCamera.x / toCamera.y,
+    z = toCamera.z / toCamera.y;
+  return out.set(
+    1,
+    x,
+    0,
+    x * (SHADOW_LIFT - point.y),
+    0,
+    0,
+    0,
+    point.y + SHADOW_LIFT,
+    0,
+    z,
+    1,
+    z * (SHADOW_LIFT - point.y),
+    0,
+    0,
+    0,
+    1,
+  );
+}
 
 /**
  * Projection of world points onto the plane through `point` with normal `normal` (default: horizontal), along the
@@ -278,23 +354,57 @@ export function shadowPlaneDepth(
 const planeSize = new Vector2();
 
 /** One shared material per renderer context, drawn once per pixel per layer (see the depth notes above). */
-const sharedMaterials = new WeakMap<AtmosphereNodes, MeshBasicNodeMaterial>();
+type WaterLayer = 'foam' | 'reflection';
+type SurfaceLayer = 'shadow' | WaterLayer;
+const sharedMaterials = new WeakMap<AtmosphereNodes, Map<SurfaceLayer, MeshBasicNodeMaterial>>();
 export function voxelShadowMaterial(nodes = DEFAULT_ATMOSPHERE_NODES): MeshBasicNodeMaterial {
-  const shared = sharedMaterials.get(nodes);
+  return voxelSurfaceMaterial(nodes, 'shadow');
+}
+
+export function voxelWaterMaterial(nodes: AtmosphereNodes, layer: WaterLayer): MeshBasicNodeMaterial {
+  return voxelSurfaceMaterial(nodes, layer);
+}
+
+function voxelSurfaceMaterial(nodes: AtmosphereNodes, layer: SurfaceLayer): MeshBasicNodeMaterial {
+  let materials = sharedMaterials.get(nodes);
+  if (!materials) sharedMaterials.set(nodes, (materials = new Map()));
+  const shared = materials.get(layer);
   if (shared) return shared;
-  const material = new MeshBasicNodeMaterial({ color: 0x000000 });
-  material.name = 'voxel-shadow';
+  const material = new MeshBasicNodeMaterial({
+    color: layer === 'foam' ? 0xf3f8ff : layer === 'reflection' ? 0x162633 : 0x000000,
+  });
+  material.name = `voxel-${layer}`;
   material.transparent = true;
   material.opacity = SHADOW_OPACITY;
   const look = spriteLookFor(nodes);
   const mode = voxelShadowFor(nodes);
-  material.opacityNode = uniform(SHADOW_OPACITY).onObjectUpdate(() => {
+  const opacity = uniform(SHADOW_OPACITY).onObjectUpdate(({ object }) => {
+    const surface = object instanceof VoxelSurfaceMesh ? object : undefined;
+    if (layer === 'reflection') return WATER_REFLECTION_OPACITY;
+    if (layer === 'foam') return shadowCopyOpacity(WATER_FOAM_OPACITY * (1 + 0.03 * (surface?.foamPulse ?? 0)));
+    if (surface?.onWater) return shadowCopyOpacity(WATER_CONTACT_OPACITY);
     const target =
       look.enabled.value > 0.5 && look.shadowDarkness.value !== 1
         ? Math.min(SHADOW_OPACITY * look.shadowDarkness.value, 0.9)
         : SHADOW_OPACITY;
     return shadowCopyOpacity(target, mode.soft ? SHADOW_COPIES.length : 1);
   });
+  material.opacityNode = opacity;
+  if (layer !== 'shadow') {
+    material.side = DoubleSide;
+    material.forceSinglePass = true; // Analytic depth already rejects duplicate faces; avoid transparent back/front passes.
+  }
+  if (layer === 'reflection') {
+    // Projected colour and lighting nodes depend on the unflattened model basis. Use a dark blue-grey silhouette
+    // instead, retaining source world height for the fade even though the drawn matrix has no vertical dimension.
+    const sourceMatrix = uniform(new Matrix4()).onObjectUpdate(({ object }) => {
+      if (object instanceof VoxelSurfaceMesh) sourceMatrix.value.copy(object.source.matrixWorld);
+    });
+    const waterY = uniform(0).onObjectUpdate(({ object }) => (object instanceof VoxelSurfaceMesh ? object.waterY : 0));
+    const height = sourceMatrix.mul(vec4(positionLocal, 1)).y.sub(waterY);
+    material.opacityNode = opacity.mul(float(1).sub(abs(height).div(WATER_REFLECTION_FADE)).clamp());
+    material.alphaTest = 0.001;
+  }
   material.depthWrite = true;
   material.depthFunc = LessDepth;
   const plane = uniform(new Vector4());
@@ -303,7 +413,7 @@ export function voxelShadowMaterial(nodes = DEFAULT_ATMOSPHERE_NODES): MeshBasic
     const target = renderer.getRenderTarget();
     if (target) planeSize.set(target.width, target.height);
     else renderer.getDrawingBufferSize(planeSize);
-    const shadow = object instanceof VoxelShadowMesh ? object : undefined;
+    const shadow = object instanceof VoxelSurfaceMesh ? object : undefined;
     shadowPlaneDepth(
       camera as OrthographicCamera,
       planeSize.x,
@@ -320,7 +430,7 @@ export function voxelShadowMaterial(nodes = DEFAULT_ATMOSPHERE_NODES): MeshBasic
       .sub(plane.w)
       .mul(SHADOW_DEPTH_STEPS),
   ).div(SHADOW_DEPTH_STEPS);
-  sharedMaterials.set(nodes, material);
+  materials.set(layer, material);
   nodes.own(material);
   return material;
 }
@@ -334,31 +444,45 @@ const projection = new Matrix4();
  * Flattened twin of a voxel part. Add it to the unit's root group after every part (the scene graph updates children
  * in order, so the source's world matrix is current by then); it follows the source's pose every frame.
  */
-export class VoxelShadowMesh extends Mesh {
+class VoxelSurfaceMesh extends Mesh {
   readonly planeNormal = new Vector3(0, 1, 0);
   planeConstant = SHADOW_LIFT;
-  private readonly mode: { soft: boolean };
+  onWater = false;
+  waterY = 0;
+  foamPulse = 0;
+  private readonly mode: VoxelShadowState;
 
   constructor(
     readonly source: Mesh,
     nodes = DEFAULT_ATMOSPHERE_NODES,
     readonly copyIndex = 0,
+    readonly layer: SurfaceLayer = 'shadow',
   ) {
-    super(source.geometry, voxelShadowMaterial(nodes));
+    super(source.geometry, voxelSurfaceMaterial(nodes, layer));
     this.mode = voxelShadowFor(nodes);
-    this.name = 'voxel-shadow';
+    this.name = `voxel-${layer}`;
     this.matrixAutoUpdate = false;
     this.castShadow = false;
     this.receiveShadow = false;
     // After the sprite layers (4): over their ground decals (lifted less), behind upright art and voxel bodies.
-    this.renderOrder = 4.5 + copyIndex * 0.001;
+    this.renderOrder = (layer === 'reflection' ? 4.49 : layer === 'foam' ? 4.51 : 4.5) + copyIndex * 0.001;
+    this.visible = this.wanted = layer === 'shadow' && (copyIndex === 0 || this.mode.soft);
+  }
+
+  /** Visibility the review modes and the water test ask for, applied only when it changes: hiding by other code (the
+   * sandbox bake's isolation, review tooling) is never overridden every frame. */
+  private wanted: boolean;
+  private show(wanted: boolean): void {
+    if (wanted !== this.wanted) this.visible = this.wanted = wanted;
   }
 
   override updateMatrixWorld(force?: boolean): void {
-    this.visible = this.copyIndex === 0 || this.mode.soft;
+    const land = this.layer === 'shadow' && (this.copyIndex === 0 || this.mode.soft);
+    this.onWater = false;
     const parent = this.parent;
     const ground = groundOf(this);
     if (!parent || !ground) {
+      this.show(land);
       super.updateMatrixWorld(force);
       return;
     }
@@ -370,7 +494,27 @@ export class VoxelShadowMesh extends Mesh {
     const anchor = physicalOrigin ?? origin;
     point.set(anchor.x, ground.height(anchor.x, anchor.z), anchor.z);
     const height = origin.y - point.y;
-    if (!physicalOrigin && height > AIRBORNE_HEIGHT) {
+    const waterY = !physicalOrigin && this.mode.naval ? ground.waterHeight?.(origin.x, origin.z) : undefined;
+    this.onWater = waterY !== undefined && Math.abs(origin.y - waterY) <= AIRBORNE_HEIGHT;
+    // Water contact/foam always retain the penumbra, independently of land's hard review mode.
+    this.show(this.onWater || land);
+    if (this.layer !== 'shadow' && !this.onWater) return;
+    if (this.onWater) {
+      this.waterY = waterY!;
+      this.foamPulse = Math.sin(this.mode.time * Math.PI);
+      point.y = this.waterY;
+      normal.copy(UP);
+      if (this.layer === 'reflection') waterReflectionProjection(point, this.mode.toCamera, projection);
+      else
+        waterContactProjection(point, this.layer === 'foam' ? WATER_FOAM_SCALE + 0.02 * this.foamPulse : 1, projection);
+      if (this.layer === 'shadow') projection.elements[13] += WATER_CONTACT_LIFT;
+      // Reflection is the lowest decal. Moving along the view ray keeps its screen position unchanged.
+      if (this.layer === 'reflection') {
+        projection.elements[12] -= (SHADOW_COPY_LIFT * this.mode.toCamera.x) / this.mode.toCamera.y;
+        projection.elements[13] -= SHADOW_COPY_LIFT;
+        projection.elements[14] -= (SHADOW_COPY_LIFT * this.mode.toCamera.z) / this.mode.toCamera.y;
+      }
+    } else if (!physicalOrigin && height > AIRBORNE_HEIGHT) {
       point.x += AIRBORNE_SHADOW_DRIFT_X * height;
       point.z += AIRBORNE_SHADOW_DRIFT_Z * height;
       airborneShadowProjection(origin, point, airborneShadowScale(height), projection);
@@ -389,8 +533,21 @@ export class VoxelShadowMesh extends Mesh {
     p[14] += copy.z + copy.lift * normal.z;
     this.planeNormal.copy(normal);
     this.planeConstant = normal.dot(point) + SHADOW_LIFT + copy.lift;
+    if (this.onWater)
+      this.planeConstant +=
+        this.layer === 'shadow' ? WATER_CONTACT_LIFT : this.layer === 'reflection' ? -SHADOW_COPY_LIFT : 0;
     this.matrixWorld.multiplyMatrices(projection, this.source.matrixWorld);
     this.matrixWorldNeedsUpdate = false;
     for (const child of this.children) child.updateMatrixWorld(force);
+  }
+}
+
+/** Land/air shadow twin, switching to straight-down contact darkening at a grounded water origin. */
+export class VoxelShadowMesh extends VoxelSurfaceMesh {}
+
+/** Water-only twins; hidden on land, in flight, for physical-origin overrides and in old naval review mode. */
+export class VoxelWaterMesh extends VoxelSurfaceMesh {
+  constructor(source: Mesh, nodes: AtmosphereNodes | undefined, layer: WaterLayer, copyIndex = 0) {
+    super(source, nodes, copyIndex, layer);
   }
 }

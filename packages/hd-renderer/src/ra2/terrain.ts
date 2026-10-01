@@ -327,7 +327,21 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
     const value = hGrid[j * (W * SUB + 1) + i]!;
     return value >= 50 ? 0 : value;
   };
-  return { mesh, heightTexture, heightAt, wetness, waterY: null, water, reflectionTarget: materials.reflectionTarget };
+  const waterHeightAt = (wx: number, wz: number): number | undefined => {
+    const x = Math.floor(wx),
+      z = Math.floor(wz);
+    return cellExists(x, z) && isWater(x, z) ? baseLevel(x, z) * LEVEL_HEIGHT : undefined;
+  };
+  return {
+    mesh,
+    heightTexture,
+    heightAt,
+    waterHeightAt,
+    wetness,
+    waterY: null,
+    water,
+    reflectionTarget: materials.reflectionTarget,
+  };
 }
 
 /** Extra shore distance (cells) given to water right at a cliff foot, so it reads as deep water (see waterLook). */

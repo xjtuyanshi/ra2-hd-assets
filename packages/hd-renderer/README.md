@@ -441,7 +441,16 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   object level plus the units' extra light (rules `ExtraUnitLight`). Shadows are the model flattened onto the ground
   along a fixed light, with a 0.04-cell contact penumbra from five shared-geometry/material twins whose overlapping
   core keeps the original darkness (depth-tested once per layer, see `voxelShadow.ts`); `?vshadow=hard` restores one
-  crisp twin in the sandbox and replays. Airborne units drop theirs straight down, shrunk with height. Building voxel
+  crisp twin in the sandbox and replays. Grounded voxel origins on water are identified by the terrain's surface
+  lookup, regardless of unit type: five straight-down twins give 0.3 core contact darkness, five light foam twins
+  scale 1.1 about the origin (±0.02 scale and ±3% of 0.4 core alpha over two seconds on the renderer clock), and one
+  dark blue-grey reflection silhouette mirrors each part about the water and flattens it along the camera view ray.
+  Reflection alpha is 0.25 at the waterline and fades to zero by 0.5 world units below it. The silhouette avoids
+  applying projected colour/normal nodes to a singular flattened model matrix. All twins share source geometry and
+  renderer-owned materials, with no per-frame allocations; water draws at most eleven twins per part, land five.
+  Contact depth masks the foam core so only the enlarged soft rim shows; all layers sit just above the water,
+  behind upright art. `?vnaval=old` restores the ordinary water drop shadow for before/after review, independently
+  of `vshadow=hard`. Airborne units drop theirs straight down, shrunk with height. Building voxel
   turrets cast from a bounded physical point on their
   view ray nearest the foundation centre, using the same ground shear as vehicles rather than their pulled render
   altitude. Review parameters (sandbox and replays): `?vpl=<extra>,<occlusion>,

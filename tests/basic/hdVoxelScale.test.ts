@@ -10,6 +10,7 @@ import {
   SHADOW_SHEAR_X,
   SHADOW_SHEAR_Z,
   VoxelShadowMesh,
+  VoxelWaterMesh,
   airborneShadowProjection,
   airborneShadowScale,
   shadowProjection,
@@ -68,9 +69,13 @@ describe('voxel scale', () => {
     const twins = meshes.filter((m) => m instanceof VoxelShadowMesh);
     expect(twins.length).toBe(2 * SHADOW_COPIES.length);
     expect(meshes.filter((m) => !(m instanceof VoxelShadowMesh)).every((m) => !m.castShadow)).toBe(true);
-    // Body mesh, turret group, then all shadow layers (their sources update first).
-    expect(root.children.slice(2).every((c) => c instanceof VoxelShadowMesh)).toBe(true);
-    expect(meshes.length).toBe(1 + 2 * SHADOW_COPIES.length);
+    // Body mesh, turret group, then all surface twins (their sources update first).
+    expect(root.children.slice(2).every((c) => c instanceof VoxelShadowMesh || c instanceof VoxelWaterMesh)).toBe(true);
+    const water = meshes.filter((m) => m instanceof VoxelWaterMesh);
+    expect(water.filter((m) => m.layer === 'foam')).toHaveLength(2 * SHADOW_COPIES.length);
+    expect(water.filter((m) => m.layer === 'reflection')).toHaveLength(2);
+    expect(water.every((m) => !m.visible)).toBe(true);
+    expect(meshes.length).toBe(1 + 2 * (2 * SHADOW_COPIES.length + 1));
   });
 });
 

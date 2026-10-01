@@ -31,7 +31,7 @@ import { buildWater } from '../src/water';
 import { buildTerrain } from '../src/terrain';
 import { buildRa2Terrain } from '../src/ra2/terrain';
 import { buildVoxelGeometry } from '../src/ra2/voxels';
-import { voxelShadowMaterial } from '../src/ra2/voxelShadow';
+import { voxelShadowMaterial, voxelWaterMaterial } from '../src/ra2/voxelShadow';
 import { Ra2NightDressing } from '../src/ra2/nightDressing';
 import { AtmosphereNodes } from '../src/atmosphere';
 import { ObjectLayer } from '../src/objects';
@@ -397,6 +397,8 @@ describe('r186 vertex and uniform binding budget', () => {
       expect(part.geometry.getAttribute('position').count).toBeGreaterThan(65536);
       expect(assertLimits(new Mesh(part.geometry, part.material)).buffers.length).toBe(4);
       assertLimits(new Mesh(part.geometry, voxelShadowMaterial()));
+      assertLimits(new Mesh(part.geometry, voxelWaterMaterial(source.nodes!, 'foam')));
+      assertLimits(new Mesh(part.geometry, voxelWaterMaterial(source.nodes!, 'reflection')));
       part.geometry.dispose();
     }
     [terrain.mesh, generic.mesh, water.mesh].forEach(dispose);

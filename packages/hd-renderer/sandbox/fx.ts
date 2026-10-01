@@ -124,6 +124,8 @@ const live = await LiveView.create(canvas, {
 };
 // &vshadow=hard restores the single hard twin; contact penumbra is the default (also in replays).
 voxelShadowFor(live.hd.nodes).soft = params.get('vshadow') !== 'hard';
+// &vnaval=old restores sheared drop shadows on water for before/after review.
+voxelShadowFor(live.hd.nodes).naval = params.get('vnaval') !== 'old';
 // &look=golden: the enhanced look preset (src/HdRenderer.ts LOOK_PRESETS; pair it with &hours=16.5), for effect reviews
 // in the lighting they will be seen with.
 const lookPreset = params.get('look') as LookPreset | null;

@@ -148,6 +148,8 @@ if (params.has('shadows')) hd.settings.shadows = params.get('shadows') !== '0';
 if (params.has('debug')) hd.settings.debugView = params.get('debug') as HdSettings['debugView'];
 // ?vshadow=hard restores the single hard twin; contact penumbra is the default.
 voxelShadowFor(hd.nodes).soft = params.get('vshadow') !== 'hard';
+// ?vnaval=old restores sheared drop shadows on water for before/after review.
+voxelShadowFor(hd.nodes).naval = params.get('vnaval') !== 'old';
 // Voxel material review (see src/ra2/vpl.ts): ?vpl=<extra light>,<occlusion>,<sheen>.
 if (params.has('vpl')) {
   const { voxelExtraLight, voxelOcclusion, voxelSheen } = voxelLightingFor(hd.nodes);
