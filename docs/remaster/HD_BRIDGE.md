@@ -230,12 +230,17 @@ Optional art lives under the local HD cache's `_ui/` directory:
 - `_ui/cameos/index.json`: `{ "version": 1, "images": { "image": { "hd": "hd.png", "orig": "orig.png" } },
 "byId": { "TYPE_ID": "image" } }`. Both image paths are optional and relative to `_ui/cameos/`.
   The type-ID mapping takes precedence over the snapshot's image name; missing HD art falls back to original art.
+  An image entry's optional `caption` (string) is the short name printed on the original cameo (Simplified Chinese
+  for this install, for example `矿石精炼厂` where the type's UIName is `苏联矿石精炼厂`); the HD caption prefers it over
+  the snapshot's UIName, which remains the fallback. The native tooltip is unchanged.
 - `_ui/chrome/<side>/chrome.json`: `{ "frame": { "width": 800, "height": 600 }, "pieces": [
 { "file": "sidebar.png", "rect": { "x": 0, "y": 0, "width": 168, "height": 600 },
 "anchor": "sidebar" } ] }`. Side is `0` Allied, `1` Soviet, `2` Yuri, or `-1` unknown. Files are relative to
   that side's chrome directory. `rect.x/y` are frame-pixel offsets from the live anchor's origin and `width/height`
   are frame-pixel sizes. PNG scale does not affect geometry. Three 168x248 sidebar pieces use y=0/248/496;
-  two 492x32 command halves use x=0/492, y=0. Loaded chrome replaces procedural tab icons.
+  two 492x32 command halves use x=0/492, y=0. Loaded chrome replaces procedural tab icons. When every piece of an
+  anchor has the same art-to-frame scale, the pieces are composited once into one bitmap per anchor and drawn with a
+  single scaled `drawImage`, so filtered piece edges cannot leave a dark seam at their joins.
   Optional `tabs` is `{ "file": "tabs.png", "scale": 4, "frames": [
 { "tab": 0, "state": "normal", "rect": { "x": 0, "y": 0, "width": 112, "height": 108 } } ] }`.
   Each rectangle is in atlas pixels and includes the whole native tab canvas with transparency; it is scaled into
