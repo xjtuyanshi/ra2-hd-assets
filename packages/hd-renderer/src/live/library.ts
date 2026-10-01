@@ -8,6 +8,7 @@ import {
   loadHdAtlas,
   loadMaskTexture,
   readPalettePng,
+  type HdAtlas,
   type HdAtlasRef,
   type Ra2Cache,
   type WindowsIndex,
@@ -29,7 +30,7 @@ export class LiveLibrary {
   /** Changes when asynchronous art settles; presentation can sleep while nothing has arrived. */
   revision = 0;
   private readonly voxels = new Map<string, VoxelModel | 'loading' | 'failed'>();
-  private readonly hdPages = new Map<number, { color: Texture; remap: Texture } | 'loading' | 'failed'>();
+  private readonly hdPages = new Map<number, HdAtlas | 'loading' | 'failed'>();
   private readonly windowPages = new Map<number, Texture | 'loading' | 'failed'>();
   /** Uploads a freshly decoded page straight to the GPU (the renderer's initTexture); see loadIndexedPage. */
   uploadPage: ((texture: Texture) => void) | null = null;
@@ -146,7 +147,7 @@ export class LiveLibrary {
    * The page's HD atlas (pnpm hd:sprites --library), null while loading or when the page has none. Callers draw the
    * indexed page until it arrives.
    */
-  hdPage(index: number): { color: Texture; remap: Texture } | null {
+  hdPage(index: number): HdAtlas | null {
     const refs = (this.library as TypeLibrary & { spriteAtlasesHd?: (HdAtlasRef | null)[] }).spriteAtlasesHd;
     const ref = refs?.[index];
     if (!ref) return null;

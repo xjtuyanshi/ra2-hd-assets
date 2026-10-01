@@ -172,6 +172,10 @@ complete. Library pages run sequentially and each completed page is recorded, so
 not discard earlier completed pages. No renderer changes are included in this offline step: consumers must use
 the grey colour layer and soft mask to apply house colours, and continue using the indexed shadow frames.
 
+HD references may also include `paintSaturation` (0..1, absent = 1). The renderer reduces only the decoded house
+colour's saturation in linear light, preserving Rec.709 luminance and the grey ramp's shading. At 1 or absent,
+the shader adds no grading nodes.
+
 **Debug mode:** `--limit-frames N` limits the body frames processed on **each selected page**, writes
 `<stem>@2x-debug.png` and `<stem>@2x-debug-remap.png`, and never changes manifest/library references or normal HD
 outputs, even if N covers every frame. Unprocessed body frames are transparent. Use this mode for a quick visual
@@ -374,6 +378,41 @@ reference as `style_reference.png`, and the prompt asks for that rendering style
 cornices, light and shade) while the structure rules stay; `--style-lock-l <0..1>` takes that share of the colour
 lock's low-frequency lightness target from the reference where it shows the object cleanly (hue and saturation stay
 the original's). Because lightness may now move, loosen `lf_dE_mean` / `lf_dE_p95` with `--thresholds` accordingly.
+
+## Infantry page finishing (Python, experimental)
+
+`python/infantry_sheets.py build` composes redraw sheets, accepts frames by silhouette IoU, and pastes only frames
+whose library `page` equals `--page`. Other-page frames are recorded with `accepted: false` and
+`skipped: "other-page"` in `pages/report.json`. Optional `--rim-soften K` and `--paint-saturation S` both accept
+0..1; defaults are 0 and 1, preserving existing pixels and paint grading. Saturation below 1 is recorded in the
+installed `library.json` page entry and `library.l3-infantry.json`.
+
+Rim softening runs after pasting, within accepted frame rectangles only. It selects opaque texels (alpha >= 128)
+within two 8-neighbour steps of transparency or the frame boundary, excluding paint-mask values >= 128. It averages
+non-rim opaque RGB in a frame-clipped 7x7 neighbourhood in linear light. Darker rim texels move towards that mean
+by `K * (1 - luminance(rim) / luminance(mean))`, bounded to 0..K; missing references and brighter rims are unchanged.
+Alpha and remap bytes are preserved. The result is rounded back to sRGB uint8.
+
+`polish` applies the same operation to **all** frames of selected sprites on the requested page, reading the current
+variant's colour/remap filenames from its own `library.json`:
+
+```bash
+python3 packages/ra2-assets/python/infantry_sheets.py build \
+  --library "$LIBRARY" --work "$WORK" --page 21 --variant-dir "$VARIANT" \
+  --rim-soften 0.5 --paint-saturation 0.82
+python3 packages/ra2-assets/python/infantry_sheets.py polish \
+  --library "$LIBRARY" --page 21 --variant-dir "$VARIANT" --sprites infantry:CONS,infantry:SHK \
+  --rim-soften 0.5 --paint-saturation 0.82 --suffix l4inf
+python3 -m pytest packages/ra2-assets/python/test_infantry_sheets.py -q
+```
+
+`polish` writes `sprites-P@2x-<suffix>.png` and `sprites-P@2x-remap-<suffix>.png` (default suffix `l4inf`), then
+atomically replaces the variant manifest with only that page's `file`, `remap`, and `paintSaturation` updated.
+Its saturation default of 1 restores full house colour; its rim default of 0 preserves pixels. A symlinked manifest
+is read through and replaced with a real file; existing output symlinks are also replaced without changing their
+targets. Other page entries and manifest metadata survive. Repeated softening accumulates because it reads the
+current variant. Source and variant directories must differ; derived art stays outside Git. Python stages need
+NumPy and Pillow; the synthetic regression command additionally needs pytest.
 
 ## Sprite material atlas (Python, experimental)
 

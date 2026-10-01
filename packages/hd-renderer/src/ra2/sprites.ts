@@ -48,7 +48,7 @@ import type { LightingClass, MapObject, SpriteFrame } from '../../../ra2-assets/
 import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLight, pavedAt, puddleNoise } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
-import { type Ra2Cache } from './cache';
+import { type HdAtlas, type Ra2Cache } from './cache';
 import { objectLevelAt, srgbScale, terrainGradeAt } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
 import { cardDepthNode } from './cardDepth';
@@ -251,7 +251,7 @@ export class SpriteLayer {
      * pixels written as a grey ramp, plus a mask of those pixels (see packages/ra2-assets spriteHd). Shadows keep using
      * the indexed atlas.
      */
-    hd: { color: Texture; remap: Texture } | null = null,
+    hd: HdAtlas | null = null,
     /**
      * Lit-window mask over the same atlas (R = lit, G = variant; ra2-assets windows.ts), same normalized UVs as the
      * indexed and HD atlases. Null: no windows.
@@ -516,7 +516,12 @@ export class SpriteLayer {
           const grey = pow(hdArt.g.max(0), 1 / 2.2).mul(255);
           const remapIndex = clamp(float(16).add(float(255).sub(grey).div(15)), 16, 31);
           const i0 = floor(remapIndex);
-          const house = mix(paletteColour(i0), paletteColour(i0.add(1).min(31)), remapIndex.sub(i0));
+          let house: ShaderNode = mix(paletteColour(i0), paletteColour(i0.add(1).min(31)), remapIndex.sub(i0));
+          if ((hd.paintSaturation ?? 1) < 1) {
+            // Palette samples are linear; preserve Rec.709 luminance and the encoded shading. Default pages add no nodes.
+            const greyHouse = house.dot(vec3(0.2126, 0.7152, 0.0722));
+            house = mix(vec3(greyHouse), house, hd.paintSaturation!);
+          }
           const colour = mix(hdArt.rgb, house, paint);
           // The upscaler saw the art over a flat background, so HD texels next to transparent ones carry a light fringe
           // of it (pale rings around the holes in foliage). Within about one original texel of any transparent texel the

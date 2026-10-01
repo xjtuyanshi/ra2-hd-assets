@@ -59,7 +59,7 @@ export interface Ra2Cache {
   };
   spriteAtlas: Texture;
   /** 2x HD version of the sprite atlas (full colour + house-paint mask), when extracted (pnpm hd:sprites). */
-  spriteAtlasHd: { color: Texture; remap: Texture } | null;
+  spriteAtlasHd: HdAtlas | null;
   /** All palettes stacked into one 256xN texture; `paletteRow` maps a palette key to its row. */
   paletteAtlas: DataTexture;
   paletteRow: Map<string, number>;
@@ -192,10 +192,20 @@ export interface HdAtlasRef {
   scale: number;
   width: number;
   height: number;
+  /** House-paint saturation in linear light, 0..1; absent means 1. Preserves Rec.709 luminance. */
+  paintSaturation?: number;
+}
+
+/** Loaded HD page textures and its optional house-paint grade. */
+export interface HdAtlas {
+  color: Texture;
+  remap: Texture;
+  /** House-paint saturation, 0..1; absent means 1 (no additional shader nodes). */
+  paintSaturation?: number;
 }
 
 /** Load an HD sprite atlas pair: colour art (sRGB, filtered) and the house-paint mask (linear data). */
-export async function loadHdAtlas(base: string, ref: HdAtlasRef): Promise<{ color: Texture; remap: Texture }> {
+export async function loadHdAtlas(base: string, ref: HdAtlasRef): Promise<HdAtlas> {
   const loader = new TextureLoader();
   const [color, remap] = await Promise.all([
     loader.loadAsync(`${base}/${ref.file}`),
@@ -209,7 +219,7 @@ export async function loadHdAtlas(base: string, ref: HdAtlasRef): Promise<{ colo
   }
   color.colorSpace = SRGBColorSpace;
   remap.colorSpace = NoColorSpace;
-  return { color, remap };
+  return { color, remap, paintSaturation: ref.paintSaturation ?? 1 };
 }
 
 export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}): Promise<Ra2Cache> {

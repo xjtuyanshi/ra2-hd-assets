@@ -235,7 +235,10 @@ class LibraryTests(unittest.TestCase):
         shutil.copyfile(d / "input.png", d / "full.png")
         with contextlib.redirect_stdout(io.StringIO()):
             color, _, report = inf.build(self.lib, self.root, PAGE, options())
-        self.assertEqual(set(report["frames"]), {f"{SPRITE}#1"})
+        self.assertEqual(set(report["frames"]), {f"{SPRITE}#0", f"{SPRITE}#1"})
+        self.assertEqual(report["frames"][f"{SPRITE}#0"]["skipped"], "other-page")
+        self.assertFalse(report["frames"][f"{SPRITE}#0"]["accepted"])
+        self.assertTrue(report["frames"][f"{SPRITE}#1"]["accepted"])
         x, y, w, h = self.lib.frames(SPRITE)[0]["rect"]
         crop = np.s_[2 * y:2 * (y + h), 2 * x:2 * (x + w)]
         np.testing.assert_array_equal(color[crop], self.lib.page2(PAGE)[crop])
@@ -307,7 +310,8 @@ class PipelineTests(unittest.TestCase):
         source_manifest = (self.library_dir / "library.json").read_bytes()
         with contextlib.redirect_stdout(io.StringIO()):
             code = inf.main(["build", "--library", str(self.library_dir), "--work", str(self.work),
-                             "--page", str(PAGE), "--variant-dir", str(variant)])
+                             "--page", str(PAGE), "--variant-dir", str(variant),
+                             "--rim-soften", "0.5", "--paint-saturation", "0.82"])
         self.assertEqual(code, 0)
         report = json.loads((self.work / "pages/report.json").read_text())
         self.assertEqual(report["sheets"]["E1_Walk_b"], "missing")
@@ -327,7 +331,7 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse((variant / filename).is_symlink())
         expected = copy.deepcopy(merge_base)
         expected["spriteAtlasesHd"][PAGE].update(file=f"sprites-{PAGE}@2x-l3inf.png",
-                                                 remap=f"sprites-{PAGE}@2x-remap-l3inf.png")
+                                                 remap=f"sprites-{PAGE}@2x-remap-l3inf.png", paintSaturation=0.82)
         self.assertEqual(json.loads((variant / "library.json").read_text()), expected)
         self.assertEqual((self.library_dir / "library.json").read_bytes(), source_manifest)
         for source in self.library_dir.iterdir():
@@ -337,6 +341,9 @@ class PipelineTests(unittest.TestCase):
         note = json.loads((variant / "library.l3-infantry.json").read_text())
         self.assertEqual(note["sprites"], [SPRITE])
         self.assertEqual(note["page"], PAGE)
+        self.assertEqual(note["spriteAtlasesHd"][str(PAGE)]["paintSaturation"], 0.82)
+        self.assertEqual(report["options"]["paint_saturation"], 0.82)
+        self.assertEqual(report["options"]["rim_soften"], 0.5)
 
     def test_install_replaces_manifest_and_page_symlinks_without_writing_source(self):
         variant = self.root / "linked-variant"
@@ -370,6 +377,198 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(report["frames"][f"{SPRITE}#0"]["accepted"])
         result = inf.compose_job(self.lib, self.d, options(), page=0)
         self.assertEqual(result["frames"], {})
+        self.assertEqual(set(result["skipped"].values()), {"other-page"})
+
+    def test_build_softens_only_accepted_rects_and_rechecks_page_before_pasting(self):
+        rgba = np.zeros((44, 36, 4), np.uint8)
+        rgba[..., 3] = 255
+        rgba[2:-2, 2:-2, :3] = 128
+        paint = np.zeros(rgba.shape[:2], np.uint8)
+        frames = {i: {"rgba": rgba, "paint": paint, "metrics": {"sil_iou": i * 0.4 + 0.5}}
+                  for i in range(3)}
+        job = {"sprite": SPRITE}
+        other_frame = self.lib.frames(SPRITE)[2]
+        original_page = other_frame["page"]
+        other_frame["page"] = PAGE - 1
+        try:
+            with mock.patch.object(inf, "compose_job", return_value={"job": job, "frames": frames, "raw": "full.png"}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                color, remap, report = inf.build(self.lib, self.work, PAGE, options(rim_soften=0.5), names=[self.name])
+        finally:
+            other_frame["page"] = original_page
+        x, y, w, h = self.lib.frames(SPRITE)[1]["rect"]
+        touched = np.zeros(color.shape[:2], bool)
+        touched[2 * y:2 * (y + h), 2 * x:2 * (x + w)] = True
+        np.testing.assert_array_equal(color[~touched], self.lib.page2(PAGE)[~touched])
+        np.testing.assert_array_equal(remap[~touched], self.lib.remap2(PAGE)[~touched])
+        np.testing.assert_array_equal(color[2 * y, 2 * x + 10], [92, 92, 92, 255])
+        np.testing.assert_array_equal(color[..., 3][touched], rgba[..., 3].ravel())
+        np.testing.assert_array_equal(remap[touched], paint.ravel())
+        self.assertFalse(report["frames"][f"{SPRITE}#0"]["accepted"])
+        self.assertTrue(report["frames"][f"{SPRITE}#1"]["accepted"])
+        self.assertEqual(report["frames"][f"{SPRITE}#2"]["skipped"], "other-page")
+        self.assertFalse(report["frames"][f"{SPRITE}#2"]["accepted"])
+
+
+class RimTests(unittest.TestCase):
+    def test_black_rim_moves_halfway_in_linear_light_and_preserves_paint_and_alpha(self):
+        rgba = np.zeros((16, 16, 4), np.uint8)
+        rgba[2:14, 2:14, 3] = 255
+        rgba[4:12, 4:12, :3] = 128
+        rgba[3, 8, 3] = 128
+        rgba[1, 8] = [33, 44, 55, 127]
+        rgba[3, 3, :3] = 195
+        paint = np.zeros((16, 16), np.uint8)
+        paint[3, 3] = 128
+        paint[3, 8] = 127
+        original = rgba.copy()
+        out = inf.soften_rim(rgba, paint, 0.5)
+        np.testing.assert_array_equal(out[3, 8], [92, 92, 92, 128])
+        ratio = inf.rd.srgb_to_linear(out[3, 8, :3]) / inf.rd.srgb_to_linear(np.array([128] * 3))
+        np.testing.assert_allclose(ratio, 0.5, atol=0.006)
+        np.testing.assert_array_equal(out[paint >= 128], rgba[paint >= 128])
+        np.testing.assert_array_equal(out[..., 3], rgba[..., 3])
+        np.testing.assert_array_equal(out[rgba[..., 3] < 128], rgba[rgba[..., 3] < 128])
+        np.testing.assert_array_equal(out[4:12, 4:12], rgba[4:12, 4:12])
+        np.testing.assert_array_equal(rgba, original)
+        self.assertEqual(paint[3, 3], 128)
+        np.testing.assert_array_equal(inf.soften_rim(rgba, paint, 0), rgba)
+
+    def test_frame_border_and_luminance_ratio_leave_bright_rims_unchanged(self):
+        rgba = np.zeros((16, 16, 4), np.uint8)
+        rgba[..., 3] = 255
+        rgba[2:-2, 2:-2, :3] = 128
+        rgba[1, 6, :3] = 64
+        rgba[1, 11, :3] = 220
+        out = inf.soften_rim(rgba, np.zeros((16, 16), np.uint8), 0.5)
+        np.testing.assert_array_equal(out[0, 6, :3], [92] * 3)
+        # 64 and 128 sRGB are approximately 0.0513 and 0.2159 in linear light.
+        expected = inf.rd.linear_to_srgb(np.array([0.05126946 + (0.2158605 - 0.05126946)
+                                                   * 0.5 * (1 - 0.05126946 / 0.2158605)] * 3))
+        np.testing.assert_allclose(out[1, 6, :3], expected, atol=0.5)
+        np.testing.assert_array_equal(out[1, 11], rgba[1, 11])
+
+    def test_local_mean_uses_linear_light_and_diagonal_neighbours(self):
+        rgba = np.zeros((12, 12, 4), np.uint8)
+        rgba[..., 3] = 255
+        rgba[2:4, 2:4, :3] = np.array([[0, 255], [255, 0]])[..., None]
+        rgba[6:10, 6:10, :3] = 255  # beyond the corner's radius of three
+        out = inf.soften_rim(rgba, np.zeros((12, 12), np.uint8), 0.5)
+        # Four interior samples at the corner average to 0.5 linear, then black moves halfway: 0.25 -> 137 sRGB.
+        np.testing.assert_array_equal(out[0, 0], [137, 137, 137, 255])
+
+    def test_no_local_interior_and_zero_luminance_are_noops(self):
+        rgba = np.zeros((20, 20, 4), np.uint8)
+        rgba[1:4, 1:4, 3] = 255  # a thin island has no interior reference within three texels
+        rgba[10:20, 10:20, 3] = 255  # interior exists here, but is black
+        paint = np.zeros((20, 20), np.uint8)
+        np.testing.assert_array_equal(inf.soften_rim(rgba, paint, 1), rgba)
+        np.testing.assert_array_equal(inf.soften_rim(rgba[:4, :4], paint[:4, :4], 1), rgba[:4, :4])
+
+
+class PolishTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix=".tmp-infantry-polish-", dir=Path(__file__).parent)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / "source"
+        self.data = synthetic_library(self.source)
+        self.data["sprites"][SPRITE]["frames"] = [
+            {"rect": [0, 0, 8, 8], "offset": [0, 0], "page": PAGE},
+            {"rect": [8, 0, 8, 8], "offset": [0, 0], "page": PAGE - 1},
+            {"rect": [0, 8, 8, 8], "offset": [0, 0], "page": PAGE},
+        ]
+        self.data["sprites"]["infantry:UNTOUCHED"]["frames"][0]["rect"] = [8, 8, 8, 8]
+        (self.source / "library.json").write_text(json.dumps(self.data))
+        self.variant = self.root / "variant"
+        self.variant.mkdir()
+        self.color = np.zeros((32, 32, 4), np.uint8)
+        self.color[..., 3] = 255
+        for y, x in ((0, 0), (0, 16), (16, 0), (16, 16)):
+            self.color[y + 2:y + 14, x + 2:x + 14, :3] = 128
+        self.paint = np.zeros((32, 32), np.uint8)
+        self.color[1, 1, :3] = 195
+        self.paint[1, 1] = 255
+        Image.fromarray(self.color).save(self.variant / "variant-colour.png")
+        Image.fromarray(self.paint).save(self.variant / "variant-paint.png")
+        self.merged = copy.deepcopy(self.data)
+        self.merged["spriteAtlasesHd"][PAGE].update(file="variant-colour.png", remap="variant-paint.png",
+                                                   width=32, height=32, paintSaturation=0.9)
+        self.merged["variantOnly"] = {"keep": [False, 0, "elsewhere"]}
+        self.manifest = self.variant / "library.json"
+        self.manifest.write_text(json.dumps(self.merged))
+
+    def run_polish(self, *extra):
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = inf.main(["polish", "--library", str(self.source), "--page", str(PAGE),
+                             "--variant-dir", str(self.variant), "--sprites", SPRITE,
+                             "--rim-soften", "0.5", "--paint-saturation", "0.82", *extra])
+        self.assertEqual(code, 0)
+
+    def assert_polished(self, suffix="l4inf"):
+        expected = copy.deepcopy(self.merged)
+        entry = expected["spriteAtlasesHd"][PAGE]
+        entry.update(file=f"sprites-{PAGE}@2x-{suffix}.png", remap=f"sprites-{PAGE}@2x-remap-{suffix}.png",
+                     paintSaturation=0.82)
+        actual = json.loads(self.manifest.read_text())
+        self.assertEqual(json.dumps(actual), json.dumps(expected))
+        color = read_image(self.variant / entry["file"])
+        paint = read_image(self.variant / entry["remap"])
+        np.testing.assert_array_equal(color[:, 16:], self.color[:, 16:])  # other page's rect and unlisted sprite
+        np.testing.assert_array_equal(color[0, 8], [92, 92, 92, 255])
+        np.testing.assert_array_equal(color[16, 8], [92, 92, 92, 255])  # every selected page-P frame
+        np.testing.assert_array_equal(color[..., 3], self.color[..., 3])
+        np.testing.assert_array_equal(color[self.paint >= 128], self.color[self.paint >= 128])
+        np.testing.assert_array_equal(paint, self.paint)
+        return color
+
+    def test_polish_reads_current_variant_and_only_changes_the_selected_page(self):
+        original = {p: p.read_bytes() for p in self.source.iterdir()}
+        self.run_polish("--suffix", "custom")
+        self.assert_polished("custom")
+        for path, contents in original.items():
+            self.assertEqual(path.read_bytes(), contents)
+        np.testing.assert_array_equal(read_image(self.variant / "variant-colour.png"), self.color)
+
+    def test_polish_replaces_symlinked_manifest_and_output_pages_atomically(self):
+        linked = self.root / "linked-manifest.json"
+        self.manifest.rename(linked)
+        self.manifest.symlink_to(linked)
+        for name, target in ((f"sprites-{PAGE}@2x-l4inf.png", "variant-colour.png"),
+                             (f"sprites-{PAGE}@2x-remap-l4inf.png", "variant-paint.png")):
+            (self.variant / name).symlink_to(self.variant / target)
+        original = linked.read_bytes()
+        with mock.patch.object(inf.os, "replace", wraps=inf.os.replace) as replace:
+            self.run_polish()
+        self.assertFalse(self.manifest.is_symlink())
+        self.assertEqual(linked.read_bytes(), original)
+        self.assertEqual(replace.call_args_list[-1].args[1], self.manifest)
+        self.assertEqual(len(replace.call_args_list), 3)
+        for call in replace.call_args_list:
+            self.assertEqual(call.args[0].parent, self.variant)
+            self.assertFalse(call.args[1].is_symlink())
+        color = self.assert_polished()
+        np.testing.assert_array_equal(read_image(self.variant / "variant-colour.png"), self.color)
+        np.testing.assert_array_equal(read_image(self.variant / "variant-paint.png"), self.paint)
+        # A second invocation must read the newly installed page, even with the same source library and suffix.
+        self.run_polish("--rim-soften", "0", "--paint-saturation", "1")
+        np.testing.assert_array_equal(read_image(self.variant / f"sprites-{PAGE}@2x-l4inf.png"), color)
+        self.assertEqual(json.loads(self.manifest.read_text())["spriteAtlasesHd"][PAGE]["paintSaturation"], 1)
+        self.assertEqual(list(self.variant.glob(".*.tmp")), [])
+
+    def test_polish_and_build_validate_weights_and_keep_noop_defaults(self):
+        for command in ("build", "polish"):
+            args = [command, "--library", str(self.source), "--page", str(PAGE), "--variant-dir", str(self.variant)]
+            args += ["--work", str(self.root)] if command == "build" else ["--sprites", SPRITE]
+            defaults = inf.parser().parse_args(args)
+            self.assertEqual(defaults.rim_soften, 0)
+            self.assertEqual(defaults.paint_saturation, 1)
+            for option in ("--rim-soften", "--paint-saturation"):
+                for value in ("-0.01", "1.01", "nan", "inf"):
+                    with self.subTest(command=command, option=option, value=value), \
+                            contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                        inf.parser().parse_args([*args, option, value])
+                    self.assertEqual(error.exception.code, 2)
 
 
 class SchedulerTests(unittest.TestCase):
@@ -472,7 +671,7 @@ shutil.copyfile(d / "input.png", d / "output.png")
     def test_cli_help_needs_no_library(self):
         result = subprocess.run([sys.executable, "-B", str(Path(inf.__file__)), "--help"],
                                 capture_output=True, text=True, check=True)
-        self.assertIn("{prepare,run,compose,build}", result.stdout)
+        self.assertIn("{prepare,run,compose,build,polish}", result.stdout)
 
 
 if __name__ == "__main__":

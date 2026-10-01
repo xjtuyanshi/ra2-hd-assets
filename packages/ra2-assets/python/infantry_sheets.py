@@ -20,13 +20,16 @@ the model sees decoded house colours over flat grey on a native 1536x1024 or 102
 ``prepare`` writes model inputs, jobs and prompts; ``run`` invokes a command-line image agent with at most three
 jobs in flight, three attempts per job and a shared usage-limit stop file. ``compose`` writes reviews and metrics;
 ``build`` rejects low-silhouette-IoU frames and installs variant pages into a symlink farm, merging just the chosen
-HD page's colour/remap filenames into its library.json. NumPy and Pillow suffice for every stage except ``run``.
+HD page's colour/remap filenames into its library.json. ``build`` and ``polish`` optionally soften unpainted dark
+rims and set per-page house-paint saturation; ``polish`` reads an existing variant and processes all selected
+sprite frames on that page. NumPy and Pillow suffice for every stage except ``run``.
 All actual inputs and outputs are derived game art and must remain in gameres/ or another untracked directory.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import functools
 import json
 import math
@@ -35,6 +38,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 
 import numpy as np
@@ -509,6 +513,53 @@ def sharpen_interior(final, body2, amount, sigma):
     detail = final - gaussian_blur(final, sigma)
     return np.where(inner[..., None], np.clip(final + amount * detail, 0, 255), final)
 
+
+def soften_rim(rgba, paint, amount):
+    """Lift dark, unpainted silhouette texels towards a 7x7 non-rim opaque mean, in linear light."""
+    if not 0 <= amount <= 1:
+        raise ValueError("rim-soften must be between 0 and 1")
+    if amount == 0:
+        return rgba
+    opaque = rgba[..., 3] >= 128
+    # Erosion pads with transparency: the frame boundary counts even on a fully opaque crop.
+    rim = opaque & (rd.erode_distance(opaque, 2) <= 2) & (paint < 128)
+    interior = opaque & ~rim
+    if not rim.any() or not interior.any():
+        return rgba
+    linear = rd.srgb_to_linear(rgba[..., :3])
+    h, w = opaque.shape
+    padded = np.pad(linear * interior[..., None], ((3, 3), (3, 3), (0, 0)))
+    padded_count = np.pad(interior, 3)
+    total = np.zeros_like(linear)
+    count = np.zeros((h, w), np.int32)
+    for dy in range(7):
+        for dx in range(7):
+            total += padded[dy:dy + h, dx:dx + w]
+            count += padded_count[dy:dy + h, dx:dx + w]
+    reference = total / np.maximum(count[..., None], 1)
+    weights = np.array([0.2126, 0.7152, 0.0722], np.float32)
+    lum, ref_lum = linear @ weights, reference @ weights
+    changed = rim & (count > 0) & (lum < ref_lum)
+    if not changed.any():
+        return rgba
+    blend = np.clip(amount * (1 - lum[changed] / ref_lum[changed]), 0, amount)
+    out = rgba.copy()
+    rgb = linear[changed] + (reference[changed] - linear[changed]) * blend[:, None]
+    out[..., :3][changed] = np.clip(np.rint(rd.linear_to_srgb(rgb)), 0, 255).astype(np.uint8)
+    return out
+
+
+def soften_frame_rects(color, remap, rects, amount):
+    """Process each 1x frame rect once; all neighbourhood reads stay within that frame's 2x crop."""
+    if amount == 0:
+        return
+    for x, y, w, h in sorted(set(map(tuple, rects))):
+        if min(x, y) < 0 or min(w, h) <= 0 or 2 * (x + w) > color.shape[1] or 2 * (y + h) > color.shape[0]:
+            raise ValueError("frame rect lies outside the HD page")
+        crop = np.s_[2 * y:2 * (y + h), 2 * x:2 * (x + w)]
+        color[crop] = soften_rim(color[crop], remap[crop], amount)
+
+
 def compose_job(lib: Library, d: Path, opts, page=None):
     job = json.loads((d / "job.json").read_text())
     raw, which = load_raw(d)
@@ -523,12 +574,14 @@ def compose_job(lib: Library, d: Path, opts, page=None):
     rx, ry = raw.shape[1] / cw, raw.shape[0] / ch
     ramp = lib.scheme(house)
     results = {}
+    skipped = {}
     pad = 64
     rawp = np.pad(raw, ((pad, pad), (pad, pad), (0, 0)), mode="edge")
     inpp = np.pad(inp, ((pad, pad), (pad, pad), (0, 0)), mode="edge")
     for p in job["layout"]["place"]:
         i = p["frame"]
         if page is not None and lib.frames(sp)[i]["page"] != page:
+            skipped[i] = "other-page"
             continue
         _, _, _, idx = lib.frame1(sp, i, house)
         ref2, alpha2, paint2 = lib.frame2(sp, i, house)
@@ -652,7 +705,7 @@ def compose_job(lib: Library, d: Path, opts, page=None):
                                   "reg": [round(v, 3) for v in (sx, tx, sy, ty)], "rejected": "rejected" in diag, "tried": [round(float(v), 3) for v in diag.get("rejected", [])],
                                   "leak": round(float(leak.sum() / max(1, body2.sum())), 3),
                                   "trim": round(float((1 - trim)[body2].mean()) if body2.any() else 0, 3)}}
-    return {"job": job, "frames": results, "raw": which}
+    return {"job": job, "frames": results, "skipped": skipped, "raw": which}
 
 
 def review(lib: Library, res, path, scale=4):
@@ -858,32 +911,59 @@ def compose(lib: Library, work: Path, opts, names=None):
 
 def build(lib: Library, work: Path, page: int, opts, names=None, min_sil=0.6):
     color, remap = lib.page2(page).copy(), lib.remap2(page).copy()
+    accepted_rects = []
+    rim_soften = getattr(opts, "rim_soften", 0.0)
     report = {"page": page, "frames": {}, "sheets": {}, "options": {
         key: getattr(opts, key) for key in COMPOSE_DEFAULTS}, "min_sil": min_sil}
+    report["options"].update(rim_soften=rim_soften, paint_saturation=getattr(opts, "paint_saturation", 1.0))
     for d in sheet_dirs(work, names):
         res = compose_job(lib, d, opts, page=page)
         if res is None:
             report["sheets"][d.name] = "missing"
             continue
         sprite = res["job"]["sprite"]
+        skipped = dict(res.get("skipped", {}))
         accepted = 0
         for i, result in res["frames"].items():
+            frame = lib.frames(sprite)[i]
+            # Recheck at the write boundary, even if a composer already filtered the job.
+            if frame["page"] != page:
+                skipped[i] = "other-page"
+                continue
             metrics = dict(result["metrics"])
             ok = metrics["sil_iou"] >= min_sil
             metrics.update(accepted=ok, sheet=d.name)
             report["frames"][f"{sprite}#{i}"] = metrics
             if not ok:
                 continue
-            x, y, w, h = lib.frames(sprite)[i]["rect"]
+            x, y, w, h = frame["rect"]
             crop = np.s_[2 * y:2 * (y + h), 2 * x:2 * (x + w)]
             color[crop], remap[crop] = result["rgba"], result["paint"]
+            accepted_rects.append(frame["rect"])
             accepted += 1
+        for i, reason in skipped.items():
+            report["frames"][f"{sprite}#{i}"] = {"accepted": False, "skipped": reason, "sheet": d.name}
         report["sheets"][d.name] = {"frames": len(res["frames"]), "accepted": accepted, "raw": res["raw"]}
         print(d.name, accepted, "/", len(res["frames"]), flush=True)
+    soften_frame_rects(color, remap, accepted_rects, rim_soften)
     return color, remap, report
 
 
-def install(lib: Library, variant_dir: Path, page: int, page_path: Path, remap_path: Path, sprites):
+@contextlib.contextmanager
+def atomic_output(path: Path):
+    """Replace the directory entry, never the destination of a pre-existing symlink."""
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}-", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        yield tmp
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def install(lib: Library, variant_dir: Path, page: int, page_path: Path, remap_path: Path, sprites,
+            paint_saturation=1.0):
     """Install pages while preserving an existing real variant manifest and every unrelated entry."""
     variant_dir = variant_dir.resolve()
     if variant_dir == lib.root:
@@ -894,6 +974,10 @@ def install(lib: Library, variant_dir: Path, page: int, page_path: Path, remap_p
     merged = json.loads(base.read_text(encoding="utf-8"))
     merged["spriteAtlasesHd"][page]["file"] = page_path.name
     merged["spriteAtlasesHd"][page]["remap"] = remap_path.name
+    entry = {"file": page_path.name, "remap": remap_path.name}
+    if paint_saturation < 1:
+        entry["paintSaturation"] = paint_saturation
+        merged["spriteAtlasesHd"][page]["paintSaturation"] = paint_saturation
     for source in lib.root.iterdir():
         target = variant_dir / source.name
         if source.name == "library.json" or source.resolve() == variant_dir or target.exists() or target.is_symlink():
@@ -906,18 +990,40 @@ def install(lib: Library, variant_dir: Path, page: int, page_path: Path, remap_p
         if source.resolve() != target.resolve():
             with Image.open(source) as im:
                 im.save(target, optimize=False)
-    tmp = manifest.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(merged, separators=(",", ":")), encoding="utf-8")
-    os.replace(tmp, manifest)
+    with atomic_output(manifest) as tmp:
+        tmp.write_text(json.dumps(merged, separators=(",", ":")), encoding="utf-8")
     note = variant_dir / "library.l3-infantry.json"
     if note.is_symlink():
         note.unlink()
     note.write_text(json.dumps({
         "track": "infantry", "page": page,
-        "spriteAtlasesHd": {str(page): {"file": page_path.name, "remap": remap_path.name}},
+        "spriteAtlasesHd": {str(page): entry},
         "sprites": sorted(set(sprites)),
         "note": "Only accepted frames of these sprites differ from the source HD colour and remap pages.",
         "written": time.strftime("%Y-%m-%d %H:%M:%S")}, indent=2), encoding="utf-8")
+
+
+def polish(lib: Library, variant_dir: Path, page: int, sprites, rim_soften=0.0, paint_saturation=1.0,
+           suffix="l4inf"):
+    """Polish current variant pixels, then atomically replace only its selected HD page reference."""
+    variant_dir = variant_dir.resolve()
+    if variant_dir == lib.root:
+        raise ValueError("variant directory must differ from the source library")
+    # Do not reuse the library cache: repeated polish runs must read the variant's latest manifest and pixels.
+    variant = Library(variant_dir)
+    color, remap = variant.page2(page).copy(), variant.remap2(page).copy()
+    rects = [frame["rect"] for sprite in sprites for frame in lib.frames(sprite) if frame["page"] == page]
+    soften_frame_rects(color, remap, rects, rim_soften)
+    page_path = variant_dir / f"sprites-{page}@2x-{suffix}.png"
+    remap_path = variant_dir / f"sprites-{page}@2x-remap-{suffix}.png"
+    for path, pixels in ((page_path, color), (remap_path, remap)):
+        with atomic_output(path) as tmp:
+            Image.fromarray(pixels).save(tmp, format="PNG")
+    variant.data["spriteAtlasesHd"][page].update(file=page_path.name, remap=remap_path.name,
+                                               paintSaturation=paint_saturation)
+    with atomic_output(variant_dir / "library.json") as tmp:
+        tmp.write_text(json.dumps(variant.data, separators=(",", ":")), encoding="utf-8")
+    print("frames polished", len(rects), "on page", page, flush=True)
 
 
 COMPOSE_DEFAULTS = {"sigma_l": 3.0, "sigma_ab": 4.0, "lock_l": 0.2, "lock_ab": 0.25, "band": 3,
@@ -938,6 +1044,20 @@ def csv_names(text):
     if not names:
         raise argparse.ArgumentTypeError("provide at least one comma-separated name")
     return names
+
+
+def unit_interval(text):
+    value = float(text)
+    if not 0 <= value <= 1:
+        raise argparse.ArgumentTypeError("value must be between 0 and 1")
+    return value
+
+
+def add_polish_options(ap):
+    ap.add_argument("--rim-soften", type=unit_interval, default=0.0,
+                    help="dark silhouette rim lift, 0..1 (default: 0, unchanged)")
+    ap.add_argument("--paint-saturation", type=unit_interval, default=1.0,
+                    help="linear-light house-paint saturation, 0..1 (default: 1)")
 
 
 def parser():
@@ -964,6 +1084,14 @@ def parser():
             sub.add_argument("--variant-dir", type=Path, required=True)
             sub.add_argument("--suffix", default="l3inf")
             sub.add_argument("--min-sil", type=float, default=0.6)
+            add_polish_options(sub)
+    sub = commands.add_parser("polish")
+    sub.add_argument("--library", type=Path, required=True)
+    sub.add_argument("--page", type=int, required=True)
+    sub.add_argument("--variant-dir", type=Path, required=True)
+    sub.add_argument("--sprites", type=csv_names, required=True)
+    sub.add_argument("--suffix", default="l4inf")
+    add_polish_options(sub)
     return ap
 
 
@@ -980,17 +1108,22 @@ def main(argv=None):
         if opts.command == "run":
             return run(opts.work, opts.codex, opts.parallel, opts.limit_file, opts.names, opts.redo)
         lib = library(opts.library)
-        if opts.command == "prepare":
-            prepare(lib, opts.work, opts.units)
-        elif opts.command == "compose":
-            return compose(lib, opts.work, opts, opts.names)
-        else:
-            if opts.page < 0 or not 0 <= opts.min_sil <= 1:
-                raise ValueError("page must be non-negative and min-sil between 0 and 1")
+        if opts.command in ("build", "polish"):
+            if opts.page < 0:
+                raise ValueError("page must be non-negative")
             if not re.fullmatch(r"[A-Za-z0-9_-]+", opts.suffix):
                 raise ValueError("suffix must contain only letters, digits, hyphens and underscores")
             if opts.variant_dir.resolve() == lib.root:
                 raise ValueError("variant directory must differ from the source library")
+        if opts.command == "prepare":
+            prepare(lib, opts.work, opts.units)
+        elif opts.command == "compose":
+            return compose(lib, opts.work, opts, opts.names)
+        elif opts.command == "polish":
+            polish(lib, opts.variant_dir, opts.page, opts.sprites, opts.rim_soften, opts.paint_saturation, opts.suffix)
+        else:
+            if not 0 <= opts.min_sil <= 1:
+                raise ValueError("min-sil must be between 0 and 1")
             color, remap, report = build(lib, opts.work, opts.page, opts, opts.names, opts.min_sil)
             pages = opts.work / "pages"
             pages.mkdir(parents=True, exist_ok=True)
@@ -1000,7 +1133,7 @@ def main(argv=None):
             Image.fromarray(remap).save(remap_path)
             (pages / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
             sprites = {key.rsplit("#", 1)[0] for key, value in report["frames"].items() if value["accepted"]}
-            install(lib, opts.variant_dir, opts.page, page_path, remap_path, sprites)
+            install(lib, opts.variant_dir, opts.page, page_path, remap_path, sprites, opts.paint_saturation)
             print("frames accepted", sum(m["accepted"] for m in report["frames"].values()),
                   "of", len(report["frames"]), flush=True)
         return 0
