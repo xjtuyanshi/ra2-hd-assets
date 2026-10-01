@@ -302,6 +302,8 @@ const REFLECT_MAX = 0.26;
  * concept's deep blue-teal instead of slate grey (the column's colour shows through the weak reflection).
  */
 const SKY_IN_WATER = vec3(0.3, 0.62, 0.78);
+/** Luminance of SKY_IN_WATER: the sheen's sky keeps the enhanced look's sky level without its colour filter. */
+const SKY_IN_WATER_LUMA = 0.2126 * 0.3 + 0.7152 * 0.62 + 0.0722 * 0.78;
 /** Ground direction towards the fixed camera, and how far behind a point its mirrored local light is sampled. */
 const TOWARDS_CAMERA = vec2(Math.SQRT1_2, Math.SQRT1_2);
 const LIGHT_MIRROR_REACH = 0.9;
@@ -392,6 +394,158 @@ function swellSlope(p: ShaderNode, wind: ShaderNode): ShaderNode {
   return vec2(sx, sz);
 }
 
+/** Peak of cos(x) * exp(sharp * (sin(x) - 1)), so WATER_SHEEN train slopes are peak slopes. */
+function sharpCrestPeak(sharp: number): number {
+  let peak = 0;
+  for (let i = 0; i <= 2000; i++) {
+    const x = (i / 2000) * Math.PI;
+    peak = Math.max(peak, Math.abs(Math.cos(x) * Math.exp(sharp * (Math.sin(x) - 1))));
+  }
+  return peak;
+}
+
+/**
+ * Slope of the short-crested wind waves of the reflective sheen (WATER_SHEEN): directional trains around the camera
+ * axis with sharpened crests, bent by a slow domain warp and broken into short crests by per-train noise envelopes.
+ */
+function sheenTrains(p: ShaderNode, wind: ShaderNode, gust: ShaderNode): { slope: ShaderNode; crest: ShaderNode } {
+  const S = WATER_SHEEN;
+  const tex = waterTextures();
+  const warpSample: ShaderNode = texture(tex.noise, p.div(S.warpScale).add(vec2(time.mul(0.004), time.mul(-0.003))));
+  const curlSample: ShaderNode = texture(tex.noise, p.div(S.curlScale).add(vec2(time.mul(-0.01), time.mul(0.007))));
+  const q: ShaderNode = p
+    .add(vec2(warpSample.g.sub(0.5), warpSample.r.sub(0.5)).mul(S.warp * 2))
+    .add(vec2(curlSample.g.sub(0.5), curlSample.r.sub(0.5)).mul(S.curl * 2));
+  const envelope: ShaderNode = texture(tex.noise, p.div(S.envelopeScale).add(vec2(time.mul(-0.006), time.mul(0.008))));
+  const channels: ShaderNode[] = [envelope.g, envelope.b, envelope.r, envelope.g.oneMinus(), envelope.b.oneMinus()];
+  const strength: ShaderNode = float(0.55)
+    .add(wind.mul(1.3))
+    .mul(mix(float(0.75), float(1.3), gust));
+  const norm = 1 / sharpCrestPeak(S.sharp);
+  const base = Math.PI / 4;
+  let sx: ShaderNode = float(0);
+  let sz: ShaderNode = float(0);
+  let crest: ShaderNode = float(0);
+  S.trains.forEach(([offset, wavelength, slope, speed], i) => {
+    // Waves run towards the camera (+x+z) give crests across the screen.
+    const dx = Math.cos(base + offset);
+    const dz = Math.sin(base + offset);
+    const k = (Math.PI * 2) / wavelength;
+    const phase: ShaderNode = q.x
+      .mul(dx)
+      .add(q.y.mul(dz))
+      .sub(time.mul(speed))
+      .mul(k)
+      .add(i * 1.7);
+    const env: ShaderNode = mix(float(S.envelopeLow), float(S.envelopeHigh), smoothstep(0.3, 0.8, channels[i]!));
+    const s: ShaderNode = cos(phase)
+      .mul(exp(sin(phase).sub(1).mul(S.sharp)))
+      .mul(slope * norm)
+      .mul(env);
+    sx = sx.add(s.mul(dx));
+    sz = sz.add(s.mul(dz));
+    // Crest line of this train (the sun-lit ridge), weighted by its share of the sea.
+    crest = crest.add(
+      exp(sin(phase).sub(1).mul(S.crestSharp))
+        .mul(env)
+        .mul(slope / S.trains[0]![2]),
+    );
+  });
+  return { slope: vec2(sx, sz).mul(strength), crest: crest.mul(strength) };
+}
+
+/**
+ * Crest net of the reflective sheen (WATER_SHEEN.web): the thin, connected wavy lines in which the approved target's
+ * open water mirrors the low sky (wave backs tilted away from the camera). Two drifting copies of the Voronoi caustic
+ * web, stretched across the view like the target's net (cells about 2.4 times wider than tall on screen), bent by the
+ * sheen waves and averaged; the power keeps only the lines, brightest where both copies agree. 0..1.
+ */
+function sheenWeb(p: ShaderNode, bend: ShaderNode): ShaderNode {
+  const W = WATER_SHEEN.web;
+  const tex = waterTextures();
+  // Screen-aligned ground axes: x - z runs across the screen (30 engine px per unit), x + z down it (15 px per unit).
+  const screen: ShaderNode = vec2(p.x.sub(p.y), p.x.add(p.y)).add(bend.mul(W.bend));
+  const a: ShaderNode = texture(
+    tex.caustics,
+    screen.div(vec2(W.tileAcross, W.tileDown)).add(vec2(time.mul(W.driftA[0]), time.mul(W.driftA[1]))),
+  ).r;
+  const b: ShaderNode = texture(
+    tex.caustics,
+    screen
+      .div(vec2(W.tileAcross * W.second, W.tileDown * W.second))
+      .add(vec2(time.mul(W.driftB[0]), time.mul(W.driftB[1]))),
+  ).r;
+  return pow(a.mul(W.mixA).add(b.mul(1 - W.mixA)), W.power);
+}
+
+/** The reflective sheen of open water (see WATER_SHEEN), shared by the painted-bed and the enhanced looks. */
+interface WaterSheen {
+  /** Reflectance of the sky (Fresnel of the sheen normal plus the crest net), already weighted by `open`. */
+  strength: ShaderNode;
+  /** Sky colour as the sheen facets mirror it (cyan low sky to tinted zenith), at the scene's sky level. */
+  sky: ShaderNode;
+  /** Reflected direction of the sheen facets, and their plain Schlick Fresnel term. */
+  reflected: ShaderNode;
+  fresnel: ShaderNode;
+  /** Flat-water mirror direction of the virtual eye (the glitter path's centre line). */
+  mirrorDir: ShaderNode;
+  /** Crest lines of the sheen's wind waves (sun-lit ridges). */
+  crest: ShaderNode;
+}
+
+function waterSheen(
+  p: ShaderNode,
+  slope: ShaderNode,
+  gust: ShaderNode,
+  uniforms: WaterUniforms,
+  skyLevel: ShaderNode,
+  open: ShaderNode,
+): WaterSheen {
+  const S = WATER_SHEEN;
+  const xz: ShaderNode = p.xz;
+  const trains = sheenTrains(xz, uniforms.wind, gust);
+  const sheenSlope: ShaderNode = trains.slope.add(slope.mul(S.rippleWeight));
+  const n: ShaderNode = normalize(vec3(sheenSlope.x.negate(), 1, sheenSlope.y.negate()));
+  // View vector of a virtual perspective eye on the camera axis (WATER_SHEEN.halfFov over the visible half width):
+  // farther water (screen top) is seen at a more grazing angle, and the sun's glitter gathers on the side of the
+  // screen facing the sun, as it does for any real observer. Only the water's shading uses it; the scene stays
+  // orthographic.
+  const axis = vec3(Math.cos(S.elevation) * Math.SQRT1_2, Math.sin(S.elevation), Math.cos(S.elevation) * Math.SQRT1_2);
+  const centre: ShaderNode = cameraPosition.sub(axis.mul(cameraPosition.y.sub(p.y).div(Math.sin(S.elevation))));
+  const halfWidth: ShaderNode = float(1).div(max((cameraProjectionMatrix as ShaderNode).element(0).x.abs(), 1e-4));
+  const eye: ShaderNode = centre.add(axis.mul(halfWidth.div(Math.tan(S.halfFov))));
+  const v: ShaderNode = normalize(eye.sub(p));
+  const fresnel: ShaderNode = float(S.f0).add(float(1 - S.f0).mul(pow(float(1).sub(max(dot(n, v), 0)), 5)));
+  const reflected: ShaderNode = reflect(v.negate(), n);
+  const tint = S.horizonTint;
+  const tintLuma = 0.2126 * tint[0] + 0.7152 * tint[1] + 0.0722 * tint[2];
+  const horizonLuma: ShaderNode = dot(uniforms.skyHorizon, vec3(0.2126, 0.7152, 0.0722));
+  const horizon: ShaderNode = mix(
+    uniforms.skyHorizon,
+    vec3(tint[0] / tintLuma, tint[1] / tintLuma, tint[2] / tintLuma).mul(horizonLuma),
+    S.horizonTintAmount,
+  );
+  const sky: ShaderNode = mix(
+    horizon,
+    uniforms.skyZenith.mul(vec3(...S.zenithTint)),
+    smoothstep(S.skyLow, S.skyHigh, reflected.y),
+  )
+    .mul(skyLevel)
+    .mul(float(1).sub(uniforms.rain.mul(0.4)))
+    .mul(S.gain);
+  const web: ShaderNode = S.web.fromTrains
+    ? smoothstep(S.web.crestLow, S.web.crestHigh, trains.crest)
+    : sheenWeb(xz, trains.slope);
+  return {
+    strength: fresnel.add(web.mul(S.web.fresnel)).min(1).mul(open),
+    sky,
+    reflected,
+    fresnel,
+    mirrorDir: vec3(v.x.negate(), v.y, v.z.negate()),
+    crest: trains.crest,
+  };
+}
+
 /** Slope of rain rings: sparse cells, each an expanding ring with a random phase (seeds from the hash texture). */
 function rainSlope(p: ShaderNode, rain: ShaderNode): ShaderNode {
   const tex = waterTextures();
@@ -479,7 +633,17 @@ function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_N
   const reflected = inputs.reflection
     ? moonlit(inputs.reflection.colour, nodes).mul(mix(float(1), float(0.8), night))
     : null;
-  const mirrored: ShaderNode = reflected && inputs.reflection ? mix(sky, reflected, inputs.reflection.coverage) : sky;
+  // L5 reflective sheen (WATER_SHEEN) on water without a painted detail layer too (every other map and theatre):
+  // offshore the sky is mirrored by the sheen's short-crested waves and crest net; near the bank the ripple Fresnel
+  // above stays, so beaches and the painted shallows keep their calibrated look.
+  const E = WATER_SHEEN.enhanced;
+  const open: ShaderNode = smoothstep(E.openNear, E.openFar, depth);
+  const sh = waterSheen(p, slope, gust, uniforms, skyLevel.mul(SKY_IN_WATER).div(SKY_IN_WATER_LUMA), float(1));
+  const reflectance: ShaderNode = mix(strength, sh.strength.mul(E.gain), open);
+  const skyMirror: ShaderNode = mix(sky, sh.sky, open);
+  body = body.mul(mix(vec3(1), vec3(...E.bodyTint).mul(E.bodyScale), open));
+  const mirrored: ShaderNode =
+    reflected && inputs.reflection ? mix(skyMirror, reflected, inputs.reflection.coverage) : skyMirror;
   // Sun glitter: the sun mirrored in ripple facets, a tight lobe (small bright sparkles, bloomed) over a faint wider one;
   // gathered in gusts, none in rain or right at the bank.
   const sunDot: ShaderNode = max(dot(r, uniforms.sunDirection), 0);
@@ -541,9 +705,9 @@ function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_N
   // body in white.
   const foamColour: ShaderNode = color(0xeef3f2).mul(mix(float(1), float(0.5), night));
   body = mix(body, bed.mul(0.55), exposed);
-  body = mix(body.mul(float(1).sub(strength)), foamColour, foam);
+  body = mix(body.mul(float(1).sub(reflectance)), foamColour, foam);
   const emission: ShaderNode = mirrored
-    .mul(strength)
+    .mul(reflectance)
     .add(glint)
     .add(lights)
     .mul(float(1).sub(foam))
@@ -647,14 +811,14 @@ export function rippledReflection(
 }
 
 /** Beach profile: shelf width (cells), initial optical-depth slope, then quadratic deepening beyond the shelf. */
-export const BEACH_PROFILE = { shelf: 0.35, slope: 2.5, drop: 20 } as const;
+export const BEACH_PROFILE = { shelf: 0.45, slope: 2.0, drop: 40 } as const;
 /** Beer-Lambert absorption per unit optical depth (RGB): red disappears first; the bed is lost by 0.8-1 cells. */
 export const BED_ABSORPTION = [4.2, 1.45, 1.0] as const;
 /** In-scattered colour of the water over the shelf (turquoise, about one cell wide as in the approved target), faded
  * towards the enhanced MID/DEEP offshore. */
 const BED_SCATTER = { colour: 0x1f9e93, near: 0.1, far: 0.95, amount: 0.85 } as const;
 /** Lit turquoise shelf on maps with a painted surface tile (cells from the bank; see bedWaterLook). */
-const BED_SHALLOW_GLOW = { colour: 0x4f9488, near: 0.2, far: 0.85, amount: 0.4 } as const;
+const BED_SHALLOW_GLOW = { colour: 0x2aa884, near: 0.25, far: 1.8, amount: 0.27 } as const;
 /** Optional per-map water detail, used only by the painted-bed look. */
 export const WATER_DETAIL = {
   /** Gain from linear detail colour to the in-scattered column colour. */
@@ -662,9 +826,9 @@ export const WATER_DETAIL = {
   /** 0 keeps the constant DEEP/MID/scatter column; 1 uses the detail colour. */
   columnAmount: 1.0,
   /** Share of the constant turquoise scatter retained over the first shallowReach cells. */
-  shallowKeep: 0.35,
+  shallowKeep: 0.8,
   /** Shore distance in cells over which shallowKeep fades out. */
-  shallowReach: 0.25,
+  shallowReach: 0.75,
   /** Strength of alpha modulation of ripple roughness and glitter; A = 0.5 is neutral. */
   roughAmount: 1.0,
 } as const;
@@ -716,15 +880,15 @@ export const WATER_SURFACE_TILE = {
   warp: 0.15,
   /** Exponent on the painted relief ratio (1 = as painted) and its weight offshore. */
   relief: 1.0,
-  reliefAmount: 0.9,
+  reliefAmount: 0.45,
   /** Glint gain (x sun colour) and the glitter-path lift towards the sun's mirror direction. */
-  glintGain: 2.4,
+  glintGain: 1.6,
   glintPath: 3.0,
   glintPathPower: 4,
-  glintFloor: 0.2,
+  glintFloor: 0.06,
   /** Glint copy magnification: across (screen x) and down (screen y). */
-  glintStretchX: 2.8,
-  glintStretchY: 1.35,
+  glintStretchX: 4.4,
+  glintStretchY: 2.3,
   /** Glint cores: the cross-faded glint value is sharpened between these levels (crisp specks, not soft discs). */
   glintLow: 0.12,
   glintHigh: 0.55,
@@ -738,6 +902,118 @@ export const WATER_SURFACE_TILE = {
   laceScale: 0.55,
   laceDriftX: 0.004,
   laceDriftY: 0.007,
+} as const;
+/**
+ * Reflective sheen of water with a detail layer (L5, owner feedback 2026-10-01: the approved river target's water is
+ * glossy, ours read matte with confetti-like specks). Real water at the RTS pitch (30 degrees) is mostly a mirror of the
+ * sky: a facet tilted away from the camera reflects the bright, cyan low sky at a grazing angle (Fresnel ~0.1-0.3),
+ * a facet tilted towards it reflects the darker zenith at ~0.02. Short-crested wind waves whose crests run across the
+ * view therefore show as thin bright sky lines over darker blue troughs, as in the target. The sheen uses its own
+ * steeper wave normal (trains below plus a share of the ripple/swell slope); the water column is dimmed by the
+ * reflected share so the mean colour stays on the calibrated profile.
+ */
+export const WATER_SHEEN = {
+  /** Wind waves: angle from the camera axis on the ground (rad), wavelength (cells), peak slope, phase speed (cells/s). */
+  trains: [
+    [0.12, 0.54, 0.08, 0.22],
+    [-0.22, 0.43, 0.07, 0.19],
+    [0.5, 0.35, 0.045, 0.17],
+    [-0.55, 0.65, 0.04, 0.24],
+    [0.0, 0.29, 0.035, 0.15],
+  ] as readonly (readonly [number, number, number, number])[],
+  /** Crest sharpness: slope ~ cos(phase) * exp(sharp * (sin(phase) - 1)), narrow crests over broad troughs. */
+  sharp: 1.0,
+  /** Sharpness of the crest lines that catch the sun inside the glitter path. */
+  crestSharp: 9,
+  /** Sun-lit crest dashes in the glitter path: crest threshold, breakup threshold and noise scale (cells), gain. */
+  crestLow: 0.35,
+  crestHigh: 0.9,
+  dashLow: 0.5,
+  dashHigh: 0.68,
+  dashScale: 2.2,
+  dashGain: 0.25,
+  /** Crest dashes near the beaches (x dashGain): the target's golden crescents on the wavelets of the glitter zone. */
+  dashBoost: 4,
+  /** Domain warp (cells) bending the crests, and its noise scale (cells per noise tile). */
+  warp: 0.1,
+  warpScale: 12,
+  /** Fine domain warp (cells) and its noise scale: curls the crests into the target's wavy net. */
+  curl: 0.08,
+  curlScale: 2.6,
+  /** Per-train amplitude envelope (short crests): noise scale (cells per tile) and range. */
+  envelopeScale: 5.5,
+  envelopeLow: 0.35,
+  envelopeHigh: 1.3,
+  /** Share of the ripple/swell slope in the sheen normal. */
+  rippleWeight: 0.6,
+  /** Fixed view elevation (rad) and a slight perspective spread from screen bottom to top (rad). */
+  elevation: Math.PI / 6,
+  halfFov: (18 * Math.PI) / 180,
+  /** Glitter path: lobe around the flat-water mirror direction of the sun, (dot * 0.5 + 0.5) ^ power * gain + floor. */
+  pathPower: 6,
+  pathGain: 14,
+  pathFloor: 0.03,
+  /** Schlick F0 of water, the reflected sky's gain, and the share of the column the sheen replaces. */
+  f0: 0.02,
+  gain: 0.8,
+  /** Low sky as water mirrors it: the scene's horizon pulled towards a clear cyan of the same luminance. */
+  horizonTint: [0.25, 0.66, 1.0] as readonly [number, number, number],
+  /** Zenith as water mirrors it (multiplier on the scene's zenith): a little greener, like the target's teal-blue. */
+  zenithTint: [0.55, 1.0, 1.0] as readonly [number, number, number],
+  horizonTintAmount: 0.85,
+  /** Reflected elevation (sin) over which the sky goes from horizon to zenith colour. */
+  skyLow: -0.05,
+  skyHigh: 0.7,
+  /** Column dimming offshore so the mean apparent colour keeps the calibrated profile. */
+  bodyScale: 1.2,
+  /** Offshore body tint (linear multiplier): the target's open water is a clear blue, a little less teal than the repaint. */
+  bodyTint: [0.8, 1.04, 1.2] as readonly [number, number, number],
+  /** Broad sun specular (wave-slope roughness) and its gain. */
+  sunBroadPower: 14,
+  sunBroadGain: 0.35,
+  /**
+   * Warm sun glints thin out offshore (the target's golden specks gather within a cell or two of the beaches; open water
+   * shows the sky on its crests instead): full up to near, falling to the offshore share by far (cells from shore).
+   */
+  /**
+   * The crest net (sheenWeb): Voronoi tile size across / down the screen in units of x - z and x + z (one tile holds
+   * 8 x 8 cells: about 23 x 7 engine px each, the target's crest lines), the second copy's scale, drifts (tiles/s), the first
+   * copy's weight, line power, bend by the sheen slope (units per slope), and the Fresnel share the lines add (they
+   * are wave backs mirroring the low sky).
+   */
+  web: {
+    tileAcross: 6.2,
+    tileDown: 3.8,
+    second: 1.37,
+    driftA: [0.011, -0.017] as readonly [number, number],
+    driftB: [-0.008, -0.012] as readonly [number, number],
+    mixA: 0.55,
+    power: 5,
+    bend: 0.6,
+    fresnel: 0.13,
+    /** Use the sheen trains' own crest lines (wavy, mostly across the view) instead of the Voronoi web. */
+    fromTrains: true,
+    crestLow: 0.3,
+    crestHigh: 1.7,
+  },
+  /**
+   * The sheen on water without a detail layer (enhancedWaterLook): offshore weight from the bank (cells), a gain on the
+   * sheen's reflectance, and the body tint/scale that keeps the mean colour of that look.
+   */
+  enhanced: {
+    openNear: 0.1,
+    openFar: 0.6,
+    gain: 0.9,
+    bodyTint: [1.5, 1.0, 0.95] as readonly [number, number, number],
+    bodyScale: 1.0,
+  },
+  glintNear: 1.2,
+  glintFar: 4.2,
+  glintOffshore: 0.25,
+  /** Near-shore glitter: gain factor and widened core threshold, full within glintBoostFull cells of the bank. */
+  glintBoost: 1.8,
+  glintBoostLow: 0.05,
+  glintBoostFull: 0.6,
 } as const;
 /** Foam at cliff feet (cells; see bedWaterLook): lapping band width, backwash reach, opacities, wet contact shade. */
 const CLIFF_FOAM = {
@@ -765,14 +1041,14 @@ const BED_REFRACTION_MAX = 0.06;
 const BED_REFRACTION_FADE = 0.04;
 /** Bed illumination: unit ambient preserves the shore colour; caustics fade in, then out across the shallow shelf. */
 const BED_AMBIENT = 1;
-const BED_CAUSTICS = { gain: 0.65, start: 0.04, peak: 0.18, end: 0.55 } as const;
+const BED_CAUSTICS = { gain: 0.65, start: 0.04, peak: 0.22, end: 0.55 } as const;
 /** Fully wet through maximum run-up, drying towards a noisy edge 0.25-0.35 cells inland. */
 const BEACH_WET = {
   reach: 0.22,
   jitter: 0.08,
   full: 0.03,
-  brightness: 0.8,
-  saturation: 1.1,
+  brightness: 0.88,
+  saturation: 1.05,
   roughness: 0.32,
   sheen: 0.018,
 } as const;
@@ -792,22 +1068,33 @@ const BED_SWASH = {
 /** Foam widths/reach in cells, opacity caps and noise thresholds; no line is tied to the static mask edge. */
 const BED_FOAM = {
   frontWidth: 0.03,
-  frontOpacity: 0.8,
+  frontOpacity: 0.7,
   waterOpacity: 0.5,
-  laceLow: 0.34,
-  laceHigh: 0.56,
+  laceLow: 0.22,
+  laceHigh: 0.45,
   bubbleLow: 0.5,
   bubbleHigh: 0.7,
   breakerFar: 0.45,
   breakerWidth: 0.03,
   /** With a painted lace tile: thin wavy breaker lines (width, opacity), their wobble (cells) and its noise scale. */
-  wavyBreakerWidth: 0.028,
-  wavyBreakerOpacity: 0.95,
+  wavyBreakerWidth: 0.04,
+  wavyBreakerOpacity: 0.75,
   wobble: 0.12,
   wobbleScale: 0.8,
-  wavyLaceOpacity: 0.45,
+  wavyLaceOpacity: 0.3,
+  /** Breaker visibility over its roll with a painted lace tile (fade in after / fade out from these roll fractions). */
+  surfFadeIn: 0.12,
+  surfFadeOut: 0.8,
+  /** Swirled lace threads: fbm tiles per cell, drift factor, iso-line half width, patch thresholds, reach, opacity. */
+  swirlScale: 0.3,
+  swirlDrift: 1.2,
+  swirlWidth: 0.04,
+  swirlPatchLow: 0.38,
+  swirlPatchHigh: 0.6,
+  swirlReach: 0.75,
+  swirlOpacity: 0.15,
   /** Surf-zone lace and second breaker opacity (the approved target shows a wide, lacy surf band on beaches). */
-  laceOpacity: 0.7,
+  laceOpacity: 0.45,
 } as const;
 /** Shore distance over which reflections replace the faint wet-sand sheen; glitter starts farther offshore. */
 const BED_REFLECTION_REACH = { start: 0.05, full: 0.4 } as const;
@@ -1057,6 +1344,29 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
     .mul(open);
   body = body.mul(float(1).sub(strength));
 
+  // Reflective sheen (WATER_SHEEN): the sky mirrored by short-crested waves with a full Fresnel term.
+  let sheen: { strength: ShaderNode; sky: ShaderNode; r: ShaderNode } | null = null;
+  // Flat-water mirror direction of the sheen's virtual eye (the glitter path's centre line).
+  let mirrorDir: ShaderNode | null = null;
+  let crestLine: ShaderNode | null = null;
+  if (detail) {
+    const S = WATER_SHEEN;
+    const sh = waterSheen(p, slope, gust, uniforms, skyLevel, open);
+    crestLine = sh.crest;
+    mirrorDir = sh.mirrorDir;
+    body = body.mul(float(1).sub(sh.strength)).mul(mix(vec3(1), vec3(...S.bodyTint).mul(S.bodyScale), open));
+    sheen = { strength: sh.strength, sky: sh.sky, r: sh.reflected };
+    // Broad sun specular on the same facets (only where the sun stands opposite the camera).
+    glitter = glitter.add(
+      pow(max(dot(sh.reflected, uniforms.sunDirection), 0), S.sunBroadPower)
+        .mul(S.sunBroadGain)
+        .mul(sh.fresnel.mul(4).min(1))
+        .mul(float(1).sub(uniforms.rain))
+        .mul(float(1).sub(night.mul(0.75)))
+        .mul(open),
+    );
+  }
+
   const drift: ShaderNode = vec2(time.mul(BEACH_NOISE.driftX), time.mul(BEACH_NOISE.driftZ));
   const lace: ShaderNode = texture(tex.noise, xz.mul(BEACH_NOISE.laceScale).add(drift)).g;
   const fine: ShaderNode = texture(tex.noise, xz.mul(BEACH_NOISE.laceScale).sub(drift)).b;
@@ -1086,22 +1396,35 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
   const wavyShore: ShaderNode = laceTile ? shore.add(wobble) : shore;
   const breakerWidth: number = laceTile ? BED_FOAM.wavyBreakerWidth : BED_FOAM.breakerWidth;
   const breakerLace: ShaderNode = laceTile ? smoothstep(0.12, 0.3, laceTile) : gaps;
+  // L5 surf (painted lace tile): three breakers a third of a cycle apart, each visible over most of its roll, so a still
+  // shows 2-3 crisp parallel lines in the surf band (owner feedback on the L4 composite).
+  const fadeIn: number = laceTile ? BED_FOAM.surfFadeIn : 0.2;
+  const fadeOut: number = laceTile ? BED_FOAM.surfFadeOut : 0.7;
   const breaker: ShaderNode = smoothstep(breakerWidth, 0, abs(wavyShore.sub(breakerAt)))
-    .mul(smoothstep(0, 0.2, roll))
-    .mul(smoothstep(1, 0.7, roll))
+    .mul(smoothstep(0, fadeIn, roll))
+    .mul(smoothstep(1, fadeOut, roll))
     .mul(breakerLace)
     .mul(laceTile ? BED_FOAM.wavyBreakerOpacity : BED_FOAM.waterOpacity);
   // A second breaker half a cycle behind the first, so the surf band always holds two rolling lines.
-  const roll2: ShaderNode = fract(roll.add(0.5));
-  const breaker2: ShaderNode = smoothstep(
-    breakerWidth,
-    0,
-    abs(wavyShore.sub(mix(float(BED_FOAM.breakerFar), 0, roll2))),
-  )
-    .mul(smoothstep(0, 0.2, roll2))
-    .mul(smoothstep(1, 0.7, roll2))
+  const roll2: ShaderNode = fract(roll.add(laceTile ? 1 / 3 : 0.5));
+  let breaker2: ShaderNode = smoothstep(breakerWidth, 0, abs(wavyShore.sub(mix(float(BED_FOAM.breakerFar), 0, roll2))))
+    .mul(smoothstep(0, fadeIn, roll2))
+    .mul(smoothstep(1, fadeOut, roll2))
     .mul(laceTile ? smoothstep(0.18, 0.4, laceTile) : smoothstep(0.3, 0.5, lace))
     .mul(laceTile ? BED_FOAM.wavyBreakerOpacity : BED_FOAM.laceOpacity);
+  if (laceTile) {
+    const roll3: ShaderNode = fract(roll.add(2 / 3));
+    const breaker3: ShaderNode = smoothstep(
+      breakerWidth,
+      0,
+      abs(wavyShore.add(float(wobble).mul(-0.6)).sub(mix(float(BED_FOAM.breakerFar), 0, roll3))),
+    )
+      .mul(smoothstep(0, fadeIn, roll3))
+      .mul(smoothstep(1, fadeOut, roll3))
+      .mul(smoothstep(0.15, 0.36, laceTile))
+      .mul(BED_FOAM.wavyBreakerOpacity);
+    breaker2 = breaker2.max(breaker3);
+  }
   // Surf lace: sparse fine lace thinning out offshore (its threshold rises with the distance).
   const surfLace: ShaderNode = (
     laceTile
@@ -1114,12 +1437,27 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
   )
     .mul(smoothstep(0, BED_SWASH.retreat, shore))
     .mul(smoothstep(BED_FOAM.breakerFar, 0.1, shore));
+  // Swirled surf lace (L5, painted lace tile): the target's shallows carry curly white foam threads between the
+  // breakers. Iso-lines of a drifting medium fbm give such threads (curls, C and S shapes); a broad noise breaks them
+  // into patches and they thin out towards the edge of the surf band.
+  let swirl: ShaderNode | number = 0;
+  if (laceTile) {
+    const F = BED_FOAM;
+    const field: ShaderNode = texture(tex.noise, xz.mul(F.swirlScale).add(drift.mul(F.swirlDrift))).g;
+    const patches: ShaderNode = texture(tex.noise, xz.mul(F.swirlScale * 0.37).sub(drift)).r;
+    swirl = smoothstep(F.swirlWidth, F.swirlWidth * 0.3, abs(field.sub(0.5)))
+      .mul(smoothstep(F.swirlPatchLow, F.swirlPatchHigh, patches))
+      .mul(smoothstep(0.02, 0.08, shore))
+      .mul(smoothstep(F.swirlReach, F.swirlReach * 0.3, shore))
+      .mul(F.swirlOpacity);
+  }
   let foam: ShaderNode = line
     .mul(laceTile ? mix(float(0.75), float(1), smoothstep(0.15, 0.45, laceTile)) : 1)
     .max(drainage)
     .max(breaker)
     .max(breaker2)
     .max(surfLace)
+    .max(swirl)
     .mul(surf);
   if (inputs.cliff) {
     // Cliff foot: the swell laps against the wall in a broken foam band whose width breathes, a fainter backwash line
@@ -1148,17 +1486,51 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
   if (tile) {
     // Painted crest glints, brighter along the sun's glitter path and in gust patches; no grid glints or whitecaps.
     const T = WATER_SURFACE_TILE;
-    const path: ShaderNode = pow(max(dot(r, uniforms.sunDirection), 0), T.glintPathPower)
-      .mul(T.glintPath)
-      .add(T.glintFloor);
+    const path: ShaderNode = mirrorDir
+      ? pow(dot(mirrorDir, uniforms.sunDirection).mul(0.5).add(0.5), WATER_SHEEN.pathPower)
+          .mul(WATER_SHEEN.pathGain)
+          .add(WATER_SHEEN.pathFloor)
+      : pow(max(dot(r, uniforms.sunDirection), 0), T.glintPathPower)
+          .mul(T.glintPath)
+          .add(T.glintFloor);
+    // Near the beaches the glitter is denser and its specks larger (the target's golden crescents): a lower core
+    // threshold widens each painted glint and the gain rises, fading to the offshore values by glintFar.
+    const nearShore: ShaderNode | number = crestLine
+      ? smoothstep(WATER_SHEEN.glintFar, WATER_SHEEN.glintBoostFull, shore)
+      : 0;
+    let glints: ShaderNode = smoothstep(
+      mix(float(T.glintLow), float(WATER_SHEEN.glintBoostLow), nearShore),
+      T.glintHigh,
+      tile.glint,
+    )
+      .mul(tile.glint.mul(0.6).add(0.4))
+      .mul(mix(float(T.glintGain), float(T.glintGain * WATER_SHEEN.glintBoost), nearShore));
+    if (crestLine) {
+      // The sun catches the sheen's wave crests: painted glint points gather on them, and inside the glitter path the
+      // crests themselves light up as short dashes (the target's crescents and strokes rather than round specks).
+      const S = WATER_SHEEN;
+      const onCrest: ShaderNode = smoothstep(S.crestLow, S.crestHigh, crestLine);
+      const dashUv: ShaderNode = vec2(xz.x.sub(xz.y).mul(0.35), xz.x.add(xz.y)).div(S.dashScale);
+      const dash: ShaderNode = smoothstep(S.dashLow, S.dashHigh, texture(tex.noise, dashUv).b);
+      glints = glints
+        .mul(mix(float(0.3), float(1.2), onCrest))
+        .add(onCrest.mul(dash).mul(mix(float(S.dashGain), float(S.dashGain * S.dashBoost), nearShore)));
+    }
     sparkle = uniforms.sunColor.mul(vec3(...T.glintTint)).mul(
-      smoothstep(T.glintLow, T.glintHigh, tile.glint)
-        .mul(tile.glint.mul(0.6).add(0.4))
-        .mul(T.glintGain)
+      glints
         .mul(path)
         // Clustered like the target's glitter: dense in gust patches and the repaint's rough areas, sparse elsewhere.
         .mul(mix(float(T.glintCalm), float(T.glintGust), gust))
         .mul(pow(max(rough, 0), T.glintRoughPower))
+        .mul(
+          crestLine
+            ? mix(
+                float(1),
+                float(WATER_SHEEN.glintOffshore),
+                smoothstep(WATER_SHEEN.glintNear, WATER_SHEEN.glintFar, shore),
+              )
+            : 1,
+        )
         .mul(open)
         .mul(float(1).sub(uniforms.rain))
         .mul(float(1).sub(night.mul(0.8))),
@@ -1215,11 +1587,13 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
   const reflectedLight: ShaderNode =
     detail && reflected && inputs.reflection
       ? mix(
-          waterSky.mul(strength),
-          reflected.mul(max(strength, open.mul(OBJECT_REFLECT))),
+          sheen ? sheen.sky.mul(sheen.strength) : waterSky.mul(strength),
+          reflected.mul(max(sheen ? max(strength, sheen.strength) : strength, open.mul(OBJECT_REFLECT))),
           inputs.reflection.coverage.mul(OBJECT_COVERAGE),
         )
-      : mirrored.mul(strength);
+      : sheen
+        ? sheen.sky.mul(sheen.strength)
+        : mirrored.mul(strength);
   const emission: ShaderNode = reflectedLight
     .add(uniforms.sunColor.mul(glitter))
     .add(sparkle)
