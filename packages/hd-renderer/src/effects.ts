@@ -1731,14 +1731,18 @@ export class EffectsLayer {
    * The energy beams the engine draws this logic frame (lasers, electric and psychic bolts), replacing the previous
    * set; an empty list clears them. They stay until the next call, so the caller sets them once per logic frame and
    * their geometry persists while the game is paused, like the engine's own redrawn beams. Each beam also flashes a
-   * short light at its target. Enhanced bolts flicker with the presentation clock and add a blue-white impact pulse.
+   * short light at its target unless its flash flag is false. `flash` false updates only geometry, keeping an appended
+   * decorative layer from retriggering native impacts. Enhanced bolts flicker with the presentation clock and add a
+   * blue-white impact pulse.
    */
-  setBeams(now: number, beams: readonly BeamSpec[]): void {
+  setBeams(now: number, beams: readonly BeamSpec[], flash = true): void {
     this.beams.setBeams(beams, this.enhancedBeams);
+    if (!flash) return;
     const light = GARNISH_LIGHTS.beam;
+    const flashing = beams.some((beam) => beam.flash === false) ? beams.filter((beam) => beam.flash !== false) : beams;
     // Only the last 256 pulses survive the light field's flash ring. Avoid processing discarded pulses.
-    for (let i = Math.max(0, beams.length - BEAM_LIGHTS); i < beams.length; i++) {
-      const beam = beams[i]!;
+    for (let i = Math.max(0, flashing.length - BEAM_LIGHTS); i < flashing.length; i++) {
+      const beam = flashing[i]!;
       const { x, y, z } = beam.colour;
       const max = Math.max(x, y, z, 1e-3);
       this.lightField?.pulse(
@@ -1758,7 +1762,7 @@ export class EffectsLayer {
       let emitted = 0;
       for (let i = beams.length - 1; i >= 0 && emitted < HALOS; i--) {
         const beam = beams[i]!;
-        if (!beam.bolt) continue;
+        if (!beam.bolt || beam.flash === false) continue;
         emitted++;
         this.halo.spawn(now, beam.to, this.zeroVelocity, impact.width, impact.life, HALO_ELECTRIC);
         for (let j = 0; j < impact.sparks; j++) {
@@ -1816,6 +1820,8 @@ export interface BeamSpec {
   bolt: boolean;
   /** Shape seed: the same seed gives the same jagged shape. */
   seed: number;
+  /** False for decorative beams whose owning source already provides the light; also skips impact garnish. */
+  flash?: boolean;
 }
 
 /** Bolt segment length and sideways/vertical jitter (world units = cells). */

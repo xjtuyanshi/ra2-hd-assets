@@ -252,7 +252,7 @@ single-sampled, so layers should copy at most once per frame and only while they
 
 ## Enhanced look (opt-in, `src/ra2/spriteLook.ts`)
 
-Modern light on the original art, off by default: with every setting below at 0 the frame is the faithful one bit for
+Modern light on the original art, off by default: with effect strengths at 0 and lighting depth gains at 1 the frame is the faithful one bit for
 bit (the sprite shader skips the whole branch; checked by render hash on XMP29U2). `LOOK_PRESETS` / `applyLookPreset`
 name `faithful`, `golden` and `cinematic` (golden afternoon: every effect on, the sun arc, exposure adaptation, hour
 16.5). Sandbox: `?look=golden`, single overrides `?relight= ?contrast= ?spec= ?glass= ?ao= ?shfollow= ?shsoft= ?wetrefl=
@@ -270,17 +270,52 @@ surfaces, blue/teal) against the three approved target framings (XMP29U2 city pa
 greys land within about 1-3 b* units of the targets (golden: 7-9 units warmer); the remaining gap in local contrast is
 in the art and lighting, not in the grade.
 
-| Setting                                         | Meaning                                                                                                                                                                                                                                                              |
-| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `relight`, `lightContrast`                      | Building and tree art relit by the sun as a delta on its baked shading: each pixel scales by (irradiance of its normal under the current sun and sky, relative to flat ground) / (the same under the art's own light, `ART_LIGHT`). Exactly 1 under the art's light. |
-| `specular`                                      | GGX sun highlights on facades and roofs (and the sheen of wet surfaces).                                                                                                                                                                                             |
-| `glass`                                         | Window panes of the material atlas mirror the sky (stylised street-level mirror, tinted by the pane, a smooth tilt field over the facade) with a sun glint on the inside of full panes.                                                                              |
-| `occlusion`                                     | Baked occlusion of the material atlas (wall feet, roofs next to higher tiers) and soft ground contact decals around foundations.                                                                                                                                     |
-| `shadowFollow`, `shadowSoftness`                | SHP shadow decals turn and stretch about their object's base with the sun (voxel shadows turn with them); their penumbra grows with distance.                                                                                                                        |
-| `wetReflections`                                | Upright art mirrored about its base line on wet paving (short, rippled, strongest in puddles).                                                                                                                                                                       |
-| `sunPath`                                       | `'arc'`: `Lighting.sunArc`, east in the morning, over the camera side at noon, west in the evening (the art's azimuth at 15:00); `'fixed'`: the classic azimuth.                                                                                                     |
-| `adaptExposure`                                 | Lifts early and late daylight towards noon's flat-ground brightness (the colour of the light stays).                                                                                                                                                                 |
-| `voxelSheen`, `voxelSheenCap`, `voxelOcclusion` | Voxel highlight strength and cap and crease occlusion (`vpl.ts`); null leaves the voxel material as configured.                                                                                                                                                      |
+Lighting depth gains are plain numeric settings read every frame, with uniform updates and no shader rebuild.
+Defaults, `faithful` and `golden` use 1 for all six; only `cinematic` uses the initial gains below, pending rendered
+review. The FX sandbox (`sandbox/fx.ts`) accepts overrides after the preset, for example
+`?look=cinematic&set=sunGain:1.3,specularSize:1.8,aoPower:1.4,contactShade:1.5,shadowLength:1.4,shadowDarkness:1.15`.
+The gains remain dormant when the enhanced look is off. Neutral AO and roughness take the original value; neutral
+shadow stretch takes the original calculation, and other neutral gains multiply by exactly 1.
+
+| Setting                                         | Meaning                                                                                                                                                                                                                                                                                                                     |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `relight`, `lightContrast`                      | Building and tree art relit by the sun as a delta on its baked shading: each pixel scales by (irradiance of its normal under the current sun and sky, relative to flat ground) / (the same under the art's own light, `ART_LIGHT`). Exactly 1 under the art's light.                                                        |
+| `specular`                                      | GGX sun highlights on facades and roofs (and the sheen of wet surfaces).                                                                                                                                                                                                                                                    |
+| `glass`                                         | Window panes of the material atlas mirror the sky (stylised street-level mirror, tinted by the pane, a smooth tilt field over the facade) with a sun glint on the inside of full panes.                                                                                                                                     |
+| `occlusion`                                     | Baked occlusion of the material atlas (wall feet, roofs next to higher tiers) and soft ground contact decals around foundations.                                                                                                                                                                                            |
+| `shadowFollow`, `shadowSoftness`                | SHP shadow decals turn and stretch about their object's base with the sun (voxel shadows turn with them); their penumbra grows with distance.                                                                                                                                                                               |
+| `wetReflections`                                | Upright art mirrored about its base line on wet paving (short, rippled, strongest in puddles).                                                                                                                                                                                                                              |
+| `sourceLights`                                  | HD building emitter gain: default and `faithful` 0; `golden` / `cinematic` 1. The Tesla reactor emits blue ground/object light outside its foundation, a white-hot flickering HDR head and short decorative arcs; the Tesla coil, war factory doors and Soviet refinery furnace add smaller lights (mostly after dusk).     |
+| `sunPath`                                       | `'arc'`: `Lighting.sunArc`, east in the morning, over the camera side at noon, west in the evening (the art's azimuth at 15:00); `'fixed'`: the classic azimuth.                                                                                                                                                            |
+| `adaptExposure`                                 | Lifts early and late daylight towards noon's flat-ground brightness (the colour of the light stays).                                                                                                                                                                                                                        |
+| `voxelSheen`, `voxelSheenCap`, `voxelOcclusion` | Voxel highlight strength and cap and crease occlusion (`vpl.ts`); null leaves the voxel material as configured.                                                                                                                                                                                                             |
+| `sunGain` (neutral 1; cinematic 1.25)           | Multiplies the sprite relight sun weight without changing its sky weight; the upper factor limit becomes `2.4 * max(1, sunGain)`. Also scales VPL/PBR voxel direct light and projected-vehicle Lambert/form/relight sun terms; their ambient and reference terms stay unchanged.                                            |
+| `specularSize` (neutral 1; cinematic 1.6)       | Scales facade/metal GGX roughness (cap 0.9) and highlight intensity by its square. Glass retains a tighter lobe with square-root roughness scaling. Applies to sprite GGX/glass glints, voxel GGX (the VPL sheen cap still applies), and both projected-vehicle Blinn-Phong glints (exponents divided by the size squared). |
+| `aoPower` (neutral 1; cinematic 1.5)            | Raises baked sprite AO and voxel crease AO to this power, bypassing `pow` at 1. Includes VPL, PBR and the projected vehicle's mesh form AO; baked occlusion inside redraw textures cannot be separated.                                                                                                                     |
+| `contactShade` (neutral 1; cinematic 1.5)       | Multiplies foundation contact alpha (`0.42 * contactShade`, final alpha capped at 0.85) and the terrain's contact darkening only while the enhanced look is enabled (darkening cap 0.85). Faithful terrain keeps its original contact attribute.                                                                            |
+| `shadowLength` (neutral 1; cinematic 1.4)       | Multiplies the elevation-derived SHP/voxel stretch and its cap (`MAX_SHADOW_STRETCH * shadowLength`), only with `shadowFollow > 0`; partial follow still blends from the original transform.                                                                                                                                |
+| `shadowDarkness` (neutral 1; cinematic 1.15)    | Multiplies enhanced crisp/soft SHP and voxel shadow opacity (cap 0.9). Faithful keeps `ENGINE_SHADOW_OPACITY`; voxel shadow materials and their uniforms share one renderer context and its lifetime.                                                                                                                       |
+| `clarity` (neutral 0; cinematic 0.55)           | Mid-scale local contrast on the display image: the luminance band between Gaussian blurs of 1.25 and 5 CSS px is added back this many times (shaded side at half strength, mid-tones only). 0 leaves the pass out of the pipeline.                                                                                          |
+
+Building emitters are authored in `src/live/buildingLights.ts` (`BUILDING_LIGHTS`); more buildings need only table
+entries. Foundation fractions and engine-pixel head heights are converted to world coordinates using the live type
+library. Dead, shrouded, building/selling and unknown-foundation objects emit nothing. `LightField.source()` keeps
+sources alive while refreshed, fades in over 0.25 seconds and fades out over its TTL after refreshes stop. Its
+light-local rectangle (half-extents plus centre offset) masks the emitting foundation with a 0.25-cell outer edge.
+CPU electrical flicker drives both irradiance and glow; decorative beams skip target flashes and impact garnish.
+Switching source gain to zero clears sources and arcs immediately. These use the existing top-down light field,
+not volumetric point-light shadowing. A source's `groundOnly` share (`SourceSpec.groundOnly`, 1 for the reactor and
+the refinery furnace) is summed as luminance in the field's alpha channel (plain one/one blending, cleared to zero;
+every other light writes zero, which leaves colour and all other consumers unchanged). Upright building sprites take
+that share at their own foundation's interior (the pixel's ground projection clamped 0.35 cells inside it) instead of
+at the ground in front of the art that their pixels otherwise sample (`objectLightAt` in `src/atmosphere.ts`): the
+owner's hole keeps its facades and the orb glass unwashed, while the ground, pads, units and neighbouring buildings
+take the pool. Decorative arc colour, reach and the crawling share are `ARC_STYLE` in `buildingLights.ts`.
+
+`packages/ra2-assets/python/look_metrics.py` compares renders of one bench framing with the approved targets (L*
+percentiles, local contrast at pixel and mid scale, sun/shade separation, highlight and deep-shade shares, chroma;
+`--rings` gives the b*/L* spill profile around a light), which is how the `cinematic` grade, `clarity` and the
+reactor's light were calibrated.
 
 Per-pixel normals come from an optional material atlas next to the HD sprite atlas (`normals.json` +
 `sprites@2x-normals.png`, written by `packages/ra2-assets/python/sprite_normals.py`, loaded by `spriteMaterials.ts`);

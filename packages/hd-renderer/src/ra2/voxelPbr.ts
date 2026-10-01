@@ -40,6 +40,7 @@ import {
 import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLight, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrade } from './mapLighting';
+import { highlightRoughness, poweredOcclusion, spriteLookFor, type SpriteLookState } from './spriteLook';
 import { ra2VoxelClass, VOXEL_CLASS_ID } from './voxelClasses';
 import { VOXEL_TO_WORLD } from './voxelScale';
 import { voxelLightingFor } from './vpl';
@@ -134,11 +135,19 @@ const MAX_ALBEDO_GAIN = 6;
  * also drift towards white, which bleached the Rhino's khaki and the Allied blue). Clipping scales all channels
  * together, so a saturated colour stays saturated.
  */
-export function litAlbedo(r: number, g: number, b: number, lr: number, lg: number, lb: number): [number, number, number] {
+export function litAlbedo(
+  r: number,
+  g: number,
+  b: number,
+  lr: number,
+  lg: number,
+  lb: number,
+): [number, number, number] {
   const rgb = [toLinear(r), toLinear(g), toLinear(b)];
   const lum = (c: number[]) => 0.2126 * c[0]! + 0.7152 * c[1]! + 0.0722 * c[2]!;
   const base = lum(rgb);
-  const gain = base > 1e-4 ? Math.min(MAX_ALBEDO_GAIN, Math.max(1, lum([toLinear(lr), toLinear(lg), toLinear(lb)]) / base)) : 1;
+  const gain =
+    base > 1e-4 ? Math.min(MAX_ALBEDO_GAIN, Math.max(1, lum([toLinear(lr), toLinear(lg), toLinear(lb)]) / base)) : 1;
   const lit = rgb.map((c) => c * gain);
   const peak = Math.max(1, ...lit);
   return lit.map((c) => toSrgb(c / peak)) as [number, number, number];
@@ -218,6 +227,7 @@ class RemasterLighting extends PhysicalLightingModel {
   constructor(
     private readonly ao: ShaderNode,
     private readonly state: VoxelPbrState,
+    private readonly look: SpriteLookState,
   ) {
     super();
   }
@@ -230,8 +240,12 @@ class RemasterLighting extends PhysicalLightingModel {
     // Key/fill balance: sunGain scales the direct (sun) terms, fill the sky's diffuse, so vehicles can carry the
     // directional contrast of the painted art around them without changing the scene's lights.
     (reflected.directDiffuse as ShaderNode).mulAssign(diffuse.mul(this.state.sunGain));
+    (reflected.directDiffuse as ShaderNode).mulAssign(this.look.sunGain);
     (reflected.indirectDiffuse as ShaderNode).mulAssign(diffuse.mul(this.state.fill));
     (reflected.directSpecular as ShaderNode).mulAssign(specular.mul(this.state.sunGain));
+    (reflected.directSpecular as ShaderNode).mulAssign(
+      this.look.sunGain.mul(this.look.specularSize.mul(this.look.specularSize)),
+    );
     (reflected.indirectSpecular as ShaderNode).mulAssign(specular);
   }
 }
@@ -239,11 +253,12 @@ class RemasterLighting extends PhysicalLightingModel {
 class RemasterMaterial extends MeshStandardNodeMaterial {
   ao!: ShaderNode;
   state!: VoxelPbrState;
+  look!: SpriteLookState;
   override setupEnvironment(): EnvironmentNode | null {
     return this.envNode ? new SpecularSky(this.envNode) : null;
   }
   override setupLightingModel(): PhysicalLightingModel {
-    return new RemasterLighting(this.ao, this.state);
+    return new RemasterLighting(this.ao, this.state, this.look);
   }
 }
 
@@ -275,7 +290,11 @@ function createMaterial(
   const glass = isClass('glass');
   const pos: ShaderNode = attribute('vpos', 'vec3');
   const curvature: ShaderNode = attribute('curvature', 'float');
-  const ao: ShaderNode = float(1).sub(attribute('occlusion', 'float').mul(state.aoStrength)).clamp();
+  const look = (material.look = spriteLookFor(nodes));
+  const ao: ShaderNode = poweredOcclusion(
+    float(1).sub(attribute('occlusion', 'float').mul(state.aoStrength)).clamp(),
+    look.aoPower,
+  );
   material.ao = ao;
   const noise: ShaderNode = valueNoise(pos.div(0.7));
   const micro: ShaderNode = valueNoise(pos.mul(1.43))
@@ -342,7 +361,10 @@ function createMaterial(
   let r: ShaderNode = mix(params.r, 0.3, wear);
   r = mix(mix(r, 0.95, cavity), 0.9, grime);
   r = mix(r, 0.9, dust);
-  material.roughnessNode = mix(r, 0.12, glass).clamp(0.04, 1);
+  material.roughnessNode = highlightRoughness(
+    mix(r, 0.12, glass).clamp(0.04, 1),
+    mix(look.specularSize, look.specularSize.max(0).sqrt(), glass),
+  );
   material.metalnessNode = mix(mix(mix(params.g, 0.9, wear), 0, grime), 0, dust).clamp();
   const lit = srgbScale(albedo, objectLevelAt(grade, modelPosition.xz).add(voxelLightingFor(nodes).voxelExtraLight));
   // Standard Lambert already divides irradiance by pi. HdRenderer's noon exposure is pi/E_noon; no emissive

@@ -269,6 +269,7 @@ function presentation(withLibrary = true) {
     root: { add: vi.fn(), remove: vi.fn() },
     hd: {
       meanExposure: 2,
+      settings: { sourceLights: 0 },
       seconds: () => 1,
       frame: vi.fn(),
       windowsWanted: () => false,

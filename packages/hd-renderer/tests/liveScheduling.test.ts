@@ -34,6 +34,7 @@ function presentation(interpolating: boolean) {
   });
   const hd = {
     meanExposure: 2,
+    settings: { sourceLights: 0 },
     seconds: () => 1,
     frame: vi.fn(),
     windowsWanted: () => false,

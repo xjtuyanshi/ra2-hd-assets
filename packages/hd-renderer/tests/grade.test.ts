@@ -154,10 +154,24 @@ describe('cinematic display grade', () => {
 });
 
 describe('cinematic preset and sandbox parameters', () => {
-  it('inherits all of golden except the explicit white balance and display-grade overrides', () => {
+  it('inherits all of golden except the explicit lighting depth, white balance and display-grade overrides', () => {
     const cinematic = LOOK_PRESETS.cinematic;
     for (const [key, value] of Object.entries(LOOK_PRESETS.golden.settings)) {
-      if (key === 'whiteAdapt' || key === 'mapTintAdapt' || key in neutralGrade()) continue;
+      if (
+        [
+          'whiteAdapt',
+          'mapTintAdapt',
+          'sunGain',
+          'specularSize',
+          'aoPower',
+          'contactShade',
+          'shadowLength',
+          'shadowDarkness',
+          'clarity',
+        ].includes(key) ||
+        key in neutralGrade()
+      )
+        continue;
       expect(cinematic.settings[key as keyof HdSettings]).toEqual(value);
     }
     expect(cinematic.hour).toBe(16.5);
@@ -166,12 +180,22 @@ describe('cinematic preset and sandbox parameters', () => {
       whiteAdapt: 1,
       mapTintAdapt: 0.3,
       gradeBalance: [0.955, 1, 1.085],
-      gradeContrast: 0.21,
-      gradePivotLift: 0.02,
-      gradeSaturation: 1.06,
+      gradeContrast: 0.14,
+      gradePivotLift: 0.045,
+      gradeSaturation: 1.08,
       gradeShadowTint: [0.8, 1, 1.2],
       gradeHighlightTint: [1.15, 1, 0.85],
+      sunGain: 1.25,
+      specularSize: 1.6,
+      aoPower: 1.5,
+      contactShade: 1.5,
+      shadowLength: 1.4,
+      shadowDarkness: 1.15,
+      clarity: 0.55,
     });
+    // The faithful default and golden leave the clarity pass out entirely.
+    expect(LOOK_PRESETS.faithful.settings.clarity).toBe(0);
+    expect(LOOK_PRESETS.golden.settings.clarity).toBe(0);
   });
 
   it.each(['faithful', 'golden'] as const)('restores all neutral grade settings when switching to %s', (preset) => {
@@ -291,6 +315,18 @@ describe('cinematic pipeline lifecycle', () => {
       hd.applySettings();
       expect(internal.pipeline).toBe(graded);
       expect(internal.gradeUniforms.gradeContrast.value).toBe(0.3);
+      for (const key of [
+        'sunGain',
+        'specularSize',
+        'aoPower',
+        'contactShade',
+        'shadowLength',
+        'shadowDarkness',
+      ] as const) {
+        hd.settings[key] = 1.7;
+        hd.applySettings();
+        expect(internal.pipeline).toBe(graded);
+      }
       applyLookPreset(hd.settings, 'golden');
       hd.applySettings();
       expect(internal.pipeline).not.toBe(graded);
@@ -334,5 +370,26 @@ describe('map tint neutralisation', () => {
     expect(neutralizeMapTint(new Color(1, 2, 3), tint, 0).toArray()).toEqual([1, 2, 3]);
     const half = neutralizeMapTint(new Color(1, 1, 1), tint, 0.5);
     expect(half.b / half.r).toBeCloseTo(Math.sqrt(full.b / full.r), 6);
+  });
+});
+
+describe('HD source light presets', () => {
+  it('adds nothing by default or in faithful and enables both enhanced presets', () => {
+    const hd = headlessRenderer();
+    try {
+      expect(hd.settings.sourceLights).toBe(0);
+      expect(LOOK_PRESETS.faithful.settings.sourceLights).toBe(0);
+      for (const preset of ['golden', 'cinematic'] as const) {
+        expect(LOOK_PRESETS[preset].settings.sourceLights).toBe(1);
+        applyLookPreset(hd.settings, preset);
+        expect(hd.settings.sourceLights).toBe(1);
+      }
+      applyLookPreset(hd.settings, 'faithful');
+      expect(hd.settings.sourceLights).toBe(0);
+    } finally {
+      // No backend was initialized; release only the nodes allocated by construction.
+      hd.nodes.dispose();
+      vi.unstubAllGlobals();
+    }
   });
 });

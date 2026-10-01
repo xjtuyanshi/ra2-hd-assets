@@ -1,5 +1,6 @@
 import {
-  AdditiveBlending,
+  AddEquation,
+  CustomBlending,
   DataTexture,
   DataUtils,
   DoubleSide,
@@ -9,6 +10,7 @@ import {
   LinearFilter,
   Mesh,
   MeshBasicNodeMaterial,
+  OneFactor,
   OrthographicCamera,
   PlaneGeometry,
   RGBAFormat,
@@ -20,6 +22,7 @@ import {
 } from 'three/webgpu';
 import {
   Fn,
+  abs,
   float,
   instancedBufferAttribute,
   length,
@@ -28,6 +31,9 @@ import {
   positionGeometry,
   positionWorld,
   select,
+  smoothstep,
+  clamp,
+  dot,
   texture,
   time,
   uniform,
@@ -54,6 +60,57 @@ export interface LightEntry {
   /** Flicker amplitude (0 = steady): intensity x (1 + amp * noise(t)). */
   flicker?: number;
   seed?: number;
+}
+
+/** A persistent emitter; holeOffset locates an exclusion rectangle relative to the light centre. */
+export interface SourceSpec extends Omit<LightEntry, 'shape'> {
+  /** Peak intensity before CPU flicker and lifetime fading (default 1). */
+  peak?: number;
+  /** Seconds after the last refresh; fades during the second half (default 0.6). */
+  ttl?: number;
+  /** Axis-aligned exclusion half-extents in world units; absent or [0, 0] leaves every fragment unchanged. */
+  hole?: readonly [number, number];
+  holeOffset?: readonly [number, number];
+  head?: number;
+  glow?: readonly [number, number, number] | null;
+  glowSize?: number;
+  /** Core radius of the visible head as a fraction of its half-size (Emitter.core). */
+  glowCore?: number;
+  /** White-hot centre gain of the visible head (Emitter.hot). */
+  glowHot?: number;
+  push?: number;
+  /** Falloff of the ground pool (default SHAPE_POOL, the compact fire pool; SHAPE_LINEAR reaches further out). */
+  shape?: typeof SHAPE_LINEAR | typeof SHAPE_POOL;
+  /**
+   * Share of this light that upright building art takes only inside its own foundation (default 0; see
+   * objectLightAt). A building's own source (the reactor's orb) sets it to 1: the ground, pads, units and neighbouring
+   * buildings take its pool, while the owner's facades and orb glass, whose pixels sample the ground in front of the
+   * art, sit in its hole instead of taking the full pool.
+   */
+  groundOnly?: number;
+}
+
+interface Source extends Kept {
+  spec: SourceSpec;
+}
+
+/** Electrical levels at 10–14 Hz, joined over 25 ms; rare surges stay within the amplitude bound. */
+export function flicker(seed: number, now: number, amp = 0): number {
+  if (amp === 0) return 1;
+  const random = (step: number) => {
+    let h = Math.imul(Math.round(seed * 1e6) ^ step, 0x45d9f3b);
+    h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  };
+  const hz = 10 + 4 * random(0x1234);
+  const tick = Math.floor(now * hz);
+  const level = (i: number) => {
+    const r = random(i);
+    return r > 0.88 ? 1 : -1 + (r / 0.88) * 1.4;
+  };
+  const t = Math.max(0, Math.min(1, (now - tick / hz) / 0.025));
+  const blend = t * t * (3 - 2 * t);
+  return 1 + Math.max(0, Math.min(1, amp)) * (level(tick - 1) * (1 - blend) + level(tick) * blend);
 }
 
 interface Pulse {
@@ -87,15 +144,21 @@ export type PulsePool = keyof typeof POOLS;
 const KEPT = 256;
 /** Static lights (lamps, window glows, visible map lamps) at once; setStatic keeps the first this many. */
 const STATIC = 896;
+/** Sources cannot displace fire or pulse instances. */
+const SOURCES = 256;
 /** Dynamic instances: every pool has its own reserved share, so a burst of flashes never starves fires. */
-const DYNAMIC = POOLS.explosion + POOLS.flash + KEPT;
+const DYNAMIC = POOLS.explosion + POOLS.flash + KEPT + SOURCES;
 
-/** Per-instance attributes of one light mesh: aPos = (x, z, radius, shape), aCol = (r, g, b, flicker), aExtra.x = seed. */
+/**
+ * Per-instance attributes of one light mesh: aPos = (x, z, radius, shape), aCol = (r, g, b, flicker), aExtra = (seed,
+ * hole half-x, half-z, ground-only share), aHoleOffset = light-local hole centre.
+ */
 interface LightInstances {
   mesh: InstancedMesh;
   aPos: InstancedBufferAttribute;
   aCol: InstancedBufferAttribute;
   aExtra: InstancedBufferAttribute;
+  aHoleOffset: InstancedBufferAttribute;
   attributes: readonly InstancedBufferAttribute[];
 }
 
@@ -104,7 +167,13 @@ export interface DynamicLight {
   x: number;
   z: number;
   colour: [number, number, number];
-  kind: 'pulse' | 'fire';
+  kind: 'pulse' | 'fire' | 'source';
+  head?: number;
+  glow?: [number, number, number];
+  glowSize?: number;
+  glowCore?: number;
+  glowHot?: number;
+  push?: number;
 }
 
 /**
@@ -113,7 +182,7 @@ export interface DynamicLight {
  * atmosphere.ts. Layer 1 is a base grid (one RGB value per cell, linear-filtered: the engine's own per-cell light);
  * layer 2 is instanced round lights in two meshes: static ones (lamps, windows; written once per setStatic, scaled by
  * the night-driven static gain and hidden while it is 0) and dynamic ones (explosion and flash pulses in separate ring
- * pools, kept-alive fires; rewritten while any is alive). The texture is re-rendered only when something changed or a
+ * pools, kept-alive fires and steady sources; rewritten while any is alive). The texture is re-rendered only when something changed or a
  * dynamic light is alive.
  */
 export class LightField {
@@ -134,6 +203,7 @@ export class LightField {
   private readonly pulses: Record<PulsePool, Pulse[]> = { explosion: [], flash: [] };
   private readonly cursor: Record<PulsePool, number> = { explosion: 0, flash: 0 };
   private readonly kept = new Map<string, Kept>();
+  private readonly sources = new Map<string, Source>();
   private readonly mirrored = new WeakMap<DynamicLight[], DynamicLight[]>();
   private baseStrength = 0;
   /** Whether the base grid fades with the night (static gain) or is always on (see MapLightStaging). */
@@ -179,7 +249,7 @@ export class LightField {
     const baseMaterial = additiveMaterial();
     baseMaterial.colorNode = vec4(
       texture(this.baseTexture, vec2(positionWorld.x.div(width), positionWorld.y.div(height))).rgb.mul(this.baseGain),
-      1,
+      0,
     );
     const base = new Mesh(new PlaneGeometry(width, height), baseMaterial);
     base.position.set(width / 2, height / 2, -1);
@@ -200,26 +270,40 @@ export class LightField {
   private buildLights(capacity: number, gain: ShaderNode): LightInstances {
     const aPos = new InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
     const aCol = new InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
-    const aExtra = new InstancedBufferAttribute(new Float32Array(capacity), 1);
+    const aExtra = new InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
+    const aHoleOffset = new InstancedBufferAttribute(new Float32Array(capacity * 2), 2);
     const material = additiveMaterial();
     const p: ShaderNode = instancedBufferAttribute(aPos, 'vec4');
     const c: ShaderNode = instancedBufferAttribute(aCol, 'vec4');
-    const seed: ShaderNode = instancedBufferAttribute(aExtra, 'float');
+    const extra: ShaderNode = instancedBufferAttribute(aExtra, 'vec4');
+    const seed = extra.x;
+    const holeOffset: ShaderNode = instancedBufferAttribute(aHoleOffset, 'vec2');
     material.positionNode = vec3(p.xy.add(positionGeometry.xy.mul(p.z.mul(2))), 0);
     material.colorNode = Fn(() => {
-      const d = length(uv().sub(0.5).mul(2));
+      const local = uv().sub(0.5).mul(p.z.mul(2)).sub(holeOffset);
+      const border = max(abs(local.x).sub(extra.y), abs(local.y).sub(extra.z));
+      const holed = extra.y.greaterThan(0).and(extra.z.greaterThan(0));
+      // A light with a hole (a building's own source) falls off from the hole's edge rather than from its centre, so
+      // the pool hugs the foundation outline instead of washing the open ground far beyond a large foundation.
+      const range = max(p.z.sub(max(extra.y, extra.z)), 0.25);
+      const d = select(holed, clamp(max(border, 0).div(range), 0, 1), length(uv().sub(0.5).mul(2)));
       const linear = max(float(1).sub(d), 0);
       const window = max(float(1).sub(d.mul(d)), 0);
       const pool = window.mul(window).div(float(1).add(d.mul(d).mul(10)));
       const shape = select(p.w.greaterThan(0.5), pool, linear);
       const flicker = float(1).add(c.w.mul(mx_noise_float(vec2(time.mul(9).add(seed.mul(17.3)), seed.mul(3.1)))));
-      return vec4(c.rgb.mul(shape).mul(flicker.max(0)).mul(gain).div(this.encodeScale), 1);
+      // No hole is exactly one, preserving all legacy fire, pulse and lamp colours.
+      const hole = select(holed, smoothstep(0, 0.25, border), float(1));
+      const rgb = c.rgb.mul(shape).mul(flicker.max(0)).mul(gain).div(this.encodeScale).mul(hole);
+      // Alpha carries the luminance of the light's ground-only share (zero for every light but a building's own source),
+      // which upright building art takes inside its own foundation (objectLightAt); colour blending ignores alpha.
+      return vec4(rgb, dot(rgb, vec3(0.2126, 0.7152, 0.0722)).mul(extra.w));
     })();
     const mesh = new InstancedMesh(new PlaneGeometry(1, 1), material, capacity);
     mesh.frustumCulled = false;
     mesh.count = 0;
     mesh.visible = false;
-    return { mesh, aPos, aCol, aExtra, attributes: [aPos, aCol, aExtra] };
+    return { mesh, aPos, aCol, aExtra, aHoleOffset, attributes: [aPos, aCol, aExtra, aHoleOffset] };
   }
 
   /** Write one light into instance `i` of `target`. */
@@ -234,10 +318,14 @@ export class LightField {
     scale: number,
     flicker: number,
     seed: number,
+    hole?: readonly [number, number],
+    holeOffset?: readonly [number, number],
+    groundOnly = 0,
   ): void {
     target.aPos.setXYZW(i, x, z, radius, shape);
     target.aCol.setXYZW(i, colour[0]! * scale, colour[1]! * scale, colour[2]! * scale, flicker);
-    target.aExtra.setX(i, seed);
+    target.aExtra.setXYZW(i, seed, hole?.[0] ?? 0, hole?.[1] ?? 0, groundOnly);
+    target.aHoleOffset.setXY(i, holeOffset?.[0] ?? 0, holeOffset?.[1] ?? 0);
   }
 
   /** Upload instances [0, n) of `target` and draw that many. */
@@ -346,6 +434,36 @@ export class LightField {
     });
   }
 
+  /** Refresh a steady source; CPU flicker is shared by the field and its visible glow. */
+  source(key: string, now: number, spec: SourceSpec): void {
+    const existing = this.sources.get(key);
+    if (!existing && this.sources.size >= SOURCES) return;
+    this.sources.set(key, {
+      key,
+      x: spec.x,
+      z: spec.z,
+      colour: [...spec.colour],
+      radius: spec.radius,
+      peak: spec.peak ?? 1,
+      flicker: spec.flicker ?? 0,
+      seed: spec.seed ?? (hashString(key) % 1000) / 1000,
+      born: existing?.born ?? now,
+      seen: now,
+      ttl: spec.ttl ?? 0.6,
+      spec,
+    });
+  }
+
+  /** Immediately remove sources when their owning presentation is disabled. */
+  clearSources(): void {
+    if (this.sources.size) this.dirty = true;
+    this.sources.clear();
+  }
+
+  private static sourceIntensity(source: Source, now: number): number {
+    return source.peak * Math.max(0, LightField.keptFade(source, now)) * flicker(source.seed, now, source.flicker);
+  }
+
   /** Current intensity of a pulse (0 when over). */
   static pulseIntensity(p: Pulse, now: number): number {
     const age = now - p.born;
@@ -393,6 +511,27 @@ export class LightField {
       const k = f.peak * LightField.keptFade(f, now);
       this.writeLight(dyn, n++, f.x, f.z, f.radius, SHAPE_POOL, f.colour, k, f.flicker, f.seed);
     }
+    for (const source of this.sources.values()) {
+      if (now - source.seen > source.ttl) {
+        this.sources.delete(source.key);
+        continue;
+      }
+      this.writeLight(
+        dyn,
+        n++,
+        source.x,
+        source.z,
+        source.radius,
+        source.spec.shape ?? SHAPE_POOL,
+        source.colour,
+        LightField.sourceIntensity(source, now),
+        0,
+        source.seed,
+        source.spec.hole,
+        source.spec.holeOffset,
+        Math.min(1, Math.max(0, source.spec.groundOnly ?? 0)),
+      );
+    }
     const needs =
       this.dirty ||
       n > 0 ||
@@ -409,9 +548,13 @@ export class LightField {
     dyn.mesh.count = n;
     dyn.mesh.visible = n > 0;
     const previous = renderer.getRenderTarget();
+    // Alpha accumulates the ground-only share from zero (the renderer's own clear alpha is 1); colour is unchanged.
+    const clearAlpha = renderer.getClearAlpha();
+    renderer.setClearAlpha(0);
     renderer.setRenderTarget(this.target);
     renderer.render(this.scene, this.camera);
     renderer.setRenderTarget(previous);
+    renderer.setClearAlpha(clearAlpha);
     this.renders++;
     return true;
   }
@@ -422,13 +565,21 @@ export class LightField {
   }
 
   /** Active light counts (for tests and stats). */
-  stats(now: number): { static: number; explosion: number; flash: number; kept: number; staticGain: number } {
+  stats(now: number): {
+    static: number;
+    explosion: number;
+    flash: number;
+    kept: number;
+    sources: number;
+    staticGain: number;
+  } {
     const active = (pool: PulsePool) => this.pulses[pool].filter((p) => LightField.pulseIntensity(p, now) > 0).length;
     return {
       static: this.staticList.length,
       explosion: active('explosion'),
       flash: active('flash'),
       kept: this.kept.size,
+      sources: [...this.sources.values()].filter((s) => now - s.seen <= s.ttl).length,
       staticGain: this.staticGain,
     };
   }
@@ -439,7 +590,7 @@ export class LightField {
   }
 
   /**
-   * Active explosion and fire lights for mirroring into other layers (reflection streaks, glows), written into `out`
+   * Active explosion, fire and source lights for mirroring into other layers (reflection streaks, glows), written into `out`
    * whose entries are reused from call to call (no allocation per frame once warm).
    */
   dynamicLights(now: number, out: DynamicLight[]): DynamicLight[] {
@@ -456,6 +607,19 @@ export class LightField {
     for (const f of this.kept.values()) {
       if (now - f.seen > f.ttl) continue;
       out[n] = writeDynamicLight(pool, n++, f.x, f.z, f.colour, f.peak * Math.min(1, (now - f.born) / 0.25), 'fire');
+    }
+    for (const source of this.sources.values()) {
+      if (now - source.seen > source.ttl) continue;
+      const k = LightField.sourceIntensity(source, now);
+      const entry = writeDynamicLight(pool, n, source.x, source.z, source.colour, k, 'source');
+      entry.head = source.spec.head;
+      entry.glowSize = source.spec.glowSize;
+      entry.glowCore = source.spec.glowCore;
+      entry.glowHot = source.spec.glowHot;
+      entry.push = source.spec.push;
+      const glow = (entry.glow ??= [0, 0, 0]);
+      for (let c = 0; c < 3; c++) glow[c] = (source.spec.glow?.[c] ?? 0) * k;
+      out[n++] = entry;
     }
     out.length = n;
     return out;
@@ -474,6 +638,7 @@ export class LightField {
     });
     this.scene.clear();
     this.kept.clear();
+    this.sources.clear();
     this.pulses.explosion.length = 0;
     this.pulses.flash.length = 0;
   }
@@ -484,7 +649,15 @@ function additiveMaterial(): MeshBasicNodeMaterial {
   material.transparent = true;
   material.depthTest = false;
   material.depthWrite = false;
-  material.blending = AdditiveBlending;
+  // Plain sums in colour and alpha. The former additive blending scaled colour by the source alpha, which was always 1,
+  // so colour is bit-identical; alpha now sums the ground-only luminance instead of counting lights (see buildLights).
+  material.blending = CustomBlending;
+  material.blendEquation = AddEquation;
+  material.blendSrc = OneFactor;
+  material.blendDst = OneFactor;
+  material.blendEquationAlpha = AddEquation;
+  material.blendSrcAlpha = OneFactor;
+  material.blendDstAlpha = OneFactor;
   material.side = DoubleSide;
   return material;
 }
@@ -511,5 +684,13 @@ function writeDynamicLight(
   entry.colour[1] = colour[1]! * k;
   entry.colour[2] = colour[2]! * k;
   entry.kind = kind;
+  if (kind !== 'source') {
+    entry.head = undefined;
+    entry.glow = undefined;
+    entry.glowSize = undefined;
+    entry.glowCore = undefined;
+    entry.glowHot = undefined;
+    entry.push = undefined;
+  }
   return entry;
 }

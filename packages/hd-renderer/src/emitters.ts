@@ -14,6 +14,7 @@ import {
   float,
   instancedBufferAttribute,
   length,
+  max,
   mix,
   mx_noise_float,
   positionGeometry,
@@ -46,6 +47,18 @@ export interface Emitter {
    * standing in front of the post still does. Default: HEAD_PUSH.
    */
   push?: number;
+  /** Head quad size (world units); overrides the dynamic default. */
+  size?: number;
+  /**
+   * Radius of the head's bright core as a fraction of the quad's half-size (default 0.2, a lamp's small bulb). A plasma
+   * orb uses its own radius so the whole sphere glows instead of a dot at its centre.
+   */
+  core?: number;
+  /**
+   * White-hot centre (0 = none, the default): white light inside about half the core radius, scaled by the glow's
+   * strongest channel. A plasma orb's over-exposed centre stays white while its rim keeps the saturated glow colour.
+   */
+  hot?: number;
   /** Streak length (world units); default: the mirrored head smeared by the wet surface (head x sqrt 3 x STREAK_SMEAR). */
   streakLength?: number;
   /** Streak half-width (world units); default 0.3. */
@@ -53,7 +66,8 @@ export interface Emitter {
 }
 
 const STATIC_CAPACITY = 1024;
-const DYNAMIC_CAPACITY = 256;
+/** Room for every mirrored explosion, fire and persistent source, so bursts cannot hide source heads. */
+const DYNAMIC_CAPACITY = 640;
 /** Toward the fixed camera on the ground plane (IsoCamera looks from +x +z). */
 const TO_CAMERA_GROUND = new Vector3(Math.SQRT1_2, 0, Math.SQRT1_2);
 /**
@@ -90,15 +104,18 @@ export class EmitterLayer {
   }
 
   private build(capacity: number, isStatic: boolean) {
-    // aPos = (x, y, z, head), aGlow = (r, g, b, size), aStreak = (r, g, b, length), aExtra = (push, half-width, seed).
+    // aPos = (x, y, z, head), aGlow = (r, g, b, size), aStreak = (r, g, b, length), aExtra = (push, half-width, seed, core),
+    // aHot = white-hot centre gain.
+    const aHot = new InstancedBufferAttribute(new Float32Array(capacity), 1);
     const aPos = new InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
     const aGlow = new InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
     const aStreak = new InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
-    const aExtra = new InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
+    const aExtra = new InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
     const p: ShaderNode = instancedBufferAttribute(aPos, 'vec4');
     const g: ShaderNode = instancedBufferAttribute(aGlow, 'vec4');
     const s: ShaderNode = instancedBufferAttribute(aStreak, 'vec4');
-    const x: ShaderNode = instancedBufferAttribute(aExtra, 'vec3');
+    const x: ShaderNode = instancedBufferAttribute(aExtra, 'vec4');
+    const hot: ShaderNode = instancedBufferAttribute(aHot, 'float');
     const gain: ShaderNode = isStatic ? this.lampGain : float(1);
 
     const heads = new MeshBasicNodeMaterial();
@@ -115,9 +132,12 @@ export class EmitterLayer {
     heads.colorNode = Fn(() => {
       const d = length(uv().sub(0.5).mul(2));
       // A modest core keeps sodium heads orange below the tone mapper's shoulder instead of cream-white.
-      const core = smoothstep(0.2, 0.0, d).mul(2.5);
+      const core = smoothstep(x.w, 0.0, d).mul(2.5);
       const halo = pow(smoothstep(1.0, 0.0, d), 3).mul(float(0.3).add(this.nodes.rainAmount.mul(0.2)));
-      return vec4(g.rgb.mul(core.add(halo)).mul(gain), 1);
+      const white = smoothstep(x.w.mul(0.6), 0.0, d)
+        .mul(hot)
+        .mul(max(g.r, max(g.g, g.b)));
+      return vec4(g.rgb.mul(core.add(halo)).add(vec3(white)).mul(gain), 1);
     })();
     const headMesh = new InstancedMesh(new PlaneGeometry(1, 1), heads, capacity);
     headMesh.frustumCulled = false;
@@ -169,12 +189,13 @@ export class EmitterLayer {
     streakMesh.renderOrder = 3;
     streakMesh.count = 0;
     this.root.add(streakMesh, headMesh);
-    return { heads: headMesh, streaks: streakMesh, attrs: [aPos, aGlow, aStreak, aExtra] };
+    return { heads: headMesh, streaks: streakMesh, attrs: [aPos, aGlow, aStreak, aExtra, aHot] };
   }
 
   private write(layer: 0 | 1, list: readonly Emitter[], sizeOf: (e: Emitter) => number): number {
     const { heads, streaks, attrs } = this.layers[layer]!;
-    const [aPos, aGlow, aStreak, aExtra] = attrs as [
+    const [aPos, aGlow, aStreak, aExtra, aHot] = attrs as [
+      InstancedBufferAttribute,
       InstancedBufferAttribute,
       InstancedBufferAttribute,
       InstancedBufferAttribute,
@@ -188,12 +209,14 @@ export class EmitterLayer {
       const length = e.streakLength ?? e.head * Math.sqrt(3) * STREAK_SMEAR;
       aStreak.setXYZW(i, e.streak[0], e.streak[1], e.streak[2], Math.max(0.3, length));
       // A stable per-emitter seed from its position jitters each streak's shimmer.
-      aExtra.setXYZ(
+      aExtra.setXYZW(
         i,
         e.push ?? HEAD_PUSH,
         e.streakWidth ?? 0.3,
         (Math.sin(e.x * 12.9898 + e.z * 78.233) * 43758.5453) % 1,
+        e.core ?? 0.2,
       );
+      aHot.setX(i, e.hot ?? 0);
     }
     for (const a of attrs) {
       a.clearUpdateRanges();
@@ -232,7 +255,7 @@ export class EmitterLayer {
 
   /** Replace the dynamic emitters (fires, explosions) for this frame. */
   setDynamic(list: readonly Emitter[]): void {
-    this.write(1, list, (e) => (e.glow[0] + e.glow[1] + e.glow[2] > 0 ? Math.min(1.6, 0.5 + e.head) : 0));
+    this.write(1, list, (e) => (e.glow[0] + e.glow[1] + e.glow[2] > 0 ? (e.size ?? Math.min(1.6, 0.5 + e.head)) : 0));
   }
 
   get staticEmitters(): number {

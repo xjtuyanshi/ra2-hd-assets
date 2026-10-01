@@ -1,6 +1,9 @@
 import { LessDepth, Matrix4, Mesh, MeshBasicNodeMaterial, Vector3, type Object3D } from 'three/webgpu';
-import { depth, floor, fwidth } from 'three/tsl';
+import { Fn, If, depth, float, floor, fwidth } from 'three/tsl';
+import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
+import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT } from '../world';
+import { spriteLookFor } from './spriteLook';
 
 /**
  * Engine-style voxel shadows. The original draws a unit's shadow by flattening the model onto the ground along a fixed
@@ -180,18 +183,28 @@ export function airborneShadowProjection(
  */
 const SHADOW_DEPTH_STEPS = 2 ** 20;
 
-/** One shared material: flat black at SHADOW_OPACITY, drawn once per pixel (see the depth notes above). */
-let sharedMaterial: MeshBasicNodeMaterial | null = null;
-export function voxelShadowMaterial(): MeshBasicNodeMaterial {
-  if (sharedMaterial) return sharedMaterial;
+/** One shared material per renderer context, drawn once per pixel (see the depth notes above). */
+const sharedMaterials = new WeakMap<AtmosphereNodes, MeshBasicNodeMaterial>();
+export function voxelShadowMaterial(nodes = DEFAULT_ATMOSPHERE_NODES): MeshBasicNodeMaterial {
+  const shared = sharedMaterials.get(nodes);
+  if (shared) return shared;
   const material = new MeshBasicNodeMaterial({ color: 0x000000 });
   material.name = 'voxel-shadow';
   material.transparent = true;
   material.opacity = SHADOW_OPACITY;
+  const look = spriteLookFor(nodes);
+  material.opacityNode = Fn(() => {
+    const value: ShaderNode = float(SHADOW_OPACITY).toVar();
+    If(look.enabled.greaterThan(0.5).and(look.shadowDarkness.notEqual(1)), () => {
+      value.assign(look.shadowDarkness.mul(SHADOW_OPACITY).min(0.9));
+    });
+    return value;
+  })();
   material.depthWrite = true;
   material.depthFunc = LessDepth;
   material.depthNode = floor(depth.sub(fwidth(depth)).mul(SHADOW_DEPTH_STEPS)).div(SHADOW_DEPTH_STEPS);
-  sharedMaterial = material;
+  sharedMaterials.set(nodes, material);
+  nodes.own(material);
   return material;
 }
 
@@ -205,8 +218,11 @@ const projection = new Matrix4();
  * in order, so the source's world matrix is current by then); it follows the source's pose every frame.
  */
 export class VoxelShadowMesh extends Mesh {
-  constructor(readonly source: Mesh) {
-    super(source.geometry, voxelShadowMaterial());
+  constructor(
+    readonly source: Mesh,
+    nodes = DEFAULT_ATMOSPHERE_NODES,
+  ) {
+    super(source.geometry, voxelShadowMaterial(nodes));
     this.name = 'voxel-shadow';
     this.matrixAutoUpdate = false;
     this.castShadow = false;

@@ -24,6 +24,7 @@ import {
   instancedBufferAttribute,
   length,
   max,
+  min,
   mix,
   positionGeometry,
   positionWorld,
@@ -43,7 +44,7 @@ import {
   vec4,
 } from 'three/tsl';
 import type { LightingClass, MapObject, SpriteFrame } from '../../../ra2-assets/src/manifest';
-import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLight, pavedAt, puddleNoise } from '../atmosphere';
+import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLightAt, pavedAt, puddleNoise } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { type HdAtlas, type Ra2Cache } from './cache';
@@ -58,6 +59,8 @@ import {
   foundationBase,
   glassReflection,
   groundCrystalColour,
+  highlightRoughness,
+  poweredOcclusion,
   relightFactor,
   sampleMaterial,
   spriteLookFor,
@@ -488,7 +491,15 @@ export class SpriteLayer {
         const down = select(flat, py, max(py, 0));
         const ground = aAnchor.xz.add(vec2(px.div(60).add(down.div(30)), down.div(30).sub(px.div(60)))).toVar();
         const height = select(flat, float(0), max(py.negate(), 0).div(ppu));
-        const local: ShaderNode = objectLight(ground, nodes)
+        // Upright building art takes ground-only light (a building's own source) inside its own foundation: the
+        // pixel's ground projection, clamped a little inside the foundation (objectLightAt).
+        const building: ShaderNode = step(0.5, aOcclusion.x).mul(float(1).sub(step(0.5, aFlat)));
+        const inset: ShaderNode = min(aOcclusion.xy.mul(0.5), 0.35);
+        const projected: ShaderNode = vec2(px.div(60).add(py.div(30)), py.div(30).sub(px.div(60)));
+        const own: ShaderNode = aAnchor.xz
+          .add(foundationOrigin)
+          .add(clamp(projected.sub(foundationOrigin), inset, max(aOcclusion.xy.sub(inset), inset)));
+        const local: ShaderNode = objectLightAt(ground, own, building, nodes)
           .div(referenceLevel)
           .mul(exp(height.mul(-0.45)));
         // The map's light, then the scene light on the night-desaturated colour (house paint keeps its colour) and local
@@ -562,7 +573,11 @@ export class SpriteLayer {
             const m = sampleMaterial(materials, atlasUv);
             const weight: ShaderNode = m.has.mul(float(1).sub(step(0.5, aFlat)));
             const factor: ShaderNode = mix(vec3(1), relightFactor(m.normal, look), look.relight.mul(weight));
-            const occlusion: ShaderNode = mix(float(1), m.ao, look.occlusion.mul(weight));
+            const occlusion: ShaderNode = mix(
+              float(1),
+              poweredOcclusion(m.ao, look.aoPower),
+              look.occlusion.mul(weight),
+            );
             const base: ShaderNode = lit.mul(factor).mul(occlusion);
             const glass: ShaderNode = smoothstep(0.75, 0.98, m.spec).mul(weight);
             // Glass: a street-level mirror (see glassReflection) with sky, cloud streaks and a sun glint, tinted by the
@@ -572,10 +587,11 @@ export class SpriteLayer {
             const reflectance: ShaderNode = look.glass
               .mul(glass.mul(GLASS_REFLECTANCE))
               .add(look.specular.mul(wet.mul(weight).mul(0.05)));
-            const roughness: ShaderNode = classRoughness(m.spec, wet);
+            const roughness: ShaderNode = highlightRoughness(classRoughness(m.spec, wet), look.specularSize);
             // Facades and roofs: a physical GGX highlight, weak on matte classes.
             const highlight: ShaderNode = sunHighlight(m.normal, sun, view, roughness, float(0.03))
               .mul(look.sunLight)
+              .mul(look.specularSize.mul(look.specularSize))
               .mul(
                 look.specular
                   .mul(weight)
@@ -607,6 +623,12 @@ export class SpriteLayer {
             );
             result.assign(select(crystal.greaterThan(0), vec4(crystalColour.add(litGlow), litAlpha), result));
           }
+          // Both crisp and softened shadows share the enhanced opacity; faithful keeps the engine's alpha above.
+          const shadowOpacity: ShaderNode = look.shadowDarkness.mul(SHADOW_OPACITY).min(0.9);
+          If(isShadow.greaterThan(0.5).and(look.shadowDarkness.notEqual(1)), () => {
+            const alpha: ShaderNode = clamp(coverage, 0, 1).mul(shadowOpacity);
+            result.assign(vec4(0, 0, 0, alpha));
+          });
           // Shadows grow a penumbra with distance from their object's base (golden-hour softness).
           If(isShadow.greaterThan(0.5).and(look.shadowSoftness.greaterThan(1e-4)), () => {
             const offset: ShaderNode = vec2(px.div(60).add(py.div(30)), py.div(30).sub(px.div(60)));
@@ -622,7 +644,7 @@ export class SpriteLayer {
               soft.addAssign(occupied.mul(inside.x).mul(inside.y));
             }
             const blended: ShaderNode = mix(clamp(coverage, 0, 1), soft.div(8), smoothstep(0.3, 1.5, radius));
-            result.assign(vec4(0, 0, 0, blended.mul(SHADOW_OPACITY)));
+            result.assign(vec4(0, 0, 0, blended.mul(shadowOpacity)));
           });
           // Contact shade: soft darkening of the ground around a foundation.
           If(isContact.greaterThan(0.5), () => {
@@ -631,7 +653,11 @@ export class SpriteLayer {
             );
             const shadeAlpha: ShaderNode = contactShade(local, aOcclusion.x, aOcclusion.y)
               .mul(look.occlusion)
-              .mul(0.42);
+              .mul(0.42)
+              .toVar();
+            If(look.contactShade.notEqual(1), () => {
+              shadeAlpha.assign(shadeAlpha.mul(look.contactShade).min(0.85));
+            });
             result.assign(vec4(0, 0, 0, shadeAlpha));
           });
           // Wet reflection: the lit art mirrored about its base line, on paved ground only, fading with distance.

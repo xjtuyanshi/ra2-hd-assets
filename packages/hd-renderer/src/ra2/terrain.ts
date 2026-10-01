@@ -19,6 +19,8 @@ import {
 import {
   BRDF_GGX,
   BRDF_Lambert,
+  Fn,
+  If,
   abs,
   attribute,
   clamp,
@@ -59,6 +61,7 @@ import { LEVEL_HEIGHT } from '../world';
 import { NO_TILE, ra2Screen, type Ra2Cache, tileAtlasPixel } from './cache';
 import { srgbScale, terrainGradeAt } from './mapLighting';
 import { SHORE_MAX, SHORE_MIN } from './shoreField';
+import { spriteLookFor } from './spriteLook';
 import { bedWaterLook, reflectionOffset, rippledReflection, waterLook, waterPreset, wetShore } from './waterLook';
 import { groupWaterCells, selectWaterMirrorLevels, type WaterCell, type WaterLevel } from './waterLevels';
 
@@ -727,7 +730,15 @@ function createMaterials(
   }
   // Contact shading darkens every light at cliff feet (an occlusion term); the sun and sky see the night-desaturated
   // albedo, local lights (emissive, below) the full colour.
-  albedo = albedo.mul(attribute('contact', 'float'));
+  const look = spriteLookFor(nodes);
+  const contact = Fn(() => {
+    const value: ShaderNode = attribute('contact', 'float').toVar();
+    If(look.enabled.greaterThan(0.5).and(look.contactShade.notEqual(1)), () => {
+      value.assign(float(1).sub(float(1).sub(value).mul(look.contactShade).min(0.85)));
+    });
+    return value;
+  })();
+  albedo = albedo.mul(contact);
   ground.colorNode = moonlit(albedo, nodes);
   // Dry original art has no sheen of its own; wet ground and puddles reflect the sun.
   ground.gloss = gloss;

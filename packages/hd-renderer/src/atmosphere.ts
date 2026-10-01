@@ -9,7 +9,18 @@ import {
   Vector2,
   type Vector3,
 } from 'three/webgpu';
-import { float, luminance, mix, mx_fractal_noise_float, smoothstep, texture, uniform, vec3 } from 'three/tsl';
+import {
+  clamp,
+  float,
+  luminance,
+  max,
+  mix,
+  mx_fractal_noise_float,
+  smoothstep,
+  texture,
+  uniform,
+  vec3,
+} from 'three/tsl';
 import type { AtmosphereProfile } from './contract';
 import type { EmitterLayer } from './emitters';
 import type { LightField } from './lightField';
@@ -128,6 +139,32 @@ export function sampleLightField(xz: ShaderNode, nodes = DEFAULT_ATMOSPHERE_NODE
  */
 export function objectLight(xz: ShaderNode, nodes = DEFAULT_ATMOSPHERE_NODES): ShaderNode {
   const lf: ShaderNode = sampleLightField(xz, nodes);
+  const l: ShaderNode = luminance(lf);
+  return mix(vec3(l, l, l), lf, float(OBJECT_TINT));
+}
+
+/**
+ * objectLight for sprite art. `building` (0 or 1) marks upright building art: it takes the ground-only share of the
+ * field (SourceSpec.groundOnly, carried in the field's alpha as luminance) at `own`, a point inside its own foundation,
+ * instead of at `xz`, the ground in front of the art that its pixels otherwise sample. A building's own source has a
+ * hole over that foundation, so its facades and the reactor's orb glass stay unwashed, while a neighbouring building
+ * inside the pool still takes the light. Without a ground-only share (alpha 0) this equals objectLight(xz) exactly.
+ */
+export function objectLightAt(
+  xz: ShaderNode,
+  own: ShaderNode,
+  building: ShaderNode,
+  nodes = DEFAULT_ATMOSPHERE_NODES,
+): ShaderNode {
+  const share = (sample: ShaderNode, rgb: ShaderNode): ShaderNode =>
+    clamp(sample.a.mul(nodes.lightFieldScale).div(max(luminance(rgb), 1e-4)), 0, 1).mul(building);
+  const front: ShaderNode = texture(nodes.lightFieldTexture, xz.div(nodes.lightFieldSize));
+  const inside: ShaderNode = texture(nodes.lightFieldTexture, own.div(nodes.lightFieldSize));
+  const frontRgb: ShaderNode = front.rgb.mul(nodes.lightFieldScale);
+  const insideRgb: ShaderNode = inside.rgb.mul(nodes.lightFieldScale);
+  const lf: ShaderNode = frontRgb
+    .mul(float(1).sub(share(front, frontRgb)))
+    .add(insideRgb.mul(share(inside, insideRgb)));
   const l: ShaderNode = luminance(lf);
   return mix(vec3(l, l, l), lf, float(OBJECT_TINT));
 }

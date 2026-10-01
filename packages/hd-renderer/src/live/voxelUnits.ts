@@ -106,7 +106,7 @@ export class VoxelUnits {
         }
       }
     }
-    const unit = instantiateVoxel(parts, this.material);
+    const unit = instantiateVoxel(parts, this.material, this.hd.nodes);
     this.pending.get(parts)?.add(unit);
     return unit;
   }

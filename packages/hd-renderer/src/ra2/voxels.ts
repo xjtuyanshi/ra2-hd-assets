@@ -520,6 +520,7 @@ export class VoxelUnit extends Group {
 export function instantiateVoxel(
   parts: VoxelGeometry[],
   material: MeshStandardNodeMaterial,
+  nodes?: AtmosphereNodes,
 ): { root: VoxelUnit; turret?: Group } {
   const root = new VoxelUnit();
   let turret: Group | undefined;
@@ -545,6 +546,6 @@ export function instantiateVoxel(
     turret.add(mesh);
   }
   // Shadow twins last: the scene graph updates children in order, so their sources' world matrices are current.
-  for (const mesh of meshes) root.add(new VoxelShadowMesh(mesh));
+  for (const mesh of meshes) root.add(new VoxelShadowMesh(mesh, nodes));
   return { root, turret };
 }
