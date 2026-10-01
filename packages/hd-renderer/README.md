@@ -143,8 +143,27 @@ spawn. Keep the default warm-up for build-up timing. Combine with anims using `f
 `spread=<cells>` place and time the listed anims, `crater=1` emulates the engine's crater smudges, and
 `window.__fx.advance(ms)` steps the clock for frame-by-frame capture (header of `sandbox/fx.ts`).
 
-Set `HD_CACHE` to an absolute variant-cache root when starting the development sandbox to review L3 redraws;
-the default remains `gameres/hd-cache`. For example, `HD_CACHE="$OUT_ROOT" pnpm hd:sandbox --port 15215`.
+Set `HD_CACHE_DIR` (or its older alias `HD_CACHE`) to an absolute variant-cache root when starting the development
+sandbox to review L3 redraws; the default remains `gameres/hd-cache`. For example,
+`HD_CACHE_DIR="$OUT_ROOT" pnpm hd:sandbox --port 15215`.
+
+### SHP vehicle review bench
+
+Serve either cache root with `HD_CACHE_DIR="$SHP_SOURCE" pnpm hd:sandbox` or
+`HD_CACHE_DIR="$SHP_VARIANT" pnpm hd:sandbox` (restart the server between roots). Open the printed local origin
+with `?fx=shpunits&stypes=DRON&map=XMP29U2&seq=Stand&step=0&zoom=4`. Each type occupies one screen row with
+eight clockwise facings, starting at screen-up, matching the redraw sheets. DarkRed (house index 11) is the default
+for this bench; `house=<index>` overrides it. Existing `units` and `squad` bench defaults remain unchanged.
+
+`seq=Stand|Walk|Fire` and zero-based `step=<n>` select an explicit pose; `sspace=1` controls spacing.
+`animate=2` adds one step every two logic frames after warm-up; `time=0.4` or `window.__fx.advance(ms)` advances
+the deterministic bench clock. The ordinary animation loop holds that clock still for screenshots. Steps wrap
+inside each facing's sequence. `LiveObject.shpUnitPose` supplies this explicit art pose; when absent, the renderer
+continues using movement, fire events and rules timing. Body and shadow always use the same selected frame.
+
+Use identical query parameters and viewport for both cache roots. The bench uses synthetic snapshots and is a
+visual review surface, not evidence of native gameplay. The [SHP sheet CLI](../ra2-assets/README.md#shp-vehicle-redraw-sheets-python)
+documents preparation and the manual image-editing handoff.
 
 **Live view.** `LiveView.create` without `timeOfDay` follows the map's staging; `liveView.setEnvironment({ timeOfDay,
 weather, weatherIntensity, lamps, windows, lights, mist })` changes it without a reload. Light sources follow the
@@ -351,3 +370,148 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   along a fixed light, halving the displayed colour once per pixel (depth-tested, see `voxelShadow.ts`); airborne units
   drop theirs straight down, shrunk with height. Review parameters (sandbox and replays): `?vpl=<extra>,<occlusion>,
 <sheen>`, `?vshape=<corner relax>,<normal blend>`, `?ml=0` (no map day light).
+
+### Optional remaster voxel look
+
+The default `HdSettings.voxelLook = 'engine'` retains the existing geometry and VPL material. Select
+`?vlook=remaster` before loading the sandbox map to use smooth, physically lit vehicles. This is a load-time
+geometry choice; changing the setting on an already built world does not rebuild its units. `loadRa2World`
+accepts `voxelLook` and `smoothVoxel: Partial<SmoothVoxelOptions>`. `VoxelUnits` inherits those world options,
+or accepts overrides as its fifth constructor argument. Geometry is shared by model and normalized options;
+house palettes share geometry but own different LUT materials, scoped to their `AtmosphereNodes` lifetime.
+
+Use `?vlook=remaster&vproj=vehicles-hd` for [projected vehicle redraws](#projected-vehicle-redraws) on the same mesh.
+
+- `src/ra2/voxelSmooth.ts` is renderer-independent, returning typed arrays from `buildSmoothSection`.
+  The thin `voxelSmoothGeometry.ts` wrapper merges sections in `buildSmoothPartGeometry`. Original bounds,
+  section transforms, normal tables, voxel scale, turret pivots and flattened shadow geometry are retained.
+- The exact separable boundary EDT uses samples on exposed cube faces. The distance to a union-of-cubes
+  boundary is exact on this aligned lattice; its occupancy sign gives the inside and outside fields in one
+  transform. This avoids the corner error of subtracting half a sample from a binary centre-distance EDT.
+  IMLS estimates the artist's planes from stored normals; the optional occupancy mode blurs signed distance.
+  Both clamp displacement to a band, preserving one-voxel features. Material-index-constant quads have separate
+  vertices; normals, curvature and ray AO are computed once per surface-net vertex before duplication.
+- Material classes still use the original `pindex`. A separate fractional `pshade` averages exposed voxel
+  indices within `shadeRadius` (default 1.5 voxels), weighted by a Gaussian with sigma `shadeRadius / 2`.
+  Only neighbours within `shadeThreshold` (default 3 index steps) and the same `floor(index / shadeRamp)`
+  group (default ramp size 16) contribute; the owning voxel always has unit weight. This reduces palette
+  dithering while preserving separated details and house stripes. Radius 0 disables it. Radius/threshold
+  accept finite nonnegative values; ramp size must be an integer 1–256. All three are geometry cache keys.
+- AO uses deterministic cosine-distributed rays, starting 0.6 voxel off the surface. Half-voxel marching
+  stops at occupied voxels or the transformed part's model ground plane. A hit at distance `t` contributes
+  `sqrt(1 - t / aoLength)`. Zero rays or zero length disables AO. The maximum inward band is below 0.5 voxel,
+  preserving a negative core in a one-voxel rod; supersampling accepts integers 2–8 (an aligned lattice needs an
+  interior sample). `smoothSigma`/`imlsRadius` are limited to 4 voxels, the outward band to 1 voxel,
+  and rays/length to 256.
+- `voxelClasses.ts` owns the RA2 palette policy. `voxelPbr.ts` uses a 256×3 nearest-filtered LUT, GGX with the
+  scene sun, diffuse HemisphereLight, and a procedural reflection sky. The sky adds no second diffuse term.
+  Lambert lighting already divides irradiance by pi, so the existing noon exposure supplies the same flat
+  diffuse reference as terrain. Metallic energy conservation, wear and reflections deliberately alter the
+  final surface response; `brightness` trims it without an additional exposure or emissive daylight fill.
+  Glass shading is available, but no stock palette ramp is guessed to be glass (the blue ramp stays paint).
+- Armour and house colours use rough military paint; the historical `metal` class is painted steel
+  (roughness 0.52, metalness 0.25). Neutral reflections replace the strong blue sky. `shadeSmooth` blends
+  raw colour with the interpolated `pshade` LUT colour, keeping both taps within the owning palette ramp.
+  `edgeLight` adds convex bevel highlights independently of wear. Dark/rubber surfaces below `treadHeight`
+  receive soft track ridges along voxel x, including view-space normal relief; `treadPeriod` is in voxels.
+  `dust` tints upward faces and the lower hull with low-frequency noise and raises roughness towards 0.9.
+  `streaks` adds thin vertical grime on near-vertical faces. Heights use the same transformed model ground
+  as grime. All detail layers are procedural and affect only the remaster look.
+
+Geometry review parameters, captured before loading:
+
+```text
+?vlook=remaster&vsmooth=supersample:3,shape:imls,imlsRadius:1.1,bandIn:0.3,bandOut:0.3,storedNormals:0.35,aoRays:48
+```
+
+Other geometry defaults: `smoothSigma:0.55`, `aoLength:10`, `groundOcclusion:true`, `shadeRadius:1.5`,
+`shadeThreshold:3`, `shadeRamp:16`. `shape:occupancy` selects
+Gaussian smoothing. Uniforms can be changed through `?vk=aoStrength:0.8,wear:0.5` or, without reloading,
+`window.__hd.voxelPbr.wear.value = 0.5`. The complete defaults are:
+
+| Uniform     | Default | Uniform       | Default |
+| ----------- | ------: | ------------- | ------: |
+| brightness  |       1 | aoStrength    |     0.8 |
+| envStrength |    0.35 | specular      |       1 |
+| shadeSmooth |       1 | edgeLight     |    0.25 |
+| tread       |     0.8 | treadPeriod   |     0.8 |
+| treadHeight |     3.5 | dust          |    0.35 |
+| streaks     |    0.25 |               |         |
+| wear        |     0.5 | wearStart     |     0.6 |
+| cavity      |     0.4 | cavityStart   |     0.6 |
+| grime       |    0.35 | grimeHeight   |       4 |
+| microNoise  |    0.06 | lightStrength |       1 |
+
+For example, `?vlook=remaster&vk=shadeSmooth:1,edgeLight:0.25,tread:0.8,dust:0.35,streaks:0.25`.
+Each detail strength accepts 0 to disable that layer. `dustColour` is a separate colour uniform, initialized
+from sRGB `(0.55, 0.48, 0.38)` and stored in linear space; change it live with
+`window.__hd.voxelPbr.dustColour.value.set('#8c7a61')`. Reflection colours are zenith `(0.42, 0.47, 0.55)`,
+horizon `(0.62, 0.64, 0.66)`, and ground `(0.12, 0.11, 0.10)` in linear space.
+
+Asset-free acceptance:
+
+```bash
+pnpm --filter hd-renderer run typecheck
+pnpm --filter hd-renderer test
+```
+
+Read-only CPU benchmark against a user-supplied voxel JSON directory (all parts, default options; first build
+and median of three subsequent uncached builds, excluding JSON I/O):
+
+```bash
+pnpm exec tsx packages/hd-renderer/scripts/benchmarkVoxelSmooth.ts "$VOXEL_JSON_DIRECTORY"
+```
+
+The synthetic tests check geometry topology, thin features, palette boundaries, normals, ground AO,
+determinism, cache isolation, shadows, depth compatibility and CPU shader generation. These checks and the
+build benchmark do not establish GPU rendering, visual quality, noon pixel matching or live-match FPS.
+
+### Projected vehicle redraws
+
+For pre-lit image-model redraws on those meshes, use `?vlook=remaster&vproj=vehicles-hd` (recommended), or
+`?vlook=engine&vproj=vehicles-hd` for the original geometry. `vproj` is relative to the HD cache root served by
+Vite. The map viewer and live bench (`?fx=units&vlook=remaster&vproj=vehicles-hd`) both support it.
+`loadRa2World`, `LiveViewOptions` and `VoxelUnitsOptions` accept `voxelProjection: string` as the atlas URL base.
+An absent index, missing type, invalid manifest or incomplete part set logs once and retains that type's selected
+engine/PBR look. Live types load asynchronously and update existing instances once the complete set arrives.
+
+The projection layer reads `<base>/index.json`, each listed type's manifest, and colour/paint atlases. It uses
+the mesh's complete world matrix (including parent turret yaw, scale and ground tilt) to select adjacent baked
+facings and project local positions through the recorded orthographic Jacobian. Turret and barrel share the
+turret atlas and pivot. Four atlas reads per fragment blend coverage-weighted colour and house paint; no
+per-unit JavaScript update is added to the frame loop. Texture coordinates have a top-left origin, `flipY=false`,
+and explicit sRGB decoding matching the VPL LUT. Frame metadata uses uniform arrays; atlases use trilinear
+mip filtering and clamp wrapping. Materials are cached per atmosphere, palette and projection part. Atlases,
+decoded bitmaps, palette LUTs and materials are released with the atmosphere, including cancelled/failed loads.
+
+The projected material uses the engine pre-lit lighting path on either geometry: map object light, extra unit
+light, night desaturation (excluding house paint), local light and `voxelFill`. Mesh AO and the extra diffuse/sheen
+affect only uncovered engine art. Depth, silhouettes, turret articulation and shadow twins still come from the
+mesh; the redraw does not create geometry outside it. At intermediate facings, differently drawn details can
+ghost during the cross-fade. GPU alignment, paint, mip seams, motion and performance need Chrome review.
+
+Both entries expose the following uniforms:
+
+```js
+window.__hd.voxelProjection.relight.value = 0; // Default 0; 1 enables directional relighting.
+window.__hd.voxelProjection.blend.value = 1; // Default 1; 0 selects only the nearest facing.
+window.__hd.voxelProjection.strength.value = 1; // Default 1; 0 shows plain engine shading on the chosen mesh.
+window.__hd.voxelProjection.levelRef.value = 1.7; // Object light level the redraws were baked under.
+window.__hd.voxelProjection.gain.value = 1; // Linear-light gain of the redraw colour (grading review).
+window.__hd.voxelProjection.saturation.value = 1; // Saturation of the redraw colour (grading review).
+window.__hd.voxelProjection.sharpen.value = 0.5; // Negative mip LOD bias (levels) for the redraw atlases.
+window.__hd.voxelProjection.paintShade.value = 0.85; // Mesh-normal form shading of the house paint (0..1).
+window.__hd.voxelProjection.paintSpec.value = 0.5; // Camera glint on the house paint.
+window.__hd.voxelProjection.formShade.value = 0.85; // Mesh Lambert form light on the whole redraw (0..1).
+window.__hd.voxelProjection.formAO.value = 0.75; // Mesh voxel occlusion on the redraw (0..1).
+window.__hd.voxelProjection.spec.value = 0.5; // Luminance-gated glint on the whole redraw.
+window.__hd.voxelProjection.contrast.value = 1.35; // Hue-preserving luminance power around linear mid grey.
+```
+
+The sandbox also takes them in the URL: `?vpk=relight:0.5,levelRef:1.7,gain:1,saturation:1`. The redraws are drawn about three times larger than the game shows them, so trilinear filtering lands between mips; `sharpen` biases the colour and paint reads toward the finer mip (0 restores plain trilinear sampling). Image models paint the remappable house colour almost flat, so the paint alone receives Lambert shading from the mesh normal against the current sun (normalised to 1 at n.l = 0.65) and a Blinn-Phong glint toward the iso camera; `vpk=sharpen:0,paintShade:0,paintSpec:0` reproduces the earlier projection look for A/B reviews. The redraws themselves are lit almost evenly, so at game scale a vehicle read as a flat painting next to the approved target frames (dark lower hulls, bright top faces, glossy edges); `formShade`, `formAO`, `spec` and `contrast` give the whole redraw form light from the smooth mesh, the mesh's voxel occlusion, a glint gated by the redraw's luminance and a luminance contrast, and `vpk=formShade:0,formAO:0,spec:0,contrast:1` turns them off. The bakes are
+screenshots of the engine look at the XMP29U2 noon object level, so their colours already carry that level: the
+projected colour is scaled by `level / levelRef` rather than `level`, and 1.7 reproduces the redraw frames' median
+brightness at noon on that map (measured in Chrome). relight, blend and strength are clamped to 0..1 in the shader. Optional relighting uses the existing sprite sun-direction uniform
+for the current sun and the VPL light direction as its reference. It is disabled by default. Omitting `vproj`
+retains the original material path and defaults. Build player-supplied assets using
+[the projection builder](../ra2-assets/README.md#vehicle-projection-atlases-python); keep all derived images outside Git.

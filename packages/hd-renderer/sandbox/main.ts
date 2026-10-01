@@ -9,7 +9,9 @@ import { SpriteLayer } from '../src/ra2/sprites';
 import { loadRa2World } from '../src/ra2/world';
 import { voxelLightingFor } from '../src/ra2/vpl';
 import { voxelShape } from '../src/ra2/voxels';
-import { addLookGui, applyLookParams } from './look';
+import { addLookGui, applyLookParams, voxelLookParams } from './look';
+import { voxelPbrFor } from '../src/ra2/voxelPbr';
+import { voxelProjectionFor } from '../src/ra2/voxelProjection';
 import { waterPreset } from '../src/ra2/waterLook';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
@@ -41,12 +43,23 @@ const water =
 waterPreset.style = water === 'enhanced' ? 'enhanced' : 'classic';
 const world = mapName
   ? await loadRa2World(`/${encodeURIComponent(mapName)}`, {
+      ...voxelLookParams(params),
       voxelShape: shape,
       // ?tmap=0 draws the per-tile atlas instead of the (AI-upscaled) whole-map terrain image, for A/B review.
       terrainMap: params.get('tmap') !== '0',
       hdSprites: params.get('hdsprites') !== '0',
       // ?cm=0 draws the manifest's terrain image instead of the colour-matched sidecar, for A/B review.
       colourMatched: params.get('cm') !== '0',
+      // ?uhouse=<owner>:<h>,<s>,<v>[;...] adds review houses (rules [Colors] HSV) for ?uowner=, e.g. Soviet:0,230,255.
+      extraHouses: Object.fromEntries(
+        (params.get('uhouse') ?? '')
+          .split(';')
+          .filter(Boolean)
+          .map((entry) => {
+            const [owner, hsv] = entry.split(':');
+            return [owner!, hsv!.split(',').map(Number) as [number, number, number]];
+          }),
+      ),
       extraObjects: (manifest) => {
         if (params.has('ugrid')) return unitGrid(manifest);
         if (!params.has('units')) return [];
@@ -92,7 +105,8 @@ function unitGrid(manifest: HdCacheManifest): MapObject[] {
   const uy = Number(params.get('uy') ?? start.y);
   const wanted = params.get('utypes')?.split(',');
   const types = wanted ?? Object.keys(manifest.voxels);
-  const owner = params.get('uowner') ?? Object.keys(manifest.houses ?? {})[0];
+  // ?uowner= may list one owner per type (comma separated); the last one applies to the remaining types.
+  const owners = (params.get('uowner') ?? Object.keys(manifest.houses ?? {})[0] ?? '').split(',');
   const facings = (params.get('ufacings') ?? '32,96,160,224').split(',').map(Number);
   return types
     .filter((voxel) => manifest.voxels[voxel])
@@ -101,7 +115,7 @@ function unitGrid(manifest: HdCacheManifest): MapObject[] {
         kind: 'vehicle' as const,
         type: voxel,
         voxel,
-        owner,
+        owner: owners[Math.min(row, owners.length - 1)] || undefined,
         x: ux + i * 1.7 + row * 1.5,
         y: uy - i * 1.7 + row * 1.5,
         z: Number(params.get('uz') ?? 0),
@@ -181,7 +195,15 @@ if (world?.cache && world.sprites && palcard) {
   hd.scene.add(layer.mesh);
 }
 // Development handle for inspecting the scene from the console.
-const handle = { hd, world, state, stats: () => hd.stats(), fires: [] as { at: Vector3; scale: number }[] };
+const handle = {
+  hd,
+  world,
+  state,
+  voxelPbr: voxelPbrFor(hd.nodes),
+  voxelProjection: voxelProjectionFor(hd.nodes),
+  stats: () => hd.stats(),
+  fires: [] as { at: Vector3; scale: number }[],
+};
 (window as unknown as { __hd: unknown }).__hd = handle;
 hd.setState(state);
 

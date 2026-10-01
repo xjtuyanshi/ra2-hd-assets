@@ -10,14 +10,15 @@ import {
 import { lookupNormal, normalTableFor } from '../../../ra2-formats/src/index';
 import type { VoxelModel, VoxelSection } from '../../../ra2-assets/src/manifest';
 import { sectionNormalsMode } from '../../../ra2-assets/src/voxelNormals';
-import { PIXELS_PER_CELL_EDGE } from '../world';
 import type { AtmosphereNodes } from '../atmosphere';
 import { createPainterDepth, meshPainterDepthNode } from '../painterDepth';
 import { decodeBase64 } from './cache';
 import { paletteNodes } from './mapLighting';
 import { VoxelShadowMesh, groundOf } from './voxelShadow';
-import { voxelFill, voxelMaterialFor } from './vpl';
+import { voxelFill, voxelMaterialFor, voxelProjectedMaterialFor } from './vpl';
+import type { VoxelProjectionAsset } from './voxelProjection';
 import { CARD_CLEARANCE } from './cardDepth';
+import { VOXEL_TO_WORLD } from './voxelScale';
 
 /**
  * Original VXL units, rendered as real meshes. The engine draws voxels through a pure rotation (the default voxel
@@ -27,7 +28,7 @@ import { CARD_CLEARANCE } from './cardDepth';
  * same-moment captures, the silhouettes then overlap the originals' at 0.91-0.97 IoU (0.66-0.73 at the earlier 8
  * leptons per voxel, which drew every vehicle a third too large and made it look lifted off the ground).
  */
-export const VOXEL_TO_WORLD = 1 / PIXELS_PER_CELL_EDGE;
+export { VOXEL_TO_WORLD } from './voxelScale';
 /** Engine leptons per cell edge: art offsets such as TurretOffset are given in leptons. */
 const LEPTONS_PER_CELL = 256;
 
@@ -41,6 +42,21 @@ export interface VoxelGeometry {
   turretOffset: number;
   /** Material for this geometry's palette (engine lighting table), when known. */
   material?: MeshStandardNodeMaterial;
+}
+
+/** Apply only complete part sets. Turret and barrel share both the projected material and the turret pivot. */
+export function projectVoxelMaterials(
+  parts: VoxelGeometry[],
+  palette: Uint8Array | null,
+  asset: VoxelProjectionAsset | null,
+  nodes: AtmosphereNodes,
+): boolean {
+  if (!asset || parts.some((part) => !asset.parts[part.role === 'body' ? 'body' : 'turret'])) return false;
+  for (const part of parts) {
+    part.material = voxelProjectedMaterialFor(palette, asset.parts[part.role === 'body' ? 'body' : 'turret']!, nodes);
+    if (!part.material.depthNode) part.material.depthNode = meshPainterDepthNode();
+  }
+  return true;
 }
 
 const FACES: { dir: [number, number, number]; corners: [number, number, number][] }[] = [

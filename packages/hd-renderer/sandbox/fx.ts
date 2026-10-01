@@ -4,6 +4,9 @@
  *
  *   ?fx=TWLT070[,GUNFIRE...]  spawn these anims at the view centre (spread along a diagonal) and show them `time` later
  *   ?fx=units                 voxel tanks, SHP drones and infantry at eight facings, plus a few buildings
+ *   ?fx=shpunits&stypes=DRON  one screen row per SHP vehicle, eight clockwise facings from screen-up, DarkRed house;
+ *                             &seq=Stand|Walk|Fire&step=0 selects a pose; &animate=N advances every N logic frames
+ *                             after warm-up (with &time= or __fx.advance). &sspace=1 controls row/column spacing.
  *   ?fx=squad                 a small battle line: Grizzlies and GIs (house &house) facing Rhinos (house &house2),
  *                             a power plant and a refinery behind them (combine with anims: ?fx=squad,TWLT070,...)
  *   ?fx=infantry              infantry art review: one row per type (&itypes=E1,E2,SHK,...), eight facings each, all
@@ -55,6 +58,10 @@ import { LiveView, type LiveObject, type LiveSmudgeCells, type LiveSnapshot } fr
 import { effectRow, type LiveAnim } from '../src/live/effects';
 import { ra2Screen } from '../src/ra2/cache';
 import { applyLookPreset, LOOK_PRESETS, type LookPreset } from '../src/HdRenderer';
+import { voxelLookParams } from './look';
+import { voxelProjectionFor } from '../src/ra2/voxelProjection';
+import { voxelPbrFor } from '../src/ra2/voxelPbr';
+import { advanceShpReview, shpUnitReview } from './shpUnitReview';
 
 const params = new URLSearchParams(location.search);
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
@@ -78,8 +85,9 @@ const mapName = params.get('map') ?? 'XMP29U2';
 const zoom = Number(params.get('zoom') ?? 1);
 const fps = Number(params.get('fps') ?? 15);
 const time = Number(params.get('time') ?? 0);
-const house = Number(params.get('house') ?? 15);
+const house = Number(params.get('house') ?? (params.get('fx')?.split(',').includes('shpunits') ? 11 : 15));
 const live = await LiveView.create(canvas, {
+  ...voxelLookParams(params),
   mapBase: `/${encodeURIComponent(mapName)}`,
   libraryBase: '/_library',
   timeOfDay: Number(params.get('hours') ?? 12),
@@ -88,6 +96,13 @@ const live = await LiveView.create(canvas, {
   effectsHdBase: params.get('fxhdbase') ?? undefined,
   water: params.get('water') === 'enhanced' ? 'enhanced' : 'classic',
 });
+(window as unknown as { __hd: unknown }).__hd = {
+  hd: live.hd,
+  world: live.world,
+  voxelProjection: voxelProjectionFor(live.hd.nodes),
+  voxelPbr: voxelPbrFor(live.hd.nodes),
+  stats: () => live.hd.stats(),
+};
 // &look=golden: the enhanced look preset (src/HdRenderer.ts LOOK_PRESETS; pair it with &hours=16.5), for effect reviews
 // in the lighting they will be seen with.
 const lookPreset = params.get('look') as LookPreset | null;
@@ -407,6 +422,9 @@ function extraObjects(): LiveObject[] {
 const buildings = fxIds.includes('bldgs') ? buildingSet() : [];
 const allObjects = [...units, ...buildings];
 const makeBuildings = params.get('make') === '1';
+const shpReview = fxIds.includes('shpunits') ? shpUnitReview(params, cx, cy, levelAt(cx, cy) * 104, nextUid) : [];
+nextUid += shpReview.length;
+const animateShp = Number(params.get('animate') ?? 0);
 const spread = Number(params.get('spread') ?? 1.6);
 const offsets = params
   .get('at')
@@ -414,7 +432,7 @@ const offsets = params
   .map((pair) => pair.split(',').map(Number) as [number, number])
   .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
 const anims: LiveAnim[] = fxIds
-  .filter((id) => id !== 'units' && id !== 'squad' && id !== 'infantry' && id !== 'bldgs')
+  .filter((id) => id !== 'units' && id !== 'squad' && id !== 'infantry' && id !== 'bldgs' && id !== 'shpunits')
   .map((type, i, list) => {
     const offset = offsets?.length ? offsets[i % offsets.length]! : null;
     const d = (i - (list.length - 1) / 2) * spread;
@@ -602,10 +620,12 @@ function snapshot(): LiveSnapshot {
     view,
     houses,
     // Delaying first appearance lets LiveView's normal make timeline start at the spawn frame.
-    objects: ((objs: LiveObject[]) =>
-      animateInfantry
+    objects: ((objs: LiveObject[]) => [
+      ...(animateInfantry
         ? objs.map((u) => (u.infantrySequence ? { ...u, sequenceFrame: Math.floor(frame / animateInfantry) } : u))
-        : objs)(makeBuildings && (spawned === null || frame < spawned) ? units : allObjects),
+        : objs),
+      ...(shpReview.length ? advanceShpReview(shpReview, spawned === null ? 0 : frame - spawned, animateShp) : []),
+    ])(makeBuildings && (spawned === null || frame < spawned) ? units : allObjects),
     effects: {
       anims: listed,
       bullets: [],

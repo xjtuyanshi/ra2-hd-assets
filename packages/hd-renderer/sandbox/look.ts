@@ -1,6 +1,60 @@
 import type GUI from 'three/addons/libs/lil-gui.module.min.js';
 import { applyLookPreset, LOOK_PRESETS, type HdRenderer, type HdSettings, type LookPreset } from '../src/HdRenderer';
 import type { RenderState } from '../src/contract';
+import { smoothVoxelOptions, DEFAULT_SMOOTH_VOXEL, type SmoothVoxelOptions } from '../src/ra2/voxelSmooth';
+import { VOXEL_PBR_DEFAULTS, voxelPbrFor, type VoxelPbrKnob } from '../src/ra2/voxelPbr';
+import { voxelProjectionFor } from '../src/ra2/voxelProjection';
+
+const PROJECTION_KNOBS = [
+  'relight',
+  'blend',
+  'strength',
+  'gain',
+  'saturation',
+  'levelRef',
+  'sharpen',
+  'paintShade',
+  'paintSpec',
+  'formShade',
+  'formAO',
+  'spec',
+  'contrast',
+] as const;
+type ProjectionKnob = (typeof PROJECTION_KNOBS)[number];
+
+/**
+ * Capture load-time vehicle options: ?vlook=engine|remaster, ?vsmooth=key:value and ?vproj=vehicles-hd.
+ * vproj is relative to the HD cache root served by Vite; ?vlook=remaster&vproj=vehicles-hd is recommended.
+ * Projection knobs are uniforms at window.__hd.voxelProjection.{relight,blend,strength}.value.
+ */
+export function voxelLookParams(params: URLSearchParams): {
+  voxelLook: 'engine' | 'remaster';
+  smoothVoxel: Readonly<SmoothVoxelOptions>;
+  voxelProjection?: string;
+} {
+  const options: Partial<SmoothVoxelOptions> = {};
+  for (const entry of (params.get('vsmooth') ?? '').split(',')) {
+    const [key, value] = entry.split(':');
+    if (!key || value === undefined || !Object.hasOwn(DEFAULT_SMOOTH_VOXEL, key)) continue;
+    if (key === 'shape') {
+      if (value === 'imls' || value === 'occupancy') options.shape = value;
+    } else if (key === 'groundOcclusion') {
+      if (['true', 'false', '0', '1'].includes(value)) options.groundOcclusion = value === 'true' || value === '1';
+    } else if (value.trim() && Number.isFinite(Number(value))) {
+      (options as Record<string, unknown>)[key] = Number(value);
+    }
+  }
+  return {
+    voxelLook: params.get('vlook') === 'remaster' ? 'remaster' : 'engine',
+    smoothVoxel: smoothVoxelOptions(options),
+    voxelProjection: params.get('vproj')?.trim()
+      ? `/${params
+          .get('vproj')!
+          .trim()
+          .replace(/^\/+|\/+$/g, '')}`
+      : undefined,
+  };
+}
 
 /**
  * Sandbox parameters of the enhanced look: ?look=faithful|golden|cinematic picks a preset (the enhanced presets also
@@ -9,6 +63,23 @@ import type { RenderState } from '../src/contract';
  * Display grade: ?wbadapt= ?gbal=r,g,b ?gcon= ?glift= ?gsat= ?gshadow=r,g,b ?ghigh=r,g,b.
  */
 export function applyLookParams(hd: HdRenderer, params: URLSearchParams, state: RenderState): void {
+  hd.settings.voxelLook = params.get('vlook') === 'remaster' ? 'remaster' : 'engine';
+  const pbr = voxelPbrFor(hd.nodes);
+  for (const entry of (params.get('vk') ?? '').split(',')) {
+    const [key, value] = entry.split(':');
+    if (key && Object.hasOwn(VOXEL_PBR_DEFAULTS, key) && value?.trim() && Number.isFinite(Number(value))) {
+      pbr[key as VoxelPbrKnob].value = Number(value);
+    }
+  }
+  // ?vpk=relight:0.5,gain:1,saturation:1,levelRef:1.7,blend:1,strength:1 sets projected-redraw uniforms.
+  const projection = voxelProjectionFor(hd.nodes);
+  for (const entry of (params.get('vpk') ?? '').split(',')) {
+    const [key, value] = entry.split(':');
+    const knob = projection[key as ProjectionKnob];
+    if (key && PROJECTION_KNOBS.includes(key as ProjectionKnob) && value?.trim() && Number.isFinite(Number(value))) {
+      knob.value = Number(value);
+    }
+  }
   const preset = params.get('look') as LookPreset | null;
   if (preset && preset in LOOK_PRESETS) {
     const hour = applyLookPreset(hd.settings, preset);

@@ -635,6 +635,92 @@ to transfer a redrawn animation reference from the variant pages to later frames
 pair; the same frame range applies. Delta merges existing variant pages and records status `DELTA`; it needs no plan
 or model call. Keep all plans, work directories, generated images and variant caches outside Git.
 
+## SHP vehicle redraw sheets (Python)
+
+`python/shp_vehicle_sheets.py` prepares DRON (the Soviet terror drone), an SHP vehicle rather than a voxel.
+It imports the unchanged `python/infantry_sheets.py` CPU image pipeline. Python 3 with numpy, Pillow and cv2 is
+sufficient; the vehicle CLI never invokes an image model. Supply your own extracted library. `--library` is the
+cache root; `--theater` selects `_library/<theater>/library.json` (XMP29U2 uses `urban`). Keep `SHP_WORK` outside Git.
+
+```sh
+SHP_SOURCE="$PWD/gameres/hd-cache"
+SHP_VARIANT="$PWD/gameres/hd-cache-l3-veh"
+SHP_WORK=/private/tmp/dron-redraw
+SHP_TOOL=packages/ra2-assets/python/shp_vehicle_sheets.py
+python3 -B "$SHP_TOOL" prepare --library "$SHP_SOURCE" --theater urban --units DRON --work "$SHP_WORK"
+# Run your image editor manually for each sheets/<name>/prompt.txt and input.png.
+# Save output.png alongside input.png, at exactly the same dimensions.
+python3 -B "$SHP_TOOL" compose --library "$SHP_SOURCE" --theater urban --work "$SHP_WORK"
+python3 -B "$SHP_TOOL" build --library "$SHP_SOURCE" --theater urban --work "$SHP_WORK"
+python3 -B "$SHP_TOOL" install --library "$SHP_SOURCE" --theater urban --work "$SHP_WORK" --variant-root "$SHP_VARIANT"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_*sheets.py' -v
+```
+
+`prepare` writes `prepare.json` and `sheets/<name>/{input.png,prompt.txt,job.json}`. It refuses to overwrite a
+prepared work directory. Each sheet is exactly 1536x1024 or 1024x1536 on RGB (118,118,118), with decoded DarkRed
+house paint. It groups all eight clockwise facings of Stand, Walk or Fire, splitting consecutive step ranges only
+when required to keep at least 4x the indexed frame size. If one step cannot fit all facings, facing blocks split
+as a fallback. Frame offsets remain the per-row anchors. The frame policy mirrors renderer `shpUnitBlocks`:
+DRON walks on 0..47, stands on 48..55 and attacks on 56..87; separate shadow cards never enter the sheets.
+
+`compose` uses `output.png` exclusively, even if an older `full.png` exists. It writes per-frame `metrics.json` and
+`review.png` (existing HD | redraw). The imported pipeline registers frames, samples in linear light, locks
+low-frequency Lab colour, preserves HD alpha with inward trimming, and encodes house-paint shading by value on the
+grey remap ramp. `compose` and `build` accept the same colour/trim/paint options as the infantry tool; pass the same
+options to both. `--names DRON_Walk,DRON_Fire` selects sheets, and misspelled names fail.
+
+`build` recomposes the selected sheets into `pages/`, discovers all affected HD pages automatically and writes
+`report.json`. Missing or wrong-sized outputs fail. A frame below `--min-sil` (default 0.6) keeps its source pixels
+in the diagnostic page, fails the build and prevents publication of `build.json`; fix the output before installing.
+`install` requires a successful build with unchanged inputs/pages. It detaches only the cache root, `_library` and
+selected theater directory when they are links, leaving other entries linked. It copies accepted body rectangles
+into the current variant pages, preserving other tracks' edits even on shared pages, then merges only the selected
+HD colour/remap filenames into `library.json`. Original cache files, indexed pages, shadow cards, other sprites and
+unrelated manifest entries remain intact. Install into a separate variant cache; the source is always read-only.
+
+See the [SHP vehicle review bench](../hd-renderer/README.md#shp-vehicle-review-bench) for deterministic eight-facing
+before/after views. Unit tests validate CPU image and installation contracts; they do not establish redraw quality
+or browser/GPU rendering acceptance.
+
+## Vehicle projection atlases (Python)
+
+`python/vehicle_projection.py` registers image-model redraw sheets against player-supplied voxel bakes and
+packs view-dependent colour/coverage and house-paint atlases. It requires Python 3 with numpy, Pillow and cv2;
+it does not download game resources or run an image model. Set `VEHICLE_WORK` to the external working
+directory containing `bake/` and `rb/`. All input and generated art, palettes and review sheets must stay outside Git.
+
+```sh
+python3 packages/ra2-assets/python/vehicle_projection.py build --type HTNK \
+  --bake "$VEHICLE_WORK/bake/HTNK" \
+  --sheets "$VEHICLE_WORK/rb/HTNK_body_A" "$VEHICLE_WORK/rb/HTNK_body_B" \
+    "$VEHICLE_WORK/rb/HTNK_tur_A" "$VEHICLE_WORK/rb/HTNK_tur_B" \
+  --palettes "$VEHICLE_WORK/bake/palettes.json" --house-key unit@BakeA \
+  --out "$VEHICLE_WORK/proj/vehicles-hd" --review "$VEHICLE_WORK/proj/review/HTNK"
+python3 packages/ra2-assets/python/vehicle_projection.py build-index --out "$VEHICLE_WORK/proj/vehicles-hd"
+python3 packages/ra2-assets/python/vehicle_projection.py grade --out "$VEHICLE_WORK/proj/vehicles-hd" \
+  --parts HTNK_body HTNK_turret SMCV_body --keep 0.3
+python3 -m unittest discover -s packages/ra2-assets/python -p test_vehicle_projection.py -v
+```
+
+`grade` is an optional post-build step for parts whose redraw drifted from steel to tan/beige: pixels in the
+orange-yellow hue band keep only `--keep` of their chroma at unchanged linear luminance (slightly cool grey), and
+house paint and alpha stay untouched. It rewrites the colour atlases in place, so run it once per build.
+
+A type requires a complete, uniformly spaced set of 32 or 16 facings for every part (`all` maps to `body`,
+`tur` to `turret`). Missing outputs and partial types fail the build; they never publish a new manifest. Sheets
+must share a scale. `output.png` is resized to the input sheet dimensions, input alpha comes from the bake's
+black/white pair, and grey-keyed redraw coverage is closed/hole-filled before registration. The bounded
+similarity search uses scale 0.94..1.06 and translations within 16 pixels; IoU below 0.85 emits a warning.
+Review sheets show the registered redraw, original silhouette outline, and registration parameters.
+
+`<TYPE>.json` version 1 records frame count/step, sheet scale, a two-row atlas-pixel Jacobian, house ramp,
+per-part atlas size, sorted frame rects/pivots, and registration results. Pivots pass through the sheet mapping,
+registration transform and packing offset. Atlas rects exclude the 12-pixel colour-dilated gutters; coverage
+remains the registered redraw alpha. Colour is sRGB; paint channels are linear data: mask, fractional ramp
+position (index 16 to 31), and half the residual linear-light luminance ratio. Civilian masks can be empty.
+`build-index` indexes completed manifests whose atlases exist. Serve the output directory as `vehicles-hd/`
+under the HD cache root; see [renderer controls](../hd-renderer/README.md#projected-vehicle-redraws).
+
 ## Sprite material atlas (Python, experimental)
 
 `python/sprite_normals.py` writes the material atlas the renderer's opt-in enhanced look relights sprites with

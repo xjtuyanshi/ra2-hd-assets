@@ -66,6 +66,7 @@ import { buildRain, type RainSystem } from './weather';
 import { VOXEL_FILL } from './ra2/voxels';
 import { groundFromHeights, setShadowGround, shadowShear } from './ra2/voxelShadow';
 import { voxelLightingFor } from './ra2/vpl';
+import { voxelPbrFor } from './ra2/voxelPbr';
 import {
   ART_LIGHT_ELEVATION,
   ART_REFERENCE_HOUR,
@@ -94,6 +95,8 @@ export function defaultAntialias(): Antialias {
 }
 
 export interface HdSettings extends CinematicGradeParams {
+  /** Load-time voxel geometry selection. Changing it requires rebuilding the world's voxel units. */
+  voxelLook: 'engine' | 'remaster';
   toneMapper: ToneMapper;
   exposure: number;
   bloom: number;
@@ -365,6 +368,7 @@ export class HdRenderer {
   readonly scene = new Scene();
   readonly view = new IsoCamera();
   readonly settings: HdSettings = {
+    voxelLook: 'engine',
     toneMapper: 'faithful',
     exposure: 1,
     bloom: 0.55,
@@ -557,6 +561,7 @@ export class HdRenderer {
     let waterY: number | null;
     if (world) {
       this.world = world;
+      if (world.voxelLook) this.settings.voxelLook = world.voxelLook;
       this.terrain = world.terrain;
       this.bounds = { width: world.width, height: world.height };
       waterY = world.waterY;
@@ -834,6 +839,15 @@ export class HdRenderer {
     this.lighting.follow(this.view.target);
     this.lighting.update(env.timeOfDay, raining ? 0.35 + 0.5 * rainAmount : 0);
     const light = this.lighting.state;
+    if (this.settings.voxelLook === 'remaster') {
+      const pbr = voxelPbrFor(this.nodes);
+      pbr.skyZenith.value.copy(light.skyZenith);
+      pbr.skyHorizon.value.copy(light.skyHorizon);
+      // LightingState has no ground swatch; the actual HemisphereLight owns the matching ground radiance.
+      pbr.groundColour.value
+        .copy(this.lighting.hemi.groundColor)
+        .multiplyScalar(this.lighting.hemi.intensity / Math.PI);
+    }
     const reference = this.lighting.referenceIrradiance();
     // Original maps only: the procedural sandbox keeps its own look.
     const nightGrade = this.world ? light.night : 0;

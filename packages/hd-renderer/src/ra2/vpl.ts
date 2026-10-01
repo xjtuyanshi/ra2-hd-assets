@@ -39,6 +39,9 @@ import type { VoxelLightingFile } from '../../../ra2-assets/src/vpl';
 import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLight, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrade } from './mapLighting';
+import { voxelProjectionFor, type VoxelProjectionPart } from './voxelProjection';
+import { projectedVoxelColour } from './voxelProjectionNodes';
+import { spriteLookFor } from './spriteLook';
 
 /**
  * Voxel shading the way the engine does it (YR 1.001). Before drawing a voxel unit, TechnoClass (@0x706F4D) has
@@ -143,6 +146,7 @@ export class VoxelLightingState {
   loading: Promise<boolean> | null = null;
   loadingUrl = '';
   readonly byPalette = new WeakMap<Uint8Array, MeshStandardNodeMaterial>();
+  readonly byProjection = new WeakMap<VoxelProjectionPart, WeakMap<Uint8Array, MeshStandardNodeMaterial>>();
 }
 
 const states = new WeakMap<AtmosphereNodes, VoxelLightingState>();
@@ -309,6 +313,7 @@ function createMaterial(
   sections: number,
   grade: MapLightGrade | null,
   nodes: AtmosphereNodes,
+  projection?: VoxelProjectionPart,
 ): MeshStandardNodeMaterial {
   const state = voxelLightingFor(nodes);
   const { voxelFill, voxelDebug, voxelExtraLight, voxelOcclusion, voxelSunDiffuse, lightDirection } = state;
@@ -317,6 +322,7 @@ function createMaterial(
   nodes.own(material);
   nodes.own(lut);
   material.name = sections ? 'voxel-vpl' : 'voxel-fallback';
+  if (projection) material.name += '-projected';
   const rows = sections + 2;
   const occlusion: ShaderNode = attribute('occlusion', 'float');
   const ao: ShaderNode = float(1).sub(occlusion.mul(voxelOcclusion));
@@ -355,16 +361,37 @@ function createMaterial(
   );
   const live: ShaderNode = float(1).sub(debugOn);
   // The cell's light for objects at the unit's origin plus the units' extra light, in the palette's scale.
-  lit = srgbScale(lit, objectLevelAt(grade, modelPosition.xz).add(voxelExtraLight));
+  const level: ShaderNode = objectLevelAt(grade, modelPosition.xz).add(voxelExtraLight);
+  lit = srgbScale(lit, level);
   // Scene light on the night-desaturated colour (house paint keeps its colour), local lights (lamps, fires,
   // explosions) on the full colour, strongest on faces turned up towards the lit ground's glow.
   const paint: ShaderNode = step(15.5, pindex).mul(step(pindex, 31.5));
   const local: ShaderNode = objectLight(positionWorld.xz, nodes)
     .mul(1 / Math.PI)
     .mul(float(0.55).add(max(n.y, 0).mul(0.45)));
-  const shaded: ShaderNode = mix(moonlit(lit, nodes), lit, paint).mul(voxelFill).add(lit.mul(local)).mul(ao);
+  let shaded: ShaderNode = mix(moonlit(lit, nodes), lit, paint).mul(voxelFill).add(lit.mul(local)).mul(ao);
+  let uncovered: ShaderNode = float(1);
+  if (projection) {
+    const projected = projectedVoxelColour(
+      projection,
+      voxelProjectionFor(nodes),
+      (index) => sRGBTransferEOTF(texture(lut, vec2(index.add(0.5).div(256), (sections + 0.5) / rows)).rgb),
+      lightDirection,
+      spriteLookFor(nodes).sunDirection,
+    );
+    const projState = voxelProjectionFor(nodes);
+    const formAo: ShaderNode = float(1).sub(occlusion.mul(projState.formAO.clamp()));
+    const colour: ShaderNode = srgbScale(projected.colour, level.div(projState.levelRef.max(0.01))).mul(formAo);
+    const projectedShade: ShaderNode = mix(moonlit(colour, nodes), colour, projected.paint)
+      .mul(voxelFill)
+      .add(colour.mul(local));
+    // The redraw already contains AO and directional shading. Only uncovered engine art receives mesh AO/sheen.
+    shaded = mix(shaded, projectedShade, projected.coverage);
+    uncovered = float(1).sub(projected.coverage);
+    material.matp = vec3(matp.xy, matp.z.mul(uncovered));
+  }
   material.emissiveNode = mix(shaded, debugColour, debugOn);
-  material.colorNode = raw.mul(voxelSunDiffuse).mul(ao).mul(live);
+  material.colorNode = raw.mul(voxelSunDiffuse).mul(ao).mul(live).mul(uncovered);
   material.roughnessNode = matp.x;
   // Metalness only shapes the highlight (see VoxelLightingModel); the diffuse term stays a plain weak Lambert.
   material.metalnessNode = float(0);
@@ -388,6 +415,33 @@ export function voxelMaterialFor(
   if (!material) {
     material = createMaterial(lookupTexture(key, loaded), loaded?.sections ?? 0, paletteGrade(palette), nodes);
     byPalette.set(key, material);
+  }
+  return material;
+}
+
+/** A palette can share a material only within one projection part, including both turret and barrel meshes. */
+export function voxelProjectedMaterialFor(
+  palette: Uint8Array | null,
+  projection: VoxelProjectionPart,
+  nodes = paletteNodes(palette) ?? DEFAULT_ATMOSPHERE_NODES,
+): MeshStandardNodeMaterial {
+  const state = voxelLightingFor(nodes);
+  let palettes = state.byProjection.get(projection);
+  if (!palettes) {
+    palettes = new WeakMap();
+    state.byProjection.set(projection, palettes);
+  }
+  const key = palette ?? GREY;
+  let material = palettes.get(key);
+  if (!material) {
+    material = createMaterial(
+      lookupTexture(key, state.loaded),
+      state.loaded?.sections ?? 0,
+      paletteGrade(palette),
+      nodes,
+      projection,
+    );
+    palettes.set(key, material);
   }
   return material;
 }
