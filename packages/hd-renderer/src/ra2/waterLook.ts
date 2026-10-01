@@ -819,6 +819,12 @@ export const BED_ABSORPTION = [4.2, 1.45, 1.0] as const;
 const BED_SCATTER = { colour: 0x1f9e93, near: 0.1, far: 0.95, amount: 0.85 } as const;
 /** Lit turquoise shelf on maps with a painted surface tile (cells from the bank; see bedWaterLook). */
 const BED_SHALLOW_GLOW = { colour: 0x2aa884, near: 0.25, far: 1.8, amount: 0.27 } as const;
+/**
+ * Shallow-band chroma reduction (L5F art review): with the luminous glow the band read tropical cyan, chroma ~20 within
+ * 0.6 cells of the bank against ~15 in the approved target. Mixing toward the pixel's own luminance keeps the
+ * brightness the owner asked for and settles the hue into the target's muted teal.
+ */
+export const BED_SHALLOW_DESAT = { near: 0.1, far: 1.6, amount: 0.3, tint: [1, 1.015, 0.97] } as const;
 /** Optional per-map water detail, used only by the painted-bed look. */
 export const WATER_DETAIL = {
   /** Gain from linear detail colour to the in-scattered column colour. */
@@ -1246,6 +1252,12 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
     displayedColumn = columnForDisplay(column.mul(nightLevel));
   }
   let body: ShaderNode = bedLit.mul(transmission).add(displayedColumn.mul(vec3(1).sub(transmission)));
+  {
+    const band: ShaderNode = smoothstep(BED_SHALLOW_DESAT.far, BED_SHALLOW_DESAT.near, offshore);
+    body = mix(body, vec3(dot(body, vec3(0.2126, 0.7152, 0.0722))), band.mul(BED_SHALLOW_DESAT.amount));
+    // A slight green-for-blue shift (luminance within 1 %) moves the cyan toward the target's teal.
+    body = body.mul(mix(vec3(1), vec3(...BED_SHALLOW_DESAT.tint), band));
+  }
 
   // Reuse the enhanced reflection, glitter, mirrored lights and rain-ripple model, fading it to zero at the sand join.
   const open: ShaderNode = smoothstep(BED_REFLECTION_REACH.start, BED_REFLECTION_REACH.full, shore);

@@ -14,7 +14,7 @@ try {
   const page = await browser.newPage({
     ignoreHTTPSErrors: true,
     viewport: { width: 1000, height: 800 },
-    deviceScaleFactor: 2,
+    deviceScaleFactor: 2.018,
   });
   await preventThirdPartyDownloads(page);
   await page.goto(process.env.RA2_BROWSER_ORIGIN ?? 'https://127.0.0.1:15174/');
@@ -22,6 +22,7 @@ try {
     const png = (width, height, color, title) => {
       const c = document.createElement('canvas'); c.width = width; c.height = height;
       const ctx = c.getContext('2d');
+      if (width===504) { ctx.fillStyle=color; ctx.fillRect(0,0,width,height); return c.toDataURL('image/png').split(',')[1]; }
       if (width===336) {
         for (let tab=0;tab<4;tab++) for (let state=0;state<3;state++) {
           ctx.fillStyle=['#3355aa','#33cc66','#aa3344'][state]; ctx.fillRect(state*112,tab*100,112,100);
@@ -36,8 +37,8 @@ try {
       if (width===120) { ctx.fillStyle='#4a9dff'; ctx.fillRect(30,30,60,30); ctx.fillStyle='#eee'; ctx.fillRect(50,20,10,15); }
       return c.toDataURL('image/png').split(',')[1];
     };
-    return { cameo: png(120,96,'#345677','Synthetic'), sidebar: png(168,600,'#262c38','SOVIET'), bar: png(632,32,'#333945','COMMAND'), cursor: png(16,16,'#f544ff',''), tabs: png(336,400,'','') };
-  })()`)) as { cameo: string; sidebar: string; bar: string; cursor: string; tabs: string };
+    return { cameo: png(120,96,'#345677','Synthetic'), sidebar: png(504,744,'#262c38',''), sidebarEnd: png(504,312,'#262c38',''), bar: png(632,32,'#333945','COMMAND'), cursor: png(16,16,'#f544ff',''), tabs: png(336,400,'','') };
+  })()`)) as { cameo: string; sidebar: string; sidebarEnd: string; bar: string; cursor: string; tabs: string };
   const requests: string[] = [];
   let chromeOn = false;
   await page.route('**/hd-cache/**', async (route) => {
@@ -50,7 +51,11 @@ try {
         json: {
           version: 1,
           byId: {},
-          images: { powricon: { hd: 'cameo.png' }, giicon: { hd: 'cameo.png' }, tnkicon: { hd: 'cameo.png' } },
+          images: {
+            powricon: { hd: 'cameo.png', caption: '短标题' },
+            giicon: { hd: 'cameo.png' },
+            tnkicon: { hd: 'cameo.png' },
+          },
         },
       });
     if (chromeOn && path.endsWith('/chrome/1/chrome.json'))
@@ -58,7 +63,11 @@ try {
         json: {
           frame: { width: 800, height: 600 },
           pieces: [
-            { file: 'sidebar.png', rect: { x: 0, y: 0, width: 168, height: 600 }, anchor: 'sidebar' },
+            ...[0, 248, 496].map((y) => ({
+              file: y === 496 ? 'sidebar-end.png' : 'sidebar.png',
+              rect: { x: 0, y, width: 168, height: y === 496 ? 104 : 248 },
+              anchor: 'sidebar',
+            })),
             { file: 'bar.png', rect: { x: 0, y: 0, width: 632, height: 32 }, anchor: 'commandBar' },
           ],
           tabs: {
@@ -80,11 +89,13 @@ try {
         ? 'cursor'
         : path.endsWith('/cameo.png')
           ? 'cameo'
-          : path.endsWith('/sidebar.png')
-            ? 'sidebar'
-            : path.endsWith('/bar.png')
-              ? 'bar'
-              : null;
+          : path.endsWith('/sidebar-end.png')
+            ? 'sidebarEnd'
+            : path.endsWith('/sidebar.png')
+              ? 'sidebar'
+              : path.endsWith('/bar.png')
+                ? 'bar'
+                : null;
     if (key) return route.fulfill({ body: Buffer.from(pictures[key], 'base64'), contentType: 'image/png' });
     return route.fulfill({ status: 404, body: 'Optional cache absent' });
   });
@@ -106,6 +117,12 @@ try {
     const frame={width:800,height:600,pixels:new Uint8Array(0),palette:new Uint8Array(0),rgba,
       cursor:{handle:1,x:690,y:250,hotspotX:0,hotspotY:0,width:6,height:6,rgba:new Uint8Array(6*6*4).fill(255)}};
     const sidebar=hdSidebar();
+    const labelCalls=[];
+    const fillText=CanvasRenderingContext2D.prototype.fillText;
+    CanvasRenderingContext2D.prototype.fillText=function(value,x,y,...args) {
+      if(this.canvas.id==='hd-ui') labelCalls.push({value,x,y,color:this.fillStyle,font:this.font});
+      return fillText.call(this,value,x,y,...args);
+    };
     sidebar.pointer={x:660,y:400,frame:0,hotspot:{x:2,y:3}};
     sidebar.tooltip={rect:{x:590,y:300,width:100,height:40},text:'Native tooltip\\n$600'};
     for (let y=397;y<413;y++) for (let x=658;x<674;x++) rgba.set([245,68,255,255],(y*800+x)*4);
@@ -130,9 +147,12 @@ try {
       tooltip(on){sidebar.tooltip=on?{rect:{x:590,y:300,width:100,height:40},text:'Native tooltip\\n$600'}:null},
       info(){return {polls,clicks,canvas:!!document.getElementById('hd-ui'),enabled:window.__hdBridge.ui.enabled,
         width:document.getElementById('hd-ui')?.width,height:document.getElementById('hd-ui')?.height}},
+      labels(){return labelCalls.splice(0)},
+      seam(y){const c=document.getElementById('hd-ui'),ctx=c.getContext('2d'),x=Math.floor(796*c.width/800),row=Math.round(y*c.height/600);
+        return [-2,-1,0,1,2].map(d=>Array.from(ctx.getImageData(x,row+d,1,1).data))},
       mode(mode){renderer.setUpscaleMode(mode)},
       keyed(){renderer.setTransparentKey({rect:{x:0,y:0,width:632,height:568},rgb565:0xf81f});rgba.set([255,0,255,255],0);frame.rgba=rgba.slice()},
-      stop(){stopped=true;cancelAnimationFrame(request);stop();renderer.destroy()},
+      stop(){stopped=true;cancelAnimationFrame(request);stop();renderer.destroy();CanvasRenderingContext2D.prototype.fillText=fillText},
     };
   })()`;
   const results: unknown[] = [];
@@ -155,8 +175,31 @@ try {
     assert.deepEqual(pixels.radar, [20, 95, 90, 255]);
     assert.deepEqual(pixels.cursor, [255, 255, 255, 255]);
     assert.equal(pixels.command[3], chrome ? 0 : 255);
-    assert.equal(pixels.info.width, 1600);
-    assert.equal(pixels.info.height, 1200);
+    assert.equal(pixels.info.width, Math.round(800 * 2.018));
+    assert.equal(pixels.info.height, Math.round(600 * 2.018));
+    const labels = (await page.evaluate('__uiAcceptance.labels()')) as {
+      value: string;
+      x: number;
+      y: number;
+      color: string;
+      font: string;
+    }[];
+    assert(labels.some((label) => label.value === '短标题'));
+    assert(labels.some((label) => label.value === 'GI'));
+    const credits = labels.find((label) => label.value === '12345')!;
+    assert.equal(credits.color, '#cec036');
+    assert.match(credits.font, /^900 12px/);
+    const scale = pixels.info.width / 800;
+    assert.equal(credits.x, Math.round(716 * scale) / scale);
+    assert.equal(credits.y, Math.round(159.5 * scale) / scale);
+    if (chrome) {
+      for (const y of [248, 496]) {
+        assert.deepEqual(
+          await page.evaluate(`__uiAcceptance.seam(${y})`),
+          Array.from({ length: 5 }, () => [38, 44, 56, 255]),
+        );
+      }
+    }
     assert.deepEqual(await page.evaluate('__uiAcceptance.pixel(660,400)'), [245, 68, 255, 255]);
     assert.equal(await page.evaluate('__uiAcceptance.uiPixel(660,400)[3]'), chrome ? 255 : 0);
     assert.deepEqual(await page.evaluate('__uiAcceptance.uiPixel(666,400)'), [245, 68, 255, 255]);
@@ -208,6 +251,9 @@ try {
       softwareCursor: 'atlas clipped at covered boundary',
       tooltip: 'native rect shown/hidden',
       tabs: chrome ? 'normal/active art after screen click; disabled sibling retains selection' : 'procedural fallback',
+      chromeSeams: chrome ? 'opaque uniform rows at 248 and 496, device scale 2.018' : null,
+      captions: 'index short caption and native-name fallback',
+      credits: 'solid native yellow, weight 900, lowered anchor',
     });
   }
   assert.equal(requests.filter((path) => path.endsWith('/chrome/1/chrome.json')).length, 2);

@@ -231,7 +231,10 @@ function presentation(withLibrary = true) {
     { kind: 'overlay', type: 'TIB01', x: 2, y: 2, z: 2, sprite: 'overlay:TIB01', flat: true },
   ];
   const available = { indexed: true, hd: true, failed: false };
-  const typeLibrary: Pick<TypeLibrary, 'smudges' | 'overlays' | 'sprites'> = withLibrary ? art : { sprites: {} };
+  const typeLibrary: Pick<TypeLibrary, 'smudges' | 'overlays' | 'sprites' | 'types'> = {
+    ...(withLibrary ? art : { sprites: {} }),
+    types: {},
+  };
   const liveLibrary = {
     library: typeLibrary,
     revision: 0,
@@ -356,6 +359,52 @@ describe('LiveView smudge integration', () => {
     p.view.render(3);
     expect([ore.mesh.count, crater.mesh.count]).toEqual([0, 1]);
     expect(p.view.diagnostics()).toMatchObject({ overlaysFromEngine: true, smudgesFromEngine: true });
+    p.view.dispose();
+  });
+
+  it('forwards rubble through LiveView and uploads building frame three on its body and shadow pages', () => {
+    const p = presentation();
+    p.liveLibrary.library.overlays = {
+      DEBRIS: {
+        rubble: true,
+        frames: 0,
+        palette: 'iso',
+        wall: false,
+        tiberium: false,
+        remap: false,
+        flat: true,
+        drawOffset: [0, 0],
+        lighting: 'full',
+      },
+    };
+    p.liveLibrary.library.types['SOURCE'] = {
+      kind: 'building',
+      image: 'SOURCE',
+      sprite: 'building:SOURCE',
+      drawOffset: [0, -15],
+      lighting: 'ambient',
+      remap: true,
+    };
+    const body: SpriteEntry = {
+      ...sprite(3),
+      palette: 'unit',
+      remap: true,
+      frames: Array.from({ length: 4 }, (_, n) => frame(3, n)),
+      shadows: Array.from({ length: 4 }, (_, n) => frame(4, n)),
+    };
+    p.liveLibrary.library.sprites['building:SOURCE'] = body;
+    const overlays = { ...cells(), types: ['DEBRIS'], rubble: [{ slot: 0, type: 'SOURCE' }] };
+    p.view.push(structuredClone({ ...p.state(), overlays }));
+    p.view.render(1);
+    const debris = p.backing.overlayLayers.get(3)!.layer;
+    const shadow = p.backing.overlayLayers.get(4)!.layer;
+    expect([debris.mesh.count, shadow.mesh.count]).toEqual([1, 1]);
+    expect(debris.getInstances()[0]).toMatchObject({ frame: body.frames[3], palette: 'lib:iso', flat: true });
+    expect(shadow.getInstances()[0]).toMatchObject({ frame: body.shadows![3], shadow: true });
+    p.view.push({ ...p.state(), overlays: { ...overlays, revision: 2, rubble: [] } });
+    p.view.render(2);
+    expect([debris.mesh.count, shadow.mesh.count]).toEqual([0, 0]);
+    expect(p.backing.smudgeLayers.get(1)!.mesh.count).toBe(1);
     p.view.dispose();
   });
 

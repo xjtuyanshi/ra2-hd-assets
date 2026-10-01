@@ -575,6 +575,63 @@ IsARock=yes
     expect(collectTypeLibrary(inst, 'temperate').overlays).toEqual(collected.overlays);
   });
 
+  it('keeps rubble metadata without resolving its Image, while a normal rock still resolves to its SHP', () => {
+    const rules = `[OverlayTypes]
+0=RUBBLE_OVERLAY
+1=SROCK01
+[RUBBLE_OVERLAY]
+Image=SROCK01
+IsRubble=yes
+DrawFlat=yes
+[SROCK01]
+IsARock=yes
+`;
+    const files = { 'srock01.shp': bodyAndShadow(2) };
+    const inis = { 'rulesmd.ini': rules, 'artmd.ini': '' };
+    const inst = fakeInstall(files, inis);
+    const reads: string[] = [];
+    const collected = collectOverlayLibrary(
+      {
+        ...inst,
+        shp: (name) => {
+          reads.push(name);
+          return inst.shp(name);
+        },
+      },
+      'temperate',
+    );
+    expect(collected.overlays['RUBBLE_OVERLAY']).toEqual({
+      rubble: true,
+      frames: 0,
+      palette: 'iso',
+      wall: false,
+      tiberium: false,
+      remap: false,
+      flat: true,
+      drawOffset: [0, 0],
+      lighting: 'full',
+    });
+    expect(collected.collector.sprites.has('overlay:RUBBLE_OVERLAY')).toBe(false);
+    expect([...collected.collector.sprites.keys()]).toEqual(['overlay:SROCK01']);
+    expect(collected.collector.sprites.get('overlay:SROCK01')!.entry.file).toBe('srock01.shp');
+    expect(reads).toEqual(['srock01.shp']);
+    expect(collected.overlays['SROCK01']!.drawOffset).toEqual([0, 15]);
+    expect(collected.warnings).toEqual([]);
+
+    const rubbleOnly = fakeInstall(files, { ...inis, 'rulesmd.ini': rules.replace('1=SROCK01\n', '') });
+    const isolated = collectOverlayLibrary(rubbleOnly, 'temperate');
+    expect(isolated.collector.sprites.size).toBe(0);
+    expect(isolated.collector.usedPalettes.has('iso')).toBe(true);
+    expect(isolated.warnings).toEqual([]);
+    const { out, dir } = makeCopy();
+    appendOverlayLibrary(rubbleOnly, 'temperate', out);
+    const saved = readLibrary(dir);
+    expect(saved.overlays!['RUBBLE_OVERLAY']).not.toHaveProperty('sprite');
+    expect(Object.keys(saved.sprites).filter((key) => key.startsWith('overlay:'))).toEqual([]);
+    expect(Object.values(saved.sprites).some((entry) => entry.file?.includes('srock'))).toBe(false);
+    expect(saved.palettes['iso']).toBe('palettes/iso.png');
+  });
+
   it('appends only new pages to a temp copy and preserves original metadata, pages, palettes and HD references', () => {
     const { original, out, source, dir } = makeCopy();
     const result = appendOverlayLibrary(inst, 'temperate', out);
@@ -591,6 +648,7 @@ IsARock=yes
       expect(readFileSync(join(dir, file))).toEqual(readFileSync(join(source, file)));
     expect(readFileSync(join(source, 'library.json'), 'utf8')).toBe(JSON.stringify(original));
     for (const overlay of Object.values(library.overlays!)) {
+      if (!overlay.sprite) continue;
       const sprite = library.sprites[overlay.sprite]!;
       expect([...sprite.frames, ...sprite.shadows!].every((frame) => frame.page === 1)).toBe(true);
     }

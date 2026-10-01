@@ -284,6 +284,42 @@ class OreFieldsTests(unittest.TestCase):
                 self.assertEqual((base / name).read_bytes(), data)
             self.assertTrue((variant / 'original.png').is_symlink())
 
+    def test_contact_bed_is_faint_and_only_near_objects(self):
+        # L5F: the soil may only form a faint halo under nuggets/gems (alpha <= bed alpha), so terrain shows between
+        # them and no cell-shaped carpet edge exists; the L5 carpet stays reproducible with bed=None.
+        with tempfile.TemporaryDirectory() as temporary:
+            inputs = tiny_inputs(Path(temporary))
+            overlays = ore.OverlayLibrary(inputs['root'], 'test')
+            lib = lambda: ore.Library(inputs['gold'], inputs['gem'], inputs['soil'])
+            contact = ore.ExtComposer(lib(), overlays, bed=ore.BED_L5F).compose_ext('TIB01', 11)
+            carpet = ore.ExtComposer(lib(), overlays).compose_ext('TIB01', 11)
+            for result in (contact, carpet):
+                self.assertEqual(result['rgba2'].shape[:2], (ore.EXT_H * ore.OUT, ore.EXT_W * ore.OUT))
+            ground_c = contact['mat2'][..., 2] < 0.1  # dielectric ground texels (soil or shadow), not the metal nugget
+            ground_v = carpet['mat2'][..., 2] < 0.1
+            a_c, a_v = contact['rgba2'][..., 3], carpet['rgba2'][..., 3]
+            # Bed + contact shadow: never the near-opaque carpet, and far less ground coverage.
+            self.assertLess(np.count_nonzero(ground_c & (a_c > 0.05)), 0.5 * np.count_nonzero(ground_v & (a_v > 0.05)))
+            self.assertLess(np.percentile(a_c[ground_c & (a_c > 0.02)], 50), np.percentile(a_v[ground_v & (a_v > 0.02)], 50))
+            gem = ore.ExtComposer(lib(), overlays, bed=ore.BED_L5F).compose_ext('GEM01', 11)
+            self.assertGreater(np.count_nonzero(gem['rgba2'][..., 3] > 0.02), 0)
+
+    def test_gem_saturation_and_pastel_lift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            inputs = tiny_inputs(Path(temporary))
+            overlays = ore.OverlayLibrary(inputs['root'], 'test')
+            base = ore.Library(inputs['gold'], inputs['gem'], inputs['soil'])
+            soft = ore.Library(inputs['gold'], inputs['gem'], inputs['soil'])
+            ore.ExtComposer(base, overlays, gem_sat=1.0, gem_pastel=0.0)
+            ore.ExtComposer(soft, overlays, gem_sat=0.6, gem_pastel=0.2)
+
+            def chroma(sprites):
+                rgb = np.concatenate([s['rgba'][..., :3][s['rgba'][..., 3] > 0.5] for s in sprites])
+                return float((rgb.max(1) - rgb.min(1)).mean()), float(rgb.mean())
+            (c0, v0), (c1, v1) = chroma(base.gem), chroma(soft.gem)
+            self.assertLess(c1, 0.75 * c0)
+            self.assertGreater(v1, v0)
+
     def test_cli_approved_defaults_and_individual_overrides(self):
         args = ['build', '--library-root', 'cache', '--theatre', 'test', '--gold', 'gold.pkl',
                 '--gem', 'gem.npz', '--soil', 'soil.png', '--out', 'build']
@@ -302,6 +338,11 @@ class OreFieldsTests(unittest.TestCase):
         self.assertEqual(changed.soil_target, [0.4, 0.3, 0.2])
         self.assertEqual(tuple(defaults.families), ore.FAMILIES)
         self.assertFalse(defaults.strict_mask_coverage)
+        self.assertEqual(defaults.bed, 'contact')
+        self.assertEqual(defaults.bed_alpha, ore.BED_L5F['alpha'])
+        self.assertLessEqual(defaults.bed_alpha, 0.25)
+        self.assertEqual((defaults.gem_sat, defaults.gem_pastel), (ore.GEM_SAT_L5F, ore.GEM_PASTEL_L5F))
+        self.assertEqual(parser.parse_args(args + ['--bed', 'carpet']).bed, 'carpet')
         self.assertTrue(parser.parse_args(args + ['--strict-mask-coverage']).strict_mask_coverage)
 
     def test_sheet_cli_writes_comparisons_with_explicit_map_and_font(self):

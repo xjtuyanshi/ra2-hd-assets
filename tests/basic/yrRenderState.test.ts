@@ -454,7 +454,8 @@ describe('YR 1.001 render state for the HD bridge', () => {
         data: frames,
         types: reuse?.types ?? ['GAWALL'],
         revision: (reuse?.revision ?? 0) + Number(changed),
-        counts: { cells: 2, overlays: 1, invalidCells: 0, invalidTypes: 0, invalidIndices: 0 },
+        rubble: [{ slot: 0, type: 'CAOILD' }],
+        counts: { cells: 2, overlays: 1, invalidCells: 0, invalidTypes: 0, invalidIndices: 0, invalidRubble: 0 },
       };
     };
     const { read, readOverlays } = sources(memory, { overlays: overlay, now: () => at, map: () => inBattle });
@@ -463,6 +464,11 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(first.overlays!.index).not.toBe(scratch.index);
     expect(first.overlays!.data).not.toBe(scratch.data);
     expect(first.overlays!.types).not.toBe(scratch.types);
+    expect(first.overlays!.rubble).toEqual(scratch.rubble);
+    expect(first.overlays!.rubble).not.toBe(scratch.rubble);
+    expect(first.overlays!.rubble![0]).not.toBe(scratch.rubble[0]);
+    scratch.rubble[0]!.type = 'OTHER';
+    expect(first.overlays!.rubble).toEqual([{ slot: 0, type: 'CAOILD' }]);
     at = 249;
     data = 7;
     memory.frame(101);
@@ -547,6 +553,7 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(first.smudges!.index).not.toBe(scratch.index);
     expect(first.smudges!.data).not.toBe(scratch.data);
     expect(first.smudges!.types).not.toBe(scratch.types);
+    expect(first.smudges).not.toHaveProperty('rubble');
     at = 249;
     data = 7;
     memory.frame(101);

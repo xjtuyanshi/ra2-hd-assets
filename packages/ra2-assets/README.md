@@ -697,7 +697,12 @@ trusted scratch `.pkl` libraries. It reuses original nugget layouts over 12 grow
 contact shadows and materials, and writes four atlas PNGs plus `frames.json`. Decals are 68x46 at offset (-34,-12)
 from the cell's top corner, with a 1 texel gutter. The defaults are the approved L5 set: soil target `.46 .325 .19`,
 gold scale `1.16`, gain `.95`, knee `.84`, gold gamma `1.2`, clarity `.2`, gem scale `1.25` and gem gamma `.78`; all
-composition parameters have individual flags. NumPy, Pillow and OpenCV are required. In-engine, the live overlay layer marks tiberium overlays as
+composition parameters have individual flags. The ground under the objects defaults to the L5F contact bed
+(`--bed contact`, `BED_L5F`): a halo of at most `.25` alpha directly under each nugget or gem plus its contact
+shadow, so the terrain shows between objects and fields never form a carpet with cell-shaped edges; gems are pulled
+toward pale glassy beads with `--gem-sat` / `--gem-pastel`. `--bed carpet --gem-sat 1 --gem-pastel 0` reproduces the
+L5 v8 soil carpet. The installed L5F page adds `--gold-scale 1.35 --gold-gain 1.0 --gem-sat .64 --gem-pastel .16
+--gem-scale 1.4 --gem-bed-alpha .25 --gem-bed-shadow .6` (gold coverage at or above the original field's). NumPy, Pillow and OpenCV are required. In-engine, the live overlay layer marks tiberium overlays as
 ground crystals: the material page drives relighting, sun highlights and sparse animated star twinkles
 (`groundCrystalColour` in `packages/hd-renderer/src/ra2/spriteLook.ts`), which fade with the sun at night.
 The default mask preserves the scratch build's thresholded faint tails exactly. Add `--strict-mask-coverage` to cover every
@@ -719,6 +724,28 @@ python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_ore_field
 
 `install` uses POSIX `flock` on the destination theatre's `.compose.lock`, atomically replaces its own page and
 JSON entries without writing through symlinks, preserves other tracks' data, and reuses the page index on reruns.
+
+## Destroyed-building rubble pages (Python)
+
+YR draws a destroyed `LeaveRubble=yes` building as its own SHP body frame 3 in the ISO palette at the IsRubble overlay
+cell that carries the building type (see `docs/remaster/LIVE_OVERLAYS.md`). The stock HD pages hold that frame
+upscaled with the unit palette, so `python/rubble_pages.py` moves frame 3 of every such building to a dedicated
+`sprites-rubble-l5f` page per theatre: `export` packs the indexed frames (plus ISO-palette RGBA and grey-118 images),
+the caller upscales `rubble_grey_1x.png` 4x (Real-ESRGAN), `build` area-downsamples to 2x with alpha from the original
+mask and optional image-model redraws (registered to the upscale with `hybrid_redraw.register`, Lab low frequencies
+locked to it; a poor fit falls back and is flagged), and `install` copies the page and points `frames[3]` at it under
+the library lock without writing through symlinks. `sheet` / `slice` prepare and cut model sheets. The rules type
+list comes from the install (`LeaveRubble=yes` building types).
+
+```bash
+python3 -B packages/ra2-assets/python/rubble_pages.py export --cache-root "$VARIANT" --theatre urban \
+  --types "$WORK/leave_rubble.json" --out "$WORK/rubble/export"
+python3 -B packages/ra2-assets/python/rubble_pages.py build --export "$WORK/rubble/export" \
+  --upscaled "$WORK/rubble/up4.png" [--redraw-dir "$WORK/rubble/redraws"] --out "$WORK/rubble/build"
+python3 -B packages/ra2-assets/python/rubble_pages.py install --build "$WORK/rubble/build" --cache-root "$VARIANT" \
+  --theatre urban
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_rubble_pages.py'
+```
 `sheet` compares original/L4/L5 with Chinese labels at the same cell anchor. Game art and all derived images stay
 outside Git; numerical tests do not establish renderer or visual acceptance.
 

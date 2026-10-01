@@ -2,7 +2,7 @@ import type { Rect } from './sidebarView';
 
 export interface CameoIndex {
   version: 1;
-  images: Record<string, { hd?: string; orig?: string }>;
+  images: Record<string, { hd?: string; orig?: string; caption?: string }>;
   byId: Record<string, string>;
 }
 
@@ -28,12 +28,89 @@ export interface CursorManifest {
 export interface ChromeAssets {
   frame: { width: number; height: number };
   pieces: (ChromeManifest['pieces'][number] & { bitmap: ImageBitmap })[];
+  composites?: Partial<
+    Record<ChromeManifest['pieces'][number]['anchor'], { rect: Rect; bitmap: ImageBitmap | HTMLCanvasElement }>
+  >;
   tabs?: NonNullable<ChromeManifest['tabs']> & { bitmap: ImageBitmap };
+}
+
+/** Place an anchor's pieces without resampling; incompatible scales retain per-piece drawing. */
+export function layoutChromeAnchor(pieces: readonly Pick<ChromeAssets['pieces'][number], 'rect' | 'bitmap'>[]): {
+  rect: Rect;
+  width: number;
+  height: number;
+  placements: Rect[];
+} | null {
+  if (!pieces.length) return null;
+  const scale = pieces[0]!.bitmap.width / pieces[0]!.rect.width;
+  if (!(scale > 0) || !Number.isFinite(scale)) return null;
+  if (
+    !pieces.every(
+      ({ rect: r, bitmap }) =>
+        r.width > 0 &&
+        r.height > 0 &&
+        bitmap.width / r.width === scale &&
+        bitmap.height / r.height === scale &&
+        [r.x, r.y, r.width, r.height].every((value) => Number.isInteger(value * scale)),
+    )
+  )
+    return null;
+  const x = Math.min(...pieces.map((piece) => piece.rect.x));
+  const y = Math.min(...pieces.map((piece) => piece.rect.y));
+  const width = Math.max(...pieces.map((piece) => piece.rect.x + piece.rect.width)) - x;
+  const height = Math.max(...pieces.map((piece) => piece.rect.y + piece.rect.height)) - y;
+  return {
+    rect: { x, y, width, height },
+    width: width * scale,
+    height: height * scale,
+    placements: pieces.map(({ rect: r, bitmap }) => ({
+      x: (r.x - x) * scale,
+      y: (r.y - y) * scale,
+      width: bitmap.width,
+      height: bitmap.height,
+    })),
+  };
+}
+
+function composeChrome(pieces: ChromeAssets['pieces']): NonNullable<ChromeAssets['composites']> {
+  const composites: NonNullable<ChromeAssets['composites']> = {};
+  for (const anchor of new Set(pieces.map((piece) => piece.anchor))) {
+    const group = pieces.filter((piece) => piece.anchor === anchor);
+    const layout = layoutChromeAnchor(group);
+    if (!layout) continue;
+    let canvas: OffscreenCanvas | HTMLCanvasElement | null = null;
+    try {
+      canvas =
+        typeof OffscreenCanvas !== 'undefined'
+          ? new OffscreenCanvas(layout.width, layout.height)
+          : typeof document !== 'undefined'
+            ? document.createElement('canvas')
+            : null;
+      if (!canvas) continue;
+      canvas.width = layout.width;
+      canvas.height = layout.height;
+      const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+      if (!ctx) continue;
+      ctx.imageSmoothingEnabled = false;
+      group.forEach((piece, i) => {
+        const r = layout.placements[i]!;
+        ctx.drawImage(piece.bitmap, r.x, r.y, r.width, r.height);
+      });
+      const bitmap = 'transferToImageBitmap' in canvas ? canvas.transferToImageBitmap() : canvas;
+      composites[anchor] = { rect: layout.rect, bitmap };
+    } catch {
+      // Optional composition failures retain the complete per-piece chrome.
+    } finally {
+      if (canvas && composites[anchor]?.bitmap !== canvas) canvas.width = canvas.height = 0;
+    }
+  }
+  return composites;
 }
 
 /** Getters are nonblocking: unavailable assets retain procedural drawing until a later frame. */
 export interface UiAssets {
   cameo(id: string, image: string | null): ImageBitmap | null;
+  caption(id: string, image: string | null): string | null;
   chrome(side: number): ChromeAssets | null;
   cursor(frame: number): { bitmap: ImageBitmap; rect: Rect } | null;
 }
@@ -82,6 +159,17 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
     pending.set(path, request);
     return request;
   };
+  const cameoEntry = (id: string, image: string | null) => {
+    if (disposed) return null;
+    if (!indexStarted) {
+      indexStarted = true;
+      void json<CameoIndex>(`${base}/cameos/index.json`).then((value) => {
+        if (!disposed && value?.version === 1 && value.images && value.byId) index = value;
+      });
+    }
+    const name = index?.byId[id] ?? image;
+    return name ? (index?.images[name] ?? null) : null;
+  };
   return {
     cursor(frame) {
       if (disposed) return null;
@@ -113,15 +201,7 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
       return cursor && rect ? { bitmap: cursor.bitmap, rect } : null;
     },
     cameo(id, image) {
-      if (disposed) return null;
-      if (!indexStarted) {
-        indexStarted = true;
-        void json<CameoIndex>(`${base}/cameos/index.json`).then((value) => {
-          if (!disposed && value?.version === 1 && value.images && value.byId) index = value;
-        });
-      }
-      const name = index?.byId[id] ?? image;
-      const entry = name ? index?.images[name] : null;
+      const entry = cameoEntry(id, image);
       if (!entry) return null;
       for (const file of [entry.hd, entry.orig]) {
         if (!file) continue;
@@ -135,6 +215,9 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
         if (result) return result;
       }
       return null;
+    },
+    caption(id, image) {
+      return cameoEntry(id, image)?.caption ?? null;
     },
     chrome(side) {
       if (disposed) return null;
@@ -153,6 +236,7 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
             // Do not erase native chrome unless its complete replacement is available.
             if (!disposed && pieces.every((piece) => piece.bitmap)) {
               const assets: ChromeAssets = { frame: manifest.frame, pieces: pieces as ChromeAssets['pieces'] };
+              assets.composites = composeChrome(assets.pieces);
               chrome.set(side, assets);
               // Publish complete chrome first. Optional tab failures must never hide the other pieces.
               const tabs = manifest.tabs;
@@ -209,6 +293,12 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
       disposed = true;
       abort.abort();
       for (const value of bitmaps.values()) value?.close();
+      for (const assets of chrome.values()) {
+        for (const composite of Object.values(assets?.composites ?? {})) {
+          if ('close' in composite.bitmap) composite.bitmap.close();
+          else composite.bitmap.width = composite.bitmap.height = 0;
+        }
+      }
       bitmaps.clear();
       pending.clear();
       chrome.clear();

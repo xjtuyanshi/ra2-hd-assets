@@ -122,6 +122,8 @@ export interface GameRenderCellSprites {
   /** Native cell data: overlay frame or smudge footprint offset, in the same cell order. */
   data: Uint8Array;
   types: string[];
+  /** Source building type of an IsRubble overlay cell; only the engine's single carrier cell is listed. */
+  rubble?: { slot: number; type: string }[];
   /** Increases when published content changes, including a new battle, for this reader's lifetime. */
   revision: number;
 }

@@ -128,6 +128,18 @@ export class ArtSource {
    * 0x47F9B2; walls therefore use the unit palette with current-player remap, rather than WallOwnerIndex.
    */
   overlayArt(id: string): Omit<LibraryOverlay, 'sprite' | 'frames'> & { candidates: string[] } {
+    if (this.rulesBool(id, 'IsRubble'))
+      return {
+        candidates: [],
+        rubble: true,
+        palette: 'iso',
+        wall: false,
+        tiberium: false,
+        remap: false,
+        flat: true,
+        drawOffset: drawOffsetFor('overlay'),
+        lighting: 'full',
+      };
     const { sec, image } = this.artOf(id);
     const wall = this.rulesBool(id, 'Wall');
     const tiberium = this.rulesBool(id, 'Tiberium');

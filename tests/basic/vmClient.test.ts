@@ -263,6 +263,25 @@ describe('WorkerVmClient RPC lifecycle', () => {
     expect(replaced?.overlays).toBe(overlays);
     expect(gridState.smudges.index[0]).toBe(0);
 
+    const rubble = [{ slot: 0, type: 'SOURCE' }];
+    const carrierGrid = { ...overlays, rubble, revision: 2 };
+    const withRubble = client.getRenderState();
+    worker.emit(
+      structuredClone({
+        type: 'render-state-cells-unchanged',
+        requestId: requestId(worker, 'render-state'),
+        value: { ...rest, frame: 11, overlays: carrierGrid },
+      }),
+    );
+    expect((await withRubble)?.overlays?.rubble).toEqual(rubble);
+    const keepRubble = client.getRenderState();
+    worker.emit({
+      type: 'render-state-cells-unchanged',
+      requestId: requestId(worker, 'render-state'),
+      value: { ...rest, frame: 12 },
+    });
+    expect((await keepRubble)?.overlays?.rubble).toEqual(rubble);
+
     const outside = client.getRenderState();
     worker.emit({ type: 'render-state-reply', requestId: requestId(worker, 'render-state'), value: null });
     await expect(outside).resolves.toBeNull();
