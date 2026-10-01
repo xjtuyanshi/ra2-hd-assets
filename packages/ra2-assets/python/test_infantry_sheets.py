@@ -712,6 +712,84 @@ class InstallPagesTests(unittest.TestCase):
         np.testing.assert_array_equal(color[2:], self.color[2:])
 
 
+class CopyPagesTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / "urban"
+        synthetic_library(self.source)
+        self.target = self.root / "temperate"
+        data = synthetic_library(self.target)
+        # Same frames, different atlas packing: frames 0 and 1 swap rectangles in the target theater.
+        frames = data["sprites"][SPRITE]["frames"]
+        frames[0]["rect"], frames[1]["rect"] = frames[1]["rect"], frames[0]["rect"]
+        (self.target / "library.json").write_text(json.dumps(data))
+        frames[2]["page"] = PAGE - 1  # packed onto another page in this theater
+        (self.target / "library.json").write_text(json.dumps(data))
+        self.target_manifest = (self.target / "library.json").read_bytes()
+        self.staged = self.root / "staged"
+        self.staged.mkdir()
+        colour = read_image(self.source / "colour-custom.png")
+        paint = read_image(self.source / "paint-custom.png")
+        self.rect0 = frames[1]["rect"]  # frame 0's rectangle in the source theater
+        x, y, w, h = self.rect0
+        colour[2 * y:2 * (y + h), 2 * x:2 * (x + w)] = [9, 200, 30, 255]
+        paint[2 * y:2 * (y + h), 2 * x:2 * (x + w)] = 77
+        x1, y1, w1, h1 = frames[0]["rect"]  # frame 1 in the source: built but rejected
+        colour[2 * y1:2 * (y1 + h1), 2 * x1:2 * (x1 + w1)] = [250, 0, 0, 255]
+        Image.fromarray(colour).save(self.staged / f"sprites-{PAGE}@2x-l5inf.png")
+        Image.fromarray(paint).save(self.staged / f"sprites-{PAGE}@2x-remap-l5inf.png")
+        (self.staged / f"report-{PAGE}.json").write_text(json.dumps({"frames": {
+            f"{SPRITE}#0": {"accepted": True, "sil_iou": 0.9}, f"{SPRITE}#1": {"accepted": False},
+            f"{SPRITE}#2": {"accepted": True},
+            "infantry:NOT_HERE#0": {"accepted": True}}}))
+        self.farm = self.root / "farm"
+        self.farm.mkdir()
+        (self.farm / "temperate").symlink_to(self.target)
+        self.out = self.root / "out"
+
+    def run_copy(self, *extra):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return inf.main(["copy-pages", "--library", str(self.target), "--source-library", str(self.source),
+                             "--staged", str(self.staged), "--out", str(self.out), "--farm", str(self.farm),
+                             "--rel-dir", "temperate", *extra])
+
+    def test_accepted_frames_follow_the_target_layout_and_only_the_page_entry_changes(self):
+        self.assertEqual(self.run_copy(), 0)
+        base = read_image(self.target / "colour-custom.png")
+        page = read_image(self.out / f"sprites-{PAGE}@2x-l5inf.png")
+        x, y, w, h = self.rect0  # frame 0's rectangle in the target theater is the source's frame 1 rectangle
+        tx, ty = json.loads(self.target_manifest)["sprites"][SPRITE]["frames"][0]["rect"][:2]
+        crop = np.s_[2 * ty:2 * (ty + h), 2 * tx:2 * (tx + w)]
+        np.testing.assert_array_equal(page[crop], np.broadcast_to([9, 200, 30, 255], page[crop].shape))
+        np.testing.assert_array_equal(read_image(self.out / f"sprites-{PAGE}@2x-remap-l5inf.png")[crop], 77)
+        outside = np.ones(page.shape[:2], bool)
+        outside[crop] = False
+        x2, y2, w2, h2 = json.loads(self.target_manifest)["sprites"][SPRITE]["frames"][2]["rect"]
+        other = read_image(self.out / f"sprites-{PAGE - 1}@2x-l5inf.png")  # frame 2 lands on the other page
+        crop2 = np.s_[2 * y2:2 * (y2 + h2), 2 * x2:2 * (x2 + w2)]
+        np.testing.assert_array_equal(other[crop2], read_image(self.staged / f"sprites-{PAGE}@2x-l5inf.png")[crop2])
+        self.assertEqual(json.loads((self.out / f"report-{PAGE - 1}.json").read_text())["frames"][f"{SPRITE}#2"]
+                         ["source_page"], PAGE)
+        np.testing.assert_array_equal(page[outside], base[outside])  # rejected frame 1 and the rest stay base
+        report = json.loads((self.out / f"report-{PAGE}.json").read_text())
+        self.assertTrue(report["frames"][f"{SPRITE}#0"]["copied"])
+        self.assertEqual(report["frames"]["infantry:NOT_HERE#0"]["skipped"], "missing")
+        manifest = json.loads((self.farm / "temperate/library.json").read_text())
+        self.assertEqual(manifest["spriteAtlasesHd"][PAGE]["file"], f"sprites-{PAGE}@2x-l5inf.png")
+        self.assertEqual(manifest["spriteAtlasesHd"][PAGE]["paintSaturation"], 0.7)
+        self.assertEqual(manifest["unrelated"], {"keep": [0, "test", False]})
+        self.assertEqual((self.target / "library.json").read_bytes(), self.target_manifest)
+
+    def test_a_different_unit_palette_is_refused(self):
+        shutil.rmtree(self.source)
+        synthetic_library(self.source, tint=20)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.run_copy()
+        self.assertFalse((self.out / f"sprites-{PAGE}@2x-l5inf.png").exists())
+
+
 class SchedulerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix=".tmp-infantry-run-", dir=Path(__file__).parent)
@@ -812,7 +890,7 @@ shutil.copyfile(d / "input.png", d / "output.png")
     def test_cli_help_needs_no_library(self):
         result = subprocess.run([sys.executable, "-B", str(Path(inf.__file__)), "--help"],
                                 capture_output=True, text=True, check=True)
-        self.assertIn("{prepare,run,compose,build,polish,install-pages}", result.stdout)
+        self.assertIn("{prepare,run,compose,build,polish,install-pages,copy-pages}", result.stdout)
 
 
 if __name__ == "__main__":

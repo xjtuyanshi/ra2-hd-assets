@@ -522,6 +522,20 @@ python3 packages/ra2-assets/python/infantry_sheets.py install-pages \
   test_cache_farm test_infantry_sheets test_vehicle_projection test_codex_queue)
 ```
 
+`copy-pages` installs one theater's staged `install-pages` build into another theater without recomposing: every
+frame accepted in `report-P.json` is copied (colour and remap) from its rectangle in `--source-library` to the same
+sprite frame's rectangle in `--library`, onto that theater's base page (or `--fill-dir` donor page). Composition
+depends on the theater only through the unit palette and the base frame, so this is refused unless both unit
+palettes are identical (in the extracted YR libraries temperate, urban, desert, lunar and new urban share one; snow
+differs and needs `install-pages`). Atlas packing may differ per theater, so each frame lands on whichever page
+holds it here; frames missing here or of a different size are reported and left untouched.
+
+```bash
+python3 packages/ra2-assets/python/infantry_sheets.py copy-pages \
+  --library "$LIBRARY_TEMPERATE" --source-library "$LIBRARY_URBAN" --staged "$STAGING_URBAN" \
+  --out "$STAGING_TEMPERATE" --farm "$FARM" --rel-dir "_library/temperate" --pages 21,22
+```
+
 `python/cache_farm.py` exposes generic `install_file(root, rel, data_path)` and `patch_json(root, rel, fn)` helpers.
 Parent directory symlinks are atomically swapped for real directories containing symlinks to the original children,
 so writes stay in the farm. Directory swaps require macOS or Linux filesystem support. File installs use hard links

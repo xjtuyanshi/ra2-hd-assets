@@ -24,7 +24,9 @@ HD page's colour/remap filenames into its library.json. ``build`` and ``polish``
 rims and set per-page house-paint saturation; ``polish`` reads an existing variant and processes all selected
 sprite frames on that page. NumPy and Pillow suffice for every stage except ``run``.
 ``install-pages`` composes finished sheets into staging pages and installs selected HD page entries into a
-configurable cache farm, with locked manifest updates and optional donor-filled base pages.
+configurable cache farm, with locked manifest updates and optional donor-filled base pages. ``copy-pages`` installs
+another theater's staged build into this theater by copying each accepted frame rectangle (theaters with an identical
+unit palette compose to the same pixels, so recomposing every sheet per theater is unnecessary).
 All actual inputs and outputs are derived game art and must remain in gameres/ or another untracked directory.
 """
 
@@ -1173,6 +1175,115 @@ def install_pages(lib: Library, work: Path, out: Path, farm: Path, rel_dir: str,
               f"{accepted}/{len(report['frames'])} frames accepted, {time.monotonic() - start:.0f}s", flush=True)
 
 
+def copy_pages(source: Library, staged: Path, lib: Library, out: Path, farm: Path, rel_dir: str,
+               fill_dir=None, pages=None, suffix="l5inf", paint_saturation=0.7):
+    """Install a staged install-pages build of another theater by copying its accepted frame rectangles.
+
+    The compose stage depends on the theater only through the unit palette (colour lock) and the base HD frame, so
+    theaters sharing the source's unit palette get the same pixels; copying avoids recomposing every sheet. Frames
+    are matched by sprite and frame index and copied (colour and remap) from the source rectangle to this theater's
+    rectangle; a frame missing here, on another page or of a different size is reported and left as the base page.
+    """
+    import cache_farm
+
+    relative = Path(rel_dir)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("rel-dir must be relative and contain no '..'")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", suffix):
+        raise ValueError("suffix must contain only letters, digits, hyphens and underscores")
+    if out.resolve() in (lib.root, staged.resolve()) or (farm / relative).absolute() == lib.root:
+        raise ValueError("staging and farm directories must differ from the source libraries and staged build")
+    for key in ("unit",):
+        if not np.array_equal(source.palette(key), lib.palette(key)):
+            raise ValueError(f"{key} palettes differ between theaters; compose this theater with install-pages")
+    if fill_dir is not None:
+        for page, entry in enumerate(lib.data["spriteAtlasesHd"]):
+            fill = fill_dir / f"sprites-{page}@2x-fill.png"
+            if entry is None and fill.is_file():
+                base = lib.data["spriteAtlases"][page]
+                lib.data["spriteAtlasesHd"][page] = {
+                    "file": str(fill.resolve()),
+                    "remap": str((fill_dir / f"sprites-{page}@2x-remap-fill.png").resolve()),
+                    "scale": 2, "width": 2 * base["width"], "height": 2 * base["height"]}
+    # Atlas packing differs between theaters: a sprite on source page 21 may sit on page 22 here. Every staged report
+    # is read, and each target page receives the accepted frames that land on it, from whichever source page.
+    reports = {int(p.stem.split("-")[1]): json.loads(p.read_text(encoding="utf-8"))
+               for p in staged.glob("report-*.json")}
+    if not reports:
+        raise ValueError(f"no staged report-<page>.json in {staged}")
+    accepted = []
+    for src_page, built in sorted(reports.items()):
+        for key, metrics in built["frames"].items():
+            if metrics.get("accepted"):
+                sprite, index = key.rsplit("#", 1)
+                accepted.append((src_page, key, sprite, int(index), metrics))
+    landing = set()
+    for _, _, sprite, index, _ in accepted:
+        frames = lib.data["sprites"].get(sprite, {}).get("frames", [])
+        if index < len(frames) and frames[index].get("page") is not None:
+            landing.add(frames[index]["page"])
+    selected = sorted(set(reports) | landing)
+    if pages is not None:
+        selected = [page for page in selected if page in pages]
+    if not selected:
+        raise ValueError("no staged page selected")
+    images = {}
+
+    def source_page(page):
+        if page not in images:
+            with Image.open(staged / f"sprites-{page}@2x-{suffix}.png") as im:
+                colour = np.asarray(im.convert("RGBA"))
+            with Image.open(staged / f"sprites-{page}@2x-remap-{suffix}.png") as im:
+                images[page] = colour, np.asarray(im.convert("L"))
+        return images[page]
+
+    out.mkdir(parents=True, exist_ok=True)
+    for page in selected:
+        base = lib.data["spriteAtlasesHd"][page]
+        if base is None:
+            raise ValueError(f"page {page} has no HD atlas; provide its donor pages with --fill-dir")
+        color, remap = lib.page2(page).copy(), lib.remap2(page).copy()
+        report = {"page": page, "copied_from": source.data.get("theater", source.root.name), "frames": {}}
+        copied = 0
+        for src_page, key, sprite, index, metrics in accepted:
+            try:
+                a, b = source.frames(sprite)[index], lib.frames(sprite)[index]
+            except (KeyError, IndexError):
+                if src_page == page:
+                    report["frames"][key] = {"accepted": False, "skipped": "missing"}
+                continue
+            if b.get("page") != page:
+                continue
+            if a.get("page") != src_page or a["rect"][2:] != b["rect"][2:]:
+                report["frames"][key] = {"accepted": False, "skipped": "layout"}
+                continue
+            (xa, ya, w, h), (xb, yb) = a["rect"], b["rect"][:2]
+            src_color, src_remap = source_page(src_page)
+            src = np.s_[2 * ya:2 * (ya + h), 2 * xa:2 * (xa + w)]
+            dst = np.s_[2 * yb:2 * (yb + h), 2 * xb:2 * (xb + w)]
+            color[dst], remap[dst] = src_color[src], src_remap[src]
+            report["frames"][key] = dict(metrics, copied=True, source_page=src_page)
+            copied += 1
+        page_path = out / f"sprites-{page}@2x-{suffix}.png"
+        remap_path = out / f"sprites-{page}@2x-remap-{suffix}.png"
+        for pixels, path in ((color, page_path), (remap, remap_path)):
+            with atomic_output(path, suffix=".part") as tmp:
+                Image.fromarray(pixels).save(tmp, format="PNG")
+        (out / f"report-{page}.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+        cache_farm.install_file(farm, str(relative / page_path.name), page_path)
+        cache_farm.install_file(farm, str(relative / remap_path.name), remap_path)
+
+        def patch(data, page=page, base=base, page_path=page_path, remap_path=remap_path):
+            if data["spriteAtlasesHd"][page] is None:
+                data["spriteAtlasesHd"][page] = {"scale": 2, "width": base["width"], "height": base["height"]}
+            data["spriteAtlasesHd"][page].update(file=page_path.name, remap=remap_path.name,
+                                                paintSaturation=paint_saturation)
+
+        cache_farm.patch_json(farm, str(relative / "library.json"), patch)
+        print(f"{lib.data.get('theater', lib.root.name)} page {page}: copied {copied} frames, "
+              f"{len(report['frames']) - copied} skipped", flush=True)
+
+
 def install(lib: Library, variant_dir: Path, page: int, page_path: Path, remap_path: Path, sprites,
             paint_saturation=1.0):
     """Install pages while preserving an existing real variant manifest and every unrelated entry."""
@@ -1334,6 +1445,14 @@ def parser():
     sub.add_argument("--suffix", default="l5inf")
     add_compose_options(sub)
     add_polish_options(sub, rim_soften=0.5, paint_saturation=0.7)
+    sub = commands.add_parser("copy-pages")
+    for name in ("library", "source_library", "staged", "out", "farm"):
+        sub.add_argument("--" + name.replace("_", "-"), type=Path, required=True)
+    sub.add_argument("--rel-dir", required=True)
+    sub.add_argument("--fill-dir", type=Path)
+    sub.add_argument("--pages", type=csv_pages)
+    sub.add_argument("--suffix", default="l5inf")
+    sub.add_argument("--paint-saturation", type=unit_interval, default=0.7)
     return ap
 
 
@@ -1350,6 +1469,10 @@ def main(argv=None):
         if opts.command == "run":
             return run(opts.work, opts.codex, opts.parallel, opts.limit_file, opts.names, opts.redo,
                        reasoning=opts.reasoning, order_by=opts.order)
+        if opts.command == "copy-pages":
+            copy_pages(Library(opts.source_library.resolve()), opts.staged, Library(opts.library.resolve()), opts.out,
+                       opts.farm, opts.rel_dir, opts.fill_dir, opts.pages, opts.suffix, opts.paint_saturation)
+            return 0
         if opts.command == "install-pages":
             # Donor-page overrides are local to this invocation, never mutations of the shared library cache.
             install_pages(Library(opts.library.resolve()), opts.work, opts.out, opts.farm, opts.rel_dir, opts,
