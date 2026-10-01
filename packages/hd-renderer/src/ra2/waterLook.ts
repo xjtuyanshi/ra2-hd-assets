@@ -20,17 +20,19 @@ import {
   reflect,
   sin,
   smoothstep,
+  sqrt,
   texture,
   time,
   uniform,
   vec2,
   vec3,
 } from 'three/tsl';
-import type { ReflectorNode } from 'three/webgpu';
+import type { ReflectorNode, Texture } from 'three/webgpu';
 import { DEFAULT_ATMOSPHERE_NODES, moonlit, sampleLightField } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import type { WaterUniforms } from '../waterShading';
 import { RIPPLE_SLOPE_RANGE, WATER_TEXTURE_SIZE, waterTextures } from '../proceduralTextures';
+import { CLIFF_FIELD_MAX } from './shoreField';
 import { LEVEL_HEIGHT } from '../world';
 
 /**
@@ -260,6 +262,17 @@ const RIPPLE_LAYERS: readonly (readonly [number, number, number, number])[] = [
   [0.95, 1.9, 0.13, 0.75],
   [-0.85, 1.25, 0.1, 0.55],
 ];
+/**
+ * Fine chop for the wave relief of water with a detail layer: short wind waves a few engine pixels long, the dense
+ * light/dark strokes of the approved target's open water (shading only).
+ */
+const FINE_CHOP: readonly (readonly [number, number, number, number])[] = [
+  // Crests across the view (waves running towards the camera, 45 degrees on the ground): horizontal strokes on screen,
+  // as in the target; one layer only, domain-warped by the broad sea, so no cross-hatch from two regular layers.
+  [Math.PI / 4 - WIND_ANGLE, 0.8, 0.06, 1.4],
+];
+/** Domain warp of the fine chop by the broad sea's slope (cells per unit slope). */
+const FINE_CHOP_WARP = 1.6;
 /** RMS surface slope per axis of all ripple layers together in a moderate wind (0.35), outside gusts. */
 const RIPPLE_SLOPE = 0.1;
 /** Long swells: angle offset from the wind, wavelength (cells), slope amplitude, angular speed (rad/s). */
@@ -315,8 +328,10 @@ function rippleSlope(
   gust: ShaderNode,
   layers: readonly (readonly [number, number, number, number])[] = RIPPLE_LAYERS,
   roughMultiplier: ShaderNode | number = 1,
+  source: 'ripple' | 'chop' = 'ripple',
 ): ShaderNode {
   const tex = waterTextures();
+  const map = source === 'chop' ? tex.chop : tex.ripple;
   const norm = Math.sqrt(RIPPLE_LAYERS.reduce((sum, layer) => sum + layer[3] * layer[3], 0));
   let rough: ShaderNode = float(0.55)
     .add(wind.mul(1.3))
@@ -332,7 +347,7 @@ function rippleSlope(
     // Layer coordinates: u along the layer's wind axis (the texture's x, where its waves travel), v across.
     const u: ShaderNode = p.x.mul(c).add(p.y.mul(s));
     const v: ShaderNode = p.y.mul(c).sub(p.x.mul(s));
-    const texel: ShaderNode = texture(tex.ripple, vec2(u.sub(time.mul(drift)), v).div(tile));
+    const texel: ShaderNode = texture(map, vec2(u.sub(time.mul(drift)), v).div(tile));
     const du: ShaderNode = texel.r.mul(2).sub(1).mul(RIPPLE_SLOPE_RANGE);
     const dv: ShaderNode = texel.g.mul(2).sub(1).mul(RIPPLE_SLOPE_RANGE);
     const w = (weight * RIPPLE_SLOPE) / norm;
@@ -632,12 +647,14 @@ export function rippledReflection(
 }
 
 /** Beach profile: shelf width (cells), initial optical-depth slope, then quadratic deepening beyond the shelf. */
-export const BEACH_PROFILE = { shelf: 0.35, slope: 1.9, drop: 20 } as const;
+export const BEACH_PROFILE = { shelf: 0.35, slope: 2.5, drop: 20 } as const;
 /** Beer-Lambert absorption per unit optical depth (RGB): red disappears first; the bed is lost by 0.8-1 cells. */
-export const BED_ABSORPTION = [3.2, 1.2, 0.85] as const;
+export const BED_ABSORPTION = [4.2, 1.45, 1.0] as const;
 /** In-scattered colour of the water over the shelf (turquoise, about one cell wide as in the approved target), faded
  * towards the enhanced MID/DEEP offshore. */
 const BED_SCATTER = { colour: 0x1f9e93, near: 0.1, far: 0.95, amount: 0.85 } as const;
+/** Lit turquoise shelf on maps with a painted surface tile (cells from the bank; see bedWaterLook). */
+const BED_SHALLOW_GLOW = { colour: 0x2aa89c, near: 0.2, far: 0.85, amount: 0.45 } as const;
 /** Optional per-map water detail, used only by the painted-bed look. */
 export const WATER_DETAIL = {
   /** Gain from linear detail colour to the in-scattered column colour. */
@@ -662,20 +679,83 @@ export const WATER_DETAIL = {
  *   strongest along the sun's glitter path but present everywhere, like the target's speckled chop.
  */
 export const WATER_SURFACE = {
-  relief: 2.4,
-  reliefMin: 0.55,
-  reliefMax: 1.7,
-  capLow: 0.62,
-  capHigh: 0.9,
-  capAmount: 0.7,
-  capBreakup: 0.62,
-  sparkScale: 0.42,
-  sparkJitter: 2.5,
-  sparkThreshold: 0.86,
-  sparkGain: 2.2,
-  sparkPath: 3.0,
-  sparkPathPower: 5,
+  relief: 1.2,
+  /** Relief of the fine chop layers (shading only, they do not bend reflections). */
+  fineRelief: 14,
+  reliefMin: 0.4,
+  reliefMax: 2.6,
+  capLow: 0.72,
+  capHigh: 0.95,
+  capAmount: 0.55,
+  capBreakup: 0.72,
+  sparkScale: 0.075,
+  /** Glint grid cells per unit of (x - z) and of (x + z) / 2: square cells of 30 / sparkCells engine pixels. */
+  sparkCells: 5,
+  sparkJitter: 1.2,
+  sparkThreshold: 0.65,
+  sparkGain: 6,
+  sparkPath: 8.0,
+  sparkPathPower: 3,
+  sparkBase: 0.25,
 } as const;
+/**
+ * The painted surface tile (MapMaterials.waterSurface) on water with a detail layer: the image model's chop strokes and
+ * crest glints, repeated in screen-aligned ground space, so the waves read like the approved target at game scale.
+ * Two copies drift with the wind and cross-fade (flow-map phases), re-placed while invisible, and the broad swell's
+ * slope bends them; deviations are rescaled by 1 / |w| so the cross-fade keeps the painted contrast.
+ */
+export const WATER_SURFACE_TILE = {
+  /** Tile drift on screen (tiles per second) and the flow period (s) after which a copy is re-placed. */
+  driftX: 0.006,
+  driftY: -0.011,
+  period: 7,
+  /** Offset of each new placement (tiles), irrational so placements never repeat. */
+  jumpX: 0.371,
+  jumpY: 0.613,
+  /** Tiles per unit of swell slope (the long swells bend the painted chop). */
+  warp: 0.15,
+  /** Exponent on the painted relief ratio (1 = as painted) and its weight offshore. */
+  relief: 1.0,
+  reliefAmount: 0.9,
+  /** Glint gain (x sun colour) and the glitter-path lift towards the sun's mirror direction. */
+  glintGain: 2.4,
+  glintPath: 3.0,
+  glintPathPower: 4,
+  glintFloor: 0.2,
+  /** Glint copy magnification: across (screen x) and down (screen y). */
+  glintStretchX: 2.8,
+  glintStretchY: 1.35,
+  /** Glint cores: the cross-faded glint value is sharpened between these levels (crisp specks, not soft discs). */
+  glintLow: 0.12,
+  glintHigh: 0.55,
+  /** Glint density outside / inside gust patches, and the power on the detail layer's roughness weight. */
+  glintCalm: 0.25,
+  glintGust: 1.7,
+  glintRoughPower: 1.5,
+  /** Glints are the sun itself: a touch warmer than the sun colour's average, like the target's golden specks. */
+  glintTint: [1.0, 0.86, 0.62],
+  /** Foam lace: the lace tile scale relative to the surface tile, and its drift (tiles/s). */
+  laceScale: 0.55,
+  laceDriftX: 0.004,
+  laceDriftY: 0.007,
+} as const;
+/** Foam at cliff feet (cells; see bedWaterLook): lapping band width, backwash reach, opacities, wet contact shade. */
+const CLIFF_FOAM = {
+  base: 0.05,
+  lap: 0.1,
+  opacity: 0.6,
+  backReach: 0.3,
+  backOpacity: 0.4,
+  contactShade: 0.7,
+  contactReach: 0.12,
+} as const;
+/** Minimum reflectance of mirrored objects on water with a detail layer (see bedWaterLook). */
+const OBJECT_REFLECT = 0.12;
+/**
+ * Share of the mirrored scene over the sky reflection on water with a detail layer: the approved target shows cliff
+ * and tree reflections as faint dark-warm tints, the sky's blue dominating; full coverage read as red-brown smears.
+ */
+const OBJECT_COVERAGE = 0.5;
 /** Analytic sky as water with a detail layer reflects it (see bedWaterLook). */
 const WATER_DETAIL_SKY = vec3(0.45, 0.7, 0.6);
 /** Refraction in world cells per ripple slope per depth, bounded to about 2.5 engine pixels in any direction. */
@@ -712,14 +792,22 @@ const BED_SWASH = {
 /** Foam widths/reach in cells, opacity caps and noise thresholds; no line is tied to the static mask edge. */
 const BED_FOAM = {
   frontWidth: 0.03,
-  frontOpacity: 0.95,
+  frontOpacity: 0.8,
   waterOpacity: 0.5,
   laceLow: 0.34,
   laceHigh: 0.56,
   bubbleLow: 0.5,
   bubbleHigh: 0.7,
-  breakerFar: 0.3,
-  breakerWidth: 0.022,
+  breakerFar: 0.45,
+  breakerWidth: 0.03,
+  /** With a painted lace tile: thin wavy breaker lines (width, opacity), their wobble (cells) and its noise scale. */
+  wavyBreakerWidth: 0.028,
+  wavyBreakerOpacity: 0.95,
+  wobble: 0.12,
+  wobbleScale: 0.8,
+  wavyLaceOpacity: 0.45,
+  /** Surf-zone lace and second breaker opacity (the approved target shows a wide, lacy surf band on beaches). */
+  laceOpacity: 0.7,
 } as const;
 /** Shore distance over which reflections replace the faint wet-sand sheen; glitter starts farther offshore. */
 const BED_REFLECTION_REACH = { start: 0.05, full: 0.4 } as const;
@@ -746,8 +834,16 @@ export function beachDepth(shore: ShaderNode): ShaderNode {
 }
 
 export interface BedWaterInputs extends WaterLookInputs {
+  /** 0..1 normalised distance to the nearest cliff wall (CLIFF_FIELD_MAX cells = 1),
+   * when the map has a shoreIgnore mask. */
+  cliff?: ShaderNode;
   /** Composite-space water-detail sample: RGB is linear apparent colour, A is roughness/glitter weight. */
   detail?: ShaderNode;
+  /**
+   * Repeating painted open-water surface (MapMaterials.waterSurface): R relief ratio / 2, G crest glints, B foam lace;
+   * scale is the tile width in screen units of 30 engine px. Used together with a detail layer only.
+   */
+  surface?: { texture: Texture; scale: number };
   /** Graded linear bed colour at a world xz offset, with the same rain wetness as art (the adjacent land albedo). */
   bedAt: (offsetXZ: ShaderNode) => ShaderNode;
   /** Display compensation belongs only to in-scattered water, never to transmitted bed colour or foam. */
@@ -848,7 +944,16 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
       float(1).sub(smoothstep(WATER_DETAIL.shallowReach, 0, offshore).mul(WATER_DETAIL.shallowKeep)),
     );
     // The repaint already describes a display colour: compensate only the constant column, then dim both at night.
-    displayedColumn = mix(columnForDisplay(column), detail.rgb.mul(WATER_DETAIL.columnGain), weight).mul(nightLevel);
+    displayedColumn = mix(columnForDisplay(column), detail.rgb.mul(WATER_DETAIL.columnGain), weight);
+    if (inputs.surface) {
+      // Luminous turquoise over the sandy shelf (the approved target's beaches): sunlight scattered back from the bed
+      // through clear shallow water, widest within about three quarters of a cell of the bank.
+      const lit: ShaderNode = smoothstep(BED_SHALLOW_GLOW.far, BED_SHALLOW_GLOW.near, offshore).mul(
+        BED_SHALLOW_GLOW.amount,
+      );
+      displayedColumn = mix(displayedColumn, columnForDisplay(color(BED_SHALLOW_GLOW.colour)), lit);
+    }
+    displayedColumn = displayedColumn.mul(nightLevel);
   } else {
     // Keep the original operation order (including compensation after night dimming) without a detail layer.
     displayedColumn = columnForDisplay(column.mul(nightLevel));
@@ -858,14 +963,68 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
   // Reuse the enhanced reflection, glitter, mirrored lights and rain-ripple model, fading it to zero at the sand join.
   const open: ShaderNode = smoothstep(BED_REFLECTION_REACH.start, BED_REFLECTION_REACH.full, shore);
   const crest: ShaderNode | null = detail ? rippleCrest(xz) : null;
+  // Painted surface tile: two copies drifting on screen, cross-faded by flow phase and re-placed while invisible.
+  let tile: { relief: ShaderNode; glint: ShaderNode; lace: ShaderNode } | null = null;
+  if (detail && inputs.surface) {
+    const T = WATER_SURFACE_TILE;
+    const map = inputs.surface.texture;
+    const screen: ShaderNode = vec2(xz.x.sub(xz.y), xz.x.add(xz.y).mul(0.5)).div(inputs.surface.scale);
+    // Only the long swells bend the painted chop: the ripple layers' slope would crumple it at their own frequency.
+    const bend: ShaderNode = swellSlope(xz, uniforms.wind).mul(T.warp);
+    const q: ShaderNode = screen.add(bend);
+    const flow = (i: number, scale: ShaderNode | null = null) => {
+      const t: ShaderNode = time.div(T.period).add(i * 0.5);
+      const phase: ShaderNode = fract(t);
+      const uv: ShaderNode = (scale ? q.mul(scale) : q)
+        .add(vec2(T.driftX, T.driftY).mul(phase.mul(T.period)))
+        .add(vec2(T.jumpX, T.jumpY).mul(t.floor().add(i * 0.37)));
+      return { sample: texture(map, uv), weight: float(1).sub(abs(phase.mul(2).sub(1))) };
+    };
+    const a = flow(0);
+    const b = flow(1);
+    // Glints from their own, magnified and horizontally stretched copies: the target's sun specks are short horizontal
+    // streaks several engine pixels wide, larger than the painted chop's own highlights.
+    const glintScale: ShaderNode = vec2(1 / T.glintStretchX, 1 / T.glintStretchY);
+    const ga = flow(0, glintScale);
+    const gb = flow(1, glintScale);
+    const norm: ShaderNode = float(1).div(max(sqrt(a.weight.mul(a.weight).add(b.weight.mul(b.weight))), 0.5));
+    const deviation: ShaderNode = a.sample.r
+      .mul(2)
+      .sub(1)
+      .mul(a.weight)
+      .add(b.sample.r.mul(2).sub(1).mul(b.weight))
+      .mul(norm);
+    const laceUv: ShaderNode = screen.div(T.laceScale).add(bend).add(vec2(T.laceDriftX, T.laceDriftY).mul(time));
+    tile = {
+      relief: float(1).add(deviation),
+      glint: ga.sample.g.mul(ga.weight).add(gb.sample.g.mul(gb.weight)).mul(norm),
+      lace: texture(map, laceUv).b,
+    };
+  }
   if (detail) {
     // Wave relief: n.L of the rippled surface against the flat one, through the slope towards the sun on the ground.
     const sunGround: ShaderNode = normalize(vec2(uniforms.sunDirection.x, uniforms.sunDirection.z).add(vec2(1e-4, 0)));
-    const facing: ShaderNode = dot(slope, sunGround).negate();
-    const relief: ShaderNode = float(1)
-      .add(facing.mul(WATER_SURFACE.relief))
-      .clamp(WATER_SURFACE.reliefMin, WATER_SURFACE.reliefMax);
-    body = body.mul(mix(float(1), relief, open));
+    const fine: ShaderNode = rippleSlope(
+      xz.add(slope.mul(FINE_CHOP_WARP)),
+      uniforms.wind,
+      gust,
+      FINE_CHOP,
+      rough,
+      'chop',
+    );
+    // With a painted surface tile its strokes replace the procedural fine chop; the broad slope still shades swells.
+    const facing: ShaderNode = (
+      tile
+        ? dot(slope, sunGround).mul(WATER_SURFACE.relief)
+        : dot(slope, sunGround).mul(WATER_SURFACE.relief).add(dot(fine, sunGround).mul(WATER_SURFACE.fineRelief))
+    ).negate();
+    // Exponential: lit crest flanks flare up to a few times the body, lee flanks fall off more gently.
+    const relief: ShaderNode = exp(facing).clamp(WATER_SURFACE.reliefMin, WATER_SURFACE.reliefMax);
+    body = body.mul(mix(float(1), relief, smoothstep(0.12, 0.6, shore)));
+    if (tile) {
+      const painted: ShaderNode = pow(max(tile.relief, 0.05), WATER_SURFACE_TILE.relief);
+      body = body.mul(mix(float(1), painted, smoothstep(0.06, 0.4, shore).mul(WATER_SURFACE_TILE.reliefAmount)));
+    }
   }
   const view: ShaderNode = normalize(cameraPosition.sub(p));
   const fresnel: ShaderNode = float(0.02).add(float(0.98).mul(pow(float(1).sub(max(dot(normal, view), 0)), 5)));
@@ -917,28 +1076,116 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
     .mul(BED_FOAM.waterOpacity);
   const roll: ShaderNode = fract(cycle.div(Math.PI * 2).add(0.35));
   const breakerAt: ShaderNode = mix(float(BED_FOAM.breakerFar), float(0), roll);
-  const breaker: ShaderNode = smoothstep(BED_FOAM.breakerWidth, 0, abs(shore.sub(breakerAt)))
+  // With a painted lace tile (the approved target's surf): breakers are thin wavy lines whose distance from the bank
+  // wobbles along the shore (not contour lines parallel to it), broken by the lace into long strokes, and a sparse
+  // fine lace drifts between them.
+  const laceTile: ShaderNode | null = tile ? tile.lace : null;
+  const wobble: ShaderNode | number = laceTile
+    ? texture(tex.noise, xz.mul(BED_FOAM.wobbleScale).add(drift)).r.sub(0.5).mul(BED_FOAM.wobble)
+    : 0;
+  const wavyShore: ShaderNode = laceTile ? shore.add(wobble) : shore;
+  const breakerWidth: number = laceTile ? BED_FOAM.wavyBreakerWidth : BED_FOAM.breakerWidth;
+  const breakerLace: ShaderNode = laceTile ? smoothstep(0.12, 0.3, laceTile) : gaps;
+  const breaker: ShaderNode = smoothstep(breakerWidth, 0, abs(wavyShore.sub(breakerAt)))
     .mul(smoothstep(0, 0.2, roll))
     .mul(smoothstep(1, 0.7, roll))
-    .mul(gaps)
-    .mul(BED_FOAM.waterOpacity);
-  const surfLace: ShaderNode = bubbles
-    .mul(gaps)
+    .mul(breakerLace)
+    .mul(laceTile ? BED_FOAM.wavyBreakerOpacity : BED_FOAM.waterOpacity);
+  // A second breaker half a cycle behind the first, so the surf band always holds two rolling lines.
+  const roll2: ShaderNode = fract(roll.add(0.5));
+  const breaker2: ShaderNode = smoothstep(
+    breakerWidth,
+    0,
+    abs(wavyShore.sub(mix(float(BED_FOAM.breakerFar), 0, roll2))),
+  )
+    .mul(smoothstep(0, 0.2, roll2))
+    .mul(smoothstep(1, 0.7, roll2))
+    .mul(laceTile ? smoothstep(0.18, 0.4, laceTile) : smoothstep(0.3, 0.5, lace))
+    .mul(laceTile ? BED_FOAM.wavyBreakerOpacity : BED_FOAM.laceOpacity);
+  // Surf lace: sparse fine lace thinning out offshore (its threshold rises with the distance).
+  const surfLace: ShaderNode = (
+    laceTile
+      ? smoothstep(
+          mix(float(0.5), float(0.85), smoothstep(0, BED_FOAM.breakerFar, shore)),
+          mix(float(0.7), float(0.97), smoothstep(0, BED_FOAM.breakerFar, shore)),
+          laceTile,
+        ).mul(BED_FOAM.wavyLaceOpacity)
+      : bubbles.mul(gaps).mul(BED_FOAM.laceOpacity)
+  )
     .mul(smoothstep(0, BED_SWASH.retreat, shore))
-    .mul(smoothstep(BED_FOAM.breakerFar, 0.1, shore))
-    .mul(BED_FOAM.waterOpacity);
-  let foam: ShaderNode = line.max(drainage).max(breaker).max(surfLace).mul(surf);
+    .mul(smoothstep(BED_FOAM.breakerFar, 0.1, shore));
+  let foam: ShaderNode = line
+    .mul(laceTile ? mix(float(0.75), float(1), smoothstep(0.15, 0.45, laceTile)) : 1)
+    .max(drainage)
+    .max(breaker)
+    .max(breaker2)
+    .max(surfLace)
+    .mul(surf);
+  if (inputs.cliff) {
+    // Cliff foot: the swell laps against the wall in a broken foam band whose width breathes, a fainter backwash line
+    // runs out from the wall, and the water right at the wall is darker (the wall's shade and wet contact). Replaces
+    // the hard straight seam where the wall geometry meets the water plane.
+    const wall: ShaderNode = inputs.cliff.mul(CLIFF_FIELD_MAX);
+    const phase: ShaderNode = time.mul(1.25).add(along.mul(12));
+    const lapWidth: ShaderNode = sin(phase).mul(0.5).add(0.5).mul(CLIFF_FOAM.lap).add(CLIFF_FOAM.base);
+    // The wall's foot is a straight geometric edge: jitter the band's reach along it and break it with the lace tile.
+    const reach: ShaderNode = laceTile ? lapWidth.mul(mix(float(0.45), float(1.6), laceTile)) : lapWidth;
+    const lapFoam: ShaderNode = smoothstep(reach, reach.mul(0.35), wall)
+      .mul(laceTile ? smoothstep(0.3, 0.6, laceTile) : smoothstep(0.25, 0.5, lace))
+      .mul(mix(float(0.55), float(1), bubbles))
+      .mul(CLIFF_FOAM.opacity);
+    const backAt: ShaderNode = fract(time.mul(0.18).add(along.mul(3)))
+      .mul(CLIFF_FOAM.backReach)
+      .add(CLIFF_FOAM.base);
+    const backwash: ShaderNode = smoothstep(0.025, 0, abs(wall.sub(backAt)))
+      .mul(smoothstep(0.4, 0.62, lace))
+      .mul(smoothstep(CLIFF_FOAM.backReach, 0, backAt))
+      .mul(CLIFF_FOAM.backOpacity);
+    foam = foam.max(lapFoam.max(backwash).mul(waterness));
+    body = body.mul(mix(float(CLIFF_FOAM.contactShade), float(1), smoothstep(0, CLIFF_FOAM.contactReach, wall)));
+  }
   let sparkle: ShaderNode = vec3(0);
-  if (detail && crest) {
+  if (tile) {
+    // Painted crest glints, brighter along the sun's glitter path and in gust patches; no grid glints or whitecaps.
+    const T = WATER_SURFACE_TILE;
+    const path: ShaderNode = pow(max(dot(r, uniforms.sunDirection), 0), T.glintPathPower)
+      .mul(T.glintPath)
+      .add(T.glintFloor);
+    sparkle = uniforms.sunColor.mul(vec3(...T.glintTint)).mul(
+      smoothstep(T.glintLow, T.glintHigh, tile.glint)
+        .mul(tile.glint.mul(0.6).add(0.4))
+        .mul(T.glintGain)
+        .mul(path)
+        // Clustered like the target's glitter: dense in gust patches and the repaint's rough areas, sparse elsewhere.
+        .mul(mix(float(T.glintCalm), float(T.glintGust), gust))
+        .mul(pow(max(rough, 0), T.glintRoughPower))
+        .mul(open)
+        .mul(float(1).sub(uniforms.rain))
+        .mul(float(1).sub(night.mul(0.8))),
+    );
+  } else if (detail && crest) {
     const windiness: ShaderNode = float(0.6)
       .add(uniforms.wind.mul(1.2))
       .mul(mix(float(0.75), float(1.3), gust))
       .mul(rough);
-    // Sparkles: a hash looked up through the moving slope, so points appear and vanish as the facets turn.
-    const hash: ShaderNode = texture(
-      tex.noise,
-      xz.mul(WATER_SURFACE.sparkScale).add(slope.mul(WATER_SURFACE.sparkJitter)),
-    ).a;
+    // Glints: one candidate per cell of a grid across / along the view (x - z, x + z), lit at random, drawn as a short
+    // horizontal streak (the sun on a wave facet) and twinkling with its own phase; the cell jitter follows the slope.
+    const glintUv: ShaderNode = vec2(xz.x.sub(xz.y), xz.x.add(xz.y).mul(0.5)).mul(WATER_SURFACE.sparkCells);
+    const cell: ShaderNode = glintUv.floor();
+    const seed: ShaderNode = texture(tex.noise, cell.add(0.5).div(WATER_TEXTURE_SIZE)).a;
+    const seed2: ShaderNode = texture(tex.noise, cell.add(vec2(53.5, 117.5)).div(WATER_TEXTURE_SIZE)).a;
+    const local: ShaderNode = glintUv
+      .fract()
+      .sub(vec2(seed, seed2).mul(0.5).add(0.25))
+      .add(slope.mul(WATER_SURFACE.sparkJitter));
+    const streak: ShaderNode = smoothstep(0.32, 0.06, vec2(local.x.mul(0.55), local.y.mul(1.7)).length());
+    const twinkle: ShaderNode = pow(
+      sin(time.mul(2.3).add(seed2.mul(40)))
+        .mul(0.5)
+        .add(0.5),
+      3,
+    );
+    const glint: ShaderNode = smoothstep(WATER_SURFACE.sparkThreshold, 1, seed).mul(streak).mul(twinkle);
     // Whitecaps break into specks: only the hash's brighter points of a high crest turn white.
     const capHash: ShaderNode = texture(tex.noise, xz.mul(WATER_SURFACE.sparkScale * 1.7).sub(slope)).a;
     const whitecap: ShaderNode = smoothstep(WATER_SURFACE.capLow, WATER_SURFACE.capHigh, crest.mul(windiness))
@@ -948,10 +1195,10 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
     foam = foam.max(whitecap);
     const path: ShaderNode = pow(max(dot(r, uniforms.sunDirection), 0), WATER_SURFACE.sparkPathPower)
       .mul(WATER_SURFACE.sparkPath)
-      .add(1);
+      .add(WATER_SURFACE.sparkBase);
     sparkle = uniforms.sunColor.mul(
-      smoothstep(WATER_SURFACE.sparkThreshold, 1, hash)
-        .mul(smoothstep(0.2, 0.55, crest.mul(windiness)))
+      glint
+        .mul(smoothstep(0.08, 0.3, crest.mul(windiness)))
         .mul(path)
         .mul(WATER_SURFACE.sparkGain)
         .mul(rough)
@@ -963,8 +1210,17 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
   const foamColour: ShaderNode = color(0xf2f6f5).mul(mix(float(1), float(0.5), night));
   const sandSheen: ShaderNode = sky.mul(wetness).mul(float(1).sub(open)).mul(BEACH_WET.sheen);
   const sheetSheen: ShaderNode = sky.mul(sheet).mul(filmFade).mul(BED_SWASH.sheen);
-  const emission: ShaderNode = mirrored
-    .mul(strength)
+  // Mirrored cliffs, trees and units on water with a detail layer reflect at least OBJECT_REFLECT (the owner asked for
+  // clearly readable reflections on every water level); the sky keeps the Fresnel strength.
+  const reflectedLight: ShaderNode =
+    detail && reflected && inputs.reflection
+      ? mix(
+          waterSky.mul(strength),
+          reflected.mul(max(strength, open.mul(OBJECT_REFLECT))),
+          inputs.reflection.coverage.mul(OBJECT_COVERAGE),
+        )
+      : mirrored.mul(strength);
+  const emission: ShaderNode = reflectedLight
     .add(uniforms.sunColor.mul(glitter))
     .add(sparkle)
     .add(lights)

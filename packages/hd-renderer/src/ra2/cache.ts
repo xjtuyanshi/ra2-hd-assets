@@ -7,6 +7,7 @@ import {
   NoColorSpace,
   RGBAFormat,
   RedFormat,
+  RepeatWrapping,
   SRGBColorSpace,
   Texture,
   TextureLoader,
@@ -17,7 +18,7 @@ import { validateMapLights, type MapLightsSidecar } from '../../../ra2-assets/sr
 import { MAP_MATERIALS_FILE, type MapMaterials } from '../../../ra2-assets/src/mapMaterials';
 import { MapLightGrade, setPaletteGrade, setPaletteNodes } from './mapLighting';
 import { AtmosphereNodes } from '../atmosphere';
-import { buildShoreField } from './shoreField';
+import { buildCliffField, buildShoreField } from './shoreField';
 
 /** windows.json next to a lit-window mask (packages/ra2-assets src/node/lights.ts WindowsSidecar). */
 export interface WindowsIndex {
@@ -58,8 +59,12 @@ export interface Ra2Cache {
     waterBed: boolean;
     /** Composite-space apparent water colour (sRGB) and roughness (A); null when absent or unreadable. */
     waterDetail: Texture | null;
+    /** Repeating painted open-water surface tile (see MapMaterials.waterSurface) and its size; null when absent. */
+    waterSurface: { texture: Texture; scale: number } | null;
     /** Signed distance to the shoreline in cells, encoded as in shoreField.ts (drives depth, foam and wet sand). */
     shore: DataTexture;
+    /** Normalised cliff contact distance (CLIFF_FIELD_MAX cells = 1); null without a loaded shore-ignore mask. */
+    cliff: DataTexture | null;
     ref: NonNullable<HdCacheManifest['terrainMap']>;
   };
   spriteAtlas: Texture;
@@ -317,6 +322,23 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
         console.warn(`${url(material.waterDetail)}: failed to load water detail; ignoring it`, error);
       }
     }
+    let waterSurface: { texture: Texture; scale: number } | null = null;
+    if (material.waterSurface) {
+      try {
+        const surface = await load(material.waterSurface);
+        // Data channels (relief ratio, glints, foam lace): no sRGB decode; a seamless tile repeats in both axes.
+        surface.colorSpace = NoColorSpace;
+        surface.magFilter = LinearFilter;
+        surface.minFilter = LinearMipmapLinearFilter;
+        surface.generateMipmaps = true;
+        surface.anisotropy = 8;
+        surface.wrapS = RepeatWrapping;
+        surface.wrapT = RepeatWrapping;
+        waterSurface = { texture: surface, scale: material.waterSurfaceScale };
+      } catch (error) {
+        console.warn(`${url(material.waterSurface)}: failed to load water surface; ignoring it`, error);
+      }
+    }
     let shoreIgnore: Uint8Array | undefined;
     if (mask && material.shoreIgnore) {
       const ignoreUrl = url(material.shoreIgnore);
@@ -324,30 +346,29 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
         const ignore = await loadMask(ignoreUrl);
         if (ignore.width === mask.width && ignore.height === mask.height) shoreIgnore = ignore.bytes;
         else console.warn(`${ignoreUrl}: shore-ignore size differs from the water mask; ignoring it`);
-        // Only the CPU bytes feed the distance field; this mask is never sampled by a material.
+        // Only the CPU bytes feed the distance fields; this mask is never sampled by a material.
         ignore.texture.dispose();
       } catch (error) {
         console.warn(`${ignoreUrl}: failed to load shore-ignore mask; ignoring it`, error);
       }
     }
     void original;
+    const downsample = material.waterBed ? 2 : 4;
     terrainMap = {
       texture,
       waterMask: mask?.texture ?? emptyMask(),
       waterBed: material.waterBed,
       waterDetail,
+      waterSurface,
       // The lake-bed shoreline needs a finer, higher-precision distance field (see buildShoreField).
       shore: mask
-        ? buildShoreField(
-            mask.bytes,
-            mask.width,
-            mask.height,
-            ref.scale,
-            material.waterBed ? 2 : 4,
-            material.waterBed,
-            shoreIgnore,
-          ).texture
+        ? buildShoreField(mask.bytes, mask.width, mask.height, ref.scale, downsample, material.waterBed, shoreIgnore)
+            .texture
         : emptyMask(),
+      cliff:
+        mask && shoreIgnore
+          ? buildCliffField(mask.bytes, shoreIgnore, mask.width, mask.height, ref.scale, downsample).texture
+          : null,
       ref,
     };
   }
@@ -400,6 +421,9 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
 
 const PALETTE_ROWS = 128;
 
+/** Default width of one painted water-surface tile, in screen units of 30 engine px (MapMaterials.waterSurfaceScale). */
+export const DEFAULT_WATER_SURFACE_SCALE = 13;
+
 /** Resolve the optional material overrides together, so the mask and the distance field always use the same asset. */
 export function resolveTerrainMaterials(
   ref: NonNullable<HdCacheManifest['terrainMap']>,
@@ -410,6 +434,8 @@ export function resolveTerrainMaterials(
   shoreIgnore: string | undefined;
   waterBed: boolean;
   waterDetail: string | undefined;
+  waterSurface: string | undefined;
+  waterSurfaceScale: number;
 } {
   return {
     file: materials?.terrainMap ?? ref.file,
@@ -417,6 +443,11 @@ export function resolveTerrainMaterials(
     shoreIgnore: typeof materials?.shoreIgnore === 'string' ? materials.shoreIgnore : undefined,
     waterBed: materials?.waterBed === true,
     waterDetail: typeof materials?.waterDetail === 'string' ? materials.waterDetail : undefined,
+    waterSurface: typeof materials?.waterSurface === 'string' ? materials.waterSurface : undefined,
+    waterSurfaceScale:
+      typeof materials?.waterSurfaceScale === 'number' && materials.waterSurfaceScale > 0
+        ? materials.waterSurfaceScale
+        : DEFAULT_WATER_SURFACE_SCALE,
   };
 }
 

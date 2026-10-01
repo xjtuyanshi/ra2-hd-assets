@@ -569,6 +569,14 @@ edges; only `enhanced` water with `waterBed: true` samples it. Missing or unread
 constant water column; omitting the field preserves the original shading. Detail colour bypasses the constant
 column's display compensation, then shares its night dimming.
 
+Optional `waterSurface` names a seamless RGBA8 painted water surface tile with linear data channels: R = relief
+luminance ratio / 2 (0.5 neutral), G = crest glints, B = foam lace, A = unused. It repeats in screen-aligned ground
+space; one tile spans `waterSurfaceScale` screen units of 30 engine px on each axis (positive number, default 13).
+The renderer uses `NoColorSpace`, repeat wrapping on both axes, linear/mipmap filtering and anisotropy 8. Only
+enhanced lake-bed water (`waterBed: true`) with a `waterDetail` layer samples it. An absent tile leaves the existing
+shading intact; a missing or unreadable tile warns once and leaves the surface null. Tiles are made from
+image-model texture tiles by a scratch tool outside the repository.
+
 ## Engine rules the extractor encodes
 
 - MIX priority (highest first): expandmd##, ra2md/ra2, cache, local, language, conquer/generic/isogen, theater mixes.

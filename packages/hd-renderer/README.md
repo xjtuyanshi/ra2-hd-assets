@@ -247,7 +247,13 @@ reflections still follow the settings.
   in the map's `materials.json` uses the water mask's size/layout; greyscale values >= 128 mark cliff tops and walls
   that must stay dry and not create a beach beside water in screen space. At least half a field texel's pixels must
   be marked, and it must remain land after speck filling. Missing or mismatched images warn once and leave the
-  field unchanged; the image is only loaded when a water mask is available. The opt-in `enhanced` look:
+  field unchanged; the image is only loaded when a water mask is available. The same loaded bytes also produce
+  `terrainMap.cliff`, an unsigned distance to marked texels using the shore field's isometric metric and majority
+  downsampling (2 composite pixels per texel for lake beds, otherwise 4). Its R16F texture uses linear filtering,
+  no mipmaps and a normalised 0..1 range capped at `CLIFF_FIELD_MAX` (1.5 cells); wall texels are zero. Marked water
+  and specks remain cliff targets. The enhanced bed path receives the red channel as `BedWaterInputs.cliff`;
+  without a valid loaded ignore mask the cache field is null and the shader input is absent.
+  The opt-in `enhanced` look:
   a narrow turquoise shallow band with caustics over a sandy bed, dark blue-teal depths, a wind sea from three
   scrolled layers of a tileable ripple normal map plus two swells under drifting gust patches, sun glitter in ripple
   facets, rippled reflections of the mirrored scene, explosions and lamps mirrored from the light field, a swash that
@@ -263,6 +269,13 @@ reflections still follow the settings.
   `WATER_DETAIL` in `waterLook.ts` controls column blending, retained shallow turquoise and alpha modulation. Only the
   constant column receives display compensation; the mixed column then dims at night. Without detail, the bed shader
   keeps its original calculation order.
+  Optional `materials.json.waterSurface` names a seamless RGBA8 painted water surface tile with linear data channels:
+  R = relief luminance ratio / 2 (0.5 neutral), G = crest glints, B = foam lace, A = unused. The tile repeats in
+  screen-aligned ground space; one tile spans `waterSurfaceScale` screen units of 30 engine px on each axis
+  (positive number, default 13). It uses `NoColorSpace`, repeat wrapping on both axes, linear/mipmap filtering and
+  anisotropy 8. Only enhanced lake-bed water (`waterBed: true`) with a `waterDetail` layer samples it; absent tiles
+  leave the existing shading intact, and load failures warn once and leave the surface null. Tiles are made from
+  image-model texture tiles by a scratch tool outside the repository.
 - Sprites (`sprites.ts`): filtered coverage of the indexed mask for soft edges; within about one original texel of
   transparent texels HD atlas colours keep their hue but are never brighter than the original texel there (the
   upscaler's pale background fringe goes without a rim of raw palette colours). SHP shadows halve the displayed

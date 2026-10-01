@@ -35,6 +35,18 @@ export interface MapMaterials {
    * patches and current streaks. Used only by the enhanced water style with waterBed.
    */
   waterDetail?: string;
+  /**
+   * Seamless RGBA8 tile of the open-water surface as the fixed isometric camera sees it (its x runs along the screen
+   * x axis, its y down the screen), any square size, repeated over every water level in screen-aligned ground space
+   * (one tile is waterSurfaceScale x waterSurfaceScale screen units of 30 engine px). Linear data, not colour:
+   * R = luminance ratio of the painted chop to its local mean / 2 (0.5 = neutral),
+   * G = sun-glint strength on wave crests (0..1),
+   * B = surf / foam lace mask (0..1),
+   * A = 1. Used only by the enhanced water style with waterBed.
+   */
+  waterSurface?: string;
+  /** Width of one waterSurface tile in screen units of 30 engine px (default 13). */
+  waterSurfaceScale?: number;
   /** How the files were made (source images, filter width), for review. */
   notes?: string;
 }

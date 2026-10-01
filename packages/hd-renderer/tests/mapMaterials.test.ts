@@ -1,7 +1,11 @@
 import {
   ClampToEdgeWrapping,
+  DataUtils,
+  HalfFloatType,
   LinearFilter,
   LinearMipmapLinearFilter,
+  NoColorSpace,
+  RepeatWrapping,
   SRGBColorSpace,
   Texture,
   TextureLoader,
@@ -29,6 +33,8 @@ describe('map material water overrides', () => {
       shoreIgnore: undefined,
       waterBed: false,
       waterDetail: undefined,
+      waterSurface: undefined,
+      waterSurfaceScale: 13,
     });
   });
 
@@ -39,6 +45,8 @@ describe('map material water overrides', () => {
       shoreIgnore: undefined,
       waterBed: false,
       waterDetail: undefined,
+      waterSurface: undefined,
+      waterSurfaceScale: 13,
     });
   });
 
@@ -57,6 +65,8 @@ describe('map material water overrides', () => {
       shoreIgnore: 'cliffs.png',
       waterBed: true,
       waterDetail: 'water-detail.png',
+      waterSurface: undefined,
+      waterSurfaceScale: 13,
     });
     expect(ref.waterMask).toBe('water.png');
   });
@@ -68,6 +78,8 @@ describe('map material water overrides', () => {
       shoreIgnore: undefined,
       waterBed: false,
       waterDetail: undefined,
+      waterSurface: undefined,
+      waterSurfaceScale: 13,
     });
   });
 
@@ -89,6 +101,8 @@ describe('map material water overrides', () => {
       shoreIgnore: 'cliffs.png',
       waterBed: false,
       waterDetail: undefined,
+      waterSurface: undefined,
+      waterSurfaceScale: 13,
     });
   });
 
@@ -100,6 +114,8 @@ describe('map material water overrides', () => {
       shoreIgnore: undefined,
       waterBed: false,
       waterDetail: undefined,
+      waterSurface: undefined,
+      waterSurfaceScale: 13,
     });
   });
 
@@ -119,8 +135,58 @@ describe('map material water overrides', () => {
       shoreIgnore: undefined,
       waterBed: true,
       waterDetail: undefined,
+      waterSurface: undefined,
+      waterSurfaceScale: 13,
     });
   });
+
+  it.each([0.5, 7, 26])('resolves a water surface tile with a positive scale: %s', (waterSurfaceScale) => {
+    expect(resolveTerrainMaterials(ref, { version: 1, waterSurface: 'surface.png', waterSurfaceScale })).toEqual({
+      file: 'terrain.png',
+      waterMask: 'water.png',
+      shoreIgnore: undefined,
+      waterBed: false,
+      waterDetail: undefined,
+      waterSurface: 'surface.png',
+      waterSurfaceScale,
+    });
+  });
+
+  it.each([true, false, 128, null, {}, []].map((waterSurface) => ({ waterSurface })))(
+    'ignores a non-string waterSurface JSON value: $waterSurface',
+    ({ waterSurface }) => {
+      const material = JSON.parse(
+        JSON.stringify({ version: 1, waterSurface, waterSurfaceScale: 7, terrainMap: 'matched.png', waterBed: true }),
+      ) as MapMaterials;
+      expect(resolveTerrainMaterials(ref, material)).toEqual({
+        file: 'matched.png',
+        waterMask: 'water.png',
+        shoreIgnore: undefined,
+        waterBed: true,
+        waterDetail: undefined,
+        waterSurface: undefined,
+        waterSurfaceScale: 7,
+      });
+    },
+  );
+
+  it.each([undefined, 0, -2, true, false, '8', null, {}, []].map((waterSurfaceScale) => ({ waterSurfaceScale })))(
+    'defaults an absent, non-positive or non-number waterSurfaceScale to 13: $waterSurfaceScale',
+    ({ waterSurfaceScale }) => {
+      const material = JSON.parse(
+        JSON.stringify({ version: 1, waterSurface: 'surface.png', waterSurfaceScale }),
+      ) as MapMaterials;
+      expect(resolveTerrainMaterials(ref, material)).toEqual({
+        file: 'terrain.png',
+        waterMask: 'water.png',
+        shoreIgnore: undefined,
+        waterBed: false,
+        waterDetail: undefined,
+        waterSurface: 'surface.png',
+        waterSurfaceScale: 13,
+      });
+    },
+  );
 });
 
 describe('map material cache loading', () => {
@@ -192,8 +258,9 @@ describe('map material cache loading', () => {
     return { images, fetchFile, loadTexture, warn, water, width, height };
   }
 
-  it.each([false, true])('applies the loaded bytes to the field only (waterBed=%s)', async (waterBed) => {
-    const { warn, water } = fixture({ version: 1, shoreIgnore: 'cliffs.png', waterBed });
+  it.each([false, true])('applies the loaded bytes to both distance fields (waterBed=%s)', async (waterBed) => {
+    const { images, warn, water } = fixture({ version: 1, shoreIgnore: 'cliffs.png', waterBed });
+    images.get('cliffs.png')!.bytes = water.map((value) => 255 - value);
     const cache = await loadRa2Cache('/map');
     const map = cache.terrainMap!;
     expect(map.waterMask.image.data).toEqual(water);
@@ -202,6 +269,15 @@ describe('map material cache loading', () => {
     expect(Array.from(values)).toEqual(
       Array.from({ length: values.length }, (_, i) => (i % width < width / 2 ? 0 : waterBed ? 0x3c00 : 255)),
     );
+    expect(map.cliff).not.toBeNull();
+    expect(map.cliff!.type).toBe(HalfFloatType);
+    expect([map.cliff!.image.width, map.cliff!.image.height]).toEqual([map.shore.image.width, map.shore.image.height]);
+    const cliff = map.cliff!.image.data as Uint16Array;
+    const step = waterBed ? 2 : 4;
+    for (let i = 0; i < cliff.length; i++) {
+      const distance = (Math.max(0, (i % width) - (width / 2 - 1)) * step * Math.SQRT2) / (ref.scale * 60);
+      expect(DataUtils.fromHalfFloat(cliff[i]!) * 1.5).toBeCloseTo(distance, 3);
+    }
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -217,6 +293,7 @@ describe('map material cache loading', () => {
       const cache = await loadRa2Cache('/map');
       const baseline = buildShoreField(water, width, height, ref.scale);
       expect(cache.terrainMap!.shore.image.data).toEqual(baseline.texture.image.data);
+      expect(cache.terrainMap!.cliff).toBeNull();
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn.mock.calls[0]![0]).toContain('/map/cliffs.png');
       baseline.texture.dispose();
@@ -228,6 +305,7 @@ describe('map material cache loading', () => {
     const cache = await loadRa2Cache('/map');
     expect(fetchFile).not.toHaveBeenCalledWith('/map/cliffs.png');
     expect(cache.terrainMap!.shore.image.data).toEqual(new Uint8Array(1));
+    expect(cache.terrainMap!.cliff).toBeNull();
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -239,6 +317,7 @@ describe('map material cache loading', () => {
       const baseline = buildShoreField(water, width, height, ref.scale);
       expect(fetchFile).not.toHaveBeenCalledWith('/map/cliffs.png');
       expect(cache.terrainMap!.shore.image.data).toEqual(baseline.texture.image.data);
+      expect(cache.terrainMap!.cliff).toBeNull();
       expect(warn).not.toHaveBeenCalled();
       baseline.texture.dispose();
     },
@@ -246,7 +325,8 @@ describe('map material cache loading', () => {
 
   it('bypasses shore-ignore with the rest of the sidecar when colour matching is disabled', async () => {
     const { fetchFile, warn } = fixture();
-    await loadRa2Cache('/map', { colourMatched: false });
+    const cache = await loadRa2Cache('/map', { colourMatched: false });
+    expect(cache.terrainMap!.cliff).toBeNull();
     expect(fetchFile).not.toHaveBeenCalledWith('/map/materials.json');
     expect(fetchFile).not.toHaveBeenCalledWith('/map/cliffs.png');
     expect(warn).not.toHaveBeenCalled();
@@ -319,6 +399,71 @@ describe('map material cache loading', () => {
     const map = (await loadRa2Cache('/map', { colourMatched: false })).terrainMap!;
     expect(map.waterDetail).toBeNull();
     expect(loadTexture).not.toHaveBeenCalledWith('/map/detail.png');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { waterSurfaceScale: undefined, expectedScale: 13 },
+    { waterSurfaceScale: 6.5, expectedScale: 6.5 },
+  ])('loads a repeating water surface tile with scale $expectedScale', async ({ waterSurfaceScale, expectedScale }) => {
+    const { images, loadTexture, warn } = fixture({
+      version: 1,
+      waterSurface: 'surface.png',
+      waterSurfaceScale,
+      waterBed: true,
+    });
+    const rgba = new Uint8Array([128, 0, 0, 255, 160, 64, 16, 255, 96, 128, 32, 255, 192, 192, 255, 255]);
+    images.set('surface.png', { width: 2, height: 2, bytes: new Uint8Array(), rgba });
+    const map = (await loadRa2Cache('/map')).terrainMap!;
+    expect(map.waterSurface).toEqual({ texture: expect.any(Texture), scale: expectedScale });
+    const { texture } = map.waterSurface!;
+    expect(loadTexture).toHaveBeenCalledWith('/map/surface.png');
+    expect(texture.colorSpace).toBe(NoColorSpace);
+    expect(texture.magFilter).toBe(LinearFilter);
+    expect(texture.minFilter).toBe(LinearMipmapLinearFilter);
+    expect(texture.generateMipmaps).toBe(true);
+    expect(texture.anisotropy).toBe(8);
+    expect([texture.wrapS, texture.wrapT]).toEqual([RepeatWrapping, RepeatWrapping]);
+    expect(texture.premultiplyAlpha).toBe(false);
+    expect(texture.flipY).toBe(false);
+    expect(texture.image.rgba).toEqual(rgba);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each(['missing file', 'load failure'])('warns once and leaves water surface null on %s', async (problem) => {
+    const { images, loadTexture, warn } = fixture({ version: 1, waterSurface: 'surface.png', waterBed: true });
+    if (problem === 'load failure') {
+      images.set('surface.png', { width: 2, height: 2, bytes: new Uint8Array(4) });
+      const loadFixture = loadTexture.getMockImplementation()!;
+      loadTexture.mockImplementation(async (url) => {
+        if (url === '/map/surface.png') throw new Error('Invalid surface image');
+        return loadFixture(url);
+      });
+    }
+    const map = (await loadRa2Cache('/map')).terrainMap!;
+    expect(map.waterBed).toBe(true);
+    expect(map.waterSurface).toBeNull();
+    expect(loadTexture).toHaveBeenCalledWith('/map/surface.png');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith('/map/surface.png: failed to load water surface; ignoring it', expect.any(Error));
+  });
+
+  it.each([{}, { waterSurface: true }, { waterSurface: null }, { version: 2, waterSurface: 'surface.png' }])(
+    'does not load absent or invalid water surface: %j',
+    async (overrides) => {
+      const { loadTexture, warn } = fixture({ version: 1, ...overrides });
+      const map = (await loadRa2Cache('/map')).terrainMap!;
+      expect(map.waterSurface).toBeNull();
+      expect(loadTexture).toHaveBeenCalledTimes(1); // The original sprite atlas only.
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('bypasses water surface when colour matching is disabled', async () => {
+    const { loadTexture, warn } = fixture({ version: 1, waterSurface: 'surface.png', waterSurfaceScale: 7 });
+    const map = (await loadRa2Cache('/map', { colourMatched: false })).terrainMap!;
+    expect(map.waterSurface).toBeNull();
+    expect(loadTexture).not.toHaveBeenCalledWith('/map/surface.png');
     expect(warn).not.toHaveBeenCalled();
   });
 });

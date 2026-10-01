@@ -50,7 +50,7 @@ export interface RippleField {
  * layer's wind axis; the shader rotates each layer), with a height spectrum falling as k^-1.8 so the long waves shape
  * the surface and the short ones carry most of the slope, like a wind sea. Slopes are exact analytic derivatives.
  */
-export function rippleField(size = WATER_TEXTURE_SIZE, seed = 11, waves = 96): RippleField {
+export function rippleField(size = WATER_TEXTURE_SIZE, seed = 11, waves = 96, spread = 1.3): RippleField {
   const random = seeded(seed);
   const cosTable = new Float64Array(size);
   const sinTable = new Float64Array(size);
@@ -64,7 +64,7 @@ export function rippleField(size = WATER_TEXTURE_SIZE, seed = 11, waves = 96): R
   const sy = new Float64Array(n);
   for (let w = 0; w < waves; w++) {
     const k = 3 * Math.pow(40 / 3, random());
-    const angle = (random() * 2 - 1) * 1.3 * (0.5 + 0.5 * random());
+    const angle = (random() * 2 - 1) * spread * (0.5 + 0.5 * random());
     let kx = Math.round(k * Math.cos(angle));
     const ky = Math.round(k * Math.sin(angle));
     if (kx === 0 && ky === 0) kx = 3;
@@ -203,6 +203,11 @@ function repeatTexture(data: Uint8Array, size: number, mipmaps: boolean): DataTe
 
 export interface WaterTextures {
   ripple: DataTexture;
+  /**
+   * Like ripple, but its waves stay within about +-25 degrees of +x: long-crested chop whose crests read as strokes
+   * across the wind instead of the ripple tile's cellular cross-sea (used for the fine chop of detailed water).
+   */
+  chop: DataTexture;
   caustics: DataTexture;
   noise: DataTexture;
 }
@@ -213,18 +218,22 @@ let shared: WaterTextures | null = null;
 export function waterTextures(): WaterTextures {
   if (shared) return shared;
   const size = WATER_TEXTURE_SIZE;
-  const ripple = rippleField(size);
-  const rippleData = new Uint8Array(size * size * 4);
-  for (let i = 0; i < size * size; i++) {
-    const sx = ripple.slopeX[i]!;
-    const sy = ripple.slopeY[i]!;
-    rippleData[i * 4] = toByte(0.5 + sx / (2 * RIPPLE_SLOPE_RANGE));
-    rippleData[i * 4 + 1] = toByte(0.5 + sy / (2 * RIPPLE_SLOPE_RANGE));
-    rippleData[i * 4 + 2] = toByte(0.5 + ripple.height[i]! / 6);
-    // Crests: high and steep points, where wind first breaks the surface into white.
-    const steep = Math.hypot(sx, sy) / 2.5;
-    rippleData[i * 4 + 3] = toByte(Math.max(0, ripple.height[i]! - 1) * 0.6 + steep * 0.4);
-  }
+  const pack = (ripple: RippleField): Uint8Array => {
+    const data = new Uint8Array(size * size * 4);
+    for (let i = 0; i < size * size; i++) {
+      const sx = ripple.slopeX[i]!;
+      const sy = ripple.slopeY[i]!;
+      data[i * 4] = toByte(0.5 + sx / (2 * RIPPLE_SLOPE_RANGE));
+      data[i * 4 + 1] = toByte(0.5 + sy / (2 * RIPPLE_SLOPE_RANGE));
+      data[i * 4 + 2] = toByte(0.5 + ripple.height[i]! / 6);
+      // Crests: high and steep points, where wind first breaks the surface into white.
+      const steep = Math.hypot(sx, sy) / 2.5;
+      data[i * 4 + 3] = toByte(Math.max(0, ripple.height[i]! - 1) * 0.6 + steep * 0.4);
+    }
+    return data;
+  };
+  const rippleData = pack(rippleField(size));
+  const chopData = pack(rippleField(size, 17, 72, 0.45));
   const caustic = causticField(size);
   const causticData = new Uint8Array(size * size * 4);
   for (let i = 0; i < size * size; i++) {
@@ -247,6 +256,7 @@ export function waterTextures(): WaterTextures {
   }
   shared = {
     ripple: repeatTexture(rippleData, size, true),
+    chop: repeatTexture(chopData, size, true),
     caustics: repeatTexture(causticData, size, true),
     // The hash channel must not be filtered across mip levels; the noise is only read at scales near 1:1 or larger.
     noise: repeatTexture(noiseData, size, false),

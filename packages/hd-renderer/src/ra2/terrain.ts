@@ -674,6 +674,8 @@ function createMaterials(
           calm,
           bedAt,
           detail: map.waterDetail ? texture(map.waterDetail, uv) : undefined,
+          surface: map.waterSurface ?? undefined,
+          cliff: map.cliff ? texture(map.cliff, uv).r : undefined,
           columnForDisplay: (column) => waterForDisplay(column, nodes),
           reflectionLevel: mix(float(1), float(WATER_LEVEL), nodes.faithfulDisplay),
         },

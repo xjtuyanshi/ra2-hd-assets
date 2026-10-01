@@ -3,8 +3,10 @@ import { reflector } from 'three/tsl';
 import {
   DataTexture,
   Group,
+  HalfFloatType,
   NodeFrame,
   OrthographicCamera,
+  RedFormat,
   ReflectorNode,
   WebGLCoordinateSystem,
   WebGPUCoordinateSystem,
@@ -13,6 +15,7 @@ import { AtmosphereNodes } from '../src/atmosphere';
 import { NO_TILE, type Ra2Cache } from '../src/ra2/cache';
 import { buildRa2Terrain } from '../src/ra2/terrain';
 import { waterPreset } from '../src/ra2/waterLook';
+import * as waterLook from '../src/ra2/waterLook';
 import type { ShaderNode } from '../src/tsl';
 import { LEVEL_HEIGHT } from '../src/world';
 
@@ -24,7 +27,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function terrain(waterBed = true, counts = [1, 12, 13, 14, 15, 16]) {
+function terrain(waterBed = true, counts = [1, 12, 13, 14, 15, 16], hasCliff = false) {
   const width = Math.max(...counts, 1);
   const height = counts.length * 8;
   const exists = new Uint8Array(width * height);
@@ -40,6 +43,7 @@ function terrain(waterBed = true, counts = [1, 12, 13, 14, 15, 16]) {
   });
   const texture = new DataTexture(new Uint8Array([32, 64, 96, 255]), 1, 1);
   const detailTexture = new DataTexture(new Uint8Array([24, 72, 96, 128]), 1, 1);
+  const cliffTexture = hasCliff ? new DataTexture(new Uint16Array([0]), 1, 1, RedFormat, HalfFloatType) : null;
   const nodes = new AtmosphereNodes();
   const cache = {
     nodes,
@@ -55,8 +59,10 @@ function terrain(waterBed = true, counts = [1, 12, 13, 14, 15, 16]) {
       texture,
       waterMask: texture,
       shore: texture,
+      cliff: cliffTexture,
       waterBed,
       waterDetail: detailTexture,
+      waterSurface: null,
       ref: { file: 'terrain.png', width: 128, height: 64, scale: 1, originX: 0, originY: 0 },
     },
   } as unknown as Ra2Cache;
@@ -79,14 +85,33 @@ function terrain(waterBed = true, counts = [1, 12, 13, 14, 15, 16]) {
     build.heightTexture.dispose();
     texture.dispose();
     detailTexture.dispose();
+    cliffTexture?.dispose();
     nodes.dispose();
   });
   const detailSamples = [...seen].filter((node) => node.isTextureNode && node.value === detailTexture);
   const compositeSamples = [...seen].filter((node) => node.isTextureNode && node.value === texture);
-  return { build, instances, detailSamples, compositeSamples };
+  return { build, instances, detailSamples, compositeSamples, cliffTexture };
 }
 
 describe('terrain water mirrors', () => {
+  it.each([false, true])(
+    'passes the optional cliff distance to bed water with composite UVs (cliff=%s)',
+    (hasCliff) => {
+      waterPreset.style = 'enhanced';
+      const bed = vi.spyOn(waterLook, 'bedWaterLook');
+      const { cliffTexture } = terrain(true, [1], hasCliff);
+      expect(bed).toHaveBeenCalledTimes(1);
+      const inputs = bed.mock.calls[0]![0];
+      if (hasCliff) {
+        expect(inputs.cliff.components).toBe('x'); // TSL canonicalises the red-channel swizzle to x.
+        expect(inputs.cliff.node.value).toBe(cliffTexture);
+        expect(inputs.cliff.node.uvNode).toBe(inputs.detail.uvNode);
+      } else {
+        expect(inputs.cliff).toBeUndefined();
+      }
+    },
+  );
+
   it('attaches four independently sampled mirror planes under one scene target for enhanced bed water', () => {
     waterPreset.style = 'enhanced';
     const { build, instances, detailSamples, compositeSamples } = terrain();

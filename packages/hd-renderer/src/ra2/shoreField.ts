@@ -4,6 +4,9 @@ import { DataTexture, DataUtils, HalfFloatType, LinearFilter, RedFormat, Unsigne
 export const SHORE_MIN = -3;
 export const SHORE_MAX = 9;
 
+/** Cliff contact distance in cells encoded by a texel value of 1. */
+export const CLIFF_FIELD_MAX = 1.5;
+
 /**
  * Land specks of at most this many field texels (8-connected, 4 x 4 mask pixels each at the default step: about
  * 6 x 6 engine pixels) inside open water count as water: they are single rocks or mask noise, and as land each one
@@ -41,27 +44,7 @@ export function buildShoreField(
   precise = false,
   ignore?: Uint8Array,
 ): { texture: DataTexture; data: Uint8Array; width: number; height: number } {
-  const w = Math.ceil(width / step);
-  const h = Math.ceil(height / step);
-  const water = new Uint8Array(w * h);
-  const ignored = ignore ? new Uint8Array(w * h) : null;
-  for (let y = 0; y < h; y++)
-    for (let x = 0; x < w; x++) {
-      let sum = 0;
-      let n = 0;
-      let ignoredPixels = 0;
-      for (let dy = 0; dy < step; dy++)
-        for (let dx = 0; dx < step; dx++) {
-          const px = x * step + dx;
-          const py = y * step + dy;
-          if (px >= width || py >= height) continue;
-          sum += mask[py * width + px]!;
-          if (ignore && ignore[py * width + px]! >= 128) ignoredPixels++;
-          n++;
-        }
-      water[y * w + x] = n && sum / n >= 128 ? 1 : 0;
-      if (ignored) ignored[y * w + x] = n && ignoredPixels * 2 >= n ? 1 : 0;
-    }
+  const { water, ignored, width: w, height: h } = downsampleMasks(mask, width, height, step, ignore);
   fillSpecks(water, w, h, SPECK_TEXELS);
   const texel = step / scale;
   const toWater = distanceField(water, w, h, 1, texel, texel * 2);
@@ -93,6 +76,64 @@ export function buildShoreField(
   texture.minFilter = LinearFilter;
   texture.needsUpdate = true;
   return { texture, data, width: w, height: h };
+}
+
+/**
+ * Unsigned distance to the nearest shore-ignored texel, in the shore field's isometric cell metric. Both masks use
+ * the same composite-space layout and majority downsampling as buildShoreField. Every marked texel is a target,
+ * including marks over water or specks: water classification must not erase a cliff contact line.
+ *
+ * Values are normalised to 0..1 over CLIFF_FIELD_MAX cells and stored as half-float bits in `data`, matching the
+ * precise lake-bed shore texture. Distance is zero on a wall texel, without the signed shore field's edge inset.
+ */
+export function buildCliffField(
+  maskBytes: Uint8Array,
+  ignoreBytes: Uint8Array,
+  width: number,
+  height: number,
+  scale: number,
+  downsample = 4,
+): { texture: DataTexture; data: Uint16Array } {
+  const { ignored, width: w, height: h } = downsampleMasks(maskBytes, width, height, downsample, ignoreBytes);
+  const texel = downsample / scale;
+  const toCliff = distanceField(ignored!, w, h, 1, texel, texel * 2);
+  const data = new Uint16Array(w * h);
+  for (let i = 0; i < data.length; i++) {
+    const cells = Math.sqrt(toCliff[i]!) / ISO_PIXELS_PER_CELL;
+    data[i] = DataUtils.toHalfFloat(Math.min(1, cells / CLIFF_FIELD_MAX));
+  }
+  const texture = new DataTexture(data, w, h, RedFormat, HalfFloatType);
+  texture.magFilter = LinearFilter;
+  texture.minFilter = LinearFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return { texture, data };
+}
+
+/** Sample both fields on the same texel grid, including partial blocks at the composite's edges. */
+function downsampleMasks(mask: Uint8Array, width: number, height: number, step: number, ignore?: Uint8Array) {
+  const w = Math.ceil(width / step);
+  const h = Math.ceil(height / step);
+  const water = new Uint8Array(w * h);
+  const ignored = ignore ? new Uint8Array(w * h) : null;
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      let n = 0;
+      let ignoredPixels = 0;
+      for (let dy = 0; dy < step; dy++)
+        for (let dx = 0; dx < step; dx++) {
+          const px = x * step + dx;
+          const py = y * step + dy;
+          if (px >= width || py >= height) continue;
+          sum += mask[py * width + px]!;
+          if (ignore && ignore[py * width + px]! >= 128) ignoredPixels++;
+          n++;
+        }
+      water[y * w + x] = n && sum / n >= 128 ? 1 : 0;
+      if (ignored) ignored[y * w + x] = n && ignoredPixels * 2 >= n ? 1 : 0;
+    }
+  return { water, ignored, width: w, height: h };
 }
 
 /**

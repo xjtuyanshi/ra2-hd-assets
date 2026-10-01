@@ -40,12 +40,14 @@ describe('painted-bed beach profile', () => {
   });
 
   it('keeps the sand visible in the first 0.15 cells while absorbing red fastest', () => {
+    // Tuned against the approved river target: the turquoise column takes over within about a quarter cell, but the
+    // sand still shows through clearly at 0.15 cells (more than half of green and blue, a fifth of red).
     const [r, g, b] = transmission(0.15);
-    expect(r).toBeGreaterThan(0.3);
+    expect(r).toBeGreaterThan(0.18);
     expect(r).toBeLessThan(g!);
-    expect(g).toBeGreaterThan(0.65);
+    expect(g).toBeGreaterThan(0.5);
     expect(g).toBeLessThan(b!);
-    expect(b).toBeGreaterThan(0.75);
+    expect(b).toBeGreaterThan(0.6);
   });
 
   it('removes the bed by 0.8-1 cells without negative or non-finite transmission offshore', () => {
