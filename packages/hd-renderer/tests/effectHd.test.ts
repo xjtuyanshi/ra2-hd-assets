@@ -16,7 +16,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EffectHdAnim, EffectHdLibrary } from '../../ra2-assets/src/effects';
 import type { DirtyAttribute } from '../src/dirtyAttribute';
-import { EffectsLayer, ENHANCED } from '../src/effects';
+import { BlastCrowd, EffectsLayer, ENHANCED } from '../src/effects';
 import { EffectArt, PAGE_RETRY_SECONDS, type ResolvedAnim } from '../src/live/effectArt';
 import {
   animAlpha,
@@ -301,6 +301,7 @@ describe('live HD flipbook selection', () => {
     const pools = Object.fromEntries(names.map((name) => [name, { spawn: vi.fn() }]));
     const layer = Object.assign(Object.create(EffectsLayer.prototype), pools, {
       zeroVelocity: new Vector3(),
+      crowd: new BlastCrowd(),
     }) as EffectsLayer;
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
     const at = new Vector3(1, 2, 3);
