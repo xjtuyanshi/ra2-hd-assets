@@ -275,6 +275,8 @@ export class LiveEffectsDriver {
   private readonly systems = new Map<string, TrackedSystem>();
   private bullets: LiveBullet[] = [];
   private beams: LiveBeam[] = [];
+  private decorativeBeams: readonly BeamSpec[] = [];
+  private decorativeState = '[]';
   private readonly beamTail: LiveBeam[] = [];
   private beamFrame = NaN;
   private beamState = '';
@@ -402,7 +404,7 @@ export class LiveEffectsDriver {
    * The HD bolt shape uses a stable seed for each pair of logic frames; it does not reproduce native random paths.
    */
   private beamSpecs(): BeamSpec[] {
-    return this.beams.map((beam) => {
+    const native = this.beams.map((beam) => {
       const bolt = beam.kind === 'bolt';
       const srgb = bolt ? (isViolet(beam.colour) ? ALTERNATE : TESLA) : beam.colour;
       return {
@@ -413,6 +415,16 @@ export class LiveEffectsDriver {
         seed: (Math.floor(this.logicFrame / 2) * 7919 + Math.round(beam.target.x + beam.target.y * 3)) >>> 0,
       };
     });
+    return this.decorativeBeams.length ? [...native, ...this.decorativeBeams] : native;
+  }
+
+  /** Replace decorative geometry without retriggering native beam flashes on display refreshes. */
+  setDecorativeBeams(now: number, beams: readonly BeamSpec[]): void {
+    const state = JSON.stringify(beams);
+    if (state === this.decorativeState) return;
+    this.decorativeState = state;
+    this.decorativeBeams = beams;
+    this.effects.setBeams(now, this.beamSpecs(), false);
   }
 
   /**

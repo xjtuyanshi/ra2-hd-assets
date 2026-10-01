@@ -56,6 +56,7 @@ function presentation() {
   const effectDriver = { frame: vi.fn(), cards: vi.fn(() => ({ drawn: 0, missing: 0 })), smokeCards: vi.fn() };
   const effectSprites = { setInstances: vi.fn(), now: { value: 0 }, displayScale: { value: 1 } };
   const hd = {
+    settings: { sourceLights: 0 },
     seconds: () => 1,
     meanExposure: 2,
     frame: vi.fn(),

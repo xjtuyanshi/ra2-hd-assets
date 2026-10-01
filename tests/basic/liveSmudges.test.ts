@@ -267,6 +267,7 @@ function presentation(withLibrary = true) {
     cellLayer,
     root: { add: vi.fn(), remove: vi.fn() },
     hd: {
+      settings: { sourceLights: 0 },
       seconds: () => 1,
       frame: vi.fn(),
       windowsWanted: () => false,

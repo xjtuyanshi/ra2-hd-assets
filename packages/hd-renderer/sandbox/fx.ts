@@ -110,6 +110,19 @@ if (lookPreset && lookPreset in LOOK_PRESETS) {
   applyLookPreset(live.hd.settings, lookPreset);
   live.hd.applySettings();
 }
+// &set=key:value,...: numeric setting overrides after the look (A/B reviews of one knob at the same camera/lighting).
+const overrides = (params.get('set') ?? '').split(',').filter(Boolean);
+if (overrides.length) {
+  const settings = live.hd.settings as unknown as Record<string, unknown>;
+  for (const item of overrides) {
+    const [key, raw] = item.split(':');
+    const value = Number(raw);
+    if (!key || typeof settings[key] !== 'number' || !Number.isFinite(value))
+      throw new Error(`Invalid setting override: ${item}; expected numericKey:value`);
+    settings[key] = value;
+  }
+  live.hd.applySettings();
+}
 // &garnish=0: the original art alone (no HD light, sparks or smoke), for side-by-side checks.
 if (params.get('garnish') === '0')
   (live as unknown as { effectDriver: { garnishEnabled: boolean } }).effectDriver.garnishEnabled = false;

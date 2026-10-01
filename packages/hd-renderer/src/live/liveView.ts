@@ -28,6 +28,7 @@ import { EffectArt, type ResolvedAnim } from './effectArt';
 import { EffectSpriteLayer, animAlpha, type EffectInstance } from './effectSprites';
 import { LiveEffectsDriver, smokeOnVehicle, type EffectStyle, type LiveAnim, type LiveEffects } from './effects';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
+import { buildingLightArcs, buildingLightSources } from './buildingLights';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
 import { SmudgeInstanceCache, type LiveSmudgeCells, type SmudgePage } from './smudges';
@@ -845,6 +846,31 @@ export class LiveView {
     }
   }
 
+  private sourceLightsActive = false;
+
+  /** Refresh only visible, completed building sources; a faithful switch clears the enhanced layer immediately. */
+  private updateBuildingLights(snapshot: LiveSnapshot | undefined): void {
+    if (!(this.hd.settings.sourceLights > 0)) {
+      if (this.sourceLightsActive) {
+        this.hd.lightField.clearSources();
+        this.effectDriver.setDecorativeBeams(this.hd.seconds(), []);
+        this.sourceLightsActive = false;
+      }
+      return;
+    }
+    const lights = buildingLightSources(
+      snapshot?.objects ?? [],
+      this.hd.settings,
+      (type) => this.library?.type(type)?.foundation,
+      (building) => this.shroud.isLocationShrouded(building.x, building.y, building.z),
+      this.library?.conditionYellow,
+    );
+    const now = this.hd.seconds();
+    for (const light of lights) this.hd.lightField.source(light.key, now, light);
+    this.effectDriver.setDecorativeBeams(now, buildingLightArcs(lights, snapshot?.frame ?? 0));
+    this.sourceLightsActive = true;
+  }
+
   render(now = performance.now()): void {
     const dt = Math.min(0.1, Math.max(0, (now - this.lastRender) / 1000));
     this.lastRender = now;
@@ -895,6 +921,7 @@ export class LiveView {
     if (this.overlayPagesDirty) this.flushOverlayPages();
     if (this.smudgePagesDirty) this.flushSmudgePages();
     if (this.painterDirty) this.applyPainterOrder();
+    this.updateBuildingLights(current?.snapshot);
     this.effectDriver.frame(this.hd.seconds(), this.wind);
     if (this.effectSprites) {
       this.effectSprites.now.value = this.hd.seconds();

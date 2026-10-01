@@ -259,9 +259,19 @@ in the art and lighting, not in the grade.
 | `occlusion`                                     | Baked occlusion of the material atlas (wall feet, roofs next to higher tiers) and soft ground contact decals around foundations.                                                                                                                                     |
 | `shadowFollow`, `shadowSoftness`                | SHP shadow decals turn and stretch about their object's base with the sun (voxel shadows turn with them); their penumbra grows with distance.                                                                                                                        |
 | `wetReflections`                                | Upright art mirrored about its base line on wet paving (short, rippled, strongest in puddles).                                                                                                                                                                       |
+| `sourceLights`                                  | HD building emitter gain: default and `faithful` 0; `golden` / `cinematic` 1. The Tesla reactor emits blue ground/object light outside its foundation, a matching flickering HDR head and short decorative arcs.                                                     |
 | `sunPath`                                       | `'arc'`: `Lighting.sunArc`, east in the morning, over the camera side at noon, west in the evening (the art's azimuth at 15:00); `'fixed'`: the classic azimuth.                                                                                                     |
 | `adaptExposure`                                 | Lifts early and late daylight towards noon's flat-ground brightness (the colour of the light stays).                                                                                                                                                                 |
 | `voxelSheen`, `voxelSheenCap`, `voxelOcclusion` | Voxel highlight strength and cap and crease occlusion (`vpl.ts`); null leaves the voxel material as configured.                                                                                                                                                      |
+
+Building emitters are authored in `src/live/buildingLights.ts` (`BUILDING_LIGHTS`); more buildings need only table
+entries. Foundation fractions and engine-pixel head heights are converted to world coordinates using the live type
+library. Dead, shrouded, building/selling and unknown-foundation objects emit nothing. `LightField.source()` keeps
+sources alive while refreshed, fades in over 0.25 seconds and fades out over its TTL after refreshes stop. Its
+light-local rectangle (half-extents plus centre offset) masks the emitting foundation with a 0.25-cell outer edge.
+CPU electrical flicker drives both irradiance and glow; decorative beams skip target flashes and impact garnish.
+Switching source gain to zero clears sources and arcs immediately. These use the existing top-down light field,
+not volumetric point-light shadowing; visual alignment and bloom need rendered review.
 
 Per-pixel normals come from an optional material atlas next to the HD sprite atlas (`normals.json` +
 `sprites@2x-normals.png`, written by `packages/ra2-assets/python/sprite_normals.py`, loaded by `spriteMaterials.ts`);

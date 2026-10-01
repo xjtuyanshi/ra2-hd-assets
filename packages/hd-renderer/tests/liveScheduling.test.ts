@@ -26,7 +26,13 @@ function presentation(interpolating: boolean) {
   const library = { revision: 0 };
   const applyObjects = vi.fn();
   const applyEffects = vi.fn();
-  const hd = { seconds: () => 1, frame: vi.fn(), windowsWanted: () => false, materialsWanted: vi.fn(() => false) };
+  const hd = {
+    settings: { sourceLights: 0 },
+    seconds: () => 1,
+    frame: vi.fn(),
+    windowsWanted: () => false,
+    materialsWanted: vi.fn(() => false),
+  };
   const view = Object.assign(Object.create(LiveView.prototype) as object, {
     current: { snapshot: { frame: 2 }, at: 10 },
     previous: { snapshot: { frame: 1 }, at: 0 },

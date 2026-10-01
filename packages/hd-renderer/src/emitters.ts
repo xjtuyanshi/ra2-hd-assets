@@ -46,6 +46,8 @@ export interface Emitter {
    * standing in front of the post still does. Default: HEAD_PUSH.
    */
   push?: number;
+  /** Head quad size (world units); overrides the dynamic default. */
+  size?: number;
   /** Streak length (world units); default: the mirrored head smeared by the wet surface (head x sqrt 3 x STREAK_SMEAR). */
   streakLength?: number;
   /** Streak half-width (world units); default 0.3. */
@@ -53,7 +55,8 @@ export interface Emitter {
 }
 
 const STATIC_CAPACITY = 1024;
-const DYNAMIC_CAPACITY = 256;
+/** Room for every mirrored explosion, fire and persistent source, so bursts cannot hide source heads. */
+const DYNAMIC_CAPACITY = 640;
 /** Toward the fixed camera on the ground plane (IsoCamera looks from +x +z). */
 const TO_CAMERA_GROUND = new Vector3(Math.SQRT1_2, 0, Math.SQRT1_2);
 /**
@@ -232,7 +235,7 @@ export class EmitterLayer {
 
   /** Replace the dynamic emitters (fires, explosions) for this frame. */
   setDynamic(list: readonly Emitter[]): void {
-    this.write(1, list, (e) => (e.glow[0] + e.glow[1] + e.glow[2] > 0 ? Math.min(1.6, 0.5 + e.head) : 0));
+    this.write(1, list, (e) => (e.glow[0] + e.glow[1] + e.glow[2] > 0 ? (e.size ?? Math.min(1.6, 0.5 + e.head)) : 0));
   }
 
   get staticEmitters(): number {

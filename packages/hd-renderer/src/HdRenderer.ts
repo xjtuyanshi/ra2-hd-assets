@@ -117,7 +117,7 @@ export interface HdSettings extends CinematicGradeParams {
    * material atlas or the live library page's); specular: sun highlights on facades and roofs; glass: sky reflection
    * and glints on window panes; occlusion: baked occlusion and soft ground contact under buildings; shadowFollow:
    * SHP shadows turn and stretch with the sun; shadowSoftness: their penumbra grows with distance; wetReflections:
-   * buildings and trees mirrored on wet paving.
+   * buildings and trees mirrored on wet paving; sourceLights: HD emitter gain (0 adds nothing).
    */
   relight: number;
   specular: number;
@@ -127,6 +127,8 @@ export interface HdSettings extends CinematicGradeParams {
   shadowFollow: number;
   shadowSoftness: number;
   wetReflections: number;
+  /** HD source irradiance and emitter glow gain: 0 = none, 1 = authored strength. */
+  sourceLights: number;
   /**
    * Directional contrast of the relighting: 1 keeps the scene's own sky-to-sun ratio; above 1 the sun dominates the
    * sky (sunlit faces brighter and warmer, shaded faces darker and cooler), as in low evening light.
@@ -163,6 +165,7 @@ const GOLDEN_SETTINGS: LookSettings = {
   shadowFollow: 1,
   shadowSoftness: 1,
   wetReflections: 1,
+  sourceLights: 1,
   lightContrast: 1.5,
   sunPath: 'arc',
   adaptExposure: 0.85,
@@ -185,6 +188,7 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       shadowFollow: 0,
       shadowSoftness: 0,
       wetReflections: 0,
+      sourceLights: 0,
       lightContrast: 1,
       sunPath: 'fixed',
       adaptExposure: 0,
@@ -325,7 +329,7 @@ export interface HdStats {
   nightLevel: number | null;
   staticGain: number;
   staticLights: number;
-  dynamicLights: { explosion: number; flash: number; kept: number };
+  dynamicLights: { explosion: number; flash: number; kept: number; sources: number };
   lightFieldRenders: number;
   emitters: number;
   mist: number;
@@ -385,6 +389,7 @@ export class HdRenderer {
     shadowFollow: 0,
     shadowSoftness: 0,
     wetReflections: 0,
+    sourceLights: 0,
     lightContrast: 1,
     sunPath: 'fixed',
     adaptExposure: 0,
@@ -1089,7 +1094,7 @@ export class HdRenderer {
     this.voxelShearBase = null;
   }
 
-  /** Fires and explosions also show as glows and wet reflections, mirrored from the light field. */
+  /** Dynamic sources, fires and explosions also show as glows and wet reflections, mirrored from the light field. */
   private mirrorDynamicEmitters(now: number): void {
     const lights = this.lightField.dynamicLights(now, this.dynamicLights);
     const pool = this.dynamicEmitterPool;
@@ -1104,9 +1109,12 @@ export class HdRenderer {
       e.z = l.z;
       // Fires show as flames: only their wet reflection is mirrored here. Explosions also get a glow at their heart.
       const fire = l.kind === 'fire';
-      e.head = fire ? 0.5 : 0.8;
+      const source = l.kind === 'source';
+      e.head = source ? (l.head ?? 0) : fire ? 0.5 : 0.8;
+      e.size = source ? l.glowSize : undefined;
+      e.push = source ? l.push : undefined;
       for (let c = 0; c < 3; c++) {
-        e.glow[c] = fire ? 0 : l.colour[c]! * k * 0.12;
+        e.glow[c] = source ? (l.glow?.[c] ?? 0) : fire ? 0 : l.colour[c]! * k * 0.12;
         e.streak[c] = l.colour[c]! * k * (fire ? 0.45 : 0.35);
       }
       out.push(e);
@@ -1159,7 +1167,7 @@ export class HdRenderer {
       nightLevel: this.lighting.nightLevel,
       staticGain: this.staticGain,
       staticLights: lf.static,
-      dynamicLights: { explosion: lf.explosion, flash: lf.flash, kept: lf.kept },
+      dynamicLights: { explosion: lf.explosion, flash: lf.flash, kept: lf.kept, sources: lf.sources },
       lightFieldRenders: this.lightField.renders,
       emitters: this.emitters.staticEmitters,
       mist: this.mist.amount.value,

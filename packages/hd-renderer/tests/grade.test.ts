@@ -336,3 +336,24 @@ describe('map tint neutralisation', () => {
     expect(half.b / half.r).toBeCloseTo(Math.sqrt(full.b / full.r), 6);
   });
 });
+
+describe('HD source light presets', () => {
+  it('adds nothing by default or in faithful and enables both enhanced presets', () => {
+    const hd = headlessRenderer();
+    try {
+      expect(hd.settings.sourceLights).toBe(0);
+      expect(LOOK_PRESETS.faithful.settings.sourceLights).toBe(0);
+      for (const preset of ['golden', 'cinematic'] as const) {
+        expect(LOOK_PRESETS[preset].settings.sourceLights).toBe(1);
+        applyLookPreset(hd.settings, preset);
+        expect(hd.settings.sourceLights).toBe(1);
+      }
+      applyLookPreset(hd.settings, 'faithful');
+      expect(hd.settings.sourceLights).toBe(0);
+    } finally {
+      // No backend was initialized; release only the nodes allocated by construction.
+      hd.nodes.dispose();
+      vi.unstubAllGlobals();
+    }
+  });
+});
