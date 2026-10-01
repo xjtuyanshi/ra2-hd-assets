@@ -168,6 +168,13 @@ export interface HdSettings extends CinematicGradeParams {
    * In between, the correction is the tint's inverse raised to this power. Fades with the map light's own day weight.
    */
   mapTintAdapt: number;
+  /**
+   * Share of the map's light sources (lamp posts such as INGALITE: +50 % at the post, about 15 cells round) in the
+   * map's day light (1: the engine's, faithful; the night presentation owns lamps after dusk). Real street lamps do not
+   * brighten sunlit ground; at full share a city park framing renders its lawn at L* 53 against the approved target's
+   * 45 (without lamps 34), and a Tesla reactor next to a lamp sits on near-white pavement.
+   */
+  mapSourcesByDay: number;
   /** Voxel sheen strength, sheen cap and crease occlusion (ra2/vpl.ts); null leaves the voxel material as it is. */
   voxelSheen: number | null;
   voxelSheenCap: number | null;
@@ -183,6 +190,7 @@ type LookSettings = Partial<HdSettings> &
     HdSettings,
     | 'whiteAdapt'
     | 'mapTintAdapt'
+    | 'mapSourcesByDay'
     | 'sunGain'
     | 'clarity'
     | 'specularSize'
@@ -217,6 +225,7 @@ const GOLDEN_SETTINGS: LookSettings = {
   voxelOcclusion: 0.35,
   whiteAdapt: 0,
   mapTintAdapt: 0,
+  mapSourcesByDay: 1,
   ...neutralGrade(),
 };
 
@@ -247,6 +256,7 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       voxelOcclusion: 0.15,
       whiteAdapt: 0,
       mapTintAdapt: 0,
+      mapSourcesByDay: 1,
       ...neutralGrade(),
     },
   },
@@ -277,6 +287,7 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       clarity: 0.55,
       whiteAdapt: 1,
       mapTintAdapt: 0.3,
+      mapSourcesByDay: 0.3,
       gradeBalance: [0.955, 1, 1.085],
       gradeContrast: 0.14,
       gradePivotLift: 0.045,
@@ -465,6 +476,7 @@ export class HdRenderer {
     adaptExposure: 0,
     whiteAdapt: 0,
     mapTintAdapt: 0,
+    mapSourcesByDay: 1,
     ...neutralGrade(),
     voxelSheen: null,
     voxelSheenCap: null,
@@ -998,6 +1010,7 @@ export class HdRenderer {
     // The map's own light by day ([Lighting] and light sources, mapLighting.ts); the night presentation owns maps staged
     // as night or dusk and the night hours of day maps.
     this.world?.mapLight?.setWeight(profile?.kind === 'day' ? 1 - light.night : 0);
+    this.world?.mapLight?.setSourceWeight(this.settings.mapSourcesByDay);
     if (this.water) {
       const w = this.water.uniforms;
       w.sunDirection.value.copy(light.sunDirection);
