@@ -9,6 +9,8 @@ vi.mock('../src/ra2/sprites', async (original) => ({
   SpriteLayer: vi.fn(
     class {
       readonly mesh = new InstancedMesh(new BufferGeometry(), new MeshBasicMaterial(), 1);
+      readonly capacity = 64;
+      readonly setInstances = vi.fn();
     },
   ),
 }));
@@ -38,8 +40,19 @@ function presentation() {
     cache: {},
     root: new Group(),
     pageLayers: new Map(),
+    overlayLayers: new Map(),
+    overlayInstances: { instances: { pages: new Map([[0, []]]) } },
+    uploadedOverlays: new Map(),
+    overlayPagesDirty: true,
     world: {},
-  }) as { pageLayer(key: number): SpriteLayer | null; root: Group };
+  }) as {
+    pageLayer(key: number): SpriteLayer | null;
+    root: Group;
+    flushOverlayPages(): void;
+    overlayLayers: Map<number, { layer: SpriteLayer; materials: boolean }>;
+    overlayInstances: { instances: { pages: Map<number, unknown[]> } };
+    overlayPagesDirty: boolean;
+  };
   return { view, library, look, available, atlas, hd };
 }
 
@@ -117,6 +130,55 @@ describe('live page material selection', () => {
     p.available.materials = { texture: new Texture() };
     expect(p.view.pageLayer(0)).not.toBe(first);
     expect(SpriteLayer).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('live overlay page materials', () => {
+  it('draws while loading, upgrades unchanged instances once, and retains materials after disabling the look', () => {
+    const p = presentation();
+    p.view.flushOverlayPages();
+    const first = p.view.overlayLayers.get(0)!.layer;
+    expect(p.library.materialsPage).not.toHaveBeenCalled();
+    const dispose = vi.spyOn(first.mesh, 'dispose');
+    const geometry = vi.spyOn(first.mesh.geometry, 'dispose');
+    const material = vi.spyOn(first.mesh.material as MeshBasicMaterial, 'dispose');
+    p.look.materials = true;
+    p.view.flushOverlayPages();
+    p.view.flushOverlayPages();
+    expect(p.view.overlayPagesDirty).toBe(true);
+    expect(p.view.overlayLayers.get(0)!.layer).toBe(first);
+    expect(first.setInstances).toHaveBeenCalledTimes(1);
+    p.available.materials = { texture: new Texture() };
+    p.view.flushOverlayPages();
+    const enhanced = p.view.overlayLayers.get(0)!.layer;
+    expect(enhanced).not.toBe(first);
+    expect(vi.mocked(SpriteLayer).mock.calls.at(-1)![6]).toBe(p.available.materials);
+    expect(enhanced.setInstances).toHaveBeenCalledTimes(1);
+    for (const spy of [dispose, geometry, material]) expect(spy).toHaveBeenCalledTimes(1);
+    expect(p.view.root.children).toEqual([enhanced.mesh]);
+    p.view.flushOverlayPages();
+    p.look.materials = false;
+    p.view.flushOverlayPages();
+    expect(p.view.overlayPagesDirty).toBe(false);
+    expect(SpriteLayer).toHaveBeenCalledTimes(2);
+    expect(enhanced.setInstances).toHaveBeenCalledTimes(1);
+    // Capacity growth must retain the already loaded sidecar even after the enhanced look is disabled.
+    p.view.overlayInstances.instances.pages.set(0, Array(65).fill({}));
+    p.view.flushOverlayPages();
+    expect(vi.mocked(SpriteLayer).mock.calls.at(-1)![6]).toBe(p.available.materials);
+  });
+
+  it('stops retrying absent/failed material pages without rebuilding the colour-only layer', () => {
+    const p = presentation();
+    p.look.materials = true;
+    p.view.flushOverlayPages();
+    const first = p.view.overlayLayers.get(0)!.layer;
+    expect(p.view.overlayPagesDirty).toBe(true);
+    p.library.hasMaterialsPage.mockReturnValue(false);
+    p.view.flushOverlayPages();
+    expect(p.view.overlayPagesDirty).toBe(false);
+    expect(p.view.overlayLayers.get(0)!.layer).toBe(first);
+    expect(SpriteLayer).toHaveBeenCalledTimes(1);
   });
 });
 

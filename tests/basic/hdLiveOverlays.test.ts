@@ -95,6 +95,7 @@ describe('live overlay instances', () => {
     expect([ore.flat, ore.push, ore.lighting]).toEqual([true, 0, 'none']);
     expect([wall.flat, wall.lighting]).toEqual([false, 'ambient']);
     expect(wall.push).toBeGreaterThan(0);
+    expect([ore.glint, gems.glint, wall.glint, rock.glint]).toEqual([1, 1, undefined, undefined]);
   });
 
   it('does not clamp/wrap missing frames or retain depleted overlays', () => {
@@ -127,6 +128,7 @@ describe('live overlay instances', () => {
     const built = buildOverlayInstances(cells(), art, terrain(), palette);
     expect(built.pages.get(9)![0]).toMatchObject({ frame: shadow, shadow: true, flat: true, push: 0 });
     expect(built.pages.get(9)![0]!.anchor).toBe(built.pages.get(0)![0]!.anchor);
+    expect(built.pages.get(9)![0]!.glint).toBeUndefined();
   });
 });
 

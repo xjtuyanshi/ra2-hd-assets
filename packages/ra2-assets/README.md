@@ -539,6 +539,39 @@ near-neutral texels untouched) a share `k` towards a fresh grass-green Lab a/b, 
 trees are graded together with the repainted lawn instead of keeping each map's olive original. Sheets,
 model outputs, patches and variant caches are derived art and belong outside Git.
 
+## Ore and gem field redraw (Python, experimental)
+
+`python/ore_fields.py` ports the L5 field pipeline with explicit paths and no model calls or environment inputs.
+`extract` cuts grey-118 model sheets into numeric `.npz` arrays and a companion JSON index; `build` also accepts
+trusted scratch `.pkl` libraries. It reuses original nugget layouts over 12 growth stages, adds growing soil,
+contact shadows and materials, and writes four atlas PNGs plus `frames.json`. Decals are 68x46 at offset (-34,-12)
+from the cell's top corner, with a 1 texel gutter. The defaults are the approved L5 set: soil target `.46 .325 .19`,
+gold scale `1.16`, gain `.95`, knee `.84`, gold gamma `1.2`, clarity `.2`, gem scale `1.25` and gem gamma `.78`; all
+composition parameters have individual flags. NumPy, Pillow and OpenCV are required. In-engine, the live overlay layer marks tiberium overlays as
+ground crystals: the material page drives relighting, sun highlights and sparse animated star twinkles
+(`groundCrystalColour` in `packages/hd-renderer/src/ra2/spriteLook.ts`), which fade with the sun at night.
+The default mask preserves the scratch build's thresholded faint tails exactly. Add `--strict-mask-coverage` to cover every
+nonzero delivered HD alpha texel; only the indexed PNG changes, with existing indices preserved. The synthetic
+coverage regression checks this explicit mode as well as the default's compatibility behaviour.
+
+```bash
+python3 -B packages/ra2-assets/python/ore_fields.py extract --sheet "$GOLD_SHEET" --kind gold --out "$WORK/gold.npz"
+python3 -B packages/ra2-assets/python/ore_fields.py extract --sheet "$GEM_SHEET" --kind gem --out "$WORK/gem.npz"
+python3 -B packages/ra2-assets/python/ore_fields.py build --library-root "$LIBRARY_ROOT" --theatre temperate \
+  --gold "$WORK/gold.npz" --gem "$WORK/gem.npz" --soil "$SOIL" --out "$WORK/build"
+python3 -B packages/ra2-assets/python/ore_fields.py install --build-dir "$WORK/build" \
+  --cache-root "$VARIANT" --theatre temperate
+python3 -B packages/ra2-assets/python/ore_fields.py sheet --build-dir "$WORK/build" \
+  --library-root "$LIBRARY_ROOT" --theatre temperate --cache-root "$L4_CACHE" --map XMP29U2 \
+  --font "$CHINESE_FONT" --out "$WORK/sheets"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_ore_fields.py'
+```
+
+`install` uses POSIX `flock` on the destination theatre's `.compose.lock`, atomically replaces its own page and
+JSON entries without writing through symlinks, preserves other tracks' data, and reuses the page index on reruns.
+`sheet` compares original/L4/L5 with Chinese labels at the same cell anchor. Game art and all derived images stay
+outside Git; numerical tests do not establish renderer or visual acceptance.
+
 ## Level 3 building redraw sheets (Python, experimental)
 
 `python/l3_redraw.py` reuses the hybrid registration, checks and paint encoding for map caches and paged type

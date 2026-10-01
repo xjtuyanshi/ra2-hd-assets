@@ -9,6 +9,7 @@ import type { MapLightGrade } from './mapLighting';
 import { Ra2NightDressing } from './nightDressing';
 import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from './sprites';
 import { loadSpriteMaterials } from './spriteMaterials';
+import type { SpriteMaterialAtlas } from './spriteLook';
 import { objectYSort, painterObject } from './painterOrder';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from './bridgeDepth';
 import { buildRa2Terrain } from './terrain';
@@ -45,6 +46,8 @@ export interface HdWorld {
   /** Where the camera starts (world units). */
   focus: Vector3;
   sprites?: SpriteLayer;
+  /** Shared map sprite materials, loaded once with this world and reused by live map-cache cell layers. */
+  spriteMaterials?: SpriteMaterialAtlas | null;
   cache?: Ra2Cache;
   /** Per-cell surface (RG8, linear): R = paved (asphalt, concrete, brick, roads), G = open water. */
   surfaceTexture?: DataTexture;
@@ -253,6 +256,7 @@ export async function loadRa2World(
       push,
       shadow: false,
       flat,
+      glint: object.kind === 'overlay' && flat && lighting === 'none' ? 1 : undefined,
       lighting,
       painter: object.kind === 'overlay' ? undefined : painter,
       deckHeight,
@@ -311,6 +315,7 @@ export async function loadRa2World(
     root,
     focus,
     sprites: spriteLayer,
+    spriteMaterials: materials,
     cache,
     surface,
     surfaceTexture: surfaceTexture(surface, manifest.grid.width, manifest.grid.height),

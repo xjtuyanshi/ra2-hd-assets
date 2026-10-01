@@ -188,6 +188,12 @@ under `gameres/tools/diffusion/`) is the opt-in `remat` step of `hd:prepare` (ad
 `packages/ra2-assets/python/rematerialize.py`; to try it on part of the map first, run the script directly with
 `--region`.
 
+The offline L5 ore/gem pipeline is `packages/ra2-assets/python/ore_fields.py`: `extract`, `build`, `install` and
+`sheet` use explicit source/cache/output paths. It writes 68x46 decals, four atlas PNGs and frame metadata;
+installation preserves other library entries under a compose lock. Commands and defaults are documented in
+[the asset tools guide](../../packages/ra2-assets/README.md#ore-and-gem-field-redraw-python-experimental).
+Game art and derived images remain outside Git.
+
 ## Running it
 
 Start a development server whose game root holds a skirmish setup (a scratch copy of the installation with an edited

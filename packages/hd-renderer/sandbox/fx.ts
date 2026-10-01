@@ -41,6 +41,13 @@
  *   &spread=1.6               cells between the listed anims along the diagonal
  *   &crater=1                 emulate the engine's craters (bridge H3 smudge grid: the map's own smudges plus a
  *                             CRATER/BURNT smudge where a Scorch=yes / Crater=yes anim reaches its middle)
+ *   &ore=1                   publish the map's overlays through the live library path (ore, gems and walls)
+ *   &harvest=0,0;6,0;6,4     implies ore=1; harvester follows cell offsets from cx,cy, then stops at the endpoint
+ *                             &harvester=CMIN selects its rules type; &house its colour; &hspeed=0.8 cells/second
+ *                             &hrate=0.6 seconds between growth losses within Chebyshev distance 1 while moving
+ *   &ostages=TIB01,GEM01     implies ore=1; replace overlays with rows of growth frames 0..11 from cx,cy (+x/+y)
+ *                             &ospace=2 integer cell spacing; &ofill=N adds an N x N frame-11 block per type to
+ *                             the right (blocks stagger farther right for each row to avoid overlap)
  *   &house=15                 colour scheme index of the owning house
  *   &objects=T@dx,dy[@owner[@health[@facing]]];...
  *                             extra units/buildings (rules type T, kind from the type library) at cell offsets from
@@ -63,6 +70,8 @@ import { voxelLookParams } from './look';
 import { voxelProjectionFor } from '../src/ra2/voxelProjection';
 import { voxelPbrFor } from '../src/ra2/voxelPbr';
 import { advanceShpReview, shpUnitReview } from './shpUnitReview';
+import type { TypeLibrary } from '../../ra2-assets/src/library';
+import { depleteOre, growthGrid, mapOverlayGrid, polylinePosition, type CellPoint } from './oreBench';
 
 const params = new URLSearchParams(location.search);
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
@@ -306,8 +315,10 @@ function infantrySet(): LiveObject[] {
         type,
         owner: second.has(type) ? 1 : 0,
         // Screen rows: +1 map x and -1 map y is one step right on screen, +1 on both one step down.
-        ...at(cx + (i - 3.5) * 0.6 * spacing + (row - types.length / 2) * 0.9 * spacing,
-          cy - (i - 3.5) * 0.6 * spacing + (row - types.length / 2) * 0.9 * spacing),
+        ...at(
+          cx + (i - 3.5) * 0.6 * spacing + (row - types.length / 2) * 0.9 * spacing,
+          cy - (i - 3.5) * 0.6 * spacing + (row - types.length / 2) * 0.9 * spacing,
+        ),
         facingRaw: i * 8192,
         infantrySequence: seq,
         sequenceFrame: step,
@@ -379,16 +390,86 @@ for (const [id, a] of Object.entries(effectsJson?.anims ?? {}))
   });
 
 const fxIds = (params.get('fx') ?? 'units').split(',').filter(Boolean);
+const oreEnabled = params.get('ore') === '1' || params.has('harvest') || params.has('ostages');
+const benchLibrary =
+  params.has('objects') || oreEnabled || params.get('crater') === '1'
+    ? await fetch(`/_library/${cache.manifest.theater}/library.json`)
+        .then((r) => (r.ok ? (r.json() as Promise<TypeLibrary>) : null))
+        .catch(() => null)
+    : null;
 /** Kind of every rules type in the map theater's type library (for &objects=). */
-const libraryKinds: Record<string, string> = params.has('objects')
-  ? Object.fromEntries(
-      Object.entries(
-        ((await fetch(`/_library/${cache.manifest.theater}/library.json`)
-          .then((r) => (r.ok ? r.json() : null))
-          .catch(() => null)) as { types?: Record<string, { kind: string }> } | null)?.types ?? {},
-      ).map(([id, t]) => [id, t.kind]),
-    )
-  : {};
+const libraryKinds = Object.fromEntries(Object.entries(benchLibrary?.types ?? {}).map(([id, t]) => [id, t.kind]));
+let oreGrid = !oreEnabled
+  ? null
+  : params.has('ostages')
+    ? growthGrid(
+        grid.width,
+        grid.height,
+        params
+          .get('ostages')!
+          .split(',')
+          .map((id) => id.trim())
+          .filter(Boolean),
+        cx,
+        cy,
+        Number(params.get('ospace') ?? 2),
+        Number(params.get('ofill') ?? 0),
+      )
+    : mapOverlayGrid(grid.width, grid.height, cache.manifest.objects);
+const tiberium = new Set(
+  Object.entries(benchLibrary?.overlays ?? {})
+    .filter(([, t]) => t.tiberium)
+    .map(([id]) => id),
+);
+const harvestPath: CellPoint[] = params.has('harvest')
+  ? params
+      .get('harvest')!
+      .split(';')
+      .map((pair) => {
+        const values = pair.split(',').map(Number);
+        if (values.length !== 2 || pair.split(',').some((v) => !v.trim()) || !values.every(Number.isFinite))
+          throw new Error(`Invalid harvest point: ${pair}; expected dx,dy`);
+        return [cx + values[0]!, cy + values[1]!] as const;
+      })
+  : [];
+const harvestSpeed = Number(params.get('hspeed') ?? 0.8);
+const harvestRate = Number(params.get('hrate') ?? 0.6);
+if (
+  harvestPath.length &&
+  (!Number.isFinite(harvestSpeed) || harvestSpeed <= 0 || !Number.isFinite(harvestRate) || harvestRate <= 0)
+)
+  throw new Error('Harvest speed and rate must be positive finite numbers');
+const harvesterUid = harvestPath.length ? nextUid++ : 0;
+let harvestTick = 0;
+
+/** Harvest only on logic-time boundaries; repeated snapshot reads must not consume another growth frame. */
+function harvestObjects(): LiveObject[] {
+  if (!harvestPath.length) return [];
+  const age = spawned === null ? 0 : Math.max(0, frame - spawned) / fps;
+  const tick = Math.floor(age / harvestRate + 1e-9);
+  while (harvestTick < tick) {
+    const position = polylinePosition(harvestPath, ++harvestTick * harvestRate, harvestSpeed);
+    if (position.moving && oreGrid) {
+      // Keep previously published snapshots stable for interpolation and capture/debug readers.
+      const next = { ...oreGrid, index: oreGrid.index.slice(), data: oreGrid.data.slice() };
+      if (depleteOre(next, position.x, position.y, tiberium)) oreGrid = next;
+    }
+  }
+  const position = polylinePosition(harvestPath, age, harvestSpeed);
+  return [
+    {
+      id: harvesterUid,
+      uid: harvesterUid,
+      kind: 'vehicle',
+      type: params.get('harvester') || 'CMIN',
+      owner: 0,
+      ...at(position.x, position.y),
+      facingRaw: position.facingRaw,
+      health: 1,
+      isSelected: false,
+    },
+  ];
+}
 const units = [
   ...(fxIds.includes('units') ? unitSet() : []),
   ...(fxIds.includes('squad') ? squadSet() : []),
@@ -452,8 +533,14 @@ for (const item of (params.get('bolts') ?? '').split(';').filter(Boolean)) {
 }
 const boltFor = Number(params.get('boltfor') ?? 0.4);
 const repeat = Math.max(0, Number(params.get('repeat') ?? 0));
-const delays = (params.get('delay') ?? '').split(',').filter((v) => v !== '').map(Number);
-const periods = (params.get('period') ?? '').split(',').filter((v) => v !== '').map(Number);
+const delays = (params.get('delay') ?? '')
+  .split(',')
+  .filter((v) => v !== '')
+  .map(Number);
+const periods = (params.get('period') ?? '')
+  .split(',')
+  .filter((v) => v !== '')
+  .map(Number);
 /** Start delay and repeat period (seconds) of listed anim `i`. */
 const delayOf = (i: number) => (Number.isFinite(delays[i]) ? delays[i]! : i * stagger);
 const periodOf = (i: number) => Math.max(0, Number.isFinite(periods[i]) ? periods[i]! : repeat);
@@ -482,16 +569,9 @@ function listedAnim(anim: LiveAnim, i: number): LiveAnim | null {
 }
 
 // --- engine craters (&crater=1): the map's own smudges plus one where each scorching anim reaches its middle ----------
-const smudgeLibrary = params.get('crater') === '1' ? await loadSmudgeLibrary() : null;
+const smudgeLibrary = params.get('crater') === '1' ? (benchLibrary?.smudges ?? {}) : null;
 const craterCells = new Map<number, { type: string; age: number }>();
 let smudgeRevision = 1;
-
-async function loadSmudgeLibrary(): Promise<Record<string, { width: number; height: number }>> {
-  const library = (await fetch(`/_library/${cache.manifest.theater}/library.json`)
-    .then((r) => (r.ok ? r.json() : null))
-    .catch(() => null)) as { smudges?: Record<string, { width: number; height: number }> } | null;
-  return library?.smudges ?? {};
-}
 
 /** The engine's crater for a scorching anim: a random CRATER (big blasts) or BURNT (small ones) 1x1 smudge. */
 function craterType(anim: LiveAnim, scale: number): string {
@@ -615,6 +695,7 @@ function buildingLayerAnims(): LiveAnim[] {
 }
 
 function snapshot(): LiveSnapshot {
+  const harvesters = harvestObjects();
   const listed = anims.map((a, i) => listedAnim(a, i)).filter((a): a is LiveAnim => !!a);
   listed.push(...buildingLayerAnims());
   return {
@@ -623,6 +704,7 @@ function snapshot(): LiveSnapshot {
     houses,
     // Delaying first appearance lets LiveView's normal make timeline start at the spawn frame.
     objects: ((objs: LiveObject[]) => [
+      ...harvesters,
       ...(animateInfantry
         ? objs.map((u) => (u.infantrySequence ? { ...u, sequenceFrame: Math.floor(frame / animateInfantry) } : u))
         : objs),
@@ -635,6 +717,7 @@ function snapshot(): LiveSnapshot {
       beams: benchBeams(),
     },
     ...(smudgeLibrary ? { smudges: smudgeGrid() } : {}),
+    ...(oreGrid ? { overlays: oreGrid, localHouse: 0 } : {}),
   };
 }
 

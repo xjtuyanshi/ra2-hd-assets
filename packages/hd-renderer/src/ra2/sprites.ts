@@ -57,6 +57,7 @@ import {
   contactShade,
   foundationBase,
   glassReflection,
+  groundCrystalColour,
   relightFactor,
   sampleMaterial,
   spriteLookFor,
@@ -75,6 +76,8 @@ export interface SpriteInstance {
   shadow: boolean;
   /** Lay the art on the ground as a decal (ore, smudges, flat overlays) instead of a camera-facing card. */
   flat?: boolean;
+  /** Flat decals only: 0..1 ground-crystal relighting, highlights and animated sparkle; absent = unchanged art. */
+  glint?: number;
   /**
    * Extra object light on top of the map's (default 1), applied to the palette colour in its own (sRGB) scale and
    * clamped at white, like the engine's palette lighting.
@@ -101,6 +104,9 @@ export interface SpriteInstance {
 }
 
 const LIGHTING_CODE: Record<LightingClass, number> = { ambient: 0, full: 1, none: 2 };
+
+/** World units of depth bias per 15 screen rows of a ground-crystal decal (see placement). */
+const CRYSTAL_DECAL_ROW_BIAS = 0.002;
 
 /** flags.x of an instance: 0 card, 1 decal, 2 shadow, 3 contact shade, 4 wet reflection. */
 function instanceCode(s: SpriteInstance): number {
@@ -216,7 +222,7 @@ export class SpriteLayer {
   private readonly params: DirtyAttribute;
   /**
    * x: card/decal/shadow/contact/reflection (instanceCode); y: object light; z: map lighting class; w: bounded
-   * traversal bias in world units.
+   * traversal bias in world units for cards, or ground-crystal weight for plain flat decals.
    * The second vec4 holds foundation width/height and draw-point offsets; width -1 selects an elevated deck.
    * Both vec4 attributes share one buffer: WebGPU allows 8 vertex buffers.
    */
@@ -382,7 +388,18 @@ export class SpriteLayer {
           .add(this.toCamera.mul(pushAmount));
         // Ground decal: invert the engine projection at the anchor's height (1 px right = (1/60, -1/60) cells,
         // 1 px down = (1/30, 1/30) cells), so the art covers exactly the same screen pixels while lying on the ground.
-        const decal = aAnchor.add(vec3(px.div(60).add(py.div(30)), SPRITE_DECAL_LIFT, py.div(30).sub(px.div(60))));
+        // Ground-crystal decals (ore cells whose art spills over the cell edge) overlap their neighbours in one plane.
+        // Where a pass writes depth, the decal drawn first would reject the overlap of the next one by rounding, which
+        // cuts nuggets along straight lines. A depth bias by the pixel's screen row relative to the anchor makes the
+        // decal anchored lower on screen (the front cell, drawn later in painter order) win; at most a few thousandths
+        // of a cell, well inside SPRITE_DECAL_LIFT.
+        const crystalDecal: ShaderNode = step(0.5, aFlat)
+          .mul(float(1).sub(step(1.5, aFlat)))
+          .mul(step(1e-4, aFlags.w));
+        const rowBias: ShaderNode = clamp(py.div(15), -3, 3).mul(-CRYSTAL_DECAL_ROW_BIAS).mul(crystalDecal);
+        const decal = aAnchor
+          .add(vec3(px.div(60).add(py.div(30)), SPRITE_DECAL_LIFT, py.div(30).sub(px.div(60))))
+          .add(this.toCamera.mul(rowBias));
         const placed = aFlat.greaterThan(0.5).select(decal, card);
         // Enhanced look (spriteLook.ts). Shadows follow the sun: their ground offsets turn and stretch about the object's
         // base (the foundation's centre, or the draw point); the faithful path keeps the untouched decal.
@@ -572,6 +589,23 @@ export class SpriteLayer {
             const sky: ShaderNode = pane.sky.mul(occlusion);
             const relit: ShaderNode = mix(base, sky, reflectance).add(highlight).add(glint);
             result.assign(select(flatArt, result, vec4(relit.add(litGlow), litAlpha)));
+            const isDecal: ShaderNode = step(0.5, aFlat).mul(float(1).sub(step(1.5, aFlat)));
+            const crystal: ShaderNode = aFlags.w.mul(isDecal).mul(m.has);
+            // Use colour-atlas pixels, not material pixels: material sidecars may have a different resolution.
+            const hdScale = hd
+              ? ((hd.color.image as { width?: number } | null)?.width ?? atlas.width) / atlas.width
+              : 1;
+            const crystalColour = groundCrystalColour(
+              lit,
+              m,
+              crystal,
+              texel.mul(hdScale),
+              view,
+              look,
+              aAnchor.xz,
+              (pixel) => sampleMaterial(materials, pixel.div(hdScale).div(atlasSize)),
+            );
+            result.assign(select(crystal.greaterThan(0), vec4(crystalColour.add(litGlow), litAlpha), result));
           }
           // Shadows grow a penumbra with distance from their object's base (golden-hour softness).
           If(isShadow.greaterThan(0.5).and(look.shadowSoftness.greaterThan(1e-4)), () => {
@@ -744,7 +778,11 @@ export class SpriteLayer {
           instanceCode(s),
           s.light ?? 1,
           LIGHTING_CODE[s.lighting ?? 'ambient'],
-          s.flat || s.shadow || s.kind ? 0 : spritePainterBias(s.painter, s.painterPart),
+          instanceCode(s) === 1
+            ? Math.max(0, Math.min(1, s.glint ?? 0))
+            : s.flat || s.shadow || s.kind
+              ? 0
+              : spritePainterBias(s.painter, s.painterPart),
         );
         const foundation = s.painter?.foundation;
         const dx = foundation ? s.anchor.x - s.painter!.x : 0;
