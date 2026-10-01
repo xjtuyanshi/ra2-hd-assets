@@ -233,16 +233,31 @@ surface edge clamps and hidden/corrupt data. They require no game assets.
 The supplied original executable and art were read only for static evidence; none
 are added to Git.
 
-The normal right-sidebar layout recipe retains the prior C1/C2 live-match acceptance.
-The C3 cursor/tooltip and text-polish additions have not gained real-match acceptance.
-The browser smoke harness covers their page-side composition, restoration and UI/full
-A/B switches; a blocked browser launch is not a pass.
+Live acceptance (YR 1.001, 1152x744 frame, right sidebar, skirmish on XMP29U2 with all three sides): the
+page layer was compared against the native sidebar in frozen pairs (VM Worker busy-waiting while the HD and
+the native screenshot are taken) during scripted build orders. Matched: chrome/tab/cameo rectangles, cameo
+identity and order on all four tabs, build progress sector, hold (`等待`) and ready (`就绪`) labels, queue
+counts, darkened unavailable cameos, tab flashing, the active-tab plate, radar aperture after the radar comes
+online, and the power bar. Findings fixed from these pairs:
 
-**UNVERIFIED runtime:** final partial-edge cursor alignment and latency, native tooltip
-pixel alignment, localized text legibility, left-sidebar/hidden-sidebar
-layouts, observer cameo behavior (the observer draws a separate slot treatment),
-modded power art when no live header exists, all availability approximations,
-native clock/art alignment and timing, radar transitions, tooltips/cursor save-under,
-page-layer toggling and real user interaction with the new drawing.
+- the infantry and vehicle type vectors were swapped (`0xA8E348` is InfantryTypes, `0xA83CE0` UnitTypes;
+  the type-vector table at `0x48DD10` lists them), which put vehicle cameos on the infantry tab;
+- the native radar strokes the map outline one row outside its aperture (yellow rows at aperture y-1 and
+  y+height), so the radar hole is padded by one frame pixel;
+- the progress clock washes the unbuilt sector 50% toward a colour of the side's sidebar palette, not black:
+  mean-colour regression of the covered sector (original cameo vs native frame) gives Allied about
+  (64,173,238) and Soviet about (244,225,112); Yuri, which uses the Soviet sidebar art, measures
+  (241,222,113). After the change the covered-sector mean of an Allied power plant at 24% progress reads
+  native (87,139,168) against HD (87,140,171).
+
+Known live differences: the credits counter can trail the native frame by one or two polls while the native
+counter is ticking (both show the same value once it settles); the first frames of the radar power-on
+transition can differ (a transient viewport outline), steady radar pixels match (mean absolute difference
+0.04 over the aperture).
+
+**UNVERIFIED runtime:** left-sidebar/hidden-sidebar layouts, observer cameo behavior (the observer draws a
+separate slot treatment), superweapon cameos in a live match, modded power art when no live header exists,
+availability approximations beyond the scripted build orders, native tooltip pixel alignment (no tooltip was
+shown natively in the scripted runs), cursor save-under, and frame sizes other than 1152x744 in a real match.
 The normal frame recipe is not certified for left-sidebar or hidden-sidebar modes.
 These limits do not turn synthetic tests or a successful build into UI acceptance.
