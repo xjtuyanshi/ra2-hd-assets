@@ -27,6 +27,14 @@ export interface MapMaterials {
    * painted water. Opts into transmitted/refracted bed shading only with the enhanced water style; default false.
    */
   waterBed?: boolean;
+  /**
+   * RGBA8 PNG covering exactly the terrain composite's area, at any resolution with the same aspect ratio
+   * (typically a quarter of the composite's resolution). RGB is the sRGB apparent colour of open water: low/mid
+   * frequencies from an image-model repaint of the map's water, extrapolated over land so bilinear filtering never
+   * bleeds land colour into water. A is 0..1 surface roughness / sun-glitter weight (128 = neutral), carrying wind
+   * patches and current streaks. Used only by the enhanced water style with waterBed.
+   */
+  waterDetail?: string;
   /** How the files were made (source images, filter width), for review. */
   notes?: string;
 }

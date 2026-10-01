@@ -1,4 +1,11 @@
-import { Texture, TextureLoader } from 'three/webgpu';
+import {
+  ClampToEdgeWrapping,
+  LinearFilter,
+  LinearMipmapLinearFilter,
+  SRGBColorSpace,
+  Texture,
+  TextureLoader,
+} from 'three/webgpu';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MapMaterials } from '../../ra2-assets/src/mapMaterials';
 import { loadRa2Cache, resolveTerrainMaterials } from '../src/ra2/cache';
@@ -21,6 +28,7 @@ describe('map material water overrides', () => {
       waterMask: 'water.png',
       shoreIgnore: undefined,
       waterBed: false,
+      waterDetail: undefined,
     });
   });
 
@@ -30,6 +38,7 @@ describe('map material water overrides', () => {
       waterMask: 'water.png',
       shoreIgnore: undefined,
       waterBed: false,
+      waterDetail: undefined,
     });
   });
 
@@ -40,12 +49,14 @@ describe('map material water overrides', () => {
       waterMask: 'shore.png',
       shoreIgnore: 'cliffs.png',
       waterBed: true,
+      waterDetail: 'water-detail.png',
     };
     expect(resolveTerrainMaterials(Object.freeze(ref), Object.freeze(material))).toEqual({
       file: 'bed.png',
       waterMask: 'shore.png',
       shoreIgnore: 'cliffs.png',
       waterBed: true,
+      waterDetail: 'water-detail.png',
     });
     expect(ref.waterMask).toBe('water.png');
   });
@@ -56,6 +67,7 @@ describe('map material water overrides', () => {
       waterMask: 'shore.png',
       shoreIgnore: undefined,
       waterBed: false,
+      waterDetail: undefined,
     });
   });
 
@@ -76,6 +88,7 @@ describe('map material water overrides', () => {
       waterMask: 'water.png',
       shoreIgnore: 'cliffs.png',
       waterBed: false,
+      waterDetail: undefined,
     });
   });
 
@@ -86,11 +99,31 @@ describe('map material water overrides', () => {
       waterMask: 'water.png',
       shoreIgnore: undefined,
       waterBed: false,
+      waterDetail: undefined,
+    });
+  });
+
+  it('allows water detail independently of other overrides', () => {
+    expect(resolveTerrainMaterials(ref, { version: 1, waterDetail: 'water-detail.png' }).waterDetail).toBe(
+      'water-detail.png',
+    );
+  });
+
+  it.each([true, 128, null, {}, []])('ignores a non-string waterDetail JSON value: %j', (waterDetail) => {
+    const material = JSON.parse(
+      JSON.stringify({ version: 1, waterDetail, terrainMap: 'matched.png', waterBed: true }),
+    ) as MapMaterials;
+    expect(resolveTerrainMaterials(ref, material)).toEqual({
+      file: 'matched.png',
+      waterMask: 'water.png',
+      shoreIgnore: undefined,
+      waterBed: true,
+      waterDetail: undefined,
     });
   });
 });
 
-describe('shore-ignore cache loading', () => {
+describe('map material cache loading', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -100,8 +133,9 @@ describe('shore-ignore cache loading', () => {
     const width = 16;
     const height = 8;
     const water = Uint8Array.from({ length: width * height }, (_, i) => (i % width < 8 ? 0 : 255));
-    const blank = { width, height, bytes: new Uint8Array(water.length) };
-    const images = new Map([
+    type FixtureImage = { width: number; height: number; bytes: Uint8Array; rgba?: Uint8Array };
+    const blank: FixtureImage = { width, height, bytes: new Uint8Array(water.length) };
+    const images = new Map<string, FixtureImage>([
       ['atlas.png', blank],
       ['terrain.png', blank],
       ['water.png', { width, height, bytes: water }],
@@ -133,18 +167,29 @@ describe('shore-ignore cache loading', () => {
           let data: Uint8ClampedArray;
           return {
             drawImage(image: typeof blank) {
-              data = new Uint8ClampedArray(image.bytes.length * 4).fill(255);
-              image.bytes.forEach((value, i) => (data[i * 4] = value));
+              data = image.rgba
+                ? new Uint8ClampedArray(image.rgba)
+                : new Uint8ClampedArray(image.bytes.length * 4).fill(255);
+              if (!image.rgba) image.bytes.forEach((value, i) => (data[i * 4] = value));
             },
             getImageData: () => ({ data }),
           };
         }
       },
     );
-    vi.spyOn(TextureLoader.prototype, 'loadAsync').mockImplementation(async () => new Texture());
+    const loadTexture = vi.spyOn(TextureLoader.prototype, 'loadAsync').mockImplementation(async (url) => {
+      const file = url.split('/').at(-1)!;
+      const texture = new Texture();
+      if (file !== 'sprites.png') {
+        const image = images.get(file);
+        if (!image) throw new Error(`Missing fixture: ${file}`);
+        texture.image = image;
+      }
+      return texture;
+    });
     vi.spyOn(console, 'info').mockImplementation(() => {});
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    return { images, fetchFile, warn, water, width, height };
+    return { images, fetchFile, loadTexture, warn, water, width, height };
   }
 
   it.each([false, true])('applies the loaded bytes to the field only (waterBed=%s)', async (waterBed) => {
@@ -204,6 +249,76 @@ describe('shore-ignore cache loading', () => {
     await loadRa2Cache('/map', { colourMatched: false });
     expect(fetchFile).not.toHaveBeenCalledWith('/map/materials.json');
     expect(fetchFile).not.toHaveBeenCalledWith('/map/cliffs.png');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('loads smaller water detail with the same top-down orientation as the mask and composite', async () => {
+    const { images, loadTexture, warn, water, width, height } = fixture({
+      version: 1,
+      waterDetail: 'detail.png',
+      waterBed: true,
+    });
+    // Unequal top/bottom rows and left/right halves expose either UV flip; detail covers the same area at half size.
+    const marker = (u: number, v: number) => (v < 0.5 ? 16 : 224) + (u < 0.5 ? 0 : 1);
+    for (let i = 0; i < water.length; i++) water[i] = marker((i % width) / width, Math.floor(i / width) / height);
+    images.get('terrain.png')!.bytes = water.slice();
+    const detailW = width / 2;
+    const detailH = height / 2;
+    const rgba = new Uint8Array(detailW * detailH * 4);
+    for (let i = 0; i < detailW * detailH; i++) {
+      rgba.set([marker((i % detailW) / detailW, Math.floor(i / detailW) / detailH), 93, 174, (i % 3) * 127], i * 4);
+    }
+    images.set('detail.png', { width: detailW, height: detailH, bytes: new Uint8Array(), rgba });
+    const map = (await loadRa2Cache('/map')).terrainMap!;
+    const detail = map.waterDetail!;
+    expect(loadTexture).toHaveBeenCalledWith('/map/detail.png');
+    expect(detail.colorSpace).toBe(SRGBColorSpace);
+    expect(detail.magFilter).toBe(LinearFilter);
+    expect(detail.minFilter).toBe(LinearMipmapLinearFilter);
+    expect(detail.generateMipmaps).toBe(true);
+    expect([detail.wrapS, detail.wrapT]).toEqual([ClampToEdgeWrapping, ClampToEdgeWrapping]);
+    expect(detail.premultiplyAlpha).toBe(false);
+    expect([detail.flipY, map.waterMask.flipY, map.texture.flipY]).toEqual([false, false, false]);
+    expect(detail.image.rgba).toEqual(rgba);
+    for (const [u, v] of [
+      [0.25, 0.25],
+      [0.75, 0.25],
+      [0.25, 0.75],
+      [0.75, 0.75],
+    ]) {
+      const i = Math.floor(v * height) * width + Math.floor(u * width);
+      const d = Math.floor(v * detailH) * detailW + Math.floor(u * detailW);
+      expect(detail.image.rgba[d * 4]).toBe(map.waterMask.image.data[i]);
+      expect(detail.image.rgba[d * 4]).toBe(map.texture.image.data[i * 4]);
+    }
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('warns and leaves water detail null on a load failure without failing the map', async () => {
+    const { warn } = fixture({ version: 1, waterDetail: 'missing.png', waterBed: true });
+    const map = (await loadRa2Cache('/map')).terrainMap!;
+    expect(map.waterBed).toBe(true);
+    expect(map.waterDetail).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]![0]).toContain('/map/missing.png');
+  });
+
+  it.each([{}, { waterDetail: true }, { waterDetail: null }, { version: 2, waterDetail: 'detail.png' }])(
+    'does not load absent or invalid water detail: %j',
+    async (overrides) => {
+      const { loadTexture, warn } = fixture({ version: 1, ...overrides });
+      const map = (await loadRa2Cache('/map')).terrainMap!;
+      expect(map.waterDetail).toBeNull();
+      expect(loadTexture).toHaveBeenCalledTimes(1); // The original sprite atlas only.
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('bypasses water detail when colour matching is disabled', async () => {
+    const { loadTexture, warn } = fixture({ version: 1, waterDetail: 'detail.png' });
+    const map = (await loadRa2Cache('/map', { colourMatched: false })).terrainMap!;
+    expect(map.waterDetail).toBeNull();
+    expect(loadTexture).not.toHaveBeenCalledWith('/map/detail.png');
     expect(warn).not.toHaveBeenCalled();
   });
 });

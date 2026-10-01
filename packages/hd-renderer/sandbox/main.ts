@@ -34,9 +34,10 @@ if (params.has('vshape')) {
   if (Number.isFinite(relax)) shape.cornerRelax = relax!;
   if (Number.isFinite(blend)) shape.normalBlend = blend!;
 }
-// ?water=enhanced draws the remaster's modern water (src/ra2/waterLook.ts), as ?look=golden does unless ?water= says
+// ?water=enhanced draws the remaster's modern water, as ?look=golden|cinematic does unless ?water= says
 // otherwise; the default is the earlier HD water ('classic').
-const water = params.get('water') ?? (params.get('look') === 'golden' ? 'enhanced' : 'classic');
+const water =
+  params.get('water') ?? (['golden', 'cinematic'].includes(params.get('look') ?? '') ? 'enhanced' : 'classic');
 waterPreset.style = water === 'enhanced' ? 'enhanced' : 'classic';
 const world = mapName
   ? await loadRa2World(`/${encodeURIComponent(mapName)}`, {

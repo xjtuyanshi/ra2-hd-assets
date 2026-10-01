@@ -560,6 +560,15 @@ least half its pixels marked and remain land after speck filling; it stays dry a
 The renderer loads this image only alongside a water mask. A load failure or size mismatch warns once and uses the
 unchanged distance field; omitting the field preserves existing behavior.
 
+Optional `waterDetail` names an RGBA8 PNG covering exactly the terrain composite's area with the same aspect ratio,
+at any resolution (typically a quarter of the composite's). RGB stores sRGB apparent open-water colour, using low/mid
+frequencies from an image-model repaint of the map's water. Extrapolate water colour across land so filtering never
+introduces land colour. Alpha stores surface roughness / sun-glitter weight (0..1, byte 128 neutral), such as wind
+patches and current streaks. The renderer loads it without a vertical flip, with linear/mipmap filtering and clamped
+edges; only `enhanced` water with `waterBed: true` samples it. Missing or unreadable detail warns and falls back to the
+constant water column; omitting the field preserves the original shading. Detail colour bypasses the constant
+column's display compensation, then shares its night dimming.
+
 ## Engine rules the extractor encodes
 
 - MIX priority (highest first): expandmd##, ra2md/ra2, cache, local, language, conquer/generic/isogen, theater mixes.

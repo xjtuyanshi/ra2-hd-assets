@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { float, uniform, vec3 } from 'three/tsl';
+import { float, uniform, vec3, vec4 } from 'three/tsl';
 import { Vector3 } from 'three/webgpu';
 import { AtmosphereNodes } from '../src/atmosphere';
 import { BEACH_PROFILE, BED_ABSORPTION, beachDepth, bedWaterLook } from '../src/ra2/waterLook';
@@ -7,6 +7,17 @@ import type { ShaderNode } from '../src/tsl';
 import { createWaterUniforms } from '../src/waterShading';
 
 const transmission = (shore: number) => BED_ABSORPTION.map((absorption) => Math.exp(-absorption * beachDepth(shore)));
+
+function dependencies(root: ShaderNode): Set<ShaderNode> {
+  const seen = new Set<ShaderNode>();
+  const visit = (node: ShaderNode) => {
+    if (seen.has(node)) return;
+    seen.add(node);
+    for (const child of node.getChildren()) visit(child);
+  };
+  visit(root);
+  return seen;
+}
 
 describe('painted-bed beach profile', () => {
   it('has no optical depth or absorption at the waterline or on exposed land', () => {
@@ -56,16 +67,6 @@ describe('painted-bed shader graph', () => {
     const bed = uniform(new Vector3(0.6, 0.4, 0.2));
     const bedAt = vi.fn((_offset: ShaderNode) => bed);
     const columnForDisplay = vi.fn((column: ShaderNode) => column.mul(0.67));
-    const dependencies = (root: ShaderNode): Set<ShaderNode> => {
-      const seen = new Set<ShaderNode>();
-      const visit = (node: ShaderNode) => {
-        if (seen.has(node)) return;
-        seen.add(node);
-        for (const child of node.getChildren()) visit(child);
-      };
-      visit(root);
-      return seen;
-    };
     const look = bedWaterLook(
       {
         position: vec3(2, 0, 3),
@@ -90,5 +91,42 @@ describe('painted-bed shader graph', () => {
     expect(dependencies(look.normal).has(water.rain)).toBe(true);
     expect(dependencies(look.emission).has(nodes.lightFieldTexture)).toBe(true);
     nodes.dispose();
+  });
+
+  it('keeps detail colour out of display compensation and applies detail roughness to the water graph', () => {
+    const nodes = new AtmosphereNodes();
+    const water = createWaterUniforms();
+    const detail = vec4(uniform(new Vector3(0.04, 0.2, 0.3)), uniform(0.75));
+    const columnForDisplay = vi.fn((column: ShaderNode) => column.mul(0.67));
+    try {
+      const look = bedWaterLook(
+        {
+          position: vec3(2, 0, 3),
+          shore: float(0.15),
+          waterness: float(1),
+          art: vec3(0.5),
+          uniforms: water,
+          bedAt: () => vec3(0.5),
+          columnForDisplay,
+          reflectionLevel: float(0.67),
+          detail,
+        },
+        nodes,
+      );
+      expect(columnForDisplay).toHaveBeenCalledTimes(1);
+      const compensated = dependencies(columnForDisplay.mock.calls[0]![0]);
+      expect(compensated.has(detail)).toBe(false);
+      expect(compensated.has(nodes.night)).toBe(false); // Night dims the mixed display column afterwards.
+      expect(dependencies(look.body).has(detail)).toBe(true);
+      expect(dependencies(look.body).has(nodes.night)).toBe(true);
+      expect(dependencies(look.normal).has(detail)).toBe(true);
+      expect(dependencies(look.normal).has(water.rain)).toBe(true);
+      expect(dependencies(look.emission).has(detail)).toBe(true);
+      expect(dependencies(look.land).has(detail)).toBe(false);
+      // Whitecaps on the open water follow the detail layer's roughness (A); the shore foam itself does not.
+      expect(dependencies(look.foam).has(detail)).toBe(true);
+    } finally {
+      nodes.dispose();
+    }
   });
 });

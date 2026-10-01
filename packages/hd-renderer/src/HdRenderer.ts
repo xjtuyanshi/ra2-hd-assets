@@ -35,6 +35,7 @@ import {
   screenUV,
   smoothstep,
   texture,
+  toneMapping,
   uniform,
   vec3,
   vec4,
@@ -57,7 +58,7 @@ import { LightField, type DynamicLight } from './lightField';
 import { Lighting, clearLightAt, noonFlatLuminance } from './lighting';
 import { Mist, MIST_CAP } from './mist';
 import { ObjectLayer } from './objects';
-import { faithfulToneMap } from './post';
+import { cinematicGrade, faithfulToneMap, hasCinematicGrade, neutralGrade, type CinematicGradeParams } from './post';
 import { buildTerrain, type TerrainBuild } from './terrain';
 import type { ShaderNode } from './tsl';
 import { buildWater, type WaterUniforms } from './water';
@@ -92,7 +93,7 @@ export function defaultAntialias(): Antialias {
   return memory !== undefined && memory <= 4 ? 'fxaa' : 'msaa4';
 }
 
-export interface HdSettings {
+export interface HdSettings extends CinematicGradeParams {
   toneMapper: ToneMapper;
   exposure: number;
   bloom: number;
@@ -132,16 +133,46 @@ export interface HdSettings {
   sunPath: 'fixed' | 'arc';
   /** 0: daylight keeps noon's exposure (faithful); 1: flat ground keeps noon's brightness at every daylight hour. */
   adaptExposure: number;
+  /** 0: noon white balance (faithful); 1: current flat-ground white balance, preserving luminance. Fades at night. */
+  whiteAdapt: number;
+  /**
+   * 0: the map's own [Lighting] Red/Green/Blue tint shows as authored (faithful; XMP29U2 is 1/0.8/0.68, a strong warm
+   * cast); 1: the tint is divided out of the daylight exposure, luminance kept, so neutral greys render neutral.
+   * In between, the correction is the tint's inverse raised to this power. Fades with the map light's own day weight.
+   */
+  mapTintAdapt: number;
   /** Voxel sheen strength, sheen cap and crease occlusion (ra2/vpl.ts); null leaves the voxel material as it is. */
   voxelSheen: number | null;
   voxelSheenCap: number | null;
   voxelOcclusion: number | null;
 }
 
-/** Named looks: the faithful default and the enhanced "golden afternoon" (settings plus a suggested hour). */
-export type LookPreset = 'faithful' | 'golden';
+/** Named looks, including the approved S2 direction with medium cooling (settings plus a suggested hour). */
+export type LookPreset = 'faithful' | 'golden' | 'cinematic';
 
-export const LOOK_PRESETS: Record<LookPreset, { settings: Partial<HdSettings>; hour?: number }> = {
+type LookSettings = Partial<HdSettings> & CinematicGradeParams & Pick<HdSettings, 'whiteAdapt' | 'mapTintAdapt'>;
+
+const GOLDEN_SETTINGS: LookSettings = {
+  relight: 1,
+  specular: 1,
+  glass: 1,
+  occlusion: 1,
+  shadowFollow: 1,
+  shadowSoftness: 1,
+  wetReflections: 1,
+  lightContrast: 1.5,
+  sunPath: 'arc',
+  adaptExposure: 0.85,
+  bloom: 0.5,
+  voxelSheen: 1,
+  voxelSheenCap: 0.35,
+  voxelOcclusion: 0.35,
+  whiteAdapt: 0,
+  mapTintAdapt: 0,
+  ...neutralGrade(),
+};
+
+export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: number }> = {
   faithful: {
     settings: {
       relight: 0,
@@ -158,32 +189,44 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: Partial<HdSettings>; h
       voxelSheen: 0,
       voxelSheenCap: 0.05,
       voxelOcclusion: 0.15,
+      whiteAdapt: 0,
+      mapTintAdapt: 0,
+      ...neutralGrade(),
     },
   },
   golden: {
     hour: 16.5,
+    settings: GOLDEN_SETTINGS,
+  },
+  // The approved S2 grade with medium cooling, calibrated on the three approved targets (city park and battle areas of
+  // XMP29U2, ref_river of RiverRam; scratchpad finallook4/water/cal): neutral greys (asphalt, concrete) measured at
+  // a* 2.0-2.2 / b* 2.9-5.0 against the targets' 1.1-1.7 / 1.6-1.9 (golden: 5.5 / 9-11), greens and brick within a
+  // few a*/b* units. White balance to the hour's flat-ground light, a third of the map's own warm tint divided out,
+  // a slightly cool residual balance, cool shadows and warm sunlit highlights (warmth from the sun only).
+  cinematic: {
+    hour: 16.5,
     settings: {
-      relight: 1,
-      specular: 1,
-      glass: 1,
-      occlusion: 1,
-      shadowFollow: 1,
-      shadowSoftness: 1,
-      wetReflections: 1,
-      lightContrast: 1.5,
-      sunPath: 'arc',
-      adaptExposure: 0.85,
-      bloom: 0.5,
-      voxelSheen: 1,
-      voxelSheenCap: 0.35,
-      voxelOcclusion: 0.35,
+      ...GOLDEN_SETTINGS,
+      whiteAdapt: 1,
+      mapTintAdapt: 0.3,
+      gradeBalance: [0.97, 1, 1.06],
+      gradeContrast: 0.15,
+      gradePivotLift: 0.02,
+      gradeSaturation: 1.06,
+      gradeShadowTint: [0.8, 1, 1.2],
+      gradeHighlightTint: [1.15, 1, 0.85],
     },
   },
 };
 
 /** Apply a named look to renderer settings (call applySettings() afterwards); returns its suggested hour. */
 export function applyLookPreset(settings: HdSettings, preset: LookPreset): number | undefined {
-  Object.assign(settings, LOOK_PRESETS[preset].settings);
+  const look = LOOK_PRESETS[preset].settings;
+  Object.assign(settings, look);
+  // GUI channel edits must never mutate a preset or another renderer's settings.
+  settings.gradeBalance = [...look.gradeBalance];
+  settings.gradeShadowTint = [...look.gradeShadowTint];
+  settings.gradeHighlightTint = [...look.gradeHighlightTint];
   return LOOK_PRESETS[preset].hour;
 }
 
@@ -191,6 +234,42 @@ export function applyLookPreset(settings: HdSettings, preset: LookPreset): numbe
 const MAX_SHADOW_STRETCH = 2;
 /** Exposure adaptation never lifts the frame by more than this factor. */
 const MAX_ADAPT = 2.2;
+
+/**
+ * Divide a map's [Lighting] colour tint out of the exposure in place (amount 0..1 as a power of the inverse tint),
+ * keeping the Rec.709 luminance of a neutral surface under that tint unchanged.
+ */
+export function neutralizeMapTint(
+  exposure: Color,
+  tint: { red: number; green: number; blue: number },
+  amount: number,
+): Color {
+  const weight = Math.min(1, Math.max(0, amount));
+  if (weight <= 0) return exposure;
+  const r = Math.max(1e-3, tint.red);
+  const g = Math.max(1e-3, tint.green);
+  const b = Math.max(1e-3, tint.blue);
+  const level = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const gr = (level / r) ** weight;
+  const gg = (level / g) ** weight;
+  const gb = (level / b) ** weight;
+  const scale = level / (0.2126 * r * gr + 0.7152 * g * gg + 0.0722 * b * gb);
+  return exposure.setRGB(exposure.r * gr * scale, exposure.g * gg * scale, exposure.b * gb * scale);
+}
+
+/** Adapt exposure in place, keeping the Rec.709 luminance of a flat-lit neutral surface unchanged. */
+export function adaptWhiteBalance(exposure: Color, noon: Color, flat: Color, amount: number, night: number): Color {
+  const weight = Math.min(1, Math.max(0, amount)) * (1 - night);
+  if (weight <= 0) return exposure;
+  // Geometric gain interpolation: currentGain / noonGain = noon irradiance / current irradiance.
+  const r = (noon.r / Math.max(1e-6, flat.r)) ** weight;
+  const g = (noon.g / Math.max(1e-6, flat.g)) ** weight;
+  const b = (noon.b / Math.max(1e-6, flat.b)) ** weight;
+  const before = 0.2126 * flat.r * exposure.r + 0.7152 * flat.g * exposure.g + 0.0722 * flat.b * exposure.b;
+  const after = 0.2126 * flat.r * exposure.r * r + 0.7152 * flat.g * exposure.g * g + 0.0722 * flat.b * exposure.b * b;
+  const scale = before / Math.max(1e-6, after);
+  return exposure.setRGB(exposure.r * r * scale, exposure.g * g * scale, exposure.b * b * scale);
+}
 
 const TONE_MAPPERS: Record<Exclude<ToneMapper, 'faithful'>, ToneMapping> = {
   agx: AgXToneMapping,
@@ -305,6 +384,9 @@ export class HdRenderer {
     lightContrast: 1,
     sunPath: 'fixed',
     adaptExposure: 0,
+    whiteAdapt: 0,
+    mapTintAdapt: 0,
+    ...neutralGrade(),
     voxelSheen: null,
     voxelSheenCap: null,
     voxelOcclusion: null,
@@ -312,6 +394,8 @@ export class HdRenderer {
   /** Night presentation: map lights, HD lamps, windows, mist, night level (changeable at runtime). */
   readonly atmosphere: AtmosphereSettings = { ...DEFAULT_ATMOSPHERE_SETTINGS };
   private pipeline: RenderPipeline | undefined;
+  /** Only structural changes rebuild render targets; grade values themselves stay in uniforms. */
+  private pipelineKey = '';
   /** Nodes of the current pipeline that own render targets (pass targets, bloom, FXAA and sharpen), freed on rebuild. */
   private pipelineNodes: { dispose(): void }[] = [];
   private readonly bloomStrength = uniform(0.55);
@@ -320,6 +404,14 @@ export class HdRenderer {
   private readonly blackLift = uniform(new Color(0, 0, 0));
   /** Share of PBR Neutral in the faithful display transform: the night weight on original maps (see post.ts). */
   private readonly nightDisplay = uniform(0);
+  private readonly gradeUniforms = {
+    gradeBalance: uniform(new Vector3(1, 1, 1)),
+    gradeContrast: uniform(0),
+    gradePivotLift: uniform(0),
+    gradeSaturation: uniform(1),
+    gradeShadowTint: uniform(new Vector3(1, 1, 1)),
+    gradeHighlightTint: uniform(new Vector3(1, 1, 1)),
+  };
   private readonly vignetteStrength = uniform(0.25);
   /**
    * Scene exposure per channel, applied before bloom and the display transform (the built-in tone mappers get
@@ -533,8 +625,20 @@ export class HdRenderer {
     if (this.pipeline) this.buildPipeline();
   }
 
+  private settingsPipelineKey(): string {
+    const { antialias, toneMapper, sharpness, debugView } = this.settings;
+    return JSON.stringify([
+      antialias,
+      toneMapper,
+      sharpness,
+      debugView,
+      debugView === 'none' && hasCinematicGrade(this.settings),
+    ]);
+  }
+
   private buildPipeline(): void {
     const { antialias, toneMapper, sharpness, debugView } = this.settings;
+    this.pipelineKey = this.settingsPipelineKey();
     // Release the previous pipeline's render targets and output material before building the new one (the MSAA scene
     // target alone is over 100 MB at 2400x1500).
     this.pipeline?.dispose();
@@ -599,10 +703,20 @@ export class HdRenderer {
     const neutral: ShaderNode = neutralToneMapping(composite, float(1));
     // (TSL's chained a.mix(b, t) is mix(b, t, a); call mix() directly.)
     const mixed: ShaderNode = mix(faithful, neutral, this.nightDisplay);
-    const output: ShaderNode =
-      toneMapper === 'faithful'
-        ? renderOutput(vec4(mixed, 1), NoToneMapping)
-        : renderOutput(vec4(composite, 1), TONE_MAPPERS[toneMapper]);
+    let output: ShaderNode;
+    if (hasCinematicGrade(this.settings)) {
+      // Grade display-linear colour after the tone map, before renderOutput encodes sRGB and the night toe lift.
+      const linear: ShaderNode =
+        toneMapper === 'faithful' ? mixed : toneMapping(TONE_MAPPERS[toneMapper], float(1), vec4(composite, 1)).rgb;
+      const graded: ShaderNode = mix(cinematicGrade(linear, this.gradeUniforms), linear, this.nightDisplay);
+      output = renderOutput(vec4(graded, 1), NoToneMapping);
+    } else {
+      // Keep the original graph untouched when all display-grade controls are neutral.
+      output =
+        toneMapper === 'faithful'
+          ? renderOutput(vec4(mixed, 1), NoToneMapping)
+          : renderOutput(vec4(composite, 1), TONE_MAPPERS[toneMapper]);
+    }
     const toe = float(1).sub(output.rgb.div(NIGHT_TOE)).max(0);
     let display: ShaderNode = vec4(output.rgb.add(this.blackLift.mul(visible).mul(toe.mul(toe))), 1);
     if (antialias === 'fxaa') {
@@ -623,6 +737,12 @@ export class HdRenderer {
     this.renderer.toneMappingExposure = 1;
     this.bloomStrength.value = this.settings.bloom;
     this.vignetteStrength.value = this.settings.vignette;
+    this.gradeUniforms.gradeBalance.value.fromArray(this.settings.gradeBalance);
+    this.gradeUniforms.gradeContrast.value = this.settings.gradeContrast;
+    this.gradeUniforms.gradePivotLift.value = this.settings.gradePivotLift;
+    this.gradeUniforms.gradeSaturation.value = this.settings.gradeSaturation;
+    this.gradeUniforms.gradeShadowTint.value.fromArray(this.settings.gradeShadowTint);
+    this.gradeUniforms.gradeHighlightTint.value.fromArray(this.settings.gradeHighlightTint);
     // Original maps have no sun-shadow casters: the tile art paints terrain shading, sprites carry their own shadow
     // frames and voxels draw engine-style flattened shadows. Skipping the empty shadow map saves a full depth pass
     // and the per-pixel shadow lookups of every receiver.
@@ -632,7 +752,7 @@ export class HdRenderer {
     if (this.settings.voxelSheen !== null) voxels.voxelSheen.value = this.settings.voxelSheen;
     if (this.settings.voxelSheenCap !== null) voxels.voxelSheenCap.value = this.settings.voxelSheenCap;
     if (this.settings.voxelOcclusion !== null) voxels.voxelOcclusion.value = this.settings.voxelOcclusion;
-    this.buildPipeline();
+    if (!this.pipeline || this.pipelineKey !== this.settingsPipelineKey()) this.buildPipeline();
   }
 
   setState(state: RenderState): void {
@@ -729,6 +849,21 @@ export class HdRenderer {
         const noonLum = 0.2126 * noon.r + 0.7152 * noon.g + 0.0722 * noon.b;
         const lift = Math.min(MAX_ADAPT, Math.max(1, noonLum / Math.max(1e-6, now)));
         exposure.multiplyScalar(1 + (lift - 1) * adapt);
+      }
+      if (this.settings.whiteAdapt > 0 && nightGrade < 1) {
+        // Exposure adaptation alone owns brightness; white adaptation changes only the illuminant balance.
+        adaptWhiteBalance(
+          exposure,
+          noon,
+          this.lighting.flatIrradianceColor(this.scratchColor),
+          this.settings.whiteAdapt,
+          nightGrade,
+        );
+      }
+      const mapLight = this.world.mapLight;
+      if (this.settings.mapTintAdapt > 0 && mapLight) {
+        // The map light's day weight is set below for this frame; last frame's weight is the same within a frame.
+        neutralizeMapTint(exposure, mapLight.lighting, this.settings.mapTintAdapt * mapLight.currentWeight);
       }
     } else {
       exposure.setScalar(this.settings.exposure * light.exposure);

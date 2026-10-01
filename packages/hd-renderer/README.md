@@ -182,7 +182,8 @@ Units and buildings are placeholders (`src/objects.ts`) until real assets exist;
 | `sharpness`  | `1`          | RCAS sharpening after the display transform (0 strongest, 2 off, below 0 disabled).                                                                                                                                                                                                                                                                                        |
 | `debugView`  | `'none'`     | `'overbright'` marks exposed luminance above 1; `'voxel-xy'` / `'voxel-z'` write voxel palette index, world normal and corner occlusion raw to the screen, for fitting the voxel lighting against captures of the original.                                                                                                                                                |
 
-Call `applySettings()` after changing a setting; it rebuilds the post pipeline and frees the previous one's targets.
+Call `applySettings()` after changing a setting; structural changes rebuild the post pipeline and free its previous
+targets, while uniform changes update the existing pipeline.
 
 GPU memory of the post targets at 2400x1500 device pixels (estimated from their formats): with `'msaa4'` the scene
 colour takes about 115 MB multisampled (RGBA16F) plus a 29 MB resolve texture and its depth about 58 MB; with
@@ -198,9 +199,18 @@ single-sampled, so layers should copy at most once per frame and only while they
 
 Modern light on the original art, off by default: with every setting below at 0 the frame is the faithful one bit for
 bit (the sprite shader skips the whole branch; checked by render hash on XMP29U2). `LOOK_PRESETS` / `applyLookPreset`
-name two looks: `faithful` and `golden` (golden afternoon: every effect on, the sun arc, exposure adaptation, hour
+name `faithful`, `golden` and `cinematic` (golden afternoon: every effect on, the sun arc, exposure adaptation, hour
 16.5). Sandbox: `?look=golden`, single overrides `?relight= ?contrast= ?spec= ?glass= ?ao= ?shfollow= ?shsoft= ?wetrefl=
 ?sunpath=fixed|arc ?adapt= ?vsheen= ?vsheencap= ?vao=` and the "现代光影" GUI folder (`sandbox/look.ts`).
+
+`?look=cinematic` adds the approved S2 direction with medium cooling to `golden` at 16.5; both enhanced presets select
+enhanced water unless `water=` overrides it. Calibration controls in "现代光影" also accept URL overrides after the preset:
+`wbadapt` (`whiteAdapt`, 0..1), `gbal=r,g,b`, `gcon` (-0.5..1), `glift`, `gsat`, `gshadow=r,g,b`, `ghigh=r,g,b`.
+White adaptation geometrically balances exposure toward the current flat-ground irradiance without changing its
+luminance. The display grade runs after tone mapping, before sRGB encoding and the night toe lift; it skips debug
+views and fades out with the night weight, as white adaptation does. Defaults and the `faithful`/`golden` presets are
+neutral and omit the grade node entirely. Grade values update uniforms; only switching between neutral and active
+grading rebuilds the pipeline. These starting values still require reference-image calibration.
 
 | Setting                                         | Meaning                                                                                                                                                                                                                                                              |
 | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -240,12 +250,19 @@ reflections still follow the settings.
   field unchanged; the image is only loaded when a water mask is available. The opt-in `enhanced` look:
   a narrow turquoise shallow band with caustics over a sandy bed, dark blue-teal depths, a wind sea from three
   scrolled layers of a tileable ripple normal map plus two swells under drifting gust patches, sun glitter in ripple
-  facets, rippled reflections of the mirrored scene (one mirror plane at the lowest water level; with a lake bed, lakes
-  on higher terraces keep only the sky reflection instead of displaced ghost cliffs), explosions and lamps mirrored
-  from the light field, a swash that
+  facets, rippled reflections of the mirrored scene, explosions and lamps mirrored from the light field, a swash that
   laps up and back with a thin foam line, breaker lines and wet sand, no surf at cliff feet, and rain rings. The default
   is the earlier `classic` look; sandbox `water=enhanced` (or `look=golden`), `LiveViewOptions.water` and in game
   `hd-water=enhanced` select the modern one (`waterPreset`, chosen before the world is built).
+  With `waterBed: true`, enhanced water uses one half-resolution colour/depth mirror per base water level with at
+  least 12 open-water cells, keeping the four largest levels. Each mirror renders only while its padded cell bounds
+  intersect the camera frustum; fragment height selects the matching plane, and other levels keep sky only. Classic
+  and legacy enhanced water retain the single lowest mirror. Optional `materials.json.waterDetail` supplies sRGB
+  apparent water colour and alpha roughness/glitter weight over the composite's area (same aspect, any resolution).
+  It shares the mask's top-down UVs and uses linear/mipmap filtering with clamped edges; load failures warn and leave it unused.
+  `WATER_DETAIL` in `waterLook.ts` controls column blending, retained shallow turquoise and alpha modulation. Only the
+  constant column receives display compensation; the mixed column then dims at night. Without detail, the bed shader
+  keeps its original calculation order.
 - Sprites (`sprites.ts`): filtered coverage of the indexed mask for soft edges; within about one original texel of
   transparent texels HD atlas colours keep their hue but are never brighter than the original texel there (the
   upscaler's pale background fringe goes without a rim of raw palette colours). SHP shadows halve the displayed

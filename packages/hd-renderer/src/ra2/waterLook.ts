@@ -314,12 +314,15 @@ function rippleSlope(
   wind: ShaderNode,
   gust: ShaderNode,
   layers: readonly (readonly [number, number, number, number])[] = RIPPLE_LAYERS,
+  roughMultiplier: ShaderNode | number = 1,
 ): ShaderNode {
   const tex = waterTextures();
   const norm = Math.sqrt(RIPPLE_LAYERS.reduce((sum, layer) => sum + layer[3] * layer[3], 0));
-  const rough: ShaderNode = float(0.55)
+  let rough: ShaderNode = float(0.55)
     .add(wind.mul(1.3))
     .mul(mix(float(0.6), float(1.35), gust));
+  // Do not add an operation to the legacy graph when no detail layer supplies a multiplier.
+  if (roughMultiplier !== 1) rough = rough.mul(roughMultiplier);
   let sx: ShaderNode = float(0);
   let sz: ShaderNode = float(0);
   for (const [offset, tile, drift, weight] of layers) {
@@ -337,6 +340,22 @@ function rippleSlope(
     sz = sz.add(du.mul(s).add(dv.mul(c)).mul(w));
   }
   return vec2(sx, sz).mul(rough);
+}
+
+/** Crest sharpness (ripple A channel) of the two broadest ripple layers, at the same drifting coordinates. */
+function rippleCrest(p: ShaderNode): ShaderNode {
+  const tex = waterTextures();
+  let crest: ShaderNode = float(0);
+  RIPPLE_LAYERS.slice(0, 2).forEach(([offset, tile, drift], i) => {
+    const angle = WIND_ANGLE + offset;
+    const c = Math.cos(angle);
+    const s = Math.sin(angle);
+    const u: ShaderNode = p.x.mul(c).add(p.y.mul(s));
+    const v: ShaderNode = p.y.mul(c).sub(p.x.mul(s));
+    const a: ShaderNode = texture(tex.ripple, vec2(u.sub(time.mul(drift)), v).div(tile)).a;
+    crest = crest.max(i === 0 ? a : a.mul(0.85));
+  });
+  return crest;
 }
 
 /** Slope of the long swells (analytic). */
@@ -377,8 +396,14 @@ function rainSlope(p: ShaderNode, rain: ShaderNode): ShaderNode {
 }
 
 /** Full surface slope of the enhanced sea: ripples, swells and rain rings. */
-function enhancedSlope(p: ShaderNode, wind: ShaderNode, rain: ShaderNode, gust: ShaderNode): ShaderNode {
-  return rippleSlope(p, wind, gust).add(swellSlope(p, wind)).add(rainSlope(p, rain));
+function enhancedSlope(
+  p: ShaderNode,
+  wind: ShaderNode,
+  rain: ShaderNode,
+  gust: ShaderNode,
+  roughMultiplier: ShaderNode | number = 1,
+): ShaderNode {
+  return rippleSlope(p, wind, gust, RIPPLE_LAYERS, roughMultiplier).add(swellSlope(p, wind)).add(rainSlope(p, rain));
 }
 
 function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_NODES): WaterLook {
@@ -613,6 +638,46 @@ export const BED_ABSORPTION = [3.2, 1.2, 0.85] as const;
 /** In-scattered colour of the water over the shelf (turquoise, about one cell wide as in the approved target), faded
  * towards the enhanced MID/DEEP offshore. */
 const BED_SCATTER = { colour: 0x1f9e93, near: 0.1, far: 0.95, amount: 0.85 } as const;
+/** Optional per-map water detail, used only by the painted-bed look. */
+export const WATER_DETAIL = {
+  /** Gain from linear detail colour to the in-scattered column colour. */
+  columnGain: 1.0,
+  /** 0 keeps the constant DEEP/MID/scatter column; 1 uses the detail colour. */
+  columnAmount: 1.0,
+  /** Share of the constant turquoise scatter retained over the first shallowReach cells. */
+  shallowKeep: 0.35,
+  /** Shore distance in cells over which shallowKeep fades out. */
+  shallowReach: 0.25,
+  /** Strength of alpha modulation of ripple roughness and glitter; A = 0.5 is neutral. */
+  roughAmount: 1.0,
+} as const;
+/**
+ * Open-water surface detail of the painted-bed look on maps with a water-detail layer, tuned against the approved
+ * river target (finallook4/water metrics: the target's open water has ~1.5x the luminance spread, ~1.6x the local
+ * contrast and ~10x the share of bright specks of the earlier water):
+ * - relief: wave flanks facing the sun are lit, lee flanks darker (the diffuse body otherwise ignores the waves);
+ * - whitecaps: small white caps on the steepest crests of the two broadest ripple layers, gathered by gusts and the
+ *   layer's roughness (A), drifting with the waves;
+ * - sparkles: sun-coloured points on crest facets, twinkling as the slopes move (a hash looked up through the slope),
+ *   strongest along the sun's glitter path but present everywhere, like the target's speckled chop.
+ */
+export const WATER_SURFACE = {
+  relief: 2.4,
+  reliefMin: 0.55,
+  reliefMax: 1.7,
+  capLow: 0.62,
+  capHigh: 0.9,
+  capAmount: 0.7,
+  capBreakup: 0.62,
+  sparkScale: 0.42,
+  sparkJitter: 2.5,
+  sparkThreshold: 0.86,
+  sparkGain: 2.2,
+  sparkPath: 3.0,
+  sparkPathPower: 5,
+} as const;
+/** Analytic sky as water with a detail layer reflects it (see bedWaterLook). */
+const WATER_DETAIL_SKY = vec3(0.45, 0.7, 0.6);
 /** Refraction in world cells per ripple slope per depth, bounded to about 2.5 engine pixels in any direction. */
 const BED_REFRACTION = 0.18;
 const BED_REFRACTION_MAX = 0.06;
@@ -647,10 +712,10 @@ const BED_SWASH = {
 /** Foam widths/reach in cells, opacity caps and noise thresholds; no line is tied to the static mask edge. */
 const BED_FOAM = {
   frontWidth: 0.03,
-  frontOpacity: 0.8,
-  waterOpacity: 0.3,
-  laceLow: 0.42,
-  laceHigh: 0.62,
+  frontOpacity: 0.95,
+  waterOpacity: 0.5,
+  laceLow: 0.34,
+  laceHigh: 0.56,
   bubbleLow: 0.5,
   bubbleHigh: 0.7,
   breakerFar: 0.3,
@@ -681,6 +746,8 @@ export function beachDepth(shore: ShaderNode): ShaderNode {
 }
 
 export interface BedWaterInputs extends WaterLookInputs {
+  /** Composite-space water-detail sample: RGB is linear apparent colour, A is roughness/glitter weight. */
+  detail?: ShaderNode;
   /** Graded linear bed colour at a world xz offset, with the same rain wetness as art (the adjacent land albedo). */
   bedAt: (offsetXZ: ShaderNode) => ShaderNode;
   /** Display compensation belongs only to in-scattered water, never to transmitted bed colour or foam. */
@@ -709,13 +776,14 @@ export interface BedWaterLook extends WaterLook {
  * water assets need the original hue mix, inland replacement and whole-body display compensation.
  */
 export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_NODES): BedWaterLook {
-  const { position: p, shore, waterness, art, uniforms, bedAt, columnForDisplay, reflectionLevel } = inputs;
+  const { position: p, shore, waterness, art, uniforms, bedAt, columnForDisplay, reflectionLevel, detail } = inputs;
   const { night, sceneBrightness } = nodes;
   const tex = waterTextures();
   const xz: ShaderNode = p.xz;
   const surf: ShaderNode = float(1).sub(inputs.calm ?? float(0));
   const gust = gustAt(xz);
-  const slope = enhancedSlope(xz, uniforms.wind, uniforms.rain, gust);
+  const rough: ShaderNode | number = detail ? mix(float(1), detail.a.mul(2), WATER_DETAIL.roughAmount) : 1;
+  const slope = enhancedSlope(xz, uniforms.wind, uniforms.rain, gust, rough);
   const normal: ShaderNode = normalize(vec3(slope.x.negate(), 1, slope.y.negate()));
 
   const along: ShaderNode = texture(tex.noise, xz.mul(BED_SWASH.phaseScale)).r;
@@ -772,31 +840,57 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
     mix(color(DEEP), color(MID), smoothstep(1.3, 0.35, offshore)),
     color(BED_SCATTER.colour),
     smoothstep(BED_SCATTER.far, BED_SCATTER.near, offshore).mul(BED_SCATTER.amount),
-  ).mul(mix(float(1), float(0.7), night));
-  let body: ShaderNode = bedLit.mul(transmission).add(columnForDisplay(column).mul(vec3(1).sub(transmission)));
+  );
+  const nightLevel: ShaderNode = mix(float(1), float(0.7), night);
+  let displayedColumn: ShaderNode;
+  if (detail) {
+    const weight: ShaderNode = float(WATER_DETAIL.columnAmount).mul(
+      float(1).sub(smoothstep(WATER_DETAIL.shallowReach, 0, offshore).mul(WATER_DETAIL.shallowKeep)),
+    );
+    // The repaint already describes a display colour: compensate only the constant column, then dim both at night.
+    displayedColumn = mix(columnForDisplay(column), detail.rgb.mul(WATER_DETAIL.columnGain), weight).mul(nightLevel);
+  } else {
+    // Keep the original operation order (including compensation after night dimming) without a detail layer.
+    displayedColumn = columnForDisplay(column.mul(nightLevel));
+  }
+  let body: ShaderNode = bedLit.mul(transmission).add(displayedColumn.mul(vec3(1).sub(transmission)));
 
   // Reuse the enhanced reflection, glitter, mirrored lights and rain-ripple model, fading it to zero at the sand join.
   const open: ShaderNode = smoothstep(BED_REFLECTION_REACH.start, BED_REFLECTION_REACH.full, shore);
+  const crest: ShaderNode | null = detail ? rippleCrest(xz) : null;
+  if (detail) {
+    // Wave relief: n.L of the rippled surface against the flat one, through the slope towards the sun on the ground.
+    const sunGround: ShaderNode = normalize(vec2(uniforms.sunDirection.x, uniforms.sunDirection.z).add(vec2(1e-4, 0)));
+    const facing: ShaderNode = dot(slope, sunGround).negate();
+    const relief: ShaderNode = float(1)
+      .add(facing.mul(WATER_SURFACE.relief))
+      .clamp(WATER_SURFACE.reliefMin, WATER_SURFACE.reliefMax);
+    body = body.mul(mix(float(1), relief, open));
+  }
   const view: ShaderNode = normalize(cameraPosition.sub(p));
   const fresnel: ShaderNode = float(0.02).add(float(0.98).mul(pow(float(1).sub(max(dot(normal, view), 0)), 5)));
   const strength: ShaderNode = fresnel.mul(REFLECT_GAIN).add(REFLECT_BASE).min(REFLECT_MAX).mul(open);
   const r: ShaderNode = reflect(view.negate(), normal);
   const skyLevel: ShaderNode = mix(float(1), sceneBrightness.min(1).mul(0.6), night);
   const sky: ShaderNode = mix(uniforms.skyHorizon, uniforms.skyZenith, smoothstep(0.0, 0.6, r.y)).mul(skyLevel);
-  const waterSky: ShaderNode = sky.mul(SKY_IN_WATER);
+  // With a detail layer the column already carries the water's apparent colour (sky included, as the repaint shows
+  // it): the analytic sky is reflected dimmer and greener so open water reads teal, not sky blue; mirrored cliffs and
+  // trees keep their full strength.
+  const waterSky: ShaderNode = detail ? sky.mul(SKY_IN_WATER).mul(WATER_DETAIL_SKY) : sky.mul(SKY_IN_WATER);
   const reflected = inputs.reflection
     ? moonlit(inputs.reflection.colour, nodes).mul(mix(float(1), float(0.8), night))
     : null;
   const mirrored: ShaderNode =
     reflected && inputs.reflection ? mix(waterSky, reflected, inputs.reflection.coverage) : waterSky;
   const sunDot: ShaderNode = max(dot(r, uniforms.sunDirection), 0);
-  const glitter: ShaderNode = pow(sunDot, 600)
+  let glitter: ShaderNode = pow(sunDot, 600)
     .mul(6)
     .add(pow(sunDot, 110).mul(0.3))
     .mul(mix(float(0.3), float(1.35), gust))
     .mul(float(1).sub(uniforms.rain))
     .mul(float(1).sub(night.mul(0.75)))
     .mul(smoothstep(BED_GLITTER_START, BED_GLITTER_FULL, shore));
+  if (detail) glitter = glitter.mul(rough);
   const rippleEnergy: ShaderNode = abs(slope.x).add(abs(slope.y));
   const lights: ShaderNode = sampleLightField(xz.sub(TOWARDS_CAMERA.mul(LIGHT_MIRROR_REACH)).add(slope.mul(0.5)), nodes)
     .mul(LIGHT_MIRROR)
@@ -833,13 +927,46 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
     .mul(smoothstep(0, BED_SWASH.retreat, shore))
     .mul(smoothstep(BED_FOAM.breakerFar, 0.1, shore))
     .mul(BED_FOAM.waterOpacity);
-  const foam: ShaderNode = line.max(drainage).max(breaker).max(surfLace).mul(surf);
-  const foamColour: ShaderNode = color(0xeef3f2).mul(mix(float(1), float(0.5), night));
+  let foam: ShaderNode = line.max(drainage).max(breaker).max(surfLace).mul(surf);
+  let sparkle: ShaderNode = vec3(0);
+  if (detail && crest) {
+    const windiness: ShaderNode = float(0.6)
+      .add(uniforms.wind.mul(1.2))
+      .mul(mix(float(0.75), float(1.3), gust))
+      .mul(rough);
+    // Sparkles: a hash looked up through the moving slope, so points appear and vanish as the facets turn.
+    const hash: ShaderNode = texture(
+      tex.noise,
+      xz.mul(WATER_SURFACE.sparkScale).add(slope.mul(WATER_SURFACE.sparkJitter)),
+    ).a;
+    // Whitecaps break into specks: only the hash's brighter points of a high crest turn white.
+    const capHash: ShaderNode = texture(tex.noise, xz.mul(WATER_SURFACE.sparkScale * 1.7).sub(slope)).a;
+    const whitecap: ShaderNode = smoothstep(WATER_SURFACE.capLow, WATER_SURFACE.capHigh, crest.mul(windiness))
+      .mul(smoothstep(WATER_SURFACE.capBreakup, 1, capHash))
+      .mul(WATER_SURFACE.capAmount)
+      .mul(open);
+    foam = foam.max(whitecap);
+    const path: ShaderNode = pow(max(dot(r, uniforms.sunDirection), 0), WATER_SURFACE.sparkPathPower)
+      .mul(WATER_SURFACE.sparkPath)
+      .add(1);
+    sparkle = uniforms.sunColor.mul(
+      smoothstep(WATER_SURFACE.sparkThreshold, 1, hash)
+        .mul(smoothstep(0.2, 0.55, crest.mul(windiness)))
+        .mul(path)
+        .mul(WATER_SURFACE.sparkGain)
+        .mul(rough)
+        .mul(open)
+        .mul(float(1).sub(uniforms.rain))
+        .mul(float(1).sub(night.mul(0.8))),
+    );
+  }
+  const foamColour: ShaderNode = color(0xf2f6f5).mul(mix(float(1), float(0.5), night));
   const sandSheen: ShaderNode = sky.mul(wetness).mul(float(1).sub(open)).mul(BEACH_WET.sheen);
   const sheetSheen: ShaderNode = sky.mul(sheet).mul(filmFade).mul(BED_SWASH.sheen);
   const emission: ShaderNode = mirrored
     .mul(strength)
     .add(uniforms.sunColor.mul(glitter))
+    .add(sparkle)
     .add(lights)
     .mul(waterness)
     .mul(reflectionLevel)

@@ -1,4 +1,5 @@
 import {
+  ClampToEdgeWrapping,
   DataTexture,
   LinearFilter,
   LinearMipmapLinearFilter,
@@ -55,6 +56,8 @@ export interface Ra2Cache {
     waterMask: DataTexture;
     /** The terrain image contains a painted lake bed; only the enhanced water style uses bed optics. */
     waterBed: boolean;
+    /** Composite-space apparent water colour (sRGB) and roughness (A); null when absent or unreadable. */
+    waterDetail: Texture | null;
     /** Signed distance to the shoreline in cells, encoded as in shoreField.ts (drives depth, foam and wet sand). */
     shore: DataTexture;
     ref: NonNullable<HdCacheManifest['terrainMap']>;
@@ -298,6 +301,22 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     texture.anisotropy = 8;
     // The composite's own water mask when present; otherwise treat nothing as water rather than guessing.
     const mask = material.waterMask ? await loadMask(url(material.waterMask)) : null;
+    let waterDetail: Texture | null = null;
+    if (material.waterDetail) {
+      try {
+        waterDetail = await load(material.waterDetail);
+        // load() keeps PNG rows top-down (flipY = false), matching loadMask/loadDilated DataTextures and atlasUv.
+        // Alpha is roughness data, not transparency; RGB is decoded from sRGB only when the shader samples it.
+        waterDetail.colorSpace = SRGBColorSpace;
+        waterDetail.magFilter = LinearFilter;
+        waterDetail.minFilter = LinearMipmapLinearFilter;
+        waterDetail.generateMipmaps = true;
+        waterDetail.wrapS = ClampToEdgeWrapping;
+        waterDetail.wrapT = ClampToEdgeWrapping;
+      } catch (error) {
+        console.warn(`${url(material.waterDetail)}: failed to load water detail; ignoring it`, error);
+      }
+    }
     let shoreIgnore: Uint8Array | undefined;
     if (mask && material.shoreIgnore) {
       const ignoreUrl = url(material.shoreIgnore);
@@ -316,6 +335,7 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
       texture,
       waterMask: mask?.texture ?? emptyMask(),
       waterBed: material.waterBed,
+      waterDetail,
       // The lake-bed shoreline needs a finer, higher-precision distance field (see buildShoreField).
       shore: mask
         ? buildShoreField(
@@ -384,12 +404,19 @@ const PALETTE_ROWS = 128;
 export function resolveTerrainMaterials(
   ref: NonNullable<HdCacheManifest['terrainMap']>,
   materials: MapMaterials | null,
-): { file: string; waterMask: string | undefined; shoreIgnore: string | undefined; waterBed: boolean } {
+): {
+  file: string;
+  waterMask: string | undefined;
+  shoreIgnore: string | undefined;
+  waterBed: boolean;
+  waterDetail: string | undefined;
+} {
   return {
     file: materials?.terrainMap ?? ref.file,
     waterMask: materials?.waterMask ?? ref.waterMask,
     shoreIgnore: typeof materials?.shoreIgnore === 'string' ? materials.shoreIgnore : undefined,
     waterBed: materials?.waterBed === true,
+    waterDetail: typeof materials?.waterDetail === 'string' ? materials.waterDetail : undefined,
   };
 }
 
@@ -399,7 +426,7 @@ async function loadMapMaterials(url: string): Promise<MapMaterials | null> {
     const response = await fetch(url);
     if (!response.ok) return null;
     const json = (await response.json()) as MapMaterials;
-    // Resolve optional shoreIgnore types without rejecting legacy sidecars or their other overrides.
+    // Resolve optional shoreIgnore/waterDetail types without rejecting legacy sidecars or their other overrides.
     return json && json.version === 1 ? json : null;
   } catch {
     return null;
