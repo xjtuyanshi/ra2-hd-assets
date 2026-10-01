@@ -93,6 +93,8 @@ interface FrameBackend {
    * through, while everything else (sidebar, cursor) still comes from the game. Needs a `transparent` renderer.
    */
   setTransparentRect(rect: FrameRect | null): void;
+  /** Independent covered regions, cleared after every frame path and before the cursor. */
+  setTransparentRects(rects: readonly FrameRect[]): void;
   /**
    * HD bridge native overlay passthrough (dev): make key-coloured pixels inside the rectangle transparent instead of the
    * whole rectangle. While a key is set, upscaling and post-processing are bypassed (the frame is drawn 1:1 filtered
@@ -153,6 +155,7 @@ export function createVmFrameRenderer(
   let destroyed = false;
   let transparentRect: FrameRect | null = null;
   let transparentKey: FrameKey | null = null;
+  let transparentRects: readonly FrameRect[] = [];
   return {
     get backend() {
       return backend.backend;
@@ -180,6 +183,7 @@ export function createVmFrameRenderer(
       const replacement = createBackend(next);
       replacement.setTransparentRect(transparentRect);
       replacement.setTransparentKey(transparentKey);
+      replacement.setTransparentRects(transparentRects);
       backend.destroy();
       backend = replacement;
       mode = next;
@@ -191,6 +195,10 @@ export function createVmFrameRenderer(
     setTransparentRect(rect) {
       transparentRect = rect;
       if (!destroyed) backend.setTransparentRect(rect);
+    },
+    setTransparentRects(rects) {
+      transparentRects = rects.map((rect) => ({ ...rect }));
+      if (!destroyed) backend.setTransparentRects(transparentRects);
     },
     setTransparentKey(key) {
       transparentKey = key;
@@ -251,6 +259,7 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
   private spatialStatus = t('插值放大：等待游戏画面（非 AI）');
   private transparentRect: FrameRect | null = null;
   private transparentKey: FrameKey | null = null;
+  private transparentRects: readonly FrameRect[] = [];
   /** Created on first use of a key; one program per frame format. */
   private keyPrograms: Record<'indexed' | 'rgba' | 'rgb565', KeyProgram> | null = null;
 
@@ -493,6 +502,7 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
     const { gl } = this;
     if (this.transparentKey) {
       this.drawKeyed(frame, this.transparentKey, targetWidth, targetHeight);
+      this.punchTransparentRect(frame, targetWidth, targetHeight);
       this.drawCursor(frameCursor(cursorFrame), cursorFrame, cursorPresentation);
       return;
     }
@@ -575,6 +585,10 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
 
   setTransparentRect(rect: FrameRect | null): void {
     this.transparentRect = rect;
+  }
+
+  setTransparentRects(rects: readonly FrameRect[]): void {
+    this.transparentRects = rects;
   }
 
   setTransparentKey(key: FrameKey | null): void {
@@ -669,33 +683,40 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
   }
 
   /**
-   * Force the whole frame opaque (palette entries may carry alpha 0), then clear the requested rectangle to transparent
-   * before the cursor is drawn on top. Only has a visible effect with an alpha drawing buffer.
+   * Plain/upscaled frames first become opaque (palette entries may carry alpha 0). Preserve keyed alpha instead,
+   * then clear all covered regions before the cursor pass. Requires an alpha drawing buffer.
    */
   private punchTransparentRect(frame: VmFrame, targetWidth: number, targetHeight: number): void {
-    const rect = this.transparentRect;
-    if (!rect) return;
+    // Keyed pixels must keep their alpha; the singular hole is superseded by the key, the extra holes are not.
+    const rects =
+      this.transparentKey || !this.transparentRect
+        ? this.transparentRects
+        : [this.transparentRect, ...this.transparentRects];
+    if (!rects.length) return;
     const { gl } = this;
     const sx = targetWidth / frame.width;
     const sy = targetHeight / frame.height;
-    const x0 = Math.max(0, Math.round(rect.x * sx));
-    const x1 = Math.min(targetWidth, Math.round((rect.x + rect.width) * sx));
-    const y0 = Math.max(0, Math.round(rect.y * sy));
-    const y1 = Math.min(targetHeight, Math.round((rect.y + rect.height) * sy));
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, targetWidth, targetHeight);
-    gl.colorMask(false, false, false, true);
-    gl.clearColor(0, 0, 0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.colorMask(true, true, true, true);
-    if (x1 > x0 && y1 > y0) {
-      gl.enable(gl.SCISSOR_TEST);
+    if (!this.transparentKey) {
+      gl.colorMask(false, false, false, true);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.colorMask(true, true, true, true);
+    }
+    gl.enable(gl.SCISSOR_TEST);
+    gl.clearColor(0, 0, 0, 0);
+    for (const rect of rects) {
+      const x0 = Math.max(0, Math.round(rect.x * sx));
+      const x1 = Math.min(targetWidth, Math.round((rect.x + rect.width) * sx));
+      const y0 = Math.max(0, Math.round(rect.y * sy));
+      const y1 = Math.min(targetHeight, Math.round((rect.y + rect.height) * sy));
+      if (x1 <= x0 || y1 <= y0) continue;
       // GL scissor rectangles start at the bottom-left corner.
       gl.scissor(x0, targetHeight - y1, x1 - x0, y1 - y0);
-      gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.disable(gl.SCISSOR_TEST);
     }
+    gl.disable(gl.SCISSOR_TEST);
     gl.clearColor(9 / 255, 11 / 255, 16 / 255, 1);
   }
 
@@ -806,6 +827,7 @@ class CanvasFrameRenderer implements FrameBackend {
    * startHdBridge therefore run the HD bridge (and the game's passthrough patches) only with the WebGL2 backend.
    */
   setTransparentRect(): void {}
+  setTransparentRects(): void {}
   setTransparentKey(): void {}
 
   clear(): void {

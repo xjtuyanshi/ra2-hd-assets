@@ -3,6 +3,7 @@ import type { VmShell } from '../../src/adapter/vmShell';
 import type { GameRenderState } from '../../src/games/renderState';
 import { startHdBridge } from '../../src/ui/pages/game/hdBridge';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
+import { hdSidebar } from '../helpers/hdSidebar';
 
 // The bridge loads LiveView (three.js, WebGPU) through a dynamic import; a stub stands in for it.
 const liveView = vi.hoisted(() => ({ create: vi.fn() }));
@@ -13,8 +14,12 @@ vi.mock('../../packages/hd-renderer/src/HdRenderer', () => ({
   applyLookPreset: hdRenderer.applyLookPreset,
 }));
 
+const hdUi = vi.hoisted(() => ({ start: vi.fn() }));
+vi.mock('../../src/ui/pages/game/hdUi', () => ({ startHdUi: hdUi.start }));
+
 interface BridgeHandle {
   toggle(): boolean;
+  readonly ui: { enabled: boolean; toggle(): boolean };
   readonly live: unknown;
   readonly passthrough: { flags: number; unsupported: boolean; keyed: boolean };
 }
@@ -125,6 +130,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   liveView.create.mockReset();
   hdRenderer.applyLookPreset.mockReset();
+  hdUi.start.mockReset();
 });
 
 describe('HD bridge look parameters', () => {
@@ -578,5 +584,48 @@ describe('HD 桥状态机', () => {
     harness.stop();
     expect(harness.vm.getRenderState).not.toHaveBeenCalled();
     expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
+  });
+});
+
+describe('HD interface bridge wiring', () => {
+  it('updates before uncached-map returns, polls every 50 ms, A/B hides and cleanup disposes', async () => {
+    const ui = { update: vi.fn(), setEnabled: vi.fn(), dispose: vi.fn() };
+    hdUi.start.mockReturnValue(ui);
+    liveView.create.mockRejectedValue(new Error('optional map cache absent'));
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const h = setup('?hd=1&hd-ui=1');
+    const state = { ...battle(1), sidebar: hdSidebar() };
+    h.setState(state);
+    await vi.waitFor(() => expect(hdUi.start).toHaveBeenCalledOnce());
+    await advance(16);
+    expect(ui.update).toHaveBeenLastCalledWith(state.sidebar);
+    await advance(49);
+    expect(h.polls()).toBe(1);
+    await advance(1);
+    expect(h.polls()).toBe(2);
+    expect(h.bridge()?.ui.enabled).toBe(true);
+    expect(h.bridge()?.ui.toggle()).toBe(false);
+    expect(ui.setEnabled).toHaveBeenLastCalledWith(false);
+    h.bridge()?.ui.toggle();
+    expect(h.bridge()?.toggle()).toBe(false);
+    expect(ui.setEnabled).toHaveBeenLastCalledWith(false);
+    h.bridge()?.toggle();
+    expect(ui.setEnabled).toHaveBeenLastCalledWith(true);
+    h.vm.getRenderState.mockRejectedValueOnce(new Error('poll failed'));
+    await advance(50);
+    expect(ui.update).toHaveBeenLastCalledWith(null);
+    h.stop();
+    expect(ui.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('does not load UI without hd-ui=1 or after immediate cleanup', async () => {
+    const h = setup();
+    await settle();
+    expect(hdUi.start).not.toHaveBeenCalled();
+    h.stop();
+    const late = setup('?hd=1&hd-ui=1');
+    late.stop();
+    await settle();
+    expect(hdUi.start).not.toHaveBeenCalled();
   });
 });

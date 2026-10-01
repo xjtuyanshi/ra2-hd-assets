@@ -200,6 +200,55 @@ cooling); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-wate
 the HD cache (e.g. `vehicles-hd`); `hd-rect=x,y,w,h`
 overrides the tactical rectangle (default: the frame minus YR's 168 px sidebar and 32 px command bar).
 
+## HD interface layer (`hd-ui=1`)
+
+In development, `?hd=1&hd-ui=1` adds a separate Canvas 2D interface controller (`hdUi.ts`). It consumes the optional
+`GameRenderState.sidebar` snapshot, including live frame-space layout, faction, active tab, visible cameos,
+animated credits, native power slot counts, radar state, repair/sell modes and localized ready/hold labels. It works
+without a battlefield HD cache. While enabled in a battle, uncached-map polls run at least every 50 ms; a live
+battlefield keeps its faster polling cadence. Unavailable snapshots and poll failures hide the interface.
+
+The `#hd-ui` canvas sits immediately before `#screen`, at z-index 0 above `#hd-screen`, matches the screen's CSS box
+and device pixel ratio, and receives no input. The WebGL2 frame renderer clears the covered rectangles after every
+frame path (plain, upscaled or keyed), before its independent native cursor pass. These extra rectangles are
+independent of the tactical key/hole. All pointer and keyboard input continues to reach the original game.
+Native cameo tooltips in covered areas are replaced with an HD name/cost tooltip inside the sidebar column.
+
+Optional art lives under the local HD cache's `_ui/` directory:
+
+- `_ui/cameos/index.json`: `{ "version": 1, "images": { "image": { "hd": "hd.png", "orig": "orig.png" } },
+"byId": { "TYPE_ID": "image" } }`. Both image paths are optional and relative to `_ui/cameos/`.
+  The type-ID mapping takes precedence over the snapshot's image name; missing HD art falls back to original art.
+- `_ui/chrome/<side>/chrome.json`: `{ "frame": { "width": 800, "height": 600 }, "pieces": [
+{ "file": "sidebar.png", "rect": { "x": 632, "y": 0, "width": 168, "height": 600 },
+"anchor": "sidebar" } ] }`. Side is `0` Allied, `1` Soviet, `2` Yuri, or `-1` unknown. Files are relative to
+  that side's chrome directory. Sidebar pieces translate their frame-space origin to the live sidebar origin;
+  `commandBar` pieces map onto the live command bar, stretching its width.
+
+Manifests and bitmaps load lazily. Missing files (including 404 responses) are remembered for the controller's
+lifetime; reload to pick up newly created assets. A complete loaded chrome set covers the sidebar and command bar,
+with an active radar aperture preserved by up to four rectangles around it. Without complete chrome, only the cameo
+strip, power column, credits band and tab rectangles are replaced procedurally; native radar, buttons and command
+bar remain visible. Missing cameo art uses a named dark tile. Cameos retain captions, progress sectors, queue badges,
+ready/hold labels, availability shading, flashing and hover outlines. All extracted or derived art stays outside Git.
+
+`__hdBridge.toggle()` toggles both battlefield and interface for original/HD A/B checks.
+`__hdBridge.ui.enabled` reports the effective interface switch and `__hdBridge.ui.toggle()` independently toggles
+only the interface. The controller owns its animation request, canvas and bitmap cache; session cleanup cancels
+animation, removes its canvas, closes bitmaps (including late results) and clears the extra frame rectangles.
+
+Asset-free regressions are in `tests/basic/hdUi.test.ts`, `tests/basic/vmFrameRenderer.test.ts` and
+`tests/basic/hdBridge.test.ts`. With a running development server, `pnpm exec tsx
+tests/basic/browser/hdUiBrowserSmoke.mts` exercises synthetic fallback/chrome composition, radar/cursor pixels,
+input passthrough, both A/B switches and cleanup in a real browser. `RA2_BROWSER_ORIGIN` selects the development
+origin, `RA2_BROWSER_EXECUTABLE` optionally selects an installed Chromium executable, and `HD_UI_EVIDENCE_DIR`
+optionally retains screenshots and the JSON transcript. A blocked browser launch is unverified acceptance.
+
+The dynamic import of `hdUi.ts` is lexically guarded by `import.meta.env.DEV` in `hdBridge.ts`; the production-graph
+architecture regression rejects reachable `hdUi.ts` and the guest sidebar reader. Production builds contain neither
+the interface controller nor its renderer/assets. Synthetic drawing tests and browser previews verify page-side
+rendering and lifecycle separately from real-game guest-reader, native-tooltip and interaction acceptance.
+
 ## Bridge fields
 
 The live view's snapshot types carry optional fields beyond what the page forwards today. Each consumer is active only
