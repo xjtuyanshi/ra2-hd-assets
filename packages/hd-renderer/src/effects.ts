@@ -1158,7 +1158,9 @@ export class EffectsLayer {
         const lumps = texture(noise, dir.mul(0.3).add(offset)).g;
         const clumps = texture(noise, p.mul(0.9).add(offset.yx)).r;
         const front = float(0.8).add(lumps.sub(0.5).mul(0.32));
-        const ring = smoothstep(front.sub(0.42), front.sub(0.04), d).mul(smoothstep(front.add(0.05), front.sub(0.02), d));
+        const ring = smoothstep(front.sub(0.42), front.sub(0.04), d).mul(
+          smoothstep(front.add(0.05), front.sub(0.02), d),
+        );
         const broken = smoothstep(0.32, 0.62, clumps.add(lumps.sub(0.5).mul(0.5)));
         const skirt = smoothstep(front, front.sub(0.6), d).mul(0.12);
         // Dark, slightly warm soil; the inner skirt is scorched darker still.
