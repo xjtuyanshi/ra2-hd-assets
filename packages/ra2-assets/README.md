@@ -539,6 +539,24 @@ near-neutral texels untouched) a share `k` towards a fresh grass-green Lab a/b, 
 trees are graded together with the repainted lawn instead of keeping each map's olive original. Sheets,
 model outputs, patches and variant caches are derived art and belong outside Git.
 
+## Building redraw transfers (Python)
+
+`python/building_redraw.py xfer --library-root "$VARIANT" --theater urban --patches "$PATCHES" NAME[:i|:d|:mk]`
+transfers accepted idle redraws to animation, damaged and build-up frames (all three states when omitted);
+`xfer --delta` also keeps the redraw, shifted by the 1x palette colour change, on colour-cycling pixels whose
+silhouette does not move. `walls-xfer` accepts the same options followed by wall types and maps damaged frame `k` to
+piece `k % 16`.
+Both preserve model-owned patches, including patches without a `.src`; only sources starting with `xfer` may be
+overwritten. `xfer --parts <JSON file>` overrides reference parts with ordered `sprite:frame` lists keyed by `NAME`
+or `NAME:state`, including bibs and special idle layers. `python/theatre_pages.py xfer "$THEATRE" "$URBAN" "$BASELINE"
+--pages 0,1` fills missing HD entries from shared urban art (all theatre pages by default), symlinking identical pages
+and retaining baseline pixels for differing frames. Its `overlay-walls "$LIBRARY" TYPE...` redirects wall overlays
+to HD building frames; `normals-merge "$SRC" "$LIBRARY" "$SPRITES_FILE"` merges only the selected sprites' material
+rectangles, using a whitespace-separated sprite list and preserving incompatible existing layouts. These tools use
+atomic JSON/PNG replacements and copy-on-write pages; all supplied libraries, baselines and patches stay outside Git.
+Run their asset-free acceptance from `packages/ra2-assets/python` with
+`python3 -B -m unittest test_building_redraw test_theatre_pages -v`.
+
 ## Level 3 building redraw sheets (Python, experimental)
 
 `python/l3_redraw.py` reuses the hybrid registration, checks and paint encoding for map caches and paged type

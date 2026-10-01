@@ -322,6 +322,207 @@ def save_patch(sprite, frame, rgba, remap, tag='', *, patches):
         (patches / f'{n}.src').write_text(tag)
 
 
+def model_patch(sprite, frame, patches):
+    """Treat an existing patch without provenance as model-owned too."""
+    name = patch_name(sprite, frame)
+    source = Path(patches) / f'{name}.src'
+    return (Path(patches) / f'{name}.png').exists() and not (
+        source.exists() and source.read_text(encoding='utf-8').startswith('xfer'))
+
+
+class Xfer:
+    """Transfer stored HD blocks where anchor-aligned 1x indices match a redraw."""
+
+    def __init__(self, lib, patches, delta=False):
+        self.lib = lib
+        self.patches = Path(patches)
+        self.delta = delta
+
+    def raw(self, sprite, frame):
+        f = self.lib.lib['sprites'][sprite]['frames'][frame]
+        x, y, w, h = f['rect']
+        page = f.get('page', 0)
+        idx = self.lib.idx_page(page)[y:y + h, x:x + w].astype(np.int32)
+        hd, remap = self.lib.hd_page(page)
+        block = (slice(2 * y, 2 * (y + h)), slice(2 * x, 2 * (x + w)))
+        return idx, hd[block].astype(np.float32), remap[block].astype(np.float32) / 255, tuple(f['offset'])
+
+    def hd_of(self, sprite, frame):
+        idx, rgba, remap, offset = self.raw(sprite, frame)
+        path = self.patches / f'{patch_name(sprite, frame)}.png'
+        redrawn = False
+        if path.exists():
+            patch = read_image(path, 'RGBA').astype(np.float32)
+            if patch.shape == rgba.shape:
+                rgba = patch
+                remap = read_image(path.with_name(path.stem + '-remap.png'), 'L').astype(np.float32) / 255
+                if remap.shape != rgba.shape[:2]:
+                    raise ValueError(f'remap size differs from patch: {path}')
+                redrawn = True
+        return idx, rgba, remap, offset, redrawn
+
+    def reference(self, parts):
+        if not parts:
+            raise ValueError('transfer reference needs at least one part')
+        items = [self.hd_of(*parse_part(part)) for part in parts]
+        x0 = min(o[0] for _, _, _, o, _ in items) - 64
+        y0 = min(o[1] for _, _, _, o, _ in items) - 64
+        width = max(o[0] + i.shape[1] for i, _, _, o, _ in items) - x0 + 64
+        height = max(o[1] + i.shape[0] for i, _, _, o, _ in items) - y0 + 64
+        idx = np.full((height, width), -1, np.int32)
+        redrawn = np.zeros((height, width), bool)
+        colour = np.zeros((2 * height, 2 * width, 3), np.float32)
+        alpha = np.zeros((2 * height, 2 * width), np.float32)
+        paint = np.zeros_like(alpha)
+        for indices, rgba, remap, (ox, oy), red in items:
+            h, w = indices.shape
+            x, y = ox - x0, oy - y0
+            mask = indices > 0
+            idx[y:y + h, x:x + w][mask] = indices[mask]
+            redrawn[y:y + h, x:x + w][mask] = red
+            a = rgba[..., 3] / 255
+            block = (slice(2 * y, 2 * (y + h)), slice(2 * x, 2 * (x + w)))
+            colour[block] = rgba[..., :3] * a[..., None] + colour[block] * (1 - a[..., None])
+            paint[block] = np.where(a > 0.5, remap, paint[block])
+            alpha[block] = a + alpha[block] * (1 - a)
+        colour /= np.maximum(alpha, 1e-3)[..., None]
+        return dict(idx=idx, red=redrawn, col=colour, rm=paint, origin=(x0, y0))
+
+    def colour_changed(self, sprite, idx, rid, rred, equal):
+        """Pixels of colour-cycling, glow or flicker frames: the silhouette stays in place (overlap with the
+        reference above 0.93) and only palette indices change. Both frames cover the pixel's 3x3 neighbourhood;
+        house-paint indices of remapped sprites are excluded (their stored ramp code must not be shifted)."""
+        a0, a1 = rid > 0, idx > 0
+        union = (a0 | a1).sum()
+        if not union or (a0 & a1).sum() / union <= 0.93:
+            return None
+        both = cv2.erode((a0 & a1).astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+        changed = both & (rid != idx) & rred & ~equal
+        if self.lib.lib['sprites'][sprite].get('remap'):
+            changed &= ~((idx >= 16) & (idx < 32)) & ~((rid >= 16) & (rid < 32))
+        return changed
+
+    def shift_colour(self, sprite, redraw, idx, rid, changed):
+        """Keep the redraw's invented detail and shift it by the 1x colour change (Lab delta, smoothed at 2x)."""
+        palette = self.lib.pal[self.lib.lib['sprites'][sprite]['palette']].astype(np.float32) / 255
+        lab = cv2.cvtColor(palette[None], cv2.COLOR_RGB2LAB)[0]
+        delta = lab[np.clip(idx, 0, 255)] - lab[np.clip(rid, 0, 255)]
+        delta[~changed] = 0
+        delta = cv2.GaussianBlur(np.repeat(np.repeat(delta, 2, 0), 2, 1).astype(np.float32), (0, 0), 0.6)
+        lab_redraw = cv2.cvtColor((redraw / 255).astype(np.float32), cv2.COLOR_RGB2LAB) + delta
+        lab_redraw[..., 0] = np.clip(lab_redraw[..., 0], 0, 100)
+        shifted = np.clip(cv2.cvtColor(lab_redraw, cv2.COLOR_LAB2RGB) * 255, 0, 255)
+        mask = np.repeat(np.repeat(changed, 2, 0), 2, 1)
+        return np.where(mask[..., None], shifted, redraw)
+
+    def transfer(self, ref, sprite, frame):
+        idx, rgba, remap, (ox, oy) = self.raw(sprite, frame)
+        h, w = idx.shape
+        if h == 0 or w == 0 or not (idx > 1).any():
+            return None
+        x, y = ox - ref['origin'][0], oy - ref['origin'][1]
+        height, width = ref['idx'].shape
+        if x < 0 or y < 0 or x + w > width or y + h > height:
+            return None
+        rid, rred = ref['idx'][y:y + h, x:x + w], ref['red'][y:y + h, x:x + w]
+        equal = (idx > 0) & (rid == idx) & rred
+        changed = self.colour_changed(sprite, idx, rid, rred, equal) if self.delta else None
+        if equal.sum() + (0 if changed is None else changed.sum()) < 4:
+            return None
+        block = (slice(2 * y, 2 * (y + h)), slice(2 * x, 2 * (x + w)))
+        redraw, redraw_remap = ref['col'][block], ref['rm'][block]
+        if changed is not None and changed.any():
+            redraw = self.shift_colour(sprite, redraw, idx, rid, changed)
+            equal = equal | changed
+        mask = np.repeat(np.repeat(equal, 2, 0), 2, 1).astype(np.float32)
+        base = rgba[..., :3].copy()
+        nonpaint = (remap < 0.05) & (redraw_remap < 0.05)
+        fit = (mask > 0.5) & nonpaint & (rgba[..., 3] > 128)
+        if fit.sum() > 200:
+            lab_base = cv2.cvtColor(base / 255, cv2.COLOR_RGB2LAB)
+            lab_redraw = cv2.cvtColor(redraw / 255, cv2.COLOR_RGB2LAB)
+            adjusted = lab_base.copy()
+            for channel in range(3):
+                mb, mr = lab_base[..., channel][fit].mean(), lab_redraw[..., channel][fit].mean()
+                if channel == 0:
+                    sb = lab_base[..., 0][fit].std() + 1e-3
+                    sr = lab_redraw[..., 0][fit].std() + 1e-3
+                    gain = float(np.clip(sr / sb, 0.85, 1.35))
+                    adjusted[..., 0] = (lab_base[..., 0] - mb) * gain + mr
+                else:
+                    adjusted[..., channel] = lab_base[..., channel] + (mr - mb)
+            adjusted = cv2.cvtColor(adjusted, cv2.COLOR_LAB2RGB) * 255
+            adjusted += 0.45 * (adjusted - cv2.GaussianBlur(adjusted, (0, 0), 1.0))
+            base = np.where(nonpaint[..., None], adjusted, base)
+        feather = cv2.GaussianBlur(mask, (0, 0), 0.7)
+        # Bound the feather to the matched region's immediate rim.
+        feather = np.minimum(feather, cv2.dilate(mask, np.ones((3, 3))))
+        colour = redraw * feather[..., None] + base * (1 - feather[..., None])
+        # House paint is stored as a ramp code; blending codes changes the owner's colour.
+        paint = (remap > 0.05) | (redraw_remap > 0.05)
+        colour[paint] = np.where((mask[paint] > 0.5)[..., None], redraw[paint], rgba[..., :3][paint])
+        output_remap = np.where(mask > 0.5, redraw_remap, remap)
+        output = np.dstack([np.clip(np.rint(colour), 0, 255), rgba[..., 3]]).astype(np.uint8)
+        return output, np.clip(np.rint(output_remap * 255), 0, 255).astype(np.uint8), float(
+            equal.sum() / max(1, (idx > 0).sum()))
+
+
+def xfer_targets(lib, name, state):
+    building = lib.lib['types'][name]['building']
+    if state == 'mk':
+        return [building['buildup']] if building.get('buildup') else []
+    return [layer['damagedSprite'] if state == 'd' else layer['sprite']
+            for layer in building['layers'] if state != 'd' or 'damagedSprite' in layer]
+
+
+def save_xfer_patch(sprite, frame, result, tag, patches):
+    if result is None or model_patch(sprite, frame, patches):
+        return False
+    patches = Path(patches)
+    patches.mkdir(parents=True, exist_ok=True)
+    rgba, remap, _ = result
+    name = patch_name(sprite, frame)
+    atomic_image(patches / f'{name}.png', Image.fromarray(rgba))
+    atomic_image(patches / f'{name}-remap.png', Image.fromarray(remap))
+    (patches / f'{name}.src').write_text(tag, encoding='utf-8')
+    return True
+
+
+def xfer(lib, name, state, *, patches, parts=None, log=None, delta=False):
+    """Transfer an idle redraw to one state; explicit parts also support bib-only buildings. delta: also keep the
+    redraw (colour-shifted) on colour-cycling pixels whose silhouette is unchanged (Xfer.colour_changed)."""
+    if state not in ('i', 'd', 'mk'):
+        raise ValueError('transfer state must be i, d or mk')
+    transfer = Xfer(lib, patches, delta=delta)
+    ref = transfer.reference(idle_parts(lib, name, damaged=state == 'd', include_auxiliary=True)
+                             if parts is None else parts)
+    count = 0
+    for sprite in dict.fromkeys(xfer_targets(lib, name, state)):
+        for frame in range(len(lib.lib['sprites'][sprite]['frames'])):
+            if model_patch(sprite, frame, patches):
+                continue
+            result = transfer.transfer(ref, sprite, frame)
+            if save_xfer_patch(sprite, frame, result, f'xfer:{name}_{state}', patches):
+                count += 1
+                if log is not None:
+                    log.append(f'{sprite}#{frame} {result[2]:.2f}')
+    return count
+
+
+def walls_xfer(lib, name, *, patches):
+    """Damaged wall frame k reuses the accepted connection piece k % 16."""
+    sprite = lib.lib['types'][name]['sprite']
+    transfer = Xfer(lib, patches)
+    count = 0
+    for frame in range(16, len(lib.lib['sprites'][sprite]['frames'])):
+        if model_patch(sprite, frame, patches) or not model_patch(sprite, frame % 16, patches):
+            continue
+        ref = transfer.reference([f'{sprite}:{frame % 16}'])
+        result = transfer.transfer(ref, sprite, frame)
+        count += save_xfer_patch(sprite, frame, result, f'xfer:{name}_wall', patches)
+    return count
+
+
 def job_comp(lib, jobdir):
     lay = json.loads((Path(jobdir) / 'layout.json').read_text())
     x0, y0 = lay['origin']
@@ -450,13 +651,25 @@ def refs_text(has_style, has_sibling):
     return '\n'.join(lines) + '\n'
 
 
-def idle_parts(lib, name, damaged=False, storage=STORAGE):
+def idle_parts(lib, name, damaged=False, storage=STORAGE, *, include_auxiliary=False):
+    """Transfers include flat-building bibs and special idle layers; body jobs retain their selection."""
     t = lib.lib['types'][name]
     b = t['building']
-    parts = [f"{t['sprite']}:{1 if damaged else 0}"]
+    parts = []
+    if include_auxiliary and b.get('bib'):
+        frame = 1 if damaged and len(lib.lib['sprites'][b['bib']]['frames']) > 1 else 0
+        parts.append(f"{b['bib']}:{frame}")
+    frame = 1 if damaged else 0
+    if not include_auxiliary or lib.lib['sprites'][t['sprite']]['frames'][frame]['rect'][2] > 0:
+        parts.append(f"{t['sprite']}:{frame}")
+    super_anim = False
     for L in b['layers']:
         k = L['key']
-        on = k in ('ActiveAnim', 'IdleAnim') or (name not in storage and k in ('ActiveAnimTwo', 'ActiveAnimThree', 'ActiveAnimFour'))
+        on = k in ('ActiveAnim', 'IdleAnim') or (include_auxiliary and k == 'IdleAnimTwo') or (
+            name not in storage and k in ('ActiveAnimTwo', 'ActiveAnimThree', 'ActiveAnimFour'))
+        if include_auxiliary and k == 'SuperAnim' and not super_anim:
+            on = True
+            super_anim = True
         if not on:
             continue
         s = L.get('damagedSprite', L['sprite']) if damaged else L['sprite']
@@ -1095,6 +1308,15 @@ def parser():
     p.add_argument('--patches', type=Path, required=True)
     p.add_argument('--only', nargs='+')
     p.add_argument('--record', default='l4_frames_bldg.json')
+    for command in ('xfer', 'walls-xfer'):
+        p = commands.add_parser(command, help='transfer accepted redraws to animation or damaged wall frames')
+        p.add_argument('--library-root', type=Path, required=True, help='variant root containing _library/<theater>')
+        p.add_argument('--theater', default='urban')
+        p.add_argument('--patches', type=Path, required=True)
+        p.add_argument('names', nargs='+')
+        if command == 'xfer':
+            p.add_argument('--parts', type=json_option, help='JSON mapping NAME or NAME:state to ordered sprite:frame parts')
+            p.add_argument('--delta', action='store_true', help='colour-shift the redraw on colour-cycling pixels')
     for command in ('normals-job', 'normals-assist'):
         p = commands.add_parser(command)
         p.add_argument('--work', type=Path, required=True)
@@ -1144,6 +1366,17 @@ def main(argv=None):
                           specs=read_json(args.specs) if args.specs else None, buildup=buildup)
         elif args.command == 'compose':
             compose(args.library, args.patches, args.only, args.record)
+        elif args.command in ('xfer', 'walls-xfer'):
+            lib = Lib(args.theater, args.library_root)
+            for selector in args.names:
+                if args.command == 'walls-xfer':
+                    print(selector, 'damaged pieces', walls_xfer(lib, selector, patches=args.patches))
+                    continue
+                name, _, state = selector.partition(':')
+                overrides = args.parts or {}
+                for state in ([state] if state else ['i', 'd', 'mk']):
+                    parts = overrides.get(f'{name}:{state}', overrides.get(name))
+                    print(name, state, xfer(lib, name, state, patches=args.patches, parts=parts, delta=args.delta))
         elif args.command == 'normals-job':
             normals_job(args.work, args.jobs)
         elif args.command == 'normals-assist':

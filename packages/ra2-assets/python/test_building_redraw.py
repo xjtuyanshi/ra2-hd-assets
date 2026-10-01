@@ -393,5 +393,142 @@ class BuildingTests(unittest.TestCase):
             self.assertEqual(br.Lib().dir, self.lib.dir)
 
 
+class TransferTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='.tmp-xfer-', dir=Path(__file__).parent)
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.directory = self.root / '_library' / 'snow'
+        self.directory.mkdir(parents=True)
+        self.patches = self.root / 'patches'
+        self.indices = np.full((4, 60), 50, np.uint8)
+        self.indices[:, :10] = 40
+        self.indices[:, 10:20] = 42
+        for x, value in ((20, 40), (30, 40), (40, 42), (50, 40)):
+            self.indices[:, x:x+4] = value
+        Image.fromarray(self.indices).save(self.directory / 'index.png')
+        baseline = np.full((8, 120, 4), [20, 30, 40, 255], np.uint8)
+        baseline[0, 40, 3] = 97
+        Image.fromarray(baseline).save(self.directory / 'colour.png')
+        Image.fromarray(np.zeros((8, 120), np.uint8)).save(self.directory / 'paint.png')
+        Image.new('RGB', (256, 1), 'grey').save(self.directory / 'palette.png')
+        sprites = {}
+        for sprite, positions in ((BODY, [0, 10]), (ANIM, [20, 30]), (DAMAGE, [40]), (BUILDUP, [50])):
+            sprites[sprite] = dict(palette='unit', frames=[
+                dict(rect=[x, 0, 10, 4], offset=[-7, -3], page=0) for x in positions])
+        self.data = dict(palettes={'unit': 'palette.png'}, sprites=sprites,
+                         spriteAtlases=[dict(file='index.png')],
+                         spriteAtlasesHd=[dict(file='colour.png', remap='paint.png')],
+                         types={'TEST': dict(sprite=BODY, building=dict(buildup=BUILDUP, layers=[
+                             dict(key='BuildAnim', sprite=ANIM, damagedSprite=DAMAGE, anim=dict(start=0))]))})
+        br.write_json(self.directory / 'library.json', self.data)
+
+    def patch(self, sprite, frame, colour, tag='model:accepted'):
+        rgba = np.full((8, 20, 4), [*colour, 255], np.uint8)
+        br.save_patch(sprite, frame, rgba, np.zeros((8, 20), np.uint8), tag, patches=self.patches)
+        return rgba
+
+    def cli(self, command, *selectors, extra=()):
+        result = subprocess.run([sys.executable, '-B', br.__file__, command, '--library-root', str(self.root),
+                                 '--theater', 'snow', '--patches', str(self.patches), *extra, *selectors],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def test_xfer_states_copy_matching_indices_keep_baseline_and_model_patch(self):
+        self.patch(BODY, 0, (210, 90, 30))
+        self.patch(BODY, 1, (40, 180, 210))
+        self.patch(ANIM, 1, (99, 19, 201))
+        before = {p.name: p.read_bytes() for p in self.patches.iterdir()}
+        self.cli('xfer', 'TEST')
+        for sprite, state, colour in ((ANIM, 'i', (210, 90, 30)), (DAMAGE, 'd', (40, 180, 210)),
+                                       (BUILDUP, 'mk', (210, 90, 30))):
+            name = br.patch_name(sprite, 0)
+            output = br.read_image(self.patches / f'{name}.png')
+            np.testing.assert_array_equal(output[4, 2, :3], colour)
+            # Beyond the feather's immediate rim, differing indices retain baseline bytes.
+            np.testing.assert_array_equal(output[:, 12:, :3], np.full((8, 8, 3), [20, 30, 40], np.uint8))
+            original = br.Xfer(br.Lib('snow', self.root), self.patches).raw(sprite, 0)[1]
+            np.testing.assert_array_equal(output[..., 3], original[..., 3])
+            self.assertEqual((self.patches / f'{name}.src').read_text(), f'xfer:TEST_{state}')
+        for name, content in before.items():
+            self.assertEqual((self.patches / name).read_bytes(), content)
+        # Generated transfers may be refreshed, but accepted model files stay protected.
+        self.patch(BODY, 0, (80, 210, 30))
+        self.cli('xfer', 'TEST:i')
+        np.testing.assert_array_equal(br.read_image(self.patches / 'anim_TEST_A#0.png')[4, 2, :3], [80, 210, 30])
+        self.assertEqual((self.patches / 'anim_TEST_A#1.png').read_bytes(), before['anim_TEST_A#1.png'])
+
+    def test_explicit_parts_override_and_missing_provenance_protects_patch(self):
+        self.patch(BODY, 1, (40, 180, 210))
+        self.indices[:, 20:24] = 42
+        Image.fromarray(self.indices).save(self.directory / 'index.png')
+        self.patch(ANIM, 1, (201, 20, 40), tag='')
+        protected = (self.patches / 'anim_TEST_A#1.png').read_bytes()
+        override = self.root / 'parts.json'
+        br.write_json(override, {'TEST:i': [f'{BODY}:1']})
+        self.cli('xfer', 'TEST:i', extra=('--parts', str(override)))
+        np.testing.assert_array_equal(br.read_image(self.patches / 'anim_TEST_A#0.png')[4, 2, :3], [40, 180, 210])
+        self.assertEqual((self.patches / 'anim_TEST_A#1.png').read_bytes(), protected)
+
+    def test_remap_codes_are_copied_without_feathering(self):
+        self.patch(BODY, 0, (195, 195, 195))
+        Image.fromarray(np.full((8, 20), 255, np.uint8)).save(self.patches / 'building_TEST#0-remap.png')
+        self.cli('xfer', 'TEST:i')
+        output = br.read_image(self.patches / 'anim_TEST_A#0.png')
+        remap = br.read_image(self.patches / 'anim_TEST_A#0-remap.png')
+        np.testing.assert_array_equal(output[:, :8, :3], np.full((8, 8, 3), 195, np.uint8))
+        np.testing.assert_array_equal(remap[:, :8], np.full((8, 8), 255, np.uint8))
+        np.testing.assert_array_equal(remap[:, 8:], 0)
+
+    def test_transfer_idle_rules_include_bib_idle_two_and_only_first_super(self):
+        lib = br.Lib('snow', self.root)
+        lib.lib['sprites']['bib:TEST'] = lib.lib['sprites'][BODY]
+        building = lib.lib['types']['TEST']['building']
+        building['bib'] = 'bib:TEST'
+        building['layers'] = [dict(key=key, sprite=sprite, anim=dict(start=0)) for key, sprite in (
+            ('IdleAnimTwo', ANIM), ('SuperAnim', DAMAGE), ('SuperAnim', BUILDUP))]
+        # Flat buildings may have an empty body; their bib and layers form the reference.
+        lib.lib['sprites'][BODY]['frames'][0]['rect'][2] = 0
+        self.assertEqual(br.idle_parts(lib, 'TEST'), [f'{BODY}:0'])
+        self.assertEqual(br.idle_parts(lib, 'TEST', include_auxiliary=True),
+                         ['bib:TEST:0', f'{ANIM}:0', f'{DAMAGE}:0'])
+        self.assertEqual(br.idle_parts(lib, 'TEST', damaged=True, include_auxiliary=True),
+                         ['bib:TEST:1', f'{BODY}:1', f'{ANIM}:0', f'{DAMAGE}:0'])
+
+    def test_walls_frame_17_takes_piece_1_and_keeps_model_damage(self):
+        sprite = 'building:WALL'
+        self.data['sprites'][sprite] = dict(palette='unit', frames=[
+            dict(rect=[0, 0, 10, 4], offset=[-7, -3], page=0) for _ in range(18)])
+        self.data['types']['WALL'] = dict(sprite=sprite)
+        br.write_json(self.directory / 'library.json', self.data)
+        self.patch(sprite, 0, (210, 90, 30))
+        piece = self.patch(sprite, 1, (40, 180, 210))
+        self.patch(sprite, 16, (99, 19, 201))
+        protected = (self.patches / 'building_WALL#16.png').read_bytes()
+        self.cli('walls-xfer', 'WALL')
+        np.testing.assert_array_equal(br.read_image(self.patches / 'building_WALL#17.png'), piece)
+        self.assertEqual((self.patches / 'building_WALL#17.src').read_text(), 'xfer:WALL_wall')
+        self.assertEqual((self.patches / 'building_WALL#16.png').read_bytes(), protected)
+
+
 if __name__ == '__main__':
     unittest.main()
+
+
+class DeltaTransferTests(unittest.TestCase):
+    def test_colour_cycle_keeps_redraw_detail_shifted_by_palette_delta(self):
+        class FakeLib:
+            pal = {'unit': np.stack([np.arange(256)] * 3, 1).astype(np.float32)}
+            lib = {'sprites': {'anim:X': {'palette': 'unit'}}}
+        x = br.Xfer(FakeLib(), '.', delta=True)
+        rid = np.full((8, 8), 100, np.int32); idx = rid.copy(); idx[2:6, 2:6] = 160
+        changed = x.colour_changed('anim:X', idx, rid, np.ones((8, 8), bool), idx == rid)
+        self.assertTrue(changed[3, 3]); self.assertFalse(changed[0, 0])
+        redraw = np.zeros((16, 16, 3), np.float32) + 100; redraw[::2, ::2] = 140  # invented detail
+        out = x.shift_colour('anim:X', redraw, idx, rid, changed)
+        self.assertGreater(out[7, 7].mean(), redraw[7, 7].mean() + 30)   # brighter where the index got brighter
+        self.assertGreater(abs(out[6, 6].mean() - out[7, 7].mean()), 10)  # detail pattern survives
+        self.assertTrue(np.allclose(out[0, 0], redraw[0, 0]))            # untouched outside the change
+        moved = rid.copy(); moved[:, :4] = 0                              # silhouette change: no delta mode
+        self.assertIsNone(x.colour_changed('anim:X', idx, moved, np.ones((8, 8), bool), idx == moved))
