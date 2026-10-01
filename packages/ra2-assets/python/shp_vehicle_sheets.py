@@ -52,16 +52,18 @@ PROFILES = {
     },
     "SQD": {
         "house": "DarkRed",
-        "desc": "Soviet giant squid: a huge dark red-brown squid at the sea surface with a long mantle and thick "
-                "writhing tentacles, seen from the high RTS camera",
+        "desc": "Soviet giant squid: a huge squid at the sea surface with a pale pinkish-tan mantle, a house-coloured "
+                "(red) armoured collar band around its head and long olive-brown tentacles trailing behind",
         "subject": "squid",
         "sequences": {"Stand": "idling at the surface", "Walk": "a swimming cycle along the surface",
                       "Fire": "an attack cycle (tentacles rise, grab and slam)"},
         "material": "realistic wet cephalopod skin with glossy specular highlights, mottled chromatophore spots, "
-                    "fine skin folds, visible suckers on the tentacle undersides and clean white water splashes",
+                    "fine skin folds, visible suckers on the tentacles and a riveted metal collar band",
         "forbid": "Do not turn the squid into a robot, an octopus cartoon or a toy.",
-        "parts": "Preserve the mantle, every tentacle, their lengths, curls and positions, and any splashes.",
-        "colour": "Keep the same dark red-brown squid colours; splashes stay white.",
+        "parts": "Preserve the mantle and its fins, the collar band, every tentacle with its length, curl and position, "
+                 "and any splashes.",
+        "colour": "Keep the pale pinkish-tan mantle and olive-brown tentacles; the collar band stays house red "
+                  "(DarkRed); splashes stay white.",
     },
 }
 UNITS = {unit: f"vehicle:{unit}" for unit in PROFILES}
