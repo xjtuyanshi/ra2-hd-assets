@@ -278,6 +278,11 @@ def review_sheet(frames: list[Frame], path: Path):
     sheet.save(path)
 
 
+def file_stem(type_name: str) -> str:
+    """File name stem of a projection type: library voxel ids of building turrets ('NAFLAK:turret') use '_'."""
+    return type_name.replace(':', '_')
+
+
 def build(type_name: str, bake: Path, sheets: list[Path], palettes: Path, house_key: str,
           out: Path, review: Path | None = None) -> dict:
     meta = json.loads((bake / 'meta.json').read_text())
@@ -330,6 +335,10 @@ def build(type_name: str, bake: Path, sheets: list[Path], palettes: Path, house_
             if registration.iou < 0.85:
                 warnings.warn(f'{type_name}/{part}/{k:03d}: registration IoU {registration.iou:.4f} < 0.85', stacklevel=2)
     required = {'body', 'turret'} if engine.get('turreted', any(f['part'] == 'turret' for f in engine['frames'])) else {'body'}
+    # A building's voxel turret (rules TurretAnimIsVoxel, library voxel id 'NAFLAK:turret') has only turret/barrel
+    # sections: the renderer asks for the 'turret' atlas alone, so a sheet set of just that part is complete.
+    if ':' in type_name and set(parts) == {'turret'}:
+        required = {'turret'}
     if set(parts) != required:
         raise ValueError(f'Incomplete part set: expected {sorted(required)}, got {sorted(parts)}')
     facings = None
@@ -349,9 +358,10 @@ def build(type_name: str, bake: Path, sheets: list[Path], palettes: Path, house_
                 'scale': scale, 'jacobian': (BAKE_JACOBIAN * scale).tolist(),
                 'house': {'first': 16, 'count': 16} if any(np.any(f.paint[..., 0]) for fs in parts.values() for f in fs) else None,
                 'parts': {}, 'registration': []}
+    stem = file_stem(type_name)
     for part, frames in parts.items():
         colour, paint, packed = pack_frames(frames)
-        colour_name, paint_name = f'{type_name}_{part}.png', f'{type_name}_{part}_paint.png'
+        colour_name, paint_name = f'{stem}_{part}.png', f'{stem}_{part}_paint.png'
         Image.fromarray(colour).save(out / colour_name)
         Image.fromarray(paint).save(out / paint_name)
         manifest['parts'][part] = {'colour': colour_name, 'paint': paint_name,
@@ -360,11 +370,11 @@ def build(type_name: str, bake: Path, sheets: list[Path], palettes: Path, house_
             r = f.registration
             manifest['registration'].append({'part': part, 'k': f.k, 'iou': r.iou, 'scale': r.scale, 'dx': r.dx, 'dy': r.dy})
         if review:
-            review_sheet(frames, review / f'{type_name}_{part}.png')
+            review_sheet(frames, review / f'{stem}_{part}.png')
     # Publish only complete types; an interrupted build must not add a partial manifest to the index.
-    temporary = out / f'{type_name}.json.tmp'
+    temporary = out / f'{stem}.json.tmp'
     temporary.write_text(json.dumps(manifest, indent=2) + '\n')
-    temporary.replace(out / f'{type_name}.json')
+    temporary.replace(out / f'{stem}.json')
     return manifest
 
 

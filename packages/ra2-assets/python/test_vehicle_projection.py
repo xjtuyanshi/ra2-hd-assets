@@ -93,6 +93,42 @@ class VehicleProjectionTests(unittest.TestCase):
         self.assertEqual(paint[10, 1, 0], 0)
         self.assertFalse(paint_channels(colour, mask, source, mask * 0, ramp).any())
 
+    def test_building_turret_builds_a_turret_only_type(self):
+        # A building's voxel turret (library id 'GUN:turret') has no body: its sheet set is the turret part alone, and
+        # file names replace the ':' so the index maps the id to an ordinary file.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bake, sheet, out = root / 'bake', root / 'sheet', root / 'out'
+            (bake / 'engine').mkdir(parents=True)
+            sheet.mkdir()
+            frames, cells = [], []
+            a = np.zeros((32, 32), np.uint8)
+            a[12:24, 10:26] = 1
+            colour = np.full((32, 32, 3), [90, 100, 110], np.uint8)
+            output = np.tile(np.where(a[..., None], colour, 118).astype(np.uint8), (4, 4, 1))
+            for i in range(16):
+                for suffix, background in [('k', 0), ('w', 255), ('p', 0)]:
+                    Image.fromarray(np.where(a[..., None], colour, background).astype(np.uint8)).save(
+                        bake / 'engine' / f'turret_{i:03d}_{suffix}.png')
+                frames.append({'k': i, 'facing': i * 16, 'part': 'turret', 'pivot': [16, 24]})
+                x, y = (i % 4) * 32, (i // 4) * 32
+                cells.append({'k': i, 'facing': i * 16, 'src_centre': [16, 16], 'dst_origin': [x + 16, y + 16], 'cell': [x, y, 32, 32]})
+            (bake / 'meta.json').write_text(json.dumps({'looks': {'engine': {'frames': frames, 'turreted': True}}}))
+            (sheet / 'input.json').write_text(json.dumps({'part': 'turret', 'scale': 1, 'cells': cells}))
+            Image.fromarray(output).save(sheet / 'input.png')
+            Image.fromarray(output).save(sheet / 'output.png')
+            palettes = root / 'palettes.json'
+            palettes.write_text(json.dumps({'unit@BakeA': [100] * 768}))
+            manifest = build('GUN:turret', bake, [sheet], palettes, 'unit@BakeA', out)
+            self.assertEqual(manifest['type'], 'GUN:turret')
+            self.assertEqual(set(manifest['parts']), {'turret'})
+            self.assertEqual(manifest['parts']['turret']['colour'], 'GUN_turret_turret.png')
+            self.assertTrue((out / 'GUN_turret_turret_paint.png').is_file())
+            self.assertEqual(build_index(out)['types'], {'GUN:turret': 'GUN_turret.json'})
+            # An ordinary vehicle id still needs its body.
+            with self.assertRaisesRegex(ValueError, 'Incomplete part set'):
+                build('GUN', bake, [sheet], palettes, 'unit@BakeA', root / 'out2')
+
     def test_full_civilian_build_and_incomplete_facings_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
