@@ -226,6 +226,40 @@ Per-pixel normals come from an optional material atlas next to the HD sprite atl
 without it the relighting has no normals and sprites keep their baked shading, while shadows, contact decals and
 reflections still follow the settings.
 
+Live libraries accept the same encoding in per-page PNGs described by `normals.json.pages` (see the
+[generator contract](../ra2-assets/README.md#sprite-material-atlas-python-experimental)). A page is ignored with one
+warning if its HD filename, dimensions or scale no longer match `spriteAtlasesHd`. Material PNGs load lazily when
+`HdRenderer.materialsWanted()` sees positive relight, occlusion, specular or glass strength. Faithful and shadow-only
+looks do not request them. Existing sprites stay visible while a page loads; its arrival increments the library
+revision and replaces that page's mesh once. Loaded masks are retained across look/hour changes and released when
+the live view disposes. Indexed-only negative-key layers never get materials; smudge layers keep their existing path.
+
+SpriteLayer uses `atlasUv = (frame.rect.xy + frameUV * frame.rect.zw) / indexedAtlasSize` for indexed, HD, window and
+material sampling. The coverage and edge-filter distances are intentionally in original indexed pixels, and the
+material shader has no colour-atlas texel-size uniform. A correctly aligned 4x colour/remap page therefore renders
+with the same UVs and geometry, including a 1x material page, subject to the device's texture-size/memory limits.
+`HdAtlasRef.scale` is not used to transform UVs. The following offline sprite contracts still assume 2x:
+
+- `ra2-assets/src/manifest.ts`: `SpriteAtlasHdRef.scale` is the literal type `2`; library/map contracts inherit it.
+- `ra2-assets/src/node/spriteHdCache.ts`, `outputRef`: `@2x` filenames, `scale: 2` and doubled dimensions.
+- `ra2-assets/src/node/spriteHd.ts`, `scatterBatch` / `upscaleSpriteAtlas`: 4x inference is reduced to 2x; frame
+  dimensions, destination offsets, page allocation and shadow clearing use doubled indexed coordinates.
+- `ra2-assets/src/node/prepareMap.ts`, `hdFresh`: freshness requires scale 2 and doubled dimensions. A 4x page is
+  considered stale by this preparation workflow.
+- `ra2-assets/python/sprite_normals.py`: map `Cache` and output require 2x, and classifier/assist geometry and pixel
+  radii use `SCALE = 2`. Library inputs use their declared scale, then classify at 2x and output 1x or 2x. Its
+  `@2x-normals` filenames do not constrain texture resolution.
+- `ra2-assets/python/redetail_sprites.py`: `MapCache` requires/crops 2x; `compose` downsamples to 2x and writes
+  doubled frame rectangles; `frame_metrics` and colour-lock radii are calibrated at 2x.
+- `ra2-assets/python/hybrid_redraw.py`: `FrameData` / `frame_data`, `postprocess`, `lock_colour`, `checks`,
+  `consistency` and `compose_atlas` use 2x frames, masks and atlas writes.
+- `ra2-assets/python/l3_redraw.py`: `Source` requires/crops 2x; `composite_hd`, `register_panel`, `process_sheet`,
+  stabilization, `paste_patches` and delta transfer use doubled frame coordinates and masks.
+
+The `2x` mentions in `ra2/cache.ts`, `ra2/spriteLook.ts`, the library contract comments and CLI descriptions are
+documentation/naming of those generated assets, not shader restrictions. `ra2-assets/src/node/lights.ts` also uses
+`SCALE = 2` for its window **preview sheet** only, not library material or colour sampling.
+
 ## Original maps (`src/ra2`)
 
 - Map lighting (`mapLighting.ts`): the map's `[Lighting]` and light sources as the engine applies them by day, per cell

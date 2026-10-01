@@ -247,9 +247,9 @@ export class SpriteLayer {
       height: cache.manifest.spriteAtlas.height,
     },
     /**
-     * Optional 2x HD version of the same atlas (same layout, normalized UVs unchanged): full-colour art with house-paint
-     * pixels written as a grey ramp, plus a mask of those pixels (see packages/ra2-assets spriteHd). Shadows keep using
-     * the indexed atlas.
+     * Optional HD version of the same atlas (same layout, normalized UVs unchanged at any scale): full-colour art with
+     * house-paint pixels written as a grey ramp, plus a mask of those pixels (see packages/ra2-assets spriteHd).
+     * Shadows keep using the indexed atlas.
      */
     hd: { color: Texture; remap: Texture } | null = null,
     /**
@@ -259,8 +259,9 @@ export class SpriteLayer {
     windows: Texture | null = null,
     /**
      * Material atlas over the same atlas (sprites@2x-normals.png: world normal, specular class, occlusion; see
-     * spriteLook.ts), same normalized UVs. Null: the enhanced look has no per-pixel normals for this layer (shadows,
-     * contact shades and reflections still follow it).
+     * spriteLook.ts), same normalized UVs; its pixel dimensions can differ from both colour and indexed atlases.
+     * Null: the enhanced look has no per-pixel normals for this layer (shadows, contact shades and reflections still
+     * follow it).
      */
     materials: SpriteMaterialAtlas | null = null,
   ) {

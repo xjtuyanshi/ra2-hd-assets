@@ -490,8 +490,34 @@ glass.
 ```bash
 python3 -B packages/ra2-assets/python/sprite_normals.py --cache gameres/hd-cache/XMP29U2 --assist "$WORK/assist" \
   --debug-dir "$WORK/normals-debug"
-python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_sprite_normals.py'
+python3 -m pytest packages/ra2-assets/python/test_sprite_normals.py -q
 ```
+
+Library mode uses the same classifier for player buildings and their animation layers. `--library` takes the directory
+containing `library.json` and is mutually exclusive with `--cache`. Prefixes default to `building:` and `anim:` in
+library mode (`building:` and `tree:` for maps); `--sprites` and `--only <sprite-id> <sprite-id>#<frame>` narrow the
+selection. Body sprites and normal/damaged animation layers inherit foundations from their building types, falling
+back to `[1, 1]` when no building references them. Identical rectangles are processed once per page; empty frames
+carry no material data.
+
+```bash
+python3 -B packages/ra2-assets/python/sprite_normals.py --library "$HD_CACHE/_library/urban" \
+  --pages 0,1,4,10 --out-scale 1 --out-dir "$WORK/materials"
+```
+
+Without `--pages`, every HD page with selected nonempty frames is processed. Each output is named
+`sprites-<page>@2x-normals.png`; `--out-scale 1` (the default) writes the original indexed page's dimensions, while
+`--out-scale 2` retains the classifier's 2x pixels. The area filter averages only texels with material data and leaves
+empty regions at RGBA zero. Classification always runs at 2x; higher-resolution colour crops are resized to that
+calibration before classification. The filename's `@2x` denotes the classifier convention, not the output dimensions.
+
+`--out-dir` defaults to the library directory; a separate output directory leaves all library inputs untouched.
+Its single `normals.json` has `version: 1`, the same `encoding` as map mode, and `pages`, keyed by decimal page index.
+Each entry records `file`, `atlas` (HD colour filename), `width`, `height`, `scale` (HD page identity),
+`materialWidth`, `materialHeight` (output PNG size) and `frames` (processed unique rectangles). PNGs and JSON are
+replaced atomically, publishing each completed page while preserving other pages in an existing sidecar. A partial
+`--only` run replaces the selected page's material data, not individual frames within its earlier output. Serve the
+result alongside the library to enable it in LiveLibrary; the renderer does not search arbitrary work directories.
 
 ## Output (`<out>/<mapId>/`)
 

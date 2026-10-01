@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-pixel normals, glass and occlusion for a map cache's HD building and tree sprites.
+"""Per-pixel normals, glass and occlusion for map-cache or type-library HD sprites.
 
 The renderer draws original SHP art as camera-facing cards whose shading is baked by the artists' fixed light. To relight
 those cards with the HD scene's sun (an opt-in look, see packages/hd-renderer src/ra2/spriteLook.ts) it needs to know
@@ -81,6 +81,12 @@ SPEC_ROOF = 0.25
 SPEC_FACADE = 0.08
 SPEC_FOLIAGE = 0.04
 AO_FLOOR = 0.3
+ENCODING = {
+    "r": "world normal x * 0.5 + 0.5",
+    "g": "world normal z * 0.5 + 0.5 (y = sqrt(1 - x^2 - z^2))",
+    "b": f"specular class: glass {SPEC_GLASS}, smooth roof {SPEC_ROOF}, facade {SPEC_FACADE}, foliage {SPEC_FOLIAGE}",
+    "a": f"ambient occlusion {AO_FLOOR}..1; 0 = no data (original shading kept)",
+}
 
 
 # ------------------------------------------------------------------------------------------------ small image helpers
@@ -608,12 +614,77 @@ def frames_to_process(manifest: dict, prefixes: list[str]) -> list[tuple[str, in
     return out
 
 
+def frame_material(
+    sid: str, fi: int, frame: dict, entry: dict, rgba: np.ndarray, index: np.ndarray,
+    lit: np.ndarray | None = None, assist_dir: Path | None = None, assist_iou: float = 0.88,
+    debug: Path | None = None,
+) -> tuple[np.ndarray | None, dict]:
+    """Classify and encode one frame at 2x, shared by map caches and library pages."""
+    coverage = np.repeat(np.repeat(index > 0, SCALE, 0), SCALE, 1)
+    alpha = np.where(coverage, rgba[..., 3], 0.0)
+    rgb = rgba[..., :3]
+    category = sid.split(":", 1)[0]
+    info: dict = {"category": category}
+    if category == "tree":
+        normal, spec, ao = tree_material(rgb, alpha)
+    else:
+        foundation = entry.get("foundation") or [1, 1]
+        fw, fh = foundation
+        # Screen x of the foundation's front (bottom) corner relative to the frame's left edge, at 2x (the draw
+        # point is the foundation's top corner, see sprites.ts objectAnchor with drawOffset (0, 0)).
+        corner_x = SCALE * (30 * (fw - fh) - frame["offset"][0])
+        corner_x = corner_x if 0 < corner_x < SCALE * frame["rect"][2] else None
+        prob, stats = classify_building(rgb, alpha, corner_x, SCALE * 6.0)
+        info.update(stats)
+        key = f"{sid}#{fi}"
+        normal_in = None
+        info["source"] = "classifier"
+        if assist_dir:
+            assist = load_assist(assist_dir / f"{key.replace(':', '_')}.png", alpha)
+            if assist is not None:
+                check = check_assist(assist, rgb, alpha, prob, corner_x)
+                ok, reasons = assist_passes(check, assist_iou)
+                check["accepted"] = ok
+                if reasons:
+                    check["reasons"] = reasons
+                info["assist"] = check
+                if ok:
+                    # The render supplies the normals inside its own silhouette; art pixels it missed take the
+                    # nearest rendered normal.
+                    art = alpha > 0.5
+                    known = assist["mask"] & art
+                    filled = dilate_fill(assist["normal"], known, steps=24)
+                    reach = dilate_mask(known, 24)
+                    fallback = normalise(prob @ FACE_NORMALS)
+                    normal_in = normalise(np.where(reach[..., None], filled, fallback))
+                    n = normal_in
+                    prob = np.clip(np.stack([n[..., 1], n[..., 2], n[..., 0]], -1), 1e-3, None)
+                    prob /= prob.sum(-1, keepdims=True)
+                    info["source"] = "assist"
+        normal, spec, ao = building_material(rgb, alpha, prob, lit, normal_in)
+        if debug:
+            save_debug(debug, sid, fi, rgb, alpha, prob, normal, spec, ao)
+    known = alpha > 0.5
+    if not known.any():
+        return None, info
+    # Fill the whole frame rectangle so filtering at the art's edge never meets "no data".
+    packed = np.concatenate([normal[..., [0, 2]], spec[..., None], np.clip(ao, AO_FLOOR, 1)[..., None]], -1)
+    packed = dilate_fill(packed, known, steps=12)
+    packed[~known & ~(dilate_mask(known, 12))] = packed[known].mean(0)
+    encoded = np.empty((*alpha.shape, 4), np.float32)
+    encoded[..., 0] = packed[..., 0] * 0.5 + 0.5
+    encoded[..., 1] = packed[..., 1] * 0.5 + 0.5
+    encoded[..., 2] = np.clip(packed[..., 2], 0, 1)
+    encoded[..., 3] = np.clip(packed[..., 3], AO_FLOOR, 1)
+    return encoded, info
+
+
 def process(args: argparse.Namespace) -> Path:
     cache = Cache(Path(args.cache).resolve(), args.atlas)
     manifest = cache.manifest
     H2, W2 = cache.hd.shape[:2]
     out = np.zeros((H2, W2, 4), np.float32)
-    frames = frames_to_process(manifest, args.sprites)
+    frames = frames_to_process(manifest, args.sprites or ["building:", "tree:"])
     if args.only:
         frames = [f for f in frames if any(f[0] == o or f"{f[0]}#{f[1]}" == o for o in args.only)]
     assist_dir = Path(args.assist).resolve() if args.assist else None
@@ -627,64 +698,13 @@ def process(args: argparse.Namespace) -> Path:
         sl = (slice(SCALE * y, SCALE * (y + h)), slice(SCALE * x, SCALE * (x + w)))
         rgba = cache.hd[sl]
         index = cache.index[y:y + h, x:x + w]
-        coverage = np.repeat(np.repeat(index > 0, SCALE, 0), SCALE, 1)
-        alpha = np.where(coverage, rgba[..., 3], 0.0)
-        rgb = rgba[..., :3]
-        category = sid.split(":", 1)[0]
-        info: dict = {"category": category}
-        if category == "tree":
-            normal, spec, ao = tree_material(rgb, alpha)
-        else:
-            foundation = entry.get("foundation") or [1, 1]
-            fw, fh = foundation
-            # Screen x of the foundation's front (bottom) corner relative to the frame's left edge, at 2x (the draw
-            # point is the foundation's top corner, see sprites.ts objectAnchor with drawOffset (0, 0)).
-            corner_x = SCALE * (30 * (fw - fh) - frame["offset"][0])
-            corner_x = corner_x if 0 < corner_x < SCALE * w else None
-            prob, stats = classify_building(rgb, alpha, corner_x, SCALE * 6.0)
-            info.update(stats)
-            key = f"{sid}#{fi}"
-            normal_in = None
-            info["source"] = "classifier"
-            if assist_dir:
-                assist = load_assist(assist_dir / f"{key.replace(':', '_')}.png", alpha)
-                if assist is not None:
-                    check = check_assist(assist, rgb, alpha, prob, corner_x)
-                    ok, reasons = assist_passes(check, args.assist_iou)
-                    check["accepted"] = ok
-                    if reasons:
-                        check["reasons"] = reasons
-                    info["assist"] = check
-                    if ok:
-                        # The render supplies the normals inside its own silhouette; art pixels it missed take the
-                        # nearest rendered normal.
-                        art = alpha > 0.5
-                        known = assist["mask"] & art
-                        filled = dilate_fill(assist["normal"], known, steps=24)
-                        reach = dilate_mask(known, 24)
-                        fallback = normalise(prob @ FACE_NORMALS)
-                        normal_in = normalise(np.where(reach[..., None], filled, fallback))
-                        n = normal_in
-                        prob = np.clip(np.stack([n[..., 1], n[..., 2], n[..., 0]], -1), 1e-3, None)
-                        prob /= prob.sum(-1, keepdims=True)
-                        info["source"] = "assist"
-            lit = None
-            if cache.windows is not None:
-                lit = np.repeat(np.repeat(cache.windows[y:y + h, x:x + w], SCALE, 0), SCALE, 1)
-            normal, spec, ao = building_material(rgb, alpha, prob, lit, normal_in)
-            if debug:
-                save_debug(debug, sid, fi, rgb, alpha, prob, normal, spec, ao)
-        known = alpha > 0.5
-        if not known.any():
+        lit = None
+        if cache.windows is not None:
+            lit = np.repeat(np.repeat(cache.windows[y:y + h, x:x + w], SCALE, 0), SCALE, 1)
+        encoded, info = frame_material(sid, fi, frame, entry, rgba, index, lit, assist_dir, args.assist_iou, debug)
+        if encoded is None:
             continue
-        # Fill the whole frame rectangle so filtering at the art's edge never meets "no data".
-        packed = np.concatenate([normal[..., [0, 2]], spec[..., None], np.clip(ao, AO_FLOOR, 1)[..., None]], -1)
-        packed = dilate_fill(packed, known, steps=12)
-        packed[~known & ~(dilate_mask(known, 12))] = packed[known].mean(0)
-        out[sl][..., 0] = packed[..., 0] * 0.5 + 0.5
-        out[sl][..., 1] = packed[..., 1] * 0.5 + 0.5
-        out[sl][..., 2] = np.clip(packed[..., 2], 0, 1)
-        out[sl][..., 3] = np.clip(packed[..., 3], AO_FLOOR, 1)
+        out[sl] = encoded
         report[f"{sid}#{fi}"] = info
     elapsed = time.time() - t0
     target = cache.dir / args.out
@@ -698,17 +718,144 @@ def process(args: argparse.Namespace) -> Path:
         "width": W2,
         "height": H2,
         "scale": SCALE,
-        "encoding": {
-            "r": "world normal x * 0.5 + 0.5",
-            "g": "world normal z * 0.5 + 0.5 (y = sqrt(1 - x^2 - z^2))",
-            "b": f"specular class: glass {SPEC_GLASS}, smooth roof {SPEC_ROOF}, facade {SPEC_FACADE}, foliage {SPEC_FOLIAGE}",
-            "a": f"ambient occlusion {AO_FLOOR}..1; 0 = no data (original shading kept)",
-        },
+        "encoding": ENCODING,
         "frames": report,
         "seconds": round(elapsed, 1),
     }
     atomic_json(cache.dir / args.sidecar, sidecar)
     print(f"wrote {target} ({len(report)} frames, {elapsed:.1f} s)")
+    return target
+
+
+def downsample_material(encoded: np.ndarray) -> np.ndarray:
+    """2x -> 1x area average over data texels only; empty blocks remain exactly zero in every channel."""
+    h, w = encoded.shape[:2]
+    blocks = encoded.reshape(h // 2, 2, w // 2, 2, 4)
+    valid = blocks[..., 3] > 0
+    count = valid.sum(axis=(1, 3))
+    total = np.where(valid[..., None], blocks, 0).sum(axis=(1, 3))
+    return total / np.maximum(count, 1)[..., None]
+
+
+def library_frames(library: dict, prefixes: list[str], only: list[str] | None) -> dict[int, list[tuple]]:
+    """Group unique selected body/anim rectangles by page; animation layers inherit their building's foundation."""
+    foundations = {}
+    for entry in library.get("types", {}).values():
+        building = entry.get("building")
+        if building is None:
+            continue
+        foundation = entry.get("foundation") or [1, 1]
+        if entry.get("sprite"):
+            foundations.setdefault(entry["sprite"], foundation)
+        for layer in building.get("layers", []):
+            for key in ("sprite", "damagedSprite"):
+                if layer.get(key):
+                    foundations.setdefault(layer[key], foundation)
+    pages: dict[int, list[tuple]] = {}
+    seen = set()
+    for sid, entry in library["sprites"].items():
+        if not any(sid.startswith(prefix) for prefix in prefixes):
+            continue
+        fallback = [1, 1] if sid.startswith("anim:") else entry.get("foundation") or [1, 1]
+        material_entry = {**entry, "foundation": foundations.get(sid, fallback)}
+        for fi, frame in enumerate(entry.get("frames") or []):
+            if only and sid not in only and f"{sid}#{fi}" not in only:
+                continue
+            rect = tuple(frame["rect"])
+            page = frame.get("page", 0)
+            key = (page, rect)
+            if rect[2] < 1 or rect[3] < 1 or key in seen:
+                continue
+            seen.add(key)
+            pages.setdefault(page, []).append((sid, fi, frame, material_entry))
+    return pages
+
+
+def process_library(args: argparse.Namespace) -> Path:
+    directory = Path(args.library).resolve()
+    library = json.loads((directory / "library.json").read_text())
+    hd_refs = library.get("spriteAtlasesHd") or []
+    frames = library_frames(library, args.sprites or ["building:", "anim:"], args.only)
+    pages = args.pages if args.pages is not None else [i for i, ref in enumerate(hd_refs) if ref and frames.get(i)]
+    for page in pages:
+        if page >= len(hd_refs) or not hd_refs[page]:
+            raise ValueError(f"library page {page} has no HD atlas")
+    output = Path(args.out_dir).resolve() if args.out_dir else directory
+    output.mkdir(parents=True, exist_ok=True)
+    target = output / "normals.json"
+    sidecar = json.loads(target.read_text()) if target.exists() else {"version": VERSION, "pages": {}}
+    if sidecar.get("version") != VERSION or not isinstance(sidecar.get("pages"), dict):
+        raise ValueError(f"{target}: not a version {VERSION} library material sidecar")
+    sidecar["encoding"] = ENCODING
+    window_path = directory / "windows.json"
+    windows = json.loads(window_path.read_text()).get("pages", {}) if window_path.exists() else {}
+    assist_dir = Path(args.assist).resolve() if args.assist else None
+    debug = Path(args.debug_dir).resolve() if args.debug_dir else None
+    if debug:
+        debug.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    total_frames = 0
+    for page in pages:
+        t0 = time.monotonic()
+        ref = hd_refs[page]
+        source = library["spriteAtlases"][page]
+        scale = ref["scale"]
+        if not isinstance(scale, int) or scale < 1:
+            raise ValueError(f"library page {page}: invalid HD scale {scale}")
+        with Image.open(directory / source["file"]) as im:
+            index = np.asarray(im)
+        if index.ndim == 3:
+            index = index[..., 0]
+        height, width = index.shape
+        if (width, height) != (source["width"], source["height"]):
+            raise ValueError(f"library page {page}: indexed atlas size does not match library.json")
+        if (width * scale, height * scale) != (ref["width"], ref["height"]):
+            raise ValueError(f"library page {page}: HD atlas size does not match its scale")
+        window = None
+        if str(page) in windows:
+            with Image.open(directory / windows[str(page)]) as im:
+                if im.size == (width, height):
+                    window = (np.asarray(im.convert("RGBA"))[..., 0] > 0).astype(np.float32)
+        # Keep colour/output pages in bytes and classify one floating-point frame at a time, even on an 8192px page.
+        out = np.zeros((height * args.out_scale, width * args.out_scale, 4), np.uint8)
+        count = 0
+        with Image.open(directory / ref["file"]) as hd:
+            if hd.size != (ref["width"], ref["height"]):
+                raise ValueError(f"library page {page}: HD PNG size does not match library.json")
+            for sid, fi, frame, entry in frames.get(page, []):
+                x, y, w, h = frame["rect"]
+                if x < 0 or y < 0 or x + w > width or y + h > height:
+                    raise ValueError(f"{sid}#{fi}: frame is outside library page {page}")
+                crop = hd.crop((scale * x, scale * y, scale * (x + w), scale * (y + h))).convert("RGBA")
+                # The classifier's pixel radii are calibrated at 2x regardless of the colour atlas resolution.
+                if scale != SCALE:
+                    crop = crop.resize((SCALE * w, SCALE * h), Image.Resampling.BOX if scale > SCALE else Image.Resampling.LANCZOS)
+                rgba = np.asarray(crop, np.float32) / 255.0
+                lit = None if window is None else np.repeat(np.repeat(window[y:y + h, x:x + w], SCALE, 0), SCALE, 1)
+                encoded, _ = frame_material(sid, fi, frame, entry, rgba, index[y:y + h, x:x + w],
+                                            lit, assist_dir, args.assist_iou, debug)
+                if encoded is None:
+                    continue
+                if args.out_scale == 1:
+                    encoded = downsample_material(encoded)
+                k = args.out_scale
+                out[k * y:k * (y + h), k * x:k * (x + w)] = np.round(encoded * 255).astype(np.uint8)
+                count += 1
+                if count % 100 == 0:
+                    print(f"page {page}: {count} frames ({time.monotonic() - t0:.1f} s)", flush=True)
+        if not count and args.pages is None:
+            continue
+        filename = f"sprites-{page}@2x-normals.png"
+        atomic_image(output / filename, out)
+        sidecar["pages"][str(page)] = {
+            "file": filename, "atlas": ref["file"], "width": ref["width"], "height": ref["height"],
+            "scale": scale, "materialWidth": out.shape[1], "materialHeight": out.shape[0], "frames": count,
+        }
+        # Publish each completed page atomically so interruption does not discard earlier pages' metadata.
+        atomic_json(target, sidecar)
+        total_frames += count
+        print(f"wrote {output / filename} ({count} frames, {time.monotonic() - t0:.1f} s)", flush=True)
+    print(f"library: {total_frames} frames, {time.monotonic() - started:.1f} s total", flush=True)
     return target
 
 
@@ -742,11 +889,16 @@ def save_debug(directory: Path, sid: str, fi: int, rgb, alpha, prob, normal, spe
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--cache", required=True, help="map cache directory (gameres/hd-cache/<map>)")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--cache", help="map cache directory (gameres/hd-cache/<map>)")
+    source.add_argument("--library", help="type-library directory containing library.json")
+    p.add_argument("--pages", type=page_indices, help="library HD page indices, comma-separated (default: all selected frames' HD pages)")
+    p.add_argument("--out-scale", type=int, choices=(1, 2), default=1, help="library material pixels per original pixel (default: 1)")
+    p.add_argument("--out-dir", help="library output directory (default: library directory)")
     p.add_argument("--atlas", help="HD atlas file in the cache (default: manifest.spriteAtlasHd.file)")
     p.add_argument("--out", default="sprites@2x-normals.png", help="output atlas file name (written into the cache)")
     p.add_argument("--sidecar", default="normals.json", help="sidecar file name (written into the cache)")
-    p.add_argument("--sprites", nargs="+", default=["building:", "tree:"], help="sprite id prefixes to process")
+    p.add_argument("--sprites", nargs="+", help="sprite id prefixes (map: building: tree:; library: building: anim:)")
     p.add_argument("--only", nargs="*", help="restrict to these sprite ids or sprite#frame keys (debugging)")
     p.add_argument("--assist", help="directory of image-model normal renders named <sprite>_<id>#<frame>.png")
     p.add_argument("--assist-iou", type=float, default=0.88, help="minimum silhouette IoU to accept a render")
@@ -754,9 +906,22 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def page_indices(value: str) -> list[int]:
+    try:
+        pages = sorted(set(int(i) for i in value.split(",")))
+        if any(i < 0 for i in pages):
+            raise ValueError()
+        return pages
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("pages must be comma-separated nonnegative integers") from error
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    process(args)
+    if args.library:
+        process_library(args)
+    else:
+        process(args)
     return 0
 
 

@@ -15,6 +15,35 @@ export interface SpriteMaterialsSidecar {
   scale: number;
 }
 
+/** Library material pages retain the HD colour page identity separately from the material PNG's resolution. */
+export interface LibrarySpriteMaterialsSidecar {
+  version: 1;
+  pages: Record<
+    string,
+    Omit<SpriteMaterialsSidecar, 'version'> & {
+      materialWidth: number;
+      materialHeight: number;
+      frames: number;
+    }
+  >;
+}
+
+export function validateLibrarySpriteMaterials(json: unknown): LibrarySpriteMaterialsSidecar {
+  const value = json as Partial<LibrarySpriteMaterialsSidecar> | null;
+  if (!value || value.version !== 1 || !value.pages || typeof value.pages !== 'object' || Array.isArray(value.pages))
+    throw new Error('not a version 1 library sprite material sidecar');
+  for (const [page, entry] of Object.entries(value.pages)) {
+    if (!/^(0|[1-9]\d*)$/.test(page)) throw new Error('invalid material page index');
+    validate({ ...entry, version: 1 });
+    if (typeof entry.atlas !== 'string' || !/^[\w@.-]+\.png$/.test(entry.atlas))
+      throw new Error('invalid HD atlas file');
+    for (const size of [entry.width, entry.height, entry.scale, entry.materialWidth, entry.materialHeight])
+      if (!Number.isSafeInteger(size) || size <= 0) throw new Error('invalid material page size or scale');
+    if (!Number.isSafeInteger(entry.frames) || entry.frames < 0) throw new Error('invalid material frame count');
+  }
+  return value as LibrarySpriteMaterialsSidecar;
+}
+
 function validate(json: unknown): SpriteMaterialsSidecar {
   const value = json as Partial<SpriteMaterialsSidecar> | null;
   if (!value || value.version !== 1 || typeof value.file !== 'string' || !/^[\w@.-]+\.png$/.test(value.file))
@@ -39,8 +68,13 @@ export async function loadSpriteMaterials(
     console.warn(`${root}/normals.json: made for a ${sidecar.width}x${sidecar.height} atlas, ignored`);
     return null;
   }
+  return loadSpriteMaterialAtlas(`${root}/${sidecar.file}`);
+}
+
+/** Decode material data identically for map atlases and lazily loaded library pages. */
+export async function loadSpriteMaterialAtlas(url: string): Promise<SpriteMaterialAtlas | null> {
   try {
-    const response = await fetch(`${root}/${sidecar.file}`);
+    const response = await fetch(url);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const bitmap = await createImageBitmap(await response.blob(), {
       colorSpaceConversion: 'none',
@@ -49,13 +83,15 @@ export async function loadSpriteMaterials(
     const texture = new Texture(bitmap);
     texture.flipY = false;
     texture.colorSpace = NoColorSpace;
+    texture.premultiplyAlpha = false;
     texture.magFilter = LinearFilter;
     texture.minFilter = LinearMipmapLinearFilter;
     texture.generateMipmaps = true;
     texture.needsUpdate = true;
+    texture.addEventListener('dispose', () => bitmap.close());
     return { texture };
   } catch (error) {
-    console.warn(`${root}/${sidecar.file}: failed to load`, error);
+    console.warn(`${url}: failed to load`, error);
     return null;
   }
 }
