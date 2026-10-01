@@ -1,11 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { clockWashOf, drawPointer, drawSidebar, transparentRects } from '../../packages/hd-renderer/src/ui/sidebarView';
-import { createUiAssets, type ChromeAssets, type UiAssets } from '../../packages/hd-renderer/src/ui/uiAssets';
+import {
+  CREDITS_COLOR,
+  clockWashOf,
+  drawPointer,
+  drawSidebar,
+  transparentRects,
+} from '../../packages/hd-renderer/src/ui/sidebarView';
+import {
+  createUiAssets,
+  layoutChromeAnchor,
+  type ChromeAssets,
+  type UiAssets,
+} from '../../packages/hd-renderer/src/ui/uiAssets';
 import { startHdUi } from '../../src/ui/pages/game/hdUi';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
 import { hdSidebar } from '../helpers/hdSidebar';
 
-const fallback: UiAssets = { cameo: () => null, chrome: () => null, cursor: () => null };
+const fallback: UiAssets = { cameo: () => null, caption: () => null, chrome: () => null, cursor: () => null };
 const chrome: ChromeAssets = {
   frame: { width: 800, height: 600 },
   pieces: [
@@ -68,12 +79,69 @@ function recording() {
   }) as unknown as CanvasRenderingContext2D;
   return { ctx, calls };
 }
+
+function mockCompositionCanvas() {
+  const canvases: Canvas[] = [];
+  class Canvas {
+    readonly recording = recording();
+    bitmap: ImageBitmap | null = null;
+    constructor(
+      public width: number,
+      public height: number,
+    ) {
+      canvases.push(this);
+    }
+    getContext() {
+      return this.recording.ctx;
+    }
+    transferToImageBitmap() {
+      return (this.bitmap = { width: this.width, height: this.height, close: vi.fn() } as unknown as ImageBitmap);
+    }
+  }
+  vi.stubGlobal('OffscreenCanvas', Canvas);
+  return canvases;
+}
+
+const sidebarPieces = () =>
+  [0, 248, 496].map((y) => ({
+    file: `s${y}.png`,
+    anchor: 'sidebar' as const,
+    rect: { x: 0, y, width: 168, height: 248 },
+    bitmap: { width: 504, height: 744 } as ImageBitmap,
+  }));
 const settle = async () => {
   for (let i = 0; i < 30; i++) await Promise.resolve();
 };
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe('chrome anchor composition layout', () => {
+  it('places three 3x pieces on integer art rows in a single sidebar bitmap', () => {
+    expect(layoutChromeAnchor(sidebarPieces())).toEqual({
+      rect: { x: 0, y: 0, width: 168, height: 744 },
+      width: 504,
+      height: 2232,
+      placements: [0, 744, 1488].map((y) => ({ x: 0, y, width: 504, height: 744 })),
+    });
+  });
+  it('keeps nonzero anchor offsets while making bitmap placements relative to their union', () => {
+    const pieces = sidebarPieces().map((piece) => ({ ...piece, rect: { ...piece.rect, x: 2, y: piece.rect.y - 4 } }));
+    expect(layoutChromeAnchor(pieces)).toMatchObject({
+      rect: { x: 2, y: -4, width: 168, height: 744 },
+      placements: [0, 744, 1488].map((y) => ({ x: 0, y, width: 504, height: 744 })),
+    });
+  });
+  it.each(['scale', 'height', 'offset', 'size'])('rejects incompatible %s instead of resampling pieces', (failure) => {
+    const pieces = sidebarPieces();
+    if (failure === 'scale') pieces[1]!.bitmap = { width: 336, height: 496 } as ImageBitmap;
+    if (failure === 'height') pieces[1]!.bitmap = { width: 504, height: 743 } as ImageBitmap;
+    if (failure === 'offset') pieces[1]!.rect.y += 0.1;
+    if (failure === 'size') pieces[1]!.rect.width = 0;
+    expect(layoutChromeAnchor(pieces)).toBeNull();
+    expect(layoutChromeAnchor([])).toBeNull();
+  });
 });
 
 describe('HD sidebar covered regions', () => {
@@ -161,8 +229,68 @@ describe('HD sidebar drawing', () => {
       });
     }
     expect(labels).not.toContain('$800');
-    expect(calls.find((c) => c.name === 'fillText' && c.args[0] === '12345')?.args.slice(1)).toEqual([716, 156]);
+    expect(calls.find((c) => c.name === 'fillText' && c.args[0] === '12345')?.args.slice(1)).toEqual([716, 159.5]);
     expect(calls.filter((c) => c.name === 'clip').length).toBeGreaterThan(2);
+  });
+  it('uses the native credits colour and heavier ink at the lowered, horizontally centred anchor', () => {
+    const s = hdSidebar();
+    const { ctx, calls } = recording();
+    const scale = 2.018;
+    drawSidebar(ctx, s, withChrome, { scale, time: 0 });
+    expect(CREDITS_COLOR).toBe('rgb(206,192,54)');
+    const x = Math.round(s.layout.creditsAnchor.x * scale) / scale;
+    const y = Math.round((s.layout.creditsAnchor.y + 3.5) * scale) / scale;
+    const strokes = calls.filter((call) => call.name === 'strokeText' && call.args[0] === '12345');
+    expect(strokes.map((call) => [call.style.strokeStyle, call.style.lineWidth])).toEqual([
+      ['#090b10', 2],
+      [CREDITS_COLOR, 0.6],
+    ]);
+    expect(strokes.every((call) => call.args[1] === x && call.args[2] === y)).toBe(true);
+    const fill = calls.find((call) => call.name === 'fillText' && call.args[0] === '12345')!;
+    expect(fill.args).toEqual(['12345', x, y]);
+    expect(fill.style).toMatchObject({ fillStyle: CREDITS_COLOR, textAlign: 'center', textBaseline: 'top' });
+    expect(String(fill.style.font)).toMatch(/^900 12px/);
+    expect(calls.indexOf(strokes[1]!)).toBeLessThan(calls.indexOf(fill));
+  });
+  it.each([true, false])(
+    'prefers index captions with cameo art available=%s and preserves the native tooltip',
+    (art) => {
+      const s = hdSidebar();
+      s.cameos = [s.cameos[0]!];
+      s.cameos[0]!.name = '苏联矿石精炼厂';
+      s.tooltip = { rect: { x: 590, y: 300, width: 100, height: 40 }, text: '苏联矿石精炼厂\n$600' };
+      const caption = vi.fn(() => '矿石精炼厂');
+      const { ctx, calls } = recording();
+      drawSidebar(
+        ctx,
+        s,
+        {
+          ...fallback,
+          caption,
+          cameo: () => (art ? ({ width: 120, height: 96 } as ImageBitmap) : null),
+        },
+        { scale: 1, time: 0 },
+      );
+      expect(caption).toHaveBeenCalledWith(s.cameos[0]!.id, s.cameos[0]!.image);
+      const labels = calls.filter((call) => call.name === 'fillText');
+      expect(labels.filter((call) => call.args[0] === '矿石精炼厂')).toHaveLength(art ? 1 : 2);
+      expect(labels.filter((call) => call.args[0] === '苏联矿石精炼厂')).toHaveLength(1);
+      expect(labels.find((call) => call.args[0] === '苏联矿石精炼厂')?.style.textAlign).toBe('left');
+    },
+  );
+  it.each([true, false])('falls back to the native name when captions are absent, art available=%s', (art) => {
+    const s = hdSidebar();
+    s.cameos = [s.cameos[0]!];
+    const { ctx, calls } = recording();
+    drawSidebar(
+      ctx,
+      s,
+      { ...fallback, cameo: () => (art ? ({ width: 120, height: 96 } as ImageBitmap) : null) },
+      { scale: 1, time: 0 },
+    );
+    expect(calls.filter((call) => call.name === 'fillText' && call.args[0] === s.cameos[0]!.name)).toHaveLength(
+      art ? 1 : 2,
+    );
   });
   it('centres fitted yellow Ready/Hold captions on text-sized dark boxes and keeps queued Hold left aligned', () => {
     const s = hdSidebar();
@@ -431,6 +559,161 @@ describe('HD software cursor', () => {
 });
 
 describe('optional HD UI art cache', () => {
+  it('owns and releases the detached canvas when OffscreenCanvas is unavailable', async () => {
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    const { ctx, calls } = recording();
+    const canvas = { width: 0, height: 0, getContext: () => ctx };
+    const createElement = vi.fn(() => canvas);
+    vi.stubGlobal('document', { createElement });
+    const pieces = sidebarPieces();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (path: string) => ({
+        ok: true,
+        json: async () => ({ frame: chrome.frame, pieces }),
+        blob: async () => new Blob([path]),
+      })),
+    );
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 504, height: 744, close: vi.fn() })),
+    );
+    const assets = createUiAssets();
+    assets.chrome(1);
+    await settle();
+    expect(createElement).toHaveBeenCalledExactlyOnceWith('canvas');
+    expect(assets.chrome(1)?.composites?.sidebar?.bitmap).toBe(canvas);
+    expect(canvas).toMatchObject({ width: 504, height: 2232 });
+    expect(calls.filter((call) => call.name === 'drawImage').map((call) => call.args.slice(1))).toEqual(
+      [0, 744, 1488].map((y) => [0, y, 504, 744]),
+    );
+    assets.dispose();
+    expect(canvas).toMatchObject({ width: 0, height: 0 });
+  });
+  it('composes each anchor once and draws one snapped destination per anchor at fractional device scale', async () => {
+    const canvases = mockCompositionCanvas();
+    const s = hdSidebar();
+    s.cameos = [];
+    s.layout.sidebar = { x: 984, y: 0, width: 168, height: 744 };
+    s.layout.commandBar = { x: 0, y: 712, width: 984, height: 32 };
+    const pieces = [
+      ...sidebarPieces(),
+      ...[0, 492].map((x) => ({
+        file: `b${x}.png`,
+        anchor: 'commandBar' as const,
+        rect: { x, y: 0, width: 492, height: 32 },
+        bitmap: { width: 1476, height: 96 } as ImageBitmap,
+      })),
+    ];
+    const images = pieces.map((piece) => ({ ...piece.bitmap, close: vi.fn() }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (path: string) => ({
+        ok: true,
+        json: async () => ({ frame: s.frame, pieces }),
+        blob: async () => new Blob([path]),
+      })),
+    );
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async (blob: Blob) => {
+        const path = await blob.text();
+        return images[pieces.findIndex((piece) => path.endsWith(`/${piece.file}`))];
+      }),
+    );
+    const assets = createUiAssets();
+    expect(assets.chrome(1)).toBeNull();
+    await settle();
+    expect(canvases).toHaveLength(2);
+    expect(canvases[0]!.bitmap).toMatchObject({ width: 504, height: 2232 });
+    expect(canvases[0]!.recording.calls.filter((call) => call.name === 'drawImage').map((call) => call.args)).toEqual(
+      [0, 744, 1488].map((y, i) => [images[i], 0, y, 504, 744]),
+    );
+    expect(canvases[1]!.bitmap).toMatchObject({ width: 2952, height: 96 });
+    expect(canvases[1]!.recording.calls.filter((call) => call.name === 'drawImage').map((call) => call.args)).toEqual(
+      [0, 1476].map((x, i) => [images[i + 3], x, 0, 1476, 96]),
+    );
+    const { ctx, calls } = recording();
+    const scale = 2.018;
+    const snap = (value: number) => Math.round(value * scale) / scale;
+    drawSidebar(ctx, s, assets, { scale, time: 0 });
+    expect(calls.filter((call) => call.name === 'drawImage').map((call) => call.args)).toEqual(
+      [s.layout.sidebar, s.layout.commandBar!].map((r, i) => [
+        canvases[i]!.bitmap,
+        snap(r.x),
+        snap(r.y),
+        snap(r.x + r.width) - snap(r.x),
+        snap(r.y + r.height) - snap(r.y),
+      ]),
+    );
+    drawSidebar(ctx, s, assets, { scale, time: 10 });
+    expect(canvases).toHaveLength(2);
+    assets.dispose();
+    assets.dispose();
+    for (const image of [...images, ...canvases.map((canvas) => canvas.bitmap!)])
+      expect(image.close).toHaveBeenCalledOnce();
+  });
+  it('retains per-piece drawing when an anchor mixes art scales', async () => {
+    const canvases = mockCompositionCanvas();
+    const pieces = sidebarPieces();
+    pieces[1]!.bitmap = { width: 336, height: 496 } as ImageBitmap;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (path: string) => ({
+        ok: true,
+        json: async () => ({ frame: chrome.frame, pieces }),
+        blob: async () => new Blob([path]),
+      })),
+    );
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async (blob: Blob) => {
+        const path = await blob.text();
+        return { ...pieces.find((piece) => path.endsWith(`/${piece.file}`))!.bitmap, close: vi.fn() };
+      }),
+    );
+    const assets = createUiAssets();
+    assets.chrome(1);
+    await settle();
+    expect(assets.chrome(1)?.composites).toEqual({});
+    expect(canvases).toHaveLength(0);
+    const s = hdSidebar();
+    s.cameos = [];
+    s.layout.commandBar = null;
+    const { ctx, calls } = recording();
+    drawSidebar(ctx, s, assets, { scale: 1, time: 0 });
+    expect(calls.filter((call) => call.name === 'drawImage').map((call) => call.args.slice(1))).toEqual(
+      [0, 248, 496].map((y) => [632, y, 168, 248]),
+    );
+    assets.dispose();
+  });
+  it('resolves captions through the same byId and image fallback without loading art', async () => {
+    const fetcher = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        version: 1,
+        byId: { BUILDING: 'resolved', NO_CAPTION: 'unknown' },
+        images: {
+          resolved: { hd: 'hd.png', caption: '矿石精炼厂' },
+          supplied: { orig: 'orig.png', caption: '攻击潜艇' },
+          unknown: { hd: 'unknown.png' },
+        },
+      }),
+    }));
+    vi.stubGlobal('fetch', fetcher);
+    const assets = createUiAssets();
+    expect(assets.caption('BUILDING', 'supplied')).toBeNull();
+    await settle();
+    expect(assets.caption('BUILDING', 'supplied')).toBe('矿石精炼厂');
+    expect(assets.caption('BUILDING', null)).toBe('矿石精炼厂');
+    expect(assets.caption('UNMAPPED', 'supplied')).toBe('攻击潜艇');
+    expect(assets.caption('NO_CAPTION', 'supplied')).toBeNull();
+    expect(assets.caption('UNMAPPED', null)).toBeNull();
+    expect(assets.caption('UNMAPPED', 'missing')).toBeNull();
+    expect(fetcher).toHaveBeenCalledOnce();
+    assets.dispose();
+    expect(assets.caption('BUILDING', null)).toBeNull();
+  });
   it.each(['absent', '404', 'decode', 'bounds', 'incomplete', 'duplicate', 'state'])(
     'keeps complete chrome when optional tabs are broken: %s',
     async (failure) => {
