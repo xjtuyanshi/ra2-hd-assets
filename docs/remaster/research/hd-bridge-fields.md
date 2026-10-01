@@ -226,3 +226,5 @@ once and use interpretable map-cache art, but cannot draw every new type until u
 `smudgesFromEngine` diagnostics distinguish each layer; the legacy `cellsFromEngine` reports any active live cell path.
 See [Live overlays and smudges](../LIVE_OVERLAYS.md) for exact cache commands, polling measurements and acceptance.
 Real-match comparison remains unverified by reader/mapping/library/view unit tests.
+
+Native interface publication is documented in [YR sidebar UI state](sidebar-ui.md).

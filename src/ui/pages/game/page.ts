@@ -138,6 +138,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   let exitHandled = false;
   let vm: VmShell | null = null;
   let adaptInputResolution: ((width: number, height: number) => void) | null = null;
+  let inputPointerPosition: (() => Readonly<{ x: number; y: number }> | null) | null = null;
   let gameSource: GameSource | null = null;
   let selectedGameId: SupportedGameId | null = null;
   let requestedResolution: GameResolution | null = null;
@@ -463,10 +464,12 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     }));
     const pointerProbeTimer = debugAutoOpen ? window.setInterval(refreshPointerProbe, 250) : null;
     adaptInputResolution = installedInput.adaptResolution;
+    inputPointerPosition = installedInput.pointerPosition;
     const cleanupTouch = installAdaptiveTouchControls(canvas, startedVm);
     const cleanupWake = installWakeLock();
     activeInputCleanup = () => {
       adaptInputResolution = null;
+      inputPointerPosition = null;
       installedInput.cleanup();
       if (pointerProbeTimer !== null) window.clearInterval(pointerProbeTimer);
       cleanupTouch();
@@ -552,6 +555,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
           frameRenderer,
           invalidate: () => presenter.invalidate(),
           frameSize: () => (presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null),
+          pointerPosition: () => inputPointerPosition?.() ?? null,
         });
       })
       .catch((error) => console.warn('[HD] bridge failed to start', error));

@@ -12,6 +12,7 @@
     "./library": "./src/library.ts",
     "./lights": "./src/lights.ts",
     "./windows": "./src/windows.ts",
+    "./ui": "./src/ui.ts",
     "./vpl": "./src/vpl.ts"
   },
   "scripts": {
@@ -25,6 +26,7 @@
     "library": "tsx src/cli/library.mts",
     "lights": "tsx src/cli/lights.mts",
     "materials": "tsx src/cli/materials.mts",
+    "ui": "tsx src/cli/ui.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

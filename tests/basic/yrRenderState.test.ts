@@ -1,3 +1,4 @@
+import type { GameRenderSidebar } from '../../src/games/renderState';
 import { describe, expect, it, vi } from 'vitest';
 import { GAME_RENDER_SHROUD } from '../../src/games/renderState';
 import { createByteViewAccessor } from '../../src/games/shared/memoryAccessor';
@@ -261,6 +262,7 @@ function sources(
     overlays?: (options?: ReadYrOverlayOptions) => YrOverlays | null;
     smudges?: (options?: ReadYrSmudgeOptions) => YrSmudges | null;
     now?: () => number;
+    sidebar?: () => GameRenderSidebar | null;
   } = {},
 ) {
   let frame = 0;
@@ -280,6 +282,7 @@ function sources(
     createEffectsReader,
     createOverlayReader,
     createSmudgeReader,
+    createSidebarReader: options.sidebar ? () => options.sidebar! : undefined,
     now: options.now ?? (() => 0),
   });
   return {
@@ -297,6 +300,99 @@ function sources(
 }
 
 describe('YR 1.001 render state for the HD bridge', () => {
+  it('polls the sidebar every time and republishes only its changed content, preserving battlefield references', () => {
+    const memory = keyMemory();
+    const sidebar: GameRenderSidebar = {
+      frame: { width: 800, height: 600 },
+      side: 0,
+      activeTab: 0,
+      tabs: [],
+      cameos: [],
+      credits: 100,
+      layout: {
+        sidebar: { x: 632, y: 0, width: 168, height: 600 },
+        commandBar: null,
+        radar: { x: 648, y: 49, width: 140, height: 108 },
+        credits: { x: 632, y: 0, width: 168, height: 16 },
+        creditsAnchor: { x: 716, y: 2 },
+        strip: { x: 654, y: 227, width: 123, height: 300 },
+        cameo: { width: 60, height: 48 },
+        cameoPitch: { x: 63, y: 50 },
+        cameoOrigin: { x: 654, y: 228 },
+        tabs: [],
+        buttons: { repair: null, sell: null, options: null, diplomacy: null, scrollUp: null, scrollDown: null },
+        power: { x: 637, y: 227, width: 12, slotHeight: 3, slots: 101 },
+      },
+      power: { output: 100, drain: 50, surplus: 2, reserve: 3, used: 4, low: false },
+      radarActive: false,
+      modes: { repair: false, sell: false },
+      labels: { ready: 'Ready', hold: 'On Hold' },
+    };
+    let next: GameRenderSidebar | null = sidebar;
+    let at = 0;
+    const poll = vi.fn(() => next && structuredClone(next));
+    const harness = sources(memory, { sidebar: poll, now: () => at });
+    const first = harness.read()!;
+    expect(first.sidebar).toEqual(sidebar);
+    expect(harness.read()).toBe(first); // New but equal sidebar read retains both identities.
+    expect(poll).toHaveBeenCalledTimes(2);
+    next = { ...sidebar, credits: 101 };
+    const changed = harness.read()!;
+    expect(changed).not.toBe(first);
+    expect(changed.sidebar).not.toBe(first.sidebar);
+    for (const field of ['objects', 'effects', 'overlays', 'smudges', 'shroud', 'houses', 'map', 'view'] as const)
+      expect(changed[field]).toBe(first[field]);
+    expect(first.sidebar!.credits).toBe(100);
+    expect(harness.read()).toBe(changed);
+    expect(harness.readState).toHaveBeenCalledTimes(1);
+    next = {
+      ...next,
+      pointer: { x: 660, y: 250, frame: 1, hotspot: { x: 0, y: 0 } },
+      tooltip: { rect: { x: 600, y: 260, width: 90, height: 30 }, text: 'Native\n$600' },
+    };
+    const pointerChanged = harness.read()!;
+    expect(pointerChanged).not.toBe(changed);
+    expect(pointerChanged.objects).toBe(changed.objects);
+    expect(pointerChanged.sidebar?.pointer?.frame).toBe(1);
+    expect(pointerChanged.sidebar?.tooltip?.text).toBe('Native\n$600');
+    expect(harness.read()).toBe(pointerChanged);
+    at = 250; // Due cell poll takes a second cache-return path.
+    next = { ...next, radarActive: true };
+    const due = harness.read()!;
+    expect(due).not.toBe(changed);
+    expect(due.objects).toBe(changed.objects);
+    expect(due.effects).toBe(changed.effects);
+    expect(harness.read()).toBe(due);
+    next = null;
+    const unavailable = harness.read()!;
+    expect(unavailable.sidebar).toBeNull();
+    expect(unavailable.objects).toBe(due.objects);
+    expect(harness.read()).toBe(unavailable);
+    next = sidebar;
+    memory.frame(101);
+    harness.readState.mockReturnValue(yrState(101, false));
+    const outside = harness.read()!;
+    expect(outside.sidebar).toBeNull();
+    expect(harness.read()).toBe(outside);
+  });
+
+  it('accepts an unavailable optional sidebar factory', () => {
+    const memory = keyMemory();
+    const read = createYrRenderStateReaderFrom({
+      memory: () => createByteViewAccessor(memory.bytes),
+      readState: () => yrState(100),
+      createShroudReader: () => null,
+      createEffectsReader: () => null,
+      createOverlayReader: () => null,
+      createSmudgeReader: () => null,
+      createSidebarReader: () => null,
+      now: () => 0,
+    });
+    const first = read()!;
+    expect(first.sidebar).toBeNull();
+    expect(read()).toBe(first);
+  });
+
   it('preserves optional H2 fields, including zero frames, in immutable thread-safe publications', () => {
     const memory = keyMemory();
     const harness = sources(memory);

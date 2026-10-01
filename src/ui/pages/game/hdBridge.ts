@@ -6,6 +6,7 @@ import {
   RENDER_PASSTHROUGH_KEY_RGB565,
 } from '../../../games/renderPassthrough';
 import type { FrameRect, VmFrameRenderer } from './vmFrameRenderer';
+import type { HdUi } from './hdUi';
 import type { LookPreset } from '../../../../packages/hd-renderer/src/HdRenderer';
 import type { LiveSnapshot, LiveView } from '../../../../packages/hd-renderer/src/live/liveView';
 
@@ -36,6 +37,8 @@ export interface HdBridgeHost {
   invalidate(): void;
   /** Current guest frame size, or null before the first frame. */
   frameSize(): { width: number; height: number } | null;
+  /** Read-only local input position; cursor shape always comes from the guest snapshot. */
+  pointerPosition?(): Readonly<{ x: number; y: number }> | null;
 }
 
 /** YR's in-game layout around the tactical view: sidebar on the right, command bar at the bottom (engine pixels). */
@@ -115,6 +118,21 @@ export function startHdBridge(host: HdBridgeHost): () => void {
   let lastPollAt = -Infinity;
   let stopped = false;
   let enabled = true;
+  let ui: HdUi | null = null;
+  let uiEnabled = params.get('hd-ui') === '1';
+  let latestState: GameRenderState | null = null;
+  let inBattle = false;
+  // The production graph walker follows page.ts -> hdBridge.ts, so the import itself must be under DEV.
+  if (import.meta.env.DEV && params.get('hd-ui') === '1') {
+    void import('./hdUi')
+      .then(({ startHdUi }) => {
+        if (stopped) return;
+        ui = startHdUi(host);
+        ui.setEnabled(enabled && uiEnabled);
+        ui.update(latestState?.sidebar ?? null);
+      })
+      .catch((error) => console.warn('[HD] interface layer unavailable', error));
+  }
   let frame = 0;
   let lastLayout = '';
   const passthroughFlags = parsePassthroughFlags(params.get('hd-passthrough'));
@@ -254,6 +272,9 @@ export function startHdBridge(host: HdBridgeHost): () => void {
     // A reply that was already in flight when the bridge stopped belongs to a session being torn down.
     if (stopped) return;
     pollFailed = false;
+    latestState = state;
+    inBattle = !!state?.map;
+    ui?.update(state?.sidebar ?? null);
     const mapId = state?.map?.fileName?.replace(/\.[^.]+$/, '') ?? null;
     // A new match on a map (coming from another map or from outside a battle, or the logic frame starting over) may
     // find a cache built since its last failed load.
@@ -278,7 +299,11 @@ export function startHdBridge(host: HdBridgeHost): () => void {
 
   /** Full snapshots are only worth their cost while the HD view can show them (null replies are cheap). */
   const pollInterval = () =>
-    !enabled || pollFailed || (stateMap !== null && (liveMap !== stateMap || !live)) ? IDLE_POLL_MS : ACTIVE_POLL_MS;
+    enabled && uiEnabled && ui && inBattle && !pollFailed && (liveMap !== stateMap || !live)
+      ? 50
+      : !enabled || pollFailed || (stateMap !== null && (liveMap !== stateMap || !live))
+        ? IDLE_POLL_MS
+        : ACTIVE_POLL_MS;
 
   const poll = (now: number) => {
     polling = true;
@@ -288,6 +313,8 @@ export function startHdBridge(host: HdBridgeHost): () => void {
       .then(onState, () => {
         if (stopped) return;
         pollFailed = true;
+        latestState = null;
+        ui?.update(null);
         setHole(null);
       })
       .catch((error) => console.warn('[HD] could not apply the render state', error))
@@ -332,8 +359,24 @@ export function startHdBridge(host: HdBridgeHost): () => void {
     toggle() {
       if (stopped) return enabled;
       enabled = !enabled;
+      ui?.setEnabled(enabled && uiEnabled);
       if (!enabled) setHole(null);
       return enabled;
+    },
+    ui: {
+      get state() {
+        // Return a detached copy so console/test drivers cannot mutate the live bridge's retained snapshot.
+        return latestState?.sidebar ? structuredClone(latestState.sidebar) : null;
+      },
+      get enabled() {
+        return enabled && uiEnabled && !!ui;
+      },
+      toggle() {
+        if (stopped) return false;
+        uiEnabled = !uiEnabled;
+        ui?.setEnabled(enabled && uiEnabled);
+        return enabled && uiEnabled && !!ui;
+      },
     },
     get live() {
       return live;
@@ -350,6 +393,9 @@ export function startHdBridge(host: HdBridgeHost): () => void {
     if (stopped) return;
     stopped = true;
     cancelAnimationFrame(frame);
+    ui?.dispose();
+    ui = null;
+    latestState = null;
     if (passthroughRequest) void host.vm.setTacticalPassthrough(0).catch(() => undefined);
     // Pending polls, loads and passthrough replies check `stopped`; reset the rest so nothing refers to this session.
     passthroughRequest = 0;

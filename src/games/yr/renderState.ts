@@ -7,6 +7,7 @@ import type {
   GameRenderShroud,
   GameRenderSmudges,
   GameRenderState,
+  GameRenderSidebar,
   GameRenderStateReader,
 } from '../renderState';
 import { createByteViewAccessor, type GuestMemoryAccessor } from '../shared/memoryAccessor';
@@ -20,6 +21,7 @@ import {
   type YrEffects,
 } from './effectsReader';
 import { createYrOverlayReader, type ReadYrOverlayOptions, type YrOverlays } from './overlayReader';
+import { createYrSidebarReader } from './sidebarReader';
 import { createYrSmudgeReader, type ReadYrSmudgeOptions, type YrSmudges } from './smudgeReader';
 import { createYrShroudReader, type ReadYrShroudOptions, type YrShroud } from './shroudReader';
 import {
@@ -56,6 +58,8 @@ export interface YrRenderStateSources {
   createEffectsReader: () => ((options?: ReadYrEffectsOptions) => YrEffects | null) | null;
   createOverlayReader: () => ((options?: ReadYrOverlayOptions) => YrOverlays | null) | null;
   createSmudgeReader: () => ((options?: ReadYrSmudgeOptions) => YrSmudges | null) | null;
+  /** Native interface polling is independent of the battlefield change key. */
+  createSidebarReader?: () => (() => GameRenderSidebar | null) | null;
   /** Host polling clock only; never changes the guest's clock or logic frame. */
   now?: () => number;
 }
@@ -79,6 +83,7 @@ export function createYrRenderStateReader(
     createEffectsReader: () => createYrEffectsReader(accessor, hash),
     createOverlayReader: () => createYrOverlayReader(accessor, hash),
     createSmudgeReader: () => createYrSmudgeReader(accessor, hash),
+    createSidebarReader: () => createYrSidebarReader(accessor, hash),
   });
 }
 
@@ -87,6 +92,22 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
   let readEffects: ReturnType<YrRenderStateSources['createEffectsReader']> = null;
   let readOverlays: ReturnType<YrRenderStateSources['createOverlayReader']> = null;
   let readSmudges: ReturnType<YrRenderStateSources['createSmudgeReader']> = null;
+  const readSidebar = sources.createSidebarReader?.() ?? null;
+  let sidebar: GameRenderSidebar | null = null;
+  let sidebarKey = 'null';
+  const pollSidebar = () => {
+    const next = readSidebar?.() ?? null;
+    // Bounded plain data (at most 60 visible slots); exact comparison avoids hash collisions and preserves identity.
+    const key = JSON.stringify(next);
+    if (key !== sidebarKey) {
+      sidebar = next;
+      sidebarKey = key;
+    }
+  };
+  const publishSidebar = (snapshot: GameRenderState): GameRenderState => {
+    const next = snapshot.map ? sidebar : null;
+    return !sources.createSidebarReader || snapshot.sidebar === next ? snapshot : { ...snapshot, sidebar: next };
+  };
   let lastKey: number[] | null = null;
   let last: GameRenderState | null = null;
   // The shroud reader fills this result's arrays in place. It is never handed out, so reusing it is safe whether the
@@ -102,11 +123,12 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
   let lastCellPoll = -Infinity;
   const now = sources.now ?? (() => performance.now());
   return () => {
+    pollSidebar();
     const key = readChangeKey(sources.memory);
     const at = now();
     const cellsDue = at - lastCellPoll >= YR_OVERLAY_POLL_MS;
     const unchangedKey = key && lastKey && sameKey(key, lastKey);
-    if (last && unchangedKey && (!last.map || !cellsDue)) return last;
+    if (last && unchangedKey && (!last.map || !cellsDue)) return (last = publishSidebar(last));
     const state = sources.readState();
     if (!state) {
       last = lastKey = null;
@@ -144,7 +166,8 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
         lastCellPoll = at;
       }
       // A due cell poll need not republish the rest of a paused/unchanged battlefield.
-      if (last && !newBattle && unchangedKey && overlays === last.overlays && smudges === last.smudges) return last;
+      if (last && !newBattle && unchangedKey && overlays === last.overlays && smudges === last.smudges)
+        return (last = publishSidebar(last));
       readShroud ??= sources.createShroudReader();
       readEffects ??= sources.createEffectsReader();
       scratch = readShroud?.({ reuse: scratch }) ?? null;
@@ -169,6 +192,7 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
       smudges,
       effects,
     };
+    last = publishSidebar(last);
     lastKey = key;
     return last;
   };

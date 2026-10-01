@@ -206,6 +206,80 @@ cooling); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-wate
 the HD cache (e.g. `vehicles-hd`); `hd-rect=x,y,w,h`
 overrides the tactical rectangle (default: the frame minus YR's 168 px sidebar and 32 px command bar).
 
+## HD interface layer (`hd-ui=1`)
+
+In development, `?hd=1&hd-ui=1` adds a separate Canvas 2D interface controller (`hdUi.ts`). It consumes the optional
+`GameRenderState.sidebar` snapshot, including live frame-space layout, faction, active tab, visible cameos,
+animated credits, native power slot counts, radar state, repair/sell modes and localized ready/hold labels. It works
+without a battlefield HD cache. While enabled in a battle, uncached-map polls run at least every 50 ms; a live
+battlefield keeps its faster polling cadence. Unavailable snapshots and poll failures hide the interface.
+
+The `#hd-ui` canvas sits immediately before `#screen`, at z-index 0 above `#hd-screen`, matches the screen's CSS box
+and device pixel ratio, and receives no input. The WebGL2 frame renderer clears the covered rectangles after every
+frame path (plain, upscaled or keyed), before its independent native cursor pass. These extra rectangles are
+independent of the tactical key/hole. All pointer and keyboard input continues to reach the original game.
+The read-only native `sidebar.pointer` supplies cursor sheet frame and resolved hotspot; the input controller's
+read-only position accessor supplies low-latency guest coordinates when available. The cursor is drawn last,
+clipped to the exact covered union, including partial intersections at its edges. Outside that union the native
+software cursor remains visible. Missing cursor art uses a vector arrow; unknown/hidden pointer state draws none.
+The optional `sidebar.tooltip` supplies the native frame rectangle and copied UTF-16 text, including native cost
+lines and line breaks. That rectangle is added to the transparent regions while shown and filled with an HD tooltip.
+
+Optional art lives under the local HD cache's `_ui/` directory:
+
+- `_ui/cameos/index.json`: `{ "version": 1, "images": { "image": { "hd": "hd.png", "orig": "orig.png" } },
+"byId": { "TYPE_ID": "image" } }`. Both image paths are optional and relative to `_ui/cameos/`.
+  The type-ID mapping takes precedence over the snapshot's image name; missing HD art falls back to original art.
+- `_ui/chrome/<side>/chrome.json`: `{ "frame": { "width": 800, "height": 600 }, "pieces": [
+{ "file": "sidebar.png", "rect": { "x": 0, "y": 0, "width": 168, "height": 600 },
+"anchor": "sidebar" } ] }`. Side is `0` Allied, `1` Soviet, `2` Yuri, or `-1` unknown. Files are relative to
+  that side's chrome directory. `rect.x/y` are frame-pixel offsets from the live anchor's origin and `width/height`
+  are frame-pixel sizes. PNG scale does not affect geometry. Three 168x248 sidebar pieces use y=0/248/496;
+  two 492x32 command halves use x=0/492, y=0. Loaded chrome replaces procedural tab icons.
+  Optional `tabs` is `{ "file": "tabs.png", "scale": 4, "frames": [
+{ "tab": 0, "state": "normal", "rect": { "x": 0, "y": 0, "width": 112, "height": 108 } } ] }`.
+  Each rectangle is in atlas pixels and includes the whole native tab canvas with transparency; it is scaled into
+  `layout.tabs[tab]`. A usable atlas has unique, bounded normal/active frames for tabs 0–3; pressed frames are optional.
+  Nonempty tabs select active art when selected, or alternate active/normal every 500 ms when flashing; empty tabs
+  leave the chrome's blank disabled plate visible. Art replaces tab pulse/glow/outline overlays. Pressed art is reserved
+  until the page exposes held-button state; no input listeners are added. Missing/malformed manifests, missing PNGs,
+  decode errors or invalid frames disable only tab art, retaining complete chrome and the prior tab overlays.
+  Extract native strips with `pnpm hd:ui -- tabs --game "$RA2_INSTALL" --out "$UI_WORK/tabs-orig"`, then use
+  `packages/ra2-assets/python/ui_chrome.py tabs-sheet` / `tabs-pack` as described in the asset package README.
+- `_ui/cursor/cursor.json`: `{ "version": 1, "frames": [{ "x": 0, "y": 0, "width": 55, "height": 43 }] }`.
+  Rectangles index `cursor.png` (or optional relative `file`). Each frame includes transparent bounding-box padding;
+  hotspots remain runtime data. Export with `pnpm hd:ui -- cursor --game "$RA2_INSTALL" --out "$HD_CACHE/_ui/cursor"`.
+  This YR build uses `MOUSE.SHA` and `MOUSEPAL.PAL`; CLI `--shape`/`--palette` can select other supplied files.
+
+Manifests and bitmaps load lazily. Missing files (including 404 responses) are remembered for the controller's
+lifetime; reload to pick up newly created assets. A complete loaded chrome set covers the sidebar and command bar,
+with an active radar aperture preserved by up to four rectangles around it. Without complete chrome, only the cameo
+strip, power column, credits band and tab rectangles are replaced procedurally; native radar, buttons and command
+bar remain visible. Missing cameo art uses a named dark tile. Cameos retain captions, progress sectors, queue badges,
+ready/hold labels, availability shading, flashing and hover outlines. Ready/Hold use bold 13 frame-pixel warm yellow
+text (`#ffd84a`), a 1.25 px dark stroke below the fill and a text-sized translucent black rounded box with 3 px padding.
+The vertical centre is cameo y+20; long translations shrink to 10 px and then fit the available width. The pulse floor
+is 85%; queued Hold stays left aligned so its badge remains visible. Name captions retain their existing styling.
+All extracted or derived art stays outside Git.
+
+`__hdBridge.toggle()` toggles both battlefield and interface for original/HD A/B checks.
+`__hdBridge.ui.enabled` reports the effective interface switch and `__hdBridge.ui.toggle()` independently toggles
+only the interface. `__hdBridge.ui.state` returns a detached read-only-access snapshot of the last sidebar publication
+(null when unavailable), so inspection cannot mutate the bridge's live state. The controller owns its animation request, canvas and bitmap cache; session cleanup cancels
+animation, removes its canvas, closes bitmaps (including late results) and clears the extra frame rectangles.
+
+Asset-free regressions are in `tests/basic/hdUi.test.ts`, `tests/basic/vmFrameRenderer.test.ts` and
+`tests/basic/hdBridge.test.ts`. With a running development server, `pnpm exec tsx
+tests/basic/browser/hdUiBrowserSmoke.mts` exercises synthetic fallback/chrome composition, radar/cursor pixels,
+input passthrough, both A/B switches and cleanup in a real browser. `RA2_BROWSER_ORIGIN` selects the development
+origin, `RA2_BROWSER_EXECUTABLE` optionally selects an installed Chromium executable, and `HD_UI_EVIDENCE_DIR`
+optionally retains screenshots and the JSON transcript. A blocked browser launch is unverified acceptance.
+
+The dynamic import of `hdUi.ts` is lexically guarded by `import.meta.env.DEV` in `hdBridge.ts`; the production-graph
+architecture regression rejects reachable `hdUi.ts` and the guest sidebar reader. Production builds contain neither
+the interface controller nor its renderer/assets. Synthetic drawing tests and browser previews verify page-side
+rendering and lifecycle separately from real-game guest-reader, native-tooltip and interaction acceptance.
+
 ## Bridge fields
 
 The live view's snapshot types carry optional fields beyond what the page forwards today. Each consumer is active only

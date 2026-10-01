@@ -27,6 +27,12 @@ export interface GameRenderState {
   smudges: GameRenderSmudges | null;
   /** Live effects the engine is playing, null while they cannot be read. */
   effects: GameRenderEffects | null;
+  /**
+   * The native build sidebar and command bar as the game currently draws them, for an HD interface layer that covers
+   * them while every input still goes to the game. Absent when the game has no sidebar reader; null outside a battle or
+   * while it cannot be read.
+   */
+  sidebar?: GameRenderSidebar | null;
 }
 
 export interface GameRenderMap {
@@ -227,3 +233,127 @@ export type CreateGameRenderStateReader = (
   size: number,
   hash: string,
 ) => Promise<GameRenderStateReader | null>;
+
+/** Half-open rectangle in guest frame (engine) pixels. */
+export interface GameRenderRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Native in-game interface (sidebar, command bar) state. All positions are guest frame pixels taken from the game's own
+ * layout fields, so an HD layer can be placed exactly over the native pixels at any guest resolution. Values describe
+ * what the native interface shows (animated credits, clock frame, flashing), not the underlying economy.
+ */
+export interface GameRenderSidebar {
+  /** Guest frame size the layout refers to. */
+  frame: { width: number; height: number };
+  /** Faction art family of the interface: 0 Allied, 1 Soviet, 2 the third side (YR: Yuri), -1 unknown. */
+  side: number;
+  layout: GameRenderSidebarLayout;
+  /** Index into `tabs` of the tab whose cameos are shown. */
+  activeTab: number;
+  tabs: GameRenderSidebarTab[];
+  /** Cameos of the active tab that are at least partly inside `layout.strip`, in native draw order. */
+  cameos: GameRenderCameo[];
+  /** The number the native credits counter currently shows (it animates towards the balance). */
+  credits: number;
+  power: GameRenderPower;
+  /** True while the radar shows the minimap or its open/close animation; false while it shows the faction emblem. */
+  radarActive: boolean;
+  /** Repair / sell cursor modes armed from the sidebar buttons. */
+  modes: { repair: boolean; sell: boolean };
+  /** Cameo captions in the game's language (e.g. "Ready", "On Hold"), null when they could not be read. */
+  labels: { ready: string | null; hold: string | null };
+  /** Software cursor: frame-pixel hotspot position, sheet frame and offset inside that frame. Null when unknown/hidden. */
+  pointer?: { x: number; y: number; frame: number; hotspot: { x: number; y: number } } | null;
+  /** Shown native tooltip, including its exact frame-pixel bounds and original wide-string line breaks. */
+  tooltip?: { rect: GameRenderRect; text: string } | null;
+}
+
+export interface GameRenderSidebarLayout {
+  /** The whole sidebar column. */
+  sidebar: GameRenderRect;
+  /** The bottom command bar, null when the game shows none. */
+  commandBar: GameRenderRect | null;
+  /** Radar aperture (the largest minimap area inside the radar frame). */
+  radar: GameRenderRect;
+  /** Band holding the credits counter; `creditsAnchor` is the native text anchor (centre x, top y). */
+  credits: GameRenderRect;
+  creditsAnchor: { x: number; y: number };
+  /** Visible cameo area; cameos are clipped to it while the strip scrolls. */
+  strip: GameRenderRect;
+  /** Size of one cameo picture and the column / row pitch of the cameo grid (first column at `strip.x`). */
+  cameo: { width: number; height: number };
+  cameoPitch: { x: number; y: number };
+  /** Top-left of the first visible cameo row when the strip is not scrolling (the native draw adds 1 px to Location.y). */
+  cameoOrigin: { x: number; y: number };
+  /** Tab buttons, same order as `GameRenderSidebar.tabs`. */
+  tabs: GameRenderRect[];
+  /** Sidebar buttons; null when the game has no such button or its rectangle could not be read. */
+  buttons: {
+    repair: GameRenderRect | null;
+    sell: GameRenderRect | null;
+    options: GameRenderRect | null;
+    diplomacy: GameRenderRect | null;
+    scrollUp: GameRenderRect | null;
+    scrollDown: GameRenderRect | null;
+  };
+  /** Power bar: left x, first slot top y, slot pitch in pixels and number of slots (top to bottom). */
+  power: { x: number; y: number; width: number; slotHeight: number; slots: number };
+}
+
+export interface GameRenderSidebarTab {
+  /** Number of cameos the tab holds (0: the native tab is disabled). */
+  count: number;
+  /** The native tab button is flashing (new cameos appeared while another tab was shown). */
+  flashing: boolean;
+}
+
+export type GameRenderCameoKind = 'building' | 'defense' | 'infantry' | 'vehicle' | 'naval' | 'aircraft' | 'super';
+
+export interface GameRenderCameo {
+  /** Position in the tab's cameo list. */
+  index: number;
+  /** Top-left of the cameo picture in frame pixels (may lie partly outside `layout.strip` while scrolling). */
+  x: number;
+  y: number;
+  /** Type identifier (YR: the rules section name, e.g. E1, GAPOWR; superweapons: their type name). */
+  id: string;
+  /** Cameo picture name in lower case without extension (YR: e.g. giicon), null when it could not be read. */
+  image: string | null;
+  kind: GameRenderCameoKind;
+  /** Display name in the game's language. */
+  name: string;
+  /** Build cost in credits, null when not applicable or unknown. */
+  cost: number | null;
+  /** Native clock progress 0..1 while the clock shows, null when no clock is drawn. */
+  progress: number | null;
+  /** The native caption shown on the cameo. */
+  ready: boolean;
+  hold: boolean;
+  /** The native darkening overlay is drawn (not buildable now). */
+  darkened: boolean;
+  /** Queue number the native cameo shows (0: none). */
+  queued: number;
+  /** The native flash is active (it blinks while true). */
+  flashing: boolean;
+  /** The pointer is over this cameo (native hover outline). */
+  hovered: boolean;
+}
+
+/**
+ * Native power bar. The bar is drawn from the top: `slots - (surplus + reserve + used)` empty slots, then the three
+ * coloured bands in this order down to the bottom slot. Counts are the native animated values.
+ */
+export interface GameRenderPower {
+  output: number;
+  drain: number;
+  surplus: number;
+  reserve: number;
+  used: number;
+  /** Low power: output below a non-zero drain. */
+  low: boolean;
+}
