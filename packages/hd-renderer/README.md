@@ -368,6 +368,16 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   anisotropy 8. Only enhanced lake-bed water (`waterBed: true`) with a `waterDetail` layer samples it; absent tiles
   leave the existing shading intact, and load failures warn once and leave the surface null. Tiles are made from
   image-model texture tiles by a scratch tool outside the repository.
+  Reflective sheen (`WATER_SHEEN`, both enhanced paths): offshore the sky is mirrored by a separate short-crested
+  wind-wave normal (directional trains near the camera axis, domain-warped) with a full Schlick Fresnel term seen from
+  a virtual perspective eye on the camera axis, so farther water is more grazing; the trains' own crest lines add a
+  thin sky-lit crest net. The mirrored sky is the scene's horizon pulled towards a clear cyan and a tinted zenith; the
+  water body is dimmed by the reflected share and tinted so the mean colour stays on the calibrated profile. On
+  painted-bed water the warm sun glints thin out offshore (`glintNear`/`glintFar`) and gather on the wavelets within a
+  cell of beaches; three breaker lines and fbm iso-line lace threads form the surf band. Water without a detail layer
+  (every other map) uses the same sheen beyond `enhanced.openNear..openFar` cells from the bank. The shallow shelf
+  (`BEACH_PROFILE`) keeps the sand visible to about half a cell. Tools: `packages/ra2-assets/python/water_metrics.py`
+  (water metrics at the river framing) and `shallow_bed.py` (lifts the painted waterline stroke on the land side).
 - Sprites (`sprites.ts`): filtered coverage of the indexed mask for soft edges; within about one original texel of
   transparent texels HD atlas colours keep their hue but are never brighter than the original texel there (the
   upscaler's pale background fringe goes without a rim of raw palette colours). An HD page's optional

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { float, uniform, vec3, vec4 } from 'three/tsl';
 import { Vector3 } from 'three/webgpu';
 import { AtmosphereNodes } from '../src/atmosphere';
-import { BEACH_PROFILE, BED_ABSORPTION, beachDepth, bedWaterLook } from '../src/ra2/waterLook';
+import { BEACH_PROFILE, BED_ABSORPTION, beachDepth, bedWaterLook, WATER_SHEEN } from '../src/ra2/waterLook';
 import type { ShaderNode } from '../src/tsl';
 import { createWaterUniforms } from '../src/waterShading';
 
@@ -48,6 +48,31 @@ describe('painted-bed beach profile', () => {
     expect(g).toBeGreaterThan(0.5);
     expect(g).toBeLessThan(b!);
     expect(b).toBeGreaterThan(0.6);
+  });
+
+  it('keeps sand visible through the luminous shallows out to about 0.4 cells', () => {
+    // L5 (owner feedback: wider luminous turquoise shallows): the bright bed still shows through at 0.4 cells, red is
+    // mostly absorbed there (the turquoise comes from the sand seen through clear water).
+    const [r, g, b] = transmission(0.4);
+    expect(r).toBeLessThan(0.15);
+    expect(g).toBeGreaterThan(0.3);
+    expect(b).toBeGreaterThan(0.4);
+  });
+
+  it('keeps the reflective sheen waves across the view and the warm glitter near the beaches', () => {
+    for (const [angle, wavelength, slope, speed] of WATER_SHEEN.trains) {
+      // Crests run across the screen (the target's horizontal wavy crest lines), not a cross-hatch.
+      expect(Math.abs(angle)).toBeLessThanOrEqual(0.6);
+      expect(wavelength).toBeGreaterThan(0.2);
+      expect(wavelength).toBeLessThan(0.8);
+      expect(slope).toBeGreaterThan(0);
+      expect(slope).toBeLessThan(0.15);
+      expect(speed).toBeGreaterThan(0);
+    }
+    expect(WATER_SHEEN.glintNear).toBeLessThan(WATER_SHEEN.glintFar);
+    expect(WATER_SHEEN.glintOffshore).toBeLessThan(0.5);
+    expect(WATER_SHEEN.glintBoostFull).toBeLessThan(WATER_SHEEN.glintFar);
+    expect(WATER_SHEEN.enhanced.openNear).toBeLessThan(WATER_SHEEN.enhanced.openFar);
   });
 
   it('removes the bed by 0.8-1 cells without negative or non-finite transmission offshore', () => {
