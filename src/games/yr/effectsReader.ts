@@ -1,4 +1,5 @@
 import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
+import { readYrBeams, type YrRadBeamEffect, type YrWaveEffect, type YrBeamsStats } from './beamsReader';
 import { readYrObjectCoords, YR_GET_COORDS, YR_GET_COORDS_SLOT, type YrPoint3 } from './objectCoords';
 export {
   readYrObjectCoords,
@@ -14,7 +15,8 @@ import { YR_STATE_VTABLES, isPlausiblePointer, readAsciiZ, readPointerVector } f
  * Read-only live visual effects of Yuri's Revenge 1.001 (gamemd.exe, SHA-256 in YR_STARTUP_PAGE_HASH) for an external
  * renderer that replaces the original 2D explosion, fire, smoke and weapon art: animations (AnimClass), projectiles in
  * flight (BulletClass), laser beams (LaserDrawClass), electric bolts (EBolt), particle systems (ParticleSystemClass)
- * and "just fired" events (TechnoClass::LastFireBulletFrame). Like stateReader.ts it only reads guest memory through a
+ * plus RadBeam/WaveClass ribbons (beamsReader.ts, with their own instruction evidence) and "just fired" events
+ * (TechnoClass::LastFireBulletFrame). Like stateReader.ts it only reads guest memory through a
  * GuestMemoryAccessor, never writes guest state and never calls guest code, so it runs on the main thread and in the VM
  * Worker alike.
  *
@@ -471,6 +473,7 @@ export interface YrFireEvent {
 export type YrEffectKind = 'anims' | 'voxelAnims' | 'bullets' | 'particleSystems' | 'lasers' | 'electricBolts';
 
 export interface YrEffectsStats {
+  beams?: YrBeamsStats;
   /** Raw DynamicVectorClass counts. */
   vectors: Record<YrEffectKind, number>;
   /** Entries skipped because a pointer, vtable, type, value or coordinate failed validation. */
@@ -493,6 +496,8 @@ export interface YrEffects {
   bullets: YrBulletEffect[];
   lasers: YrLaserEffect[];
   electricBolts: YrElectricBoltEffect[];
+  radBeams?: YrRadBeamEffect[];
+  waves?: YrWaveEffect[];
   particleSystems: YrParticleSystemEffect[];
   /** Technos whose last shot is at most `fireWindow` frames old. */
   fires: YrFireEvent[];
@@ -937,7 +942,21 @@ export function readYrEffects(memory: GuestMemoryAccessor, options: ReadYrEffect
     }
   }
 
-  return { frame, anims, voxelAnims, bullets, lasers, electricBolts, particleSystems, fires, stats };
+  const beams = readYrBeams(memory, { includeLimbo });
+  stats.beams = beams.stats;
+  return {
+    frame,
+    anims,
+    voxelAnims,
+    bullets,
+    lasers,
+    electricBolts,
+    particleSystems,
+    fires,
+    stats,
+    radBeams: beams.radBeams,
+    waves: beams.waves,
+  };
 }
 
 /**

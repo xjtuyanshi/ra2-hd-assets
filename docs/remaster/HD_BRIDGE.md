@@ -242,6 +242,12 @@ Without these optional fields the view retains its library-yellow body/layer est
 - YR publishes native anim frame/stage, alpha, layer, owner and attachment data, including building anims, and
   projectile type/frame/velocity. Older hosts retain the timing and grey-dot fallbacks. Smoke columns still follow
   the view's particles rather than native particle frames; full H1 beam/debris/particle metadata remains incomplete.
+- Optional `radBeams` and `waves` now pass from the YR effects reader through the bridge to an independent HD ribbon
+  layer. It redraws RadBeam rad/temporal/eruption and WaveClass sonic/magnetron/laser/biglaser at the cached engine
+  endpoints, fading from native age/intensity and clearing on removal, including within the same logic frame.
+  Shapes/colors are procedural approximations; sustained rad cycles and magnetron intensity resets follow the
+  observed state. Missing optional arrays draw nothing. The sandbox `fx.html?fx=beams&bprogress=0.5` is a frozen
+  five-effect preview; actual weapon-trigger coverage requires a separate live-game run.
 - Completed YR building bodies use `buildingFrame` from the native chooser, while bibs and animation variants use
   the independent `buildingDamaged` yellow condition. Civilian `CanBeOccupied` bodies normally damage at red;
   occupancy, TechLevel, gates and active mode offsets are included. Invalid rules/type reads and special

@@ -4,6 +4,8 @@
  *
  *   ?fx=TWLT070[,GUNFIRE...]  spawn these anims at the view centre (spread along a diagonal) and show them `time` later
  *   ?fx=units                 voxel tanks, SHP drones and infantry at eight facings, plus a few buildings
+ *   ?fx=beams                 rad, temporal, eruption, magnetron and sonic in five screen rows around cx/cy;
+ *                             frozen at mid-life (&bprogress=0..1 changes progress); &effects=enhanced brightens halos
  *   ?fx=shpunits&stypes=DRON  one screen row per SHP vehicle, eight clockwise facings from screen-up, DarkRed house;
  *                             &seq=Stand|Walk|Fire&step=0 selects a pose; &animate=N advances every N logic frames
  *                             after warm-up (with &time= or __fx.advance). &sspace=1 controls row/column spacing.
@@ -12,6 +14,10 @@
  *   ?fx=infantry              infantry art review: one row per type (&itypes=E1,E2,SHK,...), eight facings each, all
  *                             showing sequence &seq= (default Ready) at step &step= (default 0; &animate=N steps it
  *                             every N logic frames). Types listed in &itypes2= belong to house &house2.
+ *   ?fx=parade&ptypes=E1:0,GGI:0|E2:1,HTNK:1  unit parade: one screen row per '|' group, TYPE:owner entries left to
+ *                             right (kind from the type library; owner indexes the bench houses, 3 = &house3),
+ *                             facing &pface= (default 24576, towards the viewer), infantry in sequence &pseq=
+ *                             (default Ready; &animate=N steps it), &pspace=1 scales the spacing
  *   ?fx=bldgs&bldgs=NACNST:0:0:0,NAPOWR:4:0:1  TYPE:dx:dy[:owner] buildings, cell offsets from cx,cy;
  *                             owner indexes the bench houses (default 0); combine with anims: ?fx=bldgs,TWLT070
  *   &health=0.4               health of all listed buildings (default 1; <= 0.5 uses damaged art)
@@ -64,6 +70,7 @@
  */
 import { LiveView, type LiveObject, type LiveSmudgeCells, type LiveSnapshot } from '../src/live/liveView';
 import { effectRow, type LiveAnim } from '../src/live/effects';
+import type { LiveRadBeam, LiveWave } from '../src/live/beams';
 import { ra2Screen } from '../src/ra2/cache';
 import { applyLookPreset, LOOK_PRESETS, type LookPreset } from '../src/HdRenderer';
 import { voxelLookParams } from './look';
@@ -163,7 +170,15 @@ async function replay(): Promise<never> {
   const calm = (frame: number): LiveSnapshot => ({
     ...first,
     frame,
-    effects: first.effects && { ...first.effects, anims: [], bullets: [], particleSystems: [], beams: [] },
+    effects: first.effects && {
+      ...first.effects,
+      anims: [],
+      bullets: [],
+      particleSystems: [],
+      beams: [],
+      radBeams: [],
+      waves: [],
+    },
   });
   const warm = Number(params.get('warm') ?? 120);
   for (let i = 0; i < warm; i++) {
@@ -213,6 +228,8 @@ const houses = [
   { index: 1, colorIndex: Number(params.get('house2') ?? 3) },
   // The Neutral house of a skirmish (colour scheme LightGrey).
   { index: 2, colorIndex: 5 },
+  // A third player house for unit parades (default Purple, Yuri's colour).
+  { index: 3, colorIndex: Number(params.get('house3') ?? 17) },
 ];
 
 let nextUid = 5000;
@@ -405,7 +422,7 @@ for (const [id, a] of Object.entries(effectsJson?.anims ?? {}))
 const fxIds = (params.get('fx') ?? 'units').split(',').filter(Boolean);
 const oreEnabled = params.get('ore') === '1' || params.has('harvest') || params.has('ostages');
 const benchLibrary =
-  params.has('objects') || oreEnabled || params.get('crater') === '1'
+  params.has('objects') || oreEnabled || params.get('crater') === '1' || fxIds.includes('parade')
     ? await fetch(`/_library/${cache.manifest.theater}/library.json`)
         .then((r) => (r.ok ? (r.json() as Promise<TypeLibrary>) : null))
         .catch(() => null)
@@ -487,8 +504,50 @@ const units = [
   ...(fxIds.includes('units') ? unitSet() : []),
   ...(fxIds.includes('squad') ? squadSet() : []),
   ...(fxIds.includes('infantry') ? infantrySet() : []),
+  ...(fxIds.includes('parade') ? paradeSet() : []),
   ...extraObjects(),
 ];
+
+/** Unit parade (?fx=parade): rows of mixed units for whole-roster reviews. */
+function paradeSet(): LiveObject[] {
+  const facing = Number(params.get('pface') ?? 24576);
+  const seq = params.get('pseq') ?? 'Ready';
+  const space = Number(params.get('pspace') ?? 1);
+  const rows = (params.get('ptypes') ?? 'E1:0,MTNK:0|E2:1,HTNK:1')
+    .split('|')
+    .map((row) => row.split(',').filter(Boolean));
+  const objects: LiveObject[] = [];
+  const width = (kind: string) => (kind === 'infantry' ? 0.75 : kind === 'aircraft' ? 2.2 : 1.7) * space;
+  rows.forEach((row, r) => {
+    const entries = row.map((entry) => {
+      const [type, owner] = entry.split(':');
+      return { type: type!, owner: Number(owner ?? 0), kind: (libraryKinds[type!] ?? 'vehicle') as LiveObject['kind'] };
+    });
+    const total = entries.reduce((sum, e) => sum + width(e.kind), 0);
+    let along = -total / 2;
+    // Rows go down the screen (+1 map x and +1 map y), entries to the right (+1 map x, -1 map y).
+    const down = (r - (rows.length - 1) / 2) * 1.5 * space;
+    for (const e of entries) {
+      const d = along + width(e.kind) / 2;
+      along += width(e.kind);
+      const uid = nextUid++;
+      objects.push({
+        id: uid,
+        uid,
+        kind: e.kind,
+        type: e.type,
+        owner: e.owner,
+        ...at(cx + d / 2 + down, cy - d / 2 + down),
+        facingRaw: facing,
+        ...(e.kind === 'vehicle' || e.kind === 'aircraft' ? { turretFacingRaw: facing } : {}),
+        ...(e.kind === 'infantry' ? { infantrySequence: seq, sequenceFrame: 0 } : {}),
+        health: 1,
+        isSelected: false,
+      });
+    }
+  });
+  return objects;
+}
 
 /** &objects=: extra units and buildings for effect scenarios (kind looked up in the type library). */
 function extraObjects(): LiveObject[] {
@@ -528,7 +587,7 @@ const offsets = params
   .map((pair) => pair.split(',').map(Number) as [number, number])
   .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
 const anims: LiveAnim[] = fxIds
-  .filter((id) => id !== 'units' && id !== 'squad' && id !== 'infantry' && id !== 'bldgs' && id !== 'shpunits')
+  .filter((id) => !['units', 'squad', 'infantry', 'bldgs', 'shpunits', 'parade', 'beams'].includes(id))
   .map((type, i, list) => {
     const offset = offsets?.length ? offsets[i % offsets.length]! : null;
     const d = (i - (list.length - 1) / 2) * spread;
@@ -671,6 +730,42 @@ function benchBeams(): NonNullable<LiveSnapshot['effects']>['beams'] {
   return beams;
 }
 
+/** Fixed native ribbon/wave publications, independent of warm-up and animation time. */
+function benchRibbons(): { radBeams: LiveRadBeam[]; waves: LiveWave[] } {
+  if (!fxIds.includes('beams') || spawned === null) return { radBeams: [], waves: [] };
+  const value = Number(params.get('bprogress') ?? 0.5);
+  const progress = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0.5;
+  const ends = (row: number) => {
+    const down = (row - 2) * 1.2 + 0.5;
+    const source = at(cx + down - 2.5, cy + down + 2.5);
+    const target = at(cx + down + 2.5, cy + down - 2.5);
+    source.z += 104;
+    target.z += 104;
+    return { source, target };
+  };
+  return {
+    radBeams: (['rad', 'temporal', 'eruption'] as const).map((type, row) => ({
+      id: 60_000 + row,
+      type,
+      ...ends(row),
+      color: [70, 255, 90],
+      period: 20,
+      amplitude: 40,
+      age: progress * 20,
+      sustained: false,
+      progress,
+    })),
+    waves: (['magnetron', 'sonic'] as const).map((type, row) => ({
+      id: 60_003 + row,
+      uid: 60_003 + row,
+      type,
+      ...ends(row + 3),
+      intensity: 100 * (1 - progress),
+      progress,
+    })),
+  };
+}
+
 /** &banims: the listed building layers as the engine's building anim list would hold them now (looping). */
 const buildingLayerSpecs = (params.get('banims') ?? '')
   .split(',')
@@ -728,6 +823,7 @@ function snapshot(): LiveSnapshot {
       bullets: [],
       particleSystems: [],
       beams: benchBeams(),
+      ...(fxIds.includes('beams') ? benchRibbons() : {}),
     },
     ...(smudgeLibrary ? { smudges: smudgeGrid() } : {}),
     ...(oreGrid ? { overlays: oreGrid, localHouse: 0 } : {}),

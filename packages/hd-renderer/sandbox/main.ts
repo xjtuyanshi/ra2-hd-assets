@@ -205,6 +205,8 @@ const handle = {
   fires: [] as { at: Vector3; scale: number }[],
 };
 (window as unknown as { __hd: unknown }).__hd = handle;
+// ?vbake=1: isolated voxel unit renders for the vehicle redraw pipeline (sandbox/bake.ts).
+if (params.has('vbake') && world) (await import('./bake')).installBake(hd, world);
 hd.setState(state);
 
 // Fixed camera presets for comparable screenshots: ?cx=12&cy=44&zoom=0.8

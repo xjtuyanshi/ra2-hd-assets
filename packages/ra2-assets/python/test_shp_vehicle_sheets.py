@@ -129,6 +129,21 @@ class LayoutTests(unittest.TestCase):
             self.assertEqual(Counter(i for s in specs for r in s["rows"] for i in r), Counter(range(88)))
 
 
+class PromptProfileTests(unittest.TestCase):
+    def test_sea_creatures_use_organic_profiles_and_every_sequence_is_described(self):
+        spec = {"seq": "Fire", "rows": [[0, 1]], "facings": [0], "steps": [0, 2]}
+        for unit, terms in {"DLPH": ("dolphin", "wet dolphin skin", "flukes"),
+                            "SQD": ("squid", "suckers", "tentacle")}.items():
+            with self.subTest(unit=unit):
+                prompt = veh.prompt_for(unit, spec, (1024, 1536), 8)
+                for term in terms + ("(118,118,118)", "CLOCKWISE"):
+                    self.assertIn(term, prompt)
+                self.assertNotIn("dark steel", prompt)
+                self.assertNotIn("spider", prompt)
+                self.assertEqual(set(veh.PROFILES[unit]["sequences"]), set(veh.SEQUENCES))
+        self.assertEqual(set(veh.UNITS), set(veh.HOUSE))
+
+
 class PipelineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

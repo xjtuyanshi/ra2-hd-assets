@@ -23,6 +23,10 @@ jobs in flight, three attempts per job and a shared usage-limit stop file. ``com
 HD page's colour/remap filenames into its library.json. ``build`` and ``polish`` optionally soften unpainted dark
 rims and set per-page house-paint saturation; ``polish`` reads an existing variant and processes all selected
 sprite frames on that page. NumPy and Pillow suffice for every stage except ``run``.
+``install-pages`` composes finished sheets into staging pages and installs selected HD page entries into a
+configurable cache farm, with locked manifest updates and optional donor-filled base pages. ``copy-pages`` installs
+another theater's staged build into this theater by copying each accepted frame rectangle (theaters with an identical
+unit palette compose to the same pixels, so recomposing every sheet per theater is unnecessary).
 All actual inputs and outputs are derived game art and must remain in gameres/ or another untracked directory.
 """
 
@@ -53,12 +57,24 @@ GREYV = np.array([118, 118, 118], np.float32)
 PAD, GAP = 3, 3
 MAX_LONG, MAX_SHORT = 1536, 1024
 
-UNITS = {  # type -> sprite
+UNITS = {  # type -> sprite; insertion order is the scheduling priority (typical skirmish frequency first)
     "E1": "infantry:GI", "E2": "infantry:CONS", "SHK": "infantry:SHK", "ENGINEER": "infantry:ENGINEER",
     "DOG": "infantry:DOG", "ADOG": "infantry:ADOG",
+    "FLAKT": "infantry:FLAKT", "INIT": "infantry:INIT", "GGI": "infantry:GGI", "BRUTE": "infantry:BRUTE",
+    "JUMPJET": "infantry:ROCK", "SLAV": "infantry:SLAV", "YURI": "infantry:YURI", "IVAN": "infantry:IVAN",
+    "DESO": "infantry:DESO", "TERROR": "infantry:TRST", "SNIPE": "infantry:SNIPE", "SPY": "infantry:SPY",
+    "TANY": "infantry:TANY", "VIRUS": "infantry:VIRUS", "BORIS": "infantry:BORIS", "GHOST": "infantry:SEAL",
+    "CLEG": "infantry:CLEG", "YURIPR": "infantry:YURIX", "CIV1": "infantry:CIV1", "CIV2": "infantry:CIV2",
+    "CIV3": "infantry:CIV3",
 }
 
-HOUSE = {"E1": "DarkBlue", "ENGINEER": "DarkBlue", "ADOG": "DarkBlue", "E2": "DarkRed", "SHK": "DarkRed", "DOG": "DarkRed"}
+ALLIED, SOVIET, YURI_SIDE = "DarkBlue", "DarkRed", "Purple"
+HOUSE = {"E1": ALLIED, "ENGINEER": ALLIED, "ADOG": ALLIED, "E2": SOVIET, "SHK": SOVIET, "DOG": SOVIET,
+         "FLAKT": SOVIET, "IVAN": SOVIET, "DESO": SOVIET, "TERROR": SOVIET, "BORIS": SOVIET,
+         "GGI": ALLIED, "JUMPJET": ALLIED, "SNIPE": ALLIED, "SPY": ALLIED, "TANY": ALLIED, "GHOST": ALLIED,
+         "CLEG": ALLIED, "CIV1": ALLIED, "CIV2": ALLIED, "CIV3": ALLIED,
+         "INIT": YURI_SIDE, "BRUTE": YURI_SIDE, "SLAV": YURI_SIDE, "YURI": YURI_SIDE, "VIRUS": YURI_SIDE,
+         "YURIPR": YURI_SIDE}
 
 UNIT_DESC = {
     "E1": ("Allied GI rifleman",
@@ -82,6 +98,66 @@ UNIT_DESC = {
     "ADOG": ("Allied attack dog",
              "an Allied attack dog: a German shepherd with a black saddle and tan legs/belly, short dense fur, "
              "wearing a team-colour (blue) collar/harness"),
+    "FLAKT": ("Soviet flak trooper",
+              "a Soviet anti-aircraft infantryman: steel helmet, team-colour (red) chest armour and shoulder pads over a "
+              "brown leather tunic, ammunition belts, dark trousers and black boots, carrying a heavy shoulder-mounted "
+              "flak cannon (a long grey steel tube with a breech block and sight) that fires bright flak bursts"),
+    "INIT": ("Yuri initiate",
+             "a Yuri psychic initiate: a shaven-headed young acolyte in a dark grey tunic with team-colour (purple) "
+             "robe panels, sash and arm bands, grey trousers with purple bands, black boots; he hurls glowing psychic "
+             "energy from his hands"),
+    "GGI": ("Allied guardian GI",
+            "a heavy Allied anti-tank infantryman: dark steel helmet, team-colour (blue) armour plates on the shoulders "
+            "and chest, tactical vest and webbing, dark olive trousers, black boots, carrying a shoulder-fired missile "
+            "launcher; when deployed he sits behind sandbags"),
+    "BRUTE": ("Yuri brute",
+              "a Yuri brute: a hulking grey-skinned mutant giant with enormous muscular arms and fists, a hunched back "
+              "and a small head, wearing torn team-colour (purple) trousers and straps; it smashes with its fists"),
+    "JUMPJET": ("Allied rocketeer",
+                "an Allied rocketeer: a soldier with a twin-nozzle jet pack on his back, a team-colour (blue) flight "
+                "suit with white/silver armour plates and a helmet with visor, flying and firing a machine gun"),
+    "SLAV": ("Yuri slave",
+             "a Yuri slave labourer: a gaunt, bare-armed worker in a ragged yellowish vest and team-colour (purple) "
+             "trousers, black boots, carrying a long-handled shovel which he uses to dig and carry ore"),
+    "YURI": ("Yuri clone",
+             "a Yuri clone: a bald psychic man in a long grey military greatcoat with team-colour (purple) panels and "
+             "gold trim, black boots; he projects mind-control energy"),
+    "IVAN": ("Crazy Ivan",
+             "Crazy Ivan, a Soviet demolitions expert: a wild bearded man in a team-colour (red) fur cap (ushanka) and "
+             "jacket with brown leather straps, satchels of dynamite bombs, dark trousers and boots"),
+    "DESO": ("Soviet desolator",
+             "a Soviet desolator: a soldier in a full black radiation suit with team-colour (red) armour plates and a "
+             "sealed gas-mask helmet, carrying a radiation cannon with glowing green canisters; it fires toxic green "
+             "radiation"),
+    "TERROR": ("Soviet terrorist",
+               "a Cuban terrorist: a man in a green shirt with rolled sleeves, khaki trousers and boots, with "
+               "explosive charges and wires strapped to his chest"),
+    "SNIPE": ("Allied sniper",
+              "a British sniper: team-colour (blue) beret, khaki and tan camouflage outfit with a ghillie-style cape, "
+              "brown boots, a long scoped sniper rifle"),
+    "SPY": ("Allied spy",
+            "a spy: a man in a dark charcoal business suit and a dark trilby hat, black shoes, holding a silenced pistol"),
+    "TANY": ("Tanya",
+             "Tanya, the Allied commando: an athletic woman with a dark brown ponytail, a team-colour (blue) tank top, "
+             "olive cargo trousers, black boots, firing two pistols"),
+    "VIRUS": ("Yuri virus",
+              "a Yuri virus sniper: a slim woman with short dark hair in a dark bodysuit with team-colour (purple) "
+              "panels and white details, carrying a long toxin sniper rifle"),
+    "BORIS": ("Boris",
+              "Boris, the Soviet hero: a big bearded soldier in a brown leather cap and jacket with team-colour (red) "
+              "details, a white-grey undershirt, ammunition belts, carrying an assault rifle and a laser designator"),
+    "GHOST": ("Allied Navy SEAL",
+              "an Allied Navy SEAL commando: tan and olive tactical gear with team-colour (blue) details, a black "
+              "balaclava/cap, webbing and pouches, a compact submachine gun"),
+    "CLEG": ("Chrono legionnaire",
+             "an Allied chrono legionnaire: an infantryman in a bulky futuristic white armoured suit with team-colour "
+             "(blue) panels, a full helmet with visor and a chrono backpack, firing a blue-white chrono beam"),
+    "YURIPR": ("Yuri Prime",
+               "Yuri Prime: the bald psychic leader in long flowing team-colour (purple) and black robes with gold "
+               "trim and a high collar, projecting psychic power"),
+    "CIV1": ("civilian woman", "a civilian woman in a yellow dress and white shoes"),
+    "CIV2": ("civilian man", "a civilian man in a white shirt, dark blue jeans and dark shoes"),
+    "CIV3": ("civilian man", "a civilian man in a green jacket, dark trousers and boots, with dark hair"),
 }
 
 
@@ -99,7 +175,28 @@ SEQ_DESC = {
     "Deploy": "deploying: kneeling down and building a circular sandbag emplacement around himself (reading order)",
     "Cheer": "cheering animation and other single poses",
     "Misc": "assorted single poses",
+    "SecondaryFire": "a second attack (reading order per row)",
+    "Shovel": "digging ore with a shovel",
+    "Carry": "carrying a load of ore",
+    "Fly": "flying with the jet pack (jet flames below)",
+    "FireFly": "flying and firing",
+    "Tumble": "tumbling through the air after being hit (reading order)",
+    "Panic": "running in panic",
+    "Tread": "treading water: only the head, shoulders and arms are above the water line",
+    "Swim": "swimming: only the head, shoulders and arms are above the water line",
+    "WetAttack": "attacking from the water: only the upper body is above the water line",
+    "WetIdle1": "idle while treading water (reading order)",
+    "WetIdle2": "a second idle while treading water (reading order)",
+    "WetDie1": "dying in the water (reading order)",
+    "WetDie2": "a second death in the water (reading order)",
+    "Idles": "two idle fidget animations, each in reading order (left to right, top to bottom): first the rows of "
+             "idle 1, then the rows of idle 2",
+    "Dies": "two death animations, each in reading order (left to right, top to bottom): first the rows of death 1 "
+            "(hit, collapsing, lying dead), then the rows of death 2 (thrown back, falling, lying dead)",
 }
+
+FACING_SEQS = ("Walk", "FireUp", "Crawl", "FireProne", "DeployedFire", "DownUp", "SecondaryFire", "Shovel", "Carry",
+               "Fly", "FireFly", "Panic", "Tread", "Swim", "WetAttack")
 
 
 DOG_SEQ = {"Walk": "a running gallop cycle (the first column is the standing pose, then 6 run frames)",
@@ -203,6 +300,8 @@ def blocks(lib: Library, unit):
     t = lib.data["types"][unit]
     sp = t["sprite"]
     n = len(lib.frames(sp))
+    # Empty frames (zero rect, no atlas page) have nothing to redraw; treat them as already covered.
+    empty = {i for i, f in enumerate(lib.frames(sp)) if "page" not in f or 0 in f["rect"][2:]}
     seqs = t["infantry"]["sequences"]
     cands = []
     for name, s in seqs.items():
@@ -211,7 +310,7 @@ def blocks(lib: Library, unit):
             rows = [[st + f * fm + c for c in range(cnt)] for f in range(8)]
         else:
             rows = [[st + c for c in range(cnt)]]
-        rows = [[i for i in r if 0 <= i < n] for r in rows]
+        rows = [[i for i in r if 0 <= i < n and i not in empty] for r in rows]
         if any(rows):
             cands.append((name, rows, fm))
     # Largest first; skip blocks whose frames are all covered already.
@@ -232,7 +331,7 @@ def blocks(lib: Library, unit):
                     covered.add(i)
             unique.append(unseen)
         out.append((name, unique))
-    rest = sorted(set(range(n)) - covered)
+    rest = sorted(set(range(n)) - covered - empty)
     # Uncovered frames: contiguous runs, 8 per row.
     run = []
     for i in rest + [None]:
@@ -285,6 +384,28 @@ def sheet_specs(lib: Library, unit):
     if misc:
         specs.append((f"{unit}_Misc", "Cheer", misc))
     return specs
+
+
+def merge_small(lib: Library, unit, specs, min_scale=3.5):
+    """Pair Idle1+Idle2 and Die1+Die2 non-facing sheets into one sheet when the pair still fits at min_scale or more:
+    fewer image-model calls, and both animations of a pair share one rendering."""
+    by = {name: (seq, rows) for name, seq, rows in specs}
+    sp = lib.data["types"][unit]["sprite"]
+    out, used = [], set()
+    for first, second, merged in (("Idle1", "Idle2", "Idles"), ("Die1", "Die2", "Dies")):
+        a, b = by.get(f"{unit}_{first}"), by.get(f"{unit}_{second}")
+        if not a or not b or len(a[1]) + len(b[1]) > 8:
+            continue
+        rows = a[1] + b[1]
+        lay = layout(lib, sp, rows)
+        try:
+            ok = choose_scale(lay["W"], lay["H"]) >= min_scale
+        except ValueError:
+            ok = False
+        if ok:
+            out.append((f"{unit}_{merged}", merged, rows))
+            used.update({f"{unit}_{first}", f"{unit}_{second}"})
+    return [s for s in specs if s[0] not in used] + out
 
 
 def layout(lib: Library, sprite, rows):
@@ -369,13 +490,21 @@ def facing_lines(rows, first_facing, dog):
     return "\n".join(out)
 
 
+STYLE_TEXT = ("\nstyle.png is a STYLE REFERENCE ONLY: an approved redraw of a DIFFERENT unit from the same remaster. "
+              "Match its rendering style, material realism, lighting and density of invented detail. Do NOT copy its "
+              "character, equipment, colours, poses or layout - input.png alone defines the design, poses and "
+              "positions.\nInvent the fine detail the low-resolution original could never show (stitching, seams, buckles, "
+              "straps, pouches, insignia, panel lines, rivets, scuffs and wear) so that each figure reads as a detailed "
+              "3D-rendered model at game scale.\n")
+
+
 def prompt_for(unit, seq, rows, size, extra="", first_facing=None):
     name, desc = UNIT_DESC[unit]
     dog = unit in ("DOG", "ADOG")
     sdesc = (DOG_SEQ if dog else SEQ_DESC).get(seq, SEQ_DESC.get(seq, "an animation"))
     n = sum(len(r) for r in rows)
     facing = ""
-    if seq in ("Walk", "FireUp", "Crawl", "FireProne", "DeployedFire", "DownUp") or (dog and seq in ("Walk", "FireUp")):
+    if seq in FACING_SEQS or (dog and seq in ("Walk", "FireUp")):
         facing = (f" Each of the {len(rows)} rows is one facing direction and the columns are consecutive animation "
                   "frames, so neighbouring frames in a row must look like the same character in slightly different "
                   "poses.")
@@ -405,7 +534,7 @@ Save the result as output.png in this directory with exactly the same pixel size
 """
 
 
-def make_job(lib: Library, unit, name, seq, rows, root):
+def make_job(lib: Library, unit, name, seq, rows, root, style_ref=None):
     sp = lib.data["types"][unit]["sprite"]
     lay = layout(lib, sp, rows)
     S = choose_scale(lay["W"], lay["H"])
@@ -420,7 +549,12 @@ def make_job(lib: Library, unit, name, seq, rows, root):
            "layout": lay, "size": [img.shape[1], img.shape[0]]}
     (d / "job.json").write_text(json.dumps(job))
     first = 4 if name.endswith("_b") else 0
-    (d / "prompt.txt").write_text(prompt_for(unit, seq, rows, (img.shape[1], img.shape[0]), first_facing=first))
+    extra = ""
+    if style_ref is not None:
+        shutil.copy2(style_ref, d / "style.png")
+        extra = STYLE_TEXT
+    (d / "prompt.txt").write_text(prompt_for(unit, seq, rows, (img.shape[1], img.shape[0]), extra=extra,
+                                             first_facing=first))
     return job
 
 
@@ -751,15 +885,20 @@ def sheet_dirs(work: Path, names=None):
     return dirs
 
 
-def prepare(lib: Library, work: Path, units=None):
+def prepare(lib: Library, work: Path, units=None, style_ref=None, merge=False, skip_seqs=()):
     units = list(UNITS) if units is None else list(units)
     unknown = set(units) - UNITS.keys()
     if unknown:
         raise ValueError(f"unsupported infantry types: {', '.join(sorted(unknown))}")
     jobs = []
     for unit in units:
-        for name, seq, rows in sheet_specs(lib, unit):
-            job = make_job(lib, unit, name, seq, rows, work / "sheets")
+        specs = sheet_specs(lib, unit)
+        if merge:
+            specs = merge_small(lib, unit, specs)
+        for name, seq, rows in specs:
+            if seq in skip_seqs:
+                continue
+            job = make_job(lib, unit, name, seq, rows, work / "sheets", style_ref)
             jobs.append(job)
             print(name, "frames", sum(map(len, rows)), "size", job["size"], flush=True)
     return jobs
@@ -767,7 +906,8 @@ def prepare(lib: Library, work: Path, units=None):
 
 LIMIT_PATTERN = re.compile(r"usage limit|rate limit|\b429\b|quota", re.I)
 SEQUENCE_PRIORITY = {"Walk": 0, "FireUp": 1, "DownUp": 2, "Crawl": 3, "FireProne": 4, "Die1": 5,
-                     "Die2": 6, "Idle1": 7, "Idle2": 8, "DeployedFire": 9, "Deploy": 10, "Cheer": 11}
+                     "Die2": 6, "Idle1": 7, "Idle2": 8, "DeployedFire": 9, "Deploy": 10, "Cheer": 11,
+                     "Dies": 5, "Idles": 7, "SecondaryFire": 1, "Fly": 1, "FireFly": 1, "Shovel": 2, "Carry": 2}
 
 
 def done(d: Path):
@@ -790,7 +930,8 @@ def archive_redo(d: Path):
             shutil.move(str(path), backup / path.name)
 
 
-def run(work: Path, codex: str, parallel=3, limit_file=None, names=None, redo=(), poll_interval=1.0):
+def run(work: Path, codex: str, parallel=3, limit_file=None, names=None, redo=(), poll_interval=1.0,
+        reasoning=None, order_by="sequence"):
     """Run prepared jobs, drain active children on limits, and retry missing outputs up to three times."""
     if not 1 <= parallel <= 3:
         raise ValueError("parallel must be between 1 and 3")
@@ -816,7 +957,9 @@ def run(work: Path, codex: str, parallel=3, limit_file=None, names=None, redo=()
 
     def order(d):
         job = json.loads((d / "job.json").read_text(encoding="utf-8"))
-        return SEQUENCE_PRIORITY.get(job["seq"], 20), unit_priority.get(job["unit"], 20), d.name
+        seq, unit = SEQUENCE_PRIORITY.get(job["seq"], 20), unit_priority.get(job["unit"], 20)
+        # "unit" finishes whole units first (a half-redrawn unit flickers between styles in game).
+        return (unit, seq, d.name) if order_by == "unit" else (seq, unit, d.name)
 
     dirs.sort(key=order)
     for d in dirs:
@@ -865,8 +1008,9 @@ def run(work: Path, codex: str, parallel=3, limit_file=None, names=None, redo=()
                 (d / "start").write_text(f"{int(time.time())}\n", encoding="utf-8")
                 output = (d / "run.log").open("w", encoding="utf-8")
                 try:
+                    effort = ["-c", f'model_reasoning_effort="{reasoning}"'] if reasoning else []
                     proc = subprocess.Popen(
-                        [binary, "exec", "-s", "workspace-write", "--skip-git-repo-check", "-C", str(d),
+                        [binary, "exec", "-s", "workspace-write", *effort, "--skip-git-repo-check", "-C", str(d),
                          "-o", str(d / "last.txt"), prompt], cwd=d, stdin=subprocess.DEVNULL,
                         stdout=output, stderr=subprocess.STDOUT)
                 except BaseException:
@@ -950,9 +1094,9 @@ def build(lib: Library, work: Path, page: int, opts, names=None, min_sil=0.6):
 
 
 @contextlib.contextmanager
-def atomic_output(path: Path):
+def atomic_output(path: Path, suffix=".tmp"):
     """Replace the directory entry, never the destination of a pre-existing symlink."""
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}-", suffix=".tmp", dir=path.parent)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}-", suffix=suffix, dir=path.parent)
     os.close(fd)
     tmp = Path(name)
     try:
@@ -960,6 +1104,184 @@ def atomic_output(path: Path):
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def install_pages(lib: Library, work: Path, out: Path, farm: Path, rel_dir: str, opts,
+                  fill_dir=None, units=None, pages=None, min_sil=0.6, suffix="l5inf"):
+    """Compose finished sheets and patch only each installed HD page in the farm's latest manifest."""
+    # POSIX locking is needed only by this command; existing image stages remain platform-independent.
+    import cache_farm
+
+    relative = Path(rel_dir)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("rel-dir must be relative and contain no '..'")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", suffix):
+        raise ValueError("suffix must contain only letters, digits, hyphens and underscores")
+    if not 0 <= min_sil <= 1:
+        raise ValueError("min-sil must be between 0 and 1")
+    if out.resolve() == lib.root or (farm / relative).absolute() == lib.root:
+        raise ValueError("staging and farm directories must differ from the source library")
+    if fill_dir is not None:
+        for page, entry in enumerate(lib.data["spriteAtlasesHd"]):
+            fill = fill_dir / f"sprites-{page}@2x-fill.png"
+            if entry is None and fill.is_file():
+                base = lib.data["spriteAtlases"][page]
+                lib.data["spriteAtlasesHd"][page] = {
+                    "file": str(fill.resolve()),
+                    "remap": str((fill_dir / f"sprites-{page}@2x-remap-fill.png").resolve()),
+                    "scale": 2, "width": 2 * base["width"], "height": 2 * base["height"]}
+    finished = []
+    for directory in sheet_dirs(work):
+        if not (directory / "output.png").is_file():
+            continue
+        job = json.loads((directory / "job.json").read_text(encoding="utf-8"))
+        if units and job["unit"] not in units:
+            continue
+        if job["sprite"] not in lib.data["sprites"]:
+            continue
+        job_pages = {frame.get("page") for frame in lib.frames(job["sprite"])} - {None}
+        finished.append((directory.name, job_pages))
+    selected = sorted({page for _, job_pages in finished for page in job_pages})
+    if pages is not None:
+        selected = [page for page in selected if page in pages]
+    out.mkdir(parents=True, exist_ok=True)
+    for page in selected:
+        base = lib.data["spriteAtlasesHd"][page]
+        if base is None:
+            raise ValueError(f"page {page} has no HD atlas; provide its donor pages with --fill-dir")
+        names = [name for name, job_pages in finished if page in job_pages]
+        start = time.monotonic()
+        color, remap, report = build(lib, work, page, opts, names, min_sil)
+        page_path = out / f"sprites-{page}@2x-{suffix}.png"
+        remap_path = out / f"sprites-{page}@2x-remap-{suffix}.png"
+        # Installed pages may be hard links: never overwrite their served inode while staging a new build.
+        for pixels, path in ((color, page_path), (remap, remap_path)):
+            with atomic_output(path, suffix=".part") as tmp:
+                Image.fromarray(pixels).save(tmp, format="PNG")
+        (out / f"report-{page}.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+        cache_farm.install_file(farm, str(relative / page_path.name), page_path)
+        cache_farm.install_file(farm, str(relative / remap_path.name), remap_path)
+
+        def patch(data):
+            if data["spriteAtlasesHd"][page] is None:
+                data["spriteAtlasesHd"][page] = {
+                    "scale": 2, "width": base["width"], "height": base["height"]}
+            data["spriteAtlasesHd"][page].update(file=page_path.name, remap=remap_path.name,
+                                                paintSaturation=opts.paint_saturation)
+
+        cache_farm.patch_json(farm, str(relative / "library.json"), patch)
+        accepted = sum(bool(frame.get("accepted")) for frame in report["frames"].values())
+        print(f"{lib.data.get('theater', lib.root.name)} page {page}: {len(names)} sheets, "
+              f"{accepted}/{len(report['frames'])} frames accepted, {time.monotonic() - start:.0f}s", flush=True)
+
+
+def copy_pages(source: Library, staged: Path, lib: Library, out: Path, farm: Path, rel_dir: str,
+               fill_dir=None, pages=None, suffix="l5inf", paint_saturation=0.7):
+    """Install a staged install-pages build of another theater by copying its accepted frame rectangles.
+
+    The compose stage depends on the theater only through the unit palette (colour lock) and the base HD frame, so
+    theaters sharing the source's unit palette get the same pixels; copying avoids recomposing every sheet. Frames
+    are matched by sprite and frame index and copied (colour and remap) from the source rectangle to this theater's
+    rectangle; a frame missing here, on another page or of a different size is reported and left as the base page.
+    """
+    import cache_farm
+
+    relative = Path(rel_dir)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("rel-dir must be relative and contain no '..'")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", suffix):
+        raise ValueError("suffix must contain only letters, digits, hyphens and underscores")
+    if out.resolve() in (lib.root, staged.resolve()) or (farm / relative).absolute() == lib.root:
+        raise ValueError("staging and farm directories must differ from the source libraries and staged build")
+    for key in ("unit",):
+        if not np.array_equal(source.palette(key), lib.palette(key)):
+            raise ValueError(f"{key} palettes differ between theaters; compose this theater with install-pages")
+    if fill_dir is not None:
+        for page, entry in enumerate(lib.data["spriteAtlasesHd"]):
+            fill = fill_dir / f"sprites-{page}@2x-fill.png"
+            if entry is None and fill.is_file():
+                base = lib.data["spriteAtlases"][page]
+                lib.data["spriteAtlasesHd"][page] = {
+                    "file": str(fill.resolve()),
+                    "remap": str((fill_dir / f"sprites-{page}@2x-remap-fill.png").resolve()),
+                    "scale": 2, "width": 2 * base["width"], "height": 2 * base["height"]}
+    # Atlas packing differs between theaters: a sprite on source page 21 may sit on page 22 here. Every staged report
+    # is read, and each target page receives the accepted frames that land on it, from whichever source page.
+    reports = {int(p.stem.split("-")[1]): json.loads(p.read_text(encoding="utf-8"))
+               for p in staged.glob("report-*.json")}
+    if not reports:
+        raise ValueError(f"no staged report-<page>.json in {staged}")
+    accepted = []
+    for src_page, built in sorted(reports.items()):
+        for key, metrics in built["frames"].items():
+            if metrics.get("accepted"):
+                sprite, index = key.rsplit("#", 1)
+                accepted.append((src_page, key, sprite, int(index), metrics))
+    landing = set()
+    for _, _, sprite, index, _ in accepted:
+        frames = lib.data["sprites"].get(sprite, {}).get("frames", [])
+        if index < len(frames) and frames[index].get("page") is not None:
+            landing.add(frames[index]["page"])
+    selected = sorted(set(reports) | landing)
+    if pages is not None:
+        selected = [page for page in selected if page in pages]
+    if not selected:
+        raise ValueError("no staged page selected")
+    images = {}
+
+    def source_page(page):
+        if page not in images:
+            with Image.open(staged / f"sprites-{page}@2x-{suffix}.png") as im:
+                colour = np.asarray(im.convert("RGBA"))
+            with Image.open(staged / f"sprites-{page}@2x-remap-{suffix}.png") as im:
+                images[page] = colour, np.asarray(im.convert("L"))
+        return images[page]
+
+    out.mkdir(parents=True, exist_ok=True)
+    for page in selected:
+        base = lib.data["spriteAtlasesHd"][page]
+        if base is None:
+            raise ValueError(f"page {page} has no HD atlas; provide its donor pages with --fill-dir")
+        color, remap = lib.page2(page).copy(), lib.remap2(page).copy()
+        report = {"page": page, "copied_from": source.data.get("theater", source.root.name), "frames": {}}
+        copied = 0
+        for src_page, key, sprite, index, metrics in accepted:
+            try:
+                a, b = source.frames(sprite)[index], lib.frames(sprite)[index]
+            except (KeyError, IndexError):
+                if src_page == page:
+                    report["frames"][key] = {"accepted": False, "skipped": "missing"}
+                continue
+            if b.get("page") != page:
+                continue
+            if a.get("page") != src_page or a["rect"][2:] != b["rect"][2:]:
+                report["frames"][key] = {"accepted": False, "skipped": "layout"}
+                continue
+            (xa, ya, w, h), (xb, yb) = a["rect"], b["rect"][:2]
+            src_color, src_remap = source_page(src_page)
+            src = np.s_[2 * ya:2 * (ya + h), 2 * xa:2 * (xa + w)]
+            dst = np.s_[2 * yb:2 * (yb + h), 2 * xb:2 * (xb + w)]
+            color[dst], remap[dst] = src_color[src], src_remap[src]
+            report["frames"][key] = dict(metrics, copied=True, source_page=src_page)
+            copied += 1
+        page_path = out / f"sprites-{page}@2x-{suffix}.png"
+        remap_path = out / f"sprites-{page}@2x-remap-{suffix}.png"
+        for pixels, path in ((color, page_path), (remap, remap_path)):
+            with atomic_output(path, suffix=".part") as tmp:
+                Image.fromarray(pixels).save(tmp, format="PNG")
+        (out / f"report-{page}.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+        cache_farm.install_file(farm, str(relative / page_path.name), page_path)
+        cache_farm.install_file(farm, str(relative / remap_path.name), remap_path)
+
+        def patch(data, page=page, base=base, page_path=page_path, remap_path=remap_path):
+            if data["spriteAtlasesHd"][page] is None:
+                data["spriteAtlasesHd"][page] = {"scale": 2, "width": base["width"], "height": base["height"]}
+            data["spriteAtlasesHd"][page].update(file=page_path.name, remap=remap_path.name,
+                                                paintSaturation=paint_saturation)
+
+        cache_farm.patch_json(farm, str(relative / "library.json"), patch)
+        print(f"{lib.data.get('theater', lib.root.name)} page {page}: copied {copied} frames, "
+              f"{len(report['frames']) - copied} skipped", flush=True)
 
 
 def install(lib: Library, variant_dir: Path, page: int, page_path: Path, remap_path: Path, sprites,
@@ -1046,6 +1368,16 @@ def csv_names(text):
     return names
 
 
+def csv_pages(text):
+    try:
+        pages = [int(name) for name in csv_names(text)]
+    except ValueError:
+        raise argparse.ArgumentTypeError("pages must be comma-separated non-negative integers")
+    if any(page < 0 for page in pages):
+        raise argparse.ArgumentTypeError("pages must be comma-separated non-negative integers")
+    return pages
+
+
 def unit_interval(text):
     value = float(text)
     if not 0 <= value <= 1:
@@ -1053,11 +1385,12 @@ def unit_interval(text):
     return value
 
 
-def add_polish_options(ap):
-    ap.add_argument("--rim-soften", type=unit_interval, default=0.0,
-                    help="dark silhouette rim lift, 0..1 (default: 0, unchanged)")
-    ap.add_argument("--paint-saturation", type=unit_interval, default=1.0,
-                    help="linear-light house-paint saturation, 0..1 (default: 1)")
+def add_polish_options(ap, rim_soften=0.0, paint_saturation=1.0):
+    rim_default = f"{rim_soften:g}" + (", unchanged" if rim_soften == 0 else "")
+    ap.add_argument("--rim-soften", type=unit_interval, default=rim_soften,
+                    help=f"dark silhouette rim lift, 0..1 (default: {rim_default})")
+    ap.add_argument("--paint-saturation", type=unit_interval, default=paint_saturation,
+                    help=f"linear-light house-paint saturation, 0..1 (default: {paint_saturation:g})")
 
 
 def parser():
@@ -1070,6 +1403,12 @@ def parser():
             sub.add_argument("--library", type=Path, required=True)
         if command == "prepare":
             sub.add_argument("--units", type=csv_names)
+            sub.add_argument("--style-ref", type=Path,
+                             help="approved redraw given to the model as a style-only reference (style.png)")
+            sub.add_argument("--merge-small", action="store_true",
+                             help="pair Idle1+Idle2 and Die1+Die2 into one sheet when the scale allows")
+            sub.add_argument("--skip-seqs", type=csv_names, default=(),
+                             help="sequence keys to leave out (e.g. water sequences)")
         else:
             sub.add_argument("--names", type=csv_names)
         if command == "run":
@@ -1077,6 +1416,9 @@ def parser():
             sub.add_argument("--parallel", type=int, choices=(1, 2, 3), default=3)
             sub.add_argument("--limit-file", type=Path)
             sub.add_argument("--redo", type=csv_names, default=())
+            sub.add_argument("--reasoning", choices=("low", "medium", "high", "xhigh", "max"),
+                             help="codex model_reasoning_effort override")
+            sub.add_argument("--order", choices=("sequence", "unit"), default="sequence")
         if command in ("compose", "build"):
             add_compose_options(sub)
         if command == "build":
@@ -1092,6 +1434,25 @@ def parser():
     sub.add_argument("--sprites", type=csv_names, required=True)
     sub.add_argument("--suffix", default="l4inf")
     add_polish_options(sub)
+    sub = commands.add_parser("install-pages")
+    for name in ("library", "work", "out", "farm"):
+        sub.add_argument("--" + name, type=Path, required=True)
+    sub.add_argument("--rel-dir", required=True)
+    sub.add_argument("--fill-dir", type=Path)
+    sub.add_argument("--units", type=csv_names)
+    sub.add_argument("--pages", type=csv_pages)
+    sub.add_argument("--min-sil", type=unit_interval, default=0.6)
+    sub.add_argument("--suffix", default="l5inf")
+    add_compose_options(sub)
+    add_polish_options(sub, rim_soften=0.5, paint_saturation=0.7)
+    sub = commands.add_parser("copy-pages")
+    for name in ("library", "source_library", "staged", "out", "farm"):
+        sub.add_argument("--" + name.replace("_", "-"), type=Path, required=True)
+    sub.add_argument("--rel-dir", required=True)
+    sub.add_argument("--fill-dir", type=Path)
+    sub.add_argument("--pages", type=csv_pages)
+    sub.add_argument("--suffix", default="l5inf")
+    sub.add_argument("--paint-saturation", type=unit_interval, default=0.7)
     return ap
 
 
@@ -1099,14 +1460,24 @@ def main(argv=None):
     ap = parser()
     opts = ap.parse_args(argv)
     try:
-        if opts.command in ("compose", "build"):
+        if opts.command in ("compose", "build", "install-pages"):
             if any(not math.isfinite(getattr(opts, key)) or getattr(opts, key) < 0
                    for key in ("sigma_l", "sigma_ab", "shadow_soft", "band")):
                 raise ValueError("blur radii and trim band must be finite and non-negative")
             if any(not 0 <= getattr(opts, key) <= 1 for key in ("lock_l", "lock_ab", "edge_mix", "shadow_alpha")):
                 raise ValueError("colour-lock, edge-mix and shadow-alpha weights must be between 0 and 1")
         if opts.command == "run":
-            return run(opts.work, opts.codex, opts.parallel, opts.limit_file, opts.names, opts.redo)
+            return run(opts.work, opts.codex, opts.parallel, opts.limit_file, opts.names, opts.redo,
+                       reasoning=opts.reasoning, order_by=opts.order)
+        if opts.command == "copy-pages":
+            copy_pages(Library(opts.source_library.resolve()), opts.staged, Library(opts.library.resolve()), opts.out,
+                       opts.farm, opts.rel_dir, opts.fill_dir, opts.pages, opts.suffix, opts.paint_saturation)
+            return 0
+        if opts.command == "install-pages":
+            # Donor-page overrides are local to this invocation, never mutations of the shared library cache.
+            install_pages(Library(opts.library.resolve()), opts.work, opts.out, opts.farm, opts.rel_dir, opts,
+                          opts.fill_dir, opts.units, opts.pages, opts.min_sil, opts.suffix)
+            return 0
         lib = library(opts.library)
         if opts.command in ("build", "polish"):
             if opts.page < 0:
@@ -1116,7 +1487,9 @@ def main(argv=None):
             if opts.variant_dir.resolve() == lib.root:
                 raise ValueError("variant directory must differ from the source library")
         if opts.command == "prepare":
-            prepare(lib, opts.work, opts.units)
+            if opts.style_ref is not None and not opts.style_ref.is_file():
+                raise ValueError(f"style reference not found: {opts.style_ref}")
+            prepare(lib, opts.work, opts.units, opts.style_ref, opts.merge_small, tuple(opts.skip_seqs))
         elif opts.command == "compose":
             return compose(lib, opts.work, opts, opts.names)
         elif opts.command == "polish":

@@ -176,12 +176,38 @@ export interface GameRenderParticleSystem extends GameRenderPoint {
   behavesLike: GameRenderParticleBehaviour | null;
 }
 
+/** A sinusoidal energy ribbon; progress is the engine's current draw cycle, 0..1. */
+export interface GameRenderRadBeam {
+  id: number;
+  type: 'rad' | 'temporal' | 'eruption';
+  source: GameRenderPoint;
+  target: GameRenderPoint;
+  color: [number, number, number];
+  period: number;
+  amplitude: number;
+  age: number;
+  sustained: boolean;
+  progress: number;
+}
+
+export interface GameRenderWave {
+  id: number;
+  uid: number;
+  type: 'sonic' | 'laser' | 'biglaser' | 'magnetron';
+  source: GameRenderPoint;
+  target: GameRenderPoint;
+  intensity: number;
+  progress: number;
+}
+
 export interface GameRenderEffects {
   anims: GameRenderAnim[];
   bullets: GameRenderBullet[];
   lasers: GameRenderLaser[];
   electricBolts: GameRenderElectricBolt[];
   particleSystems: GameRenderParticleSystem[];
+  radBeams?: GameRenderRadBeam[];
+  waves?: GameRenderWave[];
 }
 
 /**

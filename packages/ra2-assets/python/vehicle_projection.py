@@ -368,6 +368,78 @@ def build(type_name: str, bake: Path, sheets: list[Path], palettes: Path, house_
     return manifest
 
 
+SHEET_SIZE = (1536, 1024)
+
+
+def compose_sheet(bake: Path, part: str, out: Path, facings: list[int], cols: int = 4, rows: int = 4,
+                  scale: float | None = None, margin: int = 22, scale_part: str = 'all') -> dict:
+    """Write an image-model input sheet (input.png + input.json) from a bake's engine renders.
+
+    Each listed facing's black/white pair is un-matted, resampled premultiplied at ``scale`` (Lanczos) and composited
+    over flat grey, centred in its grid cell on that facing's bounding box. Without ``scale`` the largest scale (at most
+    2) that fits every facing of ``scale_part`` in a cell with ``margin`` is used, so body and turret sheets of one
+    vehicle share a scale. input.json records sheet_xy = dst_origin + scale * (bake_xy - src_centre) per cell, which
+    ``build`` inverts.
+    """
+    meta = json.loads((bake / 'meta.json').read_text())
+    width, height = SHEET_SIZE
+    cw, ch = width // cols, height // rows
+    if len(facings) > cols * rows:
+        raise ValueError(f'{len(facings)} facings do not fit a {cols}x{rows} sheet')
+
+    def load(name: str, k: int) -> tuple[np.ndarray, np.ndarray]:
+        colour, alpha = unmatte(rgb(bake / 'engine' / f'{name}_{k:03d}_k.png'),
+                                rgb(bake / 'engine' / f'{name}_{k:03d}_w.png'))
+        return np.where(alpha[..., None] > 0, colour, 0), alpha
+
+    def bbox(alpha: np.ndarray) -> tuple[int, int, int, int]:
+        ys, xs = np.nonzero(alpha > 0.02)
+        if not len(xs):
+            raise ValueError('empty bake frame')
+        return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+    if scale is None:
+        ks = sorted({int(f['k']) for f in meta['looks']['engine']['frames'] if f.get('part', scale_part) == scale_part})
+        ks = ks or sorted({int(f['k']) for f in meta['looks']['engine']['frames']})
+        mw = mh = 1
+        for k in ks:
+            x0, y0, x1, y1 = bbox(load(scale_part, k)[1])
+            mw, mh = max(mw, x1 - x0), max(mh, y1 - y0)
+        scale = min(2.0, (cw - 2 * margin) / mw, (ch - 2 * margin) / mh)
+    count = len({int(f['k']) for f in meta['looks']['engine']['frames']}) or 1
+    facing_of = {int(f['k']): int(f['facing']) for f in meta['looks']['engine']['frames'] if 'facing' in f}
+    sheet = np.full((height, width, 3), GREY, np.float32)
+    cells = []
+    pad = 4
+    for i, k in enumerate(facings):
+        colour, alpha = load(part, k)
+        x0, y0, x1, y1 = bbox(alpha)
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        col, row = i % cols, i // cols
+        ox, oy = col * cw + cw / 2, row * ch + ch / 2
+        ys, xs = slice(max(0, y0 - pad), y1 + pad), slice(max(0, x0 - pad), x1 + pad)
+        sx, sy = xs.start, ys.start
+        crop, crop_alpha = (colour * alpha[..., None])[ys, xs], alpha[ys, xs]
+        w2, h2 = max(1, round(crop.shape[1] * scale)), max(1, round(crop.shape[0] * scale))
+        resize = lambda a: np.asarray(Image.fromarray(a.astype(np.float32), 'F').resize((w2, h2), Image.LANCZOS))
+        premultiplied = np.stack([resize(crop[..., j]) for j in range(3)], -1)
+        coverage = np.clip(resize(crop_alpha), 0, 1)
+        ix, iy = int(round(ox + scale * (sx - cx))), int(round(oy + scale * (sy - cy)))
+        tx0, ty0 = max(ix, 0), max(iy, 0)
+        tx1, ty1 = min(ix + w2, width), min(iy + h2, height)
+        region = sheet[ty0:ty1, tx0:tx1]
+        src = (slice(ty0 - iy, ty1 - iy), slice(tx0 - ix, tx1 - ix))
+        region[:] = np.clip(premultiplied[src], 0, 255) + region * (1 - coverage[src][..., None])
+        cells.append({'k': int(k), 'facing': facing_of.get(int(k), round(k * 256 / count) % 256),
+                      'src_centre': [float(cx), float(cy)],
+                      'dst_origin': [ix - scale * (sx - cx), iy - scale * (sy - cy)], 'cell': [col * cw, row * ch, cw, ch]})
+    out.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.clip(sheet, 0, 255).astype(np.uint8)).save(out / 'input.png')
+    spec = {'bake': str(bake), 'part': part, 'scale': float(scale), 'size': [width, height], 'cells': cells}
+    (out / 'input.json').write_text(json.dumps(spec, indent=1))
+    return spec
+
+
 def build_index(out: Path) -> dict:
     types = {}
     for path in sorted(out.glob('*.json')):
@@ -385,10 +457,13 @@ def build_index(out: Path) -> dict:
     return index
 
 
-def steel_grade(rgba: np.ndarray, paint: np.ndarray, keep: float = 0.3) -> np.ndarray:
+def steel_grade(
+    rgba: np.ndarray, paint: np.ndarray, keep: float = 0.3, centre: float = 40.0, half: float = 20.0
+) -> np.ndarray:
     """Pull the warm tan/beige the image model drifts hull metal to back toward neutral steel.
 
-    Pixels whose hue lies in the orange-yellow band (full effect at 20-60 degrees, fading out over 10 degrees) keep
+    Pixels whose hue lies in the band `centre` +- `half` degrees (default orange-yellow, full effect at 20-60 degrees,
+    fading out over 10 degrees; the distance wraps around 360, so centre=0 selects reds) keep
     only `keep` of their chroma; linear luminance is preserved and the grey gets a slight cool tint. House paint
     (paint red channel above 0.3, full protection from 0.7) and alpha are untouched. The approved target frames show
     silver steel hulls, as do the original voxels; the redraws of the Soviet hulls came back tan.
@@ -401,7 +476,8 @@ def steel_grade(rgba: np.ndarray, paint: np.ndarray, keep: float = 0.3) -> np.nd
     r, g, b = srgb[..., 0], srgb[..., 1], srgb[..., 2]
     d = np.maximum(hi - lo, 1e-6)
     hue = np.where(hi == r, ((g - b) / d) % 6, np.where(hi == g, (b - r) / d + 2, (r - g) / d + 4)) * 60
-    band = np.clip(1 - np.maximum(0, np.abs(hue - 40) - 20) / 10, 0, 1)
+    dist = np.abs((hue - centre + 180) % 360 - 180)
+    band = np.clip(1 - np.maximum(0, dist - half) / 10, 0, 1)
     protect = np.clip((np.asarray(paint, np.float64) / 255 - 0.3) / 0.4, 0, 1)
     w = (band * (1 - protect) * (1 - keep))[..., None]
     out = lin * (1 - w) + y * np.array([0.97, 1.0, 1.05]) * w
@@ -411,19 +487,55 @@ def steel_grade(rgba: np.ndarray, paint: np.ndarray, keep: float = 0.3) -> np.nd
     return graded
 
 
-def grade(atlases: Path, parts: list[str], keep: float) -> dict:
+def grade(atlases: Path, parts: list[str], keep: float, centre: float = 40.0, half: float = 20.0) -> dict:
     """steel_grade each <part>.png in place (atomic replace), using <part>_paint.png as the paint mask."""
     changed = {}
     for part in parts:
         colour_path, paint_path = atlases / f'{part}.png', atlases / f'{part}_paint.png'
         rgba = np.asarray(Image.open(colour_path).convert('RGBA'))
         paint = np.asarray(Image.open(paint_path).convert('RGB'))[..., 0]
-        graded = steel_grade(rgba, paint, keep)
+        graded = steel_grade(rgba, paint, keep, centre, half)
         tmp = colour_path.with_suffix('.grade.png')
         Image.fromarray(graded, 'RGBA').save(tmp)
         tmp.replace(colour_path)
         changed[part] = int((np.abs(graded.astype(int) - rgba.astype(int)).max(-1) > 2).sum())
     return changed
+
+
+def chroma_lock(design, redraw, background=(118, 118, 118), sigma: float = 6.0, strength: float = 1.0,
+                paint_chroma: float = 42.0) -> np.ndarray:
+    """Restore the design sheet's low-frequency hue/saturation on an aligned image-model redraw sheet.
+
+    The image model sometimes repaints a faction's hull colour (Yuri's olive khaki came back as neutral steel). In
+    CIE Lab the redraw keeps its lightness and its fine chroma detail (panel lines, wear, highlights) while the
+    Gaussian low-pass of a*/b* (sigma in sheet pixels, normalised over the foreground) is replaced by the design's.
+    Strongly saturated texels (house paint, lamps, chroma above paint_chroma) are neither sources nor targets: the
+    paint becomes the house colour later and lamps keep the redraw's colour. Background = the sheet's flat fill.
+    """
+    design = np.asarray(design, np.uint8)[..., :3]
+    redraw = np.asarray(redraw, np.uint8)
+    rgb = redraw[..., :3]
+    bg = np.asarray(background, np.int32)
+    fg_design = (np.abs(design.astype(np.int32) - bg).max(-1) > 6).astype(np.float32)
+    fg_redraw = (np.abs(rgb.astype(np.int32) - bg).max(-1) > 6).astype(np.float32)
+    lab_d = cv2.cvtColor(design.astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+    lab_r = cv2.cvtColor(rgb.astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+    src = fg_design * (np.hypot(lab_d[..., 1], lab_d[..., 2]) < paint_chroma)
+    # Full correction below paint_chroma, fading out over 8 chroma units above it.
+    target = fg_redraw * np.clip((paint_chroma + 8 - np.hypot(lab_r[..., 1], lab_r[..., 2])) / 8, 0, 1)
+
+    def low_pass(ab, weight):
+        num = cv2.GaussianBlur(ab * weight[..., None], (0, 0), sigma)
+        den = cv2.GaussianBlur(weight, (0, 0), sigma)[..., None]
+        return num / np.maximum(den, 1e-4)
+
+    shift = low_pass(lab_d[..., 1:], src) - low_pass(lab_r[..., 1:], (target > 0.99).astype(np.float32))
+    out = lab_r.copy()
+    out[..., 1:] += strength * shift * target[..., None]
+    locked = np.clip(cv2.cvtColor(out, cv2.COLOR_LAB2RGB) * 255 + 0.5, 0, 255).astype(np.uint8)
+    result = redraw.copy()
+    result[..., :3] = np.where(fg_redraw[..., None] > 0, locked, rgb)
+    return result
 
 
 def main():
@@ -437,17 +549,52 @@ def main():
     builder.add_argument('--house-key', default='unit@BakeA')
     builder.add_argument('--out', type=Path, required=True)
     builder.add_argument('--review', type=Path)
+    sheeter = commands.add_parser('sheet', help='compose an image-model input sheet from a bake')
+    sheeter.add_argument('--bake', type=Path, required=True)
+    sheeter.add_argument('--part', required=True)
+    sheeter.add_argument('--out', type=Path, required=True)
+    sheeter.add_argument('--facings', required=True, help='bake frame indices: k0,k1,... or a-b')
+    sheeter.add_argument('--cols', type=int, default=4)
+    sheeter.add_argument('--rows', type=int, default=4)
+    sheeter.add_argument('--scale', type=float)
     index = commands.add_parser('build-index')
     index.add_argument('--out', type=Path, required=True)
     grader = commands.add_parser('grade', help='steel_grade built colour atlases in place')
     grader.add_argument('--out', type=Path, required=True)
     grader.add_argument('--parts', nargs='+', required=True)
     grader.add_argument('--keep', type=float, default=0.3)
+    grader.add_argument('--hue', type=float, default=40.0, help='centre of the graded hue band, degrees')
+    grader.add_argument('--half', type=float, default=20.0, help='half width of the band at full effect, degrees')
+    locker = commands.add_parser('lock', help='restore the design colours on a redraw sheet (chroma_lock)')
+    locker.add_argument('--design', type=Path, required=True, help='image-model input sheet (input.png)')
+    locker.add_argument('--redraw', type=Path, required=True, help='image-model result (output.png)')
+    locker.add_argument('--out', type=Path, required=True)
+    locker.add_argument('--sigma', type=float, default=6.0)
+    locker.add_argument('--strength', type=float, default=1.0)
     args = parser.parse_args()
-    if args.command == 'build-index':
+    if args.command == 'lock':
+        design = np.asarray(Image.open(args.design).convert('RGB'))
+        with Image.open(args.redraw) as im:
+            mode = 'RGBA' if im.mode in ('RGBA', 'LA', 'P') else 'RGB'
+            redraw = np.asarray(im.convert(mode))
+        if design.shape[:2] != redraw.shape[:2]:
+            raise SystemExit(f'size mismatch: design {design.shape[:2]} vs redraw {redraw.shape[:2]}')
+        # Keep the redraw's mode so downstream registration sees the same file layout.
+        Image.fromarray(chroma_lock(design, redraw, tuple(int(v) for v in design[0, 0]), args.sigma, args.strength),
+                        mode).save(args.out)
+        return
+    if args.command == 'sheet':
+        if '-' in args.facings:
+            first, last = map(int, args.facings.split('-'))
+            facings = list(range(first, last + 1))
+        else:
+            facings = [int(v) for v in args.facings.split(',')]
+        spec = compose_sheet(args.bake, args.part, args.out, facings, args.cols, args.rows, args.scale)
+        print(json.dumps({'scale': spec['scale'], 'cells': len(spec['cells'])}))
+    elif args.command == 'build-index':
         print(json.dumps(build_index(args.out), indent=2))
     elif args.command == 'grade':
-        print(json.dumps(grade(args.out, args.parts, args.keep), indent=2))
+        print(json.dumps(grade(args.out, args.parts, args.keep, args.hue, args.half), indent=2))
     else:
         spec = build(args.type, args.bake, args.sheets, args.palettes, args.house_key, args.out, args.review)
         print(json.dumps({**{k: spec[k] for k in ('type', 'frames', 'facingStep', 'scale', 'jacobian', 'house')},

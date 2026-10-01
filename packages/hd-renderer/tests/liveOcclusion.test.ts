@@ -85,6 +85,7 @@ function presentation() {
     effectDriver,
     volumetricBlasts: new VolumetricBlastLayer({ light: staticCards.light, sunDirection: staticCards.toCamera }),
     volumeInstances: [],
+    liveBeams: { update: vi.fn(), displayScale: { value: 1 } },
     effectSprites,
     effectArt,
     warnedCells: true,

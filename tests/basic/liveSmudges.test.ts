@@ -279,6 +279,7 @@ function presentation(withLibrary = true) {
     },
     effectDriver: { frame: vi.fn(), unknownTypes: new Set(), logicFps: 30 },
     volumetricBlasts: new VolumetricBlastLayer({ light: cellLayer.light, sunDirection: cellLayer.toCamera }),
+    liveBeams: { update: vi.fn(), displayScale: { value: 1 }, dispose: vi.fn() },
     effectStats: { drawn: 0, missing: 0 },
     cellsFromEngine: false,
     cellsDirty: true,

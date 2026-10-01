@@ -21,11 +21,55 @@ from PIL import Image
 
 import infantry_sheets as inf
 
-UNITS = {"DRON": "vehicle:DRON"}
-HOUSE = {"DRON": "DarkRed"}
-UNIT_DESC = {"DRON": "Soviet terror drone: a small four-legged spider robot with a round armoured body/eye, "
-             "thin articulated metal legs, house-coloured (red) panels and dark steel"}
-SEQUENCES = {"Stand": "standing ready", "Walk": "a six-step walking cycle", "Fire": "a leaping attack cycle"}
+# Per-unit prompt profiles. DRON keeps the exact L4 wording; sea creatures get organic materials instead of steel.
+PROFILES = {
+    "DRON": {
+        "house": "DarkRed",
+        "desc": "Soviet terror drone: a small four-legged spider robot with a round armoured body/eye, "
+                "thin articulated metal legs, house-coloured (red) panels and dark steel",
+        "subject": "robot",
+        "sequences": {"Stand": "standing ready", "Walk": "a six-step walking cycle", "Fire": "a leaping attack cycle"},
+        "material": "physically based dark steel, subtle metal highlights, armoured plates, mechanical joints and "
+                    "restrained wear",
+        "forbid": "Do not turn the robot into a living spider.",
+        "parts": "Preserve all four legs, their lengths, angles, thin articulated joints, the round armoured body and eye.",
+        "colour": "House-painted panels stay red (DarkRed); dark steel stays dark.",
+    },
+    "DLPH": {
+        "house": "DarkBlue",
+        "desc": "Allied trained dolphin: a sleek grey bottlenose dolphin leaping and swimming at the sea surface, "
+                "wearing a house-coloured (blue) sonic emitter pack strapped to its back with a dark harness band",
+        "subject": "dolphin",
+        "sequences": {"Stand": "idling at the surface", "Walk": "a swimming cycle along the surface",
+                      "Fire": "a sonic attack cycle (body raised, beak open)"},
+        "material": "realistic wet dolphin skin with a smooth specular sheen, subtle countershading (darker grey back, "
+                    "pale belly), fine natural skin texture, believable anatomy and clean white water splashes",
+        "forbid": "Do not turn the dolphin into a robot, a fish or a toy.",
+        "parts": "Preserve the body length, curve, dorsal fin, flippers, tail flukes, beak, the back-mounted emitter "
+                 "pack with its harness band, and any splashes.",
+        "colour": "Keep the cool grey dolphin colours; the emitter pack stays house blue (DarkBlue) with small "
+                  "metal details; splashes stay white.",
+    },
+    "SQD": {
+        "house": "DarkRed",
+        "desc": "Soviet giant squid: a huge squid at the sea surface with a pale pinkish-tan mantle, a house-coloured "
+                "(red) armoured collar band around its head and long olive-brown tentacles trailing behind",
+        "subject": "squid",
+        "sequences": {"Stand": "idling at the surface", "Walk": "a swimming cycle along the surface",
+                      "Fire": "an attack cycle (tentacles rise, grab and slam)"},
+        "material": "realistic wet cephalopod skin with glossy specular highlights, mottled chromatophore spots, "
+                    "fine skin folds, visible suckers on the tentacles and a riveted metal collar band",
+        "forbid": "Do not turn the squid into a robot, an octopus cartoon or a toy.",
+        "parts": "Preserve the mantle and its fins, the collar band, every tentacle with its length, curl and position, "
+                 "and any splashes.",
+        "colour": "Keep the pale pinkish-tan mantle and olive-brown tentacles; the collar band stays house red "
+                  "(DarkRed); splashes stay white.",
+    },
+}
+UNITS = {unit: f"vehicle:{unit}" for unit in PROFILES}
+HOUSE = {unit: p["house"] for unit, p in PROFILES.items()}
+UNIT_DESC = {unit: p["desc"] for unit, p in PROFILES.items()}
+SEQUENCES = PROFILES["DRON"]["sequences"]
 FACINGS = ("up (away from the camera)", "up-right", "right", "down-right", "down (towards the camera)",
            "down-left", "left", "up-left")
 MIN_SCALE = 4
@@ -77,8 +121,12 @@ def blocks(lib, unit):
     return result
 
 
-def sheet_specs(lib, unit):
-    """Prefer every facing on one sheet; split consecutive step ranges before splitting facing blocks."""
+def sheet_specs(lib, unit, min_scale=MIN_SCALE):
+    """Prefer every facing on one sheet; split consecutive step ranges before splitting facing blocks.
+
+    min_scale trades redraw resolution for sheet count: large sprites (the giant squid) at 4x would need ~70 sheets.
+    Anything >= 2.5x still oversamples the 2x HD atlas.
+    """
     specs = []
     sprite = lib.data["types"][unit]["sprite"]
 
@@ -87,7 +135,7 @@ def sheet_specs(lib, unit):
             return False
         lay = inf.layout(lib, sprite, rows)
         try:
-            return inf.choose_scale(lay["W"], lay["H"]) >= MIN_SCALE
+            return inf.choose_scale(lay["W"], lay["H"]) >= min_scale
         except ValueError:
             return False
 
@@ -116,7 +164,7 @@ def sheet_specs(lib, unit):
                     last = next((f for f in range(len(rows), first, -1)
                                  if fits([r[start:end] for r in rows[first:f]])), None)
                     if last is None:
-                        raise ValueError(f"{unit} {seq} facing {first} cannot fit at {MIN_SCALE}x")
+                        raise ValueError(f"{unit} {seq} facing {first} cannot fit at {min_scale}x")
                     add(seq, [r[start:end] for r in rows[first:last]], first, start, end)
                     first = last
             start = end
@@ -124,26 +172,26 @@ def sheet_specs(lib, unit):
 
 
 def prompt_for(unit, spec, size, facing_count):
+    p = PROFILES[unit]
     rows = "\n".join(f"- row {r + 1}: facing {FACINGS[f] if facing_count == 8 else str(f) + ' clockwise from screen-up'}"
                      for r, f in enumerate(spec["facings"]))
     return f"""Edit input.png only, then save output.png at exactly {size[0]}x{size[1]} pixels.
 
-This Red Alert 2 sprite sheet shows {sum(map(len, spec['rows']))} frames of the same {UNIT_DESC[unit]}.
+This Red Alert 2 sprite sheet shows {sum(map(len, spec['rows']))} frames of the same {p['desc']}.
 The high isometric camera, about 30 degrees from above, must stay fixed. The sequence is {spec['seq']}:
-{SEQUENCES[spec['seq']]}, zero-based steps {spec['steps'][0]} through {spec['steps'][1] - 1}.
+{p['sequences'][spec['seq']]}, zero-based steps {spec['steps'][0]} through {spec['steps'][1] - 1}.
 Each row is one facing; columns are consecutive animation steps. SHP vehicles run CLOCKWISE from screen-up:
 {rows}
 
-Redraw the entire sheet as a realistic modern high-end RTS remaster: physically based dark steel, subtle metal
-highlights, armoured plates, mechanical joints and restrained wear, with consistent soft daylight from upper left.
-Keep the original robot design immediately recognisable. Keep materials and lighting coherent between all frames.
-No cartoon, chibi, toy-like plastic, painting or pixel-art treatment. Do not turn the robot into a living spider.
+Redraw the entire sheet as a realistic modern high-end RTS remaster: {p['material']}, with consistent soft daylight
+from upper left. Keep the original {p['subject']} design immediately recognisable. Keep materials and lighting coherent
+between all frames. No cartoon, chibi, toy-like plastic, painting or pixel-art treatment. {p['forbid']}
 
 Strict geometry and colour requirements:
 - Keep EVERY frame at exactly its original position and size, with the same pose, facing, silhouette and anchor.
-- Preserve all four legs, their lengths, angles, thin articulated joints, the round armoured body and eye.
+- {p['parts']}
 - Do not mirror, rotate, shift, re-space, re-arrange, add or remove frames or parts. Detail stays inside silhouettes.
-- Keep the same colours and overall brightness. House-painted panels stay red (DarkRed); dark steel stays dark.
+- Keep the same colours and overall brightness. {p['colour']}
 - Preserve any attack effects already present; do not invent weapons, effects, scenery or extra equipment.
 - Keep the background flat uniform RGB (118,118,118) everywhere else. No ground, cast shadows, gradients, texture,
   grid, borders, text or labels. Preserve the empty margins and gaps between frames.
@@ -186,13 +234,15 @@ def outside_source(path, *sources):
         raise ValueError(f"refusing to write inside source cache: {path}")
 
 
-def prepare(lib, work, theater, units=None):
+def prepare(lib, work, theater, units=None, min_scale=MIN_SCALE):
     units = list(UNITS) if units is None else list(units)
     if not units or set(units) - UNITS.keys():
         raise ValueError(f"supported SHP vehicles: {', '.join(UNITS)}")
     if (work / "prepare.json").exists() or (work / "sheets").exists():
         raise ValueError("work already contains prepared sheets; use a new work directory to preserve existing outputs")
-    planned = [(unit, spec) for unit in units for spec in sheet_specs(lib, unit)]
+    if not 2 <= min_scale <= 8:
+        raise ValueError("min-scale must be between 2 and 8")
+    planned = [(unit, spec) for unit in units for spec in sheet_specs(lib, unit, min_scale)]
     jobs = []
     source_hash = digest(lib.root / "library.json")
     for unit, spec in planned:
@@ -404,6 +454,7 @@ def parser():
         sub.add_argument("--work", type=Path, required=True)
         if command == "prepare":
             sub.add_argument("--units", type=inf.csv_names, default=list(UNITS))
+            sub.add_argument("--min-scale", type=float, default=MIN_SCALE)
         if command in ("compose", "build"):
             sub.add_argument("--names", type=inf.csv_names)
             inf.add_compose_options(sub)
@@ -437,7 +488,7 @@ def main(argv=None):
             if any(getattr(opts, k) > 1 for k in ("lock_l", "lock_ab", "edge_mix", "shadow_alpha")):
                 raise ValueError("colour/edge/shadow weights must be between 0 and 1")
         if opts.command == "prepare":
-            prepare(lib, opts.work, opts.theater, opts.units)
+            prepare(lib, opts.work, opts.theater, opts.units, opts.min_scale)
         elif opts.command == "compose":
             compose(lib, opts.work, opts.theater, opts, opts.names)
         elif opts.command == "build":

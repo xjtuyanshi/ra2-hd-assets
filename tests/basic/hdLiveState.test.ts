@@ -65,6 +65,7 @@ function view(makeFrames = 25): ViewState {
     housePaletteKeys: new Map(),
     buildingAnimMatches: new Map(),
     effectDriver: {},
+    liveBeams: { update() {} },
     cellsFromEngine: true,
     root: { add() {}, remove() {} },
     library: {

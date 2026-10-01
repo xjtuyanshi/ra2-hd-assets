@@ -204,6 +204,33 @@ RadBeam weapon fired in that scene, so for those two lists the run shows only th
 
 ## Known limits
 
+RadBeam and WaveClass pixel suppression now has an HD replacement: `src/games/yr/beamsReader.ts` reads their native
+arrays, endpoints and draw-cycle state; the optional `radBeams`/`waves` fields pass through the game render snapshot
+and HD bridge to `packages/hd-renderer/src/live/beams.ts`. It draws additive world-space ribbons and magnetic/sonic
+ripples, retaining native list membership and removal, including publications within the same logic frame. No gate or
+guest update behavior changes. Faithful/enhanced styles share geometry; enhanced brightens the halo. Colors and ripple
+shapes are HD interpretations, not a pixel-identical port (eruption is orange, temporal blue-white).
+
+Verified YR 1.001 layout evidence (instruction addresses in the player's disassembly; also recorded in the reader):
+
+| Fact | Layout | Confirming instructions |
+| --- | --- | --- |
+| RadBeam pointer vector | base `0xB04A60`, items `+4`, capacity `+8`, count `+0x10` | `0x659134`, `0x659139`, `0x65917A`, `0x659180`, `0x659186`, `0x6591B9` |
+| RadBeam shape | type `+0x10`; RGB `+0x20`; source/target `+0x24`/`+0x30`; period `+0x3C`; double amplitude `+0x40` | `0x65940F`, `0x659474..0x659480`, `0x6594A4..0x6594D4`, `0x6594E4`, `0x6594F8..0x6594FB` |
+| RadBeam draw cycle | age `+0x7C`, sustained `+0x58`, drawing `+9` | `0x6599A8..0x6599B3`, `0x65996F..0x659998`, `0x65978C`, `0x659CB7` |
+| WaveClass vector/vtable | base `0xA8EC38`, items `+4`, capacity `+8`, count `+0x10`; vtable `0x7F6BF4` | `0x75EAA9`, `0x75EAAE`, `0x75EAF3..0x75EAF9`, `0x75EA3F` |
+| Wave type/world endpoints | type `+0xB0`; source `+0xC0`, target `+0xB4`; `+0xCC` is screen-space | `0x75E97B`, `0x761B1E..0x761B83`, `0x7625B2..0x762617` |
+| Wave cache ownership | ctor initializes endpoints; sonic/magnetic AI refreshes them through direct calls, independently of the suppressed DrawIfVisible slot | `0x75EB1A`, `0x75EB29`, `0x760F6E`, `0x760FA0`, `0x762CBF`, `0x762D0E`, `0x762D52` |
+| Wave life | sonic/magnetron intensity `+0x130`, 100 to -1; laser/biglaser intensity `+0x1D0`, 160 to below 32 | `0x75E98E`, `0x760F73..0x760F86`, `0x760FD7..0x760FEB`, `0x75EB87`, `0x760FF6..0x761010` |
+
+RadBeam period is a draw-cycle duration, not a spatial wavelength. Sustained beams oscillate their age and remain
+until the native engine removes them. Magnetron can reset its intensity to 64 (`0x762B51`), so wave progress is a
+current intensity/cycle value, not monotonic total age. RadBeam enum value 0 is named Temporal by YRpp; the observed
+DrawAll dispatch handles values 1/2 only, so an actual temporal firing path still needs separate game-scene validation.
+
+The deterministic sandbox `fx.html?fx=beams` shows rad, temporal, eruption, magnetron and sonic around `cx`/`cy`,
+frozen at progress 0.5. `bprogress=0..1` selects a different lifetime sample; `effects=enhanced` selects brighter halos.
+
 - Translucent native drawing over the key blends with it: with effects left native, smoke and translucent explosion
   edges appear magenta-tinted over the HD world. Switching effects to passthrough removes them; exact un-blending
   would need the tactical view rendered twice with two keys (difference matting).

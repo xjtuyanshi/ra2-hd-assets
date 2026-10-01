@@ -30,6 +30,7 @@ import { spriteLookFor } from '../ra2/spriteLook';
 import { EffectArt, type ResolvedAnim } from './effectArt';
 import { EffectSpriteLayer, animAlpha, type EffectInstance } from './effectSprites';
 import { LiveEffectsDriver, smokeOnVehicle, type EffectStyle, type LiveAnim, type LiveEffects } from './effects';
+import { LiveBeams } from './beams';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
 import { buildingLightArcs, buildingLightSources } from './buildingLights';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
@@ -443,6 +444,7 @@ export class LiveView {
   private readonly pageLayers = new Map<number, { layer: SpriteLayer; windows: boolean; materials: boolean }>();
   private readonly shroud: ShroudLayer;
   private readonly effectDriver: LiveEffectsDriver;
+  private readonly liveBeams: LiveBeams;
   private readonly effectArt: EffectArt | null;
   private readonly effectSprites: EffectSpriteLayer | null;
   private readonly projectiles: Projectiles | null;
@@ -562,6 +564,8 @@ export class LiveView {
     this.effectDriver.style = options.effects ?? 'faithful';
     this.effectDriver.hdEnabled = options.effectsHd !== false;
     this.effectDriver.volumetric = options.volumetricEffects ?? 'off';
+    this.liveBeams = new LiveBeams(hd.effects.cameraRight, hd.effects.cameraUp, hd.effects.now);
+    this.root.add(this.liveBeams.mesh);
     this.effectDriver.hasHdArt = (type) => !!this.effectArt?.hdAnim(type);
     this.effectDriver.artWidth = (type) => {
       const w = this.effectArt?.anim(type)?.art.visW;
@@ -765,6 +769,7 @@ export class LiveView {
         this.wind,
       );
     this.updateOverlays(snapshot);
+    this.liveBeams.update(snapshot.effects, this.effectDriver.style, this.hidden);
     this.updateSmudges(snapshot);
     if (snapshot.cells) {
       this.cellsFromEngine = true;
@@ -952,6 +957,7 @@ export class LiveView {
     if (this.painterDirty) this.applyPainterOrder();
     this.updateBuildingLights(current?.snapshot);
     this.effectDriver.frame(this.hd.seconds(), this.wind);
+    this.liveBeams.displayScale.value = 1 / Math.max(1e-3, this.hd.meanExposure);
     if (this.effectSprites) {
       this.effectSprites.now.value = this.hd.seconds();
       this.effectSprites.displayScale.value = 1 / Math.max(1e-3, this.hd.meanExposure);
@@ -969,11 +975,13 @@ export class LiveView {
   /** Switch garnish for new effects and card art on the next snapshot (see LiveViewOptions.effects). */
   setEffectStyle(style: EffectStyle): void {
     this.effectDriver.style = style;
+    this.liveBeams.update(this.current?.snapshot.effects, style, this.hidden);
     if (style === 'enhanced' && this.effectDriver.hdEnabled)
       void this.effectArt?.loadHd().then(() => this.effectArt?.preloadHd(COMBAT_ANIMS));
   }
 
   dispose(): void {
+    this.liveBeams.dispose();
     this.hd.renderer.setAnimationLoop(null);
     for (const { layer } of this.overlayLayers.values()) this.disposeOverlayLayer(layer);
     this.overlayLayers.clear();

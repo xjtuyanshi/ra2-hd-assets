@@ -4,6 +4,7 @@ The HD live view (`packages/hd-renderer/src/live`) accepts optional snapshot fie
 present; without them it falls back to the estimates listed in `docs/remaster/HD_BRIDGE.md` ("Bridge fields"). The
 types to fill are `LiveSnapshot`, `LiveHouse`, `LiveObject`, `LiveCells` (`live/liveView.ts`) and `LiveAnim`,
 `LiveBullet`, `LiveParticleSystem`, `LiveVoxelAnim`, `LiveFireEvent`, `LiveBeam`, `LiveEffects` (`live/effects.ts`).
+`LiveRadBeam` and `LiveWave` (`live/beams.ts`) extend `LiveEffects` with optional `radBeams`/`waves` arrays.
 H2 building and infantry state and H3 runtime cells (overlays and smudges, published as independent live
 grids) are implemented end to end. H1 is partially implemented; remaining fields below are proposals.
 
@@ -12,7 +13,14 @@ grids) are implemented end to end. H1 is partially implemented; remaining fields
 Everything below already exists in `YrEffects` (`src/games/yr/effectsReader.ts`) or `YrHouseState`
 (`src/games/yr/stateReader.ts`); H1 only stops `toSnapshot` in `src/ui/pages/game/hdBridge.ts` (and, for houses, the
 game-neutral `GameRenderHouse`) from dropping it. Implemented: anim frame/stage/frameCount, flat/layer/alpha,
-owner/attachment/buildingAnim and projectile type/frame/velocity. Zero-lifetime electric bolts are filtered by the
+owner/attachment/buildingAnim and projectile type/frame/velocity. The YR observer also reads RadBeam and WaveClass
+through `src/games/yr/beamsReader.ts`; their validated endpoints, type,
+period/amplitude/color and life/progress pass through `GameRenderEffects` and `toSnapshot` unchanged. The independent
+HD beam layer consumes these optional arrays, clears them on removal/unavailable effects, and shares the engine
+coordinate transform and depth-tested additive presentation with the other effect layers. Instruction evidence and
+cycle/reset limits are in [Tactical passthrough](tactical-passthrough.md).
+
+Zero-lifetime electric bolts are filtered by the
 YR projection, and the view accepts changed effects without requiring a new logic frame. The following is the full
 target projection, not the current game-neutral contract (debris, fire events, detailed beams and particles remain):
 

@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from vehicle_projection import (BAKE_JACOBIAN, Frame, Registration, affine_point, build, build_index,
+from vehicle_projection import (BAKE_JACOBIAN, Frame, Registration, affine_point, build, build_index, chroma_lock, compose_sheet,
                                 linear_rgb, pack_frames, paint_channels, ramp_position, redraw_alpha, register,
                                 sheet_matrix, similarity, steel_grade, warp)
 
@@ -133,6 +133,41 @@ class VehicleProjectionTests(unittest.TestCase):
             self.assertFalse((out / 'BAD.json').exists())
 
 
+    def test_composed_sheet_round_trips_through_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bake, sheet, out = root / 'bake', root / 'sheet', root / 'out'
+            (bake / 'engine').mkdir(parents=True)
+            frames = []
+            for i in range(16):
+                k = i * 2
+                a = np.zeros((96, 96), np.uint8)
+                a[30 + i % 3:60, 20:70 - i] = 1
+                colour = np.full((96, 96, 3), [90, 100, 110], np.uint8)
+                for suffix, background in [('k', 0), ('w', 255), ('p', 0)]:
+                    Image.fromarray(np.where(a[..., None], colour, background).astype(np.uint8)).save(
+                        bake / 'engine' / f'all_{k:03d}_{suffix}.png')
+                frames.append({'k': k, 'facing': k * 8, 'part': 'all', 'pivot': [48, 50]})
+            (bake / 'meta.json').write_text(json.dumps({'looks': {'engine': {'frames': frames, 'turreted': False}}}))
+            spec = compose_sheet(bake, 'all', sheet, list(range(0, 32, 2)))
+            self.assertEqual(len(spec['cells']), 16)
+            self.assertLessEqual(spec['scale'], 2.0)
+            image = np.asarray(Image.open(sheet / 'input.png'))
+            self.assertEqual(image.shape, (1024, 1536, 3))
+            # Every cell's bake centre lands on its cell centre, and the sheet colour is the un-matted bake colour.
+            for cell in spec['cells']:
+                x, y, w, h = cell['cell']
+                self.assertAlmostEqual(cell['dst_origin'][0], x + w / 2, delta=1)
+                self.assertAlmostEqual(cell['dst_origin'][1], y + h / 2, delta=1)
+                self.assertTrue(np.allclose(image[y + h // 2, x + w // 2], [90, 100, 110], atol=3))
+            self.assertTrue((image[:4, :4] == 118).all())
+            Image.fromarray(image).save(sheet / 'output.png')
+            palettes = root / 'palettes.json'
+            palettes.write_text(json.dumps({'unit@BakeA': [100] * 768}))
+            manifest = build('BOX', bake, [sheet], palettes, 'unit@BakeA', out)
+            self.assertEqual(manifest['frames'], 16)
+            self.assertGreater(min(r['iou'] for r in manifest['registration']), 0.9)
+
     def test_steel_grade_neutralises_tan_only(self):
         rgba = np.array([[[196, 170, 120, 255], [200, 30, 30, 255], [40, 90, 200, 255], [196, 170, 120, 128]]],
                         np.uint8)
@@ -145,6 +180,32 @@ class VehicleProjectionTests(unittest.TestCase):
         np.testing.assert_array_equal(red, rgba[0, 1])  # hue 0 and 220 lie outside the band
         np.testing.assert_array_equal(blue, rgba[0, 2])
         np.testing.assert_array_equal(painted, rgba[0, 3])  # house paint and alpha untouched
+
+    def test_steel_grade_red_band_wraps_around_zero(self):
+        # A stray red the image model painted on an Allied hull (hue 350) is greyed with centre=0; tan and blue stay.
+        rgba = np.array([[[200, 30, 60, 255], [196, 170, 120, 255], [40, 90, 200, 255]]], np.uint8)
+        paint = np.zeros((1, 3), np.uint8)
+        red, tan, blue = steel_grade(rgba, paint, 0.1, centre=0, half=25)[0]
+        self.assertLess(int(red[:3].max()) - int(red[:3].min()), 30)
+        np.testing.assert_array_equal(tan, rgba[0, 1])
+        np.testing.assert_array_equal(blue, rgba[0, 2])
+
+    def test_chroma_lock_restores_design_hue_keeps_lightness_detail_and_paint(self):
+        bg = np.full((64, 64, 3), 118, np.uint8)
+        design, redraw = bg.copy(), bg.copy()
+        design[16:48, 16:48] = (190, 180, 120)  # olive khaki hull
+        design[28:36, 28:36] = (220, 20, 20)  # saturated house paint
+        grey = np.linspace(90, 210, 32).astype(np.uint8)
+        redraw[16:48, 16:48] = grey[None, :, None]  # neutral steel with a lightness ramp (the detail to keep)
+        redraw[28:36, 28:36] = (200, 30, 30)
+        out = chroma_lock(design, redraw)
+        lab = lambda a: cv2.cvtColor(a.astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+        lo, ld, lr = lab(out), lab(design), lab(redraw)
+        hull = np.s_[18:26, 18:46]
+        self.assertGreater(lo[hull][..., 2].mean(), 0.7 * ld[hull][..., 2].mean())  # yellow (b*) restored
+        self.assertLess(np.abs(lo[hull][..., 0] - lr[hull][..., 0]).max(), 4.0)  # lightness ramp kept
+        np.testing.assert_array_equal(out[30:34, 30:34], redraw[30:34, 30:34])  # paint untouched
+        np.testing.assert_array_equal(out[:8, :8], redraw[:8, :8])  # background untouched
 
 if __name__ == '__main__':
     unittest.main()
