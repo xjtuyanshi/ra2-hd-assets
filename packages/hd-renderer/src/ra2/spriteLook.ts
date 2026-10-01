@@ -5,6 +5,8 @@ import {
   dot,
   exp,
   float,
+  floor,
+  fract,
   luminance,
   max,
   min,
@@ -13,10 +15,14 @@ import {
   normalize,
   pow,
   reflect,
+  sin,
   smoothstep,
   sqrt,
+  step,
   texture,
+  time,
   uniform,
+  vec2,
   vec3,
 } from 'three/tsl';
 import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
@@ -129,6 +135,11 @@ export interface MaterialTexel {
   has: ShaderNode;
 }
 
+/**
+ * R/G encode world normal x/z in 0..1; alpha stores AO in 0.3..1 (0 means no data).
+ * Upright art uses B as its specular class. Ground-crystal decals instead encode dielectric gloss as 2B when
+ * B < 0.5, or metal gloss as 2(B - 0.5) otherwise. Gloss 0..1 maps to roughness 0.72..0.09.
+ */
 export function sampleMaterial(atlas: SpriteMaterialAtlas, uv: ShaderNode): MaterialTexel {
   const t: ShaderNode = texture(atlas.texture, uv);
   const x: ShaderNode = t.r.mul(2).sub(1);
@@ -141,6 +152,118 @@ export function sampleMaterial(atlas: SpriteMaterialAtlas, uv: ShaderNode): Mate
     ao: clamp(t.a.sub(0.3).div(0.7), 0, 1).mul(0.7).add(0.3),
     has: smoothstep(0.12, 0.26, t.a),
   };
+}
+
+/** Material lookup at a colour-atlas (HD) pixel position of the same layer. */
+export type CrystalMaterialAt = (pixel: ShaderNode) => MaterialTexel;
+
+/** Ground-crystal colour, excluding glow/alpha. Call only for layers with a material atlas. */
+export function groundCrystalColour(
+  lit: ShaderNode,
+  m: MaterialTexel,
+  crystal: ShaderNode,
+  pixel: ShaderNode,
+  view: ShaderNode,
+  state: SpriteLookState,
+  seed: ShaderNode = vec2(0, 0),
+  materialAt?: CrystalMaterialAt,
+): ShaderNode {
+  const metal: ShaderNode = step(0.5, m.spec).toVar();
+  const gloss: ShaderNode = crystalGloss(m.spec).toVar();
+  const roughness: ShaderNode = mix(float(0.72), float(0.09), gloss);
+  const hue: ShaderNode = lit
+    .div(max(luminance(lit), 1e-3))
+    .clamp(0, 1.6)
+    .toVar();
+  const tint: ShaderNode = mix(vec3(1), hue, metal.mul(0.7)).toVar();
+  const ao: ShaderNode = mix(float(1), m.ao, state.occlusion.mul(crystal));
+  const base: ShaderNode = lit.mul(mix(vec3(1), relightFactor(m.normal, state), state.relight.mul(crystal))).mul(ao);
+  // Bound the entire tinted highlight, including user strength, to prevent glossy facets producing fireflies.
+  const highlight: ShaderNode = min(
+    sunHighlight(m.normal, state.sunDirection, view, roughness, mix(float(0.06), float(0.55), metal))
+      .mul(state.sunLight)
+      .mul(state.specular)
+      .mul(crystal)
+      .mul(m.ao)
+      .mul(tint),
+    state.sunLight.mul(1.6),
+  );
+  if (!materialAt) return base.add(highlight);
+  // Twinkles follow the sun (moonlight keeps a faint trace at night); a warm white, as arms may cross soil.
+  const sunLight: ShaderNode = state.sunLight;
+  const skyLight: ShaderNode = state.skyLight;
+  const sparkleLight: ShaderNode = sunLight.add(skyLight.mul(0.12));
+  const twinkle: ShaderNode = crystalSparkle(pixel, seed, materialAt, view, state.sunDirection);
+  const sparkle: ShaderNode = vec3(1, 0.97, 0.88)
+    .mul(twinkle)
+    .mul(2.4)
+    .mul(state.specular)
+    .mul(crystal)
+    .mul(sparkleLight);
+  return base.add(highlight).add(sparkle);
+}
+
+/** Dielectric gloss is 2B below B = 0.5, metal gloss 2(B - 0.5) above it (see sampleMaterial). */
+function crystalGloss(spec: ShaderNode): ShaderNode {
+  return clamp(spec.sub(step(0.5, spec).mul(0.5)).mul(2), 0, 1);
+}
+
+/** Twinkle grid pitch in colour-atlas pixels; a star stays inside its own grid cell. */
+const SPARKLE_PITCH = 10;
+
+/**
+ * Sparse star twinkles; TSL time follows the renderer clock, including frozen sandbox captures.
+ * Each SPARKLE_PITCH grid cell of the art may hold one star at a jittered centre. Whether it can flash depends on the
+ * material at that centre (glossy facet whose mirror direction meets the camera), so the core and its four arms appear
+ * together even where an arm crosses soil. `seed` (the instance's ground anchor) decorrelates cells sharing one atlas
+ * frame, so a field of identical frames never twinkles in sync; the star layout stays tied to the art.
+ */
+function crystalSparkle(
+  pixel: ShaderNode,
+  seed: ShaderNode,
+  materialAt: CrystalMaterialAt,
+  view: ShaderNode,
+  sun: ShaderNode,
+): ShaderNode {
+  const cell: ShaderNode = floor(pixel.div(SPARKLE_PITCH)).toVar();
+  const art = (x: number, y: number): ShaderNode => fract(sin(dot(cell, vec2(x, y))).mul(43758.5));
+  const salted: ShaderNode = cell.add(fract(seed.mul(vec2(0.1031, 0.1137))).mul(997)).toVar();
+  const hash = (x: number, y: number): ShaderNode => fract(sin(dot(salted, vec2(x, y))).mul(43758.5));
+  const centre: ShaderNode = cell
+    .add(vec2(art(12.9, 78.2), art(39.3, 11.1)).mul(0.24).add(0.38))
+    .mul(SPARKLE_PITCH)
+    .toVar();
+  const at = materialAt(centre);
+  const phase = hash(127.1, 311.7).toVar();
+  const rate = mix(float(0.25), float(0.7), hash(269.5, 183.3));
+  const flash = pow(
+    max(
+      sin(
+        time
+          .mul(rate)
+          .add(phase)
+          .mul(2 * Math.PI),
+      ),
+      0,
+    ),
+    12,
+  );
+  const local: ShaderNode = pixel.add(0.5).sub(centre).toVar();
+  const core = exp(dot(local, local).mul(-1 / (2 * 0.8 ** 2)));
+  const reach = SPARKLE_PITCH * 0.36;
+  const arms = exp(local.x.mul(local.x).mul(-1 / (2 * 0.32 ** 2)))
+    .mul(max(float(1).sub(abs(local.y).div(reach)), 0))
+    .add(exp(local.y.mul(local.y).mul(-1 / (2 * 0.32 ** 2))).mul(max(float(1).sub(abs(local.x).div(reach)), 0)));
+  // Two independent tilts in x/z let nearby facets catch slightly different sun angles.
+  const tilted = normalize(at.normal.add(vec3(hash(419.2, 371.9).sub(0.5), 0, hash(157.7, 113.1).sub(0.5)).mul(0.6)));
+  const facing = smoothstep(0.5, 0.92, dot(reflect(sun.negate(), tilted), view));
+  return core
+    .add(arms.mul(0.6))
+    .mul(flash)
+    .mul(step(0.45, hash(39.3, 47.1)))
+    .mul(smoothstep(0.5, 0.8, crystalGloss(at.spec)))
+    .mul(at.has)
+    .mul(facing);
 }
 
 /** Irradiance of a surface with normal n relative to flat ground (a wall sees half the sky), per channel. */

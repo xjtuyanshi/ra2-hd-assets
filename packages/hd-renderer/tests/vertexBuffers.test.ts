@@ -59,6 +59,7 @@ interface LayoutBackend {
     camera: OrthographicCamera;
     scene: Scene;
     build(): void;
+    fragmentShader: string;
     getAttributesArray(): { name: string; node?: { attribute?: VertexAttribute } }[];
     getBindings(): { bindings: { isUniformBuffer?: boolean; byteLength: number }[] }[];
   };
@@ -91,7 +92,7 @@ function layout(mesh: Mesh, uniformLimit = MAX_UNIFORM_BYTES) {
     .flatMap((group) =>
       group.bindings.filter((binding) => binding.isUniformBuffer).map((binding) => binding.byteLength),
     );
-  return { buffers, attributes, uniformBytes };
+  return { buffers, attributes, uniformBytes, fragmentShader: builder.fragmentShader };
 }
 
 function assertLimits(mesh: Mesh, uniformLimit = MAX_UNIFORM_BYTES) {
@@ -151,6 +152,27 @@ function dispose(mesh: Mesh): void {
 }
 
 describe('r186 vertex and uniform binding budget', () => {
+  it('builds crystal sparkle in every material pass, including under, with no sparkle nodes on default pages', () => {
+    const source = cache();
+    for (const materials of [null, { texture: texture() }]) {
+      const layer = new SpriteLayer(
+        source,
+        [],
+        1,
+        undefined,
+        { color: new DataTexture(new Uint8Array(512 * 8 * 4), 512, 8), remap: texture() },
+        null,
+        materials,
+      );
+      for (const mesh of [layer.mesh, ...layer.groundPasses]) {
+        const { fragmentShader } = assertLimits(mesh);
+        // This is the cell hash's constant in the generated WGSL, not a source-text assertion.
+        expect(fragmentShader.includes('43758.5'), mesh.name).toBe(materials !== null);
+      }
+      dispose(layer.mesh);
+    }
+  });
+
   it('submits the live instance count on a plain Mesh, including empty and full batches', () => {
     const mesh = new InstancedQuad(new MeshBasicNodeMaterial(), 4096);
     const renderObject = {

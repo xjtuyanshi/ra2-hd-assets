@@ -5,8 +5,11 @@ import type { DirtyAttribute } from '../src/dirtyAttribute';
 import { applyLookPreset, LOOK_PRESETS, type HdSettings } from '../src/HdRenderer';
 import { clearLightAt, sunArcDirection } from '../src/lighting';
 import type { Ra2Cache } from '../src/ra2/cache';
-import { painterObject } from '../src/ra2/painterOrder';
-import { ART_LIGHT, shadowTransform } from '../src/ra2/spriteLook';
+import { painterObject, spritePainterBias } from '../src/ra2/painterOrder';
+import { SpritePool } from '../src/live/spritePool';
+import { float, vec2, vec3 } from 'three/tsl';
+import { ART_LIGHT, groundCrystalColour, shadowTransform, spriteLookFor } from '../src/ra2/spriteLook';
+import type { ShaderNode } from '../src/tsl';
 import { InstancedQuad } from '../src/instancedQuad';
 import { GROUND_PULL, SpriteLayer, groundPlaneDepth, type SpriteInstance } from '../src/ra2/sprites';
 import { CARD_CLEARANCE } from '../src/ra2/cardDepth';
@@ -86,6 +89,47 @@ describe('enhanced look: presets', () => {
 type Buffers = { anchor: DirtyAttribute; flags: DirtyAttribute };
 
 describe('enhanced look: sprite instances', () => {
+  it('packs glint only in plain decal flags.w and preserves card bias and other ground kinds', () => {
+    const painter = painterObject(2, 100);
+    painter.bias = 0.008;
+    const base: SpriteInstance = {
+      anchor: new Vector3(),
+      frame: { rect: [0, 0, 8, 8], offset: [-4, -8] },
+      palette: 'unit',
+      push: 0,
+      shadow: false,
+      painter,
+      glint: 0.7,
+    };
+    const inputs: SpriteInstance[] = [
+      { ...base, flat: true },
+      { ...base, flat: true, glint: undefined },
+      { ...base, flat: true, glint: 2 },
+      { ...base, flat: true, glint: -1 },
+      { ...base, flat: true, shadow: true },
+      { ...base, flat: true, kind: 'contact' },
+      { ...base, flat: true, kind: 'reflection' },
+      base,
+    ];
+    const layer = new SpriteLayer(cache, inputs);
+    const flags = (layer as unknown as Buffers).flags;
+    const w = (i: number) => flags.array[i * flags.itemSize + 3];
+    expect(w(0)).toBeCloseTo(0.7);
+    expect([w(1), w(2), w(3), w(4), w(5), w(6)]).toEqual([0, 1, 0, 0, 0, 0]);
+    expect(w(7)).toBeCloseTo(spritePainterBias(painter), 7);
+    expect(w(7)).not.toBe(0);
+    layer.mesh.geometry.dispose();
+    layer.mesh.material.dispose();
+    layer.mesh.dispose();
+    const pool = new SpritePool();
+    const ore = pool.take(base.anchor, base.frame, 'unit', 0, false, true);
+    ore.glint = 1;
+    pool.begin();
+    const reused = pool.take(base.anchor, base.frame, 'unit', 0, true, true);
+    expect(reused).toBe(ore);
+    expect(reused.glint).toBeUndefined();
+  });
+
   it('shares matrix-free geometry and synchronizes all pass counts at large capacity', () => {
     const layer = new SpriteLayer(cache, [], 5000);
     expect(layer.capacity).toBe(5000);
@@ -199,5 +243,33 @@ describe('enhanced look: ground passes', () => {
       const got = coefficients.x + coefficients.y * px + coefficients.z * py + coefficients.w * y;
       expect(got).toBeCloseTo(expected, 9);
     }
+  });
+});
+
+describe('enhanced look: ground crystals', () => {
+  const texel = () => ({ normal: vec3(0, 1, 0), ao: float(1), spec: float(0.9), has: float(1) });
+  const colour = (materialAt?: (pixel: ShaderNode) => ReturnType<typeof texel>) =>
+    groundCrystalColour(
+      vec3(0.6, 0.5, 0.2),
+      texel(),
+      float(1),
+      vec2(12, 7),
+      vec3(0, 1, 0),
+      spriteLookFor(),
+      vec2(3, 4),
+      materialAt,
+    );
+
+  it('adds twinkles only with a material sampler, sampling once at the star centre of the pixel grid cell', () => {
+    expect(colour()).toBeTruthy();
+    const centres: ShaderNode[] = [];
+    expect(
+      colour((pixel) => {
+        centres.push(pixel);
+        return texel();
+      }),
+    ).toBeTruthy();
+    // One lookup per fragment: the star's facet (normal, gloss) decides whether its whole cross flashes.
+    expect(centres).toHaveLength(1);
   });
 });

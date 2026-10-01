@@ -87,6 +87,7 @@ export function buildOverlayInstances(
       push: type.flat ? 0 : cardPush(frame),
       shadow: false,
       flat: type.flat,
+      glint: type.tiberium === true ? 1 : undefined,
       lighting: type.lighting,
       deckHeight: isHighBridge(id) ? HIGH_BRIDGE_HEIGHT : undefined,
     });

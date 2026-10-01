@@ -257,7 +257,7 @@ function presentation(withLibrary = true) {
     warnedOverlayPages: new Set(),
     overlayInstances: new OverlayInstanceCache(ground),
     smudgeInstances: new SmudgeInstanceCache(ground, cache.manifest.sprites),
-    overlayLayers: new Map<number, SpriteLayer>(),
+    overlayLayers: new Map<number, { layer: SpriteLayer; materials: boolean }>(),
     uploadedOverlays: new Map(),
     smudgeLayers: new Map<SmudgePage, SpriteLayer>(),
     uploadedSmudges: new Map(),
@@ -299,6 +299,26 @@ function presentation(withLibrary = true) {
 }
 
 describe('LiveView smudge integration', () => {
+  it('applies ground crystal policy only to unlit flat map overlays and resets pooled records', () => {
+    const p = presentation();
+    const mapOre = p.backing.cellObjects.get(1)![1]!;
+    mapOre.lighting = 'none';
+    const shadow = p.backing.cache.manifest.sprites['overlay:TIB01']!.frames[0]!;
+    p.backing.cache.manifest.sprites['overlay:TIB01']!.shadows = [shadow];
+    const flush = () => (p.view as unknown as { flushCells(): void }).flushCells();
+    flush();
+    const instances = p.cellLayer.getInstances();
+    expect(instances.map((s) => s.glint)).toEqual([undefined, undefined, 1]);
+    mapOre.lighting = 'full';
+    flush();
+    expect(p.cellLayer.getInstances().every((s) => s.glint === undefined)).toBe(true);
+    mapOre.lighting = 'none';
+    mapOre.flat = false;
+    flush();
+    expect(p.cellLayer.getInstances().every((s) => s.glint === undefined)).toBe(true);
+    p.view.dispose();
+  });
+
   it('updates live overlay and smudge grids independently on the same logic frame', () => {
     const p = presentation();
     const overlay: LibraryOverlay = {
@@ -317,7 +337,7 @@ describe('LiveView smudge integration', () => {
     const state = { ...p.state(), overlays: { ...cells(), types: ['TIB01'], data: new Uint8Array([1, 0, 0, 0]) } };
     p.view.push(state);
     p.view.render(1);
-    const ore = p.backing.overlayLayers.get(3)!;
+    const ore = p.backing.overlayLayers.get(3)!.layer;
     const crater = p.backing.smudgeLayers.get(1)!;
     expect([ore.mesh.count, crater.mesh.count, p.cellLayer.mesh.count]).toEqual([1, 1, 0]);
     const oreUploads = vi.spyOn(ore, 'setInstances');

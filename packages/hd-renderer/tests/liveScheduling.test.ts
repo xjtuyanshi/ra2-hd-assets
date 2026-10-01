@@ -26,6 +26,9 @@ function presentation(interpolating: boolean) {
   const library = { revision: 0 };
   const applyObjects = vi.fn();
   const applyEffects = vi.fn();
+  const flushOverlayPages = vi.fn(function (this: { overlayPagesDirty: boolean }) {
+    this.overlayPagesDirty = false;
+  });
   const hd = { seconds: () => 1, frame: vi.fn(), windowsWanted: () => false, materialsWanted: vi.fn(() => false) };
   const view = Object.assign(Object.create(LiveView.prototype) as object, {
     current: { snapshot: { frame: 2 }, at: 10 },
@@ -38,11 +41,12 @@ function presentation(interpolating: boolean) {
     cellsDirty: false,
     objectsInterpolate: interpolating,
     applyCamera: vi.fn(),
+    flushOverlayPages,
     applyObjects,
     applyEffects,
     applyPainterOrder: vi.fn(),
   }) as unknown as LiveView;
-  return { view, art, library, applyObjects, applyEffects, hd };
+  return { view, art, library, applyObjects, applyEffects, flushOverlayPages, hd };
 }
 
 describe('live presentation scheduling', () => {
@@ -222,10 +226,12 @@ describe('live presentation scheduling', () => {
     p.view.render(20);
     p.view.render(30);
     expect(p.applyObjects).toHaveBeenCalledTimes(2);
+    expect(p.flushOverlayPages).toHaveBeenCalledTimes(2);
     p.library.revision++;
     p.view.render(40);
     p.view.render(50);
     expect(p.applyObjects).toHaveBeenCalledTimes(3);
+    expect(p.flushOverlayPages).toHaveBeenCalledTimes(3);
     expect(p.applyEffects).toHaveBeenCalledTimes(1);
   });
 });

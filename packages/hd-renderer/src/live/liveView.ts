@@ -442,7 +442,7 @@ export class LiveView {
   private readonly cellObjects = new Map<number, MapObject[]>();
   private cellsDirty = true;
   private readonly overlayInstances: OverlayInstanceCache;
-  private readonly overlayLayers = new Map<number, SpriteLayer>();
+  private readonly overlayLayers = new Map<number, { layer: SpriteLayer; materials: boolean }>();
   private readonly uploadedOverlays = new Map<number, readonly SpriteInstance[]>();
   private overlayPagesDirty = false;
   private readonly warnedOverlayTypes = new Set<string>();
@@ -566,7 +566,15 @@ export class LiveView {
     this.shareSpriteUniforms(this.sprites);
     // Room for the map's own cells (each may add a shadow) plus as many again for cells the engine adds (bridge H3).
     const mapCells = cache.manifest.objects.filter((o) => o.kind === 'overlay' || o.kind === 'smudge').length;
-    this.cellLayer = new SpriteLayer(cache, [], Math.max(4096, mapCells * 4), undefined, cache.spriteAtlasHd);
+    this.cellLayer = new SpriteLayer(
+      cache,
+      [],
+      Math.max(4096, mapCells * 4),
+      undefined,
+      cache.spriteAtlasHd,
+      null,
+      world.spriteMaterials ?? null,
+    );
     this.cellLayer.mesh.name = 'live-cells';
     this.root.add(this.cellLayer.mesh);
     this.shareSpriteUniforms(this.cellLayer);
@@ -859,6 +867,8 @@ export class LiveView {
       const artRevision = this.effectArt?.revision ?? 0;
       const windows = this.hd.windowsWanted();
       const materials = this.hd.materialsWanted();
+      if (this.objectLibraryRevision !== libraryRevision || this.objectsMaterials !== materials)
+        this.overlayPagesDirty = true;
       const objectAlpha = this.objectsInterpolate ? alpha : 1;
       if (
         this.objectsFor !== current ||
@@ -912,7 +922,7 @@ export class LiveView {
 
   dispose(): void {
     this.hd.renderer.setAnimationLoop(null);
-    for (const layer of this.overlayLayers.values()) this.disposeOverlayLayer(layer);
+    for (const { layer } of this.overlayLayers.values()) this.disposeOverlayLayer(layer);
     this.overlayLayers.clear();
     this.uploadedOverlays.clear();
     for (const layer of this.smudgeLayers.values()) this.disposeOverlayLayer(layer);
@@ -1867,13 +1877,18 @@ export class LiveView {
   private flushOverlayPages(): void {
     this.overlayPagesDirty = false;
     const pages = this.overlayInstances.instances.pages;
-    for (const [page, layer] of this.overlayLayers) {
+    for (const [page, { layer }] of this.overlayLayers) {
       if (pages.has(page)) continue;
       if (layer.mesh.count) layer.setInstances([]);
       this.uploadedOverlays.delete(page);
     }
     for (const [page, instances] of pages) {
-      if (this.uploadedOverlays.get(page) === instances) continue;
+      const existing = this.overlayLayers.get(page);
+      const wantMaterials = this.hd.materialsWanted() && !!this.library?.hasMaterialsPage(page);
+      const materials = wantMaterials || existing?.materials ? this.library!.materialsPage(page) : null;
+      if (wantMaterials && !materials) this.overlayPagesDirty = true;
+      const upgrade = !!materials && !existing?.materials;
+      if (this.uploadedOverlays.get(page) === instances && !upgrade) continue;
       const atlas = this.library?.page(page);
       if (!atlas) {
         if (this.library && !this.library.pageFailed(page)) this.overlayPagesDirty = true;
@@ -1888,18 +1903,18 @@ export class LiveView {
         this.overlayPagesDirty = true;
         continue;
       }
-      let layer = this.overlayLayers.get(page);
-      if (layer && layer.capacity < instances.length) {
+      let layer = existing?.layer;
+      const capacity = Math.max(layer?.capacity ?? 64, 2 ** Math.ceil(Math.log2(instances.length)));
+      if (layer && (layer.capacity < instances.length || upgrade)) {
         this.disposeOverlayLayer(layer);
         layer = undefined;
       }
       if (!layer) {
-        const capacity = Math.max(64, 2 ** Math.ceil(Math.log2(instances.length)));
-        layer = new SpriteLayer(this.cache, [], capacity, atlas, hd);
+        layer = new SpriteLayer(this.cache, [], capacity, atlas, hd, null, materials);
         layer.mesh.name = `live-overlays-${page}`;
         this.shareSpriteUniforms(layer);
         this.root.add(layer.mesh);
-        this.overlayLayers.set(page, layer);
+        this.overlayLayers.set(page, { layer, materials: !!materials });
       }
       layer.setInstances(instances);
       this.uploadedOverlays.set(page, instances);
@@ -1980,18 +1995,18 @@ export class LiveView {
         const lighting = object.lighting ?? 'full';
         const shadow = entry.shadows?.[index];
         if (shadow) instances.push(this.cellPool.take(anchor, shadow, palette, 0, true, true, undefined, lighting));
-        instances.push(
-          this.cellPool.take(
-            anchor,
-            frame,
-            palette,
-            object.flat ? 0 : cardPush(frame),
-            false,
-            !!object.flat,
-            undefined,
-            lighting,
-          ),
+        const body = this.cellPool.take(
+          anchor,
+          frame,
+          palette,
+          object.flat ? 0 : cardPush(frame),
+          false,
+          !!object.flat,
+          undefined,
+          lighting,
         );
+        body.glint = object.kind === 'overlay' && object.flat && lighting === 'none' ? 1 : undefined;
+        instances.push(body);
       }
     this.cellLayer.setInstances(instances);
   }
