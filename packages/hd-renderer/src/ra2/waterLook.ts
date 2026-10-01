@@ -654,7 +654,7 @@ export const BED_ABSORPTION = [4.2, 1.45, 1.0] as const;
  * towards the enhanced MID/DEEP offshore. */
 const BED_SCATTER = { colour: 0x1f9e93, near: 0.1, far: 0.95, amount: 0.85 } as const;
 /** Lit turquoise shelf on maps with a painted surface tile (cells from the bank; see bedWaterLook). */
-const BED_SHALLOW_GLOW = { colour: 0x2aa89c, near: 0.2, far: 0.85, amount: 0.45 } as const;
+const BED_SHALLOW_GLOW = { colour: 0x4f9488, near: 0.2, far: 0.85, amount: 0.4 } as const;
 /** Optional per-map water detail, used only by the painted-bed look. */
 export const WATER_DETAIL = {
   /** Gain from linear detail colour to the in-scattered column colour. */

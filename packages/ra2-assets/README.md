@@ -353,6 +353,49 @@ use 15 × manifest scale composite px/level and ignore plateaus at least 2 level
 and `--help` describe the remaining tuned constants and optional diagnostics. Review the outputs before assigning
 the final filenames, relative to the map cache, to `terrainMap`, `waterMask` and `shoreIgnore` in `materials.json`.
 
+## Water surface, detail and cliff-foot stripe tools (Python)
+
+These NumPy/Pillow/OpenCV tools take all input and output paths as arguments, generate PNGs outside Git, and never
+edit `materials.json`. Filenames assigned to that sidecar are relative to the map cache.
+
+- `python/water_surface.py` blends chop and foam textures with half-offset copies and variance compensation. Its
+  RGBA tile feeds `waterSurface`: R = relief ratio / 2, G = glints, B = foam lace, A = 255. Defaults are `--size 1024`,
+  `--glint-percentiles 93.5 99.6` (power 1.5) and `--glint-gain 1`. It prints channel/seam statistics and writes
+  `<out-stem>_chop_seamless.png`. `waterSurfaceScale` controls the repeat width in screen units of 30 engine pixels
+  (default 13), independently of the texture's pixel size.
+- `python/cliff_foot_stripe.py` inpaints light grey pixels at water edges near `shoreIgnore`, preserving terrain
+  alpha. Use its output as `terrainMap`; `--mask-out` optionally saves the repair selection. Defaults are
+  `--saturation 0.2 --value 110 --vertical-reach 7 --cliff-reach 12 --inpaint-radius 5`; distances are composite pixels.
+- `python/water_detail.py` registers `--repaint` to `--repaint-input` with ECC, combines the target's shore-distance
+  colour profile with repaint variation, and fills land with push-pull. Its RGBA output feeds `waterDetail`:
+  RGB = sRGB water colour, A = roughness/glitter weight. Supply both composite-size masks and the target's
+  `--target-box X0 Y0 X1 Y1` in composite pixels; target image dimensions are read automatically. The repaint mapping
+  is `composite = screen * repaint-scale + repaint-offset`, with input pixels scaled by `repaint-screen-scale`.
+  All three transform arguments are required. `--detail-scale 4` rounds output dimensions up; `--cell-size 84.85`
+  is composite pixels per cell after stretching y by 2. Set it for your composite resolution. Defaults are
+  `--gain 1 --sigma 3 --target-spatial 0`; sigma is in detail pixels. Target spatial variation accepts 0..1 and uses
+  the same water-colour filter as the target profile, with `--target-border 40` controlling the framing-relative
+  fade. Optional `--correction file.json` supplies `{"ratio": [[r, g, b], ...]}` with 17 nonnegative RGB multipliers
+  in the profile-bin order recorded in `<out>.json`; an optional `bins` array must match that report. The report
+  also records ECC registration and framing. Missing profile samples or failed registration are errors.
+
+Set the path and framing variables to your inputs. Keep `waterBed: true` for enhanced water; `waterSurface` also
+requires `waterDetail`. Inspect the generated layers before assigning their filenames to the sidecar.
+
+```bash
+python3 -B packages/ra2-assets/python/water_surface.py --chop "$CHOP" --foam "$FOAM" --out "$WORK/water-surface.png"
+python3 -B packages/ra2-assets/python/cliff_foot_stripe.py --terrain "$TERRAIN" --water-mask "$WATER_MASK" \
+  --shore-ignore "$SHORE_IGNORE" --out "$WORK/terrain-clean.png" --mask-out "$WORK/stripe-mask.png"
+python3 -B packages/ra2-assets/python/water_detail.py --repaint "$REPAINT" --repaint-input "$REPAINT_INPUT" \
+  --repaint-scale "$REPAINT_SCALE" --repaint-offset "$OFFSET_X" "$OFFSET_Y" \
+  --repaint-screen-scale "$REPAINT_SCREEN_SCALE" --target "$TARGET" --target-box "$X0" "$Y0" "$X1" "$Y1" \
+  --water-mask "$WATER_MASK" --shore-ignore "$SHORE_IGNORE" --composite-size "$COMPOSITE_W" "$COMPOSITE_H" \
+  --cell-size "$CELL_SIZE" --out "$WORK/water-detail.png"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_*.py'
+# Equivalent discovery when pytest is installed:
+python3 -B -m pytest packages/ra2-assets/python -q
+```
+
 ## Local sprite re-detailing (Python, experimental)
 
 `python/redetail_sprites.py` repaints selected body frames of a map cache's HD sprite atlas (`hd:sprites` output) with
@@ -574,8 +617,8 @@ luminance ratio / 2 (0.5 neutral), G = crest glints, B = foam lace, A = unused. 
 space; one tile spans `waterSurfaceScale` screen units of 30 engine px on each axis (positive number, default 13).
 The renderer uses `NoColorSpace`, repeat wrapping on both axes, linear/mipmap filtering and anisotropy 8. Only
 enhanced lake-bed water (`waterBed: true`) with a `waterDetail` layer samples it. An absent tile leaves the existing
-shading intact; a missing or unreadable tile warns once and leaves the surface null. Tiles are made from
-image-model texture tiles by a scratch tool outside the repository.
+shading intact; a missing or unreadable tile warns once and leaves the surface null. Build tiles with
+`python/water_surface.py` as described in [Water tools](#water-surface-detail-and-cliff-foot-stripe-tools-python).
 
 ## Engine rules the extractor encodes
 
