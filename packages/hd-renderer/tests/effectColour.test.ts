@@ -174,7 +174,7 @@ describe('enhanced particle routing and lights', () => {
     const big = random < 0.2;
     const speed = 0.85 * (big ? 0.6 : 1);
     for (let i = 0; i < chunks; i++) {
-      expect(debris.params.getX(i)).toBeCloseTo((0.07 + random * 0.09 * 1.6) * (big ? 1.6 : 1));
+      expect(debris.params.getX(i)).toBeCloseTo((0.07 + random * 0.09 * 1.6) * (big ? 1.6 : 1) * ENHANCED.debris.size);
       expect(debris.velocity.getX(i)).toBeCloseTo((random - 0.5) * 8 * speed);
       expect(debris.velocity.getZ(i)).toBeCloseTo((random - 0.5) * 8 * speed);
       expect(debris.velocity.getY(i)).toBeCloseTo((2.5 + random * 3.5) * speed);

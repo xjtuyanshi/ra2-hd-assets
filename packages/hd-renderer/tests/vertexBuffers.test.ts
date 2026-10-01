@@ -300,7 +300,8 @@ describe('r186 vertex and uniform binding budget', () => {
       dots: 512,
       halo: 128,
       billow: 1536,
-      debris: 1024,
+      // L5 volumetric blasts throw more, larger chunks (22 + 40 per scale), so the pool holds 1536 like smoke.
+      debris: 1536,
       shimmer: 64,
       dust: 64,
       blast: 96,

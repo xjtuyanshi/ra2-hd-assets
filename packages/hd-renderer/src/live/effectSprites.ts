@@ -97,7 +97,7 @@ export const FX_GLOW = 1.25;
 export const HD_FX_FIRE = 1.0;
 /** Flame grade of redrawn fire: share of the temperature re-map (0 = the redraw's own colours) and the heat gamma. */
 export const HD_FX_GRADE = 0.85;
-export const HD_FX_GAMMA = 1.9;
+export const HD_FX_GAMMA = 2.3;
 /**
  * Display-referred (sRGB) flame colour by heat 0..1: dark red-brown, deep red, orange, yellow-orange, white-yellow.
  * The stops sit where heat = dot(display colour, (0.25, 0.5, 0.25)) puts those colours, so a gamma of 1 leaves
@@ -119,7 +119,19 @@ function flameRampDisplay(heat: ShaderNode): ShaderNode {
   }
   return rgb;
 }
-export const HD_FX_EMISSIVE = 2.0;
+/**
+ * HDR gain of the white-hot core. The volumetric redraws paint separate white-hot patches between orange flame and
+ * soot; a gain of 2 let the bloom merge them into one white blob over the soot, so the core sits just over the bloom
+ * threshold. The heat gamma above (2.3) likewise keeps more of the flame orange, red and crimson.
+ */
+export const HD_FX_EMISSIVE = 1.4;
+/**
+ * Exponents applied to the anim's translucency fade (animAlphaSmooth) on redrawn frames: smoke keeps more body than the
+ * fade asks for and flame most of it, because the redrawn frames already thin out on their own.
+ */
+export const HD_FX_FADE = { smoke: 0.25, flame: 0.12 };
+/** Half-width of the frame crossfade around mid-stage (EffectSpriteLayer.hdBlendWidth; 0.5 = a whole-stage blend). */
+export const HD_FX_BLEND_WIDTH = 0.25;
 const CAPACITY = 4096;
 /** Quads are one texel larger on every side, so the filtered edge can fade out instead of being cut. */
 const MARGIN = 1;
@@ -168,6 +180,14 @@ export class EffectSpriteLayer {
   /** Flame grade of redrawn fire (see HdPageMesh): share of the temperature re-map and the gamma on flame heat. */
   readonly hdFireGrade = uniform(HD_FX_GRADE);
   readonly hdFireGamma = uniform(HD_FX_GAMMA);
+  /** Exponents on the anim's translucency fade for redrawn smoke and flame (HD_FX_FADE; uniforms for look reviews). */
+  readonly hdSmokeFade = uniform(HD_FX_FADE.smoke);
+  readonly hdFlameFade = uniform(HD_FX_FADE.flame);
+  /**
+   * Half-width of the crossfade between consecutive redrawn frames, centred on the middle of the engine stage (0.5 =
+   * a linear blend over the whole stage). Chaotic flame blended across a whole stage reads as a soft double exposure.
+   */
+  readonly hdBlendWidth = uniform(HD_FX_BLEND_WIDTH);
   /**
    * The scene drawn so far, for the display-space mix of translucent cards. One node shared by every page mesh: three
    * copies the framebuffer once per render for each distinct node (NodeUpdateType.RENDER, keyed by the node), and each
@@ -581,7 +601,8 @@ class HdPageMesh {
       };
       const current = sample(aRect, aOffsets.xy);
       const next = sample(aNextRect, aOffsets.zw);
-      const blend = clamp(aTiming.x.add(layer.now.sub(aTiming.y).div(max(aTiming.z, 1e-4))), 0, 1);
+      const stage = clamp(aTiming.x.add(layer.now.sub(aTiming.y).div(max(aTiming.z, 1e-4))), 0, 1);
+      const blend = smoothstep(float(0.5).sub(layer.hdBlendWidth), float(0.5).add(layer.hdBlendWidth), stage);
       const rgba: ShaderNode = mix(current, next, blend);
       // Judge fire on the straight display-referred colour; light with little coverage (glow, arcs) is emissive too.
       const rgb = rgba.rgb.div(max(rgba.a, 0.02)).min(1);
@@ -612,7 +633,7 @@ class HdPageMesh {
       // The anim's translucency fade (animAlphaSmooth) is the engine's stand-in for a dissipating cloud; the redrawn
       // frames already thin out, so smoke keeps more body (sqrt of the fade) and flame most of it (fourth root): a
       // half-transparent fireball over grass mixes to an olive murk, and half-transparent smoke reads as a grey veil.
-      const fade: ShaderNode = pow(aAnchor.w, mix(float(0.5), float(0.25), e));
+      const fade: ShaderNode = pow(aAnchor.w, mix(layer.hdSmokeFade, layer.hdFlameFade, e));
       return vec4(lit.mul(fade), rgba.a.mul(fade));
     })();
     const quad = new PlaneGeometry(1, 1);

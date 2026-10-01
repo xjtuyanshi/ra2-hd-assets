@@ -7,6 +7,7 @@ import { VoxelUnits } from '../src/live/voxelUnits';
 import type { Ra2Cache } from '../src/ra2/cache';
 import { SpriteLayer } from '../src/ra2/sprites';
 import { VoxelUnit } from '../src/ra2/voxels';
+import { VolumetricBlastLayer } from '../src/volumetricBlasts';
 import { IsoCamera } from '../src/world';
 
 const object = (x: number): LiveObject => ({
@@ -53,7 +54,12 @@ function presentation() {
   root.addSourceMesh(mesh);
   const visual = { root, mode: 'voxel', type: 'TEST', paletteKey: '', firstFrame: 1 };
   const shroud = { hidden: false, isLocationShrouded: () => shroud.hidden };
-  const effectDriver = { frame: vi.fn(), cards: vi.fn(() => ({ drawn: 0, missing: 0 })), smokeCards: vi.fn() };
+  const effectDriver = {
+    frame: vi.fn(),
+    cards: vi.fn(() => ({ drawn: 0, missing: 0 })),
+    smokeCards: vi.fn(),
+    volumes: vi.fn(),
+  };
   const effectSprites = { setInstances: vi.fn(), now: { value: 0 }, displayScale: { value: 1 } };
   const hd = {
     seconds: () => 1,
@@ -76,6 +82,8 @@ function presentation() {
     hd,
     shroud,
     effectDriver,
+    volumetricBlasts: new VolumetricBlastLayer({ light: staticCards.light, sunDirection: staticCards.toCamera }),
+    volumeInstances: [],
     effectSprites,
     effectArt,
     warnedCells: true,

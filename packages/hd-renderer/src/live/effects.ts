@@ -1,4 +1,6 @@
 import { Vector3 } from 'three/webgpu';
+import { VOLUMETRIC_BLAST_PRESETS, type VolumetricBlast } from '../volumetricBlasts';
+import { VOLUMETRIC_ANIMS } from './volumetricTable';
 import { animFrameAt, type EffectAnim } from '../../../ra2-assets/src/effects';
 import {
   BEAM_LIGHTS,
@@ -293,6 +295,8 @@ export class LiveEffectsDriver {
   garnishEnabled = true;
   /** The live view's opt-out for RGBA flipbooks; native art and procedural garnish keep their existing behavior. */
   hdEnabled = true;
+  /** Opt-in procedural volumes for large blasts in enhanced style. */
+  volumetric: 'off' | 'ray' = 'off';
   /**
    * 'faithful' (default): the garnish stays inside the native art's footprint and lifetime. 'enhanced': the remaster's
    * modern effects around it (EffectsLayer ENHANCED: a real flash of light, glow halo and bloom, rolling lit smoke,
@@ -505,6 +509,7 @@ export class LiveEffectsDriver {
         }
         continue;
       }
+      if (this.volumePolicy(anim.type)) continue;
       const { art: a, sprite } = resolved;
       let index = anim.frame;
       if (index === undefined) {
@@ -601,6 +606,57 @@ export class LiveEffectsDriver {
     return { drawn, missing };
   }
 
+  /** Same selection gate for cards, volumes and the retained HD garnish. */
+  private volumePolicy(type: string): (typeof VOLUMETRIC_ANIMS)[string] | undefined {
+    return this.style === 'enhanced' && this.garnishEnabled && this.volumetric === 'ray'
+      ? VOLUMETRIC_ANIMS[type.toUpperCase()]
+      : undefined;
+  }
+
+  /** Volumes follow native stages and stop as soon as their anim leaves the snapshot. */
+  volumes(art: EffectArt, out: VolumetricBlast[]): void {
+    for (const tracked of this.anims.values()) {
+      const { anim } = tracked;
+      const policy = this.volumePolicy(anim.type);
+      if (!policy || this.hidden(anim.x, anim.y, anim.z)) continue;
+      const resolved = art.anim(anim.type);
+      if (!resolved) continue;
+      const a = resolved.art;
+      const index =
+        anim.frame ??
+        animFrameAt(a, this.logicFrame - tracked.since, anim.uid) ??
+        a.start + Math.max(0, a.frameCount - 1);
+      const frame = resolved.sprite.frames[index];
+      if (!frame || frame.rect[2] <= 0) continue;
+      const end = Math.max(1, anim.frameCount || a.frameCount);
+      const rateFrames = Math.max(1, anim.rate ?? a.rateFrames);
+      const blend0 = anim.stage === undefined ? ((this.logicFrame - tracked.since) % rateFrames) / rateFrames : 0;
+      const stage = (anim.stage ?? animStage(a, index)) + blend0;
+      const rate = this.logicFps / (end * rateFrames);
+      out.push({
+        anchor: tracked.at.clone(),
+        radius: policy.size * pixelsToWorld(a.visW ?? frame.rect[2]) * 0.5,
+        progress0: Math.max(0, Math.min(1, stage / end)),
+        t0: this.pushedAt,
+        rate,
+        lifeSeconds: 1 / rate,
+        seed: anim.uid,
+        style: VOLUMETRIC_BLAST_PRESETS[policy.preset],
+        fade: Math.sqrt(
+          animAlphaSmooth(
+            {
+              translucent: anim.translucent ?? a.translucent,
+              translucency: anim.translucency ?? a.translucency,
+            },
+            stage,
+            end,
+          ),
+        ),
+        push: cardPush(frame),
+      });
+    }
+  }
+
   /** Tracked anims (diagnostics and tests). */
   get tracked(): ReadonlyMap<string, { anim: LiveAnim; row: EffectTableRow; since: number }> {
     return this.anims;
@@ -639,7 +695,8 @@ export class LiveEffectsDriver {
       // haze. The enhanced style adds its own rolling smoke around the art on purpose.
       smoke: 0,
       enhanced,
-      hdArt: enhanced && this.hdEnabled && !!this.hasHdArt?.(tracked.anim.type),
+      hdArt:
+        !!this.volumePolicy(tracked.anim.type) || (enhanced && this.hdEnabled && !!this.hasHdArt?.(tracked.anim.type)),
       // Enhanced: the engine's crater (Scorch=yes / Crater=yes art) glows hot for a moment; the mark itself stays native.
       hotCrater: enhanced && row.scorch === 1,
     };

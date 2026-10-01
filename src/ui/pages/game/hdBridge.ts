@@ -209,6 +209,8 @@ export function startHdBridge(host: HdBridgeHost): () => void {
           weatherIntensity: params.get('hd-weather') === 'rain' ? 0.8 : 0,
           // hd-fx=enhanced: the remaster's modern effects around the engine's own anims (default: faithful).
           effects: params.get('hd-fx') === 'enhanced' ? 'enhanced' : 'faithful',
+          // Development opt-in: retain the default effect cards unless explicitly selected.
+          volumetricEffects: params.get('hd-fxvol') === 'ray' ? 'ray' : 'off',
           // hd-water=enhanced: the remaster's modern water (default: the earlier HD water).
           water: params.get('hd-water') === 'enhanced' ? 'enhanced' : 'classic',
           ...(params.get('hd-vlook') === 'remaster' ? { voxelLook: 'remaster' } : {}),
