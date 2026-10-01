@@ -210,7 +210,10 @@ White adaptation geometrically balances exposure toward the current flat-ground 
 luminance. The display grade runs after tone mapping, before sRGB encoding and the night toe lift; it skips debug
 views and fades out with the night weight, as white adaptation does. Defaults and the `faithful`/`golden` presets are
 neutral and omit the grade node entirely. Grade values update uniforms; only switching between neutral and active
-grading rebuilds the pipeline. These starting values still require reference-image calibration.
+grading rebuilds the pipeline. The `cinematic` values are calibrated by material class (neutral greys, greens, warm
+surfaces, blue/teal) against the three approved target framings (XMP29U2 city park and battle, RiverRam river): neutral
+greys land within about 1-3 b* units of the targets (golden: 7-9 units warmer); the remaining gap in local contrast is
+in the art and lighting, not in the grade.
 
 | Setting                                         | Meaning                                                                                                                                                                                                                                                              |
 | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

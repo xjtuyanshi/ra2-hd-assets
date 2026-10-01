@@ -165,8 +165,8 @@ describe('cinematic preset and sandbox parameters', () => {
     expect(cinematic.settings).toMatchObject({
       whiteAdapt: 1,
       mapTintAdapt: 0.3,
-      gradeBalance: [0.97, 1, 1.06],
-      gradeContrast: 0.15,
+      gradeBalance: [0.955, 1, 1.085],
+      gradeContrast: 0.21,
       gradePivotLift: 0.02,
       gradeSaturation: 1.06,
       gradeShadowTint: [0.8, 1, 1.2],

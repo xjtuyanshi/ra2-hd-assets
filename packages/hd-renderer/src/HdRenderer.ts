@@ -200,8 +200,8 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
   },
   // The approved S2 grade with medium cooling, calibrated on the three approved targets (city park and battle areas of
   // XMP29U2, ref_river of RiverRam; scratchpad finallook4/water/cal): neutral greys (asphalt, concrete) measured at
-  // a* 2.0-2.2 / b* 2.9-5.0 against the targets' 1.1-1.7 / 1.6-1.9 (golden: 5.5 / 9-11), greens and brick within a
-  // few a*/b* units. White balance to the hour's flat-ground light, a third of the map's own warm tint divided out,
+  // a* 1.9-2.1 / b* 2.5-4.5 against the targets' 1.1-1.7 / 1.6-1.9 (golden: 5.5 / 9-11), brick and the river's water
+  // within about one a*/b* unit. White balance to the hour's flat-ground light, a third of the map's own warm tint divided out,
   // a slightly cool residual balance, cool shadows and warm sunlit highlights (warmth from the sun only).
   cinematic: {
     hour: 16.5,
@@ -209,8 +209,8 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       ...GOLDEN_SETTINGS,
       whiteAdapt: 1,
       mapTintAdapt: 0.3,
-      gradeBalance: [0.97, 1, 1.06],
-      gradeContrast: 0.15,
+      gradeBalance: [0.955, 1, 1.085],
+      gradeContrast: 0.21,
       gradePivotLift: 0.02,
       gradeSaturation: 1.06,
       gradeShadowTint: [0.8, 1, 1.2],
