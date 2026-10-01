@@ -9,6 +9,15 @@
  *   ?fx=infantry              infantry art review: one row per type (&itypes=E1,E2,SHK,...), eight facings each, all
  *                             showing sequence &seq= (default Ready) at step &step= (default 0; &animate=N steps it
  *                             every N logic frames). Types listed in &itypes2= belong to house &house2.
+ *   ?fx=bldgs&bldgs=NACNST:0:0:0,NAPOWR:4:0:1  TYPE:dx:dy[:owner] buildings, cell offsets from cx,cy;
+ *                             owner indexes the bench houses (default 0); combine with anims: ?fx=bldgs,TWLT070
+ *   &health=0.4               health of all listed buildings (default 1; <= 0.5 uses damaged art)
+ *   &banims=NAREFNL1:0:3:4,NAREFNOR:0:20:3  SPRITE:start:frames:rate building layers played as the bridge's
+ *                             building anim list (buildingAnim entries attached to every listed building, looping
+ *                             from the spawn), e.g. the refinery's ore unloading that the fallback never shows;
+ *                             a building then draws only the listed layers that it has
+ *   &make=1&time=0.4          omit listed buildings during warm-up, then spawn them to play the engine-style
+ *                             build-up; time selects seconds after spawn (keep the default warm-up for make)
  *   &at=dx,dy;dx,dy           cell offsets from the centre for the listed anims (instead of the diagonal)
  *   &map=XMP29U2&cx=60&cy=62  map cache and centre cell (default: the map's first waypoint)
  *   &zoom=3                   CSS pixels per engine pixel
@@ -293,6 +302,46 @@ function infantrySet(): LiveObject[] {
   return objects;
 }
 
+/** An explicit building layout for comparing intact, damaged and make art at the same camera/lighting. */
+function buildingSet(): LiveObject[] {
+  const health = Number(params.get('health') ?? 1);
+  if (!Number.isFinite(health) || health < 0 || health > 1) throw new Error('health must be between 0 and 1');
+  return (params.get('bldgs') ?? '')
+    .split(',')
+    .filter(Boolean)
+    .map((spec) => {
+      const fields = spec.split(':');
+      const [type, dx, dy] = fields;
+      const x = Number(dx);
+      const y = Number(dy);
+      const owner = Number(fields[3] ?? 0);
+      if (
+        fields.length < 3 ||
+        fields.length > 4 ||
+        !type ||
+        !dx ||
+        !dy ||
+        !Number.isFinite(x) ||
+        !Number.isFinite(y) ||
+        !Number.isInteger(owner) ||
+        !houses.some((h) => h.index === owner)
+      )
+        throw new Error(`Invalid building spec: ${spec}; expected TYPE:dx:dy[:owner]`);
+      const uid = nextUid++;
+      return {
+        id: uid,
+        uid,
+        kind: 'building',
+        type,
+        owner,
+        ...at(cx + x, cy + y),
+        facingRaw: 0,
+        health,
+        isSelected: false,
+      };
+    });
+}
+
 /** Engine timing of an anim type from the effect art sidecar (pnpm hd:effects), when it exists. */
 interface FxArt {
   frames: number;
@@ -355,6 +404,9 @@ function extraObjects(): LiveObject[] {
   }
   return objects;
 }
+const buildings = fxIds.includes('bldgs') ? buildingSet() : [];
+const allObjects = [...units, ...buildings];
+const makeBuildings = params.get('make') === '1';
 const spread = Number(params.get('spread') ?? 1.6);
 const offsets = params
   .get('at')
@@ -362,7 +414,7 @@ const offsets = params
   .map((pair) => pair.split(',').map(Number) as [number, number])
   .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
 const anims: LiveAnim[] = fxIds
-  .filter((id) => id !== 'units' && id !== 'squad' && id !== 'infantry')
+  .filter((id) => id !== 'units' && id !== 'squad' && id !== 'infantry' && id !== 'bldgs')
   .map((type, i, list) => {
     const offset = offsets?.length ? offsets[i % offsets.length]! : null;
     const d = (i - (list.length - 1) / 2) * spread;
@@ -506,15 +558,54 @@ function benchBeams(): NonNullable<LiveSnapshot['effects']>['beams'] {
   return beams;
 }
 
+/** &banims: the listed building layers as the engine's building anim list would hold them now (looping). */
+const buildingLayerSpecs = (params.get('banims') ?? '')
+  .split(',')
+  .filter(Boolean)
+  .map((spec) => {
+    const [type, start, frames, rate] = spec.split(':');
+    const parsed = { type: type ?? '', start: Number(start), frames: Number(frames), rate: Number(rate) };
+    if (!parsed.type || !(parsed.start >= 0) || !(parsed.frames >= 1) || !(parsed.rate >= 1))
+      throw new Error(`Invalid building anim spec: ${spec}; expected SPRITE:start:frames:rate`);
+    return parsed;
+  });
+function buildingLayerAnims(): LiveAnim[] {
+  if (!buildingLayerSpecs.length || spawned === null || frame < spawned) return [];
+  const age = frame - spawned;
+  return buildings.flatMap((b, bi) =>
+    buildingLayerSpecs.map((s, i) => {
+      const stage = Math.floor(age / s.rate) % s.frames;
+      const uid = 50_000 + bi * 64 + i;
+      return {
+        id: uid,
+        uid,
+        type: s.type,
+        x: b.x,
+        y: b.y,
+        z: b.z,
+        frame: s.start + stage,
+        stage,
+        frameCount: s.frames,
+        rate: s.rate,
+        buildingAnim: true,
+        attachedTo: { id: b.id, uid: b.uid, kind: 'building' },
+      };
+    }),
+  );
+}
+
 function snapshot(): LiveSnapshot {
   const listed = anims.map((a, i) => listedAnim(a, i)).filter((a): a is LiveAnim => !!a);
+  listed.push(...buildingLayerAnims());
   return {
     frame,
     view,
     houses,
-    objects: animateInfantry
-      ? units.map((u) => (u.infantrySequence ? { ...u, sequenceFrame: Math.floor(frame / animateInfantry) } : u))
-      : units,
+    // Delaying first appearance lets LiveView's normal make timeline start at the spawn frame.
+    objects: ((objs: LiveObject[]) =>
+      animateInfantry
+        ? objs.map((u) => (u.infantrySequence ? { ...u, sequenceFrame: Math.floor(frame / animateInfantry) } : u))
+        : objs)(makeBuildings && (spawned === null || frame < spawned) ? units : allObjects),
     effects: {
       anims: listed,
       bullets: [],

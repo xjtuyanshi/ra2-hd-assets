@@ -1,12 +1,15 @@
-"""Asset-free tests: python -B -m unittest discover -s packages/ra2-assets/python -p 'test_sprite_normals.py'."""
+"""Asset-free tests: python3 -m pytest packages/ra2-assets/python/test_sprite_normals.py -q."""
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
+import pytest
 from PIL import Image
 
 import sprite_normals as sn
@@ -204,6 +207,178 @@ class AssistTests(unittest.TestCase):
         ok, reasons = sn.assist_passes(sn.check_assist(assist, rgb, alpha, prob, 48.0), 0.88)
         self.assertFalse(ok)
         self.assertTrue(any("IoU" in r for r in reasons))
+
+
+@pytest.fixture
+def library(tmp_path):
+    source = tmp_path / "library"
+    source.mkdir()
+    rect = [3, 4, 16, 18]
+    frame = {"rect": rect, "offset": [22, -18], "page": 0}
+    other = {"rect": [22, 3, 8, 10], "offset": [0, -10], "page": 1}
+    manifest = {
+        "spriteAtlases": [], "spriteAtlasesHd": [],
+        "sprites": {
+            "building:TEST": {"frames": [frame, other]},
+            "anim:TEST_A": {"frames": [{**frame, "page": 1}, {**other, "page": 0}]},
+            "tree:TEST": {"frames": [{"rect": [2, 26, 8, 8], "offset": [-4, -8], "page": 0}]},
+        },
+        "types": {"TEST": {"sprite": "building:TEST", "foundation": [2, 1],
+                             "building": {"layers": [{"sprite": "anim:TEST_A", "damagedSprite": "anim:TEST_AD"}]}}},
+    }
+    rgb, alpha, _ = box_building(32, 36, 18)
+    for page in range(2):
+        indexed = np.zeros((40, 32), np.uint8)
+        rgba = np.zeros((80, 64, 4), np.uint8)
+        indexed[4:22, 3:19] = alpha.reshape(18, 2, 16, 2).max(axis=(1, 3)).astype(np.uint8) * 100
+        rgba[8:44, 6:38, :3] = np.round(rgb * 255).astype(np.uint8)
+        rgba[8:44, 6:38, 3] = alpha.astype(np.uint8) * 255
+        # Only page 1 has art at this rectangle. Page 0's HD colour alone must not count as indexed coverage.
+        indexed[3:13, 22:30] = 100 if page == 1 else 0
+        rgba[6:26, 44:60] = [100, 120, 140, 255]
+        indexed[26:34, 2:10] = 100
+        rgba[52:68, 4:20] = [50, 150, 50, 255]
+        Image.fromarray(indexed).save(source / f"sprites-{page}.png")
+        Image.fromarray(rgba).save(source / f"sprites-{page}@2x.png")
+        manifest["spriteAtlases"].append({"file": f"sprites-{page}.png", "width": 32, "height": 40})
+        manifest["spriteAtlasesHd"].append({"file": f"sprites-{page}@2x.png", "remap": f"remap-{page}.png",
+                                           "width": 64, "height": 80, "scale": 2})
+    (source / "library.json").write_text(json.dumps(manifest))
+    return source, manifest
+
+
+def run_library(source, output, *options):
+    assert sn.main(["--library", str(source), "--out-dir", str(output), *options]) == 0
+    return json.loads((output / "normals.json").read_text())
+
+
+def pixels(path):
+    with Image.open(path) as im:
+        return np.array(im)
+
+
+def test_library_layout_foundations_and_empty_frames(library, tmp_path):
+    source, manifest = library
+    before = {p.name: p.read_bytes() for p in source.iterdir()}
+    output = tmp_path / "materials"
+    with patch.object(sn, "classify_building", wraps=sn.classify_building) as classify:
+        sidecar = run_library(source, output)
+    assert sidecar["version"] == 1
+    assert sidecar["encoding"] == sn.ENCODING
+    assert set(sidecar["pages"]) == {"0", "1"}
+    assert sidecar["pages"]["0"] == {
+        "file": "sprites-0@2x-normals.png", "atlas": "sprites-0@2x.png", "width": 64, "height": 80,
+        "scale": 2, "materialWidth": 32, "materialHeight": 40, "frames": 1,
+    }
+    assert sidecar["pages"]["1"]["frames"] == 2
+    for page in (0, 1):
+        data = pixels(output / sidecar["pages"][str(page)]["file"])
+        valid = np.zeros((40, 32), bool)
+        valid[4:22, 3:19] = True
+        if page == 1:
+            valid[3:13, 22:30] = True
+        assert np.all(data[valid, 3] > 0)
+        assert np.all(data[~valid] == 0)
+    # Both the body and the anim get the non-square foundation from the building type (corner x = 16 at 2x).
+    assert sum(call.args[2] == 16 for call in classify.call_args_list) == 2
+    assert {p.name: p.read_bytes() for p in source.iterdir()} == before
+    frames = sn.library_frames(manifest, ["anim:"], None)
+    assert frames[1][0][3]["foundation"] == [2, 1]
+    manifest["types"] = {}
+    manifest["sprites"]["anim:TEST_A"]["foundation"] = [9, 9]
+    assert sn.library_frames(manifest, ["anim:"], None)[1][0][3]["foundation"] == [1, 1]
+
+
+def test_library_keeps_one_pixel_wide_nonempty_frames(library, tmp_path):
+    source, manifest = library
+    manifest["sprites"]["building:TEST"]["frames"].append({"rect": [0, 0, 1, 2], "offset": [0, 0], "page": 0})
+    (source / "library.json").write_text(json.dumps(manifest))
+    indexed = pixels(source / "sprites-0.png")
+    indexed[:2, :1] = 100
+    Image.fromarray(indexed).save(source / "sprites-0.png")
+    rgba = pixels(source / "sprites-0@2x.png")
+    rgba[:4, :2] = [120, 120, 120, 255]
+    Image.fromarray(rgba).save(source / "sprites-0@2x.png")
+    output = tmp_path / "materials"
+    sidecar = run_library(source, output, "--pages", "0")
+    assert sidecar["pages"]["0"]["frames"] == 2
+    assert np.all(pixels(output / sidecar["pages"]["0"]["file"])[:2, :1, 3] > 0)
+
+
+def test_library_downsample_matches_2x_area_filter(library, tmp_path):
+    source, _ = library
+    full, small = tmp_path / "2x", tmp_path / "1x"
+    run_library(source, full, "--out-scale", "2")
+    run_library(source, small)
+    for page in (0, 1):
+        filename = f"sprites-{page}@2x-normals.png"
+        encoded = pixels(full / filename).astype(np.float32)
+        expected = np.round(sn.downsample_material(encoded))
+        actual = pixels(small / filename)
+        assert actual.shape == (40, 32, 4)
+        np.testing.assert_allclose(actual, expected, atol=1)
+        assert np.array_equal(actual[..., 3] == 0, expected[..., 3] == 0)
+
+
+def test_area_filter_ignores_no_data_in_every_channel():
+    data = np.zeros((4, 6, 4), np.float32)
+    data[0, 0] = [0.2, 0.8, 1.0, 0.6]
+    data[1, 1] = [0.6, 0.4, 0.2, 1.0]
+    data[0, 4] = [0.1, 0.9, 0.4, 0.3]
+    data[2:, :, :3] = 1  # Even nonzero RGB is no-data when alpha is zero.
+    down = sn.downsample_material(data)
+    np.testing.assert_allclose(down[0, 0], [0.4, 0.6, 0.6, 0.8])
+    np.testing.assert_allclose(down[0, 2], data[0, 4])
+    assert np.all(down[1] == 0)
+    assert np.all(down[0, 1] == 0)
+
+
+def test_library_page_selection_only_and_merge(library, tmp_path):
+    source, _ = library
+    output = tmp_path / "materials"
+    first = run_library(source, output, "--pages", "0")
+    original = (output / first["pages"]["0"]["file"]).read_bytes()
+    merged = run_library(source, output, "--pages", "1", "--only", "anim:TEST_A#0", "--out-scale", "2")
+    assert merged["pages"]["0"] == first["pages"]["0"]
+    assert (output / first["pages"]["0"]["file"]).read_bytes() == original
+    assert merged["pages"]["1"]["frames"] == 1
+    assert merged["pages"]["1"]["materialWidth"] == 64
+    assert not pixels(output / merged["pages"]["1"]["file"])[6:26, 44:60].any()
+    replaced = run_library(source, output, "--pages", "1", "--only", "building:TEST")
+    assert replaced["pages"]["0"] == first["pages"]["0"]
+    assert replaced["pages"]["1"]["materialWidth"] == 32
+    assert not list(output.glob("*.tmp"))
+
+
+def test_library_default_pages_require_hd_and_selected_data(library, tmp_path):
+    source, manifest = library
+    manifest["spriteAtlasesHd"][0] = None
+    (source / "library.json").write_text(json.dumps(manifest))
+    sidecar = run_library(source, tmp_path / "materials", "--only", "anim:TEST_A")
+    assert set(sidecar["pages"]) == {"1"}
+    with pytest.raises(ValueError, match="no HD atlas"):
+        run_library(source, tmp_path / "missing", "--pages", "0")
+
+
+def test_library_higher_resolution_colour_uses_2x_classifier(library, tmp_path):
+    source, manifest = library
+    ref = manifest["spriteAtlasesHd"][0]
+    with Image.open(source / ref["file"]) as im:
+        im.resize((128, 160), Image.Resampling.NEAREST).save(source / "sprite-4x.png")
+    ref.update(file="sprite-4x.png", width=128, height=160, scale=4)
+    (source / "library.json").write_text(json.dumps(manifest))
+    sidecar = run_library(source, tmp_path / "materials", "--pages", "0")
+    assert sidecar["pages"]["0"]["scale"] == 4
+    assert sidecar["pages"]["0"]["width"] == 128
+    assert sidecar["pages"]["0"]["materialWidth"] == 32
+
+
+def test_library_cli_excludes_cache_and_rejects_invalid_pages():
+    with pytest.raises(SystemExit):
+        sn.build_parser().parse_args(["--library", "a", "--cache", "b"])
+    for value in ("-1", "0,no", ""):
+        with pytest.raises(SystemExit):
+            sn.build_parser().parse_args(["--library", "a", "--pages", value])
 
 
 if __name__ == "__main__":

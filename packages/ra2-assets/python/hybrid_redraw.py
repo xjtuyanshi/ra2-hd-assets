@@ -235,8 +235,8 @@ def attach_style(fd: FrameData, cache: rd.MapCache, box: tuple[int, int, int, in
 
 
 # ---------------------------------------------------------------------------------------------------- model input
-def model_input(fd: FrameData, esrgan: Path | None, lock: list[str] | None = None) -> tuple[np.ndarray, dict]:
-    """4x Real-ESRGAN of the frame (margin MARGIN, edge-bled) composited on flat grey, enlarged for small frames."""
+def model_input_4x(fd: FrameData, esrgan: Path | None, lock: list[str] | None = None) -> np.ndarray:
+    """Native 4x input with margin; sheet callers enlarge only after arranging all panels."""
     h, w = fd.alpha1.shape
     box = np.zeros((h + 2 * MARGIN, w + 2 * MARGIN, 3), np.float32)
     known = np.zeros(box.shape[:2], bool)
@@ -251,7 +251,12 @@ def model_input(fd: FrameData, esrgan: Path | None, lock: list[str] | None = Non
     else:
         up = rd.realesrgan(esrgan, box, 4)
     a4 = rd.smooth_alpha(known.astype(np.float32), 4)
-    comp = up * a4[..., None] + GREY * (1 - a4[..., None])
+    return up * a4[..., None] + GREY * (1 - a4[..., None])
+
+
+def model_input(fd: FrameData, esrgan: Path | None, lock: list[str] | None = None) -> tuple[np.ndarray, dict]:
+    """4x Real-ESRGAN of the frame (margin MARGIN, edge-bled) composited on flat grey, enlarged for small frames."""
+    comp = model_input_4x(fd, esrgan, lock)
     long_side = max(comp.shape[:2])
     f = 1 if long_side >= ENLARGE_BELOW else math.ceil(MIN_LONG_SIDE / long_side)
     canvas = comp if f == 1 else np.asarray(Image.fromarray(to_u8(comp)).resize(
@@ -366,6 +371,33 @@ class Redraw:
     registration: dict = field(default_factory=dict)
 
 
+def registered_4x(raw: np.ndarray, canvas: tuple[int, int], scale4: tuple[int, int], enlarge: int,
+                  params: tuple[float, float, float, float], origin: tuple[int, int] = (0, 0)) -> np.ndarray:
+    """Sample a registered 4x region directly from the full-resolution model image in linear light.
+
+    ``origin`` is the region's top-left canvas edge. Parameters map full canvas pixel centres to model canvas
+    centres, so the same convention works for a single frame and for independently registered sheet panels.
+    """
+    cw, ch = canvas
+    w4, h4 = scale4
+    sx, tx, sy, ty = params
+    rx, ry = raw.shape[1] / cw, raw.shape[0] / ch
+
+    def x(edge: float) -> float:
+        return (sx * (origin[0] + enlarge * edge - 0.5) + tx + 0.5) * rx
+
+    def y(edge: float) -> float:
+        return (sy * (origin[1] + enlarge * edge - 0.5) + ty + 0.5) * ry
+
+    box = (x(0), y(0), x(w4), y(h4))
+    if not all(math.isfinite(v) for v in box) or sx <= 0 or sy <= 0:
+        raise ValueError("invalid registration scale/translation")
+    # Models may translate an object beyond the canvas. Extend border colours before Pillow's box sampler.
+    pad = max(64, math.ceil(max(-box[0], -box[1], box[2] - raw.shape[1], box[3] - raw.shape[0], 0)) + 4)
+    rawp = np.pad(raw, ((pad, pad), (pad, pad), (0, 0)), mode="edge")
+    return resize_linear(rawp, (w4, h4), box=tuple(v + pad for v in box))
+
+
 def postprocess(fd: FrameData, meta: dict, inp_canvas: np.ndarray, raw: np.ndarray, sigma_l: float,
                 sigma_ab: float, lock: float = 1.0, edge_hf: float = 0.75) -> Redraw:
     """Register a model output onto the frame, downsample, lock colour, restore alpha and paint."""
@@ -377,22 +409,7 @@ def postprocess(fd: FrameData, meta: dict, inp_canvas: np.ndarray, raw: np.ndarr
     weight = dilate(foreground(inp_canvas, 6.0), 8)
     params, diag = register(inp_canvas, out_c, weight)
     sx, tx, sy, ty = params
-    # Resample the 4x frame (with margin) straight from the full-size model image: canvas pixel u = f * x4 + (f-1)/2,
-    # model canvas coordinate s * u + t, raw coordinate scaled by raw/canvas. Pixel-centre -> edge convention for box.
-    rx, ry = raw.shape[1] / cw, raw.shape[0] / ch
-
-    def to_raw_x(x_edge_4x: float) -> float:
-        u = f * x_edge_4x  # edge coordinate at canvas scale
-        return (sx * (u - 0.5) + tx + 0.5) * rx
-
-    def to_raw_y(y_edge_4x: float) -> float:
-        v = f * y_edge_4x
-        return (sy * (v - 0.5) + ty + 0.5) * ry
-
-    pad = 64
-    rawp = np.pad(raw, ((pad, pad), (pad, pad), (0, 0)), mode="edge")
-    boxr = (to_raw_x(0) + pad, to_raw_y(0) + pad, to_raw_x(w4) + pad, to_raw_y(h4) + pad)
-    reg4 = resize_linear(rawp, (w4, h4), box=boxr)
+    reg4 = registered_4x(raw, (cw, ch), (w4, h4), f, params)
     m2 = 2 * meta["margin"]
     raw2m = rd.box_down_linear(reg4, 2)
     x, y, w, h = fd.ref.rect
@@ -413,7 +430,8 @@ def postprocess(fd: FrameData, meta: dict, inp_canvas: np.ndarray, raw: np.ndarr
     return Redraw(rgba, fd.displayed(rgba), raw2, raw2m, reg4, diag)
 
 
-def lock_colour(fd: FrameData, rep2: np.ndarray, sigma_l: float, sigma_ab: float, lock: float, edge_hf: float
+def lock_colour(fd: FrameData, rep2: np.ndarray, sigma_l: float, sigma_ab: float, lock: float, edge_hf: float,
+                *, lock_ab: float | None = None
                 ) -> np.ndarray:
     """Low frequencies of Lab from the original art (weight ``lock``), higher frequencies from the redraw."""
     a2n = fd.alpha1.repeat(2, 0).repeat(2, 1)
@@ -436,7 +454,8 @@ def lock_colour(fd: FrameData, rep2: np.ndarray, sigma_l: float, sigma_ab: float
             low_style = rd.masked_blur(style_l[0], wgt * (style_l[1] > 0), sigma)
             share = rd.masked_blur(style_l[1], wgt, sigma)
             low_ref = low_ref + share * (low_style - low_ref)
-        out[..., c] = lab_rep[..., c] + lock * (low_ref - low_rep)
+        amount = lock if c == 0 or lock_ab is None else lock_ab
+        out[..., c] = lab_rep[..., c] + amount * (low_ref - low_rep)
     # Outermost silhouette ring: the model saw flat background next to it; damp its detail there.
     ring = rd.erode_distance(fd.alpha2 > 0, 2) == 1
     if edge_hf < 1:

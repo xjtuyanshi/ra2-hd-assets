@@ -26,7 +26,7 @@ function presentation(interpolating: boolean) {
   const library = { revision: 0 };
   const applyObjects = vi.fn();
   const applyEffects = vi.fn();
-  const hd = { seconds: () => 1, frame: vi.fn(), windowsWanted: () => false };
+  const hd = { seconds: () => 1, frame: vi.fn(), windowsWanted: () => false, materialsWanted: vi.fn(() => false) };
   const view = Object.assign(Object.create(LiveView.prototype) as object, {
     current: { snapshot: { frame: 2 }, at: 10 },
     previous: { snapshot: { frame: 1 }, at: 0 },
@@ -212,6 +212,20 @@ describe('live presentation scheduling', () => {
     p.view.render(20);
     p.view.render(24);
     expect(p.applyObjects.mock.calls.map((call) => call[2])).toEqual([0.2, 0.6, 1]);
+    expect(p.applyEffects).toHaveBeenCalledTimes(1);
+  });
+
+  it('revisits library layers on look changes without a new engine snapshot, then sleeps until art arrives', () => {
+    const p = presentation(false);
+    p.view.render(10);
+    p.hd.materialsWanted.mockReturnValue(true);
+    p.view.render(20);
+    p.view.render(30);
+    expect(p.applyObjects).toHaveBeenCalledTimes(2);
+    p.library.revision++;
+    p.view.render(40);
+    p.view.render(50);
+    expect(p.applyObjects).toHaveBeenCalledTimes(3);
     expect(p.applyEffects).toHaveBeenCalledTimes(1);
   });
 });

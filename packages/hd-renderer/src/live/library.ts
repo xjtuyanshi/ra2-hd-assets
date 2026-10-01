@@ -2,6 +2,12 @@ import { DataTexture, NearestFilter, NoColorSpace, RedFormat, Texture, UnsignedB
 import type { LibraryType, TypeLibrary } from '../../../ra2-assets/src/library';
 import { indexedBitmapPixels } from './indexedPixels';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
+import type { SpriteMaterialAtlas } from '../ra2/spriteLook';
+import {
+  loadSpriteMaterialAtlas,
+  validateLibrarySpriteMaterials,
+  type LibrarySpriteMaterialsSidecar,
+} from '../ra2/spriteMaterials';
 import {
   addPalette,
   fetchOptionalJson,
@@ -32,6 +38,8 @@ export class LiveLibrary {
   private readonly voxels = new Map<string, VoxelModel | 'loading' | 'failed'>();
   private readonly hdPages = new Map<number, HdAtlas | 'loading' | 'failed'>();
   private readonly windowPages = new Map<number, Texture | 'loading' | 'failed'>();
+  private readonly materialPages = new Map<number, SpriteMaterialAtlas | 'loading' | 'failed'>();
+  private materialsDisposed = false;
   /** Uploads a freshly decoded page straight to the GPU (the renderer's initTexture); see loadIndexedPage. */
   uploadPage: ((texture: Texture) => void) | null = null;
 
@@ -40,6 +48,7 @@ export class LiveLibrary {
     readonly library: TypeLibrary,
     /** Lit-window masks per atlas page (pnpm hd:lights -- --library <theater>), when extracted. */
     readonly windows: WindowsIndex | null,
+    private readonly materials: LibrarySpriteMaterialsSidecar | null,
   ) {}
 
   /** Null when the theater has no extracted library (pnpm hd:library), in which case the map cache is used alone. */
@@ -62,7 +71,57 @@ export class LiveLibrary {
     for (const [key, file] of Object.entries(library.palettes))
       addPalette(cache, LIBRARY_PALETTE_PREFIX + key, await readPalettePng(`${root}/${file}`));
     const windows = await fetchOptionalJson<WindowsIndex>(`${root}/windows.json`);
-    return new LiveLibrary(root, library, windows);
+    const materials = await fetchOptionalJson(`${root}/normals.json`, validateLibrarySpriteMaterials);
+    for (const [index, page] of Object.entries(materials?.pages ?? {})) {
+      const hd = library.spriteAtlasesHd?.[Number(index)];
+      if (
+        !hd ||
+        hd.width !== page.width ||
+        hd.height !== page.height ||
+        hd.file !== page.atlas ||
+        hd.scale !== page.scale
+      ) {
+        console.warn(
+          `${root}/normals.json: page ${index} made for ${page.atlas} (${page.width}x${page.height}, scale ${page.scale}), ignored`,
+        );
+        delete materials!.pages[index];
+      }
+    }
+    return new LiveLibrary(root, library, windows, materials);
+  }
+
+  /** Whether a compatible material page exists and has not failed; this never requests the PNG. */
+  hasMaterialsPage(index: number): boolean {
+    return (
+      !this.materialsDisposed && !!this.materials?.pages[String(index)] && this.materialPages.get(index) !== 'failed'
+    );
+  }
+
+  /** Material data loads only when an enhanced look needs it. A pending/failed page keeps the existing art. */
+  materialsPage(index: number): SpriteMaterialAtlas | null {
+    if (!this.hasMaterialsPage(index)) return null;
+    const entry = this.materialPages.get(index);
+    if (entry === undefined) {
+      this.materialPages.set(index, 'loading');
+      const page = this.materials!.pages[String(index)]!;
+      void loadSpriteMaterialAtlas(`${this.base}/${page.file}`).then((atlas) => {
+        if (this.materialsDisposed) {
+          atlas?.texture.dispose();
+          return;
+        }
+        this.materialPages.set(index, atlas ?? 'failed');
+        this.revision++;
+      });
+      return null;
+    }
+    return typeof entry === 'string' ? null : entry;
+  }
+
+  /** The live view owns these shared textures; replacing a sprite mesh must not release them. */
+  disposeMaterials(): void {
+    this.materialsDisposed = true;
+    for (const atlas of this.materialPages.values()) if (typeof atlas !== 'string') atlas.texture.dispose();
+    this.materialPages.clear();
   }
 
   /** Whether the page has a lit-window mask (loaded or loading). */

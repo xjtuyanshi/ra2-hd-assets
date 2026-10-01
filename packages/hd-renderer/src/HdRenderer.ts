@@ -110,10 +110,10 @@ export interface HdSettings {
   /**
    * Enhanced look on original art (ra2/spriteLook.ts), opt-in: with every value 0 the frame is the faithful one, bit
    * for bit. relight: the sun relights building and tree art as a delta on its baked shading (needs the map's sprite
-   * material atlas); specular: sun highlights on facades and roofs; glass: sky reflection and glints on window panes;
-   * occlusion: baked occlusion and soft ground
-   * contact under buildings; shadowFollow: SHP shadows turn and stretch with the sun; shadowSoftness: their penumbra
-   * grows with distance; wetReflections: buildings and trees mirrored on wet paving.
+   * material atlas or the live library page's); specular: sun highlights on facades and roofs; glass: sky reflection
+   * and glints on window panes; occlusion: baked occlusion and soft ground contact under buildings; shadowFollow:
+   * SHP shadows turn and stretch with the sun; shadowSoftness: their penumbra grows with distance; wetReflections:
+   * buildings and trees mirrored on wet paving.
    */
   relight: number;
   specular: number;
@@ -1056,6 +1056,12 @@ export class HdRenderer {
    */
   windowsWanted(): boolean {
     return this.atmosphere.windows && this.lighting.nightAt(this.state.environment.timeOfDay) > WINDOW_NIGHT[0];
+  }
+
+  /** Whether per-pixel sprite materials can contribute, known before frame() updates the look uniforms. */
+  materialsWanted(): boolean {
+    const s = this.settings;
+    return s.relight > 0 || s.occlusion > 0 || s.specular > 0 || s.glass > 0;
   }
 
   /** Release this renderer's shader resources and GPU targets; call once the view stops presenting. */

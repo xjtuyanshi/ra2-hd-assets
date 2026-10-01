@@ -418,6 +418,7 @@ export class LiveView {
   private objectLibraryRevision = -1;
   private objectArtRevision = -1;
   private objectsWindows = false;
+  private objectsMaterials = false;
   private effectArtRevision = -1;
   private readonly root = new Group();
   private readonly voxelUnits: VoxelUnits;
@@ -428,7 +429,7 @@ export class LiveView {
   private readonly libraryPaletteKeys = new Map<string, string>();
   private readonly houseColour = new Map<number, number>();
   private readonly sprites: SpriteLayer;
-  private readonly pageLayers = new Map<number, { layer: SpriteLayer; windows: boolean }>();
+  private readonly pageLayers = new Map<number, { layer: SpriteLayer; windows: boolean; materials: boolean }>();
   private readonly shroud: ShroudLayer;
   private readonly effectDriver: LiveEffectsDriver;
   private readonly effectArt: EffectArt | null;
@@ -850,19 +851,22 @@ export class LiveView {
       const libraryRevision = this.library?.revision ?? 0;
       const artRevision = this.effectArt?.revision ?? 0;
       const windows = this.hd.windowsWanted();
+      const materials = this.hd.materialsWanted();
       const objectAlpha = this.objectsInterpolate ? alpha : 1;
       if (
         this.objectsFor !== current ||
         this.objectsAlpha !== objectAlpha ||
         this.objectLibraryRevision !== libraryRevision ||
         this.objectArtRevision !== artRevision ||
-        this.objectsWindows !== windows
+        this.objectsWindows !== windows ||
+        this.objectsMaterials !== materials
       ) {
         if (
           this.objectsFor !== current ||
           this.objectLibraryRevision !== libraryRevision ||
           this.objectArtRevision !== artRevision ||
-          this.objectsWindows !== windows
+          this.objectsWindows !== windows ||
+          this.objectsMaterials !== materials
         )
           this.painterDirty = true;
         this.applyObjects(previous, current, objectAlpha);
@@ -871,6 +875,7 @@ export class LiveView {
         this.objectLibraryRevision = libraryRevision;
         this.objectArtRevision = artRevision;
         this.objectsWindows = windows;
+        this.objectsMaterials = materials;
       }
       // Effect cards change with the logic frame only: rebuilt per snapshot (and while art is still loading).
       if (this.effectsFor !== current || this.effectArtRevision !== artRevision) {
@@ -906,6 +911,9 @@ export class LiveView {
     for (const layer of this.smudgeLayers.values()) this.disposeOverlayLayer(layer);
     this.smudgeLayers.clear();
     this.uploadedSmudges.clear();
+    for (const { layer } of this.pageLayers.values()) this.disposeOverlayLayer(layer);
+    this.pageLayers.clear();
+    this.library?.disposeMaterials();
     this.hd.dispose();
     this.visuals.clear();
     this.appearances.clear();
@@ -1168,16 +1176,20 @@ export class LiveView {
     // then rebuild its layer with it; by day and while the mask loads the layer draws without. Decided from the hour
     // (not windowGain, which hd.frame only sets after this), so a match starting at night builds each layer once.
     const wantWindows = this.hd.windowsWanted() && this.library!.hasWindowsPage(page);
-    if (existing && (existing.windows || !wantWindows)) return existing.layer;
+    const wantMaterials = !indexedOnly && this.hd.materialsWanted() && this.library!.hasMaterialsPage(page);
+    if (existing && (existing.windows || !wantWindows) && (existing.materials || !wantMaterials)) return existing.layer;
     const atlas = this.library?.page(page);
     if (!atlas) return existing?.layer ?? null;
     // Wait for the page's HD art when it has it, so a layer is never built twice for its colour texture.
     const hd = indexedOnly ? null : this.library!.hdPage(page);
     if (!indexedOnly && !hd && this.library!.hasHdPage(page)) return existing?.layer ?? null;
-    const windows = wantWindows ? this.library!.windowsPage(page) : null;
+    // Retain already attached masks when the other sidecar arrives, even if the hour/look changed meanwhile.
+    const windows = wantWindows || existing?.windows ? this.library!.windowsPage(page) : null;
+    const materials = wantMaterials || existing?.materials ? this.library!.materialsPage(page) : null;
     // While a wanted mask loads, keep drawing what exists (or wait, like for HD art) instead of building twice.
     if (wantWindows && !windows) return existing?.layer ?? null;
-    if (existing && !windows) return existing.layer;
+    // On first use, draw the available art while materials load. Later arrivals replace the mesh just once.
+    if (existing && wantMaterials && !materials) return existing.layer;
     if (existing) {
       const mesh = existing.layer.mesh;
       this.root.remove(mesh);
@@ -1185,11 +1197,11 @@ export class LiveView {
       (mesh.material as { dispose(): void }).dispose();
       mesh.dispose();
     }
-    const layer = new SpriteLayer(this.cache, [], LIVE_SPRITE_CAPACITY, atlas, hd, windows);
+    const layer = new SpriteLayer(this.cache, [], LIVE_SPRITE_CAPACITY, atlas, hd, windows, materials);
     layer.mesh.name = `live-sprites-${key}`;
     this.shareSpriteUniforms(layer);
     this.root.add(layer.mesh);
-    this.pageLayers.set(key, { layer, windows: !!windows });
+    this.pageLayers.set(key, { layer, windows: !!windows, materials: !!materials });
     return layer;
   }
 

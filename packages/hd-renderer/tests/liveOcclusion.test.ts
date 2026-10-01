@@ -55,7 +55,14 @@ function presentation() {
   const shroud = { hidden: false, isLocationShrouded: () => shroud.hidden };
   const effectDriver = { frame: vi.fn(), cards: vi.fn(() => ({ drawn: 0, missing: 0 })), smokeCards: vi.fn() };
   const effectSprites = { setInstances: vi.fn(), now: { value: 0 }, displayScale: { value: 1 } };
-  const hd = { seconds: () => 1, meanExposure: 2, frame: vi.fn(), windowsWanted: () => false, view: new IsoCamera() };
+  const hd = {
+    seconds: () => 1,
+    meanExposure: 2,
+    frame: vi.fn(),
+    windowsWanted: () => false,
+    materialsWanted: () => false,
+    view: new IsoCamera(),
+  };
   const effectArt = { revision: 0, particle: () => ({ sprite: { frames: [frame] }, art: { translucency: 0 } }) };
   const state = {
     current: null as null | { snapshot: LiveSnapshot; at: number; byUid: Map<number, LiveObject> },
