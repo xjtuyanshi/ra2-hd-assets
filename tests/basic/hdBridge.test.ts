@@ -288,6 +288,31 @@ describe('HD 桥状态机', () => {
       lasers: [],
       electricBolts: [],
       particleSystems: [],
+      radBeams: [
+        {
+          id: 40,
+          type: 'rad',
+          source: { x: 256, y: 512, z: 104 },
+          target: { x: 512, y: 768, z: 208 },
+          color: [30, 255, 70],
+          period: 20,
+          amplitude: 40,
+          age: 10,
+          progress: 0.5,
+          sustained: false,
+        },
+      ],
+      waves: [
+        {
+          id: 41,
+          uid: 42,
+          type: 'sonic',
+          source: { x: 256, y: 512, z: 104 },
+          target: { x: 512, y: 768, z: 208 },
+          intensity: 50,
+          progress: 0.5,
+        },
+      ],
     };
     harness.setState(state);
     await advance(16);
@@ -300,6 +325,8 @@ describe('HD 桥状态机', () => {
     expect(pushed.objects[0]).toMatchObject({ health: 0, infantrySequence: 'Die1', sequenceFrame: 2 });
     expect(pushed.effects!.anims[0]).toMatchObject({ frame: 10, stage: 8, translucency: 25 });
     expect(pushed.effects!.anims[1]!.buildingAnim).toBe(true);
+    expect(pushed.effects!.radBeams).toEqual(state.effects!.radBeams);
+    expect(pushed.effects!.waves).toEqual(state.effects!.waves);
     harness.setState({ ...next, effects: { ...next.effects!, anims: [] } });
     await advance(16);
     expect(view.push.mock.calls.at(-1)![0].effects!.anims).toEqual([]);

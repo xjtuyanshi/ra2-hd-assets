@@ -11,6 +11,7 @@ import type {
 } from '../renderState';
 import { createByteViewAccessor, type GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { YR_BUILDING_RULES } from './buildingRenderState';
+import { YR_BEAMS_GLOBALS, YR_BEAMS_LIMITS } from './beamsReader';
 import {
   createYrEffectsReader,
   YR_EFFECTS_GLOBALS,
@@ -247,6 +248,20 @@ function readChangeKey(memory: () => GuestMemoryAccessor): number[] | null {
         span(pointer, 0, size);
       }
     }
+    // RadBeam ages during draw; waves can change endpoints/intensity in another same-frame publication.
+    for (const [kind, size] of [
+      ['radBeams', 0x80],
+      ['waves', 0x1d4],
+    ] as const) {
+      word(m.u32(YR_BEAMS_GLOBALS[kind] + 8)); // Capacity also participates in beamsReader validation.
+      const pointers = readPointerVector(m, YR_BEAMS_GLOBALS[kind], YR_BEAMS_LIMITS[kind]);
+      if (!pointers) return null;
+      word(pointers.length);
+      for (const pointer of pointers) {
+        word(pointer);
+        span(pointer, 0, size);
+      }
+    }
     // Layer sorting may finish after the logic frame counter changed. Do not retain a stale registered tie order
     // just because a later poll observes that same frame, including while the match is paused.
     for (let layer = 0; layer < 5; layer++) {
@@ -407,6 +422,13 @@ function projectEffects(effects: YrEffects): GameRenderEffects {
       target: point(target),
       innerColor,
     })),
+    radBeams: effects.radBeams?.map((beam) => ({
+      ...beam,
+      source: point(beam.source),
+      target: point(beam.target),
+      color: [...beam.color],
+    })),
+    waves: effects.waves?.map((wave) => ({ ...wave, source: point(wave.source), target: point(wave.target) })),
     // EBolt::Draw 0x4C2797..0x4C279C skips lifetime zero even before DrawAll removes the object.
     electricBolts: effects.electricBolts
       .filter((bolt) => bolt.lifetime > 0)

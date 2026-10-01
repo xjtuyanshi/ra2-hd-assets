@@ -76,6 +76,7 @@ function presentation() {
     hd,
     shroud,
     effectDriver,
+    liveBeams: { update: vi.fn(), displayScale: { value: 1 } },
     effectSprites,
     effectArt,
     warnedCells: true,

@@ -3,6 +3,7 @@ import { GAME_RENDER_SHROUD } from '../../src/games/renderState';
 import { createByteViewAccessor } from '../../src/games/shared/memoryAccessor';
 import type { ReadYrEffectsOptions, YrEffects } from '../../src/games/yr/effectsReader';
 import { YR_EFFECTS_GLOBALS as E } from '../../src/games/yr/effectsReader';
+import { YR_BEAMS_GLOBALS as B, YR_BEAMS_OFFSETS as BO } from '../../src/games/yr/beamsReader';
 import { YR_BUILDING_RULES as R } from '../../src/games/yr/buildingRenderState';
 import type { ReadYrSmudgeOptions, YrSmudges } from '../../src/games/yr/smudgeReader';
 import type { ReadYrOverlayOptions, YrOverlays } from '../../src/games/yr/overlayReader';
@@ -635,6 +636,64 @@ describe('YR 1.001 render state for the HD bridge', () => {
     memory.u32(E.anims + 0x10, 0);
     fx.anims = [];
     expect(h.read()!.effects!.anims).toEqual([]);
+  });
+
+  it('publishes native beam metadata and invalidates same-frame age, intensity, vector capacity and removal', () => {
+    const memory = keyMemory(),
+      h = sources(memory),
+      fx = yrEffects(100);
+    h.readEffects.mockReturnValue(fx);
+    const source = { x: 256, y: 512, z: 104 },
+      target = { x: 1536, y: 1024, z: 208 };
+    fx.radBeams = [
+      {
+        id: 20,
+        type: 'rad',
+        source,
+        target,
+        color: [30, 250, 60],
+        period: 20,
+        amplitude: 40,
+        age: 5,
+        progress: 0.25,
+        sustained: false,
+      },
+    ];
+    fx.waves = [{ id: 21, uid: 22, type: 'magnetron', source, target, intensity: 50, progress: 0.5 }];
+    const items = 0xb70000,
+      rad = 0xb71000,
+      wave = 0xb72000;
+    for (const [base, pointer, offset] of [
+      [B.radBeams, rad, 0],
+      [B.waves, wave, 4],
+    ]) {
+      memory.u32(base! + 4, items + offset!);
+      memory.u32(base! + 8, 1);
+      memory.u32(base! + 0x10, 1);
+      memory.u32(items + offset!, pointer!);
+    }
+    const first = h.read()!;
+    expect(first.effects!.radBeams).toEqual(fx.radBeams);
+    expect(first.effects!.waves).toEqual(fx.waves);
+    expect(h.read()).toBe(first);
+    memory.u32(rad + BO.radAge, 6);
+    fx.radBeams[0]!.age = 6;
+    fx.radBeams[0]!.progress = 0.3;
+    const aged = h.read()!;
+    expect(aged).not.toBe(first);
+    expect(first.effects!.radBeams![0]!.age).toBe(5);
+    fx.radBeams[0]!.color[0] = 100;
+    expect(first.effects!.radBeams![0]!.color[0]).toBe(30);
+    memory.u32(wave + BO.waveIntensity, 64);
+    fx.waves[0]!.intensity = 64;
+    const reset = h.read()!;
+    expect(reset).not.toBe(aged);
+    expect(reset.effects!.waves![0]!.intensity).toBe(64);
+    memory.u32(B.radBeams + 8, 2);
+    expect(h.read()).not.toBe(reset);
+    memory.u32(B.waves + 0x10, 0);
+    fx.waves = [];
+    expect(h.read()!.effects!.waves).toEqual([]);
   });
 
   it('invalidates completed-building art after same-frame health, occupancy or loaded-rule changes', () => {

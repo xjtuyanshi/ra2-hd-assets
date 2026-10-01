@@ -406,6 +406,11 @@ describe('YR 1.001 effects reader', () => {
     ]);
     // Anim vector: 4 good + limbo + bad vtable + null + unresolvable owner + bad type + duplicate.
     expect(effects.stats).toEqual({
+      beams: {
+        vectors: { radBeams: 0, waves: 0 },
+        invalid: { radBeams: 0, waves: 0 },
+        inactive: { radBeams: 0, waves: 0 },
+      },
       vectors: { anims: 10, voxelAnims: 1, bullets: 2, particleSystems: 1, lasers: 2, electricBolts: 2 },
       invalid: { anims: 4, voxelAnims: 0, bullets: 0, particleSystems: 0, lasers: 1, electricBolts: 1 },
       limbo: { anims: 1, voxelAnims: 0, bullets: 0, particleSystems: 0, lasers: 0, electricBolts: 0 },

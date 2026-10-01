@@ -275,6 +275,7 @@ function presentation(withLibrary = true) {
       renderer: { setAnimationLoop: vi.fn() },
     },
     effectDriver: { frame: vi.fn(), unknownTypes: new Set(), logicFps: 30 },
+    liveBeams: { update: vi.fn(), displayScale: { value: 1 }, dispose: vi.fn() },
     effectStats: { drawn: 0, missing: 0 },
     cellsFromEngine: false,
     cellsDirty: true,

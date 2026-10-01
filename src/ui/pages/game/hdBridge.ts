@@ -399,6 +399,8 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
           colour: (alternateColor ? [190, 90, 255] : [150, 200, 255]) as [number, number, number],
         })),
       ],
+      radBeams: state.effects.radBeams,
+      waves: state.effects.waves,
       particleSystems: state.effects.particleSystems.map(({ id, uid, behavesLike, x, y, z }) => ({
         id,
         uid,

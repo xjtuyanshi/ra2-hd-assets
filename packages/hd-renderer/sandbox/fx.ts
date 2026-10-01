@@ -4,6 +4,8 @@
  *
  *   ?fx=TWLT070[,GUNFIRE...]  spawn these anims at the view centre (spread along a diagonal) and show them `time` later
  *   ?fx=units                 voxel tanks, SHP drones and infantry at eight facings, plus a few buildings
+ *   ?fx=beams                 rad, temporal, eruption, magnetron and sonic in five screen rows around cx/cy;
+ *                             frozen at mid-life (&bprogress=0..1 changes progress); &effects=enhanced brightens halos
  *   ?fx=shpunits&stypes=DRON  one screen row per SHP vehicle, eight clockwise facings from screen-up, DarkRed house;
  *                             &seq=Stand|Walk|Fire&step=0 selects a pose; &animate=N advances every N logic frames
  *                             after warm-up (with &time= or __fx.advance). &sspace=1 controls row/column spacing.
@@ -60,6 +62,7 @@
  */
 import { LiveView, type LiveObject, type LiveSmudgeCells, type LiveSnapshot } from '../src/live/liveView';
 import { effectRow, type LiveAnim } from '../src/live/effects';
+import type { LiveRadBeam, LiveWave } from '../src/live/beams';
 import { ra2Screen } from '../src/ra2/cache';
 import { applyLookPreset, LOOK_PRESETS, type LookPreset } from '../src/HdRenderer';
 import { voxelLookParams } from './look';
@@ -143,7 +146,15 @@ async function replay(): Promise<never> {
   const calm = (frame: number): LiveSnapshot => ({
     ...first,
     frame,
-    effects: first.effects && { ...first.effects, anims: [], bullets: [], particleSystems: [], beams: [] },
+    effects: first.effects && {
+      ...first.effects,
+      anims: [],
+      bullets: [],
+      particleSystems: [],
+      beams: [],
+      radBeams: [],
+      waves: [],
+    },
   });
   const warm = Number(params.get('warm') ?? 120);
   for (let i = 0; i < warm; i++) {
@@ -310,8 +321,10 @@ function infantrySet(): LiveObject[] {
         type,
         owner: second.has(type) ? 1 : 0,
         // Screen rows: +1 map x and -1 map y is one step right on screen, +1 on both one step down.
-        ...at(cx + (i - 3.5) * 0.6 * spacing + (row - types.length / 2) * 0.9 * spacing,
-          cy - (i - 3.5) * 0.6 * spacing + (row - types.length / 2) * 0.9 * spacing),
+        ...at(
+          cx + (i - 3.5) * 0.6 * spacing + (row - types.length / 2) * 0.9 * spacing,
+          cy - (i - 3.5) * 0.6 * spacing + (row - types.length / 2) * 0.9 * spacing,
+        ),
         facingRaw: i * 8192,
         infantrySequence: seq,
         sequenceFrame: step,
@@ -384,15 +397,18 @@ for (const [id, a] of Object.entries(effectsJson?.anims ?? {}))
 
 const fxIds = (params.get('fx') ?? 'units').split(',').filter(Boolean);
 /** Kind of every rules type in the map theater's type library (for &objects=). */
-const libraryKinds: Record<string, string> = params.has('objects') || fxIds.includes('parade')
-  ? Object.fromEntries(
-      Object.entries(
-        ((await fetch(`/_library/${cache.manifest.theater}/library.json`)
-          .then((r) => (r.ok ? r.json() : null))
-          .catch(() => null)) as { types?: Record<string, { kind: string }> } | null)?.types ?? {},
-      ).map(([id, t]) => [id, t.kind]),
-    )
-  : {};
+const libraryKinds: Record<string, string> =
+  params.has('objects') || fxIds.includes('parade')
+    ? Object.fromEntries(
+        Object.entries(
+          (
+            (await fetch(`/_library/${cache.manifest.theater}/library.json`)
+              .then((r) => (r.ok ? r.json() : null))
+              .catch(() => null)) as { types?: Record<string, { kind: string }> } | null
+          )?.types ?? {},
+        ).map(([id, t]) => [id, t.kind]),
+      )
+    : {};
 const units = [
   ...(fxIds.includes('units') ? unitSet() : []),
   ...(fxIds.includes('squad') ? squadSet() : []),
@@ -406,7 +422,9 @@ function paradeSet(): LiveObject[] {
   const facing = Number(params.get('pface') ?? 24576);
   const seq = params.get('pseq') ?? 'Ready';
   const space = Number(params.get('pspace') ?? 1);
-  const rows = (params.get('ptypes') ?? 'E1:0,MTNK:0|E2:1,HTNK:1').split('|').map((row) => row.split(',').filter(Boolean));
+  const rows = (params.get('ptypes') ?? 'E1:0,MTNK:0|E2:1,HTNK:1')
+    .split('|')
+    .map((row) => row.split(',').filter(Boolean));
   const objects: LiveObject[] = [];
   const width = (kind: string) => (kind === 'infantry' ? 0.75 : kind === 'aircraft' ? 2.2 : 1.7) * space;
   rows.forEach((row, r) => {
@@ -478,9 +496,7 @@ const offsets = params
   .map((pair) => pair.split(',').map(Number) as [number, number])
   .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
 const anims: LiveAnim[] = fxIds
-  .filter(
-    (id) => !['units', 'squad', 'infantry', 'bldgs', 'shpunits', 'parade'].includes(id),
-  )
+  .filter((id) => !['units', 'squad', 'infantry', 'bldgs', 'shpunits', 'parade', 'beams'].includes(id))
   .map((type, i, list) => {
     const offset = offsets?.length ? offsets[i % offsets.length]! : null;
     const d = (i - (list.length - 1) / 2) * spread;
@@ -498,8 +514,14 @@ for (const item of (params.get('bolts') ?? '').split(';').filter(Boolean)) {
 }
 const boltFor = Number(params.get('boltfor') ?? 0.4);
 const repeat = Math.max(0, Number(params.get('repeat') ?? 0));
-const delays = (params.get('delay') ?? '').split(',').filter((v) => v !== '').map(Number);
-const periods = (params.get('period') ?? '').split(',').filter((v) => v !== '').map(Number);
+const delays = (params.get('delay') ?? '')
+  .split(',')
+  .filter((v) => v !== '')
+  .map(Number);
+const periods = (params.get('period') ?? '')
+  .split(',')
+  .filter((v) => v !== '')
+  .map(Number);
 /** Start delay and repeat period (seconds) of listed anim `i`. */
 const delayOf = (i: number) => (Number.isFinite(delays[i]) ? delays[i]! : i * stagger);
 const periodOf = (i: number) => Math.max(0, Number.isFinite(periods[i]) ? periods[i]! : repeat);
@@ -624,6 +646,42 @@ function benchBeams(): NonNullable<LiveSnapshot['effects']>['beams'] {
   return beams;
 }
 
+/** Fixed native ribbon/wave publications, independent of warm-up and animation time. */
+function benchRibbons(): { radBeams: LiveRadBeam[]; waves: LiveWave[] } {
+  if (!fxIds.includes('beams') || spawned === null) return { radBeams: [], waves: [] };
+  const value = Number(params.get('bprogress') ?? 0.5);
+  const progress = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0.5;
+  const ends = (row: number) => {
+    const down = (row - 2) * 1.2 + 0.5;
+    const source = at(cx + down - 2.5, cy + down + 2.5);
+    const target = at(cx + down + 2.5, cy + down - 2.5);
+    source.z += 104;
+    target.z += 104;
+    return { source, target };
+  };
+  return {
+    radBeams: (['rad', 'temporal', 'eruption'] as const).map((type, row) => ({
+      id: 60_000 + row,
+      type,
+      ...ends(row),
+      color: [70, 255, 90],
+      period: 20,
+      amplitude: 40,
+      age: progress * 20,
+      sustained: false,
+      progress,
+    })),
+    waves: (['magnetron', 'sonic'] as const).map((type, row) => ({
+      id: 60_003 + row,
+      uid: 60_003 + row,
+      type,
+      ...ends(row + 3),
+      intensity: 100 * (1 - progress),
+      progress,
+    })),
+  };
+}
+
 /** &banims: the listed building layers as the engine's building anim list would hold them now (looping). */
 const buildingLayerSpecs = (params.get('banims') ?? '')
   .split(',')
@@ -679,6 +737,7 @@ function snapshot(): LiveSnapshot {
       bullets: [],
       particleSystems: [],
       beams: benchBeams(),
+      ...(fxIds.includes('beams') ? benchRibbons() : {}),
     },
     ...(smudgeLibrary ? { smudges: smudgeGrid() } : {}),
   };

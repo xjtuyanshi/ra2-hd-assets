@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LiveView, type LiveSnapshot } from '../src/live/liveView';
+import { engineAnchor } from '../src/live/effectSprites';
+import { waveRings } from '../src/live/beams';
+import { Vector3 } from 'three/webgpu';
 
 const random = Math.random;
 
@@ -75,5 +78,61 @@ describe('building bench snapshots', () => {
     expect(first.filter((o) => o.kind === 'building').map((o) => o.type)).toEqual(['GAPOWR', 'NAREFN']);
     expect(first.every((o) => o.health === 1)).toBe(true);
     expect(snapshots.at(-1)!.objects).toEqual(first);
+  });
+});
+
+describe('native beam bench snapshots', () => {
+  it('spawns all five beam kinds around cx/cy and freezes their mid-life state across time', async () => {
+    const snapshots = await bench('?fx=beams&cx=14&cy=16&warm=2&time=0.4');
+    expect(snapshots[0]!.effects?.radBeams).toEqual([]);
+    const fx = snapshots[2]!.effects!;
+    expect(fx.anims).toEqual([]);
+    expect(fx.radBeams?.map((b) => b.type)).toEqual(['rad', 'temporal', 'eruption']);
+    expect(fx.waves?.map((b) => b.type)).toEqual(['magnetron', 'sonic']);
+    expect([...fx.radBeams!, ...fx.waves!].every((b) => b.progress === 0.5)).toBe(true);
+    expect(fx.radBeams![0]!.source).toEqual({
+      x: Math.round((14 - 1.9 - 2.5) * 256),
+      y: Math.round((16 - 1.9 + 2.5) * 256),
+      z: 312,
+    });
+    expect(snapshots.at(-1)!.effects).toEqual(fx);
+  });
+
+  it.each([
+    ['0', 0],
+    ['0.8', 0.8],
+    ['1', 1],
+    ['3', 1],
+    ['-1', 0],
+    ['NaN', 0.5],
+  ])('accepts and bounds bprogress=%s', async (value, progress) => {
+    const snapshots = await bench(`?fx=beams&bprogress=${value}&warm=0`);
+    const fx = snapshots.at(-1)!.effects!;
+    expect(fx.radBeams![0]!.progress).toBe(progress);
+    expect(fx.radBeams![0]!.age).toBe(Number(progress) * 20);
+    expect(fx.waves![0]!.intensity).toBe(100 * (1 - Number(progress)));
+  });
+
+  it('centres the magnetron and sonic ellipses on their own bench lines, below the three ribbon rows', async () => {
+    const snapshots = await bench('?fx=beams&cx=14&cy=16&warm=0');
+    const fx = snapshots.at(-1)!.effects!;
+    const screenY = ({ x, y, z }: { x: number; y: number; z: number }) => ((x + y) * 15) / 256 - (z * 15) / 104;
+    const rows = [...fx.radBeams!, ...fx.waves!];
+    rows.forEach((beam, i) => {
+      expect(screenY(beam.source)).toBe(screenY(beam.target));
+      if (i) expect(screenY(beam.source)).toBeGreaterThan(screenY(rows[i - 1]!.source));
+    });
+    for (const wave of fx.waves!) {
+      const from = engineAnchor(wave.source.x, wave.source.y, wave.source.z);
+      const to = engineAnchor(wave.target.x, wave.target.y, wave.target.z);
+      for (const ring of waveRings(wave)) {
+        const centre = ring
+          .slice(0, -1)
+          .reduce((sum, p) => sum.add(p), new Vector3())
+          .divideScalar(ring.length - 1);
+        const t = centre.clone().sub(from).dot(to.clone().sub(from)) / from.distanceToSquared(to);
+        expect(centre.distanceTo(from.clone().lerp(to, t))).toBeLessThan(1e-10);
+      }
+    }
   });
 });
