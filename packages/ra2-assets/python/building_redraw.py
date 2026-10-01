@@ -589,7 +589,7 @@ def fix_sheet_hue(jobdir, hue=38.0):
     return count
 
 
-def index_paint(lib, sprite, *, patches, min_chroma=10.0):
+def index_paint(lib, sprite, *, patches, min_chroma=10.0, grow=2, hue_tolerance=30.0):
     """Encode house paint in existing patches of `sprite` from the 1x palette indices 16..31.
 
     The live renderer draws every building sprite (body, layers, bib, build-up) with the owner's remap, so pixels that
@@ -597,9 +597,13 @@ def index_paint(lib, sprite, *, patches, min_chroma=10.0):
     it, which is empty for some sprites (e.g. Tesla fins, prism tower bands, some build-ups): their redraw bakes the
     default red. Chromatic, not yet painted texels over index 16..31 are re-encoded on the grey ramp of the sprite's
     own unremapped palette ramp (luminance kept), so they decode to the same red for the default house.
+    Redraws are registered, not pixel-exact: texels within `grow` (2x) pixels of the index mask whose hue is within
+    `hue_tolerance` degrees of the ramp's are encoded too, so no default-red fringe remains on other houses.
     Returns the number of texels encoded."""
     entry = lib.lib['sprites'][sprite]
     ramp = lib.pal[entry['palette']][16:32].astype(np.float32)
+    ramp_lab = cv2.cvtColor(np.clip(ramp, 0, 255).astype(np.uint8)[None], cv2.COLOR_RGB2LAB)[0].astype(np.float32)
+    ramp_hue = math.degrees(math.atan2((ramp_lab[:, 2] - 128).mean(), (ramp_lab[:, 1] - 128).mean()))
     count = 0
     for frame, f in enumerate(entry['frames']):
         x, y, w, h = f['rect']
@@ -615,7 +619,10 @@ def index_paint(lib, sprite, *, patches, min_chroma=10.0):
             raise ValueError(f'patch size differs from the frame: {path}')
         lab = cv2.cvtColor(np.ascontiguousarray(rgba[..., :3]), cv2.COLOR_RGB2LAB).astype(np.float32)
         chroma = np.hypot(lab[..., 1] - 128, lab[..., 2] - 128)
-        sel = house & (rgba[..., 3] > 0) & (chroma > min_chroma) & (remap == 0)
+        hue = np.degrees(np.arctan2(lab[..., 2] - 128, lab[..., 1] - 128))
+        near = cv2.dilate(house.astype(np.uint8), np.ones((2 * grow + 1, 2 * grow + 1), np.uint8)) > 0
+        fringe = near & (np.abs((hue - ramp_hue + 180) % 360 - 180) < hue_tolerance) & (chroma > 1.8 * min_chroma)
+        sel = (house | fringe) & (rgba[..., 3] > 0) & (chroma > min_chroma) & (remap == 0)
         if not sel.any():
             continue
         grey = rd.neutral_to_grey(rgba[..., :3].astype(np.float32), ramp)

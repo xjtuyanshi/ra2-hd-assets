@@ -533,12 +533,12 @@ class TransferTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             return result.stdout
 
-        self.assertIn('paint texels 48', run())
+        self.assertIn('paint texels 80', run())  # 6 index columns plus a 2-texel red fringe on both sides
         rgba = br.read_image(self.patches / 'building_TEST#0.png')
         remap = br.read_image(self.patches / 'building_TEST#0-remap.png', 'L')
-        self.assertTrue((remap[:, 4:10] == 255).all())
-        self.assertTrue((remap[:, :4] == 0).all() and (remap[:, 10:] == 0).all())
-        self.assertTrue((rgba[:, 4:10, 0] == rgba[:, 4:10, 1]).all())  # grey-ramp encoded
+        self.assertTrue((remap[:, 2:12] == 255).all())
+        self.assertTrue((remap[:, :2] == 0).all() and (remap[:, 12:] == 0).all())
+        self.assertTrue((rgba[:, 2:12, 0] == rgba[:, 2:12, 1]).all())  # grey-ramp encoded
         np.testing.assert_array_equal(rgba[:, 12, :3], np.tile([180, 40, 30], (8, 1)))
         self.assertIn('paint texels 0', run())
 

@@ -322,3 +322,58 @@ class TheatreTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PatchToolTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='.tmp-theatre-patch-', dir=Path(__file__).parent)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def cli(self, *arguments):
+        result = subprocess.run([sys.executable, '-B', tp.__file__, *map(str, arguments)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_copy_patches_only_where_indices_offsets_and_palette_colours_match(self):
+        a, b = synthetic_library(self.root / 'temperate'), synthetic_library(self.root / 'desert')
+        index = np.asarray(Image.open(self.root / 'desert' / 'index-1.png')).copy()
+        index[0, 0] = 7  # page 1 differs in the destination theatre
+        Image.fromarray(index).save(self.root / 'desert' / 'index-1.png')
+        src, dst = self.root / 'patches_t', self.root / 'patches_d'
+        src.mkdir()
+        for k in range(3):
+            Image.new('RGBA', (8, 8), (200, 10 + k, 30, 255)).save(src / f'building_SELECTED#{k}.png')
+            Image.new('L', (8, 8), 255).save(src / f'building_SELECTED#{k}-remap.png')
+        Image.new('RGBA', (8, 8), (1, 2, 3, 255)).save(src / 'building_MISSING#0.png')
+        Image.new('L', (8, 8), 0).save(src / 'building_MISSING#0-remap.png')
+        self.assertIn('copied 2 skipped 2', self.cli('copy-patches', self.root / 'temperate', self.root / 'desert', src, dst))
+        self.assertTrue((dst / 'building_SELECTED#0.png').exists() and (dst / 'building_SELECTED#2-remap.png').exists())
+        self.assertFalse((dst / 'building_SELECTED#1.png').exists())
+        self.assertEqual((dst / 'building_SELECTED#0.src').read_text(), 'xfer:theatre temperate')
+        # A palette difference on a used index blocks the copy as well.
+        Image.new('RGB', (256, 1), (90, 100, 111)).save(self.root / 'desert' / 'palette.png')
+        self.assertIn('copied 0 skipped 4', self.cli('copy-patches', self.root / 'temperate', self.root / 'desert', src, self.root / 'none'))
+
+    def test_map_paste_materialises_symlinked_atlas_and_changes_only_frame_rects(self):
+        shared, m = self.root / 'shared', self.root / 'map'
+        shared.mkdir(); m.mkdir()
+        Image.new('RGBA', (40, 20), (9, 9, 9, 255)).save(shared / 'sprites@2x.png')
+        Image.new('L', (40, 20), 0).save(shared / 'sprites@2x-remap.png')
+        for name in ('sprites@2x.png', 'sprites@2x-remap.png'):
+            (m / name).symlink_to(shared / name)
+        write_json(m / 'manifest.json', dict(spriteAtlasHd=dict(file='sprites@2x.png', remap='sprites@2x-remap.png', scale=2),
+                                             sprites={'building:CAOILD': dict(frames=[dict(rect=[2, 1, 3, 2], offset=[0, 0])],
+                                                                              sourceFrames=[1])}))
+        patches = self.root / 'patches'; patches.mkdir()
+        Image.new('RGBA', (6, 4), (200, 100, 50, 255)).save(patches / 'building_CAOILD#1.png')
+        Image.new('L', (6, 4), 255).save(patches / 'building_CAOILD#1-remap.png')
+        self.assertIn('pasted 1', self.cli('map-paste', m, patches, 'building:CAOILD', 'building:ABSENT'))
+        self.assertFalse((m / 'sprites@2x.png').is_symlink())
+        colour = np.asarray(Image.open(m / 'sprites@2x.png'))
+        remap = np.asarray(Image.open(m / 'sprites@2x-remap.png'))
+        np.testing.assert_array_equal(colour[2:6, 4:10, :3], np.full((4, 6, 3), [200, 100, 50]))
+        self.assertEqual(int(colour[0, 0, 0]), 9)
+        self.assertTrue((remap[2:6, 4:10] == 255).all() and remap[0, 0] == 0)
+        np.testing.assert_array_equal(np.asarray(Image.open(shared / 'sprites@2x.png'))[2:6, 4:10, 0], np.full((4, 6), 9))

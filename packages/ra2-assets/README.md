@@ -558,7 +558,12 @@ or `NAME:state`, including bibs and special idle layers. `python/theatre_pages.p
 --pages 0,1` fills missing HD entries from shared urban art (all theatre pages by default), symlinking identical pages
 and retaining baseline pixels for differing frames. Its `overlay-walls "$LIBRARY" TYPE...` redirects wall overlays
 to HD building frames; `normals-merge "$SRC" "$LIBRARY" "$SPRITES_FILE"` merges only the selected sprites' material
-rectangles, using a whitespace-separated sprite list and preserving incompatible existing layouts. These tools use
+rectangles, using a whitespace-separated sprite list and preserving incompatible existing layouts. `copy-patches SRC_LIB DST_LIB
+SRC_PATCHES DST_PATCHES` copies redraw patches to another theatre only where the frame's 1x indices, offset and used
+palette colours are identical (tech buildings share their art across theatres). `map-paste MAPDIR PATCHES SPRITE...`
+pastes library frame patches into a variant map cache's HD/remap atlas (map-placed objects draw from the map atlas),
+materialising symlinked atlases and changing only the matched frame rectangles (`sourceFrames` maps map frames to
+library frames). These tools use
 atomic JSON/PNG replacements and copy-on-write pages; all supplied libraries, baselines and patches stay outside Git.
 Run their asset-free acceptance from `packages/ra2-assets/python` with
 `python3 -B -m unittest test_building_redraw test_theatre_pages -v`.

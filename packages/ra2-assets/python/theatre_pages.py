@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 from uuid import uuid4
 
@@ -326,6 +327,81 @@ def normals_merge(src, library, sprites_file):
     return sorted(additions, key=int)
 
 
+def copy_patches(src_dir, dst_dir, src_patches, dst_patches):
+    """Copy building-redraw patches (``<kind>_<name>#<frame>.png`` + ``-remap.png``) from one theatre to another when the
+    destination frame uses the same 1x indices, offset and palette colours (the same SHP art drawn for both theatres,
+    e.g. tech buildings). Differing or missing frames are left alone. Returns (copied, skipped)."""
+    src_dir, dst_dir, src_patches, dst_patches = map(Path, (src_dir, dst_dir, src_patches, dst_patches))
+    a_lib, b_lib = read_json(src_dir / 'library.json'), read_json(dst_dir / 'library.json')
+    pal = lambda d, lib, key: read_image(d / lib['palettes'][key], 'RGB')[0]
+    pages = {}
+    def frame(d, lib, tag, sprite, k):
+        entry = lib['sprites'][sprite]
+        f = entry['frames'][k]
+        x, y, w, h = f['rect']
+        key = (tag, f.get('page', 0))
+        if key not in pages:
+            pages[key] = idx_page(d, lib, f.get('page', 0))
+        return pages[key][y:y + h, x:x + w], tuple(f['offset']), pal(d, lib, entry['palette'])
+    dst_patches.mkdir(parents=True, exist_ok=True)
+    copied = skipped = 0
+    for png in sorted(src_patches.glob('*#*.png')):
+        if png.name.endswith('-remap.png'):
+            continue
+        kind, _, rest = png.stem.partition('_')
+        name, _, k = rest.rpartition('#')
+        sprite = f'{kind}:{name}'
+        try:
+            a, oa, pa = frame(src_dir, a_lib, 'a', sprite, int(k))
+            b, ob, pb = frame(dst_dir, b_lib, 'b', sprite, int(k))
+        except (KeyError, IndexError, ValueError):
+            skipped += 1
+            continue
+        used = np.unique(a)
+        if a.shape != b.shape or oa != ob or not np.array_equal(a, b) or not np.array_equal(pa[used], pb[used]):
+            skipped += 1
+            continue
+        for suffix in ('.png', '-remap.png'):
+            atomic_write(dst_patches / (png.stem + suffix), lambda t, f=src_patches / (png.stem + suffix): shutil.copyfile(f, t))
+        (dst_patches / f'{png.stem}.src').write_text(f'xfer:theatre {src_dir.name}', encoding='utf-8')
+        copied += 1
+    return copied, skipped
+
+
+def map_paste(map_dir, patches, sprites):
+    """Paste library frame patches into a variant MAP cache atlas: map-placed objects draw from the map's own atlas.
+    A symlinked HD or remap atlas is materialised (copy-on-write); only the patched frame rects change. Map frames
+    are matched to library frames through ``sourceFrames`` when present. Returns the number of pasted frames."""
+    map_dir, patches = Path(map_dir), Path(patches)
+    manifest = read_json(map_dir / 'manifest.json')
+    hd = manifest['spriteAtlasHd']
+    scale = hd.get('scale', 2)
+    with library_lock(map_dir):
+        colour = read_image(map_dir / hd['file'], 'RGBA').copy()
+        remap = read_image(map_dir / hd['remap'], 'L').copy()
+        count = 0
+        for sprite in sprites:
+            entry = manifest['sprites'].get(sprite)
+            if not entry:
+                continue
+            for i, f in enumerate(entry['frames']):
+                k = (entry.get('sourceFrames') or list(range(len(entry['frames']))))[i]
+                path = patches / f"{sprite.replace(':', '_')}#{k}.png"
+                if not path.exists():
+                    continue
+                x, y, w, h = f['rect']
+                rgba = read_image(path, 'RGBA')
+                paint = read_image(path.with_name(path.stem + '-remap.png'), 'L')
+                if rgba.shape[:2] != (h * scale, w * scale) or paint.shape != rgba.shape[:2]:
+                    raise ValueError(f'patch size differs from the map frame: {path}')
+                colour[y * scale:(y + h) * scale, x * scale:(x + w) * scale] = rgba
+                remap[y * scale:(y + h) * scale, x * scale:(x + w) * scale] = paint
+                count += 1
+        for name, pixels in ((hd['file'], colour), (hd['remap'], remap)):
+            atomic_image(map_dir / name, pixels)  # replaces a symlink entry, never its shared target
+    return count
+
+
 def page_indices(text):
     try:
         pages = [int(p) for p in text.split(',')]
@@ -351,6 +427,13 @@ def parser():
     p.add_argument('src', type=Path)
     p.add_argument('library', type=Path)
     p.add_argument('sprites_file', type=Path)
+    p = commands.add_parser('copy-patches', help='copy redraw patches to another theatre where the art is identical')
+    for name in ('src_dir', 'dst_dir', 'src_patches', 'dst_patches'):
+        p.add_argument(name, type=Path)
+    p = commands.add_parser('map-paste', help='paste library frame patches into a variant map atlas')
+    p.add_argument('map_dir', type=Path)
+    p.add_argument('patches', type=Path)
+    p.add_argument('sprites', nargs='+')
     return ap
 
 
@@ -362,6 +445,10 @@ def main(argv=None):
             print('THEATRE_XFER_DONE', xfer(args.theatre, args.urban, args.baseline, args.pages))
         elif args.command == 'overlay-walls':
             print('patched', len(overlay_walls(args.library, args.types)))
+        elif args.command == 'copy-patches':
+            print('copied %d skipped %d' % copy_patches(args.src_dir, args.dst_dir, args.src_patches, args.dst_patches))
+        elif args.command == 'map-paste':
+            print('pasted', map_paste(args.map_dir, args.patches, args.sprites))
         else:
             print('NORMALS_MERGED', normals_merge(args.src, args.library, args.sprites_file))
     except (ValueError, KeyError, OSError) as error:
