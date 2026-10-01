@@ -181,5 +181,14 @@ class VehicleProjectionTests(unittest.TestCase):
         np.testing.assert_array_equal(blue, rgba[0, 2])
         np.testing.assert_array_equal(painted, rgba[0, 3])  # house paint and alpha untouched
 
+    def test_steel_grade_red_band_wraps_around_zero(self):
+        # A stray red the image model painted on an Allied hull (hue 350) is greyed with centre=0; tan and blue stay.
+        rgba = np.array([[[200, 30, 60, 255], [196, 170, 120, 255], [40, 90, 200, 255]]], np.uint8)
+        paint = np.zeros((1, 3), np.uint8)
+        red, tan, blue = steel_grade(rgba, paint, 0.1, centre=0, half=25)[0]
+        self.assertLess(int(red[:3].max()) - int(red[:3].min()), 30)
+        np.testing.assert_array_equal(tan, rgba[0, 1])
+        np.testing.assert_array_equal(blue, rgba[0, 2])
+
 if __name__ == '__main__':
     unittest.main()

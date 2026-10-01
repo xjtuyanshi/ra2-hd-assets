@@ -571,6 +571,147 @@ class PolishTests(unittest.TestCase):
                     self.assertEqual(error.exception.code, 2)
 
 
+class InstallPagesTests(unittest.TestCase):
+    def test_argument_parsing_and_defaults(self):
+        required = ["install-pages", "--library", "base", "--work", "work", "--out", "staging",
+                    "--farm", "farm", "--rel-dir", "_library/theatre"]
+        defaults = inf.parser().parse_args(required)
+        self.assertEqual(defaults.command, "install-pages")
+        self.assertEqual((defaults.library, defaults.work, defaults.out, defaults.farm),
+                         tuple(map(Path, ("base", "work", "staging", "farm"))))
+        self.assertEqual(defaults.rel_dir, "_library/theatre")
+        self.assertEqual((defaults.min_sil, defaults.rim_soften, defaults.paint_saturation, defaults.suffix),
+                         (0.6, 0.5, 0.7, "l5inf"))
+        self.assertIsNone(defaults.fill_dir)
+        self.assertIsNone(defaults.units)
+        self.assertIsNone(defaults.pages)
+        parsed = inf.parser().parse_args([*required, "--fill-dir", "fill", "--units", "E1,E2",
+                                         "--pages", "21,22", "--min-sil", "0.8", "--rim-soften", "0.2",
+                                         "--paint-saturation", "0.9", "--suffix", "custom"])
+        self.assertEqual(parsed.fill_dir, Path("fill"))
+        self.assertEqual(parsed.units, ["E1", "E2"])
+        self.assertEqual(parsed.pages, [21, 22])
+        self.assertEqual((parsed.min_sil, parsed.rim_soften, parsed.paint_saturation, parsed.suffix),
+                         (0.8, 0.2, 0.9, "custom"))
+        for flag, value in (("--pages", "1,no"), ("--pages", "-1"), ("--rim-soften", "nan"),
+                            ("--paint-saturation", "1.1"), ("--min-sil", "-0.1")):
+            with self.subTest(flag=flag, value=value), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                inf.parser().parse_args([*required, flag, value])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        self.color = np.full((4, 4, 4), [30, 40, 50, 255], np.uint8)
+        self.paint = np.full((4, 4), 7, np.uint8)
+        Image.fromarray(self.color).save(self.source / "colour.png")
+        Image.fromarray(self.paint).save(self.source / "paint.png")
+        entry = {"file": "colour.png", "remap": "paint.png", "scale": 2, "width": 4, "height": 4}
+        self.data = {"theater": "TEST", "spriteAtlases": [{"width": 2, "height": 2}] * 3,
+                     "spriteAtlasesHd": [copy.deepcopy(entry) for _ in range(3)],
+                     "sprites": {SPRITE: {"frames": [
+                         {"page": 1, "rect": [0, 0, 1, 1]}, {"page": 1, "rect": [1, 0, 1, 1]},
+                         {"page": 2, "rect": [0, 0, 1, 1]}]}}, "keep": [False, 0]}
+        self.manifest = self.source / "library.json"
+        self.manifest.write_text(json.dumps(self.data))
+        self.current = self.root / "current"
+        self.current.mkdir()
+        self.merged = copy.deepcopy(self.data)
+        self.merged["spriteAtlasesHd"][1]["otherTrack"] = "keep page metadata"
+        self.merged["spriteAtlasesHd"][0]["file"] = "other-page.png"
+        self.merged["farmOnly"] = True
+        self.current_manifest = self.current / "library.json"
+        self.current_manifest.write_text(json.dumps(self.merged))
+        self.farm = self.root / "farm"
+        self.farm.mkdir()
+        (self.farm / "theatre").symlink_to(self.current)
+        self.out = self.root / "staging"
+        self.out.mkdir()
+        self.work = self.root / "work"
+        for name, unit, sprite, output in (("finished", "E1", SPRITE, "output.png"),
+                                            ("excluded", "E2", SPRITE, "output.png"),
+                                            ("pending", "E1", SPRITE, None),
+                                            ("full-only", "E1", SPRITE, "full.png"),
+                                            ("foreign", "E1", "unknown", "output.png")):
+            directory = self.work / "sheets" / name
+            directory.mkdir(parents=True)
+            (directory / "job.json").write_text(json.dumps({"unit": unit, "sprite": sprite}))
+            if output:
+                Image.new("RGB", (1, 1)).save(directory / output)
+
+    def composer(self, lib, directory, opts, page):
+        self.assertEqual(directory.name, "finished")
+        rgba = np.full((2, 2, 4), [200, 100, 20, 255], np.uint8)
+        paint = np.full((2, 2), 19, np.uint8)
+        frames = {i: {"rgba": rgba, "paint": paint, "metrics": {"sil_iou": 0.2 if i == 1 else 0.9}}
+                  for i, frame in enumerate(lib.frames(SPRITE)) if frame["page"] == page}
+        skipped = {i: "other-page" for i, frame in enumerate(lib.frames(SPRITE)) if frame["page"] != page}
+        return {"job": {"sprite": SPRITE}, "frames": frames, "skipped": skipped, "raw": "output.png"}
+
+    def run_install(self, page, *extra):
+        with mock.patch.object(inf, "compose_job", side_effect=self.composer), \
+                contextlib.redirect_stdout(io.StringIO()):
+            code = inf.main(["install-pages", "--library", str(self.source), "--work", str(self.work),
+                             "--out", str(self.out), "--farm", str(self.farm), "--rel-dir", "theatre",
+                             "--units", "E1", "--pages", str(page), *extra])
+        self.assertEqual(code, 0)
+
+    def test_install_filters_jobs_and_pages_and_preserves_current_farm_manifest(self):
+        page_path = self.out / "sprites-1@2x-l5inf.png"
+        Image.fromarray(self.color).save(page_path)
+        old_link = self.root / "served-before.png"
+        old_link.hardlink_to(page_path)
+        original_manifest = self.current_manifest.read_bytes()
+        source_manifest = self.manifest.read_bytes()
+        self.run_install(1)
+        expected = copy.deepcopy(self.merged)
+        expected["spriteAtlasesHd"][1].update(file=page_path.name, remap="sprites-1@2x-remap-l5inf.png",
+                                             paintSaturation=0.7)
+        manifest = self.farm / "theatre/library.json"
+        self.assertFalse(manifest.is_symlink())
+        self.assertEqual(json.loads(manifest.read_text()), expected)
+        self.assertEqual(self.current_manifest.read_bytes(), original_manifest)
+        self.assertEqual(self.manifest.read_bytes(), source_manifest)
+        self.assertFalse((self.farm / "theatre").is_symlink())
+        self.assertEqual((self.farm / "theatre" / page_path.name).stat().st_ino, page_path.stat().st_ino)
+        np.testing.assert_array_equal(read_image(old_link), self.color)
+        expected_color = self.color.copy()
+        expected_color[:2, :2] = [200, 100, 20, 255]
+        np.testing.assert_array_equal(read_image(page_path), expected_color)
+        expected_paint = self.paint.copy()
+        expected_paint[:2, :2] = 19
+        np.testing.assert_array_equal(read_image(self.out / "sprites-1@2x-remap-l5inf.png"), expected_paint)
+        report = json.loads((self.out / "report-1.json").read_text())
+        self.assertFalse(report["frames"][f"{SPRITE}#1"]["accepted"])
+        self.assertEqual(report["frames"][f"{SPRITE}#2"]["skipped"], "other-page")
+        self.assertFalse((self.out / "sprites-2@2x-l5inf.png").exists())
+        self.assertEqual(list(self.out.glob(".*")), [])
+
+    def test_donor_fill_initialises_only_missing_selected_hd_entry(self):
+        self.data["spriteAtlasesHd"][2] = None
+        self.manifest.write_text(json.dumps(self.data))
+        cached = inf.library(self.source)
+        self.merged["spriteAtlasesHd"][2] = None
+        self.current_manifest.write_text(json.dumps(self.merged))
+        fill = self.root / "fill"
+        fill.mkdir()
+        Image.fromarray(self.color).save(fill / "sprites-2@2x-fill.png")
+        Image.fromarray(self.paint).save(fill / "sprites-2@2x-remap-fill.png")
+        self.run_install(2, "--fill-dir", str(fill), "--suffix", "custom", "--paint-saturation", "0.8")
+        expected = copy.deepcopy(self.merged)
+        expected["spriteAtlasesHd"][2] = {"file": "sprites-2@2x-custom.png",
+                                           "remap": "sprites-2@2x-remap-custom.png", "scale": 2,
+                                           "width": 4, "height": 4, "paintSaturation": 0.8}
+        self.assertEqual(json.loads((self.farm / "theatre/library.json").read_text()), expected)
+        self.assertIsNone(cached.data["spriteAtlasesHd"][2])
+        self.assertIsNone(json.loads(self.manifest.read_text())["spriteAtlasesHd"][2])
+        color = read_image(self.out / "sprites-2@2x-custom.png")
+        np.testing.assert_array_equal(color[2:], self.color[2:])
+
+
 class SchedulerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix=".tmp-infantry-run-", dir=Path(__file__).parent)
@@ -671,7 +812,7 @@ shutil.copyfile(d / "input.png", d / "output.png")
     def test_cli_help_needs_no_library(self):
         result = subprocess.run([sys.executable, "-B", str(Path(inf.__file__)), "--help"],
                                 capture_output=True, text=True, check=True)
-        self.assertIn("{prepare,run,compose,build,polish}", result.stdout)
+        self.assertIn("{prepare,run,compose,build,polish,install-pages}", result.stdout)
 
 
 if __name__ == "__main__":

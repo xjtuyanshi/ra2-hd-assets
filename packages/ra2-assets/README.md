@@ -504,6 +504,32 @@ targets. Other page entries and manifest metadata survive. Repeated softening ac
 current variant. Source and variant directories must differ; derived art stays outside Git. Python stages need
 NumPy and Pillow; the synthetic regression command additionally needs pytest.
 
+`install-pages` composes every finished sheet (`sheets/<job>/job.json` and `output.png`) selected by `--units`,
+using only its frames on the selected `--pages`. Both filters are optional; unknown sprites are skipped. It stages
+`sprites-P@2x-<suffix>.png`, `sprites-P@2x-remap-<suffix>.png` and `report-P.json` in `--out`, then installs the
+images under `<farm>/<rel-dir>` and patches only `spriteAtlasesHd[P]` in that directory's current `library.json`.
+The farm must already contain a readable manifest, possibly through a symlink to another cache. Defaults are
+`--min-sil 0.6 --rim-soften 0.5 --paint-saturation 0.7 --suffix l5inf`; existing subcommands keep their defaults.
+Optional `--fill-dir` supplies `sprites-P@2x-fill.png` and `sprites-P@2x-remap-fill.png` only when the base library
+has no HD atlas entry for P. A newly populated manifest entry gets scale 2 and the donor page's dimensions.
+
+```bash
+python3 packages/ra2-assets/python/infantry_sheets.py install-pages \
+  --library "$LIBRARY" --work "$WORK" --out "$STAGING" \
+  --farm "$FARM" --rel-dir "_library/temperate" --fill-dir "$FILL" \
+  --units E1,E2 --pages 21,22
+(cd packages/ra2-assets/python && python3 -m unittest \
+  test_cache_farm test_infantry_sheets test_vehicle_projection test_codex_queue)
+```
+
+`python/cache_farm.py` exposes generic `install_file(root, rel, data_path)` and `patch_json(root, rel, fn)` helpers.
+Parent directory symlinks are atomically swapped for real directories containing symlinks to the original children,
+so writes stay in the farm. Directory swaps require macOS or Linux filesystem support. File installs use hard links
+on the same device and copies across devices. Staging images use fresh inodes and atomic `.part` replacement;
+reinstalling an identical hard link leaves no temporary name. JSON patchers read, mutate and atomically replace
+the current manifest under an exclusive `fcntl` lock beside it. Lock files persist to keep concurrent waiters on
+the same lock inode. Other manifest entries and the base cache's files are preserved.
+
 ## Tree and vegetation redraw (Python, experimental)
 
 `python/tree_redraw.py` redraws a map's tree/bush TerrainTypes (`tree:TREE*` frame 0 and its shadow) in batches: one

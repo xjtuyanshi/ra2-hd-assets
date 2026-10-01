@@ -457,10 +457,13 @@ def build_index(out: Path) -> dict:
     return index
 
 
-def steel_grade(rgba: np.ndarray, paint: np.ndarray, keep: float = 0.3) -> np.ndarray:
+def steel_grade(
+    rgba: np.ndarray, paint: np.ndarray, keep: float = 0.3, centre: float = 40.0, half: float = 20.0
+) -> np.ndarray:
     """Pull the warm tan/beige the image model drifts hull metal to back toward neutral steel.
 
-    Pixels whose hue lies in the orange-yellow band (full effect at 20-60 degrees, fading out over 10 degrees) keep
+    Pixels whose hue lies in the band `centre` +- `half` degrees (default orange-yellow, full effect at 20-60 degrees,
+    fading out over 10 degrees; the distance wraps around 360, so centre=0 selects reds) keep
     only `keep` of their chroma; linear luminance is preserved and the grey gets a slight cool tint. House paint
     (paint red channel above 0.3, full protection from 0.7) and alpha are untouched. The approved target frames show
     silver steel hulls, as do the original voxels; the redraws of the Soviet hulls came back tan.
@@ -473,7 +476,8 @@ def steel_grade(rgba: np.ndarray, paint: np.ndarray, keep: float = 0.3) -> np.nd
     r, g, b = srgb[..., 0], srgb[..., 1], srgb[..., 2]
     d = np.maximum(hi - lo, 1e-6)
     hue = np.where(hi == r, ((g - b) / d) % 6, np.where(hi == g, (b - r) / d + 2, (r - g) / d + 4)) * 60
-    band = np.clip(1 - np.maximum(0, np.abs(hue - 40) - 20) / 10, 0, 1)
+    dist = np.abs((hue - centre + 180) % 360 - 180)
+    band = np.clip(1 - np.maximum(0, dist - half) / 10, 0, 1)
     protect = np.clip((np.asarray(paint, np.float64) / 255 - 0.3) / 0.4, 0, 1)
     w = (band * (1 - protect) * (1 - keep))[..., None]
     out = lin * (1 - w) + y * np.array([0.97, 1.0, 1.05]) * w
@@ -483,14 +487,14 @@ def steel_grade(rgba: np.ndarray, paint: np.ndarray, keep: float = 0.3) -> np.nd
     return graded
 
 
-def grade(atlases: Path, parts: list[str], keep: float) -> dict:
+def grade(atlases: Path, parts: list[str], keep: float, centre: float = 40.0, half: float = 20.0) -> dict:
     """steel_grade each <part>.png in place (atomic replace), using <part>_paint.png as the paint mask."""
     changed = {}
     for part in parts:
         colour_path, paint_path = atlases / f'{part}.png', atlases / f'{part}_paint.png'
         rgba = np.asarray(Image.open(colour_path).convert('RGBA'))
         paint = np.asarray(Image.open(paint_path).convert('RGB'))[..., 0]
-        graded = steel_grade(rgba, paint, keep)
+        graded = steel_grade(rgba, paint, keep, centre, half)
         tmp = colour_path.with_suffix('.grade.png')
         Image.fromarray(graded, 'RGBA').save(tmp)
         tmp.replace(colour_path)
@@ -523,6 +527,8 @@ def main():
     grader.add_argument('--out', type=Path, required=True)
     grader.add_argument('--parts', nargs='+', required=True)
     grader.add_argument('--keep', type=float, default=0.3)
+    grader.add_argument('--hue', type=float, default=40.0, help='centre of the graded hue band, degrees')
+    grader.add_argument('--half', type=float, default=20.0, help='half width of the band at full effect, degrees')
     args = parser.parse_args()
     if args.command == 'sheet':
         if '-' in args.facings:
@@ -535,7 +541,7 @@ def main():
     elif args.command == 'build-index':
         print(json.dumps(build_index(args.out), indent=2))
     elif args.command == 'grade':
-        print(json.dumps(grade(args.out, args.parts, args.keep), indent=2))
+        print(json.dumps(grade(args.out, args.parts, args.keep, args.hue, args.half), indent=2))
     else:
         spec = build(args.type, args.bake, args.sheets, args.palettes, args.house_key, args.out, args.review)
         print(json.dumps({**{k: spec[k] for k in ('type', 'frames', 'facingStep', 'scale', 'jacobian', 'house')},

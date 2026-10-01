@@ -23,6 +23,8 @@ jobs in flight, three attempts per job and a shared usage-limit stop file. ``com
 HD page's colour/remap filenames into its library.json. ``build`` and ``polish`` optionally soften unpainted dark
 rims and set per-page house-paint saturation; ``polish`` reads an existing variant and processes all selected
 sprite frames on that page. NumPy and Pillow suffice for every stage except ``run``.
+``install-pages`` composes finished sheets into staging pages and installs selected HD page entries into a
+configurable cache farm, with locked manifest updates and optional donor-filled base pages.
 All actual inputs and outputs are derived game art and must remain in gameres/ or another untracked directory.
 """
 
@@ -1090,9 +1092,9 @@ def build(lib: Library, work: Path, page: int, opts, names=None, min_sil=0.6):
 
 
 @contextlib.contextmanager
-def atomic_output(path: Path):
+def atomic_output(path: Path, suffix=".tmp"):
     """Replace the directory entry, never the destination of a pre-existing symlink."""
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}-", suffix=".tmp", dir=path.parent)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}-", suffix=suffix, dir=path.parent)
     os.close(fd)
     tmp = Path(name)
     try:
@@ -1100,6 +1102,75 @@ def atomic_output(path: Path):
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def install_pages(lib: Library, work: Path, out: Path, farm: Path, rel_dir: str, opts,
+                  fill_dir=None, units=None, pages=None, min_sil=0.6, suffix="l5inf"):
+    """Compose finished sheets and patch only each installed HD page in the farm's latest manifest."""
+    # POSIX locking is needed only by this command; existing image stages remain platform-independent.
+    import cache_farm
+
+    relative = Path(rel_dir)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("rel-dir must be relative and contain no '..'")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", suffix):
+        raise ValueError("suffix must contain only letters, digits, hyphens and underscores")
+    if not 0 <= min_sil <= 1:
+        raise ValueError("min-sil must be between 0 and 1")
+    if out.resolve() == lib.root or (farm / relative).absolute() == lib.root:
+        raise ValueError("staging and farm directories must differ from the source library")
+    if fill_dir is not None:
+        for page, entry in enumerate(lib.data["spriteAtlasesHd"]):
+            fill = fill_dir / f"sprites-{page}@2x-fill.png"
+            if entry is None and fill.is_file():
+                base = lib.data["spriteAtlases"][page]
+                lib.data["spriteAtlasesHd"][page] = {
+                    "file": str(fill.resolve()),
+                    "remap": str((fill_dir / f"sprites-{page}@2x-remap-fill.png").resolve()),
+                    "scale": 2, "width": 2 * base["width"], "height": 2 * base["height"]}
+    finished = []
+    for directory in sheet_dirs(work):
+        if not (directory / "output.png").is_file():
+            continue
+        job = json.loads((directory / "job.json").read_text(encoding="utf-8"))
+        if units and job["unit"] not in units:
+            continue
+        if job["sprite"] not in lib.data["sprites"]:
+            continue
+        job_pages = {frame.get("page") for frame in lib.frames(job["sprite"])} - {None}
+        finished.append((directory.name, job_pages))
+    selected = sorted({page for _, job_pages in finished for page in job_pages})
+    if pages is not None:
+        selected = [page for page in selected if page in pages]
+    out.mkdir(parents=True, exist_ok=True)
+    for page in selected:
+        base = lib.data["spriteAtlasesHd"][page]
+        if base is None:
+            raise ValueError(f"page {page} has no HD atlas; provide its donor pages with --fill-dir")
+        names = [name for name, job_pages in finished if page in job_pages]
+        start = time.monotonic()
+        color, remap, report = build(lib, work, page, opts, names, min_sil)
+        page_path = out / f"sprites-{page}@2x-{suffix}.png"
+        remap_path = out / f"sprites-{page}@2x-remap-{suffix}.png"
+        # Installed pages may be hard links: never overwrite their served inode while staging a new build.
+        for pixels, path in ((color, page_path), (remap, remap_path)):
+            with atomic_output(path, suffix=".part") as tmp:
+                Image.fromarray(pixels).save(tmp, format="PNG")
+        (out / f"report-{page}.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+        cache_farm.install_file(farm, str(relative / page_path.name), page_path)
+        cache_farm.install_file(farm, str(relative / remap_path.name), remap_path)
+
+        def patch(data):
+            if data["spriteAtlasesHd"][page] is None:
+                data["spriteAtlasesHd"][page] = {
+                    "scale": 2, "width": base["width"], "height": base["height"]}
+            data["spriteAtlasesHd"][page].update(file=page_path.name, remap=remap_path.name,
+                                                paintSaturation=opts.paint_saturation)
+
+        cache_farm.patch_json(farm, str(relative / "library.json"), patch)
+        accepted = sum(bool(frame.get("accepted")) for frame in report["frames"].values())
+        print(f"{lib.data.get('theater', lib.root.name)} page {page}: {len(names)} sheets, "
+              f"{accepted}/{len(report['frames'])} frames accepted, {time.monotonic() - start:.0f}s", flush=True)
 
 
 def install(lib: Library, variant_dir: Path, page: int, page_path: Path, remap_path: Path, sprites,
@@ -1186,6 +1257,16 @@ def csv_names(text):
     return names
 
 
+def csv_pages(text):
+    try:
+        pages = [int(name) for name in csv_names(text)]
+    except ValueError:
+        raise argparse.ArgumentTypeError("pages must be comma-separated non-negative integers")
+    if any(page < 0 for page in pages):
+        raise argparse.ArgumentTypeError("pages must be comma-separated non-negative integers")
+    return pages
+
+
 def unit_interval(text):
     value = float(text)
     if not 0 <= value <= 1:
@@ -1193,11 +1274,12 @@ def unit_interval(text):
     return value
 
 
-def add_polish_options(ap):
-    ap.add_argument("--rim-soften", type=unit_interval, default=0.0,
-                    help="dark silhouette rim lift, 0..1 (default: 0, unchanged)")
-    ap.add_argument("--paint-saturation", type=unit_interval, default=1.0,
-                    help="linear-light house-paint saturation, 0..1 (default: 1)")
+def add_polish_options(ap, rim_soften=0.0, paint_saturation=1.0):
+    rim_default = f"{rim_soften:g}" + (", unchanged" if rim_soften == 0 else "")
+    ap.add_argument("--rim-soften", type=unit_interval, default=rim_soften,
+                    help=f"dark silhouette rim lift, 0..1 (default: {rim_default})")
+    ap.add_argument("--paint-saturation", type=unit_interval, default=paint_saturation,
+                    help=f"linear-light house-paint saturation, 0..1 (default: {paint_saturation:g})")
 
 
 def parser():
@@ -1241,6 +1323,17 @@ def parser():
     sub.add_argument("--sprites", type=csv_names, required=True)
     sub.add_argument("--suffix", default="l4inf")
     add_polish_options(sub)
+    sub = commands.add_parser("install-pages")
+    for name in ("library", "work", "out", "farm"):
+        sub.add_argument("--" + name, type=Path, required=True)
+    sub.add_argument("--rel-dir", required=True)
+    sub.add_argument("--fill-dir", type=Path)
+    sub.add_argument("--units", type=csv_names)
+    sub.add_argument("--pages", type=csv_pages)
+    sub.add_argument("--min-sil", type=unit_interval, default=0.6)
+    sub.add_argument("--suffix", default="l5inf")
+    add_compose_options(sub)
+    add_polish_options(sub, rim_soften=0.5, paint_saturation=0.7)
     return ap
 
 
@@ -1248,7 +1341,7 @@ def main(argv=None):
     ap = parser()
     opts = ap.parse_args(argv)
     try:
-        if opts.command in ("compose", "build"):
+        if opts.command in ("compose", "build", "install-pages"):
             if any(not math.isfinite(getattr(opts, key)) or getattr(opts, key) < 0
                    for key in ("sigma_l", "sigma_ab", "shadow_soft", "band")):
                 raise ValueError("blur radii and trim band must be finite and non-negative")
@@ -1257,6 +1350,11 @@ def main(argv=None):
         if opts.command == "run":
             return run(opts.work, opts.codex, opts.parallel, opts.limit_file, opts.names, opts.redo,
                        reasoning=opts.reasoning, order_by=opts.order)
+        if opts.command == "install-pages":
+            # Donor-page overrides are local to this invocation, never mutations of the shared library cache.
+            install_pages(Library(opts.library.resolve()), opts.work, opts.out, opts.farm, opts.rel_dir, opts,
+                          opts.fill_dir, opts.units, opts.pages, opts.min_sil, opts.suffix)
+            return 0
         lib = library(opts.library)
         if opts.command in ("build", "polish"):
             if opts.page < 0:
