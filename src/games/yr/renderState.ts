@@ -208,6 +208,7 @@ function publishCells(read: GameRenderCellSprites, revision: number): GameRender
     index: read.index.slice(),
     data: read.data.slice(),
     types: read.types.slice(),
+    ...(read.rubble && { rubble: read.rubble.map((entry) => ({ ...entry })) }),
     revision,
   };
 }

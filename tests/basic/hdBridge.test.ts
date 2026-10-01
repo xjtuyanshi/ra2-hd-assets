@@ -384,11 +384,14 @@ describe('HD 桥状态机', () => {
       revision: 3,
     };
     state.smudges = { ...state.overlays, types: ['CR1'], data: new Uint8Array([2, 0]) };
+    state.overlays.rubble = [{ slot: 0, type: 'SOURCE' }];
     harness.setState(state);
     await advance(16);
     const pushed = view.push.mock.calls.at(-1)![0];
     expect(pushed.localHouse).toBe(2);
     expect(pushed.overlays).toBe(state.overlays);
+    expect(pushed.overlays.rubble).toBe(state.overlays.rubble);
+    expect(pushed.smudges).not.toHaveProperty('rubble');
     expect(pushed.smudges).toBe(state.smudges);
     harness.setState({ ...state, frame: 4, overlays: null, smudges: null });
     await advance(16);

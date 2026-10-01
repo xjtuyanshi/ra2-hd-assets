@@ -66,7 +66,7 @@ export interface TypeLibrary {
   voxels: Record<string, string>;
   /** Every TechnoType whose art resolved, keyed by rules type id (e.g. "GAPOWR", "HTNK", "E1", "ORCA"). */
   types: Record<string, LibraryType>;
-  /** Every rules [OverlayTypes] entry whose art resolved; absent in older libraries. */
+  /** Every rules [OverlayTypes] entry whose art resolved, plus rubble carriers; absent in older libraries. */
   overlays?: Record<string, LibraryOverlay>;
   /** Diagnostics of a later overlays-only append; the original extraction record is preserved. */
   overlayExtractor?: { tool: string; counts: Record<string, number>; warnings: string[] };
@@ -89,7 +89,10 @@ export interface TypeLibrary {
 
 /** Cell art uses the engine's OverlayData directly as its body-frame index, without animation or facing logic. */
 export interface LibraryOverlay {
-  sprite: string;
+  /** Absent for rubble carriers, which draw their source building's rubble frame instead. */
+  sprite?: string;
+  /** Rules IsRubble=yes: the overlay's Image is never drawn. */
+  rubble?: true;
   /** Number of body frames, excluding a detected shadow half. */
   frames: number;
   palette: 'unit' | 'theater' | 'iso';

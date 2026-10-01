@@ -404,6 +404,16 @@ describe('VmWorkerController request-scoped errors', () => {
     expect(messages.at(-1)).toHaveProperty('value.overlays', null);
     expect(messages.at(-1)).not.toHaveProperty('value.smudges');
 
+    const rubble = [{ slot: 0, type: 'SOURCE' }];
+    core.renderState = { ...core.renderState, overlays: { ...overlays, rubble, revision: 3 } };
+    await controller.handleMessage({ type: 'render-state', requestId: 18 });
+    expect(structuredClone(messages.at(-1))).toHaveProperty('value.overlays.rubble', rubble);
+    expect(messages.at(-1)).not.toHaveProperty('value.smudges');
+    core.renderState = { ...core.renderState, frame: 46 };
+    await controller.handleMessage({ type: 'render-state', requestId: 19 });
+    expect(messages.at(-1)?.type).toBe('render-state-cells-unchanged');
+    expect(messages.at(-1)).not.toHaveProperty('value.overlays');
+
     controller.dispose();
   });
   it('uses one request id for init/start and preserves their order', async () => {

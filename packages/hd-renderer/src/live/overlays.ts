@@ -11,7 +11,9 @@ export interface LiveOverlayCells {
   index: Int16Array;
   data: Uint8Array;
   types: string[];
-  /** Changes only when cell contents or the type table change; monotonic for the reader's lifetime. */
+  /** Source building type of a rubble overlay; only the engine's single carrier cell is listed. */
+  rubble?: { slot: number; type: string }[];
+  /** Changes only when cell contents, rubble carriers or the type table change; monotonic for the reader's lifetime. */
   revision: number;
 }
 
@@ -35,7 +37,7 @@ export interface OverlayInstances {
  */
 export function buildOverlayInstances(
   cells: LiveOverlayCells,
-  library: Pick<TypeLibrary, 'overlays' | 'sprites'> | null,
+  library: Pick<TypeLibrary, 'overlays' | 'sprites' | 'types'> | null,
   terrain: OverlayTerrain,
   palette: (key: string, remap: boolean) => string,
 ): OverlayInstances {
@@ -44,6 +46,16 @@ export function buildOverlayInstances(
   if (!Number.isSafeInteger(cells.width) || cells.width <= 0 || !Number.isSafeInteger(cells.height))
     return { pages, missingTypes };
   const count = Math.min(cells.width * cells.height, cells.index.length, cells.data.length);
+  const rubble = new Map<number, string>();
+  const rubbleOverlayIds = new Set<string>();
+  for (const entry of cells.rubble ?? []) {
+    if (!Number.isSafeInteger(entry.slot) || entry.slot < 0 || entry.slot >= count) continue;
+    const id = cells.types[cells.index[entry.slot]!];
+    if (!id) continue;
+    rubble.set(entry.slot, entry.type);
+    // A carrier identifies the overlay type even in older libraries that still contain its unused Image sprite.
+    rubbleOverlayIds.add(id);
+  }
   const add = (instance: SpriteInstance): void => {
     const page = instance.frame.page ?? 0;
     let list = pages.get(page);
@@ -61,11 +73,31 @@ export function buildOverlayInstances(
     const cell = y * terrain.width + x;
     if (!terrain.exists[cell]) continue;
     const type = library?.overlays?.[id];
-    const sprite = type ? library?.sprites[type.sprite] : undefined;
-    const frameIndex = cells.data[slot]!;
-    const frame = type && frameIndex < type.frames ? sprite?.frames[frameIndex] : undefined;
-    if (!type || !sprite || !frame) {
+    if (!type) {
       missingTypes.add(id);
+      continue;
+    }
+    const isRubble = type.rubble === true || rubbleOverlayIds.has(id);
+    let sprite;
+    let frameIndex;
+    if (isRubble) {
+      const source = rubble.get(slot);
+      if (!source) continue;
+      const building = library?.types[source];
+      sprite = building?.kind === 'building' && building.sprite ? library?.sprites[building.sprite] : undefined;
+      if (!sprite) {
+        missingTypes.add(`rubble:${source}`);
+        continue;
+      }
+      if (sprite.frames.length <= 3) continue;
+      frameIndex = 3;
+    } else {
+      sprite = type.sprite ? library?.sprites[type.sprite] : undefined;
+      frameIndex = cells.data[slot]!;
+    }
+    const frame = isRubble || frameIndex < type.frames ? sprite?.frames[frameIndex] : undefined;
+    if (!sprite || !frame) {
+      missingTypes.add(isRubble ? `rubble:${rubble.get(slot)}` : id);
       continue;
     }
     const anchor = objectAnchor({
@@ -76,10 +108,18 @@ export function buildOverlayInstances(
       z: terrain.levels[cell] ?? 0,
       drawOffset: type.drawOffset,
     });
-    const paletteKey = palette(type.palette, type.remap);
+    const paletteKey = palette(type.palette, isRubble ? false : type.remap);
     const shadow = sprite.shadows?.[frameIndex];
     if (shadow)
-      add({ anchor, frame: shadow, palette: paletteKey, push: 0, shadow: true, flat: true, lighting: type.lighting });
+      add({
+        anchor,
+        frame: shadow,
+        palette: paletteKey,
+        push: 0,
+        shadow: true,
+        flat: isRubble ? type.flat : true,
+        lighting: type.lighting,
+      });
     add({
       anchor,
       frame,
@@ -87,9 +127,9 @@ export function buildOverlayInstances(
       push: type.flat ? 0 : cardPush(frame),
       shadow: false,
       flat: type.flat,
-      glint: type.tiberium === true ? 1 : undefined,
+      glint: !isRubble && type.tiberium === true ? 1 : undefined,
       lighting: type.lighting,
-      deckHeight: isHighBridge(id) ? HIGH_BRIDGE_HEIGHT : undefined,
+      deckHeight: !isRubble && isHighBridge(id) ? HIGH_BRIDGE_HEIGHT : undefined,
     });
   }
   return { pages, missingTypes };
@@ -101,7 +141,7 @@ export function buildOverlayInstances(
  */
 export class OverlayInstanceCache {
   private key: string | null = null;
-  private library: Pick<TypeLibrary, 'overlays' | 'sprites'> | null = null;
+  private library: Pick<TypeLibrary, 'overlays' | 'sprites' | 'types'> | null = null;
   active = false;
   instances: OverlayInstances = { pages: new Map(), missingTypes: new Set() };
 
@@ -109,14 +149,14 @@ export class OverlayInstanceCache {
 
   update(
     cells: LiveOverlayCells | null,
-    library: Pick<TypeLibrary, 'overlays' | 'sprites'> | null,
+    library: Pick<TypeLibrary, 'overlays' | 'sprites' | 'types'> | null,
     paletteKey: string,
     palette: (key: string, remap: boolean) => string,
   ): boolean {
     // Libraries extracted before the overlay section existed cannot replace the map's art yet.
     if (!library?.overlays) cells = null;
     const key = cells
-      ? `${cells.revision}:${cells.originX}:${cells.originY}:${cells.width}:${cells.height}:${paletteKey}`
+      ? `${cells.revision}:${cells.originX}:${cells.originY}:${cells.width}:${cells.height}:${paletteKey}:${JSON.stringify(cells.rubble ?? [])}`
       : null;
     if (key === this.key && library === this.library) return false;
     this.key = key;

@@ -333,6 +333,8 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
       continue;
     }
     const art = src.overlayArt(type);
+    // Map files do not supply the live carrier's source building type; never substitute the overlay's Image.
+    if (art.rubble) continue;
     const { wall, tiberium } = art;
     const id = `overlay:${type}`;
     const s = addShp(id, art.candidates, art.palette, art.remap);

@@ -1,5 +1,6 @@
 import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { YR_STARTUP_PAGE_HASH } from './startupPage';
+import { YR_STATE_VTABLES } from './stateReader';
 
 /**
  * Read-only cell overlays for the pinned Yuri's Revenge 1.001 image. No guest code, state writes or game assets.
@@ -23,6 +24,14 @@ import { YR_STARTUP_PAGE_HASH } from './startupPage';
  *   branch (+0x2A8 at 0x47F96A) passes the complete data byte at 0x47F99C. It selects CurrentPlayer 0xA83D4C
  *   at 0x47F9A4, that house's ColorSchemeIndex +0x16054, and its ColorScheme light convert +0x30C: walls use the
  *   local player's remap, NOT CellClass::WallOwnerIndex (+0x50). This is vanilla-engine presentation behavior.
+ * - OverlayTypeClass::LoadFromINI 0x5FE9FC reads IsRubble into type +0x2B4; BuildingTypeClass reads LeaveRubble
+ *   into +0x1768 at 0x460EF5. The IsRubble branches at 0x47F641 (shadow) / 0x47FAD1 (body) never draw the overlay's
+ *   Image. They read CellClass +0x40 as the source BuildingTypeClass (vtable 0x7E4570, ID at +0x24); null draws nothing.
+ *   GetRubble 0x45F160 (body) / 0x45F1D0 (shadow) uses the building's own SHP frame 3 when frameCount/2 > 3,
+ *   with shadow frame frameCount/2 + 3. The unused stock-rules alternative is LeaveRubble with SHP +0x14F4, frame 0.
+ *   Drawing uses CellClass LightConvert +0x34 (ISO palette with cell lighting) at the normal overlay draw point.
+ * - Rubble placement 0x441F60 sets overlay index 0xEF and clears +0x40 on every foundation cell, then stores the
+ *   building type only on its location (top-left) cell. Publish only that carrier, never infer types for its neighbours.
  *
  * Confidence: high for the listed widths/offsets, index/ID mapping, growth, connection and draw-frame semantics
  * (matching header facts and independent instruction reads/writes). Synthetic tests validate the observer, not
@@ -36,12 +45,14 @@ export const YR_OVERLAY_OFFSETS = Object.freeze({
   cellItems: 0x13c,
   cellCapacity: 0x140,
   cellMapCoords: 0x24,
+  cellRubbleType: 0x40,
   cellOverlayType: 0x44,
   cellOverlayData: 0x11e,
   vectorItems: 0x4,
   vectorCapacity: 0x8,
   vectorCount: 0x10,
   typeId: 0x24,
+  typeIsRubble: 0x2b4,
 });
 export const YR_OVERLAY_VTABLES = Object.freeze({ cell: 0x7e4eec, type: 0x7ef600 });
 
@@ -62,9 +73,18 @@ export interface YrOverlays {
   data: Uint8Array;
   /** Array positions are preserved; an invalid type is represented by an empty ID. */
   types: string[];
-  /** Starts at 1; increases only when bounds, IDs, indices or data differ from the supplied reuse snapshot. */
+  /** Source building types on the engine's single carrier cells, sorted by row-major published slot. */
+  rubble: { slot: number; type: string }[];
+  /** Starts at 1; increases only when bounds, IDs, indices, data or rubble differ from the supplied reuse snapshot. */
   revision: number;
-  counts: { cells: number; overlays: number; invalidCells: number; invalidTypes: number; invalidIndices: number };
+  counts: {
+    cells: number;
+    overlays: number;
+    invalidCells: number;
+    invalidTypes: number;
+    invalidIndices: number;
+    invalidRubble: number;
+  };
 }
 
 export interface ReadYrOverlayOptions {
@@ -124,16 +144,19 @@ function read(memory: GuestMemoryAccessor, reuse: YrOverlays | null | undefined)
   const data = sameArrays ? reuse.data : new Uint8Array(size);
   const types = reuse?.types.length === typeCount ? reuse.types : new Array<string>(typeCount).fill('');
   let changed = !sameArrays || reuse?.originX !== left || reuse.originY !== top || types !== reuse.types;
-  const counts = { cells: 0, overlays: 0, invalidCells: 0, invalidTypes: 0, invalidIndices: 0 };
+  const counts = { cells: 0, overlays: 0, invalidCells: 0, invalidTypes: 0, invalidIndices: 0, invalidRubble: 0 };
+  const rubbleTypes = new Uint8Array(typeCount);
+  const rubble: YrOverlays['rubble'] = [];
   for (let i = 0; i < typeCount; i++) {
     const type = memory.u32(typeItems + i * 4);
     const id =
-      pointer(memory, type, o.typeId + TYPE_ID_LENGTH) && memory.u32(type) === YR_OVERLAY_VTABLES.type
+      pointer(memory, type, o.typeIsRubble + 1) && memory.u32(type) === YR_OVERLAY_VTABLES.type
         ? typeId(memory, type + o.typeId)
         : '';
     if (!id) counts.invalidTypes++;
     if (types[i] !== id) changed = true;
     types[i] = id;
+    if (id) rubbleTypes[i] = Number(memory.u8(type + o.typeIsRubble) !== 0);
   }
   // One slot read per bounded cell, but field reads only for existing, validated cells. Keeping the table scan
   // detects newly allocated/removed cells and load-game pointer replacements without a stale-pointer cache.
@@ -157,6 +180,18 @@ function read(memory: GuestMemoryAccessor, reuse: YrOverlays | null | undefined)
             nextIndex = candidate;
             nextData = memory.u8(cell + o.cellOverlayData);
             counts.overlays++;
+            if (rubbleTypes[candidate]) {
+              const building = memory.u32(cell + o.cellRubbleType);
+              if (building !== 0) {
+                const id =
+                  pointer(memory, building, o.typeId + TYPE_ID_LENGTH) &&
+                  memory.u32(building) === YR_STATE_VTABLES.buildingType
+                    ? typeId(memory, building + o.typeId)
+                    : '';
+                if (id) rubble.push({ slot: out, type: id });
+                else counts.invalidRubble++;
+              }
+            }
           } else if (candidate !== -1 && candidate !== 0xff && candidate !== 0xffff) counts.invalidIndices++;
         }
       }
@@ -165,6 +200,11 @@ function read(memory: GuestMemoryAccessor, reuse: YrOverlays | null | undefined)
       data[out] = nextData;
     }
   }
+  if (
+    rubble.length !== reuse?.rubble.length ||
+    rubble.some((entry, i) => entry.slot !== reuse?.rubble[i]?.slot || entry.type !== reuse?.rubble[i]?.type)
+  )
+    changed = true;
   return {
     frame: memory.i32(g.frame),
     originX: left,
@@ -174,6 +214,7 @@ function read(memory: GuestMemoryAccessor, reuse: YrOverlays | null | undefined)
     index,
     data,
     types,
+    rubble,
     revision: (reuse?.revision ?? 0) + (changed ? 1 : 0),
     counts,
   };
@@ -183,7 +224,7 @@ function read(memory: GuestMemoryAccessor, reuse: YrOverlays | null | undefined)
  * Pure observer. Invalid global tables return null; invalid cells/types are counted and omitted. Never throws,
  * including if a memory view is detached between polls. A null result invalidates any supplied reuse buffers.
  * Exact comparisons during the scan avoid digest collisions and let the bridge forward unchanged revisions cheaply.
- * Cost is O(bounded slots + existing cells + types), with 3 bytes per bounded slot and no per-cell allocations.
+ * Cost is O(bounded slots + existing cells + types), with 3 bytes per bounded slot and allocations only for carriers.
  */
 export function readYrOverlays(memory: GuestMemoryAccessor, options: ReadYrOverlayOptions = {}): YrOverlays | null {
   try {

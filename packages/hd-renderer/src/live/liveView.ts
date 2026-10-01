@@ -126,7 +126,8 @@ export interface LiveSnapshot {
   shroud?: ShroudCells | null;
   /** The engine's live effects (anims, projectiles, particle systems, beams), when the host reads them. */
   effects?: LiveEffects | null;
-  /** Full live overlay grid; null/absent or a legacy library without overlay art keeps map-cache overlays. */
+  /** Full live overlay grid, including rubble carriers; forwarded intact to the overlay cache. Null/absent or a
+   * legacy library without overlay art keeps map-cache overlays. */
   overlays?: LiveOverlayCells | null;
   /** Full live smudge grid; null/absent keeps map-cache smudges. Older libraries use available map-cache art. */
   smudges?: LiveSmudgeCells | null;

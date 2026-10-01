@@ -51,6 +51,21 @@ authoritative even with an old library, so removed map-start smudges do not ling
 Terrain elevation still comes from the map cache; dynamic terrain deformation is outside this contract. Footprint
 dimensions come from the theater library rules; custom-map Width/Height overrides require matching metadata.
 
+### Rubble of destroyed buildings
+
+Rules `[RUBBLE_OVERLAY]` has `Image=SROCK01` and `IsRubble=yes`, but YR 1.001 never draws an IsRubble overlay's own
+image (CellClass overlay draw 0x47F6A0; rubble branches 0x47F641 shadow / 0x47FAD1 body test OverlayTypeClass
++0x2B4). It reads CellClass +0x40, the source BuildingTypeClass (vtable 0x7E4570): null draws nothing, otherwise
+BuildingTypeClass::GetRubble (0x45F160 / 0x45F1D0) uses that building's own SHP body frame 3 (shadow frame
+frameCount/2 + 3) when the SHP has more than three body frames, drawn with the cell's light convert (+0x34, ISO
+palette) at the overlay draw point. The destruction path (0x441F60) puts overlay 0xEF on every foundation cell, clears
++0x40 there and stores the building type only on the location (top-left) cell. The overlay reader therefore publishes
+`rubble: [{ slot, type }]` for those carrier cells only; libraries mark IsRubble overlays `rubble: true` without a
+sprite (never `srock01`), and LiveView draws the carrier building's frame 3 and shadow with the overlay's ISO palette,
+lighting and flat flag. HD art for those frames lives on a dedicated `sprites-rubble-l5f` page per theatre
+(`packages/ra2-assets/python/rubble_pages.py`); older libraries that still list a RUBBLE_OVERLAY sprite are ignored
+once a carrier names the overlay type.
+
 ## Upgrade existing caches
 
 Use the player's own complete installation. Derived atlases and screenshots must stay outside Git. From the repository

@@ -151,6 +151,12 @@ function collectOverlays(
   counts['listed:overlay'] = ids.length;
   for (const id of ids) {
     const { candidates, ...art } = src.overlayArt(id);
+    if (art.rubble) {
+      overlays[id] = { frames: 0, ...art };
+      // The source building's indexed sprite is recoloured with the cell palette at runtime.
+      collector.usedPalettes.add(art.palette);
+      continue;
+    }
     const sprite = `overlay:${id}`;
     const pending = collector.addShp(sprite, candidates, art.palette, art.remap);
     if (!pending) continue;
