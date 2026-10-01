@@ -193,6 +193,9 @@ sidecar the view falls back to land-type surfaces and no map light sources.
   smoke building over the first second and lingering for about five seconds, a smoke column rising for about thirteen
   seconds after bigger blasts, heat shimmer, a dust ring, and around
   craters a hot glow and charred ground that fades over most of a minute (the engine's crater smudge stays).
+  Smoke opacity smoothly reaches a 0.62 multiplier over puff ages 1.2-3.0 seconds; column puffs reach 0.6 over
+  1.5-4.0 seconds. The same age ramp shifts both radial silhouette edges inward by 0.15 in normalized radius
+  (`lateOpacity`, `lateFrom`, `lateEdge`), keeping the early smoke unchanged while the older rims thin faster.
   Optional HD flipbooks enlarge explosions, collapses and debris by 1.3 and impacts by 1.15 around the native draw
   point, with matching garnish footprints; other categories and native cards keep their size. Enhanced debris uses
   lit polygonal chunks, including a few larger, slower pieces, that rest on the ground for about eight seconds.

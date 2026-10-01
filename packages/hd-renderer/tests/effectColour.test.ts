@@ -94,6 +94,18 @@ describe('enhanced ember radiance', () => {
 });
 
 describe('enhanced particle routing and lights', () => {
+  it.each([
+    ['smoke', 0.62, [1.2, 3.0]],
+    ['column', 0.6, [1.5, 4.0]],
+  ] as const)('documents late %s thinning without changing the early phase', (name, lateOpacity, lateFrom) => {
+    const tuning = ENHANCED[name];
+    expect(tuning).toMatchObject({ lateOpacity, lateFrom, lateEdge: 0.15 });
+    expect(tuning.lateOpacity).toBeGreaterThan(0);
+    expect(tuning.lateOpacity).toBeLessThan(1);
+    expect(tuning.lateFrom[0]).toBeGreaterThanOrEqual(1.2);
+    expect(tuning.lateFrom[0]).toBeLessThan(tuning.lateFrom[1]);
+  });
+
   it('builds a dense smoke dome over the first second, then retains drifting billows and the longer column', () => {
     let seed = 123;
     vi.spyOn(Math, 'random').mockImplementation(() => {

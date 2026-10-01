@@ -197,10 +197,39 @@ export const ENHANCED = {
   },
   /** Debris: chunks per blast; `rest` seconds on the ground, `glowLife` seconds cooling from core to rim temperature. */
   debris: { count: 16, perScale: 28, rest: 8, glowLife: 1.1, rim: 0.65 },
-  /** Billows keep forming over `spread` seconds after the first birth at `delay`. */
-  smoke: { count: 3, perScale: 7, delay: 0.1, spread: 0.9, life: 5.0, size: 0.5, opacity: 0.85 },
-  /** Smoke column (blasts of scale >= `from`): puffs emitted over `span` seconds, each rising for `life` seconds. */
-  column: { from: 0.35, count: 5, perScale: 8, span: 6, life: 13, rise: 0.32, size: 0.55 },
+  /**
+   * Billows keep forming over `spread` seconds after the first birth at `delay`. Across `lateFrom` seconds of puff
+   * age, opacity smoothly reaches the `lateOpacity` multiplier and both radial silhouette edges move inward by
+   * `lateEdge` in normalized radius. Before that interval, opacity and edges retain their original values.
+   */
+  smoke: {
+    count: 3,
+    perScale: 7,
+    delay: 0.1,
+    spread: 0.9,
+    life: 5.0,
+    size: 0.5,
+    opacity: 0.85,
+    lateOpacity: 0.62,
+    lateFrom: [1.2, 3.0],
+    lateEdge: 0.15,
+  },
+  /**
+   * Smoke column (blasts of scale >= `from`): puffs emitted over `span` seconds, each rising for `life` seconds.
+   * `lateFrom` (puff age in seconds), `lateOpacity` (multiplier) and `lateEdge` (inward radial shift) work as for billows.
+   */
+  column: {
+    from: 0.35,
+    count: 5,
+    perScale: 8,
+    span: 6,
+    life: 13,
+    rise: 0.32,
+    size: 0.55,
+    lateOpacity: 0.6,
+    lateFrom: [1.5, 4.0],
+    lateEdge: 0.15,
+  },
   shimmer: { width: 1.5, life: 1.0 },
   dust: { width: 2.2, life: 0.9 },
   /** Ember-bed width/lifetime and edge temperature; the centre starts at temperature 1 and cools to zero. */
@@ -925,7 +954,12 @@ export class EffectsLayer {
         const bump = lumps.sub(0.5).mul(1.2).add(broad.sub(0.5).mul(0.6)).add(fine.sub(0.5).mul(0.4));
         const r = length(p).add(bump.mul(0.6));
         // A defined, lumpy silhouette over a dense core (a puff, not a haze).
-        const density = smoothstep(1.0, 0.72, r).mul(float(0.55).add(smoothstep(0.9, 0.2, r).mul(0.45)));
+        // Puff age leaves the early billow intact; the old rim reaches zero at a smaller radius.
+        const late = smoothstep(ENHANCED.smoke.lateFrom[0], ENHANCED.smoke.lateFrom[1], age);
+        const edge = late.mul(ENHANCED.smoke.lateEdge);
+        const density = smoothstep(float(1.0).sub(edge), float(0.72).sub(edge), r).mul(
+          float(0.55).add(smoothstep(0.9, 0.2, r).mul(0.45)),
+        );
         // Lumpy sphere normal in billboard space (x right, y up, z towards the camera).
         const z = sqrt(clamp(float(1).sub(dot(p, p)), 0.04, 1));
         const nrm = normalize(vec3(p.x.add(bump.mul(1.1)), p.y.add(bump.mul(1.1)), z));
@@ -952,6 +986,7 @@ export class EffectsLayer {
           .mul(smoothstep(0.0, 0.08, t))
           .mul(smoothstep(1.0, 0.35, t))
           .mul(ENHANCED.smoke.opacity)
+          .mul(mix(1, ENHANCED.smoke.lateOpacity, late))
           .mul(t.lessThan(1).select(float(1), float(0)));
         return vec4(base.mul(lit).mul(alpha).add(glow.mul(alpha)), alpha);
       })();
@@ -1172,7 +1207,12 @@ export class EffectsLayer {
         const fine = texture(noise, q.mul(0.85).add(vec2(seed.mul(5.3), age.mul(-0.02)))).b;
         const bump = lumps.sub(0.5).mul(1.2).add(fine.sub(0.5).mul(0.4));
         const r = length(p).add(bump.mul(0.6));
-        const density = smoothstep(1.0, 0.65, r).mul(float(0.5).add(smoothstep(0.9, 0.2, r).mul(0.5)));
+        // The column uses its own puff-age interval for the same opacity and silhouette thinning.
+        const late = smoothstep(ENHANCED.column.lateFrom[0], ENHANCED.column.lateFrom[1], age);
+        const edge = late.mul(ENHANCED.column.lateEdge);
+        const density = smoothstep(float(1.0).sub(edge), float(0.65).sub(edge), r).mul(
+          float(0.5).add(smoothstep(0.9, 0.2, r).mul(0.5)),
+        );
         const z = sqrt(clamp(float(1).sub(dot(p, p)), 0.04, 1));
         const nrm = normalize(vec3(p.x.add(bump.mul(1.1)), p.y.add(bump.mul(1.1)), z));
         const sun = dot(nrm, vec3(-0.5, 0.68, 0.53)).max(0);
@@ -1190,6 +1230,7 @@ export class EffectsLayer {
           .mul(smoothstep(0.0, 0.06, t))
           .mul(smoothstep(1.0, 0.4, t))
           .mul(0.62)
+          .mul(mix(1, ENHANCED.column.lateOpacity, late))
           .mul(t.lessThan(1).select(float(1), float(0)));
         return vec4(base.mul(lit).mul(alpha).add(glow.mul(alpha)), alpha);
       })();
