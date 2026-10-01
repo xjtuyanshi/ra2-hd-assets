@@ -79,6 +79,20 @@ export class VoxelProjectionState {
   readonly paintShade = uniform(0.85);
   readonly paintSpec = uniform(0.5);
   /**
+   * Form light for the whole redraw (not only house paint). The image-model redraws are lit almost evenly, so at game
+   * scale a vehicle reads as a flat painting while the target look has dark lower hulls, bright top faces and glossy
+   * edges. formShade multiplies the redraw by the smooth mesh's Lambert term against the current sun (normalised to 1
+   * at n.l = 0.65), formAO applies the mesh's voxel occlusion (crevices, the hull under the turret), spec adds a
+   * luminance-gated Blinn-Phong glint toward the iso camera, and contrast is a hue-preserving luminance power around
+   * linear mid grey (full strength below it, about a third above it so light hulls do not clip). Defaults were
+   * chosen by 1:1 game-scale comparison with the approved S2 target frames; formShade:0,formAO:0,spec:0,contrast:1
+   * is the plain projection.
+   */
+  readonly formShade = uniform(0.85);
+  readonly formAO = uniform(0.75);
+  readonly spec = uniform(0.5);
+  readonly contrast = uniform(1.35);
+  /**
    * Light level the redraws were baked under. The bakes are screenshots of the engine look, so their colours already
    * carry the bake map's object light level; the projected colour is scaled by level / levelRef instead of level.
    * 1.7 matches the median brightness of the XMP29U2 noon bakes (measured in Chrome against the redraw frames).

@@ -412,9 +412,13 @@ window.__hd.voxelProjection.saturation.value = 1; // Saturation of the redraw co
 window.__hd.voxelProjection.sharpen.value = 0.5; // Negative mip LOD bias (levels) for the redraw atlases.
 window.__hd.voxelProjection.paintShade.value = 0.85; // Mesh-normal form shading of the house paint (0..1).
 window.__hd.voxelProjection.paintSpec.value = 0.5; // Camera glint on the house paint.
+window.__hd.voxelProjection.formShade.value = 0.85; // Mesh Lambert form light on the whole redraw (0..1).
+window.__hd.voxelProjection.formAO.value = 0.75; // Mesh voxel occlusion on the redraw (0..1).
+window.__hd.voxelProjection.spec.value = 0.5; // Luminance-gated glint on the whole redraw.
+window.__hd.voxelProjection.contrast.value = 1.35; // Hue-preserving luminance power around linear mid grey.
 ```
 
-The sandbox also takes them in the URL: `?vpk=relight:0.5,levelRef:1.7,gain:1,saturation:1`. The redraws are drawn about three times larger than the game shows them, so trilinear filtering lands between mips; `sharpen` biases the colour and paint reads toward the finer mip (0 restores plain trilinear sampling). Image models paint the remappable house colour almost flat, so the paint alone receives Lambert shading from the mesh normal against the current sun (normalised to 1 at n.l = 0.65) and a Blinn-Phong glint toward the iso camera; `vpk=sharpen:0,paintShade:0,paintSpec:0` reproduces the earlier projection look for A/B reviews. The bakes are
+The sandbox also takes them in the URL: `?vpk=relight:0.5,levelRef:1.7,gain:1,saturation:1`. The redraws are drawn about three times larger than the game shows them, so trilinear filtering lands between mips; `sharpen` biases the colour and paint reads toward the finer mip (0 restores plain trilinear sampling). Image models paint the remappable house colour almost flat, so the paint alone receives Lambert shading from the mesh normal against the current sun (normalised to 1 at n.l = 0.65) and a Blinn-Phong glint toward the iso camera; `vpk=sharpen:0,paintShade:0,paintSpec:0` reproduces the earlier projection look for A/B reviews. The redraws themselves are lit almost evenly, so at game scale a vehicle read as a flat painting next to the approved target frames (dark lower hulls, bright top faces, glossy edges); `formShade`, `formAO`, `spec` and `contrast` give the whole redraw form light from the smooth mesh, the mesh's voxel occlusion, a glint gated by the redraw's luminance and a luminance contrast, and `vpk=formShade:0,formAO:0,spec:0,contrast:1` turns them off. The bakes are
 screenshots of the engine look at the XMP29U2 noon object level, so their colours already carry that level: the
 projected colour is scaled by `level / levelRef` rather than `level`, and 1.7 reproduces the redraw frames' median
 brightness at noon on that map (measured in Chrome). relight, blend and strength are clamped to 0..1 in the shader. Optional relighting uses the existing sprite sun-direction uniform

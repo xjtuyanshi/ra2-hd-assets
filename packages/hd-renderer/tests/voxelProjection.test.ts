@@ -197,6 +197,12 @@ describe('projected materials and shader compilation', () => {
     expect(voxelProjectionFor(other).strength.value).toBe(1);
     expect(voxelProjectionFor(other).blend.value).toBe(1);
     expect(voxelProjectionFor(other).relight.value).toBe(0);
+    // Form light defaults are per atmosphere context too (formShade/formAO/spec/contrast, see VoxelProjectionState).
+    voxelProjectionFor(nodes).formShade.value = 0;
+    expect(voxelProjectionFor(other).formShade.value).toBe(0.85);
+    expect(voxelProjectionFor(other).formAO.value).toBe(0.75);
+    expect(voxelProjectionFor(other).spec.value).toBe(0.5);
+    expect(voxelProjectionFor(other).contrast.value).toBe(1.35);
     nodes.dispose();
     nodes.dispose();
     other.dispose();

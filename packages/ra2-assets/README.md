@@ -437,8 +437,14 @@ python3 packages/ra2-assets/python/vehicle_projection.py build --type HTNK \
   --palettes "$VEHICLE_WORK/bake/palettes.json" --house-key unit@BakeA \
   --out "$VEHICLE_WORK/proj/vehicles-hd" --review "$VEHICLE_WORK/proj/review/HTNK"
 python3 packages/ra2-assets/python/vehicle_projection.py build-index --out "$VEHICLE_WORK/proj/vehicles-hd"
+python3 packages/ra2-assets/python/vehicle_projection.py grade --out "$VEHICLE_WORK/proj/vehicles-hd" \
+  --parts HTNK_body HTNK_turret SMCV_body --keep 0.3
 python3 -m unittest discover -s packages/ra2-assets/python -p test_vehicle_projection.py -v
 ```
+
+`grade` is an optional post-build step for parts whose redraw drifted from steel to tan/beige: pixels in the
+orange-yellow hue band keep only `--keep` of their chroma at unchanged linear luminance (slightly cool grey), and
+house paint and alpha stay untouched. It rewrites the colour atlases in place, so run it once per build.
 
 A type requires a complete, uniformly spaced set of 32 or 16 facings for every part (`all` maps to `body`,
 `tur` to `turret`). Missing outputs and partial types fail the build; they never publish a new manifest. Sheets

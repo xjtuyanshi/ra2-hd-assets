@@ -11,6 +11,7 @@ import {
   normalWorld,
   pow,
   positionLocal,
+  smoothstep,
   sRGBTransferEOTF,
   sin,
   step,
@@ -98,6 +99,21 @@ export function projectedVoxelColour(
     house = house.mul(mix(1, shade, state.paintShade.clamp())).add(glint);
     colour = mix(colour, house, mask);
   }
+  // Form light from the smooth mesh on the whole redraw (house paint already has its own shade above).
+  const lit: ShaderNode = max(n.dot(currentLight), 0);
+  const form: ShaderNode = lit.mul(0.8).add(0.3).div(0.3 + 0.8 * 0.65);
+  colour = colour.mul(mix(1, form, state.formShade.clamp().mul(float(1).sub(mask))));
+  const luma: ShaderNode = colour.dot(vec3(0.2126, 0.7152, 0.0722)).max(1e-4).toVar();
+  // Shadows take the full power, highlights about a third of it: the redraws are bright, and a symmetric power
+  // pushed light hulls to clipped white; the glint below supplies the bright edges instead.
+  const power: ShaderNode = state.contrast.sub(1).mul(mix(1, 0.35, step(0.18, luma)));
+  colour = colour.mul(pow(luma.div(0.18), power));
+  const eye: ShaderNode = cameraWorldMatrix.mul(vec4(0, 0, 1, 0)).xyz.normalize();
+  const sheen: ShaderNode = pow(max(n.dot(currentLight.add(eye).normalize()), 0), 24)
+    .mul(smoothstep(0.03, 0.35, luma))
+    .mul(step(1e-4, lit))
+    .mul(state.spec.max(0));
+  colour = colour.add(vec3(1, 0.97, 0.92).mul(sheen));
   const ratio: ShaderNode = max(n.dot(currentLight), 0)
     .mul(0.4)
     .add(0.6)

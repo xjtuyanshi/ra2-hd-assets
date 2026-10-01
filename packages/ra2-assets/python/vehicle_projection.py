@@ -385,6 +385,47 @@ def build_index(out: Path) -> dict:
     return index
 
 
+def steel_grade(rgba: np.ndarray, paint: np.ndarray, keep: float = 0.3) -> np.ndarray:
+    """Pull the warm tan/beige the image model drifts hull metal to back toward neutral steel.
+
+    Pixels whose hue lies in the orange-yellow band (full effect at 20-60 degrees, fading out over 10 degrees) keep
+    only `keep` of their chroma; linear luminance is preserved and the grey gets a slight cool tint. House paint
+    (paint red channel above 0.3, full protection from 0.7) and alpha are untouched. The approved target frames show
+    silver steel hulls, as do the original voxels; the redraws of the Soviet hulls came back tan.
+    """
+    rgba = np.asarray(rgba, np.uint8)
+    srgb = rgba[..., :3].astype(np.float64) / 255
+    lin = linear_rgb(rgba[..., :3])
+    y = (lin @ np.array([0.2126, 0.7152, 0.0722]))[..., None]
+    hi, lo = srgb.max(-1), srgb.min(-1)
+    r, g, b = srgb[..., 0], srgb[..., 1], srgb[..., 2]
+    d = np.maximum(hi - lo, 1e-6)
+    hue = np.where(hi == r, ((g - b) / d) % 6, np.where(hi == g, (b - r) / d + 2, (r - g) / d + 4)) * 60
+    band = np.clip(1 - np.maximum(0, np.abs(hue - 40) - 20) / 10, 0, 1)
+    protect = np.clip((np.asarray(paint, np.float64) / 255 - 0.3) / 0.4, 0, 1)
+    w = (band * (1 - protect) * (1 - keep))[..., None]
+    out = lin * (1 - w) + y * np.array([0.97, 1.0, 1.05]) * w
+    out = np.where(out <= 0.0031308, out * 12.92, 1.055 * np.clip(out, 0, None) ** (1 / 2.4) - 0.055)
+    graded = rgba.copy()
+    graded[..., :3] = np.clip(np.round(out * 255), 0, 255).astype(np.uint8)
+    return graded
+
+
+def grade(atlases: Path, parts: list[str], keep: float) -> dict:
+    """steel_grade each <part>.png in place (atomic replace), using <part>_paint.png as the paint mask."""
+    changed = {}
+    for part in parts:
+        colour_path, paint_path = atlases / f'{part}.png', atlases / f'{part}_paint.png'
+        rgba = np.asarray(Image.open(colour_path).convert('RGBA'))
+        paint = np.asarray(Image.open(paint_path).convert('RGB'))[..., 0]
+        graded = steel_grade(rgba, paint, keep)
+        tmp = colour_path.with_suffix('.grade.png')
+        Image.fromarray(graded, 'RGBA').save(tmp)
+        tmp.replace(colour_path)
+        changed[part] = int((np.abs(graded.astype(int) - rgba.astype(int)).max(-1) > 2).sum())
+    return changed
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -398,9 +439,15 @@ def main():
     builder.add_argument('--review', type=Path)
     index = commands.add_parser('build-index')
     index.add_argument('--out', type=Path, required=True)
+    grader = commands.add_parser('grade', help='steel_grade built colour atlases in place')
+    grader.add_argument('--out', type=Path, required=True)
+    grader.add_argument('--parts', nargs='+', required=True)
+    grader.add_argument('--keep', type=float, default=0.3)
     args = parser.parse_args()
     if args.command == 'build-index':
         print(json.dumps(build_index(args.out), indent=2))
+    elif args.command == 'grade':
+        print(json.dumps(grade(args.out, args.parts, args.keep), indent=2))
     else:
         spec = build(args.type, args.bake, args.sheets, args.palettes, args.house_key, args.out, args.review)
         print(json.dumps({**{k: spec[k] for k in ('type', 'frames', 'facingStep', 'scale', 'jacobian', 'house')},

@@ -9,8 +9,8 @@ import numpy as np
 from PIL import Image
 
 from vehicle_projection import (BAKE_JACOBIAN, Frame, Registration, affine_point, build, build_index,
-                                pack_frames, paint_channels, ramp_position, redraw_alpha, register,
-                                sheet_matrix, similarity, warp)
+                                linear_rgb, pack_frames, paint_channels, ramp_position, redraw_alpha, register,
+                                sheet_matrix, similarity, steel_grade, warp)
 
 
 class VehicleProjectionTests(unittest.TestCase):
@@ -132,6 +132,19 @@ class VehicleProjectionTests(unittest.TestCase):
                 build('BAD', bake, [sheet], palettes, 'unit@BakeA', out)
             self.assertFalse((out / 'BAD.json').exists())
 
+
+    def test_steel_grade_neutralises_tan_only(self):
+        rgba = np.array([[[196, 170, 120, 255], [200, 30, 30, 255], [40, 90, 200, 255], [196, 170, 120, 128]]],
+                        np.uint8)
+        paint = np.array([[0, 0, 0, 255]], np.uint8)
+        tan, red, blue, painted = steel_grade(rgba, paint, 0.3)[0]
+        weights = [0.2126, 0.7152, 0.0722]
+        self.assertLess(int(tan[:3].max()) - int(tan[:3].min()), 30)  # 76 apart before
+        self.assertAlmostEqual(float(linear_rgb(tan[:3]) @ weights), float(linear_rgb(rgba[0, 0, :3]) @ weights),
+                               delta=0.01)
+        np.testing.assert_array_equal(red, rgba[0, 1])  # hue 0 and 220 lie outside the band
+        np.testing.assert_array_equal(blue, rgba[0, 2])
+        np.testing.assert_array_equal(painted, rgba[0, 3])  # house paint and alpha untouched
 
 if __name__ == '__main__':
     unittest.main()

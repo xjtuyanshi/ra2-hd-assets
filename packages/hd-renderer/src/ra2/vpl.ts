@@ -379,7 +379,9 @@ function createMaterial(
       lightDirection,
       spriteLookFor(nodes).sunDirection,
     );
-    const colour: ShaderNode = srgbScale(projected.colour, level.div(voxelProjectionFor(nodes).levelRef.max(0.01)));
+    const projState = voxelProjectionFor(nodes);
+    const formAo: ShaderNode = float(1).sub(occlusion.mul(projState.formAO.clamp()));
+    const colour: ShaderNode = srgbScale(projected.colour, level.div(projState.levelRef.max(0.01))).mul(formAo);
     const projectedShade: ShaderNode = mix(moonlit(colour, nodes), colour, projected.paint)
       .mul(voxelFill)
       .add(colour.mul(local));
