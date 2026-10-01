@@ -76,6 +76,7 @@ import { applyLookPreset, LOOK_PRESETS, type LookPreset } from '../src/HdRendere
 import { voxelLookParams } from './look';
 import { voxelProjectionFor } from '../src/ra2/voxelProjection';
 import { voxelPbrFor } from '../src/ra2/voxelPbr';
+import { voxelShadowFor } from '../src/ra2/voxelShadow';
 import { advanceShpReview, shpUnitReview } from './shpUnitReview';
 import type { TypeLibrary } from '../../ra2-assets/src/library';
 import { depleteOre, growthGrid, mapOverlayGrid, polylinePosition, type CellPoint } from './oreBench';
@@ -121,6 +122,8 @@ const live = await LiveView.create(canvas, {
   voxelPbr: voxelPbrFor(live.hd.nodes),
   stats: () => live.hd.stats(),
 };
+// &vshadow=hard restores the single hard twin; contact penumbra is the default (also in replays).
+voxelShadowFor(live.hd.nodes).soft = params.get('vshadow') !== 'hard';
 // &look=golden: the enhanced look preset (src/HdRenderer.ts LOOK_PRESETS; pair it with &hours=16.5), for effect reviews
 // in the lighting they will be seen with.
 const lookPreset = params.get('look') as LookPreset | null;

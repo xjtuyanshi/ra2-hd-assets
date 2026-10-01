@@ -1,7 +1,16 @@
-import { LessDepth, Matrix4, Mesh, MeshBasicNodeMaterial, Vector3, type Object3D } from 'three/webgpu';
-import { Fn, If, depth, float, floor, fwidth } from 'three/tsl';
+import {
+  LessDepth,
+  Matrix4,
+  Mesh,
+  MeshBasicNodeMaterial,
+  Vector2,
+  Vector3,
+  Vector4,
+  type Object3D,
+  type OrthographicCamera,
+} from 'three/webgpu';
+import { floor, screenCoordinate, uniform } from 'three/tsl';
 import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
-import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT } from '../world';
 import { spriteLookFor } from './spriteLook';
 
@@ -11,14 +20,19 @@ import { spriteLookFor } from './spriteLook';
  * shadow lies. A 3D sun shadow put tank shadows several cells away from where the original has them, left hovering
  * aircraft without any shadow under them and made every vehicle read as floating.
  *
- * Here each voxel part gets a twin that shares its geometry and is drawn with P . matrixWorld, where P projects world
- * points onto the ground plane under the unit along the engine's shadow direction. Overlapping parts and faces darken
- * a pixel only once: every twin of a unit lies on one plane and writes one depth per pixel, the plane's nearest depth
- * within the pixel (so every multisample of the ground behind it passes) quantised to SHADOW_DEPTH_STEPS; it passes
+ * Here each voxel part gets five twins sharing geometry/material, drawn with P . matrixWorld, where P projects
+ * world points onto the ground plane under the unit along the engine's shadow direction. A physical shadow-origin override
+ * translates render-offset geometry back to that origin before ground projection, regardless of render altitude.
+ * Four twins offset by 0.04 cells soften the edge; their increasing lifts draw in order. Each layer's opacity is
+ * 1 - (1 - target)^(1/5), so the shared core retains the engine/enhanced darkness. Within each layer, overlapping
+ * parts and faces darken a pixel only once: all use the same analytic plane depth at the pixel centre, pulled to the
+ * nearest depth within the pixel (so every ground multisample passes), quantised to SHADOW_DEPTH_STEPS. It passes
  * only in front of what is there (LessDepth), so a second fragment on the same plane fails the depth test. (A stencil
  * did the same, but a depth-stencil target cannot be sampled in three r186, and the post pipeline samples the scene
  * depth for the mist and the shroud. Without the per-pixel nearest depth, a pixel-centre depth failed against about
- * half the ground's multisamples under MSAA and the shadows came out half as dark.) Shadows draw after the sprites'
+ * half the ground's multisamples under MSAA and the shadows came out half as dark. Derivatives of interpolated
+ * triangle depth introduced a stippled fringe; analytic coefficients keep identical depths across voxel edges.)
+ * Review tooling can restore a single hard twin. Shadows draw after the sprites'
  * decals and before upright art is blended over them only where they are in front (renderOrder and SHADOW_LIFT).
  */
 
@@ -47,6 +61,30 @@ export const SHADOW_OPACITY = ENGINE_SHADOW_OPACITY;
  * darkens them too, as the engine draws shadows over the ground layer.
  */
 export const SHADOW_LIFT = 0.03;
+/** Contact penumbra radius in cells, independent of camera zoom. */
+export const SHADOW_PENUMBRA = 0.04;
+/** Extra normal lift per layer, above the iso camera's depth quantisation step (400 / 2^20). */
+export const SHADOW_COPY_LIFT = 0.001;
+export const SHADOW_COPIES = [
+  { x: 0, z: 0, lift: 0 },
+  { x: -SHADOW_PENUMBRA, z: 0, lift: SHADOW_COPY_LIFT },
+  { x: SHADOW_PENUMBRA, z: 0, lift: 2 * SHADOW_COPY_LIFT },
+  { x: 0, z: -SHADOW_PENUMBRA, lift: 3 * SHADOW_COPY_LIFT },
+  { x: 0, z: SHADOW_PENUMBRA, lift: 4 * SHADOW_COPY_LIFT },
+] as const;
+
+/** Equal black-alpha layers whose fully covered core composes to the target darkness. */
+export function shadowCopyOpacity(target: number, copies: number = SHADOW_COPIES.length): number {
+  return 1 - Math.pow(1 - target, 1 / copies);
+}
+
+const shadowModes = new WeakMap<AtmosphereNodes, { soft: boolean }>();
+/** Renderer-local review switch; hard mode hides the four extra twins and restores single-layer opacity. */
+export function voxelShadowFor(nodes = DEFAULT_ATMOSPHERE_NODES): { soft: boolean } {
+  let mode = shadowModes.get(nodes);
+  if (!mode) shadowModes.set(nodes, (mode = { soft: true }));
+  return mode;
+}
 /** A unit whose origin is higher than this above the ground (world units) is airborne: aircraft, jumpjets. */
 export const AIRBORNE_HEIGHT = 0.1;
 /**
@@ -95,6 +133,18 @@ export function groundFromHeights(height: (x: number, z: number) => number, maxS
 }
 
 const grounds = new WeakMap<Object3D, ShadowGround>();
+const shadowOrigins = new WeakMap<Object3D, Vector3>();
+
+/** Set a unit root's physical world-space shadow origin, forcing ground projection; absent restores normal shadows. */
+export function setShadowOrigin(unit: Object3D, origin?: Vector3): void {
+  if (!origin) {
+    shadowOrigins.delete(unit);
+    return;
+  }
+  let stored = shadowOrigins.get(unit);
+  if (!stored) shadowOrigins.set(unit, (stored = new Vector3()));
+  stored.copy(origin);
+}
 
 /** Register the ground of a scene; voxel units and their shadows below `scene` look it up by walking to their root. */
 export function setShadowGround(scene: Object3D, ground: ShadowGround | ((x: number, z: number) => number)): void {
@@ -144,6 +194,26 @@ export function shadowProjection(point: Vector3, normal: Vector3 = UP, out = new
   );
 }
 
+/** Translate geometry from its drawn origin to its physical origin, then apply the ordinary ground projection. */
+export function shadowOriginProjection(
+  drawnOrigin: Vector3,
+  physicalOrigin: Vector3,
+  ground: Vector3,
+  normal: Vector3 = UP,
+  out = new Matrix4(),
+): Matrix4 {
+  shadowProjection(ground, normal, out);
+  const dx = physicalOrigin.x - drawnOrigin.x;
+  const dy = physicalOrigin.y - drawnOrigin.y;
+  const dz = physicalOrigin.z - drawnOrigin.z;
+  // P * T(physical - drawn), without allocating a translation matrix for every shadow part each frame.
+  const e = out.elements;
+  e[12] += e[0]! * dx + e[4]! * dy + e[8]! * dz;
+  e[13] += e[1]! * dx + e[5]! * dy + e[9]! * dz;
+  e[14] += e[2]! * dx + e[6]! * dy + e[10]! * dz;
+  return out;
+}
+
 /**
  * Shadow of an airborne unit whose origin is at `origin`, over the ground point `ground` below it: the model is
  * flattened along the shadow direction relative to its own origin (its own body height only, as on the ground), dropped
@@ -178,12 +248,36 @@ export function airborneShadowProjection(
 }
 
 /**
- * Depth quantisation of shadow twins: coplanar triangles interpolate the same depth up to rounding, and quantising to
- * 2^-20 of the camera range (about 0.0004 world units for the iso camera's 400) makes them exactly equal.
+ * Quantise analytic plane depth to 2^-20 of the camera range (about 0.0004 world units for the iso camera's 400).
+ * All parts/faces of a layer use the same coefficients, so triangle interpolation/derivatives cannot split a bin.
  */
-const SHADOW_DEPTH_STEPS = 2 ** 20;
+export const SHADOW_DEPTH_STEPS = 2 ** 20;
 
-/** One shared material per renderer context, drawn once per pixel (see the depth notes above). */
+/** Pixel-centre depth c0 + cx*x + cy*y of n.p = constant, plus the nearest-sample pull in w (pixels, y down). */
+export function shadowPlaneDepth(
+  camera: OrthographicCamera,
+  width: number,
+  height: number,
+  normal: Vector3,
+  constant: number,
+  out: Vector4,
+): Vector4 {
+  const m = camera.matrixWorld.elements;
+  const p = camera.projectionMatrixInverse.elements;
+  const nx = normal.x * m[0]! + normal.y * m[1]! + normal.z * m[2]!;
+  const ny = normal.x * m[4]! + normal.y * m[5]! + normal.z * m[6]!;
+  const nz = normal.x * m[8]! + normal.y * m[9]! + normal.z * m[10]!;
+  const d = constant - normal.x * m[12]! - normal.y * m[13]! - normal.z * m[14]!;
+  const range = camera.far - camera.near;
+  const c0 = ((nx * (p[12]! - p[0]!) + ny * (p[13]! + p[5]!) - d) / nz - camera.near) / range;
+  const cx = (2 * nx * p[0]!) / (width * nz * range);
+  const cy = (-2 * ny * p[5]!) / (height * nz * range);
+  return out.set(c0, cx, cy, (Math.abs(cx) + Math.abs(cy)) / 2);
+}
+
+const planeSize = new Vector2();
+
+/** One shared material per renderer context, drawn once per pixel per layer (see the depth notes above). */
 const sharedMaterials = new WeakMap<AtmosphereNodes, MeshBasicNodeMaterial>();
 export function voxelShadowMaterial(nodes = DEFAULT_ATMOSPHERE_NODES): MeshBasicNodeMaterial {
   const shared = sharedMaterials.get(nodes);
@@ -193,16 +287,39 @@ export function voxelShadowMaterial(nodes = DEFAULT_ATMOSPHERE_NODES): MeshBasic
   material.transparent = true;
   material.opacity = SHADOW_OPACITY;
   const look = spriteLookFor(nodes);
-  material.opacityNode = Fn(() => {
-    const value: ShaderNode = float(SHADOW_OPACITY).toVar();
-    If(look.enabled.greaterThan(0.5).and(look.shadowDarkness.notEqual(1)), () => {
-      value.assign(look.shadowDarkness.mul(SHADOW_OPACITY).min(0.9));
-    });
-    return value;
-  })();
+  const mode = voxelShadowFor(nodes);
+  material.opacityNode = uniform(SHADOW_OPACITY).onObjectUpdate(() => {
+    const target =
+      look.enabled.value > 0.5 && look.shadowDarkness.value !== 1
+        ? Math.min(SHADOW_OPACITY * look.shadowDarkness.value, 0.9)
+        : SHADOW_OPACITY;
+    return shadowCopyOpacity(target, mode.soft ? SHADOW_COPIES.length : 1);
+  });
   material.depthWrite = true;
   material.depthFunc = LessDepth;
-  material.depthNode = floor(depth.sub(fwidth(depth)).mul(SHADOW_DEPTH_STEPS)).div(SHADOW_DEPTH_STEPS);
+  const plane = uniform(new Vector4());
+  plane.onObjectUpdate(({ object, camera, renderer }) => {
+    if (!renderer || !camera) return;
+    const target = renderer.getRenderTarget();
+    if (target) planeSize.set(target.width, target.height);
+    else renderer.getDrawingBufferSize(planeSize);
+    const shadow = object instanceof VoxelShadowMesh ? object : undefined;
+    shadowPlaneDepth(
+      camera as OrthographicCamera,
+      planeSize.x,
+      planeSize.y,
+      shadow?.planeNormal ?? UP,
+      shadow?.planeConstant ?? SHADOW_LIFT,
+      plane.value,
+    );
+  });
+  material.depthNode = floor(
+    plane.x
+      .add(plane.y.mul(screenCoordinate.x))
+      .add(plane.z.mul(screenCoordinate.y))
+      .sub(plane.w)
+      .mul(SHADOW_DEPTH_STEPS),
+  ).div(SHADOW_DEPTH_STEPS);
   sharedMaterials.set(nodes, material);
   nodes.own(material);
   return material;
@@ -218,41 +335,60 @@ const projection = new Matrix4();
  * in order, so the source's world matrix is current by then); it follows the source's pose every frame.
  */
 export class VoxelShadowMesh extends Mesh {
+  readonly planeNormal = new Vector3(0, 1, 0);
+  planeConstant = SHADOW_LIFT;
+  private readonly mode: { soft: boolean };
+
   constructor(
     readonly source: Mesh,
     nodes = DEFAULT_ATMOSPHERE_NODES,
+    readonly copyIndex = 0,
   ) {
     super(source.geometry, voxelShadowMaterial(nodes));
+    this.mode = voxelShadowFor(nodes);
     this.name = 'voxel-shadow';
     this.matrixAutoUpdate = false;
     this.castShadow = false;
     this.receiveShadow = false;
     // After the sprite layers (4): over their ground decals (lifted less), behind upright art and voxel bodies.
-    this.renderOrder = 4.5;
+    this.renderOrder = 4.5 + copyIndex * 0.001;
   }
 
   override updateMatrixWorld(force?: boolean): void {
+    this.visible = this.copyIndex === 0 || this.mode.soft;
     const parent = this.parent;
     const ground = groundOf(this);
     if (!parent || !ground) {
       super.updateMatrixWorld(force);
       return;
     }
-    // Ground under the unit's origin: its own position for vehicles on the ground, the terrain or water below it for
-    // aircraft and jumpjets, whose shadow drops straight down there and shrinks with their height.
+    // An override casts from a physical origin instead of a render-offset root, always with ground shear. Otherwise
+    // vehicles use their own origin; aircraft and jumpjets drop onto the terrain/water and shrink with their height.
     const e = parent.matrixWorld.elements;
     origin.set(e[12]!, e[13]!, e[14]!);
-    point.set(origin.x, ground.height(origin.x, origin.z), origin.z);
+    const physicalOrigin = shadowOrigins.get(parent);
+    const anchor = physicalOrigin ?? origin;
+    point.set(anchor.x, ground.height(anchor.x, anchor.z), anchor.z);
     const height = origin.y - point.y;
-    if (height > AIRBORNE_HEIGHT) {
+    if (!physicalOrigin && height > AIRBORNE_HEIGHT) {
       point.x += AIRBORNE_SHADOW_DRIFT_X * height;
       point.z += AIRBORNE_SHADOW_DRIFT_Z * height;
       airborneShadowProjection(origin, point, airborneShadowScale(height), projection);
+      normal.copy(UP);
     } else {
       if (ground.normal) ground.normal(point.x, point.z, normal);
       else normal.copy(UP);
-      shadowProjection(point, normal, projection);
+      if (physicalOrigin) shadowOriginProjection(origin, physicalOrigin, point, normal, projection);
+      else shadowProjection(point, normal, projection);
     }
+    const copy = SHADOW_COPIES[this.copyIndex]!;
+    // Offset in the tangent plane (including ramps), then lift along its normal. Flight never scales the penumbra.
+    const p = projection.elements;
+    p[12] += copy.x + copy.lift * normal.x;
+    p[13] += -(normal.x * copy.x + normal.z * copy.z) / normal.y + copy.lift * normal.y;
+    p[14] += copy.z + copy.lift * normal.z;
+    this.planeNormal.copy(normal);
+    this.planeConstant = normal.dot(point) + SHADOW_LIFT + copy.lift;
     this.matrixWorld.multiplyMatrices(projection, this.source.matrixWorld);
     this.matrixWorldNeedsUpdate = false;
     for (const child of this.children) child.updateMatrixWorld(force);

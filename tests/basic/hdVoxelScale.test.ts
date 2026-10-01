@@ -5,6 +5,7 @@ import { PIXELS_PER_CELL_EDGE } from '../../packages/hd-renderer/src/world';
 import { VOXEL_TO_WORLD, buildVoxelGeometry, instantiateVoxel } from '../../packages/hd-renderer/src/ra2/voxels';
 import {
   AIRBORNE_SHADOW_HALF,
+  SHADOW_COPIES,
   SHADOW_LIFT,
   SHADOW_SHEAR_X,
   SHADOW_SHEAR_Z,
@@ -62,14 +63,14 @@ describe('voxel scale', () => {
     expect(turret?.type).toBe('Group');
     expect(turret!.position.toArray()).toEqual([-100 / 256, 0, 0]);
     expect(turret!.children[0]!.position.toArray()).toEqual([0, 0, 0]);
-    // Voxel meshes cast no sun shadow; each part has a flattened twin instead, after all parts.
+    // Voxel meshes cast no sun shadow; each part has contact-shadow twins instead, after all parts.
     const meshes = root.children.filter((c) => (c as { isMesh?: boolean }).isMesh);
     const twins = meshes.filter((m) => m instanceof VoxelShadowMesh);
-    expect(twins.length).toBe(2);
+    expect(twins.length).toBe(2 * SHADOW_COPIES.length);
     expect(meshes.filter((m) => !(m instanceof VoxelShadowMesh)).every((m) => !m.castShadow)).toBe(true);
-    // Body mesh, turret group, then the two twins last (their sources update first).
-    expect(root.children.slice(-2).every((c) => c instanceof VoxelShadowMesh)).toBe(true);
-    expect(meshes.length).toBe(3);
+    // Body mesh, turret group, then all shadow layers (their sources update first).
+    expect(root.children.slice(2).every((c) => c instanceof VoxelShadowMesh)).toBe(true);
+    expect(meshes.length).toBe(1 + 2 * SHADOW_COPIES.length);
   });
 });
 

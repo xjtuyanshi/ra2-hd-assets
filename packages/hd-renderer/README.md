@@ -439,8 +439,12 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   (the `pnpm hd:materials` sidecar) with the engine's own shade rule (YR 1.001 @0x7586F0: section = int(16 x
   (max(0, N.L) + max(0, b / (3 - 2b)))), b = N.H, H between the voxel light and the model's up axis), lit by the cell's
   object level plus the units' extra light (rules `ExtraUnitLight`). Shadows are the model flattened onto the ground
-  along a fixed light, halving the displayed colour once per pixel (depth-tested, see `voxelShadow.ts`); airborne units
-  drop theirs straight down, shrunk with height. Review parameters (sandbox and replays): `?vpl=<extra>,<occlusion>,
+  along a fixed light, with a 0.04-cell contact penumbra from five shared-geometry/material twins whose overlapping
+  core keeps the original darkness (depth-tested once per layer, see `voxelShadow.ts`); `?vshadow=hard` restores one
+  crisp twin in the sandbox and replays. Airborne units drop theirs straight down, shrunk with height. Building voxel
+  turrets cast from a bounded physical point on their
+  view ray nearest the foundation centre, using the same ground shear as vehicles rather than their pulled render
+  altitude. Review parameters (sandbox and replays): `?vpl=<extra>,<occlusion>,
 <sheen>`, `?vshape=<corner relax>,<normal blend>`, `?ml=0` (no map day light).
 
 ### Optional remaster voxel look

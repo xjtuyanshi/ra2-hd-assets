@@ -22,6 +22,7 @@ import {
 } from '../ra2/painterOrder';
 import { foundationPointPush } from '../ra2/cardDepth';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
+import { setShadowOrigin } from '../ra2/voxelShadow';
 import { loadRa2World, type HdWorld } from '../ra2/world';
 import { waterPreset, type WaterStyle } from '../ra2/waterLook';
 import { LEVEL_HEIGHT } from '../world';
@@ -1513,8 +1514,9 @@ export class LiveView {
    * sold, when its make anim shows instead). The engine draws the turret at the building's draw point plus
    * TurretAnimX/Y pixels, after the body (TurretAnimZAdjust < 0): here it stands at that screen point on the
    * building's level and is pulled past the body's foundation depth at that screen point, plus its own depth. This
-   * preserves the established turret-over-body placement without a global depth slot. The model loads on first use;
-   * until then (and when it is missing) it counts in diagnostics().
+   * preserves the established turret-over-body placement without a global depth slot. Its shadow uses a bounded
+   * physical origin on that view ray nearest the foundation centre, with ordinary ground shear instead of flight drift.
+   * The model loads on first use; until then (and when it is missing) it counts in diagnostics().
    */
   private buildingTurret(object: LiveObject, visual: Visual, turretFacing: number | null): void {
     const spec = visual.libraryType?.building?.turretVoxel;
@@ -1558,7 +1560,18 @@ export class LiveView {
           ? cardPush(body)
           : 0.5) + TURRET_DEPTH;
     const toCamera = this.world.sprites?.toCamera.value;
-    if (toCamera) at.addScaledVector(toCamera, push);
+    if (toCamera) {
+      at.addScaledVector(toCamera, push);
+      const [w, h] = foundation ?? [1, 1];
+      const centre = this.spritePool
+        .anchor()
+        .set(
+          Math.floor(object.x / LEPTONS_PER_CELL) + w / 2,
+          (object.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT,
+          Math.floor(object.y / LEPTONS_PER_CELL) + h / 2,
+        );
+      setShadowOrigin(unit.root, buildingTurretShadowOrigin(at, toCamera, centre, centre));
+    } else setShadowOrigin(unit.root);
     const pose = this.pose;
     pose.x = at.x * LEPTONS_PER_CELL;
     pose.y = at.z * LEPTONS_PER_CELL;
@@ -2146,6 +2159,31 @@ function lerpAngle16(a: number, b: number, t: number): number {
 /** World position of an engine lepton coordinate, for hosts that place their own overlays. */
 export function leptonToWorld(x: number, y: number, z: number, out = new Vector3()): Vector3 {
   return out.set(x / LEPTONS_PER_CELL, (z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT, y / LEPTONS_PER_CELL);
+}
+
+/**
+ * Physical turret origin on the drawn origin's view ray: minimise ground-plane distance to the foundation centre,
+ * clamping height to the building's ground level through three levels above it. Moving along this ray preserves the
+ * turret's screen position; the facade pull is only a rendering offset, not a flight altitude.
+ */
+export function buildingTurretShadowOrigin(
+  drawnOrigin: Vector3,
+  toCamera: Vector3,
+  foundationCentre: Vector3,
+  out = new Vector3(),
+): Vector3 {
+  const lengthSq = toCamera.x * toCamera.x + toCamera.z * toCamera.z;
+  let t =
+    lengthSq > 0
+      ? ((foundationCentre.x - drawnOrigin.x) * toCamera.x + (foundationCentre.z - drawnOrigin.z) * toCamera.z) /
+        lengthSq
+      : 0;
+  if (toCamera.y !== 0) {
+    const low = (foundationCentre.y - drawnOrigin.y) / toCamera.y;
+    const high = (foundationCentre.y + 3 * LEVEL_HEIGHT - drawnOrigin.y) / toCamera.y;
+    t = Math.max(Math.min(low, high), Math.min(Math.max(low, high), t));
+  }
+  return out.copy(drawnOrigin).addScaledVector(toCamera, t);
 }
 
 /**

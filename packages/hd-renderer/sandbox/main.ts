@@ -8,6 +8,7 @@ import { createScenario } from './scenario';
 import { SpriteLayer } from '../src/ra2/sprites';
 import { loadRa2World } from '../src/ra2/world';
 import { voxelLightingFor } from '../src/ra2/vpl';
+import { voxelShadowFor } from '../src/ra2/voxelShadow';
 import { voxelShape } from '../src/ra2/voxels';
 import { addLookGui, applyLookParams, voxelLookParams } from './look';
 import { voxelPbrFor } from '../src/ra2/voxelPbr';
@@ -145,6 +146,8 @@ if (params.has('sharp')) hd.settings.sharpness = Number(params.get('sharp'));
 if (params.has('bloom')) hd.settings.bloom = Number(params.get('bloom'));
 if (params.has('shadows')) hd.settings.shadows = params.get('shadows') !== '0';
 if (params.has('debug')) hd.settings.debugView = params.get('debug') as HdSettings['debugView'];
+// ?vshadow=hard restores the single hard twin; contact penumbra is the default.
+voxelShadowFor(hd.nodes).soft = params.get('vshadow') !== 'hard';
 // Voxel material review (see src/ra2/vpl.ts): ?vpl=<extra light>,<occlusion>,<sheen>.
 if (params.has('vpl')) {
   const { voxelExtraLight, voxelOcclusion, voxelSheen } = voxelLightingFor(hd.nodes);
