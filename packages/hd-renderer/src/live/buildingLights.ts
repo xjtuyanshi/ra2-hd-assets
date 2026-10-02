@@ -13,6 +13,8 @@ import { IsoCamera, LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import type { LiveObject } from './liveView';
 
 export interface BuildingLightSpec {
+  /** This light represents the building's native ActiveAnim glow. */
+  activeAnim?: boolean;
   /** Fractions of the foundation, measured from its top-left cell corner. */
   at: readonly [number, number];
   /** Engine pixels above ground. */
@@ -94,6 +96,8 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
   // and present the saturated sphere/arcs after the grade so neither can feed bloom's lavender-white veil.
   NAPOWR: [
     {
+      // NAPOWR_A redraws the sphere/walls; the type has no Light* keys. Native detail skips are presentation only.
+      activeAnim: true,
       // Battle framing at two device pixels per engine pixel: this head is within one engine pixel of the glass centre.
       at: [0.47, 0.4],
       height: 27,
@@ -238,7 +242,10 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
   ],
 };
 
-type Building = Pick<LiveObject, 'type' | 'kind' | 'x' | 'y' | 'z' | 'health' | 'buildState' | 'buildingDamaged'> &
+type Building = Pick<
+  LiveObject,
+  'type' | 'kind' | 'x' | 'y' | 'z' | 'health' | 'buildState' | 'buildingDamaged' | 'activeAnim'
+> &
   Partial<Pick<LiveObject, 'uid' | 'id'>>;
 
 export interface BuildingLightPlacement extends SourceSpec {
@@ -301,7 +308,7 @@ export function buildingLightPlacements(
 export function buildingLightSources(
   buildings: readonly Building[],
   /** night: the renderer's lamp gain (0 by day, 1 at night) for lights with a `day` share below one. */
-  settings: { sourceLights: number; night?: number },
+  settings: { sourceLights: number; night?: number; nativeDetail?: 'ignore' | 'mirror' },
   foundation: (type: string) => readonly [number, number] | undefined,
   shrouded: (building: Building) => boolean,
   conditionYellow = 0.5,
@@ -314,7 +321,10 @@ export function buildingLightSources(
       building.kind !== 'building' ||
       !BUILDING_LIGHTS[building.type] ||
       building.health <= 0 ||
-      !(gate ? gate.allowed(building) : building.buildState === 'done') ||
+      !(gate ? gate.allowed(building, false) : building.buildState === 'done') ||
+      BUILDING_LIGHTS[building.type]!.every(
+        (spec) => spec.activeAnim && !activeAnimLit(building, settings.nativeDetail),
+      ) ||
       shrouded(building)
     )
       continue;
@@ -325,6 +335,11 @@ export function buildingLightSources(
     for (let index = 0; index < lights.length; index++) {
       const light = lights[index]!;
       const spec = specs[index]!;
+      if (
+        spec.activeAnim &&
+        (!activeAnimLit(building, settings.nativeDetail) || (gate && !gate.allowed(building, true)))
+      )
+        continue;
       const night = Math.min(1, Math.max(0, settings.night ?? 0));
       const day = spec.day ?? 1;
       const daylight = day + (1 - day) * night;
@@ -340,7 +355,7 @@ export function buildingLightSources(
         rgb[1] * k,
         rgb[2] * k,
       ];
-      light.fadeStart = gate?.fadeStart(building);
+      light.fadeStart = gate?.fadeStart(building, spec.activeAnim === true);
       light.colour = scale(light.colour);
       light.glow = light.glow ? scale(light.glow, gain * glowGain) : null;
       out.push(light);
@@ -364,7 +379,16 @@ interface GateState {
   blocked: boolean;
   allowed: boolean;
   born: number;
+  animAllowed: boolean;
+  animBorn: number;
 }
+
+function activeAnimLit(building: Building, nativeDetail: 'ignore' | 'mirror' = 'ignore'): boolean {
+  return building.activeAnim !== 'none' && !(nativeDetail === 'mirror' && building.activeAnim === 'detail');
+}
+
+const onlyActiveAnimLights = (building: Building) =>
+  BUILDING_LIGHTS[building.type]?.every((spec) => spec.activeAnim === true) ?? false;
 
 /** Constructor sentinels must not flash before build-up; sandbox objects in the first snapshot are already present. */
 export class BuildingLightGate {
@@ -373,7 +397,12 @@ export class BuildingLightGate {
   private readonly states = new Map<string, GateState>();
   private readonly seen = new Set<string>();
 
-  update(buildings: readonly Building[], frame: number, now: number): void {
+  update(
+    buildings: readonly Building[],
+    frame: number,
+    now: number,
+    nativeDetail: 'ignore' | 'mirror' = 'ignore',
+  ): void {
     if (frame < this.lastFrame) {
       this.states.clear();
       this.first = true;
@@ -385,8 +414,17 @@ export class BuildingLightGate {
       const key = buildingKey(b);
       this.seen.add(key);
       let state = this.states.get(key);
+      const fresh = !state;
       if (!state) {
-        state = { frame, undefinedFrames: 0, blocked: false, allowed: false, born: now };
+        state = {
+          frame,
+          undefinedFrames: 0,
+          blocked: false,
+          allowed: false,
+          born: now,
+          animAllowed: false,
+          animBorn: now,
+        };
         this.states.set(key, state);
         if (this.first && b.buildState === undefined) {
           state.allowed = true;
@@ -410,15 +448,21 @@ export class BuildingLightGate {
           state.born = now;
         }
       }
+      // Track ActiveAnim separately so an unrelated source on the same building retains its own fade.
+      const animAllowed = state.allowed && activeAnimLit(b, nativeDetail);
+      if (animAllowed && !state.animAllowed) state.animBorn = fresh ? state.born : now;
+      state.animAllowed = animAllowed;
     }
     for (const key of this.states.keys()) if (!this.seen.has(key)) this.states.delete(key);
     this.first = false;
   }
-  allowed(building: Building): boolean {
-    return this.states.get(buildingKey(building))?.allowed ?? false;
+  allowed(building: Building, activeAnim = onlyActiveAnimLights(building)): boolean {
+    const state = this.states.get(buildingKey(building));
+    return !!state?.allowed && (!activeAnim || state.animAllowed);
   }
-  fadeStart(building: Building): number | undefined {
-    return this.states.get(buildingKey(building))?.born;
+  fadeStart(building: Building, activeAnim = onlyActiveAnimLights(building)): number | undefined {
+    const state = this.states.get(buildingKey(building));
+    return activeAnim ? state?.animBorn : state?.born;
   }
 }
 

@@ -6,6 +6,7 @@ import type { ReadYrEffectsOptions, YrEffects } from '../../src/games/yr/effects
 import { YR_EFFECTS_GLOBALS as E } from '../../src/games/yr/effectsReader';
 import { YR_BEAMS_GLOBALS as B, YR_BEAMS_OFFSETS as BO } from '../../src/games/yr/beamsReader';
 import { YR_BUILDING_RULES as R } from '../../src/games/yr/buildingRenderState';
+import { YR_BUILDING_ACTIVE_ANIM as A, YR_NATIVE_DETAIL as D } from '../../src/games/yr/buildingActiveAnim';
 import type { ReadYrSmudgeOptions, YrSmudges } from '../../src/games/yr/smudgeReader';
 import type { ReadYrOverlayOptions, YrOverlays } from '../../src/games/yr/overlayReader';
 import { createYrRenderStateReader, createYrRenderStateReaderFrom } from '../../src/games/yr/renderState';
@@ -301,6 +302,124 @@ function sources(
 }
 
 describe('YR 1.001 render state for the HD bridge', () => {
+  it('publishes completed-building ActiveAnim and observes same-frame detail/slot/type changes', () => {
+    const memory = keyMemory();
+    const building = memory.technos[0]!;
+    const anim = 0xb50000;
+    const type = 0xb60000;
+    memory.u32(building, V.building);
+    memory.u32(building + A.slot, anim);
+    memory.u32(anim, 0x7e3354);
+    memory.u32(anim + A.type, type);
+    memory.u32(type, 0x7e3608);
+    memory.u32(type + A.detailLevel, 2);
+    memory.u32(D.fps, 30);
+    memory.u32(D.min, 15);
+    memory.u32(D.buffer, 5);
+    memory.u32(D.level, 2);
+    const state = yrState(100);
+    state.objects[0] = { ...state.objects[0]!, kind: 'building', type: 'NAPOWR', buildState: 'done' };
+    const harness = sources(memory);
+    harness.readState.mockImplementation(() => state);
+    const first = harness.read()!;
+    expect(first.objects[0]!.activeAnim).toBe('shown');
+    expect(first.nativeDetail).toEqual({ fps: 30, lowFrameRate: false, level: 2 });
+    expect(harness.read()).toBe(first);
+    for (const [address, value, expected] of [
+      [D.fps, 14, 'detail'],
+      [D.fps, 15, 'shown'],
+      [D.lowFrameRate, 1, 'detail'],
+      [D.fps, 20, 'shown'],
+      [D.min, 16, 'detail'],
+      [D.buffer, 0, 'shown'],
+      [D.level, 1, 'detail'],
+      [D.level, 2, 'shown'],
+      [type + A.detailLevel, 3, 'detail'],
+      [type + A.detailLevel, 2, 'shown'],
+      [anim + A.invisible, 1, 'detail'],
+      [anim + A.invisible, 0, 'shown'],
+      [building + A.slot, 0, 'none'],
+      [building + A.slot, anim, 'shown'],
+      [anim + A.type, 0, undefined],
+      [anim + A.type, type, 'shown'],
+      [type, 0, undefined],
+      [type, 0x7e3608, 'shown'],
+      [D.min, 0, undefined],
+    ] as const) {
+      const previous = harness.read()!;
+      memory.u32(address, value);
+      const next = harness.read()!;
+      expect(next).not.toBe(previous);
+      expect(next.frame).toBe(100);
+      expect(next.objects[0]!.activeAnim).toBe(expected);
+      if (expected === undefined) expect(next.objects[0]).not.toHaveProperty('activeAnim');
+    }
+    expect(first.objects[0]!.activeAnim).toBe('shown');
+    expect(structuredClone(first)).toEqual(first);
+    expect(harness.read()).not.toHaveProperty('nativeDetail');
+  });
+
+  it('samples detail globals once per poll regardless of the number of completed buildings', () => {
+    const memory = keyMemory();
+    memory.u32(D.min, 15);
+    memory.u32(D.buffer, 5);
+    const state = yrState(100);
+    state.objects = memory.technos.map((id, i) => {
+      memory.u32(id, V.building);
+      return { ...state.objects[0]!, id, uid: i, kind: 'building', buildState: 'done' };
+    });
+    const accessor = createByteViewAccessor(memory.bytes);
+    const originalBytes = accessor.bytes;
+    const bytes = vi.spyOn(accessor, 'bytes');
+    const harness = sources(memory);
+    harness.readState.mockImplementation(() => state);
+    const read = createYrRenderStateReaderFrom({
+      memory: () => accessor,
+      readState: harness.readState,
+      createShroudReader: harness.createShroudReader,
+      createEffectsReader: harness.createEffectsReader,
+      createOverlayReader: harness.createOverlayReader,
+      createSmudgeReader: harness.createSmudgeReader,
+      now: () => 0,
+    });
+    expect(read()!.objects.map((object) => object.activeAnim)).toEqual(['none', 'none']);
+    read(); // Cached polls still observe the native draw gate.
+    for (const address of Object.values(D)) expect(bytes.mock.calls.filter(([at]) => at === address)).toHaveLength(2);
+    bytes.mockImplementation((at, width) =>
+      at === memory.technos[0]! + A.slot ? new Uint8Array(0) : originalBytes(at, width),
+    );
+    expect(read()!.objects[0]).not.toHaveProperty('activeAnim');
+    bytes.mockImplementation(originalBytes);
+    expect(read()!.objects[0]!.activeAnim).toBe('none'); // Availability recovered within the same logic frame.
+    state.objects[0]!.buildState = 'building';
+    state.objects[1]!.buildState = 'selling';
+    memory.frame(101);
+    expect(read()!.objects.every((object) => !('activeAnim' in object))).toBe(true);
+  });
+
+  it('contains an unavailable guest-memory view and recovers on the next poll', () => {
+    const memory = keyMemory();
+    const harness = sources(memory);
+    let unavailable = false;
+    const read = createYrRenderStateReaderFrom({
+      memory: () => {
+        if (unavailable) throw new Error('detached guest view');
+        return createByteViewAccessor(memory.bytes);
+      },
+      readState: harness.readState,
+      createShroudReader: harness.createShroudReader,
+      createEffectsReader: harness.createEffectsReader,
+      createOverlayReader: harness.createOverlayReader,
+      createSmudgeReader: harness.createSmudgeReader,
+      now: () => 0,
+    });
+    expect(read()).not.toBeNull();
+    unavailable = true;
+    expect(read()).toBeNull();
+    unavailable = false;
+    expect(read()).not.toBeNull();
+  });
+
   it('polls the sidebar every time and republishes only its changed content, preserving battlefield references', () => {
     const memory = keyMemory();
     const sidebar: GameRenderSidebar = {

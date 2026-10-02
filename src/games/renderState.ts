@@ -19,6 +19,8 @@ export interface GameRenderState {
   /** `index` of the local player's house, or -1. */
   localHouse: number;
   objects: GameRenderObject[];
+  /** Native renderer detail diagnostics; absent when unavailable or unsupported by the game. */
+  nativeDetail?: { fps: number; lowFrameRate: boolean; level: number };
   /** The local player's per-cell shroud (and fog), null while it cannot be read. */
   shroud: GameRenderShroud | null;
   /** Live cell decorations, null while unavailable (the renderer may use its static map cache). */
@@ -78,6 +80,8 @@ export interface GameRenderObject extends GameRenderPoint {
   buildingFrame?: number;
   /** Engine damage condition for bibs and animation layers; independent of the body-frame policy. */
   buildingDamaged?: boolean;
+  /** Completed-building ActiveAnim: missing, drawn, or skipped by the native renderer's detail gate. */
+  activeAnim?: 'none' | 'shown' | 'detail';
   /** Current infantry art sequence key, when the game can report it. */
   infantrySequence?: string;
   /** Animation step within infantrySequence, before its start/facing offsets. */

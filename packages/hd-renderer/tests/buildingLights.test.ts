@@ -46,6 +46,42 @@ const camera: BuildingLightCamera = {
 };
 
 describe('building light policy', () => {
+  it.each([
+    [undefined, 'ignore', 1],
+    [undefined, 'mirror', 1],
+    ['none', 'ignore', 0],
+    ['none', 'mirror', 0],
+    ['shown', 'ignore', 1],
+    ['shown', 'mirror', 1],
+    ['detail', 'ignore', 1],
+    ['detail', 'mirror', 0],
+  ] as const)(
+    'selects ActiveAnim %s in %s mode without affecting unrelated lights',
+    (activeAnim, nativeDetail, count) => {
+      const selectMode = (type: string) =>
+        buildingLightSources(
+          [{ ...reactor, type, activeAnim }],
+          { sourceLights: 1, nativeDetail },
+          foundation,
+          () => false,
+        );
+      const lights = selectMode('NAPOWR');
+      expect(lights).toHaveLength(count);
+      const overlay = buildingLightOverlay(
+        lights.map((light) => ({ ...light, fade: 1 })),
+        10,
+        2,
+        camera,
+      );
+      expect(overlay.discs).toHaveLength(count);
+      expect(overlay.strokes.length > 0).toBe(count > 0);
+      for (const type of Object.keys(BUILDING_LIGHTS).filter((type) => type !== 'NAPOWR')) {
+        expect(selectMode(type)).toEqual(select([{ ...reactor, type }]));
+        expect(BUILDING_LIGHTS[type]!.every((spec) => spec.activeAnim === undefined)).toBe(true);
+      }
+      expect(select([{ ...reactor, activeAnim: 'detail' }])).toHaveLength(1); // Default ignores native detail.
+    },
+  );
   it('centres the soft pool on the foundation while retaining the head position and depth push', () => {
     const light = buildingLightPlacements('NAPOWR', reactor, [3, 2])[0]!;
     expect(light).toMatchObject({
@@ -195,7 +231,9 @@ describe('building light policy', () => {
     const setStrokes = vi.fn();
     const setDecorativeBeams = vi.fn();
     const settings = { sourceLights: 0 };
+    const options: { nativeDetail: 'ignore' | 'mirror' } = { nativeDetail: 'ignore' };
     const view = Object.assign(Object.create(LiveView.prototype), {
+      options,
       hd: {
         settings,
         seconds: () => 2,
@@ -229,6 +267,20 @@ describe('building light policy', () => {
     const lights = select().map((light) => ({ ...light, fade: 1 }));
     expect(setStrokes.mock.calls[0]![0]).toEqual(buildingLightOverlay(lights, snapshot.frame, 2, camera).strokes);
     expect(setDecorativeBeams).not.toHaveBeenCalled();
+    // Same-frame native gate changes clear the pool, orb and arcs together; mirror is an explicit review option.
+    view.updateBuildingLights({ ...snapshot, objects: [{ ...reactor, activeAnim: 'none' }] });
+    expect(retainSources).toHaveBeenLastCalledWith(new Set());
+    expect(setDiscs).toHaveBeenLastCalledWith([]);
+    expect(setStrokes).toHaveBeenLastCalledWith([]);
+    view.updateBuildingLights({ ...snapshot, objects: [{ ...reactor, activeAnim: 'detail' }] });
+    expect(setDiscs.mock.calls.at(-1)![0]).toHaveLength(1);
+    options.nativeDetail = 'mirror';
+    view.updateBuildingLights({ ...snapshot, objects: [{ ...reactor, activeAnim: 'detail' }] });
+    expect(retainSources).toHaveBeenLastCalledWith(new Set());
+    expect(setDiscs).toHaveBeenLastCalledWith([]);
+    expect(setStrokes).toHaveBeenLastCalledWith([]);
+    view.updateBuildingLights({ ...snapshot, objects: [{ ...reactor, activeAnim: 'shown' }] });
+    expect(setDiscs.mock.calls.at(-1)![0]).toHaveLength(1);
     view.updateBuildingLights({ ...snapshot, objects: [{ ...reactor, health: 0 }] });
     expect(retainSources).toHaveBeenLastCalledWith(new Set());
     expect(setDiscs).toHaveBeenLastCalledWith([]);
@@ -240,6 +292,29 @@ describe('building light policy', () => {
 });
 
 describe('building state gate', () => {
+  it.each(['ignore', 'mirror'] as const)('restarts the existing fade after ActiveAnim returns in %s mode', (mode) => {
+    const gate = new BuildingLightGate();
+    const lights = (b: LiveObject) =>
+      buildingLightSources([b], { sourceLights: 1, nativeDetail: mode }, foundation, () => false, 0.5, gate);
+    gate.update([reactor], 100, 1, mode);
+    const initial = lights(reactor)[0]!;
+    expect(sourceFade(1.5, initial.fadeStart!, initial.fadeIn)).toBe(1);
+    const off: LiveObject = { ...reactor, activeAnim: mode === 'mirror' ? 'detail' : 'none' };
+    gate.update([off], 100, 2, mode);
+    expect(gate.allowed(off)).toBe(false);
+    expect(lights(off)).toEqual([]);
+    gate.update([{ ...reactor, activeAnim: 'shown' }], 100, 3, mode);
+    const relit = lights({ ...reactor, activeAnim: 'shown' })[0]!;
+    expect(gate.allowed(reactor)).toBe(true);
+    expect(relit.fadeStart).toBe(3);
+    expect(sourceFade(3, relit.fadeStart!, relit.fadeIn)).toBe(0);
+    expect(sourceFade(3.25, relit.fadeStart!, relit.fadeIn)).toBe(0.5);
+    gate.update([{ ...reactor, activeAnim: undefined }], 100, 3.5, mode);
+    expect(lights(reactor)[0]!.fadeStart).toBe(3);
+    gate.update([off], 1, 4, mode); // A frame rewind drops stale per-building state.
+    expect(gate.allowed(off)).toBe(false);
+  });
+
   it('rejects placement sentinels and build-up until done, then fades over half a second', () => {
     const gate = new BuildingLightGate();
     gate.update([], 0, 0);

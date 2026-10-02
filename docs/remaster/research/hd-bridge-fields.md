@@ -125,6 +125,56 @@ need not equal the available art count. The reader's `0x7FFF` count bound is a s
 The pinned construction loader uses Start=0; other starts, invalid counts/stages, partial initialization and missing
 make art leave H2 unavailable.
 
+### ActiveAnim and native dynamic detail
+
+Baseline: player-supplied `gamemd.exe`, YR 1.001, the pinned SHA-256 above. The user verified the
+following through read-only reverse engineering and live measurement; the implementation does not patch
+the native draw gate or run its mutating threshold function.
+
+NAPOWR has no `Light*` keys. Its blue sphere and lit walls come from artmd's `NAPOWR_A` ActiveAnim
+(`DetailLevel=2`, `ActiveAnimPoweredSpecial=true`), whose frames redraw the whole building. The body art
+without that anim has a pale glass sphere. This is not a delayed native light source.
+
+| Fact | YR 1.001 evidence |
+| --- | --- |
+| ActiveAnim instance | `BuildingClass::Anims[21]` begins at `+0x55C`; slot 3 is `+0x568` |
+| Slot removal | `0x451E40` nulls the slot and deletes its anim through vtable `+0x20` |
+| PoweredSpecial lifecycle | `0x4549B0` tests online through vtable `+0x350`, creates slots through `0x451890`; offline sibling `0x454930` kills them through `0x451E40` |
+| Per-slot powered flags | BuildingType records stride `0x44` from `+0xF8C`: Powered `+0xF8C`, PoweredLight `+0xF8D`, PoweredEffect `+0xF8E`, PoweredSpecial `+0xF8F`; slot 3 is `+0x1058..+0x105B`, INI stores `0x461A03` / `0x461A20` / `0x461A5A` |
+| Type PoweredSpecial | `+0x1574`, INI store `0x46000F` |
+| Anim fields | Type `+0xC8`, Invisible `+0x19D`, Stage `+0xAC` (also documented in `src/games/yr/effectsReader.ts`); AnimType.DetailLevel `+0x2D4` |
+| Draw gate | `0x422FCC..0x42300E`: skip if FPS below DetailThreshold and DetailLevel > 1, or Invisible, or DetailLevel above options dword `[0xA8EB78]` |
+| Measured FPS | Dword `[0xABCD44]`, writer `0x55E3B5` |
+| Threshold hysteresis | `0x55AF60`, flag byte `[0xABCD50]`, min dword `[0x829FF4]`, buffer dword `[0x829FF8]` |
+| AudioVisual INI keys | Loader `0x669216` / `0x66922F` / `0x669248` stores the three detail keys to `[esi]` / `[esi+4]` / `[esi+8]`; stock DetailMinFrameRateNormal=15, DetailBufferZoneWidth=5 |
+
+When the flag is set, DetailThreshold clears it at FPS >= min + buffer and returns min; otherwise it
+returns min + buffer. When clear, FPS < min sets it and returns min + buffer; otherwise it returns min.
+The equivalent read-only skip predicate is `(flag ? fps < min + buffer : fps < min) && DetailLevel > 1`.
+
+User live proof: a normal-speed skirmish supplied **519 samples at 250 ms**. Flag `[0xABCD50] == 1`
+was equivalent to the original sphere being unlit, with **zero exceptions**. Measured FPS was 1..19 in
+these windows on a loaded host; layer order and building/anim object bytes were identical between lit
+and unlit windows. The off window is the engine's dynamic-detail fallback below 15 FPS, held until 20,
+and depends on host load in the VM. It is not a change in game state.
+
+`src/games/yr/buildingActiveAnim.ts`, called by the hash/image-gated YR render projection for completed
+buildings, publishes optional `activeAnim`: null slot -> `none`; a present anim skipped by any of the
+three gates -> `detail`; otherwise -> `shown`. It validates building/anim/type pointer spans and
+vtables, DetailLevel/options 0..3, boolean flags, and FPS/min/buffer integers (FPS 0..1000, min 1..1000,
+buffer 0..1000, sum <= 1000). Failed/truncated reads remain unknown; a validated null slot needs no
+detail globals. Globals are sampled once per poll and reused across buildings, with optional snapshot
+`nativeDetail { fps, lowFrameRate, level }`. Same-frame caching includes globals, slot, anim and type
+detail fields, even when the slot is not yet in the effects vector. No YR address reaches the renderer.
+
+NAPOWR alone marks its HD light as `BuildingLightSpec.activeAnim`. `none` removes its pool, orb and
+arcs immediately and return restarts their existing half-second fade. Default `'ignore'` preserves
+lighting for `detail`, presenting game state independently of native renderer load; `'mirror'` or
+`?hd-native-detail=mirror` also suppresses `detail` for original/HD reviews. Undefined retains the
+existing policy, including sandbox/older snapshots. Other building sources are unchanged. Synthetic
+reader, same-frame projection, bridge and light-gate regressions cover these contracts; the user's
+native live proof does not establish new HD rendered-pixel parity in this worktree.
+
 ### Infantry
 
 | Field                      | Offset                          | Pinned executable evidence                                                                                                                                                                                                                                                                          |

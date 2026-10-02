@@ -12,6 +12,12 @@ import type {
 } from '../renderState';
 import { createByteViewAccessor, type GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { YR_BUILDING_RULES } from './buildingRenderState';
+import {
+  readYrBuildingActiveAnim,
+  readYrNativeDetail,
+  YR_BUILDING_ACTIVE_ANIM,
+  type YrNativeDetail,
+} from './buildingActiveAnim';
 import { YR_BEAMS_GLOBALS, YR_BEAMS_LIMITS } from './beamsReader';
 import {
   createYrEffectsReader,
@@ -124,7 +130,18 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
   const now = sources.now ?? (() => performance.now());
   return () => {
     pollSidebar();
-    const key = readChangeKey(sources.memory);
+    let memory: GuestMemoryAccessor;
+    try {
+      memory = sources.memory();
+    } catch {
+      last = lastKey = null;
+      overlayScratch = overlays = null;
+      smudgeScratch = smudges = null;
+      lastCellPoll = -Infinity;
+      return null;
+    }
+    const nativeDetail = readYrNativeDetail(memory);
+    const key = readChangeKey(memory, nativeDetail);
     const at = now();
     const cellsDue = at - lastCellPoll >= YR_OVERLAY_POLL_MS;
     const unchangedKey = key && lastKey && sameKey(key, lastKey);
@@ -186,7 +203,11 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
       map: state.map && { fileName: state.map.fileName },
       houses: state.houses.map(({ index, colorIndex }) => ({ index, colorIndex })),
       localHouse: state.localHouse,
-      objects: state.objects.map(projectObject),
+      objects: state.objects.map((object) => projectObject(object, memory, nativeDetail)),
+      ...(state.map &&
+        nativeDetail && {
+          nativeDetail: { fps: nativeDetail.fps, lowFrameRate: nativeDetail.lowFrameRate, level: nativeDetail.level },
+        }),
       shroud: state.map ? shroud : null,
       overlays,
       smudges,
@@ -220,9 +241,8 @@ function publishCells(read: GameRenderCellSprites, revision: number): GameRender
  * A frame number alone must never keep a pre-update death step or an expired beam. Null disables caching on an
  * implausible vector. Type/configuration data is read again whenever one of these live fields changes.
  */
-function readChangeKey(memory: () => GuestMemoryAccessor): number[] | null {
+function readChangeKey(m: GuestMemoryAccessor, nativeDetail: YrNativeDetail | null): number[] | null {
   try {
-    const m = memory();
     const o = YR_STATE_OFFSETS;
     const technos = readPointerVector(m, YR_STATE_GLOBALS.technos, 4 * YR_STATE_LIMITS.objectsPerKind);
     if (!technos) return null;
@@ -231,6 +251,14 @@ function readChangeKey(memory: () => GuestMemoryAccessor): number[] | null {
     const word = (value: number) => {
       hash = Math.imul(hash ^ value, 0x01000193);
     };
+    word(nativeDetail ? 1 : 0);
+    if (nativeDetail) {
+      word(nativeDetail.fps);
+      word(Number(nativeDetail.lowFrameRate));
+      word(nativeDetail.level);
+      word(nativeDetail.min);
+      word(nativeDetail.buffer);
+    }
     const span = (pointer: number, start: number, end: number) => {
       if (!isPlausiblePointer(m, pointer, end)) throw new Error('unavailable render key');
       for (let at = start; at < end; at += 4) word(m.u32(pointer + at));
@@ -254,7 +282,25 @@ function readChangeKey(memory: () => GuestMemoryAccessor): number[] | null {
         if (!isPlausiblePointer(m, pointer, o.unitUnloading + 1)) return null;
         word(m.u8(pointer + o.unitUnloading)); // Unloading can change the draw image within the same logic frame.
       }
-      if (vtable === YR_STATE_VTABLES.building) span(pointer, 0x6e8, 0x6ec); // HasBuildUp.
+      if (vtable === YR_STATE_VTABLES.building) {
+        span(pointer, 0x6e8, 0x6ec); // HasBuildUp.
+        const a = YR_BUILDING_ACTIVE_ANIM;
+        // Include read availability: scalar fallbacks alone could cache unknown across a recovered null-slot read.
+        const activeAnim = readYrBuildingActiveAnim(m, pointer, nativeDetail);
+        word(activeAnim === 'none' ? 1 : activeAnim === 'shown' ? 2 : activeAnim === 'detail' ? 3 : 0);
+        span(pointer, a.slot, a.slot + 4);
+        const anim = m.u32(pointer + a.slot);
+        if (anim !== 0) {
+          // ActiveAnim need not be in the effects vector during a constructor/deletion slice.
+          span(anim, 0, 4);
+          span(anim, a.type, a.type + 4);
+          if (!isPlausiblePointer(m, anim, a.invisible + 1)) return null;
+          word(m.u8(anim + a.invisible));
+          const type = m.u32(anim + a.type);
+          span(type, 0, 4);
+          span(type, a.detailLevel, a.detailLevel + 4);
+        }
+      }
     }
     const rules = m.u32(YR_BUILDING_RULES.instance);
     word(rules);
@@ -345,7 +391,11 @@ function publishShroud(read: YrShroud, previous: GameRenderShroud | null): GameR
   };
 }
 
-function projectObject(object: YrObjectState): GameRenderObject {
+function projectObject(
+  object: YrObjectState,
+  memory: GuestMemoryAccessor,
+  nativeDetail: YrNativeDetail | null,
+): GameRenderObject {
   const {
     id,
     uid,
@@ -369,6 +419,8 @@ function projectObject(object: YrObjectState): GameRenderObject {
     health,
     isSelected,
   } = object;
+  const activeAnim =
+    kind === 'building' && buildState === 'done' ? readYrBuildingActiveAnim(memory, id, nativeDetail) : undefined;
   return {
     id,
     uid,
@@ -385,6 +437,7 @@ function projectObject(object: YrObjectState): GameRenderObject {
     ...(buildupFrame !== undefined ? { buildupFrame } : {}),
     ...(buildingFrame !== undefined ? { buildingFrame } : {}),
     ...(buildingDamaged !== undefined ? { buildingDamaged } : {}),
+    ...(activeAnim !== undefined ? { activeAnim } : {}),
     ...(infantrySequence !== undefined ? { infantrySequence } : {}),
     ...(sequenceFrame !== undefined ? { sequenceFrame } : {}),
     ...(infantryDrawFacingRaw !== undefined ? { infantryDrawFacingRaw } : {}),

@@ -91,6 +91,8 @@ export interface LiveObject {
   buildupFrame?: number;
   buildingFrame?: number;
   buildingDamaged?: boolean;
+  /** Native ActiveAnim presence/draw gate; undefined retains the existing light policy. */
+  activeAnim?: 'none' | 'shown' | 'detail';
   /** Bridge (H2): infantry sequence key (e.g. "Walk", "Die1", "FireUp") and sequence-local animation step. */
   infantrySequence?: string;
   sequenceFrame?: number;
@@ -132,6 +134,8 @@ export interface LiveSnapshot {
   /** Local player's house index; native walls use this house's colour scheme. */
   localHouse?: number;
   objects: LiveObject[];
+  /** Native renderer diagnostics, independently of HD presentation settings. */
+  nativeDetail?: { fps: number; lowFrameRate: boolean; level: number };
   /** The local player's per-cell visibility (see ShroudLayer), when the host can read it. */
   shroud?: ShroudCells | null;
   /** The engine's live effects (anims, projectiles, particle systems, beams), when the host reads them. */
@@ -176,6 +180,8 @@ export interface LiveViewOptions extends VoxelUnitsOptions {
   volumetricEffects?: 'off' | 'ray';
   /** Directory holding effects-hd.json (default: <libraryBase>/common/effects-hd). */
   effectsHdBase?: string;
+  /** ActiveAnim glow: ignore native detail skips (default), or mirror them for native/HD reviews. */
+  nativeDetail?: 'ignore' | 'mirror';
   /** Water look (ra2/waterLook.ts): 'classic' (default) or the modern 'enhanced' water. */
   water?: WaterStyle;
 }
@@ -910,7 +916,8 @@ export class LiveView {
   private updateBuildingLights(snapshot: LiveSnapshot | undefined): void {
     const now = this.hd.seconds();
     // Observe real logic frames even while the look is faithful; repeated presentation frames cannot age a sentinel.
-    if (snapshot) this.buildingLightGate.update(snapshot.objects, snapshot.frame, now);
+    const nativeDetail = this.options?.nativeDetail ?? 'ignore';
+    if (snapshot) this.buildingLightGate.update(snapshot.objects, snapshot.frame, now, nativeDetail);
     if (!(this.hd.settings.sourceLights > 0)) {
       if (this.sourceLightsActive) {
         this.hd.lightField.clearSources();
@@ -922,7 +929,7 @@ export class LiveView {
     }
     const lights = buildingLightSources(
       snapshot?.objects ?? [],
-      { sourceLights: this.hd.settings.sourceLights, night: this.hd.emitters.lampGain.value },
+      { sourceLights: this.hd.settings.sourceLights, night: this.hd.emitters.lampGain.value, nativeDetail },
       (type) => this.library?.type(type)?.foundation,
       (building) => this.shroud.isLocationShrouded(building.x, building.y, building.z),
       this.library?.conditionYellow,

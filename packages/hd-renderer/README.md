@@ -377,6 +377,23 @@ visible overlay (default 0.25 seconds; NAPOWR 0.5 seconds). The NAPOWR orb fades
 arcs only above half fade. CPU electrical flicker drives both pool intensity and orb brightness (amplitude 0.12).
 Other building glow specifications remain unchanged. Switching source gain to zero clears the sources and overlay.
 
+NAPOWR alone sets `BuildingLightSpec.activeAnim`: its glow represents native `NAPOWR_A`, which redraws
+the blue sphere and lit walls (`DetailLevel=2`, `ActiveAnimPoweredSpecial=true`); the type has no `Light*`
+keys and its body alone shows pale glass. Optional `LiveObject.activeAnim` distinguishes `none` (no anim),
+`shown` (native draw allowed) and `detail` (native draw suppressed by Invisible, options detail or frame-rate
+detail). `none` removes the pool, orb and arcs immediately; return restarts their existing half-second fade.
+`LiveViewOptions.nativeDetail` defaults to `'ignore'`, keeping `detail` lit to present game state independently
+of native renderer load. Use `'mirror'` or the development bridge URL parameter `hd-native-detail=mirror`
+to turn `detail` off too for original/HD reviews. Undefined state keeps the existing policy for sandbox,
+replay and unknown reads; other building light types remain unchanged. Optional snapshot `nativeDetail`
+contains the native renderer's FPS, low-frame-rate flag and options level, not HD settings.
+
+The user verified YR 1.001's dynamic-detail fallback with 519 normal-speed samples at 250 ms: the native
+low-frame-rate flag was equivalent to an unlit sphere with zero exceptions, FPS 1..19 and unchanged
+building/anim bytes and layer order. Stock hysteresis suppresses detail-2 art below 15 FPS until 20 FPS.
+These off windows are renderer fallback, not delayed lights or game-state changes. Address evidence and
+validation boundaries stay in [HD bridge research](../../docs/remaster/research/hd-bridge-fields.md#activeanim-and-native-dynamic-detail).
+
 The reactor uses `SHAPE_SOFT`: a Euclidean, world-space radial pool centred on the foundation centre, radius 2.6
 cells, no exclusion hole, weight `(1 - smoothstep(0, 1, distance / radius))^2`. The field's existing up-to-eight
 texels per cell and linear min/mag filtering keep the profile continuous across cell boundaries. Its night irradiance
@@ -403,9 +420,10 @@ use derivatives for roughly one device pixel of antialiasing. Display-linear col
 blue nor as lavender) to a saturated blue body (35/85/255) at about half opacity (`bodyAlpha` 0.52 from 0.75 radii),
 revealing the painted glass swirl, then a glassy limb (110/160/245, `limbAlpha` 0.62). At 0.45 opacity the body left
 the pale painted glass lavender (replay lavender 2354 against the 2000 gate); a paler body (60/115/255 at 0.5) left a
-live frame of two reactors at 0.88-0.94 times the original's saturated blue. Beside a map lamp (`INGALITE`) the
-engine's lamp light washes the original's sphere pale (near the reactor: saturated blue 324, lavender 1435), while the
-unlit overlay stays blue, so that frame reads about 1.6 times the original.
+live frame of two reactors at 0.88-0.94 times the original's saturated blue. An earlier native image beside a map
+lamp (`INGALITE`) measured a pale sphere (near the reactor: saturated blue 324, lavender 1435), while the HD
+overlay stayed blue, so that frame read about 1.6 times the original. That image alone does not establish a
+light-source cause; the ActiveAnim/detail evidence above identifies the native off windows.
 
 Each reactor has 4–5 crawling filaments from the white core's edge (0.3–0.42 radii) to the glass and three
 rim-to-pylon/pad strikes. Filaments and their optional forks stay inside 0.985 radii and clear the tower wedge;

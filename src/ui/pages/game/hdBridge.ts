@@ -226,6 +226,7 @@ export function startHdBridge(host: HdBridgeHost): () => void {
           weatherIntensity: params.get('hd-weather') === 'rain' ? 0.8 : 0,
           // hd-fx=enhanced: the remaster's modern effects around the engine's own anims (default: faithful).
           effects: params.get('hd-fx') === 'enhanced' ? 'enhanced' : 'faithful',
+          nativeDetail: params.get('hd-native-detail') === 'mirror' ? 'mirror' : 'ignore',
           // Development opt-in: retain the default effect cards unless explicitly selected.
           volumetricEffects: params.get('hd-fxvol') === 'ray' ? 'ray' : 'off',
           // hd-water=enhanced: the remaster's modern water (default: the earlier HD water).
@@ -420,6 +421,7 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
   return {
     frame: state.frame,
     view: state.view,
+    ...(state.nativeDetail !== undefined ? { nativeDetail: state.nativeDetail } : {}),
     houses: state.houses.map((house) => ({ index: house.index, colorIndex: house.colorIndex })),
     localHouse: state.localHouse,
     shroud: state.shroud,
@@ -473,6 +475,7 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
       ...(object.buildupFrame !== undefined ? { buildupFrame: object.buildupFrame } : {}),
       ...(object.buildingFrame !== undefined ? { buildingFrame: object.buildingFrame } : {}),
       ...(object.buildingDamaged !== undefined ? { buildingDamaged: object.buildingDamaged } : {}),
+      ...(object.activeAnim !== undefined ? { activeAnim: object.activeAnim } : {}),
       ...(object.infantrySequence !== undefined ? { infantrySequence: object.infantrySequence } : {}),
       ...(object.sequenceFrame !== undefined ? { sequenceFrame: object.sequenceFrame } : {}),
       ...(object.infantryDrawFacingRaw !== undefined ? { infantryDrawFacingRaw: object.infantryDrawFacingRaw } : {}),
