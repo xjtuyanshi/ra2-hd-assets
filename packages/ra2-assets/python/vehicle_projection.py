@@ -452,6 +452,23 @@ def compose_sheet(bake: Path, part: str, out: Path, facings: list[int], cols: in
     return spec
 
 
+def manifest_atlases(path: Path, spec: dict) -> list[Path]:
+    """Validate the atlas references shared by index building and farm installation."""
+    if not isinstance(spec.get('parts'), dict) or not spec['parts']:
+        raise ValueError(f'{path.name}: missing atlas parts')
+    atlases = set()
+    for part in spec['parts'].values():
+        for key in ('colour', 'paint'):
+            name = part.get(key) if isinstance(part, dict) else None
+            if not isinstance(name, str) or Path(name).name != name or not name.endswith('.png'):
+                raise ValueError(f'{path.name}: invalid {key} atlas name: {name!r}')
+            atlas = path.parent / name
+            if not atlas.is_file():
+                raise ValueError(f'{path.name}: missing atlas {name}')
+            atlases.add(atlas)
+    return sorted(atlases)
+
+
 def build_index(out: Path) -> dict:
     types = {}
     for path in sorted(out.glob('*.json')):
@@ -459,14 +476,50 @@ def build_index(out: Path) -> dict:
             continue
         spec = json.loads(path.read_text())
         if spec.get('version') == 1 and spec.get('type') and 'parts' in spec:
-            if not all((out / p[key]).is_file() for p in spec['parts'].values() for key in ('colour', 'paint')):
-                raise ValueError(f'{path.name}: missing atlas')
+            manifest_atlases(path, spec)
             types[spec['type']] = path.name
     index = {'version': 1, 'types': types}
     out.mkdir(parents=True, exist_ok=True)
     (out / 'index.json.tmp').write_text(json.dumps(index, indent=2) + '\n')
     (out / 'index.json.tmp').replace(out / 'index.json')
     return index
+
+
+def install(farm: Path, build_dir: Path, type_name: str) -> list[str]:
+    """Install one complete projection type without writing through farm symlinks."""
+    import cache_farm
+
+    name = f'{file_stem(type_name)}.json'
+    if Path(name).name != name:
+        raise ValueError(f'Invalid projection type: {type_name!r}')
+    manifest = build_dir / name
+    if not manifest.is_file():
+        raise ValueError(f'Missing build manifest: {manifest}')
+    spec = json.loads(manifest.read_text(encoding='utf-8'))
+    if not isinstance(spec, dict) or spec.get('version') != 1 or spec.get('type') != type_name:
+        raise ValueError(f'{name}: expected a version 1 manifest for {type_name}')
+    atlases = manifest_atlases(manifest, spec)
+    index_path = farm / 'vehicles-hd/index.json'
+    if not index_path.is_file():
+        raise ValueError(f'Missing farm index (an existing index is required): {index_path}')
+
+    def validate_index(index):
+        if not isinstance(index, dict) or index.get('version') != 1 or not isinstance(index.get('types'), dict):
+            raise ValueError(f'{index_path}: expected a version 1 index with types')
+
+    # Refuse incomplete inputs before installing anything; validate again under the JSON lock.
+    validate_index(json.loads(index_path.read_text(encoding='utf-8')))
+    files = [*atlases, manifest]
+    for path in files:
+        cache_farm.install_file(farm, 'vehicles-hd/' + path.name, path)
+
+    def patch(index):
+        validate_index(index)
+        index['types'][type_name] = name
+        index['types'] = dict(sorted(index['types'].items()))
+
+    cache_farm.patch_json(farm, 'vehicles-hd/index.json', patch)
+    return [path.name for path in files]
 
 
 def steel_grade(
@@ -606,6 +659,10 @@ def main(argv=None):
     sheeter.add_argument('--scale', type=float)
     index = commands.add_parser('build-index')
     index.add_argument('--out', type=Path, required=True)
+    installer = commands.add_parser('install', help='install a complete type into a copy-on-write cache farm')
+    installer.add_argument('--farm', type=Path, required=True)
+    installer.add_argument('--build-dir', type=Path, required=True)
+    installer.add_argument('--type', required=True)
     grader = commands.add_parser('grade', help='steel_grade built colour atlases in place')
     grader.add_argument('--out', type=Path, required=True)
     grader.add_argument('--parts', nargs='+', required=True)
@@ -650,6 +707,14 @@ def main(argv=None):
         print(json.dumps({'scale': spec['scale'], 'cells': len(spec['cells'])}))
     elif args.command == 'build-index':
         print(json.dumps(build_index(args.out), indent=2))
+    elif args.command == 'install':
+        try:
+            names = install(args.farm, args.build_dir, args.type)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+        for name in names:
+            print(f'installed vehicles-hd/{name}')
+        print(f'index {args.type} -> {file_stem(args.type)}.json')
     elif args.command == 'grade':
         print(json.dumps(grade(args.out, args.parts, args.keep, args.hue, args.half), indent=2))
     else:

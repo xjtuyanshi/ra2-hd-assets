@@ -252,6 +252,95 @@ describe('YR 1.001 state reader', () => {
     expect(invalid.objects).toHaveLength(3);
   });
 
+  it.each([
+    ['HARV', 'HORV'],
+    ['CMIN', 'CMON'],
+  ])('selects %s unloading art %s only while docked, without changing the rules type', (id, imageId) => {
+    const m = syntheticMemory();
+    const type = m.type(V.unitType, id, 1000);
+    const unloadingType = m.type(V.unitType, imageId, 500);
+    const unit = m.object(V.unit, O.unitType, type, 0, { x: 256, y: 512, health: 750, uid: 1 });
+    m.vector(G.units, [unit]);
+    m.u8(type + O.unitTypeHarvester, 1);
+    m.u32(type + O.technoTypeUnloadingClass, unloadingType);
+    m.u8(unit + O.unitUnloading, 1);
+    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects[0];
+    expect(read()).toMatchObject({ type: id, imageType: imageId, health: 0.75 });
+    m.u8(unit + O.unitUnloading, 0);
+    expect(read()).toMatchObject({ type: id, health: 0.75 });
+    expect(read()).not.toHaveProperty('imageType');
+    // A poll during the draw's temporary Type substitution still draws the unloading image.
+    m.u8(unit + O.unitUnloading, 1);
+    m.u32(unit + O.unitType, unloadingType);
+    m.u8(unloadingType + O.unitTypeHarvester, 1);
+    expect(read()).toMatchObject({ type: imageId });
+    expect(read()).not.toHaveProperty('imageType');
+  });
+
+  it('ignores a non-harvester UnloadingClass, including the separate SCHP deployment path', () => {
+    const m = syntheticMemory();
+    const type = m.type(V.unitType, 'SCHP', 1000);
+    const unloadingType = m.type(V.unitType, 'SCHD', 1000);
+    const unit = m.object(V.unit, O.unitType, type, 0, { x: 256, y: 512, health: 750, uid: 1 });
+    m.vector(G.units, [unit]);
+    m.u32(type + O.technoTypeUnloadingClass, unloadingType);
+    m.u8(unit + O.unitUnloading, 1);
+    m.u8(unit + 0x6e0, 1);
+    const read = readYrState(createByteViewAccessor(m.bytes));
+    expect(read.objects[0]).toMatchObject({ type: 'SCHP' });
+    expect(read.objects[0]).not.toHaveProperty('imageType');
+  });
+
+  it.each(['null', 'out-of-bounds', 'wrong-vtable', 'cached-building-type', 'missing-id'])(
+    'ignores an %s UnloadingClass while keeping the HARV object',
+    (invalid) => {
+      const m = syntheticMemory();
+      const type = m.type(V.unitType, 'HARV', 1000);
+      let unloadingType = m.type(V.unitType, 'HORV', 500);
+      const unit = m.object(V.unit, O.unitType, type, 0, { x: 256, y: 512, health: 750, uid: 1 });
+      m.vector(G.units, [unit]);
+      m.u8(type + O.unitTypeHarvester, 1);
+      m.u8(unit + O.unitUnloading, 1);
+      if (invalid === 'null') unloadingType = 0;
+      else if (invalid === 'out-of-bounds') unloadingType = m.bytes.length - 4;
+      else if (invalid === 'wrong-vtable') m.u32(unloadingType, V.infantryType);
+      else if (invalid === 'missing-id') m.ascii(unloadingType + O.typeId, '');
+      else {
+        unloadingType = m.type(V.buildingType, 'GAREFN', 1000);
+        const refinery = m.object(V.building, O.buildingType, unloadingType, 0, {
+          x: 256,
+          y: 512,
+          health: 1000,
+          uid: 2,
+        });
+        m.vector(G.buildings, [refinery]);
+      }
+      m.u32(type + O.technoTypeUnloadingClass, unloadingType);
+      const read = readYrState(createByteViewAccessor(m.bytes));
+      const miner = read.objects.find((object) => object.id === unit);
+      expect(miner).toMatchObject({ type: 'HARV', health: 0.75 });
+      expect(miner).not.toHaveProperty('imageType');
+      expect(read.stats.invalid.vehicle).toBe(0);
+    },
+  );
+
+  it('bounds-checks the larger harvester type span without rejecting a valid base type', () => {
+    const m = syntheticMemory();
+    const type = (m.bytes.length - O.unitTypeHarvester) & ~3;
+    m.u32(type, V.unitType);
+    m.ascii(type + O.typeId, 'HARV');
+    m.i32(type + O.typeStrength, 1000);
+    const unloadingType = m.type(V.unitType, 'HORV', 500);
+    m.u32(type + O.technoTypeUnloadingClass, unloadingType);
+    const unit = m.object(V.unit, O.unitType, type, 0, { x: 256, y: 512, health: 750, uid: 1 });
+    m.vector(G.units, [unit]);
+    m.u8(unit + O.unitUnloading, 1);
+    const memory = createByteViewAccessor(m.bytes.subarray(0, type + O.unitTypeHarvester));
+    const miner = readYrState(memory).objects[0];
+    expect(miner).toMatchObject({ type: 'HARV', health: 0.75 });
+    expect(miner).not.toHaveProperty('imageType');
+  });
+
   it('reads map, houses and objects, skipping limbo and invalid entries', () => {
     const { m, tank, soldier, yard } = battlefield();
     const state = readYrState(createByteViewAccessor(m.bytes));

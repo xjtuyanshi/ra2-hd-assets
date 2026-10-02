@@ -462,6 +462,7 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
       uid: object.uid,
       kind: object.kind,
       type: object.type,
+      ...(object.imageType ? { imageType: object.imageType } : {}),
       owner: object.owner,
       x: object.x,
       y: object.y,

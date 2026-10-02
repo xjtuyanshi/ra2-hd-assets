@@ -15,6 +15,7 @@ import {
   YR_STATE_GLOBALS as G,
   YR_STATE_LIMITS,
   YR_STATE_OFFSETS as O,
+  YR_STATE_VTABLES as V,
   type YrState,
 } from '../../src/games/yr/stateReader';
 import { createGuestMemory } from '../helpers/guestMemory';
@@ -688,6 +689,33 @@ describe('YR 1.001 render state for the HD bridge', () => {
     });
     // The snapshot must survive a structured clone (the Worker reply).
     expect(structuredClone(state)).toEqual(state);
+  });
+
+  it('publishes unloading image changes within the same frame and leaves older objects optional', () => {
+    const memory = keyMemory();
+    const h = sources(memory);
+    const state = yrState(100);
+    state.objects[0]!.type = 'HARV';
+    h.readState.mockReturnValue(state);
+    memory.u32(memory.technos[0]!, V.unit);
+    const first = h.read()!;
+    expect(first.objects[0]).not.toHaveProperty('imageType');
+    expect(h.read()).toBe(first);
+    memory.bytes[memory.technos[0]! + O.unitUnloading] = 1;
+    state.objects[0]!.imageType = 'HORV';
+    const unloading = h.read()!;
+    expect(unloading).not.toBe(first);
+    expect(unloading.frame).toBe(first.frame);
+    expect(unloading.objects[0]).toMatchObject({ type: 'HARV', imageType: 'HORV' });
+    expect(unloading.objects[1]).not.toHaveProperty('imageType');
+    expect(structuredClone(unloading)).toEqual(unloading);
+    expect(h.read()).toBe(unloading);
+    memory.bytes[memory.technos[0]! + O.unitUnloading] = 0;
+    delete state.objects[0]!.imageType;
+    const finished = h.read()!;
+    expect(finished).not.toBe(unloading);
+    expect(finished.objects[0]).not.toHaveProperty('imageType');
+    expect(unloading.objects[0]!.imageType).toBe('HORV');
   });
 
   it('invalidates a same-frame cached infantry step and preserves health zero through publication', () => {

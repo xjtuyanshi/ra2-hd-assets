@@ -1,4 +1,6 @@
 """Asset-free projection builder contracts; run with unittest discovery."""
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -271,6 +273,113 @@ class VehicleProjectionTests(unittest.TestCase):
         self.assertLess(np.abs(lo[hull][..., 0] - lr[hull][..., 0]).max(), 4.0)  # lightness ramp kept
         np.testing.assert_array_equal(out[30:34, 30:34], redraw[30:34, 30:34])  # paint untouched
         np.testing.assert_array_equal(out[:8, :8], redraw[:8, :8])  # background untouched
+
+class ProjectionInstallTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def fake_build_and_farm(self, type_name='CAR', directory_symlink=False):
+        stem = projection.file_stem(type_name)
+        root = self.root / stem
+        base, farm, build_dir = root / 'base', root / 'farm', root / 'build'
+        (base / 'vehicles-hd').mkdir(parents=True)
+        farm.mkdir()
+        build_dir.mkdir()
+        part = 'turret' if type_name.endswith(':turret') else 'body'
+        colour, paint = f'{stem}_{part}.png', f'{stem}_{part}_paint.png'
+        spec = {'version': 1, 'type': type_name, 'frames': 16, 'facingStep': 16, 'scale': 1,
+                'jacobian': BAKE_JACOBIAN.tolist(), 'house': None, 'registration': [],
+                'parts': {part: {'colour': colour, 'paint': paint, 'size': [1, 1], 'frames': [
+                    {'k': k, 'facing': k * 16, 'pivot': [0, 0], 'rect': [0, 0, 1, 1]} for k in range(16)]}}}
+        (build_dir / f'{stem}.json').write_text(json.dumps(spec))
+        Image.new('RGBA', (1, 1), (90, 100, 110, 255)).save(build_dir / colour)
+        Image.new('RGB', (1, 1), (0, 0, 0)).save(build_dir / paint)
+        base_files = base / 'vehicles-hd'
+        (base_files / 'index.json').write_text(json.dumps({'version': 1, 'types': {'ZZZ': 'ZZZ.json'}, 'keep': True}))
+        (base_files / 'ZZZ.json').write_text(json.dumps({'type': 'ZZZ'}))
+        # Replace existing symlinks as well as adding a new index entry.
+        for path in build_dir.iterdir():
+            (base_files / path.name).write_bytes(b'old ' + path.name.encode())
+        if directory_symlink:
+            (farm / 'vehicles-hd').symlink_to(base_files)
+        else:
+            (farm / 'vehicles-hd').mkdir()
+            for path in base_files.iterdir():
+                (farm / 'vehicles-hd' / path.name).symlink_to(path)
+        return base_files, farm, build_dir
+
+    def test_install_cli_preserves_base_bytes_inodes_and_existing_index_entries(self):
+        for type_name, directory_symlink in (('CAR', False), ('GUN:turret', True)):
+            with self.subTest(type_name=type_name):
+                base, farm, build_dir = self.fake_build_and_farm(type_name, directory_symlink)
+                snapshot = {p.name: (p.read_bytes(), p.stat().st_ino) for p in base.iterdir()}
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    projection.main(['install', '--farm', str(farm), '--build-dir', str(build_dir), '--type', type_name])
+                for path in build_dir.iterdir():
+                    installed = farm / 'vehicles-hd' / path.name
+                    self.assertFalse(installed.is_symlink())
+                    self.assertTrue(installed.is_file())
+                    self.assertEqual(installed.read_bytes(), path.read_bytes())
+                index_path = farm / 'vehicles-hd/index.json'
+                self.assertFalse(index_path.is_symlink())
+                index = json.loads(index_path.read_text())
+                self.assertEqual(index['types'], {'ZZZ': 'ZZZ.json', type_name: f'{projection.file_stem(type_name)}.json'})
+                self.assertEqual(list(index['types']), sorted(index['types']))
+                self.assertTrue(index['keep'])
+                self.assertTrue((farm / 'vehicles-hd/ZZZ.json').is_symlink())
+                for name, before in snapshot.items():
+                    path = base / name
+                    self.assertEqual((path.read_bytes(), path.stat().st_ino), before)
+                lines = output.getvalue().splitlines()
+                self.assertEqual(set(lines[:-1]), {f'installed vehicles-hd/{p.name}' for p in build_dir.iterdir()})
+                self.assertEqual(len(lines), 4)
+                self.assertEqual(lines[-1], f'index {type_name} -> {projection.file_stem(type_name)}.json')
+
+    def test_missing_atlas_is_refused_before_any_farm_write_or_index_build(self):
+        _, farm, build_dir = self.fake_build_and_farm()
+        (build_dir / 'CAR_body_paint.png').unlink()
+        for operation in (lambda: projection.install(farm, build_dir, 'CAR'), lambda: build_index(build_dir)):
+            with self.assertRaisesRegex(ValueError, 'missing atlas CAR_body_paint.png'):
+                operation()
+        self.assertTrue(all(p.is_symlink() for p in (farm / 'vehicles-hd').iterdir()))
+        self.assertFalse((build_dir / 'index.json').exists())
+
+    def test_missing_manifest_is_refused_before_any_farm_write(self):
+        _, farm, build_dir = self.fake_build_and_farm()
+        (build_dir / 'CAR.json').unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing build manifest'):
+            projection.install(farm, build_dir, 'CAR')
+        self.assertTrue(all(p.is_symlink() for p in (farm / 'vehicles-hd').iterdir()))
+
+    def test_missing_index_is_not_created_and_cli_error_is_clear(self):
+        _, farm, build_dir = self.fake_build_and_farm()
+        index = farm / 'vehicles-hd/index.json'
+        index.unlink()
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error), self.assertRaises(SystemExit) as stopped:
+            projection.main(['install', '--farm', str(farm), '--build-dir', str(build_dir), '--type', 'CAR'])
+        self.assertEqual(stopped.exception.code, 2)
+        self.assertIn('Missing farm index', error.getvalue())
+        self.assertFalse(index.exists())
+        self.assertTrue(all(p.is_symlink() for p in index.parent.iterdir()))
+
+    def test_wrong_manifest_type_or_invalid_index_is_refused_before_installing(self):
+        _, farm, build_dir = self.fake_build_and_farm()
+        manifest = build_dir / 'CAR.json'
+        spec = json.loads(manifest.read_text())
+        manifest.write_text(json.dumps({**spec, 'type': 'OTHER'}))
+        with self.assertRaisesRegex(ValueError, 'manifest for CAR'):
+            projection.install(farm, build_dir, 'CAR')
+        manifest.write_text(json.dumps(spec))
+        (farm / 'vehicles-hd/index.json').unlink()
+        (farm / 'vehicles-hd/index.json').write_text(json.dumps({'version': 1, 'types': []}))
+        with self.assertRaisesRegex(ValueError, 'index with types'):
+            projection.install(farm, build_dir, 'CAR')
+        self.assertTrue((farm / 'vehicles-hd/CAR.json').is_symlink())
+
 
 class CamoLockTests(unittest.TestCase):
     def hull(self):

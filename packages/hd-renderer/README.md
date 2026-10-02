@@ -188,6 +188,12 @@ buildings light no windows
 and cast no light, except the map's invisible lamp-post dummies, which every player knows from the map. Without a
 sidecar the view falls back to land-type surfaces and no map light sources.
 
+Live object fields include optional `imageType`, the engine-selected draw image; `type` retains the rules identity
+for ownership, health and events. YR 1.001 tests Harvester at `0x73D2A6` and Unloading at `0x73D2B0`, reads
+UnloadingClass at `0x73D2BA`, then swaps Type at `0x73D2C4` and restores it at `0x73D3A2`: docked HARV/CMIN
+therefore draw HORV/CMON. Image changes rebuild the visual while retaining animation clocks; missing image art
+falls back to `type`.
+
 Live cell overlays (`src/live/overlays.ts`) draw each overlay's library frame at its cell. Rubble overlays
 (`LibraryOverlay.rubble`, rules IsRubble) never draw their own image: the carrier cell named in the snapshot's
 `overlays.rubble` draws its destroyed building's body frame 3 and shadow with the overlay's ISO palette, lighting and
@@ -523,6 +529,10 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   luminance before the coverage-mask mix. A value of 1 or absent adds no shader nodes. SHP shadows halve the displayed
   colour, like the engine's. Live object occlusion uses scene-wide painter depth slots (`ra2/painterOrder.ts`),
   independently of art placement and per-frame `cardPush`; all atlas pages and voxel parts share the same order.
+  Visible layer-2 non-building voxel units drawn after a building and stationary for at least six logic frames
+  receive a dock pull only inside its foundation: the maximum facade push at their exact anchor and four one-cell
+  axial offsets plus 0.5, capped at 3.5 and taking the largest building pull (about 3.009 at the measured refinery
+  dock); a screen-overlapping unit passing within about three cells in front can temporarily draw behind them.
   Physical depth remains available to atmospheric post processing, while ground decals and shadows keep their
   existing depth paths. See `docs/remaster/HD_BRIDGE.md`, "Object occlusion", for the native rule and fallback limits.
   With the enhanced look on, a layer draws its ground art in two extra passes just before its cards

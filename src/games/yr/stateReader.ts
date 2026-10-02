@@ -68,6 +68,8 @@ export const YR_STATE_OFFSETS = Object.freeze({
   secondaryFacing: 0x3a0,
   /** UnitClass::Type (UnitTypeClass*). */
   unitType: 0x6c4,
+  /** UnitClass::Unloading (bool); UnitClass draw tests it at 0x73D2B0. */
+  unitUnloading: 0x6d1,
   /** InfantryClass::Type (InfantryTypeClass*). */
   infantryType: 0x6c0,
   /** BuildingClass::Type (BuildingTypeClass*). */
@@ -80,6 +82,10 @@ export const YR_STATE_OFFSETS = Object.freeze({
   typeStrength: 0xa0,
   /** TechnoTypeClass::Turret (bool). */
   typeTurret: 0xca1,
+  /** UnitTypeClass::Harvester (bool); UnitClass draw tests it at 0x73D2A6. */
+  unitTypeHarvester: 0xe0e,
+  /** TechnoTypeClass::UnloadingClass (UnitTypeClass*); UnitClass draw reads it at 0x73D2BA. */
+  technoTypeUnloadingClass: 0x6b8,
   /** BuildingTypeClass::Gate (bool); BuildingClass::GetYSort at 0x449410 subtracts 16. */
   buildingTypeGate: 0x16b7,
   /** BuildingTypeClass::TurretAnimIsVoxel (bool); the same sort virtual adds 32. */
@@ -210,6 +216,11 @@ export interface YrObjectState {
   kind: YrObjectKind;
   /** Rules ID, e.g. "MTNK", "AMCV", "GACNST". */
   type: string;
+  /**
+   * Engine-selected draw image: UnitClass swaps Type to UnloadingClass at 0x73D2C4 and restores it at 0x73D3A2.
+   * `type` stays the rules type for selection, health and ownership.
+   */
+  imageType?: string;
   /** Owning house index in `houses`, or -1 when the owner pointer is not a known house. */
   owner: number;
   /**
@@ -508,18 +519,18 @@ export function readYrState(memory: GuestMemoryAccessor, options: ReadYrStateOpt
 
   const typeCache = new Map<number, { id: string; strength: number; turret: boolean } | null>();
   const readType = (pointer: number, vtable: number) => {
+    // Validate the requested class even if another vector already cached this pointer's type data.
+    if (!isPlausiblePointer(memory, pointer, o.typeTurret + 1) || memory.u32(pointer) !== vtable) return null;
     let cached = typeCache.get(pointer);
     if (cached === undefined) {
       cached = null;
-      if (isPlausiblePointer(memory, pointer, o.typeTurret + 1) && memory.u32(pointer) === vtable) {
-        const id = readAsciiZ(memory, pointer + o.typeId, 0x18);
-        if (id)
-          cached = {
-            id,
-            strength: memory.i32(pointer + o.typeStrength),
-            turret: memory.u8(pointer + o.typeTurret) !== 0,
-          };
-      }
+      const id = readAsciiZ(memory, pointer + o.typeId, 0x18);
+      if (id)
+        cached = {
+          id,
+          strength: memory.i32(pointer + o.typeStrength),
+          turret: memory.u8(pointer + o.typeTurret) !== 0,
+        };
       typeCache.set(pointer, cached);
     }
     return cached;
@@ -567,6 +578,8 @@ export function readYrState(memory: GuestMemoryAccessor, options: ReadYrStateOpt
         continue;
       }
       const typePointer = memory.u32(pointer + spec.typeOffset);
+      // A rare poll inside 0x73D2C4..0x73D3A2 can see Type already swapped; harmlessly draw that unloading
+      // image for one snapshot rather than trying to reconstruct the engine's saved stack value.
       const type = readType(typePointer, spec.typeVtable);
       const x = memory.i32(pointer + o.location),
         y = memory.i32(pointer + o.location + 4),
@@ -596,6 +609,16 @@ export function readYrState(memory: GuestMemoryAccessor, options: ReadYrStateOpt
         health: type.strength > 0 ? Math.min(1, Math.max(0, hitPoints / type.strength)) : 0,
         isSelected: memory.u8(pointer + o.isSelected) !== 0,
       };
+      if (
+        spec.kind === 'vehicle' &&
+        isPlausiblePointer(memory, typePointer, o.unitTypeHarvester + 1) &&
+        isPlausiblePointer(memory, pointer, o.unitUnloading + 1) &&
+        memory.u8(typePointer + o.unitTypeHarvester) &&
+        memory.u8(pointer + o.unitUnloading)
+      ) {
+        const unloading = readType(memory.u32(typePointer + o.technoTypeUnloadingClass), YR_STATE_VTABLES.unitType);
+        if (unloading) object.imageType = unloading.id;
+      }
       if (type.turret) {
         const turretRaw = readFacingRaw(memory, pointer + o.secondaryFacing, frame);
         object.turretFacingRaw = turretRaw;

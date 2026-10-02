@@ -1010,6 +1010,20 @@ position (index 16 to 31), and half the residual linear-light luminance ratio. C
 `build-index` indexes completed manifests whose atlases exist. Serve the output directory as `vehicles-hd/`
 under the HD cache root; see [renderer controls](../hd-renderer/README.md#projected-vehicle-redraws).
 
+### Copy-on-write farm installation
+
+`install` installs the selected type's manifest and every colour/paint atlas it lists into an existing farm's
+`vehicles-hd/`, using `cache_farm.install_file` and the locked `patch_json` update. It requires a readable version 1
+`vehicles-hd/index.json`; a missing index is an error. Missing manifests or atlases are refused before installation.
+The index retains other types and fields, sorts `types` by id, and maps building turret ids such as `NAFLAK:turret`
+to `NAFLAK_turret.json`. It prints one line per installed file and the index entry. Farm symlinks are replaced
+without modifying the base cache. This establishes file installation, not renderer loading or visual acceptance.
+
+```sh
+python3 packages/ra2-assets/python/vehicle_projection.py install \
+  --farm "$VEHICLE_WORK/farm" --build-dir "$VEHICLE_WORK/proj/vehicles-hd" --type HTNK
+```
+
 ## Volumetric explosion redraws (Python)
 
 `python/volumetric_explosions.py` redraws explosion anims as volumetric fireballs for the optional RGBA flipbooks
@@ -1049,6 +1063,30 @@ Use `--interior` to fill small dark chunks (at most 160 texels) enclosed by warm
 in every frame, preserving debris over transparency or neutral smoke. This mode runs only interior cleanup, so already cleaned pages do not repeat rim or
 late-debris processing. Add `--anims EXPLOLRG,TWLT070` to limit either mode to those anims (default: all anims on the
 selected pages); per-page pixel counts are printed and pages are still installed atomically through `cache_farm.install_file`.
+
+## Frozen live-pair crops and house-hue metrics (Python)
+
+`python/live_pair_metrics.py` reads `orig-NN.png` / `hd-NN.png` captures of the whole 1152x744 guest frame from
+`$PAIRS`. Python 3 with numpy, Pillow and cv2 is required. `--box EX0 EY0 EX1 EY1` uses engine pixels: each image's
+width/1152 and height/744 scale its box independently, rounding lower edges down and upper edges up. `crop` keeps
+native screenshot resolution, pastes both crops with an 8 px white gap, and adds labels only with `--font` (a TTF/TTC
+supporting the chosen text, rendered at 20 px). Labels default to `原版 HD`; omitting the font omits the label strip.
+
+```sh
+python3 packages/ra2-assets/python/live_pair_metrics.py crop \
+  --pairs "$PAIRS" --id 12 --box 100 200 140 230 --out "$PAIRS/crop-12.png" \
+  --labels 原版 HD --font "$FONT"
+python3 packages/ra2-assets/python/live_pair_metrics.py house \
+  --pairs "$PAIRS" --id 12 --box 100 200 140 230 --hue 170 10 --smin 100 --vmin 60
+(cd packages/ra2-assets/python && python3 -m unittest \
+  test_vehicle_projection test_live_pair_metrics test_cache_farm -v)
+```
+
+`house` prints JSON `{"orig": n, "hd": m, "ratio": m / max(1, n)}`. Its inclusive OpenCV HSV hue bounds are 0..180;
+LO > HI wraps around zero. Saturation/value minima default to 100/60 (0..255). Counts are screenshot pixels, so a
+2x capture has four times the pixel area of a 1x capture; use matching scales when comparing raw counts/ratios.
+Unrelated pixels with the same hue also count. These frozen-crop measurements do not establish object ownership,
+visual acceptance, animation correctness or complete live coverage. Captures and generated crops stay outside Git.
 
 ## Live snapshot replays (Python)
 

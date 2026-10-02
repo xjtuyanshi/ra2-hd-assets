@@ -63,6 +63,8 @@ export interface GameRenderObject extends GameRenderPoint {
   kind: GameRenderObjectKind;
   /** Rules type id, for example "MTNK". */
   type: string;
+  /** Engine-selected draw image when it differs from the rules type. */
+  imageType?: string;
   /** GameRenderHouse.index of the owner, or -1 when unknown. */
   owner: number;
   facingRaw: number;

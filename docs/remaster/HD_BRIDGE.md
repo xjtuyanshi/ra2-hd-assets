@@ -131,6 +131,21 @@ profile. Turrets and lamp heads clear that profile, while physical beams, rain, 
 same depth space. Stock high-bridge overlays use a horizontal depth plane four height levels above the cell,
 so neighboring deck pieces cannot sort ahead of an on-deck unit merely because of their cell keys.
 
+Visible layer-2 non-building voxel units receive a geometric camera-space dock pull only when their anchor cell is
+inside a visible building's foundation (`bx <= ux < bx + w`, `bz <= uz < bz + h`), native painter order places the
+unit after that building, and at least `DOCK_SETTLE_FRAMES` (6) logic frames have elapsed since its last observed
+move (or first appearance). Units outside the foundation already stand physically in front of the facade; moving
+units leaving a war-factory door remain behind it as in native drawing. `ra2/dockPull.ts` keeps a foundation-cell
+bucket lookup and samples `foundationPointPush` at the exact live anchor (`x/256`, `y/256`) and four axial offsets
+one cell away, separately from the floored painter cell. Pull is the nonnegative maximum sample plus
+`DOCK_PULL_MARGIN` (0.5), capped at `DOCK_PULL_MAX` (3.5); multiple qualifying buildings contribute their largest
+pull, never a sum. At the Soviet refinery NW (51,101), foundation [4,3], a live War Miner at (13952,26240) leptons
+has a maximum sample push of about 2.509 and receives about 3.009. Replay showed the former one-cell pull still cut
+the tipped bin, whereas about three cells placed the whole bin over the dish as native drawing does. This
+compensates for low pad/dish art without decoding YR's `BUILDNGZ.SHA` Z shapes. While active, the pull can draw a
+screen-overlapping unit passing within about three cells in front of the docked unit behind it; the cut-off bin
+was permanent at every dock. Building voxel turrets, aircraft above layer 2, projectiles and effects retain their biases.
+
 Ground decals, ore and shadow transforms retain their existing paths. The separate geometry-depth attachment
 keeps mist and shroud independent of the card's analytic occlusion depth. Older snapshots retain the Ground-key
 fallback and terrain-relative flight layer; exact ties and unusual locomotor layers without native metadata remain
@@ -308,6 +323,13 @@ the table also lists the remaining optional fields. These additions forward data
 Completed-building H2 also supplies `buildingFrame` and `buildingDamaged`: the engine-selected body/shadow frame
 (including occupancy) is independent of the yellow condition used for bibs and damage-animation variants.
 Without these optional fields the view retains its library-yellow body/layer estimate.
+
+Optional object `imageType` forwards the engine's draw image without replacing the rules `type` used for health,
+selection, ownership and events. YR 1.001 UnitClass draw saves Type at `0x73D29C`, tests Harvester (+`0xE0E`) at
+`0x73D2A6` and Unloading (+`0x6D1`) at `0x73D2B0`, reads UnloadingClass (+`0x6B8`) at `0x73D2BA`, swaps Type at
+`0x73D2C4` and restores it at `0x73D3A2`. The reader validates the alternate UnitTypeClass pointer/vtable/id, so
+unloading HARV/CMIN draw HORV/CMON; absent or invalid fields and missing alternate art retain `type`. A rare poll
+inside the swap window can already see the unloading type for one snapshot. SCHP deployment is a separate policy.
 
 ## Known limits
 
