@@ -82,12 +82,17 @@ def prep(args: argparse.Namespace) -> int:
                 overlap = max(0, min(x + TW, x1) - max(x, x0)) * max(0, min(y + TH, y1) - max(y, y0))
             tiles.append(dict(tx=tx, ty=ty, x=x, y=y, water=water, overlap=overlap))
     tiles.sort(key=lambda t: (-t["overlap"], t["ty"], t["tx"]))
+    args.tiles.mkdir(parents=True, exist_ok=True)
+    index_path = args.tiles / "prep.json"
+    index_path.unlink(missing_ok=True)
     queue = []
+    skipped = {}
     for tile in tiles:
         directory = args.tiles.resolve() / f"{tile['tx']}_{tile['ty']}"
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "tile.json").write_text(json.dumps(tile), encoding="utf-8")
-        if tile["water"] > args.skip_water:
+        skipped[directory.name] = tile["water"] > args.skip_water
+        if skipped[directory.name]:
             print("skip (water)", directory.name, round(tile["water"], 2))
             continue
         Image.fromarray(img[tile["y"]:tile["y"] + TH, tile["x"]:tile["x"] + TW]).save(directory / "input.png")
@@ -96,6 +101,11 @@ def prep(args: argparse.Namespace) -> int:
     queue_path = args.queue if args.queue is not None else args.tiles / "queue.txt"
     queue_path.parent.mkdir(parents=True, exist_ok=True)
     queue_path.write_text("\n".join(queue) + "\n", encoding="utf-8")
+    # Publish only after all inputs and the queue exist, so completeness can distinguish intentional skips
+    # from interrupted preparation and detect an entire missing tile directory.
+    temporary_index = index_path.with_suffix(".tmp")
+    temporary_index.write_text(json.dumps(dict(width=w, height=h, skipped=skipped)), encoding="utf-8")
+    temporary_index.replace(index_path)
     print(w, h, "tiles", len(tiles), "queued", len(queue), "region-first",
           sum(t["overlap"] > 0 for t in tiles))
     return 0
@@ -109,16 +119,31 @@ def from_lab(lab: np.ndarray) -> np.ndarray:
     return np.clip(cv2.cvtColor(lab.astype(np.float32), cv2.COLOR_LAB2RGB), 0, 1)
 
 
+def valid_blur(delta: np.ndarray, sigma: float, validity: np.ndarray) -> np.ndarray:
+    """Blur a scalar correction using alpha weights in [0, 1], ignoring invalid RGB outside the map."""
+    weight = cv2.GaussianBlur(validity, (0, 0), sigma)
+    correction = cv2.GaussianBlur(delta * validity, (0, 0), sigma)
+    return np.divide(correction, weight, out=np.zeros_like(correction), where=weight > 1e-6)
+
+
 def colour_lock(inp: np.ndarray, out: np.ndarray, sigma_l: float = 20, sigma_ab: float = 10,
-                lock_l: float = 0.75, lock_ab: float = 1.0) -> np.ndarray:
+                lock_l: float = 0.75, lock_ab: float = 1.0,
+                validity: np.ndarray | None = None) -> np.ndarray:
     li, lo = to_lab(inp), to_lab(out)
     result = lo.copy()
-    result[..., 0] = lo[..., 0] + lock_l * (
-        cv2.GaussianBlur(li[..., 0], (0, 0), sigma_l) - cv2.GaussianBlur(lo[..., 0], (0, 0), sigma_l))
-    for channel in (1, 2):
-        result[..., channel] = lo[..., channel] + lock_ab * (
-            cv2.GaussianBlur(li[..., channel], (0, 0), sigma_ab)
-            - cv2.GaussianBlur(lo[..., channel], (0, 0), sigma_ab))
+    if validity is not None:
+        if validity.shape != inp.shape[:2]:
+            raise ValueError("colour-lock validity must match the input dimensions")
+        validity = validity.astype(np.float32, copy=False)
+        if np.all(validity == 1):
+            validity = None
+    for channel, sigma, strength in ((0, sigma_l, lock_l), (1, sigma_ab, lock_ab), (2, sigma_ab, lock_ab)):
+        if validity is None:
+            correction = (cv2.GaussianBlur(li[..., channel], (0, 0), sigma)
+                          - cv2.GaussianBlur(lo[..., channel], (0, 0), sigma))
+        else:
+            correction = valid_blur(li[..., channel] - lo[..., channel], sigma, validity)
+        result[..., channel] += strength * correction
     return from_lab(result)
 
 
@@ -196,6 +221,21 @@ def min_cut(cost: np.ndarray, axis: int) -> np.ndarray:
     return path
 
 
+def seam_weights(path: np.ndarray, size: int, overlap: int, feather: float) -> np.ndarray:
+    """Bound a smooth transition around each cut to the overlap; its outer edges are exactly 0 and 1."""
+    coordinates = np.arange(size, dtype=np.float32)[None, :]
+    if feather <= 0:
+        return (coordinates >= path[:, None]).astype(np.float32)
+    centre = path[:, None].astype(np.float32) - 0.5
+    distance = coordinates - centre
+    # A smoothstep over +/- two sigma approximates the old small Gaussian feather, while separate
+    # side widths keep the minimum-cost cut centred when broad feathers reach the overlap's edges.
+    radius = 2 * feather
+    width = np.where(distance < 0, np.minimum(radius, centre), np.minimum(radius, overlap - 1 - centre))
+    t = np.clip(0.5 + distance / (2 * np.maximum(width, 1e-6)), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
 def stitch(canvas: np.ndarray, filled: np.ndarray, tile: np.ndarray, x: int, y: int, feather: float = 3) -> None:
     """Quilt one tile in place, using its actual size for composites smaller than a full tile."""
     h, w = tile.shape[:2]
@@ -204,24 +244,63 @@ def stitch(canvas: np.ndarray, filled: np.ndarray, tile: np.ndarray, x: int, y: 
     mask = np.ones((h, w), np.float32)
     if overlap.any():
         cost = cv2.GaussianBlur(((current - tile) ** 2).sum(-1), (0, 0), 1.5)
-        ovx = int(overlap[h // 2].sum()) if overlap[h // 2, 0] else 0
-        ovy = int(overlap[:, w // 2].sum()) if overlap[0, w // 2] else 0
+        # The new bottom-right corner is unfilled. Middle scans can lie entirely in the perpendicular
+        # strip when the last edge-anchored tile overlaps more than half its width or height.
+        ovx = int(overlap[-1].sum()) if overlap[-1, 0] else 0
+        ovy = int(overlap[:, -1].sum()) if overlap[0, -1] else 0
         if ovx > 8:
             band = cost[:, :ovx].copy()
             band[:, :4] += 1e3
             band[:, -4:] += 1e3
             path = min_cut(band, 0)
-            mask *= (np.arange(w)[None, :] >= path[:, None]).astype(np.float32)
+            mask *= seam_weights(path, w, ovx, feather)
         if ovy > 8:
             band = cost[:ovy, :].copy()
             band[:4] += 1e3
             band[-4:] += 1e3
             path = min_cut(band, 1)
-            mask *= (np.arange(h)[:, None] >= path[None, :]).astype(np.float32)
+            mask *= seam_weights(path, h, ovy, feather).T
         mask = np.where(overlap, mask, 1.0)
-        mask = np.where(overlap, cv2.GaussianBlur(mask, (0, 0), feather), 1.0)
     canvas[y:y + h, x:x + w] = current * (1 - mask[..., None]) + tile * mask[..., None]
     filled[y:y + h, x:x + w] = True
+
+
+def require_complete(tiles: list[dict], directory: Path, w: int, h: int) -> None:
+    expected = {f"{tx}_{ty}": (x, y)
+                for ty, y in enumerate(starts(h, TH, SY)) for tx, x in enumerate(starts(w, TW, SX))}
+    by_name = {tile["dir"].name: tile for tile in tiles}
+    if by_name.keys() != expected.keys():
+        missing = sorted(expected.keys() - by_name.keys())
+        extra = sorted(by_name.keys() - expected.keys())
+        raise ValueError(f"--require-complete: tile metadata does not match the source grid; "
+                         f"missing {missing}, unexpected {extra}")
+    index_path = directory / "prep.json"
+    skipped = None
+    if index_path.exists():
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        skipped = index.get("skipped")
+        if (index.get("width"), index.get("height")) != (w, h) or not isinstance(skipped, dict) \
+                or skipped.keys() != expected.keys() or any(type(value) is not bool for value in skipped.values()):
+            raise ValueError("--require-complete: prep.json does not match the source grid")
+    for name, (x, y) in expected.items():
+        tile = by_name[name]
+        if (tile.get("x"), tile.get("y")) != (x, y):
+            raise ValueError(f"--require-complete: tile {name} has unexpected coordinates")
+        inp, out = tile["dir"] / "input.png", tile["dir"] / "output.png"
+        # Old preparations have no index: only the canonical water threshold justifies an absent input.
+        # If an input exists, the tile was queued and its output is required even above that threshold.
+        water = tile.get("water")
+        skip = skipped[name] if skipped is not None else (
+            isinstance(water, (int, float)) and 0.85 < water <= 1 and not inp.exists() and not out.exists())
+        if skip:
+            if out.exists():
+                raise ValueError(f"--require-complete: skipped tile {name} has a stale output")
+            continue
+        if not inp.exists() or not out.exists():
+            raise ValueError(f"--require-complete: tile {name} is missing input.png or output.png")
+        with Image.open(inp) as image:
+            if image.size != (min(TW, w - x), min(TH, h - y)):
+                raise ValueError(f"--require-complete: tile {name} input dimensions do not match the source grid")
 
 
 def assemble(args: argparse.Namespace) -> int:
@@ -232,6 +311,13 @@ def assemble(args: argparse.Namespace) -> int:
         tile = json.loads(path.read_text(encoding="utf-8"))
         tile["dir"] = path.parent
         tiles.append(tile)
+    if args.require_complete:
+        require_complete(tiles, args.tiles, w, h)
+    colour = None
+    if args.colour_source is not None:
+        colour = load_image(args.colour_source, "RGB")
+        if colour.shape[:2] != (h, w):
+            raise ValueError("--colour-source must have the source's dimensions")
     canvas = source[..., :3].astype(np.float32) / 255
     filled = np.zeros((h, w), bool)
     used = 0
@@ -249,18 +335,36 @@ def assemble(args: argparse.Namespace) -> int:
             out = cv2.resize(out, (tw, th), interpolation=cv2.INTER_AREA)
         if not args.no_align:
             out = align(inp, out, directory.name)
-        painted = colour_lock(inp, out, args.sigma_l, args.sigma_ab, args.lock_l, args.lock_ab)
+        validity = source[y:y + th, x:x + tw, 3].astype(np.float32) / 255
+        painted = colour_lock(inp, out, args.sigma_l, args.sigma_ab, args.lock_l, args.lock_ab, validity)
         stitch(canvas, filled, painted, x, y, args.feather)
         used += 1
+    if colour is not None:
+        # Apply the reference/source low-frequency delta globally after quilting. Tile-local reference
+        # blurs would disagree at tile edges and at painted/fallback joins when the reference varies there.
+        # Haloed strips bound memory and use the same correction for painted and uncovered pixels.
+        halo = int(np.ceil(4 * max(args.sigma_l, args.sigma_ab)))
+        for y in range(0, h, 256):
+            end = min(h, y + 256)
+            top, bottom = max(0, y - halo), min(h, end + halo)
+            delta = to_lab(colour[top:bottom]) - to_lab(source[top:bottom, :, :3])
+            validity = source[top:bottom, :, 3].astype(np.float32) / 255
+            painted_lab = cv2.cvtColor(canvas[y:end], cv2.COLOR_RGB2LAB)
+            for channel, sigma, strength in ((0, args.sigma_l, args.lock_l),
+                                              (1, args.sigma_ab, args.lock_ab),
+                                              (2, args.sigma_ab, args.lock_ab)):
+                correction = valid_blur(delta[..., channel], sigma, validity)
+                painted_lab[..., channel] += strength * correction[y - top:end - top]
+            canvas[y:end] = from_lab(painted_lab)
     result = source.copy()
     result[..., :3] = np.round(np.clip(canvas, 0, 1) * 255).astype(np.uint8)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(result).save(args.output)
+    Image.fromarray(result).save(args.output, format="PNG")
     print("assembled tiles", len(tiles), "with output", used, "->", args.output)
     if args.debug_box:
         x0, y0, x1, y1 = args.debug_box
         debug = args.output.with_name(args.output.stem + "_dbg.png")
-        Image.fromarray(np.concatenate([source[y0:y1, x0:x1, :3], result[y0:y1, x0:x1, :3]], 1)).save(debug)
+        Image.fromarray(np.concatenate([source[y0:y1, x0:x1, :3], result[y0:y1, x0:x1, :3]], 1)).save(debug, format="PNG")
     return 0
 
 
@@ -423,6 +527,12 @@ def build_parser() -> argparse.ArgumentParser:
     assembly.add_argument("--lock-l", type=float, default=0.75)
     assembly.add_argument("--lock-ab", type=float, default=1.0)
     assembly.add_argument("--feather", type=float, default=3.0)
+    assembly.add_argument("--colour-source", type=Path,
+                          help="same-layout reference whose low-frequency difference from the source is applied "
+                               "globally after normal tile colour-locking and quilting")
+    assembly.add_argument("--require-complete", action="store_true",
+                          help="validate the full source tile grid and prepared input/output coverage; "
+                               "intentional water skips remain source")
     assembly.add_argument("--no-align", action="store_true", help="disable ECC affine registration")
     assembly.add_argument("--debug-box", "--dbg", type=box_arg, help="write <output-stem>_dbg.png for x0,y0,x1,y1")
     assembly.set_defaults(func=assemble)
