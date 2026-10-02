@@ -68,6 +68,8 @@ once a carrier names the overlay type.
 
 ## Upgrade existing caches
 
+For a shared symlink farm, follow the [scratch extraction and overlay installation route](../../packages/ra2-assets/README.md#install-overlay-art-into-a-cache-farm), then reapply ore/gem and wall redirections in that order.
+
 Use the player's own complete installation. Derived atlases and screenshots must stay outside Git. From the repository
 root, with `YR_INSTALL` set to that installation and `HD_CACHE` to the existing map-cache root:
 

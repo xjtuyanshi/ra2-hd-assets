@@ -741,6 +741,14 @@ python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_ore_field
 `install` uses POSIX `flock` on the destination theatre's `.compose.lock`, atomically replaces its own page and
 JSON entries without writing through symlinks, preserves other tracks' data, and reuses the page index on reruns.
 
+`build` and `install` need the theatre library's `overlays` section; libraries extracted without it take it from the
+farm route in [Install overlay art into a cache farm](#install-overlay-art-into-a-cache-farm) first. In the YR 1.001
+data the six theater palettes (`temperat.pal`, `snow.pal`, `urban.pal`, `desert.pal`, `lunar.pal`, `urbann.pal`) are
+byte-identical, and `tibNN.sno`, `.urb`, `.ubn` and `.lun` are the same files as `tibNN.tem` (gems likewise), so a
+build from any of those theatres reproduces the temperate page exactly. Only the desert ore art (`tibNN.des`) differs;
+it needs its own build. The page carries no ground colour of its own beyond the contact bed (at most .25 alpha under
+each nugget), so the same page reads on grass, snow, pavement and regolith.
+
 ## Destroyed-building rubble pages (Python)
 
 YR draws a destroyed `LeaveRubble=yes` building as its own SHP body frame 3 in the ISO palette at the IsRubble overlay
@@ -1215,6 +1223,47 @@ New page slots have no HD reference until processed by `hd:sprites`. `overlayExt
 counts and missing-art warnings. Repeated runs append new pages; old pages remain intact for existing references.
 The library JSON is replaced only after the new files exist. A failed extraction can leave unreferenced new files
 but retains the old JSON. `--only overlays` requires an existing library and does not run `--preview`.
+
+### Install overlay art into a cache farm
+
+The overlay append takes no lock and must never run directly inside a shared symlink farm. Instead, copy
+`library.json` and `palettes/` as real files into a fresh scratch theater directory. Existing atlas files need not
+be copied: the installer ignores every source page not referenced by an overlay frame or shadow. Set `HD_CACHE`
+to the farm cache root, `YR_INSTALL` to the player's installation, and `ORE_BUILD` to the existing ore/gem build
+directory containing `frames.json` and its pages:
+
+```bash
+THEATRE=urban
+OVERLAY_SCRATCH="$(mktemp -d)"
+mkdir -p "$OVERLAY_SCRATCH/$THEATRE/palettes"
+cp -L "$HD_CACHE/_library/$THEATRE/library.json" "$OVERLAY_SCRATCH/$THEATRE/library.json"
+cp -RL "$HD_CACHE/_library/$THEATRE/palettes/." "$OVERLAY_SCRATCH/$THEATRE/palettes/"
+pnpm hd:library -- --game "$YR_INSTALL" --out "$OVERLAY_SCRATCH" --theater "$THEATRE" --only overlays
+python3 -B packages/ra2-assets/python/theatre_overlays.py install \
+  --extracted "$OVERLAY_SCRATCH/$THEATRE" --cache-root "$HD_CACHE" --theatre "$THEATRE"
+python3 -B packages/ra2-assets/python/ore_fields.py install \
+  --build-dir "$ORE_BUILD" --cache-root "$HD_CACHE" --theatre "$THEATRE"
+python3 -B packages/ra2-assets/python/theatre_pages.py overlay-walls "$HD_CACHE/_library/$THEATRE"
+```
+
+`theatre_overlays.py install` holds the theater's `.compose.lock` across planning, file installation and publication.
+It uses `cache_farm.install_file` for atomic copy-on-write files and `cache_farm.patch_json` for the current JSON
+merge under its own `.library.json.lock`, preserving unrelated concurrent edits. Referenced pages are processed in
+ascending source-index order, reusing a byte-identical destination atlas by SHA-256 or taking the first free
+`sprites-overlays-<n>.png` name. Optional HD color/remap files use that atlas stem's `@2x.png` and `@2x-remap.png`
+names. Missing palettes are installed; conflicting `paletteSources`, mismatched theater/version or changed planned
+page slots abort publication. Files exist before JSON is published; an interrupted or rejected merge can leave
+unreferenced installed files. Reinstalling the same extraction reuses its pages and leaves the JSON content unchanged.
+
+This replaces all overlay sprites, so reapply later redirections afterwards in the order shown: `ore_fields.py install`
+redirects ore/gem frames to the ore page, then `theatre_pages.py overlay-walls` redirects walls to HD building frames.
+The installer prints the theater, overlay type count, pages added/reused and palettes added.
+
+```bash
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_theatre_overlays.py'
+```
+
+### Refresh smudge art
 
 Add or refresh all smudge art in existing theater libraries, including craters and burns absent from a map's initial
 placements:
