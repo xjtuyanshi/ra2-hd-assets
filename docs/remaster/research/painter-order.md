@@ -320,6 +320,14 @@ The supplied barracks replay has a `2x2` foundation at northwest `(67,14)` and a
 in transparent art beside the tapered tower and above the plinth: changing only opaque-card depth cannot hide
 those pixels. The engine's building Z-shape box covers the foundation independently of those art holes.
 
+Known limit (live frozen frames, YABRCK `2x3`, NW `(54,90)`): the original hides a fresh initiate at local
+`(1.25,1.75)` on its spawn frame but shows it 9 and 21 frames later at `(1.47,1.96)` and `(1.8,2.29)` walking down
+its exit stairs, still inside the foundation (the Yuri barracks' Z-shape is low there). HD hides those poses: both
+the containment rule below and the rectangular front facade (about 1.06 and 0.4 sum units in front of the unit)
+cover them. Limiting the rule to the spawn moment was tried and did not reveal the initiate (the facade still covers
+the stairs) while it would re-expose the NAHAND conscript in transparent art, so the rule stays unconditional until
+per-art Z-shapes are reconstructed.
+
 `LiveView` therefore suppresses ground-layer, non-airborne infantry at exact snapshot anchors strictly inside
 `NW + (0.05, w - 0.05) x (0.05, h - 0.05)`. It hides the visual root and queues no body, shadow or overlay art for
 that frame. Vehicle/aircraft delivery and docking remain independent. Anchors on the inset boundary or outside,
