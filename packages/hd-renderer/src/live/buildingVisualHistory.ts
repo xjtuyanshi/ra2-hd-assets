@@ -6,7 +6,11 @@ interface LastBuildingVisual {
   missingFrame?: number;
 }
 
-/** Bounded presentation compensation, not reconstruction of the native render/present phase. */
+/**
+ * Preserve the last drawable building descriptor through its first missing logic frame. Polling can miss the
+ * zero-HP state entirely, so eligibility does not depend on health. Explicit hiding and selling take effect
+ * immediately. This is bounded presentation compensation, not reconstruction of the native render/present phase.
+ */
 export class BuildingVisualHistory {
   private lastFrame = -1;
   private readonly last = new Map<number, LastBuildingVisual>();
@@ -21,7 +25,8 @@ export class BuildingVisualHistory {
     for (const [uid, last] of this.last) {
       if (uids.has(uid)) continue;
       last.missingFrame ??= snapshot.frame;
-      // A reused pointer, skipped logic frame or second missing logic frame cannot revive old art.
+      // Same-frame publications do not extend the deadline. A reused pointer, skipped logic frame or second
+      // missing logic frame cannot revive old art, even if the next publication repeats the original frame.
       if (ids.has(last.object.id) || snapshot.frame > last.snapshot.frame + 1 || snapshot.frame !== last.missingFrame) {
         this.last.delete(uid);
         continue;
@@ -29,12 +34,7 @@ export class BuildingVisualHistory {
       this.retained.set(uid, last);
     }
     for (const object of snapshot.objects) {
-      if (
-        object.kind !== 'building' ||
-        !(object.health <= 0) ||
-        object.buildState === 'selling' ||
-        object.nativeHidden
-      ) {
+      if (object.kind !== 'building' || object.buildState === 'selling' || object.nativeHidden) {
         this.last.delete(object.uid);
         continue;
       }

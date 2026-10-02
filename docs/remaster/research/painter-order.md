@@ -495,12 +495,14 @@ Normal rendering at `0x55D8F2` precedes Logic AI at `0x55DC9E` and the logic-fra
 observes its removal. However, the wait path can render again after the increment (`0x55E271 -> 0x4F4480`), so a
 fixed one-frame picture lag is not established.
 
-LiveView uses a bounded presentation heuristic: a building last reported with health <= 0 and not selling keeps
+LiveView uses a bounded presentation heuristic: a drawable building not selling or explicitly hidden keeps
 its last visual only for the first missing snapshot's logic frame, provided that frame is no more than one tick
 after its last observation. It expires as soon as that missing frame advances; same-frame polls do not extend
 the lifetime, and larger frame gaps or a rollback do not resurrect it. Pointer/UID replacement cancels the old
-visual. The cached descriptor and body frame stay frozen; no freed native pointer is read. Healthy removals and sold buildings
-are removed normally. This one-tick cache has synthetic regression coverage, but exact last-picture parity is
+visual. The cached descriptor and body frame stay frozen; no freed native pointer is read. Positive last-sampled
+health is eligible because lethal damage and removal can both occur between polls, without publishing HP=0.
+Explicit selling/hidden states remove the cached visual immediately. This one-tick cache has synthetic regression
+coverage, including actual LiveView body/shadow queuing and disposal, but exact last-picture parity is
 `UNCERTAIN`, and live acceptance is `UNVERIFIED`. Exact parity would need coherent render descriptors tied to the
 native image's presentation boundary, not arbitrary post-logic polling or an invented multi-tick death timer.
 

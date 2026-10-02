@@ -5,6 +5,7 @@ import { SpritePool } from '../src/live/spritePool';
 import {
   INFANTRY_SHADOW_OPACITY,
   INFANTRY_SHADOW_RAMP,
+  GROUND_PULL,
   infantryShadowAlpha,
   SpriteLayer,
   type SpriteInstance,
@@ -12,6 +13,7 @@ import {
 import type { Ra2Cache } from '../src/ra2/cache';
 import type { DirtyAttribute } from '../src/dirtyAttribute';
 import { applyLookPreset, type HdSettings } from '../src/HdRenderer';
+import { CARD_CLEARANCE } from '../src/ra2/cardDepth';
 
 const body = {
   rect: [0, 0, 10, 20] as [number, number, number, number],
@@ -89,8 +91,7 @@ describe('live infantry footprint', () => {
     expect(settings.shadowFollow).toBeGreaterThan(0);
     expect(settings.shadowSoftness).toBeGreaterThan(0);
     expect(settings.shadowLength).toBeGreaterThan(1);
-    expect(INFANTRY_SHADOW_OPACITY).toBeGreaterThanOrEqual(0.9);
-    expect(INFANTRY_SHADOW_OPACITY).toBeLessThanOrEqual(0.98);
+    expect(INFANTRY_SHADOW_OPACITY).toBe(1);
     pool.begin();
     expect(pool.take(new Vector3(), shadow, 'library:unit', 0, true, true)).toBe(infantry);
     expect(infantry.infantryShadow).toBeUndefined();
@@ -118,5 +119,24 @@ describe('live infantry footprint', () => {
       expect(a).toBeGreaterThanOrEqual(previous - 1e-12);
       previous = a;
     }
+  });
+
+  it('leaves no bright ground in a covered palette-index-12 contact core', () => {
+    // Alpha is applied in linear light. Even 0.96 transmits bright pavement; the native indexed pixel is solid.
+    for (const ground of [0.05, 0.5, 1, 4]) {
+      for (const coverage of [INFANTRY_SHADOW_RAMP.to, 0.5, 1]) {
+        expect(ground * (1 - infantryShadowAlpha(coverage))).toBe(0);
+      }
+      expect(ground * (1 - infantryShadowAlpha(0))).toBe(ground);
+    }
+  });
+
+  it('places the solid core ahead of ordinary shadows but behind reflections and upright feet', () => {
+    // LessDepth must admit an infantry core after a fully covered building/vehicle SHP shadow on the same plane.
+    const range = 400;
+    const depth = (pull: number) => 0.5 - pull / range;
+    expect(depth(GROUND_PULL.infantryCore)).toBeLessThan(depth(GROUND_PULL.shadow[1]));
+    expect(depth(GROUND_PULL.infantryCore)).toBeGreaterThan(depth(GROUND_PULL.reflection));
+    expect(depth(GROUND_PULL.infantryCore)).toBeGreaterThan(depth(CARD_CLEARANCE));
   });
 });

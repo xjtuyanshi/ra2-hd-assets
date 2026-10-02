@@ -81,12 +81,12 @@ function deliveryView() {
     queue(batch: Map<number, SpriteInstance[]>, instance: SpriteInstance, indexed?: boolean): void;
   };
   const queued = vi.spyOn(view, 'queue');
-  const draw = () => {
+  const draw = (frame = 0) => {
     pool.begin();
     pool.painter = painter;
     queued.mockClear();
     const batch = new Map<number, SpriteInstance[]>();
-    view.libraryBuildingSprites(object, visual, batch, { frame: 0, houses: [], objects: [object] });
+    view.libraryBuildingSprites(object, visual, batch, { frame, houses: [], objects: [object] });
     return { batch, cards: queued.mock.calls.map((call) => call[1]) };
   };
   return { object, type, sprites, painter, state, view, draw, queued };
@@ -197,6 +197,34 @@ describe('live delivery building image', () => {
     expect(original).toContain(h.sprites.deploy!.frames[1]);
     delete h.object.unloading;
     expect(h.draw().cards.map((card) => card.frame)).toContain(h.sprites.body!.frames[1]);
+  });
+
+  it('follows repeated and changing native frames through a long hold and close without running a door clock', () => {
+    const h = deliveryView();
+    // Ordinary attached animations keep their own clocks; this fixture isolates the replacement body/door.
+    h.type.building!.layers = h.type.building!.layers.filter((layer) => layer.key !== 'ActiveAnim');
+    h.object.unloading = 'door';
+    h.object.contactUid = 99;
+    h.object.buildingFrame = 0;
+    const opening = h.draw(100).cards.map((card) => card.frame);
+    expect(opening).toContain(h.sprites.deploy!.frames[0]);
+    expect(h.draw(140).cards.map((card) => card.frame)).toEqual(opening);
+
+    h.object.buildingFrame = 1;
+    const held = h.draw(140).cards.map((card) => card.frame);
+    expect(held).toContain(h.sprites.deploy!.frames[1]);
+    expect(held).toContain(h.sprites.door!.frames[0]);
+    delete h.object.contactUid;
+    for (const frame of [141, 180, 1000]) expect(h.draw(frame).cards.map((card) => card.frame)).toEqual(held);
+
+    // Only the next native stage changes the body, even at the same published logic frame.
+    h.object.buildingFrame = 0;
+    expect(h.draw(1000).cards.map((card) => card.frame)).toEqual(opening);
+    delete h.object.unloading;
+    const closed = h.draw(1000).cards.map((card) => card.frame);
+    expect(closed).toContain(h.sprites.body!.frames[0]);
+    expect(closed).not.toContain(h.sprites.deploy!.frames[0]);
+    expect(closed).not.toContain(h.sprites.door!.frames[0]);
   });
 
   it('halves the complete source count when delivery art has no extracted shadow half', () => {

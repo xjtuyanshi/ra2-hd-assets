@@ -207,6 +207,9 @@ publishes 0.5 while either native chrono byte is nonzero, and SHP/voxel body par
 depth; shadows stay unchanged. Omitted fields retain normal rendering. These are independent predicates, and
 the chrono flags alone never hide the object. Selection brackets remain the game's native overlay; LiveView
 does not generate selection geometry. This does not establish a CMIN-specific invisibility window.
+CMIN's normal teleport path clears the WarpingOut byte and timer immediately for harvesters. A reported invisible
+arrival therefore requires a native render/present trace, including locomotor state; a matching logic-frame number
+alone cannot distinguish body suppression from a framebuffer that still shows the miner before relocation.
 Attached anims, particle systems and fire events follow the hidden owner's UID/pointer match, including same-frame
 hide/unhide; independent explosions and projectiles retain their native publication lifetime.
 
@@ -229,9 +232,10 @@ the interior card uses native gradient 0 with k=1. Opaque foreground posts keep 
 plane and posts can occlude the same unit differently. Missing/empty pairs retain the ordinary body. Queued Unload
 alone does not open the door unless CurrentMission is the -1 sentinel.
 
-A destroyed building last reported with health <= 0 can retain its frozen visual only for the first missing
+A vanished drawable building can retain its frozen visual only for the first missing
 snapshot's logic frame, provided the last observation is no more than one tick old. It expires as soon as that
-frame advances. Selling, pointer/UID replacement, larger frame gaps and rollback do not retain it; same-frame
+frame advances. The last published health need not be zero: a fatal hit and removal can occur between polls.
+Selling, native-hidden objects, pointer/UID replacement, larger frame gaps and rollback do not retain it; same-frame
 polls do not extend the lifetime. This is a bounded presentation heuristic, not established exact native frame
 parity: the normal prelogic render can leave old pixels, but native wait paths can render after the frame increment.
 Exact parity is `UNCERTAIN`; live original/HD acceptance is `UNVERIFIED`. See the
@@ -522,7 +526,7 @@ shadow stretch takes the original calculation, and other neutral gains multiply 
 | `aoPower` (neutral 1; cinematic 1.5)            | Raises baked sprite AO and voxel crease AO to this power, bypassing `pow` at 1. Includes VPL, PBR and the projected vehicle's mesh form AO; baked occlusion inside redraw textures cannot be separated.                                                                                                                                                                                                                                                 |
 | `contactShade` (neutral 1; cinematic 1.5)       | Multiplies foundation contact alpha (`0.42 * contactShade`, final alpha capped at 0.85) and the terrain's contact darkening only while the enhanced look is enabled (darkening cap 0.85). Faithful terrain keeps its original contact attribute.                                                                                                                                                                                                        |
 | `shadowLength` (neutral 1; cinematic 1.4)       | Multiplies the elevation-derived SHP/voxel stretch and its cap (`MAX_SHADOW_STRETCH * shadowLength`), only with `shadowFollow > 0`; partial follow still blends from the original transform.                                                                                                                                                                                                                                                            |
-| `shadowDarkness` (neutral 1; cinematic 1.15)    | Multiplies enhanced crisp/soft SHP and voxel shadow opacity (cap 0.9). Faithful keeps `ENGINE_SHADOW_OPACITY`; voxel shadow materials and their uniforms share one renderer context and its lifetime.                                                                                                                                                                                                                                                   |
+| `shadowDarkness` (neutral 1; cinematic 1.15)    | Multiplies enhanced building/vehicle SHP and voxel shadow opacity (cap 0.9). Their faithful path keeps `ENGINE_SHADOW_OPACITY`; infantry contact cores stay solid in all looks. Voxel shadow materials and uniforms share one renderer context and lifetime.                                                                                                                                                                                            |
 | `clarity` (neutral 0; cinematic 0.55)           | Mid-scale local contrast on the display image: the luminance band between Gaussian blurs of 1.25 and 5 CSS px is added back this many times (shaded side at half strength, mid-tones only). 0 leaves the pass out of the pipeline.                                                                                                                                                                                                                      |
 
 Building emitters are authored in `src/live/buildingLights.ts` (`BUILDING_LIGHTS`); foundation fractions and
@@ -707,8 +711,9 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   transparent texels HD atlas colours keep their hue but are never brighter than the original texel there (the
   upscaler's pale background fringe goes without a rim of raw palette colours). An HD page's optional
   `paintSaturation` (0..1, absent = 1) grades only the decoded house colour in linear light, preserving Rec.709
-  luminance before the coverage-mask mix. A value of 1 or absent adds no shader nodes. SHP shadows halve the displayed
-  colour, like the engine's. Live object occlusion combines native BUILDNGZ body samples, ground-like parts and
+  luminance before the coverage-mask mix. A value of 1 or absent adds no shader nodes. Building and vehicle SHP
+  shadows halve the displayed colour; infantry uses solid black palette-index-12 contact cores in all looks.
+  Live object occlusion combines native BUILDNGZ body samples, ground-like parts and
   gradient-2 ground-unit cards (`ra2/nativeDepth.ts`) with small scene-wide traversal/component biases
   (`ra2/painterOrder.ts`). Atlas pages share a depth template; a current-cell Harvester/Refinery predicate supplies
   the native 13-row bonus. No radio-contact dock pull or neighbor propagation remains. Libraries without a depth
@@ -895,14 +900,20 @@ retains the original material path and defaults. Build player-supplied assets us
 ## Infantry contact shadows
 
 Live infantry queues the shadow matching its selected body/sequence frame, including a dedicated library page.
-Only infantry shadows carry a contact marker (cleared whenever a sprite-pool record is reused). Their enhanced-look
-core opacity is **0.8** (`INFANTRY_SHADOW_OPACITY`), reached already at filtered coverage 0.35 (`INFANTRY_SHADOW_RAMP`,
-smoothstep 0.02-0.35): the upscaled mask is only about 0.5 at the original blob's edge, so a linear ramp left half of
-each blob lighter than the original's solid palette-index-12 shadow (V<40 pixels on the same frozen frames: Initiates
-0.51x -> 0.60x, Slaves 0.55x -> 0.61x, Conscripts 0.75-0.77x of the original; opacity alone saturated at 0.55x). Their
-original SHP offsets remain attached to the feet even in `cinematic`. Sun following,
+Only infantry shadows carry a contact marker (cleared whenever a sprite-pool record is reused). Their
+core opacity is **1** (`INFANTRY_SHADOW_OPACITY`) in both faithful and enhanced looks, matching solid
+palette-index-12 pixels instead of the half-colour shadow blitter. Full opacity is reached at filtered coverage
+0.22 (`INFANTRY_SHADOW_RAMP`, smoothstep 0.02-0.22), with an antialiased exterior. The upscaled mask is only
+about 0.5 at the original blob's edge, so a linear ramp would leave the edge transmitting bright ground.
+Their original SHP offsets remain attached to the feet even in `cinematic`. Sun following,
 shadow-length transforms and the distance-based blur are bypassed for infantry. The dedicated 2x black RGBA page
 supplies alpha coverage with a solid core and antialiased exterior; the indexed page is the loading fallback. Both
-colour and over-pass depth use that same coverage. The faithful path retains engine shadow opacity. Building and
+colour and over-pass depth use that same coverage. Look strength controls do not weaken the infantry core. Building and
 vehicle shadows retain their existing indexed coverage, transforms, opacity, softness and ground-depth ordering.
+In the enhanced ground pass, the infantry core has a 0.028 depth pull, ahead of ordinary shadow ranks (up to 0.027)
+but behind reflections and upright feet. Thus an earlier building shadow cannot reject its solid core in LessDepth.
 Build/repair the library with [the infantry shadow tool](../ra2-assets/README.md#infantry-shadow-repair-python--typescript).
+Fixture tests cover coverage, sprite-pool reuse, dedicated page routing and generated main/ground-pass shaders.
+Full alpha removes ground transmission before postprocessing; mist, bloom and night tone mapping can still affect
+displayed colour. The tests do not establish displayed-pixel strength: live GI, Initiate, Slave and Conscript
+comparisons remain `UNVERIFIED`.

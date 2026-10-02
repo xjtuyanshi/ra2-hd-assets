@@ -200,28 +200,31 @@ describe('LiveView physical occlusion scheduling', () => {
     expect(p.live.visuals.get(1)).toBe(p.visual);
   });
 
-  it('holds a destroyed building body and shadow for one missing logic frame, then removes its visual', () => {
-    const p = presentation();
-    const art = p.live.cache.manifest.sprites['building:TESTBUILD']!;
-    art.shadows = [...art.frames];
-    const dead = { ...object(512), id: 2, uid: 2, kind: 'building' as const, type: 'TESTBUILD', health: 0 };
-    p.view.push({ ...snapshot(10, 256), objects: [object(256), dead] }, 0);
-    p.view.render(0);
-    const visual = p.live.visuals.get(2);
-    const cards = p.live.sprites.getInstances().map((s) => ({ frame: s.frame, shadow: s.shadow }));
-    expect(cards).toHaveLength(2);
-    p.view.push(snapshot(11, 256), 100);
-    p.view.render(100);
-    expect(p.live.visuals.get(2)).toBe(visual);
-    expect(p.live.sprites.getInstances().map((s) => ({ frame: s.frame, shadow: s.shadow }))).toEqual(cards);
-    p.view.push(snapshot(11, 256), 120);
-    p.view.render(120);
-    expect(p.live.visuals.get(2)).toBe(visual);
-    p.view.push(snapshot(12, 256), 200);
-    p.view.render(200);
-    expect(p.live.visuals.has(2)).toBe(false);
-    expect(p.live.sprites.getInstances()).toHaveLength(0);
-  });
+  it.each([0, 0.5, 1])(
+    'holds a vanished building body and shadow for one missing logic frame at health %s',
+    (health) => {
+      const p = presentation();
+      const art = p.live.cache.manifest.sprites['building:TESTBUILD']!;
+      art.shadows = [...art.frames];
+      const building = { ...object(512), id: 2, uid: 2, kind: 'building' as const, type: 'TESTBUILD', health };
+      p.view.push({ ...snapshot(10, 256), objects: [object(256), building] }, 0);
+      p.view.render(0);
+      const visual = p.live.visuals.get(2);
+      const cards = p.live.sprites.getInstances().map((s) => ({ frame: s.frame, shadow: s.shadow }));
+      expect(cards).toHaveLength(2);
+      p.view.push(snapshot(11, 256), 100);
+      p.view.render(100);
+      expect(p.live.visuals.get(2)).toBe(visual);
+      expect(p.live.sprites.getInstances().map((s) => ({ frame: s.frame, shadow: s.shadow }))).toEqual(cards);
+      p.view.push(snapshot(11, 256), 120);
+      p.view.render(120);
+      expect(p.live.visuals.get(2)).toBe(visual);
+      p.view.push(snapshot(12, 256), 200);
+      p.view.render(200);
+      expect(p.live.visuals.has(2)).toBe(false);
+      expect(p.live.sprites.getInstances()).toHaveLength(0);
+    },
+  );
 
   it.each([
     ['inside', 'infantry', 0.5, 1.5, true, 2, 0, true],

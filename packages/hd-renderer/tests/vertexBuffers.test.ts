@@ -159,6 +159,34 @@ function dispose(mesh: Mesh): void {
 }
 
 describe('r186 vertex and uniform binding budget', () => {
+  it('builds solid infantry contact alpha in indexed and HD main/ground passes before enhanced look controls', () => {
+    const source = cache();
+    const look = spriteLookFor(source.nodes);
+    look.enabled.name = 'testEnhancedLook';
+    for (const hd of [null, { color: texture(), remap: texture() }]) {
+      const layer = new SpriteLayer(source, [], 1, undefined, hd);
+      try {
+        for (const mesh of [layer.mesh, ...layer.groundPasses]) {
+          const { fragmentShader } = assertLimits(mesh);
+          const alpha = fragmentShader.indexOf('spriteInfantryShadowAlpha =');
+          const enhanced = fragmentShader.indexOf('if ( ( object.testEnhancedLook > 0.5 ) )');
+          expect(alpha, mesh.name).toBeGreaterThan(-1);
+          expect(fragmentShader).toMatch(
+            /spriteInfantryShadowAlpha = \( smoothstep\( 0\.02, 0\.22, [^\n]+\) \* 1\.0 \)/,
+          );
+          expect(enhanced, mesh.name).toBeGreaterThan(alpha);
+          if (mesh === layer.groundPasses[1]) {
+            expect(fragmentShader).toMatch(/spriteInfantryShadowPull = mix\([^\n]+0\.028,[^\n]+step\( 0\.22,/);
+          }
+        }
+      } finally {
+        dispose(layer.mesh);
+        hd?.color.dispose();
+        hd?.remap.dispose();
+      }
+    }
+  });
+
   it('builds native signed integer template loads and a test-only door pass without adding vertex buffers', () => {
     const source = cache();
     source.depthTemplate = {

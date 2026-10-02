@@ -91,7 +91,7 @@ export interface SpriteInstance {
   shadow: boolean;
   /** Body-card alpha multiplier, default 1. Shadows and ground extras keep their own opacity. */
   opacity?: number;
-  /** Infantry's inline SHP footprint stays at the draw point; enhanced opacity is fixed at 0.78. */
+  /** Infantry's inline SHP footprint stays at the draw point with a solid contact core in every look. */
   infantryShadow?: boolean;
   /** Lay the art on the ground as a decal (ore, smudges, flat overlays) instead of a camera-facing card. */
   flat?: boolean;
@@ -154,24 +154,21 @@ type GroundPass = 'main' | 'under' | 'over' | 'readOnly' | 'unit' | 'translucent
  * ground 0.0153 nearer); zoomed further out, the nearest samples of a pixel can miss its shadow. Shadows step up with
  * their coverage (five levels): a later, denser shadow still darkens an earlier fringe.
  */
-export const GROUND_PULL = { shadow: [0.019, 0.027], reflection: 0.0285 } as const;
+export const GROUND_PULL = { shadow: [0.019, 0.027], infantryCore: 0.028, reflection: 0.0285 } as const;
 /**
- * The original infantry blob is palette index 12, i.e. black. 0.8 left a fifth of bright ground showing (V<40 px 0.42x
- * of the original for GIs on brick in a live S2 pair, 0.86x in its replay); 0.96 is near-black on any ground
- * (replay 1.01-1.21x of the original in the same boxes) while still not a hard cut-out.
+ * The original infantry blob is solid palette index 12 (black), not the half-colour shadow blitter used by
+ * buildings and voxels. Its covered core must not transmit the ground, in either faithful or enhanced looks.
  */
-export const INFANTRY_SHADOW_OPACITY = 0.96;
+export const INFANTRY_SHADOW_OPACITY = 1;
 /**
  * Coverage ramp of infantry contact shadows. The original draws them as solid palette-index-12 blobs inside the body
  * frames; the filtered/upscaled mask is only ~0.5 at the blob's own edge, so a linear ramp left half of every blob
- * lighter than the core (V<40 px 0.51x / 0.55x of the original for Initiates / Slaves on the same frozen frames; with
- * this ramp 0.60x / 0.61x, opacity alone saturated at 0.55x). Coverage >= `to` is the full core, the soft fringe
- * stays at the blob's edge (P-L5H-1). The rest of the gap is the HD bodies covering more of their own blob and the
- * original's near-black body pixels, not a missing shadow.
+ * lighter than the core. Coverage >= `to` is the full core, while the soft fringe stays at the blob's edge.
+ * This affects contact alpha only; the selected native frame and its footprint are unchanged.
  */
 export const INFANTRY_SHADOW_RAMP = { from: 0.02, to: 0.22 } as const;
 
-/** CPU twin of the enhanced infantry shadow alpha for a filtered mask coverage (0..1). */
+/** CPU twin of the infantry shadow alpha for a filtered mask coverage (0..1), shared by all looks. */
 export function infantryShadowAlpha(coverage: number): number {
   const t = Math.min(
     1,
@@ -229,7 +226,7 @@ export function groundPlaneDepth(camera: OrthographicCamera, width: number, heig
   return out.set(c0, depthAt(1, 0, 0) - c0, depthAt(0, 1, 0) - c0, depthAt(0, 0, 1) - c0);
 }
 
-/** Darkening of SHP shadows: the engine halves the displayed colour under them (see ENGINE_SHADOW_OPACITY). */
+/** Default SHP shadow blitter; infantry uses solid palette-index-12 contact pixels instead. */
 const SHADOW_OPACITY = ENGINE_SHADOW_OPACITY;
 
 /**
@@ -573,7 +570,15 @@ export class SpriteLayer {
         const shadowCoverage: ShaderNode = hd
           ? mix(clamp(coverage, 0, 1), max(clamp(coverage, 0, 1), texture(hd.color, atlasUv).a), isInfantryShadow)
           : clamp(coverage, 0, 1);
-        const shadow: ShaderNode = vec4(0, 0, 0, shadowCoverage.mul(SHADOW_OPACITY));
+        const infantryAlpha: ShaderNode = smoothstep(INFANTRY_SHADOW_RAMP.from, INFANTRY_SHADOW_RAMP.to, shadowCoverage)
+          .mul(INFANTRY_SHADOW_OPACITY)
+          .toVar('spriteInfantryShadowAlpha');
+        const shadow: ShaderNode = vec4(
+          0,
+          0,
+          0,
+          mix(shadowCoverage.mul(SHADOW_OPACITY), infantryAlpha, isInfantryShadow),
+        );
         const edge: ShaderNode = smoothstep(0.35, 0.65, coverage);
         // Local light at the ground point under this pixel (decals: the pixel itself; upright art: straight below it on
         // screen, down to the anchor's ground line), fading with the pixel's height above that ground.
@@ -716,24 +721,12 @@ export class SpriteLayer {
             );
             result.assign(select(crystal.greaterThan(0), vec4(crystalColour.add(litGlow), litAlpha), result));
           }
-          // Both crisp and softened shadows share the enhanced opacity; faithful keeps the engine's alpha above.
-          const shadowOpacity: ShaderNode = mix(
-            look.shadowDarkness.mul(SHADOW_OPACITY).min(0.9),
-            INFANTRY_SHADOW_OPACITY,
-            isInfantryShadow,
-          );
-          If(
-            isShadow.greaterThan(0.5).and(look.shadowDarkness.notEqual(1).or(isInfantryShadow.greaterThan(0.5))),
-            () => {
-              const ramped: ShaderNode = mix(
-                shadowCoverage,
-                smoothstep(INFANTRY_SHADOW_RAMP.from, INFANTRY_SHADOW_RAMP.to, shadowCoverage),
-                isInfantryShadow,
-              );
-              const alpha: ShaderNode = ramped.mul(shadowOpacity);
-              result.assign(vec4(0, 0, 0, alpha));
-            },
-          );
+          // Only half-colour shadows respond to look controls. Infantry keeps its solid native contact core.
+          const shadowOpacity: ShaderNode = look.shadowDarkness.mul(SHADOW_OPACITY).min(0.9);
+          If(isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(look.shadowDarkness.notEqual(1)), () => {
+            const alpha: ShaderNode = shadowCoverage.mul(shadowOpacity);
+            result.assign(vec4(0, 0, 0, alpha));
+          });
           // Shadows grow a penumbra with distance from their object's base (golden-hour softness).
           If(
             isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(look.shadowSoftness.greaterThan(1e-4)),
@@ -891,11 +884,14 @@ export class SpriteLayer {
         ? mix(indexedCoverage, max(indexedCoverage, texture(hd.color, texel.div(atlasSize)).a), isInfantryShadow)
         : indexedCoverage;
       const level5: ShaderNode = floor(clamp(coverage, 0, 1).mul(4).add(0.5));
-      const pull: ShaderNode = select(
-        isReflection.greaterThan(0.5),
-        float(GROUND_PULL.reflection),
+      // A solid infantry core must pass an earlier half-colour shadow, even when its filtered coverage is only .22.
+      // Keep this ahead of ordinary shadow coverage ranks and behind both wet reflections and upright card feet.
+      const shadowPull: ShaderNode = mix(
         float(GROUND_PULL.shadow[0]).add(level5.mul((GROUND_PULL.shadow[1] - GROUND_PULL.shadow[0]) / 4)),
-      );
+        GROUND_PULL.infantryCore,
+        isInfantryShadow.mul(step(INFANTRY_SHADOW_RAMP.to, coverage)),
+      ).toVar('spriteInfantryShadowPull');
+      const pull: ShaderNode = select(isReflection.greaterThan(0.5), float(GROUND_PULL.reflection), shadowPull);
       return ground.sub(pull.div(cameraFar.sub(cameraNear)));
     })();
     const passMaterial = (pass: GroundPass): MeshBasicNodeMaterial => {

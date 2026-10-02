@@ -239,6 +239,9 @@ export function readYrBuildingDockState(
     if (!pointerFits(memory, type, o.helipad + 1) || memory.u32(type) !== 0x7e4570) return result;
     // NAWEAP/Rhino live trace: CurrentMission=5, QueuedMission=16 keeps the door closed at spawn;
     // CurrentMission switches to 16 thirteen frames later and stays there through the drive-out.
+    // The supplied GAWEAP/NAWEAP/YAWEAP use replacement SHPs, not DoorAnim. DrawIt 0x43D692
+    // selects them for the entire effective Unload mission, including DoorClass closing/closed;
+    // their image frame comes from GetCurrentFrame, independently of the door transition timer.
     const current = memory.i32(pointer + o.currentMission);
     const queued = current === -1 ? memory.i32(pointer + o.queuedMission) : -1;
     if (
