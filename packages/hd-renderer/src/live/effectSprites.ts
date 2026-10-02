@@ -17,6 +17,7 @@ import {
   float,
   floor,
   instancedBufferAttribute,
+  length,
   max,
   min,
   mix,
@@ -42,13 +43,20 @@ import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import type { Ra2Cache } from '../ra2/cache';
 import { cardDepthNode, EFFECT_DECAL_LIFT } from '../ra2/cardDepth';
+import {
+  fireballDepthBiasNode,
+  fireballRadius,
+  packEffectDrawRadius,
+  unpackEffectDrawRadiusNode,
+} from '../ra2/fireballDepth';
 import { MAX_PAINTER_BIAS, spritePainterBias, type PainterObject } from '../ra2/painterOrder';
+import type { EffectCategory } from './effectTable';
 
 /** How an effect frame is drawn. */
 export type EffectDraw = 'card' | 'flat' | 'shadow';
 /**
  * Draw pass, following the engine's layers: Ground and Air both test object/terrain Z. Air composites later,
- * without writing depth, so its registration layer never bypasses a tree or building's occlusion. Top is untested.
+ * without writing depth. Explosions have a bounded spherical front; other art retains anchor depth. Top is untested.
  */
 export type EffectPass = 'ground' | 'air' | 'top';
 
@@ -68,6 +76,8 @@ export interface EffectInstance {
   depth: number;
   /** Fire-coloured pixels may glow slightly (anim palette art). */
   glow: boolean;
+  /** Tracked anim classification, independent of whether native or HD art supplies its frame. */
+  category?: EffectCategory;
   /**
    * Extra world units the card's depth comes towards the camera (a merged building-death fireball engulfs the building
    * it stands in, see FIREBALL_MERGE in effects.ts). Placement is unchanged.
@@ -146,6 +156,29 @@ const CAPACITY = 4096;
 const MARGIN = 1;
 const RENDER_ORDER: Record<EffectPass, number> = { ground: 6, air: 7, top: 8 };
 const DRAW_RANK: Record<EffectDraw, number> = { flat: 0, shadow: 1, card: 2 };
+
+/** Eligible Air explosion radius from the displayed frame union; different-page HD successors are held. */
+export function effectSphereRadius(instance: EffectInstance): number {
+  if (
+    instance.draw !== 'card' ||
+    instance.pass !== 'air' ||
+    (instance.category !== 'explosion' && instance.category !== 'collapse')
+  )
+    return 0;
+  const hd = instance.hd;
+  if (!hd)
+    return fireballRadius(instance.frame.rect[2] / PIXELS_PER_CELL_EDGE, instance.frame.rect[3] / PIXELS_PER_CELL_EDGE);
+  const frame = hd.frame;
+  const next = hd.next?.page === frame.page ? hd.next : frame;
+  const width =
+    Math.max(frame.offset[0] + frame.rect[2] / hd.scale, next.offset[0] + next.rect[2] / hd.scale) -
+    Math.min(frame.offset[0], next.offset[0]);
+  const height =
+    Math.max(frame.offset[1] + frame.rect[3] / hd.scale, next.offset[1] + next.rect[3] / hd.scale) -
+    Math.min(frame.offset[1], next.offset[1]);
+  const display = (hd.size ?? 1) / PIXELS_PER_CELL_EDGE;
+  return fireballRadius(width * display, height * display);
+}
 const cardPainterBias = (instance: EffectInstance): number => {
   if (instance.draw !== 'card' || instance.pass === 'top') return 0;
   // Air composites over coincident Ground/unit pixels, but never receives an unconditional foreground plane.
@@ -361,7 +394,7 @@ class PageMesh {
     this.rect = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
     // x, y = frame offset from the canvas centre (px); z = palette row; w = push.
     this.params = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
-    // x = opacity; y = card/decal/shadow; z = glow allowed; w = bounded traversal bias in world units.
+    // x = opacity; y = draw mode + sphere R/4 (see packEffectDrawRadius); z = glow; w = traversal + legacy bias.
     this.style = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
     this.opaqueMaterial = this.buildMaterial(false);
     this.mesh = new InstancedQuad(this.opaqueMaterial, CAPACITY);
@@ -382,6 +415,7 @@ class PageMesh {
     const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
     const aParams: ShaderNode = instancedBufferAttribute(this.params, 'vec4');
     const aStyle: ShaderNode = instancedBufferAttribute(this.style, 'vec4');
+    const { draw, radius } = unpackEffectDrawRadiusNode(aStyle.y);
     const atlasSize = vec2(atlas.width, atlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
     const ppu = float(PIXELS_PER_CELL_EDGE);
@@ -394,13 +428,20 @@ class PageMesh {
     material.blending = NormalBlending;
     const u: ShaderNode = uv().x;
     const v: ShaderNode = float(1).sub(uv().y);
+    const px = aParams.x.sub(margin).add(u.mul(aRect.z.add(margin.mul(2))));
+    const py = aParams.y.sub(margin).add(v.mul(aRect.w.add(margin.mul(2))));
+    const r = length(
+      vec2(px, py)
+        .sub(aParams.xy.add(aRect.zw.mul(0.5)))
+        .div(ppu),
+    );
     material.depthNode = cardDepthNode(
-      aParams.x.sub(margin).add(u.mul(aRect.z.add(margin.mul(2)))),
-      aParams.y.sub(margin).add(v.mul(aRect.w.add(margin.mul(2)))),
+      px,
+      py,
       vec4(0),
       aParams.w,
-      aStyle.w,
-      aStyle.y.greaterThan(0.5),
+      fireballDepthBiasNode(r, radius, aStyle.w, py),
+      draw.greaterThan(0.5),
     );
     const gu: ShaderNode = positionGeometry.x.add(0.5);
     const gv: ShaderNode = float(0.5).sub(positionGeometry.y);
@@ -413,7 +454,7 @@ class PageMesh {
         .add(layer.toCamera.mul(aParams.w));
       // Ground decal: invert the engine projection at the anchor's height (see ra2/sprites.ts).
       const decal = aAnchor.add(vec3(px.div(60).add(py.div(30)), EFFECT_DECAL_LIFT, py.div(30).sub(px.div(60))));
-      return aStyle.y.greaterThan(0.5).select(decal, card);
+      return draw.greaterThan(0.5).select(decal, card);
     })();
     material.colorNode = Fn(() => {
       // Continuous atlas texel coordinate of this fragment, then the four texel centres around it.
@@ -465,7 +506,7 @@ class PageMesh {
         .and(hi.sub(lo).greaterThan(hi.mul(0.2)));
       const fire: ShaderNode = warm.and(aStyle.z.greaterThan(0.5)).select(float(1), float(0));
       const lit: ShaderNode = art.mul(mix(layer.light, vec3(FX_GLOW), fire));
-      const isShadow = aStyle.y.greaterThan(1.5);
+      const isShadow = draw.greaterThan(1.5);
       const shadow = vec4(0, 0, 0, mask.mul(0.5).mul(aStyle.x));
       const a: ShaderNode = mask.mul(aStyle.x);
       if (!translucent) return isShadow.select(shadow, vec4(lit, a));
@@ -501,9 +542,9 @@ class PageMesh {
       this.style.setXYZW(
         i,
         s.alpha,
-        s.draw === 'shadow' ? 2 : s.draw === 'flat' ? 1 : 0,
+        packEffectDrawRadius(s.draw === 'shadow' ? 2 : s.draw === 'flat' ? 1 : 0, effectSphereRadius(s)),
         s.glow ? 1 : 0,
-        cardPainterBias(s),
+        cardPainterBias(s) + (s.depthBias ?? 0),
       );
       if (s.alpha < 1 && s.draw !== 'shadow') translucent = true;
     }
@@ -545,7 +586,7 @@ class HdPageMesh {
   private readonly nextRect = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
   /** Current and next frame offsets (native pixels). */
   private readonly offsets = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
-  /** x = card/decal; y = push; z = the same bounded painter bias as native cards; w = HD scale. */
+  /** x = draw mode + sphere R/4 (see packEffectDrawRadius); y = push; z = traversal + legacy bias; w = HD scale. */
   private readonly style = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
   /** x = blend at push; y = push time; z = seconds per engine stage; w = display size. */
   private readonly timing = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
@@ -557,6 +598,7 @@ class HdPageMesh {
     const aNextRect: ShaderNode = instancedBufferAttribute(this.nextRect, 'vec4');
     const aOffsets: ShaderNode = instancedBufferAttribute(this.offsets, 'vec4');
     const aStyle: ShaderNode = instancedBufferAttribute(this.style, 'vec4');
+    const { draw, radius } = unpackEffectDrawRadiusNode(aStyle.x);
     const aTiming: ShaderNode = instancedBufferAttribute(this.timing, 'vec4');
     const scale: ShaderNode = aStyle.w;
     // Union of the current and next frame rects in native pixels (top-left, size).
@@ -569,9 +611,9 @@ class HdPageMesh {
     const material = (this.material = new MeshBasicNodeMaterial());
     material.transparent = true;
     material.depthWrite = false;
-    // Like the native cards: ground and air cards are depth-tested against the card depth of their ground anchor
-    // (cardDepthNode), only the top layer draws unconditionally. Air was untested here, so an enlarged HD fireball
-    // covered units standing in front of its anchor (a terror drone 1.5 cells south of a blast lost its body at 0.7 s).
+    // Native Layer=air composites over the ground layer. Enlarged HD fireballs need a bounded volume instead:
+    // anchor-only Z exposed bushes inside their cores; untested Z swallowed a terror drone 1.5 cells south.
+    // The spherical front preserves that foreground unit with margin; only Top remains unconditional.
     material.depthTest = pass !== 'top';
     material.blending = CustomBlending;
     material.blendSrc = OneFactor;
@@ -585,14 +627,23 @@ class HdPageMesh {
     const py: ShaderNode = aBounds.y.sub(margin).add(gv.mul(aBounds.w.add(margin.mul(2))));
     const x = px.mul(aTiming.w);
     const y = py.mul(aTiming.w);
-    material.depthNode = cardDepthNode(x, y, vec4(0), aStyle.y, aStyle.z, aStyle.x.greaterThan(0.5));
+    const centre = aBounds.xy.add(aBounds.zw.mul(0.5)).mul(aTiming.w);
+    const r = length(vec2(x, y).sub(centre).div(ppu));
+    material.depthNode = cardDepthNode(
+      x,
+      y,
+      vec4(0),
+      aStyle.y,
+      fireballDepthBiasNode(r, radius, aStyle.z, y),
+      draw.greaterThan(0.5),
+    );
     material.positionNode = Fn(() => {
       const card = aAnchor.xyz
         .add(layer.cameraRight.mul(x.div(ppu)))
         .sub(layer.cameraUp.mul(y.div(ppu)))
         .add(layer.toCamera.mul(aStyle.y));
       const decal = aAnchor.xyz.add(vec3(x.div(60).add(y.div(30)), 0.025, y.div(30).sub(x.div(60))));
-      return aStyle.x.greaterThan(0.5).select(decal, card);
+      return draw.greaterThan(0.5).select(decal, card);
     })();
     material.colorNode = Fn(() => {
       const sample = (rect: ShaderNode, offset: ShaderNode): ShaderNode => {
@@ -680,7 +731,13 @@ class HdPageMesh {
       this.rect.setXYZW(i, ...frame.rect);
       this.nextRect.setXYZW(i, ...next.rect);
       this.offsets.setXYZW(i, ...frame.offset, ...next.offset);
-      this.style.setXYZW(i, s.draw === 'flat' ? 1 : 0, s.push, cardPainterBias(s) + (s.depthBias ?? 0), hd.scale);
+      this.style.setXYZW(
+        i,
+        packEffectDrawRadius(s.draw === 'flat' ? 1 : 0, effectSphereRadius(s)),
+        s.push,
+        cardPainterBias(s) + (s.depthBias ?? 0),
+        hd.scale,
+      );
       this.timing.setXYZW(i, hd.blend0, hd.t0, hd.stageSeconds, hd.size ?? 1);
     }
     this.anchor.flush();

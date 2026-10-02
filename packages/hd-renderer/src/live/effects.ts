@@ -648,6 +648,7 @@ export class LiveEffectsDriver {
             pass,
             depth,
             glow: false,
+            category: tracked.row.c,
             ...(lead?.depthBias ? { depthBias: lead.depthBias } : {}),
             hd: {
               frame: hdFrame,
@@ -691,6 +692,7 @@ export class LiveEffectsDriver {
         pass,
         depth,
         glow: cardGlows(a, index, alpha, resolved.remap),
+        category: tracked.row.c,
       });
       drawn++;
     }

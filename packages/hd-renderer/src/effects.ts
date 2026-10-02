@@ -63,6 +63,7 @@ import { DirtyAttribute } from './dirtyAttribute';
 import { waterTextures } from './proceduralTextures';
 import { isShadowPass } from './painterDepth';
 import { CARD_CLEARANCE } from './ra2/cardDepth';
+import { FIREBALL_VOLUME, fireballRadiusNode, sphereDepthBias, sphereDepthBiasNode } from './ra2/fireballDepth';
 import type { ShaderNode } from './tsl';
 
 const FIREBALLS = 96;
@@ -90,6 +91,8 @@ const SPARK_ELECTRIC = 3;
 /** Positive halo extras retain the original intensity; negative values select the enhanced colour treatments. */
 const HALO_HD = -1;
 const HALO_ELECTRIC = -2;
+/** Explosion-only halo mode; muzzle and electric halos retain their original anchor depth. */
+const HALO_EXPLOSION = -3;
 
 /**
  * Local light of each effect, drawn into the light field (irradiance; the exposure reference is noon flat ground, about
@@ -201,7 +204,7 @@ export class CharLedger {
 
 export const ENHANCED = {
   /** Extra ground-card clearance envelops the anchor's own unit without reaching the next foreground cell. */
-  anchorBias: 0.5,
+  anchorBias: FIREBALL_VOLUME.anchorBias,
   anchorEpsilon: 1e-6,
   /** HD display size by effect-table category; native art and all other categories retain their size. */
   hdSize: { explosion: 1.3, collapse: 1.3, debris: 1.3, impact: 1.15 },
@@ -503,9 +506,16 @@ export function emberRampRgb(t: number): [number, number, number] {
 /**
  * Camera-space push relative to the physical fragment. viewDir points away from the orthographic camera.
  * Intersect its ray with an upright card at the centre's ground point, switching to the ground below the card.
- * Billboard lift and growth must not advance this depth: otherwise smoke hides units in front of the blast.
+ * Smoke retains the anchor profile. Explosion fire may pass a bounded sphere radius; its front is measured from
+ * the upright plane and maxed with the ground intersection, never added to the already-nearer lower ground rim.
  */
-export function anchoredDepthShift(fragment: Vector3, centre: Vector3, ground: number, viewDir: Vector3): number {
+export function anchoredDepthShift(
+  fragment: Vector3,
+  centre: Vector3,
+  ground: number,
+  viewDir: Vector3,
+  radius = 0,
+): number {
   const direction = viewDir.clone().normalize();
   const horizontal = direction.x * direction.x + direction.z * direction.z;
   const vertical =
@@ -513,11 +523,18 @@ export function anchoredDepthShift(fragment: Vector3, centre: Vector3, ground: n
       ? ((centre.x - fragment.x) * direction.x + (centre.z - fragment.z) * direction.z) / horizontal
       : Infinity;
   const floor = Math.abs(direction.y) > ENHANCED.anchorEpsilon ? (ground - fragment.y) / direction.y : Infinity;
-  return CARD_CLEARANCE + ENHANCED.anchorBias - Math.min(vertical, floor);
+  const relative = fragment.clone().sub(centre);
+  const r = Math.sqrt(Math.max(0, relative.lengthSq() - relative.dot(direction) ** 2));
+  return CARD_CLEARANCE + ENHANCED.anchorBias - Math.min(vertical - sphereDepthBias(r, radius), floor);
 }
 
 /** Same ray intersection as anchoredDepthShift; orthographic depth is linear in camera-space world units. */
-function anchoredDepthNode(centre: ShaderNode, ground: ShaderNode, toCamera: ShaderNode): ShaderNode {
+function anchoredDepthNode(
+  centre: ShaderNode,
+  ground: ShaderNode,
+  toCamera: ShaderNode,
+  radius?: ShaderNode,
+): ShaderNode {
   return Fn(([], builder: NodeBuilder) => {
     // Shadow cameras have different rays: their pass must retain physical geometry depth.
     if (isShadowPass(builder)) return depth;
@@ -532,7 +549,17 @@ function anchoredDepthNode(centre: ShaderNode, ground: ShaderNode, toCamera: Sha
     // Parallel rays omit that plane, matching the CPU mirror without dividing by zero in either select branch.
     const both = abs(direction.y).greaterThan(ENHANCED.anchorEpsilon).select(min(vertical, floor), vertical);
     const intersection = horizontal.greaterThan(ENHANCED.anchorEpsilon).select(both, floor);
-    const push = float(CARD_CLEARANCE + ENHANCED.anchorBias).sub(intersection);
+    // Only incandescent explosion puffs pass a radius. Preserve the original smoke shader when none is supplied.
+    let engulfIntersection = intersection;
+    if (radius) {
+      const relative = positionWorld.sub(anchor);
+      const r = length(relative.sub(direction.mul(dot(relative, direction))));
+      const sphereIntersection = vertical.sub(sphereDepthBiasNode(r, varying(radius)));
+      engulfIntersection = horizontal
+        .greaterThan(ENHANCED.anchorEpsilon)
+        .select(min(intersection, sphereIntersection), intersection);
+    }
+    const push = float(CARD_CLEARANCE + ENHANCED.anchorBias).sub(engulfIntersection);
     return depth.sub(push.div(cameraFar.sub(cameraNear)));
   })();
 }
@@ -661,7 +688,8 @@ class ParticlePool {
     this.origin = new InterleavedBufferAttribute(placement, 3, 0);
     this.ground = new InterleavedBufferAttribute(placement, 1, 3);
     this.velocity = new InstancedBufferAttribute(new Float32Array(count * 3), 3);
-    // x = size, y = lifetime, z = seed, w = per-pool extra (smoke: soot; sparks: style; garnish fire: ground cover)
+    // x = size, y = lifetime, z = seed, w = per-pool extra (smoke: soot; sparks: style; garnish fire: ground cover).
+    // Garnish fire's negative w encodes explosion cover as -(1 + cover), preserving muzzle/spark depth and buffers.
     this.params = new InstancedBufferAttribute(new Float32Array(count * 4), 4);
     this.attributes = [this.start, placement, this.velocity, this.params];
     this.material = material;
@@ -1173,11 +1201,18 @@ export class EffectsLayer {
     // Live garnish flash: centred on the native card (no lift, pulled towards the camera so it sits in front of it),
     // hottest in the middle of a young flash, cooling through the original's oranges to lit soot at the rim.
     this.garnishFire = new ParticlePool(GARNISH_FLASHES, quad, premultiplied(), (pool) => {
-      const { age, life, size, seed, origin, ground, alive, extra: cover } = particleInputs(pool, this.now);
+      const { age, life, size, seed, origin, ground, alive, extra: mode } = particleInputs(pool, this.now);
+      const explosion = mode.lessThan(0);
+      const cover = explosion.select(mode.negate().sub(1), mode);
       const t = clamp(age.div(life), 0, 1);
       const grow = size.mul(float(0.35).add(smoothstep(0, 0.35, t).mul(0.9)));
       const centre = origin;
-      pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera);
+      pool.material.depthNode = anchoredDepthNode(
+        centre,
+        ground,
+        this.toCamera,
+        explosion.select(fireballRadiusNode(grow), float(0)),
+      );
       pool.material.positionNode = billboard(centre, grow.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
@@ -1218,7 +1253,13 @@ export class EffectsLayer {
       const t = clamp(age.div(life), 0, 1);
       const grow = size.mul(float(0.6).add(smoothstep(0, 0.3, t).mul(0.4)));
       const centre = origin;
-      pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera);
+      const explosion = mode.equal(HALO_HD).or(mode.equal(HALO_EXPLOSION));
+      pool.material.depthNode = anchoredDepthNode(
+        centre,
+        ground,
+        this.toCamera,
+        explosion.select(fireballRadiusNode(grow), float(0)),
+      );
       pool.material.positionNode = billboard(centre, grow.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const d = length(uv().sub(0.5).mul(2));
@@ -1226,7 +1267,8 @@ export class EffectsLayer {
         const falloff = exp(d.mul(d).mul(hd.select(float(-ENHANCED.halo.falloff), float(-5.5)))).mul(
           smoothstep(1.0, 0.8, d),
         );
-        const original = mix(vec3(1.0, 0.5, 0.16), vec3(1.0, 0.86, 0.55), exp(d.mul(d).mul(-18))).mul(mode);
+        const intensity = mode.equal(HALO_EXPLOSION).select(float(ENHANCED.halo.intensity), mode);
+        const original = mix(vec3(1.0, 0.5, 0.16), vec3(1.0, 0.86, 0.55), exp(d.mul(d).mul(-18))).mul(intensity);
         const temperature = mix(this.hdHaloCore, float(ENHANCED.halo.rim), clamp(d, 0, 1)).mul(
           float(1).sub(t.mul(ENHANCED.halo.cooling)),
         );
@@ -1508,7 +1550,7 @@ export class EffectsLayer {
       );
       const rise: ShaderNode = t.mul(size).mul(0.22);
       const centre = origin.add(vec3(0, rise, 0));
-      pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera);
+      pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera, fireballRadiusNode(grow));
       pool.material.positionNode = billboard(centre, grow.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
@@ -1767,7 +1809,7 @@ export class EffectsLayer {
     const width = Math.max(0.3, Math.min(options.maxSize ?? 1.2 * s, 4 * Math.max(0.3, s)));
     const e = ENHANCED;
     // Hot core inside the art, the detailed fireball over it for the art's own duration, then the halo around it.
-    this.garnishFire.spawn(now, at, this.zeroVelocity, (options.hdArt ? 0.35 : 0.7) * width, 0.14, 0.6);
+    this.garnishFire.spawn(now, at, this.zeroVelocity, (options.hdArt ? 0.35 : 0.7) * width, 0.14, -(1 + 0.6));
     const artLife = Math.max(0.35, Math.min(options.maxLife ?? 1.2, 3));
     if (!options.hdArt)
       this.blast.spawn(
@@ -1785,7 +1827,7 @@ export class EffectsLayer {
       this.zeroVelocity,
       (options.hdArt ? e.halo.hdWidth : e.halo.width) * width,
       e.halo.life,
-      options.hdArt ? HALO_HD : e.halo.intensity,
+      options.hdArt ? HALO_HD : HALO_EXPLOSION,
     );
     const light = e.light;
     const radius = light.radius + light.radiusPerScale * lightScale;

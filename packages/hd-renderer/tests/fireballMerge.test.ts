@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 import type { EffectHdAnim } from '../../ra2-assets/src/effects';
 import { ENHANCED, type EffectsLayer } from '../src/effects';
 import type { EffectArt, ResolvedAnim } from '../src/live/effectArt';
-import { engineAnchor, type EffectInstance } from '../src/live/effectSprites';
+import { effectSphereRadius, engineAnchor, type EffectInstance } from '../src/live/effectSprites';
 import { FIREBALL_MERGE, LiveEffectsDriver, type LiveAnim } from '../src/live/effects';
+import { fireballDepthBias } from '../src/ra2/fireballDepth';
+import { MAX_PAINTER_BIAS } from '../src/ra2/painterOrder';
 
 const HD_TYPES = new Set(['S_BANG48', 'S_TUMU60', 'TWLT070']);
 
@@ -96,6 +98,10 @@ describe('clustered explosions merge into one or two big fireballs (FIREBALL_MER
     expect(lead.hd!.size).toBeCloseTo(ENHANCED.hdSize.explosion * grown, 5);
     expect(lead.depthBias).toBeGreaterThan(FIREBALL_MERGE.engulf);
     expect(lead.depthBias).toBeLessThan(FIREBALL_MERGE.engulf + FIREBALL_MERGE.radius * 2);
+    const radius = effectSphereRadius(lead);
+    const legacy = MAX_PAINTER_BIAS + lead.depthBias!;
+    // This widely spread building-death lead retains its complete old engulf profile, even outside the sphere.
+    for (const r of [0, radius * 0.6, radius, radius * 2]) expect(fireballDepthBias(r, radius, legacy)).toBe(legacy);
     f.push(102, 10 + FIREBALL_MERGE.grow + 0.01);
     out = f.cards();
     expect(out).toHaveLength(1);

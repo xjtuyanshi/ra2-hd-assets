@@ -273,7 +273,13 @@ describe('r186 vertex and uniform binding budget', () => {
     'bounds opaque/translucent %s animation, projectile and particle cards',
     (pass) => {
       const source = cache();
-      const layer = new EffectSpriteLayer(source, () => ({ texture: texture(), width: 256, height: 4 }));
+      const atlas = { texture: texture(), width: 256, height: 4 };
+      const layer = new EffectSpriteLayer(
+        source,
+        () => atlas,
+        undefined,
+        () => atlas,
+      );
       const card: EffectInstance = {
         anchor: new Vector3(),
         frame: { rect: [0, 0, 8, 8], offset: [-4, -4], page: 0 },
@@ -284,6 +290,7 @@ describe('r186 vertex and uniform binding budget', () => {
         pass,
         depth: 0,
         glow: true,
+        category: 'explosion',
       };
       for (const alpha of [1, 0.5]) {
         layer.setInstances([{ ...card, alpha }], 0);
@@ -292,7 +299,36 @@ describe('r186 vertex and uniform binding budget', () => {
         expect('instanceMatrix' in mesh).toBe(false);
         expect((mesh as { capacity?: number }).capacity).toBe(4096);
       }
+      layer.setInstances(
+        [
+          {
+            ...card,
+            hd: {
+              frame: { page: 0, rect: [0, 0, 128, 128], offset: [-32, -48] },
+              next: null,
+              scale: 2,
+              size: 1.3,
+              blend0: 0,
+              t0: 0,
+              stageSeconds: 0.1,
+            },
+          },
+        ],
+        0,
+      );
+      const hd = meshes(layer.root).find((mesh) => mesh.name.startsWith('live-effects-hd-'))!;
+      const result = assertLimits(hd);
+      // Six vec4 instance fields, one position buffer and one fallback matrix buffer: no seventh field.
+      expect(result.buffers.length).toBe(8);
+      if (pass === 'top') {
+        // Top never tests/writes fragment depth; only draw mode is needed for its vertex placement.
+        expect(result.fragmentShader).not.toContain('sqrt(');
+      } else {
+        expect(result.fragmentShader).toContain('sqrt(');
+        expect(result.fragmentShader).toContain('fract(');
+      }
       layer.setInstances([], MESH_IDLE_SECONDS + 1);
+      atlas.texture.dispose();
       source.nodes!.dispose();
     },
   );

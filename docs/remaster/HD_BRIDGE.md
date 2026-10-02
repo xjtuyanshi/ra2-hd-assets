@@ -88,6 +88,15 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    smoke lit by the sun and the fire below, heat shimmer, a dust ring and, for anims that leave a crater, the crater
    glowing hot for about two seconds. The native frames, their timing and size, and the persistent crater (the engine's
    own smudge) stay as they are.
+   Upright Air anims classified as explosion/collapse use bounded sphere depth in both native and HD cards:
+   `sqrt(max(0, R^2-r^2))`, with `R = min(1.16, displayed max dimension/2)` in world units (factor 1, native-pixel
+   dimensions times current HD size divided by `60/sqrt(2)`). This restores native Air's engulfing of overlapping
+   ground-layer bushes while keeping enlarged fireballs behind units 1.5 horizontal cells ahead. Existing 0.5
+   incandescent anchor support plus the 0.04 Air tie break leaves 0.03205 world units of same-ray margin at that
+   distance. The sphere's upright front is maxed with the lower ground rim and merged-building engulf, never added
+   to them. Explosion fire puffs/halos share the clamp; smoke, muzzle/debris, ground/flat/shadow and Top stay unchanged.
+   Radius reuses the draw mode's fractional part (`mode + R/4`); HD retains six vec4 instance fields/eight vertex
+   buffers. See [Painter-order evidence](research/painter-order.md) and `packages/hd-renderer/tests/fireballEngulf.test.ts`.
    Smoke particle systems (damaged and burning units and buildings, refinery chimneys) are drawn with their
    ParticleType's original SHP frames: the view runs the system's particles itself from its rules (spawn rate, cap,
    radius, velocity, deceleration, life; `SMOKE_SYSTEMS` in the table) with rise and drift measured on the engine's own

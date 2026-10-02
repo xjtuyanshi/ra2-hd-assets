@@ -478,7 +478,9 @@ describe('enhanced particle routing and lights', () => {
     const enhanced = makeLayer();
     enhanced.explode(1, new Vector3(), 1, new Vector3(), { enhanced: true, maxSize: 2 });
     expect(pool(enhanced, 'halo').params.getX(0)).toBeCloseTo(3.2);
-    expect(pool(enhanced, 'halo').params.getW(0)).toBeCloseTo(1.8);
+    // The explosion mode keeps this intensity in the shader and adds volume depth; it shares no muzzle flag.
+    expect(pool(enhanced, 'halo').params.getW(0)).toBe(-3);
+    expect(ENHANCED.halo.intensity).toBe(1.8);
     expect(pool(enhanced, 'blast').until).toBeGreaterThan(1);
   });
 

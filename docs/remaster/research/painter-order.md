@@ -166,8 +166,22 @@ ground-following wall pixels to fail against their own or neighboring shadows, l
 Frame selection, wall connection data, placement and shadow opacity are unchanged.
 
 Ground and Air effect cards both test this reconstructed depth and do not write depth. Air still
-composites after Ground and uses a bounded traversal bias over coincident unit pixels; it cannot
-bypass a tree or building facade. Animation, SHP projectile and particle producers share this material
+composites after Ground and uses a bounded traversal bias over coincident unit pixels. Native `Layer=air`
+explosions (EXPLOLRG/MED/SML, TWLT070/100, S_BANG48 and the effect table's other explosion ids) draw after
+the ground layer, so overlapping bushes do not pierce their cores. HD display enlargement needs a bounded volume
+approximation: unconditional Air covers units 1.5 horizontal cells ahead, while anchor-only Z exposes those bushes.
+`ra2/fireballDepth.ts` gives upright Air explosion/collapse cards a spherical front with
+`bias(r) = sqrt(max(0, R^2 - r^2))` and `R = min(1.16, max(displayed width, displayed height)/2)` (factor 1).
+Displayed dimensions and union-centre distances are native pixels times current HD display size divided by
+`60/sqrt(2)`; native SHP cards use size 1. The sphere uses the existing incandescent-garnish support of 0.5 world
+units plus Air's 0.04 tie break. The same-ray unit separation is `1.5/cos(30) = 1.73205`; the maximum advance
+1.70 retains 0.03205 margin (the largest two-decimal cap reserving 0.03 is 1.16). The front at `r <= 0.6R` is at
+least `0.8R` nearer, engulfing tree cards 0.5-1.0 horizontal cells ahead in the tested peak-stage crops.
+Take the maximum of the upright sphere, ground-following rim and legacy merged-building engulf; summing them
+would double-count ground/merge reach. Explosion fire puffs/halos use their current diameter and the same cap;
+smoke, muzzle/spark/debris art, flat/shadow/Ground and Top cards retain their policies. Radius is packed into the
+draw mode's fractional part (`mode + R/4`), preserving six native/eight HD vertex buffers. Farther foreground
+facades still occlude the bounded sphere. Animation, SHP projectile and particle producers share this material
 policy, including the translucent variant. Top remains the explicit untested pass. This preserves
 physical occlusion rather than reconstructing every native read-only unit/translucency interaction.
 

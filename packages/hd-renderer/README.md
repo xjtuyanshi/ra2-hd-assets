@@ -283,7 +283,10 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   Billows, column puffs, halos, garnish flashes and procedural blast cards take depth from a vertical card through
   their centre's ground point, switching to the ground plane below its base. This depth uses the shared card clearance
   plus `anchorBias` (0.5 world units), so lift and growth do not pull smoke over foreground units; shadow passes keep
-  physical depth. Ground heights are interleaved with particle origins to stay within the WebGPU vertex-buffer budget.
+  physical depth. Explosion fire puffs and explosion halos add the bounded sphere profile described below; smoke,
+  muzzle and electric garnish keep the original anchor profile. Ground heights are interleaved with particle origins
+  to stay within the WebGPU vertex-buffer budget. A negative garnish-fire cover encodes an explosion as `-(1 + cover)`;
+  halo modes `-1` (HD explosion) and `-3` (native-art explosion) select volume depth without changing colour/intensity.
   Optional HD flipbooks enlarge explosions, collapses and debris by 1.3 and impacts by 1.15 around the native draw
   point, with matching garnish footprints; other categories and native cards keep their size. Enhanced debris throws
   6 + 12 chunks per scale, slightly larger than L5's (`ENHANCED.debris.size` 1.35) and dark faceted rubble colours that
@@ -312,15 +315,36 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   (L5: a red-heavy ramp with gamma 2.3 turned the mid-life fireball red-orange around a dark core). Low-coverage
   pixels count as added light only when they are coloured (fire glow, arcs); neutral low-coverage smoke rims are
   scene-lit, which removed a white outline around redrawn smoke. HD cards of the ground and air layers are
-  depth-tested against their anchor's card depth like the native cards (only the top layer draws unconditionally),
-  so an enlarged fireball no longer covers a unit standing in front of its anchor.
+  depth-tested like the native cards (only the top layer draws unconditionally). Native `Layer=air` explosions draw
+  after the whole ground layer, covering overlapping trees and bushes; HD enlargement makes an unconditional Air
+  pass swallow a terror drone 1.5 cells in front, while anchor-only depth exposes bushes inside the fireball.
+  Non-flat Air cards classified as `explosion` or `collapse` therefore have a spherical front in both native SHP
+  and HD paths (`src/ra2/fireballDepth.ts`). At screen-plane distance `r` from the displayed current/next union's
+  centre, its nearness is `sqrt(max(0, R*R - r*r))`. `R = min(1.16, 0.5 * max(displayed width, displayed height))`,
+  with radius factor 1; dimensions are native pixels times display size, divided by `PIXELS_PER_CELL_EDGE`
+  (`60/sqrt(2)`). Native frames use size 1. The 0.5 world-unit anchor support is shared with incandescent garnish;
+  ordinary cards also retain Air's 0.04 traversal bias. At `r <= 0.6R`, the sphere contributes at least `0.8R`,
+  enough with that support to engulf nearby tree cards without increasing the radius into the next foreground unit.
+  The foreground unit's same-ray depth advantage is `1.5/cos(30) = 1.73205`: the maximum card advance is
+  `0.04 + 0.5 + 1.16 = 1.70`, leaving 0.03205 world units. Reserving 0.03 permits at most 1.16205, rounded down
+  to 1.16. The sphere is measured from the upright anchor plane and maxed with the existing ground-following lower
+  rim, so ground nearness is not counted twice. Smoke, muzzle flashes, sparks, debris, Ground/flat/shadow cards and
+  Top retain their original policies. Procedural explosion fire uses its currently growing diameter and the same cap;
+  the optional raymarched blast material is unchanged.
+  Radius occupies the fractional part of the existing draw-mode scalar (`mode + R/4`, decoded by `floor`/`fract`),
+  in native `style.y` and HD `style.x`. No instance buffer is added: native cards still use six total buffers and HD
+  cards eight (six vec4 fields, position and matrix fallback). Pure TypeScript and fragment-stage TSL twins share
+  the radius, sphere, combination and packing policy; `fireballEngulf.test.ts` samples same-ray overlapping pixels
+  and `vertexBuffers.test.ts` builds the actual WGSL layouts without claiming GPU-rendered acceptance.
   Clustered explosions merge (`FIREBALL_MERGE` in `src/live/effects.ts`, enhanced style with HD flipbooks): the
   blasts one snapshot spawns within 2.5 cells of each other (a building's Explosion= list) form a group whose most
   fiery blast is drawn at the group's centroid, enlarged by 0.15 per member up to 1.7, with one garnish for the
   whole group; the others draw nothing. Later blasts within 1.6 cells of a member join for 0.5 s (the lead grows
   smoothly), after which a later group starts a second lead (at most two per 2.5 s). A merged lead's depth comes
   forward by its members' spread plus 0.5 world units (`EffectInstance.depthBias`), so it engulfs the dying
-  building without covering units beyond it. A lone blast is unchanged.
+  building without covering units beyond its legacy footprint. The effective front is the **maximum** of that legacy
+  profile and the sphere, not their sum: overlapping engulf profiles must not extend the lead's reach twice.
+  A lone blast has only the bounded sphere profile and keeps its original merge size.
 - Post (`src/HdRenderer.ts`, `src/post.ts`): per-channel exposure, mist and shroud visibility, bloom of the scene
   `output` only, the display transform and cinematic grade, then the unbloomed emissive overlay in display-linear
   colour **before** `renderOutput` encodes sRGB. The same composite applies at night and with neutral grading;

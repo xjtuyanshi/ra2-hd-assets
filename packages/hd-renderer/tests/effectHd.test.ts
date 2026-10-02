@@ -313,7 +313,8 @@ describe('live HD flipbook selection', () => {
     expect(pools.airborneEmbers!.spawn).toHaveBeenCalled();
     const core = pools.garnishFire!.spawn.mock.calls[0]!;
     const halo = pools.halo!.spawn.mock.calls[0]!;
-    expect(halo.slice(3)).toEqual([width * ENHANCED.halo.width, ENHANCED.halo.life, ENHANCED.halo.intensity]);
+    // -3 retains native-halo intensity while selecting the explosion's spherical front (muzzle halos stay positive).
+    expect(halo.slice(3)).toEqual([width * ENHANCED.halo.width, ENHANCED.halo.life, -3]);
     const unchanged = names.filter((name) => !['garnishFire', 'blast', 'halo'].includes(name));
     const garnish = unchanged.map((name) => pools[name]!.spawn.mock.calls.slice());
     for (const pool of Object.values(pools)) pool.spawn.mockClear();
