@@ -208,6 +208,13 @@ describe('guest memory accessors', () => {
 });
 
 describe('YR 1.001 state reader', () => {
+  const continuousReader = (m: ReturnType<typeof syntheticMemory>) => {
+    for (const vtable of Object.values(V)) m.u32(vtable, 0x6d_0000);
+    const read = createYrStateReader(() => createByteViewAccessor(m.bytes), YR_STARTUP_PAGE_HASH);
+    expect(read).not.toBeNull();
+    return read!;
+  };
+
   const radio = (m: ReturnType<typeof syntheticMemory>, object: number, contact: number, capacity = 1) => {
     const items = m.alloc(64 * 4);
     m.u32(items, contact);
@@ -247,20 +254,72 @@ describe('YR 1.001 state reader', () => {
     expect(read()).not.toHaveProperty('unloading');
   });
 
-  it('keeps the delivery image through link release until the effective mission returns to Guard', () => {
+  it.each(['door', 'roof'] as const)('keeps %s delivery through link release until effective Guard', (unloading) => {
     const { m, tank, yard } = battlefield();
+    const type = m.view.getUint32(tank + O.unitType, true);
+    m.ascii(type + O.typeId, unloading === 'roof' ? 'SHAD' : 'HTNK');
+    m.u8(type + O.typeJumpJet, unloading === 'roof' ? 1 : 0);
     const items = radio(m, yard, tank);
     m.i32(yard + B.currentMission, 5);
     m.i32(yard + B.queuedMission, 16);
-    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects.find((o) => o.id === yard);
+    const reader = continuousReader(m);
+    const read = () => reader()!.objects.find((o) => o.id === yard);
     expect(read()).not.toHaveProperty('unloading');
     m.i32(yard + B.currentMission, 16);
-    expect(read()).toHaveProperty('unloading', 'door');
+    expect(read()).toHaveProperty('unloading', unloading);
     m.u32(items, 0);
     expect(read()).not.toHaveProperty('contactUid');
-    expect(read()).toHaveProperty('unloading', 'door');
+    expect(read()).toHaveProperty('unloading', unloading);
+    m.i32(yard + B.currentMission, -1);
+    expect(read()).toHaveProperty('unloading', unloading); // Queued Unload is still the same effective mission.
     m.i32(yard + B.currentMission, 5);
     expect(read()).not.toHaveProperty('unloading');
+    m.i32(yard + B.currentMission, 16);
+    expect(read()).toHaveProperty('unloading', 'door'); // A new Unload cannot inherit the previous roof.
+  });
+
+  it.each(['missing', 'type', 'uid', 'invalid mission'] as const)('resets the roof latch on %s', (change) => {
+    const { m, tank, yard } = battlefield();
+    m.u8(m.view.getUint32(tank + O.unitType, true) + O.typeJumpJet, 1);
+    const items = radio(m, yard, tank);
+    m.i32(yard + B.currentMission, 16);
+    const reader = continuousReader(m);
+    const read = () => reader()!.objects.find((o) => o.id === yard);
+    expect(read()).toHaveProperty('unloading', 'roof');
+    m.u32(items, 0);
+    if (change === 'missing') {
+      m.vector(G.buildings, []);
+      expect(read()).toBeUndefined();
+      m.vector(G.buildings, [yard]);
+    } else if (change === 'type') {
+      m.u32(yard + O.buildingType, m.type(V.buildingType, 'GAWEAP', 1000));
+    } else if (change === 'uid') {
+      m.u32(yard + O.uniqueId, 99);
+    } else {
+      m.i32(yard + B.currentMission, 32);
+      expect(read()).not.toHaveProperty('unloading');
+      m.i32(yard + B.currentMission, 16);
+    }
+    expect(read()).toHaveProperty('unloading', 'door');
+  });
+
+  it('omits unreadable roof state without substituting a latched roof or sharing history between readers', () => {
+    const { m, tank, yard } = battlefield();
+    const type = m.view.getUint32(tank + O.unitType, true);
+    m.u8(type + O.typeBalloonHover, 1);
+    const items = radio(m, yard, tank);
+    m.i32(yard + B.currentMission, 16);
+    const reader = continuousReader(m);
+    const read = () => reader()!.objects.find((o) => o.id === yard);
+    expect(read()).toHaveProperty('unloading', 'roof');
+    m.u8(type + O.typeBalloonHover, 2);
+    expect(read()).not.toHaveProperty('unloading');
+    m.i32(yard + O.radioCapacity, -1);
+    expect(read()).not.toHaveProperty('unloading');
+    m.i32(yard + O.radioCapacity, 1);
+    m.u32(items, 0);
+    expect(read()).toHaveProperty('unloading', 'roof');
+    expect(continuousReader(m)()!.objects.find((o) => o.id === yard)).toHaveProperty('unloading', 'door');
   });
 
   it.each([-1, 0, 65, 0x7fffffff])('omits contacts with invalid/empty capacity %s', (capacity) => {

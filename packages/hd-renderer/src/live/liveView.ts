@@ -64,6 +64,13 @@ export type { LiveSmudgeCells } from './smudges';
 export const DOOR_RECESS = 2.75;
 
 /**
+ * Roof openings reveal the floor deeper inside than a facade door, in x+z cell units.
+ * A centre at local (2.5,1.5), sum 4, lies in front of the native interior plane 7.5-4=3.5;
+ * outside units behind the 5x3 centre columns' back surface (sum <=3) remain hidden.
+ */
+export const ROOF_RECESS = 4;
+
+/**
  * Live view: draws a running original match (read from game memory by the host page) with the HD renderer, framed
  * exactly like the game's own tactical view. The host polls snapshots and pushes them here; this module never talks to
  * the game. Static map content (terrain, trees) comes from the local HD cache; ore, walls and smudges start from the
@@ -1527,7 +1534,7 @@ export class LiveView {
           push,
           false,
         );
-        interior.foundationRecess = DOOR_RECESS;
+        interior.foundationRecess = object.unloading === 'roof' ? ROOF_RECESS : DOOR_RECESS;
         this.queue(batch, interior, !door!.remap);
       }
     }

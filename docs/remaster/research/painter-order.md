@@ -216,10 +216,30 @@ YR 1.001 policy stays in `src/games/yr`:
   GAWEAP/NAWEAP/YAWEAP have radio links to newly produced units but must keep them behind the factory facade.
   Repair shipyards also have WeaponsFactory, so their delivery phase independently disables pull.
 - Mission getter `0x5B3040` reads CurrentMission `+0xAC`, using QueuedMission `+0xB4` only when CurrentMission is `-1`.
-  DrawIt `0x43D33A..0x43D381` selects delivery only at effective mission `16`; roof delivery additionally requires
-  link 0's type to have JumpJet `+0xD94` (store `0x715200`) or BalloonHover `+0xD6A` (`0x714DA9`). The reader validates
+  DrawIt `0x43D33A..0x43D381` reads link 0's type flags JumpJet `+0xD94` (store `0x715200`) or BalloonHover `+0xD6A`
+  (`0x714DA9`) to select the roof; `0x43D692..` uses that decision only at effective mission `16`. The reader validates
   each object's class vtable and existing class-specific type offset before reading these flags, instead of calling
   GetTechnoType (virtual `+0x84`). Art availability does not determine the published delivery state.
+
+`createYrStateReader` retains a roof decision only after publishing `unloading='roof'` in the current continuous
+effective Unload. When link 0 becomes NULL it continues publishing roof until the effective mission leaves `16`.
+Unreadable roof state still omits `unloading`; it does not substitute the latch. History belongs to each reader,
+checks the building pointer, UID and type pointer, and retains only validated buildings seen in the latest read
+and still in Unload. Disappearance, type/UID reuse and invalid mission reads reset it. `readYrState` remains a
+stateless single-snapshot helper.
+
+Supplied frozen native GAWEAP `5x3`, northwest `(58,98)`, Night Hawk SHAD roof-delivery evidence:
+
+| Frame | Current / queued mission | Link 0 | SHAD Z (leptons) | Original drawing |
+| --- | --- | --- | --- | --- |
+| 9171 | 5 / 16 | SHAD | 208 | Closed roof. |
+| 9184 / 9208 | 16 | SHAD | 208 | RoofDeployingAnim; heli parts visible inside the opening. |
+| 9235 | 16 | NULL | 368 | Roof still open; heli rising out. The previous HD reader selected door and hid it under a closed roof. |
+| 9278 | 5 | NULL | 798 | Roof still open for an unexplained reason; intentionally outside this Unload latch. |
+| 9342 | — | — | — | Closed in original and HD. |
+
+These are supplied native observations, not new HD rendered-pixel acceptance. The mission-5 discrepancy at 9278
+remains `UNVERIFIED`; the latch deliberately ends there.
 
 After direct dock pulls are computed, a different ground vehicle/infantry U within three cells (Chebyshev distance)
 of docked unit D's exact anchor inherits pull only if it follows D in painter order:
@@ -242,7 +262,8 @@ UnderRoofDoorAnim `+0x1504` at `0x45F78B`. DrawIt `0x43D692..0x43D6D3` / `0x43D7
 `LiveView.libraryBuildingSprites` uses these library key pairs while a completed building reports `unloading`.
 It clamps the replacement body frame to `frames.length - 1`, substitutes its shadow, and queues the under-door
 frame immediately after the body with the same anchor, placement push and foundation dimensions/offsets. Each
-sprite retains the existing palette/remap handling. The under-door card alone has `SpriteInstance.foundationRecess = 2`;
+sprite retains the existing palette/remap handling. The under-door card alone has `SpriteInstance.foundationRecess`
+set to `DOOR_RECESS = 2.75` for a door or `ROOF_RECESS = 4` for a roof;
 the deploying body retains the front facade. There is no factory-exit dock pull. Missing/empty pairs retain the
 normal body. Bibs, active layers, construction
 and selling frames, and voxel turrets are unchanged.
@@ -263,6 +284,14 @@ waiting tank at `(2.5,1.5)` (voxel front end about `3.0` behind) stays hidden. `
 that hidden case. The rectangular profile gives front sums `7.0` and `6.93` at the two centre columns above; it
 does not reconstruct the native first column's `7.5`. With the recess these become `4.25` and `4.18`, keeping the
 first centre (`4.0`) behind and the second (`5.19`) in front. A back-surface profile would expose the early tank and is therefore unsuitable.
+
+Roof delivery instead looks down to a deeper interior floor: `ROOF_RECESS = 4`, exported beside `DOOR_RECESS`,
+applies only to the UnderRoofDoorAnim card. In the supplied native roof frames the heli at local `(2.5,1.5)`,
+sum `4.0`, must appear in front of the interior plane `7.5 - 4 = 3.5`. The rectangular approximation's facade sum
+at this column is `7`, so its recessed sum is `3`. Both a unit on the floor and one raised `1.5` levels remain in
+front of that card; the deploying body's opaque roof edges still occlude them. Outside units behind the building
+on the same column stay hidden: their sums are below the back surface (at most `3` on the `5x3` centre columns).
+Door delivery retains the shallower measured recess and all of its previous depth relationships.
 
 The optional generic `SpriteInstance.foundationRecess` defaults to zero. Instance encoding changes only the
 existing sum-offset component, foundation flags component 7: `ds = -dx - dz - foundationRecess`. Both

@@ -196,12 +196,16 @@ falls back to `type`.
 
 Live technos may report `contactUid`, the validated radio contact's stable ID in the same snapshot. Buildings also
 report `dock` (refinery, repair or helipad policy) and `unloading: 'door' | 'roof'` while their effective mission is
-Unload. A completed delivering building with both matching library layers replaces its body/shadow with
+Unload. The YR reader instance latches a previously published roof during that continuous Unload when link 0
+is released. It resets on another effective mission, missing buildings or changed pointer identity (UID/type),
+prunes entries not seen in the latest read, and still omits unreadable roof state. The renderer consumes this
+policy without reading missions or links. A completed delivering building with both matching library layers replaces its body/shadow with
 `DeployingAnim` and queues `UnderDoorAnim` immediately after it; roof delivery uses `RoofDeployingAnim` and
 `UnderRoofDoorAnim`. The body frame is clamped to the replacement art; the door uses healthy/damaged frame 0/1.
 Both cards retain the same anchor, palette/remap routing, placement push and foundation dimensions/difference offset.
-The under-door card alone receives `SpriteInstance.foundationRecess = DOOR_RECESS`, with exported
-`DOOR_RECESS = 2.75` in `src/live/liveView.ts`; the deploying body and all other layers keep zero. This measured
+The under-door card alone receives `SpriteInstance.foundationRecess = DOOR_RECESS` for UnderDoorAnim or
+`ROOF_RECESS` for UnderRoofDoorAnim, with exported `DOOR_RECESS = 2.75` and `ROOF_RECESS = 4` in
+`src/live/liveView.ts`; the deploying body and all other layers keep zero. The door's measured
 approximation of the engine's door-interior Z-shape/ZAdjust shifts the facade inward by `2.75` x+z units
 (`2.75 * sqrt(3/8) ≈ 1.684` world units in depth). Frozen native NAWEAP `5x3`, northwest `(58,98)`, +x-door frames
 bound the recess: frame `9454` hides the tank centre at local `(2.5,1.5)` completely under the open dark interior,
@@ -210,9 +214,19 @@ frames later, the whole tank at local `(4.13,1.06)`, about `1.74` behind the fac
 while the door posts stay in front. Thus `1.74 < R < about 3.0`; live frozen frames then showed the whole tank at local `(3.85,1.43)` (rear about `2.8`
 behind), which `R = 2` clipped, so `R = 2.75` is used. The foundation's back surface would expose the
 early tank incorrectly. These are supplied native measurements, not new HD runtime acceptance.
+The roof opening reveals a deeper floor: the inside unit at local `(2.5,1.5)`, sum `4.0`, lies in front of the
+native interior plane `7.5 - ROOF_RECESS = 3.5` (the rectangular model gives `7 - 4 = 3`). It remains in front
+on the floor and `1.5` levels up; a unit outside behind the same column, below the back surface (at most `3` on
+the `5x3` centre columns), remains hidden. The body's opaque roof edges retain facade depth.
+Supplied frozen native GAWEAP `5x3`, NW `(58,98)`, SHAD evidence: frame `9171`, CurrentMission `5` / queued `16`,
+link 0 SHAD, Z `208`, has a closed roof. Frames `9184/9208`, mission `16`, same link/Z, show RoofDeployingAnim and
+heli parts inside. Frame `9235`, mission `16`, released link and Z `368`, still shows an open roof with the heli
+rising; the reader latch preserves that roof. Frame `9278`, mission `5`, link NULL, Z `798`, also shows an open
+native roof for an unexplained reason: this remains `UNVERIFIED` and outside the latch. Frame `9342` is closed
+in both views. These frozen observations do not establish new HD runtime acceptance.
 At screen column `d = px / 30 + dx`, the front sum remains `max(0, min(2w - d, 2h + d))`; the existing foundation
 flags component 7 encodes `ds = -dx - dz - (foundationRecess ?? 0)`. The rectangular model gives recessed sums
-`4.25` and `4.18` at those centre columns, respectively hiding centre `4.0` and exposing centre `5.19` while the
+`4.25` and `4.18` for door delivery at those centre columns, respectively hiding centre `4.0` and exposing centre `5.19` while the
 body's facade still covers opaque posts/walls. A unit outside behind the building stays hidden on the same column.
 Lower ramp rows keep ground depth, so a unit outside the facade stands in front. The CPU helper/shader are
 unchanged; anchor/light samples use their original five-component buffer, and pool reuse resets recess to zero.

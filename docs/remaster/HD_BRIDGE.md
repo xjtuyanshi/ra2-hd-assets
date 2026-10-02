@@ -150,7 +150,18 @@ During effective Unload mission, completed buildings report `unloading: 'door' |
 layers exist, the deploying image/shadow replaces the body, then the healthy/damaged under-door card follows with
 its anchor, push and foundation profile. Queued Unload alone does not open the door unless CurrentMission is -1;
 radio link release during drive-out does not close it before the mission changes. Missing art pairs retain the
-normal body, and factory exits receive no dock pull. Native field/address evidence and the accompanying factory
+normal body, and factory exits receive no dock pull. A YR reader instance latches a published roof during the same
+continuous effective Unload and reuses it only for NULL link 0; unreadable roof state still omits `unloading`.
+It resets when the mission leaves `16`, the building disappears or its UID/type pointer changes, pruning entries
+not seen in the latest read. The renderer uses `DOOR_RECESS = 2.75` for UnderDoorAnim and `ROOF_RECESS = 4` for
+UnderRoofDoorAnim only; both are x+z units. The deeper roof plane exposes an inside unit at local `(2.5,1.5)` on
+the floor or `1.5` levels up, while an outside unit behind the same building column stays hidden.
+Supplied frozen native GAWEAP `5x3`, NW `(58,98)`, SHAD frames show: `9171` (mission `5`, queued `16`, link SHAD,
+Z `208`) closed; `9184/9208` (mission `16`, link SHAD, Z `208`) open with heli parts inside; `9235` (mission `16`,
+link NULL, Z `368`) still open as the heli rises. The latch fixes the released-link selection. `9278` (mission `5`,
+link NULL, Z `798`) is still open natively for an unexplained reason and remains `UNVERIFIED`, outside the latch;
+`9342` is closed in both. These are supplied observations, not a new HD runtime acceptance run.
+Native field/address evidence and the accompanying factory
 trace are in [Painter order research](research/painter-order.md#contacted-dock-pull-and-delivery-images).
 
 Ground decals, ore and shadow transforms retain their existing paths. The separate geometry-depth attachment

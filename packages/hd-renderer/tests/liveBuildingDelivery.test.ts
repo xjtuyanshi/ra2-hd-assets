@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Group, Texture, Vector3 } from 'three/webgpu';
 import type { LibraryType } from '../../ra2-assets/src/library';
 import type { SpriteEntry, SpriteFrame } from '../../ra2-assets/src/manifest';
-import { DOOR_RECESS, LiveView, type LiveObject, type LiveSnapshot } from '../src/live/liveView';
+import { DOOR_RECESS, ROOF_RECESS, LiveView, type LiveObject, type LiveSnapshot } from '../src/live/liveView';
 import { SpritePool } from '../src/live/spritePool';
 import { cardDepthPush } from '../src/ra2/cardDepth';
 import { assignPainterBias, painterObject, spritePainterBias } from '../src/ra2/painterOrder';
@@ -10,7 +10,7 @@ import { SpriteLayer, type SpriteInstance } from '../src/ra2/sprites';
 import type { Ra2Cache } from '../src/ra2/cache';
 import type { DirtyAttribute } from '../src/dirtyAttribute';
 import { biasedDepth } from '../src/painterDepth';
-import { IsoCamera, PIXELS_PER_CELL_EDGE } from '../src/world';
+import { IsoCamera, LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../src/world';
 import { VOXEL_CLEARANCE } from '../src/ra2/voxels';
 
 /** Real libraryBuildingSprites, buildup, layer, palette and queue paths; no GPU or game assets. */
@@ -126,7 +126,14 @@ describe('live delivery building image', () => {
       expect(cards[1]).toMatchObject({ shadow: true, flat: true });
       expect(body).toMatchObject({ shadow: false, flat: false });
       expect(DOOR_RECESS).toBe(2.75);
-      expect(cards.map((card) => card.foundationRecess)).toEqual([0, 0, 0, 2.75, 0]);
+      expect(ROOF_RECESS).toBe(4);
+      expect(cards.map((card) => card.foundationRecess)).toEqual([
+        0,
+        0,
+        0,
+        unloading === 'roof' ? ROOF_RECESS : DOOR_RECESS,
+        0,
+      ]);
       // The deploying body retains its facade: a unit inside remains behind opaque posts, then emerges in front.
       for (const [x, z, hidden] of [
         [12.5, 21.5, true],
@@ -195,7 +202,10 @@ describe('live delivery building image', () => {
       const right = new Vector3().setFromMatrixColumn(camera.camera.matrixWorld, 0);
       const up = new Vector3().setFromMatrixColumn(camera.camera.matrixWorld, 1);
       const toward = new Vector3().setFromMatrixColumn(camera.camera.matrixWorld, 2);
-      const screen = (p: Vector3): [number, number] => [30 * (p.x - p.z), 15 * (p.x + p.z)];
+      const screen = (p: Vector3): [number, number] => [
+        30 * (p.x - p.z),
+        15 * (p.x + p.z) - p.y * Math.cos(Math.PI / 6) * PIXELS_PER_CELL_EDGE,
+      ];
       const physical = (p: Vector3) =>
         (-p.clone().applyMatrix4(camera.camera.matrixWorldInverse).z - camera.camera.near) / range;
       const depth = (s: SpriteInstance, pixel: [number, number]) => {
@@ -230,14 +240,22 @@ describe('live delivery building image', () => {
             5,
             3,
             0,
-            s === door ? -2.75 : 0,
+            s === door ? -(unloading === 'roof' ? ROOF_RECESS : DOOR_RECESS) : 0,
           ]);
         }
-        for (const [x, z, hidden] of [
-          [2.5, 1.5, true],
-          [4.13, 1.06, false],
-        ] as const) {
-          unit.anchor.set(58 + x, 0, 98 + z);
+        const positions: ReadonlyArray<readonly [number, number, number, boolean]> =
+          unloading === 'roof'
+            ? [
+                [2.5, 1.5, 0, false],
+                [2.5, 1.5, 1.5, false],
+                [4.13, 1.06, 0, false],
+              ]
+            : [
+                [2.5, 1.5, 0, true],
+                [4.13, 1.06, 0, false],
+              ];
+        for (const [x, z, levels, hidden] of positions) {
+          unit.anchor.set(58 + x, levels * LEVEL_HEIGHT, 98 + z);
           layer.setInstances([body, door, unit]);
           for (const row of [0, -10]) {
             const pixel = screen(unit.anchor);
@@ -246,7 +264,7 @@ describe('live delivery building image', () => {
             for (const s of [body, door, unit]) expectCovered(s, pixel);
             const spriteDepth = depth(unit, pixel);
             const voxelPoint = unit.anchor.clone();
-            voxelPoint.y = -row / (Math.cos(Math.PI / 6) * PIXELS_PER_CELL_EDGE);
+            voxelPoint.y -= row / (Math.cos(Math.PI / 6) * PIXELS_PER_CELL_EDGE);
             const voxelDepth = biasedDepth(
               physical(voxelPoint),
               VOXEL_CLEARANCE + spritePainterBias(unitPainter),
@@ -257,21 +275,24 @@ describe('live delivery building image', () => {
               else expect(unitDepth).toBeLessThan(depth(door, pixel));
               expect(unitDepth).toBeGreaterThan(depth(body, pixel));
             }
-            // At the later tank both sampled rows lie on the ramp's ground branch (the recessed facade is further back).
-            expect((spriteDepth - depth(door, pixel)) * range).toBeCloseTo(
-              hidden ? 0.197760509 : row === 0 ? -0.006363636 : -0.55069469,
-              6,
-            );
-            expect((voxelDepth - depth(door, pixel)) * range).toBeCloseTo(
-              hidden ? 0.192760509 : row === 0 ? -0.011363636 : -0.55569469,
-              6,
-            );
-            if (!hidden) expect((spriteDepth - depth(body, pixel)) * range).toBeCloseTo(1.414340414, 6);
+            if (unloading === 'door') {
+              // Preserve the measured door depths; at the later tank both rows use the ramp's ground branch.
+              expect((spriteDepth - depth(door, pixel)) * range).toBeCloseTo(
+                hidden ? 0.197760509 : row === 0 ? -0.006363636 : -0.55069469,
+                6,
+              );
+              expect((voxelDepth - depth(door, pixel)) * range).toBeCloseTo(
+                hidden ? 0.192760509 : row === 0 ? -0.011363636 : -0.55569469,
+                6,
+              );
+              if (!hidden) expect((spriteDepth - depth(body, pixel)) * range).toBeCloseTo(1.414340414, 6);
+            }
           }
         }
-        // Same later tank column d=3.07, outside behind the back surface s=3.07 (z=-0.5, s=2.07).
-        const tankColumn = screen(unit.anchor)[0];
-        unit.anchor.set(60.57, 0, 97.5);
+        // Roof: same inside column d=1, outside behind back surface s=1, at local (0.5,-0.5), s=0.
+        // Door: same later tank column d=3.07, outside behind back surface s=3.07, at (2.57,-0.5), s=2.07.
+        const tankColumn = unloading === 'roof' ? 30 * (58 + 2.5 - 98 - 1.5) : screen(unit.anchor)[0];
+        unit.anchor.set(unloading === 'roof' ? 58.5 : 60.57, 0, 97.5);
         layer.setInstances([body, door, unit]);
         expect(screen(unit.anchor)[0]).toBeCloseTo(tankColumn);
         for (const row of [0, -10]) {
