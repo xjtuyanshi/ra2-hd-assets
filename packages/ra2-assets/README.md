@@ -1103,6 +1103,43 @@ python3 packages/ra2-assets/python/recording_video.py --out "$OUT/death.mp4" --w
 (cd packages/ra2-assets/python && python3 -m unittest test_recording_video -v)
 ```
 
+## Aftermath metrics (Python)
+
+`python/aftermath_metrics.py` accepts `--video` (cv2-readable mp4/webm), `--frames` (`f0000.png`, ... with `--step`
+seconds per frame), or `--pairs` (`orig-ID.png` / `hd-ID.png` with ordered `--ids`). It counts dark pixels (HSV V <
+`--dark-v`, default 50/255) and grey veil (exact saturation < 0.15, 0.35 < V/255 < 0.85) in repeatable
+`--box x0,y0,x1,y1` regions. `--box-scale-from WxH` rescales boxes on each axis, rounding edges outward.
+Python 3, numpy and cv2 are required; library entry points are `analyze`, `pixel_counts`, `box_to_pixels` and
+`sample_video` (BGR uint8 arrays). Related tools above are `python/live_pair_metrics.py` (crops/house-hue counts)
+and `python/recording_video.py` (recording cuts/read-back).
+
+Video/frames require `--event`. Offsets default to -1,0,1,2,3,5,8,11 seconds; `--at` replaces them. Pair IDs map to
+offsets in order (first N defaults, or an equal-length `--at`). Signed rises subtract each box/channel's median
+of negative-offset samples; frames without negative samples use frame zero. Video/pairs require a negative sample.
+Pairs show original/HD side by side and raw HD-minus-original dark counts. Counts are native pixels: compare at
+matching capture resolutions.
+
+Video sampling uses `floor((event + offset) * fps)` with container FPS or `--fps` override (required for non-finite,
+non-positive or above-240 container FPS). Indexed recordings seek by frame index and check positions before/after
+reading. WebM, unusable frame counts or failed seeks restart sequentially, retaining only requested frames, to
+avoid MediaRecorder index problems. This uses nominal FPS rather than variable-frame-rate timestamps; unavailable
+samples are errors. JSON includes requested/actual times, frame indices, read mode/reason, baselines and all results.
+
+```sh
+python3 packages/ra2-assets/python/aftermath_metrics.py --video "$REC" --event 2 \
+  --box 100,200,400,500 --box-scale-from 1152x744 --gate-dark '+5:6000,+11:3000' --json "$OUT/death.json"
+python3 packages/ra2-assets/python/aftermath_metrics.py --frames "$FRAMES" --step 0.5 --event 2 \
+  --box 0,0,160,120 --at=-1,0,5,11
+python3 packages/ra2-assets/python/aftermath_metrics.py --pairs "$PAIRS" --ids pre,p1,p2 --at=-1,5,11 \
+  --box 100,200,400,500 --box-scale-from 1152x744 --gate-grey '+5:6000,+11:3000'
+(cd packages/ra2-assets/python && python3 -m pytest -q test_aftermath_metrics.py)
+```
+
+The stdout table and optional JSON show counts, rises and pass/fail. Both `--gate-dark` and `--gate-grey` apply
+`OFFSET:MAX_RISE` limits to every box/channel at sampled offsets. Exit codes: 0 = pass/no gates, 1 = failed gate,
+2 = bad/missing input. Tests require pytest and use no game assets. Counts do not establish object ownership or
+visual acceptance; recordings, captures and reports stay outside Git.
+
 ## Live snapshot replays (Python)
 
 `python/live_replay.py` turns a few frozen live snapshots (bridge `LiveSnapshot`s or live-pair records holding one
