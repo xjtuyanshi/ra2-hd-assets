@@ -1,4 +1,4 @@
-import { Mesh, type Group } from 'three/webgpu';
+import { Mesh, type Group, type Vector3 } from 'three/webgpu';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
 import type { HdRenderer } from '../HdRenderer';
 import type { Ra2Cache } from '../ra2/cache';
@@ -7,6 +7,7 @@ import {
   createVoxelMaterial,
   instantiateVoxel,
   projectVoxelMaterials,
+  updateVoxelNativeDepth,
   VoxelUnit as VoxelRoot,
   type VoxelGeometry,
 } from '../ra2/voxels';
@@ -92,7 +93,7 @@ export class VoxelUnits {
           void projection.loadType(model.id, required).then((asset) => {
             if (projectVoxelMaterials(target, palette, asset, this.hd.nodes)) {
               const materials = new Map(target.map((part) => [part.geometry, part.material!]));
-              for (const unit of waiting)
+              for (const unit of waiting) {
                 unit.root.traverse((mesh) => {
                   // Shadow twins share geometry but own their shadow material and must never be repainted.
                   if (mesh instanceof Mesh && mesh.userData.painterDepth) {
@@ -100,6 +101,13 @@ export class VoxelUnits {
                     if (material) mesh.material = material;
                   }
                 });
+                // A resting unit may receive no new pose after this callback. Preserve its active color/depth
+                // pass immediately instead of showing the new physical source until a later publication.
+                if (unit.root instanceof VoxelRoot) {
+                  const { anchor, bonus, enabled } = unit.root.nativeDepth;
+                  updateVoxelNativeDepth(unit, anchor, bonus, enabled !== 0);
+                }
+              }
             }
             waiting.clear();
             this.pending.delete(target);
@@ -126,9 +134,14 @@ export class VoxelUnits {
     if (unit.turret) unit.turret.rotation.y = pose.facing - (turretFacing ?? pose.facing);
   }
 
-  /** Preserve full mesh depth; no slot compression or override of physical overlays. */
+  /** Painter bias remains additive to either physical flight depth or the native ground card. */
   setPainterBias(unit: VoxelUnit, bias: number): void {
     if (unit.root instanceof VoxelRoot) unit.root.setPainterBias(bias);
+  }
+
+  /** Call after pose/turret updates; anchor is the world-space ground draw point, including bridge elevation. */
+  setNativeDepth(unit: VoxelUnit, anchor: Vector3, bonus = 0, enabled = true): void {
+    updateVoxelNativeDepth(unit, anchor, bonus, enabled);
   }
 
   /** Whole-object capture membership belongs only to original part meshes, including articulated barrels. */

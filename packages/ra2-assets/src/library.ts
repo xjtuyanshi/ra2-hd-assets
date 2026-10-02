@@ -50,6 +50,8 @@ export interface TypeLibrary {
    * one sprite may sit on different pages, so a renderer typically uploads all pages as one texture array.
    */
   spriteAtlases: AtlasRef[];
+  /** Shared BUILDNGZ depth corrections, raw uint8 bytes reinterpreted as int8 after extraction. */
+  depthTemplate?: { file: string; width: number; height: number };
   /**
    * Optional offline 2x RGBA/remap atlases, indexed exactly like spriteAtlases. Null means a page has not been
    * processed. Normalized UVs are unchanged; shadows still come from the indexed source pages.
@@ -152,6 +154,10 @@ export interface LibraryType {
   voxel?: string;
   /** rules Turret=yes: voxel models then have a turret (and maybe barrel) part turned by the turret facing. */
   turret?: boolean;
+  /** Rules Harvester=yes: the native depth bonus applies while its current cell belongs to a refinery. */
+  harvester?: true;
+  /** Rules Refinery=yes: identifies foundation cells eligible for the harvester depth bonus. */
+  refinery?: true;
   /** Building footprint (art Foundation=WxH) in cells. */
   foundation?: [width: number, height: number];
   /**
@@ -181,6 +187,8 @@ export interface LibraryType {
 }
 
 export interface LibraryBuilding {
+  /** Native BUILDNGZ placement and body adjustment; absent values are zero. */
+  zShape?: { pointMove?: [x: number, y: number]; normalZAdjust?: number };
   /**
    * Body frames of `sprite`: frame 0 healthy, frame 1 damaged (health / strength <= conditionYellow), later frames
    * exported as-is (their meaning, e.g. extra damage stages, is not decoded). Frames may be empty: the nuclear silo
@@ -231,6 +239,8 @@ export interface LibraryAnimLayer {
   /** Art <key>ZAdjust / <key>YSort (engine depth adjustments, recorded raw). */
   zAdjust?: number;
   ySort?: number;
+  /** The animation type's YDrawOffset, in native screen pixels. */
+  yDrawOffset?: number;
   /** Art <key>Powered=yes: only shown/animated while the building has power. */
   powered?: boolean;
   /** The anim section's timing: Start/End/LoopStart/LoopEnd/LoopCount/Rate/Reverse, recorded raw when present. */

@@ -46,7 +46,11 @@ describe('SHP vehicle sheet/review frame contract', () => {
     const cards: SpriteInstance[] = [];
     const pool = new SpritePool();
     const view = Object.assign(Object.create(LiveView.prototype), {
-      library: { library: { sprites: { 'vehicle:DRON': { frames, shadows, palette: 'unit', remap: false } } } },
+      library: {
+        type: () => undefined,
+        library: { sprites: { 'vehicle:DRON': { frames, shadows, palette: 'unit', remap: false } } },
+      },
+      world: { terrain: { heightAt: () => 0 } },
       cache: { paletteRow: new Map() },
       spritePool: pool,
       shpPose: { state: 'stand', step: 0 },

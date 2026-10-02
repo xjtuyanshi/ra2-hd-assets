@@ -35,9 +35,14 @@ import {
   type EngulfFire,
   type EngulfObject,
 } from '../ra2/fireEngulf';
-import { foundationPointPush } from '../ra2/cardDepth';
-import { FoundationIndex } from './foundationIndex';
-import { dockPull, propagateDockPull, type DockPullUnit } from '../ra2/dockPull';
+import { foundationPointPush, GROUND_DEPTH } from '../ra2/cardDepth';
+import {
+  addRefineryFoundation,
+  harvesterRefineryBonus,
+  attachedBodyDepth,
+  buildingDepthProfile,
+  type NativeSpriteDepth,
+} from '../ra2/nativeDepth';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 import { setShadowOrigin } from '../ra2/voxelShadow';
 import { loadRa2World, type HdWorld } from '../ra2/world';
@@ -68,22 +73,6 @@ import { VoxelUnits, type VoxelUnit, type VoxelUnitsOptions } from './voxelUnits
 
 export type { LiveOverlayCells } from './overlays';
 export type { LiveSmudgeCells } from './smudges';
-
-/**
- * Measured approximation of the engine's door-interior Z-shape/ZAdjust, in x+z cell units.
- * Frozen live NAWEAP 5x3 frames (+x door): with the door open the waiting tank at local (2.5,1.5) is hidden,
- * its centre 3.5 and its voxel front end about 3.0 behind the native facade; at local (3.85,1.43) the original
- * shows the whole tank in the doorway (centre 2.3 behind, rear about 2.8). R=2 still clipped that tank's rear
- * half in the live view, so R=2.75 (2.75*sqrt(3/8) world depth) keeps a 0.25 margin to the hidden case.
- */
-export const DOOR_RECESS = 2.75;
-
-/**
- * Roof openings reveal the floor deeper inside than a facade door, in x+z cell units.
- * A centre at local (2.5,1.5), sum 4, lies in front of the native interior plane 7.5-4=3.5;
- * outside units behind the 5x3 centre columns' back surface (sum <=3) remain hidden.
- */
-export const ROOF_RECESS = 4;
 
 /**
  * Live view: draws a running original match (read from game memory by the host page) with the HD renderer, framed
@@ -562,7 +551,7 @@ export class LiveView {
   /** Civilian houses of the newest snapshot (see civilianHouses). */
   private civilian = new Set<number>();
   /** Rebuilt on snapshot/art changes, never for an interpolation-only presentation. */
-  private foundationIndex = new FoundationIndex();
+  private refineryCells = new Set<string>();
   /**
    * The newest snapshot's building anims (bridge flag buildingAnim) by the cell they stand on and by the object they
    * are attached to, with their list index; null when the host flags none (the fallback layers are drawn then).
@@ -1225,6 +1214,7 @@ export class LiveView {
     this.pageLayers.clear();
     this.volumetricBlasts.dispose();
     this.library?.disposeMaterials();
+    this.library?.disposeDepthTemplate();
     this.hd.dispose();
     this.visuals.clear();
     this.appearances.clear();
@@ -1293,21 +1283,14 @@ export class LiveView {
     for (const list of batch.values()) list.length = 0;
     this.spritePool.begin();
     if (this.painterDirty) {
-      this.foundationIndex = new FoundationIndex();
+      this.refineryCells = new Set<string>();
       for (const object of current.snapshot.objects) {
         if (object.kind !== 'building') continue;
-        const visual = this.visualFor(object, this.houseColour.get(object.owner) ?? -1, frame);
-        if (visual.libraryType?.invisible || this.cache.lights?.types[object.type]?.invisible) continue;
-        const foundation =
-          visual.libraryType?.foundation ??
-          (visual.sprite ? this.cache.manifest.sprites[visual.sprite]?.foundation : undefined);
-        if (foundation)
-          this.foundationIndex.add(
-            Math.floor(object.x / LEPTONS_PER_CELL),
-            Math.floor(object.y / LEPTONS_PER_CELL),
-            foundation[0],
-            foundation[1],
-          );
+        const type = this.library?.type(object.type);
+        if (!type?.refinery || !type.foundation) continue;
+        const x = Math.floor(object.x / LEPTONS_PER_CELL);
+        const y = Math.floor(object.y / LEPTONS_PER_CELL);
+        addRefineryFoundation(this.refineryCells, true, x, y, type.foundation);
       }
     }
     for (const object of current.snapshot.objects) {
@@ -1315,14 +1298,7 @@ export class LiveView {
       const visual = this.visualFor(object, colorIndex, frame);
       // Native techno rendering does not reject the anchor's shroud cell. The common per-pixel mask covers the
       // whole sprite/voxel, including tall art crossing the edge. InvisibleInGame types still never draw.
-      const containedInfantry =
-        object.kind === 'infantry' &&
-        (object.renderOrder?.layer ?? 2) === 2 &&
-        (object.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT <=
-          this.world.terrain.heightAt(object.x / LEPTONS_PER_CELL, object.y / LEPTONS_PER_CELL) + 0.01 &&
-        this.foundationIndex.contains(object.x / LEPTONS_PER_CELL, object.y / LEPTONS_PER_CELL);
-      const hidden =
-        !!visual.libraryType?.invisible || !!this.cache.lights?.types[object.type]?.invisible || containedInfantry;
+      const hidden = !!visual.libraryType?.invisible || !!this.cache.lights?.types[object.type]?.invisible;
       if (visual.root.visible === hidden) this.painterDirty = true;
       visual.root.visible = !hidden;
       if (hidden) continue;
@@ -1350,9 +1326,6 @@ export class LiveView {
           objectYSort(object.x, object.y, object.kind === 'building', !!visual.libraryType?.building?.turretVoxel);
         painter.index = registered?.index;
         painter.uid = object.uid;
-        painter.contactUid = object.contactUid;
-        painter.dock = object.dock;
-        painter.unloading = object.unloading;
         painter.foundation =
           object.kind === 'building'
             ? (visual.libraryType?.foundation ??
@@ -1393,6 +1366,7 @@ export class LiveView {
       }
       const turret = lerpAngle16(from.turretFacingRaw ?? from.facingRaw, object.turretFacingRaw ?? object.facingRaw, t);
       this.voxelUnits.pose(unit, pose, turret);
+      this.voxelUnits.setNativeDepth(unit, unit.root.position, this.harvesterBonus(object), this.groundCard(object));
     }
     for (const uid of this.visuals.keys()) {
       if (current.byUid.has(uid)) continue;
@@ -1402,18 +1376,48 @@ export class LiveView {
     if (!this.painterDirty) this.flushSprites(batch, false);
   }
 
+  /** Native current-cell policy uses the rules type, including while its unloading image is substituted. */
+  private harvesterBonus(object: LiveObject): number {
+    return harvesterRefineryBonus(
+      !!this.library?.type(object.type)?.harvester,
+      object.x,
+      object.y,
+      this.refineryCells ?? new Set(),
+    );
+  }
+
+  /** Ground registrations on terrain or a stock bridge deck; rising/flying art keeps physical depth. */
+  private groundCard(object: LiveObject): boolean {
+    if ((object.renderOrder?.layer ?? 2) !== 2) return false;
+    const x = object.x / LEPTONS_PER_CELL;
+    const y = object.y / LEPTONS_PER_CELL;
+    const height = (object.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT;
+    const ground = this.world.terrain.heightAt(x, y);
+    if (height <= ground + 0.01) return true;
+    if (Math.abs(height - ground - HIGH_BRIDGE_HEIGHT) > 0.01) return false;
+    const cx = Math.floor(x);
+    const cy = Math.floor(y);
+    const cells = this.current?.snapshot.overlays;
+    if (cells) {
+      const dx = cx - cells.originX;
+      const dy = cy - cells.originY;
+      if (dx < 0 || dy < 0 || dx >= cells.width || dy >= cells.height) return false;
+      const type = cells.types[cells.index[dy * cells.width + dx]!];
+      return !!type && isHighBridge(type);
+    }
+    return this.cache.manifest.objects.some(
+      (o) => o.kind === 'overlay' && o.x === cx && o.y === cy && isHighBridge(o.type),
+    );
+  }
+
   /** Refresh only logic/art/visibility inputs. Static cards have physical depth and never join unit uploads. */
   private applyPainterOrder(): void {
     this.painterDirty = false;
     const objects = this.painterObjects;
     objects.length = 0;
-    const buildings = new Map<number, PainterObject>();
-    for (const [uid, visual] of this.visuals) {
+    for (const visual of this.visuals.values()) {
       if (!visual.root.visible || !visual.painter) continue;
-      visual.painter.pull = 0;
       objects.push(visual.painter);
-      if (this.current?.byUid.get(uid)?.kind === 'building' && visual.painter.foundation)
-        buildings.set(uid, visual.painter);
     }
     for (const effect of this.effectInstances) {
       if (effect.pass !== 'ground' || effect.draw !== 'card') continue;
@@ -1423,18 +1427,6 @@ export class LiveView {
     }
     if (this.projectiles) for (const entry of this.projectiles.painterEntries()) objects.push(entry.painter);
     assignPainterBias(objects);
-    const docked: DockPullUnit[] = [];
-    const passing: DockPullUnit[] = [];
-    for (const [uid, visual] of this.visuals) {
-      const painter = visual.painter;
-      const object = this.current?.byUid.get(uid);
-      if (!painter || !visual.root.visible || !object || object.kind === 'building') continue;
-      const unit = { painter, anchor: { x: object.x / LEPTONS_PER_CELL, z: object.y / LEPTONS_PER_CELL } };
-      painter.pull = dockPull(painter, unit.anchor, buildings.get(object.contactUid!));
-      if (painter.pull > 0) docked.push(unit);
-      if (object.kind === 'vehicle' || object.kind === 'infantry') passing.push(unit);
-    }
-    propagateDockPull(passing, docked);
     for (const visual of this.visuals.values()) {
       const painter = visual.painter;
       if (!painter || !visual.root.visible) continue;
@@ -1647,12 +1639,24 @@ export class LiveView {
           this.spritePool.take(anchor, shadow, this.buildingPalette(make, visual.paletteKey), 0, true, true),
           plain,
         );
-      if (mk && mk.rect[2] > 0)
-        this.queue(
-          batch,
-          this.spritePool.take(anchor, mk, this.buildingPalette(make, visual.paletteKey), cardPush(mk), false),
-          plain,
+      if (mk && mk.rect[2] > 0) {
+        const card = this.spritePool.take(
+          anchor,
+          mk,
+          this.buildingPalette(make, visual.paletteKey),
+          cardPush(mk),
+          false,
         );
+        card.nativeDepth = buildingDepthProfile(
+          mk,
+          type.foundation ?? [1, 1],
+          type.building?.zShape,
+          object.buildState ?? 'building',
+          undefined,
+          this.cache.depthTemplate,
+        );
+        this.queue(batch, card, plain);
+      }
       return false;
     }
 
@@ -1660,12 +1664,18 @@ export class LiveView {
     const body = object.buildingFrame ?? (damaged && entry.frames.length > 1 ? 1 : 0);
     const bib = type.building?.bib ? sprites[type.building.bib] : undefined;
     const bibFrame = bib?.frames[damaged && bib.frames.length > 1 ? 1 : 0];
-    if (bib && bibFrame)
-      this.queue(
-        batch,
-        this.spritePool.take(anchor, bibFrame, this.buildingPalette(bib, visual.paletteKey), 0, false, true),
-        !bib.remap,
+    if (bib && bibFrame) {
+      const card = this.spritePool.take(
+        anchor,
+        bibFrame,
+        this.buildingPalette(bib, visual.paletteKey),
+        this.cache.depthTemplate ? cardPush(bibFrame) : 0,
+        false,
+        !this.cache.depthTemplate,
       );
+      if (this.cache.depthTemplate) card.nativeDepth = { mode: 'ground', bonus: 2 };
+      this.queue(batch, card, !bib.remap);
+    }
     const layers = type.building?.layers ?? EMPTY_LAYERS;
     const deployingKey = object.unloading === 'roof' ? 'RoofDeployingAnim' : 'DeployingAnim';
     const doorKey = object.unloading === 'roof' ? 'UnderRoofDoorAnim' : 'UnderDoorAnim';
@@ -1674,7 +1684,7 @@ export class LiveView {
       : undefined;
     const door = object.unloading ? sprites[layers.find((layer) => layer.key === doorKey)?.sprite ?? ''] : undefined;
     // Delivery images are body replacements. Explicit construction/selling state still owns the art path
-    // even when a library has no make sprite. The interior shares placement but recesses the foundation facade.
+    // even when a library has no make sprite. The interior uses the native ground gradient.
     const delivering =
       object.buildState !== 'building' &&
       object.buildState !== 'selling' &&
@@ -1691,12 +1701,27 @@ export class LiveView {
       );
     const bodyFrame = bodyArt.frames[shownBody];
     const push = bodyFrame ? cardPush(bodyFrame) : 0.03;
-    if (bodyFrame && bodyFrame.rect[2] > 0)
-      this.queue(
-        batch,
-        this.spritePool.take(anchor, bodyFrame, this.buildingPalette(bodyArt, visual.paletteKey), push, false),
-        !bodyArt.remap,
+    const nativeDepth = bodyFrame
+      ? buildingDepthProfile(
+          bodyFrame,
+          type.foundation ?? [1, 1],
+          type.building?.zShape,
+          object.buildState,
+          delivering ? object.unloading : undefined,
+          this.cache.depthTemplate,
+        )
+      : undefined;
+    if (bodyFrame && bodyFrame.rect[2] > 0) {
+      const card = this.spritePool.take(
+        anchor,
+        bodyFrame,
+        this.buildingPalette(bodyArt, visual.paletteKey),
+        push,
+        false,
       );
+      card.nativeDepth = nativeDepth;
+      this.queue(batch, card, !bodyArt.remap);
+    }
 
     if (delivering) {
       const doorFrame = door!.frames[Math.min(damaged ? 1 : 0, door!.frames.length - 1)];
@@ -1708,7 +1733,7 @@ export class LiveView {
           push,
           false,
         );
-        interior.foundationRecess = object.unloading === 'roof' ? ROOF_RECESS : DOOR_RECESS;
+        if (this.cache.depthTemplate) interior.nativeDepth = { mode: 'ground', bonus: 1 };
         this.queue(batch, interior, !door!.remap);
       }
     }
@@ -1720,7 +1745,18 @@ export class LiveView {
         for (const layer of layers) {
           if (animId(layer.sprite) !== anim.type && (!layer.damagedSprite || animId(layer.damagedSprite) !== anim.type))
             continue;
-          this.buildingLayerSprites(object, visual, batch, frame, damaged, anchor, push, layer, anim.frame ?? null);
+          this.buildingLayerSprites(
+            object,
+            visual,
+            batch,
+            frame,
+            damaged,
+            anchor,
+            push,
+            layer,
+            anim.frame ?? null,
+            nativeDepth,
+          );
           break;
         }
       }
@@ -1739,6 +1775,7 @@ export class LiveView {
         push,
         layer,
         layerIdle(layer, object.type, civilian && object.owner >= 0) ? (layer.anim.start ?? 0) : null,
+        nativeDepth,
       );
     }
     return true;
@@ -1764,6 +1801,7 @@ export class LiveView {
     push: number,
     layer: LibraryAnimLayer,
     index: number | null,
+    nativeDepth?: NativeSpriteDepth,
   ): void {
     const type = visual.libraryType!;
     const sprites = this.library!.library.sprites;
@@ -1778,16 +1816,19 @@ export class LiveView {
       ),
     );
     const layerFrameArt = art.frames[shown];
-    const layerAnchor = layer.offset
-      ? leptonAnchor(
-          object.x,
-          object.y,
-          object.z,
-          type.drawOffset[0] + layer.offset[0],
-          type.drawOffset[1] + layer.offset[1],
-          this.spritePool.anchor(),
-        )
-      : anchor;
+    const dx = layer.offset?.[0] ?? 0;
+    const dy = (layer.offset?.[1] ?? 0) + (layer.yDrawOffset ?? 0);
+    const layerAnchor =
+      dx || dy
+        ? leptonAnchor(
+            object.x,
+            object.y,
+            object.z,
+            type.drawOffset[0] + dx,
+            type.drawOffset[1] + dy,
+            this.spritePool.anchor(),
+          )
+        : anchor;
     // Art Shadow=yes layers (the derrick's pump, flags, radar dishes) cast their own shadow frames.
     const layerShadow = layer.anim.shadow ? art.shadows?.[shown] : undefined;
     if (layerShadow && layerShadow.rect[2] > 0)
@@ -1797,21 +1838,26 @@ export class LiveView {
         !art.remap,
       );
     if (!layerFrameArt || layerFrameArt.rect[2] <= 0) return;
-    this.queue(
-      batch,
-      this.spritePool.take(
-        layerAnchor,
-        layerFrameArt,
-        this.buildingPalette(art, visual.paletteKey),
-        push + 0.01,
-        false,
-        false,
-        undefined,
-        undefined,
-        0.1,
-      ),
-      !art.remap,
+    const card = this.spritePool.take(
+      layerAnchor,
+      layerFrameArt,
+      this.buildingPalette(art, visual.paletteKey),
+      push + 0.01,
+      false,
+      false,
+      undefined,
+      undefined,
+      0.1,
     );
+    if (nativeDepth) {
+      if (layer.key === 'DoorAnim') {
+        card.nativeDepth = { mode: 'ground', bonus: 6 };
+        card.depthWrite = false;
+      } else if (layer.key === 'UnderDoorAnim' || layer.key === 'UnderRoofDoorAnim') {
+        card.nativeDepth = { mode: 'ground', bonus: 1 };
+      } else card.nativeDepth = attachedBodyDepth(nativeDepth, [dx, dy], dy * GROUND_DEPTH);
+    }
+    this.queue(batch, card, !art.remap);
   }
 
   /**
@@ -1819,8 +1865,9 @@ export class LiveView {
    * cannon ...), turned by the building's facing (`turretFacing` in radians; null while the building is being built or
    * sold, when its make anim shows instead). The engine draws the turret at the building's draw point plus
    * TurretAnimX/Y pixels, after the body (TurretAnimZAdjust < 0): here it stands at that screen point on the
-   * building's level and is pulled past the body's foundation depth at that screen point, plus its own depth. This
-   * preserves the established turret-over-body placement without a global depth slot. Its shadow uses a bounded
+   * building's level. The established geometry pull keeps lighting and screen placement unchanged; native depth
+   * uses the unpushed draw anchor and the turret's own bitmap card, retaining only the KAPPA physical residual.
+   * Its shadow uses a bounded
    * physical origin on that view ray nearest the foundation centre, with ordinary ground shear instead of flight drift.
    * The model loads on first use; until then (and when it is missing) it counts in diagnostics().
    */
@@ -1852,6 +1899,7 @@ export class LiveView {
       type.drawOffset[1] + spec.offset[1],
       this.spritePool.anchor(),
     );
+    const groundAnchor = this.spritePool.anchor().copy(at);
     const body = this.library!.library.sprites[type.sprite!]?.frames[0];
     const foundation = type.foundation;
     const push =
@@ -1884,6 +1932,12 @@ export class LiveView {
     pose.z = (at.y / LEVEL_HEIGHT) * LEPTONS_PER_LEVEL;
     pose.facing = Math.PI / 2;
     this.voxelUnits.pose(unit, pose, turretFacing);
+    this.voxelUnits.setNativeDepth(
+      unit,
+      groundAnchor,
+      -1 - (spec.zAdjust ?? 0),
+      !!this.cache.depthTemplate && (object.renderOrder?.layer ?? 2) === 2,
+    );
   }
 
   /**
@@ -1992,10 +2046,10 @@ export class LiveView {
       this.queue(batch, instance);
     }
     const light = objectLight('infantry');
-    this.queue(
-      batch,
-      this.spritePool.take(anchor, spriteFrame, palette, cardPush(spriteFrame), false, undefined, light),
-    );
+    const card = this.spritePool.take(anchor, spriteFrame, palette, cardPush(spriteFrame), false, undefined, light);
+    if (this.groundCard(object))
+      card.nativeDepth = { mode: 'card', bottom: spriteFrame.offset[1] + spriteFrame.rect[3] - 1, bonus: 12 };
+    this.queue(batch, card);
   }
 
   /** SHP vehicles and aircraft (terror drone, squid, dolphin): directional frames per state (shpUnits.ts). */
@@ -2041,11 +2095,16 @@ export class LiveView {
     const shadow = entry.shadows?.[index];
     if (shadow && shadow.rect[2] > 0) this.queue(batch, this.spritePool.take(anchor, shadow, palette, 0, true, true));
     const light = objectLight(object.kind);
-    if (spriteFrame.rect[2] > 0)
-      this.queue(
-        batch,
-        this.spritePool.take(anchor, spriteFrame, palette, cardPush(spriteFrame), false, undefined, light),
-      );
+    if (spriteFrame.rect[2] > 0) {
+      const card = this.spritePool.take(anchor, spriteFrame, palette, cardPush(spriteFrame), false, undefined, light);
+      if (this.groundCard(object))
+        card.nativeDepth = {
+          mode: 'card',
+          bottom: spriteFrame.offset[1] + spriteFrame.rect[3] - 1,
+          bonus: this.harvesterBonus(object),
+        };
+      this.queue(batch, card);
+    }
   }
 
   /** A building whose art only the map cache has (library missing): the still frames the map extractor exported. */
@@ -2060,34 +2119,53 @@ export class LiveView {
     // Buildings always wear their owner's colours (see libraryBuildingSprites).
     const palette = paletteFor(this.cache, entry.palette, true, owner);
     const push = cardPush(frame);
+    const nativeDepth = buildingDepthProfile(
+      frame,
+      entry.foundation ?? [1, 1],
+      undefined,
+      object.buildState,
+      undefined,
+      this.cache.depthTemplate,
+    );
     let list = batch.get('map');
     if (!list) batch.set('map', (list = []));
     for (const underlay of entry.underlays ?? EMPTY_IDS) {
       const bib = manifest.sprites[underlay];
-      if (bib?.frames[0])
-        list.push(
-          this.spritePool.take(anchor, bib.frames[0], paletteFor(this.cache, bib.palette, true, owner), 0, false, true),
+      if (bib?.frames[0]) {
+        const card = this.spritePool.take(
+          anchor,
+          bib.frames[0],
+          paletteFor(this.cache, bib.palette, true, owner),
+          nativeDepth ? cardPush(bib.frames[0]) : 0,
+          false,
+          !nativeDepth,
         );
+        if (nativeDepth) card.nativeDepth = { mode: 'ground', bonus: 2 };
+        list.push(card);
+      }
     }
     const shadow = entry.shadows?.[frameIndex];
     if (shadow) list.push(this.spritePool.take(anchor, shadow, palette, 0, true, true));
-    list.push(this.spritePool.take(anchor, frame, palette, push, false));
+    const body = this.spritePool.take(anchor, frame, palette, push, false);
+    body.nativeDepth = nativeDepth;
+    list.push(body);
     for (const layer of entry.layers ?? EMPTY_IDS) {
       const art = manifest.sprites[layer];
-      if (art?.frames[0])
-        list.push(
-          this.spritePool.take(
-            anchor,
-            art.frames[0],
-            paletteFor(this.cache, art.palette, true, owner),
-            push + 0.01,
-            false,
-            false,
-            undefined,
-            undefined,
-            0.1,
-          ),
+      if (art?.frames[0]) {
+        const card = this.spritePool.take(
+          anchor,
+          art.frames[0],
+          paletteFor(this.cache, art.palette, true, owner),
+          push + 0.01,
+          false,
+          false,
+          undefined,
+          undefined,
+          0.1,
         );
+        card.nativeDepth = nativeDepth;
+        list.push(card);
+      }
     }
   }
 

@@ -54,7 +54,8 @@ export class SpritePool {
     instance.painter = !flat && !shadow ? this.painter : undefined;
     instance.painterPart = painterPart;
     instance.deckHeight = !flat && !shadow ? this.deckHeight : undefined;
-    instance.foundationRecess = 0;
+    instance.nativeDepth = undefined;
+    instance.depthWrite = undefined;
     return instance;
   }
 }

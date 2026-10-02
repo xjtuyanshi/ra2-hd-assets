@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { Group, Mesh, Vector3 } from 'three/webgpu';
+import { DataTexture, Group, Mesh, Vector3 } from 'three/webgpu';
 import { AtmosphereNodes } from '../src/atmosphere';
 import { buildingTurretShadowOrigin, LiveView, type LiveObject } from '../src/live/liveView';
 import { SpritePool } from '../src/live/spritePool';
 import { VoxelUnits } from '../src/live/voxelUnits';
 import { foundationPointPush } from '../src/ra2/cardDepth';
+import type { Ra2Cache } from '../src/ra2/cache';
 import { setShadowGround, SHADOW_LIFT, SHADOW_SHEAR_X, SHADOW_SHEAR_Z, VoxelShadowMesh } from '../src/ra2/voxelShadow';
 import { VoxelUnit } from '../src/ra2/voxels';
 import { IsoCamera, LEVEL_HEIGHT } from '../src/world';
@@ -35,11 +36,12 @@ function building(foundation: [number, number], offset: [number, number], level:
   visual.root.add(root);
   scene.add(visual.root);
   const state = {
+    cache: { depthTemplate: undefined as Ra2Cache['depthTemplate'] },
     world: { sprites: { toCamera: { value: toCamera } } },
     library: { library: { sprites: {} } },
     spritePool: new SpritePool(),
     pose: { x: 0, y: 0, z: 0, facing: 0 },
-    voxelUnits: { pose: VoxelUnits.prototype.pose },
+    voxelUnits: { pose: VoxelUnits.prototype.pose, setNativeDepth: VoxelUnits.prototype.setNativeDepth },
   };
   const view = Object.assign(Object.create(LiveView.prototype), state) as {
     buildingTurret(object: LiveObject, visual: unknown, facing: number | null): void;
@@ -76,6 +78,36 @@ function building(foundation: [number, number], offset: [number, number], level:
 }
 
 describe('building turret physical shadow origin', () => {
+  it('keeps the physical fallback without a template and enables the native card only in the ground layer', () => {
+    const b = building([2, 2], [0, -20], 0);
+    const texture = new DataTexture(new Uint8Array([0]), 1, 1);
+    try {
+      b.pose(0);
+      const placement = b.root.position.clone();
+      const shadow = b.shadow.matrixWorld.clone();
+      expect(b.root.nativeDepth.enabled).toBe(0);
+      b.state.cache.depthTemplate = { texture, width: 1, height: 1 };
+      b.pose(0);
+      expect(b.root.nativeDepth.enabled).toBe(1);
+      expect(b.root.nativeDepth.bonus).toBe(-1);
+      expect(b.root.position.distanceTo(placement)).toBeLessThan(1e-12);
+      expect(b.shadow.matrixWorld.equals(shadow)).toBe(true);
+      expect(b.root.nativeDepth.anchor.y).toBe(0);
+      expect(b.root.nativeDepth.anchor.distanceTo(placement)).toBeGreaterThan(0);
+      b.object.renderOrder = { layer: 3, index: 0, ySort: 0 };
+      b.pose(0);
+      expect(b.root.nativeDepth.enabled).toBe(0);
+      b.object.renderOrder.layer = 2;
+      b.state.cache.depthTemplate = undefined;
+      b.pose(0);
+      expect(b.root.nativeDepth.enabled).toBe(0);
+      expect(b.root.position.distanceTo(placement)).toBeLessThan(1e-12);
+    } finally {
+      b.dispose();
+      texture.dispose();
+    }
+  });
+
   it('chooses the closest ground position on the view ray without changing the screen position', () => {
     const centre = new Vector3(10, 2, 20);
     const drawn = new Vector3(9.2, 2, 19.6).addScaledVector(toCamera, 4);

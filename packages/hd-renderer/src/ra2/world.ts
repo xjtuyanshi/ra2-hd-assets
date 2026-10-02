@@ -19,6 +19,7 @@ import {
   instantiateVoxel,
   projectVoxelMaterials,
   setVoxelShapeFor,
+  updateVoxelNativeDepth,
   voxelShapeFor,
   type VoxelGeometry,
   type VoxelShape,
@@ -27,6 +28,7 @@ import { loadVoxelLighting } from './vpl';
 import { smoothVoxelOptions, type SmoothVoxelOptions } from './voxelSmooth';
 import { buildSmoothVoxelGeometry } from './voxelSmoothGeometry';
 import { projectionParts, voxelProjectionLibrary, type VoxelProjectionLibrary } from './voxelProjection';
+import { frameInclusiveBottom } from './nativeDepth';
 
 /** A battlefield the HD renderer can draw: terrain, optional water, and everything standing on it. */
 export interface HdWorld {
@@ -153,8 +155,21 @@ export async function loadRa2World(
   // Enhanced-look decals (spriteLook.ts; drawn only while their effect is on): ground contact shades first, under
   // every other decal, and wet-paving mirror images of upright art.
   const lookDecals: SpriteInstance[] = [];
+  const bridgeCells = new Set(
+    objects
+      .filter((object) => object.kind === 'overlay' && isHighBridge(object.type))
+      .map((object) => `${object.x},${object.y}`),
+  );
   for (const object of objects) {
     const anchor = objectAnchor(object);
+    const ground = terrain.heightAt(anchor.x, anchor.z);
+    // Static caches have no registration/locomotor state. Unit kinds at terrain or a known high deck are the
+    // ground-layer equivalent; raised aircraft/units retain physical depth. No harvester bonus is inferred
+    // because static map objects do not include rules flags.
+    const groundUnit =
+      (object.kind === 'vehicle' || object.kind === 'infantry' || object.kind === 'aircraft') &&
+      (anchor.y <= ground + 0.01 ||
+        (bridgeCells.has(`${object.x},${object.y}`) && Math.abs(anchor.y - ground - HIGH_BRIDGE_HEIGHT) <= 0.01));
     if (object.voxel) {
       const model = cache.voxels.get(object.voxel);
       if (!model) continue;
@@ -176,11 +191,12 @@ export async function loadRa2World(
       }
       const { root: vehicle } = instantiateVoxel(parts, voxelMaterial, nodes);
       vehicle.position.copy(anchor);
-      vehicle.position.y = Math.max(anchor.y, terrain.heightAt(anchor.x, anchor.z));
+      vehicle.position.y = Math.max(anchor.y, ground);
       // Engine facing 0 = north (world -z), clockwise; the model's nose is local +x.
       const phi = ((object.facing ?? 0) / 256) * Math.PI * 2;
       vehicle.rotation.y = Math.PI / 2 - phi;
       root.add(vehicle);
+      updateVoxelNativeDepth(vehicle, vehicle.position, 0, groundUnit);
       continue;
     }
     if (!object.sprite) continue;
@@ -260,6 +276,10 @@ export async function loadRa2World(
       lighting,
       painter: object.kind === 'overlay' ? undefined : painter,
       deckHeight,
+      nativeDepth:
+        groundUnit && !flat
+          ? { mode: 'card', bottom: frameInclusiveBottom(frame), bonus: object.kind === 'infantry' ? 12 : 0 }
+          : undefined,
     });
     for (const layer of entry.layers ?? []) {
       const art = manifest.sprites[layer];

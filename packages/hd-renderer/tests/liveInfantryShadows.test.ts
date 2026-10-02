@@ -40,6 +40,7 @@ describe('live infantry footprint', () => {
       library,
       spritePool: pool,
       libraryPaletteKeys: new Map(),
+      world: { terrain: { heightAt: () => 0 } },
     }) as {
       libraryInfantrySprites(...args: unknown[]): void;
     };
@@ -51,7 +52,7 @@ describe('live infantry footprint', () => {
         infantry: { sequences: { Walk: { start: 0, count: 2, facingMultiplier: 0 } } },
       },
     };
-    const object = { kind: 'infantry', infantrySequence: 'Walk', sequenceFrame: 1 } as LiveObject;
+    const object = { kind: 'infantry', x: 512, y: 768, z: 0, infantrySequence: 'Walk', sequenceFrame: 1 } as LiveObject;
     const batch = new Map<number, SpriteInstance[]>();
     view.libraryInfantrySprites(object, { x: 512, y: 768, z: 0, facing: 0 }, visual, batch, 1);
     const sh = batch.get(7)![0]!;
@@ -76,8 +77,11 @@ describe('live infantry footprint', () => {
     const vehicle = pool.take(new Vector3(), shadow, 'library:unit', 0, true, true);
     const layer = new SpriteLayer(cache, [infantry, building, vehicle]);
     const flags = (layer as unknown as { flags: DirtyAttribute }).flags;
-    expect([0, 1, 2].map((i) => flags.array[i * 8 + 3])).toEqual([1, 0, 0]);
-    for (const i of [1, 2]) expect(Array.from(flags.array.slice(i * 8, (i + 1) * 8))).toEqual([2, 1, 0, 0, 0, 0, 0, 0]);
+    expect([0, 1, 2].map((i) => flags.array[i * flags.itemSize + 3])).toEqual([1, 0, 0]);
+    for (const i of [1, 2])
+      expect(Array.from(flags.array.slice(i * flags.itemSize, i * flags.itemSize + 8))).toEqual([
+        2, 1, 0, 0, 0, 0, 0, 0,
+      ]);
     expect(layer.groundPasses).toHaveLength(2);
     expect(layer.groundPasses.every((mesh) => mesh.count === 3)).toBe(true);
     const settings = {} as HdSettings;

@@ -4,6 +4,7 @@ import {
   Group,
   Mesh,
   MeshStandardNodeMaterial,
+  Object3D,
   Quaternion,
   Vector3,
 } from 'three/webgpu';
@@ -11,7 +12,7 @@ import { lookupNormal, normalTableFor } from '../../../ra2-formats/src/index';
 import type { VoxelModel, VoxelSection } from '../../../ra2-assets/src/manifest';
 import { sectionNormalsMode } from '../../../ra2-assets/src/voxelNormals';
 import type { AtmosphereNodes } from '../atmosphere';
-import { createPainterDepth, meshPainterDepthNode } from '../painterDepth';
+import { createPainterDepth } from '../painterDepth';
 import { decodeBase64 } from './cache';
 import { paletteNodes } from './mapLighting';
 import { SHADOW_COPIES, VoxelShadowMesh, VoxelWaterMesh, groundOf } from './voxelShadow';
@@ -19,6 +20,8 @@ import { voxelFill, voxelMaterialFor, voxelProjectedMaterialFor } from './vpl';
 import type { VoxelProjectionAsset } from './voxelProjection';
 import { CARD_CLEARANCE } from './cardDepth';
 import { VOXEL_TO_WORLD } from './voxelScale';
+import { createVoxelNativeDepth, voxelBitmapBottom, voxelNativeDepthNode } from './voxelNativeDepth';
+import { NATIVE_UNIT_RENDER_ORDER } from './nativeDepth';
 
 /**
  * Original VXL units, rendered as real meshes. The engine draws voxels through a pure rotation (the default voxel
@@ -54,7 +57,7 @@ export function projectVoxelMaterials(
   if (!asset || parts.some((part) => !asset.parts[part.role === 'body' ? 'body' : 'turret'])) return false;
   for (const part of parts) {
     part.material = voxelProjectedMaterialFor(palette, asset.parts[part.role === 'body' ? 'body' : 'turret']!, nodes);
-    if (!part.material.depthNode) part.material.depthNode = meshPainterDepthNode();
+    if (!part.material.depthNode) part.material.depthNode = voxelNativeDepthNode();
   }
   return true;
 }
@@ -487,15 +490,17 @@ export class VoxelUnit extends Group {
   /** Rotation-independent world radius about the root, including articulated turret offsets. */
   captureRadius = 0;
   private readonly painterDepth = createPainterDepth();
+  readonly nativeDepth = createVoxelNativeDepth();
 
   constructor() {
     super();
     this.painterDepth.bias = VOXEL_CLEARANCE;
   }
 
-  /** Real meshes share a bounded physical-depth bias; shadow twins retain ordinary ground depth. */
+  /** Real meshes share card state and painter bias; shadow twins retain ordinary ground depth. */
   addSourceMesh(mesh: Mesh): void {
     mesh.userData.painterDepth = this.painterDepth;
+    mesh.userData.voxelNativeDepth = this.nativeDepth;
     this.partMeshes.push(mesh);
   }
 
@@ -515,6 +520,70 @@ export class VoxelUnit extends Group {
     }
     this.matrixWorldNeedsUpdate = true;
   }
+
+  override updateMatrixWorld(force?: boolean): void {
+    super.updateMatrixWorld(force);
+    // Static maps acquire terrain tilt only after attachment to the renderer's scene. Keep their card bottom
+    // current too; source matrices are already posed here, and twins never participate in the bounds.
+    if (this.nativeDepth.enabled)
+      this.nativeDepth.bottom = voxelBitmapBottom(this.partMeshes, this.nativeDepth.anchor, false);
+  }
+}
+
+const nativeMaterials = new WeakMap<MeshStandardNodeMaterial, MeshStandardNodeMaterial>();
+const physicalMaterials = new WeakMap<MeshStandardNodeMaterial, MeshStandardNodeMaterial>();
+const physicalOrders = new WeakMap<Mesh, number>();
+
+/** Shared source materials stay physical; a source's disposal owns its transparent native-card variant too. */
+function nativeVoxelMaterial(source: MeshStandardNodeMaterial): MeshStandardNodeMaterial {
+  let material = nativeMaterials.get(source);
+  if (!material) {
+    material = source.clone();
+    material.name = `${source.name}:native-ground`;
+    material.transparent = true;
+    material.depthWrite = true;
+    nativeMaterials.set(source, material);
+    physicalMaterials.set(material, source);
+    const variant = material;
+    source.addEventListener('dispose', () => variant.dispose());
+  }
+  return material;
+}
+
+function setVoxelNativePass(root: VoxelUnit, enabled: boolean): void {
+  for (const mesh of root.partMeshes) {
+    const material = mesh.material as MeshStandardNodeMaterial;
+    const source = physicalMaterials.get(material) ?? material;
+    if (enabled) {
+      if (!physicalOrders.has(mesh)) physicalOrders.set(mesh, mesh.renderOrder);
+      // DoorAnim is a color-only layer at 4.001. Unit color follows it while body depth still rejects hidden units.
+      mesh.renderOrder = NATIVE_UNIT_RENDER_ORDER;
+      mesh.material = nativeVoxelMaterial(source);
+    } else {
+      mesh.material = source;
+      const order = physicalOrders.get(mesh);
+      if (order !== undefined) {
+        mesh.renderOrder = order;
+        physicalOrders.delete(mesh);
+      }
+    }
+  }
+}
+
+/** Update after posing all parts. Non-ground layers opt out without changing shared materials or geometry. */
+export function updateVoxelNativeDepth(
+  unit: Object3D | { root: Object3D },
+  anchor: Vector3,
+  bonus = 0,
+  enabled = true,
+): void {
+  const root = unit instanceof Object3D ? unit : unit.root;
+  if (!(root instanceof VoxelUnit)) return;
+  root.nativeDepth.enabled = enabled ? 1 : 0;
+  root.nativeDepth.anchor.copy(anchor);
+  root.nativeDepth.bonus = bonus;
+  if (enabled) root.nativeDepth.bottom = voxelBitmapBottom(root.partMeshes, anchor);
+  setVoxelNativePass(root, enabled);
 }
 
 /**
@@ -534,7 +603,7 @@ export function instantiateVoxel(
     const mesh = new Mesh(part.geometry, part.material ?? material);
     const sourceMaterial = part.material ?? material;
     // Palette materials are shared. The node reads the currently rendered mesh's depth slot.
-    if (!sourceMaterial.depthNode) sourceMaterial.depthNode = meshPainterDepthNode();
+    if (!sourceMaterial.depthNode) sourceMaterial.depthNode = voxelNativeDepthNode();
     root.addSourceMesh(mesh);
     if (!part.geometry.boundingSphere) part.geometry.computeBoundingSphere();
     const sphere = part.geometry.boundingSphere!;

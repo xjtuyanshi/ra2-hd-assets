@@ -243,6 +243,7 @@ function presentation(withLibrary = true) {
     hasHdPage: () => !available.hd,
     pageFailed: () => available.failed,
     disposeMaterials: vi.fn(),
+    disposeDepthTemplate: vi.fn(),
   };
   const cellLayer = new SpriteLayer(cache, [], 8);
   const backing = {
@@ -494,6 +495,7 @@ describe('LiveView smudge integration', () => {
     expect(p.backing.smudgeLayers.size).toBe(0);
     expect(p.backing.uploadedSmudges.size).toBe(0);
     expect(p.liveLibrary.disposeMaterials).toHaveBeenCalledTimes(1);
+    expect(p.liveLibrary.disposeDepthTemplate).toHaveBeenCalledTimes(1);
   });
 
   it('grows a page without truncating marks and disposes the replaced mesh', () => {

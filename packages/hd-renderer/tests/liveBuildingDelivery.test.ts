@@ -1,17 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Group, Texture, Vector3 } from 'three/webgpu';
+import { Group } from 'three/webgpu';
+import { painterObject } from '../src/ra2/painterOrder';
+import type { SpriteInstance } from '../src/ra2/sprites';
 import type { LibraryType } from '../../ra2-assets/src/library';
 import type { SpriteEntry, SpriteFrame } from '../../ra2-assets/src/manifest';
-import { DOOR_RECESS, ROOF_RECESS, LiveView, type LiveObject, type LiveSnapshot } from '../src/live/liveView';
+import { LiveView, type LiveObject, type LiveSnapshot } from '../src/live/liveView';
 import { SpritePool } from '../src/live/spritePool';
-import { cardDepthPush } from '../src/ra2/cardDepth';
-import { assignPainterBias, painterObject, spritePainterBias } from '../src/ra2/painterOrder';
-import { SpriteLayer, type SpriteInstance } from '../src/ra2/sprites';
-import type { Ra2Cache } from '../src/ra2/cache';
-import type { DirtyAttribute } from '../src/dirtyAttribute';
-import { biasedDepth } from '../src/painterDepth';
-import { IsoCamera, LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../src/world';
-import { VOXEL_CLEARANCE } from '../src/ra2/voxels';
 
 /** Real libraryBuildingSprites, buildup, layer, palette and queue paths; no GPU or game assets. */
 function deliveryView() {
@@ -52,7 +46,7 @@ function deliveryView() {
   const pool = new SpritePool();
   const state = {
     library: { library: { sprites }, conditionYellow: 0.5, page: () => ({}), hasHdPage: () => false },
-    cache: { paletteRow: new Map([['lib:unit@house0', 1]]) },
+    cache: { paletteRow: new Map([['lib:unit@house0', 1]]), depthTemplate: { width: 396, height: 477 } },
     libraryPaletteKeys: new Map(),
     spritePool: pool,
     civilian: new Set(),
@@ -95,7 +89,7 @@ function deliveryView() {
     view.libraryBuildingSprites(object, visual, batch, { frame: 0, houses: [], objects: [object] });
     return { batch, cards: queued.mock.calls.map((call) => call[1]) };
   };
-  return { object, type, sprites, painter, state, draw, queued };
+  return { object, type, sprites, painter, state, view, draw, queued };
 }
 
 describe('live delivery building image', () => {
@@ -125,212 +119,52 @@ describe('live delivery building image', () => {
       expect(body.palette).toBe(section.palette);
       expect(cards[1]).toMatchObject({ shadow: true, flat: true });
       expect(body).toMatchObject({ shadow: false, flat: false });
-      expect(DOOR_RECESS).toBe(2.75);
-      expect(ROOF_RECESS).toBe(4);
-      expect(cards.map((card) => card.foundationRecess)).toEqual([
-        0,
-        0,
-        0,
-        unloading === 'roof' ? ROOF_RECESS : DOOR_RECESS,
-        0,
-      ]);
-      // The deploying body retains its facade: a unit inside remains behind opaque posts, then emerges in front.
-      for (const [x, z, hidden] of [
-        [12.5, 21.5, true],
-        [15.5, 21.5, false],
-      ] as const) {
-        const px = (x - body.anchor.x - (z - body.anchor.z)) * 30;
-        const py = (x - body.anchor.x + z - body.anchor.z) * 15 - 0.3 * Math.cos(Math.PI / 6) * (60 / Math.SQRT2);
-        const bodyDepth = cardDepthPush(
-          px,
-          py,
-          5,
-          3,
-          body.anchor.x - body.anchor.z - h.painter.x + h.painter.z,
-          h.painter.x + h.painter.z - body.anchor.x - body.anchor.z,
-        );
-        const unitDepth = (x + z - body.anchor.x - body.anchor.z) * Math.sqrt(3 / 8) + 0.3 * 0.5 + 0.035;
-        expect(bodyDepth > unitDepth).toBe(hidden);
-      }
+      expect(cards.map((card) => card.nativeDepth?.mode)).toEqual(['ground', undefined, 'body', 'ground', 'body']);
+      expect(cards[0]!.nativeDepth).toEqual({ mode: 'ground', bonus: 2 });
+      expect(section.nativeDepth).toEqual({ mode: 'ground', bonus: 1 });
+      expect(body.nativeDepth).toMatchObject({
+        mode: 'body',
+        origin: [138, 356],
+        base: unloading === 'roof' ? 56 : 36,
+      });
+      expect(cards[4]!.nativeDepth).toMatchObject(body.nativeDepth!);
     },
   );
 
-  it.each(['door', 'roof'] as const)(
-    'fits the %s recess to the frozen factory delivery positions while retaining facade and ground depth',
-    (unloading) => {
-      const h = deliveryView();
-      Object.assign(h.object, { x: 58.5 * 256, y: 98.5 * 256, unloading });
-      Object.assign(h.painter, { x: 58, z: 98 });
-      h.type.drawOffset = [0, -15];
-      // Wide synthetic cards cover the tested column and rows; no private factory pixels are required.
-      for (const id of ['deploy', 'door', 'roofDeploy', 'roofDoor']) {
-        Object.assign(h.sprites[id]!.frames[0]!, { rect: [0, 0, 360, 300], offset: [-120, -140] });
-      }
-      const { cards } = h.draw();
-      const body = cards[2]!;
-      const door = cards[3]!;
-      expect(body.anchor.toArray()).toEqual([58, 0, 98]);
-      const unitPainter = { ...painterObject(2, 0, 56), x: 60.5, z: 99.5 };
-      assignPainterBias([h.painter, unitPainter]);
-      const unit: SpriteInstance = {
-        anchor: new Vector3(unitPainter.x, 0, unitPainter.z),
-        frame: { rect: [0, 0, 21, 30], offset: [-10, -25] },
-        palette: 'unit',
-        push: 0.4,
-        shadow: false,
-        painter: unitPainter,
-      };
-      const atlas = new Texture();
-      const layer = new SpriteLayer(
-        {
-          paletteAtlas: { image: { height: 1 } },
-          paletteRow: new Map(),
-          manifest: { spriteAtlas: { width: 512, height: 512 } },
-          spriteAtlas: atlas,
-        } as unknown as Ra2Cache,
-        [body, door, unit],
-      );
-      const uploaded = layer as unknown as {
-        params: DirtyAttribute;
-        flags: DirtyAttribute;
-        orderedCards: SpriteInstance[];
-      };
-      const camera = new IsoCamera();
-      camera.target.copy(body.anchor);
-      camera.update();
-      const range = camera.camera.far - camera.camera.near;
-      const right = new Vector3().setFromMatrixColumn(camera.camera.matrixWorld, 0);
-      const up = new Vector3().setFromMatrixColumn(camera.camera.matrixWorld, 1);
-      const toward = new Vector3().setFromMatrixColumn(camera.camera.matrixWorld, 2);
-      const screen = (p: Vector3): [number, number] => [
-        30 * (p.x - p.z),
-        15 * (p.x + p.z) - p.y * Math.cos(Math.PI / 6) * PIXELS_PER_CELL_EDGE,
-      ];
-      const physical = (p: Vector3) =>
-        (-p.clone().applyMatrix4(camera.camera.matrixWorldInverse).z - camera.camera.near) / range;
-      const depth = (s: SpriteInstance, pixel: [number, number]) => {
-        const i = uploaded.orderedCards.indexOf(s);
-        const at = screen(s.anchor);
-        const px = pixel[0] - at[0];
-        const py = pixel[1] - at[1];
-        const placement = uploaded.params.array[i * 4 + 3]!;
-        const placed = s.anchor
-          .clone()
-          .addScaledVector(right, px / PIXELS_PER_CELL_EDGE)
-          .addScaledVector(up, -py / PIXELS_PER_CELL_EDGE)
-          .addScaledVector(toward, placement);
-        const [w, sizeH, dx, ds] = Array.from(uploaded.flags.array.slice(i * 8 + 4, i * 8 + 8));
-        return biasedDepth(
-          physical(placed),
-          cardDepthPush(px, py, w, sizeH, dx, ds) - placement + uploaded.flags.array[i * 8 + 3]!,
-          range,
-        );
-      };
-      const expectCovered = (s: SpriteInstance, pixel: [number, number]) => {
-        const at = screen(s.anchor);
-        expect(pixel[0] - at[0]).toBeGreaterThanOrEqual(s.frame.offset[0]);
-        expect(pixel[0] - at[0]).toBeLessThan(s.frame.offset[0] + s.frame.rect[2]);
-        expect(pixel[1] - at[1]).toBeGreaterThanOrEqual(s.frame.offset[1]);
-        expect(pixel[1] - at[1]).toBeLessThan(s.frame.offset[1] + s.frame.rect[3]);
-      };
-      try {
-        for (const s of [body, door]) {
-          const i = uploaded.orderedCards.indexOf(s);
-          expect(Array.from(uploaded.flags.array.slice(i * 8 + 4, i * 8 + 8))).toEqual([
-            5,
-            3,
-            0,
-            s === door ? -(unloading === 'roof' ? ROOF_RECESS : DOOR_RECESS) : 0,
-          ]);
-        }
-        const positions: ReadonlyArray<readonly [number, number, number, boolean]> =
-          unloading === 'roof'
-            ? [
-                [2.5, 1.5, 0, false],
-                [2.5, 1.5, 1.5, false],
-                [4.13, 1.06, 0, false],
-              ]
-            : [
-                [2.5, 1.5, 0, true],
-                [4.13, 1.06, 0, false],
-              ];
-        for (const [x, z, levels, hidden] of positions) {
-          unit.anchor.set(58 + x, levels * LEVEL_HEIGHT, 98 + z);
-          layer.setInstances([body, door, unit]);
-          for (const row of [0, -10]) {
-            const pixel = screen(unit.anchor);
-            pixel[1] += row;
-            // The synthetic opaque body covers this door-post/wall column; these are depth assertions, not art QA.
-            for (const s of [body, door, unit]) expectCovered(s, pixel);
-            const spriteDepth = depth(unit, pixel);
-            const voxelPoint = unit.anchor.clone();
-            voxelPoint.y -= row / (Math.cos(Math.PI / 6) * PIXELS_PER_CELL_EDGE);
-            const voxelDepth = biasedDepth(
-              physical(voxelPoint),
-              VOXEL_CLEARANCE + spritePainterBias(unitPainter),
-              range,
-            );
-            for (const unitDepth of [spriteDepth, voxelDepth]) {
-              if (hidden) expect(unitDepth).toBeGreaterThan(depth(door, pixel));
-              else expect(unitDepth).toBeLessThan(depth(door, pixel));
-              expect(unitDepth).toBeGreaterThan(depth(body, pixel));
-            }
-            if (unloading === 'door') {
-              // Preserve the measured door depths; at the later tank both rows use the ramp's ground branch.
-              expect((spriteDepth - depth(door, pixel)) * range).toBeCloseTo(
-                hidden ? 0.197760509 : row === 0 ? -0.006363636 : -0.55069469,
-                6,
-              );
-              expect((voxelDepth - depth(door, pixel)) * range).toBeCloseTo(
-                hidden ? 0.192760509 : row === 0 ? -0.011363636 : -0.55569469,
-                6,
-              );
-              if (!hidden) expect((spriteDepth - depth(body, pixel)) * range).toBeCloseTo(1.414340414, 6);
-            }
-          }
-        }
-        // Roof: same inside column d=1, outside behind back surface s=1, at local (0.5,-0.5), s=0.
-        // Door: same later tank column d=3.07, outside behind back surface s=3.07, at (2.57,-0.5), s=2.07.
-        const tankColumn = unloading === 'roof' ? 30 * (58 + 2.5 - 98 - 1.5) : screen(unit.anchor)[0];
-        unit.anchor.set(unloading === 'roof' ? 58.5 : 60.57, 0, 97.5);
-        layer.setInstances([body, door, unit]);
-        expect(screen(unit.anchor)[0]).toBeCloseTo(tankColumn);
-        for (const row of [0, -10]) {
-          const pixel = screen(unit.anchor);
-          pixel[1] += row;
-          expect(depth(unit, pixel)).toBeGreaterThan(depth(door, pixel));
-          const voxelPoint = unit.anchor.clone();
-          voxelPoint.y = -row / (Math.cos(Math.PI / 6) * PIXELS_PER_CELL_EDGE);
-          expect(
-            biasedDepth(physical(voxelPoint), VOXEL_CLEARANCE + spritePainterBias(unitPainter), range),
-          ).toBeGreaterThan(depth(door, pixel));
-        }
-        // Outside the +x facade, ramp/base rows retain the unchanged ground-depth branch for both cards.
-        unit.anchor.set(63.5, 0, 99.5);
-        layer.setInstances([body, door, unit]);
-        for (const row of [0, 4]) {
-          const pixel = screen(unit.anchor);
-          pixel[1] += row;
-          for (const s of [body, door, unit]) expectCovered(s, pixel);
-          for (const s of [body, door]) {
-            const at = screen(s.anchor);
-            const i = uploaded.orderedCards.indexOf(s);
-            const [w, sizeH, dx, ds] = Array.from(uploaded.flags.array.slice(i * 8 + 4, i * 8 + 8));
-            expect(cardDepthPush(pixel[0] - at[0], pixel[1] - at[1], w, sizeH, dx, ds)).toBeCloseTo(
-              cardDepthPush(pixel[0] - at[0], pixel[1] - at[1]),
-              12,
-            );
-            expect(depth(unit, pixel)).toBeLessThan(depth(s, pixel));
-          }
-        }
-      } finally {
-        layer.mesh.dispose();
-        layer.mesh.geometry.dispose();
-        layer.mesh.material.dispose();
-        atlas.dispose();
-      }
-    },
-  );
+  it('keeps legacy building profiles only when the template is absent', () => {
+    const h = deliveryView();
+    h.object.unloading = 'door';
+    delete (h.state.cache as { depthTemplate?: unknown }).depthTemplate;
+    expect(h.draw().cards.every((card) => card.nativeDepth === undefined)).toBe(true);
+  });
+
+  it('translates attached layers to the current body origin and bottom, including YDrawOffset', () => {
+    const h = deliveryView();
+    h.type.building!.zShape = { pointMove: [30, 15], normalZAdjust: 4 };
+    const active = h.type.building!.layers.find((layer) => layer.key === 'ActiveAnim')!;
+    active.offset = [12, -9];
+    active.yDrawOffset = 3;
+    const cards = h.draw().cards;
+    const body = cards[2]!;
+    const layer = cards[3]!;
+    expect(body.nativeDepth).toMatchObject({ mode: 'body', origin: [168, 371], base: 12 });
+    expect(layer.nativeDepth).toMatchObject({ mode: 'body', origin: [168, 371], base: 12, offset: [12, -6] });
+    expect(layer.anchor.x - body.anchor.x).toBeCloseTo(0);
+    expect(layer.anchor.z - body.anchor.z).toBeCloseTo(-0.4);
+  });
+
+  it('draws DoorAnim with native ground depth without writing unit-occluding depth', () => {
+    const h = deliveryView();
+    h.type.building!.layers.push({ key: 'DoorAnim', sprite: 'active', anim: {} });
+    Object.assign(h.view, {
+      buildingAnims: { attached: new Map([[1, [[0, { type: 'active', frame: 0 }]]]]), cells: new Map() },
+    });
+    // Resolve a unique DoorAnim image through the native animation path.
+    h.type.building!.layers = h.type.building!.layers.filter((layer) => layer.key !== 'ActiveAnim');
+    const card = h.draw().cards.at(-1)!;
+    expect(card.nativeDepth).toEqual({ mode: 'ground', bonus: 6 });
+    expect(card.depthWrite).toBe(false);
+  });
 
   it.each(['door', 'roof'] as const)(
     'clamps the %s body/shadow frame and independently selects yellow damage',
@@ -408,6 +242,8 @@ describe('live delivery building image', () => {
       h.object.unloading = 'door';
       h.object.buildState = buildState;
       h.object.buildupFrame = 1;
+      h.type.building!.zShape = { pointMove: [30, 15], normalZAdjust: 4 };
+      expect(h.draw().cards[1]!.nativeDepth).toMatchObject({ mode: 'body', origin: [138, 356], base: 12 });
       expect(h.draw().cards.map((card) => card.frame)).toEqual([
         h.sprites.make!.shadows![1],
         h.sprites.make!.frames[1],

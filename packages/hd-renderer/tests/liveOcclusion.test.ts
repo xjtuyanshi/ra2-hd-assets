@@ -7,12 +7,11 @@ import { BuildingLightGate } from '../src/live/buildingLights';
 import { LiveView, type LiveObject, type LiveSnapshot } from '../src/live/liveView';
 import type { EffectInstance } from '../src/live/effectSprites';
 import { SpritePool } from '../src/live/spritePool';
-import { FoundationIndex } from '../src/live/foundationIndex';
 import { VoxelUnits } from '../src/live/voxelUnits';
 import type { Ra2Cache } from '../src/ra2/cache';
-import { cardDepthPush, foundationPointPush } from '../src/ra2/cardDepth';
+import { cardDepthPush } from '../src/ra2/cardDepth';
 import { biasedDepth } from '../src/painterDepth';
-import { MAX_PAINTER_BIAS, painterObject, spritePainterBias, type PainterObject } from '../src/ra2/painterOrder';
+import { painterObject, spritePainterBias, type PainterObject } from '../src/ra2/painterOrder';
 import { cardPush, SpriteLayer, type SpriteInstance } from '../src/ra2/sprites';
 import { VOXEL_CLEARANCE, VoxelUnit } from '../src/ra2/voxels';
 import { VolumetricBlastLayer } from '../src/volumetricBlasts';
@@ -61,6 +60,7 @@ function presentation() {
     manifest: {
       sprites: { 'building:TESTBUILD': { frames: [frame], palette: 'unit', foundation: [4, 4] } },
       spriteAtlas: { width: 64, height: 64 },
+      objects: [],
     },
     paletteAtlas: { image: { height: 1 } },
     spriteAtlas: new Texture(),
@@ -139,7 +139,11 @@ function presentation() {
     painterDirty: false,
     effectsDirty: false,
     pose: { x: 0, y: 0, z: 0, facing: 0 },
-    voxelUnits: { pose: VoxelUnits.prototype.pose, setPainterBias: VoxelUnits.prototype.setPainterBias },
+    voxelUnits: {
+      pose: VoxelUnits.prototype.pose,
+      setPainterBias: VoxelUnits.prototype.setPainterBias,
+      setNativeDepth: VoxelUnits.prototype.setNativeDepth,
+    },
     viewWidth: 0,
     viewHeight: 0,
     lastRender: 0,
@@ -162,7 +166,7 @@ function presentation() {
 
 describe('LiveView physical occlusion scheduling', () => {
   it.each([
-    ['inside', 'infantry', 0.5, 1.5, true, 2, 0, false],
+    ['inside', 'infantry', 0.5, 1.5, true, 2, 0, true],
     ['outside south', 'infantry', 0.5, 2.2, true, 2, 0, true],
     ['no building', 'infantry', 0.5, 1.5, false, 2, 0, true],
     ['inside vehicle', 'vehicle', 0.5, 1.5, true, 2, 0, true],
@@ -174,7 +178,7 @@ describe('LiveView physical occlusion scheduling', () => {
     ['outside north', 'infantry', 0.5, -0.01, true, 2, 0, true],
     ['west inset boundary', 'infantry', 0.05, 1.5, true, 2, 0, true],
     ['south inset boundary', 'infantry', 0.5, 1.95, true, 2, 0, true],
-    ['past west inset', 'infantry', 0.051, 1.5, true, 2, 0, false],
+    ['past west inset', 'infantry', 0.051, 1.5, true, 2, 0, true],
   ] as const)('draws the expected body and shadow for %s', (_, kind, x, z, building, layer, altitude, drawn) => {
     const p = presentation();
     const frame = {
@@ -246,49 +250,11 @@ describe('LiveView physical occlusion scheduling', () => {
     expect(own.filter((s) => s.shadow)).toHaveLength(drawn ? 1 : 0);
     expect(p.visual.root.visible).toBe(drawn);
     if (!drawn) expect(queue.mock.calls.every((call) => call[1].anchor.x === 67 && call[1].anchor.z === 14)).toBe(true);
-    // Containment uses the exact new endpoint even while the pose is interpolated, and refreshes on removal.
-    if (!drawn) {
-      const outside = {
-        ...snap,
-        frame: 2,
-        objects: snap.objects.map((o) => (o.uid === 1 ? { ...o, y: 16.2 * 256 } : o)),
-      };
-      p.view.push(outside, 100);
-      p.view.render(100);
-      expect(p.visual.root.visible).toBe(true);
-      const inside = { ...snap, frame: 3 };
-      p.view.push(inside, 200);
-      p.view.render(200);
-      expect(p.visual.root.visible).toBe(false);
-      buildingType.invisible = true;
-      p.view.push({ ...inside }, 205);
-      p.view.render(205);
-      expect(p.visual.root.visible).toBe(true);
-      buildingType.invisible = false;
-      p.view.push({ ...inside }, 207);
-      p.view.render(207);
-      expect(p.visual.root.visible).toBe(false);
-      // A publication can remove a foundation without advancing the logic frame.
-      p.view.push({ ...inside, objects: [inside.objects[0]!] }, 210);
-      p.view.render(210);
-      expect(p.visual.root.visible).toBe(true);
-    }
-  });
-
-  it('unions overlapping foundations in constant-time cell queries without filling empty corners', () => {
-    const index = new FoundationIndex();
-    for (let i = 0; i < 1000; i++) {
-      index.add(0, 0, 2, 2);
-      index.add(1, 1, 2, 2);
-    }
-    expect(index.contains(1, 1)).toBe(true); // Internal cell seam, not an exterior edge.
-    expect(index.contains(1.99, 1.99)).toBe(true); // Inside the second despite the first's inset.
-    expect(index.contains(0.5, 2.2)).toBe(false);
-    expect(index.contains(2.2, 0.5)).toBe(false);
-    expect(index.contains(0.05, 0.5)).toBe(false);
-    expect(index.contains(0.0501, 0.5)).toBe(true);
-    expect(index.contains(2.95, 2.5)).toBe(false);
-    expect(index.contains(2.9499, 2.5)).toBe(true);
+    // Opaque body/template pixels decide visibility; no instance-level spawn hiding remains.
+    if (kind === 'infantry')
+      expect(own.find((card) => !card.shadow)?.nativeDepth?.mode).toBe(
+        layer === 2 && altitude === 0 ? 'card' : undefined,
+      );
   });
 
   it.each([
@@ -366,8 +332,8 @@ describe('LiveView physical occlusion scheduling', () => {
     expect(unit.anchor.y).toBe(2 * LEVEL_HEIGHT);
     expect(unit.anchor.z).toBeCloseTo(z, 10);
     expect([body.push, unit.push]).toEqual([cardPush(body.frame), cardPush(unit.frame)]);
-    expect(body).toMatchObject({ flat: false, shadow: false, painterPart: 0, painter: { bias: 0, pull: 0 } });
-    expect(unit).toMatchObject({ flat: false, shadow: false, painterPart: 0, painter: { pull: 0 } });
+    expect(body).toMatchObject({ flat: false, shadow: false, painterPart: 0, painter: { bias: 0 } });
+    expect(unit).toMatchObject({ flat: false, shadow: false, painterPart: 0 });
     expect(unit.painter!.afterEqual).toBeUndefined();
     expect(spritePainterBias(unit.painter)).toBeCloseTo((0.01 * 56) / 88, 12);
     for (const shadow of cards.filter((s) => s.shadow)) {
@@ -380,7 +346,10 @@ describe('LiveView physical occlusion scheduling', () => {
       params: DirtyAttribute;
     };
     const index = (s: SpriteInstance) => cards.filter((c) => c.shadow).length + uploaded.orderedCards.indexOf(s);
-    const profile = (s: SpriteInstance) => Array.from(uploaded.flags.array.slice(index(s) * 8 + 4, index(s) * 8 + 8));
+    const profile = (s: SpriteInstance) =>
+      Array.from(
+        uploaded.flags.array.slice(index(s) * uploaded.flags.itemSize + 4, index(s) * uploaded.flags.itemSize + 8),
+      );
     expect(profile(body)).toEqual([2, 2, 0, 0]);
     expect(profile(unit)).toEqual([0, 0, 0, 0]);
     const camera = new IsoCamera();
@@ -409,7 +378,7 @@ describe('LiveView physical occlusion scheduling', () => {
       const [w, h, dx, ds] = profile(s);
       return biasedDepth(
         physical,
-        cardDepthPush(px, py, w, h, dx, ds) - placement + uploaded.flags.array[i * 8 + 3]!,
+        cardDepthPush(px, py, w, h, dx, ds) - placement + uploaded.flags.array[i * uploaded.flags.itemSize + 3]!,
         range,
       );
     };
@@ -423,161 +392,59 @@ describe('LiveView physical occlusion scheduling', () => {
     }
   });
 
-  it.each(['infantry', 'vehicle'] as const)(
-    'uploads propagated pull for a passing sprite %s and removes it behind the dock',
-    (kind) => {
-      const p = presentation();
-      p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
-      p.view.push(dockSnapshot(1), 0);
-      p.view.render(0);
-      const passing: LiveObject = { ...object(13952 + 256), uid: 3, kind, y: 26240 };
-      p.live.current!.byUid.set(passing.uid, passing);
-      const painter = { ...painterObject(2, 0, 9), uid: 3, x: 55, z: 102 };
-      p.live.visuals.set(3, { ...p.visual, mode: 'library-sprite', root: new VoxelUnit(), painter });
-      // The same pooled upright record used by both infantry and SHP vehicle draw paths.
-      const pool = new SpritePool();
-      pool.painter = painter;
-      const frame = p.live.cache.manifest.sprites['building:TESTBUILD']!.frames[0]!;
-      const card = pool.take(new Vector3(passing.x / 256, 0, passing.y / 256), frame, 'unit', 0.2, false);
-      p.live.spriteBatch.get('map')!.push(card);
-      p.live.applyPainterOrder();
-      const uploaded = p.live.sprites as unknown as { orderedCards: (typeof card)[]; flags: { array: Float32Array } };
-      const bias = () => uploaded.flags.array[uploaded.orderedCards.indexOf(card) * 8 + 3]!;
-      const docked = p.visual.painter!;
-      expect(painter.pull).toBeGreaterThan(0);
-      expect(bias()).toBeCloseTo(spritePainterBias(painter), 6);
-      expect((passing.x / 256 + passing.y / 256) * Math.sqrt(3 / 8) + bias()).toBeGreaterThan(
-        (13952 / 256 + 26240 / 256) * Math.sqrt(3 / 8) + spritePainterBias(docked),
-      );
-      expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(VOXEL_CLEARANCE + spritePainterBias(docked));
-      painter.index = 6;
-      p.live.applyPainterOrder();
-      expect(painter.pull).toBe(0);
-      expect(bias()).toBeCloseTo(painter.bias, 6);
-    },
-  );
-
-  it('pulls the measured dock footprint immediately, keeps turret bias, and refreshes only on changed inputs', () => {
+  it('uses native cards only on terrain or a present bridge deck in Ground', () => {
     const p = presentation();
-    p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
-    const expectedPull = foundationPointPush(2.5, 1.5, 4, 3) + 0.5;
-    p.view.push(dockSnapshot(1), 0);
+    const live = p.view as unknown as {
+      groundCard(object: LiveObject): boolean;
+      harvesterBonus(object: LiveObject): number;
+    };
+    const o = object(256);
+    expect(live.groundCard(o)).toBe(true);
+    o.z = 104;
+    expect(live.groundCard(o)).toBe(false);
+    o.z = 416;
+    expect(live.groundCard(o)).toBe(false);
+    p.live.cache.manifest.objects.push({ kind: 'overlay', type: 'BRIDGE1', x: 1, y: 1, z: 0 });
+    expect(live.groundCard(o)).toBe(true);
+    o.renderOrder!.layer = 4;
+    expect(live.groundCard(o)).toBe(false);
+    Object.assign(p.live, {
+      library: { type: (type: string) => ({ harvester: type === 'TEST' }) },
+      refineryCells: new Set(['1,1']),
+    });
+    o.imageType = 'UNLOADING';
+    expect(live.harvesterBonus(o)).toBe(13);
+  });
+
+  it('uses current refinery cells without contact or settlement and keeps painter bias bounded', () => {
+    const p = presentation();
+    const unitType = { harvester: true };
+    const buildingType = { refinery: true, foundation: [4, 3] };
+    Object.assign(p.live, {
+      library: { revision: 0, type: (id: string) => (id === 'TEST' ? unitType : buildingType) },
+    });
+    const snap = dockSnapshot(1);
+    delete snap.objects[0]!.contactUid;
+    p.view.push(snap, 0);
     p.view.render(0);
-    const normalBias = () => VOXEL_CLEARANCE + (p.visual.painter?.bias ?? 0);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + expectedPull);
+    expect(p.visual.root.nativeDepth.bonus).toBe(13);
+    expect(p.visual.root.nativeDepth.enabled).toBe(1);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(VOXEL_CLEARANCE + spritePainterBias(p.visual.painter));
     const calls = p.order.mock.calls.length;
     p.view.render(50);
     expect(p.order).toHaveBeenCalledTimes(calls);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + expectedPull);
-    p.view.push(dockSnapshot(6), 60);
-    p.view.render(60);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + expectedPull);
-    p.view.push(dockSnapshot(7), 70);
-    p.view.render(70);
-    expect(p.visual.firstFrame).toBe(1);
-    expect(p.visual.painter).toMatchObject({ x: 54, z: 102 });
-    expect(p.mesh.userData.painterDepth.bias - normalBias()).toBeCloseTo(expectedPull);
-    expect(expectedPull).toBeCloseTo(3.00949, 5);
-    expect(p.mesh.userData.painterDepth.bias).toBeGreaterThan(MAX_PAINTER_BIAS);
-    const settledCalls = p.order.mock.calls.length;
-    p.view.render(80);
-    expect(p.order).toHaveBeenCalledTimes(settledCalls);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + expectedPull);
-
-    const building = p.live.visuals.get(2)!;
-    expect(building.painter).toMatchObject({ x: 51, z: 101, foundation: [4, 3] });
-    const turretRoot = new VoxelUnit();
-    const turretMesh = new Mesh();
-    turretRoot.addSourceMesh(turretMesh);
-    Object.assign(building, { buildingTurret: { root: turretRoot } });
-    p.live.applyPainterOrder();
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + expectedPull);
-    expect(turretMesh.userData.painterDepth.bias).toBeCloseTo(
-      VOXEL_CLEARANCE + spritePainterBias(building.painter, 0.4),
-    );
-
-    const reordered = dockSnapshot(8);
-    reordered.objects[0]!.renderOrder!.index = 6;
-    p.view.push(reordered, 90);
-    p.view.render(90);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
-
-    p.view.push(dockSnapshot(9), 100);
-    p.view.render(100);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + expectedPull);
-    Object.assign(building, { libraryType: { invisible: true } });
-    p.view.push(dockSnapshot(10), 110);
+    expect(p.visual.root.nativeDepth.bonus).toBe(13);
+    // Radio contact may persist while leaving; only the current cell decides the bonus.
+    p.view.push(dockSnapshot(2, 55 * 256, 26240), 100);
     p.view.render(110);
-    expect(building.root.visible).toBe(false);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
-  });
-
-  it.each([
-    ['x', 8, 0],
-    ['y', 0, 8],
-  ] as const)('keeps the pull while backing in on a %s move', (_, dx, dy) => {
-    const p = presentation();
-    p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
-    const normalBias = () => VOXEL_CLEARANCE + (p.visual.painter?.bias ?? 0);
-    p.view.push(dockSnapshot(1), 0);
-    p.view.render(0);
-    p.view.push(dockSnapshot(7), 100);
-    p.view.render(100);
-    expect(p.mesh.userData.painterDepth.bias - normalBias()).toBeCloseTo(3.00949, 5);
-    p.view.push(dockSnapshot(8, 13952 + dx, 26240 + dy), 200);
-    p.view.render(250);
-    expect(p.visual.lastMoveFrame).toBe(8);
-    expect(p.mesh.userData.painterDepth.bias).toBeGreaterThan(normalBias() + 2.9);
-    p.view.push(dockSnapshot(13, 13952 + dx, 26240 + dy), 300);
-    p.view.render(300);
-    expect(p.mesh.userData.painterDepth.bias).toBeGreaterThan(normalBias() + 2.9);
-    p.view.push(dockSnapshot(14, 13952 + dx, 26240 + dy), 400);
-    p.view.render(400);
-    expect(p.mesh.userData.painterDepth.bias - normalBias()).toBeGreaterThan(2.9);
-  });
-
-  it.each([
-    ['east', 57 * 256 + 128, 26240],
-    ['south', 13952, 106 * 256 + 128],
-  ] as const)('keeps a settled voxel outside the %s foundation boundary at ordinary bias', (_, x, y) => {
-    const p = presentation();
-    p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
-    p.view.push(dockSnapshot(1, x, y), 0);
-    p.view.render(0);
-    p.view.push(dockSnapshot(7, x, y), 100);
-    p.view.render(100);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(VOXEL_CLEARANCE + spritePainterBias(p.visual.painter));
-  });
-
-  it('uses only the contacted host among overlapping visible buildings', () => {
-    const p = presentation();
-    const refineryArt = p.live.cache.manifest.sprites['building:TESTBUILD']!;
-    refineryArt.foundation = [4, 3];
-    p.live.cache.manifest.sprites['building:SMALLBUILD'] = { ...refineryArt, foundation: [4, 2] };
-    const snap = dockSnapshot(1);
-    const smaller: LiveObject = {
-      ...snap.objects[1]!,
-      uid: 3,
-      type: 'SMALLBUILD',
-      renderOrder: { layer: 2, index: 6, ySort: 38912 },
-    };
-    snap.objects.splice(1, 0, smaller);
-    p.view.push(snap, 0);
-    p.view.render(0);
-    p.view.push({ ...snap, frame: 7 }, 100);
-    p.view.render(100);
-    expect(p.live.visuals.get(3)!.root.visible).toBe(true);
-    expect(p.mesh.userData.painterDepth.bias - VOXEL_CLEARANCE - (p.visual.painter?.bias ?? 0)).toBeCloseTo(3.00949, 5);
-  });
-
-  it('caps a settled voxel pull at 3.5 even under a taller part of the facade', () => {
-    const p = presentation();
-    p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
-    p.view.push(dockSnapshot(1, 52 * 256 + 128, 101 * 256 + 128), 0);
-    p.view.render(0);
-    p.view.push(dockSnapshot(7, 52 * 256 + 128, 101 * 256 + 128), 100);
-    p.view.render(100);
-    expect(p.mesh.userData.painterDepth.bias - VOXEL_CLEARANCE - (p.visual.painter?.bias ?? 0)).toBeCloseTo(3.5);
+    expect(p.visual.root.nativeDepth.bonus).toBe(0);
+    p.view.push(dockSnapshot(3), 200);
+    p.view.render(210);
+    expect(p.visual.root.nativeDepth.bonus).toBe(13);
+    unitType.harvester = false;
+    p.view.push(dockSnapshot(4), 300);
+    p.view.render(310);
+    expect(p.visual.root.nativeDepth.bonus).toBe(0);
   });
 
   it.each([

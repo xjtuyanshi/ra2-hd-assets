@@ -68,6 +68,8 @@ export interface Ra2Cache {
     ref: NonNullable<HdCacheManifest['terrainMap']>;
   };
   spriteAtlas: Texture;
+  /** Shared native BUILDNGZ bytes; owned by LiveLibrary, sampled with integer texture loads. */
+  depthTemplate?: { texture: DataTexture; width: number; height: number };
   /** 2x HD version of the sprite atlas (full colour + house-paint mask), when extracted (pnpm hd:sprites). */
   spriteAtlasHd: HdAtlas | null;
   /** All palettes stacked into one 256xN texture; `paletteRow` maps a palette key to its row. */

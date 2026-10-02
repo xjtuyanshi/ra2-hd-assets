@@ -24,6 +24,8 @@ import {
 } from '../src/ra2/painterOrder';
 import { cardPush, objectAnchor, SpriteLayer, type SpriteInstance } from '../src/ra2/sprites';
 import { VOXEL_CLEARANCE } from '../src/ra2/voxels';
+import { TerrainDepth } from '../src/terrainDepth';
+import { groundPush, nativeCardPush } from '../src/ra2/nativeDepth';
 import { IsoCamera, PIXELS_PER_CELL_EDGE } from '../src/world';
 
 const view = new IsoCamera();
@@ -264,6 +266,100 @@ describe('YR traversal and physical occlusion', () => {
 type Buffers = { anchor: DirtyAttribute; params: DirtyAttribute; flags: DirtyAttribute };
 
 describe('sprite depth attributes', () => {
+  it('packs native modes and owner offsets without changing capture codes or depth-writing ordinary cards', () => {
+    const atlas = new Texture();
+    const cache = {
+      paletteAtlas: { image: { height: 1 } },
+      paletteRow: new Map([['unit', 0]]),
+      manifest: { spriteAtlas: { width: 256, height: 256 } },
+      spriteAtlas: atlas,
+    } as unknown as Ra2Cache;
+    const card: SpriteInstance = {
+      anchor: new Vector3(),
+      frame: { rect: [0, 0, 20, 40], offset: [-10, -30] },
+      palette: 'unit',
+      push: 0,
+      shadow: false,
+      nativeDepth: { mode: 'body', origin: [198, 386], base: 91, offset: [12, 9], anchorPush: 0.5 },
+    };
+    const layer = new SpriteLayer(cache, [card]);
+    const flags = (layer as unknown as Buffers).flags;
+    try {
+      expect(flags.itemSize).toBe(16);
+      expect(Array.from(flags.array.slice(8, 16))).toEqual([1, 198, 386, 91, 12, 9, 0.5, 0]);
+      expect(layer.readOnlyMesh.visible).toBe(false);
+      layer.setInstances([{ ...card, nativeDepth: { mode: 'ground', bonus: 6 }, depthWrite: false }]);
+      expect(Array.from(flags.array.slice(8, 16))).toEqual([2, 0, 0, 6, 0, 0, 0, 1]);
+      expect(layer.readOnlyMesh.visible).toBe(true);
+      expect(layer.readOnlyMesh.count).toBe(1);
+      expect(layer.readOnlyMesh.material.depthWrite).toBe(false);
+      expect(layer.mesh.material.depthWrite).toBe(true);
+      expect(layer.readOnlyMesh.geometry).toBe(layer.mesh.geometry);
+      layer.mesh.renderOrder = 8;
+      expect(layer.readOnlyMesh.renderOrder).toBeCloseTo(8.001, 8);
+      layer.setInstances([{ ...card, nativeDepth: { mode: 'card', bottom: 9, bonus: 12 } }]);
+      expect(Array.from(flags.array.slice(8, 16))).toEqual([3, 9, 12, 0, 0, 0, 0, 2]);
+      expect(layer.unitMesh.visible).toBe(true);
+      expect(layer.readOnlyMesh.visible).toBe(false);
+      layer.setInstances([{ ...card, shadow: true }]);
+      expect(Array.from(flags.array.slice(8, 16))).toEqual(new Array(8).fill(0));
+    } finally {
+      layer.mesh.geometry.dispose();
+      layer.mesh.material.dispose();
+      layer.mesh.dispose();
+      atlas.dispose();
+    }
+  });
+
+  it('draws native units after test-only doors and retains unit capture metadata in their late pass', () => {
+    const atlas = new Texture();
+    const capture = new TerrainDepth(1.5);
+    const cache = {
+      paletteAtlas: { image: { height: 1 } },
+      paletteRow: new Map(),
+      manifest: { spriteAtlas: { width: 32, height: 32 } },
+      spriteAtlas: atlas,
+    } as unknown as Ra2Cache;
+    const frame: SpriteFrame = { rect: [0, 0, 20, 20], offset: [-10, -16] };
+    const unit: SpriteInstance = {
+      anchor: new Vector3(),
+      frame,
+      palette: '',
+      push: 0,
+      shadow: false,
+      nativeDepth: { mode: 'card', bottom: 3, bonus: 0 },
+    };
+    const door: SpriteInstance = { ...unit, nativeDepth: { mode: 'ground', bonus: 6 }, depthWrite: false };
+    const layer = new SpriteLayer(cache, [door, unit], 2, undefined, null, null, null, capture);
+    try {
+      // e=3 clears UnderDoor(k=1), but Door(k=6) is nearer. Test-only depth without scheduling would paint it over.
+      expect(nativeCardPush(0, 3)).toBeGreaterThan(groundPush(0, 1));
+      expect(nativeCardPush(0, 3)).toBeLessThan(groundPush(0, 6));
+      expect(layer.mesh.renderOrder).toBeLessThan(layer.readOnlyMesh.renderOrder);
+      expect(layer.readOnlyMesh.renderOrder).toBeLessThan(layer.unitMesh.renderOrder);
+      expect(layer.unitMesh.material.transparent).toBe(true);
+      expect(layer.unitMesh.material.depthWrite).toBe(true);
+      expect(layer.unitMesh.geometry).toBe(layer.mesh.geometry);
+      expect(layer.unitMesh.material.userData.objectDepthCodeNode).toBe(
+        layer.mesh.material.userData.objectDepthCodeNode,
+      );
+      layer.updateCaptureCodes(() => 7);
+      expect(layer.unitMesh.layers.isEnabled(31)).toBe(true);
+      expect(layer.readOnlyMesh.layers.isEnabled(31)).toBe(false);
+      const flags = (layer as unknown as Buffers).flags;
+      expect(flags.itemSize).toBe(17);
+      expect(flags.getComponent(0, 8)).toBe(-65504);
+      expect(flags.getComponent(1, 8)).toBe(7);
+      layer.mesh.dispose();
+      expect(layer.unitMesh.layers.isEnabled(31)).toBe(false);
+    } finally {
+      layer.mesh.geometry.dispose();
+      layer.mesh.material.dispose();
+      capture.dispose();
+      atlas.dispose();
+    }
+  });
+
   it('uploads foundation profiles and biases across atlases while keeping shadows, ore and placement physical', () => {
     const atlas = new Texture();
     const cache = {
@@ -291,13 +387,13 @@ describe('sprite depth attributes', () => {
       expect(Array.from(buffers.flags.array.slice(4, 8))).toEqual([4, 2, 0, 0]);
       const placement = Array.from(buffers.params.array);
       const anchor = Array.from(buffers.anchor.array);
-      layer.setInstances([{ ...card, foundationRecess: 2 }]);
-      expect(Array.from(buffers.flags.array.slice(4, 8))).toEqual([4, 2, 0, -2]);
+      layer.setInstances([{ ...card, nativeDepth: { mode: 'ground', bonus: 1 } }]);
+      expect(Array.from(buffers.flags.array.slice(4, 8))).toEqual([4, 2, 0, 0]);
       expect(buffers.anchor.itemSize).toBe(5);
       expect(Array.from(buffers.anchor.array)).toEqual(anchor);
       expect(Array.from(buffers.params.array)).toEqual(placement);
-      layer.setInstances([{ ...card, anchor: new Vector3(50.75, 0, 50.25), foundationRecess: 2 }]);
-      expect(Array.from(buffers.flags.array.slice(4, 8))).toEqual([4, 2, 0.5, -3]);
+      layer.setInstances([{ ...card, anchor: new Vector3(50.75, 0, 50.25) }]);
+      expect(Array.from(buffers.flags.array.slice(4, 8))).toEqual([4, 2, 0.5, -1]);
       layer.setInstances([{ ...card, painterPart: 0.1 }]);
       expect(Array.from(buffers.flags.array.slice(4, 7))).toEqual([4, 2, 0]);
       expect(buffers.flags.array[7]).toBeCloseTo(0, 12);
@@ -329,13 +425,14 @@ describe('sprite depth attributes', () => {
     }
   });
 
-  it('clears pooled owners, component bias, bridge profiles and foundation recess between uses', () => {
+  it('clears pooled owners, component bias, bridge profiles and native depth between uses', () => {
     const pool = new SpritePool();
     const frame: SpriteFrame = { rect: [0, 0, 16, 24], offset: [-8, -18] };
     pool.painter = painterObject(2, 10);
     pool.deckHeight = HIGH_BRIDGE_HEIGHT;
     const first = pool.take(new Vector3(), frame, 'unit', 0, false, false, 1, 'ambient', 0.4);
-    first.foundationRecess = 2;
+    first.nativeDepth = { mode: 'ground', bonus: 1 };
+    first.depthWrite = false;
     expect(first.painter).toBeDefined();
     pool.begin();
     const next = pool.take(new Vector3(), frame, 'unit', 0, false);
@@ -343,7 +440,8 @@ describe('sprite depth attributes', () => {
     expect(next.painter).toBeUndefined();
     expect(next.painterPart).toBe(0);
     expect(next.deckHeight).toBeUndefined();
-    expect(next.foundationRecess).toBe(0);
+    expect(next.nativeDepth).toBeUndefined();
+    expect(next.depthWrite).toBeUndefined();
   });
 });
 

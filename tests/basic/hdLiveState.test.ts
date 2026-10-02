@@ -262,6 +262,7 @@ function infantryView(metadata: Record<string, InfantrySequence> | null = sequen
     ...(metadata ? { infantry: { sequenceName: 'TestSequence', sequences: metadata } } : {}),
   };
   const target = Object.assign(Object.create(LiveView.prototype), {
+    world: { terrain: { heightAt: () => 0 } },
     library: {
       library: { sprites: { infantry: { frames, palette: 'unit', remap: false } } },
       page: () => ({}),
@@ -370,6 +371,7 @@ describe('native building body selection', () => {
     const bib = frames.map((f) => ({ ...f, rect: [10 + f.rect[0], 0, 1, 1] as [number, number, number, number] }));
     const type: LibraryType = { ...buildingType, building: { bodyFrames: 4, layers: [], bib: 'bib' } };
     const target = Object.assign(Object.create(LiveView.prototype), {
+      cache: { depthTemplate: undefined },
       library: {
         conditionYellow: 0.5,
         library: {

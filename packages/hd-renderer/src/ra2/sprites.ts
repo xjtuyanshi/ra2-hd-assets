@@ -62,6 +62,7 @@ import { type HdAtlas, type Ra2Cache } from './cache';
 import { objectLevelAt, srgbScale, terrainGradeAt } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
 import { cardDepthNode, SPRITE_DECAL_LIFT } from './cardDepth';
+import { NATIVE_UNIT_RENDER_ORDER, type NativeSpriteDepth } from './nativeDepth';
 import { comparePainterOrder, spritePainterBias, type PainterObject } from './painterOrder';
 import {
   GLASS_REFLECTANCE,
@@ -112,8 +113,10 @@ export interface SpriteInstance {
   painterPart?: number;
   /** Horizontal high-bridge depth at this height above the draw anchor; leaves screen placement unchanged. */
   deckHeight?: number;
-  /** Shift the foundation's facade sum inward in x+z cell units; defaults to zero and leaves placement unchanged. */
-  foundationRecess?: number;
+  /** Original-engine body template, horizontal part or bitmap-bottom card; absent preserves analytic depth. */
+  nativeDepth?: NativeSpriteDepth;
+  /** Test-only native parts such as DoorAnim retain color but never obscure later units through depth writes. */
+  depthWrite?: boolean;
   /**
    * Enhanced-look ground decals (see spriteLook.ts), drawn only while their effect is on: 'contact' darkens the ground
    * around `painter.foundation`, 'reflection' mirrors `frame` (an upright card's art) on wet paving below its base.
@@ -140,7 +143,7 @@ function instanceRank(s: SpriteInstance): number {
 }
 
 /** Draw passes of a sprite layer: the main one, and the enhanced look's ground passes (SpriteLayer.groundPasses). */
-type GroundPass = 'main' | 'under' | 'over';
+type GroundPass = 'main' | 'under' | 'over' | 'readOnly' | 'unit';
 
 /**
  * How far (world units along the view) the enhanced look's 'over' pass pulls SHP shadows and wet reflections in front
@@ -224,7 +227,7 @@ const SHADOW_OPACITY = ENGINE_SHADOW_OPACITY;
 
 /**
  * Placement push for camera-facing geometry (also used by lighting/shadows). Fragment occlusion is reconstructed
- * independently by cardDepth.ts, so frame dimensions cannot change which object hides another. A pixel d world
+ * independently by cardDepth.ts; native bitmap bounds affect that profile, never this placement offset. A pixel d world
  * units below the anchor on screen sees ground d * cot(30°) nearer to the camera than the anchor, so the card must come
  * forward at least that far for its lowest pixel.
  */
@@ -241,6 +244,10 @@ export function cardPush(frame: SpriteFrame): number {
  */
 export class SpriteLayer {
   readonly mesh: InstancedQuad;
+  /** Test-only sprite parts share every instance buffer; visible only when such a part exists. */
+  readonly readOnlyMesh: InstancedQuad;
+  /** Ground cards follow test-only parts, so a door cannot paint over a unit that passed the body. */
+  readonly unitMesh: InstancedQuad;
   /**
    * The enhanced look's ground passes ('under', 'over'; children of `mesh`, shown by HdRenderer only while the look is
    * on). They share this layer's instance buffers.
@@ -261,8 +268,9 @@ export class SpriteLayer {
    * x: card/decal/shadow/contact/reflection (instanceCode); y: object light; z: map lighting class; w: bounded
    * traversal bias in world units for cards, ground-crystal weight for plain flat decals, or infantry shadow marker.
    * The second vec4 holds foundation width/height and draw-point offsets; width -1 selects an elevated deck.
-   * A ninth scalar holds the relative anchor code (NOT_CAPTURED_CODE excludes an instance), read only by capture-enabled main materials.
-   * All three attributes share one buffer: WebGPU allows 8 vertex buffers. Non-capture layers retain stride 8.
+   * Capture-enabled layers retain their relative anchor code at scalar 8. Two additional vec4s hold the native
+   * depth mode/profile and owner offsets/pass (0 ordinary, 1 test-only, 2 ground unit). All attributes share one buffer: stride 16, or 17 with
+   * capture, so native depth adds no vertex buffer (WebGPU allows eight).
    */
   private readonly flags: DirtyAttribute;
   private instances: readonly SpriteInstance[] = [];
@@ -315,7 +323,8 @@ export class SpriteLayer {
     this.anchor = new DirtyAttribute(new Float32Array(count * 5), 5);
     this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
     this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
-    this.flags = new DirtyAttribute(new Float32Array(count * (capture ? 9 : 8)), capture ? 9 : 8);
+    const nativeOffset = capture ? 9 : 8;
+    this.flags = new DirtyAttribute(new Float32Array(count * (nativeOffset + 8)), nativeOffset + 8);
 
     const atlasSize = vec2(atlas.width, atlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
@@ -325,6 +334,18 @@ export class SpriteLayer {
     const aLightSample: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec2', 5, 3);
     const aFlags: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', this.flags.itemSize, 0);
     const aOcclusion: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', this.flags.itemSize, 4);
+    const aNative: ShaderNode = instancedBufferAttribute(
+      this.flags.interleaved(),
+      'vec4',
+      this.flags.itemSize,
+      nativeOffset,
+    );
+    const aNativeOffset: ShaderNode = instancedBufferAttribute(
+      this.flags.interleaved(),
+      'vec4',
+      this.flags.itemSize,
+      nativeOffset + 4,
+    );
     const aFlat: ShaderNode = aFlags.x;
     const isInfantryShadow: ShaderNode = step(1.5, aFlat)
       .mul(float(1).sub(step(2.5, aFlat)))
@@ -403,6 +424,7 @@ export class SpriteLayer {
         pushAmount,
         aFlags.w,
         aFlat.greaterThan(0.5),
+        { data: aNative, offset: aNativeOffset, template: cache.depthTemplate },
       );
     material.depthNode = cardDepth();
     // Vertex stage: corners from the untouched geometry attribute (+-0.5).
@@ -418,9 +440,15 @@ export class SpriteLayer {
       .mul(float(1).sub(step(2.5, aFlat)))
       .add(isReflection);
     const skipIn = (pass: GroundPass): ShaderNode =>
-      pass === 'main'
-        ? enhancedOn.mul(step(0.5, aFlat))
-        : float(1).sub(enhancedOn.mul(pass === 'under' ? underKind : overKind));
+      pass === 'readOnly'
+        ? aNativeOffset.w.equal(1).select(0, 1)
+        : pass === 'unit'
+          ? aNativeOffset.w.equal(2).select(0, 1)
+          : pass === 'main'
+            ? enhancedOn.mul(step(0.5, aFlat)).add(step(0.5, aNativeOffset.w))
+            : float(1)
+                .sub(enhancedOn.mul(pass === 'under' ? underKind : overKind))
+                .add(step(0.5, aNativeOffset.w));
     const placement = (pass: GroundPass): ShaderNode =>
       Fn(() => {
         const px = aParams.x.add(gu.mul(aRect.z));
@@ -750,7 +778,7 @@ export class SpriteLayer {
     if (capture) {
       // Every vertex of an instance shares the anchor code, including across its SHP component pages.
       const code: ShaderNode = varying(
-        instancedBufferAttribute(this.flags.interleaved(), 'float', 9, 8),
+        instancedBufferAttribute(this.flags.interleaved(), 'float', this.flags.itemSize, 8),
         'objectDepthInstanceCode',
       ).setInterpolation('flat', 'either');
       material.userData.objectDepthCodeNode = code;
@@ -768,6 +796,39 @@ export class SpriteLayer {
     this.mesh = new InstancedQuad(material, count);
     this.mesh.renderOrder = 4;
     this.mesh.name = 'ra2-sprites';
+
+    const readOnlyMaterial = new MeshBasicNodeMaterial();
+    readOnlyMaterial.name = 'ra2-sprites-read-only';
+    readOnlyMaterial.transparent = true;
+    readOnlyMaterial.blending = NormalBlending;
+    readOnlyMaterial.alphaTest = material.alphaTest;
+    readOnlyMaterial.positionNode = placement('readOnly');
+    readOnlyMaterial.colorNode = colourNode();
+    readOnlyMaterial.depthNode = cardDepth();
+    readOnlyMaterial.depthWrite = false;
+    this.readOnlyMesh = new InstancedQuad(readOnlyMaterial, count, this.mesh.geometry);
+    this.readOnlyMesh.name = 'ra2-sprites-read-only';
+    const main = this.mesh;
+    Object.defineProperty(this.readOnlyMesh, 'renderOrder', {
+      get: () => main.renderOrder + 0.001,
+      set: () => {},
+      configurable: true,
+    });
+    this.mesh.add(this.readOnlyMesh);
+
+    const unitMaterial = new MeshBasicNodeMaterial();
+    unitMaterial.name = 'ra2-sprites-ground-units';
+    unitMaterial.transparent = true;
+    unitMaterial.blending = NormalBlending;
+    unitMaterial.alphaTest = material.alphaTest;
+    unitMaterial.positionNode = placement('unit');
+    unitMaterial.colorNode = material.colorNode;
+    unitMaterial.depthNode = cardDepth();
+    unitMaterial.userData.objectDepthCodeNode = material.userData.objectDepthCodeNode;
+    this.unitMesh = new InstancedQuad(unitMaterial, count, this.mesh.geometry);
+    this.unitMesh.name = 'ra2-sprites-ground-units';
+    this.unitMesh.renderOrder = NATIVE_UNIT_RENDER_ORDER;
+    this.mesh.add(this.unitMesh);
 
     // Enhanced-look ground passes. In one draw call every ground decal wrote depth on the same plane (0.02 above the
     // ground), so coplanar decals z-fought: SHP shadows over contact shades, bibs and each other passed or failed by
@@ -847,10 +908,15 @@ export class SpriteLayer {
       return passMesh;
     });
     material.addEventListener('dispose', () => {
+      readOnlyMaterial.dispose();
+      unitMaterial.dispose();
       for (const passMesh of this.groundPasses) (passMesh.material as MeshBasicNodeMaterial).dispose();
     });
     this.mesh.addEventListener('dispose', () => {
+      this.readOnlyMesh.dispose();
+      this.unitMesh.dispose();
       capture?.setCaptured(this.mesh, false);
+      capture?.setCaptured(this.unitMesh, false);
       for (const passMesh of this.groundPasses) {
         look.groundPasses.delete(passMesh);
         passMesh.dispose();
@@ -873,6 +939,8 @@ export class SpriteLayer {
     this.instanceCount = instances.length;
     // Stable partition by rank: the former stable sort's exact order, without a copied/sorted array.
     let count = 0;
+    let readOnly = false;
+    let units = false;
     for (let rank = 0; rank < 4 && count < this.capacity; rank++) {
       const list = rank === 3 ? cards : instances;
       for (let j = 0; j < list.length && count < this.capacity; j++) {
@@ -905,11 +973,41 @@ export class SpriteLayer {
         this.flags.setComponent(i, 4, s.deckHeight !== undefined ? -1 : (foundation?.[0] ?? 0));
         this.flags.setComponent(i, 5, s.deckHeight ?? foundation?.[1] ?? 0);
         this.flags.setComponent(i, 6, dx - dz);
-        this.flags.setComponent(i, 7, -dx - dz - (s.foundationRecess ?? 0));
+        this.flags.setComponent(i, 7, -dx - dz);
+        const native = !s.flat && !s.shadow && !s.kind ? s.nativeDepth : undefined;
+        const at = this.capture ? 9 : 8;
+        this.flags.setComponent(i, at, native?.mode === 'body' ? 1 : native?.mode === 'ground' ? 2 : native ? 3 : 0);
+        this.flags.setComponent(
+          i,
+          at + 1,
+          native?.mode === 'body' ? native.origin[0] : native?.mode === 'card' ? native.bottom : 0,
+        );
+        this.flags.setComponent(
+          i,
+          at + 2,
+          native?.mode === 'body' ? native.origin[1] : native?.mode === 'card' ? native.bonus : 0,
+        );
+        this.flags.setComponent(
+          i,
+          at + 3,
+          native?.mode === 'body' ? native.base : native?.mode === 'ground' ? native.bonus : 0,
+        );
+        this.flags.setComponent(i, at + 4, native?.offset?.[0] ?? 0);
+        this.flags.setComponent(i, at + 5, native?.offset?.[1] ?? 0);
+        this.flags.setComponent(i, at + 6, native?.anchorPush ?? 0);
+        const testOnly = s.depthWrite === false && instanceCode(s) === 0;
+        const unit = !testOnly && native?.mode === 'card' && !foundation;
+        this.flags.setComponent(i, at + 7, testOnly ? 1 : unit ? 2 : 0);
+        readOnly ||= testOnly;
+        units ||= unit;
       }
     }
     if (this.capture) this.uploaded.length = count;
     this.mesh.count = count;
+    this.readOnlyMesh.count = count;
+    this.readOnlyMesh.visible = readOnly;
+    this.unitMesh.count = count;
+    this.unitMesh.visible = units;
     for (const passMesh of this.groundPasses) passMesh.count = count;
     this.anchor.flush();
     this.rect.flush();
@@ -920,14 +1018,19 @@ export class SpriteLayer {
   updateCaptureCodes(codeFor: (instance: SpriteInstance) => number): void {
     if (!this.capture) return;
     let captured = false;
+    let unitsCaptured = false;
     for (let i = 0; i < this.uploaded.length; i++) {
       const instance = this.uploaded[i]!;
-      const value = instanceCode(instance) === 0 ? codeFor(instance) : NOT_CAPTURED_CODE;
+      const value =
+        instanceCode(instance) === 0 && instance.depthWrite !== false ? codeFor(instance) : NOT_CAPTURED_CODE;
       this.flags.setComponent(i, 8, value);
       captured ||= value !== NOT_CAPTURED_CODE;
+      unitsCaptured ||=
+        value !== NOT_CAPTURED_CODE && instance.nativeDepth?.mode === 'card' && !instance.painter?.foundation;
     }
     this.flags.flush();
     this.capture.setCaptured(this.mesh, captured);
+    this.capture.setCaptured(this.unitMesh, unitsCaptured);
   }
 }
 
