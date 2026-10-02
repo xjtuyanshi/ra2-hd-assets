@@ -382,11 +382,14 @@ The reactor's clipped plasma orb and confined arcs use the generic `src/emissive
 `BeamLayer`. The orb matches the art's measured glass radius (17.75 engine px, 0.418 world units) with no halo;
 its head remains at foundation [0.47, 0.40], 27 px up. A screen-space occluder wedge at (+11.5, -1.5) engine px,
 between -22 and 90 degrees in the y-down frame, preserves the front-right tower overlap. Radial and wedge edges
-use derivatives for roughly one device pixel of antialiasing. Display-linear colours run from a cyan-white core over
-the inner half (sRGB 225/252/255 to 130/220/255 at 0.55 radii, opaque; cyan hues below 200 count neither as the
-reviews' saturated blue nor as lavender) to a saturated blue body at half opacity (`bodyAlpha` 0.5 from 0.8 radii),
-revealing the painted glass swirl, then a glassy limb of saturation about 0.5 (`limbAlpha` 0.58). At 0.45 opacity the
-body left the pale painted glass lavender (replay lavender 2354 against the 2000 gate).
+use derivatives for roughly one device pixel of antialiasing. Display-linear colours run from a cyan-white core
+(sRGB 225/252/255 to 130/220/255 at 0.48 radii, opaque; cyan hues below 200 count neither as the reviews' saturated
+blue nor as lavender) to a saturated blue body (35/85/255) at about half opacity (`bodyAlpha` 0.52 from 0.75 radii),
+revealing the painted glass swirl, then a glassy limb (110/160/245, `limbAlpha` 0.62). At 0.45 opacity the body left
+the pale painted glass lavender (replay lavender 2354 against the 2000 gate); a paler body (60/115/255 at 0.5) left a
+live frame of two reactors at 0.88-0.94 times the original's saturated blue. Beside a map lamp (`INGALITE`) the
+engine's lamp light washes the original's sphere pale (near the reactor: saturated blue 324, lavender 1435), while the
+unlit overlay stays blue, so that frame reads about 1.6 times the original.
 
 Each reactor has 4–5 crawling filaments from the white core's edge (0.3–0.42 radii) to the glass and three
 rim-to-pylon/pad strikes. Filaments and their optional forks stay inside 0.985 radii and clear the tower wedge;
@@ -395,7 +398,7 @@ cell beyond the glass). All vertices lie in the camera's screen plane before dep
 units ahead of the disc. Capsule widths are 2 engine px (forks 1.3), with a cyan-white core occupying 45 % of the
 half-width; each arc/fork has a 3 times wider blue under-stroke at 0.45 opacity that starts at half radius
 (`glowStart`): converging filament glows otherwise stained the white core blue. Gates on the battle and replay
-framings against the faithful render of the same frame: saturated blue 1.28x / 1.40x, lavender 873 / 1364.
+framings against the faithful render of the same frame: saturated blue 1.33x / 1.45x, lavender 782 / 1220.
 Persistent filament slots drift by 0.06 radians per logic frame, sampled at the start of each two-frame pair;
 geometry reseeds per pair while presentation-time alpha flickers 0.7–1.0 times the shared source fade. Arcs appear
 only above half fade. Plain-data setters reuse fixed buffers (256 discs, 16384 segments); HdRenderer owns their
