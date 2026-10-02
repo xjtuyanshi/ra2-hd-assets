@@ -810,6 +810,60 @@ build from any of those theatres reproduces the temperate page exactly. Only the
 it needs its own build. The page carries no ground colour of its own beyond the contact bed (at most .25 alpha under
 each nugget), so the same page reads on grass, snow, pavement and regolith.
 
+## Desert ore in the original grain style (Python)
+
+`python/ore_upscale.py` rebuilds the L5 desert ore page from the player's extracted original `tibNN.des` and
+gem art. It preserves every family, all 12 growth stages, frame offsets and rectangles from the supplied L5
+`frames.json`. It reads the original indexed pixels with the extracted theater palette, packs all frames into
+one sheet with 24-pixel edge-extended margins, runs `realesrgan-x4plus` at 4x, then area-reduces premultiplied
+colour to 2x. Alpha comes independently from the smoothly enlarged original 1-bit mask, including transparent
+padding around each tight crop. Colour bleed into transparent texels avoids black fringes under linear filtering.
+There is no generated nugget replacement, gold ramp, soil bed or added shadow. NumPy, Pillow, OpenCV and the
+operator-supplied Real-ESRGAN NCNN binary plus its `models/` directory are required; nothing is downloaded.
+
+```bash
+python3 -B packages/ra2-assets/python/ore_upscale.py build \
+  --extracted "$EXTRACTED_DESERT" --theatre desert --layout "$L5_DESERT_BUILD" \
+  --esrgan "$ESRGAN_DIR" --out "$WORK/build"
+python3 -B packages/ra2-assets/python/ore_upscale.py preview \
+  --extracted "$EXTRACTED_DESERT" --layout "$L5_DESERT_BUILD" \
+  --build "$WORK/build" --out "$WORK/preview.png"
+python3 -B packages/ra2-assets/python/ore_upscale.py install \
+  --cache-root "$VARIANT" --theatre desert --build "$WORK/build"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_ore_upscale.py'
+```
+
+`--tone original` (default) corrects only the model's per-frame mean Lab colour drift toward the source;
+`--tone model` keeps the model's colours. There is no clarity or gloss colour enhancement. Outputs are
+`sprites-ore-l5@2x-l5hdes.png`, `sprites-ore-l5@2x-l5hdes-remap.png` (an exact copy of the layout's empty remap),
+`sprites-ore-l5@2x-l5hdes-normals.png`, and `metrics.json` with alpha-weighted CIELAB L*/C*/circular hue per
+sprite family plus coverage for every stage. The material page derives silhouette/luminance relief in the
+`ore_fields.py` world-normal basis, with the same R/G normal encoding, B dielectric crystal gloss `.47`, and
+A occlusion (`0` means no data). The build also copies the unchanged indexed page and `frames.json` for
+verification and retains the padded input, 4x result and `esrgan.log`. Keep the entire build outside Git.
+Coverage metrics also report soft-edge alpha outside the supplied native mask, which the renderer gates out.
+The original mask is retained even when it clips those antialiased tails; inspect `native_gate.clipped_fraction`
+when assessing in-engine edges.
+
+Installation finds the existing `sprites-ore-l5@2x.png` HD entry by name (or its own new name on reruns),
+requires the corresponding native ore page, validates all growth-frame geometry and the native mask hash,
+and refuses a page shared with non-ore sprites. It uses `cache_farm.install_file` and `patch_json` under
+`.compose.lock`, realises directory symlinks before locking, and replaces file symlinks atomically. Only this
+HD entry's file/remap and its normals entry are patched; the normals `atlas` follows the new HD filename.
+Native pages, sprite keys, growth stages, other theatres and the L5G cache remain unchanged. Builds reject
+output inside the read-only inputs or through a directory symlink. The preview shows last-stage TIB01, TIB05,
+TIB12, TIB20 and GEM01 as original nearest 4x | L5 nearest 2x | new nearest 2x on `#b49a6e` sand.
+`--esrgan-cmd` is an argv-prefix override for a compatible runner (tests use an asset-free fake); the selected
+command is recorded in metrics. There is no automatic interpolation fallback when the real model fails.
+
+`--smooth` (in place of `--esrgan`) is the installed L5H look. The owner preferred the earlier static (L4) desert
+ore, the original art drawn with smooth filtering, over both the generated L5 clumps and the model upscale, which
+sharpens the SHP's single-pixel pink/green dither into coloured fringes. Smooth mode blurs only the Lab chroma of
+each 1x ore frame (sigma 1.2; gems are excluded because neighbouring stones differ in colour), then does a light
+1x blur and a bicubic 4x resize. It rounds the enlarged 1-bit mask with a 1.6-pixel blur and a smoothstep at
+0.22-0.62, so every pebble becomes a distinct, smooth, round grain in the original tone and position.
+Static previews and synthetic tests do not establish in-engine depletion or visual acceptance.
+
 ## Gem colour match (Python)
 
 `python/gem_colours.py` deepens HD pink, mint and light-blue gems toward the original theater palette's red,
