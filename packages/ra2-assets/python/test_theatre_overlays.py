@@ -10,12 +10,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
 from PIL import Image
 
 import theatre_overlays as overlays
+import ore_fields as ore
+import theatre_pages as tp
 
 
 def write_json(path, data):
@@ -107,6 +110,57 @@ class TheatreOverlaysTests(unittest.TestCase):
 
     def read_dest(self):
         return json.loads((self.dest / 'library.json').read_text(encoding='utf-8'))
+
+    def prepare_one_shot(self):
+        build = self.root / 'ore-build'
+        build.mkdir()
+        meta = dict(width=4, height=3, offset=[-3, 1], frames={
+            family: [[0, 0, 2, 2] for _ in range(ore.FRAMES)] for family in ('TIB01', 'GEM01')})
+        write_json(build / 'frames.json', meta)
+        indexed_page(build / ore.PAGE, 51)
+        Image.new('RGBA', (8, 6), (90, 80, 70, 255)).save(build / ore.HD)
+        Image.new('L', (8, 6), 0).save(build / ore.REMAP)
+        Image.new('RGBA', (8, 6), (40, 50, 60, 255)).save(build / ore.MAT)
+        for name in ore.PAGE_FILES:
+            Image.new('L', (2, 2), 7).save(self.base / name)
+            (self.dest / name).symlink_to(self.base / name)
+        for name in ('TIB01', 'TIB2_01', 'TIB3_01', 'GEM01'):
+            self.extracted['sprites'][f'overlay:{name}'] = dict(palette='theater', custom='extracted ore', frames=[
+                dict(page=2, rect=[0, 0, 2, 2], offset=[-1, -2], stage=k) for k in range(ore.FRAMES)])
+            self.extracted['overlays'][name] = dict(sprite=f'overlay:{name}')
+        for name in tp.WALL_TYPES:
+            building = copy.deepcopy(self.library['sprites']['building:X'])
+            self.library['sprites'][f'building:{name}'] = building
+            old = copy.deepcopy(building)
+            old['custom'] = 'previous redirect'
+            self.library['sprites'][f'overlay:{name}'] = old
+            wall = copy.deepcopy(building)
+            wall['custom'] = 'extracted wall'
+            for frame in wall['frames'] + wall['shadows']:
+                frame['page'] = 2
+            self.extracted['sprites'][f'overlay:{name}'] = wall
+            self.extracted['overlays'][name] = dict(sprite=f'overlay:{name}')
+        self.extracted['sprites']['overlay:NEW'] = dict(
+            palette='theater', frames=[dict(page=2, rect=[0, 0, 1, 1])], custom='extracted new sprite')
+        self.extracted['overlays']['NEW'] = dict(sprite='overlay:NEW')
+        write_json(self.base / 'library.json', self.library)
+        normals = dict(version=7, custom='keep', pages={'1': dict(file='older-material.png')})
+        write_json(self.base / 'normals.json', normals)
+        (self.dest / 'normals.json').symlink_to(self.base / 'normals.json')
+        for name in ('.compose.lock', '.library.json.lock', '.normals.json.lock'):
+            (self.base / name).write_bytes(b'')
+            (self.dest / name).symlink_to(self.base / name)
+        self.save_source()
+        self.base_before = snapshot(self.base)
+        return build, meta, normals
+
+    def install_one_shot(self, build, **kwargs):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            summary = overlays.install(self.source, self.cache, 'snow', ore_build=build, walls=True, **kwargs)
+        self.assertEqual(output.getvalue(), summary + '\n')
+        self.assertEqual(snapshot(self.base), self.base_before)
+        return summary
 
     def append_dest_page(self, name='another-page.png', value=93):
         indexed_page(self.dest / name, value)
@@ -314,6 +368,189 @@ class TheatreOverlaysTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, 'snow: overlay types 2; pages added 1, reused 0; palettes added 2\n')
         self.assertEqual(snapshot(self.base), self.base_before)
+
+    def test_one_shot_cli_replaces_symlinked_pages_and_json_without_changing_older_farm(self):
+        build, meta, normals = self.prepare_one_shot()
+        before = {str(path.relative_to(self.base)): path.read_bytes()
+                  for path in self.base.rglob('*') if path.is_file()}
+        result = subprocess.run([sys.executable, '-B', overlays.__file__, 'install',
+                                 '--extracted', str(self.source), '--cache-root', str(self.cache),
+                                 '--theatre', 'snow', '--ore-build', str(build), '--walls'],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertIn('ore page 3, sprites changed 4; walls patched 4', result.stdout)
+        after = self.read_dest()
+        page = next(i for i, atlas in enumerate(after['spriteAtlases']) if atlas['file'] == ore.PAGE)
+        self.assertEqual(page, 3)
+        for name in ('TIB01', 'TIB2_01', 'TIB3_01', 'GEM01'):
+            sprite = after['sprites'][f'overlay:{name}']
+            self.assertEqual(sprite['custom'], 'extracted ore')
+            family = 'GEM01' if name == 'GEM01' else 'TIB01'
+            self.assertEqual(len(sprite['frames']), ore.FRAMES)
+            for k, frame in enumerate(sprite['frames']):
+                self.assertEqual(frame, dict(page=page, rect=meta['frames'][family][k],
+                                             offset=meta['offset'], stage=k))
+        for name in tp.WALL_TYPES:
+            wall = after['sprites'][f'overlay:{name}']
+            building = after['sprites'][f'building:{name}']
+            self.assertEqual(wall['frames'], building['frames'])
+            self.assertEqual(wall['shadows'], building['shadows'])
+            self.assertEqual(wall['custom'], 'extracted wall')
+        self.assertEqual(after['sprites']['overlay:NEW'], self.extracted['sprites']['overlay:NEW'])
+        self.assertNotIn('overlay:OLD', after['sprites'])
+        self.assertEqual(after['overlays'], self.extracted['overlays'])
+        self.assertEqual(after['overlayExtractor'], self.extracted['overlayExtractor'])
+        self.assertEqual(after['custom'], self.library['custom'])
+        installed_normals = json.loads((self.dest / 'normals.json').read_text())
+        self.assertEqual(installed_normals['version'], normals['version'])
+        self.assertEqual(installed_normals['custom'], normals['custom'])
+        self.assertEqual(installed_normals['pages']['1'], normals['pages']['1'])
+        self.assertEqual(installed_normals['pages'][str(page)], dict(
+            file=ore.MAT, atlas=after['spriteAtlasesHd'][page]['file'], width=8, height=6, scale=ore.OUT,
+            materialWidth=8, materialHeight=6, frames=24))
+        for name in (*ore.PAGE_FILES, 'library.json', 'normals.json'):
+            self.assertFalse((self.dest / name).is_symlink())
+            if name in ore.PAGE_FILES:
+                self.assertEqual((self.dest / name).read_bytes(), (build / name).read_bytes())
+        for name in ('.compose.lock', '.library.json.lock', '.normals.json.lock'):
+            self.assertTrue((self.dest / name).is_symlink())
+        self.assertEqual(before, {str(path.relative_to(self.base)): path.read_bytes()
+                                  for path in self.base.rglob('*') if path.is_file()})
+
+    def test_one_shot_publishes_library_once_after_all_files_under_compose_lock(self):
+        build, _, _ = self.prepare_one_shot()
+        patch_json = overlays.cache_farm.patch_json
+        published = []
+
+        def checked_patch(root, relative, update, **kwargs):
+            with (self.dest / '.compose.lock').open('a') as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for name in (*ore.PAGE_FILES, 'sprites-overlays-0.png', 'palettes/iso.png', 'palettes/theater.png'):
+                self.assertTrue((self.dest / name).is_file())
+                self.assertFalse((self.dest / name).is_symlink())
+            published.append(relative)
+            patch_json(root, relative, update, **kwargs)
+
+        with mock.patch.object(overlays.cache_farm, 'patch_json', side_effect=checked_patch):
+            self.install_one_shot(build)
+        self.assertEqual(published, ['library.json', 'normals.json'])
+        before = self.read_dest()
+        self.assertIn('ore page 3, sprites changed 4; walls patched 4', self.install_one_shot(build))
+        self.assertEqual(self.read_dest(), before)
+
+    def test_one_shot_preserves_concurrent_library_and_normals_patches_during_file_installation(self):
+        build, _, _ = self.prepare_one_shot()
+        # Reusing the overlay page lets an independent append proceed; the ore index must use the locked JSON.
+        self.append_dest_page('preexisting-overlays.png', value=42)
+        ready, done = threading.Event(), threading.Event()
+        errors = []
+
+        def writer():
+            try:
+                if not ready.wait(10):
+                    raise RuntimeError('installer did not reach the interleaving point')
+                indexed_page(self.dest / 'concurrent.png', 78)
+
+                def update(lib):
+                    lib['spriteAtlases'].append(dict(file='concurrent.png', width=4, height=3))
+                    lib['concurrent'] = True
+
+                overlays.cache_farm.patch_json(self.dest, 'library.json', update)
+                overlays.cache_farm.patch_json(self.dest, 'normals.json', lambda data: data['pages'].update(
+                    {'99': {'file': 'concurrent-material.png'}}))
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                done.set()
+
+        install_file = overlays.cache_farm.install_file
+
+        def interleaved_install(root, relative, source):
+            install_file(root, relative, source)
+            if relative == ore.MAT:
+                ready.set()
+                self.assertTrue(done.wait(10), 'concurrent JSON writer was blocked by the compose lock')
+
+        thread = threading.Thread(target=writer, daemon=True)
+        thread.start()
+        try:
+            with mock.patch.object(overlays.cache_farm, 'install_file', side_effect=interleaved_install):
+                self.install_one_shot(build)
+        finally:
+            ready.set()
+            thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        after = self.read_dest()
+        self.assertTrue(after['concurrent'])
+        self.assertEqual(after['sprites']['overlay:TIB01']['frames'][0]['page'], 4)
+        normals = json.loads((self.dest / 'normals.json').read_text())
+        self.assertEqual(normals['pages']['99'], {'file': 'concurrent-material.png'})
+        self.assertEqual(normals['pages']['4']['atlas'], after['spriteAtlasesHd'][4]['file'])
+
+    def test_one_shot_creates_missing_normals_and_honours_custom_wall_types(self):
+        build, _, _ = self.prepare_one_shot()
+        (self.dest / 'normals.json').unlink()
+        result = subprocess.run([sys.executable, '-B', overlays.__file__, 'install',
+                                 '--extracted', str(self.source), '--cache-root', str(self.cache),
+                                 '--theatre', 'snow', '--ore-build', str(build), '--walls',
+                                 '--wall-types', 'GAWALL,GAWALL,MISSING'],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('ore page 3, sprites changed 4; walls patched 1', result.stdout)
+        after = self.read_dest()
+        self.assertEqual(after['sprites']['overlay:GAWALL']['frames'], after['sprites']['building:GAWALL']['frames'])
+        self.assertEqual(after['sprites']['overlay:NAWALL'], self.extracted['sprites']['overlay:NAWALL'])
+        normals = json.loads((self.dest / 'normals.json').read_text())
+        self.assertEqual(normals['version'], 1)
+        self.assertEqual(set(normals['pages']), {'3'})
+        self.assertEqual(snapshot(self.base), self.base_before)
+
+    def test_invalid_ore_build_is_rejected_before_installing_files(self):
+        build, meta, _ = self.prepare_one_shot()
+        meta['frames']['TIB01'].pop()
+        write_json(build / 'frames.json', meta)
+        before = snapshot(self.dest)
+        with self.assertRaisesRegex(ValueError, 'exactly 12'):
+            self.install_one_shot(build)
+        self.assertEqual(snapshot(self.dest), before)
+
+    def test_failed_ore_redirection_does_not_publish_a_partial_overlay_merge(self):
+        build, _, _ = self.prepare_one_shot()
+        self.extracted['sprites']['overlay:TIB01']['frames'].pop()
+        self.save_source()
+        before = {name: (self.dest / name).read_bytes() for name in ('library.json', 'normals.json')}
+        with self.assertRaisesRegex(ValueError, 'fewer than 12'):
+            self.install_one_shot(build)
+        for name, content in before.items():
+            self.assertTrue((self.dest / name).is_symlink())
+            self.assertEqual((self.dest / name).read_bytes(), content)
+        self.assertEqual(snapshot(self.base), self.base_before)
+
+    def test_optional_ore_and_wall_redirections_can_run_independently(self):
+        build, _, _ = self.prepare_one_shot()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            summary = overlays.install(self.source, self.cache, 'snow', ore_build=build)
+        self.assertEqual(output.getvalue(), summary + '\n')
+        self.assertIn('ore page 3, sprites changed 4; walls patched 0', summary)
+        after = self.read_dest()
+        self.assertEqual(after['sprites']['overlay:TIB01']['frames'][0]['page'], 3)
+        self.assertEqual(after['sprites']['overlay:GAWALL'], self.extracted['sprites']['overlay:GAWALL'])
+        normals_before = (self.dest / 'normals.json').read_bytes()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            summary = overlays.install(self.source, self.cache, 'snow', walls=True)
+        self.assertEqual(output.getvalue(), summary + '\n')
+        self.assertIn('ore page None, sprites changed 0; walls patched 4', summary)
+        after = self.read_dest()
+        self.assertEqual(after['sprites']['overlay:TIB01'], self.extracted['sprites']['overlay:TIB01'])
+        self.assertEqual(after['sprites']['overlay:GAWALL']['frames'], after['sprites']['building:GAWALL']['frames'])
+        self.assertEqual((self.dest / 'normals.json').read_bytes(), normals_before)
+        self.install()
+        self.assertEqual(self.read_dest()['sprites']['overlay:GAWALL'], self.extracted['sprites']['overlay:GAWALL'])
 
 
 if __name__ == '__main__':

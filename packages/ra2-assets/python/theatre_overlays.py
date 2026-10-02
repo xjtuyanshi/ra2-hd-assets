@@ -6,9 +6,9 @@ never directly in a shared farm. Only pages used by overlay frames or shadows
 are imported. The compose lock covers planning, file installation and the locked
 cache_farm.patch_json merge; files are installed before JSON publication.
 
-This replaces every overlay sprite, including later frame redirections. Reapply
-them afterwards in this order: ore_fields.py install (ore/gem frames to the ore
-page), then theatre_pages.py overlay-walls (walls to HD building frames).
+This replaces every overlay sprite, including later frame redirections. Use
+--ore-build and --walls to restore them in the same compose-locked transaction:
+merge overlays, redirect ore/gem growth frames, then share HD building wall frames.
 """
 
 from __future__ import annotations
@@ -72,7 +72,8 @@ def _overlay_sprites(source: dict) -> tuple[dict, list[int]]:
     return sprites, sorted(pages)
 
 
-def install(extracted: Path, cache_root: Path, theatre: str) -> str:
+def install(extracted: Path, cache_root: Path, theatre: str, *, ore_build: Path | None = None,
+            walls: bool = False, wall_types=None) -> str:
     """Merge an extracted overlay section, print and return its one-line summary."""
     if theatre in ('', '.', '..') or Path(theatre).name != theatre:
         raise ValueError('theatre must be a single directory name')
@@ -87,6 +88,14 @@ def install(extracted: Path, cache_root: Path, theatre: str) -> str:
     with (directory / '.compose.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
+            ore_meta = None
+            if ore_build is not None:
+                import ore_fields
+                ore_build = Path(ore_build)
+                ore_meta = ore_fields.validate_ore_build(ore_build)
+            if walls:
+                import theatre_pages
+                wall_types = theatre_pages.WALL_TYPES if wall_types is None else wall_types
             source = _read_json(source_dir / 'library.json')
             current = _read_json(directory / 'library.json')
             missing_palettes = _validate(source, current, theatre)
@@ -161,11 +170,16 @@ def install(extracted: Path, cache_root: Path, theatre: str) -> str:
 
             for name, (path, _) in files.items():
                 cache_farm.install_file(directory, name, path)
+            if ore_meta is not None:
+                for name in ore_fields.PAGE_FILES:
+                    cache_farm.install_file(directory, name, ore_build / name)
 
             palettes_added = 0
+            ore_page, ore_changed = None, 0
+            ore_normals, walls_patched = {}, []
 
             def update(data):
-                nonlocal palettes_added
+                nonlocal palettes_added, ore_page, ore_changed
                 missing = _validate(source, data, theatre)
                 dest_atlases = data['spriteAtlases']
                 # A writer using only the JSON lock may have run during file
@@ -204,12 +218,22 @@ def install(extracted: Path, cache_root: Path, theatre: str) -> str:
                     data['palettes'][key] = relative
                     data.setdefault('paletteSources', {})[key] = palette_source
                 palettes_added = len(missing)
+                # The merge replaces every overlay sprite, so redirections must run after it in this callback.
+                if ore_meta is not None:
+                    ore_page, ore_changed = ore_fields.apply_ore_page(data, ore_normals, ore_meta)
+                if walls:
+                    walls_patched.extend(theatre_pages.redirect_walls(data, wall_types))
 
             # patch_json owns .library.json.lock. Taking it on another descriptor
             # here would deadlock; the compose lock remains held across this call.
             cache_farm.patch_json(directory, 'library.json', update)
+            if ore_meta is not None:
+                ore_fields.patch_ore_normals(directory, ore_normals)
             summary = (f'{theatre}: overlay types {len(overlays)}; pages added {len(additions)}, '
                        f'reused {len(pages) - len(additions)}; palettes added {palettes_added}')
+            if ore_meta is not None or walls:
+                summary += (f'; ore page {ore_page}, sprites changed {ore_changed}; '
+                            f'walls patched {len(walls_patched)}')
             print(summary)
             return summary
         finally:
@@ -223,9 +247,15 @@ def main(argv: list[str] | None = None) -> int:
     command.add_argument('--extracted', type=Path, required=True)
     command.add_argument('--cache-root', type=Path, required=True)
     command.add_argument('--theatre', required=True)
+    command.add_argument('--ore-build', type=Path, help='install ore/gem pages and redirect growth frames')
+    command.add_argument('--walls', action='store_true', help='redirect matching walls to HD building frames')
+    command.add_argument('--wall-types', help='comma-separated wall types (requires --walls)')
     args = parser.parse_args(argv)
+    if args.wall_types is not None and not args.walls:
+        command.error('--wall-types requires --walls')
     try:
-        install(args.extracted, args.cache_root, args.theatre)
+        install(args.extracted, args.cache_root, args.theatre, ore_build=args.ore_build, walls=args.walls,
+                wall_types=args.wall_types.split(',') if args.wall_types is not None else None)
     except (OSError, ValueError, KeyError) as error:
         print(f'theatre_overlays install: {error}', file=sys.stderr)
         return 1

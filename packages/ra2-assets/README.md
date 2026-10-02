@@ -1240,10 +1240,8 @@ cp -L "$HD_CACHE/_library/$THEATRE/library.json" "$OVERLAY_SCRATCH/$THEATRE/libr
 cp -RL "$HD_CACHE/_library/$THEATRE/palettes/." "$OVERLAY_SCRATCH/$THEATRE/palettes/"
 pnpm hd:library -- --game "$YR_INSTALL" --out "$OVERLAY_SCRATCH" --theater "$THEATRE" --only overlays
 python3 -B packages/ra2-assets/python/theatre_overlays.py install \
-  --extracted "$OVERLAY_SCRATCH/$THEATRE" --cache-root "$HD_CACHE" --theatre "$THEATRE"
-python3 -B packages/ra2-assets/python/ore_fields.py install \
-  --build-dir "$ORE_BUILD" --cache-root "$HD_CACHE" --theatre "$THEATRE"
-python3 -B packages/ra2-assets/python/theatre_pages.py overlay-walls "$HD_CACHE/_library/$THEATRE"
+  --extracted "$OVERLAY_SCRATCH/$THEATRE" --cache-root "$HD_CACHE" --theatre "$THEATRE" \
+  --ore-build "$ORE_BUILD" --walls
 ```
 
 `theatre_overlays.py install` holds the theater's `.compose.lock` across planning, file installation and publication.
@@ -1255,9 +1253,18 @@ names. Missing palettes are installed; conflicting `paletteSources`, mismatched 
 page slots abort publication. Files exist before JSON is published; an interrupted or rejected merge can leave
 unreferenced installed files. Reinstalling the same extraction reuses its pages and leaves the JSON content unchanged.
 
-This replaces all overlay sprites, so reapply later redirections afterwards in the order shown: `ore_fields.py install`
-redirects ore/gem frames to the ore page, then `theatre_pages.py overlay-walls` redirects walls to HD building frames.
-The installer prints the theater, overlay type count, pages added/reused and palettes added.
+`--ore-build` installs the ore/gem `PAGE_FILES` before publishing JSON. One `library.json` patch merges overlays,
+redirects ore/gem growth frames to the ore page, then redirects matching walls to HD building frames when `--walls`
+is present. The same compose lock remains held while `normals.json` is patched under `.normals.json.lock`, using
+the ore page index computed inside the library patch; a missing normals file is created atomically. Existing JSON
+and lock symlinks are supported: data files are replaced with real files, while locks keep their shared inodes.
+
+Omit `--walls` to retain extracted wall frames, or use `--walls --wall-types GAWALL,NAWALL` to select wall types.
+The default wall types are `GAWALL,NAWALL,GASAND,GAFWLL`. Without either `--ore-build` or `--walls`, the installer
+keeps its overlay-only behavior, replacing all overlay sprites; later redirections then need to be reapplied using
+`ore_fields.py install` followed by `theatre_pages.py overlay-walls`. It prints one summary line with the theater,
+overlay type count, pages added/reused and palettes added, plus the ore page index, ore sprites changed and walls
+patched when either option is enabled.
 
 ```bash
 python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_theatre_overlays.py'
