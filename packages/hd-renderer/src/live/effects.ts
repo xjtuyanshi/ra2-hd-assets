@@ -22,6 +22,8 @@ import {
   type EffectPass,
 } from './effectSprites';
 import { EFFECT_TABLE, SMOKE_SYSTEMS, type EffectTableRow, type SmokeSystemRow } from './effectTable';
+import { heldPulseEnvelope } from '../lightField';
+import type { SceneLighting } from '../sceneLighting';
 
 /**
  * Live effects: the engine's own effect list (src/games/yr/effectsReader.ts on the host side) drawn in two layers.
@@ -354,6 +356,17 @@ export class LiveEffectsDriver {
   private lastPush: { frame: number; seconds: number } | null = null;
   /** Renderer clock of the newest push, including another push of the same logic frame. */
   private pushedAt = 0;
+  private lastStormStrike = -Infinity;
+  private currentSceneEvent: SceneLighting['event'] = null;
+  get sceneEvent(): SceneLighting['event'] {
+    return this.currentSceneEvent;
+  }
+  set sceneEvent(event: SceneLighting['event']) {
+    if (event !== this.currentSceneEvent) this.lastStormStrike = -Infinity;
+    this.currentSceneEvent = event;
+  }
+  /** Scene illumination is independent of optional procedural garnish and of the selected effect-art style. */
+  onStormStrike: ((at: Vector3, now: number) => void) | null = null;
   /** Logic frames per second, an EMA of the snapshot frame rate (the engine's GameSpeed and emulation speed vary). */
   logicFps = 15;
   /** Logic frame of the newest snapshot. */
@@ -385,6 +398,10 @@ export class LiveEffectsDriver {
   /** A new snapshot arrived (logic frame `frame`, renderer clock `now` in seconds). */
   push(effects: LiveEffects, frame: number, now: number, wind: Vector3): void {
     const generation = ++this.generation;
+    if (frame < this.logicFrame) {
+      this.anims.clear();
+      this.lastStormStrike = -Infinity;
+    }
     this.pushedAt = now;
     if (this.lastPush && frame > this.lastPush.frame && now > this.lastPush.seconds) {
       const fps = (frame - this.lastPush.frame) / (now - this.lastPush.seconds);
@@ -421,6 +438,12 @@ export class LiveEffectsDriver {
     this.mergeFireballs(fresh, now);
     for (const tracked of fresh) {
       const { anim } = tracked;
+      // The table identifies the Weather Control strike rows by their superweapon light (WCLBOLT1/3).
+      // A strike under shroud may flash the sky; the renderer still masks its local pool and ordinary art.
+      if (this.sceneEvent === 'storm' && tracked.row.c === 'superweapon' && tracked.row.light) {
+        this.lastStormStrike = now;
+        this.onStormStrike?.(tracked.at, now);
+      }
       if (tracked.merge?.absorbed || this.hidden(anim.x, anim.y, anim.z)) continue;
       this.garnish(tracked, now, wind);
     }
@@ -475,6 +498,11 @@ export class LiveEffectsDriver {
       this.effects.enhancedBeams = this.garnishEnabled && this.style === 'enhanced';
       this.effects.setBeams(now, this.beamSpecs());
     }
+  }
+
+  /** Bounded, non-accumulating sky flash: multiple strikes never wash the whole frame white. */
+  skyFlash(now: number): number {
+    return this.sceneEvent === 'storm' ? 0.12 * heldPulseEnvelope(now - this.lastStormStrike, 0.08, 0.25) : 0;
   }
 
   /**
@@ -586,8 +614,9 @@ export class LiveEffectsDriver {
     let missing = 0;
     for (const tracked of this.anims.values()) {
       const { anim } = tracked;
-      if (this.hidden(anim.x, anim.y, anim.z)) continue;
       const resolved = art.anim(anim.type);
+      // Live YR captures show Layer=top clouds above black shroud. All other native layers keep the existing gate.
+      if ((anim.layer ?? resolved?.art.layer) !== 'top' && this.hidden(anim.x, anim.y, anim.z)) continue;
       if (!resolved) {
         if (art.ready) {
           missing++;
@@ -612,7 +641,7 @@ export class LiveEffectsDriver {
       const anchor = engineAnchor(drawAt.x, drawAt.y, drawAt.z, a.drawOffset ?? [0, 0]);
       const flat = anim.flat ?? a.flat ?? false;
       const layer = anim.layer ?? a.layer;
-      const pass: EffectPass = flat ? 'ground' : layer === 'top' ? 'top' : layer === 'air' ? 'air' : 'ground';
+      const pass: EffectPass = layer === 'top' ? 'top' : flat ? 'ground' : layer === 'air' ? 'air' : 'ground';
       const key = palette(resolved, anim.owner);
       const depth = engineDepth(drawAt.x, drawAt.y, drawAt.z) + (a.zAdjust ?? 0) * 0.001;
       // Translucent=yes art fades by stage (animAlpha): the bridge's stage, or the fallback frame's.

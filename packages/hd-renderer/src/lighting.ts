@@ -1,5 +1,60 @@
-import { Color, DirectionalLight, HemisphereLight, Object3D, Vector3 } from 'three/webgpu';
+import {
+  Color,
+  DirectionalLight,
+  HemisphereLight,
+  MeshStandardNodeMaterial,
+  Object3D,
+  PhysicalLightingModel,
+  Vector3,
+  type NodeBuilder,
+} from 'three/webgpu';
+import { Fn, If, sRGBTransferEOTF, sRGBTransferOETF, uniform } from 'three/tsl';
 import type { AtmosphereProfile } from './contract';
+import type { ShaderNode } from './tsl';
+
+/** Renderer-local scene multipliers are independent of the authored map-grade weight and all adaptation inputs. */
+export class SceneLightingUniforms {
+  readonly sceneTerrainMul = uniform(new Color(1, 1, 1)).setName('sceneTerrainMul');
+  readonly sceneObjectMul = uniform(new Color(1, 1, 1)).setName('sceneObjectMul');
+  /** Cast shadows disappear under an event's overcast sky; contact occlusion still anchors objects. */
+  readonly sceneSunShadow = uniform(1).setName('sceneSunShadow');
+}
+
+/** Apply palette-domain light to a lit linear colour, retaining the original expression exactly at identity. */
+export function sceneLitColour(colour: ShaderNode, multiplier: ShaderNode): ShaderNode {
+  // Explicit inputs keep reflectors, textures and renderer-local uniforms visible to graph traversal/lifecycle tools.
+  return Fn(([source, scale]: ShaderNode[]) => {
+    const result: ShaderNode = source.toVar();
+    If(scale.r.notEqual(1).or(scale.g.notEqual(1)).or(scale.b.notEqual(1)), () => {
+      result.assign(sRGBTransferEOTF((sRGBTransferOETF(result.max(0)) as ShaderNode).mul(scale).min(1)));
+    });
+    return result;
+  })(colour, multiplier);
+}
+
+/** Physical materials call this after sun/sky lighting and before three adds their separate emissive term. */
+export function finishSceneLighting(builder: NodeBuilder, multiplier: ShaderNode): void {
+  const { outgoingLight } = builder.context as { outgoingLight: ShaderNode };
+  outgoingLight.assign(sceneLitColour(outgoingLight, multiplier));
+}
+
+class SceneLightingModel extends PhysicalLightingModel {
+  constructor(private readonly multiplier: ShaderNode) {
+    super();
+  }
+  override finish(builder: NodeBuilder): void {
+    super.finish(builder);
+    finishSceneLighting(builder, this.multiplier);
+  }
+}
+
+/** Ordinary physical material whose emitted light remains independent of the scene's palette transform. */
+export class SceneLitMaterial extends MeshStandardNodeMaterial {
+  sceneMultiplier!: ShaderNode;
+  override setupLightingModel(): PhysicalLightingModel {
+    return new SceneLightingModel(this.sceneMultiplier);
+  }
+}
 
 /** One key of the day cycle: sun/sky colours and intensities in linear space. */
 export interface LightKey {

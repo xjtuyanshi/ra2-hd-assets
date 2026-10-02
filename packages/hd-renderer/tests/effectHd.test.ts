@@ -210,7 +210,7 @@ describe('live HD flipbook selection', () => {
     f.push({ frame: 0, stage: 0, layer });
     expect(f.cards().out[0]!.pass).toBe(layer);
     f.push({ frame: 0, stage: 0, layer, flat: true });
-    expect(f.cards().out[0]).toMatchObject({ pass: 'ground', draw: 'flat', push: 0 });
+    expect(f.cards().out[0]).toMatchObject({ pass: layer === 'top' ? 'top' : 'ground', draw: 'flat', push: 0 });
   });
 
   it('holds the last one-shot frame and wraps looping art to its own loopStart', () => {

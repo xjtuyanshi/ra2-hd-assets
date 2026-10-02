@@ -39,6 +39,7 @@ import {
 } from 'three/tsl';
 import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLight, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
+import { finishSceneLighting } from '../lighting';
 import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrade } from './mapLighting';
 import { highlightRoughness, poweredOcclusion, spriteLookFor, type SpriteLookState } from './spriteLook';
 import { ra2VoxelClass, VOXEL_CLASS_ID } from './voxelClasses';
@@ -228,8 +229,13 @@ class RemasterLighting extends PhysicalLightingModel {
     private readonly ao: ShaderNode,
     private readonly state: VoxelPbrState,
     private readonly look: SpriteLookState,
+    private readonly sceneMultiplier: ShaderNode,
   ) {
     super();
+  }
+  override finish(builder: NodeBuilder): void {
+    super.finish(builder);
+    finishSceneLighting(builder, this.sceneMultiplier);
   }
   override start(builder: NodeBuilder): void {
     super.start(builder);
@@ -254,11 +260,12 @@ class RemasterMaterial extends MeshStandardNodeMaterial {
   ao!: ShaderNode;
   state!: VoxelPbrState;
   look!: SpriteLookState;
+  sceneMultiplier!: ShaderNode;
   override setupEnvironment(): EnvironmentNode | null {
     return this.envNode ? new SpecularSky(this.envNode) : null;
   }
   override setupLightingModel(): PhysicalLightingModel {
-    return new RemasterLighting(this.ao, this.state, this.look);
+    return new RemasterLighting(this.ao, this.state, this.look, this.sceneMultiplier);
   }
 }
 
@@ -269,6 +276,7 @@ function createMaterial(
 ): MeshStandardNodeMaterial {
   const state = voxelPbrFor(nodes);
   const material = nodes.own(new RemasterMaterial());
+  material.sceneMultiplier = nodes.sceneObjectMul;
   nodes.own(lut);
   material.name = 'voxel-remaster';
   material.state = state;

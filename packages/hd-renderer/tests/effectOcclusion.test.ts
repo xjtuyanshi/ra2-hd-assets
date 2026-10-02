@@ -78,3 +78,47 @@ it.each([1, 0.5])('depth-tests Air animations, projectiles and particles with op
   layer.setInstances([], MESH_IDLE_SECONDS + 1);
   texture.dispose();
 });
+
+it('keeps only native Top animations above black shroud, in a separate transparent draw root', () => {
+  const driver = new LiveEffectsDriver({ setBeams() {} } as unknown as EffectsLayer, () => true);
+  driver.garnishEnabled = false;
+  driver.push(
+    {
+      anims: ['top', 'air', 'ground', 'surface', 'underground'].map((layer, uid) => ({
+        id: uid,
+        uid,
+        type: 'SYNTHETIC',
+        x: 256,
+        y: 512,
+        z: 1490,
+        frame: 0,
+        layer: layer as 'top' | 'air' | 'ground' | 'surface' | 'underground',
+      })),
+      bullets: [],
+      particleSystems: [],
+    },
+    1,
+    0,
+    new Vector3(),
+  );
+  const cards: EffectInstance[] = [];
+  expect(driver.cards(art, () => 'fx:anim', cards)).toEqual({ drawn: 1, missing: 0 });
+  expect(cards[0]!.pass).toBe('top');
+  const texture = new DataTexture(new Uint8Array(256 * 4), 256, 1);
+  const cache = { paletteAtlas: texture, paletteRow: new Map([['fx:anim', 0]]) } as unknown as Ra2Cache;
+  const layer = new EffectSpriteLayer(cache, () => ({ texture, width: 256, height: 1 }));
+  try {
+    layer.setInstances([...cards, { ...cards[0]!, pass: 'air' }], 0);
+    expect(layer.root.children).toHaveLength(1);
+    expect(layer.topRoot.children).toHaveLength(1);
+    expect(layer.topVisible).toBe(true);
+    expect((layer.topRoot.children[0] as Mesh).material).toMatchObject({ depthTest: false, depthWrite: false });
+    expect((layer.root.children[0] as Mesh).material).toMatchObject({ depthTest: true, depthWrite: false });
+    layer.setInstances([], MESH_IDLE_SECONDS + 1);
+    expect(layer.topVisible).toBe(false);
+    expect(layer.root.children).toHaveLength(0);
+    expect(layer.topRoot.children).toHaveLength(0);
+  } finally {
+    texture.dispose();
+  }
+});

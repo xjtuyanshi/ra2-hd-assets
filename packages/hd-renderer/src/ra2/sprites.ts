@@ -57,6 +57,7 @@ import {
   puddleNoise,
 } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
+import { sceneLitColour } from '../lighting';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { type HdAtlas, type Ra2Cache } from './cache';
 import { objectLevelAt, srgbScale, terrainGradeAt } from './mapLighting';
@@ -333,6 +334,9 @@ export class SpriteLayer {
     // mapLighting.ts): 'ambient' takes the level, 'full' the per-channel grade, 'none' nothing.
     const isFull: ShaderNode = step(0.5, aFlags.z).mul(float(1).sub(step(1.5, aFlags.z)));
     const isNone: ShaderNode = step(1.5, aFlags.z);
+    // The event transforms terrain even when its authored map grade is disabled (ungraded ore/gem cell art).
+    // Effect art is drawn by EffectSpriteLayer, whose separate material never samples these scene multipliers.
+    const sceneMultiplier: ShaderNode = mix(nodes.sceneObjectMul, nodes.sceneTerrainMul, max(isFull, isNone));
     const grade: ShaderNode = mix(
       mix(vec3(objectLevelAt(cache.mapLight, aLightSample)), terrainGradeAt(cache.mapLight, aLightSample), isFull),
       vec3(1),
@@ -555,7 +559,8 @@ export class SpriteLayer {
         const shade = (c: ShaderNode, paint: ShaderNode): ShaderNode => {
           const lit: ShaderNode = objectLit(c);
           const base = mix(moonlit(lit, nodes), lit, paint).mul(this.light);
-          return base.add(localLightHeadroom(base, lit.mul(local), nodes.localLightCap));
+          const eventBase = sceneLitColour(base, sceneMultiplier);
+          return eventBase.add(localLightHeadroom(eventBase, lit.mul(local), nodes.localLightCap));
         };
         // Lit windows at night: warm amber panes (85 %) or a dimmer cool white (15 %) by the window's variant, each pane
         // with its own brightness; variants above 0.85 stay dark. Kept below the tone mapper's shoulder so panes stay
@@ -651,8 +656,10 @@ export class SpriteLayer {
             // Glints only on the full inside of a pane (not its softer rim), so they never sparkle as single pixels.
             const core: ShaderNode = smoothstep(0.92, 0.99, m.spec).mul(weight);
             const glint: ShaderNode = pane.glint.mul(look.sunLight).mul(look.glass.mul(core).mul(occlusion));
-            const sky: ShaderNode = pane.sky.mul(occlusion);
-            const relit: ShaderNode = mix(base, sky, reflectance).add(highlight).add(glint);
+            const sky: ShaderNode = sceneLitColour(pane.sky.mul(occlusion), sceneMultiplier);
+            const relit: ShaderNode = mix(base, sky, reflectance)
+              .add(sceneLitColour(highlight, sceneMultiplier))
+              .add(sceneLitColour(glint, sceneMultiplier));
             result.assign(select(flatArt, result, vec4(relit.add(litGlow), litAlpha)));
             const isDecal: ShaderNode = step(0.5, aFlat).mul(float(1).sub(step(1.5, aFlat)));
             const crystal: ShaderNode = aFlags.w.mul(isDecal).mul(m.has);
@@ -743,6 +750,11 @@ export class SpriteLayer {
               .mul(fade);
             result.assign(vec4(lit.mul(0.9), litAlpha.mul(strength)));
           });
+        });
+        // Black shadow/contact RGB naturally darkens the already transformed receiver. Only cast-shadow coverage
+        // vanishes under event overcast; foundation contact and infantry contact blobs keep their grounding role.
+        If(isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(nodes.sceneSunShadow.notEqual(1)), () => {
+          result.a.mulAssign(nodes.sceneSunShadow);
         });
         return result;
       })();

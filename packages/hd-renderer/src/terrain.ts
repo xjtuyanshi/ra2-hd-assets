@@ -26,6 +26,7 @@ import { DEFAULT_ATMOSPHERE_NODES, sampleLightField, type AtmosphereNodes } from
 import type { RenderMap, TerrainClass } from './contract';
 import { LEVEL_HEIGHT } from './world';
 import type { ShaderNode } from './tsl';
+import { SceneLitMaterial } from './lighting';
 
 /** Vertices per cell edge; 4 keeps shorelines smooth without a per-pixel heightmap. */
 const SUBDIVISIONS = 4;
@@ -151,7 +152,8 @@ function createTerrainMaterial(
   height: number,
   nodes: AtmosphereNodes,
 ): MeshStandardNodeMaterial {
-  const material = new MeshStandardNodeMaterial();
+  const material = new SceneLitMaterial();
+  material.sceneMultiplier = nodes.sceneTerrainMul;
   const weights = attribute('terrainWeights', 'vec4');
   const p = positionWorld;
 

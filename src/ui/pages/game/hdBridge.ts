@@ -425,6 +425,7 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
     houses: state.houses.map((house) => ({ index: house.index, colorIndex: house.colorIndex })),
     localHouse: state.localHouse,
     shroud: state.shroud,
+    lighting: state.lighting,
     overlays: state.overlays,
     smudges: state.smudges,
     effects: state.effects && {

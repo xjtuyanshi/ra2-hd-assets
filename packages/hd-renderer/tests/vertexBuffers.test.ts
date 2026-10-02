@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AmbientLight,
   type BufferAttribute,
   type InterleavedBufferAttribute,
   type Texture,
@@ -18,7 +19,7 @@ import {
   Vector3,
   WebGPURenderer,
 } from 'three/webgpu';
-import { float, texture as textureNode, uv, vec4 } from 'three/tsl';
+import { float, lights, texture as textureNode, uv, vec4 } from 'three/tsl';
 // @ts-expect-error r186 exposes this internal module without a matching @types/three declaration.
 import RenderObject from 'three/src/renderers/common/RenderObject.js';
 import { InstancedQuad } from '../src/instancedQuad';
@@ -34,6 +35,7 @@ import { buildWater } from '../src/water';
 import { buildTerrain } from '../src/terrain';
 import { buildRa2Terrain } from '../src/ra2/terrain';
 import { buildVoxelGeometry } from '../src/ra2/voxels';
+import { voxelPbrMaterialFor } from '../src/ra2/voxelPbr';
 import { voxelShadowMaterial, voxelWaterMaterial } from '../src/ra2/voxelShadow';
 import { Ra2NightDressing } from '../src/ra2/nightDressing';
 import { AtmosphereNodes } from '../src/atmosphere';
@@ -347,7 +349,7 @@ describe('r186 vertex and uniform binding budget', () => {
       };
       for (const alpha of [1, 0.5]) {
         layer.setInstances([{ ...card, alpha }], 0);
-        const mesh = meshes(layer.root)[0]!;
+        const mesh = meshes(pass === 'top' ? layer.topRoot : layer.root)[0]!;
         const native = assertLimits(mesh);
         expect(native.buffers.length).toBe(6);
         expect(native.fragmentShader.includes('terrainDepthPullEnabled')).toBe(pass === 'air');
@@ -371,7 +373,9 @@ describe('r186 vertex and uniform binding budget', () => {
         ],
         0,
       );
-      const hd = meshes(layer.root).find((mesh) => mesh.name.startsWith('live-effects-hd-'))!;
+      const hd = meshes(pass === 'top' ? layer.topRoot : layer.root).find((mesh) =>
+        mesh.name.startsWith('live-effects-hd-'),
+      )!;
       const result = assertLimits(hd);
       expect(result.fragmentShader.includes('terrainDepthPullEnabled')).toBe(pass === 'air');
       // Six vec4 instance fields, one position buffer and one fallback matrix buffer: no seventh field.
@@ -577,6 +581,33 @@ describe('r186 vertex and uniform binding budget', () => {
       waterPreset.style = previous;
       source.nodes!.dispose();
     }
+  });
+
+  it('compiles scene multipliers after physical lighting and on every sprite lighting class', () => {
+    const source = cache();
+    const terrain = buildRa2Terrain(source);
+    for (const material of terrain.mesh.material as MeshBasicNodeMaterial[]) {
+      material.lightsNode = lights([new AmbientLight(0xffffff, 1)]);
+      expect(assertLimits(new Mesh(terrain.mesh.geometry, material)).fragmentShader).toContain('sceneTerrainMul');
+    }
+    const palette = new Uint8Array(768);
+    const parts = buildVoxelGeometry(syntheticModel([syntheticSection(2)]), palette, source.nodes);
+    for (const part of parts) {
+      part.material.lightsNode = lights([new AmbientLight(0xffffff, 1)]);
+      expect(assertLimits(new Mesh(part.geometry, part.material)).fragmentShader).toContain('sceneObjectMul');
+      const pbr = voxelPbrMaterialFor(palette, source.nodes);
+      pbr.lightsNode = lights([new AmbientLight(0xffffff, 1)]);
+      expect(assertLimits(new Mesh(part.geometry, pbr)).fragmentShader).toContain('sceneObjectMul');
+      part.geometry.dispose();
+    }
+    const sprites = new SpriteLayer(source, [], 1);
+    const shader = assertLimits(sprites.mesh).fragmentShader;
+    expect(shader).toContain('sceneTerrainMul');
+    expect(shader).toContain('sceneObjectMul');
+    expect(shader).toContain('sceneSunShadow');
+    dispose(sprites.mesh);
+    dispose(terrain.mesh);
+    source.nodes!.dispose();
   });
 
   it('audits sandbox object/window materials and custom full-screen mist/tone mapping', () => {

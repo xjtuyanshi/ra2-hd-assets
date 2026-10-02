@@ -277,6 +277,8 @@ function presentation(withLibrary = true) {
       settings: { sourceLights: 0 },
       seconds: () => 1,
       frame: vi.fn(),
+      setSceneLighting: vi.fn(),
+      setTopEffectsVisible: vi.fn(),
       windowsWanted: () => false,
       materialsWanted: () => false,
       dispose: vi.fn(),
@@ -284,7 +286,7 @@ function presentation(withLibrary = true) {
       // Overlay pages register as always-covered terrain-class occluders for Air fire (P-L5H-3b).
       terrainDepth: { register: vi.fn(), setCaptured: vi.fn() },
     },
-    effectDriver: { frame: vi.fn(), unknownTypes: new Set(), logicFps: 30 },
+    effectDriver: { frame: vi.fn(), skyFlash: () => 0, unknownTypes: new Set(), logicFps: 30 },
     volumetricBlasts: new VolumetricBlastLayer({ light: cellLayer.light, sunDirection: cellLayer.toCamera }),
     liveBeams: { update: vi.fn(), displayScale: { value: 1 }, dispose: vi.fn() },
     effectStats: { drawn: 0, missing: 0 },

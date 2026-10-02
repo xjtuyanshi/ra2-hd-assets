@@ -24,10 +24,11 @@ import {
 import type { AtmosphereProfile } from './contract';
 import type { EmitterLayer } from './emitters';
 import type { LightField } from './lightField';
+import { SceneLightingUniforms } from './lighting';
 import type { ShaderNode } from './tsl';
 
 /** Shader inputs owned by one renderer/world. Legacy exports below remain for standalone material callers. */
-export class AtmosphereNodes {
+export class AtmosphereNodes extends SceneLightingUniforms {
   private disposed = false;
   private readonly resources = new Set<{ dispose(): void }>();
   /** Materials and lookup textures created for this context share its lifetime. */
@@ -55,12 +56,16 @@ export class AtmosphereNodes {
   readonly faithfulDisplay = uniform(1);
 
   constructor() {
+    super();
     this.black.needsUpdate = true;
     this.noSurface.needsUpdate = true;
   }
 
   /** Mirror a renderer's inputs into layers created before its world was known, without replacing their nodes. */
   copyValuesFrom(source: AtmosphereNodes): void {
+    this.sceneTerrainMul.value.copy(source.sceneTerrainMul.value);
+    this.sceneObjectMul.value.copy(source.sceneObjectMul.value);
+    this.sceneSunShadow.value = source.sceneSunShadow.value;
     this.sceneLevel.value.copy(source.sceneLevel.value);
     this.sceneBrightness.value = source.sceneBrightness.value;
     this.localLightCap.value = source.localLightCap.value;

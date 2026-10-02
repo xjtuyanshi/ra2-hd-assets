@@ -14,6 +14,7 @@ import {
   RedFormat,
   Vector3,
   type Object3D,
+  type NodeBuilder,
   type ReflectorNode,
 } from 'three/webgpu';
 import {
@@ -56,6 +57,7 @@ import {
   type AtmosphereNodes,
 } from '../atmosphere';
 import { createWaterUniforms, waterSurface, type WaterUniforms } from '../waterShading';
+import { finishSceneLighting, sceneLitColour } from '../lighting';
 import type { TerrainBuild } from '../terrain';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT } from '../world';
@@ -464,7 +466,7 @@ function wetSheen(
   return light
     .mul(puddle.mul(0.015))
     .add(mirroredLight.mul(puddle).mul(sparkle).mul(0.16))
-    .add(sky.mul(float(0.03).add(puddle.mul(0.045))).mul(skyLevel))
+    .add(sceneLitColour(sky.mul(float(0.03).add(puddle.mul(0.045))).mul(skyLevel), nodes.sceneTerrainMul))
     .mul(wetPaved);
 }
 
@@ -475,8 +477,16 @@ function wetSheen(
  * which read as haze over the whole battlefield (flat ground is calibrated to show the art exactly at clear noon).
  */
 class ArtLightingModel extends PhysicalLightingModel {
-  constructor(private readonly gloss: ShaderNode) {
+  constructor(
+    private readonly gloss: ShaderNode,
+    private readonly sceneMultiplier: ShaderNode,
+  ) {
     super();
+  }
+
+  override finish(builder: NodeBuilder): void {
+    super.finish(builder);
+    finishSceneLighting(builder, this.sceneMultiplier);
   }
 
   override direct({
@@ -507,8 +517,9 @@ class ArtLightingModel extends PhysicalLightingModel {
 class ArtMaterial extends MeshStandardNodeMaterial {
   /** 0 = dry art (diffuse only) .. 1 = full wet specular. */
   gloss: ShaderNode = float(0);
+  sceneMultiplier!: ShaderNode;
   override setupLightingModel(): PhysicalLightingModel {
-    return new ArtLightingModel(this.gloss);
+    return new ArtLightingModel(this.gloss, this.sceneMultiplier);
   }
 }
 
@@ -572,6 +583,7 @@ function createMaterials(
 
   // Cliff walls take the upper tile's art, else the lower tile's, else neutral rock where neither raster covers the face.
   const wall = new ArtMaterial();
+  wall.sceneMultiplier = nodes.sceneTerrainMul;
   {
     const upper = sample('atlasUv', 'atlasRect').colour;
     const lower = sample('atlasUv2', 'atlasRect2').colour;
@@ -589,16 +601,20 @@ function createMaterials(
     wall.metalnessNode = float(0);
     // Local lights (map light sources, lamps, fires, explosions) from the light field, as diffuse irradiance.
     wall.emissiveNode = localLightHeadroom(
-      wet.albedo
-        .mul(nodes.sceneLevel)
-        .mul(nodes.referenceLevel)
-        .mul(1 / Math.PI),
+      sceneLitColour(
+        wet.albedo
+          .mul(nodes.sceneLevel)
+          .mul(nodes.referenceLevel)
+          .mul(1 / Math.PI),
+        nodes.sceneTerrainMul,
+      ),
       wet.albedo.mul(sampleLightField(positionWorld.xz, nodes)).mul(1 / Math.PI),
       nodes.localLightCap,
     );
   }
 
   const ground = new ArtMaterial();
+  ground.sceneMultiplier = nodes.sceneTerrainMul;
   const { uv, colour: raw } = sample('atlasUv', 'atlasRect');
   // Tile art under the map's own light (see mapLighting.ts), as the engine draws it.
   const grade: ShaderNode = terrainGradeAt(cache.mapLight, positionWorld.xz);
@@ -767,13 +783,18 @@ function createMaterials(
   ground.roughnessNode = roughness;
   ground.metalnessNode = float(0);
   // Local lights from the light field (exactly zero by day without explosions), plus the wet paved sheen.
-  ground.emissiveNode = (ground.emissiveNode as ShaderNode)
+  // Water reflection/glint is reflected scene light despite its emissive implementation. Local source pools below
+  // stay additive: event darkness must not dim an explosion, lamp, or lightning strike's illumination.
+  ground.emissiveNode = sceneLitColour(ground.emissiveNode as ShaderNode, nodes.sceneTerrainMul)
     .add(
       localLightHeadroom(
-        albedo
-          .mul(nodes.sceneLevel)
-          .mul(nodes.referenceLevel)
-          .mul(1 / Math.PI),
+        sceneLitColour(
+          albedo
+            .mul(nodes.sceneLevel)
+            .mul(nodes.referenceLevel)
+            .mul(1 / Math.PI),
+          nodes.sceneTerrainMul,
+        ),
         albedo.mul(localLight).mul(1 / Math.PI),
         nodes.localLightCap,
       ),

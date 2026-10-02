@@ -8,6 +8,7 @@ import {
   RGBAFormat,
   UnsignedByteType,
   Vector3,
+  type NodeBuilder,
 } from 'three/webgpu';
 import {
   BRDF_GGX,
@@ -38,6 +39,7 @@ import {
 import type { VoxelLightingFile } from '../../../ra2-assets/src/vpl';
 import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLight, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
+import { finishSceneLighting, sceneLitColour } from '../lighting';
 import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrade } from './mapLighting';
 import { voxelProjectionFor, type VoxelProjectionPart } from './voxelProjection';
 import { projectedVoxelColour } from './voxelProjectionNodes';
@@ -217,8 +219,14 @@ class VoxelLightingModel extends PhysicalLightingModel {
     private readonly matp: ShaderNode,
     private readonly state: VoxelLightingState,
     private readonly look: SpriteLookState,
+    private readonly sceneMultiplier: ShaderNode,
   ) {
     super();
+  }
+
+  override finish(builder: NodeBuilder): void {
+    super.finish(builder);
+    finishSceneLighting(builder, this.sceneMultiplier);
   }
 
   override direct({
@@ -258,8 +266,9 @@ class VoxelMaterial extends MeshStandardNodeMaterial {
   matp!: ShaderNode;
   state!: VoxelLightingState;
   look!: SpriteLookState;
+  sceneMultiplier!: ShaderNode;
   override setupLightingModel(): PhysicalLightingModel {
-    return new VoxelLightingModel(this.raw, this.matp, this.state, this.look);
+    return new VoxelLightingModel(this.raw, this.matp, this.state, this.look, this.sceneMultiplier);
   }
 }
 
@@ -328,6 +337,7 @@ function createMaterial(
   const state = voxelLightingFor(nodes);
   const { voxelFill, voxelDebug, voxelExtraLight, voxelOcclusion, voxelSunDiffuse, lightDirection } = state;
   const material = new VoxelMaterial();
+  material.sceneMultiplier = nodes.sceneObjectMul;
   material.state = state;
   const look = (material.look = spriteLookFor(nodes));
   nodes.own(material);
@@ -380,7 +390,9 @@ function createMaterial(
   const local: ShaderNode = objectLight(positionWorld.xz, nodes)
     .mul(1 / Math.PI)
     .mul(float(0.55).add(max(n.y, 0).mul(0.45)));
-  let shaded: ShaderNode = mix(moonlit(lit, nodes), lit, paint).mul(voxelFill).add(lit.mul(local)).mul(ao);
+  let shaded: ShaderNode = sceneLitColour(mix(moonlit(lit, nodes), lit, paint).mul(voxelFill), nodes.sceneObjectMul)
+    .add(lit.mul(local))
+    .mul(ao);
   let uncovered: ShaderNode = float(1);
   if (projection) {
     const projected = projectedVoxelColour(
@@ -394,9 +406,10 @@ function createMaterial(
     const projState = voxelProjectionFor(nodes);
     const formAo: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(projState.formAO.clamp())), look.aoPower);
     const colour: ShaderNode = srgbScale(projected.colour, level.div(projState.levelRef.max(0.01))).mul(formAo);
-    const projectedShade: ShaderNode = mix(moonlit(colour, nodes), colour, projected.paint)
-      .mul(voxelFill)
-      .add(colour.mul(local));
+    const projectedShade: ShaderNode = sceneLitColour(
+      mix(moonlit(colour, nodes), colour, projected.paint).mul(voxelFill),
+      nodes.sceneObjectMul,
+    ).add(colour.mul(local));
     // The redraw already contains AO and directional shading. Only uncovered engine art receives mesh AO/sheen.
     shaded = mix(shaded, projectedShade, projected.coverage);
     uncovered = float(1).sub(projected.coverage);
