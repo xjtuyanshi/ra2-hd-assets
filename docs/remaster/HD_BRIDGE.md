@@ -200,8 +200,8 @@ Start a development server whose game root holds a skirmish setup (a scratch cop
 `RA2MD.INI` `[Skirmish]` section, as described in `scripts/remaster/perf/README.md`), then open
 `/?start-page=battle&hd=1`. By default the HD lighting follows the map's own `[Lighting]` (day, dusk or night maps, see
 `pnpm hd:lights`); `hd-time=<hours>` and `hd-weather=rain` override it; `hd-look=<preset>` (`faithful|golden|cinematic`)
-applies the preset and its suggested hour unless `hd-time` is given (`cinematic` is the approved look with medium
-cooling); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=enhanced` the modern water;
+applies the preset and, on day maps, its suggested hour unless `hd-time` is given (dusk and night maps keep their own
+`[Lighting]` hour; `cinematic` is the approved look with medium cooling); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=enhanced` the modern water;
 `hd-vlook=remaster` selects the remaster voxel look; `hd-vproj=<dir>` selects vehicle redraw projection atlases under
 the HD cache (e.g. `vehicles-hd`); `hd-rect=x,y,w,h`
 overrides the tactical rectangle (default: the frame minus YR's 168 px sidebar and 32 px command bar).

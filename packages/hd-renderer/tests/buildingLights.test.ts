@@ -82,18 +82,18 @@ describe('building light policy', () => {
     expect(hue).toBeGreaterThanOrEqual(215);
     expect(hue).toBeLessThanOrEqual(235);
     expect((b - r) / b).toBeGreaterThanOrEqual(0.6);
-    expect(body.map((v) => Math.round(v * 255))).toEqual([60, 115, 255]);
+    expect(body.map((v) => Math.round(v * 255))).toEqual([35, 85, 255]);
     expect(0.2126 * light.colour[0] + 0.7152 * light.colour[1] + 0.0722 * light.colour[2]).toBeLessThanOrEqual(0.2);
     // Measured glass radius at two device pixels per engine pixel; no halo extends the art silhouette.
     expect(light.orb).toMatchObject({
       radius: 0.418,
-      coreRadius: 0.55,
-      bodyStart: 0.8,
+      coreRadius: 0.48,
+      bodyStart: 0.75,
       bodyEnd: 0.92,
       alpha: 1,
       coreAlpha: 1,
-      bodyAlpha: 0.5,
-      limbAlpha: 0.58,
+      bodyAlpha: 0.52,
+      limbAlpha: 0.62,
       filamentMix: 0.5,
       haloScale: 1,
       haloAlpha: 0,
@@ -106,8 +106,8 @@ describe('building light policy', () => {
     const colours = {
       hot: [225, 252, 255],
       mid: [130, 220, 255],
-      body: [60, 115, 255],
-      limb: [125, 170, 245],
+      body: [35, 85, 255],
+      limb: [110, 160, 245],
       filaments: [170, 235, 255],
       halo: [45, 95, 255],
     } as const;

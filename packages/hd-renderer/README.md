@@ -177,7 +177,7 @@ Use identical query parameters and viewport for both cache roots. The bench uses
 visual review surface, not evidence of native gameplay. The [SHP sheet CLI](../ra2-assets/README.md#shp-vehicle-redraw-sheets-python)
 documents preparation and the manual image-editing handoff.
 
-**Live view.** `LiveView.create` without `timeOfDay` follows the map's staging; `liveView.setEnvironment({ timeOfDay,
+**Live view.** `LiveView.create` without `timeOfDay` follows the map's staging (`dayHour`, a look preset's suggested hour, replaces the staging hour of day maps only: dusk and night maps keep theirs); `liveView.setEnvironment({ timeOfDay,
 weather, weatherIntensity, lamps, windows, lights, mist })` changes it without a reload. Light sources follow the
 buildings standing in the match (light-emitting types from `lights.json`; the engine grid is recomputed when that set
 changes), lit windows use the type library's masks (`pnpm hd:lights -- --library <theater>`), and fires keep a small

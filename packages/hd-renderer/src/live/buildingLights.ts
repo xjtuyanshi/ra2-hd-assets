@@ -119,19 +119,21 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
         // of the same frame: saturated blue 1.0-1.5x, lavender <= 2000): a white-cyan core over the inner half (the
         // target's white-hot heart; cyan hue < 200 counts neither as saturated blue nor lavender), a saturated body at
         // half opacity so the painted glass swirl shows through without turning pale lavender, a rim of S about 0.5.
+        // Live pair (two adjacent reactors, same box as the review): a less saturated body (60/115/255) left the box at
+        // 0.88-0.94x the original's saturated blue; this body over the pale glass still reads as glass.
         hot: displayLinear(225, 252, 255),
         mid: displayLinear(130, 220, 255),
-        body: displayLinear(60, 115, 255),
-        limb: displayLinear(125, 170, 245),
+        body: displayLinear(35, 85, 255),
+        limb: displayLinear(110, 160, 245),
         filaments: displayLinear(170, 235, 255),
         halo: displayLinear(45, 95, 255),
-        coreRadius: 0.55,
-        bodyStart: 0.8,
+        coreRadius: 0.48,
+        bodyStart: 0.75,
         bodyEnd: 0.92,
         alpha: 1,
         coreAlpha: 1,
-        bodyAlpha: 0.5,
-        limbAlpha: 0.58,
+        bodyAlpha: 0.52,
+        limbAlpha: 0.62,
         filamentMix: 0.5,
         haloAlpha: 0,
         haloScale: 1,
