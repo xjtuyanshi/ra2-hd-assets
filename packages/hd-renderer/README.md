@@ -374,30 +374,23 @@ lit colour in the same units. Lamp-lit sandstone cannot accumulate a white veil;
 within dark-ground headroom remain unscaled. This replaces per-source lamp gains; the clamp is dormant with
 `sourceLights=0`, retaining faithful local-light rendering.
 
-The reactor's head and five decorative arcs use the generic `src/emissiveOverlay.ts`, never bloomed head glows or
-`BeamLayer`. The camera-facing plasma orb covers the art's glass sphere (0.55 world units, about 16.5 engine px, at
-foundation [0.47, 0.40] and 27 px up: measured on the battle and live-replay framings, a 0.30 disc at [0.57, 0.40] left
-a pale glass ring round a dark-blue "eye"). Its display-linear, sRGB-authored colours run from a white-hot cyan core
-(205, 250, 255; hue about 186 degrees) through a saturated cyan-blue `mid` (100, 200, 255) to the saturated body
-(55, 115, 255) and a lighter glassy rim (110, 175, 255), with animated internal filaments (`filamentMix` 0.75) and a halo
-ending at 1.4 radii. The ramp passes through saturated cyan rather than pale blue on purpose: pixels of HSV hue
-200-290 degrees with S 0.03-0.3 are what reviews counted as the lavender veil. The orb's alpha is radial: opaque core
-(`coreAlpha` 1) to `coreRadius` 0.42, a partly transparent body (`bodyAlpha` 0.7 from `bodyStart` 0.68) so the painted
-glass sphere shows through, and a stronger limb (`limbAlpha` 0.88). The disc is pulled towards the camera by its halo
-radius past the head's own push (with only the head's push the owner's foundation depth wedge cut a pie slice out of
-the orb), arcs by 0.8 world units (so the reactor's own tower cards do not swallow them). Arc directions lose 85 % of
-their component along the view direction (the live view passes the camera's `toCamera`), so bolts radiate from the
-orb's silhouette in the screen plane: an outgoing arc pointing at the camera used to collapse into stacked glow dots,
-the dark-blue "eye" over the white core. Each arc has 7–10 jagged points and 1–2 forks from inner joints, reach
-0.5–1.15 world units past the glass; crawling paths stay on the glass. Capsule segments provide round joints/caps,
-widths 3.2 engine pixels (forks 2.2) with a cyan-white core over the inner 45 % of the width (`coreFraction`) and the
-saturated edge (45, 110, 255) fading to 70 % at the rim; under every arc and fork a 3.5 times wider glow stroke in the
-edge colour at half opacity stands in for the bloom halo. The core follows the distance across the stroke, not the
-capsule radius: with a radial core each segment's round start cap painted edge blue over the previous segment's core
-end and broke every bolt into dashes. Segments with no screen-space length draw nothing. Shapes reseed every two logic
-frames; alpha flickers 0.7–1.0 with presentation time. Day/night use the same orb and stroke colours. Plain-data
-setters reuse fixed buffers
-(256 discs, 16384 segments); HdRenderer owns and disposes the layer. Native attack beams and their impact effects retain their existing pipeline.
+The reactor's clipped plasma orb and confined arcs use the generic `src/emissiveOverlay.ts`, outside bloom and
+`BeamLayer`. The orb matches the art's measured glass radius (17.75 engine px, 0.418 world units) with no halo;
+its head remains at foundation [0.47, 0.40], 27 px up. A screen-space occluder wedge at (+11.5, -1.5) engine px,
+between -22 and 90 degrees in the y-down frame, preserves the front-right tower overlap. Radial and wedge edges
+use derivatives for roughly one device pixel of antialiasing. Display-linear colours run from cyan-white heat
+through cyan-blue to a translucent blue body (`bodyAlpha` 0.45), revealing the painted glass swirl, then a glassy
+limb (`limbAlpha` 0.55).
+
+Each reactor has 4–5 crawling core-to-glass filaments and 2–3 rim-to-pylon/pad strikes. Filaments and their optional
+forks stay inside 0.985 radii and clear the tower wedge; strikes target six measured anchors and every vertex stays
+within the glass radius plus 12 engine px. All vertices lie in the camera's screen plane before depth push; strokes
+sit just 0.05 world units ahead of the disc. Capsule widths are 1.6 engine px (forks 1.1), with a cyan-white core
+occupying 45 % of the half-width; each arc/fork has a 2.4 times wider blue under-stroke at 0.3 opacity.
+Persistent filament slots drift by 0.06 radians per logic frame, sampled at the start of each two-frame pair;
+geometry reseeds per pair while presentation-time alpha flickers 0.7–1.0 times the shared source fade. Arcs appear
+only above half fade. Plain-data setters reuse fixed buffers (256 discs, 16384 segments); HdRenderer owns their
+lifetime. Native attack beams and their impact effects retain their existing pipeline.
 
 `packages/ra2-assets/python/look_metrics.py` compares renders of one bench framing with the approved targets (L*
 percentiles, local contrast at pixel and mid scale, sun/shade separation, highlight and deep-shade shares, chroma;

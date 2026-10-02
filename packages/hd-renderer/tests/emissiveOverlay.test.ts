@@ -15,9 +15,13 @@ import { mrt, output, vec4 } from 'three/tsl';
 import {
   EmissiveOverlay,
   emissiveMrtSupported,
+  orbOccluded,
+  orbRadialAlpha,
+  orbSilhouetteScale,
   strokeWorldWidth,
   type EmissiveDisc,
   type EmissiveStroke,
+  type OrbOccluder,
 } from '../src/emissiveOverlay';
 import { HdRenderer, applyLookPreset, emissiveOverlayEnabled } from '../src/HdRenderer';
 import { BUILDING_LIGHTS } from '../src/live/buildingLights';
@@ -111,12 +115,12 @@ describe('emissive primitive buffers and render exclusion', () => {
     try {
       overlay.setDiscs([disc, { ...disc, alpha: 0.5, orb: { ...disc.orb, alpha: 0.8, filamentMix: 0.6 } }]);
       const data = internal.discData.array;
-      expect(data).toHaveLength(2 * 9 * 4);
+      expect(data).toHaveLength(2 * 11 * 4);
       for (const [index, fade, globalAlpha, filamentMix] of [
-        [0, 1, 1, 0.75],
+        [0, 1, 1, 0.5],
         [1, 0.5, 0.8, 0.6],
       ]) {
-        const base = index! * 36;
+        const base = index! * 44;
         for (let channel = 0; channel < 3; channel++)
           expect(data[base + 28 + channel]).toBeCloseTo(disc.orb.mid[channel]!);
         expect(data[base + 11]).toBeCloseTo(disc.orb.coreRadius);
@@ -130,6 +134,48 @@ describe('emissive primitive buffers and render exclusion', () => {
         expect(data[base + 34]).toBeCloseTo(disc.orb.limbAlpha);
         expect(data[base + 35]).toBe(0);
       }
+    } finally {
+      overlay.dispose();
+    }
+  });
+  it('packs only two y-down wedges and clears absent slots when an instance is reused', () => {
+    const overlay = new EmissiveOverlay(PIXELS_PER_CELL_EDGE, 1, 1);
+    const internal = overlay as unknown as { discData: { array: Float32Array } };
+    const wedges: OrbOccluder[] = [
+      { corner: [0.648, -0.085], from: -22, to: 90 },
+      { corner: [-0.2, 0.4], from: 180, to: 240 },
+      { corner: [5, 5], from: 0, to: 30 },
+    ];
+    try {
+      overlay.setDiscs([{ ...disc, orb: { ...disc.orb, occluders: wedges } }]);
+      const data = internal.discData.array;
+      expect(data).toHaveLength(44);
+      for (let i = 0; i < 2; i++) {
+        const offset = 36 + i * 4;
+        expect(data[offset]).toBeCloseTo(wedges[i]!.corner[0]);
+        expect(data[offset + 1]).toBeCloseTo(wedges[i]!.corner[1]);
+        expect(data[offset + 2]).toBeCloseTo((wedges[i]!.from * Math.PI) / 180);
+        expect(data[offset + 3]).toBeCloseTo((wedges[i]!.to * Math.PI) / 180);
+      }
+      overlay.setDiscs([{ ...disc, orb: { ...disc.orb, occluders: [wedges[0]!] } }]);
+      expect([...data.slice(40)]).toEqual([0, 0, 0, 0]);
+      overlay.setDiscs([{ ...disc, orb: { ...disc.orb, occluders: undefined } }]);
+      expect([...data.slice(36)]).toEqual(Array(8).fill(0));
+    } finally {
+      overlay.dispose();
+    }
+  });
+  it.each([
+    { haloAlpha: 0, haloScale: 1.4 },
+    { haloAlpha: 0.4, haloScale: 1 },
+    { haloAlpha: 0.4, haloScale: 0.8 },
+    { haloAlpha: 0.4, haloScale: 1.4 },
+  ])('uploads the effective silhouette scale for %j', (halo) => {
+    const overlay = new EmissiveOverlay(PIXELS_PER_CELL_EDGE, 1, 1);
+    const internal = overlay as unknown as { discData: { array: Float32Array } };
+    try {
+      overlay.setDiscs([{ ...disc, orb: { ...disc.orb, ...halo } }]);
+      expect(internal.discData.array[6]).toBeCloseTo(orbSilhouetteScale(halo));
     } finally {
       overlay.dispose();
     }
@@ -191,6 +237,47 @@ describe('emissive primitive buffers and render exclusion', () => {
   });
 });
 
+describe('orb silhouette shader CPU twins', () => {
+  it('draws no pixels beyond the radius when either halo control disables it, with inward device-pixel AA', () => {
+    const onePixel = 1 / (17.75 * 2);
+    for (const [haloAlpha, haloScale] of [
+      [0, 1],
+      [0, 1.4],
+      [0.4, 1],
+      [0.4, 0.8],
+    ]) {
+      expect(orbSilhouetteScale({ haloAlpha: haloAlpha!, haloScale: haloScale! })).toBe(1);
+      for (let d = 1; d <= 2; d += 0.01) expect(orbRadialAlpha(d, 0.55, haloAlpha!, haloScale!, onePixel)).toBe(0);
+      expect(orbRadialAlpha(1 - onePixel, 0.55, haloAlpha!, haloScale!, onePixel)).toBeCloseTo(0.55);
+      expect(orbRadialAlpha(1 - onePixel / 2, 0.55, haloAlpha!, haloScale!, onePixel)).toBeCloseTo(0.55 / 2);
+      expect(orbRadialAlpha(1, 0.55, haloAlpha!, haloScale!, 0)).toBe(0);
+    }
+    expect(orbRadialAlpha(1.2, 0.55, 0.4, 1.4, onePixel)).toBeCloseTo(0.2);
+    expect(orbRadialAlpha(1.4, 0.55, 0.4, 1.4, onePixel)).toBe(0);
+  });
+  it('removes the right/below tower wedge in the y-down frame, preserving pixels beyond either edge', () => {
+    const tower = disc.orb.occluders![0]!;
+    expect(orbOccluded(0.9, 0, tower)).toBe(true);
+    expect(orbOccluded(0.7, 0.6, tower)).toBe(true);
+    expect(orbOccluded(0, 0, tower)).toBe(false);
+    expect(orbOccluded(0.6, 0.4, tower)).toBe(false);
+    expect(orbOccluded(0.9, -0.3, tower)).toBe(false);
+    expect(orbOccluded(...tower.corner, tower)).toBe(true);
+    for (let angle = -180; angle <= 180; angle++) {
+      const x = tower.corner[0] + Math.cos((angle * Math.PI) / 180);
+      const y = tower.corner[1] + Math.sin((angle * Math.PI) / 180);
+      // Edge values are checked explicitly above; strict interiors avoid trig round-off at the two boundaries.
+      if (angle === tower.from || angle === tower.to) continue;
+      expect(orbOccluded(x, y, tower)).toBe(angle > tower.from && angle < tower.to);
+    }
+    const wrap: OrbOccluder = { corner: [0, 0], from: 170, to: 250 };
+    expect(orbOccluded(-1, 0, wrap)).toBe(true);
+    expect(orbOccluded(0, -1, wrap)).toBe(false);
+    expect(orbOccluded(1, 0)).toBe(false);
+    expect(orbOccluded(1, 0, { corner: [0, 0], from: 0, to: 0 })).toBe(false);
+  });
+});
+
 /** Build r186's actual WGSL/MRT layouts without a browser/device; GPU validation remains the reviewer's. */
 function buildShader(mesh: InstancedQuad, attachments: ReturnType<typeof mrt> | null) {
   const renderer = new WebGPURenderer({ canvas: { width: 1, height: 1 } as HTMLCanvasElement });
@@ -249,6 +336,8 @@ describe('emissive MRT shader graphs', () => {
         expect(shader.fragment).not.toContain('NaN');
         expect(shader.buffers).toBeLessThanOrEqual(8);
         expect(shader.attributes).toBeLessThanOrEqual(16);
+        // Includes geometry position/UV: both mask slots must fit without dropping any radial colour/profile inputs.
+        expect(shader.attributes).toBe(mesh === overlay.discs ? 13 : 6);
       }
     } finally {
       overlay.dispose();
