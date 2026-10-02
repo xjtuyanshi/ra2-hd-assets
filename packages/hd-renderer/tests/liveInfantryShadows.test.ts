@@ -1,0 +1,95 @@
+import { describe, expect, it } from 'vitest';
+import { Texture, Vector3 } from 'three/webgpu';
+import { LiveView, type LiveObject } from '../src/live/liveView';
+import { SpritePool } from '../src/live/spritePool';
+import { INFANTRY_SHADOW_OPACITY, SpriteLayer, type SpriteInstance } from '../src/ra2/sprites';
+import type { Ra2Cache } from '../src/ra2/cache';
+import type { DirtyAttribute } from '../src/dirtyAttribute';
+import { applyLookPreset, type HdSettings } from '../src/HdRenderer';
+
+const body = {
+  rect: [0, 0, 10, 20] as [number, number, number, number],
+  offset: [-5, -18] as [number, number],
+  page: 0,
+};
+const shadow = {
+  rect: [2, 2, 12, 7] as [number, number, number, number],
+  offset: [-6, -2] as [number, number],
+  page: 7,
+};
+const cache = {
+  paletteAtlas: { image: { height: 1 } },
+  paletteRow: new Map([['library:unit', 0]]),
+  manifest: { spriteAtlas: { width: 64, height: 64 } },
+  spriteAtlas: new Texture(),
+} as unknown as Ra2Cache;
+
+describe('live infantry footprint', () => {
+  it('queues the selected shadow on its dedicated page at the body anchor through the real pool and queue', () => {
+    const pool = new SpritePool();
+    const entry = { frames: [body, body], shadows: [shadow, shadow], palette: 'unit', remap: true };
+    const library = { library: { sprites: { 'infantry:TEST': entry } }, page: () => ({}), hasHdPage: () => true };
+    const view = Object.assign(Object.create(LiveView.prototype), {
+      cache,
+      library,
+      spritePool: pool,
+      libraryPaletteKeys: new Map(),
+    }) as {
+      libraryInfantrySprites(...args: unknown[]): void;
+    };
+    const visual = {
+      libraryType: {
+        sprite: 'infantry:TEST',
+        remap: true,
+        drawOffset: [0, 0],
+        infantry: { sequences: { Walk: { start: 0, count: 2, facingMultiplier: 0 } } },
+      },
+    };
+    const object = { kind: 'infantry', infantrySequence: 'Walk', sequenceFrame: 1 } as LiveObject;
+    const batch = new Map<number, SpriteInstance[]>();
+    view.libraryInfantrySprites(object, { x: 512, y: 768, z: 0, facing: 0 }, visual, batch, 1);
+    const sh = batch.get(7)![0]!;
+    const art = batch.get(0)![0]!;
+    expect(sh).toMatchObject({ frame: shadow, shadow: true, flat: true, infantryShadow: true, push: 0 });
+    expect(art.frame).toBe(body);
+    expect(sh.anchor.toArray()).toEqual(art.anchor.toArray());
+    expect(art.infantryShadow).toBeUndefined();
+    entry.shadows[1] = { ...shadow, rect: [0, 0, 0, 0] };
+    pool.begin();
+    batch.clear();
+    view.libraryInfantrySprites(object, { x: 512, y: 768, z: 0, facing: 0 }, visual, batch, 1);
+    expect(batch.has(7)).toBe(false);
+    expect(batch.get(0)).toHaveLength(1);
+  });
+
+  it('uploads an infantry-only marker without changing building/vehicle flags and clears it on pool reuse', () => {
+    const pool = new SpritePool();
+    const infantry = pool.take(new Vector3(), shadow, 'library:unit', 0, true, true);
+    infantry.infantryShadow = true;
+    const building = pool.take(new Vector3(), shadow, 'library:unit', 0, true, true);
+    const vehicle = pool.take(new Vector3(), shadow, 'library:unit', 0, true, true);
+    const layer = new SpriteLayer(cache, [infantry, building, vehicle]);
+    const flags = (layer as unknown as { flags: DirtyAttribute }).flags;
+    expect([0, 1, 2].map((i) => flags.array[i * 8 + 3])).toEqual([1, 0, 0]);
+    for (const i of [1, 2]) expect(Array.from(flags.array.slice(i * 8, (i + 1) * 8))).toEqual([2, 1, 0, 0, 0, 0, 0, 0]);
+    expect(layer.groundPasses).toHaveLength(2);
+    expect(layer.groundPasses.every((mesh) => mesh.count === 3)).toBe(true);
+    const settings = {} as HdSettings;
+    applyLookPreset(settings, 'cinematic');
+    expect(settings.shadowFollow).toBeGreaterThan(0);
+    expect(settings.shadowSoftness).toBeGreaterThan(0);
+    expect(settings.shadowLength).toBeGreaterThan(1);
+    expect(INFANTRY_SHADOW_OPACITY).toBeGreaterThanOrEqual(0.75);
+    expect(INFANTRY_SHADOW_OPACITY).toBeLessThanOrEqual(0.8);
+    pool.begin();
+    expect(pool.take(new Vector3(), shadow, 'library:unit', 0, true, true)).toBe(infantry);
+    expect(infantry.infantryShadow).toBeUndefined();
+    layer.mesh.geometry.dispose();
+    layer.mesh.material.dispose();
+    layer.mesh.dispose();
+    for (const mesh of layer.groundPasses) {
+      mesh.material.dispose();
+      mesh.dispose();
+    }
+  });
+});

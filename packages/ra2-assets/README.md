@@ -1578,3 +1578,51 @@ For a reproducible CPU/I/O benchmark, run `pnpm exec node --import tsx packages/
 It generates a 4096x4096 indexed page with 1,800 body and 1,800 shadow frames (64x64 each), spawns the fake 4x binary,
 writes both 8192x8192 outputs, and reports page/binary times. All inputs and outputs are synthetic and are removed
 from the system temporary directory after the run. This benchmark does not measure real GPU inference.
+
+## Infantry shadow repair (Python + TypeScript)
+
+Stock GI/INIT/SLAV/BRUTE/DOG SHPs have empty second-half shadow headers. Their original black footprint is embedded
+in each body frame as unit-palette index **12**, not shadow index 1. `SpriteCollector` isolates that index into a
+separate index-1 mask when an infantry frame has no nonempty baked shadow. Genuine second-half shadows take
+precedence. Body pixels, sequence indices, canvas and draw point remain unchanged. Index-12 black detail inside the
+body also enters the mask; the upright body occludes it at the same screen coordinates. This is not a generated blob
+or a replacement of dark clothing. `infshdw.shp` is a separate native elevated-infantry decal and is not used here.
+
+For an existing farm, repair only its infantry shadow records and append one dedicated page in both atlas arrays:
+
+```bash
+python3 -B packages/ra2-assets/python/infantry_shadows.py \
+  --game /path/to/owned/ra2 \
+  --farm /path/to/target/hd-cache \
+  --stage /path/to/scratch/shadow/stage \
+  --preview /path/to/scratch/shadow/preview.png
+```
+
+The default theatre set is urban, temperate, snow, desert, newurban and lunar; `--theatres urban snow` restricts it.
+Requires Pillow, NumPy and the repository's pnpm dependencies. The read-only `src/cli/infantryShadows.mts` exporter
+uses `GameInstall`, `decodeShp` and the same shadow policy as the extractor. It selects each library body's
+`sourceFrames` index, or its ordinal index when absent, and writes `frames.json` plus `source-audit.json` in each
+theatre's staging directory. Unreadable SHPs or mismatched source/body metadata abort publication.
+
+The installer deduplicates cropped masks, preserves offsets with a transparent border and writes an R8/`L` index-1
+page. Its aligned 2x page is black RGBA with shadow **coverage**, not darkness, in alpha, plus a zero house-remap
+page. Bilinear reconstruction softens the exterior edge while the original occupied pixels retain opaque 2x cores;
+there is no erosion, Gaussian blur or border fade that thins small footprints. PNGs are installed using
+`cache_farm.install_file`, then `library.json` is merged with `cache_farm.patch_json` under the theatre's
+`.compose.lock`. Existing bodies, body PNGs, other sprites, palettes and type records are preserved. Reruns reuse
+`sprites-infantry-shadows.png`'s page slot; staging writes replace inodes, so hard-linked served PNGs are never
+rewritten in place. The farm root, `_library` and theatre directories must be real; file symlinks are replaced,
+never written through.
+
+Future `hd:sprites --library` builds also write infantry shadow alpha coverage; building and vehicle HD shadow
+regions retain their existing transparent format. The renderer retains indexed coverage as a floor, so legacy
+HD pages with zero shadow alpha remain visible and loading transitions cannot thin the footprint.
+
+The tool prints verified per-theatre sprite/frame counts and saves `counts.json`. The preview reads HD bodies and
+shadow alpha back from the installed farm at 4x on grey ground; its second row shows masks alone. It is asset-layout
+evidence, not live GPU acceptance. Asset-free regressions:
+
+```bash
+pnpm exec vitest run packages/ra2-assets/tests/infantryShadows.test.ts
+python3 -B -m unittest discover -s packages/ra2-assets/python -p test_infantry_shadows.py
+```

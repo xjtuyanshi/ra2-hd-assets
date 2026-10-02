@@ -226,6 +226,7 @@ export class SpriteCollector {
     remap: boolean,
     extra: Partial<SpriteEntry> = {},
     pick?: FramePicker,
+    inlineShadowIndex?: number,
   ): PendingSprite | undefined {
     const known = this.sprites.get(id);
     if (known) return known;
@@ -250,7 +251,9 @@ export class SpriteCollector {
     });
     const picked = pick?.(split.body).filter((i) => i >= 0 && i < split.body);
     const bodies = picked ? picked.map((i) => decoded[i]!) : decoded.slice(0, split.body);
-    const shadows = picked ? picked.map((i) => decoded[split.body + i]!) : decoded.slice(split.body);
+    const shadows = (picked ?? bodies.map((_, i) => i)).map((i) =>
+      shpShadowFrame(decoded[i]!, split.hasShadows ? decoded[split.body + i] : undefined, inlineShadowIndex),
+    );
     const pending: PendingSprite = {
       entry: {
         palette,
@@ -262,12 +265,27 @@ export class SpriteCollector {
         ...extra,
       },
       frames: bodies.map(toFrame),
-      ...(split.hasShadows ? { shadows: shadows.map(toFrame) } : {}),
+      ...(split.hasShadows || inlineShadowIndex !== undefined ? { shadows: shadows.map(toFrame) } : {}),
     };
     this.usedPalettes.add(palette);
     this.sprites.set(id, pending);
     return pending;
   }
+}
+
+/** Prefer baked shadow art; otherwise isolate a caller-selected inline palette index without changing body art. */
+export function shpShadowFrame(
+  body: ReturnType<typeof decodeShp>[number],
+  baked: ReturnType<typeof decodeShp>[number] | undefined,
+  inlineIndex?: number,
+): ReturnType<typeof decodeShp>[number] {
+  if (baked?.pixels.some((v) => v !== 0)) return baked;
+  if (inlineIndex === undefined) return baked ?? { x: 0, y: 0, cx: 0, cy: 0, pixels: new Uint8Array() };
+  // Index 1 is the atlas shadow convention; source palette colours never enter the shadow pass.
+  const pixels = body.pixels.map((v) => (v === inlineIndex ? 1 : 0));
+  return pixels.some((v) => v !== 0)
+    ? { ...body, pixels }
+    : { x: body.x, y: body.y, cx: 0, cy: 0, pixels: new Uint8Array() };
 }
 
 export function decodeShp(shp: ShpFile): { x: number; y: number; cx: number; cy: number; pixels: Uint8Array }[] {

@@ -1819,7 +1819,11 @@ export class LiveView {
       visual.paletteKey || undefined,
     );
     const shadow = entry.shadows?.[index];
-    if (shadow) this.queue(batch, this.spritePool.take(anchor, shadow, palette, 0, true, true));
+    if (shadow && shadow.rect[2] > 0 && shadow.rect[3] > 0) {
+      const instance = this.spritePool.take(anchor, shadow, palette, 0, true, true);
+      instance.infantryShadow = true;
+      this.queue(batch, instance);
+    }
     const light = objectLight('infantry');
     this.queue(
       batch,
