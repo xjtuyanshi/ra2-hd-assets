@@ -155,7 +155,12 @@ type GroundPass = 'main' | 'under' | 'over' | 'readOnly' | 'unit' | 'translucent
  * their coverage (five levels): a later, denser shadow still darkens an earlier fringe.
  */
 export const GROUND_PULL = { shadow: [0.019, 0.027], reflection: 0.0285 } as const;
-export const INFANTRY_SHADOW_OPACITY = 0.8;
+/**
+ * The original infantry blob is palette index 12, i.e. black. 0.8 left a fifth of bright ground showing (V<40 px 0.42x
+ * of the original for GIs on brick in a live S2 pair, 0.86x in its replay); 0.96 is near-black on any ground
+ * (replay 1.01-1.21x of the original in the same boxes) while still not a hard cut-out.
+ */
+export const INFANTRY_SHADOW_OPACITY = 0.96;
 /**
  * Coverage ramp of infantry contact shadows. The original draws them as solid palette-index-12 blobs inside the body
  * frames; the filtered/upscaled mask is only ~0.5 at the blob's own edge, so a linear ramp left half of every blob
@@ -164,7 +169,7 @@ export const INFANTRY_SHADOW_OPACITY = 0.8;
  * stays at the blob's edge (P-L5H-1). The rest of the gap is the HD bodies covering more of their own blob and the
  * original's near-black body pixels, not a missing shadow.
  */
-export const INFANTRY_SHADOW_RAMP = { from: 0.02, to: 0.35 } as const;
+export const INFANTRY_SHADOW_RAMP = { from: 0.02, to: 0.22 } as const;
 
 /** CPU twin of the enhanced infantry shadow alpha for a filtered mask coverage (0..1). */
 export function infantryShadowAlpha(coverage: number): number {

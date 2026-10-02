@@ -89,8 +89,8 @@ describe('live infantry footprint', () => {
     expect(settings.shadowFollow).toBeGreaterThan(0);
     expect(settings.shadowSoftness).toBeGreaterThan(0);
     expect(settings.shadowLength).toBeGreaterThan(1);
-    expect(INFANTRY_SHADOW_OPACITY).toBeGreaterThanOrEqual(0.75);
-    expect(INFANTRY_SHADOW_OPACITY).toBeLessThanOrEqual(0.8);
+    expect(INFANTRY_SHADOW_OPACITY).toBeGreaterThanOrEqual(0.9);
+    expect(INFANTRY_SHADOW_OPACITY).toBeLessThanOrEqual(0.98);
     pool.begin();
     expect(pool.take(new Vector3(), shadow, 'library:unit', 0, true, true)).toBe(infantry);
     expect(infantry.infantryShadow).toBeUndefined();
