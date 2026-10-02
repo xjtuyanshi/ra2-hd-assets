@@ -194,6 +194,55 @@ UnloadingClass at `0x73D2BA`, then swaps Type at `0x73D2C4` and restores it at `
 therefore draw HORV/CMON. Image changes rebuild the visual while retaining animation clocks; missing image art
 falls back to `type`.
 
+Live technos may report `contactUid`, the validated radio contact's stable ID in the same snapshot. Buildings also
+report `dock` (refinery, repair or helipad policy) and `unloading: 'door' | 'roof'` while their effective mission is
+Unload. The YR reader instance latches a previously published roof during that continuous Unload when link 0
+is released. It resets on another effective mission, missing buildings or changed pointer identity (UID/type),
+prunes entries not seen in the latest read, and still omits unreadable roof state. The renderer consumes this
+policy without reading missions or links. A completed delivering building with both matching library layers replaces its body/shadow with
+`DeployingAnim` and queues `UnderDoorAnim` immediately after it; roof delivery uses `RoofDeployingAnim` and
+`UnderRoofDoorAnim`. The body frame is clamped to the replacement art; the door uses healthy/damaged frame 0/1.
+Both cards retain the same anchor, palette/remap routing, placement push and foundation dimensions/difference offset.
+The under-door card alone receives `SpriteInstance.foundationRecess = DOOR_RECESS` for UnderDoorAnim or
+`ROOF_RECESS` for UnderRoofDoorAnim, with exported `DOOR_RECESS = 2.75` and `ROOF_RECESS = 4` in
+`src/live/liveView.ts`; the deploying body and all other layers keep zero. The door's measured
+approximation of the engine's door-interior Z-shape/ZAdjust shifts the facade inward by `2.75` x+z units
+(`2.75 * sqrt(3/8) ≈ 1.684` world units in depth). Frozen native NAWEAP `5x3`, northwest `(58,98)`, +x-door frames
+bound the recess: frame `9454` hides the tank centre at local `(2.5,1.5)` completely under the open dark interior,
+`3.5` x+z units behind the native facade (`7.5` versus `4.0`), with its front end about `3.0` behind. About `86`
+frames later, the whole tank at local `(4.13,1.06)`, about `1.74` behind the facade, appears over the interior/ramp
+while the door posts stay in front. Thus `1.74 < R < about 3.0`; live frozen frames then showed the whole tank at local `(3.85,1.43)` (rear about `2.8`
+behind), which `R = 2` clipped, so `R = 2.75` is used. The foundation's back surface would expose the
+early tank incorrectly. These are supplied native measurements, not new HD runtime acceptance.
+The roof opening reveals a deeper floor: the inside unit at local `(2.5,1.5)`, sum `4.0`, lies in front of the
+native interior plane `7.5 - ROOF_RECESS = 3.5` (the rectangular model gives `7 - 4 = 3`). It remains in front
+on the floor and `1.5` levels up; a unit outside behind the same column, below the back surface (at most `3` on
+the `5x3` centre columns), remains hidden. The body's opaque roof edges retain facade depth.
+Supplied frozen native GAWEAP `5x3`, NW `(58,98)`, SHAD evidence: frame `9171`, CurrentMission `5` / queued `16`,
+link 0 SHAD, Z `208`, has a closed roof. Frames `9184/9208`, mission `16`, same link/Z, show RoofDeployingAnim and
+heli parts inside. Frame `9235`, mission `16`, released link and Z `368`, still shows an open roof with the heli
+rising; the reader latch preserves that roof. Frame `9278`, mission `5`, link NULL, Z `798`, also shows an open
+native roof for an unexplained reason: this remains `UNVERIFIED` and outside the latch. Frame `9342` is closed
+in both views. These frozen observations do not establish new HD runtime acceptance.
+At screen column `d = px / 30 + dx`, the front sum remains `max(0, min(2w - d, 2h + d))`; the existing foundation
+flags component 7 encodes `ds = -dx - dz - (foundationRecess ?? 0)`. The rectangular model gives recessed sums
+`4.25` and `4.18` for door delivery at those centre columns, respectively hiding centre `4.0` and exposing centre `5.19` while the
+body's facade still covers opaque posts/walls. A unit outside behind the building stays hidden on the same column.
+Lower ramp rows keep ground depth, so a unit outside the facade stands in front. The CPU helper/shader are
+unchanged; anchor/light samples use their original five-component buffer, and pool reuse resets recess to zero.
+Missing pairs retain
+the normal body. Bibs, active animation layers, buildup and turrets keep their existing paths. Queued Unload alone
+does not open the door unless CurrentMission is the -1 sentinel; YR reader evidence is documented in
+`docs/remaster/research/painter-order.md`.
+
+Ground-layer infantry whose exact snapshot anchor lies strictly inside a visible building's rectangular
+foundation is hidden before body, shadow or overlay sprites are queued, matching the engine's foundation Z-shape
+box even where HD art is transparent. An inset of 0.05 cells leaves edge/outside infantry visible. A snapshot/art
+refresh builds a cell index with nine edge/interior region bits per cell; each infantry query is one lookup and
+one bit test, including overlapping foundations. Interpolated poses do not change this snapshot containment.
+Airborne infantry, other layers, vehicles and aircraft retain their existing paths; unknown or invisible
+foundations do not hide infantry. This approximation does not decode custom or nonrectangular Z-shapes.
+
 Live cell overlays (`src/live/overlays.ts`) draw each overlay's library frame at its cell. Rubble overlays
 (`LibraryOverlay.rubble`, rules IsRubble) never draw their own image: the carrier cell named in the snapshot's
 `overlays.rubble` draws its destroyed building's body frame 3 and shadow with the overlay's ISO palette, lighting and
@@ -529,10 +578,13 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   luminance before the coverage-mask mix. A value of 1 or absent adds no shader nodes. SHP shadows halve the displayed
   colour, like the engine's. Live object occlusion uses scene-wide painter depth slots (`ra2/painterOrder.ts`),
   independently of art placement and per-frame `cardPush`; all atlas pages and voxel parts share the same order.
-  Visible layer-2 non-building voxel units drawn after a building and stationary for at least six logic frames
-  receive a dock pull only inside its foundation: the maximum facade push at their exact anchor and four one-cell
-  axial offsets plus 0.5, capped at 3.5 and taking the largest building pull (about 3.009 at the measured refinery
-  dock); a screen-overlapping unit passing within about three cells in front can temporarily draw behind them.
+  Visible layer-2 units receive dock pull only from their radio contact's building, with `dock === true` and no
+  `unloading` state, inside or within one cell of its foundation. Pull is immediate during backing-in: the maximum
+  facade push at the exact anchor and four one-cell axial offsets plus 0.5, capped at 3.5 (about 3.009 at the measured
+  refinery dock). War-factory exits receive no dock pull. Ground vehicles/infantry within three cells in Chebyshev
+  distance that follow a directly docked unit in native painter order inherit enough pull to remain in front;
+  preceding units stay behind. `PainterObject.pull` supplies the same camera-space value to sprite and voxel paths.
+  Buildings, effects and projectiles are excluded, and snapshots without contact/dock data receive no dock pull.
   Physical depth remains available to atmospheric post processing, while ground decals and shadows keep their
   existing depth paths. See `docs/remaster/HD_BRIDGE.md`, "Object occlusion", for the native rule and fallback limits.
   With the enhanced look on, a layer draws its ground art in two extra passes just before its cards

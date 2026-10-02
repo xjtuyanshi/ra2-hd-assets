@@ -106,6 +106,8 @@ export interface SpriteInstance {
   painterPart?: number;
   /** Horizontal high-bridge depth at this height above the draw anchor; leaves screen placement unchanged. */
   deckHeight?: number;
+  /** Shift the foundation's facade sum inward in x+z cell units; defaults to zero and leaves placement unchanged. */
+  foundationRecess?: number;
   /**
    * Enhanced-look ground decals (see spriteLook.ts), drawn only while their effect is on: 'contact' darkens the ground
    * around `painter.foundation`, 'reflection' mirrors `frame` (an upright card's art) on wet paving below its base.
@@ -824,7 +826,7 @@ export class SpriteLayer {
         this.flags.setComponent(i, 4, s.deckHeight !== undefined ? -1 : (foundation?.[0] ?? 0));
         this.flags.setComponent(i, 5, s.deckHeight ?? foundation?.[1] ?? 0);
         this.flags.setComponent(i, 6, dx - dz);
-        this.flags.setComponent(i, 7, -dx - dz);
+        this.flags.setComponent(i, 7, -dx - dz - (s.foundationRecess ?? 0));
       }
     }
     this.mesh.count = count;

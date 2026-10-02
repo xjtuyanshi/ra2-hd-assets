@@ -27,7 +27,8 @@ import {
   type PainterObject,
 } from '../ra2/painterOrder';
 import { foundationPointPush } from '../ra2/cardDepth';
-import { bucketDockBuildings, dockPull } from '../ra2/dockPull';
+import { FoundationIndex } from './foundationIndex';
+import { dockPull, propagateDockPull, type DockPullUnit } from '../ra2/dockPull';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 import { setShadowOrigin } from '../ra2/voxelShadow';
 import { loadRa2World, type HdWorld } from '../ra2/world';
@@ -52,6 +53,22 @@ import { VoxelUnits, type VoxelUnit, type VoxelUnitsOptions } from './voxelUnits
 
 export type { LiveOverlayCells } from './overlays';
 export type { LiveSmudgeCells } from './smudges';
+
+/**
+ * Measured approximation of the engine's door-interior Z-shape/ZAdjust, in x+z cell units.
+ * Frozen live NAWEAP 5x3 frames (+x door): with the door open the waiting tank at local (2.5,1.5) is hidden,
+ * its centre 3.5 and its voxel front end about 3.0 behind the native facade; at local (3.85,1.43) the original
+ * shows the whole tank in the doorway (centre 2.3 behind, rear about 2.8). R=2 still clipped that tank's rear
+ * half in the live view, so R=2.75 (2.75*sqrt(3/8) world depth) keeps a 0.25 margin to the hidden case.
+ */
+export const DOOR_RECESS = 2.75;
+
+/**
+ * Roof openings reveal the floor deeper inside than a facade door, in x+z cell units.
+ * A centre at local (2.5,1.5), sum 4, lies in front of the native interior plane 7.5-4=3.5;
+ * outside units behind the 5x3 centre columns' back surface (sum <=3) remain hidden.
+ */
+export const ROOF_RECESS = 4;
 
 /**
  * Live view: draws a running original match (read from game memory by the host page) with the HD renderer, framed
@@ -91,6 +108,12 @@ export interface LiveObject {
   buildupFrame?: number;
   buildingFrame?: number;
   buildingDamaged?: boolean;
+  /** Validated radio contact's stable ID in this snapshot. */
+  contactUid?: number;
+  /** Host can dock/service units; supplied by the game policy. */
+  dock?: boolean;
+  /** Engine-selected delivery image, independent of available art. */
+  unloading?: 'door' | 'roof';
   /** Bridge (H2): infantry sequence key (e.g. "Walk", "Die1", "FireUp") and sequence-local animation step. */
   infantrySequence?: string;
   sequenceFrame?: number;
@@ -507,6 +530,8 @@ export class LiveView {
   private effectStats = { drawn: 0, missing: 0 };
   /** Civilian houses of the newest snapshot (see civilianHouses). */
   private civilian = new Set<number>();
+  /** Rebuilt on snapshot/art changes, never for an interpolation-only presentation. */
+  private foundationIndex = new FoundationIndex();
   /**
    * The newest snapshot's building anims (bridge flag buildingAnim) by the cell they stand on and by the object they
    * are attached to, with their list index; null when the host flags none (the fallback layers are drawn then).
@@ -1102,12 +1127,37 @@ export class LiveView {
     const batch = this.spriteBatch;
     for (const list of batch.values()) list.length = 0;
     this.spritePool.begin();
+    if (this.painterDirty) {
+      this.foundationIndex = new FoundationIndex();
+      for (const object of current.snapshot.objects) {
+        if (object.kind !== 'building') continue;
+        const visual = this.visualFor(object, this.houseColour.get(object.owner) ?? -1, frame);
+        if (visual.libraryType?.invisible || this.cache.lights?.types[object.type]?.invisible) continue;
+        const foundation =
+          visual.libraryType?.foundation ??
+          (visual.sprite ? this.cache.manifest.sprites[visual.sprite]?.foundation : undefined);
+        if (foundation)
+          this.foundationIndex.add(
+            Math.floor(object.x / LEPTONS_PER_CELL),
+            Math.floor(object.y / LEPTONS_PER_CELL),
+            foundation[0],
+            foundation[1],
+          );
+      }
+    }
     for (const object of current.snapshot.objects) {
       const colorIndex = this.houseColour.get(object.owner) ?? -1;
       const visual = this.visualFor(object, colorIndex, frame);
       // Native techno rendering does not reject the anchor's shroud cell. The common per-pixel mask covers the
       // whole sprite/voxel, including tall art crossing the edge. InvisibleInGame types still never draw.
-      const hidden = !!visual.libraryType?.invisible || !!this.cache.lights?.types[object.type]?.invisible;
+      const containedInfantry =
+        object.kind === 'infantry' &&
+        (object.renderOrder?.layer ?? 2) === 2 &&
+        (object.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT <=
+          this.world.terrain.heightAt(object.x / LEPTONS_PER_CELL, object.y / LEPTONS_PER_CELL) + 0.01 &&
+        this.foundationIndex.contains(object.x / LEPTONS_PER_CELL, object.y / LEPTONS_PER_CELL);
+      const hidden =
+        !!visual.libraryType?.invisible || !!this.cache.lights?.types[object.type]?.invisible || containedInfantry;
       if (visual.root.visible === hidden) this.painterDirty = true;
       visual.root.visible = !hidden;
       if (hidden) continue;
@@ -1134,6 +1184,10 @@ export class LiveView {
           registered?.ySort ??
           objectYSort(object.x, object.y, object.kind === 'building', !!visual.libraryType?.building?.turretVoxel);
         painter.index = registered?.index;
+        painter.uid = object.uid;
+        painter.contactUid = object.contactUid;
+        painter.dock = object.dock;
+        painter.unloading = object.unloading;
         painter.foundation =
           object.kind === 'building'
             ? (visual.libraryType?.foundation ??
@@ -1188,12 +1242,13 @@ export class LiveView {
     this.painterDirty = false;
     const objects = this.painterObjects;
     objects.length = 0;
-    const buildings: PainterObject[] = [];
+    const buildings = new Map<number, PainterObject>();
     for (const [uid, visual] of this.visuals) {
       if (!visual.root.visible || !visual.painter) continue;
+      visual.painter.pull = 0;
       objects.push(visual.painter);
       if (this.current?.byUid.get(uid)?.kind === 'building' && visual.painter.foundation)
-        buildings.push(visual.painter);
+        buildings.set(uid, visual.painter);
     }
     for (const effect of this.effectInstances) {
       if (effect.pass !== 'ground' || effect.draw !== 'card') continue;
@@ -1203,23 +1258,22 @@ export class LiveView {
     }
     if (this.projectiles) for (const entry of this.projectiles.painterEntries()) objects.push(entry.painter);
     assignPainterBias(objects);
-    const buildingCells = bucketDockBuildings(buildings);
+    const docked: DockPullUnit[] = [];
+    const passing: DockPullUnit[] = [];
     for (const [uid, visual] of this.visuals) {
       const painter = visual.painter;
+      const object = this.current?.byUid.get(uid);
+      if (!painter || !visual.root.visible || !object || object.kind === 'building') continue;
+      const unit = { painter, anchor: { x: object.x / LEPTONS_PER_CELL, z: object.y / LEPTONS_PER_CELL } };
+      painter.pull = dockPull(painter, unit.anchor, buildings.get(object.contactUid!));
+      if (painter.pull > 0) docked.push(unit);
+      if (object.kind === 'vehicle' || object.kind === 'infantry') passing.push(unit);
+    }
+    propagateDockPull(passing, docked);
+    for (const visual of this.visuals.values()) {
+      const painter = visual.painter;
       if (!painter || !visual.root.visible) continue;
-      if (visual.mode === 'voxel') {
-        const object = this.current?.byUid.get(uid);
-        const pull =
-          object && object.kind !== 'building'
-            ? dockPull(
-                painter,
-                { x: object.x / LEPTONS_PER_CELL, z: object.y / LEPTONS_PER_CELL },
-                this.current!.snapshot.frame - (visual.lastMoveFrame ?? visual.firstFrame),
-                buildingCells.get(painter.x)?.get(painter.z),
-              )
-            : 0;
-        this.voxelUnits.setPainterBias(visual, spritePainterBias(painter) + pull);
-      }
+      if (visual.mode === 'voxel') this.voxelUnits.setPainterBias(visual, spritePainterBias(painter));
       if (visual.buildingTurret) this.voxelUnits.setPainterBias(visual.buildingTurret, spritePainterBias(painter, 0.4));
     }
     if (this.projectiles)
@@ -1438,23 +1492,52 @@ export class LiveView {
         this.spritePool.take(anchor, bibFrame, this.buildingPalette(bib, visual.paletteKey), 0, false, true),
         !bib.remap,
       );
-    const shadow = entry.shadows?.[body];
+    const layers = type.building?.layers ?? EMPTY_LAYERS;
+    const deployingKey = object.unloading === 'roof' ? 'RoofDeployingAnim' : 'DeployingAnim';
+    const doorKey = object.unloading === 'roof' ? 'UnderRoofDoorAnim' : 'UnderDoorAnim';
+    const deploying = object.unloading
+      ? sprites[layers.find((layer) => layer.key === deployingKey)?.sprite ?? '']
+      : undefined;
+    const door = object.unloading ? sprites[layers.find((layer) => layer.key === doorKey)?.sprite ?? ''] : undefined;
+    // Delivery images are body replacements. Explicit construction/selling state still owns the art path
+    // even when a library has no make sprite. The interior shares placement but recesses the foundation facade.
+    const delivering =
+      object.buildState !== 'building' &&
+      object.buildState !== 'selling' &&
+      !!deploying?.frames.length &&
+      !!door?.frames.length;
+    const bodyArt = delivering ? deploying! : entry;
+    const shownBody = delivering ? Math.min(body, bodyArt.frames.length - 1) : body;
+    const shadow = bodyArt.shadows?.[shownBody];
     if (shadow)
       this.queue(
         batch,
-        this.spritePool.take(anchor, shadow, this.buildingPalette(entry, visual.paletteKey), 0, true, true),
-        !entry.remap,
+        this.spritePool.take(anchor, shadow, this.buildingPalette(bodyArt, visual.paletteKey), 0, true, true),
+        !bodyArt.remap,
       );
-    const bodyFrame = entry.frames[body];
+    const bodyFrame = bodyArt.frames[shownBody];
     const push = bodyFrame ? cardPush(bodyFrame) : 0.03;
     if (bodyFrame && bodyFrame.rect[2] > 0)
       this.queue(
         batch,
-        this.spritePool.take(anchor, bodyFrame, this.buildingPalette(entry, visual.paletteKey), push, false),
-        !entry.remap,
+        this.spritePool.take(anchor, bodyFrame, this.buildingPalette(bodyArt, visual.paletteKey), push, false),
+        !bodyArt.remap,
       );
 
-    const layers = type.building?.layers ?? EMPTY_LAYERS;
+    if (delivering) {
+      const doorFrame = door!.frames[Math.min(damaged ? 1 : 0, door!.frames.length - 1)];
+      if (doorFrame && doorFrame.rect[2] > 0) {
+        const interior = this.spritePool.take(
+          anchor,
+          doorFrame,
+          this.buildingPalette(door!, visual.paletteKey),
+          push,
+          false,
+        );
+        interior.foundationRecess = object.unloading === 'roof' ? ROOF_RECESS : DOOR_RECESS;
+        this.queue(batch, interior, !door!.remap);
+      }
+    }
     const native = this.nativeBuildingAnims(object, type);
 
     if (native) {

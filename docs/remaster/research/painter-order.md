@@ -193,18 +193,175 @@ prove that the reported CAMIAM01/trooper and tree/explosion captures now match i
 Fog/shroud continue to use the separate geometry-depth attachment; static map previews enable it too now that
 their cards use the same analytic depth. The post-processing depth contract is unchanged.
 
+## Contacted dock pull and delivery images
+
+The analytic foundation profile does not decode low dock/pad recesses in `BUILDNGZ.SHA`. The measured refinery case
+has northwest cell `(51,101)`, foundation `4x3`, and unit anchor `(13952/256,26240/256)`. Sampling
+`foundationPointPush` at that exact anchor and its four one-cell axial neighbours, then adding `0.5`, yields about
+`3.00949` camera-space world units; the maximum is capped at `3.5`.
+
+`ra2/dockPull.ts` now requires the unit's `contactUid` to match the host building's `uid`, the host's `dock` to be
+true, and its `unloading` field to be absent. The unit must be in layer 2 without a foundation, drawn after its
+host in native painter order, with its exact anchor inside the foundation or its one-cell outer border. There is
+no stationary-frame gate: backing-in frames must clear the low pad too. Hosts are resolved by UID rather than by
+searching every foundation. Missing policy/contact data in older snapshots disables dock pull.
+
+YR 1.001 policy stays in `src/games/yr`:
+
+- RadioLinks is `VectorClass<TechnoClass*>` at `+0xE0` (observed vtable `0x7E180C`), with Items `+0xE4` and Capacity
+  `+0xE8`. GetNthLink `0x65AD40` indexes Items; ContainsLink `0x65AD50` scans Capacity entries. Contact ID publication
+  requires capacity `1..64`, plausible pointers/spans, and link 0 belonging to the validated objects of this snapshot.
+- BuildingType flags are UnitRepair `+0x16A9` (INI store `0x460929`), Refinery `+0x16BB` (`0x460A6C`), and Helipad
+  `+0x16CB` (`0x4604E0`). Their validated OR defines `dock`. WeaponsFactory `+0x16BD` (`0x460A8C`) alone is not a dock:
+  GAWEAP/NAWEAP/YAWEAP have radio links to newly produced units but must keep them behind the factory facade.
+  Repair shipyards also have WeaponsFactory, so their delivery phase independently disables pull.
+- Mission getter `0x5B3040` reads CurrentMission `+0xAC`, using QueuedMission `+0xB4` only when CurrentMission is `-1`.
+  DrawIt `0x43D33A..0x43D381` reads link 0's type flags JumpJet `+0xD94` (store `0x715200`) or BalloonHover `+0xD6A`
+  (`0x714DA9`) to select the roof; `0x43D692..` uses that decision only at effective mission `16`. The reader validates
+  each object's class vtable and existing class-specific type offset before reading these flags, instead of calling
+  GetTechnoType (virtual `+0x84`). Art availability does not determine the published delivery state.
+
+`createYrStateReader` retains a roof decision only after publishing `unloading='roof'` in the current continuous
+effective Unload. When link 0 becomes NULL it continues publishing roof until the effective mission leaves `16`.
+Unreadable roof state still omits `unloading`; it does not substitute the latch. History belongs to each reader,
+checks the building pointer, UID and type pointer, and retains only validated buildings seen in the latest read
+and still in Unload. Disappearance, type/UID reuse and invalid mission reads reset it. `readYrState` remains a
+stateless single-snapshot helper.
+
+Supplied frozen native GAWEAP `5x3`, northwest `(58,98)`, Night Hawk SHAD roof-delivery evidence:
+
+| Frame | Current / queued mission | Link 0 | SHAD Z (leptons) | Original drawing |
+| --- | --- | --- | --- | --- |
+| 9171 | 5 / 16 | SHAD | 208 | Closed roof. |
+| 9184 / 9208 | 16 | SHAD | 208 | RoofDeployingAnim; heli parts visible inside the opening. |
+| 9235 | 16 | NULL | 368 | Roof still open; heli rising out. The previous HD reader selected door and hid it under a closed roof. |
+| 9278 | 5 | NULL | 798 | Roof still open for an unexplained reason; intentionally outside this Unload latch. |
+| 9342 | — | — | — | Closed in original and HD. |
+
+These are supplied native observations, not new HD rendered-pixel acceptance. The mission-5 discrepancy at 9278
+remains `UNVERIFIED`; the latch deliberately ends there.
+
+After direct dock pulls are computed, a different ground vehicle/infantry U within three cells (Chebyshev distance)
+of docked unit D's exact anchor inherits pull only if it follows D in painter order:
+
+```text
+pull_U = max(pull_U, 0, pull_D - ((U.x + U.z) - (D.x + D.z)) * sqrt(3/8) + 0.05)
+```
+
+Coordinates in this expression are cell anchors. This preserves overlap ordering for passing units; units before
+D are never pulled. Only directly docked units are sources, so propagation does not cascade through a crowd or
+alter another directly docked unit. `PainterObject.pull` enters `spritePainterBias`, which both SHP cards and voxel
+parts consume. Buildings, their turrets, effects and projectiles do not participate in this propagation.
+
+The factory's delivery art is a body image substitution, not an attached AnimClass. Art loaders store DeployingAnim
+`+0x14E4` at `0x45F3A7`, UnderDoorAnim `+0x14EC` at `0x45F5DF`, RoofDeployingAnim `+0x14FC` at `0x45F47F`, and
+UnderRoofDoorAnim `+0x1504` at `0x45F78B`. DrawIt `0x43D692..0x43D6D3` / `0x43D7D2` substitutes the deploying shape
+(native Z adjust -20, roof -40); `0x43D7A7..0x43D7EE` clamps GetCurrentFrame (`0x43EF90`) to its foreground half.
+`0x43D8EE..0x43D9C9` and roof `0x43D9D8..0x43DA67` then draw the under-door section at yellow-damage frame 1, else 0.
+
+`LiveView.libraryBuildingSprites` uses these library key pairs while a completed building reports `unloading`.
+It clamps the replacement body frame to `frames.length - 1`, substitutes its shadow, and queues the under-door
+frame immediately after the body with the same anchor, placement push and foundation dimensions/offsets. Each
+sprite retains the existing palette/remap handling. The under-door card alone has `SpriteInstance.foundationRecess`
+set to `DOOR_RECESS = 2.75` for a door or `ROOF_RECESS = 4` for a roof;
+the deploying body retains the front facade. There is no factory-exit dock pull. Missing/empty pairs retain the
+normal body. Bibs, active layers, construction
+and selling frames, and voxel turrets are unchanged.
+
+Frozen native frames fit a recessed door plane rather than the foundation's back surface. NAWEAP has a `5x3`
+foundation at northwest `(58,98)`, with its door on the +x face. At frame `9454`, `unloading='door'`, the open dark
+interior completely covers the new tank at local `(2.5,1.5)`: its centre has `x+z=4.0`, versus native facade
+`x+z=7.5` at that column, so it is `3.5` sum units behind; its front end at local `x≈3.0` is about `3.0` behind.
+About `86` frames later, the whole tank at local `(4.13,1.06)` is visible over the dark interior and ramp while
+the door posts remain in front. Its centre is about `1.74` sum units behind the facade. These supplied native
+observations bound the interior recess by `1.74 < R < about 3.0` (refined below); they are not a new HD runtime acceptance run.
+
+`live/liveView.ts` exports `DOOR_RECESS = 2.75`, a generic measured approximation of the engine's door-interior
+Z-shape/ZAdjust (`2.75 * sqrt(3/8) ≈ 1.684` world units in depth). A first fit of `R = 2` hid the rear half of a
+tank that the original shows whole: in frozen live frames (same factory) the original shows the entire tank in the
+doorway at local `(3.85,1.43)`, its centre `2.3` and its rear end about `2.8` sum units behind the facade, while the
+waiting tank at `(2.5,1.5)` (voxel front end about `3.0` behind) stays hidden. `2.75` keeps a `0.25` margin to
+that hidden case. The rectangular profile gives front sums `7.0` and `6.93` at the two centre columns above; it
+does not reconstruct the native first column's `7.5`. With the recess these become `4.25` and `4.18`, keeping the
+first centre (`4.0`) behind and the second (`5.19`) in front. A back-surface profile would expose the early tank and is therefore unsuitable.
+
+Roof delivery instead looks down to a deeper interior floor: `ROOF_RECESS = 4`, exported beside `DOOR_RECESS`,
+applies only to the UnderRoofDoorAnim card. In the supplied native roof frames the heli at local `(2.5,1.5)`,
+sum `4.0`, must appear in front of the interior plane `7.5 - 4 = 3.5`. The rectangular approximation's facade sum
+at this column is `7`, so its recessed sum is `3`. Both a unit on the floor and one raised `1.5` levels remain in
+front of that card; the deploying body's opaque roof edges still occlude them. Outside units behind the building
+on the same column stay hidden: their sums are below the back surface (at most `3` on the `5x3` centre columns).
+Door delivery retains the shallower measured recess and all of its previous depth relationships.
+
+The optional generic `SpriteInstance.foundationRecess` defaults to zero. Instance encoding changes only the
+existing sum-offset component, foundation flags component 7: `ds = -dx - dz - foundationRecess`. Both
+`cardDepthPush` and `cardDepthNode` retain their original expression and interface:
+
+```text
+d = px / 30 + dx
+front = max(0, min(2w - d, 2h + d))
+ds = -dx - dz - recess
+s = front + ds
+push = max(py * GROUND_DEPTH, s * FOUNDATION_DEPTH - py * VERTICAL_DEPTH) + CARD_CLEARANCE
+```
+
+The deploying body and all other layers retain recess zero. The body's facade still hides the emerging tank at
+opaque posts/walls, and an outside unit behind the building on the same screen column remains hidden by the
+interior. Lower ramp rows retain `max(ground, facade)`, so a unit standing outside the facade stays in front with
+the existing unit bias. Reused pool records reset their recess to zero. There is no depth-mode bit or new shader
+branch: the anchor/light-sample buffer returns to five components and the original vec2 light-sample attribute.
+Foundation widths/heights, difference offset, placement, lighting and deck/shadow paths retain their behavior;
+other consumers of the existing sum offset receive the same recessed profile for the interior card.
+
+## Infantry inside foundations
+
+The supplied barracks replay has a `2x2` foundation at northwest `(67,14)` and an infantry spawn at local
+`(0.5,1.5)`. The original hides it until it walks out, about ten logic frames later. Its HD pixels appear mostly
+in transparent art beside the tapered tower and above the plinth: changing only opaque-card depth cannot hide
+those pixels. The engine's building Z-shape box covers the foundation independently of those art holes.
+
+Known limit (live frozen frames, YABRCK `2x3`, NW `(54,90)`): the original hides a fresh initiate at local
+`(1.25,1.75)` on its spawn frame but shows it 9 and 21 frames later at `(1.47,1.96)` and `(1.8,2.29)` walking down
+its exit stairs, still inside the foundation (the Yuri barracks' Z-shape is low there). HD hides those poses: both
+the containment rule below and the rectangular front facade (about 1.06 and 0.4 sum units in front of the unit)
+cover them. Limiting the rule to the spawn moment was tried and did not reveal the initiate (the facade still covers
+the stairs) while it would re-expose the NAHAND conscript in transparent art, so the rule stays unconditional until
+per-art Z-shapes are reconstructed.
+
+`LiveView` therefore suppresses ground-layer, non-airborne infantry at exact snapshot anchors strictly inside
+`NW + (0.05, w - 0.05) x (0.05, h - 0.05)`. It hides the visual root and queues no body, shadow or overlay art for
+that frame. Vehicle/aircraft delivery and docking remain independent. Anchors on the inset boundary or outside,
+airborne infantry, non-ground registration and scenes without a known visible foundation are unaffected.
+The existing front-facade depth approximation still governs opaque-art overlap.
+
+The cell-aligned rectangular foundation index is refreshed for new publications (including same-frame changes)
+and art/visibility rebuilds, not interpolation-only poses. Each cell stores a nine-bit union of allowed low-edge,
+middle and high-edge regions on its two axes. Overlaps merge by OR, so an infantry lookup remains one cell lookup
+and one bit test rather than a scan of building candidates. Inset checks compare world-coordinate bounds directly
+to keep exact edge equality outside despite floating-point subtraction. This is a rectangular foundation
+approximation, not a claim to reconstruct custom/nonrectangular native Z-shapes.
+
+An accompanying native NAWEAP/Rhino trace observed CurrentMission `5` with QueuedMission `16` when the tank appeared
+(door still closed), then CurrentMission `16` thirteen logic frames later with link 0 pointing at the tank inside
+the foundation. Mission `16` persisted for about five seconds during drive-out; link 0 was released after the unit
+left the foundation, then mission returned to `5` and the door closed. This supports effective-mission gating and
+keeping the door image through link release. It is native-state evidence supplied with this task, not live HD
+rendered-pixel acceptance of the implementation.
+
 ## Update ownership and regressions
 
 `LiveView` refreshes traversal metadata for a new snapshot, changed registration, art/cell rebuild or visibility
 change. An interpolation-only presentation updates poses/anchors without assigning biases or sorting cards.
-Static trees, cells and overlay pages retain depth profiles and never join unit/effect uploads. Scratch arrays
-and sprite records are retained; the ordering refresh creates no temporary sort arrays or Sets. Particle cards
+Static trees, cells and overlay pages retain depth profiles and never join unit/effect uploads. Sprite records
+are retained; the ordering refresh creates a UID host map and direct-dock/passing anchor lists, without sorting
+them. Particle cards
 own a separate pool reset by `applyEffects`, so an asynchronously loaded turret cannot overwrite their anchors.
 
 A same-frame registration-only push replaces metadata on the existing timed snapshot and UID map, retaining
 `previous`, `current.at`, object poses and camera endpoints. It invalidates object ordering, not the effects clock.
 
-Asset-free coverage is in `packages/hd-renderer/tests/painterOrder.test.ts`, `liveOcclusion.test.ts`,
+Asset-free coverage is in `packages/hd-renderer/tests/painterOrder.test.ts`, `dockPull.test.ts`,
+`liveBuildingDelivery.test.ts`, `liveOcclusion.test.ts`,
 `liveScheduling.test.ts`, `effectBuffers.test.ts`, `effectOcclusion.test.ts`, `projectiles.test.ts`,
 `vertexBuffers.test.ts`, and `tests/basic/liveSmudges.test.ts`.
 The LiveView regression executes the real push/render/object/effect/order methods with GPU/resource boundaries

@@ -55,6 +55,9 @@ export const YR_BUILDING_RENDER_OFFSETS = Object.freeze({
   occupants: 0x694,
   gateStages: 0x16f8,
   modes: 0xf04,
+  unitRepair: 0x16a9,
+  refinery: 0x16bb,
+  helipad: 0x16cb,
 });
 
 export const YR_BUILDING_RULES = Object.freeze({ instance: 0x8871e0, yellow: 0x1700, red: 0x1708 });
@@ -198,4 +201,52 @@ function readBodyState(
   } catch {
     return {};
   }
+}
+
+/**
+ * YR 1.001 INI bool stores: UnitRepair +0x16A9 (0x460929), Refinery +0x16BB (0x460A6C),
+ * Helipad +0x16CB (0x4604E0). WeaponsFactory +0x16BD (0x460A8C) alone is NOT a dock.
+ * DrawIt 0x43D33A..0x43D381 selects roof delivery from the radio contact's JumpJet/BalloonHover;
+ * 0x43D692..0x43D7EE replaces the body, then 0x43D8EE..0x43DA67 draws the under-door section.
+ * Art-loader pointers: DeployingAnim +0x14E4 (0x45F3A7), UnderDoorAnim +0x14EC (0x45F5DF),
+ * RoofDeployingAnim +0x14FC (0x45F47F), UnderRoofDoorAnim +0x1504 (0x45F78B). These are body/door
+ * images, not AnimClass instances; the renderer selects their library counterparts independently of this read.
+ * The caller validates that contact's type; undefined roof means its optional read was implausible.
+ */
+export function readYrBuildingDockState(
+  memory: GuestMemoryAccessor,
+  pointer: number,
+  roof: boolean | undefined,
+): { dock?: boolean; unloading?: 'door' | 'roof' } {
+  const o = YR_BUILDING_RENDER_OFFSETS;
+  const result: { dock?: boolean; unloading?: 'door' | 'roof' } = {};
+  try {
+    if (!pointerFits(memory, pointer, o.type + 4) || memory.u32(pointer) !== 0x7e3ebc) return result;
+    const type = memory.u32(pointer + o.type);
+    if (pointerFits(memory, type, o.helipad + 1) && memory.u32(type) === 0x7e4570) {
+      const flags = [o.refinery, o.unitRepair, o.helipad].map((offset) => memory.u8(type + offset));
+      if (flags.every((flag) => flag === 0 || flag === 1)) result.dock = flags.some((flag) => flag === 1);
+    }
+  } catch {
+    // Dock policy and mission state are independent optional reads.
+  }
+  try {
+    if (!pointerFits(memory, pointer, o.type + 4) || memory.u32(pointer) !== 0x7e3ebc) return result;
+    const type = memory.u32(pointer + o.type);
+    if (!pointerFits(memory, type, o.helipad + 1) || memory.u32(type) !== 0x7e4570) return result;
+    // NAWEAP/Rhino live trace: CurrentMission=5, QueuedMission=16 keeps the door closed at spawn;
+    // CurrentMission switches to 16 thirteen frames later and stays there through the drive-out.
+    const current = memory.i32(pointer + o.currentMission);
+    const queued = current === -1 ? memory.i32(pointer + o.queuedMission) : -1;
+    if (
+      validMission(current) &&
+      validMission(queued) &&
+      (current === -1 ? queued : current) === 16 &&
+      roof !== undefined
+    )
+      result.unloading = roof ? 'roof' : 'door';
+  } catch {
+    // Keep a validated dock flag even if the mission read fails.
+  }
+  return result;
 }

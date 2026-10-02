@@ -290,7 +290,17 @@ describe('sprite depth attributes', () => {
       const buffers = layer as unknown as Buffers;
       expect(Array.from(buffers.flags.array.slice(4, 8))).toEqual([4, 2, 0, 0]);
       const placement = Array.from(buffers.params.array);
+      const anchor = Array.from(buffers.anchor.array);
+      layer.setInstances([{ ...card, foundationRecess: 2 }]);
+      expect(Array.from(buffers.flags.array.slice(4, 8))).toEqual([4, 2, 0, -2]);
+      expect(buffers.anchor.itemSize).toBe(5);
+      expect(Array.from(buffers.anchor.array)).toEqual(anchor);
+      expect(Array.from(buffers.params.array)).toEqual(placement);
+      layer.setInstances([{ ...card, anchor: new Vector3(50.75, 0, 50.25), foundationRecess: 2 }]);
+      expect(Array.from(buffers.flags.array.slice(4, 8))).toEqual([4, 2, 0.5, -3]);
       layer.setInstances([{ ...card, painterPart: 0.1 }]);
+      expect(Array.from(buffers.flags.array.slice(4, 7))).toEqual([4, 2, 0]);
+      expect(buffers.flags.array[7]).toBeCloseTo(0, 12);
       expect(buffers.flags.array[3]).toBeGreaterThan(0);
       expect(Array.from(buffers.params.array)).toEqual(placement);
       for (const mode of [{ shadow: true }, { flat: true }]) {
@@ -319,12 +329,13 @@ describe('sprite depth attributes', () => {
     }
   });
 
-  it('clears pooled owners, component bias and bridge profiles between uses', () => {
+  it('clears pooled owners, component bias, bridge profiles and foundation recess between uses', () => {
     const pool = new SpritePool();
     const frame: SpriteFrame = { rect: [0, 0, 16, 24], offset: [-8, -18] };
     pool.painter = painterObject(2, 10);
     pool.deckHeight = HIGH_BRIDGE_HEIGHT;
     const first = pool.take(new Vector3(), frame, 'unit', 0, false, false, 1, 'ambient', 0.4);
+    first.foundationRecess = 2;
     expect(first.painter).toBeDefined();
     pool.begin();
     const next = pool.take(new Vector3(), frame, 'unit', 0, false);
@@ -332,6 +343,7 @@ describe('sprite depth attributes', () => {
     expect(next.painter).toBeUndefined();
     expect(next.painterPart).toBe(0);
     expect(next.deckHeight).toBeUndefined();
+    expect(next.foundationRecess).toBe(0);
   });
 });
 

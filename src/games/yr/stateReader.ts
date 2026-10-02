@@ -1,6 +1,6 @@
 import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { YR_STARTUP_PAGE_HASH } from './startupPage';
-import { readYrBuildingRenderState } from './buildingRenderState';
+import { readYrBuildingDockState, readYrBuildingRenderState } from './buildingRenderState';
 import { readYrInfantryRenderState } from './infantryRenderState';
 
 /**
@@ -52,6 +52,12 @@ const VECTOR_COUNT = 0x10;
 export const YR_STATE_OFFSETS = Object.freeze({
   /** AbstractClass::UniqueID (sequence number, never reused within a game). */
   uniqueId: 0x10,
+  /** RadioLinks VectorClass +0xE0 (live vtable 0x7E180C): GetNthLink 0x65AD40 / ContainsLink 0x65AD50. */
+  radioItems: 0xe4,
+  radioCapacity: 0xe8,
+  /** TechnoTypeClass bool stores: JumpJet 0x715200, BalloonHover 0x714DA9. */
+  typeJumpJet: 0xd94,
+  typeBalloonHover: 0xd6a,
   /** ObjectClass::Health (int, current hit points). */
   health: 0x6c,
   /** ObjectClass::InLimbo (bool: removed from the map, e.g. inside a transport/factory or pending deletion). */
@@ -249,6 +255,12 @@ export interface YrObjectState {
   /** Native completed-building frame and independently selected damage layers. */
   buildingFrame?: number;
   buildingDamaged?: boolean;
+  /** Validated radio contact's stable ID in this snapshot. */
+  contactUid?: number;
+  /** Host can dock/service units; supplied by the game policy. */
+  dock?: boolean;
+  /** Engine-selected delivery image, independent of available art. */
+  unloading?: 'door' | 'roof';
   /** Art sequence key from InfantryClass::SequenceAnim. */
   infantrySequence?: string;
   /** Sequence-local animation stage, excluding start/facing offsets. */
@@ -381,6 +393,43 @@ export function readPointerVector(memory: GuestMemoryAccessor, vector: number, l
   return result;
 }
 
+/** VectorClass, not DynamicVectorClass: zero capacity is a valid empty radio contact. */
+function readRadioContact(memory: GuestMemoryAccessor, pointer: number): number | null | undefined {
+  const o = YR_STATE_OFFSETS;
+  try {
+    if (!isPlausiblePointer(memory, pointer, o.radioCapacity + 4)) return undefined;
+    const capacity = memory.i32(pointer + o.radioCapacity);
+    if (capacity === 0) return null;
+    if (!Number.isInteger(capacity) || capacity < 1 || capacity > 64) return undefined;
+    const items = memory.u32(pointer + o.radioItems);
+    if (!isPlausiblePointer(memory, items, capacity * 4)) return undefined;
+    const contact = memory.u32(items);
+    return contact === 0 ? null : isPlausiblePointer(memory, contact) ? contact : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** DrawIt 0x43D33A..0x43D381 uses GetTechnoType (virtual +0x84) on radio link 0. */
+function readContactRoof(memory: GuestMemoryAccessor, contact: number | null | undefined): boolean | undefined {
+  if (contact === null) return false;
+  if (contact === undefined) return undefined;
+  try {
+    const vtable = memory.u32(contact);
+    const spec = KINDS.find((kind) => vtable === kind.vtable);
+    if (!spec || !isPlausiblePointer(memory, contact, spec.typeOffset + 4)) return undefined;
+    const type = memory.u32(contact + spec.typeOffset);
+    const o = YR_STATE_OFFSETS;
+    if (!isPlausiblePointer(memory, type, o.typeJumpJet + 1) || memory.u32(type) !== spec.typeVtable) return undefined;
+    const jumpJet = memory.u8(type + o.typeJumpJet);
+    const balloon = memory.u8(type + o.typeBalloonHover);
+    if (![jumpJet, balloon].every((flag) => flag === 0 || flag === 1)) return undefined;
+    return jumpJet === 1 || balloon === 1;
+  } catch {
+    return undefined;
+  }
+}
+
 const s16 = (value: number) => (value << 16) >> 16;
 
 /**
@@ -483,10 +532,22 @@ export interface ReadYrStateOptions {
 }
 
 /**
- * One consistent-as-possible snapshot of the battlefield. Never throws for any memory content; outside a battle it
- * returns an empty object list and a null map.
+ * One consistent-as-possible, stateless snapshot of the battlefield. Outside a battle it returns an empty object
+ * list and a null map. Use createYrStateReader for continuous roof-delivery history across publications.
  */
 export function readYrState(memory: GuestMemoryAccessor, options: ReadYrStateOptions = {}): YrState {
+  return readYrStateSnapshot(memory, options, { roofDeliveries: new Map() });
+}
+
+interface YrStateHistory {
+  roofDeliveries: Map<number, { uid: number; type: number }>;
+}
+
+function readYrStateSnapshot(
+  memory: GuestMemoryAccessor,
+  options: ReadYrStateOptions,
+  history: YrStateHistory,
+): YrState {
   const o = YR_STATE_OFFSETS;
   const frame = memory.i32(YR_STATE_GLOBALS.frame);
   const perKind = () => ({ building: 0, vehicle: 0, infantry: 0, aircraft: 0 });
@@ -646,6 +707,41 @@ export function readYrState(memory: GuestMemoryAccessor, options: ReadYrStateOpt
     }
   }
 
+  // Resolve after every kind is read: contacts can point into a later vector, and stale links must not
+  // resurrect objects omitted from this publication. The native pointer never escapes as contact identity.
+  const byPointer = new Map(objects.map((object) => [object.id, object]));
+  const roofDeliveries: YrStateHistory['roofDeliveries'] = new Map();
+  for (const object of objects) {
+    const contact = readRadioContact(memory, object.id);
+    const linked = contact == null ? undefined : byPointer.get(contact);
+    if (linked) object.contactUid = linked.uid;
+    if (object.kind === 'building') {
+      const roof = readContactRoof(memory, contact);
+      // Validate effective Unload independently of an unreadable roof; the temporary choice is never published.
+      const delivery = readYrBuildingDockState(memory, object.id, roof ?? true);
+      if (delivery.unloading) {
+        const type = memory.u32(object.id + o.buildingType);
+        const previous = history.roofDeliveries.get(object.id);
+        const latched = previous?.uid === object.uid && previous.type === type;
+        // Frozen GAWEAP 5x3, NW (58,98), SHAD delivery: frame 9171 has CurrentMission=5/QueuedMission=16,
+        // link0=SHAD, z=208 and a closed roof. Frames 9184/9208 have effective Unload=16, the same link/z,
+        // RoofDeployingAnim and visible heli parts inside. At 9235 link0=NULL, mission=16, z=368: the original
+        // still draws the open roof as the heli rises. DrawIt 0x43D33A..0x43D381 reads GetNthLink(0)'s
+        // JumpJet +0xD94 / BalloonHover +0xD6A; 0x43D692.. uses it with GetCurrentMission (0x5B3040,
+        // +0xAC, or +0xB4 only when current==-1). Preserve a previously published roof after link release
+        // only within this continuous Unload. Frame 9278 (mission=5, link=NULL, z=798) still has an open
+        // native roof for an unexplained reason: intentionally leave it unmatched; frame 9342 closes both.
+        if (roof === true || latched) roofDeliveries.set(object.id, { uid: object.uid, type });
+        if (roof === undefined) delete delivery.unloading;
+        else if (contact === null && latched) delivery.unloading = 'roof';
+      }
+      Object.assign(object, delivery);
+    }
+  }
+  // Retain only validated buildings seen in this read and still in Unload: disappearance, type/UID reuse,
+  // a different effective mission or an invalid mission read ends the latch. At most one entry per building.
+  history.roofDeliveries = roofDeliveries;
+
   const tactical = memory.u32(YR_STATE_GLOBALS.tactical);
   const view = isPlausiblePointer(memory, tactical, o.tacticalPos + 8)
     ? { x: memory.i32(tactical + o.tacticalPos), y: memory.i32(tactical + o.tacticalPos + 4) }
@@ -670,10 +766,12 @@ export function createYrStateReader(
       return first >= 0x401000 && first < 0x800000;
     });
   if (!imageValid(memory())) return null;
+  const history: YrStateHistory = { roofDeliveries: new Map() };
   return (options) => {
     try {
-      return readYrState(memory(), options);
+      return readYrStateSnapshot(memory(), options ?? {}, history);
     } catch {
+      history.roofDeliveries.clear();
       return null;
     }
   };

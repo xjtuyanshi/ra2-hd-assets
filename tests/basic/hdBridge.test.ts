@@ -236,6 +236,9 @@ describe('HD 桥状态机', () => {
         buildupFrame: 0,
         buildingFrame: 0,
         buildingDamaged: false,
+        contactUid: 0,
+        dock: false,
+        unloading: 'door',
       },
       {
         ...common,
@@ -253,11 +256,20 @@ describe('HD 桥状态机', () => {
     harness.setState(state);
     await advance(16);
     const pushed = view.push.mock.calls.at(-1)![0];
-    expect(pushed.objects[0]).toMatchObject({ buildingFrame: 0, buildingDamaged: false });
+    expect(pushed.objects[0]).toMatchObject({
+      buildingFrame: 0,
+      buildingDamaged: false,
+      contactUid: 0,
+      dock: false,
+      unloading: 'door',
+    });
     expect(pushed.objects).toEqual(state.objects);
     expect(pushed.objects[2]).not.toHaveProperty('buildState');
     expect(pushed.objects[2]).not.toHaveProperty('sequenceFrame');
     expect(pushed.objects[2]).toMatchObject({ type: 'HARV', imageType: 'HORV' });
+    expect(pushed.objects[3]).not.toHaveProperty('contactUid');
+    expect(pushed.objects[3]).not.toHaveProperty('dock');
+    expect(pushed.objects[3]).not.toHaveProperty('unloading');
     expect(pushed.objects[3]).not.toHaveProperty('imageType');
     delete state.objects[2]!.imageType;
     harness.setState({ ...state });
