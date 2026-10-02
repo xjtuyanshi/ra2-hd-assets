@@ -11,13 +11,15 @@ from unittest import mock
 
 import cache_farm as farm
 
+PROCESS_TIMEOUT = 30
+
 
 def patch_worker(root, key, started, entered, release):
     started.set()
 
     def patch(data):
         entered.set()
-        if release is not None and not release.wait(3):
+        if release is not None and not release.wait(2 * PROCESS_TIMEOUT):
             raise RuntimeError("timed out waiting to release the JSON patch")
         data[key] = True
 
@@ -143,21 +145,24 @@ class CacheFarmTests(unittest.TestCase):
         try:
             first.start()
             processes.append(first)
+            # Interpreter startup can exceed the callback budget on a loaded host.
+            # Wait for readiness separately; keep the lock-entry and exclusion assertions intact.
+            self.assertTrue(first_started.wait(PROCESS_TIMEOUT), "first patch process did not start")
             self.assertTrue(first_entered.wait(3))
             second.start()
             processes.append(second)
-            self.assertTrue(second_started.wait(3))
+            self.assertTrue(second_started.wait(PROCESS_TIMEOUT), "second patch process did not start")
             self.assertFalse(second_entered.wait(0.1), "second callback ran while the first held the lock")
             release.set()
             for process in processes:
-                process.join(3)
+                process.join(PROCESS_TIMEOUT)
                 self.assertEqual(process.exitcode, 0)
         finally:
             release.set()
             for process in processes:
                 if process.is_alive():
                     process.terminate()
-                    process.join(3)
+                    process.join(PROCESS_TIMEOUT)
         dst = self.cache / "library.json"
         self.assertFalse(dst.is_symlink())
         self.assertEqual(json.loads(dst.read_text()), {"keep": [0, False], "first": True, "second": True})
