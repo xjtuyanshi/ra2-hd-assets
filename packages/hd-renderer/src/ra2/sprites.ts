@@ -1,3 +1,4 @@
+import { DepthClass, type DepthCaptureClass, type TerrainDepth } from '../terrainDepth';
 import { DirtyAttribute } from '../dirtyAttribute';
 import { InstancedQuad } from '../instancedQuad';
 import {
@@ -13,6 +14,7 @@ import {
 } from 'three/webgpu';
 import {
   Fn,
+  Discard,
   If,
   cameraFar,
   cameraNear,
@@ -38,6 +40,7 @@ import {
   step,
   texture,
   uniform,
+  varying,
   uv,
   vec2,
   vec3,
@@ -257,12 +260,14 @@ export class SpriteLayer {
    * x: card/decal/shadow/contact/reflection (instanceCode); y: object light; z: map lighting class; w: bounded
    * traversal bias in world units for cards, ground-crystal weight for plain flat decals, or infantry shadow marker.
    * The second vec4 holds foundation width/height and draw-point offsets; width -1 selects an elevated deck.
-   * Both vec4 attributes share one buffer: WebGPU allows 8 vertex buffers.
+   * A ninth scalar holds the capture class (0 NONE, 1 COVER, 2 FRONT), read only by capture-enabled main materials.
+   * All three attributes share one buffer: WebGPU allows 8 vertex buffers. Non-capture layers retain stride 8.
    */
   private readonly flags: DirtyAttribute;
   private instances: readonly SpriteInstance[] = [];
   private readonly orderedCards: SpriteInstance[] = [];
   private instanceCount = 0;
+  private readonly uploaded: SpriteInstance[] = [];
 
   /** Current records; static layers keep these and their depth profiles until the layer itself changes. */
   getInstances(): readonly SpriteInstance[] {
@@ -298,6 +303,7 @@ export class SpriteLayer {
      * follow it).
      */
     materials: SpriteMaterialAtlas | null = null,
+    private readonly capture: TerrainDepth | null = null,
   ) {
     const nodes = cache.nodes ?? DEFAULT_ATMOSPHERE_NODES;
     const { referenceLevel, windowGain } = nodes;
@@ -308,7 +314,7 @@ export class SpriteLayer {
     this.anchor = new DirtyAttribute(new Float32Array(count * 5), 5);
     this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
     this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
-    this.flags = new DirtyAttribute(new Float32Array(count * 8), 8);
+    this.flags = new DirtyAttribute(new Float32Array(count * (capture ? 9 : 8)), capture ? 9 : 8);
 
     const atlasSize = vec2(atlas.width, atlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
@@ -316,8 +322,8 @@ export class SpriteLayer {
     const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
     const aParams: ShaderNode = instancedBufferAttribute(this.params, 'vec4');
     const aLightSample: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec2', 5, 3);
-    const aFlags: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', 8, 0);
-    const aOcclusion: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', 8, 4);
+    const aFlags: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', this.flags.itemSize, 0);
+    const aOcclusion: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', this.flags.itemSize, 4);
     const aFlat: ShaderNode = aFlags.x;
     const isInfantryShadow: ShaderNode = step(1.5, aFlat)
       .mul(float(1).sub(step(2.5, aFlat)))
@@ -739,7 +745,24 @@ export class SpriteLayer {
         });
         return result;
       })();
-    material.colorNode = colourNode();
+    const mainColour = colourNode();
+    if (capture) {
+      // Classes are categorical: flat interpolation prevents an exact comparison from becoming a fragment edge.
+      const classification: ShaderNode = varying(
+        instancedBufferAttribute(this.flags.interleaved(), 'float', 9, 8),
+        'objectDepthInstanceClass',
+      ).setInterpolation('flat', 'either');
+      const kind: ShaderNode = varying(aFlat, 'objectDepthInstanceKind').setInterpolation('flat', 'either');
+      material.colorNode = Fn(() => {
+        // This object-group gate is recomputed for the actual capture target/camera. Main/mirror output and depth
+        // use the original nodes unchanged. Ground-pass children never receive capture layers or this discard.
+        If(
+          capture.captureClass.greaterThan(0).and(classification.notEqual(capture.captureClass).or(kind.notEqual(0))),
+          () => Discard(),
+        );
+        return mainColour;
+      })();
+    } else material.colorNode = mainColour;
 
     this.mesh = new InstancedQuad(material, count);
     this.mesh.renderOrder = 4;
@@ -826,6 +849,7 @@ export class SpriteLayer {
       for (const passMesh of this.groundPasses) (passMesh.material as MeshBasicNodeMaterial).dispose();
     });
     this.mesh.addEventListener('dispose', () => {
+      capture?.setClasses(this.mesh, false, false);
       for (const passMesh of this.groundPasses) {
         look.groundPasses.delete(passMesh);
         passMesh.dispose();
@@ -854,6 +878,7 @@ export class SpriteLayer {
         const s = list[j]!;
         if (instanceRank(s) !== rank) continue;
         const i = count++;
+        if (this.capture) this.uploaded[i] = s;
         this.anchor.setXYZ(i, s.anchor.x, s.anchor.y, s.anchor.z);
         this.anchor.setComponent(i, 3, s.lightSample?.[0] ?? s.anchor.x);
         this.anchor.setComponent(i, 4, s.lightSample?.[1] ?? s.anchor.z);
@@ -881,12 +906,28 @@ export class SpriteLayer {
         this.flags.setComponent(i, 7, -dx - dz - (s.foundationRecess ?? 0));
       }
     }
+    if (this.capture) this.uploaded.length = count;
     this.mesh.count = count;
     for (const passMesh of this.groundPasses) passMesh.count = count;
     this.anchor.flush();
     this.rect.flush();
     this.params.flush();
     this.flags.flush();
+  }
+  /** Update only the retained class scalar; ordering, positions, colours and reconstructed scene depth do not change. */
+  updateCaptureClasses(classify: (instance: SpriteInstance) => DepthCaptureClass): void {
+    if (!this.capture) return;
+    let cover = false;
+    let front = false;
+    for (let i = 0; i < this.uploaded.length; i++) {
+      const instance = this.uploaded[i]!;
+      const value = instanceCode(instance) === 0 ? classify(instance) : DepthClass.NONE;
+      this.flags.setComponent(i, 8, value);
+      cover ||= value === DepthClass.COVER;
+      front ||= value === DepthClass.FRONT;
+    }
+    this.flags.flush();
+    this.capture.setClasses(this.mesh, cover, front);
   }
 }
 

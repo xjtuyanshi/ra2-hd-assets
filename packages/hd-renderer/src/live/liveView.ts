@@ -26,6 +26,15 @@ import {
   spritePainterBias,
   type PainterObject,
 } from '../ra2/painterOrder';
+import { DepthClass } from '../terrainDepth';
+import {
+  classifyEngulf,
+  engulfAnchor,
+  FIRE_FOOTPRINT_MARGIN,
+  OBJECT_FOOTPRINT_MARGIN,
+  type EngulfFire,
+  type EngulfObject,
+} from '../ra2/fireEngulf';
 import { foundationPointPush } from '../ra2/cardDepth';
 import { FoundationIndex } from './foundationIndex';
 import { dockPull, propagateDockPull, type DockPullUnit } from '../ra2/dockPull';
@@ -33,11 +42,17 @@ import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 import { setShadowOrigin } from '../ra2/voxelShadow';
 import { loadRa2World, type HdWorld } from '../ra2/world';
 import { waterPreset, type WaterStyle } from '../ra2/waterLook';
-import { LEVEL_HEIGHT } from '../world';
+import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { VolumetricBlastLayer, type VolumetricBlast } from '../volumetricBlasts';
 import { spriteLookFor } from '../ra2/spriteLook';
 import { EffectArt, type ResolvedAnim } from './effectArt';
-import { EffectSpriteLayer, animAlpha, type EffectInstance } from './effectSprites';
+import {
+  EffectSpriteLayer,
+  animAlpha,
+  effectDisplayBounds,
+  type EffectDisplayBounds,
+  type EffectInstance,
+} from './effectSprites';
 import { LiveEffectsDriver, smokeOnVehicle, type EffectStyle, type LiveAnim, type LiveEffects } from './effects';
 import { LiveBeams } from './beams';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
@@ -254,6 +269,7 @@ export interface LiveEnvironment {
   mist?: number;
 }
 
+const UNIT_FOUNDATION = [1, 1] as const;
 const LEPTONS_PER_CELL = 256;
 const LEPTONS_PER_LEVEL = 104;
 /** A logic-frame move longer than this (cells) is a teleport (chrono, reinforcement) and is not interpolated. */
@@ -284,6 +300,7 @@ interface Timed {
 }
 
 interface Visual {
+  engulf?: EngulfObject;
   painter?: PainterObject;
   /** Resolved art type, including an engine-selected image or its rules-type fallback. */
   type: string;
@@ -472,6 +489,15 @@ export class LiveView {
   private readonly cellPool = new SpritePool();
   private readonly cellInstances: CellSprite[] = [];
   private readonly effectInstances: EffectInstance[] = [];
+  private readonly engulfFires: EngulfFire[] = [];
+  private readonly engulfBounds: EffectDisplayBounds = { x: 0, y: 0, width: 0, height: 0 };
+  private readonly engulfRight = new Vector3();
+  private readonly engulfUp = new Vector3();
+  private readonly engulfToCamera = new Vector3();
+  private engulfActive = false;
+  private readonly spriteCaptureClass = (instance: SpriteInstance) =>
+    this.visuals.get(instance.painter?.uid ?? -1)?.engulf?.classification ?? DepthClass.NONE;
+  private readonly classifyFireEngulf = () => this.updateFireEngulf();
   private readonly volumeInstances: VolumetricBlast[] = [];
   readonly volumetricBlasts: VolumetricBlastLayer;
   private readonly pose: Pose = { x: 0, y: 0, z: 0, facing: 0 };
@@ -569,6 +595,7 @@ export class LiveView {
     private readonly state: RenderState,
   ) {
     hd.enablePainterDepth();
+    hd.beforeDepthCapture = this.classifyFireEngulf;
     this.root.name = 'live-objects';
     hd.scene.add(this.root);
     this.voxelUnits = new VoxelUnits(hd, world, cache, options.libraryBase, options);
@@ -639,6 +666,8 @@ export class LiveView {
       undefined,
       cache.spriteAtlasHd,
       cache.windows?.texture ?? null,
+      null,
+      hd.terrainDepth,
     );
     this.sprites.mesh.name = 'live-sprites';
     this.root.add(this.sprites.mesh);
@@ -1051,6 +1080,128 @@ export class LiveView {
     this.hd.frame(dt);
   }
 
+  /**
+   * Runs immediately before capture, after effect records, interpolated poses, painter depth and the camera are final.
+   * Scratch fires/objects retain their high-water storage; normal frames allocate no records, vectors or callbacks.
+   */
+  private updateFireEngulf(): void {
+    const right = this.engulfRight.setFromMatrixColumn(this.hd.view.camera.matrixWorld, 0);
+    const up = this.engulfUp.setFromMatrixColumn(this.hd.view.camera.matrixWorld, 1);
+    const toCamera = this.engulfToCamera.setFromMatrixColumn(this.hd.view.camera.matrixWorld, 2);
+    const fires = this.engulfFires;
+    let count = 0;
+    for (const effect of this.effectInstances) {
+      if (
+        effect.alpha <= 0 ||
+        effect.draw !== 'card' ||
+        effect.pass !== 'air' ||
+        (effect.category !== 'explosion' && effect.category !== 'collapse')
+      )
+        continue;
+      const bounds = this.engulfBounds;
+      effectDisplayBounds(effect, bounds);
+      if (bounds.width <= 0 || bounds.height <= 0) continue;
+      const fire = (fires[count] ??= { x: 0, y: 0, z: 0, screenX: 0, screenY: 0, radius: 0 });
+      count++;
+      const anchor = effect.anchor;
+      fire.x = anchor.x;
+      fire.y = anchor.y;
+      fire.z = anchor.z;
+      fire.screenX = anchor.dot(right) + bounds.x + bounds.width / 2;
+      fire.screenY = anchor.dot(up) - bounds.y - bounds.height / 2;
+      // HD display/merge growth is already in these bounds. Never use the capped fallback sphere for proximity.
+      fire.radius = Math.hypot(bounds.width, bounds.height) / 2 + FIRE_FOOTPRINT_MARGIN;
+    }
+    if (!count && !this.engulfActive) return;
+    this.engulfActive = count > 0;
+    for (const [uid, visual] of this.visuals) {
+      const object = this.current?.byUid.get(uid);
+      const state = (visual.engulf ??= { x: 0, y: 0, z: 0, radius: 0, classification: DepthClass.NONE });
+      state.classification = DepthClass.NONE;
+      state.radius = 0;
+      if (!count || !visual.root.visible || !object || visual.mode === 'placeholder') continue;
+      const foundation = object.kind === 'building' ? (visual.painter?.foundation ?? UNIT_FOUNDATION) : undefined;
+      engulfAnchor(visual.root.position, foundation, visual.painter?.x ?? 0, visual.painter?.z ?? 0, state);
+      if (object.kind === 'building' && visual.mode !== 'voxel')
+        state.y = (object.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT;
+      if (visual.mode === 'voxel') {
+        state.radius =
+          Math.hypot(
+            visual.root.position.x - state.x,
+            visual.root.position.y - state.y,
+            visual.root.position.z - state.z,
+          ) +
+          this.voxelUnits.captureRadius(visual) +
+          OBJECT_FOOTPRINT_MARGIN;
+      }
+    }
+    // Build one generous footprint per owner across ALL SHP parts/pages, so a fire near a tall annex or barrel
+    // classifies the body too. Shadows/decals/reflections never contribute or receive an object class.
+    if (count)
+      for (const instances of this.spriteBatch.values())
+        for (const instance of instances) {
+          if (instance.flat || instance.shadow || instance.kind) continue;
+          const visual = this.visuals.get(instance.painter?.uid ?? -1);
+          const state = visual?.engulf;
+          const object = this.current?.byUid.get(instance.painter?.uid ?? -1);
+          if (!visual?.root.visible || !state || !object || visual.mode === 'placeholder') continue;
+          if (object.kind !== 'building' && state.radius === 0) {
+            engulfAnchor(instance.anchor, undefined, 0, 0, state);
+          }
+          const dx =
+            (instance.anchor.x - state.x) * right.x +
+            (instance.anchor.y - state.y) * right.y +
+            (instance.anchor.z - state.z) * right.z;
+          const dy =
+            (instance.anchor.x - state.x) * up.x +
+            (instance.anchor.y - state.y) * up.y +
+            (instance.anchor.z - state.z) * up.z;
+          const x0 = dx + instance.frame.offset[0] / PIXELS_PER_CELL_EDGE;
+          const y0 = dy - instance.frame.offset[1] / PIXELS_PER_CELL_EDGE;
+          const x1 = x0 + instance.frame.rect[2] / PIXELS_PER_CELL_EDGE;
+          const y1 = y0 - instance.frame.rect[3] / PIXELS_PER_CELL_EDGE;
+          state.radius = Math.max(
+            state.radius,
+            Math.hypot(Math.max(Math.abs(x0), Math.abs(x1)), Math.max(Math.abs(y0), Math.abs(y1))) +
+              OBJECT_FOOTPRINT_MARGIN,
+          );
+        }
+    for (const [uid, visual] of this.visuals) {
+      const state = visual.engulf!;
+      const object = this.current?.byUid.get(uid);
+      if (count && object && visual.root.visible && state.radius > 0) {
+        // Flying aircraft retain their original independent layer. Landed aircraft use the same policy as vehicles.
+        const airborne =
+          object.kind === 'aircraft' &&
+          ((visual.painter?.layer ?? 2) >= 4 || state.y > this.world.terrain.heightAt(state.x, state.z) + 0.01);
+        if (!airborne) {
+          const foundation = visual.painter?.foundation;
+          if (foundation)
+            state.radius = Math.max(
+              state.radius,
+              Math.hypot(foundation[0], foundation[1]) / 2 + OBJECT_FOOTPRINT_MARGIN,
+            );
+          if (visual.buildingTurret)
+            state.radius = Math.max(
+              state.radius,
+              Math.hypot(
+                visual.buildingTurret.root.position.x - state.x,
+                visual.buildingTurret.root.position.y - state.y,
+                visual.buildingTurret.root.position.z - state.z,
+              ) +
+                this.voxelUnits.captureRadius(visual.buildingTurret) +
+                OBJECT_FOOTPRINT_MARGIN,
+            );
+          state.classification = classifyEngulf(state, state.radius, fires, count, right, up, toCamera);
+        }
+      }
+      if (visual.mode === 'voxel') this.voxelUnits.setCaptureClass(visual, state.classification);
+      if (visual.buildingTurret) this.voxelUnits.setCaptureClass(visual.buildingTurret, state.classification);
+    }
+    this.sprites.updateCaptureClasses(this.spriteCaptureClass);
+    for (const { layer } of this.pageLayers.values()) layer.updateCaptureClasses(this.spriteCaptureClass);
+  }
+
   /** Switch garnish for new effects and card art on the next snapshot (see LiveViewOptions.effects). */
   setEffectStyle(style: EffectStyle): void {
     this.effectDriver.style = style;
@@ -1060,6 +1211,7 @@ export class LiveView {
   }
 
   dispose(): void {
+    if (this.hd.beforeDepthCapture === this.classifyFireEngulf) this.hd.beforeDepthCapture = undefined;
     this.liveBeams.dispose();
     this.hd.renderer.setAnimationLoop(null);
     for (const { layer } of this.overlayLayers.values()) this.disposeOverlayLayer(layer);
@@ -1243,7 +1395,7 @@ export class LiveView {
     }
     for (const uid of this.visuals.keys()) {
       if (current.byUid.has(uid)) continue;
-      this.root.remove(this.visuals.get(uid)!.root);
+      this.removeVisual(this.visuals.get(uid)!);
       this.visuals.delete(uid);
     }
     if (!this.painterDirty) this.flushSprites(batch, false);
@@ -1407,7 +1559,16 @@ export class LiveView {
       (mesh.material as { dispose(): void }).dispose();
       mesh.dispose();
     }
-    const layer = new SpriteLayer(this.cache, [], LIVE_SPRITE_CAPACITY, atlas, hd, windows, materials);
+    const layer = new SpriteLayer(
+      this.cache,
+      [],
+      LIVE_SPRITE_CAPACITY,
+      atlas,
+      hd,
+      windows,
+      materials,
+      this.hd.terrainDepth,
+    );
     layer.mesh.name = `live-sprites-${key}`;
     this.shareSpriteUniforms(layer);
     this.root.add(layer.mesh);
@@ -1929,6 +2090,12 @@ export class LiveView {
     }
   }
 
+  private removeVisual(visual: Visual): void {
+    if (visual.mode === 'voxel') this.voxelUnits.dispose(visual);
+    else visual.root.removeFromParent();
+    if (visual.buildingTurret) this.voxelUnits.dispose(visual.buildingTurret);
+  }
+
   private visualFor(object: LiveObject, colorIndex: number, frame: number): Visual {
     const paletteKey = this.housePaletteKeys.get(colorIndex) ?? '';
     const artType = this.artType(object);
@@ -1939,7 +2106,7 @@ export class LiveView {
     if (existing && existing.type === artType && existing.paletteKey === paletteKey) {
       if (!existing.pending || !this.artReady(object)) return existing;
     }
-    if (existing) this.root.remove(existing.root);
+    if (existing) this.removeVisual(existing);
     const visual = this.buildVisual(object, paletteKey, firstFrame);
     if (existing) {
       visual.lastMoveFrame = existing.lastMoveFrame;
@@ -2168,6 +2335,7 @@ export class LiveView {
       if (!layer) {
         layer = new SpriteLayer(this.cache, [], capacity, atlas, hd, null, materials);
         layer.mesh.name = `live-overlays-${page}`;
+        this.hd.terrainDepth.register(layer.mesh);
         this.shareSpriteUniforms(layer);
         this.root.add(layer.mesh);
         this.overlayLayers.set(page, { layer, materials: !!materials });
@@ -2178,6 +2346,7 @@ export class LiveView {
   }
 
   private disposeOverlayLayer(layer: SpriteLayer): void {
+    this.hd.terrainDepth.setClasses(layer.mesh, false, false);
     this.root.remove(layer.mesh);
     layer.mesh.geometry.dispose();
     (layer.mesh.material as { dispose(): void }).dispose();

@@ -22,7 +22,14 @@ import { EffectSpriteLayer, effectSphereRadius, MESH_IDLE_SECONDS } from '../src
 import type { Ra2Cache } from '../src/ra2/cache';
 import { CARD_CLEARANCE, cardDepthPush } from '../src/ra2/cardDepth';
 import { FIREBALL_VOLUME } from '../src/ra2/fireballDepth';
-import { TerrainDepth, TERRAIN_DEPTH_EPSILON, TERRAIN_DEPTH_LAYER, terrainDepthPull } from '../src/terrainDepth';
+import {
+  TerrainDepth,
+  TERRAIN_DEPTH_EPSILON,
+  TERRAIN_DEPTH_LAYER,
+  FRONT_DEPTH_LAYER,
+  DepthClass,
+  terrainDepthPull,
+} from '../src/terrainDepth';
 import { PIXELS_PER_CELL_EDGE } from '../src/world';
 import {
   anchor,
@@ -213,7 +220,7 @@ describe('terrain-only capture ownership and mirror gate', () => {
     renderer.setMRT(attachments);
     renderer.setRenderTarget(target, 2, 1);
     clear.mockImplementation(() => {
-      expect(renderer.getRenderTarget()).toBe(depth.target);
+      expect([depth.target, depth.frontTarget]).toContain(renderer.getRenderTarget());
       expect(renderer.getMRT()).toBeNull();
       expect(renderer.getClearDepth()).toBe(1);
       expect(scene.background).toBeNull();
@@ -298,34 +305,111 @@ describe('terrain-only capture ownership and mirror gate', () => {
     scene.add(parent);
     depth.register(occluder);
     const texture = depth.target.depthTexture;
+    const frontTexture = depth.frontTarget.depthTexture;
+    const frontDispose = vi.spyOn(depth.frontTarget, 'dispose');
+    const frontTextureDispose = vi.spyOn(frontTexture!, 'dispose');
     const targetDispose = vi.spyOn(depth.target, 'dispose');
     const textureDispose = vi.spyOn(texture!, 'dispose');
     try {
       parent.visible = false;
       depth.render(renderer, scene, new OrthographicCamera());
       expect(render).not.toHaveBeenCalled();
-      expect(clear).toHaveBeenCalledTimes(1);
+      expect(clear).toHaveBeenCalledTimes(2);
       parent.visible = true;
       (occluder as Mesh & { count: number }).count = 0;
       depth.render(renderer, scene, new OrthographicCamera());
       expect(render).not.toHaveBeenCalled();
-      expect(clear).toHaveBeenCalledTimes(2);
+      expect(clear).toHaveBeenCalledTimes(4);
       vi.mocked(renderer.getDrawingBufferSize).mockImplementation((out) => out.set(640, 360));
       depth.resize(renderer);
       expect(depth.target.width).toBe(640);
       expect(depth.target.height).toBe(360);
       expect(depth.target.depthTexture).toBe(texture);
+      expect(depth.frontTarget.width).toBe(640);
+      expect(depth.frontTarget.height).toBe(360);
+      expect(depth.frontTarget.depthTexture).toBe(frontTexture);
       targetDispose.mockClear();
+      frontDispose.mockClear();
       depth.dispose();
       depth.dispose();
       expect(targetDispose).toHaveBeenCalledTimes(1);
       expect(textureDispose).toHaveBeenCalledTimes(1);
+      expect(frontDispose).toHaveBeenCalledTimes(1);
+      expect(frontTextureDispose).toHaveBeenCalledTimes(1);
       expect(occluder.layers.mask).toBe(1);
       expect(() => depth.register(occluder)).toThrow('after disposal');
     } finally {
       depth.dispose();
       release(occluder);
       target.dispose();
+    }
+  });
+
+  it('captures COVER and FRONT independently, skips empty FRONT draws, and gates nested captures/mirrors', () => {
+    const depth = new TerrainDepth();
+    const { renderer, target, clear, draws, render } = captureFixture();
+    const scene = new Scene();
+    const tree = mesh('tree');
+    const covered = mesh('covered-hull');
+    const front = mesh('front-turret');
+    const child = mesh('shadow-child');
+    covered.add(child);
+    scene.add(tree, covered, front);
+    const camera = new OrthographicCamera();
+    const mirror = camera.clone();
+    const reflection = new RenderTarget(2, 2);
+    const update = (camera: OrthographicCamera) => {
+      depth.captureClass.update({ renderer, camera } as NodeFrame);
+      depth.enabled.update({ renderer, camera } as NodeFrame);
+      return depth.captureClass.value;
+    };
+    depth.setMainPass(target, camera);
+    depth.register(tree);
+    depth.setClass(covered, DepthClass.COVER);
+    depth.setClass(front, DepthClass.FRONT);
+    const original = render.getMockImplementation()!;
+    render.mockImplementation((scene, camera) => {
+      const captureCamera = camera as OrthographicCamera;
+      expect(update(captureCamera)).toBe(camera === depth.camera ? DepthClass.COVER : DepthClass.FRONT);
+      expect(depth.enabled.value).toBe(0);
+      const currentTarget = renderer.getRenderTarget();
+      renderer.setRenderTarget(reflection);
+      expect(update(mirror)).toBe(0);
+      renderer.setRenderTarget(currentTarget);
+      expect(update(captureCamera)).toBe(camera === depth.camera ? DepthClass.COVER : DepthClass.FRONT);
+      original(scene, camera);
+    });
+    try {
+      expect(depth.captureClass.value).toBe(0);
+      depth.render(renderer, scene, camera);
+      expect(draws).toEqual([[tree, covered], [front]]);
+      expect(clear).toHaveBeenCalledTimes(2);
+      expect(child.layers.mask).toBe(1);
+      expect(depth.frontCamera.layers.mask).toBe(1 << FRONT_DEPTH_LAYER);
+      expect(depth.frontTarget.depthTexture!.type).toBe(FloatType);
+      expect(depth.frontTarget.samples).toBe(0);
+      expect(update(depth.frontCamera)).toBe(0);
+      depth.renderMainPass(() => {
+        expect(update(camera)).toBe(0);
+        expect(depth.enabled.value).toBe(1);
+      });
+      depth.setClass(front, DepthClass.NONE);
+      draws.length = 0;
+      depth.render(renderer, scene, camera);
+      expect(draws).toEqual([[tree, covered]]);
+      expect(front.layers.mask).toBe(1);
+      render.mockImplementationOnce(() => {
+        throw new Error('capture failure');
+      });
+      expect(() => depth.render(renderer, scene, camera)).toThrow('capture failure');
+      expect(depth.captureClass.value).toBe(0);
+      expect(update(depth.camera)).toBe(0);
+      expect(renderer.getRenderTarget()).toBe(target);
+    } finally {
+      depth.dispose();
+      [tree, covered, front, child].forEach(release);
+      target.dispose();
+      reflection.dispose();
     }
   });
 
@@ -378,6 +462,7 @@ describe('terrain-only capture ownership and mirror gate', () => {
     expect(live.match(/terrainDepth.register\([^)]*\)/g)).toEqual([
       'terrainDepth.register(world.sprites.mesh)',
       'terrainDepth.register(this.cellLayer.mesh)',
+      'terrainDepth.register(layer.mesh)',
     ]);
     expect(live).toContain("includeObject: (object) => object.kind === 'tree'");
     expect(world).toContain("if (object.kind === 'building')");

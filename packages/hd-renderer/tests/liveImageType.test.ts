@@ -46,7 +46,10 @@ function visualView() {
         ['lib:unit@house1', 1],
       ]),
     },
-    voxelUnits: { build: vi.fn((_model: VoxelModel, _palette: string, _key: string) => ({ root: new Group() })) },
+    voxelUnits: {
+      build: vi.fn((_model: VoxelModel, _palette: string, _key: string) => ({ root: new Group() })),
+      dispose: vi.fn((unit: { root: Group }) => unit.root.removeFromParent()),
+    },
     root: new Group(),
     visuals: new Map<number, TestVisual>(),
     appearances: new Map<number, { frame: number }>(),
@@ -92,6 +95,7 @@ describe('live engine-selected draw images', () => {
     h.object.imageType = imageType;
     const unloading = h.view.visualFor(h.object, 0, 12);
     expect(unloading).not.toBe(normal);
+    expect(h.state.voxelUnits.dispose).toHaveBeenCalledWith(normal);
     expect(unloading).toMatchObject({ type: imageType, mode: 'voxel', lastMoveFrame: 8, firedFrame: 9, deadFrame: 7 });
     expect(unloading.libraryType).toBe(h.types.get(imageType));
     expect(h.state.voxelUnits.build).toHaveBeenLastCalledWith(

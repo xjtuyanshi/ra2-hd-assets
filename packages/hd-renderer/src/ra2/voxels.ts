@@ -482,6 +482,10 @@ export const VOXEL_CLEARANCE = CARD_CLEARANCE + 0.005;
  * ramps (applied in world space, after the yaw).
  */
 export class VoxelUnit extends Group {
+  /** Only body/turret/barrel originals; never infer membership by traversing shadow/reflection/foam children. */
+  readonly partMeshes: Mesh[] = [];
+  /** Rotation-independent world radius about the root, including articulated turret offsets. */
+  captureRadius = 0;
   private readonly painterDepth = createPainterDepth();
 
   constructor() {
@@ -492,6 +496,7 @@ export class VoxelUnit extends Group {
   /** Real meshes share a bounded physical-depth bias; shadow twins retain ordinary ground depth. */
   addSourceMesh(mesh: Mesh): void {
     mesh.userData.painterDepth = this.painterDepth;
+    this.partMeshes.push(mesh);
   }
 
   setPainterBias(bias: number): void {
@@ -531,6 +536,12 @@ export function instantiateVoxel(
     // Palette materials are shared. The node reads the currently rendered mesh's depth slot.
     if (!sourceMaterial.depthNode) sourceMaterial.depthNode = meshPainterDepthNode();
     root.addSourceMesh(mesh);
+    if (!part.geometry.boundingSphere) part.geometry.computeBoundingSphere();
+    const sphere = part.geometry.boundingSphere!;
+    root.captureRadius = Math.max(
+      root.captureRadius,
+      sphere.center.length() + sphere.radius + Math.abs(part.turretOffset),
+    );
     mesh.castShadow = false;
     mesh.receiveShadow = false;
     meshes.push(mesh);

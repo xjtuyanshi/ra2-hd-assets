@@ -233,6 +233,7 @@ describe('r186 vertex and uniform binding budget', () => {
       'wetness',
     ] as const)
       look[key].value = 1;
+    const terrainDepth = new TerrainDepth();
     // Both palette and HD colour paths include windows, normals, glass/AO, contact shade and wet reflections.
     // Also compile the faithful variant, which has no material atlas.
     for (const variant of ['faithful', 'indexed', 'hd'] as const) {
@@ -245,6 +246,7 @@ describe('r186 vertex and uniform binding budget', () => {
         variant === 'indexed' ? null : { color: texture(), remap: texture() },
         texture(),
         variant === 'faithful' ? null : { texture: texture() },
+        terrainDepth,
       );
       const main = assertLimits(layer.mesh);
       const shared = new Set(main.attributes.map(attributeBuffer));
@@ -252,7 +254,13 @@ describe('r186 vertex and uniform binding budget', () => {
       for (const mesh of [layer.mesh, ...layer.groundPasses]) {
         const result = mesh === layer.mesh ? main : assertLimits(mesh);
         expect(result.buffers.length).toBe(6);
-        expect(result.attributes.length).toBe(8);
+        expect(result.attributes.length).toBe(mesh === layer.mesh ? 9 : 8);
+        expect(result.fragmentShader.includes('objectDepthCaptureClass')).toBe(mesh === layer.mesh);
+        if (mesh === layer.mesh) {
+          expect(result.fragmentShader).toMatch(/@interpolate\( flat, either \) objectDepthInstanceClass/);
+          expect(result.fragmentShader).toMatch(/objectDepthCaptureClass > 0\.0/);
+          expect(result.fragmentShader).toMatch(/!= object\.objectDepthCaptureClass/);
+        }
         const buffers = new Set(result.attributes.map(attributeBuffer));
         expect(buffers.size).toBe(shared.size);
         for (const buffer of buffers) expect(shared.has(buffer)).toBe(true);
@@ -267,6 +275,7 @@ describe('r186 vertex and uniform binding budget', () => {
       dispose(layer.mesh);
       expect(look.groundPasses.size).toBe(0);
     }
+    terrainDepth.dispose();
     source.nodes!.dispose();
   });
 

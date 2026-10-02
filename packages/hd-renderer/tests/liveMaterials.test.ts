@@ -34,8 +34,9 @@ function presentation() {
     hasMaterialsPage: vi.fn(() => true),
     materialsPage: vi.fn(() => available.materials),
   };
+  const depth = { register: vi.fn(), setClasses: vi.fn() };
   const view = Object.assign(Object.create(LiveView.prototype), {
-    hd: { windowsWanted: () => look.windows, materialsWanted: () => look.materials },
+    hd: { windowsWanted: () => look.windows, materialsWanted: () => look.materials, terrainDepth: depth },
     library,
     cache: {},
     root: new Group(),
@@ -53,17 +54,17 @@ function presentation() {
     overlayInstances: { instances: { pages: Map<number, unknown[]> } };
     overlayPagesDirty: boolean;
   };
-  return { view, library, look, available, atlas, hd };
+  return { view, library, look, available, atlas, hd, depth };
 }
 
 describe('live page material selection', () => {
   it('does not request materials in faithful mode or on indexed-only keys', () => {
     const p = presentation();
     p.view.pageLayer(0);
-    expect(vi.mocked(SpriteLayer).mock.calls[0]!.slice(3)).toEqual([p.atlas, p.hd, null, null]);
+    expect(vi.mocked(SpriteLayer).mock.calls[0]!.slice(3)).toEqual([p.atlas, p.hd, null, null, p.depth]);
     p.look.materials = true;
     p.view.pageLayer(-1);
-    expect(vi.mocked(SpriteLayer).mock.calls[1]!.slice(3)).toEqual([p.atlas, null, null, null]);
+    expect(vi.mocked(SpriteLayer).mock.calls[1]!.slice(3)).toEqual([p.atlas, null, null, null, p.depth]);
     expect(p.library.hasMaterialsPage).not.toHaveBeenCalled();
     expect(p.library.materialsPage).not.toHaveBeenCalled();
   });
@@ -139,6 +140,7 @@ describe('live overlay page materials', () => {
     p.view.flushOverlayPages();
     const first = p.view.overlayLayers.get(0)!.layer;
     expect(p.library.materialsPage).not.toHaveBeenCalled();
+    expect(p.depth.register).toHaveBeenCalledWith(first.mesh);
     const dispose = vi.spyOn(first.mesh, 'dispose');
     const geometry = vi.spyOn(first.mesh.geometry, 'dispose');
     const material = vi.spyOn(first.mesh.material as MeshBasicMaterial, 'dispose');
@@ -152,6 +154,8 @@ describe('live overlay page materials', () => {
     p.view.flushOverlayPages();
     const enhanced = p.view.overlayLayers.get(0)!.layer;
     expect(enhanced).not.toBe(first);
+    expect(p.depth.setClasses).toHaveBeenCalledWith(first.mesh, false, false);
+    expect(p.depth.register).toHaveBeenLastCalledWith(enhanced.mesh);
     expect(vi.mocked(SpriteLayer).mock.calls.at(-1)![6]).toBe(p.available.materials);
     expect(enhanced.setInstances).toHaveBeenCalledTimes(1);
     for (const spy of [dispose, geometry, material]) expect(spy).toHaveBeenCalledTimes(1);

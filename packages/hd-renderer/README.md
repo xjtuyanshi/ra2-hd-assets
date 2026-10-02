@@ -315,38 +315,48 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   (L5: a red-heavy ramp with gamma 2.3 turned the mid-life fireball red-orange around a dark core). Low-coverage
   pixels count as added light only when they are coloured (fire glow, arcs); neutral low-coverage smoke rims are
   scene-lit, which removed a white outline around redrawn smoke. HD cards of the ground and air layers are
-  depth-tested like the native cards (only Top is untested). Native `Layer=air` draws after the whole ground layer,
-  requiring two rules: overlapping TerrainClass trees/bushes and overlays always stay under Air fire at every
-  covered pixel; units/buildings retain the bounded sphere. A single larger sphere cannot satisfy both rules.
-  Non-flat Air explosion/collapse cards keep the native/HD sphere (`src/ra2/fireballDepth.ts`):
-  `sqrt(max(0, R*R-r*r))` at union-centre distance `r`, with `R = min(1.16, max(displayed width, height)/2)`, factor 1.
-  Dimensions are native pixels times display size divided by `60/sqrt(2)`; native size is 1. Existing 0.5 anchor
-  support plus 0.04 Air bias gives maximum advance 1.70, retaining 0.03205 same-ray margin at 1.5 horizontal cells
-  (`1.5/cos(30) = 1.73205`). Sphere, ground rim and legacy merged engulf remain max-combined, never summed.
-  Radius stays packed as `mode + R/4` (native `style.y`, HD `style.x`), preserving native six/HD eight buffers.
-  `HdRenderer.terrainDepth` owns the generic prepass/pull (`src/terrainDepth.ts`). Immediately before the pipeline it
-  clears drawing-buffer-size, no-MSAA T to far and renders the same registered main meshes/materials with a copied
-  view camera on dedicated layer 31 and MRT disabled, restoring target/MRT/clear state. LiveView registers only
-  `world.sprites.mesh` (loaded with `kind === 'tree'`) and `cellLayer.mesh`; under/over children retain layer 0.
-  Alpha discard, painter bias and depth/position nodes are shared. Non-live worlds may mix buildings into
-  `world.sprites` and do not register it; live sprites/buildings/voxels, terrain/water/effects are excluded.
-  Every non-flat Air card (including native translucent and other Air art) uses `min(cardDepth, T[pixel]-eps)`
-  after its existing profile. `textureLoad` at `screenCoordinate` is 1:1 with no filtering; T=1 leaves depth unchanged.
-  `eps = 0.001/(cameraFar-cameraNear)` is 2.500625e-6 at 0.1..400, over 41 D24 steps and 20 float32 ULPs, far below the
-  foreground sphere margin. Tree pixels pass regardless of sphere radius, including its edge/corners. Units/buildings
-  ahead of a tree still hold nearer buffer depth and only the unchanged sphere can pass them.
-  Enhanced explosion core/blast/halos/smoke billows/columns and explosion sparks/embers share the pull. Shared pools
-  use existing modes: spark mode 4 keeps mode 2's hot treatment; negative ember temperature tags explosion births,
-  decoded by magnitude. Muzzle/electric sparks, continuous-fire embers and other garnish retain depth/colour/motion.
-  Ground/Top/flat/shadow, ground scorch/craters/dust/debris shadows, beams/projectiles/units/buildings and
-  `volumetricBlasts.ts` are unchanged. The per-object gate is off outside the main pipeline and checks actual scene
-  target plus original camera. r186 updates/uploads object uniforms after `updateBefore` finishes nested ReflectorNode
-  renders, so mirrors get 0 and resumed main draws get 1; camera layers alone are insufficient. WebGL2 fallback
-  disables capture/pull and omits its sampler. HdRenderer owns resize/disposal, clears hidden/empty captures without
-  draws, and repeats capture in benchmarks. Cost: one extra single-sample, full-resolution pass over tree/overlay
-  mains per frame (RGBA8 + depth32float: 8 bytes/pixel target storage), plus one depth load per eligible fragment.
-  `fireballTerrain.test.ts` and `fireballEngulf.test.ts` cover CPU policies/construction/lifecycle;
-  `vertexBuffers.test.ts` builds actual r186 WGSL layouts. GPU pixel coverage and timing need runtime acceptance.
+  depth-tested like the native cards (only Top is untested). Native `Layer=air` draws over the ground layer. Trees/bushes, terrain objects and overlays remain under
+  fire; units and buildings now use whole-object COVER/FRONT classification (`src/ra2/fireEngulf.ts`), so fire cannot
+  slice a voxel hull/turret/barrel. LiveView classifies immediately before capture, after current poses, effect cards
+  and camera are final. Fires are active non-flat Air explosion/collapse native/HD cards, including merged leads.
+  Proximity uses their displayed current/same-page-next union centre and half-diagonal plus 0.75 world units,
+  including HD display scale/merge growth without the sphere radius cap. Object bounds include SHP component corners
+  across pages, voxel bounding spheres/centres/turret offsets, and building foundation/height/turret extent, plus 0.75.
+  Over-inclusion only matters where actual fire pixels overlap actual object pixels. Units/infantry/parked aircraft
+  use their ground draw point (voxel root or SHP anchor, with height/bridge placement); buildings use foundation centre
+  at ground height (NW plus half dimensions, missing foundation 1x1). Flying aircraft retain their own layer and are
+  excluded (flight layer or height > ground + 0.01). Less than `FRONT_DISTANCE = 1.5` horizontal cells towards camera
+  from any near fire means COVER; at least 1.5 ahead of every near fire means FRONT; otherwise NONE. COVER wins across
+  fires, and all components share the owner class (1e-9-cell numeric threshold tolerance).
+  The sphere `sqrt(max(0,R*R-r*r))`, `R=min(1.16,displayed max dimension/2)`, factor 1, 0.5 anchor support, 0.04 Air
+  bias and legacy merge `depthBias` max-combination stay unchanged as fallback for unclassified surfaces such as ground.
+  `mode + R/4` packing remains native six/HD eight vertex buffers.
+  `HdRenderer.terrainDepth` (`src/terrainDepth.ts`, public round-one name retained) owns two drawing-buffer-size,
+  no-MSAA RGBA8 + depth32float targets: COVER on layer 31 (`target`/`camera`) contains tree mains, cell/library overlay
+  mains and COVER objects; FRONT on layer 30 (`frontTarget`/`frontCamera`) contains FRONT objects only. Both clear to
+  far; empty FRONT skips projection/draws. Voxel layers apply only to explicit body/turret/barrel `partMeshes`, with
+  prior masks restored on class change/removal; shadow/reflection/foam twins are excluded. Sprite mains store one
+  class scalar (0 NONE, 1 COVER, 2 FRONT) at flags offset 8, stride 9 floats in the existing interleaved buffer (non-capture layers retain stride 8). Class/kind varyings use flat interpolation for exact categorical comparisons. The
+  object uniform `objectDepthCaptureClass` discards mismatched/non-upright instances only during capture, defaults
+  zero elsewhere, and never admits under/over children. Main/mirror colour output and depth use the original nodes;
+  sprite main layouts stay six buffers/nine attributes, ground passes six/eight. Non-live mixed world sprites do not
+  register. Cameras/materials/alpha discard/painter depth and state restoration follow round one.
+  The same non-flat Air cards (including native translucent/other Air art) and explosion core/blast/halos/billows/
+  columns/sparks/embers now load COVER c and FRONT f at the actual pixel, main pass only: if `c<f && c<1`, use
+  `min(base,c-eps)`; else if `f<1`, use `max(base,f+eps)`; else keep base. `objectDepthCombine` is the pure TypeScript
+  twin. `eps=0.001/(far-near)` is 2.500625e-6 at 0.1..400. Visible scene depth equals the front-most classified surface,
+  so every COVER pixel passes and every FRONT pixel fails independently of the sphere/object intersection. Normal
+  occlusion remains (nearer class wins, FRONT on ties). Shared garnish mode tags stay unchanged. Ground/Top/flat/shadow,
+  ground garnish, beams/projectiles, muzzle/continuous-fire garnish and `volumetricBlasts.ts` keep their depth policies.
+  Object-group gates check actual target/camera after nested reflector rendering: main/mirror/capture cannot leak
+  into one another. WebGL2 omits capture/combination samplers. HdRenderer owns resize/disposal and benchmark capture.
+  Cost: existing terrain pass plus a few COVER objects, one FRONT pass only when FRONT objects exist (otherwise a
+  clear), two depth loads per eligible fragment and 16 bytes/pixel target storage (8 more than round one). Per-instance
+  class costs one extra float in capture-enabled layers; other layers retain stride 8. No extra buffer is added. CPU scratch records are reused; unchanged no-fire frames skip object
+  classification/uploads and add no object capture draws. CPU work collects footprints and compares objects with
+  active fires. `fireEngulf.test.ts`, `fireballTerrain.test.ts`, `fireballEngulf.test.ts` and `vertexBuffers.test.ts`
+  cover anchor/3D-volume policy, capture lifecycle/gates and actual r186 WGSL layouts. GPU execution, five-blast XMP29U2
+  pixel review and same-scene performance remain UNVERIFIED by these CPU tests.
   Clustered explosions merge (`FIREBALL_MERGE` in `src/live/effects.ts`, enhanced style with HD flipbooks): the
   blasts one snapshot spawns within 2.5 cells of each other (a building's Explosion= list) form a group whose most
   fiery blast is drawn at the group's centroid, enlarged by 0.15 per member up to 1.7, with one garnish for the

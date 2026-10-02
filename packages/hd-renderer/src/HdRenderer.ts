@@ -536,8 +536,10 @@ export class HdRenderer {
   private readonly objects = new ObjectLayer();
   /** HD effects; live views spawn into it from the game's own effect list. */
   readonly effects: EffectsLayer;
-  /** Generic capture; game views register only their terrain-class main meshes. */
+  /** Generic capture; game views select terrain mains and whole-object COVER/FRONT parts. */
   readonly terrainDepth = new TerrainDepth();
+  /** Presentation owner may refresh per-object capture membership after this frame's poses and camera are final. */
+  beforeDepthCapture?: () => void;
   /** Lamp heads and wet-ground reflections. */
   readonly emitters: EmitterLayer;
   readonly emissiveOverlay: EmissiveOverlay;
@@ -1179,6 +1181,7 @@ export class HdRenderer {
   }
 
   private renderPipeline(): void {
+    this.beforeDepthCapture?.();
     this.terrainDepth.render(this.renderer, this.scene, this.view.camera);
     this.terrainDepth.renderMainPass(() => this.pipeline!.render());
   }
@@ -1415,6 +1418,7 @@ export class HdRenderer {
     this.pipelineNodes.length = 0;
     this.lightField?.dispose();
     this.emissiveOverlay.dispose();
+    this.beforeDepthCapture = undefined;
     this.terrainDepth.dispose();
     if (this.nodes !== DEFAULT_ATMOSPHERE_NODES) this.nodes.dispose();
     if (this.layerNodes !== this.nodes && this.layerNodes !== DEFAULT_ATMOSPHERE_NODES) this.layerNodes.dispose();

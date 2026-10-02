@@ -159,6 +159,27 @@ const MARGIN = 1;
 const RENDER_ORDER: Record<EffectPass, number> = { ground: 6, air: 7, top: 8 };
 const DRAW_RANK: Record<EffectDraw, number> = { flat: 0, shadow: 1, card: 2 };
 
+export interface EffectDisplayBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Displayed crop union in screen-plane world units, including HD size and the shader's same-page successor rule. */
+export function effectDisplayBounds(instance: EffectInstance, out: EffectDisplayBounds): void {
+  const hd = instance.hd;
+  const frame = hd?.frame ?? instance.frame;
+  const next = hd && hd.next && hd.next.page === frame.page ? hd.next : frame;
+  const scale = hd?.scale ?? 1;
+  const display = (hd?.size ?? 1) / PIXELS_PER_CELL_EDGE;
+  const x = Math.min(frame.offset[0], next.offset[0]);
+  const y = Math.min(frame.offset[1], next.offset[1]);
+  out.x = x * display;
+  out.y = y * display;
+  out.width = (Math.max(frame.offset[0] + frame.rect[2] / scale, next.offset[0] + next.rect[2] / scale) - x) * display;
+  out.height = (Math.max(frame.offset[1] + frame.rect[3] / scale, next.offset[1] + next.rect[3] / scale) - y) * display;
+}
 /** Eligible Air explosion radius from the displayed frame union; different-page HD successors are held. */
 export function effectSphereRadius(instance: EffectInstance): number {
   if (
@@ -183,7 +204,7 @@ export function effectSphereRadius(instance: EffectInstance): number {
 }
 const cardPainterBias = (instance: EffectInstance): number => {
   if (instance.draw !== 'card' || instance.pass === 'top') return 0;
-  // Keep the traversal budget against units/facades; the separate terrain-only pull restores native Air ordering.
+  // Keep the traversal budget against units/facades; the separate whole-object combination restores Air engulf ordering.
   return instance.pass === 'air' ? MAX_PAINTER_BIAS : spritePainterBias(instance.painter, instance.painterPart);
 };
 const compareCards = (a: EffectInstance, b: EffectInstance): number => {
@@ -617,8 +638,8 @@ class HdPageMesh {
     const material = (this.material = new MeshBasicNodeMaterial());
     material.transparent = true;
     material.depthWrite = false;
-    // Native Air ordering applies to terrain-class art via the separate pull below. Units/buildings still test
-    // the existing sphere; untested Z would swallow a terror drone 1.5 cells south. Only Top is unconditional.
+    // Native Air ordering and whole-object engulf use the combination below. The sphere remains the fallback
+    // for unclassified surfaces. Only Top is unconditional.
     material.depthTest = pass !== 'top';
     material.blending = CustomBlending;
     material.blendSrc = OneFactor;
