@@ -82,7 +82,7 @@ import { BUILDING_LIGHTS, displayLinear } from '../src/live/buildingLights';
 import { voxelLookParams } from './look';
 import { voxelProjectionFor } from '../src/ra2/voxelProjection';
 import { voxelPbrFor } from '../src/ra2/voxelPbr';
-import { voxelShadowFor } from '../src/ra2/voxelShadow';
+import { applyVoxelShadowParams } from '../src/ra2/voxelShadow';
 import { advanceShpReview, shpUnitReview } from './shpUnitReview';
 import type { TypeLibrary } from '../../ra2-assets/src/library';
 import { depleteOre, growthGrid, mapOverlayGrid, polylinePosition, type CellPoint } from './oreBench';
@@ -132,10 +132,8 @@ const live = await LiveView.create(canvas, {
   voxelPbr: voxelPbrFor(live.hd.nodes),
   stats: () => live.hd.stats(),
 };
-// &vshadow=hard restores the single hard twin; contact penumbra is the default (also in replays).
-voxelShadowFor(live.hd.nodes).soft = params.get('vshadow') !== 'hard';
-// &vnaval=old restores sheared drop shadows on water for before/after review.
-voxelShadowFor(live.hd.nodes).naval = params.get('vnaval') !== 'old';
+// Independent before/after controls for penumbra, naval contact and reflection colour.
+applyVoxelShadowParams(params, live.hd.nodes);
 // &look=golden: the enhanced look preset (src/HdRenderer.ts LOOK_PRESETS; pair it with &hours=16.5), for effect reviews
 // in the lighting they will be seen with.
 const lookPreset = params.get('look') as LookPreset | null;

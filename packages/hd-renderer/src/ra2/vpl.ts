@@ -25,6 +25,7 @@ import {
   modelWorldMatrix,
   normalView,
   normalWorld,
+  positionGeometry,
   positionWorld,
   roughness,
   sRGBTransferEOTF,
@@ -41,6 +42,7 @@ import type { ShaderNode } from '../tsl';
 import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrade } from './mapLighting';
 import { voxelProjectionFor, type VoxelProjectionPart } from './voxelProjection';
 import { projectedVoxelColour } from './voxelProjectionNodes';
+import { registerVoxelReflectionColour, voxelReflectionAmbient, voxelReflectionNormal } from './voxelReflectionColour';
 import { highlightRoughness, poweredOcclusion, spriteLookFor, type SpriteLookState } from './spriteLook';
 
 /**
@@ -345,23 +347,24 @@ function createMaterial(
   material.raw = raw;
   material.matp = matp;
   const n: ShaderNode = normalWorld;
-  const d: ShaderNode = dot(n, lightDirection);
-  let lit: ShaderNode;
-  if (sections) {
-    // The engine's shade (see above): the view vector is the model's own up axis in world space.
-    const up: ShaderNode = modelWorldMatrix.mul(vec4(0, 1, 0, 0)).xyz.normalize();
-    const b: ShaderNode = dot(n, lightDirection.add(up).normalize());
-    const specular: ShaderNode = max(b.div(float(ENGINE_SPECULAR).sub(b.mul(ENGINE_SPECULAR - 1))), 0);
-    const section: ShaderNode = clamp(floor(max(d, 0).add(specular).mul(ENGINE_SECTION_SCALE)), 0, sections - 1);
-    lit = sRGBTransferEOTF(row(section));
-  } else {
+  const paletteLit = (normal: ShaderNode, matrix: ShaderNode): ShaderNode => {
+    const d: ShaderNode = dot(normal, lightDirection);
+    if (sections) {
+      // The engine's shade (see above): the view vector is the model's own up axis in world space.
+      const up: ShaderNode = matrix.mul(vec4(0, 1, 0, 0)).xyz.normalize();
+      const b: ShaderNode = dot(normal, lightDirection.add(up).normalize());
+      const specular: ShaderNode = max(b.div(float(ENGINE_SPECULAR).sub(b.mul(ENGINE_SPECULAR - 1))), 0);
+      const section: ShaderNode = clamp(floor(max(d, 0).add(specular).mul(ENGINE_SECTION_SCALE)), 0, sections - 1);
+      return sRGBTransferEOTF(row(section));
+    }
     // A smooth stand-in on the raw palette colour for the retail table's median brightening at the engine's sections.
-    lit = raw.mul(
+    return raw.mul(
       float(0.85)
         .add(max(d, 0).mul(0.37))
         .add(max(min(d, 0), -0.625).mul(0.45)),
     );
-  }
+  };
+  let lit: ShaderNode = paletteLit(n, modelWorldMatrix);
   // Switches are blended arithmetically rather than with select(): TSL compiles a select of shared sub-expressions
   // into branches that each compute them once, leaving the other branch reading an unassigned variable.
   const debugOn: ShaderNode = step(0.5, voxelDebug);
@@ -407,6 +410,50 @@ function createMaterial(
   material.roughnessNode = matp.x;
   // Metalness only shapes the highlight (see VoxelLightingModel); the diffuse term stays a plain weak Lambert.
   material.metalnessNode = float(0);
+  registerVoxelReflectionColour(material, (sourceMatrix) => {
+    const sourceNormal = voxelReflectionNormal(sourceMatrix);
+    const sourceOrigin: ShaderNode = sourceMatrix.mul(vec4(0, 0, 0, 1)).xyz;
+    const sourcePosition: ShaderNode = sourceMatrix.mul(vec4(positionGeometry, 1)).xyz;
+    const sourceLevel: ShaderNode = objectLevelAt(grade, sourceOrigin.xz).add(voxelExtraLight);
+    const sourceLit: ShaderNode = srgbScale(paletteLit(sourceNormal, sourceMatrix), sourceLevel);
+    const sourceLocal: ShaderNode = objectLight(sourcePosition.xz, nodes)
+      .mul(1 / Math.PI)
+      .mul(float(0.55).add(max(sourceNormal.y, 0).mul(0.45)));
+    let ceiling: ShaderNode = mix(moonlit(sourceLit, nodes), sourceLit, paint)
+      .mul(voxelFill)
+      .add(sourceLit.mul(sourceLocal))
+      .mul(ao);
+    // The VPL palette ramp is the engine's fixed sculpted surface colour, independent of the scene's sun. Raw
+    // palette indices alone would turn its pale/white hulls dark grey; retain that ramp at half ambient radiance.
+    let albedo: ShaderNode = mix(moonlit(sourceLit, nodes), sourceLit, paint).mul(ao);
+    if (projection) {
+      const projState = voxelProjectionFor(nodes);
+      const projected = projectedVoxelColour(
+        projection,
+        projState,
+        (index) => sRGBTransferEOTF(texture(lut, vec2(index.add(0.5).div(256), (sections + 0.5) / rows)).rgb),
+        lightDirection,
+        look.sunDirection,
+        look,
+        { matrix: sourceMatrix, position: positionGeometry, normal: sourceNormal },
+      );
+      const formAo: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(projState.formAO.clamp())), look.aoPower);
+      const projectionLevel: ShaderNode = sourceLevel.div(projState.levelRef.max(0.01));
+      const projectedAlbedo: ShaderNode = srgbScale(projected.albedo, projectionLevel).mul(formAo);
+      const projectedLit: ShaderNode = srgbScale(projected.colour, projectionLevel).mul(formAo);
+      albedo = mix(albedo, mix(moonlit(projectedAlbedo, nodes), projectedAlbedo, projected.paint), projected.coverage);
+      ceiling = mix(
+        ceiling,
+        mix(moonlit(projectedLit, nodes), projectedLit, projected.paint)
+          .mul(voxelFill)
+          .add(projectedLit.mul(sourceLocal)),
+        projected.coverage,
+      );
+    }
+    // The exact source emissive term is a lower bound on its complete (nonnegative) lighting. Clamp to that
+    // bound so darker source faces stay dark; direct sun/glints above never add radiance to the water twin.
+    return voxelReflectionAmbient(albedo, voxelFill, ceiling);
+  });
   return material;
 }
 

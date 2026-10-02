@@ -697,14 +697,20 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   lookup, regardless of unit type: five straight-down twins give 0.3 core contact darkness; five blue-white foam twins
   retain only source points near the waterline (smooth fade from 0.06 to 0.14 world units above it), scale 1.06 across
   the hull and 1.14 along its forward axis, and break their 0.3 core alpha with drifting 0.1/0.2-cell value noise
-  (±0.02 scale and ±3% alpha breathing over two seconds on the renderer clock). One mid blue-grey reflection
-  silhouette mirrors each part about the water and flattens it along the camera view ray; its 0.3 waterline alpha
-  ripples horizontally and fades to zero by 0.5 world units below it. The silhouette avoids
-  applying projected colour/normal nodes to a singular flattened model matrix. All twins share source geometry and
-  renderer-owned materials, with no per-frame allocations; water draws at most eleven twins per part, land five.
+  (±0.02 scale and ±3% alpha breathing over two seconds on the renderer clock). One coloured reflection mirrors
+  each part about the water and flattens it along the camera view ray; its 0.45 waterline alpha ripples horizontally
+  and fades to zero by 0.5 world units below it. The reflection reads the part's palette colours or projected HD
+  atlas (including house paint) from original geometry coordinates and a separate, unflattened source matrix.
+  Its ambient-only colour is attenuated and slightly water-tinted, with no added sun glints; it never transforms
+  normals through the singular decal matrix (`voxelReflectionColour.ts`). Coloured twins compensate the mirrored
+  winding when culling rear faces; concave front-face overlaps retain the existing once-per-pixel plane-depth rule.
+  All twins share source geometry; reflection materials are cached per
+  source material and renderer, with no per-frame allocations or new passes. Water draws at most eleven twins per
+  part, land five.
   Contact depth masks the foam core so only the enlarged soft rim shows; all layers sit just above the water,
-  behind upright art. `?vnaval=old` restores the ordinary water drop shadow for before/after review, independently
-  of `vshadow=hard`. Airborne units drop theirs straight down, shrunk with height. Building voxel
+  behind upright art. `?vrefl=flat` restores the previous blue-grey silhouette and its 0.3 alpha while retaining
+  the foam/contact layers. `?vnaval=old` restores the ordinary water drop shadow for before/after review; both
+  controls are independent of `vshadow=hard`. Airborne units drop theirs straight down, shrunk with height. Building voxel
   turrets cast from a bounded physical point on their
   view ray nearest the foundation centre, using the same ground shear as vehicles rather than their pulled render
   altitude. Review parameters (sandbox and replays): `?vpl=<extra>,<occlusion>,

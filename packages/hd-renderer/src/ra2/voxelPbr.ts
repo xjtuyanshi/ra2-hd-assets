@@ -23,6 +23,7 @@ import {
   modelPosition,
   normalView,
   normalWorld,
+  positionGeometry,
   positionLocal,
   positionView,
   positionViewDirection,
@@ -36,6 +37,7 @@ import {
   uniform,
   vec2,
   vec3,
+  vec4,
 } from 'three/tsl';
 import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLight, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
@@ -44,6 +46,12 @@ import { highlightRoughness, poweredOcclusion, spriteLookFor, type SpriteLookSta
 import { ra2VoxelClass, VOXEL_CLASS_ID } from './voxelClasses';
 import { VOXEL_TO_WORLD } from './voxelScale';
 import { voxelLightingFor } from './vpl';
+import {
+  VOXEL_REFLECTION_AMBIENT,
+  registerVoxelReflectionColour,
+  voxelReflectionAmbient,
+  voxelReflectionNormal,
+} from './voxelReflectionColour';
 
 export const VOXEL_PBR_DEFAULTS = Object.freeze({
   brightness: 1,
@@ -100,6 +108,9 @@ export class VoxelPbrState {
   readonly skyZenith = uniform(new Color(0.45, 0.5, 0.58));
   readonly skyHorizon = uniform(new Color(0.7, 0.68, 0.64));
   readonly groundColour = uniform(new Color(0.22, 0.2, 0.16));
+  /** Hemisphere irradiance / pi only, refreshed with the renderer's actual light (never flat sun irradiance). */
+  readonly reflectionSky = uniform(new Color(0, 0, 0));
+  readonly reflectionGround = uniform(new Color(0, 0, 0));
   readonly byPalette = new WeakMap<Uint8Array, MeshStandardNodeMaterial>();
 }
 const states = new WeakMap<AtmosphereNodes, VoxelPbrState>();
@@ -311,16 +322,39 @@ function createMaterial(
   const cavity: ShaderNode = smoothstep(state.cavityStart, state.cavityStart.add(1.2), curvature.negate())
     .mul(state.cavity)
     .clamp();
-  // positionLocal includes section bounds/transform, so height is above the PART's model ground, in voxel units.
-  const modelPos: ShaderNode = positionLocal.div(VOXEL_TO_WORLD);
-  const lowerHull: ShaderNode = float(1).sub(smoothstep(0, state.grimeHeight.max(0.001), modelPos.y));
-  const grime: ShaderNode = lowerHull.mul(noise).mul(state.grime).clamp();
   const edge: ShaderNode = smoothstep(0, 1.2, curvature).mul(armour.sub(house)).mul(state.edgeLight).clamp();
-  const track: ShaderNode = isClass('dark')
-    .add(isClass('rubber'))
-    .mul(float(1).sub(smoothstep(state.treadHeight.sub(0.5), state.treadHeight, modelPos.y)))
-    .mul(state.tread)
-    .clamp();
+  const surfaceTerms = (normal: ShaderNode, position: ShaderNode) => {
+    // Geometry includes section bounds/transform, so this height is above the PART's model ground in voxels.
+    const modelPos: ShaderNode = position.div(VOXEL_TO_WORLD);
+    const lowerHull: ShaderNode = float(1).sub(smoothstep(0, state.grimeHeight.max(0.001), modelPos.y));
+    const grime: ShaderNode = lowerHull.mul(noise).mul(state.grime).clamp();
+    const track: ShaderNode = isClass('dark')
+      .add(isClass('rubber'))
+      .mul(float(1).sub(smoothstep(state.treadHeight.sub(0.5), state.treadHeight, modelPos.y)))
+      .mul(state.tread)
+      .clamp();
+    const dustPattern: ShaderNode = smoothstep(0.2, 0.8, valueNoise(pos.mul(0.25))).mul(state.dust);
+    const dust: ShaderNode = smoothstep(0.6, 0.9, normal.y).max(lowerHull).mul(dustPattern).clamp();
+    // Model-local y is vertical (vpos.z is section height); stretch the noise sixfold along model height.
+    const streakPattern: ShaderNode = smoothstep(0.62, 0.78, valueNoise(modelPos.mul(vec3(2, 1 / 3, 2)))).mul(
+      state.streaks,
+    );
+    const streaks: ShaderNode = float(1)
+      .sub(smoothstep(0.15, 0.35, normal.y.abs()))
+      .mul(streakPattern)
+      .clamp();
+    return {
+      grime,
+      track,
+      dust,
+      streaks,
+      dustMin: lowerHull.mul(dustPattern).clamp(),
+      dustMax: dustPattern.clamp(),
+      streakMax: streakPattern.clamp(),
+    };
+  };
+  const surface = surfaceTerms(normalWorld, positionLocal);
+  const { grime, track, dust } = surface;
   const frequency: ShaderNode = float(2 * Math.PI).div(state.treadPeriod.max(0.001));
   const phase: ShaderNode = pos.x.mul(frequency);
   const ridge: ShaderNode = sin(phase).mul(0.5).add(0.5);
@@ -335,29 +369,21 @@ function createMaterial(
     .mul(determinant.abs().max(1e-12))
     .sub(gradient.mul(determinant.sign()).mul(slope).mul(VOXEL_TO_WORLD))
     .normalize();
-  const dust: ShaderNode = smoothstep(0.6, 0.9, normalWorld.y)
-    .max(lowerHull)
-    .mul(smoothstep(0.2, 0.8, valueNoise(pos.mul(0.25))))
-    .mul(state.dust)
-    .clamp();
-  // Model-local y is vertical (vpos.z is section height); stretch the noise sixfold along model height.
-  const streaks: ShaderNode = float(1)
-    .sub(smoothstep(0.15, 0.35, normalWorld.y.abs()))
-    .mul(smoothstep(0.62, 0.78, valueNoise(modelPos.mul(vec3(2, 1 / 3, 2)))))
-    .mul(state.streaks)
-    .clamp();
   // House paint: the remap ramps are pale where the engine's VPL would brighten and saturate them with light; a
   // physically lit albedo needs that saturation back to read as the faction colour at game distance.
   const grey: ShaderNode = colour.dot(vec3(0.2126, 0.7152, 0.0722));
   const housePaint: ShaderNode = mix(vec3(grey), colour, state.houseSat).max(0).mul(state.houseGain).min(1);
-  let albedo: ShaderNode = mix(colour, housePaint, house);
-  albedo = albedo.mul(float(1).add(micro.mul(2).sub(1).mul(state.microNoise).mul(paint)));
-  albedo = mix(albedo, vec3(0.45), wear).mul(float(1).sub(cavity.mul(0.65)));
-  albedo = mix(albedo, vec3(1), edge.mul(0.2));
-  albedo = albedo.mul(mix(1, ridge.mul(0.45).add(0.55), track));
-  albedo = mix(albedo, vec3(0.36, 0.31, 0.25), grime);
-  albedo = albedo.mul(float(1).sub(streaks.mul(0.25)));
-  albedo = mix(albedo, state.dustColour, dust);
+  const surfaceAlbedo = ({ grime, track, dust, streaks }: ReturnType<typeof surfaceTerms>): ShaderNode => {
+    let albedo: ShaderNode = mix(colour, housePaint, house);
+    albedo = albedo.mul(float(1).add(micro.mul(2).sub(1).mul(state.microNoise).mul(paint)));
+    albedo = mix(albedo, vec3(0.45), wear).mul(float(1).sub(cavity.mul(0.65)));
+    albedo = mix(albedo, vec3(1), edge.mul(0.2));
+    albedo = albedo.mul(mix(1, ridge.mul(0.45).add(0.55), track));
+    albedo = mix(albedo, vec3(0.36, 0.31, 0.25), grime);
+    albedo = albedo.mul(float(1).sub(streaks.mul(0.25)));
+    return mix(albedo, state.dustColour, dust);
+  };
+  const albedo = surfaceAlbedo(surface);
   let r: ShaderNode = mix(params.r, 0.3, wear);
   r = mix(mix(r, 0.95, cavity), 0.9, grime);
   r = mix(r, 0.9, dust);
@@ -365,7 +391,9 @@ function createMaterial(
     mix(r, 0.12, glass).clamp(0.04, 1),
     mix(look.specularSize, look.specularSize.max(0).sqrt(), glass),
   );
-  material.metalnessNode = mix(mix(mix(params.g, 0.9, wear), 0, grime), 0, dust).clamp();
+  const surfaceMetalness = ({ grime, dust }: ReturnType<typeof surfaceTerms>): ShaderNode =>
+    mix(mix(mix(params.g, 0.9, wear), 0, grime), 0, dust).clamp();
+  material.metalnessNode = surfaceMetalness(surface);
   const lit = srgbScale(albedo, objectLevelAt(grade, modelPosition.xz).add(voxelLightingFor(nodes).voxelExtraLight));
   // Standard Lambert already divides irradiance by pi. HdRenderer's noon exposure is pi/E_noon; no emissive
   // daylight fill or second exposure factor belongs here. Metal energy conservation and GGX remain physical.
@@ -385,6 +413,38 @@ function createMaterial(
   const environment: ShaderNode = mix(state.groundColour, sky, smoothstep(-0.12, 0.12, direction.y));
   // GGX supplies Fresnel, including glass grazing reflections; the class only increases its environment gain.
   material.envNode = environment.mul(state.envStrength).mul(float(1).add(glass.mul(1.5)));
+  registerVoxelReflectionColour(material, (sourceMatrix) => {
+    const origin: ShaderNode = sourceMatrix.mul(vec4(0, 0, 0, 1)).xyz;
+    const normal = voxelReflectionNormal(sourceMatrix);
+    // Keep the lit palette ramp, house colour and procedural surface detail when no HD atlas is available.
+    // View-space tread normals, direct sun, metallic glints and emissive lamps do not illuminate the water.
+    const reflectedSurface = surfaceTerms(normal, positionGeometry);
+    const sourceLevel: ShaderNode = objectLevelAt(grade, origin.xz).add(voxelLightingFor(nodes).voxelExtraLight);
+    const gradedSurface = (surface: ReturnType<typeof surfaceTerms>): ShaderNode => {
+      const base: ShaderNode = srgbScale(surfaceAlbedo(surface), sourceLevel);
+      return mix(moonlit(base, nodes), base, house);
+    };
+    // The weaker hemisphere endpoint is a lower bound for every perturbed tread normal. Use the same diffuse
+    // energy loss to metalness as the upright physical material; disabling sun/specular cannot brighten its twin.
+    const hemisphere: ShaderNode = (state.reflectionSky as ShaderNode)
+      .min(state.reflectionGround)
+      .mul(state.fill.clamp())
+      .mul(ao)
+      .mul(state.brightness.max(0));
+    // Tread normal perturbation can also change dust/streak albedo. Maximum streaking and both dust endpoints
+    // bound every possible source normal; take colour and diffuse-energy minima separately to retain that bound
+    // through palette grading. These are graph-construction objects, never per-frame allocations.
+    const leastDust = { ...reflectedSurface, dust: reflectedSurface.dustMin, streaks: reflectedSurface.streakMax };
+    const mostDust = { ...leastDust, dust: reflectedSurface.dustMax };
+    const diffuseFloor: ShaderNode = gradedSurface(leastDust)
+      .min(gradedSurface(mostDust))
+      .mul(float(1).sub(surfaceMetalness(leastDust)))
+      .mul(hemisphere)
+      // Keep the ambient attenuation on the ceiling, leaving headroom for the physical BRDF's Fresnel loss.
+      .mul(VOXEL_REFLECTION_AMBIENT);
+    const ambient: ShaderNode = hemisphere.mul(float(1).sub(surfaceMetalness(reflectedSurface)));
+    return voxelReflectionAmbient(gradedSurface(reflectedSurface), ambient, diffuseFloor);
+  });
   return material;
 }
 

@@ -176,15 +176,15 @@ describe('voxel shadow context ownership', () => {
     const twins = unit.root.children.filter((o): o is VoxelShadowMesh => o instanceof VoxelShadowMesh);
     expect(twins.every((t) => t.material === shadow)).toBe(true);
     const waterDisposals = (['foam', 'reflection'] as const).map((layer) => {
-      const material = voxelWaterMaterial(a, layer);
+      const waterMaterial = voxelWaterMaterial(a, layer, material);
       const water = unit.root.children.filter(
         (o): o is VoxelWaterMesh => o instanceof VoxelWaterMesh && o.layer === layer,
       );
       expect(water.length).toBe(layer === 'foam' ? 5 : 1);
-      expect(water.every((t) => t.material === material && t.geometry === geometry)).toBe(true);
-      expect(material.forceSinglePass).toBe(true);
-      expect(voxelWaterMaterial(b, layer)).not.toBe(material);
-      return vi.spyOn(material, 'dispose');
+      expect(water.every((t) => t.material === waterMaterial && t.geometry === geometry)).toBe(true);
+      expect(waterMaterial.forceSinglePass).toBe(true);
+      expect(voxelWaterMaterial(b, layer, material)).not.toBe(waterMaterial);
+      return vi.spyOn(waterMaterial, 'dispose');
     });
     spriteLookFor(a).shadowDarkness.value = 1.15;
     expect(spriteLookFor(b).shadowDarkness.value).toBe(1);
