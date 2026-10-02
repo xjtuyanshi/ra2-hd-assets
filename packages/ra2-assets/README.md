@@ -1098,16 +1098,23 @@ visual acceptance, animation correctness or complete live coverage. Captures and
 
 ## Recording cuts with read-back (Python)
 
-`python/recording_video.py` cuts, re-times and labels browser recordings (such as an in-page MediaRecorder capture of
-the HD canvas, which has a variable frame rate) into one H.264 mp4. Each `--seg 'SRC|T0|T1|SPEED|LABEL|TZERO'` samples
+`python/recording_video.py` cuts, crops, re-times and labels browser recordings (such as an in-page MediaRecorder capture of
+the HD canvas, which has a variable frame rate) into one H.264 mp4. Each `--seg 'SRC|T0|T1|SPEED|LABEL|TZERO[|CROP]'` samples
 source seconds T0..T1 at the output rate using the container timestamps (SPEED 2 = double speed, 0.4 = slow motion);
-`--font` draws LABEL and, with a numeric TZERO, a `t=+x.x s` clock. The written file is read back and the command exits
-with status 1 when its frame count differs from the frames written (a truncated encode). Recordings and outputs stay
-outside Git.
+the optional seventh field CROP is `x0:y0:x1:y1` in integer **source pixels**, with exclusive x1/y1 and x1 > x0,
+y1 > y0. Coordinates are clamped to each source frame; invalid boxes or boxes empty after clamping fail. Six-field
+specs still use the full frame. Each sampled frame is cropped before resizing to `--width`, with height following
+the crop's aspect ratio (rounded to an even height, at least 2 pixels). The first segment sets the output size;
+later aspect ratios are scaled to fit and centred with black padding, without stretching.
+`--font` draws LABEL and, with a numeric TZERO, a `t=+x.x s` clock after crop/resize/padding. The written file is read back
+and the command exits with status 1 when its frame count differs from the frames written (a truncated encode).
+Recordings and outputs stay outside Git.
 
 ```sh
 python3 packages/ra2-assets/python/recording_video.py --out "$OUT/death.mp4" --width 1280 --fps 25 --font "$FONT" \
   --seg "$REC|1.1|14.4|1|Building death|2.086" --seg "$REC|1.8|5.0|0.4|Slow motion|2.086"
+python3 packages/ra2-assets/python/recording_video.py --out "$OUT/crop.mp4" --width 1280 --fps 25 \
+  --seg "$REC|1.1|14.4|1|||320:180:1600:900"
 (cd packages/ra2-assets/python && python3 -m unittest test_recording_video -v)
 ```
 
