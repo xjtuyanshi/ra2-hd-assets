@@ -1088,6 +1088,21 @@ LO > HI wraps around zero. Saturation/value minima default to 100/60 (0..255). C
 Unrelated pixels with the same hue also count. These frozen-crop measurements do not establish object ownership,
 visual acceptance, animation correctness or complete live coverage. Captures and generated crops stay outside Git.
 
+## Recording cuts with read-back (Python)
+
+`python/recording_video.py` cuts, re-times and labels browser recordings (such as an in-page MediaRecorder capture of
+the HD canvas, which has a variable frame rate) into one H.264 mp4. Each `--seg 'SRC|T0|T1|SPEED|LABEL|TZERO'` samples
+source seconds T0..T1 at the output rate using the container timestamps (SPEED 2 = double speed, 0.4 = slow motion);
+`--font` draws LABEL and, with a numeric TZERO, a `t=+x.x s` clock. The written file is read back and the command exits
+with status 1 when its frame count differs from the frames written (a truncated encode). Recordings and outputs stay
+outside Git.
+
+```sh
+python3 packages/ra2-assets/python/recording_video.py --out "$OUT/death.mp4" --width 1280 --fps 25 --font "$FONT" \
+  --seg "$REC|1.1|14.4|1|Building death|2.086" --seg "$REC|1.8|5.0|0.4|Slow motion|2.086"
+(cd packages/ra2-assets/python && python3 -m unittest test_recording_video -v)
+```
+
 ## Live snapshot replays (Python)
 
 `python/live_replay.py` turns a few frozen live snapshots (bridge `LiveSnapshot`s or live-pair records holding one
