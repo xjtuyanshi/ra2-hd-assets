@@ -8,6 +8,7 @@
  *
  * Layout (one directory per theater, plus shared theater-independent data):
  *   _library/<theater>/library.json      this file (TypeLibrary)
+ *   _library/<theater>/buildngz.bin      transformed native building depth template (signed 8-bit samples)
  *   _library/<theater>/sprites-<n>.png   indexed sprite atlas pages (SpriteFrame.page = n)
  *   _library/<theater>/palettes/<key>.png 256x1 RGB palettes
  *   _library/common/voxels/<ID>.json     voxel models (VoxelModel from manifest.ts), shared by all theaters: VXL/HVA
@@ -37,9 +38,21 @@ export const LIBRARY_ATLAS_MAX = 4096;
 
 export type LibraryKind = 'building' | 'vehicle' | 'infantry' | 'aircraft';
 
+/** Native BUILDNGZ.SHA frame 0 after the engine loader's transform; every path is relative to library.json. */
+export interface LibraryDepthTemplate {
+  file: string;
+  width: number;
+  height: number;
+}
+
 export interface TypeLibrary {
   version: typeof TYPE_LIBRARY_VERSION;
   theater: TheaterId;
+  /**
+   * Row-major width * height bytes: raw 0 stays 0, otherwise (raw - 65) & 255. Consumers interpret signed int8;
+   * zero is a valid depth correction, never transparency. Absent in older libraries; full extractions require it.
+   */
+  depthTemplate?: LibraryDepthTemplate;
   /** 256-entry RGB palettes as 256x1 PNGs keyed like the map cache ("unit", "iso", custom art Palette= names). */
   palettes: Record<string, string>;
   /** Original palette file per key (e.g. { unit: "unittem.pal" }). */
@@ -50,8 +63,6 @@ export interface TypeLibrary {
    * one sprite may sit on different pages, so a renderer typically uploads all pages as one texture array.
    */
   spriteAtlases: AtlasRef[];
-  /** Shared BUILDNGZ depth corrections, raw uint8 bytes reinterpreted as int8 after extraction. */
-  depthTemplate?: { file: string; width: number; height: number };
   /**
    * Optional offline 2x RGBA/remap atlases, indexed exactly like spriteAtlases. Null means a page has not been
    * processed. Normalized UVs are unchanged; shadows still come from the indexed source pages.
@@ -154,10 +165,6 @@ export interface LibraryType {
   voxel?: string;
   /** rules Turret=yes: voxel models then have a turret (and maybe barrel) part turned by the turret facing. */
   turret?: boolean;
-  /** Rules Harvester=yes: the native depth bonus applies while its current cell belongs to a refinery. */
-  harvester?: true;
-  /** Rules Refinery=yes: identifies foundation cells eligible for the harvester depth bonus. */
-  refinery?: true;
   /** Building footprint (art Foundation=WxH) in cells. */
   foundation?: [width: number, height: number];
   /**
@@ -171,6 +178,10 @@ export interface LibraryType {
   remap: boolean;
   /** rules InvisibleInGame=yes (lamp posts and other light-source dummies): the engine never draws it. */
   invisible?: boolean;
+  /** Vehicle rules Harvester=yes; relevant to native depth while the current cell contains a refinery. */
+  harvester?: true;
+  /** Building rules Refinery=yes; together with a harvester's current-cell building, enables its depth adjustment. */
+  refinery?: true;
   /** rules UnloadingClass (harvesters, miners, Siege Chopper): voxel id of the model shown while unloading/deployed. */
   unloadingVoxel?: string;
   /** rules DeployingAnim= SHP (e.g. the Siege Chopper's deploy): anim sprite id, played once. */
@@ -187,8 +198,13 @@ export interface LibraryType {
 }
 
 export interface LibraryBuilding {
-  /** Native BUILDNGZ placement and body adjustment; absent values are zero. */
-  zShape?: { pointMove?: [x: number, y: number]; normalZAdjust?: number };
+  /** Non-default native body-depth inputs from this type's art section; plain ZAdjust is not NormalZAdjust. */
+  zShape?: {
+    /** Art ZShapePointMove, in native template pixels; absent means [0, 0]. */
+    pointMove?: [x: number, y: number];
+    /** Art NormalZAdjust, in native Z units; absent means 0. */
+    normalZAdjust?: number;
+  };
   /**
    * Body frames of `sprite`: frame 0 healthy, frame 1 damaged (health / strength <= conditionYellow), later frames
    * exported as-is (their meaning, e.g. extra damage stages, is not decoded). Frames may be empty: the nuclear silo
@@ -239,7 +255,7 @@ export interface LibraryAnimLayer {
   /** Art <key>ZAdjust / <key>YSort (engine depth adjustments, recorded raw). */
   zAdjust?: number;
   ySort?: number;
-  /** The animation type's YDrawOffset, in native screen pixels. */
+  /** Anim art YDrawOffset (default 0), added by native drawing to position and Z; not folded into offset here. */
   yDrawOffset?: number;
   /** Art <key>Powered=yes: only shown/animated while the building has power. */
   powered?: boolean;

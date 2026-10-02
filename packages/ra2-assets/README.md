@@ -28,6 +28,10 @@ pnpm hd:terrain-map -- --map RiverRam [--cache <dir>]
 # Type library for live matches (defaults: all six theaters, --out <repo>/gameres/hd-cache/_library)
 pnpm hd:library -- [--game <install dir>] [--theater temperate --theater snow ...] [--out <dir>] [--preview]
 
+# Stage native depth inputs, then update existing copy-on-write theater libraries
+pnpm --filter ra2-assets zshape -- --game "$GAME_DIR" --out "$ZSHAPE_STAGE"
+python3 packages/ra2-assets/python/zshape_install.py --staging "$ZSHAPE_STAGE" --farm "$HD_CACHE"
+
 # Effect art sidecar for live matches (defaults: all six theaters, --out <repo>/gameres/hd-cache/_library/common/effects);
 # --table also writes the HD garnish table the live renderer imports
 pnpm hd:effects -- [--game <install dir>] [--theater urban ...] [--out <dir>] [--table packages/hd-renderer/src/live/effectTable.ts]
@@ -1472,6 +1476,10 @@ result alongside the library to enable it in LiveLibrary; the renderer does not 
   palette, Wall/Tiberium flags, draw offsets, flat/lighting rules and remap; `OverlayData` selects the frame directly.
   `smudges` maps ids to sprite ids, body-frame counts and Width/Height footprints. The engine draws smudge body
   frame 0; `SmudgeData` selects a cell within the footprint (`dy * Width + dx`), not an animation frame.
+- `<theater>/buildngz.bin`: the engine-transformed `BUILDNGZ.SHA` frame 0, with dimensions from its frame
+  rectangle. `depthTemplate: { file: "buildngz.bin", width, height }` describes this row-major raw binary.
+  Every raw byte is transformed to `raw === 0 ? 0 : (raw - 65) & 255`. Consumers read signed int8 values;
+  zero is a valid depth correction and never transparency. Full extractions require a readable template.
 - `<theater>/sprites-<n>.png`: single-channel indexed atlas pages (value = palette index, 0 = transparent), each at
   most 4096x4096. Every body/anim/bib frame is exported with its shadow frame. A sprite's frames are packed together
   (types need one or two pages), so renderers can load pages lazily; `SpriteFrame.page` selects the page.
@@ -1481,6 +1489,41 @@ result alongside the library to enable it in LiveLibrary; the renderer does not 
 - `common/voxels/<ID>.json`: voxel models (`VoxelModel`, as in the map cache) shared by all theaters; library.json
   refers to them as `../common/voxels/<ID>.json`.
 
+Native depth metadata is additive to version 1; older libraries may omit it. `types[id].building.zShape` records
+art `ZShapePointMove` as `pointMove: [x, y]` and `NormalZAdjust` as `normalZAdjust`, omitting zero/default members
+and the entire object when both are default. Plain art `ZAdjust` is not an alias for `NormalZAdjust`.
+`types[id].harvester: true` comes only from vehicle rules `Harvester=yes`, and `types[id].refinery: true` only
+from building rules `Refinery=yes` (stock YR's `YAREFN` omits this flag). Native refinery depth depends on the harvester's current-cell building,
+so the flags alone do not establish contact or docking. Attached building layers record their anim section's
+nonzero `YDrawOffset` as `yDrawOffset`; this is added by native drawing to both position and Z. It remains separate
+from the existing layer `offset`, which retains the building art's `<key>X`/`<key>Y` values.
+
+### Refresh native depth inputs in a cache farm
+
+Set `GAME_DIR` to the player's installation, `ZSHAPE_STAGE` to a staging directory, and `HD_CACHE` to the farm root:
+
+```bash
+pnpm --filter ra2-assets zshape -- --game "$GAME_DIR" --out "$ZSHAPE_STAGE"
+python3 packages/ra2-assets/python/zshape_install.py --staging "$ZSHAPE_STAGE" --farm "$HD_CACHE"
+```
+
+The TypeScript CLI reads the same `GameInstall` archive precedence and art resolution as normal library extraction.
+It writes `buildngz.bin` and `zshape-patch.json` into staging. The patch is keyed by theater; each entry contains
+`depthTemplate`, `types: { <ID>: { zShape?, harvester?, refinery? } }` and
+`layers: { <ID>: { <layerKey>: { yDrawOffset } } }`, with only non-default metadata entries. The installer applies
+`zShape` under each existing type's `building` record and finds layers by their `key`; it does not add unresolved
+types or layers. It installs the binary beside each present theater's `library.json` and merges metadata using
+`cache_farm.install_file` and locked, atomic `cache_farm.patch_json`. File symlinks are replaced, never written
+through, and unrelated concurrent JSON updates are preserved. Repeating the same install leaves the metadata
+unchanged. Use this staging/installer path for farms; a full library rebuild writes fresh sprites and palettes.
+
+```bash
+pnpm exec vitest run packages/ra2-assets/tests/zshape.test.ts packages/ra2-assets/tests/library.test.ts
+python3 -B -m unittest discover -s packages/ra2-assets/python -p test_zshape_install.py
+```
+
+### Refresh overlay art
+
 Add or refresh only overlay art in an existing library, without extracting units or rewriting existing atlas pages:
 
 ```bash
@@ -1489,7 +1532,7 @@ pnpm hd:library -- --game "$YR_INSTALL" --out "$HD_CACHE/_library" --theater urb
 
 The existing theater/version must match. This appends `sprites-overlays-<n>.png` pages and replaces the `overlays`
 records and their sprite references. Existing TechnoTypes, voxel paths, colour schemes, palettes, sprite frames,
-HD page references and the original `extractor` diagnostics are preserved; only missing palettes are written.
+HD page references, native depth metadata and the original `extractor` diagnostics are preserved; only missing palettes are written.
 New page slots have no HD reference until processed by `hd:sprites`. `overlayExtractor` records this append's
 counts and missing-art warnings. Repeated runs append new pages; old pages remain intact for existing references.
 The library JSON is replaced only after the new files exist. A failed extraction can leave unreferenced new files
@@ -1687,8 +1730,10 @@ only.
 
 `vitest` unit tests in `tests/` cover tile-slot resolution, clear-tile substitution, projection and anchor math, the
 PNG encoder, palette remap, art naming and atlas packing; they need no game files. `tests/library.test.ts` covers
-infantry sequence parsing, the colour scheme order, paged atlas packing, theater art-name resolution and type library
-records built from a synthetic in-memory install (hand-made SHP files and INI text). `tests/effectsLibrary.test.ts`
+infantry sequence parsing, the colour scheme order, paged atlas packing, theater art-name resolution, native depth
+metadata and full depth-template output built from a synthetic in-memory install (hand-made SHP files and INI text).
+`tests/zshape.test.ts` covers the signed-byte transform, frame-0 dimensions and native art/rules key parsing.
+`tests/effectsLibrary.test.ts`
 does the same for the effect sidecar: anim timing and flags, theater variants, projectiles, overlays, smudges, the
 classification and the generated table.
 Terrain tests use synthetic caches to cover painter order, alpha, origin, water classification and preview
