@@ -88,15 +88,32 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    smoke lit by the sun and the fire below, heat shimmer, a dust ring and, for anims that leave a crater, the crater
    glowing hot for about two seconds. The native frames, their timing and size, and the persistent crater (the engine's
    own smudge) stay as they are.
-   Upright Air anims classified as explosion/collapse use bounded sphere depth in both native and HD cards:
-   `sqrt(max(0, R^2-r^2))`, with `R = min(1.16, displayed max dimension/2)` in world units (factor 1, native-pixel
-   dimensions times current HD size divided by `60/sqrt(2)`). This restores native Air's engulfing of overlapping
-   ground-layer bushes while keeping enlarged fireballs behind units 1.5 horizontal cells ahead. Existing 0.5
-   incandescent anchor support plus the 0.04 Air tie break leaves 0.03205 world units of same-ray margin at that
-   distance. The sphere's upright front is maxed with the lower ground rim and merged-building engulf, never added
-   to them. Explosion fire puffs/halos share the clamp; smoke, muzzle/debris, ground/flat/shadow and Top stay unchanged.
-   Radius reuses the draw mode's fractional part (`mode + R/4`); HD retains six vec4 instance fields/eight vertex
-   buffers. See [Painter-order evidence](research/painter-order.md) and `packages/hd-renderer/tests/fireballEngulf.test.ts`.
+   Native `Layer=air` draws after the whole ground layer. Air fire follows two rules: overlapping TerrainClass
+   trees/bushes and overlays always stay under fire, including edges/corners; units/buildings retain the bounded
+   sphere. Explosion/collapse native and HD cards keep `sqrt(max(0, R^2-r^2))`, with
+   `R = min(1.16, displayed max dimension/2)`, factor 1 (native pixels times HD size divided by `60/sqrt(2)`). Existing
+   0.5 anchor support plus Air's 0.04 bias leaves 0.03205 same-ray margin at 1.5 horizontal cells. Sphere, ground rim
+   and legacy engulf remain max-combined; `FIREBALL_MERGE.engulf` and `mode + R/4` packing are unchanged,
+   preserving native six/HD eight vertex buffers.
+   `HdRenderer.terrainDepth` owns generic drawing-buffer-size, no-MSAA `depth32float` T. Before each pipeline render
+   it clears T to far and renders the same registered meshes/materials with a copied camera on layer 31 and MRT
+   disabled, restoring target/MRT/clear state. LiveView registers only `world.sprites.mesh` (loaded with
+   `kind === 'tree'`) and `cellLayer.mesh`; under/over children, live sprites/buildings/voxels, terrain/water/effects
+   are excluded. Non-live worlds may mix buildings into `world.sprites` and do not register it.
+   Every non-flat Air-pass native/HD card (including translucent native and other Air art) applies
+   `min(cardDepth, T[pixel] - 0.001/(cameraFar-cameraNear))` afterward. `textureLoad` at `screenCoordinate` samples 1:1;
+   T=1 leaves depth unchanged. Epsilon is 2.500625e-6 at 0.1..400, over 41 D24 steps and 20 float32 ULPs. Tree pixels
+   pass; units/buildings ahead of the tree still hold nearer depth and test the unchanged sphere.
+   Enhanced explosion core/blast/halos/smoke billows/columns and explosion sparks/embers also pull; existing modes
+   gate shared pools without new attributes. Ground/Top/flat/shadow, ground garnish, beams/projectiles/units/buildings
+   and `volumetricBlasts.ts` are unchanged. The per-object gate defaults off outside the pipeline and checks actual
+   scene target plus original camera: three r186 completes nested ReflectorNode renders in `updateBefore`, then
+   updates/uploads uniforms for the resumed draw. Mirrors get 0; main draws get 1. WebGL2 fallback disables pull
+   and capture. HdRenderer owns resize/disposal; hidden/empty frames only clear. Cost: one extra single-sample pass
+   over tree/overlay mains per frame (8 bytes/pixel target storage), plus one depth load per eligible fragment;
+   benchmarks include capture. See [Painter-order evidence](research/painter-order.md) and `fireballTerrain.test.ts`,
+   `fireballEngulf.test.ts`, `vertexBuffers.test.ts` in `packages/hd-renderer/tests/`. CPU evidence does not establish
+   GPU pixel coverage or timing.
    Smoke particle systems (damaged and burning units and buildings, refinery chimneys) are drawn with their
    ParticleType's original SHP frames: the view runs the system's particles itself from its rules (spawn rate, cap,
    radius, velocity, deceleration, life; `SMOKE_SYSTEMS` in the table) with rise and drift measured on the engine's own

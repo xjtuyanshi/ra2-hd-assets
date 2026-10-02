@@ -602,6 +602,7 @@ export class LiveView {
           (page) => this.effectArt!.release(page),
           (page) => this.effectArt!.hdPageState(page),
           (page) => this.effectArt!.releaseHd(page),
+          hd.terrainDepth,
         )
       : null;
     if (this.effectSprites) this.root.add(this.effectSprites.root);
@@ -656,6 +657,10 @@ export class LiveView {
     this.cellLayer.mesh.name = 'live-cells';
     this.root.add(this.cellLayer.mesh);
     this.shareSpriteUniforms(this.cellLayer);
+    // LiveView.create loads only kind === 'tree' into world.sprites. Non-live world views can mix buildings there,
+    // so registration belongs here, never in HdRenderer/loadRa2World. Ground-pass children keep their own layers.
+    if (world.sprites) hd.terrainDepth.register(world.sprites.mesh);
+    hd.terrainDepth.register(this.cellLayer.mesh);
     if (this.effectSprites) this.shareSpriteUniforms(this.effectSprites);
     this.shareSpriteUniforms(this.volumetricBlasts);
     for (const object of cache.manifest.objects)

@@ -36,6 +36,7 @@ import { Ra2NightDressing } from '../src/ra2/nightDressing';
 import { AtmosphereNodes } from '../src/atmosphere';
 import { ObjectLayer } from '../src/objects';
 import { Mist } from '../src/mist';
+import { TerrainDepth } from '../src/terrainDepth';
 import { faithfulToneMap } from '../src/post';
 import { MapLightGrade } from '../src/ra2/mapLighting';
 import type { Ra2Cache } from '../src/ra2/cache';
@@ -274,11 +275,14 @@ describe('r186 vertex and uniform binding budget', () => {
     (pass) => {
       const source = cache();
       const atlas = { texture: texture(), width: 256, height: 4 };
+      const terrainDepth = new TerrainDepth();
       const layer = new EffectSpriteLayer(
         source,
         () => atlas,
         undefined,
         () => atlas,
+        undefined,
+        terrainDepth,
       );
       const card: EffectInstance = {
         anchor: new Vector3(),
@@ -295,7 +299,9 @@ describe('r186 vertex and uniform binding budget', () => {
       for (const alpha of [1, 0.5]) {
         layer.setInstances([{ ...card, alpha }], 0);
         const mesh = meshes(layer.root)[0]!;
-        expect(assertLimits(mesh).buffers.length).toBe(6);
+        const native = assertLimits(mesh);
+        expect(native.buffers.length).toBe(6);
+        expect(native.fragmentShader.includes('terrainDepthPullEnabled')).toBe(pass === 'air');
         expect('instanceMatrix' in mesh).toBe(false);
         expect((mesh as { capacity?: number }).capacity).toBe(4096);
       }
@@ -318,6 +324,7 @@ describe('r186 vertex and uniform binding budget', () => {
       );
       const hd = meshes(layer.root).find((mesh) => mesh.name.startsWith('live-effects-hd-'))!;
       const result = assertLimits(hd);
+      expect(result.fragmentShader.includes('terrainDepthPullEnabled')).toBe(pass === 'air');
       // Six vec4 instance fields, one position buffer and one fallback matrix buffer: no seventh field.
       expect(result.buffers.length).toBe(8);
       if (pass === 'top') {
@@ -330,12 +337,14 @@ describe('r186 vertex and uniform binding budget', () => {
       layer.setInstances([], MESH_IDLE_SECONDS + 1);
       atlas.texture.dispose();
       source.nodes!.dispose();
+      terrainDepth.dispose();
     },
   );
 
   it('audits every procedural effect, beam, emitter, light-field and weather batch at allocated capacity', () => {
     const nodes = new AtmosphereNodes();
-    const effects = new EffectsLayer(nodes);
+    const terrainDepth = new TerrainDepth();
+    const effects = new EffectsLayer(nodes, terrainDepth);
     const emitters = new EmitterLayer(nodes);
     const lights = new LightField(2, 2, { nodes });
     const rain = buildRain(2, 2, texture(), 0, nodes);
@@ -388,6 +397,7 @@ describe('r186 vertex and uniform binding budget', () => {
     for (const root of [effects.root, emitters.root, rain.object]) meshes(root).forEach(dispose);
     lights.dispose();
     nodes.dispose();
+    terrainDepth.dispose();
   });
 
   it('audits data-sized night poles above the instance-matrix fallback threshold', () => {

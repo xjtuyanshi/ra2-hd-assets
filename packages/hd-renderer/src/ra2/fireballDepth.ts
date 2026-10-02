@@ -36,9 +36,10 @@ export function sphereDepthBiasNode(r: ShaderNode, radius: ShaderNode): ShaderNo
  * constantBias includes traversal and the legacy merged-building engulf. Take the maximum, not the sum: both
  * profiles describe the same engulfing front. Adding them would swallow buildings/units beyond either profile.
  * The existing garnish's 0.5 support also covers the card's own anchor; a sphere alone at r=0.6R reaches only 0.8R,
- * insufficient to hide a tree one horizontal cell ahead (1 / cos(30) = 1.1547 camera units). Evaluate the sphere
- * from the upright anchor plane, then max with the original ground-following rim: adding sphere depth to that
- * already-nearer ground intersection would count the lower rim twice and hide the foreground unit's feet.
+ * insufficient by itself at one horizontal cell of separation (1 / cos(30) = 1.1547 camera units). TerrainClass
+ * coverage is now handled separately by terrainDepth.ts, independent of this bounded unit/building profile.
+ * Evaluate the sphere from the upright anchor plane, then max with the original ground-following rim: adding
+ * depth to that already-nearer ground intersection would count the lower rim twice and hide foreground feet.
  * py is the fragment's displayed offset below the anchor, in native pixels (HD display size already applied).
  */
 export function fireballDepthBias(r: number, radius: number, constantBias = 0, py = 0): number {

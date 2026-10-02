@@ -417,8 +417,10 @@ describe('enhanced particle routing and lights', () => {
       expect(embers.start.getX(i)).toBeLessThanOrEqual(Math.fround(2 + e.delay));
       expect(embers.params.getY(i)).toBeGreaterThanOrEqual(Math.fround(e.life[0]));
       expect(embers.params.getY(i)).toBeLessThanOrEqual(Math.fround(e.life[1]));
-      expect(embers.params.getW(i)).toBeGreaterThanOrEqual(Math.fround(e.temperature[0]));
-      expect(embers.params.getW(i)).toBeLessThanOrEqual(Math.fround(e.temperature[1]));
+      // Sign now tags explosion-only depth pull; magnitude retains the authored cooling temperature.
+      expect(embers.params.getW(i)).toBeLessThan(0);
+      expect(Math.abs(embers.params.getW(i))).toBeGreaterThanOrEqual(Math.fround(e.temperature[0]));
+      expect(Math.abs(embers.params.getW(i))).toBeLessThanOrEqual(Math.fround(e.temperature[1]));
       expect(embers.velocity.getY(i)).toBeGreaterThanOrEqual(Math.fround(e.rise[0]));
       expect(embers.velocity.getY(i)).toBeLessThanOrEqual(Math.fround(e.rise[1]));
       for (const axis of ['x', 'z'] as const) {
@@ -437,7 +439,7 @@ describe('enhanced particle routing and lights', () => {
     expect(pool(layer, 'embers').params.getW(0)).toBe(1);
     expect(pool(layer, 'embers').until).toBeCloseTo(2.3);
     expect(ENHANCED.crater.opacity).toBeLessThanOrEqual(0.25);
-    expect(pool(layer, 'sparks').params.getW(0)).toBe(2);
+    expect(pool(layer, 'sparks').params.getW(0)).toBe(4);
     expect(spawned(pool(layer, 'sparks'))).toBe(34);
     expect(pulse).toHaveBeenCalledTimes(2);
     const [flash, glow] = pulse.mock.calls;

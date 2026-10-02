@@ -65,6 +65,7 @@ import { isShadowPass } from './painterDepth';
 import { CARD_CLEARANCE } from './ra2/cardDepth';
 import { FIREBALL_VOLUME, fireballRadiusNode, sphereDepthBias, sphereDepthBiasNode } from './ra2/fireballDepth';
 import type { ShaderNode } from './tsl';
+import type { TerrainDepth } from './terrainDepth';
 
 const FIREBALLS = 96;
 const FLAMES = 768;
@@ -88,6 +89,8 @@ const COLUMN_PUFFS = 768;
 /** Particle modes, separate from the original sandbox (0) and faithful garnish (1) spark values. */
 const SPARK_HOT = 2;
 const SPARK_ELECTRIC = 3;
+/** Same enhanced hot treatment, but only explosion particles receive the terrain-class pull. */
+const SPARK_EXPLOSION = 4;
 /** Positive halo extras retain the original intensity; negative values select the enhanced colour treatments. */
 const HALO_HD = -1;
 const HALO_ELECTRIC = -2;
@@ -863,7 +866,10 @@ export class EffectsLayer {
   /** Seconds of camera shake still pending, scaled by explosion size (the live view never shakes). */
   shake = 0;
 
-  constructor(readonly nodes = DEFAULT_ATMOSPHERE_NODES) {
+  constructor(
+    readonly nodes = DEFAULT_ATMOSPHERE_NODES,
+    terrainDepth?: TerrainDepth,
+  ) {
     const quad = new PlaneGeometry(1, 1);
 
     this.fireballs = new ParticlePool(FIREBALLS, quad, additive(), (pool) => {
@@ -986,6 +992,8 @@ export class EffectsLayer {
     this.sparks = new ParticlePool(SPARKS, new PlaneGeometry(1, 1), additive(), (pool) => {
       const { age, life, size, seed, origin, velocity, alive, extra: garnish } = particleInputs(pool, this.now);
       const t = clamp(age.div(life), 0, 1);
+      if (terrainDepth)
+        pool.material.depthNode = terrainDepth.node(depth, garnish.equal(SPARK_EXPLOSION).select(float(1), float(0)));
       const flight = min(age, life);
       const gravity = vec3(0, -9.0, 0).mul(flight.mul(flight).mul(0.5));
       const position = origin.add(velocity.mul(flight)).add(gravity);
@@ -1025,7 +1033,10 @@ export class EffectsLayer {
     // flicker and cooling stay on the GPU, and this pool never receives sandbox or faithful particles.
     this.airborneEmbers = new ParticlePool(ENHANCED.embers.pool, quad, additive(), (pool) => {
       const e = ENHANCED.embers;
-      const { age, life, size, seed, origin, velocity, alive, extra: temperature } = particleInputs(pool, this.now);
+      const { age, life, size, seed, origin, velocity, alive, extra: mode } = particleInputs(pool, this.now);
+      // Sign tags explosion embers without changing their temperature, motion or the particle buffer layout.
+      const temperature = abs(mode);
+      if (terrainDepth) pool.material.depthNode = terrainDepth.node(depth, mode.lessThan(0).select(float(1), float(0)));
       const flight = clamp(age, 0, life);
       const t = flight.div(life);
       const rise = velocity.y.mul(float(1).sub(exp(flight.mul(-e.drag)))).div(e.drag);
@@ -1213,6 +1224,8 @@ export class EffectsLayer {
         this.toCamera,
         explosion.select(fireballRadiusNode(grow), float(0)),
       );
+      if (terrainDepth)
+        pool.material.depthNode = terrainDepth.node(pool.material.depthNode, explosion.select(float(1), float(0)));
       pool.material.positionNode = billboard(centre, grow.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
@@ -1260,6 +1273,8 @@ export class EffectsLayer {
         this.toCamera,
         explosion.select(fireballRadiusNode(grow), float(0)),
       );
+      if (terrainDepth)
+        pool.material.depthNode = terrainDepth.node(pool.material.depthNode, explosion.select(float(1), float(0)));
       pool.material.positionNode = billboard(centre, grow.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const d = length(uv().sub(0.5).mul(2));
@@ -1306,6 +1321,7 @@ export class EffectsLayer {
         .mul(alive);
       const centre = origin.add(drift);
       pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera);
+      if (terrainDepth) pool.material.depthNode = terrainDepth.node(pool.material.depthNode);
       pool.material.positionNode = billboard(centre, grow, this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
@@ -1551,6 +1567,7 @@ export class EffectsLayer {
       const rise: ShaderNode = t.mul(size).mul(0.22);
       const centre = origin.add(vec3(0, rise, 0));
       pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera, fireballRadiusNode(grow));
+      if (terrainDepth) pool.material.depthNode = terrainDepth.node(pool.material.depthNode);
       pool.material.positionNode = billboard(centre, grow.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
@@ -1602,6 +1619,7 @@ export class EffectsLayer {
         .mul(alive);
       const centre = origin.add(velocity.mul(flight));
       pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera);
+      if (terrainDepth) pool.material.depthNode = terrainDepth.node(pool.material.depthNode);
       pool.material.positionNode = billboard(centre, grow, this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
@@ -1853,10 +1871,17 @@ export class EffectsLayer {
       const velocity = new Vector3(r(10), 3 + Math.random() * 6, r(10)).multiplyScalar(
         (0.35 + 0.35 * s) * (far ? 1.6 : 1),
       );
-      this.sparks.spawn(now, lifted, velocity, far ? 0.055 : 0.045, (far ? 0.8 : 0.4) + Math.random() * 0.6, SPARK_HOT);
+      this.sparks.spawn(
+        now,
+        lifted,
+        velocity,
+        far ? 0.055 : 0.045,
+        (far ? 0.8 : 0.4) + Math.random() * 0.6,
+        SPARK_EXPLOSION,
+      );
     }
     for (let i = 0, n = Math.round(e.embers.count + e.embers.perScale * s); i < n; i++)
-      this.spawnEmber(now + Math.random() * e.embers.delay, at, width, wind);
+      this.spawnEmber(now + Math.random() * e.embers.delay, at, width, wind, true);
     // Clustered blasts share independent budgets (BLAST_CROWD); a lone blast keeps its requests up to each ceiling.
     const wantDebris = Math.round(e.debris.count + e.debris.perScale * s);
     const wantColumn = s >= e.column.from ? Math.round(e.column.count + e.column.perScale * Math.min(1.5, s)) : 0;
@@ -2092,7 +2117,7 @@ export class EffectsLayer {
   }
 
   /** Shared enhanced ember launch volume; vertical convection stays independent of horizontal wind strength. */
-  private spawnEmber(now: number, at: Vector3, width: number, wind: Vector3): void {
+  private spawnEmber(now: number, at: Vector3, width: number, wind: Vector3, explosion = false): void {
     const e = ENHANCED.embers;
     const offset = new Vector3(
       (Math.random() - 0.5) * e.volume * width,
@@ -2110,7 +2135,7 @@ export class EffectsLayer {
       velocity,
       randomBetween(e.size),
       randomBetween(e.life),
-      randomBetween(e.temperature),
+      randomBetween(e.temperature) * (explosion ? -1 : 1),
     );
   }
 

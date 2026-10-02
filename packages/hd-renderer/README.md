@@ -315,27 +315,38 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   (L5: a red-heavy ramp with gamma 2.3 turned the mid-life fireball red-orange around a dark core). Low-coverage
   pixels count as added light only when they are coloured (fire glow, arcs); neutral low-coverage smoke rims are
   scene-lit, which removed a white outline around redrawn smoke. HD cards of the ground and air layers are
-  depth-tested like the native cards (only the top layer draws unconditionally). Native `Layer=air` explosions draw
-  after the whole ground layer, covering overlapping trees and bushes; HD enlargement makes an unconditional Air
-  pass swallow a terror drone 1.5 cells in front, while anchor-only depth exposes bushes inside the fireball.
-  Non-flat Air cards classified as `explosion` or `collapse` therefore have a spherical front in both native SHP
-  and HD paths (`src/ra2/fireballDepth.ts`). At screen-plane distance `r` from the displayed current/next union's
-  centre, its nearness is `sqrt(max(0, R*R - r*r))`. `R = min(1.16, 0.5 * max(displayed width, displayed height))`,
-  with radius factor 1; dimensions are native pixels times display size, divided by `PIXELS_PER_CELL_EDGE`
-  (`60/sqrt(2)`). Native frames use size 1. The 0.5 world-unit anchor support is shared with incandescent garnish;
-  ordinary cards also retain Air's 0.04 traversal bias. At `r <= 0.6R`, the sphere contributes at least `0.8R`,
-  enough with that support to engulf nearby tree cards without increasing the radius into the next foreground unit.
-  The foreground unit's same-ray depth advantage is `1.5/cos(30) = 1.73205`: the maximum card advance is
-  `0.04 + 0.5 + 1.16 = 1.70`, leaving 0.03205 world units. Reserving 0.03 permits at most 1.16205, rounded down
-  to 1.16. The sphere is measured from the upright anchor plane and maxed with the existing ground-following lower
-  rim, so ground nearness is not counted twice. Smoke, muzzle flashes, sparks, debris, Ground/flat/shadow cards and
-  Top retain their original policies. Procedural explosion fire uses its currently growing diameter and the same cap;
-  the optional raymarched blast material is unchanged.
-  Radius occupies the fractional part of the existing draw-mode scalar (`mode + R/4`, decoded by `floor`/`fract`),
-  in native `style.y` and HD `style.x`. No instance buffer is added: native cards still use six total buffers and HD
-  cards eight (six vec4 fields, position and matrix fallback). Pure TypeScript and fragment-stage TSL twins share
-  the radius, sphere, combination and packing policy; `fireballEngulf.test.ts` samples same-ray overlapping pixels
-  and `vertexBuffers.test.ts` builds the actual WGSL layouts without claiming GPU-rendered acceptance.
+  depth-tested like the native cards (only Top is untested). Native `Layer=air` draws after the whole ground layer,
+  requiring two rules: overlapping TerrainClass trees/bushes and overlays always stay under Air fire at every
+  covered pixel; units/buildings retain the bounded sphere. A single larger sphere cannot satisfy both rules.
+  Non-flat Air explosion/collapse cards keep the native/HD sphere (`src/ra2/fireballDepth.ts`):
+  `sqrt(max(0, R*R-r*r))` at union-centre distance `r`, with `R = min(1.16, max(displayed width, height)/2)`, factor 1.
+  Dimensions are native pixels times display size divided by `60/sqrt(2)`; native size is 1. Existing 0.5 anchor
+  support plus 0.04 Air bias gives maximum advance 1.70, retaining 0.03205 same-ray margin at 1.5 horizontal cells
+  (`1.5/cos(30) = 1.73205`). Sphere, ground rim and legacy merged engulf remain max-combined, never summed.
+  Radius stays packed as `mode + R/4` (native `style.y`, HD `style.x`), preserving native six/HD eight buffers.
+  `HdRenderer.terrainDepth` owns the generic prepass/pull (`src/terrainDepth.ts`). Immediately before the pipeline it
+  clears drawing-buffer-size, no-MSAA T to far and renders the same registered main meshes/materials with a copied
+  view camera on dedicated layer 31 and MRT disabled, restoring target/MRT/clear state. LiveView registers only
+  `world.sprites.mesh` (loaded with `kind === 'tree'`) and `cellLayer.mesh`; under/over children retain layer 0.
+  Alpha discard, painter bias and depth/position nodes are shared. Non-live worlds may mix buildings into
+  `world.sprites` and do not register it; live sprites/buildings/voxels, terrain/water/effects are excluded.
+  Every non-flat Air card (including native translucent and other Air art) uses `min(cardDepth, T[pixel]-eps)`
+  after its existing profile. `textureLoad` at `screenCoordinate` is 1:1 with no filtering; T=1 leaves depth unchanged.
+  `eps = 0.001/(cameraFar-cameraNear)` is 2.500625e-6 at 0.1..400, over 41 D24 steps and 20 float32 ULPs, far below the
+  foreground sphere margin. Tree pixels pass regardless of sphere radius, including its edge/corners. Units/buildings
+  ahead of a tree still hold nearer buffer depth and only the unchanged sphere can pass them.
+  Enhanced explosion core/blast/halos/smoke billows/columns and explosion sparks/embers share the pull. Shared pools
+  use existing modes: spark mode 4 keeps mode 2's hot treatment; negative ember temperature tags explosion births,
+  decoded by magnitude. Muzzle/electric sparks, continuous-fire embers and other garnish retain depth/colour/motion.
+  Ground/Top/flat/shadow, ground scorch/craters/dust/debris shadows, beams/projectiles/units/buildings and
+  `volumetricBlasts.ts` are unchanged. The per-object gate is off outside the main pipeline and checks actual scene
+  target plus original camera. r186 updates/uploads object uniforms after `updateBefore` finishes nested ReflectorNode
+  renders, so mirrors get 0 and resumed main draws get 1; camera layers alone are insufficient. WebGL2 fallback
+  disables capture/pull and omits its sampler. HdRenderer owns resize/disposal, clears hidden/empty captures without
+  draws, and repeats capture in benchmarks. Cost: one extra single-sample, full-resolution pass over tree/overlay
+  mains per frame (RGBA8 + depth32float: 8 bytes/pixel target storage), plus one depth load per eligible fragment.
+  `fireballTerrain.test.ts` and `fireballEngulf.test.ts` cover CPU policies/construction/lifecycle;
+  `vertexBuffers.test.ts` builds actual r186 WGSL layouts. GPU pixel coverage and timing need runtime acceptance.
   Clustered explosions merge (`FIREBALL_MERGE` in `src/live/effects.ts`, enhanced style with HD flipbooks): the
   blasts one snapshot spawns within 2.5 cells of each other (a building's Explosion= list) form a group whose most
   fiery blast is drawn at the group's centroid, enlarged by 0.15 per member up to 1.7, with one garnish for the

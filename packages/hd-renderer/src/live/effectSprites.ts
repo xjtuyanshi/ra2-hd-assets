@@ -40,6 +40,7 @@ import type { SpriteFrame } from '../../../ra2-assets/src/manifest';
 import { DirtyAttribute } from '../dirtyAttribute';
 import { InstancedQuad } from '../instancedQuad';
 import type { ShaderNode } from '../tsl';
+import type { TerrainDepth } from '../terrainDepth';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import type { Ra2Cache } from '../ra2/cache';
 import { cardDepthNode, EFFECT_DECAL_LIFT } from '../ra2/cardDepth';
@@ -56,7 +57,8 @@ import type { EffectCategory } from './effectTable';
 export type EffectDraw = 'card' | 'flat' | 'shadow';
 /**
  * Draw pass, following the engine's layers: Ground and Air both test object/terrain Z. Air composites later,
- * without writing depth. Explosions have a bounded spherical front; other art retains anchor depth. Top is untested.
+ * without writing depth. Non-flat Air cards pull ahead of terrain-class pixels in the main view; against units and
+ * buildings explosions keep their bounded spherical front and other art keeps anchor depth. Top is untested.
  */
 export type EffectPass = 'ground' | 'air' | 'top';
 
@@ -181,8 +183,7 @@ export function effectSphereRadius(instance: EffectInstance): number {
 }
 const cardPainterBias = (instance: EffectInstance): number => {
   if (instance.draw !== 'card' || instance.pass === 'top') return 0;
-  // Air composites over coincident Ground/unit pixels, but never receives an unconditional foreground plane.
-  // Stay inside the existing traversal budget so a farther impact still fails a tree/facade's physical Z test.
+  // Keep the traversal budget against units/facades; the separate terrain-only pull restores native Air ordering.
   return instance.pass === 'air' ? MAX_PAINTER_BIAS : spritePainterBias(instance.painter, instance.painterPart);
 };
 const compareCards = (a: EffectInstance, b: EffectInstance): number => {
@@ -259,6 +260,7 @@ export class EffectSpriteLayer {
     /** Optional RGBA pages; HD instances are skipped entirely when this source is absent. */
     private readonly hdPageSource?: (page: number) => EffectPage | 'loading' | null,
     private readonly releaseHdPage: (page: number) => void = () => {},
+    readonly terrainDepth?: TerrainDepth,
   ) {
     this.root.name = 'live-effect-sprites';
   }
@@ -443,6 +445,10 @@ class PageMesh {
       fireballDepthBiasNode(r, radius, aStyle.w, py),
       draw.greaterThan(0.5),
     );
+    // Native Layer=air covers the entire ground layer, including the card's corners beyond its sphere.
+    // Per-pass selection also covers smoke/muzzle Air art; flat/shadow instances retain their original depth.
+    if (this.pass === 'air' && layer.terrainDepth)
+      material.depthNode = layer.terrainDepth.node(material.depthNode, draw.equal(0).select(float(1), float(0)));
     const gu: ShaderNode = positionGeometry.x.add(0.5);
     const gv: ShaderNode = float(0.5).sub(positionGeometry.y);
     material.positionNode = Fn(() => {
@@ -611,9 +617,8 @@ class HdPageMesh {
     const material = (this.material = new MeshBasicNodeMaterial());
     material.transparent = true;
     material.depthWrite = false;
-    // Native Layer=air composites over the ground layer. Enlarged HD fireballs need a bounded volume instead:
-    // anchor-only Z exposed bushes inside their cores; untested Z swallowed a terror drone 1.5 cells south.
-    // The spherical front preserves that foreground unit with margin; only Top remains unconditional.
+    // Native Air ordering applies to terrain-class art via the separate pull below. Units/buildings still test
+    // the existing sphere; untested Z would swallow a terror drone 1.5 cells south. Only Top is unconditional.
     material.depthTest = pass !== 'top';
     material.blending = CustomBlending;
     material.blendSrc = OneFactor;
@@ -637,6 +642,8 @@ class HdPageMesh {
       fireballDepthBiasNode(r, radius, aStyle.z, y),
       draw.greaterThan(0.5),
     );
+    if (pass === 'air' && layer.terrainDepth)
+      material.depthNode = layer.terrainDepth.node(material.depthNode, draw.equal(0).select(float(1), float(0)));
     material.positionNode = Fn(() => {
       const card = aAnchor.xyz
         .add(layer.cameraRight.mul(x.div(ppu)))

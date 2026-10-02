@@ -55,6 +55,7 @@ import {
 } from './atmosphere';
 import type { AtmosphereProfile, RenderEvent, RenderState } from './contract';
 import { EffectsLayer } from './effects';
+import { TerrainDepth } from './terrainDepth';
 import { EmitterLayer, type Emitter } from './emitters';
 import { EmissiveOverlay, emissiveMrtSupported } from './emissiveOverlay';
 import { LightField, type DynamicLight } from './lightField';
@@ -535,6 +536,8 @@ export class HdRenderer {
   private readonly objects = new ObjectLayer();
   /** HD effects; live views spawn into it from the game's own effect list. */
   readonly effects: EffectsLayer;
+  /** Generic capture; game views register only their terrain-class main meshes. */
+  readonly terrainDepth = new TerrainDepth();
   /** Lamp heads and wet-ground reflections. */
   readonly emitters: EmitterLayer;
   readonly emissiveOverlay: EmissiveOverlay;
@@ -611,7 +614,7 @@ export class HdRenderer {
   ) {
     this.nodes = options.nodes ?? new AtmosphereNodes();
     this.layerNodes = this.nodes;
-    this.effects = new EffectsLayer(this.layerNodes);
+    this.effects = new EffectsLayer(this.layerNodes, this.terrainDepth);
     this.emitters = new EmitterLayer(this.layerNodes);
     this.emissiveOverlay = new EmissiveOverlay(PIXELS_PER_CELL_EDGE);
     this.scene.onBeforeRender = () => this.emissiveOverlay.beginRender(this.renderer);
@@ -790,6 +793,7 @@ export class HdRenderer {
     for (const node of this.pipelineNodes) node.dispose();
     const nodes: { dispose(): void }[] = (this.pipelineNodes = []);
     const scenePass = pass(this.scene, this.view.camera, { samples: antialias === 'msaa4' ? 4 : 0 });
+    this.terrainDepth.setMainPass(scenePass.renderTarget, this.view.camera);
     if (this.painterDepthEnabled || overlay) {
       const outputs: Record<string, ShaderNode> = { output: materialOutput };
       if (this.painterDepthEnabled) {
@@ -964,6 +968,7 @@ export class HdRenderer {
   resize(cssWidth: number, cssHeight: number): void {
     this.renderer.setSize(cssWidth, cssHeight, false);
     this.view.resize(cssWidth, cssHeight);
+    this.terrainDepth.resize(this.renderer);
   }
 
   /** The profile the lighting follows: the map's (with any night-level override), none for the procedural sandbox. */
@@ -1168,9 +1173,14 @@ export class HdRenderer {
     if (this.layerNodes !== this.nodes) this.layerNodes.copyValuesFrom(this.nodes);
     this.lightField.update(now, this.renderer, this.staticGain);
     this.mirrorDynamicEmitters(now);
-    this.pipeline!.render();
+    this.renderPipeline();
     this.frames++;
     if (this.trackTimestamp && this.frames % 2 === 0) void this.collectGpuTimes();
+  }
+
+  private renderPipeline(): void {
+    this.terrainDepth.render(this.renderer, this.scene, this.view.camera);
+    this.terrainDepth.renderMainPass(() => this.pipeline!.render());
   }
 
   private readonly scratchColor = new Color();
@@ -1376,7 +1386,7 @@ export class HdRenderer {
     const started = performance.now();
     for (let i = 0; i < frames; i++) {
       nodeFrame.update();
-      this.pipeline!.render();
+      this.renderPipeline();
     }
     await queue.onSubmittedWorkDone();
     return (performance.now() - started) / frames;
@@ -1405,6 +1415,7 @@ export class HdRenderer {
     this.pipelineNodes.length = 0;
     this.lightField?.dispose();
     this.emissiveOverlay.dispose();
+    this.terrainDepth.dispose();
     if (this.nodes !== DEFAULT_ATMOSPHERE_NODES) this.nodes.dispose();
     if (this.layerNodes !== this.nodes && this.layerNodes !== DEFAULT_ATMOSPHERE_NODES) this.layerNodes.dispose();
     this.renderer.dispose();

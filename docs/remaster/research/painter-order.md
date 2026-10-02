@@ -165,25 +165,53 @@ the latter's camera-depth displacement plus `0.01` (currently `0.06`). A `0.03` 
 ground-following wall pixels to fail against their own or neighboring shadows, leaving dark holes.
 Frame selection, wall connection data, placement and shadow opacity are unchanged.
 
-Ground and Air effect cards both test this reconstructed depth and do not write depth. Air still
-composites after Ground and uses a bounded traversal bias over coincident unit pixels. Native `Layer=air`
-explosions (EXPLOLRG/MED/SML, TWLT070/100, S_BANG48 and the effect table's other explosion ids) draw after
-the ground layer, so overlapping bushes do not pierce their cores. HD display enlargement needs a bounded volume
-approximation: unconditional Air covers units 1.5 horizontal cells ahead, while anchor-only Z exposes those bushes.
-`ra2/fireballDepth.ts` gives upright Air explosion/collapse cards a spherical front with
-`bias(r) = sqrt(max(0, R^2 - r^2))` and `R = min(1.16, max(displayed width, displayed height)/2)` (factor 1).
+Ground and Air effect cards test reconstructed depth and do not write depth. Native `Layer=air` anims
+(EXPLOLRG/MED/SML, TWLT070/100, S_BANG48, S_CLSN22 and other explosion/collapse art) draw after the **whole**
+ground layer. Two rules are required: overlapping TerrainClass trees/bushes and overlays always stay under Air
+fire, including edges and drawn corners; units/buildings retain the bounded sphere comparison. A sphere alone
+cannot cover a tree 1.4 cells ahead or a bush at its edge while preserving a unit 1.5 cells ahead.
+
+`ra2/fireballDepth.ts` keeps upright Air explosion/collapse cards' spherical front unchanged:
+`bias(r) = sqrt(max(0, R^2 - r^2))`, `R = min(1.16, max(displayed width, displayed height)/2)` (factor 1).
 Displayed dimensions and union-centre distances are native pixels times current HD display size divided by
-`60/sqrt(2)`; native SHP cards use size 1. The sphere uses the existing incandescent-garnish support of 0.5 world
-units plus Air's 0.04 tie break. The same-ray unit separation is `1.5/cos(30) = 1.73205`; the maximum advance
-1.70 retains 0.03205 margin (the largest two-decimal cap reserving 0.03 is 1.16). The front at `r <= 0.6R` is at
-least `0.8R` nearer, engulfing tree cards 0.5-1.0 horizontal cells ahead in the tested peak-stage crops.
-Take the maximum of the upright sphere, ground-following rim and legacy merged-building engulf; summing them
-would double-count ground/merge reach. Explosion fire puffs/halos use their current diameter and the same cap;
-smoke, muzzle/spark/debris art, flat/shadow/Ground and Top cards retain their policies. Radius is packed into the
-draw mode's fractional part (`mode + R/4`), preserving six native/eight HD vertex buffers. Farther foreground
-facades still occlude the bounded sphere. Animation, SHP projectile and particle producers share this material
-policy, including the translucent variant. Top remains the explicit untested pass. This preserves
-physical occlusion rather than reconstructing every native read-only unit/translucency interaction.
+`60/sqrt(2)`; native SHP size is 1. Existing 0.5 world-unit incandescent anchor support and Air's 0.04 tie break
+give maximum advance 1.70. The same-ray unit separation `1.5/cos(30) = 1.73205` retains 0.03205 margin. The
+upright sphere, ground-following rim and legacy merged-building engulf are combined with **max**, never summed.
+`FIREBALL_MERGE.engulf` is unchanged. Radius stays packed as `mode + R/4`, preserving native six/HD eight buffers.
+
+`HdRenderer` owns the generic `TerrainDepth` capture/pull (`src/terrainDepth.ts`): a drawing-buffer-size,
+single-sample T with sampleable `depth32float`, cleared to far immediately before each scene pipeline render.
+The copied view camera uses only layer 31 (`TERRAIN_DEPTH_LAYER`), MRT is disabled, and target/MRT/clear state
+are restored even after errors. The same main meshes/materials retain position/depth nodes, alpha discard and
+painter bias. LiveView registers exactly `world.sprites.mesh` (loaded with only `kind === 'tree'`) and
+`cellLayer.mesh`. Under/over shadow/decal/reflection children retain layer 0: r186 `Renderer._projectObject`
+checks each object's mask and still traverses children. Non-live `loadRa2World` may mix buildings into
+`world.sprites` and does not register it. Live-sprite/building/voxel/terrain/water/effect meshes are excluded.
+Empty/hidden captures still clear T to prevent stale foreground pulls.
+
+Every non-flat Air-pass native/HD card, including translucent native materials and other Air art, applies
+`min(cardDepth, T[pixel] - 0.001/(cameraFar-cameraNear))` after its existing policy. T=1 leaves depth exactly
+unchanged. The camera-space epsilon 0.001 is 2.500625e-6 normalized at the orthographic 0.1..400 range, over
+41 D24 steps and 20 float32 ULPs, far below the foreground-unit sphere margin. `textureLoad` at `screenCoordinate`
+uses the fragment's own pixel with no filtering. Where a tree is front-most the pull passes its depth regardless
+of distance or radius; a unit/building ahead of that tree still holds nearer buffer depth and rejects the pull
+unless the unchanged sphere already reaches it.
+
+Enhanced explosion cores, procedural blasts, explosion halos, smoke billows/columns and explosion sparks/embers
+share the pull. Shared pools gate explosion modes with existing scalars: spark mode 4 keeps mode 2's hot treatment;
+negative ember temperature tags explosion births and is decoded by magnitude. Muzzle/electric sparks, continuous
+fire embers and other garnish keep their policies. Ground/Top, flat/shadow, scorch/craters/dust/debris shadows,
+beams/projectiles/units/buildings and `volumetricBlasts.ts` are unchanged.
+
+The gate defaults off outside the main pipeline and checks actual scene-pass target **and** original camera per
+object. In r186 `Renderer._renderObjectDirect`, `updateBefore` performs nested ReflectorNode renders before
+`NodeManager.updateForRender` and `Bindings.updateForRender` update/upload object groups. Mirrors therefore get 0
+and resumed main draws get 1; cloned camera layers alone cannot gate this. WebGL2 fallback disables capture/pull
+and omits the sampler. HdRenderer owns resize/disposal and repeats capture in benchmarks. Cost: one extra
+single-sample, full-resolution pass over tree/overlay mains per frame (RGBA8 + depth32float: 8 bytes/pixel target
+storage), plus one depth load per eligible fragment. No duplicate fire draw or extra instance attribute is needed.
+`fireballTerrain.test.ts`, `fireballEngulf.test.ts` and `vertexBuffers.test.ts` provide CPU policy, construction,
+layout and lifecycle evidence; GPU pixels and timing require separate runtime acceptance.
 
 High-bridge cards instead use a horizontal plane at `4 * LEVEL_HEIGHT`; neighboring pieces have identical
 depth at the same screen pixel. Their draw offsets remain unchanged. Voxel geometry retains its complete depth,
@@ -244,13 +272,13 @@ stateless single-snapshot helper.
 
 Supplied frozen native GAWEAP `5x3`, northwest `(58,98)`, Night Hawk SHAD roof-delivery evidence:
 
-| Frame | Current / queued mission | Link 0 | SHAD Z (leptons) | Original drawing |
-| --- | --- | --- | --- | --- |
-| 9171 | 5 / 16 | SHAD | 208 | Closed roof. |
-| 9184 / 9208 | 16 | SHAD | 208 | RoofDeployingAnim; heli parts visible inside the opening. |
-| 9235 | 16 | NULL | 368 | Roof still open; heli rising out. The previous HD reader selected door and hid it under a closed roof. |
-| 9278 | 5 | NULL | 798 | Roof still open for an unexplained reason; intentionally outside this Unload latch. |
-| 9342 | — | — | — | Closed in original and HD. |
+| Frame       | Current / queued mission | Link 0 | SHAD Z (leptons) | Original drawing                                                                                       |
+| ----------- | ------------------------ | ------ | ---------------- | ------------------------------------------------------------------------------------------------------ |
+| 9171        | 5 / 16                   | SHAD   | 208              | Closed roof.                                                                                           |
+| 9184 / 9208 | 16                       | SHAD   | 208              | RoofDeployingAnim; heli parts visible inside the opening.                                              |
+| 9235        | 16                       | NULL   | 368              | Roof still open; heli rising out. The previous HD reader selected door and hid it under a closed roof. |
+| 9278        | 5                        | NULL   | 798              | Roof still open for an unexplained reason; intentionally outside this Unload latch.                    |
+| 9342        | —                        | —      | —                | Closed in original and HD.                                                                             |
 
 These are supplied native observations, not new HD rendered-pixel acceptance. The mission-5 discrepancy at 9278
 remains `UNVERIFIED`; the latch deliberately ends there.
