@@ -132,34 +132,43 @@ export const GARNISH_LIGHTS = {
  * foundation within a second or two; with every blast throwing its own debris (up to ~100 chunks resting for seconds)
  * and a thirteen-second smoke column, a collapse buried the base under a black swarm of chunks and a smoke wall in live
  * matches (L5 compose, frozen pairs of a construction yard's death). Blasts within `radius` world units and `window`
- * seconds of each other therefore share `debris` chunks and `smoke` puffs (billows plus column); each blast keeps
- * a small `floor` while budget remains. The ceiling includes that floor: otherwise a twelve-blast collapse still
- * exceeds the rubble target even after spending its shared budget. A lone blast keeps its requested chunk count.
+ * seconds of each other therefore share `debris` chunks, `smoke` billows and a separate `late` column allowance.
+ * Each blast keeps a small `floor` while budget remains. The ceiling includes that floor: otherwise a collapse still
+ * exceeds the rubble target even after spending its shared budget. A lone blast keeps its counts up to each ceiling.
  */
 export const BLAST_CROWD = {
   window: 2.5,
   radius: 2.5,
   debris: 36,
-  smoke: 14,
-  floor: { debris: 2, smoke: 1 },
+  smoke: 10,
+  late: 3,
+  floor: { debris: 2, smoke: 1, late: 0 },
   /** Reserve some of the remaining allowance for later anims in the same collapse. */
   followupShare: 0.5,
 };
 
 /** Recent enhanced blasts by place, for BLAST_CROWD. */
 export class BlastCrowd {
-  private recent: { t: number; x: number; z: number; debris: number; smoke: number }[] = [];
+  private recent: { t: number; x: number; z: number; debris: number; smoke: number; late: number }[] = [];
   constructor(private readonly budget = BLAST_CROWD) {}
-  /** Grants up to `debris` chunks and `smoke` puffs to a blast at `at`, given what its cluster already used. */
-  grant(now: number, at: Vector3, debris: number, smoke: number): { debris: number; smoke: number } {
+  /** Grants chunks, billows and column puffs independently, given what the blast's cluster already used. */
+  grant(
+    now: number,
+    at: Vector3,
+    debris: number,
+    smoke: number,
+    late = 0,
+  ): { debris: number; smoke: number; late: number } {
     const b = this.budget;
     this.recent = this.recent.filter((r) => now - r.t <= b.window && r.t <= now);
     let usedDebris = 0;
     let usedSmoke = 0;
+    let usedLate = 0;
     for (const r of this.recent)
       if ((r.x - at.x) ** 2 + (r.z - at.z) ** 2 <= b.radius * b.radius) {
         usedDebris += r.debris;
         usedSmoke += r.smoke;
+        usedLate += r.late;
       }
     const grant = (wanted: number, used: number, limit: number, floor: number) => {
       const remaining = Math.max(0, limit - used);
@@ -169,6 +178,7 @@ export class BlastCrowd {
     const granted = {
       debris: grant(debris, usedDebris, b.debris, b.floor.debris),
       smoke: grant(smoke, usedSmoke, b.smoke, b.floor.smoke),
+      late: grant(late, usedLate, b.late, b.floor.late),
     };
     this.recent.push({ t: now, x: at.x, z: at.z, ...granted });
     return granted;
@@ -307,72 +317,88 @@ export const ENHANCED = {
   },
   /**
    * Billows keep forming over `spread` seconds after the first birth at `delay`. Across `lateFrom` seconds of puff
-   * age, opacity smoothly reaches the `lateOpacity` multiplier and both radial silhouette edges move inward by
-   * `lateEdge` in normalized radius. Before that interval, opacity and edges retain their original values.
+   * age, opacity smoothly reaches the `lateOpacity` multiplier with a final `maxLate` cap, and lobe radii shrink by
+   * `lateEdge` in quad space. Before that interval, opacity and radii retain their original values.
    */
   smoke: {
     count: 2,
     perScale: 3,
     delay: 0.1,
     spread: 0.9,
-    life: 5.0,
+    life: 2.7,
     size: 0.8,
-    opacity: 0.9,
-    lateOpacity: 0.8,
-    lateFrom: [1.2, 3.0],
+    /** World units: a merged collapse fireball is several cells wide, and art-sized puffs merged into one sheet. */
+    maxSize: 1.8,
+    opacity: 0.8,
+    lateOpacity: 0.6,
+    lateFrom: [0.3, 1.0],
+    maxLate: 0.5,
     lateEdge: 0.15,
-    edge: [0.95, 0.5],
     boundary: [1, 0.6],
-    lumpiness: 0.8,
-    erosion: 0.3,
-    erosionRange: [0.15, 0.85],
+    lobes: 4,
+    lobeRadius: [0.42, 0.62],
+    lobeSpread: 0.36,
+    lobeLift: 0.12,
+    densityNoise: 0.45,
     ambient: 0.1,
     sun: 1.6,
-    underside: 0.55,
-    undersideRange: [-0.6, 0.6],
+    underside: 0.35,
+    undersideRange: [-0.5, 0.5],
   },
   /**
    * Smoke column (blasts of scale >= `from`): puffs emitted over `span` seconds, each rising for `life` seconds.
-   * `lateFrom` (puff age in seconds), `lateOpacity` (multiplier) and `lateEdge` (inward radial shift) work as for billows.
+   * `lateFrom`, `lateOpacity`, `maxLate` and `lateEdge` thin and cap the lobes as for billows.
    */
   column: {
     from: 0.35,
     count: 3,
     perScale: 3,
-    span: 3.5,
-    life: 9,
+    span: 1.0,
+    life: 2.4,
     rise: 0.32,
     size: 0.9,
-    lateOpacity: 0.78,
-    lateFrom: [1.5, 4.0],
+    maxSize: 1.8,
+    lateOpacity: 0.8,
+    lateFrom: [0.3, 1.0],
+    maxLate: 0.5,
     lateEdge: 0.15,
-    edge: [0.95, 0.5],
     boundary: [1, 0.6],
-    lumpiness: 0.8,
-    erosion: 0.3,
-    erosionRange: [0.15, 0.85],
+    lobes: 4,
+    lobeRadius: [0.42, 0.62],
+    lobeSpread: 0.36,
+    lobeLift: 0.12,
+    densityNoise: 0.45,
     ambient: 0.12,
     sun: 1.5,
-    underside: 0.55,
-    undersideRange: [-0.6, 0.6],
+    underside: 0.35,
+    undersideRange: [-0.5, 0.5],
   },
+  /** Trail puffs over native trail anims (SMOKEY2 behind debris, missile trails): world-unit size and seconds caps. */
+  trail: { maxSize: 0.4, maxLife: 1.2 },
   shimmer: { width: 1.5, life: 1.0 },
   dust: { width: 2.2, life: 0.9 },
-  /** A brief smooth light spill; persistent red crust competes with the engine's own crater/scorch. */
+  /** Brief broken hot rim over the charred decal; fade thresholds are fractions of the flash's life. */
   crater: {
     width: 0.6,
-    life: 0.45,
+    life: 0.3,
     delay: 0,
-    opacity: 0.4,
-    edge: [1, 0],
-    core: [0.55, 0],
-    colourCore: [1, 0.85, 0.3],
-    colourEdge: [1, 0.45, 0.08],
-    fadeIn: 0.08,
-    fadeOut: 0.2,
+    opacity: 0.25,
+    /** Rim band (normalized radius where the glow starts) and the share of scattered embers inside it. */
+    rim: [0.38, 0.72],
+    inner: 0.5,
+    /** Emission of the thin cracks (additive): they read hot although they cover little of the crater. */
+    gain: 1.8,
+    colourCore: [1, 0.5, 0.16],
+    colourEdge: [1, 0.3, 0.06],
+    fadeIn: 0.05,
+    fadeOut: 0.4,
   },
   /** Charred ground around a crater: width relative to the art, seconds until it has faded. */
-  char: { width: 1.8, life: 45 },
+  /**
+   * Charred ground around a crater: width relative to the art, seconds until it has faded, seconds to darken in (under
+   * the crater flash). It carries no glow of its own: a saturated orange core lasting seconds read as a flat lava decal.
+   */
+  char: { width: 1.8, life: 45, fadeIn: 0.15 },
   /**
    * Muzzle star: art-relative width with the existing world-size caps, life in seconds, ray count, radial reach and
    * angular jitter (fraction of ray spacing). Core/ray widths use the unit disc; `rayFade` is the solid share of reach.
@@ -494,6 +520,50 @@ function anchoredDepthNode(centre: ShaderNode, ground: ShaderNode, toCamera: Sha
     const push = float(CARD_CLEARANCE + ENHANCED.anchorBias).sub(intersection);
     return depth.sub(push.div(cameraFar.sub(cameraNear)));
   })();
+}
+
+/** Union of seeded lobes, shaded at the front-most surface; all lobes reuse the puff's three noise samples. */
+function smokeLobes(
+  p: ShaderNode,
+  seed: ShaderNode,
+  angle: ShaderNode,
+  edge: ShaderNode,
+  fine: ShaderNode,
+  broad: ShaderNode,
+  bump: ShaderNode,
+  e: typeof ENHANCED.smoke | typeof ENHANCED.column,
+) {
+  const nearest = float(10).toVar();
+  const front = float(-1).toVar();
+  const normal = vec3(0, 0, 1).toVar();
+  const centreY = float(0).toVar();
+  const c = cos(angle);
+  const s = sin(angle);
+  // Unroll at graph construction: the lobe count adds no buffers or per-fragment texture fetches.
+  for (let j = 0; j < e.lobes; j++) {
+    const hash = (salt: number) => fract(sin(seed.mul(17.13).add(j * 3.71 + salt)).mul(43758.5453));
+    const theta = hash(0).mul(Math.PI * 2);
+    const spread = sqrt(hash(1.37)).mul(e.lobeSpread);
+    const x = cos(theta).mul(spread);
+    const y = sin(theta).mul(spread);
+    const centre = vec2(x.mul(c).sub(y.mul(s)), x.mul(s).add(y.mul(c)).add(e.lobeLift)).toVar();
+    const radius = mix(...e.lobeRadius, hash(2.83)).sub(edge);
+    const q = p.sub(centre).div(radius).toVar();
+    const d = length(q).add(fine.sub(0.5).mul(0.15)).toVar();
+    const h = sqrt(max(0, float(1).sub(d.mul(d)))).toVar();
+    const surface = h.mul(radius).add(hash(4.19).mul(0.25)).toVar();
+    const visible = d.lessThan(1).and(surface.greaterThan(front)).toVar();
+    const n = normalize(vec3(q.x.add(bump.mul(0.5)), q.y.add(bump.mul(0.5)), h.add(0.05)));
+    nearest.assign(min(nearest, d));
+    normal.assign(visible.select(n, normal));
+    centreY.assign(visible.select(centre.y, centreY));
+    front.assign(visible.select(surface, front));
+  }
+  const density = smoothstep(1, 0.62, nearest)
+    .mul(smoothstep(...e.boundary, length(p)))
+    .mul(mix(1 - e.densityNoise, 1, broad));
+  const shadow = mix(0.7, 1, smoothstep(-0.4, 0.4, centreY));
+  return { density, normal, shadow };
 }
 
 /** Exact ground contact time, including the spawn lift; the shadow must not stop at the lifted origin. */
@@ -1000,10 +1070,11 @@ export class EffectsLayer {
           .mul(0.55)
           .add(smoothstep(0.6, 0.15, r.add(fine.mul(0.08))).mul(0.5));
         const shade: ShaderNode = mix(color(0x120e0b), color(0x2e251c), fine.mul(0.5).add(0.5)).mul(this.sceneLight);
+        // The hot rim is the crater flash's (embers pool); the char itself is cold soot that darkens in quickly.
         const char = vec4(
-          shade.add(ember.mul(0.6)),
+          shade,
           clamp(soot, 0, 0.88)
-            .mul(smoothstep(0.0, 0.02, t))
+            .mul(smoothstep(0.0, ENHANCED.char.fadeIn, age))
             .mul(smoothstep(1.0, 0.35, t)),
         );
         return mix(plain, char, step(0.5, charred));
@@ -1047,11 +1118,29 @@ export class EffectsLayer {
         const tint = mix(FLAME_EDGE, vec3(1.0, 0.9, 0.6), core);
         const fade = smoothstep(0.0, 0.15, t).mul(smoothstep(1.0, 0.5, t));
         const original = vec4(tint.mul(bed.mul(0.5).add(core.mul(0.9))), fade.mul(0.55));
-        // A crater is illuminated briefly, not filled with cooling lava. Keep the persistent-fire bed unchanged.
+        // A broken hot rim and faint embers reveal the charred decal underneath; the persistent-fire bed stays intact.
         const e = ENHANCED.crater;
-        const radius = length(p);
-        const glow = smoothstep(...e.edge, radius);
-        const rgb = mix(vec3(...e.colourEdge), vec3(...e.colourCore), smoothstep(...e.core, radius));
+        const outline = mx_noise_float(vec3(p.mul(1.8), seed.mul(29).add(t.mul(0.12))));
+        const radius = length(p).add(outline.mul(0.18));
+        const rim = smoothstep(...e.rim, radius).mul(smoothstep(1, 0.8, radius));
+        // Ridged noise: glowing cracks and ember segments, never a closed ring or a filled disc.
+        const crackNoise = mx_noise_float(vec3(p.mul(6), seed.mul(41).add(t.mul(0.3))));
+        const cracks = smoothstep(0.8, 0.95, float(1).sub(abs(crackNoise)));
+        const fineNoise = mx_noise_float(vec3(p.mul(12), seed.mul(53)));
+        const embers = smoothstep(0.88, 0.97, float(1).sub(abs(fineNoise)))
+          .mul(smoothstep(0.85, 0.2, radius))
+          .mul(e.inner);
+        // A faint hot band along the rim, brighter along thin crack segments, and scattered ember specks inside.
+        const glow = rim
+          .mul(cracks.mul(0.7).add(0.3))
+          .add(embers)
+          .min(1)
+          .mul(smoothstep(1, 0.94, length(p)));
+        // Thin glowing cracks: low coverage (opacity) but emissive (gain, picked up by the bloom), hottest along the rim
+        // and cooling to deep orange as the flash ends.
+        const rgb = mix(vec3(...e.colourCore), vec3(...e.colourEdge), t).mul(
+          float(e.gain).mul(float(1).add(rim.mul(0.4))),
+        );
         const alpha = glow
           .mul(e.opacity)
           .mul(smoothstep(0, e.fadeIn, t))
@@ -1130,7 +1219,7 @@ export class EffectsLayer {
     });
 
     // Enhanced rolling smoke: puffs that rise and spread with drag, turn slowly (rolling), and are shaded as lumpy
-    // spheres: lit from the upper left like the original art, a sky-lit rim, the local light field (fires,
+    // lobes: lit from the upper left like the original art, a sky-lit rim, the local light field (fires,
     // explosions), and the fire's glow underneath while they are young (params.w = heat). Premultiplied: the glow adds
     // light, the soot covers what is behind.
     this.billow = new ParticlePool(BILLOWS, quad, premultiplied(), (pool) => {
@@ -1149,7 +1238,7 @@ export class EffectsLayer {
           float(0.55).add(
             float(1)
               .sub(exp(flight.mul(-0.8)))
-              .mul(1.3),
+              .mul(1.0),
           ),
         )
         .mul(alive);
@@ -1162,40 +1251,30 @@ export class EffectsLayer {
         const c = cos(angle);
         const s = sin(angle);
         const q = vec2(p.x.mul(c).sub(p.y.mul(s)), p.x.mul(s).add(p.y.mul(c)));
-        const lumps = texture(noise, q.mul(0.32).add(vec2(seed.mul(3.7), seed.mul(1.9).add(age.mul(0.025))))).g;
-        const broad = texture(noise, q.mul(0.16).add(vec2(seed.mul(7.1), seed.mul(2.3).add(age.mul(0.018))))).r;
-        const fine = texture(noise, q.mul(0.9).add(vec2(seed.mul(5.3), age.mul(-0.04)))).b;
-        const bump = lumps.sub(0.5).mul(1.2).add(broad.sub(0.5).mul(0.6)).add(fine.sub(0.5).mul(0.4));
+        const lumps = texture(noise, q.mul(0.32).add(vec2(seed.mul(3.7), seed.mul(1.9).add(age.mul(0.025))))).g.toVar();
+        const broad = texture(noise, q.mul(0.16).add(vec2(seed.mul(7.1), seed.mul(2.3).add(age.mul(0.018))))).r.toVar();
+        const fine = texture(noise, q.mul(0.9).add(vec2(seed.mul(5.3), age.mul(-0.04)))).b.toVar();
+        const bump = lumps.sub(0.5).mul(1.2).add(broad.sub(0.5).mul(0.6)).add(fine.sub(0.5).mul(0.4)).toVar();
         const e = ENHANCED.smoke;
-        const r = length(p).add(bump.mul(e.lumpiness));
-        // Erode the broad feathered rim and reach zero before the quad boundary: overlaps must not reveal a sheet.
-        // Puff age retains the existing late thinning independently of silhouette softness.
-        const late = smoothstep(ENHANCED.smoke.lateFrom[0], ENHANCED.smoke.lateFrom[1], age);
-        const edge = late.mul(ENHANCED.smoke.lateEdge);
-        const density = smoothstep(float(e.edge[0]).sub(edge), float(e.edge[1]).sub(edge), r)
-          .mul(float(0.55).add(smoothstep(0.9, 0.2, r).mul(0.45)))
-          .mul(smoothstep(...e.boundary, length(p)))
-          .mul(mix(1 - e.erosion, 1, smoothstep(...e.erosionRange, lumps)));
-        // Lumpy sphere normal in billboard space (x right, y up, z towards the camera).
-        const z = sqrt(clamp(float(1).sub(dot(p, p)), 0.04, 1));
-        const nrm = normalize(vec3(p.x.add(bump.mul(1.1)), p.y.add(bump.mul(1.1)), z));
+        const late = smoothstep(...e.lateFrom, age);
+        const edge = late.mul(e.lateEdge);
+        const { density, normal: nrm, shadow } = smokeLobes(p, seed, angle, edge, fine, broad, bump, e);
         const sun = dot(nrm, vec3(-0.5, 0.68, 0.53)).max(0);
         const rim = pow(float(1).sub(nrm.z), 3).mul(0.35);
         const shade = float(e.ambient)
           .add(sun.mul(e.sun))
           .add(rim)
-          .mul(mix(e.underside, 1, smoothstep(...e.undersideRange, nrm.y)));
+          .mul(mix(e.underside, 1, smoothstep(...e.undersideRange, nrm.y)))
+          .mul(shadow);
         const lit = this.nodes.sceneBrightness
           .mul(shade)
           .add(objectLight(positionWorld.xz, this.nodes).div(this.nodes.referenceLevel).mul(0.45));
-        // Black-brown soot while young, ageing to a warm grey-brown haze (dust mixed in) as the cloud lingers.
-        // Ageing faster towards a lighter grey-brown than L5 (0x6f675d over the whole life): with the darker soot, the
-        // sunlit tops of the few large fix-round billows did not read and the cloud became a dark haze.
-        const base = mix(color(0x1d1a17), color(0x8a8275), clamp(t.mul(1.6).add(seed.mul(0.25)), 0, 1));
+        // Young soot retains the fire's warmth; cold lobes age to neutral grey so sunlit tops stay distinct.
+        const base = mix(color(0x1d1a17), color(0x86847f), clamp(t.mul(1.6).add(seed.mul(0.25)), 0, 1));
         // The fire's glow: underneath the young puff, and inside it for the first moments (black-orange smoke).
         // The fire's glow fades in seconds, not in shares of the (long) life: a lingering cloud is cold soot.
         const under = smoothstep(0.15, -0.8, nrm.y)
-          .mul(exp(age.mul(-2.4)))
+          .mul(exp(age.mul(-3.2)))
           .mul(1.8);
         const inner = exp(dot(p, p).mul(-3))
           .mul(pow(clamp(float(1).sub(age.div(0.7)), 0, 1), 2))
@@ -1206,9 +1285,10 @@ export class EffectsLayer {
         const alpha = density
           .mul(smoothstep(0.0, 0.08, t))
           .mul(smoothstep(1.0, 0.35, t))
-          .mul(ENHANCED.smoke.opacity)
-          .mul(mix(1, ENHANCED.smoke.lateOpacity, late))
-          .mul(t.lessThan(1).select(float(1), float(0)));
+          .mul(e.opacity)
+          .mul(mix(1, e.lateOpacity, late))
+          .mul(t.lessThan(1).select(float(1), float(0)))
+          .min(mix(1, e.maxLate, late));
         return vec4(base.mul(lit).mul(alpha).add(glow.mul(alpha)), alpha);
       })();
     });
@@ -1231,7 +1311,7 @@ export class EffectsLayer {
     });
     this.debrisShadow.mesh.renderOrder = ENHANCED.debris.shadow.renderOrder;
 
-    // Sparse rubble is depth-tested before smoke. Coverage cut-outs write only the polygon, never its empty quad.
+    // Sparse rubble is depth-tested (not written) before smoke and effect cards; coverage cut-outs keep crisp polygons.
     this.debris = new ParticlePool(DEBRIS, quad, blended(), (pool) => {
       const { age, life, size, seed, origin, velocity, ground, alive, extra: hot } = particleInputs(pool, this.now);
       const e = ENHANCED.debris;
@@ -1319,7 +1399,9 @@ export class EffectsLayer {
         );
       })();
     });
-    this.debris.material.depthWrite = true;
+    // No depth write: effect cards and smoke drawn later cover the chunks they overlap. Writing depth let chunks inside
+    // the fireball punch through its anchored card as dark triangular specks on the white-yellow core (L5F review).
+    this.debris.material.depthWrite = false;
     this.debris.material.alphaTest = ENHANCED.debris.alphaTest;
     this.debris.mesh.renderOrder = ENHANCED.debris.renderOrder;
 
@@ -1465,20 +1547,14 @@ export class EffectsLayer {
         const c = cos(angle);
         const sn = sin(angle);
         const q = vec2(p.x.mul(c).sub(p.y.mul(sn)), p.x.mul(sn).add(p.y.mul(c)));
-        const lumps = texture(noise, q.mul(0.3).add(vec2(seed.mul(3.7), seed.mul(1.9).add(age.mul(0.012))))).g;
-        const fine = texture(noise, q.mul(0.85).add(vec2(seed.mul(5.3), age.mul(-0.02)))).b;
-        const bump = lumps.sub(0.5).mul(1.2).add(fine.sub(0.5).mul(0.4));
+        const lumps = texture(noise, q.mul(0.3).add(vec2(seed.mul(3.7), seed.mul(1.9).add(age.mul(0.012))))).g.toVar();
+        const broad = texture(noise, q.mul(0.16).add(vec2(seed.mul(7.1), seed.mul(2.3).add(age.mul(0.018))))).r.toVar();
+        const fine = texture(noise, q.mul(0.85).add(vec2(seed.mul(5.3), age.mul(-0.02)))).b.toVar();
+        const bump = lumps.sub(0.5).mul(1.2).add(fine.sub(0.5).mul(0.4)).toVar();
         const e = ENHANCED.column;
-        const r = length(p).add(bump.mul(e.lumpiness));
-        // The column uses its own puff-age interval for the same opacity and silhouette thinning.
-        const late = smoothstep(ENHANCED.column.lateFrom[0], ENHANCED.column.lateFrom[1], age);
-        const edge = late.mul(ENHANCED.column.lateEdge);
-        const density = smoothstep(float(e.edge[0]).sub(edge), float(e.edge[1]).sub(edge), r)
-          .mul(float(0.5).add(smoothstep(0.9, 0.2, r).mul(0.5)))
-          .mul(smoothstep(...e.boundary, length(p)))
-          .mul(mix(1 - e.erosion, 1, smoothstep(...e.erosionRange, lumps)));
-        const z = sqrt(clamp(float(1).sub(dot(p, p)), 0.04, 1));
-        const nrm = normalize(vec3(p.x.add(bump.mul(1.1)), p.y.add(bump.mul(1.1)), z));
+        const late = smoothstep(...e.lateFrom, age);
+        const edge = late.mul(e.lateEdge);
+        const { density, normal: nrm, shadow } = smokeLobes(p, seed, angle, edge, fine, broad, bump, e);
         const sun = dot(nrm, vec3(-0.5, 0.68, 0.53)).max(0);
         const rim = pow(float(1).sub(nrm.z), 3).mul(0.3);
         const lit = this.nodes.sceneBrightness
@@ -1486,10 +1562,11 @@ export class EffectsLayer {
             float(e.ambient)
               .add(sun.mul(e.sun))
               .add(rim)
-              .mul(mix(e.underside, 1, smoothstep(...e.undersideRange, nrm.y))),
+              .mul(mix(e.underside, 1, smoothstep(...e.undersideRange, nrm.y)))
+              .mul(shadow),
           )
           .add(objectLight(positionWorld.xz, this.nodes).div(this.nodes.referenceLevel).mul(0.4));
-        const base = mix(color(0x2a2622), color(0x958d80), clamp(t.mul(1.5).add(seed.mul(0.2)), 0, 1));
+        const base = mix(color(0x2a2622), color(0x8e8c87), clamp(t.mul(1.5).add(seed.mul(0.2)), 0, 1));
         const glow = vec3(1.0, 0.42, 0.12)
           .mul(heat)
           .mul(smoothstep(0.1, -0.8, nrm.y))
@@ -1499,8 +1576,9 @@ export class EffectsLayer {
           .mul(smoothstep(0.0, 0.06, t))
           .mul(smoothstep(1.0, 0.4, t))
           .mul(0.62)
-          .mul(mix(1, ENHANCED.column.lateOpacity, late))
-          .mul(t.lessThan(1).select(float(1), float(0)));
+          .mul(mix(1, e.lateOpacity, late))
+          .mul(t.lessThan(1).select(float(1), float(0)))
+          .min(mix(1, e.maxLate, late));
         return vec4(base.mul(lit).mul(alpha).add(glow.mul(alpha)), alpha);
       })();
     });
@@ -1717,12 +1795,11 @@ export class EffectsLayer {
     }
     for (let i = 0, n = Math.round(e.embers.count + e.embers.perScale * s); i < n; i++)
       this.spawnEmber(now + Math.random() * e.embers.delay, at, width, wind);
-    // Clustered blasts (a building collapse) share one particle budget (BLAST_CROWD); a lone blast keeps all of its own.
+    // Clustered blasts share independent budgets (BLAST_CROWD); a lone blast keeps its requests up to each ceiling.
     const wantDebris = Math.round(e.debris.count + e.debris.perScale * s);
     const wantColumn = s >= e.column.from ? Math.round(e.column.count + e.column.perScale * Math.min(1.5, s)) : 0;
     const wantBillows = Math.round(e.smoke.count + e.smoke.perScale * s);
-    const granted = this.crowd.grant(now, at, wantDebris, wantColumn + wantBillows);
-    const smokeShare = granted.smoke / Math.max(1, wantColumn + wantBillows);
+    const granted = this.crowd.grant(now, at, wantDebris, wantBillows, wantColumn);
     for (let i = 0, n = granted.debris; i < n; i++) {
       const d = e.debris;
       const big = Math.random() < d.bigChance;
@@ -1741,28 +1818,23 @@ export class EffectsLayer {
       this.debris.spawn(now, lifted, velocity, size, lifetime, hot, at.y, seed);
       this.debrisShadow.spawn(now, lifted, velocity, size, lifetime, hot, at.y, seed);
     }
-    // A smoke column after bigger blasts: puffs emitted over a few seconds from the blast, rising with the wind.
-    if (wantColumn > 0) {
-      const n = Math.round(wantColumn * smokeShare);
-      for (let i = 0; i < n; i++) {
-        const delay = 0.25 + (i / n) * e.column.span * (0.7 + 0.3 * Math.random());
-        const velocity = new Vector3(r(0.12), e.column.rise * (0.8 + Math.random() * 0.4), r(0.12))
-          .multiplyScalar(0.8 + 0.3 * s)
-          .add(wind.clone().multiplyScalar(0.6));
-        this.column.spawn(
-          now + delay,
-          at.clone().add(new Vector3(r(0.4 * width), 0.2 * width, r(0.4 * width))),
-          velocity,
-          e.column.size * width * (0.8 + Math.random() * 0.4),
-          e.column.life * (0.8 + Math.random() * 0.4),
-          Math.max(0, 1 - delay / 2.5),
-          at.y,
-        );
-      }
+    // Larger blasts emit their separately budgeted column puffs over the first second, rising with the wind.
+    for (let i = 0, n = granted.late; i < n; i++) {
+      const delay = 0.25 + (i / n) * e.column.span * (0.7 + 0.3 * Math.random());
+      const velocity = new Vector3(r(0.12), e.column.rise * (0.8 + Math.random() * 0.4), r(0.12))
+        .multiplyScalar(0.8 + 0.3 * s)
+        .add(wind.clone().multiplyScalar(0.6));
+      this.column.spawn(
+        now + delay,
+        at.clone().add(new Vector3(r(0.4 * width), 0.2 * width, r(0.4 * width))),
+        velocity,
+        Math.min(e.column.size * width, e.column.maxSize) * (0.8 + Math.random() * 0.4),
+        e.column.life * (0.8 + Math.random() * 0.4),
+        Math.max(0, 1 - delay / 2.5),
+        at.y,
+      );
     }
-    // Assign the remainder rather than rounding twice: a one-puff grant must never become two puffs.
-    const billowCount = granted.smoke - Math.round(wantColumn * smokeShare);
-    for (let i = 0, n = billowCount; i < n; i++) {
+    for (let i = 0, n = granted.smoke; i < n; i++) {
       const velocity = new Vector3(r(0.5), 0.45 + Math.random() * 0.45, r(0.5)).multiplyScalar(0.6 + 0.4 * s).add(wind);
       const x = r(0.7 * width);
       const z = r(0.7 * width);
@@ -1772,7 +1844,7 @@ export class EffectsLayer {
         now + e.smoke.delay + ((i + Math.random()) / n) * e.smoke.spread,
         at.clone().add(new Vector3(x, 0.1 + Math.random() * (height - 0.1), z)),
         velocity,
-        e.smoke.size * (0.8 + Math.random() * 0.5) * width,
+        Math.min(e.smoke.size * width, e.smoke.maxSize) * (0.8 + Math.random() * 0.5),
         e.smoke.life * (0.8 + Math.random() * 0.4),
         1,
         at.y,
@@ -1783,7 +1855,7 @@ export class EffectsLayer {
     if (options.hotCrater) {
       this.embers.spawn(now + e.crater.delay, at, this.zeroVelocity, e.crater.width * width, e.crater.life, 1);
       // Charred ground around the engine's crater smudge (which stays underneath), fading over most of a minute.
-      this.scorch.spawn(now + 0.1, at, this.zeroVelocity, e.char.width * width, e.char.life, 1);
+      this.scorch.spawn(now + 0.05, at, this.zeroVelocity, e.char.width * width, e.char.life, 1);
     }
   }
 

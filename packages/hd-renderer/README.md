@@ -208,12 +208,17 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   The live view's opt-in `enhanced` effect style (`ENHANCED`) adds, around the engine's own anim: a boiling fireball
   over native art for its duration (original fire colours), a warm light on the ground and on units next to the blast
   (strongest over the first 0.8 seconds, gone by about 1.2), fewer sparks and brief airborne embers,
-  heat shimmer, a ragged ground dust ring, and a few large smoke billows with sunlit tops and darker undersides.
-  Billows form over the first second and linger for about five seconds; bigger blasts emit a few larger column puffs
-  over 3.5 seconds with a nominal nine-second life. Wider feathered silhouettes and noise-eroded alpha soften overlaps.
-  Smoke opacity smoothly reaches a 0.8 multiplier over puff ages 1.2-3.0 seconds; column puffs reach 0.78 over
-  1.5-4.0 seconds. The same age ramp shifts both radial silhouette edges inward by 0.15 in normalized radius
-  (`lateOpacity`, `lateFrom`, `lateEdge`), thinning the older rims while retaining the fire glow underneath young smoke.
+  heat shimmer, a ragged ground dust ring, and lobed billows with sunlit tops and dark undersides.
+  Billows and larger blasts' column puffs form over the first second and are gone by about four seconds after the blast.
+  Four rolling lobes and uneven density break up each puff, ageing from young soot to neutral grey. Puffs are at most
+  1.8 world units wide at birth (`maxSize`; a merged collapse fireball is several cells wide, and art-sized puffs merged
+  into one flat sheet) and grow at most about 1.5 times. Over puff ages 0.3-1.0 seconds, opacity reaches a 0.6
+  multiplier for billows and 0.8 for column puffs, with final late alpha capped at 0.5, so units under late smoke stay
+  readable. The same ramp shrinks lobe radii by 0.15 (`lateOpacity`, `lateFrom`, `maxLate`, `lateEdge`), retaining the
+  fire glow underneath young smoke. HD puffs over trail anims (SMOKEY2 behind flying debris, missile
+  trails) stay at most 0.4 world units wide and 1.2 seconds long in the enhanced style (`ENHANCED.trail`): a building
+  death's dozens of trail puffs accumulated into a grey sheet with depth-cut edges, while without them the native trail
+  art shows as raw octagonal dots.
   Billows, column puffs, halos, garnish flashes and procedural blast cards take depth from a vertical card through
   their centre's ground point, switching to the ground plane below its base. This depth uses the shared card clearance
   plus `anchorBias` (0.5 world units), so lift and growth do not pull smoke over foreground units; shadow passes keep
@@ -225,11 +230,14 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   chunks stretch along projected velocity with thinner streak ends, then stop, rest for 0.9 seconds (0.7-1.3 times)
   and fade over 0.6 seconds. Capped flight speed keeps the complete lifetime below 2.5 seconds. Each chunk has a soft
   ground contact ellipse that follows its ballistics and weakens with height. Shadows draw at 5.5 and cut-out rubble
-  writes depth at 5.9 (`alphaTest` 0.5), before smoke at 6 and effect cards at 7, allowing later smoke to cover rubble.
-  Blasts within 2.5 cells and 2.5 seconds share hard ceilings of 36 chunks and 14 smoke puffs (`BLAST_CROWD`), including
-  later-blast floors of two chunks and one puff while allowance remains. A twelve-blast collapse stays within 20-40
-  chunks rather than accumulating a rubble swarm. Craters receive only a smooth orange-yellow ground glow for 0.45
-  seconds, with alpha at most 0.4; charred ground still fades over most of a minute and the engine's crater smudge stays.
+  (`alphaTest` 0.5) at 5.9 without writing depth, before smoke at 6 and effect cards at 7: later smoke and fireball cards
+  cover the chunks they overlap, so no chunk shows as a dark speck on a fireball's white-yellow core.
+  Blasts within 2.5 cells and 2.5 seconds share hard ceilings of 36 chunks, 10 billows and 3 column puffs (`BLAST_CROWD`),
+  with later-blast floors of two chunks, one billow and zero column puffs while allowance remains. Craters receive a
+  0.3-second flash of thin emissive cracks along a noise-broken rim plus scattered ember specks (coverage alpha 0.25,
+  `gain` 1.8, hot orange cooling to deep orange), over a charred noise decal that darkens in within 0.15 seconds and
+  fades over most of a minute; the decal has no glow of its own (its old saturated orange core lasted seconds and read
+  as a flat lava ellipse). The engine's crater smudge stays.
   Redrawn HD frames are graded in the shader: flame pixels are self-lit and re-mapped through a temperature ramp with
   a heat gamma (`HD_FX_GAMMA`), only the white-hot core gets a modest HDR gain for the bloom (`HD_FX_EMISSIVE`), the
   anim's translucency fade is softened by separate smoke and flame exponents (`HD_FX_FADE`), and consecutive frames

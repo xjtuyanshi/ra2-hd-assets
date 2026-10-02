@@ -875,8 +875,14 @@ export class LiveEffectsDriver {
     else if (row.fx === 'spark') this.effects.sparkFlash(now, at, row.s, options);
     else if (row.fx === 'impact') this.effects.impact(now, at, row.s, wind, options);
     else if (row.fx === 'smoke') {
-      // One puff per anim instance (trail puffs such as SMOKEY2), never a continuous column.
-      this.effects.smokePuff(now, at, row.s, wind, { maxSize: options.maxSize, maxLife: options.maxLife });
+      // One puff per anim instance (trail puffs such as SMOKEY2), never a continuous column. The enhanced style keeps
+      // them small and brief (ENHANCED.trail): the dozens of debris-trail puffs of a building death accumulated into a
+      // flat grey sheet with depth-cut edges, while without any HD puff the native trail art shows as raw octagons.
+      const trail = enhanced ? ENHANCED.trail : { maxSize: Infinity, maxLife: Infinity };
+      this.effects.smokePuff(now, at, row.s, wind, {
+        maxSize: Math.min(options.maxSize ?? Infinity, trail.maxSize),
+        maxLife: Math.min(options.maxLife ?? Infinity, trail.maxLife),
+      });
     } else if (row.fx === 'fire' && !row.loop)
       this.effects.flame(now, at, row.s, undefined, { maxSize: options.maxSize, maxLife: options.maxLife });
   }

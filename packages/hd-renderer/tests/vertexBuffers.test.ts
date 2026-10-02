@@ -339,7 +339,8 @@ describe('r186 vertex and uniform binding budget', () => {
       const mesh = pools[key].mesh;
       mesh.name = `effects-${key}`;
       expect(mesh.instanceMatrix.count, key).toBe(capacities[key]);
-      expect(mesh.material).toMatchObject({ depthTest: true, depthWrite: key === 'debris' });
+      // No effect pool writes depth (debris included: chunks must not punch through later fireball cards).
+      expect(mesh.material).toMatchObject({ depthTest: true, depthWrite: false });
       if (key === 'debris') expect(mesh.material).toMatchObject({ alphaTest: ENHANCED.debris.alphaTest });
     }
     for (const mesh of audited) {

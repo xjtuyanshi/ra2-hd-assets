@@ -1035,6 +1035,11 @@ python3 -B packages/ra2-assets/python/effect_cleanup.py --farm "$VARIANT" effect
 python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_effect_cleanup.py'
 ```
 
+Use `--interior` to fill small dark chunks (at most 160 texels) enclosed by warm fire (ring luma >= 0.25, R >= G >= B)
+in every frame, preserving debris over transparency or neutral smoke. This mode runs only interior cleanup, so already cleaned pages do not repeat rim or
+late-debris processing. Add `--anims EXPLOLRG,TWLT070` to limit either mode to those anims (default: all anims on the
+selected pages); per-page pixel counts are printed and pages are still installed atomically through `cache_farm.install_file`.
+
 ## Live snapshot replays (Python)
 
 `python/live_replay.py` turns a few frozen live snapshots (bridge `LiveSnapshot`s or live-pair records holding one

@@ -98,18 +98,32 @@ describe('enhanced ember radiance', () => {
 
 describe('enhanced particle routing and lights', () => {
   it.each([
-    ['smoke', 0.8, [1.2, 3.0]],
-    ['column', 0.78, [1.5, 4.0]],
-  ] as const)('documents late %s thinning without changing the early phase', (name, lateOpacity, lateFrom) => {
+    ['smoke', 0.6, [0.3, 1.0]],
+    ['column', 0.8, [0.3, 1.0]],
+  ] as const)('documents late %s thinning and the half-opacity cap', (name, lateOpacity, lateFrom) => {
     const tuning = ENHANCED[name];
-    expect(tuning).toMatchObject({ lateOpacity, lateFrom, lateEdge: 0.15 });
+    expect(tuning).toMatchObject({ lateOpacity, lateFrom, lateEdge: 0.15, maxLate: 0.5 });
     expect(tuning.lateOpacity).toBeGreaterThan(0);
     expect(tuning.lateOpacity).toBeLessThan(1);
-    expect(tuning.lateFrom[0]).toBeGreaterThanOrEqual(1.2);
+    expect(tuning.lateFrom[0]).toBe(0.3);
     expect(tuning.lateFrom[0]).toBeLessThan(tuning.lateFrom[1]);
   });
 
-  it('builds a few large soft billows over the first second, then retains drifting smoke and the shorter column', () => {
+  it.each(['smoke', 'column'] as const)('documents %s lobes with bright tops and dark undersides', (name) => {
+    expect(ENHANCED[name]).toMatchObject({
+      lobes: 4,
+      lobeRadius: [0.42, 0.62],
+      lobeSpread: 0.36,
+      lobeLift: 0.12,
+      densityNoise: 0.45,
+      underside: 0.35,
+      undersideRange: [-0.5, 0.5],
+      ambient: name === 'smoke' ? 0.1 : 0.12,
+      sun: name === 'smoke' ? 1.6 : 1.5,
+    });
+  });
+
+  it('builds lobed billows over the first second and a separately capped short column', () => {
     let seed = 123;
     vi.spyOn(Math, 'random').mockImplementation(() => {
       seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
@@ -125,7 +139,8 @@ describe('enhanced particle routing and lights', () => {
     const billows = Math.round(e.smoke.count + e.smoke.perScale);
     expect(billows).toBe(5);
     expect(e.smoke.size).toBe(0.8);
-    expect(e.column).toMatchObject({ count: 3, perScale: 3, size: 0.9, life: 9, span: 3.5 });
+    expect(e.smoke.life).toBe(2.7);
+    expect(e.column).toMatchObject({ count: 3, perScale: 3, size: 0.9, life: 2.4, span: 1.0 });
     expect(spawned(smoke)).toBe(billows);
     expect(smoke.mesh.material).toMatchObject({
       blending: CustomBlending,
@@ -157,19 +172,60 @@ describe('enhanced particle routing and lights', () => {
       expect(smoke.velocity.getY(i)).toBeGreaterThan(0);
     }
     const column = pool(layer, 'column');
-    const puffs = Math.round(e.column.count + e.column.perScale);
+    const puffs = Math.min(BLAST_CROWD.late, Math.round(e.column.count + e.column.perScale));
     expect(spawned(column)).toBe(puffs);
     for (let i = 0; i < puffs; i++) {
       expect(column.ground.getX(i)).toBe(at.y);
       expect(column.params.getY(i)).toBeGreaterThanOrEqual(Math.fround(e.column.life * 0.8));
       expect(column.params.getY(i)).toBeLessThanOrEqual(Math.fround(e.column.life * 1.2));
     }
-    layer.update(6, new Vector3(1, 0, 0), new Vector3(0, 1, 0));
+    layer.update(Math.min(smoke.until, column.until) - 0.01, new Vector3(1, 0, 0), new Vector3(0, 1, 0));
     expect(smoke.mesh.visible).toBe(true);
     expect(column.mesh.visible).toBe(true);
-    layer.update(smoke.until + 0.01, new Vector3(1, 0, 0), new Vector3(0, 1, 0));
+    layer.update(Math.max(smoke.until, column.until) + 0.01, new Vector3(1, 0, 0), new Vector3(0, 1, 0));
     expect(smoke.mesh.visible).toBe(false);
-    expect(column.mesh.visible).toBe(true);
+    expect(column.mesh.visible).toBe(false);
+  });
+
+  it.each([0, 0.5, 0.999999])('expires all late smoke within 4.3 seconds of a large blast (random=%s)', (random) => {
+    vi.spyOn(Math, 'random').mockReturnValue(random);
+    const layer = makeLayer();
+    const now = 2;
+    layer.explode(now, new Vector3(), 2, new Vector3(), { enhanced: true, hdArt: true, hotCrater: true });
+    for (const name of ['billow', 'column']) {
+      const particles = pool(layer, name);
+      expect(spawned(particles)).toBe(name === 'billow' ? 8 : 3);
+      for (let i = 0; i < particles.start.count; i++) {
+        const start = particles.start.getX(i);
+        if (start >= 0) expect(start + particles.params.getY(i)).toBeLessThanOrEqual(now + 4.3);
+      }
+      expect(particles.until).toBeLessThanOrEqual(now + 4.3);
+    }
+    layer.update(now + 4.3, new Vector3(1, 0, 0), new Vector3(0, 1, 0));
+    expect(pool(layer, 'billow').mesh.visible).toBe(false);
+    expect(pool(layer, 'column').mesh.visible).toBe(false);
+  });
+
+  it('limits the crater hot rim to alpha 0.25 for 0.3 seconds with fractional fades', () => {
+    expect(ENHANCED.crater).toMatchObject({
+      life: 0.3,
+      opacity: 0.25,
+      fadeIn: 0.05,
+      fadeOut: 0.4,
+    });
+    // Thin emissive cracks along a broken rim (hot orange cooling to deep orange), not a filled disc: the glow is
+    // limited by coverage (opacity) and life, while the gain keeps the few lit cracks reading hot.
+    expect(ENHANCED.crater.colourCore[1]).toBeGreaterThan(ENHANCED.crater.colourEdge[1]);
+    expect(ENHANCED.crater.gain * ENHANCED.crater.opacity).toBeLessThanOrEqual(0.5);
+    // The charred decal under it darkens in while the rim glows instead of fading in over most of a second.
+    expect(ENHANCED.char.fadeIn).toBeLessThanOrEqual(0.2);
+    expect(ENHANCED.crater.life).toBeLessThanOrEqual(0.3);
+    expect(ENHANCED.crater.opacity).toBeLessThanOrEqual(0.25);
+    const layer = makeLayer();
+    layer.explode(2, new Vector3(), 2, new Vector3(), { enhanced: true, hdArt: true, hotCrater: true });
+    expect(pool(layer, 'embers').params.getY(0)).toBeCloseTo(0.3);
+    layer.update(2.31, new Vector3(1, 0, 0), new Vector3(0, 1, 0));
+    expect(pool(layer, 'embers').mesh.visible).toBe(false);
   });
 
   it.each([0, 0.1, 0.5, 0.999999])(
@@ -189,7 +245,7 @@ describe('enhanced particle routing and lights', () => {
       const shadow = pool(layer, 'debrisShadow');
       expect(spawned(shadow)).toBe(chunks);
       expect(debris.mesh.renderOrder).toBe(5.9);
-      expect(debris.mesh.material).toMatchObject({ depthTest: true, depthWrite: true, alphaTest: 0.5 });
+      expect(debris.mesh.material).toMatchObject({ depthTest: true, depthWrite: false, alphaTest: 0.5 });
       expect(shadow.mesh.renderOrder).toBe(5.5);
       expect(shadow.mesh.material).toMatchObject({ depthTest: true, depthWrite: false });
       for (let i = 0; i < chunks; i++) {
@@ -225,8 +281,8 @@ describe('enhanced particle routing and lights', () => {
     for (let i = 0; i < 12; i++)
       layer.explode(1, new Vector3(i * 10, 0, 0), 3.5, new Vector3(), { enhanced: true, hdArt: true, maxSize: 4 });
     for (const [name, perBlast] of [
-      ['billow', 7],
-      ['column', 7],
+      ['billow', 8],
+      ['column', 3],
       ['debris', ENHANCED.debris.count + 2 * ENHANCED.debris.perScale],
       ['debrisShadow', ENHANCED.debris.count + 2 * ENHANCED.debris.perScale],
     ] as const) {
@@ -237,7 +293,7 @@ describe('enhanced particle routing and lights', () => {
     }
   });
 
-  it('caps an actual twelve-blast collapse at 20-40 chunks and 14 smoke puffs, including rounding', () => {
+  it('caps an actual twelve-blast collapse at 36 chunks, 10 billows and 3 column puffs', () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.999999);
     const layer = makeLayer();
     for (let i = 0; i < 12; i++)
@@ -252,7 +308,8 @@ describe('enhanced particle routing and lights', () => {
     expect(count).toBeLessThanOrEqual(40);
     expect(count).toBe(BLAST_CROWD.debris);
     expect(spawned(pool(layer, 'debrisShadow'))).toBe(count);
-    expect(spawned(pool(layer, 'billow')) + spawned(pool(layer, 'column'))).toBeLessThanOrEqual(BLAST_CROWD.smoke);
+    expect(spawned(pool(layer, 'billow'))).toBe(BLAST_CROWD.smoke);
+    expect(spawned(pool(layer, 'column'))).toBe(BLAST_CROWD.late);
     for (let i = 0; i < count; i++) expect(debris.params.getY(i)).toBeLessThan(2.5);
   });
 
@@ -295,8 +352,8 @@ describe('enhanced particle routing and lights', () => {
     expect(pool(layer, 'halo').params.getX(0)).toBeCloseTo(width * ENHANCED.halo.hdWidth);
     expect(pool(layer, 'blast').until).toBe(-Infinity);
     expect(pool(layer, 'embers').params.getW(0)).toBe(1);
-    expect(pool(layer, 'embers').until).toBeCloseTo(2.45);
-    expect(ENHANCED.crater.opacity).toBeLessThanOrEqual(0.4);
+    expect(pool(layer, 'embers').until).toBeCloseTo(2.3);
+    expect(ENHANCED.crater.opacity).toBeLessThanOrEqual(0.25);
     expect(pool(layer, 'sparks').params.getW(0)).toBe(2);
     expect(spawned(pool(layer, 'sparks'))).toBe(34);
     expect(pulse).toHaveBeenCalledTimes(2);
@@ -575,6 +632,12 @@ describe('effect colour shader construction', () => {
       expect(builder.vertexShader).toContain('@vertex');
       expect(builder.fragmentShader).toContain('@fragment');
       expect(`${builder.vertexShader}\n${builder.fragmentShader}`).not.toMatch(/\b(?:NaN|undefined)\b/);
+      if (['billow', 'column'].some((name) => mesh === pool(layer, name).mesh)) {
+        // Four lobes share three noise samples; the remaining fetch is the existing local light field.
+        const samples = builder.fragmentShader.match(/\btextureSample\w*\(/g) ?? [];
+        expect(samples.length).toBeGreaterThanOrEqual(3);
+        expect(samples.length).toBeLessThanOrEqual(4);
+      }
     }
     expect(pool(layer, 'airborneEmbers').mesh.count).toBe(ENHANCED.embers.pool);
   });
