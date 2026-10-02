@@ -1092,10 +1092,15 @@ visual acceptance, animation correctness or complete live coverage. Captures and
 
 `python/recording_video.py` cuts, re-times and labels browser recordings (such as an in-page MediaRecorder capture of
 the HD canvas, which has a variable frame rate) into one H.264 mp4. Each `--seg 'SRC|T0|T1|SPEED|LABEL|TZERO'` samples
-source seconds T0..T1 at the output rate using the container timestamps (SPEED 2 = double speed, 0.4 = slow motion);
-`--font` draws LABEL and, with a numeric TZERO, a `t=+x.x s` clock. The written file is read back and the command exits
-with status 1 when its frame count differs from the frames written (a truncated encode). Recordings and outputs stay
-outside Git.
+source seconds T0..T1 at the output rate using the container timestamps (SPEED 2 = double speed, 0.4 = slow motion),
+falling back to the nominal rate when timestamps are unavailable. Each source is decoded sequentially once with a
+constant number of frames in memory; selected frames are resized immediately and written as soon as their output
+order permits. Samples for later cuts, including overlapping cuts and returns to earlier source times, use temporary
+disk storage at the output size. `--max-height H` scales down further to fit the height limit while keeping H.264
+dimensions even. `--quality Q` requests encoder quality (0–100); unsupported backends ignore it with a note in the
+JSON summary. `--font` draws LABEL and, with a numeric TZERO, a `t=+x.x s` clock. The written file is read back and
+the command exits with status 1 when its frame count differs from the frames written (a truncated encode).
+Recordings and outputs stay outside Git.
 
 ```sh
 python3 packages/ra2-assets/python/recording_video.py --out "$OUT/death.mp4" --width 1280 --fps 25 --font "$FONT" \
