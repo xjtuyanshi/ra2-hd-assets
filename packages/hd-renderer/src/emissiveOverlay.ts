@@ -32,6 +32,14 @@ import type { ShaderNode } from './tsl';
 export type OverlayRgb = readonly [number, number, number];
 export type OverlayPoint = Readonly<{ x: number; y: number; z: number }>;
 
+/** Disc-local radius units, with screen x right and y down; angles follow that same y-down frame. */
+export interface OrbOccluder {
+  corner: readonly [number, number];
+  /** Edge angles in degrees, with to > from and a span below 180 degrees. */
+  from: number;
+  to: number;
+}
+
 /** All colours are display-linear, independent of the scene's exposure and grade. */
 export interface PlasmaOrb {
   radius: number;
@@ -51,6 +59,8 @@ export interface PlasmaOrb {
   filamentMix: number;
   haloAlpha: number;
   haloScale: number;
+  /** At most two wedges are uploaded; additional entries are ignored. */
+  occluders?: readonly OrbOccluder[];
 }
 export interface EmissiveDisc {
   centre: OverlayPoint;
@@ -75,6 +85,43 @@ export interface EmissiveStroke {
 /** Convert engine-pixel width using the same world-to-original-pixel scale as the owner's sprites. */
 export function strokeWorldWidth(enginePixels: number, pixelsPerWorldUnit: number): number {
   return enginePixels / pixelsPerWorldUnit;
+}
+
+/** Signed unit-normal distances to the two wedge edges; nonnegative on both means occluded. */
+export function orbOccluderDistances(x: number, y: number, occluder: OrbOccluder): readonly [number, number] {
+  const dx = x - occluder.corner[0];
+  const dy = y - occluder.corner[1];
+  const from = (occluder.from * Math.PI) / 180;
+  const to = (occluder.to * Math.PI) / 180;
+  return [Math.cos(from) * dy - Math.sin(from) * dx, Math.sin(to) * dx - Math.cos(to) * dy];
+}
+
+/** CPU twin of the shader's wedge test, also used to keep procedural filaments off the painted occluder. */
+export function orbOccluded(x: number, y: number, occluder?: OrbOccluder): boolean {
+  if (!occluder || !(occluder.to > occluder.from)) return false;
+  return orbOccluderDistances(x, y, occluder).every((distance) => distance >= 0);
+}
+
+/** A disabled halo must not enlarge either the quad or the depth clearance. */
+export function orbSilhouetteScale(orb: Pick<PlasmaOrb, 'haloAlpha' | 'haloScale'>): number {
+  return orb.haloAlpha > 0 && orb.haloScale > 1 ? orb.haloScale : 1;
+}
+
+/** CPU twin of the radial shader alpha, with derivatives supplied by asset-free tests in radius units. */
+export function orbRadialAlpha(
+  d: number,
+  sphereAlpha: number,
+  haloAlpha: number,
+  haloScale: number,
+  radialFwidth: number,
+): number {
+  const smooth = (a: number, b: number, x: number) => {
+    const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+    return t * t * (3 - 2 * t);
+  };
+  const outside = smooth(1 - Math.max(radialFwidth, 1e-6), 1, d);
+  const halo = haloAlpha > 0 && haloScale > 1 ? haloAlpha * (1 - smooth(1, Math.max(haloScale, 1.000001), d)) : 0;
+  return sphereAlpha * (1 - outside) + halo * outside;
 }
 
 /** r186 can blend MRT attachments independently on WebGPU or WebGL2 with indexed draw-buffer blending. */
@@ -144,9 +191,10 @@ export class EmissiveOverlay {
   ) {
     this.root.name = 'unbloomed-emissive';
     this.root.visible = false;
-    const discs = batch(discCapacity, 9);
+    // Eleven interleaved vec4s plus the quad's position/UV consume thirteen of WebGPU's sixteen attributes.
+    const discs = batch(discCapacity, 11);
     this.discData = discs.data;
-    const [p, extra, hot, body, limb, filaments, halo, mid, opacity] = discs.nodes;
+    const [p, extra, hot, body, limb, filaments, halo, mid, opacity, occluder0, occluder1] = discs.nodes;
     const xy: ShaderNode = uv().sub(0.5).mul(2).mul(extra!.z);
     const d = length(xy);
     const turbulence = mx_noise_float(vec3(xy.mul(7), this.now.mul(0.9).add(extra!.y.mul(17))));
@@ -167,11 +215,25 @@ export class EmissiveOverlay {
       opacity!.z,
       smoothstep(limb!.w, 1, d),
     ).mul(body!.w);
-    const outside = smoothstep(0.99, 1.01, d);
-    const alpha = mix(sphereAlpha, halo!.w.mul(float(1).sub(smoothstep(1, extra!.z, d))), outside).mul(
-      d.lessThan(extra!.z).select(float(1), float(0)),
-    );
-    const discMaterial = material(mix(rgb, halo!.rgb, outside).mul(extra!.w), alpha);
+    // Feather inward by one device pixel so a halo-free silhouette has exactly zero alpha beyond its radius.
+    const outside = smoothstep(float(1).sub(fwidth(d).max(1e-6)), 1, d);
+    const hasHalo = extra!.z.greaterThan(1);
+    // Even a select's unused branch must be defined: smoothstep(1, 1, d) is undefined on GPU backends.
+    const haloAlpha = hasHalo.select(halo!.w.mul(float(1).sub(smoothstep(1, extra!.z.max(1.000001), d))), float(0));
+    const screenXY = vec2(xy.x, xy.y.negate());
+    let orbVisible: ShaderNode = float(1);
+    for (const occluder of [occluder0!, occluder1!]) {
+      const delta = screenXY.sub(occluder.xy);
+      const fromDistance = dot(delta, vec2(occluder.z.sin().negate(), occluder.z.cos()));
+      const toDistance = dot(delta, vec2(occluder.w.sin(), occluder.w.cos().negate()));
+      // The wedge is the intersection of two half-planes. Feather on the visible side, keeping its interior empty.
+      const removed = smoothstep(fwidth(fromDistance).max(1e-6).negate(), 0, fromDistance).mul(
+        smoothstep(fwidth(toDistance).max(1e-6).negate(), 0, toDistance),
+      );
+      orbVisible = orbVisible.mul(occluder.w.greaterThan(occluder.z).select(float(1).sub(removed), float(1)));
+    }
+    const alpha = mix(sphereAlpha, haloAlpha, outside).mul(orbVisible);
+    const discMaterial = material(mix(rgb, halo!.rgb, hasHalo.select(outside, float(0))).mul(extra!.w), alpha);
     discMaterial.positionNode = p!.xyz
       .add(this.toCamera.mul(extra!.x))
       .add(this.cameraRight.mul(positionGeometry.x.mul(p!.w).mul(extra!.z).mul(2)))
@@ -264,7 +326,7 @@ export class EmissiveOverlay {
       const d = list[i]!;
       const o = d.orb;
       write4(this.discData, i, 0, d.centre.x, d.centre.y, d.centre.z, o.radius);
-      write4(this.discData, i, 1, d.push, d.seed, o.haloScale, d.brightness);
+      write4(this.discData, i, 1, d.push, d.seed, orbSilhouetteScale(o), d.brightness);
       write4(this.discData, i, 2, o.hot[0], o.hot[1], o.hot[2], o.coreRadius);
       write4(this.discData, i, 3, o.body[0], o.body[1], o.body[2], o.alpha * d.alpha);
       write4(this.discData, i, 4, o.limb[0], o.limb[1], o.limb[2], o.bodyStart);
@@ -272,6 +334,19 @@ export class EmissiveOverlay {
       write4(this.discData, i, 6, o.halo[0], o.halo[1], o.halo[2], o.haloAlpha * d.alpha);
       write4(this.discData, i, 7, o.mid[0], o.mid[1], o.mid[2], o.filamentMix);
       write4(this.discData, i, 8, o.coreAlpha, o.bodyAlpha, o.limbAlpha, 0);
+      for (let j = 0; j < 2; j++) {
+        const wedge = o.occluders?.[j];
+        // Equal angles disable the slot, including when a reused instance loses its previous occluder.
+        write4(
+          this.discData,
+          i,
+          9 + j,
+          wedge?.corner[0] ?? 0,
+          wedge?.corner[1] ?? 0,
+          ((wedge?.from ?? 0) * Math.PI) / 180,
+          ((wedge?.to ?? 0) * Math.PI) / 180,
+        );
+      }
     }
     flush(this.discData, this.discRange);
     this.discs.count = n;

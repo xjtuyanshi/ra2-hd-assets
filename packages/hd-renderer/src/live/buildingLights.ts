@@ -1,8 +1,15 @@
 import { Vector3 } from 'three/webgpu';
-import type { EmissiveDisc, EmissiveStroke, OverlayRgb, PlasmaOrb } from '../emissiveOverlay';
+import {
+  orbOccluderDistances,
+  orbSilhouetteScale,
+  type EmissiveDisc,
+  type EmissiveStroke,
+  type OverlayRgb,
+  type PlasmaOrb,
+} from '../emissiveOverlay';
 import { flicker, SHAPE_LINEAR, SHAPE_POOL, SHAPE_SOFT, type SourceSpec } from '../lightField';
 import { foundationPointPush } from '../ra2/cardDepth';
-import { LEVEL_HEIGHT } from '../world';
+import { IsoCamera, LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import type { LiveObject } from './liveView';
 
 export interface BuildingLightSpec {
@@ -33,7 +40,6 @@ export interface BuildingLightSpec {
   push?: number;
   hole: boolean;
   damaged: number;
-  arcs: number;
   /** Ground falloff: 'wide' reaches beyond a large hole (SHAPE_LINEAR), 'pool' is the compact fire pool. */
   falloff?: 'wide' | 'pool' | 'soft';
   orb?: PlasmaOrb;
@@ -59,8 +65,15 @@ export interface BuildingArcStyle {
   width: number;
   forkWidth: number;
   coreFraction: number;
-  reach: readonly [number, number];
+  filaments: readonly [number, number];
+  strikes: readonly [number, number];
+  /** Engine pixels from the orb centre, screen x right and y down. */
+  anchors: readonly (readonly [number, number])[];
+  maxBeyond: number;
+  /** Radians per logic frame; geometry samples this drift at the start of each frame pair. */
   crawl: number;
+  glowWidth: number;
+  glowAlpha: number;
 }
 
 /** Colour-picker values are sRGB; the overlay attachment and post composite are display-linear. */
@@ -74,8 +87,7 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
   // and present the saturated sphere/arcs after the grade so neither can feed bloom's lavender-white veil.
   NAPOWR: [
     {
-      // The overlay orb must sit on the art's glass sphere (radius about 16.5 engine px): measured on the battle and
-      // live-replay framings, [0.57, 0.40] put the disc about 6 engine px right of and 2.5 below the art's centre.
+      // Battle framing at two device pixels per engine pixel: this head is within one engine pixel of the glass centre.
       at: [0.47, 0.4],
       height: 27,
       // Night value; by day only `day` of it (luminance about 0.17 of noon flat ground: measured +16 % luminance on the
@@ -90,38 +102,53 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
       glowSize: 0,
       hole: false,
       damaged: 0.6,
-      arcs: 5,
       falloff: 'soft',
       fadeIn: 0.5,
       orb: {
-        // Cover the painted sphere while revealing its glass through a partially transparent body ring.
-        radius: 0.55,
+        // The art's glass radius measures 17.75 engine px / PIXELS_PER_CELL_EDGE = 0.418 world units.
+        // No halo may extend that silhouette; the translucent body reveals the painted glass swirl.
+        radius: 0.418,
         // Cyan-white heat must pass through saturated cyan-blue, avoiding pale blue/lavender in the colour ramp.
-        hot: displayLinear(205, 250, 255),
-        mid: displayLinear(100, 200, 255),
-        body: displayLinear(55, 115, 255),
-        limb: displayLinear(110, 175, 255),
-        filaments: displayLinear(165, 235, 255),
+        hot: displayLinear(215, 250, 255),
+        mid: displayLinear(120, 205, 255),
+        body: displayLinear(70, 130, 255),
+        limb: displayLinear(125, 170, 240),
+        filaments: displayLinear(170, 235, 255),
         halo: displayLinear(45, 95, 255),
-        coreRadius: 0.42,
-        bodyStart: 0.68,
-        bodyEnd: 0.88,
+        coreRadius: 0.3,
+        bodyStart: 0.55,
+        bodyEnd: 0.9,
         alpha: 1,
-        coreAlpha: 1,
-        bodyAlpha: 0.7,
-        limbAlpha: 0.88,
-        filamentMix: 0.75,
-        haloAlpha: 0.4,
-        haloScale: 1.4,
+        coreAlpha: 0.95,
+        bodyAlpha: 0.45,
+        limbAlpha: 0.55,
+        filamentMix: 0.5,
+        haloAlpha: 0,
+        haloScale: 1,
+        // Front-right tower corner (+11.5, -1.5) engine px; top rises right at -22 degrees, left edge drops at 90.
+        occluders: [{ corner: [0.648, -0.085], from: -22, to: 90 }],
       },
       arcStyle: {
-        core: displayLinear(210, 250, 255),
-        edge: displayLinear(45, 110, 255),
-        width: 3.2,
-        forkWidth: 2.2,
+        core: displayLinear(215, 250, 255),
+        edge: displayLinear(70, 140, 255),
+        width: 1.6,
+        forkWidth: 1.1,
         coreFraction: 0.45,
-        reach: [0.5, 1.15],
-        crawl: 0.4,
+        glowWidth: 2.4,
+        glowAlpha: 0.3,
+        filaments: [4, 5],
+        strikes: [2, 3],
+        // Measured coil, base fittings, three pad emitters and the right tower's corner insulator (engine px).
+        anchors: [
+          [-23, -17],
+          [-24, 11],
+          [-12, 22],
+          [-2, 26],
+          [8, 22],
+          [13, -2],
+        ],
+        maxBeyond: 12,
+        crawl: 0.06,
       },
     },
   ],
@@ -142,7 +169,6 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
       glowCore: 0.3,
       hole: false,
       damaged: 0.5,
-      arcs: 0,
       day: 0.5,
     },
   ],
@@ -158,7 +184,6 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
       glowSize: 0,
       hole: false,
       damaged: 0.5,
-      arcs: 0,
       day: 0.12,
     },
   ],
@@ -174,7 +199,6 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
       glowSize: 0,
       hole: false,
       damaged: 0.5,
-      arcs: 0,
       day: 0.12,
     },
   ],
@@ -192,7 +216,6 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
       // Like the reactor: the furnace lights the apron and the harvester dock, not the smelter's own walls.
       groundOnly: 1,
       damaged: 0.5,
-      arcs: 0,
       falloff: 'pool',
       day: 0.1,
     },
@@ -207,7 +230,6 @@ export interface BuildingLightPlacement extends SourceSpec {
   groundY: number;
   headPosition: Vector3;
   damaged: number;
-  arcs: number;
   orb?: PlasmaOrb;
   arcStyle?: BuildingArcStyle;
   fade?: number;
@@ -253,7 +275,6 @@ export function buildingLightPlacements(
       // Clear the owner's facade depth without moving the head on screen (fixed orthographic camera).
       push: foundationPointPush(lx, lz, w, h) + (spec.push ?? 0.15),
       damaged: spec.damaged,
-      arcs: spec.arcs,
       ttl: 0.6,
       seed: (hashString(`building:${building.uid ?? building.id ?? `${type}@${x0},${z0}`}:${index}`) % 1000) / 1000,
     };
@@ -385,33 +406,82 @@ export class BuildingLightGate {
   }
 }
 
-/** Extra depth pull of the arcs past the orb's own (world units). */
-const ARC_PUSH = 0.8;
-/** Width and opacity of the soft glow stroke drawn under each arc and fork. */
-const ARC_GLOW_WIDTH = 3.5;
-const ARC_GLOW_ALPHA = 0.5;
+export interface BuildingLightCamera {
+  right: Vector3;
+  up: Vector3;
+  toCamera: Vector3;
+}
 
-function screenDirection(direction: Vector3, toCamera?: Vector3): Vector3 {
-  const cameraLengthSq = toCamera?.lengthSq() ?? 0;
-  // Suppress view depth before normalising so outgoing glow starts at the silhouette, not over the core as an eye.
-  if (toCamera && cameraLengthSq > 0) {
-    direction.addScaledVector(toCamera, (-0.85 * direction.dot(toCamera)) / cameraLengthSq);
-    const cameraLength = Math.sqrt(cameraLengthSq);
-    const depth = direction.dot(toCamera) / cameraLength;
-    // Nearly axial seeds can still exceed |dot| 0.5 after 85 % suppression; cap only those residual directions.
-    if (Math.abs(depth) > direction.length() * 0.5) {
-      direction.addScaledVector(toCamera, -depth / cameraLength);
-      if (direction.lengthSq() < 1e-12) {
-        if (toCamera.x !== 0 || toCamera.z !== 0) direction.set(-toCamera.z, 0, toCamera.x);
-        else direction.set(1, 0, 0);
-      }
-      direction
-        .normalize()
-        .multiplyScalar(Math.sqrt(0.75))
-        .addScaledVector(toCamera, (Math.sign(depth) * 0.5) / cameraLength);
+// Use the renderer's actual fixed projection, rather than maintaining a second set of yaw/pitch constants.
+const fixedView = new IsoCamera();
+fixedView.update();
+const fixedCamera: BuildingLightCamera = {
+  right: new Vector3().setFromMatrixColumn(fixedView.camera.matrixWorld, 0),
+  up: new Vector3().setFromMatrixColumn(fixedView.camera.matrixWorld, 1),
+  toCamera: new Vector3().setFromMatrixColumn(fixedView.camera.matrixWorld, 2),
+};
+
+type ScreenPoint = { x: number; y: number };
+const TAU = Math.PI * 2;
+
+function randomSequence(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
+/** Persistent slot phase; pair sampling freezes geometry without turning crawl into a reseeded random direction. */
+export function filamentSlotAngle(key: string, slot: number, frame: number, crawl: number): number {
+  // Golden-angle spacing prevents adjacent slot hashes from clustering all filaments on the same side of the glass.
+  return (hashString(key) / 4294967296) * TAU + slot * Math.PI * (3 - Math.sqrt(5)) + frame * crawl;
+}
+
+function polar(radius: number, angle: number): ScreenPoint {
+  return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+}
+function clampRadius(point: ScreenPoint, limit: number): ScreenPoint {
+  const radius = Math.hypot(point.x, point.y);
+  if (radius > limit) {
+    point.x *= limit / radius;
+    point.y *= limit / radius;
+  }
+  return point;
+}
+function lerpPoint(a: ScreenPoint, b: ScreenPoint, t: number): ScreenPoint {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+/** Rotate a whole filament/fork together so neither segments nor their glow can cross the painted tower wedge. */
+function clearOccluders(paths: readonly ScreenPoint[][], orb: PlasmaOrb, radius: number, margin: number): boolean {
+  const occluders = orb.occluders?.slice(0, 2).filter((o) => o.to > o.from) ?? [];
+  if (occluders.length === 0) return true;
+  const points = [...new Set(paths.flat())];
+  const rotated = (p: ScreenPoint, angle: number): ScreenPoint => ({
+    x: p.x * Math.cos(angle) - p.y * Math.sin(angle),
+    y: p.x * Math.sin(angle) + p.y * Math.cos(angle),
+  });
+  const clear = (angle: number): boolean =>
+    occluders.every((occluder) => {
+      const distances = points.map((p) => {
+        const q = rotated(p, angle);
+        return orbOccluderDistances(q.x / radius, q.y / radius, occluder);
+      });
+      // One common separating edge keeps every connecting segment outside this convex wedge as well as its vertices.
+      return [0, 1].some((edge) => distances.every((d) => d[edge]! < -margin / radius));
+    });
+  // Search both directions for the smallest safe rotation. Invalid/all-covering masks emit no hidden filaments.
+  const steps = 128;
+  for (let step = 0; step <= steps; step++) {
+    for (const sign of [1, -1]) {
+      const angle = (sign * step * Math.PI) / steps;
+      if (!clear(angle)) continue;
+      for (const p of points) Object.assign(p, rotated(p, angle));
+      return true;
     }
   }
-  return direction.normalize();
+  return false;
 }
 
 /** Pure decorative policy: shapes reseed every two logic frames, presentation alpha and orb brightness remain live. */
@@ -419,123 +489,137 @@ export function buildingLightOverlay(
   lights: readonly BuildingLightPlacement[],
   frame: number,
   now: number,
-  toCamera?: Vector3,
+  camera: BuildingLightCamera = fixedCamera,
 ): { discs: EmissiveDisc[]; strokes: EmissiveStroke[] } {
   const discs: EmissiveDisc[] = [];
   const strokes: EmissiveStroke[] = [];
+  const pair = Math.floor(frame / 2);
+  const pairFrame = pair * 2;
   for (const light of lights) {
     const orb = light.orb;
     const fade = light.fade ?? 1;
     if (!orb) continue;
     const hash = hashString(light.key);
+    const push = (light.push ?? 0) + orb.radius * orbSilhouetteScale(orb);
     discs.push({
       centre: light.headPosition,
       orb,
-      // The disc and its halo reach radius x haloScale round the head; with only the head's own pull the owner's
-      // foundation depth (a wedge whose ridge is the front corner) cut a pie slice out of the right half of the orb.
-      push: (light.push ?? 0) + orb.radius * orb.haloScale,
+      // Clear the owner's foundation-depth ridge; the explicit screen-space wedge restores the painted tower overlap.
+      push,
       seed: light.seed ?? 0,
       alpha: fade,
       brightness: flicker(light.seed ?? 0, now, light.flicker),
     });
     const style = light.arcStyle;
     if (!style || fade <= 0.5) continue;
-    for (let index = 0; index < light.arcs; index++) {
-      const seed = (hash ^ Math.imul(Math.floor(frame / 2), 7919) ^ Math.imul(index + 1, 104729)) >>> 0;
-      let state = seed;
-      const random = () => {
-        state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-        return state / 4294967296;
-      };
-      const angle = random() * Math.PI * 2;
-      const down = -0.55 + 0.8 * random();
-      const horizontal = Math.sqrt(1 - down * down);
-      const dir = screenDirection(
-        new Vector3(Math.cos(angle) * horizontal, down, Math.sin(angle) * horizontal),
-        toCamera,
-      );
-      const centre = light.headPosition;
-      const from = centre.clone().addScaledVector(dir, orb.radius);
-      const crawling = Math.floor((index + 1) * style.crawl) > Math.floor(index * style.crawl);
-      const distance = style.reach[0] + (style.reach[1] - style.reach[0]) * random();
-      let to: Vector3;
-      if (crawling) {
-        const turn = (random() < 0.5 ? -1 : 1) * (0.9 + random());
-        const down2 = Math.max(-0.7, Math.min(0.6, down + (random() - 0.5) * 0.9));
-        const h2 = Math.sqrt(1 - down2 * down2);
-        to = centre
-          .clone()
-          .addScaledVector(
-            screenDirection(new Vector3(Math.cos(angle + turn) * h2, down2, Math.sin(angle + turn) * h2), toCamera),
-            orb.radius * 1.12,
-          );
-      } else to = from.clone().addScaledVector(dir, distance);
-      const points: Vector3[] = [];
-      const count = 7 + Math.floor(random() * 4);
-      const onGlass = (p: Vector3): Vector3 =>
-        crawling
-          ? p
-              .sub(centre)
-              .normalize()
-              .multiplyScalar(orb.radius * 1.04)
-              .add(centre)
-          : p;
-      for (let j = 0; j < count; j++) {
-        const p = from.clone().lerp(to, j / (count - 1));
-        if (j > 0 && j < count - 1)
-          p.add(new Vector3((random() - 0.5) * 0.1, (random() - 0.5) * 0.1, (random() - 0.5) * 0.1));
-        points.push(onGlass(p));
+    const radius = orb.radius * PIXELS_PER_CELL_EDGE;
+    const limit = radius + style.maxBeyond;
+    const counts = randomSequence((hash ^ Math.imul(pair, 7919)) >>> 0);
+    const count = ([min, max]: readonly [number, number]) => min + Math.floor(counts() * (max - min + 1));
+    const filaments = count(style.filaments);
+    const strikes = style.anchors.length > 0 ? count(style.strikes) : 0;
+    for (let index = 0; index < filaments + strikes; index++) {
+      const seed = (hash ^ Math.imul(pair, 7919) ^ Math.imul(index + 1, 104729)) >>> 0;
+      const random = randomSequence(seed);
+      const paths: ScreenPoint[][] = [];
+      if (index < filaments) {
+        const theta = filamentSlotAngle(light.key, index, pairFrame, style.crawl) + (random() * 2 - 1) * 0.3;
+        const r0 = (0.12 + random() * 0.13) * radius;
+        const r1 = (0.92 + random() * 0.065) * radius;
+        const twist = (random() * 2 - 1) * 0.35;
+        const points: ScreenPoint[] = [];
+        const vertices = 6 + Math.floor(random() * 4);
+        for (let j = 0; j < vertices; j++) {
+          const t = j / (vertices - 1);
+          const angle = theta + twist * (t - 1);
+          const p = polar(r0 + (r1 - r0) * t, angle);
+          const jitter = (random() * 2 - 1) * 0.08 * radius * Math.sin(Math.PI * t);
+          p.x -= Math.sin(angle) * jitter;
+          p.y += Math.cos(angle) * jitter;
+          points.push(clampRadius(p, 0.985 * radius));
+        }
+        paths.push(points);
+        if (random() < 0.6) {
+          const cumulative = [0];
+          for (let j = 1; j < points.length; j++)
+            cumulative.push(
+              cumulative[j - 1]! + Math.hypot(points[j]!.x - points[j - 1]!.x, points[j]!.y - points[j - 1]!.y),
+            );
+          const total = cumulative.at(-1)!;
+          const joints = cumulative.flatMap((d, j) => (d / total >= 0.55 && d / total <= 0.8 ? [j] : []));
+          const joint = joints[Math.floor(random() * joints.length)];
+          if (joint !== undefined) {
+            const start = points[joint]!;
+            const angle = theta + (random() < 0.5 ? -1 : 1) * (0.25 + random() * 0.25);
+            const end = polar(0.95 * radius, angle);
+            const delta = Math.atan2(
+              Math.sin(Math.atan2(start.y, start.x) - angle),
+              Math.cos(Math.atan2(start.y, start.x) - angle),
+            );
+            const middle = polar((Math.hypot(start.x, start.y) + 0.95 * radius) / 2, angle + delta / 2);
+            paths.push([start, clampRadius(middle, 0.985 * radius), end]);
+          }
+        }
+        if (!clearOccluders(paths, orb, radius, (style.width * style.glowWidth) / 2)) continue;
+      } else {
+        const anchor = style.anchors[Math.floor(random() * style.anchors.length)]!;
+        const angle = Math.atan2(anchor[1], anchor[0]);
+        const start = polar(0.95 * radius, angle);
+        const jitter = polar(random() * 2, random() * TAU);
+        const end = clampRadius({ x: anchor[0] + jitter.x, y: anchor[1] + jitter.y }, limit);
+        const spanAngle = Math.atan2(end.y - start.y, end.x - start.x);
+        const points: ScreenPoint[] = [];
+        const vertices = 5 + Math.floor(random() * 3);
+        for (let j = 0; j < vertices; j++) {
+          const t = j / (vertices - 1);
+          const p = lerpPoint(start, end, t);
+          const offset = (random() * 2 - 1) * 2.5 * Math.sin(Math.PI * t);
+          p.x -= Math.sin(spanAngle) * offset;
+          p.y += Math.cos(spanAngle) * offset;
+          points.push(clampRadius(p, limit));
+        }
+        paths.push(points);
+        if (random() < 0.4) {
+          const joint = 1 + Math.floor(random() * (vertices - 2));
+          const from = points[joint]!;
+          const end = clampRadius({ x: from.x + (random() * 2 - 1) * 3, y: from.y + (random() * 2 - 1) * 3 }, limit);
+          paths.push(random() < 0.5 ? [from, end] : [from, clampRadius(lerpPoint(from, end, 0.5), limit), end]);
+        }
       }
       // Alpha changes with presentation time even while paused; geometry never depends on presentation time.
       const alpha = (0.7 + 0.3 * ((hashString(`${seed}:${Math.floor(now * 1000)}`) % 10000) / 9999)) * fade;
-      const stroke = (points: Vector3[], width: number): EmissiveStroke => ({
-        points,
-        width,
-        core: style.core,
-        edge: style.edge,
-        alpha,
-        coreFraction: style.coreFraction,
-        // Arcs strike the pads and towers in front of the orb: pull them further towards the camera than the orb so the
-        // reactor's own tower cards do not swallow them (units standing in front stay nearer still).
-        push: (light.push ?? 0) + ARC_PUSH,
-      });
-      // A wide, faint saturated glow under each crisp bolt: the electric halo the bloom used to add (as lavender haze).
-      strokes.push({
-        ...stroke(points, style.width * ARC_GLOW_WIDTH),
-        core: style.edge,
-        alpha: alpha * ARC_GLOW_ALPHA,
-        coreFraction: 0,
-      });
-      strokes.push(stroke(points, style.width));
-      const cumulative = [0];
-      for (let j = 1; j < points.length; j++)
-        cumulative.push(cumulative[j - 1]! + points[j]!.distanceTo(points[j - 1]!));
-      const total = cumulative[cumulative.length - 1]!;
-      const joints = cumulative.flatMap((length, j) => (length / total >= 0.3 && length / total <= 0.5 ? [j] : []));
-      const forks = 1 + Math.floor(random() * 2);
-      for (let f = 0; f < forks; f++) {
-        const joint = joints[Math.floor(random() * joints.length)] ?? Math.round(0.4 * (count - 1));
-        const start = points[joint]!;
-        const end = start
-          .clone()
-          .add(new Vector3((random() - 0.5) * 0.28, -0.08 - random() * 0.16, (random() - 0.5) * 0.28));
-        const fork = [
-          start,
-          onGlass(
-            start
+      const projected = new Map<ScreenPoint, Vector3>();
+      for (let path = 0; path < paths.length; path++) {
+        const points = paths[path]!.map((p) => {
+          let world = projected.get(p);
+          if (!world) {
+            // Screen y points DOWN. Every vertex has zero view depth before the shader applies the shared push.
+            world = light.headPosition
               .clone()
-              .lerp(end, 0.5)
-              .add(new Vector3((random() - 0.5) * 0.1, (random() - 0.5) * 0.1, (random() - 0.5) * 0.1)),
-          ),
-          onGlass(end),
-        ];
+              .addScaledVector(camera.right, p.x / PIXELS_PER_CELL_EDGE)
+              .addScaledVector(camera.up, -p.y / PIXELS_PER_CELL_EDGE);
+            projected.set(p, world);
+          }
+          return world;
+        });
+        const width = path === 0 ? style.width : style.forkWidth;
+        const stroke: EmissiveStroke = {
+          points,
+          width,
+          core: style.core,
+          edge: style.edge,
+          alpha,
+          coreFraction: style.coreFraction,
+          push: push + 0.05,
+        };
         strokes.push({
-          ...stroke(fork, style.forkWidth * ARC_GLOW_WIDTH),
+          ...stroke,
+          width: width * style.glowWidth,
           core: style.edge,
-          alpha: alpha * ARC_GLOW_ALPHA,
+          alpha: alpha * style.glowAlpha,
           coreFraction: 0,
         });
-        strokes.push(stroke(fork, style.forkWidth));
+        strokes.push(stroke);
       }
     }
   }
