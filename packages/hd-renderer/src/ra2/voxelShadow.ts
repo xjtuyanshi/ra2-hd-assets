@@ -105,10 +105,10 @@ export const WATER_CONTACT_OPACITY = 0.3;
 export const WATER_FOAM_OPACITY = 0.3;
 export const WATER_FOAM_SCALE = 1.06;
 export const WATER_FOAM_FORWARD_SCALE = 1.14;
-export const WATER_REFLECTION_OPACITY = 0.45;
+export const WATER_REFLECTION_OPACITY = 0.6;
 /** Previous silhouette alpha, retained exactly for the flat reflection review. */
 export const WATER_FLAT_REFLECTION_OPACITY = 0.3;
-export const WATER_REFLECTION_FADE = 0.5;
+export const WATER_REFLECTION_FADE = 0.8;
 /** Contact must write ahead of every foam layer, so foam fails depth inside the hull rather than whitening it. */
 const WATER_CONTACT_LIFT = (SHADOW_COPIES.length + 1) * SHADOW_COPY_LIFT;
 

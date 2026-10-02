@@ -580,9 +580,9 @@ describe('voxel water contact', () => {
         const alpha = Math.max(...points.map((p) => sampleWaterAlpha(foam, p)));
         expect(1 - (1 - alpha) ** 5).toBeCloseTo(WATER_FOAM_OPACITY * (1 + 0.03 * pulse), 14);
       }
-      expect(WATER_REFLECTION_OPACITY).toBe(0.45);
+      expect(WATER_REFLECTION_OPACITY).toBe(0.6);
       expect(WATER_FLAT_REFLECTION_OPACITY).toBe(0.3);
-      expect(WATER_REFLECTION_FADE).toBe(0.5);
+      expect(WATER_REFLECTION_FADE).toBe(0.8);
     } finally {
       source.geometry.dispose();
       source.material.dispose();

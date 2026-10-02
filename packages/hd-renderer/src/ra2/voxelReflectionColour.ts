@@ -3,7 +3,7 @@ import { normalGeometry, transformNormal, vec3 } from 'three/tsl';
 import type { ShaderNode } from '../tsl';
 
 /** Reflection radiance relative to the part's ambient-lit albedo, before waterline coverage. */
-export const VOXEL_REFLECTION_AMBIENT = 0.52;
+export const VOXEL_REFLECTION_AMBIENT = 0.6;
 /** A small blue-grey absorption bias; alpha compositing supplies the local water colour underneath. */
 export const VOXEL_REFLECTION_TINT = [0.95, 0.98, 1] as const;
 

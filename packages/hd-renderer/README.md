@@ -726,10 +726,11 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   retain only source points near the waterline (smooth fade from 0.06 to 0.14 world units above it), scale 1.06 across
   the hull and 1.14 along its forward axis, and break their 0.3 core alpha with drifting 0.1/0.2-cell value noise
   (±0.02 scale and ±3% alpha breathing over two seconds on the renderer clock). One coloured reflection mirrors
-  each part about the water and flattens it along the camera view ray; its 0.45 waterline alpha ripples horizontally
-  and fades to zero by 0.5 world units below it. The reflection reads the part's palette colours or projected HD
+  each part about the water and flattens it along the camera view ray; its 0.6 waterline alpha ripples horizontally
+  and fades to zero by 0.8 world units below it (stage-2 review: at 0.45/0.5 the mirrored hull barely showed under
+  the ship). The reflection reads the part's palette colours or projected HD
   atlas (including house paint) from original geometry coordinates and a separate, unflattened source matrix.
-  Its ambient-only colour is attenuated and slightly water-tinted, with no added sun glints; it never transforms
+  Its ambient-only colour (0.6 of the albedo) is attenuated and slightly water-tinted, with no added sun glints; it never transforms
   normals through the singular decal matrix (`voxelReflectionColour.ts`). Coloured twins compensate the mirrored
   winding when culling rear faces; concave front-face overlaps retain the existing once-per-pixel plane-depth rule.
   All twins share source geometry; reflection materials are cached per

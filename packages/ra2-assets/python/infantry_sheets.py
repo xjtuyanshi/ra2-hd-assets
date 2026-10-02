@@ -69,6 +69,40 @@ UNITS = {  # type -> sprite; insertion order is the scheduling priority (typical
     "TANY": "infantry:TANY", "VIRUS": "infantry:VIRUS", "BORIS": "infantry:BORIS", "GHOST": "infantry:SEAL",
     "CLEG": "infantry:CLEG", "YURIPR": "infantry:YURIX", "CIV1": "infantry:CIV1", "CIV2": "infantry:CIV2",
     "CIV3": "infantry:CIV3",
+    # Stage 2: remaining civilians, campaign characters and animals (types sharing a sprite are redrawn once).
+    "CIVA": "infantry:CIVA",
+    "CIVB": "infantry:CIVB",
+    "CIVC": "infantry:CIVC",
+    "CIVSF": "infantry:CIVSF",
+    "CIVSFM": "infantry:CIVSFM",
+    "CIVSTM": "infantry:CIVSTM",
+    "CIVBBP": "infantry:CIVBBP",
+    "CIVBF": "infantry:CIVBF",
+    "CIVBFM": "infantry:CIVBFM",
+    "CIVBTM": "infantry:CIVBTM",
+    "CTECH": "infantry:CIV3",
+    "SSRV": "infantry:SSRV",
+    "PRES": "infantry:PRES",
+    "PENTGEN": "infantry:PENTGEN",
+    "VLADIMIR": "infantry:VLADIMIR",
+    "RMNV": "infantry:RMNV",
+    "EINS": "infantry:EINS",
+    "CCOMAND": "infantry:CCOMAND",
+    "CIVAN": "infantry:CIVAN",
+    "PTROOP": "infantry:PTROOP",
+    "LUNR": "infantry:LUNR",
+    "ARND": "infantry:ARND",
+    "STLN": "infantry:STLN",
+    "CLNT": "infantry:CIVC",
+    "MUMY": "infantry:MUMY",
+    "WWLF": "infantry:MUMY",
+    "COW": "infantry:COW",
+    "ALL": "infantry:ALL",
+    "POLARB": "infantry:POLARB",
+    "JOSH": "infantry:JOSH",
+    "CAML": "infantry:CAML",
+    "DNOA": "infantry:DNOA",
+    "DNOB": "infantry:DNOB",
 }
 
 ALLIED, SOVIET, YURI_SIDE = "DarkBlue", "DarkRed", "Purple"
@@ -78,6 +112,11 @@ HOUSE = {"E1": ALLIED, "ENGINEER": ALLIED, "ADOG": ALLIED, "E2": SOVIET, "SHK": 
          "CLEG": ALLIED, "CIV1": ALLIED, "CIV2": ALLIED, "CIV3": ALLIED,
          "INIT": YURI_SIDE, "BRUTE": YURI_SIDE, "SLAV": YURI_SIDE, "YURI": YURI_SIDE, "VIRUS": YURI_SIDE,
          "YURIPR": YURI_SIDE}
+HOUSE.update({t: ALLIED for t in ("CIVA", "CIVB", "CIVC", "CIVSF", "CIVSFM", "CIVSTM", "CIVBBP", "CIVBF", "CIVBFM",
+                                  "CIVBTM", "CTECH", "SSRV", "PRES", "PENTGEN", "EINS", "CCOMAND", "CIVAN", "ARND",
+                                  "STLN", "CLNT", "MUMY", "WWLF", "COW", "ALL", "POLARB", "JOSH", "CAML", "DNOA",
+                                  "DNOB")})
+HOUSE.update({"VLADIMIR": SOVIET, "RMNV": SOVIET, "LUNR": SOVIET, "PTROOP": YURI_SIDE})
 
 UNIT_DESC = {
     "E1": ("Allied GI rifleman",
@@ -158,10 +197,76 @@ UNIT_DESC = {
     "YURIPR": ("Yuri Prime",
                "Yuri Prime: the bald psychic leader in long flowing team-colour (purple) and black robes with gold "
                "trim and a high collar, projecting psychic power"),
-    "CIV1": ("civilian woman", "a civilian woman in a yellow dress and white shoes"),
-    "CIV2": ("civilian man", "a civilian man in a white shirt, dark blue jeans and dark shoes"),
-    "CIV3": ("civilian man", "a civilian man in a green jacket, dark trousers and boots, with dark hair"),
+    "CIV1": ("civilian woman",
+            "a civilian woman with orange-red hair, a pale yellow short-sleeved top, a brown skirt, white socks and light shoes, with a small grey handgun visible in the firing pose"),
+    "CIV2": ("civilian man",
+            "a civilian man with short dark hair, a white short-sleeved shirt, dark blue jeans and dark brown shoes, holding a small dark handgun in the firing pose"),
+    "CIV3": ("civilian man",
+            "a dark-haired man in a green jacket with team-colour (red) shoulder and upper-arm patches, dark sleeves, brown trousers and black boots, with a small grey handgun visible in the firing pose"),
+    "CIVA": ("brown-haired civilian",
+            "a brown-haired civilian in a white and grey short-sleeved top, a dark belt, blue trousers tucked into tall dark brown boots, with a small grey handgun visible in the firing pose"),
+    "CIVB": ("fair-haired civilian",
+            "a civilian with pale blond-grey hair, a white and grey short-sleeved top, a dark belt and blue trousers tucked into tall dark brown boots, with a small grey handgun visible in the firing pose"),
+    "CIVC": ("cowboy civilian",
+            "a cowboy in a broad-brimmed black hat, black short-sleeved shirt, blue jeans, a dark belt with a pale buckle and tall black boots, holding a small grey handgun in the firing pose"),
+    "CIVSF": ("red-haired civilian woman",
+            "a civilian woman with long orange-red hair, a pale pink long-sleeved top, dark olive trousers and black boots, with a small grey handgun visible in the firing pose"),
+    "CIVSFM": ("heavy civilian man",
+            "a heavyset civilian man with short blond hair, a dark grey long-sleeved jacket, olive-khaki trousers and dark blue-black shoes, with a small dark handgun visible in the firing pose"),
+    "CIVSTM": ("civilian man in blue",
+            "a civilian man with short dark brown hair, a dark blue long-sleeved shirt, brown trousers and black shoes, holding a small dark handgun in the firing pose"),
+    "CIVBBP": ("civilian baseball player",
+            "a small baseball player in a blue cap and loose blue jersey, grey knee-length trousers, white socks and dark shoes, carrying a large brown baseball glove"),
+    "CIVBF": ("beach woman",
+            "a slim blonde woman with tan skin, a blue two-piece swimsuit, bare arms and legs and bare feet"),
+    "CIVBFM": ("heavy beach man",
+            "a heavyset man with short dark hair, a bare pale chest and round belly, brown-olive swimming trunks and bare feet, holding a pale grey-white towel-like item in one pose"),
+    "CIVBTM": ("slim beach man",
+            "a slim man with short dark hair, a bare pale chest, dark olive-brown swimming trunks, bare legs and bare feet"),
+    "SSRV": ("Secret Service agent",
+            "a dark-haired agent with dark sunglasses, a black suit, pale shirt, dark blue tie and black shoes, carrying a brown rectangular briefcase and using a small dark pistol in the firing pose"),
+    "PRES": ("US President",
+            "a dark-haired man in a blue suit, pale shirt, red necktie and black shoes"),
+    "PENTGEN": ("Pentagon general",
+            "a general in an olive peaked cap with a pale band and dark visor, an olive uniform jacket with a pale collar and team-colour (red) shoulder boards, matching olive trousers and black shoes"),
+    "VLADIMIR": ("General Vladimir",
+            "a general in a team-colour (red) peaked cap, a tan-brown uniform with gold-yellow chest and belt details, team-colour (red) shoulder patches, sleeve bands and trouser-side trim, and tall black boots"),
+    "RMNV": ("Premier Romanov",
+            "a stocky man in a white peaked cap with a dark band, a white uniform jacket with team-colour (red) shoulder boards, collar and cuffs, gold-yellow front trim, a black belt, grey trousers and black boots"),
+    "EINS": ("Einstein",
+            "an elderly scientist with bushy grey-white hair, a white knee-length laboratory coat, dark olive-brown trousers and black shoes"),
+    "CCOMAND": ("Chrono Commando",
+            "a commando in an olive-green helmet and green-khaki uniform, dark chest equipment and black boots, carrying a dark rifle and a large circular silver-white and dark blue backpack with team-colour (red) edging and shoulder straps"),
+    "CIVAN": ("Chrono Ivan",
+            "a bomber with a team-colour (red) cap and backpack straps, a brown-orange chest harness, exposed tan forearms with grey wrist cuffs, tan-brown trousers, bulky blue-grey boots and a large circular silver-white and dark blue backpack with a team-colour (red) rim, handling a small orange-brown explosive bundle"),
+    "PTROOP": ("Psi-Corps trooper",
+            "a Psi-Corps trooper in an olive-grey knee-length coat with a broad team-colour (red) collar and shoulder covering, team-colour (red) lower trim, a dark front panel, dark trousers and black boots"),
+    "LUNR": ("lunar cosmonaut",
+            "a lunar cosmonaut in a bulky white and silver-grey pressure suit with team-colour (red) helmet trim, chest and outer limb panels, a dark face visor, dark boots, a tall silver-grey twin-cylinder backpack with team-colour (red) caps and a short silver-grey gun"),
+    "ARND": ("action hero in black",
+            "a short-haired man with dark sunglasses, a black jacket over a grey shirt, dark grey trousers and black boots, carrying a large silver and blue-grey gun"),
+    "STLN": ("headband-wearing action hero",
+            "a muscular man with dark brown hair and a trailing red headband, bare tan arms, a black sleeveless top, grey trousers and black boots, carrying a black rifle"),
+    "MUMY": ("mummy",
+            "a human-shaped mummy with its head, torso, arms and legs wrapped in pale grey-white bandages, dark gaps around the face and joints and empty hands held forward"),
+    "COW": ("cow",
+            "a black-and-white cow with large irregular coat patches, a pale muzzle, small ears, four slender legs with dark hooves and a thin tail"),
+    "ALL": ("alligator",
+            "an alligator with mottled golden-brown scales, dark bands and raised ridges along its back, a long low snout, a pale lower jaw, four short splayed legs and a long tapering tail"),
+    "POLARB": ("polar bear",
+            "a stocky polar bear with white-cream fur and grey shading, a long neck, small rounded ears, a dark nose, four thick legs with broad paws and a short tail"),
+    "JOSH": ("chimpanzee",
+            "a small hunched chimpanzee with charcoal-brown fur, a pale tan-pink face, tan hands and feet, long forearms and short bent hind legs"),
+    "CAML": ("chimpanzee",
+            "a small hunched chimpanzee with charcoal-brown fur, a pale tan-pink face, tan hands and feet, long forearms and short bent hind legs"),
+    "DNOA": ("tyrannosaur",
+            "a large bipedal tyrannosaur with olive-brown and grey scaly skin, dark stripes across its back, a paler underside, a massive head and jaws, tiny forearms, powerful hind legs with clawed feet and a long tapering tail"),
+    "DNOB": ("long-necked reptile",
+            "a large olive-grey reptile with mottled skin, a small blunt head on a very long curved neck and a broad humped body with pale upper surfaces and dark grey-blue shading"),
 }
+for _alias, _src in {"CTECH": "CIV3", "CLNT": "CIVC", "WWLF": "MUMY"}.items():
+    UNIT_DESC[_alias] = UNIT_DESC[_src]
+
 
 
 SEQ_DESC = {
@@ -207,6 +312,24 @@ DOG_SEQ = {"Walk": "a running gallop cycle (the first column is the standing pos
            "Idle1": "idle: sitting / sniffing (reading order)", "Idle2": "idle: scratching / looking around (reading order)",
            "Die1": "a death animation: yelping, collapsing and lying dead (reading order)",
            "Die2": "a second death animation (reading order)", "Cheer": "a happy jumping / wagging animation"}
+
+
+# Animals and creatures (no weapon, no clothing): material text per type; ANIMAL_SEQ names their sequences.
+ANIMALS = {
+    "COW": "realistic short hair with a soft sheen, glossy wet nose and eyes, hooves",
+    "ALL": "realistic wet reptile scales and osteoderm ridges with a slight gloss, teeth, claws",
+    "POLARB": "realistic dense white fur with visible strands and soft sheen, dark nose and eyes, heavy paws",
+    "JOSH": "realistic coarse fur with visible strands, wrinkled bare skin on the face, hands and feet",
+    "CAML": "realistic coarse fur with visible strands, wrinkled bare skin on the face, hands and feet",
+    "DNOA": "realistic thick scaly reptile hide with folds and wrinkles, teeth and claws, glinting eyes",
+    "DNOB": "realistic thick scaly reptile hide with folds and wrinkles, glinting eyes",
+    "MUMY": "realistic layered linen bandages with frayed edges, stains and dust, dark gaps between the wraps",
+    "WWLF": "realistic layered linen bandages with frayed edges, stains and dust, dark gaps between the wraps",
+}
+ANIMAL_SEQ = {"Walk": "a walking cycle (the first column is the standing pose, then the walk frames)",
+              "FireUp": "attacking (lunging / biting / swinging)", "Panic": "running away in panic",
+              "Idle1": "an idle animation (reading order)", "Idle2": "a second idle animation (reading order)",
+              "Idles": SEQ_DESC["Idles"].replace("fidget ", ""), "Dies": SEQ_DESC["Dies"].replace("(hit, collapsing, lying dead)", "(hit, collapsing, lying dead)")}
 
 
 FACING_TEXT = {
@@ -504,7 +627,8 @@ STYLE_TEXT = ("\nstyle.png is a STYLE REFERENCE ONLY: an approved redraw of a DI
 def prompt_for(unit, seq, rows, size, extra="", first_facing=None):
     name, desc = UNIT_DESC[unit]
     dog = unit in ("DOG", "ADOG")
-    sdesc = (DOG_SEQ if dog else SEQ_DESC).get(seq, SEQ_DESC.get(seq, "an animation"))
+    animal = dog or unit in ANIMALS
+    sdesc = (DOG_SEQ if dog else ANIMAL_SEQ if animal else SEQ_DESC).get(seq, SEQ_DESC.get(seq, "an animation"))
     n = sum(len(r) for r in rows)
     facing = ""
     if seq in FACING_SEQS or (dog and seq in ("Walk", "FireUp")):
@@ -514,9 +638,9 @@ def prompt_for(unit, seq, rows, size, extra="", first_facing=None):
     if facing and first_facing is not None:
         facing += (" The facing direction of each row (this is essential - keep it exactly, the game picks the frame by "
                    "direction):\n" + facing_lines(rows, first_facing, dog) + "\n")
-    creature = "animal" if dog else "character"
+    creature = "animal" if animal else "character"
     materials = ("realistic fur with visible strands and soft sheen, wet dark nose, glinting eyes, a leather collar"
-                 if dog else
+                 if dog else ANIMALS[unit] if animal else
                  "real fabric with folds, seams and creases, webbing straps, pouches and buckles, worn leather boots, "
                  "matte and glossy metal with small specular highlights, realistic skin shading on the face and hands, "
                  "a detailed weapon with visible receiver, magazine and barrel")

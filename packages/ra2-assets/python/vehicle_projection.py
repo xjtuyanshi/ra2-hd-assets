@@ -569,11 +569,17 @@ def grade(atlases: Path, parts: list[str], keep: float, centre: float = 40.0, ha
     return changed
 
 
+# Hulls the redraw made brighter than the original (Allied Mirage tank / MCV, +9..+10 L* in the parade) need a
+# darkening exponent; beyond 3 the curve crushes mid tones, so larger values are rejected as typos.
+MAX_LIGHTNESS_GAMMA = 3.0
+
+
 def lift_lightness(rgba: np.ndarray, paint: np.ndarray, gamma: float,
                    protect_lo: float = 0.3, protect_hi: float = 0.7) -> np.ndarray:
-    """Lift Lab lightness while preserving chroma, alpha and protected RGB bytes."""
-    if not 0 < gamma <= 1:
-        raise ValueError('gamma must satisfy 0 < gamma <= 1')
+    """Apply a Lab lightness exponent (gamma < 1 lifts, gamma > 1 darkens) while preserving chroma, alpha and
+    protected RGB bytes."""
+    if not 0 < gamma <= MAX_LIGHTNESS_GAMMA:
+        raise ValueError(f'gamma must satisfy 0 < gamma <= {MAX_LIGHTNESS_GAMMA}')
     if not 0 <= protect_lo < protect_hi <= 1:
         raise ValueError('paint protection must satisfy 0 <= protect_lo < protect_hi <= 1')
     rgba = np.asarray(rgba, np.uint8)
@@ -636,9 +642,10 @@ def publish_atlas(out_dir: Path, name: str, data: np.ndarray | bytes):
 
 
 def lift(src_dir: Path, out_dir: Path, type_name: str, gamma: float) -> dict[str, int]:
-    """Write a complete lifted type build to a separate directory, publishing files atomically."""
-    if not 0 < gamma <= 1:
-        raise ValueError('gamma must satisfy 0 < gamma <= 1')
+    """Write a complete lifted (gamma < 1) or darkened (gamma > 1) type build to a separate directory, publishing
+    files atomically."""
+    if not 0 < gamma <= MAX_LIGHTNESS_GAMMA:
+        raise ValueError(f'gamma must satisfy 0 < gamma <= {MAX_LIGHTNESS_GAMMA}')
     src_dir, out_dir, manifest_bytes, spec = load_type_build(src_dir, out_dir, type_name)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -760,11 +767,11 @@ def main(argv=None):
     grader.add_argument('--keep', type=float, default=0.3)
     grader.add_argument('--hue', type=float, default=40.0, help='centre of the graded hue band, degrees')
     grader.add_argument('--half', type=float, default=20.0, help='half width of the band at full effect, degrees')
-    lifter = commands.add_parser('lift', help='lift hull lightness into a separate complete type build')
+    lifter = commands.add_parser('lift', help='lift or darken hull lightness into a separate complete type build')
     lifter.add_argument('--src', type=Path, required=True)
     lifter.add_argument('--out', type=Path, required=True)
     lifter.add_argument('--type', required=True)
-    lifter.add_argument('--gamma', type=float, required=True, help='lightness exponent, 0 < gamma <= 1')
+    lifter.add_argument('--gamma', type=float, required=True, help='lightness exponent: < 1 lifts, > 1 darkens (0 < gamma <= 3)')
     locker = commands.add_parser('lock', help='restore design colours and optionally camouflage on a redraw sheet')
     locker.add_argument('--design', type=Path, required=True, help='image-model input sheet (input.png)')
     locker.add_argument('--redraw', type=Path, required=True, help='image-model result (output.png)')
