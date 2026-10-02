@@ -147,6 +147,24 @@ type GroundPass = 'main' | 'under' | 'over';
  */
 export const GROUND_PULL = { shadow: [0.019, 0.027], reflection: 0.0285 } as const;
 export const INFANTRY_SHADOW_OPACITY = 0.8;
+/**
+ * Coverage ramp of infantry contact shadows. The original draws them as solid palette-index-12 blobs inside the body
+ * frames; the filtered/upscaled mask is only ~0.5 at the blob's own edge, so a linear ramp left half of every blob
+ * lighter than the core (V<40 px 0.51x / 0.55x of the original for Initiates / Slaves on the same frozen frames; with
+ * this ramp 0.60x / 0.61x, opacity alone saturated at 0.55x). Coverage >= `to` is the full core, the soft fringe
+ * stays at the blob's edge (P-L5H-1). The rest of the gap is the HD bodies covering more of their own blob and the
+ * original's near-black body pixels, not a missing shadow.
+ */
+export const INFANTRY_SHADOW_RAMP = { from: 0.02, to: 0.35 } as const;
+
+/** CPU twin of the enhanced infantry shadow alpha for a filtered mask coverage (0..1). */
+export function infantryShadowAlpha(coverage: number): number {
+  const t = Math.min(
+    1,
+    Math.max(0, (coverage - INFANTRY_SHADOW_RAMP.from) / (INFANTRY_SHADOW_RAMP.to - INFANTRY_SHADOW_RAMP.from)),
+  );
+  return t * t * (3 - 2 * t) * INFANTRY_SHADOW_OPACITY;
+}
 
 /**
  * Filtered coverage of a frame's 1x indexed mask at `texel` (quadratic B-spline over the 3x3 texels around it, texels
@@ -656,7 +674,12 @@ export class SpriteLayer {
           If(
             isShadow.greaterThan(0.5).and(look.shadowDarkness.notEqual(1).or(isInfantryShadow.greaterThan(0.5))),
             () => {
-              const alpha: ShaderNode = shadowCoverage.mul(shadowOpacity);
+              const ramped: ShaderNode = mix(
+                shadowCoverage,
+                smoothstep(INFANTRY_SHADOW_RAMP.from, INFANTRY_SHADOW_RAMP.to, shadowCoverage),
+                isInfantryShadow,
+              );
+              const alpha: ShaderNode = ramped.mul(shadowOpacity);
               result.assign(vec4(0, 0, 0, alpha));
             },
           );

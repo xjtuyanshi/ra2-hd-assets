@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { Texture, Vector3 } from 'three/webgpu';
 import { LiveView, type LiveObject } from '../src/live/liveView';
 import { SpritePool } from '../src/live/spritePool';
-import { INFANTRY_SHADOW_OPACITY, SpriteLayer, type SpriteInstance } from '../src/ra2/sprites';
+import {
+  INFANTRY_SHADOW_OPACITY,
+  INFANTRY_SHADOW_RAMP,
+  infantryShadowAlpha,
+  SpriteLayer,
+  type SpriteInstance,
+} from '../src/ra2/sprites';
 import type { Ra2Cache } from '../src/ra2/cache';
 import type { DirtyAttribute } from '../src/dirtyAttribute';
 import { applyLookPreset, type HdSettings } from '../src/HdRenderer';
@@ -90,6 +96,23 @@ describe('live infantry footprint', () => {
     for (const mesh of layer.groundPasses) {
       mesh.material.dispose();
       mesh.dispose();
+    }
+  });
+
+  it('ramps infantry shadow coverage to a solid core at the original blob edge and keeps a soft outer fringe', () => {
+    expect(infantryShadowAlpha(0)).toBe(0);
+    expect(infantryShadowAlpha(INFANTRY_SHADOW_RAMP.from)).toBe(0);
+    // The upscaled mask is ~0.5 at the original blob's edge: that edge is already the full core opacity.
+    expect(infantryShadowAlpha(0.5)).toBeCloseTo(INFANTRY_SHADOW_OPACITY, 10);
+    expect(infantryShadowAlpha(1)).toBeCloseTo(INFANTRY_SHADOW_OPACITY, 10);
+    const fringe = infantryShadowAlpha(0.2);
+    expect(fringe).toBeGreaterThan(0);
+    expect(fringe).toBeLessThan(INFANTRY_SHADOW_OPACITY);
+    let previous = 0;
+    for (let c = 0; c <= 1.0001; c += 0.05) {
+      const a = infantryShadowAlpha(c);
+      expect(a).toBeGreaterThanOrEqual(previous - 1e-12);
+      previous = a;
     }
   });
 });
