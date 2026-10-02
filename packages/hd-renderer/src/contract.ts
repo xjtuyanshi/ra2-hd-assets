@@ -35,6 +35,10 @@ export interface AtmosphereProfile {
   nightLevel: number;
   /** The map's light tint normalised by its largest channel. */
   tint: [r: number, g: number, b: number];
+  /** Optional daylight scene-light multiplier relative to clear noon, in linear light. */
+  exposure?: number;
+  /** Airless daylight: luminance-matched neutral sun/sky carrying only the normalised map tint. */
+  airless?: boolean;
 }
 
 export interface RenderMap {

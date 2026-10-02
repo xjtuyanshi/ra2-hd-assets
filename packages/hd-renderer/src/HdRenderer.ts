@@ -723,7 +723,7 @@ export class HdRenderer {
       this.nodes.surfaceSize.value.set(world.width, world.height);
     }
     if (this.layerNodes !== this.nodes) this.layerNodes.copyValuesFrom(this.nodes);
-    // Flat-ground irradiance at clear noon (day keys never depend on the map's profile): the day exposure's white point.
+    // Unprofiled clear noon is the display reference, before a map's daylight exposure/tint is applied.
     this.lighting.update(12, 0);
     this.lighting.flatIrradianceColor(this.noonIrradiance);
     this.scene.add(
@@ -923,12 +923,7 @@ export class HdRenderer {
     this.bloomStrength.value = this.settings.bloom;
     this.clarityAmount.value = this.settings.clarity;
     this.vignetteStrength.value = this.settings.vignette;
-    this.gradeUniforms.gradeBalance.value.fromArray(this.settings.gradeBalance);
-    this.gradeUniforms.gradeContrast.value = this.settings.gradeContrast;
-    this.gradeUniforms.gradePivotLift.value = this.settings.gradePivotLift;
-    this.gradeUniforms.gradeSaturation.value = this.settings.gradeSaturation;
-    this.gradeUniforms.gradeShadowTint.value.fromArray(this.settings.gradeShadowTint);
-    this.gradeUniforms.gradeHighlightTint.value.fromArray(this.settings.gradeHighlightTint);
+    this.updateGrade(this.state.map.atmosphere?.airless === true);
     // Original maps have no sun-shadow casters: the tile art paints terrain shading, sprites carry their own shadow
     // frames and voxels draw engine-style flattened shadows. Skipping the empty shadow map saves a full depth pass
     // and the per-pixel shadow lookups of every receiver.
@@ -939,6 +934,25 @@ export class HdRenderer {
     if (this.settings.voxelSheenCap !== null) voxels.voxelSheenCap.value = this.settings.voxelSheenCap;
     if (this.settings.voxelOcclusion !== null) voxels.voxelOcclusion.value = this.settings.voxelOcclusion;
     if (!this.pipeline || this.pipelineKey !== this.settingsPipelineKey()) this.buildPipeline();
+  }
+
+  private gradeAirless = false;
+
+  /** An airless scene retains the authored illuminant instead of acquiring a cinematic sky/shadow colour. */
+  private updateGrade(airless: boolean): void {
+    this.gradeAirless = airless;
+    if (airless) {
+      this.gradeUniforms.gradeBalance.value.setScalar(1);
+      this.gradeUniforms.gradeShadowTint.value.setScalar(1);
+      this.gradeUniforms.gradeHighlightTint.value.setScalar(1);
+    } else {
+      this.gradeUniforms.gradeBalance.value.fromArray(this.settings.gradeBalance);
+      this.gradeUniforms.gradeShadowTint.value.fromArray(this.settings.gradeShadowTint);
+      this.gradeUniforms.gradeHighlightTint.value.fromArray(this.settings.gradeHighlightTint);
+    }
+    this.gradeUniforms.gradeContrast.value = this.settings.gradeContrast;
+    this.gradeUniforms.gradePivotLift.value = this.settings.gradePivotLift;
+    this.gradeUniforms.gradeSaturation.value = this.settings.gradeSaturation;
   }
 
   setState(state: RenderState): void {
@@ -987,6 +1001,8 @@ export class HdRenderer {
     adjusted.hour = profile.hour;
     adjusted.tint = profile.tint;
     adjusted.nightLevel = level;
+    adjusted.exposure = profile.exposure;
+    adjusted.airless = profile.airless;
     return adjusted;
   }
 
@@ -1008,6 +1024,8 @@ export class HdRenderer {
       : Math.max(0, wet.value - deltaSeconds * 0.02);
 
     const profile = this.profile();
+    const airless = profile?.airless === true;
+    if (airless !== this.gradeAirless) this.updateGrade(airless);
     this.lighting.setProfile(profile);
     this.lighting.follow(this.view.target);
     this.lighting.update(env.timeOfDay, raining ? 0.35 + 0.5 * rainAmount : 0);
@@ -1032,13 +1050,16 @@ export class HdRenderer {
     if (this.world) {
       const noon = this.noonIrradiance;
       const k = Math.PI * this.settings.exposure;
-      exposure.setRGB(
-        k * (1 / noon.r + (1 / reference - 1 / noon.r) * nightGrade),
-        k * (1 / noon.g + (1 / reference - 1 / noon.g) * nightGrade),
-        k * (1 / noon.b + (1 / reference - 1 / noon.b) * nightGrade),
-      );
+      // Airless keys already remove the terrestrial sky colour; a per-channel noon white point would tint them again.
+      if (airless && nightGrade === 0) exposure.setScalar(k / noonFlatLuminance());
+      else
+        exposure.setRGB(
+          k * (1 / noon.r + (1 / reference - 1 / noon.r) * nightGrade),
+          k * (1 / noon.g + (1 / reference - 1 / noon.g) * nightGrade),
+          k * (1 / noon.b + (1 / reference - 1 / noon.b) * nightGrade),
+        );
       // Enhanced look: lift late and early daylight towards noon's brightness (the colour of the light stays).
-      const adapt = this.settings.adaptExposure * (1 - nightGrade);
+      const adapt = profile?.exposure === undefined ? this.settings.adaptExposure * (1 - nightGrade) : 0;
       if (adapt > 0) {
         const flat = this.lighting.flatIrradianceColor(this.scratchColor);
         const now = 0.2126 * flat.r + 0.7152 * flat.g + 0.0722 * flat.b;
@@ -1046,7 +1067,7 @@ export class HdRenderer {
         const lift = Math.min(MAX_ADAPT, Math.max(1, noonLum / Math.max(1e-6, now)));
         exposure.multiplyScalar(1 + (lift - 1) * adapt);
       }
-      if (this.settings.whiteAdapt > 0 && nightGrade < 1) {
+      if (!airless && this.settings.whiteAdapt > 0 && nightGrade < 1) {
         // Exposure adaptation alone owns brightness; white adaptation changes only the illuminant balance.
         adaptWhiteBalance(
           exposure,
@@ -1057,7 +1078,7 @@ export class HdRenderer {
         );
       }
       const mapLight = this.world.mapLight;
-      if (this.settings.mapTintAdapt > 0 && mapLight) {
+      if (!airless && this.settings.mapTintAdapt > 0 && mapLight) {
         // The map light's day weight is set below for this frame; last frame's weight is the same within a frame.
         neutralizeMapTint(exposure, mapLight.lighting, this.settings.mapTintAdapt * mapLight.currentWeight);
       }
@@ -1071,8 +1092,9 @@ export class HdRenderer {
     this.nightDisplay.value = nightGrade;
     this.nodes.faithfulDisplay.value = this.settings.toneMapper === 'faithful' ? 1 - nightGrade : 0;
     // The map's own light by day ([Lighting] and light sources, mapLighting.ts); the night presentation owns maps staged
-    // as night or dusk and the night hours of day maps.
-    this.world?.mapLight?.setWeight(profile?.kind === 'day' ? 1 - light.night : 0);
+    // as night or dusk and the night hours of day maps. Airless daylight already carries the authored ambient/tint
+    // in its scene light; applying the palette-domain map grade too would darken and tint it twice.
+    this.world?.mapLight?.setWeight(profile?.kind === 'day' && !airless ? 1 - light.night : 0);
     this.world?.mapLight?.setSourceWeight(this.settings.mapSourcesByDay);
     if (this.water) {
       const w = this.water.uniforms;
@@ -1080,6 +1102,7 @@ export class HdRenderer {
       w.sunColor.value.copy(light.sunColor).multiplyScalar(this.lighting.sun.intensity / 3);
       w.skyZenith.value.copy(light.skyZenith);
       w.skyHorizon.value.copy(light.skyHorizon);
+      w.airless.value = airless ? 1 : 0;
       w.ambient.value.copy(light.ambient);
       w.rain.value = rainAmount;
       w.wind.value = env.windStrength + rainAmount * 0.3;
@@ -1114,7 +1137,7 @@ export class HdRenderer {
     const baseMist = raining
       ? (1 - light.night) * 0.06 * rainAmount + light.night * (0.045 + 0.04 * rainAmount)
       : 0.05 * light.night;
-    this.mist.amount.value = Math.min(MIST_CAP, baseMist * this.atmosphere.mist);
+    this.mist.amount.value = airless ? 0 : Math.min(MIST_CAP, baseMist * this.atmosphere.mist);
     if (this.mist.amount.value > 0 !== this.mistInPipeline) this.buildPipeline();
 
     this.rain.intensity.value = rainAmount;

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { LibraryOverlay, LibraryType } from '../../packages/ra2-assets/src/library';
+import { mapAtmosphere } from '../../packages/ra2-assets/src/lights';
 import type { SpriteEntry, SpriteFrame } from '../../packages/ra2-assets/src/manifest';
 import {
   buildOverlayInstances,
@@ -113,6 +114,36 @@ function rubbleFixture(patch: Partial<LibraryOverlay> = {}) {
 }
 
 describe('live overlay instances', () => {
+  it('preserves noon light only for ore and gems under lunar exposure, including mixed atlas pages', () => {
+    const art = library();
+    // The class, not the page or palette, selects the gain.
+    for (const entry of Object.values(art.sprites)) for (const frame of entry.frames) frame.page = 0;
+    art.sprites['overlay:TIB01'].shadows = [frame(9, 0)];
+    const state = cells();
+    state.data[0] = 0;
+    const atmosphere = mapAtmosphere(
+      { ambient: 0.65, ground: 0.05, level: 0.008, red: 1, green: 1, blue: 1.1 },
+      3,
+      undefined,
+      'lunar',
+    );
+    const result = buildOverlayInstances(state, art, terrain(), palette, atmosphere);
+    const bodies = result.pages.get(0)!;
+    expect(bodies.map((instance) => instance.lightGain)).toEqual([
+      1 / atmosphere.exposure!,
+      1 / atmosphere.exposure!,
+      1,
+      1,
+    ]);
+    for (const instance of bodies.slice(0, 2)) expect(instance.lightGain! * atmosphere.exposure!).toBeCloseTo(1, 12);
+    expect(result.pages.get(9)![0]!.lightGain).toBeUndefined();
+    const day = buildOverlayInstances(state, art, terrain(), palette);
+    expect(day.pages.get(0)!.map((instance) => instance.lightGain)).toEqual([1, 1, 1, 1]);
+    const { art: rubbleArt, state: rubbleState } = rubbleFixture({ tiberium: true });
+    expect(
+      buildOverlayInstances(rubbleState, rubbleArt, terrain(), palette, atmosphere).pages.get(4)![0]!.lightGain,
+    ).toBe(1);
+  });
   it('uses exact native growth/connection frames, extracted draw points and local wall remap', () => {
     const art = library();
     const built = buildOverlayInstances(cells(), art, terrain(), palette);
@@ -228,6 +259,16 @@ describe('live overlay instances', () => {
 });
 
 describe('overlay instance revision cache', () => {
+  it('rebuilds gain when exposure changes without changing the engine cells', () => {
+    const cache = new OverlayInstanceCache(terrain());
+    const state = cells();
+    const art = library();
+    expect(cache.update(state, art, '', palette, { exposure: 0.36 })).toBe(true);
+    expect(cache.instances.pages.get(0)![0]!.lightGain).toBeCloseTo(1 / 0.36);
+    expect(cache.update(state, art, '', palette, { exposure: 0.36 })).toBe(false);
+    expect(cache.update(state, art, '', palette)).toBe(true);
+    expect(cache.instances.pages.get(0)![0]!.lightGain).toBe(1);
+  });
   it('ignores structured clone identity and rebuilds only content, palette or source changes', () => {
     const cache = new OverlayInstanceCache(terrain());
     const state = cells();

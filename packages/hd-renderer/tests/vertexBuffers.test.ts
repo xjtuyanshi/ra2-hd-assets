@@ -157,6 +157,32 @@ function dispose(mesh: Mesh): void {
 }
 
 describe('r186 vertex and uniform binding budget', () => {
+  it('emits per-instance received-light compensation in every sprite colour path and pass', () => {
+    const source = cache();
+    for (const hd of [null, { color: texture(), remap: texture() }]) {
+      for (const materials of [null, { texture: texture() }]) {
+        const layer = new SpriteLayer(source, [], 1, undefined, hd, texture(), materials);
+        for (const mesh of [layer.mesh, ...layer.groundPasses]) {
+          const { fragmentShader } = assertLimits(mesh);
+          const gainLines = fragmentShader.split('\n').filter((line) => line.includes('spriteReceivedLightGain'));
+          const label = `${mesh.name}: ${hd ? 'HD' : 'indexed'}, ${materials ? 'materials' : 'plain'}`;
+          // Compile the real TSL graph: uploading an attribute alone does not prove the fragment shader reads it.
+          expect(gainLines.join('\n'), label).toMatch(/spriteReceivedLightGain\s*=\s*\w+\.z;/);
+          const guard = gainLines.find((line) => line.includes('if '))?.replace(/\s|[()]/g, '');
+          // Gain 1 is an arithmetic no-op; kinds >= 1.5 are shadows, contact shades and reflections.
+          expect(guard, label).toMatch(/^ifspriteReceivedLightGain!=1\.0&&\w+\.x<1\.5\{$/);
+          const assignment = gainLines.find((line) => line.includes('vec4<f32>'))?.replace(/\s|[()]/g, '');
+          // The same glow is removed and restored around the linear multiply, and alpha comes from the old result.
+          expect(assignment, label).toMatch(
+            /^(\w+)=vec4<f32>\1\.xyz-(\w+)\*vec3<f32>spriteReceivedLightGain\+\2,\1\.w;$/,
+          );
+        }
+        dispose(layer.mesh);
+      }
+    }
+    source.nodes!.dispose();
+  });
+
   it('builds crystal sparkle in every material pass, including under, with no sparkle nodes on default pages', () => {
     const source = cache();
     for (const materials of [null, { texture: texture() }]) {

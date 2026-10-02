@@ -304,6 +304,11 @@ const REFLECT_MAX = 0.26;
 const SKY_IN_WATER = vec3(0.3, 0.62, 0.78);
 /** Luminance of SKY_IN_WATER: the sheen's sky keeps the enhanced look's sky level without its colour filter. */
 const SKY_IN_WATER_LUMA = 0.2126 * 0.3 + 0.7152 * 0.62 + 0.0722 * 0.78;
+
+/** Airless reflections inherit the scene tint, without adding the look's terrestrial sky colour. */
+function skyFilter(uniforms: WaterUniforms): ShaderNode {
+  return uniforms.airless.greaterThan(0).select(vec3(SKY_IN_WATER_LUMA), SKY_IN_WATER);
+}
 /** Ground direction towards the fixed camera, and how far behind a point its mirrored local light is sampled. */
 const TOWARDS_CAMERA = vec2(Math.SQRT1_2, Math.SQRT1_2);
 const LIGHT_MIRROR_REACH = 0.9;
@@ -523,11 +528,18 @@ function waterSheen(
   const horizon: ShaderNode = mix(
     uniforms.skyHorizon,
     vec3(tint[0] / tintLuma, tint[1] / tintLuma, tint[2] / tintLuma).mul(horizonLuma),
-    S.horizonTintAmount,
+    float(S.horizonTintAmount).mul(float(1).sub(uniforms.airless)),
   );
   const sky: ShaderNode = mix(
     horizon,
-    uniforms.skyZenith.mul(vec3(...S.zenithTint)),
+    uniforms.skyZenith.mul(
+      uniforms.airless
+        .greaterThan(0)
+        .select(
+          vec3(0.2126 * S.zenithTint[0] + 0.7152 * S.zenithTint[1] + 0.0722 * S.zenithTint[2]),
+          vec3(...S.zenithTint),
+        ),
+    ),
     smoothstep(S.skyLow, S.skyHigh, reflected.y),
   )
     .mul(skyLevel)
@@ -628,7 +640,7 @@ function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_N
   const r: ShaderNode = reflect(view.negate(), normal);
   const skyLevel: ShaderNode = mix(float(1), sceneBrightness.min(1).mul(0.6), night);
   const sky: ShaderNode = mix(uniforms.skyHorizon, uniforms.skyZenith, smoothstep(0.0, 0.6, r.y)).mul(
-    skyLevel.mul(SKY_IN_WATER),
+    skyLevel.mul(skyFilter(uniforms)),
   );
   const reflected = inputs.reflection
     ? moonlit(inputs.reflection.colour, nodes).mul(mix(float(1), float(0.8), night))
@@ -638,7 +650,7 @@ function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_N
   // above stays, so beaches and the painted shallows keep their calibrated look.
   const E = WATER_SHEEN.enhanced;
   const open: ShaderNode = smoothstep(E.openNear, E.openFar, depth);
-  const sh = waterSheen(p, slope, gust, uniforms, skyLevel.mul(SKY_IN_WATER).div(SKY_IN_WATER_LUMA), float(1));
+  const sh = waterSheen(p, slope, gust, uniforms, skyLevel.mul(skyFilter(uniforms)).div(SKY_IN_WATER_LUMA), float(1));
   const reflectance: ShaderNode = mix(strength, sh.strength.mul(E.gain), open);
   const skyMirror: ShaderNode = mix(sky, sh.sky, open);
   body = body.mul(mix(vec3(1), vec3(...E.bodyTint).mul(E.bodyScale), open));
@@ -1334,7 +1346,9 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
   // With a detail layer the column already carries the water's apparent colour (sky included, as the repaint shows
   // it): the analytic sky is reflected dimmer and greener so open water reads teal, not sky blue; mirrored cliffs and
   // trees keep their full strength.
-  const waterSky: ShaderNode = detail ? sky.mul(SKY_IN_WATER).mul(WATER_DETAIL_SKY) : sky.mul(SKY_IN_WATER);
+  const waterSky: ShaderNode = detail
+    ? sky.mul(skyFilter(uniforms)).mul(WATER_DETAIL_SKY)
+    : sky.mul(skyFilter(uniforms));
   const reflected = inputs.reflection
     ? moonlit(inputs.reflection.colour, nodes).mul(mix(float(1), float(0.8), night))
     : null;

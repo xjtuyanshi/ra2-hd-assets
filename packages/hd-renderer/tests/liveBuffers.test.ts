@@ -52,8 +52,8 @@ describe('live sprite buffers', () => {
     expect(attrs.every((a) => a.updateRanges.length === 0)).toBe(true);
     cards[0]!.anchor.x += 0.25;
     layer.setInstances(cards);
-    // Moving the anchor also moves its default light sample in the shared five-component buffer.
-    expect(buffers.anchor.updateRanges).toEqual([{ start: 15, count: 4 }]);
+    // Moving the anchor also moves its default light sample in the shared six-component buffer.
+    expect(buffers.anchor.updateRanges).toEqual([{ start: 18, count: 4 }]);
     expect(attrs.slice(1).map((a) => a.version)).toEqual(versions.slice(1));
     attrs.forEach((a) => a.clearUpdateRanges());
     const moved = attrs.map((a) => a.version);
@@ -66,12 +66,28 @@ describe('live sprite buffers', () => {
     const pool = new SpritePool();
     const source = sprite(2);
     const first = pool.take(source.anchor, source.frame, 'unit', 1, true, true, 2, 'full');
+    first.lightGain = 1 / 0.36;
     pool.begin();
     const second = pool.take(new Vector3(3, 4, 5), source.frame, 'unit', 0, false);
     expect(second).toBe(first);
     expect(second.anchor.toArray()).toEqual([3, 4, 5]);
     expect(second).toMatchObject({ flat: false, shadow: false, light: 1, lighting: 'ambient' });
+    expect(second.lightGain).toBeUndefined();
     expect(source.anchor.x).toBe(2);
+  });
+
+  it('uploads linear light gain independently of palette light and resets it on reused slots', () => {
+    const layer = new SpriteLayer(cache, [], 1);
+    const decal = { ...sprite(1, true), light: 0.8, lightGain: 1 / 0.36 };
+    layer.setInstances([decal]);
+    const buffers = layer as unknown as Buffers;
+    expect(buffers.anchor.array[5]).toBeCloseTo(1 / 0.36, 6);
+    expect(buffers.flags.array[1]).toBeCloseTo(0.8, 6);
+    layer.setInstances([sprite(1, true)]);
+    expect(buffers.anchor.array[5]).toBe(1);
+    expect(buffers.flags.array[1]).toBe(1);
+    layer.mesh.geometry.dispose();
+    layer.mesh.dispose();
   });
 
   it('preserves the projection while filling a caller-owned anchor', () => {

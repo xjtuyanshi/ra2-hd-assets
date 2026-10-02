@@ -207,7 +207,7 @@ describe('smudge revision cache', () => {
 });
 
 /** Use real CPU sprite buffers and LiveView methods after construction, without starting a browser/GPU or match. */
-function presentation(withLibrary = true) {
+function presentation(withLibrary = true, exposure?: number) {
   const ground = terrain();
   const art = library();
   const cache = {
@@ -246,6 +246,7 @@ function presentation(withLibrary = true) {
   };
   const cellLayer = new SpriteLayer(cache, [], 8);
   const backing = {
+    state: { map: { atmosphere: exposure === undefined ? undefined : { exposure } } },
     buildingLightGate: new BuildingLightGate(),
     cache,
     library: liveLibrary,
@@ -331,8 +332,8 @@ describe('LiveView smudge integration', () => {
     p.view.dispose();
   });
 
-  it('updates live overlay and smudge grids independently on the same logic frame', () => {
-    const p = presentation();
+  it.each([undefined, 0.36])('updates overlay and smudge grids independently with exposure=%s', (exposure) => {
+    const p = presentation(true, exposure);
     const overlay: LibraryOverlay = {
       sprite: 'overlay:TIB01',
       frames: 2,
@@ -352,6 +353,8 @@ describe('LiveView smudge integration', () => {
     const ore = p.backing.overlayLayers.get(3)!.layer;
     const crater = p.backing.smudgeLayers.get(1)!;
     expect([ore.mesh.count, crater.mesh.count, p.cellLayer.mesh.count]).toEqual([1, 1, 0]);
+    expect(ore.getInstances()[0]!.lightGain).toBe(exposure === undefined ? 1 : 1 / exposure);
+    expect(crater.getInstances()[0]!.lightGain).toBeUndefined();
     const oreUploads = vi.spyOn(ore, 'setInstances');
     p.view.push({ ...state, smudges: { ...state.smudges!, revision: 2, index: new Int16Array(4).fill(-1) } });
     p.view.render(2);

@@ -249,13 +249,15 @@ export interface LiveDiagnostics {
   smudgeTypesWithoutArt: string[];
 }
 
-/** Initial hour: an explicit time, else the preset's day hour on day maps, else the map's own staging hour. */
+/** Initial hour: an explicit time, else the preset's day hour on atmospheric day maps, else the map's staging. */
 export function liveTimeOfDay(
-  atmosphere: Pick<AtmosphereProfile, 'kind' | 'hour'>,
+  atmosphere: Pick<AtmosphereProfile, 'kind' | 'hour' | 'airless'>,
   options: Pick<LiveViewOptions, 'timeOfDay' | 'dayHour'>,
 ): number {
   if (options.timeOfDay !== undefined) return options.timeOfDay;
-  return atmosphere.kind === 'day' && options.dayHour !== undefined ? options.dayHour : atmosphere.hour;
+  return atmosphere.kind === 'day' && !atmosphere.airless && options.dayHour !== undefined
+    ? options.dayHour
+    : atmosphere.hour;
 }
 
 /** Runtime presentation changes (no reload): time, weather and the night dressing switches. */
@@ -721,8 +723,8 @@ export class LiveView {
     const lighting = cache.lights?.lighting.normal ??
       cache.manifest.lighting ?? { ambient: 1, level: 0.032, red: 1, green: 1, blue: 1, ground: 0 };
     const atmosphere = cache.lights
-      ? sidecarAtmosphere(cache.lights)
-      : mapAtmosphere(lighting, medianHeight(cache.height, cache.exists));
+      ? sidecarAtmosphere(cache.lights, cache.manifest.theater)
+      : mapAtmosphere(lighting, medianHeight(cache.height, cache.exists), undefined, cache.manifest.theater);
     const state: RenderState = {
       version: RENDER_STATE_VERSION,
       tick: 0,
@@ -2282,6 +2284,7 @@ export class LiveView {
       this.library?.library ?? null,
       house ?? '',
       (palette, remap) => paletteFor(this.cache, LIBRARY_PALETTE_PREFIX + palette, remap, house),
+      this.state.map.atmosphere,
     );
     if (!changed) return;
     if (wasActive !== this.overlayInstances.active) this.cellsDirty = true;

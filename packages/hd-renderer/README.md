@@ -66,14 +66,26 @@ comparisons) and `atmoperf` (frame cost, see below).
 Maps are staged from their own `[Lighting]` (`RenderMap.atmosphere`: `sidecarAtmosphere` recomputes it from the raw
 `[Lighting]` and lamp posts in the `lights.json` sidecar written by `pnpm hd:lights`, else `mapAtmosphere` from the
 manifest): day maps default to noon, warm mid-ambient maps to dusk, stock night maps to 22:00. The class comes from the
-authored `Ambient - Ground` and tint plus lamp posts as evidence, not from the height term (see
-`docs/remaster/research/yr-scene-lighting.md`). Every night-only term is exactly zero by day. By day the map's own
+authored `Ambient - Ground` and tint plus lamp posts as evidence, not from the height term, with the lunar exception
+below (see `docs/remaster/research/yr-scene-lighting.md`). Every night-only term is exactly zero by day. By day the map's own
 `[Lighting]` and light sources grade the original art as the engine does (see Original maps below); the night
 presentation below keeps the calibration it was tuned with: the day's per-channel exposure, faithful display transform,
 bloom threshold and sprite level blend into `pi / referenceIrradiance()`, PBR Neutral, the 0.85 threshold and the scene
 level with the night weight, and the day map grade fades out with it (the night keys already derive their level and
 tint from the same `[Lighting]`).
 
+- **Lunar staging.** Theater `lunar` always defaults to day at 12:00, with `airless: true`; its low ambient is dim
+  airless daylight. The optional profile `exposure` scales day sun and sky intensities in linear light:
+  `clamp(engineToLinear(Ambient - Ground + Level * medianZ) / engineToLinear(1), 0.2, 1)`, where
+  `engineToLinear(e) = 0.30 * (e / 0.62)^2.2`. Sun and sky are luminance-matched neutral greys multiplied by the
+  map tint normalised to Rec.709 luminance 1. MoonPatr (`0.65`, RGB `1/1/1.1`, Ground `0.05`, Level `0.008`) is about
+  0.36 of noon, retaining only the authored slight cool tint. Day exposure adaptation and the map's palette grade
+  must not apply the ambient a second time or lift it back to noon; airless sky/haze and display-grade colours do
+  not add the terrestrial blue cast. Default lunar staging keeps lamps and night dressing off. The game policy
+  gives library ore/gem overlay sprites (`tiberium` types) a generic per-instance light gain of `1 / exposure`, so
+  their art keeps noon brightness while the regolith stays dim; other sprite classes retain gain 1. Profiles without
+  these optional fields retain their existing rendering. See the research note for the frozen-frame evidence and
+  visual comparison procedure; the code-only C1 change has no new on-screen acceptance result.
 - **Night level.** Night light keys are scaled so unlit flat ground shows the profile's night level (30 % of noon
   for a typical stock night, 26-40 % for night maps), 40 % from a desaturated moon and 60 % from the sky. Moonlight is
   cool (`MOON_TINT`); only maps built as night maps add their own `[Lighting]` tint, a day map's warm grade never tints
@@ -611,7 +623,8 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   level x per-channel colour, objects (buildings, units, infantry, aircraft) the level only, both on the palette's own
   sRGB values. `SpriteInstance.lighting` selects the class per sprite (`'ambient'` by default, `'full'`, `'none'`); map
   objects take `MapObject.lighting`. Each map cache owns its grade (`Ra2Cache.mapLight`), live light sources update it
-  through the night dressing, and the renderer weights it with the day (`setWeight`, baked into the texels). The HD
+  through the night dressing, and the renderer weights it with the day (`setWeight`, baked into the texels). Lunar
+  airless staging instead owns the map's ambient and tint in its sun/sky keys, without applying this grade again. The HD
   water look takes no grade of its own (it mixes the graded tile art's hue in already).
 - Terrain (`terrain.ts`): original tile art is lit by plain Lambert diffuse from the sun and sky, with specular only on
   wet ground, so flat ground at clear noon shows exactly composite x map lighting. Contact shading from the height

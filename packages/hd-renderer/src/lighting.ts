@@ -181,8 +181,9 @@ const matchedGrey = (grey: Color, like: Color): Color =>
   grey.clone().multiplyScalar(luminanceOf(like) / Math.max(1e-6, luminanceOf(grey)));
 
 /**
- * Light keys adjusted to a map's atmosphere profile. Day keys (night = 0) are the very same objects, so daytime
- * lighting is unchanged bit for bit. Night-weighted keys get:
+ * Light keys adjusted to a map's atmosphere profile. Day keys (night = 0) are the very same objects unless exposure
+ * or airless daylight is requested. Exposure scales their sun/sky radiance; airless keys replace each colour with
+ * luminance-matched grey carrying only the map tint, normalised to luminance 1. Night-weighted keys get:
  *   - moon and night sky desaturated 30 % towards a luminance-matched grey (the original palettes stay readable);
  *   - the cool MOON_TINT, times the map's [Lighting] tint (square root) when the map was built as a night map, both
  *     normalised to luminance 1 and applied in proportion to the key's night weight;
@@ -197,7 +198,23 @@ export function profileKeys(profile: AtmosphereProfile): LightKey[] {
   moon.multiplyScalar(1 / Math.max(1e-6, luminanceOf(moon)));
   return KEYS.map((key) => {
     const n = key.night;
-    if (n === 0) return key;
+    if (n === 0) {
+      if (profile.exposure === undefined && !profile.airless) return key;
+      const exposure = profile.exposure ?? 1;
+      const tint = new Color(...profile.tint);
+      const colour = (original: Color): Color => (profile.airless ? matchedGrey(tint, original) : original);
+      return {
+        ...key,
+        sun: colour(key.sun),
+        sunIntensity: key.sunIntensity * exposure,
+        hemiSky: colour(key.hemiSky),
+        hemiGround: colour(key.hemiGround),
+        hemiIntensity: key.hemiIntensity * exposure,
+        // Reflections consume these radiance swatches directly, without a separate sky intensity.
+        skyZenith: colour(key.skyZenith).clone().multiplyScalar(exposure),
+        skyHorizon: colour(key.skyHorizon).clone().multiplyScalar(exposure),
+      };
+    }
     const tint = new Color(1, 1, 1).lerp(moon, n);
     const sun = key.sun
       .clone()
@@ -330,6 +347,8 @@ export class Lighting {
         !!this.profile &&
         profile.kind === this.profile.kind &&
         profile.nightLevel === this.profile.nightLevel &&
+        profile.exposure === this.profile.exposure &&
+        profile.airless === this.profile.airless &&
         profile.tint[0] === this.profile.tint[0] &&
         profile.tint[1] === this.profile.tint[1] &&
         profile.tint[2] === this.profile.tint[2]);
@@ -434,7 +453,7 @@ export class Lighting {
     const hemiColor = this.hemi.color.copy(a.hemiSky).lerp(b.hemiSky, t);
     this.hemi.groundColor.copy(a.hemiGround).lerp(b.hemiGround, t);
     let hemiIntensity = lerp(a.hemiIntensity, b.hemiIntensity, t);
-    if (overcast > 0) {
+    if (overcast > 0 && !(this.profile?.airless && night === 0)) {
       const clearFlat = this.flatLuminance(sunColor, sunIntensity, hemiColor, hemiIntensity);
       // Scratch colours: this runs every frame in rain.
       const grey = this.grey.copy(OVERCAST_GREY).multiplyScalar(luminanceOf(hemiColor) / luminanceOf(OVERCAST_GREY));
