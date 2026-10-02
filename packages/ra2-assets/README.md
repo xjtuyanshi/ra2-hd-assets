@@ -937,16 +937,20 @@ For a theatre whose art differs in only part of a frame, use:
 
 ```sh
 python3 python/theatre_pages.py variant-xfer "$THEATRE" "$URBAN" "$BASELINE" \
-  --pages 0,1 --detail 0.35 --max-changed 0.6
+  --pages 0,1 --detail 0.35 --max-changed 0.6 --tolerance 14 --min-area 3
 ```
 
 `variant-xfer` matches sprite id, frame index and palette key, then aligns the cropped frames on their union box.
 `SpriteFrame.offset` is the crop's top-left relative to the SHP canvas centre (the draw origin), not the atlas origin
 or full-canvas top-left: `src/node/artSource.ts` subtracts half the SHP canvas size during extraction, and
 `src/node/libraryPreview.ts` draws each crop at that offset. This alignment also handles a changed crop size or offset.
-The changed mask compares opaque 1x indices and their used palette colours, including pixels opaque in just one frame;
-transparent index 0 is ignored. For remapped sprites, index and colour differences within house-paint indices 16–31
-are ignored when both pixels stay in that ramp; transitions to non-paint or transparency still count.
+The changed mask compares opaque 1x pixels by CIE76 Delta E between their palette colours in CIE Lab (L in 0–100),
+marking differences strictly above `--tolerance` (default 14). Different indices with similar colours stay unchanged,
+so re-render shading and dither can retain urban detail. For remapped sprites, two house-paint indices 16–31 count as
+the same; exactly one house-paint index counts as a colour change regardless of Delta E. The colour mask removes
+8-connected components smaller than `--min-area` 1x pixels (default 3, positive integer), then closes with a 3x3 square
+to fill small holes in surviving regions. Pixels opaque in just one frame always count as changed and are added after
+cleanup, so even single-pixel silhouette changes survive. Pixels transparent in both frames do not seed colour changes.
 Frames without an eligible HD counterpart, with an empty urban frame, or whose changed area exceeds `--max-changed`
 of the theatre frame's opaque area retain the baseline unchanged. Baseline files are `sprites-N@2x.png` and
 `sprites-N@2x-remap.png`; a page needing unavailable baseline files is skipped, while a fully exact page can be
@@ -968,8 +972,9 @@ are reported rather than silently changing those inputs.
 Pages publish as unique `sprites-N@2x-vxfer-<uuid>.png` files with `-remap` and `-normals` companions, filling missing HD
 entries by default. `--refresh-owned` can replace only current `-vxfer-` entries; other HD entries stay untouched.
 Each page prints urban-exact, variant, baseline and silhouette-QA failure counts. Atomic `variant-xfer-report.json`
-records those counts by page and sprite id, the parameters and whether each page was published. Library and normals
-publication in `xfer`, `variant-xfer`, `overlay-walls` and `normals-merge` holds both `.compose.lock` and the corresponding
+records those counts by page and sprite id, the parameters (including `tolerance` and `min_area`) and whether each page
+was published. Library and normals publication in `xfer`, `variant-xfer`, `overlay-walls` and `normals-merge` holds
+both `.compose.lock` and the corresponding
 cache-farm per-file lock (`.library.json.lock` or `.normals.json.lock`); atomic replacement materialises a farm symlink
 without writing through it to a shared source.
 

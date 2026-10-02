@@ -292,13 +292,25 @@ def aligned_block(block, shape, origin, scale=1):
     return out
 
 
-def variant_mask(target, source, target_palette, source_palette, remap=False):
-    """Compare visible indices and their used colours, excluding house-paint colours."""
+def variant_mask(target, source, target_palette, source_palette, remap=False, tolerance=14, min_area=3):
+    """Keep perceptual colour regions and every native silhouette difference."""
     opaque_t, opaque_s = target > 0, source > 0
     both = opaque_t & opaque_s
-    paint = both & (target >= 16) & (target <= 31) & (source >= 16) & (source <= 31) if remap else np.zeros_like(both)
-    colour_diff = np.any(target_palette[target] != source_palette[source], axis=-1)
-    return (opaque_t ^ opaque_s) | (both & ~paint & ((target != source) | colour_diff))
+    # Float RGB conversion gives CIE Lab L in 0..100, not OpenCV's encoded uint8 Lab.
+    lab_t = cv2.cvtColor(target_palette[None].astype(np.float32) / 255, cv2.COLOR_RGB2LAB)[0]
+    lab_s = cv2.cvtColor(source_palette[None].astype(np.float32) / 255, cv2.COLOR_RGB2LAB)[0]
+    delta_e = np.linalg.norm(lab_t[target] - lab_s[source], axis=-1)
+    colour = both & (delta_e > tolerance)
+    if remap:
+        paint_t, paint_s = (target >= 16) & (target <= 31), (source >= 16) & (source <= 31)
+        colour = (colour & ~(paint_t & paint_s)) | (both & (paint_t ^ paint_s))
+    # Remove dither speckles before filling small gaps inside surviving snow regions.
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(colour.astype(np.uint8), connectivity=8)
+    keep = stats[:, cv2.CC_STAT_AREA] >= min_area
+    keep[0] = False
+    colour = cv2.morphologyEx(keep[labels].astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    # Silhouette changes are never filtered, even when only one native pixel differs.
+    return (opaque_t ^ opaque_s) | colour.astype(bool)
 
 
 def feather_mask(changed):
@@ -350,12 +362,17 @@ def transfer_counts():
     return dict(urban_exact=0, variant=0, baseline=0, qa_silhouette_failures=0)
 
 
-def variant_xfer(theatre, urban, baseline, pages=None, refresh_owned=False, detail=0.35, max_changed=0.6):
+def variant_xfer(theatre, urban, baseline, pages=None, refresh_owned=False, detail=0.35, max_changed=0.6,
+                 tolerance=14, min_area=3):
     """Reuse accepted redraws, replacing only aligned native-art differences."""
     if not np.isfinite(detail) or detail < 0:
         raise ValueError('detail must be finite and nonnegative')
     if not np.isfinite(max_changed) or not 0 <= max_changed <= 1:
         raise ValueError('max-changed must be between 0 and 1')
+    if not np.isfinite(tolerance) or tolerance < 0:
+        raise ValueError('tolerance must be finite and nonnegative')
+    if not isinstance(min_area, int) or min_area < 1:
+        raise ValueError('min-area must be a positive integer')
     tdir, udir, base = Path(theatre), Path(urban), Path(baseline)
     if tdir.resolve() == udir.resolve():
         raise ValueError('theatre and urban directories must differ')
@@ -388,7 +405,8 @@ def variant_xfer(theatre, urban, baseline, pages=None, refresh_owned=False, deta
                     raise ValueError(f'source material dimensions differ on page {page}')
             return colour, remap, material, factor
 
-        report = dict(version=1, parameters=dict(detail=detail, max_changed=max_changed), pages={}, sprites={})
+        report = dict(version=1, parameters=dict(detail=detail, max_changed=max_changed,
+                                                tolerance=tolerance, min_area=min_area), pages={}, sprites={})
         hd_entries, material_entries, owned_entries = {}, {}, {}
         pages = range(len(target['spriteAtlases'])) if pages is None else pages
         for page in dict.fromkeys(pages):
@@ -437,7 +455,7 @@ def variant_xfer(theatre, urban, baseline, pages=None, refresh_owned=False, deta
                         union, origins = frame_union(frame, other)
                         ti, ui = aligned_block(own, union, origins[0]), aligned_block(native, union, origins[1])
                         key = sprite.get('palette')
-                        changed = variant_mask(ti, ui, tp[key], sp[key], bool(sprite.get('remap')))
+                        changed = variant_mask(ti, ui, tp[key], sp[key], bool(sprite.get('remap')), tolerance, min_area)
                         # Removed source pixels count too; they must not survive as ghost edges.
                         fraction = np.count_nonzero(changed) / max(1, np.count_nonzero(own))
                         if native.any() and fraction <= max_changed:
@@ -769,6 +787,8 @@ def parser():
     p.add_argument('--refresh-owned', action='store_true', help='regenerate only earlier -vxfer- HD entries')
     p.add_argument('--detail', type=float, default=0.35, help='source Lab luminance detail strength (default: 0.35)')
     p.add_argument('--max-changed', type=float, default=0.6, help='maximum changed/target-opaque ratio (default: 0.6)')
+    p.add_argument('--tolerance', type=float, default=14, help='CIE76 Delta E colour threshold (default: 14)')
+    p.add_argument('--min-area', type=int, default=3, help='minimum 8-connected colour region in 1x pixels (default: 3)')
     p = commands.add_parser('overlay-walls', help='redirect wall overlays to HD building frames')
     p.add_argument('library', type=Path)
     p.add_argument('types', nargs='*', default=WALL_TYPES)
@@ -798,7 +818,8 @@ def main(argv=None):
             print('THEATRE_XFER_DONE', xfer(args.theatre, args.urban, args.baseline, args.pages, args.refresh_owned))
         elif args.command == 'variant-xfer':
             print('THEATRE_VARIANT_XFER_DONE', variant_xfer(args.theatre, args.urban, args.baseline, args.pages,
-                                                          args.refresh_owned, args.detail, args.max_changed))
+                                                          args.refresh_owned, args.detail, args.max_changed,
+                                                          args.tolerance, args.min_area))
         elif args.command == 'overlay-walls':
             print('patched', len(overlay_walls(args.library, args.types)))
         elif args.command == 'copy-patches':

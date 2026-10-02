@@ -781,6 +781,94 @@ class VariantTransferTests(unittest.TestCase):
         self.assert_silhouette(colour, self.indices)
         self.assert_counts(exact=1)
 
+    def test_dither_only_index_differences_below_tolerance_copy_urban_exactly(self):
+        palette = self.palette.copy()
+        palette[0, 42] = [92, 103, 111]
+        Image.fromarray(palette).save(self.theatre / 'palette.png')
+        changed = self.indices.copy()
+        changed[::2] = 42
+        changed[:, ::2] = 42
+        Image.fromarray(changed).save(self.theatre / 'index.png')
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+        _, colour, remap, material = self.outputs()
+        np.testing.assert_array_equal(colour, self.colour)
+        np.testing.assert_array_equal(remap, self.remap)
+        np.testing.assert_array_equal(material, self.material.repeat(2, 0).repeat(2, 1))
+        self.assert_counts(exact=1)
+
+    def test_white_blob_closes_holes_and_removes_one_and_two_pixel_speckles(self):
+        palette = self.palette.copy()
+        palette[0, 41] = [245, 245, 245]
+        Image.fromarray(palette).save(self.theatre / 'palette.png')
+        changed = self.indices.copy()
+        changed[8:15, 8:15] = 41
+        changed[11, 11] = 40
+        changed[2, 2] = 41
+        changed[20, 2:4] = 41
+        Image.fromarray(changed).save(self.theatre / 'index.png')
+        expected = np.zeros_like(changed, dtype=bool)
+        expected[8:15, 8:15] = True
+        mask = tp.variant_mask(changed, self.indices, palette[0], self.palette[0])
+        np.testing.assert_array_equal(mask, expected)
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, detail=0), [0])
+        _, colour, _, _ = self.outputs()
+        np.testing.assert_array_equal(colour[16:30, 16:30], self.base_colour[16:30, 16:30])
+        for region in ((slice(4, 6), slice(4, 6)), (slice(40, 42), slice(4, 8))):
+            np.testing.assert_array_equal(colour[region], self.colour[region])
+        self.assert_counts(variant=1)
+
+    def test_colour_components_use_eight_connectivity_and_minimum_area(self):
+        changed = self.indices.copy()
+        changed[6, 6] = changed[7, 7] = changed[8, 8] = 41
+        changed[17, 17] = changed[18, 18] = 41
+        mask = tp.variant_mask(changed, self.indices, self.palette[0], self.palette[0])
+        self.assertTrue(mask[6, 6] and mask[7, 7] and mask[8, 8])
+        self.assertFalse(mask[17, 17] or mask[18, 18])
+        self.assertFalse(tp.variant_mask(changed, self.indices, self.palette[0], self.palette[0],
+                                         min_area=4).any())
+
+    def test_delta_e_uses_lab_units_and_a_strict_tolerance(self):
+        palette = self.palette[0].copy()
+        palette[40], palette[41] = [0, 0, 0], [255, 255, 255]
+        changed = np.full_like(self.indices, 41)
+        # Black and white differ by exactly 100 in CIE76, not the uint8 Lab scale.
+        self.assertFalse(tp.variant_mask(changed, self.indices, palette, palette, tolerance=100).any())
+        self.assertTrue(tp.variant_mask(changed, self.indices, palette, palette, tolerance=99).all())
+
+    def test_exactly_one_house_paint_index_changes_even_with_identical_colours(self):
+        changed = self.indices.copy()
+        changed[10:13, 10:13] = 16
+        Image.fromarray(changed).save(self.theatre / 'index.png')
+        for directory, library in ((self.urban, self.source), (self.theatre, self.target)):
+            library['sprites'][self.sprite_id]['remap'] = True
+            write_json(directory / 'library.json', library)
+        for target, source in ((changed, self.indices), (self.indices, changed)):
+            mask = tp.variant_mask(target, source, self.palette[0], self.palette[0], remap=True)
+            np.testing.assert_array_equal(mask, changed == 16)
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, detail=0), [0])
+        _, colour, remap, _ = self.outputs()
+        np.testing.assert_array_equal(colour[20:26, 20:26], self.base_colour[20:26, 20:26])
+        np.testing.assert_array_equal(remap[20:26, 20:26], self.base_remap[20:26, 20:26])
+        self.assert_counts(variant=1)
+
+    def test_tiny_alpha_addition_and_removal_survive_colour_cleanup(self):
+        changed, source = self.indices.copy(), self.indices.copy()
+        changed[4, 4] = 0
+        source[19, 19] = 0
+        Image.fromarray(changed).save(self.theatre / 'index.png')
+        Image.fromarray(source).save(self.urban / 'index.png')
+        self.colour[38:40, 38:40, 3] = 0
+        Image.fromarray(self.colour).save(self.urban / 'hd.png')
+        self.write_baseline(changed)
+        mask = tp.variant_mask(changed, source, self.palette[0], self.palette[0], min_area=1000)
+        np.testing.assert_array_equal(mask, (changed > 0) ^ (source > 0))
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, detail=0, min_area=1000), [0])
+        _, colour, _, _ = self.outputs()
+        for region in ((slice(8, 10), slice(8, 10)), (slice(38, 40), slice(38, 40))):
+            np.testing.assert_array_equal(colour[region], self.base_colour[region])
+        self.assert_silhouette(colour, changed)
+        self.assert_counts(variant=1)
+
     def test_three_by_three_patch_keeps_distant_redraw_and_adds_lab_detail(self):
         changed = self.change_patch()
         self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, detail=0.35), [0])
@@ -796,7 +884,7 @@ class VariantTransferTests(unittest.TestCase):
                                         - self.base_colour[20:26, 20:26, :3].astype(int))), 1)
         self.assert_silhouette(colour, changed)
         report = self.assert_counts(variant=1)
-        self.assertEqual(report['parameters'], dict(detail=0.35, max_changed=0.6))
+        self.assertEqual(report['parameters'], dict(detail=0.35, max_changed=0.6, tolerance=14, min_area=3))
 
     def test_material_and_remap_use_urban_outside_changed_region_and_baseline_inside(self):
         self.change_patch()
@@ -1040,15 +1128,19 @@ class VariantTransferTests(unittest.TestCase):
         self.change_patch()
         command = [sys.executable, '-B', tp.__file__, 'variant-xfer', str(self.theatre), str(self.urban),
                    str(self.baseline), '--pages', '0', '--detail', '0', '--max-changed', '0.7']
-        first = subprocess.run(command, capture_output=True, text=True)
+        first = subprocess.run(command + ['--tolerance', '12', '--min-area', '2'], capture_output=True, text=True)
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertIn('page 0:', first.stdout)
         self.assertIn('variant', first.stdout)
         self.assertIn('baseline', first.stdout)
         report = self.assert_counts(variant=1)
-        self.assertEqual(report['parameters'], dict(detail=0.0, max_changed=0.7))
+        self.assertEqual(report['parameters'], dict(detail=0.0, max_changed=0.7, tolerance=12.0, min_area=2))
         old = tp.read_json(self.theatre / 'library.json')['spriteAtlasesHd'][0]
-        second = subprocess.run(command + ['--refresh-owned'], capture_output=True, text=True)
+        second = subprocess.run(command + ['--refresh-owned', '--tolerance', '100', '--min-area', '10'],
+                                capture_output=True, text=True)
         self.assertEqual(second.returncode, 0, second.stderr)
-        new = tp.read_json(self.theatre / 'library.json')['spriteAtlasesHd'][0]
+        new, colour, _, _ = self.outputs()
         self.assertNotEqual(old['file'], new['file'])
+        np.testing.assert_array_equal(colour, self.colour)
+        report = self.assert_counts(exact=1)
+        self.assertEqual(report['parameters'], dict(detail=0.0, max_changed=0.7, tolerance=100.0, min_area=10))
