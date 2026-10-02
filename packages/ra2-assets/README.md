@@ -451,6 +451,27 @@ were measured: 17.75 engine px on the battle framing); `reach base img cx,cy box
 changed pixels from a centre, in engine pixels. Test: `python3 -m unittest test_emissive_metrics` (synthetic,
 asset-free).
 
+Containment measurements use NumPy and Pillow only; RGB thresholds are in 0..1 units. Boxes are `x0,y0,x1,y1`
+with exclusive right/bottom bounds. Polygons are `"x,y;x,y;..."`, filled by the even-odd rule at pixel centres.
+
+- `mask present.png absent.png out.png [--threshold 0.04] [--dilate 2]`: threshold the maximum absolute RGB-channel
+  difference; retain the largest 8-connected component and original components touching its square dilation
+  (radius N pixels), then fill holes. Write a 0/255 grayscale PNG and JSON `{area, bbox}` (empty bbox: `null`).
+- `outside base.png img.png (--mask mask.png | --poly "...") [--box x0,y0,x1,y1] [--dv 0.03]`: count pixels with
+  increased HSV value **or** blueness `b - (r + g) / 2` by at least `dv`. JSON contains `outside`, `inside`,
+  `max_v_increase_outside` (maximum positive V change across the exterior region) and `outside_clusters` (up to
+  five bounding boxes, largest first, 8-connected, area >= 4). All measurements respect the optional box.
+- `footprint x y w h [--height H] [--scale S] [--cell 60x30]`: `(x, y)` is the foundation's top corner; `w, h` are
+  cells along the two isometric axes. Print the diamond as a polygon rounded to 0.1 image px, or the convex hull
+  with a copy shifted up by `H * S`. `S` is image px per engine px (default 1); cell dimensions are engine px.
+- `pairgate orig.png hd.png x0,y0,x1,y1 --poly "..." [--max-ratio 1.1] [--tol 0]`: JSON gives `orig`/`hd` class
+  counts, `satblue_ratio`, `outside_orig`/`outside_hd` (blue or lavender outside the polygon), `pass_ratio`,
+  `pass_outside` and combined `pass`. Gates require ratio <= max-ratio and outside_hd <= outside_orig + tol.
+  With no original blue, ratio is `null` and the ratio gate passes only with no HD blue. Completed measurements
+  exit 0 even when gates fail. Use frozen original/HD pairs of the same frame.
+
+Run from `packages/ra2-assets/python`: `python3 -m unittest -q test_emissive_metrics` (synthetic, asset-free).
+
 ## Water surface, detail and cliff-foot stripe tools (Python)
 
 These NumPy/Pillow/OpenCV tools take all input and output paths as arguments, generate PNGs outside Git, and never
