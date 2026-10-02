@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Color, Mesh } from 'three/webgpu';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createScenario } from '../sandbox/scenario';
-import { applyLookPreset, HdRenderer, mapPresentation } from '../src/HdRenderer';
+import { applyLookPreset, DUSK_EXPOSURE, HdRenderer, mapPresentation } from '../src/HdRenderer';
 import type { AtmosphereProfile, MapLighting, Weather } from '../src/contract';
 import { Lighting } from '../src/lighting';
 import type { LightField } from '../src/lightField';
@@ -109,6 +109,7 @@ describe('authored dusk staging', () => {
   it('keeps all engine source light and disables the three adaptations without mutating look settings', () => {
     const settings = { adaptExposure: 0.85, whiteAdapt: 0.85, mapTintAdapt: 0.3, mapSourcesByDay: 0.2 };
     expect(mapPresentation('dusk', 0, settings)).toEqual({
+      exposureScale: DUSK_EXPOSURE,
       mapWeight: 1,
       sourceWeight: 1,
       adaptExposure: 0,
@@ -118,6 +119,7 @@ describe('authored dusk staging', () => {
     for (const kind of ['day', 'night'] as const) {
       for (const night of [0, 0.29304, 1]) {
         expect(mapPresentation(kind, night, settings)).toEqual({
+          exposureScale: 1,
           mapWeight: kind === 'day' ? 1 - night : 0,
           sourceWeight: 0.2,
           adaptExposure: 0.85,
@@ -301,7 +303,7 @@ describe('renderer faithfulness controls', () => {
     });
   }
 
-  it('uses the complete engine dusk grade with unadapted noon exposure and no duplicate lamp field', () => {
+  it('uses the complete engine dusk grade with unadapted noon exposure (dusk-calibrated) and no duplicate lamp field', () => {
     const f = headless(dusk, 'clear');
     try {
       f.hd.frame(0);
@@ -310,7 +312,12 @@ describe('renderer faithfulness controls', () => {
       expect(f.internals.staticGain).toBe(0);
       expect(f.fieldUpdate).toHaveBeenLastCalledWith(expect.any(Number), f.hd.renderer, 0);
       const noon = f.internals.noonIrradiance;
-      expectRgb(f.internals.exposure.value.toArray(), [Math.PI / noon.r, Math.PI / noon.g, Math.PI / noon.b]);
+      // Noon exposure (no adaptation) with the dusk calibration factor only.
+      expectRgb(f.internals.exposure.value.toArray(), [
+        (Math.PI / noon.r) * DUSK_EXPOSURE,
+        (Math.PI / noon.g) * DUSK_EXPOSURE,
+        (Math.PI / noon.b) * DUSK_EXPOSURE,
+      ]);
       const before = f.controls();
       Object.assign(f.hd.settings, { adaptExposure: 0, whiteAdapt: 0, mapTintAdapt: 0, mapSourcesByDay: 1 });
       f.hd.frame(0);

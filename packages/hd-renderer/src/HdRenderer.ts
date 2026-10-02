@@ -342,6 +342,14 @@ const CLARITY_SIGMA = 5;
 const MAX_ADAPT = 2.2;
 
 /** Effective map presentation, separate from the user's look settings and all scene-event inputs. */
+/**
+ * Exposure of authored dusk maps relative to the day calibration. Same-frame replay of DuskPen (Ambient 0.73, RGB
+ * 1/0.92/0.8, Level 0.035) against the original: HD/original pixel median (1.114, 1.17, 1.034) while the day calibration
+ * on XMP29U2 gives (0.982, 1.036, 1.149); the dusk path lacks the day path's exposure normalisation detail, so it reads
+ * about 12 % brighter than the original. 0.9 brings it back in line with the day maps.
+ */
+export const DUSK_EXPOSURE = 0.9;
+
 export function mapPresentation(
   kind: AtmosphereProfile['kind'] | undefined,
   night: number,
@@ -349,6 +357,8 @@ export function mapPresentation(
 ) {
   const dusk = kind === 'dusk';
   return {
+    /** Extra exposure factor of the clear-light calibration (1 except authored dusk, see DUSK_EXPOSURE). */
+    exposureScale: dusk ? 1 + (DUSK_EXPOSURE - 1) * (1 - night) : 1,
     mapWeight: kind === 'day' || dusk ? 1 - night : 0,
     sourceWeight: dusk ? 1 : settings.mapSourcesByDay,
     adaptExposure: dusk ? 0 : settings.adaptExposure,
@@ -1179,6 +1189,7 @@ export class HdRenderer {
         // The map light's day weight is set below for this frame; last frame's weight is the same within a frame.
         neutralizeMapTint(exposure, mapLight.lighting, presentation.mapTintAdapt * mapLight.currentWeight);
       }
+      if (presentation.exposureScale !== 1) exposure.multiplyScalar(presentation.exposureScale);
     } else {
       exposure.setScalar(this.settings.exposure * light.exposure);
     }
