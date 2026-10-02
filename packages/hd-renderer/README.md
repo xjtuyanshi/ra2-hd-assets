@@ -351,7 +351,7 @@ shadow stretch takes the original calculation, and other neutral gains multiply 
 | `occlusion`                                     | Baked occlusion of the material atlas (wall feet, roofs next to higher tiers) and soft ground contact decals around foundations.                                                                                                                                                                                                                                                                                                                        |
 | `shadowFollow`, `shadowSoftness`                | SHP shadow decals turn and stretch about their object's base with the sun (voxel shadows turn with them); their penumbra grows with distance.                                                                                                                                                                                                                                                                                                           |
 | `wetReflections`                                | Upright art mirrored about its base line on wet paving (short, rippled, strongest in puddles).                                                                                                                                                                                                                                                                                                                                                          |
-| `sourceLights`                                  | HD building emitter gain: default and `faithful` 0; `golden` / `cinematic` 1. The Tesla reactor emits blue ground/object light outside its foundation, an unbloomed white-hot plasma orb and forked arcs (emissive overlay); the Tesla coil, war factory doors and Soviet refinery furnace add smaller lights (mostly after dusk).                                                                                                                      |
+| `sourceLights`                                  | HD building emitter gain: default and `faithful` 0; `golden` / `cinematic` 1. The Tesla reactor adds a small blue ground pool, an unbloomed glass tint and thin internal lightning with at most one short cradle strike; the Tesla coil, war factory doors and Soviet refinery furnace add smaller lights (mostly after dusk).                                                                                                                          |
 | `mapSourcesByDay`                               | Share of the map's light sources (lamp posts such as `INGALITE`) in the map's day light: default, `faithful` and `golden` 1 (the engine's); `cinematic` 0.2. At full share a city park framing rendered its lawn at L* 53 against the approved target's 45 (34 without lamps), and a Tesla reactor beside a lamp stood on near-white pavement; a fifth keeps the lawn green (hue 58) at L* 44. The night presentation owns lamps after dusk either way. |
 | `sunPath`                                       | `'arc'`: `Lighting.sunArc`, east in the morning, over the camera side at noon, west in the evening (the art's azimuth at 15:00); `'fixed'`: the classic azimuth.                                                                                                                                                                                                                                                                                        |
 | `adaptExposure`                                 | Lifts early and late daylight towards noon's flat-ground brightness (the colour of the light stays).                                                                                                                                                                                                                                                                                                                                                    |
@@ -394,13 +394,12 @@ building/anim bytes and layer order. Stock hysteresis suppresses detail-2 art be
 These off windows are renderer fallback, not delayed lights or game-state changes. Address evidence and
 validation boundaries stay in [HD bridge research](../../docs/remaster/research/hd-bridge-fields.md#activeanim-and-native-dynamic-detail).
 
-The reactor uses `SHAPE_SOFT`: a Euclidean, world-space radial pool centred on the foundation centre, radius 2.6
-cells, no exclusion hole, weight `(1 - smoothstep(0, 1, distance / radius))^2`. The field's existing up-to-eight
+The reactor uses `SHAPE_SOFT`: a Euclidean, world-space radial pool centred on the foundation centre, radius 1
+cell, no exclusion hole, weight `(1 - smoothstep(0, 1, distance / radius))^2`. The field's existing up-to-eight
 texels per cell and linear min/mag filtering keep the profile continuous across cell boundaries. Its night irradiance
-is `[0.75, 2.1, 12.75]`, with day share 0.066 (day luminance about 0.17 before flicker: +16 % luminance measured on the
-grass beside two live reactors; a third of this night value left the hour-21 pavement unchanged). This replaces the measured
-lavender-white pool that raised pavement from L* 36 to 53. Rectangle-edge pools and foundation holes remain available
-for other sources, including the refinery.
+is `[0.45, 1.25, 7.6]`, with day share 0.11 (day luminance about 0.17 before flicker, within 2 % of L5G). The smaller
+pool confines the tint to the reactor's own 3x2 foundation instead of washing neighbouring pavement and facades blue.
+Rectangle-edge pools and foundation holes remain available for other sources, including the refinery.
 
 A source's `groundOnly` share is summed as luminance in the field's alpha channel, independently of RGB. Upright
 building sprites sample this share inside their own foundation instead of the ground in front of the card
@@ -411,28 +410,29 @@ lit colour in the same units. Lamp-lit sandstone cannot accumulate a white veil;
 within dark-ground headroom remain unscaled. This replaces per-source lamp gains; the clamp is dormant with
 `sourceLights=0`, retaining faithful local-light rendering.
 
-The reactor's clipped plasma orb and confined arcs use the generic `src/emissiveOverlay.ts`, outside bloom and
-`BeamLayer`. The orb matches the art's measured glass radius (17.75 engine px, 0.418 world units) with no halo;
+The owner read the earlier white core and outward lightning as "a Tesla coil about to explode". The original is a
+glass globe with lightning inside: energy stays inside the machine. The HD art's own `NAPOWR_A` frames paint the glass,
+lightning and cradle crackle, so the overlay only tints the glass and adds thin internal lightning with a short cradle
+strike. It uses the generic `src/emissiveOverlay.ts`, outside bloom and `BeamLayer`.
+
+The clipped orb matches the art's measured glass radius (17.75 engine px, 0.418 world units) with no halo;
 its head remains at foundation [0.47, 0.40], 27 px up. A screen-space occluder wedge at (+11.5, -1.5) engine px,
 between -22 and 90 degrees in the y-down frame, preserves the front-right tower overlap. Radial and wedge edges
-use derivatives for roughly one device pixel of antialiasing. Display-linear colours run from a cyan-white core
-(sRGB 225/252/255 to 130/220/255 at 0.48 radii, opaque; cyan hues below 200 count neither as the reviews' saturated
-blue nor as lavender) to a saturated blue body (35/85/255) at about half opacity (`bodyAlpha` 0.52 from 0.75 radii),
-revealing the painted glass swirl, then a glassy limb (110/160/245, `limbAlpha` 0.62). At 0.45 opacity the body left
-the pale painted glass lavender (replay lavender 2354 against the 2000 gate); a paler body (60/115/255 at 0.5) left a
-live frame of two reactors at 0.88-0.94 times the original's saturated blue. An earlier native image beside a map
-lamp (`INGALITE`) measured a pale sphere (near the reactor: saturated blue 324, lavender 1435), while the HD
-overlay stayed blue, so that frame read about 1.6 times the original. That image alone does not establish a
-light-source cause; the ActiveAnim/detail evidence above identifies the native off windows.
+use derivatives for roughly one device pixel of antialiasing. The hot, mid and body colours are blue-violet tints,
+with core/body/limb opacity at most 0.35 and `filamentMix=0`: no white-hot core or procedural radial spokes hide the
+painted glass and lightning.
 
-Each reactor has 4–5 crawling filaments from the white core's edge (0.3–0.42 radii) to the glass and three
-rim-to-pylon/pad strikes. Filaments and their optional forks stay inside 0.985 radii and clear the tower wedge;
-strikes target six measured anchors and every vertex stays within the glass radius plus 12 engine px (about 0.3 of a
-cell beyond the glass). All vertices lie in the camera's screen plane before depth push; strokes sit just 0.05 world
-units ahead of the disc. Capsule widths are 2 engine px (forks 1.3), with a cyan-white core occupying 45 % of the
-half-width; each arc/fork has a 3 times wider blue under-stroke at 0.45 opacity that starts at half radius
-(`glowStart`): converging filament glows otherwise stained the white core blue. Gates on the battle and replay
-framings against the faithful render of the same frame: saturated blue 1.33x / 1.45x, lavender 782 / 1220.
+Each reactor has 3–4 crawling filaments from 0.08–0.22 to 0.55–0.85 radii, ending inside the glass. Optional forks
+end at `min(0.95, filamentEnd[1])` radii; filaments and forks clear the tower wedge. At most one strike starts at
+0.95 radii and drops into the cradle anchors ([-12, 22], [-2, 26], [8, 22] engine px), never to the coil or towers.
+Strike vertices and forks stay within the glass radius plus 9 engine px; outside 0.95 radii they stay at least
+0.3 radii below the centre line. Tests cover every crisp/glow path vertex over 200 frame pairs for one and two
+reactors in both camera bases. Omitting `BuildingArcStyle.filamentEnd` preserves legacy ends at 0.92–0.985 radii
+and forks at 0.95 for other specs.
+
+All vertices lie in the camera's screen plane before depth push; strokes sit just 0.05 world units ahead of the
+disc. Capsule widths are 1.1 engine px (forks 0.8), with a white-blue core occupying 50 % of the half-width; each
+arc/fork has a 2.2 times wider blue under-stroke at 0.22 opacity, starting at the same vertex (`glowStart=0`).
 Persistent filament slots drift by 0.06 radians per logic frame, sampled at the start of each two-frame pair;
 geometry reseeds per pair while presentation-time alpha flickers 0.7–1.0 times the shared source fade. Arcs appear
 only above half fade. Plain-data setters reuse fixed buffers (256 discs, 16384 segments); HdRenderer owns their

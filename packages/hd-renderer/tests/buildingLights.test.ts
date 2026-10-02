@@ -36,7 +36,9 @@ function srgb(v: number) {
   return v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055;
 }
 
-const ARC = BUILDING_LIGHTS.NAPOWR![0]!.arcStyle!;
+const luminance = ([r, g, b]: readonly number[]) => 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+const REACTOR = BUILDING_LIGHTS.NAPOWR![0]!;
+const ARC = REACTOR.arcStyle!;
 const iso = new IsoCamera();
 iso.update();
 const camera: BuildingLightCamera = {
@@ -44,6 +46,10 @@ const camera: BuildingLightCamera = {
   up: new Vector3().setFromMatrixColumn(iso.camera.matrixWorld, 1),
   toCamera: new Vector3().setFromMatrixColumn(iso.camera.matrixWorld, 2),
 };
+const cameraBases = [
+  ['RA2', camera],
+  ['front', { right: new Vector3(1, 0, 0), up: new Vector3(0, 1, 0), toCamera: new Vector3(0, 0, 1) }],
+] as const;
 
 describe('building light policy', () => {
   it.each([
@@ -89,7 +95,7 @@ describe('building light policy', () => {
       z: 8,
       groundOnly: 1,
       key: 'building:42:0',
-      radius: 2.6,
+      radius: REACTOR.radius,
       shape: SHAPE_SOFT,
       glow: null,
       fadeIn: 0.5,
@@ -110,81 +116,53 @@ describe('building light policy', () => {
     expect(BUILDING_LIGHTS.NAWEAP![0]!.colour).toEqual([2.6, 1.5, 0.55]);
     expect(BUILDING_LIGHTS.GAWEAP![0]!.colour).toEqual([2.3, 1.7, 1]);
   });
-  it('authors a saturated blue body in display-linear colour and a contained daytime pool', () => {
-    const light = select()[0]!;
-    const body = light.orb!.body.map(srgb);
-    const [r, g, b] = body as [number, number, number];
-    const hue = 60 * ((r - g) / (b - r) + 4);
-    expect(hue).toBeGreaterThanOrEqual(215);
-    expect(hue).toBeLessThanOrEqual(235);
-    expect((b - r) / b).toBeGreaterThanOrEqual(0.6);
-    expect(body.map((v) => Math.round(v * 255))).toEqual([35, 85, 255]);
-    expect(0.2126 * light.colour[0] + 0.7152 * light.colour[1] + 0.0722 * light.colour[2]).toBeLessThanOrEqual(0.2);
-    // Measured glass radius at two device pixels per engine pixel; no halo extends the art silhouette.
-    expect(light.orb).toMatchObject({
+  it('tints the measured glass blue-violet without a white core, procedural filaments or halo', () => {
+    const orb = select()[0]!.orb!;
+    expect(orb).toEqual(REACTOR.orb);
+    expect(orb).toMatchObject({
       radius: 0.418,
-      coreRadius: 0.48,
-      bodyStart: 0.75,
-      bodyEnd: 0.92,
-      alpha: 1,
-      coreAlpha: 1,
-      bodyAlpha: 0.52,
-      limbAlpha: 0.62,
-      filamentMix: 0.5,
+      filamentMix: 0,
       haloScale: 1,
       haloAlpha: 0,
       occluders: [{ corner: [0.648, -0.085], from: -22, to: 90 }],
     });
-    expect(select([reactor], 1, 1)[0]!.colour).toEqual([0.75, 2.1, 12.75]);
-  });
-  it('keeps the hot core cyan-white and authors saturated body, limb and filament colours', () => {
-    const orb = select()[0]!.orb!;
-    const colours = {
-      hot: [225, 252, 255],
-      mid: [130, 220, 255],
-      body: [35, 85, 255],
-      limb: [110, 160, 245],
-      filaments: [170, 235, 255],
-      halo: [45, 95, 255],
-    } as const;
-    for (const name of Object.keys(colours) as (keyof typeof colours)[])
-      expect(orb[name].map((v) => Math.round(srgb(v) * 255))).toEqual(colours[name]);
-    expect(ARC.core.map((v) => Math.round(srgb(v) * 255))).toEqual([210, 250, 255]);
-    expect(ARC.edge.map((v) => Math.round(srgb(v) * 255))).toEqual([50, 120, 255]);
-    expect(ARC).toMatchObject({
-      width: 2,
-      forkWidth: 1.3,
-      coreFraction: 0.45,
-      glowWidth: 3,
-      glowAlpha: 0.45,
-      filaments: [4, 5],
-      strikes: [3, 3],
-      filamentStart: [0.3, 0.42],
-      glowStart: 0.5,
-      maxBeyond: 12,
-      crawl: 0.06,
-      anchors: [
-        [-23, -17],
-        [-24, 11],
-        [-12, 22],
-        [-2, 26],
-        [8, 22],
-        [13, -2],
-      ],
-    });
-    const spec = BUILDING_LIGHTS.NAPOWR![0]!;
-    expect(spec.at).toEqual([0.47, 0.4]);
-    expect(spec.height).toBe(27);
     expect(orb.radius * PIXELS_PER_CELL_EDGE).toBeCloseTo(17.75, 1);
-    const [r, g, b] = orb.hot.map(srgb) as [number, number, number];
-    expect(60 * ((r - g) / (b - r) + 4)).toBeLessThanOrEqual(195);
-    const luminance = 0.2126 * orb.hot[0] + 0.7152 * orb.hot[1] + 0.0722 * orb.hot[2];
-    expect(116 * Math.cbrt(luminance) - 16).toBeGreaterThan(92);
-    // The core-to-body transition stays out of the pale-lavender band (hue 200-290 at low saturation): either cyan
-    // (hue below 200) or saturated.
-    const mid = orb.mid.map(srgb) as [number, number, number];
-    const midHue = 60 * ((mid[0] - mid[1]) / (mid[2] - mid[0]) + 4);
-    expect(midHue < 200 || (mid[2] - mid[0]) / mid[2] >= 0.5).toBe(true);
+    for (const alpha of [orb.coreAlpha, orb.bodyAlpha, orb.limbAlpha]) {
+      expect(alpha).toBeGreaterThanOrEqual(0);
+      expect(alpha).toBeLessThanOrEqual(0.35);
+    }
+    for (const name of ['hot', 'mid', 'body'] as const) {
+      const channels = orb[name].map(srgb);
+      const max = Math.max(...channels);
+      expect(channels[2]).toBe(max);
+      expect((max - Math.min(...channels)) / max).toBeGreaterThanOrEqual(0.4);
+    }
+  });
+  it('contains the soft ground pool while preserving L5G daytime irradiance', () => {
+    expect(REACTOR.radius).toBeLessThanOrEqual(1.5);
+    expect(REACTOR.falloff).toBe('soft');
+    expect(REACTOR.groundOnly).toBe(1);
+    const day = REACTOR.colour.map((v) => v * REACTOR.day!);
+    expect(select()[0]!.colour).toEqual(day);
+    expect(select([reactor], 1, 1)[0]!.colour).toEqual(REACTOR.colour);
+    expect(luminance(day)).toBeLessThanOrEqual(0.2);
+    const l5g = 0.066 * luminance([0.75, 2.1, 12.75]);
+    expect(Math.abs(luminance(day) - l5g) / l5g).toBeLessThanOrEqual(0.02);
+  });
+  it('authors thin internal lightning with at most one short strike into the cradle', () => {
+    expect(ARC.width).toBeLessThanOrEqual(1.5);
+    expect(ARC.glowAlpha).toBeLessThanOrEqual(0.3);
+    expect(ARC.filaments).toEqual([3, 4]);
+    expect(ARC.filamentEnd![1]).toBeLessThanOrEqual(0.85);
+    expect(ARC.strikes[1]).toBeLessThanOrEqual(1);
+    expect(ARC.maxBeyond).toBeLessThanOrEqual(10);
+    expect(ARC.anchors.length).toBeGreaterThan(0);
+    for (const [x, y] of ARC.anchors) {
+      expect(y).toBeGreaterThanOrEqual(15);
+      expect(Math.hypot(x, y)).toBeLessThanOrEqual(REACTOR.orb!.radius * PIXELS_PER_CELL_EDGE + ARC.maxBeyond);
+    }
+    expect(REACTOR.at).toEqual([0.47, 0.4]);
+    expect(REACTOR.height).toBe(27);
   });
   it('creates nothing at zero gain without querying foundations or visibility', () => {
     const size = vi.fn(foundation);
@@ -262,8 +240,8 @@ describe('building light policy', () => {
     expect(source).toHaveBeenCalledWith('building:42:0', 2, expect.objectContaining({ glow: null }));
     expect(setDiscs.mock.calls[0]![0]).toHaveLength(1);
     const arcCount = setStrokes.mock.calls[0]![0].filter((s: { width: number }) => s.width === ARC.width).length;
-    expect(arcCount).toBeGreaterThanOrEqual(6);
-    expect(arcCount).toBeLessThanOrEqual(8);
+    expect(arcCount).toBeGreaterThanOrEqual(ARC.filaments[0] + ARC.strikes[0]);
+    expect(arcCount).toBeLessThanOrEqual(ARC.filaments[1] + ARC.strikes[1]);
     const lights = select().map((light) => ({ ...light, fade: 1 }));
     expect(setStrokes.mock.calls[0]![0]).toEqual(buildingLightOverlay(lights, snapshot.frame, 2, camera).strokes);
     expect(setDecorativeBeams).not.toHaveBeenCalled();
@@ -363,7 +341,7 @@ describe('building state gate', () => {
   });
 });
 
-describe('confined unbloomed plasma overlay', () => {
+describe('confined unbloomed glass overlay', () => {
   const screen = (p: OverlayPoint, centre: Vector3, basis = camera) => {
     const delta = new Vector3().copy(p).sub(centre);
     return { x: delta.dot(basis.right) * PIXELS_PER_CELL_EDGE, y: -delta.dot(basis.up) * PIXELS_PER_CELL_EDGE };
@@ -371,13 +349,10 @@ describe('confined unbloomed plasma overlay', () => {
   const crisp = (strokes: EmissiveStroke[]) => strokes.filter((s) => s.coreFraction !== 0);
   const parents = (strokes: EmissiveStroke[]) => crisp(strokes).filter((s) => s.width === ARC.width);
   const isFilament = (s: EmissiveStroke, centre: Vector3, radius: number) =>
-    // Filaments start inside the white core (filamentStart), strikes on the rim.
-    new Vector3().copy(s.points[0]!).distanceTo(centre) < 0.6 * radius;
+    // Filaments start near the centre; strikes start at 0.95 radii.
+    new Vector3().copy(s.points[0]!).distanceTo(centre) < 0.95 * radius - 1e-8;
 
-  it.each([
-    ['RA2', camera],
-    ['front', { right: new Vector3(1, 0, 0), up: new Vector3(0, 1, 0), toCamera: new Vector3(0, 0, 1) }],
-  ] as const)('confines 6–8 arcs and their forks for 40 frame pairs in the %s screen plane', (_, basis) => {
+  it.each(cameraBases)('confines arcs and forks for 40 frame pairs in the %s screen plane', (_, basis) => {
     for (const light of [
       select()[0]!,
       { ...select()[0]!, key: 'second-reactor', headPosition: new Vector3(-2, 3, 1) },
@@ -393,8 +368,8 @@ describe('confined unbloomed plasma overlay', () => {
           buildingLightOverlay([light], frame + 2, 1, basis).strokes.map((s) => s.points),
         );
         const arcs = parents(a.strokes);
-        expect(arcs.length).toBeGreaterThanOrEqual(6);
-        expect(arcs.length).toBeLessThanOrEqual(8);
+        expect(arcs.length).toBeGreaterThanOrEqual(ARC.filaments[0] + ARC.strikes[0]);
+        expect(arcs.length).toBeLessThanOrEqual(ARC.filaments[1] + ARC.strikes[1]);
         const filaments = arcs.filter((s) => isFilament(s, light.headPosition, light.orb!.radius));
         const strikes = arcs.filter((s) => !filaments.includes(s));
         expect(filaments.length).toBeGreaterThanOrEqual(ARC.filaments[0]);
@@ -416,8 +391,8 @@ describe('confined unbloomed plasma overlay', () => {
           const r1 = new Vector3().copy(filament.points.at(-1)!).distanceTo(light.headPosition) * PIXELS_PER_CELL_EDGE;
           expect(r0).toBeGreaterThanOrEqual(ARC.filamentStart![0] * radius - 1e-8);
           expect(r0).toBeLessThanOrEqual(ARC.filamentStart![1] * radius + 1e-8);
-          expect(r1).toBeGreaterThanOrEqual(0.92 * radius - 1e-8);
-          expect(r1).toBeLessThanOrEqual(0.985 * radius + 1e-8);
+          expect(r1).toBeGreaterThanOrEqual(ARC.filamentEnd![0] * radius - 1e-8);
+          expect(r1).toBeLessThanOrEqual(ARC.filamentEnd![1] * radius + 1e-8);
           const forks = crisp(a.strokes).filter(
             (s) => s.width === ARC.forkWidth && filament.points.includes(s.points[0]!),
           );
@@ -426,7 +401,7 @@ describe('confined unbloomed plasma overlay', () => {
           for (const s of [filament, ...forks]) {
             for (const p of s.points) {
               const q = screen(p, light.headPosition, basis);
-              expect(Math.hypot(q.x, q.y)).toBeLessThanOrEqual(0.985 * radius + 1e-8);
+              expect(Math.hypot(q.x, q.y)).toBeLessThanOrEqual(0.95 * radius + 1e-8);
               for (const o of light.orb!.occluders ?? [])
                 expect(orbOccluded(q.x / radius, q.y / radius, o)).toBe(false);
             }
@@ -449,7 +424,7 @@ describe('confined unbloomed plasma overlay', () => {
             expect(fraction).toBeLessThanOrEqual(0.8);
             expect(
               new Vector3().copy(fork.points.at(-1)!).distanceTo(light.headPosition) * PIXELS_PER_CELL_EDGE,
-            ).toBeCloseTo(0.95 * radius);
+            ).toBeCloseTo(Math.min(0.95, ARC.filamentEnd![1]) * radius);
           }
         }
         for (const strike of strikes) {
@@ -474,8 +449,7 @@ describe('confined unbloomed plasma overlay', () => {
         for (let i = 0; i < a.strokes.length; i += 2) {
           const glow = a.strokes[i]!;
           const bolt = a.strokes[i + 1]!;
-          // The glow is the bolt's tail from its first vertex outside glowStart (always at least the final segment):
-          // filament glows converging on the centre stained the white core blue.
+          // The glow is the bolt's tail from its first vertex outside glowStart (at least the final segment).
           const from = bolt.points.findIndex(
             (p) =>
               new Vector3().copy(p).distanceTo(light.headPosition) * PIXELS_PER_CELL_EDGE >=
@@ -504,10 +478,98 @@ describe('confined unbloomed plasma overlay', () => {
     }
   });
 
+  it.each(cameraBases)('keeps energy inside the glass or cradle over 200 frame pairs in the %s basis', (_, basis) => {
+    const second: LiveObject = { ...reactor, id: 11, uid: 43, x: reactor.x + 4 * 256 };
+    for (const objects of [[reactor], [reactor, second]]) {
+      const lights = select(objects);
+      let filamentForks = 0;
+      let strikesSeen = 0;
+      let strikeForks = 0;
+      for (let frame = 0; frame < 400; frame += 2) {
+        const overlay = buildingLightOverlay(lights, frame, 1, basis);
+        expect(overlay.discs).toHaveLength(objects.length);
+        expect(overlay).toEqual(buildingLightOverlay(lights, frame + 1, 1, basis));
+        const checked = new Set<EmissiveStroke>();
+        for (const light of lights) {
+          const radius = light.orb!.radius * PIXELS_PER_CELL_EDGE;
+          const limit = radius + ARC.maxBeyond;
+          // The two foundations are disjoint, so the first point identifies each stroke's owner independently
+          // of emission order. Check the combined overlay rather than generating each reactor in isolation.
+          const strokes = overlay.strokes.filter((s) => {
+            const p = screen(s.points[0]!, light.headPosition, basis);
+            return Math.hypot(p.x, p.y) <= limit + 1e-8;
+          });
+          const arcs = parents(strokes);
+          const strikes = arcs.filter((s) => !isFilament(s, light.headPosition, light.orb!.radius));
+          expect(arcs.length).toBeGreaterThanOrEqual(ARC.filaments[0] + ARC.strikes[0]);
+          expect(arcs.length).toBeLessThanOrEqual(ARC.filaments[1] + ARC.strikes[1]);
+          strikesSeen += strikes.length;
+          for (let i = 0; i < strokes.length; i += 2) {
+            const glow = strokes[i]!;
+            const bolt = strokes[i + 1]!;
+            const isFork = bolt.width === ARC.forkWidth;
+            const strike = strikes.find((s) => s === bolt || (isFork && s.points.includes(bolt.points[0]!)));
+            if (isFork) {
+              if (strike) strikeForks++;
+              else filamentForks++;
+            }
+            // Classify the crisp path and apply its containment rule to both it and its glow, including forks.
+            for (const stroke of [glow, bolt]) {
+              expect(checked.has(stroke)).toBe(false);
+              checked.add(stroke);
+              for (const vertex of stroke.points) {
+                const p = screen(vertex, light.headPosition, basis);
+                const distance = Math.hypot(p.x, p.y);
+                if (strike) {
+                  expect(distance).toBeLessThanOrEqual(limit + 1e-8);
+                  if (distance > 0.95 * radius + 1e-8) expect(p.y).toBeGreaterThanOrEqual(0.3 * radius - 1e-8);
+                } else {
+                  expect(distance).toBeLessThanOrEqual(0.95 * radius + 1e-8);
+                }
+              }
+            }
+          }
+        }
+        expect(checked.size).toBe(overlay.strokes.length);
+      }
+      // Exercise both exceptions and their forks; a run without strikes must not pass the cradle guarantee.
+      expect(strikesSeen).toBeGreaterThan(0);
+      expect(strikeForks).toBeGreaterThan(0);
+      expect(filamentForks).toBeGreaterThan(0);
+    }
+  });
+
+  it('preserves legacy filament ends and fork radii when filamentEnd is absent', () => {
+    const light = select()[0]!;
+    const style = { ...ARC, strikes: [0, 0] as const };
+    delete style.filamentEnd;
+    const legacy = { ...light, orb: { ...light.orb!, occluders: [] }, arcStyle: style };
+    const radius = light.orb!.radius;
+    let forksSeen = 0;
+    for (let frame = 0; frame < 80; frame += 2) {
+      const strokes = buildingLightOverlay([legacy], frame, 1, camera).strokes;
+      const filaments = parents(strokes);
+      expect(filaments.length).toBeGreaterThanOrEqual(style.filaments[0]);
+      expect(filaments.length).toBeLessThanOrEqual(style.filaments[1]);
+      for (const filament of filaments) {
+        const end = new Vector3().copy(filament.points.at(-1)!).distanceTo(light.headPosition) / radius;
+        expect(end).toBeGreaterThanOrEqual(0.92 - 1e-8);
+        expect(end).toBeLessThanOrEqual(0.985 + 1e-8);
+        const forks = crisp(strokes).filter(
+          (s) => s.width === style.forkWidth && filament.points.includes(s.points[0]!),
+        );
+        forksSeen += forks.length;
+        for (const fork of forks)
+          expect(new Vector3().copy(fork.points.at(-1)!).distanceTo(light.headPosition) / radius).toBeCloseTo(0.95);
+      }
+    }
+    expect(forksSeen).toBeGreaterThan(0);
+  });
+
   it('drifts persistent slot phases by crawl per frame while pair sampling preserves shapes', () => {
     const light = select()[0]!;
     const unmasked = { ...light, orb: { ...light.orb!, occluders: [] } };
-    for (let slot = 0; slot < 5; slot++) {
+    for (let slot = 0; slot < ARC.filaments[1]; slot++) {
       for (let frame = 0; frame < 80; frame++) {
         expect(
           filamentSlotAngle(light.key, slot, frame + 1, ARC.crawl) -
