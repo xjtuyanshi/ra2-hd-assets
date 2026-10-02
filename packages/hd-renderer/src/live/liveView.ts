@@ -2,7 +2,13 @@ import { BoxGeometry, Color, Group, Mesh, MeshStandardNodeMaterial, type Texture
 import { uniform } from 'three/tsl';
 import { mapAtmosphere, medianHeight, sidecarAtmosphere } from '../../../ra2-assets/src/lights';
 import type { AtmosphereSettings } from '../atmosphere';
-import { HOUSE_COLORS, RENDER_STATE_VERSION, type RenderState, type Weather } from '../contract';
+import {
+  HOUSE_COLORS,
+  RENDER_STATE_VERSION,
+  type AtmosphereProfile,
+  type RenderState,
+  type Weather,
+} from '../contract';
 import { HdRenderer } from '../HdRenderer';
 import type { LibraryAnimLayer, LibraryType } from '../../../ra2-assets/src/library';
 import { NORMALIZED_RATE_FACTOR, animRateFrames } from '../../../ra2-assets/src/effects';
@@ -146,6 +152,12 @@ export interface LiveViewOptions extends VoxelUnitsOptions {
   houseRemap?: (colorIndex: number) => [number, number, number][];
   /** Hour of day; undefined = the map's own staging (its [Lighting]: noon for day maps, 22:00 for night maps). */
   timeOfDay?: number;
+  /**
+   * Hour for maps whose own [Lighting] reads as day (a look preset's suggested hour, e.g. cinematic 16.5); dusk and night
+   * maps keep their own staging hour. `timeOfDay` overrides both. A preset hour applied to every map rendered stock
+   * night maps (ambient about 0.6, lamp posts) as a sunny afternoon, so the night presentation never appeared in play.
+   */
+  dayHour?: number;
   weather?: Weather;
   weatherIntensity?: number;
   /**
@@ -188,6 +200,15 @@ export interface LiveDiagnostics {
   smudgesFromEngine: boolean;
   /** Smudge types whose art or footprint could not be resolved in the current live grid. */
   smudgeTypesWithoutArt: string[];
+}
+
+/** Initial hour: an explicit time, else the preset's day hour on day maps, else the map's own staging hour. */
+export function liveTimeOfDay(
+  atmosphere: Pick<AtmosphereProfile, 'kind' | 'hour'>,
+  options: Pick<LiveViewOptions, 'timeOfDay' | 'dayHour'>,
+): number {
+  if (options.timeOfDay !== undefined) return options.timeOfDay;
+  return atmosphere.kind === 'day' && options.dayHour !== undefined ? options.dayHour : atmosphere.hour;
 }
 
 /** Runtime presentation changes (no reload): time, weather and the night dressing switches. */
@@ -650,7 +671,7 @@ export class LiveView {
       objects: [],
       events: [],
       environment: {
-        timeOfDay: options.timeOfDay ?? atmosphere.hour,
+        timeOfDay: liveTimeOfDay(atmosphere, options),
         weather: options.weather ?? 'clear',
         weatherIntensity: options.weatherIntensity ?? 0,
         windDirection: 0.6,
@@ -910,7 +931,11 @@ export class LiveView {
       light.fade = this.hd.lightField.sourceFade(light.key, now);
     }
     this.hd.lightField.retainSources(this.activeSourceKeys);
-    const overlay = buildingLightOverlay(lights, snapshot?.frame ?? 0, now, this.hd.emissiveOverlay.toCamera.value);
+    const overlay = buildingLightOverlay(lights, snapshot?.frame ?? 0, now, {
+      right: this.hd.emissiveOverlay.cameraRight.value,
+      up: this.hd.emissiveOverlay.cameraUp.value,
+      toCamera: this.hd.emissiveOverlay.toCamera.value,
+    });
     this.hd.emissiveOverlay.setDiscs(overlay.discs);
     this.hd.emissiveOverlay.setStrokes(overlay.strokes);
     this.sourceLightsActive = true;

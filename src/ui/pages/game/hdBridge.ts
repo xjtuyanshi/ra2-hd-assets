@@ -213,16 +213,15 @@ export function startHdBridge(host: HdBridgeHost): () => void {
       .then(async ([{ LiveView }, renderer]) => {
         // A stopped bridge must not create a GPU device for its detached canvas.
         if (stopped) return null;
-        const timeOfDay = params.has('hd-time')
-          ? Number(params.get('hd-time'))
-          : preset && renderer
-            ? renderer.LOOK_PRESETS[preset].hour
-            : undefined;
+        const timeOfDay = params.has('hd-time') ? Number(params.get('hd-time')) : undefined;
+        // A preset's suggested hour stages day maps only: dusk and night maps keep their own [Lighting] hour.
+        const dayHour = preset && renderer ? renderer.LOOK_PRESETS[preset].hour : undefined;
         const view = await LiveView.create(canvas, {
           mapBase: `/hd-cache/${encodeURIComponent(mapId)}`,
           libraryBase: '/hd-cache/_library',
-          // Without hd-time or a preset hour, the map's own [Lighting] decides day, dusk or night.
+          // Without hd-time, the map's own [Lighting] decides day, dusk or night (a preset's hour applies to day maps).
           ...(timeOfDay !== undefined ? { timeOfDay } : {}),
+          ...(dayHour !== undefined ? { dayHour } : {}),
           weather: params.get('hd-weather') === 'rain' ? 'rain' : 'clear',
           weatherIntensity: params.get('hd-weather') === 'rain' ? 0.8 : 0,
           // hd-fx=enhanced: the remaster's modern effects around the engine's own anims (default: faithful).

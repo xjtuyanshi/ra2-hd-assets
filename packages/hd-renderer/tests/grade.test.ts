@@ -178,10 +178,11 @@ describe('cinematic preset and sandbox parameters', () => {
     expect(cinematic.hour).toBe(16.5);
     // Calibrated against the approved targets (see the preset's comment).
     expect(cinematic.settings).toMatchObject({
-      whiteAdapt: 1,
+      // L5G: 15 % of the afternoon sun's colour stays on flat ground (battle grass warmth from the light).
+      whiteAdapt: 0.85,
       mapTintAdapt: 0.3,
-      // Street lamps keep 30 % of their daytime engine light (park lawn L* 53 -> 40 before the foliage grade).
-      mapSourcesByDay: 0.3,
+      // Street lamps keep 20 % of their daytime engine light (the lamp-lit park lawn stays green and near L* 45).
+      mapSourcesByDay: 0.2,
       gradeBalance: [0.955, 1, 1.085],
       gradeContrast: 0.14,
       gradePivotLift: 0.045,

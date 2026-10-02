@@ -295,9 +295,16 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       // (battle L* median 33 -> 36, target 39; L* < 22 share 23% -> 17%, target 17%), while the stronger sun, contact
       // and AO knobs above keep the sun/shade split at the target's (blurred p90 - p10 of L* 36-38, target 34).
       clarity: 0.55,
-      whiteAdapt: 1,
+      // L5G battle warmth from the light, not the tiles (scratchpad finallook7/light, same battle/park/river framings):
+      // the approved targets flip the original grass order (originals: battle grass S-weighted hue 59, park lawn 53;
+      // targets: battle 52 golden, park 63 green) on shared foliage, so no global tile or grade change can serve both.
+      // Keeping 15 % of the afternoon sun's colour on flat ground (whiteAdapt 0.85) warms the open battle grass
+      // (hue 63.6 -> 62.2) and the river's highlights (warmth 0.36 -> 0.37, target 0.44); fewer daytime lamp washes
+      // (mapSourcesByDay 0.2) keep the lamp-lit park lawn green (hue 58, the owner's floor) at L* 44 (target 45).
+      // Noon flat-ground brightness (adaptExposure 1) helped the battle grass little and over-brightened the river.
+      whiteAdapt: 0.85,
       mapTintAdapt: 0.3,
-      mapSourcesByDay: 0.3,
+      mapSourcesByDay: 0.2,
       gradeBalance: [0.955, 1, 1.085],
       gradeContrast: 0.14,
       gradePivotLift: 0.045,

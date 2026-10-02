@@ -141,8 +141,10 @@ describe('HD bridge look parameters', () => {
     await advance(16);
     expect(liveView.create).toHaveBeenCalledWith(
       harness.hdCanvas,
-      expect.objectContaining({ timeOfDay: 16.5, voxelLook: 'remaster', voxelProjection: '/hd-cache/vehicles-hd' }),
+      expect.objectContaining({ dayHour: 16.5, voxelLook: 'remaster', voxelProjection: '/hd-cache/vehicles-hd' }),
     );
+    // The preset hour stages day maps only; dusk and night maps keep their own [Lighting] hour.
+    expect(liveView.create.mock.calls[0]![1]).not.toHaveProperty('timeOfDay');
     expect(hdRenderer.applyLookPreset).toHaveBeenCalledExactlyOnceWith(view.hd.settings, 'cinematic');
     expect(view.hd.applySettings).toHaveBeenCalledTimes(1);
     expect(view.push).toHaveBeenCalledTimes(1);
@@ -159,7 +161,10 @@ describe('HD bridge look parameters', () => {
     const harness = setup('?hd=1&hd-look=cinematic&hd-time=12');
     const view = fakeLookView();
     await goLive(harness, view);
-    expect(liveView.create).toHaveBeenCalledWith(harness.hdCanvas, expect.objectContaining({ timeOfDay: 12 }));
+    expect(liveView.create).toHaveBeenCalledWith(
+      harness.hdCanvas,
+      expect.objectContaining({ timeOfDay: 12, dayHour: 16.5 }),
+    );
     expect(hdRenderer.applyLookPreset).toHaveBeenCalledWith(view.hd.settings, 'cinematic');
     expect(view.hd.applySettings).toHaveBeenCalledTimes(1);
     harness.stop();
@@ -170,6 +175,7 @@ describe('HD bridge look parameters', () => {
     await goLive(harness);
     const options = liveView.create.mock.calls[0]![1];
     expect(options).not.toHaveProperty('timeOfDay');
+    expect(options).not.toHaveProperty('dayHour');
     expect(options).not.toHaveProperty('voxelLook');
     expect(options).not.toHaveProperty('voxelProjection');
     expect(hdRenderer.applyLookPreset).not.toHaveBeenCalled();
@@ -181,6 +187,7 @@ describe('HD bridge look parameters', () => {
     const view = fakeLookView();
     await goLive(harness, view);
     expect(liveView.create.mock.calls[0]![1]).not.toHaveProperty('timeOfDay');
+    expect(liveView.create.mock.calls[0]![1]).not.toHaveProperty('dayHour');
     expect(hdRenderer.applyLookPreset).toHaveBeenCalledWith(view.hd.settings, 'faithful');
     expect(view.hd.applySettings).toHaveBeenCalledTimes(1);
     harness.stop();

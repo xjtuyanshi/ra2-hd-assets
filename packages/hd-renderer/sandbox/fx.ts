@@ -31,7 +31,8 @@
  *   &map=XMP29U2&cx=60&cy=62  map cache and centre cell (default: the map's first waypoint)
  *   &zoom=3                   CSS pixels per engine pixel
  *   &time=0.4                 seconds after the spawn to show (logic frames advance at &fps=, default 15)
- *   &hours=12                 time of day
+ *   &hours=12                 time of day; &hours=map: the map's own [Lighting] staging (&dayhour= applies to day
+ *                             maps only, as the live bridge does with a look preset's hour)
  *   &look=golden              the enhanced look preset (sun arc, relit art, shadows following the sun)
  *   &water=enhanced           the modern water (default: the earlier HD water)
  *   &native=1                 pass the bridge fields (exact anim frame) instead of relying on the fallback timing
@@ -77,6 +78,7 @@ import { effectRow, type LiveAnim } from '../src/live/effects';
 import type { LiveRadBeam, LiveWave } from '../src/live/beams';
 import { ra2Screen } from '../src/ra2/cache';
 import { applyLookPreset, LOOK_PRESETS, type LookPreset } from '../src/HdRenderer';
+import { BUILDING_LIGHTS, displayLinear } from '../src/live/buildingLights';
 import { voxelLookParams } from './look';
 import { voxelProjectionFor } from '../src/ra2/voxelProjection';
 import { voxelPbrFor } from '../src/ra2/voxelPbr';
@@ -112,7 +114,11 @@ const live = await LiveView.create(canvas, {
   ...voxelLookParams(params),
   mapBase: `/${encodeURIComponent(mapName)}`,
   libraryBase: '/_library',
-  timeOfDay: Number(params.get('hours') ?? 12),
+  ...(params.get('hours') === 'map'
+    ? params.has('dayhour')
+      ? { dayHour: Number(params.get('dayhour')) }
+      : {}
+    : { timeOfDay: Number(params.get('hours') ?? 12) }),
   effects: params.get('effects') === 'enhanced' ? 'enhanced' : 'faithful',
   effectsHd: params.get('fxhd') !== '0',
   volumetricEffects: params.get('fxvol') === 'ray' ? 'ray' : 'off',
@@ -158,6 +164,21 @@ if (overrides.length) {
     settings[key] = value;
   }
   live.hd.applySettings();
+}
+// &lightspec=TYPE.orb.key:value,TYPE.arc.key:value,...: building-light tuning reviews without code edits (development
+// sandbox only). Values: a number, an sRGB colour r/g/b (0-255, converted to display-linear like the spec's colours) for
+// colour keys, or a range a~b for [min, max] keys (arc filaments/strikes).
+for (const item of (params.get('lightspec') ?? '').split(',').filter(Boolean)) {
+  const [path, raw] = item.split(':');
+  const [type, part, key] = (path ?? '').split('.');
+  const spec = BUILDING_LIGHTS[type ?? '']?.[0] as unknown as Record<string, Record<string, unknown> | undefined>;
+  const target = part === 'orb' ? spec?.orb : part === 'arc' ? spec?.arcStyle : part === 'light' ? spec : undefined;
+  if (!target || !key || raw === undefined || !(key in target)) throw new Error(`Invalid lightspec override: ${item}`);
+  if (raw.includes('/')) {
+    const [r, g, b] = raw.split('/').map(Number);
+    target[key] = displayLinear(r!, g!, b!);
+  } else if (raw.includes('~')) target[key] = raw.split('~').map(Number);
+  else target[key] = Number(raw);
 }
 // &garnish=0: the original art alone (no HD light, sparks or smoke), for side-by-side checks.
 if (params.get('garnish') === '0')
