@@ -719,6 +719,18 @@ python3 packages/ra2-assets/python/infantry_sheets.py repaint-pages \
 (cd packages/ra2-assets/python && python3 -m unittest test_infantry_sheets test_vehicle_projection)
 ```
 
+`paint-value --farm "$FARM" --theater urban --stage "$STAGING" --sprites infantry:INIT,infantry:SLAV
+--gamma 0.35 --outside-floor 15` darkens only named frames' encoded house-paint indices with `k' = 15*(k/15)^gamma`
+(`0 < gamma <= 1`). The optional floor (0..15, default 0) applies outside original remap indices 16..31, nearest
+upsampled to 2x and dilated by one HD texel. Alpha, paint masks, unpainted texels and other frames stay unchanged.
+The first run records current HD filenames in `<stage>/<suffix>-<theater>-source.json`; reruns use those baselines,
+with a staged source copy if a baseline already bears the output suffix. It stages `<stem>-<suffix>.png` (default
+`l5hinf`, stripping an existing suffix), installs without writing through symlinks, and patches only each selected
+HD page's `file`. Each page reports its distinct rectangle count and per-sprite mean remap index before/after.
+Any sprite key works (for example `building:YAREFN,anim:YAREFN_A,anim:YAREFNMK`, the deployed Slave Miner). The
+L5H values (gamma 0.35, floor 15 for INIT, SLAV and the deployed Slave Miner) were chosen against live frames of the
+original: saturated house-hue texels brighter than V 60 in the same frozen frame came to 0.89-1.15x the original's.
+
 ## Tree and vegetation redraw (Python, experimental)
 
 `python/tree_redraw.py` redraws a map's tree/bush TerrainTypes (`tree:TREE*` frame 0 and its shadow) in batches: one
@@ -789,6 +801,29 @@ python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_ore_field
 
 `install` uses POSIX `flock` on the destination theatre's `.compose.lock`, atomically replaces its own page and
 JSON entries without writing through symlinks, preserves other tracks' data, and reuses the page index on reruns.
+
+## Gem colour match (Python)
+
+`python/gem_colours.py` deepens HD pink, mint and light-blue gems toward the original theater palette's red,
+green and blue ramps. All selected frames share a luminance CDF to preserve facet ordering consistently;
+nearby bright neutral glints join their gem's family. Alpha, neutral contact beds/shadows and non-gem atlas
+texels stay unchanged. NumPy, Pillow and OpenCV are required.
+
+```bash
+python3 -B packages/ra2-assets/python/gem_colours.py metrics --cache-root "$VARIANT" --theatre urban \
+  --strength 1.0 --stage "$WORK/gem-colours"
+python3 -B packages/ra2-assets/python/gem_colours.py apply --cache-root "$VARIANT" --theatre urban \
+  --strength 1.0 --stage "$WORK/gem-colours"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_gem_colours.py'
+```
+
+Both commands print JSON texel counts and mean CIELAB L*/C* for original, HD-before and HD-after colours per
+family; `metrics` previews the proposed result without writing. `apply` stages an atomic PNG, installs through
+the copy-on-write farm and patches only the HD file name under `.compose.lock`; remap and other entry keys remain
+unchanged. Defaults select `overlay:GEM01` through `overlay:GEM12`, strength `1.0` (range `0..1`) and suffix
+`l5hgem`; use `--sprites overlay:GEM01,overlay:GEM02` or `--suffix NAME` to override. Keep the stage directory
+and its `<suffix>-source.json` outside the library and Git: reruns read the recorded source page to avoid
+accumulating the effect or suffixes. Synthetic tests do not establish in-engine visual acceptance.
 
 ## Destroyed-building rubble pages (Python)
 
@@ -1022,6 +1057,16 @@ python3 -m unittest discover -s packages/ra2-assets/python -p test_vehicle_proje
 `grade` is an optional post-build step for parts whose redraw drifted from steel to tan/beige: pixels in the
 orange-yellow hue band keep only `--keep` of their chroma at unchanged linear luminance (slightly cool grey), and
 house paint and alpha stay untouched. It rewrites the colour atlases in place, so run it once per build.
+
+`lift --src "$VEHICLE_WORK/proj/vehicles-hd" --out "$VEHICLE_WORK/lifted" --type HTNK --gamma 0.6`
+raises hull CIELAB lightness with `L' = 100 * (L / 100) ** gamma` while retaining a*/b*. Gamma must satisfy
+`0 < gamma <= 1`; `1` preserves every RGBA byte. The paint red channel fades the lift from full strength at
+0.3 to zero at 0.7; fully protected and transparent texels retain their original RGB, and alpha never changes.
+The command prints JSON changed-texel counts per part and atomically writes colour atlases under their existing
+names, copying paint atlases and the manifest byte-for-byte into a complete build for `install --build-dir`.
+The output must be separate from, and outside, the source directory; source files remain untouched.
+L5H lifted the Soviet hulls that read darker than the original in a same-frame parade (gamma HTNK 0.6, APOC 0.7,
+HTK 0.4, TTNK 0.55, DTRUCK 0.5, SMCV 0.6, V3 0.8): median hull L* moved from 4-16 below the original to within 5.
 
 `lock --design INPUT --redraw OUTPUT --out LOCKED` restores the design sheet's low-pass Lab chroma while keeping
 the redraw's lightness and fine chroma detail. Legacy defaults remain `--sigma 6 --strength 1`; background and

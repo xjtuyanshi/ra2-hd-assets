@@ -710,6 +710,38 @@ def repaint_frame(rgba2, paint2, idx1, ramp, detail=0.4, low_sigma=1.0, detail_s
     return out, np.clip(np.rint(p_new * 255), 0, 255).astype(np.uint8)
 
 
+def _validate_paint_value(gamma, outside_floor):
+    if not 0 < gamma <= 1:
+        raise ValueError("gamma must be in (0, 1]")
+    if not 0 <= outside_floor <= 15:
+        raise ValueError("outside-floor must be between 0 and 15")
+
+
+def paint_value_frame(rgba2, paint2, idx1, gamma, outside_floor=0.0, threshold=0.02):
+    """Darken encoded house paint without changing its extent, alpha or unpainted colour."""
+    _validate_paint_value(gamma, outside_floor)
+    if not 0 <= threshold <= 1:
+        raise ValueError("threshold must be between 0 and 1")
+    if (idx1.ndim != 2 or rgba2.shape != (*[2 * n for n in idx1.shape], 4)
+            or paint2.shape != rgba2.shape[:2]):
+        raise ValueError("HD colour and paint must be exactly 2x the original indexed frame")
+    out = rgba2.copy()
+    if gamma == 1 and outside_floor == 0:
+        return out
+    painted = (paint2.astype(np.float32) / 255 > threshold) & (rgba2[..., 3] > 0)
+    rgb = rgba2[..., :3].astype(np.float32)
+    k = np.clip((255 - rgb[..., 1]) / 15, 0, 15)
+    darker = 15 * (k / 15) ** gamma
+    if outside_floor > 0:
+        original = np.repeat(np.repeat((idx1 >= 16) & (idx1 <= 31), 2, 0), 2, 1)
+        # One HD texel in all eight directions, not one original-resolution pixel.
+        outside = ~hr.dilate(original, 1)
+        darker[outside] = np.maximum(darker[outside], outside_floor)
+    delta = (255 - 15 * darker) - rgb[..., 1]
+    out[..., :3][painted] = np.clip(np.rint(rgb[painted] + delta[painted, None]), 0, 255).astype(np.uint8)
+    return out
+
+
 def _dist_to(mask, iters=12):
     """Chessboard-ish distance (in texels) from every texel to the nearest True texel of mask, capped at iters."""
     d = np.full(mask.shape, float(iters), np.float32)
@@ -1394,6 +1426,95 @@ def repaint_pages(lib: Library, farm: Path, theater: str, stage: Path, pages=Non
         print(f"{theater} page {page}: {count} frames, {time.monotonic() - start:.0f}s", flush=True)
 
 
+def paint_value_pages(farm: Path, theater: str, stage: Path, sprites, gamma, outside_floor=0.0, suffix="l5hinf"):
+    """Finish named frames from recorded baseline files and patch only each installed HD colour filename."""
+    import cache_farm
+
+    for name, value in (("theater", theater), ("suffix", suffix)):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+            raise ValueError(f"{name} must contain only letters, digits, hyphens and underscores")
+    _validate_paint_value(gamma, outside_floor)
+    relative = Path("_library") / theater
+    lib = Library(farm / relative)
+    if not sprites:
+        raise ValueError("provide at least one sprite name")
+    missing = [name for name in sprites if name not in lib.data["sprites"]]
+    if missing:
+        raise ValueError("unknown sprites: " + ", ".join(missing))
+    if stage.resolve().is_relative_to(lib.root.resolve()):
+        raise ValueError("staging must be outside the farm library and its source directory")
+    selected = {name: lib.frames(name) for name in sprites}
+    pages = sorted({frame["page"] for frames in selected.values() for frame in frames
+                    if frame.get("page") is not None and all(n > 0 for n in frame["rect"][2:])})
+
+    def output_name(filename):
+        return Path(filename).stem.removesuffix("-" + suffix) + "-" + suffix + ".png"
+
+    def snapshot_path(page):
+        return stage / f".{suffix}-{theater}-source-{page}.png"
+
+    stage.mkdir(parents=True, exist_ok=True)
+    source_json = stage / f"{suffix}-{theater}-source.json"
+    if source_json.exists():
+        sources = json.loads(source_json.read_text(encoding="utf-8"))
+    else:
+        sources = {str(page): entry["file"] for page, entry in enumerate(lib.data["spriteAtlasesHd"]) if entry}
+        for page, filename in sources.items():
+            if Path(filename) == Path(output_name(filename)):
+                # A baseline already bearing this suffix would otherwise be replaced on the first install.
+                with atomic_output(snapshot_path(page)) as tmp:
+                    shutil.copyfile(lib.root / filename, tmp)
+        with atomic_output(source_json) as tmp:
+            tmp.write_text(json.dumps(sources, indent=2), encoding="utf-8")
+    for page in pages:
+        if not lib.data["spriteAtlasesHd"][page]:
+            continue
+        filename = sources[str(page)]
+        source_path = (snapshot_path(page) if Path(filename) == Path(output_name(filename))
+                       else lib.root / filename)
+        with Image.open(source_path) as im:
+            before = np.array(im.convert("RGBA"))
+        color, paint, indices = before.copy(), lib.remap2(page), lib.page1(page)
+        seen = set()
+        sprite_rects = {name: {tuple(frame["rect"]) for frame in frames if frame.get("page") == page
+                             and all(n > 0 for n in frame["rect"][2:])}
+                        for name, frames in selected.items()}
+        for rects in sprite_rects.values():
+            for x, y, w, h in sorted(rects):
+                rect = (x, y, w, h)
+                if rect in seen:
+                    continue
+                crop = np.s_[2 * y:2 * (y + h), 2 * x:2 * (x + w)]
+                color[crop] = paint_value_frame(color[crop], paint[crop], indices[y:y + h, x:x + w],
+                                                gamma, outside_floor)
+                seen.add(rect)
+        metrics = []
+        for name, rects in sprite_rects.items():
+            if not rects:
+                continue
+            sums, count = np.zeros(2, np.float64), 0
+            for x, y, w, h in sorted(rects):
+                crop = np.s_[2 * y:2 * (y + h), 2 * x:2 * (x + w)]
+                mask = (paint[crop].astype(np.float32) / 255 > 0.02) & (before[crop][..., 3] > 0)
+                for i, pixels in enumerate((before, color)):
+                    k = np.clip((255 - pixels[crop][..., 1].astype(np.float32)) / 15, 0, 15)
+                    sums[i] += k[mask].sum(dtype=np.float64)
+                count += np.count_nonzero(mask)
+            means = f"{sums[0] / count:.3f} -> {sums[1] / count:.3f}" if count else "n/a -> n/a"
+            metrics.append(f"{name} mean k {means}")
+        page_path = stage / output_name(filename)
+        # Staged files may be hard-linked into the farm; replace their directory entry on every rerun.
+        with atomic_output(page_path, suffix=".part") as tmp:
+            Image.fromarray(color).save(tmp, format="PNG", compress_level=1)
+        cache_farm.install_file(farm, str(relative / page_path.name), page_path)
+
+        def patch(data):
+            data["spriteAtlasesHd"][page]["file"] = page_path.name
+
+        cache_farm.patch_json(farm, str(relative / "library.json"), patch)
+        print(f"{theater} page {page}: {len(seen)} rects; " + "; ".join(metrics), flush=True)
+
+
 def copy_pages(source: Library, staged: Path, lib: Library, out: Path, farm: Path, rel_dir: str,
                fill_dir=None, pages=None, suffix="l5inf", paint_saturation=0.7):
     """Install a staged install-pages build of another theater by copying its accepted frame rectangles.
@@ -1696,6 +1817,14 @@ def parser():
     selection = sub.add_mutually_exclusive_group()
     selection.add_argument("--sprites-prefix", type=csv_names, default=["infantry:", "vehicle:"])
     selection.add_argument("--sprites", type=csv_names, help="exact sprite names, e.g. building:GAPILL")
+    sub = commands.add_parser("paint-value", help="darken the encoded house-paint value of named sprites")
+    for name in ("farm", "stage"):
+        sub.add_argument("--" + name, type=Path, required=True)
+    sub.add_argument("--theater", required=True)
+    sub.add_argument("--sprites", type=csv_names, required=True)
+    sub.add_argument("--gamma", type=float, required=True)
+    sub.add_argument("--outside-floor", type=float, default=0.0)
+    sub.add_argument("--suffix", default="l5hinf")
     return ap
 
 
@@ -1712,6 +1841,15 @@ def main(argv=None):
         if opts.command == "run":
             return run(opts.work, opts.codex, opts.parallel, opts.limit_file, opts.names, opts.redo,
                        reasoning=opts.reasoning, order_by=opts.order)
+        if opts.command == "paint-value":
+            pixel_limit = Image.MAX_IMAGE_PIXELS
+            try:
+                Image.MAX_IMAGE_PIXELS = None
+                paint_value_pages(opts.farm, opts.theater, opts.stage, opts.sprites, opts.gamma,
+                                  opts.outside_floor, opts.suffix)
+            finally:
+                Image.MAX_IMAGE_PIXELS = pixel_limit
+            return 0
         if opts.command == "repaint-pages":
             # Large atlas reads are intentional here; restore Pillow's guard for other callers.
             pixel_limit = Image.MAX_IMAGE_PIXELS

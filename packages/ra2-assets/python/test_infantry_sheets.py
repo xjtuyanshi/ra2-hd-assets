@@ -1134,6 +1134,225 @@ class RepaintPagesTests(unittest.TestCase):
                 inf.parser().parse_args([*args, "--edge", edge])
 
 
+class PaintValueFrameTests(unittest.TestCase):
+    def test_gamma_darkens_neutral_paint_and_preserves_other_bytes(self):
+        k = np.tile(np.repeat([4, 8, 12], 2), (4, 1))
+        rgba = np.empty((4, 6, 4), np.uint8)
+        rgba[..., :3] = (255 - 15 * k)[..., None]
+        rgba[..., 3] = 173
+        paint = np.full((4, 6), 255, np.uint8)
+        rgba[0, 0] = [29, 47, 61, 0]
+        rgba[0, 1, :3] = [25, 46, 67]
+        paint[0, 1], paint[1, 0], paint[1, 1] = 0, 5, 6
+        idx = np.full((2, 3), 20, np.uint8)
+        original, original_paint, original_idx = rgba.copy(), paint.copy(), idx.copy()
+        out = inf.paint_value_frame(rgba, paint, idx, 0.5)
+        mask = (paint / 255 > 0.02) & (rgba[..., 3] > 0)
+        actual_k = (255 - out[..., 1].astype(float)) / 15
+        np.testing.assert_allclose(actual_k[mask], (15 * (k / 15) ** 0.5)[mask], atol=0.07, rtol=0)
+        np.testing.assert_array_equal(out[..., 0][mask], out[..., 1][mask])
+        np.testing.assert_array_equal(out[..., 2][mask], out[..., 1][mask])
+        np.testing.assert_array_equal(out[~mask], rgba[~mask])
+        np.testing.assert_array_equal(out[..., 3], rgba[..., 3])
+        np.testing.assert_array_equal(rgba, original)
+        np.testing.assert_array_equal(paint, original_paint)
+        np.testing.assert_array_equal(idx, original_idx)
+
+    def test_equal_channel_delta_preserves_chroma_until_clipped(self):
+        rgba = np.array([[[235, 195, 5, 255], [250, 195, 240, 91]],
+                         [[40, 195, 35, 255], [10, 195, 9, 128]]], np.uint8)
+        out = inf.paint_value_frame(rgba, np.full((2, 2), 255, np.uint8), np.array([[20]]), 0.5)
+        delta = (255 - 15 * (15 * (4 / 15) ** 0.5)) - 195
+        expected = rgba.copy()
+        expected[..., :3] = np.clip(np.rint(rgba[..., :3].astype(float) + delta), 0, 255).astype(np.uint8)
+        np.testing.assert_array_equal(out, expected)
+
+    def test_floor_uses_original_remap_with_one_hd_texel_of_eight_neighbour_dilation(self):
+        idx = np.full((5, 5), 40, np.uint8)
+        idx[2, 2], idx[0, 0], idx[4, 4] = 20, 16, 31
+        idx[0, 4], idx[4, 0] = 15, 32  # Adjacent palette indices are not remap.
+        rgba = np.full((10, 10, 4), 195, np.uint8)
+        rgba[..., 3] = 255
+        rgba[0, 9, 3] = 0
+        paint = np.full((10, 10), 255, np.uint8)
+        paint[9, 0] = 0
+        out = inf.paint_value_frame(rgba, paint, idx, 1, outside_floor=15)
+        protected = np.zeros((10, 10), bool)
+        protected[3:7, 3:7] = True
+        protected[:3, :3] = True
+        protected[7:, 7:] = True
+        changed = ~protected & (rgba[..., 3] > 0) & (paint > 0)
+        expected = rgba.copy()
+        expected[..., :3][changed] = 30
+        np.testing.assert_array_equal(out, expected)
+        # Gamma still applies inside the protected region; the floor is additional, not a replacement.
+        out = inf.paint_value_frame(rgba, paint, idx, 0.5, outside_floor=15)
+        self.assertEqual(out[4, 4, 1], round(255 - 15 * (15 * (4 / 15) ** 0.5)))
+        self.assertEqual(out[2, 4, 1], 30)
+
+    def test_identity_and_invalid_parameters(self):
+        rng = np.random.default_rng(7)
+        rgba = rng.integers(0, 256, (8, 10, 4), dtype=np.uint8)
+        paint = rng.integers(0, 256, (8, 10), dtype=np.uint8)
+        idx = rng.integers(0, 256, (4, 5), dtype=np.uint8)
+        np.testing.assert_array_equal(inf.paint_value_frame(rgba, paint, idx, 1), rgba)
+        for gamma in (0, -0.1, 1.01, float("nan"), float("inf")):
+            with self.subTest(gamma=gamma), self.assertRaises(ValueError):
+                inf.paint_value_frame(rgba, paint, idx, gamma)
+        for floor in (-0.1, 15.01, float("nan"), float("inf")):
+            with self.subTest(floor=floor), self.assertRaises(ValueError):
+                inf.paint_value_frame(rgba, paint, idx, 0.5, floor)
+
+
+class PaintValuePagesTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        self.colors, self.paints, atlases, hd = [], [], [], []
+        for page, width in enumerate((16, 4)):
+            idx = np.full((4, width), 40, np.uint8)
+            for x in range(0, width, 4):
+                idx[1:3, x + 1:x + 3] = 20
+            k = np.tile([4, 8, 12, 8], (8, width // 2))
+            color = np.empty((8, 2 * width, 4), np.uint8)
+            color[..., :3] = (255 - 15 * k)[..., None]
+            color[..., 3] = 255
+            color[0, 0, 3], color[0, 1, 3] = 0, 85
+            paint = np.full((8, 2 * width), 255, np.uint8)
+            paint[0, 2], paint[0, 3] = 0, 5
+            names = [f"original-{page}.png", f"custom-{page}@2x.png", f"house-{page}.png"]
+            for pixels, name in zip((idx, color, paint), names):
+                Image.fromarray(pixels).save(self.source / name)
+            self.colors.append(color)
+            self.paints.append(paint)
+            atlases.append({"file": names[0]})
+            hd.append({"file": names[1], "remap": names[2], "scale": 2, "paintSaturation": 0.7 + page * 0.1,
+                       "width": 2 * width, "height": 8, "provenance": "preserve"})
+        self.data = {
+            "spriteAtlases": atlases, "spriteAtlasesHd": hd,
+            "sprites": {
+                "infantry:INIT": {"frames": [{"page": 0, "rect": [x, 0, 4, 4]} for x in (0, 0, 4)]},
+                "infantry:SLAV": {"frames": [{"page": 0, "rect": [8, 0, 4, 4]}]},
+                "infantry:GI": {"frames": [{"page": 0, "rect": [12, 0, 4, 4]}]},
+                "infantry:CONS": {"frames": [{"page": 1, "rect": [0, 0, 4, 4]}]}},
+            "farmOnly": {"keep": [False, 0, "metadata"]}}
+        self.write_manifest()
+        self.farm = self.root / "farm"
+        (self.farm / "_library").mkdir(parents=True)
+        self.target = self.farm / "_library/urban"
+        self.target.symlink_to(self.source)
+        self.stage = self.root / "stage"
+        self.record_source()
+
+    def write_manifest(self):
+        (self.source / "library.json").write_text(json.dumps(self.data), encoding="utf-8")
+
+    def record_source(self):
+        self.source_files = {p.name: (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_ino)
+                             for p in self.source.iterdir()}
+
+    def assert_source_untouched(self):
+        self.assertEqual({p.name: (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_ino)
+                          for p in self.source.iterdir()}, self.source_files)
+
+    def run_cli(self, *extra):
+        return subprocess.run([sys.executable, "-B", str(Path(inf.__file__)), "paint-value",
+                               "--farm", str(self.farm), "--theater", "urban", "--stage", str(self.stage),
+                               "--sprites", "infantry:INIT", "--gamma", "0.5", *extra],
+                              check=True, capture_output=True, text=True)
+
+    def test_cli_changes_only_named_rects_and_reruns_from_recorded_files(self):
+        # Existing output symlinks must be replaced without changing their targets.
+        self.stage.mkdir()
+        filename = "custom-0@2x-l5hinf.png"
+        (self.stage / filename).symlink_to(self.source / "custom-0@2x.png")
+        (self.source / filename).symlink_to(self.source / "custom-0@2x.png")
+        self.record_source()
+        result = self.run_cli()
+        self.assertIn("urban page 0: 2 rects", result.stdout)
+        self.assertIn("infantry:INIT mean k", result.stdout)
+        expected = self.colors[0].copy()
+        mask = (self.paints[0] / 255 > 0.02) & (expected[..., 3] > 0)
+        mask[:, 16:] = False
+        k = (255 - expected[..., 1].astype(float)) / 15
+        expected[..., :3][mask] = np.rint(255 - 15 * (15 * (k[mask] / 15) ** 0.5))[:, None]
+        np.testing.assert_array_equal(read_image(self.target / filename), expected)
+        np.testing.assert_array_equal(read_image(self.target / filename)[:, 16:], self.colors[0][:, 16:])
+        self.assertFalse((self.target / filename).is_symlink())
+        self.assertFalse((self.stage / filename).is_symlink())
+        self.assertFalse((self.target / "library.json").is_symlink())
+        self.assertTrue((self.target / "custom-1@2x.png").is_symlink())
+        want = copy.deepcopy(self.data)
+        want["spriteAtlasesHd"][0]["file"] = filename
+        self.assertEqual(json.loads((self.target / "library.json").read_text()), want)
+        source_json = self.stage / "l5hinf-urban-source.json"
+        self.assertEqual(json.loads(source_json.read_text()), {"0": "custom-0@2x.png", "1": "custom-1@2x.png"})
+        record = (source_json.read_bytes(), source_json.stat().st_mtime_ns)
+        first = (self.target / filename).read_bytes()
+        self.run_cli()
+        self.assertEqual((self.target / filename).read_bytes(), first)
+        self.assertEqual((source_json.read_bytes(), source_json.stat().st_mtime_ns), record)
+        for page in range(2):
+            name = self.data["spriteAtlasesHd"][page]["remap"]
+            self.assertTrue((self.target / name).is_symlink())
+            self.assertEqual((self.target / name).read_bytes(), self.source_files[name][0])
+        self.assert_source_untouched()
+
+    def test_all_named_pages_and_shared_alias_rects_are_processed_once(self):
+        self.data["sprites"]["infantry:SLAV"]["frames"].append({"page": 0, "rect": [0, 0, 4, 4]})
+        self.write_manifest()
+        self.record_source()
+        result = self.run_cli("--sprites", "infantry:INIT,infantry:SLAV,infantry:CONS", "--gamma", "0.45",
+                              "--outside-floor", "15", "--suffix", "navy")
+        self.assertIn("page 0: 3 rects", result.stdout)
+        self.assertIn("infantry:SLAV mean k", result.stdout)
+        self.assertIn("page 1: 1 rects", result.stdout)
+        self.assertIn("infantry:CONS mean k", result.stdout)
+        for page, width in ((0, 12), (1, 4)):
+            expected = self.colors[page].copy()
+            idx = read_image(self.source / f"original-{page}.png")
+            for x in range(0, width, 4):
+                crop = np.s_[:, 2 * x:2 * (x + 4)]
+                expected[crop] = inf.paint_value_frame(self.colors[page][crop], self.paints[page][crop],
+                                                       idx[:, x:x + 4], 0.45, 15)
+            np.testing.assert_array_equal(read_image(self.target / f"custom-{page}@2x-navy.png"), expected)
+        self.assert_source_untouched()
+
+    def test_existing_suffix_keeps_an_immutable_baseline_without_duplicate_suffixes(self):
+        original = self.source / "custom-0@2x.png"
+        filename = "custom-0@2x-l5hinf.png"
+        original.rename(self.source / filename)
+        self.data["spriteAtlasesHd"][0]["file"] = filename
+        self.write_manifest()
+        self.record_source()
+        self.run_cli()
+        first = (self.target / filename).read_bytes()
+        self.assertNotEqual(first, self.source_files[filename][0])
+        self.run_cli()
+        self.assertEqual((self.target / filename).read_bytes(), first)
+        self.assertFalse((self.target / "custom-0@2x-l5hinf-l5hinf.png").exists())
+        self.assertEqual(json.loads((self.stage / "l5hinf-urban-source.json").read_text())["0"], filename)
+        self.assert_source_untouched()
+
+    def test_cli_rejects_invalid_parameters_and_unknown_sprites_before_writing(self):
+        args = ["paint-value", "--farm", str(self.farm), "--theater", "urban", "--stage", str(self.stage),
+                "--sprites", "infantry:INIT", "--gamma", "0.5"]
+        for flag, value in (("--theater", "../urban"), ("--suffix", "bad/name"), ("--gamma", "0"),
+                            ("--gamma", "1.1"), ("--gamma", "nan"), ("--outside-floor", "-1"),
+                            ("--outside-floor", "16"), ("--outside-floor", "nan"),
+                            ("--sprites", "infantry:INIT,infantry:MISSING"), ("--sprites", ","),
+                            ("--stage", str(self.source))):
+            with self.subTest(flag=flag, value=value), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                inf.main([*args, flag, value])
+            self.assertFalse(self.stage.exists())
+            self.assertTrue(self.target.is_symlink())
+            self.assert_source_untouched()
+
+
 class SchedulerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix=".tmp-infantry-run-", dir=Path(__file__).parent)
@@ -1234,7 +1453,7 @@ shutil.copyfile(d / "input.png", d / "output.png")
     def test_cli_help_needs_no_library(self):
         result = subprocess.run([sys.executable, "-B", str(Path(inf.__file__)), "--help"],
                                 capture_output=True, text=True, check=True)
-        self.assertIn("{prepare,run,compose,build,polish,install-pages,copy-pages,repaint-pages}", result.stdout)
+        self.assertIn("{prepare,run,compose,build,polish,install-pages,copy-pages,repaint-pages,paint-value}", result.stdout)
 
 
 if __name__ == "__main__":

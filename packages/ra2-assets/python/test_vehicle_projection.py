@@ -3,6 +3,8 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -273,6 +275,230 @@ class VehicleProjectionTests(unittest.TestCase):
         self.assertLess(np.abs(lo[hull][..., 0] - lr[hull][..., 0]).max(), 4.0)  # lightness ramp kept
         np.testing.assert_array_equal(out[30:34, 30:34], redraw[30:34, 30:34])  # paint untouched
         np.testing.assert_array_equal(out[:8, :8], redraw[:8, :8])  # background untouched
+
+class LiftLightnessTests(unittest.TestCase):
+    def lab(self, rgba):
+        return cv2.cvtColor(rgba[..., :3].astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+
+    def test_darks_rise_highlights_change_less_and_ramp_stays_monotonic(self):
+        ramp = np.zeros((1, 256, 4), np.uint8)
+        ramp[..., :3] = np.arange(256, dtype=np.uint8)[None, :, None]
+        ramp[..., 3] = 255
+        # At gamma 0.8, L*=30 rises by about 8 and L*=90 by about 2.
+        before = self.lab(ramp)[..., 0]
+        self.assertAlmostEqual(float(before[0, 71]), 30, delta=1)
+        self.assertAlmostEqual(float(before[0, 226]), 90, delta=1)
+        after = self.lab(projection.lift_lightness(ramp, np.zeros((1, 256), np.uint8), 0.8))[..., 0]
+        self.assertGreater(float(after[0, 71] - before[0, 71]), 5)
+        self.assertGreater(float(after[0, 226] - before[0, 226]), 0)
+        self.assertLess(float(after[0, 226] - before[0, 226]), 2.5)
+        self.assertTrue(np.all(np.diff(after[0]) >= 0))
+        self.assertEqual(float(after[0, 0]), 0)
+        self.assertEqual(float(after[0, -1]), 100)
+
+    def test_gamma_point_six_matches_lightness_curve_and_partial_paint_weight(self):
+        rgba = np.full((1, 3, 4), [71, 71, 71, 255], np.uint8)
+        paint = np.array([[0, 128, 255]], np.uint8)
+        before = self.lab(rgba)[..., 0]
+        after = self.lab(projection.lift_lightness(rgba, paint, 0.6))[..., 0]
+        weight = 1 - np.clip((paint.astype(float) / 255 - 0.3) / 0.4, 0, 1)
+        expected = before + (100 * (before / 100) ** 0.6 - before) * weight
+        np.testing.assert_allclose(after, expected, atol=0.4)
+        self.assertGreater(float(after[0, 1]), float(before[0, 1]))
+        self.assertLess(float(after[0, 1]), float(after[0, 0]))
+
+    def test_chroma_and_coloured_hue_are_preserved(self):
+        rgba = np.array([[[71, 71, 71, 255], [65, 79, 92, 255], [150, 165, 180, 255],
+                          [120, 85, 65, 255]]], np.uint8)
+        before = self.lab(rgba)
+        after = self.lab(projection.lift_lightness(rgba, np.zeros((1, 4), np.uint8), 0.6))
+        np.testing.assert_allclose(after[..., 1:], before[..., 1:], atol=1.5)
+        before_hue = np.rad2deg(np.arctan2(before[0, 3, 2], before[0, 3, 1]))
+        after_hue = np.rad2deg(np.arctan2(after[0, 3, 2], after[0, 3, 1]))
+        self.assertLessEqual(abs(float((after_hue - before_hue + 180) % 360 - 180)), 3)
+
+    def test_paint_and_transparency_preserve_original_bytes_and_inputs(self):
+        rgba = np.array([[[71, 71, 71, 255], [91, 37, 143, 128], [19, 137, 53, 0],
+                          [65, 79, 92, 64]]], np.uint8)
+        paint = np.array([[0, 255, 0, 179]], np.uint8)
+        original, original_paint = rgba.copy(), paint.copy()
+        result = projection.lift_lightness(rgba, paint, 0.6)
+        self.assertFalse(np.array_equal(result[0, 0], original[0, 0]))
+        np.testing.assert_array_equal(result[0, 1:], original[0, 1:])
+        np.testing.assert_array_equal(result[..., 3], original[..., 3])
+        np.testing.assert_array_equal(rgba, original)
+        np.testing.assert_array_equal(paint, original_paint)
+
+    def test_near_zero_weight_keeps_rgb_bytes_without_round_trip(self):
+        rgba = np.array([[[19, 137, 53, 255], [91, 37, 143, 64]]], np.uint8)
+        paint = np.full((1, 2), 178, np.uint8)
+        # Choose a protection boundary where this uint8 mask gives 0 < w <= 1e-3.
+        result = projection.lift_lightness(rgba, paint, 0.6, protect_hi=178 / 255 + 0.0001)
+        np.testing.assert_array_equal(result, rgba)
+
+    def test_gamma_one_returns_an_identical_independent_copy(self):
+        rng = np.random.default_rng(2026)
+        rgba = rng.integers(0, 256, (8, 8, 4), dtype=np.uint8)
+        paint = rng.integers(0, 256, (8, 8), dtype=np.uint8)
+        result = projection.lift_lightness(rgba, paint, 1)
+        self.assertEqual(result.dtype, np.uint8)
+        np.testing.assert_array_equal(result, rgba)
+        self.assertFalse(np.shares_memory(result, rgba))
+
+    def test_invalid_gamma_masks_and_protection_bounds_are_rejected(self):
+        rgba, paint = np.zeros((1, 1, 4), np.uint8), np.zeros((1, 1), np.uint8)
+        for gamma in (0, -0.1, 1.1, float('nan'), float('inf')):
+            with self.subTest(gamma=gamma), self.assertRaisesRegex(ValueError, 'gamma'):
+                projection.lift_lightness(rgba, paint, gamma)
+        with self.assertRaisesRegex(ValueError, 'matching paint red channel'):
+            projection.lift_lightness(rgba, np.zeros((1, 2), np.uint8), 0.6)
+        for lo, hi in ((0.7, 0.3), (0.3, 0.3), (-0.1, 0.7), (0.3, 1.1)):
+            with self.subTest(lo=lo, hi=hi), self.assertRaisesRegex(ValueError, 'paint protection'):
+                projection.lift_lightness(rgba, paint, 0.6, lo, hi)
+
+
+class ProjectionLiftTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.src, self.out = self.root / 'source', self.root / 'lifted'
+        self.src.mkdir()
+        self.rgba = np.array([[[71, 71, 71, 255], [65, 79, 92, 64]],
+                              [[91, 37, 143, 128], [19, 137, 53, 0]]], np.uint8)
+        paint = np.zeros((2, 2, 3), np.uint8)
+        paint[1, 0] = [255, 77, 199]
+        paint[0, 1] = [128, 255, 255]
+        self.spec = {'version': 1, 'type': 'HTNK', 'frames': 16, 'facingStep': 16, 'scale': 1,
+                     'jacobian': BAKE_JACOBIAN.tolist(), 'house': {'first': 16, 'count': 16},
+                     'registration': [], 'parts': {}}
+        for part in ('body', 'turret'):
+            # Atlas names are manifest references, not names inferred from the part.
+            colour_name, paint_name = f'custom_{part}.png', f'mask_{part}.png'
+            Image.fromarray(self.rgba).save(self.src / colour_name)
+            Image.fromarray(paint).save(self.src / paint_name)
+            self.spec['parts'][part] = {'colour': colour_name, 'paint': paint_name, 'size': [2, 2],
+                                       'frames': [{'k': k, 'facing': k * 16, 'pivot': [0, 0],
+                                                   'rect': [0, 0, 2, 2]} for k in range(16)]}
+        (self.src / 'HTNK.json').write_text(json.dumps(self.spec, indent=2) + '\n')
+        self.snapshot = {p.name: p.read_bytes() for p in self.src.iterdir()}
+
+    def assert_source_untouched(self):
+        self.assertEqual({p.name: p.read_bytes() for p in self.src.iterdir()}, self.snapshot)
+
+    def assert_complete_output(self, changed):
+        self.assertEqual(changed, {'body': 2, 'turret': 2})
+        self.assertEqual({p.name for p in self.out.iterdir()}, set(self.snapshot))
+        self.assertEqual((self.out / 'HTNK.json').read_bytes(), self.snapshot['HTNK.json'])
+        for part, entry in self.spec['parts'].items():
+            self.assertEqual((self.out / entry['paint']).read_bytes(), self.snapshot[entry['paint']])
+            self.assertNotEqual((self.out / entry['colour']).read_bytes(), self.snapshot[entry['colour']])
+            with Image.open(self.out / entry['colour']) as image:
+                self.assertEqual(image.mode, 'RGBA')
+                result = np.array(image)
+            self.assertEqual(int(np.count_nonzero(np.any(result != self.rgba, axis=-1))), changed[part])
+            np.testing.assert_array_equal(result[..., 3], self.rgba[..., 3])
+            np.testing.assert_array_equal(result[1], self.rgba[1])
+        self.assert_source_untouched()
+
+    def test_lift_writes_a_complete_separate_build_with_exact_counts(self):
+        self.assert_complete_output(projection.lift(self.src, self.out, 'HTNK', 0.6))
+
+    def test_output_is_compatible_with_existing_farm_install(self):
+        projection.lift(self.src, self.out, 'HTNK', 0.6)
+        farm = self.root / 'farm'
+        (farm / 'vehicles-hd').mkdir(parents=True)
+        (farm / 'vehicles-hd/index.json').write_text(json.dumps({'version': 1, 'types': {}}))
+        installed = projection.install(farm, self.out, 'HTNK')
+        self.assertEqual(set(installed), set(self.snapshot))
+        for name in installed:
+            self.assertEqual((farm / 'vehicles-hd' / name).read_bytes(), (self.out / name).read_bytes())
+        self.assertEqual(json.loads((farm / 'vehicles-hd/index.json').read_text())['types'], {'HTNK': 'HTNK.json'})
+        self.assert_source_untouched()
+
+    def test_same_nested_and_symlinked_source_outputs_are_refused(self):
+        alias = self.root / 'alias'
+        alias.symlink_to(self.src, target_is_directory=True)
+        for out in (self.src, self.src / 'nested', self.src / '..' / 'source', alias, alias / 'nested'):
+            with self.subTest(out=out), self.assertRaisesRegex(ValueError, 'source directory'):
+                projection.lift(self.src, out, 'HTNK', 0.6)
+        self.assertFalse((self.src / 'nested').exists())
+        self.assert_source_untouched()
+
+    def test_existing_output_symlinks_are_replaced_without_writing_through(self):
+        self.out.mkdir()
+        for name in self.snapshot:
+            (self.out / name).symlink_to(self.src / name)
+        changed = projection.lift(self.src, self.out, 'HTNK', 0.6)
+        self.assertTrue(all(not p.is_symlink() for p in self.out.iterdir()))
+        self.assert_complete_output(changed)
+
+    def test_invalid_gamma_type_manifest_and_missing_atlas_fail_before_output(self):
+        for gamma in (0, -1, 1.1, float('nan'), float('inf')):
+            with self.subTest(gamma=gamma), self.assertRaisesRegex(ValueError, 'gamma'):
+                projection.lift(self.src, self.out, 'HTNK', gamma)
+        for type_name in ('../HTNK', 'HTNK/other', 'HTNK:turret', 'HTNK-1', 'HTNK\n', ''):
+            with self.subTest(type_name=type_name), self.assertRaisesRegex(ValueError, 'Invalid projection type'):
+                projection.lift(self.src, self.out, type_name, 0.6)
+        with self.assertRaisesRegex(ValueError, 'Missing build manifest'):
+            projection.lift(self.src, self.out, 'MISSING', 0.6)
+        manifest = self.src / 'HTNK.json'
+        manifest.write_text(json.dumps({**self.spec, 'type': 'OTHER'}))
+        with self.assertRaisesRegex(ValueError, 'version 1 manifest for HTNK'):
+            projection.lift(self.src, self.out, 'HTNK', 0.6)
+        manifest.write_bytes(self.snapshot[manifest.name])
+        atlas = self.src / self.spec['parts']['turret']['paint']
+        atlas.unlink()
+        with self.assertRaisesRegex(ValueError, 'missing atlas'):
+            projection.lift(self.src, self.out, 'HTNK', 0.6)
+        atlas.write_bytes(self.snapshot[atlas.name])
+        self.assertFalse(self.out.exists())
+        self.assert_source_untouched()
+
+    def test_failed_image_write_leaves_no_partial_destination_or_temporary_file(self):
+        self.out.mkdir()
+        destination = self.out / self.spec['parts']['body']['colour']
+        destination.write_bytes(b'previous build')
+        with mock.patch.object(Image.Image, 'save', side_effect=OSError('synthetic write failure')):
+            with self.assertRaisesRegex(OSError, 'synthetic write failure'):
+                projection.lift(self.src, self.out, 'HTNK', 0.6)
+        self.assertEqual(destination.read_bytes(), b'previous build')
+        self.assertEqual(list(self.out.iterdir()), [destination])
+        self.assert_source_untouched()
+
+    def test_gamma_one_build_preserves_colour_pixels_and_reports_zero(self):
+        self.assertEqual(projection.lift(self.src, self.out, 'HTNK', 1), {'body': 0, 'turret': 0})
+        for entry in self.spec['parts'].values():
+            with Image.open(self.out / entry['colour']) as image:
+                np.testing.assert_array_equal(np.array(image), self.rgba)
+        self.assert_source_untouched()
+
+    def test_cli_returns_zero_and_prints_json(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = projection.main(['lift', '--src', str(self.src), '--out', str(self.out),
+                                      '--type', 'HTNK', '--gamma', '0.6'])
+        self.assertEqual(status, 0)
+        self.assert_complete_output(json.loads(output.getvalue()))
+        command = [sys.executable, '-B', str(Path(projection.__file__).resolve()), 'lift',
+                   '--src', str(self.src), '--out', str(self.out), '--type', 'HTNK', '--gamma', '0.6']
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_complete_output(json.loads(result.stdout))
+
+    def test_cli_validation_reports_errors_without_creating_output(self):
+        base = ['lift', '--src', str(self.src), '--out', str(self.out)]
+        for type_name, gamma, message in (('HTNK', '0', 'gamma'), ('../HTNK', '0.6', 'Invalid projection type'),
+                                          ('MISSING', '0.6', 'Missing build manifest')):
+            errors = io.StringIO()
+            with self.subTest(type_name=type_name, gamma=gamma), contextlib.redirect_stderr(errors):
+                with self.assertRaises(SystemExit) as raised:
+                    projection.main([*base, '--type', type_name, '--gamma', gamma])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn(message, errors.getvalue())
+        self.assertFalse(self.out.exists())
+        self.assert_source_untouched()
+
 
 class ProjectionInstallTests(unittest.TestCase):
     def setUp(self):
