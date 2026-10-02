@@ -160,7 +160,6 @@ describe('cinematic preset and sandbox parameters', () => {
       if (
         [
           'whiteAdapt',
-          'adaptExposure',
           'mapTintAdapt',
           'mapSourcesByDay',
           'sunGain',
@@ -179,11 +178,10 @@ describe('cinematic preset and sandbox parameters', () => {
     expect(cinematic.hour).toBe(16.5);
     // Calibrated against the approved targets (see the preset's comment).
     expect(cinematic.settings).toMatchObject({
-      // L5G: 15 % of the afternoon sun's colour stays on flat ground; noon flat-ground brightness (battle grass warmth).
+      // L5G: 15 % of the afternoon sun's colour stays on flat ground (battle grass warmth from the light).
       whiteAdapt: 0.85,
-      adaptExposure: 1,
       mapTintAdapt: 0.3,
-      // Street lamps keep 20 % of their daytime engine light (park lawn at the target's L* 45 with the brighter day).
+      // Street lamps keep 20 % of their daytime engine light (the lamp-lit park lawn stays green and near L* 45).
       mapSourcesByDay: 0.2,
       gradeBalance: [0.955, 1, 1.085],
       gradeContrast: 0.14,
