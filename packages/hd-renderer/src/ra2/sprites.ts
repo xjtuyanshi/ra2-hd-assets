@@ -146,7 +146,7 @@ type GroundPass = 'main' | 'under' | 'over';
  * their coverage (five levels): a later, denser shadow still darkens an earlier fringe.
  */
 export const GROUND_PULL = { shadow: [0.019, 0.027], reflection: 0.0285 } as const;
-export const INFANTRY_SHADOW_OPACITY = 0.78;
+export const INFANTRY_SHADOW_OPACITY = 0.8;
 
 /**
  * Filtered coverage of a frame's 1x indexed mask at `texel` (quadratic B-spline over the 3x3 texels around it, texels
