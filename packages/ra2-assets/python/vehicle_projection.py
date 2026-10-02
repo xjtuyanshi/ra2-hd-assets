@@ -12,6 +12,8 @@ from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
+import re
+import tempfile
 import warnings
 
 import cv2
@@ -567,6 +569,95 @@ def grade(atlases: Path, parts: list[str], keep: float, centre: float = 40.0, ha
     return changed
 
 
+def lift_lightness(rgba: np.ndarray, paint: np.ndarray, gamma: float,
+                   protect_lo: float = 0.3, protect_hi: float = 0.7) -> np.ndarray:
+    """Lift Lab lightness while preserving chroma, alpha and protected RGB bytes."""
+    if not 0 < gamma <= 1:
+        raise ValueError('gamma must satisfy 0 < gamma <= 1')
+    if not 0 <= protect_lo < protect_hi <= 1:
+        raise ValueError('paint protection must satisfy 0 <= protect_lo < protect_hi <= 1')
+    rgba = np.asarray(rgba, np.uint8)
+    paint = np.asarray(paint, np.float32)
+    if rgba.ndim != 3 or rgba.shape[-1] != 4 or paint.shape != rgba.shape[:2]:
+        raise ValueError('Expected an RGBA image and a matching paint red channel')
+    result = rgba.copy()
+    if gamma == 1:
+        return result
+    weight = 1 - np.clip((paint / 255 - protect_lo) / (protect_hi - protect_lo), 0, 1)
+    active = (weight > 1e-3) & (rgba[..., 3] != 0)
+    if not active.any():
+        return result
+    # Float conversion gives physical L*/a*/b* units from the original uint8 RGB.
+    lab = cv2.cvtColor(rgba[..., :3].astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+    lightness = lab[..., 0]
+    lifted = 100 * (lightness / 100) ** gamma
+    lab[..., 0] = lightness + (lifted - lightness) * weight
+    colour = np.clip(np.rint(cv2.cvtColor(lab, cv2.COLOR_LAB2RGB) * 255), 0, 255).astype(np.uint8)
+    # Protected and transparent texels must not acquire Lab round-trip drift.
+    result[..., :3][active] = colour[active]
+    return result
+
+
+def load_type_build(src_dir: Path, out_dir: Path, type_name: str) -> tuple[Path, Path, bytes, dict]:
+    """Discover a complete source type and reject outputs within its library."""
+    if re.fullmatch(r'[A-Za-z0-9_]+', type_name) is None:
+        raise ValueError(f'Invalid projection type: {type_name!r}')
+    src_dir, out_dir = Path(src_dir).resolve(), Path(out_dir).resolve()
+    if out_dir == src_dir or src_dir in out_dir.parents:
+        raise ValueError('Output directory must not be the source directory or inside it')
+    manifest = src_dir / f'{type_name}.json'
+    if not manifest.is_file():
+        raise ValueError(f'Missing build manifest: {manifest}')
+    manifest_bytes = manifest.read_bytes()
+    spec = json.loads(manifest_bytes)
+    if not isinstance(spec, dict) or spec.get('version') != 1 or spec.get('type') != type_name:
+        raise ValueError(f'{manifest.name}: expected a version 1 manifest for {type_name}')
+    manifest_atlases(manifest, spec)
+    return src_dir, out_dir, manifest_bytes, spec
+
+
+def publish_atlas(out_dir: Path, name: str, data: np.ndarray | bytes):
+    """Atomically publish image or file bytes without following destination symlinks."""
+    with tempfile.NamedTemporaryFile(dir=out_dir, suffix='.tmp', delete=False) as temporary:
+        path = Path(temporary.name)
+        try:
+            if isinstance(data, bytes):
+                temporary.write(data)
+            else:
+                Image.fromarray(data).save(temporary, format='PNG')
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+    try:
+        # Replace destination symlinks rather than writing through them into the source.
+        path.replace(out_dir / name)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def lift(src_dir: Path, out_dir: Path, type_name: str, gamma: float) -> dict[str, int]:
+    """Write a complete lifted type build to a separate directory, publishing files atomically."""
+    if not 0 < gamma <= 1:
+        raise ValueError('gamma must satisfy 0 < gamma <= 1')
+    src_dir, out_dir, manifest_bytes, spec = load_type_build(src_dir, out_dir, type_name)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    changed = {}
+    for part, entry in spec['parts'].items():
+        with Image.open(src_dir / entry['colour']) as image:
+            rgba = np.asarray(image.convert('RGBA'))
+        with Image.open(src_dir / entry['paint']) as image:
+            paint = np.asarray(image.convert('RGB'))[..., 0]
+        lifted = lift_lightness(rgba, paint, gamma)
+        publish_atlas(out_dir, entry['colour'], lifted)
+        publish_atlas(out_dir, entry['paint'], (src_dir / entry['paint']).read_bytes())
+        changed[part] = int(np.count_nonzero(np.any(lifted != rgba, axis=-1)))
+    # Publish the unchanged manifest only after all of its atlases are written.
+    publish_atlas(out_dir, f'{type_name}.json', manifest_bytes)
+    return changed
+
+
+
 def chroma_lock(design, redraw, background=(118, 118, 118), sigma: float = 6.0, strength: float = 1.0,
                 paint_chroma: float = 42.0) -> np.ndarray:
     """Restore the design sheet's low-frequency hue/saturation on an aligned image-model redraw sheet.
@@ -669,6 +760,11 @@ def main(argv=None):
     grader.add_argument('--keep', type=float, default=0.3)
     grader.add_argument('--hue', type=float, default=40.0, help='centre of the graded hue band, degrees')
     grader.add_argument('--half', type=float, default=20.0, help='half width of the band at full effect, degrees')
+    lifter = commands.add_parser('lift', help='lift hull lightness into a separate complete type build')
+    lifter.add_argument('--src', type=Path, required=True)
+    lifter.add_argument('--out', type=Path, required=True)
+    lifter.add_argument('--type', required=True)
+    lifter.add_argument('--gamma', type=float, required=True, help='lightness exponent, 0 < gamma <= 1')
     locker = commands.add_parser('lock', help='restore design colours and optionally camouflage on a redraw sheet')
     locker.add_argument('--design', type=Path, required=True, help='image-model input sheet (input.png)')
     locker.add_argument('--redraw', type=Path, required=True, help='image-model result (output.png)')
@@ -717,6 +813,13 @@ def main(argv=None):
         print(f'index {args.type} -> {file_stem(args.type)}.json')
     elif args.command == 'grade':
         print(json.dumps(grade(args.out, args.parts, args.keep, args.hue, args.half), indent=2))
+    elif args.command == 'lift':
+        try:
+            changed = lift(args.src, args.out, args.type, args.gamma)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+        print(json.dumps(changed, indent=2))
+        return 0
     else:
         spec = build(args.type, args.bake, args.sheets, args.palettes, args.house_key, args.out, args.review)
         print(json.dumps({**{k: spec[k] for k in ('type', 'frames', 'facingStep', 'scale', 'jacobian', 'house')},
