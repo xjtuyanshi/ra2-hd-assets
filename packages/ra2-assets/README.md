@@ -802,6 +802,14 @@ python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_ore_field
 `install` uses POSIX `flock` on the destination theatre's `.compose.lock`, atomically replaces its own page and
 JSON entries without writing through symlinks, preserves other tracks' data, and reuses the page index on reruns.
 
+`build` and `install` need the theatre library's `overlays` section; libraries extracted without it take it from the
+farm route in [Install overlay art into a cache farm](#install-overlay-art-into-a-cache-farm) first. In the YR 1.001
+data the six theater palettes (`temperat.pal`, `snow.pal`, `urban.pal`, `desert.pal`, `lunar.pal`, `urbann.pal`) are
+byte-identical, and `tibNN.sno`, `.urb`, `.ubn` and `.lun` are the same files as `tibNN.tem` (gems likewise), so a
+build from any of those theatres reproduces the temperate page exactly. Only the desert ore art (`tibNN.des`) differs;
+it needs its own build. The page carries no ground colour of its own beyond the contact bed (at most .25 alpha under
+each nugget), so the same page reads on grass, snow, pavement and regolith.
+
 ## Gem colour match (Python)
 
 `python/gem_colours.py` deepens HD pink, mint and light-blue gems toward the original theater palette's red,
@@ -1184,21 +1192,26 @@ visual acceptance, animation correctness or complete live coverage. Captures and
 
 ## Recording cuts with read-back (Python)
 
-`python/recording_video.py` cuts, re-times and labels browser recordings (such as an in-page MediaRecorder capture of
-the HD canvas, which has a variable frame rate) into one H.264 mp4. Each `--seg 'SRC|T0|T1|SPEED|LABEL|TZERO'` samples
-source seconds T0..T1 at the output rate using the container timestamps (SPEED 2 = double speed, 0.4 = slow motion),
-falling back to the nominal rate when timestamps are unavailable. Each source is decoded sequentially once with a
-constant number of frames in memory; selected frames are resized immediately and written as soon as their output
-order permits. Samples for later cuts, including overlapping cuts and returns to earlier source times, use temporary
-disk storage at the output size. `--max-height H` scales down further to fit the height limit while keeping H.264
-dimensions even. `--quality Q` requests encoder quality (0–100); unsupported backends ignore it with a note in the
-JSON summary. `--font` draws LABEL and, with a numeric TZERO, a `t=+x.x s` clock. The written file is read back and
-the command exits with status 1 when its frame count differs from the frames written (a truncated encode).
+`python/recording_video.py` cuts, crops, re-times and labels browser recordings (such as an in-page MediaRecorder
+capture of the HD canvas) into one H.264 mp4. Each `--seg 'SRC|T0|T1|SPEED|LABEL|TZERO[|CROP]'` samples source seconds
+T0..T1 at the output rate using container timestamps (SPEED 2 = double speed, 0.4 = slow motion), falling back to the
+nominal rate when timestamps are unavailable. Optional CROP is `x0:y0:x1:y1` in integer **source pixels**, with
+exclusive x1/y1 and x1 > x0, y1 > y0; bounds are clamped to each frame, and invalid or empty boxes fail. Six-field
+specs keep the full frame. Cropping precedes resizing to `--width`, with proportional, even dimensions of at least
+2 pixels; `--max-height H` then scales down further to fit the height limit while keeping dimensions even. The first
+segment sets the output size; later aspect ratios fit it with centred black padding. Each source is decoded
+sequentially once with a constant number of frames in memory; selected frames are resized immediately, and samples
+for later, overlapping or reordered cuts use temporary disk storage. `--quality Q` requests encoder quality (0–100);
+unsupported backends ignore it with a note in the JSON summary. `--font` draws LABEL and, with a numeric TZERO,
+a `t=+x.x s` clock after crop/resize/padding. The written file is read back, and the command exits with status 1 when
+its frame count differs from the frames written (a truncated encode).
 Recordings and outputs stay outside Git.
 
 ```sh
 python3 packages/ra2-assets/python/recording_video.py --out "$OUT/death.mp4" --width 1280 --fps 25 --font "$FONT" \
   --seg "$REC|1.1|14.4|1|Building death|2.086" --seg "$REC|1.8|5.0|0.4|Slow motion|2.086"
+python3 packages/ra2-assets/python/recording_video.py --out "$OUT/crop.mp4" --width 1280 --fps 25 \
+  --seg "$REC|1.1|14.4|1|||320:180:1600:900"
 (cd packages/ra2-assets/python && python3 -m unittest test_recording_video -v)
 ```
 
@@ -1351,6 +1364,54 @@ New page slots have no HD reference until processed by `hd:sprites`. `overlayExt
 counts and missing-art warnings. Repeated runs append new pages; old pages remain intact for existing references.
 The library JSON is replaced only after the new files exist. A failed extraction can leave unreferenced new files
 but retains the old JSON. `--only overlays` requires an existing library and does not run `--preview`.
+
+### Install overlay art into a cache farm
+
+The overlay append takes no lock and must never run directly inside a shared symlink farm. Instead, copy
+`library.json` and `palettes/` as real files into a fresh scratch theater directory. Existing atlas files need not
+be copied: the installer ignores every source page not referenced by an overlay frame or shadow. Set `HD_CACHE`
+to the farm cache root, `YR_INSTALL` to the player's installation, and `ORE_BUILD` to the existing ore/gem build
+directory containing `frames.json` and its pages:
+
+```bash
+THEATRE=urban
+OVERLAY_SCRATCH="$(mktemp -d)"
+mkdir -p "$OVERLAY_SCRATCH/$THEATRE/palettes"
+cp -L "$HD_CACHE/_library/$THEATRE/library.json" "$OVERLAY_SCRATCH/$THEATRE/library.json"
+cp -RL "$HD_CACHE/_library/$THEATRE/palettes/." "$OVERLAY_SCRATCH/$THEATRE/palettes/"
+pnpm hd:library -- --game "$YR_INSTALL" --out "$OVERLAY_SCRATCH" --theater "$THEATRE" --only overlays
+python3 -B packages/ra2-assets/python/theatre_overlays.py install \
+  --extracted "$OVERLAY_SCRATCH/$THEATRE" --cache-root "$HD_CACHE" --theatre "$THEATRE" \
+  --ore-build "$ORE_BUILD" --walls
+```
+
+`theatre_overlays.py install` holds the theater's `.compose.lock` across planning, file installation and publication.
+It uses `cache_farm.install_file` for atomic copy-on-write files and `cache_farm.patch_json` for the current JSON
+merge under its own `.library.json.lock`, preserving unrelated concurrent edits. Referenced pages are processed in
+ascending source-index order, reusing a byte-identical destination atlas by SHA-256 or taking the first free
+`sprites-overlays-<n>.png` name. Optional HD color/remap files use that atlas stem's `@2x.png` and `@2x-remap.png`
+names. Missing palettes are installed; conflicting `paletteSources`, mismatched theater/version or changed planned
+page slots abort publication. Files exist before JSON is published; an interrupted or rejected merge can leave
+unreferenced installed files. Reinstalling the same extraction reuses its pages and leaves the JSON content unchanged.
+
+`--ore-build` installs the ore/gem `PAGE_FILES` before publishing JSON. One `library.json` patch merges overlays,
+redirects ore/gem growth frames to the ore page, then redirects matching walls to HD building frames when `--walls`
+is present. The same compose lock remains held while `normals.json` is patched under `.normals.json.lock`, using
+the ore page index computed inside the library patch; a missing normals file is created atomically. Existing JSON
+and lock symlinks are supported: data files are replaced with real files, while locks keep their shared inodes.
+
+Omit `--walls` to retain extracted wall frames, or use `--walls --wall-types GAWALL,NAWALL` to select wall types.
+The default wall types are `GAWALL,NAWALL,GASAND,GAFWLL`. Without either `--ore-build` or `--walls`, the installer
+keeps its overlay-only behavior, replacing all overlay sprites; later redirections then need to be reapplied using
+`ore_fields.py install` followed by `theatre_pages.py overlay-walls`. It prints one summary line with the theater,
+overlay type count, pages added/reused and palettes added, plus the ore page index, ore sprites changed and walls
+patched when either option is enabled.
+
+```bash
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_theatre_overlays.py'
+```
+
+### Refresh smudge art
 
 Add or refresh all smudge art in existing theater libraries, including craters and burns absent from a map's initial
 placements:

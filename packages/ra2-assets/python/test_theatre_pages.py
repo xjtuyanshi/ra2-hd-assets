@@ -1,6 +1,9 @@
 """Asset-free theatre page acceptance using tiny synthetic libraries only."""
 
+import contextlib
 import copy
+import fcntl
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -356,6 +359,60 @@ class TheatreTests(unittest.TestCase):
                 self.assertEqual(after[key], data[key])
         for name, content in files.items():
             self.assertEqual((directory / name).read_bytes(), content)
+
+    def test_overlay_walls_uses_shared_json_lock_and_preserves_symlink_farm_sources(self):
+        base = self.root / 'older'
+        data = synthetic_library(base)
+        building = dict(palette='unit', frames=[dict(page=0, rect=[0, 0, 4, 4], offset=[-2, -3])],
+                        shadows=[dict(page=0, rect=[4, 0, 4, 4], offset=[-2, 0])])
+        overlay = copy.deepcopy(building)
+        for frame in overlay['frames'] + overlay['shadows']:
+            frame['page'] = 2
+        overlay['custom'] = 'keep overlay metadata'
+        data['sprites'].update({'building:GAWALL': building, 'overlay:GAWALL': overlay})
+        write_json(base / 'library.json', data)
+        for name in ('.compose.lock', '.library.json.lock'):
+            (base / name).touch()
+        before = {path.name: path.read_bytes() for path in base.iterdir()}
+        farm = self.root / 'farm' / '_library' / 'snow'
+        farm.mkdir(parents=True)
+        for path in base.iterdir():
+            (farm / path.name).symlink_to(path)
+        patch_json = tp.cache_farm.patch_json
+
+        def checked_patch(root, relative, update):
+            self.assertEqual(Path(root), farm)
+            self.assertEqual(relative, 'library.json')
+            with (base / '.compose.lock').open('a') as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            patch_json(root, relative, lambda lib: lib.update(concurrent=True))
+
+            def checked_update(lib):
+                with (base / '.library.json.lock').open('a') as lock:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                update(lib)
+
+            patch_json(root, relative, checked_update)
+
+        output = io.StringIO()
+        with mock.patch.object(tp.cache_farm, 'patch_json', side_effect=checked_patch) as patched, \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(tp.overlay_walls(farm, ('GAWALL', 'MISSING', 'GAWALL')), ['GAWALL'])
+        self.assertEqual(patched.call_count, 1)
+        self.assertEqual(output.getvalue(), 'GAWALL overlay -> building frames on pages [0]\n'
+                         'MISSING skip (missing or frame count differs)\n')
+        after = tp.read_json(farm / 'library.json')
+        self.assertTrue(after['concurrent'])
+        wall = after['sprites']['overlay:GAWALL']
+        self.assertEqual(wall['frames'], building['frames'])
+        self.assertEqual(wall['shadows'], building['shadows'])
+        self.assertEqual(wall['custom'], overlay['custom'])
+        self.assertFalse((farm / 'library.json').is_symlink())
+        for name in ('.compose.lock', '.library.json.lock'):
+            self.assertTrue((farm / name).is_symlink())
+        self.assertEqual(before, {path.name: path.read_bytes() for path in base.iterdir()})
 
     def test_page_claimed_before_json_publish_keeps_its_hd_and_material_entry(self):
         owned_hd = dict(file='owned.png', remap='owned-remap.png')

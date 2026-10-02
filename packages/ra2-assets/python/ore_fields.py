@@ -54,7 +54,6 @@ import math
 import os
 from pathlib import Path
 import pickle
-import shutil
 import sys
 import tempfile
 import time
@@ -62,6 +61,8 @@ import time
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+import cache_farm
 
 BG = 118.0
 S = 4  # Internal supersampling relative to the 1x original.
@@ -119,16 +120,6 @@ def write_atomic(path: Path, data: bytes) -> None:
             raise
     try:
         os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
-def copy_atomic(src: Path, dst: Path) -> None:
-    with tempfile.NamedTemporaryFile(dir=dst.parent, suffix='.tmp-ore', delete=False) as stream:
-        tmp = Path(stream.name)
-    try:
-        shutil.copyfile(src, tmp)
-        os.replace(tmp, dst)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -909,9 +900,8 @@ def build(library_root: Path, theatre: str, gold: Path, gem: Path, soil: Path, o
 # ----------------------------------------------------------------------------- locked copy-on-write installation
 
 
-def install(build_dir: Path, cache_root: Path, theatre: str) -> int:
+def validate_ore_build(build_dir: Path) -> dict:
     build_dir = Path(build_dir)
-    directory = Path(cache_root) / '_library' / theatre
     meta = read_json(build_dir / 'frames.json')
     if not meta['frames'] or set(meta['frames']) - set(FAMILIES):
         raise ValueError('build metadata contains no ore/gem frames or an unknown family')
@@ -920,47 +910,70 @@ def install(build_dir: Path, cache_root: Path, theatre: str) -> int:
     for name in PAGE_FILES:
         if not (build_dir / name).is_file():
             raise ValueError(f'build page is missing: {name}')
-    # Copy pages inside the same lock as metadata: another composer must never observe mixed page/JSON versions.
+    return meta
+
+
+def apply_ore_page(lib: dict, normals: dict, meta: dict) -> tuple[int, int]:
+    """Redirect ore/gem growth frames and record their shared HD and material page."""
+    atlases = lib['spriteAtlases']
+    page = next((i for i, atlas in enumerate(atlases) if atlas['file'] == PAGE), None)
+    if page is None:
+        page = len(atlases)
+        atlases.append({})
+    atlases[page] = {'file': PAGE, 'width': meta['width'], 'height': meta['height']}
+    hd = lib.setdefault('spriteAtlasesHd', [])
+    while len(hd) <= page:
+        hd.append(None)
+    hd[page] = {'file': HD, 'remap': REMAP, 'scale': OUT,
+                'width': meta['width'] * OUT, 'height': meta['height'] * OUT}
+    changed = 0
+    for key, sprite in lib['sprites'].items():
+        if not key.startswith('overlay:'):
+            continue
+        name = key.split(':', 1)[1]
+        family = ALIASES.get(name, name)
+        if family not in meta['frames']:
+            continue
+        if len(sprite['frames']) < FRAMES:
+            raise ValueError(f'{key}: destination has fewer than 12 growth frames')
+        for k, rect in enumerate(meta['frames'][family]):
+            # Keep frame-specific metadata too; only geometry and the page belong to this track.
+            sprite['frames'][k].update(rect=rect, offset=meta['offset'], page=page)
+        changed += 1
+    normals.setdefault('pages', {})[str(page)] = {
+        'file': MAT, 'atlas': HD, 'width': meta['width'] * OUT, 'height': meta['height'] * OUT, 'scale': OUT,
+        'materialWidth': meta['width'] * OUT, 'materialHeight': meta['height'] * OUT,
+        'frames': sum(len(value) for value in meta['frames'].values()),
+    }
+    return page, changed
+
+
+def patch_ore_normals(directory: Path, normals: dict) -> None:
+    def update(current):
+        current.setdefault('pages', {}).update(normals['pages'])
+    # Only publish the entry computed under the library lock; other material writers keep their entries.
+    cache_farm.patch_json(directory, 'normals.json', update, default={'version': 1, 'pages': {}})
+
+
+def install(build_dir: Path, cache_root: Path, theatre: str) -> int:
+    build_dir = Path(build_dir)
+    directory = Path(cache_root) / '_library' / theatre
+    meta = validate_ore_build(build_dir)
+    # The compose lock covers files and both JSON publications; per-file locks exclude independent patchers.
     with (directory / '.compose.lock').open('a+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            lib = read_json(directory / 'library.json')
-            npath = directory / 'normals.json'
-            normals = read_json(npath) if npath.exists() else {'version': 1, 'pages': {}}
-            atlases = lib['spriteAtlases']
-            page = next((i for i, atlas in enumerate(atlases) if atlas['file'] == PAGE), None)
-            if page is None:
-                page = len(atlases)
-                atlases.append({})
-            atlases[page] = {'file': PAGE, 'width': meta['width'], 'height': meta['height']}
-            hd = lib.setdefault('spriteAtlasesHd', [])
-            while len(hd) <= page:
-                hd.append(None)
-            hd[page] = {'file': HD, 'remap': REMAP, 'scale': OUT,
-                        'width': meta['width'] * OUT, 'height': meta['height'] * OUT}
-            changed = 0
-            for key, sprite in lib['sprites'].items():
-                if not key.startswith('overlay:'):
-                    continue
-                name = key.split(':', 1)[1]
-                family = ALIASES.get(name, name)
-                if family not in meta['frames']:
-                    continue
-                if len(sprite['frames']) < FRAMES:
-                    raise ValueError(f'{key}: destination has fewer than 12 growth frames')
-                for k, rect in enumerate(meta['frames'][family]):
-                    # Keep frame-specific metadata too; only geometry and the page belong to this track.
-                    sprite['frames'][k].update(rect=rect, offset=meta['offset'], page=page)
-                changed += 1
-            normals.setdefault('pages', {})[str(page)] = {
-                'file': MAT, 'atlas': HD, 'width': meta['width'] * OUT, 'height': meta['height'] * OUT, 'scale': OUT,
-                'materialWidth': meta['width'] * OUT, 'materialHeight': meta['height'] * OUT,
-                'frames': sum(len(value) for value in meta['frames'].values()),
-            }
             for name in PAGE_FILES:
-                copy_atomic(build_dir / name, directory / name)
-            write_atomic(directory / 'library.json', json.dumps(lib, separators=(',', ':')).encode())
-            write_atomic(npath, json.dumps(normals, indent=2).encode())
+                cache_farm.install_file(directory, name, build_dir / name)
+            page, changed = None, 0
+            normals = {}
+
+            def update(lib):
+                nonlocal page, changed
+                page, changed = apply_ore_page(lib, normals, meta)
+
+            cache_farm.patch_json(directory, 'library.json', update)
+            patch_ore_normals(directory, normals)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
     print(theatre, 'page', page, 'sprites patched', changed)

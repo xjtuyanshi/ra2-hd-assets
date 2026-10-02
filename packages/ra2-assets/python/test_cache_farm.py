@@ -132,6 +132,37 @@ class CacheFarmTests(unittest.TestCase):
         self.assertTrue((self.cache / ".library.json.lock").is_file())
         self.assert_no_temporary_names()
 
+    def test_missing_json_uses_a_fresh_default_and_existing_json_takes_precedence(self):
+        default = {'version': 1, 'pages': {}}
+        farm.patch_json(self.cache, 'normals.json', lambda data: data['pages'].update({'3': {'file': 'ore.png'}}),
+                        default=default)
+        self.assertEqual(default, {'version': 1, 'pages': {}})
+        farm.patch_json(self.cache, 'normals.json', lambda data: data.update(custom=True),
+                        default={'version': 9, 'pages': {}})
+        self.assertEqual(json.loads((self.cache / 'normals.json').read_text()),
+                         {'version': 1, 'pages': {'3': {'file': 'ore.png'}}, 'custom': True})
+        self.assert_no_temporary_names()
+
+    def test_default_replaces_dangling_symlink_without_creating_its_target(self):
+        missing = self.root / 'missing.json'
+        dst = self.cache / 'normals.json'
+        dst.symlink_to(missing)
+        farm.patch_json(self.cache, 'normals.json', lambda data: data.update(created=True), default={})
+        self.assertFalse(dst.is_symlink())
+        self.assertEqual(json.loads(dst.read_text()), {'created': True})
+        self.assertFalse(missing.exists())
+        self.assert_no_temporary_names()
+
+    def test_missing_json_without_default_and_invalid_existing_json_still_fail(self):
+        with self.assertRaises(FileNotFoundError):
+            farm.patch_json(self.cache, 'missing.json', lambda data: None)
+        dst = self.cache / 'invalid.json'
+        dst.write_text('invalid JSON')
+        with self.assertRaises(json.JSONDecodeError):
+            farm.patch_json(self.cache, 'invalid.json', lambda data: None, default={})
+        self.assertEqual(dst.read_text(), 'invalid JSON')
+        self.assert_no_temporary_names()
+
     def test_concurrent_json_patchers_lock_before_reading_and_preserve_updates(self):
         self.manifest()
         ctx = multiprocessing.get_context("spawn")

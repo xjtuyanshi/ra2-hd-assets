@@ -19,6 +19,8 @@ from uuid import uuid4
 import numpy as np
 from PIL import Image
 
+import cache_farm
+
 Image.MAX_IMAGE_PIXELS = None
 WALL_TYPES = ('GAWALL', 'NAWALL', 'GASAND', 'GAFWLL')
 
@@ -256,34 +258,50 @@ def xfer(theatre, urban, baseline, pages=None, refresh_owned=False):
         return sorted(published)
 
 
+def _wall_skip_reason(lib, name):
+    overlay = lib['sprites'].get(f'overlay:{name}')
+    building = lib['sprites'].get(f'building:{name}')
+    if not overlay or not building or len(overlay['frames']) != len(building['frames']):
+        return 'skip (missing or frame count differs)'
+    pages = {f.get('page', 0) for f in building['frames'] if f['rect'][2]}
+    if not all(page_entry(lib.get('spriteAtlasesHd') or [], p) for p in pages):
+        return 'skip (building pages without HD)'
+    if any(f['offset'] != g['offset'] or f['rect'][2:] != g['rect'][2:]
+           for f, g in zip(overlay['frames'], building['frames'])):
+        return 'skip (frames differ)'
+    return None
+
+
+def redirect_walls(lib: dict, types=WALL_TYPES) -> list[str]:
+    patched = []
+    for name in dict.fromkeys(types):
+        if _wall_skip_reason(lib, name):
+            continue
+        overlay = lib['sprites'][f'overlay:{name}']
+        building = lib['sprites'][f'building:{name}']
+        # Map walls use an overlay page without HD. The building SHP has
+        # identical geometry on an HD page, so share its frames and shadows.
+        overlay['frames'] = building['frames']
+        if 'shadows' in building and len(building['shadows']) == len(overlay.get('shadows', [])):
+            overlay['shadows'] = building['shadows']
+        patched.append(name)
+    return patched
+
+
 def overlay_walls(library, types=WALL_TYPES):
     directory = Path(library)
+    types = tuple(dict.fromkeys(types))
     patched = []
     with library_lock(directory):
         def update(current):
-            hd = current.get('spriteAtlasesHd') or []
-            for name in dict.fromkeys(types):
-                overlay = current['sprites'].get(f'overlay:{name}')
-                building = current['sprites'].get(f'building:{name}')
-                if not overlay or not building or len(overlay['frames']) != len(building['frames']):
-                    print(name, 'skip (missing or frame count differs)')
-                    continue
-                pages = {f.get('page', 0) for f in building['frames'] if f['rect'][2]}
-                if not all(page_entry(hd, p) for p in pages):
-                    print(name, 'skip (building pages without HD)')
-                    continue
-                if any(f['offset'] != g['offset'] or f['rect'][2:] != g['rect'][2:]
-                       for f, g in zip(overlay['frames'], building['frames'])):
-                    print(name, 'skip (frames differ)')
-                    continue
-                # Map walls use an overlay page without HD. The building SHP has
-                # identical geometry on an HD page, so share its frames and shadows.
-                overlay['frames'] = building['frames']
-                if 'shadows' in building and len(building['shadows']) == len(overlay.get('shadows', [])):
-                    overlay['shadows'] = building['shadows']
-                patched.append(name)
-                print(name, 'overlay -> building frames on pages', sorted(pages))
-        patch_json(directory / 'library.json', update)
+            patched.extend(redirect_walls(current, types))
+            for name in types:
+                if name not in patched:
+                    print(name, _wall_skip_reason(current, name))
+                else:
+                    pages = {f.get('page', 0) for f in current['sprites'][f'building:{name}']['frames'] if f['rect'][2]}
+                    print(name, 'overlay -> building frames on pages', sorted(pages))
+        cache_farm.patch_json(directory, 'library.json', update)
     return patched
 
 

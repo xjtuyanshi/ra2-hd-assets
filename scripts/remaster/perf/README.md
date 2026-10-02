@@ -18,7 +18,11 @@ pause menu, so a later run can load the identical scene at another resolution or
 
 Skirmish setup comes from the game's own `RA2MD.INI` `[Skirmish]` section (`GameMode`, `ScenIndex`, `SlotNN`), which
 `?start-page=battle` then starts natively. Keep that INI in a scratch copy of the installation (a directory of
-symlinks plus the edited INI), never in the player's installation or in Git. Point the development server at it:
+symlinks plus the edited INI), never in the player's installation or in Git. `ScenIndex` indexes the battle map list:
+the `[MultiMaps]` entries of `missionsmd.pkt` (index 0 is `XMP29U2`) followed by the maps that loose `.yro`/`.mmx`
+packages add through their own embedded `[MultiMaps]`. To start one particular loose map, give the scratch copy a loose
+`missionsmd.pkt` containing only an empty `[MultiMaps]` section (loose files take precedence over the MIX copy) and
+keep only that map's `.yro` link: `ScenIndex=0` then selects it. Point the development server at the scratch root:
 
 ```bash
 RA2_GAME_ROOT=/path/to/scratch-root pnpm run dev --host 127.0.0.1   # scratch-root/ra2/ holds the YR files

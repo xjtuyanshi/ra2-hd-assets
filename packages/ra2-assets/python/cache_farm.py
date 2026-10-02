@@ -1,6 +1,7 @@
 """Atomic file installation and locked JSON updates in a copy-on-write symlink farm."""
 
 import contextlib
+import copy
 import ctypes
 import errno
 import fcntl
@@ -11,6 +12,8 @@ import shutil
 import sys
 import tempfile
 from typing import Callable
+
+_MISSING = object()
 
 
 @contextlib.contextmanager
@@ -119,11 +122,17 @@ def install_file(root: Path, rel: str, data_path: Path) -> None:
         shutil.copyfile(source, tmp)
 
 
-def patch_json(root: Path, rel: str, fn: Callable[[object], None]) -> None:
-    """Read through a symlink, mutate under a per-file lock, and replace it with a real JSON file."""
+def patch_json(root: Path, rel: str, fn: Callable[[object], None], *, default=_MISSING) -> None:
+    """Replace JSON under its per-file lock, optionally using a default for a missing file."""
     dst = _destination(root, rel)
     with _locked(dst.with_name(f".{dst.name}.lock")):
-        data = json.loads(dst.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(dst.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            if default is _MISSING:
+                raise
+            # Defaults belong to the caller; callbacks must not leak mutations into later creations.
+            data = copy.deepcopy(default)
         fn(data)
         with _temporary_file(dst) as tmp:
             tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")

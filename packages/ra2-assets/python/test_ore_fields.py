@@ -244,19 +244,19 @@ class OreFieldsTests(unittest.TestCase):
             variant.mkdir(parents=True)
             for path in base.iterdir():
                 (variant / path.name).symlink_to(path)
-            real_copy = ore.copy_atomic
+            install_file = ore.cache_farm.install_file
             copies = []
 
-            def locked_copy(src, dst):
+            def locked_install(directory, relative, src):
                 # A separate descriptor must be denied an exclusive lock during every page mutation.
                 with (variant / '.compose.lock').open('a+') as competing:
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(competing, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                copies.append(dst.name)
-                real_copy(src, dst)
+                copies.append(relative)
+                install_file(directory, relative, src)
 
             args = ['install', '--build-dir', str(out), '--cache-root', str(root / 'variant'), '--theatre', 'test']
-            with mock.patch.object(ore, 'copy_atomic', side_effect=locked_copy):
+            with mock.patch.object(ore.cache_farm, 'install_file', side_effect=locked_install):
                 self.assertEqual(ore.main(args), 0)
             self.assertEqual(copies, list(ore.PAGE_FILES))
             installed = ore.read_json(variant / 'library.json')
@@ -283,6 +283,52 @@ class OreFieldsTests(unittest.TestCase):
             for name, data in before.items():
                 self.assertEqual((base / name).read_bytes(), data)
             self.assertTrue((variant / 'original.png').is_symlink())
+
+    def test_symlink_farm_creates_missing_normals_at_page_index_from_locked_library(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs, out = tiny_inputs(root), root / 'build'
+            self.assertEqual(ore.main(build_args(inputs, out)), 0)
+            base = inputs['directory']
+            for name in ore.PAGE_FILES:
+                save(base / name, np.full((2, 2), 12, np.uint8))
+            for name in ('.compose.lock', '.library.json.lock', '.normals.json.lock'):
+                (base / name).touch()
+            before = {path.name: path.read_bytes() for path in base.iterdir()}
+            farm_root = root / 'farm'
+            variant = farm_root / '_library' / 'test'
+            variant.mkdir(parents=True)
+            for path in base.iterdir():
+                (variant / path.name).symlink_to(path)
+            install_file = ore.cache_farm.install_file
+
+            def install_and_patch(directory, relative, src):
+                install_file(directory, relative, src)
+                if relative == ore.MAT:
+                    save(variant / 'concurrent.png', np.zeros((1, 1), np.uint8))
+
+                    def update(lib):
+                        lib['spriteAtlases'].append(dict(file='concurrent.png', width=1, height=1))
+                        lib['concurrent'] = True
+
+                    ore.cache_farm.patch_json(variant, 'library.json', update)
+
+            with mock.patch.object(ore.cache_farm, 'install_file', side_effect=install_and_patch):
+                page = ore.install(out, farm_root, 'test')
+            self.assertEqual(page, 2)
+            library = ore.read_json(variant / 'library.json')
+            self.assertTrue(library['concurrent'])
+            self.assertEqual(library['sprites']['overlay:TIB01']['frames'][0]['page'], page)
+            normals = ore.read_json(variant / 'normals.json')
+            self.assertEqual(normals['version'], 1)
+            self.assertEqual(set(normals['pages']), {str(page)})
+            self.assertEqual(normals['pages'][str(page)]['atlas'], library['spriteAtlasesHd'][page]['file'])
+            for name in (*ore.PAGE_FILES, 'library.json', 'normals.json'):
+                self.assertFalse((variant / name).is_symlink())
+            for name in ('.compose.lock', '.library.json.lock', '.normals.json.lock'):
+                self.assertTrue((variant / name).is_symlink())
+            self.assertFalse((base / 'normals.json').exists())
+            self.assertEqual(before, {path.name: path.read_bytes() for path in base.iterdir()})
 
     def test_contact_bed_is_faint_and_only_near_objects(self):
         # L5F: the soil may only form a faint halo under nuggets/gems (alpha <= bed alpha), so terrain shows between

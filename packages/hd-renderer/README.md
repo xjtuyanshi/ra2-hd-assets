@@ -18,6 +18,12 @@ The former named uniform exports remain available for standalone materials using
 `HdWorld` objects without `nodes` or `cache.nodes` also use that context to keep their existing materials working; pass an
 explicit context to custom material builders and their world to isolate multiple such custom worlds.
 
+Both the live view and the sandbox create their device with `HdRenderer.adapterLimits()`, which requests the
+adapter's own `maxTextureDimension2D` and `maxBufferSize` instead of the WebGPU defaults (8192 px, 256 MiB). A large
+map's whole-map 2x terrain must fit in one texture and in its upload staging buffer: DeepFrze's 12000x6664 terrain
+needs about 320 MB and rendered black under the default buffer limit. Hardware below those sizes still fails
+validation for such maps; the WebGL2 fallback is unaffected.
+
 Call `hd.dispose()` after stopping presentation. It releases the post pipeline, light-field targets and meshes, and
 context-owned fallback textures, voxel materials and lookup textures. A context belongs to one world/renderer lifetime;
 pass the same `nodes` option to loaders and constructors when explicitly composing them. Map grades remain per cache,

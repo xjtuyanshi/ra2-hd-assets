@@ -633,16 +633,22 @@ export class HdRenderer {
   }
 
   /**
-   * WebGPU devices default to 8192 px textures; ask for what the adapter really supports (16384 on Apple GPUs) so a
-   * large map's upscaled whole-map terrain fits in one texture. Empty when WebGPU is unavailable.
+   * WebGPU devices default to 8192 px textures and 256 MiB buffers; ask for what the adapter really supports (16384 px
+   * and 4 GiB on Apple GPUs) so a large map's upscaled whole-map terrain fits in one texture and its upload staging
+   * buffer (DeepFrze's 12000x6664 @2x terrain needs 320 MB, which rendered black under the default). Empty when WebGPU
+   * is unavailable.
    */
   static async adapterLimits(): Promise<Record<string, number>> {
     const gpu = (
       navigator as Navigator & { gpu?: { requestAdapter(): Promise<{ limits: Record<string, number> } | null> } }
     ).gpu;
     const adapter = await gpu?.requestAdapter().catch(() => null);
+    const limits: Record<string, number> = {};
     const max = adapter?.limits.maxTextureDimension2D;
-    return max ? { maxTextureDimension2D: max } : {};
+    if (max) limits.maxTextureDimension2D = max;
+    const buffer = adapter?.limits.maxBufferSize;
+    if (buffer) limits.maxBufferSize = buffer;
+    return limits;
   }
 
   /** 'WebGPU' or 'WebGL2' once init() resolved. */
