@@ -31,7 +31,8 @@
  *   &map=XMP29U2&cx=60&cy=62  map cache and centre cell (default: the map's first waypoint)
  *   &zoom=3                   CSS pixels per engine pixel
  *   &time=0.4                 seconds after the spawn to show (logic frames advance at &fps=, default 15)
- *   &hours=12                 time of day
+ *   &hours=12                 time of day; &hours=map: the map's own [Lighting] staging (&dayhour= applies to day
+ *                             maps only, as the live bridge does with a look preset's hour)
  *   &look=golden              the enhanced look preset (sun arc, relit art, shadows following the sun)
  *   &water=enhanced           the modern water (default: the earlier HD water)
  *   &native=1                 pass the bridge fields (exact anim frame) instead of relying on the fallback timing
@@ -112,7 +113,11 @@ const live = await LiveView.create(canvas, {
   ...voxelLookParams(params),
   mapBase: `/${encodeURIComponent(mapName)}`,
   libraryBase: '/_library',
-  timeOfDay: Number(params.get('hours') ?? 12),
+  ...(params.get('hours') === 'map'
+    ? params.has('dayhour')
+      ? { dayHour: Number(params.get('dayhour')) }
+      : {}
+    : { timeOfDay: Number(params.get('hours') ?? 12) }),
   effects: params.get('effects') === 'enhanced' ? 'enhanced' : 'faithful',
   effectsHd: params.get('fxhd') !== '0',
   volumetricEffects: params.get('fxvol') === 'ray' ? 'ray' : 'off',

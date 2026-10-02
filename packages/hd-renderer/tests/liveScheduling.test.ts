@@ -258,3 +258,14 @@ describe('live presentation scheduling', () => {
     expect(p.applyEffects).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('live staging hour', () => {
+  it("applies a preset's day hour to day maps only; an explicit time wins", async () => {
+    const { liveTimeOfDay } = await import('../src/live/liveView');
+    expect(liveTimeOfDay({ kind: 'day', hour: 12 }, { dayHour: 16.5 })).toBe(16.5);
+    expect(liveTimeOfDay({ kind: 'night', hour: 22 }, { dayHour: 16.5 })).toBe(22);
+    expect(liveTimeOfDay({ kind: 'dusk', hour: 19 }, { dayHour: 16.5 })).toBe(19);
+    expect(liveTimeOfDay({ kind: 'night', hour: 22 }, { timeOfDay: 12, dayHour: 16.5 })).toBe(12);
+    expect(liveTimeOfDay({ kind: 'day', hour: 12 }, {})).toBe(12);
+  });
+});
