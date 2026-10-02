@@ -82,18 +82,18 @@ describe('building light policy', () => {
     expect(hue).toBeGreaterThanOrEqual(215);
     expect(hue).toBeLessThanOrEqual(235);
     expect((b - r) / b).toBeGreaterThanOrEqual(0.6);
-    expect(body.map((v) => Math.round(v * 255))).toEqual([70, 130, 255]);
+    expect(body.map((v) => Math.round(v * 255))).toEqual([60, 115, 255]);
     expect(0.2126 * light.colour[0] + 0.7152 * light.colour[1] + 0.0722 * light.colour[2]).toBeLessThanOrEqual(0.2);
     // Measured glass radius at two device pixels per engine pixel; no halo extends the art silhouette.
     expect(light.orb).toMatchObject({
       radius: 0.418,
-      coreRadius: 0.3,
-      bodyStart: 0.55,
-      bodyEnd: 0.9,
+      coreRadius: 0.55,
+      bodyStart: 0.8,
+      bodyEnd: 0.92,
       alpha: 1,
-      coreAlpha: 0.95,
-      bodyAlpha: 0.45,
-      limbAlpha: 0.55,
+      coreAlpha: 1,
+      bodyAlpha: 0.5,
+      limbAlpha: 0.58,
       filamentMix: 0.5,
       haloScale: 1,
       haloAlpha: 0,
@@ -104,25 +104,27 @@ describe('building light policy', () => {
   it('keeps the hot core cyan-white and authors saturated body, limb and filament colours', () => {
     const orb = select()[0]!.orb!;
     const colours = {
-      hot: [215, 250, 255],
-      mid: [120, 205, 255],
-      body: [70, 130, 255],
-      limb: [125, 170, 240],
+      hot: [225, 252, 255],
+      mid: [130, 220, 255],
+      body: [60, 115, 255],
+      limb: [125, 170, 245],
       filaments: [170, 235, 255],
       halo: [45, 95, 255],
     } as const;
     for (const name of Object.keys(colours) as (keyof typeof colours)[])
       expect(orb[name].map((v) => Math.round(srgb(v) * 255))).toEqual(colours[name]);
-    expect(ARC.core.map((v) => Math.round(srgb(v) * 255))).toEqual([215, 250, 255]);
-    expect(ARC.edge.map((v) => Math.round(srgb(v) * 255))).toEqual([70, 140, 255]);
+    expect(ARC.core.map((v) => Math.round(srgb(v) * 255))).toEqual([210, 250, 255]);
+    expect(ARC.edge.map((v) => Math.round(srgb(v) * 255))).toEqual([50, 120, 255]);
     expect(ARC).toMatchObject({
-      width: 1.6,
-      forkWidth: 1.1,
+      width: 2,
+      forkWidth: 1.3,
       coreFraction: 0.45,
-      glowWidth: 2.4,
-      glowAlpha: 0.3,
+      glowWidth: 3,
+      glowAlpha: 0.45,
       filaments: [4, 5],
-      strikes: [2, 3],
+      strikes: [3, 3],
+      filamentStart: [0.3, 0.42],
+      glowStart: 0.5,
       maxBeyond: 12,
       crawl: 0.06,
       anchors: [
@@ -142,8 +144,11 @@ describe('building light policy', () => {
     expect(60 * ((r - g) / (b - r) + 4)).toBeLessThanOrEqual(195);
     const luminance = 0.2126 * orb.hot[0] + 0.7152 * orb.hot[1] + 0.0722 * orb.hot[2];
     expect(116 * Math.cbrt(luminance) - 16).toBeGreaterThan(92);
+    // The core-to-body transition stays out of the pale-lavender band (hue 200-290 at low saturation): either cyan
+    // (hue below 200) or saturated.
     const mid = orb.mid.map(srgb) as [number, number, number];
-    expect((mid[2] - mid[0]) / mid[2]).toBeGreaterThanOrEqual(0.5);
+    const midHue = 60 * ((mid[0] - mid[1]) / (mid[2] - mid[0]) + 4);
+    expect(midHue < 200 || (mid[2] - mid[0]) / mid[2] >= 0.5).toBe(true);
   });
   it('creates nothing at zero gain without querying foundations or visibility', () => {
     const size = vi.fn(foundation);
@@ -291,7 +296,8 @@ describe('confined unbloomed plasma overlay', () => {
   const crisp = (strokes: EmissiveStroke[]) => strokes.filter((s) => s.coreFraction !== 0);
   const parents = (strokes: EmissiveStroke[]) => crisp(strokes).filter((s) => s.width === ARC.width);
   const isFilament = (s: EmissiveStroke, centre: Vector3, radius: number) =>
-    new Vector3().copy(s.points[0]!).distanceTo(centre) < 0.3 * radius;
+    // Filaments start inside the white core (filamentStart), strikes on the rim.
+    new Vector3().copy(s.points[0]!).distanceTo(centre) < 0.6 * radius;
 
   it.each([
     ['RA2', camera],
@@ -316,10 +322,10 @@ describe('confined unbloomed plasma overlay', () => {
         expect(arcs.length).toBeLessThanOrEqual(8);
         const filaments = arcs.filter((s) => isFilament(s, light.headPosition, light.orb!.radius));
         const strikes = arcs.filter((s) => !filaments.includes(s));
-        expect(filaments.length).toBeGreaterThanOrEqual(4);
-        expect(filaments.length).toBeLessThanOrEqual(5);
-        expect(strikes.length).toBeGreaterThanOrEqual(2);
-        expect(strikes.length).toBeLessThanOrEqual(3);
+        expect(filaments.length).toBeGreaterThanOrEqual(ARC.filaments[0]);
+        expect(filaments.length).toBeLessThanOrEqual(ARC.filaments[1]);
+        expect(strikes.length).toBeGreaterThanOrEqual(ARC.strikes[0]);
+        expect(strikes.length).toBeLessThanOrEqual(ARC.strikes[1]);
         for (const s of a.strokes) {
           expect(s.push).toBeCloseTo(a.discs[0]!.push + 0.05);
           for (const p of s.points) {
@@ -333,8 +339,8 @@ describe('confined unbloomed plasma overlay', () => {
           expect(filament.points.length).toBeLessThanOrEqual(9);
           const r0 = new Vector3().copy(filament.points[0]!).distanceTo(light.headPosition) * PIXELS_PER_CELL_EDGE;
           const r1 = new Vector3().copy(filament.points.at(-1)!).distanceTo(light.headPosition) * PIXELS_PER_CELL_EDGE;
-          expect(r0).toBeGreaterThanOrEqual(0.12 * radius - 1e-8);
-          expect(r0).toBeLessThanOrEqual(0.25 * radius + 1e-8);
+          expect(r0).toBeGreaterThanOrEqual(ARC.filamentStart![0] * radius - 1e-8);
+          expect(r0).toBeLessThanOrEqual(ARC.filamentStart![1] * radius + 1e-8);
           expect(r1).toBeGreaterThanOrEqual(0.92 * radius - 1e-8);
           expect(r1).toBeLessThanOrEqual(0.985 * radius + 1e-8);
           const forks = crisp(a.strokes).filter(
@@ -393,7 +399,22 @@ describe('confined unbloomed plasma overlay', () => {
         for (let i = 0; i < a.strokes.length; i += 2) {
           const glow = a.strokes[i]!;
           const bolt = a.strokes[i + 1]!;
-          expect(glow.points).toBe(bolt.points);
+          // The glow is the bolt's tail from its first vertex outside glowStart (always at least the final segment):
+          // filament glows converging on the centre stained the white core blue.
+          const from = bolt.points.findIndex(
+            (p) =>
+              new Vector3().copy(p).distanceTo(light.headPosition) * PIXELS_PER_CELL_EDGE >=
+              ARC.glowStart! * radius - 1e-6,
+          );
+          const tail = bolt.points.slice(Math.min(from < 0 ? bolt.points.length - 2 : from, bolt.points.length - 2));
+          expect(glow.points).toEqual(tail);
+          for (const p of glow.points)
+            expect(new Vector3().copy(p).distanceTo(light.headPosition) * PIXELS_PER_CELL_EDGE).toBeGreaterThanOrEqual(
+              Math.min(
+                ARC.glowStart! * radius,
+                new Vector3().copy(bolt.points.at(-2)!).distanceTo(light.headPosition) * PIXELS_PER_CELL_EDGE,
+              ) - 1e-6,
+            );
           expect(glow.width).toBeCloseTo(bolt.width * ARC.glowWidth);
           expect(glow.alpha).toBeCloseTo(bolt.alpha * ARC.glowAlpha);
           expect(glow.core).toEqual(ARC.edge);

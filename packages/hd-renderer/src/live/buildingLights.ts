@@ -74,10 +74,17 @@ export interface BuildingArcStyle {
   crawl: number;
   glowWidth: number;
   glowAlpha: number;
+  /** Filament start radius range as fractions of the orb radius (default [0.12, 0.25]). */
+  filamentStart?: readonly [number, number];
+  /**
+   * Glow under-strokes begin at the first vertex at least this fraction of the orb radius from its centre (default 0:
+   * whole path). Five filament glows converging on the centre painted the white-hot core saturated blue.
+   */
+  glowStart?: number;
 }
 
 /** Colour-picker values are sRGB; the overlay attachment and post composite are display-linear. */
-function displayLinear(r: number, g: number, b: number): OverlayRgb {
+export function displayLinear(r: number, g: number, b: number): OverlayRgb {
   const linear = (v: number) => (v / 255 <= 0.04045 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4);
   return [linear(r), linear(g), linear(b)];
 }
@@ -108,20 +115,23 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
         // The art's glass radius measures 17.75 engine px / PIXELS_PER_CELL_EDGE = 0.418 world units.
         // No halo may extend that silhouette; the translucent body reveals the painted glass swirl.
         radius: 0.418,
-        // Cyan-white heat must pass through saturated cyan-blue, avoiding pale blue/lavender in the colour ramp.
-        hot: displayLinear(215, 250, 255),
-        mid: displayLinear(120, 205, 255),
-        body: displayLinear(70, 130, 255),
-        limb: displayLinear(125, 170, 240),
+        // L5G tuning on the battle and replay framings (scratchpad finallook7/light, gates against the faithful render
+        // of the same frame: saturated blue 1.0-1.5x, lavender <= 2000): a white-cyan core over the inner half (the
+        // target's white-hot heart; cyan hue < 200 counts neither as saturated blue nor lavender), a saturated body at
+        // half opacity so the painted glass swirl shows through without turning pale lavender, a rim of S about 0.5.
+        hot: displayLinear(225, 252, 255),
+        mid: displayLinear(130, 220, 255),
+        body: displayLinear(60, 115, 255),
+        limb: displayLinear(125, 170, 245),
         filaments: displayLinear(170, 235, 255),
         halo: displayLinear(45, 95, 255),
-        coreRadius: 0.3,
-        bodyStart: 0.55,
-        bodyEnd: 0.9,
+        coreRadius: 0.55,
+        bodyStart: 0.8,
+        bodyEnd: 0.92,
         alpha: 1,
-        coreAlpha: 0.95,
-        bodyAlpha: 0.45,
-        limbAlpha: 0.55,
+        coreAlpha: 1,
+        bodyAlpha: 0.5,
+        limbAlpha: 0.58,
         filamentMix: 0.5,
         haloAlpha: 0,
         haloScale: 1,
@@ -129,15 +139,19 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
         occluders: [{ corner: [0.648, -0.085], from: -22, to: 90 }],
       },
       arcStyle: {
-        core: displayLinear(215, 250, 255),
-        edge: displayLinear(70, 140, 255),
-        width: 1.6,
-        forkWidth: 1.1,
+        core: displayLinear(210, 250, 255),
+        edge: displayLinear(50, 120, 255),
+        width: 2,
+        forkWidth: 1.3,
         coreFraction: 0.45,
-        glowWidth: 2.4,
-        glowAlpha: 0.3,
+        glowWidth: 3,
+        glowAlpha: 0.45,
+        // Seven or eight arcs: four or five filaments leave the white core's edge (their glows start at half radius so
+        // they cannot stain the core blue) and three strikes reach the coil, base fittings and pad emitters.
         filaments: [4, 5],
-        strikes: [2, 3],
+        strikes: [3, 3],
+        filamentStart: [0.3, 0.42],
+        glowStart: 0.5,
         // Measured coil, base fittings, three pad emitters and the right tower's corner insulator (engine px).
         anchors: [
           [-23, -17],
@@ -524,7 +538,8 @@ export function buildingLightOverlay(
       const paths: ScreenPoint[][] = [];
       if (index < filaments) {
         const theta = filamentSlotAngle(light.key, index, pairFrame, style.crawl) + (random() * 2 - 1) * 0.3;
-        const r0 = (0.12 + random() * 0.13) * radius;
+        const [startMin, startMax] = style.filamentStart ?? [0.12, 0.25];
+        const r0 = (startMin + random() * (startMax - startMin)) * radius;
         const r1 = (0.92 + random() * 0.065) * radius;
         const twist = (random() * 2 - 1) * 0.35;
         const points: ScreenPoint[] = [];
@@ -612,8 +627,13 @@ export function buildingLightOverlay(
           coreFraction: style.coreFraction,
           push: push + 0.05,
         };
+        // The glow starts at the first vertex outside glowStart, keeping at least the final segment so every bolt
+        // still has its own glow directly underneath.
+        const outside = paths[path]!.findIndex((p) => Math.hypot(p.x, p.y) >= (style.glowStart ?? 0) * radius);
+        const glowFrom = Math.min(outside < 0 ? points.length - 2 : outside, points.length - 2);
         strokes.push({
           ...stroke,
+          points: glowFrom > 0 ? points.slice(glowFrom) : points,
           width: width * style.glowWidth,
           core: style.edge,
           alpha: alpha * style.glowAlpha,

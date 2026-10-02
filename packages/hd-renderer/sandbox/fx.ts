@@ -78,6 +78,7 @@ import { effectRow, type LiveAnim } from '../src/live/effects';
 import type { LiveRadBeam, LiveWave } from '../src/live/beams';
 import { ra2Screen } from '../src/ra2/cache';
 import { applyLookPreset, LOOK_PRESETS, type LookPreset } from '../src/HdRenderer';
+import { BUILDING_LIGHTS, displayLinear } from '../src/live/buildingLights';
 import { voxelLookParams } from './look';
 import { voxelProjectionFor } from '../src/ra2/voxelProjection';
 import { voxelPbrFor } from '../src/ra2/voxelPbr';
@@ -163,6 +164,21 @@ if (overrides.length) {
     settings[key] = value;
   }
   live.hd.applySettings();
+}
+// &lightspec=TYPE.orb.key:value,TYPE.arc.key:value,...: building-light tuning reviews without code edits (development
+// sandbox only). Values: a number, an sRGB colour r/g/b (0-255, converted to display-linear like the spec's colours) for
+// colour keys, or a range a~b for [min, max] keys (arc filaments/strikes).
+for (const item of (params.get('lightspec') ?? '').split(',').filter(Boolean)) {
+  const [path, raw] = item.split(':');
+  const [type, part, key] = (path ?? '').split('.');
+  const spec = BUILDING_LIGHTS[type ?? '']?.[0] as unknown as Record<string, Record<string, unknown> | undefined>;
+  const target = part === 'orb' ? spec?.orb : part === 'arc' ? spec?.arcStyle : part === 'light' ? spec : undefined;
+  if (!target || !key || raw === undefined || !(key in target)) throw new Error(`Invalid lightspec override: ${item}`);
+  if (raw.includes('/')) {
+    const [r, g, b] = raw.split('/').map(Number);
+    target[key] = displayLinear(r!, g!, b!);
+  } else if (raw.includes('~')) target[key] = raw.split('~').map(Number);
+  else target[key] = Number(raw);
 }
 // &garnish=0: the original art alone (no HD light, sparks or smoke), for side-by-side checks.
 if (params.get('garnish') === '0')
