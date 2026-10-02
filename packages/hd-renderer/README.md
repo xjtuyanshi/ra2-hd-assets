@@ -789,3 +789,14 @@ brightness at noon on that map (measured in Chrome). relight, blend and strength
 for the current sun and the VPL light direction as its reference. It is disabled by default. Omitting `vproj`
 retains the original material path and defaults. Build player-supplied assets using
 [the projection builder](../ra2-assets/README.md#vehicle-projection-atlases-python); keep all derived images outside Git.
+
+## Infantry contact shadows
+
+Live infantry queues the shadow matching its selected body/sequence frame, including a dedicated library page.
+Only infantry shadows carry a contact marker (cleared whenever a sprite-pool record is reused). Their enhanced-look
+core opacity is **0.78**; their original SHP offsets remain attached to the feet even in `cinematic`. Sun following,
+shadow-length transforms and the distance-based blur are bypassed for infantry. The dedicated 2x black RGBA page
+supplies alpha coverage with a solid core and antialiased exterior; the indexed page is the loading fallback. Both
+colour and over-pass depth use that same coverage. The faithful path retains engine shadow opacity. Building and
+vehicle shadows retain their existing indexed coverage, transforms, opacity, softness and ground-depth ordering.
+Build/repair the library with [the infantry shadow tool](../ra2-assets/README.md#infantry-shadow-repair-python--typescript).

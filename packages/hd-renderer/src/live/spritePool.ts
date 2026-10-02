@@ -46,6 +46,7 @@ export class SpritePool {
     instance.palette = palette;
     instance.push = push;
     instance.shadow = shadow;
+    instance.infantryShadow = undefined;
     instance.flat = flat;
     instance.glint = undefined;
     instance.light = light;

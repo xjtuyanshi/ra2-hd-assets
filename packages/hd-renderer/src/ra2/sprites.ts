@@ -84,6 +84,8 @@ export interface SpriteInstance {
   /** World units to pull the card towards the camera so terrain around the base never cuts it (see cardPush). */
   push: number;
   shadow: boolean;
+  /** Infantry's inline SHP footprint stays at the draw point; enhanced opacity is fixed at 0.78. */
+  infantryShadow?: boolean;
   /** Lay the art on the ground as a decal (ore, smudges, flat overlays) instead of a camera-facing card. */
   flat?: boolean;
   /** Flat decals only: 0..1 ground-crystal relighting, highlights and animated sparkle; absent = unchanged art. */
@@ -144,6 +146,7 @@ type GroundPass = 'main' | 'under' | 'over';
  * their coverage (five levels): a later, denser shadow still darkens an earlier fringe.
  */
 export const GROUND_PULL = { shadow: [0.019, 0.027], reflection: 0.0285 } as const;
+export const INFANTRY_SHADOW_OPACITY = 0.78;
 
 /**
  * Filtered coverage of a frame's 1x indexed mask at `texel` (quadratic B-spline over the 3x3 texels around it, texels
@@ -234,7 +237,7 @@ export class SpriteLayer {
   private readonly params: DirtyAttribute;
   /**
    * x: card/decal/shadow/contact/reflection (instanceCode); y: object light; z: map lighting class; w: bounded
-   * traversal bias in world units for cards, or ground-crystal weight for plain flat decals.
+   * traversal bias in world units for cards, ground-crystal weight for plain flat decals, or infantry shadow marker.
    * The second vec4 holds foundation width/height and draw-point offsets; width -1 selects an elevated deck.
    * Both vec4 attributes share one buffer: WebGPU allows 8 vertex buffers.
    */
@@ -298,6 +301,9 @@ export class SpriteLayer {
     const aFlags: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', 8, 0);
     const aOcclusion: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', 8, 4);
     const aFlat: ShaderNode = aFlags.x;
+    const isInfantryShadow: ShaderNode = step(1.5, aFlat)
+      .mul(float(1).sub(step(2.5, aFlat)))
+      .mul(step(0.5, aFlags.w));
     // The map's light for this instance's class, times its own extra light, in the palette's sRGB scale (see
     // mapLighting.ts): 'ambient' takes the level, 'full' the per-channel grade, 'none' nothing.
     const isFull: ShaderNode = step(0.5, aFlags.z).mul(float(1).sub(step(1.5, aFlags.z)));
@@ -423,7 +429,11 @@ export class SpriteLayer {
           vec2(m.x.mul(offset.x).add(m.z.mul(offset.y)), m.y.mul(offset.x).add(m.w.mul(offset.y))),
         );
         const followed = aAnchor.add(vec3(turned.x, SPRITE_DECAL_LIFT, turned.y));
-        const follow: ShaderNode = isShadowKind.mul(step(1e-4, look.shadowFollow)).mul(look.enabled);
+        // Inline infantry footprints share the body's screen offsets; rotating them would detach them from its feet.
+        const follow: ShaderNode = isShadowKind
+          .mul(float(1).sub(isInfantryShadow))
+          .mul(step(1e-4, look.shadowFollow))
+          .mul(look.enabled);
         // Contact shades and reflections exist only while their effect is on; otherwise they collapse to a point.
         const rows: ShaderNode = reflectionRows();
         const qy = rows.x.add(gv.mul(rows.y.sub(rows.x)));
@@ -490,7 +500,11 @@ export class SpriteLayer {
         }
         // Shadows take the filtered coverage itself: solid shadow art stays solid with a soft edge, and the stippled
         // shadows of trees and bushes become an even half shadow (their average at 1x) instead of blotches.
-        const shadow: ShaderNode = vec4(0, 0, 0, clamp(coverage, 0, 1).mul(SHADOW_OPACITY));
+        // Existing building/vehicle shadows retain indexed coverage. Only the new infantry page supplies HD alpha.
+        const shadowCoverage: ShaderNode = hd
+          ? mix(clamp(coverage, 0, 1), max(clamp(coverage, 0, 1), texture(hd.color, atlasUv).a), isInfantryShadow)
+          : clamp(coverage, 0, 1);
+        const shadow: ShaderNode = vec4(0, 0, 0, shadowCoverage.mul(SHADOW_OPACITY));
         const edge: ShaderNode = smoothstep(0.35, 0.65, coverage);
         // Local light at the ground point under this pixel (decals: the pixel itself; upright art: straight below it on
         // screen, down to the anchor's ground line), fading with the pixel's height above that ground.
@@ -634,28 +648,38 @@ export class SpriteLayer {
             result.assign(select(crystal.greaterThan(0), vec4(crystalColour.add(litGlow), litAlpha), result));
           }
           // Both crisp and softened shadows share the enhanced opacity; faithful keeps the engine's alpha above.
-          const shadowOpacity: ShaderNode = look.shadowDarkness.mul(SHADOW_OPACITY).min(0.9);
-          If(isShadow.greaterThan(0.5).and(look.shadowDarkness.notEqual(1)), () => {
-            const alpha: ShaderNode = clamp(coverage, 0, 1).mul(shadowOpacity);
-            result.assign(vec4(0, 0, 0, alpha));
-          });
+          const shadowOpacity: ShaderNode = mix(
+            look.shadowDarkness.mul(SHADOW_OPACITY).min(0.9),
+            INFANTRY_SHADOW_OPACITY,
+            isInfantryShadow,
+          );
+          If(
+            isShadow.greaterThan(0.5).and(look.shadowDarkness.notEqual(1).or(isInfantryShadow.greaterThan(0.5))),
+            () => {
+              const alpha: ShaderNode = shadowCoverage.mul(shadowOpacity);
+              result.assign(vec4(0, 0, 0, alpha));
+            },
+          );
           // Shadows grow a penumbra with distance from their object's base (golden-hour softness).
-          If(isShadow.greaterThan(0.5).and(look.shadowSoftness.greaterThan(1e-4)), () => {
-            const offset: ShaderNode = vec2(px.div(60).add(py.div(30)), py.div(30).sub(px.div(60)));
-            const reach: ShaderNode = length(offset.sub(baseCentre));
-            const radius: ShaderNode = look.shadowSoftness.mul(reach).mul(2.2).min(6);
-            const soft: ShaderNode = float(0).toVar();
-            for (let i = 0; i < 8; i++) {
-              const angle = (i / 8) * Math.PI * 2 + 0.4;
-              const r = i % 2 === 0 ? 1 : 0.55;
-              const k: ShaderNode = floor(texel.add(vec2(cos(angle), sin(angle)).mul(radius.mul(r))));
-              const inside: ShaderNode = step(lo, k).mul(float(1).sub(step(hi, k)));
-              const occupied: ShaderNode = step(0.5, texture(atlas.texture, k.add(0.5).div(atlasSize)).r.mul(255));
-              soft.addAssign(occupied.mul(inside.x).mul(inside.y));
-            }
-            const blended: ShaderNode = mix(clamp(coverage, 0, 1), soft.div(8), smoothstep(0.3, 1.5, radius));
-            result.assign(vec4(0, 0, 0, blended.mul(shadowOpacity)));
-          });
+          If(
+            isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(look.shadowSoftness.greaterThan(1e-4)),
+            () => {
+              const offset: ShaderNode = vec2(px.div(60).add(py.div(30)), py.div(30).sub(px.div(60)));
+              const reach: ShaderNode = length(offset.sub(baseCentre));
+              const radius: ShaderNode = look.shadowSoftness.mul(reach).mul(2.2).min(6);
+              const soft: ShaderNode = float(0).toVar();
+              for (let i = 0; i < 8; i++) {
+                const angle = (i / 8) * Math.PI * 2 + 0.4;
+                const r = i % 2 === 0 ? 1 : 0.55;
+                const k: ShaderNode = floor(texel.add(vec2(cos(angle), sin(angle)).mul(radius.mul(r))));
+                const inside: ShaderNode = step(lo, k).mul(float(1).sub(step(hi, k)));
+                const occupied: ShaderNode = step(0.5, texture(atlas.texture, k.add(0.5).div(atlasSize)).r.mul(255));
+                soft.addAssign(occupied.mul(inside.x).mul(inside.y));
+              }
+              const blended: ShaderNode = mix(clamp(coverage, 0, 1), soft.div(8), smoothstep(0.3, 1.5, radius));
+              result.assign(vec4(0, 0, 0, blended.mul(shadowOpacity)));
+            },
+          );
           // Contact shade: soft darkening of the ground around a foundation.
           If(isContact.greaterThan(0.5), () => {
             const local: ShaderNode = vec2(px.div(60).add(py.div(30)), py.div(30).sub(px.div(60))).sub(
@@ -724,7 +748,10 @@ export class SpriteLayer {
         .add(c.z.mul(screenCoordinate.y))
         .add(c.w.mul(level));
       const texel = vec2(aRect.x.add(uv().x.mul(aRect.z)), aRect.y.add(vCard.mul(aRect.w)));
-      const coverage = frameCoverage(atlas.texture, atlasSize, texel, aRect);
+      const indexedCoverage = frameCoverage(atlas.texture, atlasSize, texel, aRect);
+      const coverage = hd
+        ? mix(indexedCoverage, max(indexedCoverage, texture(hd.color, texel.div(atlasSize)).a), isInfantryShadow)
+        : indexedCoverage;
       const level5: ShaderNode = floor(clamp(coverage, 0, 1).mul(4).add(0.5));
       const pull: ShaderNode = select(
         isReflection.greaterThan(0.5),
@@ -816,9 +843,11 @@ export class SpriteLayer {
           LIGHTING_CODE[s.lighting ?? 'ambient'],
           instanceCode(s) === 1
             ? Math.max(0, Math.min(1, s.glint ?? 0))
-            : s.flat || s.shadow || s.kind
-              ? 0
-              : spritePainterBias(s.painter, s.painterPart),
+            : s.shadow && s.infantryShadow
+              ? 1
+              : s.flat || s.shadow || s.kind
+                ? 0
+                : spritePainterBias(s.painter, s.painterPart),
         );
         const foundation = s.painter?.foundation;
         const dx = foundation ? s.anchor.x - s.painter!.x : 0;

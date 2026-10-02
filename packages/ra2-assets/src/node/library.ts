@@ -478,7 +478,8 @@ export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): Col
     }
     const remap = secBool(sec, 'Remapable', true);
     const spriteId = `infantry:${section}`;
-    const s = collector.addShp(spriteId, candidates, 'unit', remap);
+    // Stock infantry leaves the shadow half empty and paints its grounded shadow with unit-palette index 12.
+    const s = collector.addShp(spriteId, candidates, 'unit', remap, {}, undefined, 12);
     if (!s) {
       skip('infantry', id, `unreadable art ${candidates[0]}`);
       return undefined;

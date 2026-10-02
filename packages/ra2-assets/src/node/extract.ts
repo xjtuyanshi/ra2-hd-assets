@@ -458,7 +458,7 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
       return;
     }
     const id = `${kind}:${e.type}`;
-    const s = addShp(id, shpCandidates(image, sec), 'unit', true);
+    const s = addShp(id, shpCandidates(image, sec), 'unit', true, {}, undefined, kind === 'infantry' ? 12 : undefined);
     if (!s) return;
     let frame = 0;
     if (kind === 'infantry') {
