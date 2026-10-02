@@ -1756,3 +1756,42 @@ evidence, not live GPU acceptance. Asset-free regressions:
 pnpm exec vitest run packages/ra2-assets/tests/infantryShadows.test.ts
 python3 -B -m unittest discover -s packages/ra2-assets/python -p test_infantry_shadows.py
 ```
+
+## Unit redraw coverage (Python)
+
+`python/unit_coverage.py` audits an existing cache farm without modifying its libraries, symlinks or art. The
+runtime dependencies are Python 3.11+, NumPy and Pillow. Pass the stage-0 cache separately with `--base`; keep both inputs and
+generated reports outside Git. No game files are downloaded or copied into this package.
+
+```bash
+python3 packages/ra2-assets/python/unit_coverage.py scan \
+  --farm "$HD_FARM" --base "$HD_BASE" \
+  --theaters urban temperate snow desert lunar newurban \
+  --meta packages/ra2-assets/python/unit_coverage_meta.example.json \
+  --json "$COVERAGE_OUT/coverage.json" --md "$COVERAGE_OUT/coverage.md"
+python3 -m pytest packages/ra2-assets/python/test_unit_coverage.py
+```
+
+`--theaters` and `--meta` are optional; the default covers all six theaters. Urban remains required for calibration
+even when `--theaters` selects other theaters only. Metadata maps rules type codes to
+optional `side`, `name` and `note` strings. For example, the GI's rules code is `E1`, while its image is `GI`.
+The JSON retains per-theater non-empty frame and infantry sequence counts. The Chinese Markdown table uses
+`已完成`, `部分` and `未完成`, with rules order preserved within each kind. Voxel checks require the manifest's
+body and applicable turret parts; unloading forms receive additional rows, as do building turret voxels.
+The primary unit table covers infantry, vehicles, aircraft and building turrets; building body types are
+accounted for per theater in the JSON's `excluded_buildings` record.
+
+Sprite classification compares each box-downsampled HD frame with the original on shared, non-shadow body pixels,
+and scores its CIE Lab difference from the box-downsampled stage-0 page to remove ordinary upscale differences.
+When a theater's stage-0 library has no HD page reference, the scanner can borrow the urban stage-0 frame after
+verifying identical frame dimensions, offsets and original pixels. Decoded RGBA comparisons ignore RGB under zero
+alpha. If both originals are indexed and their raw indices match exactly, differing decoded palette pixels are
+excluded from scoring and counted in `baseline_palette_pixels_excluded`. Such frames record
+`baseline_theater: "urban"` and `baseline_fallback: true`; other original-art changes prevent borrowing and remain
+unverified. Missing files behind a declared HD reference do not trigger this fallback.
+Non-empty original frames remain in the totals when their current HD art is missing and cannot be scored.
+Known redrawn and unchanged urban sprites calibrate a structural threshold, with score distributions and the
+chosen margin included in the report. A redrawn control type can still contain retained animation frames.
+This is an image-based coverage estimate, not proof of image-model provenance: global polish and an unusually
+faithful redraw can affect classification. The asset-free pytest suite creates tiny synthetic libraries, pages
+and voxel manifests in temporary directories.
