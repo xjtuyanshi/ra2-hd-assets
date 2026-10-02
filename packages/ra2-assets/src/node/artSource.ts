@@ -18,6 +18,8 @@ import type { IniFile, IniSection, ShpFile, VxlFile } from 'ra2-formats';
 import type { SpriteEntry, SpriteFrame, VoxelModel, VoxelPart } from '../manifest.ts';
 import { chooseAtlasWidth, packShelves, packShelvesPaged } from '../atlas.ts';
 import { animTimingArt, artFileCandidates, resolveArtFile, splitShadowHalf } from '../art.ts';
+import { drawOffsetFor } from '../iso.ts';
+import type { LibraryOverlay, LibrarySmudge } from '../library.ts';
 import type { TheaterInfo } from '../theater.ts';
 import type { GameInstall } from './install.ts';
 
@@ -120,6 +122,60 @@ export class ArtSource {
     });
   }
 
+  /**
+   * Overlay art rules shared by map and live-library extraction. Draw offsets/lighting preserve the map extractor's
+   * conventions. YR 1.001 DrawOverlay tests Wall at 0x47F96A and selects the current player's ColorSchemeIndex at
+   * 0x47F9B2; walls therefore use the unit palette with current-player remap, rather than WallOwnerIndex.
+   */
+  overlayArt(id: string): Omit<LibraryOverlay, 'sprite' | 'frames'> & { candidates: string[] } {
+    if (this.rulesBool(id, 'IsRubble'))
+      return {
+        candidates: [],
+        rubble: true,
+        palette: 'iso',
+        wall: false,
+        tiberium: false,
+        remap: false,
+        flat: true,
+        drawOffset: drawOffsetFor('overlay'),
+        lighting: 'full',
+      };
+    const { sec, image } = this.artOf(id);
+    const wall = this.rulesBool(id, 'Wall');
+    const tiberium = this.rulesBool(id, 'Tiberium');
+    const highBridge = /^(BRIDGE|BRIDGEB|RAILBRDG)[12]$/i.test(id);
+    return {
+      candidates: this.shpCandidates(image, sec),
+      palette: wall ? 'unit' : tiberium ? 'theater' : 'iso',
+      wall,
+      tiberium,
+      remap: wall,
+      flat: !wall && !highBridge && (tiberium || this.rulesBool(id, 'DrawFlat', true)),
+      drawOffset: highBridge ? [0, -60] : drawOffsetFor('overlay', { isARock: this.rulesBool(id, 'IsARock') }),
+      lighting: tiberium ? 'none' : wall ? 'ambient' : 'full',
+    };
+  }
+
+  /** SmudgeTypes always use theater art, including types with no art Theater=yes entry. */
+  smudgeArt(id: string): Omit<LibrarySmudge, 'sprite' | 'frames'> & { candidates: string[] } {
+    const { image } = this.artOf(id);
+    return {
+      candidates: artFileCandidates(image, {
+        theater: true,
+        newTheater: false,
+        theaterExt: this.theater.ext,
+        theaterLetter: this.theater.newTheaterLetter,
+      }),
+      palette: 'iso',
+      width: Math.max(1, this.rulesInt(id, 'Width') ?? 1),
+      height: Math.max(1, this.rulesInt(id, 'Height') ?? 1),
+      remap: false,
+      flat: true,
+      drawOffset: drawOffsetFor('smudge'),
+      lighting: 'full',
+    };
+  }
+
   /** An anim section (building layer, bib, buildup): its file candidates and timing. */
   animArt(anim: string): {
     sec: IniSection | undefined;
@@ -170,6 +226,7 @@ export class SpriteCollector {
     remap: boolean,
     extra: Partial<SpriteEntry> = {},
     pick?: FramePicker,
+    inlineShadowIndex?: number,
   ): PendingSprite | undefined {
     const known = this.sprites.get(id);
     if (known) return known;
@@ -194,7 +251,9 @@ export class SpriteCollector {
     });
     const picked = pick?.(split.body).filter((i) => i >= 0 && i < split.body);
     const bodies = picked ? picked.map((i) => decoded[i]!) : decoded.slice(0, split.body);
-    const shadows = picked ? picked.map((i) => decoded[split.body + i]!) : decoded.slice(split.body);
+    const shadows = (picked ?? bodies.map((_, i) => i)).map((i) =>
+      shpShadowFrame(decoded[i]!, split.hasShadows ? decoded[split.body + i] : undefined, inlineShadowIndex),
+    );
     const pending: PendingSprite = {
       entry: {
         palette,
@@ -206,12 +265,27 @@ export class SpriteCollector {
         ...extra,
       },
       frames: bodies.map(toFrame),
-      ...(split.hasShadows ? { shadows: shadows.map(toFrame) } : {}),
+      ...(split.hasShadows || inlineShadowIndex !== undefined ? { shadows: shadows.map(toFrame) } : {}),
     };
     this.usedPalettes.add(palette);
     this.sprites.set(id, pending);
     return pending;
   }
+}
+
+/** Prefer baked shadow art; otherwise isolate a caller-selected inline palette index without changing body art. */
+export function shpShadowFrame(
+  body: ReturnType<typeof decodeShp>[number],
+  baked: ReturnType<typeof decodeShp>[number] | undefined,
+  inlineIndex?: number,
+): ReturnType<typeof decodeShp>[number] {
+  if (baked?.pixels.some((v) => v !== 0)) return baked;
+  if (inlineIndex === undefined) return baked ?? { x: 0, y: 0, cx: 0, cy: 0, pixels: new Uint8Array() };
+  // Index 1 is the atlas shadow convention; source palette colours never enter the shadow pass.
+  const pixels = body.pixels.map((v) => (v === inlineIndex ? 1 : 0));
+  return pixels.some((v) => v !== 0)
+    ? { ...body, pixels }
+    : { x: body.x, y: body.y, cx: 0, cy: 0, pixels: new Uint8Array() };
 }
 
 export function decodeShp(shp: ShpFile): { x: number; y: number; cx: number; cy: number; pixels: Uint8Array }[] {
@@ -255,7 +329,7 @@ export function buildVoxelModel(
   warn: (m: string) => void,
 ): VoxelModel | undefined {
   const parts: VoxelPart[] = [];
-  let normalsMode = 4;
+  let normalsMode: number | undefined;
   for (const { role, stem: name, required } of specs) {
     let vxl: VxlFile | undefined;
     try {
@@ -285,7 +359,7 @@ export function buildVoxelModel(
       m[3] = m[3]! * s.scale;
       m[7] = m[7]! * s.scale;
       m[11] = m[11]! * s.scale;
-      normalsMode = s.normalsMode;
+      normalsMode ??= s.normalsMode;
       const buf = new Uint8Array(s.voxels.length * 5);
       s.voxels.forEach((v, i) => buf.set([v.x, v.y, v.z, v.color, v.normal], i * 5));
       return {
@@ -296,12 +370,14 @@ export function buildVoxelModel(
         maxBounds: [...s.maxBounds] as [number, number, number],
         transform: m,
         voxels: b64(buf),
+        normalsMode: s.normalsMode,
       };
     });
     parts.push({ role, sections });
   }
   if (!parts.length) return undefined;
-  return { id, palette: 'unit', normalsMode, parts, file: `${specs[0]!.stem}.vxl`, turretOffset };
+  // The model-level mode is the first (body) section's; each section carries its own.
+  return { id, palette: 'unit', normalsMode: normalsMode ?? 4, parts, file: `${specs[0]!.stem}.vxl`, turretOffset };
 }
 
 export interface PackedSprites {

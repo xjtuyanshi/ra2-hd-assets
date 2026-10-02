@@ -1,12 +1,20 @@
-import { NearestFilter, NoColorSpace, TextureLoader, type Texture } from 'three/webgpu';
+import { DataTexture, NearestFilter, NoColorSpace, RedFormat, Texture, UnsignedByteType } from 'three/webgpu';
 import type { LibraryType, TypeLibrary } from '../../../ra2-assets/src/library';
+import { indexedBitmapPixels } from './indexedPixels';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
+import type { SpriteMaterialAtlas } from '../ra2/spriteLook';
+import {
+  loadSpriteMaterialAtlas,
+  validateLibrarySpriteMaterials,
+  type LibrarySpriteMaterialsSidecar,
+} from '../ra2/spriteMaterials';
 import {
   addPalette,
   fetchOptionalJson,
   loadHdAtlas,
   loadMaskTexture,
   readPalettePng,
+  type HdAtlas,
   type HdAtlasRef,
   type Ra2Cache,
   type WindowsIndex,
@@ -21,16 +29,26 @@ export const LIBRARY_PALETTE_PREFIX = 'lib:';
  * callers ask again on a later frame until they are ready.
  */
 export class LiveLibrary {
-  private readonly pages = new Map<number, Texture | 'loading' | 'failed'>();
+  private readonly pages = new Map<
+    number,
+    { texture: Texture; width: number; height: number } | 'loading' | 'failed'
+  >();
+  /** Changes when asynchronous art settles; presentation can sleep while nothing has arrived. */
+  revision = 0;
   private readonly voxels = new Map<string, VoxelModel | 'loading' | 'failed'>();
-  private readonly hdPages = new Map<number, { color: Texture; remap: Texture } | 'loading' | 'failed'>();
+  private readonly hdPages = new Map<number, HdAtlas | 'loading' | 'failed'>();
   private readonly windowPages = new Map<number, Texture | 'loading' | 'failed'>();
+  private readonly materialPages = new Map<number, SpriteMaterialAtlas | 'loading' | 'failed'>();
+  private materialsDisposed = false;
+  /** Uploads a freshly decoded page straight to the GPU (the renderer's initTexture); see loadIndexedPage. */
+  uploadPage: ((texture: Texture) => void) | null = null;
 
   private constructor(
     readonly base: string,
     readonly library: TypeLibrary,
     /** Lit-window masks per atlas page (pnpm hd:lights -- --library <theater>), when extracted. */
     readonly windows: WindowsIndex | null,
+    private readonly materials: LibrarySpriteMaterialsSidecar | null,
   ) {}
 
   /** Null when the theater has no extracted library (pnpm hd:library), in which case the map cache is used alone. */
@@ -39,10 +57,71 @@ export class LiveLibrary {
     const response = await fetch(`${root}/library.json`).catch(() => null);
     if (!response?.ok) return null;
     const library = (await response.json()) as TypeLibrary;
+    // HD pages recorded outside library.json (a sidecar written by a later tool, same shape as spriteAtlasesHd), so
+    // library.json itself never has to be rewritten.
+    if (!library.spriteAtlasesHd) {
+      const sidecar = await fetch(`${root}/sprites-hd.json`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null);
+      const pages = Array.isArray(sidecar)
+        ? sidecar
+        : (sidecar as { spriteAtlasesHd?: unknown } | null)?.spriteAtlasesHd;
+      if (Array.isArray(pages)) library.spriteAtlasesHd = pages as TypeLibrary['spriteAtlasesHd'];
+    }
     for (const [key, file] of Object.entries(library.palettes))
       addPalette(cache, LIBRARY_PALETTE_PREFIX + key, await readPalettePng(`${root}/${file}`));
     const windows = await fetchOptionalJson<WindowsIndex>(`${root}/windows.json`);
-    return new LiveLibrary(root, library, windows);
+    const materials = await fetchOptionalJson(`${root}/normals.json`, validateLibrarySpriteMaterials);
+    for (const [index, page] of Object.entries(materials?.pages ?? {})) {
+      const hd = library.spriteAtlasesHd?.[Number(index)];
+      if (
+        !hd ||
+        hd.width !== page.width ||
+        hd.height !== page.height ||
+        hd.file !== page.atlas ||
+        hd.scale !== page.scale
+      ) {
+        console.warn(
+          `${root}/normals.json: page ${index} made for ${page.atlas} (${page.width}x${page.height}, scale ${page.scale}), ignored`,
+        );
+        delete materials!.pages[index];
+      }
+    }
+    return new LiveLibrary(root, library, windows, materials);
+  }
+
+  /** Whether a compatible material page exists and has not failed; this never requests the PNG. */
+  hasMaterialsPage(index: number): boolean {
+    return (
+      !this.materialsDisposed && !!this.materials?.pages[String(index)] && this.materialPages.get(index) !== 'failed'
+    );
+  }
+
+  /** Material data loads only when an enhanced look needs it. A pending/failed page keeps the existing art. */
+  materialsPage(index: number): SpriteMaterialAtlas | null {
+    if (!this.hasMaterialsPage(index)) return null;
+    const entry = this.materialPages.get(index);
+    if (entry === undefined) {
+      this.materialPages.set(index, 'loading');
+      const page = this.materials!.pages[String(index)]!;
+      void loadSpriteMaterialAtlas(`${this.base}/${page.file}`).then((atlas) => {
+        if (this.materialsDisposed) {
+          atlas?.texture.dispose();
+          return;
+        }
+        this.materialPages.set(index, atlas ?? 'failed');
+        this.revision++;
+      });
+      return null;
+    }
+    return typeof entry === 'string' ? null : entry;
+  }
+
+  /** The live view owns these shared textures; replacing a sprite mesh must not release them. */
+  disposeMaterials(): void {
+    this.materialsDisposed = true;
+    for (const atlas of this.materialPages.values()) if (typeof atlas !== 'string') atlas.texture.dispose();
+    this.materialPages.clear();
   }
 
   /** Whether the page has a lit-window mask (loaded or loading). */
@@ -57,7 +136,10 @@ export class LiveLibrary {
     const entry = this.windowPages.get(index);
     if (entry === undefined) {
       this.windowPages.set(index, 'loading');
-      void loadMaskTexture(`${this.base}/${file}`).then((texture) => this.windowPages.set(index, texture ?? 'failed'));
+      void loadMaskTexture(`${this.base}/${file}`).then((texture) => {
+        this.windowPages.set(index, texture ?? 'failed');
+        this.revision++;
+      });
       return null;
     }
     return typeof entry === 'string' ? null : entry;
@@ -101,28 +183,30 @@ export class LiveLibrary {
     if (!ref) return null;
     if (entry === undefined) {
       this.pages.set(index, 'loading');
-      new TextureLoader()
-        .loadAsync(`${this.base}/${ref.file}`)
+      loadIndexedPage(`${this.base}/${ref.file}`, this.uploadPage ?? undefined)
         .then((texture) => {
-          // Palette indices: never filtered, flipped or colour-converted.
-          texture.flipY = false;
-          texture.colorSpace = NoColorSpace;
-          texture.magFilter = NearestFilter;
-          texture.minFilter = NearestFilter;
-          texture.generateMipmaps = false;
-          this.pages.set(index, texture);
+          this.pages.set(index, { texture, width: ref.width, height: ref.height });
+          this.revision++;
         })
-        .catch(() => this.pages.set(index, 'failed'));
+        .catch(() => {
+          this.pages.set(index, 'failed');
+          this.revision++;
+        });
       return null;
     }
-    return typeof entry === 'string' ? null : { texture: entry, width: ref.width, height: ref.height };
+    return typeof entry === 'string' ? null : entry;
+  }
+
+  /** A missing/failed page is settled, so infrequently changing cell layers need not retry it every frame. */
+  pageFailed(index: number): boolean {
+    return !this.library.spriteAtlases[index] || this.pages.get(index) === 'failed';
   }
 
   /**
    * The page's HD atlas (pnpm hd:sprites --library), null while loading or when the page has none. Callers draw the
    * indexed page until it arrives.
    */
-  hdPage(index: number): { color: Texture; remap: Texture } | null {
+  hdPage(index: number): HdAtlas | null {
     const refs = (this.library as TypeLibrary & { spriteAtlasesHd?: (HdAtlasRef | null)[] }).spriteAtlasesHd;
     const ref = refs?.[index];
     if (!ref) return null;
@@ -130,8 +214,14 @@ export class LiveLibrary {
     if (entry === undefined) {
       this.hdPages.set(index, 'loading');
       loadHdAtlas(this.base, ref)
-        .then((atlas) => this.hdPages.set(index, atlas))
-        .catch(() => this.hdPages.set(index, 'failed'));
+        .then((atlas) => {
+          this.hdPages.set(index, atlas);
+          this.revision++;
+        })
+        .catch(() => {
+          this.hdPages.set(index, 'failed');
+          this.revision++;
+        });
       return null;
     }
     return typeof entry === 'string' ? null : entry;
@@ -152,12 +242,83 @@ export class LiveLibrary {
       this.voxels.set(id, 'loading');
       fetch(`${this.base}/${file}`)
         .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-        .then((model: VoxelModel) => this.voxels.set(id, model))
-        .catch(() => this.voxels.set(id, 'failed'));
+        .then((model: VoxelModel) => {
+          this.voxels.set(id, model);
+          this.revision++;
+        })
+        .catch(() => {
+          this.voxels.set(id, 'failed');
+          this.revision++;
+        });
       return null;
     }
     return typeof entry === 'string' ? null : entry;
   }
+
+  /** Whether a voxel model is missing from the library or failed to load (as opposed to still loading). */
+  voxelFailed(id: string): boolean {
+    return !this.library.voxels[id] || this.voxels.get(id) === 'failed';
+  }
+}
+
+/**
+ * An indexed atlas page (8-bit grayscale PNG: the value is a palette index) as a single-channel R8 texture: a quarter
+ * of the GPU memory of the RGBA8 texture an image loader makes (16 MiB instead of 64 MiB for a 4096 x 4096 page).
+ * Decoded without colour conversion or premultiplication, never filtered, flipped or mipmapped.
+ *
+ * With `upload` (the renderer's initTexture) the decoded bitmap goes to the GPU as it is: WebGPU's
+ * copyExternalImageToTexture (WebGL: texImage2D with RED) writes its red channel into the R8 texture, so the main
+ * thread never touches the 16.7 M pixels, and the bitmap is released right after the upload. Without it (tests, other
+ * hosts), bounded strips yield between reads; the R8 CPU copy is released after the renderer's first upload.
+ */
+export async function loadIndexedPage(url: string, upload?: (texture: Texture) => void): Promise<Texture> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: ${response.status}`);
+  const bitmap = await createImageBitmap(await response.blob(), {
+    colorSpaceConversion: 'none',
+    premultiplyAlpha: 'none',
+  });
+  const { width, height } = bitmap;
+  try {
+    if (upload) {
+      const texture = new Texture(bitmap as unknown as HTMLImageElement);
+      indexedSettings(texture);
+      texture.format = RedFormat;
+      texture.type = UnsignedByteType;
+      texture.premultiplyAlpha = false;
+      texture.needsUpdate = true;
+      try {
+        upload(texture);
+      } catch (error) {
+        texture.dispose();
+        throw error;
+      }
+      // Only dimensions survive: this immutable page is never uploaded again.
+      texture.image = { width, height } as unknown as HTMLImageElement;
+      return texture;
+    }
+    const indices = await indexedBitmapPixels(bitmap);
+    const texture = new DataTexture(indices, width, height, RedFormat, UnsignedByteType);
+    indexedSettings(texture);
+    texture.unpackAlignment = 1;
+    texture.onUpdate = () => {
+      // Both renderer backends have copied these immutable bytes when onUpdate runs.
+      texture.image.data = null;
+      texture.onUpdate = null;
+    };
+    texture.needsUpdate = true;
+    return texture;
+  } finally {
+    bitmap.close();
+  }
+}
+
+function indexedSettings(texture: Texture): void {
+  texture.flipY = false;
+  texture.colorSpace = NoColorSpace;
+  texture.magFilter = NearestFilter;
+  texture.minFilter = NearestFilter;
+  texture.generateMipmaps = false;
 }
 
 /** Scale an sRGB colour's HSV saturation, keeping hue and value. */

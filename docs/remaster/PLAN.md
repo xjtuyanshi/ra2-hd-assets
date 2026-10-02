@@ -422,6 +422,76 @@ CD 是技术上最适合做 HD 的底座（three.js 3D 正交场景，体素是�
 - 以后如果全量采用 3D 做步兵，只留给约 6 个英雄步兵。
 - 如果按 v1 的全量范围做，预计 4–8 个月。
 
+#### Infantry sheet asset tool
+
+`packages/ra2-assets/python/infantry_sheets.py` groups frames by animation and facing block so the image model
+redraws a coherent cycle. It reuses the registration and colour helpers from `hybrid_redraw.py`,
+`redetail_sprites.py` and `rematerialize.py`. NumPy and Pillow are required. Run from the repository root, with
+`LIBRARY` set to a theater library directory, `WORK` to an untracked work directory, `VARIANT` to a separate
+variant library directory, and `CODEX` to the image-capable agent executable:
+
+```bash
+python3 -B packages/ra2-assets/python/infantry_sheets.py prepare --library "$LIBRARY" --work "$WORK" --units E1,E2,SHK,ENGINEER,DOG,ADOG
+python3 -B packages/ra2-assets/python/infantry_sheets.py run --work "$WORK" --codex "$CODEX" --parallel 3 --limit-file "$WORK/LIMIT_HIT.txt"
+python3 -B packages/ra2-assets/python/infantry_sheets.py compose --library "$LIBRARY" --work "$WORK"
+python3 -B packages/ra2-assets/python/infantry_sheets.py build --library "$LIBRARY" --work "$WORK" --page 21 --variant-dir "$VARIANT" --suffix l3inf --min-sil 0.6
+```
+
+Preparation writes `sheets/<name>/{input.png,job.json,prompt.txt}`. `run` skips finished sheets, makes at most three
+attempts per sheet, and stops launching on usage/rate limits, HTTP 429 or quota messages; already running
+jobs finish. An existing limit file also prevents launches. `--names a,b` selects prepared sheets; `--redo a,b`
+archives their previous results under `tryN` before rerunning. Composition prefers `full.png` over `output.png`
+and writes `review.png` plus `metrics.json` per sheet. Body alpha is kept except for an inward trim band; ground
+shadows have a separate opacity/softness treatment. The default `--paint shaded` takes house paint only from
+saturated texels close to the house hue (so faces and brown cloth beside a red area stay unpainted) and encodes it
+by value rather than luminance, because a lit team colour is lighter than its ramp's brightest luminance and would
+otherwise clamp to one flat slab; `--paint model` keeps the earlier encoding. `--sharpen` (default 0.6) is a mild
+unsharp mask on the body interior, never on the antialiased rim. `compose --help` lists the colour, band, shadow,
+paint and sharpening options, which `build` also accepts. Use matching options for review and build.
+
+Build writes colour/remap pages and `report.json` under `WORK/pages`, keeping unprocessed or rejected frames
+unchanged. The variant directory links other library files and merges only the selected HD page's `file` and
+`remap` fields into its existing real `library.json` (otherwise the source manifest). It also writes
+`library.l3-infantry.json`. Missing outputs and rejected frames remain explicit in the report; installation is
+not visual acceptance. All game-derived inputs and outputs remain untracked. Asset-free regression:
+`cd packages/ra2-assets/python && python3 -B -m unittest test_infantry_sheets -v`.
+
+#### Building redraw asset tool
+
+`packages/ra2-assets/python/building_redraw.py` consolidates the buildings-v4 body, animation, build-up,
+patch composition and normal-assist workflow. It requires NumPy, Pillow and OpenCV and reuses
+`hybrid_redraw.py` and `redetail_sprites.py`. `--root` (or `HD_CACHE_DIR`) selects an HD cache containing
+`_library/<theater>/library.json`; `--theater` defaults to `urban`. All work, patches, references and variant
+pages are game-derived and must remain untracked. The tool prepares prompts but does not invoke an image model.
+
+```bash
+python3 -B packages/ra2-assets/python/building_redraw.py body --root "$HD_CACHE_DIR" --kind intact --specs "$SPECS" --work "$WORK" --style-dir "$STYLE" --sibling "$SIBLING" NAREFN
+python3 -B packages/ra2-assets/python/building_redraw.py post "$WORK/NAREFN_i" --root "$HD_CACHE_DIR"
+python3 -B packages/ra2-assets/python/building_redraw.py patches --root "$HD_CACHE_DIR" --work "$WORK" --patches "$PATCHES" NAREFN_i
+python3 -B packages/ra2-assets/python/building_redraw.py compose --library "$VARIANT" --patches "$PATCHES" --only building:NAREFN anim:NAREFN
+```
+
+Specs are a JSON object keyed by type name, each containing `name`, `design`, `details` (a string array),
+`keep`, `colours` and `style` (null or an image filename relative to `--style-dir`). Damaged jobs use the intact
+job's `output.png`. `--storage NAREFN,GAREFN` excludes storage-level ActiveAnimTwo–Four from idle composites.
+Post prefers `raw.png` over `output.png`; `--finish` accepts inline JSON or a JSON file of finish overrides.
+`anim make JOB BODYJOB SPRITE a-b COLS F "moving parts"` and `anim make_multi` (comma-separated
+`sprite:frame` cells) prepare coherent sheets; `buildup make NAME BODYJOB a-b COLS F [SUFFIX]` prepares
+construction sheets with no static body blend. Both take `--work`, `--root`, `--theater`, and optional `--specs`
+for display names in older layouts; their `post JOB...` commands also require `--patches`.
+
+`normals-job --work WORK JOB...` prepares `<JOB>_N`; `normals-assist --work WORK --out ASSISTDIR --root ROOT JOB...`
+registers normal renders for `sprite_normals.py --assist`. Optional `--extra` JSON maps source sprites to sibling
+sprite lists; no storage sibling map is implicit. `pack make PACKDIR --prompt PROMPTFILE [--max-width 2600]
+[--ref NAME=PATH] SUBJOBDIR...` batches equal-factor inputs with 48-pixel grey gaps, expanding `{n}` and `{cells}`
+from optional `cell.txt` descriptions. `pack split PACKDIR` resizes `raw.png` (else `output.png`) to the pack
+canvas and writes each sub-job's `output.png` and `packed_from.txt`.
+
+Compose holds `LIBDIR/.compose.lock` across page reads, atomic replacements and record updates; concurrent
+writers must use the same lock. Only selected frame rects change, symlink targets stay untouched, and
+`--record` defaults to `l4_frames_bldg.json`. Installation is not visual acceptance. Asset-free regression:
+`cd packages/ra2-assets/python && python3 -B -m unittest test_building_redraw -v`.
+
 #### Phase 4–7：资产规模化、环境、VFX、打磨
 
 - 规模化按阵营单位 → 战区 → 步兵 → 民用建筑 → 动画 → 图标的顺序分批，每批由你签字。

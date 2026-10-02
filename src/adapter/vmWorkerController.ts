@@ -267,8 +267,20 @@ export class VmWorkerController {
             this.post({ type: 'render-state-unchanged', requestId: message.requestId });
             break;
           }
+          const sameOverlays = value?.overlays && value.overlays === this.lastRenderState?.overlays;
+          const sameSmudges = value?.smudges && value.smudges === this.lastRenderState?.smudges;
           this.lastRenderState = value;
-          this.post({ type: 'render-state-reply', requestId: message.requestId, value });
+          if (value && (sameOverlays || sameSmudges)) {
+            // Each cell layer changes independently; moving units need neither unchanged grid cloned again.
+            const { overlays, smudges, ...rest } = value;
+            this.post({
+              type: 'render-state-cells-unchanged',
+              requestId: message.requestId,
+              value: { ...rest, ...(!sameOverlays && { overlays }), ...(!sameSmudges && { smudges }) },
+            });
+          } else {
+            this.post({ type: 'render-state-reply', requestId: message.requestId, value });
+          }
           break;
         }
         case 'diagnostics':

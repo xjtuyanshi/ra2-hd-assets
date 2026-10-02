@@ -22,7 +22,7 @@ import {
   smoothstep,
   uniform,
 } from 'three/tsl';
-import { sampleLightField } from './atmosphere';
+import { DEFAULT_ATMOSPHERE_NODES, sampleLightField, type AtmosphereNodes } from './atmosphere';
 import type { RenderMap, TerrainClass } from './contract';
 import { LEVEL_HEIGHT } from './world';
 import type { ShaderNode } from './tsl';
@@ -38,11 +38,13 @@ export interface TerrainBuild {
   /** World-space height (y) sampled on the vertex grid; shared with water and weather. */
   heightTexture: DataTexture;
   heightAt(x: number, z: number): number;
+  /** Water surface at the origin, or undefined on land/outside the map; independent of unit type. */
+  waterHeightAt?(x: number, z: number): number | undefined;
   /** 0..1 surface wetness, raised by rain and dried over time. */
   wetness: { value: number };
 }
 
-export function buildTerrain(map: RenderMap): TerrainBuild {
+export function buildTerrain(map: RenderMap, nodes = DEFAULT_ATMOSPHERE_NODES): TerrainBuild {
   const cols = map.width * SUBDIVISIONS + 1;
   const rows = map.height * SUBDIVISIONS + 1;
   const positions = new Float32Array(cols * rows * 3);
@@ -124,7 +126,7 @@ export function buildTerrain(map: RenderMap): TerrainBuild {
   heightTexture.needsUpdate = true;
 
   const wetness = uniform(0);
-  const material = createTerrainMaterial(wetness, map.waterLevel * LEVEL_HEIGHT, map.width, map.height);
+  const material = createTerrainMaterial(wetness, map.waterLevel * LEVEL_HEIGHT, map.width, map.height, nodes);
   const mesh = new Mesh(geometry, material);
   mesh.receiveShadow = true;
   mesh.castShadow = true;
@@ -135,7 +137,11 @@ export function buildTerrain(map: RenderMap): TerrainBuild {
     const row = Math.min(rows - 1, Math.max(0, Math.round(z * SUBDIVISIONS)));
     return heights[row * cols + col]!;
   };
-  return { mesh, heightTexture, heightAt, wetness };
+  const waterHeightAt = (x: number, z: number): number | undefined =>
+    x >= 0 && z >= 0 && x < map.width && z < map.height && heightAt(x, z) < map.waterLevel * LEVEL_HEIGHT
+      ? map.waterLevel * LEVEL_HEIGHT
+      : undefined;
+  return { mesh, heightTexture, heightAt, waterHeightAt, wetness };
 }
 
 function createTerrainMaterial(
@@ -143,6 +149,7 @@ function createTerrainMaterial(
   waterY: number,
   width: number,
   height: number,
+  nodes: AtmosphereNodes,
 ): MeshStandardNodeMaterial {
   const material = new MeshStandardNodeMaterial();
   const weights = attribute('terrainWeights', 'vec4');
@@ -210,7 +217,7 @@ function createTerrainMaterial(
   // Local lights (explosions, fires) from the light field, as diffuse irradiance on the albedo.
   material.emissiveNode = albedo
     .mul(border)
-    .mul(sampleLightField(p.xz))
+    .mul(sampleLightField(p.xz, nodes))
     .mul(1 / Math.PI);
   material.roughnessNode = mix(float(1), roughness, border);
   material.metalnessNode = float(0);

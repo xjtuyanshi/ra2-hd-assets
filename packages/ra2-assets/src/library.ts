@@ -66,6 +66,14 @@ export interface TypeLibrary {
   voxels: Record<string, string>;
   /** Every TechnoType whose art resolved, keyed by rules type id (e.g. "GAPOWR", "HTNK", "E1", "ORCA"). */
   types: Record<string, LibraryType>;
+  /** Every rules [OverlayTypes] entry whose art resolved, plus rubble carriers; absent in older libraries. */
+  overlays?: Record<string, LibraryOverlay>;
+  /** Diagnostics of a later overlays-only append; the original extraction record is preserved. */
+  overlayExtractor?: { tool: string; counts: Record<string, number>; warnings: string[] };
+  /** Every rules [SmudgeTypes] entry whose theater art resolved; absent in older libraries. */
+  smudges?: Record<string, LibrarySmudge>;
+  /** Diagnostics of a later smudges-only append; the original extraction record is preserved. */
+  smudgeExtractor?: { tool: string; counts: Record<string, number>; warnings: string[] };
   /**
    * The game's runtime ColorScheme array in order, so the live reader's HouseClass::ColorSchemeIndex (`colorIndex`)
    * indexes it directly. See ColorSchemeEntry and colorSchemeSlots in remap.ts for the ordering evidence.
@@ -77,6 +85,41 @@ export interface TypeLibrary {
   conditionYellow: number;
   conditionRed: number;
   extractor: { tool: string; counts: Record<string, number>; warnings: string[] };
+}
+
+/** Cell art uses the engine's OverlayData directly as its body-frame index, without animation or facing logic. */
+export interface LibraryOverlay {
+  /** Absent for rubble carriers, which draw their source building's rubble frame instead. */
+  sprite?: string;
+  /** Rules IsRubble=yes: the overlay's Image is never drawn. */
+  rubble?: true;
+  /** Number of body frames, excluding a detected shadow half. */
+  frames: number;
+  palette: 'unit' | 'theater' | 'iso';
+  wall: boolean;
+  tiberium: boolean;
+  /** Stock YR walls use the current player's colour scheme, not the cell's wall-owner index. */
+  remap: boolean;
+  flat: boolean;
+  /** Offset from the projected cell top corner, shared with the map extractor. */
+  drawOffset: [x: number, y: number];
+  lighting: LightingClass;
+}
+
+/** Ground decals draw body frame 0; the engine's SmudgeData is an index within this type's footprint. */
+export interface LibrarySmudge {
+  sprite: string;
+  /** Number of body frames, excluding a detected shadow half. */
+  frames: number;
+  /** Rules Width/Height in cells. SmudgeData = dy * width + dx reconstructs the multi-cell origin. */
+  width: number;
+  height: number;
+  palette: 'iso';
+  remap: false;
+  flat: true;
+  /** Offset from the projected cell top corner, shared with the map extractor. */
+  drawOffset: [x: number, y: number];
+  lighting: 'full';
 }
 
 /**
@@ -212,7 +255,8 @@ export interface LibraryInfantry {
   /**
    * Every entry of the sequence section (Ready, Guard, Walk, FireUp, Prone, Crawl, Die1..5, Deploy, Swim, ...).
    * Frame for engine facing f at animation step t: see sequenceFrame in art.ts
-   *   start + (facingMultiplier > 0 ? facingFrame(f, 8) * facingMultiplier : 0) + t % count.
+   *   start + direction * facingMultiplier + t % count (direction contributes only for a positive multiplier).
+   * sequenceFrame's optional raw facing preserves the infantry art's finer sector-boundary quantization.
    */
   sequences: Record<string, InfantrySequence>;
   /** art Crawls= (default yes) and FireUp= (frames before firing), recorded raw. */

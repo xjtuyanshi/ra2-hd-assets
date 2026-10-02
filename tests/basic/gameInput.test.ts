@@ -68,6 +68,26 @@ function setup(search = '', locked = true) {
 }
 
 describe('桌面鼠标跟手性', () => {
+  it('publishes detached read-only local coordinates before a coalesced guest move, with absolute/locked and resize support', () => {
+    const h = setup('', false);
+    expect(installed!.pointerPosition()).toBeNull();
+    h.pointer('pointermove', { clientX: 120, clientY: 140 });
+    expect(installed!.pointerPosition()).toEqual({ x: 120, y: 140 });
+    const position = installed!.pointerPosition() as { x: number; y: number };
+    position.x = 1;
+    expect(installed!.pointerPosition()?.x).toBe(120);
+    h.doc.pointerLockElement = h.canvas;
+    h.pointer('pointermove', { movementX: 9, movementY: 11 });
+    expect(installed!.pointerPosition()).toEqual({ x: 129, y: 151 });
+    expect(h.vm.setCursorPosition).toHaveBeenLastCalledWith(120, 140);
+    const events = h.vm.postMessage.mock.calls.length;
+    installed!.pointerPosition();
+    expect(h.vm.postMessage).toHaveBeenCalledTimes(events);
+    installed!.adaptResolution(1600, 1200);
+    expect(installed!.pointerPosition()).toEqual({ x: 258, y: 302 });
+    installed!.cleanup();
+    expect(installed!.pointerPosition()).toBeNull();
+  });
   it.each(['blur-first', 'unlock-first', 'unlock-only'])('失焦/隐藏/解锁不伪造 Esc：%s', (order) => {
     vi.useFakeTimers();
     const { doc, vm } = setup();

@@ -168,6 +168,8 @@ export function installCanvasFit(
 
 export interface InstalledGameInput {
   adaptResolution(width: number, height: number): void;
+  /** Latest locally tracked guest coordinates, copied for presentation without dispatching input. */
+  pointerPosition(): Readonly<{ x: number; y: number }> | null;
   cleanup(): void;
 }
 
@@ -204,6 +206,7 @@ export function installGameInput(
   const initialFrame = getFrameSize();
   let logicalMouseX = initialFrame.width / 2;
   let logicalMouseY = initialFrame.height / 2;
+  let pointerTracked = false;
   let logicalFrameWidth = initialFrame.width;
   let logicalFrameHeight = initialFrame.height;
   let pointerLockPending = false;
@@ -356,6 +359,7 @@ export function installGameInput(
       logicalMouseX = Math.max(0, Math.min(width - 1, ((event.clientX - rect.left) * width) / (rect.width || 1)));
       logicalMouseY = Math.max(0, Math.min(height - 1, ((event.clientY - rect.top) * height) / (rect.height || 1)));
     }
+    pointerTracked = true;
     return [Math.floor(logicalMouseX), Math.floor(logicalMouseY)];
   };
   const mousePosition = (event: MouseEvent): [number, number] => {
@@ -1040,7 +1044,9 @@ export function installGameInput(
 
   return {
     adaptResolution,
+    pointerPosition: () => (pointerTracked ? { x: Math.floor(logicalMouseX), y: Math.floor(logicalMouseY) } : null),
     cleanup() {
+      pointerTracked = false;
       releaseInput();
       removers.splice(0).forEach((remove) => remove());
       if (document.pointerLockElement === canvas) {

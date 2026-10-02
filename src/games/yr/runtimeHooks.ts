@@ -31,7 +31,7 @@ export function skipYrStartupMovies(memory: GuestMemory): boolean {
 
 /**
  * HD bridge extensions (the render-state readers and the native overlay passthrough patches) are development-only.
- * Each hook loads its module on first use through a dynamic import behind `import.meta.env.DEV`, a build-time
+ * The render-state module owns the 250 ms overlay poll alongside the other readers. Each hook loads its module on first use through a dynamic import behind `import.meta.env.DEV`, a build-time
  * constant, so production bundles contain none of that code and the hooks resolve to null there. A static import of
  * any of those modules elsewhere would ship them again; tests/basic/architecture/dependencies.test.ts rejects that.
  */

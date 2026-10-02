@@ -1,8 +1,18 @@
-import { DataTexture, LinearFilter, RedFormat, UnsignedByteType } from 'three/webgpu';
+import { DataTexture, DataUtils, HalfFloatType, LinearFilter, RedFormat, UnsignedByteType } from 'three/webgpu';
 
 /** Encoded range of the signed shore distance, in cells: texel value 0..1 maps to SHORE_MIN..SHORE_MAX. */
 export const SHORE_MIN = -3;
 export const SHORE_MAX = 9;
+
+/** Cliff contact distance in cells encoded by a texel value of 1. */
+export const CLIFF_FIELD_MAX = 1.5;
+
+/**
+ * Land specks of at most this many field texels (8-connected, 4 x 4 mask pixels each at the default step: about
+ * 6 x 6 engine pixels) inside open water count as water: they are single rocks or mask noise, and as land each one
+ * got a turquoise halo and a ring of foam (white speckles across a lake, owner feedback).
+ */
+export const SPECK_TEXELS = 8;
 
 /** Engine pixels per world cell along the ground once the 2:1 screen squash is undone (60 / sqrt 2). */
 const ISO_PIXELS_PER_CELL = 60 / Math.SQRT2;
@@ -15,6 +25,15 @@ const FAR = 1e20;
  * and wet sand are all derived from this one field, so they follow the painted shoreline exactly.
  *
  * `scale` is the mask's pixels per engine pixel; `step` downsamples (one texel per `step` mask pixels).
+ *
+ * `precise` (the lake-bed shoreline, whose wet sand, swash and foam work at a few hundredths of a cell) stores the same
+ * normalised value as a half float instead of 8 bits (one 8-bit step is 0.047 cells, which drew contour lines along
+ * the waterline), and moves every distance half a texel towards the shoreline so the field crosses zero on the mask's
+ * edge instead of jumping from -1 to +1 texel across it. The default 8-bit field is unchanged.
+ *
+ * `ignore` has the mask's size and layout; values >= 128 mark land that must not form a shoreline (cliff tops and
+ * walls can sit next to water at their feet in screen space). A texel is ignored when at least half its mask pixels
+ * are marked and it remains land after speck filling. Ignored land stays dry and is excluded from water depth.
  */
 export function buildShoreField(
   mask: Uint8Array,
@@ -22,39 +41,138 @@ export function buildShoreField(
   height: number,
   scale: number,
   step = 4,
+  precise = false,
+  ignore?: Uint8Array,
 ): { texture: DataTexture; data: Uint8Array; width: number; height: number } {
+  const { water, ignored, width: w, height: h } = downsampleMasks(mask, width, height, step, ignore);
+  fillSpecks(water, w, h, SPECK_TEXELS);
+  const texel = step / scale;
+  const toWater = distanceField(water, w, h, 1, texel, texel * 2);
+  const toLand = distanceField(
+    ignored ? water.map((value, i) => value || ignored[i]!) : water,
+    w,
+    h,
+    0,
+    texel,
+    texel * 2,
+  );
+  const data = new Uint8Array(w * h);
+  const half = precise ? new Uint16Array(w * h) : null;
+  const inset = precise ? texel / 2 : 0;
+  for (let i = 0; i < data.length; i++) {
+    const cells = water[i]
+      ? (Math.sqrt(toLand[i]!) - inset) / ISO_PIXELS_PER_CELL
+      : ignored?.[i]
+        ? SHORE_MIN
+        : -(Math.sqrt(toWater[i]!) - inset) / ISO_PIXELS_PER_CELL;
+    const unit = Math.min(1, Math.max(0, (cells - SHORE_MIN) / (SHORE_MAX - SHORE_MIN)));
+    data[i] = Math.round(unit * 255);
+    if (half) half[i] = DataUtils.toHalfFloat(unit);
+  }
+  const texture = half
+    ? new DataTexture(half, w, h, RedFormat, HalfFloatType)
+    : new DataTexture(data, w, h, RedFormat, UnsignedByteType);
+  texture.magFilter = LinearFilter;
+  texture.minFilter = LinearFilter;
+  texture.needsUpdate = true;
+  return { texture, data, width: w, height: h };
+}
+
+/**
+ * Unsigned distance to the nearest shore-ignored texel, in the shore field's isometric cell metric. Both masks use
+ * the same composite-space layout and majority downsampling as buildShoreField. Every marked texel is a target,
+ * including marks over water or specks: water classification must not erase a cliff contact line.
+ *
+ * Values are normalised to 0..1 over CLIFF_FIELD_MAX cells and stored as half-float bits in `data`, matching the
+ * precise lake-bed shore texture. Distance is zero on a wall texel, without the signed shore field's edge inset.
+ */
+export function buildCliffField(
+  maskBytes: Uint8Array,
+  ignoreBytes: Uint8Array,
+  width: number,
+  height: number,
+  scale: number,
+  downsample = 4,
+): { texture: DataTexture; data: Uint16Array } {
+  const { ignored, width: w, height: h } = downsampleMasks(maskBytes, width, height, downsample, ignoreBytes);
+  const texel = downsample / scale;
+  const toCliff = distanceField(ignored!, w, h, 1, texel, texel * 2);
+  const data = new Uint16Array(w * h);
+  for (let i = 0; i < data.length; i++) {
+    const cells = Math.sqrt(toCliff[i]!) / ISO_PIXELS_PER_CELL;
+    data[i] = DataUtils.toHalfFloat(Math.min(1, cells / CLIFF_FIELD_MAX));
+  }
+  const texture = new DataTexture(data, w, h, RedFormat, HalfFloatType);
+  texture.magFilter = LinearFilter;
+  texture.minFilter = LinearFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return { texture, data };
+}
+
+/** Sample both fields on the same texel grid, including partial blocks at the composite's edges. */
+function downsampleMasks(mask: Uint8Array, width: number, height: number, step: number, ignore?: Uint8Array) {
   const w = Math.ceil(width / step);
   const h = Math.ceil(height / step);
   const water = new Uint8Array(w * h);
+  const ignored = ignore ? new Uint8Array(w * h) : null;
   for (let y = 0; y < h; y++)
     for (let x = 0; x < w; x++) {
       let sum = 0;
       let n = 0;
+      let ignoredPixels = 0;
       for (let dy = 0; dy < step; dy++)
         for (let dx = 0; dx < step; dx++) {
           const px = x * step + dx;
           const py = y * step + dy;
           if (px >= width || py >= height) continue;
           sum += mask[py * width + px]!;
+          if (ignore && ignore[py * width + px]! >= 128) ignoredPixels++;
           n++;
         }
       water[y * w + x] = n && sum / n >= 128 ? 1 : 0;
+      if (ignored) ignored[y * w + x] = n && ignoredPixels * 2 >= n ? 1 : 0;
     }
-  const texel = step / scale;
-  const toWater = distanceField(water, w, h, 1, texel, texel * 2);
-  const toLand = distanceField(water, w, h, 0, texel, texel * 2);
-  const data = new Uint8Array(w * h);
-  for (let i = 0; i < data.length; i++) {
-    const cells = water[i]
-      ? Math.sqrt(toLand[i]!) / ISO_PIXELS_PER_CELL
-      : -Math.sqrt(toWater[i]!) / ISO_PIXELS_PER_CELL;
-    data[i] = Math.round(Math.min(1, Math.max(0, (cells - SHORE_MIN) / (SHORE_MAX - SHORE_MIN))) * 255);
+  return { water, ignored, width: w, height: h };
+}
+
+/**
+ * Turn 8-connected land components of at most `maxTexels` texels that do not touch the field's border into water
+ * (in place). Returns the number of texels changed.
+ */
+export function fillSpecks(water: Uint8Array, width: number, height: number, maxTexels: number): number {
+  const seen = new Uint8Array(water.length);
+  const stack: number[] = [];
+  const component: number[] = [];
+  let changed = 0;
+  for (let start = 0; start < water.length; start++) {
+    if (water[start] || seen[start]) continue;
+    seen[start] = 1;
+    stack.push(start);
+    component.length = 0;
+    let border = false;
+    while (stack.length) {
+      const i = stack.pop()!;
+      component.push(i);
+      const x = i % width;
+      const y = (i - x) / width;
+      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) border = true;
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          const j = ny * width + nx;
+          if (water[j] || seen[j]) continue;
+          seen[j] = 1;
+          stack.push(j);
+        }
+    }
+    if (border || component.length > maxTexels) continue;
+    for (const i of component) water[i] = 1;
+    changed += component.length;
   }
-  const texture = new DataTexture(data, w, h, RedFormat, UnsignedByteType);
-  texture.magFilter = LinearFilter;
-  texture.minFilter = LinearFilter;
-  texture.needsUpdate = true;
-  return { texture, data, width: w, height: h };
+  return changed;
 }
 
 /**

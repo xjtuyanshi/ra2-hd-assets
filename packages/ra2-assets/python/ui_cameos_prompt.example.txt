@@ -1,0 +1,22 @@
+Task: image generation / image editing only. Do not write code other than what is needed to save or resize the image. Do not browse the web.
+
+Files in this directory:
+- input.png = DESIGN REFERENCE (1536x1024). A sheet of {N} sidebar build icons ("cameos") from the classic real-time-strategy game Command & Conquer: Red Alert 2 / Yuri's Revenge, laid out as a grid of 3 columns x 2 rows of panels (480x384 each) separated by dark gutters. Each icon was a tiny 60x48-pixel picture; here it is enlarged 8x, so it is soft and blurry and shows almost no real detail. The name label that the originals had along the bottom edge was erased (the bottom strip of each panel is smudged).
+- style_reference.png = STYLE REFERENCE. A frame from the remaster that the art director approved. Copy its rendering QUALITY and mood (realistic materials, crisp fine detail, cinematic sun and shade, rich but natural colour, clean neutral greys), not its camera or content.
+
+The panels, in reading order:
+{PANELS}
+
+Use your image generation tool (with input.png as the main reference image and style_reference.png as a style reference) to produce a REMASTERED version of the whole sheet: every panel redrawn as a high-end modern cinematic 3D render / photoreal promotional shot of the SAME subject, as a 2020s AAA remaster would ship its build icons.
+
+MOST IMPORTANT - INVENT THE MISSING DETAIL. The originals were far too small to show real detail. Do not just sharpen the blurry shapes: re-imagine everything with the real detail it would have - for machines: panel seams, rivets and bolts, hatches, vents and grilles, track links and road wheels, antennas, cables, weld lines, chipped paint and grime, glass with reflections; for buildings: real materials (brick, concrete, steel, glass), windows with frames, pipes, ladders, railings, signage shapes without readable text; for people: realistic faces with natural proportions and expressions, skin texture, hair, fabric folds, straps, pouches, buckles and detailed weapons; for energy and explosions: layered volumetric fire, smoke, light and sparks. Strong local contrast, bright specular edges, deep ambient occlusion, cinematic lighting. Realistic and grounded. NOT cartoon, NOT anime, NOT plastic toy, NOT painterly, NOT a sketch, no noise, no blur.
+
+KEEP (design identity - do not break):
+- the grid exactly: the same 3x2 panels at exactly the same positions and sizes with the same dark gutters; each picture fills its whole panel edge to edge (no borders, no frames, no rounded corners, no vignette boxes);
+- in each panel: the same subject, the same composition, camera angle and framing, the same pose, the same background type (sky, landscape, sea, base, interior...), and the same colour scheme (uniform and paint colours, faction colours such as Allied blue, Soviet red, Yuri purple, camouflage patterns, energy colours);
+- each character keeps its identity cues (helmet or hat, hair, beard, bald head, clothing colours, the weapon or object it holds).
+You are FREE to change and add small details inside each part - that is the goal.
+
+ABSOLUTELY NO TEXT: no letters, numbers, names, captions, logos with letters or watermarks anywhere. Continue each picture naturally across its bottom strip where the old label was.
+
+Save the result as output.png in this directory at exactly 1536x1024 pixels (if the tool returns another size, resize the whole generated image to 1536x1024; do not crop). Also copy the generated image before resizing to raw.png in this directory. Then reply with one line saying the tool used and the generated size before resizing.

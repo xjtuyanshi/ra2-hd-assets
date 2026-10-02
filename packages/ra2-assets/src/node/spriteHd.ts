@@ -167,16 +167,19 @@ interface SelectedFrame {
   remap: boolean;
 }
 
-function selectFrames(opts: SpriteHdOptions): { bodies: SelectedFrame[]; shadows: SpriteFrame[] } {
+function selectFrames(opts: SpriteHdOptions): {
+  bodies: SelectedFrame[];
+  shadows: { frame: SpriteFrame; infantry: boolean }[];
+} {
   const bodies: SelectedFrame[] = [];
-  const shadows: SpriteFrame[] = [];
+  const shadows: { frame: SpriteFrame; infantry: boolean }[] = [];
   const aliases = new Map<string, { palette: string; remap: boolean }>();
   const page = opts.page ?? 0;
   for (const [id, sprite] of Object.entries(opts.sprites)) {
     for (const frame of sprite.shadows ?? []) {
       if ((frame.page ?? 0) !== page) continue;
       checkRect(frame, opts.atlas);
-      shadows.push(frame);
+      shadows.push({ frame, infantry: id.startsWith('infantry:') });
     }
     for (const frame of sprite.frames) {
       if ((frame.page ?? 0) !== page) continue;
@@ -325,13 +328,28 @@ export async function upscaleSpriteAtlas(opts: SpriteHdOptions): Promise<SpriteH
         );
       cutBack(batch, inferred, bodies, opts, image, remap);
     }
-    // Shadows remain exclusively indexed, even if malformed input aliases a body and shadow rectangle.
-    for (const shadow of shadows) {
+    // Building/vehicle shadows remain exclusively indexed, even if malformed input aliases a body rectangle.
+    for (const { frame: shadow, infantry } of shadows) {
       const [x, y, w, h] = shadow.rect;
       for (let row = y * 2; row < (y + h) * 2; row++) {
         const begin = row * width + x * 2;
         image.data.fill(0, begin * 4, (begin + w * 2) * 4);
         remap.data.fill(0, begin, begin + w * 2);
+      }
+      if (infantry && w && h) {
+        // Infantry's contact pass can use HD coverage. Restore opaque cores with only an antialiased exterior.
+        const mask = new Uint8Array(w * h);
+        for (let row = 0; row < h; row++)
+          for (let col = 0; col < w; col++)
+            mask[row * w + col] = opts.atlas.data[((y + row) * opts.atlas.width + x + col) * opts.atlas.channels]!
+              ? 255
+              : 0;
+        const alpha = resizeBilinear({ width: w, height: h, channels: 1, data: mask }, w * 2, h * 2);
+        for (let row = 0; row < h * 2; row++)
+          for (let col = 0; col < w * 2; col++) {
+            const core = mask[Math.floor(row / 2) * w + Math.floor(col / 2)]!;
+            image.data[((y * 2 + row) * width + x * 2 + col) * 4 + 3] = Math.max(core, alpha.data[row * w * 2 + col]!);
+          }
       }
     }
     return {

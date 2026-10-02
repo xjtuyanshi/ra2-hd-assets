@@ -226,6 +226,8 @@ export function profileKeys(profile: AtmosphereProfile): LightKey[] {
 
 export interface LightingState {
   sunDirection: Vector3;
+  /** Key elevation of the sun in degrees before the 28 degree readability floor (shadow length of the sun arc). */
+  keyElevation: number;
   sunColor: Color;
   skyZenith: Color;
   skyHorizon: Color;
@@ -239,8 +241,15 @@ export class Lighting {
   readonly root = new Object3D();
   readonly sun: DirectionalLight;
   readonly hemi: HemisphereLight;
+  /**
+   * Sun path. false (default): the classic fixed azimuth from screen upper-left, whatever the hour. true: the azimuth
+   * follows the hour along sunArcDirection (east in the morning, over the camera side at noon, west in the evening),
+   * for the enhanced look's moving highlights and shadows.
+   */
+  sunArc = false;
   readonly state: LightingState = {
     sunDirection: new Vector3(),
+    keyElevation: 55,
     sunColor: new Color(),
     skyZenith: new Color(),
     skyHorizon: new Color(),
@@ -285,10 +294,13 @@ export class Lighting {
   /** Irradiance on flat ground from the sun and sky, per channel (linear), for the current state. */
   flatIrradianceColor(out: Color): Color {
     const sunHeight = Math.max(0, this.state.sunDirection.y);
-    return out
-      .copy(this.sun.color)
-      .multiplyScalar(this.sun.intensity * sunHeight)
-      .add(this.hemi.color.clone().multiplyScalar(this.hemi.intensity));
+    const sun = this.sun.intensity * sunHeight;
+    const sky = this.hemi.intensity;
+    return out.setRGB(
+      this.sun.color.r * sun + this.hemi.color.r * sky,
+      this.sun.color.g * sun + this.hemi.color.g * sky,
+      this.sun.color.b * sun + this.hemi.color.b * sky,
+    );
   }
 
   /** Flat-ground irradiance at clear noon: the reference at which original art keeps its original brightness. */
@@ -318,7 +330,9 @@ export class Lighting {
         !!this.profile &&
         profile.kind === this.profile.kind &&
         profile.nightLevel === this.profile.nightLevel &&
-        profile.tint.every((v, i) => v === this.profile!.tint[i]));
+        profile.tint[0] === this.profile.tint[0] &&
+        profile.tint[1] === this.profile.tint[1] &&
+        profile.tint[2] === this.profile.tint[2]);
     if (same) return;
     this.profile = profile ? { ...profile, tint: [...profile.tint] } : null;
     this.keys = profile ? profileKeys(profile) : KEYS;
@@ -351,36 +365,42 @@ export class Lighting {
     const a = keys[i]!;
     const b = keys[i + 1]!;
     const t = (h - a.hour) / (b.hour - a.hour);
-    const lerp = (x: number, y: number) => x + (y - x) * t;
 
     // Shadows longer than ~2x object height hurt RTS readability, so the sun never drops below 28°.
-    const elevation = (Math.max(28, lerp(a.elevation, b.elevation)) * Math.PI) / 180;
+    this.state.keyElevation = lerp(a.elevation, b.elevation, t);
+    const elevation = (Math.max(28, this.state.keyElevation) * Math.PI) / 180;
     // Screen upper-left in world space is -x (see IsoCamera): the classic RA2 light direction.
     const azimuth = Math.PI;
-    const dir = this.state.sunDirection
-      .set(
-        Math.cos(azimuth) * Math.cos(elevation),
-        Math.sin(elevation),
-        Math.sin(azimuth) * Math.cos(elevation) - 0.35 * Math.cos(elevation),
-      )
-      .normalize();
+    const dir = this.state.sunDirection;
+    if (this.sunArc) {
+      const night = Math.min(1, Math.max(0, lerp(a.night, b.night, t)));
+      sunArcDirection(h, night, elevation, dir);
+    } else {
+      dir
+        .set(
+          Math.cos(azimuth) * Math.cos(elevation),
+          Math.sin(elevation),
+          Math.sin(azimuth) * Math.cos(elevation) - 0.35 * Math.cos(elevation),
+        )
+        .normalize();
+    }
     this.sun.position.copy(this.sun.target.position).addScaledVector(dir, 80);
     if (this.profile) {
       this.updateProfiled(a, b, t, overcast);
       return;
     }
 
-    const grey = new Color(0.55, 0.58, 0.62);
+    const grey = this.grey.copy(OVERCAST_GREY);
     this.state.sunColor
       .copy(a.sun)
       .lerp(b.sun, t)
       .lerp(grey, overcast * 0.7);
     this.sun.color.copy(this.state.sunColor);
-    this.sun.intensity = lerp(a.sunIntensity, b.sunIntensity) * (1 - overcast * 0.55);
+    this.sun.intensity = lerp(a.sunIntensity, b.sunIntensity, t) * (1 - overcast * 0.55);
     this.state.skyZenith
       .copy(a.skyZenith)
       .lerp(b.skyZenith, t)
-      .lerp(grey.clone().multiplyScalar(0.5), overcast * 0.8);
+      .lerp(this.halfGrey.copy(grey).multiplyScalar(0.5), overcast * 0.8);
     this.state.skyHorizon
       .copy(a.skyHorizon)
       .lerp(b.skyHorizon, t)
@@ -391,12 +411,12 @@ export class Lighting {
       .lerp(grey, overcast * 0.5);
     this.hemi.groundColor.copy(a.hemiGround).lerp(b.hemiGround, t);
     // Overcast skies scatter more light; keep ambient up so wet battles stay readable.
-    this.hemi.intensity = lerp(a.hemiIntensity, b.hemiIntensity) * (1 + overcast * 0.15);
+    this.hemi.intensity = lerp(a.hemiIntensity, b.hemiIntensity, t) * (1 + overcast * 0.15);
     this.state.ambient.copy(this.hemi.color).multiplyScalar(this.hemi.intensity * 0.5);
-    this.state.exposure = lerp(a.exposure, b.exposure);
+    this.state.exposure = lerp(a.exposure, b.exposure, t);
     // Moonlight keys use sunIntensity 0.6, dusk 1.2, day 2.6+: map that onto 1 (night) .. 0 (day). At the keys this
     // equals their explicit `night`; the procedural sandbox keeps this curve between keys.
-    this.state.night = Math.min(1, Math.max(0, 1 - (lerp(a.sunIntensity, b.sunIntensity) - 0.6) / 0.9));
+    this.state.night = Math.min(1, Math.max(0, 1 - (lerp(a.sunIntensity, b.sunIntensity, t) - 0.6) / 0.9));
   }
 
   /**
@@ -406,15 +426,14 @@ export class Lighting {
    * night (never below NIGHT_RAIN_FLOOR of noon).
    */
   private updateProfiled(a: LightKey, b: LightKey, t: number, overcast: number): void {
-    const lerp = (x: number, y: number) => x + (y - x) * t;
-    const night = lerp(a.night, b.night);
+    const night = lerp(a.night, b.night, t);
     const sunColor = this.state.sunColor.copy(a.sun).lerp(b.sun, t);
-    let sunIntensity = lerp(a.sunIntensity, b.sunIntensity);
+    let sunIntensity = lerp(a.sunIntensity, b.sunIntensity, t);
     this.state.skyZenith.copy(a.skyZenith).lerp(b.skyZenith, t);
     this.state.skyHorizon.copy(a.skyHorizon).lerp(b.skyHorizon, t);
     const hemiColor = this.hemi.color.copy(a.hemiSky).lerp(b.hemiSky, t);
     this.hemi.groundColor.copy(a.hemiGround).lerp(b.hemiGround, t);
-    let hemiIntensity = lerp(a.hemiIntensity, b.hemiIntensity);
+    let hemiIntensity = lerp(a.hemiIntensity, b.hemiIntensity, t);
     if (overcast > 0) {
       const clearFlat = this.flatLuminance(sunColor, sunIntensity, hemiColor, hemiIntensity);
       // Scratch colours: this runs every frame in rain.
@@ -434,7 +453,7 @@ export class Lighting {
     this.sun.intensity = sunIntensity;
     this.hemi.intensity = hemiIntensity;
     this.state.ambient.copy(this.hemi.color).multiplyScalar(this.hemi.intensity * 0.5);
-    this.state.exposure = lerp(a.exposure, b.exposure);
+    this.state.exposure = lerp(a.exposure, b.exposure, t);
     this.state.night = Math.min(1, Math.max(0, night));
   }
 
@@ -442,4 +461,44 @@ export class Lighting {
   get nightLevel(): number | null {
     return this.profile?.nightLevel ?? null;
   }
+}
+
+function lerp(x: number, y: number, t: number): number {
+  return x + (y - x) * t;
+}
+
+/**
+ * Sun direction of the arc path at `hour` (world, unit, towards the sun) for an elevation in radians. The azimuth runs
+ * from screen right (world +x-z, 6:00) over the camera side (+x+z, 12:00) to screen left (-x+z, 18:00), so the visible
+ * walls are lit by day and the art's own light direction (from +z, see ra2/spriteLook.ts ART_LIGHT) is passed at 15:00.
+ * Night hours (by the key's night weight) return to that art direction, which the night presentation was tuned with.
+ */
+export function sunArcDirection(hour: number, night: number, elevation: number, out: Vector3): Vector3 {
+  const day = Math.min(1, Math.max(0, (hour - 6) / 12));
+  const alpha = lerp(Math.PI * day, 0.75 * Math.PI, night);
+  const c = Math.cos(alpha) * Math.SQRT1_2;
+  const s = Math.sin(alpha) * Math.SQRT1_2;
+  // cos(alpha) * right (1, 0, -1)/sqrt2 + sin(alpha) * towards camera (1, 0, 1)/sqrt2.
+  const hx = c + s;
+  const hz = s - c;
+  return out.set(hx * Math.cos(elevation), Math.sin(elevation), hz * Math.cos(elevation)).normalize();
+}
+
+/** Clear-sky sun and sky irradiance (colour x intensity, linear) of the day keys at `hour`, without any state. */
+export function clearLightAt(hour: number, sun = new Color(), sky = new Color()): { sun: Color; sky: Color } {
+  const h = ((hour % 24) + 24) % 24;
+  let i = 0;
+  while (i < KEYS.length - 2 && KEYS[i + 1]!.hour <= h) i++;
+  const a = KEYS[i]!;
+  const b = KEYS[i + 1]!;
+  const t = (h - a.hour) / (b.hour - a.hour);
+  sun
+    .copy(a.sun)
+    .lerp(b.sun, t)
+    .multiplyScalar(lerp(a.sunIntensity, b.sunIntensity, t));
+  sky
+    .copy(a.hemiSky)
+    .lerp(b.hemiSky, t)
+    .multiplyScalar(lerp(a.hemiIntensity, b.hemiIntensity, t));
+  return { sun, sky };
 }

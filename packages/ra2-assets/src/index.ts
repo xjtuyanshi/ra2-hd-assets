@@ -10,3 +10,6 @@ export * from './art.ts';
 export * from './atlas.ts';
 export * from './library.ts';
 export * from './waterMask.ts';
+export * from './vpl.ts';
+export * from './voxelNormals.ts';
+export * from './ui.ts';

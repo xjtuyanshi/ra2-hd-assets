@@ -3,13 +3,23 @@ import type { VmShell } from '../../src/adapter/vmShell';
 import type { GameRenderState } from '../../src/games/renderState';
 import { startHdBridge } from '../../src/ui/pages/game/hdBridge';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
+import { hdSidebar } from '../helpers/hdSidebar';
 
 // The bridge loads LiveView (three.js, WebGPU) through a dynamic import; a stub stands in for it.
 const liveView = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock('../../packages/hd-renderer/src/live/liveView', () => ({ LiveView: { create: liveView.create } }));
+const hdRenderer = vi.hoisted(() => ({ applyLookPreset: vi.fn() }));
+vi.mock('../../packages/hd-renderer/src/HdRenderer', () => ({
+  LOOK_PRESETS: { faithful: {}, golden: { hour: 16.5 }, cinematic: { hour: 16.5 } },
+  applyLookPreset: hdRenderer.applyLookPreset,
+}));
+
+const hdUi = vi.hoisted(() => ({ start: vi.fn() }));
+vi.mock('../../src/ui/pages/game/hdUi', () => ({ startHdUi: hdUi.start }));
 
 interface BridgeHandle {
   toggle(): boolean;
+  readonly ui: { enabled: boolean; readonly state: GameRenderState['sidebar']; toggle(): boolean };
   readonly live: unknown;
   readonly passthrough: { flags: number; unsupported: boolean; keyed: boolean };
 }
@@ -25,6 +35,10 @@ function fakeView() {
   return { push: vi.fn(), render: vi.fn(), resize: vi.fn(), dispose: vi.fn() };
 }
 
+function fakeLookView() {
+  return { ...fakeView(), hd: { settings: {}, applySettings: vi.fn() } };
+}
+
 function battle(frame: number, fileName = 'XMP29U2.MAP'): GameRenderState {
   return {
     frame,
@@ -33,6 +47,8 @@ function battle(frame: number, fileName = 'XMP29U2.MAP'): GameRenderState {
     houses: [],
     objects: [],
     shroud: null,
+    overlays: null,
+    smudges: null,
     effects: null,
   } as unknown as GameRenderState;
 }
@@ -113,9 +129,321 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   liveView.create.mockReset();
+  hdRenderer.applyLookPreset.mockReset();
+  hdUi.start.mockReset();
+});
+
+describe('HD bridge look parameters', () => {
+  it.each([
+    ['', 'ignore'],
+    ['&hd-native-detail=mirror', 'mirror'],
+    ['&hd-native-detail=ignore', 'ignore'],
+    ['&hd-native-detail=invalid', 'ignore'],
+  ])('passes native detail review mode from %s', async (query, nativeDetail) => {
+    const harness = setup(`?hd=1${query}`);
+    await goLive(harness);
+    expect(liveView.create).toHaveBeenCalledWith(harness.hdCanvas, expect.objectContaining({ nativeDetail }));
+    harness.stop();
+  });
+  it('applies the cinematic preset and vehicle options before the first snapshot push and render', async () => {
+    const harness = setup('?hd=1&hd-look=cinematic&hd-vlook=remaster&hd-vproj=/vehicles-hd/');
+    const view = fakeLookView();
+    await goLive(harness, view);
+    await advance(16);
+    expect(liveView.create).toHaveBeenCalledWith(
+      harness.hdCanvas,
+      expect.objectContaining({ dayHour: 16.5, voxelLook: 'remaster', voxelProjection: '/hd-cache/vehicles-hd' }),
+    );
+    // The preset hour stages day maps only; dusk and night maps keep their own [Lighting] hour.
+    expect(liveView.create.mock.calls[0]![1]).not.toHaveProperty('timeOfDay');
+    expect(hdRenderer.applyLookPreset).toHaveBeenCalledExactlyOnceWith(view.hd.settings, 'cinematic');
+    expect(view.hd.applySettings).toHaveBeenCalledTimes(1);
+    expect(view.push).toHaveBeenCalledTimes(1);
+    expect(view.render).toHaveBeenCalled();
+    expect(hdRenderer.applyLookPreset.mock.invocationCallOrder[0]).toBeLessThan(
+      view.hd.applySettings.mock.invocationCallOrder[0]!,
+    );
+    expect(view.hd.applySettings.mock.invocationCallOrder[0]).toBeLessThan(view.push.mock.invocationCallOrder[0]!);
+    expect(view.hd.applySettings.mock.invocationCallOrder[0]).toBeLessThan(view.render.mock.invocationCallOrder[0]!);
+    harness.stop();
+  });
+
+  it('lets hd-time override the preset hour', async () => {
+    const harness = setup('?hd=1&hd-look=cinematic&hd-time=12');
+    const view = fakeLookView();
+    await goLive(harness, view);
+    expect(liveView.create).toHaveBeenCalledWith(
+      harness.hdCanvas,
+      expect.objectContaining({ timeOfDay: 12, dayHour: 16.5 }),
+    );
+    expect(hdRenderer.applyLookPreset).toHaveBeenCalledWith(view.hd.settings, 'cinematic');
+    expect(view.hd.applySettings).toHaveBeenCalledTimes(1);
+    harness.stop();
+  });
+
+  it('ignores unknown looks, engine voxel look and traversal in the projection directory', async () => {
+    const harness = setup('?hd=1&hd-look=neon&hd-vlook=engine&hd-vproj=../x');
+    await goLive(harness);
+    const options = liveView.create.mock.calls[0]![1];
+    expect(options).not.toHaveProperty('timeOfDay');
+    expect(options).not.toHaveProperty('dayHour');
+    expect(options).not.toHaveProperty('voxelLook');
+    expect(options).not.toHaveProperty('voxelProjection');
+    expect(hdRenderer.applyLookPreset).not.toHaveBeenCalled();
+    harness.stop();
+  });
+
+  it('keeps map staging when the faithful preset has no suggested hour', async () => {
+    const harness = setup('?hd=1&hd-look=faithful');
+    const view = fakeLookView();
+    await goLive(harness, view);
+    expect(liveView.create.mock.calls[0]![1]).not.toHaveProperty('timeOfDay');
+    expect(liveView.create.mock.calls[0]![1]).not.toHaveProperty('dayHour');
+    expect(hdRenderer.applyLookPreset).toHaveBeenCalledWith(view.hd.settings, 'faithful');
+    expect(view.hd.applySettings).toHaveBeenCalledTimes(1);
+    harness.stop();
+  });
+
+  it.each([
+    ['  /vehicles-hd/  ', '/hd-cache/vehicles-hd'],
+    ['', undefined],
+    ['  ///  ', undefined],
+    ['vehicles..hd', undefined],
+    ['vehicles\\hd', undefined],
+    ['https://example', undefined],
+  ])('sanitizes the projection directory %j', async (directory, expected) => {
+    const harness = setup(`?hd=1&hd-vproj=${encodeURIComponent(directory!)}`);
+    await goLive(harness);
+    const options = liveView.create.mock.calls[0]![1];
+    if (expected === undefined) expect(options).not.toHaveProperty('voxelProjection');
+    else expect(options.voxelProjection).toBe(expected);
+    expect(hdRenderer.applyLookPreset).not.toHaveBeenCalled();
+    harness.stop();
+  });
 });
 
 describe('HD 桥状态机', () => {
+  it('forwards engine image and H2 animation fields and keeps absent fields optional', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    const state = battle(3);
+    state.nativeDetail = { fps: 14, lowFrameRate: true, level: 2 };
+    const common = {
+      owner: 0,
+      x: 100,
+      y: 200,
+      z: 0,
+      facingRaw: 0,
+      health: 1,
+      isSelected: false,
+    };
+    state.objects = [
+      {
+        ...common,
+        id: 1,
+        uid: 11,
+        kind: 'building',
+        type: 'NAHAND',
+        buildState: 'selling',
+        buildupFrame: 0,
+        buildingFrame: 0,
+        buildingDamaged: false,
+        contactUid: 0,
+        dock: false,
+        unloading: 'door',
+        activeAnim: 'detail',
+      },
+      {
+        ...common,
+        id: 2,
+        uid: 12,
+        kind: 'infantry',
+        type: 'E1',
+        infantrySequence: 'Deployed',
+        sequenceFrame: 0,
+        infantryDrawFacingRaw: 0,
+      },
+      { ...common, id: 3, uid: 13, kind: 'vehicle', type: 'HARV', imageType: 'HORV' },
+      { ...common, id: 4, uid: 14, kind: 'vehicle', type: 'CMIN' },
+    ];
+    harness.setState(state);
+    await advance(16);
+    const pushed = view.push.mock.calls.at(-1)![0];
+    expect(pushed.nativeDetail).toEqual(state.nativeDetail);
+    expect(pushed.objects[0]).toMatchObject({
+      buildingFrame: 0,
+      buildingDamaged: false,
+      contactUid: 0,
+      dock: false,
+      unloading: 'door',
+    });
+    expect(pushed.objects).toEqual(state.objects);
+    expect(pushed.objects[2]).not.toHaveProperty('buildState');
+    expect(pushed.objects[2]).not.toHaveProperty('sequenceFrame');
+    expect(pushed.objects[2]).not.toHaveProperty('activeAnim');
+    expect(pushed.objects[2]).toMatchObject({ type: 'HARV', imageType: 'HORV' });
+    expect(pushed.objects[3]).not.toHaveProperty('contactUid');
+    expect(pushed.objects[3]).not.toHaveProperty('dock');
+    expect(pushed.objects[3]).not.toHaveProperty('unloading');
+    expect(pushed.objects[3]).not.toHaveProperty('imageType');
+    delete state.objects[2]!.imageType;
+    delete state.objects[0]!.activeAnim;
+    delete state.nativeDetail;
+    harness.setState({ ...state });
+    await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].objects[2]).not.toHaveProperty('imageType');
+    expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('activeAnim');
+    expect(view.push.mock.calls.at(-1)![0]).not.toHaveProperty('nativeDetail');
+    harness.stop();
+  });
+
+  it('forwards same-frame death progress and native effect stages, then an empty effect publication', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    const state = battle(20);
+    state.objects = [
+      {
+        id: 1,
+        uid: 1,
+        kind: 'infantry',
+        type: 'TEST',
+        owner: 0,
+        x: 0,
+        y: 0,
+        z: 0,
+        facingRaw: 0,
+        health: 0,
+        isSelected: false,
+        infantrySequence: 'Die1',
+        sequenceFrame: 0,
+      },
+    ];
+    const effect = {
+      id: 2,
+      uid: 2,
+      type: 'TEST',
+      x: 0,
+      y: 0,
+      z: 0,
+      frameCount: 15,
+      frame: 8,
+      stage: 8,
+      buildingAnim: false,
+      invisible: false,
+      translucent: true,
+      translucency: 25,
+    };
+    state.effects = {
+      anims: [effect, { ...effect, uid: 3, buildingAnim: true }],
+      bullets: [],
+      lasers: [],
+      electricBolts: [],
+      particleSystems: [],
+      radBeams: [
+        {
+          id: 40,
+          type: 'rad',
+          source: { x: 256, y: 512, z: 104 },
+          target: { x: 512, y: 768, z: 208 },
+          color: [30, 255, 70],
+          period: 20,
+          amplitude: 40,
+          age: 10,
+          progress: 0.5,
+          sustained: false,
+        },
+      ],
+      waves: [
+        {
+          id: 41,
+          uid: 42,
+          type: 'sonic',
+          source: { x: 256, y: 512, z: 104 },
+          target: { x: 512, y: 768, z: 208 },
+          intensity: 50,
+          progress: 0.5,
+        },
+      ],
+    };
+    harness.setState(state);
+    await advance(16);
+    const next = structuredClone(state);
+    next.objects[0]!.sequenceFrame = 2;
+    next.effects!.anims[0]!.frame = 10;
+    harness.setState(next);
+    await advance(16);
+    const pushed = view.push.mock.calls.at(-1)![0];
+    expect(pushed.objects[0]).toMatchObject({ health: 0, infantrySequence: 'Die1', sequenceFrame: 2 });
+    expect(pushed.effects!.anims[0]).toMatchObject({ frame: 10, stage: 8, translucency: 25 });
+    expect(pushed.effects!.anims[1]!.buildingAnim).toBe(true);
+    expect(pushed.effects!.radBeams).toEqual(state.effects!.radBeams);
+    expect(pushed.effects!.waves).toEqual(state.effects!.waves);
+    harness.setState({ ...next, effects: { ...next.effects!, anims: [] } });
+    await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].effects!.anims).toEqual([]);
+    harness.stop();
+  });
+
+  it('forwards optional native painter order without inventing metadata for older snapshots', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    const state = battle(3);
+    const object = {
+      id: 1,
+      uid: 2,
+      kind: 'infantry' as const,
+      type: 'SHK',
+      owner: 0,
+      x: 13248,
+      y: 20544,
+      z: 208,
+      facingRaw: 0,
+      health: 1,
+      isSelected: false,
+    };
+    state.objects = [
+      { ...object, renderOrder: { layer: 2, index: 3, ySort: 33792 } },
+      { ...object, id: 3, uid: 4 },
+    ];
+    harness.setState(state);
+    await advance(16);
+    const pushed = view.push.mock.calls.at(-1)![0];
+    expect(pushed.objects[0].renderOrder).toEqual({ layer: 2, index: 3, ySort: 33792 });
+    expect(pushed.objects[1]).not.toHaveProperty('renderOrder');
+    harness.stop();
+  });
+
+  it('forwards independent live overlays, smudges and the local house without copying the cell arrays', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    const state = battle(3);
+    state.localHouse = 2;
+    state.overlays = {
+      originX: 1,
+      originY: 2,
+      width: 2,
+      height: 1,
+      index: new Int16Array([0, -1]),
+      data: new Uint8Array([7, 0]),
+      types: ['GAWALL'],
+      revision: 3,
+    };
+    state.smudges = { ...state.overlays, types: ['CR1'], data: new Uint8Array([2, 0]) };
+    state.overlays.rubble = [{ slot: 0, type: 'SOURCE' }];
+    harness.setState(state);
+    await advance(16);
+    const pushed = view.push.mock.calls.at(-1)![0];
+    expect(pushed.localHouse).toBe(2);
+    expect(pushed.overlays).toBe(state.overlays);
+    expect(pushed.overlays.rubble).toBe(state.overlays.rubble);
+    expect(pushed.smudges).not.toHaveProperty('rubble');
+    expect(pushed.smudges).toBe(state.smudges);
+    harness.setState({ ...state, frame: 4, overlays: null, smudges: null });
+    await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].overlays).toBeNull();
+    expect(view.push.mock.calls.at(-1)![0].smudges).toBeNull();
+    harness.stop();
+  });
   it('游戏接受直通：只让键色透明，关闭后键色保留一小段再清除', async () => {
     const harness = setup();
     const view = await goLive(harness);
@@ -331,5 +659,54 @@ describe('HD 桥状态机', () => {
     harness.stop();
     expect(harness.vm.getRenderState).not.toHaveBeenCalled();
     expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
+  });
+});
+
+describe('HD interface bridge wiring', () => {
+  it('updates before uncached-map returns, polls every 50 ms, A/B hides and cleanup disposes', async () => {
+    const ui = { update: vi.fn(), setEnabled: vi.fn(), dispose: vi.fn() };
+    hdUi.start.mockReturnValue(ui);
+    liveView.create.mockRejectedValue(new Error('optional map cache absent'));
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const h = setup('?hd=1&hd-ui=1');
+    const state = { ...battle(1), sidebar: hdSidebar() };
+    h.setState(state);
+    await vi.waitFor(() => expect(hdUi.start).toHaveBeenCalledOnce());
+    await advance(16);
+    expect(ui.update).toHaveBeenLastCalledWith(state.sidebar);
+    const published = h.bridge()!.ui.state!;
+    expect(published).toEqual(state.sidebar);
+    expect(published).not.toBe(state.sidebar);
+    published.credits = -1;
+    expect(h.bridge()!.ui.state!.credits).toBe(state.sidebar.credits);
+    expect(Object.getOwnPropertyDescriptor(h.bridge()!.ui, 'state')?.set).toBeUndefined();
+    await advance(49);
+    expect(h.polls()).toBe(1);
+    await advance(1);
+    expect(h.polls()).toBe(2);
+    expect(h.bridge()?.ui.enabled).toBe(true);
+    expect(h.bridge()?.ui.toggle()).toBe(false);
+    expect(ui.setEnabled).toHaveBeenLastCalledWith(false);
+    h.bridge()?.ui.toggle();
+    expect(h.bridge()?.toggle()).toBe(false);
+    expect(ui.setEnabled).toHaveBeenLastCalledWith(false);
+    h.bridge()?.toggle();
+    expect(ui.setEnabled).toHaveBeenLastCalledWith(true);
+    h.vm.getRenderState.mockRejectedValueOnce(new Error('poll failed'));
+    await advance(50);
+    expect(ui.update).toHaveBeenLastCalledWith(null);
+    h.stop();
+    expect(ui.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('does not load UI without hd-ui=1 or after immediate cleanup', async () => {
+    const h = setup();
+    await settle();
+    expect(hdUi.start).not.toHaveBeenCalled();
+    h.stop();
+    const late = setup('?hd=1&hd-ui=1');
+    late.stop();
+    await settle();
+    expect(hdUi.start).not.toHaveBeenCalled();
   });
 });

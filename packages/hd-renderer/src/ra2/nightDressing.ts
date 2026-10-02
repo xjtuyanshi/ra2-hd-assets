@@ -9,14 +9,15 @@ import {
 import { instancedBufferAttribute, positionGeometry, vec3, vec4 } from 'three/tsl';
 import type { MapLightsSidecar } from '../../../ra2-assets/src/lights';
 import type { MapObject, SpriteFrame } from '../../../ra2-assets/src/manifest';
-import { sceneLevel, type AtmosphereContext, type FrameAtmosphere, type WorldDressing } from '../atmosphere';
+import { type AtmosphereContext, type FrameAtmosphere, type WorldDressing } from '../atmosphere';
 import type { Emitter, EmitterLayer } from '../emitters';
 import { SHAPE_POOL, type LightEntry } from '../lightField';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT } from '../world';
 import type { Ra2Cache } from './cache';
+import type { MapLightGrade } from './mapLighting';
 import { MapLights, type SourceLight } from './mapLights';
-import { cardPush } from './sprites';
+import { foundationPointPush } from './cardDepth';
 
 /**
  * Colour of an HD street lamp's head: saturated sodium orange, so the head and its reflection stay orange below the
@@ -67,6 +68,8 @@ export interface NightDressingOptions {
   root: Object3D;
   /** Map objects drawn by the world (buildings with lit windows get a glow in front). */
   objects: readonly MapObject[];
+  /** The map's day light (mapLighting.ts): it follows the same light sources as the night presentation. */
+  mapLight?: MapLightGrade;
 }
 
 /**
@@ -101,7 +104,10 @@ export class Ra2NightDressing implements WorldDressing {
     // Head: a few pixels below the top of the game's lamp-post frame (the globe), above the cell centre, so HD lamps
     // stand as tall as the map's own posts.
     this.lampHead = lamp ? Math.max(0.5, (15 - lamp.frame.offset[1] - 5) / PIXELS_PER_HEIGHT) : 1.0;
-    this.headPush = Math.max(POLE_PUSH, lamp ? cardPush(lamp.frame) : 0) + 0.05;
+    // The globe sits above the cell centre (15 screen pixels below the foundation's NW draw point). Match its
+    // building's analytic facade depth, subtracting the centre's physical camera depth. Frame padding is irrelevant.
+    this.headPush =
+      Math.max(POLE_PUSH, lamp ? foundationPointPush(0.5, 0.5, lamp.foundation[0], lamp.foundation[1]) : 0) + 0.05;
     const sidecar = cache.lights;
     if (sidecar) {
       const W = cache.manifest.grid.width;
@@ -129,11 +135,12 @@ export class Ra2NightDressing implements WorldDressing {
   }
 
   /** The map cache's own INGALITE/GALITE sprite (gglite.shp): sizes HD lamps and places visible map lamps' heads. */
-  private lampArt(): { id: string; frame: SpriteFrame } | null {
+  private lampArt(): { id: string; frame: SpriteFrame; foundation: readonly [number, number] } | null {
     const sprites = this.options.cache.manifest.sprites;
     for (const id of ['building:GALITE', 'building:INGALITE']) {
-      const frame = sprites[id]?.frames[0];
-      if (frame && frame.rect[2] > 0) return { id, frame };
+      const entry = sprites[id];
+      const frame = entry?.frames[0];
+      if (frame && frame.rect[2] > 0) return { id, frame, foundation: entry!.foundation ?? [1, 1] };
     }
     return null;
   }
@@ -161,6 +168,7 @@ export class Ra2NightDressing implements WorldDressing {
   /** Live matches: the light-emitting buildings currently standing. */
   setSources(sources: readonly SourceLight[]): void {
     this.mapLights?.setSources(sources);
+    this.options.mapLight?.setSources(sources);
     this.version++;
   }
 
@@ -410,7 +418,7 @@ function buildPoles(bases: readonly Vector3[], head: number, camera: EmitterLaye
     .add(camera.cameraRight.mul(positionGeometry.x.mul(0.06)))
     .add(vec3(0, positionGeometry.y.add(0.5).mul(head), 0))
     .add(camera.toCamera.mul(POLE_PUSH));
-  material.colorNode = vec4(vec3(0.07, 0.07, 0.075).mul(sceneLevel), 1);
+  material.colorNode = vec4(vec3(0.07, 0.07, 0.075).mul(camera.nodes.sceneLevel), 1);
   const mesh = new InstancedMesh(new PlaneGeometry(1, 1), material, bases.length);
   mesh.frustumCulled = false;
   mesh.renderOrder = 4;

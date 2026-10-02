@@ -2,6 +2,7 @@ import '../helpers/chineseLocale';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createVmFrameRenderer, keyRectUv, rgb565ToRgb888 } from '../../src/ui/pages/game/vmFrameRenderer';
 import { parsePassthroughFlags } from '../../src/ui/pages/game/hdBridge';
+import { AiUpscale } from '../../src/ui/pages/game/aiUpscale';
 import { fsrUpscaleMode, spatialUpscaleEnabled } from '../../src/ui/pages/game/spatialUpscale';
 import type { VmFrame } from '../../src/vm86/win32';
 
@@ -221,7 +222,10 @@ function indexedFrame(width = 2, height = 1): VmFrame {
   };
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe('VmFrameRenderer 生命周期', () => {
   it('实时切换复用上下文、释放旧管线，同模式和销毁后不再分配', () => {
@@ -292,6 +296,7 @@ describe('VmFrameRenderer 生命周期', () => {
       rgba: new Uint8Array([1, 2, 3, 255, 4, 5, 6, 255]),
     };
 
+    renderer.setTransparentRects([{ x: 0, y: 0, width: 1, height: 1 }]);
     renderer.clear();
     renderer.draw(first, 20, 10);
     renderer.draw(rgba, 20, 10);
@@ -407,6 +412,84 @@ describe('VmFrameRenderer 生命周期', () => {
     renderer.setTransparentRect(null);
     gl.calls.length = 0;
     renderer.draw(indexedFrame(4, 2), 8, 4);
+    expect(gl.calls.some((call) => call.startsWith('colorMask:'))).toBe(false);
+    renderer.destroy();
+  });
+
+  it.each(['off', 'bicubic', 'fsr-rcas', 'fast'] as const)(
+    'extra holes survive %s backend replacement and precede the cursor',
+    (mode) => {
+      const gl = new FakeWebGl();
+      const renderer = createVmFrameRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement);
+      renderer.setTransparentRect({ x: 0, y: 0, width: 1, height: 1 });
+      renderer.setTransparentRects([
+        { x: 2, y: 0, width: 2, height: 1 },
+        { x: -2, y: 1, width: 3, height: 2 },
+      ]);
+      renderer.setUpscaleMode(mode);
+      const frame = {
+        ...indexedFrame(4, 2),
+        cursor: {
+          handle: 1,
+          x: 1,
+          y: 1,
+          width: 1,
+          height: 1,
+          hotspotX: 0,
+          hotspotY: 0,
+          rgba: new Uint8Array([255, 255, 255, 255]),
+        },
+      };
+      renderer.draw(frame, 8, 4);
+      expect(gl.calls).toContain('scissor:0,2,2,2');
+      expect(gl.calls).toContain('scissor:4,2,4,2');
+      expect(gl.calls).toContain('scissor:0,0,2,2');
+      expect(gl.calls.indexOf('colorMask:false,false,false,true')).toBeGreaterThan(gl.calls.indexOf('drawArrays'));
+      expect(gl.calls.lastIndexOf('scissor:0,0,2,2')).toBeLessThan(
+        gl.calls.findIndex((call) => call.startsWith('uniform4f:cursorRect')),
+      );
+      renderer.setTransparentRects([]);
+      renderer.setTransparentRect(null);
+      gl.calls.length = 0;
+      renderer.draw(frame, 8, 4);
+      expect(gl.calls.some((call) => call.startsWith('scissor:'))).toBe(false);
+      renderer.destroy();
+    },
+  );
+
+  it.each([false, true])('clears holes after AI presentation (cached=%s) and post-processing', (cached) => {
+    const gl = new FakeWebGl();
+    vi.spyOn(AiUpscale.prototype, 'prepare').mockReturnValue(true);
+    vi.spyOn(AiUpscale.prototype, 'hasFrame').mockReturnValue(cached);
+    vi.spyOn(AiUpscale.prototype, 'bindInput').mockImplementation(() => undefined);
+    const infer = vi.spyOn(AiUpscale.prototype, 'infer').mockImplementation(() => gl.calls.push('AI infer'));
+    vi.spyOn(AiUpscale.prototype, 'draw').mockImplementation(() => gl.calls.push('AI draw'));
+    const renderer = createVmFrameRenderer(
+      { getContext: () => gl } as unknown as HTMLCanvasElement,
+      true,
+      false,
+      null,
+      false,
+      true,
+    );
+    renderer.setPostProcess(() => ({ draw: () => gl.calls.push('post process'), destroy: () => undefined }));
+    renderer.setTransparentRects([{ x: 2, y: 0, width: 2, height: 1 }]);
+    renderer.draw(indexedFrame(4, 2), 8, 4);
+    expect(infer).toHaveBeenCalledTimes(cached ? 0 : 1);
+    expect(gl.calls.indexOf('AI draw')).toBeLessThan(gl.calls.indexOf('post process'));
+    expect(gl.calls.indexOf('post process')).toBeLessThan(gl.calls.indexOf('scissor:4,2,4,2'));
+    renderer.destroy();
+  });
+
+  it('extra holes keep key alpha and do not clear the superseded singular hole', () => {
+    const gl = new FakeWebGl();
+    const renderer = createVmFrameRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement);
+    renderer.setTransparentRect({ x: 0, y: 0, width: 1, height: 1 });
+    renderer.setTransparentKey({ rect: { x: 0, y: 0, width: 2, height: 2 }, rgb565: 0xf81f });
+    renderer.setTransparentRects([{ x: 2, y: 0, width: 2, height: 1 }]);
+    renderer.setUpscaleMode('bicubic');
+    renderer.draw(indexedFrame(4, 2), 8, 4);
+    expect(gl.calls.filter((call) => call.startsWith('scissor:'))).toEqual(['scissor:4,2,4,2']);
     expect(gl.calls.some((call) => call.startsWith('colorMask:'))).toBe(false);
     renderer.destroy();
   });

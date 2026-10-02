@@ -86,6 +86,12 @@ export type WorkerToMainMessage =
   | { type: 'diagnostics-reply'; requestId: number; value: VmDiagnostics }
   | { type: 'game-performance-reply'; requestId: number; value: GamePerformanceSample | null }
   | { type: 'render-state-reply'; requestId: number; value: GameRenderState | null }
+  /** An omitted cell layer retains the preceding ordered reply's publication; explicit null clears it. */
+  | {
+      type: 'render-state-cells-unchanged';
+      requestId: number;
+      value: Omit<GameRenderState, 'overlays' | 'smudges'> & Partial<Pick<GameRenderState, 'overlays' | 'smudges'>>;
+    }
   /**
    * The core returned the same snapshot object as the last render-state reply this Worker posted: the client answers
    * with its copy of that reply instead of receiving another structured clone.

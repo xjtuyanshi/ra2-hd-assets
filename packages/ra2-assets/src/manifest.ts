@@ -71,11 +71,10 @@ export interface HdCacheManifest {
   /** Added: original palette file per key in `palettes` (e.g. { unit: "unittem.pal" }). */
   paletteSources?: Record<string, string>;
   /**
-   * Added: the map's normal [Lighting] (not the Ion Storm / Dominator variants; Level defaults to 0.032 when the
-   * map omits it). Palettes of an object on a cell at level z are multiplied per MapObject.lighting class by
-   * mapLightMultipliers in iso.ts: (ambient + ground + level * (z - 1)), times (red, green, blue) for class 'full'
-   * only, clamped to 255. The formula follows the Chrono Divide-derived reference engine and is not yet verified
-   * against in-game screenshots.
+   * Added: the map's normal [Lighting] as written in the map (not the Ion Storm / Dominator variants; Level defaults
+   * to 0.032 when the map omits it). Palettes of an object on a cell at level z are multiplied per MapObject.lighting
+   * class by mapLightMultipliers in iso.ts, the engine's cell formula (Ambient - Ground + Level * z, times the
+   * normalised (red, green, blue) for class 'full' only), clamped to 255.
    */
   lighting?: MapLighting;
   /**
@@ -145,6 +144,8 @@ export interface SpriteAtlasHdRef extends AtlasRef {
   remap: string;
   /** Frame rectangles and atlas dimensions are exactly twice their indexed source values. */
   scale: 2;
+  /** House-paint saturation in linear light, 0..1; absent means 1. Preserves Rec.709 luminance. */
+  paintSaturation?: number;
 }
 
 export interface TileEntry {
@@ -264,7 +265,11 @@ export interface VoxelModel {
   id: string;
   /** Palette key (normally "unit"). */
   palette: string;
-  /** Normal table id from the VXL section tailer: 2 = Tiberian Sun (36 normals), 4 = Red Alert 2 (244 normals). */
+  /**
+   * Normal table id from a VXL section tailer: 2 = Tiberian Sun (36 normals), 4 = Red Alert 2 (244 normals). Sections
+   * of one model may differ (VoxelSection.normalsMode); caches extracted before that field recorded the last section's
+   * mode here, which is wrong for mixed models, so readers use sectionNormalsMode (voxelNormals.ts).
+   */
   normalsMode: number;
   parts: VoxelPart[];
   /** Added: body VXL file the model came from (e.g. "mtnk.vxl"). */
@@ -290,4 +295,6 @@ export interface VoxelSection {
   transform: number[];
   /** Base64 Uint8 quintuples (x, y, z, colour index, normal index) per voxel. */
   voxels: Base64Array;
+  /** Added: this section's normal table (tailer normalsMode); absent in older caches (see sectionNormalsMode). */
+  normalsMode?: number;
 }

@@ -5,6 +5,7 @@
  * per-pixel normals shading beyond a fixed light, turret turned with the body.
  */
 import { lookupNormal, normalTableFor } from 'ra2-formats';
+import { sectionNormalsMode } from '../voxelNormals.ts';
 import type { VoxelModel } from '../manifest.ts';
 
 export interface SplatPoint {
@@ -28,12 +29,12 @@ export function voxelSplat(model: VoxelModel, facing: number): SplatPoint[] {
   const fx = Math.sin(ang);
   const fy = -Math.cos(ang);
   const light: [number, number, number] = [0.2, -0.5, 0.85];
-  const table = normalTableFor(model.normalsMode);
   const pts: SplatPoint[] = [];
   for (const part of model.parts) {
     const partShift = part.role === 'body' ? 0 : (model.turretOffset ?? 0) / 8;
     for (const s of part.sections) {
       const vox = fromB64(s.voxels);
+      const table = normalTableFor(sectionNormalsMode(s, vox));
       const t = s.transform;
       const sc = [0, 1, 2].map((k) => (s.maxBounds[k]! - s.minBounds[k]!) / Math.max(1, s.size[k]!));
       for (let i = 0; i < vox.length; i += 5) {

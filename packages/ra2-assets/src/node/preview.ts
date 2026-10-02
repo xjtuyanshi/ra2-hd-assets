@@ -14,6 +14,7 @@ import { lookupNormal, normalTableFor } from 'ra2-formats';
 import type { HdCacheManifest, LightingClass, MapObject, SpriteEntry, SpriteFrame, VoxelModel } from '../manifest.ts';
 import { CELL_H, mapLightMultipliers, projectCorner } from '../iso.ts';
 import { applyRemap } from '../remap.ts';
+import { sectionNormalsMode } from '../voxelNormals.ts';
 import { decodePng, encodePng, type PngImage } from './png.ts';
 import { drawTerrainTiles, terrainLayout } from './terrain.ts';
 
@@ -223,7 +224,7 @@ export function renderPreview(opts: PreviewOptions): PreviewResult {
       for (const s of part.sections) {
         const vox = fromB64(s.voxels);
         const t = s.transform;
-        const table = normalTableFor(model.normalsMode);
+        const table = normalTableFor(sectionNormalsMode(s, vox));
         const sc = [0, 1, 2].map((k) => (s.maxBounds[k]! - s.minBounds[k]!) / Math.max(1, s.size[k]!));
         for (let i = 0; i < vox.length; i += 5) {
           const p = [0, 1, 2].map((k) => s.minBounds[k]! + (vox[i + k]! + 0.5) * sc[k]!);

@@ -206,6 +206,31 @@ describe('upscaleSpriteAtlas with synthetic 4x inference', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it('carries infantry shadow coverage into future HD builds without changing building or vehicle shadows', async () => {
+    const run = vi.fn(fakeNearestRun);
+    const result = await upscaleSpriteAtlas({
+      atlas: {
+        width: 9,
+        height: 3,
+        channels: 1,
+        data: Uint8Array.from({ length: 27 }, (_, i) => (i === 10 || i === 13 || i === 16 ? 1 : 0)),
+      },
+      sprites: {
+        'infantry:TEST': spriteEntry([spriteFrame([0, 0, 0, 0])], { shadows: [spriteFrame([0, 0, 3, 3])] }),
+        'building:TEST': spriteEntry([spriteFrame([0, 0, 0, 0])], { shadows: [spriteFrame([3, 0, 3, 3])] }),
+        'vehicle:TEST': spriteEntry([spriteFrame([0, 0, 0, 0])], { shadows: [spriteFrame([6, 0, 3, 3])] }),
+      },
+      palettes: {},
+      run,
+    });
+    for (const y of [2, 3]) for (const x of [2, 3]) expect(pixel(result.image, x, y)).toEqual([0, 0, 0, 255]);
+    expect(pixel(result.image, 1, 2)[3]).toBeGreaterThan(0);
+    expect(pixel(result.image, 1, 2)[3]).toBeLessThan(255);
+    for (let y = 0; y < 6; y++) for (let x = 6; x < 18; x++) expect(pixel(result.image, x, y)).toEqual([0, 0, 0, 0]);
+    expect(result.remap.data.every((v) => v === 0)).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('bleeds the local frame colour into its transparent crop and gutter before inference', async () => {
     const inputs: PngImage[] = [];
     await upscaleSpriteAtlas({

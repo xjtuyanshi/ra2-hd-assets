@@ -1,14 +1,27 @@
 import GUI from 'three/addons/libs/lil-gui.module.min.js';
-import { Vector3 } from 'three/webgpu';
+import { DataTexture, NearestFilter, NoColorSpace, RedFormat, UnsignedByteType, Vector3 } from 'three/webgpu';
 import { mapAtmosphere, medianHeight, sidecarAtmosphere } from '../../ra2-assets/src/lights';
-import { HdRenderer, type ToneMapper } from '../src/HdRenderer';
+import type { HdCacheManifest, MapObject } from '../../ra2-assets/src/manifest';
+import { HdRenderer, type Antialias, type HdSettings, type ToneMapper } from '../src/HdRenderer';
 import type { RenderEvent, RenderObject, RenderState, Weather } from '../src/contract';
 import { createScenario } from './scenario';
+import { SpriteLayer } from '../src/ra2/sprites';
 import { loadRa2World } from '../src/ra2/world';
+import { voxelLightingFor } from '../src/ra2/vpl';
+import { voxelShadowFor } from '../src/ra2/voxelShadow';
+import { voxelShape } from '../src/ra2/voxels';
+import { addLookGui, applyLookParams, voxelLookParams } from './look';
+import { voxelPbrFor } from '../src/ra2/voxelPbr';
+import { voxelProjectionFor } from '../src/ra2/voxelProjection';
+import { waterPreset } from '../src/ra2/waterLook';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
 const hud = document.querySelector<HTMLElement>('#hud')!;
 const params = new URLSearchParams(location.search);
+
+// ?fx= opens the live-view bench (sandbox/fx.ts) instead of the sandbox; it owns the page, so this module stops here.
+if (params.has('fx')) await import('./fx').then(() => new Promise<never>(() => {}));
+
 const state: RenderState = createScenario();
 // Deterministic preset hooks for screenshots: ?time=20&weather=rain
 if (params.has('time')) state.environment.timeOfDay = Number(params.get('time'));
@@ -17,12 +30,39 @@ if (params.has('weather')) state.environment.weather = params.get('weather') as 
 // ?map=<name> draws an original map from the local HD cache (pnpm hd:extract) instead of the procedural scenario.
 const mapName = params.get('map');
 // ?units=1 parks the extracted voxel vehicles near the start point, in all eight facings, to review them.
+// ?vshape=<corner relax>,<normal blend>: this world's voxel refinement, independent of other renderers.
+const shape = { ...voxelShape };
+if (params.has('vshape')) {
+  const [relax, blend] = params.get('vshape')!.split(',').map(Number);
+  if (Number.isFinite(relax)) shape.cornerRelax = relax!;
+  if (Number.isFinite(blend)) shape.normalBlend = blend!;
+}
+// ?water=enhanced draws the remaster's modern water, as ?look=golden|cinematic does unless ?water= says
+// otherwise; the default is the earlier HD water ('classic').
+const water =
+  params.get('water') ?? (['golden', 'cinematic'].includes(params.get('look') ?? '') ? 'enhanced' : 'classic');
+waterPreset.style = water === 'enhanced' ? 'enhanced' : 'classic';
 const world = mapName
   ? await loadRa2World(`/${encodeURIComponent(mapName)}`, {
+      ...voxelLookParams(params),
+      voxelShape: shape,
       // ?tmap=0 draws the per-tile atlas instead of the (AI-upscaled) whole-map terrain image, for A/B review.
       terrainMap: params.get('tmap') !== '0',
       hdSprites: params.get('hdsprites') !== '0',
+      // ?cm=0 draws the manifest's terrain image instead of the colour-matched sidecar, for A/B review.
+      colourMatched: params.get('cm') !== '0',
+      // ?uhouse=<owner>:<h>,<s>,<v>[;...] adds review houses (rules [Colors] HSV) for ?uowner=, e.g. Soviet:0,230,255.
+      extraHouses: Object.fromEntries(
+        (params.get('uhouse') ?? '')
+          .split(';')
+          .filter(Boolean)
+          .map((entry) => {
+            const [owner, hsv] = entry.split(':');
+            return [owner!, hsv!.split(',').map(Number) as [number, number, number]];
+          }),
+      ),
       extraObjects: (manifest) => {
+        if (params.has('ugrid')) return unitGrid(manifest);
         if (!params.has('units')) return [];
         const start = manifest.waypoints.find((w) => w.id === 0) ?? manifest.waypoints[0] ?? { x: 50, y: 50 };
         const owner = Object.keys(manifest.houses ?? {})[0];
@@ -55,7 +95,37 @@ if (world?.cache) {
   // Without ?time the map decides (noon for day maps, as before).
   if (!params.has('time')) state.environment.timeOfDay = state.map.atmosphere.hour;
 }
+
+/**
+ * ?ugrid=1 (materials review): the map's voxel types (or ?utypes=MTNK,HTNK), four body facings each, in a diagonal
+ * grid on the ground around ?ux=&uy= (default waypoint 0), owned by ?uowner= (default the map's first house).
+ */
+function unitGrid(manifest: HdCacheManifest): MapObject[] {
+  const start = manifest.waypoints.find((w) => w.id === 0) ?? manifest.waypoints[0] ?? { x: 50, y: 50 };
+  const ux = Number(params.get('ux') ?? start.x);
+  const uy = Number(params.get('uy') ?? start.y);
+  const wanted = params.get('utypes')?.split(',');
+  const types = wanted ?? Object.keys(manifest.voxels);
+  // ?uowner= may list one owner per type (comma separated); the last one applies to the remaining types.
+  const owners = (params.get('uowner') ?? Object.keys(manifest.houses ?? {})[0] ?? '').split(',');
+  const facings = (params.get('ufacings') ?? '32,96,160,224').split(',').map(Number);
+  return types
+    .filter((voxel) => manifest.voxels[voxel])
+    .flatMap((voxel, row) =>
+      facings.map((facing, i) => ({
+        kind: 'vehicle' as const,
+        type: voxel,
+        voxel,
+        owner: owners[Math.min(row, owners.length - 1)] || undefined,
+        x: ux + i * 1.7 + row * 1.5,
+        y: uy - i * 1.7 + row * 1.5,
+        z: Number(params.get('uz') ?? 0),
+        facing,
+      })),
+    );
+}
 const hd = new HdRenderer(canvas, state, {
+  nodes: world?.nodes,
   forceWebGL: params.get('webgl') === '1',
   requiredLimits: await HdRenderer.adapterLimits(),
   // ?perf=1: GPU timestamp queries (window.__hd.stats().gpuMs).
@@ -69,12 +139,79 @@ if (lamps === 'on' || lamps === 'off' || lamps === 'auto') atmosphere.lamps = la
 if (params.has('windows')) atmosphere.windows = params.get('windows') !== '0';
 if (params.has('mist')) atmosphere.mist = Number(params.get('mist'));
 if (params.has('nightlevel')) atmosphere.nightLevel = Number(params.get('nightlevel'));
+// Post-processing presets for A/B review: ?tone=neutral&aa=fxaa&sharp=-1&bloom=0.55&shadows=0&debug=overbright
+if (params.has('tone')) hd.settings.toneMapper = params.get('tone') as ToneMapper;
+if (params.has('aa')) hd.settings.antialias = params.get('aa') as Antialias;
+if (params.has('sharp')) hd.settings.sharpness = Number(params.get('sharp'));
+if (params.has('bloom')) hd.settings.bloom = Number(params.get('bloom'));
+if (params.has('shadows')) hd.settings.shadows = params.get('shadows') !== '0';
+if (params.has('debug')) hd.settings.debugView = params.get('debug') as HdSettings['debugView'];
+// ?vshadow=hard restores the single hard twin; contact penumbra is the default.
+voxelShadowFor(hd.nodes).soft = params.get('vshadow') !== 'hard';
+// ?vnaval=old restores sheared drop shadows on water for before/after review.
+voxelShadowFor(hd.nodes).naval = params.get('vnaval') !== 'old';
+// Voxel material review (see src/ra2/vpl.ts): ?vpl=<extra light>,<occlusion>,<sheen>.
+if (params.has('vpl')) {
+  const { voxelExtraLight, voxelOcclusion, voxelSheen } = voxelLightingFor(hd.nodes);
+  const [extra, occlusion, sheen] = params.get('vpl')!.split(',').map(Number);
+  if (Number.isFinite(extra)) voxelExtraLight.value = extra!;
+  if (Number.isFinite(occlusion)) voxelOcclusion.value = occlusion!;
+  if (Number.isFinite(sheen)) voxelSheen.value = sheen!;
+}
+// ?ml=0 leaves out the map's own day light ([Lighting] and light sources, src/ra2/mapLighting.ts), for A/B review.
+if (world && params.get('ml') === '0') {
+  world.cache?.mapLight?.setWeight(0);
+  world.mapLight = undefined;
+}
+// Enhanced look (src/ra2/spriteLook.ts): ?look=golden and single overrides, see sandbox/look.ts.
+applyLookParams(hd, params, state);
 await hd.init(world);
 // ?wet=<0..1>: start with wet ground (rain wets surfaces over a few seconds otherwise).
 if (params.has('wet') && world) world.terrain.wetness.value = Math.min(1, Math.max(0, Number(params.get('wet'))));
+// ?palcard=<palette key>: the palette's 256 entries as one unlit sprite card (16x16 swatches of 4x4 engine pixels,
+// index 0 transparent) at the view centre, to check that original colours survive the display transform.
+const palcard = params.get('palcard');
+if (world?.cache && world.sprites && palcard) {
+  const size = 64;
+  const indices = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) indices[y * size + x] = (y >> 2) * 16 + (x >> 2);
+  const atlas = new DataTexture(indices, size, size, RedFormat, UnsignedByteType);
+  atlas.colorSpace = NoColorSpace;
+  atlas.magFilter = NearestFilter;
+  atlas.minFilter = NearestFilter;
+  atlas.needsUpdate = true;
+  const layer = new SpriteLayer(world.cache, [], 1, { texture: atlas, width: size, height: size });
+  for (const key of ['cameraRight', 'cameraUp', 'toCamera', 'light'] as const)
+    layer[key].value = world.sprites[key].value;
+  const target = world.focus.clone();
+  if (params.has('cx')) target.x = Number(params.get('cx'));
+  if (params.has('cy')) target.z = Number(params.get('cy'));
+  layer.setInstances([
+    {
+      anchor: target.setY(world.terrain.heightAt(target.x, target.z)),
+      frame: { rect: [0, 0, size, size], offset: [-size / 2, -size / 2] },
+      palette: palcard,
+      // Well in front of the ground so nothing occludes it; the orthographic view keeps it centred on the target.
+      push: 5,
+      shadow: false,
+    },
+  ]);
+  layer.mesh.renderOrder = 10;
+  hd.scene.add(layer.mesh);
+}
 // Development handle for inspecting the scene from the console.
-const handle = { hd, world, state, stats: () => hd.stats(), fires: [] as { at: Vector3; scale: number }[] };
+const handle = {
+  hd,
+  world,
+  state,
+  voxelPbr: voxelPbrFor(hd.nodes),
+  voxelProjection: voxelProjectionFor(hd.nodes),
+  stats: () => hd.stats(),
+  fires: [] as { at: Vector3; scale: number }[],
+};
 (window as unknown as { __hd: unknown }).__hd = handle;
+// ?vbake=1: isolated voxel unit renders for the vehicle redraw pipeline (sandbox/bake.ts).
+if (params.has('vbake') && world) (await import('./bake')).installBake(hd, world);
 hd.setState(state);
 
 // Fixed camera presets for comparable screenshots: ?cx=12&cy=44&zoom=0.8
@@ -226,7 +363,12 @@ const wetness = world?.terrain.wetness;
 if (wetness) night.add(wetness, 'value', 0, 1, 0.01).name('地面湿度').listen();
 const look = gui.addFolder('画质');
 look
-  .add(hd.settings, 'toneMapper', { Neutral: 'neutral', AgX: 'agx', ACES: 'aces' } satisfies Record<string, ToneMapper>)
+  .add(hd.settings, 'toneMapper', {
+    原版保真: 'faithful',
+    Neutral: 'neutral',
+    AgX: 'agx',
+    ACES: 'aces',
+  } satisfies Record<string, ToneMapper>)
   .name('色调映射')
   .onChange(() => hd.applySettings());
 look.add(hd.settings, 'exposure', 0.4, 2, 0.01).name('曝光');
@@ -243,9 +385,14 @@ look
   .name('阴影')
   .onChange(() => hd.applySettings());
 look
-  .add(hd.settings, 'antialias')
-  .name('抗锯齿 FXAA')
+  .add(hd.settings, 'antialias', { 'MSAA 4x': 'msaa4', FXAA: 'fxaa', 关: 'none' } satisfies Record<string, Antialias>)
+  .name('抗锯齿')
   .onChange(() => hd.applySettings());
+look
+  .add(hd.settings, 'sharpness', -1, 2, 0.05)
+  .name('锐化（0 最强，<0 关）')
+  .onChange(() => hd.applySettings());
+addLookGui(gui, hd, state);
 if (params.has('nogui')) gui.hide();
 if (params.has('nohud')) hud.hidden = true;
 

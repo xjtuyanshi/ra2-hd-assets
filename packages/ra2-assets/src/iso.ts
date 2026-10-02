@@ -8,6 +8,7 @@
  * diamond box starts at (left, top) has anchor (left + 30, top): drawing the raster at `corner - anchor` lines the
  * diamond up with the cell. Engine coordinates in leptons use 256 per cell and 104 per height level.
  */
+import { engineCellLight, engineLighting } from './lights.ts';
 import type { LightingClass, MapLighting, MapObjectKind } from './manifest.ts';
 
 export const CELL_W = 60;
@@ -189,19 +190,23 @@ export function coordDrawOffset(kind: 'building' | 'vehicle' | 'infantry' | 'air
 export const DEFAULT_LIGHT_LEVEL = 0.032;
 
 /**
- * Per-channel palette multipliers for something drawn on a cell at height level z, following the Chrono
- * Divide-derived reference (huangkaoya/ts-redalert2 src/engine/Lighting.ts compute / computeLevel / computeTint):
- *   intensity = ambient + ground + (class uses Level ? level * (z - 1) : 0)
- *   tint      = class 'full' ? (red, green, blue) : (1, 1, 1)
- * Classes (ObjectArt.getDefaultLighting / readPaletteAndLightingTypes): 'full' = tiles, terrain objects, overlays,
- * smudges (level + tint); 'ambient' = buildings, units, infantry, aircraft, walls (level, no tint); 'none' =
- * tiberium overlays, tiberium trees, veins (unlit). Not yet compared with in-game screenshots; per-cell light
- * sources, Ion Storm and Dominator lighting are not modelled.
+ * Per-channel palette multipliers for something drawn on a cell at height level z under the map's [Lighting], with
+ * the engine's own cell formula (lights.ts engineCellLight, YR 1.001 @0x484180): intensity = Ambient - Ground +
+ * Level x z in the engine's truncated precision, clamped to [0, 2], and the per-channel tint normalised by its largest
+ * channel. Classes (MapObject.lighting): 'full' = tiles, terrain objects, overlays, smudges (intensity x tint);
+ * 'ambient' = buildings, units, infantry, aircraft, walls (intensity only); 'none' = ore, gems (unlit). Measured
+ * against same-moment captures of XMP29U2 in packages/hd-renderer (src/ra2/mapLighting.ts). Light sources, Ion Storm
+ * and Dominator lighting are not included here.
  */
 export function mapLightMultipliers(l: MapLighting, z: number, cls: LightingClass = 'full'): [number, number, number] {
   if (cls === 'none') return [1, 1, 1];
-  const k = l.ambient + l.ground + l.level * (z - 1);
-  return cls === 'full' ? [k * l.red, k * l.green, k * l.blue] : [k, k, k];
+  const cell = engineCellLight(
+    { width: 1, height: 1, z: Uint8Array.of(Math.max(0, Math.min(255, Math.round(z)))), exists: Uint8Array.of(1) },
+    engineLighting(l),
+    [],
+  );
+  const k = cell.intensity[0]!;
+  return cls === 'full' ? [k * cell.tint[0]!, k * cell.tint[1]!, k * cell.tint[2]!] : [k, k, k];
 }
 
 /**

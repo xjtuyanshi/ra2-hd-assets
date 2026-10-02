@@ -670,6 +670,8 @@ describe('VmCore HD bridge opt-in', () => {
       localHouse: -1,
       objects: [],
       shroud: null,
+      overlays: null,
+      smudges: null,
       effects: null,
     };
     const reader = vi.fn(() => snapshot);

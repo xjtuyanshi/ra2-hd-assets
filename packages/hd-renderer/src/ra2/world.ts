@@ -1,16 +1,41 @@
 import { DataTexture, LinearFilter, Object3D, RGFormat, UnsignedByteType, Vector3 } from 'three/webgpu';
 import { SURFACE, surfaceFromLandType } from '../../../ra2-assets/src/lights';
 import type { MapObject } from '../../../ra2-assets/src/manifest';
-import type { WorldDressing } from '../atmosphere';
+import { AtmosphereNodes, type WorldDressing } from '../atmosphere';
 import type { TerrainBuild } from '../terrain';
-import { decodeBase64, loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOptions } from './cache';
+import { remapRamp, type Hsv } from '../../../ra2-assets/src/remap';
+import { addHousePalettes, decodeBase64, loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOptions } from './cache';
+import type { MapLightGrade } from './mapLighting';
 import { Ra2NightDressing } from './nightDressing';
 import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from './sprites';
+import { loadSpriteMaterials } from './spriteMaterials';
+import type { SpriteMaterialAtlas } from './spriteLook';
+import { objectYSort, painterObject } from './painterOrder';
+import { HIGH_BRIDGE_HEIGHT, isHighBridge } from './bridgeDepth';
 import { buildRa2Terrain } from './terrain';
-import { buildVoxelGeometry, createVoxelMaterial, instantiateVoxel, type VoxelGeometry } from './voxels';
+import {
+  buildVoxelGeometry,
+  createVoxelMaterial,
+  instantiateVoxel,
+  projectVoxelMaterials,
+  setVoxelShapeFor,
+  voxelShapeFor,
+  type VoxelGeometry,
+  type VoxelShape,
+} from './voxels';
+import { loadVoxelLighting } from './vpl';
+import { smoothVoxelOptions, type SmoothVoxelOptions } from './voxelSmooth';
+import { buildSmoothVoxelGeometry } from './voxelSmoothGeometry';
+import { projectionParts, voxelProjectionLibrary, type VoxelProjectionLibrary } from './voxelProjection';
 
 /** A battlefield the HD renderer can draw: terrain, optional water, and everything standing on it. */
 export interface HdWorld {
+  nodes?: AtmosphereNodes;
+  /** Load-time geometry choice, also inherited by units created later in live matches. */
+  voxelLook?: 'engine' | 'remaster';
+  smoothVoxel?: Readonly<SmoothVoxelOptions>;
+  voxelProjection?: string;
+  projections?: VoxelProjectionLibrary;
   width: number;
   height: number;
   terrain: TerrainBuild;
@@ -21,6 +46,8 @@ export interface HdWorld {
   /** Where the camera starts (world units). */
   focus: Vector3;
   sprites?: SpriteLayer;
+  /** Shared map sprite materials, loaded once with this world and reused by live map-cache cell layers. */
+  spriteMaterials?: SpriteMaterialAtlas | null;
   cache?: Ra2Cache;
   /** Per-cell surface (RG8, linear): R = paved (asphalt, concrete, brick, roads), G = open water. */
   surfaceTexture?: DataTexture;
@@ -28,6 +55,8 @@ export interface HdWorld {
   surface?: Uint8Array;
   /** Night dressing: map light sources, HD street lamps, window glows. */
   dressing?: WorldDressing & Ra2NightDressing;
+  /** The engine's per-cell light of the map ([Lighting] plus light sources), applied by day (see mapLighting.ts). */
+  mapLight?: MapLightGrade;
 }
 
 /** Surface classes per cell: the sidecar's (tile colours) when present, else land types only. */
@@ -63,12 +92,49 @@ export async function loadRa2World(
   base: string,
   options: {
     extraObjects?: (manifest: Ra2Cache['manifest']) => MapObject[];
+    /** Immutable per-world voxel refinement; defaults are captured before asynchronous resource loading starts. */
+    voxelShape?: Readonly<VoxelShape>;
+    voxelLook?: 'engine' | 'remaster';
+    smoothVoxel?: Partial<SmoothVoxelOptions>;
+    /** Optional base URL of view-dependent vehicle redraw atlases; absent/failed types keep their current look. */
+    voxelProjection?: string;
     /** Keep only map objects passing this test (a live match draws units and buildings from game memory instead). */
     includeObject?: (object: MapObject) => boolean;
+    /** Load the optional sprite material atlas (normals.json) for the enhanced look; default true. */
+    spriteMaterials?: boolean;
+    /**
+     * Review houses the map does not name (owner -> rules [Colors] HSV): their remap rows are added before any object
+     * is built, so extra objects owned by them draw in that house colour.
+     */
+    extraHouses?: Record<string, Hsv>;
   } & Ra2CacheOptions = {},
 ): Promise<HdWorld> {
-  const cache = await loadRa2Cache(base, options);
+  const nodes = options.nodes ?? new AtmosphereNodes();
+  const voxelLook = options.voxelLook ?? 'engine';
+  const smoothVoxel = smoothVoxelOptions(options.smoothVoxel);
+  const projections = options.voxelProjection ? voxelProjectionLibrary(options.voxelProjection, nodes) : undefined;
+  if (options.voxelShape) setVoxelShapeFor(nodes, options.voxelShape);
+  else voxelShapeFor(nodes);
+  // The engine's voxel lighting table lives next to the map caches, in the type library's common directory; without
+  // it voxels use a fitted fallback curve.
+  const [cache] = await Promise.all([
+    loadRa2Cache(base, { ...options, nodes }),
+    loadVoxelLighting(`${base.replace(/\/$/, '')}/../_library/common/voxels-vpl.json`, nodes),
+  ]);
   const { manifest } = cache;
+  // Include cached map models even when static objects are filtered out for a live match.
+  if (projections)
+    await Promise.all(
+      [...cache.voxels.values()].map((model) => projections.loadType(model.id, projectionParts(model.parts))),
+    );
+  const unitPalette = cache.paletteRgb.get('unit');
+  for (const [owner, hsv] of Object.entries(options.extraHouses ?? {}))
+    if (unitPalette) addHousePalettes(cache, owner, remapRamp(unitPalette, hsv));
+  const hdRef = manifest.spriteAtlasHd;
+  const materials =
+    options.spriteMaterials === false || !cache.spriteAtlasHd
+      ? null
+      : await loadSpriteMaterials(base, hdRef ? { width: hdRef.width, height: hdRef.height } : null);
   // InvisibleInGame objects (lamp-post dummies such as INGALITE) are never drawn by the engine.
   const hidden = new Set(cache.lights?.hiddenObjects ?? []);
   const placed = manifest.objects.filter(
@@ -80,10 +146,13 @@ export async function loadRa2World(
   root.name = 'ra2-world';
   if (terrain.reflectionTarget) root.add(terrain.reflectionTarget);
 
-  // Voxel vehicles: one geometry set per (model, owner) because house colours are baked into vertex colours.
-  const voxelMaterial = createVoxelMaterial();
+  // Geometry is shared per model/refinement; each owner gets its palette material.
+  const voxelMaterial = createVoxelMaterial(nodes);
   const geometries = new Map<string, VoxelGeometry[]>();
   const sprites: SpriteInstance[] = [];
+  // Enhanced-look decals (spriteLook.ts; drawn only while their effect is on): ground contact shades first, under
+  // every other decal, and wet-paving mirror images of upright art.
+  const lookDecals: SpriteInstance[] = [];
   for (const object of objects) {
     const anchor = objectAnchor(object);
     if (object.voxel) {
@@ -93,10 +162,19 @@ export async function loadRa2World(
       const cacheKey = `${object.voxel}@${paletteKey}`;
       let parts = geometries.get(cacheKey);
       if (!parts) {
-        parts = buildVoxelGeometry(model, cache.paletteRgb.get(paletteKey)!);
+        parts =
+          voxelLook === 'remaster'
+            ? buildSmoothVoxelGeometry(model, cache.paletteRgb.get(paletteKey)!, nodes, smoothVoxel)
+            : buildVoxelGeometry(model, cache.paletteRgb.get(paletteKey)!, nodes);
+        projectVoxelMaterials(
+          parts,
+          cache.paletteRgb.get(paletteKey)!,
+          projections?.get(model.id, projectionParts(model.parts)) ?? null,
+          nodes,
+        );
         geometries.set(cacheKey, parts);
       }
-      const { root: vehicle } = instantiateVoxel(parts, voxelMaterial);
+      const { root: vehicle } = instantiateVoxel(parts, voxelMaterial, nodes);
       vehicle.position.copy(anchor);
       vehicle.position.y = Math.max(anchor.y, terrain.heightAt(anchor.x, anchor.z));
       // Engine facing 0 = north (world -z), clockwise; the model's nose is local +x.
@@ -113,6 +191,18 @@ export async function loadRa2World(
     const frame = entry.frames[frameIndex]!;
     const flat = !!object.flat;
     const push = cardPush(frame);
+    // The extractor records how the engine lights each object (absent = 'full', terrain-class art).
+    const lighting = object.lighting ?? 'full';
+    const painter = painterObject(
+      2,
+      objectYSort((object.x + 0.5) * 256, (object.y + 0.5) * 256, object.kind === 'building'),
+    );
+    if (object.kind === 'building') {
+      painter.foundation = entry.foundation;
+      painter.x = object.x;
+      painter.z = object.y;
+    }
+    const deckHeight = object.kind === 'overlay' && isHighBridge(object.type) ? HIGH_BRIDGE_HEIGHT : undefined;
     for (const underlay of entry.underlays ?? []) {
       const bib = manifest.sprites[underlay];
       if (bib?.frames[0])
@@ -123,12 +213,54 @@ export async function loadRa2World(
           push: 0,
           shadow: false,
           flat: true,
+          lighting,
         });
     }
-    // Shadows are cast on the ground: draw them as decals too.
+    // Shadows are cast on the ground: draw them as decals too. The painter carries the foundation the enhanced look
+    // turns them about (flat decals take no depth from it).
     const shadow = entry.shadows?.[frameIndex];
-    if (shadow) sprites.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true });
-    sprites.push({ anchor, frame, palette, push, shadow: false, flat });
+    if (shadow) sprites.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true, painter });
+    if (object.kind === 'building' && entry.foundation) {
+      const [w, h] = entry.foundation;
+      const margin = 30;
+      lookDecals.push({
+        anchor,
+        frame: {
+          rect: [0, 0, 30 * (w + h) + 2 * margin, 15 * (w + h) + 2 * margin],
+          offset: [-30 * h - margin, -margin],
+        },
+        palette,
+        push: 0,
+        shadow: false,
+        flat: true,
+        kind: 'contact',
+        painter,
+      });
+    }
+    if (!flat && object.kind !== 'overlay')
+      sprites.push({
+        anchor,
+        frame,
+        palette,
+        push: 0,
+        shadow: false,
+        flat: true,
+        lighting,
+        painter,
+        kind: 'reflection',
+      });
+    sprites.push({
+      anchor,
+      frame,
+      palette,
+      push,
+      shadow: false,
+      flat,
+      glint: object.kind === 'overlay' && flat && lighting === 'none' ? 1 : undefined,
+      lighting,
+      painter: object.kind === 'overlay' ? undefined : painter,
+      deckHeight,
+    });
     for (const layer of entry.layers ?? []) {
       const art = manifest.sprites[layer];
       if (art?.frames[0])
@@ -138,9 +270,13 @@ export async function loadRa2World(
           palette: paletteFor(cache, art.palette, art.remap, object.owner),
           push: push + 0.01,
           shadow: false,
+          lighting,
+          painter,
+          painterPart: 0.1,
         });
     }
   }
+  sprites.unshift(...lookDecals);
   const spriteLayer = new SpriteLayer(
     cache,
     sprites,
@@ -148,14 +284,17 @@ export async function loadRa2World(
     undefined,
     cache.spriteAtlasHd,
     cache.windows?.texture ?? null,
+    materials,
   );
   root.add(spriteLayer.mesh);
   const surface = cellSurface(cache);
+  const mapLight = cache.mapLight ?? undefined;
   const dressing = new Ra2NightDressing({
     cache,
     heightAt: terrain.heightAt,
     root,
     objects,
+    mapLight,
   });
 
   const waypoint = manifest.waypoints.find((w) => w.id === 0) ?? manifest.waypoints[0];
@@ -163,6 +302,11 @@ export async function loadRa2World(
     ? new Vector3(waypoint.x + 0.5, terrain.heightAt(waypoint.x + 0.5, waypoint.y + 0.5), waypoint.y + 0.5)
     : new Vector3(manifest.grid.width / 2, 0, manifest.grid.height / 2);
   return {
+    nodes,
+    voxelLook,
+    smoothVoxel,
+    voxelProjection: options.voxelProjection,
+    projections,
     width: manifest.grid.width,
     height: manifest.grid.height,
     terrain,
@@ -171,10 +315,12 @@ export async function loadRa2World(
     root,
     focus,
     sprites: spriteLayer,
+    spriteMaterials: materials,
     cache,
     surface,
     surfaceTexture: surfaceTexture(surface, manifest.grid.width, manifest.grid.height),
     dressing,
+    mapLight,
   };
 }
 

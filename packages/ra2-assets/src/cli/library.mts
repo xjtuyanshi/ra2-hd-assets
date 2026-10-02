@@ -1,5 +1,5 @@
 /**
- * pnpm --filter ra2-assets library -- --game <install dir> [--theater temperate ...] [--out <dir>] [--preview]
+ * pnpm --filter ra2-assets library -- --game <install dir> [--theater temperate ...] [--out <dir>] [--only overlays|smudges] [--preview]
  *
  * Extracts the per-theater type library (art for every building, vehicle, infantry and aircraft type) from the
  * player's own install into <out>/<theater>/ (default <repo>/gameres/hd-cache/_library, all six theaters), with voxel
@@ -21,6 +21,7 @@ const { values } = parseArgs({
     theater: { type: 'string', multiple: true },
     out: { type: 'string', default: join(repoRoot, 'gameres/hd-cache/_library') },
     preview: { type: 'boolean', default: false },
+    only: { type: 'string' },
   },
 });
 const theaters = (values.theater ?? []).flatMap((t) => t.split(',')).map((t) => t.trim().toLowerCase());
@@ -29,14 +30,23 @@ if (unknown.length) {
   console.error(`unknown theater(s) ${unknown.join(', ')}; expected ${ALL_THEATERS.join(', ')}`);
   process.exit(2);
 }
+if (values.only !== undefined && values.only !== 'overlays' && values.only !== 'smudges') {
+  console.error('--only accepts overlays or smudges');
+  process.exit(2);
+}
 const t0 = Date.now();
 const results = extractLibrary({
   gameDir: resolve(values.game!),
   outDir: resolve(values.out!),
   theaters: theaters as TheaterId[],
+  only: values.only,
 });
 for (const r of results) {
   const c = r.library.extractor.counts;
+  if (values.only) {
+    console.log(`  ${r.theater}: ${Object.keys(r.library[values.only] ?? {}).length} ${values.only} -> ${r.dir}`);
+    continue;
+  }
   console.log(
     `  ${r.theater}: buildings ${c['types:building'] ?? 0}/${c['listed:building'] ?? 0}, vehicles ${c['types:vehicle'] ?? 0}/${c['listed:vehicle'] ?? 0}, ` +
       `infantry ${c['types:infantry'] ?? 0}/${c['listed:infantry'] ?? 0}, aircraft ${c['types:aircraft'] ?? 0}/${c['listed:aircraft'] ?? 0} -> ${r.dir}`,

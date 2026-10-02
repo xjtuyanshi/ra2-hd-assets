@@ -355,6 +355,17 @@ export class WorkerVmClient implements VmShell {
       case 'render-state-unchanged':
         this.resolveRequest(message.requestId, this.lastRenderState);
         break;
+      case 'render-state-cells-unchanged':
+        // Replies are ordered, including timed-out requests. Absence reuses a grid; null must clear it.
+        this.lastRenderState = {
+          ...message.value,
+          overlays:
+            message.value.overlays === undefined ? (this.lastRenderState?.overlays ?? null) : message.value.overlays,
+          smudges:
+            message.value.smudges === undefined ? (this.lastRenderState?.smudges ?? null) : message.value.smudges,
+        };
+        this.resolveRequest(message.requestId, this.lastRenderState);
+        break;
       case 'game-performance-reply':
       case 'diagnostics-reply':
       case 'state-reply':

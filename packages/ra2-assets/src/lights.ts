@@ -155,6 +155,21 @@ export const enginePerMille = (v: number): number => Math.trunc(v * 1000 + 0.01)
 /** BuildingTypeClass light fields: int(v * 1000 + 0.1) / 1000. */
 export const lightPerMille = (v: number): number => Math.trunc(v * 1000 + 0.1) / 1000;
 
+/**
+ * A [Lighting] set in the engine's stored precision (percent / per-mille, truncated), from raw INI values such as
+ * manifest.lighting. Idempotent: values already in engine precision come back unchanged.
+ */
+export function engineLighting(l: EngineLighting): EngineLighting {
+  return {
+    ambient: enginePercent(l.ambient),
+    red: enginePercent(l.red),
+    green: enginePercent(l.green),
+    blue: enginePercent(l.blue),
+    ground: enginePerMille(l.ground),
+    level: enginePerMille(l.level),
+  };
+}
+
 type Getter = (key: string) => string | undefined;
 
 /** ScenarioClass constructor defaults (@0x6838D3..0x683997). DominatorGround/Level are not set there: 0. */

@@ -1,4 +1,5 @@
 import {
+  ClampToEdgeWrapping,
   DataTexture,
   LinearFilter,
   LinearMipmapLinearFilter,
@@ -6,6 +7,7 @@ import {
   NoColorSpace,
   RGBAFormat,
   RedFormat,
+  RepeatWrapping,
   SRGBColorSpace,
   Texture,
   TextureLoader,
@@ -13,7 +15,10 @@ import {
 } from 'three/webgpu';
 import type { HdCacheManifest, TileEntry, VoxelModel } from '../../../ra2-assets/src/manifest';
 import { validateMapLights, type MapLightsSidecar } from '../../../ra2-assets/src/lights';
-import { buildShoreField } from './shoreField';
+import { MAP_MATERIALS_FILE, type MapMaterials } from '../../../ra2-assets/src/mapMaterials';
+import { MapLightGrade, setPaletteGrade, setPaletteNodes } from './mapLighting';
+import { AtmosphereNodes } from '../atmosphere';
+import { buildCliffField, buildShoreField } from './shoreField';
 
 /** windows.json next to a lit-window mask (packages/ra2-assets src/node/lights.ts WindowsSidecar). */
 export interface WindowsIndex {
@@ -36,6 +41,8 @@ export interface WindowsIndex {
  * produced locally from the player's own game files and served from gameres/hd-cache by the sandbox dev server.
  */
 export interface Ra2Cache {
+  /** Material inputs of the renderer/world owning this cache. */
+  nodes?: AtmosphereNodes;
   base: string;
   manifest: HdCacheManifest;
   exists: Uint8Array;
@@ -48,13 +55,21 @@ export interface Ra2Cache {
   terrainMap?: {
     texture: DataTexture;
     waterMask: DataTexture;
+    /** The terrain image contains a painted lake bed; only the enhanced water style uses bed optics. */
+    waterBed: boolean;
+    /** Composite-space apparent water colour (sRGB) and roughness (A); null when absent or unreadable. */
+    waterDetail: Texture | null;
+    /** Repeating painted open-water surface tile (see MapMaterials.waterSurface) and its size; null when absent. */
+    waterSurface: { texture: Texture; scale: number } | null;
     /** Signed distance to the shoreline in cells, encoded as in shoreField.ts (drives depth, foam and wet sand). */
     shore: DataTexture;
+    /** Normalised cliff contact distance (CLIFF_FIELD_MAX cells = 1); null without a loaded shore-ignore mask. */
+    cliff: DataTexture | null;
     ref: NonNullable<HdCacheManifest['terrainMap']>;
   };
   spriteAtlas: Texture;
   /** 2x HD version of the sprite atlas (full colour + house-paint mask), when extracted (pnpm hd:sprites). */
-  spriteAtlasHd: { color: Texture; remap: Texture } | null;
+  spriteAtlasHd: HdAtlas | null;
   /** All palettes stacked into one 256xN texture; `paletteRow` maps a palette key to its row. */
   paletteAtlas: DataTexture;
   paletteRow: Map<string, number>;
@@ -63,11 +78,33 @@ export interface Ra2Cache {
   voxels: Map<string, VoxelModel>;
   /** The map's light sidecar (pnpm hd:lights), or null when the cache has none (or it failed to load). */
   lights: MapLightsSidecar | null;
+  /**
+   * The engine's per-cell light of the map ([Lighting] and light sources, see mapLighting.ts), from the light sidecar
+   * when present, else the manifest's [Lighting]; null when the map records neither.
+   */
+  mapLight: MapLightGrade | null;
   /** Lit-window mask over the sprite atlas (same layout) and its index, when extracted. */
   windows: { texture: Texture; index: WindowsIndex } | null;
 }
 
 export const NO_TILE = 0xffff;
+
+/** Median base height level of the map's existing cells (the typical terrain height, e.g. for map lighting). */
+export function medianLevel(cache: Pick<Ra2Cache, 'exists' | 'height'>): number {
+  const counts = new Array<number>(256).fill(0);
+  let total = 0;
+  for (let i = 0; i < cache.height.length; i++) {
+    if (!cache.exists[i]) continue;
+    counts[cache.height[i]!]!++;
+    total++;
+  }
+  let seen = 0;
+  for (let level = 0; level < 256; level++) {
+    seen += counts[level]!;
+    if (seen * 2 >= total && total) return level;
+  }
+  return 0;
+}
 
 export function decodeBase64(text: string): Uint8Array {
   const binary = atob(text);
@@ -146,10 +183,16 @@ export async function loadMaskTexture(url: string): Promise<Texture | null> {
 }
 
 export interface Ra2CacheOptions {
+  nodes?: AtmosphereNodes;
   /** Use the manifest's whole-map terrain image (AI-upscaled when available); default true. */
   terrainMap?: boolean;
   /** Use the HD sprite atlas when the cache has one; default true. */
   hdSprites?: boolean;
+  /**
+   * Prefer the colour-matched terrain image named by the map's materials.json sidecar (pnpm hd:materials --terrain)
+   * when there is one; default true.
+   */
+  colourMatched?: boolean;
 }
 
 /** Where an HD sprite atlas is recorded (manifest.spriteAtlasHd / library spriteAtlasesHd entries). */
@@ -159,10 +202,20 @@ export interface HdAtlasRef {
   scale: number;
   width: number;
   height: number;
+  /** House-paint saturation in linear light, 0..1; absent means 1. Preserves Rec.709 luminance. */
+  paintSaturation?: number;
+}
+
+/** Loaded HD page textures and its optional house-paint grade. */
+export interface HdAtlas {
+  color: Texture;
+  remap: Texture;
+  /** House-paint saturation, 0..1; absent means 1 (no additional shader nodes). */
+  paintSaturation?: number;
 }
 
 /** Load an HD sprite atlas pair: colour art (sRGB, filtered) and the house-paint mask (linear data). */
-export async function loadHdAtlas(base: string, ref: HdAtlasRef): Promise<{ color: Texture; remap: Texture }> {
+export async function loadHdAtlas(base: string, ref: HdAtlasRef): Promise<HdAtlas> {
   const loader = new TextureLoader();
   const [color, remap] = await Promise.all([
     loader.loadAsync(`${base}/${ref.file}`),
@@ -176,10 +229,11 @@ export async function loadHdAtlas(base: string, ref: HdAtlasRef): Promise<{ colo
   }
   color.colorSpace = SRGBColorSpace;
   remap.colorSpace = NoColorSpace;
-  return { color, remap };
+  return { color, remap, paintSaturation: ref.paintSaturation ?? 1 };
 }
 
 export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}): Promise<Ra2Cache> {
+  const nodes = options.nodes ?? new AtmosphereNodes();
   const url = (file: string) => `${base.replace(/\/$/, '')}/${file}`;
   const manifestBytes = await (await fetch(url('manifest.json'))).arrayBuffer();
   const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as HdCacheManifest;
@@ -247,10 +301,13 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
 
   let terrainMap: Ra2Cache['terrainMap'];
   const ref = options.terrainMap === false ? undefined : manifest.terrainMap;
+  const materials = ref && options.colourMatched !== false ? await loadMapMaterials(url(MAP_MATERIALS_FILE)) : null;
   if (ref) {
+    const material = resolveTerrainMaterials(ref, materials);
     // Upscaled composites already carry bled colours under their transparent border; only the raw scale-1 image
     // needs the dilation pass.
-    const { texture, original } = await loadDilated(url(ref.file), ref.scale > 1 ? 0 : 10);
+    // The colour-matched image has the same size and layout as ref.file.
+    const { texture, original } = await loadDilated(url(material.file), ref.scale > 1 ? 0 : 10);
     texture.colorSpace = SRGBColorSpace;
     texture.magFilter = LinearFilter;
     // A whole map is far larger than the screen when zoomed out: mipmaps keep it from shimmering.
@@ -258,12 +315,70 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     texture.generateMipmaps = true;
     texture.anisotropy = 8;
     // The composite's own water mask when present; otherwise treat nothing as water rather than guessing.
-    const mask = ref.waterMask ? await loadMask(url(ref.waterMask)) : null;
+    const mask = material.waterMask ? await loadMask(url(material.waterMask)) : null;
+    let waterDetail: Texture | null = null;
+    if (material.waterDetail) {
+      try {
+        waterDetail = await load(material.waterDetail);
+        // load() keeps PNG rows top-down (flipY = false), matching loadMask/loadDilated DataTextures and atlasUv.
+        // Alpha is roughness data, not transparency; RGB is decoded from sRGB only when the shader samples it.
+        waterDetail.colorSpace = SRGBColorSpace;
+        waterDetail.magFilter = LinearFilter;
+        waterDetail.minFilter = LinearMipmapLinearFilter;
+        waterDetail.generateMipmaps = true;
+        waterDetail.wrapS = ClampToEdgeWrapping;
+        waterDetail.wrapT = ClampToEdgeWrapping;
+      } catch (error) {
+        console.warn(`${url(material.waterDetail)}: failed to load water detail; ignoring it`, error);
+      }
+    }
+    let waterSurface: { texture: Texture; scale: number } | null = null;
+    if (material.waterSurface) {
+      try {
+        const surface = await load(material.waterSurface);
+        // Data channels (relief ratio, glints, foam lace): no sRGB decode; a seamless tile repeats in both axes.
+        surface.colorSpace = NoColorSpace;
+        surface.magFilter = LinearFilter;
+        surface.minFilter = LinearMipmapLinearFilter;
+        surface.generateMipmaps = true;
+        surface.anisotropy = 8;
+        surface.wrapS = RepeatWrapping;
+        surface.wrapT = RepeatWrapping;
+        waterSurface = { texture: surface, scale: material.waterSurfaceScale };
+      } catch (error) {
+        console.warn(`${url(material.waterSurface)}: failed to load water surface; ignoring it`, error);
+      }
+    }
+    let shoreIgnore: Uint8Array | undefined;
+    if (mask && material.shoreIgnore) {
+      const ignoreUrl = url(material.shoreIgnore);
+      try {
+        const ignore = await loadMask(ignoreUrl);
+        if (ignore.width === mask.width && ignore.height === mask.height) shoreIgnore = ignore.bytes;
+        else console.warn(`${ignoreUrl}: shore-ignore size differs from the water mask; ignoring it`);
+        // Only the CPU bytes feed the distance fields; this mask is never sampled by a material.
+        ignore.texture.dispose();
+      } catch (error) {
+        console.warn(`${ignoreUrl}: failed to load shore-ignore mask; ignoring it`, error);
+      }
+    }
     void original;
+    const downsample = material.waterBed ? 2 : 4;
     terrainMap = {
       texture,
       waterMask: mask?.texture ?? emptyMask(),
-      shore: mask ? buildShoreField(mask.bytes, mask.width, mask.height, ref.scale).texture : emptyMask(),
+      waterBed: material.waterBed,
+      waterDetail,
+      waterSurface,
+      // The lake-bed shoreline needs a finer, higher-precision distance field (see buildShoreField).
+      shore: mask
+        ? buildShoreField(mask.bytes, mask.width, mask.height, ref.scale, downsample, material.waterBed, shoreIgnore)
+            .texture
+        : emptyMask(),
+      cliff:
+        mask && shoreIgnore
+          ? buildCliffField(mask.bytes, shoreIgnore, mask.width, mask.height, ref.scale, downsample).texture
+          : null,
       ref,
     };
   }
@@ -277,14 +392,31 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
   const windowsTexture = windowsIndex ? await loadMaskTexture(url('windows.png')) : null;
   const windows = windowsIndex && windowsTexture ? { texture: windowsTexture, index: windowsIndex } : null;
 
+  const exists = decodeBase64(manifest.cells.exists);
+  const height = decodeBase64(manifest.cells.height);
+  const lighting = lights?.lighting.normal ?? manifest.lighting;
+  const mapLight = lighting
+    ? new MapLightGrade(
+        { width: manifest.grid.width, height: manifest.grid.height, z: height, exists },
+        lighting,
+        lights?.lights ?? [],
+      )
+    : null;
+  for (const rgb of paletteRgb.values()) {
+    setPaletteGrade(rgb, mapLight);
+    setPaletteNodes(rgb, nodes);
+  }
+
   return {
     base,
+    nodes,
     manifest,
     lights,
+    mapLight,
     windows,
     terrainMap,
-    exists: decodeBase64(manifest.cells.exists),
-    height: decodeBase64(manifest.cells.height),
+    exists,
+    height,
     tile,
     terrainAtlas,
     waterMask,
@@ -298,6 +430,49 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
 }
 
 const PALETTE_ROWS = 128;
+
+/** Default width of one painted water-surface tile, in screen units of 30 engine px (MapMaterials.waterSurfaceScale). */
+export const DEFAULT_WATER_SURFACE_SCALE = 13;
+
+/** Resolve the optional material overrides together, so the mask and the distance field always use the same asset. */
+export function resolveTerrainMaterials(
+  ref: NonNullable<HdCacheManifest['terrainMap']>,
+  materials: MapMaterials | null,
+): {
+  file: string;
+  waterMask: string | undefined;
+  shoreIgnore: string | undefined;
+  waterBed: boolean;
+  waterDetail: string | undefined;
+  waterSurface: string | undefined;
+  waterSurfaceScale: number;
+} {
+  return {
+    file: materials?.terrainMap ?? ref.file,
+    waterMask: materials?.waterMask ?? ref.waterMask,
+    shoreIgnore: typeof materials?.shoreIgnore === 'string' ? materials.shoreIgnore : undefined,
+    waterBed: materials?.waterBed === true,
+    waterDetail: typeof materials?.waterDetail === 'string' ? materials.waterDetail : undefined,
+    waterSurface: typeof materials?.waterSurface === 'string' ? materials.waterSurface : undefined,
+    waterSurfaceScale:
+      typeof materials?.waterSurfaceScale === 'number' && materials.waterSurfaceScale > 0
+        ? materials.waterSurfaceScale
+        : DEFAULT_WATER_SURFACE_SCALE,
+  };
+}
+
+/** The optional per-map materials sidecar; null when absent or unreadable (dev servers may answer 404 or HTML). */
+async function loadMapMaterials(url: string): Promise<MapMaterials | null> {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const json = (await response.json()) as MapMaterials;
+    // Resolve optional shoreIgnore/waterDetail types without rejecting legacy sidecars or their other overrides.
+    return json && json.version === 1 ? json : null;
+  } catch {
+    return null;
+  }
+}
 
 function writePaletteRow(stacked: Uint8Array, row: number, rgb: Uint8Array): void {
   for (let i = 0; i < 256; i++) stacked.set([rgb[i * 3]!, rgb[i * 3 + 1]!, rgb[i * 3 + 2]!, 255], (row * 256 + i) * 4);
@@ -313,6 +488,8 @@ export function addPalette(cache: Ra2Cache, key: string, rgb: Uint8Array): boole
     cache.paletteRow.set(key, row);
   }
   cache.paletteRgb.set(key, rgb);
+  setPaletteGrade(rgb, cache.mapLight);
+  if (cache.nodes) setPaletteNodes(rgb, cache.nodes);
   writePaletteRow(stacked, row, rgb);
   cache.paletteAtlas.needsUpdate = true;
   return true;
@@ -337,6 +514,8 @@ export function addHousePalettes(
     const remapped = cache.paletteRgb.get(key)!.slice();
     remap.slice(0, 16).forEach(([r, g, b], i) => remapped.set([r, g, b], (16 + i) * 3));
     cache.paletteRgb.set(houseKey, remapped);
+    setPaletteGrade(remapped, cache.mapLight);
+    if (cache.nodes) setPaletteNodes(remapped, cache.nodes);
     let row = cache.paletteRow.get(houseKey);
     if (row === undefined) {
       if (next >= capacity) return false;
@@ -386,9 +565,18 @@ export function tileAtlasPixel(
 }
 
 /** Palette key for an object's art: the house-remapped row when the art is remappable and the owner is known. */
+const remapKeys = new WeakMap<Ra2Cache, Map<string, Map<string, string>>>();
+
 export function paletteFor(cache: Ra2Cache, palette: string, remap: boolean, owner?: string): string {
-  const key = `${palette}@${owner}`;
-  return remap && owner && cache.paletteRow.has(key) ? key : palette;
+  if (!remap || !owner) return palette;
+  let owners = remapKeys.get(cache);
+  if (!owners) remapKeys.set(cache, (owners = new Map()));
+  let palettes = owners.get(owner);
+  if (!palettes) owners.set(owner, (palettes = new Map()));
+  let key = palettes.get(palette);
+  if (!key) palettes.set(palette, (key = `${palette}@${owner}`));
+  // Palette rows may arrive after the first lookup, so cache only the key, never its availability.
+  return cache.paletteRow.has(key) ? key : palette;
 }
 
 /** World point on the ground at `level` whose engine projection is the screen point (sx, sy). */

@@ -205,6 +205,8 @@ describe('WorkerVmClient RPC lifecycle', () => {
       localHouse: -1,
       objects: [],
       shroud: null,
+      overlays: null,
+      smudges: null,
       effects: null,
     };
     const first = client.getRenderState();
@@ -213,6 +215,73 @@ describe('WorkerVmClient RPC lifecycle', () => {
     const second = client.getRenderState();
     worker.emit({ type: 'render-state-unchanged', requestId: requestId(worker, 'render-state') });
     await expect(second).resolves.toBe(snapshot);
+    const overlays = {
+      originX: 0,
+      originY: 0,
+      width: 1,
+      height: 1,
+      index: new Int16Array([0]),
+      data: new Uint8Array([3]),
+      types: ['GAWALL'],
+      revision: 1,
+    };
+    const smudges = { ...overlays, types: ['CR1'] };
+    const gridState = { ...snapshot, overlays, smudges };
+    const full = client.getRenderState();
+    worker.emit({ type: 'render-state-reply', requestId: requestId(worker, 'render-state'), value: gridState });
+    await expect(full).resolves.toBe(gridState);
+    const { overlays: _grid, smudges: _smudges, ...rest } = gridState;
+    const delta = client.getRenderState();
+    worker.emit({
+      type: 'render-state-cells-unchanged',
+      requestId: requestId(worker, 'render-state'),
+      value: { ...rest, frame: 8 },
+    });
+    const updated = await delta;
+    expect(updated?.overlays).toBe(overlays);
+    expect(updated?.smudges).toBe(smudges);
+    expect(updated?.frame).toBe(8);
+    expect(gridState.frame).toBe(7);
+    const clearSmudges = client.getRenderState();
+    worker.emit({
+      type: 'render-state-cells-unchanged',
+      requestId: requestId(worker, 'render-state'),
+      value: { ...rest, frame: 9, smudges: null },
+    });
+    const cleared = await clearSmudges;
+    expect(cleared?.smudges).toBeNull();
+    expect(cleared?.overlays).toBe(overlays);
+    const replaceSmudges = client.getRenderState();
+    const replacement = { ...smudges, index: new Int16Array([-1]), revision: 2 };
+    worker.emit({
+      type: 'render-state-cells-unchanged',
+      requestId: requestId(worker, 'render-state'),
+      value: { ...rest, frame: 10, smudges: replacement },
+    });
+    const replaced = await replaceSmudges;
+    expect(replaced?.smudges).toBe(replacement);
+    expect(replaced?.overlays).toBe(overlays);
+    expect(gridState.smudges.index[0]).toBe(0);
+
+    const rubble = [{ slot: 0, type: 'SOURCE' }];
+    const carrierGrid = { ...overlays, rubble, revision: 2 };
+    const withRubble = client.getRenderState();
+    worker.emit(
+      structuredClone({
+        type: 'render-state-cells-unchanged',
+        requestId: requestId(worker, 'render-state'),
+        value: { ...rest, frame: 11, overlays: carrierGrid },
+      }),
+    );
+    expect((await withRubble)?.overlays?.rubble).toEqual(rubble);
+    const keepRubble = client.getRenderState();
+    worker.emit({
+      type: 'render-state-cells-unchanged',
+      requestId: requestId(worker, 'render-state'),
+      value: { ...rest, frame: 12 },
+    });
+    expect((await keepRubble)?.overlays?.rubble).toEqual(rubble);
+
     const outside = client.getRenderState();
     worker.emit({ type: 'render-state-reply', requestId: requestId(worker, 'render-state'), value: null });
     await expect(outside).resolves.toBeNull();
@@ -241,6 +310,8 @@ describe('WorkerVmClient RPC lifecycle', () => {
       localHouse: -1,
       objects: [],
       shroud: null,
+      overlays: null,
+      smudges: null,
       effects: null,
     };
     const late = client.getRenderState();

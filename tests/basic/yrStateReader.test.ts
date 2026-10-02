@@ -21,6 +21,8 @@ import {
   worldVectorToFacing,
 } from '../../src/games/yr/stateReader';
 import { YR_STARTUP_PAGE_HASH } from '../../src/games/yr/startupPage';
+import { YR_BUILDING_RENDER_OFFSETS as B } from '../../src/games/yr/buildingRenderState';
+import { YR_INFANTRY_RENDER_OFFSETS as I } from '../../src/games/yr/infantryRenderState';
 
 /** Synthetic 16 MiB guest memory: enough for every YR 1.001 global and a small heap above 0xb00000. */
 function syntheticMemory() {
@@ -51,7 +53,7 @@ function syntheticMemory() {
     u32(base + 0x10, pointers.length);
   };
   const type = (vtable: number, id: string, strength: number, turret = false) => {
-    const at = alloc(0xd00);
+    const at = alloc(vtable === V.buildingType ? 0x1800 : 0x1700);
     u32(at, vtable);
     ascii(at + O.typeId, id);
     i32(at + O.typeStrength, strength);
@@ -87,7 +89,7 @@ function syntheticMemory() {
     owner: number,
     fields: { x: number; y: number; z?: number; health: number; uid: number; facing?: number; limbo?: boolean },
   ) => {
-    const at = alloc(0x6d0);
+    const at = alloc(0x700);
     u32(at, vtable);
     u32(at + O.uniqueId, fields.uid);
     i32(at + O.health, fields.health);
@@ -98,6 +100,10 @@ function syntheticMemory() {
     u32(at + O.owner, owner);
     u32(at + typeOffset, typePointer);
     facing(at + O.primaryFacing, fields.facing ?? 0);
+    if (vtable === V.building) {
+      i32(at + B.state, 1);
+      i32(at + B.queuedState, -1);
+    }
     return at;
   };
   return { bytes, view, alloc, u8, u16, u32, i32, ascii, utf16, vector, type, house, facing, object };
@@ -155,6 +161,8 @@ function battlefield() {
   const limboMcv = m.object(V.unit, O.unitType, amcv, player, { x: 0, y: 0, health: 1000, uid: 12, limbo: true });
   const badVtable = m.object(0x12345678, O.unitType, mtnk, player, { x: 256, y: 256, health: 1, uid: 13 });
   const soldier = m.object(V.infantry, O.infantryType, e1, ai, { x: 1000, y: 2000, z: 104, health: 200, uid: 14 });
+  m.i32(soldier + I.sequence, 2);
+  m.i32(soldier + I.sequenceFrame, 3);
   const yard = m.object(V.building, O.buildingType, gacnst, ai, { x: 5000, y: 6000, health: 500, uid: 15 });
   m.vector(G.units, [tank, limboMcv, badVtable, 0]);
   m.vector(G.infantry, [soldier]);
@@ -200,6 +208,304 @@ describe('guest memory accessors', () => {
 });
 
 describe('YR 1.001 state reader', () => {
+  const continuousReader = (m: ReturnType<typeof syntheticMemory>) => {
+    for (const vtable of Object.values(V)) m.u32(vtable, 0x6d_0000);
+    const read = createYrStateReader(() => createByteViewAccessor(m.bytes), YR_STARTUP_PAGE_HASH);
+    expect(read).not.toBeNull();
+    return read!;
+  };
+
+  const radio = (m: ReturnType<typeof syntheticMemory>, object: number, contact: number, capacity = 1) => {
+    const items = m.alloc(64 * 4);
+    m.u32(items, contact);
+    m.u32(object + O.radioItems, items);
+    m.i32(object + O.radioCapacity, capacity);
+    return items;
+  };
+
+  it('resolves stable contact IDs after all kinds, including aircraft and reciprocal building links', () => {
+    const { m, tank, soldier, yard, player } = battlefield();
+    const type = m.type(V.aircraftType, 'TESTAIR', 100);
+    const aircraft = m.object(V.aircraft, O.aircraftType, type, player, { x: 256, y: 512, health: 100, uid: 16 });
+    m.vector(G.aircraft, [aircraft]);
+    for (const unit of [tank, soldier, aircraft]) radio(m, unit, yard, 64);
+    radio(m, yard, aircraft);
+    const read = readYrState(createByteViewAccessor(m.bytes));
+    for (const unit of [tank, soldier, aircraft])
+      expect(read.objects.find((o) => o.id === unit)).toMatchObject({ contactUid: 15 });
+    expect(read.objects.find((o) => o.id === yard)).toMatchObject({ contactUid: 16, dock: false });
+  });
+
+  it.each([O.typeJumpJet, O.typeBalloonHover])('selects roof delivery from validated contact type flag %s', (flag) => {
+    const { m, tank, yard } = battlefield();
+    radio(m, yard, tank);
+    m.i32(yard + B.currentMission, 16);
+    const type = m.view.getUint32(tank + O.unitType, true);
+    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects.find((o) => o.id === yard);
+    expect(read()).toMatchObject({ contactUid: 11, unloading: 'door' });
+    m.u8(type + flag, 1);
+    expect(read()).toMatchObject({ unloading: 'roof' });
+    m.i32(yard + B.currentMission, 5);
+    m.i32(yard + B.queuedMission, 16);
+    expect(read()).not.toHaveProperty('unloading');
+    m.i32(yard + B.currentMission, -1);
+    expect(read()).toMatchObject({ unloading: 'roof' });
+    m.u8(type + flag, 2);
+    expect(read()).not.toHaveProperty('unloading');
+  });
+
+  it.each(['door', 'roof'] as const)('keeps %s delivery through link release until effective Guard', (unloading) => {
+    const { m, tank, yard } = battlefield();
+    const type = m.view.getUint32(tank + O.unitType, true);
+    m.ascii(type + O.typeId, unloading === 'roof' ? 'SHAD' : 'HTNK');
+    m.u8(type + O.typeJumpJet, unloading === 'roof' ? 1 : 0);
+    const items = radio(m, yard, tank);
+    m.i32(yard + B.currentMission, 5);
+    m.i32(yard + B.queuedMission, 16);
+    const reader = continuousReader(m);
+    const read = () => reader()!.objects.find((o) => o.id === yard);
+    expect(read()).not.toHaveProperty('unloading');
+    m.i32(yard + B.currentMission, 16);
+    expect(read()).toHaveProperty('unloading', unloading);
+    m.u32(items, 0);
+    expect(read()).not.toHaveProperty('contactUid');
+    expect(read()).toHaveProperty('unloading', unloading);
+    m.i32(yard + B.currentMission, -1);
+    expect(read()).toHaveProperty('unloading', unloading); // Queued Unload is still the same effective mission.
+    m.i32(yard + B.currentMission, 5);
+    expect(read()).not.toHaveProperty('unloading');
+    m.i32(yard + B.currentMission, 16);
+    expect(read()).toHaveProperty('unloading', 'door'); // A new Unload cannot inherit the previous roof.
+  });
+
+  it.each(['missing', 'type', 'uid', 'invalid mission'] as const)('resets the roof latch on %s', (change) => {
+    const { m, tank, yard } = battlefield();
+    m.u8(m.view.getUint32(tank + O.unitType, true) + O.typeJumpJet, 1);
+    const items = radio(m, yard, tank);
+    m.i32(yard + B.currentMission, 16);
+    const reader = continuousReader(m);
+    const read = () => reader()!.objects.find((o) => o.id === yard);
+    expect(read()).toHaveProperty('unloading', 'roof');
+    m.u32(items, 0);
+    if (change === 'missing') {
+      m.vector(G.buildings, []);
+      expect(read()).toBeUndefined();
+      m.vector(G.buildings, [yard]);
+    } else if (change === 'type') {
+      m.u32(yard + O.buildingType, m.type(V.buildingType, 'GAWEAP', 1000));
+    } else if (change === 'uid') {
+      m.u32(yard + O.uniqueId, 99);
+    } else {
+      m.i32(yard + B.currentMission, 32);
+      expect(read()).not.toHaveProperty('unloading');
+      m.i32(yard + B.currentMission, 16);
+    }
+    expect(read()).toHaveProperty('unloading', 'door');
+  });
+
+  it('omits unreadable roof state without substituting a latched roof or sharing history between readers', () => {
+    const { m, tank, yard } = battlefield();
+    const type = m.view.getUint32(tank + O.unitType, true);
+    m.u8(type + O.typeBalloonHover, 1);
+    const items = radio(m, yard, tank);
+    m.i32(yard + B.currentMission, 16);
+    const reader = continuousReader(m);
+    const read = () => reader()!.objects.find((o) => o.id === yard);
+    expect(read()).toHaveProperty('unloading', 'roof');
+    m.u8(type + O.typeBalloonHover, 2);
+    expect(read()).not.toHaveProperty('unloading');
+    m.i32(yard + O.radioCapacity, -1);
+    expect(read()).not.toHaveProperty('unloading');
+    m.i32(yard + O.radioCapacity, 1);
+    m.u32(items, 0);
+    expect(read()).toHaveProperty('unloading', 'roof');
+    expect(continuousReader(m)()!.objects.find((o) => o.id === yard)).toHaveProperty('unloading', 'door');
+  });
+
+  it.each([-1, 0, 65, 0x7fffffff])('omits contacts with invalid/empty capacity %s', (capacity) => {
+    const { m, tank, yard } = battlefield();
+    radio(m, tank, yard, capacity);
+    radio(m, yard, tank, capacity);
+    m.i32(yard + B.currentMission, 16);
+    const read = readYrState(createByteViewAccessor(m.bytes));
+    expect(read.objects.find((o) => o.id === tank)).not.toHaveProperty('contactUid');
+    const host = read.objects.find((o) => o.id === yard);
+    expect(host).not.toHaveProperty('contactUid');
+    if (capacity === 0) expect(host).toHaveProperty('unloading', 'door');
+    else expect(host).not.toHaveProperty('unloading');
+  });
+
+  it('omits stale, limbo, misaligned and out-of-range radio pointers without losing valid objects', () => {
+    const { m, tank, yard, limboMcv } = battlefield();
+    const items = radio(m, tank, yard);
+    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects.find((o) => o.id === tank);
+    for (const contact of [0, 3, m.bytes.length, limboMcv, m.alloc(0x700)]) {
+      m.u32(items, contact);
+      expect(read()).not.toHaveProperty('contactUid');
+    }
+    m.u32(items, yard);
+    for (const bad of [0, items + 1, m.bytes.length - 4]) {
+      m.u32(tank + O.radioItems, bad);
+      m.i32(tank + O.radioCapacity, 2);
+      expect(read()).not.toHaveProperty('contactUid');
+    }
+    m.u32(tank + O.radioItems, items);
+    m.i32(tank + O.radioCapacity, 1);
+    expect(read()).toHaveProperty('contactUid', 15);
+  });
+
+  it('contains failed optional radio accessors and invalid dock flag reads', () => {
+    const { m, tank, yard } = battlefield();
+    radio(m, tank, yard);
+    const base = createByteViewAccessor(m.bytes);
+    const memory = {
+      ...base,
+      i32: (at: number) => {
+        if (at === tank + O.radioCapacity) throw new Error('unavailable');
+        return base.i32(at);
+      },
+    };
+    expect(readYrState(memory).objects.find((o) => o.id === tank)).not.toHaveProperty('contactUid');
+    const type = m.view.getUint32(yard + O.buildingType, true);
+    m.u8(type + B.refinery, 1);
+    expect(readYrState(base).objects.find((o) => o.id === yard)).toHaveProperty('dock', true);
+    m.u8(type + B.helipad, 2);
+    expect(readYrState(base).objects.find((o) => o.id === yard)).not.toHaveProperty('dock');
+  });
+
+  it('carries a validated JumpJet target facing without replacing primary facing', () => {
+    const { m, soldier, tank } = battlefield();
+    const data = new DataView(m.bytes.buffer);
+    const type = data.getUint32(soldier + O.infantryType, true);
+    const base = m.alloc(0xa0);
+    m.u8(type + I.jumpJet, 1);
+    m.u32(soldier + I.locomotor, base + 4);
+    m.u32(base, 0x7ece34);
+    m.u32(base + 4, 0x7ecd68);
+    m.u32(0x7ece40, 0x54b710);
+    m.u32(soldier + I.target, tank);
+    m.u32(V.infantry + 0x48, 0x5f65a0);
+    m.u32(V.unit + 0x48, 0x5f65a0);
+    m.i32(tank + O.location, 1256);
+    m.i32(tank + O.location + 4, 2000);
+    data.setFloat32(0x8650b8, 0.024413354694843292, true);
+    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects.find((o) => o.id === soldier);
+    expect(read()).toMatchObject({ infantryDrawFacingRaw: 0x3fff, facingRaw: 0, infantrySequence: 'Prone' });
+    m.u8(type + I.jumpJetTurn, 1);
+    expect(read()).not.toHaveProperty('infantryDrawFacingRaw');
+  });
+
+  it('adds H2 make state and leaves failed optional reads off otherwise valid objects', () => {
+    const { m, yard, soldier } = battlefield();
+    const type = new DataView(m.bytes.buffer).getUint32(yard + O.buildingType, true);
+    m.i32(yard + B.state, 0);
+    m.u8(yard + B.hasBuildup, 1);
+    m.i32(yard + B.currentMission, 19);
+    m.i32(yard + B.queuedMission, -1);
+    m.i32(yard + B.stage, 4);
+    m.i32(type + B.makeCount, 20);
+    const read = () => readYrState(createByteViewAccessor(m.bytes));
+    expect(read().objects.find((object) => object.id === yard)).toMatchObject({
+      buildState: 'selling',
+      buildupFrame: 15,
+    });
+    m.i32(yard + B.state, 6);
+    m.i32(soldier + I.sequence, -1);
+    const invalid = read();
+    expect(invalid.objects.find((object) => object.id === yard)).not.toHaveProperty('buildState');
+    expect(invalid.objects.find((object) => object.id === soldier)).not.toHaveProperty('infantrySequence');
+    expect(invalid.objects).toHaveLength(3);
+  });
+
+  it.each([
+    ['HARV', 'HORV'],
+    ['CMIN', 'CMON'],
+  ])('selects %s unloading art %s only while docked, without changing the rules type', (id, imageId) => {
+    const m = syntheticMemory();
+    const type = m.type(V.unitType, id, 1000);
+    const unloadingType = m.type(V.unitType, imageId, 500);
+    const unit = m.object(V.unit, O.unitType, type, 0, { x: 256, y: 512, health: 750, uid: 1 });
+    m.vector(G.units, [unit]);
+    m.u8(type + O.unitTypeHarvester, 1);
+    m.u32(type + O.technoTypeUnloadingClass, unloadingType);
+    m.u8(unit + O.unitUnloading, 1);
+    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects[0];
+    expect(read()).toMatchObject({ type: id, imageType: imageId, health: 0.75 });
+    m.u8(unit + O.unitUnloading, 0);
+    expect(read()).toMatchObject({ type: id, health: 0.75 });
+    expect(read()).not.toHaveProperty('imageType');
+    // A poll during the draw's temporary Type substitution still draws the unloading image.
+    m.u8(unit + O.unitUnloading, 1);
+    m.u32(unit + O.unitType, unloadingType);
+    m.u8(unloadingType + O.unitTypeHarvester, 1);
+    expect(read()).toMatchObject({ type: imageId });
+    expect(read()).not.toHaveProperty('imageType');
+  });
+
+  it('ignores a non-harvester UnloadingClass, including the separate SCHP deployment path', () => {
+    const m = syntheticMemory();
+    const type = m.type(V.unitType, 'SCHP', 1000);
+    const unloadingType = m.type(V.unitType, 'SCHD', 1000);
+    const unit = m.object(V.unit, O.unitType, type, 0, { x: 256, y: 512, health: 750, uid: 1 });
+    m.vector(G.units, [unit]);
+    m.u32(type + O.technoTypeUnloadingClass, unloadingType);
+    m.u8(unit + O.unitUnloading, 1);
+    m.u8(unit + 0x6e0, 1);
+    const read = readYrState(createByteViewAccessor(m.bytes));
+    expect(read.objects[0]).toMatchObject({ type: 'SCHP' });
+    expect(read.objects[0]).not.toHaveProperty('imageType');
+  });
+
+  it.each(['null', 'out-of-bounds', 'wrong-vtable', 'cached-building-type', 'missing-id'])(
+    'ignores an %s UnloadingClass while keeping the HARV object',
+    (invalid) => {
+      const m = syntheticMemory();
+      const type = m.type(V.unitType, 'HARV', 1000);
+      let unloadingType = m.type(V.unitType, 'HORV', 500);
+      const unit = m.object(V.unit, O.unitType, type, 0, { x: 256, y: 512, health: 750, uid: 1 });
+      m.vector(G.units, [unit]);
+      m.u8(type + O.unitTypeHarvester, 1);
+      m.u8(unit + O.unitUnloading, 1);
+      if (invalid === 'null') unloadingType = 0;
+      else if (invalid === 'out-of-bounds') unloadingType = m.bytes.length - 4;
+      else if (invalid === 'wrong-vtable') m.u32(unloadingType, V.infantryType);
+      else if (invalid === 'missing-id') m.ascii(unloadingType + O.typeId, '');
+      else {
+        unloadingType = m.type(V.buildingType, 'GAREFN', 1000);
+        const refinery = m.object(V.building, O.buildingType, unloadingType, 0, {
+          x: 256,
+          y: 512,
+          health: 1000,
+          uid: 2,
+        });
+        m.vector(G.buildings, [refinery]);
+      }
+      m.u32(type + O.technoTypeUnloadingClass, unloadingType);
+      const read = readYrState(createByteViewAccessor(m.bytes));
+      const miner = read.objects.find((object) => object.id === unit);
+      expect(miner).toMatchObject({ type: 'HARV', health: 0.75 });
+      expect(miner).not.toHaveProperty('imageType');
+      expect(read.stats.invalid.vehicle).toBe(0);
+    },
+  );
+
+  it('bounds-checks the larger harvester type span without rejecting a valid base type', () => {
+    const m = syntheticMemory();
+    const type = (m.bytes.length - O.unitTypeHarvester) & ~3;
+    m.u32(type, V.unitType);
+    m.ascii(type + O.typeId, 'HARV');
+    m.i32(type + O.typeStrength, 1000);
+    const unloadingType = m.type(V.unitType, 'HORV', 500);
+    m.u32(type + O.technoTypeUnloadingClass, unloadingType);
+    const unit = m.object(V.unit, O.unitType, type, 0, { x: 256, y: 512, health: 750, uid: 1 });
+    m.vector(G.units, [unit]);
+    m.u8(unit + O.unitUnloading, 1);
+    const memory = createByteViewAccessor(m.bytes.subarray(0, type + O.unitTypeHarvester));
+    const miner = readYrState(memory).objects[0];
+    expect(miner).toMatchObject({ type: 'HARV', health: 0.75 });
+    expect(miner).not.toHaveProperty('imageType');
+  });
+
   it('reads map, houses and objects, skipping limbo and invalid entries', () => {
     const { m, tank, soldier, yard } = battlefield();
     const state = readYrState(createByteViewAccessor(m.bytes));
@@ -252,6 +558,8 @@ describe('YR 1.001 state reader', () => {
         facingRaw: 0,
         health: 0.5,
         isSelected: false,
+        buildState: 'done',
+        dock: false,
       },
       {
         id: tank,
@@ -282,6 +590,8 @@ describe('YR 1.001 state reader', () => {
         facingRaw: 0,
         health: 1,
         isSelected: false,
+        infantrySequence: 'Prone',
+        sequenceFrame: 3,
       },
     ]);
     // Unit vector: tank + limbo MCV + wrong vtable + null pointer.
@@ -303,6 +613,71 @@ describe('YR 1.001 state reader', () => {
     const before = m.bytes.slice();
     readYrState(createByteViewAccessor(m.bytes), { includeLimbo: true });
     expect(Buffer.compare(m.bytes, before)).toBe(0);
+  });
+
+  it('reads registered painter layers and stable tie indices independently of kind, height and UID', () => {
+    const { m, tank, soldier, yard, ai } = battlefield();
+    m.i32(soldier + O.location, 13248);
+    m.i32(soldier + O.location + 4, 20544);
+    m.i32(tank + O.location, 13440);
+    m.i32(tank + O.location + 4, 20352);
+    m.i32(tank + O.location + 8, 1040);
+    m.i32(yard + O.location, 13696);
+    m.i32(yard + O.location + 4, 20864);
+    const effect = m.alloc(0x100);
+    const planeType = m.type(V.aircraftType, 'ORCA', 200);
+    const plane = m.object(V.aircraft, O.aircraftType, planeType, ai, { x: 1, y: 2, z: 208, health: 200, uid: 1 });
+    m.vector(G.aircraft, [plane]);
+    m.vector(G.renderLayers + 2 * 0x18, [effect, soldier, tank, yard]);
+    m.vector(G.renderLayers + 4 * 0x18, [plane]);
+    const read = readYrState(createByteViewAccessor(m.bytes));
+    const order = (id: number) => read.objects.find((object) => object.id === id)?.renderOrder;
+    expect(order(soldier)).toEqual({ layer: 2, index: 1, ySort: 33792 });
+    expect(order(tank)).toEqual({ layer: 2, index: 2, ySort: 33792 });
+    expect(order(yard)).toEqual({ layer: 2, index: 3, ySort: 34304 });
+    expect(order(plane)).toEqual({ layer: 4, index: 0, ySort: 3 });
+    // A layer registration, including an air/ground transition, can change without changing the kind vector.
+    m.vector(G.renderLayers + 4 * 0x18, []);
+    m.vector(G.renderLayers + 2 * 0x18, [plane, effect, soldier, tank, yard]);
+    expect(
+      readYrState(createByteViewAccessor(m.bytes)).objects.find((object) => object.id === plane)?.renderOrder,
+    ).toEqual({ layer: 2, index: 0, ySort: 3 });
+  });
+
+  it.each([
+    [false, false, 10744],
+    [true, false, 10776],
+    [false, true, 10728],
+    [true, true, 10760],
+  ])('applies building voxel-turret=%s and gate=%s sort adjustments', (voxelTurret, gate, ySort) => {
+    const { m, yard } = battlefield();
+    const type = m.view.getUint32(yard + O.buildingType, true);
+    m.u8(type + O.buildingTypeVoxelTurret, voxelTurret ? 1 : 0);
+    m.u8(type + O.buildingTypeGate, gate ? 1 : 0);
+    m.vector(G.renderLayers + 2 * 0x18, [yard]);
+    expect(
+      readYrState(createByteViewAccessor(m.bytes)).objects.find((object) => object.id === yard)?.renderOrder,
+    ).toEqual({ layer: 2, index: 0, ySort });
+  });
+
+  it('omits uncertain painter metadata while retaining valid objects and other readable layers', () => {
+    const { m, tank, soldier, yard } = battlefield();
+    const layer = G.renderLayers + 2 * 0x18;
+    const read = () => readYrState(createByteViewAccessor(m.bytes));
+    expect(read().objects.every((object) => object.renderOrder === undefined)).toBe(true);
+    m.vector(layer, [soldier, tank, yard]);
+    m.vector(G.renderLayers + 4 * 0x18, [tank]);
+    const duplicate = read();
+    expect(duplicate.objects).toHaveLength(3);
+    expect(duplicate.objects.find((object) => object.id === tank)).not.toHaveProperty('renderOrder');
+    expect(duplicate.objects.find((object) => object.id === yard)?.renderOrder?.index).toBe(2);
+    m.u32(layer + 0x10, YR_STATE_LIMITS.objectsPerLayer + 1);
+    expect(read().objects.find((object) => object.id === yard)).not.toHaveProperty('renderOrder');
+    expect(read().objects.find((object) => object.id === tank)?.renderOrder?.layer).toBe(4);
+    m.u32(layer + 0x10, 1);
+    m.u32(layer + 4, 0xfffffff0);
+    expect(read().objects).toHaveLength(3);
+    expect(read().objects.find((object) => object.id === soldier)).not.toHaveProperty('renderOrder');
   });
 
   it('returns an empty state outside a battle', () => {

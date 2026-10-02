@@ -1,0 +1,52 @@
+[
+  {
+    "name": "DRON",
+    "unit": { "facings": 8, "frames": { "WalkFrames": 6, "FiringFrames": 4 } },
+    "blocks": {
+      "facings": 8,
+      "walk": { "start": 0, "count": 6 },
+      "stand": { "start": 48, "count": 1 },
+      "fire": { "start": 56, "count": 4 }
+    }
+  },
+  {
+    "name": "defaults",
+    "unit": { "facings": 0, "frames": {} },
+    "blocks": {
+      "facings": 8,
+      "walk": { "start": 0, "count": 0 },
+      "stand": { "start": 0, "count": 1 },
+      "fire": { "start": 8, "count": 0 }
+    }
+  },
+  {
+    "name": "explicit starts including zero",
+    "unit": {
+      "facings": 4,
+      "frames": {
+        "WalkFrames": 3,
+        "StandingFrames": 2,
+        "FiringFrames": 5,
+        "StartWalkFrame": 11,
+        "StartStandFrame": 0,
+        "StartFiringFrame": 30
+      }
+    },
+    "blocks": {
+      "facings": 4,
+      "walk": { "start": 11, "count": 3 },
+      "stand": { "start": 0, "count": 2 },
+      "fire": { "start": 30, "count": 5 }
+    }
+  },
+  {
+    "name": "clamped counts and facings",
+    "unit": { "facings": -2, "frames": { "WalkFrames": -4, "StandingFrames": 0, "FiringFrames": 2 } },
+    "blocks": {
+      "facings": 1,
+      "walk": { "start": 0, "count": 0 },
+      "stand": { "start": 0, "count": 0 },
+      "fire": { "start": 0, "count": 2 }
+    }
+  }
+]

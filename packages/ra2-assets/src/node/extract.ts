@@ -34,7 +34,6 @@ import { HD_CACHE_VERSION } from '../manifest.ts';
 import { packShelves } from '../atlas.ts';
 import {
   animStillFrame,
-  artFileCandidates,
   BUILDING_ACTIVE_ANIM_KEYS,
   buildingConditionFrame,
   facingFrame,
@@ -262,7 +261,6 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   };
   // Engine draw points (see drawOffsetFor): overlays, smudges, buildings and tiberium trees put their canvas centre on
   // the cell's top corner; rocks, other terrain objects and movable objects on the cell centre (or their coord).
-  const cellCorner = drawOffsetFor('overlay');
   const cellCentre = drawOffsetFor('vehicle');
   // YR writes these as percentages ("50%"); parseIniFraction reads them as the engine does.
   const conditionYellow = parseIniFraction(rules.getSection('AudioVisual')?.getString('ConditionYellow', ''), 0.5);
@@ -294,16 +292,9 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
     const x = Number.parseInt(xs ?? '', 10);
     const y = Number.parseInt(ys ?? '', 10);
     if (!type || !Number.isFinite(x) || !Number.isFinite(y)) continue;
-    const { image } = artOf(type);
+    const { candidates, palette, remap, flat, drawOffset, lighting } = src.smudgeArt(type);
     const id = `smudge:${type}`;
-    // SmudgeTypes are always theater art (cr1.tem, burn01.tem, ...) even without an art Theater=yes entry.
-    const candidates = artFileCandidates(image, {
-      theater: true,
-      newTheater: false,
-      theaterExt: theater.ext,
-      theaterLetter: theater.newTheaterLetter,
-    });
-    const s = addShp(id, candidates, 'iso', false);
+    const s = addShp(id, candidates, palette, remap);
     if (!s) continue;
     objects.push({
       kind: 'smudge',
@@ -313,9 +304,9 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
       z: heightAt(x, y),
       sprite: id,
       frame: 0,
-      flat: true,
-      drawOffset: cellCorner,
-      lighting: 'full',
+      flat,
+      drawOffset,
+      lighting,
     });
     count('smudge');
   }
@@ -341,25 +332,18 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
       warn(`overlay index ${idx} not in [OverlayTypes]`);
       continue;
     }
-    const { sec, image } = artOf(type);
-    const wall = rulesBool(type, 'Wall');
-    const tiberium = rulesBool(type, 'Tiberium');
+    const art = src.overlayArt(type);
+    // Map files do not supply the live carrier's source building type; never substitute the overlay's Image.
+    if (art.rubble) continue;
+    const { wall, tiberium } = art;
     const id = `overlay:${type}`;
-    const s = addShp(id, shpCandidates(image, sec), wall ? 'unit' : tiberium ? 'theater' : 'iso', wall);
+    const s = addShp(id, art.candidates, art.palette, art.remap);
     if (!s) continue;
     let frame = od[i]!;
     if (frame >= s.frames.length) {
       warn(`${id}: OverlayData ${frame} beyond ${s.frames.length} body frames (clamped)`);
       frame = s.frames.length - 1;
     }
-    // High bridges (BRIDGE1/2, BRIDGEB1/2, RAILBRDG1/2) are drawn BridgeLevels (4) levels above their cell. They have
-    // no DrawFlat key, so the DrawFlat default must not put their raised deck into the ground pass.
-    const highBridge = /^(BRIDGE|BRIDGEB|RAILBRDG)[12]$/i.test(type);
-    const drawFlat = rulesBool(type, 'DrawFlat', true);
-    const flat = !wall && !highBridge && (tiberium || drawFlat);
-    const off: [number, number] = highBridge
-      ? [0, -4 * 15]
-      : drawOffsetFor('overlay', { isARock: rulesBool(type, 'IsARock') });
     objects.push({
       kind: 'overlay',
       type,
@@ -368,9 +352,9 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
       z: heightAt(x, y),
       sprite: id,
       frame,
-      flat,
-      drawOffset: off,
-      lighting: tiberium ? 'none' : wall ? 'ambient' : 'full',
+      flat: art.flat,
+      drawOffset: art.drawOffset,
+      lighting: art.lighting,
     });
     count(
       tiberium
@@ -474,7 +458,7 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
       return;
     }
     const id = `${kind}:${e.type}`;
-    const s = addShp(id, shpCandidates(image, sec), 'unit', true);
+    const s = addShp(id, shpCandidates(image, sec), 'unit', true, {}, undefined, kind === 'infantry' ? 12 : undefined);
     if (!s) return;
     let frame = 0;
     if (kind === 'infantry') {

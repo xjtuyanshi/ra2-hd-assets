@@ -1,0 +1,386 @@
+[
+  {
+    "anim": "TWLT070",
+    "kind": "explosion",
+    "chunks": [[18, 25]],
+    "scale": 3,
+    "cols": 3
+  },
+  {
+    "anim": "EXPLOLRG",
+    "kind": "explosion",
+    "chunks": [
+      [0, 8],
+      [9, 17],
+      [18, 20]
+    ],
+    "scale": 3,
+    "cols": 3
+  },
+  {
+    "anim": "S_BANG48",
+    "kind": "explosion",
+    "chunks": [
+      [0, 8],
+      [9, 17],
+      [18, 22]
+    ],
+    "scale": 3,
+    "cols": 3
+  },
+  {
+    "anim": "TWLT050",
+    "kind": "explosion",
+    "chunks": [[0, 16]],
+    "scale": 5,
+    "cols": 5
+  },
+  {
+    "anim": "TWLT100",
+    "kind": "explosion",
+    "chunks": [
+      [0, 8],
+      [9, 17],
+      [18, 20]
+    ],
+    "scale": 3,
+    "cols": 3
+  },
+  {
+    "anim": "FIRE01",
+    "kind": "fire",
+    "chunks": [[0, 29]],
+    "scale": 5,
+    "cols": 6
+  },
+  {
+    "anim": "TSTLEXP",
+    "kind": "tesla",
+    "chunks": [
+      [8, 20],
+      [21, 32]
+    ],
+    "scale": 3,
+    "cols": 4
+  },
+  {
+    "anim": "EXPLOMED",
+    "kind": "explosion",
+    "chunks": [[0, 14]],
+    "scale": 5,
+    "cols": 4
+  },
+  {
+    "anim": "EXPLOSML",
+    "kind": "explosion",
+    "chunks": [[0, 13]],
+    "scale": 6,
+    "cols": 5
+  },
+  {
+    "anim": "FIRE03",
+    "kind": "fire",
+    "chunks": [[0, 29]],
+    "scale": 7,
+    "cols": 6
+  },
+  {
+    "anim": "TSTIMPCT",
+    "kind": "tesla",
+    "chunks": [[0, 13]],
+    "scale": 7,
+    "cols": 5
+  },
+  {
+    "anim": "VTMUZZLE",
+    "kind": "muzzle",
+    "chunks": [[0, 10]],
+    "scale": 6,
+    "cols": 4
+  },
+  {
+    "anim": "GUNFIRE",
+    "kind": "muzzle",
+    "chunks": [[0, 3]],
+    "scale": 10,
+    "cols": 2
+  },
+  {
+    "anim": "FIRE02",
+    "kind": "fire",
+    "chunks": [
+      [0, 23],
+      [24, 47],
+      [48, 63]
+    ],
+    "scale": 5,
+    "cols": 6
+  },
+  {
+    "anim": "S_CLSN58",
+    "kind": "explosion",
+    "chunks": [
+      [0, 8],
+      [9, 17],
+      [18, 20]
+    ],
+    "scale": 3,
+    "cols": 3
+  },
+  {
+    "anim": "S_TUMU60",
+    "kind": "explosion",
+    "chunks": [
+      [0, 8],
+      [9, 17],
+      [18, 20]
+    ],
+    "scale": 3,
+    "cols": 3
+  },
+  {
+    "anim": "BRRLEXP1",
+    "kind": "explosion",
+    "chunks": [
+      [0, 8],
+      [9, 17],
+      [18, 24]
+    ],
+    "scale": 3,
+    "cols": 3
+  },
+  {
+    "anim": "APOCEXP",
+    "kind": "explosion",
+    "chunks": [[0, 15]],
+    "scale": 4,
+    "cols": 4
+  },
+  {
+    "anim": "PIFFPIFF",
+    "kind": "impact",
+    "chunks": [[0, 11]],
+    "scale": 10,
+    "cols": 4
+  },
+  {
+    "anim": "VTEXPLOD",
+    "kind": "explosion",
+    "chunks": [
+      [0, 12],
+      [13, 25]
+    ],
+    "scale": 4,
+    "cols": 4
+  },
+  {
+    "anim": "S_TUMU30",
+    "kind": "explosion",
+    "chunks": [[0, 9]],
+    "scale": 4,
+    "cols": 5
+  },
+  {
+    "anim": "S_CLSN30",
+    "kind": "explosion",
+    "chunks": [[0, 17]],
+    "scale": 3,
+    "cols": 6
+  },
+  {
+    "anim": "S_BANG34",
+    "kind": "explosion",
+    "chunks": [[0, 12]],
+    "scale": 6,
+    "cols": 5
+  },
+  {
+    "anim": "XGRYMED1",
+    "kind": "explosion",
+    "chunks": [[0, 14]],
+    "scale": 3,
+    "cols": 5
+  },
+  {
+    "anim": "KTSTLEXP",
+    "kind": "plasma",
+    "chunks": [
+      [0, 9],
+      [10, 19]
+    ],
+    "scale": 3,
+    "cols": 5
+  },
+  {
+    "anim": "PIFF",
+    "kind": "impact",
+    "chunks": [[0, 6]],
+    "scale": 10,
+    "cols": 4
+  },
+  {
+    "anim": "S_BRNL58",
+    "kind": "explosion",
+    "chunks": [[0, 9]],
+    "scale": 3,
+    "cols": 5
+  },
+  {
+    "anim": "XGRYSML1",
+    "kind": "explosion",
+    "chunks": [[0, 14]],
+    "scale": 6,
+    "cols": 5
+  },
+  {
+    "anim": "APMUZZLE",
+    "kind": "muzzle",
+    "chunks": [[0, 12]],
+    "scale": 8,
+    "cols": 5
+  },
+  {
+    "anim": "BRRLEXP2",
+    "kind": "explosion",
+    "chunks": [
+      [0, 8],
+      [9, 17],
+      [18, 26],
+      [27, 30]
+    ],
+    "scale": 2,
+    "cols": 3
+  },
+  {
+    "anim": "S_BANG16",
+    "kind": "explosion",
+    "chunks": [[0, 7]],
+    "scale": 10,
+    "cols": 4,
+    "sibling": "S_BANG34_0"
+  },
+  {
+    "anim": "S_BANG24",
+    "kind": "explosion",
+    "chunks": [[0, 7]],
+    "scale": 9,
+    "cols": 4,
+    "sibling": "S_BANG34_0"
+  },
+  {
+    "anim": "S_BRNL20",
+    "kind": "explosion",
+    "chunks": [[0, 9]],
+    "scale": 7,
+    "cols": 5,
+    "sibling": "S_BRNL58_0"
+  },
+  {
+    "anim": "S_BRNL30",
+    "kind": "explosion",
+    "chunks": [[0, 9]],
+    "scale": 5,
+    "cols": 5,
+    "sibling": "S_BRNL58_0"
+  },
+  {
+    "anim": "S_BRNL40",
+    "kind": "explosion",
+    "chunks": [[0, 9]],
+    "scale": 4,
+    "cols": 5,
+    "sibling": "S_BRNL58_0"
+  },
+  {
+    "anim": "S_CLSN16",
+    "kind": "explosion",
+    "chunks": [[0, 12]],
+    "scale": 7,
+    "cols": 5,
+    "sibling": "S_CLSN30_0"
+  },
+  {
+    "anim": "S_CLSN22",
+    "kind": "explosion",
+    "chunks": [[0, 12]],
+    "scale": 6,
+    "cols": 5,
+    "sibling": "S_CLSN30_0"
+  },
+  {
+    "anim": "S_CLSN42",
+    "kind": "explosion",
+    "chunks": [[0, 17]],
+    "scale": 3,
+    "cols": 6,
+    "sibling": "S_CLSN30_0"
+  },
+  {
+    "anim": "S_TUMU22",
+    "kind": "explosion",
+    "chunks": [[0, 9]],
+    "scale": 6,
+    "cols": 5,
+    "sibling": "S_TUMU30_0"
+  },
+  {
+    "anim": "S_TUMU42",
+    "kind": "explosion",
+    "chunks": [[0, 9]],
+    "scale": 4,
+    "cols": 5,
+    "sibling": "S_TUMU30_0"
+  },
+  {
+    "anim": "TWLT026",
+    "kind": "explosion",
+    "chunks": [[0, 16]],
+    "scale": 7,
+    "cols": 6,
+    "sibling": "TWLT050_0"
+  },
+  {
+    "anim": "TWLT036",
+    "kind": "explosion",
+    "chunks": [[0, 16]],
+    "scale": 6,
+    "cols": 6,
+    "sibling": "TWLT050_0"
+  },
+  {
+    "anim": "XGRYMED2",
+    "kind": "explosion",
+    "chunks": [[0, 13]],
+    "scale": 3,
+    "cols": 5,
+    "sibling": "XGRYMED1_0"
+  },
+  {
+    "anim": "XGRYSML2",
+    "kind": "explosion",
+    "chunks": [[0, 12]],
+    "scale": 5,
+    "cols": 5,
+    "sibling": "XGRYSML1_0"
+  },
+  {
+    "anim": "GCMUZZLE",
+    "kind": "muzzle",
+    "chunks": [[0, 16]],
+    "scale": 4,
+    "cols": 6,
+    "sibling": "APMUZZLE_0"
+  },
+  {
+    "anim": "EXPLOLB",
+    "kind": "blueexp",
+    "chunks": [
+      [0, 8],
+      [9, 17],
+      [18, 26],
+      [27, 30]
+    ],
+    "scale": 2,
+    "cols": 3
+  }
+]

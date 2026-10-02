@@ -153,9 +153,9 @@ describe('terrain map', () => {
   });
 
   it.each([
-    { full: true, lighting: true, hash: '66e3db7c695b8a906325a53fe8c95fad07b827af1bdef93164b7f546e8753be2' },
+    { full: true, lighting: true, hash: 'edae658a86f48cfcd7e41b28810ce2caa2fcb02defb1e0bc877ec7b9a697934e' },
     { full: true, lighting: false, hash: 'cd0fc1df3901e709acf0dd26b275a49b48732f0c998e925d17a61ef4c67690fd' },
-    { full: false, lighting: true, hash: 'd3a9b3ea4254808bb073ac74ab3c021e7aed26d2d5de8769ed19c8acd03a1b08' },
+    { full: false, lighting: true, hash: '1c7472353b87cb8c003b051eabde2e432b45a636eb906521a9222f874ec5f685' },
   ])('keeps preview PNG bytes identical (full=$full, lighting=$lighting)', ({ full, lighting, hash }) => {
     const { cacheDir, manifest } = syntheticCache();
     manifest.objects = manifest.objects.filter((object) => !object.voxel);
@@ -172,7 +172,8 @@ describe('terrain map', () => {
     const palette = new Uint8Array(256 * 3);
     palette.set([255, 10, 90, 30, 220, 50, 20, 70, 250], 3);
     writeFileSync(join(cacheDir, 'unit.png'), encodePng({ width: 256, height: 1, channels: 3, data: palette }));
-    // Golden hashes were captured from the pre-refactor compositor with this synthetic cache.
+    // Golden hashes were captured from the pre-refactor compositor with this synthetic cache; the lighting=true ones
+    // again after mapLightMultipliers moved to the engine's cell formula (Level x z instead of Level x (z - 1)).
     const result = renderPreview({ cacheDir, full, lighting });
     expect(createHash('sha256').update(readFileSync(result.file)).digest('hex')).toBe(hash);
   });
