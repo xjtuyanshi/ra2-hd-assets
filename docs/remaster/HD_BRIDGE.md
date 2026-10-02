@@ -131,12 +131,20 @@ profile. Turrets and lamp heads clear that profile, while physical beams, rain, 
 same depth space. Stock high-bridge overlays use a horizontal depth plane four height levels above the cell,
 so neighboring deck pieces cannot sort ahead of an on-deck unit merely because of their cell keys.
 
-Visible layer-2 voxel ground units receive a single one-cell camera-space dock pull when their anchor is inside a
-visible building's foundation or its one-cell extension on the +x/+z front sides and native painter order places
-the unit after that building. A live War Miner at the Soviet refinery dock lost its ore bin behind the analytic
-facade ramp, while native drawing placed the miner over the low dish. The pull compensates for low pad/dish art
-without decoding YR's `BUILDNGZ.SHA` Z shapes; it never accumulates across buildings or reaches a southern facade at
-least one more cell ahead. Building voxel turrets, aircraft above layer 2, projectiles and effects retain their biases.
+Visible layer-2 non-building voxel units receive a geometric camera-space dock pull only when their anchor cell is
+inside a visible building's foundation (`bx <= ux < bx + w`, `bz <= uz < bz + h`), native painter order places the
+unit after that building, and at least `DOCK_SETTLE_FRAMES` (6) logic frames have elapsed since its last observed
+move (or first appearance). Units outside the foundation already stand physically in front of the facade; moving
+units leaving a war-factory door remain behind it as in native drawing. `ra2/dockPull.ts` keeps a foundation-cell
+bucket lookup and samples `foundationPointPush` at the exact live anchor (`x/256`, `y/256`) and four axial offsets
+one cell away, separately from the floored painter cell. Pull is the nonnegative maximum sample plus
+`DOCK_PULL_MARGIN` (0.5), capped at `DOCK_PULL_MAX` (3.5); multiple qualifying buildings contribute their largest
+pull, never a sum. At the Soviet refinery NW (51,101), foundation [4,3], a live War Miner at (13952,26240) leptons
+has a maximum sample push of about 2.509 and receives about 3.009. Replay showed the former one-cell pull still cut
+the tipped bin, whereas about three cells placed the whole bin over the dish as native drawing does. This
+compensates for low pad/dish art without decoding YR's `BUILDNGZ.SHA` Z shapes. While active, the pull can draw a
+screen-overlapping unit passing within about three cells in front of the docked unit behind it; the cut-off bin
+was permanent at every dock. Building voxel turrets, aircraft above layer 2, projectiles and effects retain their biases.
 
 Ground decals, ore and shadow transforms retain their existing paths. The separate geometry-depth attachment
 keeps mist and shroud independent of the card's analytic occlusion depth. Older snapshots retain the Ground-key

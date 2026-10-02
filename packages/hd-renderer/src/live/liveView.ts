@@ -1185,7 +1185,14 @@ export class LiveView {
       if (visual.mode === 'voxel') {
         const object = this.current?.byUid.get(uid);
         const pull =
-          object && object.kind !== 'building' ? dockPull(painter, buildingCells.get(painter.x)?.get(painter.z)) : 0;
+          object && object.kind !== 'building'
+            ? dockPull(
+                painter,
+                { x: object.x / LEPTONS_PER_CELL, z: object.y / LEPTONS_PER_CELL },
+                this.current!.snapshot.frame - (visual.lastMoveFrame ?? visual.firstFrame),
+                buildingCells.get(painter.x)?.get(painter.z),
+              )
+            : 0;
         this.voxelUnits.setPainterBias(visual, spritePainterBias(painter) + pull);
       }
       if (visual.buildingTurret) this.voxelUnits.setPainterBias(visual.buildingTurret, spritePainterBias(painter, 0.4));
@@ -1802,7 +1809,7 @@ export class LiveView {
     const paletteKey = this.housePaletteKeys.get(colorIndex) ?? '';
     const artType = this.artType(object);
     const existing = this.visuals.get(object.uid);
-    const firstFrame = this.appearances.get(object.uid)?.frame ?? frame;
+    const firstFrame = this.appearances.get(object.uid)?.frame ?? existing?.firstFrame ?? frame;
     if (existing) existing.firstFrame = firstFrame;
     // Owner changes (capture, mind control) and engine image changes rebuild the visual; pending art is retried.
     if (existing && existing.type === artType && existing.paletteKey === paletteKey) {

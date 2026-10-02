@@ -6,7 +6,8 @@ import type { EffectInstance } from '../src/live/effectSprites';
 import { SpritePool } from '../src/live/spritePool';
 import { VoxelUnits } from '../src/live/voxelUnits';
 import type { Ra2Cache } from '../src/ra2/cache';
-import { DOCK_PULL } from '../src/ra2/dockPull';
+import { foundationPointPush } from '../src/ra2/cardDepth';
+import { DOCK_SETTLE_FRAMES } from '../src/ra2/dockPull';
 import { MAX_PAINTER_BIAS, spritePainterBias, type PainterObject } from '../src/ra2/painterOrder';
 import { SpriteLayer } from '../src/ra2/sprites';
 import { VOXEL_CLEARANCE, VoxelUnit } from '../src/ra2/voxels';
@@ -32,6 +33,20 @@ const snapshot = (frame: number, x: number): LiveSnapshot => ({
   view: { x, y: 0 },
   houses: [],
   objects: [object(x)],
+});
+const dockSnapshot = (frame: number, x = 13952, y = 26240): LiveSnapshot => ({
+  ...snapshot(frame, 0),
+  objects: [
+    { ...object(x), y, renderOrder: { layer: 2, index: 8, ySort: 40192 } },
+    {
+      ...object(51 * 256 + 128),
+      uid: 2,
+      type: 'TESTBUILD',
+      kind: 'building',
+      y: 101 * 256 + 128,
+      renderOrder: { layer: 2, index: 7, ySort: 38912 },
+    },
+  ],
 });
 
 /** Real push, render, applyCamera, applyObjects, applyEffects and applyPainterOrder; only resource/GPU edges are fakes. */
@@ -61,6 +76,7 @@ function presentation() {
     type: 'TEST',
     paletteKey: '',
     firstFrame: 1,
+    lastMoveFrame: undefined as number | undefined,
     painter: undefined as PainterObject | undefined,
   };
   const shroud = { hidden: false, isLocationShrouded: () => shroud.hidden };
@@ -140,57 +156,130 @@ function presentation() {
 }
 
 describe('LiveView physical occlusion scheduling', () => {
-  it('pulls a docked voxel once, keeps its building turret bias, and refreshes only on changed inputs', () => {
+  it('pulls the measured dock footprint after settling, keeps turret bias, and refreshes only on changed inputs', () => {
     const p = presentation();
     p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
-    const docked = {
-      ...object(14 * 256 + 128),
-      y: 21 * 256 + 128,
-      renderOrder: { layer: 2, index: 8, ySort: 40192 },
-    };
-    const refinery: LiveObject = {
-      ...object(10 * 256 + 128),
-      uid: 2,
-      type: 'TESTBUILD',
-      kind: 'building',
-      y: 20 * 256 + 128,
-      renderOrder: { layer: 2, index: 7, ySort: 38912 },
-    };
-    const snap = { ...snapshot(1, 0), objects: [docked, refinery] };
-    p.view.push(snap, 0);
+    const expectedPull = foundationPointPush(2.5, 1.5, 4, 3) + 0.5;
+    p.view.push(dockSnapshot(1), 0);
     p.view.render(0);
     const normalBias = () => VOXEL_CLEARANCE + spritePainterBias(p.visual.painter);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + DOCK_PULL);
-    expect(p.mesh.userData.painterDepth.bias).toBeGreaterThan(MAX_PAINTER_BIAS);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
     const calls = p.order.mock.calls.length;
     p.view.render(50);
     expect(p.order).toHaveBeenCalledTimes(calls);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + DOCK_PULL);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
+    p.view.push(dockSnapshot(DOCK_SETTLE_FRAMES), 60);
+    p.view.render(60);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
+    p.view.push(dockSnapshot(1 + DOCK_SETTLE_FRAMES), 70);
+    p.view.render(70);
+    expect(p.visual.firstFrame).toBe(1);
+    expect(p.visual.painter).toMatchObject({ x: 54, z: 102 });
+    expect(p.mesh.userData.painterDepth.bias - normalBias()).toBeCloseTo(expectedPull);
+    expect(expectedPull).toBeCloseTo(3.00949, 5);
+    expect(p.mesh.userData.painterDepth.bias).toBeGreaterThan(MAX_PAINTER_BIAS);
+    const settledCalls = p.order.mock.calls.length;
+    p.view.render(80);
+    expect(p.order).toHaveBeenCalledTimes(settledCalls);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + expectedPull);
 
     const building = p.live.visuals.get(2)!;
-    expect(building.painter).toMatchObject({ x: 10, z: 20, foundation: [4, 3] });
+    expect(building.painter).toMatchObject({ x: 51, z: 101, foundation: [4, 3] });
     const turretRoot = new VoxelUnit();
     const turretMesh = new Mesh();
     turretRoot.addSourceMesh(turretMesh);
     Object.assign(building, { buildingTurret: { root: turretRoot } });
     p.live.applyPainterOrder();
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + DOCK_PULL);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + expectedPull);
     expect(turretMesh.userData.painterDepth.bias).toBeCloseTo(
       VOXEL_CLEARANCE + spritePainterBias(building.painter, 0.4),
     );
 
-    p.view.push({ ...snap, objects: [{ ...docked, renderOrder: { ...docked.renderOrder, index: 6 } }, refinery] }, 60);
-    p.view.render(60);
+    const reordered = dockSnapshot(8);
+    reordered.objects[0]!.renderOrder!.index = 6;
+    p.view.push(reordered, 90);
+    p.view.render(90);
     expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
 
-    p.view.push(snap, 70);
-    p.view.render(70);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + DOCK_PULL);
-    Object.assign(building, { libraryType: { invisible: true } });
-    p.view.push({ ...snap, frame: 2 }, 100);
+    p.view.push(dockSnapshot(9), 100);
     p.view.render(100);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + expectedPull);
+    Object.assign(building, { libraryType: { invisible: true } });
+    p.view.push(dockSnapshot(10), 110);
+    p.view.render(110);
     expect(building.root.visible).toBe(false);
     expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
+  });
+
+  it.each([
+    ['x', 8, 0],
+    ['y', 0, 8],
+  ] as const)('removes the pull on a %s move and waits six logic frames before pulling again', (_, dx, dy) => {
+    const p = presentation();
+    p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
+    const normalBias = () => VOXEL_CLEARANCE + spritePainterBias(p.visual.painter);
+    p.view.push(dockSnapshot(1), 0);
+    p.view.render(0);
+    p.view.push(dockSnapshot(7), 100);
+    p.view.render(100);
+    expect(p.mesh.userData.painterDepth.bias - normalBias()).toBeCloseTo(3.00949, 5);
+    p.view.push(dockSnapshot(8, 13952 + dx, 26240 + dy), 200);
+    p.view.render(250);
+    expect(p.visual.lastMoveFrame).toBe(8);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
+    p.view.push(dockSnapshot(13, 13952 + dx, 26240 + dy), 300);
+    p.view.render(300);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
+    p.view.push(dockSnapshot(14, 13952 + dx, 26240 + dy), 400);
+    p.view.render(400);
+    expect(p.mesh.userData.painterDepth.bias - normalBias()).toBeGreaterThan(2.9);
+  });
+
+  it.each([
+    ['east', 55 * 256 + 128, 26240],
+    ['south', 13952, 104 * 256 + 128],
+  ] as const)('keeps a settled voxel outside the %s foundation boundary at ordinary bias', (_, x, y) => {
+    const p = presentation();
+    p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
+    p.view.push(dockSnapshot(1, x, y), 0);
+    p.view.render(0);
+    p.view.push(dockSnapshot(7, x, y), 100);
+    p.view.render(100);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(VOXEL_CLEARANCE + spritePainterBias(p.visual.painter));
+  });
+
+  it('uses the largest visible building pull rather than adding overlapping foundation pulls', () => {
+    const p = presentation();
+    const refineryArt = p.live.cache.manifest.sprites['building:TESTBUILD']!;
+    refineryArt.foundation = [4, 3];
+    p.live.cache.manifest.sprites['building:SMALLBUILD'] = { ...refineryArt, foundation: [4, 2] };
+    const snap = dockSnapshot(1);
+    const smaller: LiveObject = {
+      ...snap.objects[1]!,
+      uid: 3,
+      type: 'SMALLBUILD',
+      renderOrder: { layer: 2, index: 6, ySort: 38912 },
+    };
+    snap.objects.splice(1, 0, smaller);
+    p.view.push(snap, 0);
+    p.view.render(0);
+    p.view.push({ ...snap, frame: 7 }, 100);
+    p.view.render(100);
+    expect(p.live.visuals.get(3)!.root.visible).toBe(true);
+    expect(p.mesh.userData.painterDepth.bias - VOXEL_CLEARANCE - spritePainterBias(p.visual.painter)).toBeCloseTo(
+      3.00949,
+      5,
+    );
+  });
+
+  it('caps a settled voxel pull at 3.5 even under a taller part of the facade', () => {
+    const p = presentation();
+    p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
+    p.view.push(dockSnapshot(1, 52 * 256 + 128, 101 * 256 + 128), 0);
+    p.view.render(0);
+    p.view.push(dockSnapshot(7, 52 * 256 + 128, 101 * 256 + 128), 100);
+    p.view.render(100);
+    expect(p.mesh.userData.painterDepth.bias - VOXEL_CLEARANCE - spritePainterBias(p.visual.painter)).toBeCloseTo(3.5);
   });
 
   it.each([
@@ -200,7 +289,7 @@ describe('LiveView physical occlusion scheduling', () => {
     const p = presentation();
     const snap = snapshot(1, 0);
     snap.objects = [
-      { ...object(5 * 256 + 128), kind, y: 2 * 256 + 128, renderOrder: { layer, index: 8, ySort: 2000 } },
+      { ...object(4 * 256 + 128), kind, y: 2 * 256 + 128, renderOrder: { layer, index: 8, ySort: 2000 } },
       {
         ...object(1 * 256 + 128),
         uid: 2,
@@ -212,6 +301,8 @@ describe('LiveView physical occlusion scheduling', () => {
     ];
     p.view.push(snap, 0);
     p.view.render(0);
+    p.view.push({ ...snap, frame: 1 + DOCK_SETTLE_FRAMES }, 100);
+    p.view.render(100);
     expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(VOXEL_CLEARANCE + spritePainterBias(p.visual.painter));
   });
 

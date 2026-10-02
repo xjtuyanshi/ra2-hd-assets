@@ -516,8 +516,10 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   luminance before the coverage-mask mix. A value of 1 or absent adds no shader nodes. SHP shadows halve the displayed
   colour, like the engine's. Live object occlusion uses scene-wide painter depth slots (`ra2/painterOrder.ts`),
   independently of art placement and per-frame `cardPush`; all atlas pages and voxel parts share the same order.
-  Visible layer-2 voxel ground units drawn after a building receive one cell of camera-space dock pull inside its
-  foundation or its one-cell +x/+z front extension, compensating for low pad/dish art without accumulating pulls.
+  Visible layer-2 non-building voxel units drawn after a building and stationary for at least six logic frames
+  receive a dock pull only inside its foundation: the maximum facade push at their exact anchor and four one-cell
+  axial offsets plus 0.5, capped at 3.5 and taking the largest building pull (about 3.009 at the measured refinery
+  dock); a screen-overlapping unit passing within about three cells in front can temporarily draw behind them.
   Physical depth remains available to atmospheric post processing, while ground decals and shadows keep their
   existing depth paths. See `docs/remaster/HD_BRIDGE.md`, "Object occlusion", for the native rule and fallback limits.
   With the enhanced look on, a layer draws its ground art in two extra passes just before its cards
