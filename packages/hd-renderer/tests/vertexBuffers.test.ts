@@ -291,6 +291,8 @@ describe('r186 vertex and uniform binding budget', () => {
       expect(captured.attributes.length).toBe(9);
       expect(captured.fragmentShader).toContain('@location( 0 ) m0 : vec4<f32>');
       expect(captured.fragmentShader).toContain('objectDepthInstanceCode');
+      // Material MRT colour outputs must not replace the capture's code/coverage contract or its blend alpha.
+      expect(captured.fragmentShader).toContain('objectDepthInstanceCode * DiffuseColor.w');
       const shared = new Set(main.attributes.map(attributeBuffer));
       expect(layer.groundPasses).toHaveLength(2);
       for (const mesh of [layer.mesh, ...layer.groundPasses]) {

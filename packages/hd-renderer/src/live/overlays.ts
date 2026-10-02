@@ -128,6 +128,7 @@ export function buildOverlayInstances(
       shadow: false,
       flat: type.flat,
       glint: !isRubble && type.tiberium === true ? 1 : undefined,
+      unlit: !isRubble && type.tiberium === true,
       lighting: type.lighting,
       deckHeight: !isRubble && isHighBridge(id) ? HIGH_BRIDGE_HEIGHT : undefined,
     });

@@ -29,9 +29,10 @@ import type { ShaderNode } from '../tsl';
  * terrain, sprite and voxel materials sample by world position; each material references its own map's texture, so
  * two maps alive at once never share state. The HD lights (sun, sky, time of day, weather) act on top of it, relative
  * to clear noon. The renderer sets the grade's weight every frame (1 by day): the night presentation (lighting.ts,
- * mapLights.ts) owns maps staged as night or dusk and every night hour, where it derives its level, tint and
+ * mapLights.ts) owns maps staged as night and every night hour, where it derives its level, tint and
  * light-source pools from the same [Lighting]; applying both would light the map twice. The weight is baked into the
- * texels (re-encoded only when it changes), so no shader uniform is involved.
+ * texels (re-encoded only when it changes), so no shader uniform is involved. Dusk keeps the complete engine grade
+ * at its authored golden hour; its separate light field does not duplicate the sources.
  */
 
 /** The engine clamps a cell's intensity to 2; texels store multiplier / MAP_LIGHT_RANGE in 8 bits. */

@@ -86,8 +86,9 @@ the same art (`gglite.shp`).
 - Light sources: the engine grid's difference to the unlit grid is added as irradiance, staged by the map's class
   (`mapLightStaging` in `packages/hd-renderer/src/ra2/mapLights.ts`). Night maps get the engine exactly (full
   `LightVisibility`, linear falloff, full strength, at the night ambient `nightBaseAmbient`): their mappers tuned
-  lamps and `NEGLAMP` darkening for that formula. Dusk maps get the same at their own ambient, always on, as the
-  engine applies light sources at every hour. A day map forced to night is an HD presentation choice, not the engine:
+  lamps and `NEGLAMP` darkening for that formula. Dusk maps keep sources in the full engine grade at their authored
+  hour; their separate field follows night gain only when the hour is forced towards night and the grade fades out.
+  A day map forced to night is an HD presentation choice, not the engine:
   with the full 15.6-cell radius the seven `INGALITE` washes on XMP29U2 lit the park lawn to 0.77 of noon, a floodlit
   field, while the moon alone gives 0.26; there each source is a pool (0.45 x `LightVisibility`, the engine falloff
   squared via `engineLightDelta`'s `falloffPower`, 0.8 of the engine's strength): about 3.1x the moonlit ground at the
@@ -103,8 +104,38 @@ the same art (`gglite.shp`).
   own sRGB scale, level x tint for terrain-class art and the level only for objects, as the engine draws them at all
   times. Checked on XMP29U2 against same-moment captures: terrain 1.00/0.81/0.66 of the palette per channel, 1.345x
   next to the `INGALITE` posts (1.340 predicted). Its weight fades with the night weight on day maps and is 0 on maps
-  staged as night or dusk, whose light the night presentation above derives from the same data (one owner at a
-  time). `mapLightMultipliers` in `packages/ra2-assets/src/iso.ts` (offline previews) uses the same formula.
+  staged as night, whose light the night presentation above derives from the same data (one owner at a time).
+  Authored dusk keeps weight 1 and source share 1 at its map hour, including under cinematic settings whose day-map
+  source share is 0.2. `mapLightMultipliers` in `packages/ra2-assets/src/iso.ts` (offline previews) uses the same formula.
+
+## Dusk staging and unlit resource overlays
+
+The supplied same-frame DuskPen measurements use Ambient 0.73, RGB `(1, 0.92, 0.8)`, Level 0.035, median height 6,
+and the authored dusk hour 18.2. A flat-ground sample measured original mean `(139, 124, 60)`, hue 48.5 and saturation
+0.40, versus HD `(161, 152, 87)`, hue 52 and saturation 0.30 (both L5H and the pre-fix S2 baseline). Day-map XMP29U2
+was already close: original `(91, 82, 55)`, HD `(93, 87, 65)`. These are supplied replay observations, not results of
+the asset-free tests in this checkout.
+
+The dusk profile now anchors the warm sunset key at its own hour and uses a 10-degree sun floor; other profiles keep
+28 degrees. The anchor has night weight zero. Clear flat RGB is normalized to noon before weather, with the same
+per-channel scale on sun and sky, preserving warm directional light and cooler shade. The original `MapLightGrade`
+then supplies the full engine brightness, warm tint and light sources. Enhanced exposure lift, white adaptation and
+map-tint neutralization are disabled for dusk profiles. The separate source field follows night gain, which is zero
+at the anchor, so those light sources are not applied twice. If time is forced towards night, map grade and the clear
+calibration fade into the night presentation. Day/night profile settings and light uniforms are regression-tested
+for exact equality with the pre-fix baseline. DuskPen's target of mean RGB within ±8% of the original and saturation
+at least 0.33 remains **UNVERIFIED** until the owner renders and measures replays.
+
+The same-pixel DuskPen evidence establishes a separate overlay policy: bright yellow ore was `(200.7, 180.3, 40.8)`
+before the storm and `(200.8, 180.4, 40.8)` during it, while adjacent grass changed by `(0.30, 0.44, 0.98)`. On night
+map Transylv, ore remained bright yellow at mean `(222, 200, 45)` over dark grass. Ore and gems (tiberium overlays,
+all theatres) therefore bypass scene-event lighting, map grade and night/dusk darkening. Live classification uses
+the overlay type's `tiberium` flag; static map caches use the extractor's existing unlit overlay classification.
+The HD material retains clear-noon crystal shading and optional decorative wetness. Ordinary overlays keep their
+terrain lighting. This is an overlay-only policy; unlit metadata on other object classes does not reclassify them
+as resource overlays. The display capture preserves depth/foreground occlusion and shroud; filtered-edge night-toe
+composition and rendered-pixel equivalence still require GPU acceptance. The isolated highlights no longer feed
+scene bloom; their material sparkle remains, but equivalence to the former clear-noon bloom halo is unverified.
 
 ## Scene lighting events
 
@@ -170,6 +201,14 @@ the expected storm/clear ratios are terrain `0.87 * (0.3/1,0.4/0.8,0.75/0.68) = 
 and buildings/units `(0.23,0.34,0.64)`, consistent within palette quantization. `WCCLOUD1..3` in the supplied live
 sample occupy native layer `top`, at about 1493 leptons Z, and the original captures show their bright grey art
 above black shroud without event darkening.
+
+The supplied HD cinematic replay at hour 16.5 measured storm/clear terrain ratios `(0.229, 0.450, 1.117)` and
+building ratios `(0.22, 0.36–0.39, 0.75–0.80)` despite correct scene multipliers. The storm presentation was selecting
+the ordinary grey-blue overcast key after adaptation, adding a second colour transform. It now transfers removed
+sun RGB irradiance into hemisphere RGB irradiance without changing flat-ground colour or luminance. Existing
+decorative weather is retained, while sky colours, exposure, white adaptation, map-tint adaptation and bloom
+threshold remain event-free. Unit tests exercise that conservation and renderer uniform ordering; the corrected
+replay ratios remain **UNVERIFIED** until measured.
 
 Limits retained from static RE: full cell recomputation's Dominator terrain branch reads NukeLevel at
 `0x4844DB`, unlike incremental relight and bridges. New converters at `0x555E50` test storm before nuke and include

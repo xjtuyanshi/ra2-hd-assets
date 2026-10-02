@@ -135,6 +135,27 @@ describe('live overlay instances', () => {
     expect([wall.flat, wall.lighting]).toEqual([false, 'ambient']);
     expect(wall.push).toBeGreaterThan(0);
     expect([ore.glint, gems.glint, wall.glint, rock.glint]).toEqual([1, 1, undefined, undefined]);
+    expect([ore.unlit, gems.unlit, wall.unlit, rock.unlit]).toEqual([true, true, false, false]);
+  });
+
+  it('classifies arbitrary ore/gem types by the type flag, preserving normal overlays and rubble', () => {
+    const state = cells();
+    state.types = ['CUSTOM_RESOURCE', 'DECORATION', 'GAWALL', 'SROCK01'];
+    const base = library();
+    const art = {
+      ...base,
+      overlays: {
+        ...base.overlays,
+        CUSTOM_RESOURCE: overlay('TIB01', { lighting: 'full' }),
+        DECORATION: overlay('GEM01', { tiberium: false, lighting: 'none' }),
+      },
+    };
+    const built = buildOverlayInstances(state, art, terrain(), palette);
+    expect(built.pages.get(0)![0]!.unlit).toBe(true);
+    expect(built.pages.get(1)![0]!.unlit).toBe(false);
+    const rubble = rubbleFixture({ tiberium: true, lighting: 'none' });
+    const rubbleBody = buildOverlayInstances(rubble.state, rubble.art, terrain(), palette).pages.get(4)![0]!;
+    expect(rubbleBody.unlit).toBe(false);
   });
 
   it('does not clamp/wrap missing frames or retain depleted overlays', () => {

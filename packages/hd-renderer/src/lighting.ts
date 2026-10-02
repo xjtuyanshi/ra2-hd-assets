@@ -262,6 +262,10 @@ export function profileKeys(profile: AtmosphereProfile): LightKey[] {
     moon.multiply(new Color(Math.sqrt(profile.tint[0]), Math.sqrt(profile.tint[1]), Math.sqrt(profile.tint[2])));
   moon.multiplyScalar(1 / Math.max(1e-6, luminanceOf(moon)));
   return KEYS.map((key) => {
+    // Dusk is an authored daylight grade, not a partially moonlit night. Stage the golden-hour key at the map's
+    // own hour; later hours still interpolate into the existing night keys. Its flat RGB is calibrated in update().
+    if (profile.kind === 'dusk' && key.hour === 18.5)
+      return { ...key, hour: Math.min(20.99, Math.max(16.01, profile.hour)), night: 0 };
     const n = key.night;
     if (n === 0) return key;
     const tint = new Color(1, 1, 1).lerp(moon, n);
@@ -292,7 +296,7 @@ export function profileKeys(profile: AtmosphereProfile): LightKey[] {
 
 export interface LightingState {
   sunDirection: Vector3;
-  /** Key elevation of the sun in degrees before the 28 degree readability floor (shadow length of the sun arc). */
+  /** Key elevation before the readability floor (28 degrees normally, 10 on authored dusk maps). */
   keyElevation: number;
   sunColor: Color;
   skyZenith: Color;
@@ -375,6 +379,27 @@ export class Lighting {
     );
   }
 
+  /**
+   * Event overcast only redistributes existing light. Transfer the removed sun's flat-ground RGB to the sky,
+   * including any decorative weather already applied; never recolour, dim or recompute the exposure reference.
+   */
+  applySceneOvercast(amount: number): void {
+    const share = Math.min(1, Math.max(0, amount));
+    if (!(share > 0)) return;
+    const removed = this.sun.intensity * share;
+    const flat = removed * Math.max(0, this.state.sunDirection.y);
+    const sky = this.hemi.intensity;
+    const nextSky = sky > 0 ? sky : 1;
+    this.hemi.color.setRGB(
+      (this.hemi.color.r * sky + this.sun.color.r * flat) / nextSky,
+      (this.hemi.color.g * sky + this.sun.color.g * flat) / nextSky,
+      (this.hemi.color.b * sky + this.sun.color.b * flat) / nextSky,
+    );
+    this.hemi.intensity = nextSky;
+    this.sun.intensity -= removed;
+    this.state.ambient.copy(this.hemi.color).multiplyScalar(nextSky * 0.5);
+  }
+
   /** Clear irradiance for the same hour/direction, before weather; exposure adaptation must use this reference. */
   clearFlatIrradianceColor(out: Color): Color {
     return out.copy(this.clearFlat);
@@ -398,6 +423,7 @@ export class Lighting {
   private readonly clearSun = new Color();
   private readonly clearHemi = new Color();
   private readonly clearFlat = new Color();
+  private readonly duskScale = new Color();
 
   /**
    * Stage the day cycle for a map's atmosphere profile (see profileKeys), or null for the procedural sandbox's
@@ -409,6 +435,7 @@ export class Lighting {
       (!!profile &&
         !!this.profile &&
         profile.kind === this.profile.kind &&
+        profile.hour === this.profile.hour &&
         profile.nightLevel === this.profile.nightLevel &&
         profile.tint[0] === this.profile.tint[0] &&
         profile.tint[1] === this.profile.tint[1] &&
@@ -421,7 +448,7 @@ export class Lighting {
   /** Night weight (0 day .. 1 night) of the day cycle at `hour`, without changing any state. */
   nightAt(hour: number): number {
     const keys = this.keys;
-    const h = ((hour % 24) + 24) % 24;
+    const h = this.profile?.kind === 'dusk' && hour >= 0 && hour < 24 ? hour : ((hour % 24) + 24) % 24;
     let i = 0;
     while (i < keys.length - 2 && keys[i + 1]!.hour <= h) i++;
     const a = keys[i]!;
@@ -442,16 +469,16 @@ export class Lighting {
    */
   update(hour: number, overcast: number, maxDayDimming?: number, weather?: LightingWeather): void {
     const keys = this.keys;
-    const h = ((hour % 24) + 24) % 24;
+    const h = this.profile?.kind === 'dusk' && hour >= 0 && hour < 24 ? hour : ((hour % 24) + 24) % 24;
     let i = 0;
     while (i < keys.length - 2 && keys[i + 1]!.hour <= h) i++;
     const a = keys[i]!;
     const b = keys[i + 1]!;
     const t = (h - a.hour) / (b.hour - a.hour);
 
-    // Shadows longer than ~2x object height hurt RTS readability, so the sun never drops below 28°.
+    // Authored dusk needs a low golden-hour sun. Keep the established readability floor on every other profile.
     this.state.keyElevation = lerp(a.elevation, b.elevation, t);
-    const elevation = (Math.max(28, this.state.keyElevation) * Math.PI) / 180;
+    const elevation = (Math.max(this.profile?.kind === 'dusk' ? 10 : 28, this.state.keyElevation) * Math.PI) / 180;
     // Screen upper-left in world space is -x (see IsoCamera): the classic RA2 light direction.
     const azimuth = Math.PI;
     const dir = this.state.sunDirection;
@@ -479,6 +506,22 @@ export class Lighting {
       clearSun.g * direct + clearHemi.g * diffuse,
       clearSun.b * direct + clearHemi.b * diffuse,
     );
+    if (this.profile?.kind === 'dusk') {
+      // The engine grade owns the dusk flat-ground colour and brightness, just as it does at noon on day maps.
+      // Calibrate the clear light BEFORE weather, preserving each channel's warm-direct/cool-diffuse contrast.
+      // Fade this calibration into the existing moonlit presentation if the hour is explicitly forced to night.
+      const day = 1 - lerp(a.night, b.night, t);
+      const noon = KEYS.find((key) => key.hour === 12)!;
+      const noonDirect = noon.sunIntensity * sunHeight(noon.elevation);
+      const scale = this.duskScale.setRGB(
+        lerp(1, (noon.sun.r * noonDirect + noon.hemiSky.r * noon.hemiIntensity) / this.clearFlat.r, day),
+        lerp(1, (noon.sun.g * noonDirect + noon.hemiSky.g * noon.hemiIntensity) / this.clearFlat.g, day),
+        lerp(1, (noon.sun.b * noonDirect + noon.hemiSky.b * noon.hemiIntensity) / this.clearFlat.b, day),
+      );
+      clearSun.multiply(scale);
+      clearHemi.multiply(scale);
+      this.clearFlat.multiply(scale);
+    }
     if (this.profile) {
       this.updateProfiled(a, b, t, overcast, weather);
       return;
@@ -533,11 +576,11 @@ export class Lighting {
    */
   private updateProfiled(a: LightKey, b: LightKey, t: number, overcast: number, weather?: LightingWeather): void {
     const night = lerp(a.night, b.night, t);
-    const sunColor = this.state.sunColor.copy(a.sun).lerp(b.sun, t);
+    const sunColor = this.state.sunColor.copy(this.clearSun);
     let sunIntensity = lerp(a.sunIntensity, b.sunIntensity, t);
     this.state.skyZenith.copy(a.skyZenith).lerp(b.skyZenith, t);
     this.state.skyHorizon.copy(a.skyHorizon).lerp(b.skyHorizon, t);
-    const hemiColor = this.hemi.color.copy(a.hemiSky).lerp(b.hemiSky, t);
+    const hemiColor = this.hemi.color.copy(this.clearHemi);
     this.hemi.groundColor.copy(a.hemiGround).lerp(b.hemiGround, t);
     let hemiIntensity = lerp(a.hemiIntensity, b.hemiIntensity, t);
     if (overcast > 0) {

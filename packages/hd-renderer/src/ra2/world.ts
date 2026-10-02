@@ -8,7 +8,7 @@ import { remapRamp, type Hsv } from '../../../ra2-assets/src/remap';
 import { addHousePalettes, decodeBase64, loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOptions } from './cache';
 import type { MapLightGrade } from './mapLighting';
 import { Ra2NightDressing } from './nightDressing';
-import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from './sprites';
+import { SpriteLayer, cardPush, isUnlitMapOverlay, objectAnchor, type SpriteInstance } from './sprites';
 import { loadSpriteMaterials } from './spriteMaterials';
 import type { SpriteMaterialAtlas } from './spriteLook';
 import { objectYSort, painterObject } from './painterOrder';
@@ -269,6 +269,7 @@ export async function loadRa2World(
       shadow: false,
       flat,
       glint: object.kind === 'overlay' && flat && lighting === 'none' ? 1 : undefined,
+      unlit: isUnlitMapOverlay(object),
       lighting,
       painter: object.kind === 'overlay' ? undefined : painter,
       deckHeight,

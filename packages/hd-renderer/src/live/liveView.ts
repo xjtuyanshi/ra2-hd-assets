@@ -20,7 +20,7 @@ import { sequenceFrame } from '../../../ra2-assets/src/art';
 import type { MapObject } from '../../../ra2-assets/src/manifest';
 import type { TheaterId } from '../../../ra2-assets/src/theater';
 import { addHousePalettes, paletteFor, type Ra2Cache } from '../ra2/cache';
-import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from '../ra2/sprites';
+import { SpriteLayer, cardPush, isUnlitMapOverlay, objectAnchor, type SpriteInstance } from '../ra2/sprites';
 import {
   assignPainterBias,
   objectYSort,
@@ -2470,6 +2470,7 @@ export class LiveView {
           lighting,
         );
         body.glint = object.kind === 'overlay' && object.flat && lighting === 'none' ? 1 : undefined;
+        body.unlit = isUnlitMapOverlay(object);
         instances.push(body);
       }
     this.cellLayer.setInstances(instances);

@@ -72,14 +72,17 @@ the live presentation clock, while event changes use the newest snapshot immedia
 at its median cell height without local light-source contributions. For `I = ambient + level * z - ground`, it
 uses `I_live / I_map`; `sceneTerrainMul` additionally replaces the map's normalized RGB with raw event RGB,
 while `sceneObjectMul` multiplies untinted object art by raw event RGB. These shared vec3 uniforms apply in palette
-colour space independently of the day/night map-grade weight. Tiles, whole-map terrain, water, overlays, ore,
+colour space independently of the day/night map-grade weight. Tiles, whole-map terrain, water, ordinary overlays,
 walls, smudges, trees and bridges use the terrain multiplier; buildings and all unit art use the object multiplier.
 Effect art, local-light emission, window/lamp/Tesla glows, bloom and UI keep their own colours. Exposure, white
 adaptation and map-tint adaptation use authored, event-free lighting. An absent or authored-normal state leaves
 both multipliers exactly `(1,1,1)` and takes the material's identity branch.
 
-A storm selects the existing overcast key after adaptation and multiplier calculation, and `sceneSunShadow = 0`
-removes hard sun shadows while retaining contact shading. Top-layer effect cards (including storm clouds) use a
+A storm transfers all direct flat-ground irradiance into the hemisphere light with `Lighting.applySceneOvercast(1)`
+after adaptation and multiplier calculation. The transfer preserves each linear RGB channel and luminance, including
+any decorative rain/snow already applied; it does not select the grey-blue weather key or change exposure, white
+adaptation, map-tint adaptation, bloom threshold or weather metadata. `sceneSunShadow = 0` removes hard sun shadows
+while retaining contact shading. Top-layer effect cards (including storm clouds) use a
 separate transparent pass after shroud/fog; ground and air effects retain their existing visibility/depth rules.
 The extra pass exists only while top art is visible. Storm bolts produce a blue-white light-field pulse at their
 ground point (4.5-cell radius, 0.12-second peak and 0.35-second decay) and a bounded 12% sky flash (0.08-second peak,
@@ -91,6 +94,17 @@ map values. Example: `?fx=WCCLOUD1,WCLBOLT1&map=XMP29U2&lighting=.87,1,.8,.68,.3
 Without this parameter each replay snapshot retains its own lighting (including null/absent reset semantics).
 Asset-free math, reader, bridge, shroud routing and shader-layout tests do not establish GPU pixel equivalence,
 storm-cloud composition, pulse strength or real-game timing; those require same-scene captures.
+
+Ore and gems are self-lit overlays. The live adapter uses the overlay type's `tiberium` flag; static caches already
+carry the extractor's `lighting: 'none'` classification. Only those overlay instances bypass map grade, scene-event
+multipliers, time-of-day light and the night display transform. Their HD crystal lighting uses a fixed clear-noon
+reference, while decorative wetness remains available. Walls, rubble, bridges and crates retain normal lighting.
+A renderer-local `unlit` MRT attachment carries their noon display colour through ordinary foreground occlusion,
+shroud and top effects. It shares material blending and uses at most four attachments alongside physical depth and
+emission. Explicit exposure, the selected daytime tone/grade and vignette still apply. Self-lit highlights bypass
+scene bloom (their material sparkle remains); matching the former noon bloom halo is not established by this path.
+The night toe is suppressed where self-lit colour survives; fractional filtered edges and GPU composition
+remain **UNVERIFIED** until replay captures are measured.
 
 ## Night, weather and map light sources
 
@@ -105,6 +119,15 @@ bloom threshold and sprite level blend into `pi / referenceIrradiance()`, PBR Ne
 level with the night weight, and the day map grade fades out with it (the night keys already derive their level and
 tint from the same `[Lighting]`).
 
+- **Authored dusk.** A dusk profile places its warm sunset key at the map's hour (DuskPen: 18.2), with a 10-degree
+  sun floor instead of the usual 28 degrees. At that key the night weight is exactly zero, `MapLightGrade` weight and
+  source share are both 1, and effective `adaptExposure`, `whiteAdapt` and `mapTintAdapt` are zero. Clear flat-ground
+  irradiance is calibrated per channel to clear noon before decorative weather, so the engine grade owns brightness
+  and tint while direct light stays warm and diffuse shade cooler. This calibration fades into the night keys if the
+  hour is manually advanced. The separate dusk source field follows night gain, avoiding duplicate lamp washes at
+  the authored hour. Day and night profiles retain their existing uniforms/settings. DuskPen's per-channel ±8% and
+  saturation ≥0.33 replay targets are **UNVERIFIED** by asset-free tests.
+
 - **Night level.** Night light keys are scaled so unlit flat ground shows the profile's night level (30 % of noon
   for a typical stock night, 26-40 % for night maps), 40 % from a desaturated moon and 60 % from the sky. Moonlight is
   cool (`MOON_TINT`); only maps built as night maps add their own `[Lighting]` tint, a day map's warm grade never tints
@@ -114,7 +137,7 @@ tint from the same `[Lighting]`).
   instead of darkening the frame (flat ground keeps 1 - 0.08 x overcast of its clear brightness by day, 95 % at night, never below 26 % of noon).
 - **Light field** (`src/lightField.ts`). Every local light is drawn top-down into one whole-map texture (up to 8
   texels per cell): the light of the map's light sources (`src/ra2/mapLights.ts`, YR 1.001's cell formula staged by
-  `mapLightStaging`: exact on night maps, exact and always on for dusk maps, tight pools when a day map is forced to
+  `mapLightStaging`: exact on night maps, exact on dusk maps only as their map grade fades towards night, tight pools when a day map is forced to
   night), HD street lamps and window glows (static, faded in with the night), and dynamic lights: explosion and
   muzzle/beam pulses in separate ring pools and kept-alive fires, each pool with its own reserved instances. Static and
   dynamic lights are separate instanced meshes; static ones are written once per change and hidden by day. The
@@ -411,8 +434,9 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   Wider views increase the bound; no arbitrary-zoom precision claim is made. Capture MRT writes `R=code*a,G=a`
   using original normal blending: over clear `(code*a*b)/(a*b)=code` (b=a). Same-anchor parts preserve the ratio;
   different transparent owners produce weighted code mixtures requiring pixel review. A capture-only MRT
-  keeps vec4 shader output on RG16F because r186's normal RG conversion drops the source alpha. Main/mirror
-  output and all materials stay unchanged. See three.js 0.186.1 `MRTNode.setup`/`NodeMaterial.setup` and GPUWeb CTS
+  keeps vec4 shader output on RG16F because r186's normal RG conversion drops the source alpha. Its merge retains
+  the capture's authoritative code/coverage outputs when a material carries its own MRT (including self-lit art).
+  Main/mirror outputs remain independent. See three.js 0.186.1 `MRTNode.setup`/`NodeMaterial.setup` and GPUWeb CTS
   `src/webgpu/api/validation/render_pipeline/fragment_state.spec.ts` for the output/blending compatibility evidence.
   The reduction clamps a 3x3 neighbourhood, ignoring depth>=1 or G<=0. Record A keeps the captured centre's
   code, or the nearest captured code if the centre is absent. Record B keeps the nearest captured code differing
