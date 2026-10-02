@@ -1095,7 +1095,9 @@ export class HdRenderer {
     // as night or dusk and the night hours of day maps. Airless daylight uses neutral sun/sky, leaving the authored
     // ambient, tint and local light-source pools to this same palette-domain grade.
     this.world?.mapLight?.setWeight(profile?.kind === 'day' ? 1 - light.night : 0);
-    this.world?.mapLight?.setSourceWeight(this.settings.mapSourcesByDay);
+    // Airless maps have no sunlit-sky reason to dim the lamps: their pools are the scene's mood (MoonPatr's base sits
+    // in blue-violet lamp light in the original, a* +13 / b* -31 beside the base), so they keep the engine's full share.
+    this.world?.mapLight?.setSourceWeight(profile?.airless === true ? 1 : this.settings.mapSourcesByDay);
     if (this.water) {
       const w = this.water.uniforms;
       w.sunDirection.value.copy(light.sunDirection);

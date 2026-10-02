@@ -160,9 +160,11 @@ describe('airless renderer staging', () => {
       expect(frame.mist.amount.value).toBe(0);
       expect(luma(sprites.light.value.clone().multiply(frame.exposure.value))).toBeCloseTo(1, 12);
       state.environment.weather = 'clear';
+      // Airless maps keep the engine's full lamp share whatever the look's daytime share (cinematic uses 0.2).
       hd.settings.mapSourcesByDay = 0;
       hd.frame(0);
-      expect(Array.from(mapLight.texture.image.data as Uint8Array)).toEqual(plainTexels);
+      expect(Array.from(mapLight.texture.image.data as Uint8Array)).toEqual(litTexels);
+      expect(litTexels).not.toEqual(plainTexels);
       hd.settings.mapSourcesByDay = 1;
       hd.frame(0);
       expect(Array.from(mapLight.texture.image.data as Uint8Array)).toEqual(litTexels);

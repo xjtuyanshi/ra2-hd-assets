@@ -79,13 +79,15 @@ tint from the same `[Lighting]`).
   light sources: terrain-class art takes cell intensity x tint, objects take intensity. The lunar profile has neutral
   tint and no `exposure` multiplier; sun and sky use luminance-matched neutral greys, so the grade owns the ambient,
   height and authored tint once. Exposure adaptation remains off for airless profiles, as do white/tint adaptation
-  and sky/haze/display-grade colour. Same-moment original MoonPatr captures show strong blue-violet pools around the
+  and sky/haze/display-grade colour. The light sources keep their full engine share on airless maps, whatever the
+  look's `mapSourcesByDay` (cinematic 0.2 dims street lamps on sunlit terrestrial maps). Same-moment original MoonPatr captures show strong blue-violet pools around the
   player's base from nine map sources (`SNONITLAMP` x5, `INBLULMP` x4); these must remain visible while the unlit
   regolith stays dim. The game policy marks library ore/gem overlay sprites (`tiberium` types) grade-exempt through
   a generic per-instance flag, selecting multiplier 1 instead of the terrain/object grade and preserving full art
   brightness. Other sprite classes and terrestrial day maps keep their existing grade. Default lunar staging keeps
-  HD night dressing off while retaining the original map lamps. See the research note for the supplied captures and
-  visual comparison procedure; the C4 implementation has no new on-screen acceptance result.
+  HD night dressing off while retaining the original map lamps. Live same-moment check (MoonPatr base, cinematic):
+  flat regolith L* 47 (original 43-47), b* -9 like the original away from the lamps; HD buildings render about 10 L*
+  brighter than the original's (their relit HD art), see docs/remaster/research/yr-scene-lighting.md.
 - **Night level.** Night light keys are scaled so unlit flat ground shows the profile's night level (30 % of noon
   for a typical stock night, 26-40 % for night maps), 40 % from a desaturated moon and 60 % from the sky. Moonlight is
   cool (`MOON_TINT`); only maps built as night maps add their own `[Lighting]` tint, a day map's warm grade never tints
