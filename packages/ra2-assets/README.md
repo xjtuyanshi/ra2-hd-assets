@@ -441,6 +441,16 @@ light) both move towards the approved targets' golden sunlit grass (battle 43.5 
 map (7200 x 3630) takes about 7 s and 8 GB in float32. Install the result through `cache_farm.install_file` and point
 `terrainMap` in `materials.json` at it. Test: `python3 -m unittest test_foliage_grade` (synthetic, asset-free).
 
+### Emissive head review metrics
+
+`python/emissive_metrics.py` measures the Tesla reactor's overlay on rendered framings with the reviews' pixel classes:
+`counts img x0,y0,x1,y1` gives saturated blue (HSV hue 205-260, S >= 0.5, V >= 0.6) and pale lavender (hue 200-290,
+S 0.03-0.3, V >= 0.85) in a box, compared against the faithful render or the original frame of the same scene;
+`fit img box [--ymax Y]` fits a circle to the painted glass outline (how the overlay orb's radius and head position
+were measured: 17.75 engine px on the battle framing); `reach base img cx,cy box --scale 2` reports how far an overlay
+changed pixels from a centre, in engine pixels. Test: `python3 -m unittest test_emissive_metrics` (synthetic,
+asset-free).
+
 ## Water surface, detail and cliff-foot stripe tools (Python)
 
 These NumPy/Pillow/OpenCV tools take all input and output paths as arguments, generate PNGs outside Git, and never
