@@ -56,11 +56,12 @@ export type { LiveSmudgeCells } from './smudges';
 
 /**
  * Measured approximation of the engine's door-interior Z-shape/ZAdjust, in x+z cell units.
- * Frozen NAWEAP 5x3 at NW (58,98), +x door: frame 9454 hides the tank at local (2.5,1.5),
- * 3.5 behind the native facade (front end about 3.0); about 86 frames later, local (4.13,1.06)
- * is fully visible at 1.74 behind it. Thus 1.74 < R < about 3.0; R=2 is 2*sqrt(3/8) world depth.
+ * Frozen live NAWEAP 5x3 frames (+x door): with the door open the waiting tank at local (2.5,1.5) is hidden,
+ * its centre 3.5 and its voxel front end about 3.0 behind the native facade; at local (3.85,1.43) the original
+ * shows the whole tank in the doorway (centre 2.3 behind, rear about 2.8). R=2 still clipped that tank's rear
+ * half in the live view, so R=2.75 (2.75*sqrt(3/8) world depth) keeps a 0.25 margin to the hidden case.
  */
-export const DOOR_RECESS = 2;
+export const DOOR_RECESS = 2.75;
 
 /**
  * Live view: draws a running original match (read from game memory by the host page) with the HD renderer, framed

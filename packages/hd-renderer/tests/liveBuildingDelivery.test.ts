@@ -125,8 +125,8 @@ describe('live delivery building image', () => {
       expect(body.palette).toBe(section.palette);
       expect(cards[1]).toMatchObject({ shadow: true, flat: true });
       expect(body).toMatchObject({ shadow: false, flat: false });
-      expect(DOOR_RECESS).toBe(2);
-      expect(cards.map((card) => card.foundationRecess)).toEqual([0, 0, 0, 2, 0]);
+      expect(DOOR_RECESS).toBe(2.75);
+      expect(cards.map((card) => card.foundationRecess)).toEqual([0, 0, 0, 2.75, 0]);
       // The deploying body retains its facade: a unit inside remains behind opaque posts, then emerges in front.
       for (const [x, z, hidden] of [
         [12.5, 21.5, true],
@@ -226,7 +226,12 @@ describe('live delivery building image', () => {
       try {
         for (const s of [body, door]) {
           const i = uploaded.orderedCards.indexOf(s);
-          expect(Array.from(uploaded.flags.array.slice(i * 8 + 4, i * 8 + 8))).toEqual([5, 3, 0, s === door ? -2 : 0]);
+          expect(Array.from(uploaded.flags.array.slice(i * 8 + 4, i * 8 + 8))).toEqual([
+            5,
+            3,
+            0,
+            s === door ? -2.75 : 0,
+          ]);
         }
         for (const [x, z, hidden] of [
           [2.5, 1.5, true],
@@ -252,13 +257,13 @@ describe('live delivery building image', () => {
               else expect(unitDepth).toBeLessThan(depth(door, pixel));
               expect(unitDepth).toBeGreaterThan(depth(body, pixel));
             }
-            // At the later feet row, max(ground, facade) selects the ramp; 10px up it selects the recessed facade.
+            // At the later tank both sampled rows lie on the ramp's ground branch (the recessed facade is further back).
             expect((spriteDepth - depth(door, pixel)) * range).toBeCloseTo(
-              hidden ? 0.810132945 : row === 0 ? -0.006363636 : -0.218652747,
+              hidden ? 0.197760509 : row === 0 ? -0.006363636 : -0.55069469,
               6,
             );
             expect((voxelDepth - depth(door, pixel)) * range).toBeCloseTo(
-              hidden ? 0.805132945 : row === 0 ? -0.011363636 : -0.223652747,
+              hidden ? 0.192760509 : row === 0 ? -0.011363636 : -0.55569469,
               6,
             );
             if (!hidden) expect((spriteDepth - depth(body, pixel)) * range).toBeCloseTo(1.414340414, 6);

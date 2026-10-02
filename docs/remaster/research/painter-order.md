@@ -253,13 +253,16 @@ interior completely covers the new tank at local `(2.5,1.5)`: its centre has `x+
 `x+z=7.5` at that column, so it is `3.5` sum units behind; its front end at local `x≈3.0` is about `3.0` behind.
 About `86` frames later, the whole tank at local `(4.13,1.06)` is visible over the dark interior and ramp while
 the door posts remain in front. Its centre is about `1.74` sum units behind the facade. These supplied native
-observations bound the interior recess by `1.74 < R < about 3.0`; they are not a new HD runtime acceptance run.
+observations bound the interior recess by `1.74 < R < about 3.0` (refined below); they are not a new HD runtime acceptance run.
 
-`live/liveView.ts` exports `DOOR_RECESS = 2`, a generic measured approximation of the engine's door-interior
-Z-shape/ZAdjust. This is `2 * sqrt(3/8) ≈ 1.224745` world units in depth. The existing rectangular profile gives
-front sums `7.0` and `6.93` at the two centre columns; it does not reconstruct the native first column's `7.5`.
-With the recess, these become `5.0` and `4.93`, keeping the first centre (`4.0`) behind and the second (`5.19`)
-in front. A back-surface profile would expose the early tank and is therefore unsuitable.
+`live/liveView.ts` exports `DOOR_RECESS = 2.75`, a generic measured approximation of the engine's door-interior
+Z-shape/ZAdjust (`2.75 * sqrt(3/8) ≈ 1.684` world units in depth). A first fit of `R = 2` hid the rear half of a
+tank that the original shows whole: in frozen live frames (same factory) the original shows the entire tank in the
+doorway at local `(3.85,1.43)`, its centre `2.3` and its rear end about `2.8` sum units behind the facade, while the
+waiting tank at `(2.5,1.5)` (voxel front end about `3.0` behind) stays hidden. `2.75` keeps a `0.25` margin to
+that hidden case. The rectangular profile gives front sums `7.0` and `6.93` at the two centre columns above; it
+does not reconstruct the native first column's `7.5`. With the recess these become `4.25` and `4.18`, keeping the
+first centre (`4.0`) behind and the second (`5.19`) in front. A back-surface profile would expose the early tank and is therefore unsuitable.
 
 The optional generic `SpriteInstance.foundationRecess` defaults to zero. Instance encoding changes only the
 existing sum-offset component, foundation flags component 7: `ds = -dx - dz - foundationRecess`. Both
