@@ -1220,11 +1220,11 @@ in every frame, preserving debris over transparency or neutral smoke. This mode 
 late-debris processing. Add `--anims EXPLOLRG,TWLT070` to limit either mode to those anims (default: all anims on the
 selected pages); per-page pixel counts are printed and pages are still installed atomically through `cache_farm.install_file`.
 
-## Frozen live-pair crops and house-hue metrics (Python)
+## Frozen live-pair review tools (Python)
 
 `python/live_pair_metrics.py` reads `orig-NN.png` / `hd-NN.png` captures of the whole 1152x744 guest frame from
 `$PAIRS`. Python 3 with numpy, Pillow and cv2 is required. `--box EX0 EY0 EX1 EY1` uses engine pixels: each image's
-width/1152 and height/744 scale its box independently, rounding lower edges down and upper edges up. `crop` keeps
+width/1152 and height/744 scale the `crop` / `house` box independently, rounding lower edges down and upper edges up. `crop` keeps
 native screenshot resolution, pastes both crops with an 8 px white gap, and adds labels only with `--font` (a TTF/TTC
 supporting the chosen text, rendered at 20 px). Labels default to `原版 HD`; omitting the font omits the label strip.
 
@@ -1242,7 +1242,83 @@ python3 packages/ra2-assets/python/live_pair_metrics.py house \
 LO > HI wraps around zero. Saturation/value minima default to 100/60 (0..255). Counts are screenshot pixels, so a
 2x capture has four times the pixel area of a 1x capture; use matching scales when comparing raw counts/ratios.
 Unrelated pixels with the same hue also count. These frozen-crop measurements do not establish object ownership,
-visual acceptance, animation correctness or complete live coverage. Captures and generated crops stay outside Git.
+visual acceptance, animation correctness or complete live coverage. Captures and generated boards/crops stay outside Git.
+
+### Object-centred spatial boards
+
+`spatial` reads a JSON spec and writes a PNG comparison board plus a sibling `<stem>_s.jpg` phone copy whose long
+side is at most 2000 px. Titles, column names, row labels and notes use the macOS STHeiti Medium TTC font when
+available; otherwise Pillow's default font is used (Chinese glyph coverage depends on that font).
+
+```sh
+python3 -B packages/ra2-assets/python/live_pair_metrics.py spatial \
+  --spec "$REVIEW/board.json" --out "$REVIEW/board.png"
+```
+
+Example `board.json` (relative image and pair paths resolve from the spec's directory):
+
+```json
+{
+  "title": "空间对照",
+  "subtitle": "同一冻结时刻，统一引擎像素比例",
+  "scale": 2,
+  "cols": ["原版", "HD", "战术回放"],
+  "rows": [
+    {
+      "label": "苏军工厂",
+      "note": "核对轮廓和阴影",
+      "pairs": "pairs",
+      "idx": "07",
+      "find": { "type": "NAWEAP", "owner": 0, "near": [300, 200] },
+      "size": [220, 160],
+      "off": [0, -20],
+      "tiles": [["orig"], ["hd"], ["replay.png", 2]]
+    }
+  ]
+}
+```
+
+Each row uses either `box: [x0, y0, x1, y1]` in engine pixels or `find` with a required `type`, optional `owner`
+and optional engine-screen `near: [sx, sy]` hint. `find` reads that row's `native-NN.json`, accepting either a bare
+`LiveSnapshot` or a live-pair record with the snapshot under `state`. Coordinates are leptons; projection matches
+the driver's clicks: `sx = (x - y) * 30 / 256 - view.x` and
+`sy = (x + y) * 15 / 256 - z * 15 / 104 - view.y`. The nearest matching object to `near` wins; without a hint,
+the first on-screen match wins (or the first match if all are off-screen). `size` defaults to `[220, 160]`, and
+`off` defaults to `[0, 0]`, shifting the crop centre in engine pixels. A missing match fails with the type, pair
+index and directory in the error. Boxes intersect the full 1152x744 guest frame; empty intersections fail.
+
+`scale` is the board's pixels per engine pixel (default 2). `tiles` defaults to `[["orig"], ["hd"]`; pair frames
+and other `["path", "pair"]` images infer their source scale from width/1152. `["path", 2]` uses an explicit 2x
+source scale, useful for tactical replays whose origin is the guest-frame origin. All tiles are cropped before
+resizing to the board scale. `cols` names the columns and must match the largest tile count in any row; omitted
+names default to `原版`, `HD`, then numbered extra columns. Rows may have fewer tiles than the column count.
+
+### Scale-normalised dark pixels
+
+`dark` accepts one or more image paths and an engine-pixel box. It counts HSV **V < threshold** (default 40),
+also reports **V < 60**, and prints JSON. Every count is divided by that image's scale squared, so identical
+1x/2x rectangles report the same engine-pixel area. Thresholds are strict integer bounds in 0..255; coloured
+pixels use HSV value, not luminance. Counts are measured before any resizing.
+
+```sh
+python3 -B packages/ra2-assets/python/live_pair_metrics.py dark \
+  "$PAIRS/orig-07.png" "$PAIRS/hd-07.png" --box 100 200 140 230
+python3 -B packages/ra2-assets/python/live_pair_metrics.py dark \
+  "$REVIEW/replay.png" --box 100 200 140 230 --scale 2 --threshold 50
+```
+
+The default source scale is each image's width/1152; `--scale` sets one common explicit source scale for all
+images in that invocation. Replays must share the guest-frame origin. JSON contains the clamped `box`,
+`threshold`, `units: "engine_pixels"`, and an `images` list with `path`, `scale`, `below_threshold` and `below_60`.
+Both new commands round crop edges outward, use the same width-derived scale on both axes, and reject images
+that do not cover the requested box (allowing one pixel of raster rounding). They never pad missing image areas
+with black. Fractional scales/edges may include boundary pixels; integer aligned rectangles give exact areas.
+
+Asset-free regressions for all four subcommands:
+
+```sh
+python3 -B -m unittest discover -s packages/ra2-assets/python -p test_live_pair_metrics.py -v
+```
 
 ## Recording cuts with read-back (Python)
 
