@@ -1,6 +1,44 @@
 import { describe, expect, it } from 'vitest';
 import { Vector3 } from 'three';
-import { BLAST_CROWD, BlastCrowd, ENHANCED } from '../src/effects';
+import { BLAST_CROWD, BlastCrowd, CharLedger, ENHANCED } from '../src/effects';
+
+describe('enhanced char ledger', () => {
+  it.each([
+    [1, 8, 1],
+    [4, 1, 2],
+    [0, 10, 2],
+  ])('grants %i-cell-separated blasts %i seconds apart exactly %i marks', (distance, delay, marks) => {
+    const ledger = new CharLedger();
+    const claims = [ledger.claim(0, new Vector3()), ledger.claim(delay, new Vector3(distance, 0, 0))];
+    expect(claims.filter(Boolean)).toHaveLength(marks);
+  });
+
+  it('compares x/z distance, including the radius boundary and ignoring height', () => {
+    const ledger = new CharLedger();
+    expect(ledger.claim(0, new Vector3())).toBe(true);
+    expect(ledger.claim(1, new Vector3(0, 100, ENHANCED.char.radius))).toBe(false);
+    expect(ledger.claim(2, new Vector3(2, 0, 2))).toBe(true);
+  });
+
+  it('does not renew a rejected mark or retain mutable positions or future clock history', () => {
+    const ledger = new CharLedger();
+    const at = new Vector3();
+    expect(ledger.claim(0, at)).toBe(true);
+    at.x = 100;
+    expect(ledger.claim(ENHANCED.char.life, new Vector3())).toBe(false);
+    expect(ledger.claim(ENHANCED.char.life + 0.01, new Vector3())).toBe(true);
+    expect(ledger.claim(0, new Vector3())).toBe(true);
+  });
+
+  it('keeps char faint, bounded and short-lived so the native smudge is the lasting mark', () => {
+    expect(ENHANCED.char).toMatchObject({ width: 1.8, fadeIn: 0.15, radius: 2.5 });
+    expect(ENHANCED.char.opacity).toBeGreaterThan(0);
+    expect(ENHANCED.char.opacity).toBeLessThanOrEqual(0.35);
+    expect(ENHANCED.char.life).toBeGreaterThanOrEqual(8);
+    expect(ENHANCED.char.life).toBeLessThanOrEqual(10);
+    expect(ENHANCED.char.maxWidth).toBeLessThanOrEqual(2.5);
+  });
+});
 
 describe('enhanced blast cluster budget', () => {
   it.each([

@@ -479,6 +479,27 @@ were measured: 17.75 engine px on the battle framing); `reach base img cx,cy box
 changed pixels from a centre, in engine pixels. Test: `python3 -m unittest test_emissive_metrics` (synthetic,
 asset-free).
 
+Containment measurements use NumPy and Pillow only; RGB thresholds are in 0..1 units. Boxes are `x0,y0,x1,y1`
+with exclusive right/bottom bounds. Polygons are `"x,y;x,y;..."`, filled by the even-odd rule at pixel centres.
+
+- `mask present.png absent.png out.png [--threshold 0.04] [--dilate 2]`: threshold the maximum absolute RGB-channel
+  difference; retain the largest 8-connected component and original components touching its square dilation
+  (radius N pixels), then fill holes. Write a 0/255 grayscale PNG and JSON `{area, bbox}` (empty bbox: `null`).
+- `outside base.png img.png (--mask mask.png | --poly "...") [--box x0,y0,x1,y1] [--dv 0.03]`: count pixels with
+  increased HSV value **or** blueness `b - (r + g) / 2` by at least `dv`. JSON contains `outside`, `inside`,
+  `max_v_increase_outside` (maximum positive V change across the exterior region) and `outside_clusters` (up to
+  five bounding boxes, largest first, 8-connected, area >= 4). All measurements respect the optional box.
+- `footprint x y w h [--height H] [--scale S] [--cell 60x30]`: `(x, y)` is the foundation's top corner; `w, h` are
+  cells along the two isometric axes. Print the diamond as a polygon rounded to 0.1 image px, or the convex hull
+  with a copy shifted up by `H * S`. `S` is image px per engine px (default 1); cell dimensions are engine px.
+- `pairgate orig.png hd.png x0,y0,x1,y1 --poly "..." [--max-ratio 1.1] [--tol 0]`: JSON gives `orig`/`hd` class
+  counts, `satblue_ratio`, `outside_orig`/`outside_hd` (blue or lavender outside the polygon), `pass_ratio`,
+  `pass_outside` and combined `pass`. Gates require ratio <= max-ratio and outside_hd <= outside_orig + tol.
+  With no original blue, ratio is `null` and the ratio gate passes only with no HD blue. Completed measurements
+  exit 0 even when gates fail. Use frozen original/HD pairs of the same frame.
+
+Run from `packages/ra2-assets/python`: `python3 -m unittest -q test_emissive_metrics` (synthetic, asset-free).
+
 ## Water surface, detail and cliff-foot stripe tools (Python)
 
 These NumPy/Pillow/OpenCV tools take all input and output paths as arguments, generate PNGs outside Git, and never
@@ -1120,16 +1141,58 @@ visual acceptance, animation correctness or complete live coverage. Captures and
 
 `python/recording_video.py` cuts, re-times and labels browser recordings (such as an in-page MediaRecorder capture of
 the HD canvas, which has a variable frame rate) into one H.264 mp4. Each `--seg 'SRC|T0|T1|SPEED|LABEL|TZERO'` samples
-source seconds T0..T1 at the output rate using the container timestamps (SPEED 2 = double speed, 0.4 = slow motion);
-`--font` draws LABEL and, with a numeric TZERO, a `t=+x.x s` clock. The written file is read back and the command exits
-with status 1 when its frame count differs from the frames written (a truncated encode). Recordings and outputs stay
-outside Git.
+source seconds T0..T1 at the output rate using the container timestamps (SPEED 2 = double speed, 0.4 = slow motion),
+falling back to the nominal rate when timestamps are unavailable. Each source is decoded sequentially once with a
+constant number of frames in memory; selected frames are resized immediately and written as soon as their output
+order permits. Samples for later cuts, including overlapping cuts and returns to earlier source times, use temporary
+disk storage at the output size. `--max-height H` scales down further to fit the height limit while keeping H.264
+dimensions even. `--quality Q` requests encoder quality (0–100); unsupported backends ignore it with a note in the
+JSON summary. `--font` draws LABEL and, with a numeric TZERO, a `t=+x.x s` clock. The written file is read back and
+the command exits with status 1 when its frame count differs from the frames written (a truncated encode).
+Recordings and outputs stay outside Git.
 
 ```sh
 python3 packages/ra2-assets/python/recording_video.py --out "$OUT/death.mp4" --width 1280 --fps 25 --font "$FONT" \
   --seg "$REC|1.1|14.4|1|Building death|2.086" --seg "$REC|1.8|5.0|0.4|Slow motion|2.086"
 (cd packages/ra2-assets/python && python3 -m unittest test_recording_video -v)
 ```
+
+## Aftermath metrics (Python)
+
+`python/aftermath_metrics.py` accepts `--video` (cv2-readable mp4/webm), `--frames` (`f0000.png`, ... with `--step`
+seconds per frame), or `--pairs` (`orig-ID.png` / `hd-ID.png` with ordered `--ids`). It counts dark pixels (HSV V <
+`--dark-v`, default 50/255) and grey veil (exact saturation < 0.15, 0.35 < V/255 < 0.85) in repeatable
+`--box x0,y0,x1,y1` regions. `--box-scale-from WxH` rescales boxes on each axis, rounding edges outward.
+Python 3, numpy and cv2 are required; library entry points are `analyze`, `pixel_counts`, `box_to_pixels` and
+`sample_video` (BGR uint8 arrays). Related tools above are `python/live_pair_metrics.py` (crops/house-hue counts)
+and `python/recording_video.py` (recording cuts/read-back).
+
+Video/frames require `--event`. Offsets default to -1,0,1,2,3,5,8,11 seconds; `--at` replaces them. Pair IDs map to
+offsets in order (first N defaults, or an equal-length `--at`). Signed rises subtract each box/channel's median
+of negative-offset samples; frames without negative samples use frame zero. Video/pairs require a negative sample.
+Pairs show original/HD side by side and raw HD-minus-original dark counts. Counts are native pixels: compare at
+matching capture resolutions.
+
+Video sampling uses `floor((event + offset) * fps)` with container FPS or `--fps` override (required for non-finite,
+non-positive or above-240 container FPS). Indexed recordings seek by frame index and check positions before/after
+reading. WebM, unusable frame counts or failed seeks restart sequentially, retaining only requested frames, to
+avoid MediaRecorder index problems. This uses nominal FPS rather than variable-frame-rate timestamps; unavailable
+samples are errors. JSON includes requested/actual times, frame indices, read mode/reason, baselines and all results.
+
+```sh
+python3 packages/ra2-assets/python/aftermath_metrics.py --video "$REC" --event 2 \
+  --box 100,200,400,500 --box-scale-from 1152x744 --gate-dark '+5:6000,+11:3000' --json "$OUT/death.json"
+python3 packages/ra2-assets/python/aftermath_metrics.py --frames "$FRAMES" --step 0.5 --event 2 \
+  --box 0,0,160,120 --at=-1,0,5,11
+python3 packages/ra2-assets/python/aftermath_metrics.py --pairs "$PAIRS" --ids pre,p1,p2 --at=-1,5,11 \
+  --box 100,200,400,500 --box-scale-from 1152x744 --gate-grey '+5:6000,+11:3000'
+(cd packages/ra2-assets/python && python3 -m pytest -q test_aftermath_metrics.py)
+```
+
+The stdout table and optional JSON show counts, rises and pass/fail. Both `--gate-dark` and `--gate-grey` apply
+`OFFSET:MAX_RISE` limits to every box/channel at sampled offsets. Exit codes: 0 = pass/no gates, 1 = failed gate,
+2 = bad/missing input. Tests require pytest and use no game assets. Counts do not establish object ownership or
+visual acceptance; recordings, captures and reports stay outside Git.
 
 ## Live snapshot replays (Python)
 

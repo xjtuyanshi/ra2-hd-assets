@@ -326,7 +326,7 @@ synthetic snapshots (`tests/basic/hdLive*.test.ts`, `tests/basic/liveSmudges.tes
 and the H3 overlay and smudge grids are read from pinned YR 1.001 and forwarded end to end. Evidence, optional-read
 boundaries and the remaining H1/H2 proposals are in `docs/remaster/research/hd-bridge-fields.md`. H1 is partial:
 native anim frame/stage/alpha/layer/owner/attachment/buildingAnim and bullet type/frame/velocity are forwarded;
-the table also lists the remaining optional fields. These additions forward data the readers already read.
+the table also lists the remaining optional fields alongside implemented observer fields.
 
 | Step | Fields                                                                                                                       | Used for                                                                                                       | Fallback without it                                                                                                                                                                                                                                                        |
 | ---- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -341,6 +341,17 @@ the table also lists the remaining optional fields. These additions forward data
 Completed-building H2 also supplies `buildingFrame` and `buildingDamaged`: the engine-selected body/shadow frame
 (including occupancy) is independent of the yellow condition used for bibs and damage-animation variants.
 Without these optional fields the view retains its library-yellow body/layer estimate.
+
+Completed-building H2 also publishes `activeAnim?: 'none' | 'shown' | 'detail'` from the validated native
+ActiveAnim slot: `none` means no anim, `shown` means its native draw gate allows it, and `detail` means
+Invisible, options detail or dynamic frame-rate detail suppresses it. Invalid reads omit the field (unknown).
+The YR projection's `buildingActiveAnim.ts` observer reads detail globals once per poll; optional snapshot
+`nativeDetail { fps, lowFrameRate, level }` exposes the validated native renderer diagnostics. These fields
+participate in the same-frame change key and pass through the page to LiveView. RA2 supplies neither.
+Only NAPOWR's HD glow opts into this state: `none` removes its orb, arcs and pool, then their existing fade
+restarts when the anim returns. The default `LiveViewOptions.nativeDetail: 'ignore'` keeps `detail` lit;
+`?hd-native-detail=mirror` (option `'mirror'`) suppresses it for native/HD reviews. Unknown state retains
+the existing build-state/sandbox policy. See [ActiveAnim evidence](research/hd-bridge-fields.md#activeanim-and-native-dynamic-detail).
 
 Optional object `imageType` forwards the engine's draw image without replacing the rules `type` used for health,
 selection, ownership and events. YR 1.001 UnitClass draw saves Type at `0x73D29C`, tests Harvester (+`0xE0E`) at

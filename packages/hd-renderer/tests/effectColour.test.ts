@@ -26,7 +26,7 @@ import {
   type BeamSpec,
 } from '../src/effects';
 import type { LightField } from '../src/lightField';
-import { LiveEffectsDriver, type LiveEffects } from '../src/live/effects';
+import { FIREBALL_MERGE, LiveEffectsDriver, type LiveEffects } from '../src/live/effects';
 
 type Pool = {
   mesh: InstancedMesh & { material: MeshBasicNodeMaterial };
@@ -36,6 +36,7 @@ type Pool = {
   velocity: InstancedBufferAttribute;
   params: InstancedBufferAttribute;
   until: number;
+  spawn(now: number, at: Vector3, velocity: Vector3, size: number, life: number, extra?: number): void;
 };
 
 const layers: EffectsLayer[] = [];
@@ -204,6 +205,88 @@ describe('enhanced particle routing and lights', () => {
     layer.update(now + 4.3, new Vector3(1, 0, 0), new Vector3(0, 1, 0));
     expect(pool(layer, 'billow').mesh.visible).toBe(false);
     expect(pool(layer, 'column').mesh.visible).toBe(false);
+  });
+
+  it('shares the actual char pool by place and lifetime while retaining every hot-crater flash', () => {
+    const layer = makeLayer();
+    const scorch = pool(layer, 'scorch');
+    const flash = pool(layer, 'embers');
+    for (const [now, x] of [
+      [2, 0],
+      [3, 1],
+      [4, 4],
+      [12, 0],
+    ])
+      layer.explode(now!, new Vector3(x, 0, 0), 1, new Vector3(), { enhanced: true, hotCrater: true });
+    expect(spawned(scorch)).toBe(3);
+    expect(spawned(flash)).toBe(4);
+    for (let i = 0; i < 3; i++) {
+      expect(scorch.params.getX(i)).toBeLessThanOrEqual(ENHANCED.char.maxWidth);
+      expect(scorch.params.getY(i)).toBe(ENHANCED.char.life);
+      expect(scorch.params.getW(i)).toBe(1);
+    }
+    layer.update(scorch.until, new Vector3(1, 0, 0), new Vector3(0, 1, 0));
+    expect(scorch.mesh.visible).toBe(false);
+  });
+
+  it.each([
+    [undefined, 0.5, 0.9],
+    [undefined, 4, 2.5],
+    [0.1, 4, 0.3],
+    [1.4, 4, 1.4],
+    [3, 4, 2.5],
+  ])('bounds charWidth=%s independently of fireball maxSize=%s to %s cells', (charWidth, maxSize, expected) => {
+    const layer = makeLayer();
+    layer.explode(2, new Vector3(), 2, new Vector3(), { enhanced: true, hotCrater: true, charWidth, maxSize });
+    expect(pool(layer, 'scorch').params.getX(0)).toBeCloseTo(expected, 5);
+  });
+
+  it('spawns exactly one foundation-sized char for a live building-death cluster and its staggered follow-up lead', () => {
+    const layer = makeLayer();
+    const char = vi.spyOn(pool(layer, 'scorch'), 'spawn');
+    const flash = vi.spyOn(pool(layer, 'embers'), 'spawn');
+    const explode = vi.spyOn(layer, 'explode');
+    const driver = new LiveEffectsDriver(layer, () => false);
+    driver.style = 'enhanced';
+    driver.hasHdArt = () => true;
+    // Nine simultaneous Crater=yes anims span a 3 x 3 foundation; the lead's fireball width is separate.
+    const anims = Array.from({ length: 9 }, (_, i) => ({
+      id: i + 1,
+      uid: i + 1,
+      type: 'TWLT070',
+      x: 256 * (10 + (i % 3)),
+      y: 256 * (10 + Math.floor(i / 3)),
+      z: 0,
+    }));
+    expect(anims.length).toBeGreaterThanOrEqual(FIREBALL_MERGE.engulfMembers);
+    driver.push({ anims, bullets: [], particleSystems: [] }, 100, 2, new Vector3());
+    expect(explode).toHaveBeenCalledTimes(1);
+    expect(explode.mock.calls[0]![4]).toMatchObject({ hotCrater: true, charWidth: 3 });
+    expect(char).toHaveBeenCalledTimes(1);
+    expect(char.mock.calls[0]![3]).toBeCloseTo(Math.min(2 + 1, ENHANCED.char.maxWidth), 5);
+    expect(char.mock.calls[0]![1]).toMatchObject({ x: 11, z: 11 });
+    // After the merge window a second lead keeps the cluster's foundation, but cannot paint a second char.
+    anims.push({ id: 10, uid: 10, type: 'TWLT070', x: 11 * 256, y: 11 * 256, z: 0 });
+    driver.push({ anims, bullets: [], particleSystems: [] }, 110, 2 + FIREBALL_MERGE.window + 0.1, new Vector3());
+    expect(explode).toHaveBeenCalledTimes(2);
+    expect(explode.mock.calls[1]![4]).toMatchObject({ charWidth: 3 });
+    expect(char).toHaveBeenCalledTimes(1);
+    expect(flash).toHaveBeenCalledTimes(2);
+  });
+
+  it('retains plain scorch spawns and lifetimes alongside enhanced char at the same place', () => {
+    const layer = makeLayer();
+    const scorch = pool(layer, 'scorch');
+    const at = new Vector3();
+    layer.explode(2, at, 1, new Vector3(), { enhanced: true, hotCrater: true });
+    layer.explode(3, at, 1, new Vector3(), { scorch: true, charWidth: 0.1 });
+    layer.explode(4, at, 1, new Vector3());
+    expect(spawned(scorch)).toBe(3);
+    for (const i of [1, 2]) {
+      expect(scorch.params.getW(i)).toBe(0);
+      expect(scorch.params.getY(i)).toBe(40);
+      expect(scorch.params.getX(i)).toBeCloseTo(1.4, 5);
+    }
   });
 
   it('limits the crater hot rim to alpha 0.25 for 0.3 seconds with fractional fades', () => {
@@ -616,6 +699,7 @@ describe('effect colour shader construction', () => {
       'muzzleStar',
       'halo',
       'embers',
+      'scorch',
       'debris',
       'debrisShadow',
       'garnishFire',

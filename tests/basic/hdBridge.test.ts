@@ -134,6 +134,17 @@ afterEach(() => {
 });
 
 describe('HD bridge look parameters', () => {
+  it.each([
+    ['', 'ignore'],
+    ['&hd-native-detail=mirror', 'mirror'],
+    ['&hd-native-detail=ignore', 'ignore'],
+    ['&hd-native-detail=invalid', 'ignore'],
+  ])('passes native detail review mode from %s', async (query, nativeDetail) => {
+    const harness = setup(`?hd=1${query}`);
+    await goLive(harness);
+    expect(liveView.create).toHaveBeenCalledWith(harness.hdCanvas, expect.objectContaining({ nativeDetail }));
+    harness.stop();
+  });
   it('applies the cinematic preset and vehicle options before the first snapshot push and render', async () => {
     const harness = setup('?hd=1&hd-look=cinematic&hd-vlook=remaster&hd-vproj=/vehicles-hd/');
     const view = fakeLookView();
@@ -216,6 +227,7 @@ describe('HD 桥状态机', () => {
     const harness = setup();
     const view = await goLive(harness);
     const state = battle(3);
+    state.nativeDetail = { fps: 14, lowFrameRate: true, level: 2 };
     const common = {
       owner: 0,
       x: 100,
@@ -239,6 +251,7 @@ describe('HD 桥状态机', () => {
         contactUid: 0,
         dock: false,
         unloading: 'door',
+        activeAnim: 'detail',
       },
       {
         ...common,
@@ -256,6 +269,7 @@ describe('HD 桥状态机', () => {
     harness.setState(state);
     await advance(16);
     const pushed = view.push.mock.calls.at(-1)![0];
+    expect(pushed.nativeDetail).toEqual(state.nativeDetail);
     expect(pushed.objects[0]).toMatchObject({
       buildingFrame: 0,
       buildingDamaged: false,
@@ -266,15 +280,20 @@ describe('HD 桥状态机', () => {
     expect(pushed.objects).toEqual(state.objects);
     expect(pushed.objects[2]).not.toHaveProperty('buildState');
     expect(pushed.objects[2]).not.toHaveProperty('sequenceFrame');
+    expect(pushed.objects[2]).not.toHaveProperty('activeAnim');
     expect(pushed.objects[2]).toMatchObject({ type: 'HARV', imageType: 'HORV' });
     expect(pushed.objects[3]).not.toHaveProperty('contactUid');
     expect(pushed.objects[3]).not.toHaveProperty('dock');
     expect(pushed.objects[3]).not.toHaveProperty('unloading');
     expect(pushed.objects[3]).not.toHaveProperty('imageType');
     delete state.objects[2]!.imageType;
+    delete state.objects[0]!.activeAnim;
+    delete state.nativeDetail;
     harness.setState({ ...state });
     await advance(16);
     expect(view.push.mock.calls.at(-1)![0].objects[2]).not.toHaveProperty('imageType');
+    expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('activeAnim');
+    expect(view.push.mock.calls.at(-1)![0]).not.toHaveProperty('nativeDetail');
     harness.stop();
   });
 

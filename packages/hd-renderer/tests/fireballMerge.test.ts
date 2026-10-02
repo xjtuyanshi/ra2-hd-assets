@@ -116,7 +116,31 @@ describe('clustered explosions merge into one or two big fireballs (FIREBALL_MER
     expect(out).toHaveLength(2);
     for (const card of out) expect(card.hd!.size).toBeCloseTo(ENHANCED.hdSize.explosion, 5);
     expect(f.explode).toHaveBeenCalledTimes(2);
-    for (const call of f.explode.mock.calls) expect(call[2]).toBeCloseTo(0.93, 5);
+    for (const call of f.explode.mock.calls) {
+      expect(call[2]).toBeCloseTo(0.93, 5);
+      expect(call[4].charWidth).toBeUndefined();
+    }
+  });
+
+  it.each([
+    [[10, 10], [11, 10], [10, 10.5], 2],
+    [[10, 10], [10.5, 10], [10, 11], 2],
+  ] as const)('measures the foundation before the lead moves to the centroid (%s, %s, %s)', (a, b, c, width) => {
+    const f = fixture();
+    // The first (and equally fiery) member leads at an extreme; measuring after centring would lose that bound.
+    for (const [x, z] of [a, b, c]) f.spawn('TWLT070', x, z);
+    f.push(100, 10);
+    expect(f.explode).toHaveBeenCalledTimes(1);
+    expect(f.explode.mock.calls[0]![4]).toMatchObject({ charWidth: width });
+  });
+
+  it('leaves the art-relative char width for a two-member merge below the building-death threshold', () => {
+    const f = fixture();
+    f.spawn('TWLT070', 10, 10);
+    f.spawn('TWLT070', 11, 10);
+    f.push(100, 10);
+    expect(f.explode).toHaveBeenCalledTimes(1);
+    expect(f.explode.mock.calls[0]![4].charWidth).toBeUndefined();
   });
 
   it('turns a staggered collapse into at most two leads that grow smoothly with later members', () => {

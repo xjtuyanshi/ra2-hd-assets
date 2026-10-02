@@ -123,7 +123,7 @@ export const GARNISH_LIGHTS = {
  *     outliving the art by a couple of seconds;
  *   - a heat shimmer over the blast and a dust ring racing out over the ground;
  *   - for anims that leave the engine's crater or scorch (Scorch=yes / Crater=yes), the crater glowing hot and cooling
- *     briefly, with charred ground fading over most of a minute while the engine's smudge stays underneath.
+ *     briefly, with one faint charred mark per place fading within nine seconds while the engine's smudge stays.
  * Ground-anchored depth keeps rising smoke behind foreground units; sparse rubble and short ground rests keep a
  * building collapse readable after its fireball has gone. All enhanced look tuning lives here for visual reviews.
  */
@@ -182,6 +182,20 @@ export class BlastCrowd {
     };
     this.recent.push({ t: now, x: at.x, z: at.z, ...granted });
     return granted;
+  }
+}
+
+/** Recent charred marks by place; rejected blasts do not renew a mark's lifetime. */
+export class CharLedger {
+  private recent: { t: number; x: number; z: number }[] = [];
+  constructor(private readonly char = ENHANCED.char) {}
+  /** Claims one mark within the ground-plane radius for its lifetime, ignoring height and expired clock history. */
+  claim(now: number, at: Vector3): boolean {
+    const c = this.char;
+    this.recent = this.recent.filter((r) => now - r.t <= c.life && r.t <= now);
+    if (this.recent.some((r) => (r.x - at.x) ** 2 + (r.z - at.z) ** 2 <= c.radius * c.radius)) return false;
+    this.recent.push({ t: now, x: at.x, z: at.z });
+    return true;
   }
 }
 
@@ -393,12 +407,13 @@ export const ENHANCED = {
     fadeIn: 0.05,
     fadeOut: 0.4,
   },
-  /** Charred ground around a crater: width relative to the art, seconds until it has faded. */
   /**
-   * Charred ground around a crater: width relative to the art, seconds until it has faded, seconds to darken in (under
-   * the crater flash). It carries no glow of its own: a saturated orange core lasting seconds read as a flat lava decal.
+   * Charred ground: `width` is the fallback art-width multiplier; `maxWidth` caps its diameter in world units;
+   * `opacity` is peak alpha; `life` and `fadeIn` are seconds to disappear and darken in; `radius` is the world-unit
+   * distance within which marks share one lifetime. Live review found opaque 2-3-cell splats adding 11-17k dark pixels
+   * in a 500 x 500 box through 11 seconds, while the original stayed almost clean: the engine's smudge is the lasting mark.
    */
-  char: { width: 1.8, life: 45, fadeIn: 0.15 },
+  char: { width: 1.8, maxWidth: 2.5, opacity: 0.35, life: 9, fadeIn: 0.15, radius: 2.5 },
   /**
    * Muzzle star: art-relative width with the existing world-size caps, life in seconds, ray count, radial reach and
    * angular jitter (fraction of ray spacing). Core/ray widths use the unit disc; `rayFade` is the solid share of reach.
@@ -747,6 +762,8 @@ export interface GarnishOptions {
   hdArt?: boolean;
   /** Enhanced style: the anim leaves the engine's crater or scorch, so the crater glows hot for a moment. */
   hotCrater?: boolean;
+  /** Enhanced char footprint in world units (a dying building's foundation, independent of its fireball width). */
+  charWidth?: number;
 }
 
 export class EffectsLayer {
@@ -796,6 +813,8 @@ export class EffectsLayer {
   private readonly debrisShadow: ParticlePool;
   /** Particle budget shared by clustered enhanced blasts (BLAST_CROWD). */
   private readonly crowd = new BlastCrowd();
+  /** One enhanced charred mark per nearby death/place for the mark's lifetime. */
+  private readonly charLedger = new CharLedger();
   /** Enhanced style: heat shimmer (refracts the frame drawn so far). */
   private readonly shimmer: ParticlePool;
   /** Enhanced style: dust rings over the ground. */
@@ -1044,7 +1063,7 @@ export class EffectsLayer {
     const ground = new PlaneGeometry(1, 1);
     ground.rotateX(-Math.PI / 2);
     // Scorch decal. params.w = 1: the enhanced style's charred ground (see enhancedExplosion): soot streaks thrown out
-    // radially around the crater, darkest near it, lit by the scene, fading over most of a minute.
+    // radially around the crater, darkest near it, lit by the scene, faint and gone within nine seconds.
     this.scorch = new ParticlePool(SCORCHES, ground, blended(), (pool) => {
       const { age, life, size, seed, origin, alive, extra: charred } = particleInputs(pool, this.now);
       const t = clamp(age.div(life), 0, 1);
@@ -1073,7 +1092,8 @@ export class EffectsLayer {
         // The hot rim is the crater flash's (embers pool); the char itself is cold soot that darkens in quickly.
         const char = vec4(
           shade,
-          clamp(soot, 0, 0.88)
+          clamp(soot, 0, 1)
+            .mul(ENHANCED.char.opacity)
             .mul(smoothstep(0.0, ENHANCED.char.fadeIn, age))
             .mul(smoothstep(1.0, 0.35, t)),
         );
@@ -1854,8 +1874,11 @@ export class EffectsLayer {
     this.dust.spawn(now, at, this.zeroVelocity, e.dust.width * width, e.dust.life);
     if (options.hotCrater) {
       this.embers.spawn(now + e.crater.delay, at, this.zeroVelocity, e.crater.width * width, e.crater.life, 1);
-      // Charred ground around the engine's crater smudge (which stays underneath), fading over most of a minute.
-      this.scorch.spawn(now + 0.05, at, this.zeroVelocity, e.char.width * width, e.char.life, 1);
+      // The per-blast hot flash stays above the engine's lasting smudge; only the faint char is shared by place.
+      if (this.charLedger.claim(now, at)) {
+        const charWidth = Math.max(0.3, Math.min(options.charWidth ?? e.char.width * width, e.char.maxWidth));
+        this.scorch.spawn(now + 0.05, at, this.zeroVelocity, charWidth, e.char.life, 1);
+      }
     }
   }
 

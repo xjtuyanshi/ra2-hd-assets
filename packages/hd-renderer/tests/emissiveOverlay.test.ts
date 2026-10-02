@@ -117,7 +117,7 @@ describe('emissive primitive buffers and render exclusion', () => {
       const data = internal.discData.array;
       expect(data).toHaveLength(2 * 11 * 4);
       for (const [index, fade, globalAlpha, filamentMix] of [
-        [0, 1, 1, 0.5],
+        [0, 1, disc.orb.alpha, disc.orb.filamentMix],
         [1, 0.5, 0.8, 0.6],
       ]) {
         const base = index! * 44;

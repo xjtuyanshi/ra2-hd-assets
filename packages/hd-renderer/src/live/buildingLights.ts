@@ -13,6 +13,8 @@ import { IsoCamera, LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import type { LiveObject } from './liveView';
 
 export interface BuildingLightSpec {
+  /** This light represents the building's native ActiveAnim glow. */
+  activeAnim?: boolean;
   /** Fractions of the foundation, measured from its top-left cell corner. */
   at: readonly [number, number];
   /** Engine pixels above ground. */
@@ -77,6 +79,12 @@ export interface BuildingArcStyle {
   /** Filament start radius range as fractions of the orb radius (default [0.12, 0.25]). */
   filamentStart?: readonly [number, number];
   /**
+   * Filament end radius range as fractions of the orb radius (default [0.92, 0.985]: spokes reaching the glass). Forks
+   * end at the range's maximum (at most 0.95). Ends well inside the glass keep the lightning crawling INSIDE the globe
+   * instead of radiating from a hot centre to the rim (the owner read rim-to-centre spokes as a Tesla coil firing).
+   */
+  filamentEnd?: readonly [number, number];
+  /**
    * Glow under-strokes begin at the first vertex at least this fraction of the orb radius from its centre (default 0:
    * whole path). Five filament glows converging on the centre painted the white-hot core saturated blue.
    */
@@ -94,16 +102,20 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
   // and present the saturated sphere/arcs after the grade so neither can feed bloom's lavender-white veil.
   NAPOWR: [
     {
+      // NAPOWR_A redraws the sphere/walls; the type has no Light* keys. Native detail skips are presentation only.
+      activeAnim: true,
       // Battle framing at two device pixels per engine pixel: this head is within one engine pixel of the glass centre.
       at: [0.47, 0.4],
       height: 27,
-      // Night value; by day only `day` of it (luminance about 0.17 of noon flat ground: measured +16 % luminance on the
-      // grass beside two live reactors, the target's contained tint). At a third of this the night pool vanished
-      // (pavement next to the reactors unchanged at hour 21).
-      colour: [0.75, 2.1, 12.75],
-      radius: 2.6,
+      // Owner feedback (L5H): the energy stays inside the machine. NAPOWR has no Light* keys, so the original lights
+      // no ground at all; the pool is a faint tint confined to the reactor's own 3x2 foundation (radius 1 cell from
+      // its centre reaches the short axis' edge with zero weight). The L5G 2.6-cell pool painted the night pavement
+      // and neighbouring facades blue; at 1.4 cells it still lit 4.5k night px outside the reactor's silhouette.
+      // Night value; by day only `day` of it (the same daytime irradiance as L5G, about 0.17 of noon flat ground).
+      colour: [0.45, 1.25, 7.6],
+      radius: 1,
       flicker: 0.12,
-      day: 0.066,
+      day: 0.11,
       groundOnly: 1,
       glow: null,
       glowSize: 0,
@@ -113,57 +125,58 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
       fadeIn: 0.5,
       orb: {
         // The art's glass radius measures 17.75 engine px / PIXELS_PER_CELL_EDGE = 0.418 world units.
-        // No halo may extend that silhouette; the translucent body reveals the painted glass swirl.
+        // No halo may extend that silhouette.
         radius: 0.418,
-        // L5G tuning on the battle and replay framings (scratchpad finallook7/light, gates against the faithful render
-        // of the same frame: saturated blue 1.0-1.5x, lavender <= 2000): a white-cyan core over the inner half (the
-        // target's white-hot heart; cyan hue < 200 counts neither as saturated blue nor lavender), a saturated body at
-        // half opacity so the painted glass swirl shows through without turning pale lavender, a rim of S about 0.5.
-        // Live pair (two adjacent reactors, same box as the review): a less saturated body (60/115/255) left the box at
-        // 0.88-0.94x the original's saturated blue; this body over the pale glass still reads as glass.
-        hot: displayLinear(225, 252, 255),
-        mid: displayLinear(130, 220, 255),
-        body: displayLinear(35, 85, 255),
-        limb: displayLinear(110, 160, 245),
-        filaments: displayLinear(170, 235, 255),
-        halo: displayLinear(45, 95, 255),
-        coreRadius: 0.48,
+        // Owner feedback (L5H, "a Tesla coil about to explode"): the original sphere is a GLASS globe with lightning
+        // inside, and the HD art's own NAPOWR_A frames already paint that glass, its lightning and the crackle in the
+        // cradle. The overlay therefore adds no white-hot core and no plasma body: only a faint blue-violet tint
+        // inside the glass (the original's lavender-blue sphere; a pale tint turned the night glass milky grey) so
+        // the art's glass reflections and lightning stay visible, day and night.
+        hot: displayLinear(120, 140, 255),
+        mid: displayLinear(110, 130, 255),
+        body: displayLinear(90, 110, 255),
+        limb: displayLinear(120, 140, 250),
+        filaments: displayLinear(200, 215, 255),
+        halo: displayLinear(90, 110, 255),
+        coreRadius: 0.55,
         bodyStart: 0.75,
         bodyEnd: 0.92,
         alpha: 1,
-        coreAlpha: 1,
-        bodyAlpha: 0.52,
-        limbAlpha: 0.62,
-        filamentMix: 0.5,
+        // Sandbox day/night, one and two reactors: 0.25/0.18 left the night glass grey; this tint keeps it the
+        // faithful render's deep blue while the box stays below the L5G orb's saturated blue (two reactors 7492 vs
+        // 8712; the L5G orb measured 0.90x the live original's).
+        coreAlpha: 0.35,
+        bodyAlpha: 0.26,
+        limbAlpha: 0.1,
+        filamentMix: 0,
         haloAlpha: 0,
         haloScale: 1,
         // Front-right tower corner (+11.5, -1.5) engine px; top rises right at -22 degrees, left edge drops at 90.
         occluders: [{ corner: [0.648, -0.085], from: -22, to: 90 }],
       },
       arcStyle: {
-        core: displayLinear(210, 250, 255),
-        edge: displayLinear(50, 120, 255),
-        width: 2,
-        forkWidth: 1.3,
-        coreFraction: 0.45,
-        glowWidth: 3,
-        glowAlpha: 0.45,
-        // Seven or eight arcs: four or five filaments leave the white core's edge (their glows start at half radius so
-        // they cannot stain the core blue) and three strikes reach the coil, base fittings and pad emitters.
-        filaments: [4, 5],
-        strikes: [3, 3],
-        filamentStart: [0.3, 0.42],
-        glowStart: 0.5,
-        // Measured coil, base fittings, three pad emitters and the right tower's corner insulator (engine px).
+        // Thin white-blue lightning that crawls INSIDE the glass (ends at 55-85 % of the radius, never at the rim),
+        // with a faint narrow glow; no strikes to the coil or towers. At most one short arc drops from the glass into
+        // the cradle below it (the original's crackle between the sphere and its base), inside the footprint.
+        core: displayLinear(235, 242, 255),
+        edge: displayLinear(110, 130, 255),
+        width: 1.1,
+        forkWidth: 0.8,
+        coreFraction: 0.5,
+        glowWidth: 2.2,
+        glowAlpha: 0.22,
+        filaments: [3, 4],
+        strikes: [0, 1],
+        filamentStart: [0.08, 0.22],
+        filamentEnd: [0.55, 0.85],
+        glowStart: 0,
+        // Cradle fittings directly below the glass (engine px): left fitting, centre pad emitter, right fitting.
         anchors: [
-          [-23, -17],
-          [-24, 11],
           [-12, 22],
           [-2, 26],
           [8, 22],
-          [13, -2],
         ],
-        maxBeyond: 12,
+        maxBeyond: 9,
         crawl: 0.06,
       },
     },
@@ -238,7 +251,10 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
   ],
 };
 
-type Building = Pick<LiveObject, 'type' | 'kind' | 'x' | 'y' | 'z' | 'health' | 'buildState' | 'buildingDamaged'> &
+type Building = Pick<
+  LiveObject,
+  'type' | 'kind' | 'x' | 'y' | 'z' | 'health' | 'buildState' | 'buildingDamaged' | 'activeAnim'
+> &
   Partial<Pick<LiveObject, 'uid' | 'id'>>;
 
 export interface BuildingLightPlacement extends SourceSpec {
@@ -301,7 +317,7 @@ export function buildingLightPlacements(
 export function buildingLightSources(
   buildings: readonly Building[],
   /** night: the renderer's lamp gain (0 by day, 1 at night) for lights with a `day` share below one. */
-  settings: { sourceLights: number; night?: number },
+  settings: { sourceLights: number; night?: number; nativeDetail?: 'ignore' | 'mirror' },
   foundation: (type: string) => readonly [number, number] | undefined,
   shrouded: (building: Building) => boolean,
   conditionYellow = 0.5,
@@ -314,7 +330,10 @@ export function buildingLightSources(
       building.kind !== 'building' ||
       !BUILDING_LIGHTS[building.type] ||
       building.health <= 0 ||
-      !(gate ? gate.allowed(building) : building.buildState === 'done') ||
+      !(gate ? gate.allowed(building, false) : building.buildState === 'done') ||
+      BUILDING_LIGHTS[building.type]!.every(
+        (spec) => spec.activeAnim && !activeAnimLit(building, settings.nativeDetail),
+      ) ||
       shrouded(building)
     )
       continue;
@@ -325,6 +344,11 @@ export function buildingLightSources(
     for (let index = 0; index < lights.length; index++) {
       const light = lights[index]!;
       const spec = specs[index]!;
+      if (
+        spec.activeAnim &&
+        (!activeAnimLit(building, settings.nativeDetail) || (gate && !gate.allowed(building, true)))
+      )
+        continue;
       const night = Math.min(1, Math.max(0, settings.night ?? 0));
       const day = spec.day ?? 1;
       const daylight = day + (1 - day) * night;
@@ -340,7 +364,7 @@ export function buildingLightSources(
         rgb[1] * k,
         rgb[2] * k,
       ];
-      light.fadeStart = gate?.fadeStart(building);
+      light.fadeStart = gate?.fadeStart(building, spec.activeAnim === true);
       light.colour = scale(light.colour);
       light.glow = light.glow ? scale(light.glow, gain * glowGain) : null;
       out.push(light);
@@ -364,7 +388,16 @@ interface GateState {
   blocked: boolean;
   allowed: boolean;
   born: number;
+  animAllowed: boolean;
+  animBorn: number;
 }
+
+function activeAnimLit(building: Building, nativeDetail: 'ignore' | 'mirror' = 'ignore'): boolean {
+  return building.activeAnim !== 'none' && !(nativeDetail === 'mirror' && building.activeAnim === 'detail');
+}
+
+const onlyActiveAnimLights = (building: Building) =>
+  BUILDING_LIGHTS[building.type]?.every((spec) => spec.activeAnim === true) ?? false;
 
 /** Constructor sentinels must not flash before build-up; sandbox objects in the first snapshot are already present. */
 export class BuildingLightGate {
@@ -373,7 +406,12 @@ export class BuildingLightGate {
   private readonly states = new Map<string, GateState>();
   private readonly seen = new Set<string>();
 
-  update(buildings: readonly Building[], frame: number, now: number): void {
+  update(
+    buildings: readonly Building[],
+    frame: number,
+    now: number,
+    nativeDetail: 'ignore' | 'mirror' = 'ignore',
+  ): void {
     if (frame < this.lastFrame) {
       this.states.clear();
       this.first = true;
@@ -385,8 +423,17 @@ export class BuildingLightGate {
       const key = buildingKey(b);
       this.seen.add(key);
       let state = this.states.get(key);
+      const fresh = !state;
       if (!state) {
-        state = { frame, undefinedFrames: 0, blocked: false, allowed: false, born: now };
+        state = {
+          frame,
+          undefinedFrames: 0,
+          blocked: false,
+          allowed: false,
+          born: now,
+          animAllowed: false,
+          animBorn: now,
+        };
         this.states.set(key, state);
         if (this.first && b.buildState === undefined) {
           state.allowed = true;
@@ -410,15 +457,21 @@ export class BuildingLightGate {
           state.born = now;
         }
       }
+      // Track ActiveAnim separately so an unrelated source on the same building retains its own fade.
+      const animAllowed = state.allowed && activeAnimLit(b, nativeDetail);
+      if (animAllowed && !state.animAllowed) state.animBorn = fresh ? state.born : now;
+      state.animAllowed = animAllowed;
     }
     for (const key of this.states.keys()) if (!this.seen.has(key)) this.states.delete(key);
     this.first = false;
   }
-  allowed(building: Building): boolean {
-    return this.states.get(buildingKey(building))?.allowed ?? false;
+  allowed(building: Building, activeAnim = onlyActiveAnimLights(building)): boolean {
+    const state = this.states.get(buildingKey(building));
+    return !!state?.allowed && (!activeAnim || state.animAllowed);
   }
-  fadeStart(building: Building): number | undefined {
-    return this.states.get(buildingKey(building))?.born;
+  fadeStart(building: Building, activeAnim = onlyActiveAnimLights(building)): number | undefined {
+    const state = this.states.get(buildingKey(building));
+    return activeAnim ? state?.animBorn : state?.born;
   }
 }
 
@@ -542,7 +595,9 @@ export function buildingLightOverlay(
         const theta = filamentSlotAngle(light.key, index, pairFrame, style.crawl) + (random() * 2 - 1) * 0.3;
         const [startMin, startMax] = style.filamentStart ?? [0.12, 0.25];
         const r0 = (startMin + random() * (startMax - startMin)) * radius;
-        const r1 = (0.92 + random() * 0.065) * radius;
+        const [endMin, endMax] = style.filamentEnd ?? [0.92, 0.985];
+        const r1 = (endMin + random() * (endMax - endMin)) * radius;
+        const forkEnd = Math.min(0.95, endMax) * radius;
         const twist = (random() * 2 - 1) * 0.35;
         const points: ScreenPoint[] = [];
         const vertices = 6 + Math.floor(random() * 4);
@@ -568,12 +623,12 @@ export function buildingLightOverlay(
           if (joint !== undefined) {
             const start = points[joint]!;
             const angle = theta + (random() < 0.5 ? -1 : 1) * (0.25 + random() * 0.25);
-            const end = polar(0.95 * radius, angle);
+            const end = polar(forkEnd, angle);
             const delta = Math.atan2(
               Math.sin(Math.atan2(start.y, start.x) - angle),
               Math.cos(Math.atan2(start.y, start.x) - angle),
             );
-            const middle = polar((Math.hypot(start.x, start.y) + 0.95 * radius) / 2, angle + delta / 2);
+            const middle = polar((Math.hypot(start.x, start.y) + forkEnd) / 2, angle + delta / 2);
             paths.push([start, clampRadius(middle, 0.985 * radius), end]);
           }
         }
