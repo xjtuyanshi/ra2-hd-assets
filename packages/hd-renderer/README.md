@@ -818,7 +818,11 @@ retains the original material path and defaults. Build player-supplied assets us
 
 Live infantry queues the shadow matching its selected body/sequence frame, including a dedicated library page.
 Only infantry shadows carry a contact marker (cleared whenever a sprite-pool record is reused). Their enhanced-look
-core opacity is **0.78**; their original SHP offsets remain attached to the feet even in `cinematic`. Sun following,
+core opacity is **0.8** (`INFANTRY_SHADOW_OPACITY`), reached already at filtered coverage 0.35 (`INFANTRY_SHADOW_RAMP`,
+smoothstep 0.02-0.35): the upscaled mask is only about 0.5 at the original blob's edge, so a linear ramp left half of
+each blob lighter than the original's solid palette-index-12 shadow (V<40 pixels on the same frozen frames: Initiates
+0.51x -> 0.60x, Slaves 0.55x -> 0.61x, Conscripts 0.75-0.77x of the original; opacity alone saturated at 0.55x). Their
+original SHP offsets remain attached to the feet even in `cinematic`. Sun following,
 shadow-length transforms and the distance-based blur are bypassed for infantry. The dedicated 2x black RGBA page
 supplies alpha coverage with a solid core and antialiased exterior; the indexed page is the loading fallback. Both
 colour and over-pass depth use that same coverage. The faithful path retains engine shadow opacity. Building and
