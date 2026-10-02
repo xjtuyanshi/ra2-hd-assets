@@ -149,6 +149,34 @@ spawn. Keep the default warm-up for build-up timing. Combine with anims using `f
 `spread=<cells>` place and time the listed anims, `crater=1` emulates the engine's crater smudges, and
 `window.__fx.advance(ms)` steps the clock for frame-by-frame capture (header of `sandbox/fx.ts`).
 
+**Native radiation, chrono and control links** (`src/live/beams.ts`): the live snapshot's `radBeams` and
+`mindControlLinks` share one bounded, additive, depth-tested stroke pool with the existing waves. Type-1 radiation
+and chrono rays use their published RGB colour, a single sine strand displaced in world Z, and native age/period
+amplitude. The stock Chrono Legionnaire uses the same type-1 path as radiation, with `ChronoBeamColor`
+`128,200,255`, period 15 and amplitude 40; the RadBeam enum value named `temporal` is not its drawing path.
+The renderer previously ignored the published RGB and drew both as green. Correcting this shared path also
+corrects the Desolator strand. HD interpolates the native curve with 64..512 segments, pins its first/last points
+to the observed weapon/target coordinates, and adds a soft core, halo and gentle intensity flow. Unlike native
+integer stepping, the final sine cannot move the endpoint off the target. No extra strand or impact splash is added.
+
+Mind-control links use the controller house's published colour and one 32-segment world-Z parabolic arch,
+`z(t) = lerp(source.z,target.z,t) + 4*arcHeight*t*(1-t)`, with native `arcHeight=512` leptons. A smooth highlight
+travels toward the target on the native approximately 1.024-second cycle. The source and target are the reader's
+validated weapon coordinates; the renderer adds no head offset. Selection and capture-timer visibility belong to
+the observer: a link remains fully lit while published and disappears when removed, with no host-side lifetime
+or fade. These auxiliary links and type-1 rays have no additional endpoint-shroud rejection; the shared scene
+mask and depth pass still apply. This does not establish pixel parity with native links drawn after shroud.
+Unknown/removed effects clear immediately, including publications that change within the same game frame.
+
+`?fx=beams` provides deterministic radiation, chrono, eruption, magnetron, sonic and mind-control rows.
+`btypes=chrono,mindcontrol` selects just the new review pair; other accepted entries are `rad`, `eruption`,
+`magnetron` and `sonic`. `bprogress=0..1` selects ray age and wave progress (default 0.5); the chrono example uses
+the stock period and colour, and the control link is a fixed red-house example. `effects=enhanced` brightens
+halos; `time=<seconds>` and `window.__fx.advance(ms)` move only presentation flow, leaving these publications
+fixed. For isolated screenshots, use `?fx=beams&btypes=chrono&bprogress=0.5&zoom=3` and
+`?fx=beams&btypes=mindcontrol&zoom=3`. CPU geometry, upload, shader-binding and bench-snapshot tests do not
+replace an original-versus-HD frozen-pair review of live FLH endpoints, native link selection/expiry, depth or GPU pixels.
+
 `src/volumetricBlasts.ts` adds opt-in procedural 3D fireballs with turbulent lobes, dark internal soot,
 a white flash and sun-lit rolling smoke. Use `effects=enhanced&fxvol=ray` in the bench,
 `LiveViewOptions.volumetricEffects = 'ray'`, or `hd-fx=enhanced&hd-fxvol=ray` in the development bridge.

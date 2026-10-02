@@ -220,6 +220,20 @@ export interface GameRenderWave {
   progress: number;
 }
 
+/** A native-selected/timed control link. Coordinates and arc height are in engine world units. */
+export interface GameRenderMindControlLink {
+  id: number;
+  controller: number;
+  targetId: number;
+  source: GameRenderPoint;
+  target: GameRenderPoint;
+  /** The controller house's RGB, in sRGB 0..255. */
+  color: [number, number, number];
+  arcHeight: number;
+  remainingFrames: number;
+  selected: boolean;
+}
+
 export interface GameRenderEffects {
   anims: GameRenderAnim[];
   bullets: GameRenderBullet[];
@@ -228,6 +242,7 @@ export interface GameRenderEffects {
   particleSystems: GameRenderParticleSystem[];
   radBeams?: GameRenderRadBeam[];
   waves?: GameRenderWave[];
+  mindControlLinks?: GameRenderMindControlLink[];
 }
 
 /**

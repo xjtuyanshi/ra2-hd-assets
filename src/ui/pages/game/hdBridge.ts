@@ -450,6 +450,7 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
       ],
       radBeams: state.effects.radBeams,
       waves: state.effects.waves,
+      mindControlLinks: state.effects.mindControlLinks,
       particleSystems: state.effects.particleSystems.map(({ id, uid, behavesLike, x, y, z }) => ({
         id,
         uid,

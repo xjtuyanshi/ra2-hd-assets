@@ -1,9 +1,17 @@
-import { AdditiveBlending, DoubleSide, MeshBasicNodeMaterial, Vector3 } from 'three/webgpu';
+import {
+  AdditiveBlending,
+  Color as ThreeColor,
+  DoubleSide,
+  MeshBasicNodeMaterial,
+  SRGBColorSpace,
+  Vector3,
+} from 'three/webgpu';
 import {
   Fn,
   cross,
   float,
   floor,
+  fract,
   instancedBufferAttribute,
   length,
   max,
@@ -52,18 +60,33 @@ export interface LiveWave {
   intensity: number;
   progress: number;
 }
+export interface LiveMindControlLink {
+  id: number;
+  controller: number;
+  targetId: number;
+  source: Point;
+  target: Point;
+  color: [number, number, number];
+  /** Height of the world-space parabolic arch, in leptons. */
+  arcHeight: number;
+  remainingFrames: number;
+  selected: boolean;
+}
 
 // Extend the existing snapshot contract here so effects.ts retains its independent laser/EBolt implementation.
 declare module './effects' {
   interface LiveEffects {
     radBeams?: LiveRadBeam[];
     waves?: LiveWave[];
+    mindControlLinks?: LiveMindControlLink[];
   }
 }
 
 export const RIBBON_SEGMENTS = 64;
+export const RAD_MAX_SEGMENTS = 512;
 export const BEAM_RIBBON_CAPACITY = 4096;
 export const RING_SEGMENTS = 32;
+export const LINK_SEGMENTS = 32;
 /** Full widths in world units: zoom scales the complete profile, including its white-hot core. */
 export const BEAM_WIDTHS = {
   halo: 12 / PIXELS_PER_CELL_EDGE,
@@ -110,6 +133,42 @@ export function ribbonPoints(
   });
 }
 
+function radLength(beam: LiveRadBeam): number {
+  return Math.hypot(beam.target.x - beam.source.x, beam.target.y - beam.source.y, beam.target.z - beam.source.z);
+}
+
+function radDisplacement(beam: LiveRadBeam, t: number): number {
+  const phase = (t * 2 * Math.max(radLength(beam), 360) * Math.PI) / 180;
+  return Math.sin(phase) * beam.amplitude * clamp01(beam.age / Math.max(1, beam.period));
+}
+
+/** Native type-1 radiation/chrono sine: one strand displaces world Z, with age scaling amplitude, not phase. */
+export function nativeRadPoints(beam: LiveRadBeam): Vector3[] {
+  const segments = Math.min(RAD_MAX_SEGMENTS, Math.max(RIBBON_SEGMENTS, Math.ceil(radLength(beam) / 15)));
+  return Array.from({ length: segments + 1 }, (_, i) => {
+    const t = i / segments;
+    // Native integer stepping and its final sine can miss the cached target. HD pins the two weapon anchors.
+    const displacement = i === 0 || i === segments ? 0 : radDisplacement(beam, t);
+    return toWorld({
+      x: beam.source.x + (beam.target.x - beam.source.x) * t,
+      y: beam.source.y + (beam.target.y - beam.source.y) * t,
+      z: beam.source.z + (beam.target.z - beam.source.z) * t + displacement,
+    });
+  });
+}
+
+/** One world-space arch, not a camera-plane wave; its endpoints retain the observed weapon coordinates. */
+export function mindControlPoints(link: LiveMindControlLink): Vector3[] {
+  return Array.from({ length: LINK_SEGMENTS + 1 }, (_, i) => {
+    const t = i / LINK_SEGMENTS;
+    return toWorld({
+      x: link.source.x + (link.target.x - link.source.x) * t,
+      y: link.source.y + (link.target.y - link.source.y) * t,
+      z: link.source.z + (link.target.z - link.source.z) * t + 4 * link.arcHeight * t * (1 - t),
+    });
+  });
+}
+
 function ringProgress(wave: LiveWave, i: number, count: number): number {
   return (clamp01(wave.progress) * 1.6 + i / count) % 1;
 }
@@ -148,12 +207,22 @@ interface StrokeStyle {
   color: Color;
   hot: Color;
   widths: typeof BEAM_WIDTHS;
+  /** A travelling highlight on a 32-segment link; negative phase disables it for other strokes. */
+  linkFlow?: boolean;
 }
-const RAD_STYLES: Record<LiveRadBeam['type'], StrokeStyle> = {
-  rad: { color: [0.45, 1, 0.2], hot: [1, 1, 0.72], widths: BEAM_WIDTHS },
-  temporal: { color: [0.5, 0.82, 1], hot: [1, 1, 1], widths: BEAM_WIDTHS },
-  eruption: { color: [1, 0.22, 0.035], hot: [1, 0.88, 0.24], widths: BEAM_WIDTHS },
-};
+/** Snapshot colours are authored display RGB; shader light values must be linear. */
+export function beamColor(color: Color): [number, number, number] {
+  const linear = new ThreeColor().setRGB(color[0] / 255, color[1] / 255, color[2] / 255, SRGBColorSpace);
+  return [linear.r, linear.g, linear.b];
+}
+function radStyle(beam: LiveRadBeam): StrokeStyle {
+  const color = beamColor(beam.color);
+  return {
+    color,
+    hot: color.map((component) => 0.72 + 0.28 * component) as [number, number, number],
+    widths: BEAM_WIDTHS,
+  };
+}
 function scaledStyle(style: StrokeStyle, scale: number): StrokeStyle {
   return {
     ...style,
@@ -180,7 +249,7 @@ export class LiveBeams {
   private readonly from = new DirtyAttribute(new Float32Array(BEAM_RIBBON_CAPACITY * 3), 3);
   private readonly to = new DirtyAttribute(new Float32Array(BEAM_RIBBON_CAPACITY * 3), 3);
   // All profile/noise attributes share ONE vertex buffer: four total with the two endpoints and the quad position.
-  private readonly appearance = new DirtyAttribute(new Float32Array(BEAM_RIBBON_CAPACITY * 13), 13);
+  private readonly appearance = new DirtyAttribute(new Float32Array(BEAM_RIBBON_CAPACITY * 14), 14);
   private count = 0;
   private publication = '';
   private style: EffectStyle = 'faithful';
@@ -194,12 +263,13 @@ export class LiveBeams {
     const a: ShaderNode = instancedBufferAttribute(this.from, 'vec3');
     const b: ShaderNode = instancedBufferAttribute(this.to, 'vec3');
     const appearance = this.appearance.interleaved();
-    const tint: ShaderNode = instancedBufferAttribute(appearance, 'vec3', 13, 0);
-    const hot: ShaderNode = instancedBufferAttribute(appearance, 'vec3', 13, 3);
-    const widths: ShaderNode = instancedBufferAttribute(appearance, 'vec3', 13, 6);
-    const gain: ShaderNode = instancedBufferAttribute(appearance, 'float', 13, 9);
-    const noise: ShaderNode = instancedBufferAttribute(appearance, 'vec2', 13, 10);
-    const legacyFlag: ShaderNode = instancedBufferAttribute(appearance, 'float', 13, 12);
+    const tint: ShaderNode = instancedBufferAttribute(appearance, 'vec3', 14, 0);
+    const hot: ShaderNode = instancedBufferAttribute(appearance, 'vec3', 14, 3);
+    const widths: ShaderNode = instancedBufferAttribute(appearance, 'vec3', 14, 6);
+    const gain: ShaderNode = instancedBufferAttribute(appearance, 'float', 14, 9);
+    const noise: ShaderNode = instancedBufferAttribute(appearance, 'vec2', 14, 10);
+    const legacyFlag: ShaderNode = instancedBufferAttribute(appearance, 'float', 14, 12);
+    const linkFlow: ShaderNode = instancedBufferAttribute(appearance, 'float', 14, 13);
     const legacy: ShaderNode = legacyFlag.greaterThan(0);
     const width: ShaderNode = widths.x;
     const span: ShaderNode = length(b.sub(a));
@@ -251,6 +321,16 @@ export class LiveBeams {
         .mul(0.08)
         .add(sin(phase.mul(2.17).add(noise.y)).mul(0.04))
         .add(1);
+      // Native links sweep a house-colour -> white highlight along their 32 segments every 1.024 seconds.
+      // Interpolate within each segment for a smooth HD flow, without changing their publication-owned lifetime.
+      const linkPhase: ShaderNode = fract(
+        linkFlow.add(along.div(span.max(1e-5)).clamp(0, 1).div(64)).sub(now.div(1.024)),
+      );
+      const linkHighlight: ShaderNode = linkPhase
+        .mul(2)
+        .mul(smoothstep(0.5, 0.45, linkPhase))
+        .mul(step(0, linkFlow));
+      const strokeHot: ShaderNode = mix(hot, vec3(1), linkHighlight);
       const light = tint
         .mul(
           halo
@@ -259,7 +339,7 @@ export class LiveBeams {
             .add(inner.mul(1.1))
             .mul(mix(0.6, 1, this.enhanced)),
         )
-        .add(hot.mul(core.mul(2.2)));
+        .add(strokeHot.mul(core.mul(2.2)));
       const laserLight = tint
         .mul(halo.mul(halo).mul(mix(0.5, 1.1, this.enhanced)))
         .add(vec3(1, 0.98, 0.96).mul(core.mul(1.8)));
@@ -275,7 +355,7 @@ export class LiveBeams {
       );
     })();
     this.mesh = new InstancedQuad(material, BEAM_RIBBON_CAPACITY);
-    this.mesh.name = 'live-rad-beams-waves';
+    this.mesh.name = 'live-rad-beams-waves-links';
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 7;
     this.mesh.count = 0;
@@ -290,12 +370,16 @@ export class LiveBeams {
   ): void {
     // Include visibility results: a shroud publication can hide a stationary beam without changing its data.
     const rad = (effects?.radBeams ?? []).filter(
-      (b) => !hidden(b.source.x, b.source.y, b.source.z) && !hidden(b.target.x, b.target.y, b.target.z),
+      (b) =>
+        b.type === 'rad' ||
+        (!hidden(b.source.x, b.source.y, b.source.z) && !hidden(b.target.x, b.target.y, b.target.z)),
     );
     const waves = (effects?.waves ?? []).filter(
       (b) => !hidden(b.source.x, b.source.y, b.source.z) && !hidden(b.target.x, b.target.y, b.target.z),
     );
-    const publication = JSON.stringify([rad, waves]);
+    // These auxiliary links follow their observer's native selection/timer policy, which has no endpoint-shroud gate.
+    const links = effects?.mindControlLinks ?? [];
+    const publication = JSON.stringify([rad, waves, links]);
     if (publication === this.publication && style === this.style) return;
     this.publication = publication;
     this.style = style;
@@ -303,7 +387,21 @@ export class LiveBeams {
     this.count = 0;
     for (const beam of rad) {
       if (this.count >= BEAM_RIBBON_CAPACITY) break;
-      const style = RAD_STYLES[beam.type];
+      const style = radStyle(beam);
+      if (beam.type === 'rad') {
+        if (!beam.sustained && beam.age >= beam.period) continue;
+        const points = nativeRadPoints(beam);
+        // The native segment colour follows its height displacement. There is no age-driven opacity fade.
+        const gains = points
+          .slice(1)
+          .map((_, i) =>
+            beam.amplitude
+              ? 0.5 + Math.abs(radDisplacement(beam, (i + 1) / (points.length - 1)) / beam.amplitude) / 2
+              : 0.5,
+          );
+        this.stroke(points, style, 1, beam.id, false, gains);
+        continue;
+      }
       const gain = beamFade(beam.progress, beam.sustained);
       this.strands(beam, style, gain);
       this.endpoints(toWorld(beam.source), toWorld(beam.target), style, gain, beam.id);
@@ -347,6 +445,22 @@ export class LiveBeams {
         });
       }
     }
+    for (const link of links) {
+      if (this.count >= BEAM_RIBBON_CAPACITY) break;
+      const color = beamColor(link.color);
+      // The observer owns selection/capture-timer gating. A valid publication stays fully lit until removed.
+      this.stroke(
+        mindControlPoints(link),
+        {
+          color,
+          hot: color,
+          widths: { halo: 6 / PIXELS_PER_CELL_EDGE, inner: 2 / PIXELS_PER_CELL_EDGE, core: 1 / PIXELS_PER_CELL_EDGE },
+          linkFlow: true,
+        },
+        1,
+        link.id,
+      );
+    }
     for (const attribute of [this.from, this.to, this.appearance]) attribute.flush();
     this.mesh.count = this.count;
     this.mesh.visible = this.count > 0;
@@ -381,7 +495,14 @@ export class LiveBeams {
     }
   }
 
-  private stroke(points: readonly Vector3[], style: StrokeStyle, gain: number, seed: number, legacy = false): void {
+  private stroke(
+    points: readonly Vector3[],
+    style: StrokeStyle,
+    gain: number,
+    seed: number,
+    legacy = false,
+    segmentGains?: readonly number[],
+  ): void {
     if (!(gain > 0)) return;
     let distance = 0;
     // Closed rings have no ends; a zero-length flare is a single segment with both caps.
@@ -397,12 +518,13 @@ export class LiveBeams {
       this.appearance.setComponent(n, 6, style.widths.halo);
       this.appearance.setComponent(n, 7, style.widths.inner);
       this.appearance.setComponent(n, 8, style.widths.core);
-      this.appearance.setComponent(n, 9, gain);
+      this.appearance.setComponent(n, 9, gain * (segmentGains?.[i - 1] ?? 1));
       this.appearance.setComponent(n, 10, distance);
       this.appearance.setComponent(n, 11, seed);
       const startCap = i === 1 && !closed ? 1 : 0;
       const endCap = i === points.length - 1 && !closed ? 1 : 0;
       this.appearance.setComponent(n, 12, legacy ? 1 : -(1 + startCap + 2 * endCap));
+      this.appearance.setComponent(n, 13, style.linkFlow ? (i - 1) / 64 : -1);
       distance += a.distanceTo(b);
     }
   }

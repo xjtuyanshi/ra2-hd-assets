@@ -3,7 +3,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { GAME_RENDER_SHROUD } from '../../src/games/renderState';
 import { createByteViewAccessor } from '../../src/games/shared/memoryAccessor';
 import type { ReadYrEffectsOptions, YrEffects } from '../../src/games/yr/effectsReader';
-import { YR_EFFECTS_GLOBALS as E } from '../../src/games/yr/effectsReader';
+import { readYrEffects, YR_EFFECTS_GLOBALS as E } from '../../src/games/yr/effectsReader';
+import {
+  YR_CAPTURE_MANAGER_VTABLE,
+  YR_MIND_CONTROL_HOUSE_VTABLE,
+  YR_MIND_CONTROL_GLOBALS as MC,
+  YR_MIND_CONTROL_OFFSETS as MO,
+} from '../../src/games/yr/mindControlLinkReader';
 import { YR_BEAMS_GLOBALS as B, YR_BEAMS_OFFSETS as BO } from '../../src/games/yr/beamsReader';
 import { YR_BUILDING_RULES as R } from '../../src/games/yr/buildingRenderState';
 import { YR_BUILDING_ACTIVE_ANIM as A, YR_NATIVE_DETAIL as D } from '../../src/games/yr/buildingActiveAnim';
@@ -919,6 +925,19 @@ describe('YR 1.001 render state for the HD bridge', () => {
       },
     ];
     fx.waves = [{ id: 21, uid: 22, type: 'magnetron', source, target, intensity: 50, progress: 0.5 }];
+    fx.mindControlLinks = [
+      {
+        id: 23,
+        controller: 24,
+        targetId: 25,
+        source,
+        target,
+        color: [80, 120, 255],
+        arcHeight: 512,
+        remainingFrames: 30,
+        selected: false,
+      },
+    ];
     const items = 0xb70000,
       rad = 0xb71000,
       wave = 0xb72000;
@@ -934,6 +953,9 @@ describe('YR 1.001 render state for the HD bridge', () => {
     const first = h.read()!;
     expect(first.effects!.radBeams).toEqual(fx.radBeams);
     expect(first.effects!.waves).toEqual(fx.waves);
+    expect(first.effects!.mindControlLinks).toEqual(fx.mindControlLinks);
+    expect(first.effects!.mindControlLinks![0]!.source).not.toBe(source);
+    expect(first.effects!.mindControlLinks![0]!.color).not.toBe(fx.mindControlLinks[0]!.color);
     expect(h.read()).toBe(first);
     memory.u32(rad + BO.radAge, 6);
     fx.radBeams[0]!.age = 6;
@@ -953,6 +975,71 @@ describe('YR 1.001 render state for the HD bridge', () => {
     memory.u32(B.waves + 0x10, 0);
     fx.waves = [];
     expect(h.read()!.effects!.waves).toEqual([]);
+  });
+
+  it('refreshes nested mind-control color, target height, timers and planning visibility in the same frame', () => {
+    const memory = keyMemory(),
+      h = sources(memory),
+      data = new DataView(memory.bytes.buffer);
+    const controller = memory.technos[0]!,
+      target = memory.technos[1]!;
+    const type = 0xc10000,
+      targetType = 0xc12000,
+      house = 0xc20000,
+      manager = 0xc30000,
+      node = 0xc40000;
+    const vector = (base: number, items: number, pointer: number) => {
+      memory.u32(base + 4, items);
+      memory.u32(base + 8, 1);
+      memory.u32(base + 0x10, 1);
+      memory.u32(items, pointer);
+    };
+    memory.u32(controller, V.infantry);
+    memory.u32(controller + 0x6c0, type);
+    memory.u32(type, V.infantryType);
+    memory.u32(target, V.unit);
+    memory.u32(target + 0x6c4, targetType);
+    memory.u32(targetType, V.unitType);
+    memory.u32(controller + 0x6c, 100);
+    memory.u32(target + 0x6c, 100);
+    memory.u32(controller + MO.owner, house);
+    memory.u32(house, YR_MIND_CONTROL_HOUSE_VTABLE);
+    memory.bytes.set([30, 120, 230], house + MO.houseColor);
+    memory.u32(controller + MO.manager, manager);
+    memory.u32(target + MO.controlledBy, controller);
+    memory.u32(manager, YR_CAPTURE_MANAGER_VTABLE);
+    memory.u32(manager + MO.controller, controller);
+    memory.u32(node, target);
+    memory.u32(node + MO.timerStart, 90);
+    memory.u32(node + MO.timerDuration, 20);
+    vector(MC.managers, 0xc50000, manager);
+    vector(manager + MO.nodes, 0xc50010, node);
+    memory.u32(type + MO.alternateFlh + 8, 140);
+    memory.u32(targetType + MO.targetHeight, 80);
+    data.setFloat32(MC.trigScale, 2607.594482421875, true);
+    for (let i = 0; i < 10240; i++) data.setFloat32(MC.trig + i * 4, Math.sin((i * Math.PI * 2) / 8192), true);
+    h.readEffects.mockImplementation(() => readYrEffects(createByteViewAccessor(memory.bytes), { fireWindow: 0 }));
+    const first = h.read()!;
+    expect(first.effects!.mindControlLinks).toHaveLength(1);
+    expect(h.read()).toBe(first);
+    memory.bytes[house + MO.houseColor] = 180;
+    const recolored = h.read()!;
+    expect(recolored).not.toBe(first);
+    expect(recolored.effects!.mindControlLinks![0]!.color).toEqual([180, 120, 230]);
+    expect(first.effects!.mindControlLinks![0]!.color).toEqual([30, 120, 230]);
+    memory.u32(targetType + MO.targetHeight, 160);
+    const raised = h.read()!;
+    expect(raised.effects!.mindControlLinks![0]!.target.z).toBe(160);
+    memory.u32(node + MO.timerDuration, 10);
+    expect(h.read()!.effects!.mindControlLinks).toEqual([]);
+    memory.select(target, true);
+    expect(h.read()!.effects!.mindControlLinks).toHaveLength(1);
+    memory.bytes[MC.planning] = 1;
+    expect(h.read()!.effects!.mindControlLinks).toEqual([]);
+    memory.bytes[MC.planning] = 0;
+    expect(h.read()!.effects!.mindControlLinks).toHaveLength(1);
+    memory.u32(manager + MO.nodes + 0x10, 0);
+    expect(h.read()!.effects!.mindControlLinks).toEqual([]);
   });
 
   it('invalidates completed-building art after same-frame health, occupancy or loaded-rule changes', () => {

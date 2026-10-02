@@ -208,8 +208,10 @@ RadBeam and WaveClass pixel suppression now has an HD replacement: `src/games/yr
 arrays, endpoints and draw-cycle state; the optional `radBeams`/`waves` fields pass through the game render snapshot
 and HD bridge to `packages/hd-renderer/src/live/beams.ts`. It draws additive world-space ribbons and magnetic/sonic
 ripples, retaining native list membership and removal, including publications within the same logic frame. No gate or
-guest update behavior changes. Faithful/enhanced styles share geometry; enhanced brightens the halo. Colors and ripple
-shapes are HD interpretations, not a pixel-identical port (eruption is orange, temporal blue-white).
+guest update behavior changes. Faithful/enhanced styles share geometry; enhanced brightens the halo. RadBeam now uses
+its native RGB; type 1 uses the native single world-Z sine, including chrono weapons. Halo/core widths and magnetic/sonic
+ripples remain HD interpretations, not a pixel-identical port. CaptureManager links are also projected separately;
+their endpoint, color, selection and timer evidence is in [HD bridge fields](hd-bridge-fields.md#chrono-weapon-ribbon-and-mind-control-links).
 
 Verified YR 1.001 layout evidence (instruction addresses in the player's disassembly; also recorded in the reader):
 
@@ -225,11 +227,14 @@ Verified YR 1.001 layout evidence (instruction addresses in the player's disasse
 
 RadBeam period is a draw-cycle duration, not a spatial wavelength. Sustained beams oscillate their age and remain
 until the native engine removes them. Magnetron can reset its intensity to 64 (`0x762B51`), so wave progress is a
-current intensity/cycle value, not monotonic total age. RadBeam enum value 0 is named Temporal by YRpp; the observed
-DrawAll dispatch handles values 1/2 only, so an actual temporal firing path still needs separate game-scene validation.
+current intensity/cycle value, not monotonic total age. RadBeam enum value 0 is named Temporal by YRpp but is not
+drawn by DrawAll and is filtered out. The CLEG firing path is independently confirmed as type **1**, with
+`ChronoBeamColor` selected through the temporal warhead branch (`0x6FF594..0x6FF5B7`, `0x6FD620`);
+it was already read but incorrectly drawn green by the old fixed type palette. Frozen live comparison remains separate.
 
-The deterministic sandbox `fx.html?fx=beams` shows rad, temporal, eruption, magnetron and sonic around `cx`/`cy`,
-frozen at progress 0.5. `bprogress=0..1` selects a different lifetime sample; `effects=enhanced` selects brighter halos.
+The deterministic sandbox `fx.html?fx=beams` shows rad, chrono, eruption, magnetron, sonic and a mind-control link
+around `cx`/`cy`, frozen at progress 0.5. `bprogress=0..1` selects a different lifetime sample;
+`btypes=chrono,mindcontrol` isolates the new review rows; `effects=enhanced` selects brighter halos.
 
 - Translucent native drawing over the key blends with it: with effects left native, smoke and translucent explosion
   edges appear magenta-tinted over the HD world. Switching effects to passthrough removes them; exact un-blending

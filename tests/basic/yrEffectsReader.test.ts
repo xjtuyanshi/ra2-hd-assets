@@ -410,6 +410,7 @@ describe('YR 1.001 effects reader', () => {
         vectors: { radBeams: 0, waves: 0 },
         invalid: { radBeams: 0, waves: 0 },
         inactive: { radBeams: 0, waves: 0 },
+        mindControlLinks: { managers: 0, nodes: 0, invalid: 0, inactive: 0, unsupported: 0 },
       },
       vectors: { anims: 10, voxelAnims: 1, bullets: 2, particleSystems: 1, lasers: 2, electricBolts: 2 },
       invalid: { anims: 4, voxelAnims: 0, bullets: 0, particleSystems: 0, lasers: 1, electricBolts: 1 },

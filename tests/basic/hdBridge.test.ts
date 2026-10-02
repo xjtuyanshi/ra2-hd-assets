@@ -364,6 +364,19 @@ describe('HD 桥状态机', () => {
           progress: 0.5,
         },
       ],
+      mindControlLinks: [
+        {
+          id: 43,
+          controller: 44,
+          targetId: 45,
+          source: { x: 256, y: 512, z: 135 },
+          target: { x: 512, y: 768, z: 168 },
+          color: [200, 20, 255],
+          arcHeight: 512,
+          remainingFrames: 0,
+          selected: true,
+        },
+      ],
     };
     harness.setState(state);
     await advance(16);
@@ -378,9 +391,11 @@ describe('HD 桥状态机', () => {
     expect(pushed.effects!.anims[1]!.buildingAnim).toBe(true);
     expect(pushed.effects!.radBeams).toEqual(state.effects!.radBeams);
     expect(pushed.effects!.waves).toEqual(state.effects!.waves);
-    harness.setState({ ...next, effects: { ...next.effects!, anims: [] } });
+    expect(pushed.effects!.mindControlLinks).toEqual(state.effects!.mindControlLinks);
+    harness.setState({ ...next, effects: { ...next.effects!, anims: [], mindControlLinks: [] } });
     await advance(16);
     expect(view.push.mock.calls.at(-1)![0].effects!.anims).toEqual([]);
+    expect(view.push.mock.calls.at(-1)![0].effects!.mindControlLinks).toEqual([]);
     harness.stop();
   });
 
