@@ -177,6 +177,7 @@ describe('building light policy', () => {
         { ...reactor, health: 0 },
         { ...reactor, buildState: 'building' },
         { ...reactor, buildState: 'selling' },
+        { ...reactor, nativeHidden: true },
         { ...reactor, kind: 'vehicle' },
         { ...reactor, buildState: undefined },
       ]),

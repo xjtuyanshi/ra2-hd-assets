@@ -139,6 +139,11 @@ export class VoxelUnits {
     if (unit.root instanceof VoxelRoot) unit.root.setPainterBias(bias);
   }
 
+  /** Native chrono blending changes body/turret/barrel alpha, never the separately rendered ground shadows. */
+  setOpacity(unit: VoxelUnit, opacity: number): void {
+    if (unit.root instanceof VoxelRoot) unit.root.setOpacity(opacity);
+  }
+
   /** Call after pose/turret updates; anchor is the world-space ground draw point, including bridge elevation. */
   setNativeDepth(unit: VoxelUnit, anchor: Vector3, bonus = 0, enabled = true): void {
     updateVoxelNativeDepth(unit, anchor, bonus, enabled);
@@ -158,6 +163,7 @@ export class VoxelUnits {
   dispose(unit: VoxelUnit): void {
     this.setCaptureCode(unit, NOT_CAPTURED_CODE);
     for (const waiting of this.pending.values()) waiting.delete(unit);
+    if (unit.root instanceof VoxelRoot) unit.root.disposeOpacityMaterials();
     unit.root.removeFromParent();
   }
 }

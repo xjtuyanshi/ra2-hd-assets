@@ -5,7 +5,7 @@ import { createByteViewAccessor } from '../../src/games/shared/memoryAccessor';
 import type { ReadYrEffectsOptions, YrEffects } from '../../src/games/yr/effectsReader';
 import { YR_EFFECTS_GLOBALS as E } from '../../src/games/yr/effectsReader';
 import { YR_BEAMS_GLOBALS as B, YR_BEAMS_OFFSETS as BO } from '../../src/games/yr/beamsReader';
-import { YR_BUILDING_RULES as R } from '../../src/games/yr/buildingRenderState';
+import { YR_BUILDING_RENDER_OFFSETS as BR, YR_BUILDING_RULES as R } from '../../src/games/yr/buildingRenderState';
 import { YR_BUILDING_ACTIVE_ANIM as A, YR_NATIVE_DETAIL as D } from '../../src/games/yr/buildingActiveAnim';
 import type { ReadYrSmudgeOptions, YrSmudges } from '../../src/games/yr/smudgeReader';
 import type { ReadYrOverlayOptions, YrOverlays } from '../../src/games/yr/overlayReader';
@@ -844,6 +844,119 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(finished).not.toBe(unloading);
     expect(finished.objects[0]).not.toHaveProperty('imageType');
     expect(unloading.objects[0]!.imageType).toBe('HORV');
+  });
+
+  it('publishes body-only translucency and whole-object hiding without changing older snapshots', () => {
+    const memory = keyMemory();
+    const h = sources(memory);
+    const state = yrState(100);
+    h.readState.mockReturnValue(state);
+    const unit = memory.technos[0]!;
+    memory.u32(unit, V.unit);
+    const first = h.read()!;
+    expect(first.objects[0]).not.toHaveProperty('nativeHidden');
+    expect(first.objects[0]).not.toHaveProperty('translucent');
+    memory.bytes[unit + O.beingWarpedOut] = 1;
+    Object.assign(state.objects[0]!, { translucent: 0.5 });
+    const chrono = h.read()!;
+    expect(chrono).not.toBe(first);
+    expect(chrono.frame).toBe(first.frame);
+    expect(chrono.objects[0]).toHaveProperty('translucent', 0.5);
+    expect(chrono.objects[0]).not.toHaveProperty('nativeHidden');
+    expect(h.read()).toBe(chrono);
+    memory.bytes[unit + O.tethered] = 1;
+    Object.assign(state.objects[0]!, { nativeHidden: true });
+    const hidden = h.read()!;
+    expect(hidden).not.toBe(chrono);
+    expect(hidden.objects[0]).toMatchObject({ nativeHidden: true, translucent: 0.5 });
+    expect(hidden.objects[1]).not.toHaveProperty('nativeHidden');
+    expect(hidden.objects[1]).not.toHaveProperty('translucent');
+    expect(structuredClone(hidden)).toEqual(hidden);
+    memory.bytes[unit + O.beingWarpedOut] = 0;
+    memory.bytes[unit + O.tethered] = 0;
+    delete state.objects[0]!.nativeHidden;
+    delete state.objects[0]!.translucent;
+    const released = h.read()!;
+    expect(released).not.toBe(hidden);
+    expect(released.objects[0]).not.toHaveProperty('nativeHidden');
+    expect(released.objects[0]).not.toHaveProperty('translucent');
+    expect(hidden.objects[0]).toMatchObject({ nativeHidden: true, translucent: 0.5 });
+  });
+
+  it('invalidates same-frame visibility/delivery state for link, door and either chrono flag changes', () => {
+    const memory = keyMemory();
+    const h = sources(memory);
+    h.readState.mockReturnValue(yrState(100));
+    const unit = memory.technos[0]!;
+    const building = memory.technos[1]!;
+    const radioItems = 0xb5_0000;
+    memory.u32(unit, V.unit);
+    memory.u32(building, V.building);
+    memory.u32(unit + O.radioItems, radioItems);
+    memory.u32(unit + O.radioCapacity, 1);
+    memory.u32(radioItems, building);
+    let previous = h.read()!;
+    for (const mutate of [
+      () => {
+        memory.bytes[unit + O.beingWarpedOut] = 1;
+      },
+      () => {
+        memory.bytes[unit + O.warpingOut] = 1;
+      },
+      () => {
+        memory.bytes[unit + O.tethered] = 1;
+      },
+      () => {
+        memory.bytes[building + BR.doorMoving] = 1;
+      },
+      () => {
+        memory.bytes[building + BR.doorTargetOpen] = 1;
+      },
+      () => memory.u32(building + BR.currentMission, 16),
+      () => memory.u32(building + BR.queuedMission, 16),
+      () => memory.u32(radioItems, 0),
+      () => memory.u32(unit + O.radioCapacity, 0),
+    ]) {
+      mutate();
+      const next = h.read()!;
+      expect(next).not.toBe(previous);
+      expect(next.frame).toBe(previous.frame);
+      expect(h.read()).toBe(next);
+      previous = next;
+    }
+  });
+
+  it('invalidates a tether hide when the linked building is absent from the techno vector', () => {
+    const memory = keyMemory();
+    const h = sources(memory);
+    h.readState.mockReturnValue(yrState(100));
+    const unit = memory.technos[0]!;
+    const building = 0xb6_0000;
+    const type = 0xb7_0000;
+    const radioItems = 0xb5_0000;
+    memory.u32(unit, V.unit);
+    memory.bytes[unit + O.tethered] = 1;
+    memory.u32(unit + O.radioItems, radioItems);
+    memory.u32(unit + O.radioCapacity, 1);
+    memory.u32(radioItems, building);
+    memory.u32(building, V.building);
+    memory.u32(building + O.buildingType, type);
+    memory.u32(building + BR.currentMission, 16);
+    memory.u32(type, V.buildingType);
+    memory.bytes.set(new TextEncoder().encode('GAWEAP\0'), type + O.typeId);
+    const first = h.read()!;
+    expect(h.read()).toBe(first);
+    memory.u32(building + BR.currentMission, 5);
+    const released = h.read()!;
+    expect(released).not.toBe(first);
+    expect(h.read()).toBe(released);
+    memory.u32(building + BR.queuedMission, 16);
+    const queued = h.read()!;
+    expect(queued).not.toBe(released);
+    memory.bytes[building + BR.doorMoving] = 2;
+    const invalid = h.read()!;
+    expect(invalid).not.toBe(queued);
+    expect(h.read()).toBe(invalid);
   });
 
   it('invalidates a same-frame cached infantry step and preserves health zero through publication', () => {

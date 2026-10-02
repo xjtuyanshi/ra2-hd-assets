@@ -200,6 +200,16 @@ UnloadingClass at `0x73D2BA`, then swaps Type at `0x73D2C4` and restores it at `
 therefore draw HORV/CMON. Image changes rebuild the visual while retaining animation clocks; missing image art
 falls back to `type`.
 
+Optional `nativeHidden` suppresses the complete live object, including shadows and HD extras. The YR reader
+uses this for tethered UnitClass vehicles whose validated building radio link has effective or queued Unload 16
+and canonical door booleans. All four door states qualify. Optional `translucent` is body opacity: the reader
+publishes 0.5 while either native chrono byte is nonzero, and SHP/voxel body parts blend at 50% without writing
+depth; shadows stay unchanged. Omitted fields retain normal rendering. These are independent predicates, and
+the chrono flags alone never hide the object. Selection brackets remain the game's native overlay; LiveView
+does not generate selection geometry. This does not establish a CMIN-specific invisibility window.
+Attached anims, particle systems and fire events follow the hidden owner's UID/pointer match, including same-frame
+hide/unhide; independent explosions and projectiles retain their native publication lifetime.
+
 Live technos may report `contactUid`, the validated radio contact's stable ID in the same snapshot. Buildings also
 report `dock` (refinery, repair or helipad policy) and `unloading: 'door' | 'roof'` while their effective mission is
 Unload. The YR reader instance latches a previously published roof during that continuous Unload when link 0
@@ -207,12 +217,26 @@ is released. It resets on another effective mission, missing buildings or change
 prunes entries not seen in the latest read, and still omits unreadable roof state. The renderer consumes this
 policy without reading missions or links. A completed delivering building with both matching library layers replaces its body/shadow with
 `DeployingAnim` and queues `UnderDoorAnim` immediately after it; roof delivery uses `RoofDeployingAnim` and
-`UnderRoofDoorAnim`. The body frame is clamped to the replacement art; the door uses healthy/damaged frame 0/1.
+`UnderRoofDoorAnim`. The replacement remains through link release and logical door closing until effective
+Unload ends; it uses the native `buildingFrame` stage/damage offset, without restarting the stage or deriving it
+from logical door openness. The body uses the native inclusive half-count cap from the source `frameCount`
+(foreground plus shadow array lengths for legacy entries), including the source shadow-half frame at that
+boundary; the door uses healthy/damaged frame 0/1. Native DrawIt's null-contact branch defaults to
+ground delivery; the retained roof latch is a separate observed compatibility policy.
 Both cards retain their anchor, palette/remap routing and geometry placement. With an extracted native depth
 template, the replacement body uses BUILDNGZ with `NormalZAdjust = -20` for door delivery or -40 for roof delivery;
 the interior card uses native gradient 0 with k=1. Opaque foreground posts keep their body depth, so the floor
 plane and posts can occlude the same unit differently. Missing/empty pairs retain the ordinary body. Queued Unload
 alone does not open the door unless CurrentMission is the -1 sentinel.
+
+A destroyed building last reported with health <= 0 can retain its frozen visual only for the first missing
+snapshot's logic frame, provided the last observation is no more than one tick old. It expires as soon as that
+frame advances. Selling, pointer/UID replacement, larger frame gaps and rollback do not retain it; same-frame
+polls do not extend the lifetime. This is a bounded presentation heuristic, not established exact native frame
+parity: the normal prelogic render can leave old pixels, but native wait paths can render after the frame increment.
+Exact parity is `UNCERTAIN`; live original/HD acceptance is `UNVERIFIED`. See the
+[native eligibility and presentation evidence](../../docs/remaster/research/painter-order.md#native-draw-eligibility-and-body-translucency).
+
 Supplied frozen native GAWEAP `5x3`, NW `(58,98)`, SHAD evidence: frame `9171`, CurrentMission `5` / queued `16`,
 link 0 SHAD, Z `208`, has a closed roof. Frames `9184/9208`, mission `16`, same link/Z, show RoofDeployingAnim and
 heli parts inside. Frame `9235`, mission `16`, released link and Z `368`, still shows an open roof with the heli

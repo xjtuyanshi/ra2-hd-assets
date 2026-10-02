@@ -143,6 +143,7 @@ function presentation() {
       pose: VoxelUnits.prototype.pose,
       setPainterBias: VoxelUnits.prototype.setPainterBias,
       setNativeDepth: VoxelUnits.prototype.setNativeDepth,
+      setOpacity: VoxelUnits.prototype.setOpacity,
     },
     viewWidth: 0,
     viewHeight: 0,
@@ -165,6 +166,63 @@ function presentation() {
 }
 
 describe('LiveView physical occlusion scheduling', () => {
+  it('hides the whole native-hidden voxel root and restores it on the same logic frame', () => {
+    const p = presentation();
+    const snap = snapshot(1, 256);
+    snap.objects[0]!.isSelected = true;
+    p.view.push(snap, 0);
+    p.view.render(0);
+    const shadow = new Mesh();
+    p.visual.root.add(shadow);
+    p.view.push({ ...snap, objects: [{ ...snap.objects[0]!, nativeHidden: true }] }, 10);
+    p.view.render(10);
+    expect(p.visual.root.visible).toBe(false);
+    expect(shadow.parent).toBe(p.visual.root);
+    expect(p.live.painterObjects).toHaveLength(0);
+    expect(p.live.sprites.getInstances()).toHaveLength(0);
+    p.view.push({ ...snap }, 20);
+    p.view.render(20);
+    expect(p.visual.root.visible).toBe(true);
+    expect(p.live.painterObjects).toHaveLength(1);
+  });
+
+  it('forwards and clears body opacity without rebuilding the voxel visual', () => {
+    const p = presentation();
+    const opacity = vi.spyOn(p.live.voxelUnits, 'setOpacity');
+    const snap = snapshot(1, 256);
+    snap.objects[0]!.translucent = 0.5;
+    p.view.push(snap, 0);
+    p.view.render(0);
+    expect(opacity).toHaveBeenLastCalledWith(p.visual, 0.5);
+    p.view.push({ ...snap, objects: [{ ...snap.objects[0]!, translucent: undefined }] }, 10);
+    p.view.render(10);
+    expect(opacity).toHaveBeenLastCalledWith(p.visual, 1);
+    expect(p.live.visuals.get(1)).toBe(p.visual);
+  });
+
+  it('holds a destroyed building body and shadow for one missing logic frame, then removes its visual', () => {
+    const p = presentation();
+    const art = p.live.cache.manifest.sprites['building:TESTBUILD']!;
+    art.shadows = [...art.frames];
+    const dead = { ...object(512), id: 2, uid: 2, kind: 'building' as const, type: 'TESTBUILD', health: 0 };
+    p.view.push({ ...snapshot(10, 256), objects: [object(256), dead] }, 0);
+    p.view.render(0);
+    const visual = p.live.visuals.get(2);
+    const cards = p.live.sprites.getInstances().map((s) => ({ frame: s.frame, shadow: s.shadow }));
+    expect(cards).toHaveLength(2);
+    p.view.push(snapshot(11, 256), 100);
+    p.view.render(100);
+    expect(p.live.visuals.get(2)).toBe(visual);
+    expect(p.live.sprites.getInstances().map((s) => ({ frame: s.frame, shadow: s.shadow }))).toEqual(cards);
+    p.view.push(snapshot(11, 256), 120);
+    p.view.render(120);
+    expect(p.live.visuals.get(2)).toBe(visual);
+    p.view.push(snapshot(12, 256), 200);
+    p.view.render(200);
+    expect(p.live.visuals.has(2)).toBe(false);
+    expect(p.live.sprites.getInstances()).toHaveLength(0);
+  });
+
   it.each([
     ['inside', 'infantry', 0.5, 1.5, true, 2, 0, true],
     ['outside south', 'infantry', 0.5, 2.2, true, 2, 0, true],
@@ -255,6 +313,27 @@ describe('LiveView physical occlusion scheduling', () => {
       expect(own.find((card) => !card.shadow)?.nativeDepth?.mode).toBe(
         layer === 2 && altitude === 0 ? 'card' : undefined,
       );
+    const cardsForUnit = () =>
+      (p.live.spriteBatch.get(0) ?? []).filter(
+        (s) => Math.abs(s.anchor.x - (67 + x)) < 0.001 && Math.abs(s.anchor.z - (14 + z)) < 0.001,
+      );
+    const chrono = {
+      ...snap,
+      objects: snap.objects.map((o) => ({ ...o, translucent: o.uid === 1 ? 0.5 : undefined })),
+    };
+    p.view.push(chrono, 10);
+    p.view.render(10);
+    expect(cardsForUnit().find((s) => !s.shadow)?.opacity).toBe(0.5);
+    expect(cardsForUnit().find((s) => s.shadow)?.opacity).toBeUndefined();
+    const hiddenUnit = { ...chrono, objects: chrono.objects.map((o) => ({ ...o, nativeHidden: o.uid === 1 })) };
+    p.view.push(hiddenUnit, 20);
+    p.view.render(20);
+    expect(cardsForUnit()).toHaveLength(0);
+    expect(p.visual.root.visible).toBe(false);
+    p.view.push({ ...snap }, 30);
+    p.view.render(30);
+    expect(cardsForUnit()).toHaveLength(2);
+    expect(cardsForUnit().every((s) => s.opacity === undefined)).toBe(true);
   });
 
   it.each([

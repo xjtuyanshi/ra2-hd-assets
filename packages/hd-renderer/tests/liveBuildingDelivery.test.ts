@@ -167,7 +167,7 @@ describe('live delivery building image', () => {
   });
 
   it.each(['door', 'roof'] as const)(
-    'clamps the %s body/shadow frame and independently selects yellow damage',
+    'uses the inclusive native %s frame cap and independently selects yellow damage',
     (unloading) => {
       const h = deliveryView();
       h.object.unloading = unloading;
@@ -180,11 +180,46 @@ describe('live delivery building image', () => {
           .draw()
           .cards.map((card) => card.frame)
           .slice(0, 4),
-      ).toEqual([h.sprites.bib!.frames[1], deploy.shadows![1], deploy.frames[1], door.frames[1]]);
+      ).toEqual([h.sprites.bib!.frames[1], deploy.shadows![0], door.frames[1], h.sprites.active!.frames[0]]);
       door.frames.length = 1;
-      expect(h.draw().cards[3]!.frame).toBe(door.frames[0]);
+      expect(h.draw().cards[2]!.frame).toBe(door.frames[0]);
     },
   );
+
+  it('keeps the delivery image and native stage after contact release, until unloading ends', () => {
+    const h = deliveryView();
+    h.object.unloading = 'door';
+    h.object.contactUid = 99;
+    h.object.buildingFrame = 1;
+    const original = h.draw().cards.map((card) => card.frame);
+    delete h.object.contactUid;
+    expect(h.draw().cards.map((card) => card.frame)).toEqual(original);
+    expect(original).toContain(h.sprites.deploy!.frames[1]);
+    delete h.object.unloading;
+    expect(h.draw().cards.map((card) => card.frame)).toContain(h.sprites.body!.frames[1]);
+  });
+
+  it('halves the complete source count when delivery art has no extracted shadow half', () => {
+    const h = deliveryView();
+    h.object.unloading = 'door';
+    h.object.buildingFrame = 99;
+    const deploy = h.sprites.deploy!;
+    deploy.frames.push(...deploy.shadows!);
+    delete deploy.shadows;
+    expect(h.draw().cards[1]!.frame).toBe(deploy.frames[2]);
+  });
+
+  it('draws the inclusive source-shadow boundary from indexed art even when its HD atlas rectangle is empty', () => {
+    const h = deliveryView();
+    h.object.unloading = 'door';
+    h.object.buildingFrame = 99;
+    h.sprites.deploy!.frameCount = 4;
+    h.state.library.hasHdPage = () => true;
+    const { batch } = h.draw();
+    const cap = batch.get(-1)!.find((card) => card.frame === h.sprites.deploy!.shadows![0]);
+    expect(cap).toMatchObject({ shadow: false });
+    expect(batch.get(0)?.some((card) => card.frame === cap!.frame)).toBe(false);
+  });
 
   it('keeps the normal body/shadow when unloading is absent and restores it when delivery ends', () => {
     const h = deliveryView();

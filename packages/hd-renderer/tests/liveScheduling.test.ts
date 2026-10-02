@@ -70,6 +70,102 @@ function presentation(interpolating: boolean) {
 }
 
 describe('live presentation scheduling', () => {
+  it('hides owner-attached effects and restores them on a same-frame unhide while retaining independent effects', () => {
+    const { view, state } = pushView();
+    const owner = { id: 100, uid: 10, kind: 'vehicle' as const };
+    const point = { x: 256, y: 256, z: 0 };
+    const snapshot: LiveSnapshot = {
+      frame: 20,
+      view: null,
+      houses: [],
+      objects: [
+        {
+          ...owner,
+          ...point,
+          type: 'TEST',
+          owner: 0,
+          facingRaw: 0,
+          health: 1,
+          isSelected: false,
+          nativeHidden: true,
+        },
+      ],
+      effects: {
+        anims: [
+          { id: 200, uid: 20, type: 'FIRE01', ...point, attachedTo: owner },
+          { id: 201, uid: 21, type: 'TWLT070', ...point, attachedTo: null },
+        ],
+        particleSystems: [
+          { id: 300, uid: 30, behaviour: 'smoke', ...point, attachedTo: owner },
+          { id: 301, uid: 31, behaviour: 'smoke', ...point },
+        ],
+        bullets: [{ id: 400, uid: 40, type: 'CANNON', ...point }],
+        fireEvents: [
+          { id: owner.id, uid: owner.uid, frame: 20 },
+          { id: 101, uid: 11, frame: 20 },
+        ],
+      },
+    };
+    view.push(snapshot, 100);
+    const timed = state.current;
+    const filtered = state.effectDriver.push.mock.calls.at(-1)![0];
+    expect(filtered.anims).toEqual([snapshot.effects!.anims[1]]);
+    expect(filtered.particleSystems).toEqual([snapshot.effects!.particleSystems[1]]);
+    expect(filtered.fireEvents).toEqual([snapshot.effects!.fireEvents![1]]);
+    expect(filtered.bullets).toEqual(snapshot.effects!.bullets);
+    expect(snapshot.effects!.anims).toHaveLength(2);
+    expect(snapshot.effects!.particleSystems).toHaveLength(2);
+    expect(snapshot.effects!.fireEvents).toHaveLength(2);
+
+    view.push({ ...snapshot, objects: [{ ...snapshot.objects[0]!, nativeHidden: false }] }, 120);
+    expect(state.current).toBe(timed);
+    expect(state.current?.at).toBe(100);
+    expect(state.effectDriver.push.mock.calls.at(-1)![0]).toEqual(snapshot.effects);
+
+    view.push({ ...snapshot, effects: { anims: [], particleSystems: [], bullets: [], fireEvents: [] } }, 140);
+    expect(state.effectDriver.push.mock.calls.at(-1)![0]).toEqual({
+      anims: [],
+      particleSystems: [],
+      bullets: [],
+      fireEvents: [],
+    });
+  });
+
+  it.each([
+    { field: 'pointer', attachedTo: { id: 101, uid: 10, kind: 'vehicle' } },
+    { field: 'UID', attachedTo: { id: 100, uid: 11, kind: 'vehicle' } },
+  ])('keeps attached effects when the hidden owner has a different $field', ({ attachedTo }) => {
+    const { view, state } = pushView();
+    const point = { x: 256, y: 256, z: 0 };
+    const snapshot: LiveSnapshot = {
+      frame: 20,
+      view: null,
+      houses: [],
+      objects: [
+        {
+          id: 100,
+          uid: 10,
+          kind: 'vehicle',
+          ...point,
+          type: 'TEST',
+          owner: 0,
+          facingRaw: 0,
+          health: 1,
+          isSelected: false,
+          nativeHidden: true,
+        },
+      ],
+      effects: {
+        anims: [{ id: 200, uid: 20, type: 'FIRE01', ...point, attachedTo }],
+        particleSystems: [{ id: 300, uid: 30, behaviour: 'smoke', ...point, attachedTo }],
+        bullets: [],
+        fireEvents: [{ id: attachedTo.id, uid: attachedTo.uid, frame: 20 }],
+      },
+    };
+    view.push(snapshot, 100);
+    expect(state.effectDriver.push.mock.calls.at(-1)![0]).toEqual(snapshot.effects);
+  });
+
   it('accepts death/prone steps, damage and effect removal in the same frame without restarting its timestamp', () => {
     const { view, state } = pushView();
     const snapshot: LiveSnapshot = {

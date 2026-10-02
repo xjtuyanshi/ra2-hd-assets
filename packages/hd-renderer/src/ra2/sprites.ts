@@ -89,6 +89,8 @@ export interface SpriteInstance {
   /** World units to pull the card towards the camera so terrain around the base never cuts it (see cardPush). */
   push: number;
   shadow: boolean;
+  /** Body-card alpha multiplier, default 1. Shadows and ground extras keep their own opacity. */
+  opacity?: number;
   /** Infantry's inline SHP footprint stays at the draw point; enhanced opacity is fixed at 0.78. */
   infantryShadow?: boolean;
   /** Lay the art on the ground as a decal (ore, smudges, flat overlays) instead of a camera-facing card. */
@@ -143,7 +145,7 @@ function instanceRank(s: SpriteInstance): number {
 }
 
 /** Draw passes of a sprite layer: the main one, and the enhanced look's ground passes (SpriteLayer.groundPasses). */
-type GroundPass = 'main' | 'under' | 'over' | 'readOnly' | 'unit';
+type GroundPass = 'main' | 'under' | 'over' | 'readOnly' | 'unit' | 'translucent';
 
 /**
  * How far (world units along the view) the enhanced look's 'over' pass pulls SHP shadows and wet reflections in front
@@ -248,6 +250,8 @@ export class SpriteLayer {
   readonly readOnlyMesh: InstancedQuad;
   /** Ground cards follow test-only parts, so a door cannot paint over a unit that passed the body. */
   readonly unitMesh: InstancedQuad;
+  /** Translucent bodies follow native unit color, retaining depth tests without writing an opaque silhouette. */
+  readonly translucentMesh: InstancedQuad;
   /**
    * The enhanced look's ground passes ('under', 'over'; children of `mesh`, shown by HdRenderer only while the look is
    * on). They share this layer's instance buffers.
@@ -269,7 +273,8 @@ export class SpriteLayer {
    * traversal bias in world units for cards, ground-crystal weight for plain flat decals, or infantry shadow marker.
    * The second vec4 holds foundation width/height and draw-point offsets; width -1 selects an elevated deck.
    * Capture-enabled layers retain their relative anchor code at scalar 8. Two additional vec4s hold the native
-   * depth mode/profile and owner offsets/pass (0 ordinary, 1 test-only, 2 ground unit). All attributes share one buffer: stride 16, or 17 with
+   * depth mode/profile and owner offsets/pass (0 ordinary, 1 test-only, 2 ground unit, 3 + opacity translucent).
+   * All attributes share one buffer: stride 16, or 17 with
    * capture, so native depth adds no vertex buffer (WebGPU allows eight).
    */
   private readonly flags: DirtyAttribute;
@@ -347,6 +352,10 @@ export class SpriteLayer {
       nativeOffset + 4,
     );
     const aFlat: ShaderNode = aFlags.x;
+    const bodyOpacity: ShaderNode = aNativeOffset.w
+      .greaterThanEqual(3)
+      .select(aNativeOffset.w.sub(3), 1)
+      .toVar('spriteBodyOpacity');
     const isInfantryShadow: ShaderNode = step(1.5, aFlat)
       .mul(float(1).sub(step(2.5, aFlat)))
       .mul(step(0.5, aFlags.w));
@@ -440,15 +449,17 @@ export class SpriteLayer {
       .mul(float(1).sub(step(2.5, aFlat)))
       .add(isReflection);
     const skipIn = (pass: GroundPass): ShaderNode =>
-      pass === 'readOnly'
-        ? aNativeOffset.w.equal(1).select(0, 1)
-        : pass === 'unit'
-          ? aNativeOffset.w.equal(2).select(0, 1)
-          : pass === 'main'
-            ? enhancedOn.mul(step(0.5, aFlat)).add(step(0.5, aNativeOffset.w))
-            : float(1)
-                .sub(enhancedOn.mul(pass === 'under' ? underKind : overKind))
-                .add(step(0.5, aNativeOffset.w));
+      pass === 'translucent'
+        ? aNativeOffset.w.greaterThanEqual(3).select(0, 1)
+        : pass === 'readOnly'
+          ? aNativeOffset.w.equal(1).select(0, 1)
+          : pass === 'unit'
+            ? aNativeOffset.w.equal(2).select(0, 1)
+            : pass === 'main'
+              ? enhancedOn.mul(step(0.5, aFlat)).add(step(0.5, aNativeOffset.w))
+              : float(1)
+                  .sub(enhancedOn.mul(pass === 'under' ? underKind : overKind))
+                  .add(step(0.5, aNativeOffset.w));
     const placement = (pass: GroundPass): ShaderNode =>
       Fn(() => {
         const px = aParams.x.add(gu.mul(aRect.z));
@@ -772,7 +783,7 @@ export class SpriteLayer {
             result.assign(vec4(lit.mul(0.9), litAlpha.mul(strength)));
           });
         });
-        return result;
+        return vec4(result.rgb, result.a.mul(bodyOpacity));
       })();
     const mainColour = colourNode();
     if (capture) {
@@ -829,6 +840,20 @@ export class SpriteLayer {
     this.unitMesh.name = 'ra2-sprites-ground-units';
     this.unitMesh.renderOrder = NATIVE_UNIT_RENDER_ORDER;
     this.mesh.add(this.unitMesh);
+
+    const translucentMaterial = new MeshBasicNodeMaterial();
+    translucentMaterial.name = 'ra2-sprites-translucent';
+    translucentMaterial.transparent = true;
+    translucentMaterial.blending = NormalBlending;
+    translucentMaterial.alphaTest = material.alphaTest;
+    translucentMaterial.positionNode = placement('translucent');
+    translucentMaterial.colorNode = colourNode();
+    translucentMaterial.depthNode = cardDepth();
+    translucentMaterial.depthWrite = false;
+    this.translucentMesh = new InstancedQuad(translucentMaterial, count, this.mesh.geometry);
+    this.translucentMesh.name = 'ra2-sprites-translucent';
+    this.translucentMesh.renderOrder = NATIVE_UNIT_RENDER_ORDER + 0.001;
+    this.mesh.add(this.translucentMesh);
 
     // Enhanced-look ground passes. In one draw call every ground decal wrote depth on the same plane (0.02 above the
     // ground), so coplanar decals z-fought: SHP shadows over contact shades, bibs and each other passed or failed by
@@ -910,11 +935,13 @@ export class SpriteLayer {
     material.addEventListener('dispose', () => {
       readOnlyMaterial.dispose();
       unitMaterial.dispose();
+      translucentMaterial.dispose();
       for (const passMesh of this.groundPasses) (passMesh.material as MeshBasicNodeMaterial).dispose();
     });
     this.mesh.addEventListener('dispose', () => {
       this.readOnlyMesh.dispose();
       this.unitMesh.dispose();
+      this.translucentMesh.dispose();
       capture?.setCaptured(this.mesh, false);
       capture?.setCaptured(this.unitMesh, false);
       for (const passMesh of this.groundPasses) {
@@ -941,6 +968,7 @@ export class SpriteLayer {
     let count = 0;
     let readOnly = false;
     let units = false;
+    let translucent = false;
     for (let rank = 0; rank < 4 && count < this.capacity; rank++) {
       const list = rank === 3 ? cards : instances;
       for (let j = 0; j < list.length && count < this.capacity; j++) {
@@ -995,11 +1023,14 @@ export class SpriteLayer {
         this.flags.setComponent(i, at + 4, native?.offset?.[0] ?? 0);
         this.flags.setComponent(i, at + 5, native?.offset?.[1] ?? 0);
         this.flags.setComponent(i, at + 6, native?.anchorPush ?? 0);
-        const testOnly = s.depthWrite === false && instanceCode(s) === 0;
+        const opacity = instanceCode(s) === 0 ? Math.max(0, Math.min(1, s.opacity ?? 1)) : 1;
+        const blending = opacity < 1;
+        const testOnly = !blending && s.depthWrite === false && instanceCode(s) === 0;
         const unit = !testOnly && native?.mode === 'card' && !foundation;
-        this.flags.setComponent(i, at + 7, testOnly ? 1 : unit ? 2 : 0);
+        this.flags.setComponent(i, at + 7, blending ? 3 + opacity : testOnly ? 1 : unit ? 2 : 0);
         readOnly ||= testOnly;
-        units ||= unit;
+        units ||= !blending && unit;
+        translucent ||= blending;
       }
     }
     if (this.capture) this.uploaded.length = count;
@@ -1008,6 +1039,8 @@ export class SpriteLayer {
     this.readOnlyMesh.visible = readOnly;
     this.unitMesh.count = count;
     this.unitMesh.visible = units;
+    this.translucentMesh.count = count;
+    this.translucentMesh.visible = translucent;
     for (const passMesh of this.groundPasses) passMesh.count = count;
     this.anchor.flush();
     this.rect.flush();
@@ -1022,7 +1055,9 @@ export class SpriteLayer {
     for (let i = 0; i < this.uploaded.length; i++) {
       const instance = this.uploaded[i]!;
       const value =
-        instanceCode(instance) === 0 && instance.depthWrite !== false ? codeFor(instance) : NOT_CAPTURED_CODE;
+        instanceCode(instance) === 0 && instance.depthWrite !== false && (instance.opacity ?? 1) >= 1
+          ? codeFor(instance)
+          : NOT_CAPTURED_CODE;
       this.flags.setComponent(i, 8, value);
       captured ||= value !== NOT_CAPTURED_CODE;
       unitsCaptured ||=

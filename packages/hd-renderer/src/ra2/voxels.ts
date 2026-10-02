@@ -491,6 +491,8 @@ export class VoxelUnit extends Group {
   captureRadius = 0;
   private readonly painterDepth = createPainterDepth();
   readonly nativeDepth = createVoxelNativeDepth();
+  private readonly translucentMaterials = new Map<MeshStandardNodeMaterial, MeshStandardNodeMaterial>();
+  bodyOpacity = 1;
 
   constructor() {
     super();
@@ -506,6 +508,33 @@ export class VoxelUnit extends Group {
 
   setPainterBias(bias: number): void {
     this.painterDepth.bias = VOXEL_CLEARANCE + bias;
+  }
+
+  /** Only this unit's original parts use these variants; cached palette sources and every surface twin stay intact. */
+  setOpacity(opacity: number): void {
+    const next = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
+    if (next === this.bodyOpacity) return;
+    this.bodyOpacity = next;
+    setVoxelNativePass(this, this.nativeDepth.enabled !== 0);
+  }
+
+  translucentMaterial(source: MeshStandardNodeMaterial): MeshStandardNodeMaterial {
+    let material = this.translucentMaterials.get(source);
+    if (!material) {
+      material = source.clone();
+      material.name = `${source.name}:translucent`;
+      material.transparent = true;
+      material.depthWrite = false;
+      this.translucentMaterials.set(source, material);
+      physicalMaterials.set(material, source);
+    }
+    material.opacity = source.opacity * this.bodyOpacity;
+    return material;
+  }
+
+  disposeOpacityMaterials(): void {
+    for (const material of this.translucentMaterials.values()) material.dispose();
+    this.translucentMaterials.clear();
   }
 
   override updateMatrix(): void {
@@ -558,9 +587,9 @@ function setVoxelNativePass(root: VoxelUnit, enabled: boolean): void {
       if (!physicalOrders.has(mesh)) physicalOrders.set(mesh, mesh.renderOrder);
       // DoorAnim is a color-only layer at 4.001. Unit color follows it while body depth still rejects hidden units.
       mesh.renderOrder = NATIVE_UNIT_RENDER_ORDER;
-      mesh.material = nativeVoxelMaterial(source);
+      mesh.material = root.bodyOpacity < 1 ? root.translucentMaterial(source) : nativeVoxelMaterial(source);
     } else {
-      mesh.material = source;
+      mesh.material = root.bodyOpacity < 1 ? root.translucentMaterial(source) : source;
       const order = physicalOrders.get(mesh);
       if (order !== undefined) {
         mesh.renderOrder = order;

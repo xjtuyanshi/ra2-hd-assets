@@ -39,6 +39,9 @@ export const YR_BUILDING_RENDER_OFFSETS = Object.freeze({
   currentMission: 0xac,
   queuedMission: 0xb4,
   stage: 0xf8,
+  /** DoorClass canonical booleans, tested by the Unit render wrapper at 0x73B0F3..0x73B114. */
+  doorMoving: 0x368,
+  doorTargetOpen: 0x369,
   type: 0x520,
   state: 0x534,
   queuedState: 0x538,

@@ -67,6 +67,10 @@ export interface GameRenderObject extends GameRenderPoint {
   type: string;
   /** Engine-selected draw image when it differs from the rules type. */
   imageType?: string;
+  /** Native whole-object draw gate, including shadows and attached presentation. */
+  nativeHidden?: boolean;
+  /** Body opacity in 0..1; omitted for ordinary opaque drawing. Does not affect shadows. */
+  translucent?: number;
   /** GameRenderHouse.index of the owner, or -1 when unknown. */
   owner: number;
   facingRaw: number;

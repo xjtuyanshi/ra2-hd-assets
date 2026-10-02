@@ -307,7 +307,13 @@ describe('r186 vertex and uniform binding budget', () => {
       expect(captured.fragmentShader).toContain('objectDepthInstanceCode');
       const shared = new Set(main.attributes.map(attributeBuffer));
       expect(layer.groundPasses).toHaveLength(2);
-      for (const mesh of [layer.mesh, ...layer.groundPasses, layer.readOnlyMesh, layer.unitMesh]) {
+      for (const mesh of [
+        layer.mesh,
+        ...layer.groundPasses,
+        layer.readOnlyMesh,
+        layer.unitMesh,
+        layer.translucentMesh,
+      ]) {
         const result = mesh === layer.mesh ? main : assertLimits(mesh);
         expect(result.buffers.length).toBe(6);
         expect(result.attributes.length).toBe(
@@ -316,6 +322,12 @@ describe('r186 vertex and uniform binding budget', () => {
         expect(result.fragmentShader.includes('objectDepthCaptureEnabled')).toBe(
           mesh === layer.mesh || mesh === layer.unitMesh,
         );
+        if (mesh === layer.translucentMesh) {
+          expect(result.fragmentShader).toContain('spriteBodyOpacity');
+          expect(mesh.material.depthWrite).toBe(false);
+          expect(mesh.renderOrder).toBeGreaterThan(layer.readOnlyMesh.renderOrder);
+          expect(mesh.renderOrder).toBeGreaterThan(layer.unitMesh.renderOrder);
+        }
         if (mesh === layer.mesh || mesh === layer.unitMesh) {
           expect(result.fragmentShader).toMatch(/@interpolate\( flat, either \) objectDepthInstanceCode/);
           expect(result.fragmentShader).toMatch(/objectDepthCaptureEnabled > 0\.0/);

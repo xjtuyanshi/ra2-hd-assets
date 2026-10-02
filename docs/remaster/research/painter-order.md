@@ -417,12 +417,26 @@ remains `UNVERIFIED`; the latch deliberately ends there.
 The factory's delivery art is a body image substitution, not an attached AnimClass. Art loaders store DeployingAnim
 `+0x14E4` at `0x45F3A7`, UnderDoorAnim `+0x14EC` at `0x45F5DF`, RoofDeployingAnim `+0x14FC` at `0x45F47F`, and
 UnderRoofDoorAnim `+0x1504` at `0x45F78B`. DrawIt `0x43D692..0x43D6D3` / `0x43D7D2` substitutes the deploying shape
-(native Z adjust -20, roof -40); `0x43D7A7..0x43D7EE` clamps GetCurrentFrame (`0x43EF90`) to its foreground half.
+(native Z adjust -20, roof -40); `0x43D7A7..0x43D7EE` selects
+`min(GetCurrentFrame(B), trunc(i16[SHP+6] / 2))`, without subtracting one from that cap.
 `0x43D8EE..0x43D9C9` and roof `0x43D9D8..0x43DA67` then draw the under-door section at yellow-damage frame 1, else 0.
 
+This replacement lasts for the entire effective Unload mission, including after link 0 becomes NULL and while
+the logical door closes. Ground delivery remains `unloading='door'` without a contact. DoorClass moving/target-open
+bytes `+0x368/+0x369` and its timer (`+0x358/+0x360/+0x364`) do not drive the deploying SHP frame. The ordinary
+factory body getter keeps stage `+0xF8` and mode `+0x534`, applying the existing damage-bank offset; Unload does
+not reset the stage. State 3 holds while `+0x418` is nonzero, starts closing at `0x44E202..0x44E22B`, and state 4
+requests Guard only after closure (`0x44E233..0x44E25A`). A separate DoorAnim is absent from the supplied ordinary
+factory definitions; any configured legacy DoorAnim follows its own progress rule. The persisted roof latch above
+is a separate observed compatibility policy, not proved by the null-contact branch of DrawIt, which defaults to
+ground delivery.
+
 `LiveView.libraryBuildingSprites` uses those library key pairs while a completed building reports `unloading`.
-It clamps the replacement body frame, substitutes its shadow, and queues the healthy/damaged under-door frame at
-the same draw anchor with the existing palette/remap routing. Missing/empty pairs retain the normal body.
+It uses `SpriteEntry.frameCount` for the native inclusive half-count cap; legacy entries without that metadata
+fall back to foreground plus shadow array lengths. The source frame exactly at the half boundary addresses the
+first shadow-half frame, rather than clamping to the last foreground frame. It substitutes the replacement
+shadow and queues the healthy/damaged under-door frame at the same draw anchor with the existing palette/remap
+routing. Missing/empty pairs retain the normal body.
 The replacement body receives the BUILDNGZ baseline with Nadj -20/-40; both under-door interiors use gradient 0,
 k=1. Body posts remain depth writers while the floor plane admits a nearer unit card.
 
@@ -438,6 +452,57 @@ the foundation. Mission `16` persisted for about five seconds during drive-out; 
 left the foundation, then mission returned to `5` and the door closed. This supports effective-mission gating and
 keeping the door image through link release. It is native-state evidence supplied with this task, not live HD
 rendered-pixel acceptance of the implementation.
+
+## Native draw eligibility and body translucency
+
+These predicates are from the pinned YR 1.001 executable. The reader evaluates validated pointers and fields;
+the bridge forwards generic optional `nativeHidden` and `translucent` fields, and LiveView never calls guest code.
+
+Unit wrapper `0x73B0B4..0x73B121` skips the complete render when tether byte `U+0x418` is nonzero, link 0 is a
+validated building, and either its effective mission or queued mission is Unload 16, with canonical door booleans
+`B+0x368/B+0x369` (each 0 or 1). The four door predicates exhaust opening, closing, open and closed; this is not an
+openness threshold. Building validation checks its object/type spans, vtables and type ID independently of
+whether InLimbo or snapshot filtering omits the linked building from publication; `contactUid` remains limited to
+published contacts. Effective mission uses `B+0xAC`, falling back to `B+0xB4` only when current is -1. Queued
+Unload can therefore hide a tethered unit before it selects the factory's replacement body. `nativeHidden=true`
+suppresses the whole HD visual, including shadows and owner extras, through the same visibility gate as
+InvisibleInGame art. Selection brackets and health bars remain native overlay pixels; LiveView does not generate
+selection geometry, and the bridge preserves `isSelected` as state rather than altering native input/selection.
+Owner-attached anims, particle systems and fire events are suppressed only when both UID and pointer match the
+hidden owner, including same-frame hide/unhide changes. Independent explosions and projectiles retain their
+native publication lifetime.
+
+Chrono bytes BeingWarpedOut `U+0x270` and WarpingOut `U+0x271` are a different rule. If either is nonzero,
+`0x73B259..0x73B275` ORs flag `0x4` into the body draw. The ordinary uncloaked combination selects
+`BlitTransLucent50AlphaZRead`, whose pixel loop at `0x495165..0x495178` halves and adds source/destination colors.
+The reader publishes `translucent=0.5`; HD applies that opacity to SHP/voxel body parts without changing their
+shadow opacity. The translucent body does not write depth. Clearing the flags restores ordinary body rendering.
+These bytes alone are not invisibility flags, and this does not establish every cloak/blend combination.
+
+No CMIN-specific hard-hide interval is proved: normal teleport's harvester exception clears `+0x271` and its timer
+at `0x719580..0x7195B6`. Refinery docking sends Unload to the miner, not necessarily the building, so neither rule
+is a verified explanation for a reported missing miner. Live original/HD comparison remains `UNVERIFIED`.
+
+## Last destroyed-building visual
+
+The reader has no Health > 0 filter; zero-HP buildings can still be reported while eligible. Native removal first
+clears marked byte `+0x74` and tactical membership (`0x5F4D6D..0x5F4D79`), then sets InLimbo `+0x81` at
+`0x5F4E9E`, which excludes the building from the default reader. The native building render wrapper itself requires
+marked and !InLimbo (`0x43CED1..0x43CEE4`); this is not a proved state where an InLimbo object keeps drawing.
+
+Normal rendering at `0x55D8F2` precedes Logic AI at `0x55DC9E` and the logic-frame increment at
+`0x55DE73..0x55DE81`. A previously painted body can therefore remain in the native framebuffer after the reader
+observes its removal. However, the wait path can render again after the increment (`0x55E271 -> 0x4F4480`), so a
+fixed one-frame picture lag is not established.
+
+LiveView uses a bounded presentation heuristic: a building last reported with health <= 0 and not selling keeps
+its last visual only for the first missing snapshot's logic frame, provided that frame is no more than one tick
+after its last observation. It expires as soon as that missing frame advances; same-frame polls do not extend
+the lifetime, and larger frame gaps or a rollback do not resurrect it. Pointer/UID replacement cancels the old
+visual. The cached descriptor and body frame stay frozen; no freed native pointer is read. Healthy removals and sold buildings
+are removed normally. This one-tick cache has synthetic regression coverage, but exact last-picture parity is
+`UNCERTAIN`, and live acceptance is `UNVERIFIED`. Exact parity would need coherent render descriptors tied to the
+native image's presentation boundary, not arbitrary post-logic polling or an invented multi-tick death timer.
 
 ## Update ownership and regressions
 

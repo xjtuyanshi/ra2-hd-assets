@@ -62,6 +62,7 @@ import { LiveEffectsDriver, smokeOnVehicle, type EffectStyle, type LiveAnim, typ
 import { LiveBeams } from './beams';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
 import { BuildingLightGate, buildingLightOverlay, buildingLightSources } from './buildingLights';
+import { BuildingVisualHistory } from './buildingVisualHistory';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
 import { SmudgeInstanceCache, type LiveSmudgeCells, type SmudgePage } from './smudges';
@@ -107,6 +108,10 @@ export interface LiveObject {
   turretFacingRaw?: number;
   health: number;
   isSelected: boolean;
+  /** Native whole-object draw gate: suppress body, shadow and HD additions. */
+  nativeHidden?: boolean;
+  /** Body opacity while the native draw mode is translucent; shadows keep their normal opacity. */
+  translucent?: number;
   /** Bridge (H2): building construction state and the actual make SHP frame, including engine reversal. */
   buildState?: 'building' | 'selling' | 'done';
   buildupFrame?: number;
@@ -174,6 +179,24 @@ export interface LiveSnapshot {
   smudges?: LiveSmudgeCells | null;
   /** Bridge (H3): runtime overlay/smudge cells. */
   cells?: LiveCells | null;
+}
+
+/** Attached presentation follows its owner's draw eligibility; independent explosions/projectiles remain native. */
+function visibleObjectEffects(snapshot: LiveSnapshot): LiveEffects | null | undefined {
+  const effects = snapshot.effects;
+  if (!effects) return effects;
+  const hidden = new Map(
+    snapshot.objects.filter((object) => object.nativeHidden).map((object) => [object.uid, object.id]),
+  );
+  if (!hidden.size) return effects;
+  const shown = (attachment: { uid: number; id: number } | null | undefined) =>
+    !attachment || hidden.get(attachment.uid) !== attachment.id;
+  return {
+    ...effects,
+    anims: effects.anims.filter((anim) => shown(anim.attachedTo)),
+    particleSystems: effects.particleSystems.filter((system) => shown(system.attachedTo)),
+    ...(effects.fireEvents ? { fireEvents: effects.fireEvents.filter(shown) } : {}),
+  };
 }
 
 export interface LiveViewOptions extends VoxelUnitsOptions {
@@ -469,6 +492,7 @@ export class LiveView {
   private previous: Timed | null = null;
   private current: Timed | null = null;
   private readonly visuals = new Map<number, Visual>();
+  private buildingVisualHistory?: BuildingVisualHistory;
   /** Building appearance by match-unique UID; tolerate brief omissions without retaining every dead object. */
   private readonly appearances = new Map<number, { frame: number; afterGap: boolean; lastSeen: number }>();
   private readonly spriteBatch: SpriteBatch = new Map();
@@ -783,6 +807,7 @@ export class LiveView {
     const hadEffects = !!current?.snapshot.effects;
     if (current?.snapshot === snapshot) return;
     const sameFrame = current?.snapshot.frame === snapshot.frame;
+    (this.buildingVisualHistory ??= new BuildingVisualHistory()).update(snapshot);
     this.painterDirty = true;
     if (current && snapshot.frame < current.snapshot.frame) {
       // Loading an earlier save or starting another match establishes a new appearance timeline.
@@ -834,16 +859,17 @@ export class LiveView {
     for (const house of snapshot.houses) this.houseColour.set(house.index, house.colorIndex);
     const library = this.library;
     this.civilian = civilianHouses(snapshot, library ? (type) => !!library.type(type)?.building?.buildup : null);
-    this.buildingAnims = indexBuildingAnims(snapshot.effects?.anims);
+    const effects = visibleObjectEffects(snapshot);
+    this.buildingAnims = indexBuildingAnims(effects?.anims);
     this.buildingAnimMatches.clear();
     if (snapshot.shroud) this.shroud.update(snapshot.shroud);
     if (!sameFrame) this.trackMotion(snapshot, current);
     // A damaged vehicle's smoke system sits on the vehicle (see smokeUnlimited).
-    const vehicles = snapshot.objects.filter((o) => o.kind === 'vehicle');
+    const vehicles = snapshot.objects.filter((o) => o.kind === 'vehicle' && !o.nativeHidden);
     this.effectDriver.vehicleAt = (x, y, z) => smokeOnVehicle(vehicles, x, y, z);
-    if (snapshot.effects || hadEffects)
+    if (effects || hadEffects)
       this.effectDriver.push(
-        snapshot.effects ?? { anims: [], bullets: [], particleSystems: [] },
+        effects ?? { anims: [], bullets: [], particleSystems: [] },
         snapshot.frame,
         this.hd.seconds(),
         this.wind,
@@ -882,7 +908,7 @@ export class LiveView {
     const dressing = this.world.dressing;
     const types = this.cache.lights?.types;
     if (!dressing) return;
-    const buildings = snapshot.objects.filter((o) => o.kind === 'building');
+    const buildings = snapshot.objects.filter((o) => o.kind === 'building' && !o.nativeHidden);
     const shrouded = (b: LiveObject) => this.shroud.isLocationShrouded(b.x, b.y, b.z);
     if (types) {
       const sources: SourceLight[] = [];
@@ -1104,7 +1130,7 @@ export class LiveView {
     if (!count && !this.engulfActive) return;
     this.engulfActive = count > 0;
     for (const [uid, visual] of this.visuals) {
-      const object = this.current?.byUid.get(uid);
+      const object = this.current?.byUid.get(uid) ?? this.buildingVisualHistory?.retained.get(uid)?.object;
       const state = (visual.engulf ??= { x: 0, y: 0, z: 0, radius: 0, code: NOT_CAPTURED_CODE });
       state.code = NOT_CAPTURED_CODE;
       state.radius = 0;
@@ -1130,9 +1156,10 @@ export class LiveView {
       for (const instances of this.spriteBatch.values())
         for (const instance of instances) {
           if (instance.flat || instance.shadow || instance.kind) continue;
-          const visual = this.visuals.get(instance.painter?.uid ?? -1);
+          const uid = instance.painter?.uid ?? -1;
+          const visual = this.visuals.get(uid);
           const state = visual?.engulf;
-          const object = this.current?.byUid.get(instance.painter?.uid ?? -1);
+          const object = this.current?.byUid.get(uid) ?? this.buildingVisualHistory?.retained.get(uid)?.object;
           if (!visual?.root.visible || !state || !object || visual.mode === 'placeholder') continue;
           if (object.kind !== 'building' && state.radius === 0) {
             engulfAnchor(instance.anchor, undefined, 0, 0, state);
@@ -1157,7 +1184,7 @@ export class LiveView {
         }
     for (const [uid, visual] of this.visuals) {
       const state = visual.engulf!;
-      const object = this.current?.byUid.get(uid);
+      const object = this.current?.byUid.get(uid) ?? this.buildingVisualHistory?.retained.get(uid)?.object;
       if (count && object && visual.root.visible && state.radius > 0) {
         // Flying aircraft retain their original independent layer. Landed aircraft use the same policy as vehicles.
         const airborne =
@@ -1212,12 +1239,14 @@ export class LiveView {
     this.uploadedSmudges.clear();
     for (const { layer } of this.pageLayers.values()) this.disposeOverlayLayer(layer);
     this.pageLayers.clear();
+    for (const visual of this.visuals.values()) this.removeVisual(visual);
     this.volumetricBlasts.dispose();
     this.library?.disposeMaterials();
     this.library?.disposeDepthTemplate();
     this.hd.dispose();
     this.visuals.clear();
     this.appearances.clear();
+    this.buildingVisualHistory?.clear();
   }
 
   /** What the view could not draw (a healthy match reports no placeholders and no effects without art). */
@@ -1278,7 +1307,10 @@ export class LiveView {
   }
 
   private applyObjects(previous: Timed | null, current: Timed, alpha: number): void {
-    const frame = current.snapshot.frame;
+    const retained = this.buildingVisualHistory?.retained;
+    const objects = retained?.size
+      ? [...current.snapshot.objects, ...Array.from(retained.values(), (last) => last.object)]
+      : current.snapshot.objects;
     const batch = this.spriteBatch;
     for (const list of batch.values()) list.length = 0;
     this.spritePool.begin();
@@ -1293,16 +1325,20 @@ export class LiveView {
         addRefineryFoundation(this.refineryCells, true, x, y, type.foundation);
       }
     }
-    for (const object of current.snapshot.objects) {
+    for (const object of objects) {
+      const last = retained?.get(object.uid);
+      const snapshot = last?.snapshot ?? current.snapshot;
+      const frame = snapshot.frame;
       const colorIndex = this.houseColour.get(object.owner) ?? -1;
       const visual = this.visualFor(object, colorIndex, frame);
       // Native techno rendering does not reject the anchor's shroud cell. The common per-pixel mask covers the
       // whole sprite/voxel, including tall art crossing the edge. InvisibleInGame types still never draw.
-      const hidden = !!visual.libraryType?.invisible || !!this.cache.lights?.types[object.type]?.invisible;
+      const hidden =
+        !!object.nativeHidden || !!visual.libraryType?.invisible || !!this.cache.lights?.types[object.type]?.invisible;
       if (visual.root.visible === hidden) this.painterDirty = true;
       visual.root.visible = !hidden;
       if (hidden) continue;
-      const before = previous?.byUid.get(object.uid);
+      const before = last ? undefined : previous?.byUid.get(object.uid);
       const near = before
         ? Math.hypot(object.x - before.x, object.y - before.y) / LEPTONS_PER_CELL < TELEPORT_CELLS
         : false;
@@ -1349,7 +1385,7 @@ export class LiveView {
       }
       if (visual.mode === 'library-sprite') {
         if (object.kind === 'building') {
-          const standing = this.libraryBuildingSprites(object, visual, batch, current.snapshot);
+          const standing = this.libraryBuildingSprites(object, visual, batch, snapshot);
           // A building's turret aims with its PrimaryFacing (the reader's facingRaw): recorded sentry guns turned it
           // (5793 .. 28312) while their SecondaryFacing (turretFacingRaw) stayed 0.
           this.buildingTurret(object, visual, standing ? pose.facing : null);
@@ -1358,6 +1394,7 @@ export class LiveView {
         continue;
       }
       const unit = visual;
+      this.voxelUnits.setOpacity(unit, object.translucent ?? 1);
       // Buildings are never turned (facing pi/2 is the identity rotation).
       if (object.kind === 'building') {
         pose.facing = Math.PI / 2;
@@ -1369,7 +1406,7 @@ export class LiveView {
       this.voxelUnits.setNativeDepth(unit, unit.root.position, this.harvesterBonus(object), this.groundCard(object));
     }
     for (const uid of this.visuals.keys()) {
-      if (current.byUid.has(uid)) continue;
+      if (current.byUid.has(uid) || retained?.has(uid)) continue;
       this.removeVisual(this.visuals.get(uid)!);
       this.visuals.delete(uid);
     }
@@ -1456,7 +1493,7 @@ export class LiveView {
     this.effectDriver.volumes(this.effectArt, this.volumeInstances);
     this.volumetricBlasts.setBlasts(this.volumeInstances);
     this.effectDriver.smokeCards(this.effectArt, instances);
-    const effects = snapshot.effects;
+    const effects = visibleObjectEffects(snapshot);
     this.projectiles?.update(effects?.bullets ?? [], effects?.voxelAnims ?? [], this.hidden, instances);
     if (effects) this.particleCards(effects, instances);
     // An async art revision, rather than every presentation frame, schedules the next rebuild.
@@ -1691,7 +1728,10 @@ export class LiveView {
       !!deploying?.frames.length &&
       !!door?.frames.length;
     const bodyArt = delivering ? deploying! : entry;
-    const shownBody = delivering ? Math.min(body, bodyArt.frames.length - 1) : body;
+    // The native cap is inclusive and counts the source SHP's shadow half. At the boundary it really
+    // selects that half's first source frame; clamping to the last foreground frame changes the image.
+    const sourceFrames = bodyArt.frameCount ?? bodyArt.frames.length + (bodyArt.shadows?.length ?? 0);
+    const shownBody = delivering ? Math.min(body, Math.trunc(sourceFrames / 2)) : body;
     const shadow = bodyArt.shadows?.[shownBody];
     if (shadow)
       this.queue(
@@ -1699,7 +1739,8 @@ export class LiveView {
         this.spritePool.take(anchor, shadow, this.buildingPalette(bodyArt, visual.paletteKey), 0, true, true),
         !bodyArt.remap,
       );
-    const bodyFrame = bodyArt.frames[shownBody];
+    const bodyFrame =
+      bodyArt.frames[shownBody] ?? (delivering ? bodyArt.shadows?.[shownBody - bodyArt.frames.length] : undefined);
     const push = bodyFrame ? cardPush(bodyFrame) : 0.03;
     const nativeDepth = bodyFrame
       ? buildingDepthProfile(
@@ -1720,7 +1761,9 @@ export class LiveView {
         false,
       );
       card.nativeDepth = nativeDepth;
-      this.queue(batch, card, !bodyArt.remap);
+      // HD atlases intentionally clear shadow rectangles. An inclusive-cap source shadow used as a body
+      // must sample its original indexed pixels instead of that empty HD rectangle.
+      this.queue(batch, card, !bodyArt.remap || shownBody >= bodyArt.frames.length);
     }
 
     if (delivering) {
@@ -1945,7 +1988,8 @@ export class LiveView {
    * attachment empty, so they are matched by position: an anim belongs to the building whose foundation holds it.
    */
   private nativeBuildingAnims(object: LiveObject, type: LibraryType): LiveAnim[] | null {
-    const index = this.buildingAnims;
+    const last = this.buildingVisualHistory?.retained.get(object.uid);
+    const index = last ? indexBuildingAnims(last.snapshot.effects?.anims) : this.buildingAnims;
     if (!index) return null;
     const cached = this.buildingAnimMatches.get(object.uid);
     if (cached) return cached;
@@ -2047,6 +2091,7 @@ export class LiveView {
     }
     const light = objectLight('infantry');
     const card = this.spritePool.take(anchor, spriteFrame, palette, cardPush(spriteFrame), false, undefined, light);
+    card.opacity = object.translucent;
     if (this.groundCard(object))
       card.nativeDepth = { mode: 'card', bottom: spriteFrame.offset[1] + spriteFrame.rect[3] - 1, bonus: 12 };
     this.queue(batch, card);
@@ -2097,6 +2142,7 @@ export class LiveView {
     const light = objectLight(object.kind);
     if (spriteFrame.rect[2] > 0) {
       const card = this.spritePool.take(anchor, spriteFrame, palette, cardPush(spriteFrame), false, undefined, light);
+      card.opacity = object.translucent;
       if (this.groundCard(object))
         card.nativeDepth = {
           mode: 'card',

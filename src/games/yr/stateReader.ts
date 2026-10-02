@@ -1,6 +1,6 @@
 import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { YR_STARTUP_PAGE_HASH } from './startupPage';
-import { readYrBuildingDockState, readYrBuildingRenderState } from './buildingRenderState';
+import { readYrBuildingDockState, readYrBuildingRenderState, YR_BUILDING_RENDER_OFFSETS } from './buildingRenderState';
 import { readYrInfantryRenderState } from './infantryRenderState';
 
 /**
@@ -68,6 +68,11 @@ export const YR_STATE_OFFSETS = Object.freeze({
   location: 0x9c,
   /** TechnoClass::Owner (HouseClass*). */
   owner: 0x21c,
+  /** Techno chrono flags: shared body helper 0x706694..0x706700 selects BlitTransLucent50. */
+  beingWarpedOut: 0x270,
+  warpingOut: 0x271,
+  /** Unit render wrapper 0x73B0B4 tests this before resolving its first radio link. */
+  tethered: 0x418,
   /** TechnoClass::PrimaryFacing (FacingClass, the body). */
   primaryFacing: 0x388,
   /** TechnoClass::SecondaryFacing (FacingClass, the turret). */
@@ -227,6 +232,10 @@ export interface YrObjectState {
    * `type` stays the rules type for selection, health and ownership.
    */
   imageType?: string;
+  /** Native whole-object draw gate; suppresses body, shadow and attached presentation. */
+  nativeHidden?: boolean;
+  /** Body opacity while native chrono blending is active; shadows retain their ordinary opacity. */
+  translucent?: number;
   /** Owning house index in `houses`, or -1 when the owner pointer is not a known house. */
   owner: number;
   /**
@@ -425,6 +434,54 @@ function readContactRoof(memory: GuestMemoryAccessor, contact: number | null | u
     const balloon = memory.u8(type + o.typeBalloonHover);
     if (![jumpJet, balloon].every((flag) => flag === 0 || flag === 1)) return undefined;
     return jumpJet === 1 || balloon === 1;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Unit render wrapper 0x73B0B0..0x73B139 returns before Object::Render for every canonical door state. */
+export function readYrUnitNativeHidden(
+  memory: GuestMemoryAccessor,
+  pointer: number,
+  contact: number | null | undefined,
+): boolean {
+  if (contact == null) return false;
+  const o = YR_STATE_OFFSETS;
+  const b = YR_BUILDING_RENDER_OFFSETS;
+  try {
+    // Native eligibility depends on a valid building link, independently of the building's publication or
+    // limbo state. Validate its class/type spans here without invoking guest kind/mission/door virtuals.
+    if (
+      !isPlausiblePointer(memory, pointer, o.tethered + 1) ||
+      memory.u8(pointer + o.tethered) === 0 ||
+      !isPlausiblePointer(memory, contact, o.buildingType + 4) ||
+      memory.u32(contact) !== YR_STATE_VTABLES.building
+    )
+      return false;
+    const type = memory.u32(contact + o.buildingType);
+    if (
+      !isPlausiblePointer(memory, type, o.typeTurret + 1) ||
+      memory.u32(type) !== YR_STATE_VTABLES.buildingType ||
+      !readAsciiZ(memory, type + o.typeId, 0x18)
+    )
+      return false;
+    const moving = memory.u8(contact + b.doorMoving);
+    const targetOpen = memory.u8(contact + b.doorTargetOpen);
+    if (![moving, targetOpen].every((flag) => flag === 0 || flag === 1)) return false;
+    const current = memory.i32(contact + b.currentMission);
+    const queued = memory.i32(contact + b.queuedMission);
+    return (current === -1 ? queued : current) === 16 || queued === 16;
+  } catch {
+    return false;
+  }
+}
+
+/** Chrono is a body blend, independent of the whole-object tether gate and of shadow eligibility. */
+function readChronoTranslucency(memory: GuestMemoryAccessor, pointer: number): number | undefined {
+  const o = YR_STATE_OFFSETS;
+  try {
+    if (!isPlausiblePointer(memory, pointer, o.warpingOut + 1)) return undefined;
+    return memory.u8(pointer + o.beingWarpedOut) !== 0 || memory.u8(pointer + o.warpingOut) !== 0 ? 0.5 : undefined;
   } catch {
     return undefined;
   }
@@ -715,6 +772,11 @@ function readYrStateSnapshot(
     const contact = readRadioContact(memory, object.id);
     const linked = contact == null ? undefined : byPointer.get(contact);
     if (linked) object.contactUid = linked.uid;
+    if (object.kind !== 'building') {
+      const translucent = readChronoTranslucency(memory, object.id);
+      if (translucent !== undefined) object.translucent = translucent;
+      if (object.kind === 'vehicle' && readYrUnitNativeHidden(memory, object.id, contact)) object.nativeHidden = true;
+    }
     if (object.kind === 'building') {
       const roof = readContactRoof(memory, contact);
       // Validate effective Unload independently of an unreadable roof; the temporary choice is never published.

@@ -11,7 +11,7 @@ import type {
   GameRenderStateReader,
 } from '../renderState';
 import { createByteViewAccessor, type GuestMemoryAccessor } from '../shared/memoryAccessor';
-import { YR_BUILDING_RULES } from './buildingRenderState';
+import { YR_BUILDING_RENDER_OFFSETS, YR_BUILDING_RULES } from './buildingRenderState';
 import {
   readYrBuildingActiveAnim,
   readYrNativeDetail,
@@ -38,6 +38,7 @@ import {
   createYrStateReader,
   isPlausiblePointer,
   readPointerVector,
+  readYrUnitNativeHidden,
   type YrObjectState,
   type YrState,
 } from './stateReader';
@@ -270,8 +271,19 @@ function readChangeKey(m: GuestMemoryAccessor, nativeDetail: YrNativeDetail | nu
       span(pointer, 0x10, 0x14); // UniqueID, including pointer reuse.
       span(pointer, 0x6c, 0xa8); // Health, limbo/selection, location.
       span(pointer, 0xac, 0xb8); // Current/queued mission, including sale reversal.
+      span(pointer, o.radioItems, o.radioCapacity + 4);
+      const radioCapacity = m.i32(pointer + o.radioCapacity);
+      if (!Number.isInteger(radioCapacity) || radioCapacity < 0 || radioCapacity > 64) return null;
+      let radioContact: number | null = null;
+      if (radioCapacity > 0) {
+        const radioItems = m.u32(pointer + o.radioItems);
+        if (!isPlausiblePointer(m, radioItems, radioCapacity * 4)) return null;
+        radioContact = m.u32(radioItems);
+        word(radioContact); // Contact release can change delivery/visibility within the same logic frame.
+      }
       span(pointer, 0xf8, 0xfc); // Techno animation stage.
       span(pointer, 0x21c, 0x220); // Owner.
+      span(pointer, o.beingWarpedOut, o.warpingOut + 3); // Chrono body blend, independent of shadow visibility.
       span(pointer, 0x2b4, 0x2b8); // Target used by the infantry draw-facing branch.
       span(pointer, 0x388, 0x3b8); // Both facing interpolators.
       span(pointer, 0x520, 0x53c); // Building type and current/queued mode.
@@ -281,8 +293,14 @@ function readChangeKey(m: GuestMemoryAccessor, nativeDetail: YrNativeDetail | nu
       if (vtable === YR_STATE_VTABLES.unit) {
         if (!isPlausiblePointer(m, pointer, o.unitUnloading + 1)) return null;
         word(m.u8(pointer + o.unitUnloading)); // Unloading can change the draw image within the same logic frame.
+        word(m.u8(pointer + o.tethered));
+        // A valid linked building need not still be registered in the techno/class vectors.
+        word(Number(readYrUnitNativeHidden(m, pointer, radioContact)));
       }
       if (vtable === YR_STATE_VTABLES.building) {
+        const b = YR_BUILDING_RENDER_OFFSETS;
+        word(m.u8(pointer + b.doorMoving));
+        word(m.u8(pointer + b.doorTargetOpen));
         span(pointer, 0x6e8, 0x6ec); // HasBuildUp.
         const a = YR_BUILDING_ACTIVE_ANIM;
         // Include read availability: scalar fallbacks alone could cache unknown across a recovered null-slot read.
@@ -402,6 +420,8 @@ function projectObject(
     kind,
     type,
     imageType,
+    nativeHidden,
+    translucent,
     owner,
     x,
     y,
@@ -430,6 +450,8 @@ function projectObject(
     kind,
     type,
     ...(imageType ? { imageType } : {}),
+    ...(nativeHidden !== undefined ? { nativeHidden } : {}),
+    ...(translucent !== undefined ? { translucent } : {}),
     owner,
     x,
     y,

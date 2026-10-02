@@ -187,39 +187,31 @@ foundation dimensions enter this key. The building's drawing centre and art offs
 YR 1.001 evidence: `GetYSort` at `0x5F6BD0`, building position at `0x459EF0`, building override at `0x449410`,
 layer traversal at `0x6D8DB0`; the layer vectors start at `0x8A0360` with stride `0x18`.
 
-Traversal breaks near-equal physical depth ties with a bounded camera-space bias; it never assigns a global NDC
-band. Voxel meshes retain their full depth range. Sprite fragment depth is reconstructed independently of frame
-padding: ordinary cards stand vertically above their anchor and follow the ground below it; buildings use a
-per-column front-facade ramp derived from their foundation. Shifted building animation cards share the owner's
-profile. Turrets and lamp heads clear that profile, while physical beams, rain, emitters and garnish test in the
-same depth space. Stock high-bridge overlays use a horizontal depth plane four height levels above the cell,
-so neighboring deck pieces cannot sort ahead of an on-deck unit merely because of their cell keys.
-
-Visible layer-2 units receive a geometric camera-space dock pull only from their radio contact's visible building
-(`contactUid === host.uid`) when it reports `dock === true` and no `unloading` state. The exact anchor must lie
-inside the foundation or within its one-cell outer border, and native painter order must place the unit after the
-host. There is no stationary-frame gate, so backing-in units clear low pad art immediately. YR defines docks from
-Refinery, UnitRepair or Helipad; WeaponsFactory alone does not qualify. Missing contact/dock data disables pull.
-`ra2/dockPull.ts` samples `foundationPointPush` at the exact live anchor (`x/256`, `y/256`) and four axial offsets
-one cell away, separately from the floored painter cell. Pull is the nonnegative maximum sample plus
-`DOCK_PULL_MARGIN` (0.5), capped at `DOCK_PULL_MAX` (3.5). At refinery NW (51,101), foundation [4,3], the measured unit
-anchor (13952,26240) leptons receives about 3.00949, compensating for low pad art without decoding `BUILDNGZ.SHA`.
-
-Other ground vehicles/infantry within three cells (Chebyshev) inherit enough pull to remain in front only when they
-follow a directly docked unit in painter order. Preceding units retain their depth, and propagation never cascades
-through passing units. `PainterObject.pull` feeds both sprite and voxel bias paths. Building turrets, aircraft
-above layer 2, projectiles and effects retain their existing biases.
+Traversal breaks near-equal depth ties with a bounded camera-space bias; it never assigns a global NDC band.
+With an extracted native depth template, building fragment depth uses signed `BUILDNGZ.SHA` corrections and native
+frame baselines, while attached building parts inherit the owner's template. Ground SHP units use native upright
+card gradients. Ground voxel units approximate the native projected bitmap bottom with posed bounds, retaining
+six percent of physical depth for internal face ordering. A harvester receives the native card bonus only while
+its current cell belongs to a refinery foundation. The previous contact-based dock pull and propagation are
+removed; `contactUid` and `dock` remain optional state metadata. Buildings without a template retain the analytic
+foundation fallback. Flight, shadows and bridge-deck geometry retain their existing paths. Full formulas and
+approximation bounds are in [Native Z model](research/painter-order.md#native-z-model).
 
 During effective Unload mission, completed buildings report `unloading: 'door' | 'roof'`. When both matching art
-layers exist, the deploying image/shadow replaces the body, then the healthy/damaged under-door card follows with
-its anchor, push and foundation profile. Queued Unload alone does not open the door unless CurrentMission is -1;
-radio link release during drive-out does not close it before the mission changes. Missing art pairs retain the
-normal body, and factory exits receive no dock pull. A YR reader instance latches a published roof during the same
+layers exist, the deploying image/shadow replaces the body, then the healthy/damaged under-door card follows.
+The replacement persists through radio link release and logical door closing, until effective mission 16 ends;
+native `buildingFrame` keeps the body stage and damage offset instead of restarting at Unload. Logical door
+progress does not animate this replacement SHP. The native inclusive cap uses the source `frameCount / 2`
+rounded down (foreground plus shadow array lengths when legacy metadata is absent). It can select the first
+source shadow-half frame at its boundary, rather than the last foreground frame. Queued Unload alone does not open the
+door unless CurrentMission is -1. Missing art pairs retain the normal body. A YR reader instance latches a
+published roof during the same
 continuous effective Unload and reuses it only for NULL link 0; unreadable roof state still omits `unloading`.
 It resets when the mission leaves `16`, the building disappears or its UID/type pointer changes, pruning entries
-not seen in the latest read. The renderer uses `DOOR_RECESS = 2.75` for UnderDoorAnim and `ROOF_RECESS = 4` for
-UnderRoofDoorAnim only; both are x+z units. The deeper roof plane exposes an inside unit at local `(2.5,1.5)` on
-the floor or `1.5` levels up, while an outside unit behind the same building column stays hidden.
+not seen in the latest read. This retained roof is a compatibility policy from supplied observations; the native
+DrawIt null-contact branch alone selects ground delivery. The replacement body uses native Z adjust -20 for door
+or -40 for roof delivery, and both under-door interiors use ground gradient k=1. No measured recess or rectangular
+infantry-hide workaround remains; opaque body posts and the ground interior have their own fragment depth.
 Supplied frozen native GAWEAP `5x3`, NW `(58,98)`, SHAD frames show: `9171` (mission `5`, queued `16`, link SHAD,
 Z `208`) closed; `9184/9208` (mission `16`, link SHAD, Z `208`) open with heli parts inside; `9235` (mission `16`,
 link NULL, Z `368`) still open as the heli rises. The latch fixes the released-link selection. `9278` (mission `5`,
@@ -242,9 +234,9 @@ native animation stages, health, occupancy and effect instance state: a logic fr
 Techno art is not culled by its anchor's shroud cell; the common pixel mask clips revealed roofs and vehicle edges.
 See [native presentation evidence](research/native-presentation.md) for the pinned draw paths and damage-body rule.
 
-The native building path also consumes `BUILDNGZ.SHA` and software integer Z gradients. The foundation ramp is
-an approximation, not a decoded per-art Z shape: roofs, recesses, nonrectangular foundations, custom bridges and
-individual `ZAdjust` interactions require live comparison. See [tactical occlusion research](research/painter-order.md)
+Synthetic depth and draw-eligibility regressions do not establish live WebGPU pixel parity. Template-edge clipping,
+the ground-voxel approximation, special locomotors and individual `ZAdjust` interactions still require live
+comparison. See [tactical occlusion research](research/painter-order.md)
 for verified read/write blitters, addresses, formulas and the precise limitations. CPU regressions do not establish
 WebGPU execution or same-moment original-art parity.
 
@@ -423,6 +415,31 @@ selection, ownership and events. YR 1.001 UnitClass draw saves Type at `0x73D29C
 `0x73D2C4` and restores it at `0x73D3A2`. The reader validates the alternate UnitTypeClass pointer/vtable/id, so
 unloading HARV/CMIN draw HORV/CMON; absent or invalid fields and missing alternate art retain `type`. A rare poll
 inside the swap window can already see the unloading type for one snapshot. SCHP deployment is a separate policy.
+
+Optional `nativeHidden` suppresses a complete object visual, including its shadows and HD extras. YR emits true
+for the proven UnitClass gate: nonzero tether byte, a validated building in radio link 0, effective or queued
+Unload 16, and canonical door booleans. It covers opening, closing, open and closed; it is independent of the
+factory's own effective-mission-only delivery image rule. Invalid or inactive observations omit the flag. The
+bridge preserves the object's simulation/selection state; selection brackets and health bars are native overlay
+pixels, and LiveView creates no selection geometry.
+Owner-attached anims, particle systems and fire events follow this gate when both UID and pointer match;
+independent explosions and projectiles keep their native publication lifetime. Same-frame unhide restores the
+attached presentation without restarting the snapshot's interpolation timestamp.
+
+Optional `translucent` is body opacity: YR emits 0.5 while BeingWarpedOut or WarpingOut is nonzero. SHP and voxel
+body parts use 50% opacity and do not write depth while shadows retain their normal opacity. The chrono bytes
+alone never set `nativeHidden`. Both fields pass through unchanged when defined, participate in same-frame
+reader revisions, and restore ordinary rendering when omitted. Neither rule proves a CMIN-specific invisibility
+window. Static predicates and their limits are in
+[Native draw eligibility](research/painter-order.md#native-draw-eligibility-and-body-translucency).
+
+When a building last reported with health <= 0 disappears, LiveView retains its frozen last visual only for the
+first missing snapshot's logic frame, provided the last observation is no more than one tick old. It expires as
+soon as that frame advances. Selling, pointer/UID replacement, larger frame gaps and rollback do not retain it;
+same-frame polls do not extend it. This is a bounded presentation heuristic: native prelogic rendering can leave
+a previous picture on screen, but another native render can occur after the frame
+increment. Exact last-picture parity is `UNCERTAIN`, with live acceptance `UNVERIFIED`; see
+[Last destroyed-building visual](research/painter-order.md#last-destroyed-building-visual).
 
 ## Known limits
 
