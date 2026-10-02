@@ -10,6 +10,8 @@ import {
   type Weather,
 } from '../contract';
 import { HdRenderer } from '../HdRenderer';
+import type { SceneLighting } from '../sceneLighting';
+import { interpolateSceneLighting, stormStrikeLight } from './sceneLighting';
 import type { LibraryAnimLayer, LibraryType } from '../../../ra2-assets/src/library';
 import { NORMALIZED_RATE_FACTOR, animRateFrames } from '../../../ra2-assets/src/effects';
 import type { SourceLight } from '../ra2/mapLights';
@@ -167,6 +169,8 @@ export interface LiveCells {
 export interface LiveSnapshot {
   /** Logic frame counter. */
   frame: number;
+  /** Current engine scene illumination; absent/null preserves the map's authored lighting. */
+  lighting?: SceneLighting | null;
   /** Engine screen pixel of the tactical view's top-left corner. */
   view: { x: number; y: number } | null;
   houses: LiveHouse[];
@@ -632,9 +636,12 @@ export class LiveView {
           hd.terrainDepth,
         )
       : null;
-    if (this.effectSprites) this.root.add(this.effectSprites.root);
+    if (this.effectSprites) {
+      this.root.add(this.effectSprites.root);
+      hd.topScene.add(this.effectSprites.topRoot);
+    }
     this.volumetricBlasts = new VolumetricBlastLayer({
-      light: this.effectSprites?.light ?? world.sprites?.light ?? uniform(new Color(1, 1, 1)),
+      light: uniform(new Color(1, 1, 1)),
       sunDirection: spriteLookFor(hd.nodes).sunDirection,
       displayScale: this.effectSprites?.displayScale,
     });
@@ -650,6 +657,16 @@ export class LiveView {
     this.effectDriver.style = options.effects ?? 'faithful';
     this.effectDriver.hdEnabled = options.effectsHd !== false;
     this.effectDriver.volumetric = options.volumetricEffects ?? 'off';
+    const lightingHeight = medianHeight(cache.height, cache.exists);
+    this.effectDriver.onStormStrike = (at, now) => {
+      const lighting = this.current?.snapshot.lighting;
+      if (lighting?.event !== 'storm') return;
+      const strike = stormStrikeLight(lighting, lightingHeight, hd.nodes.referenceLevel.value);
+      hd.lightField.pulse(now, at, strike.colour, strike.radius, strike.peak, 0.47, 0, 'flash', {
+        hold: 0.12,
+        fade: 0.35,
+      });
+    };
     this.liveBeams = new LiveBeams(hd.effects.cameraRight, hd.effects.cameraUp, hd.effects.now);
     this.root.add(this.liveBeams.mesh);
     this.effectDriver.hasHdArt = (type) => !!this.effectArt?.hdAnim(type);
@@ -692,6 +709,10 @@ export class LiveView {
     hd.terrainDepth.register(this.cellLayer.mesh);
     if (this.effectSprites) this.shareSpriteUniforms(this.effectSprites);
     this.shareSpriteUniforms(this.volumetricBlasts);
+    // Effect art and procedural smoke retain the authored illumination while the scene follows palette events.
+    if (this.effectSprites) this.effectSprites.light.value = hd.effectLight;
+    this.volumetricBlasts.light.value = hd.effectLight;
+    hd.effects.sceneLight.value = hd.effectLight;
     for (const object of cache.manifest.objects)
       if (object.kind === 'overlay' || object.kind === 'smudge') this.cellList(object.x, object.y).push(object);
     const cellTerrain = {
@@ -853,6 +874,8 @@ export class LiveView {
     // A damaged vehicle's smoke system sits on the vehicle (see smokeUnlimited).
     const vehicles = snapshot.objects.filter((o) => o.kind === 'vehicle');
     this.effectDriver.vehicleAt = (x, y, z) => smokeOnVehicle(vehicles, x, y, z);
+    this.effectDriver.sceneEvent = snapshot.lighting?.event ?? null;
+    this.hd.setSceneLighting(snapshot.lighting ?? null);
     if (snapshot.effects || hadEffects)
       this.effectDriver.push(
         snapshot.effects ?? { anims: [], bullets: [], particleSystems: [] },
@@ -1020,6 +1043,10 @@ export class LiveView {
       const interval = previous ? Math.min(250, Math.max(10, current.at - previous.at)) : 1;
       // Draw one logic frame behind, blending towards the newest snapshot: smooth motion at any display rate.
       const alpha = previous ? Math.min(1, Math.max(0, (now - current.at) / interval)) : 1;
+      this.hd.setSceneLighting(
+        interpolateSceneLighting(previous?.snapshot, current.snapshot, alpha),
+        this.effectDriver.skyFlash(this.hd.seconds()),
+      );
       this.applyCamera(previous?.snapshot.view ?? null, current.snapshot.view, alpha);
       const libraryRevision = this.library?.revision ?? 0;
       const artRevision = this.effectArt?.revision ?? 0;
@@ -1065,6 +1092,7 @@ export class LiveView {
     if (this.painterDirty) this.applyPainterOrder();
     this.updateBuildingLights(current?.snapshot);
     this.effectDriver.frame(this.hd.seconds(), this.wind);
+    if (!current) this.hd.setSceneLighting(null);
     this.liveBeams.displayScale.value = 1 / Math.max(1e-3, this.hd.meanExposure);
     if (this.effectSprites) {
       this.effectSprites.now.value = this.hd.seconds();
@@ -1225,6 +1253,8 @@ export class LiveView {
     for (const { layer } of this.pageLayers.values()) this.disposeOverlayLayer(layer);
     this.pageLayers.clear();
     this.volumetricBlasts.dispose();
+    this.effectSprites?.setInstances([], Infinity);
+    this.effectSprites?.topRoot.removeFromParent();
     this.library?.disposeMaterials();
     this.hd.dispose();
     this.visuals.clear();
@@ -1455,6 +1485,7 @@ export class LiveView {
     if (this.effectsDirty) {
       this.effectsDirty = false;
       this.effectSprites?.setInstances(this.effectInstances, this.hd.seconds());
+      this.hd.setTopEffectsVisible(this.effectSprites?.topVisible ?? false);
     }
     this.flushSprites(this.spriteBatch);
   }

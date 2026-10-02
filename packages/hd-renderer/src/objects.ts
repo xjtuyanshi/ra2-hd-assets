@@ -10,6 +10,8 @@ import {
 } from 'three/webgpu';
 import { mx_noise_float, positionLocal, uniform } from 'three/tsl';
 import { HOUSE_COLORS, type RenderObject } from './contract';
+import { DEFAULT_ATMOSPHERE_NODES } from './atmosphere';
+import { SceneLitMaterial } from './lighting';
 import { LEVEL_HEIGHT, cellToWorld } from './world';
 
 /**
@@ -29,8 +31,13 @@ export class ObjectLayer {
   private readonly leaves = matte(0x2f5a1f);
   private readonly windows: MeshStandardNodeMaterial;
 
-  constructor() {
-    this.windows = new MeshStandardNodeMaterial({ color: 0x1b2430, roughness: 0.2, metalness: 0.1 });
+  constructor(private readonly atmosphereNodes = DEFAULT_ATMOSPHERE_NODES) {
+    for (const material of [this.dark, this.steel, this.concrete])
+      material.sceneMultiplier = atmosphereNodes.sceneObjectMul;
+    for (const material of [this.bark, this.leaves]) material.sceneMultiplier = atmosphereNodes.sceneTerrainMul;
+    const windows = new SceneLitMaterial({ color: 0x1b2430, roughness: 0.2, metalness: 0.1 });
+    windows.sceneMultiplier = atmosphereNodes.sceneObjectMul;
+    this.windows = windows;
     // Warm window light that flickers slightly per pane at night.
     const flicker = mx_noise_float(positionLocal.mul(4)).mul(0.25).add(0.75);
     this.windows.emissiveNode = uniform(new Color(1.0, 0.72, 0.35))
@@ -66,7 +73,9 @@ export class ObjectLayer {
   private house(house: number): MeshStandardNodeMaterial {
     let material = this.houseMaterials.get(house);
     if (!material) {
-      material = metal(house < 0 ? 0x8a8a80 : HOUSE_COLORS[house % HOUSE_COLORS.length]!, 0.45, 0.4);
+      const created = metal(house < 0 ? 0x8a8a80 : HOUSE_COLORS[house % HOUSE_COLORS.length]!, 0.45, 0.4);
+      created.sceneMultiplier = this.atmosphereNodes.sceneObjectMul;
+      material = created;
       this.houseMaterials.set(house, material);
     }
     return material;
@@ -135,10 +144,10 @@ export class ObjectLayer {
   }
 }
 
-function metal(hex: number, metalness: number, roughness: number): MeshStandardNodeMaterial {
-  return new MeshStandardNodeMaterial({ color: hex, metalness, roughness });
+function metal(hex: number, metalness: number, roughness: number): SceneLitMaterial {
+  return new SceneLitMaterial({ color: hex, metalness, roughness });
 }
 
-function matte(hex: number): MeshStandardNodeMaterial {
-  return new MeshStandardNodeMaterial({ color: hex, metalness: 0, roughness: 0.9 });
+function matte(hex: number): SceneLitMaterial {
+  return new SceneLitMaterial({ color: hex, metalness: 0, roughness: 0.9 });
 }

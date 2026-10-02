@@ -634,7 +634,8 @@ describe('Air material and explosion-garnish construction', () => {
             for (const draw of ['card', 'flat', 'shadow'] as const) {
               const card = { ...blast(crops[0], hd), pass, draw, category };
               layer.setInstances([card], 0);
-              const mesh = layer.root.children.find((child) => child.visible)! as Mesh;
+              const root = pass === 'top' ? layer.topRoot : layer.root;
+              const mesh = root.children.find((child) => child.visible)! as Mesh;
               const shader = shaders(mesh);
               expect(shader.fragment.includes('terrainDepthPullEnabled')).toBe(pass === 'air');
               if (pass === 'air') {

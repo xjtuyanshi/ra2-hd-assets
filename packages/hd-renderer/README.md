@@ -61,6 +61,37 @@ b01..b08: noon, map-driven default, dusk, night, night rain, fires, day rain, la
 regression framings), `atmobase` (the same framings without parameters older builds ignore, for before/after
 comparisons) and `atmoperf` (frame cost, see below).
 
+## Scene lighting events
+
+`LiveSnapshot.lighting` carries the engine's current ambient, selected ground/level terms, normal RGB, raw event
+RGB override and event identity. Missing or null lighting is unknown and restores identity multipliers. Replays
+consume the same field; there is no renderer-owned ambient fade. Same-event consecutive snapshots interpolate on
+the live presentation clock, while event changes use the newest snapshot immediately.
+
+`src/sceneLighting.ts` compares that state with the map's authored `MapLightGrade.lighting` (manifest fallback),
+at its median cell height without local light-source contributions. For `I = ambient + level * z - ground`, it
+uses `I_live / I_map`; `sceneTerrainMul` additionally replaces the map's normalized RGB with raw event RGB,
+while `sceneObjectMul` multiplies untinted object art by raw event RGB. These shared vec3 uniforms apply in palette
+colour space independently of the day/night map-grade weight. Tiles, whole-map terrain, water, overlays, ore,
+walls, smudges, trees and bridges use the terrain multiplier; buildings and all unit art use the object multiplier.
+Effect art, local-light emission, window/lamp/Tesla glows, bloom and UI keep their own colours. Exposure, white
+adaptation and map-tint adaptation use authored, event-free lighting. An absent or authored-normal state leaves
+both multipliers exactly `(1,1,1)` and takes the material's identity branch.
+
+A storm selects the existing overcast key after adaptation and multiplier calculation, and `sceneSunShadow = 0`
+removes hard sun shadows while retaining contact shading. Top-layer effect cards (including storm clouds) use a
+separate transparent pass after shroud/fog; ground and air effects retain their existing visibility/depth rules.
+The extra pass exists only while top art is visible. Storm bolts produce a blue-white light-field pulse at their
+ground point (4.5-cell radius, 0.12-second peak and 0.35-second decay) and a bounded 12% sky flash (0.08-second peak,
+0.25-second decay). Pulse timing follows the renderer's effect clock; a repeated snapshot does not retrigger it.
+
+The live bench accepts `&lighting=<ambient>,<r>,<g>,<b>[,<overrideR>,<overrideG>,<overrideB>]` for synthetic scenes
+and replays. Four values force ordinary lighting; seven also stage a storm. Ground and level retain the authored
+map values. Example: `?fx=WCCLOUD1,WCLBOLT1&map=XMP29U2&lighting=.87,1,.8,.68,.3,.4,.75`.
+Without this parameter each replay snapshot retains its own lighting (including null/absent reset semantics).
+Asset-free math, reader, bridge, shroud routing and shader-layout tests do not establish GPU pixel equivalence,
+storm-cloud composition, pulse strength or real-game timing; those require same-scene captures.
+
 ## Night, weather and map light sources
 
 Maps are staged from their own `[Lighting]` (`RenderMap.atmosphere`: `sidecarAtmosphere` recomputes it from the raw

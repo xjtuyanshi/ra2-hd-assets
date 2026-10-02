@@ -28,6 +28,7 @@ import {
 } from 'three/tsl';
 import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
+import { sceneLitColour } from '../lighting';
 import { LEVEL_HEIGHT } from '../world';
 import { spriteLookFor } from './spriteLook';
 
@@ -455,9 +456,14 @@ function voxelSurfaceMaterial(nodes: AtmosphereNodes, layer: SurfaceLayer): Mesh
       look.enabled.value > 0.5 && look.shadowDarkness.value !== 1
         ? Math.min(SHADOW_OPACITY * look.shadowDarkness.value, 0.9)
         : SHADOW_OPACITY;
-    return shadowCopyOpacity(target * nodes.weatherSunShare.value, mode.soft ? SHADOW_COPIES.length : 1);
+    return shadowCopyOpacity(
+      target * nodes.weatherSunShare.value * nodes.sceneSunShadow.value,
+      mode.soft ? SHADOW_COPIES.length : 1,
+    );
   });
   material.opacityNode = opacity;
+  // Black shadow/contact RGB needs no second event factor. The coloured reflection and waterline foam do.
+  if (layer !== 'shadow') material.colorNode = sceneLitColour(uniform(material.color), nodes.sceneObjectMul);
   if (layer !== 'shadow') {
     material.side = DoubleSide;
     material.forceSinglePass = true; // Analytic depth already rejects duplicate faces; avoid transparent back/front passes.

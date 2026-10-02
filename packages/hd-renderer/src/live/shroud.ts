@@ -124,7 +124,8 @@ export function shroudVisibility(field: ShaderNode): ShaderNode {
 
 /**
  * The local player's shroud and fog, applied like the engine: a darkening layer on the flat Z = 0 plane (not following
- * the terrain) that covers terrain, objects and effects alike. On an elevated map a cell's shroud therefore lands on
+ * the terrain) that covers terrain, objects and ordinary effects. Native Top animations composite above this mask,
+ * matching storm clouds observed over black shroud in YR. On an elevated map a cell's shroud therefore lands on
  * the terrain one row "behind" it on screen, exactly as in the original. The edge comes from a per-corner field (a
  * corner is lit only when all four cells around it are), filtered linearly and sharpened, which puts the black
  * boundary where the engine's edge pieces put it (see EDGE_INSET).
