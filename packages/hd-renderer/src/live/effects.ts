@@ -218,6 +218,14 @@ export interface MergeRole {
   y: number;
   z: number;
   depthBias: number;
+  /** Lead only: shared cluster extent, measured before moving a lead to its centroid, for the char footprint. */
+  foundation?: FoundationExtent;
+}
+
+interface FoundationExtent {
+  members: number;
+  x: [number, number];
+  z: [number, number];
 }
 
 interface FireballCluster {
@@ -230,6 +238,8 @@ interface FireballCluster {
   count: number;
   /** World positions of every member so far (joinRadius linkage). */
   members: Vector3[];
+  /** Original ground-plane bounds, independent of the lead's centroid and fireball display size. */
+  foundation: FoundationExtent;
 }
 
 interface TrackedAnim {
@@ -723,6 +733,19 @@ export class LiveEffectsDriver {
       const near = this.clusters.find(
         (c) => alive(c.lead) && group.some((t) => c.members.some((p) => near2(p, t.at, m.joinRadius))),
       );
+      // Retain original foundation bounds without changing the merge's positions, linkage or lead selection.
+      const foundation: FoundationExtent = near?.foundation ?? {
+        members: 0,
+        x: [Infinity, -Infinity],
+        z: [Infinity, -Infinity],
+      };
+      foundation.members += group.length;
+      for (const { at } of group) {
+        foundation.x[0] = Math.min(foundation.x[0], at.x);
+        foundation.x[1] = Math.max(foundation.x[1], at.x);
+        foundation.z[0] = Math.min(foundation.z[0], at.z);
+        foundation.z[1] = Math.max(foundation.z[1], at.z);
+      }
       if (near && (now - near.leadAt <= m.window || near.leads >= m.maxLeads)) {
         for (const t of group) {
           absorb(t);
@@ -750,6 +773,7 @@ export class LiveEffectsDriver {
         y: group.reduce((sum, t) => sum + t.anim.y, 0) / group.length,
         z: group.reduce((sum, t) => sum + t.anim.z, 0) / group.length,
         depthBias: 0,
+        foundation,
       };
       lead.merge = role;
       world(role, lead.at);
@@ -761,7 +785,7 @@ export class LiveEffectsDriver {
       if (near && near.leads < m.maxLeads) {
         Object.assign(near, { lead, leadAt: now, leads: near.leads + 1, count: group.length });
         near.members.push(...members);
-      } else this.clusters.push({ lead, t0: now, leadAt: now, leads: 1, count: group.length, members });
+      } else this.clusters.push({ lead, t0: now, leadAt: now, leads: 1, count: group.length, members, foundation });
     }
   }
 
@@ -864,11 +888,14 @@ export class LiveEffectsDriver {
       enhanced,
       hdArt:
         !!this.volumePolicy(tracked.anim.type) || (enhanced && this.hdEnabled && !!this.hasHdArt?.(tracked.anim.type)),
-      // Enhanced: the engine's crater (Scorch=yes / Crater=yes art) glows hot for a moment; the mark itself stays native.
+      // Enhanced: a brief hot crater and faint char accompany the engine's own lasting smudge.
       hotCrater: enhanced && row.scorch === 1,
     };
     // A merge lead carries its cluster: its garnish is sized for the fireball it grows to.
     const merged = tracked.merge && !tracked.merge.absorbed ? tracked.merge.size : 1;
+    const foundation = tracked.merge && !tracked.merge.absorbed ? tracked.merge.foundation : undefined;
+    if (foundation && foundation.members >= FIREBALL_MERGE.engulfMembers)
+      options.charWidth = Math.max(foundation.x[1] - foundation.x[0], foundation.z[1] - foundation.z[0]) + 1;
     if (options.hdArt && options.maxSize !== undefined) options.maxSize *= hdSize(row) * merged;
     if (row.fx === 'explosion') this.effects.explode(now, at, row.s * merged, wind, options);
     else if (row.fx === 'muzzle') this.effects.muzzleFlash(now, at, row.s, options);

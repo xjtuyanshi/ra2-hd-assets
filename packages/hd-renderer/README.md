@@ -241,9 +241,11 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   Blasts within 2.5 cells and 2.5 seconds share hard ceilings of 36 chunks, 10 billows and 3 column puffs (`BLAST_CROWD`),
   with later-blast floors of two chunks, one billow and zero column puffs while allowance remains. Craters receive a
   0.3-second flash of thin emissive cracks along a noise-broken rim plus scattered ember specks (coverage alpha 0.25,
-  `gain` 1.8, hot orange cooling to deep orange), over a charred noise decal that darkens in within 0.15 seconds and
-  fades over most of a minute; the decal has no glow of its own (its old saturated orange core lasted seconds and read
-  as a flat lava ellipse). The engine's crater smudge stays.
+  `gain` 1.8, hot orange cooling to deep orange), over one charred noise decal per death/place: blasts within 2.5 cells
+  share the mark for its 9-second lifetime. A building death's char covers its foundation (the larger member span plus
+  one cell), capped at 2.5 world units; other blasts use the art-relative width with the same cap. The decal darkens in
+  within 0.15 seconds, peaks at alpha 0.35, has no glow and disappears within 9 seconds. The engine's own crater smudge
+  stays as the lasting mark.
   Redrawn HD frames are graded in the shader: flame pixels are self-lit and re-mapped through a temperature ramp with
   a heat gamma (`HD_FX_GAMMA`), only the white-hot core gets a modest HDR gain for the bloom (`HD_FX_EMISSIVE`), the
   anim's translucency fade is softened by separate smoke and flame exponents (`HD_FX_FADE`), and consecutive frames
