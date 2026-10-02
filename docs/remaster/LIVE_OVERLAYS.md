@@ -66,6 +66,16 @@ lighting and flat flag. HD art for those frames lives on a dedicated `sprites-ru
 (`packages/ra2-assets/python/rubble_pages.py`); older libraries that still list a RUBBLE_OVERLAY sprite are ignored
 once a carrier names the overlay type.
 
+### Theatre coverage
+
+The contract is the same for all six theatre libraries; only the art differs. A library without an `overlays`
+section keeps the static map-cache fallback, so its ore never depletes and its walls never change in HD. Snow, desert,
+new-urban and lunar libraries get the section through the scratch extraction and farm installation route linked below,
+with the ore/gem page and, where the theatre has HD building pages, the wall redirection in the same transaction.
+Theatres without HD building pages (snow and lunar in current caches) keep 1x wall art. Rubble frames come from the
+per-theatre rubble page, so snow rubble keeps its snow. Verify each theatre in a live match: harvested cells must
+disappear at the same moments as in the native view, and spreading ore must appear in HD as it does natively.
+
 ## Upgrade existing caches
 
 For a shared symlink farm, follow the [scratch extraction and overlay installation route](../../packages/ra2-assets/README.md#install-overlay-art-into-a-cache-farm), then reapply ore/gem and wall redirections in that order.
