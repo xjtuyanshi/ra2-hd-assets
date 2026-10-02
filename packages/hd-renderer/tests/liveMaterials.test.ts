@@ -34,7 +34,7 @@ function presentation() {
     hasMaterialsPage: vi.fn(() => true),
     materialsPage: vi.fn(() => available.materials),
   };
-  const depth = { register: vi.fn(), setClasses: vi.fn() };
+  const depth = { register: vi.fn(), setCaptured: vi.fn() };
   const view = Object.assign(Object.create(LiveView.prototype), {
     hd: { windowsWanted: () => look.windows, materialsWanted: () => look.materials, terrainDepth: depth },
     library,
@@ -154,7 +154,7 @@ describe('live overlay page materials', () => {
     p.view.flushOverlayPages();
     const enhanced = p.view.overlayLayers.get(0)!.layer;
     expect(enhanced).not.toBe(first);
-    expect(p.depth.setClasses).toHaveBeenCalledWith(first.mesh, false, false);
+    expect(p.depth.setCaptured).toHaveBeenCalledWith(first.mesh, false);
     expect(p.depth.register).toHaveBeenLastCalledWith(enhanced.mesh);
     expect(vi.mocked(SpriteLayer).mock.calls.at(-1)![6]).toBe(p.available.materials);
     expect(enhanced.setInstances).toHaveBeenCalledTimes(1);

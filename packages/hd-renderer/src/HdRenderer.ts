@@ -56,6 +56,7 @@ import {
 import type { AtmosphereProfile, RenderEvent, RenderState } from './contract';
 import { EffectsLayer } from './effects';
 import { TerrainDepth } from './terrainDepth';
+import { FRONT_DISTANCE } from './ra2/fireEngulf';
 import { EmitterLayer, type Emitter } from './emitters';
 import { EmissiveOverlay, emissiveMrtSupported } from './emissiveOverlay';
 import { LightField, type DynamicLight } from './lightField';
@@ -536,8 +537,8 @@ export class HdRenderer {
   private readonly objects = new ObjectLayer();
   /** HD effects; live views spawn into it from the game's own effect list. */
   readonly effects: EffectsLayer;
-  /** Generic capture; game views select terrain mains and whole-object COVER/FRONT parts. */
-  readonly terrainDepth = new TerrainDepth();
+  /** Generic capture; game views select terrain mains and near whole-object parts for per-fire decisions. */
+  readonly terrainDepth = new TerrainDepth(FRONT_DISTANCE);
   /** Presentation owner may refresh per-object capture membership after this frame's poses and camera are final. */
   beforeDepthCapture?: () => void;
   /** Lamp heads and wet-ground reflections. */
@@ -1181,6 +1182,7 @@ export class HdRenderer {
   }
 
   private renderPipeline(): void {
+    this.terrainDepth.setReference(this.view.camera, this.view.target);
     this.beforeDepthCapture?.();
     this.terrainDepth.render(this.renderer, this.scene, this.view.camera);
     this.terrainDepth.renderMainPass(() => this.pipeline!.render());

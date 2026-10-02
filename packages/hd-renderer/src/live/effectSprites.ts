@@ -469,7 +469,11 @@ class PageMesh {
     // Native Layer=air covers the entire ground layer, including the card's corners beyond its sphere.
     // Per-pass selection also covers smoke/muzzle Air art; flat/shadow instances retain their original depth.
     if (this.pass === 'air' && layer.terrainDepth)
-      material.depthNode = layer.terrainDepth.node(material.depthNode, draw.equal(0).select(float(1), float(0)));
+      material.depthNode = layer.terrainDepth.node(
+        material.depthNode,
+        aAnchor.xyz,
+        draw.equal(0).select(float(1), float(0)),
+      );
     const gu: ShaderNode = positionGeometry.x.add(0.5);
     const gv: ShaderNode = float(0.5).sub(positionGeometry.y);
     material.positionNode = Fn(() => {
@@ -664,7 +668,11 @@ class HdPageMesh {
       draw.greaterThan(0.5),
     );
     if (pass === 'air' && layer.terrainDepth)
-      material.depthNode = layer.terrainDepth.node(material.depthNode, draw.equal(0).select(float(1), float(0)));
+      material.depthNode = layer.terrainDepth.node(
+        material.depthNode,
+        aAnchor.xyz,
+        draw.equal(0).select(float(1), float(0)),
+      );
     material.positionNode = Fn(() => {
       const card = aAnchor.xyz
         .add(layer.cameraRight.mul(x.div(ppu)))

@@ -11,7 +11,7 @@ import {
   type VoxelGeometry,
 } from '../ra2/voxels';
 import type { HdWorld } from '../ra2/world';
-import { DepthClass, type DepthCaptureClass } from '../terrainDepth';
+import { NOT_CAPTURED_CODE } from '../objectDepth';
 import { LEVEL_HEIGHT } from '../world';
 import { smoothVoxelOptions, type SmoothVoxelOptions } from '../ra2/voxelSmooth';
 import { buildSmoothVoxelGeometry } from '../ra2/voxelSmoothGeometry';
@@ -132,9 +132,9 @@ export class VoxelUnits {
   }
 
   /** Whole-object capture membership belongs only to original part meshes, including articulated barrels. */
-  setCaptureClass(unit: VoxelUnit, classification: DepthCaptureClass): void {
+  setCaptureCode(unit: VoxelUnit, code: number): void {
     if (unit.root instanceof VoxelRoot)
-      for (const mesh of unit.root.partMeshes) this.hd.terrainDepth.setClass(mesh, classification);
+      for (const mesh of unit.root.partMeshes) this.hd.terrainDepth.setCaptured(mesh, code !== NOT_CAPTURED_CODE, code);
   }
 
   captureRadius(unit: VoxelUnit): number {
@@ -143,7 +143,7 @@ export class VoxelUnits {
 
   /** Take a unit out of the scene (geometry stays cached for the next instance of its type). */
   dispose(unit: VoxelUnit): void {
-    this.setCaptureClass(unit, DepthClass.NONE);
+    this.setCaptureCode(unit, NOT_CAPTURED_CODE);
     for (const waiting of this.pending.values()) waiting.delete(unit);
     unit.root.removeFromParent();
   }

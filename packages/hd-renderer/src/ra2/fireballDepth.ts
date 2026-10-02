@@ -37,7 +37,7 @@ export function sphereDepthBiasNode(r: ShaderNode, radius: ShaderNode): ShaderNo
  * profiles describe the same engulfing front. Adding them would swallow buildings/units beyond either profile.
  * The existing garnish's 0.5 support also covers the card's own anchor; a sphere alone at r=0.6R reaches only 0.8R,
  * insufficient by itself at one horizontal cell of separation (1 / cos(30) = 1.1547 camera units). TerrainClass
- * and whole-object unit/building coverage now use the separate two-class terrainDepth.ts combination. This
+ * and whole-object unit/building coverage now use the separate per-fire terrainDepth.ts combination. This
  * bounded sphere is retained as the fallback for unclassified surfaces.
  * Evaluate the sphere from the upright anchor plane, then max with the original ground-following rim: adding
  * depth to that already-nearer ground intersection would count the lower rim twice and hide foreground feet.

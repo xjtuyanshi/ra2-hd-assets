@@ -1,4 +1,5 @@
-import { DepthClass, type DepthCaptureClass, type TerrainDepth } from '../terrainDepth';
+import type { TerrainDepth } from '../terrainDepth';
+import { NOT_CAPTURED_CODE } from '../objectDepth';
 import { DirtyAttribute } from '../dirtyAttribute';
 import { InstancedQuad } from '../instancedQuad';
 import {
@@ -260,7 +261,7 @@ export class SpriteLayer {
    * x: card/decal/shadow/contact/reflection (instanceCode); y: object light; z: map lighting class; w: bounded
    * traversal bias in world units for cards, ground-crystal weight for plain flat decals, or infantry shadow marker.
    * The second vec4 holds foundation width/height and draw-point offsets; width -1 selects an elevated deck.
-   * A ninth scalar holds the capture class (0 NONE, 1 COVER, 2 FRONT), read only by capture-enabled main materials.
+   * A ninth scalar holds the relative anchor code (NOT_CAPTURED_CODE excludes an instance), read only by capture-enabled main materials.
    * All three attributes share one buffer: WebGPU allows 8 vertex buffers. Non-capture layers retain stride 8.
    */
   private readonly flags: DirtyAttribute;
@@ -747,18 +748,18 @@ export class SpriteLayer {
       })();
     const mainColour = colourNode();
     if (capture) {
-      // Classes are categorical: flat interpolation prevents an exact comparison from becoming a fragment edge.
-      const classification: ShaderNode = varying(
+      // Every vertex of an instance shares the anchor code, including across its SHP component pages.
+      const code: ShaderNode = varying(
         instancedBufferAttribute(this.flags.interleaved(), 'float', 9, 8),
-        'objectDepthInstanceClass',
+        'objectDepthInstanceCode',
       ).setInterpolation('flat', 'either');
+      material.userData.objectDepthCodeNode = code;
       const kind: ShaderNode = varying(aFlat, 'objectDepthInstanceKind').setInterpolation('flat', 'either');
       material.colorNode = Fn(() => {
         // This object-group gate is recomputed for the actual capture target/camera. Main/mirror output and depth
         // use the original nodes unchanged. Ground-pass children never receive capture layers or this discard.
-        If(
-          capture.captureClass.greaterThan(0).and(classification.notEqual(capture.captureClass).or(kind.notEqual(0))),
-          () => Discard(),
+        If(capture.captureEnabled.greaterThan(0).and(code.equal(NOT_CAPTURED_CODE).or(kind.notEqual(0))), () =>
+          Discard(),
         );
         return mainColour;
       })();
@@ -849,7 +850,7 @@ export class SpriteLayer {
       for (const passMesh of this.groundPasses) (passMesh.material as MeshBasicNodeMaterial).dispose();
     });
     this.mesh.addEventListener('dispose', () => {
-      capture?.setClasses(this.mesh, false, false);
+      capture?.setCaptured(this.mesh, false);
       for (const passMesh of this.groundPasses) {
         look.groundPasses.delete(passMesh);
         passMesh.dispose();
@@ -900,6 +901,7 @@ export class SpriteLayer {
         const foundation = s.painter?.foundation;
         const dx = foundation ? s.anchor.x - s.painter!.x : 0;
         const dz = foundation ? s.anchor.z - s.painter!.z : 0;
+        if (this.capture) this.flags.setComponent(i, 8, NOT_CAPTURED_CODE);
         this.flags.setComponent(i, 4, s.deckHeight !== undefined ? -1 : (foundation?.[0] ?? 0));
         this.flags.setComponent(i, 5, s.deckHeight ?? foundation?.[1] ?? 0);
         this.flags.setComponent(i, 6, dx - dz);
@@ -914,20 +916,18 @@ export class SpriteLayer {
     this.params.flush();
     this.flags.flush();
   }
-  /** Update only the retained class scalar; ordering, positions, colours and reconstructed scene depth do not change. */
-  updateCaptureClasses(classify: (instance: SpriteInstance) => DepthCaptureClass): void {
+  /** Update only the retained anchor code; main/mirror colours and surface depth are unchanged. */
+  updateCaptureCodes(codeFor: (instance: SpriteInstance) => number): void {
     if (!this.capture) return;
-    let cover = false;
-    let front = false;
+    let captured = false;
     for (let i = 0; i < this.uploaded.length; i++) {
       const instance = this.uploaded[i]!;
-      const value = instanceCode(instance) === 0 ? classify(instance) : DepthClass.NONE;
+      const value = instanceCode(instance) === 0 ? codeFor(instance) : NOT_CAPTURED_CODE;
       this.flags.setComponent(i, 8, value);
-      cover ||= value === DepthClass.COVER;
-      front ||= value === DepthClass.FRONT;
+      captured ||= value !== NOT_CAPTURED_CODE;
     }
     this.flags.flush();
-    this.capture.setClasses(this.mesh, cover, front);
+    this.capture.setCaptured(this.mesh, captured);
   }
 }
 

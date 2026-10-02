@@ -26,9 +26,9 @@ import {
   spritePainterBias,
   type PainterObject,
 } from '../ra2/painterOrder';
-import { DepthClass } from '../terrainDepth';
+import { NOT_CAPTURED_CODE } from '../objectDepth';
 import {
-  classifyEngulf,
+  isNearEngulfFire,
   engulfAnchor,
   FIRE_FOOTPRINT_MARGIN,
   OBJECT_FOOTPRINT_MARGIN,
@@ -493,10 +493,9 @@ export class LiveView {
   private readonly engulfBounds: EffectDisplayBounds = { x: 0, y: 0, width: 0, height: 0 };
   private readonly engulfRight = new Vector3();
   private readonly engulfUp = new Vector3();
-  private readonly engulfToCamera = new Vector3();
   private engulfActive = false;
-  private readonly spriteCaptureClass = (instance: SpriteInstance) =>
-    this.visuals.get(instance.painter?.uid ?? -1)?.engulf?.classification ?? DepthClass.NONE;
+  private readonly spriteCaptureCode = (instance: SpriteInstance) =>
+    this.visuals.get(instance.painter?.uid ?? -1)?.engulf?.code ?? NOT_CAPTURED_CODE;
   private readonly classifyFireEngulf = () => this.updateFireEngulf();
   private readonly volumeInstances: VolumetricBlast[] = [];
   readonly volumetricBlasts: VolumetricBlastLayer;
@@ -1087,7 +1086,6 @@ export class LiveView {
   private updateFireEngulf(): void {
     const right = this.engulfRight.setFromMatrixColumn(this.hd.view.camera.matrixWorld, 0);
     const up = this.engulfUp.setFromMatrixColumn(this.hd.view.camera.matrixWorld, 1);
-    const toCamera = this.engulfToCamera.setFromMatrixColumn(this.hd.view.camera.matrixWorld, 2);
     const fires = this.engulfFires;
     let count = 0;
     for (const effect of this.effectInstances) {
@@ -1112,12 +1110,14 @@ export class LiveView {
       // HD display/merge growth is already in these bounds. Never use the capped fallback sphere for proximity.
       fire.radius = Math.hypot(bounds.width, bounds.height) / 2 + FIRE_FOOTPRINT_MARGIN;
     }
+    count = this.hd.effects.appendExplosionFootprints(fires, count, right, up, FIRE_FOOTPRINT_MARGIN);
+    this.hd.terrainDepth.setNeeded(count > 0);
     if (!count && !this.engulfActive) return;
     this.engulfActive = count > 0;
     for (const [uid, visual] of this.visuals) {
       const object = this.current?.byUid.get(uid);
-      const state = (visual.engulf ??= { x: 0, y: 0, z: 0, radius: 0, classification: DepthClass.NONE });
-      state.classification = DepthClass.NONE;
+      const state = (visual.engulf ??= { x: 0, y: 0, z: 0, radius: 0, code: NOT_CAPTURED_CODE });
+      state.code = NOT_CAPTURED_CODE;
       state.radius = 0;
       if (!count || !visual.root.visible || !object || visual.mode === 'placeholder') continue;
       const foundation = object.kind === 'building' ? (visual.painter?.foundation ?? UNIT_FOUNDATION) : undefined;
@@ -1136,7 +1136,7 @@ export class LiveView {
       }
     }
     // Build one generous footprint per owner across ALL SHP parts/pages, so a fire near a tall annex or barrel
-    // classifies the body too. Shadows/decals/reflections never contribute or receive an object class.
+    // captures the body too. Shadows/decals/reflections never contribute or receive an object code.
     if (count)
       for (const instances of this.spriteBatch.values())
         for (const instance of instances) {
@@ -1192,14 +1192,15 @@ export class LiveView {
                 this.voxelUnits.captureRadius(visual.buildingTurret) +
                 OBJECT_FOOTPRINT_MARGIN,
             );
-          state.classification = classifyEngulf(state, state.radius, fires, count, right, up, toCamera);
+          if (isNearEngulfFire(state, state.radius, fires, count, right, up))
+            state.code = this.hd.terrainDepth.anchorCode(state);
         }
       }
-      if (visual.mode === 'voxel') this.voxelUnits.setCaptureClass(visual, state.classification);
-      if (visual.buildingTurret) this.voxelUnits.setCaptureClass(visual.buildingTurret, state.classification);
+      if (visual.mode === 'voxel') this.voxelUnits.setCaptureCode(visual, state.code);
+      if (visual.buildingTurret) this.voxelUnits.setCaptureCode(visual.buildingTurret, state.code);
     }
-    this.sprites.updateCaptureClasses(this.spriteCaptureClass);
-    for (const { layer } of this.pageLayers.values()) layer.updateCaptureClasses(this.spriteCaptureClass);
+    this.sprites.updateCaptureCodes(this.spriteCaptureCode);
+    for (const { layer } of this.pageLayers.values()) layer.updateCaptureCodes(this.spriteCaptureCode);
   }
 
   /** Switch garnish for new effects and card art on the next snapshot (see LiveViewOptions.effects). */
@@ -2346,7 +2347,7 @@ export class LiveView {
   }
 
   private disposeOverlayLayer(layer: SpriteLayer): void {
-    this.hd.terrainDepth.setClasses(layer.mesh, false, false);
+    this.hd.terrainDepth.setCaptured(layer.mesh, false);
     this.root.remove(layer.mesh);
     layer.mesh.geometry.dispose();
     (layer.mesh.material as { dispose(): void }).dispose();

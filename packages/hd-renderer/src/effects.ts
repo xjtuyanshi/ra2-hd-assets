@@ -992,11 +992,15 @@ export class EffectsLayer {
     this.sparks = new ParticlePool(SPARKS, new PlaneGeometry(1, 1), additive(), (pool) => {
       const { age, life, size, seed, origin, velocity, alive, extra: garnish } = particleInputs(pool, this.now);
       const t = clamp(age.div(life), 0, 1);
-      if (terrainDepth)
-        pool.material.depthNode = terrainDepth.node(depth, garnish.equal(SPARK_EXPLOSION).select(float(1), float(0)));
       const flight = min(age, life);
       const gravity = vec3(0, -9.0, 0).mul(flight.mul(flight).mul(0.5));
       const position = origin.add(velocity.mul(flight)).add(gravity);
+      if (terrainDepth)
+        pool.material.depthNode = terrainDepth.node(
+          depth,
+          position,
+          garnish.equal(SPARK_EXPLOSION).select(float(1), float(0)),
+        );
       const width = size.mul(float(1).sub(t)).mul(alive);
       const enhanced = step(1.5, garnish);
       const currentVelocity = velocity.add(vec3(0, flight.mul(-9), 0));
@@ -1036,7 +1040,6 @@ export class EffectsLayer {
       const { age, life, size, seed, origin, velocity, alive, extra: mode } = particleInputs(pool, this.now);
       // Sign tags explosion embers without changing their temperature, motion or the particle buffer layout.
       const temperature = abs(mode);
-      if (terrainDepth) pool.material.depthNode = terrainDepth.node(depth, mode.lessThan(0).select(float(1), float(0)));
       const flight = clamp(age, 0, life);
       const t = flight.div(life);
       const rise = velocity.y.mul(float(1).sub(exp(flight.mul(-e.drag)))).div(e.drag);
@@ -1048,6 +1051,8 @@ export class EffectsLayer {
         .mul(e.wobble)
         .mul(smoothstep(0, e.wobbleIn, flight));
       const at = origin.add(vec3(velocity.x.mul(flight), rise, velocity.z.mul(flight))).add(wobble);
+      if (terrainDepth)
+        pool.material.depthNode = terrainDepth.node(depth, at, mode.lessThan(0).select(float(1), float(0)));
       pool.material.positionNode = billboard(at, size.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const mask = smoothstep(1, 0, length(uv().sub(0.5).mul(2)));
@@ -1225,7 +1230,11 @@ export class EffectsLayer {
         explosion.select(fireballRadiusNode(grow), float(0)),
       );
       if (terrainDepth)
-        pool.material.depthNode = terrainDepth.node(pool.material.depthNode, explosion.select(float(1), float(0)));
+        pool.material.depthNode = terrainDepth.node(
+          pool.material.depthNode,
+          centre,
+          explosion.select(float(1), float(0)),
+        );
       pool.material.positionNode = billboard(centre, grow.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
@@ -1274,7 +1283,11 @@ export class EffectsLayer {
         explosion.select(fireballRadiusNode(grow), float(0)),
       );
       if (terrainDepth)
-        pool.material.depthNode = terrainDepth.node(pool.material.depthNode, explosion.select(float(1), float(0)));
+        pool.material.depthNode = terrainDepth.node(
+          pool.material.depthNode,
+          centre,
+          explosion.select(float(1), float(0)),
+        );
       pool.material.positionNode = billboard(centre, grow.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const d = length(uv().sub(0.5).mul(2));
@@ -1321,7 +1334,7 @@ export class EffectsLayer {
         .mul(alive);
       const centre = origin.add(drift);
       pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera);
-      if (terrainDepth) pool.material.depthNode = terrainDepth.node(pool.material.depthNode);
+      if (terrainDepth) pool.material.depthNode = terrainDepth.node(pool.material.depthNode, centre);
       pool.material.positionNode = billboard(centre, grow, this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
@@ -1567,7 +1580,7 @@ export class EffectsLayer {
       const rise: ShaderNode = t.mul(size).mul(0.22);
       const centre = origin.add(vec3(0, rise, 0));
       pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera, fireballRadiusNode(grow));
-      if (terrainDepth) pool.material.depthNode = terrainDepth.node(pool.material.depthNode);
+      if (terrainDepth) pool.material.depthNode = terrainDepth.node(pool.material.depthNode, centre);
       pool.material.positionNode = billboard(centre, grow.mul(alive), this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
@@ -1619,7 +1632,7 @@ export class EffectsLayer {
         .mul(alive);
       const centre = origin.add(velocity.mul(flight));
       pool.material.depthNode = anchoredDepthNode(centre, ground, this.toCamera);
-      if (terrainDepth) pool.material.depthNode = terrainDepth.node(pool.material.depthNode);
+      if (terrainDepth) pool.material.depthNode = terrainDepth.node(pool.material.depthNode, centre);
       pool.material.positionNode = billboard(centre, grow, this.cameraRight, this.cameraUp);
       pool.material.colorNode = Fn(() => {
         const p = uv().sub(0.5).mul(2);
@@ -2230,6 +2243,98 @@ export class EffectsLayer {
     this.cameraRight.value.copy(cameraRight);
     this.cameraUp.value.copy(cameraUp);
     if (toCamera) this.toCamera.value.copy(toCamera);
+  }
+
+  /**
+   * Capture membership outlives the native card. Each active pool contributes one generous screen circle over its
+   * explosion particles, including delayed births and shader motion. This is only a near test; per-fire decisions
+   * use each particle's actual current x/z in the shader. Unrelated muzzle/continuous-fire/electric modes are excluded.
+   */
+  appendExplosionFootprints(
+    fires: { x: number; y: number; z: number; screenX: number; screenY: number; radius: number }[],
+    count: number,
+    right: Vector3,
+    up: Vector3,
+    margin: number,
+  ): number {
+    const now = this.now.value;
+    for (let kind = 0; kind < 7; kind++) {
+      const pool =
+        kind === 0
+          ? this.garnishFire
+          : kind === 1
+            ? this.blast
+            : kind === 2
+              ? this.halo
+              : kind === 3
+                ? this.billow
+                : kind === 4
+                  ? this.column
+                  : kind === 5
+                    ? this.sparks
+                    : this.airborneEmbers;
+      if (now >= pool.until) continue;
+      let x0 = Infinity,
+        y0 = Infinity,
+        x1 = -Infinity,
+        y1 = -Infinity;
+      for (let i = 0; i < pool.start.count; i++) {
+        const age = now - pool.start.getX(i),
+          life = pool.params.getY(i),
+          mode = pool.params.getW(i);
+        if (
+          age < 0 ||
+          age >= life ||
+          (kind === 0 && mode >= 0) ||
+          (kind === 2 && mode !== HALO_HD && mode !== HALO_EXPLOSION) ||
+          (kind === 5 && mode !== SPARK_EXPLOSION) ||
+          (kind === 6 && mode >= 0)
+        )
+          continue;
+        const size = pool.params.getX(i);
+        const vx = pool.velocity.getX(i),
+          vy = pool.velocity.getY(i),
+          vz = pool.velocity.getZ(i);
+        let x = pool.origin.getX(i),
+          y = pool.origin.getY(i),
+          z = pool.origin.getZ(i);
+        let motionMargin = 0;
+        if (kind === 1) y += (age / life) * size * 0.22;
+        if (kind === 3 || kind === 4) {
+          const flight = kind === 3 ? (1 - Math.exp(-age * 1.1)) / 1.1 + age * 0.12 : age;
+          x += vx * flight;
+          y += vy * flight;
+          z += vz * flight;
+        }
+        if (kind === 5) {
+          x += vx * age;
+          y += vy * age - 4.5 * age * age;
+          z += vz * age;
+          motionMargin = size * ENHANCED.sparks.stretch[1];
+        }
+        if (kind === 6) {
+          x += vx * age;
+          y += (vy * (1 - Math.exp(-age * ENHANCED.embers.drag))) / ENHANCED.embers.drag;
+          z += vz * age;
+          motionMargin = Math.SQRT2 * ENHANCED.embers.wobble;
+        }
+        const sx = x * right.x + y * right.y + z * right.z;
+        const sy = x * up.x + y * up.y + z * up.z;
+        // 3*size bounds even the growing column's full diagonal (2.45*size / sqrt(2)).
+        const radius = 3 * size + motionMargin + margin;
+        x0 = Math.min(x0, sx - radius);
+        x1 = Math.max(x1, sx + radius);
+        y0 = Math.min(y0, sy - radius);
+        y1 = Math.max(y1, sy + radius);
+      }
+      if (x0 === Infinity) continue;
+      const fire = (fires[count] ??= { x: 0, y: 0, z: 0, screenX: 0, screenY: 0, radius: 0 });
+      count++;
+      fire.screenX = (x0 + x1) / 2;
+      fire.screenY = (y0 + y1) / 2;
+      fire.radius = Math.hypot(x1 - x0, y1 - y0) / 2;
+    }
+    return count;
   }
 
   /** Active effect lights per pool and the strongest explosion light (console checks and tests). */

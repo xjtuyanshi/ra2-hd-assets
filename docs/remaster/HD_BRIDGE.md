@@ -88,48 +88,69 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    smoke lit by the sun and the fire below, heat shimmer, a dust ring and, for anims that leave a crater, the crater
    glowing hot for about two seconds. The native frames, their timing and size, and the persistent crater (the engine's
    own smudge) stay as they are.
-   Native `Layer=air` draws over the ground layer. Trees/bushes, terrain objects and overlays remain under
-   fire; units and buildings now use whole-object COVER/FRONT classification (`src/ra2/fireEngulf.ts`), so fire cannot
-   slice a voxel hull/turret/barrel. LiveView classifies immediately before capture, after current poses, effect cards
-   and camera are final. Fires are active non-flat Air explosion/collapse native/HD cards, including merged leads.
-   Proximity uses their displayed current/same-page-next union centre and half-diagonal plus 0.75 world units,
-   including HD display scale/merge growth without the sphere radius cap. Object bounds include SHP component corners
-   across pages, voxel bounding spheres/centres/turret offsets, and building foundation/height/turret extent, plus 0.75.
-   Over-inclusion only matters where actual fire pixels overlap actual object pixels. Units/infantry/parked aircraft
-   use their ground draw point (voxel root or SHP anchor, with height/bridge placement); buildings use foundation centre
-   at ground height (NW plus half dimensions, missing foundation 1x1). Flying aircraft retain their own layer and are
-   excluded (flight layer or height > ground + 0.01). Less than `FRONT_DISTANCE = 1.5` horizontal cells towards camera
-   from any near fire means COVER; at least 1.5 ahead of every near fire means FRONT; otherwise NONE. COVER wins across
-   fires, and all components share the owner class (1e-9-cell numeric threshold tolerance).
-   The sphere `sqrt(max(0,R*R-r*r))`, `R=min(1.16,displayed max dimension/2)`, factor 1, 0.5 anchor support, 0.04 Air
-   bias and legacy merge `depthBias` max-combination stay unchanged as fallback for unclassified surfaces such as ground.
-   `mode + R/4` packing remains native six/HD eight vertex buffers.
-   `HdRenderer.terrainDepth` (`src/terrainDepth.ts`, public round-one name retained) owns two drawing-buffer-size,
-   no-MSAA RGBA8 + depth32float targets: COVER on layer 31 (`target`/`camera`) contains tree mains, cell/library overlay
-   mains and COVER objects; FRONT on layer 30 (`frontTarget`/`frontCamera`) contains FRONT objects only. Both clear to
-   far; empty FRONT skips projection/draws. Voxel layers apply only to explicit body/turret/barrel `partMeshes`, with
-   prior masks restored on class change/removal; shadow/reflection/foam twins are excluded. Sprite mains store one
-   class scalar (0 NONE, 1 COVER, 2 FRONT) at flags offset 8, stride 9 floats in the existing interleaved buffer (non-capture layers retain stride 8). Class/kind varyings use flat interpolation for exact categorical comparisons. The
-   object uniform `objectDepthCaptureClass` discards mismatched/non-upright instances only during capture, defaults
-   zero elsewhere, and never admits under/over children. Main/mirror colour output and depth use the original nodes;
-   sprite main layouts stay six buffers/nine attributes, ground passes six/eight. Non-live mixed world sprites do not
-   register. Cameras/materials/alpha discard/painter depth and state restoration follow round one.
-   The same non-flat Air cards (including native translucent/other Air art) and explosion core/blast/halos/billows/
-   columns/sparks/embers now load COVER c and FRONT f at the actual pixel, main pass only: if `c<f && c<1`, use
-   `min(base,c-eps)`; else if `f<1`, use `max(base,f+eps)`; else keep base. `objectDepthCombine` is the pure TypeScript
-   twin. `eps=0.001/(far-near)` is 2.500625e-6 at 0.1..400. Visible scene depth equals the front-most classified surface,
-   so every COVER pixel passes and every FRONT pixel fails independently of the sphere/object intersection. Normal
-   occlusion remains (nearer class wins, FRONT on ties). Shared garnish mode tags stay unchanged. Ground/Top/flat/shadow,
-   ground garnish, beams/projectiles, muzzle/continuous-fire garnish and `volumetricBlasts.ts` keep their depth policies.
-   Object-group gates check actual target/camera after nested reflector rendering: main/mirror/capture cannot leak
-   into one another. WebGL2 omits capture/combination samplers. HdRenderer owns resize/disposal and benchmark capture.
-   Cost: existing terrain pass plus a few COVER objects, one FRONT pass only when FRONT objects exist (otherwise a
-   clear), two depth loads per eligible fragment and 16 bytes/pixel target storage (8 more than round one). Per-instance
-   class costs one extra float in capture-enabled layers; other layers retain stride 8. No extra buffer is added. CPU scratch records are reused; unchanged no-fire frames skip object
-   classification/uploads and add no object capture draws. CPU work collects footprints and compares objects with
-   active fires. `fireEngulf.test.ts`, `fireballTerrain.test.ts`, `fireballEngulf.test.ts` and `vertexBuffers.test.ts`
-   cover anchor/3D-volume policy, capture lifecycle/gates and actual r186 WGSL layouts. GPU execution, five-blast XMP29U2
-   pixel review and same-scene performance remain UNVERIFIED by these CPU tests.
+   Native `Layer=air` draws over the ground layer. The final P-L5H-3b policy is per **(fire, object)**:
+   `front=objectCode-fireCode`; less than **FRONT_DISTANCE=1.5 horizontal cells** covers the complete owner;
+   at least 1.5 keeps it completely in front. Rhino 5009 is 1.83848 cells ahead of EXPLOLRG but 0.84853
+   behind TWLT050, so these two fires receive opposite decisions in the same frame. Trees/bushes and overlay
+   mains always cover via code **-1024**. The CPU near test only chooses capture membership: retain uncapped
+   native/HD crop unions and merge growth, 0.75-cell fire/object margins, SHP owner parts across pages, voxel
+   spheres/turret offsets and building foundation/turret extents. Alive explosion garnish contributes up to seven
+   conservative pool circles, including shader motion, so capture survives the end of a native card. Delayed/unborn,
+   expired and muzzle/electric/continuous-fire particles do not activate it. Units/infantry/parked aircraft use
+   their ground draw anchor with height/bridge placement; buildings use foundation centre at body ground height
+   (missing foundation 1x1). Flying aircraft remain excluded (flight layer or height > ground + 0.01).
+   `HdRenderer.terrainDepth` owns **one** drawing-buffer-size layer-31 capture, **RG16F + depth32float**, followed
+   by one fullscreen reduction with **two RGBA16F MRT attachments without depth**. Capture uses the original materials/depth/alpha discard;
+   voxel layers touch only explicit body/turret/barrel part meshes and restore prior masks/userData. Shared voxel
+   materials read a code from the rendered mesh's object-group uniform. Sprite flags component 8 (stride 9;
+   non-capture stride 8) stores the instance code or **-65504** for capture-only discard. Main/capture sprite
+   layouts remain six buffers/nine attributes, ground passes six/eight; native/HD Air cards remain six/eight buffers.
+   Codes are horizontal anchor coordinates relative to this frame's `IsoCamera.target`, near view centre.
+   Cards use instance anchors; garnish uses each particle's current x/z, including drift/ballistics/wobble.
+   With `u=2^-11`, RG encode/decode plus reduction code storage error is bounded by
+   `abs(code)*((1+u)^2/(1-u)-1)+2^-20`: <0.011728 cells at |code|<=8, <0.046907 at |code|<=32.
+   Wider views increase the bound; no arbitrary-zoom precision claim is made. Capture MRT writes `R=code*a,G=a`
+   using original normal blending: over clear `(code*a*b)/(a*b)=code` (b=a). Same-anchor parts preserve the ratio;
+   different transparent owners produce weighted code mixtures requiring pixel review. A capture-only MRT
+   keeps vec4 shader output on RG16F because r186's normal RG conversion drops the source alpha. Main/mirror
+   output and all materials stay unchanged. See three.js 0.186.1 `MRTNode.setup`/`NodeMaterial.setup` and GPUWeb CTS
+   `src/webgpu/api/validation/render_pipeline/fragment_state.spec.ts` for the output/blending compatibility evidence.
+   The reduction clamps a 3x3 neighbourhood, ignoring depth>=1 or G<=0. Record A keeps the captured centre's
+   code, or the nearest captured code if the centre is absent. Record B keeps the nearest captured code differing
+   from A by more than **OBJECT_CODE_TOLERANCE=0.1**, or is invalid. Each RGBA16F attachment stores sMin/sMax
+   only over texels within tolerance of its own code, that code, and valid; invalid records are zero. Nearest ties
+   keep the first row-major texel. Codes are anchor groups, not unique IDs; a third distinct group is not retained.
+   Depths are camera-space distances relative to view-centre distance (150 cells): the 0.1..400 range becomes
+   [-149.9,250), max half-float rounding 0.0625 cells. Use **CAP=2 camera-space cells, eps=0.2 cells**:
+   For each valid record, `spread=min(sMax-sMin,CAP)`, `cover=code-fireCode<1.5`.
+   `P=min over cover records of (sMin-spread-eps)`, `Q=max over front records of (sMax+spread+eps)`;
+   absent P/Q are +infinity/-infinity. Each eligible main-pass fire fragment makes **two textureLoads** and uses
+   `min(max(base,normalized(Q)),normalized(P))`; no valid records keeps base exactly. If Q>P, the covered surface
+   is the visible front, so cover wins by applying P last. This covers a centre bush behind a FRONT tank even
+   with base behind the bush, while keeping every tank sample in front; it also covers a COVER tank over a centre
+   bush. Normalize distances by camera near/far. The 3x3 window and extra spread within each code group
+   bound neighbouring-triangle pixel-centre depth extrapolation up to min(spread,CAP), handling MSAA samples
+   that retain different triangles than the single-sample centre. eps covers three half-float errors (0.1875)
+   plus D24 rounding. Triangles absent from all nine texels or extrapolation beyond CAP are outside this local proof.
+   The sphere `sqrt(max(0,R*R-r*r))`, R=min(1.16,displayed max dimension/2), factor 1, 0.5 anchor support, 0.04 Air
+   bias and legacy merge max-combination remain the fallback. Same non-flat Air cards and explosion core/blast/
+   halo/billow/column/spark/ember garnish are eligible. Existing mode tags keep shared pools gated; Ground/Top/
+   flat/shadow, ground garnish, muzzle/electric/continuous-fire garnish, beams/projectiles and volumetric blasts
+   retain their policies. Object-group gates recompute after nested reflectors using actual target/camera.
+   WebGL2 omits the capture/reduction path. With no Air explosion/collapse card and no explosion garnish alive,
+   skip both passes and all clears; pull defaults off. HdRenderer owns resize/disposal; success/failure restores
+   target/cube face/mipmap/MRT/clear colour/alpha/depth/auto-clear/background. Pipeline rebuilds retain these targets.
+   Storage: **24 bytes/pixel**, **86,400,000 bytes (86.4 MB, 82.40 MiB)** at 2400x1500, excluding existing scene
+   attachments and driver overhead: depth32float (4) + RG16F (4) + two RGBA16F records (16), without packing or
+   precision loss. This adds **28.8 MB (27.47 MiB, +50%)** over the prior 57.6 MB estimate, or 26.4 MB over the
+   approximate 60 MB goal. Active-frame cost: one scene capture, one fullscreen reduction (9 depth + 9 code
+   loads shared by both records), two reduction loads per eligible fire fragment; one extra instance scalar, no extra vertex buffer.
+   CPU scratch records are reused; active garnish pools scan their allocated slots and owners compare near circles;
+   unchanged no-fire frames skip owner uploads. `objectDepth.ts` exports the pure encode/decode/reduction/decision/
+   precision twins. CPU tests cover per-pair Rhino, 3D hull/turret/barrel, SHP drone, trees/corners, MSAA shallow/steep
+   edges, centre-bush/FRONT and COVER tank edges, conflicting COVER tree/FRONT unit, two FRONT units, ownership
+   tolerance, blending, formats/memory, lifecycle/gates and actual WGSL/binding budgets. GPU execution, XMP29U2 4x pixels,
+   different-owner transparent edges and same-scene performance remain **UNVERIFIED**.
    See [Painter-order evidence](research/painter-order.md) for the policy and capture contract.
    Smoke particle systems (damaged and burning units and buildings, refinery chimneys) are drawn with their
    ParticleType's original SHP frames: the view runs the system's particles itself from its rules (spawn rate, cap,

@@ -73,10 +73,14 @@ interface LayoutBackend {
  * interleaved attributes by their data buffer: the four fallback matrix columns cost ONE buffer, not four.
  * This checks generated layouts/bindings, not WGSL validation or GPU execution.
  */
-function layout(mesh: Mesh, uniformLimit = MAX_UNIFORM_BYTES) {
+function layout(mesh: Mesh, uniformLimit = MAX_UNIFORM_BYTES, capture?: TerrainDepth) {
   const renderer = new WebGPURenderer({ canvas: { width: 1, height: 1 } as HTMLCanvasElement });
   renderer.hasFeature = () => false;
   renderer.hasCompatibility = () => false;
+  if (capture) {
+    renderer.setRenderTarget(capture.target);
+    renderer.setMRT(capture.captureMRT);
+  }
   const backend = renderer.backend as unknown as LayoutBackend;
   backend.capabilities.getUniformBufferLimit = () => uniformLimit;
   // Obtain the bundled builder from the backend. Importing src/NodeBuilder separately would create a second TSL
@@ -96,8 +100,8 @@ function layout(mesh: Mesh, uniformLimit = MAX_UNIFORM_BYTES) {
   return { buffers, attributes, uniformBytes, fragmentShader: builder.fragmentShader };
 }
 
-function assertLimits(mesh: Mesh, uniformLimit = MAX_UNIFORM_BYTES) {
-  const result = layout(mesh, uniformLimit);
+function assertLimits(mesh: Mesh, uniformLimit = MAX_UNIFORM_BYTES, capture?: TerrainDepth) {
+  const result = layout(mesh, uniformLimit, capture);
   expect(result.buffers.length, mesh.name).toBeGreaterThan(0);
   expect(result.buffers.length, mesh.name).toBeLessThanOrEqual(MAX_VERTEX_BUFFERS);
   expect(result.attributes.length, mesh.name).toBeLessThanOrEqual(16);
@@ -233,7 +237,7 @@ describe('r186 vertex and uniform binding budget', () => {
       'wetness',
     ] as const)
       look[key].value = 1;
-    const terrainDepth = new TerrainDepth();
+    const terrainDepth = new TerrainDepth(1.5);
     // Both palette and HD colour paths include windows, normals, glass/AO, contact shade and wet reflections.
     // Also compile the faithful variant, which has no material atlas.
     for (const variant of ['faithful', 'indexed', 'hd'] as const) {
@@ -249,17 +253,22 @@ describe('r186 vertex and uniform binding budget', () => {
         terrainDepth,
       );
       const main = assertLimits(layer.mesh);
+      const captured = assertLimits(layer.mesh, MAX_UNIFORM_BYTES, terrainDepth);
+      expect(captured.buffers.length).toBe(6);
+      expect(captured.attributes.length).toBe(9);
+      expect(captured.fragmentShader).toContain('@location( 0 ) m0 : vec4<f32>');
+      expect(captured.fragmentShader).toContain('objectDepthInstanceCode');
       const shared = new Set(main.attributes.map(attributeBuffer));
       expect(layer.groundPasses).toHaveLength(2);
       for (const mesh of [layer.mesh, ...layer.groundPasses]) {
         const result = mesh === layer.mesh ? main : assertLimits(mesh);
         expect(result.buffers.length).toBe(6);
         expect(result.attributes.length).toBe(mesh === layer.mesh ? 9 : 8);
-        expect(result.fragmentShader.includes('objectDepthCaptureClass')).toBe(mesh === layer.mesh);
+        expect(result.fragmentShader.includes('objectDepthCaptureEnabled')).toBe(mesh === layer.mesh);
         if (mesh === layer.mesh) {
-          expect(result.fragmentShader).toMatch(/@interpolate\( flat, either \) objectDepthInstanceClass/);
-          expect(result.fragmentShader).toMatch(/objectDepthCaptureClass > 0\.0/);
-          expect(result.fragmentShader).toMatch(/!= object\.objectDepthCaptureClass/);
+          expect(result.fragmentShader).toMatch(/@interpolate\( flat, either \) objectDepthInstanceCode/);
+          expect(result.fragmentShader).toMatch(/objectDepthCaptureEnabled > 0\.0/);
+          expect(result.fragmentShader).toContain('-65504.0');
         }
         const buffers = new Set(result.attributes.map(attributeBuffer));
         expect(buffers.size).toBe(shared.size);
@@ -284,7 +293,7 @@ describe('r186 vertex and uniform binding budget', () => {
     (pass) => {
       const source = cache();
       const atlas = { texture: texture(), width: 256, height: 4 };
-      const terrainDepth = new TerrainDepth();
+      const terrainDepth = new TerrainDepth(1.5);
       const layer = new EffectSpriteLayer(
         source,
         () => atlas,
@@ -352,7 +361,7 @@ describe('r186 vertex and uniform binding budget', () => {
 
   it('audits every procedural effect, beam, emitter, light-field and weather batch at allocated capacity', () => {
     const nodes = new AtmosphereNodes();
-    const terrainDepth = new TerrainDepth();
+    const terrainDepth = new TerrainDepth(1.5);
     const effects = new EffectsLayer(nodes, terrainDepth);
     const emitters = new EmitterLayer(nodes);
     const lights = new LightField(2, 2, { nodes });

@@ -1,10 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import { BoxGeometry, DataTexture, Group, Mesh, MeshBasicNodeMaterial, Vector3 } from 'three/webgpu';
-import { DepthClass, TerrainDepth, objectDepthCombine } from '../src/terrainDepth';
+import { TerrainDepth } from '../src/terrainDepth';
+import {
+  NOT_CAPTURED_CODE,
+  ALWAYS_COVER_CODE,
+  objectDepthCombine,
+  reduceObjectDepth,
+  encodeAnchorCode,
+} from '../src/objectDepth';
 import {
   FRONT_DISTANCE,
   FIRE_FOOTPRINT_MARGIN,
-  classifyEngulf,
+  isNearEngulfFire,
   engulfAnchor,
   type EngulfFire,
   type EngulfObject,
@@ -36,35 +43,40 @@ function fire(card = blast()): EngulfFire {
     radius: Math.hypot(bounds.width, bounds.height) / 2 + FIRE_FOOTPRINT_MARGIN,
   };
 }
-const classify = (point: Vector3, fires = [fire()], radius = 1) =>
-  classifyEngulf(point, radius, fires, fires.length, right, up, toCamera);
+const code = (point: { x: number; z: number }) =>
+  (point.x - anchor.x) * horizontal.x + (point.z - anchor.z) * horizontal.z;
+const isNear = (point: Vector3, fires = [fire()], radius = 1) =>
+  isNearEngulfFire(point, radius, fires, fires.length, right, up);
+const combine = (base: number, surface: number, objectCode: number, fireCode = 0) => {
+  const [r, g] = encodeAnchorCode(objectCode, 1);
+  return objectDepthCombine(
+    base,
+    reduceObjectDepth([{ depth: surface, r, g }], near, far, 150),
+    fireCode,
+    FRONT_DISTANCE,
+    near,
+    far,
+    150,
+  );
+};
 
-describe('whole-object RA2 anchor classification', () => {
-  it.each([0, 0.5, 1, 1.4, -0.5, -1, -1.4, -1.5, -2])('COVER at %s horizontal cells', (distance) => {
-    expect(classify(anchor.clone().addScaledVector(horizontal, distance))).toBe(DepthClass.COVER);
-  });
-  it.each([1.5, 2])('FRONT at %s horizontal cells, including the exact boundary', (distance) => {
-    expect(classify(anchor.clone().addScaledVector(horizontal, distance))).toBe(DepthClass.FRONT);
-  });
-  it('uses screen-plane overlap and COVER wins with multiple near fires in either order', () => {
-    expect(classify(anchor.clone().addScaledVector(right, 30))).toBe(DepthClass.NONE);
-    const frontFire = fire();
-    const coverCard = blast();
-    coverCard.anchor.addScaledVector(horizontal, 1.5);
-    const coverFire = fire(coverCard);
+describe('whole-object RA2 anchor membership', () => {
+  it('uses generous screen-plane overlap, independently of the per-fire direction decision', () => {
+    expect(isNear(anchor.clone().addScaledVector(right, 30))).toBe(false);
+    const other = blast();
+    other.anchor.addScaledVector(horizontal, 1.5);
     const object = anchor.clone().addScaledVector(horizontal, 2);
     for (const fires of [
-      [frontFire, coverFire],
-      [coverFire, frontFire],
+      [fire(), fire(other)],
+      [fire(other), fire()],
     ])
-      expect(classify(object, fires)).toBe(DepthClass.COVER);
+      expect(isNear(object, fires)).toBe(true);
   });
-  it('buildings classify by foundation centre even when the NW draw corner is COVER', () => {
+  it('uses the foundation centre for every building component', () => {
     const point = { x: 0, y: 0, z: 0 };
     engulfAnchor(anchor, [3, 3], anchor.x, anchor.z, point);
     expect(point).toEqual({ x: anchor.x + 1.5, y: anchor.y, z: anchor.z + 1.5 });
-    expect(classify(anchor)).toBe(DepthClass.COVER);
-    expect(classifyEngulf(point, 3, [fire()], 1, right, up, toCamera)).toBe(DepthClass.FRONT);
+    expect(code(point)).toBeGreaterThan(FRONT_DISTANCE);
     engulfAnchor(anchor, undefined, 100, 100, point);
     expect(point).toEqual({ x: anchor.x, y: anchor.y, z: anchor.z });
   });
@@ -78,8 +90,8 @@ describe('whole-object RA2 anchor classification', () => {
     expect(bounds.height).toBeCloseTo((4 * 140) / PIXELS_PER_CELL_EDGE);
     expect(fire(card).radius).toBeGreaterThan(effectSphereRadius(card) * 4);
     const distant = anchor.clone().addScaledVector(right, 5);
-    expect(classify(distant, [fire(card)], 0.4)).toBe(DepthClass.COVER);
-    expect(classify(distant, [fire()], 0.4)).toBe(DepthClass.NONE);
+    expect(isNear(distant, [fire(card)], 0.4)).toBe(true);
+    expect(isNear(distant, [fire()], 0.4)).toBe(false);
     card.hd!.next = { ...card.hd!.next!, page: 99 };
     effectDisplayBounds(card, bounds);
     expect(bounds.width).toBeCloseTo((4 * crops[0]!.width) / PIXELS_PER_CELL_EDGE);
@@ -109,14 +121,13 @@ function vehicleSamples(): Vector3[] {
 }
 
 describe('whole-object combination across a synthetic 3D hull/turret/barrel', () => {
-  it('proves old sphere slicing and engulfs every COVER sample, rejecting every FRONT sample', () => {
+  it('proves old sphere slicing and makes one decision across every hull/turret/barrel sample', () => {
     const card = blast();
     const bounds = displayed(card);
     let mixedPlacements = 0;
-    for (const distance of [0, 0.5, 1, 1.5, 2]) {
+    for (const distance of [0, 0.5, 1, 1.4, 1.5, 2]) {
       const at = anchor.clone().addScaledVector(horizontal, distance);
-      const classification = classify(at);
-      expect(classification).toBe(distance < FRONT_DISTANCE ? DepthClass.COVER : DepthClass.FRONT);
+      expect(isNear(at)).toBe(true);
       let basePass = 0;
       let baseFail = 0;
       let coveredSamples = 0;
@@ -132,10 +143,8 @@ describe('whole-object combination across a synthetic 3D hull/turret/barrel', ()
         const base = normalized(fireDepth(card, sx, sy));
         if (base < object) basePass++;
         else baseFail++;
-        const cover = classification === DepthClass.COVER ? object : 1;
-        const front = classification === DepthClass.FRONT ? object : 1;
-        const combined = objectDepthCombine(base, cover, front, near, far);
-        expect(combined < object, `d=${distance} surface=${local.toArray()}`).toBe(classification === DepthClass.COVER);
+        const combined = combine(base, object, code(at));
+        expect(combined < object, `d=${distance} surface=${local.toArray()}`).toBe(distance < FRONT_DISTANCE);
       }
       // At 2 cells only the lower card rim overlaps the vehicle; still require a nontrivial surface grid.
       expect(coveredSamples).toBeGreaterThan(100);
@@ -146,7 +155,7 @@ describe('whole-object combination across a synthetic 3D hull/turret/barrel', ()
   it('keeps every pixel of the SHP terror drone 1.5 cells south in front, even at the card corners', () => {
     const card = blast();
     const at = anchor.clone().addScaledVector(horizontal, FRONT_DISTANCE);
-    expect(classify(at)).toBe(DepthClass.FRONT);
+    expect(code(at)).toBeCloseTo(FRONT_DISTANCE);
     let samples = 0;
     for (let x = -12; x <= 12; x++)
       for (let y = -20; y <= 4; y++) {
@@ -157,16 +166,27 @@ describe('whole-object combination across a synthetic 3D hull/turret/barrel', ()
         const offset = pixel.clone().sub(anchor);
         const object = normalized(at.dot(toCamera) + cardDepthPush(x, y));
         const base = normalized(fireDepth(card, offset.dot(right), offset.dot(up)));
-        expect(objectDepthCombine(base, 1, object, near, far)).toBeGreaterThan(object);
+        expect(combine(base, object, code(at))).toBeGreaterThan(object);
         samples++;
       }
     expect(samples).toBe(625);
   });
-  it('uses the nearer class, FRONT on a tie, and unchanged fallback on empty ground', () => {
-    expect(objectDepthCombine(0.4, 0.6, 0.5, near, far)).toBeGreaterThan(0.5);
-    expect(objectDepthCombine(0.8, 0.4, 0.5, near, far)).toBeLessThan(0.4);
-    expect(objectDepthCombine(0.1, 0.5, 0.5, near, far)).toBeGreaterThan(0.5);
-    expect(objectDepthCombine(0.999999, 1, 1, near, far)).toBe(0.999999);
+  it('covers a tree in front of a FRONT unit and leaves empty pixels exactly unchanged', () => {
+    expect(combine(0.8, 0.4, ALWAYS_COVER_CODE)).toBeLessThan(0.4);
+    const empty = reduceObjectDepth([{ depth: 1, r: 0, g: 0 }], near, far, 150);
+    expect(objectDepthCombine(0.999999, empty, 0, FRONT_DISTANCE, near, far, 150)).toBe(0.999999);
+  });
+  it('decides Rhino 5009 independently for EXPLOLRG and TWLT050 in the same frame', () => {
+    const tank = new Vector3(63, 0, 63.6);
+    const big = new Vector3(60.8, 0, 63.2);
+    const small = new Vector3(64, 0, 63.8);
+    expect(code(tank) - code(big)).toBeCloseTo(1.8384776);
+    expect(code(tank) - code(small)).toBeCloseTo(-0.8485281);
+    for (const local of vehicleSamples()) {
+      const surface = normalized(tank.clone().add(local).dot(toCamera));
+      expect(combine(0.2, surface, code(tank), code(big))).toBeGreaterThan(surface);
+      expect(combine(0.8, surface, code(tank), code(small))).toBeLessThan(surface);
+    }
   });
 });
 
@@ -185,9 +205,9 @@ function source(): Ra2Cache {
   } as unknown as Ra2Cache;
 }
 
-it('classifies live SHP owners across pages, shares building turret class, and clears stale classes when fire ends', () => {
+it('captures live SHP owners across pages, shares building turret code, and clears stale codes when fire ends', () => {
   const cache = source();
-  const depth = new TerrainDepth();
+  const depth = new TerrainDepth(FRONT_DISTANCE);
   const sprites = new SpriteLayer(cache, [], 8, undefined, null, null, null, depth);
   const page = new SpriteLayer(cache, [], 8, undefined, null, null, null, depth);
   const dronePainter = { ...painterObject(2, 0), uid: 1 };
@@ -214,9 +234,11 @@ it('classifies live SHP owners across pages, shares building turret class, and c
     [2, { root: new Group(), mode: 'library-sprite', painter: buildingPainter, buildingTurret: turret }],
     [3, { root: new Group(), mode: 'library-sprite', painter: aircraftPainter }],
   ]) as Map<number, { root: Group; mode: string; painter: typeof dronePainter; engulf?: EngulfObject }>;
-  const setClass = vi.fn();
+  const setCode = vi.fn();
   const view = {
     hd: {
+      terrainDepth: depth,
+      effects: { appendExplosionFootprints: (_fires: unknown, count: number) => count },
       view: {
         camera: {
           matrixWorld: {
@@ -244,7 +266,6 @@ it('classifies live SHP owners across pages, shares building turret class, and c
     },
     engulfRight: new Vector3(),
     engulfUp: new Vector3(),
-    engulfToCamera: new Vector3(),
     engulfActive: false,
     engulfFires: [] as EngulfFire[],
     engulfBounds: { x: 0, y: 0, width: 0, height: 0 },
@@ -262,31 +283,33 @@ it('classifies live SHP owners across pages, shares building turret class, and c
       ]),
     },
     world: { terrain: { heightAt: () => 0 } },
-    voxelUnits: { setCaptureClass: setClass, captureRadius: () => 0.6 },
+    voxelUnits: { setCaptureCode: setCode, captureRadius: () => 0.6 },
     sprites,
     pageLayers: new Map([[0, { layer: page }]]),
-    spriteCaptureClass: (instance: SpriteInstance) =>
-      visuals.get(instance.painter?.uid ?? -1)?.engulf?.classification ?? DepthClass.NONE,
+    spriteCaptureCode: (instance: SpriteInstance) =>
+      visuals.get(instance.painter?.uid ?? -1)?.engulf?.code ?? NOT_CAPTURED_CODE,
   };
   const update = (LiveView.prototype as unknown as { updateFireEngulf(this: typeof view): void }).updateFireEngulf;
   try {
+    depth.reference.value.copy(anchor);
+    depth.horizontal.value.set(horizontal.x, horizontal.z);
     update.call(view);
-    expect(visuals.get(1)!.engulf!.classification).toBe(DepthClass.FRONT);
-    expect(visuals.get(2)!.engulf!.classification).toBe(DepthClass.COVER);
-    expect(visuals.get(3)!.engulf!.classification).toBe(DepthClass.NONE);
-    expect(setClass).toHaveBeenLastCalledWith(turret, DepthClass.COVER);
+    expect(visuals.get(1)!.engulf!.code).toBeCloseTo(1.5);
+    expect(visuals.get(2)!.engulf!.code).toBeCloseTo(Math.SQRT1_2);
+    expect(visuals.get(3)!.engulf!.code).toBe(NOT_CAPTURED_CODE);
+    expect(setCode).toHaveBeenLastCalledWith(turret, expect.closeTo(Math.SQRT1_2));
     expect(visuals.get(2)!.engulf!.radius).toBeGreaterThan(3);
     expect(visuals.get(2)!.engulf!.y).toBeCloseTo(anchor.y);
     const flags = (layer: SpriteLayer) =>
       (layer as unknown as { flags: { getComponent(i: number, j: number): number } }).flags;
-    const classificationOf = (layer: SpriteLayer, instance: SpriteInstance) => {
+    const codeOf = (layer: SpriteLayer, instance: SpriteInstance) => {
       const records = (layer as unknown as { uploaded: SpriteInstance[] }).uploaded;
       return flags(layer).getComponent(records.indexOf(instance), 8);
     };
-    expect(classificationOf(sprites, drone)).toBe(DepthClass.FRONT);
-    expect(classificationOf(sprites, building)).toBe(DepthClass.COVER);
-    expect(classificationOf(page, annex)).toBe(DepthClass.COVER);
-    expect(classificationOf(sprites, aircraft)).toBe(DepthClass.NONE);
+    expect(codeOf(sprites, drone)).toBeCloseTo(code(drone.anchor));
+    expect(codeOf(sprites, building)).toBeCloseTo(Math.SQRT1_2);
+    expect(codeOf(page, annex)).toBeCloseTo(Math.SQRT1_2);
+    expect(codeOf(sprites, aircraft)).toBe(NOT_CAPTURED_CODE);
     const fireStorage = view.engulfFires[0];
     const objectStorage = visuals.get(1)!.engulf;
     update.call(view);
@@ -294,14 +317,14 @@ it('classifies live SHP owners across pages, shares building turret class, and c
     expect(visuals.get(1)!.engulf).toBe(objectStorage);
     drone.anchor.copy(anchor).addScaledVector(horizontal, 0.5);
     update.call(view);
-    expect(classificationOf(sprites, drone)).toBe(DepthClass.COVER);
+    expect(codeOf(sprites, drone)).toBeCloseTo(0.5);
     drone.anchor.copy(anchor).addScaledVector(horizontal, 2);
     update.call(view);
-    expect(classificationOf(sprites, drone)).toBe(DepthClass.FRONT);
+    expect(codeOf(sprites, drone)).toBeCloseTo(code(drone.anchor));
     view.effectInstances.length = 0;
     update.call(view);
-    expect(classificationOf(sprites, drone)).toBe(DepthClass.NONE);
-    expect(setClass).toHaveBeenLastCalledWith(turret, DepthClass.NONE);
+    expect(codeOf(sprites, drone)).toBe(NOT_CAPTURED_CODE);
+    expect(setCode).toHaveBeenLastCalledWith(turret, NOT_CAPTURED_CODE);
   } finally {
     for (const layer of [sprites, page]) {
       layer.mesh.geometry.dispose();
@@ -315,7 +338,7 @@ it('classifies live SHP owners across pages, shares building turret class, and c
 });
 
 it('toggles capture layers on voxel body/turret/barrel originals only and restores on removal', () => {
-  const depth = new TerrainDepth();
+  const depth = new TerrainDepth(FRONT_DISTANCE);
   const nodes = new AtmosphereNodes();
   const geometry = new BoxGeometry(1, 0.7, 0.5);
   const material = createVoxelMaterial(nodes);
@@ -327,9 +350,9 @@ it('toggles capture layers on voxel body/turret/barrel originals only and restor
   const driver = {
     hd: { terrainDepth: depth },
     pending: new Map(),
-    setCaptureClass: VoxelUnits.prototype.setCaptureClass,
+    setCaptureCode: VoxelUnits.prototype.setCaptureCode,
   };
-  const setClass = VoxelUnits.prototype.setCaptureClass;
+  const setCode = VoxelUnits.prototype.setCaptureCode;
   const twins: Mesh[] = [];
   unit.root.traverse((mesh) => {
     if (mesh instanceof Mesh && !unit.root.partMeshes.includes(mesh)) twins.push(mesh);
@@ -340,16 +363,15 @@ it('toggles capture layers on voxel body/turret/barrel originals only and restor
     expect(unit.root.partMeshes).toHaveLength(3);
     unit.root.partMeshes[0]!.layers.enable(12);
     const originals = unit.root.partMeshes.map((mesh) => mesh.layers.mask);
-    for (const classification of [DepthClass.COVER, DepthClass.FRONT, DepthClass.NONE]) {
-      setClass.call(driver as unknown as VoxelUnits, unit, classification);
+    for (const value of [0, 2, NOT_CAPTURED_CODE]) {
+      setCode.call(driver as unknown as VoxelUnits, unit, value);
       unit.root.partMeshes.forEach((mesh, i) => {
-        expect(mesh.layers.isEnabled(31)).toBe(classification === DepthClass.COVER);
-        expect(mesh.layers.isEnabled(30)).toBe(classification === DepthClass.FRONT);
-        if (classification === DepthClass.NONE) expect(mesh.layers.mask).toBe(originals[i]);
+        expect(mesh.layers.isEnabled(31)).toBe(value !== NOT_CAPTURED_CODE);
+        if (value === NOT_CAPTURED_CODE) expect(mesh.layers.mask).toBe(originals[i]);
       });
       expect(twins.map((mesh) => mesh.layers.mask)).toEqual(masks);
     }
-    setClass.call(driver as unknown as VoxelUnits, unit, DepthClass.FRONT);
+    setCode.call(driver as unknown as VoxelUnits, unit, 2);
     VoxelUnits.prototype.dispose.call(driver as unknown as VoxelUnits, unit);
     expect(unit.root.partMeshes.map((mesh) => mesh.layers.mask)).toEqual(originals);
     expect(unit.root.captureRadius).toBeGreaterThan(0.8);
