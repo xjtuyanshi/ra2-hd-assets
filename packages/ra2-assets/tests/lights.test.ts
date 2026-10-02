@@ -21,7 +21,7 @@ import {
   readEngineLighting,
   readLightType,
   sidecarAtmosphere,
-  spriteClassLightGain,
+  spriteClassGradeExempt,
   surfaceFromLandType,
   validateMapLights,
   type EngineLight,
@@ -248,15 +248,24 @@ describe('mapAtmosphere', () => {
     const profile = mapAtmosphere(lighting, 3, { lamps: 20 }, 'lunar');
     expect(profile).toMatchObject({ kind: 'day', hour: 12, airless: true, nightLevel: DEFAULT_NIGHT_LEVEL });
     expect(profile.tint).toEqual([1, 1, 1]);
-    expect(profile.exposure).toBeGreaterThanOrEqual(0.33);
-    expect(profile.exposure).toBeLessThanOrEqual(0.39);
-    expect(profile.exposure).toBeCloseTo(engineToLinear(0.624) / engineToLinear(1), 12);
+    expect(profile).not.toHaveProperty('exposure');
     expect(mapAtmosphere(lighting, 3).kind).toBe('night');
   });
 
-  it('bounds lunar exposure and preserves staging for every other theater', () => {
-    expect(mapAtmosphere(L(0.05, 1, 1, 1), 0, undefined, 'lunar').exposure).toBe(0.2);
-    expect(mapAtmosphere(L(2, 1, 1, 1), 0, undefined, 'lunar').exposure).toBe(1);
+  it('leaves lunar dimming to the palette grade and preserves staging for every other theater', () => {
+    for (const [ambient, height] of [
+      [0.05, 0],
+      [0.65, 3],
+      [2, 10],
+    ] as const) {
+      expect(mapAtmosphere(L(ambient, 1, 1, 1.1, 0.05, 0.008), height, undefined, 'LUNAR')).toEqual({
+        kind: 'day',
+        hour: 12,
+        airless: true,
+        nightLevel: DEFAULT_NIGHT_LEVEL,
+        tint: [1, 1, 1],
+      });
+    }
     const transylv = L(0.6, 0.9, 0.9, 1, 0.05, 0.008);
     expect(mapAtmosphere(transylv, 2, { lamps: 4 }, 'newurban')).toEqual(mapAtmosphere(transylv, 2, { lamps: 4 }));
     expect(mapAtmosphere(transylv, 2, { lamps: 4 }, 'newurban').kind).toBe('night');
@@ -337,25 +346,29 @@ describe('mapAtmosphere', () => {
   });
 });
 
-describe('spriteClassLightGain', () => {
-  it('cancels lunar exposure only for the ore class', () => {
+describe('spriteClassGradeExempt', () => {
+  it('exempts only the ore class from the airless map grade', () => {
     const profile = mapAtmosphere(
       { ambient: 0.65, red: 1, green: 1, blue: 1.1, ground: 0.05, level: 0.008 },
       3,
       undefined,
       'lunar',
     );
-    expect(spriteClassLightGain(profile, 'ore')).toBe(1 / profile.exposure!);
+    expect(spriteClassGradeExempt(profile, 'ore')).toBe(true);
     for (const spriteClass of ['ground', 'overlay', 'smudge', 'building', 'infantry', 'unit']) {
-      expect(spriteClassLightGain(profile, spriteClass)).toBe(1);
+      expect(spriteClassGradeExempt(profile, spriteClass)).toBe(false);
     }
   });
 
-  it('leaves ordinary day/night profiles and non-dimming exposure unchanged', () => {
-    expect(spriteClassLightGain(mapAtmosphere(XMP_LIGHTING, 2), 'ore')).toBe(1);
-    expect(spriteClassLightGain(mapAtmosphere({ ...XMP_LIGHTING, ambient: 0.6 }, 2), 'ore')).toBe(1);
-    for (const exposure of [undefined, 0, 1, 2, Number.NaN]) {
-      expect(spriteClassLightGain({ exposure }, 'ore')).toBe(1);
+  it('leaves all classes on ordinary day/night profiles subject to the map grade', () => {
+    for (const profile of [
+      mapAtmosphere(XMP_LIGHTING, 2),
+      mapAtmosphere({ ...XMP_LIGHTING, ambient: 0.6 }, 2),
+      { airless: false },
+    ]) {
+      for (const spriteClass of ['ore', 'ground', 'overlay', 'smudge', 'building', 'infantry', 'unit']) {
+        expect(spriteClassGradeExempt(profile, spriteClass)).toBe(false);
+      }
     }
   });
 });

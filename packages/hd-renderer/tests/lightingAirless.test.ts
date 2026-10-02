@@ -16,12 +16,13 @@ const luma = (c: Color): number => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
 const chroma = (c: Color): number[] => c.toArray().map((v) => v / luma(c));
 
 describe('airless daylight keys', () => {
-  it('gives MoonPatr flat ground 0.36 of noon within 2 percent and only its normalised map tint', () => {
+  it('keeps lunar daylight at neutral noon so the engine grade alone supplies the authored dimming', () => {
     const profile = lunar();
+    expect(profile.exposure).toBeUndefined();
+    expect(profile.tint).toEqual([1, 1, 1]);
     const key = profileKeys(profile).find((key) => key.hour === 12)!;
     const flat = luma(key.sun) * key.sunIntensity * sunHeight(key.elevation) + luma(key.hemiSky) * key.hemiIntensity;
-    expect(flat / noonFlatLuminance()).toBeCloseTo(profile.exposure!, 12);
-    expect(Math.abs(flat / noonFlatLuminance() / 0.36 - 1)).toBeLessThan(0.02);
+    expect(flat / noonFlatLuminance()).toBeCloseTo(1, 12);
     const tint = chroma(new Color(...profile.tint));
     for (const colour of [key.sun, key.hemiSky, key.hemiGround, key.skyHorizon, key.skyZenith])
       chroma(colour).forEach((channel, i) => expect(channel).toBeCloseTo(tint[i]!, 12));
@@ -74,7 +75,7 @@ describe('airless daylight keys', () => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('airless renderer staging', () => {
-  it('preserves exposure and tint through night-level overrides, adaptation and cinematic look changes', () => {
+  it('preserves engine lamp pools and neutral light through night-level overrides and cinematic look changes', () => {
     vi.stubGlobal('window', { devicePixelRatio: 1 });
     const canvas = { width: 1, height: 1, style: {}, addEventListener() {}, removeEventListener() {} };
     const state = createScenario(2, 2);
@@ -85,6 +86,13 @@ describe('airless renderer staging', () => {
       { width: 2, height: 2, z: new Uint8Array(4).fill(4), exists: new Uint8Array(4).fill(1) },
       lighting,
     );
+    const plainTexels = Array.from(mapLight.texture.image.data as Uint8Array);
+    mapLight.setSources([{ position: [128, 128, 416], radius: 256, intensity: 0.25, tint: [0.25, 0, 0.6] }]);
+    const litTexels = Array.from(mapLight.texture.image.data as Uint8Array);
+    expect(litTexels[2]).toBeGreaterThan(litTexels[0]!);
+    expect(litTexels[0]).toBeGreaterThan(litTexels[1]!);
+    expect(litTexels[2]).toBeGreaterThan(plainTexels[2]!);
+    expect(litTexels.slice(4)).toEqual(plainTexels.slice(4));
     const water = createWaterUniforms();
     // Exercise the complete CPU frame path; the two GPU operations are stubs, with no backend or browser startup.
     const frame = hd as unknown as {
@@ -124,11 +132,13 @@ describe('airless renderer staging', () => {
         hd.frame(0);
         expect(frame.profile()).toMatchObject({ ...lunar(), nightLevel: 0.4 });
         const displayed = sprites.light.value.clone().multiply(frame.exposure.value);
-        expect(luma(displayed)).toBeCloseTo(lunar().exposure!, 12);
+        expect(luma(displayed)).toBeCloseTo(1, 12);
         chroma(displayed).forEach((channel, i) =>
           expect(channel).toBeCloseTo(chroma(new Color(...lunar().tint))[i]!, 12),
         );
-        expect(mapLight.currentWeight).toBe(0);
+        expect(mapLight.currentWeight).toBe(1);
+        if (hd.settings.mapSourcesByDay === 1)
+          expect(Array.from(mapLight.texture.image.data as Uint8Array)).toEqual(litTexels);
         expect(hd.nodes.night.value).toBe(0);
         expect(hd.nodes.windowGain.value).toBe(0);
         expect(hd.emitters.lampGain.value).toBe(0);
@@ -148,8 +158,32 @@ describe('airless renderer staging', () => {
       state.environment.weatherIntensity = 1;
       hd.frame(0);
       expect(frame.mist.amount.value).toBe(0);
-      expect(luma(sprites.light.value.clone().multiply(frame.exposure.value))).toBeCloseTo(lunar().exposure!, 12);
+      expect(luma(sprites.light.value.clone().multiply(frame.exposure.value))).toBeCloseTo(1, 12);
       state.environment.weather = 'clear';
+      hd.settings.mapSourcesByDay = 0;
+      hd.frame(0);
+      expect(Array.from(mapLight.texture.image.data as Uint8Array)).toEqual(plainTexels);
+      hd.settings.mapSourcesByDay = 1;
+      hd.frame(0);
+      expect(Array.from(mapLight.texture.image.data as Uint8Array)).toEqual(litTexels);
+      // A dimmer daylight hour detects accidental auto-adaptation even without a profile exposure override.
+      state.environment.timeOfDay = 16;
+      hd.settings.adaptExposure = 0;
+      hd.frame(0);
+      const unadapted = frame.exposure.value.toArray();
+      expect(luma(sprites.light.value.clone().multiply(frame.exposure.value))).toBeLessThan(0.9);
+      hd.settings.adaptExposure = 1;
+      hd.frame(0);
+      expect(frame.exposure.value.toArray()).toEqual(unadapted);
+      state.environment.timeOfDay = 18.5;
+      hd.frame(0);
+      expect(hd.nodes.night.value).toBeGreaterThan(0);
+      expect(hd.nodes.night.value).toBeLessThan(1);
+      expect(mapLight.currentWeight).toBeCloseTo(1 - hd.nodes.night.value, 12);
+      state.environment.timeOfDay = 21;
+      hd.frame(0);
+      expect(mapLight.currentWeight).toBe(0);
+      state.environment.timeOfDay = 12;
       state.map.atmosphere = day;
       hd.frame(0);
       expect(frame.profile().exposure).toBeUndefined();

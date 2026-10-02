@@ -207,7 +207,7 @@ describe('smudge revision cache', () => {
 });
 
 /** Use real CPU sprite buffers and LiveView methods after construction, without starting a browser/GPU or match. */
-function presentation(withLibrary = true, exposure?: number) {
+function presentation(withLibrary = true, airless?: boolean) {
   const ground = terrain();
   const art = library();
   const cache = {
@@ -246,7 +246,7 @@ function presentation(withLibrary = true, exposure?: number) {
   };
   const cellLayer = new SpriteLayer(cache, [], 8);
   const backing = {
-    state: { map: { atmosphere: exposure === undefined ? undefined : { exposure } } },
+    state: { map: { atmosphere: airless === undefined ? undefined : { airless } } },
     buildingLightGate: new BuildingLightGate(),
     cache,
     library: liveLibrary,
@@ -332,8 +332,8 @@ describe('LiveView smudge integration', () => {
     p.view.dispose();
   });
 
-  it.each([undefined, 0.36])('updates overlay and smudge grids independently with exposure=%s', (exposure) => {
-    const p = presentation(true, exposure);
+  it.each([undefined, false, true])('updates overlay and smudge grids independently with airless=%s', (airless) => {
+    const p = presentation(true, airless);
     const overlay: LibraryOverlay = {
       sprite: 'overlay:TIB01',
       frames: 2,
@@ -353,8 +353,8 @@ describe('LiveView smudge integration', () => {
     const ore = p.backing.overlayLayers.get(3)!.layer;
     const crater = p.backing.smudgeLayers.get(1)!;
     expect([ore.mesh.count, crater.mesh.count, p.cellLayer.mesh.count]).toEqual([1, 1, 0]);
-    expect(ore.getInstances()[0]!.lightGain).toBe(exposure === undefined ? 1 : 1 / exposure);
-    expect(crater.getInstances()[0]!.lightGain).toBeUndefined();
+    expect(Boolean(ore.getInstances()[0]!.gradeExempt)).toBe(airless === true);
+    expect(crater.getInstances()[0]!.gradeExempt).toBeUndefined();
     const oreUploads = vi.spyOn(ore, 'setInstances');
     p.view.push({ ...state, smudges: { ...state.smudges!, revision: 2, index: new Int16Array(4).fill(-1) } });
     p.view.render(2);
@@ -367,8 +367,8 @@ describe('LiveView smudge integration', () => {
     p.view.dispose();
   });
 
-  it('forwards rubble through LiveView and uploads building frame three on its body and shadow pages', () => {
-    const p = presentation();
+  it.each([undefined, true])('forwards graded rubble and smudges through LiveView with airless=%s', (airless) => {
+    const p = presentation(true, airless);
     p.liveLibrary.library.overlays = {
       DEBRIS: {
         rubble: true,
@@ -406,6 +406,9 @@ describe('LiveView smudge integration', () => {
     expect([debris.mesh.count, shadow.mesh.count]).toEqual([1, 1]);
     expect(debris.getInstances()[0]).toMatchObject({ frame: body.frames[3], palette: 'lib:iso', flat: true });
     expect(shadow.getInstances()[0]).toMatchObject({ frame: body.shadows![3], shadow: true });
+    expect(Boolean(debris.getInstances()[0]!.gradeExempt)).toBe(false);
+    expect(shadow.getInstances()[0]!.gradeExempt).toBeUndefined();
+    expect(p.backing.smudgeLayers.get(1)!.getInstances()[0]!.gradeExempt).toBeUndefined();
     p.view.push({ ...p.state(), overlays: { ...overlays, revision: 2, rubble: [] } });
     p.view.render(2);
     expect([debris.mesh.count, shadow.mesh.count]).toEqual([0, 0]);

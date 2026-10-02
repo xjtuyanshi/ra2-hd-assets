@@ -1059,7 +1059,7 @@ export class HdRenderer {
           k * (1 / noon.b + (1 / reference - 1 / noon.b) * nightGrade),
         );
       // Enhanced look: lift late and early daylight towards noon's brightness (the colour of the light stays).
-      const adapt = profile?.exposure === undefined ? this.settings.adaptExposure * (1 - nightGrade) : 0;
+      const adapt = !airless && profile?.exposure === undefined ? this.settings.adaptExposure * (1 - nightGrade) : 0;
       if (adapt > 0) {
         const flat = this.lighting.flatIrradianceColor(this.scratchColor);
         const now = 0.2126 * flat.r + 0.7152 * flat.g + 0.0722 * flat.b;
@@ -1092,9 +1092,9 @@ export class HdRenderer {
     this.nightDisplay.value = nightGrade;
     this.nodes.faithfulDisplay.value = this.settings.toneMapper === 'faithful' ? 1 - nightGrade : 0;
     // The map's own light by day ([Lighting] and light sources, mapLighting.ts); the night presentation owns maps staged
-    // as night or dusk and the night hours of day maps. Airless daylight already carries the authored ambient/tint
-    // in its scene light; applying the palette-domain map grade too would darken and tint it twice.
-    this.world?.mapLight?.setWeight(profile?.kind === 'day' && !airless ? 1 - light.night : 0);
+    // as night or dusk and the night hours of day maps. Airless daylight uses neutral sun/sky, leaving the authored
+    // ambient, tint and local light-source pools to this same palette-domain grade.
+    this.world?.mapLight?.setWeight(profile?.kind === 'day' ? 1 - light.night : 0);
     this.world?.mapLight?.setSourceWeight(this.settings.mapSourcesByDay);
     if (this.water) {
       const w = this.water.uniforms;

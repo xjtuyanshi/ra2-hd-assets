@@ -94,7 +94,7 @@ export interface AtmosphereProfile {
   tint: [r: number, g: number, b: number];
   /** Daylight intensity multiplier relative to HD noon, in linear light; omitted preserves the standard keys. */
   exposure?: number;
-  /** Neutral, luminance-matched day sun/sky tinted by the map, without atmospheric sky or haze colour. */
+  /** Neutral, luminance-matched day sun/sky without atmospheric sky, haze or exposure/white/tint adaptation. */
   airless?: boolean;
 }
 
@@ -420,8 +420,8 @@ export function nightEvidence(lights: readonly Pick<MapLightSource, 'intensity' 
  * built as night maps (lamp posts, blue tints, NEGLAMP darkening), 0.8+ are day maps with a colour grade.
  * nightLevel (night maps): clamp(engineToLinear(Ambient - Ground + Level x medianZ), 0.26, 0.40), what unlit ground
  * at the map's typical height shows, kept readable; otherwise DEFAULT_NIGHT_LEVEL.
- * Lunar exposure is clamp(engineToLinear(base + Level x medianZ) / engineToLinear(1), 0.2, 1), preserving the
- * palette-domain dimming of regolith in linear light while sun/sky colour comes only from the authored map tint.
+ * Lunar daylight leaves ambient, height and light sources to the engine-exact palette grade. Its neutral sun/sky
+ * have no exposure multiplier, so the map dims the art once and retains its local lamp pools.
  */
 export function mapAtmosphere(
   normal: EngineLighting,
@@ -438,11 +438,9 @@ export function mapAtmosphere(
       kind: 'day',
       hour: 12,
       nightLevel: DEFAULT_NIGHT_LEVEL,
-      // Neutral light: the original's lit regolith reads neutral grey (MoonPatr, Blue=1.1: unlit art a* 0 / b* -5,
-      // lit frame a* -3 / b* -3), so the authored blue tint is not visible there; applying it in linear light turned
-      // the HD ground purple-blue (a* +2 / b* -7 with the colour-matched terrain).
+      // The original's lit regolith reads neutral grey. The palette grade owns the authored tint and light sources;
+      // applying that tint again through the sun/sky would add a blue cast and lose the single lighting owner.
       tint: [1, 1, 1],
-      exposure: Math.min(1, Math.max(0.2, engineToLinear(eff) / engineToLinear(1))),
       airless: true,
     };
   }
@@ -472,10 +470,9 @@ export function sidecarAtmosphere(
   return mapAtmosphere(sidecar.lighting.normal, sidecar.cells.medianZ, nightEvidence(sidecar.lights), theater);
 }
 
-/** Ore/gem overlays retain their art brightness while lunar daylight dims the rest of the scene. */
-export function spriteClassLightGain(profile: Pick<AtmosphereProfile, 'exposure'>, spriteClass: string): number {
-  const exposure = profile.exposure;
-  return spriteClass === 'ore' && exposure !== undefined && exposure > 0 && exposure < 1 ? 1 / exposure : 1;
+/** Ore/gem overlays retain their art brightness while the airless map's palette grade dims the ground. */
+export function spriteClassGradeExempt(profile: Pick<AtmosphereProfile, 'airless'>, spriteClass: string): boolean {
+  return profile.airless === true && spriteClass === 'ore';
 }
 
 /** Engine ambient whose unlit ground maps to the profile's night level (the inverse of engineToLinear). */

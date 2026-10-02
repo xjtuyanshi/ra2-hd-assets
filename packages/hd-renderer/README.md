@@ -75,18 +75,17 @@ level with the night weight, and the day map grade fades out with it (the night 
 tint from the same `[Lighting]`).
 
 - **Lunar staging.** Theater `lunar` always defaults to day at 12:00, with `airless: true`; its low ambient is dim
-  airless daylight. The optional profile `exposure` scales day sun and sky intensities in linear light:
-  `clamp(engineToLinear(Ambient - Ground + Level * medianZ) / engineToLinear(1), 0.2, 1)`, where
-  `engineToLinear(e) = 0.30 * (e / 0.62)^2.2`. Sun and sky are luminance-matched neutral greys multiplied by the
-  profile tint normalised to Rec.709 luminance 1; the lunar profile's tint is neutral because the original's lit
-  regolith reads neutral grey (MoonPatr: unlit art a* 0 / b* -5, lit frame a* -3 / b* -3) although the map authors
-  Blue=1.1. MoonPatr (`0.65`, RGB `1/1/1.1`, Ground `0.05`, Level `0.008`) is about 0.36 of noon. Day exposure adaptation and the map's palette grade
-  must not apply the ambient a second time or lift it back to noon; airless sky/haze and display-grade colours do
-  not add the terrestrial blue cast. Default lunar staging keeps lamps and night dressing off. The game policy
-  gives library ore/gem overlay sprites (`tiberium` types) a generic per-instance light gain of `1 / exposure`, so
-  their art keeps noon brightness while the regolith stays dim; other sprite classes retain gain 1. Profiles without
-  these optional fields retain their existing rendering. See the research note for the frozen-frame evidence and
-  visual comparison procedure; the code-only C1 change has no new on-screen acceptance result.
+  airless daylight. The engine-exact palette grade stays enabled at weight `1 - night`, including the map's own
+  light sources: terrain-class art takes cell intensity x tint, objects take intensity. The lunar profile has neutral
+  tint and no `exposure` multiplier; sun and sky use luminance-matched neutral greys, so the grade owns the ambient,
+  height and authored tint once. Exposure adaptation remains off for airless profiles, as do white/tint adaptation
+  and sky/haze/display-grade colour. Same-moment original MoonPatr captures show strong blue-violet pools around the
+  player's base from nine map sources (`SNONITLAMP` x5, `INBLULMP` x4); these must remain visible while the unlit
+  regolith stays dim. The game policy marks library ore/gem overlay sprites (`tiberium` types) grade-exempt through
+  a generic per-instance flag, selecting multiplier 1 instead of the terrain/object grade and preserving full art
+  brightness. Other sprite classes and terrestrial day maps keep their existing grade. Default lunar staging keeps
+  HD night dressing off while retaining the original map lamps. See the research note for the supplied captures and
+  visual comparison procedure; the C4 implementation has no new on-screen acceptance result.
 - **Night level.** Night light keys are scaled so unlit flat ground shows the profile's night level (30 % of noon
   for a typical stock night, 26-40 % for night maps), 40 % from a desaturated moon and 60 % from the sky. Moonlight is
   cool (`MOON_TINT`); only maps built as night maps add their own `[Lighting]` tint, a day map's warm grade never tints
@@ -625,7 +624,8 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   sRGB values. `SpriteInstance.lighting` selects the class per sprite (`'ambient'` by default, `'full'`, `'none'`); map
   objects take `MapObject.lighting`. Each map cache owns its grade (`Ra2Cache.mapLight`), live light sources update it
   through the night dressing, and the renderer weights it with the day (`setWeight`, baked into the texels). Lunar
-  airless staging instead owns the map's ambient and tint in its sun/sky keys, without applying this grade again. The HD
+  airless staging uses this same grade with neutral sun/sky; the game layer exempts ore/gem sprites through the generic
+  per-instance grade flag so their art stays bright. The HD
   water look takes no grade of its own (it mixes the graded tile art's hue in already).
 - Terrain (`terrain.ts`): original tile art is lit by plain Lambert diffuse from the sun and sky, with specular only on
   wet ground, so flat ground at clear noon shows exactly composite x map lighting. Contact shading from the height

@@ -66,25 +66,25 @@ describe('live sprite buffers', () => {
     const pool = new SpritePool();
     const source = sprite(2);
     const first = pool.take(source.anchor, source.frame, 'unit', 1, true, true, 2, 'full');
-    first.lightGain = 1 / 0.36;
+    first.gradeExempt = true;
     pool.begin();
     const second = pool.take(new Vector3(3, 4, 5), source.frame, 'unit', 0, false);
     expect(second).toBe(first);
     expect(second.anchor.toArray()).toEqual([3, 4, 5]);
     expect(second).toMatchObject({ flat: false, shadow: false, light: 1, lighting: 'ambient' });
-    expect(second.lightGain).toBeUndefined();
+    expect(second.gradeExempt).toBeUndefined();
     expect(source.anchor.x).toBe(2);
   });
 
-  it('uploads linear light gain independently of palette light and resets it on reused slots', () => {
+  it('uploads map-grade exemption independently of extra palette light and resets it on reused slots', () => {
     const layer = new SpriteLayer(cache, [], 1);
-    const decal = { ...sprite(1, true), light: 0.8, lightGain: 1 / 0.36 };
+    const decal = { ...sprite(1, true), light: 0.8, gradeExempt: true };
     layer.setInstances([decal]);
     const buffers = layer as unknown as Buffers;
-    expect(buffers.anchor.array[5]).toBeCloseTo(1 / 0.36, 6);
+    expect(buffers.anchor.array[5]).toBe(1);
     expect(buffers.flags.array[1]).toBeCloseTo(0.8, 6);
     layer.setInstances([sprite(1, true)]);
-    expect(buffers.anchor.array[5]).toBe(1);
+    expect(buffers.anchor.array[5]).toBe(0);
     expect(buffers.flags.array[1]).toBe(1);
     layer.mesh.geometry.dispose();
     layer.mesh.dispose();

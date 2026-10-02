@@ -114,9 +114,9 @@ function rubbleFixture(patch: Partial<LibraryOverlay> = {}) {
 }
 
 describe('live overlay instances', () => {
-  it('preserves noon light only for ore and gems under lunar exposure, including mixed atlas pages', () => {
+  it('exempts only ore and gems from the lunar map grade, including mixed atlas pages', () => {
     const art = library();
-    // The class, not the page or palette, selects the gain.
+    // The class, not the page or palette, selects the grade exemption.
     for (const entry of Object.values(art.sprites)) for (const frame of entry.frames) frame.page = 0;
     art.sprites['overlay:TIB01'].shadows = [frame(9, 0)];
     const state = cells();
@@ -129,20 +129,14 @@ describe('live overlay instances', () => {
     );
     const result = buildOverlayInstances(state, art, terrain(), palette, atmosphere);
     const bodies = result.pages.get(0)!;
-    expect(bodies.map((instance) => instance.lightGain)).toEqual([
-      1 / atmosphere.exposure!,
-      1 / atmosphere.exposure!,
-      1,
-      1,
-    ]);
-    for (const instance of bodies.slice(0, 2)) expect(instance.lightGain! * atmosphere.exposure!).toBeCloseTo(1, 12);
-    expect(result.pages.get(9)![0]!.lightGain).toBeUndefined();
+    expect(bodies.map((instance) => Boolean(instance.gradeExempt))).toEqual([true, true, false, false]);
+    expect(result.pages.get(9)![0]!.gradeExempt).toBeUndefined();
     const day = buildOverlayInstances(state, art, terrain(), palette);
-    expect(day.pages.get(0)!.map((instance) => instance.lightGain)).toEqual([1, 1, 1, 1]);
+    expect(day.pages.get(0)!.every((instance) => !instance.gradeExempt)).toBe(true);
     const { art: rubbleArt, state: rubbleState } = rubbleFixture({ tiberium: true });
-    expect(
-      buildOverlayInstances(rubbleState, rubbleArt, terrain(), palette, atmosphere).pages.get(4)![0]!.lightGain,
-    ).toBe(1);
+    const rubble = buildOverlayInstances(rubbleState, rubbleArt, terrain(), palette, atmosphere);
+    expect(Boolean(rubble.pages.get(4)![0]!.gradeExempt)).toBe(false);
+    expect(rubble.pages.get(9)![0]!.gradeExempt).toBeUndefined();
   });
   it('uses exact native growth/connection frames, extracted draw points and local wall remap', () => {
     const art = library();
@@ -259,15 +253,18 @@ describe('live overlay instances', () => {
 });
 
 describe('overlay instance revision cache', () => {
-  it('rebuilds gain when exposure changes without changing the engine cells', () => {
+  it('rebuilds the grade exemption when airless changes without changing the engine cells', () => {
     const cache = new OverlayInstanceCache(terrain());
     const state = cells();
     const art = library();
-    expect(cache.update(state, art, '', palette, { exposure: 0.36 })).toBe(true);
-    expect(cache.instances.pages.get(0)![0]!.lightGain).toBeCloseTo(1 / 0.36);
-    expect(cache.update(state, art, '', palette, { exposure: 0.36 })).toBe(false);
-    expect(cache.update(state, art, '', palette)).toBe(true);
-    expect(cache.instances.pages.get(0)![0]!.lightGain).toBe(1);
+    expect(cache.update(state, art, '', palette, { airless: true })).toBe(true);
+    expect(cache.instances.pages.get(0)![0]!.gradeExempt).toBe(true);
+    expect(cache.update(state, art, '', palette, { airless: true })).toBe(false);
+    expect(cache.update(state, art, '', palette, { airless: false })).toBe(true);
+    expect(Boolean(cache.instances.pages.get(0)![0]!.gradeExempt)).toBe(false);
+    expect(cache.update(state, art, '', palette)).toBe(false);
+    expect(cache.update(state, art, '', palette, { airless: true })).toBe(true);
+    expect(cache.instances.pages.get(0)![0]!.gradeExempt).toBe(true);
   });
   it('ignores structured clone identity and rebuilds only content, palette or source changes', () => {
     const cache = new OverlayInstanceCache(terrain());
