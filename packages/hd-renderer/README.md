@@ -107,6 +107,19 @@ tint from the same `[Lighting]`).
 - **Rain** (`src/weather.ts`) is lit by the scene and the light field (bright only near lamps at night); splashes are
   rings, full size on paving, small and faint on grass, none on open water. `storm` is heavier rain; there is no
   lightning (decorative weather rule in `docs/remaster/PLAN.md`).
+- **Snow** (`src/weather.ts`) uses 7000 world-anchored, camera-facing soft discs in the same camera-wrapped 48-cell
+  volume as rain. Flakes drift with the wind and sway as they fall, take scene and local lamp light, and vanish
+  above terrain or open water without accumulation or splashes. Snow is dry: selecting it clears residual wetness,
+  puddles and wet reflections. Its overcast is `0.3 + 0.35 * intensity`, with at most 6% flat-ground dimming by day
+  (5.2% on profiled maps) and a trace of mist. Clear weather hides both particle groups; decorative weather remains
+  off by default and never changes the map's chosen hour.
+- **Ground exclusions** (`src/weatherGroundMask.ts`) are a renderer-owned, nearest-filtered R8 texture with one
+  texel per cell: 255 excludes ground weather. Height-grid slopes steeper than 1.5 terrain levels per cell are
+  excluded once at load; static and live building foundations mark their complete cells. Rain rings are suppressed
+  there, including fragments crossing in from adjacent cells; snow vanishes 0.6 units above excluded cells, 0.15
+  above open water, or over its final 0.08 units above ordinary ground. Live snapshots and resolved art refresh
+  foundation coverage only on change, with no texture upload for unchanged coverage or interpolation-only frames.
+  Removing a building restores its cells while preserving terrain exclusions. The procedural sandbox has an empty mask.
 - **Mist** (`src/mist.ts`): a thin height-based veil before bloom, at most 20 %, none on a clear day (the pipeline is
   rebuilt without it while its amount is 0), lit by the light field so lamps get halos.
 - **Fire** (`src/effects.ts`): a flickering ember bed on the ground, golden flame tongues rooted in it (upright,
@@ -121,14 +134,22 @@ tint from the same `[Lighting]`).
   masks detected in the original civilian art (`windows.png`: warm amber panes with per-pane brightness), shown at
   night only. `lights=0` also switches off visible map lamps and the dummies' heads.
 
-Sandbox parameters: `time=<hours>` (default: the map's hour), `weather=clear|rain|storm`, `rain=<0..1>`, `wet=<0..1>`
+Sandbox parameters: `time=<hours>` (default: the map's hour), `weather=clear|rain|snow|storm`, `rain=<0..1>` (legacy
+precipitation intensity), `wet=<0..1>`
 (start wet), `lights=0` (map light sources off), `lamps=auto|on|off` (`auto`: urban and newurban only),
 `windows=0|1`, `mist=<multiplier>`, `nightlevel=<fraction of noon>`, `fires=<N>` (persistent fires around the view
 centre), `boom=1` (periodic explosions), `water=enhanced|classic` (the modern water on original maps, opt-in; `look=golden` turns
 it on unless `water=` is given; default `classic`, the earlier HD water), `perf=1` (frames
 back to back plus GPU timestamps; diagnostics only). `lamps=off&windows=0` gives a night lit only by
 the map's own light sources and effects. `window.__hd.stats()` reports exposure, night, light counts, mist, wetness
-and frame times; `window.__hd.hd.effects.lightStats(window.__hd.hd.seconds())` the active effect lights.
+and frame times, plus separate `rain` and `snow` intensities; `window.__hd.hd.effects.lightStats(window.__hd.hd.seconds())`
+the active effect lights.
+
+The live/replay bench (`?fx=...`, `sandbox/fx.ts`) accepts `weather=rain|snow|storm&wi=<0..1>` and exposes
+`window.__hd.setWeather('snow', 0.8)` to change weather through `LiveView.setEnvironment` without reloading.
+The development game bridge uses `hd-weather=rain|snow|storm&hd-weather-intensity=<0..1>`. Both default to clear;
+rain and snow default to intensity 0.8, storm to 1. Unknown weather values select clear, finite intensity values
+are clamped to 0..1, and empty or invalid intensities use the weather default (`src/weatherParams.ts`).
 
 **Performance.** Measure frame cost with `node scripts/gpubench.mjs [baseUrl] [out.json]` (WebGPU): it loads the
 `atmoperf` night framing (XMP29U2, night rain 0.8, wet, four fires, periodic explosions, 2400x1500), waits `WARM`
@@ -261,7 +282,7 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   surfaces, puddles, wet shore band, border shroud (`src/terrain.ts`).
 - Water: analytic sky reflection, sun sheen, depth tint from the terrain height texture, shoreline foam, rain rings
   (`src/water.ts`). Original maps shade their water per pixel on the terrain (`src/ra2/waterLook.ts`, below).
-- Weather: world-anchored GPU rain streaks and splashes (`src/weather.ts`).
+- Weather: world-anchored GPU rain streaks, masked splashes and dry snowflakes (`src/weather.ts`).
 - Lighting: fixed classic sun azimuth, time-of-day keys, overcast, soft shadows for the procedural scenario
   (`src/lighting.ts`). Original maps take no sun shadows (see below).
 - Effects: instanced fireballs, flame tongues, smoke, sparks, scorch decals, light-field flashes, camera shake; with

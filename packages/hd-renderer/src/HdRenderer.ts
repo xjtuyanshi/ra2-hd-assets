@@ -67,7 +67,8 @@ import { cinematicGrade, faithfulToneMap, hasCinematicGrade, neutralGrade, type 
 import { buildTerrain, type TerrainBuild } from './terrain';
 import type { ShaderNode } from './tsl';
 import { buildWater, type WaterUniforms } from './water';
-import { buildRain, type RainSystem } from './weather';
+import { buildRain, buildSnow, type RainSystem } from './weather';
+import { steepWeatherCells, WeatherGroundMask } from './weatherGroundMask';
 import { VOXEL_FILL } from './ra2/voxels';
 import { groundFromHeights, setShadowGround, shadowShear, voxelShadowFor } from './ra2/voxelShadow';
 import { voxelLightingFor } from './ra2/vpl';
@@ -428,6 +429,7 @@ export interface HdStats {
   mist: number;
   wet: number;
   rain: number;
+  snow: number;
   pointLights: number;
   /** Scene light level relative to clear noon (rain streaks and smoke scale with it). */
   sceneBrightness: number;
@@ -567,6 +569,9 @@ export class HdRenderer {
   private terrain!: TerrainBuild;
   private water: { uniforms: WaterUniforms } | null = null;
   private rain!: RainSystem;
+  private snow!: RainSystem;
+  /** Cell exclusions shared by ground splashes and snow landings; live foundations update it only on change. */
+  weatherGroundMask!: WeatherGroundMask;
   /** Present when drawing an original map; null for the procedural sandbox. */
   private world: HdWorld | null = null;
   private waterY = 0;
@@ -711,7 +716,30 @@ export class HdRenderer {
       this.water = water;
       this.scene.add(water.mesh);
     }
-    this.rain = buildRain(this.bounds.width, this.bounds.height, this.terrain.heightTexture, this.waterY, this.nodes);
+    this.weatherGroundMask = new WeatherGroundMask(
+      this.bounds.width,
+      this.bounds.height,
+      world
+        ? steepWeatherCells(this.bounds.width, this.bounds.height, this.terrain.heightTexture, LEVEL_HEIGHT * 1.5)
+        : undefined,
+    );
+    this.weatherGroundMask.updateFoundations(world?.weatherFoundations ?? []);
+    this.rain = buildRain(
+      this.bounds.width,
+      this.bounds.height,
+      this.terrain.heightTexture,
+      this.waterY,
+      this.nodes,
+      this.weatherGroundMask.texture,
+    );
+    this.snow = buildSnow(
+      this.bounds.width,
+      this.bounds.height,
+      this.terrain.heightTexture,
+      this.waterY,
+      this.nodes,
+      this.weatherGroundMask.texture,
+    );
     this.nodes.referenceLevel.value = this.lighting.referenceIrradiance();
     this.lightField = new LightField(this.bounds.width, this.bounds.height, {
       halfFloat: LightField.supportsHalfFloat(this.renderer),
@@ -731,6 +759,7 @@ export class HdRenderer {
       this.lighting.root,
       this.effects.root,
       this.rain.object,
+      this.snow.object,
       this.emitters.root,
       this.emissiveOverlay.root,
     );
@@ -999,18 +1028,28 @@ export class HdRenderer {
     this.lastFrameAt = started;
     const env = this.state.environment;
     const raining = env.weather === 'rain' || env.weather === 'storm';
+    const snowing = env.weather === 'snow';
     // A storm is heavier rain (and wind); no lightning (decorative weather rule, docs/remaster/PLAN.md).
     const rainAmount = raining ? Math.min(1, env.weatherIntensity * (env.weather === 'storm' ? 1.3 : 1)) : 0;
+    const snowAmount = snowing ? env.weatherIntensity : 0;
     // Surfaces wet quickly under rain and dry slowly after it stops.
     const wet = this.terrain.wetness;
-    wet.value = raining
-      ? Math.min(1, wet.value + deltaSeconds * 0.25 * rainAmount)
-      : Math.max(0, wet.value - deltaSeconds * 0.02);
+    // Snow is dry decoration: switching from rain also removes residual puddles and wet reflections.
+    wet.value = snowing
+      ? 0
+      : raining
+        ? Math.min(1, wet.value + deltaSeconds * 0.25 * rainAmount)
+        : Math.max(0, wet.value - deltaSeconds * 0.02);
 
     const profile = this.profile();
     this.lighting.setProfile(profile);
     this.lighting.follow(this.view.target);
-    this.lighting.update(env.timeOfDay, raining ? 0.35 + 0.5 * rainAmount : 0);
+    // Profiled flat ground loses at most 0.08 * 0.65 = 5.2% by day in snow.
+    this.lighting.update(
+      env.timeOfDay,
+      raining ? 0.35 + 0.5 * rainAmount : snowing ? 0.3 + 0.35 * snowAmount : 0,
+      snowing ? 0.06 : undefined,
+    );
     const light = this.lighting.state;
     if (this.settings.voxelLook === 'remaster') {
       const pbr = voxelPbrFor(this.nodes);
@@ -1113,14 +1152,22 @@ export class HdRenderer {
     // Mist: none on a clear day, a trace in day rain, a thin veil at night (thicker in night rain). Capped.
     const baseMist = raining
       ? (1 - light.night) * 0.06 * rainAmount + light.night * (0.045 + 0.04 * rainAmount)
-      : 0.05 * light.night;
+      : snowing
+        ? 0.06 * snowAmount
+        : 0.05 * light.night;
     this.mist.amount.value = Math.min(MIST_CAP, baseMist * this.atmosphere.mist);
     if (this.mist.amount.value > 0 !== this.mistInPipeline) this.buildPipeline();
 
     this.rain.intensity.value = rainAmount;
+    this.rain.object.visible = rainAmount > 0;
     this.rain.windX.value = Math.cos(env.windDirection) * env.windStrength * 0.4;
     this.rain.windZ.value = Math.sin(env.windDirection) * env.windStrength * 0.4;
     this.rain.center.value.copy(this.view.target);
+    this.snow.intensity.value = snowAmount;
+    this.snow.object.visible = snowAmount > 0;
+    this.snow.windX.value = this.rain.windX.value;
+    this.snow.windZ.value = this.rain.windZ.value;
+    this.snow.center.value.copy(this.view.target);
 
     // Camera shake decays quickly; it is purely presentational.
     this.effects.shake = Math.max(0, this.effects.shake - deltaSeconds);
@@ -1363,6 +1410,7 @@ export class HdRenderer {
       mist: this.mist.amount.value,
       wet: this.terrain.wetness.value,
       rain: this.nodes.rainAmount.value,
+      snow: this.snow.intensity.value,
       pointLights,
       sceneBrightness: this.nodes.sceneBrightness.value,
       windowGain: this.nodes.windowGain.value,
@@ -1419,6 +1467,9 @@ export class HdRenderer {
     for (const node of this.pipelineNodes) node.dispose();
     this.pipelineNodes.length = 0;
     this.lightField?.dispose();
+    this.rain?.dispose();
+    this.snow?.dispose();
+    this.weatherGroundMask?.dispose();
     this.emissiveOverlay.dispose();
     this.beforeDepthCapture = undefined;
     this.terrainDepth.dispose();

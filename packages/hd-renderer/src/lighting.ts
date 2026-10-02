@@ -356,8 +356,11 @@ export class Lighting {
     return luminanceOf(sunColor) * sunIntensity * height + luminanceOf(hemiColor) * hemiIntensity;
   }
 
-  /** Blend day-cycle keys; weather darkens and desaturates the key light. */
-  update(hour: number, overcast: number): void {
+  /**
+   * Blend day-cycle keys. The optional legacy-key dimming cap transfers lost daylight to the overcast sky;
+   * profiled maps already preserve their own flat-ground irradiance. Omit it to retain the original weather curve.
+   */
+  update(hour: number, overcast: number, maxDayDimming?: number): void {
     const keys = this.keys;
     const h = ((hour % 24) + 24) % 24;
     let i = 0;
@@ -412,6 +415,18 @@ export class Lighting {
     this.hemi.groundColor.copy(a.hemiGround).lerp(b.hemiGround, t);
     // Overcast skies scatter more light; keep ambient up so wet battles stay readable.
     this.hemi.intensity = lerp(a.hemiIntensity, b.hemiIntensity, t) * (1 + overcast * 0.15);
+    if (maxDayDimming !== undefined && overcast > 0) {
+      // Match the legacy night curve below, fading the cap away rather than lifting the night sky.
+      const day = Math.min(1, Math.max(0, (lerp(a.sunIntensity, b.sunIntensity, t) - 0.6) / 0.9));
+      const clearFlat =
+        lerp(luminanceOf(a.sun), luminanceOf(b.sun), t) *
+          lerp(a.sunIntensity, b.sunIntensity, t) *
+          Math.max(0, this.state.sunDirection.y) +
+        lerp(luminanceOf(a.hemiSky), luminanceOf(b.hemiSky), t) * lerp(a.hemiIntensity, b.hemiIntensity, t);
+      const minimum = clearFlat * (1 - Math.min(1, Math.max(0, maxDayDimming)));
+      const current = this.flatLuminance(this.sun.color, this.sun.intensity, this.hemi.color, this.hemi.intensity);
+      this.hemi.intensity += (Math.max(0, minimum - current) * day) / Math.max(1e-6, luminanceOf(this.hemi.color));
+    }
     this.state.ambient.copy(this.hemi.color).multiplyScalar(this.hemi.intensity * 0.5);
     this.state.exposure = lerp(a.exposure, b.exposure, t);
     // Moonlight keys use sunIntensity 0.6, dusk 1.2, day 2.6+: map that onto 1 (night) .. 0 (day). At the keys this

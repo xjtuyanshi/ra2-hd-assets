@@ -33,6 +33,7 @@
  *   &time=0.4                 seconds after the spawn to show (logic frames advance at &fps=, default 15)
  *   &hours=12                 time of day; &hours=map: the map's own [Lighting] staging (&dayhour= applies to day
  *                             maps only, as the live bridge does with a look preset's hour)
+ *   &weather=rain|snow|storm  decorative weather (default clear); &wi=0..1 sets intensity (default 0.8, storm 1)
  *   &look=golden              the enhanced look preset (sun arc, relit art, shadows following the sun)
  *   &water=enhanced           the modern water (default: the earlier HD water)
  *   &native=1                 pass the bridge fields (exact anim frame) instead of relying on the fallback timing
@@ -86,6 +87,8 @@ import { voxelShadowFor } from '../src/ra2/voxelShadow';
 import { advanceShpReview, shpUnitReview } from './shpUnitReview';
 import type { TypeLibrary } from '../../ra2-assets/src/library';
 import { depleteOre, growthGrid, mapOverlayGrid, polylinePosition, type CellPoint } from './oreBench';
+import type { Weather } from '../src/contract';
+import { parseWeatherParams, weatherSettings } from '../src/weatherParams';
 
 const params = new URLSearchParams(location.search);
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
@@ -112,6 +115,7 @@ const time = Number(params.get('time') ?? 0);
 const house = Number(params.get('house') ?? (params.get('fx')?.split(',').includes('shpunits') ? 11 : 15));
 const live = await LiveView.create(canvas, {
   ...voxelLookParams(params),
+  ...parseWeatherParams(params),
   mapBase: `/${encodeURIComponent(mapName)}`,
   libraryBase: '/_library',
   ...(params.get('hours') === 'map'
@@ -131,6 +135,7 @@ const live = await LiveView.create(canvas, {
   voxelProjection: voxelProjectionFor(live.hd.nodes),
   voxelPbr: voxelPbrFor(live.hd.nodes),
   stats: () => live.hd.stats(),
+  setWeather: (weather: Weather, intensity?: number) => live.setEnvironment(weatherSettings(weather, intensity)),
 };
 // &vshadow=hard restores the single hard twin; contact penumbra is the default (also in replays).
 voxelShadowFor(live.hd.nodes).soft = params.get('vshadow') !== 'hard';

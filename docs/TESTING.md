@@ -47,7 +47,7 @@ with six vertex buffers and eight attributes at capacities 1024, 1025, 4096 (liv
 The suite builds both indexed and HD colour paths with windows and the enhanced look's normals, glass, AO, contact
 shades and wet reflections, and verifies ground-pass cleanup. Grown cell, overlay and smudge pages keep the same
 binding count. Other fixtures cover all sixteen procedural effect pools (including the seven enhanced explosion
-pools), beams, emitters, light fields, rain/splashes, data-sized night poles, terrain/cliffs, classic and enhanced
+pools), beams, emitters, light fields, rain/masked splashes/snow, data-sized night poles, terrain/cliffs, classic and enhanced
 water with and without scene reflections, voxel units/projectiles/debris/shadows, sandbox objects/windows and custom
 full-screen mist/tone mapping. These are shader-layout checks,
 not WebGPU pipeline validation, rendered-pixel acceptance or performance measurements.

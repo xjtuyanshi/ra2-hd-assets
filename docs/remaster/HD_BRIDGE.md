@@ -296,7 +296,11 @@ Game art and derived images remain outside Git.
 Start a development server whose game root holds a skirmish setup (a scratch copy of the installation with an edited
 `RA2MD.INI` `[Skirmish]` section, as described in `scripts/remaster/perf/README.md`), then open
 `/?start-page=battle&hd=1`. By default the HD lighting follows the map's own `[Lighting]` (day, dusk or night maps, see
-`pnpm hd:lights`); `hd-time=<hours>` and `hd-weather=rain` override it; `hd-look=<preset>` (`faithful|golden|cinematic`)
+`pnpm hd:lights`); `hd-time=<hours>` overrides the hour. Decorative weather is off by default;
+`hd-weather=rain|snow|storm` enables it, with optional `hd-weather-intensity=<0..1>` (default 0.8 for rain/snow,
+1 for storm; finite values are clamped, invalid intensities use the default, unknown weather selects clear).
+Snow stays dry and ground weather excludes building foundations and steep cells.
+`hd-look=<preset>` (`faithful|golden|cinematic`)
 applies the preset and, on day maps, its suggested hour unless `hd-time` is given (dusk and night maps keep their own
 `[Lighting]` hour; `cinematic` is the approved look with medium cooling); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=enhanced` the modern water;
 `hd-vlook=remaster` selects the remaster voxel look; `hd-vproj=<dir>` selects vehicle redraw projection atlases under

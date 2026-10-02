@@ -37,6 +37,7 @@ import {
 } from '../ra2/fireEngulf';
 import { foundationPointPush } from '../ra2/cardDepth';
 import { FoundationIndex } from './foundationIndex';
+import type { WeatherFoundation } from '../weatherGroundMask';
 import { dockPull, propagateDockPull, type DockPullUnit } from '../ra2/dockPull';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 import { setShadowOrigin } from '../ra2/voxelShadow';
@@ -1287,29 +1288,35 @@ export class LiveView {
     }
   }
 
+  private updateFoundations(objects: readonly LiveObject[], frame: number): void {
+    this.foundationIndex = new FoundationIndex();
+    const weatherFoundations: WeatherFoundation[] = [];
+    for (const object of objects) {
+      if (object.kind !== 'building') continue;
+      const visual = this.visualFor(object, this.houseColour.get(object.owner) ?? -1, frame);
+      if (visual.libraryType?.invisible || this.cache.lights?.types[object.type]?.invisible) continue;
+      const foundation =
+        visual.libraryType?.foundation ??
+        (visual.sprite ? this.cache.manifest.sprites[visual.sprite]?.foundation : undefined);
+      const x = Math.floor(object.x / LEPTONS_PER_CELL);
+      const z = Math.floor(object.y / LEPTONS_PER_CELL);
+      if (foundation) this.foundationIndex.add(x, z, foundation[0], foundation[1]);
+      // The light sidecar can know a footprint before art resolves; this fallback affects weather alone.
+      const weatherFoundation = foundation ?? this.cache.lights?.types[object.type]?.foundation;
+      if (weatherFoundation)
+        weatherFoundations.push({ x, z, width: weatherFoundation[0], height: weatherFoundation[1] });
+    }
+    // Snapshots and asynchronous art revisions already rebuild this index; interpolation-only frames do not.
+    // The renderer compares footprint keys before touching the texture, including a transition to no buildings.
+    this.hd.weatherGroundMask?.updateFoundations(weatherFoundations);
+  }
+
   private applyObjects(previous: Timed | null, current: Timed, alpha: number): void {
     const frame = current.snapshot.frame;
     const batch = this.spriteBatch;
     for (const list of batch.values()) list.length = 0;
     this.spritePool.begin();
-    if (this.painterDirty) {
-      this.foundationIndex = new FoundationIndex();
-      for (const object of current.snapshot.objects) {
-        if (object.kind !== 'building') continue;
-        const visual = this.visualFor(object, this.houseColour.get(object.owner) ?? -1, frame);
-        if (visual.libraryType?.invisible || this.cache.lights?.types[object.type]?.invisible) continue;
-        const foundation =
-          visual.libraryType?.foundation ??
-          (visual.sprite ? this.cache.manifest.sprites[visual.sprite]?.foundation : undefined);
-        if (foundation)
-          this.foundationIndex.add(
-            Math.floor(object.x / LEPTONS_PER_CELL),
-            Math.floor(object.y / LEPTONS_PER_CELL),
-            foundation[0],
-            foundation[1],
-          );
-      }
-    }
+    if (this.painterDirty) this.updateFoundations(current.snapshot.objects, frame);
     for (const object of current.snapshot.objects) {
       const colorIndex = this.houseColour.get(object.owner) ?? -1;
       const visual = this.visualFor(object, colorIndex, frame);
