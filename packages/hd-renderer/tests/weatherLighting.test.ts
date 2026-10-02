@@ -1,6 +1,6 @@
 import { Color } from 'three/webgpu';
 import { describe, expect, it } from 'vitest';
-import { Lighting } from '../src/lighting';
+import { DAY_WEATHER_LIGHTING, Lighting, type LightingWeather } from '../src/lighting';
 
 const luminance = (colour: Color) => 0.2126 * colour.r + 0.7152 * colour.g + 0.0722 * colour.b;
 const snapshot = (lighting: Lighting) => ({
@@ -126,6 +126,130 @@ describe('optional weather daylight dimming cap', () => {
       switched.update(12, overcast);
       legacy.update(12, overcast);
       expect(snapshot(switched)).toEqual(snapshot(legacy));
+    }
+  });
+});
+
+const dayProfile = { kind: 'day', hour: 12, nightLevel: 0.3, tint: [1, 1, 1] } as const;
+
+/** Direct light is completely occluded in the shadow sample; upward-facing ground still receives all sky light. */
+function flatShadowRatio(lighting: Lighting): number {
+  return (
+    (luminance(lighting.hemi.color) * lighting.hemi.intensity) / luminance(lighting.flatIrradianceColor(new Color()))
+  );
+}
+
+const completeSnapshot = (lighting: Lighting) => ({
+  ...snapshot(lighting),
+  hemiGround: lighting.hemi.groundColor.toArray(),
+  sunDirection: lighting.state.sunDirection.toArray(),
+  sunPosition: lighting.sun.position.toArray(),
+  sunTarget: lighting.sun.target.position.toArray(),
+  keyElevation: lighting.state.keyElevation,
+  weatherSunShare: lighting.state.weatherSunShare,
+  weatherBrightness: lighting.state.weatherBrightness,
+  flat: lighting.flatIrradianceColor(new Color()).toArray(),
+  clearFlat: lighting.clearFlatIrradianceColor(new Color()).toArray(),
+});
+
+function profiledLighting(kind: 'day' | 'dusk' | 'night' = 'day') {
+  const lighting = new Lighting(20, 20);
+  lighting.setProfile({ ...dayProfile, kind, tint: [...dayProfile.tint] });
+  return lighting;
+}
+
+describe('profiled decorative weather daylight', () => {
+  for (const arc of [false, true]) {
+    it.each([8, 12, 16])(
+      `softens rain shadows and reserves wet-surface brightness at %s:00 (sun arc = ${arc})`,
+      (hour) => {
+        const lighting = profiledLighting();
+        lighting.sunArc = arc;
+        lighting.update(hour, 0);
+        const clear = luminance(lighting.flatIrradianceColor(new Color()));
+        const clearShadow = flatShadowRatio(lighting);
+        const clearSkyBR = lighting.hemi.color.b / lighting.hemi.color.r;
+        lighting.update(hour, 0.75, undefined, { kind: 'rain', intensity: 0.8 });
+        const rain = luminance(lighting.flatIrradianceColor(new Color()));
+        expect(flatShadowRatio(lighting)).toBeGreaterThanOrEqual(0.78);
+        expect(flatShadowRatio(lighting)).toBeGreaterThan(clearShadow);
+        // Incident light leaves room for the independently required 10 % wet-albedo response. The composed flat
+        // radiance is 82.8 % of clear; shader/rendered-pixel and authored palette effects still require visual review.
+        expect(rain / clear).toBeCloseTo(0.92, 12);
+        expect((rain / clear) * 0.9).toBeGreaterThanOrEqual(0.8);
+        expect((rain / clear) * 0.9).toBeLessThanOrEqual(0.88);
+        expect(lighting.hemi.color.b / lighting.hemi.color.r / clearSkyBR).toBeCloseTo(1.08, 12);
+        expect(lighting.sun.color.r / lighting.sun.color.g).toBeCloseTo(0.96, 12);
+        expect(lighting.sun.color.b / lighting.sun.color.g).toBeCloseTo(1.04, 12);
+        expect(lighting.state.weatherSunShare).toBeCloseTo(0.232, 12);
+        expect(lighting.state.weatherBrightness).toBeCloseTo(0.92, 12);
+        expect(luminance(lighting.clearFlatIrradianceColor(new Color()))).toBe(clear);
+      },
+    );
+
+    it.each([8, 12, 16])(
+      `retains bright neutral-cool snow while softening shadows at %s:00 (sun arc = ${arc})`,
+      (hour) => {
+        const lighting = profiledLighting();
+        lighting.sunArc = arc;
+        lighting.update(hour, 0);
+        const clear = luminance(lighting.flatIrradianceColor(new Color()));
+        const clearSkyBR = lighting.hemi.color.b / lighting.hemi.color.r;
+        lighting.update(hour, 0.58, 0.06, { kind: 'snow', intensity: 0.8 });
+        const ratio = luminance(lighting.flatIrradianceColor(new Color())) / clear;
+        expect(flatShadowRatio(lighting)).toBeGreaterThanOrEqual(0.72);
+        expect(ratio).toBeGreaterThanOrEqual(0.9);
+        expect(ratio).toBeLessThanOrEqual(0.97);
+        expect(ratio).toBeCloseTo(0.94, 12);
+        expect(lighting.hemi.color.b / lighting.hemi.color.r / clearSkyBR).toBeCloseTo(1.032, 12);
+        expect(lighting.sun.color.b / lighting.sun.color.r).toBeCloseTo(1.04 / 0.96, 12);
+        expect(lighting.state.weatherSunShare).toBeCloseTo(0.312, 12);
+      },
+    );
+  }
+
+  for (const kind of ['rain', 'snow'] as const) {
+    it.each([0, 5.5, 8, 12, 16, 18.5, 22])(`keeps clear uniforms identical after ${kind} at %s:00`, (hour) => {
+      const switched = profiledLighting();
+      const fresh = profiledLighting();
+      switched.update(hour, 0.75, undefined, { kind, intensity: 0.8 });
+      switched.update(hour, 0);
+      fresh.update(hour, 0);
+      expect(completeSnapshot(switched)).toEqual(completeSnapshot(fresh));
+      switched.update(hour, 0, undefined, { kind, intensity: 0 });
+      expect(completeSnapshot(switched)).toEqual(completeSnapshot(fresh));
+    });
+
+    it.each(['day', 'dusk', 'night'] as const)(
+      `preserves the existing night presentation for ${kind} on %s maps`,
+      (profileKind) => {
+        const explicit = profiledLighting(profileKind);
+        const legacy = profiledLighting(profileKind);
+        const hours = profileKind === 'day' ? [0, 21, 22] : [0, 8, 12, 18.5, 22];
+        const weather: LightingWeather = { kind, intensity: 0.8 };
+        for (const hour of hours) {
+          explicit.update(hour, 0.75, undefined, weather);
+          legacy.update(hour, 0.75);
+          expect(completeSnapshot(explicit)).toEqual(completeSnapshot(legacy));
+        }
+      },
+    );
+  }
+
+  it('bounds full-intensity sun suppression and brightness while keeping the night fade continuous', () => {
+    const lighting = profiledLighting();
+    for (const kind of ['rain', 'snow'] as const) {
+      lighting.update(12, 0.85, undefined, { kind, intensity: 1 });
+      expect(lighting.sun.intensity).toBeGreaterThan(0);
+      expect(lighting.hemi.intensity).toBeGreaterThan(0);
+      expect(lighting.state.weatherSunShare).toBeCloseTo(1 - DAY_WEATHER_LIGHTING[kind].sunSuppression);
+      const noonSunShare = lighting.state.weatherSunShare;
+      lighting.update(18.5, 0.85, undefined, { kind, intensity: 1 });
+      expect(lighting.state.weatherSunShare).toBeGreaterThan(noonSunShare);
+      expect(lighting.state.weatherSunShare).toBeLessThan(1);
+      lighting.update(21, 0.85, undefined, { kind, intensity: 1 });
+      expect(lighting.state.weatherSunShare).toBe(1);
+      expect(lighting.state.weatherBrightness).toBe(1);
     }
   });
 });

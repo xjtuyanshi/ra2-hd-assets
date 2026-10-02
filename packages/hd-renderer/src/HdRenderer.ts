@@ -724,6 +724,8 @@ export class HdRenderer {
         : undefined,
     );
     this.weatherGroundMask.updateFoundations(world?.weatherFoundations ?? []);
+    this.nodes.weatherGroundTexture.value = this.weatherGroundMask.texture;
+    this.nodes.weatherGroundSize.value.set(this.bounds.width, this.bounds.height);
     this.rain = buildRain(
       this.bounds.width,
       this.bounds.height,
@@ -1044,11 +1046,11 @@ export class HdRenderer {
     const profile = this.profile();
     this.lighting.setProfile(profile);
     this.lighting.follow(this.view.target);
-    // Profiled flat ground loses at most 0.08 * 0.65 = 5.2% by day in snow.
     this.lighting.update(
       env.timeOfDay,
       raining ? 0.35 + 0.5 * rainAmount : snowing ? 0.3 + 0.35 * snowAmount : 0,
       snowing ? 0.06 : undefined,
+      raining ? { kind: 'rain', intensity: rainAmount } : snowing ? { kind: 'snow', intensity: snowAmount } : undefined,
     );
     const light = this.lighting.state;
     if (this.settings.voxelLook === 'remaster') {
@@ -1079,7 +1081,11 @@ export class HdRenderer {
       // Enhanced look: lift late and early daylight towards noon's brightness (the colour of the light stays).
       const adapt = this.settings.adaptExposure * (1 - nightGrade);
       if (adapt > 0) {
-        const flat = this.lighting.flatIrradianceColor(this.scratchColor);
+        // Adapt to the hour's clear illumination so exposure does not cancel intentional overcast dimming.
+        const flat =
+          light.weatherSunShare !== 1
+            ? this.lighting.clearFlatIrradianceColor(this.scratchColor)
+            : this.lighting.flatIrradianceColor(this.scratchColor);
         const now = 0.2126 * flat.r + 0.7152 * flat.g + 0.0722 * flat.b;
         const noonLum = 0.2126 * noon.r + 0.7152 * noon.g + 0.0722 * noon.b;
         const lift = Math.min(MAX_ADAPT, Math.max(1, noonLum / Math.max(1e-6, now)));
@@ -1090,7 +1096,9 @@ export class HdRenderer {
         adaptWhiteBalance(
           exposure,
           noon,
-          this.lighting.flatIrradianceColor(this.scratchColor),
+          light.weatherSunShare !== 1
+            ? this.lighting.clearFlatIrradianceColor(this.scratchColor)
+            : this.lighting.flatIrradianceColor(this.scratchColor),
           this.settings.whiteAdapt,
           nightGrade,
         );
@@ -1132,6 +1140,9 @@ export class HdRenderer {
       ((0.2126 * level.r + 0.7152 * level.g + 0.0722 * level.b) * reference) / noonFlatLuminance();
     this.nodes.night.value = light.night;
     this.nodes.rainAmount.value = rainAmount;
+    this.nodes.weatherSunShare.value = light.weatherSunShare;
+    this.nodes.weatherDesaturation.value =
+      profile?.kind === 'day' && raining ? 0.15625 * rainAmount * (1 - light.night) : 0;
     this.nodes.moonDesaturation.value = NIGHT_DESATURATION * nightGrade;
     const levelLuminance = 0.2126 * level.r + 0.7152 * level.g + 0.0722 * level.b;
     this.nodes.moonNeutral.value.setRGB(

@@ -75,6 +75,9 @@ export function relightFactorUpper(sunGain: number): number {
 /** Maximum sun-following stretch at neutral shadowLength, relative to the art's own shadow (readability). */
 export const MAX_SHADOW_STRETCH = 2;
 
+/** Wet paving reflects a faint image; even stacked look gains must not turn it into a second building. */
+export const WET_REFLECTION_MAX_OPACITY = 0.25;
+
 /** Sun-elevation stretch with the original floor/cap; shadowLength scales both the result and its cap. */
 export function shadowStretch(keyElevation: number, shadowLength = 1): number {
   const elevation = (Math.max(12, keyElevation) * Math.PI) / 180;

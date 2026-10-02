@@ -95,28 +95,48 @@ tint from the same `[Lighting]`).
   `moonlit()`; house paint excluded), while local lights, lit windows and fires keep full colour, and the display
   black level is lifted after tone mapping (the Neutral toe crushed shadows to 6-9 of 255; now about 12-15, never
   under shroud). Measured on a05/a06: lawn median 50/49 (was 74/71), mean saturation 124/113 (was 156/159).
-- **Wet ground** (`src/ra2/terrain.ts`). Paved cells (asphalt, concrete, brick, roads; from the sidecar's surface
-  classes) darken, gloss and form puddles (little sky in them by day: darker wet asphalt, not milky patches; at night
-  sparse twinkling glints of the lamps mirrored in them); soft ground only darkens a little.
+- **Day overcast** (`src/lighting.ts`, `DAY_WEATHER_LIGHTING`). Original day-map profiles transfer direct sun into
+  diffuse sky light. At intensity 0.8, rain retains 0.232 of the clear direct-light fraction and 0.92 of incident
+  flat-ground luminance; snow retains 0.312 and 0.94. At noon this gives fully shadowed/sunlit irradiance ratios
+  0.821 and 0.759. Rain's hemisphere B/R increases 8%, snow's 3.2%; the key tends to cool grey (0.96:1:1.04).
+  Exposure and white adaptation use the clear light at the same hour, preserving the weather change. SHP shadows,
+  infantry shadows, voxel shadows and contact shades scale by the same retained sun fraction. Rain terrain albedo
+  is desaturated 12.5% at intensity 0.8. These day-map changes fade with night weight; night/dusk profiles retain
+  their existing light curve, and the procedural sandbox retains its original lighting curve.
+- **Wet ground** (`src/ra2/terrain.ts`, `WET_GROUND_LOOK`). Paved cells (asphalt, concrete, brick, roads; from the
+  sidecar's surface classes) gain a glossy water film: saturated diffuse multiplier 0.75, roughness 0.26, and a
+  grey-sky reflection weighted by 0.20 at the fixed isometric view. Reflected sky luminance is relative to the lit
+  wet art, giving 0.90 of dry radiance before the weather light change. Puddle cores add 14% over adjacent wet
+  paving, with soft noise edges (0.56..0.72) and expanding impact rings (radius 0.14, width 0.018, 1.6 cycles/s,
+  up to another 2% inside puddles). Grass, sand and soil only darken to 0.90 at saturation, without gloss or puddles.
+  At rain intensity 0.8, saturated flat ground therefore models 0.92 × 0.90 = 0.828 of clear luminance. Building
+  mirror images remain paved-only and faint (0.10..0.22 strength, final alpha capped at 0.25). Night ground retains
+  its dim sky and sparse lamp glints. Shader/state checks are asset-free; tone mapping, local lighting, source-art
+  shading, pixel chroma and mixed-material crop averages still require same-frame rendered review.
 - **Emitters** (`src/emitters.ts`). Sodium-orange lamp heads glow and, on wet paving, cast long reflection streaks
   towards the camera; lit windows reflect as even streaks under each column of lit panes (from the pane columns in
   `windows.json`, on the wall the panes are on, starting at its base), fires as streaks, explosions also as a glow.
   Layers that would add exactly zero (static heads by day, streaks on dry ground) are hidden. Heads are pulled
   towards the camera only just past their own post, so units in front still cover them. At night the wet sheen
   follows the scene's light level, so puddles stay dark and mirror-like instead of milky.
-- **Rain** (`src/weather.ts`) is lit by the scene and the light field (bright only near lamps at night); splashes are
-  rings, full size on paving, small and faint on grass, none on open water. `storm` is heavier rain; there is no
-  lightning (decorative weather rule in `docs/remaster/PLAN.md`).
-- **Snow** (`src/weather.ts`) uses 7000 world-anchored, camera-facing soft discs in the same camera-wrapped 48-cell
-  volume as rain. Flakes drift with the wind and sway as they fall, take scene and local lamp light, and vanish
-  above terrain or open water without accumulation or splashes. Snow is dry: selecting it clears residual wetness,
-  puddles and wet reflections. Its overcast is `0.3 + 0.35 * intensity`, with at most 6% flat-ground dimming by day
-  (5.2% on profiled maps) and a trace of mist. Clear weather hides both particle groups; decorative weather remains
+- **Rain** (`src/weather.ts`, `RAIN_LOOK`) uses 12000 wind-slanted streaks, width 0.026, length 0.55..0.85 units,
+  with daytime core opacity 0.24..0.38 and a faint tapered motion trail. Scene and light-field illumination still
+  controls visibility at night. Its 3500 bright splash rings land only on paved, non-water cells; radius 0.047 and
+  expansion 0.6..1 correspond to 2.4..4 pixels horizontally at native 1x camera scale. `storm` is heavier rain;
+  there is no lightning (decorative weather rule in `docs/remaster/PLAN.md`).
+- **Snow** (`src/weather.ts`, `SNOW_LOOK`) uses 9000 world-anchored, camera-facing soft discs in the same
+  camera-wrapped 48-cell volume as rain. Far/middle/near layers occupy 50/35/15% of flakes, with sizes
+  0.04..0.055 / 0.055..0.075 / 0.075..0.09 units and speeds 0.55..0.8 / 0.85..1.15 / 1.2..1.65 units/s.
+  Larger flakes sway more; about 2% extend to size 0.12. Daytime RGB is floored at (0.9212, 0.9506, 0.98) with
+  core opacity 0.8..1; night keeps scene and local lamp illumination. Flakes vanish above terrain or open water
+  without accumulation or splashes. Snow is dry: selecting it clears residual wetness, puddles and wet reflections.
+  Clear weather hides both particle groups and resets day-weather gains to neutral; decorative weather remains
   off by default and never changes the map's chosen hour.
 - **Ground exclusions** (`src/weatherGroundMask.ts`) are a renderer-owned, nearest-filtered R8 texture with one
   texel per cell: 255 excludes ground weather. Height-grid slopes steeper than 1.5 terrain levels per cell are
-  excluded once at load; static and live building foundations mark their complete cells. Rain rings are suppressed
-  there, including fragments crossing in from adjacent cells; snow vanishes 0.6 units above excluded cells, 0.15
+  excluded once at load; static and live building foundations mark their complete cells. Wet films, puddles,
+  ripple rings, building mirror images and rain splashes are suppressed there, including fragments crossing in from
+  adjacent cells. Cliff walls do not receive wet ground shading. Snow vanishes 0.6 units above excluded cells, 0.15
   above open water, or over its final 0.08 units above ordinary ground. Live snapshots and resolved art refresh
   foundation coverage only on change, with no texture upload for unchanged coverage or interpolation-only frames.
   Removing a building restores its cells while preserving terrain exclusions. The procedural sandbox has an empty mask.

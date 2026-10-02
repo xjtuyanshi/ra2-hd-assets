@@ -140,6 +140,17 @@ const OVERCAST_GREY = new Color(0.55, 0.58, 0.62);
  * 0.94 of clear light, so a rainy afternoon stays above 0.85 of clear noon's frame brightness with wet ground.
  */
 const OVERCAST_DIMMING = 0.08;
+/** Day-map weather targets; retained direct-light fraction is relative to the clear sun/sky split. */
+export const DAY_WEATHER_LIGHTING = {
+  rain: { dimming: 0.1, sunSuppression: 0.96, skyBlueShift: 0.1 },
+  snow: { dimming: 0.075, sunSuppression: 0.86, skyBlueShift: 0.04 },
+} as const;
+const DAY_OVERCAST_KEY = new Color(0.96, 1, 1.04);
+
+export interface LightingWeather {
+  kind: 'rain' | 'snow';
+  intensity: number;
+}
 /**
  * Neutral tone mapping subtracts about 0.04 from mid-tones and bends everything below 0.08 into a quadratic toe, so
  * ground lit at nightLevel x noon in linear light would display about 30 % darker than that relative to noon
@@ -235,6 +246,10 @@ export interface LightingState {
   exposure: number;
   /** 0 = full day, 1 = night: drives emissive windows and lamp lights. */
   night: number;
+  /** Day weather's direct-light fraction / clear direct-light fraction; use for independent shadow decals. */
+  weatherSunShare: number;
+  /** Day weather's flat-light multiplier; clear and the preserved night presentation return 1. */
+  weatherBrightness: number;
 }
 
 export class Lighting {
@@ -256,6 +271,8 @@ export class Lighting {
     ambient: new Color(),
     exposure: 1,
     night: 0,
+    weatherSunShare: 1,
+    weatherBrightness: 1,
   };
 
   constructor(mapWidth: number, mapHeight: number) {
@@ -303,6 +320,11 @@ export class Lighting {
     );
   }
 
+  /** Clear irradiance for the same hour/direction, before weather; exposure adaptation must use this reference. */
+  clearFlatIrradianceColor(out: Color): Color {
+    return out.copy(this.clearFlat);
+  }
+
   /** Flat-ground irradiance at clear noon: the reference at which original art keeps its original brightness. */
   referenceIrradiance(): number {
     if (this.reference === undefined) {
@@ -318,6 +340,9 @@ export class Lighting {
   private profile: AtmosphereProfile | null = null;
   private readonly grey = new Color();
   private readonly halfGrey = new Color();
+  private readonly clearSun = new Color();
+  private readonly clearHemi = new Color();
+  private readonly clearFlat = new Color();
 
   /**
    * Stage the day cycle for a map's atmosphere profile (see profileKeys), or null for the procedural sandbox's
@@ -360,7 +385,7 @@ export class Lighting {
    * Blend day-cycle keys. The optional legacy-key dimming cap transfers lost daylight to the overcast sky;
    * profiled maps already preserve their own flat-ground irradiance. Omit it to retain the original weather curve.
    */
-  update(hour: number, overcast: number, maxDayDimming?: number): void {
+  update(hour: number, overcast: number, maxDayDimming?: number, weather?: LightingWeather): void {
     const keys = this.keys;
     const h = ((hour % 24) + 24) % 24;
     let i = 0;
@@ -388,8 +413,19 @@ export class Lighting {
         .normalize();
     }
     this.sun.position.copy(this.sun.target.position).addScaledVector(dir, 80);
+    this.state.weatherSunShare = 1;
+    this.state.weatherBrightness = 1;
+    const clearSun = this.clearSun.copy(a.sun).lerp(b.sun, t);
+    const clearHemi = this.clearHemi.copy(a.hemiSky).lerp(b.hemiSky, t);
+    const direct = lerp(a.sunIntensity, b.sunIntensity, t) * Math.max(0, dir.y);
+    const diffuse = lerp(a.hemiIntensity, b.hemiIntensity, t);
+    this.clearFlat.setRGB(
+      clearSun.r * direct + clearHemi.r * diffuse,
+      clearSun.g * direct + clearHemi.g * diffuse,
+      clearSun.b * direct + clearHemi.b * diffuse,
+    );
     if (this.profile) {
-      this.updateProfiled(a, b, t, overcast);
+      this.updateProfiled(a, b, t, overcast, weather);
       return;
     }
 
@@ -435,12 +471,12 @@ export class Lighting {
   }
 
   /**
-   * Map profile path. Overcast moves light from the sun to the sky instead of darkening the frame: the overcast grey is
-   * scaled to the key's own sky luminance (night rain stays blue-grey), the sun loses 60 % x overcast, and the sky is
-   * solved so flat ground keeps (1 - OVERCAST_DIMMING x overcast) of its clear brightness by day and NIGHT_RAIN of it at
-   * night (never below NIGHT_RAIN_FLOOR of noon).
+   * Map profile path. Preserve the existing night presentation and optional legacy overcast curve. Explicit day-map
+   * weather then solves total flat-ground irradiance and the sun/sky split separately: rain leaves 92 % incident
+   * light at 0.8 (82.8 % after the wet-ground response), while snow leaves 94 %. This dims flat art without retaining
+   * the clear day's hard directional contrast. Independent shadow decals consume the same retained sun share.
    */
-  private updateProfiled(a: LightKey, b: LightKey, t: number, overcast: number): void {
+  private updateProfiled(a: LightKey, b: LightKey, t: number, overcast: number, weather?: LightingWeather): void {
     const night = lerp(a.night, b.night, t);
     const sunColor = this.state.sunColor.copy(a.sun).lerp(b.sun, t);
     let sunIntensity = lerp(a.sunIntensity, b.sunIntensity, t);
@@ -463,6 +499,42 @@ export class Lighting {
       const target = Math.max(clearFlat * factor, Math.min(clearFlat, NIGHT_RAIN_FLOOR * noonFlat) * night);
       const sunFlat = this.flatLuminance(sunColor, sunIntensity, hemiColor, 0);
       hemiIntensity = Math.max(0, (target - sunFlat) / Math.max(1e-6, luminanceOf(hemiColor)));
+    }
+    if (overcast > 0 && weather && weather.intensity > 0 && this.profile?.kind === 'day' && night < 1) {
+      const intensity = Math.min(1, Math.max(0, weather.intensity));
+      const day = 1 - night;
+      const tuning = DAY_WEATHER_LIGHTING[weather.kind];
+      const brightness = 1 - tuning.dimming * intensity;
+      const sunShare = 1 - tuning.sunSuppression * intensity;
+      const clearFlat = luminanceOf(this.clearFlat);
+      const clearDirect =
+        luminanceOf(this.clearSun) * lerp(a.sunIntensity, b.sunIntensity, t) * Math.max(0, this.state.sunDirection.y);
+      const target = clearFlat * brightness;
+      // Keep the day-map colour shift luminance-neutral before solving the light split. The sky's B/R rises exactly
+      // 8 % for rain at 0.8; the key itself becomes cool grey. Night maps and full-night keys keep the old curve above.
+      const dayKey = this.grey
+        .copy(DAY_OVERCAST_KEY)
+        .multiplyScalar(luminanceOf(this.clearSun) / luminanceOf(DAY_OVERCAST_KEY));
+      this.halfGrey.copy(this.clearSun).lerp(dayKey, Math.min(1, intensity / 0.8));
+      sunColor.lerp(this.halfGrey, day);
+      const daySky = this.grey.copy(this.clearHemi);
+      daySky.b *= 1 + tuning.skyBlueShift * intensity;
+      daySky.multiplyScalar(luminanceOf(this.clearHemi) / luminanceOf(daySky));
+      hemiColor.lerp(daySky, day);
+      // The attenuated direct fraction, rather than raw light intensity, governs independent contact/voxel shadows.
+      const targetSun = clearDirect * brightness * sunShare;
+      const daySunIntensity =
+        targetSun / Math.max(1e-6, luminanceOf(sunColor) * Math.max(0, this.state.sunDirection.y));
+      const dayHemiIntensity = (target - targetSun) / Math.max(1e-6, luminanceOf(hemiColor));
+      sunIntensity = lerp(sunIntensity, daySunIntensity, day);
+      hemiIntensity = lerp(hemiIntensity, dayHemiIntensity, day);
+      const skyGrey = this.grey
+        .copy(DAY_OVERCAST_KEY)
+        .multiplyScalar(luminanceOf(this.clearHemi) / luminanceOf(DAY_OVERCAST_KEY));
+      this.state.skyHorizon.lerp(skyGrey, day * intensity);
+      this.state.skyZenith.lerp(this.halfGrey.copy(skyGrey).multiplyScalar(0.5), day * intensity);
+      this.state.weatherSunShare = lerp(1, sunShare, day);
+      this.state.weatherBrightness = lerp(1, brightness, day);
     }
     this.sun.color.copy(sunColor);
     this.sun.intensity = sunIntensity;

@@ -53,6 +53,7 @@ import {
   pavedAt,
   puddleNoise,
   sampleLightField,
+  weatherGroundClearAt,
   type AtmosphereNodes,
 } from '../atmosphere';
 import { createWaterUniforms, waterSurface, type WaterUniforms } from '../waterShading';
@@ -406,11 +407,52 @@ export function isWaterTile(t: { terrainType: number; file: string }): boolean {
   return t.terrainType === 9 || /^water/i.test(t.file);
 }
 
+/** Day rain coefficients, shared by the shader and its asset-free analytical reference below. */
+export const WET_GROUND_LOOK = {
+  softDiffuse: 0.9,
+  pavedDiffuse: 0.75,
+  pavedRoughness: 0.26,
+  skyFresnel: 0.2,
+  puddleLift: 0.14,
+  rippleLift: 0.02,
+  rippleRadius: 0.14,
+  rippleWidth: 0.018,
+  rippleFrequency: 1.6,
+} as const;
+
 /**
- * Wet ground on top of the original art. Paved surfaces (asphalt, concrete, brick) darken and turn glossy with
- * puddles; soft ground (grass, soil) only darkens a little, so rain never blackens the frame. At night wet paving
- * darkens further (its highlights are the lights' reflections). Everything is exactly the original albedo and
- * roughness while wetness is 0.
+ * CPU reference for flat, unoccluded ground before tone mapping. `puddle` is the soft noise mask, not its wetness-
+ * weighted value. Sky gain is relative to the wet diffuse luminance; it preserves the sky hue while avoiding milky
+ * white patches on dark asphalt. The night coefficients remain the existing light-reflection presentation.
+ */
+export function wetGroundResponse(wetness: number, paved: number, puddle: number, night = 0, groundClear = 1) {
+  const blend = (a: number, b: number, k: number) => a + (b - a) * k;
+  const wet = Math.max(0, Math.min(1, wetness)) * Math.max(0, Math.min(1, groundClear));
+  const pool = puddle * wet * paved;
+  const diffuse =
+    blend(
+      1,
+      blend(blend(WET_GROUND_LOOK.softDiffuse, 0.93, night), blend(WET_GROUND_LOOK.pavedDiffuse, 0.76, night), paved),
+      wet,
+    ) * blend(1, blend(1, 0.6, night), pool);
+  const sky = WET_GROUND_LOOK.skyFresnel * wet * paved;
+  return {
+    diffuse,
+    puddle: pool,
+    roughness: blend(
+      blend(0.95, blend(0.7, blend(WET_GROUND_LOOK.pavedRoughness, 0.45, night), paved), wet),
+      0.1,
+      pool,
+    ),
+    gloss: wet * blend(paved, 1, night),
+    daySkyGain: (sky + (1 + sky) * WET_GROUND_LOOK.puddleLift * pool) * (1 - night),
+  };
+}
+
+/**
+ * Paving loses diffuse light to a glossy water film; its reflected sky is added by wetSheen. Day puddles no longer
+ * multiply the tile art by a dirty dark mask. Soft ground only darkens 10 % at saturation and never grows puddles.
+ * All wet inputs are footprint-masked by the ground material; walls do not enter this path.
  */
 function wetGround(
   albedo: ShaderNode,
@@ -419,12 +461,24 @@ function wetGround(
   nodes: AtmosphereNodes,
 ): { albedo: ShaderNode; puddle: ShaderNode; roughness: ShaderNode } {
   const { night } = nodes;
-  const puddle = puddleNoise(positionWorld).mul(wetness).mul(paved);
-  const darken = mix(float(1), mix(float(0.93), mix(float(0.86), float(0.76), night), paved), wetness);
+  const puddle = puddleNoise(positionWorld, float(1).sub(nodes.night)).mul(wetness).mul(paved);
+  const darken = mix(
+    float(1),
+    mix(
+      mix(float(WET_GROUND_LOOK.softDiffuse), float(0.93), night),
+      mix(float(WET_GROUND_LOOK.pavedDiffuse), float(0.76), night),
+      paved,
+    ),
+    wetness,
+  );
   return {
-    albedo: albedo.mul(darken).mul(mix(float(1), mix(float(0.7), float(0.6), night), puddle)),
+    albedo: albedo.mul(darken).mul(mix(float(1), mix(float(1), float(0.6), night), puddle)),
     puddle,
-    roughness: mix(mix(float(0.95), mix(float(0.7), float(0.45), paved), wetness), float(0.1), puddle),
+    roughness: mix(
+      mix(float(0.95), mix(float(0.7), mix(float(WET_GROUND_LOOK.pavedRoughness), float(0.45), night), paved), wetness),
+      float(0.1),
+      puddle,
+    ),
   };
 }
 
@@ -441,10 +495,12 @@ const GLINT_REACH = 1.6;
  * lamps and fires mirrored in them. Wet paving reflects lights mainly as streaks (emitters.ts), not as a brighter pool:
  * a sheen proportional to the local light, added regardless of albedo, lifted dark asphalt under every lamp into a
  * broad golden haze, so the glints are sparse sparkles (a twinkling hash over small cells) sampling the light
- * field behind the point. Puddles reflect little sky (darker wet asphalt with a sheen, not milky patches); at night the
- * sky sheen follows the scene's light level, so puddles turn dark and mirror-like.
+ * field behind the point. Day paving reflects the overcast sky at a 0.20 isometric Fresnel weight, with sky luminance
+ * relative to the lit wet art: saturated puddles are 14 % brighter than adjacent wet asphalt. Small expanding impact
+ * rings only brighten that reflected term. The night path retains its existing dim sky and sparse lamp glints.
  */
 function wetSheen(
+  albedo: ShaderNode,
   light: ShaderNode,
   sky: ShaderNode,
   wetness: ShaderNode,
@@ -461,11 +517,37 @@ function wetSheen(
   const cell = floor(vec2(dot(xz, vec2(Math.SQRT1_2, -Math.SQRT1_2)).mul(16), dot(xz, TOWARDS_CAMERA).mul(5)));
   const hash = fract(sin(dot(cell, vec2(12.9898, 78.233))).mul(43758.5453));
   const sparkle = step(0.95, fract(hash.add(time.mul(0.35))));
-  return light
+  const nightSheen = light
     .mul(puddle.mul(0.015))
     .add(mirroredLight.mul(puddle).mul(sparkle).mul(0.16))
     .add(sky.mul(float(0.03).add(puddle.mul(0.045))).mul(skyLevel))
     .mul(wetPaved);
+  // An independent impact in each small cell keeps rings spatially sparse and avoids coherent waves over a road.
+  const rippleCell: ShaderNode = floor(xz.mul(2.2));
+  const rippleSeed = fract(sin(dot(rippleCell, vec2(91.73, 37.19))).mul(42319.173));
+  const rippleCentre = vec2(
+    fract(rippleSeed.mul(17.13)).mul(0.3).add(0.35),
+    fract(rippleSeed.mul(31.71)).mul(0.3).add(0.35),
+  );
+  const phase = fract(time.mul(WET_GROUND_LOOK.rippleFrequency).add(rippleSeed));
+  const radius = phase.mul(WET_GROUND_LOOK.rippleRadius);
+  const distance = xz.mul(2.2).fract().sub(rippleCentre).div(2.2).length();
+  const ring = float(1)
+    .sub(smoothstep(WET_GROUND_LOOK.rippleWidth * 0.3, WET_GROUND_LOOK.rippleWidth, abs(distance.sub(radius))))
+    .mul(float(1).sub(phase))
+    .mul(smoothstep(0, 0.12, phase))
+    .mul(nodes.rainAmount);
+  const skyLuma = dot(sky, vec3(0.2126, 0.7152, 0.0722)).max(1e-4);
+  const wetLitLuma = dot(albedo.mul(nodes.sceneLevel), vec3(0.2126, 0.7152, 0.0722))
+    .mul(nodes.referenceLevel)
+    .mul(1 / Math.PI);
+  const reflected = wetPaved.mul(WET_GROUND_LOOK.skyFresnel);
+  const puddleLift = float(1)
+    .add(reflected)
+    .mul(puddle)
+    .mul(float(WET_GROUND_LOOK.puddleLift).add(ring.mul(WET_GROUND_LOOK.rippleLift)));
+  const daySheen = sky.div(skyLuma).mul(wetLitLuma).mul(reflected.add(puddleLift));
+  return mix(daySheen, nightSheen, night);
 }
 
 /**
@@ -581,19 +663,19 @@ function createMaterials(
       mix(mix(color(0x5a5248), lower.rgb, lowerCover), upper.rgb, upperCover),
       terrainGradeAt(cache.mapLight, positionWorld.xz),
     );
-    const wet = wetGround(colour, wetness, float(0), nodes);
     // The sun and sky see the night-desaturated albedo; local lights (emissive) the full colour.
-    wall.colorNode = moonlit(wet.albedo, nodes);
-    wall.gloss = wetness;
-    wall.roughnessNode = wet.roughness;
+    // Ground rain never paints a water film on vertical art, even when the adjoining cell is paved.
+    wall.colorNode = moonlit(colour, nodes);
+    wall.gloss = float(0);
+    wall.roughnessNode = float(0.95);
     wall.metalnessNode = float(0);
     // Local lights (map light sources, lamps, fires, explosions) from the light field, as diffuse irradiance.
     wall.emissiveNode = localLightHeadroom(
-      wet.albedo
+      colour
         .mul(nodes.sceneLevel)
         .mul(nodes.referenceLevel)
         .mul(1 / Math.PI),
-      wet.albedo.mul(sampleLightField(positionWorld.xz, nodes)).mul(1 / Math.PI),
+      colour.mul(sampleLightField(positionWorld.xz, nodes)).mul(1 / Math.PI),
       nodes.localLightCap,
     );
   }
@@ -603,13 +685,21 @@ function createMaterials(
   // Tile art under the map's own light (see mapLighting.ts), as the engine draws it.
   const grade: ShaderNode = terrainGradeAt(cache.mapLight, positionWorld.xz);
   const art: ShaderNode = vec4(srgbScale(raw.rgb, grade), raw.a);
-  const paved: ShaderNode = pavedAt(positionWorld.xz, nodes);
+  // The surface texture is linearly filtered for ordinary light dressing. Weather must not borrow paving from a
+  // neighbouring road into a grass/sand cell; retain the established continuous night blend.
+  const paved: ShaderNode = mix(
+    pavedAt(floor(positionWorld.xz).add(0.5), nodes),
+    pavedAt(positionWorld.xz, nodes),
+    nodes.night,
+  );
   const localLight: ShaderNode = sampleLightField(positionWorld.xz, nodes);
-  const wet = wetGround(art.rgb, wetness, paved, nodes);
+  const groundWetness = wetness.mul(weatherGroundClearAt(positionWorld.xz, nodes));
+  const wet = wetGround(art.rgb, groundWetness, paved, nodes);
   let albedo: ShaderNode = wet.albedo;
   let roughness: ShaderNode = wet.roughness;
-  let gloss: ShaderNode = max(wetness, wet.puddle);
-  let sheen: ShaderNode = wetSheen(localLight, water.skyHorizon, wetness, paved, wet.puddle, nodes);
+  let gloss: ShaderNode = groundWetness.mul(mix(paved, float(1), nodes.night));
+  let sheen: ShaderNode = wetSheen(wet.albedo, localLight, water.skyHorizon, groundWetness, paved, wet.puddle, nodes);
+  let weatherLand: ShaderNode = float(1);
   let reflectionTarget: Object3D | null = null;
   const map = cache.terrainMap;
   if (map) {
@@ -630,6 +720,7 @@ function createMaterials(
     const waterness: ShaderNode = smoothstep(0.3, 0.55, texture(map.waterMask, uv).r)
       .max(smoothstep(0.0, 0.08, shore))
       .max(cliffWater);
+    weatherLand = float(1).sub(waterness);
     let reflection: { colour: ShaderNode; coverage: ShaderNode } | undefined;
     if (map.waterBed && waterPreset.style === 'enhanced') {
       const levels = selectWaterMirrorLevels(waterLevels);
@@ -686,7 +777,7 @@ function createMaterials(
           grade,
         );
         // Share rain darkening with the adjacent land, including at exactly zero optical depth.
-        return wetGround(bed, wetness, paved, nodes).albedo;
+        return wetGround(bed, groundWetness, paved, nodes).albedo;
       };
       const look = bedWaterLook(
         {
@@ -733,7 +824,7 @@ function createMaterials(
       );
       const band = smoothstep(-0.55, -0.12, shore);
       const sand = wetShore(shore);
-      const land = mix(albedo, wetGround(inland, wetness, paved, nodes).albedo, band).mul(
+      const land = mix(albedo, wetGround(inland, groundWetness, paved, nodes).albedo, band).mul(
         mix(float(1), float(0.8), sand),
       );
       albedo = mix(land, waterForDisplay(look.body, nodes), waterness);
@@ -745,6 +836,7 @@ function createMaterials(
     // Per-tile atlas fallback: the painted water with sky reflection and glints, as before.
     const surface = waterSurface(water);
     const waterness: ShaderNode = texture(cache.waterMask, uv).r;
+    weatherLand = float(1).sub(waterness);
     const body = albedo.mul(float(1).sub(surface.fresnel.mul(0.8)));
     albedo = mix(albedo, body, waterness);
     ground.emissiveNode = surface.sky.mul(surface.fresnel).add(surface.glint).mul(waterness);
@@ -757,6 +849,18 @@ function createMaterials(
     const value: ShaderNode = attribute('contact', 'float').toVar();
     If(look.enabled.greaterThan(0.5).and(look.contactShade.notEqual(1)), () => {
       value.assign(float(1).sub(float(1).sub(value).mul(look.contactShade).min(0.85)));
+    });
+    If(nodes.weatherSunShare.notEqual(1), () => {
+      value.assign(float(1).sub(float(1).sub(value).mul(nodes.weatherSunShare)));
+    });
+    return value;
+  })();
+  const litAlbedo = albedo;
+  albedo = Fn(() => {
+    const value = litAlbedo.toVar();
+    If(nodes.weatherDesaturation.greaterThan(0), () => {
+      const luma = dot(value, vec3(0.2126, 0.7152, 0.0722));
+      value.assign(mix(value, vec3(luma), nodes.weatherDesaturation.mul(weatherLand)));
     });
     return value;
   })();

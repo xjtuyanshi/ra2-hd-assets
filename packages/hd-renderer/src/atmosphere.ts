@@ -43,6 +43,9 @@ export class AtmosphereNodes {
   readonly moonDesaturation = uniform(0);
   readonly windowGain = uniform(0);
   readonly rainAmount = uniform(0);
+  /** Day-weather-only presentation gains; neutral values preserve the clear and night paths. */
+  readonly weatherDesaturation = uniform(0);
+  readonly weatherSunShare = uniform(1);
   readonly referenceLevel = uniform(1);
   private readonly black = new DataTexture(new Float32Array(4), 1, 1, RGBAFormat, FloatType);
   private readonly noSurface = new DataTexture(new Uint8Array(2), 1, 1, RGFormat, UnsignedByteType);
@@ -51,6 +54,9 @@ export class AtmosphereNodes {
   readonly lightFieldScale = uniform(1);
   readonly surfaceTexture = texture(this.noSurface);
   readonly surfaceSize = uniform(new Vector2(1, 1));
+  /** Bound to the renderer-owned footprint mask; the empty fallback excludes no ground. */
+  readonly weatherGroundTexture = texture(this.noSurface);
+  readonly weatherGroundSize = uniform(new Vector2(1, 1));
   readonly moonNeutral = uniform(new Color(1, 1, 1));
   readonly faithfulDisplay = uniform(1);
 
@@ -68,12 +74,16 @@ export class AtmosphereNodes {
     this.moonDesaturation.value = source.moonDesaturation.value;
     this.windowGain.value = source.windowGain.value;
     this.rainAmount.value = source.rainAmount.value;
+    this.weatherDesaturation.value = source.weatherDesaturation.value;
+    this.weatherSunShare.value = source.weatherSunShare.value;
     this.referenceLevel.value = source.referenceLevel.value;
     this.lightFieldTexture.value = source.lightFieldTexture.value;
     this.lightFieldSize.value.copy(source.lightFieldSize.value);
     this.lightFieldScale.value = source.lightFieldScale.value;
     this.surfaceTexture.value = source.surfaceTexture.value;
     this.surfaceSize.value.copy(source.surfaceSize.value);
+    this.weatherGroundTexture.value = source.weatherGroundTexture.value;
+    this.weatherGroundSize.value.copy(source.weatherGroundSize.value);
     this.moonNeutral.value.copy(source.moonNeutral.value);
     this.faithfulDisplay.value = source.faithfulDisplay.value;
   }
@@ -114,9 +124,18 @@ export function pavedAt(xz: ShaderNode, nodes = DEFAULT_ATMOSPHERE_NODES): Shade
   return texture(nodes.surfaceTexture, xz.div(nodes.surfaceSize)).r;
 }
 
+/** Weather surface effects may not enter building foundations or steep ground cells. */
+export function weatherGroundClearAt(xz: ShaderNode, nodes = DEFAULT_ATMOSPHERE_NODES): ShaderNode {
+  return float(1).sub(texture(nodes.weatherGroundTexture, xz.div(nodes.weatherGroundSize)).r);
+}
+
 /** Puddle mask 0..1 on wet paved ground (the same noise the terrain uses, so streaks brighten over puddles). */
-export function puddleNoise(position: ShaderNode): ShaderNode {
-  return smoothstep(0.62, 0.68, mx_fractal_noise_float(position.mul(0.55), 2, 2, 0.5, 1).mul(0.5).add(0.5));
+export function puddleNoise(position: ShaderNode, softDay: ShaderNode = float(0)): ShaderNode {
+  return smoothstep(
+    mix(float(0.62), float(0.56), softDay),
+    mix(float(0.68), float(0.72), softDay),
+    mx_fractal_noise_float(position.mul(0.55), 2, 2, 0.5, 1).mul(0.5).add(0.5),
+  );
 }
 
 /**

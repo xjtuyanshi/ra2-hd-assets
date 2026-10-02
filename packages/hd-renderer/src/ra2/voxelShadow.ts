@@ -450,12 +450,12 @@ function voxelSurfaceMaterial(nodes: AtmosphereNodes, layer: SurfaceLayer): Mesh
     const surface = object instanceof VoxelSurfaceMesh ? object : undefined;
     if (layer === 'reflection') return WATER_REFLECTION_OPACITY;
     if (layer === 'foam') return shadowCopyOpacity(WATER_FOAM_OPACITY * (1 + 0.03 * (surface?.foamPulse ?? 0)));
-    if (surface?.onWater) return shadowCopyOpacity(WATER_CONTACT_OPACITY);
+    if (surface?.onWater) return shadowCopyOpacity(WATER_CONTACT_OPACITY * nodes.weatherSunShare.value);
     const target =
       look.enabled.value > 0.5 && look.shadowDarkness.value !== 1
         ? Math.min(SHADOW_OPACITY * look.shadowDarkness.value, 0.9)
         : SHADOW_OPACITY;
-    return shadowCopyOpacity(target, mode.soft ? SHADOW_COPIES.length : 1);
+    return shadowCopyOpacity(target * nodes.weatherSunShare.value, mode.soft ? SHADOW_COPIES.length : 1);
   });
   material.opacityNode = opacity;
   if (layer !== 'shadow') {

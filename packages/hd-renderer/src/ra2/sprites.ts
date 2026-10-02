@@ -55,6 +55,7 @@ import {
   objectLightAt,
   pavedAt,
   puddleNoise,
+  weatherGroundClearAt,
 } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
@@ -65,6 +66,7 @@ import { cardDepthNode, SPRITE_DECAL_LIFT } from './cardDepth';
 import { comparePainterOrder, spritePainterBias, type PainterObject } from './painterOrder';
 import {
   GLASS_REFLECTANCE,
+  WET_REFLECTION_MAX_OPACITY,
   classRoughness,
   contactShade,
   foundationBase,
@@ -734,15 +736,25 @@ export class SpriteLayer {
             // Wet paving mirrors only the lower part of what stands on it: the image fades within about a quarter of
             // the object's height (at most 42 engine px), sharpest in puddles.
             const fade: ShaderNode = exp(below.div(tall.mul(0.28).min(42)).negate()).mul(step(0, below));
-            const surface: ShaderNode = pavedAt(positionWorld.xz, nodes);
-            const puddle: ShaderNode = puddleNoise(positionWorld);
+            // Cell-centre class sampling prevents linear texture filtering from reflecting onto adjacent grass.
+            const surface: ShaderNode = pavedAt(floor(positionWorld.xz).add(0.5), nodes);
+            const puddle: ShaderNode = puddleNoise(positionWorld, float(1).sub(nodes.night));
             const strength: ShaderNode = look.reflections
               .mul(wet)
               .mul(surface)
-              .mul(mix(float(0.14), float(0.7), puddle))
+              .mul(mix(float(0.1), float(0.22), puddle))
               .mul(fade);
-            result.assign(vec4(lit.mul(0.9), litAlpha.mul(strength)));
+            const alpha: ShaderNode = litAlpha
+              .mul(strength)
+              .min(WET_REFLECTION_MAX_OPACITY)
+              .mul(weatherGroundClearAt(positionWorld.xz, nodes));
+            result.assign(vec4(lit.mul(0.9), alpha));
           });
+        });
+        // SHP and contact decals have their own alpha, separate from actual directional-light shadows.
+        // Include faithful and infantry shadows, but leave every clear-weather operation untouched.
+        If(nodes.weatherSunShare.notEqual(1).and(isShadow.greaterThan(0.5).or(isContact.greaterThan(0.5))), () => {
+          result.assign(vec4(result.rgb, result.a.mul(nodes.weatherSunShare)));
         });
         return result;
       })();

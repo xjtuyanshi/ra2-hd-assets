@@ -451,9 +451,9 @@ describe('r186 vertex and uniform binding budget', () => {
       assertLimits(mesh, 16384);
     }
     expect(meshes(effects.root).map((m) => (m as InstancedMesh).instanceMatrix.count)).toContain(4096);
-    expect(meshes(rain.object).map((m) => (m as InstancedMesh).instanceMatrix.count)).toEqual([9000, 2500]);
+    expect(meshes(rain.object).map((m) => (m as InstancedMesh).instanceMatrix.count)).toEqual([12000, 3500]);
     expect(rain.object.visible).toBe(false);
-    expect(meshes(snow.object).map((m) => (m as InstancedMesh).instanceMatrix.count)).toEqual([7000]);
+    expect(meshes(snow.object).map((m) => (m as InstancedMesh).instanceMatrix.count)).toEqual([9000]);
     expect(snow.object.visible).toBe(false);
     expect(meshes(snow.object)[0]!.material).toMatchObject({
       transparent: true,
@@ -517,10 +517,14 @@ describe('r186 vertex and uniform binding budget', () => {
 
   it('audits terrain/cliffs, water, voxel units/projectiles/debris and their shadow materials', () => {
     const source = cache();
+    const weatherMask = new DataTexture(new Uint8Array([255, 0, 0, 0]), 2, 2, RedFormat);
+    source.nodes!.weatherGroundTexture.value = weatherMask;
     const terrain = buildRa2Terrain(source);
     expect(Array.isArray(terrain.mesh.material)).toBe(true);
-    for (const material of terrain.mesh.material as MeshBasicNodeMaterial[]) {
-      assertLimits(new Mesh(terrain.mesh.geometry, material));
+    for (const [index, material] of (terrain.mesh.material as MeshBasicNodeMaterial[]).entries()) {
+      const result = assertLimits(new Mesh(terrain.mesh.geometry, material));
+      // Ground samples the renderer-owned footprint texture per fragment; vertical art has no wet-film path.
+      expect(result.fragmentSampledTextures.includes(source.nodes!.weatherGroundTexture.value)).toBe(index === 0);
     }
     const generic = buildTerrain(
       {
@@ -548,6 +552,7 @@ describe('r186 vertex and uniform binding budget', () => {
       part.geometry.dispose();
     }
     [terrain.mesh, generic.mesh, water.mesh].forEach(dispose);
+    weatherMask.dispose();
     source.nodes!.dispose();
   });
 
