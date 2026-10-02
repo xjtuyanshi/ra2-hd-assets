@@ -6,8 +6,10 @@ import type { EffectInstance } from '../src/live/effectSprites';
 import { SpritePool } from '../src/live/spritePool';
 import { VoxelUnits } from '../src/live/voxelUnits';
 import type { Ra2Cache } from '../src/ra2/cache';
+import { DOCK_PULL } from '../src/ra2/dockPull';
+import { MAX_PAINTER_BIAS, spritePainterBias, type PainterObject } from '../src/ra2/painterOrder';
 import { SpriteLayer } from '../src/ra2/sprites';
-import { VoxelUnit } from '../src/ra2/voxels';
+import { VOXEL_CLEARANCE, VoxelUnit } from '../src/ra2/voxels';
 import { VolumetricBlastLayer } from '../src/volumetricBlasts';
 import { IsoCamera } from '../src/world';
 
@@ -53,7 +55,14 @@ function presentation() {
   const root = new VoxelUnit();
   const mesh = new Mesh();
   root.addSourceMesh(mesh);
-  const visual = { root, mode: 'voxel', type: 'TEST', paletteKey: '', firstFrame: 1 };
+  const visual = {
+    root,
+    mode: 'voxel',
+    type: 'TEST',
+    paletteKey: '',
+    firstFrame: 1,
+    painter: undefined as PainterObject | undefined,
+  };
   const shroud = { hidden: false, isLocationShrouded: () => shroud.hidden };
   const effectDriver = {
     frame: vi.fn(),
@@ -131,6 +140,81 @@ function presentation() {
 }
 
 describe('LiveView physical occlusion scheduling', () => {
+  it('pulls a docked voxel once, keeps its building turret bias, and refreshes only on changed inputs', () => {
+    const p = presentation();
+    p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
+    const docked = {
+      ...object(14 * 256 + 128),
+      y: 21 * 256 + 128,
+      renderOrder: { layer: 2, index: 8, ySort: 40192 },
+    };
+    const refinery: LiveObject = {
+      ...object(10 * 256 + 128),
+      uid: 2,
+      type: 'TESTBUILD',
+      kind: 'building',
+      y: 20 * 256 + 128,
+      renderOrder: { layer: 2, index: 7, ySort: 38912 },
+    };
+    const snap = { ...snapshot(1, 0), objects: [docked, refinery] };
+    p.view.push(snap, 0);
+    p.view.render(0);
+    const normalBias = () => VOXEL_CLEARANCE + spritePainterBias(p.visual.painter);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + DOCK_PULL);
+    expect(p.mesh.userData.painterDepth.bias).toBeGreaterThan(MAX_PAINTER_BIAS);
+    const calls = p.order.mock.calls.length;
+    p.view.render(50);
+    expect(p.order).toHaveBeenCalledTimes(calls);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + DOCK_PULL);
+
+    const building = p.live.visuals.get(2)!;
+    expect(building.painter).toMatchObject({ x: 10, z: 20, foundation: [4, 3] });
+    const turretRoot = new VoxelUnit();
+    const turretMesh = new Mesh();
+    turretRoot.addSourceMesh(turretMesh);
+    Object.assign(building, { buildingTurret: { root: turretRoot } });
+    p.live.applyPainterOrder();
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + DOCK_PULL);
+    expect(turretMesh.userData.painterDepth.bias).toBeCloseTo(
+      VOXEL_CLEARANCE + spritePainterBias(building.painter, 0.4),
+    );
+
+    p.view.push({ ...snap, objects: [{ ...docked, renderOrder: { ...docked.renderOrder, index: 6 } }, refinery] }, 60);
+    p.view.render(60);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
+
+    p.view.push(snap, 70);
+    p.view.render(70);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + DOCK_PULL);
+    Object.assign(building, { libraryType: { invisible: true } });
+    p.view.push({ ...snap, frame: 2 }, 100);
+    p.view.render(100);
+    expect(building.root.visible).toBe(false);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
+  });
+
+  it.each([
+    ['aircraft', 4],
+    ['building', 2],
+  ] as const)('keeps the ordinary bias for a voxel %s in layer %s', (kind, layer) => {
+    const p = presentation();
+    const snap = snapshot(1, 0);
+    snap.objects = [
+      { ...object(5 * 256 + 128), kind, y: 2 * 256 + 128, renderOrder: { layer, index: 8, ySort: 2000 } },
+      {
+        ...object(1 * 256 + 128),
+        uid: 2,
+        type: 'TESTBUILD',
+        kind: 'building',
+        y: 1 * 256 + 128,
+        renderOrder: { layer: 2, index: 7, ySort: 1000 },
+      },
+    ];
+    p.view.push(snap, 0);
+    p.view.render(0);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(VOXEL_CLEARANCE + spritePainterBias(p.visual.painter));
+  });
+
   it('runs real object and painter updates only on changed inputs while units still interpolate each presentation', () => {
     const p = presentation();
     const withBuilding = (frame: number, x: number) => {

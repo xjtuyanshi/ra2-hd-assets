@@ -131,6 +131,13 @@ profile. Turrets and lamp heads clear that profile, while physical beams, rain, 
 same depth space. Stock high-bridge overlays use a horizontal depth plane four height levels above the cell,
 so neighboring deck pieces cannot sort ahead of an on-deck unit merely because of their cell keys.
 
+Visible layer-2 voxel ground units receive a single one-cell camera-space dock pull when their anchor is inside a
+visible building's foundation or its one-cell extension on the +x/+z front sides and native painter order places
+the unit after that building. A live War Miner at the Soviet refinery dock lost its ore bin behind the analytic
+facade ramp, while native drawing placed the miner over the low dish. The pull compensates for low pad/dish art
+without decoding YR's `BUILDNGZ.SHA` Z shapes; it never accumulates across buildings or reaches a southern facade at
+least one more cell ahead. Building voxel turrets, aircraft above layer 2, projectiles and effects retain their biases.
+
 Ground decals, ore and shadow transforms retain their existing paths. The separate geometry-depth attachment
 keeps mist and shroud independent of the card's analytic occlusion depth. Older snapshots retain the Ground-key
 fallback and terrain-relative flight layer; exact ties and unusual locomotor layers without native metadata remain

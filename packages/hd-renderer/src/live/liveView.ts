@@ -21,6 +21,7 @@ import {
   type PainterObject,
 } from '../ra2/painterOrder';
 import { foundationPointPush } from '../ra2/cardDepth';
+import { bucketDockBuildings, dockPull } from '../ra2/dockPull';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 import { setShadowOrigin } from '../ra2/voxelShadow';
 import { loadRa2World, type HdWorld } from '../ra2/world';
@@ -1162,7 +1163,13 @@ export class LiveView {
     this.painterDirty = false;
     const objects = this.painterObjects;
     objects.length = 0;
-    for (const visual of this.visuals.values()) if (visual.root.visible && visual.painter) objects.push(visual.painter);
+    const buildings: PainterObject[] = [];
+    for (const [uid, visual] of this.visuals) {
+      if (!visual.root.visible || !visual.painter) continue;
+      objects.push(visual.painter);
+      if (this.current?.byUid.get(uid)?.kind === 'building' && visual.painter.foundation)
+        buildings.push(visual.painter);
+    }
     for (const effect of this.effectInstances) {
       if (effect.pass !== 'ground' || effect.draw !== 'card') continue;
       const painter = (effect.painter ??= painterObject(2, (effect.anchor.x + effect.anchor.z) * LEPTONS_PER_CELL));
@@ -1171,10 +1178,16 @@ export class LiveView {
     }
     if (this.projectiles) for (const entry of this.projectiles.painterEntries()) objects.push(entry.painter);
     assignPainterBias(objects);
-    for (const visual of this.visuals.values()) {
+    const buildingCells = bucketDockBuildings(buildings);
+    for (const [uid, visual] of this.visuals) {
       const painter = visual.painter;
       if (!painter || !visual.root.visible) continue;
-      if (visual.mode === 'voxel') this.voxelUnits.setPainterBias(visual, spritePainterBias(painter));
+      if (visual.mode === 'voxel') {
+        const object = this.current?.byUid.get(uid);
+        const pull =
+          object && object.kind !== 'building' ? dockPull(painter, buildingCells.get(painter.x)?.get(painter.z)) : 0;
+        this.voxelUnits.setPainterBias(visual, spritePainterBias(painter) + pull);
+      }
       if (visual.buildingTurret) this.voxelUnits.setPainterBias(visual.buildingTurret, spritePainterBias(painter, 0.4));
     }
     if (this.projectiles)
