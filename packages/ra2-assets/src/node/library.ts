@@ -36,6 +36,7 @@ import {
 } from '../library.ts';
 import { colorSchemeSlots, remapRamp } from '../remap.ts';
 import { THEATERS, type TheaterId } from '../theater.ts';
+import { decodeDepthTemplate, readBuildingZShape, readTypeDepthFlags, readYDrawOffset } from '../zshape.ts';
 import {
   ArtSource,
   buildVoxelModel,
@@ -402,6 +403,8 @@ export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): Col
       const sprite = animSprite(l.anim);
       if (!sprite) continue;
       const layer: LibraryAnimLayer = { key, sprite, anim: src.animArt(l.anim).timing };
+      const yDrawOffset = readYDrawOffset(art.getSection(l.anim));
+      if (yDrawOffset !== 0) layer.yDrawOffset = yDrawOffset;
       if (l.damaged) {
         const d = animSprite(l.damaged);
         if (d) layer.damagedSprite = d;
@@ -414,6 +417,8 @@ export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): Col
       count('layers');
     }
     const info: LibraryBuilding = { bodyFrames: body.frames.length, layers };
+    const zShape = readBuildingZShape(sec);
+    if (zShape) info.zShape = zShape;
     const bib = sec?.getString('BibShape', '').trim();
     if (bib) {
       const bid = `bib:${bib}`;
@@ -575,6 +580,7 @@ export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): Col
       }
       const t = kind === 'building' ? building(id) : kind === 'infantry' ? infantry(id) : unit(kind, id);
       if (!t) continue;
+      Object.assign(t, readTypeDepthFlags(kind, rules.getSection(id)));
       if (src.rulesBool(id, 'InvisibleInGame')) t.invisible = true;
       types[id] = t;
       count(`types:${kind}`);
@@ -613,8 +619,8 @@ export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): Col
 }
 
 /** Pack, write and describe one theater's library under `outDir/<theater>` (voxels shared in `outDir/common`). */
-function writeTypeLibrary(
-  inst: InstallView,
+export function writeTypeLibrary(
+  inst: InstallView & Pick<GameInstall, 'read'>,
   theaterId: TheaterId,
   lib: CollectedLibrary,
   outDir: string,
@@ -622,12 +628,17 @@ function writeTypeLibrary(
   log: (m: string) => void,
   t0: number,
 ): LibraryResult {
+  const depthSource = inst.read('buildngz.sha');
+  if (!depthSource)
+    throw new Error('BUILDNGZ.SHA is missing; full type library extraction requires its depth template');
+  const depthTemplate = decodeDepthTemplate(depthSource);
   const { src, collector, types, voxelModels, counts, warnings } = lib;
   const warn = (m: string): void => {
     if (!warnings.includes(m)) warnings.push(m);
   };
   const dir = join(outDir, theaterId);
   mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'buildngz.bin'), depthTemplate.pixels);
   for (const f of readdirSync(dir)) if (/^sprites-\d+\.png$/.test(f)) rmSync(join(dir, f));
   const packed = packSprites(collector.sprites, { format: 'indexed', maxPage: LIBRARY_ATLAS_MAX });
   const spriteAtlases = packed.pages.map((p, i) => {
@@ -681,6 +692,7 @@ function writeTypeLibrary(
   const library: TypeLibrary = {
     version: TYPE_LIBRARY_VERSION,
     theater: theaterId,
+    depthTemplate: { file: 'buildngz.bin', width: depthTemplate.width, height: depthTemplate.height },
     palettes,
     paletteSources,
     spriteAtlases,
