@@ -932,6 +932,47 @@ or `NAME:state`, including bibs and special idle layers. `python/theatre_pages.p
 and retaining baseline pixels for differing frames. `--refresh-owned` regenerates only entries whose colour filename
 contains `@2x-xfer-`, replacing unchanged owned entries and their matching material entries while leaving old files on disk.
 Mixed 1x/2x material blocks use nearest-neighbour resampling to the urban material scale at the target page index.
+
+For a theatre whose art differs in only part of a frame, use:
+
+```sh
+python3 python/theatre_pages.py variant-xfer "$THEATRE" "$URBAN" "$BASELINE" \
+  --pages 0,1 --detail 0.35 --max-changed 0.6
+```
+
+`variant-xfer` matches sprite id, frame index and palette key, then aligns the cropped frames on their union box.
+`SpriteFrame.offset` is the crop's top-left relative to the SHP canvas centre (the draw origin), not the atlas origin
+or full-canvas top-left: `src/node/artSource.ts` subtracts half the SHP canvas size during extraction, and
+`src/node/libraryPreview.ts` draws each crop at that offset. This alignment also handles a changed crop size or offset.
+The changed mask compares opaque 1x indices and their used palette colours, including pixels opaque in just one frame;
+transparent index 0 is ignored. For remapped sprites, index and colour differences within house-paint indices 16–31
+are ignored when both pixels stay in that ramp; transitions to non-paint or transparency still count.
+Frames without an eligible HD counterpart, with an empty urban frame, or whose changed area exceeds `--max-changed`
+of the theatre frame's opaque area retain the baseline unchanged. Baseline files are `sprites-N@2x.png` and
+`sprites-N@2x-remap.png`; a page needing unavailable baseline files is skipped, while a fully exact page can be
+transferred without them.
+
+Exact frames copy urban HD colour, alpha and remap bytes. Variant frames copy urban texels outside the changed region
+and use baseline colour, alpha and remap inside it. The 1x mask is enlarged with nearest-neighbour sampling, dilated
+by one 2x pixel, then feathered with a Gaussian of sigma 1.5 and radius 5 pixels; the original changed core keeps full
+baseline weight. In CIE Lab, variant colour keeps baseline a/b and adds
+`detail * (L_urban - GaussianBlur(L_urban, sigma=1.5))` to baseline L where the urban pixel is opaque.
+Material output uses a 2x layout, nearest-expanding 1x urban material pages. It copies urban material outside the mask
+and blends to RGBA `(128, 128, 0, 255)` inside: world-normal x/z near zero (up-facing), the lowest matte specular class,
+and ambient occlusion 1. This is the material encoding in `python/sprite_normals.py`, not a conventional RGB normal map.
+For variant frames only, alpha is corrected where 2x area-downsampling would disagree with the theatre's 1x silhouette.
+Every output frame gets a QA check: downsampled alpha `> 0.5` must match `index > 0` on at least 99.5% of its pixels.
+Exact urban and fallback baseline bytes remain unchanged even when their input silhouette fails that check; failures
+are reported rather than silently changing those inputs.
+
+Pages publish as unique `sprites-N@2x-vxfer-<uuid>.png` files with `-remap` and `-normals` companions, filling missing HD
+entries by default. `--refresh-owned` can replace only current `-vxfer-` entries; other HD entries stay untouched.
+Each page prints urban-exact, variant, baseline and silhouette-QA failure counts. Atomic `variant-xfer-report.json`
+records those counts by page and sprite id, the parameters and whether each page was published. Library and normals
+publication in `xfer`, `variant-xfer`, `overlay-walls` and `normals-merge` holds both `.compose.lock` and the corresponding
+cache-farm per-file lock (`.library.json.lock` or `.normals.json.lock`); atomic replacement materialises a farm symlink
+without writing through it to a shared source.
+
 Its `overlay-walls "$LIBRARY" TYPE...` redirects wall overlays
 to HD building frames; `normals-merge "$SRC" "$LIBRARY" "$SPRITES_FILE"` merges only the selected sprites' material
 rectangles, using a whitespace-separated sprite list and preserving incompatible existing layouts. `copy-patches SRC_LIB DST_LIB
@@ -947,7 +988,7 @@ building type, the frames the renderer actually plays (body, each layer's played
 as earlier records, L5 model patches, L5 transfers or baseline gaps. These tools use
 atomic JSON/PNG replacements and copy-on-write pages; all supplied libraries, baselines and patches stay outside Git.
 Run their asset-free acceptance from `packages/ra2-assets/python` with
-`python3 -B -m unittest test_building_redraw test_theatre_pages -v`.
+`python3 -B -m unittest test_building_redraw test_theatre_pages test_cache_farm -v`.
 
 ## Level 3 building redraw sheets (Python, experimental)
 
