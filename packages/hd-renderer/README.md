@@ -199,10 +199,34 @@ report `dock` (refinery, repair or helipad policy) and `unloading: 'door' | 'roo
 Unload. A completed delivering building with both matching library layers replaces its body/shadow with
 `DeployingAnim` and queues `UnderDoorAnim` immediately after it; roof delivery uses `RoofDeployingAnim` and
 `UnderRoofDoorAnim`. The body frame is clamped to the replacement art; the door uses healthy/damaged frame 0/1.
-Both cards retain the same anchor, palette/remap routing, push and foundation depth profile. Missing pairs retain
+Both cards retain the same anchor, palette/remap routing, placement push and foundation dimensions/difference offset.
+The under-door card alone receives `SpriteInstance.foundationRecess = DOOR_RECESS`, with exported
+`DOOR_RECESS = 2` in `src/live/liveView.ts`; the deploying body and all other layers keep zero. This measured
+approximation of the engine's door-interior Z-shape/ZAdjust shifts the facade inward by `2.0` x+z units
+(`2 * sqrt(3/8) ≈ 1.224745` world units in depth). Frozen native NAWEAP `5x3`, northwest `(58,98)`, +x-door frames
+bound the recess: frame `9454` hides the tank centre at local `(2.5,1.5)` completely under the open dark interior,
+`3.5` x+z units behind the native facade (`7.5` versus `4.0`), with its front end about `3.0` behind. About `86`
+frames later, the whole tank at local `(4.13,1.06)`, about `1.74` behind the facade, appears over the interior/ramp
+while the door posts stay in front. Thus `1.74 < R < about 3.0`; the foundation's back surface would expose the
+early tank incorrectly. These are supplied native measurements, not new HD runtime acceptance.
+At screen column `d = px / 30 + dx`, the front sum remains `max(0, min(2w - d, 2h + d))`; the existing foundation
+flags component 7 encodes `ds = -dx - dz - (foundationRecess ?? 0)`. The rectangular model gives recessed sums
+`5.0` and `4.93` at those centre columns, respectively hiding centre `4.0` and exposing centre `5.19` while the
+body's facade still covers opaque posts/walls. A unit outside behind the building stays hidden on the same column.
+Lower ramp rows keep ground depth, so a unit outside the facade stands in front. The CPU helper/shader are
+unchanged; anchor/light samples use their original five-component buffer, and pool reuse resets recess to zero.
+Missing pairs retain
 the normal body. Bibs, active animation layers, buildup and turrets keep their existing paths. Queued Unload alone
 does not open the door unless CurrentMission is the -1 sentinel; YR reader evidence is documented in
 `docs/remaster/research/painter-order.md`.
+
+Ground-layer infantry whose exact snapshot anchor lies strictly inside a visible building's rectangular
+foundation is hidden before body, shadow or overlay sprites are queued, matching the engine's foundation Z-shape
+box even where HD art is transparent. An inset of 0.05 cells leaves edge/outside infantry visible. A snapshot/art
+refresh builds a cell index with nine edge/interior region bits per cell; each infantry query is one lookup and
+one bit test, including overlapping foundations. Interpolated poses do not change this snapshot containment.
+Airborne infantry, other layers, vehicles and aircraft retain their existing paths; unknown or invisible
+foundations do not hide infantry. This approximation does not decode custom or nonrectangular Z-shapes.
 
 Live cell overlays (`src/live/overlays.ts`) draw each overlay's library frame at its cell. Rubble overlays
 (`LibraryOverlay.rubble`, rules IsRubble) never draw their own image: the carrier cell named in the snapshot's

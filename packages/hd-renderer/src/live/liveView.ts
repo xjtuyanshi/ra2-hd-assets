@@ -27,6 +27,7 @@ import {
   type PainterObject,
 } from '../ra2/painterOrder';
 import { foundationPointPush } from '../ra2/cardDepth';
+import { FoundationIndex } from './foundationIndex';
 import { dockPull, propagateDockPull, type DockPullUnit } from '../ra2/dockPull';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 import { setShadowOrigin } from '../ra2/voxelShadow';
@@ -52,6 +53,14 @@ import { VoxelUnits, type VoxelUnit, type VoxelUnitsOptions } from './voxelUnits
 
 export type { LiveOverlayCells } from './overlays';
 export type { LiveSmudgeCells } from './smudges';
+
+/**
+ * Measured approximation of the engine's door-interior Z-shape/ZAdjust, in x+z cell units.
+ * Frozen NAWEAP 5x3 at NW (58,98), +x door: frame 9454 hides the tank at local (2.5,1.5),
+ * 3.5 behind the native facade (front end about 3.0); about 86 frames later, local (4.13,1.06)
+ * is fully visible at 1.74 behind it. Thus 1.74 < R < about 3.0; R=2 is 2*sqrt(3/8) world depth.
+ */
+export const DOOR_RECESS = 2;
 
 /**
  * Live view: draws a running original match (read from game memory by the host page) with the HD renderer, framed
@@ -513,6 +522,8 @@ export class LiveView {
   private effectStats = { drawn: 0, missing: 0 };
   /** Civilian houses of the newest snapshot (see civilianHouses). */
   private civilian = new Set<number>();
+  /** Rebuilt on snapshot/art changes, never for an interpolation-only presentation. */
+  private foundationIndex = new FoundationIndex();
   /**
    * The newest snapshot's building anims (bridge flag buildingAnim) by the cell they stand on and by the object they
    * are attached to, with their list index; null when the host flags none (the fallback layers are drawn then).
@@ -1108,12 +1119,37 @@ export class LiveView {
     const batch = this.spriteBatch;
     for (const list of batch.values()) list.length = 0;
     this.spritePool.begin();
+    if (this.painterDirty) {
+      this.foundationIndex = new FoundationIndex();
+      for (const object of current.snapshot.objects) {
+        if (object.kind !== 'building') continue;
+        const visual = this.visualFor(object, this.houseColour.get(object.owner) ?? -1, frame);
+        if (visual.libraryType?.invisible || this.cache.lights?.types[object.type]?.invisible) continue;
+        const foundation =
+          visual.libraryType?.foundation ??
+          (visual.sprite ? this.cache.manifest.sprites[visual.sprite]?.foundation : undefined);
+        if (foundation)
+          this.foundationIndex.add(
+            Math.floor(object.x / LEPTONS_PER_CELL),
+            Math.floor(object.y / LEPTONS_PER_CELL),
+            foundation[0],
+            foundation[1],
+          );
+      }
+    }
     for (const object of current.snapshot.objects) {
       const colorIndex = this.houseColour.get(object.owner) ?? -1;
       const visual = this.visualFor(object, colorIndex, frame);
       // Native techno rendering does not reject the anchor's shroud cell. The common per-pixel mask covers the
       // whole sprite/voxel, including tall art crossing the edge. InvisibleInGame types still never draw.
-      const hidden = !!visual.libraryType?.invisible || !!this.cache.lights?.types[object.type]?.invisible;
+      const containedInfantry =
+        object.kind === 'infantry' &&
+        (object.renderOrder?.layer ?? 2) === 2 &&
+        (object.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT <=
+          this.world.terrain.heightAt(object.x / LEPTONS_PER_CELL, object.y / LEPTONS_PER_CELL) + 0.01 &&
+        this.foundationIndex.contains(object.x / LEPTONS_PER_CELL, object.y / LEPTONS_PER_CELL);
+      const hidden =
+        !!visual.libraryType?.invisible || !!this.cache.lights?.types[object.type]?.invisible || containedInfantry;
       if (visual.root.visible === hidden) this.painterDirty = true;
       visual.root.visible = !hidden;
       if (hidden) continue;
@@ -1456,7 +1492,7 @@ export class LiveView {
       : undefined;
     const door = object.unloading ? sprites[layers.find((layer) => layer.key === doorKey)?.sprite ?? ''] : undefined;
     // Delivery images are body replacements. Explicit construction/selling state still owns the art path
-    // even when a library has no make sprite; the door card shares the body's foundation profile below.
+    // even when a library has no make sprite. The interior shares placement but recesses the foundation facade.
     const delivering =
       object.buildState !== 'building' &&
       object.buildState !== 'selling' &&
@@ -1482,12 +1518,17 @@ export class LiveView {
 
     if (delivering) {
       const doorFrame = door!.frames[Math.min(damaged ? 1 : 0, door!.frames.length - 1)];
-      if (doorFrame && doorFrame.rect[2] > 0)
-        this.queue(
-          batch,
-          this.spritePool.take(anchor, doorFrame, this.buildingPalette(door!, visual.paletteKey), push, false),
-          !door!.remap,
+      if (doorFrame && doorFrame.rect[2] > 0) {
+        const interior = this.spritePool.take(
+          anchor,
+          doorFrame,
+          this.buildingPalette(door!, visual.paletteKey),
+          push,
+          false,
         );
+        interior.foundationRecess = DOOR_RECESS;
+        this.queue(batch, interior, !door!.remap);
+      }
     }
     const native = this.nativeBuildingAnims(object, type);
 

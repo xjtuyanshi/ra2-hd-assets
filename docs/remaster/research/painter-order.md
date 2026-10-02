@@ -241,10 +241,65 @@ UnderRoofDoorAnim `+0x1504` at `0x45F78B`. DrawIt `0x43D692..0x43D6D3` / `0x43D7
 
 `LiveView.libraryBuildingSprites` uses these library key pairs while a completed building reports `unloading`.
 It clamps the replacement body frame to `frames.length - 1`, substitutes its shadow, and queues the under-door
-frame immediately after the body with the same anchor, push and foundation painter profile. Each sprite retains
-the existing palette/remap handling. Thus a unit inside remains behind the facade and emerges across its edge;
-there is no factory-exit dock pull. Missing/empty pairs retain the normal body. Bibs, active layers, construction
+frame immediately after the body with the same anchor, placement push and foundation dimensions/offsets. Each
+sprite retains the existing palette/remap handling. The under-door card alone has `SpriteInstance.foundationRecess = 2`;
+the deploying body retains the front facade. There is no factory-exit dock pull. Missing/empty pairs retain the
+normal body. Bibs, active layers, construction
 and selling frames, and voxel turrets are unchanged.
+
+Frozen native frames fit a recessed door plane rather than the foundation's back surface. NAWEAP has a `5x3`
+foundation at northwest `(58,98)`, with its door on the +x face. At frame `9454`, `unloading='door'`, the open dark
+interior completely covers the new tank at local `(2.5,1.5)`: its centre has `x+z=4.0`, versus native facade
+`x+z=7.5` at that column, so it is `3.5` sum units behind; its front end at local `x≈3.0` is about `3.0` behind.
+About `86` frames later, the whole tank at local `(4.13,1.06)` is visible over the dark interior and ramp while
+the door posts remain in front. Its centre is about `1.74` sum units behind the facade. These supplied native
+observations bound the interior recess by `1.74 < R < about 3.0`; they are not a new HD runtime acceptance run.
+
+`live/liveView.ts` exports `DOOR_RECESS = 2`, a generic measured approximation of the engine's door-interior
+Z-shape/ZAdjust. This is `2 * sqrt(3/8) ≈ 1.224745` world units in depth. The existing rectangular profile gives
+front sums `7.0` and `6.93` at the two centre columns; it does not reconstruct the native first column's `7.5`.
+With the recess, these become `5.0` and `4.93`, keeping the first centre (`4.0`) behind and the second (`5.19`)
+in front. A back-surface profile would expose the early tank and is therefore unsuitable.
+
+The optional generic `SpriteInstance.foundationRecess` defaults to zero. Instance encoding changes only the
+existing sum-offset component, foundation flags component 7: `ds = -dx - dz - foundationRecess`. Both
+`cardDepthPush` and `cardDepthNode` retain their original expression and interface:
+
+```text
+d = px / 30 + dx
+front = max(0, min(2w - d, 2h + d))
+ds = -dx - dz - recess
+s = front + ds
+push = max(py * GROUND_DEPTH, s * FOUNDATION_DEPTH - py * VERTICAL_DEPTH) + CARD_CLEARANCE
+```
+
+The deploying body and all other layers retain recess zero. The body's facade still hides the emerging tank at
+opaque posts/walls, and an outside unit behind the building on the same screen column remains hidden by the
+interior. Lower ramp rows retain `max(ground, facade)`, so a unit standing outside the facade stays in front with
+the existing unit bias. Reused pool records reset their recess to zero. There is no depth-mode bit or new shader
+branch: the anchor/light-sample buffer returns to five components and the original vec2 light-sample attribute.
+Foundation widths/heights, difference offset, placement, lighting and deck/shadow paths retain their behavior;
+other consumers of the existing sum offset receive the same recessed profile for the interior card.
+
+## Infantry inside foundations
+
+The supplied barracks replay has a `2x2` foundation at northwest `(67,14)` and an infantry spawn at local
+`(0.5,1.5)`. The original hides it until it walks out, about ten logic frames later. Its HD pixels appear mostly
+in transparent art beside the tapered tower and above the plinth: changing only opaque-card depth cannot hide
+those pixels. The engine's building Z-shape box covers the foundation independently of those art holes.
+
+`LiveView` therefore suppresses ground-layer, non-airborne infantry at exact snapshot anchors strictly inside
+`NW + (0.05, w - 0.05) x (0.05, h - 0.05)`. It hides the visual root and queues no body, shadow or overlay art for
+that frame. Vehicle/aircraft delivery and docking remain independent. Anchors on the inset boundary or outside,
+airborne infantry, non-ground registration and scenes without a known visible foundation are unaffected.
+The existing front-facade depth approximation still governs opaque-art overlap.
+
+The cell-aligned rectangular foundation index is refreshed for new publications (including same-frame changes)
+and art/visibility rebuilds, not interpolation-only poses. Each cell stores a nine-bit union of allowed low-edge,
+middle and high-edge regions on its two axes. Overlaps merge by OR, so an infantry lookup remains one cell lookup
+and one bit test rather than a scan of building candidates. Inset checks compare world-coordinate bounds directly
+to keep exact edge equality outside despite floating-point subtraction. This is a rectangular foundation
+approximation, not a claim to reconstruct custom/nonrectangular native Z-shapes.
 
 An accompanying native NAWEAP/Rhino trace observed CurrentMission `5` with QueuedMission `16` when the tank appeared
 (door still closed), then CurrentMission `16` thirteen logic frames later with link 0 pointing at the tank inside

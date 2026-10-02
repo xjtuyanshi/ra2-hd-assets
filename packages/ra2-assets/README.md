@@ -272,6 +272,34 @@ pnpm hd:sprites -- --library temperate --pages 0 --cache "$SPRITE_CACHE" --bin "
 The Node entry points are `upscaleSpriteAtlas` in `src/node/spriteHd.ts` (pixels in/out) and `upscaleSprites` in
 `src/node/spriteHdCache.ts` (cache orchestration). Both accept an injectable `run(bin, args)` for asset-free tests.
 
+## Dark door interiors (Python)
+
+`python/door_interior.py` uses NumPy and Pillow to darken invented HD interiors against the indexed palette art.
+It selects `UnderDoorAnim` and `UnderRoofDoorAnim`, including damaged sprites, and processes body frames only.
+Coverage-normalised Gaussian luminance matching runs in linear light; a feathered dark-original mask also reduces
+interior saturation. Alpha, house-paint indices 16..31, zero-mask surfaces, shadows and other atlas rectangles stay
+unchanged. Each selected page is loaded and saved once, without altering the remap mask or library metadata.
+
+```bash
+python3 packages/ra2-assets/python/door_interior.py --library "$DOOR_FARM/_library/urban" \
+  --out "$DOOR_WORK" --dry-run
+# Review first, then install by replacing farm symlinks through cache_farm.install_file.
+python3 packages/ra2-assets/python/door_interior.py --library "$DOOR_FARM/_library/urban" \
+  --out "$DOOR_WORK" --install "$DOOR_FARM"
+cd packages/ra2-assets/python
+python3 -m unittest test_door_interior -v
+python3 -m py_compile door_interior.py
+```
+
+Repeat `--library` for distinct theaters; `--keys` overrides the comma-separated layer keys, and `--sprites`
+restricts the referenced sprites. `--out` must be outside the source libraries. Outputs under each theater are full
+HD page copies, `metrics.json` (source/output SHA-256 and per-frame sRGB luminance), and `door_interior.jpg` (original
+x2, HD before, HD after; Chinese labels when the system font is available, width at most 2000 pixels).
+`--dry-run` still writes these review artifacts but never installs, even with `--install`. Install requires library
+paths inside the farm root and never writes through symlinks. A JSON provenance marker in each output PNG prevents
+accidental repeat darkening even without the metrics file; marked inputs are refused unless `--force` is supplied.
+Keep all derived images and metrics outside Git. Offline comparisons do not establish in-game visual acceptance.
+
 ## Map lights and lit windows (`hd:lights`)
 
 `hd:lights` reads a cached map's `[Lighting]`, its light-source buildings and the rules/art they use from the player's

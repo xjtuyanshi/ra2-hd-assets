@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Group } from 'three/webgpu';
+import { Group, Texture, Vector3 } from 'three/webgpu';
 import type { LibraryType } from '../../ra2-assets/src/library';
 import type { SpriteEntry, SpriteFrame } from '../../ra2-assets/src/manifest';
-import { LiveView, type LiveObject, type LiveSnapshot } from '../src/live/liveView';
+import { DOOR_RECESS, LiveView, type LiveObject, type LiveSnapshot } from '../src/live/liveView';
 import { SpritePool } from '../src/live/spritePool';
 import { cardDepthPush } from '../src/ra2/cardDepth';
-import { painterObject } from '../src/ra2/painterOrder';
-import type { SpriteInstance } from '../src/ra2/sprites';
+import { assignPainterBias, painterObject, spritePainterBias } from '../src/ra2/painterOrder';
+import { SpriteLayer, type SpriteInstance } from '../src/ra2/sprites';
+import type { Ra2Cache } from '../src/ra2/cache';
+import type { DirtyAttribute } from '../src/dirtyAttribute';
+import { biasedDepth } from '../src/painterDepth';
+import { IsoCamera, PIXELS_PER_CELL_EDGE } from '../src/world';
+import { VOXEL_CLEARANCE } from '../src/ra2/voxels';
 
 /** Real libraryBuildingSprites, buildup, layer, palette and queue paths; no GPU or game assets. */
 function deliveryView() {
@@ -120,7 +125,9 @@ describe('live delivery building image', () => {
       expect(body.palette).toBe(section.palette);
       expect(cards[1]).toMatchObject({ shadow: true, flat: true });
       expect(body).toMatchObject({ shadow: false, flat: false });
-      // Both cards sample the same foundation profile: a unit inside remains behind it, then emerges in front.
+      expect(DOOR_RECESS).toBe(2);
+      expect(cards.map((card) => card.foundationRecess)).toEqual([0, 0, 0, 2, 0]);
+      // The deploying body retains its facade: a unit inside remains behind opaque posts, then emerges in front.
       for (const [x, z, hidden] of [
         [12.5, 21.5, true],
         [15.5, 21.5, false],
@@ -137,6 +144,164 @@ describe('live delivery building image', () => {
         );
         const unitDepth = (x + z - body.anchor.x - body.anchor.z) * Math.sqrt(3 / 8) + 0.3 * 0.5 + 0.035;
         expect(bodyDepth > unitDepth).toBe(hidden);
+      }
+    },
+  );
+
+  it.each(['door', 'roof'] as const)(
+    'fits the %s recess to the frozen factory delivery positions while retaining facade and ground depth',
+    (unloading) => {
+      const h = deliveryView();
+      Object.assign(h.object, { x: 58.5 * 256, y: 98.5 * 256, unloading });
+      Object.assign(h.painter, { x: 58, z: 98 });
+      h.type.drawOffset = [0, -15];
+      // Wide synthetic cards cover the tested column and rows; no private factory pixels are required.
+      for (const id of ['deploy', 'door', 'roofDeploy', 'roofDoor']) {
+        Object.assign(h.sprites[id]!.frames[0]!, { rect: [0, 0, 360, 300], offset: [-120, -140] });
+      }
+      const { cards } = h.draw();
+      const body = cards[2]!;
+      const door = cards[3]!;
+      expect(body.anchor.toArray()).toEqual([58, 0, 98]);
+      const unitPainter = { ...painterObject(2, 0, 56), x: 60.5, z: 99.5 };
+      assignPainterBias([h.painter, unitPainter]);
+      const unit: SpriteInstance = {
+        anchor: new Vector3(unitPainter.x, 0, unitPainter.z),
+        frame: { rect: [0, 0, 21, 30], offset: [-10, -25] },
+        palette: 'unit',
+        push: 0.4,
+        shadow: false,
+        painter: unitPainter,
+      };
+      const atlas = new Texture();
+      const layer = new SpriteLayer(
+        {
+          paletteAtlas: { image: { height: 1 } },
+          paletteRow: new Map(),
+          manifest: { spriteAtlas: { width: 512, height: 512 } },
+          spriteAtlas: atlas,
+        } as unknown as Ra2Cache,
+        [body, door, unit],
+      );
+      const uploaded = layer as unknown as {
+        params: DirtyAttribute;
+        flags: DirtyAttribute;
+        orderedCards: SpriteInstance[];
+      };
+      const camera = new IsoCamera();
+      camera.target.copy(body.anchor);
+      camera.update();
+      const range = camera.camera.far - camera.camera.near;
+      const right = new Vector3().setFromMatrixColumn(camera.camera.matrixWorld, 0);
+      const up = new Vector3().setFromMatrixColumn(camera.camera.matrixWorld, 1);
+      const toward = new Vector3().setFromMatrixColumn(camera.camera.matrixWorld, 2);
+      const screen = (p: Vector3): [number, number] => [30 * (p.x - p.z), 15 * (p.x + p.z)];
+      const physical = (p: Vector3) =>
+        (-p.clone().applyMatrix4(camera.camera.matrixWorldInverse).z - camera.camera.near) / range;
+      const depth = (s: SpriteInstance, pixel: [number, number]) => {
+        const i = uploaded.orderedCards.indexOf(s);
+        const at = screen(s.anchor);
+        const px = pixel[0] - at[0];
+        const py = pixel[1] - at[1];
+        const placement = uploaded.params.array[i * 4 + 3]!;
+        const placed = s.anchor
+          .clone()
+          .addScaledVector(right, px / PIXELS_PER_CELL_EDGE)
+          .addScaledVector(up, -py / PIXELS_PER_CELL_EDGE)
+          .addScaledVector(toward, placement);
+        const [w, sizeH, dx, ds] = Array.from(uploaded.flags.array.slice(i * 8 + 4, i * 8 + 8));
+        return biasedDepth(
+          physical(placed),
+          cardDepthPush(px, py, w, sizeH, dx, ds) - placement + uploaded.flags.array[i * 8 + 3]!,
+          range,
+        );
+      };
+      const expectCovered = (s: SpriteInstance, pixel: [number, number]) => {
+        const at = screen(s.anchor);
+        expect(pixel[0] - at[0]).toBeGreaterThanOrEqual(s.frame.offset[0]);
+        expect(pixel[0] - at[0]).toBeLessThan(s.frame.offset[0] + s.frame.rect[2]);
+        expect(pixel[1] - at[1]).toBeGreaterThanOrEqual(s.frame.offset[1]);
+        expect(pixel[1] - at[1]).toBeLessThan(s.frame.offset[1] + s.frame.rect[3]);
+      };
+      try {
+        for (const s of [body, door]) {
+          const i = uploaded.orderedCards.indexOf(s);
+          expect(Array.from(uploaded.flags.array.slice(i * 8 + 4, i * 8 + 8))).toEqual([5, 3, 0, s === door ? -2 : 0]);
+        }
+        for (const [x, z, hidden] of [
+          [2.5, 1.5, true],
+          [4.13, 1.06, false],
+        ] as const) {
+          unit.anchor.set(58 + x, 0, 98 + z);
+          layer.setInstances([body, door, unit]);
+          for (const row of [0, -10]) {
+            const pixel = screen(unit.anchor);
+            pixel[1] += row;
+            // The synthetic opaque body covers this door-post/wall column; these are depth assertions, not art QA.
+            for (const s of [body, door, unit]) expectCovered(s, pixel);
+            const spriteDepth = depth(unit, pixel);
+            const voxelPoint = unit.anchor.clone();
+            voxelPoint.y = -row / (Math.cos(Math.PI / 6) * PIXELS_PER_CELL_EDGE);
+            const voxelDepth = biasedDepth(
+              physical(voxelPoint),
+              VOXEL_CLEARANCE + spritePainterBias(unitPainter),
+              range,
+            );
+            for (const unitDepth of [spriteDepth, voxelDepth]) {
+              if (hidden) expect(unitDepth).toBeGreaterThan(depth(door, pixel));
+              else expect(unitDepth).toBeLessThan(depth(door, pixel));
+              expect(unitDepth).toBeGreaterThan(depth(body, pixel));
+            }
+            // At the later feet row, max(ground, facade) selects the ramp; 10px up it selects the recessed facade.
+            expect((spriteDepth - depth(door, pixel)) * range).toBeCloseTo(
+              hidden ? 0.810132945 : row === 0 ? -0.006363636 : -0.218652747,
+              6,
+            );
+            expect((voxelDepth - depth(door, pixel)) * range).toBeCloseTo(
+              hidden ? 0.805132945 : row === 0 ? -0.011363636 : -0.223652747,
+              6,
+            );
+            if (!hidden) expect((spriteDepth - depth(body, pixel)) * range).toBeCloseTo(1.414340414, 6);
+          }
+        }
+        // Same later tank column d=3.07, outside behind the back surface s=3.07 (z=-0.5, s=2.07).
+        const tankColumn = screen(unit.anchor)[0];
+        unit.anchor.set(60.57, 0, 97.5);
+        layer.setInstances([body, door, unit]);
+        expect(screen(unit.anchor)[0]).toBeCloseTo(tankColumn);
+        for (const row of [0, -10]) {
+          const pixel = screen(unit.anchor);
+          pixel[1] += row;
+          expect(depth(unit, pixel)).toBeGreaterThan(depth(door, pixel));
+          const voxelPoint = unit.anchor.clone();
+          voxelPoint.y = -row / (Math.cos(Math.PI / 6) * PIXELS_PER_CELL_EDGE);
+          expect(
+            biasedDepth(physical(voxelPoint), VOXEL_CLEARANCE + spritePainterBias(unitPainter), range),
+          ).toBeGreaterThan(depth(door, pixel));
+        }
+        // Outside the +x facade, ramp/base rows retain the unchanged ground-depth branch for both cards.
+        unit.anchor.set(63.5, 0, 99.5);
+        layer.setInstances([body, door, unit]);
+        for (const row of [0, 4]) {
+          const pixel = screen(unit.anchor);
+          pixel[1] += row;
+          for (const s of [body, door, unit]) expectCovered(s, pixel);
+          for (const s of [body, door]) {
+            const at = screen(s.anchor);
+            const i = uploaded.orderedCards.indexOf(s);
+            const [w, sizeH, dx, ds] = Array.from(uploaded.flags.array.slice(i * 8 + 4, i * 8 + 8));
+            expect(cardDepthPush(pixel[0] - at[0], pixel[1] - at[1], w, sizeH, dx, ds)).toBeCloseTo(
+              cardDepthPush(pixel[0] - at[0], pixel[1] - at[1]),
+              12,
+            );
+            expect(depth(unit, pixel)).toBeLessThan(depth(s, pixel));
+          }
+        }
+      } finally {
+        layer.mesh.dispose();
+        layer.mesh.geometry.dispose();
+        layer.mesh.material.dispose();
+        atlas.dispose();
       }
     },
   );
