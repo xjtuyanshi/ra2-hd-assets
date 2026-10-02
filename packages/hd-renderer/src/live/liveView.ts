@@ -68,6 +68,8 @@ export interface LiveObject {
   kind: LiveKind;
   /** Rules type id, e.g. "MTNK". */
   type: string;
+  /** Engine-selected draw image when it differs from `type`, e.g. a harvester's UnloadingClass while it unloads. */
+  imageType?: string;
   /** Index into LiveSnapshot.houses (by `index`), -1 when unknown. */
   owner: number;
   x: number;
@@ -232,6 +234,7 @@ interface Timed {
 
 interface Visual {
   painter?: PainterObject;
+  /** Resolved art type, including an engine-selected image or its rules-type fallback. */
   type: string;
   paletteKey: string;
   root: Group;
@@ -1784,13 +1787,14 @@ export class LiveView {
 
   private visualFor(object: LiveObject, colorIndex: number, frame: number): Visual {
     const paletteKey = this.housePaletteKeys.get(colorIndex) ?? '';
+    const artType = this.artType(object);
     const existing = this.visuals.get(object.uid);
     const firstFrame = this.appearances.get(object.uid)?.frame ?? frame;
     if (existing) existing.firstFrame = firstFrame;
-    // Owner changes (capture, mind control) repaint the object; art that was still loading is retried.
-    if (existing && existing.type === object.type && existing.paletteKey === paletteKey && !existing.pending)
-      return existing;
-    if (existing?.pending && !this.artReady(object)) return existing;
+    // Owner changes (capture, mind control) and engine image changes rebuild the visual; pending art is retried.
+    if (existing && existing.type === artType && existing.paletteKey === paletteKey) {
+      if (!existing.pending || !this.artReady(object)) return existing;
+    }
     if (existing) this.root.remove(existing.root);
     const visual = this.buildVisual(object, paletteKey, firstFrame);
     if (existing) {
@@ -1803,30 +1807,47 @@ export class LiveView {
     return visual;
   }
 
+  /** Resolve only the draw image; older/incomplete libraries retain the rules type's art. */
+  private artType(object: LiveObject): string {
+    const artType = object.imageType ?? object.type;
+    if (artType === object.type) return artType;
+    const type = this.library?.type(artType);
+    const sprite = !!type?.sprite && (object.kind === 'building' || object.kind === 'infantry' || !!type.shpUnit);
+    return type?.voxel ||
+      sprite ||
+      this.cache.voxels.has(artType) ||
+      (object.kind === 'building' && this.cache.manifest.sprites[`${object.kind}:${artType}`]?.frames.length)
+      ? artType
+      : object.type;
+  }
+
   /** Whether a pending object's library voxel has arrived. */
   private artReady(object: LiveObject): boolean {
-    const type = this.library?.type(object.type);
+    const artType = this.artType(object);
+    if (this.cache.voxels.has(artType)) return true;
+    const type = this.library?.type(artType);
     return !!type?.voxel && !!this.library!.voxel(type.voxel);
   }
 
   private buildVisual(object: LiveObject, paletteKey: string, firstFrame: number): Visual {
-    const libraryType = this.library?.type(object.type);
-    const base = { type: object.type, paletteKey, firstFrame };
+    const artType = this.artType(object);
+    const libraryType = this.library?.type(artType);
+    const base = { type: artType, paletteKey, firstFrame };
     if (libraryType?.sprite && (object.kind === 'building' || object.kind === 'infantry'))
       return { ...base, root: new Group(), mode: 'library-sprite', libraryType };
     // SHP vehicles and aircraft (terror drone, squid, dolphin) have directional sprites, not voxels.
     if (libraryType?.sprite && libraryType.shpUnit && (object.kind === 'vehicle' || object.kind === 'aircraft'))
       return { ...base, root: new Group(), mode: 'library-sprite', libraryType };
-    const spriteId = `${object.kind}:${object.type}`;
+    const spriteId = `${object.kind}:${artType}`;
     if (object.kind === 'building' && this.cache.manifest.sprites[spriteId]?.frames.length)
       return { ...base, root: new Group(), mode: 'map-sprite', sprite: spriteId };
-    const fromMap = this.cache.voxels.get(object.type);
+    const fromMap = this.cache.voxels.get(artType);
     const fromLibrary = !fromMap && libraryType?.voxel ? this.library!.voxel(libraryType.voxel) : null;
     const model = fromMap ?? fromLibrary;
     if (model) {
       const basePalette = fromMap ? model.palette : this.libraryPalette(model.palette);
       const key = paletteFor(this.cache, basePalette, libraryType?.remap ?? true, paletteKey || undefined);
-      const { root, turret } = this.voxelUnits.build(model, key, `${object.type}@${key}`);
+      const { root, turret } = this.voxelUnits.build(model, key, `${artType}@${key}`);
       return { ...base, root, turret, mode: 'voxel', libraryType };
     }
     // No art (yet): the object stays tracked but draws nothing (a stand-in block would read as a real, oddly

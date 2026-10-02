@@ -205,7 +205,7 @@ describe('HD bridge look parameters', () => {
 });
 
 describe('HD 桥状态机', () => {
-  it('forwards all H2 animation fields and keeps absent fields optional', async () => {
+  it('forwards engine image and H2 animation fields and keeps absent fields optional', async () => {
     const harness = setup();
     const view = await goLive(harness);
     const state = battle(3);
@@ -240,7 +240,8 @@ describe('HD 桥状态机', () => {
         sequenceFrame: 0,
         infantryDrawFacingRaw: 0,
       },
-      { ...common, id: 3, uid: 13, kind: 'vehicle', type: 'MTNK' },
+      { ...common, id: 3, uid: 13, kind: 'vehicle', type: 'HARV', imageType: 'HORV' },
+      { ...common, id: 4, uid: 14, kind: 'vehicle', type: 'CMIN' },
     ];
     harness.setState(state);
     await advance(16);
@@ -249,6 +250,12 @@ describe('HD 桥状态机', () => {
     expect(pushed.objects).toEqual(state.objects);
     expect(pushed.objects[2]).not.toHaveProperty('buildState');
     expect(pushed.objects[2]).not.toHaveProperty('sequenceFrame');
+    expect(pushed.objects[2]).toMatchObject({ type: 'HARV', imageType: 'HORV' });
+    expect(pushed.objects[3]).not.toHaveProperty('imageType');
+    delete state.objects[2]!.imageType;
+    harness.setState({ ...state });
+    await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].objects[2]).not.toHaveProperty('imageType');
     harness.stop();
   });
 

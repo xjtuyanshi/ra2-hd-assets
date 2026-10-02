@@ -309,6 +309,13 @@ Completed-building H2 also supplies `buildingFrame` and `buildingDamaged`: the e
 (including occupancy) is independent of the yellow condition used for bibs and damage-animation variants.
 Without these optional fields the view retains its library-yellow body/layer estimate.
 
+Optional object `imageType` forwards the engine's draw image without replacing the rules `type` used for health,
+selection, ownership and events. YR 1.001 UnitClass draw saves Type at `0x73D29C`, tests Harvester (+`0xE0E`) at
+`0x73D2A6` and Unloading (+`0x6D1`) at `0x73D2B0`, reads UnloadingClass (+`0x6B8`) at `0x73D2BA`, swaps Type at
+`0x73D2C4` and restores it at `0x73D3A2`. The reader validates the alternate UnitTypeClass pointer/vtable/id, so
+unloading HARV/CMIN draw HORV/CMON; absent or invalid fields and missing alternate art retain `type`. A rare poll
+inside the swap window can already see the unloading type for one snapshot. SCHP deployment is a separate policy.
+
 ## Known limits
 
 - The page skips native effects by default (`?hd-passthrough=` all) and the live view draws them itself from their

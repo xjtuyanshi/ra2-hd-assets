@@ -188,6 +188,12 @@ buildings light no windows
 and cast no light, except the map's invisible lamp-post dummies, which every player knows from the map. Without a
 sidecar the view falls back to land-type surfaces and no map light sources.
 
+Live object fields include optional `imageType`, the engine-selected draw image; `type` retains the rules identity
+for ownership, health and events. YR 1.001 tests Harvester at `0x73D2A6` and Unloading at `0x73D2B0`, reads
+UnloadingClass at `0x73D2BA`, then swaps Type at `0x73D2C4` and restores it at `0x73D3A2`: docked HARV/CMIN
+therefore draw HORV/CMON. Image changes rebuild the visual while retaining animation clocks; missing image art
+falls back to `type`.
+
 Live cell overlays (`src/live/overlays.ts`) draw each overlay's library frame at its cell. Rubble overlays
 (`LibraryOverlay.rubble`, rules IsRubble) never draw their own image: the carrier cell named in the snapshot's
 `overlays.rubble` draws its destroyed building's body frame 3 and shadow with the overlay's ISO palette, lighting and

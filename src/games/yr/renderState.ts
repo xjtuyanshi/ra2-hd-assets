@@ -250,6 +250,10 @@ function readChangeKey(memory: () => GuestMemoryAccessor): number[] | null {
       span(pointer, 0x674, 0x678); // Locomotor interface.
       span(pointer, 0x694, 0x698); // Building occupants.
       span(pointer, 0x6c0, 0x6c8); // Infantry type/sequence (unit/aircraft type).
+      if (vtable === YR_STATE_VTABLES.unit) {
+        if (!isPlausiblePointer(m, pointer, o.unitUnloading + 1)) return null;
+        word(m.u8(pointer + o.unitUnloading)); // Unloading can change the draw image within the same logic frame.
+      }
       if (vtable === YR_STATE_VTABLES.building) span(pointer, 0x6e8, 0x6ec); // HasBuildUp.
     }
     const rules = m.u32(YR_BUILDING_RULES.instance);
@@ -347,6 +351,7 @@ function projectObject(object: YrObjectState): GameRenderObject {
     uid,
     kind,
     type,
+    imageType,
     owner,
     x,
     y,
@@ -369,6 +374,7 @@ function projectObject(object: YrObjectState): GameRenderObject {
     uid,
     kind,
     type,
+    ...(imageType ? { imageType } : {}),
     owner,
     x,
     y,
