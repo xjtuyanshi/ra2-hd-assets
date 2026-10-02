@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createByteViewAccessor } from '../../src/games/shared/memoryAccessor';
 import {
   readYrBuildingRenderState,
+  readYrBuildingDockState,
   YR_BUILDING_RENDER_OFFSETS as O,
   YR_BUILDING_RULES as R,
 } from '../../src/games/yr/buildingRenderState';
@@ -235,5 +236,67 @@ describe('YR native completed-building art', () => {
     expect(m.read()).toEqual({ buildState: 'done' });
     m.i32(R.instance, m.bytes.length - 4);
     expect(m.read()).toEqual({ buildState: 'done' });
+  });
+});
+
+describe('YR building dock/delivery policy', () => {
+  it.each([O.refinery, O.unitRepair, O.helipad])(
+    'recognizes dock flag %s without requiring art or body state',
+    (flag) => {
+      const m = makeMemory();
+      expect(readYrBuildingDockState(m.memory, m.building, false)).toEqual({ dock: false });
+      m.u8(m.type + flag, 1);
+      expect(readYrBuildingDockState(m.memory, m.building, false)).toEqual({ dock: true });
+      m.u8(m.type + flag, 2);
+      expect(readYrBuildingDockState(m.memory, m.building, false)).not.toHaveProperty('dock');
+    },
+  );
+  it('does not treat WeaponsFactory as a dock, but a repair shipyard can be one', () => {
+    const m = makeMemory();
+    m.u8(m.type + 0x16bd, 1);
+    expect(readYrBuildingDockState(m.memory, m.building, false)).toEqual({ dock: false });
+    m.u8(m.type + O.unitRepair, 1);
+    expect(readYrBuildingDockState(m.memory, m.building, false)).toEqual({ dock: true });
+  });
+  it('uses only effective unload mission and omits unknown contact type state', () => {
+    const m = makeMemory();
+    const read = (roof: boolean | undefined) => readYrBuildingDockState(m.memory, m.building, roof);
+    m.i32(m.building + O.currentMission, 5);
+    m.i32(m.building + O.queuedMission, 16);
+    expect(read(false)).not.toHaveProperty('unloading');
+    m.i32(m.building + O.currentMission, -1);
+    expect(read(false)).toHaveProperty('unloading', 'door');
+    expect(read(true)).toHaveProperty('unloading', 'roof');
+    expect(read(undefined)).not.toHaveProperty('unloading');
+    m.i32(m.building + O.currentMission, 16);
+    m.i32(m.building + O.queuedMission, 32);
+    expect(read(false)).toHaveProperty('unloading', 'door');
+    m.i32(m.building + O.currentMission, 32);
+    expect(read(false)).not.toHaveProperty('unloading');
+  });
+  it('omits implausible building/type pointers and failed optional fields', () => {
+    const m = makeMemory();
+    for (const pointer of [0, m.building + 1, m.bytes.length - 4])
+      expect(readYrBuildingDockState(m.memory, pointer, false)).toEqual({});
+    for (const pointer of [0, m.type + 1, m.bytes.length - O.helipad]) {
+      m.i32(m.building + O.type, pointer);
+      expect(readYrBuildingDockState(m.memory, m.building, false)).not.toHaveProperty('dock');
+    }
+    m.i32(m.building + O.type, m.type);
+    m.i32(m.type, 0x7eb610);
+    expect(readYrBuildingDockState(m.memory, m.building, false)).not.toHaveProperty('dock');
+    m.i32(m.type, 0x7e4570);
+    expect(
+      readYrBuildingDockState(
+        {
+          ...m.memory,
+          u8: () => {
+            throw new Error('unavailable');
+          },
+        },
+        m.building,
+        false,
+      ),
+    ).not.toHaveProperty('dock');
   });
 });

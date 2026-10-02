@@ -6,6 +6,12 @@ export interface PainterObject {
   afterEqual?: boolean;
   /** Camera-space world units, independent of scene occupancy and camera movement. */
   bias: number;
+  /** Shared camera-space pull for sprite cards and voxel parts. */
+  pull?: number;
+  uid?: number;
+  contactUid?: number;
+  dock?: boolean;
+  unloading?: 'door' | 'roof';
   /** Building foundation and its northwest world coordinate, separate from the sprite's draw point. */
   foundation?: readonly [number, number];
   x: number;
@@ -59,5 +65,7 @@ export function painterObject(layer: number, ySort: number, index?: number): Pai
 
 /** Components retain physical depth, with a small, bounded tie-break over their own body. */
 export function spritePainterBias(object: PainterObject | undefined, part = 0): number {
-  return object && object.layer >= 2 ? object.bias + Math.max(0, Math.min(1, part)) * PAINTER_BIAS_STEP : 0;
+  return object && object.layer >= 2
+    ? object.bias + (object.pull ?? 0) + Math.max(0, Math.min(1, part)) * PAINTER_BIAS_STEP
+    : 0;
 }

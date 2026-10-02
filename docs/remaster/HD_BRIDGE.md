@@ -131,20 +131,27 @@ profile. Turrets and lamp heads clear that profile, while physical beams, rain, 
 same depth space. Stock high-bridge overlays use a horizontal depth plane four height levels above the cell,
 so neighboring deck pieces cannot sort ahead of an on-deck unit merely because of their cell keys.
 
-Visible layer-2 non-building voxel units receive a geometric camera-space dock pull only when their anchor cell is
-inside a visible building's foundation (`bx <= ux < bx + w`, `bz <= uz < bz + h`), native painter order places the
-unit after that building, and at least `DOCK_SETTLE_FRAMES` (6) logic frames have elapsed since its last observed
-move (or first appearance). Units outside the foundation already stand physically in front of the facade; moving
-units leaving a war-factory door remain behind it as in native drawing. `ra2/dockPull.ts` keeps a foundation-cell
-bucket lookup and samples `foundationPointPush` at the exact live anchor (`x/256`, `y/256`) and four axial offsets
+Visible layer-2 units receive a geometric camera-space dock pull only from their radio contact's visible building
+(`contactUid === host.uid`) when it reports `dock === true` and no `unloading` state. The exact anchor must lie
+inside the foundation or within its one-cell outer border, and native painter order must place the unit after the
+host. There is no stationary-frame gate, so backing-in units clear low pad art immediately. YR defines docks from
+Refinery, UnitRepair or Helipad; WeaponsFactory alone does not qualify. Missing contact/dock data disables pull.
+`ra2/dockPull.ts` samples `foundationPointPush` at the exact live anchor (`x/256`, `y/256`) and four axial offsets
 one cell away, separately from the floored painter cell. Pull is the nonnegative maximum sample plus
-`DOCK_PULL_MARGIN` (0.5), capped at `DOCK_PULL_MAX` (3.5); multiple qualifying buildings contribute their largest
-pull, never a sum. At the Soviet refinery NW (51,101), foundation [4,3], a live War Miner at (13952,26240) leptons
-has a maximum sample push of about 2.509 and receives about 3.009. Replay showed the former one-cell pull still cut
-the tipped bin, whereas about three cells placed the whole bin over the dish as native drawing does. This
-compensates for low pad/dish art without decoding YR's `BUILDNGZ.SHA` Z shapes. While active, the pull can draw a
-screen-overlapping unit passing within about three cells in front of the docked unit behind it; the cut-off bin
-was permanent at every dock. Building voxel turrets, aircraft above layer 2, projectiles and effects retain their biases.
+`DOCK_PULL_MARGIN` (0.5), capped at `DOCK_PULL_MAX` (3.5). At refinery NW (51,101), foundation [4,3], the measured unit
+anchor (13952,26240) leptons receives about 3.00949, compensating for low pad art without decoding `BUILDNGZ.SHA`.
+
+Other ground vehicles/infantry within three cells (Chebyshev) inherit enough pull to remain in front only when they
+follow a directly docked unit in painter order. Preceding units retain their depth, and propagation never cascades
+through passing units. `PainterObject.pull` feeds both sprite and voxel bias paths. Building turrets, aircraft
+above layer 2, projectiles and effects retain their existing biases.
+
+During effective Unload mission, completed buildings report `unloading: 'door' | 'roof'`. When both matching art
+layers exist, the deploying image/shadow replaces the body, then the healthy/damaged under-door card follows with
+its anchor, push and foundation profile. Queued Unload alone does not open the door unless CurrentMission is -1;
+radio link release during drive-out does not close it before the mission changes. Missing art pairs retain the
+normal body, and factory exits receive no dock pull. Native field/address evidence and the accompanying factory
+trace are in [Painter order research](research/painter-order.md#contacted-dock-pull-and-delivery-images).
 
 Ground decals, ore and shadow transforms retain their existing paths. The separate geometry-depth attachment
 keeps mist and shroud independent of the card's analytic occlusion depth. Older snapshots retain the Ground-key

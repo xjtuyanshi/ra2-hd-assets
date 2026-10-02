@@ -193,18 +193,80 @@ prove that the reported CAMIAM01/trooper and tree/explosion captures now match i
 Fog/shroud continue to use the separate geometry-depth attachment; static map previews enable it too now that
 their cards use the same analytic depth. The post-processing depth contract is unchanged.
 
+## Contacted dock pull and delivery images
+
+The analytic foundation profile does not decode low dock/pad recesses in `BUILDNGZ.SHA`. The measured refinery case
+has northwest cell `(51,101)`, foundation `4x3`, and unit anchor `(13952/256,26240/256)`. Sampling
+`foundationPointPush` at that exact anchor and its four one-cell axial neighbours, then adding `0.5`, yields about
+`3.00949` camera-space world units; the maximum is capped at `3.5`.
+
+`ra2/dockPull.ts` now requires the unit's `contactUid` to match the host building's `uid`, the host's `dock` to be
+true, and its `unloading` field to be absent. The unit must be in layer 2 without a foundation, drawn after its
+host in native painter order, with its exact anchor inside the foundation or its one-cell outer border. There is
+no stationary-frame gate: backing-in frames must clear the low pad too. Hosts are resolved by UID rather than by
+searching every foundation. Missing policy/contact data in older snapshots disables dock pull.
+
+YR 1.001 policy stays in `src/games/yr`:
+
+- RadioLinks is `VectorClass<TechnoClass*>` at `+0xE0` (observed vtable `0x7E180C`), with Items `+0xE4` and Capacity
+  `+0xE8`. GetNthLink `0x65AD40` indexes Items; ContainsLink `0x65AD50` scans Capacity entries. Contact ID publication
+  requires capacity `1..64`, plausible pointers/spans, and link 0 belonging to the validated objects of this snapshot.
+- BuildingType flags are UnitRepair `+0x16A9` (INI store `0x460929`), Refinery `+0x16BB` (`0x460A6C`), and Helipad
+  `+0x16CB` (`0x4604E0`). Their validated OR defines `dock`. WeaponsFactory `+0x16BD` (`0x460A8C`) alone is not a dock:
+  GAWEAP/NAWEAP/YAWEAP have radio links to newly produced units but must keep them behind the factory facade.
+  Repair shipyards also have WeaponsFactory, so their delivery phase independently disables pull.
+- Mission getter `0x5B3040` reads CurrentMission `+0xAC`, using QueuedMission `+0xB4` only when CurrentMission is `-1`.
+  DrawIt `0x43D33A..0x43D381` selects delivery only at effective mission `16`; roof delivery additionally requires
+  link 0's type to have JumpJet `+0xD94` (store `0x715200`) or BalloonHover `+0xD6A` (`0x714DA9`). The reader validates
+  each object's class vtable and existing class-specific type offset before reading these flags, instead of calling
+  GetTechnoType (virtual `+0x84`). Art availability does not determine the published delivery state.
+
+After direct dock pulls are computed, a different ground vehicle/infantry U within three cells (Chebyshev distance)
+of docked unit D's exact anchor inherits pull only if it follows D in painter order:
+
+```text
+pull_U = max(pull_U, 0, pull_D - ((U.x + U.z) - (D.x + D.z)) * sqrt(3/8) + 0.05)
+```
+
+Coordinates in this expression are cell anchors. This preserves overlap ordering for passing units; units before
+D are never pulled. Only directly docked units are sources, so propagation does not cascade through a crowd or
+alter another directly docked unit. `PainterObject.pull` enters `spritePainterBias`, which both SHP cards and voxel
+parts consume. Buildings, their turrets, effects and projectiles do not participate in this propagation.
+
+The factory's delivery art is a body image substitution, not an attached AnimClass. Art loaders store DeployingAnim
+`+0x14E4` at `0x45F3A7`, UnderDoorAnim `+0x14EC` at `0x45F5DF`, RoofDeployingAnim `+0x14FC` at `0x45F47F`, and
+UnderRoofDoorAnim `+0x1504` at `0x45F78B`. DrawIt `0x43D692..0x43D6D3` / `0x43D7D2` substitutes the deploying shape
+(native Z adjust -20, roof -40); `0x43D7A7..0x43D7EE` clamps GetCurrentFrame (`0x43EF90`) to its foreground half.
+`0x43D8EE..0x43D9C9` and roof `0x43D9D8..0x43DA67` then draw the under-door section at yellow-damage frame 1, else 0.
+
+`LiveView.libraryBuildingSprites` uses these library key pairs while a completed building reports `unloading`.
+It clamps the replacement body frame to `frames.length - 1`, substitutes its shadow, and queues the under-door
+frame immediately after the body with the same anchor, push and foundation painter profile. Each sprite retains
+the existing palette/remap handling. Thus a unit inside remains behind the facade and emerges across its edge;
+there is no factory-exit dock pull. Missing/empty pairs retain the normal body. Bibs, active layers, construction
+and selling frames, and voxel turrets are unchanged.
+
+An accompanying native NAWEAP/Rhino trace observed CurrentMission `5` with QueuedMission `16` when the tank appeared
+(door still closed), then CurrentMission `16` thirteen logic frames later with link 0 pointing at the tank inside
+the foundation. Mission `16` persisted for about five seconds during drive-out; link 0 was released after the unit
+left the foundation, then mission returned to `5` and the door closed. This supports effective-mission gating and
+keeping the door image through link release. It is native-state evidence supplied with this task, not live HD
+rendered-pixel acceptance of the implementation.
+
 ## Update ownership and regressions
 
 `LiveView` refreshes traversal metadata for a new snapshot, changed registration, art/cell rebuild or visibility
 change. An interpolation-only presentation updates poses/anchors without assigning biases or sorting cards.
-Static trees, cells and overlay pages retain depth profiles and never join unit/effect uploads. Scratch arrays
-and sprite records are retained; the ordering refresh creates no temporary sort arrays or Sets. Particle cards
+Static trees, cells and overlay pages retain depth profiles and never join unit/effect uploads. Sprite records
+are retained; the ordering refresh creates a UID host map and direct-dock/passing anchor lists, without sorting
+them. Particle cards
 own a separate pool reset by `applyEffects`, so an asynchronously loaded turret cannot overwrite their anchors.
 
 A same-frame registration-only push replaces metadata on the existing timed snapshot and UID map, retaining
 `previous`, `current.at`, object poses and camera endpoints. It invalidates object ordering, not the effects clock.
 
-Asset-free coverage is in `packages/hd-renderer/tests/painterOrder.test.ts`, `liveOcclusion.test.ts`,
+Asset-free coverage is in `packages/hd-renderer/tests/painterOrder.test.ts`, `dockPull.test.ts`,
+`liveBuildingDelivery.test.ts`, `liveOcclusion.test.ts`,
 `liveScheduling.test.ts`, `effectBuffers.test.ts`, `effectOcclusion.test.ts`, `projectiles.test.ts`,
 `vertexBuffers.test.ts`, and `tests/basic/liveSmudges.test.ts`.
 The LiveView regression executes the real push/render/object/effect/order methods with GPU/resource boundaries

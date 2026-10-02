@@ -208,6 +208,112 @@ describe('guest memory accessors', () => {
 });
 
 describe('YR 1.001 state reader', () => {
+  const radio = (m: ReturnType<typeof syntheticMemory>, object: number, contact: number, capacity = 1) => {
+    const items = m.alloc(64 * 4);
+    m.u32(items, contact);
+    m.u32(object + O.radioItems, items);
+    m.i32(object + O.radioCapacity, capacity);
+    return items;
+  };
+
+  it('resolves stable contact IDs after all kinds, including aircraft and reciprocal building links', () => {
+    const { m, tank, soldier, yard, player } = battlefield();
+    const type = m.type(V.aircraftType, 'TESTAIR', 100);
+    const aircraft = m.object(V.aircraft, O.aircraftType, type, player, { x: 256, y: 512, health: 100, uid: 16 });
+    m.vector(G.aircraft, [aircraft]);
+    for (const unit of [tank, soldier, aircraft]) radio(m, unit, yard, 64);
+    radio(m, yard, aircraft);
+    const read = readYrState(createByteViewAccessor(m.bytes));
+    for (const unit of [tank, soldier, aircraft])
+      expect(read.objects.find((o) => o.id === unit)).toMatchObject({ contactUid: 15 });
+    expect(read.objects.find((o) => o.id === yard)).toMatchObject({ contactUid: 16, dock: false });
+  });
+
+  it.each([O.typeJumpJet, O.typeBalloonHover])('selects roof delivery from validated contact type flag %s', (flag) => {
+    const { m, tank, yard } = battlefield();
+    radio(m, yard, tank);
+    m.i32(yard + B.currentMission, 16);
+    const type = m.view.getUint32(tank + O.unitType, true);
+    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects.find((o) => o.id === yard);
+    expect(read()).toMatchObject({ contactUid: 11, unloading: 'door' });
+    m.u8(type + flag, 1);
+    expect(read()).toMatchObject({ unloading: 'roof' });
+    m.i32(yard + B.currentMission, 5);
+    m.i32(yard + B.queuedMission, 16);
+    expect(read()).not.toHaveProperty('unloading');
+    m.i32(yard + B.currentMission, -1);
+    expect(read()).toMatchObject({ unloading: 'roof' });
+    m.u8(type + flag, 2);
+    expect(read()).not.toHaveProperty('unloading');
+  });
+
+  it('keeps the delivery image through link release until the effective mission returns to Guard', () => {
+    const { m, tank, yard } = battlefield();
+    const items = radio(m, yard, tank);
+    m.i32(yard + B.currentMission, 5);
+    m.i32(yard + B.queuedMission, 16);
+    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects.find((o) => o.id === yard);
+    expect(read()).not.toHaveProperty('unloading');
+    m.i32(yard + B.currentMission, 16);
+    expect(read()).toHaveProperty('unloading', 'door');
+    m.u32(items, 0);
+    expect(read()).not.toHaveProperty('contactUid');
+    expect(read()).toHaveProperty('unloading', 'door');
+    m.i32(yard + B.currentMission, 5);
+    expect(read()).not.toHaveProperty('unloading');
+  });
+
+  it.each([-1, 0, 65, 0x7fffffff])('omits contacts with invalid/empty capacity %s', (capacity) => {
+    const { m, tank, yard } = battlefield();
+    radio(m, tank, yard, capacity);
+    radio(m, yard, tank, capacity);
+    m.i32(yard + B.currentMission, 16);
+    const read = readYrState(createByteViewAccessor(m.bytes));
+    expect(read.objects.find((o) => o.id === tank)).not.toHaveProperty('contactUid');
+    const host = read.objects.find((o) => o.id === yard);
+    expect(host).not.toHaveProperty('contactUid');
+    if (capacity === 0) expect(host).toHaveProperty('unloading', 'door');
+    else expect(host).not.toHaveProperty('unloading');
+  });
+
+  it('omits stale, limbo, misaligned and out-of-range radio pointers without losing valid objects', () => {
+    const { m, tank, yard, limboMcv } = battlefield();
+    const items = radio(m, tank, yard);
+    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects.find((o) => o.id === tank);
+    for (const contact of [0, 3, m.bytes.length, limboMcv, m.alloc(0x700)]) {
+      m.u32(items, contact);
+      expect(read()).not.toHaveProperty('contactUid');
+    }
+    m.u32(items, yard);
+    for (const bad of [0, items + 1, m.bytes.length - 4]) {
+      m.u32(tank + O.radioItems, bad);
+      m.i32(tank + O.radioCapacity, 2);
+      expect(read()).not.toHaveProperty('contactUid');
+    }
+    m.u32(tank + O.radioItems, items);
+    m.i32(tank + O.radioCapacity, 1);
+    expect(read()).toHaveProperty('contactUid', 15);
+  });
+
+  it('contains failed optional radio accessors and invalid dock flag reads', () => {
+    const { m, tank, yard } = battlefield();
+    radio(m, tank, yard);
+    const base = createByteViewAccessor(m.bytes);
+    const memory = {
+      ...base,
+      i32: (at: number) => {
+        if (at === tank + O.radioCapacity) throw new Error('unavailable');
+        return base.i32(at);
+      },
+    };
+    expect(readYrState(memory).objects.find((o) => o.id === tank)).not.toHaveProperty('contactUid');
+    const type = m.view.getUint32(yard + O.buildingType, true);
+    m.u8(type + B.refinery, 1);
+    expect(readYrState(base).objects.find((o) => o.id === yard)).toHaveProperty('dock', true);
+    m.u8(type + B.helipad, 2);
+    expect(readYrState(base).objects.find((o) => o.id === yard)).not.toHaveProperty('dock');
+  });
+
   it('carries a validated JumpJet target facing without replacing primary facing', () => {
     const { m, soldier, tank } = battlefield();
     const data = new DataView(m.bytes.buffer);
@@ -394,6 +500,7 @@ describe('YR 1.001 state reader', () => {
         health: 0.5,
         isSelected: false,
         buildState: 'done',
+        dock: false,
       },
       {
         id: tank,

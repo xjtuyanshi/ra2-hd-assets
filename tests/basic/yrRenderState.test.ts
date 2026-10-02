@@ -405,6 +405,9 @@ describe('YR 1.001 render state for the HD bridge', () => {
       buildupFrame: 0,
       buildingFrame: 0,
       buildingDamaged: false,
+      contactUid: 0,
+      dock: false,
+      unloading: 'roof',
     };
     state.objects[1] = {
       ...state.objects[1]!,
@@ -419,12 +422,18 @@ describe('YR 1.001 render state for the HD bridge', () => {
       buildupFrame: 0,
       buildingFrame: 0,
       buildingDamaged: false,
+      contactUid: 0,
+      dock: false,
+      unloading: 'roof',
     });
     expect(result.objects[1]).toMatchObject({
       infantrySequence: 'FireProne',
       sequenceFrame: 0,
       infantryDrawFacingRaw: 0,
     });
+    expect(result.objects[1]).not.toHaveProperty('contactUid');
+    expect(result.objects[1]).not.toHaveProperty('dock');
+    expect(result.objects[1]).not.toHaveProperty('unloading');
     expect(result.objects[1]).not.toHaveProperty('buildState');
     expect(result.objects[0]).not.toHaveProperty('infantrySequence');
     expect(structuredClone(result)).toEqual(result);

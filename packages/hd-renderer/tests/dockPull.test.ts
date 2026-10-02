@@ -1,149 +1,136 @@
 import { describe, expect, it } from 'vitest';
 import { foundationPointPush } from '../src/ra2/cardDepth';
-import {
-  bucketDockBuildings,
-  DOCK_PULL_MARGIN,
-  DOCK_PULL_MAX,
-  DOCK_SETTLE_FRAMES,
-  dockPull,
-} from '../src/ra2/dockPull';
-import { painterObject, type PainterObject } from '../src/ra2/painterOrder';
+import { DOCK_PULL_MARGIN, DOCK_PULL_MAX, dockPull, propagateDockPull } from '../src/ra2/dockPull';
+import { painterObject, spritePainterBias, type PainterObject } from '../src/ra2/painterOrder';
 
 const building = (index?: number): PainterObject => ({
   ...painterObject(2, 100, index),
+  uid: 1,
+  dock: true,
   x: 10,
   z: 20,
   foundation: [4, 3],
 });
-const unit = (x = 13, z = 21, index?: number): PainterObject => ({ ...painterObject(2, 200, index), x, z });
+const unit = (x = 13, z = 21, index?: number): PainterObject => ({
+  ...painterObject(2, 200, index),
+  uid: 2,
+  contactUid: 1,
+  x,
+  z,
+});
 const anchor = (u: PainterObject) => ({ x: u.x + 0.5, z: u.z + 0.5 });
-const settledPull = (u: PainterObject, buildings?: readonly PainterObject[]) =>
-  dockPull(u, anchor(u), DOCK_SETTLE_FRAMES, buildings);
+const pull = (u: PainterObject, host = building()) => dockPull(u, anchor(u), host);
 
-describe('bounded voxel dock pull', () => {
-  it('matches the measured War Miner footprint at the Soviet refinery with exact lepton coordinates', () => {
-    const refinery = { ...building(), x: 51, z: 101 };
+describe('contacted dock pull', () => {
+  it.each([0, 100])('never pulls a factory exit, independently of %s stationary frames', (stationaryFrames) => {
+    const u = { ...unit(12, 21), stationaryFrames };
+    for (const host of [
+      { ...building(), foundation: [5, 3] as const, dock: false },
+      { ...building(), foundation: [5, 3] as const, unloading: 'door' as const },
+      { ...building(), foundation: [5, 3] as const, unloading: 'roof' as const },
+    ])
+      expect(pull(u, host)).toBe(0);
+  });
+
+  it.each([0, 100])('matches the measured dock even at %s stationary frames', (stationaryFrames) => {
+    const host = { ...building(), x: 51, z: 101 };
     const exact = { x: 13952 / 256, z: 26240 / 256 };
-    const miner = unit(Math.floor(exact.x), Math.floor(exact.z));
-    const samplePushes = (
-      [
-        [0, 0],
-        [-1, 0],
-        [1, 0],
-        [0, -1],
-        [0, 1],
-      ] as const
-    ).map(([dx, dz]) => foundationPointPush(exact.x + dx - refinery.x, exact.z + dz - refinery.z, 4, 3));
-    const pull = dockPull(miner, exact, DOCK_SETTLE_FRAMES, [refinery]);
-    expect(Math.abs(pull - (Math.max(...samplePushes) + 0.5))).toBeLessThan(0.05);
-    expect(pull).toBeCloseTo(3.00949, 5);
+    const u = { ...unit(Math.floor(exact.x), Math.floor(exact.z)), stationaryFrames };
+    expect(dockPull(u, exact, host)).toBeCloseTo(3.00949, 5);
     expect(DOCK_PULL_MARGIN).toBe(0.5);
   });
 
-  it('uses subcell anchors without changing floored painter coordinates', () => {
+  it('uses the exact subcell anchor without changing painter coordinates', () => {
     const u = unit();
-    const west = dockPull(u, { x: 13.25, z: 21.5 }, DOCK_SETTLE_FRAMES, [building()]);
-    const east = dockPull(u, { x: 13.75, z: 21.5 }, DOCK_SETTLE_FRAMES, [building()]);
-    expect(west).toBeGreaterThan(east);
+    expect(dockPull(u, { x: 13.25, z: 21.5 }, building())).toBeGreaterThan(
+      dockPull(u, { x: 13.75, z: 21.5 }, building()),
+    );
     expect(u).toMatchObject({ x: 13, z: 21 });
   });
 
-  it.each([0, 1, 5])('does not pull a unit stationary for only %s logic frames', (stationaryFrames) => {
-    const u = unit();
-    expect(dockPull(u, anchor(u), stationaryFrames, [building()])).toBe(0);
-  });
-
-  it.each([6, 7, 100])('pulls a unit stationary for %s logic frames', (stationaryFrames) => {
-    const u = unit();
-    expect(dockPull(u, anchor(u), stationaryFrames, [building()])).toBeCloseTo(3.00949, 5);
-    expect(DOCK_SETTLE_FRAMES).toBe(6);
-  });
-
-  it('does not pull a unit with an earlier fallback ySort', () => {
-    expect(settledPull({ ...unit(), ySort: 50 }, [building()])).toBe(0);
-  });
-
-  it('uses registered order even when ySort implies the reverse', () => {
-    const b = building(2);
-    expect(settledPull(unit(13, 21, 1), [b])).toBe(0);
-    expect(settledPull({ ...unit(13, 21, 3), ySort: 50 }, [b])).toBeGreaterThan(0);
-    expect(settledPull(unit(13, 21, 2), [b])).toBe(0);
-  });
-
   it.each([
-    ['east boundary', 14, 21],
-    ['south boundary', 12, 23],
-    ['front corner', 14, 23],
-    ['two cells east', 15, 21],
-    ['two cells south', 12, 24],
-    ['north', 12, 19],
-    ['west', 9, 21],
-    ['northeast', 14, 19],
-    ['southwest', 9, 23],
-  ] as const)('does not pull a later unit outside the foundation at the %s', (_, x, z) => {
-    expect(settledPull(unit(x, z), [building()])).toBe(0);
+    [14, 21],
+    [12, 23],
+    [14, 23],
+    [9, 21],
+    [12, 19],
+  ])('pulls while backing in at (%s, %s)', (x, z) => {
+    expect(pull(unit(x, z))).toBeGreaterThan(0);
   });
-
-  it('includes the northwest boundary of the foundation', () => {
-    const u = unit(10, 20);
-    expect(dockPull(u, { x: 10, z: 20 }, DOCK_SETTLE_FRAMES, [building()])).toBeGreaterThan(0);
+  it.each([
+    [16, 21],
+    [12, 25],
+    [8, 21],
+    [12, 18],
+  ])('does not pull a distant contact at (%s, %s)', (x, z) => {
+    expect(pull(unit(x, z))).toBe(0);
   });
-
-  it('caps a tall facade footprint at 3.5 camera-space world units', () => {
+  it.each([undefined, 99])('requires contactUid matching the host (%s)', (contactUid) => {
+    expect(pull({ ...unit(), contactUid })).toBe(0);
+  });
+  it('disables pull without validated host data', () => {
+    expect(dockPull(unit(), anchor(unit()))).toBe(0);
+    expect(pull(unit(), { ...building(), dock: undefined })).toBe(0);
+    expect(pull(unit(), { ...building(), uid: undefined })).toBe(0);
+  });
+  it('retains the native traversal condition, including registered order over ySort', () => {
+    expect(pull({ ...unit(), ySort: 50 })).toBe(0);
+    const host = building(2);
+    expect(pull(unit(13, 21, 1), host)).toBe(0);
+    expect(pull(unit(13, 21, 2), host)).toBe(0);
+    expect(pull({ ...unit(13, 21, 3), ySort: 50 }, host)).toBeGreaterThan(0);
+  });
+  it('caps the maximum of the five foundation samples at 3.5', () => {
     expect(foundationPointPush(0.5, 0.5, 4, 3) + DOCK_PULL_MARGIN).toBeGreaterThan(DOCK_PULL_MAX);
-    expect(settledPull(unit(10, 20), [building()])).toBe(3.5);
-    expect(DOCK_PULL_MAX).toBe(3.5);
+    expect(pull(unit(10, 20))).toBe(3.5);
   });
-
-  it('takes the largest qualifying building pull, never a sum or just the first', () => {
-    const u = unit();
-    const lower = { ...building(), foundation: [4, 2] as const };
-    const higher = building();
-    const lowerPull = settledPull(u, [lower]);
-    const higherPull = settledPull(u, [higher]);
-    expect(lowerPull).toBeGreaterThan(0);
-    expect(higherPull).toBeGreaterThan(lowerPull);
-    expect(lowerPull + higherPull).toBeGreaterThan(DOCK_PULL_MAX);
-    expect(settledPull(u, [lower, higher])).toBe(higherPull);
-    expect(settledPull(u, [higher, lower])).toBe(higherPull);
-    expect(settledPull(u, [higher, higher])).toBe(higherPull);
+  it.each([0, 1, 3, 4])('does not pull layer %s', (layer) => {
+    expect(pull({ ...unit(), layer })).toBe(0);
   });
-
-  it.each([0, 1, 3, 4])('does not pull a unit in layer %s', (layer) => {
-    expect(settledPull({ ...unit(), layer }, [building()])).toBe(0);
-  });
-
-  it('ignores different-layer buildings and building-owned voxel painters', () => {
-    expect(settledPull(unit(), [{ ...building(), layer: 3 }])).toBe(0);
-    expect(settledPull({ ...unit(), foundation: [1, 1] }, [building()])).toBe(0);
-  });
-
-  it('ignores absent and empty foundations', () => {
+  it('ignores non-ground hosts, buildings and absent/empty foundations', () => {
+    expect(pull(unit(), { ...building(), layer: 3 })).toBe(0);
+    expect(pull({ ...unit(), foundation: [1, 1] })).toBe(0);
     for (const foundation of [undefined, [0, 3], [4, 0]] as const)
-      expect(settledPull(unit(), [{ ...building(), foundation }])).toBe(0);
-    expect(settledPull(unit())).toBe(0);
+      expect(pull(unit(), { ...building(), foundation })).toBe(0);
   });
+});
 
-  it('buckets only the NW foundation rectangle without scanning distant or ineligible buildings', () => {
-    const b = building();
-    const other = { ...building(), x: 11 };
-    const far = { ...building(), x: 100, z: 200 };
-    const cells = bucketDockBuildings([
-      b,
-      other,
-      far,
-      { ...building(), layer: 3 },
-      { ...building(), foundation: undefined },
-      { ...building(), foundation: [0, 3] },
-    ]);
-    expect(cells.get(10)?.get(20)).toEqual([b]);
-    expect(cells.get(13)?.get(22)).toEqual([b, other]);
-    expect(cells.get(14)?.get(21)).toEqual([other]);
-    expect(cells.get(13)?.get(23)).toBeUndefined();
-    expect(cells.get(10)?.get(19)).toBeUndefined();
-    expect(cells.get(9)).toBeUndefined();
-    expect(cells.get(15)).toBeUndefined();
-    expect(settledPull(unit(), cells.get(13)?.get(21))).toBe(settledPull(unit(), [b, other]));
-    expect(settledPull(unit(15, 21), cells.get(15)?.get(21))).toBe(0);
+describe('passing ground units retain native order', () => {
+  const depth = (u: PainterObject) => (u.x + u.z + 1) * Math.sqrt(3 / 8) + spritePainterBias(u);
+  it.each([1, 2])('keeps a later unit %s cells in front over a pulled unit', (distance) => {
+    const d = unit(13, 21, 3);
+    d.pull = pull(d, building(2));
+    const u = { ...unit(13 + distance, 21, 4), contactUid: undefined };
+    const source = { painter: d, anchor: anchor(d) };
+    propagateDockPull([{ painter: u, anchor: anchor(u) }], [source]);
+    expect(u.pull).toBeGreaterThan(0);
+    expect(depth(u)).toBeGreaterThan(depth(d));
+    expect(depth(u) - depth(d)).toBeCloseTo(0.05, 10);
+  });
+  it('leaves earlier, distant, non-ground and building painters unchanged', () => {
+    const d = unit(13, 21, 3);
+    d.pull = 3;
+    const others = [
+      unit(12, 21, 2),
+      unit(17, 21, 4),
+      { ...unit(14, 21, 4), layer: 4 },
+      { ...unit(14, 21, 4), foundation: [1, 1] as const },
+    ];
+    propagateDockPull(
+      others.map((painter) => ({ painter, anchor: anchor(painter) })),
+      [{ painter: d, anchor: anchor(d) }],
+    );
+    for (const u of others) expect(u.pull ?? 0).toBe(0);
+  });
+  it('does not propagate through passing units or change directly docked pulls', () => {
+    const d = unit(13, 21, 3);
+    d.pull = 3;
+    const u = unit(15, 21, 4);
+    const far = unit(17, 21, 5);
+    const units = [d, u, far].map((painter) => ({ painter, anchor: anchor(painter) }));
+    propagateDockPull(units, [units[0]!]);
+    expect(d.pull).toBe(3);
+    expect(u.pull).toBeGreaterThan(0);
+    expect(far.pull ?? 0).toBe(0);
   });
 });

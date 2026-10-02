@@ -78,6 +78,12 @@ export interface GameRenderObject extends GameRenderPoint {
   buildingFrame?: number;
   /** Engine damage condition for bibs and animation layers; independent of the body-frame policy. */
   buildingDamaged?: boolean;
+  /** Validated radio contact's stable ID in this snapshot. */
+  contactUid?: number;
+  /** Host can dock/service units; supplied by the game policy. */
+  dock?: boolean;
+  /** Engine-selected delivery image, independent of available art. */
+  unloading?: 'door' | 'roof';
   /** Current infantry art sequence key, when the game can report it. */
   infantrySequence?: string;
   /** Animation step within infantrySequence, before its start/facing offsets. */

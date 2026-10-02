@@ -27,7 +27,7 @@ import {
   type PainterObject,
 } from '../ra2/painterOrder';
 import { foundationPointPush } from '../ra2/cardDepth';
-import { bucketDockBuildings, dockPull } from '../ra2/dockPull';
+import { dockPull, propagateDockPull, type DockPullUnit } from '../ra2/dockPull';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 import { setShadowOrigin } from '../ra2/voxelShadow';
 import { loadRa2World, type HdWorld } from '../ra2/world';
@@ -91,6 +91,12 @@ export interface LiveObject {
   buildupFrame?: number;
   buildingFrame?: number;
   buildingDamaged?: boolean;
+  /** Validated radio contact's stable ID in this snapshot. */
+  contactUid?: number;
+  /** Host can dock/service units; supplied by the game policy. */
+  dock?: boolean;
+  /** Engine-selected delivery image, independent of available art. */
+  unloading?: 'door' | 'roof';
   /** Bridge (H2): infantry sequence key (e.g. "Walk", "Die1", "FireUp") and sequence-local animation step. */
   infantrySequence?: string;
   sequenceFrame?: number;
@@ -1134,6 +1140,10 @@ export class LiveView {
           registered?.ySort ??
           objectYSort(object.x, object.y, object.kind === 'building', !!visual.libraryType?.building?.turretVoxel);
         painter.index = registered?.index;
+        painter.uid = object.uid;
+        painter.contactUid = object.contactUid;
+        painter.dock = object.dock;
+        painter.unloading = object.unloading;
         painter.foundation =
           object.kind === 'building'
             ? (visual.libraryType?.foundation ??
@@ -1188,12 +1198,13 @@ export class LiveView {
     this.painterDirty = false;
     const objects = this.painterObjects;
     objects.length = 0;
-    const buildings: PainterObject[] = [];
+    const buildings = new Map<number, PainterObject>();
     for (const [uid, visual] of this.visuals) {
       if (!visual.root.visible || !visual.painter) continue;
+      visual.painter.pull = 0;
       objects.push(visual.painter);
       if (this.current?.byUid.get(uid)?.kind === 'building' && visual.painter.foundation)
-        buildings.push(visual.painter);
+        buildings.set(uid, visual.painter);
     }
     for (const effect of this.effectInstances) {
       if (effect.pass !== 'ground' || effect.draw !== 'card') continue;
@@ -1203,23 +1214,22 @@ export class LiveView {
     }
     if (this.projectiles) for (const entry of this.projectiles.painterEntries()) objects.push(entry.painter);
     assignPainterBias(objects);
-    const buildingCells = bucketDockBuildings(buildings);
+    const docked: DockPullUnit[] = [];
+    const passing: DockPullUnit[] = [];
     for (const [uid, visual] of this.visuals) {
       const painter = visual.painter;
+      const object = this.current?.byUid.get(uid);
+      if (!painter || !visual.root.visible || !object || object.kind === 'building') continue;
+      const unit = { painter, anchor: { x: object.x / LEPTONS_PER_CELL, z: object.y / LEPTONS_PER_CELL } };
+      painter.pull = dockPull(painter, unit.anchor, buildings.get(object.contactUid!));
+      if (painter.pull > 0) docked.push(unit);
+      if (object.kind === 'vehicle' || object.kind === 'infantry') passing.push(unit);
+    }
+    propagateDockPull(passing, docked);
+    for (const visual of this.visuals.values()) {
+      const painter = visual.painter;
       if (!painter || !visual.root.visible) continue;
-      if (visual.mode === 'voxel') {
-        const object = this.current?.byUid.get(uid);
-        const pull =
-          object && object.kind !== 'building'
-            ? dockPull(
-                painter,
-                { x: object.x / LEPTONS_PER_CELL, z: object.y / LEPTONS_PER_CELL },
-                this.current!.snapshot.frame - (visual.lastMoveFrame ?? visual.firstFrame),
-                buildingCells.get(painter.x)?.get(painter.z),
-              )
-            : 0;
-        this.voxelUnits.setPainterBias(visual, spritePainterBias(painter) + pull);
-      }
+      if (visual.mode === 'voxel') this.voxelUnits.setPainterBias(visual, spritePainterBias(painter));
       if (visual.buildingTurret) this.voxelUnits.setPainterBias(visual.buildingTurret, spritePainterBias(painter, 0.4));
     }
     if (this.projectiles)
@@ -1438,23 +1448,47 @@ export class LiveView {
         this.spritePool.take(anchor, bibFrame, this.buildingPalette(bib, visual.paletteKey), 0, false, true),
         !bib.remap,
       );
-    const shadow = entry.shadows?.[body];
+    const layers = type.building?.layers ?? EMPTY_LAYERS;
+    const deployingKey = object.unloading === 'roof' ? 'RoofDeployingAnim' : 'DeployingAnim';
+    const doorKey = object.unloading === 'roof' ? 'UnderRoofDoorAnim' : 'UnderDoorAnim';
+    const deploying = object.unloading
+      ? sprites[layers.find((layer) => layer.key === deployingKey)?.sprite ?? '']
+      : undefined;
+    const door = object.unloading ? sprites[layers.find((layer) => layer.key === doorKey)?.sprite ?? ''] : undefined;
+    // Delivery images are body replacements. Explicit construction/selling state still owns the art path
+    // even when a library has no make sprite; the door card shares the body's foundation profile below.
+    const delivering =
+      object.buildState !== 'building' &&
+      object.buildState !== 'selling' &&
+      !!deploying?.frames.length &&
+      !!door?.frames.length;
+    const bodyArt = delivering ? deploying! : entry;
+    const shownBody = delivering ? Math.min(body, bodyArt.frames.length - 1) : body;
+    const shadow = bodyArt.shadows?.[shownBody];
     if (shadow)
       this.queue(
         batch,
-        this.spritePool.take(anchor, shadow, this.buildingPalette(entry, visual.paletteKey), 0, true, true),
-        !entry.remap,
+        this.spritePool.take(anchor, shadow, this.buildingPalette(bodyArt, visual.paletteKey), 0, true, true),
+        !bodyArt.remap,
       );
-    const bodyFrame = entry.frames[body];
+    const bodyFrame = bodyArt.frames[shownBody];
     const push = bodyFrame ? cardPush(bodyFrame) : 0.03;
     if (bodyFrame && bodyFrame.rect[2] > 0)
       this.queue(
         batch,
-        this.spritePool.take(anchor, bodyFrame, this.buildingPalette(entry, visual.paletteKey), push, false),
-        !entry.remap,
+        this.spritePool.take(anchor, bodyFrame, this.buildingPalette(bodyArt, visual.paletteKey), push, false),
+        !bodyArt.remap,
       );
 
-    const layers = type.building?.layers ?? EMPTY_LAYERS;
+    if (delivering) {
+      const doorFrame = door!.frames[Math.min(damaged ? 1 : 0, door!.frames.length - 1)];
+      if (doorFrame && doorFrame.rect[2] > 0)
+        this.queue(
+          batch,
+          this.spritePool.take(anchor, doorFrame, this.buildingPalette(door!, visual.paletteKey), push, false),
+          !door!.remap,
+        );
+    }
     const native = this.nativeBuildingAnims(object, type);
 
     if (native) {

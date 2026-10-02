@@ -7,8 +7,7 @@ import { SpritePool } from '../src/live/spritePool';
 import { VoxelUnits } from '../src/live/voxelUnits';
 import type { Ra2Cache } from '../src/ra2/cache';
 import { foundationPointPush } from '../src/ra2/cardDepth';
-import { DOCK_SETTLE_FRAMES } from '../src/ra2/dockPull';
-import { MAX_PAINTER_BIAS, spritePainterBias, type PainterObject } from '../src/ra2/painterOrder';
+import { MAX_PAINTER_BIAS, painterObject, spritePainterBias, type PainterObject } from '../src/ra2/painterOrder';
 import { SpriteLayer } from '../src/ra2/sprites';
 import { VOXEL_CLEARANCE, VoxelUnit } from '../src/ra2/voxels';
 import { VolumetricBlastLayer } from '../src/volumetricBlasts';
@@ -37,12 +36,13 @@ const snapshot = (frame: number, x: number): LiveSnapshot => ({
 const dockSnapshot = (frame: number, x = 13952, y = 26240): LiveSnapshot => ({
   ...snapshot(frame, 0),
   objects: [
-    { ...object(x), y, renderOrder: { layer: 2, index: 8, ySort: 40192 } },
+    { ...object(x), contactUid: 2, y, renderOrder: { layer: 2, index: 8, ySort: 40192 } },
     {
       ...object(51 * 256 + 128),
       uid: 2,
       type: 'TESTBUILD',
       kind: 'building',
+      dock: true,
       y: 101 * 256 + 128,
       renderOrder: { layer: 2, index: 7, ySort: 38912 },
     },
@@ -156,22 +156,56 @@ function presentation() {
 }
 
 describe('LiveView physical occlusion scheduling', () => {
-  it('pulls the measured dock footprint after settling, keeps turret bias, and refreshes only on changed inputs', () => {
+  it.each(['infantry', 'vehicle'] as const)(
+    'uploads propagated pull for a passing sprite %s and removes it behind the dock',
+    (kind) => {
+      const p = presentation();
+      p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
+      p.view.push(dockSnapshot(1), 0);
+      p.view.render(0);
+      const passing: LiveObject = { ...object(13952 + 256), uid: 3, kind, y: 26240 };
+      p.live.current!.byUid.set(passing.uid, passing);
+      const painter = { ...painterObject(2, 0, 9), uid: 3, x: 55, z: 102 };
+      p.live.visuals.set(3, { ...p.visual, mode: 'library-sprite', root: new VoxelUnit(), painter });
+      // The same pooled upright record used by both infantry and SHP vehicle draw paths.
+      const pool = new SpritePool();
+      pool.painter = painter;
+      const frame = p.live.cache.manifest.sprites['building:TESTBUILD']!.frames[0]!;
+      const card = pool.take(new Vector3(passing.x / 256, 0, passing.y / 256), frame, 'unit', 0.2, false);
+      p.live.spriteBatch.get('map')!.push(card);
+      p.live.applyPainterOrder();
+      const uploaded = p.live.sprites as unknown as { orderedCards: (typeof card)[]; flags: { array: Float32Array } };
+      const bias = () => uploaded.flags.array[uploaded.orderedCards.indexOf(card) * 8 + 3]!;
+      const docked = p.visual.painter!;
+      expect(painter.pull).toBeGreaterThan(0);
+      expect(bias()).toBeCloseTo(spritePainterBias(painter), 6);
+      expect((passing.x / 256 + passing.y / 256) * Math.sqrt(3 / 8) + bias()).toBeGreaterThan(
+        (13952 / 256 + 26240 / 256) * Math.sqrt(3 / 8) + spritePainterBias(docked),
+      );
+      expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(VOXEL_CLEARANCE + spritePainterBias(docked));
+      painter.index = 6;
+      p.live.applyPainterOrder();
+      expect(painter.pull).toBe(0);
+      expect(bias()).toBeCloseTo(painter.bias, 6);
+    },
+  );
+
+  it('pulls the measured dock footprint immediately, keeps turret bias, and refreshes only on changed inputs', () => {
     const p = presentation();
     p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
     const expectedPull = foundationPointPush(2.5, 1.5, 4, 3) + 0.5;
     p.view.push(dockSnapshot(1), 0);
     p.view.render(0);
-    const normalBias = () => VOXEL_CLEARANCE + spritePainterBias(p.visual.painter);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
+    const normalBias = () => VOXEL_CLEARANCE + (p.visual.painter?.bias ?? 0);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + expectedPull);
     const calls = p.order.mock.calls.length;
     p.view.render(50);
     expect(p.order).toHaveBeenCalledTimes(calls);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
-    p.view.push(dockSnapshot(DOCK_SETTLE_FRAMES), 60);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + expectedPull);
+    p.view.push(dockSnapshot(6), 60);
     p.view.render(60);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
-    p.view.push(dockSnapshot(1 + DOCK_SETTLE_FRAMES), 70);
+    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias() + expectedPull);
+    p.view.push(dockSnapshot(7), 70);
     p.view.render(70);
     expect(p.visual.firstFrame).toBe(1);
     expect(p.visual.painter).toMatchObject({ x: 54, z: 102 });
@@ -214,10 +248,10 @@ describe('LiveView physical occlusion scheduling', () => {
   it.each([
     ['x', 8, 0],
     ['y', 0, 8],
-  ] as const)('removes the pull on a %s move and waits six logic frames before pulling again', (_, dx, dy) => {
+  ] as const)('keeps the pull while backing in on a %s move', (_, dx, dy) => {
     const p = presentation();
     p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
-    const normalBias = () => VOXEL_CLEARANCE + spritePainterBias(p.visual.painter);
+    const normalBias = () => VOXEL_CLEARANCE + (p.visual.painter?.bias ?? 0);
     p.view.push(dockSnapshot(1), 0);
     p.view.render(0);
     p.view.push(dockSnapshot(7), 100);
@@ -226,18 +260,18 @@ describe('LiveView physical occlusion scheduling', () => {
     p.view.push(dockSnapshot(8, 13952 + dx, 26240 + dy), 200);
     p.view.render(250);
     expect(p.visual.lastMoveFrame).toBe(8);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
+    expect(p.mesh.userData.painterDepth.bias).toBeGreaterThan(normalBias() + 2.9);
     p.view.push(dockSnapshot(13, 13952 + dx, 26240 + dy), 300);
     p.view.render(300);
-    expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(normalBias());
+    expect(p.mesh.userData.painterDepth.bias).toBeGreaterThan(normalBias() + 2.9);
     p.view.push(dockSnapshot(14, 13952 + dx, 26240 + dy), 400);
     p.view.render(400);
     expect(p.mesh.userData.painterDepth.bias - normalBias()).toBeGreaterThan(2.9);
   });
 
   it.each([
-    ['east', 55 * 256 + 128, 26240],
-    ['south', 13952, 104 * 256 + 128],
+    ['east', 57 * 256 + 128, 26240],
+    ['south', 13952, 106 * 256 + 128],
   ] as const)('keeps a settled voxel outside the %s foundation boundary at ordinary bias', (_, x, y) => {
     const p = presentation();
     p.live.cache.manifest.sprites['building:TESTBUILD']!.foundation = [4, 3];
@@ -248,7 +282,7 @@ describe('LiveView physical occlusion scheduling', () => {
     expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(VOXEL_CLEARANCE + spritePainterBias(p.visual.painter));
   });
 
-  it('uses the largest visible building pull rather than adding overlapping foundation pulls', () => {
+  it('uses only the contacted host among overlapping visible buildings', () => {
     const p = presentation();
     const refineryArt = p.live.cache.manifest.sprites['building:TESTBUILD']!;
     refineryArt.foundation = [4, 3];
@@ -266,10 +300,7 @@ describe('LiveView physical occlusion scheduling', () => {
     p.view.push({ ...snap, frame: 7 }, 100);
     p.view.render(100);
     expect(p.live.visuals.get(3)!.root.visible).toBe(true);
-    expect(p.mesh.userData.painterDepth.bias - VOXEL_CLEARANCE - spritePainterBias(p.visual.painter)).toBeCloseTo(
-      3.00949,
-      5,
-    );
+    expect(p.mesh.userData.painterDepth.bias - VOXEL_CLEARANCE - (p.visual.painter?.bias ?? 0)).toBeCloseTo(3.00949, 5);
   });
 
   it('caps a settled voxel pull at 3.5 even under a taller part of the facade', () => {
@@ -279,7 +310,7 @@ describe('LiveView physical occlusion scheduling', () => {
     p.view.render(0);
     p.view.push(dockSnapshot(7, 52 * 256 + 128, 101 * 256 + 128), 100);
     p.view.render(100);
-    expect(p.mesh.userData.painterDepth.bias - VOXEL_CLEARANCE - spritePainterBias(p.visual.painter)).toBeCloseTo(3.5);
+    expect(p.mesh.userData.painterDepth.bias - VOXEL_CLEARANCE - (p.visual.painter?.bias ?? 0)).toBeCloseTo(3.5);
   });
 
   it.each([
@@ -301,7 +332,7 @@ describe('LiveView physical occlusion scheduling', () => {
     ];
     p.view.push(snap, 0);
     p.view.render(0);
-    p.view.push({ ...snap, frame: 1 + DOCK_SETTLE_FRAMES }, 100);
+    p.view.push({ ...snap, frame: 7 }, 100);
     p.view.render(100);
     expect(p.mesh.userData.painterDepth.bias).toBeCloseTo(VOXEL_CLEARANCE + spritePainterBias(p.visual.painter));
   });

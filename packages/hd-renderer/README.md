@@ -194,6 +194,16 @@ UnloadingClass at `0x73D2BA`, then swaps Type at `0x73D2C4` and restores it at `
 therefore draw HORV/CMON. Image changes rebuild the visual while retaining animation clocks; missing image art
 falls back to `type`.
 
+Live technos may report `contactUid`, the validated radio contact's stable ID in the same snapshot. Buildings also
+report `dock` (refinery, repair or helipad policy) and `unloading: 'door' | 'roof'` while their effective mission is
+Unload. A completed delivering building with both matching library layers replaces its body/shadow with
+`DeployingAnim` and queues `UnderDoorAnim` immediately after it; roof delivery uses `RoofDeployingAnim` and
+`UnderRoofDoorAnim`. The body frame is clamped to the replacement art; the door uses healthy/damaged frame 0/1.
+Both cards retain the same anchor, palette/remap routing, push and foundation depth profile. Missing pairs retain
+the normal body. Bibs, active animation layers, buildup and turrets keep their existing paths. Queued Unload alone
+does not open the door unless CurrentMission is the -1 sentinel; YR reader evidence is documented in
+`docs/remaster/research/painter-order.md`.
+
 Live cell overlays (`src/live/overlays.ts`) draw each overlay's library frame at its cell. Rubble overlays
 (`LibraryOverlay.rubble`, rules IsRubble) never draw their own image: the carrier cell named in the snapshot's
 `overlays.rubble` draws its destroyed building's body frame 3 and shadow with the overlay's ISO palette, lighting and
@@ -529,10 +539,13 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   luminance before the coverage-mask mix. A value of 1 or absent adds no shader nodes. SHP shadows halve the displayed
   colour, like the engine's. Live object occlusion uses scene-wide painter depth slots (`ra2/painterOrder.ts`),
   independently of art placement and per-frame `cardPush`; all atlas pages and voxel parts share the same order.
-  Visible layer-2 non-building voxel units drawn after a building and stationary for at least six logic frames
-  receive a dock pull only inside its foundation: the maximum facade push at their exact anchor and four one-cell
-  axial offsets plus 0.5, capped at 3.5 and taking the largest building pull (about 3.009 at the measured refinery
-  dock); a screen-overlapping unit passing within about three cells in front can temporarily draw behind them.
+  Visible layer-2 units receive dock pull only from their radio contact's building, with `dock === true` and no
+  `unloading` state, inside or within one cell of its foundation. Pull is immediate during backing-in: the maximum
+  facade push at the exact anchor and four one-cell axial offsets plus 0.5, capped at 3.5 (about 3.009 at the measured
+  refinery dock). War-factory exits receive no dock pull. Ground vehicles/infantry within three cells in Chebyshev
+  distance that follow a directly docked unit in native painter order inherit enough pull to remain in front;
+  preceding units stay behind. `PainterObject.pull` supplies the same camera-space value to sprite and voxel paths.
+  Buildings, effects and projectiles are excluded, and snapshots without contact/dock data receive no dock pull.
   Physical depth remains available to atmospheric post processing, while ground decals and shadows keep their
   existing depth paths. See `docs/remaster/HD_BRIDGE.md`, "Object occlusion", for the native rule and fallback limits.
   With the enhanced look on, a layer draws its ground art in two extra passes just before its cards
