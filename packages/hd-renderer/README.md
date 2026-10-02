@@ -78,8 +78,9 @@ tint from the same `[Lighting]`).
   airless daylight. The optional profile `exposure` scales day sun and sky intensities in linear light:
   `clamp(engineToLinear(Ambient - Ground + Level * medianZ) / engineToLinear(1), 0.2, 1)`, where
   `engineToLinear(e) = 0.30 * (e / 0.62)^2.2`. Sun and sky are luminance-matched neutral greys multiplied by the
-  map tint normalised to Rec.709 luminance 1. MoonPatr (`0.65`, RGB `1/1/1.1`, Ground `0.05`, Level `0.008`) is about
-  0.36 of noon, retaining only the authored slight cool tint. Day exposure adaptation and the map's palette grade
+  profile tint normalised to Rec.709 luminance 1; the lunar profile's tint is neutral because the original's lit
+  regolith reads neutral grey (MoonPatr: unlit art a* 0 / b* -5, lit frame a* -3 / b* -3) although the map authors
+  Blue=1.1. MoonPatr (`0.65`, RGB `1/1/1.1`, Ground `0.05`, Level `0.008`) is about 0.36 of noon. Day exposure adaptation and the map's palette grade
   must not apply the ambient a second time or lift it back to noon; airless sky/haze and display-grade colours do
   not add the terrestrial blue cast. Default lunar staging keeps lamps and night dressing off. The game policy
   gives library ore/gem overlay sprites (`tiberium` types) a generic per-instance light gain of `1 / exposure`, so

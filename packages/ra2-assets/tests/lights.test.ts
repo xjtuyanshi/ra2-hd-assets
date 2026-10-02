@@ -247,7 +247,7 @@ describe('mapAtmosphere', () => {
     const lighting = L(0.65, 1, 1, 1.1, 0.05, 0.008);
     const profile = mapAtmosphere(lighting, 3, { lamps: 20 }, 'lunar');
     expect(profile).toMatchObject({ kind: 'day', hour: 12, airless: true, nightLevel: DEFAULT_NIGHT_LEVEL });
-    expect(profile.tint).toEqual([1 / 1.1, 1 / 1.1, 1]);
+    expect(profile.tint).toEqual([1, 1, 1]);
     expect(profile.exposure).toBeGreaterThanOrEqual(0.33);
     expect(profile.exposure).toBeLessThanOrEqual(0.39);
     expect(profile.exposure).toBeCloseTo(engineToLinear(0.624) / engineToLinear(1), 12);

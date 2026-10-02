@@ -408,7 +408,7 @@ export function nightEvidence(lights: readonly Pick<MapLightSource, 'intensity' 
 /**
  * Stage a map from its own [Lighting]. The class comes from the authored base ambient `base = Ambient - Ground` (the
  * part every cell shares) and the tint = RGB / max(RGB), plus lamp posts as evidence:
- *   lunar is airless daylight at 12:00; its low ambient dims daylight rather than selecting night dressing;
+ *   lunar is airless, neutral daylight at 12:00; its low ambient dims daylight rather than selecting night dressing;
  *   night when base <= 0.70, or base <= 0.76 with a blue tint (b - (r + g) / 2 >= 0.15) or with two or more lamp
  *   posts (unless the tint is warm), at 22:00;
  *   dusk when base <= 0.76 with a warm tint (r - b >= 0.15), at 18:12;
@@ -438,7 +438,10 @@ export function mapAtmosphere(
       kind: 'day',
       hour: 12,
       nightLevel: DEFAULT_NIGHT_LEVEL,
-      tint,
+      // Neutral light: the original's lit regolith reads neutral grey (MoonPatr, Blue=1.1: unlit art a* 0 / b* -5,
+      // lit frame a* -3 / b* -3), so the authored blue tint is not visible there; applying it in linear light turned
+      // the HD ground purple-blue (a* +2 / b* -7 with the colour-matched terrain).
+      tint: [1, 1, 1],
       exposure: Math.min(1, Math.max(0.2, engineToLinear(eff) / engineToLinear(1))),
       airless: true,
     };
