@@ -24,6 +24,13 @@ import type { ShaderNode } from '../tsl';
 import type { VoxelProjectionPart, VoxelProjectionState } from './voxelProjection';
 import { highlightExponent, type SpriteLookState } from './spriteLook';
 
+/** Upright source coordinates for a projected twin whose draw matrix has been flattened or mirrored. */
+interface ProjectionBasis {
+  matrix: ShaderNode;
+  position: ShaderNode;
+  normal: ShaderNode;
+}
+
 /** Exactly four atlas samples, independent of instance count. Positions and yaw follow the complete mesh matrix. */
 export function projectedVoxelColour(
   part: VoxelProjectionPart,
@@ -32,9 +39,11 @@ export function projectedVoxelColour(
   referenceLight: ShaderNode,
   currentLight: ShaderNode,
   look: SpriteLookState,
-): { colour: ShaderNode; coverage: ShaderNode; paint: ShaderNode } {
+  basis?: ProjectionBasis,
+): { colour: ShaderNode; albedo: ShaderNode; coverage: ShaderNode; paint: ShaderNode } {
   const { manifest, spec } = part;
-  const axis: ShaderNode = modelWorldMatrix.mul(vec4(1, 0, 0, 0)).xyz;
+  const matrix = basis?.matrix ?? modelWorldMatrix;
+  const axis: ShaderNode = matrix.mul(vec4(1, 0, 0, 0)).xyz;
   const theta: ShaderNode = axis.z.negate().atan(axis.x).toVar();
   const facing: ShaderNode = fract(
     float(Math.PI / 2)
@@ -46,7 +55,7 @@ export function projectedVoxelColour(
   const k1: ShaderNode = k0.add(1).mod(manifest.frames);
   const fraction: ShaderNode = fract(f);
   const weight: ShaderNode = mix(step(0.5, fraction), fraction, state.blend.clamp()).toVar();
-  const worldOffset: ShaderNode = modelWorldMatrix.mul(vec4(positionLocal, 0)).xyz.toVar();
+  const worldOffset: ShaderNode = matrix.mul(vec4(basis?.position ?? positionLocal, 0)).xyz.toVar();
   const jx = vec3(...manifest.jacobian[0]),
     jy = vec3(...manifest.jacobian[1]);
   const sample = (k: ShaderNode): { colour: ShaderNode; alpha: ShaderNode; paint: ShaderNode } => {
@@ -85,13 +94,16 @@ export function projectedVoxelColour(
     mb: ShaderNode = wb.mul(b.paint.r);
   const paintWeight: ShaderNode = ma.add(mb);
   const mask: ShaderNode = paintWeight.div(max(coverage, 1e-5));
-  const n: ShaderNode = normalWorld;
+  const n: ShaderNode = basis?.normal ?? normalWorld;
   const highlightGain: ShaderNode = look.specularSize.mul(look.specularSize);
+  let albedo: ShaderNode = colour;
   if (manifest.house) {
     const ramp: ShaderNode = a.paint.gb.mul(ma).add(b.paint.gb.mul(mb)).div(max(paintWeight, 1e-5));
     const index: ShaderNode = ramp.x.mul(15).add(16);
     const lower: ShaderNode = floor(index);
     let house: ShaderNode = mix(rawPalette(lower), rawPalette(lower.add(1).min(31)), fract(index)).mul(ramp.y.mul(2));
+    // Preserve the atlas and remapped paint before all sun/form/glint terms for ambient-only reflections.
+    albedo = mix(colour, house, mask);
     // Image models paint the faction colour as nearly flat glossy red (it must stay remappable), so it reads like a
     // sticker next to the shaded redraw. Give it form from the mesh: Lambert against the current sun, normalised to
     // 1 at a typical lit face (n.l = 0.65), plus a Blinn-Phong glint toward the fixed iso camera.
@@ -141,8 +153,17 @@ export function projectedVoxelColour(
     .div(max(n.dot(referenceLight), 0).mul(0.4).add(0.6));
   const grey: ShaderNode = colour.dot(vec3(0.2126, 0.7152, 0.0722));
   colour = mix(vec3(grey), colour, state.saturation).max(0).mul(state.gain);
+  const albedoLuma: ShaderNode = albedo
+    .dot(vec3(0.2126, 0.7152, 0.0722))
+    .max(1e-4)
+    .toVar();
+  const albedoPower: ShaderNode = state.contrast.sub(1).mul(mix(1, 0.35, step(0.18, albedoLuma)));
+  albedo = albedo.mul(pow(albedoLuma.div(0.18), albedoPower));
+  const albedoGrey: ShaderNode = albedo.dot(vec3(0.2126, 0.7152, 0.0722));
+  albedo = mix(vec3(albedoGrey), albedo, state.saturation).max(0).mul(state.gain);
   return {
     colour: colour.mul(mix(1, ratio, state.relight.clamp())),
+    albedo,
     coverage: coverage.mul(state.strength.clamp()),
     paint: manifest.house ? mask : float(0),
   };

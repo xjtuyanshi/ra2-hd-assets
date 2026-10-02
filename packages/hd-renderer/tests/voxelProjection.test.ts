@@ -7,6 +7,7 @@ import {
   LinearMipmapLinearFilter,
   Matrix4,
   Mesh,
+  MeshBasicNodeMaterial,
   PerspectiveCamera,
   Quaternion,
   Scene,
@@ -14,7 +15,7 @@ import {
   Vector3,
   WebGPURenderer,
 } from 'three/webgpu';
-import { lights } from 'three/tsl';
+import { lights, positionGeometry, uniform, vec3 } from 'three/tsl';
 import { AtmosphereNodes } from '../src/atmosphere';
 import {
   facingFromMatrix,
@@ -31,7 +32,13 @@ import {
   voxelProjectionFor,
   voxelProjectionLibrary,
 } from '../src/ra2/voxelProjection';
-import { voxelMaterialFor, voxelProjectedMaterialFor } from '../src/ra2/vpl';
+import { voxelLightingFor, voxelMaterialFor, voxelProjectedMaterialFor } from '../src/ra2/vpl';
+import { voxelPbrFor, voxelPbrMaterialFor } from '../src/ra2/voxelPbr';
+import {
+  VOXEL_REFLECTION_AMBIENT,
+  VOXEL_REFLECTION_TINT,
+  voxelReflectionColour,
+} from '../src/ra2/voxelReflectionColour';
 import { buildVoxelGeometry, instantiateVoxel, projectVoxelMaterials } from '../src/ra2/voxels';
 import { buildSmoothVoxelGeometry } from '../src/ra2/voxelSmoothGeometry';
 import { syntheticSection } from './fixtures/syntheticVoxels';
@@ -311,6 +318,101 @@ describe('projected materials and shader compilation', () => {
       expect(builder.fragmentShader.match(reads)).toHaveLength(2);
     }
     expect(material.depthNode).toBeTruthy();
+    nodes.dispose();
+  });
+});
+
+describe('voxel reflection source colour', () => {
+  it('attenuates ambient albedo without a brightening water tint', () => {
+    expect(VOXEL_REFLECTION_AMBIENT).toBeGreaterThanOrEqual(0.45);
+    expect(VOXEL_REFLECTION_AMBIENT).toBeLessThanOrEqual(0.6);
+    expect(VOXEL_REFLECTION_TINT.every((channel) => channel > 0 && channel <= 1)).toBe(true);
+    expect(VOXEL_REFLECTION_TINT[0]).toBeLessThan(VOXEL_REFLECTION_TINT[2]);
+  });
+
+  it.each([
+    [false, 'engine'],
+    [true, 'engine'],
+    [false, 'engine-vpl'],
+    [true, 'engine-vpl'],
+    [false, 'remaster'],
+    [true, 'remaster'],
+    [false, 'projected'],
+    [true, 'projected'],
+  ] as const)('builds %s WebGL %s source colour without the flattened normal matrix', (forceWebGL, look) => {
+    const nodes = new AtmosphereNodes();
+    const spec = manifest();
+    const atlas = () => nodes.own(new DataTexture(new Uint8Array(320 * 32 * 4), 320, 32));
+    const projection = createVoxelProjectionPart(spec, 'body', atlas(), atlas());
+    const palette = new Uint8Array(768);
+    if (look === 'engine-vpl') {
+      voxelLightingFor(nodes).loaded = { table: new Uint8Array(256 * 32), sections: 32 };
+    }
+    const source =
+      look === 'projected'
+        ? voxelProjectedMaterialFor(palette, projection, nodes)
+        : look === 'remaster'
+          ? voxelPbrMaterialFor(palette, nodes)
+          : voxelMaterialFor(palette, nodes);
+    const geometry =
+      look === 'remaster'
+        ? buildSmoothVoxelGeometry(model, palette, nodes, { aoRays: 0, supersample: 2 })[0]!.geometry
+        : buildVoxelGeometry(model, palette, nodes)[0]!.geometry;
+    const original = uniform(
+      worldMatrix(53)
+        .scale(new Vector3(2, 0.8, 1.3))
+        .setPosition(20, 0.4, 30),
+    );
+    const material = nodes.own(new MeshBasicNodeMaterial());
+    material.colorNode = voxelReflectionColour(source, original);
+    // Reflection ripple is allowed to change positionLocal. Atlas coordinates must still read positionGeometry.
+    material.positionNode = positionGeometry.add(vec3(0.1, 0, -0.1));
+    const mesh = new Mesh(geometry, material);
+    mesh.matrixAutoUpdate = false;
+    mesh.matrix.makeScale(1, 0, 1);
+    mesh.updateMatrixWorld(true);
+    const renderer = new WebGPURenderer({
+      canvas: {
+        width: 64,
+        height: 64,
+        style: {},
+        addEventListener() {},
+        removeEventListener() {},
+        setAttribute() {},
+      } as unknown as HTMLCanvasElement,
+      forceWebGL,
+    });
+    vi.spyOn(renderer, 'hasFeature').mockReturnValue(false);
+    const builder = renderer.backend.createNodeBuilder(mesh, renderer);
+    builder.scene = new Scene();
+    builder.camera = new PerspectiveCamera();
+    builder.build();
+    const shader = `${builder.vertexShader}\n${builder.fragmentShader}`;
+    expect(shader).not.toMatch(/\b(?:NaN|undefined|modelNormalMatrix|normalMatrix)\b/);
+    expect(shader).toContain('voxelReflectionSourceNormal');
+    const uniforms = [...builder.uniforms.vertex, ...builder.uniforms.fragment];
+    expect(uniforms.some((entry) => (entry.node as unknown as { value: unknown }).value === original.value)).toBe(true);
+    if (look === 'remaster') {
+      const values = uniforms.map((entry) => (entry.node as unknown as { value: unknown }).value);
+      expect(values).toContain(voxelPbrFor(nodes).reflectionSky.value);
+      expect(values).toContain(voxelPbrFor(nodes).reflectionGround.value);
+      // voxelFill includes direct flat-ground sun. A physical reflection may read only actual hemisphere light.
+      expect(values).not.toContain(voxelLightingFor(nodes).voxelFill.value);
+    }
+    if (look === 'projected') {
+      expect(builder.fragmentShader).toMatch(/atan/);
+      for (const texture of [projection.colour, projection.paint]) {
+        const entry = builder.uniforms.fragment.find(
+          (u) => (u.node as unknown as { value: unknown }).value === texture,
+        );
+        expect(entry).toBeDefined();
+        const reads = new RegExp(
+          `\\b(?:texture|textureLod|textureGrad|textureLoad|textureSample(?:Level|Bias|Grad)?)\\(\\s*${entry!.name}\\b`,
+          'g',
+        );
+        expect(builder.fragmentShader.match(reads)).toHaveLength(2);
+      }
+    }
     nodes.dispose();
   });
 });

@@ -1162,6 +1162,12 @@ export class HdRenderer {
     this.lighting
       .flatIrradianceColor(voxelLightingFor(this.nodes).voxelFill.value)
       .multiplyScalar(VOXEL_FILL / Math.PI);
+    // Unprojected PBR reflections use sky/ground ambient only. The engine's flat fill includes direct sun and
+    // would brighten a dark metallic face in its water twin; keep this separate from upright voxel lighting.
+    const pbrReflection = voxelPbrFor(this.nodes);
+    const hemisphere = this.lighting.hemi;
+    pbrReflection.reflectionSky.value.copy(hemisphere.color).multiplyScalar(hemisphere.intensity / Math.PI);
+    pbrReflection.reflectionGround.value.copy(hemisphere.groundColor).multiplyScalar(hemisphere.intensity / Math.PI);
 
     const frame = this.frameInfo;
     frame.now = now;

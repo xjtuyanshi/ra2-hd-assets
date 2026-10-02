@@ -1,4 +1,5 @@
 import {
+  BackSide,
   Color,
   DoubleSide,
   LessDepth,
@@ -8,6 +9,7 @@ import {
   Vector2,
   Vector3,
   Vector4,
+  type Material,
   type Object3D,
   type OrthographicCamera,
 } from 'three/webgpu';
@@ -17,7 +19,7 @@ import {
   floor,
   fract,
   mix,
-  positionLocal,
+  positionGeometry,
   positionWorld,
   screenCoordinate,
   sin,
@@ -30,6 +32,7 @@ import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT } from '../world';
 import { spriteLookFor } from './spriteLook';
+import { voxelReflectionColour } from './voxelReflectionColour';
 
 /**
  * Engine-style voxel shadows. The original draws a unit's shadow by flattening the model onto the ground along a fixed
@@ -52,7 +55,7 @@ import { spriteLookFor } from './spriteLook';
  * Review tooling can restore a single hard twin. Shadows draw after the sprites'
  * decals and before upright art is blended over them only where they are in front (renderOrder and SHADOW_LIFT).
  * Grounded water origins instead use straight-down contact twins, broken waterline foam and a rippled mirrored
- * silhouette flattened along the view ray. Their analytic depth layers keep the foam outside the contact core;
+ * colour reflection flattened along the view ray. Their analytic depth layers keep the foam outside the contact core;
  * aircraft and physical-origin overrides retain the original projection. All twins share their source geometry.
  */
 
@@ -102,7 +105,9 @@ export const WATER_CONTACT_OPACITY = 0.3;
 export const WATER_FOAM_OPACITY = 0.3;
 export const WATER_FOAM_SCALE = 1.06;
 export const WATER_FOAM_FORWARD_SCALE = 1.14;
-export const WATER_REFLECTION_OPACITY = 0.3;
+export const WATER_REFLECTION_OPACITY = 0.45;
+/** Previous silhouette alpha, retained exactly for the flat reflection review. */
+export const WATER_FLAT_REFLECTION_OPACITY = 0.3;
 export const WATER_REFLECTION_FADE = 0.5;
 /** Contact must write ahead of every foam layer, so foam fails depth inside the hull rather than whitening it. */
 const WATER_CONTACT_LIFT = (SHADOW_COPIES.length + 1) * SHADOW_COPY_LIFT;
@@ -110,6 +115,7 @@ const WATER_CONTACT_LIFT = (SHADOW_COPIES.length + 1) * SHADOW_COPY_LIFT;
 interface VoxelShadowState {
   soft: boolean;
   naval: boolean;
+  reflection: 'colour' | 'flat';
   /** Seconds on the renderer's presentation clock, including frozen sandbox captures. */
   time: number;
   toCamera: Vector3;
@@ -124,11 +130,20 @@ export function voxelShadowFor(nodes = DEFAULT_ATMOSPHERE_NODES): VoxelShadowSta
       (mode = {
         soft: true,
         naval: true,
+        reflection: 'colour',
         time: 0,
         toCamera: new Vector3(Math.sqrt(1.5), 1, Math.sqrt(1.5)).normalize(),
       }),
     );
   return mode;
+}
+
+/** Shared parsing for the sandbox and replay bench; the three review switches are independent. */
+export function applyVoxelShadowParams(params: URLSearchParams, nodes = DEFAULT_ATMOSPHERE_NODES): void {
+  const mode = voxelShadowFor(nodes);
+  mode.soft = params.get('vshadow') !== 'hard';
+  mode.naval = params.get('vnaval') !== 'old';
+  mode.reflection = params.get('vrefl') === 'flat' ? 'flat' : 'colour';
 }
 /** A unit whose origin is higher than this above the ground (world units) is airborne: aircraft, jumpjets. */
 export const AIRBORNE_HEIGHT = 0.1;
@@ -425,11 +440,26 @@ const planeSize = new Vector2();
 type WaterLayer = 'foam' | 'reflection';
 type SurfaceLayer = 'shadow' | WaterLayer;
 const sharedMaterials = new WeakMap<AtmosphereNodes, Map<SurfaceLayer, MeshBasicNodeMaterial>>();
+const reflectionMaterials = new WeakMap<AtmosphereNodes, WeakMap<Material, MeshBasicNodeMaterial>>();
 export function voxelShadowMaterial(nodes = DEFAULT_ATMOSPHERE_NODES): MeshBasicNodeMaterial {
   return voxelSurfaceMaterial(nodes, 'shadow');
 }
 
-export function voxelWaterMaterial(nodes: AtmosphereNodes, layer: WaterLayer): MeshBasicNodeMaterial {
+export function voxelWaterMaterial(
+  nodes: AtmosphereNodes,
+  layer: WaterLayer,
+  sourceMaterial?: Material,
+): MeshBasicNodeMaterial {
+  if (layer === 'reflection' && sourceMaterial && voxelShadowFor(nodes).reflection === 'colour') {
+    let materials = reflectionMaterials.get(nodes);
+    if (!materials) reflectionMaterials.set(nodes, (materials = new WeakMap()));
+    let material = materials.get(sourceMaterial);
+    if (!material) {
+      material = createSurfaceMaterial(nodes, layer, sourceMaterial);
+      materials.set(sourceMaterial, material);
+    }
+    return material;
+  }
   return voxelSurfaceMaterial(nodes, layer);
 }
 
@@ -438,17 +468,27 @@ function voxelSurfaceMaterial(nodes: AtmosphereNodes, layer: SurfaceLayer): Mesh
   if (!materials) sharedMaterials.set(nodes, (materials = new Map()));
   const shared = materials.get(layer);
   if (shared) return shared;
+  const material = createSurfaceMaterial(nodes, layer);
+  materials.set(layer, material);
+  return material;
+}
+
+function createSurfaceMaterial(
+  nodes: AtmosphereNodes,
+  layer: SurfaceLayer,
+  sourceMaterial?: Material,
+): MeshBasicNodeMaterial {
   const material = new MeshBasicNodeMaterial({
     color: layer === 'foam' ? 0xddeef5 : layer === 'reflection' ? new Color(0.16, 0.19, 0.22) : 0x000000,
   });
-  material.name = `voxel-${layer}`;
+  material.name = `voxel-${layer}${sourceMaterial ? '-colour' : ''}`;
   material.transparent = true;
   material.opacity = SHADOW_OPACITY;
   const look = spriteLookFor(nodes);
   const mode = voxelShadowFor(nodes);
   const opacity = uniform(SHADOW_OPACITY).onObjectUpdate(({ object }) => {
     const surface = object instanceof VoxelSurfaceMesh ? object : undefined;
-    if (layer === 'reflection') return WATER_REFLECTION_OPACITY;
+    if (layer === 'reflection') return sourceMaterial ? WATER_REFLECTION_OPACITY : WATER_FLAT_REFLECTION_OPACITY;
     if (layer === 'foam') return shadowCopyOpacity(WATER_FOAM_OPACITY * (1 + 0.03 * (surface?.foamPulse ?? 0)));
     if (surface?.onWater) return shadowCopyOpacity(WATER_CONTACT_OPACITY);
     const target =
@@ -459,21 +499,25 @@ function voxelSurfaceMaterial(nodes: AtmosphereNodes, layer: SurfaceLayer): Mesh
   });
   material.opacityNode = opacity;
   if (layer !== 'shadow') {
-    material.side = DoubleSide;
+    // A real mirror reverses winding. Flattening preserves its screen winding but makes the matrix singular,
+    // hiding the negative determinant from Three's automatic front-face flip. Cull the mirrored rear surfaces
+    // explicitly for colour; the legacy silhouette and foam retain their original double-sided coverage.
+    material.side = sourceMaterial ? BackSide : DoubleSide;
     material.forceSinglePass = true; // Analytic depth already rejects duplicate faces; avoid transparent back/front passes.
-    // Retain source world height: the drawn matrix has no vertical dimension, so decks must not generate foam.
-    // Projected colour/lighting nodes also require that unflattened basis; reflection stays a blue-grey silhouette.
+    // Retain the complete source basis: the drawn matrix is singular. Geometry coordinates and this independent
+    // matrix supply height, atlas facing and house paint without ever using the flattened normal matrix.
     const sourceMatrix = uniform(new Matrix4()).onObjectUpdate(({ object }) => {
       if (object instanceof VoxelSurfaceMesh) sourceMatrix.value.copy(object.source.matrixWorld);
     });
     const waterY = uniform(0).onObjectUpdate(({ object }) => (object instanceof VoxelSurfaceMesh ? object.waterY : 0));
     const clock = uniform(0).onRenderUpdate(() => mode.time);
-    const height = sourceMatrix.mul(vec4(positionLocal, 1)).y.sub(waterY);
+    const height = sourceMatrix.mul(vec4(positionGeometry, 1)).y.sub(waterY);
     if (layer === 'foam') {
       const waterline = float(1).sub(smoothstep(0.06, 0.14, height));
       const patches = smoothstep(0.4, 0.7, waterFoamNoise(positionWorld.xz, clock));
       material.opacityNode = opacity.mul(waterline).mul(patches);
     } else {
+      if (sourceMaterial) material.colorNode = voxelReflectionColour(sourceMaterial, sourceMatrix);
       const ripple = sin(
         positionWorld.z
           .mul(36)
@@ -511,7 +555,6 @@ function voxelSurfaceMaterial(nodes: AtmosphereNodes, layer: SurfaceLayer): Mesh
       .sub(plane.w)
       .mul(SHADOW_DEPTH_STEPS),
   ).div(SHADOW_DEPTH_STEPS);
-  materials.set(layer, material);
   nodes.own(material);
   return material;
 }
@@ -532,6 +575,7 @@ class VoxelSurfaceMesh extends Mesh {
   waterY = 0;
   foamPulse = 0;
   private readonly mode: VoxelShadowState;
+  private readonly nodes: AtmosphereNodes;
 
   constructor(
     readonly source: Mesh,
@@ -541,6 +585,8 @@ class VoxelSurfaceMesh extends Mesh {
   ) {
     super(source.geometry, voxelSurfaceMaterial(nodes, layer));
     this.mode = voxelShadowFor(nodes);
+    this.nodes = nodes;
+    if (layer === 'reflection') this.updateReflectionMaterial();
     this.name = `voxel-${layer}`;
     this.matrixAutoUpdate = false;
     this.castShadow = false;
@@ -553,11 +599,17 @@ class VoxelSurfaceMesh extends Mesh {
   /** Visibility the review modes and the water test ask for, applied only when it changes: hiding by other code (the
    * sandbox bake's isolation, review tooling) is never overridden every frame. */
   private wanted: boolean;
+  private updateReflectionMaterial(): void {
+    // Production voxel parts each have one material. Unknown multi-material meshes keep the flat fallback.
+    const source = Array.isArray(this.source.material) ? undefined : this.source.material;
+    this.material = voxelWaterMaterial(this.nodes, 'reflection', source);
+  }
   private show(wanted: boolean): void {
     if (wanted !== this.wanted) this.visible = this.wanted = wanted;
   }
 
   override updateMatrixWorld(force?: boolean): void {
+    if (this.layer === 'reflection') this.updateReflectionMaterial();
     const land = this.layer === 'shadow' && (this.copyIndex === 0 || this.mode.soft);
     this.onWater = false;
     const parent = this.parent;
