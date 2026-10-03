@@ -33,6 +33,9 @@
  *   &time=0.4                 seconds after the spawn to show (logic frames advance at &fps=, default 15)
  *   &hours=12                 time of day; &hours=map: the map's own [Lighting] staging (&dayhour= applies to day
  *                             maps only, as the live bridge does with a look preset's hour)
+ *   &weather=rain|snow|storm  decorative weather (default clear); &wi=0..1 sets intensity (default 0.8, storm 1)
+ *   &lighting=.87,1,.8,.68,.3,.4,.75  force ambient and normal RGB, optionally a raw storm RGB override;
+ *                             ground/level retain the map values. Applies to synthetic snapshots and replays.
  *   &look=golden              the enhanced look preset (sun arc, relit art, shadows following the sun)
  *   &water=enhanced           the modern water (default: the earlier HD water)
  *   &native=1                 pass the bridge fields (exact anim frame) instead of relying on the fallback timing
@@ -86,6 +89,9 @@ import { voxelShadowFor } from '../src/ra2/voxelShadow';
 import { advanceShpReview, shpUnitReview } from './shpUnitReview';
 import type { TypeLibrary } from '../../ra2-assets/src/library';
 import { depleteOre, growthGrid, mapOverlayGrid, polylinePosition, type CellPoint } from './oreBench';
+import type { Weather } from '../src/contract';
+import { parseWeatherParams, weatherSettings } from '../src/weatherParams';
+import { parseSceneLighting } from './sceneLighting';
 
 const params = new URLSearchParams(location.search);
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
@@ -112,6 +118,7 @@ const time = Number(params.get('time') ?? 0);
 const house = Number(params.get('house') ?? (params.get('fx')?.split(',').includes('shpunits') ? 11 : 15));
 const live = await LiveView.create(canvas, {
   ...voxelLookParams(params),
+  ...parseWeatherParams(params),
   mapBase: `/${encodeURIComponent(mapName)}`,
   libraryBase: '/_library',
   ...(params.get('hours') === 'map'
@@ -131,6 +138,7 @@ const live = await LiveView.create(canvas, {
   voxelProjection: voxelProjectionFor(live.hd.nodes),
   voxelPbr: voxelPbrFor(live.hd.nodes),
   stats: () => live.hd.stats(),
+  setWeather: (weather: Weather, intensity?: number) => live.setEnvironment(weatherSettings(weather, intensity)),
 };
 // &vshadow=hard restores the single hard twin; contact penumbra is the default (also in replays).
 voxelShadowFor(live.hd.nodes).soft = params.get('vshadow') !== 'hard';
@@ -184,6 +192,18 @@ for (const item of (params.get('lightspec') ?? '').split(',').filter(Boolean)) {
 if (params.get('garnish') === '0')
   (live as unknown as { effectDriver: { garnishEnabled: boolean } }).effectDriver.garnishEnabled = false;
 const cache = live.world.cache!;
+const forcedLighting = parseSceneLighting(
+  params.get('lighting'),
+  live.world.mapLight?.lighting ??
+    cache.manifest.lighting ?? {
+      ambient: 1,
+      red: 1,
+      green: 1,
+      blue: 1,
+      ground: 0,
+      level: 0.032,
+    },
+);
 const grid = cache.manifest.grid;
 const waypoint = cache.manifest.waypoints[0] ?? { x: grid.width / 2, y: grid.height / 2 };
 const cx = Number(params.get('cx') ?? waypoint.x);
@@ -208,6 +228,7 @@ async function replay(): Promise<never> {
   // Load art on the first snapshot's objects without any effect, so nothing spawns before the replay starts.
   const calm = (frame: number): LiveSnapshot => ({
     ...first,
+    ...(forcedLighting ? { lighting: forcedLighting } : {}),
     frame,
     effects: first.effects && {
       ...first.effects,
@@ -231,7 +252,7 @@ async function replay(): Promise<never> {
   const withCarried = (snapshot: LiveSnapshot): LiveSnapshot => {
     for (const key of ['shroud', 'overlays', 'smudges', 'cells'] as const)
       if (snapshot[key]) (carried as Record<string, unknown>)[key] = snapshot[key];
-    return { ...carried, ...snapshot } as LiveSnapshot;
+    return { ...carried, ...snapshot, ...(forcedLighting ? { lighting: forcedLighting } : {}) } as LiveSnapshot;
   };
   // Scheduled clock of each snapshot: the first one a logic frame after the warm-up, then by its frame distance.
   const start = clock + 1000 / rate;
@@ -877,6 +898,7 @@ function snapshot(): LiveSnapshot {
     frame,
     view,
     houses,
+    ...(forcedLighting ? { lighting: forcedLighting } : {}),
     // Delaying first appearance lets LiveView's normal make timeline start at the spawn frame.
     objects: ((objs: LiveObject[]) => [
       ...harvesters,

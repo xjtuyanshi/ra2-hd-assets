@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AmbientLight,
   type BufferAttribute,
   type InterleavedBufferAttribute,
+  type Texture,
   DataTexture,
   InstancedMesh,
   Mesh,
   MeshBasicNodeMaterial,
+  NormalBlending,
   Object3D,
   OrthographicCamera,
   PlaneGeometry,
@@ -17,7 +20,7 @@ import {
   UnsignedByteType,
   WebGPURenderer,
 } from 'three/webgpu';
-import { float, texture as textureNode, uv, vec4 } from 'three/tsl';
+import { float, lights, texture as textureNode, uv, vec4 } from 'three/tsl';
 // @ts-expect-error r186 exposes this internal module without a matching @types/three declaration.
 import RenderObject from 'three/src/renderers/common/RenderObject.js';
 import { InstancedQuad } from '../src/instancedQuad';
@@ -28,11 +31,12 @@ import { EffectSpriteLayer, MESH_IDLE_SECONDS, type EffectInstance } from '../sr
 import { ENHANCED, EffectsLayer } from '../src/effects';
 import { EmitterLayer } from '../src/emitters';
 import { LightField } from '../src/lightField';
-import { buildRain } from '../src/weather';
+import { buildRain, buildSnow } from '../src/weather';
 import { buildWater } from '../src/water';
 import { buildTerrain } from '../src/terrain';
 import { buildRa2Terrain } from '../src/ra2/terrain';
 import { buildVoxelGeometry } from '../src/ra2/voxels';
+import { voxelPbrMaterialFor } from '../src/ra2/voxelPbr';
 import { voxelShadowMaterial, voxelWaterMaterial } from '../src/ra2/voxelShadow';
 import { Ra2NightDressing } from '../src/ra2/nightDressing';
 import { AtmosphereNodes } from '../src/atmosphere';
@@ -46,6 +50,7 @@ import { syntheticModel, syntheticSection } from './fixtures/syntheticVoxels';
 
 const MAX_VERTEX_BUFFERS = 8;
 const MAX_UNIFORM_BYTES = 65536;
+const FRAGMENT_STAGE = 2; // GPUShaderStage.FRAGMENT, available without a browser GPU global.
 
 type VertexAttribute = BufferAttribute | InterleavedBufferAttribute;
 interface VertexLayout {
@@ -62,9 +67,18 @@ interface LayoutBackend {
     camera: OrthographicCamera;
     scene: Scene;
     build(): void;
+    vertexShader: string;
     fragmentShader: string;
     getAttributesArray(): { name: string; node?: { attribute?: VertexAttribute } }[];
-    getBindings(): { bindings: { isUniformBuffer?: boolean; byteLength: number }[] }[];
+    getBindings(): {
+      bindings: {
+        isUniformBuffer?: boolean;
+        isSampledTexture?: boolean;
+        texture?: Texture;
+        byteLength: number;
+        visibility: number;
+      }[];
+    }[];
   };
   attributeUtils: { createShaderVertexBuffers(object: { getAttributes(): VertexAttribute[] }): VertexLayout[] };
 }
@@ -99,7 +113,25 @@ function layout(mesh: Mesh, uniformLimit = MAX_UNIFORM_BYTES, capture?: TerrainD
     .flatMap((group) =>
       group.bindings.filter((binding) => binding.isUniformBuffer).map((binding) => binding.byteLength),
     );
-  return { buffers, attributes, uniformBytes, fragmentShader: builder.fragmentShader };
+  const sampledTextures = builder
+    .getBindings()
+    .flatMap((group) => group.bindings.filter((binding) => binding.isSampledTexture).map((binding) => binding.texture));
+  const fragmentSampledTextures = builder
+    .getBindings()
+    .flatMap((group) =>
+      group.bindings
+        .filter((binding) => binding.isSampledTexture && (binding.visibility & FRAGMENT_STAGE) !== 0)
+        .map((binding) => binding.texture),
+    );
+  return {
+    buffers,
+    attributes,
+    uniformBytes,
+    sampledTextures,
+    fragmentSampledTextures,
+    vertexShader: builder.vertexShader,
+    fragmentShader: builder.fragmentShader,
+  };
 }
 
 function assertLimits(mesh: Mesh, uniformLimit = MAX_UNIFORM_BYTES, capture?: TerrainDepth) {
@@ -333,6 +365,8 @@ describe('r186 vertex and uniform binding budget', () => {
       expect(captured.attributes.length).toBe(11);
       expect(captured.fragmentShader).toContain('@location( 0 ) m0 : vec4<f32>');
       expect(captured.fragmentShader).toContain('objectDepthInstanceCode');
+      // Material MRT colour outputs must not replace the capture's code/coverage contract or its blend alpha.
+      expect(captured.fragmentShader).toContain('objectDepthInstanceCode * DiffuseColor.w');
       const shared = new Set(main.attributes.map(attributeBuffer));
       expect(layer.groundPasses).toHaveLength(2);
       for (const mesh of [
@@ -408,7 +442,7 @@ describe('r186 vertex and uniform binding budget', () => {
       };
       for (const alpha of [1, 0.5]) {
         layer.setInstances([{ ...card, alpha }], 0);
-        const mesh = meshes(layer.root)[0]!;
+        const mesh = meshes(pass === 'top' ? layer.topRoot : layer.root)[0]!;
         const native = assertLimits(mesh);
         expect(native.buffers.length).toBe(6);
         expect(native.fragmentShader.includes('terrainDepthPullEnabled')).toBe(pass === 'air');
@@ -432,7 +466,9 @@ describe('r186 vertex and uniform binding budget', () => {
         ],
         0,
       );
-      const hd = meshes(layer.root).find((mesh) => mesh.name.startsWith('live-effects-hd-'))!;
+      const hd = meshes(pass === 'top' ? layer.topRoot : layer.root).find((mesh) =>
+        mesh.name.startsWith('live-effects-hd-'),
+      )!;
       const result = assertLimits(hd);
       expect(result.fragmentShader.includes('terrainDepthPullEnabled')).toBe(pass === 'air');
       // Six vec4 instance fields, one position buffer and one fallback matrix buffer: no seventh field.
@@ -457,12 +493,21 @@ describe('r186 vertex and uniform binding budget', () => {
     const effects = new EffectsLayer(nodes, terrainDepth);
     const emitters = new EmitterLayer(nodes);
     const lights = new LightField(2, 2, { nodes });
-    const rain = buildRain(2, 2, texture(), 0, nodes);
-    const groups = [effects.root, emitters.root, (lights as unknown as { scene: Scene }).scene, rain.object];
+    const height = texture();
+    const groundMask = new DataTexture(new Uint8Array(4), 2, 2, RedFormat);
+    const rain = buildRain(2, 2, height, 0, nodes, groundMask);
+    const snow = buildSnow(2, 2, height, 0, nodes, groundMask);
+    const groups = [
+      effects.root,
+      emitters.root,
+      (lights as unknown as { scene: Scene }).scene,
+      rain.object,
+      snow.object,
+    ];
     const audited = groups.flatMap(meshes);
     // Nineteen particle pools (including the enhanced contact-shadow pool), beams; four emitter batches;
-    // base grid + two light batches; rain + splashes. Check every named pool's actual allocation below.
-    expect(audited.length).toBe(29);
+    // base grid + two light batches; rain + splashes + snow. Check every named pool's actual allocation below.
+    expect(audited.length).toBe(30);
     const capacities = {
       fireballs: 96,
       flames: 768,
@@ -503,11 +548,50 @@ describe('r186 vertex and uniform binding budget', () => {
       assertLimits(mesh, 16384);
     }
     expect(meshes(effects.root).map((m) => (m as InstancedMesh).instanceMatrix.count)).toContain(4096);
-    expect(meshes(rain.object).map((m) => (m as InstancedMesh).instanceMatrix.count)).toEqual([9000, 2500]);
-    for (const root of [effects.root, emitters.root, rain.object]) meshes(root).forEach(dispose);
+    expect(meshes(rain.object).map((m) => (m as InstancedMesh).instanceMatrix.count)).toEqual([12000, 3500]);
+    expect(rain.object.visible).toBe(false);
+    expect(meshes(snow.object).map((m) => (m as InstancedMesh).instanceMatrix.count)).toEqual([9000]);
+    expect(snow.object.visible).toBe(false);
+    expect(meshes(snow.object)[0]!.material).toMatchObject({
+      transparent: true,
+      blending: NormalBlending,
+      depthTest: true,
+      depthWrite: false,
+    });
+    for (const root of [effects.root, emitters.root]) meshes(root).forEach(dispose);
+    rain.dispose();
+    snow.dispose();
+    height.dispose();
+    groundMask.dispose();
     lights.dispose();
     nodes.dispose();
     terrainDepth.dispose();
+  });
+
+  it('binds the per-cell ground mask only for rain splashes and snow landing', () => {
+    const nodes = new AtmosphereNodes();
+    const height = texture();
+    const groundMask = new DataTexture(new Uint8Array([0, 255, 0, 0]), 2, 2, RedFormat);
+    const rain = buildRain(2, 2, height, 0, nodes, groundMask);
+    const snow = buildSnow(2, 2, height, 0, nodes, groundMask);
+    const [streaks, splashes] = meshes(rain.object);
+    expect(assertLimits(streaks!).sampledTextures).not.toContain(groundMask);
+    const splash = assertLimits(splashes!);
+    expect(splash.sampledTextures).toContain(groundMask);
+    // Clipping only ring centers lets adjacent rings draw across building/cliff edges.
+    expect(splash.fragmentSampledTextures).toContain(groundMask);
+    const flakes = assertLimits(meshes(snow.object)[0]!);
+    expect(flakes.sampledTextures).toContain(groundMask);
+    expect(flakes.sampledTextures).toContain(height);
+    expect(flakes.sampledTextures).toContain(nodes.surfaceTexture.value);
+    // Generated shader stages must retain the swaying flight and procedural disc opacity.
+    expect(flakes.vertexShader).toContain('sin(');
+    expect(flakes.fragmentShader).toContain('smoothstep(');
+    rain.dispose();
+    snow.dispose();
+    groundMask.dispose();
+    height.dispose();
+    nodes.dispose();
   });
 
   it('audits data-sized night poles above the instance-matrix fallback threshold', () => {
@@ -530,10 +614,14 @@ describe('r186 vertex and uniform binding budget', () => {
 
   it('audits terrain/cliffs, water, voxel units/projectiles/debris and their shadow materials', () => {
     const source = cache();
+    const weatherMask = new DataTexture(new Uint8Array([255, 0, 0, 0]), 2, 2, RedFormat);
+    source.nodes!.weatherGroundTexture.value = weatherMask;
     const terrain = buildRa2Terrain(source);
     expect(Array.isArray(terrain.mesh.material)).toBe(true);
-    for (const material of terrain.mesh.material as MeshBasicNodeMaterial[]) {
-      assertLimits(new Mesh(terrain.mesh.geometry, material));
+    for (const [index, material] of (terrain.mesh.material as MeshBasicNodeMaterial[]).entries()) {
+      const result = assertLimits(new Mesh(terrain.mesh.geometry, material));
+      // Ground samples the renderer-owned footprint texture per fragment; vertical art has no wet-film path.
+      expect(result.fragmentSampledTextures.includes(source.nodes!.weatherGroundTexture.value)).toBe(index === 0);
     }
     const generic = buildTerrain(
       {
@@ -561,6 +649,7 @@ describe('r186 vertex and uniform binding budget', () => {
       part.geometry.dispose();
     }
     [terrain.mesh, generic.mesh, water.mesh].forEach(dispose);
+    weatherMask.dispose();
     source.nodes!.dispose();
   });
 
@@ -590,6 +679,33 @@ describe('r186 vertex and uniform binding budget', () => {
       waterPreset.style = previous;
       source.nodes!.dispose();
     }
+  });
+
+  it('compiles scene multipliers after physical lighting and on every sprite lighting class', () => {
+    const source = cache();
+    const terrain = buildRa2Terrain(source);
+    for (const material of terrain.mesh.material as MeshBasicNodeMaterial[]) {
+      material.lightsNode = lights([new AmbientLight(0xffffff, 1)]);
+      expect(assertLimits(new Mesh(terrain.mesh.geometry, material)).fragmentShader).toContain('sceneTerrainMul');
+    }
+    const palette = new Uint8Array(768);
+    const parts = buildVoxelGeometry(syntheticModel([syntheticSection(2)]), palette, source.nodes);
+    for (const part of parts) {
+      part.material.lightsNode = lights([new AmbientLight(0xffffff, 1)]);
+      expect(assertLimits(new Mesh(part.geometry, part.material)).fragmentShader).toContain('sceneObjectMul');
+      const pbr = voxelPbrMaterialFor(palette, source.nodes);
+      pbr.lightsNode = lights([new AmbientLight(0xffffff, 1)]);
+      expect(assertLimits(new Mesh(part.geometry, pbr)).fragmentShader).toContain('sceneObjectMul');
+      part.geometry.dispose();
+    }
+    const sprites = new SpriteLayer(source, [], 1);
+    const shader = assertLimits(sprites.mesh).fragmentShader;
+    expect(shader).toContain('sceneTerrainMul');
+    expect(shader).toContain('sceneObjectMul');
+    expect(shader).toContain('sceneSunShadow');
+    dispose(sprites.mesh);
+    dispose(terrain.mesh);
+    source.nodes!.dispose();
   });
 
   it('audits sandbox object/window materials and custom full-screen mist/tone mapping', () => {

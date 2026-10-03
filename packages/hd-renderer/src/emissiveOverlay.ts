@@ -127,7 +127,7 @@ export function orbRadialAlpha(
 /** r186 can blend MRT attachments independently on WebGPU or WebGL2 with indexed draw-buffer blending. */
 export function emissiveMrtSupported(renderer: WebGPURenderer): boolean {
   const backend = renderer.backend as { isWebGPUBackend?: boolean; drawBuffersIndexedExt?: unknown };
-  // WebGL2 guarantees at least four colour attachments; this pipeline needs at most three.
+  // WebGL2 guarantees at least four colour attachments; this pipeline needs at most four, including self-lit art.
   return backend.isWebGPUBackend === true || !!backend.drawBuffersIndexedExt;
 }
 

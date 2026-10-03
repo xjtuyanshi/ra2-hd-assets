@@ -34,14 +34,14 @@ export const NIGHT_MAP_STAGING: MapLightStaging = {
   ambient: 'night',
 };
 /**
- * A dusk map: the engine applies its light sources at all times, so they show at full engine strength at the map's
- * own ambient whatever the hour (the dusk lamps and NEGLAMP shading are part of the map's look, not night dressing).
+ * A dusk map: MapLightGrade owns the complete engine light at its authored golden hour, including lamps and NEGLAMP.
+ * The separate field only fades in if the hour is forced towards night, when the grade fades out.
  */
 export const DUSK_MAP_STAGING: MapLightStaging = {
   radiusScale: 1,
   falloffPower: 1,
   gain: 1,
-  followsNight: false,
+  followsNight: true,
   ambient: 'map',
 };
 /**

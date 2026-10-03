@@ -87,6 +87,7 @@ function presentation() {
   const shroud = { hidden: false, isLocationShrouded: () => shroud.hidden };
   const effectDriver = {
     frame: vi.fn(),
+    skyFlash: () => 0,
     cards: vi.fn(() => ({ drawn: 0, missing: 0 })),
     smokeCards: vi.fn(),
     volumes: vi.fn(),
@@ -97,6 +98,8 @@ function presentation() {
     seconds: () => 1,
     meanExposure: 2,
     frame: vi.fn(),
+    setSceneLighting: vi.fn(),
+    setTopEffectsVisible: vi.fn(),
     windowsWanted: () => false,
     materialsWanted: () => false,
     view: new IsoCamera(),

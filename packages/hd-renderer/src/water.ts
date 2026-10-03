@@ -17,6 +17,8 @@ import {
   vec4,
 } from 'three/tsl';
 import type { ShaderNode } from './tsl';
+import { DEFAULT_ATMOSPHERE_NODES } from './atmosphere';
+import { sceneLitColour } from './lighting';
 import { createWaterUniforms, waterSurface, type WaterUniforms } from './waterShading';
 
 export type { WaterUniforms };
@@ -30,6 +32,7 @@ export function buildWater(
   height: number,
   waterY: number,
   heightTexture: DataTexture,
+  nodes = DEFAULT_ATMOSPHERE_NODES,
 ): { mesh: Mesh; uniforms: WaterUniforms } {
   // Extend past the map so the black border also covers seabed that parallax reveals below the plane's cut edge
   // (a surface 1 level lower shows up ~1.5 cells further out at the 30° pitch).
@@ -73,7 +76,7 @@ export function buildWater(
     // Terrain above the waterline already hides the plane by depth test, except along the map's cut edges.
     const wet = smoothstep(-0.005, 0.005, signedDepth);
     const alpha = clamp(smoothstep(0.0, 0.5, depth).mul(0.65).add(0.3).add(foam), 0, 1).mul(wet);
-    return vec4(withFoam.mul(border).mul(wet), mix(float(1), alpha, border));
+    return vec4(sceneLitColour(withFoam.mul(border).mul(wet), nodes.sceneTerrainMul), mix(float(1), alpha, border));
   })();
 
   const mesh = new Mesh(geometry, material);

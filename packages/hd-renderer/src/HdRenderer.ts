@@ -27,6 +27,7 @@ import {
   dot,
   float,
   length,
+  max,
   mix,
   mrt,
   neutralToneMapping,
@@ -61,13 +62,17 @@ import { EmitterLayer, type Emitter } from './emitters';
 import { EmissiveOverlay, emissiveMrtSupported } from './emissiveOverlay';
 import { LightField, type DynamicLight } from './lightField';
 import { Lighting, clearLightAt, noonFlatLuminance } from './lighting';
+import { computeSceneMultipliers, type SceneLighting } from './sceneLighting';
+import { medianHeight } from '../../ra2-assets/src/lights';
 import { Mist, MIST_CAP } from './mist';
 import { ObjectLayer } from './objects';
 import { cinematicGrade, faithfulToneMap, hasCinematicGrade, neutralGrade, type CinematicGradeParams } from './post';
 import { buildTerrain, type TerrainBuild } from './terrain';
 import type { ShaderNode } from './tsl';
+import { updateUnlitDisplay } from './unlit';
 import { buildWater, type WaterUniforms } from './water';
-import { buildRain, type RainSystem } from './weather';
+import { buildRain, buildSnow, type RainSystem } from './weather';
+import { steepWeatherCells, WeatherGroundMask } from './weatherGroundMask';
 import { VOXEL_FILL } from './ra2/voxels';
 import { groundFromHeights, setShadowGround, shadowShear, voxelShadowFor } from './ra2/voxelShadow';
 import { voxelLightingFor } from './ra2/vpl';
@@ -79,6 +84,7 @@ import {
   shadowStretch,
   shadowTransform,
   spriteLookFor,
+  updateUnlitSpriteLook,
 } from './ra2/spriteLook';
 import type { HdWorld } from './ra2/world';
 import { IsoCamera, LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE, cellToWorld } from './world';
@@ -335,6 +341,32 @@ const CLARITY_SIGMA = 5;
 /** Exposure adaptation never lifts the frame by more than this factor. */
 const MAX_ADAPT = 2.2;
 
+/** Effective map presentation, separate from the user's look settings and all scene-event inputs. */
+/**
+ * Exposure of authored dusk maps relative to the day calibration. Same-frame replay of DuskPen (Ambient 0.73, RGB
+ * 1/0.92/0.8, Level 0.035) against the original: HD/original pixel median (1.114, 1.17, 1.034) while the day calibration
+ * on XMP29U2 gives (0.982, 1.036, 1.149); the dusk path lacks the day path's exposure normalisation detail, so it reads
+ * about 12 % brighter than the original. 0.9 brings it back in line with the day maps.
+ */
+export const DUSK_EXPOSURE = 0.9;
+
+export function mapPresentation(
+  kind: AtmosphereProfile['kind'] | undefined,
+  night: number,
+  settings: Pick<HdSettings, 'adaptExposure' | 'whiteAdapt' | 'mapTintAdapt' | 'mapSourcesByDay'>,
+) {
+  const dusk = kind === 'dusk';
+  return {
+    /** Extra exposure factor of the clear-light calibration (1 except authored dusk, see DUSK_EXPOSURE). */
+    exposureScale: dusk ? 1 + (DUSK_EXPOSURE - 1) * (1 - night) : 1,
+    mapWeight: kind === 'day' || dusk ? 1 - night : 0,
+    sourceWeight: dusk ? 1 : settings.mapSourcesByDay,
+    adaptExposure: dusk ? 0 : settings.adaptExposure,
+    whiteAdapt: dusk ? 0 : settings.whiteAdapt,
+    mapTintAdapt: dusk ? 0 : settings.mapTintAdapt,
+  };
+}
+
 /**
  * Divide a map's [Lighting] colour tint out of the exposure in place (amount 0..1 as a power of the inverse tint),
  * keeping the Rec.709 luminance of a neutral surface under that tint unchanged.
@@ -428,6 +460,7 @@ export interface HdStats {
   mist: number;
   wet: number;
   rain: number;
+  snow: number;
   pointLights: number;
   /** Scene light level relative to clear noon (rain streaks and smoke scale with it). */
   sceneBrightness: number;
@@ -463,6 +496,15 @@ const NIGHT_BLOOM_THRESHOLD = 0.85;
 export class HdRenderer {
   readonly renderer: WebGPURenderer;
   readonly scene = new Scene();
+  /** Native top-layer effect art is composited after the ground visibility mask. */
+  readonly topScene = new Scene();
+  private topEffectsVisible = false;
+  private sceneLighting: SceneLighting | null = null;
+  private sceneSkyFlash = 0;
+  private sceneMedianZ = 0;
+  /** Effect art follows the authored time/weather light, never a scene event's overcast or palette. */
+  readonly effectLight = new Color(1, 1, 1);
+  private readonly eventFreeIrradiance = new Color();
   readonly view = new IsoCamera();
   readonly settings: HdSettings = {
     voxelLook: 'engine',
@@ -534,7 +576,7 @@ export class HdRenderer {
   /** Flat-ground irradiance at clear noon (per channel), measured once from the lighting model. */
   private readonly noonIrradiance = new Color();
   private readonly lighting: Lighting;
-  private readonly objects = new ObjectLayer();
+  private readonly objects: ObjectLayer;
   /** HD effects; live views spawn into it from the game's own effect list. */
   readonly effects: EffectsLayer;
   /** Generic capture; game views select terrain mains and near whole-object parts for per-fire decisions. */
@@ -567,6 +609,9 @@ export class HdRenderer {
   private terrain!: TerrainBuild;
   private water: { uniforms: WaterUniforms } | null = null;
   private rain!: RainSystem;
+  private snow!: RainSystem;
+  /** Cell exclusions shared by ground splashes and snow landings; live foundations update it only on change. */
+  weatherGroundMask!: WeatherGroundMask;
   /** Present when drawing an original map; null for the procedural sandbox. */
   private world: HdWorld | null = null;
   private waterY = 0;
@@ -617,6 +662,7 @@ export class HdRenderer {
   ) {
     this.nodes = options.nodes ?? new AtmosphereNodes();
     this.layerNodes = this.nodes;
+    this.objects = new ObjectLayer(this.layerNodes);
     this.effects = new EffectsLayer(this.layerNodes, this.terrainDepth);
     this.emitters = new EmitterLayer(this.layerNodes);
     this.emissiveOverlay = new EmissiveOverlay(PIXELS_PER_CELL_EDGE);
@@ -682,6 +728,7 @@ export class HdRenderer {
     let waterY: number | null;
     if (world) {
       this.world = world;
+      this.sceneMedianZ = world.cache ? medianHeight(world.cache.height, world.cache.exists) : 0;
       if (world.voxelLook) this.settings.voxelLook = world.voxelLook;
       this.terrain = world.terrain;
       this.bounds = { width: world.width, height: world.height };
@@ -707,11 +754,36 @@ export class HdRenderer {
     setShadowGround(this.scene, shadowGround);
     if (world?.water) this.water = { uniforms: world.water };
     if (waterY !== null) {
-      const water = buildWater(this.bounds.width, this.bounds.height, waterY, this.terrain.heightTexture);
+      const water = buildWater(this.bounds.width, this.bounds.height, waterY, this.terrain.heightTexture, this.nodes);
       this.water = water;
       this.scene.add(water.mesh);
     }
-    this.rain = buildRain(this.bounds.width, this.bounds.height, this.terrain.heightTexture, this.waterY, this.nodes);
+    this.weatherGroundMask = new WeatherGroundMask(
+      this.bounds.width,
+      this.bounds.height,
+      world
+        ? steepWeatherCells(this.bounds.width, this.bounds.height, this.terrain.heightTexture, LEVEL_HEIGHT * 1.5)
+        : undefined,
+    );
+    this.weatherGroundMask.updateFoundations(world?.weatherFoundations ?? []);
+    this.nodes.weatherGroundTexture.value = this.weatherGroundMask.texture;
+    this.nodes.weatherGroundSize.value.set(this.bounds.width, this.bounds.height);
+    this.rain = buildRain(
+      this.bounds.width,
+      this.bounds.height,
+      this.terrain.heightTexture,
+      this.waterY,
+      this.nodes,
+      this.weatherGroundMask.texture,
+    );
+    this.snow = buildSnow(
+      this.bounds.width,
+      this.bounds.height,
+      this.terrain.heightTexture,
+      this.waterY,
+      this.nodes,
+      this.weatherGroundMask.texture,
+    );
     this.nodes.referenceLevel.value = this.lighting.referenceIrradiance();
     this.lightField = new LightField(this.bounds.width, this.bounds.height, {
       halfFloat: LightField.supportsHalfFloat(this.renderer),
@@ -731,6 +803,7 @@ export class HdRenderer {
       this.lighting.root,
       this.effects.root,
       this.rain.object,
+      this.snow.object,
       this.emitters.root,
       this.emissiveOverlay.root,
     );
@@ -762,6 +835,19 @@ export class HdRenderer {
     if (this.pipeline) this.buildPipeline();
   }
 
+  /** Snapshot-driven palette lighting; no independent fade or exposure feedback. */
+  setSceneLighting(lighting: SceneLighting | null, skyFlash = 0): void {
+    this.sceneLighting = lighting;
+    this.sceneSkyFlash = lighting?.event === 'storm' ? Math.min(0.12, Math.max(0, skyFlash)) : 0;
+  }
+
+  /** Keep the old post graph exactly when no native top-layer art is present. */
+  setTopEffectsVisible(visible: boolean): void {
+    if (visible === this.topEffectsVisible) return;
+    this.topEffectsVisible = visible;
+    if (this.pipeline) this.buildPipeline();
+  }
+
   /** Preserve geometry depth for atmosphere when cards reconstruct analytic occlusion depth in the fragment shader. */
   enablePainterDepth(): void {
     if (this.painterDepthEnabled) return;
@@ -782,12 +868,15 @@ export class HdRenderer {
     ];
     // No extra key/graph branch for faithful: preserve its original output path exactly.
     if (emissiveOverlayEnabled(this.settings, emissiveMrtSupported(this.renderer))) key.push('emissive');
+    if (this.world && debugView === 'none') key.push('unlit');
+    if (this.topEffectsVisible) key.push('top-effects');
     return JSON.stringify(key);
   }
 
   private buildPipeline(): void {
     const { antialias, toneMapper, sharpness, debugView } = this.settings;
     const overlay = emissiveOverlayEnabled(this.settings, emissiveMrtSupported(this.renderer));
+    const unlit = !!this.world && debugView === 'none';
     this.emissiveOverlay.setEnabled(overlay);
     this.pipelineKey = this.settingsPipelineKey();
     // Release the previous pipeline's render targets and output material before building the new one (the MSAA scene
@@ -797,7 +886,7 @@ export class HdRenderer {
     const nodes: { dispose(): void }[] = (this.pipelineNodes = []);
     const scenePass = pass(this.scene, this.view.camera, { samples: antialias === 'msaa4' ? 4 : 0 });
     this.terrainDepth.setMainPass(scenePass.renderTarget, this.view.camera);
-    if (this.painterDepthEnabled || overlay) {
+    if (this.painterDepthEnabled || overlay || unlit) {
       const outputs: Record<string, ShaderNode> = { output: materialOutput };
       if (this.painterDepthEnabled) {
         // Physical-depth alpha follows depth writes, independently of art coverage; overlays never write depth.
@@ -806,6 +895,7 @@ export class HdRenderer {
         )();
       }
       if (overlay) outputs.emissive = vec4(0, 0, 0, materialOutput.a);
+      if (unlit) outputs.unlit = vec4(0, 0, 0, materialOutput.a);
       const attachments = mrt(outputs);
       if (this.painterDepthEnabled)
         attachments
@@ -814,6 +904,9 @@ export class HdRenderer {
       // Use each foreground material's blending: opaque art clears emission, alpha art covers it, additive FX add zero.
       if (overlay)
         attachments.setBlendMode('emissive', new BlendMode(MaterialBlending)).setClearColor('emissive', 0x000000, 0);
+      // Same blending as the main output, including on WebGL without indexed blend support. Foreground art clears
+      // or attenuates captured self-lit colour; this needs at most four attachments with depth and emission enabled.
+      if (unlit) attachments.setBlendMode('unlit', new BlendMode(MaterialBlending)).setClearColor('unlit', 0x000000, 0);
       scenePass.setMRT(attachments);
     }
     nodes.push(scenePass);
@@ -833,7 +926,18 @@ export class HdRenderer {
     );
     const visible: ShaderNode = this.visibilityShape ? this.visibilityShape(texel) : texel.r;
     // Colour only: the canvas stays opaque, so shroud is black and not the page behind it.
-    const shown: ShaderNode = vec4(misted.rgb.mul(visible), misted.a);
+    let shown: ShaderNode = vec4(misted.rgb.mul(visible), misted.a);
+    let topAlpha: ShaderNode | null = null;
+    if (this.topEffectsVisible) {
+      const topPass = pass(this.topScene, this.view.camera, { samples: antialias === 'msaa4' ? 4 : 0 });
+      // Transparent clear is explicit: the renderer's main canvas is intentionally opaque. Normal/custom-alpha
+      // blending produces premultiplied colour in this target, so composite it without multiplying alpha twice.
+      topPass.setMRT(mrt({ output: materialOutput }).setClearColor('output', 0x000000, 0));
+      nodes.push(topPass);
+      const top: ShaderNode = topPass.getTextureNode('output');
+      topAlpha = top.a;
+      shown = vec4(shown.rgb.mul(float(1).sub(top.a)).add(top.rgb), 1);
+    }
     // Bloom reads the unexposed scene; frame() sets its threshold from the exposure.
     const glow: ShaderNode = bloom(shown, 1, 0.45, this.bloomThreshold);
     glow.strength = this.bloomStrength;
@@ -842,7 +946,8 @@ export class HdRenderer {
       smoothstep(0.45, 1.05, length(screenUV.sub(0.5).mul(1.6))).mul(this.vignetteStrength),
     );
     // Opaque output: the vignette darkens colour only (it used to scale alpha too, letting the page show in corners).
-    const composite: ShaderNode = shown.rgb.add(glow.rgb.mul(visible)).mul(this.exposure).mul(vignette);
+    const bloomVisibility = topAlpha ? max(visible, topAlpha) : visible;
+    const composite: ShaderNode = shown.rgb.add(glow.rgb.mul(bloomVisibility)).mul(this.exposure).mul(vignette);
     this.pipeline = new RenderPipeline(this.renderer);
     // Anti-aliasing and sharpening run on the display-referred image.
     this.pipeline.outputColorTransform = false;
@@ -862,8 +967,14 @@ export class HdRenderer {
     const neutral: ShaderNode = neutralToneMapping(composite, float(1));
     // (TSL's chained a.mix(b, t) is mix(b, t, a); call mix() directly.)
     const mixed: ShaderNode = mix(faithful, neutral, this.nightDisplay);
-    const emission: ShaderNode | null = overlay ? scenePass.getTextureNode('emissive').rgb.mul(visible) : null;
-    const addEmission = (linear: ShaderNode): ShaderNode => (emission ? linear.add(emission) : linear);
+    let emission: ShaderNode | null = overlay ? scenePass.getTextureNode('emissive').rgb.mul(visible) : null;
+    if (emission && topAlpha) emission = emission.mul(float(1).sub(topAlpha));
+    let unlitColour: ShaderNode | null = unlit ? scenePass.getTextureNode('unlit').rgb.mul(visible) : null;
+    if (unlitColour && topAlpha) unlitColour = unlitColour.mul(float(1).sub(topAlpha));
+    const addEmission = (linear: ShaderNode): ShaderNode => {
+      if (unlitColour) linear = linear.add(unlitColour);
+      return emission ? linear.add(emission) : linear;
+    };
     let output: ShaderNode;
     if (hasCinematicGrade(this.settings)) {
       // Grade display-linear colour after the tone map, before renderOutput encodes sRGB and the night toe lift.
@@ -871,7 +982,7 @@ export class HdRenderer {
         toneMapper === 'faithful' ? mixed : toneMapping(TONE_MAPPERS[toneMapper], float(1), vec4(composite, 1)).rgb;
       const graded: ShaderNode = mix(cinematicGrade(linear, this.gradeUniforms), linear, this.nightDisplay);
       output = renderOutput(vec4(addEmission(graded), 1), NoToneMapping);
-    } else if (overlay) {
+    } else if (overlay || unlit) {
       const linear: ShaderNode =
         toneMapper === 'faithful' ? mixed : toneMapping(TONE_MAPPERS[toneMapper], float(1), vec4(composite, 1)).rgb;
       output = renderOutput(vec4(addEmission(linear), 1), NoToneMapping);
@@ -883,7 +994,13 @@ export class HdRenderer {
           : renderOutput(vec4(composite, 1), TONE_MAPPERS[toneMapper]);
     }
     const toe = float(1).sub(output.rgb.div(NIGHT_TOE)).max(0);
-    let display: ShaderNode = vec4(output.rgb.add(this.blackLift.mul(visible).mul(toe.mul(toe))), 1);
+    // The night toe must not lift the blue channel of yellow self-lit art. MRT alpha is foreground coverage, not
+    // unlit coverage, so suppress the toe where unlit radiance survives. At filtered edges this also suppresses the
+    // background share's toe; exact fractional edge compositing still needs rendered-pixel acceptance.
+    const toeVisibility: ShaderNode = unlitColour
+      ? dot(unlitColour, vec3(1)).greaterThan(0).select(float(0), visible)
+      : visible;
+    let display: ShaderNode = vec4(output.rgb.add(this.blackLift.mul(toeVisibility).mul(toe.mul(toe))), 1);
     if (this.settings.clarity > 0 && debugView === 'none') {
       // Band-pass (difference of two half-resolution blurs): faces, crevices and canopy masses a few CSS px and up gain
       // contrast while pixel-scale texture (brick, asphalt grain) is left as it is; the plain unsharp mask doubled it.
@@ -915,6 +1032,8 @@ export class HdRenderer {
   }
 
   applySettings(): void {
+    updateUnlitDisplay(this.nodes, this.settings);
+    if (this.layerNodes !== this.nodes) updateUnlitDisplay(this.layerNodes, this.settings);
     // Exposure is applied in the pipeline for every tone mapper.
     this.renderer.toneMapping =
       this.settings.toneMapper === 'faithful' ? NoToneMapping : TONE_MAPPERS[this.settings.toneMapper];
@@ -999,31 +1118,34 @@ export class HdRenderer {
     this.lastFrameAt = started;
     const env = this.state.environment;
     const raining = env.weather === 'rain' || env.weather === 'storm';
+    const snowing = env.weather === 'snow';
     // A storm is heavier rain (and wind); no lightning (decorative weather rule, docs/remaster/PLAN.md).
     const rainAmount = raining ? Math.min(1, env.weatherIntensity * (env.weather === 'storm' ? 1.3 : 1)) : 0;
+    const snowAmount = snowing ? env.weatherIntensity : 0;
     // Surfaces wet quickly under rain and dry slowly after it stops.
     const wet = this.terrain.wetness;
-    wet.value = raining
-      ? Math.min(1, wet.value + deltaSeconds * 0.25 * rainAmount)
-      : Math.max(0, wet.value - deltaSeconds * 0.02);
+    // Snow is dry decoration: switching from rain also removes residual puddles and wet reflections.
+    wet.value = snowing
+      ? 0
+      : raining
+        ? Math.min(1, wet.value + deltaSeconds * 0.25 * rainAmount)
+        : Math.max(0, wet.value - deltaSeconds * 0.02);
 
     const profile = this.profile();
     this.lighting.setProfile(profile);
     this.lighting.follow(this.view.target);
-    this.lighting.update(env.timeOfDay, raining ? 0.35 + 0.5 * rainAmount : 0);
+    this.lighting.update(
+      env.timeOfDay,
+      raining ? 0.35 + 0.5 * rainAmount : snowing ? 0.3 + 0.35 * snowAmount : 0,
+      snowing ? 0.06 : undefined,
+      raining ? { kind: 'rain', intensity: rainAmount } : snowing ? { kind: 'snow', intensity: snowAmount } : undefined,
+    );
     const light = this.lighting.state;
-    if (this.settings.voxelLook === 'remaster') {
-      const pbr = voxelPbrFor(this.nodes);
-      pbr.skyZenith.value.copy(light.skyZenith);
-      pbr.skyHorizon.value.copy(light.skyHorizon);
-      // LightingState has no ground swatch; the actual HemisphereLight owns the matching ground radiance.
-      pbr.groundColour.value
-        .copy(this.lighting.hemi.groundColor)
-        .multiplyScalar(this.lighting.hemi.intensity / Math.PI);
-    }
+    this.lighting.flatIrradianceColor(this.eventFreeIrradiance);
     const reference = this.lighting.referenceIrradiance();
     // Original maps only: the procedural sandbox keeps its own look.
     const nightGrade = this.world ? light.night : 0;
+    const presentation = mapPresentation(profile?.kind, light.night, this.settings);
     // Original maps are calibrated so flat ground at clear noon shows the tile art at its original colour: by day the
     // exposure is pi / (noon flat-ground irradiance) per channel, a white balance to the noon reference (the noon sun
     // is slightly warm and the sky blue). The night presentation keeps the scalar pi / reference it was tuned with;
@@ -1038,29 +1160,36 @@ export class HdRenderer {
         k * (1 / noon.b + (1 / reference - 1 / noon.b) * nightGrade),
       );
       // Enhanced look: lift late and early daylight towards noon's brightness (the colour of the light stays).
-      const adapt = this.settings.adaptExposure * (1 - nightGrade);
+      const adapt = presentation.adaptExposure * (1 - nightGrade);
       if (adapt > 0) {
-        const flat = this.lighting.flatIrradianceColor(this.scratchColor);
+        // Adapt to the hour's clear illumination so exposure does not cancel intentional overcast dimming.
+        const flat =
+          light.weatherSunShare !== 1
+            ? this.lighting.clearFlatIrradianceColor(this.scratchColor)
+            : this.lighting.flatIrradianceColor(this.scratchColor);
         const now = 0.2126 * flat.r + 0.7152 * flat.g + 0.0722 * flat.b;
         const noonLum = 0.2126 * noon.r + 0.7152 * noon.g + 0.0722 * noon.b;
         const lift = Math.min(MAX_ADAPT, Math.max(1, noonLum / Math.max(1e-6, now)));
         exposure.multiplyScalar(1 + (lift - 1) * adapt);
       }
-      if (this.settings.whiteAdapt > 0 && nightGrade < 1) {
+      if (presentation.whiteAdapt > 0 && nightGrade < 1) {
         // Exposure adaptation alone owns brightness; white adaptation changes only the illuminant balance.
         adaptWhiteBalance(
           exposure,
           noon,
-          this.lighting.flatIrradianceColor(this.scratchColor),
-          this.settings.whiteAdapt,
+          light.weatherSunShare !== 1
+            ? this.lighting.clearFlatIrradianceColor(this.scratchColor)
+            : this.lighting.flatIrradianceColor(this.scratchColor),
+          presentation.whiteAdapt,
           nightGrade,
         );
       }
       const mapLight = this.world.mapLight;
-      if (this.settings.mapTintAdapt > 0 && mapLight) {
+      if (presentation.mapTintAdapt > 0 && mapLight) {
         // The map light's day weight is set below for this frame; last frame's weight is the same within a frame.
-        neutralizeMapTint(exposure, mapLight.lighting, this.settings.mapTintAdapt * mapLight.currentWeight);
+        neutralizeMapTint(exposure, mapLight.lighting, presentation.mapTintAdapt * mapLight.currentWeight);
       }
+      if (presentation.exposureScale !== 1) exposure.multiplyScalar(presentation.exposureScale);
     } else {
       exposure.setScalar(this.settings.exposure * light.exposure);
     }
@@ -1070,10 +1199,32 @@ export class HdRenderer {
     this.bloomThreshold.value = dayThreshold + (NIGHT_BLOOM_THRESHOLD - dayThreshold) * nightGrade;
     this.nightDisplay.value = nightGrade;
     this.nodes.faithfulDisplay.value = this.settings.toneMapper === 'faithful' ? 1 - nightGrade : 0;
-    // The map's own light by day ([Lighting] and light sources, mapLighting.ts); the night presentation owns maps staged
-    // as night or dusk and the night hours of day maps.
-    this.world?.mapLight?.setWeight(profile?.kind === 'day' ? 1 - light.night : 0);
-    this.world?.mapLight?.setSourceWeight(this.settings.mapSourcesByDay);
+    // Authored dusk uses the engine's full grade and sources at its golden-hour key, without daytime neutralisation.
+    this.world?.mapLight?.setWeight(presentation.mapWeight);
+    this.world?.mapLight?.setSourceWeight(presentation.sourceWeight);
+    // Compare against the authored map, without local sources. Adaptation above reads only event-free light;
+    // otherwise a dark scene event would immediately be brightened and white-balanced back out.
+    const scene = computeSceneMultipliers(
+      this.world?.mapLight?.lighting ?? this.state.map.lighting,
+      this.sceneLighting,
+      this.sceneMedianZ,
+    );
+    const flash = 1 + this.sceneSkyFlash;
+    this.nodes.sceneTerrainMul.value.fromArray(scene.terrain).multiplyScalar(flash);
+    this.nodes.sceneObjectMul.value.fromArray(scene.objects).multiplyScalar(flash);
+    const storm = this.sceneLighting?.event === 'storm';
+    this.nodes.sceneSunShadow.value = storm ? 0 : 1;
+    this.lighting.sun.castShadow = this.settings.shadows && !this.world && !storm;
+    // This is presentation only: never infer rain, event timing or ambient from the storm flag.
+    if (storm) this.lighting.applySceneOvercast(1);
+    if (this.settings.voxelLook === 'remaster') {
+      const pbr = voxelPbrFor(this.nodes);
+      pbr.skyZenith.value.copy(light.skyZenith);
+      pbr.skyHorizon.value.copy(light.skyHorizon);
+      pbr.groundColour.value
+        .copy(this.lighting.hemi.groundColor)
+        .multiplyScalar(this.lighting.hemi.intensity / Math.PI);
+    }
     if (this.water) {
       const w = this.water.uniforms;
       w.sunDirection.value.copy(light.sunDirection);
@@ -1093,6 +1244,9 @@ export class HdRenderer {
       ((0.2126 * level.r + 0.7152 * level.g + 0.0722 * level.b) * reference) / noonFlatLuminance();
     this.nodes.night.value = light.night;
     this.nodes.rainAmount.value = rainAmount;
+    this.nodes.weatherSunShare.value = light.weatherSunShare;
+    this.nodes.weatherDesaturation.value =
+      profile?.kind === 'day' && raining ? 0.15625 * rainAmount * (1 - light.night) : 0;
     this.nodes.moonDesaturation.value = NIGHT_DESATURATION * nightGrade;
     const levelLuminance = 0.2126 * level.r + 0.7152 * level.g + 0.0722 * level.b;
     this.nodes.moonNeutral.value.setRGB(
@@ -1113,14 +1267,22 @@ export class HdRenderer {
     // Mist: none on a clear day, a trace in day rain, a thin veil at night (thicker in night rain). Capped.
     const baseMist = raining
       ? (1 - light.night) * 0.06 * rainAmount + light.night * (0.045 + 0.04 * rainAmount)
-      : 0.05 * light.night;
+      : snowing
+        ? 0.06 * snowAmount
+        : 0.05 * light.night;
     this.mist.amount.value = Math.min(MIST_CAP, baseMist * this.atmosphere.mist);
     if (this.mist.amount.value > 0 !== this.mistInPipeline) this.buildPipeline();
 
     this.rain.intensity.value = rainAmount;
+    this.rain.object.visible = rainAmount > 0;
     this.rain.windX.value = Math.cos(env.windDirection) * env.windStrength * 0.4;
     this.rain.windZ.value = Math.sin(env.windDirection) * env.windStrength * 0.4;
     this.rain.center.value.copy(this.view.target);
+    this.snow.intensity.value = snowAmount;
+    this.snow.object.visible = snowAmount > 0;
+    this.snow.windX.value = this.rain.windX.value;
+    this.snow.windZ.value = this.rain.windZ.value;
+    this.snow.center.value.copy(this.view.target);
 
     // Camera shake decays quickly; it is purely presentational.
     this.effects.shake = Math.max(0, this.effects.shake - deltaSeconds);
@@ -1148,6 +1310,7 @@ export class HdRenderer {
     this.emissiveOverlay.now.value = now;
     const sprites = this.world?.sprites;
     const spriteScale = 1 / Math.PI + (1 / reference - 1 / Math.PI) * nightGrade;
+    this.effectLight.copy(this.eventFreeIrradiance).multiplyScalar(spriteScale);
     if (sprites) {
       sprites.cameraRight.value.copy(right);
       sprites.cameraUp.value.copy(up);
@@ -1214,6 +1377,7 @@ export class HdRenderer {
     look.shadowLength.value = on ? s.shadowLength : 1;
     look.shadowDarkness.value = on ? s.shadowDarkness : 1;
     for (const pass of look.groundPasses) pass.visible = on;
+    updateUnlitSpriteLook(look, s);
     if (!on) {
       this.restoreVoxelShear();
       return;
@@ -1363,6 +1527,7 @@ export class HdRenderer {
       mist: this.mist.amount.value,
       wet: this.terrain.wetness.value,
       rain: this.nodes.rainAmount.value,
+      snow: this.snow.intensity.value,
       pointLights,
       sceneBrightness: this.nodes.sceneBrightness.value,
       windowGain: this.nodes.windowGain.value,
@@ -1419,6 +1584,9 @@ export class HdRenderer {
     for (const node of this.pipelineNodes) node.dispose();
     this.pipelineNodes.length = 0;
     this.lightField?.dispose();
+    this.rain?.dispose();
+    this.snow?.dispose();
+    this.weatherGroundMask?.dispose();
     this.emissiveOverlay.dispose();
     this.beforeDepthCapture = undefined;
     this.terrainDepth.dispose();

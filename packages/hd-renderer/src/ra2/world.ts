@@ -3,11 +3,12 @@ import { SURFACE, surfaceFromLandType } from '../../../ra2-assets/src/lights';
 import type { MapObject } from '../../../ra2-assets/src/manifest';
 import { AtmosphereNodes, type WorldDressing } from '../atmosphere';
 import type { TerrainBuild } from '../terrain';
+import type { WeatherFoundation } from '../weatherGroundMask';
 import { remapRamp, type Hsv } from '../../../ra2-assets/src/remap';
 import { addHousePalettes, decodeBase64, loadRa2Cache, paletteFor, type Ra2Cache, type Ra2CacheOptions } from './cache';
 import type { MapLightGrade } from './mapLighting';
 import { Ra2NightDressing } from './nightDressing';
-import { SpriteLayer, cardPush, objectAnchor, type SpriteInstance } from './sprites';
+import { SpriteLayer, cardPush, isUnlitMapOverlay, objectAnchor, type SpriteInstance } from './sprites';
 import { loadSpriteMaterials } from './spriteMaterials';
 import type { SpriteMaterialAtlas } from './spriteLook';
 import { objectYSort, painterObject } from './painterOrder';
@@ -41,6 +42,8 @@ export interface HdWorld {
   width: number;
   height: number;
   terrain: TerrainBuild;
+  /** Ground-weather exclusions for the buildings actually included in this static scene. */
+  weatherFoundations?: readonly WeatherFoundation[];
   waterY: number | null;
   /** Per-pixel water shading inputs when water is part of the terrain material. */
   water?: import('../waterShading').WaterUniforms;
@@ -152,6 +155,7 @@ export async function loadRa2World(
   const voxelMaterial = createVoxelMaterial(nodes);
   const geometries = new Map<string, VoxelGeometry[]>();
   const sprites: SpriteInstance[] = [];
+  const weatherFoundations: WeatherFoundation[] = [];
   // Enhanced-look decals (spriteLook.ts; drawn only while their effect is on): ground contact shades first, under
   // every other decal, and wet-paving mirror images of upright art.
   const lookDecals: SpriteInstance[] = [];
@@ -217,6 +221,14 @@ export async function loadRa2World(
       painter.foundation = entry.foundation;
       painter.x = object.x;
       painter.z = object.y;
+      // The footprint starts at the same cell corner as painter depth, independent of the art's draw offset.
+      if (entry.foundation)
+        weatherFoundations.push({
+          x: object.x,
+          z: object.y,
+          width: entry.foundation[0],
+          height: entry.foundation[1],
+        });
     }
     const deckHeight = object.kind === 'overlay' && isHighBridge(object.type) ? HIGH_BRIDGE_HEIGHT : undefined;
     for (const underlay of entry.underlays ?? []) {
@@ -273,6 +285,7 @@ export async function loadRa2World(
       shadow: false,
       flat,
       glint: object.kind === 'overlay' && flat && lighting === 'none' ? 1 : undefined,
+      unlit: isUnlitMapOverlay(object),
       lighting,
       painter: object.kind === 'overlay' ? undefined : painter,
       deckHeight,
@@ -330,6 +343,7 @@ export async function loadRa2World(
     width: manifest.grid.width,
     height: manifest.grid.height,
     terrain,
+    weatherFoundations,
     waterY: terrain.waterY,
     water: terrain.water,
     root,

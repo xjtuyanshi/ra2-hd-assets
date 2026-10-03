@@ -47,7 +47,8 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    and dolphin through `live/shpUnits.ts`, and the voxel turrets of defences with `TurretAnimIsVoxel=yes` such as the
    sentry gun, flak cannon, Patriot, Grand Cannon and Gattling cannon, placed at the art's `TurretAnimX/Y` and drawn over
    their base); the shroud as a flat Z = 0 visibility mask (`live/shroud.ts`) that the renderer applies in its post
-   pass after the mist and before bloom (`HdRenderer.setVisibility`), so nothing under black shroud glows through; and a
+   pass after the mist and before bloom (`HdRenderer.setVisibility`). Native top-layer effect art uses a separate
+   transparent pass above that mask, matching storm clouds over black shroud; ground/air effects remain masked. A
    camera framed in engine pixels from the game's `TacticalPos`, so the HD image lines up with the original pixel for
    pixel. Positions and facings are interpolated between logic frames; every animation (walking, building layers,
    build-up, effects) is clocked on the engine's logic frames, not on the wall clock. Infantry, SHP vehicles and
@@ -288,7 +289,11 @@ Game art and derived images remain outside Git.
 Start a development server whose game root holds a skirmish setup (a scratch copy of the installation with an edited
 `RA2MD.INI` `[Skirmish]` section, as described in `scripts/remaster/perf/README.md`), then open
 `/?start-page=battle&hd=1`. By default the HD lighting follows the map's own `[Lighting]` (day, dusk or night maps, see
-`pnpm hd:lights`); `hd-time=<hours>` and `hd-weather=rain` override it; `hd-look=<preset>` (`faithful|golden|cinematic`)
+`pnpm hd:lights`); `hd-time=<hours>` overrides the hour. Decorative weather is off by default;
+`hd-weather=rain|snow|storm` enables it, with optional `hd-weather-intensity=<0..1>` (default 0.8 for rain/snow,
+1 for storm; finite values are clamped, invalid intensities use the default, unknown weather selects clear).
+Snow stays dry and ground weather excludes building foundations and steep cells.
+`hd-look=<preset>` (`faithful|golden|cinematic`)
 applies the preset and, on day maps, its suggested hour unless `hd-time` is given (dusk and night maps keep their own
 `[Lighting]` hour; `cinematic` is the approved look with medium cooling); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=enhanced` the modern water;
 `hd-vlook=remaster` selects the remaster voxel look; `hd-vproj=<dir>` selects vehicle redraw projection atlases under
@@ -383,6 +388,16 @@ and the H3 overlay and smudge grids are read from pinned YR 1.001 and forwarded 
 boundaries and the remaining H1/H2 proposals are in `docs/remaster/research/hd-bridge-fields.md`. H1 is partial:
 native anim frame/stage/alpha/layer/owner/attachment/buildingAnim and bullet type/frame/velocity are forwarded;
 the table also lists the remaining optional fields alongside implemented observer fields.
+
+`GameRenderState.lighting` is forwarded unchanged as `LiveSnapshot.lighting`: current ambient, selected ground/level
+in `[Lighting]` fractions, normal `tint`, raw palette `override`, `event`, and storm active/pending/ending/target-cell
+state. `src/games/yr/sceneLighting.ts` validates the ScenarioClass pointer and reads native words/statics; invalid
+or unavailable reads publish null, never fabricated zero light. Lighting participates in the YR same-frame cache
+key, so event transitions can publish without waiting for the next logic-frame number. No event timing is inferred
+from animations. See [Scene lighting events](research/yr-scene-lighting.md#scene-lighting-events) for addresses,
+independent palette/height selection priorities and the limits of global state versus per-cell engine caches.
+The renderer applies terrain/object event multipliers independently of map-grade weight and freezes adaptation
+to event-free light; ordinary snapshots and older recordings without lighting keep identity event uniforms.
 
 | Step | Fields                                                                                                                       | Used for                                                                                                       | Fallback without it                                                                                                                                                                                                                                                        |
 | ---- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

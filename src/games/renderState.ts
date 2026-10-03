@@ -29,12 +29,36 @@ export interface GameRenderState {
   smudges: GameRenderSmudges | null;
   /** Live effects the engine is playing, null while they cannot be read. */
   effects: GameRenderEffects | null;
+  /** Live scene lighting; absent for unsupported games, null while the read is unavailable. */
+  lighting?: GameRenderLighting | null;
   /**
    * The native build sidebar and command bar as the game currently draws them, for an HD interface layer that covers
    * them while every input still goes to the game. Absent when the game has no sidebar reader; null outside a battle or
    * while it cannot be read.
    */
   sidebar?: GameRenderSidebar | null;
+}
+
+/** Scene-wide engine lighting, in fractional [Lighting] units rather than integer percentages/per-mille. */
+export interface GameRenderLighting {
+  /** Current ambient, including the engine's event transition, never the event's target ambient. */
+  ambient: number;
+  /** Current cell-lighting coefficients selected independently of the palette override. */
+  ground: number;
+  level: number;
+  /** Normal authored scene RGB, before normalization. */
+  tint: [number, number, number];
+  /** Raw event palette RGB; null restores the normal palette, without replacing the normal cell-light tint. */
+  override: [number, number, number] | null;
+  /** Event currently selecting the palette; recovery can retain changed ambient with no palette event. */
+  event: 'storm' | 'nuke' | 'dominator' | 'timewarp' | null;
+  storm?: {
+    active: boolean;
+    /** A positive countdown is pending, without implying active storm lighting. */
+    pending: boolean;
+    ending: boolean;
+    cell: { x: number; y: number };
+  };
 }
 
 export interface GameRenderMap {

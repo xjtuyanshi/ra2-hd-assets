@@ -9,6 +9,7 @@ import type { FrameRect, VmFrameRenderer } from './vmFrameRenderer';
 import type { HdUi } from './hdUi';
 import type { LookPreset } from '../../../../packages/hd-renderer/src/HdRenderer';
 import type { LiveSnapshot, LiveView } from '../../../../packages/hd-renderer/src/live/liveView';
+import { parseWeatherParams } from '../../../../packages/hd-renderer/src/weatherParams';
 
 /**
  * HD remaster bridge (development only, `?hd=1`): draws the running match with the HD renderer on a canvas under the
@@ -222,8 +223,7 @@ export function startHdBridge(host: HdBridgeHost): () => void {
           // Without hd-time, the map's own [Lighting] decides day, dusk or night (a preset's hour applies to day maps).
           ...(timeOfDay !== undefined ? { timeOfDay } : {}),
           ...(dayHour !== undefined ? { dayHour } : {}),
-          weather: params.get('hd-weather') === 'rain' ? 'rain' : 'clear',
-          weatherIntensity: params.get('hd-weather') === 'rain' ? 0.8 : 0,
+          ...parseWeatherParams(params, { weather: 'hd-weather', intensity: 'hd-weather-intensity' }),
           // hd-fx=enhanced: the remaster's modern effects around the engine's own anims (default: faithful).
           effects: params.get('hd-fx') === 'enhanced' ? 'enhanced' : 'faithful',
           nativeDetail: params.get('hd-native-detail') === 'mirror' ? 'mirror' : 'ignore',
@@ -425,6 +425,7 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
     houses: state.houses.map((house) => ({ index: house.index, colorIndex: house.colorIndex })),
     localHouse: state.localHouse,
     shroud: state.shroud,
+    lighting: state.lighting,
     overlays: state.overlays,
     smudges: state.smudges,
     effects: state.effects && {

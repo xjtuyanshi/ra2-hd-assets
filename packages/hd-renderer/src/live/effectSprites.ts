@@ -3,6 +3,7 @@ import {
   CustomBlending,
   Group,
   InstancedMesh,
+  type Mesh,
   MeshBasicNodeMaterial,
   NormalBlending,
   OneFactor,
@@ -230,6 +231,8 @@ interface PageGroup {
  */
 export class EffectSpriteLayer {
   readonly root = new Group();
+  /** Native Top art composites after the visibility mask, in the renderer's transparent top pass. */
+  readonly topRoot = new Group();
   readonly light = uniform(new Color(1, 1, 1));
   readonly cameraRight = uniform(new Vector3(1, 0, 0));
   readonly cameraUp = uniform(new Vector3(0, 1, 0));
@@ -284,6 +287,7 @@ export class EffectSpriteLayer {
     readonly terrainDepth?: TerrainDepth,
   ) {
     this.root.name = 'live-effect-sprites';
+    this.topRoot.name = 'live-top-effect-sprites';
   }
 
   /**
@@ -330,6 +334,10 @@ export class EffectSpriteLayer {
     return n;
   }
 
+  get topVisible(): boolean {
+    return this.topRoot.children.some((child) => child.visible && (child as Mesh).count > 0);
+  }
+
   /** Page meshes alive, and how many of them hold translucent cards now (diagnostics, perf checks). */
   meshStats(): { meshes: number; visible: number; translucent: number } {
     let visible = 0;
@@ -361,7 +369,7 @@ export class EffectSpriteLayer {
     this.failedPages.delete(pageKey);
     const mesh = hd ? new HdPageMesh(this, atlas, pass) : new PageMesh(this, this.cache, atlas, pass);
     this.meshes.set(key, mesh);
-    this.root.add(mesh.mesh);
+    (pass === 'top' ? this.topRoot : this.root).add(mesh.mesh);
     return mesh;
   }
 
@@ -372,7 +380,7 @@ export class EffectSpriteLayer {
     for (const key of keys) {
       const mesh = this.meshes.get(key)!;
       this.meshes.delete(key);
-      this.root.remove(mesh.mesh);
+      mesh.mesh.removeFromParent();
       mesh.dispose();
       pages.add(key.slice(0, key.lastIndexOf(':')));
     }
@@ -536,11 +544,15 @@ class PageMesh {
         .and(hi.greaterThan(0.7))
         .and(hi.sub(lo).greaterThan(hi.mul(0.2)));
       const fire: ShaderNode = warm.and(aStyle.z.greaterThan(0.5)).select(float(1), float(0));
-      const lit: ShaderNode = art.mul(mix(layer.light, vec3(FX_GLOW), fire));
+      // Native Top cloud art remains bright over black shroud; it does not inherit the event's scene illumination.
+      const lit: ShaderNode = art.mul(
+        this.pass === 'top' ? vec3(layer.displayScale) : mix(layer.light, vec3(FX_GLOW), fire),
+      );
       const isShadow = draw.greaterThan(1.5);
       const shadow = vec4(0, 0, 0, mask.mul(0.5).mul(aStyle.x));
       const a: ShaderNode = mask.mul(aStyle.x);
-      if (!translucent) return isShadow.select(shadow, vec4(lit, a));
+      // Top has a transparent target, not the scene backdrop; normal alpha composition happens after shroud.
+      if (!translucent || this.pass === 'top') return isShadow.select(shadow, vec4(lit, a));
       // The engine's translucent draw mixes 16-bit DISPLAY colours (e.g. 50 % of the art, 50 % of what is below), so
       // do the mix in display (sRGB-encoded) space against the scene drawn so far: a linear mix is brighter and lifts
       // the dark channel, turning an orange edge over grey pavement salmon-pink. Normal blending then adds
@@ -734,7 +746,7 @@ class HdPageMesh {
       // White-hot: the pale core of the flame (display green and blue both high); orange and red keep their hue.
       const hot = smoothstep(0.72, 0.95, s.g).mul(smoothstep(0.35, 0.75, s.b));
       const gain: ShaderNode = mix(layer.hdFireGain, layer.hdHotGain, hot).mul(layer.displayScale);
-      const lit = colour.mul(mix(layer.light, vec3(gain), e));
+      const lit = colour.mul(pass === 'top' ? vec3(layer.displayScale) : mix(layer.light, vec3(gain), e));
       // The anim's translucency fade (animAlphaSmooth) is the engine's stand-in for a dissipating cloud; the redrawn
       // frames already thin out, so smoke keeps more body (sqrt of the fade) and flame most of it (fourth root): a
       // half-transparent fireball over grass mixes to an olive murk, and half-transparent smoke reads as a grey veil.

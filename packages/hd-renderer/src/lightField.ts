@@ -139,6 +139,13 @@ interface Pulse {
   peak: number;
   life: number;
   decay: number;
+  envelope?: { hold: number; fade: number };
+}
+
+/** Immediate pulse, held briefly and then faded to zero; shared by local strikes and their sky flash. */
+export function heldPulseEnvelope(age: number, hold: number, fade: number): number {
+  if (age < 0) return 0;
+  return Math.max(0, Math.min(1, 1 - (age - hold) / Math.max(1e-6, fade)));
 }
 
 interface Kept {
@@ -411,9 +418,10 @@ export class LightField {
     life: number,
     decay: number,
     pool: PulsePool,
+    envelope?: { hold: number; fade: number },
   ): void {
     const list = this.pulses[pool];
-    const entry: Pulse = { born: now, x: at.x, z: at.z, colour: [...colour], radius, peak, life, decay };
+    const entry: Pulse = { born: now, x: at.x, z: at.z, colour: [...colour], radius, peak, life, decay, envelope };
     if (list.length < POOLS[pool]) list.push(entry);
     else {
       list[this.cursor[pool]] = entry;
@@ -507,6 +515,7 @@ export class LightField {
   static pulseIntensity(p: Pulse, now: number): number {
     const age = now - p.born;
     if (age < 0 || age > p.life) return 0;
+    if (p.envelope) return p.peak * heldPulseEnvelope(age, p.envelope.hold, p.envelope.fade);
     return p.peak * Math.exp(-age * p.decay) * Math.min(1, age * 30 + 0.2);
   }
 

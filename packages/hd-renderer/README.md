@@ -61,6 +61,51 @@ b01..b08: noon, map-driven default, dusk, night, night rain, fires, day rain, la
 regression framings), `atmobase` (the same framings without parameters older builds ignore, for before/after
 comparisons) and `atmoperf` (frame cost, see below).
 
+## Scene lighting events
+
+`LiveSnapshot.lighting` carries the engine's current ambient, selected ground/level terms, normal RGB, raw event
+RGB override and event identity. Missing or null lighting is unknown and restores identity multipliers. Replays
+consume the same field; there is no renderer-owned ambient fade. Same-event consecutive snapshots interpolate on
+the live presentation clock, while event changes use the newest snapshot immediately.
+
+`src/sceneLighting.ts` compares that state with the map's authored `MapLightGrade.lighting` (manifest fallback),
+at its median cell height without local light-source contributions. For `I = ambient + level * z - ground`, it
+uses `I_live / I_map`; `sceneTerrainMul` additionally replaces the map's normalized RGB with raw event RGB,
+while `sceneObjectMul` multiplies untinted object art by raw event RGB. These shared vec3 uniforms apply in palette
+colour space independently of the day/night map-grade weight. Tiles, whole-map terrain, water, ordinary overlays,
+walls, smudges, trees and bridges use the terrain multiplier; buildings and all unit art use the object multiplier.
+Effect art, local-light emission, window/lamp/Tesla glows, bloom and UI keep their own colours. Exposure, white
+adaptation and map-tint adaptation use authored, event-free lighting. An absent or authored-normal state leaves
+both multipliers exactly `(1,1,1)` and takes the material's identity branch.
+
+A storm transfers all direct flat-ground irradiance into the hemisphere light with `Lighting.applySceneOvercast(1)`
+after adaptation and multiplier calculation. The transfer preserves each linear RGB channel and luminance, including
+any decorative rain/snow already applied; it does not select the grey-blue weather key or change exposure, white
+adaptation, map-tint adaptation, bloom threshold or weather metadata. `sceneSunShadow = 0` removes hard sun shadows
+while retaining contact shading. Top-layer effect cards (including storm clouds) use a
+separate transparent pass after shroud/fog; ground and air effects retain their existing visibility/depth rules.
+The extra pass exists only while top art is visible. Storm bolts produce a blue-white light-field pulse at their
+ground point (4.5-cell radius, 0.12-second peak and 0.35-second decay) and a bounded 12% sky flash (0.08-second peak,
+0.25-second decay). Pulse timing follows the renderer's effect clock; a repeated snapshot does not retrigger it.
+
+The live bench accepts `&lighting=<ambient>,<r>,<g>,<b>[,<overrideR>,<overrideG>,<overrideB>]` for synthetic scenes
+and replays. Four values force ordinary lighting; seven also stage a storm. Ground and level retain the authored
+map values. Example: `?fx=WCCLOUD1,WCLBOLT1&map=XMP29U2&lighting=.87,1,.8,.68,.3,.4,.75`.
+Without this parameter each replay snapshot retains its own lighting (including null/absent reset semantics).
+Asset-free math, reader, bridge, shroud routing and shader-layout tests do not establish GPU pixel equivalence,
+storm-cloud composition, pulse strength or real-game timing; those require same-scene captures.
+
+Ore and gems are self-lit overlays. The live adapter uses the overlay type's `tiberium` flag; static caches already
+carry the extractor's `lighting: 'none'` classification. Only those overlay instances bypass map grade, scene-event
+multipliers, time-of-day light and the night display transform. Their HD crystal lighting uses a fixed clear-noon
+reference, while decorative wetness remains available. Walls, rubble, bridges and crates retain normal lighting.
+A renderer-local `unlit` MRT attachment carries their noon display colour through ordinary foreground occlusion,
+shroud and top effects. It shares material blending and uses at most four attachments alongside physical depth and
+emission. Explicit exposure, the selected daytime tone/grade and vignette still apply. Self-lit highlights bypass
+scene bloom (their material sparkle remains); matching the former noon bloom halo is not established by this path.
+The night toe is suppressed where self-lit colour survives; fractional filtered edges and GPU composition
+remain **UNVERIFIED** until replay captures are measured.
+
 ## Night, weather and map light sources
 
 Maps are staged from their own `[Lighting]` (`RenderMap.atmosphere`: `sidecarAtmosphere` recomputes it from the raw
@@ -74,6 +119,15 @@ bloom threshold and sprite level blend into `pi / referenceIrradiance()`, PBR Ne
 level with the night weight, and the day map grade fades out with it (the night keys already derive their level and
 tint from the same `[Lighting]`).
 
+- **Authored dusk.** A dusk profile places its warm sunset key at the map's hour (DuskPen: 18.2), with a 10-degree
+  sun floor instead of the usual 28 degrees. At that key the night weight is exactly zero, `MapLightGrade` weight and
+  source share are both 1, and effective `adaptExposure`, `whiteAdapt` and `mapTintAdapt` are zero. Clear flat-ground
+  irradiance is calibrated per channel to clear noon before decorative weather, so the engine grade owns brightness
+  and tint while direct light stays warm and diffuse shade cooler. This calibration fades into the night keys if the
+  hour is manually advanced. The separate dusk source field follows night gain, avoiding duplicate lamp washes at
+  the authored hour. Day and night profiles retain their existing uniforms/settings. DuskPen's per-channel ±8% and
+  saturation ≥0.33 replay targets are **UNVERIFIED** by asset-free tests.
+
 - **Night level.** Night light keys are scaled so unlit flat ground shows the profile's night level (30 % of noon
   for a typical stock night, 26-40 % for night maps), 40 % from a desaturated moon and 60 % from the sky. Moonlight is
   cool (`MOON_TINT`); only maps built as night maps add their own `[Lighting]` tint, a day map's warm grade never tints
@@ -83,7 +137,7 @@ tint from the same `[Lighting]`).
   instead of darkening the frame (flat ground keeps 1 - 0.08 x overcast of its clear brightness by day, 95 % at night, never below 26 % of noon).
 - **Light field** (`src/lightField.ts`). Every local light is drawn top-down into one whole-map texture (up to 8
   texels per cell): the light of the map's light sources (`src/ra2/mapLights.ts`, YR 1.001's cell formula staged by
-  `mapLightStaging`: exact on night maps, exact and always on for dusk maps, tight pools when a day map is forced to
+  `mapLightStaging`: exact on night maps, exact on dusk maps only as their map grade fades towards night, tight pools when a day map is forced to
   night), HD street lamps and window glows (static, faded in with the night), and dynamic lights: explosion and
   muzzle/beam pulses in separate ring pools and kept-alive fires, each pool with its own reserved instances. Static and
   dynamic lights are separate instanced meshes; static ones are written once per change and hidden by day. The
@@ -95,18 +149,51 @@ tint from the same `[Lighting]`).
   `moonlit()`; house paint excluded), while local lights, lit windows and fires keep full colour, and the display
   black level is lifted after tone mapping (the Neutral toe crushed shadows to 6-9 of 255; now about 12-15, never
   under shroud). Measured on a05/a06: lawn median 50/49 (was 74/71), mean saturation 124/113 (was 156/159).
-- **Wet ground** (`src/ra2/terrain.ts`). Paved cells (asphalt, concrete, brick, roads; from the sidecar's surface
-  classes) darken, gloss and form puddles (little sky in them by day: darker wet asphalt, not milky patches; at night
-  sparse twinkling glints of the lamps mirrored in them); soft ground only darkens a little.
+- **Day overcast** (`src/lighting.ts`, `DAY_WEATHER_LIGHTING`). Original day-map profiles transfer direct sun into
+  diffuse sky light. At intensity 0.8, rain retains 0.232 of the clear direct-light fraction and 0.92 of incident
+  flat-ground luminance; snow retains 0.312 and 0.94. At noon this gives fully shadowed/sunlit irradiance ratios
+  0.821 and 0.759. Rain's hemisphere B/R increases 8%, snow's 3.2%; the key tends to cool grey (0.96:1:1.04).
+  Exposure and white adaptation use the clear light at the same hour, preserving the weather change. SHP shadows,
+  infantry shadows, voxel shadows and contact shades scale by the same retained sun fraction. Rain terrain albedo
+  is desaturated 12.5% at intensity 0.8. These day-map changes fade with night weight; night/dusk profiles retain
+  their existing light curve, and the procedural sandbox retains its original lighting curve.
+- **Wet ground** (`src/ra2/terrain.ts`, `WET_GROUND_LOOK`). Paved cells (asphalt, concrete, brick, roads; from the
+  sidecar's surface classes) gain a glossy water film: saturated diffuse multiplier 0.75, roughness 0.26, and a
+  grey-sky reflection weighted by 0.20 at the fixed isometric view. Reflected sky luminance is relative to the lit
+  wet art, giving 0.90 of dry radiance before the weather light change. Puddle cores add 14% over adjacent wet
+  paving, with soft noise edges (0.56..0.72) and expanding impact rings (radius 0.14, width 0.018, 1.6 cycles/s,
+  up to another 2% inside puddles). Grass, sand and soil only darken to 0.90 at saturation, without gloss or puddles.
+  At rain intensity 0.8, saturated flat ground therefore models 0.92 × 0.90 = 0.828 of clear luminance. Building
+  mirror images remain paved-only and faint (0.10..0.22 strength, final alpha capped at 0.25). Night ground retains
+  its dim sky and sparse lamp glints. Shader/state checks are asset-free; tone mapping, local lighting, source-art
+  shading, pixel chroma and mixed-material crop averages still require same-frame rendered review.
 - **Emitters** (`src/emitters.ts`). Sodium-orange lamp heads glow and, on wet paving, cast long reflection streaks
   towards the camera; lit windows reflect as even streaks under each column of lit panes (from the pane columns in
   `windows.json`, on the wall the panes are on, starting at its base), fires as streaks, explosions also as a glow.
   Layers that would add exactly zero (static heads by day, streaks on dry ground) are hidden. Heads are pulled
   towards the camera only just past their own post, so units in front still cover them. At night the wet sheen
   follows the scene's light level, so puddles stay dark and mirror-like instead of milky.
-- **Rain** (`src/weather.ts`) is lit by the scene and the light field (bright only near lamps at night); splashes are
-  rings, full size on paving, small and faint on grass, none on open water. `storm` is heavier rain; there is no
-  lightning (decorative weather rule in `docs/remaster/PLAN.md`).
+- **Rain** (`src/weather.ts`, `RAIN_LOOK`) uses 12000 wind-slanted streaks, width 0.026, length 0.55..0.85 units,
+  with daytime core opacity 0.24..0.38 and a faint tapered motion trail. Scene and light-field illumination still
+  controls visibility at night. Its 3500 bright splash rings land only on paved, non-water cells; radius 0.047 and
+  expansion 0.6..1 correspond to 2.4..4 pixels horizontally at native 1x camera scale. `storm` is heavier rain;
+  there is no lightning (decorative weather rule in `docs/remaster/PLAN.md`).
+- **Snow** (`src/weather.ts`, `SNOW_LOOK`) uses 9000 world-anchored, camera-facing soft discs in the same
+  camera-wrapped 48-cell volume as rain. Far/middle/near layers occupy 50/35/15% of flakes, with sizes
+  0.04..0.055 / 0.055..0.075 / 0.075..0.09 units and speeds 0.55..0.8 / 0.85..1.15 / 1.2..1.65 units/s.
+  Larger flakes sway more; about 2% extend to size 0.12. Daytime RGB is floored at (0.9212, 0.9506, 0.98) with
+  core opacity 0.8..1; night keeps scene and local lamp illumination. Flakes vanish above terrain or open water
+  without accumulation or splashes. Snow is dry: selecting it clears residual wetness, puddles and wet reflections.
+  Clear weather hides both particle groups and resets day-weather gains to neutral; decorative weather remains
+  off by default and never changes the map's chosen hour.
+- **Ground exclusions** (`src/weatherGroundMask.ts`) are a renderer-owned, nearest-filtered R8 texture with one
+  texel per cell: 255 excludes ground weather. Height-grid slopes steeper than 1.5 terrain levels per cell are
+  excluded once at load; static and live building foundations mark their complete cells. Wet films, puddles,
+  ripple rings, building mirror images and rain splashes are suppressed there, including fragments crossing in from
+  adjacent cells. Cliff walls do not receive wet ground shading. Snow vanishes 0.6 units above excluded cells, 0.15
+  above open water, or over its final 0.08 units above ordinary ground. Live snapshots and resolved art refresh
+  foundation coverage only on change, with no texture upload for unchanged coverage or interpolation-only frames.
+  Removing a building restores its cells while preserving terrain exclusions. The procedural sandbox has an empty mask.
 - **Mist** (`src/mist.ts`): a thin height-based veil before bloom, at most 20 %, none on a clear day (the pipeline is
   rebuilt without it while its amount is 0), lit by the light field so lamps get halos.
 - **Fire** (`src/effects.ts`): a flickering ember bed on the ground, golden flame tongues rooted in it (upright,
@@ -121,14 +208,22 @@ tint from the same `[Lighting]`).
   masks detected in the original civilian art (`windows.png`: warm amber panes with per-pane brightness), shown at
   night only. `lights=0` also switches off visible map lamps and the dummies' heads.
 
-Sandbox parameters: `time=<hours>` (default: the map's hour), `weather=clear|rain|storm`, `rain=<0..1>`, `wet=<0..1>`
+Sandbox parameters: `time=<hours>` (default: the map's hour), `weather=clear|rain|snow|storm`, `rain=<0..1>` (legacy
+precipitation intensity), `wet=<0..1>`
 (start wet), `lights=0` (map light sources off), `lamps=auto|on|off` (`auto`: urban and newurban only),
 `windows=0|1`, `mist=<multiplier>`, `nightlevel=<fraction of noon>`, `fires=<N>` (persistent fires around the view
 centre), `boom=1` (periodic explosions), `water=enhanced|classic` (the modern water on original maps, opt-in; `look=golden` turns
 it on unless `water=` is given; default `classic`, the earlier HD water), `perf=1` (frames
 back to back plus GPU timestamps; diagnostics only). `lamps=off&windows=0` gives a night lit only by
 the map's own light sources and effects. `window.__hd.stats()` reports exposure, night, light counts, mist, wetness
-and frame times; `window.__hd.hd.effects.lightStats(window.__hd.hd.seconds())` the active effect lights.
+and frame times, plus separate `rain` and `snow` intensities; `window.__hd.hd.effects.lightStats(window.__hd.hd.seconds())`
+the active effect lights.
+
+The live/replay bench (`?fx=...`, `sandbox/fx.ts`) accepts `weather=rain|snow|storm&wi=<0..1>` and exposes
+`window.__hd.setWeather('snow', 0.8)` to change weather through `LiveView.setEnvironment` without reloading.
+The development game bridge uses `hd-weather=rain|snow|storm&hd-weather-intensity=<0..1>`. Both default to clear;
+rain and snow default to intensity 0.8, storm to 1. Unknown weather values select clear, finite intensity values
+are clamped to 0..1, and empty or invalid intensities use the weather default (`src/weatherParams.ts`).
 
 **Performance.** Measure frame cost with `node scripts/gpubench.mjs [baseUrl] [out.json]` (WebGPU): it loads the
 `atmoperf` night framing (XMP29U2, night rain 0.8, wet, four fires, periodic explosions, 2400x1500), waits `WARM`
@@ -302,7 +397,7 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   surfaces, puddles, wet shore band, border shroud (`src/terrain.ts`).
 - Water: analytic sky reflection, sun sheen, depth tint from the terrain height texture, shoreline foam, rain rings
   (`src/water.ts`). Original maps shade their water per pixel on the terrain (`src/ra2/waterLook.ts`, below).
-- Weather: world-anchored GPU rain streaks and splashes (`src/weather.ts`).
+- Weather: world-anchored GPU rain streaks, masked splashes and dry snowflakes (`src/weather.ts`).
 - Lighting: fixed classic sun azimuth, time-of-day keys, overcast, soft shadows for the procedural scenario
   (`src/lighting.ts`). Original maps take no sun shadows (see below).
 - Effects: instanced fireballs, flame tongues, smoke, sparks, scorch decals, light-field flashes, camera shake; with
@@ -383,8 +478,9 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   Wider views increase the bound; no arbitrary-zoom precision claim is made. Capture MRT writes `R=code*a,G=a`
   using original normal blending: over clear `(code*a*b)/(a*b)=code` (b=a). Same-anchor parts preserve the ratio;
   different transparent owners produce weighted code mixtures requiring pixel review. A capture-only MRT
-  keeps vec4 shader output on RG16F because r186's normal RG conversion drops the source alpha. Main/mirror
-  output and all materials stay unchanged. See three.js 0.186.1 `MRTNode.setup`/`NodeMaterial.setup` and GPUWeb CTS
+  keeps vec4 shader output on RG16F because r186's normal RG conversion drops the source alpha. Its merge retains
+  the capture's authoritative code/coverage outputs when a material carries its own MRT (including self-lit art).
+  Main/mirror outputs remain independent. See three.js 0.186.1 `MRTNode.setup`/`NodeMaterial.setup` and GPUWeb CTS
   `src/webgpu/api/validation/render_pipeline/fragment_state.spec.ts` for the output/blending compatibility evidence.
   The reduction clamps a 3x3 neighbourhood, ignoring depth>=1 or G<=0. Record A keeps the captured centre's
   code, or the nearest captured code if the centre is absent. Record B keeps the nearest captured code differing

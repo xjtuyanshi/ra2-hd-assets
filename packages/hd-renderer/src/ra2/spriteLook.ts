@@ -29,6 +29,7 @@ import {
 } from 'three/tsl';
 import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
+import { clearLightAt, Lighting } from '../lighting';
 
 /**
  * Modern light on original building and tree art (opt-in; every strength 0 by default, which leaves the sprites exactly
@@ -75,6 +76,9 @@ export function relightFactorUpper(sunGain: number): number {
 /** Maximum sun-following stretch at neutral shadowLength, relative to the art's own shadow (readability). */
 export const MAX_SHADOW_STRETCH = 2;
 
+/** Wet paving reflects a faint image; even stacked look gains must not turn it into a second building. */
+export const WET_REFLECTION_MAX_OPACITY = 0.25;
+
 /** Sun-elevation stretch with the original floor/cap; shadowLength scales both the result and its cap. */
 export function shadowStretch(keyElevation: number, shadowLength = 1): number {
   const elevation = (Math.max(12, keyElevation) * Math.PI) / 180;
@@ -91,6 +95,14 @@ export class SpriteLookState {
   readonly enabled = uniform(0);
   /** Weight of the relighting factor (0 = baked shading only; values above 1 exaggerate it). */
   readonly relight = uniform(0);
+  /** Self-lit crystals use the selected HD gains under clear noon, including on authored dusk/night maps. */
+  readonly unlitRelight = uniform(0);
+  readonly unlitBaseLight = uniform(new Color(1, 1, 1));
+  readonly unlitSunDirection = uniform(new Vector3());
+  readonly unlitSunWeight = uniform(new Color());
+  readonly unlitSkyWeight = uniform(new Color());
+  readonly unlitSunLight = uniform(new Color());
+  readonly unlitSkyLight = uniform(new Color());
   /** Sun highlights on facades and roofs (and the sheen of wet surfaces). */
   readonly specular = uniform(0);
   /** Window glass: sky reflection and sun glints on the panes of the material atlas (0 = the art's own panes). */
@@ -136,6 +148,61 @@ export class SpriteLookState {
    * only while the look is on, so the faithful frame stays a single pass.
    */
   readonly groundPasses = new Set<Object3D>();
+}
+
+interface UnlitSpriteSettings {
+  relight: number;
+  sunGain: number;
+  lightContrast: number;
+  sunPath: 'fixed' | 'arc';
+}
+
+/** Fixed noon light, expressed after the reference white balance (palette colour is already display-linear). */
+function noonCrystalReference(arc: boolean) {
+  const light = new Lighting(2, 2);
+  light.update(12, 0);
+  const irradiance = light.flatIrradianceColor(new Color());
+  light.sunArc = arc;
+  light.update(12, 0);
+  const flat = light.flatIrradianceColor(new Color());
+  const sun = light.sun.color.clone().multiplyScalar(light.sun.intensity);
+  const sky = light.hemi.color.clone().multiplyScalar(light.hemi.intensity);
+  const direction = light.state.sunDirection.clone();
+  // Fixed-path sprites use the baked azimuth at the directional light's elevation, just as updateSpriteLook does.
+  if (!arc) direction.set(0, direction.y, Math.sqrt(Math.max(0, 1 - direction.y * direction.y)));
+  const exposure = new Color(Math.PI / irradiance.r, Math.PI / irradiance.g, Math.PI / irradiance.b);
+  return {
+    sun,
+    sky,
+    direction,
+    baseLight: new Color(flat.r / irradiance.r, flat.g / irradiance.g, flat.b / irradiance.b),
+    sunLight: sun.clone().multiply(exposure),
+    skyLight: sky
+      .clone()
+      .multiply(exposure)
+      .multiplyScalar(1 / Math.PI),
+  };
+}
+const NOON_CRYSTAL_REFERENCE = { fixed: noonCrystalReference(false), arc: noonCrystalReference(true) };
+const CRYSTAL_ART_REFERENCE = clearLightAt(ART_REFERENCE_HOUR);
+const crystalLuminance = (c: Color): number => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+
+/** Only explicit look settings enter this update; hour, weather, map tint and scene events have no input path. */
+export function updateUnlitSpriteLook(state: SpriteLookState, settings: UnlitSpriteSettings): void {
+  const noon = NOON_CRYSTAL_REFERENCE[settings.sunPath];
+  state.unlitRelight.value = settings.relight;
+  state.unlitBaseLight.value.copy(noon.baseLight);
+  state.unlitSunDirection.value.copy(noon.direction);
+  state.unlitSunWeight.value
+    .copy(noon.sun)
+    .multiplyScalar(settings.sunGain / crystalLuminance(CRYSTAL_ART_REFERENCE.sun));
+  state.unlitSkyWeight.value
+    .copy(noon.sky)
+    .multiplyScalar(
+      ART_SKY_SHARE / crystalLuminance(CRYSTAL_ART_REFERENCE.sky) / Math.max(0.2, settings.lightContrast),
+    );
+  state.unlitSunLight.value.copy(noon.sunLight);
+  state.unlitSkyLight.value.copy(noon.skyLight);
 }
 
 const states = new WeakMap<AtmosphereNodes, SpriteLookState>();
@@ -195,7 +262,20 @@ export function groundCrystalColour(
   state: SpriteLookState,
   seed: ShaderNode = vec2(0, 0),
   materialAt?: CrystalMaterialAt,
+  unlit: ShaderNode = float(0),
 ): ShaderNode {
+  const sunDirection: ShaderNode = mix(state.sunDirection, state.unlitSunDirection, unlit);
+  const sunLight: ShaderNode = mix(state.sunLight, state.unlitSunLight, unlit);
+  const skyLight: ShaderNode = mix(state.skyLight, state.unlitSkyLight, unlit);
+  const relight: ShaderNode = mix(state.relight, state.unlitRelight, unlit);
+  const reference = {
+    sunDirection,
+    sunWeight: mix(state.sunWeight, state.unlitSunWeight, unlit),
+    skyWeight: mix(state.skyWeight, state.unlitSkyWeight, unlit),
+    artSunWeight: state.artSunWeight,
+    artSkyWeight: state.artSkyWeight,
+    factorUpper: state.factorUpper,
+  };
   const metal: ShaderNode = step(0.5, m.spec).toVar();
   const gloss: ShaderNode = crystalGloss(m.spec).toVar();
   const roughness: ShaderNode = mix(float(0.72), float(0.09), gloss);
@@ -205,23 +285,21 @@ export function groundCrystalColour(
     .toVar();
   const tint: ShaderNode = mix(vec3(1), hue, metal.mul(0.7)).toVar();
   const ao: ShaderNode = mix(float(1), m.ao, state.occlusion.mul(crystal));
-  const base: ShaderNode = lit.mul(mix(vec3(1), relightFactor(m.normal, state), state.relight.mul(crystal))).mul(ao);
+  const base: ShaderNode = lit.mul(mix(vec3(1), relightFactor(m.normal, reference), relight.mul(crystal))).mul(ao);
   // Bound the entire tinted highlight, including user strength, to prevent glossy facets producing fireflies.
   const highlight: ShaderNode = min(
-    sunHighlight(m.normal, state.sunDirection, view, roughness, mix(float(0.06), float(0.55), metal))
-      .mul(state.sunLight)
+    sunHighlight(m.normal, sunDirection, view, roughness, mix(float(0.06), float(0.55), metal))
+      .mul(sunLight)
       .mul(state.specular)
       .mul(crystal)
       .mul(m.ao)
       .mul(tint),
-    state.sunLight.mul(1.6),
+    sunLight.mul(1.6),
   );
   if (!materialAt) return base.add(highlight);
-  // Twinkles follow the sun (moonlight keeps a faint trace at night); a warm white, as arms may cross soil.
-  const sunLight: ShaderNode = state.sunLight;
-  const skyLight: ShaderNode = state.skyLight;
+  // Self-lit crystals retain the noon sparkle; ordinary decorative crystals follow the current sun.
   const sparkleLight: ShaderNode = sunLight.add(skyLight.mul(0.12));
-  const twinkle: ShaderNode = crystalSparkle(pixel, seed, materialAt, view, state.sunDirection);
+  const twinkle: ShaderNode = crystalSparkle(pixel, seed, materialAt, view, sunDirection);
   const sparkle: ShaderNode = vec3(1, 0.97, 0.88)
     .mul(twinkle)
     .mul(2.4)
@@ -303,7 +381,13 @@ function relativeIrradiance(n: ShaderNode, l: ShaderNode, sun: ShaderNode, sky: 
 }
 
 /** Relighting factor per channel for normal n: current light over the art's own, both relative to flat ground. */
-export function relightFactor(n: ShaderNode, state: SpriteLookState): ShaderNode {
+export function relightFactor(
+  n: ShaderNode,
+  state: Record<
+    'sunDirection' | 'sunWeight' | 'skyWeight' | 'artSunWeight' | 'artSkyWeight' | 'factorUpper',
+    ShaderNode
+  >,
+): ShaderNode {
   const now: ShaderNode = relativeIrradiance(n, state.sunDirection, state.sunWeight, state.skyWeight);
   const art: ShaderNode = relativeIrradiance(
     n,

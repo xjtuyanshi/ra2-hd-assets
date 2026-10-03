@@ -58,6 +58,12 @@ function supported(renderer: Renderer): boolean {
  * this capture-only output struct at vec4; do not modify materials, texture formats or renderer-wide builders.
  */
 class CaptureMRT extends MRTNode {
+  override merge(): this {
+    // This pass captures object codes and coverage, never a material's colour/emission outputs. The base merge
+    // would replace that contract and construct a plain MRTNode, also losing the vec4 blend-alpha guarantee below.
+    return this;
+  }
+
   override setup(): undefined {
     this.members = [this.get('output')];
     return undefined;

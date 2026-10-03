@@ -267,6 +267,31 @@ describe('HD 桥状态机', () => {
     harness.stop();
   });
 
+  it('forwards same-frame scene lighting changes and clears an unknown read', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    const state = battle(3);
+    state.lighting = {
+      ambient: 0.87,
+      ground: 0,
+      level: 0,
+      tint: [1, 0.8, 0.68],
+      override: [0.3, 0.4, 0.75],
+      event: 'storm',
+      storm: { active: true, pending: false, ending: false, cell: { x: 60, y: 62 } },
+    };
+    harness.setState(state);
+    await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].lighting).toEqual(state.lighting);
+    harness.setState({ ...state, lighting: { ...state.lighting, ambient: 1, override: null, event: null } });
+    await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].lighting).toMatchObject({ ambient: 1, override: null, event: null });
+    harness.setState({ ...state, lighting: null });
+    await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].lighting).toBeNull();
+    harness.stop();
+  });
+
   it('forwards engine image and H2 animation fields and keeps absent fields optional', async () => {
     const harness = setup();
     const view = await goLive(harness);

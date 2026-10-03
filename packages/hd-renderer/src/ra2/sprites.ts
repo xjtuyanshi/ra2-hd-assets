@@ -55,8 +55,11 @@ import {
   objectLightAt,
   pavedAt,
   puddleNoise,
+  weatherGroundClearAt,
 } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
+import { sceneLitColour } from '../lighting';
+import { bindUnlitSpriteMaterial } from './unlitSprites';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { type HdAtlas, type Ra2Cache } from './cache';
 import { objectLevelAt, srgbScale, terrainGradeAt } from './mapLighting';
@@ -66,6 +69,7 @@ import { NATIVE_UNIT_RENDER_ORDER, type NativeSpriteDepth } from './nativeDepth'
 import { comparePainterOrder, spritePainterBias, type PainterObject } from './painterOrder';
 import {
   GLASS_REFLECTANCE,
+  WET_REFLECTION_MAX_OPACITY,
   classRoughness,
   contactShade,
   foundationBase,
@@ -105,9 +109,11 @@ export interface SpriteInstance {
   /**
    * How the map's [Lighting] applies (see mapLighting.ts): 'ambient' (default) = level only, for buildings, units,
    * infantry and aircraft; 'full' = level and per-channel colour, for terrain-class art (overlays, smudges, trees);
-   * 'none' = unlit (ore, gems).
+   * 'none' = no map grade (ore, gems and tiberium trees). `unlit` also bypasses scene/display illumination.
    */
   lighting?: LightingClass;
+  /** Display-referred art: preserve its clear-noon HD appearance independently of scene/map light and night grade. */
+  unlit?: boolean;
   /** Map-light sample in world X/Z; defaults to the draw anchor. Cell copies can select a texel centre. */
   lightSample?: readonly [number, number];
   /** Optional traversal tie-break and building foundation. Decals/shadows retain physical ground depth. */
@@ -127,6 +133,11 @@ export interface SpriteInstance {
 }
 
 const LIGHTING_CODE: Record<LightingClass, number> = { ambient: 0, full: 1, none: 2 };
+
+/** The map extractor derives overlay 'none' from the rules' Tiberium flag; other ungraded art keeps scene light. */
+export function isUnlitMapOverlay(object: Pick<MapObject, 'kind' | 'lighting'>): boolean {
+  return object.kind === 'overlay' && object.lighting === 'none';
+}
 
 /** World units of depth bias per 15 screen rows of a ground-crystal decal (see placement). */
 const CRYSTAL_DECAL_ROW_BIAS = 0.002;
@@ -261,7 +272,7 @@ export class SpriteLayer {
   readonly groundPasses: InstancedQuad[];
   /** Ground-plane depth coefficients of the 'over' pass (see groundPlaneDepth), set per draw. */
   private readonly planeCoefficients = uniform(new Vector4());
-  /** Scene light level applied to unlit sprites (1 = the original's full-bright daylight). */
+  /** Palette sprites' scene light level; display-referred instances bypass it. */
   readonly light = uniform(new Color(1, 1, 1));
   readonly cameraRight = uniform(new Vector3(1, 0, 0));
   readonly cameraUp = uniform(new Vector3(0, 1, 0));
@@ -365,6 +376,9 @@ export class SpriteLayer {
     // mapLighting.ts): 'ambient' takes the level, 'full' the per-channel grade, 'none' nothing.
     const isFull: ShaderNode = step(0.5, aFlags.z).mul(float(1).sub(step(1.5, aFlags.z)));
     const isNone: ShaderNode = step(1.5, aFlags.z);
+    const isUnlit: ShaderNode = step(2.5, aFlags.z);
+    // Ungraded trees retain their former terrain event policy; self-lit overlays bypass scene lighting altogether.
+    const sceneMultiplier: ShaderNode = mix(nodes.sceneObjectMul, nodes.sceneTerrainMul, max(isFull, isNone));
     const grade: ShaderNode = mix(
       mix(vec3(objectLevelAt(cache.mapLight, aLightSample)), terrainGradeAt(cache.mapLight, aLightSample), isFull),
       vec3(1),
@@ -604,7 +618,12 @@ export class SpriteLayer {
         const shade = (c: ShaderNode, paint: ShaderNode): ShaderNode => {
           const lit: ShaderNode = objectLit(c);
           const base = mix(moonlit(lit, nodes), lit, paint).mul(this.light);
-          return base.add(localLightHeadroom(base, lit.mul(local), nodes.localLightCap));
+          const eventBase = sceneLitColour(base, sceneMultiplier);
+          return select(
+            isUnlit.greaterThan(0.5),
+            c.mul(look.unlitBaseLight),
+            eventBase.add(localLightHeadroom(eventBase, lit.mul(local), nodes.localLightCap)),
+          );
         };
         // Lit windows at night: warm amber panes (85 %) or a dimmer cool white (15 %) by the window's variant, each pane
         // with its own brightness; variants above 0.85 stay dark. Kept below the tone mapper's shoulder so panes stay
@@ -700,8 +719,10 @@ export class SpriteLayer {
             // Glints only on the full inside of a pane (not its softer rim), so they never sparkle as single pixels.
             const core: ShaderNode = smoothstep(0.92, 0.99, m.spec).mul(weight);
             const glint: ShaderNode = pane.glint.mul(look.sunLight).mul(look.glass.mul(core).mul(occlusion));
-            const sky: ShaderNode = pane.sky.mul(occlusion);
-            const relit: ShaderNode = mix(base, sky, reflectance).add(highlight).add(glint);
+            const sky: ShaderNode = sceneLitColour(pane.sky.mul(occlusion), sceneMultiplier);
+            const relit: ShaderNode = mix(base, sky, reflectance)
+              .add(sceneLitColour(highlight, sceneMultiplier))
+              .add(sceneLitColour(glint, sceneMultiplier));
             result.assign(select(flatArt, result, vec4(relit.add(litGlow), litAlpha)));
             const isDecal: ShaderNode = step(0.5, aFlat).mul(float(1).sub(step(1.5, aFlat)));
             const crystal: ShaderNode = aFlags.w.mul(isDecal).mul(m.has);
@@ -718,6 +739,7 @@ export class SpriteLayer {
               look,
               aAnchor.xz,
               (pixel) => sampleMaterial(materials, pixel.div(hdScale).div(atlasSize)),
+              isUnlit,
             );
             result.assign(select(crystal.greaterThan(0), vec4(crystalColour.add(litGlow), litAlpha), result));
           }
@@ -771,15 +793,27 @@ export class SpriteLayer {
             // Wet paving mirrors only the lower part of what stands on it: the image fades within about a quarter of
             // the object's height (at most 42 engine px), sharpest in puddles.
             const fade: ShaderNode = exp(below.div(tall.mul(0.28).min(42)).negate()).mul(step(0, below));
-            const surface: ShaderNode = pavedAt(positionWorld.xz, nodes);
-            const puddle: ShaderNode = puddleNoise(positionWorld);
+            // Cell-centre class sampling prevents linear texture filtering from reflecting onto adjacent grass.
+            const surface: ShaderNode = pavedAt(floor(positionWorld.xz).add(0.5), nodes);
+            const puddle: ShaderNode = puddleNoise(positionWorld, float(1).sub(nodes.night));
             const strength: ShaderNode = look.reflections
               .mul(wet)
               .mul(surface)
-              .mul(mix(float(0.14), float(0.7), puddle))
+              .mul(mix(float(0.1), float(0.22), puddle))
               .mul(fade);
-            result.assign(vec4(lit.mul(0.9), litAlpha.mul(strength)));
+            const alpha: ShaderNode = litAlpha
+              .mul(strength)
+              .min(WET_REFLECTION_MAX_OPACITY)
+              .mul(weatherGroundClearAt(positionWorld.xz, nodes));
+            result.assign(vec4(lit.mul(0.9), alpha));
           });
+        });
+        // Black shadow/contact RGB naturally darkens the already transformed receiver. Only cast-shadow coverage
+        // fades under overcast (decorative rain/snow sun share, scene-event overcast); foundation contact shades and
+        // infantry contact blobs keep their grounding role in every weather. Clear weather leaves this untouched.
+        const sunShare = nodes.weatherSunShare.mul(nodes.sceneSunShadow);
+        If(isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(sunShare.notEqual(1)), () => {
+          result.a.mulAssign(sunShare);
         });
         return vec4(result.rgb, result.a.mul(bodyOpacity));
       })();
@@ -802,6 +836,7 @@ export class SpriteLayer {
       })();
     } else material.colorNode = mainColour;
 
+    bindUnlitSpriteMaterial(material, isUnlit, nodes);
     this.mesh = new InstancedQuad(material, count);
     this.mesh.renderOrder = 4;
     this.mesh.name = 'ra2-sprites';
@@ -902,6 +937,7 @@ export class SpriteLayer {
       m.alphaTest = material.alphaTest;
       m.positionNode = placement(pass);
       m.colorNode = colourNode();
+      bindUnlitSpriteMaterial(m, isUnlit, nodes);
       if (pass === 'under') {
         m.depthNode = cardDepth();
         m.depthWrite = false;
@@ -986,7 +1022,7 @@ export class SpriteLayer {
           i,
           instanceCode(s),
           s.light ?? 1,
-          LIGHTING_CODE[s.lighting ?? 'ambient'],
+          s.unlit ? 3 : LIGHTING_CODE[s.lighting ?? 'ambient'],
           instanceCode(s) === 1
             ? Math.max(0, Math.min(1, s.glint ?? 0))
             : s.shadow && s.infantryShadow

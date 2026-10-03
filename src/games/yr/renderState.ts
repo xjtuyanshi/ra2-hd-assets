@@ -2,6 +2,7 @@ import type { GuestMemory } from '../../vm86/win32';
 import type {
   GameRenderCellSprites,
   GameRenderEffects,
+  GameRenderLighting,
   GameRenderObject,
   GameRenderOverlays,
   GameRenderShroud,
@@ -28,6 +29,7 @@ import {
 } from './effectsReader';
 import { createYrOverlayReader, type ReadYrOverlayOptions, type YrOverlays } from './overlayReader';
 import { createYrSidebarReader } from './sidebarReader';
+import { readYrSceneLighting } from './sceneLighting';
 import { createYrSmudgeReader, type ReadYrSmudgeOptions, type YrSmudges } from './smudgeReader';
 import { createYrShroudReader, type ReadYrShroudOptions, type YrShroud } from './shroudReader';
 import {
@@ -142,7 +144,8 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
       return null;
     }
     const nativeDetail = readYrNativeDetail(memory);
-    const key = readChangeKey(memory, nativeDetail);
+    const lighting = readYrSceneLighting(memory);
+    const key = readChangeKey(memory, nativeDetail, lighting);
     const at = now();
     const cellsDue = at - lastCellPoll >= YR_OVERLAY_POLL_MS;
     const unchangedKey = key && lastKey && sameKey(key, lastKey);
@@ -213,6 +216,7 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
       overlays,
       smudges,
       effects,
+      lighting: state.map ? lighting : null,
     };
     last = publishSidebar(last);
     lastKey = key;
@@ -242,7 +246,11 @@ function publishCells(read: GameRenderCellSprites, revision: number): GameRender
  * A frame number alone must never keep a pre-update death step or an expired beam. Null disables caching on an
  * implausible vector. Type/configuration data is read again whenever one of these live fields changes.
  */
-function readChangeKey(m: GuestMemoryAccessor, nativeDetail: YrNativeDetail | null): number[] | null {
+function readChangeKey(
+  m: GuestMemoryAccessor,
+  nativeDetail: YrNativeDetail | null,
+  lighting: GameRenderLighting | null,
+): number[] | null {
   try {
     const o = YR_STATE_OFFSETS;
     const technos = readPointerVector(m, YR_STATE_GLOBALS.technos, 4 * YR_STATE_LIMITS.objectsPerKind);
@@ -377,6 +385,25 @@ function readChangeKey(m: GuestMemoryAccessor, nativeDetail: YrNativeDetail | nu
       view ? m.i32(tactical + o.tacticalPos + 4) : 0,
       technos.length,
       hash,
+      // Scene events/relight can finish within the same logic frame. Include availability and exact fractional
+      // values independently of the integer native-field hash, so a failed zero-valued read is never cached as valid.
+      ...(lighting
+        ? [
+            1,
+            lighting.ambient,
+            lighting.ground,
+            lighting.level,
+            ...lighting.tint,
+            lighting.override ? 1 : 0,
+            ...(lighting.override ?? []),
+            ['storm', 'nuke', 'dominator', 'timewarp'].indexOf(lighting.event ?? ''),
+            Number(lighting.storm?.active),
+            Number(lighting.storm?.pending),
+            Number(lighting.storm?.ending),
+            lighting.storm?.cell.x ?? 0,
+            lighting.storm?.cell.y ?? 0,
+          ]
+        : [0]),
     ];
   } catch {
     return null;

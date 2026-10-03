@@ -14,7 +14,7 @@ function pushView() {
     buildingAnimMatches: new Map(),
     effectDriver: { push: vi.fn() },
     liveBeams: { update: vi.fn(), displayScale: { value: 1 } },
-    hd: { seconds: () => 1 },
+    hd: { seconds: () => 1, setSceneLighting: vi.fn() },
     ensureHouse: vi.fn(),
     trackMotion: vi.fn(),
     updateOverlays: vi.fn(),
@@ -39,6 +39,7 @@ function presentation(interpolating: boolean) {
     settings: { sourceLights: 0 },
     seconds: () => 1,
     frame: vi.fn(),
+    setSceneLighting: vi.fn(),
     windowsWanted: () => false,
     materialsWanted: vi.fn(() => false),
   };
@@ -56,7 +57,7 @@ function presentation(interpolating: boolean) {
     library,
     effectArt: art,
     hd,
-    effectDriver: { frame: vi.fn() },
+    effectDriver: { frame: vi.fn(), skyFlash: () => 0 },
     liveBeams: { update: vi.fn(), displayScale: { value: 1 } },
     cellsDirty: false,
     objectsInterpolate: interpolating,
@@ -166,6 +167,24 @@ describe('live presentation scheduling', () => {
     expect(state.effectDriver.push.mock.calls.at(-1)![0]).toEqual(snapshot.effects);
   });
 
+  it('forwards snapshot lighting immediately, including clearing an absent or unknown field', () => {
+    const { view, state } = pushView();
+    const lighting = {
+      ambient: 0.87,
+      ground: 0,
+      level: 0,
+      tint: [1, 0.8, 0.68] as [number, number, number],
+      override: [0.3, 0.4, 0.75] as [number, number, number],
+      event: 'storm' as const,
+    };
+    const snapshot: LiveSnapshot = { frame: 1, view: null, houses: [], objects: [], lighting };
+    view.push(snapshot, 1);
+    expect(state.hd.setSceneLighting).toHaveBeenLastCalledWith(lighting);
+    view.push({ ...snapshot, frame: 2, lighting: null }, 2);
+    expect(state.hd.setSceneLighting).toHaveBeenLastCalledWith(null);
+    view.push({ frame: 3, view: null, houses: [], objects: [] }, 3);
+    expect(state.hd.setSceneLighting).toHaveBeenLastCalledWith(null);
+  });
   it('accepts death/prone steps, damage and effect removal in the same frame without restarting its timestamp', () => {
     const { view, state } = pushView();
     const snapshot: LiveSnapshot = {
@@ -254,6 +273,7 @@ describe('live presentation scheduling', () => {
       houseColour: new Map(),
       buildingAnimMatches: new Map(),
       effectDriver: {},
+      hd: { setSceneLighting: vi.fn() },
       liveBeams: { update: vi.fn() },
       warnedCells: true,
       ensureHouse: vi.fn(),
