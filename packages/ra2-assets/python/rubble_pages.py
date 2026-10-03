@@ -361,11 +361,51 @@ class RegistrationReferences:
         return reference, provenance
 
 
+def load_colour_locks(path: Path | None, manifest: dict) -> dict:
+    """Validate caller-selected paint regions in native frame coordinates.
+
+    Original lettering and fixed paint can need tighter colour/luminance locks
+    than surrounding generated material. Regions never authorize a redraw that
+    fails the whole-frame registration gates.
+    """
+    entries = read_json(path) if path is not None else {}
+    if not isinstance(entries, dict):
+        raise ValueError("colour locks must map sprite keys to region lists")
+    result = {}
+    for key, regions in entries.items():
+        if key not in manifest["sprites"]:
+            raise ValueError(f"colour lock has unknown sprite {key}")
+        if not isinstance(regions, list) or not regions:
+            raise ValueError(f"colour locks for {key} must be a non-empty region list")
+        _, _, width, height = manifest["sprites"][key]["rect"]
+        boxes = []
+        checked = []
+        for region in regions:
+            if not isinstance(region, dict) or set(region) != {"rect", "sigma"}:
+                raise ValueError(f"invalid colour lock for {key}: expected rect and sigma")
+            if not isinstance(region["rect"], list):
+                raise ValueError(f"colour lock rectangle for {key} must be an integer list")
+            sigma = region["sigma"]
+            if (type(sigma) not in (int, float) or not math.isfinite(sigma) or sigma <= 0):
+                raise ValueError("colour lock sigma must be positive and finite")
+            box = rect_box(region["rect"], (height, width))
+            x, y, w, h = box
+            if any(x < bx + bw and bx < x + w and y < by + bh and by < y + h
+                   for bx, by, bw, bh in boxes):
+                raise ValueError(f"overlapping colour locks for {key}")
+            boxes.append(box)
+            checked.append({"rect": list(box), "sigma": float(sigma)})
+        result[key] = checked
+    return result
+
+
 def build_pages(export: Path, upscaled: Path, out: Path, redraw_dir: Path | None = None,
-                lock_sigma: float = 6, *, redraw_references: Path | None = None) -> dict:
+                lock_sigma: float = 6, *, redraw_references: Path | None = None,
+                colour_locks: Path | None = None) -> dict:
     if not math.isfinite(lock_sigma) or lock_sigma <= 0:
         raise ValueError("lock sigma must be positive and finite")
     manifest, indexed = load_export(export)
+    paint_regions = load_colour_locks(colour_locks, manifest)
     upscale = load_upscaled(upscaled, indexed)
     original = read_image(Path(export) / "rubble_rgba_1x.png", "RGBA")
     if original.shape[:2] != indexed.shape:
@@ -411,6 +451,14 @@ def build_pages(export: Path, upscaled: Path, out: Path, redraw_dir: Path | None
                     raw2 = unmatte(downsample(fitted), art, mask, alpha)
                     final = colour_lock(base2, raw2, lock_sigma)
                     final = bleed(final, mask.repeat(2, 0).repeat(2, 1))
+                    if key in paint_regions:
+                        # Read each lock from the same finished material, so region
+                        # order cannot change pixels in another region.
+                        unlocked = final.copy()
+                        for region in paint_regions[key]:
+                            locked = colour_lock(base2, unlocked, region["sigma"])
+                            crop(final, region["rect"], 2)[:] = crop(locked, region["rect"], 2)
+                        frame["colour_locks"] = copy.deepcopy(paint_regions[key])
                     frame["method"] = "redraw"
             except (ValueError, np.linalg.LinAlgError, cv2.error, OSError) as error:
                 frame["flags"].append("registration_failed")
@@ -579,6 +627,8 @@ def main(argv: list[str] | None = None) -> None:
     build.add_argument("--redraw-dir", type=Path)
     build.add_argument("--redraw-references", type=Path,
                        help="JSON destination key -> {export, upscaled, key} source registration references")
+    build.add_argument("--colour-locks", type=Path,
+                       help="JSON sprite key -> [{rect: native frame rectangle, sigma: positive blur radius}]")
     build.add_argument("--lock-sigma", type=float, default=6)
     install = commands.add_parser("install")
     install.add_argument("--build", type=Path, required=True)
@@ -611,7 +661,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Exported {len(result['sprites'])} rubble sprites for {args.theatre} to {args.out}")
         elif args.command == "build":
             result = build_pages(args.export, args.upscaled, args.out, args.redraw_dir, args.lock_sigma,
-                                 redraw_references=args.redraw_references)
+                                 redraw_references=args.redraw_references, colour_locks=args.colour_locks)
             fallbacks = sum(frame["fallback"] for frame in result["sprites"].values())
             print(f"Built {len(result['sprites'])} rubble sprites ({fallbacks} redraw fallbacks) in {args.out}")
         elif args.command == "install":

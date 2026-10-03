@@ -908,7 +908,8 @@ python3 -B packages/ra2-assets/python/rubble_pages.py export --cache-root "$VARI
   --types "$WORK/leave_rubble.json" --out "$WORK/rubble/export"
 python3 -B packages/ra2-assets/python/rubble_pages.py build --export "$WORK/rubble/export" \
   --upscaled "$WORK/rubble/up4.png" [--redraw-dir "$WORK/rubble/redraws"] \
-  [--redraw-references "$WORK/rubble/references.json"] --out "$WORK/rubble/build"
+  [--redraw-references "$WORK/rubble/references.json"] \
+  [--colour-locks "$WORK/rubble/paint-regions.json"] --out "$WORK/rubble/build"
 python3 -B packages/ra2-assets/python/rubble_pages.py install --build "$WORK/rubble/build" --cache-root "$VARIANT" \
   --theatre urban
 python3 -B packages/ra2-assets/python/rubble_pages.py groups \
@@ -931,6 +932,15 @@ gates use the source colours; final alpha and Lab colour locking still use the d
 identical geometry when theatre palettes reverse its brightness. The frame records the source identity and reference
 hashes, plus the target fit before colour locking. Omitted keys retain the original destination-reference behavior;
 an invalid or mismatched source is flagged as a registration failure, never accepted implicitly.
+
+For original lettering or fixed paint that a model changes, `build --colour-locks FILE` accepts a JSON object
+mapping sprite keys to nonempty lists of `{ "rect": [x, y, width, height], "sigma": 0.25 }`. Rectangles use native
+1x coordinates within the exported frame, must remain inside it and must not overlap. The radius must be positive
+and finite. Unknown keys and malformed regions fail before output publication. Each selected rectangle gets a
+tighter Lab luminance/chroma lock to that theatre's upscaled original; the surrounding generated material remains
+unchanged. Small radii preserve source paint and glyph shapes rather than inventing lettering. The frame records
+the applied regions. Whole-frame registration and fit/scale gates still apply first; a region cannot authorize a
+failed redraw. Omitting this option preserves the existing build behavior.
 
 `sheet` compares original/L4/L5 with Chinese labels at the same cell anchor. Game art and all derived images stay
 outside Git; numerical tests do not establish renderer or visual acceptance.
