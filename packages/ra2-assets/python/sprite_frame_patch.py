@@ -52,7 +52,7 @@ def prepare(manifest: dict, page_path, spec_path: Path) -> tuple[dict[str, Image
     """
     hd_refs = manifest.get('spriteAtlasesHd') or [manifest.get('spriteAtlasHd')]
     indexed_refs = manifest.get('spriteAtlases') or [manifest.get('spriteAtlas')]
-    if not hd_refs or any(ref is None for ref in hd_refs):
+    if not hd_refs or hd_refs == [None]:
         raise ValueError('cache has no HD atlas metadata; prepare HD separately before applying patches')
     spec = read(spec_path)
     frames = spec.get('frames')
@@ -107,6 +107,10 @@ def prepare(manifest: dict, page_path, spec_path: Path) -> tuple[dict[str, Image
         source = manifest['sprites'][sprite]
         body = source['frames'][frame]
         page = body.get('page', 0)
+        # Partially prepared libraries retain native fallback on other pages.
+        # Only a page selected for a patch must have a real HD reference.
+        if not isinstance(page, int) or page < 0 or page >= len(hd_refs) or not hd_refs[page]:
+            raise ValueError('selected frame has no HD atlas metadata; prepare HD separately before applying patches')
         if hd_refs[page].get('scale', 2) != 2:
             raise ValueError('only 2x HD atlases are supported')
         paste(hd_refs[page]['file'], body['rect'], entry['hd'], 2, False)

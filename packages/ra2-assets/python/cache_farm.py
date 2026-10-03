@@ -150,9 +150,15 @@ def install_file(root: Path, rel: str, data_path: Path) -> None:
 def install_symlink(root: Path, rel: str, source: Path) -> None:
     """Publish a relative symlink without writing through a farm directory link."""
     dst = _destination(root, rel)
+    source = Path(source).absolute()
+    # Normalize system directory aliases (for example /var -> /private/var on
+    # macOS) on both sides. Lexical relpath across aliases can overshoot the
+    # physical root and produce a dangling link. _destination already realized
+    # every farm directory, so this does not redirect any write into the base.
+    source = source.parent.resolve(strict=True) / source.name
     with _temporary_file(dst) as tmp:
         tmp.unlink()
-        tmp.symlink_to(os.path.relpath(Path(source).absolute(), dst.parent))
+        tmp.symlink_to(os.path.relpath(source, dst.parent.resolve(strict=True)))
 
 
 def patch_json(root: Path, rel: str, fn: Callable[[object], None], *, default=_MISSING) -> None:

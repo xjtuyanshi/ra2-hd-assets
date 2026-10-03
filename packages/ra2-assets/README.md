@@ -2443,3 +2443,31 @@ track-specific archived workflows; their private review/fingerprint ledgers and 
 by these ports. The monolithic live browser driver remains archived: startup assumptions, YR probes and its Worker
 freeze/capture timing need a separately authorized live validation. Offline transport tests do not validate its
 browser actions, pair synchronization, clock behavior, or game/runtime acceptance.
+
+## Reversible cache installation receipts
+
+`python/cache_install_receipt.py` records file changes around an installation in an isolated cache farm. Keep
+receipts and backups outside that farm and outside Git. It realizes selected directory links through
+`cache_farm.py`, hashes inherited files, and copies existing regular files before installation. The installer must
+use atomic replacement; neither a receipt nor a backup authorizes writing through a symlink or editing a shared
+hard link in place.
+
+```sh
+python3 -B packages/ra2-assets/python/cache_install_receipt.py begin \
+  --farm "$STAGING_CACHE" --receipt "$PRIVATE_OUT/install.json" --scope "$CACHE_SUBDIRECTORY"
+# Run the reviewed asset installer against STAGING_CACHE, then finalize its receipt.
+python3 -B packages/ra2-assets/python/cache_install_receipt.py finish --receipt "$PRIVATE_OUT/install.json"
+python3 -B packages/ra2-assets/python/cache_install_receipt.py undo --receipt "$PRIVATE_OUT/install.json"
+```
+
+Undo validates every changed file, original source, and backup before writing. For JSON it reverses recorded key
+changes while preserving unrelated later keys. For binary pages or conflicting JSON edits it refuses the undo;
+resolve those later edits deliberately instead of replacing a whole current atlas or manifest. Installations must
+be serialized while a receipt is being recorded. This is file-install evidence, not renderer or art acceptance.
+
+Synthetic rollback coverage, including a realized directory symlink, a macOS system-path alias, conflicting binary
+edits, and preserved sibling JSON keys:
+
+```sh
+python3 -B -m unittest discover -s packages/ra2-assets/python -p test_cache_install_receipt.py -v
+```

@@ -113,3 +113,23 @@ def test_symlinked_atlas_directory_cannot_write_into_source(tmp_path):
     with pytest.raises(ValueError, match='parent must not be a symlink'):
         sfp.apply(base, variant, spec)
     assert (assets / 'hd.png').read_bytes() == before
+
+
+@pytest.mark.parametrize('selected_missing', [False, True])
+def test_sparse_hd_library_validates_selected_page_only(tmp_path, selected_missing):
+    base, variant, spec, name, _ = fixture(tmp_path, paged=True)
+    manifest = json.loads((base / name).read_text())
+    manifest['spriteAtlases'].append({'file': 'unused.png'})
+    manifest['spriteAtlasesHd'].append(None)
+    if selected_missing:
+        manifest['sprites']['terrain:A']['frames'][1]['page'] = 1
+    (base / name).write_text(json.dumps(manifest))
+    original = (base / name).read_bytes()
+    if selected_missing:
+        with pytest.raises(ValueError, match='selected frame has no HD'):
+            sfp.apply(base, variant, spec)
+        assert not variant.exists()
+    else:
+        sfp.apply(base, variant, spec)
+        assert json.loads((variant / name).read_text())['spriteAtlasesHd'][1] is None
+    assert (base / name).read_bytes() == original
