@@ -415,8 +415,50 @@ options (`--blend`, colour sigmas, `--margin`) reuse the cached tiles, so they c
 
 ## Tiled terrain, lake shores and cliff feet (Python)
 
+`python/terrain_tile_qa.py` conditions one image-painted tile against an immutable RGBA reference: alpha-aware
+registration/low-frequency colour matching, exact reference alpha and open-water RGB, and texture/colour diagnostics.
+Texture gain is mean absolute luminance high-pass energy at sigma 1 composite pixel on eroded opaque land, relative
+to the native-derived reference at the same resolution. A gain above 1 rejects smoothing; it does **not** prove real
+material detail or accept geometry. Visual inspection at 1:1 remains mandatory and the report keeps `accepted: false`.
+The source and raw AI image are never overwritten. Shape errors fail instead of silently resizing a mismatched result.
+If new grain prevents edge registration, a conservative fallback requires two independently structured Lab chroma
+channels to agree within four pixels, each with ECC at least 0.9 and displacement at most eight pixels. Uniform
+or monochrome paint cannot supply this alternative evidence. The report retains the original failed fit and the
+fallback diagnostics; a genuine geometry shift still fails and visual acceptance is still separate.
+
+```bash
+python3 -B packages/ra2-assets/python/terrain_tile_qa.py --reference "$REFERENCE_RGBA" --raw "$RAW_AI" \
+  --water-mask "$WATER_MASK" --output "$CONDITIONED" --report "$QA_REPORT"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_terrain_tile*.py'
+```
+
+`python/terrain_seam_boards.py` packs every adjacent overlap rectangle plus a small surrounding margin into
+review boards without resizing. Its JSON plan contains `pairs` with `tiles` labels, an `axis` (`vertical` or
+`horizontal`), and `overlap_box_2x` coordinates `[left, top, right, bottom]`. Wide overlaps at the map's last
+row or column remain complete. The output index records the image SHA, crop coordinates and board positions;
+all reviews start as pending. An existing output directory is rejected to preserve prior review evidence.
+
+```bash
+python3 -B packages/ra2-assets/python/terrain_seam_boards.py --image "$FINAL_TERRAIN" \
+  --plan "$SEAM_PLAN" --output "$NEW_REVIEW_DIRECTORY"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_terrain_seam_boards.py'
+```
+
 These tools require NumPy, Pillow and OpenCV (`cv2`). All source images, cache and work directories are explicit
 arguments; keep generated art outside Git. They preserve terrain alpha and do not edit manifests or material sidecars.
+
+`scripts/remaster/terrain2_watch.py` keeps one already pilot-approved map's broker queue supplied through
+`terrain2_pipeline.py`. It starts no model process, accepts no art and never retries failed requests automatically.
+The existing pipeline enforces the two-pilot gate, three-request concurrency cap, disk floor and usage-limit stop.
+A local advisory lease prevents duplicate watchers. Restarting checks existing raw outputs for missing QA, so an
+interruption between ingestion and QA does not skip review evidence. Inspect `OUT/watch/status.json`; send SIGTERM
+and wait for its stopped phase before manual submit, ingest or rejection. Visual approval is safe after the QA
+phase has finished. A complete raw queue stops at `awaiting_visual_review`, not final-map acceptance.
+
+```bash
+python3 -B scripts/remaster/terrain2_watch.py --root "$ROOT" --out "$OUT" --map "$MAP"
+python3 -B -m unittest discover -s scripts/remaster -p 'test_terrain2_watch.py'
+```
 
 - `python/terrain_tiles.py`: `prep` cuts `--source` using `--water-mask` and `--prompt` into `--tiles`, writing
   `input.png`, `prompt.txt`, `tile.json`, a default `queue.txt`, and a final `prep.json` recording the full grid and
