@@ -159,6 +159,18 @@ class SmudgeRedrawTests(unittest.TestCase):
             redraw.install(staged, self.dest)
         self.assertEqual(self.snapshot(), before)
 
+    def test_staged_file_changed_during_installation_aborts_json_publication(self):
+        staged = self.assemble(); before = (self.dest/'library.json').read_bytes()
+        put = cache_farm.install_file
+        def changed(directory, name, origin):
+            if '@2x.png' in name:
+                Image.new('RGBA', (20, 20), (90, 90, 90, 255)).save(origin)
+            return put(directory, name, origin)
+        with mock.patch.object(cache_farm, 'install_file', side_effect=changed):
+            with self.assertRaisesRegex(ValueError, 'staged source changed'):
+                redraw.install(staged, self.dest)
+        self.assertEqual((self.dest/'library.json').read_bytes(), before)
+
     def test_concurrent_json_sibling_edit_survives_and_page_change_aborts(self):
         staged = self.assemble(); patch = cache_farm.patch_json
         def sibling(directory, name, update, **kwargs):

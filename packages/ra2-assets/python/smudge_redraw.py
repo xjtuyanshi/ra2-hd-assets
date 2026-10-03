@@ -277,6 +277,15 @@ def install(source, destination):
     if destination.is_symlink() or not destination.is_dir():
         raise ValueError('destination must be an explicit real theatre directory')
     lib = validate(source, require_hd=True)
+    source_files = [entry['file'] for entry in lib['spriteAtlases']]
+    source_files += [entry[key] for entry in lib['spriteAtlasesHd'] for key in ('file', 'remap')]
+    source_files += list(lib['palettes'].values())
+    source_files.append('library.fragment.json')
+    expected = {name: sha(relative_file(source, name)) for name in source_files}
+    # Bind validation and publication to the same bytes, including palettes.
+    if validate(source, require_hd=True) != lib or any(
+            sha(relative_file(source, name)) != digest for name, digest in expected.items()):
+        raise ValueError('staged source changed during validation')
     with theatre_pages.library_lock(destination):
         current = read_json(destination / 'library.json')
         if current['version'] != lib['version'] or current['theater'] != lib['theater']:
@@ -296,16 +305,16 @@ def install(source, destination):
         mapping, indexed, high, files = {}, [], [], {}
         for page, entry in enumerate(lib['spriteAtlases']):
             hd = lib['spriteAtlasesHd'][page]
-            digest = hashlib.sha256(''.join(sha(relative_file(source, e)) for e in
+            digest = hashlib.sha256(''.join(expected[e] for e in
                                            (entry['file'], hd['file'], hd['remap'])).encode()).hexdigest()[:24]
             stem = 'sprites-smudges-s2x-'+digest
             idx = dict(entry, file=stem+'.png')
             colour = dict(hd, file=stem+'@2x.png', remap=stem+'@2x-remap.png')
             for target, origin in [(idx['file'], entry['file']), (colour['file'], hd['file']), (colour['remap'], hd['remap'])]:
                 path = destination / target
-                if path.exists() and sha(path) != sha(relative_file(source, origin)):
+                if path.exists() and sha(path) != expected[origin]:
                     raise ValueError('content-addressed filename conflict')
-                files[target] = relative_file(source, origin)
+                files[target] = (relative_file(source, origin), expected[origin])
             reuse = next((i for i, old in enumerate(old_pages) if old == idx), None)
             if reuse is not None:
                 hd_pages = current.get('spriteAtlasesHd') or []
@@ -319,14 +328,16 @@ def install(source, destination):
         for sprite in sprites.values():
             for frame in sprite['frames'] + sprite.get('shadows', []):
                 frame['page'] = mapping[frame.get('page', 0)]
-        for target, origin in files.items():
+        for target, (origin, _) in files.items():
             cache_farm.install_file(destination, target, origin)
         def update(data):
             check_palette(data)
             if data['spriteAtlases'] != old_pages:
                 raise ValueError('destination page layout changed during publication')
-            for target, origin in files.items():
-                if sha(destination/target) != sha(origin):
+            if any(sha(relative_file(source, name)) != digest for name, digest in expected.items()):
+                raise ValueError('staged source changed before publication')
+            for target, (_, digest) in files.items():
+                if sha(destination/target) != digest:
                     raise ValueError('installed file changed before publication')
             data['spriteAtlases'].extend(indexed)
             hd_pages = list(data.get('spriteAtlasesHd') or [])
