@@ -309,6 +309,13 @@ class ContractTests(unittest.TestCase):
                 rows = list(csv.DictReader(f))
             self.assertEqual(rows[0]["status"], "PASS")
             self.assertTrue((out / "QA.md").is_file())
+            # A killed/partial prior receipt must recompute safely, not abort the sweep.
+            receipt = next((out / "page-results").glob("*.json"))
+            receipt.write_text('{"rows": [')
+            repaired = qa.scan(cache, out)
+            self.assertEqual(repaired["resumed_jobs"], 0)
+            self.assertEqual(repaired["flagged_rows"], 0)
+            self.assertIsNotNone(qa.read_receipt(receipt))
             # A changed page must invalidate its old receipt and emit a missing-frame failure.
             Image.fromarray(np.zeros((32, 32, 4), np.uint8)).save(cache / "sprites@2x.png")
             third = qa.scan(cache, out)

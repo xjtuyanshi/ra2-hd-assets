@@ -295,6 +295,26 @@ def row(**values):
     return {**dict.fromkeys(FIELDS, ""), **values}
 
 
+def read_receipt(path):
+    try:
+        result = json.loads(path.read_text())
+        if (isinstance(result, dict) and isinstance(result.get("rows"), list) and
+                isinstance(result.get("worst"), list) and isinstance(result.get("frames"), int) and
+                isinstance(result.get("before"), dict)):
+            return result
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def write_receipt(path, result):
+    # An interrupted write must not poison the next long-running sweep. Only a
+    # complete JSON document becomes a reusable receipt; orphan .tmp files are ignored.
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(result, allow_nan=False))
+    temporary.replace(path)
+
+
 def issue(manifest, asset, failure, detail, **values):
     return row(scope="reference", manifest=manifest, asset=asset, status="FAIL",
                failures=failure, detail=detail, **values)
@@ -488,8 +508,9 @@ def evaluate_job(job, cache, out, memo):
     salt = digest(json.dumps([job["scale"], job["saturation"], job["additive"], contract["ramps"]]).encode()).encode()
     key = digest(json.dumps([VERSION, CODE_DIGEST, contract, before], sort_keys=True).encode())
     receipt = out / "page-results" / f"{key}.json"
-    if receipt.exists():
-        return json.loads(receipt.read_text()), True
+    cached = read_receipt(receipt)
+    if cached is not None:
+        return cached, True
     base = dict(scope="sprite", manifest=job["manifest"], page=job["page"], active=job["active"],
                 source=str(Path(job["source"]).relative_to(cache)) if Path(job["source"]).is_relative_to(cache) else job["source"],
                 hd=str(Path(job["hd"]).relative_to(cache)) if Path(job["hd"]).is_relative_to(cache) else job["hd"],
@@ -502,7 +523,7 @@ def evaluate_job(job, cache, out, memo):
             errors.append(row(**base, asset="atlas", status="FAIL", failures="missing_reference", detail=str(p)))
     if errors:
         result = {"rows": errors, "frames": 0, "worst": [], "before": before}
-        receipt.write_text(json.dumps(result))
+        write_receipt(receipt, result)
         return result, False
     try:
         src, hd = read_image(Path(job["source"])), read_image(Path(job["hd"])).convert("RGBA")
@@ -579,7 +600,7 @@ def evaluate_job(job, cache, out, memo):
         errors.append(row(**base, asset="atlas", status="FAIL", failures="input_changed", detail="source changed during this page scan; rerun required"))
     result = {"rows": errors + coalesce(rows), "frames": len(rows), "worst": worst, "before": before}
     if after == before:
-        receipt.write_text(json.dumps(result, allow_nan=False))
+        write_receipt(receipt, result)
     return result, False
 
 
