@@ -5,6 +5,7 @@ import { SpritePool } from '../src/live/spritePool';
 import {
   INFANTRY_SHADOW_OPACITY,
   INFANTRY_SHADOW_RAMP,
+  GROUND_PULL,
   infantryShadowAlpha,
   SpriteLayer,
   type SpriteInstance,
@@ -12,6 +13,7 @@ import {
 import type { Ra2Cache } from '../src/ra2/cache';
 import type { DirtyAttribute } from '../src/dirtyAttribute';
 import { applyLookPreset, type HdSettings } from '../src/HdRenderer';
+import { CARD_CLEARANCE } from '../src/ra2/cardDepth';
 
 const body = {
   rect: [0, 0, 10, 20] as [number, number, number, number],
@@ -40,6 +42,7 @@ describe('live infantry footprint', () => {
       library,
       spritePool: pool,
       libraryPaletteKeys: new Map(),
+      world: { terrain: { heightAt: () => 0 } },
     }) as {
       libraryInfantrySprites(...args: unknown[]): void;
     };
@@ -51,7 +54,7 @@ describe('live infantry footprint', () => {
         infantry: { sequences: { Walk: { start: 0, count: 2, facingMultiplier: 0 } } },
       },
     };
-    const object = { kind: 'infantry', infantrySequence: 'Walk', sequenceFrame: 1 } as LiveObject;
+    const object = { kind: 'infantry', x: 512, y: 768, z: 0, infantrySequence: 'Walk', sequenceFrame: 1 } as LiveObject;
     const batch = new Map<number, SpriteInstance[]>();
     view.libraryInfantrySprites(object, { x: 512, y: 768, z: 0, facing: 0 }, visual, batch, 1);
     const sh = batch.get(7)![0]!;
@@ -76,8 +79,11 @@ describe('live infantry footprint', () => {
     const vehicle = pool.take(new Vector3(), shadow, 'library:unit', 0, true, true);
     const layer = new SpriteLayer(cache, [infantry, building, vehicle]);
     const flags = (layer as unknown as { flags: DirtyAttribute }).flags;
-    expect([0, 1, 2].map((i) => flags.array[i * 8 + 3])).toEqual([1, 0, 0]);
-    for (const i of [1, 2]) expect(Array.from(flags.array.slice(i * 8, (i + 1) * 8))).toEqual([2, 1, 0, 0, 0, 0, 0, 0]);
+    expect([0, 1, 2].map((i) => flags.array[i * flags.itemSize + 3])).toEqual([1, 0, 0]);
+    for (const i of [1, 2])
+      expect(Array.from(flags.array.slice(i * flags.itemSize, i * flags.itemSize + 8))).toEqual([
+        2, 1, 0, 0, 0, 0, 0, 0,
+      ]);
     expect(layer.groundPasses).toHaveLength(2);
     expect(layer.groundPasses.every((mesh) => mesh.count === 3)).toBe(true);
     const settings = {} as HdSettings;
@@ -85,8 +91,7 @@ describe('live infantry footprint', () => {
     expect(settings.shadowFollow).toBeGreaterThan(0);
     expect(settings.shadowSoftness).toBeGreaterThan(0);
     expect(settings.shadowLength).toBeGreaterThan(1);
-    expect(INFANTRY_SHADOW_OPACITY).toBeGreaterThanOrEqual(0.75);
-    expect(INFANTRY_SHADOW_OPACITY).toBeLessThanOrEqual(0.8);
+    expect(INFANTRY_SHADOW_OPACITY).toBe(1);
     pool.begin();
     expect(pool.take(new Vector3(), shadow, 'library:unit', 0, true, true)).toBe(infantry);
     expect(infantry.infantryShadow).toBeUndefined();
@@ -114,5 +119,24 @@ describe('live infantry footprint', () => {
       expect(a).toBeGreaterThanOrEqual(previous - 1e-12);
       previous = a;
     }
+  });
+
+  it('leaves no bright ground in a covered palette-index-12 contact core', () => {
+    // Alpha is applied in linear light. Even 0.96 transmits bright pavement; the native indexed pixel is solid.
+    for (const ground of [0.05, 0.5, 1, 4]) {
+      for (const coverage of [INFANTRY_SHADOW_RAMP.to, 0.5, 1]) {
+        expect(ground * (1 - infantryShadowAlpha(coverage))).toBe(0);
+      }
+      expect(ground * (1 - infantryShadowAlpha(0))).toBe(ground);
+    }
+  });
+
+  it('places the solid core ahead of ordinary shadows but behind reflections and upright feet', () => {
+    // LessDepth must admit an infantry core after a fully covered building/vehicle SHP shadow on the same plane.
+    const range = 400;
+    const depth = (pull: number) => 0.5 - pull / range;
+    expect(depth(GROUND_PULL.infantryCore)).toBeLessThan(depth(GROUND_PULL.shadow[1]));
+    expect(depth(GROUND_PULL.infantryCore)).toBeGreaterThan(depth(GROUND_PULL.reflection));
+    expect(depth(GROUND_PULL.infantryCore)).toBeGreaterThan(depth(CARD_CLEARANCE));
   });
 });

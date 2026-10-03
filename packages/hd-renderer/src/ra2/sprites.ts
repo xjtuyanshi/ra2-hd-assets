@@ -62,6 +62,7 @@ import { type HdAtlas, type Ra2Cache } from './cache';
 import { objectLevelAt, srgbScale, terrainGradeAt } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
 import { cardDepthNode, SPRITE_DECAL_LIFT } from './cardDepth';
+import { NATIVE_UNIT_RENDER_ORDER, type NativeSpriteDepth } from './nativeDepth';
 import { comparePainterOrder, spritePainterBias, type PainterObject } from './painterOrder';
 import {
   GLASS_REFLECTANCE,
@@ -88,7 +89,9 @@ export interface SpriteInstance {
   /** World units to pull the card towards the camera so terrain around the base never cuts it (see cardPush). */
   push: number;
   shadow: boolean;
-  /** Infantry's inline SHP footprint stays at the draw point; enhanced opacity is fixed at 0.78. */
+  /** Body-card alpha multiplier, default 1. Shadows and ground extras keep their own opacity. */
+  opacity?: number;
+  /** Infantry's inline SHP footprint stays at the draw point with a solid contact core in every look. */
   infantryShadow?: boolean;
   /** Lay the art on the ground as a decal (ore, smudges, flat overlays) instead of a camera-facing card. */
   flat?: boolean;
@@ -112,8 +115,10 @@ export interface SpriteInstance {
   painterPart?: number;
   /** Horizontal high-bridge depth at this height above the draw anchor; leaves screen placement unchanged. */
   deckHeight?: number;
-  /** Shift the foundation's facade sum inward in x+z cell units; defaults to zero and leaves placement unchanged. */
-  foundationRecess?: number;
+  /** Original-engine body template, horizontal part or bitmap-bottom card; absent preserves analytic depth. */
+  nativeDepth?: NativeSpriteDepth;
+  /** Test-only native parts such as DoorAnim retain color but never obscure later units through depth writes. */
+  depthWrite?: boolean;
   /**
    * Enhanced-look ground decals (see spriteLook.ts), drawn only while their effect is on: 'contact' darkens the ground
    * around `painter.foundation`, 'reflection' mirrors `frame` (an upright card's art) on wet paving below its base.
@@ -140,7 +145,7 @@ function instanceRank(s: SpriteInstance): number {
 }
 
 /** Draw passes of a sprite layer: the main one, and the enhanced look's ground passes (SpriteLayer.groundPasses). */
-type GroundPass = 'main' | 'under' | 'over';
+type GroundPass = 'main' | 'under' | 'over' | 'readOnly' | 'unit' | 'translucent';
 
 /**
  * How far (world units along the view) the enhanced look's 'over' pass pulls SHP shadows and wet reflections in front
@@ -149,19 +154,21 @@ type GroundPass = 'main' | 'under' | 'over';
  * ground 0.0153 nearer); zoomed further out, the nearest samples of a pixel can miss its shadow. Shadows step up with
  * their coverage (five levels): a later, denser shadow still darkens an earlier fringe.
  */
-export const GROUND_PULL = { shadow: [0.019, 0.027], reflection: 0.0285 } as const;
-export const INFANTRY_SHADOW_OPACITY = 0.8;
+export const GROUND_PULL = { shadow: [0.019, 0.027], infantryCore: 0.028, reflection: 0.0285 } as const;
+/**
+ * The original infantry blob is solid palette index 12 (black), not the half-colour shadow blitter used by
+ * buildings and voxels. Its covered core must not transmit the ground, in either faithful or enhanced looks.
+ */
+export const INFANTRY_SHADOW_OPACITY = 1;
 /**
  * Coverage ramp of infantry contact shadows. The original draws them as solid palette-index-12 blobs inside the body
  * frames; the filtered/upscaled mask is only ~0.5 at the blob's own edge, so a linear ramp left half of every blob
- * lighter than the core (V<40 px 0.51x / 0.55x of the original for Initiates / Slaves on the same frozen frames; with
- * this ramp 0.60x / 0.61x, opacity alone saturated at 0.55x). Coverage >= `to` is the full core, the soft fringe
- * stays at the blob's edge (P-L5H-1). The rest of the gap is the HD bodies covering more of their own blob and the
- * original's near-black body pixels, not a missing shadow.
+ * lighter than the core. Coverage >= `to` is the full core, while the soft fringe stays at the blob's edge.
+ * This affects contact alpha only; the selected native frame and its footprint are unchanged.
  */
-export const INFANTRY_SHADOW_RAMP = { from: 0.02, to: 0.35 } as const;
+export const INFANTRY_SHADOW_RAMP = { from: 0.02, to: 0.22 } as const;
 
-/** CPU twin of the enhanced infantry shadow alpha for a filtered mask coverage (0..1). */
+/** CPU twin of the infantry shadow alpha for a filtered mask coverage (0..1), shared by all looks. */
 export function infantryShadowAlpha(coverage: number): number {
   const t = Math.min(
     1,
@@ -219,12 +226,12 @@ export function groundPlaneDepth(camera: OrthographicCamera, width: number, heig
   return out.set(c0, depthAt(1, 0, 0) - c0, depthAt(0, 1, 0) - c0, depthAt(0, 0, 1) - c0);
 }
 
-/** Darkening of SHP shadows: the engine halves the displayed colour under them (see ENGINE_SHADOW_OPACITY). */
+/** Default SHP shadow blitter; infantry uses solid palette-index-12 contact pixels instead. */
 const SHADOW_OPACITY = ENGINE_SHADOW_OPACITY;
 
 /**
  * Placement push for camera-facing geometry (also used by lighting/shadows). Fragment occlusion is reconstructed
- * independently by cardDepth.ts, so frame dimensions cannot change which object hides another. A pixel d world
+ * independently by cardDepth.ts; native bitmap bounds affect that profile, never this placement offset. A pixel d world
  * units below the anchor on screen sees ground d * cot(30°) nearer to the camera than the anchor, so the card must come
  * forward at least that far for its lowest pixel.
  */
@@ -241,6 +248,12 @@ export function cardPush(frame: SpriteFrame): number {
  */
 export class SpriteLayer {
   readonly mesh: InstancedQuad;
+  /** Test-only sprite parts share every instance buffer; visible only when such a part exists. */
+  readonly readOnlyMesh: InstancedQuad;
+  /** Ground cards follow test-only parts, so a door cannot paint over a unit that passed the body. */
+  readonly unitMesh: InstancedQuad;
+  /** Translucent bodies follow native unit color, retaining depth tests without writing an opaque silhouette. */
+  readonly translucentMesh: InstancedQuad;
   /**
    * The enhanced look's ground passes ('under', 'over'; children of `mesh`, shown by HdRenderer only while the look is
    * on). They share this layer's instance buffers.
@@ -261,8 +274,10 @@ export class SpriteLayer {
    * x: card/decal/shadow/contact/reflection (instanceCode); y: object light; z: map lighting class; w: bounded
    * traversal bias in world units for cards, ground-crystal weight for plain flat decals, or infantry shadow marker.
    * The second vec4 holds foundation width/height and draw-point offsets; width -1 selects an elevated deck.
-   * A ninth scalar holds the relative anchor code (NOT_CAPTURED_CODE excludes an instance), read only by capture-enabled main materials.
-   * All three attributes share one buffer: WebGPU allows 8 vertex buffers. Non-capture layers retain stride 8.
+   * Capture-enabled layers retain their relative anchor code at scalar 8. Two additional vec4s hold the native
+   * depth mode/profile and owner offsets/pass (0 ordinary, 1 test-only, 2 ground unit, 3 + opacity translucent).
+   * All attributes share one buffer: stride 16, or 17 with
+   * capture, so native depth adds no vertex buffer (WebGPU allows eight).
    */
   private readonly flags: DirtyAttribute;
   private instances: readonly SpriteInstance[] = [];
@@ -315,7 +330,8 @@ export class SpriteLayer {
     this.anchor = new DirtyAttribute(new Float32Array(count * 5), 5);
     this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
     this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
-    this.flags = new DirtyAttribute(new Float32Array(count * (capture ? 9 : 8)), capture ? 9 : 8);
+    const nativeOffset = capture ? 9 : 8;
+    this.flags = new DirtyAttribute(new Float32Array(count * (nativeOffset + 8)), nativeOffset + 8);
 
     const atlasSize = vec2(atlas.width, atlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
@@ -325,7 +341,23 @@ export class SpriteLayer {
     const aLightSample: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec2', 5, 3);
     const aFlags: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', this.flags.itemSize, 0);
     const aOcclusion: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', this.flags.itemSize, 4);
+    const aNative: ShaderNode = instancedBufferAttribute(
+      this.flags.interleaved(),
+      'vec4',
+      this.flags.itemSize,
+      nativeOffset,
+    );
+    const aNativeOffset: ShaderNode = instancedBufferAttribute(
+      this.flags.interleaved(),
+      'vec4',
+      this.flags.itemSize,
+      nativeOffset + 4,
+    );
     const aFlat: ShaderNode = aFlags.x;
+    const bodyOpacity: ShaderNode = aNativeOffset.w
+      .greaterThanEqual(3)
+      .select(aNativeOffset.w.sub(3), 1)
+      .toVar('spriteBodyOpacity');
     const isInfantryShadow: ShaderNode = step(1.5, aFlat)
       .mul(float(1).sub(step(2.5, aFlat)))
       .mul(step(0.5, aFlags.w));
@@ -403,6 +435,7 @@ export class SpriteLayer {
         pushAmount,
         aFlags.w,
         aFlat.greaterThan(0.5),
+        { data: aNative, offset: aNativeOffset, template: cache.depthTemplate },
       );
     material.depthNode = cardDepth();
     // Vertex stage: corners from the untouched geometry attribute (+-0.5).
@@ -418,9 +451,17 @@ export class SpriteLayer {
       .mul(float(1).sub(step(2.5, aFlat)))
       .add(isReflection);
     const skipIn = (pass: GroundPass): ShaderNode =>
-      pass === 'main'
-        ? enhancedOn.mul(step(0.5, aFlat))
-        : float(1).sub(enhancedOn.mul(pass === 'under' ? underKind : overKind));
+      pass === 'translucent'
+        ? aNativeOffset.w.greaterThanEqual(3).select(0, 1)
+        : pass === 'readOnly'
+          ? aNativeOffset.w.equal(1).select(0, 1)
+          : pass === 'unit'
+            ? aNativeOffset.w.equal(2).select(0, 1)
+            : pass === 'main'
+              ? enhancedOn.mul(step(0.5, aFlat)).add(step(0.5, aNativeOffset.w))
+              : float(1)
+                  .sub(enhancedOn.mul(pass === 'under' ? underKind : overKind))
+                  .add(step(0.5, aNativeOffset.w));
     const placement = (pass: GroundPass): ShaderNode =>
       Fn(() => {
         const px = aParams.x.add(gu.mul(aRect.z));
@@ -529,7 +570,15 @@ export class SpriteLayer {
         const shadowCoverage: ShaderNode = hd
           ? mix(clamp(coverage, 0, 1), max(clamp(coverage, 0, 1), texture(hd.color, atlasUv).a), isInfantryShadow)
           : clamp(coverage, 0, 1);
-        const shadow: ShaderNode = vec4(0, 0, 0, shadowCoverage.mul(SHADOW_OPACITY));
+        const infantryAlpha: ShaderNode = smoothstep(INFANTRY_SHADOW_RAMP.from, INFANTRY_SHADOW_RAMP.to, shadowCoverage)
+          .mul(INFANTRY_SHADOW_OPACITY)
+          .toVar('spriteInfantryShadowAlpha');
+        const shadow: ShaderNode = vec4(
+          0,
+          0,
+          0,
+          mix(shadowCoverage.mul(SHADOW_OPACITY), infantryAlpha, isInfantryShadow),
+        );
         const edge: ShaderNode = smoothstep(0.35, 0.65, coverage);
         // Local light at the ground point under this pixel (decals: the pixel itself; upright art: straight below it on
         // screen, down to the anchor's ground line), fading with the pixel's height above that ground.
@@ -672,24 +721,12 @@ export class SpriteLayer {
             );
             result.assign(select(crystal.greaterThan(0), vec4(crystalColour.add(litGlow), litAlpha), result));
           }
-          // Both crisp and softened shadows share the enhanced opacity; faithful keeps the engine's alpha above.
-          const shadowOpacity: ShaderNode = mix(
-            look.shadowDarkness.mul(SHADOW_OPACITY).min(0.9),
-            INFANTRY_SHADOW_OPACITY,
-            isInfantryShadow,
-          );
-          If(
-            isShadow.greaterThan(0.5).and(look.shadowDarkness.notEqual(1).or(isInfantryShadow.greaterThan(0.5))),
-            () => {
-              const ramped: ShaderNode = mix(
-                shadowCoverage,
-                smoothstep(INFANTRY_SHADOW_RAMP.from, INFANTRY_SHADOW_RAMP.to, shadowCoverage),
-                isInfantryShadow,
-              );
-              const alpha: ShaderNode = ramped.mul(shadowOpacity);
-              result.assign(vec4(0, 0, 0, alpha));
-            },
-          );
+          // Only half-colour shadows respond to look controls. Infantry keeps its solid native contact core.
+          const shadowOpacity: ShaderNode = look.shadowDarkness.mul(SHADOW_OPACITY).min(0.9);
+          If(isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(look.shadowDarkness.notEqual(1)), () => {
+            const alpha: ShaderNode = shadowCoverage.mul(shadowOpacity);
+            result.assign(vec4(0, 0, 0, alpha));
+          });
           // Shadows grow a penumbra with distance from their object's base (golden-hour softness).
           If(
             isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(look.shadowSoftness.greaterThan(1e-4)),
@@ -744,13 +781,13 @@ export class SpriteLayer {
             result.assign(vec4(lit.mul(0.9), litAlpha.mul(strength)));
           });
         });
-        return result;
+        return vec4(result.rgb, result.a.mul(bodyOpacity));
       })();
     const mainColour = colourNode();
     if (capture) {
       // Every vertex of an instance shares the anchor code, including across its SHP component pages.
       const code: ShaderNode = varying(
-        instancedBufferAttribute(this.flags.interleaved(), 'float', 9, 8),
+        instancedBufferAttribute(this.flags.interleaved(), 'float', this.flags.itemSize, 8),
         'objectDepthInstanceCode',
       ).setInterpolation('flat', 'either');
       material.userData.objectDepthCodeNode = code;
@@ -768,6 +805,53 @@ export class SpriteLayer {
     this.mesh = new InstancedQuad(material, count);
     this.mesh.renderOrder = 4;
     this.mesh.name = 'ra2-sprites';
+
+    const readOnlyMaterial = new MeshBasicNodeMaterial();
+    readOnlyMaterial.name = 'ra2-sprites-read-only';
+    readOnlyMaterial.transparent = true;
+    readOnlyMaterial.blending = NormalBlending;
+    readOnlyMaterial.alphaTest = material.alphaTest;
+    readOnlyMaterial.positionNode = placement('readOnly');
+    readOnlyMaterial.colorNode = colourNode();
+    readOnlyMaterial.depthNode = cardDepth();
+    readOnlyMaterial.depthWrite = false;
+    this.readOnlyMesh = new InstancedQuad(readOnlyMaterial, count, this.mesh.geometry);
+    this.readOnlyMesh.name = 'ra2-sprites-read-only';
+    const main = this.mesh;
+    Object.defineProperty(this.readOnlyMesh, 'renderOrder', {
+      get: () => main.renderOrder + 0.001,
+      set: () => {},
+      configurable: true,
+    });
+    this.mesh.add(this.readOnlyMesh);
+
+    const unitMaterial = new MeshBasicNodeMaterial();
+    unitMaterial.name = 'ra2-sprites-ground-units';
+    unitMaterial.transparent = true;
+    unitMaterial.blending = NormalBlending;
+    unitMaterial.alphaTest = material.alphaTest;
+    unitMaterial.positionNode = placement('unit');
+    unitMaterial.colorNode = material.colorNode;
+    unitMaterial.depthNode = cardDepth();
+    unitMaterial.userData.objectDepthCodeNode = material.userData.objectDepthCodeNode;
+    this.unitMesh = new InstancedQuad(unitMaterial, count, this.mesh.geometry);
+    this.unitMesh.name = 'ra2-sprites-ground-units';
+    this.unitMesh.renderOrder = NATIVE_UNIT_RENDER_ORDER;
+    this.mesh.add(this.unitMesh);
+
+    const translucentMaterial = new MeshBasicNodeMaterial();
+    translucentMaterial.name = 'ra2-sprites-translucent';
+    translucentMaterial.transparent = true;
+    translucentMaterial.blending = NormalBlending;
+    translucentMaterial.alphaTest = material.alphaTest;
+    translucentMaterial.positionNode = placement('translucent');
+    translucentMaterial.colorNode = colourNode();
+    translucentMaterial.depthNode = cardDepth();
+    translucentMaterial.depthWrite = false;
+    this.translucentMesh = new InstancedQuad(translucentMaterial, count, this.mesh.geometry);
+    this.translucentMesh.name = 'ra2-sprites-translucent';
+    this.translucentMesh.renderOrder = NATIVE_UNIT_RENDER_ORDER + 0.001;
+    this.mesh.add(this.translucentMesh);
 
     // Enhanced-look ground passes. In one draw call every ground decal wrote depth on the same plane (0.02 above the
     // ground), so coplanar decals z-fought: SHP shadows over contact shades, bibs and each other passed or failed by
@@ -800,11 +884,14 @@ export class SpriteLayer {
         ? mix(indexedCoverage, max(indexedCoverage, texture(hd.color, texel.div(atlasSize)).a), isInfantryShadow)
         : indexedCoverage;
       const level5: ShaderNode = floor(clamp(coverage, 0, 1).mul(4).add(0.5));
-      const pull: ShaderNode = select(
-        isReflection.greaterThan(0.5),
-        float(GROUND_PULL.reflection),
+      // A solid infantry core must pass an earlier half-colour shadow, even when its filtered coverage is only .22.
+      // Keep this ahead of ordinary shadow coverage ranks and behind both wet reflections and upright card feet.
+      const shadowPull: ShaderNode = mix(
         float(GROUND_PULL.shadow[0]).add(level5.mul((GROUND_PULL.shadow[1] - GROUND_PULL.shadow[0]) / 4)),
-      );
+        GROUND_PULL.infantryCore,
+        isInfantryShadow.mul(step(INFANTRY_SHADOW_RAMP.to, coverage)),
+      ).toVar('spriteInfantryShadowPull');
+      const pull: ShaderNode = select(isReflection.greaterThan(0.5), float(GROUND_PULL.reflection), shadowPull);
       return ground.sub(pull.div(cameraFar.sub(cameraNear)));
     })();
     const passMaterial = (pass: GroundPass): MeshBasicNodeMaterial => {
@@ -847,10 +934,17 @@ export class SpriteLayer {
       return passMesh;
     });
     material.addEventListener('dispose', () => {
+      readOnlyMaterial.dispose();
+      unitMaterial.dispose();
+      translucentMaterial.dispose();
       for (const passMesh of this.groundPasses) (passMesh.material as MeshBasicNodeMaterial).dispose();
     });
     this.mesh.addEventListener('dispose', () => {
+      this.readOnlyMesh.dispose();
+      this.unitMesh.dispose();
+      this.translucentMesh.dispose();
       capture?.setCaptured(this.mesh, false);
+      capture?.setCaptured(this.unitMesh, false);
       for (const passMesh of this.groundPasses) {
         look.groundPasses.delete(passMesh);
         passMesh.dispose();
@@ -873,6 +967,9 @@ export class SpriteLayer {
     this.instanceCount = instances.length;
     // Stable partition by rank: the former stable sort's exact order, without a copied/sorted array.
     let count = 0;
+    let readOnly = false;
+    let units = false;
+    let translucent = false;
     for (let rank = 0; rank < 4 && count < this.capacity; rank++) {
       const list = rank === 3 ? cards : instances;
       for (let j = 0; j < list.length && count < this.capacity; j++) {
@@ -905,11 +1002,46 @@ export class SpriteLayer {
         this.flags.setComponent(i, 4, s.deckHeight !== undefined ? -1 : (foundation?.[0] ?? 0));
         this.flags.setComponent(i, 5, s.deckHeight ?? foundation?.[1] ?? 0);
         this.flags.setComponent(i, 6, dx - dz);
-        this.flags.setComponent(i, 7, -dx - dz - (s.foundationRecess ?? 0));
+        this.flags.setComponent(i, 7, -dx - dz);
+        const native = !s.flat && !s.shadow && !s.kind ? s.nativeDepth : undefined;
+        const at = this.capture ? 9 : 8;
+        this.flags.setComponent(i, at, native?.mode === 'body' ? 1 : native?.mode === 'ground' ? 2 : native ? 3 : 0);
+        this.flags.setComponent(
+          i,
+          at + 1,
+          native?.mode === 'body' ? native.origin[0] : native?.mode === 'card' ? native.bottom : 0,
+        );
+        this.flags.setComponent(
+          i,
+          at + 2,
+          native?.mode === 'body' ? native.origin[1] : native?.mode === 'card' ? native.bonus : 0,
+        );
+        this.flags.setComponent(
+          i,
+          at + 3,
+          native?.mode === 'body' ? native.base : native?.mode === 'ground' ? native.bonus : 0,
+        );
+        this.flags.setComponent(i, at + 4, native?.offset?.[0] ?? 0);
+        this.flags.setComponent(i, at + 5, native?.offset?.[1] ?? 0);
+        this.flags.setComponent(i, at + 6, native?.anchorPush ?? 0);
+        const opacity = instanceCode(s) === 0 ? Math.max(0, Math.min(1, s.opacity ?? 1)) : 1;
+        const blending = opacity < 1;
+        const testOnly = !blending && s.depthWrite === false && instanceCode(s) === 0;
+        const unit = !testOnly && native?.mode === 'card' && !foundation;
+        this.flags.setComponent(i, at + 7, blending ? 3 + opacity : testOnly ? 1 : unit ? 2 : 0);
+        readOnly ||= testOnly;
+        units ||= !blending && unit;
+        translucent ||= blending;
       }
     }
     if (this.capture) this.uploaded.length = count;
     this.mesh.count = count;
+    this.readOnlyMesh.count = count;
+    this.readOnlyMesh.visible = readOnly;
+    this.unitMesh.count = count;
+    this.unitMesh.visible = units;
+    this.translucentMesh.count = count;
+    this.translucentMesh.visible = translucent;
     for (const passMesh of this.groundPasses) passMesh.count = count;
     this.anchor.flush();
     this.rect.flush();
@@ -920,14 +1052,21 @@ export class SpriteLayer {
   updateCaptureCodes(codeFor: (instance: SpriteInstance) => number): void {
     if (!this.capture) return;
     let captured = false;
+    let unitsCaptured = false;
     for (let i = 0; i < this.uploaded.length; i++) {
       const instance = this.uploaded[i]!;
-      const value = instanceCode(instance) === 0 ? codeFor(instance) : NOT_CAPTURED_CODE;
+      const value =
+        instanceCode(instance) === 0 && instance.depthWrite !== false && (instance.opacity ?? 1) >= 1
+          ? codeFor(instance)
+          : NOT_CAPTURED_CODE;
       this.flags.setComponent(i, 8, value);
       captured ||= value !== NOT_CAPTURED_CODE;
+      unitsCaptured ||=
+        value !== NOT_CAPTURED_CODE && instance.nativeDepth?.mode === 'card' && !instance.painter?.foundation;
     }
     this.flags.flush();
     this.capture.setCaptured(this.mesh, captured);
+    this.capture.setCaptured(this.unitMesh, unitsCaptured);
   }
 }
 

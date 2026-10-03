@@ -223,6 +223,50 @@ describe('HD bridge look parameters', () => {
 });
 
 describe('HD 桥状态机', () => {
+  it('forwards native body visibility and opacity, including same-frame changes and absent fields', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    const state = battle(3);
+    state.objects = [
+      {
+        id: 1,
+        uid: 11,
+        kind: 'vehicle',
+        type: 'HTNK',
+        owner: 0,
+        x: 100,
+        y: 200,
+        z: 0,
+        facingRaw: 0,
+        health: 1,
+        isSelected: true,
+        nativeHidden: true,
+        translucent: 0.5,
+      },
+    ];
+    harness.setState(state);
+    await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].objects[0]).toMatchObject({
+      nativeHidden: true,
+      translucent: 0.5,
+      isSelected: true,
+    });
+
+    state.objects[0]!.nativeHidden = false;
+    state.objects[0]!.translucent = 0;
+    harness.setState({ ...state });
+    await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].objects[0]).toMatchObject({ nativeHidden: false, translucent: 0 });
+
+    delete state.objects[0]!.nativeHidden;
+    delete state.objects[0]!.translucent;
+    harness.setState({ ...state });
+    await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('nativeHidden');
+    expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('translucent');
+    harness.stop();
+  });
+
   it('forwards engine image and H2 animation fields and keeps absent fields optional', async () => {
     const harness = setup();
     const view = await goLive(harness);

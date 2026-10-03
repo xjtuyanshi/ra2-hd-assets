@@ -1,11 +1,10 @@
-import { Fn, cameraFar, cameraNear, depth, max, min } from 'three/tsl';
-import type { NodeBuilder } from 'three/webgpu';
+import { Fn, cameraFar, cameraNear, clamp, depth, floor, max, min, round, textureLoad, vec2 } from 'three/tsl';
+import type { NodeBuilder, Texture } from 'three/webgpu';
 import { isShadowPass } from '../painterDepth';
 import type { ShaderNode } from '../tsl';
-import { PIXELS_PER_CELL_EDGE } from '../world';
+import { GROUND_DEPTH, VERTICAL_DEPTH } from './nativeDepth';
 
-const VERTICAL_DEPTH = Math.tan(Math.PI / 6) / PIXELS_PER_CELL_EDGE;
-const GROUND_DEPTH = Math.sqrt(3) / PIXELS_PER_CELL_EDGE;
+export { GROUND_DEPTH, VERTICAL_DEPTH } from './nativeDepth';
 const FOUNDATION_DEPTH = 1 / (Math.SQRT2 * Math.cos(Math.PI / 6));
 export const SPRITE_DECAL_LIFT = 0.02;
 export const EFFECT_DECAL_LIFT = 0.025;
@@ -54,15 +53,45 @@ export function cardDepthNode(
   placementPush: ShaderNode,
   bias: ShaderNode,
   flat: ShaderNode,
+  native?: {
+    /** (mode, template x/card bottom, template y/card bonus, body base/ground bonus). */
+    data: ShaderNode;
+    /** (owner-relative pixel x/y, owner-relative physical nearness, sprite draw-pass code). */
+    offset: ShaderNode;
+    template?: { texture: Texture; width: number; height: number };
+  },
 ): ShaderNode {
   const d = px.div(30).add(profile.z);
   const front = max(0, min(profile.x.mul(2).sub(d), profile.y.mul(2).add(d))).add(profile.w);
   const ground = py.mul(GROUND_DEPTH);
   const facade = profile.x.greaterThan(0).select(front.mul(FOUNDATION_DEPTH), 0).sub(py.mul(VERTICAL_DEPTH));
-  const push = profile.x
+  let push = profile.x
     .lessThan(0)
     .select(ground.add(profile.y.div(Math.sin(Math.PI / 6))), max(ground, facade))
     .add(CARD_CLEARANCE);
+  if (native) {
+    const n = native.data;
+    const ownerPixel = vec2(px, py).add(native.offset.xy);
+    const card = n.y
+      .add(n.z)
+      .add(floor(n.y.sub(ownerPixel.y).div(3)))
+      .mul(GROUND_DEPTH);
+    const plane = ownerPixel.y.add(n.w).mul(GROUND_DEPTH);
+    let nativePush = n.x.equal(2).select(plane, card);
+    if (native.template) {
+      const coords = clamp(
+        n.yz.add(floor(ownerPixel)),
+        vec2(0),
+        vec2(native.template.width - 1, native.template.height - 1),
+      );
+      // R8 UNORM carries the extractor's transformed bytes, not the original SHP palette indices.
+      const byte = round(textureLoad(native.template.texture, coords).r.mul(255));
+      const signed = byte.greaterThanEqual(128).select(byte.sub(256), byte);
+      nativePush = n.x.equal(1).select(n.w.add(signed).mul(GROUND_DEPTH), nativePush);
+    }
+    const enabled = native.template ? n.x.greaterThan(0) : n.x.greaterThan(1);
+    push = enabled.select(nativePush.sub(native.offset.z).add(CARD_CLEARANCE), push);
+  }
   const corrected = depth.sub(push.sub(placementPush).add(bias).div(cameraFar.sub(cameraNear)));
   return Fn(([], builder: NodeBuilder) => (isShadowPass(builder) ? depth : flat.select(depth, corrected)))();
 }

@@ -24,6 +24,7 @@
     "upscale": "tsx src/cli/upscale.mts",
     "sprites": "tsx src/cli/sprites.mts",
     "library": "tsx src/cli/library.mts",
+    "zshape": "tsx src/cli/zshape.mts",
     "lights": "tsx src/cli/lights.mts",
     "materials": "tsx src/cli/materials.mts",
     "ui": "tsx src/cli/ui.mts",

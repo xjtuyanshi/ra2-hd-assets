@@ -227,6 +227,30 @@ describe('YR native completed-building art', () => {
     expect(m.read()?.buildingFrame).toBe(3);
   });
 
+  it('keeps the native body stage and damage bank independent of factory door transition state', () => {
+    const m = body();
+    m.i32(m.building + O.currentMission, 16);
+    m.i32(m.building + O.queuedMission, 5);
+    // Opening, open hold, closing and already closed can all occur before Unload gives way to Guard.
+    // None may advance, reverse or reset the independently maintained body stage at +0xF8.
+    for (const [moving, targetOpen] of [
+      [1, 1],
+      [0, 1],
+      [1, 0],
+      [0, 0],
+    ] as const) {
+      m.u8(m.building + O.doorMoving, moving);
+      m.u8(m.building + O.doorTargetOpen, targetOpen);
+      for (const stage of [0, 1, 3]) {
+        m.i32(m.building + O.stage, stage);
+        m.i32(m.building + O.health, 501);
+        expect(m.read()).toEqual({ buildState: 'done', buildingFrame: stage, buildingDamaged: false });
+        m.i32(m.building + O.health, 500);
+        expect(m.read()).toEqual({ buildState: 'done', buildingFrame: stage + 1, buildingDamaged: true });
+      }
+    }
+  });
+
   it('omits unvalidated body state without losing known construction completion', () => {
     const m = body();
     m.data.setFloat64(m.rules + R.red, NaN, true);
@@ -273,6 +297,26 @@ describe('YR building dock/delivery policy', () => {
     expect(read(false)).toHaveProperty('unloading', 'door');
     m.i32(m.building + O.currentMission, 32);
     expect(read(false)).not.toHaveProperty('unloading');
+  });
+  it('retains factory replacement art through opening, hold, closing and closed until effective Unload ends', () => {
+    const m = makeMemory();
+    m.i32(m.building + O.currentMission, 16);
+    m.i32(m.building + O.queuedMission, 5);
+    for (const [moving, targetOpen] of [
+      [1, 1],
+      [0, 1],
+      [1, 0],
+      [0, 0],
+    ] as const) {
+      m.u8(m.building + O.doorMoving, moving);
+      m.u8(m.building + O.doorTargetOpen, targetOpen);
+      expect(readYrBuildingDockState(m.memory, m.building, false)).toEqual({ dock: false, unloading: 'door' });
+    }
+    m.i32(m.building + O.currentMission, 5);
+    expect(readYrBuildingDockState(m.memory, m.building, false)).toEqual({ dock: false });
+    m.i32(m.building + O.currentMission, -1);
+    m.i32(m.building + O.queuedMission, 16);
+    expect(readYrBuildingDockState(m.memory, m.building, false)).toEqual({ dock: false, unloading: 'door' });
   });
   it('omits implausible building/type pointers and failed optional fields', () => {
     const m = makeMemory();

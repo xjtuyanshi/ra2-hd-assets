@@ -42,10 +42,14 @@ initializing a device. It checks the eight-buffer limit, the sixteen-attribute l
 byte length at allocated capacities (including zero visible instances). The 64 KiB matrix boundary is 1024
 instances; r186's fallback uses four interleaved columns sharing **one** vertex buffer. The suite also tests
 a smaller uniform limit so it cannot silently assume the matrix always fits. Sprite and effect card batches
-use plain `Mesh.count` with no instance matrix. Sprite main/under/over passes share geometry and instance buffers,
-with six vertex buffers and eight attributes at capacities 1024, 1025, 4096 (live sprites) and 131072 (grown pages).
+use plain `Mesh.count` with no instance matrix. Sprite main, under/over, optional native ground-unit and read-only
+DoorAnim child passes share geometry and instance buffers. All use six vertex buffers; main/unit paths use ten
+attributes, or eleven with fireball capture, and ground/read-only children use at most ten, at capacities 1024,
+1025, 4096 (live sprites) and 131072 (grown pages). Native flags use sixteen floats per instance, or seventeen
+with the existing capture code at offset eight; no extra vertex buffer is allocated for the native depth fields.
 The suite builds both indexed and HD colour paths with windows and the enhanced look's normals, glass, AO, contact
-shades and wet reflections, and verifies ground-pass cleanup. Grown cell, overlay and smudge pages keep the same
+shades and wet reflections, plus signed R8 template loads, test-only door/ground-unit color ordering, shared capture
+codes and child-pass cleanup. Grown cell, overlay and smudge pages keep the same
 binding count. Other fixtures cover all sixteen procedural effect pools (including the seven enhanced explosion
 pools), beams, emitters, light fields, rain/splashes, data-sized night poles, terrain/cliffs, classic and enhanced
 water with and without scene reflections, voxel units/projectiles/debris/shadows, sandbox objects/windows and custom

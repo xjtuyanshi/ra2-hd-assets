@@ -1,6 +1,6 @@
 /** Type library: sequences, colour scheme order, paged atlases, art-name resolution and type records (synthetic data). */
 import { afterEach, describe, expect, it } from 'vitest';
-import { cpSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Palette, ShpFile, parseIni, type IniFile } from 'ra2-formats';
@@ -17,7 +17,9 @@ import {
   collectSmudgeLibrary,
   collectTypeLibrary,
   readLibrary,
+  writeTypeLibrary,
 } from '../src/node/library.ts';
+import type { GameInstall } from '../src/node/install.ts';
 import type { TypeLibrary } from '../src/library.ts';
 
 describe('infantry sequences', () => {
@@ -231,7 +233,10 @@ const bodyAndShadow = (n: number, w = 4, h = 3) =>
     ],
   );
 
-function fakeInstall(files: Record<string, Uint8Array>, inis: Record<string, string>): InstallView {
+function fakeInstall(
+  files: Record<string, Uint8Array>,
+  inis: Record<string, string>,
+): InstallView & Pick<GameInstall, 'read'> {
   const parsed = new Map<string, IniFile>(Object.entries(inis).map(([k, v]) => [k.toLowerCase(), parseIni(v)]));
   const pal = new Uint8Array(768);
   for (let i = 0; i < 256; i++) pal.set([i >> 2, i >> 2, i >> 2], i * 3);
@@ -239,6 +244,7 @@ function fakeInstall(files: Record<string, Uint8Array>, inis: Record<string, str
   const have = (n: string): boolean => n.toLowerCase() in files || n.toLowerCase().endsWith('.pal');
   return {
     has: have,
+    read: (n: string) => files[n.toLowerCase()],
     ini: (n: string) => {
       const ini = parsed.get(n.toLowerCase());
       if (!ini) throw new Error(`${n} missing`);
@@ -248,7 +254,7 @@ function fakeInstall(files: Record<string, Uint8Array>, inis: Record<string, str
     palette: () => Palette.parse(pal),
     vxl: () => undefined,
     hva: () => undefined,
-  } as unknown as InstallView;
+  } as unknown as InstallView & Pick<GameInstall, 'read'>;
 }
 
 const RULES = `
@@ -341,6 +347,10 @@ describe('art name resolution', () => {
 });
 
 describe('type library records', () => {
+  const temp: string[] = [];
+  afterEach(() => {
+    for (const dir of temp.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
   const files = {
     'gtpowr.shp': bodyAndShadow(3),
     'ggpowr_a.shp': bodyAndShadow(3, 2, 2),
@@ -354,6 +364,87 @@ describe('type library records', () => {
     'dron.shp': bodyAndShadow(48),
   };
   const lib = collectTypeLibrary(fakeInstall(files, { 'rulesmd.ini': RULES, 'artmd.ini': ART }), 'temperate');
+
+  it('records native building depth, rules flags and anim YDrawOffset without changing layer placement', () => {
+    const depthLib = collectTypeLibrary(
+      fakeInstall(files, {
+        'rulesmd.ini': `${RULES}
+[GAPOWR]
+Refinery=yes
+Harvester=yes
+[DRON]
+Harvester=yes
+Refinery=yes
+[E1]
+Harvester=yes
+Refinery=yes
+`,
+        'artmd.ini': `${ART}
+[GAPOWR]
+ZShapePointMove=30,15
+NormalZAdjust=-8
+ZAdjust=99
+ActiveAnimX=3
+ActiveAnimY=4
+[GAPOWR_A]
+YDrawOffset=-6
+[GAYARD]
+ZShapePointMove=0,0
+NormalZAdjust=0
+ZAdjust=17
+`,
+      }),
+      'temperate',
+    );
+    expect(depthLib.types['GAPOWR']!.building!.zShape).toEqual({ pointMove: [30, 15], normalZAdjust: -8 });
+    expect(depthLib.types['GAPOWR']!.building!.layers[0]).toMatchObject({ offset: [3, 4], yDrawOffset: -6 });
+    expect(depthLib.types['GAPOWR']).toMatchObject({ refinery: true, drawOffset: [0, -15] });
+    expect(depthLib.types['GAPOWR']).not.toHaveProperty('harvester');
+    expect(depthLib.types['DRON']).toHaveProperty('harvester', true);
+    expect(depthLib.types['DRON']).not.toHaveProperty('refinery');
+    expect(depthLib.types['E1']).not.toHaveProperty('harvester');
+    expect(depthLib.types['E1']).not.toHaveProperty('refinery');
+    expect(depthLib.types['GAYARD']!.building).not.toHaveProperty('zShape');
+    expect(lib.types['GAPOWR']!.building!.layers[0]).not.toHaveProperty('yDrawOffset');
+  });
+
+  it('writes the transformed frame-0 depth template and descriptor with a full library', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ra2-depth-library-'));
+    temp.push(root);
+    const shape = makeShp([3, 2], [{ x: 0, y: 0, w: 3, h: 2, fill: 0 }]);
+    shape.set([0, 32, 65, 192, 193, 222], 32);
+    const inst = fakeInstall({ ...files, 'buildngz.sha': shape }, { 'rulesmd.ini': RULES, 'artmd.ini': ART });
+    const result = writeTypeLibrary(
+      inst,
+      'temperate',
+      collectTypeLibrary(inst, 'temperate'),
+      root,
+      new Map(),
+      () => {},
+      Date.now(),
+    );
+    const saved = readLibrary(join(root, 'temperate'));
+    expect(saved.depthTemplate).toEqual({ file: 'buildngz.bin', width: 3, height: 2 });
+    expect(saved).toEqual(result.library);
+    expect([...readFileSync(join(root, 'temperate', 'buildngz.bin'))]).toEqual([0, 223, 0, 127, 128, 157]);
+    expect([...shape.subarray(32)]).toEqual([0, 32, 65, 192, 193, 222]);
+  });
+
+  it.each([undefined, new Uint8Array(0), new Uint8Array([1, 2, 3])])(
+    'rejects missing or corrupt depth templates before writing a full library (%s)',
+    (shape) => {
+      const root = mkdtempSync(join(tmpdir(), 'ra2-depth-library-failure-'));
+      temp.push(root);
+      const inst = fakeInstall(
+        { ...files, ...(shape ? { 'buildngz.sha': shape } : {}) },
+        { 'rulesmd.ini': RULES, 'artmd.ini': ART },
+      );
+      expect(() => writeTypeLibrary(inst, 'temperate', lib, root, new Map(), () => {}, Date.now())).toThrow(
+        /BUILDNGZ/i,
+      );
+      expect(existsSync(join(root, 'temperate'))).toBe(false);
+    },
+  );
 
   it('records buildings with all frames, layers, bib, buildup and foundation', () => {
     const t = lib.types['GAPOWR']!;
@@ -502,6 +593,7 @@ IsARock=yes
     const original = {
       version: 1,
       theater: 'temperate',
+      depthTemplate: { file: 'buildngz.bin', width: 3, height: 2 },
       palettes: { unit: 'palettes/unit.png' },
       paletteSources: { unit: 'unittem.pal' },
       spriteAtlases: [{ file: 'sprites-0.png', width: 8, height: 8 }],
@@ -525,6 +617,12 @@ IsARock=yes
           drawOffset: [0, -15],
           lighting: 'ambient',
           remap: true,
+          refinery: true,
+          building: {
+            bodyFrames: 1,
+            zShape: { pointMove: [30, 15], normalZAdjust: -3 },
+            layers: [{ key: 'IdleAnim', sprite: 'building:KEEP', anim: {}, yDrawOffset: -4 }],
+          },
         },
       },
       colorSchemes: [],
@@ -535,7 +633,13 @@ IsARock=yes
       customMetadata: { preserve: true },
     };
     writeFileSync(join(source, 'library.json'), JSON.stringify(original));
-    for (const file of ['sprites-0.png', 'sprites-0@2x.png', 'sprites-0@2x-remap.png', 'palettes/unit.png'])
+    for (const file of [
+      'buildngz.bin',
+      'sprites-0.png',
+      'sprites-0@2x.png',
+      'sprites-0@2x-remap.png',
+      'palettes/unit.png',
+    ])
       writeFileSync(join(source, file), `unchanged fixture ${file}`);
     const out = join(root, 'copy');
     cpSync(join(root, 'source'), out, { recursive: true });
@@ -636,7 +740,7 @@ IsARock=yes
     const { original, out, source, dir } = makeCopy();
     const result = appendOverlayLibrary(inst, 'temperate', out);
     const library = readLibrary(dir);
-    for (const key of ['types', 'voxels', 'colorSchemes', 'colorSchemesByName', 'extractor'] as const)
+    for (const key of ['depthTemplate', 'types', 'voxels', 'colorSchemes', 'colorSchemesByName', 'extractor'] as const)
       expect(library[key]).toEqual(original[key]);
     expect((library as TypeLibrary & { customMetadata: unknown }).customMetadata).toEqual(original.customMetadata);
     expect(library.sprites['building:KEEP']).toEqual(original.sprites['building:KEEP']);
@@ -644,7 +748,13 @@ IsARock=yes
     expect(library.spriteAtlasesHd).toEqual([...original.spriteAtlasesHd, null]);
     expect(library.spriteAtlases).toHaveLength(2);
     expect(library.spriteAtlases[1]!.file).toBe('sprites-overlays-0.png');
-    for (const file of ['sprites-0.png', 'sprites-0@2x.png', 'sprites-0@2x-remap.png', 'palettes/unit.png'])
+    for (const file of [
+      'buildngz.bin',
+      'sprites-0.png',
+      'sprites-0@2x.png',
+      'sprites-0@2x-remap.png',
+      'palettes/unit.png',
+    ])
       expect(readFileSync(join(dir, file))).toEqual(readFileSync(join(source, file)));
     expect(readFileSync(join(source, 'library.json'), 'utf8')).toBe(JSON.stringify(original));
     for (const overlay of Object.values(library.overlays!)) {
@@ -724,6 +834,7 @@ IsARock=yes
     const original = appendOverlayLibrary(inst, 'temperate', out).library;
     const unchanged = [
       'library.json',
+      'buildngz.bin',
       'sprites-0.png',
       'sprites-0@2x.png',
       'sprites-0@2x-remap.png',
@@ -736,6 +847,7 @@ IsARock=yes
     const library = appendSmudgeLibrary(smudgeInst, 'temperate', out).library;
     expect(readLibrary(dir)).toEqual(library);
     for (const key of [
+      'depthTemplate',
       'types',
       'voxels',
       'colorSchemes',

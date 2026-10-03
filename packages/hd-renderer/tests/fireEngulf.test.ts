@@ -19,7 +19,8 @@ import {
 import { effectDisplayBounds, effectSphereRadius } from '../src/live/effectSprites';
 import { SpriteLayer, type SpriteInstance } from '../src/ra2/sprites';
 import { painterObject } from '../src/ra2/painterOrder';
-import { LiveView } from '../src/live/liveView';
+import { LiveView, type LiveObject } from '../src/live/liveView';
+import { BuildingVisualHistory } from '../src/live/buildingVisualHistory';
 import { VoxelUnits } from '../src/live/voxelUnits';
 import { instantiateVoxel, VoxelUnit } from '../src/ra2/voxels';
 import { createVoxelMaterial } from '../src/ra2/voxels';
@@ -205,7 +206,7 @@ function source(): Ra2Cache {
   } as unknown as Ra2Cache;
 }
 
-it('captures live SHP owners across pages, shares building turret code, and clears stale codes when fire ends', () => {
+it.each([false, true])('captures SHP pages and turrets with retained death frame: %s', (retained) => {
   const cache = source();
   const depth = new TerrainDepth(FRONT_DISTANCE);
   const sprites = new SpriteLayer(cache, [], 8, undefined, null, null, null, depth);
@@ -270,6 +271,7 @@ it('captures live SHP owners across pages, shares building turret code, and clea
     engulfFires: [] as EngulfFire[],
     engulfBounds: { x: 0, y: 0, width: 0, height: 0 },
     effectInstances: [blast()],
+    buildingVisualHistory: new BuildingVisualHistory(),
     visuals,
     spriteBatch: new Map<string, SpriteInstance[]>([
       ['map', [drone, building, aircraft]],
@@ -291,6 +293,24 @@ it('captures live SHP owners across pages, shares building turret code, and clea
   };
   const update = (LiveView.prototype as unknown as { updateFireEngulf(this: typeof view): void }).updateFireEngulf;
   try {
+    if (retained) {
+      const last: LiveObject = {
+        id: 100,
+        uid: 2,
+        kind: 'building',
+        type: 'TEST',
+        owner: 0,
+        health: 0,
+        isSelected: false,
+        x: anchor.x * 256,
+        y: anchor.z * 256,
+        z: (anchor.y / LEVEL_HEIGHT) * 104,
+        facingRaw: 0,
+      };
+      view.buildingVisualHistory.update({ frame: 10, objects: [last], houses: [], view: null });
+      view.buildingVisualHistory.update({ frame: 11, objects: [], houses: [], view: null });
+      view.current.byUid.delete(2);
+    }
     depth.reference.value.copy(anchor);
     depth.horizontal.value.set(horizontal.x, horizontal.z);
     update.call(view);
@@ -321,6 +341,15 @@ it('captures live SHP owners across pages, shares building turret code, and clea
     drone.anchor.copy(anchor).addScaledVector(horizontal, 2);
     update.call(view);
     expect(codeOf(sprites, drone)).toBeCloseTo(code(drone.anchor));
+    if (retained) {
+      // Once the compensating frame expires, stale cards/turrets cannot keep an object-capture code.
+      view.buildingVisualHistory.update({ frame: 12, objects: [], houses: [], view: null });
+      update.call(view);
+      expect(codeOf(sprites, building)).toBe(NOT_CAPTURED_CODE);
+      expect(codeOf(page, annex)).toBe(NOT_CAPTURED_CODE);
+      expect(setCode).toHaveBeenLastCalledWith(turret, NOT_CAPTURED_CODE);
+      expect(codeOf(sprites, drone)).toBeCloseTo(code(drone.anchor));
+    }
     view.effectInstances.length = 0;
     update.call(view);
     expect(codeOf(sprites, drone)).toBe(NOT_CAPTURED_CODE);

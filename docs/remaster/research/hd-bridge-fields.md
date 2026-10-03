@@ -8,6 +8,18 @@ types to fill are `LiveSnapshot`, `LiveHouse`, `LiveObject`, `LiveCells` (`live/
 H2 building and infantry state and H3 runtime cells (overlays and smudges, published as independent live
 grids) are implemented end to end. H1 is partially implemented; remaining fields below are proposals.
 
+Native object draw eligibility is also implemented end to end through optional `LiveObject.nativeHidden` and
+`LiveObject.translucent`. YR publishes `nativeHidden: true` for the validated tether/building-Unload gate and
+`translucent: 0.5` for either native chrono byte; inactive or invalid observations leave these fields absent.
+The first flag hides the entire HD visual; the second blends only body parts, retaining shadows. The reader's
+same-frame change key includes tether, chrono, radio-link/capacity and door-state fields, in addition to missions.
+The bridge preserves defined values without translating them. Offsets, pointer validation requirements and
+uncertainties are in [Native draw eligibility](painter-order.md#native-draw-eligibility-and-body-translucency).
+Factory `unloading` persists through released contacts and logical closing while effective mission remains 16;
+`buildingFrame` retains its actual stage. The one-tick destroyed-building visual cache is a LiveView presentation
+heuristic, not a new reader field or a proved native visibility rule; see
+[Last destroyed-building visual](painter-order.md#last-destroyed-building-visual).
+
 ## H1: pass through what the readers already read
 
 Everything below already exists in `YrEffects` (`src/games/yr/effectsReader.ts`) or `YrHouseState`

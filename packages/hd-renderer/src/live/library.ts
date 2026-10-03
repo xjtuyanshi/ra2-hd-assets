@@ -40,6 +40,7 @@ export class LiveLibrary {
   private readonly windowPages = new Map<number, Texture | 'loading' | 'failed'>();
   private readonly materialPages = new Map<number, SpriteMaterialAtlas | 'loading' | 'failed'>();
   private materialsDisposed = false;
+  private depthTemplateDisposed = false;
   /** Uploads a freshly decoded page straight to the GPU (the renderer's initTexture); see loadIndexedPage. */
   uploadPage: ((texture: Texture) => void) | null = null;
 
@@ -49,6 +50,8 @@ export class LiveLibrary {
     /** Lit-window masks per atlas page (pnpm hd:lights -- --library <theater>), when extracted. */
     readonly windows: WindowsIndex | null,
     private readonly materials: LibrarySpriteMaterialsSidecar | null,
+    private readonly cache: Ra2Cache,
+    private readonly depthTemplate: Ra2Cache['depthTemplate'],
   ) {}
 
   /** Null when the theater has no extracted library (pnpm hd:library), in which case the map cache is used alone. */
@@ -87,7 +90,13 @@ export class LiveLibrary {
         delete materials!.pages[index];
       }
     }
-    return new LiveLibrary(root, library, windows, materials);
+    // Publish before LiveView constructs any sprite materials: every atlas page uses this same texture.
+    // An absent descriptor deliberately retains the analytic path; a declared but invalid payload is an error.
+    const depthTemplate =
+      library.depthTemplate === undefined ? undefined : await loadDepthTemplate(root, library.depthTemplate);
+    if (depthTemplate) cache.depthTemplate = depthTemplate;
+    else delete cache.depthTemplate;
+    return new LiveLibrary(root, library, windows, materials, cache, depthTemplate);
   }
 
   /** Whether a compatible material page exists and has not failed; this never requests the PNG. */
@@ -122,6 +131,15 @@ export class LiveLibrary {
     this.materialsDisposed = true;
     for (const atlas of this.materialPages.values()) if (typeof atlas !== 'string') atlas.texture.dispose();
     this.materialPages.clear();
+  }
+
+  /** Shared by sprite materials; only the owning live view releases it, never an individual atlas page. */
+  disposeDepthTemplate(): void {
+    if (this.depthTemplateDisposed) return;
+    this.depthTemplateDisposed = true;
+    this.depthTemplate?.texture.dispose();
+    // A later library may already own the cache binding when the old view finishes disposing.
+    if (this.cache.depthTemplate === this.depthTemplate) delete this.cache.depthTemplate;
   }
 
   /** Whether the page has a lit-window mask (loaded or loading). */
@@ -259,6 +277,38 @@ export class LiveLibrary {
   voxelFailed(id: string): boolean {
     return !this.library.voxels[id] || this.voxels.get(id) === 'failed';
   }
+}
+
+/** The extractor has already applied BUILDNGZ's signed-byte transform; preserve every byte, including zero. */
+async function loadDepthTemplate(
+  root: string,
+  ref: NonNullable<TypeLibrary['depthTemplate']>,
+): Promise<NonNullable<Ra2Cache['depthTemplate']>> {
+  if (
+    !ref ||
+    typeof ref.file !== 'string' ||
+    !ref.file.length ||
+    !Number.isSafeInteger(ref.width) ||
+    !Number.isSafeInteger(ref.height) ||
+    ref.width <= 0 ||
+    ref.height <= 0 ||
+    !Number.isSafeInteger(ref.width * ref.height)
+  ) {
+    throw new Error(`${root}/library.json: invalid depthTemplate descriptor`);
+  }
+  const url = `${root}/${ref.file}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const expected = ref.width * ref.height;
+  if (bytes.byteLength !== expected) {
+    throw new Error(`${url}: depthTemplate has ${bytes.byteLength} bytes, expected ${expected}`);
+  }
+  const texture = new DataTexture(bytes, ref.width, ref.height, RedFormat, UnsignedByteType);
+  indexedSettings(texture);
+  texture.unpackAlignment = 1;
+  texture.needsUpdate = true;
+  return { texture, width: ref.width, height: ref.height };
 }
 
 /**

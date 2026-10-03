@@ -10,9 +10,11 @@ import {
   OrthographicCamera,
   PlaneGeometry,
   QuadMesh,
+  RedFormat,
   REVISION,
   Scene,
   Vector3,
+  UnsignedByteType,
   WebGPURenderer,
 } from 'three/webgpu';
 import { float, texture as textureNode, uv, vec4 } from 'three/tsl';
@@ -157,6 +159,70 @@ function dispose(mesh: Mesh): void {
 }
 
 describe('r186 vertex and uniform binding budget', () => {
+  it('builds solid infantry contact alpha in indexed and HD main/ground passes before enhanced look controls', () => {
+    const source = cache();
+    const look = spriteLookFor(source.nodes);
+    look.enabled.name = 'testEnhancedLook';
+    for (const hd of [null, { color: texture(), remap: texture() }]) {
+      const layer = new SpriteLayer(source, [], 1, undefined, hd);
+      try {
+        for (const mesh of [layer.mesh, ...layer.groundPasses]) {
+          const { fragmentShader } = assertLimits(mesh);
+          const alpha = fragmentShader.indexOf('spriteInfantryShadowAlpha =');
+          const enhanced = fragmentShader.indexOf('if ( ( object.testEnhancedLook > 0.5 ) )');
+          expect(alpha, mesh.name).toBeGreaterThan(-1);
+          expect(fragmentShader).toMatch(
+            /spriteInfantryShadowAlpha = \( smoothstep\( 0\.02, 0\.22, [^\n]+\) \* 1\.0 \)/,
+          );
+          expect(enhanced, mesh.name).toBeGreaterThan(alpha);
+          if (mesh === layer.groundPasses[1]) {
+            expect(fragmentShader).toMatch(/spriteInfantryShadowPull = mix\([^\n]+0\.028,[^\n]+step\( 0\.22,/);
+          }
+        }
+      } finally {
+        dispose(layer.mesh);
+        hd?.color.dispose();
+        hd?.remap.dispose();
+      }
+    }
+  });
+
+  it('builds native signed integer template loads and a test-only door pass without adding vertex buffers', () => {
+    const source = cache();
+    source.depthTemplate = {
+      texture: new DataTexture(new Uint8Array(396 * 477), 396, 477, RedFormat, UnsignedByteType),
+      width: 396,
+      height: 477,
+    };
+    const layer = new SpriteLayer(source, [
+      {
+        anchor: new Vector3(),
+        frame: { rect: [0, 0, 16, 24], offset: [-8, -12] },
+        palette: '',
+        push: 0,
+        shadow: false,
+        nativeDepth: { mode: 'ground', bonus: 6 },
+        depthWrite: false,
+      },
+    ]);
+    try {
+      const main = assertLimits(layer.mesh);
+      const readOnly = assertLimits(layer.readOnlyMesh);
+      expect(main.buffers.length).toBe(6);
+      expect(readOnly.buffers.length).toBe(6);
+      expect(main.attributes.length).toBe(10);
+      expect(main.fragmentShader).toContain('textureLoad(');
+      expect(main.fragmentShader).toContain('>= 128.0');
+      expect(main.fragmentShader).toContain('- 256.0');
+      expect(main.fragmentShader).toContain('floor(');
+      expect(layer.readOnlyMesh.material.depthWrite).toBe(false);
+      expect(layer.readOnlyMesh.material.depthTest).toBe(true);
+    } finally {
+      dispose(layer.mesh);
+      source.depthTemplate.texture.dispose();
+    }
+  });
+
   it('builds crystal sparkle in every material pass, including under, with no sparkle nodes on default pages', () => {
     const source = cache();
     for (const materials of [null, { texture: texture() }]) {
@@ -222,8 +288,17 @@ describe('r186 vertex and uniform binding budget', () => {
 
   // Live objects allocate 4096. Cells grow with mapCells * 4; overlay/smudge pages grow to a power of two and have
   // no finite hard cap. Test both uniform thresholds and a large grown page: these matrix-free layouts are invariant.
-  it.each([1024, 1025, 4096, 131072])('bounds every sprite-look pass at capacity %i', (capacity) => {
+  it.each(
+    [1024, 1025, 4096, 131072].flatMap((capacity) =>
+      (['faithful', 'indexed', 'hd'] as const).map((variant) => [capacity, variant] as const),
+    ),
+  )('bounds every sprite-look pass at capacity %i with %s art', (capacity, variant) => {
     const source = cache();
+    source.depthTemplate = {
+      texture: new DataTexture(new Uint8Array(396 * 477), 396, 477, RedFormat, UnsignedByteType),
+      width: 396,
+      height: 477,
+    };
     const look = spriteLookFor(source.nodes);
     for (const key of [
       'enabled',
@@ -240,7 +315,7 @@ describe('r186 vertex and uniform binding budget', () => {
     const terrainDepth = new TerrainDepth(1.5);
     // Both palette and HD colour paths include windows, normals, glass/AO, contact shade and wet reflections.
     // Also compile the faithful variant, which has no material atlas.
-    for (const variant of ['faithful', 'indexed', 'hd'] as const) {
+    {
       look.enabled.value = variant === 'faithful' ? 0 : 1;
       const layer = new SpriteLayer(
         source,
@@ -255,17 +330,33 @@ describe('r186 vertex and uniform binding budget', () => {
       const main = assertLimits(layer.mesh);
       const captured = assertLimits(layer.mesh, MAX_UNIFORM_BYTES, terrainDepth);
       expect(captured.buffers.length).toBe(6);
-      expect(captured.attributes.length).toBe(9);
+      expect(captured.attributes.length).toBe(11);
       expect(captured.fragmentShader).toContain('@location( 0 ) m0 : vec4<f32>');
       expect(captured.fragmentShader).toContain('objectDepthInstanceCode');
       const shared = new Set(main.attributes.map(attributeBuffer));
       expect(layer.groundPasses).toHaveLength(2);
-      for (const mesh of [layer.mesh, ...layer.groundPasses]) {
+      for (const mesh of [
+        layer.mesh,
+        ...layer.groundPasses,
+        layer.readOnlyMesh,
+        layer.unitMesh,
+        layer.translucentMesh,
+      ]) {
         const result = mesh === layer.mesh ? main : assertLimits(mesh);
         expect(result.buffers.length).toBe(6);
-        expect(result.attributes.length).toBe(mesh === layer.mesh ? 9 : 8);
-        expect(result.fragmentShader.includes('objectDepthCaptureEnabled')).toBe(mesh === layer.mesh);
-        if (mesh === layer.mesh) {
+        expect(result.attributes.length).toBe(
+          mesh === layer.mesh || mesh === layer.unitMesh ? 11 : mesh === layer.groundPasses[1] ? 9 : 10,
+        );
+        expect(result.fragmentShader.includes('objectDepthCaptureEnabled')).toBe(
+          mesh === layer.mesh || mesh === layer.unitMesh,
+        );
+        if (mesh === layer.translucentMesh) {
+          expect(result.fragmentShader).toContain('spriteBodyOpacity');
+          expect(mesh.material.depthWrite).toBe(false);
+          expect(mesh.renderOrder).toBeGreaterThan(layer.readOnlyMesh.renderOrder);
+          expect(mesh.renderOrder).toBeGreaterThan(layer.unitMesh.renderOrder);
+        }
+        if (mesh === layer.mesh || mesh === layer.unitMesh) {
           expect(result.fragmentShader).toMatch(/@interpolate\( flat, either \) objectDepthInstanceCode/);
           expect(result.fragmentShader).toMatch(/objectDepthCaptureEnabled > 0\.0/);
           expect(result.fragmentShader).toContain('-65504.0');
@@ -286,6 +377,7 @@ describe('r186 vertex and uniform binding budget', () => {
     }
     terrainDepth.dispose();
     source.nodes!.dispose();
+    source.depthTemplate.texture.dispose();
   });
 
   it.each(['ground', 'air', 'top'] as const)(

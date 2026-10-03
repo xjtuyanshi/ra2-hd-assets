@@ -253,7 +253,7 @@ export const BUILDING_LIGHTS: Record<string, BuildingLightSpec[]> = {
 
 type Building = Pick<
   LiveObject,
-  'type' | 'kind' | 'x' | 'y' | 'z' | 'health' | 'buildState' | 'buildingDamaged' | 'activeAnim'
+  'type' | 'kind' | 'x' | 'y' | 'z' | 'health' | 'buildState' | 'buildingDamaged' | 'activeAnim' | 'nativeHidden'
 > &
   Partial<Pick<LiveObject, 'uid' | 'id'>>;
 
@@ -328,6 +328,7 @@ export function buildingLightSources(
   for (const building of buildings) {
     if (
       building.kind !== 'building' ||
+      building.nativeHidden ||
       !BUILDING_LIGHTS[building.type] ||
       building.health <= 0 ||
       !(gate ? gate.allowed(building, false) : building.buildState === 'done') ||

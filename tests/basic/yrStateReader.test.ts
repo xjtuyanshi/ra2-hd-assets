@@ -21,7 +21,7 @@ import {
   worldVectorToFacing,
 } from '../../src/games/yr/stateReader';
 import { YR_STARTUP_PAGE_HASH } from '../../src/games/yr/startupPage';
-import { YR_BUILDING_RENDER_OFFSETS as B } from '../../src/games/yr/buildingRenderState';
+import { YR_BUILDING_RENDER_OFFSETS as B, YR_BUILDING_RULES as R } from '../../src/games/yr/buildingRenderState';
 import { YR_INFANTRY_RENDER_OFFSETS as I } from '../../src/games/yr/infantryRenderState';
 
 /** Synthetic 16 MiB guest memory: enough for every YR 1.001 global and a small heap above 0xb00000. */
@@ -223,6 +223,129 @@ describe('YR 1.001 state reader', () => {
     return items;
   };
 
+  it.each([
+    [16, -1],
+    [-1, 16],
+    [5, 16],
+  ])(
+    'hides a tethered vehicle for effective or queued Unload (%s/%s) in all canonical door states',
+    (current, queued) => {
+      const { m, tank, yard } = battlefield();
+      radio(m, tank, yard);
+      m.u8(tank + O.tethered, 1);
+      m.i32(yard + B.currentMission, current);
+      m.i32(yard + B.queuedMission, queued);
+      const read = () => readYrState(createByteViewAccessor(m.bytes)).objects.find((object) => object.id === tank);
+      for (const [moving, targetOpen] of [
+        [0, 0],
+        [0, 1],
+        [1, 0],
+        [1, 1],
+      ]) {
+        m.u8(yard + B.doorMoving, moving!);
+        m.u8(yard + B.doorTargetOpen, targetOpen!);
+        expect(read()).toMatchObject({ nativeHidden: true, contactUid: 15 });
+      }
+      m.u8(tank + O.tethered, 0);
+      expect(read()).not.toHaveProperty('nativeHidden');
+      m.u8(tank + O.tethered, 255); // The native tether predicate accepts any nonzero byte.
+      expect(read()).toHaveProperty('nativeHidden', true);
+      m.i32(yard + B.currentMission, 5);
+      m.i32(yard + B.queuedMission, -1);
+      expect(read()).not.toHaveProperty('nativeHidden');
+    },
+  );
+
+  it('never infers a tether hide from invalid links, a nonbuilding contact or noncanonical door booleans', () => {
+    const { m, tank, soldier, yard } = battlefield();
+    const items = radio(m, tank, yard);
+    m.u8(tank + O.tethered, 1);
+    m.i32(yard + B.currentMission, 16);
+    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects.find((object) => object.id === tank);
+    expect(read()).toHaveProperty('nativeHidden', true);
+    for (const offset of [B.doorMoving, B.doorTargetOpen]) {
+      for (const flag of [2, 255]) {
+        m.u8(yard + offset, flag);
+        expect(read()).not.toHaveProperty('nativeHidden');
+      }
+      m.u8(yard + offset, 0);
+    }
+    for (const contact of [0, yard + 1, m.bytes.length - 4, m.alloc(0x700), soldier]) {
+      m.u32(items, contact);
+      expect(read()).not.toHaveProperty('nativeHidden');
+    }
+    m.u32(items, yard);
+    m.u32(yard + O.buildingType, m.alloc(0x1800));
+    expect(read()).not.toHaveProperty('nativeHidden');
+  });
+
+  it.each(['limbo', 'unregistered'] as const)(
+    'validates a building radio link absent from publication (%s)',
+    (reason) => {
+      const { m, tank, yard } = battlefield();
+      radio(m, tank, yard);
+      m.u8(tank + O.tethered, 1);
+      m.i32(yard + B.currentMission, 16);
+      if (reason === 'limbo') m.u8(yard + O.inLimbo, 1);
+      else m.vector(G.buildings, []);
+      const state = readYrState(createByteViewAccessor(m.bytes));
+      expect(state.objects.some((object) => object.id === yard)).toBe(false);
+      const unit = state.objects.find((object) => object.id === tank);
+      expect(unit).toHaveProperty('nativeHidden', true);
+      expect(unit).not.toHaveProperty('contactUid');
+    },
+  );
+
+  it('keeps the UnitClass tether gate separate from shared mobile chrono blending', () => {
+    const { m, tank, soldier, yard, player } = battlefield();
+    const type = m.type(V.aircraftType, 'ORCA', 100);
+    const aircraft = m.object(V.aircraft, O.aircraftType, type, player, { x: 256, y: 512, health: 100, uid: 16 });
+    m.vector(G.aircraft, [aircraft]);
+    m.i32(yard + B.currentMission, 16);
+    for (const unit of [tank, soldier, aircraft]) {
+      radio(m, unit, yard);
+      m.u8(unit + O.tethered, 1);
+    }
+    const read = () => readYrState(createByteViewAccessor(m.bytes));
+    for (const flag of [O.beingWarpedOut, O.warpingOut]) {
+      for (const unit of [tank, soldier, aircraft]) m.u8(unit + flag, 255);
+      const state = read();
+      for (const unit of [tank, soldier, aircraft])
+        expect(state.objects.find((object) => object.id === unit)).toHaveProperty('translucent', 0.5);
+      expect(state.objects.find((object) => object.id === tank)).toHaveProperty('nativeHidden', true);
+      for (const unit of [soldier, aircraft])
+        expect(state.objects.find((object) => object.id === unit)).not.toHaveProperty('nativeHidden');
+      for (const unit of [tank, soldier, aircraft]) m.u8(unit + flag, 0);
+    }
+    m.u8(tank + O.tethered, 0);
+    m.u8(tank + O.beingWarpedOut, 1);
+    m.u8(tank + O.warpingOut, 1);
+    expect(read().objects.find((object) => object.id === tank)).toHaveProperty('translucent', 0.5);
+    expect(read().objects.find((object) => object.id === tank)).not.toHaveProperty('nativeHidden');
+    m.u8(tank + O.beingWarpedOut, 0);
+    m.u8(tank + O.warpingOut, 0);
+    for (const object of read().objects) expect(object).not.toHaveProperty('translucent');
+  });
+
+  it('contains failed optional visibility reads without losing the object', () => {
+    const { m, tank, yard } = battlefield();
+    radio(m, tank, yard);
+    m.u8(tank + O.tethered, 1);
+    m.i32(yard + B.currentMission, 16);
+    const base = createByteViewAccessor(m.bytes);
+    const memory = {
+      ...base,
+      u8: (at: number) => {
+        if (at === tank + O.beingWarpedOut || at === yard + B.doorMoving) throw new Error('unavailable');
+        return base.u8(at);
+      },
+    };
+    const object = readYrState(memory).objects.find((value) => value.id === tank);
+    expect(object).toMatchObject({ uid: 11, contactUid: 15 });
+    expect(object).not.toHaveProperty('nativeHidden');
+    expect(object).not.toHaveProperty('translucent');
+  });
+
   it('resolves stable contact IDs after all kinds, including aircraft and reciprocal building links', () => {
     const { m, tank, soldier, yard, player } = battlefield();
     const type = m.type(V.aircraftType, 'TESTAIR', 100);
@@ -276,6 +399,30 @@ describe('YR 1.001 state reader', () => {
     expect(read()).not.toHaveProperty('unloading');
     m.i32(yard + B.currentMission, 16);
     expect(read()).toHaveProperty('unloading', 'door'); // A new Unload cannot inherit the previous roof.
+  });
+
+  it('keeps the native door replacement and body stage while mission 16 closes after contact release', () => {
+    const { m, tank, yard } = battlefield();
+    const items = radio(m, yard, tank);
+    const rules = m.alloc(R.red + 8);
+    m.u32(R.instance, rules);
+    m.view.setFloat64(rules + R.yellow, 0.5, true);
+    m.view.setFloat64(rules + R.red, 0.25, true);
+    m.i32(yard + B.currentMission, 16);
+    m.i32(yard + B.stage, 7);
+    const reader = continuousReader(m);
+    const read = () => reader()!.objects.find((object) => object.id === yard);
+    expect(read()).toMatchObject({ unloading: 'door', buildingFrame: 8, buildingDamaged: true, contactUid: 11 });
+    m.u32(items, 0);
+    m.u8(yard + B.doorMoving, 1);
+    m.u8(yard + B.doorTargetOpen, 0);
+    expect(read()).toMatchObject({ unloading: 'door', buildingFrame: 8 });
+    expect(read()).not.toHaveProperty('contactUid');
+    m.i32(yard + B.stage, 9);
+    m.u8(yard + B.doorMoving, 0);
+    expect(read()).toMatchObject({ unloading: 'door', buildingFrame: 10 });
+    m.i32(yard + B.currentMission, 5);
+    expect(read()).not.toHaveProperty('unloading');
   });
 
   it.each(['missing', 'type', 'uid', 'invalid mission'] as const)('resets the roof latch on %s', (change) => {

@@ -258,6 +258,15 @@ class VoxelMaterial extends MeshStandardNodeMaterial {
   matp!: ShaderNode;
   state!: VoxelLightingState;
   look!: SpriteLookState;
+  override copy(source: this): this {
+    super.copy(source);
+    // Three copies initialized fields only; these lighting inputs are assigned after construction.
+    this.raw = source.raw;
+    this.matp = source.matp;
+    this.state = source.state;
+    this.look = source.look;
+    return this;
+  }
   override setupLightingModel(): PhysicalLightingModel {
     return new VoxelLightingModel(this.raw, this.matp, this.state, this.look);
   }

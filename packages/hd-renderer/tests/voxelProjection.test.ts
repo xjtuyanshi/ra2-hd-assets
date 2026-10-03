@@ -446,11 +446,13 @@ describe('projection loading and disposal', () => {
     for (const close of closes) expect(close).toHaveBeenCalledOnce();
   });
   it.each([
-    { model, spec: manifest() },
-    { model: turretModel, spec: turretManifest() },
+    { model, spec: manifest(), opacity: 1 },
+    { model: turretModel, spec: turretManifest(), opacity: 1 },
+    { model, spec: manifest(), opacity: 0.5 },
+    { model: turretModel, spec: turretManifest(), opacity: 0.5 },
   ])(
-    'updates live $model.id units when a type arrives, retaining turret pivots and shadow twins',
-    async ({ model: liveModel, spec }) => {
+    'updates live $model.id units at opacity $opacity when a type arrives, retaining turret pivots and shadow twins',
+    async ({ model: liveModel, spec, opacity }) => {
       mockAssets({ spec });
       const nodes = new AtmosphereNodes();
       const hd = { nodes, settings: { voxelLook: 'engine' } } as HdRenderer;
@@ -458,18 +460,33 @@ describe('projection loading and disposal', () => {
       const cache = { paletteRgb: new Map([['unit', new Uint8Array(768)]]) } as Ra2Cache;
       const units = new VoxelUnits(hd, world, cache);
       const unit = units.build(liveModel, 'unit', `${liveModel.id}@unit`);
+      units.setOpacity(unit, opacity);
+      units.setNativeDepth(unit, unit.root.position, 13);
       const meshes: Mesh[] = [];
       unit.root.traverse((object) => {
         if (object instanceof Mesh) meshes.push(object);
       });
       const originals = meshes.map((mesh) => mesh.material);
       await vi.waitFor(() => expect((meshes[0]!.material as { name: string }).name).toContain('-projected'));
+      // No pose/publication follows the asynchronous load: the callback itself must retain the native pass.
       for (let i = 0; i < meshes.length; i++) {
-        if (meshes[i]!.userData.painterDepth) expect(meshes[i]!.material).not.toBe(originals[i]);
-        else expect(meshes[i]!.material).toBe(originals[i]);
+        if (meshes[i]!.userData.painterDepth) {
+          expect(meshes[i]!.material).not.toBe(originals[i]);
+          expect(meshes[i]!.material).toMatchObject({ transparent: true, depthWrite: opacity === 1, opacity });
+          expect((meshes[i]!.material as { name: string }).name).toContain(
+            opacity === 1 ? ':native-ground' : ':translucent',
+          );
+        } else expect(meshes[i]!.material).toBe(originals[i]);
       }
       expect(unit.turret!.position.x).toBe(48 / 256);
       expect((unit.turret!.children[0] as Mesh).material).toBe((unit.turret!.children[1] as Mesh).material);
+      units.setOpacity(unit, 1);
+      units.setNativeDepth(unit, unit.root.position, 0, false);
+      for (const mesh of meshes.filter((mesh) => mesh.userData.painterDepth)) {
+        expect(mesh.material).toMatchObject({ transparent: false });
+        expect((mesh.material as { name: string }).name).toContain('-projected');
+        expect((mesh.material as { name: string }).name).not.toContain(':native-ground');
+      }
       nodes.dispose();
     },
   );

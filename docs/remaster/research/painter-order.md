@@ -11,7 +11,9 @@ No executable, disassembly dump, extracted Z-shape or screenshot belongs in this
 Names such as `ZGradient`, `ZReadWrite`, `GetYSort` and the layer names use the YRpp vocabulary
 ([Ares YRpp, GeneralDefinitions.h](https://github.com/Ares-Developers/YRpp/blob/master/GeneralDefinitions.h)).
 Instruction behavior, rather than symbolic flag names alone, is the evidence for the conclusions below.
-This is static analysis; it does not establish pixel-identical live rendering.
+The body formula was also checked against a supplied native Soviet-refinery Z-buffer dump: 9,316 of 9,370 opaque
+pixels matched exactly, with the remaining pixels overwritten by nearer later draws. That validates the native
+body formula for that capture, not the HD shader or complete live rendered-pixel parity.
 
 ## Traversal is only one part of the renderer
 
@@ -55,12 +57,13 @@ from the destination, buffer origin and Z adjustment. A supplied Z-shape provide
 The ordinary RLE read/write path has this effective operation for a nontransparent pixel:
 
 ```text
-candidate = uint16(rowBaseline - int8(zShapePixel))
+candidate = int32(rowBaseline - int8(zShapePixel))
 if candidate < existingZ:
     write colour
-    existingZ = candidate
+    existingZ = uint16(candidate)
 ```
 
+Comparison zero-extends the old ushort, without truncating the new signed candidate before testing it.
 The signed subtraction and comparison are at `0x4991DC`–`0x4991EC`; colour and Z writes are at
 `0x499222` and `0x499230`. A read-only sibling at `0x4980CB`–`0x4980E4` performs the comparison
 but does not store Z. Other blitter variants implement blending/remapping; these are concrete ordinary paths,
@@ -84,9 +87,10 @@ The shared `BUILDNGZ.SHA` name is referenced at `0x8193F4`. Loader `0x45E8F0` st
 at `0x89DDBC`, decodes frame 0 (`0x45E917` / `0x45E924`), and subtracts `0x41` from each nonzero
 sample at `0x45E94D`. The draw path takes that pointer at `0x43D767`. It aligns the template using
 foundation dimensions (`0x43D730`, call `0x45EC90`) and projected offsets (`0x6D1FE0`);
-the dimension-at-least-eight branch at `0x43D787` suppresses the shape and takes the gradient fallback.
+the width-at-least-eight branch at `0x43D787` suppresses the shape and takes the gradient fallback (height alone does not).
 Object height also contributes to the draw's Z offset (`0x43D836`–`0x43D84D`, using height projection
-`0x6D20E0`). The SHP frame's rectangular bounds are not the building's occlusion surface.
+`0x6D20E0`), as does `NormalZAdjust` at type `+0x1520`. Art `Height` is not a body-depth input.
+The clipped SHP frame bottom sets the constant baseline; the template supplies its per-pixel correction.
 
 The row renderer indexes a six-int gradient record, 24 bytes each, at `0x817710`
 (`0x437A91`–`0x437A9C`). Records 0–3 are:
@@ -119,9 +123,9 @@ for the individual cache passes and why retaining only the final object walk is 
 | Terrain tiles (TMP)     | Tile sweep `0x6D71E0` calls cell renderer `0x4801F0` at `0x6D751A`, then tile rasterizer `0x547CF0` at `0x480499`. It obtains the Z row through `0x7BD130` at `0x548194`. At `0x548228` it checks TMP header flag `+0x24 & 2`, resolving Z data via header `+0x0C` at `0x54822E`. One ordinary pixel path adds the unsigned Z byte to the baseline (`0x5487AB`–`0x5487AF`), compares existing Z at `0x5487B1`, writes passing Z at `0x5487B6`, then colour at `0x5487EB`. Unlike the SHP path above, this branch permits equal Z. |
 | Terrain objects (trees) | `DrawIt` at `0x71C1B0`: height conversion at `0x71C251`, ordinary flags `0x4E00` at `0x71C2D7`, gradient 2 at `0x71C2ED`, draw at `0x71C304`. Z adjustment includes negative height and `-12` (`0x71C2EA`). A special state/type branch selects read-only `0x2E00` at `0x71C2D0`. Ordinary trees therefore test/write Z and can cover an explosion drawn later behind them.                                                                                                                                                       |
 | Cell overlays           | Cell sweep `0x6D6D10` calls overlay renderer `0x47F6A0` at `0x6D7001`. Its SHP branches include `0x4E00`, ground/vertical gradients and tile-height adjustments. DrawFlat and elevated art cannot be reduced to one Ground cell key.                                                                                                                                                                                                                                                                                              |
-| Infantry                | Shape call at `0x519585`, flags `0x2601` at `0x51956F`: read/test existing Z. Height is projected at `0x519552`.                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Infantry | Body call `0x5195E2` through `0x41C090`/`0x705E00`: gradient 2 and write=false (`0x5195B5`–`0x5195B8`), normal grounded adjustment `-p(z)-13`. `0x519585` is the conditional INFSHDW shadow call, not the body. |
 | SHP vehicles            | Shape call at `0x73C7A7`, flags `0x2E01`: read/test existing Z.                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| Voxel units             | Rasterizer takes `ZBuffer` at `0x7600DB`, gets a pixel via `0x7BD130` at `0x7600E3`, compares the stored ushort with candidate `cx` at `0x7600ED`, and skips on `jbe` at `0x7600F0`. A passing pixel is drawn at `0x760100`. The native list does not bypass building or terrain Z.                                                                                                                                                                                                                                               |
+| Voxel units | `0x706640` reaches cached `0x707480` or uncached `0x706ED0` compositing. The rasterizer supplies a one-byte color bitmap, not its physical depth map; `0x754510` supplies its bounds. Ordinary flags `0x2800` select test-only gradient 2. Normal ground adjustment is `-p(z)-1`, or `-p(z)-14` for a Harvester on a Refinery cell (`0x7043E1`–`0x704420`). |
 
 The repository TMP decoder independently records the file's Z and extra-Z offsets in
 `packages/ra2-formats/src/tmp/tmpFile.ts`. The HD terrain mesh remains the existing physical approximation;
@@ -137,26 +141,94 @@ The engine also has later special drawing, including lasers (`0x550240`), electr
 line trails (`0x556D40`) and radiation beams (`0x6591B0`). HD physical beams/weather are not a literal port
 of all these passes. They must nevertheless share a comparable depth space with the objects they cross.
 
-## HD approximation and its boundaries
+## Native Z model
 
-`ra2/cardDepth.ts` reconstructs depth per fragment in the fixed orthographic view. It cancels the
-old frame-size-dependent `cardPush` from fragment depth while retaining its geometry placement for lighting.
-Let `px, py` be original screen pixels relative to the draw point, `P = 60 / sqrt(2)` pixels per world unit,
-and `w, h` the rectangular foundation dimensions. For a foundation-aligned card:
+`ra2/nativeDepth.ts` implements RA2/YR policy in the same camera-space nearness units as `ra2/cardDepth.ts`.
+Smaller native Z is nearer. If ground under the draw anchor has native depth `Zg`, a pixel at native depth `Z`
+has `push = (Zg - Z) * G`, where `G = GROUND_DEPTH = sqrt(3) / P`, `P = 60 / sqrt(2)` native pixels per world
+unit, and `VERTICAL_DEPTH = G / 3`. Original-screen offsets `px, py` are relative to the draw anchor, with py down.
+Geometry still uses its existing placement push for lighting; reconstructed fragment depth cancels that placement
+before applying native nearness, `CARD_CLEARANCE`, and the additive traversal/component bias.
+
+A library may provide `depthTemplate: { file, width, height }`: raw bytes already transformed by the extractor
+and reinterpreted as signed int8. The engine transform is zero -> zero, otherwise `(raw - 65) & 255` followed by
+signed reinterpretation; wrapped values must not be saturated, and zero is a valid depth correction. `LiveLibrary`
+validates exact width-times-height byte length and loads one nearest, unmipmapped R8 data texture before sprite
+materials are constructed. All atlas pages share it, use integer `textureLoad`, and its library owner releases it.
+An absent descriptor keeps the legacy analytic building path; a declared invalid/unreadable payload is an error.
+
+For body, buildup, selling and deploying-body frames, let foundation dimensions be W,H and `pointMove` be mx,my:
 
 ```text
-d = px / 30
-sFront = max(0, min(2*w - d, 2*h + d))
-groundPush = py * sqrt(3) / P
-facadePush = sFront / (sqrt(2) * cos(30°)) - py * tan(30°) / P
-push = max(groundPush, facadePush) + CARD_CLEARANCE
-depth = geometryDepth - (push - placementPush + traversalBias) / (far - near)
+A = (198 + mx - 30*(W-H), 446 + my - 15*(W+H-2))
+h' = min(frameHeight, templateHeight - (A.y + frame.offset.y))
+beta = frame.offset.y + h' - 1
+push_body(px, py) = (beta + 1 - Nadj + int8(template[A + floor(px,py)])) * G
 ```
 
-Each screen column intersects the two front faces of the foundation extrusion. Owner-relative offsets keep
-shifted building animation cards on the same profile. Ordinary trees, infantry and effects use `sFront = 0`:
-vertical above their draw point and ground-following below it. This removes frame-padding-dependent tree/explosion
-ordering and prevents surrounding ground from cutting the lower rows of a unit card.
+`building.zShape.pointMove` defaults to zero and is forced to zero while building/selling (native missions 18/19).
+`normalZAdjust` defaults to zero; DeployingAnim replaces it with -20 and RoofDeployingAnim with -40.
+Only foundation width W>=8 disables the template; those bodies use the gradient-2 card below with `c = 1 - Nadj`.
+There is no additional per-row body term. HD samples beyond the template clamp to its edge; native color is clipped
+there. Frame opacity still gates depth writes: BUILDNGZ does not fill transparent SHP holes. Neither art `Height`
+nor an invented roof/foundation volume enters this formula.
+
+Ground-like parts use `push_ground = (py + k) * G`: BibShape k=2; UnderDoorAnim, UnderRoofDoorAnim and the HD door
+interior k=1; DoorAnim k=6. DoorAnim is native test-only and its HD card must not hide passing units.
+This requires color order as well as disabled depth writes: a DoorAnim drawn after a unit could still overwrite
+that unit's color while its depth test passes against the older body buffer. The HD passes therefore draw bodies
+at render order 4, test-only DoorAnim at 4.001, then native ground units at 4.002. Unit cards retain depth writes
+for HD internal/overlap ordering. Their sprite child pass and cloned voxel materials use the transparent queue,
+so opaque-queue precedence cannot put units before the door; airborne and shadow materials retain their physical
+paths. The native ground-unit sprite child shares the main instance buffers and fireball capture codes/registration.
+Attached Active/Idle/Special/Production/Super parts, lights and conveyor cards inherit their owner's body template
+origin and clipped frame baseline, with the existing small component bias. Draw offsets, including `yDrawOffset`,
+are measured back from the owner draw anchor so a shifted animation cannot invent a nearer depth surface.
+
+Ground units use the native upright-card rule:
+
+```text
+push_card(py) = (e + c + floor((e - py) / 3)) * G
+```
+
+For SHP vehicles and infantry, e is `frame.offset.y + frameHeight - 1`; c=0 for vehicles and c=12 for infantry.
+A Harvester's c becomes 13 exactly when its current cell `(floor(x/256), floor(y/256))` belongs to a Refinery
+foundation. The library flags `harvester` and `refinery` identify those types. Radio contact, mission, stationary
+state, distance from the pad and the traversal order are not predicates for this bonus.
+
+Voxel vehicles and landed aircraft use c=0 or the same harvester bonus. `ra2/voxelNativeDepth.ts` approximates the
+native bitmap bottom with the eight projected corners of the posed world-space model AABB, recomputed as pose or
+facing changes and including articulated turret/barrel parts, excluding shadow/reflection twins. Building voxel
+turrets use their own bottom and `c = -1 - turretVoxel.zAdjust`. With ground draw anchor a, fragment p, view-forward
+unit vector F and `py_frag` projected in the same native pixel scale:
+
+```text
+Delta = (1 - KAPPA) * (dot(p - a, F) + push_card(py_frag))
+depth = physicalDepth - (Delta + additiveBias) / (far - near)
+KAPPA = 0.06
+```
+
+Keeping six percent of physical distance preserves model-face ordering. Error from the ideal card is bounded by
+`KAPPA * max(abs(dot(p-a,F) + push_card(py_frag)))` over the posed model. This is a documented HD approximation to
+the native bitmap, not physical voxel tactical depth. Only grounded layer-2 units, including bridge-deck units,
+use cards; flight and shadow passes keep their existing depth. Absolute native 16-bit wrap/modulo-three phase and
+all special locomotor/effect branches are outside this relative model.
+
+Trees, cell overlays, bridges, effects, decals, shadows, wet reflections and the fireball capture/code policy
+retain their prior paths. With no template, buildings retain the analytic foundation facade and voxel turrets retain
+their physical depth with the existing facade placement; generic cards still
+use the existing ground/vertical profile. The former dock pull/propagation, measured door/roof recess constants and
+contained-infantry suppression are removed: the refinery cell bonus, ground planes and opaque native body depth
+now decide those overlaps. Synthetic refinery, factory and barracks fixtures check the depth relationships;
+shader construction does not establish live WebGPU pixel parity with the player's art.
+
+Sprite instance flags retain their existing interleaved buffer. The stride is 16 floats without capture and 17
+with capture; the capture code keeps offset 8. A new vec4 starts at offset 8/9: mode (0 legacy, 1 body template,
+2 ground, 3 card), body origin x/y or card bottom/bonus, then body baseline or ground k. The following vec4 holds
+owner pixel offsets x/y, the anchor's existing nearness relative to its owner, and draw pass (0 main, 1 test-only,
+2 native ground unit). These attributes share the original buffer, so extending the depth profile does not consume
+another vertex buffer.
+DoorAnim uses a depth-tested, non-writing child pass over the shared geometry and is excluded from fireball capture.
 
 The clearance must exceed the lifted decal plane **at the same screen pixel**. At this camera pitch,
 a horizontal plane raised by `h` advances depth by `h / sin(30 degrees)`, not `h * sin(30 degrees)`.
@@ -205,9 +277,12 @@ materials, alpha tests/discards, position/depth nodes and painter bias preserve 
 override material. Voxel registration touches only explicit body/turret/barrel `partMeshes`; layers and prior mesh
 userData are restored on removal/disposal, with shadow/reflection/foam/glow twins excluded. Shared voxel materials
 read the code via an object-group uniform from the **rendered mesh's userData**, never a shared material constant.
-Sprite mains retain the ninth flags scalar at offset 8, stride 9, now holding a code; non-capture layers retain stride 8. Code/kind varyings are flat. The `objectDepthCaptureEnabled` object gate discards excluded/non-upright instances
-only in the actual capture target/camera. Under/over children never join capture. Sprite main/capture layouts stay
-six buffers/nine attributes, ground passes six/eight; native/HD Air cards remain six/eight buffers.
+Sprite mains retain the capture scalar at flags offset 8; native depth extends the stride to 17 floats (16 without
+capture). Code/kind varyings are flat. The `objectDepthCaptureEnabled` object gate discards excluded/non-upright
+instances only in the actual capture target/camera. Native unit children share capture registration and instance
+codes; under/over and test-only children never join capture. Sprite paths retain six vertex buffers: main/unit
+capture uses 11 attributes (10 without capture), ground passes at most 10.
+Native/HD Air effect cards retain six buffers/eight attributes.
 
 Capture colour alone is replaced through a capture MRT: source `R=code*a`, `G=a`, with original source alpha `a`.
 NormalBlending's RGB source multiplier is `b=a`, hence over clear `R'=code*a*b`, `G'=a*b` and `R'/G'=code` in exact
@@ -288,40 +363,21 @@ tolerance, blending, formats/memory,
 gates/lifecycle and actual r186 WGSL/buffer layouts. GPU execution, five-blast XMP29U2 pixel review and same-scene
 performance remain UNVERIFIED by those tests.
 
-High-bridge cards instead use a horizontal plane at `4 * LEVEL_HEIGHT`; neighboring pieces have identical
-depth at the same screen pixel. Their draw offsets remain unchanged. Voxel geometry retains its complete depth,
-with `0.035` camera-space contact clearance so its feet pass the deck's `0.03` clearance. Shadow twins and flat
-decals retain their ground-depth path. Building voxel turrets and visible lamp heads place themselves just in
-front of their own foundation profile rather than the old whole-frame card plane.
+High-bridge cards use a horizontal plane at `4 * LEVEL_HEIGHT`; neighboring pieces have identical depth at the
+same screen pixel. Their draw offsets remain unchanged. Grounded unit cards anchor on the deck while their shadow
+twins and flat decals retain their physical ground-depth paths.
 
-Traversal bias is independent of scene population: registered index `i` contributes
-`0.01 * i / (i + 32)` in camera-space world units, with small layer/component increments bounded by `0.04`.
-Foundations do not take a registration bias. Ground fallback effects get a small positive tie break.
-Physical depth wins beyond this narrow tolerance; beams, rain, emitters and garnish can pass in front of an object
-or fail behind it. There is no global `0.1..0.2` NDC band or compressed voxel depth range.
-Finite GPU precision can collapse extremely long equal-depth registration lists. Fallback/native atlas blending
-uses separate stable groups to avoid a non-transitive comparison during a partial native sort; arbitrary native
-translucency ordering across atlas pages is not reconstructed.
+Traversal bias remains independent of scene population: registered index i contributes `0.01 * i / (i + 32)`
+with small layer/component increments bounded by `0.04`, additive to the native depth above. Foundations do not
+take a registration bias. Ground fallback effects keep their small positive tie break. There is no global NDC
+slot band; finite GPU precision can still collapse long equal-depth registration lists, and arbitrary native
+translucency ordering across atlas pages is not reconstructed. Fog/shroud use the separate geometry-depth
+attachment; their post-processing contract is unchanged.
 
-This is a foundation-derived approximation, **not** decoded `BUILDNGZ.SHA`, a roof model, or a complete emulator
-of art `ZAdjust`, terrain overhangs, nonrectangular foundations and special transparency. A recess in a roof can
-therefore still differ from the original. In particular, shader construction and CPU depth assertions do not
-prove that the reported CAMIAM01/trooper and tree/explosion captures now match in a live WebGPU frame.
-Fog/shroud continue to use the separate geometry-depth attachment; static map previews enable it too now that
-their cards use the same analytic depth. The post-processing depth contract is unchanged.
+## Delivery images and native state evidence
 
-## Contacted dock pull and delivery images
-
-The analytic foundation profile does not decode low dock/pad recesses in `BUILDNGZ.SHA`. The measured refinery case
-has northwest cell `(51,101)`, foundation `4x3`, and unit anchor `(13952/256,26240/256)`. Sampling
-`foundationPointPush` at that exact anchor and its four one-cell axial neighbours, then adding `0.5`, yields about
-`3.00949` camera-space world units; the maximum is capped at `3.5`.
-
-`ra2/dockPull.ts` now requires the unit's `contactUid` to match the host building's `uid`, the host's `dock` to be
-true, and its `unloading` field to be absent. The unit must be in layer 2 without a foundation, drawn after its
-host in native painter order, with its exact anchor inside the foundation or its one-cell outer border. There is
-no stationary-frame gate: backing-in frames must clear the low pad too. Hosts are resolved by UID rather than by
-searching every foundation. Missing policy/contact data in older snapshots disables dock pull.
+The renderer retains the existing delivery-image selection and reader publication contracts. Contact/dock fields
+remain available to consumers, but they no longer determine a unit's nearness adjustment.
 
 YR 1.001 policy stays in `src/games/yr`:
 
@@ -331,7 +387,7 @@ YR 1.001 policy stays in `src/games/yr`:
 - BuildingType flags are UnitRepair `+0x16A9` (INI store `0x460929`), Refinery `+0x16BB` (`0x460A6C`), and Helipad
   `+0x16CB` (`0x4604E0`). Their validated OR defines `dock`. WeaponsFactory `+0x16BD` (`0x460A8C`) alone is not a dock:
   GAWEAP/NAWEAP/YAWEAP have radio links to newly produced units but must keep them behind the factory facade.
-  Repair shipyards also have WeaponsFactory, so their delivery phase independently disables pull.
+  These fields describe native docking/delivery state; the renderer depth bonus uses library Refinery/Harvester flags.
 - Mission getter `0x5B3040` reads CurrentMission `+0xAC`, using QueuedMission `+0xB4` only when CurrentMission is `-1`.
   DrawIt `0x43D33A..0x43D381` reads link 0's type flags JumpJet `+0xD94` (store `0x715200`) or BalloonHover `+0xD6A`
   (`0x714DA9`) to select the roof; `0x43D692..` uses that decision only at effective mission `16`. The reader validates
@@ -358,105 +414,37 @@ Supplied frozen native GAWEAP `5x3`, northwest `(58,98)`, Night Hawk SHAD roof-d
 These are supplied native observations, not new HD rendered-pixel acceptance. The mission-5 discrepancy at 9278
 remains `UNVERIFIED`; the latch deliberately ends there.
 
-After direct dock pulls are computed, a different ground vehicle/infantry U within three cells (Chebyshev distance)
-of docked unit D's exact anchor inherits pull only if it follows D in painter order:
-
-```text
-pull_U = max(pull_U, 0, pull_D - ((U.x + U.z) - (D.x + D.z)) * sqrt(3/8) + 0.05)
-```
-
-Coordinates in this expression are cell anchors. This preserves overlap ordering for passing units; units before
-D are never pulled. Only directly docked units are sources, so propagation does not cascade through a crowd or
-alter another directly docked unit. `PainterObject.pull` enters `spritePainterBias`, which both SHP cards and voxel
-parts consume. Buildings, their turrets, effects and projectiles do not participate in this propagation.
-
 The factory's delivery art is a body image substitution, not an attached AnimClass. Art loaders store DeployingAnim
 `+0x14E4` at `0x45F3A7`, UnderDoorAnim `+0x14EC` at `0x45F5DF`, RoofDeployingAnim `+0x14FC` at `0x45F47F`, and
 UnderRoofDoorAnim `+0x1504` at `0x45F78B`. DrawIt `0x43D692..0x43D6D3` / `0x43D7D2` substitutes the deploying shape
-(native Z adjust -20, roof -40); `0x43D7A7..0x43D7EE` clamps GetCurrentFrame (`0x43EF90`) to its foreground half.
+(native Z adjust -20, roof -40); `0x43D7A7..0x43D7EE` selects
+`min(GetCurrentFrame(B), trunc(i16[SHP+6] / 2))`, without subtracting one from that cap.
 `0x43D8EE..0x43D9C9` and roof `0x43D9D8..0x43DA67` then draw the under-door section at yellow-damage frame 1, else 0.
 
-`LiveView.libraryBuildingSprites` uses these library key pairs while a completed building reports `unloading`.
-It clamps the replacement body frame to `frames.length - 1`, substitutes its shadow, and queues the under-door
-frame immediately after the body with the same anchor, placement push and foundation dimensions/offsets. Each
-sprite retains the existing palette/remap handling. The under-door card alone has `SpriteInstance.foundationRecess`
-set to `DOOR_RECESS = 2.75` for a door or `ROOF_RECESS = 4` for a roof;
-the deploying body retains the front facade. There is no factory-exit dock pull. Missing/empty pairs retain the
-normal body. Bibs, active layers, construction
-and selling frames, and voxel turrets are unchanged.
+This replacement lasts for the entire effective Unload mission, including after link 0 becomes NULL and while
+the logical door closes. Ground delivery remains `unloading='door'` without a contact. DoorClass moving/target-open
+bytes `+0x368/+0x369` and its timer (`+0x358/+0x360/+0x364`) do not drive the deploying SHP frame. The ordinary
+factory body getter keeps stage `+0xF8` and mode `+0x534`, applying the existing damage-bank offset; Unload does
+not reset the stage. State 3 holds while `+0x418` is nonzero, starts closing at `0x44E202..0x44E22B`, and state 4
+requests Guard only after closure (`0x44E233..0x44E25A`). A separate DoorAnim is absent from the supplied ordinary
+factory definitions; any configured legacy DoorAnim follows its own progress rule. The persisted roof latch above
+is a separate observed compatibility policy, not proved by the null-contact branch of DrawIt, which defaults to
+ground delivery.
 
-Frozen native frames fit a recessed door plane rather than the foundation's back surface. NAWEAP has a `5x3`
-foundation at northwest `(58,98)`, with its door on the +x face. At frame `9454`, `unloading='door'`, the open dark
-interior completely covers the new tank at local `(2.5,1.5)`: its centre has `x+z=4.0`, versus native facade
-`x+z=7.5` at that column, so it is `3.5` sum units behind; its front end at local `x≈3.0` is about `3.0` behind.
-About `86` frames later, the whole tank at local `(4.13,1.06)` is visible over the dark interior and ramp while
-the door posts remain in front. Its centre is about `1.74` sum units behind the facade. These supplied native
-observations bound the interior recess by `1.74 < R < about 3.0` (refined below); they are not a new HD runtime acceptance run.
+`LiveView.libraryBuildingSprites` uses those library key pairs while a completed building reports `unloading`.
+It uses `SpriteEntry.frameCount` for the native inclusive half-count cap; legacy entries without that metadata
+fall back to foreground plus shadow array lengths. The source frame exactly at the half boundary addresses the
+first shadow-half frame, rather than clamping to the last foreground frame. It substitutes the replacement
+shadow and queues the healthy/damaged under-door frame at the same draw anchor with the existing palette/remap
+routing. Missing/empty pairs retain the normal body.
+The replacement body receives the BUILDNGZ baseline with Nadj -20/-40; both under-door interiors use gradient 0,
+k=1. Body posts remain depth writers while the floor plane admits a nearer unit card.
 
-`live/liveView.ts` exports `DOOR_RECESS = 2.75`, a generic measured approximation of the engine's door-interior
-Z-shape/ZAdjust (`2.75 * sqrt(3/8) ≈ 1.684` world units in depth). A first fit of `R = 2` hid the rear half of a
-tank that the original shows whole: in frozen live frames (same factory) the original shows the entire tank in the
-doorway at local `(3.85,1.43)`, its centre `2.3` and its rear end about `2.8` sum units behind the facade, while the
-waiting tank at `(2.5,1.5)` (voxel front end about `3.0` behind) stays hidden. `2.75` keeps a `0.25` margin to
-that hidden case. The rectangular profile gives front sums `7.0` and `6.93` at the two centre columns above; it
-does not reconstruct the native first column's `7.5`. With the recess these become `4.25` and `4.18`, keeping the
-first centre (`4.0`) behind and the second (`5.19`) in front. A back-surface profile would expose the early tank and is therefore unsuitable.
-
-Roof delivery instead looks down to a deeper interior floor: `ROOF_RECESS = 4`, exported beside `DOOR_RECESS`,
-applies only to the UnderRoofDoorAnim card. In the supplied native roof frames the heli at local `(2.5,1.5)`,
-sum `4.0`, must appear in front of the interior plane `7.5 - 4 = 3.5`. The rectangular approximation's facade sum
-at this column is `7`, so its recessed sum is `3`. Both a unit on the floor and one raised `1.5` levels remain in
-front of that card; the deploying body's opaque roof edges still occlude them. Outside units behind the building
-on the same column stay hidden: their sums are below the back surface (at most `3` on the `5x3` centre columns).
-Door delivery retains the shallower measured recess and all of its previous depth relationships.
-
-The optional generic `SpriteInstance.foundationRecess` defaults to zero. Instance encoding changes only the
-existing sum-offset component, foundation flags component 7: `ds = -dx - dz - foundationRecess`. Both
-`cardDepthPush` and `cardDepthNode` retain their original expression and interface:
-
-```text
-d = px / 30 + dx
-front = max(0, min(2w - d, 2h + d))
-ds = -dx - dz - recess
-s = front + ds
-push = max(py * GROUND_DEPTH, s * FOUNDATION_DEPTH - py * VERTICAL_DEPTH) + CARD_CLEARANCE
-```
-
-The deploying body and all other layers retain recess zero. The body's facade still hides the emerging tank at
-opaque posts/walls, and an outside unit behind the building on the same screen column remains hidden by the
-interior. Lower ramp rows retain `max(ground, facade)`, so a unit standing outside the facade stays in front with
-the existing unit bias. Reused pool records reset their recess to zero. There is no depth-mode bit or new shader
-branch: the anchor/light-sample buffer returns to five components and the original vec2 light-sample attribute.
-Foundation widths/heights, difference offset, placement, lighting and deck/shadow paths retain their behavior;
-other consumers of the existing sum offset receive the same recessed profile for the interior card.
-
-## Infantry inside foundations
-
-The supplied barracks replay has a `2x2` foundation at northwest `(67,14)` and an infantry spawn at local
-`(0.5,1.5)`. The original hides it until it walks out, about ten logic frames later. Its HD pixels appear mostly
-in transparent art beside the tapered tower and above the plinth: changing only opaque-card depth cannot hide
-those pixels. The engine's building Z-shape box covers the foundation independently of those art holes.
-
-Known limit (live frozen frames, YABRCK `2x3`, NW `(54,90)`): the original hides a fresh initiate at local
-`(1.25,1.75)` on its spawn frame but shows it 9 and 21 frames later at `(1.47,1.96)` and `(1.8,2.29)` walking down
-its exit stairs, still inside the foundation (the Yuri barracks' Z-shape is low there). HD hides those poses: both
-the containment rule below and the rectangular front facade (about 1.06 and 0.4 sum units in front of the unit)
-cover them. Limiting the rule to the spawn moment was tried and did not reveal the initiate (the facade still covers
-the stairs) while it would re-expose the NAHAND conscript in transparent art, so the rule stays unconditional until
-per-art Z-shapes are reconstructed.
-
-`LiveView` therefore suppresses ground-layer, non-airborne infantry at exact snapshot anchors strictly inside
-`NW + (0.05, w - 0.05) x (0.05, h - 0.05)`. It hides the visual root and queues no body, shadow or overlay art for
-that frame. Vehicle/aircraft delivery and docking remain independent. Anchors on the inset boundary or outside,
-airborne infantry, non-ground registration and scenes without a known visible foundation are unaffected.
-The existing front-facade depth approximation still governs opaque-art overlap.
-
-The cell-aligned rectangular foundation index is refreshed for new publications (including same-frame changes)
-and art/visibility rebuilds, not interpolation-only poses. Each cell stores a nine-bit union of allowed low-edge,
-middle and high-edge regions on its two axes. Overlaps merge by OR, so an infantry lookup remains one cell lookup
-and one bit test rather than a scan of building candidates. Inset checks compare world-coordinate bounds directly
-to keep exact edge equality outside despite floating-point subtraction. This is a rectangular foundation
-approximation, not a claim to reconstruct custom/nonrectangular native Z-shapes.
+The earlier measured `DOOR_RECESS = 2.75` / `ROOF_RECESS = 4` and `foundationRecess` encoding are removed.
+Those fits used the former analytic box; native UnderDoor depth has no such recess or art `UnderDoorAnimZAdjust`
+consumer in the traced path. Similarly, infantry are no longer hidden by a rectangular containment index. Their
+c=12 cards test the opaque body depth, allowing front stairs to differ from the foundation centre without hiding
+an entire visual, its shadow and every attached part. Transparent art alone writes no building Z.
 
 An accompanying native NAWEAP/Rhino trace observed CurrentMission `5` with QueuedMission `16` when the tank appeared
 (door still closed), then CurrentMission `16` thirteen logic frames later with link 0 pointing at the tank inside
@@ -465,19 +453,72 @@ left the foundation, then mission returned to `5` and the door closed. This supp
 keeping the door image through link release. It is native-state evidence supplied with this task, not live HD
 rendered-pixel acceptance of the implementation.
 
+## Native draw eligibility and body translucency
+
+These predicates are from the pinned YR 1.001 executable. The reader evaluates validated pointers and fields;
+the bridge forwards generic optional `nativeHidden` and `translucent` fields, and LiveView never calls guest code.
+
+Unit wrapper `0x73B0B4..0x73B121` skips the complete render when tether byte `U+0x418` is nonzero, link 0 is a
+validated building, and either its effective mission or queued mission is Unload 16, with canonical door booleans
+`B+0x368/B+0x369` (each 0 or 1). The four door predicates exhaust opening, closing, open and closed; this is not an
+openness threshold. Building validation checks its object/type spans, vtables and type ID independently of
+whether InLimbo or snapshot filtering omits the linked building from publication; `contactUid` remains limited to
+published contacts. Effective mission uses `B+0xAC`, falling back to `B+0xB4` only when current is -1. Queued
+Unload can therefore hide a tethered unit before it selects the factory's replacement body. `nativeHidden=true`
+suppresses the whole HD visual, including shadows and owner extras, through the same visibility gate as
+InvisibleInGame art. Selection brackets and health bars remain native overlay pixels; LiveView does not generate
+selection geometry, and the bridge preserves `isSelected` as state rather than altering native input/selection.
+Owner-attached anims, particle systems and fire events are suppressed only when both UID and pointer match the
+hidden owner, including same-frame hide/unhide changes. Independent explosions and projectiles retain their
+native publication lifetime.
+
+Chrono bytes BeingWarpedOut `U+0x270` and WarpingOut `U+0x271` are a different rule. If either is nonzero,
+`0x73B259..0x73B275` ORs flag `0x4` into the body draw. The ordinary uncloaked combination selects
+`BlitTransLucent50AlphaZRead`, whose pixel loop at `0x495165..0x495178` halves and adds source/destination colors.
+The reader publishes `translucent=0.5`; HD applies that opacity to SHP/voxel body parts without changing their
+shadow opacity. The translucent body does not write depth. Clearing the flags restores ordinary body rendering.
+These bytes alone are not invisibility flags, and this does not establish every cloak/blend combination.
+
+No CMIN-specific hard-hide interval is proved: normal teleport's harvester exception clears `+0x271` and its timer
+at `0x719580..0x7195B6`. Refinery docking sends Unload to the miner, not necessarily the building, so neither rule
+is a verified explanation for a reported missing miner. Live original/HD comparison remains `UNVERIFIED`.
+
+## Last destroyed-building visual
+
+The reader has no Health > 0 filter; zero-HP buildings can still be reported while eligible. Native removal first
+clears marked byte `+0x74` and tactical membership (`0x5F4D6D..0x5F4D79`), then sets InLimbo `+0x81` at
+`0x5F4E9E`, which excludes the building from the default reader. The native building render wrapper itself requires
+marked and !InLimbo (`0x43CED1..0x43CEE4`); this is not a proved state where an InLimbo object keeps drawing.
+
+Normal rendering at `0x55D8F2` precedes Logic AI at `0x55DC9E` and the logic-frame increment at
+`0x55DE73..0x55DE81`. A previously painted body can therefore remain in the native framebuffer after the reader
+observes its removal. However, the wait path can render again after the increment (`0x55E271 -> 0x4F4480`), so a
+fixed one-frame picture lag is not established.
+
+LiveView uses a bounded presentation heuristic: a drawable building not selling or explicitly hidden keeps
+its last visual only for the first missing snapshot's logic frame, provided that frame is no more than one tick
+after its last observation. It expires as soon as that missing frame advances; same-frame polls do not extend
+the lifetime, and larger frame gaps or a rollback do not resurrect it. Pointer/UID replacement cancels the old
+visual. The cached descriptor and body frame stay frozen; no freed native pointer is read. Positive last-sampled
+health is eligible because lethal damage and removal can both occur between polls, without publishing HP=0.
+Explicit selling/hidden states remove the cached visual immediately. This one-tick cache has synthetic regression
+coverage, including actual LiveView body/shadow queuing and disposal, but exact last-picture parity is
+`UNCERTAIN`, and live acceptance is `UNVERIFIED`. Exact parity would need coherent render descriptors tied to the
+native image's presentation boundary, not arbitrary post-logic polling or an invented multi-tick death timer.
+
 ## Update ownership and regressions
 
 `LiveView` refreshes traversal metadata for a new snapshot, changed registration, art/cell rebuild or visibility
 change. An interpolation-only presentation updates poses/anchors without assigning biases or sorting cards.
 Static trees, cells and overlay pages retain depth profiles and never join unit/effect uploads. Sprite records
-are retained; the ordering refresh creates a UID host map and direct-dock/passing anchor lists, without sorting
-them. Particle cards
-own a separate pool reset by `applyEffects`, so an asynchronously loaded turret cannot overwrite their anchors.
+are retained; refinery foundation cells are indexed from current type/position data, independently of radio
+links. Particle cards own a separate pool reset by `applyEffects`, so an asynchronously loaded turret cannot overwrite their anchors.
 
 A same-frame registration-only push replaces metadata on the existing timed snapshot and UID map, retaining
 `previous`, `current.at`, object poses and camera endpoints. It invalidates object ordering, not the effects clock.
 
-Asset-free coverage is in `packages/hd-renderer/tests/painterOrder.test.ts`, `dockPull.test.ts`,
+Asset-free coverage is in `packages/hd-renderer/tests/painterOrder.test.ts`, `nativeDepth.test.ts`, `voxelNativeDepth.test.ts`,
+`depthTemplateLibrary.test.ts`,
 `liveBuildingDelivery.test.ts`, `liveOcclusion.test.ts`,
 `liveScheduling.test.ts`, `effectBuffers.test.ts`, `effectOcclusion.test.ts`, `projectiles.test.ts`,
 `vertexBuffers.test.ts`, and `tests/basic/liveSmudges.test.ts`.
