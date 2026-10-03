@@ -52,6 +52,7 @@ export class SpritePool {
     instance.glint = undefined;
     instance.unlit = undefined;
     instance.light = light;
+    instance.gradeExempt = undefined;
     instance.lighting = lighting;
     instance.painter = !flat && !shadow ? this.painter : undefined;
     instance.painterPart = painterPart;

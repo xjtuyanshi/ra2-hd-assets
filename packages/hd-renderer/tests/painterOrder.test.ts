@@ -389,7 +389,7 @@ describe('sprite depth attributes', () => {
       const anchor = Array.from(buffers.anchor.array);
       layer.setInstances([{ ...card, nativeDepth: { mode: 'ground', bonus: 1 } }]);
       expect(Array.from(buffers.flags.array.slice(4, 8))).toEqual([4, 2, 0, 0]);
-      expect(buffers.anchor.itemSize).toBe(5);
+      expect(buffers.anchor.itemSize).toBe(6);
       expect(Array.from(buffers.anchor.array)).toEqual(anchor);
       expect(Array.from(buffers.params.array)).toEqual(placement);
       layer.setInstances([{ ...card, anchor: new Vector3(50.75, 0, 50.25) }]);

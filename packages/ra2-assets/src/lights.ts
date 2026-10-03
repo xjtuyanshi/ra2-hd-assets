@@ -83,7 +83,7 @@ export interface InertLight {
   tint: [r: number, g: number, b: number];
 }
 
-/** How a renderer stages a map by default: its mood, hour and night brightness (see mapAtmosphere). */
+/** How a renderer stages a map by default: its mood, hour and light levels (see mapAtmosphere). */
 export interface AtmosphereProfile {
   kind: 'day' | 'dusk' | 'night';
   /** Default hour of day for the renderer's light keys. */
@@ -92,6 +92,10 @@ export interface AtmosphereProfile {
   nightLevel: number;
   /** The map's [Lighting] tint normalised by its largest channel. */
   tint: [r: number, g: number, b: number];
+  /** Daylight intensity multiplier relative to HD noon, in linear light; omitted preserves the standard keys. */
+  exposure?: number;
+  /** Neutral, luminance-matched day sun/sky without atmospheric sky, haze or exposure/white/tint adaptation. */
+  airless?: boolean;
 }
 
 /** Per-cell surface class for wetness and HD dressing. */
@@ -404,6 +408,7 @@ export function nightEvidence(lights: readonly Pick<MapLightSource, 'intensity' 
 /**
  * Stage a map from its own [Lighting]. The class comes from the authored base ambient `base = Ambient - Ground` (the
  * part every cell shares) and the tint = RGB / max(RGB), plus lamp posts as evidence:
+ *   lunar is airless, neutral daylight at 12:00; its low ambient dims daylight rather than selecting night dressing;
  *   night when base <= 0.70, or base <= 0.76 with a blue tint (b - (r + g) / 2 >= 0.15) or with two or more lamp
  *   posts (unless the tint is warm), at 22:00;
  *   dusk when base <= 0.76 with a warm tint (r - b >= 0.15), at 18:12;
@@ -415,16 +420,30 @@ export function nightEvidence(lights: readonly Pick<MapLightSource, 'intensity' 
  * built as night maps (lamp posts, blue tints, NEGLAMP darkening), 0.8+ are day maps with a colour grade.
  * nightLevel (night maps): clamp(engineToLinear(Ambient - Ground + Level x medianZ), 0.26, 0.40), what unlit ground
  * at the map's typical height shows, kept readable; otherwise DEFAULT_NIGHT_LEVEL.
+ * Lunar daylight leaves ambient, height and light sources to the engine-exact palette grade. Its neutral sun/sky
+ * have no exposure multiplier, so the map dims the art once and retains its local lamp pools.
  */
 export function mapAtmosphere(
   normal: EngineLighting,
   medianZ: number,
   evidence: NightEvidence = { lamps: 0 },
+  theater?: string,
 ): AtmosphereProfile {
   const base = normal.ambient - normal.ground;
   const eff = base + normal.level * medianZ;
   const max = Math.max(normal.red, normal.green, normal.blue, 1e-6);
   const tint: [number, number, number] = [normal.red / max, normal.green / max, normal.blue / max];
+  if (theater?.toLowerCase() === 'lunar') {
+    return {
+      kind: 'day',
+      hour: 12,
+      nightLevel: DEFAULT_NIGHT_LEVEL,
+      // The original's lit regolith reads neutral grey. The palette grade owns the authored tint and light sources;
+      // applying that tint again through the sun/sky would add a blue cast and lose the single lighting owner.
+      tint: [1, 1, 1],
+      airless: true,
+    };
+  }
   const blueShift = tint[2] - (tint[0] + tint[1]) / 2;
   const warm = tint[0] - tint[2] >= 0.15 - 1e-9;
   const epsilon = 1e-9;
@@ -444,8 +463,16 @@ export function mapAtmosphere(
 }
 
 /** The staging of a map with a light sidecar, recomputed from its raw [Lighting] and light sources. */
-export function sidecarAtmosphere(sidecar: Pick<MapLightsSidecar, 'lighting' | 'cells' | 'lights'>): AtmosphereProfile {
-  return mapAtmosphere(sidecar.lighting.normal, sidecar.cells.medianZ, nightEvidence(sidecar.lights));
+export function sidecarAtmosphere(
+  sidecar: Pick<MapLightsSidecar, 'lighting' | 'cells' | 'lights'> & Partial<Pick<MapLightsSidecar, 'theater'>>,
+  theater = sidecar.theater,
+): AtmosphereProfile {
+  return mapAtmosphere(sidecar.lighting.normal, sidecar.cells.medianZ, nightEvidence(sidecar.lights), theater);
+}
+
+/** Ore/gem overlays retain their art brightness while the airless map's palette grade dims the ground. */
+export function spriteClassGradeExempt(profile: Pick<AtmosphereProfile, 'airless'>, spriteClass: string): boolean {
+  return profile.airless === true && spriteClass === 'ore';
 }
 
 /** Engine ambient whose unlit ground maps to the profile's night level (the inverse of engineToLinear). */

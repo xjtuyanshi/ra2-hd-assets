@@ -419,9 +419,26 @@ These tools require NumPy, Pillow and OpenCV (`cv2`). All source images, cache a
 arguments; keep generated art outside Git. They preserve terrain alpha and do not edit manifests or material sidecars.
 
 - `python/terrain_tiles.py`: `prep` cuts `--source` using `--water-mask` and `--prompt` into `--tiles`, writing
-  `input.png`, `prompt.txt`, `tile.json` and a default `queue.txt`. `run` invokes a supplied CLI; `check` writes per-tile
+  `input.png`, `prompt.txt`, `tile.json`, a default `queue.txt`, and a final `prep.json` recording the full grid and
+  intentional water skips. `run` invokes a supplied CLI; `check` writes per-tile
   `check.json` registration/colour diagnostics. `assemble` aligns, colour-locks and quilts `output.png` tiles into
-  `--output`; absent outputs retain the source. The result feeds `materials.json.terrainMap`.
+  `--output`; absent outputs retain the source. Use `--require-complete` before publishing to validate the full source
+  grid, tile coordinates/dimensions, and every required input/output. Missing tile directories and interrupted land
+  preparation fail; intentional water skips remain valid. Legacy preparations without `prep.json` must match the
+  same source grid; only water coverage > 0.85 with neither input nor output proves a skip. Custom legacy skips
+  require a fresh preparation. `--colour-source` optionally supplies a same-size, same-layout colour reference.
+  Registration and tile colour-locking still use each original input, then the reference/source low-frequency Lab
+  difference is applied globally after quilting. Painted and uncovered pixels receive the same correction, with
+  full Gaussian context across tile/strip boundaries; source alpha and high-frequency painted detail are preserved.
+  Both corrections use source alpha to exclude invalid RGB outside the map from their normalized Gaussian averages,
+  preventing transparent black borders from darkening opaque terrain when generated detail extends past the edge.
+  For registration, assembly restores only fully transparent source pixels to their input RGB in a temporary copy.
+  Warping instead normalizes the generated paint by sampled source alpha, so neither invented off-map paint nor the
+  restored transparent black can leak into filtered map edges. Paint at every nonzero-alpha pixel contributes;
+  samples without valid paint fall back to the input. Fully opaque tiles retain direct cubic sampling. The standalone
+  `check` has no source alpha and still reports raw, unmasked tile diagnostics.
+  Assembly always writes PNG, including when an atomic cache-farm temporary path has a different suffix.
+  The result feeds `materials.json.terrainMap`.
 - `python/lake_shore.py`: takes the colour-matched original `--classification`, repainted `--terrain` and original
   `--water-mask`, all at 2x composite resolution. It extends connected painted shallows and paints a dry lake bed,
   producing `--output` for `terrainMap` and `--output-mask` for `waterMask`; set `waterBed: true` (a boolean, not a file).
@@ -444,7 +461,7 @@ python3 -B packages/ra2-assets/python/terrain_tiles.py prep --source "$SOURCE" -
 python3 -B packages/ra2-assets/python/terrain_tiles.py run "$TILES/queue.txt" --work "$WORK"
 python3 -B packages/ra2-assets/python/terrain_tiles.py check --tiles "$TILES"
 python3 -B packages/ra2-assets/python/terrain_tiles.py assemble --source "$SOURCE" --tiles "$TILES" \
-  --output "$WORK/terrain.png"
+  --output "$WORK/terrain.png" --require-complete
 python3 -B packages/ra2-assets/python/lake_shore.py --classification "$CLASSIFICATION" --terrain "$WORK/terrain.png" \
   --water-mask "$WATER_MASK" --output "$WORK/bed.png" --output-mask "$WORK/shore-water.png"
 python3 -B packages/ra2-assets/python/cliff_foot.py --cache "$CACHE" --terrain "$WORK/bed.png" \
@@ -454,7 +471,9 @@ python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_*.py'
 ```
 
 The tuned defaults remain 1536x1024 composite-pixel tiles, 1280x768 strides, water coverage > 0.85 skipped, Lab blur
-sigmas 20/10 px with lightness/chroma lock 0.75/1.0, and a 3 px seam feather. Small composites use their actual crop
+sigmas 20/10 px with lightness/chroma lock 0.75/1.0, and a 3 px seam feather. Feathering follows each minimum-cost cut
+and is bounded to exact old/new weights at the overlap edges, including when a wider `--feather` is used; zero gives
+a hard cut. Edge-anchored tiles use their actual overlap widths. Small composites use their actual crop
 size; adapt the example prompt's dimensions for those. Lake-bed distances use 84 composite px/cell; cliff heights
 use 15 × manifest scale composite px/level and ignore plateaus at least 2 levels above nearby water. Module docstrings
 and `--help` describe the remaining tuned constants and optional diagnostics. Review the outputs before assigning
@@ -1006,6 +1025,52 @@ or `NAME:state`, including bibs and special idle layers. `python/theatre_pages.p
 and retaining baseline pixels for differing frames. `--refresh-owned` regenerates only entries whose colour filename
 contains `@2x-xfer-`, replacing unchanged owned entries and their matching material entries while leaving old files on disk.
 Mixed 1x/2x material blocks use nearest-neighbour resampling to the urban material scale at the target page index.
+
+For a theatre whose art differs in only part of a frame, use:
+
+```sh
+python3 python/theatre_pages.py variant-xfer "$THEATRE" "$URBAN" "$BASELINE" \
+  --pages 0,1 --detail 0.35 --max-changed 0.6 --tolerance 14 --min-area 3
+```
+
+`variant-xfer` matches sprite id, frame index and palette key, then aligns the cropped frames on their union box.
+`SpriteFrame.offset` is the crop's top-left relative to the SHP canvas centre (the draw origin), not the atlas origin
+or full-canvas top-left: `src/node/artSource.ts` subtracts half the SHP canvas size during extraction, and
+`src/node/libraryPreview.ts` draws each crop at that offset. This alignment also handles a changed crop size or offset.
+The changed mask compares opaque 1x pixels by CIE76 Delta E between their palette colours in CIE Lab (L in 0–100),
+marking differences strictly above `--tolerance` (default 14). Different indices with similar colours stay unchanged,
+so re-render shading and dither can retain urban detail. For remapped sprites, two house-paint indices 16–31 count as
+the same; exactly one house-paint index counts as a colour change regardless of Delta E. The colour mask removes
+8-connected components smaller than `--min-area` 1x pixels (default 3, positive integer), then closes with a 3x3 square
+to fill small holes in surviving regions. Pixels opaque in just one frame always count as changed and are added after
+cleanup, so even single-pixel silhouette changes survive. Pixels transparent in both frames do not seed colour changes.
+Frames without an eligible HD counterpart, with an empty urban frame, or whose changed area exceeds `--max-changed`
+of the theatre frame's opaque area retain the baseline unchanged. Baseline files are `sprites-N@2x.png` and
+`sprites-N@2x-remap.png`; a page needing unavailable baseline files is skipped, while a fully exact page can be
+transferred without them.
+
+Exact frames copy urban HD colour, alpha and remap bytes. Variant frames copy urban texels outside the changed region
+and use baseline colour, alpha and remap inside it. The 1x mask is enlarged with nearest-neighbour sampling, dilated
+by one 2x pixel, then feathered with a Gaussian of sigma 1.5 and radius 5 pixels; the original changed core keeps full
+baseline weight. In CIE Lab, variant colour keeps baseline a/b and adds
+`detail * (L_urban - GaussianBlur(L_urban, sigma=1.5))` to baseline L where the urban pixel is opaque.
+Material output uses a 2x layout, nearest-expanding 1x urban material pages. It copies urban material outside the mask
+and blends to RGBA `(128, 128, 0, 255)` inside: world-normal x/z near zero (up-facing), the lowest matte specular class,
+and ambient occlusion 1. This is the material encoding in `python/sprite_normals.py`, not a conventional RGB normal map.
+For variant frames only, alpha is corrected where 2x area-downsampling would disagree with the theatre's 1x silhouette.
+Every output frame gets a QA check: downsampled alpha `> 0.5` must match `index > 0` on at least 99.5% of its pixels.
+Exact urban and fallback baseline bytes remain unchanged even when their input silhouette fails that check; failures
+are reported rather than silently changing those inputs.
+
+Pages publish as unique `sprites-N@2x-vxfer-<uuid>.png` files with `-remap` and `-normals` companions, filling missing HD
+entries by default. `--refresh-owned` can replace only current `-vxfer-` entries; other HD entries stay untouched.
+Each page prints urban-exact, variant, baseline and silhouette-QA failure counts. Atomic `variant-xfer-report.json`
+records those counts by page and sprite id, the parameters (including `tolerance` and `min_area`) and whether each page
+was published. Library and normals publication in `xfer`, `variant-xfer`, `overlay-walls` and `normals-merge` holds
+both `.compose.lock` and the corresponding
+cache-farm per-file lock (`.library.json.lock` or `.normals.json.lock`); atomic replacement materialises a farm symlink
+without writing through it to a shared source.
+
 Its `overlay-walls "$LIBRARY" TYPE...` redirects wall overlays
 to HD building frames; `normals-merge "$SRC" "$LIBRARY" "$SPRITES_FILE"` merges only the selected sprites' material
 rectangles, using a whitespace-separated sprite list and preserving incompatible existing layouts. `copy-patches SRC_LIB DST_LIB
@@ -1024,7 +1089,7 @@ building type, the frames the renderer actually plays (body, each layer's played
 as earlier records, L5 model patches, L5 transfers or baseline gaps. These tools use
 atomic JSON/PNG replacements and copy-on-write pages; all supplied libraries, baselines and patches stay outside Git.
 Run their asset-free acceptance from `packages/ra2-assets/python` with
-`python3 -B -m unittest test_redraw_qa test_building_redraw test_rubble_pages test_theatre_pages -v`.
+`python3 -B -m unittest test_redraw_qa test_building_redraw test_rubble_pages test_theatre_pages test_cache_farm -v`.
 
 ## Level 3 building redraw sheets (Python, experimental)
 

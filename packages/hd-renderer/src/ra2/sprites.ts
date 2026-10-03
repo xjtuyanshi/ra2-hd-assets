@@ -106,6 +106,8 @@ export interface SpriteInstance {
    * clamped at white, like the engine's palette lighting.
    */
   light?: number;
+  /** Caller-selected exemption from the map grade; extra object light and HD received light are unchanged. */
+  gradeExempt?: boolean;
   /**
    * How the map's [Lighting] applies (see mapLighting.ts): 'ambient' (default) = level only, for buildings, units,
    * infantry and aircraft; 'full' = level and per-channel colour, for terrain-class art (overlays, smudges, trees);
@@ -338,7 +340,8 @@ export class SpriteLayer {
     this.capacity = Math.max(1, capacity, instances.length);
     const count = this.capacity;
     // Pack related fields into shared vertex buffers. Capacity never introduces an unused instance matrix.
-    this.anchor = new DirtyAttribute(new Float32Array(count * 5), 5);
+    // Draw anchor, map-light sample and grade exemption share one buffer/attribute pair.
+    this.anchor = new DirtyAttribute(new Float32Array(count * 6), 6);
     this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
     this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
     const nativeOffset = capture ? 9 : 8;
@@ -346,10 +349,12 @@ export class SpriteLayer {
 
     const atlasSize = vec2(atlas.width, atlas.height);
     const paletteRows = float(cache.paletteAtlas.image.height);
-    const aAnchor: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec3', 5, 0);
+    const aAnchor: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec3', 6, 0);
     const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
     const aParams: ShaderNode = instancedBufferAttribute(this.params, 'vec4');
-    const aLightSample: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec2', 5, 3);
+    const aLighting: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec3', 6, 3);
+    const aLightSample: ShaderNode = aLighting.xy;
+    const aGradeExempt: ShaderNode = aLighting.z.toVar('spriteGradeExempt');
     const aFlags: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', this.flags.itemSize, 0);
     const aOcclusion: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', this.flags.itemSize, 4);
     const aNative: ShaderNode = instancedBufferAttribute(
@@ -379,10 +384,14 @@ export class SpriteLayer {
     const isUnlit: ShaderNode = step(2.5, aFlags.z);
     // Ungraded trees retain their former terrain event policy; self-lit overlays bypass scene lighting altogether.
     const sceneMultiplier: ShaderNode = mix(nodes.sceneObjectMul, nodes.sceneTerrainMul, max(isFull, isNone));
-    const grade: ShaderNode = mix(
-      mix(vec3(objectLevelAt(cache.mapLight, aLightSample)), terrainGradeAt(cache.mapLight, aLightSample), isFull),
+    const grade: ShaderNode = select(
+      aGradeExempt.greaterThan(0.5),
       vec3(1),
-      isNone,
+      mix(
+        mix(vec3(objectLevelAt(cache.mapLight, aLightSample)), terrainGradeAt(cache.mapLight, aLightSample), isFull),
+        vec3(1),
+        isNone,
+      ),
     ).mul(aFlags.y);
     const objectLit = (c: ShaderNode): ShaderNode => srgbScale(c, grade);
     const ppu = float(PIXELS_PER_CELL_EDGE);
@@ -1016,6 +1025,7 @@ export class SpriteLayer {
         this.anchor.setXYZ(i, s.anchor.x, s.anchor.y, s.anchor.z);
         this.anchor.setComponent(i, 3, s.lightSample?.[0] ?? s.anchor.x);
         this.anchor.setComponent(i, 4, s.lightSample?.[1] ?? s.anchor.z);
+        this.anchor.setComponent(i, 5, s.gradeExempt ? 1 : 0);
         this.rect.setXYZW(i, s.frame.rect[0], s.frame.rect[1], s.frame.rect[2], s.frame.rect[3]);
         this.params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], this.cache.paletteRow.get(s.palette) ?? 0, s.push);
         this.flags.setXYZW(

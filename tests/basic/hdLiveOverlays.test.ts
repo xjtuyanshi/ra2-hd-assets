@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { LibraryOverlay, LibraryType } from '../../packages/ra2-assets/src/library';
+import { mapAtmosphere } from '../../packages/ra2-assets/src/lights';
 import type { SpriteEntry, SpriteFrame } from '../../packages/ra2-assets/src/manifest';
 import {
   buildOverlayInstances,
@@ -113,6 +114,30 @@ function rubbleFixture(patch: Partial<LibraryOverlay> = {}) {
 }
 
 describe('live overlay instances', () => {
+  it('exempts only ore and gems from the lunar map grade, including mixed atlas pages', () => {
+    const art = library();
+    // The class, not the page or palette, selects the grade exemption.
+    for (const entry of Object.values(art.sprites)) for (const frame of entry.frames) frame.page = 0;
+    art.sprites['overlay:TIB01'].shadows = [frame(9, 0)];
+    const state = cells();
+    state.data[0] = 0;
+    const atmosphere = mapAtmosphere(
+      { ambient: 0.65, ground: 0.05, level: 0.008, red: 1, green: 1, blue: 1.1 },
+      3,
+      undefined,
+      'lunar',
+    );
+    const result = buildOverlayInstances(state, art, terrain(), palette, atmosphere);
+    const bodies = result.pages.get(0)!;
+    expect(bodies.map((instance) => Boolean(instance.gradeExempt))).toEqual([true, true, false, false]);
+    expect(result.pages.get(9)![0]!.gradeExempt).toBeUndefined();
+    const day = buildOverlayInstances(state, art, terrain(), palette);
+    expect(day.pages.get(0)!.every((instance) => !instance.gradeExempt)).toBe(true);
+    const { art: rubbleArt, state: rubbleState } = rubbleFixture({ tiberium: true });
+    const rubble = buildOverlayInstances(rubbleState, rubbleArt, terrain(), palette, atmosphere);
+    expect(Boolean(rubble.pages.get(4)![0]!.gradeExempt)).toBe(false);
+    expect(rubble.pages.get(9)![0]!.gradeExempt).toBeUndefined();
+  });
   it('uses exact native growth/connection frames, extracted draw points and local wall remap', () => {
     const art = library();
     const built = buildOverlayInstances(cells(), art, terrain(), palette);
@@ -249,6 +274,19 @@ describe('live overlay instances', () => {
 });
 
 describe('overlay instance revision cache', () => {
+  it('rebuilds the grade exemption when airless changes without changing the engine cells', () => {
+    const cache = new OverlayInstanceCache(terrain());
+    const state = cells();
+    const art = library();
+    expect(cache.update(state, art, '', palette, { airless: true })).toBe(true);
+    expect(cache.instances.pages.get(0)![0]!.gradeExempt).toBe(true);
+    expect(cache.update(state, art, '', palette, { airless: true })).toBe(false);
+    expect(cache.update(state, art, '', palette, { airless: false })).toBe(true);
+    expect(Boolean(cache.instances.pages.get(0)![0]!.gradeExempt)).toBe(false);
+    expect(cache.update(state, art, '', palette)).toBe(false);
+    expect(cache.update(state, art, '', palette, { airless: true })).toBe(true);
+    expect(cache.instances.pages.get(0)![0]!.gradeExempt).toBe(true);
+  });
   it('ignores structured clone identity and rebuilds only content, palette or source changes', () => {
     const cache = new OverlayInstanceCache(terrain());
     const state = cells();

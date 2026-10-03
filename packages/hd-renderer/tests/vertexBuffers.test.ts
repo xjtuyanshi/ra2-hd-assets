@@ -255,6 +255,33 @@ describe('r186 vertex and uniform binding budget', () => {
     }
   });
 
+  it('emits per-instance map-grade exemption in every sprite colour path and pass', () => {
+    const source = cache();
+    for (const hd of [null, { color: texture(), remap: texture() }]) {
+      for (const materials of [null, { texture: texture() }]) {
+        const layer = new SpriteLayer(source, [], 1, undefined, hd, texture(), materials);
+        for (const mesh of [layer.mesh, ...layer.groundPasses]) {
+          const { fragmentShader } = assertLimits(mesh);
+          const exemptionLines = fragmentShader.split('\n').filter((line) => line.includes('spriteGradeExempt'));
+          const label = `${mesh.name}: ${hd ? 'HD' : 'indexed'}, ${materials ? 'materials' : 'plain'}`;
+          // Compile the real TSL graph: uploading an attribute alone does not prove the fragment shader reads it.
+          expect(exemptionLines.join('\n'), label).toMatch(/spriteGradeExempt\s*=\s*\w+\.z;/);
+          // The per-instance flag chooses unit palette light; default instances keep the existing class grade.
+          const exemption = fragmentShader.match(
+            /if \( \( spriteGradeExempt > 0\.5 \) \) \{\s*(\w+) = vec3<f32>\( 1\.0, 1\.0, 1\.0 \);\s*\} else \{([\s\S]*?)\n\s*\}/,
+          );
+          expect(exemption, label).not.toBeNull();
+          expect(exemption![2], label).toContain('mix(');
+          expect(exemption![2], label).toContain('max(');
+          expect(exemption![2], label).toContain('textureSample(');
+          expect(fragmentShader, label).not.toContain('spriteReceivedLightGain');
+        }
+        dispose(layer.mesh);
+      }
+    }
+    source.nodes!.dispose();
+  });
+
   it('builds crystal sparkle in every material pass, including under, with no sparkle nodes on default pages', () => {
     const source = cache();
     for (const materials of [null, { texture: texture() }]) {

@@ -383,5 +383,7 @@ describe('live staging hour', () => {
     expect(liveTimeOfDay({ kind: 'dusk', hour: 19 }, { dayHour: 16.5 })).toBe(19);
     expect(liveTimeOfDay({ kind: 'night', hour: 22 }, { timeOfDay: 12, dayHour: 16.5 })).toBe(12);
     expect(liveTimeOfDay({ kind: 'day', hour: 12 }, {})).toBe(12);
+    expect(liveTimeOfDay({ kind: 'day', hour: 12, airless: true }, { dayHour: 16.5 })).toBe(12);
+    expect(liveTimeOfDay({ kind: 'day', hour: 12, airless: true }, { timeOfDay: 10, dayHour: 16.5 })).toBe(10);
   });
 });

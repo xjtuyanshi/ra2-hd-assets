@@ -1,4 +1,5 @@
 import type { TypeLibrary } from '../../../ra2-assets/src/library';
+import { spriteClassGradeExempt, type AtmosphereProfile } from '../../../ra2-assets/src/lights';
 import { cardPush, objectAnchor, type SpriteInstance } from '../ra2/sprites';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 
@@ -40,6 +41,7 @@ export function buildOverlayInstances(
   library: Pick<TypeLibrary, 'overlays' | 'sprites' | 'types'> | null,
   terrain: OverlayTerrain,
   palette: (key: string, remap: boolean) => string,
+  atmosphere: Pick<AtmosphereProfile, 'airless'> = {},
 ): OverlayInstances {
   const pages = new Map<number, SpriteInstance[]>();
   const missingTypes = new Set<string>();
@@ -131,6 +133,7 @@ export function buildOverlayInstances(
       unlit: !isRubble && type.tiberium === true,
       lighting: type.lighting,
       deckHeight: !isRubble && isHighBridge(id) ? HIGH_BRIDGE_HEIGHT : undefined,
+      gradeExempt: spriteClassGradeExempt(atmosphere, !isRubble && type.tiberium ? 'ore' : 'overlay'),
     });
   }
   return { pages, missingTypes };
@@ -153,18 +156,19 @@ export class OverlayInstanceCache {
     library: Pick<TypeLibrary, 'overlays' | 'sprites' | 'types'> | null,
     paletteKey: string,
     palette: (key: string, remap: boolean) => string,
+    atmosphere: Pick<AtmosphereProfile, 'airless'> = {},
   ): boolean {
     // Libraries extracted before the overlay section existed cannot replace the map's art yet.
     if (!library?.overlays) cells = null;
     const key = cells
-      ? `${cells.revision}:${cells.originX}:${cells.originY}:${cells.width}:${cells.height}:${paletteKey}:${JSON.stringify(cells.rubble ?? [])}`
+      ? `${cells.revision}:${cells.originX}:${cells.originY}:${cells.width}:${cells.height}:${paletteKey}:${JSON.stringify(cells.rubble ?? [])}:${spriteClassGradeExempt(atmosphere, 'ore')}`
       : null;
     if (key === this.key && library === this.library) return false;
     this.key = key;
     this.library = library;
     this.active = cells !== null;
     this.instances = cells
-      ? buildOverlayInstances(cells, library, this.terrain, palette)
+      ? buildOverlayInstances(cells, library, this.terrain, palette, atmosphere)
       : { pages: new Map(), missingTypes: new Set() };
     return true;
   }

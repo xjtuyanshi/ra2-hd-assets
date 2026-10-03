@@ -26,6 +26,8 @@ export interface WaterUniforms {
   sunColor: ShaderNode;
   skyZenith: ShaderNode;
   skyHorizon: ShaderNode;
+  /** 1 for airless light: reflection looks keep sky luminance without their atmospheric colour filters. */
+  airless: ShaderNode;
   ambient: ShaderNode;
   rain: ShaderNode;
   wind: ShaderNode;
@@ -37,6 +39,7 @@ export function createWaterUniforms(): WaterUniforms {
     sunColor: uniform(new Color(1, 0.95, 0.85)),
     skyZenith: uniform(new Color(0.25, 0.45, 0.75)),
     skyHorizon: uniform(new Color(0.7, 0.8, 0.9)),
+    airless: uniform(0),
     ambient: uniform(new Color(0.4, 0.45, 0.5)),
     rain: uniform(0),
     wind: uniform(0.3),

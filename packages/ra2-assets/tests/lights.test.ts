@@ -20,6 +20,8 @@ import {
   placeStreetLamps,
   readEngineLighting,
   readLightType,
+  sidecarAtmosphere,
+  spriteClassGradeExempt,
   surfaceFromLandType,
   validateMapLights,
   type EngineLight,
@@ -241,6 +243,54 @@ describe('mapAtmosphere', () => {
     expect(mapAtmosphere(L(0.76, 1, 1, 1), 0).kind).toBe('day');
   });
 
+  it('stages MoonPatr as dim airless daylight regardless of night evidence', () => {
+    const lighting = L(0.65, 1, 1, 1.1, 0.05, 0.008);
+    const profile = mapAtmosphere(lighting, 3, { lamps: 20 }, 'lunar');
+    expect(profile).toMatchObject({ kind: 'day', hour: 12, airless: true, nightLevel: DEFAULT_NIGHT_LEVEL });
+    expect(profile.tint).toEqual([1, 1, 1]);
+    expect(profile).not.toHaveProperty('exposure');
+    expect(mapAtmosphere(lighting, 3).kind).toBe('night');
+  });
+
+  it('leaves lunar dimming to the palette grade and preserves staging for every other theater', () => {
+    for (const [ambient, height] of [
+      [0.05, 0],
+      [0.65, 3],
+      [2, 10],
+    ] as const) {
+      expect(mapAtmosphere(L(ambient, 1, 1, 1.1, 0.05, 0.008), height, undefined, 'LUNAR')).toEqual({
+        kind: 'day',
+        hour: 12,
+        airless: true,
+        nightLevel: DEFAULT_NIGHT_LEVEL,
+        tint: [1, 1, 1],
+      });
+    }
+    const transylv = L(0.6, 0.9, 0.9, 1, 0.05, 0.008);
+    expect(mapAtmosphere(transylv, 2, { lamps: 4 }, 'newurban')).toEqual(mapAtmosphere(transylv, 2, { lamps: 4 }));
+    expect(mapAtmosphere(transylv, 2, { lamps: 4 }, 'newurban').kind).toBe('night');
+    const alamo = mapAtmosphere(XMP_LIGHTING, 2, { lamps: 7 });
+    for (const theater of ['temperate', 'snow', 'urban', 'newurban', 'desert']) {
+      expect(mapAtmosphere(XMP_LIGHTING, 2, { lamps: 7 }, theater)).toEqual(alamo);
+    }
+    expect(alamo.kind).toBe('day');
+    expect(alamo).not.toHaveProperty('exposure');
+    expect(alamo).not.toHaveProperty('airless');
+  });
+
+  it('recomputes lunar staging from sidecar theater instead of stale atmosphere', () => {
+    const lighting = readEngineLighting(() => undefined);
+    lighting.normal = L(0.65, 1, 1, 1.1, 0.05, 0.008);
+    const cells = { medianZ: 3, surface: 'AQ==' };
+    expect(sidecarAtmosphere({ lighting, cells, lights: [], theater: 'lunar' })).toEqual(
+      mapAtmosphere(lighting.normal, 3, undefined, 'lunar'),
+    );
+    expect(sidecarAtmosphere({ lighting, cells, lights: [] }, 'lunar')).toEqual(
+      mapAtmosphere(lighting.normal, 3, undefined, 'lunar'),
+    );
+    expect(sidecarAtmosphere({ lighting, cells, lights: [] })).toEqual(mapAtmosphere(lighting.normal, 3));
+  });
+
   // The stock night maps listed in docs/remaster/research/yr-scene-lighting.md, with their real [Lighting], median
   // cell height (the extractor's missing-cell fill) and lamp posts (positive InvisibleInGame light sources).
   const NIGHT_MAPS: [name: string, lighting: ReturnType<typeof L>, medianZ: number, lamps: number][] = [
@@ -293,6 +343,33 @@ describe('mapAtmosphere', () => {
 
   it('keeps night readable with clamps', () => {
     expect(mapAtmosphere(L(0.3, 1, 1, 1), 0).nightLevel).toBe(0.26);
+  });
+});
+
+describe('spriteClassGradeExempt', () => {
+  it('exempts only the ore class from the airless map grade', () => {
+    const profile = mapAtmosphere(
+      { ambient: 0.65, red: 1, green: 1, blue: 1.1, ground: 0.05, level: 0.008 },
+      3,
+      undefined,
+      'lunar',
+    );
+    expect(spriteClassGradeExempt(profile, 'ore')).toBe(true);
+    for (const spriteClass of ['ground', 'overlay', 'smudge', 'building', 'infantry', 'unit']) {
+      expect(spriteClassGradeExempt(profile, spriteClass)).toBe(false);
+    }
+  });
+
+  it('leaves all classes on ordinary day/night profiles subject to the map grade', () => {
+    for (const profile of [
+      mapAtmosphere(XMP_LIGHTING, 2),
+      mapAtmosphere({ ...XMP_LIGHTING, ambient: 0.6 }, 2),
+      { airless: false },
+    ]) {
+      for (const spriteClass of ['ore', 'ground', 'overlay', 'smudge', 'building', 'infantry', 'unit']) {
+        expect(spriteClassGradeExempt(profile, spriteClass)).toBe(false);
+      }
+    }
   });
 });
 

@@ -46,8 +46,9 @@ rounded to 0.1, over the 220 entries with a `[Lighting]` section:
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Scenarios | 5 | 28 | 66 | 40 | 77 | 2 | 2 |
 
-The 0.6-0.72 group are the maps built as night maps: blue or neutral tints, lamp-post light sources (`INYELWLAMP`,
-`INGALITE`, `INBLULMP`, `SNONITLAMP`) and `NEGLAMP` darkening. Examples:
+The non-lunar 0.6-0.72 group are the maps built as night maps: blue or neutral tints, lamp-post light sources
+(`INYELWLAMP`, `INGALITE`, `INBLULMP`, `SNONITLAMP`) and `NEGLAMP` darkening. Lunar maps share this low ambient range
+but use dim airless daylight rather than the night presentation. Examples:
 
 | Map (source) | Theater | Ambient | R/G/B | Ground | Level | Light sources |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -70,7 +71,7 @@ the same art (`gglite.shp`).
 
 ## HD mapping
 
-- `mapAtmosphere`: the class comes from the authored base ambient `base = Ambient - Ground` and the tint, with lamp
+- `mapAtmosphere`: outside theater `lunar`, the class comes from the authored base ambient `base = Ambient - Ground` and the tint, with lamp
   posts (positive `InvisibleInGame` light sources) as evidence: night when `base <= 0.70`, or `base <= 0.76` with a
   blue tint or with two or more lamp posts (unless the tint is warm); dusk when `base <= 0.76` with a warm tint; day
   otherwise. `Level * medianZ` is deliberately left out of the class: an earlier version classified on
@@ -79,7 +80,8 @@ the same art (`gglite.shp`).
   ground at the typical height shows). `packages/ra2-assets/tests/lights.test.ts` checks the real (Ambient, RGB,
   Ground, Level, medianZ, lamp posts) of XMP06T2, XMP13S4, amazon.mmx, sov07tmd, Transylv, NOWIMPS and XTN01T2 (all
   night) and of XMP29U2, RiverRam and invasion.mmx (day). Renderers recompute the profile from the sidecar's raw data
-  (`sidecarAtmosphere`), so sidecars written by an older classifier stage maps the current way.
+  (`sidecarAtmosphere`), including the theater, so sidecars written by an older classifier stage maps the current way.
+  Theater `lunar` takes the airless day profile described below; an omitted theater retains the prior classifier.
 - Linear light from engine brightness: `engineToLinear(e) = 0.30 * (e / 0.62)^2.2` (the palette scales display
   values, so linear light scales by v^2.2); a typical stock night (0.62) shows unlit ground at 30 % of noon. Night maps
   are clamped to 26-40 % of noon so every night stays readable.
@@ -106,7 +108,9 @@ the same art (`gglite.shp`).
   next to the `INGALITE` posts (1.340 predicted). Its weight fades with the night weight on day maps and is 0 on maps
   staged as night, whose light the night presentation above derives from the same data (one owner at a time).
   Authored dusk keeps weight 1 and source share 1 at its map hour, including under cinematic settings whose day-map
-  source share is 0.2. `mapLightMultipliers` in `packages/ra2-assets/src/iso.ts` (offline previews) uses the same formula.
+  source share is 0.2. Airless lunar day profiles retain weight `1 - night`: this grade owns their ambient, tint and
+  map light sources, while their sun/sky keys stay neutral and do not multiply in the ambient again.
+  `mapLightMultipliers` in `packages/ra2-assets/src/iso.ts` (offline previews) uses the same formula.
 
 ## Dusk staging and unlit resource overlays
 
@@ -216,6 +220,60 @@ Dominator state 5, unlike bulk palette updates. Dominator's `5 -> 0` transition 
 relight, so cached cells can briefly retain older coefficients. The global snapshot follows the documented bulk
 palette/incremental-relight policy; those cached per-cell exceptions and TimeWarp's full lifecycle remain
 **UNVERIFIED** against runtime captures. Asset-free reader tests do not establish rendered-pixel acceptance.
+
+## Lunar daylight and ore/gem brightness
+
+The C1 baseline is the user's original-versus-HD measurement on the same frozen MoonPatr frame at 2x. A 480 x 320
+box of flat regolith, restricted to low-saturation pixels, gave the following readings. These are baseline evidence,
+not measurements of the implementation after C1.
+
+| Presentation | Regolith L* median / standard deviation | Regolith a* / b* | Gem HSV V median / p95 |
+| --- | --- | --- | --- |
+| Original YR | 47 / 14 (speckled grain) | -3 / -3 | 0.53 / 0.97 |
+| HD classified as night | not recorded | not recorded / about -17 | 0.35 / 0.50 |
+| HD forced to noon (`hd-time=12`) | 75 / not recorded | not recorded / -9 | 0.71 / 0.85 |
+
+MoonPatr's `[Lighting]` is Ambient `0.65`, Red `1`, Green `1`, Blue `1.1`, Ground `0.05`, Level `0.008`. Its base
+intensity is `0.60`; the height term gives roughly `0.62` on the measured ground. The original engine scales palette
+sRGB code values by cell intensity, so a factor near `0.62` corresponds to about `0.33-0.36` in linear light. This
+explains the original L* 47 versus forced-noon L* 75 without inventing moonlight or a blue sky. Gem highlights instead
+reach V p95 `0.97`, essentially the unlit art's p95 `0.96`: on this map, ore/gem overlays retain art brightness while
+the ground is dimmed.
+
+The later C4 same-moment captures supplied with the task show why a uniform scene exposure is insufficient. Away
+from lamps, the original regolith has L* `47` and the exposure-staged HD has L* `46`; gem V p95 already matches
+at `0.97`. Around the player's base, however, the original draws strong blue-violet pools from MoonPatr's nine map
+light sources (`SNONITLAMP` x5, `INBLULMP` x4), while HD is uniformly grey. Disabling `MapLightGrade` discarded
+these engine-exact local contributions. These are pre-C4 observations, not a rendered result from the new code.
+
+The lunar rule is therefore **engine grade including light sources + neutral airless sun/sky + ore exempt**.
+The map policy in `packages/ra2-assets/src/lights.ts` handles theater `lunar` before the terrestrial ambient
+classifier and returns `kind: 'day'`, `hour: 12`, `tint: [1, 1, 1]`, `airless: true`, with no `exposure` multiplier.
+`MapLightGrade` stays at weight `1 - night`, with `setSources` and `sourceWeight` following other day maps. The
+engine cell formula applies ambient, height and the local sources once, in palette sRGB: terrain-class art takes
+intensity x tint, objects take intensity. This retains the original lamp pools as well as the dim ground between
+them. Height affects the per-cell grade, not the lunar day classification. Non-lunar maps retain their existing
+results: Transylv (`newurban`, Ambient `0.60`, RGB `0.9/0.9/1.0`) remains night, and XMP29U2 remains day.
+
+In `packages/hd-renderer/src/lighting.ts`, airless sun, fill, ground and sky swatches remain luminance-matched
+neutral greys at the unscaled noon reference. Sky/haze and cinematic colour controls add no terrestrial blue;
+white adaptation and map-tint adaptation stay off. Exposure adaptation also remains off based on `airless`, even
+though the profile has no `exposure` field, so the dim palette-graded scene is not lifted back toward noon.
+Default staging stays at noon with HD night dressing off; the original map lamps remain in the day grade.
+
+Ore/gem brightness is a game-layer sprite-class policy: `spriteClassGradeExempt` returns true only for class `ore`
+on an airless profile. Library overlays whose extracted type has `tiberium: true` belong to that class. The generic
+sprite renderer receives a per-instance exemption flag and samples multiplier 1 (`vec3(1)` for the terrain grade)
+instead of `terrainGradeAt`/`objectLevelAt`, without knowing any RA2 overlay names or theater. This replaces the
+former `1 / exposure` received-light gain; all other classes and ordinary day/night profiles retain their grade.
+
+Visual acceptance remains **UNVERIFIED** for C4: the task prohibits starting a server or browser. To verify on an
+existing owner-run scene, freeze MoonPatr at the same frame and compare original with default HD staging, then
+repeat the regolith crop and gem samples above. Check blue-violet pools around the base, near-neutral dim regolith
+away from lamps, bright gem highlights, no HD night dressing, and no blue haze under the cinematic look. Repeat
+on Transylv and XMP29U2 to check that night and terrestrial day staging are unchanged. No new disassembly inspection
+was performed for C4; the ore/gem palette or `LightConvert` selection path and its addresses remain unverified,
+so the overlay exception is supported by the supplied same-frame measurements rather than an inferred executable address.
 
 ## Open questions
 

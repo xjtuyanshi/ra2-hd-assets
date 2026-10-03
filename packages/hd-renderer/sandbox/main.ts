@@ -90,8 +90,8 @@ if (world?.cache) {
   // Recomputed from the sidecar's raw [Lighting] and lamp posts, so a sidecar written by an older classifier stages
   // the map like the current one.
   state.map.atmosphere = lights
-    ? sidecarAtmosphere(lights)
-    : mapAtmosphere(lighting, medianHeight(world.cache.height, world.cache.exists));
+    ? sidecarAtmosphere(lights, manifest.theater)
+    : mapAtmosphere(lighting, medianHeight(world.cache.height, world.cache.exists), undefined, manifest.theater);
   // Without ?time the map decides (noon for day maps, as before).
   if (!params.has('time')) state.environment.timeOfDay = state.map.atmosphere.hour;
 }

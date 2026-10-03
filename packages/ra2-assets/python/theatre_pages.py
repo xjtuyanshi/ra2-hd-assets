@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Reuse shared theatre HD pages, redirect wall overlays and merge sprite materials.
 
-All inputs are local library directories or sprite lists. NumPy and Pillow are
-required; this module neither extracts game files nor downloads assets.
+All inputs are local library directories or sprite lists. NumPy, Pillow and OpenCV
+are required; this module neither extracts game files nor downloads assets.
 """
 from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from functools import lru_cache
 import json
 from pathlib import Path
 import shutil
@@ -15,6 +16,7 @@ import tempfile
 from uuid import uuid4
 
 import numpy as np
+import cv2
 from PIL import Image
 
 import cache_farm
@@ -49,8 +51,9 @@ def atomic_image(path, pixels):
 
 
 def patch_json(path, update, default=None):
+    # Callers hold .compose.lock; also serialize with cache_farm-only writers.
     path = Path(path)
-    options = {'default': default} if default is not None else {}
+    options = {} if default is None else {'default': default}
     cache_farm.patch_json(path.parent, path.name, update, **options)
 
 
@@ -242,12 +245,295 @@ def xfer(theatre, urban, baseline, pages=None, refresh_owned=False):
                 entries = current.setdefault('pages', {})
                 for page, entry in material_entries.items():
                     key = str(page)
-                    old_hd = owned_entries.get(page)
-                    old_material = entries.get(key)
-                    if key not in entries or (old_hd and (
-                            not old_material or old_material.get('atlas') == old_hd['file'])):
+                    if (key in entries) == (key in materials) and entries.get(key) == materials.get(key):
                         entries[key] = entry
             patch_json(tdir / 'normals.json', put_materials, {'version': 1, 'pages': {}})
+        return sorted(published)
+
+
+# sprite_normals.py encodes world normal X/Z in RG, specular class in B, AO in A.
+# Y is reconstructed positive: (128, 128) points up; class 0 is matte, AO 255 is unoccluded.
+FLAT_MATERIAL = np.array([128, 128, 0, 255], dtype=np.uint8)
+
+
+def frame_block(pixels, frame, scale=1):
+    x, y, w, h = frame['rect']
+    if min(x, y, w, h) < 0 or scale * (x + w) > pixels.shape[1] or scale * (y + h) > pixels.shape[0]:
+        raise ValueError('frame rectangle lies outside its page')
+    return pixels[scale*y:scale*(y+h), scale*x:scale*(x+w)]
+
+
+def frame_union(frame, other):
+    """Align crop origins in the shared SHP draw coordinate system (not atlas space).
+
+    src/node/artSource.ts produces offset = SHP crop origin - floor(canvas / 2);
+    src/manifest.ts SpriteFrame and node/libraryPreview.ts draw at offset + local pixel.
+    Offsets may be negative, and differing crop sizes must not be stretched to match.
+    """
+    origins = np.asarray([frame['offset'], other['offset']])
+    if not np.isfinite(origins).all() or not np.equal(origins, np.round(origins)).all():
+        raise ValueError('frame offsets must use integer pixels')
+    origins = origins.astype(int)
+    lower = origins.min(axis=0)
+    upper = (origins + np.asarray([frame['rect'][2:], other['rect'][2:]])).max(axis=0)
+    return tuple((upper - lower)[::-1]), origins - lower
+
+
+def aligned_block(block, shape, origin, scale=1):
+    out = np.zeros((shape[0]*scale, shape[1]*scale, *block.shape[2:]), block.dtype)
+    x, y = origin * scale
+    out[y:y+block.shape[0], x:x+block.shape[1]] = block
+    return out
+
+
+def variant_mask(target, source, target_palette, source_palette, remap=False, tolerance=14, min_area=3):
+    """Keep perceptual colour regions and every native silhouette difference."""
+    opaque_t, opaque_s = target > 0, source > 0
+    both = opaque_t & opaque_s
+    # Float RGB conversion gives CIE Lab L in 0..100, not OpenCV's encoded uint8 Lab.
+    lab_t = cv2.cvtColor(target_palette[None].astype(np.float32) / 255, cv2.COLOR_RGB2LAB)[0]
+    lab_s = cv2.cvtColor(source_palette[None].astype(np.float32) / 255, cv2.COLOR_RGB2LAB)[0]
+    delta_e = np.linalg.norm(lab_t[target] - lab_s[source], axis=-1)
+    colour = both & (delta_e > tolerance)
+    if remap:
+        paint_t, paint_s = (target >= 16) & (target <= 31), (source >= 16) & (source <= 31)
+        colour = (colour & ~(paint_t & paint_s)) | (both & (paint_t ^ paint_s))
+    # Remove dither speckles before filling small gaps inside surviving snow regions.
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(colour.astype(np.uint8), connectivity=8)
+    keep = stats[:, cv2.CC_STAT_AREA] >= min_area
+    keep[0] = False
+    colour = cv2.morphologyEx(keep[labels].astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    # Silhouette changes are never filtered, even when only one native pixel differs.
+    return (opaque_t ^ opaque_s) | colour.astype(bool)
+
+
+def feather_mask(changed):
+    core = changed.repeat(2, axis=0).repeat(2, axis=1).astype(np.float32)
+    grown = cv2.dilate(core, np.ones((3, 3), np.uint8))
+    feather = cv2.GaussianBlur(grown, (11, 11), 1.5, borderType=cv2.BORDER_CONSTANT)
+    # Keep changed pixels wholly in the variant; feather only the boundary outside C.
+    return np.maximum(core, feather)
+
+
+def masked_variant(baseline, source, weight, detail):
+    """Transfer only source luminance high frequencies; retain baseline Lab chroma."""
+    lab_b = cv2.cvtColor(baseline[..., :3].astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+    lab_s = cv2.cvtColor(source[..., :3].astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+    luminance = lab_s[..., 0]
+    high = luminance - cv2.GaussianBlur(luminance, (0, 0), 1.5)
+    lab_b[..., 0] = np.clip(lab_b[..., 0] + detail * high * (source[..., 3] > 0), 0, 100)
+    coloured = np.clip(np.rint(cv2.cvtColor(lab_b, cv2.COLOR_LAB2RGB) * 255), 0, 255).astype(np.uint8)
+    variant = baseline.copy()
+    if detail:
+        variant[..., :3] = coloured
+        # No source coverage means no detail; retain baseline bytes exactly there.
+        variant[source[..., 3] == 0, :3] = baseline[source[..., 3] == 0, :3]
+    return blend_pixels(source, variant, weight)
+
+
+def blend_pixels(source, target, weight):
+    if source.ndim == 3:
+        weight = weight[..., None]
+    return np.clip(np.rint(source.astype(np.float32) * (1 - weight) + target * weight), 0, 255).astype(np.uint8)
+
+
+def silhouette_matches(colour, indices):
+    h, w = indices.shape
+    opaque = colour[..., 3].reshape(h, 2, w, 2).mean(axis=(1, 3)) > 127.5
+    return opaque == (indices > 0)
+
+
+def preserve_silhouette(colour, indices):
+    # Feathering must not add/remove native pixels. Correct only contradicting 2x
+    # cells, leaving all already-valid alpha (including subpixel edges) untouched.
+    wrong = ~silhouette_matches(colour, indices)
+    mask = wrong.repeat(2, axis=0).repeat(2, axis=1)
+    alpha = (indices > 0).astype(np.uint8).repeat(2, axis=0).repeat(2, axis=1) * 255
+    colour[..., 3][mask] = alpha[mask]
+
+
+def transfer_counts():
+    return dict(urban_exact=0, variant=0, baseline=0, qa_silhouette_failures=0)
+
+
+def variant_xfer(theatre, urban, baseline, pages=None, refresh_owned=False, detail=0.35, max_changed=0.6,
+                 tolerance=14, min_area=3):
+    """Reuse accepted redraws, replacing only aligned native-art differences."""
+    if not np.isfinite(detail) or detail < 0:
+        raise ValueError('detail must be finite and nonnegative')
+    if not np.isfinite(max_changed) or not 0 <= max_changed <= 1:
+        raise ValueError('max-changed must be between 0 and 1')
+    if not np.isfinite(tolerance) or tolerance < 0:
+        raise ValueError('tolerance must be finite and nonnegative')
+    if not isinstance(min_area, int) or min_area < 1:
+        raise ValueError('min-area must be a positive integer')
+    tdir, udir, base = Path(theatre), Path(urban), Path(baseline)
+    if tdir.resolve() == udir.resolve():
+        raise ValueError('theatre and urban directories must differ')
+    with library_lock(tdir):
+        source, target = read_json(udir / 'library.json'), read_json(tdir / 'library.json')
+        source_normals = read_json(udir / 'normals.json', {'pages': {}})
+        source_materials = source_normals['pages']
+        materials = read_json(tdir / 'normals.json', {'pages': {}})['pages']
+        sp = {k: read_image(udir / v, 'RGB').reshape(-1, 3) for k, v in source['palettes'].items()}
+        tp = {k: read_image(tdir / v, 'RGB').reshape(-1, 3) for k, v in target['palettes'].items()}
+
+        @lru_cache(maxsize=2)
+        def source_indices(page):
+            return idx_page(udir, source, page)
+
+        @lru_cache(maxsize=2)
+        def source_hd(page):
+            entry = source['spriteAtlasesHd'][page]
+            colour = read_image(udir / entry['file'], 'RGBA')
+            remap = read_image(udir / entry['remap'], 'L')
+            shape = source_indices(page).shape
+            if entry.get('scale') != 2 or colour.shape != (shape[0]*2, shape[1]*2, 4) or remap.shape != colour.shape[:2]:
+                raise ValueError(f'source HD dimensions/scale differ on page {page}')
+            me = source_materials.get(str(page))
+            material, factor = None, 2
+            if me and me.get('atlas') == entry['file']:
+                factor = material_scale(me)
+                material = read_image(udir / me['file'], 'RGBA')
+                if material.shape != (shape[0]*factor, shape[1]*factor, 4):
+                    raise ValueError(f'source material dimensions differ on page {page}')
+            return colour, remap, material, factor
+
+        report = dict(version=1, parameters=dict(detail=detail, max_changed=max_changed,
+                                                tolerance=tolerance, min_area=min_area), pages={}, sprites={})
+        hd_entries, material_entries, owned_entries = {}, {}, {}
+        pages = range(len(target['spriteAtlases'])) if pages is None else pages
+        for page in dict.fromkeys(pages):
+            if page < 0 or page >= len(target['spriteAtlases']):
+                raise ValueError(f'theatre has no indexed page {page}')
+            old_hd = page_entry(target.get('spriteAtlasesHd') or [], page)
+            counts, sprite_counts = transfer_counts(), {}
+            report['pages'][str(page)] = counts
+            counts['published'] = False
+            if old_hd and (not refresh_owned or '-vxfer-' not in old_hd.get('file', '')):
+                counts['skipped'] = 'existing HD entry'
+                print(f'page {page}: theatre already has HD entry, skipped')
+                continue
+            if old_hd:
+                owned_entries[page] = old_hd
+            indices = idx_page(tdir, target, page)
+            bp, br = base / f'sprites-{page}@2x.png', base / f'sprites-{page}@2x-remap.png'
+            has_baseline = bp.exists() and br.exists()
+            shape = (indices.shape[0]*2, indices.shape[1]*2)
+            baseline_colour = read_image(bp, 'RGBA') if has_baseline else np.zeros((*shape, 4), np.uint8)
+            baseline_remap = read_image(br, 'L') if has_baseline else np.zeros(shape, np.uint8)
+            # Aliased frame rectangles must always sample the original baseline.
+            colour, remap = baseline_colour.copy(), baseline_remap.copy()
+            if colour.shape != (*shape, 4) or remap.shape != shape:
+                raise ValueError(f'baseline dimensions differ from theatre page {page}')
+            # All output materials use the HD layout. Missing source data stays no-data.
+            mat = np.zeros((*shape, 4), np.uint8)
+            missing_baseline = False
+            for sid, sprite in target['sprites'].items():
+                other_sprite = source['sprites'].get(sid)
+                for k, frame in enumerate(sprite['frames']):
+                    x, y, w, h = frame['rect']
+                    if frame.get('page', 0) != page or not w or not h:
+                        continue
+                    own = frame_block(indices, frame)
+                    dest = (slice(2*y, 2*(y+h)), slice(2*x, 2*(x+w)))
+                    kind = 'baseline'
+                    candidate = (other_sprite and k < len(other_sprite['frames'])
+                                 and sprite.get('palette') == other_sprite.get('palette'))
+                    if candidate:
+                        other = other_sprite['frames'][k]
+                        up = other.get('page', 0)
+                        candidate = bool(page_entry(source.get('spriteAtlasesHd') or [], up))
+                    if candidate and other['rect'][2] and other['rect'][3]:
+                        native = frame_block(source_indices(up), other)
+                        union, origins = frame_union(frame, other)
+                        ti, ui = aligned_block(own, union, origins[0]), aligned_block(native, union, origins[1])
+                        key = sprite.get('palette')
+                        changed = variant_mask(ti, ui, tp[key], sp[key], bool(sprite.get('remap')), tolerance, min_area)
+                        # Removed source pixels count too; they must not survive as ghost edges.
+                        fraction = np.count_nonzero(changed) / max(1, np.count_nonzero(own))
+                        if native.any() and fraction <= max_changed:
+                            kind = 'variant' if changed.any() else 'urban_exact'
+                            uc, ur, um, factor = source_hd(up)
+                            ac = aligned_block(frame_block(uc, other, 2), union, origins[1], 2)
+                            ar = aligned_block(frame_block(ur, other, 2), union, origins[1], 2)
+                            am = np.zeros_like(ac)
+                            if um is not None:
+                                block = frame_block(um, other, factor)
+                                if factor == 1:
+                                    block = block.repeat(2, axis=0).repeat(2, axis=1)
+                                am = aligned_block(block, union, origins[1], 2)
+                            dx, dy = origins[0] * 2
+                            crop = (slice(dy, dy+2*h), slice(dx, dx+2*w))
+                            if kind == 'variant' and has_baseline:
+                                bc = aligned_block(baseline_colour[dest], union, origins[0], 2)
+                                bm = aligned_block(baseline_remap[dest], union, origins[0], 2)
+                                weight = feather_mask(changed)
+                                ac = masked_variant(bc, ac, weight, detail)
+                                ar = blend_pixels(ar, bm, weight)
+                                am = blend_pixels(am, np.broadcast_to(FLAT_MATERIAL, am.shape), weight)
+                            if kind == 'urban_exact' or has_baseline:
+                                colour[dest], remap[dest], mat[dest] = ac[crop], ar[crop], am[crop]
+                                if kind == 'variant':
+                                    preserve_silhouette(colour[dest], own)
+                    if kind != 'urban_exact' and not has_baseline:
+                        missing_baseline = True
+                    per_sprite = sprite_counts.setdefault(sid, transfer_counts())
+                    counts[kind] += 1
+                    per_sprite[kind] += 1
+                    if (kind == 'urban_exact' or has_baseline) and silhouette_matches(colour[dest], own).mean() < 0.995:
+                        counts['qa_silhouette_failures'] += 1
+                        per_sprite['qa_silhouette_failures'] += 1
+            for sid, values in sprite_counts.items():
+                total = report['sprites'].setdefault(sid, transfer_counts())
+                for key, value in values.items():
+                    total[key] += value
+            print(f"page {page}: {counts['urban_exact']} urban-exact frames, {counts['variant']} variant frames, "
+                  f"{counts['baseline']} baseline frames, {counts['qa_silhouette_failures']} QA silhouette failures")
+            if missing_baseline:
+                counts['skipped'] = 'missing baseline colour/remap'
+                print(f'page {page}: missing baseline colour/remap, skipped')
+                continue
+            stem = f'sprites-{page}@2x-vxfer-{uuid4().hex}'
+            cn, rn, mn = f'{stem}.png', f'{stem}-remap.png', f'{stem}-normals.png'
+            atomic_image(tdir / cn, colour)
+            atomic_image(tdir / rn, remap)
+            hd_entries[page] = dict(file=cn, remap=rn, scale=2, width=shape[1], height=shape[0])
+            old_material = materials.get(str(page))
+            if str(page) not in materials or (old_hd and (not old_material or old_material.get('atlas') == old_hd['file'])):
+                atomic_image(tdir / mn, mat)
+                material_entries[page] = dict(file=mn, atlas=cn, width=shape[1], height=shape[0], scale=2,
+                                              materialWidth=shape[1], materialHeight=shape[0],
+                                              frames=counts['urban_exact'] + counts['variant'])
+
+        published = set()
+        if hd_entries:
+            def put_hd(current):
+                entries = current.get('spriteAtlasesHd') or []
+                for page, entry in hd_entries.items():
+                    while len(entries) <= page:
+                        entries.append(None)
+                    old = owned_entries.get(page)
+                    if (old is None and not entries[page]) or (old is not None and entries[page] == old):
+                        entries[page] = entry
+                        published.add(page)
+                current['spriteAtlasesHd'] = entries
+            patch_json(tdir / 'library.json', put_hd)
+        if published & material_entries.keys():
+            def put_materials(current):
+                entries = current.setdefault('pages', {})
+                for page in published & material_entries.keys():
+                    key = str(page)
+                    if (key in entries) == (key in materials) and entries.get(key) == materials.get(key):
+                        entries[key] = material_entries[page]
+            default = dict(version=1, pages={})
+            if 'encoding' in source_normals:
+                default['encoding'] = source_normals['encoding']
+            patch_json(tdir / 'normals.json', put_materials, default)
+        for page in published:
+            report['pages'][str(page)]['published'] = True
+        atomic_write(tdir / 'variant-xfer-report.json',
+                     lambda tmp: tmp.write_text(json.dumps(report, indent=2), encoding='utf-8'))
         return sorted(published)
 
 
@@ -304,54 +590,66 @@ def normals_merge(src, library, sprites_file):
     sprites = set(Path(sprites_file).read_text(encoding='utf-8').split())
     source = read_json(src / 'normals.json')['pages']
     additions = {}
+    class NoMaterialChanges(Exception):
+        pass
     with library_lock(directory):
         manifest = read_json(directory / 'library.json')
-        current = read_json(directory / 'normals.json', {'pages': {}})['pages']
-        for page, entry in source.items():
-            hd = page_entry(manifest.get('spriteAtlasesHd') or [], int(page))
-            if not hd or hd['file'] != entry['atlas']:
-                print(f'page {page}: atlas mismatch, skipped')
-                continue
-            rects = {tuple(f['rect']) for sid in sprites for f in manifest['sprites'].get(sid, {}).get('frames', [])
-                     if f.get('page', 0) == int(page) and f['rect'][2] and f['rect'][3]}
-            if not rects:
-                continue
-            new = read_image(src / entry['file'], 'RGBA')
-            if new.shape != (entry['materialHeight'], entry['materialWidth'], 4):
-                raise ValueError(f'material dimensions differ from metadata on page {page}')
-            old = current.get(page)
-            if old:
-                if (old['atlas'] != entry['atlas'] or (old['materialWidth'], old['materialHeight']) !=
-                        (entry['materialWidth'], entry['materialHeight'])):
-                    # Incompatible data belongs to another layout; do not discard it.
-                    print(f'page {page}: existing material layout differs, skipped')
+        def merge(document):
+            current = document.setdefault('pages', {})
+            for page, entry in source.items():
+                hd = page_entry(manifest.get('spriteAtlasesHd') or [], int(page))
+                if not hd or hd['file'] != entry['atlas']:
+                    print(f'page {page}: atlas mismatch, skipped')
                     continue
-                base = read_image(directory / old['file'], 'RGBA')
-                if base.shape != new.shape:
-                    raise ValueError(f'existing material dimensions differ on page {page}')
-            else:
-                base = np.zeros_like(new)
-            factor = material_scale(entry)
-            count = 0
-            for x, y, w, h in sorted(rects):
-                block = (slice(factor*y, factor*(y+h)), slice(factor*x, factor*(x+w)))
-                if min(x, y) < 0 or factor*(x+w) > new.shape[1] or factor*(y+h) > new.shape[0]:
-                    raise ValueError(f'frame lies outside material page {page}')
-                if new[block][..., 3].any():
-                    base[block] = new[block]
-                    count += 1
-            if not count:
-                continue
-            # A fresh filename prevents mutation of a file referenced by another page/sidecar.
-            name = f'sprites-{page}@2x-normals-merge-{uuid4().hex}.png'
-            atomic_image(directory / name, base)
-            additions[page] = dict(old or entry, file=name)
-            if not old:
-                additions[page]['frames'] = count
-            print(f'page {page}: merged {count} frames')
-        if additions:
-            patch_json(directory / 'normals.json', lambda d: d.setdefault('pages', {}).update(additions),
-                       {'version': 1, 'pages': {}})
+                rects = {tuple(f['rect']) for sid in sprites for f in manifest['sprites'].get(sid, {}).get('frames', [])
+                         if f.get('page', 0) == int(page) and f['rect'][2] and f['rect'][3]}
+                if not rects:
+                    continue
+                new = read_image(src / entry['file'], 'RGBA')
+                if new.shape != (entry['materialHeight'], entry['materialWidth'], 4):
+                    raise ValueError(f'material dimensions differ from metadata on page {page}')
+                old = current.get(page)
+                if old:
+                    if (old['atlas'] != entry['atlas'] or (old['materialWidth'], old['materialHeight']) !=
+                            (entry['materialWidth'], entry['materialHeight'])):
+                        # Incompatible data belongs to another layout; do not discard it.
+                        print(f'page {page}: existing material layout differs, skipped')
+                        continue
+                    base = read_image(directory / old['file'], 'RGBA')
+                    if base.shape != new.shape:
+                        raise ValueError(f'existing material dimensions differ on page {page}')
+                else:
+                    base = np.zeros_like(new)
+                factor = material_scale(entry)
+                count = 0
+                for x, y, w, h in sorted(rects):
+                    block = (slice(factor*y, factor*(y+h)), slice(factor*x, factor*(x+w)))
+                    if min(x, y) < 0 or factor*(x+w) > new.shape[1] or factor*(y+h) > new.shape[0]:
+                        raise ValueError(f'frame lies outside material page {page}')
+                    if new[block][..., 3].any():
+                        base[block] = new[block]
+                        count += 1
+                if not count:
+                    continue
+                # A fresh filename prevents mutation of a file referenced by another page/sidecar.
+                name = f'sprites-{page}@2x-normals-merge-{uuid4().hex}.png'
+                atomic_image(directory / name, base)
+                additions[page] = dict(old or entry, file=name)
+                if not old:
+                    additions[page]['frames'] = count
+                print(f'page {page}: merged {count} frames')
+            if not additions:
+                # Do not materialise a symlink or rewrite formatting for a skipped merge.
+                raise NoMaterialChanges
+            # Keep unrelated metadata even from legacy writers that ignore the lock.
+            latest = read_json(directory / 'normals.json', dict(document))
+            document.clear()
+            document.update(latest)
+            document.setdefault('pages', {}).update(additions)
+        try:
+            patch_json(directory / 'normals.json', merge, {'version': 1, 'pages': {}})
+        except NoMaterialChanges:
+            pass
     return sorted(additions, key=int)
 
 
@@ -475,6 +773,16 @@ def parser():
     p.add_argument('baseline', type=Path)
     p.add_argument('--pages', type=page_indices, help='comma-separated indices (default: all theatre pages)')
     p.add_argument('--refresh-owned', action='store_true', help='regenerate HD pages written by an earlier xfer')
+    p = commands.add_parser('variant-xfer', help='reuse redraws outside aligned native-art differences')
+    p.add_argument('theatre', type=Path)
+    p.add_argument('urban', type=Path)
+    p.add_argument('baseline', type=Path)
+    p.add_argument('--pages', type=page_indices, help='comma-separated indices (default: all theatre pages)')
+    p.add_argument('--refresh-owned', action='store_true', help='regenerate only earlier -vxfer- HD entries')
+    p.add_argument('--detail', type=float, default=0.35, help='source Lab luminance detail strength (default: 0.35)')
+    p.add_argument('--max-changed', type=float, default=0.6, help='maximum changed/target-opaque ratio (default: 0.6)')
+    p.add_argument('--tolerance', type=float, default=14, help='CIE76 Delta E colour threshold (default: 14)')
+    p.add_argument('--min-area', type=int, default=3, help='minimum 8-connected colour region in 1x pixels (default: 3)')
     p = commands.add_parser('overlay-walls', help='redirect wall overlays to HD building frames')
     p.add_argument('library', type=Path)
     p.add_argument('types', nargs='*', default=WALL_TYPES)
@@ -502,6 +810,10 @@ def main(argv=None):
     try:
         if args.command == 'xfer':
             print('THEATRE_XFER_DONE', xfer(args.theatre, args.urban, args.baseline, args.pages, args.refresh_owned))
+        elif args.command == 'variant-xfer':
+            print('THEATRE_VARIANT_XFER_DONE', variant_xfer(args.theatre, args.urban, args.baseline, args.pages,
+                                                          args.refresh_owned, args.detail, args.max_changed,
+                                                          args.tolerance, args.min_area))
         elif args.command == 'overlay-walls':
             print('patched', len(overlay_walls(args.library, args.types)))
         elif args.command == 'copy-patches':

@@ -232,7 +232,7 @@ export function writeMapLights(opts: MapLightsOptions): MapLightsResult {
     const sec = mapIni.getSection('Lighting');
     return sec?.has(key) ? sec.getString(key, '') : undefined;
   });
-  const atmosphere = mapAtmosphere(lighting.normal, medianZ, nightEvidence(lights));
+  const atmosphere = mapAtmosphere(lighting.normal, medianZ, nightEvidence(lights), manifest.theater);
 
   // ------------------------------------------------------------ HD street lamps
   const streetLamps: MapLightsSidecar['hdEmitters']['streetLamps'] = [];

@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -295,6 +296,20 @@ class TheatreTests(unittest.TestCase):
         self.assertNotEqual(new['file'], old['file'])
         self.assertEqual(tp.read_json(self.theatre / 'normals.json'), claimed)
 
+    def test_xfer_preserves_concurrent_material_change_with_the_same_atlas(self):
+        self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0]), [0])
+        claimed = tp.read_json(self.theatre / 'normals.json')
+        claimed['pages']['0']['custom'] = 'claimed while retaining the atlas'
+        original = tp.atomic_symlink
+
+        def link_and_claim(source, destination):
+            original(source, destination)
+            write_json(self.theatre / 'normals.json', claimed)
+
+        with mock.patch.object(tp, 'atomic_symlink', side_effect=link_and_claim):
+            self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0], refresh_owned=True), [0])
+        self.assertEqual(tp.read_json(self.theatre / 'normals.json'), claimed)
+
     def test_cli_refresh_owned_without_page_selection_replaces_only_owned_entries(self):
         self.cli('xfer', self.theatre, self.urban, self.baseline)
         before = tp.read_json(self.theatre / 'library.json')
@@ -555,6 +570,33 @@ class TheatreTests(unittest.TestCase):
         self.assertEqual(tp.normals_merge(source, library, sprites), [])
         self.assertEqual((library / 'normals.json').read_bytes(), before)
 
+    def test_xfer_and_normals_merge_hold_compose_and_cache_farm_json_locks(self):
+        patch_json = tp.cache_farm.patch_json
+        seen = []
+
+        def checked_patch(root, relative, update, **kwargs):
+            root = Path(root)
+            with (root / '.compose.lock').open('a') as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def checked_update(current):
+                seen.append((root, relative))
+                with (root / f'.{relative}.lock').open('a') as lock:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                update(current)
+
+            patch_json(root, relative, checked_update, **kwargs)
+
+        with mock.patch.object(tp.cache_farm, 'patch_json', side_effect=checked_patch):
+            self.assertEqual(tp.xfer(self.theatre, self.urban, self.baseline, [0]), [0])
+            library, source, sprites, _, _, _ = self.normals_setup()
+            self.assertEqual(tp.normals_merge(source, library, sprites), ['0', '1'])
+        self.assertIn((self.theatre, 'library.json'), seen)
+        self.assertIn((self.theatre, 'normals.json'), seen)
+        self.assertIn((library, 'normals.json'), seen)
+
     def test_cli_help_and_invalid_pages_do_not_require_assets(self):
         self.assertIn('normals-merge', self.cli('--help').stdout)
         result = subprocess.run([sys.executable, '-B', tp.__file__, 'xfer', 'absent', 'absent', 'absent',
@@ -684,3 +726,463 @@ class PatchToolTests(unittest.TestCase):
         self.assertEqual(int(colour[0, 0, 0]), 9)
         self.assertTrue((remap[2:6, 4:10] == 255).all() and remap[0, 0] == 0)
         np.testing.assert_array_equal(np.asarray(Image.open(shared / 'sprites@2x.png'))[2:6, 4:10, 0], np.full((4, 6), 9))
+
+
+class VariantTransferTests(unittest.TestCase):
+    """Exercise visible transfer results and farm publication without game assets."""
+
+    sprite_id = 'building:VARIANT'
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='.tmp-variant-', dir=Path(__file__).parent)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.urban, self.theatre, self.baseline = (self.root / n for n in ('urban', 'variant', 'baseline'))
+        for directory in (self.urban, self.theatre, self.baseline):
+            directory.mkdir()
+        self.indices = np.full((24, 24), 40, np.uint8)
+        self.palette = np.full((1, 256, 3), [90, 100, 110], np.uint8)
+        self.palette[0, 41] = [170, 180, 190]
+        # Fine, asymmetric structure makes incorrect detail and offset copies visible.
+        y, x = np.indices((48, 48))
+        self.colour = np.empty((48, 48, 4), np.uint8)
+        self.colour[..., 0] = 70 + x * 2 + (y % 2) * 30
+        self.colour[..., 1] = 80 + y * 2
+        self.colour[..., 2] = 120 + ((x + y) % 2) * 50
+        self.colour[..., 3] = 255
+        self.remap = ((x * 3 + y * 5) % 251).astype(np.uint8)
+        self.material = np.full((24, 24, 4), [70, 90, 120, 240], np.uint8)
+        self.source = self.write_library(self.urban, self.indices, hd=True)
+        self.target = self.write_library(self.theatre, self.indices)
+        Image.fromarray(self.colour).save(self.urban / 'hd.png')
+        Image.fromarray(self.remap).save(self.urban / 'remap.png')
+        Image.fromarray(self.material).save(self.urban / 'material.png')
+        write_json(self.urban / 'normals.json', dict(version=1, encoding='oct-normal-rg-gloss-b-mask-a', pages={
+            '0': dict(file='material.png', atlas='hd.png', width=48, height=48,
+                      materialWidth=24, materialHeight=24, scale=2)}))
+        self.write_baseline(self.indices)
+
+    def write_library(self, directory, indices, hd=False, offset=(0, 0)):
+        height, width = indices.shape
+        Image.fromarray(indices).save(directory / 'index.png')
+        Image.fromarray(self.palette).save(directory / 'palette.png')
+        library = dict(palettes={'unit': 'palette.png'},
+                       spriteAtlases=[dict(file='index.png', width=width, height=height)],
+                       spriteAtlasesHd=[dict(file='hd.png', remap='remap.png', scale=2,
+                                             width=2 * width, height=2 * height) if hd else None],
+                       sprites={self.sprite_id: dict(palette='unit', frames=[
+                           dict(page=0, rect=[0, 0, width, height], offset=list(offset))])}, marker='keep')
+        write_json(directory / 'library.json', library)
+        return library
+
+    def write_baseline(self, indices, page=0):
+        height, width = indices.shape
+        self.base_colour = np.full((2 * height, 2 * width, 4), [180, 190, 210, 255], np.uint8)
+        self.base_colour[..., 3] = (indices > 0).repeat(2, axis=0).repeat(2, axis=1) * 255
+        self.base_remap = np.full((2 * height, 2 * width), 13, np.uint8)
+        Image.fromarray(self.base_colour).save(self.baseline / f'sprites-{page}@2x.png')
+        Image.fromarray(self.base_remap).save(self.baseline / f'sprites-{page}@2x-remap.png')
+
+    def change_patch(self):
+        changed = self.indices.copy()
+        changed[10:13, 10:13] = 41
+        Image.fromarray(changed).save(self.theatre / 'index.png')
+        return changed
+
+    def outputs(self, page=0):
+        library = tp.read_json(self.theatre / 'library.json')
+        entry = library['spriteAtlasesHd'][page]
+        colour = tp.read_image(self.theatre / entry['file'], 'RGBA')
+        remap = tp.read_image(self.theatre / entry['remap'], 'L')
+        material_entry = tp.read_json(self.theatre / 'normals.json')['pages'][str(page)]
+        material = tp.read_image(self.theatre / material_entry['file'], 'RGBA')
+        self.assertEqual(material_entry['atlas'], entry['file'])
+        self.assertEqual(tp.material_scale(material_entry), 2)
+        return entry, colour, remap, material
+
+    def assert_counts(self, exact=0, variant=0, baseline=0, qa=0, page=0):
+        report = tp.read_json(self.theatre / 'variant-xfer-report.json')
+        expected = dict(urban_exact=exact, variant=variant, baseline=baseline, qa_silhouette_failures=qa)
+        self.assertEqual(report['sprites'][self.sprite_id], expected)
+        for key, value in expected.items():
+            self.assertEqual(report['pages'][str(page)][key], value)
+        self.assertTrue(report['pages'][str(page)]['published'])
+        return report
+
+    def assert_silhouette(self, colour, indices):
+        alpha = colour[..., 3].astype(np.float32).reshape(indices.shape[0], 2, indices.shape[1], 2).mean((1, 3))
+        self.assertGreaterEqual(np.mean((alpha > 127.5) == (indices > 0)), 0.995)
+
+    def test_identical_frame_copies_urban_colour_remap_and_material_exactly(self):
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+        entry, colour, remap, material = self.outputs()
+        self.assertRegex(entry['file'], r'^sprites-0@2x-vxfer-[0-9a-f]+\.png$')
+        np.testing.assert_array_equal(colour, self.colour)
+        np.testing.assert_array_equal(remap, self.remap)
+        np.testing.assert_array_equal(material, self.material.repeat(2, axis=0).repeat(2, axis=1))
+        self.assert_silhouette(colour, self.indices)
+        self.assert_counts(exact=1)
+
+    def test_dither_only_index_differences_below_tolerance_copy_urban_exactly(self):
+        palette = self.palette.copy()
+        palette[0, 42] = [92, 103, 111]
+        Image.fromarray(palette).save(self.theatre / 'palette.png')
+        changed = self.indices.copy()
+        changed[::2] = 42
+        changed[:, ::2] = 42
+        Image.fromarray(changed).save(self.theatre / 'index.png')
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+        _, colour, remap, material = self.outputs()
+        np.testing.assert_array_equal(colour, self.colour)
+        np.testing.assert_array_equal(remap, self.remap)
+        np.testing.assert_array_equal(material, self.material.repeat(2, 0).repeat(2, 1))
+        self.assert_counts(exact=1)
+
+    def test_white_blob_closes_holes_and_removes_one_and_two_pixel_speckles(self):
+        palette = self.palette.copy()
+        palette[0, 41] = [245, 245, 245]
+        Image.fromarray(palette).save(self.theatre / 'palette.png')
+        changed = self.indices.copy()
+        changed[8:15, 8:15] = 41
+        changed[11, 11] = 40
+        changed[2, 2] = 41
+        changed[20, 2:4] = 41
+        Image.fromarray(changed).save(self.theatre / 'index.png')
+        expected = np.zeros_like(changed, dtype=bool)
+        expected[8:15, 8:15] = True
+        mask = tp.variant_mask(changed, self.indices, palette[0], self.palette[0])
+        np.testing.assert_array_equal(mask, expected)
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, detail=0), [0])
+        _, colour, _, _ = self.outputs()
+        np.testing.assert_array_equal(colour[16:30, 16:30], self.base_colour[16:30, 16:30])
+        for region in ((slice(4, 6), slice(4, 6)), (slice(40, 42), slice(4, 8))):
+            np.testing.assert_array_equal(colour[region], self.colour[region])
+        self.assert_counts(variant=1)
+
+    def test_colour_components_use_eight_connectivity_and_minimum_area(self):
+        changed = self.indices.copy()
+        changed[6, 6] = changed[7, 7] = changed[8, 8] = 41
+        changed[17, 17] = changed[18, 18] = 41
+        mask = tp.variant_mask(changed, self.indices, self.palette[0], self.palette[0])
+        self.assertTrue(mask[6, 6] and mask[7, 7] and mask[8, 8])
+        self.assertFalse(mask[17, 17] or mask[18, 18])
+        self.assertFalse(tp.variant_mask(changed, self.indices, self.palette[0], self.palette[0],
+                                         min_area=4).any())
+
+    def test_delta_e_uses_lab_units_and_a_strict_tolerance(self):
+        palette = self.palette[0].copy()
+        palette[40], palette[41] = [0, 0, 0], [255, 255, 255]
+        changed = np.full_like(self.indices, 41)
+        # Black and white differ by exactly 100 in CIE76, not the uint8 Lab scale.
+        self.assertFalse(tp.variant_mask(changed, self.indices, palette, palette, tolerance=100).any())
+        self.assertTrue(tp.variant_mask(changed, self.indices, palette, palette, tolerance=99).all())
+
+    def test_exactly_one_house_paint_index_changes_even_with_identical_colours(self):
+        changed = self.indices.copy()
+        changed[10:13, 10:13] = 16
+        Image.fromarray(changed).save(self.theatre / 'index.png')
+        for directory, library in ((self.urban, self.source), (self.theatre, self.target)):
+            library['sprites'][self.sprite_id]['remap'] = True
+            write_json(directory / 'library.json', library)
+        for target, source in ((changed, self.indices), (self.indices, changed)):
+            mask = tp.variant_mask(target, source, self.palette[0], self.palette[0], remap=True)
+            np.testing.assert_array_equal(mask, changed == 16)
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, detail=0), [0])
+        _, colour, remap, _ = self.outputs()
+        np.testing.assert_array_equal(colour[20:26, 20:26], self.base_colour[20:26, 20:26])
+        np.testing.assert_array_equal(remap[20:26, 20:26], self.base_remap[20:26, 20:26])
+        self.assert_counts(variant=1)
+
+    def test_tiny_alpha_addition_and_removal_survive_colour_cleanup(self):
+        changed, source = self.indices.copy(), self.indices.copy()
+        changed[4, 4] = 0
+        source[19, 19] = 0
+        Image.fromarray(changed).save(self.theatre / 'index.png')
+        Image.fromarray(source).save(self.urban / 'index.png')
+        self.colour[38:40, 38:40, 3] = 0
+        Image.fromarray(self.colour).save(self.urban / 'hd.png')
+        self.write_baseline(changed)
+        mask = tp.variant_mask(changed, source, self.palette[0], self.palette[0], min_area=1000)
+        np.testing.assert_array_equal(mask, (changed > 0) ^ (source > 0))
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, detail=0, min_area=1000), [0])
+        _, colour, _, _ = self.outputs()
+        for region in ((slice(8, 10), slice(8, 10)), (slice(38, 40), slice(38, 40))):
+            np.testing.assert_array_equal(colour[region], self.base_colour[region])
+        self.assert_silhouette(colour, changed)
+        self.assert_counts(variant=1)
+
+    def test_three_by_three_patch_keeps_distant_redraw_and_adds_lab_detail(self):
+        changed = self.change_patch()
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, detail=0.35), [0])
+        _, colour, _, _ = self.outputs()
+        np.testing.assert_array_equal(colour[:8, :8], self.colour[:8, :8])
+        urban_lab = cv2.cvtColor(self.colour[..., :3].astype(np.float32) / 255, cv2.COLOR_RGB2Lab)
+        baseline_lab = cv2.cvtColor(self.base_colour[..., :3].astype(np.float32) / 255, cv2.COLOR_RGB2Lab)
+        detail = urban_lab[..., 0] - cv2.GaussianBlur(urban_lab[..., 0], (0, 0), 1.5)
+        baseline_lab[..., 0] = np.clip(baseline_lab[..., 0] + 0.35 * detail, 0, 100)
+        expected = np.rint(np.clip(cv2.cvtColor(baseline_lab, cv2.COLOR_Lab2RGB), 0, 1) * 255).astype(np.uint8)
+        np.testing.assert_allclose(colour[20:26, 20:26, :3], expected[20:26, 20:26], atol=2)
+        self.assertGreater(np.max(np.abs(colour[20:26, 20:26, :3].astype(int)
+                                        - self.base_colour[20:26, 20:26, :3].astype(int))), 1)
+        self.assert_silhouette(colour, changed)
+        report = self.assert_counts(variant=1)
+        self.assertEqual(report['parameters'], dict(detail=0.35, max_changed=0.6, tolerance=14, min_area=3))
+
+    def test_material_and_remap_use_urban_outside_changed_region_and_baseline_inside(self):
+        self.change_patch()
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, detail=0), [0])
+        _, colour, remap, material = self.outputs()
+        np.testing.assert_array_equal(colour[20:26, 20:26], self.base_colour[20:26, 20:26])
+        np.testing.assert_array_equal(remap[20:26, 20:26], self.base_remap[20:26, 20:26])
+        np.testing.assert_array_equal(remap[:8, :8], self.remap[:8, :8])
+        np.testing.assert_array_equal(material[20:26, 20:26],
+                                      np.full((6, 6, 4), [128, 128, 0, 255], np.uint8))
+        np.testing.assert_array_equal(material[:8, :8], self.material[:4, :4].repeat(2, 0).repeat(2, 1))
+
+    def test_aliased_variant_frames_do_not_accumulate_detail_or_feathering(self):
+        self.change_patch()
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+        _, expected_colour, expected_remap, _ = self.outputs()
+        for library in (self.source, self.target):
+            frames = library['sprites'][self.sprite_id]['frames']
+            frames.append(copy.deepcopy(frames[0]))
+        write_json(self.urban / 'library.json', self.source)
+        write_json(self.theatre / 'library.json', self.target)
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+        entry = tp.read_json(self.theatre / 'library.json')['spriteAtlasesHd'][0]
+        np.testing.assert_array_equal(tp.read_image(self.theatre / entry['file']), expected_colour)
+        np.testing.assert_array_equal(tp.read_image(self.theatre / entry['remap']), expected_remap)
+        self.assert_counts(variant=2)
+
+    def test_2x_materials_rgba_red_indices_and_square_palettes_preserve_transfer(self):
+        changed = self.change_patch()
+        y, x = np.indices((48, 48))
+        material = np.stack((30 + x * 2, 60 + y * 2, (x + y) % 3 * 80, np.full_like(x, 240)), axis=-1)
+        material = material.astype(np.uint8)
+        Image.fromarray(material).save(self.urban / 'material.png')
+        normals = tp.read_json(self.urban / 'normals.json')
+        normals['pages']['0'].update(materialWidth=48, materialHeight=48)
+        write_json(self.urban / 'normals.json', normals)
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+        _, expected_colour, expected_remap, expected_material = self.outputs()
+        np.testing.assert_array_equal(expected_material[:8, :8], material[:8, :8])
+        np.testing.assert_array_equal(expected_material[20:26, 20:26],
+                                      np.full((6, 6, 4), [128, 128, 0, 255], np.uint8))
+        # Only red carries indices; different unused channels must not change the result.
+        for directory, indices, channels in ((self.urban, self.indices, (42, 200, 0)),
+                                             (self.theatre, changed, (255, 0, 137))):
+            rgba = np.empty((*indices.shape, 4), np.uint8)
+            rgba[..., 0], rgba[..., 1:] = indices, channels
+            Image.fromarray(rgba).save(directory / 'index.png')
+            Image.fromarray(self.palette.reshape(16, 16, 3)).save(directory / 'palette.png')
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, refresh_owned=True), [0])
+        _, colour, remap, transferred_material = self.outputs()
+        np.testing.assert_array_equal(colour, expected_colour)
+        np.testing.assert_array_equal(remap, expected_remap)
+        np.testing.assert_array_equal(transferred_material, expected_material)
+        self.assert_counts(variant=1)
+
+    def test_grown_bbox_aligns_by_draw_origin_offset_and_preserves_new_silhouette(self):
+        grown = np.full((26, 28), 40, np.uint8)
+        grown[:2, :2] = 0
+        self.target = self.write_library(self.theatre, grown, offset=(-2, -1))
+        self.write_baseline(grown)
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, detail=0), [0])
+        _, colour, remap, _ = self.outputs()
+        # The source's top-left is 2 right and 1 down inside the larger target crop.
+        np.testing.assert_array_equal(colour[18:30, 20:32], self.colour[16:28, 16:28])
+        np.testing.assert_array_equal(remap[18:30, 20:32], self.remap[16:28, 16:28])
+        np.testing.assert_array_equal(colour[:2, -4:], self.base_colour[:2, -4:])
+        self.assert_silhouette(colour, grown)
+        self.assert_counts(variant=1)
+
+    def test_changed_fraction_over_threshold_uses_baseline_byte_for_byte(self):
+        changed = self.indices.copy()
+        changed[:18] = 41
+        Image.fromarray(changed).save(self.theatre / 'index.png')
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, max_changed=0.6), [0])
+        entry = tp.read_json(self.theatre / 'library.json')['spriteAtlasesHd'][0]
+        np.testing.assert_array_equal(tp.read_image(self.theatre / entry['file']), self.base_colour)
+        np.testing.assert_array_equal(tp.read_image(self.theatre / entry['remap']), self.base_remap)
+        self.assert_counts(baseline=1)
+
+    def test_used_palette_colour_difference_is_a_variant(self):
+        changed = self.change_patch()
+        Image.fromarray(changed).save(self.urban / 'index.png')
+        palette = self.palette.copy()
+        palette[0, 41] = [230, 235, 245]
+        Image.fromarray(palette).save(self.theatre / 'palette.png')
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, detail=0), [0])
+        _, colour, _, _ = self.outputs()
+        np.testing.assert_array_equal(colour[20:26, 20:26], self.base_colour[20:26, 20:26])
+        np.testing.assert_array_equal(colour[:8, :8], self.colour[:8, :8])
+        self.assert_counts(variant=1)
+
+    def test_transparent_and_house_palette_colours_do_not_make_variants(self):
+        indices = self.indices.copy()
+        indices[:2] = 0
+        indices[10:13, 10:13] = 16
+        for directory, library in ((self.urban, self.source), (self.theatre, self.target)):
+            Image.fromarray(indices).save(directory / 'index.png')
+            library['sprites'][self.sprite_id]['remap'] = True
+            write_json(directory / 'library.json', library)
+        indices[10:13, 10:13] = 17
+        Image.fromarray(indices).save(self.theatre / 'index.png')
+        self.colour[:4, :, 3] = 0
+        Image.fromarray(self.colour).save(self.urban / 'hd.png')
+        palette = self.palette.copy()
+        palette[0, [0, 16, 17, 250]] = [1, 2, 3]
+        Image.fromarray(palette).save(self.theatre / 'palette.png')
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+        _, colour, _, _ = self.outputs()
+        np.testing.assert_array_equal(colour, self.colour)
+        self.assert_counts(exact=1)
+
+    def test_no_counterpart_palette_key_mismatch_missing_hd_and_empty_source_use_baseline(self):
+        for reason in ('no counterpart', 'palette key', 'missing HD', 'empty source'):
+            with self.subTest(reason=reason):
+                source = copy.deepcopy(self.source)
+                if reason == 'no counterpart':
+                    source['sprites'] = {}
+                elif reason == 'palette key':
+                    source['palettes']['other'] = source['palettes']['unit']
+                    source['sprites'][self.sprite_id]['palette'] = 'other'
+                elif reason == 'missing HD':
+                    source['spriteAtlasesHd'] = [None]
+                else:
+                    Image.fromarray(np.zeros_like(self.indices)).save(self.urban / 'index.png')
+                write_json(self.urban / 'library.json', source)
+                write_json(self.theatre / 'library.json', self.target)
+                self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+                entry = tp.read_json(self.theatre / 'library.json')['spriteAtlasesHd'][0]
+                np.testing.assert_array_equal(tp.read_image(self.theatre / entry['file']), self.base_colour)
+                np.testing.assert_array_equal(tp.read_image(self.theatre / entry['remap']), self.base_remap)
+                self.assert_counts(baseline=1)
+
+    def test_source_counterpart_can_live_on_different_page_without_matching_page_hd(self):
+        # The destination page number is unrelated to the counterpart's source page.
+        self.target['spriteAtlases'].append(copy.deepcopy(self.target['spriteAtlases'][0]))
+        self.target['spriteAtlasesHd'].append(None)
+        self.target['sprites'][self.sprite_id]['frames'][0]['page'] = 1
+        write_json(self.theatre / 'library.json', self.target)
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, [1]), [1])
+        _, colour, remap, _ = self.outputs(1)
+        np.testing.assert_array_equal(colour, self.colour)
+        np.testing.assert_array_equal(remap, self.remap)
+        self.assert_counts(exact=1, page=1)
+
+    def test_variant_repairs_alpha_blocks_that_disagree_with_target_silhouette(self):
+        changed = self.change_patch()
+        changed[10, 10] = 0
+        Image.fromarray(changed).save(self.theatre / 'index.png')
+        # Deliberately contaminated baseline edges still must fit the 1x silhouette.
+        self.base_colour[20:22, 20:22, 3] = 255
+        self.base_colour[22:24, 22:24, 3] = 0
+        Image.fromarray(self.base_colour).save(self.baseline / 'sprites-0@2x.png')
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+        _, colour, _, _ = self.outputs()
+        self.assert_silhouette(colour, changed)
+        self.assert_counts(variant=1)
+
+    def test_exact_silhouette_failure_is_reported_without_mutating_urban_art(self):
+        self.colour[:8, :8, 3] = 0
+        Image.fromarray(self.colour).save(self.urban / 'hd.png')
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+        _, colour, _, _ = self.outputs()
+        np.testing.assert_array_equal(colour, self.colour)
+        self.assert_counts(exact=1, qa=1)
+
+    def test_symlinked_json_and_report_are_replaced_and_refresh_is_limited_to_vxfer(self):
+        shared = self.root / 'shared'
+        shared.mkdir()
+        for name, value in (('library.json', self.target),
+                            ('normals.json', dict(version=1, pages={}, marker='shared materials')),
+                            ('variant-xfer-report.json', {'marker': 'shared report'})):
+            write_json(shared / name, value)
+            (self.theatre / name).unlink(missing_ok=True)
+            (self.theatre / name).symlink_to(shared / name)
+        before = {path.name: path.read_bytes() for path in shared.iterdir()}
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+        for name, contents in before.items():
+            self.assertFalse((self.theatre / name).is_symlink())
+            self.assertEqual((shared / name).read_bytes(), contents)
+        old, _, _, _ = self.outputs()
+        old_bytes = (self.theatre / old['file']).read_bytes()
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [])
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, refresh_owned=True), [0])
+        new, _, _, _ = self.outputs()
+        self.assertNotEqual(old['file'], new['file'])
+        self.assertEqual((self.theatre / old['file']).read_bytes(), old_bytes)
+        for foreign_name in ('sprites-0@2x-xfer-other.png', 'sprites-0@2x-owned.png'):
+            with self.subTest(foreign_name=foreign_name):
+                library = tp.read_json(self.theatre / 'library.json')
+                foreign = dict(new, file=foreign_name)
+                library['spriteAtlasesHd'][0] = foreign
+                write_json(self.theatre / 'library.json', library)
+                self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, refresh_owned=True), [])
+                self.assertEqual(tp.read_json(self.theatre / 'library.json')['spriteAtlasesHd'][0], foreign)
+
+    def test_publication_holds_compose_and_cache_farm_locks_and_rereads_metadata(self):
+        patch_json = tp.cache_farm.patch_json
+        seen = []
+
+        def checked_patch(root, relative, update, **kwargs):
+            root = Path(root)
+            self.assertEqual(root, self.theatre)
+            with (root / '.compose.lock').open('a') as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if relative == 'library.json':
+                patch_json(root, relative, lambda current: current.update(concurrent='preserved'))
+
+            def checked_update(current):
+                seen.append(relative)
+                with (root / f'.{relative}.lock').open('a') as lock:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                update(current)
+
+            patch_json(root, relative, checked_update, **kwargs)
+
+        with mock.patch.object(tp.cache_farm, 'patch_json', side_effect=checked_patch):
+            self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+        self.assertIn('library.json', seen)
+        self.assertIn('normals.json', seen)
+        self.assertTrue((self.theatre / '.library.json.lock').exists())
+        self.assertTrue((self.theatre / '.normals.json.lock').exists())
+        self.assertEqual(tp.read_json(self.theatre / 'library.json')['concurrent'], 'preserved')
+
+    def test_refresh_preserves_concurrent_material_change_with_the_same_atlas(self):
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
+        claimed = tp.read_json(self.theatre / 'normals.json')
+        claimed['pages']['0']['custom'] = 'claimed while retaining the atlas'
+        original = tp.atomic_image
+
+        def save_and_claim(path, pixels):
+            original(path, pixels)
+            write_json(self.theatre / 'normals.json', claimed)
+
+        with mock.patch.object(tp, 'atomic_image', side_effect=save_and_claim):
+            self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, refresh_owned=True), [0])
+        self.assertEqual(tp.read_json(self.theatre / 'normals.json'), claimed)
+
+    def test_cli_variant_transfer_accepts_selection_threshold_and_refresh_options(self):
+        self.change_patch()
+        command = [sys.executable, '-B', tp.__file__, 'variant-xfer', str(self.theatre), str(self.urban),
+                   str(self.baseline), '--pages', '0', '--detail', '0', '--max-changed', '0.7']
+        first = subprocess.run(command + ['--tolerance', '12', '--min-area', '2'], capture_output=True, text=True)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn('page 0:', first.stdout)
+        self.assertIn('variant', first.stdout)
+        self.assertIn('baseline', first.stdout)
+        report = self.assert_counts(variant=1)
+        self.assertEqual(report['parameters'], dict(detail=0.0, max_changed=0.7, tolerance=12.0, min_area=2))
+        old = tp.read_json(self.theatre / 'library.json')['spriteAtlasesHd'][0]
+        second = subprocess.run(command + ['--refresh-owned', '--tolerance', '100', '--min-area', '10'],
+                                capture_output=True, text=True)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        new, colour, _, _ = self.outputs()
+        self.assertNotEqual(old['file'], new['file'])
+        np.testing.assert_array_equal(colour, self.colour)
+        report = self.assert_counts(exact=1)
+        self.assertEqual(report['parameters'], dict(detail=0.0, max_changed=0.7, tolerance=100.0, min_area=10))
