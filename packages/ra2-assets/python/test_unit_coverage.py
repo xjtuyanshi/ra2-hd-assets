@@ -169,6 +169,7 @@ def test_cli_outputs_metadata_and_keeps_input_caches_read_only(caches: tuple[Pat
     assert next(row for row in report["rows"] if row["code"] == "E1")["name"] == "大兵|示例"
     markdown = md_path.read_text(encoding="utf-8")
     assert "类别 | 阵营 | 代码 | 图像 | 名称 | 状态 | 说明" in markdown
+    assert "本表不验收轮廓 IoU、材质质量、阵营色保真或实机遮挡" in markdown
     assert "大兵\\|示例" in markdown
     assert "第一行\n第二行" not in markdown
     assert (snapshot(farm), snapshot(base)) == before
@@ -183,6 +184,74 @@ def test_missing_calibration_cohort_is_an_error(caches: tuple[Path, Path]) -> No
     write_json(path, library)
     with pytest.raises(ValueError, match="(?i)calibrat|redrawn|cohort"):
         coverage.scan(farm, base, theaters=["urban"])
+
+
+def test_frozen_calibration_survives_redrawing_a_negative_control(caches: tuple[Path, Path], tmp_path: Path) -> None:
+    farm, base = caches
+    original_report = coverage.scan(farm, base, theaters=["urban"])
+    reference = tmp_path / "original-coverage.json"
+    write_json(reference, original_report)
+    hd_path = farm / "_library/urban/hd.png"
+    with Image.open(hd_path) as source:
+        current = source.copy()
+    current.paste(current.crop((0, 0, 16, 16)), (16, 0))
+    current.save(hd_path)
+    with pytest.raises(ValueError, match="cohorts overlap"):
+        coverage.scan(farm, base, theaters=["urban"])
+
+    before = snapshot(farm), snapshot(base), reference.read_bytes()
+    destination = tmp_path / "frozen-coverage.json"
+    markdown_path = tmp_path / "frozen-coverage.md"
+    coverage.main([
+        "scan", "--farm", str(farm), "--base", str(base), "--theaters", "urban",
+        "--calibration-report", str(reference), "--json", str(destination), "--md", str(markdown_path),
+    ])
+    report = json.loads(destination.read_text())
+    assert report["calibration"]["threshold"] == original_report["calibration"]["threshold"]
+    assert report["calibration"]["cohorts"] == original_report["calibration"]["cohorts"]
+    assert report["calibration"]["reference"]["sha256"] == hashlib.sha256(reference.read_bytes()).hexdigest()
+    assert next(row for row in report["rows"] if row["code"] == "CIVA")["status"] == "已完成"
+    assert "历史对照" in markdown_path.read_text()
+    assert (snapshot(farm), snapshot(base), reference.read_bytes()) == before
+
+
+@pytest.mark.parametrize("invalid", ["base", "metric", "threshold", "cohort", "frames", "urban", "version"])
+def test_frozen_calibration_rejects_incompatible_or_edited_evidence(
+    caches: tuple[Path, Path], tmp_path: Path, invalid: str,
+) -> None:
+    farm, base = caches
+    report = coverage.scan(farm, base, theaters=["urban"])
+    if invalid == "base":
+        report["base"] = str(tmp_path / "different-base")
+    elif invalid == "metric":
+        report["calibration"]["metric"] = "unrelated pixel metric"
+    elif invalid == "threshold":
+        report["calibration"]["threshold"] *= 0.1
+    elif invalid == "cohort":
+        del report["calibration"]["cohorts"]["not_redrawn"]["infantry:CIVA"]
+    elif invalid == "frames":
+        next(row for row in report["rows"] if row["code"] == "CIVA")["theaters"]["urban"]["frames"][0]["score"] = 1
+    elif invalid == "urban":
+        next(row for row in report["rows"] if row["code"] == "CIVA")["theaters"].clear()
+    else:
+        report["version"] = 2
+    reference = tmp_path / "invalid-coverage.json"
+    write_json(reference, report)
+    with pytest.raises(ValueError, match="Calibration"):
+        coverage.scan(farm, base, theaters=["urban"], calibration_report=reference)
+
+
+def test_cli_cannot_overwrite_frozen_calibration(caches: tuple[Path, Path], tmp_path: Path) -> None:
+    farm, base = caches
+    reference = tmp_path / "original-coverage.json"
+    write_json(reference, coverage.scan(farm, base, theaters=["urban"]))
+    before = reference.read_bytes()
+    with pytest.raises(SystemExit):
+        coverage.main([
+            "scan", "--farm", str(farm), "--base", str(base), "--calibration-report", str(reference),
+            "--json", str(reference), "--md", str(tmp_path / "coverage.md"),
+        ])
+    assert reference.read_bytes() == before
 
 
 def test_manifest_reference_without_atlas_is_incomplete(caches: tuple[Path, Path]) -> None:

@@ -614,6 +614,10 @@ the original's). Because lightness may now move, loosen `lf_dE_mean` / `lf_dE_p9
 
 ## Infantry page finishing (Python, experimental)
 
+`prepare` splits an oversized sheet along animation columns or facing rows until it fits a native image-model
+canvas at a scale of at least 2x. Sheets that already fit retain their names and layout; split sheets keep every
+frame exactly once and preserve the facing instructions. A single frame that cannot fit at 2x is an error.
+
 `python/infantry_sheets.py build` composes redraw sheets, accepts frames by silhouette IoU, and pastes only frames
 whose library `page` equals `--page`. Other-page frames are recorded with `accepted: false` and
 `skipped: "other-page"` in `pages/report.json`. Optional `--rim-soften K` and `--paint-saturation S` both accept
@@ -1121,14 +1125,14 @@ orange-yellow hue band keep only `--keep` of their chroma at unchanged linear lu
 house paint and alpha stay untouched. It rewrites the colour atlases in place, so run it once per build.
 
 `lift --src "$VEHICLE_WORK/proj/vehicles-hd" --out "$VEHICLE_WORK/lifted" --type HTNK --gamma 0.6`
-raises hull CIELAB lightness with `L' = 100 * (L / 100) ** gamma` while retaining a*/b*. Gamma must satisfy
-`0 < gamma <= 1`; `1` preserves every RGBA byte. The paint red channel fades the lift from full strength at
+raises hull CIELAB lightness with `L' = 100 * (L / 100) ** gamma` while retaining a*/b*; gamma above 1 darkens
+instead. Gamma must satisfy `0 < gamma <= 3`; `1` preserves every RGBA byte. The paint red channel fades the lift from full strength at
 0.3 to zero at 0.7; fully protected and transparent texels retain their original RGB, and alpha never changes.
 The command prints JSON changed-texel counts per part and atomically writes colour atlases under their existing
 names, copying paint atlases and the manifest byte-for-byte into a complete build for `install --build-dir`.
 The output must be separate from, and outside, the source directory; source files remain untouched.
 L5H lifted the Soviet hulls that read darker than the original in a same-frame parade (gamma HTNK 0.6, APOC 0.7,
-HTK 0.4, TTNK 0.55, DTRUCK 0.5, SMCV 0.6, V3 0.8): median hull L* moved from 4-16 below the original to within 5.
+HTK 0.4, TTNK 0.55, DTRUCK 0.5, SMCV 0.6, V3 0.8): median hull L* moved from 4-16 below the original to within 5. Stage 2 re-measured the Allied Mirage tank and MCV, which the hull metric (low-saturation, non-shadow pixels) reported 9-10 L* brighter than the original: over the whole unit the HD versions are darker (AMCV mean L* 27.5 vs 36.8, MGTK 34.8 vs 39.9) and less lavender (C* 11 vs 15); the metric had excluded the original's saturated lavender hull pixels. A gamma 1.3 darkening was tried and rejected, so those atlases are unchanged.
 
 `lock --design INPUT --redraw OUTPUT --out LOCKED` restores the design sheet's low-pass Lab chroma while keeping
 the redraw's lightness and fine chroma detail. Legacy defaults remain `--sigma 6 --strength 1`; background and
@@ -1652,6 +1656,12 @@ shading intact; a missing or unreadable tile warns once and leaves the surface n
   theater letter (A/T/U/D/L/N) gets the map's letter, then G, then keeps the plain name. The engine does this whatever
   the art `NewTheater=` says: the install ships temperate/urban/desert/lunar files for flags marked `NewTheater=no`,
   and the shipyards have no NewTheater key but only `gg`/`ng`/`yg` files outside snow.
+- Infantry file stems use effective rules `Image=` (including scenario overrides), defaulting to the type ID;
+  the selected art section still supplies sequence/remap metadata, but its own `Image=` does not alias infantry
+  files. In YR 1.001, ObjectType::LoadFromINI (`0x5F933B`) reads that field from the caller's rules INI and the
+  Techno SHP loader (`0x7157B5`) uses it directly. Thus stock CAML loads `caml.shp` despite art `[CAML] Image=JOSH`.
+  Non-infantry art aliases retain their existing behavior. Old catalogs need a source-aware rebuild; fitting camel
+  art into inherited chimp atlas rectangles would lose the native silhouette and anchors.
 - Type library only: art `Remapable=` applies to infantry and vehicles too (animals are not house-coloured); art
   `TerrainPalette=yes` is recorded but the unit palette is kept (the lamp art is colour noise with the iso palette).
 
@@ -1801,6 +1811,15 @@ For a normal local skirmish with **one human and one AI**, the specification acc
 human and `<Player @ B>` as the AI. It emits the engine's exact preplaced-object owner names
 `<human player>` and `Computer`, respectively. This is a tool convention for that two-player setup, not a
 promise that the human starts at waypoint 0. The supervisor must arrange the intended starting location.
+
+Live results on XMP29U2 (stage-2 units track, four local matches, normal speed): `Computer` rows are created and
+owned by the AI, but the AI moves them back to its base (or into its teams) within about a minute, even with mission
+`Guard` and both recruitable flags 0; `<human player>` rows were never created; a country name such as `Americans`
+did not give the human the objects either. The reliable staging is the map's `Neutral` house, which has no AI:
+XMP29U2 declares `Allies=Americans,Alliance,British,Arabs,Neutral`, so with the human playing a Soviet country
+(e.g. Russians) against an Allied AI, Neutral-owned armed units on `Guard` stay where they were placed and attack
+the human's units in range. That is how the Chrono Legionnaire beam and the Yuri / Mastermind mind-control links
+were captured as frozen original-vs-HD pairs.
 Neutral objects retain the map's declared or already-used house name; stock maps commonly use `Neutral`
 and `Special`, which have different game roles.
 
@@ -1980,3 +1999,47 @@ chosen margin included in the report. A redrawn control type can still contain r
 This is an image-based coverage estimate, not proof of image-model provenance: global polish and an unusually
 faithful redraw can affect classification. The asset-free pytest suite creates tiny synthetic libraries, pages
 and voxel manifests in temporary directories.
+Voxel completion checks atlas, part and facing integrity only; it does not establish silhouette IoU, material
+quality, faction-paint fidelity or live occlusion. Keep registration and visual acceptance evidence separate.
+
+When a later pass redraws the negative control types, automatic calibration can no longer separate its cohorts.
+Use `--calibration-report "$ORIGINAL_COVERAGE_JSON"` to retain the original standard while scoring the current art.
+The original report must include urban control-frame scores and use the same resolved stage-0 base path. The tool
+recomputes its calibration and verifies the metric, cohorts and threshold; a supplied threshold alone is rejected.
+
+An independently verified source correction can invalidate the historical stage-0 sprite itself, as with an old
+CAML catalog containing `josh.shp` instead of native `caml.shp`. Keep that historical cache and calibration archive
+unchanged. An optional explicit `--source-overlay` supplies an immutable source-corrected comparison baseline:
+
+```bash
+python3 packages/ra2-assets/python/unit_coverage.py scan \
+  --farm "$HD_FARM" --base "$HD_BASE" \
+  --calibration-report "$ORIGINAL_COVERAGE_JSON" \
+  --source-overlay "$SOURCE_OVERLAY/source-overlay.json" \
+  --json "$COVERAGE_OUT/coverage.json" --md "$COVERAGE_OUT/coverage.md"
+python3 -m pytest packages/ra2-assets/python/test_source_overlay.py
+```
+
+The version-1 overlay declares `recipe: "indexed-nearest-2x"`, the unchanged `base` path, the frozen report's
+`calibration_report_sha256`, and reviewed `provenance` file descriptors (`path` and `sha256`). Each selected theater
+binds `base_library_sha256`, a separate baseline `library` descriptor, relative PNG `files` hashes and explicitly
+scoped `sprites`. Each sprite binds its rules `type`, `type_identity` excluding only atlas-page indices, the new
+`identity` (`file`, `canvas`, `frameCount`, `palette`, `remap`), the full `superseded_identity` (`file`, `canvas`,
+`frameCount`) and ordered `frames`/`shadows` records (`size`, `offset`, `indexed_sha256`). Baseline libraries contain
+only those declared types and sprites. No default source is inferred from filenames or a failed comparison.
+
+The scanner checks current source identity, type/sequence bindings, exact original indexed crops, offsets, palettes
+and both body/shadow counts. It independently reconstructs the baseline's nearest-2x RGBA and house-paint support;
+hashes alone cannot approve an arbitrary HD donor. Original fixed colours remain fixed for non-remappable sprites.
+Missing or altered evidence, archive metadata, page bytes, geometry or recipe fails the explicit overlay. Its
+sprites cannot borrow an unrelated urban baseline. The original frozen control scores determine calibration before
+overlay use; source-corrected sprites never enter a newly inferred calibration cohort.
+
+Reports identify this baseline as `source-verified-nearest-2x`, retain overlay/provenance hashes, and distinguish it
+from historical stage-0 art. The hashes bind reviewed evidence; they do not automatically prove the native source
+analysis or image-model provenance. Keep reports outside the immutable overlay directory. This opt-in mechanism
+does not write assets, repair catalogs, weaken geometry gates or establish live rendering acceptance.
+The new report records the source report's SHA-256 and labels the control statistics as historical. Old reports
+have no baseline content hashes, so matching paths does not prove historical byte immutability. Preserve the
+original report separately: outputs cannot overwrite it, and a report with frozen controls cannot itself serve
+as the calibration reference.

@@ -1,5 +1,5 @@
 /** Type library: sequences, colour scheme order, paged atlases, art-name resolution and type records (synthetic data). */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cpSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +10,8 @@ import { coordDrawOffset } from '../src/iso.ts';
 import { colorSchemeSlots } from '../src/remap.ts';
 import { THEATERS } from '../src/theater.ts';
 import { ArtSource, packSprites, type InstallView } from '../src/node/artSource.ts';
+import { extractMap } from '../src/node/extract.ts';
+import { GameInstall } from '../src/node/install.ts';
 import {
   appendOverlayLibrary,
   appendSmudgeLibrary,
@@ -337,6 +339,80 @@ describe('art name resolution', () => {
     const s2 = new ArtSource(i2, THEATERS.temperate, () => {});
     expect(s2.artOf('APOC')).toMatchObject({ image: 'GTNK', section: 'MTNK' });
     expect(s2.artOf('NOART')).toMatchObject({ image: 'NOART', section: 'NOART', sec: undefined });
+  });
+
+  it('keeps infantry file stems in rules while retaining art metadata and non-infantry aliases', () => {
+    const install = fakeInstall(
+      {},
+      {
+        'rulesmd.ini': '[CAML]\n;Image=JOSH\n[ALIAS]\nImage=CAML\n',
+        'artmd.ini': '[CAML]\nImage=JOSH\nSequence=CamelSequence\nRemapable=no\n[JOSH]\nSequence=ChimpSequence\n',
+      },
+    );
+    const source = new ArtSource(install, THEATERS.temperate, () => {});
+    for (const id of ['CAML', 'ALIAS']) {
+      const resolved = source.infantryArtOf(id);
+      expect(resolved).toMatchObject({ image: 'CAML', section: 'CAML' });
+      expect(resolved.sec?.getString('Sequence', '')).toBe('CamelSequence');
+      expect(source.shpCandidates(resolved.image, resolved.sec)).toEqual(['ctml.shp', 'cgml.shp', 'caml.shp']);
+    }
+    expect(source.artOf('CAML')).toMatchObject({ image: 'JOSH', section: 'CAML' });
+    expect(source.infantryArtOf('NOART')).toMatchObject({ image: 'NOART', section: 'NOART', sec: undefined });
+    const scenario = new ArtSource(install, THEATERS.temperate, () => {}, [parseIni('[CAML]\nImage=JOSH\n')]);
+    const overridden = scenario.infantryArtOf('CAML');
+    expect(overridden).toMatchObject({ image: 'JOSH', section: 'JOSH' });
+    expect(overridden.sec?.getString('Sequence', '')).toBe('ChimpSequence');
+  });
+
+  it('extracts the actual infantry file into the library without silently falling back to an art alias', () => {
+    const inis = {
+      'rulesmd.ini': '[InfantryTypes]\n0=CAML\n[CAML]\n',
+      'artmd.ini': '[CAML]\nImage=JOSH\nSequence=AnimalSequence\nRemapable=no\n[AnimalSequence]\nReady=0,1,1\n',
+    };
+    const files = { 'caml.shp': bodyAndShadow(8, 5, 7), 'josh.shp': bodyAndShadow(8, 2, 3) };
+    const actual = collectTypeLibrary(fakeInstall(files, inis), 'temperate');
+    expect(actual.collector.sprites.get('infantry:CAML')!.entry.file).toBe('caml.shp');
+    expect(actual.collector.sprites.get('infantry:CAML')!.frames[0]).toMatchObject({ w: 5, h: 7 });
+    expect(actual.types['CAML']).toMatchObject({ remap: false, infantry: { sequenceName: 'AnimalSequence' } });
+    const missing = collectTypeLibrary(fakeInstall({ 'josh.shp': files['josh.shp'] }, inis), 'temperate');
+    expect(missing.types['CAML']).toBeUndefined();
+    expect(
+      missing.warnings.some((w) => w.startsWith('infantry CAML: skipped, no art file (ctml.shp, cgml.shp, caml.shp)')),
+    ).toBe(true);
+  });
+
+  it.each([
+    { override: '', file: 'caml.shp', crop: [5, 7] },
+    { override: '[CAML]\nImage=JOSH\n', file: 'josh.shp', crop: [2, 3] },
+  ])('uses the same infantry stem policy in map extraction ($file)', ({ override, file, crop }) => {
+    const root = mkdtempSync(join(tmpdir(), 'ra2-infantry-source-'));
+    const install = fakeInstall(
+      { 'caml.shp': bodyAndShadow(8, 5, 7), 'josh.shp': bodyAndShadow(8, 2, 3) },
+      {
+        'rulesmd.ini': '[CAML]\n',
+        'artmd.ini':
+          '[CAML]\nImage=JOSH\nSequence=AnimalSequence\n[JOSH]\nSequence=AnimalSequence\n[AnimalSequence]\nReady=0,1,1\n',
+        [THEATERS.temperate.controlIni]: '[General]\nClearTile=0\n',
+      },
+    );
+    const opened = Object.assign(install, {
+      report: { mounted: [], missing: [], unreadable: [] },
+      tmp: () => undefined,
+    });
+    const spy = vi.spyOn(GameInstall, 'open').mockReturnValue(opened as unknown as GameInstall);
+    try {
+      const map = join(root, 'source.map');
+      writeFileSync(map, '[Map]\nTheater=TEMPERATE\n[Infantry]\n0=Neutral,CAML,256,1,1,0,Guard,0\n' + override);
+      const result = extractMap({ gameDir: root, map, outDir: join(root, 'out'), defaultVoxels: [], log: () => {} });
+      const sprite = result.manifest.sprites['infantry:CAML']!;
+      expect(sprite.file).toBe(file);
+      expect(sprite.frames[0]!.rect.slice(2)).toEqual(crop);
+      expect(sprite.sourceFrames).toEqual([7]);
+      expect(result.manifest.objects[0]).toMatchObject({ type: 'CAML', sprite: 'infantry:CAML', frame: 0 });
+    } finally {
+      spy.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

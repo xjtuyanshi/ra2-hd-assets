@@ -131,6 +131,178 @@ def _crop(image, rect, scale=1):
     return image.crop((x * scale, y * scale, (x + w) * scale, (y + h) * scale))
 
 
+def _sha256(path):
+    with Path(path).open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def _verified_file(root, descriptor):
+    path = Path(descriptor['path'])
+    path = path if path.is_absolute() else root / path
+    expected = descriptor['sha256']
+    if not isinstance(expected, str) or len(expected) != 64 or _sha256(path) != expected:
+        raise ValueError(f'source overlay file hash mismatch: {path}')
+    return path
+
+
+def _overlay_file(directory, name, files):
+    relative = Path(name)
+    if relative.is_absolute() or '..' in relative.parts or name not in files:
+        raise ValueError(f'source overlay unlisted or unsafe reference: {name}')
+    return directory / relative
+
+
+def load_source_overlay(path, base, loaded, calibration_report):
+    """Validate an explicit, independently reviewed original-source correction; never infer a replacement baseline.
+
+    The overlay binds the unchanged archive and frozen controls, source/evidence file hashes, exact current indexed
+    crops and an independently reconstructed nearest-2x stage-0 recipe. It cannot attest the source analysis itself;
+    the caller must review the hash-bound provenance. Only declared sprites use this separate comparison baseline.
+    """
+    if not calibration_report:
+        raise ValueError('source overlay requires a frozen calibration report')
+    path = Path(path)
+    content = path.read_bytes()
+    overlay_sha256 = hashlib.sha256(content).hexdigest()
+    data = json.loads(content)
+    if data.get('version') != 1 or data.get('recipe') != 'indexed-nearest-2x':
+        raise ValueError('unsupported source overlay version or baseline recipe')
+    if Path(data['base']).resolve() != Path(base).resolve():
+        raise ValueError('source overlay uses a different archive base')
+    if data.get('calibration_report_sha256') != _sha256(calibration_report):
+        raise ValueError('source overlay calibration report hash mismatch')
+    provenance = data.get('provenance', [])
+    if not provenance:
+        raise ValueError('source overlay requires reviewed source provenance')
+    for descriptor in provenance:
+        _verified_file(path.parent, descriptor)
+    if not data.get('theaters') or any(t not in THEATERS for t in data['theaters']):
+        raise ValueError('source overlay has invalid theater scope')
+    overrides, summary = {}, {}
+    for theater, (directory, current, base_dir, archived) in loaded.items():
+        entry = data['theaters'].get(theater)
+        if entry is None:
+            continue
+        if entry.get('base_library_sha256') != _sha256(base_dir / 'library.json'):
+            raise ValueError(f'{theater}: source overlay archive library hash mismatch')
+        library_path = _verified_file(path.parent, entry['library'])
+        library_bytes = library_path.read_bytes()
+        if hashlib.sha256(library_bytes).hexdigest() != entry['library']['sha256']:
+            raise ValueError(f'{theater}: source overlay library changed during validation')
+        baseline_dir, baseline = library_path.parent, json.loads(library_bytes)
+        specs, files = entry['sprites'], entry['files']
+        if not specs or set(baseline.get('sprites', {})) != set(specs):
+            raise ValueError(f'{theater}: source overlay sprite scope mismatch')
+        if baseline.get('theater', '').lower() != theater:
+            raise ValueError(f'{theater}: source overlay library theater mismatch')
+        if set(baseline.get('types', {})) != {s['type'] for s in specs.values()}:
+            raise ValueError(f'{theater}: source overlay type scope mismatch')
+        for name, expected in files.items():
+            file_path = _overlay_file(baseline_dir, name, files)
+            if _sha256(file_path) != expected:
+                raise ValueError(f'{theater}: source overlay page/palette hash mismatch: {name}')
+        originals, palette_cache, indexed_pages, remap_regions = {}, {}, {}, {}
+        refs, hd_refs = baseline['spriteAtlases'], baseline['spriteAtlasesHd']
+        if len(refs) != len(hd_refs):
+            raise ValueError(f'{theater}: source overlay atlas arrays differ')
+        for page, (ref, hd_ref) in enumerate(zip(refs, hd_refs)):
+            with Image.open(_overlay_file(baseline_dir, ref['file'], files)) as im:
+                if im.mode not in ('L', 'P') or list(im.size) != [ref['width'], ref['height']]:
+                    raise ValueError(f'{theater}: source overlay indexed page shape/mode mismatch')
+                originals[page] = im.copy()
+            if hd_ref.get('scale') != 2:
+                raise ValueError(f'{theater}: source overlay requires 2x baseline')
+            for name in ('file', 'remap'):
+                _overlay_file(baseline_dir, hd_ref[name], files)
+        for key, spec in specs.items():
+            target, source, old = current['sprites'][key], baseline['sprites'][key], archived['sprites'][key]
+            identity = spec['identity']
+            if set(identity) != {'file', 'canvas', 'frameCount', 'palette', 'remap'}:
+                raise ValueError(f'{theater}/{key}: source overlay incomplete identity')
+            if any(target.get(k) != v or source.get(k) != v for k, v in identity.items()):
+                raise ValueError(f'{theater}/{key}: source overlay current/source identity mismatch')
+            if set(spec['superseded_identity']) != {'file', 'canvas', 'frameCount'}:
+                raise ValueError(f'{theater}/{key}: source overlay incomplete superseded identity')
+            if any(old.get(k) != v for k, v in spec['superseded_identity'].items()):
+                raise ValueError(f'{theater}/{key}: source overlay superseded identity mismatch')
+            code = spec['type']
+            type_identity = spec['type_identity']
+            for library in (current, baseline):
+                actual = {k: v for k, v in library['types'][code].items() if k != 'atlasPages'}
+                if actual != type_identity or actual.get('sprite') != key:
+                    raise ValueError(f'{theater}/{key}: source overlay type binding mismatch')
+            palette_name = baseline['palettes'][identity['palette']]
+            palette_path = _overlay_file(baseline_dir, palette_name, files)
+            with Image.open(palette_path) as im:
+                palette = np.asarray(im.convert('RGB')).reshape(-1, 3)
+            if palette.shape != (256, 3):
+                raise ValueError(f'{theater}/{key}: source overlay palette shape mismatch')
+            with Image.open(directory / current['palettes'][identity['palette']]) as im:
+                target_palette = np.asarray(im.convert('RGB')).reshape(-1, 3)
+            if not np.array_equal(palette, target_palette):
+                raise ValueError(f'{theater}/{key}: source overlay current palette mismatch')
+            for page in {f.get('page', 0) for kind in ('frames', 'shadows') for f in source.get(kind, []) if f['rect'][2] > 0}:
+                if page in palette_cache and not np.array_equal(palette_cache[page], palette):
+                    raise ValueError(f'{theater}: source overlay page mixes palettes')
+                palette_cache[page] = palette
+                remap_regions.setdefault(page, np.zeros(np.asarray(originals[page]).shape, bool))
+            for kind in ('frames', 'shadows'):
+                expected_frames = spec[kind]
+                if len(target.get(kind, [])) != len(expected_frames) or len(source.get(kind, [])) != len(expected_frames):
+                    raise ValueError(f'{theater}/{key}: source overlay {kind} count mismatch')
+                for index, expected in enumerate(expected_frames):
+                    for library, frames, source_dir in ((baseline, source[kind], baseline_dir), (current, target[kind], directory)):
+                        frame = frames[index]
+                        if frame['rect'][2:] != expected['size'] or frame['offset'] != expected['offset']:
+                            raise ValueError(f'{theater}/{key}/{kind}/{index}: source overlay frame geometry mismatch')
+                        if 0 in expected['size']:
+                            pixels = b''
+                        else:
+                            filename = _ref(library, source_dir, 'spriteAtlases', frame.get('page', 0))
+                            if filename not in indexed_pages:
+                                with Image.open(filename) as im:
+                                    if im.mode not in ('L', 'P'):
+                                        raise ValueError('source overlay current original must be indexed')
+                                    indexed_pages[filename] = im.copy()
+                            pixels = np.asarray(_crop(indexed_pages[filename], frame['rect'])).tobytes()
+                        if hashlib.sha256(pixels).hexdigest() != expected['indexed_sha256']:
+                            raise ValueError(f'{theater}/{key}/{kind}/{index}: source overlay original crop hash mismatch')
+                    if kind == 'frames' and identity['remap'] and 0 not in expected['size']:
+                        f = source[kind][index]
+                        x, y, w, h = f['rect']
+                        remap_regions[f.get('page', 0)][y:y+h, x:x+w] = True
+        for page, palette in palette_cache.items():
+            indices = np.asarray(originals[page])
+            rgba = np.concatenate((palette[indices], ((indices != 0) * 255)[..., None]), axis=-1).astype(np.uint8)
+            rgba[indices == 12, :3] = 0
+            paint = ((indices >= 16) & (indices <= 31) & remap_regions[page]).astype(np.uint8) * 255
+            if paint.any():
+                rgba[..., :3][paint > 0] = (255 - 15 * (indices.astype(np.int32) - 16))[paint > 0, None]
+            rgba[indices == 0, :3] = 0
+            expected_rgba = np.repeat(np.repeat(rgba, 2, 0), 2, 1)
+            expected_paint = np.repeat(np.repeat(paint, 2, 0), 2, 1)
+            hd = hd_refs[page]
+            if [hd['width'], hd['height']] != [expected_rgba.shape[1], expected_rgba.shape[0]]:
+                raise ValueError(f'{theater}: source overlay HD dimensions mismatch')
+            with Image.open(_overlay_file(baseline_dir, hd['file'], files)) as im:
+                actual_rgba = np.asarray(im.convert('RGBA'))
+            with Image.open(_overlay_file(baseline_dir, hd['remap'], files)) as im:
+                actual_paint = np.asarray(im.convert('L'))
+            if not np.array_equal(actual_rgba, expected_rgba) or not np.array_equal(actual_paint, expected_paint):
+                raise ValueError(f'{theater}: source overlay nearest baseline recipe mismatch')
+        details = {'baseline_kind': 'source-verified-nearest-2x', 'source_overlay_sha256': overlay_sha256,
+                   'source_overlay_library_sha256': entry['library']['sha256']}
+        overrides[theater] = {key: (baseline_dir, baseline, details) for key in specs}
+        summary[theater] = {'sprites': list(specs), **details}
+    if not overrides:
+        raise ValueError('source overlay has no selected theater')
+    if _sha256(path) != overlay_sha256:
+        raise ValueError('source overlay changed during validation')
+    return overrides, {'path': str(path), 'sha256': overlay_sha256, 'recipe': data['recipe'],
+                       'provenance': provenance, 'theaters': summary,
+                       'interpretation': 'Explicit independently reviewed original-source correction; immutable nearest-2x baseline, not the historical stage-0 art or live acceptance.'}
+
+
 class SpriteScanner:
     """Decode each page once; reuse baseline crops and scores by verified pixel content."""
     def __init__(self):
@@ -163,7 +335,7 @@ class SpriteScanner:
         rgba[rgba[..., 3] == 0, :3] = 0
         return rgba
 
-    def scan(self, directory, data, base_dir, base, keys, fallback=None):
+    def scan(self, directory, data, base_dir, base, keys, fallback=None, source_overrides=None):
         results, groups = {}, defaultdict(list)
         schemes = data.get('colorSchemes', [])
         red = data.get('colorSchemesByName', {}).get('Red', 0)
@@ -183,10 +355,14 @@ class SpriteScanner:
                     continue
                 record['non_empty'] = None
                 try:
-                    source_dir, source = base_dir, base
+                    override = (source_overrides or {}).get(key)
+                    source_dir, source = override[:2] if override else (base_dir, base)
+                    if override:
+                        record.update(override[2])
+                    frame_ramp = None if override and sprite.get('remap') is False else ramp
                     baseline = source['sprites'][key]['frames'][index]
                     page, bp = frame.get('page', 0), baseline.get('page', 0)
-                    borrowed = not _ref(source, source_dir, 'spriteAtlasesHd', bp) and fallback is not None
+                    borrowed = not override and not _ref(source, source_dir, 'spriteAtlasesHd', bp) and fallback is not None
                     if borrowed:
                         source_dir, source = fallback
                         baseline = source['sprites'][key]['frames'][index]
@@ -194,7 +370,7 @@ class SpriteScanner:
                     record.update(baseline_theater=source_dir.name, baseline_fallback=False)
                     if rect[2:] != baseline['rect'][2:] or frame.get('offset') != baseline.get('offset'):
                         raise ValueError('stage-0 frame geometry mismatch')
-                    reference_key = (str(source_dir), key, index, ramp_key)
+                    reference_key = (str(source_dir), key, index, None if frame_ramp is None else ramp_key)
                     if borrowed and reference_key not in self.reference_frames:
                         raise ValueError('verified urban stage-0 frame unavailable')
                     paths = (_ref(data, directory, 'spriteAtlases', page),
@@ -220,7 +396,7 @@ class SpriteScanner:
                         if cache_key in self.reference_cache:
                             self.reference_frames[reference_key] = self.reference_cache[cache_key]
                     else:
-                        groups[group_key].append((paths, record, rect, baseline['rect'], pal_path, base_pal_path,
+                        groups[group_key].append((paths, record, rect, baseline['rect'], pal_path, base_pal_path, frame_ramp,
                                                    cache_key, reference_key, borrowed))
                 except (KeyError, IndexError, TypeError, ValueError) as error:
                     record['issue'] = str(error)
@@ -241,12 +417,12 @@ class SpriteScanner:
                     except (OSError, ValueError) as exc:
                         error = f'图集不可读 {path}: {exc}'
                         break
-                for paths, record, rect, base_rect, pal_path, base_pal_path, cache_key, reference_key, borrowed in jobs:
+                for paths, record, rect, base_rect, pal_path, base_pal_path, frame_ramp, cache_key, reference_key, borrowed in jobs:
                     if error:
                         original_page = images.get(_identity(paths[0]))
                         if original_page is not None:
                             try:
-                                original = self.original(_crop(original_page, rect), pal_path, ramp)
+                                original = self.original(_crop(original_page, rect), pal_path, frame_ramp)
                                 record['non_empty'] = bool(np.any(original[..., 3] > 0))
                             except (OSError, ValueError, IndexError):
                                 pass
@@ -255,7 +431,7 @@ class SpriteScanner:
                     try:
                         originals, hd, paint, base_hd, base_paint, base_original = [images.get(_identity(p)) for p in paths]
                         original_crop = _crop(originals, rect)
-                        original = self.original(original_crop, pal_path, ramp)
+                        original = self.original(original_crop, pal_path, frame_ramp)
                         comparison_mask = None
                         record['non_empty'] = bool(np.any(original[..., 3] > 0))
                         if hd is None:
@@ -272,7 +448,7 @@ class SpriteScanner:
                             record['baseline_fallback'] = True
                         else:
                             base_original_crop = _crop(base_original, base_rect)
-                            reference_original = self.original(base_original_crop, base_pal_path, ramp)
+                            reference_original = self.original(base_original_crop, base_pal_path, frame_ramp)
                             reference_indices = (np.asarray(base_original_crop).copy()
                                                  if base_original_crop.mode in ('L', 'P') and base_pal_path else None)
                             bas = downsample(np.asarray(_crop(base_hd, base_rect, 2).convert('RGBA')),
@@ -345,6 +521,45 @@ def calibrate(sprites):
                                                                  if f.get('original_lab') is not None)}
                                 for key, values in keyed.items()}
     return out
+
+
+def frozen_calibration(path: Path, base: Path):
+    """Reproduce a prior urban calibration after its negative controls are redrawn.
+
+    Never accept a supplied threshold alone: the saved control frames must still
+    reproduce every calibration statistic. Older reports identify the baseline
+    by path, not by content hash; keep that evidence limit visible in the report.
+    """
+    content = Path(path).read_bytes()
+    report = json.loads(content)
+    if report.get('version') != 1 or not isinstance(report.get('base'), str):
+        raise ValueError('Calibration report has an unsupported format')
+    if Path(report['base']).resolve() != Path(base).resolve():
+        raise ValueError('Calibration report uses a different stage-0 base')
+    saved = report.get('calibration', {})
+    if saved.get('reference'):
+        raise ValueError('Calibration requires the original report, not a report with frozen controls')
+    controls = {}
+    for row in report.get('rows', []):
+        key = row.get('sprite')
+        if key not in (*REDRAWN, *NOT_REDRAWN):
+            continue
+        frames = row.get('theaters', {}).get('urban', {}).get('frames')
+        if frames is None:
+            raise ValueError('Calibration report requires saved urban control frames')
+        if key in controls and frames != controls[key]:
+            raise ValueError(f'Calibration report has inconsistent aliases for {key}')
+        controls[key] = frames
+    reproduced = calibrate(controls)
+    if any(saved.get(key) != value for key, value in reproduced.items()):
+        raise ValueError('Calibration report metric, controls or threshold do not match its saved frames')
+    reproduced['reference'] = {
+        'path': str(Path(path).resolve()),
+        'sha256': hashlib.sha256(content).hexdigest(),
+        'base_validation': 'Same resolved stage-0 path; the original report has no baseline content hashes.',
+        'warning': 'Calibration cohorts are historical controls, not current redraw status.',
+    }
+    return reproduced
 
 
 def sprite_coverage(frames, threshold, sequences=None):
@@ -563,12 +778,13 @@ def _notes(row):
     return notes + ('；' + row['note'] if row.get('note') else '')
 
 
-def scan(farm: Path, base: Path, theaters=None, meta=None):
+def scan(farm: Path, base: Path, theaters=None, meta=None, calibration_report=None, source_overlay=None):
     """Return numeric coverage; neither source tree is written or modified."""
     started = time.monotonic()
     _identity.cache_clear()
     _content_identity.cache_clear()
     farm, base = Path(farm), Path(base)
+    calibration = frozen_calibration(calibration_report, base) if calibration_report else None
     theaters = list(dict.fromkeys(theaters or THEATERS))
     if any(theater not in THEATER_NAMES for theater in theaters):
         raise ValueError('Unknown theater')
@@ -580,15 +796,17 @@ def scan(farm: Path, base: Path, theaters=None, meta=None):
         loaded[theater] = (directory, read_json(directory / 'library.json'),
                            base_dir, read_json(base_dir / 'library.json'))
     scanner = SpriteScanner()
+    source_overrides, overlay_report = load_source_overlay(source_overlay, base, loaded, calibration_report) if source_overlay else ({}, None)
     d, lib, b, blib = loaded['urban']
-    urban = scanner.scan(d, lib, b, blib, _sprite_keys(lib))
-    calibration = calibrate(urban)
+    urban = scanner.scan(d, lib, b, blib, _sprite_keys(lib), source_overrides=source_overrides.get('urban'))
+    calibration = calibration or calibrate(urban)
     threshold = calibration['threshold']
     scored, rows_by_code = {}, {}
     for theater in theaters:
         directory, library, base_dir, baseline = loaded[theater]
         scored[theater] = urban if theater == 'urban' else scanner.scan(
-            directory, library, base_dir, baseline, _sprite_keys(library), fallback=(b, blib))
+            directory, library, base_dir, baseline, _sprite_keys(library), fallback=(b, blib),
+            source_overrides=source_overrides.get(theater))
         for code, spec in library['types'].items():
             if spec.get('kind') not in KINDS:
                 continue
@@ -625,6 +843,7 @@ def scan(farm: Path, base: Path, theaters=None, meta=None):
         row['description'] = _notes(row)
     summary = {status: sum(row['status'] == status for row in rows) for status in ('已完成', '部分', '未完成')}
     return {'version': 1, 'farm': str(farm), 'base': str(base), 'theaters': theaters,
+            **({'source_overlay': overlay_report} if overlay_report else {}),
             'scope': 'infantry, vehicles, aircraft, building turret voxels; ordinary building bodies excluded',
             'excluded_buildings': {t: [code for code, spec in loaded[t][1]['types'].items()
                                        if spec.get('kind') == 'building'] for t in theaters},
@@ -640,15 +859,24 @@ def _escape(value):
 
 def markdown(report):
     calibration = report['calibration']
+    overlay = report.get('source_overlay')
+    baseline_description = ('以当前 HD 与对应比较基线的差值排除基础放大误差；未覆盖素材使用 stage-0，'
+                            '显式源修正素材使用下列 nearest-2x 基线。' if overlay else
+                            '以当前 HD 与 stage-0 的差值排除基础放大误差。')
     lines = ['# 单位 HD 重绘覆盖率', '', '范围：步兵、车辆、飞机、建筑炮塔；普通建筑本体代码另记于 JSON 的 excluded_buildings。', '',
              f"校准：stage-0 基线结构色差阈值 **{calibration['threshold']:.6f}**；"
              f"保留/抛光簇上限 {calibration['retained_cluster_max']:.6f}，重绘簇下限 {calibration['redrawn_cluster_min']:.6f}，"
              f"间隔 {calibration['gap']:.6f}。", '',
              '分数为身体像素上的 CIE-Lab 平均色差：原图及 HD 排除透明/近黑阴影，HD 解码阵营色后用 BOX 缩回 1x。'
-             '同时记录原图色差；以当前 HD 与 stage-0 的差值排除基础放大误差。结构分数是启发式证据，不能证明生成来源。', '',
+             f'同时记录原图色差；{baseline_description}结构分数是启发式证据，不能证明生成来源。', '',
              '已知重绘的是类型，不代表其中每个动画帧都重绘；缺文件和无法评分的帧不会被算作完成。', '',
+             '体素完成状态仅核对图集文件、部件和朝向的完整性；本表不验收轮廓 IoU、材质质量、阵营色保真或实机遮挡。', '',
              '校准样本 | 帧数 | 最小 | P05 | 中位 | P95 | 最大 | 判为重绘',
              '--- | ---: | ---: | ---: | ---: | ---: | ---: | ---:']
+    if calibration.get('reference'):
+        reference = calibration['reference']
+        lines[6:6] = [f"冻结校准来源：`{_escape(reference['path'])}`；SHA-256 `{reference['sha256']}`。"
+                      '下表为历史对照，当前素材仍逐帧重新评分；仅核对 stage-0 路径，旧报告没有基线内容哈希。', '']
     for cohort, sets in calibration['cohorts'].items():
         for key, stats in sets.items():
             if not stats['count']:
@@ -656,6 +884,13 @@ def markdown(report):
             else:
                 values = ' | '.join(f'{stats[n]:.4f}' for n in ('min', 'p05', 'median', 'p95', 'max'))
                 lines.append(f'{key} ({cohort}) | {stats["count"]} | {values} | {stats["frames_redrawn"]}')
+    if overlay:
+        scoped_sprites = '；'.join(f"{_escape(theater)}：{', '.join(_escape(key) for key in entry['sprites'])}"
+                                  for theater, entry in overlay['theaters'].items())
+        lines += ['', f"显式 source overlay：`{_escape(overlay['path'])}`；SHA-256 `{overlay['sha256']}`。",
+                  '该源修正使用独立审查的原生素材 nearest-2x 比较基线（source-verified-nearest-2x），'
+                  '不是旧 stage-0 archive，也不代表实机验收；冻结校准及其历史对照保持原样。',
+                  f'适用素材：{scoped_sprites}。']
     lines += ['', '；'.join(f'{key} {value}' for key, value in report['summary'].items()), '',
               '| 类别 | 阵营 | 代码 | 图像 | 名称 | 状态 | 说明 |', '| --- | --- | --- | --- | --- | --- | --- |']
     for row in report['rows']:
@@ -674,6 +909,10 @@ def main(argv=None):
     command.add_argument('--base', required=True, type=Path)
     command.add_argument('--theaters', nargs='+', choices=THEATERS)
     command.add_argument('--meta', type=Path)
+    command.add_argument('--calibration-report', type=Path,
+                         help='Freeze calibration from an original report with saved urban control frames')
+    command.add_argument('--source-overlay', type=Path,
+                         help='Explicit hash-bound source correction with an immutable nearest-2x baseline; requires frozen calibration')
     command.add_argument('--json', required=True, type=Path)
     command.add_argument('--md', required=True, type=Path)
     options = parser.parse_args(argv)
@@ -683,7 +922,14 @@ def main(argv=None):
             parser.error('Reports must be outside the read-only farm/base directories')
     if options.json.resolve() == options.md.resolve():
         parser.error('JSON and Markdown outputs must be different files')
-    report = scan(options.farm, options.base, options.theaters, read_json(options.meta) if options.meta else None)
+    if options.calibration_report and any(path.resolve() == options.calibration_report.resolve()
+                                          for path in (options.json, options.md)):
+        parser.error('Outputs must not overwrite the calibration report')
+    if options.source_overlay and any(path.resolve().is_relative_to(options.source_overlay.parent.resolve())
+                                       for path in (options.json, options.md)):
+        parser.error('Reports must be outside the immutable source overlay directory')
+    report = scan(options.farm, options.base, options.theaters, read_json(options.meta) if options.meta else None,
+                  options.calibration_report, options.source_overlay)
     for path, content in ((options.json, json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + '\n'),
                           (options.md, markdown(report))):
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -257,8 +257,8 @@ UNIT_DESC = {
             "a stocky polar bear with white-cream fur and grey shading, a long neck, small rounded ears, a dark nose, four thick legs with broad paws and a short tail"),
     "JOSH": ("chimpanzee",
             "a small hunched chimpanzee with charcoal-brown fur, a pale tan-pink face, tan hands and feet, long forearms and short bent hind legs"),
-    "CAML": ("chimpanzee",
-            "a small hunched chimpanzee with charcoal-brown fur, a pale tan-pink face, tan hands and feet, long forearms and short bent hind legs"),
+    "CAML": ("camel",
+            "a tawny tan-brown camel with the original humped back profile, a long curved narrow neck, a small elongated muzzle, four slender jointed legs with dark feet and a short thin tail; preserve every original pose and foot contact"),
     "DNOA": ("tyrannosaur",
             "a large bipedal tyrannosaur with olive-brown and grey scaly skin, dark stripes across its back, a paler underside, a massive head and jaws, tiny forearms, powerful hind legs with clawed feet and a long tapering tail"),
     "DNOB": ("long-necked reptile",
@@ -320,7 +320,7 @@ ANIMALS = {
     "ALL": "realistic wet reptile scales and osteoderm ridges with a slight gloss, teeth, claws",
     "POLARB": "realistic dense white fur with visible strands and soft sheen, dark nose and eyes, heavy paws",
     "JOSH": "realistic coarse fur with visible strands, wrinkled bare skin on the face, hands and feet",
-    "CAML": "realistic coarse fur with visible strands, wrinkled bare skin on the face, hands and feet",
+    "CAML": "realistic short tawny fur with visible strands and longer coarse hump hair, subtle muzzle wrinkles and dark foot material, retaining the original tan-brown colours",
     "DNOA": "realistic thick scaly reptile hide with folds and wrinkles, teeth and claws, glinting eyes",
     "DNOB": "realistic thick scaly reptile hide with folds and wrinkles, glinting eyes",
     "MUMY": "realistic layered linen bandages with frayed edges, stains and dust, dark gaps between the wraps",
@@ -564,6 +564,49 @@ def choose_scale(W, H):
     return min(12.0, math.floor(s * 2) / 2)
 
 
+def fit_sheet_specs(lib: Library, unit, specs):
+    """Split oversized sheets without changing frame identity, order or facing instructions.
+
+    Existing sheets keep their names and layout. Large creatures may need a split along either the animation
+    columns or the facing rows; choose the axis that improves the worst child canvas scale most.
+    """
+    sprite = lib.data["types"][unit]["sprite"]
+
+    def scale(rows):
+        lay = layout(lib, sprite, rows)
+        return max(min(MAX_SHORT / lay["W"], MAX_LONG / lay["H"]),
+                   min(MAX_LONG / lay["W"], MAX_SHORT / lay["H"]))
+
+    def split(rows, first):
+        if scale(rows) >= 2:
+            return [(rows, first)]
+        nonempty = [i for i, row in enumerate(rows) if row]
+        start, end = nonempty[0], nonempty[-1] + 1
+        if start or end < len(rows):
+            return split(rows[start:end], first + start)
+        candidates = []
+        if len(rows) > 1:
+            mid = len(rows) // 2
+            if any(rows[:mid]) and any(rows[mid:]):
+                candidates.append([(rows[:mid], first), (rows[mid:], first + mid)])
+        columns = max(map(len, rows))
+        if columns > 1:
+            mid = columns // 2
+            candidates.append([([row[:mid] for row in rows], first),
+                               ([row[mid:] for row in rows], first)])
+        if not candidates:
+            raise ValueError(f"{unit} frame cannot fit a native model canvas at 2x")
+        chosen = max(candidates, key=lambda parts: min(scale(part) for part, _ in parts))
+        return [child for part, offset in chosen for child in split(part, offset)]
+
+    out = []
+    for name, seq, rows in specs:
+        parts = split(rows, 4 if name.endswith("_b") else 0)
+        for index, (part, first) in enumerate(parts, 1):
+            out.append((name if len(parts) == 1 else f"{name}_part{index}", seq, part, first))
+    return out
+
+
 def shadow1(idx):
     return idx == 12
 
@@ -661,7 +704,7 @@ Save the result as output.png in this directory with exactly the same pixel size
 """
 
 
-def make_job(lib: Library, unit, name, seq, rows, root, style_ref=None):
+def make_job(lib: Library, unit, name, seq, rows, root, style_ref=None, first_facing=None):
     sp = lib.data["types"][unit]["sprite"]
     lay = layout(lib, sp, rows)
     S = choose_scale(lay["W"], lay["H"])
@@ -675,7 +718,7 @@ def make_job(lib: Library, unit, name, seq, rows, root, style_ref=None):
            "origin": [ox0, oy0],
            "layout": lay, "size": [img.shape[1], img.shape[0]]}
     (d / "job.json").write_text(json.dumps(job))
-    first = 4 if name.endswith("_b") else 0
+    first = (4 if name.endswith("_b") else 0) if first_facing is None else first_facing
     extra = ""
     if style_ref is not None:
         shutil.copy2(style_ref, d / "style.png")
@@ -700,6 +743,42 @@ def fg_mask(rgb, thr=16.0):
 def iou(a, b):
     u = (a | b).sum()
     return float((a & b).sum() / u) if u else 1.0
+
+
+INDEXED_SIL_METHOD = "indexed-body-raw-margin3-v1"
+INDEXED_SIL_MARGIN = 3
+
+
+def indexed_silhouette_metrics(body2, model4, scale, render_offset):
+    """Compare raw model foreground with the original body, including the full three-native-pixel margin.
+
+    Render the indexed reference using the input sheet's Lanczos size and placement rounding. RGB colour and
+    finished HD alpha cannot define this reference: grey material can be indistinguishable from the grey backdrop.
+    Keep model foreground extraction unchanged, including its holes, and count every foreground addition in the
+    context. The legacy score remains separate; this method is an explicit alternative, not a changed default.
+    """
+    h, w = body2.shape[0] // 2, body2.shape[1] // 2
+    margin = INDEXED_SIL_MARGIN
+    size = (4 * (w + 2 * margin), 4 * (h + 2 * margin))
+    if model4.shape[:2] != (size[1], size[0]):
+        raise ValueError("indexed silhouette model sample must include the full three-pixel margin")
+    rendered = np.asarray(Image.fromarray(body2.astype(np.float32), "F").resize(
+        (round(w * scale), round(h * scale)), Image.LANCZOS))
+    # A local zero-padded mask is equivalent to placing this one frame on the full input canvas. Padding includes
+    # the fractional placement phase; it is unrelated to model foreground and never expands the source body.
+    pad = int(np.ceil(margin * scale)) + 4
+    reference = Image.fromarray(np.pad(np.clip(rendered, 0, 1), pad), "F")
+    dx, dy = render_offset
+    box = (pad - margin * scale - dx, pad - margin * scale - dy,
+           pad + (w + margin) * scale - dx, pad + (h + margin) * scale - dy)
+    reference4 = np.clip(np.asarray(reference.resize(size, Image.LANCZOS, box=box)), 0, 1)
+    reference2 = hr.box_down(reference4, 2) > 0.5
+    model2 = hr.box_down(fg_mask(model4, 16.0).astype(np.float32), 2) > 0.5
+    return {"indexed_sil_iou": iou(reference2, model2), "indexed_sil_method": INDEXED_SIL_METHOD,
+            "indexed_sil_miss_pixels": int((reference2 & ~model2).sum()),
+            "indexed_sil_extra_pixels": int((model2 & ~reference2).sum()),
+            "indexed_context_edge": bool(model2[0].any() or model2[-1].any()
+                                         or model2[:, 0].any() or model2[:, -1].any())}
 
 
 def lock_lab(rep, ref, wgt, sigma_l, sigma_ab, lock_l, lock_ab):
@@ -772,10 +851,13 @@ def up2(a):
     h, w = a.shape
     ys = (np.arange(2 * h) + 0.5) / 2 - 0.5
     xs = (np.arange(2 * w) + 0.5) / 2 - 0.5
-    y0 = np.clip(np.floor(ys).astype(int), 0, h - 1)
-    y1 = np.clip(y0 + 1, 0, h - 1)
-    x0 = np.clip(np.floor(xs).astype(int), 0, w - 1)
-    x1 = np.clip(x0 + 1, 0, w - 1)
+    # Clamp both neighbours independently; a sample before the edge must not reach the next source pixel.
+    ybase = np.floor(ys).astype(int)
+    xbase = np.floor(xs).astype(int)
+    y0 = np.clip(ybase, 0, h - 1)
+    y1 = np.clip(ybase + 1, 0, h - 1)
+    x0 = np.clip(xbase, 0, w - 1)
+    x1 = np.clip(xbase + 1, 0, w - 1)
     fy = np.clip(ys - np.floor(ys), 0, 1)[:, None]
     fx = np.clip(xs - np.floor(xs), 0, 1)[None, :]
     top = a[y0][:, x0] * (1 - fx) + a[y0][:, x1] * fx
@@ -1044,6 +1126,13 @@ def compose_job(lib: Library, d: Path, opts, page=None):
         fout = hr.box_down(fg_mask(rep4, 16.0).astype(np.float32), 2) > 0.5
         sil = iou(fin & body2, fout & body2 | (fout & ~body2 & hr.dilate(body2, 1)))
         outside = float((fout & ~hr.dilate(body2 | shadow2, 2)).sum() / max(1, body2.sum()))
+        margin = INDEXED_SIL_MARGIN
+        extended4 = hr.resize_linear(rawp, (4 * (w + 2 * margin), 4 * (h + 2 * margin)),
+                                    box=(to_raw_x(-margin) + pad, to_raw_y(-margin) + pad,
+                                         to_raw_x(w + margin) + pad, to_raw_y(h + margin) + pad))
+        indexed_metrics = indexed_silhouette_metrics(
+            np.kron((idx > 0) & (idx != 12), np.ones((2, 2), bool)), extended4, S,
+            (round(p["x"] * S) - p["x"] * S, round(p["y"] * S) - p["y"] * S))
         # Model foreground at 4x: anything not flat background grey (the anti-aliased rim of the model's figure counts
         # as foreground, so the soft edge survives the downsample).
         dev4 = np.abs(rep4 - GREYV).max(-1)
@@ -1118,7 +1207,7 @@ def compose_job(lib: Library, d: Path, opts, page=None):
         out[..., :3] = np.clip(np.rint(enc), 0, 255).astype(np.uint8)
         out[..., 3] = np.clip(np.rint(a), 0, 255).astype(np.uint8)
         results[i] = {"rgba": out, "paint": np.clip(np.rint(pw * 255), 0, 255).astype(np.uint8), "rep2": rep2, "final": final, "ref2": ref2,
-                      "metrics": {"sil_iou": round(sil, 3), "outside": round(outside, 3),
+                      "metrics": {"sil_iou": round(sil, 3), "outside": round(outside, 3), **indexed_metrics,
                                   "edge_corr": round(float(edge_corr), 3), "lf_de": round(lf_de, 2),
                                   "hf_new": round(hf_new, 2), "hf_old": round(hf_old, 2),
                                   "reg": [round(v, 3) for v in (sx, tx, sy, ty)], "rejected": "rejected" in diag, "tried": [round(float(v), 3) for v in diag.get("rejected", [])],
@@ -1180,10 +1269,9 @@ def prepare(lib: Library, work: Path, units=None, style_ref=None, merge=False, s
         specs = sheet_specs(lib, unit)
         if merge:
             specs = merge_small(lib, unit, specs)
-        for name, seq, rows in specs:
-            if seq in skip_seqs:
-                continue
-            job = make_job(lib, unit, name, seq, rows, work / "sheets", style_ref)
+        specs = [spec for spec in specs if spec[1] not in skip_seqs]
+        for name, seq, rows, first in fit_sheet_specs(lib, unit, specs):
+            job = make_job(lib, unit, name, seq, rows, work / "sheets", style_ref, first_facing=first)
             jobs.append(job)
             print(name, "frames", sum(map(len, rows)), "size", job["size"], flush=True)
     return jobs
