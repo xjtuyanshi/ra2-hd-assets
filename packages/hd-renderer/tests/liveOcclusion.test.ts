@@ -15,6 +15,7 @@ import { painterObject, spritePainterBias, type PainterObject } from '../src/ra2
 import { cardPush, SpriteLayer, type SpriteInstance } from '../src/ra2/sprites';
 import { VOXEL_CLEARANCE, VoxelUnit } from '../src/ra2/voxels';
 import { VolumetricBlastLayer } from '../src/volumetricBlasts';
+import { WeatherGroundMask } from '../src/weatherGroundMask';
 import { IsoCamera, LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../src/world';
 
 const object = (x: number): LiveObject => ({
@@ -231,6 +232,7 @@ describe('LiveView physical occlusion scheduling', () => {
 
   it.each([
     ['inside', 'infantry', 0.5, 1.5, true, 2, 0, true],
+    ['light-sidecar inside', 'infantry', 0.5, 1.5, true, 2, 0, true],
     ['outside south', 'infantry', 0.5, 2.2, true, 2, 0, true],
     ['no building', 'infantry', 0.5, 1.5, false, 2, 0, true],
     ['inside vehicle', 'vehicle', 0.5, 1.5, true, 2, 0, true],
@@ -243,7 +245,7 @@ describe('LiveView physical occlusion scheduling', () => {
     ['west inset boundary', 'infantry', 0.05, 1.5, true, 2, 0, true],
     ['south inset boundary', 'infantry', 0.5, 1.95, true, 2, 0, true],
     ['past west inset', 'infantry', 0.051, 1.5, true, 2, 0, true],
-  ] as const)('draws the expected body and shadow for %s', (_, kind, x, z, building, layer, altitude, drawn) => {
+  ] as const)('draws the expected body and shadow for %s', (label, kind, x, z, building, layer, altitude, drawn) => {
     const p = presentation();
     const frame = {
       rect: [0, 0, 21, 30] as [number, number, number, number],
@@ -270,6 +272,13 @@ describe('LiveView physical occlusion scheduling', () => {
       remap: true,
       building: { bodyFrames: 1, layers: [] },
     };
+    const weatherMask = label === 'light-sidecar inside' ? new WeatherGroundMask(70, 20) : null;
+    if (weatherMask) {
+      // The sidecar knows the weather footprint while resolved art still has no depth foundation.
+      delete buildingType.foundation;
+      Object.assign(p.hd, { weatherGroundMask: weatherMask });
+      Object.assign(p.live.cache, { lights: { types: { TESTBUILD: { foundation: [3, 2] } } } });
+    }
     Object.assign(p.live, {
       libraryPaletteKeys: new Map(),
       library: {
@@ -313,6 +322,11 @@ describe('LiveView physical occlusion scheduling', () => {
     expect(own.filter((s) => !s.shadow)).toHaveLength(drawn ? 1 : 0);
     expect(own.filter((s) => s.shadow)).toHaveLength(drawn ? 1 : 0);
     expect(p.visual.root.visible).toBe(drawn);
+    if (weatherMask) {
+      expect(weatherMask.texture.image.data[15 * 70 + 67]).toBe(255);
+      expect(p.live.visuals.get(2)?.painter?.foundation).toBeUndefined();
+      expect(p.live).not.toHaveProperty('foundationIndex');
+    }
     if (!drawn) expect(queue.mock.calls.every((call) => call[1].anchor.x === 67 && call[1].anchor.z === 14)).toBe(true);
     // Opaque body/template pixels decide visibility; no instance-level spawn hiding remains.
     if (kind === 'infantry')
@@ -340,6 +354,7 @@ describe('LiveView physical occlusion scheduling', () => {
     p.view.render(30);
     expect(cardsForUnit()).toHaveLength(2);
     expect(cardsForUnit().every((s) => s.opacity === undefined)).toBe(true);
+    weatherMask?.dispose();
   });
 
   it.each([
