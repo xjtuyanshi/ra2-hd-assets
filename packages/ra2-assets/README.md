@@ -764,7 +764,8 @@ The `--cfg` above is the adopted setting (also recorded as `build_cfg` in the ex
 lock keeps the redraw's sun-side highlights and crown shade while hue family and chroma stay the original's. The optional `grade` then moves only green foliage (Lab hue 75-165 degrees, feathered; bark, autumn rust and
 near-neutral texels untouched) a share `k` towards a fresh grass-green Lab a/b, scales its chroma and lifts it, so
 trees are graded together with the repainted lawn instead of keeping each map's olive original. Sheets,
-model outputs, patches and variant caches are derived art and belong outside Git.
+model outputs, patches and variant caches are derived art and belong outside Git. An explicitly zero-size original
+shadow is recorded as `empty_original_shadow_preserved`; no replacement shadow is invented for that frame.
 
 `python/sprite_frame_patch.py` installs reviewed patches for arbitrary frame indices into a separate map cache or
 paged type library. This supports animated terrain objects and props without treating every frame as frame 0.
