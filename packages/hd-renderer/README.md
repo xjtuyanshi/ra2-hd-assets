@@ -68,7 +68,7 @@ RGB override and event identity. Missing or null lighting is unknown and restore
 consume the same field; there is no renderer-owned ambient fade. Same-event consecutive snapshots interpolate on
 the live presentation clock, while event changes use the newest snapshot immediately.
 
-`src/sceneLighting.ts` compares that state with the map's authored `MapLightGrade.lighting` (manifest fallback),
+`src/ra2/sceneLighting.ts` compares that state with the map's authored `MapLightGrade.lighting` (manifest fallback),
 at its median cell height without local light-source contributions. For `I = ambient + level * z - ground`, it
 uses `I_live / I_map`; `sceneTerrainMul` additionally replaces the map's normalized RGB with raw event RGB,
 while `sceneObjectMul` multiplies untinted object art by raw event RGB. These shared vec3 uniforms apply in palette
@@ -76,7 +76,10 @@ colour space independently of the day/night map-grade weight. Tiles, whole-map t
 walls, smudges, trees and bridges use the terrain multiplier; buildings and all unit art use the object multiplier.
 Effect art, local-light emission, window/lamp/Tesla glows, bloom and UI keep their own colours. Exposure, white
 adaptation and map-tint adaptation use authored, event-free lighting. An absent or authored-normal state leaves
-both multipliers exactly `(1,1,1)` and takes the material's identity branch.
+both multipliers exactly `(1,1,1)` and takes the material's identity branch. The RA2 adapter also selects sun-shadow share,
+overcast and the bounded strike sky flash. Generic `src/sceneLighting.ts` accepts only terrain/object gains,
+sun-shadow share, overcast and sky flash, with finite-value protection; `HdRenderer.setSceneLighting` consumes
+that presentation DTO. It has no native event names, palette coefficients or map-height normalization policy.
 
 A storm transfers all direct flat-ground irradiance into the hemisphere light with `Lighting.applySceneOvercast(1)`
 after adaptation and multiplier calculation. The transfer preserves each linear RGB channel and luminance, including

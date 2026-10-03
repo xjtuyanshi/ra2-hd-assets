@@ -8,7 +8,7 @@ import { Lighting } from '../src/lighting';
 import type { LightField } from '../src/lightField';
 import { MapLightGrade } from '../src/ra2/mapLighting';
 import { MapLights, type SourceLight } from '../src/ra2/mapLights';
-import { computeSceneMultipliers, type SceneLighting } from '../src/sceneLighting';
+import { computeSceneMultipliers, ra2SceneLighting, type Ra2SceneLighting } from '../src/ra2/sceneLighting';
 import { buildTerrain } from '../src/terrain';
 import { buildWater } from '../src/water';
 import { buildRain, buildSnow } from '../src/weather';
@@ -266,6 +266,34 @@ function headless(profile: AtmosphereProfile, weather: Weather) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('renderer faithfulness controls', () => {
+  it('consumes neutral presentation gains, partial shadows and overcast without native event fields', () => {
+    const f = headless({ ...dusk, kind: 'day', hour: 12 }, 'clear');
+    try {
+      f.hd.frame(0);
+      const before = f.internals.lighting.flatIrradianceColor(new Color()).toArray();
+      const sun = f.internals.lighting.sun.intensity;
+      f.hd.setSceneLighting({
+        terrain: [2, 3, 4],
+        objects: [0, 0.5, 6],
+        sunShadow: 0.4,
+        overcast: 0.35,
+        skyFlash: 0.8,
+      });
+      f.hd.frame(0);
+      expectRgb(f.hd.nodes.sceneTerrainMul.value.toArray(), [3.6, 5.4, 7.2]);
+      expectRgb(f.hd.nodes.sceneObjectMul.value.toArray(), [0, 0.9, 10.8]);
+      expect(f.hd.nodes.sceneSunShadow.value).toBe(0.4);
+      expect(f.internals.lighting.sun.intensity).toBeCloseTo(sun * 0.65, 13);
+      expectRgb(f.internals.lighting.flatIrradianceColor(new Color()).toArray(), before);
+      f.hd.setSceneLighting(null);
+      f.hd.frame(0);
+      expect(f.hd.nodes.sceneObjectMul.value.toArray()).toEqual([1, 1, 1]);
+      expect(f.hd.nodes.sceneSunShadow.value).toBe(1);
+    } finally {
+      f.dispose();
+    }
+  });
+
   for (const kind of ['day', 'dusk', 'night'] as const) {
     it.each(['clear', 'rain', 'snow'] as const)(`keeps ${kind} adaptation and bloom event-free in %s`, (weather) => {
       const f = headless({ ...dusk, kind, hour: kind === 'dusk' ? 18.2 : kind === 'day' ? 16.5 : 22 }, weather);
@@ -275,7 +303,7 @@ describe('renderer faithfulness controls', () => {
         f.hd.frame(0);
         const before = f.controls();
         const flat = f.internals.lighting.flatIrradianceColor(new Color()).toArray();
-        const storm: SceneLighting = {
+        const storm: Ra2SceneLighting = {
           ambient: 0.87,
           ground: 0,
           level: 0.035,
@@ -283,7 +311,7 @@ describe('renderer faithfulness controls', () => {
           override: [0.3, 0.4, 0.75],
           event: 'storm',
         };
-        f.hd.setSceneLighting(storm);
+        f.hd.setSceneLighting(ra2SceneLighting(duskMap, storm, 6));
         f.hd.frame(0);
         expect(f.controls()).toEqual(before);
         expectRgb(f.internals.lighting.flatIrradianceColor(new Color()).toArray(), flat);

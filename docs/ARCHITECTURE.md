@@ -80,6 +80,12 @@ Date and time formatting validate only the SYSTEMTIME fields used by the respect
 
 ## Scheduling, presentation, and ownership
 
+HD scene-light presentation uses numeric terrain/object gains, sun-shadow share, overcast and sky flash.
+Native RA2/YR palette normalization, event identity and event transition policy remain in
+`packages/hd-renderer/src/ra2/sceneLighting.ts`; the generic `HdRenderer` consumes the protected numeric DTO from
+`packages/hd-renderer/src/sceneLighting.ts`. Replay snapshots retain their native lighting fields and are translated
+by `LiveView` before publication to the renderer.
+
 Worker execution is one guest path; main-thread fallback uses identical game policies and file semantics. `platform/browser/emulator.ts` wraps v86 browser adaptation. When the upstream interface matches, Workers use an in-thread MessageChannel scheduler while retaining original positive-wait durations. Otherwise, upstream scheduling remains in place. The main thread keeps its own scheduler. Adaptation does not change the guest clock or PIT frequency.
 
 DirectDraw boundaries produce frames, and exclusive frame buffers pass to presentation. The presenter selects the newest frame and coalesces browser drawing. Simulation FPS, submitted-frame FPS, and rAF FPS are distinct metrics; discarding obsolete visuals must not change simulation results. Controllers own audio, input, WebGL objects, and frequent messages, without propagating them frame by frame through React state. Experimental upscaling loads lazily through development entry points; production entry points do not load ORT or experimental model Workers.

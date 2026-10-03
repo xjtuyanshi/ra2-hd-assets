@@ -1,8 +1,8 @@
 import type { MapLighting } from '../src/contract';
-import type { SceneLighting } from '../src/sceneLighting';
+import type { Ra2SceneLighting } from '../src/ra2/sceneLighting';
 
 /** Optional bench override, in [Lighting] fractions. A seven-value override stages a storm palette. */
-export function parseSceneLighting(value: string | null, map: MapLighting): SceneLighting | undefined {
+export function parseSceneLighting(value: string | null, map: MapLighting): Ra2SceneLighting | undefined {
   if (value === null) return undefined;
   const fields = value.split(',').map((part) => part.trim());
   const values = fields.map(Number);

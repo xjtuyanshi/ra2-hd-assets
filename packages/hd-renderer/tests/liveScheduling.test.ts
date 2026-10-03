@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Color, Vector3 } from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import { VolumetricBlastLayer } from '../src/volumetricBlasts';
+import { ra2SceneLighting } from '../src/ra2/sceneLighting';
 import { BuildingLightGate } from '../src/live/buildingLights';
 import { LiveView, type LiveSnapshot } from '../src/live/liveView';
 
@@ -9,6 +10,8 @@ function pushView() {
   const internals = {
     current: null as { snapshot: LiveSnapshot; at: number; byUid: Map<number, LiveSnapshot['objects'][number]> } | null,
     previous: null,
+    world: { mapLight: { lighting: { ambient: 1, ground: 0, level: 0, red: 1, green: 0.8, blue: 0.68 } } },
+    sceneMedianZ: 0,
     appearances: new Map(),
     houseColour: new Map(),
     buildingAnimMatches: new Map(),
@@ -179,7 +182,9 @@ describe('live presentation scheduling', () => {
     };
     const snapshot: LiveSnapshot = { frame: 1, view: null, houses: [], objects: [], lighting };
     view.push(snapshot, 1);
-    expect(state.hd.setSceneLighting).toHaveBeenLastCalledWith(lighting);
+    expect(state.hd.setSceneLighting).toHaveBeenLastCalledWith(
+      ra2SceneLighting(state.world.mapLight.lighting, lighting, 0),
+    );
     view.push({ ...snapshot, frame: 2, lighting: null }, 2);
     expect(state.hd.setSceneLighting).toHaveBeenLastCalledWith(null);
     view.push({ frame: 3, view: null, houses: [], objects: [] }, 3);

@@ -11,7 +11,12 @@ import {
 } from '../contract';
 import { HdRenderer } from '../HdRenderer';
 import type { SceneLighting } from '../sceneLighting';
-import { interpolateSceneLighting, stormStrikeLight } from './sceneLighting';
+import {
+  interpolateSceneLighting,
+  ra2SceneLighting,
+  stormStrikeLight,
+  type Ra2SceneLighting,
+} from '../ra2/sceneLighting';
 import type { LibraryAnimLayer, LibraryType } from '../../../ra2-assets/src/library';
 import { NORMALIZED_RATE_FACTOR, animRateFrames } from '../../../ra2-assets/src/effects';
 import type { SourceLight } from '../ra2/mapLights';
@@ -164,7 +169,7 @@ export interface LiveSnapshot {
   /** Logic frame counter. */
   frame: number;
   /** Current engine scene illumination; absent/null preserves the map's authored lighting. */
-  lighting?: SceneLighting | null;
+  lighting?: Ra2SceneLighting | null;
   /** Engine screen pixel of the tactical view's top-left corner. */
   view: { x: number; y: number } | null;
   houses: LiveHouse[];
@@ -605,6 +610,18 @@ export class LiveView {
   private windowKey: string | null = null;
   private blockedKey: string | null = null;
 
+  private readonly sceneMedianZ: number;
+
+  private scenePresentation(lighting: Ra2SceneLighting | null | undefined, skyFlash = 0): SceneLighting | null {
+    if (!lighting) return null;
+    return ra2SceneLighting(
+      this.world.mapLight?.lighting ?? this.state.map.lighting,
+      lighting,
+      this.sceneMedianZ,
+      skyFlash,
+    );
+  }
+
   private constructor(
     readonly hd: HdRenderer,
     readonly world: HdWorld,
@@ -672,7 +689,7 @@ export class LiveView {
     this.effectDriver.style = options.effects ?? 'faithful';
     this.effectDriver.hdEnabled = options.effectsHd !== false;
     this.effectDriver.volumetric = options.volumetricEffects ?? 'off';
-    const lightingHeight = medianHeight(cache.height, cache.exists);
+    const lightingHeight = (this.sceneMedianZ = medianHeight(cache.height, cache.exists));
     this.effectDriver.onStormStrike = (at, now) => {
       const lighting = this.current?.snapshot.lighting;
       if (lighting?.event !== 'storm') return;
@@ -892,7 +909,7 @@ export class LiveView {
     const vehicles = snapshot.objects.filter((o) => o.kind === 'vehicle' && !o.nativeHidden);
     this.effectDriver.vehicleAt = (x, y, z) => smokeOnVehicle(vehicles, x, y, z);
     this.effectDriver.sceneEvent = snapshot.lighting?.event ?? null;
-    this.hd.setSceneLighting(snapshot.lighting ?? null);
+    this.hd.setSceneLighting(this.scenePresentation(snapshot.lighting));
     if (effects || hadEffects)
       this.effectDriver.push(
         effects ?? { anims: [], bullets: [], particleSystems: [] },
@@ -1061,8 +1078,10 @@ export class LiveView {
       // Draw one logic frame behind, blending towards the newest snapshot: smooth motion at any display rate.
       const alpha = previous ? Math.min(1, Math.max(0, (now - current.at) / interval)) : 1;
       this.hd.setSceneLighting(
-        interpolateSceneLighting(previous?.snapshot, current.snapshot, alpha),
-        this.effectDriver.skyFlash(this.hd.seconds()),
+        this.scenePresentation(
+          interpolateSceneLighting(previous?.snapshot, current.snapshot, alpha),
+          this.effectDriver.skyFlash(this.hd.seconds()),
+        ),
       );
       this.applyCamera(previous?.snapshot.view ?? null, current.snapshot.view, alpha);
       const libraryRevision = this.library?.revision ?? 0;

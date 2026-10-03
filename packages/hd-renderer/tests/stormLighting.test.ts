@@ -3,10 +3,10 @@ import { Vector3 } from 'three/webgpu';
 import type { EffectsLayer } from '../src/effects';
 import { LightField, heldPulseEnvelope } from '../src/lightField';
 import { LiveEffectsDriver, type LiveEffects } from '../src/live/effects';
-import { interpolateSceneLighting, stormStrikeLight } from '../src/live/sceneLighting';
-import type { SceneLighting } from '../src/sceneLighting';
+import { interpolateSceneLighting, stormStrikeLight } from '../src/ra2/sceneLighting';
+import type { Ra2SceneLighting } from '../src/ra2/sceneLighting';
 
-const lighting: SceneLighting = {
+const lighting: Ra2SceneLighting = {
   ambient: 0.87,
   ground: 0,
   level: 0,

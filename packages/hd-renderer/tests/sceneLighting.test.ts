@@ -1,11 +1,14 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { AtmosphereNodes } from '../src/atmosphere';
 import type { MapLighting } from '../src/contract';
-import { computeSceneMultipliers, type SceneLighting } from '../src/sceneLighting';
+import { computeSceneMultipliers, ra2SceneLighting, type Ra2SceneLighting } from '../src/ra2/sceneLighting';
+
+import { resolveSceneLighting } from '../src/sceneLighting';
 
 const map: MapLighting = { ambient: 1, ground: 0, level: 0, red: 1, green: 0.8, blue: 0.68 };
-const clear: SceneLighting = { ambient: 1, ground: 0, level: 0, tint: [1, 0.8, 0.68], override: null, event: null };
-const storm: SceneLighting = { ...clear, ambient: 0.87, override: [0.3, 0.4, 0.75], event: 'storm' };
+const clear: Ra2SceneLighting = { ambient: 1, ground: 0, level: 0, tint: [1, 0.8, 0.68], override: null, event: null };
+const storm: Ra2SceneLighting = { ...clear, ambient: 0.87, override: [0.3, 0.4, 0.75], event: 'storm' };
 
 describe('scene lighting replacement', () => {
   it('matches the measured terrain and object palette ratios independently', () => {
@@ -63,5 +66,66 @@ describe('scene lighting replacement', () => {
     expect(b.sceneSunShadow.value).toBe(0);
     a.dispose();
     b.dispose();
+  });
+});
+
+describe('adapter boundary and neutral scene presentation', () => {
+  it('keeps event vocabulary and palette normalization out of the generic contract and renderer', () => {
+    const contract = readFileSync(new URL('../src/sceneLighting.ts', import.meta.url), 'utf8').replace(
+      /\/\*[\s\S]*?\*\/|\/\/.*$/gm,
+      '',
+    );
+    const renderer = readFileSync(new URL('../src/HdRenderer.ts', import.meta.url), 'utf8');
+    expect(contract).not.toMatch(
+      /\b(?:MapLighting|ambient|ground|level|override|event|storm|nuke|dominator|timewarp)\b/,
+    );
+    expect(renderer).not.toMatch(/sceneLighting\?\.event|lighting\?\.event|computeSceneMultipliers|sceneMedianZ/);
+    expect(renderer).not.toMatch(/from ['"]\.\/ra2\/sceneLighting['"]/);
+  });
+
+  it('translates all native event policies without changing raw snapshot/replay input', () => {
+    for (const event of [null, 'storm', 'nuke', 'dominator', 'timewarp'] as const) {
+      const input = { ...storm, event };
+      const before = structuredClone(input);
+      const presentation = ra2SceneLighting(map, input, 0, 0.8)!;
+      expect(presentation).toEqual({
+        ...computeSceneMultipliers(map, input, 0),
+        sunShadow: event === 'storm' ? 0 : 1,
+        overcast: event === 'storm' ? 1 : 0,
+        skyFlash: event === 'storm' ? 0.12 : 0,
+      });
+      expect(input).toEqual(before);
+      expect(Object.keys(presentation).sort()).toEqual(['objects', 'overcast', 'skyFlash', 'sunShadow', 'terrain']);
+    }
+    expect(ra2SceneLighting(map, null, 0)).toBeNull();
+    expect(ra2SceneLighting(map, storm, 0, NaN)?.skyFlash).toBe(0);
+  });
+
+  it('protects numeric uniforms without applying a game-specific flash cap or mutating callers', () => {
+    const input = {
+      terrain: [2, 3, 4] as [number, number, number],
+      objects: [0, 0.5, 6] as [number, number, number],
+      sunShadow: 0.4,
+      overcast: 0.35,
+      skyFlash: 0.8,
+    };
+    const presentation = resolveSceneLighting(input);
+    expect(presentation).toEqual(input);
+    expect(presentation.terrain).not.toBe(input.terrain);
+    expect(
+      resolveSceneLighting({
+        ...input,
+        terrain: [1, NaN, 2],
+        objects: [-1, 1, 1],
+        sunShadow: NaN,
+        overcast: Infinity,
+        skyFlash: NaN,
+      }),
+    ).toEqual(resolveSceneLighting(null));
+    expect(resolveSceneLighting({ ...input, sunShadow: -2, overcast: 4, skyFlash: -2 })).toMatchObject({
+      sunShadow: 0,
+      overcast: 1,
+      skyFlash: 0,
+    });
   });
 });

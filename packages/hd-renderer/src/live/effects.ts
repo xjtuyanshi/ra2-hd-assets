@@ -23,7 +23,7 @@ import {
 } from './effectSprites';
 import { EFFECT_TABLE, SMOKE_SYSTEMS, type EffectTableRow, type SmokeSystemRow } from './effectTable';
 import { heldPulseEnvelope } from '../lightField';
-import type { SceneLighting } from '../sceneLighting';
+import type { Ra2SceneLighting } from '../ra2/sceneLighting';
 
 /**
  * Live effects: the engine's own effect list (src/games/yr/effectsReader.ts on the host side) drawn in two layers.
@@ -357,11 +357,11 @@ export class LiveEffectsDriver {
   /** Renderer clock of the newest push, including another push of the same logic frame. */
   private pushedAt = 0;
   private lastStormStrike = -Infinity;
-  private currentSceneEvent: SceneLighting['event'] = null;
-  get sceneEvent(): SceneLighting['event'] {
+  private currentSceneEvent: Ra2SceneLighting['event'] = null;
+  get sceneEvent(): Ra2SceneLighting['event'] {
     return this.currentSceneEvent;
   }
-  set sceneEvent(event: SceneLighting['event']) {
+  set sceneEvent(event: Ra2SceneLighting['event']) {
     if (event !== this.currentSceneEvent) this.lastStormStrike = -Infinity;
     this.currentSceneEvent = event;
   }

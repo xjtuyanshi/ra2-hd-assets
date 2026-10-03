@@ -143,6 +143,12 @@ scene bloom; their material sparkle remains, but equivalence to the former clear
 
 ## Scene lighting events
 
+The engine decoder preserves native scene state for snapshots and replays. The presentation adapter
+`packages/hd-renderer/src/ra2/sceneLighting.ts` owns palette normalization, event transitions, storm shadow/overcast
+selection and bounded strike flash. `packages/hd-renderer/src/sceneLighting.ts` exposes only neutral terrain/object
+gains, sun-shadow share, overcast and sky flash to `HdRenderer`; the generic renderer does not interpret native
+weapon/event names or `[Lighting]` coefficients. Adjacent same-event interpolation remains in the RA2 adapter.
+
 `src/games/yr/sceneLighting.ts` reads the live scene inputs for the generic `GameRenderLighting` contract. The
 address evidence below comes from the YR 1.001 static disassembly recorded in the supplied `re_report.md` and
 `re_offsets.json` (same `7b8a0685…` executable baseline). It is separate from the user's subsequent XMP29U2 live

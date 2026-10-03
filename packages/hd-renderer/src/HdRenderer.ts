@@ -62,8 +62,7 @@ import { EmitterLayer, type Emitter } from './emitters';
 import { EmissiveOverlay, emissiveMrtSupported } from './emissiveOverlay';
 import { LightField, type DynamicLight } from './lightField';
 import { Lighting, clearLightAt, noonFlatLuminance } from './lighting';
-import { computeSceneMultipliers, type SceneLighting } from './sceneLighting';
-import { medianHeight } from '../../ra2-assets/src/lights';
+import { resolveSceneLighting, type SceneLighting } from './sceneLighting';
 import { Mist, MIST_CAP } from './mist';
 import { ObjectLayer } from './objects';
 import { cinematicGrade, faithfulToneMap, hasCinematicGrade, neutralGrade, type CinematicGradeParams } from './post';
@@ -500,8 +499,6 @@ export class HdRenderer {
   readonly topScene = new Scene();
   private topEffectsVisible = false;
   private sceneLighting: SceneLighting | null = null;
-  private sceneSkyFlash = 0;
-  private sceneMedianZ = 0;
   /** Effect art follows the authored time/weather light, never a scene event's overcast or palette. */
   readonly effectLight = new Color(1, 1, 1);
   private readonly eventFreeIrradiance = new Color();
@@ -728,7 +725,6 @@ export class HdRenderer {
     let waterY: number | null;
     if (world) {
       this.world = world;
-      this.sceneMedianZ = world.cache ? medianHeight(world.cache.height, world.cache.exists) : 0;
       if (world.voxelLook) this.settings.voxelLook = world.voxelLook;
       this.terrain = world.terrain;
       this.bounds = { width: world.width, height: world.height };
@@ -835,10 +831,9 @@ export class HdRenderer {
     if (this.pipeline) this.buildPipeline();
   }
 
-  /** Snapshot-driven palette lighting; no independent fade or exposure feedback. */
-  setSceneLighting(lighting: SceneLighting | null, skyFlash = 0): void {
-    this.sceneLighting = lighting;
-    this.sceneSkyFlash = lighting?.event === 'storm' ? Math.min(0.12, Math.max(0, skyFlash)) : 0;
+  /** Adapter-selected presentation; no independent fade or exposure feedback. */
+  setSceneLighting(lighting: SceneLighting | null): void {
+    this.sceneLighting = lighting ? resolveSceneLighting(lighting) : null;
   }
 
   /** Keep the old post graph exactly when no native top-layer art is present. */
@@ -1227,21 +1222,15 @@ export class HdRenderer {
     // Airless maps have no sunlit-sky reason to dim the lamps: their pools are the scene's mood (MoonPatr's base sits
     // in blue-violet lamp light in the original, a* +13 / b* -31 beside the base), so they keep the engine's full share.
     this.world?.mapLight?.setSourceWeight(profile?.airless === true ? 1 : presentation.sourceWeight);
-    // Compare against the authored map, without local sources. Adaptation above reads only event-free light;
-    // otherwise a dark scene event would immediately be brightened and white-balanced back out.
-    const scene = computeSceneMultipliers(
-      this.world?.mapLight?.lighting ?? this.state.map.lighting,
-      this.sceneLighting,
-      this.sceneMedianZ,
-    );
-    const flash = 1 + this.sceneSkyFlash;
+    // The adapter supplies presentation gains separately from local sources and authored light. Adaptation above
+    // reads only the latter, so an intentionally dark scene is not brightened and white-balanced back out.
+    const scene = resolveSceneLighting(this.sceneLighting);
+    const flash = 1 + scene.skyFlash;
     this.nodes.sceneTerrainMul.value.fromArray(scene.terrain).multiplyScalar(flash);
     this.nodes.sceneObjectMul.value.fromArray(scene.objects).multiplyScalar(flash);
-    const storm = this.sceneLighting?.event === 'storm';
-    this.nodes.sceneSunShadow.value = storm ? 0 : 1;
-    this.lighting.sun.castShadow = this.settings.shadows && !this.world && !storm;
-    // This is presentation only: never infer rain, event timing or ambient from the storm flag.
-    if (storm) this.lighting.applySceneOvercast(1);
+    this.nodes.sceneSunShadow.value = scene.sunShadow;
+    this.lighting.sun.castShadow = this.settings.shadows && !this.world && scene.sunShadow > 0;
+    if (scene.overcast > 0) this.lighting.applySceneOvercast(scene.overcast);
     if (this.settings.voxelLook === 'remaster') {
       const pbr = voxelPbrFor(this.nodes);
       pbr.skyZenith.value.copy(light.skyZenith);
