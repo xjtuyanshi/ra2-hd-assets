@@ -323,6 +323,25 @@ class ContractTests(unittest.TestCase):
             self.assertGreater(third["flag_counts"]["missing_frame"], 0)
             self.assertTrue((out / "crops/01.png").is_file())
 
+    def test_shadow_reference_page_is_not_a_body_frame(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache, out = root / "cache", root / "out"
+            cache.mkdir()
+            for page in range(2):
+                Image.fromarray(np.ones((8, 8), np.uint8)).save(cache / f"sprites-{page}.png")
+            Image.fromarray(np.zeros((16, 16, 4), np.uint8)).save(cache / "sprites-1@2x.png")
+            doc = {"spriteAtlases": [{"file": f"sprites-{p}.png", "width": 8, "height": 8} for p in range(2)],
+                   "spriteAtlasesHd": [None, {"file": "sprites-1@2x.png", "width": 16, "height": 16, "scale": 2}],
+                   "sprites": {"synthetic": {"palette": "unit", "frameCount": 2,
+                     "frames": [{"page": 0, "rect": [0, 0, 8, 8], "offset": [0, 0]}],
+                     "shadows": [{"page": 1, "rect": [0, 0, 8, 8], "offset": [0, 0]}]}}}
+            (cache / "library.json").write_text(json.dumps(doc))
+            result = qa.scan(cache, out)
+            self.assertEqual(result["frames"], 0)
+            self.assertEqual(result["flagged_rows"], 0)
+            self.assertEqual(result["csv_rows"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

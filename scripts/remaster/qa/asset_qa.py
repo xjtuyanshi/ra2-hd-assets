@@ -598,7 +598,7 @@ def evaluate_job(job, cache, out, memo):
     after = {str(p): stamp(p) for p in files}
     if after != before:
         errors.append(row(**base, asset="atlas", status="FAIL", failures="input_changed", detail="source changed during this page scan; rerun required"))
-    result = {"rows": errors + coalesce(rows), "frames": len(rows), "worst": worst, "before": before}
+    result = {"rows": errors + coalesce(rows), "frames": sum(r["frames"] or 0 for r in rows), "worst": worst, "before": before}
     if after == before:
         write_receipt(receipt, result)
     return result, False
