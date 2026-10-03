@@ -266,6 +266,80 @@ describe('YR traversal and physical occlusion', () => {
 type Buffers = { anchor: DirtyAttribute; params: DirtyAttribute; flags: DirtyAttribute };
 
 describe('sprite depth attributes', () => {
+  it('keeps grade exemption, capture codes, native profiles and body opacity independent across retained uploads', () => {
+    const atlas = new Texture();
+    const capture = new TerrainDepth(1.5);
+    const cache = {
+      paletteAtlas: { image: { height: 1 } },
+      paletteRow: new Map(),
+      manifest: { spriteAtlas: { width: 32, height: 32 } },
+      spriteAtlas: atlas,
+    } as unknown as Ra2Cache;
+    const body: SpriteInstance = {
+      anchor: new Vector3(4.5, 2, 6.25),
+      frame: { rect: [0, 0, 20, 40], offset: [-10, -30] },
+      palette: '',
+      push: 0.5,
+      shadow: false,
+      lightSample: [9.5, 10.5],
+      gradeExempt: true,
+      opacity: 0.25,
+      nativeDepth: { mode: 'body', origin: [198, 386], base: 91, offset: [12, 9], anchorPush: 0.5 },
+    };
+    const unit: SpriteInstance = {
+      ...body,
+      anchor: new Vector3(7, 3, 8),
+      lightSample: undefined,
+      gradeExempt: false,
+      opacity: 1,
+      nativeDepth: { mode: 'card', bottom: 3, bonus: 12 },
+    };
+    const layer = new SpriteLayer(cache, [body, unit], 2, undefined, null, null, null, capture);
+    const buffers = layer as unknown as Buffers & { uploaded: SpriteInstance[] };
+    const row = (attribute: DirtyAttribute, instance: SpriteInstance) => {
+      const index = buffers.uploaded.indexOf(instance);
+      expect(index).toBeGreaterThanOrEqual(0);
+      return Array.from(attribute.array.slice(index * attribute.itemSize, (index + 1) * attribute.itemSize));
+    };
+    try {
+      expect(buffers.anchor.itemSize).toBe(6);
+      expect(buffers.flags.itemSize).toBe(17);
+      layer.updateCaptureCodes((instance) => (instance === body ? 23 : 7));
+      expect(row(buffers.anchor, body)).toEqual([4.5, 2, 6.25, 9.5, 10.5, 1]);
+      expect(row(buffers.anchor, unit)).toEqual([7, 3, 8, 7, 8, 0]);
+      // Translucent art deliberately stays out of capture, while its neighboring opaque card keeps its code.
+      expect(row(buffers.flags, body).slice(8)).toEqual([-65504, 1, 198, 386, 91, 12, 9, 0.5, 3.25]);
+      expect(row(buffers.flags, unit).slice(8)).toEqual([7, 3, 3, 12, 0, 0, 0, 0, 2]);
+      expect(layer.translucentMesh.visible).toBe(true);
+      expect(layer.unitMesh.layers.isEnabled(31)).toBe(true);
+      const params = row(buffers.params, body);
+      body.opacity = 1;
+      // The same pooled records are uploaded without sorting; every independent field must be reset.
+      layer.setInstances([body, unit], false);
+      expect(row(buffers.flags, body).slice(8)).toEqual([-65504, 1, 198, 386, 91, 12, 9, 0.5, 0]);
+      expect(row(buffers.anchor, body)).toEqual([4.5, 2, 6.25, 9.5, 10.5, 1]);
+      expect(row(buffers.params, body)).toEqual(params);
+      expect(layer.translucentMesh.visible).toBe(false);
+      layer.updateCaptureCodes((instance) => (instance === body ? 31 : 11));
+      expect(row(buffers.flags, body).slice(8)).toEqual([31, 1, 198, 386, 91, 12, 9, 0.5, 0]);
+      expect(row(buffers.flags, unit).slice(8)).toEqual([11, 3, 3, 12, 0, 0, 0, 0, 2]);
+      body.gradeExempt = false;
+      body.opacity = 0.5;
+      layer.setInstances([body, unit], false);
+      layer.updateCaptureCodes((instance) => (instance === body ? 31 : 11));
+      expect(row(buffers.anchor, body)).toEqual([4.5, 2, 6.25, 9.5, 10.5, 0]);
+      expect(row(buffers.flags, body).slice(8)).toEqual([-65504, 1, 198, 386, 91, 12, 9, 0.5, 3.5]);
+      expect(row(buffers.flags, unit).slice(8)).toEqual([11, 3, 3, 12, 0, 0, 0, 0, 2]);
+      expect(row(buffers.params, body)).toEqual(params);
+    } finally {
+      layer.mesh.geometry.dispose();
+      layer.mesh.material.dispose();
+      layer.mesh.dispose();
+      capture.dispose();
+      atlas.dispose();
+    }
+  });
+
   it('packs native modes and owner offsets without changing capture codes or depth-writing ordinary cards', () => {
     const atlas = new Texture();
     const cache = {
