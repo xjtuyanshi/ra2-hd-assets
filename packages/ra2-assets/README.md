@@ -411,13 +411,43 @@ options (`--blend`, colour sigmas, `--margin`) reuse the cached tiles, so they c
 
 ## Tiled terrain, lake shores and cliff feet (Python)
 
+`python/terrain_tile_qa.py` conditions one image-painted tile against an immutable RGBA reference: alpha-aware
+registration/low-frequency colour matching, exact reference alpha and open-water RGB, and texture/colour diagnostics.
+Texture gain is mean absolute luminance high-pass energy at sigma 1 composite pixel on eroded opaque land, relative
+to the native-derived reference at the same resolution. A gain above 1 rejects smoothing; it does **not** prove real
+material detail or accept geometry. Visual inspection at 1:1 remains mandatory and the report keeps `accepted: false`.
+The source and raw AI image are never overwritten. Shape errors fail instead of silently resizing a mismatched result.
+
+```bash
+python3 -B packages/ra2-assets/python/terrain_tile_qa.py --reference "$REFERENCE_RGBA" --raw "$RAW_AI" \
+  --water-mask "$WATER_MASK" --output "$CONDITIONED" --report "$QA_REPORT"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_terrain_tile*.py'
+```
+
 These tools require NumPy, Pillow and OpenCV (`cv2`). All source images, cache and work directories are explicit
 arguments; keep generated art outside Git. They preserve terrain alpha and do not edit manifests or material sidecars.
 
 - `python/terrain_tiles.py`: `prep` cuts `--source` using `--water-mask` and `--prompt` into `--tiles`, writing
-  `input.png`, `prompt.txt`, `tile.json` and a default `queue.txt`. `run` invokes a supplied CLI; `check` writes per-tile
+  `input.png`, `prompt.txt`, `tile.json`, a default `queue.txt`, and a final `prep.json` recording the full grid and
+  intentional water skips. `run` invokes a supplied CLI; `check` writes per-tile
   `check.json` registration/colour diagnostics. `assemble` aligns, colour-locks and quilts `output.png` tiles into
-  `--output`; absent outputs retain the source. The result feeds `materials.json.terrainMap`.
+  `--output`; absent outputs retain the source. Use `--require-complete` before publishing to validate the full source
+  grid, tile coordinates/dimensions, and every required input/output. Missing tile directories and interrupted land
+  preparation fail; intentional water skips remain valid. Legacy preparations without `prep.json` must match the
+  same source grid; only water coverage > 0.85 with neither input nor output proves a skip. Custom legacy skips
+  require a fresh preparation. `--colour-source` optionally supplies a same-size, same-layout colour reference.
+  Registration and tile colour-locking still use each original input, then the reference/source low-frequency Lab
+  difference is applied globally after quilting. Painted and uncovered pixels receive the same correction, with
+  full Gaussian context across tile/strip boundaries; source alpha and high-frequency painted detail are preserved.
+  Both corrections use source alpha to exclude invalid RGB outside the map from their normalized Gaussian averages,
+  preventing transparent black borders from darkening opaque terrain when generated detail extends past the edge.
+  For registration, assembly restores only fully transparent source pixels to their input RGB in a temporary copy.
+  Warping instead normalizes the generated paint by sampled source alpha, so neither invented off-map paint nor the
+  restored transparent black can leak into filtered map edges. Paint at every nonzero-alpha pixel contributes;
+  samples without valid paint fall back to the input. Fully opaque tiles retain direct cubic sampling. The standalone
+  `check` has no source alpha and still reports raw, unmasked tile diagnostics.
+  Assembly always writes PNG, including when an atomic cache-farm temporary path has a different suffix.
+  The result feeds `materials.json.terrainMap`.
 - `python/lake_shore.py`: takes the colour-matched original `--classification`, repainted `--terrain` and original
   `--water-mask`, all at 2x composite resolution. It extends connected painted shallows and paints a dry lake bed,
   producing `--output` for `terrainMap` and `--output-mask` for `waterMask`; set `waterBed: true` (a boolean, not a file).
@@ -440,7 +470,7 @@ python3 -B packages/ra2-assets/python/terrain_tiles.py prep --source "$SOURCE" -
 python3 -B packages/ra2-assets/python/terrain_tiles.py run "$TILES/queue.txt" --work "$WORK"
 python3 -B packages/ra2-assets/python/terrain_tiles.py check --tiles "$TILES"
 python3 -B packages/ra2-assets/python/terrain_tiles.py assemble --source "$SOURCE" --tiles "$TILES" \
-  --output "$WORK/terrain.png"
+  --output "$WORK/terrain.png" --require-complete
 python3 -B packages/ra2-assets/python/lake_shore.py --classification "$CLASSIFICATION" --terrain "$WORK/terrain.png" \
   --water-mask "$WATER_MASK" --output "$WORK/bed.png" --output-mask "$WORK/shore-water.png"
 python3 -B packages/ra2-assets/python/cliff_foot.py --cache "$CACHE" --terrain "$WORK/bed.png" \
@@ -450,7 +480,9 @@ python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_*.py'
 ```
 
 The tuned defaults remain 1536x1024 composite-pixel tiles, 1280x768 strides, water coverage > 0.85 skipped, Lab blur
-sigmas 20/10 px with lightness/chroma lock 0.75/1.0, and a 3 px seam feather. Small composites use their actual crop
+sigmas 20/10 px with lightness/chroma lock 0.75/1.0, and a 3 px seam feather. Feathering follows each minimum-cost cut
+and is bounded to exact old/new weights at the overlap edges, including when a wider `--feather` is used; zero gives
+a hard cut. Edge-anchored tiles use their actual overlap widths. Small composites use their actual crop
 size; adapt the example prompt's dimensions for those. Lake-bed distances use 84 composite px/cell; cliff heights
 use 15 × manifest scale composite px/level and ignore plateaus at least 2 levels above nearby water. Module docstrings
 and `--help` describe the remaining tuned constants and optional diagnostics. Review the outputs before assigning
