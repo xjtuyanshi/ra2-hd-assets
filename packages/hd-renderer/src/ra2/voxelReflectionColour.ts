@@ -9,10 +9,21 @@ export const VOXEL_REFLECTION_TINT = [0.95, 0.98, 1] as const;
 
 type ReflectionColourBuilder = (sourceMatrix: ShaderNode) => ShaderNode;
 const builders = new WeakMap<Material, ReflectionColourBuilder>();
+const physicalSources = new WeakMap<Material, Material>();
 
 /** The source material owns its palette/atlas and registers an allocation-time graph factory for its water twin. */
 export function registerVoxelReflectionColour(material: Material, builder: ReflectionColourBuilder): void {
   builders.set(material, builder);
+}
+
+/** Pass variants borrow the source graph/cache; they never acquire ownership of its palette or projection. */
+export function registerVoxelReflectionVariant(variant: Material, source: Material): void {
+  physicalSources.set(variant, voxelReflectionSource(source));
+}
+
+/** Native-ground and per-unit chrono passes reflect the same physical material, without allocating new twins. */
+export function voxelReflectionSource(material: Material): Material {
+  return physicalSources.get(material) ?? material;
 }
 
 /** Never derive normals from the water twin's singular flattening matrix. */
@@ -36,8 +47,9 @@ export function voxelReflectionAmbient(
 
 /** Called once per renderer-owned reflection material, with the original unflattened mesh matrix uniform. */
 export function voxelReflectionColour(material: Material, sourceMatrix: ShaderNode): ShaderNode {
-  const build = builders.get(material);
+  const source = voxelReflectionSource(material);
+  const build = builders.get(source);
   if (build) return build(sourceMatrix);
-  const colour = (material as Material & { color?: Color }).color;
+  const colour = (source as Material & { color?: Color }).color;
   return voxelReflectionAmbient(vec3(colour?.r ?? 1, colour?.g ?? 1, colour?.b ?? 1), vec3(1));
 }

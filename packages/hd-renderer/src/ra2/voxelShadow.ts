@@ -33,7 +33,7 @@ import type { ShaderNode } from '../tsl';
 import { sceneLitColour } from '../lighting';
 import { LEVEL_HEIGHT } from '../world';
 import { spriteLookFor } from './spriteLook';
-import { voxelReflectionColour } from './voxelReflectionColour';
+import { voxelReflectionColour, voxelReflectionSource } from './voxelReflectionColour';
 
 /**
  * Engine-style voxel shadows. The original draws a unit's shadow by flattening the model onto the ground along a fixed
@@ -452,6 +452,7 @@ export function voxelWaterMaterial(
   sourceMaterial?: Material,
 ): MeshBasicNodeMaterial {
   if (layer === 'reflection' && sourceMaterial && voxelShadowFor(nodes).reflection === 'colour') {
+    sourceMaterial = voxelReflectionSource(sourceMaterial);
     let materials = reflectionMaterials.get(nodes);
     if (!materials) reflectionMaterials.set(nodes, (materials = new WeakMap()));
     let material = materials.get(sourceMaterial);

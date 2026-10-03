@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   BackSide,
+  BoxGeometry,
   BufferGeometry,
   DoubleSide,
   Group,
@@ -14,12 +15,13 @@ import {
   WebGLCoordinateSystem,
   WebGPUCoordinateSystem,
 } from 'three/webgpu';
-import { positionGeometry, positionLocal, positionWorld } from 'three/tsl';
+import { positionGeometry, positionLocal, positionWorld, uniform, vec3 } from 'three/tsl';
 import { AtmosphereNodes } from '../src/atmosphere';
 import type { ShaderNode } from '../src/tsl';
 import { IsoCamera } from '../src/world';
 import { spriteLookFor } from '../src/ra2/spriteLook';
-import { instantiateVoxel } from '../src/ra2/voxels';
+import { instantiateVoxel, updateVoxelNativeDepth } from '../src/ra2/voxels';
+import { registerVoxelReflectionColour, voxelReflectionColour } from '../src/ra2/voxelReflectionColour';
 import {
   AIRBORNE_HEIGHT,
   AIRBORNE_SHADOW_DRIFT_X,
@@ -56,6 +58,17 @@ import {
   waterFoamProjection,
   waterReflectionProjection,
 } from '../src/ra2/voxelShadow';
+
+function graphNodes(root: ShaderNode): Set<ShaderNode> {
+  const visited = new Set<ShaderNode>();
+  const visit = (node: ShaderNode) => {
+    if (visited.has(node)) return;
+    visited.add(node);
+    for (const child of node.getChildren()) visit(child);
+  };
+  visit(root);
+  return visited;
+}
 
 /** Evaluate the material's actual alpha graph at a source vertex; shader compilation is covered by vertexBuffers. */
 function sampleWaterAlpha(mesh: VoxelWaterMesh, local: Vector3): number {
@@ -182,7 +195,12 @@ describe('voxel water contact', () => {
       expect(flat.side).toBe(DoubleSide);
       expect(foam.side).toBe(DoubleSide);
       expect(reflection.colorNode).not.toBeNull();
-      expect(flat.colorNode).toBeNull();
+      // Weather scene changes multiply the flat/foam base colour too; a null graph would lose that path.
+      for (const material of [flat, foam]) {
+        const inputs = graphNodes(material.colorNode!);
+        expect(inputs.has(nodes.sceneObjectMul)).toBe(true);
+        expect([...inputs].some((node) => node.isUniformNode && node.value === material.color)).toBe(true);
+      }
       expect(flat.color.toArray()).toEqual([0.16, 0.19, 0.22]);
       expect(new Set([reflection, turretReflection, otherReflection, flat, foam]).size).toBe(5);
       expect(voxelWaterMaterial(nodes, 'reflection', hull)).toBe(reflection);
@@ -205,6 +223,81 @@ describe('voxel water contact', () => {
       other.dispose();
       hull.dispose();
       turret.dispose();
+    }
+  });
+
+  it('retains a registered reflection and its cache through native/chrono passes without transferring disposal', () => {
+    const nodes = new AtmosphereNodes();
+    const source = nodes.own(new MeshStandardNodeMaterial());
+    const geometry = new BoxGeometry();
+    const build = vi.fn(() => vec3(0.2, 0.3, 0.4));
+    registerVoxelReflectionColour(source, build);
+    const parts = [{ role: 'body' as const, geometry, turretOffset: 0 }];
+    const first = instantiateVoxel(parts, source, nodes);
+    const second = instantiateVoxel(parts, source, nodes);
+    const mesh = first.root.partMeshes[0]!;
+    const reflection = first.root.children.find(
+      (child): child is VoxelWaterMesh => child instanceof VoxelWaterMesh && child.layer === 'reflection',
+    )!;
+    const colour = reflection.material;
+    const sourceDispose = vi.spyOn(source, 'dispose');
+    const reflectionDispose = vi.spyOn(colour, 'dispose');
+    let native: MeshStandardNodeMaterial | undefined;
+    let chrono: MeshStandardNodeMaterial | undefined;
+    try {
+      expect(build).toHaveBeenCalledOnce();
+      for (const [enabled, opacity] of [
+        [false, 1],
+        [true, 1],
+        [true, 0.5],
+        [false, 0.5],
+        [false, 1],
+        [true, 1],
+      ] as const) {
+        first.root.setOpacity(opacity);
+        updateVoxelNativeDepth(first, first.root.position, 0, enabled);
+        first.root.updateMatrixWorld(true);
+        expect(reflection.material).toBe(colour);
+        expect(voxelWaterMaterial(nodes, 'reflection', mesh.material as MeshStandardNodeMaterial)).toBe(colour);
+        if (opacity < 1) chrono = mesh.material as MeshStandardNodeMaterial;
+        else if (enabled) native = mesh.material as MeshStandardNodeMaterial;
+        // Exercise the registry directly too, matching the review's isolated API reproduction.
+        const matrix = uniform(new Matrix4());
+        build.mockClear();
+        voxelReflectionColour(mesh.material as MeshStandardNodeMaterial, matrix);
+        expect(build).toHaveBeenCalledExactlyOnceWith(matrix);
+      }
+      second.root.setOpacity(0.5);
+      second.root.updateMatrixWorld(true);
+      const otherChrono = second.root.partMeshes[0]!.material as MeshStandardNodeMaterial;
+      expect(otherChrono).not.toBe(chrono);
+      expect(voxelWaterMaterial(nodes, 'reflection', otherChrono)).toBe(colour);
+      const nativeDispose = vi.spyOn(native!, 'dispose');
+      const chronoDispose = vi.spyOn(chrono!, 'dispose');
+      const otherChronoDispose = vi.spyOn(otherChrono, 'dispose');
+      first.root.setOpacity(1);
+      second.root.setOpacity(1);
+      first.root.disposeOpacityMaterials();
+      first.root.disposeOpacityMaterials();
+      expect(chronoDispose).toHaveBeenCalledOnce();
+      expect(otherChronoDispose).not.toHaveBeenCalled();
+      expect(nativeDispose).not.toHaveBeenCalled();
+      expect(sourceDispose).not.toHaveBeenCalled();
+      expect(reflectionDispose).not.toHaveBeenCalled();
+      second.root.disposeOpacityMaterials();
+      expect(otherChronoDispose).toHaveBeenCalledOnce();
+      nodes.dispose();
+      nodes.dispose();
+      expect(sourceDispose).toHaveBeenCalledOnce();
+      expect(nativeDispose).toHaveBeenCalledOnce();
+      expect(reflectionDispose).toHaveBeenCalledOnce();
+      expect(chronoDispose).toHaveBeenCalledOnce();
+      expect(otherChronoDispose).toHaveBeenCalledOnce();
+    } finally {
+      first.root.disposeOpacityMaterials();
+      second.root.disposeOpacityMaterials();
+      geometry.dispose();
+      nodes.dispose();
     }
   });
 

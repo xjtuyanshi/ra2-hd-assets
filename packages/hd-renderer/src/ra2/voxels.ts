@@ -22,6 +22,7 @@ import { CARD_CLEARANCE } from './cardDepth';
 import { VOXEL_TO_WORLD } from './voxelScale';
 import { createVoxelNativeDepth, voxelBitmapBottom, voxelNativeDepthNode } from './voxelNativeDepth';
 import { NATIVE_UNIT_RENDER_ORDER } from './nativeDepth';
+import { registerVoxelReflectionVariant } from './voxelReflectionColour';
 
 /**
  * Original VXL units, rendered as real meshes. The engine draws voxels through a pure rotation (the default voxel
@@ -527,6 +528,7 @@ export class VoxelUnit extends Group {
       material.depthWrite = false;
       this.translucentMaterials.set(source, material);
       physicalMaterials.set(material, source);
+      registerVoxelReflectionVariant(material, source);
     }
     material.opacity = source.opacity * this.bodyOpacity;
     return material;
@@ -573,6 +575,7 @@ function nativeVoxelMaterial(source: MeshStandardNodeMaterial): MeshStandardNode
     material.depthWrite = true;
     nativeMaterials.set(source, material);
     physicalMaterials.set(material, source);
+    registerVoxelReflectionVariant(material, source);
     const variant = material;
     source.addEventListener('dispose', () => variant.dispose());
   }

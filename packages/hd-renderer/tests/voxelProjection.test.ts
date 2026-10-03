@@ -39,7 +39,7 @@ import {
   VOXEL_REFLECTION_TINT,
   voxelReflectionColour,
 } from '../src/ra2/voxelReflectionColour';
-import { buildVoxelGeometry, instantiateVoxel, projectVoxelMaterials } from '../src/ra2/voxels';
+import { buildVoxelGeometry, instantiateVoxel, projectVoxelMaterials, updateVoxelNativeDepth } from '../src/ra2/voxels';
 import { buildSmoothVoxelGeometry } from '../src/ra2/voxelSmoothGeometry';
 import { syntheticSection } from './fixtures/syntheticVoxels';
 import type { VoxelModel } from '../../ra2-assets/src/manifest';
@@ -331,15 +331,19 @@ describe('voxel reflection source colour', () => {
   });
 
   it.each([
-    [false, 'engine'],
-    [true, 'engine'],
-    [false, 'engine-vpl'],
-    [true, 'engine-vpl'],
-    [false, 'remaster'],
-    [true, 'remaster'],
-    [false, 'projected'],
-    [true, 'projected'],
-  ] as const)('builds %s WebGL %s source colour without the flattened normal matrix', (forceWebGL, look) => {
+    [false, 'engine', 'physical'],
+    [true, 'engine', 'physical'],
+    [false, 'engine-vpl', 'physical'],
+    [true, 'engine-vpl', 'physical'],
+    [false, 'remaster', 'physical'],
+    [true, 'remaster', 'physical'],
+    [false, 'projected', 'physical'],
+    [true, 'projected', 'physical'],
+    [false, 'projected', 'native-ground'],
+    [true, 'projected', 'native-ground'],
+    [false, 'projected', 'chrono'],
+    [true, 'projected', 'chrono'],
+  ] as const)('builds %s WebGL %s %s source colour without the flattened normal matrix', (forceWebGL, look, pass) => {
     const nodes = new AtmosphereNodes();
     const spec = manifest();
     const atlas = () => nodes.own(new DataTexture(new Uint8Array(320 * 32 * 4), 320, 32));
@@ -363,8 +367,13 @@ describe('voxel reflection source colour', () => {
         .scale(new Vector3(2, 0.8, 1.3))
         .setPosition(20, 0.4, 30),
     );
+    const unit = instantiateVoxel([{ role: 'body', geometry, turretOffset: 0 }], source, nodes);
+    if (pass !== 'physical') updateVoxelNativeDepth(unit, unit.root.position);
+    if (pass === 'chrono') unit.root.setOpacity(0.5);
+    const current = unit.root.partMeshes[0]!.material as typeof source;
+    if (pass !== 'physical') expect(current).not.toBe(source);
     const material = nodes.own(new MeshBasicNodeMaterial());
-    material.colorNode = voxelReflectionColour(source, original);
+    material.colorNode = voxelReflectionColour(current, original);
     // Reflection ripple is allowed to change positionLocal. Atlas coordinates must still read positionGeometry.
     material.positionNode = positionGeometry.add(vec3(0.1, 0, -0.1));
     const mesh = new Mesh(geometry, material);
@@ -412,7 +421,16 @@ describe('voxel reflection source colour', () => {
         );
         expect(builder.fragmentShader.match(reads)).toHaveLength(2);
       }
+      // The remapped palette lookup remains alongside both atlases; paint never falls back to a flat hull tint.
+      expect(
+        builder.uniforms.fragment.some((entry) => {
+          const texture = (entry.node as unknown as { value: DataTexture }).value;
+          return texture?.isDataTexture && texture.image.width === 256;
+        }),
+      ).toBe(true);
     }
+    unit.root.disposeOpacityMaterials();
+    geometry.dispose();
     nodes.dispose();
   });
 });
