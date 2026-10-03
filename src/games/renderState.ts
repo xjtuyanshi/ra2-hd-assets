@@ -320,6 +320,10 @@ export interface GameRenderSidebar {
   power: GameRenderPower;
   /** True while the radar shows the minimap or its open/close animation; false while it shows the faction emblem. */
   radarActive: boolean;
+  /** Exact native SHP frame and live destination for constructed, currently drawn gadgets. */
+  controls?: { id: string; rect: GameRenderRect; frame: number }[];
+  /** Exact native ShapeButton frames, including disabled, pressed and flashing phase. */
+  tabFrames?: number[];
   /** Repair / sell cursor modes armed from the sidebar buttons. */
   modes: { repair: boolean; sell: boolean };
   /** Cameo captions in the game's language (e.g. "Ready", "On Hold"), null when they could not be read. */

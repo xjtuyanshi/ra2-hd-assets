@@ -59,6 +59,21 @@ pnpm hd:ui -- cursor --game "$RA2_INSTALL" --out "$HD_CACHE/_ui/cursor"
 pnpm hd:ui -- tabs --game "$RA2_INSTALL" --out "$UI_WORK/tabs-orig"
 ```
 
+Additional offline UI diagnostics (all output remains private and outside Git):
+
+```bash
+pnpm exec tsx packages/ra2-assets/src/cli/auditCameos.mts --game "$RA2_INSTALL" --cache "$HD_CACHE/_ui/cameos" --out "$UI_WORK/coverage"
+pnpm exec tsx packages/ra2-assets/src/cli/extractControls.mts --game "$RA2_INSTALL" --out "$UI_WORK/controls-original"
+```
+
+The audit reads both local base and add-on rules/art/CSF sets, records their SHA-256 and checks curated primary
+and alternate images for every registered type, including stock-unbuildable tech/civil/campaign entries. Missing
+originals, absent HD files and missing type-index mappings are separate findings. Its output must be outside the
+source cameo cache. It extracts originals into the audit output, never the curated source cache. The controls
+extractor retains every original frame and its SHP canvas offsets, reads side-specific MD archives before base
+archives, and reports absent shapes rather than synthesizing them. These are asset/static-source diagnostics,
+not executable or UI acceptance. See [native HD interface keys](../hd-renderer/README.md#native-hd-interface).
+
 The `ui` subcommands require explicit input/output directories. `cameos` writes 60x48 RGBA originals into `orig/`
 and `cameos.json` with type ID/kind, primary/alternate image, localized CSF name, UIName, owners, tech level,
 palette, file, dimensions and buildability. It does not update the curated `_ui/cameos/index.json`. Missing images

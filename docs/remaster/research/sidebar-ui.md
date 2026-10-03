@@ -124,6 +124,31 @@ evidence, not a live memory capture. Community YRpp headers supplied leads only.
 | Armed repair/sell | S bytes `+0x11B0/+0x11B1` | setters `0x4AC8C8`, `0x4AC668` | V |
 | Localized Ready/Hold | Labels ptr `0xB1CF74`, Count `0xB1CF6C`; Values ptr `0xB1CF78`, Count `0xB1CF70`; label stride0x28,name[32],num+0x20,valueIndex+0x24 | `0x734E70..0x734EBC`, case-insensitive comparator `0x7C8D20`; `0x6A983B`, `0x6A9ED8` | V |
 
+## Native control states and command slots
+
+`ShapeButton::Draw` at `0x69DED3..0x69DF12` selects the actual source frame. Disabled byte `+0x1E`
+selects frame 2 first. With toggle byte `+0x40`, flashing/press-phase byte `+0x34` selects frame
+`3 + bool(+0x2D)`; otherwise it selects `bool(+0x2D)`. Without that toggle byte it selects
+`bool(+0x2C)`. The source SHP pointer is `+0x58` (`0x69DEC8`, `0x69DF86`), not `+0x40`.
+The reader publishes these numbers in `tabFrames` and each `controls` entry without calling a guest getter.
+
+The executable constructs 25 inline command gadgets at `0xB0C1C0`, stride `0x60`
+(`0x6CFBA2..0x6CFBB7`). `Tab::Draw` visits the 25-element order table at `0xB0CB78`, accepting
+indices 0..24 (`0x6D0D4F..0x6D0D8A`); it does not draw all allocated objects. The reader keeps this
+order, ignores out-of-range/duplicate slots and absent/unconstructed shapes, and reads each live rectangle.
+The expanded byte is `S+0x5544`; `0x6D0DCD..0x6D0DE3` draws `0xB0CCB0` when expanded and
+`0xB0CC40` otherwise. Those are published as `commandCollapse`/`commandExpand`. Command image keys
+remain numeric (`command0`..`command24`), avoiding invented semantic command names.
+
+The loader at `0x6D0F24..0x6D0F5A` formats `Button%02d.SHP` from string `0x842828` and retains
+source pointers in `0xB0C148`. Original-art extraction uses the existing side-archive/palette priority;
+both toolbar toggles receive the `BTTNBKGD.SHP` pointer from `0xB0FA90`
+(`0x6D0404..0x6D042F`, `0x6D0481..0x6D0487`; loader/table `0x72FB91`, `0x844D34`).
+This shape is a blank background; the toolbar decoration drawn separately at
+`0x6D0D8C..0x6D0DC8` must not be mistaken for an icon contained in it.
+missing stock shapes are reported and do not become fabricated images. UI-state fixtures are synthetic;
+these instruction checks do not certify live press/disabled timing or button labels.
+
 ## Software cursor and native tooltip (C3)
 
 These operands were checked in the supplied YR 1.001 executable and disassembly.

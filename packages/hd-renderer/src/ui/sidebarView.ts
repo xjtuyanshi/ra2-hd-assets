@@ -31,6 +31,8 @@ export interface Sidebar {
   credits: number;
   power: { used: number; reserve: number; surplus: number; low: boolean };
   radarActive: boolean;
+  controls?: { id: string; rect: Rect; frame: number }[];
+  tabFrames?: number[];
   modes: { repair: boolean; sell: boolean };
   labels: { ready: string | null; hold: string | null };
   pointer?: { x: number; y: number; frame: number; hotspot: { x: number; y: number } } | null;
@@ -95,14 +97,28 @@ const inflate = (r: Rect, by: number): Rect => ({
 export function transparentRects(sidebar: Sidebar, assets: UiAssets): Rect[] {
   const l = sidebar.layout;
   const tooltip = sidebar.tooltip ? [sidebar.tooltip.rect] : [];
-  if (assets.chrome(sidebar.side)) {
-    return [
-      // The native radar strokes the map outline one row outside its aperture (YR 1.001: yellow rows at aperture
-      // y-1 and y+height in a live pair), so the hole is padded by one frame pixel to keep that outline visible.
-      ...(sidebar.radarActive ? without(l.sidebar, inflate(l.radar, 1)) : [l.sidebar]),
-      ...(l.commandBar ? [l.commandBar] : []),
-      ...tooltip,
-    ].filter(valid);
+  const chrome = assets.chrome(sidebar.side);
+  if (chrome) {
+    let covered = [l.sidebar, ...(l.commandBar ? [l.commandBar] : [])].filter(valid);
+    const preserve: Rect[] = [];
+    if (sidebar.radarActive) preserve.push(inflate(l.radar, 1));
+    // New snapshots expose exact button state; never hide an unsupported/missing state with static chrome.
+    if (sidebar.controls) {
+      const frameFor = (id: string, frame: number) =>
+        chrome.controls?.frames.some((f) => f.id === id && f.frame === frame);
+      for (const button of sidebar.controls) if (!frameFor(button.id, button.frame)) preserve.push(button.rect);
+      for (const [id, r] of Object.entries(l.buttons))
+        if (r && !sidebar.controls.some((b) => b.id === id && frameFor(id, b.frame))) preserve.push(r);
+      if (l.commandBar && !sidebar.controls.some((button) => button.id.startsWith('command')))
+        preserve.push(l.commandBar);
+    }
+    if (sidebar.tabFrames)
+      l.tabs.forEach((r, i) => {
+        const state = ['normal', 'active', 'disabled', 'pressed', 'pressedActive'][sidebar.tabFrames![i]!];
+        if (!chrome.tabs?.frames.some((frame) => frame.tab === i && frame.state === state)) preserve.push(r);
+      });
+    for (const hole of preserve) covered = covered.flatMap((r) => without(r, hole));
+    return [...covered, ...tooltip];
   }
   return [l.strip, { ...l.power, height: l.power.slotHeight * l.power.slots }, l.credits, ...l.tabs, ...tooltip]
     .filter(valid)
@@ -114,7 +130,11 @@ export function drawSidebar(
   ctx: CanvasRenderingContext2D,
   sidebar: Sidebar,
   assets: UiAssets,
-  opts: { scale: number; time: number; pointerPosition?: Readonly<{ x: number; y: number }> | null },
+  opts: {
+    scale: number;
+    time: number;
+    pointerPosition?: Readonly<{ x: number; y: number }> | null;
+  },
 ): void {
   if (!(opts.scale > 0)) return;
   const { layout: l } = sidebar;
@@ -311,6 +331,54 @@ export function drawSidebar(
     });
   }
 
+  if (chrome?.radar) {
+    const state = sidebar.radarActive ? 'frame' : 'logo';
+    const source = chrome.radar.frames.find((frame) => frame.state === state)?.rect;
+    if (source) {
+      const target = rect(
+        state === 'frame'
+          ? { x: l.sidebar.x, y: l.radar.y - 1, width: l.sidebar.width, height: l.radar.height + 2 }
+          : l.radar,
+      );
+      ctx.save();
+      if (state === 'frame') {
+        // The native map/viewport outline stays visible even if an optional redraw has an opaque aperture.
+        ctx.beginPath();
+        for (const r of without(target, rect(inflate(l.radar, 1)))) ctx.rect(r.x, r.y, r.width, r.height);
+        ctx.clip();
+      }
+      ctx.drawImage(
+        chrome.radar.bitmap,
+        source.x,
+        source.y,
+        source.width,
+        source.height,
+        target.x,
+        target.y,
+        target.width,
+        target.height,
+      );
+      ctx.restore();
+    }
+  }
+  for (const button of sidebar.controls ?? []) {
+    const atlas = chrome?.controls;
+    const source = atlas?.frames.find((frame) => frame.id === button.id && frame.frame === button.frame)?.rect;
+    if (!atlas || !source) continue;
+    const target = rect(button.rect);
+    ctx.drawImage(
+      atlas.bitmap,
+      source.x,
+      source.y,
+      source.width,
+      source.height,
+      target.x,
+      target.y,
+      target.width,
+      target.height,
+    );
+  }
+
   ctx.save();
   ctx.beginPath();
   const strip = rect(l.strip);
@@ -410,15 +478,28 @@ export function drawSidebar(
     const tab = sidebar.tabs[i];
     if (!tab) return;
     if (chrome?.tabs) {
-      if (tab.count <= 0) return;
-      const state = tab.flashing
-        ? Math.floor(opts.time / 500) % 2 === 0
-          ? 'active'
-          : 'normal'
-        : sidebar.activeTab === i
-          ? 'active'
-          : 'normal';
+      const native = sidebar.tabFrames?.[i];
+      const names = ['normal', 'active', 'disabled', 'pressed', 'pressedActive'] as const;
+      if (
+        tab.count <= 0 &&
+        native === undefined &&
+        !chrome.tabs.frames.some((frame) => frame.tab === i && frame.state === 'disabled')
+      )
+        return;
+      const state =
+        native !== undefined
+          ? names[native]
+          : tab.count <= 0
+            ? 'disabled'
+            : tab.flashing
+              ? Math.floor(opts.time / 500) % 2 === 0
+                ? 'active'
+                : 'normal'
+              : sidebar.activeTab === i
+                ? 'active'
+                : 'normal';
       const frame = chrome.tabs.frames.find((frame) => frame.tab === i && frame.state === state);
+
       if (frame) {
         const source = frame.rect,
           target = rect(r);
@@ -436,6 +517,7 @@ export function drawSidebar(
       }
       return;
     }
+    if (sidebar.tabFrames) return;
     if (!tab.count) fill(r, 'rgba(0,0,0,0.6)');
     if (tab.flashing) {
       ctx.save();

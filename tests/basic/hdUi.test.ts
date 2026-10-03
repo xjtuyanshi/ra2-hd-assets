@@ -708,10 +708,11 @@ describe('optional HD UI art cache', () => {
     const assets = createUiAssets();
     expect(assets.caption('BUILDING', 'supplied')).toBeNull();
     await settle();
-    expect(assets.caption('BUILDING', 'supplied')).toBe('矿石精炼厂');
+    expect(assets.caption('BUILDING', 'supplied')).toBe('攻击潜艇');
     expect(assets.caption('BUILDING', null)).toBe('矿石精炼厂');
     expect(assets.caption('UNMAPPED', 'supplied')).toBe('攻击潜艇');
-    expect(assets.caption('NO_CAPTION', 'supplied')).toBeNull();
+    expect(assets.caption('NO_CAPTION', 'supplied')).toBe('攻击潜艇');
+    expect(assets.caption('NO_CAPTION', null)).toBeNull();
     expect(assets.caption('UNMAPPED', null)).toBeNull();
     expect(assets.caption('UNMAPPED', 'missing')).toBeNull();
     expect(fetcher).toHaveBeenCalledOnce();
@@ -727,7 +728,7 @@ describe('optional HD UI art cache', () => {
       if (failure === 'bounds') frames[0]!.rect.width = 999;
       if (failure === 'incomplete') frames.splice(0, 1);
       if (failure === 'duplicate') frames.push(frames[0]!);
-      if (failure === 'state') (frames[0] as { state: string }).state = 'disabled';
+      if (failure === 'state') (frames[0] as { state: string }).state = 'bogus';
       const fetcher = vi.fn(async (path: string) => ({
         ok: !(failure === '404' && path.endsWith('tabs.png')),
         json: async () => ({
@@ -962,7 +963,7 @@ describe('HD UI controller', () => {
         clientHeight: 750,
         parentElement: { insertBefore: insert },
       } as unknown as HTMLCanvasElement,
-      frameRenderer: { setTransparentRects } as unknown as VmFrameRenderer,
+      frameRenderer: { setTransparentRects, setSmoothRect: vi.fn() } as unknown as VmFrameRenderer,
       invalidate,
       frameSize: () => ({ width: 800, height: 600 }),
     };
@@ -1011,4 +1012,134 @@ describe('HD UI controller', () => {
     ui.setEnabled(true);
     expect(invalidate).toHaveBeenCalledTimes(n);
   });
+});
+
+describe('native control and radar atlas presentation', () => {
+  const bitmap = { width: 128, height: 64 } as ImageBitmap;
+  const atlas = {
+    file: 'controls.png',
+    bitmap,
+    frames: [0, 1, 2, 3, 4].map((frame) => ({
+      id: 'command7',
+      frame,
+      rect: { x: frame * 24, y: 0, width: 24, height: 24 },
+    })),
+  };
+  it.each([0, 1, 2])('draws every native state at its live rectangle on side %s', (side) => {
+    const s = hdSidebar();
+    s.side = side;
+    s.cameos = [];
+    const target = { x: 123, y: 575, width: 24, height: 24 };
+    for (let frame = 0; frame < 5; frame++) {
+      s.controls = [{ id: 'command7', rect: target, frame }];
+      const { ctx, calls } = recording();
+      drawSidebar(ctx, s, { ...fallback, chrome: () => ({ ...chrome, controls: atlas }) }, { scale: 2, time: 0 });
+      expect(calls.find((call) => call.name === 'drawImage' && call.args[0] === bitmap)?.args).toEqual([
+        bitmap,
+        frame * 24,
+        0,
+        24,
+        24,
+        123,
+        575,
+        24,
+        24,
+      ]);
+    }
+  });
+  it('preserves native pixels when an optional atlas or individual state is missing', () => {
+    const s = hdSidebar();
+    s.controls = [{ id: 'command7', rect: { x: 123, y: 575, width: 24, height: 24 }, frame: 2 }];
+    s.tabFrames = [0, 1, 2, 3];
+    for (const art of [
+      chrome,
+      { ...chrome, controls: { ...atlas, frames: atlas.frames.filter((f) => f.frame !== 2) } },
+    ]) {
+      const covered = transparentRects(s, { ...fallback, chrome: () => art });
+      const inside = (x: number, y: number) =>
+        covered.some((r) => x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height);
+      expect(inside(130, 580)).toBe(false);
+      expect(inside(667, 180)).toBe(false);
+      expect(inside(655, 200)).toBe(false);
+      expect(inside(110, 580)).toBe(true);
+    }
+  });
+  it('never stretches controls to fit different viewport chrome and keeps the native radar hole', () => {
+    const s = hdSidebar();
+    s.cameos = [];
+    const radar = {
+      file: 'radar.png',
+
+      bitmap,
+      frames: [
+        { state: 'frame' as const, rect: { x: 0, y: 0, width: 64, height: 32 } },
+        { state: 'logo' as const, rect: { x: 64, y: 0, width: 64, height: 32 } },
+      ],
+    };
+    const assets = { ...fallback, chrome: () => ({ ...chrome, radar }) };
+    const original = transparentRects(s, assets);
+    const { ctx, calls } = recording();
+    drawSidebar(ctx, s, assets, { scale: 1, time: 0 });
+    expect(calls.find((call) => call.name === 'drawImage' && call.args[0] === bitmap)?.args.slice(-4)).toEqual([
+      632, 19, 168, 132,
+    ]);
+    const drawIndex = calls.findIndex((call) => call.name === 'drawImage' && call.args[0] === bitmap);
+    let pathIndex = drawIndex - 1;
+    while (pathIndex >= 0 && calls[pathIndex]!.name !== 'beginPath') pathIndex--;
+    const radarClip = calls.slice(pathIndex, drawIndex);
+    expect(radarClip.some((call) => call.name === 'clip')).toBe(true);
+    const regions = radarClip.filter((call) => call.name === 'rect').map((call) => call.args as number[]);
+    expect(regions.length).toBeGreaterThan(0);
+    expect(regions.every(([x, y, w, h]) => x! + w! <= 643 || x! >= 789 || y! + h! <= 19 || y! >= 151)).toBe(true);
+    expect(transparentRects(s, assets)).toEqual(original);
+    s.radarActive = false;
+    calls.length = 0;
+    drawSidebar(ctx, s, assets, { scale: 1, time: 0 });
+    expect(calls.find((call) => call.name === 'drawImage' && call.args[0] === bitmap)?.args.slice(-4)).toEqual([
+      644, 20, 144, 130,
+    ]);
+  });
+  it.each(['valid', 'bounds', 'duplicate', 'invalidFrame', 'missing', 'decode'])(
+    'loads radar independently of %s controls',
+    async (failure) => {
+      const controlFrames = atlas.frames.map((f) => ({ ...f, rect: { ...f.rect } }));
+      if (failure === 'bounds') controlFrames[0]!.rect.width = 999;
+      if (failure === 'duplicate') controlFrames.push(controlFrames[0]!);
+      if (failure === 'invalidFrame') controlFrames[0]!.frame = 5;
+      const closes: ReturnType<typeof vi.fn>[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (path: string) => ({
+          ok: !(failure === 'missing' && path.endsWith('controls.png')),
+          json: async () => ({
+            frame: chrome.frame,
+            pieces: [{ ...chrome.pieces[0], bitmap: undefined }],
+            controls: { file: 'controls.png', frames: controlFrames },
+            radar: {
+              file: 'radar.png',
+
+              frames: [{ state: 'logo', rect: { x: 0, y: 0, width: 32, height: 32 } }],
+            },
+          }),
+          blob: async () => new Blob([path]),
+        })),
+      );
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn(async (blob: Blob) => {
+          if (failure === 'decode' && (await blob.text()).endsWith('controls.png')) throw new Error('decode');
+          const close = vi.fn();
+          closes.push(close);
+          return { ...bitmap, close };
+        }),
+      );
+      const assets = createUiAssets();
+      assets.chrome(0);
+      await settle();
+      expect(assets.chrome(0)?.radar?.file).toBe('radar.png');
+      expect(!!assets.chrome(0)?.controls).toBe(failure === 'valid');
+      assets.dispose();
+      for (const close of closes) expect(close).toHaveBeenCalledOnce();
+    },
+  );
 });

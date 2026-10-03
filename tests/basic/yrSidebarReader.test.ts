@@ -552,3 +552,52 @@ describe('YR 1.001 read-only sidebar', () => {
     expect(read()).toBeNull();
   });
 });
+
+describe('native HD UI gadget states', () => {
+  it('reads exact ShapeButton frames and keeps missing/undrawn command gadgets absent', () => {
+    const f = fixture();
+    const button = 0xb0b3a0;
+    f.i32(button + 0x58, 0xcc0000);
+    const source = f.bytes.slice();
+    expect(f.read()?.controls?.find((c) => c.id === 'repair')).toMatchObject({
+      frame: 0,
+      rect: { x: 1017, y: 165, width: 30, height: 24 },
+    });
+    expect(f.bytes.every((value, index) => value === source[index])).toBe(true);
+    f.u8(button + 0x2c, 1);
+    expect(f.read()?.controls?.[0]?.frame).toBe(1);
+    f.u8(button + 0x40, 1);
+    f.u8(button + 0x34, 1);
+    expect(f.read()?.controls?.[0]?.frame).toBe(3);
+    f.u8(button + 0x2d, 1);
+    expect(f.read()?.controls?.[0]?.frame).toBe(4);
+    f.u8(button + 0x1e, 1);
+    expect(f.read()?.controls?.[0]?.frame).toBe(2);
+    expect(f.read()?.controls?.some((c) => c.id.startsWith('command'))).toBe(false);
+  });
+  it('publishes only native drawn slots, deduplicates them, and selects one toolbar toggle', () => {
+    const f = fixture();
+    for (let i = 0; i < 25; i++) f.i32(G.commandSlots + i * 4, -1);
+    f.i32(G.commandSlots, 24);
+    f.i32(G.commandSlots + 4, 24);
+    f.i32(G.commandSlots + 8, 25);
+    const cmd = G.commandButtons + 24 * 0x60;
+    f.i32(cmd, 0x7e0000);
+    f.rect(cmd + 0xc, 150, 712, 24, 24);
+    f.i32(cmd + 0x58, 0xcc0000);
+    for (const at of [0xb0cc40, 0xb0ccb0]) {
+      f.i32(at, 0x7e0000);
+      f.rect(at + 0xc, 0, 712, 24, 24);
+      f.i32(at + 0x58, 0xcc0000);
+    }
+    expect(f.read()?.controls?.map((c) => c.id)).toEqual(['commandExpand']);
+    f.u8(S + 0x5544, 1);
+    expect(f.read()?.controls?.map((c) => c.id)).toEqual(['command24', 'commandCollapse']);
+    f.u8(G.tabs + 0x1e, 1);
+    f.u8(G.tabs + 0x60 + 0x40, 1);
+    f.u8(G.tabs + 0x60 + 0x34, 1);
+    expect(f.read()?.tabFrames).toEqual([2, 3, 0, 0]);
+    f.i32(G.commandBar, 0);
+    expect(f.read()?.controls).toEqual([]);
+  });
+});
