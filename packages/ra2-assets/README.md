@@ -1756,3 +1756,70 @@ evidence, not live GPU acceptance. Asset-free regressions:
 pnpm exec vitest run packages/ra2-assets/tests/infantryShadows.test.ts
 python3 -B -m unittest discover -s packages/ra2-assets/python -p test_infantry_shadows.py
 ```
+
+## Stage-two offline tool ports (Python)
+
+These tools preserve the stage-two scratch utilities' algorithms while taking explicit paths. They never start a
+browser, match, server or image-model job. NumPy and Pillow are required; the chroma, region and comparison-video
+commands also use OpenCV. Keep all inputs, generated images, captures and reports outside Git. Source provenance is
+`stage2/{civil,units,theatres,zdepth}/tools` and `stage2/zdepth/live`, as recorded in the private archive; these paths
+identify the historical source, not a runtime dependency.
+
+| Command                                | Historical tool                     | Contract                                                                                                                                                                                                                                                                |
+| -------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `python/building_qa.py JOB...`         | civil `qa.py`                       | Reads each job's `post/{orig2x,shown2x,box_rgba,reg4x}.png`; writes `post/qa.json`. Silhouette IoU, outside growth, edge/grid correlation, low-frequency Lab/hue drift and texture gain retain the calibrated thresholds. Numeric warnings require native-scale review. |
+| `python/civilian_chroma.py SOURCE OUT` | units `civlock.py`                  | Links sheet metadata into a disjoint output directory, atomically writes its locked `output.png`, and preserves source pixels and redraw alpha. Defaults: strength 1, chroma gain 1; civilian fixed-paint threshold 200.                                                |
+| `python/live_replay.py --frozen`       | units `mkreplay.py`                 | Writes three copies at frame−2, frame−1 and frame; removes sidebar, normalizes dense typed-array objects, and emits carried fields only on the first copy. Effects retain their captured stages. Existing densified replay behavior is unchanged.                       |
+| `python/atlas_install.py map`          | theatres `install_mapatlas.py`      | Installs referenced colour/remap files and sets only an empty `manifest.spriteAtlasHd`, preserving unrelated fields. An existing reference is an error.                                                                                                                 |
+| `python/atlas_install.py overlay`      | theatres `install_overlay_pages.py` | Installs only an empty `library.spriteAtlasesHd[page]` under composition and JSON locks. Keeps the original `-s2b` names by default; existing slots are retained.                                                                                                       |
+| `python/image_region_metrics.py`       | theatres `gembox.py`                | Measures low-saturation ground Lab and saturated-highlight V in an explicit crop. The original gem-box invocation uses `--box 230 170 470 330 --scale 2`, with saturation thresholds 60/90.                                                                             |
+| `python/yr_zbuffer.py`                 | zdepth `zbuf.py`                    | Decodes circular uint16 depth using captured YR headers; optionally writes a `.npy`. Explicit pitch/surface overrides preserve the original decoder's byte-address semantics.                                                                                           |
+| `python/yr_zcheck.py`                  | zdepth `zcheck.py`                  | Compares native depth with the YR BUILDNGZ body or `g0:K` gradient model. Reports exact/nearer/farther counts; nearer pixels can be legitimate occluders. Template/projection constants stay in this YR-specific module.                                                |
+| `python/native_compare_video.py`       | zdepth `sbs_video.py`               | Aligns timestamped RGB565 crop chunks and an HD recording using nearest timestamps. Keeps native nearest-neighbour and HD area sampling, gap/label layout and timing; checks encoded frame count by reading it back.                                                    |
+| `python/native_frame.py`               | live `rawpng.py`                    | Decodes frozen `raw-ID.rgb565` using `native-ID.json` dimensions. Writes a PNG without modifying the capture.                                                                                                                                                           |
+| `python/driver_command.py`             | live `cmd.sh`, `cmdf.sh`            | Atomically publishes a JSON object/array to an existing driver's `cmd/`; waits for `done/NAME.json.result`, prints content or path, and can resume after timeout with `--wait NAME.json`.                                                                               |
+
+`redraw_metrics.py`, `raster_buffers.py`, `image_region_metrics.py`, `driver_command.py` and
+`native_compare_video.py` contain reusable measurement, raster, transport and recording mechanisms. Building QA
+supplies its margin, directional profiles, minimum grid area and acceptance policy; YR depth code supplies its
+headers and native projection/template rules. No utility selects a game address, map, farm or service port.
+
+Set `TOOLS=packages/ra2-assets/python`, `TOOL_WORK` to an untracked working directory, and choose explicit source
+and farm directories. Examples (the install examples write the selected farm, so use a staging farm for review):
+
+```sh
+python3 -B "$TOOLS/building_qa.py" "$TOOL_WORK/body-job"
+python3 -B "$TOOLS/civilian_chroma.py" "$TOOL_WORK/sheet" "$TOOL_WORK/locked" --chroma-gain 1.6
+python3 -B "$TOOLS/live_replay.py" --states "$TOOL_WORK/native-12.json" --frozen --out "$TOOL_WORK/frozen.json"
+python3 -B "$TOOLS/atlas_install.py" --farm "$STAGING_FARM" --source "$ATLAS_SOURCE" map "$MAP"
+python3 -B "$TOOLS/atlas_install.py" --farm "$STAGING_FARM" --source "$ATLAS_SOURCE" overlay urban:0 --suffix s2b
+python3 -B "$TOOLS/image_region_metrics.py" "$TOOL_WORK/replay.png" --box 230 170 470 330 --scale 2
+python3 -B "$TOOLS/yr_zbuffer.py" "$TOOL_WORK/pairs/native-01.json" \
+  --buffer "$TOOL_WORK/pairs/zbuf-01.bin" --out "$TOOL_WORK/depth.npy"
+python3 -B "$TOOLS/yr_zcheck.py" "$TOOL_WORK/run" 01 "$BUILDING_TYPE" "$SHP_STEM" 0 \
+  --library "$STAGING_FARM/_library/urban/library.json" --data "$DEPTH_DATA" --mode body --n 0 --point-move 0 0
+python3 -B "$TOOLS/native_frame.py" "$TOOL_WORK/pairs" 01 --out "$TOOL_WORK/native.png"
+python3 -B "$TOOLS/native_compare_video.py" "$TOOL_WORK/compare.mp4" "$TOOL_WORK/nrec" "$TOOL_WORK/hd.mp4" \
+  "$HD_T0_MS" 0 0 984 712 --hd-width 984 --font "$REVIEW_FONT" --scale 2 --fps 15
+python3 -B "$TOOLS/driver_command.py" --run "$DRIVER_RUN" --json '{"op":"state","name":"review"}' --result-file
+python3 -B "$TOOLS/driver_command.py" --run "$DRIVER_RUN" --wait "$COMMAND_NAME" --result-file
+python3 -B -m pytest "$TOOLS/test_stage2_tools.py" "$TOOLS/test_cache_farm.py" \
+  "$TOOLS/test_vehicle_projection.py" "$TOOLS/test_live_replay.py" "$TOOLS/test_recording_video.py" \
+  "$TOOLS/test_building_redraw.py" -q
+```
+
+Compatibility boundaries: well-formed source artifacts retain their algorithms and published data. Invalid/truncated
+buffers, sparse typed-array objects, empty image classes, invalid crops, overlapping input/output directories and
+missing paired atlas files now fail explicitly. Atlas installers preflight both files and hold the publication lock
+across installation; they do not install unused files into an occupied slot. Driver timeouts and video read-back
+mismatches return failure instead of reporting apparent success. Comparison video requires `--hd-width`; pass the
+original value 984 and an explicit font to reproduce the old framing/labels. The comparison retains both decoded
+streams in memory, so use short captures. The depth checker is an offline diagnostic with the original template
+geometry and 984×712 default tactical bounds; it does not establish complete renderer/native depth parity.
+
+Existing `codex_queue.py`, `cache_farm.py` and `vehicle_projection.py` already provide the core queue, atomic file
+installation and vehicle build/grade/install mechanisms. The civil pack/batch installers and shell recipes remain
+track-specific archived workflows; their private review/fingerprint ledgers and palette handlers are not inferred
+by these ports. The monolithic live browser driver remains archived: startup assumptions, YR probes and its Worker
+freeze/capture timing need a separately authorized live validation. Offline transport tests do not validate its
+browser actions, pair synchronization, clock behavior, or game/runtime acceptance.
