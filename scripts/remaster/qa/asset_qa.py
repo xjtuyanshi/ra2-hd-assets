@@ -638,8 +638,8 @@ def write_report(out, rows, stats, candidates, cache):
         writer.writerows(rows)
     counts = collections.Counter(flag for r in rows for flag in r["failures"].split(";") if flag)
     text = ["# HD sprite QA sweep", "", f"Snapshot: {stats['started_at']} (Unix {stats['started_unix']}).", "",
-            f"Compared **{stats['frames']:,} frames** across **{stats['jobs']} page/source pairs**, "
-            f"covering **{stats['compared_hd_pages']} unique HD colour pages**. "
+            f"Checked **{stats['frames']:,} body-frame slots** across **{stats['jobs']} attempted page/source pairs**, "
+            f"covering **{stats['compared_hd_pages']} declared HD colour page paths** (including broken references, which remain failures). "
             f"Inventoried {stats['sprite_pngs']} sprite PNGs, {stats['json_files']} JSON files. "
             f"CSV: {len(rows):,} asset/frame-range or structural rows; {sum(r['status'] == 'FAIL' for r in rows):,} flagged rows.", "",
             "## Thresholds and interpretation", "",
