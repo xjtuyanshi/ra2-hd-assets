@@ -443,6 +443,19 @@ python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_terrain_s
 These tools require NumPy, Pillow and OpenCV (`cv2`). All source images, cache and work directories are explicit
 arguments; keep generated art outside Git. They preserve terrain alpha and do not edit manifests or material sidecars.
 
+`scripts/remaster/terrain2_watch.py` keeps one already pilot-approved map's broker queue supplied through
+`terrain2_pipeline.py`. It starts no model process, accepts no art and never retries failed requests automatically.
+The existing pipeline enforces the two-pilot gate, three-request concurrency cap, disk floor and usage-limit stop.
+A local advisory lease prevents duplicate watchers. Restarting checks existing raw outputs for missing QA, so an
+interruption between ingestion and QA does not skip review evidence. Inspect `OUT/watch/status.json`; send SIGTERM
+and wait for its stopped phase before manual submit, ingest or rejection. Visual approval is safe after the QA
+phase has finished. A complete raw queue stops at `awaiting_visual_review`, not final-map acceptance.
+
+```bash
+python3 -B scripts/remaster/terrain2_watch.py --root "$ROOT" --out "$OUT" --map "$MAP"
+python3 -B -m unittest discover -s scripts/remaster -p 'test_terrain2_watch.py'
+```
+
 - `python/terrain_tiles.py`: `prep` cuts `--source` using `--water-mask` and `--prompt` into `--tiles`, writing
   `input.png`, `prompt.txt`, `tile.json`, a default `queue.txt`, and a final `prep.json` recording the full grid and
   intentional water skips. `run` invokes a supplied CLI; `check` writes per-tile
