@@ -680,6 +680,10 @@ python3 packages/ra2-assets/python/infantry_sheets.py copy-pages \
 ```
 
 `python/cache_farm.py` exposes generic `install_file(root, rel, data_path)` and `patch_json(root, rel, fn)` helpers.
+`ensure_directory(root, rel)` realises a directory chain before a caller opens its stable coordination locks;
+`install_symlink(root, rel, source)` publishes a relative link through the same farm boundary.
+`lock_file(root, rel)` keeps inherited lock inodes stable and opens them read-only; it never creates a dangling
+lock symlink's target in the base cache.
 Parent directory symlinks are atomically swapped for real directories containing symlinks to the original children,
 so writes stay in the farm. Directory swaps require macOS or Linux filesystem support. File installs use hard links
 on the same device and copies across devices. Staging images use fresh inodes and atomic `.part` replacement;
@@ -903,16 +907,72 @@ list comes from the install (`LeaveRubble=yes` building types).
 python3 -B packages/ra2-assets/python/rubble_pages.py export --cache-root "$VARIANT" --theatre urban \
   --types "$WORK/leave_rubble.json" --out "$WORK/rubble/export"
 python3 -B packages/ra2-assets/python/rubble_pages.py build --export "$WORK/rubble/export" \
-  --upscaled "$WORK/rubble/up4.png" [--redraw-dir "$WORK/rubble/redraws"] --out "$WORK/rubble/build"
+  --upscaled "$WORK/rubble/up4.png" [--redraw-dir "$WORK/rubble/redraws"] \
+  [--redraw-references "$WORK/rubble/references.json"] --out "$WORK/rubble/build"
 python3 -B packages/ra2-assets/python/rubble_pages.py install --build "$WORK/rubble/build" --cache-root "$VARIANT" \
   --theatre urban
+python3 -B packages/ra2-assets/python/rubble_pages.py groups \
+  --export urban="$WORK/rubble/urban" temperate="$WORK/rubble/temperate" --out "$WORK/rubble/groups.json"
+python3 -B packages/ra2-assets/python/rubble_pages.py distribute --groups "$WORK/rubble/groups.json" \
+  --redraw "$WORK/rubble/redraw.png" --key building:NAME --theatre urban --out-root "$WORK/rubble/redraws"
 python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_rubble_pages.py'
 ```
+
+`groups` accepts theatre directories containing `export/rubble.json` and `export/sprites-rubble-l5f.png`
+(or the export directories themselves). It groups frames only when their indices, size and anchor offset match,
+without looking up existing redraws. `distribute` selects the group by theatre and sprite key, then copies the
+supplied file to `<out-root>/<theatre>/building_<NAME>.png` for each member, including differently named matches.
+
+For a redraw generated from another theatre's palette, `build --redraw-references FILE` accepts a JSON object
+mapping each destination sprite key to `{ "export": "source/export", "upscaled": "source/up4.png", "key": "building:SOURCE" }`.
+Paths resolve relative to the JSON file. Before using that source for registration, the builder verifies that its
+frame indices, dimensions and anchor offset exactly match the destination. Registration and the unchanged fit/scale
+gates use the source colours; final alpha and Lab colour locking still use the destination. This avoids rejecting
+identical geometry when theatre palettes reverse its brightness. The frame records the source identity and reference
+hashes, plus the target fit before colour locking. Omitted keys retain the original destination-reference behavior;
+an invalid or mismatched source is flagged as a registration failure, never accepted implicitly.
 
 `sheet` compares original/L4/L5 with Chinese labels at the same cell anchor. Game art and all derived images stay
 outside Git; numerical tests do not establish renderer or visual acceptance.
 
 ## Building redraw transfers (Python)
+
+`python/building_redraw.py body --design-palette NAME` uses that library palette to draw the ordered 1x parts,
+applies the house ramp on indices 16–31 of remappable parts and enlarges the composite with Lanczos to 2x. The saved
+`layout.json` field `design_palette` keeps model input, the post colour-lock reference and `post/orig2x.png`
+consistent. This is useful for art with a commented `;Palette=City` line (YR CACITY01–04 and CITY01–06):
+the theatre `lib` palette reveals the intended colours instead of unit-palette noise. Omit the option to keep
+the existing HD composite. `post` also accepts an optional layout `root` for its composite and lock reference,
+for example an ESRGAN baseline cache when replacing an earlier redraw; explicit `--root` takes precedence,
+then layout `root`, then `HD_CACHE_DIR`.
+
+For an individually reviewed failed affine fit, a job layout may set `registration_params: [sx, tx, sy, ty]`
+and a `registration_note`. Translations use input-canvas pixels; scales must be strictly between 0.8 and 1.25,
+and all four values must be finite numbers. The default remains automatic registration. Use this only after
+checking that the generated source contains the complete geometry and measuring its alignment; it cannot repair
+missing generated art. `post/post.json` records the selected parameters alongside the original automatic fit
+and review note. Preserve the previous post and raw source as evidence, rerun numerical QA, and inspect the full
+native-resolution comparison after correction; the override does not waive any visual or metric checks.
+
+```bash
+python3 -B packages/ra2-assets/python/building_redraw.py body --root "$VARIANT" --theater urban \
+  --kind intact --specs "$WORK/specs.json" --work "$WORK/jobs" --design-palette lib NAME
+python3 -B packages/ra2-assets/python/building_redraw.py post "$WORK/jobs/NAME_i" --root "$VARIANT" --theater urban
+python3 -B packages/ra2-assets/python/building_redraw.py pack-plan \
+  --items "$WORK/items.json" --cap 105000 --max-types 10 > "$WORK/packs.json"
+python3 -B packages/ra2-assets/python/redraw_qa.py "$WORK/jobs/NAME_i" [--thresholds "$WORK/thresholds.json"]
+```
+
+`pack-plan` takes a JSON list of `{name, home, fam, area}` items and prints packs with `names`, `home`, `area`
+and factor `F`. Areas are 1x cell areas including margins. Greedy packing sorts by home, family and descending
+area, keeps homes separate and opens earlier family packs for later reuse; capacity and type limits are enforced.
+An item larger than the capacity gets its own pack. `F = clamp(round(sqrt(2.6e6 / (1.35 * area))), 3, 14)`.
+`redraw_qa.py JOBDIR...` reads each posted body, prints one JSON line per job and writes `post/qa.json` with
+metrics and `fails`: silhouette/outside growth, structure/facade grids, raw/final Lab drift, hue, texture gain
+and registration framing. Hue uses only original low-frequency chroma greater than 6. `--thresholds` accepts
+a JSON object or file of partial overrides to the calibrated `TH` defaults; numerical QA still needs visual review.
+The default texture-gain minimum is 1.2, so an unchanged image reports `no-detail`; use
+`--thresholds '{"texture_gain":1.0}'` when checking baseline identity.
 
 `python/building_redraw.py xfer --library-root "$VARIANT" --theater urban --patches "$PATCHES" NAME[:i|:d|:mk]`
 transfers accepted idle redraws to animation, damaged and build-up frames (all three states when omitted);
@@ -942,12 +1002,15 @@ materialising symlinked atlases and changing only the matched frame rectangles (
 library frames). `map-copy-patches MAPDIR LIBRARY SRC_PATCHES DST_PATCHES [--tag TEXT]` is the reverse direction: it copies
 patches made for a map cache into a library patch set under the same identity test, because the live view draws every
 building that has a library type from the type library rather than the map atlas.
+Building composition and theatre material merges realise the farm's `_library/<theatre>` directory chain before
+acquiring `.compose.lock`, then publish staged pages through `cache_farm`. Material JSON merges also acquire the
+shared JSON lock, preserving entries added by other publishers.
 `building_redraw.py coverage --library LIBRARY --patches PATCHES [--prefix GA,NA,...] [--out TSV]` reports, per
 building type, the frames the renderer actually plays (body, each layer's played range intact and damaged, build-up)
 as earlier records, L5 model patches, L5 transfers or baseline gaps. These tools use
 atomic JSON/PNG replacements and copy-on-write pages; all supplied libraries, baselines and patches stay outside Git.
 Run their asset-free acceptance from `packages/ra2-assets/python` with
-`python3 -B -m unittest test_building_redraw test_theatre_pages -v`.
+`python3 -B -m unittest test_redraw_qa test_building_redraw test_rubble_pages test_theatre_pages -v`.
 
 ## Level 3 building redraw sheets (Python, experimental)
 

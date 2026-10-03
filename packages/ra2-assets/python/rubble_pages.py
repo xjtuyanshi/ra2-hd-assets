@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 from pathlib import Path
+import shutil
 import tempfile
 
 import cv2
@@ -160,6 +162,58 @@ def load_export(directory: Path) -> tuple[dict, np.ndarray]:
     return manifest, indexed
 
 
+def group_exports(exports: dict[str, Path]) -> dict:
+    """Group identical indexed frames, dimensions and offsets across explicit exports.
+
+    Each directory may contain rubble.json directly or in an export/ child. Group
+    ids hash the index bytes, dimensions and offsets with SHA-1; palette colours,
+    atlas position and rules type aliases do not affect identity.
+    """
+    groups = {}
+    for theatre, directory in exports.items():
+        component(theatre)
+        directory = Path(directory)
+        if not (directory / "rubble.json").is_file():
+            directory /= "export"
+        manifest, indexed = load_export(directory)
+        for key, frame in manifest["sprites"].items():
+            _, _, w, h = frame["rect"]
+            offset = frame["offset"]
+            if len(offset) != 2 or any(type(value) is not int for value in offset):
+                raise ValueError(f"invalid offset for {key}: {offset!r}")
+            indices = crop(indexed, frame["rect"])
+            signature = indices.tobytes() + str((w, h, offset)).encode()
+            group_id = hashlib.sha1(signature).hexdigest()[:16]
+            group = groups.setdefault(group_id, {"members": [], "area": int((indices > 0).sum()),
+                                                 "size": [w, h]})
+            group["members"].append([theatre, key])
+    return {"groups": groups}
+
+
+def distribute_redraw(groups_path: Path, redraw: Path, key: str, theatre: str, out_root: Path) -> list[Path]:
+    """Copy a redraw byte-for-byte to every member of the selected theatre/key group."""
+    groups = read_json(groups_path)["groups"]
+    matches = [group for group in groups.values() if [theatre, key] in group["members"]]
+    if len(matches) != 1:
+        raise ValueError(f"expected one group for {theatre}/{key}, found {len(matches)}")
+    destinations = []
+    for member_theatre, member_key in matches[0]["members"]:
+        if not member_key.startswith("building:") or not member_key.split(":", 1)[1]:
+            raise ValueError(f"expected building:NAME rubble key: {member_key!r}")
+        relative = f"{component(member_theatre)}/{frame_name(member_key)}"
+        if relative in destinations:
+            raise ValueError(f"duplicate rubble group member: {relative}")
+        destinations.append(relative)
+    # Stage a separate copy for each destination: edits to one redraw must not alter
+    # either the supplied source or another theatre through a shared hard link.
+    with tempfile.TemporaryDirectory(prefix="rubble-distribute-") as directory:
+        for index, relative in enumerate(destinations):
+            source = Path(directory) / f"{index}.png"
+            shutil.copyfile(redraw, source)
+            cache_farm.install_file(Path(out_root), relative, source)
+    return [Path(out_root) / relative for relative in destinations]
+
+
 def load_upscaled(path: Path, indexed: np.ndarray) -> np.ndarray:
     with Image.open(path) as image:
         expected = (indexed.shape[1] * 4, indexed.shape[0] * 4)
@@ -266,8 +320,49 @@ def registered_redraw(reference: np.ndarray, raw: np.ndarray, weight: np.ndarray
     return fitted, registration
 
 
+class RegistrationReferences:
+    """Resolve redraw source references only after proving identical indexed geometry."""
+
+    def __init__(self, path: Path | None):
+        self.path = Path(path) if path is not None else None
+        self.entries = read_json(self.path) if self.path is not None else {}
+        if not isinstance(self.entries, dict):
+            raise ValueError("redraw references must map destination sprite keys to source references")
+        self.exports, self.upscales = {}, {}
+
+    def get(self, key: str, frame: dict, indices: np.ndarray) -> tuple[np.ndarray, dict] | None:
+        if key not in self.entries:
+            return None
+        source = self.entries[key]
+        if (not isinstance(source, dict) or any(not isinstance(source.get(field), str) or not source[field]
+                                               for field in ("export", "upscaled", "key"))):
+            raise ValueError(f"invalid redraw reference for {key}: expected export, upscaled and key strings")
+        export = (self.path.parent / source["export"]).resolve()
+        upscaled = (self.path.parent / source["upscaled"]).resolve()
+        if export not in self.exports:
+            self.exports[export] = load_export(export)
+        manifest, page = self.exports[export]
+        source_frame = manifest["sprites"].get(source["key"])
+        if source_frame is None:
+            raise ValueError(f"redraw reference has no sprite {source['key']}")
+        reference_indices = crop(page, source_frame["rect"])
+        if (source_frame["offset"] != frame["offset"] or not np.array_equal(reference_indices, indices)):
+            raise ValueError(f"redraw reference geometry differs for {key}: indices, size or offset mismatch")
+        if upscaled not in self.upscales:
+            # Keep shared source pages as uint8; convert only the selected frame.
+            self.upscales[upscaled] = read_image(upscaled, "RGB")
+        image = self.upscales[upscaled]
+        if image.shape[:2] != (page.shape[0] * 4, page.shape[1] * 4):
+            raise ValueError("redraw reference upscaled image must be exactly 4x its indexed export")
+        reference = crop(image, source_frame["rect"], 4).astype(np.float32)
+        provenance = {"mode": "identical_indices_source", "theatre": manifest.get("theatre"),
+                      "key": source["key"], "indices_sha256": hashlib.sha256(indices.tobytes()).hexdigest(),
+                      "reference_sha256": hashlib.sha256(reference.astype(np.uint8).tobytes()).hexdigest()}
+        return reference, provenance
+
+
 def build_pages(export: Path, upscaled: Path, out: Path, redraw_dir: Path | None = None,
-                lock_sigma: float = 6) -> dict:
+                lock_sigma: float = 6, *, redraw_references: Path | None = None) -> dict:
     if not math.isfinite(lock_sigma) or lock_sigma <= 0:
         raise ValueError("lock sigma must be positive and finite")
     manifest, indexed = load_export(export)
@@ -275,6 +370,7 @@ def build_pages(export: Path, upscaled: Path, out: Path, redraw_dir: Path | None
     original = read_image(Path(export) / "rubble_rgba_1x.png", "RGBA")
     if original.shape[:2] != indexed.shape:
         raise ValueError("palette-reference page does not match indexed export")
+    references = RegistrationReferences(redraw_references)
     rgba = np.zeros((indexed.shape[0] * 2, indexed.shape[1] * 2, 4), np.uint8)
     result = copy.deepcopy(manifest)
     for key, frame in result["sprites"].items():
@@ -291,7 +387,18 @@ def build_pages(export: Path, upscaled: Path, out: Path, redraw_dir: Path | None
         if redraw_path is not None and redraw_path.is_file():
             try:
                 raw = read_image(redraw_path, "RGB").astype(np.float32)
-                fitted, registration = registered_redraw(base4, raw, dilated(mask).repeat(4, 0).repeat(4, 1))
+                source = references.get(key, frame, crop(indexed, rect))
+                # Equal indices may have different theatre palettes, even opposite
+                # luminance. Register against the reference that generated the raw
+                # art; the same geometry/fit gates apply, then colour-lock to target.
+                reference = source[0] if source is not None else base4
+                weight = dilated(mask).repeat(4, 0).repeat(4, 1)
+                fitted, registration = registered_redraw(reference, raw, weight)
+                if source is not None:
+                    registration["reference"] = source[1]
+                    target_fit = hybrid_redraw.pearson(blurred_luminance(base4)[weight],
+                                                       blurred_luminance(fitted)[weight])
+                    registration["target_fit_before_colour_lock"] = float(target_fit) if math.isfinite(target_fit) else 0.0
                 frame["registration"] = registration
                 frame["fit_score"] = registration["fit_score"]
                 sx, _, sy, _ = registration["params"]
@@ -446,6 +553,17 @@ def cell_size(value: str) -> tuple[int, int]:
         raise argparse.ArgumentTypeError("cell must be WxH with both dimensions at least 4") from error
 
 
+def theatre_export(value: str) -> tuple[str, Path]:
+    theatre, separator, directory = value.partition("=")
+    try:
+        component(theatre)
+        if not separator or not directory:
+            raise ValueError
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("export must be THEATRE=DIR") from error
+    return theatre, Path(directory)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -459,6 +577,8 @@ def main(argv: list[str] | None = None) -> None:
     build.add_argument("--upscaled", type=Path, required=True)
     build.add_argument("--out", type=Path, required=True)
     build.add_argument("--redraw-dir", type=Path)
+    build.add_argument("--redraw-references", type=Path,
+                       help="JSON destination key -> {export, upscaled, key} source registration references")
     build.add_argument("--lock-sigma", type=float, default=6)
     install = commands.add_parser("install")
     install.add_argument("--build", type=Path, required=True)
@@ -475,13 +595,23 @@ def main(argv: list[str] | None = None) -> None:
     slicing.add_argument("--sheet", type=Path, required=True)
     slicing.add_argument("--layout", type=Path, required=True)
     slicing.add_argument("--out", type=Path, required=True)
+    groups = commands.add_parser("groups")
+    groups.add_argument("--export", type=theatre_export, nargs="+", action="append", required=True)
+    groups.add_argument("--out", type=Path, required=True)
+    distribute = commands.add_parser("distribute")
+    distribute.add_argument("--groups", type=Path, required=True)
+    distribute.add_argument("--redraw", type=Path, required=True)
+    distribute.add_argument("--key", required=True)
+    distribute.add_argument("--theatre", required=True)
+    distribute.add_argument("--out-root", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "export":
             result = export_pages(args.cache_root, args.theatre, args.types, args.out)
             print(f"Exported {len(result['sprites'])} rubble sprites for {args.theatre} to {args.out}")
         elif args.command == "build":
-            result = build_pages(args.export, args.upscaled, args.out, args.redraw_dir, args.lock_sigma)
+            result = build_pages(args.export, args.upscaled, args.out, args.redraw_dir, args.lock_sigma,
+                                 redraw_references=args.redraw_references)
             fallbacks = sum(frame["fallback"] for frame in result["sprites"].values())
             print(f"Built {len(result['sprites'])} rubble sprites ({fallbacks} redraw fallbacks) in {args.out}")
         elif args.command == "install":
@@ -490,9 +620,19 @@ def main(argv: list[str] | None = None) -> None:
         elif args.command == "sheet":
             result = make_sheet(args.export, args.upscaled, args.keys, args.cols, args.cell, args.out)
             print(f"Packed {len(result['sprites'])} rubble cells in {args.out}")
-        else:
+        elif args.command == "slice":
             results = slice_sheet(args.sheet, args.layout, args.out)
             print(f"Sliced {len(results)} redraws into {args.out}")
+        elif args.command == "groups":
+            exports = [entry for entries in args.export for entry in entries]
+            if len(dict(exports)) != len(exports):
+                raise ValueError("each export theatre must be specified only once")
+            result = group_exports(dict(exports))
+            save_json(args.out.parent, args.out.name, result)
+            print(f"Grouped rubble into {len(result['groups'])} groups in {args.out}")
+        else:
+            results = distribute_redraw(args.groups, args.redraw, args.key, args.theatre, args.out_root)
+            print(f"Distributed redraw to {len(results)} rubble members in {args.out_root}")
     except (ValueError, OSError, KeyError, cv2.error) as error:
         parser.error(str(error))
 

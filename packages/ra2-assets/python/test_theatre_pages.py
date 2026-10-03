@@ -495,6 +495,48 @@ class TheatreTests(unittest.TestCase):
         self.assertEqual(after['custom'], 'new metadata')
         self.assertEqual(after['pages']['98'], {'file': 'another.png'})
 
+    def test_normals_merge_realises_ancestor_links_and_keeps_base_library_unchanged(self):
+        library, source, sprites, _, _, _ = self.normals_setup()
+        base_libraries = self.root / 'base-libraries'
+        base_libraries.mkdir()
+        (base_libraries / 'urban').symlink_to(library.absolute(), target_is_directory=True)
+        farm = self.root / 'farm'
+        farm.mkdir()
+        (farm / '_library').symlink_to(base_libraries.absolute(), target_is_directory=True)
+        variant = farm / '_library/urban'
+        before = {p.name: p.read_bytes() for p in library.iterdir()}
+        installer = tp.cache_farm.install_file
+        patcher = tp.cache_farm.patch_json
+        with mock.patch.object(tp.cache_farm, 'install_file', wraps=installer) as installed, \
+                mock.patch.object(tp.cache_farm, 'patch_json', wraps=patcher) as patched:
+            self.assertEqual(tp.normals_merge(source, variant, sprites), ['0', '1'])
+        self.assertEqual(installed.call_count, 2)
+        self.assertEqual(patched.call_count, 1)
+        self.assertFalse((farm / '_library').is_symlink())
+        self.assertFalse(variant.is_symlink())
+        self.assertFalse((library / '.compose.lock').exists())
+        self.assertEqual(before, {p.name: p.read_bytes() for p in library.iterdir()})
+        after = tp.read_json(variant / 'normals.json')
+        self.assertFalse((variant / 'normals.json').is_symlink())
+        for page in ('0', '1'):
+            self.assertFalse((variant / after['pages'][page]['file']).is_symlink())
+
+    def test_library_lock_borrows_an_inherited_lock_read_only(self):
+        library = self.root / 'base-with-lock'
+        library.mkdir()
+        original = library / '.compose.lock'
+        original.write_bytes(b'base coordination')
+        inode = original.stat().st_ino
+        variant = self.root / 'variant-with-lock'
+        variant.symlink_to(library.absolute(), target_is_directory=True)
+        with mock.patch.object(tp.cache_farm, 'lock_file', wraps=tp.cache_farm.lock_file) as locked:
+            with tp.library_lock(variant):
+                self.assertFalse(variant.is_symlink())
+        locked.assert_called_once_with(variant, '.compose.lock')
+        self.assertTrue((variant / '.compose.lock').is_symlink())
+        self.assertEqual(original.stat().st_ino, inode)
+        self.assertEqual(original.read_bytes(), b'base coordination')
+
     def test_normals_merge_skips_atlas_mismatch_incompatible_layout_and_empty_material(self):
         library, source, sprites, _, existing, generated = self.normals_setup()
         generated['pages']['0']['atlas'] = 'wrong.png'

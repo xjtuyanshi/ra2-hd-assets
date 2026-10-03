@@ -2,6 +2,7 @@
 
 import fcntl
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -134,6 +135,101 @@ class BuildingTests(unittest.TestCase):
         mapped = br.MapLib('map', self.root)
         np.testing.assert_array_equal(mapped.frame(BODY, 0)['hd'], f['hd'])
 
+    def add_design_palette(self):
+        palette = np.full((256, 3), 118, np.uint8)
+        palette[40], palette[41] = (45, 190, 130), (165, 40, 185)
+        palette[16:32] = (240, 50, 25)  # House paint must replace this palette ramp.
+        Image.fromarray(palette[None]).save(self.lib.dir / 'design.png')
+        self.data['palettes']['lib'] = 'design.png'
+        br.write_json(self.lib.dir / 'library.json', self.data)
+        self.lib = br.Lib(root=self.root)
+        return palette
+
+    def test_design_palette_1x_composite_lanczos_alpha_house_ramp_and_clip(self):
+        original = br.comp2x(self.lib, self.parts)
+        palette = self.add_design_palette()
+        unchanged = br.comp2x(self.lib, self.parts)
+        np.testing.assert_array_equal(unchanged['rgb'], original['rgb'])
+        before = self.lib.pal['lib'].copy()
+        palette[16:32] = self.lib.house()[:16]
+        reference = np.full((26, 26, 3), br.GREY, np.uint8)
+        indices = self.lib.idx_page(0)
+        for target, idx in ((reference[6:26, :24], indices[:20, :24]),
+                            (reference[:10, 14:26], indices[24:34, :12])):
+            target[idx > 0] = palette[idx][idx > 0]
+        for box, expected1 in ((None, reference), ((-8, -18, 8, 0), reference[4:22, 4:20])):
+            with self.subTest(box=box):
+                c = br.comp2x(self.lib, self.parts, box=box, design_palette='lib')
+                h, w = expected1.shape[:2]
+                expected2 = np.asarray(Image.fromarray(expected1).resize((w * 2, h * 2), Image.LANCZOS), np.float32)
+                expected = expected2 * c['a'][..., None] + br.GREY * (1 - c['a'][..., None])
+                np.testing.assert_array_equal(c['rgb'], expected)
+                np.testing.assert_array_equal(br.design_rgb(self.lib, c, 'lib'), expected)
+                baseline = br.comp2x(self.lib, self.parts, box=box)
+                for key in ('a', 'paint', 'rects', 'ramp'):
+                    np.testing.assert_array_equal(c[key], baseline[key])
+        np.testing.assert_array_equal(self.lib.pal['lib'], before)
+        self.assertTrue(((original['a'] > 0) & (original['a'] < 1)).any())
+
+    def test_body_design_palette_cli_input_post_reference_and_colour_lock(self):
+        self.add_design_palette()
+        specs = self.root / 'specs.json'
+        br.write_json(specs, self.specs)
+        self.assertEqual(br.main(['body', '--kind', 'intact', '--specs', str(specs), '--work', str(self.work),
+                                 '--root', str(self.root), '--design-palette', 'lib', 'TEST']), 0)
+        d = self.work / 'TEST_i'
+        lay = br.read_json(d / 'layout.json')
+        self.assertEqual(lay['design_palette'], 'lib')
+        c = br.comp2x(self.lib, self.parts, design_palette='lib')
+        np.testing.assert_array_equal(br.read_image(d / 'input.png'), np.asarray(br.model_input(c, lay['factor'])))
+        shutil.copyfile(d / 'input.png', d / 'output.png')
+        with mock.patch.object(br, 'finish', wraps=br.finish) as finish:
+            posted, _, _, _ = br.post(d, root=self.root)
+        np.testing.assert_array_equal(finish.call_args.args[0]['rgb'], c['rgb'])
+        np.testing.assert_array_equal(posted['rgb'], c['rgb'])
+        np.testing.assert_array_equal(br.read_image(d / 'post/orig2x.png'),
+                                      br.hr.to_u8(br.over_grey(c['rgb'], c['a'])))
+        # The 4x body finishing path must keep the same lock, including an alternate parts list.
+        for parts in (None, self.parts):
+            finished = br.finish_4x(self.lib, d, br.load(d / 'post/reg4x.png'), parts=parts)
+            np.testing.assert_array_equal(finished[3]['rgb'], c['rgb'])
+
+    def test_design_palette_preserves_nonremappable_parts_in_a_mixed_composite(self):
+        palette = self.add_design_palette()
+        self.lib.lib['sprites'][BODY]['remap'] = False
+        # Separate parts so the same palette index is visible in each material.
+        self.lib.lib['sprites'][ANIM]['frames'][0]['offset'] = [16, -16]
+        for sprite in (BODY, ANIM):
+            x, y, w, h = self.lib.lib['sprites'][sprite]['frames'][0]['rect']
+            self.lib.idx_page(0)[y:y+h, x:x+w] = 20
+        c = br.comp2x(self.lib, self.parts, design_palette='lib')
+        for part, expected in ((0, palette[20]), (1, self.lib.house()[4])):
+            x, y, _, _ = c['rects'][part]
+            np.testing.assert_array_equal(c['rgb'][y + 11, x + 11], expected)
+        np.testing.assert_array_equal(self.lib.pal['lib'][20], palette[20])
+
+    def test_post_layout_root_fallback_and_explicit_root_precedence(self):
+        d, original = self.body_job()
+        baseline_root = self.root / 'baseline'
+        synthetic_library(baseline_root)
+        atlas_path = baseline_root / '_library/urban/colour.png'
+        atlas = br.read_image(atlas_path)
+        atlas[..., :3] = (30, 200, 80)
+        Image.fromarray(atlas).save(atlas_path)
+        lay = br.read_json(d / 'layout.json')
+        lay['root'] = str(baseline_root)
+        br.write_json(d / 'layout.json', lay)
+        baseline = br.comp2x(br.Lib(root=baseline_root), self.parts)
+        self.assertFalse(np.array_equal(original['rgb'], baseline['rgb']))
+        with mock.patch.dict(os.environ, {'HD_CACHE_DIR': str(self.root)}):
+            for root, expected in ((None, baseline), (self.root, original)):
+                with self.subTest(root=root), mock.patch.object(br, 'finish', wraps=br.finish) as finish:
+                    c, _, _, _ = br.post(d, root=root)
+                    np.testing.assert_array_equal(c['rgb'], expected['rgb'])
+                    np.testing.assert_array_equal(finish.call_args.args[0]['rgb'], expected['rgb'])
+                    np.testing.assert_array_equal(br.read_image(d / 'post/orig2x.png'),
+                                                  br.hr.to_u8(br.over_grey(expected['rgb'], expected['a'])))
+
     def test_finish_alpha_grey_ramp_and_unpainted_encoding(self):
         c = br.comp2x(self.lib, self.parts)
         rgba, remap, shown, final = br.finish(c, c['rgb'], contrast=0, lockL=0, lockab=0,
@@ -165,6 +261,45 @@ class BuildingTests(unittest.TestCase):
         with mock.patch('builtins.print'):
             self.assertEqual(br.guard_registration((4.12, -351.0, 2.28, -238.5), 'pack cell'), (1.0, 0.0, 1.0, 0.0))
             self.assertEqual(br.guard_registration((1.0, 0.0, 0.5, 0.0)), (1.0, 0.0, 1.0, 0.0))
+
+    def test_post_reviewed_registration_restores_source_without_changing_it(self):
+        d, _ = self.body_job()
+        source = (d / 'output.png').read_bytes()
+        wrong_fit = (1.0, 0.0, 1.04, -40.0)
+        diagnostics = dict(params=list(wrong_fit), init=[1.0, 0.0, 1.0, 0.0])
+        with mock.patch.object(br, 'register_out', return_value=(wrong_fit, diagnostics)):
+            br.post(d, root=self.root)
+            auto = br.read_image(d / 'post/reg4x.png')
+            self.assertEqual(br.read_json(d / 'post/post.json')['params'], list(wrong_fit))
+            lay = br.read_json(d / 'layout.json')
+            lay.update(registration_params=[1, 0, 1, 0], registration_note='Source boundaries already align.')
+            br.write_json(d / 'layout.json', lay)
+            br.post(d, root=self.root)
+        corrected = br.read_image(d / 'post/reg4x.png')
+        original = br.read_image(d / 'output.png')
+        np.testing.assert_array_equal(corrected, original)
+        self.assertGreater(np.abs(auto.astype(float) - original).mean(), 5)
+        self.assertEqual((d / 'output.png').read_bytes(), source)
+        evidence = br.read_json(d / 'post/post.json')
+        self.assertEqual(evidence['params'], [1, 0, 1, 0])
+        self.assertEqual(evidence['diag']['params'], list(wrong_fit))
+        self.assertEqual(evidence['diag']['auto_params'], list(wrong_fit))
+        self.assertEqual(evidence['diag']['registration_source'], 'layout')
+        self.assertEqual(evidence['diag']['registration_note'], lay['registration_note'])
+
+    def test_post_rejects_malformed_manual_registration_before_writing(self):
+        d, _ = self.body_job()
+        lay = br.read_json(d / 'layout.json')
+        bad_values = [None, {}, [1, 0, 1], [1, 0, 1, 0, 0], [True, 0, 1, 0],
+                      ['1', 0, 1, 0], [1, float('nan'), 1, 0], [1, 0, 1, float('inf')],
+                      [0.8, 0, 1, 0], [1, 0, 1.25, 0], [-1, 0, 1, 0]]
+        with mock.patch.object(br, 'register_out', return_value=((1, 0, 1, 0), {})):
+            for value in bad_values:
+                with self.subTest(value=value):
+                    br.write_json(d / 'layout.json', dict(lay, registration_params=value))
+                    with self.assertRaisesRegex(ValueError, 'registration_params'):
+                        br.post(d, root=self.root)
+                    self.assertFalse((d / 'post').exists())
 
     def test_post_identity_and_split_patches(self):
         d, c = self.body_job()
@@ -280,6 +415,43 @@ class BuildingTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, stderr)
         np.testing.assert_array_equal(br.read_image(p / 'colour.png')[0:4, 220:224], original[0:4, 220:224])
         self.assertEqual(br.read_json(p / 'l4_frames_bldg.json'), {BODY: [0], 'other:sprite': [9]})
+
+    def test_compose_realises_library_ancestor_before_locking_and_publishes_via_farm(self):
+        farm = self.root / 'farm'
+        farm.mkdir()
+        (farm / '_library').symlink_to(self.root / '_library', target_is_directory=True)
+        variant = farm / '_library/urban'
+        before = {p.name: p.read_bytes() for p in self.lib.dir.iterdir()}
+        _, _, w, h = self.data['sprites'][BODY]['frames'][0]['rect']
+        br.save_patch(BODY, 0, np.full((2*h, 2*w, 4), 42, np.uint8),
+                      np.full((2*h, 2*w), 87, np.uint8), patches=self.patches)
+        installer = br.cache_farm.install_file
+        with mock.patch.object(br.cache_farm, 'install_file', wraps=installer) as installed:
+            br.compose(variant, self.patches)
+        self.assertEqual({call.args[1] for call in installed.call_args_list},
+                         {'colour.png', 'paint.png', 'l4_frames_bldg.json'})
+        self.assertFalse((farm / '_library').is_symlink())
+        self.assertFalse(variant.is_symlink())
+        self.assertTrue((variant / '.compose.lock').is_file())
+        self.assertFalse((self.lib.dir / '.compose.lock').exists())
+        self.assertEqual(before, {p.name: p.read_bytes() for p in self.lib.dir.iterdir()})
+        self.assertEqual(br.read_json(variant / 'l4_frames_bldg.json'), {BODY: [0]})
+        self.assertFalse((variant / 'colour.png').is_symlink())
+
+    def test_compose_borrows_an_inherited_lock_without_changing_its_inode(self):
+        original = self.lib.dir / '.compose.lock'
+        original.write_bytes(b'base coordination')
+        inode = original.stat().st_ino
+        farm = self.root / 'inherited-lock-farm'
+        farm.mkdir()
+        (farm / '_library').symlink_to(self.root / '_library', target_is_directory=True)
+        variant = farm / '_library/urban'
+        with mock.patch.object(br.cache_farm, 'lock_file', wraps=br.cache_farm.lock_file) as locked:
+            br.compose(variant, self.patches)
+        locked.assert_called_once_with(variant, '.compose.lock')
+        self.assertTrue((variant / '.compose.lock').is_symlink())
+        self.assertEqual(original.stat().st_ino, inode)
+        self.assertEqual(original.read_bytes(), b'base coordination')
 
     def test_anim_identity_roundtrip_and_multi(self):
         d, _ = self.body_job()
@@ -398,6 +570,60 @@ class BuildingTests(unittest.TestCase):
         self.assertIn('normals-assist', result.stdout)
         with mock.patch.dict(os.environ, {'HD_CACHE_DIR': str(self.root)}):
             self.assertEqual(br.Lib().dir, self.lib.dir)
+
+
+class PackPlanTests(unittest.TestCase):
+    def test_greedy_family_opening_capacity_type_limit_and_home_separation(self):
+        items = [dict(name=name, home=home, fam=family, area=area) for name, home, family, area in (
+            ('B3', 'urban', 'B', 10), ('S2', 'snow', 'Y', 20), ('A3', 'urban', 'A', 30),
+            ('B1', 'urban', 'B', 20), ('C1', 'urban', 'C', 5), ('A1', 'urban', 'A', 60),
+            ('S1', 'snow', 'X', 75), ('B2', 'urban', 'B', 15), ('A2', 'urban', 'A', 35))]
+        original = json.dumps(items)
+        packs = br.pack_plan(items, 100, 3)
+        self.assertEqual([p['names'] for p in packs],
+                         [['S1'], ['S2'], ['A1', 'A2', 'C1'], ['A3', 'B2', 'B3'], ['B1']])
+        by_name = {it['name']: it for it in items}
+        self.assertCountEqual([n for p in packs for n in p['names']], list(by_name))
+        for pack in packs:
+            self.assertLessEqual(pack['area'], 100)
+            self.assertLessEqual(len(pack['names']), 3)
+            self.assertEqual(pack['area'], sum(by_name[n]['area'] for n in pack['names']))
+            self.assertEqual({by_name[n]['home'] for n in pack['names']}, {pack['home']})
+        self.assertEqual(json.dumps(items), original)
+
+    def test_factor_rounding_clamps_and_empty_plan(self):
+        items = [dict(name=str(area), home=str(i), fam='A', area=area)
+                 for i, area in enumerate((1, 16000, 30000, 105000, 1200000))]
+        self.assertEqual([p['F'] for p in br.pack_plan(items, 1200000, 1)], [14, 11, 8, 4, 3])
+        self.assertEqual(br.pack_plan([], 100, 3), [])
+
+    def test_invalid_capacity_type_limit_and_areas_are_rejected(self):
+        for cap in (0, -1, float('inf'), float('nan')):
+            with self.subTest(cap=cap), self.assertRaisesRegex(ValueError, 'cap'):
+                br.pack_plan([], cap, 1)
+        for limit in (0, -1, 1.5, True):
+            with self.subTest(limit=limit), self.assertRaisesRegex(ValueError, 'max_types'):
+                br.pack_plan([], 100, limit)
+        for area in (0, -1, float('inf'), float('nan')):
+            with self.subTest(area=area), self.assertRaisesRegex(ValueError, 'area'):
+                br.pack_plan([dict(name='large', home='urban', fam='A', area=area)], 100, 1)
+
+    def test_oversize_item_gets_its_own_pack(self):
+        items = [dict(name='big', home='urban', fam='A', area=150), dict(name='small', home='urban', fam='A', area=40)]
+        self.assertEqual([p['names'] for p in br.pack_plan(items, 100, 3)], [['big'], ['small']])
+
+    def test_cli_reads_json_file_or_inline_and_prints_packs(self):
+        items = [dict(name='A1', home='urban', fam='A', area=30000)]
+        with tempfile.TemporaryDirectory(prefix='.tmp-pack-plan-', dir=Path(__file__).parent) as temporary:
+            path = Path(temporary) / 'items.json'
+            br.write_json(path, items)
+            for argument in (str(path), json.dumps(items)):
+                with self.subTest(argument=argument):
+                    result = subprocess.run([sys.executable, '-B', br.__file__, 'pack-plan', '--items', argument,
+                                             '--cap', '105000', '--max-types', '10'], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(result.stdout),
+                                     [dict(names=['A1'], home='urban', area=30000, F=8)])
 
 
 class TransferTests(unittest.TestCase):

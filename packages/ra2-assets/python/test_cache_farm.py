@@ -1,6 +1,7 @@
 """Fast, asset-free cache-farm installation and locking regressions."""
 
 import errno
+import fcntl
 import json
 import multiprocessing
 import os
@@ -38,6 +39,49 @@ class CacheFarmTests(unittest.TestCase):
 
     def assert_no_temporary_names(self):
         self.assertEqual([path for path in self.root.rglob("*") if path.name.endswith(".tmp")], [])
+
+    def test_inherited_lock_uses_read_only_handle_and_keeps_stable_inode(self):
+        source = self.root / 'base.lock'
+        source.write_bytes(b'base coordination file')
+        inherited = self.cache / '.compose.lock'
+        inherited.symlink_to(source)
+        inode = source.stat().st_ino
+        flock = farm.fcntl.flock
+        observed = []
+
+        def observe(fd, operation):
+            observed.append(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE)
+            return flock(fd, operation)
+
+        with mock.patch.object(farm.fcntl, 'flock', side_effect=observe):
+            with farm.lock_file(self.cache, '.compose.lock'):
+                self.assertEqual(source.stat().st_ino, inode)
+                self.assertTrue(inherited.is_symlink())
+        self.assertTrue(observed)
+        self.assertEqual(set(observed), {os.O_RDONLY})
+        self.assertEqual(source.read_bytes(), b'base coordination file')
+
+    def test_dangling_inherited_lock_never_creates_its_target(self):
+        missing = self.root / 'missing.lock'
+        (self.cache / '.compose.lock').symlink_to(missing)
+        with self.assertRaises(FileNotFoundError):
+            with farm.lock_file(self.cache, '.compose.lock'):
+                self.fail('a dangling coordination lock cannot be acquired')
+        self.assertFalse(missing.exists())
+
+    def test_new_lock_is_created_locally_and_opened_read_only(self):
+        opened = os.open
+        flags = []
+
+        def observe(path, mode, *args, **kwargs):
+            flags.append(mode)
+            return opened(path, mode, *args, **kwargs)
+
+        with mock.patch.object(farm.os, 'open', side_effect=observe):
+            with farm.lock_file(self.cache, '.compose.lock'):
+                self.assertTrue((self.cache / '.compose.lock').is_file())
+        self.assertTrue(all(mode & os.O_ACCMODE == os.O_RDONLY for mode in flags))
+        self.assertTrue(all(mode & os.O_NOFOLLOW for mode in flags))
 
     def test_install_replaces_symlink_without_writing_its_target(self):
         original = self.root / "original.bin"
@@ -104,6 +148,32 @@ class CacheFarmTests(unittest.TestCase):
         self.assertFalse(linked.is_symlink())
         self.assertTrue((linked / "page.bin").is_file())
         self.assertFalse((self.cache / "page.bin").exists())
+        self.assert_no_temporary_names()
+
+    def test_ensure_directory_realises_ancestors_without_creating_placeholder(self):
+        base = self.root / 'base'
+        (base / 'nested').mkdir(parents=True)
+        (base / 'nested/keep.txt').write_text('base')
+        (self.cache / 'library').symlink_to(base)
+        directory = farm.ensure_directory(self.cache, 'library/nested')
+        self.assertEqual(directory, self.cache / 'library/nested')
+        self.assertFalse((self.cache / 'library').is_symlink())
+        self.assertFalse(directory.is_symlink())
+        self.assertEqual({p.name for p in directory.iterdir()}, {'keep.txt'})
+        self.assertEqual((base / 'nested/keep.txt').read_text(), 'base')
+
+    def test_install_symlink_realises_farm_parent_and_preserves_shared_source(self):
+        base = self.root / 'base'
+        base.mkdir()
+        (base / 'page.bin').write_bytes(b'base page')
+        (self.cache / 'library').symlink_to(base)
+        farm.install_symlink(self.cache, 'library/page.bin', self.source)
+        destination = self.cache / 'library/page.bin'
+        self.assertFalse(destination.parent.is_symlink())
+        self.assertTrue(destination.is_symlink())
+        self.assertFalse(Path(os.readlink(destination)).is_absolute())
+        self.assertEqual(destination.read_bytes(), self.source.read_bytes())
+        self.assertEqual((base / 'page.bin').read_bytes(), b'base page')
         self.assert_no_temporary_names()
 
     def test_install_failure_leaves_destination_intact_and_no_temporary_names(self):
