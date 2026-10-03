@@ -615,13 +615,14 @@ def comparison(candidate, cache, out, rank):
         b[..., :3] = np.minimum(1, np.divide(b[..., :3], b[..., 3:4], out=np.zeros_like(b[..., :3]), where=b[..., 3:4] > 1e-6))
     a, b, _, _ = align(a, b, candidate["source_offset"], candidate["hd_offset"], candidate["scale"], am)
     h, w = a.shape[:2]
-    panel = Image.new("RGB", (w * 2 + 12, h + 28), "#171b22")
+    column = max(w, 84)
+    panel = Image.new("RGB", (column * 2 + 12, h + 28), "#171b22")
     draw = ImageDraw.Draw(panel)
     draw.text((2, 5), "Original 1x", fill="white")
-    draw.text((w + 14, 5), "HD -> 1x", fill="white")
+    draw.text((column + 14, 5), "HD -> 1x", fill="white")
     y, x = np.indices((h, w))
     checker = np.where(((x // 8 + y // 8) % 2)[..., None], .3, .2)
-    for im, left in ((a, 0), (b, w + 12)):
+    for im, left in ((a, 0), (b, column + 12)):
         rgb = im[..., :3] * im[..., 3:4] + checker * (1 - im[..., 3:4])
         panel.paste(Image.fromarray(np.rint(np.clip(rgb, 0, 1) * 255).astype(np.uint8)), (left, 28))
     name = f"crops/{rank:02d}.png"

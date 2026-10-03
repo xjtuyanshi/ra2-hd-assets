@@ -322,6 +322,11 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(third["resumed_jobs"], 0)
             self.assertGreater(third["flag_counts"]["missing_frame"], 0)
             self.assertTrue((out / "crops/01.png").is_file())
+            with Image.open(out / "crops/01.png") as panel:
+                self.assertGreaterEqual(panel.width, 180)
+                # Label padding must not rescale the native raster or merge columns.
+                self.assertEqual(panel.getpixel((4, 32)), (102, 102, 102))
+                self.assertEqual(panel.getpixel((100, 32)), (51, 51, 51))
 
     def test_shadow_reference_page_is_not_a_body_frame(self):
         with tempfile.TemporaryDirectory() as tmp:
