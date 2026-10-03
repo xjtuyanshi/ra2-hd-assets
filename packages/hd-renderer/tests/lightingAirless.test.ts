@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Color, Vector3 } from 'three/webgpu';
+import { Color, DataTexture, Vector3 } from 'three/webgpu';
 import { mapAtmosphere } from '../../ra2-assets/src/lights';
 import type { AtmosphereProfile } from '../src/contract';
 import { applyLookPreset, HdRenderer } from '../src/HdRenderer';
@@ -7,6 +7,7 @@ import { Lighting, noonFlatLuminance, profileKeys, sunHeight } from '../src/ligh
 import { MapLightGrade } from '../src/ra2/mapLighting';
 import { spriteLookFor } from '../src/ra2/spriteLook';
 import { createWaterUniforms } from '../src/waterShading';
+import { buildRain, buildSnow } from '../src/weather';
 import { createScenario } from '../sandbox/scenario';
 
 const lighting = { ambient: 0.65, red: 1, green: 1, blue: 1.1, ground: 0.05, level: 0.008 };
@@ -27,6 +28,19 @@ describe('airless daylight keys', () => {
     for (const colour of [key.sun, key.hemiSky, key.hemiGround, key.skyHorizon, key.skyZenith])
       chroma(colour).forEach((channel, i) => expect(channel).toBeCloseTo(tint[i]!, 12));
     expect(key.night).toBe(0);
+  });
+
+  it.each(['rain', 'snow'] as const)('keeps explicit %s weather from replacing airless daylight with a sky', (kind) => {
+    const model = new Lighting(2, 2);
+    model.setProfile(lunar());
+    model.update(12, 0);
+    const clear = model.flatIrradianceColor(new Color()).toArray();
+    const sky = model.state.skyZenith.toArray();
+    model.update(12, 0.85, undefined, { kind, intensity: 1 });
+    expect(model.flatIrradianceColor(new Color()).toArray()).toEqual(clear);
+    expect(model.state.skyZenith.toArray()).toEqual(sky);
+    expect(model.state.weatherSunShare).toBe(1);
+    expect(model.state.weatherBrightness).toBe(1);
   });
 
   it('keeps ordinary day keys by identity and all night/dusk keys unchanged', () => {
@@ -94,6 +108,9 @@ describe('airless renderer staging', () => {
     expect(litTexels[2]).toBeGreaterThan(plainTexels[2]!);
     expect(litTexels.slice(4)).toEqual(plainTexels.slice(4));
     const water = createWaterUniforms();
+    const height = new DataTexture();
+    const rain = buildRain(2, 2, height, 0, hd.nodes);
+    const snow = buildSnow(2, 2, height, 0, hd.nodes);
     // Exercise the complete CPU frame path; the two GPU operations are stubs, with no backend or browser startup.
     const frame = hd as unknown as {
       lighting: Lighting;
@@ -117,7 +134,8 @@ describe('airless renderer staging', () => {
       world: { mapLight, sprites },
       terrain: { wetness: { value: 0 } },
       water: { uniforms: water },
-      rain: { intensity: { value: 0 }, windX: { value: 0 }, windZ: { value: 0 }, center: { value: new Vector3() } },
+      rain,
+      snow,
       lightField: { update: vi.fn(), dynamicLights: () => [] },
       renderPipeline: vi.fn(),
     });
@@ -159,6 +177,13 @@ describe('airless renderer staging', () => {
       hd.frame(0);
       expect(frame.mist.amount.value).toBe(0);
       expect(luma(sprites.light.value.clone().multiply(frame.exposure.value))).toBeCloseTo(1, 12);
+      expect(rain.object.visible).toBe(true);
+      expect(snow.object.visible).toBe(false);
+      state.environment.weather = 'snow';
+      hd.frame(0);
+      expect(rain.object.visible).toBe(false);
+      expect(snow.object.visible).toBe(true);
+      expect(frame.mist.amount.value).toBe(0);
       state.environment.weather = 'clear';
       // Airless maps keep the engine's full lamp share whatever the look's daytime share (cinematic uses 0.2).
       hd.settings.mapSourcesByDay = 0;
@@ -197,6 +222,9 @@ describe('airless renderer staging', () => {
       spriteLookFor(hd.nodes).shadowFollow.value = 0;
       applyLookPreset(hd.settings, 'faithful');
       hd.frame(0);
+      rain.dispose();
+      snow.dispose();
+      height.dispose();
       mapLight.dispose();
       hd.nodes.dispose();
     }

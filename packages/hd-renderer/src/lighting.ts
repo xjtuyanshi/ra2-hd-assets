@@ -617,7 +617,14 @@ export class Lighting {
       const sunFlat = this.flatLuminance(sunColor, sunIntensity, hemiColor, 0);
       hemiIntensity = Math.max(0, (target - sunFlat) / Math.max(1e-6, luminanceOf(hemiColor)));
     }
-    if (overcast > 0 && weather && weather.intensity > 0 && this.profile?.kind === 'day' && night < 1) {
+    if (
+      overcast > 0 &&
+      weather &&
+      weather.intensity > 0 &&
+      this.profile?.kind === 'day' &&
+      !(this.profile.airless && night === 0) &&
+      night < 1
+    ) {
       const intensity = Math.min(1, Math.max(0, weather.intensity));
       const day = 1 - night;
       const tuning = DAY_WEATHER_LIGHTING[weather.kind];
