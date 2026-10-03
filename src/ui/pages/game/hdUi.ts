@@ -28,6 +28,7 @@ export function startHdUi(host: {
   let disposed = false;
   let request: number | null = null;
   let rectKey = '[]';
+  let smoothKey = 'null';
 
   const setRects = (rects: readonly FrameRect[]) => {
     const next = JSON.stringify(rects);
@@ -41,6 +42,13 @@ export function startHdUi(host: {
     const show = visible();
     canvas.style.display = show ? 'block' : 'none';
     setRects(show ? transparentRects(sidebar!, assets) : []);
+    const smooth = show && sidebar?.radarActive ? sidebar.layout.radar : null;
+    const nextSmooth = JSON.stringify(smooth);
+    if (nextSmooth !== smoothKey) {
+      smoothKey = nextSmooth;
+      host.frameRenderer.setSmoothRect(smooth);
+      host.invalidate();
+    }
     if (show && request === null) request = requestAnimationFrame(draw);
     if (!show && request !== null) {
       cancelAnimationFrame(request);
@@ -96,6 +104,7 @@ export function startHdUi(host: {
       if (request !== null) cancelAnimationFrame(request);
       request = null;
       setRects([]);
+      host.frameRenderer.setSmoothRect(null);
       assets.dispose();
       canvas.remove();
       sidebar = null;

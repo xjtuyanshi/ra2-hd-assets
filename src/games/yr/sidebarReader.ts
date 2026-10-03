@@ -13,6 +13,8 @@ export const YR_SIDEBAR = Object.freeze({
   sidebarBounds: 0x886f90,
   sidebarWidth: 0x7f5bf8,
   commandBar: 0xb0fc58,
+  commandButtons: 0xb0c1c0,
+  commandSlots: 0xb0cb78,
   pitchX: 0xb0b4fc,
   pitchY: 0xb0b500,
   stripHeight: 0xb0b504,
@@ -137,6 +139,48 @@ function gadget(m: GuestMemoryAccessor, at: number): GameRenderRect | null {
   if (!isPlausiblePointer(m, at, 0x60) || !isPlausiblePointer(m, m.u32(at))) return null;
   return rect(m, at + 0xc);
 }
+/** ShapeButton::Draw 0x69DED3..0x69DF12, read only; disabled wins over all other states. */
+function gadgetFrame(m: GuestMemoryAccessor, at: number): number {
+  if (m.u8(at + 0x1e)) return 2;
+  if (m.u8(at + 0x40)) return m.u8(at + 0x34) ? 3 + Number(!!m.u8(at + 0x2d)) : Number(!!m.u8(at + 0x2d));
+  return Number(!!m.u8(at + 0x2c));
+}
+
+function controls(
+  m: GuestMemoryAccessor,
+  commandBar: GameRenderRect | null,
+): NonNullable<GameRenderSidebar['controls']> {
+  const result: NonNullable<GameRenderSidebar['controls']> = [];
+  const add = (id: string, at: number) => {
+    const r = gadget(m, at);
+    if (r && isPlausiblePointer(m, m.u32(at + 0x58), 8)) result.push({ id, rect: r, frame: gadgetFrame(m, at) });
+  };
+  for (const [id, at] of [
+    ['repair', 0xb0b3a0],
+    ['sell', 0xb07df8],
+    ['options', 0xb04978],
+    ['diplomacy', 0xb04910],
+    ['scrollDown', 0xb0b328],
+    ['scrollUp', 0xb0b408],
+  ] as const)
+    add(id, at);
+  if (commandBar) {
+    // Tab::Draw 0x6D0D4F..0x6D0D8A visits the live slot table, not every allocated button.
+    if (m.u8(S + 0x5544)) {
+      const seen = new Set<number>();
+      for (let slot = 0; slot < 25; slot++) {
+        const index = m.i32(YR_SIDEBAR.commandSlots + slot * 4);
+        if (index < 0 || index >= 25 || seen.has(index)) continue;
+        seen.add(index);
+        add(`command${index}`, YR_SIDEBAR.commandButtons + index * 0x60);
+      }
+    }
+    // 0x6D0DCD..0x6D0DE3 selects exactly one toolbar toggle.
+    add(m.u8(S + 0x5544) ? 'commandCollapse' : 'commandExpand', m.u8(S + 0x5544) ? 0xb0ccb0 : 0xb0cc40);
+  }
+  return result;
+}
+
 function utf16(m: GuestMemoryAccessor, p: number): string | null {
   if (!p) return null;
   // UTF-16 strings need only two-byte alignment, unlike object pointers.
@@ -682,6 +726,8 @@ export function createYrSidebarReader(
         // 0x6531DB: stage3 opens, stage2 closes, stage1 is open. Activation1 draws the minimap;
         // other activation states draw interference/emblem. Availability alone must not hide closing animation.
         radarActive: radarStage === 2 || radarStage === 3 || (radarStage === 1 && activation === 1),
+        controls: controls(m, rect(m, m.u32(YR_SIDEBAR.commandBar))),
+        tabFrames: Array.from({ length: 4 }, (_, i) => gadgetFrame(m, YR_SIDEBAR.tabs + i * 0x60)),
         modes: { repair: !!m.u8(S + 0x11b0), sell: !!m.u8(S + 0x11b1) },
         labels: { ready: label(m, 'TXT_READY'), hold: label(m, 'TXT_HOLD') },
         pointer: pointer(m, frameWidth, frameHeight),

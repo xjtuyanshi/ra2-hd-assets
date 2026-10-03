@@ -222,6 +222,36 @@ describe('UI art extraction', () => {
       expect(source.shape('swicon')?.pal).toBe('cameo.pal');
     },
   );
+  it('audits a selected base-game metadata policy without leaking YR-only registries or filenames', () => {
+    const { bytes, palette } = art();
+    const rules = parseIni(
+      '[BuildingTypes]\n0=CIVIL\n[CIVIL]\nTechLevel=-1\n[VehicleTypes]\n0=YR_ONLY\n[YR_ONLY]\nOwner=A\nTechLevel=1\n',
+    );
+    const reads: string[] = [];
+    const { definitions } = yrCameos(
+      {
+        ini(name) {
+          reads.push(name);
+          if (name === 'rules.ini') return rules;
+          if (name === 'art.ini') return parseIni('');
+          throw new Error('Unexpected metadata: ' + name);
+        },
+        read(name) {
+          reads.push(name);
+          return name === 'ra2.csf' ? strings() : bytes;
+        },
+        readArchive: () => undefined,
+        has: () => false,
+        palette: () => palette,
+      },
+      { rules: 'rules.ini', art: 'art.ini', strings: 'ra2.csf', registries: ['BuildingTypes'] },
+    );
+    expect(reads).toEqual(['rules.ini', 'art.ini', 'ra2.csf']);
+    expect(definitions).toEqual([
+      expect.objectContaining({ id: 'CIVIL', kind: 'Building', cameo: 'XXICON', buildable: false }),
+    ]);
+  });
+
   it('keeps SHP padding, palette colours and index-zero transparency for every cursor frame', () => {
     const { shape, palette } = art();
     const { image, index } = buildCursorAtlas(shape, palette);

@@ -10,11 +10,15 @@ export interface ChromeManifest {
   frame: { width: number; height: number };
   /** Rect x/y are frame-pixel offsets from the live anchor; width/height are frame-pixel sizes, independent of PNG scale. */
   pieces: { file: string; rect: Rect; anchor: 'sidebar' | 'commandBar' }[];
+  /** Native ShapeButton frames: 0 normal, 1 active, 2 disabled, 3 pressed, 4 pressed-active. */
+  controls?: { file: string; frames: { id: string; frame: number; rect: Rect }[] };
+  /** Frame art has a transparent aperture; logo art covers only the native radar aperture. */
+  radar?: { file: string; frames: { state: 'frame' | 'logo'; rect: Rect }[] };
   /** Atlas rectangles are image pixels; the live layout supplies each button's frame-pixel destination. */
   tabs?: {
     file: string;
     scale: number;
-    frames: { tab: number; state: 'normal' | 'active' | 'pressed'; rect: Rect }[];
+    frames: { tab: number; state: 'normal' | 'active' | 'pressed' | 'disabled' | 'pressedActive'; rect: Rect }[];
   };
 }
 
@@ -32,6 +36,8 @@ export interface ChromeAssets {
     Record<ChromeManifest['pieces'][number]['anchor'], { rect: Rect; bitmap: ImageBitmap | HTMLCanvasElement }>
   >;
   tabs?: NonNullable<ChromeManifest['tabs']> & { bitmap: ImageBitmap };
+  controls?: NonNullable<ChromeManifest['controls']> & { bitmap: ImageBitmap };
+  radar?: NonNullable<ChromeManifest['radar']> & { bitmap: ImageBitmap };
 }
 
 /** Place an anchor's pieces without resampling; incompatible scales retain per-piece drawing. */
@@ -167,8 +173,48 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
         if (!disposed && value?.version === 1 && value.images && value.byId) index = value;
       });
     }
-    const name = index?.byId[id] ?? image;
+    // The guest already chose primary versus Alternate Cameo. Preserve that choice when indexed.
+    const name = image && index?.images[image] ? image : (index?.byId[id] ?? image);
     return name ? (index?.images[name] ?? null) : null;
+  };
+  const loadAtlas = async <T extends { file: string; frames: { rect: Rect }[] }>(
+    dir: string,
+    manifest: T | undefined,
+    keyOf: (frame: T['frames'][number]) => string | null,
+  ): Promise<(T & { bitmap: ImageBitmap }) | null> => {
+    if (
+      !manifest ||
+      typeof manifest.file !== 'string' ||
+      !/^[a-z0-9_-]+\.png$/i.test(manifest.file) ||
+      !Array.isArray(manifest.frames) ||
+      !manifest.frames.length ||
+      manifest.frames.length > 512
+    )
+      return null;
+    const image = await bitmap(`${dir}/${manifest.file}`);
+    if (disposed || !image) return null;
+    const keys = new Set<string>();
+    const valid = manifest.frames.every((frame) => {
+      if (!frame) return false;
+      const key = keyOf(frame),
+        r = frame.rect;
+      if (
+        key === null ||
+        keys.has(key) ||
+        !r ||
+        ![r.x, r.y, r.width, r.height].every(Number.isInteger) ||
+        r.x < 0 ||
+        r.y < 0 ||
+        r.width < 1 ||
+        r.height < 1 ||
+        r.x + r.width > image.width ||
+        r.y + r.height > image.height
+      )
+        return false;
+      keys.add(key);
+      return true;
+    });
+    return valid ? { ...manifest, bitmap: image } : null;
   };
   return {
     cursor(frame) {
@@ -238,6 +284,23 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
               const assets: ChromeAssets = { frame: manifest.frame, pieces: pieces as ChromeAssets['pieces'] };
               assets.composites = composeChrome(assets.pieces);
               chrome.set(side, assets);
+              // Optional atlases publish independently; one failure cannot suppress another feature.
+              void loadAtlas(dir, manifest.controls, (frame) =>
+                typeof frame.id === 'string' &&
+                /^[a-z0-9_-]+$/i.test(frame.id) &&
+                Number.isInteger(frame.frame) &&
+                frame.frame >= 0 &&
+                frame.frame <= 4
+                  ? `${frame.id}:${frame.frame}`
+                  : null,
+              ).then((atlas) => {
+                if (!disposed && atlas) assets.controls = atlas;
+              });
+              void loadAtlas(dir, manifest.radar, (frame) =>
+                ['frame', 'logo'].includes(frame.state) ? frame.state : null,
+              ).then((atlas) => {
+                if (!disposed && atlas) assets.radar = atlas;
+              });
               // Publish complete chrome first. Optional tab failures must never hide the other pieces.
               const tabs = manifest.tabs;
               if (
@@ -257,7 +320,7 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
                   !Number.isInteger(frame.tab) ||
                   frame.tab < 0 ||
                   frame.tab > 3 ||
-                  !['normal', 'active', 'pressed'].includes(frame.state)
+                  !['normal', 'active', 'pressed', 'disabled', 'pressedActive'].includes(frame.state)
                 )
                   return false;
                 const r = frame.rect,

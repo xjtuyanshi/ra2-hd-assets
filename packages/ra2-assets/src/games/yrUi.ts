@@ -54,17 +54,20 @@ export function yrTabStrips(install: Pick<GameInstall, 'readArchive'>): {
 }
 
 /** Retains the scratch extractor's metadata and its base/add-on cameo palette policy without private mount access. */
-export function yrCameos(install: Pick<GameInstall, 'ini' | 'read' | 'readArchive' | 'has' | 'palette'>): {
+export function yrCameos(
+  install: Pick<GameInstall, 'ini' | 'read' | 'readArchive' | 'has' | 'palette'>,
+  policy: { rules: string; art: string; strings: string; registries: readonly string[] } = YR_UI,
+): {
   definitions: CameoDefinition[];
   source: CameoSource;
 } {
-  const rules = install.ini(YR_UI.rules),
-    art = install.ini(YR_UI.art);
-  const bytes = install.read(YR_UI.strings);
-  if (!bytes) throw new Error(`Missing ${YR_UI.strings}`);
+  const rules = install.ini(policy.rules),
+    art = install.ini(policy.art);
+  const bytes = install.read(policy.strings);
+  if (!bytes) throw new Error(`Missing ${policy.strings}`);
   const strings = CsfFile.parse(bytes),
     definitions: CameoDefinition[] = [];
-  for (const registry of YR_UI.registries) {
+  for (const registry of policy.registries) {
     for (const id of rules.readRegistry(registry)) {
       const section = rules.getSection(id);
       if (!section) continue;

@@ -674,3 +674,51 @@ describe('VmFrameRenderer 生命周期', () => {
     fallback.destroy();
   });
 });
+
+describe('selected native framebuffer RGB interpolation', () => {
+  it.each(['indexed', 'rgba', 'rgb565'] as const)(
+    'filters only the supplied %s aperture, retains state on backend replacement and releases the program',
+    (kind) => {
+      const gl = new FakeWebGl();
+      const renderer = createVmFrameRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement, true);
+      const base = indexedFrame(4, 2);
+      const frame =
+        kind === 'rgba'
+          ? { ...base, rgba: new Uint8Array(32) }
+          : kind === 'rgb565'
+            ? { ...base, rgb565: new Uint16Array(8) }
+            : base;
+      renderer.setSmoothRect({ x: 2, y: 1, width: 2, height: 1 });
+      renderer.draw(frame, 8, 4);
+      expect(gl.calls.some((call) => call.includes('sampleRect'))).toBe(false);
+      renderer.setTransparentKey({ rect: { x: 0, y: 0, width: 1, height: 1 }, rgb565: 0xf81f });
+      renderer.draw(frame, 8, 4);
+      expect(gl.calls).toContain('uniform4f:sampleRect:2,1,4,2');
+      expect(gl.calls).toContain('scissor:4,0,4,2');
+      expect(gl.calls.lastIndexOf('drawArrays')).toBeGreaterThan(gl.calls.indexOf('scissor:4,0,4,2'));
+      renderer.setUpscaleMode('bicubic');
+      gl.calls.length = 0;
+      renderer.draw(frame, 8, 4);
+      expect(gl.calls).toContain('uniform4f:sampleRect:2,1,4,2');
+      const programs = gl.deletedPrograms.length;
+      renderer.destroy();
+      renderer.destroy();
+      // Four ordinary programs, three key formats, and the lazily created region-filter program.
+      expect(gl.deletedPrograms.length - programs).toBe(8);
+    },
+  );
+  it('removes filtering on disable and rejects malformed regions before GPU allocation', () => {
+    const gl = new FakeWebGl();
+    const renderer = createVmFrameRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement, true);
+    renderer.setTransparentKey({ rect: { x: 0, y: 0, width: 1, height: 1 }, rgb565: 0xf81f });
+    const frame = indexedFrame(4, 2);
+    for (const r of [{ x: -1, y: 0, width: 2, height: 2 }, { x: 3, y: 0, width: 2, height: 2 }, null]) {
+      renderer.setSmoothRect(r);
+      gl.calls.length = 0;
+      renderer.draw(frame, 8, 4);
+      expect(gl.calls.some((call) => call.includes('sampleRect'))).toBe(false);
+    }
+    renderer.destroy();
+    expect(gl.deletedPrograms).toHaveLength(7);
+  });
+});

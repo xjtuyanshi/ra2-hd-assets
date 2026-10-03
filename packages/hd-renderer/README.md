@@ -5,6 +5,75 @@ Base-agnostic HD 2.5D renderer for the RA2 remaster (three.js r186 `WebGPURender
 It consumes a versioned `RenderState` snapshot (`src/contract.ts`) and never reads or writes engine state, so the same
 renderer and assets can sit behind any base: the RA2 VM memory bridge, a reimplementation, or the procedural sandbox.
 
+## Native HD interface
+
+The development bridge's existing `?hd=1&hd-ui=1` switches enable `src/ui/sidebarView.ts` through the page-owned
+`startHdUi` controller. The canvas has `pointer-events: none`; it installs no input handlers and never issues a
+command to the guest. All destinations and hit areas remain the guest's live frame-pixel geometry. See
+[read-only sidebar evidence](../../docs/remaster/research/sidebar-ui.md). Runtime sidebar publication currently
+uses the pinned YR reader; auditing base RA2 assets does not establish RA2 runtime sidebar support.
+
+Assets live outside Git at `_ui/cameos/` and `_ui/chrome/{0,1,2}/`. The asset cache owns and closes all bitmaps,
+including optional atlases that arrive after disposal. The native image filename takes precedence over `byId`
+when indexed, because the engine already selected primary versus alternate cameo; `byId` remains the fallback
+for unknown or absent image metadata. Captions use that same image entry. Keep originals and HD entries for
+alternate cameos separately rather than silently aliasing them to a primary portrait.
+
+Each `chrome.json` retains `frame`, `pieces` and `tabs` and accepts two independent optional atlases:
+
+```json
+{
+  "controls": {
+    "file": "controls.png",
+    "frames": [
+      { "id": "command0", "frame": 0, "rect": { "x": 0, "y": 0, "width": 208, "height": 128 } },
+      { "id": "command0", "frame": 1, "rect": { "x": 208, "y": 0, "width": 208, "height": 128 } }
+    ]
+  },
+  "radar": {
+    "file": "radar.png",
+    "frames": [
+      { "state": "frame", "rect": { "x": 0, "y": 0, "width": 672, "height": 440 } },
+      { "state": "logo", "rect": { "x": 0, "y": 440, "width": 560, "height": 432 } }
+    ]
+  }
+}
+```
+
+Atlas rectangles use image pixels. The renderer scales each control to its **live gadget rectangle**, never to a
+percentage of the command bar or to the manifest's reference frame. IDs are `repair`, `sell`, `options`,
+`diplomacy`, `scrollUp`, `scrollDown`, `command0` through `command24`, `commandExpand` and `commandCollapse`.
+Publish only available images; 25 is the executable's capacity, not a claim that a stock installation supplies
+25 command shapes. The native frame number is authoritative: 0 normal, 1 active/selected (also the pressed state
+for two-frame non-toggle buttons), 2 disabled, 3 pressed and 4 pressed-active. A missing atlas or state leaves
+the original gadget visible instead of covering it with a static picture. Native snapshots publish only the
+currently drawn command slots and one expand/collapse control. `tabs.frames[].state` additionally accepts
+`disabled` and `pressedActive`; missing native tab states likewise retain native pixels.
+
+The radar `frame` artwork spans the sidebar width from aperture y-1 through y+height+1, with a transparent
+aperture. The `logo` fills the native aperture while radar is inactive. Keep the native minimap and its padded
+one-pixel viewport outline visible. In keyed WebGL presentation, a scissored RGB bilinear pass smoothly scales
+**only** `layout.radar` directly from the latest native framebuffer. Indexed colours are decoded before
+interpolation; RGB565 channels use the native bit expansion. Samples are clamped to the aperture so sidebar
+metal cannot bleed into the map. No reconstructed terrain, recolouring, second cursor copy or frame readback is
+used. Disable/dispose clears this region; backend replacement retains its setting. The default interface and
+Canvas 2D fallback do not allocate this pass.
+
+Private, offline reference extraction and exhaustive registered-type coverage audit:
+
+```bash
+pnpm exec tsx packages/ra2-assets/src/cli/extractControls.mts --game "$RA2_INSTALL" --out "$UI_WORK/controls-original"
+pnpm exec tsx packages/ra2-assets/src/cli/auditCameos.mts --game "$RA2_INSTALL" --cache "$HD_CACHE/_ui/cameos" --out "$UI_WORK/coverage"
+pnpm exec vitest run tests/basic/hdUi.test.ts tests/basic/yrSidebarReader.test.ts tests/basic/frameRegionFilter.test.ts tests/basic/vmFrameRenderer.test.ts packages/ra2-assets/tests/ui.test.ts
+```
+
+The audit hashes the local rules/art/CSF bytes and source index, checks primary and alternate images for all
+RA2/YR registries, and distinguishes missing original files from missing HD files. Tech/civil/campaign types are
+included even when stock rules mark them unbuildable; shared native placeholder art remains shared. Per-map and
+mod overrides are not exhaustively certified by this registry audit. Synthetic fixtures validate cache lifetime,
+state selection and presentation geometry; GPU pixels, readability at 1:1, input passthrough and real radar
+transitions require separate live acceptance.
+
 ## Renderer state and ownership
 
 Each world loaded by `loadRa2World()` owns an `AtmosphereNodes` context, carried by `world.nodes` and `cache.nodes`.

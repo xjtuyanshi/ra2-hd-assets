@@ -1,3 +1,4 @@
+import { frameRegionFilterShader, frameRegionScissor } from '../../../graphics/frameRegionFilter';
 import { t } from '../../shared/i18n/translate';
 import type { FramePostProcess } from '../../../graphics/framePostProcess';
 import type { VmFrame } from '../../../vm86/win32';
@@ -95,6 +96,8 @@ interface FrameBackend {
   setTransparentRect(rect: FrameRect | null): void;
   /** Independent covered regions, cleared after every frame path and before the cursor. */
   setTransparentRects(rects: readonly FrameRect[]): void;
+  /** Optional native RGB interpolation region; only the keyed compositing path applies it. */
+  setSmoothRect(rect: FrameRect | null): void;
   /**
    * HD bridge native overlay passthrough (dev): make key-coloured pixels inside the rectangle transparent instead of the
    * whole rectangle. While a key is set, upscaling and post-processing are bypassed (the frame is drawn 1:1 filtered
@@ -156,6 +159,7 @@ export function createVmFrameRenderer(
   let transparentRect: FrameRect | null = null;
   let transparentKey: FrameKey | null = null;
   let transparentRects: readonly FrameRect[] = [];
+  let smoothRect: FrameRect | null = null;
   return {
     get backend() {
       return backend.backend;
@@ -184,6 +188,7 @@ export function createVmFrameRenderer(
       replacement.setTransparentRect(transparentRect);
       replacement.setTransparentKey(transparentKey);
       replacement.setTransparentRects(transparentRects);
+      replacement.setSmoothRect(smoothRect);
       backend.destroy();
       backend = replacement;
       mode = next;
@@ -199,6 +204,10 @@ export function createVmFrameRenderer(
     setTransparentRects(rects) {
       transparentRects = rects.map((rect) => ({ ...rect }));
       if (!destroyed) backend.setTransparentRects(transparentRects);
+    },
+    setSmoothRect(rect) {
+      smoothRect = rect ? { ...rect } : null;
+      if (!destroyed) backend.setSmoothRect(smoothRect);
     },
     setTransparentKey(key) {
       transparentKey = key;
@@ -261,6 +270,8 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
   private transparentKey: FrameKey | null = null;
   private transparentRects: readonly FrameRect[] = [];
   /** Created on first use of a key; one program per frame format. */
+  private smoothRect: FrameRect | null = null;
+  private readonly smoothPrograms = new Map<string, { program: WebGLProgram; rect: WebGLUniformLocation | null }>();
   private keyPrograms: Record<'indexed' | 'rgba' | 'rgb565', KeyProgram> | null = null;
 
   get upscaleStatus(): string | null {
@@ -502,6 +513,7 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
     const { gl } = this;
     if (this.transparentKey) {
       this.drawKeyed(frame, this.transparentKey, targetWidth, targetHeight);
+      this.drawSmoothRegion(frame, targetWidth, targetHeight);
       this.punchTransparentRect(frame, targetWidth, targetHeight);
       this.drawCursor(frameCursor(cursorFrame), cursorFrame, cursorPresentation);
       return;
@@ -591,6 +603,10 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
     this.transparentRects = rects;
   }
 
+  setSmoothRect(rect: FrameRect | null): void {
+    this.smoothRect = rect;
+  }
+
   setTransparentKey(key: FrameKey | null): void {
     this.transparentKey = key;
   }
@@ -666,6 +682,37 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     // Restore the attribute layout the other programs were set up with.
     this.bindQuad(this.program);
+  }
+
+  private drawSmoothRegion(frame: VmFrame, targetWidth: number, targetHeight: number): void {
+    if (!this.smoothRect) return;
+    const r = this.smoothRect;
+    const scissor = frameRegionScissor(r, frame, { width: targetWidth, height: targetHeight });
+    if (!scissor) return;
+    const { gl } = this;
+    const kind = frame.rgba ? 'rgba' : frame.rgb565 ? 'rgb565' : 'indexed';
+    let entry = this.smoothPrograms.get(kind);
+    if (!entry) {
+      const program = linkProgram(gl, KEY_VERTEX_SHADER, frameRegionFilterShader(kind));
+      gl.useProgram(program);
+      if (kind === 'indexed') {
+        gl.uniform1i(gl.getUniformLocation(program, 'indexedFrame'), 0);
+        gl.uniform1i(gl.getUniformLocation(program, 'palette'), 1);
+      } else gl.uniform1i(gl.getUniformLocation(program, kind === 'rgba' ? 'rgbaFrame' : 'packedFrame'), 2);
+      entry = { program, rect: gl.getUniformLocation(program, 'sampleRect') };
+      this.smoothPrograms.set(kind, entry);
+    }
+    gl.useProgram(entry.program);
+    gl.uniform4f(entry.rect, r.x, r.y, r.x + r.width, r.y + r.height);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(scissor.x, scissor.y, scissor.width, scissor.height);
+    this.bindQuad(entry.program);
+    try {
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    } finally {
+      gl.disable(gl.SCISSOR_TEST);
+      this.bindQuad(this.program);
+    }
   }
 
   private bindQuad(program: WebGLProgram): void {
@@ -747,6 +794,8 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
     this.gl.deleteProgram(this.cursorProgram);
     for (const entry of Object.values(this.keyPrograms ?? {})) this.gl.deleteProgram(entry.program);
     this.keyPrograms = null;
+    for (const entry of this.smoothPrograms.values()) this.gl.deleteProgram(entry.program);
+    this.smoothPrograms.clear();
     if (this.rcas) {
       this.gl.deleteProgram(this.rcas.program);
       this.gl.deleteTexture(this.rcas.texture);
@@ -828,6 +877,7 @@ class CanvasFrameRenderer implements FrameBackend {
    */
   setTransparentRect(): void {}
   setTransparentRects(): void {}
+  setSmoothRect(): void {}
   setTransparentKey(): void {}
 
   clear(): void {
