@@ -23,6 +23,21 @@ class BrokerLifecycleTests(unittest.TestCase):
             self.assertEqual(pipeline.own_pending(root),['task1-job'])
             pipeline.write(root/'task1-job.receipt.json',{'state':'rejected'})
             self.assertEqual(pipeline.own_pending(root),[])
+    def test_finalization_refuses_numeric_only_or_changed_image_evidence(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);tile=root/'tiles/0_0';tile.mkdir(parents=True)
+            (root/'tiles/queue.txt').write_text(str(tile)+'\n')
+            (tile/'output.png').write_bytes(b'actual producer file')
+            (tile/'conditioned.png').write_bytes(b'actual conditioned file')
+            report={'numerical_pass':True,'accepted':False,'raw_sha256':hashlib.sha256((tile/'output.png').read_bytes()).hexdigest()}
+            pipeline.write(tile/'qa.json',report)
+            with self.assertRaises(ValueError):pipeline.validated_tiles(root)
+            report['accepted']=True;pipeline.write(tile/'qa.json',report)
+            self.assertEqual(pipeline.validated_tiles(root),[tile])
+            (tile/'output.png').write_bytes(b'changed after review')
+            with self.assertRaises(ValueError):pipeline.validated_tiles(root)
+
     def test_atomic_request_has_exact_payload_and_leaves_no_temporary_request(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);payload={'task_id':'task1','job_dir':'/owned/job','prompt_file':'/owned/job/prompt.txt'}

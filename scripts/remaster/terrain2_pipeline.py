@@ -189,13 +189,77 @@ def status(args,out,cache,requests,ledger):
     write(out/'FINAL.json',final);print(json.dumps(result))
 
 
+def validated_tiles(cache):
+    tiles=[Path(v) for v in (cache/'tiles/queue.txt').read_text().splitlines() if v]
+    for tile in tiles:
+        report=read(tile/'qa.json',{})
+        if not report.get('accepted') or not report.get('numerical_pass'):
+            raise ValueError(f'Tile has no complete numerical/visual acceptance: {tile.name}')
+        if not (tile/'conditioned.png').is_file() or not (tile/'output.png').is_file():
+            raise ValueError(f'Accepted tile missing actual images: {tile.name}')
+        if hashlib.sha256((tile/'output.png').read_bytes()).hexdigest()!=report.get('raw_sha256'):
+            raise ValueError(f'Raw image changed after QA: {tile.name}')
+    return tiles
+
+
+def assemble(args,out,cache,requests,ledger):
+    tool=module(Path(__file__).resolve().parents[2]);tiles=validated_tiles(cache)
+    token=time.strftime('%Y%m%dT%H%M%S')+'-'+uuid.uuid4().hex[:8]
+    snapshot=cache/'assembly'/token/'tiles';snapshot.mkdir(parents=True)
+    shutil.copy2(cache/'tiles/prep.json',snapshot/'prep.json')
+    for tile in tiles:
+        destination=snapshot/tile.name;destination.mkdir()
+        for name in ['input.png','tile.json']:shutil.copy2(tile/name,destination/name)
+        shutil.copy2(tile/'conditioned.png',destination/'output.png')
+    draft=snapshot.parent/'assembled.png'
+    tool.tt.main(['assemble','--source',str(cache/'source.png'),'--tiles',str(snapshot),
+                  '--require-complete','--no-align','--lock-l','0','--lock-ab','0',
+                  '--feather',str(args.feather),'--output',str(draft)])
+    reference=tool.tt.load_image(cache/'source.png','RGBA');image=tool.tt.load_image(draft,'RGBA')
+    water=tool.tt.load_image(cache/'water-mask.png','L')
+    if not np.array_equal(reference[...,3],image[...,3]):raise ValueError('Assembly changed reference alpha')
+    protected=(water>=128)|(reference[...,3]==0);image[protected]=reference[protected]
+    final=cache/'terrain-map@2x-t2.png'
+    if final.exists():shutil.copy2(final,snapshot.parent/'previous-candidate.png')
+    Image.fromarray(image).save(final)
+    measurements=[]
+    for tile in tiles:
+        meta=read(tile/'tile.json');x,y=meta['x'],meta['y'];h,w=1024,1536
+        ref=reference[y:y+h,x:x+w];result=image[y:y+h,x:x+w];wm=water[y:y+h,x:x+w]
+        import cv2
+        land=cv2.erode(((ref[...,3]>=250)&(wm<128)).astype(np.uint8),np.ones((9,9),np.uint8)).astype(bool)
+        measurement=tool.measure(ref[...,:3],result[...,:3],land);measurement['tile']=tile.name
+        measurements.append(measurement)
+    failed=[m['tile'] for m in measurements if m['sample_pixels'] and (m['texture_gain'] is None or m['texture_gain']<=1 or m['lowfreq_dE_mean']>3 or m['lowfreq_dE_p95']>6)]
+    with Image.open(cache/'original.png') as im:original=im.convert('RGBA').resize((im.width*2,im.height*2),Image.Resampling.NEAREST)
+    with Image.open(cache/'current-hd.png') as im:current=im.convert('RGBA')
+    generated=Image.fromarray(image)
+    from PIL import ImageDraw
+    crops=read(cache/'boards/CROPS.json')['crops']
+    for crop in crops:
+        box=tuple(crop['box_2x']);cw,ch=box[2]-box[0],box[3]-box[1]
+        board=Image.new('RGB',(cw*3,ch+36),(24,26,28));draw=ImageDraw.Draw(board)
+        for col,(im,label) in enumerate([(original,'Original (nearest2x)'),(current,'Current composite / labelled native fallback'),(generated,'AI terrain2 —1:1 texture pixels')]):
+            draw.text((col*cw+8,10),label,fill='white');part=im.crop(box);board.paste(part,(col*cw,36),part)
+        board.save(cache/'boards'/(crop['name']+'.png'))
+    overview=generated.copy();overview.thumbnail((1800,1200));overview.save(cache/'boards/overview.png')
+    write(cache/'final-qa.json',{'accepted':False,'visual_status':'PENDING whole-map seam/edge and final crop review',
+                               'source_alpha_exact':True,'open_water_rgb_exact':True,'tile_qa_complete':True,
+                               'final_numerical_pass':not failed,'failed_final_tiles':failed,'tile_measurements':measurements,
+                               'terrain_sha256':hashlib.sha256(final.read_bytes()).hexdigest(),'snapshot':str(snapshot),'feather':args.feather})
+    note(out,f'ASSEMBLED {args.map}: accepted tiles{len(tiles)}, final numeric failures={failed}; final PNG and3 boards exist but whole-map visual acceptance PENDING. Immutable snapshot={snapshot}.')
+    print(json.dumps({'map':args.map,'final':str(final),'failed_final_tiles':failed,'visual':'PENDING'}))
+    status(args,out,cache,requests,ledger)
+
+
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=['submit','ingest','qa','approve','reject','status'])
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=['submit','ingest','qa','approve','reject','status','assemble'])
     p.add_argument('--root',type=Path,required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--map',required=True)
+    p.add_argument('--feather',type=float,default=96)
     p.add_argument('--mode',choices=['pilots','full'],default='pilots');p.add_argument('--retry-note');p.add_argument('--tiles');p.add_argument('--review-note')
     a=p.parse_args();out=a.out.resolve();cache=out/a.map;requests=a.root/'gameres/s2x/coordinator/image-requests'
     if not cache.is_dir() or not cache.resolve().is_relative_to(out):raise SystemExit('Map must be beneath assigned OUT')
     ledger=read(cache/'jobs-ledger.json',{})
-    actions={'submit':submit,'ingest':ingest,'qa':qa,'approve':review,'reject':review,'status':status}
+    actions={'submit':submit,'ingest':ingest,'qa':qa,'approve':review,'reject':review,'status':status,'assemble':assemble}
     actions[a.action](a,out,cache,requests,ledger)
 if __name__=='__main__':main()
