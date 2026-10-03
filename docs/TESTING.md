@@ -18,6 +18,11 @@ All tests prohibit `.only`. After editing boot.asm, run `pnpm run build:boot` an
 
 ## Test directories
 
+Offline sprite QA has separate Python synthetic regressions in `tests/python/test_hd_asset_qa.py`.
+They require NumPy, Pillow and pytest, but no game resources. Run `python -m pytest tests/python/test_hd_asset_qa.py`
+in the isolated environment described in [Offline sprite QA](../scripts/remaster/qa/README.md).
+These tests are additional to `pnpm run check`; the actual private-cache sweep and visual/runtime review remain separate evidence.
+
 Classify by required resources, not whether filenames contain “game”:
 
 | Directory                                            | Level and resource requirements                                                                                 |
