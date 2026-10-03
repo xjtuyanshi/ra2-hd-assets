@@ -4,7 +4,8 @@
  * engine rule fixed here applies to both.
  *
  * Rules encoded here (evidence in extract.ts' header and art.ts):
- *   - rules `Image=` names the art section; the art section's own `Image=` names the file stem.
+ *   - rules `Image=` names the art section; non-infantry also uses the art section's `Image=` as the file stem.
+ *     Infantry takes its file stem from rules alone (the native ImageFile field), ignoring the art alias.
  *   - SHP names: `Theater=yes` -> theater extension, otherwise theater-letter substitution with the G fallback for
  *     every name matching the engine's prefix pattern, whatever `NewTheater=` says (artFileCandidates; evidence in
  *     art.ts).
@@ -110,6 +111,15 @@ export class ArtSource {
     const sec = this.art.getSection(rulesImage) ?? this.art.getSection(id);
     const image = sec?.getString('Image', '').trim() || rulesImage;
     return { sec, image, section: sec?.name ?? rulesImage };
+  }
+
+  /**
+   * Infantry keeps the rules ImageFile stem while reading sequence/remap metadata from its art section. YR 1.001
+   * ObjectType::LoadFromINI (0x5F933B) reads Image from the caller's rules INI; Techno's SHP load (0x7157B5) uses that
+   * field directly. Thus stock CAML's art Image=JOSH does not change its camel SHP. Scenario rules still override it.
+   */
+  infantryArtOf(id: string): { sec: IniSection | undefined; image: string; section: string } {
+    return { ...this.artOf(id), image: (this.rulesGet(id, 'Image') ?? '').trim() || id };
   }
 
   /** SHP file candidates for an art image (theater extension for `Theater=yes`, else theater-letter substitution). */

@@ -1,4 +1,5 @@
 import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
+import type { GameRenderMindControlLink } from '../renderState';
 import { readYrBeams, type YrRadBeamEffect, type YrWaveEffect, type YrBeamsStats } from './beamsReader';
 import { readYrObjectCoords, YR_GET_COORDS, YR_GET_COORDS_SLOT, type YrPoint3 } from './objectCoords';
 export {
@@ -498,6 +499,7 @@ export interface YrEffects {
   electricBolts: YrElectricBoltEffect[];
   radBeams?: YrRadBeamEffect[];
   waves?: YrWaveEffect[];
+  mindControlLinks?: GameRenderMindControlLink[];
   particleSystems: YrParticleSystemEffect[];
   /** Technos whose last shot is at most `fireWindow` frames old. */
   fires: YrFireEvent[];
@@ -956,6 +958,7 @@ export function readYrEffects(memory: GuestMemoryAccessor, options: ReadYrEffect
     stats,
     radBeams: beams.radBeams,
     waves: beams.waves,
+    mindControlLinks: beams.mindControlLinks,
   };
 }
 

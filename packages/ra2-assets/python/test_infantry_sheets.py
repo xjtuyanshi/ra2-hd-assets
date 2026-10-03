@@ -96,19 +96,15 @@ def read_image(path, mode=None):
         return np.array(im.convert(mode) if mode else im)
 
 
-# Frozen reviewed prototype formulas: byte-for-byte regression oracles on synthetic data.
+# Reviewed repaint/shadow formulas with an independent interpolation reference.
 def _prototype_up2(a):
-    """Bilinear 2x upsample with pixel-centre alignment (edge clamp)."""
+    """Separable interpolation with NumPy's constant endpoint extension."""
     a = a.astype(np.float32)
     h, w = a.shape
     ys = (np.arange(2 * h) + 0.5) / 2 - 0.5
     xs = (np.arange(2 * w) + 0.5) / 2 - 0.5
-    y0 = np.clip(np.floor(ys).astype(int), 0, h - 1); y1 = np.clip(y0 + 1, 0, h - 1)
-    x0 = np.clip(np.floor(xs).astype(int), 0, w - 1); x1 = np.clip(x0 + 1, 0, w - 1)
-    fy = np.clip(ys - np.floor(ys), 0, 1)[:, None]; fx = np.clip(xs - np.floor(xs), 0, 1)[None, :]
-    top = a[y0][:, x0] * (1 - fx) + a[y0][:, x1] * fx
-    bot = a[y1][:, x0] * (1 - fx) + a[y1][:, x1] * fx
-    return top * (1 - fy) + bot * fy
+    rows = np.array([np.interp(xs, np.arange(w), row) for row in a])
+    return np.array([np.interp(ys, np.arange(h), column) for column in rows.T]).T
 
 
 def _prototype_value_index(rgb, ramp):
@@ -206,6 +202,36 @@ def _prototype_reshadow_frame(rgba2, idx1, peak=0.78, far=0.5, falloff=10.0, ins
     return out
 
 
+class UpsampleTests(unittest.TestCase):
+    def test_two_by_two_uses_quarter_weights_and_clamped_edges(self):
+        source = np.array([[0, 8], [32, 64]], np.float32)
+        expected = np.array([[0, 2, 6, 8], [8, 11.5, 18.5, 22],
+                             [24, 30.5, 43.5, 50], [32, 40, 56, 64]])
+        np.testing.assert_array_equal(inf.up2(source), expected)
+
+    def test_asymmetric_values_preserve_axis_order_and_interior_alignment(self):
+        source = np.array([[0, 4, 12], [20, 28, 40], [60, 80, 100]], np.float32)
+        expected = np.array([[0, 1, 3, 6, 10, 12], [5, 6.25, 8.75, 12.25, 16.75, 19],
+                             [15, 16.75, 20.25, 24.75, 30.25, 33],
+                             [30, 32.75, 38.25, 44.5, 51.5, 55],
+                             [50, 54.25, 62.75, 71.5, 80.5, 85], [60, 65, 75, 85, 95, 100]])
+        np.testing.assert_array_equal(inf.up2(source), expected)
+
+    def test_single_row_column_and_pixel_preserve_numeric_contract(self):
+        row = np.array([[2, 10, 6]])
+        expected = np.array([[2, 4, 8, 9, 7, 6]] * 2)
+        cases = ((row, expected), (row.T, expected.T), (np.array([[7.25]]), np.full((2, 2), 7.25)))
+        for source, result in cases:
+            for dtype in (np.float32, np.float64):
+                with self.subTest(shape=source.shape, dtype=dtype):
+                    value = source.astype(dtype)
+                    before = value.copy()
+                    actual = inf.up2(value)
+                    np.testing.assert_array_equal(actual, result)
+                    np.testing.assert_array_equal(value, before)
+                    self.assertEqual(actual.dtype, np.dtype(np.float64))
+
+
 class LibraryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix=".tmp-infantry-", dir=Path(__file__).parent)
@@ -213,6 +239,57 @@ class LibraryTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.data = synthetic_library(self.root / "library")
         self.lib = inf.library(self.root / "library")
+
+    def test_fitting_sheets_keep_existing_names_layout_and_facing(self):
+        specs = inf.sheet_specs(self.lib, "E1")
+        fitted = inf.fit_sheet_specs(self.lib, "E1", specs)
+        self.assertEqual([item[:3] for item in fitted], specs)
+        for name, _, _, first in fitted:
+            self.assertEqual(first, 4 if name.endswith("_b") else 0)
+
+    def test_oversized_sheets_cover_frames_once_and_keep_facing_prompts(self):
+        # Four wide creature facings cannot fit at 2x. Exercise both row and column splitting with real layouts.
+        for frame in self.lib.frames(SPRITE):
+            frame["rect"][2:] = [240, 190]
+        rows = [list(range(start, start + 8)) for start in range(0, 32, 8)]
+        fitted = inf.fit_sheet_specs(self.lib, "E1", [("E1_Walk_b", "Walk", rows)])
+        self.assertGreater(len(fitted), 1)
+        actual = [frame for _, _, part, _ in fitted for row in part for frame in row]
+        self.assertEqual(Counter(actual), Counter(range(32)))
+        self.assertEqual(len({name for name, _, _, _ in fitted}), len(fitted))
+        for _, seq, part, first in fitted:
+            lay = inf.layout(self.lib, SPRITE, part)
+            scale = inf.choose_scale(lay["W"], lay["H"])
+            self.assertGreaterEqual(scale, 2)
+            width, height, _, _ = inf.canvas_for(lay, scale)
+            prompt = inf.prompt_for("E1", seq, part, (width, height), first_facing=first)
+            for local_row, frames in enumerate(part):
+                if frames:
+                    facing = 4 + frames[0] // 8
+                    self.assertEqual(first + local_row, facing)
+                    self.assertIn(f"row {local_row + 1}: the figure is {inf.FACING_TEXT[facing]}", prompt)
+
+    def test_single_oversized_frame_reports_unrepresentable_asset(self):
+        self.lib.frames(SPRITE)[0]["rect"][2:] = [800, 800]
+        with self.assertRaisesRegex(ValueError, "frame cannot fit"):
+            inf.fit_sheet_specs(self.lib, "E1", [("E1_Walk", "Walk", [[0]])])
+
+    def test_oversized_sparse_facing_sheets_trim_only_empty_edge_rows(self):
+        self.lib.frames(SPRITE)[0]["rect"][2:] = [240, 190]
+        for rows, expected_first in (([[], [], [], [0]], 7), ([[0], [], [], []], 4)):
+            with self.subTest(rows=rows):
+                fitted = inf.fit_sheet_specs(self.lib, "E1", [("E1_Walk_b", "Walk", rows)])
+                self.assertEqual(fitted, [("E1_Walk_b", "Walk", [[0]], expected_first)])
+                lay = inf.layout(self.lib, SPRITE, fitted[0][2])
+                self.assertEqual(inf.choose_scale(lay["W"], lay["H"]), 5)
+
+    def test_prepare_does_not_fit_excluded_sequences(self):
+        self.lib.frames(SPRITE)[0]["rect"][2:] = [800, 800]
+        specs = [("E1_Walk", "Walk", [[0]])]
+        with mock.patch.object(inf, "sheet_specs", return_value=specs):
+            self.assertEqual(inf.prepare(self.lib, self.root / "skipped", units=["E1"],
+                                         skip_seqs=["Walk"]), [])
+        self.assertFalse((self.root / "skipped").exists())
 
     def test_cache_and_manifest_paths_are_per_library(self):
         other = self.root / "second"
@@ -354,6 +431,140 @@ class LibraryTests(unittest.TestCase):
         np.testing.assert_array_equal(color[crop], self.lib.page2(PAGE)[crop])
 
 
+class IndexedSilhouetteTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix=".tmp-infantry-indexed-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        synthetic_library(self.root / "library", shadows=True)
+        self.lib = inf.Library(self.root / "library")
+        self.lay = inf.layout(self.lib, SPRITE, [[0]])
+        self.scale = 3.5
+        cw, ch, ox, oy = inf.canvas_for(self.lay, self.scale)
+        self.job = {"sprite": SPRITE, "house": "DarkBlue", "S": self.scale, "origin": [ox, oy],
+                    "size": [cw, ch], "layout": self.lay}
+        self.d = self.root / "job"
+        self.d.mkdir()
+        (self.d / "job.json").write_text(json.dumps(self.job))
+        self.input = inf.render_input(self.lib, SPRITE, self.lay, "DarkBlue", self.scale)
+        Image.fromarray(self.input).save(self.d / "input.png")
+
+    def compose(self, raw, freeze_registration=False):
+        Image.fromarray(raw).save(self.d / "full.png")
+        register = (mock.patch.object(inf.hr, "register", return_value=((1., 0., 1., 0.), {}))
+                    if freeze_registration else contextlib.nullcontext())
+        with register:
+            return inf.compose_job(self.lib, self.d, options())["frames"][0]
+
+    def frame_region(self):
+        p = self.lay["place"][0]
+        x = self.job["origin"][0] + round(p["x"] * self.scale)
+        y = self.job["origin"][1] + round(p["y"] * self.scale)
+        return x, y, round(p["w"] * self.scale), round(p["h"] * self.scale)
+
+    def test_indexed_reference_keeps_grey_source_body_and_excludes_shadow(self):
+        # A known indexed body remains a reference even when its HD material is exactly the backdrop colour.
+        original = self.lib.frame2
+
+        def grey_source(*args):
+            rgb, alpha, paint = original(*args)
+            return np.full_like(rgb, 118), alpha, np.zeros_like(paint)
+
+        with mock.patch.object(self.lib, "frame2", side_effect=grey_source):
+            grey_input = inf.render_input(self.lib, SPRITE, self.lay, "DarkBlue", self.scale)
+        Image.fromarray(grey_input).save(self.d / "input.png")
+        result = self.compose(self.input, freeze_registration=True)
+        metrics = result["metrics"]
+        self.assertEqual(metrics["sil_iou"], 0.0)
+        self.assertGreater(metrics["indexed_sil_iou"], 0.95)
+        self.assertEqual(metrics["indexed_sil_method"], "indexed-body-raw-margin3-v1")
+        self.assertFalse(metrics["indexed_context_edge"])
+        # The model contains no shadow. Counting original index12 as body would cause many additional misses.
+        self.assertLess(metrics["indexed_sil_miss_pixels"], 20)
+
+    def test_full_context_penalizes_expansion_that_legacy_band_omits(self):
+        raw = self.input.copy()
+        x, y, w, h = self.frame_region()
+        raw[y:y + h, x:x + w] = (60, 60, 50)
+        metrics = self.compose(raw)["metrics"]
+        self.assertGreater(metrics["sil_iou"], 0.75)
+        self.assertLess(metrics["indexed_sil_iou"], 0.35)
+        self.assertGreater(metrics["indexed_sil_extra_pixels"], 1000)
+        self.assertTrue(metrics["rejected"])
+
+    def test_missing_half_displacement_and_context_edge_remain_visible(self):
+        x, y, w, h = self.frame_region()
+        half = self.input.copy()
+        half[y:y + h, x:x + w // 2] = 118
+        shifted = np.full_like(self.input, 118)
+        shifted[:, 42:] = self.input[:, :-42]
+        for name, raw, edge in (("half", half, False), ("shift", shifted, True)):
+            with self.subTest(name=name):
+                metrics = self.compose(raw, freeze_registration=True)["metrics"]
+                self.assertLess(metrics["indexed_sil_iou"], 0.5)
+                self.assertGreater(metrics["indexed_sil_miss_pixels"], 240)
+                self.assertEqual(metrics["indexed_context_edge"], edge)
+
+    def test_model_interior_is_not_filled_and_true_source_holes_stay_empty(self):
+        body = np.zeros((40, 36), bool)
+        body[4:36, 4:32] = True
+        body[12:20, 12:20] = False
+        model = np.repeat(np.repeat(np.pad(body, 6), 2, 0), 2, 1)
+        rgb = np.where(model[..., None], np.array([40, 50, 60]), 118).astype(np.float32)
+        base = inf.indexed_silhouette_metrics(body, rgb, 2, (0, 0))
+        filled = rgb.copy()
+        filled[36:52, 36:52] = (40, 50, 60)
+        wrong_hole = inf.indexed_silhouette_metrics(body, filled, 2, (0, 0))
+        erased = rgb.copy()
+        erased[60:72, 32:48] = 118
+        missing = inf.indexed_silhouette_metrics(body, erased, 2, (0, 0))
+        self.assertGreater(base["indexed_sil_iou"], 0.99)
+        self.assertGreater(wrong_hole["indexed_sil_extra_pixels"], base["indexed_sil_extra_pixels"] + 50)
+        self.assertGreater(missing["indexed_sil_miss_pixels"], base["indexed_sil_miss_pixels"] + 30)
+        self.assertLess(wrong_hole["indexed_sil_iou"], base["indexed_sil_iou"])
+        self.assertLess(missing["indexed_sil_iou"], base["indexed_sil_iou"])
+
+    def test_indexed_metric_rejects_a_sample_cropped_to_the_original_body_frame(self):
+        with self.assertRaisesRegex(ValueError, "full three-pixel margin"):
+            inf.indexed_silhouette_metrics(np.ones((40, 36), bool), np.zeros((80, 72, 3)), 2, (0, 0))
+
+    def test_local_reference_matches_actual_canvas_rounding_at_fractional_scales(self):
+        # Independent full-canvas oracle catches origin phase and rounded frame-size mistakes in the local mask.
+        body = np.zeros((38, 34), bool)
+        body[2:36, 4:30] = True
+        body[14:22, 12:20] = False
+        for scale in (2.5, 3.5, 8.0):
+            for position in ((3, 5), (4, 6)):
+                with self.subTest(scale=scale, position=position):
+                    h, w = body.shape[0] // 2, body.shape[1] // 2
+                    fx, fy = (150 + value * scale for value in position)
+                    x, y = (150 + round(value * scale) for value in position)
+                    canvas = np.zeros((512, 512), np.float32)
+                    rendered = np.asarray(Image.fromarray(body.astype(np.float32), "F").resize(
+                        (round(w * scale), round(h * scale)), Image.LANCZOS))
+                    canvas[y:y + rendered.shape[0], x:x + rendered.shape[1]] = np.clip(rendered, 0, 1)
+                    sample_size = (4 * (w + 6), 4 * (h + 6))
+                    box = (fx - 3 * scale, fy - 3 * scale, fx + (w + 3) * scale, fy + (h + 3) * scale)
+                    alpha4 = np.clip(np.asarray(Image.fromarray(canvas, "F").resize(
+                        sample_size, Image.LANCZOS, box=box)), 0, 1)
+                    model4 = 118 + alpha4[..., None] * (np.array([40, 50, 60]) - 118)
+                    ref2 = inf.hr.box_down(alpha4, 2) > 0.5
+                    model2 = inf.hr.box_down(inf.fg_mask(model4, 16).astype(np.float32), 2) > 0.5
+                    metrics = inf.indexed_silhouette_metrics(body, model4, scale, (x - fx, y - fy))
+                    self.assertEqual(metrics["indexed_sil_iou"], inf.iou(ref2, model2))
+                    self.assertEqual(metrics["indexed_sil_miss_pixels"], int((ref2 & ~model2).sum()))
+
+    def test_additional_metric_does_not_change_legacy_score_or_output_pixels(self):
+        first = self.compose(self.input)
+        with mock.patch.object(inf, "indexed_silhouette_metrics", return_value={
+                "indexed_sil_iou": 0., "indexed_sil_method": inf.INDEXED_SIL_METHOD}):
+            other = self.compose(self.input)
+        self.assertNotEqual(first["metrics"]["indexed_sil_iou"], other["metrics"]["indexed_sil_iou"])
+        self.assertEqual(first["metrics"]["sil_iou"], other["metrics"]["sil_iou"])
+        for field in ("rgba", "paint", "rep2", "final", "ref2"):
+            np.testing.assert_array_equal(first[field], other[field])
+
+
 class PipelineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -478,7 +689,7 @@ class PipelineTests(unittest.TestCase):
         # Real composition above covers image maths; isolate page routing and the acceptance gate here.
         job = json.loads((self.d / "job.json").read_text())
         frames = {0: {"rgba": np.full((44, 36, 4), 7, np.uint8), "paint": np.zeros((44, 36), np.uint8),
-                      "metrics": {"sil_iou": 0.5}}}
+                      "metrics": {"sil_iou": 0.5, "indexed_sil_iou": 0.99}}}
         with mock.patch.object(inf, "compose_job", return_value={"job": job, "frames": frames, "raw": "full.png"}), \
                 contextlib.redirect_stdout(io.StringIO()):
             color, paint, report = inf.build(self.lib, self.work, PAGE, options(), names=[self.name])
@@ -929,6 +1140,21 @@ class RepaintFrameTests(unittest.TestCase):
         color, weight = inf.repaint_frame(rgba, paint, np.full((4, 6), 40), self.ramp)
         self.assertIs(color, rgba)
         self.assertIs(weight, paint)
+
+    def test_repaint_does_not_turn_border_shadow_into_house_coloured_body(self):
+        source = np.array([[12, 20, 20]] * 3, np.int32)
+        for idx in (source, source.T):
+            with self.subTest(first_edge="column" if idx is source else "row"):
+                body = np.repeat(np.repeat(idx != 12, 2, 0), 2, 1)
+                rgba = np.full((6, 6, 4), [0, 0, 0, 141], np.uint8)
+                rgba[body] = [190, 40, 20, 255]
+                color, paint = inf.repaint_frame(rgba, np.zeros((6, 6), np.uint8), idx,
+                                                 self.ramp, edge=(0.4, 0.8))
+                finished = inf.reshadow_frame(color, idx)
+                border = np.s_[:, 0] if idx is source else np.s_[0, :]
+                np.testing.assert_array_equal(paint[border], 0)
+                np.testing.assert_array_equal(finished[border], 0)
+                np.testing.assert_array_equal(finished[..., 3][body], 255)
 
     def test_darker_original_index_encodes_a_darker_ramp_code(self):
         idx = np.full((12, 24), 16, np.int32)

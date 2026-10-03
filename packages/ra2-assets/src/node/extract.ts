@@ -434,7 +434,7 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
     const x = Number.parseInt(e.fields[3] ?? '', 10);
     const y = Number.parseInt(e.fields[4] ?? '', 10);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-    const { sec, image } = artOf(e.type);
+    const { sec, image } = kind === 'infantry' ? src.infantryArtOf(e.type) : artOf(e.type);
     const facingField = kind === 'infantry' ? 7 : 5;
     const facing = Number.parseInt(e.fields[facingField] ?? '0', 10) || 0;
     const health = Number.parseInt(e.fields[2] ?? '256', 10);

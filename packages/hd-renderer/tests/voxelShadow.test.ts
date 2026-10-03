@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BackSide,
   BufferGeometry,
+  DoubleSide,
   Group,
   Matrix4,
   Mesh,
@@ -12,7 +14,7 @@ import {
   WebGLCoordinateSystem,
   WebGPUCoordinateSystem,
 } from 'three/webgpu';
-import { positionLocal, positionWorld } from 'three/tsl';
+import { positionGeometry, positionLocal, positionWorld } from 'three/tsl';
 import { AtmosphereNodes } from '../src/atmosphere';
 import type { ShaderNode } from '../src/tsl';
 import { IsoCamera } from '../src/world';
@@ -37,8 +39,10 @@ import {
   WATER_FOAM_OPACITY,
   WATER_FOAM_SCALE,
   WATER_FOAM_FORWARD_SCALE,
+  WATER_FLAT_REFLECTION_OPACITY,
   WATER_REFLECTION_FADE,
   WATER_REFLECTION_OPACITY,
+  applyVoxelShadowParams,
   setShadowGround,
   setShadowOrigin,
   shadowOriginProjection,
@@ -71,7 +75,7 @@ function sampleWaterAlpha(mesh: VoxelWaterMesh, local: Vector3): number {
     const cached = cache.get(node);
     if (cached) return cached;
     let result: number[];
-    if (node === positionLocal) result = local.toArray();
+    if (node === positionGeometry || node === positionLocal) result = local.toArray();
     else if (node === positionWorld) result = local.clone().applyMatrix4(mesh.matrixWorld).toArray();
     else if (node.isInputNode) result = typeof node.value === 'number' ? [node.value] : node.value.toArray();
     else if (node.nodes) result = node.nodes.flatMap(evaluate);
@@ -126,6 +130,119 @@ function sampleWaterAlpha(mesh: VoxelWaterMesh, local: Vector3): number {
 }
 
 describe('voxel water contact', () => {
+  it('parses independent review switches and restores defaults without changing renderer frame inputs', () => {
+    const nodes = new AtmosphereNodes();
+    const other = new AtmosphereNodes();
+    const mode = voxelShadowFor(nodes);
+    mode.time = 17;
+    mode.toCamera.set(0.2, 0.3, 0.4);
+    try {
+      for (const hard of [false, true]) {
+        for (const old of [false, true]) {
+          for (const flat of [false, true]) {
+            const params = new URLSearchParams();
+            if (hard) params.set('vshadow', 'hard');
+            if (old) params.set('vnaval', 'old');
+            if (flat) params.set('vrefl', 'flat');
+            applyVoxelShadowParams(params, nodes);
+            expect(mode).toMatchObject({ soft: !hard, naval: !old, reflection: flat ? 'flat' : 'colour', time: 17 });
+            expect(mode.toCamera.toArray()).toEqual([0.2, 0.3, 0.4]);
+            expect(voxelShadowFor(other)).toMatchObject({ soft: true, naval: true, reflection: 'colour' });
+          }
+        }
+      }
+      for (const params of ['', 'vshadow=unknown&vnaval=unknown&vrefl=unknown']) {
+        applyVoxelShadowParams(new URLSearchParams(params), nodes);
+        expect(mode).toMatchObject({ soft: true, naval: true, reflection: 'colour' });
+      }
+    } finally {
+      nodes.dispose();
+      other.dispose();
+    }
+  });
+
+  it('caches coloured reflections per source material and renderer, with shared flat/foam fallback and owned disposal', () => {
+    const nodes = new AtmosphereNodes();
+    const other = new AtmosphereNodes();
+    const hull = new MeshStandardNodeMaterial({ color: 0xeeeedd });
+    const turret = new MeshStandardNodeMaterial({ color: 0xcc2222 });
+    const reflection = voxelWaterMaterial(nodes, 'reflection', hull);
+    const turretReflection = voxelWaterMaterial(nodes, 'reflection', turret);
+    const otherReflection = voxelWaterMaterial(other, 'reflection', hull);
+    const flat = voxelWaterMaterial(nodes, 'reflection');
+    const foam = voxelWaterMaterial(nodes, 'foam');
+    const disposed = new Map<MeshBasicNodeMaterial, number>();
+    for (const material of [reflection, turretReflection, otherReflection, flat, foam]) {
+      disposed.set(material, 0);
+      material.addEventListener('dispose', () => disposed.set(material, disposed.get(material)! + 1));
+    }
+    try {
+      expect(reflection.name).toBe('voxel-reflection-colour');
+      expect(reflection.side).toBe(BackSide);
+      expect(flat.side).toBe(DoubleSide);
+      expect(foam.side).toBe(DoubleSide);
+      expect(reflection.colorNode).not.toBeNull();
+      expect(flat.colorNode).toBeNull();
+      expect(flat.color.toArray()).toEqual([0.16, 0.19, 0.22]);
+      expect(new Set([reflection, turretReflection, otherReflection, flat, foam]).size).toBe(5);
+      expect(voxelWaterMaterial(nodes, 'reflection', hull)).toBe(reflection);
+      expect(voxelWaterMaterial(nodes, 'foam', hull)).toBe(foam);
+      expect(voxelWaterMaterial(nodes, 'foam', turret)).toBe(foam);
+      applyVoxelShadowParams(new URLSearchParams('vrefl=flat'), nodes);
+      expect(voxelWaterMaterial(nodes, 'reflection', hull)).toBe(flat);
+      expect(voxelWaterMaterial(nodes, 'reflection', turret)).toBe(flat);
+      expect(voxelWaterMaterial(other, 'reflection', hull)).toBe(otherReflection);
+      applyVoxelShadowParams(new URLSearchParams(), nodes);
+      expect(voxelWaterMaterial(nodes, 'reflection', hull)).toBe(reflection);
+      expect(voxelWaterMaterial(nodes, 'reflection', turret)).toBe(turretReflection);
+      nodes.dispose();
+      for (const material of [reflection, turretReflection, flat, foam]) expect(disposed.get(material)).toBe(1);
+      expect(disposed.get(otherReflection)).toBe(0);
+      other.dispose();
+      expect(disposed.get(otherReflection)).toBe(1);
+    } finally {
+      nodes.dispose();
+      other.dispose();
+      hull.dispose();
+      turret.dispose();
+    }
+  });
+
+  it('switches existing twins between source colours and flat review without changing foam or allocating each frame', () => {
+    const nodes = new AtmosphereNodes();
+    const source = new Mesh();
+    const replacement = new MeshBasicNodeMaterial({ color: 0xff2222 });
+    const original = source.material;
+    const reflection = new VoxelWaterMesh(source, nodes, 'reflection');
+    const foam = new VoxelWaterMesh(source, nodes, 'foam');
+    const colour = reflection.material;
+    const foamMaterial = foam.material;
+    try {
+      expect(colour).toBe(voxelWaterMaterial(nodes, 'reflection', original));
+      for (const params of ['vrefl=flat', '', 'vrefl=flat', '']) {
+        applyVoxelShadowParams(new URLSearchParams(params), nodes);
+        for (let frame = 0; frame < 3; frame++) {
+          reflection.updateMatrixWorld(true);
+          foam.updateMatrixWorld(true);
+          expect(reflection.material).toBe(params ? voxelWaterMaterial(nodes, 'reflection') : colour);
+          expect(foam.material).toBe(foamMaterial);
+        }
+      }
+      source.material = replacement;
+      reflection.updateMatrixWorld(true);
+      expect(reflection.material).toBe(voxelWaterMaterial(nodes, 'reflection', replacement));
+      expect(reflection.material).not.toBe(colour);
+      source.material = original;
+      reflection.updateMatrixWorld(true);
+      expect(reflection.material).toBe(colour);
+    } finally {
+      source.geometry.dispose();
+      original.dispose();
+      replacement.dispose();
+      nodes.dispose();
+    }
+  });
+
   it('keeps x/z straight down and scales foam about the water origin, independent of height', () => {
     const origin = new Vector3(12, 1.4, 23);
     for (const scale of [1, WATER_FOAM_SCALE - 0.02, WATER_FOAM_SCALE, WATER_FOAM_SCALE + 0.02]) {
@@ -259,98 +376,186 @@ describe('voxel water contact', () => {
     },
   );
 
-  it('switches by water under the origin, retains land/flight/override matrices, and bounds shared twins', () => {
-    const nodes = new AtmosphereNodes();
-    const geometry = new BufferGeometry();
-    const material = new MeshStandardNodeMaterial();
-    const unit = instantiateVoxel([{ role: 'body', turretOffset: 0, geometry }], material, nodes);
-    const scene = new Group();
-    scene.add(unit.root);
-    let water = false;
-    let samples = 0;
-    setShadowGround(scene, {
-      height: () => 0.4,
-      normal: (_x, _z, out) => out.set(0.2, 1, -0.1).normalize(),
-      waterHeight: (x, z) => {
-        expect(x).toBe(10);
-        expect(z).toBe(20);
-        samples++;
-        return water ? 0.4 : undefined;
-      },
-    });
-    unit.root.position.set(10, 0.4, 20);
-    unit.root.rotation.y = 0.7;
-    const shadows = unit.root.children.filter((o): o is VoxelShadowMesh => o instanceof VoxelShadowMesh);
-    const decals = unit.root.children.filter((o): o is VoxelWaterMesh => o instanceof VoxelWaterMesh);
-    const mode = voxelShadowFor(nodes);
-    try {
-      expect(shadows).toHaveLength(5);
-      expect(decals).toHaveLength(6);
-      for (const twin of [...shadows, ...decals]) expect(twin.geometry).toBe(geometry);
-      scene.updateMatrixWorld(true);
-      const land = shadows.map((s) => s.matrixWorld.clone());
-      expect(decals.every((d) => !d.visible)).toBe(true);
-      water = true;
-      scene.updateMatrixWorld(true);
-      expect(samples).toBeGreaterThan(0);
-      expect(shadows.every((s) => s.onWater && s.visible)).toBe(true);
-      expect(decals.every((d) => d.visible && d.onWater)).toBe(true);
-      const sourcePoint = new Vector3(0.6, 0.3, -0.2).applyMatrix4(shadows[0]!.source.matrixWorld);
-      const contact = new Vector3(0.6, 0.3, -0.2).applyMatrix4(shadows[0]!.matrixWorld);
-      expect(contact.x).toBeCloseTo(sourcePoint.x, 12);
-      expect(contact.z).toBeCloseTo(sourcePoint.z, 12);
-      for (const twin of [...shadows, ...decals]) {
-        const p = new Vector3(0.6, 0.3, -0.2).applyMatrix4(twin.matrixWorld);
-        expect(p.y).toBeCloseTo(twin.planeConstant, 12);
+  it.each(['colour', 'flat'] as const)(
+    'fades the %s reflection using source height while retaining bounded, clock-driven ripple',
+    (variant) => {
+      const nodes = new AtmosphereNodes();
+      const source = new Mesh();
+      const mode = voxelShadowFor(nodes);
+      mode.reflection = variant;
+      const reflection = new VoxelWaterMesh(source, nodes, 'reflection');
+      const unit = new Group();
+      const scene = new Group();
+      unit.position.set(12, 1.4, 23);
+      source.position.y = 0.2;
+      source.scale.set(1.5, 2, 0.7);
+      source.rotation.y = 0.6;
+      unit.add(source, reflection);
+      scene.add(unit);
+      setShadowGround(scene, { height: () => 1.4, waterHeight: () => 1.4 });
+      const opacity = variant === 'colour' ? WATER_REFLECTION_OPACITY : WATER_FLAT_REFLECTION_OPACITY;
+      try {
+        scene.updateMatrixWorld(true);
+        expect(reflection.matrixWorld.determinant()).toBe(0);
+        expect(source.matrixWorld.determinant()).toBeGreaterThan(0);
+        for (const height of [-1, -WATER_REFLECTION_FADE, -0.25, 0, 0.25, WATER_REFLECTION_FADE, 1]) {
+          const local = new Vector3(0.2, (height - 0.2) / 2, -0.1);
+          const alpha = sampleWaterAlpha(reflection, local);
+          const faded = opacity * Math.max(0, 1 - Math.abs(height) / WATER_REFLECTION_FADE);
+          expect(alpha).toBeGreaterThanOrEqual(faded * 0.76 - 1e-12);
+          expect(alpha).toBeLessThanOrEqual(faded + 1e-12);
+          if (Math.abs(height) >= WATER_REFLECTION_FADE) expect(alpha).toBeCloseTo(0, 12);
+        }
+        const local = new Vector3(0.2, -0.1, -0.1);
+        const first = sampleWaterAlpha(reflection, local);
+        mode.time = 1;
+        const second = sampleWaterAlpha(reflection, local);
+        expect(second).not.toBe(first);
+        mode.time = 0;
+        expect(sampleWaterAlpha(reflection, local)).toBe(first);
+        expect(sampleWaterAlpha(reflection, local.clone().setX(0.23))).not.toBe(first);
+        source.position.y += WATER_REFLECTION_FADE;
+        scene.updateMatrixWorld(true);
+        expect(sampleWaterAlpha(reflection, local)).toBeCloseTo(0, 12);
+      } finally {
+        source.geometry.dispose();
+        source.material.dispose();
+        nodes.dispose();
       }
-      const foam = decals.find((d) => d.layer === 'foam')!;
-      expect(Math.max(...decals.map((d) => d.planeConstant))).toBeLessThan(
-        Math.min(...shadows.map((s) => s.planeConstant)),
-      );
-      expect(foam.renderOrder).toBeGreaterThan(Math.max(...shadows.map((s) => s.renderOrder)));
-      mode.time = 0.5;
-      scene.updateMatrixWorld(true);
-      const breathing = foam.matrixWorld.clone();
-      expect(foam.foamPulse).toBe(1);
-      scene.updateMatrixWorld(true);
-      expect(foam.matrixWorld.elements).toEqual(breathing.elements);
-      mode.time += 2;
-      scene.updateMatrixWorld(true);
-      expect(foam.matrixWorld.elements).toEqual(breathing.elements);
-      mode.naval = false;
-      scene.updateMatrixWorld(true);
-      shadows.forEach((s, i) => expect(s.matrixWorld.elements).toEqual(land[i]!.elements));
-      expect(decals.every((d) => !d.visible)).toBe(true);
-      mode.naval = true;
-      for (const height of [AIRBORNE_HEIGHT + 0.01, AIRBORNE_SHADOW_HALF]) {
-        unit.root.position.y = 0.4 + height;
+    },
+  );
+
+  it.each([WebGLCoordinateSystem, WebGPUCoordinateSystem])(
+    'preserves mirrored back-face winding even though the flattened matrix has zero determinant (coordinate system %s)',
+    (coordinateSystem) => {
+      const iso = new IsoCamera();
+      iso.camera.coordinateSystem = coordinateSystem;
+      iso.target.set(0, 0, 0);
+      iso.resize(800, 600);
+      iso.update();
+      const view = new Vector3().setFromMatrixColumn(iso.camera.matrixWorld, 2);
+      const projection = waterReflectionProjection(iso.target, view, new Matrix4());
+      const mirror = new Matrix4().makeScale(1, -1, 1);
+      const triangle = [new Vector3(0, 0, 0), new Vector3(0, 1, 0), new Vector3(0, 0, 1)];
+      const screenArea = (matrix: Matrix4) => {
+        const [a, b, c] = triangle.map((p) => p.clone().applyMatrix4(matrix).project(iso.camera));
+        return (b!.x - a!.x) * (c!.y - a!.y) - (b!.y - a!.y) * (c!.x - a!.x);
+      };
+      expect(screenArea(new Matrix4())).toBeGreaterThan(0);
+      expect(screenArea(mirror)).toBeLessThan(0);
+      expect(screenArea(projection)).toBeCloseTo(screenArea(mirror), 12);
+      expect(mirror.determinant()).toBe(-1);
+      // Three cannot infer the winding inversion from this determinant: coloured twins explicitly use BackSide.
+      expect(projection.determinant()).toBe(0);
+    },
+  );
+
+  it.each(['colour', 'flat'] as const)(
+    'keeps %s reflection on water and preserves land/flight/override twins',
+    (variant) => {
+      const nodes = new AtmosphereNodes();
+      const geometry = new BufferGeometry();
+      const material = new MeshStandardNodeMaterial();
+      const unit = instantiateVoxel([{ role: 'body', turretOffset: 0, geometry }], material, nodes);
+      const scene = new Group();
+      scene.add(unit.root);
+      let water = false;
+      let samples = 0;
+      setShadowGround(scene, {
+        height: () => 0.4,
+        normal: (_x, _z, out) => out.set(0.2, 1, -0.1).normalize(),
+        waterHeight: (x, z) => {
+          expect(x).toBe(10);
+          expect(z).toBe(20);
+          samples++;
+          return water ? 0.4 : undefined;
+        },
+      });
+      unit.root.position.set(10, 0.4, 20);
+      unit.root.rotation.y = 0.7;
+      const shadows = unit.root.children.filter((o): o is VoxelShadowMesh => o instanceof VoxelShadowMesh);
+      const decals = unit.root.children.filter((o): o is VoxelWaterMesh => o instanceof VoxelWaterMesh);
+      const mode = voxelShadowFor(nodes);
+      mode.reflection = variant;
+      try {
+        expect(shadows).toHaveLength(5);
+        expect(decals).toHaveLength(6);
+        for (const twin of [...shadows, ...decals]) expect(twin.geometry).toBe(geometry);
+        scene.updateMatrixWorld(true);
+        const land = shadows.map((s) => s.matrixWorld.clone());
+        expect(decals.every((d) => !d.visible)).toBe(true);
+        water = true;
+        scene.updateMatrixWorld(true);
+        expect(samples).toBeGreaterThan(0);
+        expect(shadows.every((s) => s.onWater && s.visible)).toBe(true);
+        expect(decals.every((d) => d.visible && d.onWater)).toBe(true);
+        const sourcePoint = new Vector3(0.6, 0.3, -0.2).applyMatrix4(shadows[0]!.source.matrixWorld);
+        const contact = new Vector3(0.6, 0.3, -0.2).applyMatrix4(shadows[0]!.matrixWorld);
+        expect(contact.x).toBeCloseTo(sourcePoint.x, 12);
+        expect(contact.z).toBeCloseTo(sourcePoint.z, 12);
+        for (const twin of [...shadows, ...decals]) {
+          const p = new Vector3(0.6, 0.3, -0.2).applyMatrix4(twin.matrixWorld);
+          expect(p.y).toBeCloseTo(twin.planeConstant, 12);
+        }
+        const foam = decals.find((d) => d.layer === 'foam')!;
+        const reflection = decals.find((d) => d.layer === 'reflection')!;
+        expect(reflection.planeConstant).toBeLessThan(
+          Math.min(...decals.filter((d) => d.layer === 'foam').map((d) => d.planeConstant)),
+        );
+        expect(reflection.renderOrder).toBeLessThan(Math.min(...shadows.map((s) => s.renderOrder)));
+        expect(reflection.material).toBe(voxelWaterMaterial(nodes, 'reflection', material));
+        const reflectedMaterial = reflection.material as MeshBasicNodeMaterial;
+        expect(reflectedMaterial.depthWrite).toBe(true);
+        expect(reflectedMaterial.forceSinglePass).toBe(true);
+        expect(reflectedMaterial.depthNode).not.toBeNull();
+        expect(Math.max(...decals.map((d) => d.planeConstant))).toBeLessThan(
+          Math.min(...shadows.map((s) => s.planeConstant)),
+        );
+        expect(foam.renderOrder).toBeGreaterThan(Math.max(...shadows.map((s) => s.renderOrder)));
+        mode.time = 0.5;
+        scene.updateMatrixWorld(true);
+        const breathing = foam.matrixWorld.clone();
+        expect(foam.foamPulse).toBe(1);
+        scene.updateMatrixWorld(true);
+        expect(foam.matrixWorld.elements).toEqual(breathing.elements);
+        mode.time += 2;
+        scene.updateMatrixWorld(true);
+        expect(foam.matrixWorld.elements).toEqual(breathing.elements);
         mode.naval = false;
         scene.updateMatrixWorld(true);
-        const airborne = shadows.map((s) => s.matrixWorld.clone());
+        shadows.forEach((s, i) => expect(s.matrixWorld.elements).toEqual(land[i]!.elements));
+        expect(decals.every((d) => !d.visible)).toBe(true);
+        mode.naval = true;
+        for (const height of [AIRBORNE_HEIGHT + 0.01, AIRBORNE_SHADOW_HALF]) {
+          unit.root.position.y = 0.4 + height;
+          mode.naval = false;
+          scene.updateMatrixWorld(true);
+          const airborne = shadows.map((s) => s.matrixWorld.clone());
+          mode.naval = true;
+          scene.updateMatrixWorld(true);
+          shadows.forEach((s, i) => expect(s.matrixWorld.elements).toEqual(airborne[i]!.elements));
+          expect(decals.every((d) => !d.visible)).toBe(true);
+        }
+        setShadowOrigin(unit.root, new Vector3(8, 0.9, 18));
+        scene.updateMatrixWorld(true);
+        const override = shadows.map((s) => s.matrixWorld.clone());
+        mode.naval = false;
+        scene.updateMatrixWorld(true);
+        shadows.forEach((s, i) => expect(s.matrixWorld.elements).toEqual(override[i]!.elements));
+        expect(decals.every((d) => !d.visible)).toBe(true);
+        setShadowOrigin(unit.root);
+        unit.root.position.y = 0.4;
+        water = false;
         mode.naval = true;
         scene.updateMatrixWorld(true);
-        shadows.forEach((s, i) => expect(s.matrixWorld.elements).toEqual(airborne[i]!.elements));
-        expect(decals.every((d) => !d.visible)).toBe(true);
+        shadows.forEach((s, i) => expect(s.matrixWorld.elements).toEqual(land[i]!.elements));
+      } finally {
+        geometry.dispose();
+        material.dispose();
+        nodes.dispose();
       }
-      setShadowOrigin(unit.root, new Vector3(8, 0.9, 18));
-      scene.updateMatrixWorld(true);
-      const override = shadows.map((s) => s.matrixWorld.clone());
-      mode.naval = false;
-      scene.updateMatrixWorld(true);
-      shadows.forEach((s, i) => expect(s.matrixWorld.elements).toEqual(override[i]!.elements));
-      expect(decals.every((d) => !d.visible)).toBe(true);
-      setShadowOrigin(unit.root);
-      unit.root.position.y = 0.4;
-      water = false;
-      mode.naval = true;
-      scene.updateMatrixWorld(true);
-      shadows.forEach((s, i) => expect(s.matrixWorld.elements).toEqual(land[i]!.elements));
-    } finally {
-      geometry.dispose();
-      material.dispose();
-      nodes.dispose();
-    }
-  });
+    },
+  );
 
   it('composes water opacity independently of the land preset and uses the deterministic foam pulse', () => {
     const nodes = new AtmosphereNodes();
@@ -375,7 +580,9 @@ describe('voxel water contact', () => {
         const alpha = Math.max(...points.map((p) => sampleWaterAlpha(foam, p)));
         expect(1 - (1 - alpha) ** 5).toBeCloseTo(WATER_FOAM_OPACITY * (1 + 0.03 * pulse), 14);
       }
-      expect(WATER_REFLECTION_OPACITY).toBe(0.3);
+      expect(WATER_REFLECTION_OPACITY).toBe(0.6);
+      expect(WATER_FLAT_REFLECTION_OPACITY).toBe(0.3);
+      expect(WATER_REFLECTION_FADE).toBe(0.8);
     } finally {
       source.geometry.dispose();
       source.material.dispose();

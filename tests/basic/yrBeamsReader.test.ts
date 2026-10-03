@@ -60,7 +60,7 @@ function memory() {
 }
 
 describe('YR RadBeam and Wave memory', () => {
-  it('reads all native kinds, world endpoints, RGB/double amplitude and each lifetime branch without writes', () => {
+  it('reads dispatched native kinds, world endpoints, RGB/double amplitude and lifetimes without writes', () => {
     const m = memory();
     const rad = [m.rad(0), m.rad(1), m.rad(2)];
     const waves = [m.wave(0), m.wave(1, 96), m.wave(2, 96), m.wave(3)];
@@ -68,8 +68,8 @@ describe('YR RadBeam and Wave memory', () => {
     m.vector(G.waves, waves);
     const before = m.bytes.slice();
     const read = readYrBeams(m.accessor);
-    expect(read.radBeams.map((b) => b.type)).toEqual(['temporal', 'rad', 'eruption']);
-    expect(read.radBeams[1]).toMatchObject({
+    expect(read.radBeams.map((b) => b.type)).toEqual(['rad', 'eruption']);
+    expect(read.radBeams[0]).toMatchObject({
       color: [20, 250, 70],
       amplitude: 40.5,
       period: 20,
@@ -84,7 +84,45 @@ describe('YR RadBeam and Wave memory', () => {
       uid: 123,
     });
     expect(read.stats.invalid).toEqual({ radBeams: 0, waves: 0 });
+    expect(read.stats.inactive.radBeams).toBe(1);
     expect(m.bytes.every((b, i) => b === before[i])).toBe(true);
+  });
+
+  it('observes chrono as native type 1 with cached RGB and exact FLH/target anchors for its 15 draw cycles', () => {
+    const m = memory();
+    const chrono = m.rad(1, 0);
+    m.bytes.set([128, 200, 255], chrono + O.radColor);
+    m.word(chrono + O.radPeriod, 15);
+    m.data.setFloat64(chrono + O.radAmplitude, 40, true);
+    m.point(chrono + O.radSource, 2560 + 100, 3072 - 25, 104 + 135);
+    m.point(chrono + O.radTarget, 4096 + 64, 3584 - 32, 208 + 180);
+    m.vector(G.radBeams, [chrono]);
+    expect(readYrBeams(m.accessor).radBeams).toEqual([
+      {
+        id: chrono,
+        type: 'rad',
+        color: [128, 200, 255],
+        source: { x: 2660, y: 3047, z: 239 },
+        target: { x: 4160, y: 3552, z: 388 },
+        amplitude: 40,
+        period: 15,
+        age: 0,
+        progress: 0,
+        sustained: false,
+      },
+    ]);
+    // A map may override ChronoBeamColor; color never changes native type semantics.
+    m.bytes.set([227, 66, 19], chrono + O.radColor);
+    m.word(chrono + O.radAge, 14);
+    expect(readYrBeams(m.accessor).radBeams[0]).toMatchObject({
+      type: 'rad',
+      color: [227, 66, 19],
+      age: 14,
+      progress: 14 / 15,
+    });
+    m.word(chrono + O.radAge, 15);
+    expect(readYrBeams(m.accessor).radBeams).toEqual([]);
+    expect(readYrBeams(m.accessor).stats.inactive.radBeams).toBe(1);
   });
 
   it('adds optional effects arrays and diagnostics through the existing observer', () => {

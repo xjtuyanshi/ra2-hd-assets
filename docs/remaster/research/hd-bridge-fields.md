@@ -4,7 +4,8 @@ The HD live view (`packages/hd-renderer/src/live`) accepts optional snapshot fie
 present; without them it falls back to the estimates listed in `docs/remaster/HD_BRIDGE.md` ("Bridge fields"). The
 types to fill are `LiveSnapshot`, `LiveHouse`, `LiveObject`, `LiveCells` (`live/liveView.ts`) and `LiveAnim`,
 `LiveBullet`, `LiveParticleSystem`, `LiveVoxelAnim`, `LiveFireEvent`, `LiveBeam`, `LiveEffects` (`live/effects.ts`).
-`LiveRadBeam` and `LiveWave` (`live/beams.ts`) extend `LiveEffects` with optional `radBeams`/`waves` arrays.
+`LiveRadBeam`, `LiveWave` and `LiveMindControlLink` (`live/beams.ts`) extend `LiveEffects` with optional
+`radBeams`/`waves`/`mindControlLinks` arrays.
 H2 building and infantry state and H3 runtime cells (overlays and smudges, published as independent live
 grids) are implemented end to end. H1 is partially implemented; remaining fields below are proposals.
 
@@ -90,6 +91,93 @@ Notes:
   simulated smoke; the per-particle ParticleType id and frame (ParticleClass::Type and its StageClass) are not read
   yet and would be an H2-style addition.
 - Poll cost: all of these are read on every poll already.
+
+### Chrono weapon ribbon and mind-control links
+
+Baseline: the player-owned YR 1.001 executable with SHA-256
+`7b8a068535d6af06845edf95ae829b113d00c02909330e16f197426cd7db94b6`.
+The following comes from its disassembly; YRpp class/header names are lookup leads only. Stock rules/art values
+were read from the player's MIX files through `GameInstall`, without copying the INI files into this repository.
+All observers remain behind the existing executable/image gate, and use the same policy in the main thread and Worker.
+
+**Chrono is an existing RadBeam path, not a missing WaveClass or TemporalClass drawing list.** CLEG's
+`NeutronRifle`/`NeutronRifleE` have `IsRadBeam=yes`; their `ChronoBeam` warhead has `Temporal=yes`.
+`0x6FF594..0x6FF5B7` branches on WeaponType `+0x154` and WarheadType `+0x15A`, calling `0x6FD620(target, 1)`.
+That function allocates **RadBeam type 1** at `0x6FD629..0x6FD62E`, choosing Rules `ChronoBeamColor` at
+`+0x1866` (`0x6FD752/0x6FD758`): stock RGB **128,200,255**. The existing reader already sees this beam.
+The HD defect was replacing its decoded RGB with a fixed green type-1 style; the renderer now consumes the
+actual color, including custom rule colors. No RGB heuristic identifies a weapon, and no second temporal beam is invented.
+RadBeam enum 0 is named Temporal in YRpp but `DrawAll` (`0x65928C/0x6592CD`) dispatches only 1/2;
+enum 0 is not evidence of a visible CLEG beam. TemporalClass owns erasure state, not this ribbon's presentation.
+
+| Chrono ribbon property | YR 1.001 evidence |
+| --- | --- |
+| Owner/list | RadBeam registry `0xB04A60`; TemporalClass registry `0xB0EC60` / vtable `0x7F5180` owns the erasure state, not a second drawn beam |
+| Source | Shooter `GetFLH(weapon 0, zero base)` at `0x6FD657`, cached by `0x6FD774` into RadBeam `+0x24`; stock CLEG `PrimaryFireFLH=100,-25,135` |
+| Target | Object `GetTargetCoords` (vtable `+0xA4`) at `0x6FD707`, otherwise `GetCenterCoords` (`+0x58`) at `0x6FD6F9`; cached by `0x6FD780` into `+0x30` |
+| Depth vs position | `GetRenderCoords` at `0x6FD67A` supplies depth bias only; it must not replace either endpoint |
+| Shape | One line strand; `0x6597C7..0x659824` sets amplitude to `Amplitude * Age / Period`; `0x659ACD..0x659B71` adds `sin(t * 2 * max(distance, 360) * pi / 180)` times that amplitude to world Z |
+| Rasterization | `0x6598FE..0x65993F` draws one depth-tested line per segment; spacing is FPS-dependent (10..100 leptons, `0x659291..0x6592BF`), not a fixed-width multi-strand helix |
+| Lifetime | Period 15 / amplitude 40 at `0x6FD785..0x6FD797`; age increments during drawing at `0x6599A8..0x6599AD`, expires at age >= Period (`0x6599B0..0x6599B3`), independent of Temporal.LifeTimer |
+| Visibility | Drawing-enabled byte `+9`; DrawAll has no owner, selection or endpoint-shroud predicate, but uses viewport clipping and depth testing |
+
+The HD type-1 path uses the decoded RGB and native world-Z sine, with a smooth core/halo and subtle intensity flow.
+It has no invented impact splash or double strand and no host-time lifetime extension. The correction also applies
+to non-temporal type-1 radiation beams, because native type 1 does not encode a reliable weapon-semantic tag.
+Native integer coordinate stepping can stop short of the cached target and its final sine can displace Z;
+HD deliberately uses continuous interpolation and pins both exact cached weapon anchors. Its 64..512 smooth
+segments and glow widths are presentation choices, not claims of native pixel identity. The common HD scene
+visibility/depth pass remains in effect; rendered shroud-edge parity requires the frozen-pair review.
+
+**Mind-control links** come from CaptureManager, separately from the capture weapon's projectile/impact effect.
+The read-only `mindControlLinkReader.ts`, aggregated by `beamsReader.ts`, publishes native-filtered links;
+the renderer receives coordinates, RGB, arc height and opaque identities, with no ABI knowledge or guest calls.
+
+| Field or behavior | YR 1.001 evidence |
+| --- | --- |
+| Manager registry / identity | DynamicVector at `0x89E0F0`, primary vtable `0x7E4B40`; manager nodes vector `+0x24`, controller `+0x48` |
+| Per-capture node | Unit `+0`, OriginalOwner `+4`, LinkDrawTimer start `+8`, remaining duration `+0x10` |
+| Capture duration | `0x471E3A..0x471E57` starts the timer using frame `[0xA8ED84]` and Rules `MindControlAttackLineFrames` (`+0x310`); remaining time is read from each node, not hardcoded |
+| Link visibility | `DrawLinks` `0x472160`: controller selected (`+0x83`), corresponding controlled unit selected, or LinkDrawTimer still positive |
+| Coarse draw scheduling | `NeedsToDrawLinks` `0x472640` also considers selection of controller `+0x11C`; this does not bypass DrawLinks' individual-node filter |
+| Color | Controller's house (`+0x21C`), house `LaserColor` RGB bytes `+0x56F9`; not a fixed purple or the unit's original owner |
+| Color-owner identity | House vtable `0x7EA8A0`, constructor store `0x4F5DCC`; both span and identity are validated |
+| Source | `0x472254..0x472264` calls `GetFLH(-1 - nodeIndex % 5, zero)`; native `0x6F3AD0` reads Type `AlternateFLH0..4` at `+0x85C + 12*i` |
+| Missing alternate FLH | Art loader `0x715F9E..0x716005` fills missing slots with `PrimaryFireFLH` (`+0x89C`); use loaded fields, not a guessed head height |
+| Source transform | `0x6F3B62..0x6F3D4B`: native 32-direction rounding, trig table, locomotor DrawMatrix, TurretOffset `+0x720`, barrel parity `+0x3B8`; Walk matrix `0x55A730`, Drive `0x4AFF60`, fixed ramp table `0xB45188 + 48*i` |
+| Building source | `GetRenderCoords` `0x459EF0` uses raw Location minus `(128,128,0)`; GetFLH `0x453840` also handles FirePixelOffset through Tactical inverse matrix `+0xDE4` (`0x6D2070`) |
+| Shape | `0x704E40`, interpolation `0x70508A..0x705119`: one 32-segment parabola; world Z adds `512 * (1 - ((i - 16) / 16)^2)`, no helix |
+| Width and highlight | Native ordinary line segments and 3x3 endpoint squares; `GetTickCount` IAT `0x7E1530` drives 64 steps at 16 ms (about 1.024 s), blending house color toward white; timer expiry switches off, without fading |
+| Target | Raw controlled-unit Location plus its type's `LeptonMindControlOffset` (`+0x3DC`) in Z, not a building foundation centre |
+| Planning mode | Global byte `0xAC4CF4`, getter `0x637AA0`, tactical gate `0x6D46DD..0x6D4799`; links are suppressed during planning mode |
+
+These are selection/capture-timer overlays, not persistent links for every controlled unit. Native dispatch has
+no additional local-house or endpoint-shroud predicate and draws the auxiliary links after shroud. The HD layer
+does not add a local-house/endpoint rejection, but still shares the scene's depth and final visibility-mask pass;
+native-after-shroud compositing parity is not established by the data-path tests.
+
+The player's stock `[CombatDamage] MindControlAttackLineFrames` is **20 logic frames**. The constructor fallback
+is 15 (`0x665ABE`); the INI loader `0x66C914..0x66C92E` uses section pointer `[0x7F0C84]` (CombatDamage) and
+key `0x83AF88`. The observer reads each node's actual remaining timer, so scenario/rules changes retain their timing.
+
+The projection hashes decoded link data as part of its same-frame change key: nested nodes, selection, timers,
+planning mode, source transforms, target height and house color can all change without a new frame number.
+Published points and RGB tuples are copied; native node membership/removal owns lifetime, without a host grace period.
+
+The source observer supports the stock Yuri/Yuri Prime walking path, Mastermind drive path on flat or settled
+ramps, and ordinary building FLH/FirePixelOffset paths. It omits unsupported transforms rather than publishing a
+false muzzle: moving slope interpolation/rocking, unknown non-null locomotors, open-topped passenger firing slots,
+building occupant/voxel-barrel offsets, and buildings with lateral/forward FLH and a live target requiring the
+special target-facing branch. Such omissions are counted as `stats.beams.mindControlLinks.unsupported`.
+Read-time limits are 1024 managers, 1024 nodes per manager and 4096 nodes total; malformed vectors, duplicate
+pointers, invalid object/type/house identities, backlinks, timers or coordinates are rejected independently.
+HD highlight animation preserves the native direction/approximate cycle but uses the presentation clock;
+its phase is not synchronized to the guest's GetTickCount. No unsupported-branch or original-pixel parity is claimed.
+
+Browser/live acceptance is separate from the synthetic tests. Compare frozen original/HD pairs for CLEG's blue
+weapon-to-target ribbon, interruption/expiry, a non-blue house's selected and deselected Yuri links, independent
+selection of one controlled unit, capture-timer expiry, Mastermind's five alternate FLHs, changing target heights,
+planning mode, and links crossing units/buildings/shroud. No rendered-pixel or full-match claim follows from these tests.
 
 ## H2: implemented building and infantry state
 

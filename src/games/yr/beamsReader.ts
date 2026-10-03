@@ -1,5 +1,6 @@
-import type { GameRenderRadBeam, GameRenderWave } from '../renderState';
+import type { GameRenderMindControlLink, GameRenderRadBeam, GameRenderWave } from '../renderState';
 import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
+import { readYrMindControlLinks } from './mindControlLinkReader';
 import type { YrPoint3 } from './objectCoords';
 import { isPlausiblePointer, readPointerVector } from './stateReader';
 
@@ -11,8 +12,27 @@ import { isPlausiblePointer, readPointerVector } from './stateReader';
  * - RadBeam has no vtable. Allocate (0x659110) registers in the vector at 0xB04A60:
  *   capacity 0x659134, count 0x659139/0x65917A, items 0x659180/0x659186. DrawAll
  *   reads count/items at 0x6591B9/0x6591D7. Ctor stores Type +0x10 at 0x65940F.
- *   Enum 1/2: weapon allocations 0x6FD629/0x6FD929; 0 is YRpp's Temporal value
- *   (the ctor accepts it, but DrawAll only dispatches 1/2 at 0x65928C/0x6592CD).
+ *   Enum 1/2: weapon allocations 0x6FD629/0x6FD929; 0 is YRpp's Temporal value,
+ *   but DrawAll only dispatches 1/2 at 0x65928C/0x6592CD. Type 0 is not drawn.
+ * - CLEG's chrono beam IS type 1, not type 0 or WaveClass: Fire tests IsRadBeam
+ *   (+0x154) at 0x6FF594 and Warhead.Temporal (+0x15A) at 0x6FF5A8, then calls
+ *   0x6FD620(target, 1) at 0x6FF5B7. That function allocates native type 1 and
+ *   selects Rules.ChronoBeamColor +0x1866 at 0x6FD752/0x6FD758 (INI load
+ *   0x66B7AD..0x66B7CF, key 0x83A1F0). Stock RGB is 128,200,255; retain the
+ *   actual cached RGB, including scenario overrides, without color-based tagging.
+ *   Source is GetFLH(weapon 0, zero base) at 0x6FD657, target GetTargetCoords
+ *   (vtable +0xA4) at 0x6FD707, or GetCenterCoords (+0x58) at 0x6FD6F9.
+ *   Stores 0x6FD774/0x6FD780 preserve those world points. GetRenderCoords at
+ *   0x6FD67A only supplies the native depth bias, not an endpoint displacement.
+ *   Period=15 and Amplitude=40 are set at 0x6FD785..0x6FD797. TemporalClass
+ *   owns erasure gameplay, not the beam's visual lifetime; do not synthesize a
+ *   persistent beam from Temporal.Owner/Target while the target is being erased.
+ * - Native type 1 is one segmented sine in world Z, not a two-strand helix.
+ *   Draw computes Amplitude * Age / Period at 0x6597C7..0x659824. For distance
+ *   L in leptons and segment fraction t, 0x659ACD..0x659B19 computes
+ *   sin(t * 2 * max(L,360) * pi/180), then adds the displacement only to Z at
+ *   0x659B64..0x659B71. The rasterizer uses one depth-tested line per segment
+ *   (0x6598FE..0x65993F); DrawAll has no player-owner/selection/shroud predicate.
  * - RGB bytes +0x20..22: 0x659474..0x659480; source +0x24..2C:
  *   0x6594A4..0x6594B4; target +0x30..38: 0x6594C4..0x6594D4.
  *   Period +0x3C: 0x6594E4; Amplitude (double) +0x40: 0x6594F8/0x6594FB.
@@ -75,10 +95,12 @@ export interface YrBeamsStats {
   vectors: { radBeams: number; waves: number };
   invalid: { radBeams: number; waves: number };
   inactive: { radBeams: number; waves: number };
+  mindControlLinks?: ReturnType<typeof readYrMindControlLinks>['stats'];
 }
 export interface YrBeams {
   radBeams: YrRadBeamEffect[];
   waves: YrWaveEffect[];
+  mindControlLinks: GameRenderMindControlLink[];
   stats: YrBeamsStats;
 }
 
@@ -143,7 +165,7 @@ export function readYrBeams(m: GuestMemoryAccessor, options: { includeLimbo?: bo
       stats.invalid.radBeams++;
       continue;
     }
-    if (!drawing || (!sustained && age >= period)) {
+    if (type === 'temporal' || !drawing || (!sustained && age >= period)) {
       stats.inactive.radBeams++;
       continue;
     }
@@ -198,5 +220,7 @@ export function readYrBeams(m: GuestMemoryAccessor, options: { includeLimbo?: bo
       progress: Math.min(1, laser ? (160 - intensity) / 128 : (100 - intensity) / 100),
     });
   }
-  return { radBeams, waves, stats };
+  const mindControl = readYrMindControlLinks(m);
+  stats.mindControlLinks = mindControl.stats;
+  return { radBeams, waves, mindControlLinks: mindControl.mindControlLinks, stats };
 }

@@ -336,6 +336,15 @@ class LiftLightnessTests(unittest.TestCase):
         result = projection.lift_lightness(rgba, paint, 0.6, protect_hi=178 / 255 + 0.0001)
         np.testing.assert_array_equal(result, rgba)
 
+    def test_gamma_above_one_darkens_mid_tones_and_keeps_paint(self):
+        rgba = np.zeros((1, 2, 4), np.uint8)
+        rgba[..., :3] = (150, 150, 150)
+        rgba[..., 3] = 255
+        paint = np.array([[0, 255]], np.uint8)
+        out = projection.lift_lightness(rgba, paint, 1.3)
+        self.assertLess(int(out[0, 0, 0]), 150)
+        np.testing.assert_array_equal(out[0, 1], rgba[0, 1])
+
     def test_gamma_one_returns_an_identical_independent_copy(self):
         rng = np.random.default_rng(2026)
         rgba = rng.integers(0, 256, (8, 8, 4), dtype=np.uint8)
@@ -347,7 +356,7 @@ class LiftLightnessTests(unittest.TestCase):
 
     def test_invalid_gamma_masks_and_protection_bounds_are_rejected(self):
         rgba, paint = np.zeros((1, 1, 4), np.uint8), np.zeros((1, 1), np.uint8)
-        for gamma in (0, -0.1, 1.1, float('nan'), float('inf')):
+        for gamma in (0, -0.1, 3.1, float('nan'), float('inf')):
             with self.subTest(gamma=gamma), self.assertRaisesRegex(ValueError, 'gamma'):
                 projection.lift_lightness(rgba, paint, gamma)
         with self.assertRaisesRegex(ValueError, 'matching paint red channel'):
@@ -434,7 +443,7 @@ class ProjectionLiftTests(unittest.TestCase):
         self.assert_complete_output(changed)
 
     def test_invalid_gamma_type_manifest_and_missing_atlas_fail_before_output(self):
-        for gamma in (0, -1, 1.1, float('nan'), float('inf')):
+        for gamma in (0, -1, 3.1, float('nan'), float('inf')):
             with self.subTest(gamma=gamma), self.assertRaisesRegex(ValueError, 'gamma'):
                 projection.lift(self.src, self.out, 'HTNK', gamma)
         for type_name in ('../HTNK', 'HTNK/other', 'HTNK:turret', 'HTNK-1', 'HTNK\n', ''):

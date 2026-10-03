@@ -152,20 +152,33 @@ describe('ore bench snapshots', () => {
 });
 
 describe('native beam bench snapshots', () => {
-  it('spawns all five beam kinds around cx/cy and freezes their mid-life state across time', async () => {
+  it('spawns all six beam examples around cx/cy and freezes their mid-life state across time', async () => {
     const snapshots = await bench('?fx=beams&cx=14&cy=16&warm=2&time=0.4');
     expect(snapshots[0]!.effects?.radBeams).toEqual([]);
     const fx = snapshots[2]!.effects!;
     expect(fx.anims).toEqual([]);
-    expect(fx.radBeams?.map((b) => b.type)).toEqual(['rad', 'temporal', 'eruption']);
+    expect(fx.radBeams?.map((b) => b.type)).toEqual(['rad', 'rad', 'eruption']);
+    expect(fx.radBeams?.[1]).toMatchObject({ color: [128, 200, 255], period: 15, amplitude: 40, age: 7.5 });
     expect(fx.waves?.map((b) => b.type)).toEqual(['magnetron', 'sonic']);
+    expect(fx.mindControlLinks).toHaveLength(1);
+    expect(fx.mindControlLinks?.[0]).toMatchObject({ color: [255, 32, 64], arcHeight: 512, remainingFrames: 15 });
     expect([...fx.radBeams!, ...fx.waves!].every((b) => b.progress === 0.5)).toBe(true);
     expect(fx.radBeams![0]!.source).toEqual({
-      x: Math.round((14 - 1.9 - 2.5) * 256),
-      y: Math.round((16 - 1.9 + 2.5) * 256),
+      x: Math.round((14 - 3.7 - 2.5) * 256),
+      y: Math.round((16 - 3.7 + 2.5) * 256),
       z: 312,
     });
     expect(snapshots.at(-1)!.effects).toEqual(fx);
+  });
+
+  it('selects deterministic chrono and mind-control review rows without creating the undrawn type-0 temporal beam', async () => {
+    const snapshots = await bench('?fx=beams&btypes=chrono,mindcontrol&bprogress=0.8&warm=0');
+    const fx = snapshots.at(-1)!.effects!;
+    expect(fx.radBeams).toHaveLength(1);
+    expect(fx.radBeams![0]).toMatchObject({ type: 'rad', color: [128, 200, 255], period: 15, age: 12 });
+    expect(fx.waves).toEqual([]);
+    expect(fx.mindControlLinks).toHaveLength(1);
+    expect((await bench('?fx=beams&btypes=mindcontrol&warm=0')).at(-1)!.effects!.radBeams).toEqual([]);
   });
 
   it.each([

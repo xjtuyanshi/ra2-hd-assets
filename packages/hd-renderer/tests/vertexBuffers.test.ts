@@ -37,7 +37,7 @@ import { buildTerrain } from '../src/terrain';
 import { buildRa2Terrain } from '../src/ra2/terrain';
 import { buildVoxelGeometry } from '../src/ra2/voxels';
 import { voxelPbrMaterialFor } from '../src/ra2/voxelPbr';
-import { voxelShadowMaterial, voxelWaterMaterial } from '../src/ra2/voxelShadow';
+import { VoxelWaterMesh, voxelShadowMaterial, voxelWaterMaterial } from '../src/ra2/voxelShadow';
 import { Ra2NightDressing } from '../src/ra2/nightDressing';
 import { AtmosphereNodes } from '../src/atmosphere';
 import { ObjectLayer } from '../src/objects';
@@ -673,12 +673,52 @@ describe('r186 vertex and uniform binding budget', () => {
       assertLimits(new Mesh(part.geometry, voxelShadowMaterial()));
       assertLimits(new Mesh(part.geometry, voxelWaterMaterial(source.nodes!, 'foam')));
       assertLimits(new Mesh(part.geometry, voxelWaterMaterial(source.nodes!, 'reflection')));
+      const reflection = voxelWaterMaterial(source.nodes!, 'reflection', part.material);
+      expect(reflection.colorNode).not.toBeNull();
+      assertLimits(new Mesh(part.geometry, reflection));
       part.geometry.dispose();
     }
     [terrain.mesh, generic.mesh, water.mesh].forEach(dispose);
     weatherMask.dispose();
     source.nodes!.dispose();
   });
+
+  it.each([false, true])(
+    'generates the complete coloured naval reflection shader without a device (WebGL=%s)',
+    (forceWebGL) => {
+      const nodes = new AtmosphereNodes();
+      const parts = buildVoxelGeometry(syntheticModel([syntheticSection(2)]), new Uint8Array(768), nodes);
+      const part = parts[0]!;
+      const source = new Mesh(part.geometry, part.material);
+      const reflection = new VoxelWaterMesh(source, nodes, 'reflection');
+      const canvas = {
+        width: 64,
+        height: 64,
+        style: {},
+        addEventListener() {},
+        removeEventListener() {},
+        setAttribute() {},
+      };
+      try {
+        const renderer = new WebGPURenderer({ canvas: canvas as unknown as HTMLCanvasElement, forceWebGL });
+        renderer.hasFeature = () => false;
+        renderer.hasCompatibility = () => false;
+        const builder = renderer.backend.createNodeBuilder(reflection, renderer);
+        builder.camera = new OrthographicCamera(-1, 1, 1, -1, 0.1, 400);
+        builder.scene = new Scene();
+        builder.build();
+        expect(builder.vertexShader).not.toMatch(/\b(?:NaN|undefined)\b/);
+        expect(builder.fragmentShader).not.toMatch(/\b(?:NaN|undefined)\b/);
+        expect(builder.fragmentShader).toMatch(/\bsin\(/);
+        expect(builder.fragmentShader).toMatch(/\bfloor\(/);
+        expect(builder.fragmentShader).toMatch(/texture(?:Sample|Load|Lod|Grad)?\(/);
+        expect(builder.fragmentShader).not.toContain('modelNormalMatrix');
+      } finally {
+        parts.forEach((p) => p.geometry.dispose());
+        nodes.dispose();
+      }
+    },
+  );
 
   it.each(['classic', 'enhanced'] as const)('audits %s shoreline water with and without scene reflections', (style) => {
     const source = cache();

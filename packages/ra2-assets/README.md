@@ -637,6 +637,10 @@ the original's). Because lightness may now move, loosen `lf_dE_mean` / `lf_dE_p9
 
 ## Infantry page finishing (Python, experimental)
 
+`prepare` splits an oversized sheet along animation columns or facing rows until it fits a native image-model
+canvas at a scale of at least 2x. Sheets that already fit retain their names and layout; split sheets keep every
+frame exactly once and preserve the facing instructions. A single frame that cannot fit at 2x is an error.
+
 `python/infantry_sheets.py build` composes redraw sheets, accepts frames by silhouette IoU, and pastes only frames
 whose library `page` equals `--page`. Other-page frames are recorded with `accepted: false` and
 `skipped: "other-page"` in `pages/report.json`. Optional `--rim-soften K` and `--paint-saturation S` both accept
@@ -1263,14 +1267,14 @@ orange-yellow hue band keep only `--keep` of their chroma at unchanged linear lu
 house paint and alpha stay untouched. It rewrites the colour atlases in place, so run it once per build.
 
 `lift --src "$VEHICLE_WORK/proj/vehicles-hd" --out "$VEHICLE_WORK/lifted" --type HTNK --gamma 0.6`
-raises hull CIELAB lightness with `L' = 100 * (L / 100) ** gamma` while retaining a*/b*. Gamma must satisfy
-`0 < gamma <= 1`; `1` preserves every RGBA byte. The paint red channel fades the lift from full strength at
+raises hull CIELAB lightness with `L' = 100 * (L / 100) ** gamma` while retaining a*/b*; gamma above 1 darkens
+instead. Gamma must satisfy `0 < gamma <= 3`; `1` preserves every RGBA byte. The paint red channel fades the lift from full strength at
 0.3 to zero at 0.7; fully protected and transparent texels retain their original RGB, and alpha never changes.
 The command prints JSON changed-texel counts per part and atomically writes colour atlases under their existing
 names, copying paint atlases and the manifest byte-for-byte into a complete build for `install --build-dir`.
 The output must be separate from, and outside, the source directory; source files remain untouched.
 L5H lifted the Soviet hulls that read darker than the original in a same-frame parade (gamma HTNK 0.6, APOC 0.7,
-HTK 0.4, TTNK 0.55, DTRUCK 0.5, SMCV 0.6, V3 0.8): median hull L* moved from 4-16 below the original to within 5.
+HTK 0.4, TTNK 0.55, DTRUCK 0.5, SMCV 0.6, V3 0.8): median hull L* moved from 4-16 below the original to within 5. Stage 2 re-measured the Allied Mirage tank and MCV, which the hull metric (low-saturation, non-shadow pixels) reported 9-10 L* brighter than the original: over the whole unit the HD versions are darker (AMCV mean L* 27.5 vs 36.8, MGTK 34.8 vs 39.9) and less lavender (C* 11 vs 15); the metric had excluded the original's saturated lavender hull pixels. A gamma 1.3 darkening was tried and rejected, so those atlases are unchanged.
 
 `lock --design INPUT --redraw OUTPUT --out LOCKED` restores the design sheet's low-pass Lab chroma while keeping
 the redraw's lightness and fine chroma detail. Legacy defaults remain `--sigma 6 --strength 1`; background and
@@ -1833,6 +1837,12 @@ shading intact; a missing or unreadable tile warns once and leaves the surface n
   theater letter (A/T/U/D/L/N) gets the map's letter, then G, then keeps the plain name. The engine does this whatever
   the art `NewTheater=` says: the install ships temperate/urban/desert/lunar files for flags marked `NewTheater=no`,
   and the shipyards have no NewTheater key but only `gg`/`ng`/`yg` files outside snow.
+- Infantry file stems use effective rules `Image=` (including scenario overrides), defaulting to the type ID;
+  the selected art section still supplies sequence/remap metadata, but its own `Image=` does not alias infantry
+  files. In YR 1.001, ObjectType::LoadFromINI (`0x5F933B`) reads that field from the caller's rules INI and the
+  Techno SHP loader (`0x7157B5`) uses it directly. Thus stock CAML loads `caml.shp` despite art `[CAML] Image=JOSH`.
+  Non-infantry art aliases retain their existing behavior. Old catalogs need a source-aware rebuild; fitting camel
+  art into inherited chimp atlas rectangles would lose the native silhouette and anchors.
 - Type library only: art `Remapable=` applies to infantry and vehicles too (animals are not house-coloured); art
   `TerrainPalette=yes` is recorded but the unit palette is kept (the lamp art is colour noise with the iso palette).
 
@@ -1892,6 +1902,200 @@ It generates a 4096x4096 indexed page with 1,800 body and 1,800 shadow frames (6
 writes both 8192x8192 outputs, and reports page/binary times. All inputs and outputs are synthetic and are removed
 from the system temporary directory after the run. This benchmark does not measure real GPU inference.
 
+## Scenario maps (Python)
+
+[`python/scenario_map.py`](python/scenario_map.py) creates an additive test scenario for the unmodified
+YR 1.001 engine. It reads the player's installation without modifying it, finds a stock multiplayer map and its
+packet description, and writes `<NAME>.yro` plus a plain-text `<NAME>.map` inspection copy. These outputs contain
+original game data and must stay outside Git, in a temporary directory or a gitignored resource directory.
+The tool does not launch the game, start a server, or change rules, executable files, or skirmish settings.
+
+```bash
+python3 packages/ra2-assets/python/scenario_map.py ls --game "$RA2_INSTALL" --find XMP29U2
+python3 packages/ra2-assets/python/scenario_map.py build \
+  --game "$RA2_INSTALL" --spec "$SCENARIO_SPEC" --out "$SCENARIO_OUT"
+python3 -m pytest -q packages/ra2-assets/python/test_scenario_map.py
+```
+
+`ls` lists packet/map pairs, archive paths, map filename hashes and packet locations. `--find` is an optional,
+case-insensitive substring filter on map and container names. Lookup traverses `.mix`, `.mmx`, and `.yro`
+containers in the game directory, including nested archives whose member names are unavailable. Unknown
+nested names are shown as `id:XXXXXXXX`, since MIX indices store hashes rather than filenames. Conflicting
+copies of a base map fail with an ambiguity error. Invalid archives produce diagnostics; they are not treated
+as readable maps. Outputs must be outside the game directory and must not already exist. The new map name
+must not collide with a map already present in the archives. Failed writes remove only files created by that run.
+
+### JSON specification and placement
+
+The following example uses a hypothetical `TESTBASE` map with waypoint `0` and a declared `Neutral` house.
+Replace the base name with an entry reported by `ls` and use type IDs present in the installed game.
+
+```json
+{
+  "base": "TESTBASE",
+  "name": "TESTVIEW",
+  "description": "Unit comparison",
+  "objects": [
+    {
+      "house": "<Player @ A>",
+      "kind": "infantry",
+      "type": "CLEG",
+      "at": { "waypoint": 0, "dx": 4, "dy": 2 },
+      "facing": 64,
+      "mission": "Area Guard",
+      "count": 3
+    },
+    {
+      "house": "<Player @ B>",
+      "kind": "unit",
+      "type": "HTNK",
+      "at": { "x": 40, "y": 50 },
+      "mission": "Sleep"
+    },
+    {
+      "house": "Neutral",
+      "kind": "aircraft",
+      "type": "PDPLANE",
+      "at": { "x": 42, "y": 50 }
+    }
+  ]
+}
+```
+
+`base`, `name`, and a nonempty `objects` array are required. `base` is a packet entry name, optionally with its
+map extension, and cannot be a path. `name` starts with an ASCII letter, contains only letters, digits and
+underscores, and is at most 32 characters; output names are uppercase. Optional `description` defaults to
+the uppercase name. Each object requires `house`, `kind`, `type`, and `at`. Unknown or inapplicable keys fail
+validation. String fields must be nonempty ASCII without INI delimiters or control characters. Type IDs are
+not resolved against rules: a valid spelling is still the supervisor's responsibility.
+
+`at` is either `{ "x": X, "y": Y }` or `{ "waypoint": N, "dx": DX, "dy": DY }`, never both.
+Coordinates use game cells, not screen pixels. A waypoint value is `x + 1000*y`: decode with `% 1000` for X
+and `// 1000` for Y, then add the offsets. Waypoint IDs are `0..701`, offsets default to zero and must be in
+`-511..511`; absolute coordinates are `0..511`. The requested cell must also lie inside the isometric
+rhombus described by `[Map] Size=0,0,width,height`, with dimensions `1..256`.
+
+Placement is deterministic and tracks existing and newly added objects. Infantry use free sub-cells `2`, `3`,
+and `4`; an optional `sub_cell` restricts placement to that slot. A full cell spills into expanding square
+rings around the requested cell. Units and aircraft get distinct free cells, including when `count > 1`.
+Listed vehicle, aircraft, structure-origin and terrain-object cells are blocked, as are infantry-occupied
+cells for vehicles/aircraft. Legacy infantry sub-cells `0` or `1` reserve their entire cell. The JSON build
+report prints every chosen cell, sub-cell, object index, requested house and emitted house.
+
+Terrain acceptance is **UNVERIFIED**: placement does not establish water, cliffs, structure footprints,
+overlays, bridge geometry or runtime passability. It does not decode `IsoMapPack5` in Python. The existing
+TypeScript terrain decoder is in `../ra2-formats/src/map/isoMapPack.ts`; using that decoder and theater tile
+definitions is a separate terrain review step. A successful build is a file-format check, not a VM gameplay
+or ownership acceptance result.
+
+### Ownership in the original engine
+
+For a normal local skirmish with **one human and one AI**, the specification accepts `<Player @ A>` as the
+human and `<Player @ B>` as the AI. It emits the engine's exact preplaced-object owner names
+`<human player>` and `Computer`, respectively. This is a tool convention for that two-player setup, not a
+promise that the human starts at waypoint 0. The supervisor must arrange the intended starting location.
+
+Live results on XMP29U2 (stage-2 units track, four local matches, normal speed): `Computer` rows are created and
+owned by the AI, but the AI moves them back to its base (or into its teams) within about a minute, even with mission
+`Guard` and both recruitable flags 0; `<human player>` rows were never created; a country name such as `Americans`
+did not give the human the objects either. The reliable staging is the map's `Neutral` house, which has no AI:
+XMP29U2 declares `Allies=Americans,Alliance,British,Arabs,Neutral`, so with the human playing a Soviet country
+(e.g. Russians) against an Allied AI, Neutral-owned armed units on `Guard` stay where they were placed and attack
+the human's units in range. That is how the Chrono Legionnaire beam and the Yuri / Mastermind mind-control links
+were captured as frozen original-vs-HD pairs.
+Neutral objects retain the map's declared or already-used house name; stock maps commonly use `Neutral`
+and `Special`, which have different game roles.
+
+The executable also contains `<Player @ A>` through `<Player @ H>`, but those tokens belong to the
+trigger/team house-reference path. The preplaced Infantry/Units/Aircraft loaders instead compare exact
+runtime house names and skip objects with an unresolved owner. Consequently, this tool does not write the
+tokens literally into object rows. C through H are rejected, and network or multiple-AI ownership is
+unsupported: ordinary skirmish names every AI `Computer`, so the name cannot identify a particular AI.
+Adding map `[Houses]` entries does not solve this; the multiplayer scenario loader bypasses that section.
+
+### YR object field layouts
+
+The index to the left of `=` is a unique numbered entry. Fields to its right are positional:
+
+```text
+[Infantry]
+index=house,type,strength,x,y,sub_cell,mission,facing,tag,veterancy,group,on_bridge,autocreate_no_recruitable,autocreate_yes_recruitable
+
+[Units]
+index=house,type,strength,x,y,facing,mission,tag,veterancy,group,on_bridge,follows_index,autocreate_no_recruitable,autocreate_yes_recruitable
+
+[Aircraft]
+index=house,type,strength,x,y,facing,mission,tag,veterancy,group,autocreate_no_recruitable,autocreate_yes_recruitable
+```
+
+| Field                        | Accepted value and default                                                                                                                                |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `house`, `type`              | Required exact house/type strings; ownership translation is described above.                                                                              |
+| `strength`                   | Integer `0..256`, default `256`; fraction of the type's full health in 1/256ths. The native loader clamps the resulting actual hitpoints to at least one. |
+| `facing`                     | Integer `0..255`, default `0`; 256-based direction.                                                                                                       |
+| `mission`                    | A name from the engine's list below, default `Guard`. Recognition does not mean every mission is useful for every object type.                            |
+| `count`                      | Integer `1..10000`, default `1`; total additions across the specification cannot exceed 10000. This is a tool field, not a CSV field.                     |
+| `sub_cell`                   | Infantry only: integer `2..4`; omitted means choose the first free slot.                                                                                  |
+| `tag`                        | Always emitted as `None`; the specification does not attach triggers.                                                                                     |
+| `veterancy`                  | Integer `0..200`, default `0`; `100` is veteran and `200` is elite. Intermediate values represent partial experience.                                     |
+| `group`                      | Integer `-1..9`, default `-1` (no group).                                                                                                                 |
+| `on_bridge`                  | Infantry/units only: integer `0` or `1`, default `0`; native `HIGH`/above-ground flag. It does not create a bridge.                                       |
+| `follows_index`              | Units only: integer `-1..65535`, default `-1`; native follower reference to an existing unit list index. Existence is not checked.                        |
+| `autocreate_no_recruitable`  | Integer `0` or `1`, default `1`; availability for teams with `Autocreate=no`.                                                                             |
+| `autocreate_yes_recruitable` | Integer `0` or `1`, default `0`; availability for teams with `Autocreate=yes`.                                                                            |
+
+Boolean-looking fields require JSON integers, not `true`/`false`. These defaults are scenario-tool defaults;
+they need not match every stock map. Supported mission spellings are:
+
+```text
+Sleep, Attack, Move, QMove, Retreat, Guard, Sticky, Enter, Capture, Eaten,
+Harvest, Area Guard, Return, Stop, Ambush, Hunt, Unload, Sabotage, Construction,
+Selling, Repair, Rescue, Missile, Harmless, Open, Patrol, Paradrop Approach,
+Paradrop Overfly, Wait, Attack Move, Spyplane Approach, Spyplane Overfly
+```
+
+Existing map bytes, line endings, comments, sections and their order remain intact. Additions are inserted
+at the end of their original section with indices starting after the maximum existing index; missing object
+sections are appended at EOF. Existing object numbers are never renumbered. Duplicate sections, duplicate
+numeric object keys and nonnumeric object keys are rejected rather than normalized.
+
+### Archive contract and evidence
+
+The output `.yro` is an unencrypted TS/RA2-style MIX with exactly two members: `<NAME>.pkt` and the renamed
+map using the base map's extension (normally `<NAME>.map`). The packet contains only `[MultiMaps]` with
+`1=<NAME>` and the base map's copied description block, renamed to `[<NAME>]` with `Description` changed.
+Other packet metadata is preserved. This mirrors the stock downloadable `.yro` pairing and permits the
+supervisor's existing empty loose `missionsmd.pkt` plus `[Skirmish] ScenIndex=0` selection procedure.
+Installing the generated archive and arranging those launch settings remain harness operations.
+
+[`python/scenario_mix.py`](python/scenario_mix.py) is a generic, stdlib-only archive helper. It reads classic
+and TS/RA2 flags headers, validates indices/body bounds, and handles the RSA-key-source/Blowfish encrypted
+headers required by stock `multimd.mix`; output is always unencrypted. SHA-1 trailer presence is recognized,
+but its digest is not verified. IDs use CRC32 of the uppercase name with classic partial-word padding: append
+the tail length and then copies of the tail's first byte to complete four bytes. Output entries are sorted by
+signed 32-bit ID, matching stock indices. The implementations and attribution follow this repository's
+`../ra2-formats/src/mix/{crc,wskey,blowfish,mixFile}.ts` and the XCC sources named in the helper.
+
+The format was cross-checked against player-owned stock data and the YR 1.001 executable; no extracted map
+fixture is part of the tests. Reproducible evidence locations are:
+
+- `multimd.mix` contains `XMP29U2.MAP`, whose `[Units]` entry 0 has the 14-field vehicle layout and uses
+  `Neutral`, `None`, group `-1` and follows-index `-1`. Its `[Houses]` includes `Neutral` and `Special`.
+- `multimd.mix` member `AustinTX.MAP`, `[Infantry]` entries 62, 63 and 66, confirms the 14-field infantry
+  layout and sub-cells 2, 4 and 3; `C1A02MD.MAP`, `[Aircraft]` entry 0, confirms the 12-field aircraft layout.
+- YR 1.001 writer format-string VAs are `0x825584` (Infantry, used at `0x520062`), `0x845910` (Units,
+  `0x743862`), and `0x817F40` (Aircraft, `0x41B0BA`). Veterancy import/export at `0x7500E0`/`0x7500D0`
+  applies factors `0.01`/`100`. Waypoint decoding at `0x68BE0A..0x68BE33` divides by 1000 into X/Y.
+- The 32 mission names are stored in the pointer table at `0x816CAC`; resolver `0x5B3910` reads it.
+  All three object loaders call exact-name resolver `0x50C170`: Infantry at `0x51FB6D`, Units at
+  `0x74330F`, Aircraft at `0x41B17D`. Native skirmish names are written at `0x68804A` and `0x688210`;
+  the multiplayer branch at `0x6877B9` bypasses `[Houses]` import. Player-token decoding is at `0x510FB0`.
+- World-Altering Editor revision `110eb4640c51a2784372ec1bba3fb34c2313bafd`,
+  `src/MapEditorLibrary/Initialization/MapLoader.cs` (`ReadInfantry`, `ReadUnits`, `ReadAircraft`) and
+  `MapWriter.cs` provide an independent field-order check. `Constants.cs` records health/facing bounds
+  and veterancy values; `Models/MapTile.cs` chooses free sub-cells 4, 3 and 2; `Models/Waypoint.cs` writes
+  `Y * 1000 + X`. These are provenance references, not runtime dependencies.
+
 ## Infantry shadow repair (Python + TypeScript)
 
 Stock GI/INIT/SLAV/BRUTE/DOG SHPs have empty second-half shadow headers. Their original black footprint is embedded
@@ -1939,3 +2143,86 @@ evidence, not live GPU acceptance. Asset-free regressions:
 pnpm exec vitest run packages/ra2-assets/tests/infantryShadows.test.ts
 python3 -B -m unittest discover -s packages/ra2-assets/python -p test_infantry_shadows.py
 ```
+
+## Unit redraw coverage (Python)
+
+`python/unit_coverage.py` audits an existing cache farm without modifying its libraries, symlinks or art. The
+runtime dependencies are Python 3.11+, NumPy and Pillow. Pass the stage-0 cache separately with `--base`; keep both inputs and
+generated reports outside Git. No game files are downloaded or copied into this package.
+
+```bash
+python3 packages/ra2-assets/python/unit_coverage.py scan \
+  --farm "$HD_FARM" --base "$HD_BASE" \
+  --theaters urban temperate snow desert lunar newurban \
+  --meta packages/ra2-assets/python/unit_coverage_meta.example.json \
+  --json "$COVERAGE_OUT/coverage.json" --md "$COVERAGE_OUT/coverage.md"
+python3 -m pytest packages/ra2-assets/python/test_unit_coverage.py
+```
+
+`--theaters` and `--meta` are optional; the default covers all six theaters. Urban remains required for calibration
+even when `--theaters` selects other theaters only. Metadata maps rules type codes to
+optional `side`, `name` and `note` strings. For example, the GI's rules code is `E1`, while its image is `GI`.
+The JSON retains per-theater non-empty frame and infantry sequence counts. The Chinese Markdown table uses
+`已完成`, `部分` and `未完成`, with rules order preserved within each kind. Voxel checks require the manifest's
+body and applicable turret parts; unloading forms receive additional rows, as do building turret voxels.
+The primary unit table covers infantry, vehicles, aircraft and building turrets; building body types are
+accounted for per theater in the JSON's `excluded_buildings` record.
+
+Sprite classification compares each box-downsampled HD frame with the original on shared, non-shadow body pixels,
+and scores its CIE Lab difference from the box-downsampled stage-0 page to remove ordinary upscale differences.
+When a theater's stage-0 library has no HD page reference, the scanner can borrow the urban stage-0 frame after
+verifying identical frame dimensions, offsets and original pixels. Decoded RGBA comparisons ignore RGB under zero
+alpha. If both originals are indexed and their raw indices match exactly, differing decoded palette pixels are
+excluded from scoring and counted in `baseline_palette_pixels_excluded`. Such frames record
+`baseline_theater: "urban"` and `baseline_fallback: true`; other original-art changes prevent borrowing and remain
+unverified. Missing files behind a declared HD reference do not trigger this fallback.
+Non-empty original frames remain in the totals when their current HD art is missing and cannot be scored.
+Known redrawn and unchanged urban sprites calibrate a structural threshold, with score distributions and the
+chosen margin included in the report. A redrawn control type can still contain retained animation frames.
+This is an image-based coverage estimate, not proof of image-model provenance: global polish and an unusually
+faithful redraw can affect classification. The asset-free pytest suite creates tiny synthetic libraries, pages
+and voxel manifests in temporary directories.
+Voxel completion checks atlas, part and facing integrity only; it does not establish silhouette IoU, material
+quality, faction-paint fidelity or live occlusion. Keep registration and visual acceptance evidence separate.
+
+When a later pass redraws the negative control types, automatic calibration can no longer separate its cohorts.
+Use `--calibration-report "$ORIGINAL_COVERAGE_JSON"` to retain the original standard while scoring the current art.
+The original report must include urban control-frame scores and use the same resolved stage-0 base path. The tool
+recomputes its calibration and verifies the metric, cohorts and threshold; a supplied threshold alone is rejected.
+
+An independently verified source correction can invalidate the historical stage-0 sprite itself, as with an old
+CAML catalog containing `josh.shp` instead of native `caml.shp`. Keep that historical cache and calibration archive
+unchanged. An optional explicit `--source-overlay` supplies an immutable source-corrected comparison baseline:
+
+```bash
+python3 packages/ra2-assets/python/unit_coverage.py scan \
+  --farm "$HD_FARM" --base "$HD_BASE" \
+  --calibration-report "$ORIGINAL_COVERAGE_JSON" \
+  --source-overlay "$SOURCE_OVERLAY/source-overlay.json" \
+  --json "$COVERAGE_OUT/coverage.json" --md "$COVERAGE_OUT/coverage.md"
+python3 -m pytest packages/ra2-assets/python/test_source_overlay.py
+```
+
+The version-1 overlay declares `recipe: "indexed-nearest-2x"`, the unchanged `base` path, the frozen report's
+`calibration_report_sha256`, and reviewed `provenance` file descriptors (`path` and `sha256`). Each selected theater
+binds `base_library_sha256`, a separate baseline `library` descriptor, relative PNG `files` hashes and explicitly
+scoped `sprites`. Each sprite binds its rules `type`, `type_identity` excluding only atlas-page indices, the new
+`identity` (`file`, `canvas`, `frameCount`, `palette`, `remap`), the full `superseded_identity` (`file`, `canvas`,
+`frameCount`) and ordered `frames`/`shadows` records (`size`, `offset`, `indexed_sha256`). Baseline libraries contain
+only those declared types and sprites. No default source is inferred from filenames or a failed comparison.
+
+The scanner checks current source identity, type/sequence bindings, exact original indexed crops, offsets, palettes
+and both body/shadow counts. It independently reconstructs the baseline's nearest-2x RGBA and house-paint support;
+hashes alone cannot approve an arbitrary HD donor. Original fixed colours remain fixed for non-remappable sprites.
+Missing or altered evidence, archive metadata, page bytes, geometry or recipe fails the explicit overlay. Its
+sprites cannot borrow an unrelated urban baseline. The original frozen control scores determine calibration before
+overlay use; source-corrected sprites never enter a newly inferred calibration cohort.
+
+Reports identify this baseline as `source-verified-nearest-2x`, retain overlay/provenance hashes, and distinguish it
+from historical stage-0 art. The hashes bind reviewed evidence; they do not automatically prove the native source
+analysis or image-model provenance. Keep reports outside the immutable overlay directory. This opt-in mechanism
+does not write assets, repair catalogs, weaken geometry gates or establish live rendering acceptance.
+The new report records the source report's SHA-256 and labels the control statistics as historical. Old reports
+have no baseline content hashes, so matching paths does not prove historical byte immutability. Preserve the
+original report separately: outputs cannot overwrite it, and a report with frozen controls cannot itself serve
+as the calibration reference.

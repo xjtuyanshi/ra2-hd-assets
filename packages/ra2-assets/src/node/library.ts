@@ -475,7 +475,7 @@ export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): Col
 
   // ---------------------------------------------------------------- infantry
   const infantry = (id: string): LibraryType | undefined => {
-    const { sec, image, section } = src.artOf(id);
+    const { sec, image, section } = src.infantryArtOf(id);
     const candidates = src.shpCandidates(image, sec);
     if (!resolveArtFile(candidates, has)) {
       skip('infantry', id, `no art file (${candidates.join(', ')})`);

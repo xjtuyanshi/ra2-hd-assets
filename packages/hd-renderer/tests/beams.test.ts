@@ -11,16 +11,22 @@ import { uniform } from 'three/tsl';
 import {
   beamFade,
   beamIntensity,
+  beamColor,
   LiveBeams,
+  mindControlPoints,
+  nativeRadPoints,
   ribbonPoints,
   waveRings,
   RIBBON_SEGMENTS,
   RING_SEGMENTS,
+  LINK_SEGMENTS,
+  RAD_MAX_SEGMENTS,
   BEAM_WIDTHS,
   BEAM_STRANDS,
   BEAM_RIBBON_CAPACITY,
   type LiveRadBeam,
   type LiveWave,
+  type LiveMindControlLink,
 } from '../src/live/beams';
 import { engineAnchor } from '../src/live/effectSprites';
 import type { LiveEffects } from '../src/live/effects';
@@ -48,12 +54,24 @@ const wave: LiveWave = {
   intensity: 50,
   progress: 0.5,
 };
-const effects = (r: LiveRadBeam[] = [], w: LiveWave[] = []): LiveEffects => ({
+const link: LiveMindControlLink = {
+  id: 30,
+  controller: 31,
+  targetId: 32,
+  source: rad.source,
+  target: rad.target,
+  color: [255, 32, 64],
+  arcHeight: 512,
+  remainingFrames: 15,
+  selected: false,
+};
+const effects = (r: LiveRadBeam[] = [], w: LiveWave[] = [], links: LiveMindControlLink[] = []): LiveEffects => ({
   anims: [],
   bullets: [],
   particleSystems: [],
   radBeams: r,
   waves: w,
+  mindControlLinks: links,
 });
 const layer = () => new LiveBeams(uniform(new Vector3(1, 0, 0)), uniform(new Vector3(0, 1, 0)), uniform(0));
 const buffers = (beams: LiveBeams) =>
@@ -97,6 +115,74 @@ function checkEllipses(wave: LiveWave): number[] {
 }
 
 describe('HD native beam geometry and publications', () => {
+  it('keeps the chrono/radiation strand in world Z with exact anchors and native age-scaled amplitude', () => {
+    // A 360-lepton span covers exactly two native sine turns. Segment 8 is the first peak.
+    const beam = { ...rad, source: { x: 0, y: 0, z: 104 }, target: { x: 360, y: 0, z: 104 } };
+    const points = nativeRadPoints(beam);
+    expect(points).toHaveLength(65);
+    expect(points[0]).toEqual(engineAnchor(0, 0, 104));
+    expect(points.at(-1)).toEqual(engineAnchor(360, 0, 104));
+    expect(points[8]).toEqual(engineAnchor(45, 0, 124));
+    expect(nativeRadPoints({ ...beam, age: 5 })[8]).toEqual(engineAnchor(45, 0, 114));
+    expect(nativeRadPoints({ ...beam, age: 0 })[8]).toEqual(engineAnchor(45, 0, 104));
+    const oblique = nativeRadPoints(rad);
+    oblique.forEach((p, i) => {
+      const t = i / (oblique.length - 1);
+      const baseline = engineAnchor(256 + 2048 * t, 512, 104 + 104 * t);
+      expect(p.x).toBeCloseTo(baseline.x, 12);
+      expect(p.z).toBeCloseTo(baseline.z, 12);
+      expect(Math.abs(p.y - baseline.y)).toBeLessThanOrEqual((20 / 104) * LEVEL_HEIGHT + 1e-10);
+    });
+    expect(nativeRadPoints({ ...rad, target: { x: 100_000, y: 512, z: 208 } })).toHaveLength(RAD_MAX_SEGMENTS + 1);
+  });
+
+  it('uploads a single chrono strand in the published rules colour without a fabricated second strand or impact splash', () => {
+    const beams = layer();
+    const chrono = { ...rad, color: [128, 200, 255] as [number, number, number], period: 15, age: 7 };
+    beams.update(effects([chrono]), 'faithful', () => false);
+    expect(beams.mesh.count).toBe(nativeRadPoints(chrono).length - 1);
+    const { from, to, appearance: a } = buffers(beams);
+    const expectedColor = [0.2158605, 0.5775804, 1];
+    expectedColor.forEach((value, i) => expect(a.getComponent(0, i)).toBeCloseTo(value, 6));
+    expect(a.getComponent(0, 9)).toBeGreaterThan(0.5);
+    expect(a.getComponent(0, 9)).toBeLessThan(1);
+    expect(new Vector3().fromBufferAttribute(from, 0).distanceTo(engineAnchor(256, 512, 104))).toBeLessThan(1e-6);
+    expect(
+      new Vector3().fromBufferAttribute(to, beams.mesh.count - 1).distanceTo(engineAnchor(2304, 512, 208)),
+    ).toBeLessThan(1e-6);
+    beams.update(effects([{ ...chrono, color: [255, 0, 0] }]), 'faithful', () => false);
+    expect([0, 1, 2].map((i) => a.getComponent(0, i))).toEqual([1, 0, 0]);
+    beams.update(effects([{ ...chrono, age: 15 }]), 'faithful', () => false);
+    expect(beams.mesh.count).toBe(0);
+    beams.dispose();
+  });
+
+  it('keeps the mind-control arch in world Z, preserves endpoints and uses house colour with a flowing highlight', () => {
+    const points = mindControlPoints(link);
+    expect(points).toHaveLength(LINK_SEGMENTS + 1);
+    expect(points[0]).toEqual(engineAnchor(256, 512, 104));
+    expect(points.at(-1)).toEqual(engineAnchor(2304, 512, 208));
+    expect(points[16]).toEqual(engineAnchor(1280, 512, 156 + 512));
+    const beams = layer();
+    beams.update(effects([], [], [link]), 'faithful', () => true);
+    // The native auxiliary-link observer, rather than endpoint shroud filtering or a host timer, owns visibility.
+    expect(beams.mesh.count).toBe(LINK_SEGMENTS);
+    const { from, to, appearance: a } = buffers(beams);
+    beamColor(link.color).forEach((value, i) => expect(a.getComponent(0, i)).toBeCloseTo(value, 6));
+    expect(a.getComponent(0, 9)).toBe(1);
+    expect(a.getComponent(0, 13)).toBe(0);
+    expect(a.getComponent(31, 13)).toBe(31 / 64);
+    expect(a.getComponent(0, 6) * PIXELS_PER_CELL_EDGE).toBeCloseTo(6, 6);
+    expect(new Vector3().fromBufferAttribute(from, 0).distanceTo(engineAnchor(256, 512, 104))).toBeLessThan(1e-6);
+    expect(new Vector3().fromBufferAttribute(to, 31).distanceTo(engineAnchor(2304, 512, 208))).toBeLessThan(1e-6);
+    beams.update(effects([], [], [{ ...link, selected: true, remainingFrames: 0 }]), 'faithful', () => true);
+    expect(beams.mesh.count).toBe(LINK_SEGMENTS);
+    expect(a.getComponent(0, 9)).toBe(1);
+    beams.update(effects(), 'faithful', () => false);
+    expect(beams.mesh.count).toBe(0);
+    beams.dispose();
+  });
+
   it('pins the engine endpoints, bounds the sinusoidal amplitude and uses Period to phase the ribbon', () => {
     const points = ribbonPoints(rad),
       from = engineAnchor(256, 512, 104),
@@ -166,7 +252,7 @@ describe('HD native beam geometry and publications', () => {
 
   it('uploads two strands, zoom-proportional 12/4/1.5px profiles, specified colours and centred endpoint flares/splash', () => {
     expect(BEAM_STRANDS).toBe(2);
-    for (const type of ['rad', 'temporal', 'eruption'] as const) {
+    for (const type of ['temporal', 'eruption'] as const) {
       const beams = layer();
       beams.update(effects([{ ...rad, type }]), 'enhanced', () => false);
       expect(beams.mesh.count).toBe(BEAM_STRANDS * RIBBON_SEGMENTS + 8);
@@ -176,7 +262,7 @@ describe('HD native beam geometry and publications', () => {
       [12, 4, 1.5].forEach((width, i) => expect(profile(64)[i]).toBeCloseTo(width * 0.7, 5));
       expect(a.getComponent(64, 9) / a.getComponent(0, 9)).toBeCloseTo(0.45, 5);
       expect(a.getComponent(0, 6)).toBeCloseTo(BEAM_WIDTHS.halo, 6);
-      const expected = type === 'rad' ? [0.45, 1, 0.2] : type === 'temporal' ? [0.5, 0.82, 1] : [1, 0.22, 0.035];
+      const expected = beamColor(rad.color);
       expected.forEach((color, i) => expect(a.getComponent(0, i)).toBeCloseTo(color, 6));
       for (const [n, endpoint, scale] of [
         [128, rad.source, 1.8],
@@ -258,7 +344,7 @@ describe('HD native beam geometry and publications', () => {
     expect(layouts).toHaveLength(4);
     expect(attributes.length).toBeLessThanOrEqual(16);
     const packed = attributes.filter((a): a is InterleavedBufferAttribute => 'isInterleavedBufferAttribute' in a);
-    expect(packed).toHaveLength(6);
+    expect(packed).toHaveLength(7);
     expect(new Set(packed.map((a) => a.data)).size).toBe(1);
     beams.dispose();
   });
@@ -273,16 +359,16 @@ describe('HD native beam geometry and publications', () => {
     const beams = layer(),
       visible = () => false;
     beams.update(effects([rad], [wave]), 'faithful', visible);
-    expect(beams.mesh.count).toBe(2 * RIBBON_SEGMENTS + 8 + 1 + 6 * RING_SEGMENTS);
+    expect(beams.mesh.count).toBe(nativeRadPoints(rad).length - 1 + 1 + 6 * RING_SEGMENTS);
     const flush = vi.spyOn((beams as unknown as { from: { flush(): void } }).from, 'flush');
     beams.update(effects([rad], [wave]), 'faithful', visible);
     expect(flush).not.toHaveBeenCalled();
     beams.update(effects([{ ...rad, target: { ...rad.target, x: 2560 } }]), 'faithful', visible);
     expect(flush).toHaveBeenCalledOnce();
-    beams.update(effects([{ ...rad, progress: 1 }]), 'faithful', visible);
+    beams.update(effects([{ ...rad, age: rad.period, progress: 1 }]), 'faithful', visible);
     expect(beams.mesh.visible).toBe(false);
     beams.update(effects([rad]), 'enhanced', visible);
-    expect(beams.mesh.count).toBe(2 * RIBBON_SEGMENTS + 8);
+    expect(beams.mesh.count).toBe(nativeRadPoints(rad).length - 1);
     beams.update(undefined, 'enhanced', visible);
     expect(beams.mesh.count).toBe(0);
     const disposeGeometry = vi.spyOn(beams.mesh.geometry, 'dispose');
@@ -294,10 +380,26 @@ describe('HD native beam geometry and publications', () => {
 
   it('bounds GPU uploads and re-evaluates shroud visibility on an unchanged publication', () => {
     const beams = layer(),
-      many = effects(Array.from({ length: 100 }, (_, id) => ({ ...rad, id })));
+      many = effects(Array.from({ length: 100 }, (_, id) => ({ ...rad, type: 'eruption' as const, id })));
     beams.update(many, 'faithful', () => false);
     expect(beams.mesh.count).toBe(BEAM_RIBBON_CAPACITY);
     beams.update(many, 'faithful', () => true);
+    expect(beams.mesh.count).toBe(0);
+    beams.dispose();
+  });
+
+  it('lets type-1 rays and mind-control links follow native visibility while bounding their shared uploads', () => {
+    const beams = layer();
+    beams.update(effects([rad]), 'faithful', () => true);
+    expect(beams.mesh.count).toBe(nativeRadPoints(rad).length - 1);
+    const links = Array.from({ length: 130 }, (_, id) => ({ ...link, id }));
+    beams.update(effects([], [], links), 'faithful', () => true);
+    expect(beams.mesh.count).toBe(BEAM_RIBBON_CAPACITY);
+    const changed = { ...link, target: { ...link.target, z: 416 } };
+    beams.update(effects([], [], [changed]), 'faithful', () => true);
+    const { to } = buffers(beams);
+    expect(new Vector3().fromBufferAttribute(to, 31).distanceTo(engineAnchor(2304, 512, 416))).toBeLessThan(1e-6);
+    beams.update(undefined, 'faithful', () => true);
     expect(beams.mesh.count).toBe(0);
     beams.dispose();
   });

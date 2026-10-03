@@ -20,6 +20,7 @@ import {
   type YrNativeDetail,
 } from './buildingActiveAnim';
 import { YR_BEAMS_GLOBALS, YR_BEAMS_LIMITS } from './beamsReader';
+import { readYrMindControlLinks } from './mindControlLinkReader';
 import {
   createYrEffectsReader,
   YR_EFFECTS_GLOBALS,
@@ -363,6 +364,11 @@ function readChangeKey(
         span(pointer, 0, size);
       }
     }
+    // Control links depend on nested nodes, alternate FLHs, house colour, selection and planning mode, not only
+    // their manager objects. Hash the bounded read-only projection so every decoded dependency participates,
+    // including same-frame disappearance/recovery. No guest buffers or pointers are followed outside the YR layer.
+    const links = JSON.stringify(readYrMindControlLinks(m).mindControlLinks);
+    for (let i = 0; i < links.length; i++) word(links.charCodeAt(i));
     // Layer sorting may finish after the logic frame counter changed. Do not retain a stale registered tie order
     // just because a later poll observes that same frame, including while the match is paused.
     for (let layer = 0; layer < 5; layer++) {
@@ -568,6 +574,12 @@ function projectEffects(effects: YrEffects): GameRenderEffects {
       color: [...beam.color],
     })),
     waves: effects.waves?.map((wave) => ({ ...wave, source: point(wave.source), target: point(wave.target) })),
+    mindControlLinks: effects.mindControlLinks?.map((link) => ({
+      ...link,
+      source: point(link.source),
+      target: point(link.target),
+      color: [...link.color],
+    })),
     // EBolt::Draw 0x4C2797..0x4C279C skips lifetime zero even before DrawAll removes the object.
     electricBolts: effects.electricBolts
       .filter((bolt) => bolt.lifetime > 0)

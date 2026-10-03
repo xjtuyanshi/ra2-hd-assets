@@ -4,8 +4,9 @@
  *
  *   ?fx=TWLT070[,GUNFIRE...]  spawn these anims at the view centre (spread along a diagonal) and show them `time` later
  *   ?fx=units                 voxel tanks, SHP drones and infantry at eight facings, plus a few buildings
- *   ?fx=beams                 rad, temporal, eruption, magnetron and sonic in five screen rows around cx/cy;
- *                             frozen at mid-life (&bprogress=0..1 changes progress); &effects=enhanced brightens halos
+ *   ?fx=beams                 rad, chrono, eruption, magnetron, sonic and a house-coloured mind-control link;
+ *                             frozen at mid-life (&bprogress=0..1 changes progress); &effects=enhanced brightens halos;
+ *                             &btypes=chrono,mindcontrol selects rows (default all six)
  *   ?fx=shpunits&stypes=DRON  one screen row per SHP vehicle, eight clockwise facings from screen-up, DarkRed house;
  *                             &seq=Stand|Walk|Fire&step=0 selects a pose; &animate=N advances every N logic frames
  *                             after warm-up (with &time= or __fx.advance). &sspace=1 controls row/column spacing.
@@ -78,14 +79,14 @@
  */
 import { LiveView, type LiveObject, type LiveSmudgeCells, type LiveSnapshot } from '../src/live/liveView';
 import { effectRow, type LiveAnim } from '../src/live/effects';
-import type { LiveRadBeam, LiveWave } from '../src/live/beams';
+import type { LiveMindControlLink, LiveRadBeam, LiveWave } from '../src/live/beams';
 import { ra2Screen } from '../src/ra2/cache';
 import { applyLookPreset, LOOK_PRESETS, type LookPreset } from '../src/HdRenderer';
 import { BUILDING_LIGHTS, displayLinear } from '../src/live/buildingLights';
 import { voxelLookParams } from './look';
 import { voxelProjectionFor } from '../src/ra2/voxelProjection';
 import { voxelPbrFor } from '../src/ra2/voxelPbr';
-import { voxelShadowFor } from '../src/ra2/voxelShadow';
+import { applyVoxelShadowParams } from '../src/ra2/voxelShadow';
 import { advanceShpReview, shpUnitReview } from './shpUnitReview';
 import type { TypeLibrary } from '../../ra2-assets/src/library';
 import { depleteOre, growthGrid, mapOverlayGrid, polylinePosition, type CellPoint } from './oreBench';
@@ -140,10 +141,8 @@ const live = await LiveView.create(canvas, {
   stats: () => live.hd.stats(),
   setWeather: (weather: Weather, intensity?: number) => live.setEnvironment(weatherSettings(weather, intensity)),
 };
-// &vshadow=hard restores the single hard twin; contact penumbra is the default (also in replays).
-voxelShadowFor(live.hd.nodes).soft = params.get('vshadow') !== 'hard';
-// &vnaval=old restores sheared drop shadows on water for before/after review.
-voxelShadowFor(live.hd.nodes).naval = params.get('vnaval') !== 'old';
+// Independent before/after controls for penumbra, naval contact and reflection colour.
+applyVoxelShadowParams(params, live.hd.nodes);
 // &look=golden: the enhanced look preset (src/HdRenderer.ts LOOK_PRESETS; pair it with &hours=16.5), for effect reviews
 // in the lighting they will be seen with.
 const lookPreset = params.get('look') as LookPreset | null;
@@ -238,6 +237,7 @@ async function replay(): Promise<never> {
       beams: [],
       radBeams: [],
       waves: [],
+      mindControlLinks: [],
     },
   });
   const warm = Number(params.get('warm') ?? 120);
@@ -819,39 +819,62 @@ function benchBeams(): NonNullable<LiveSnapshot['effects']>['beams'] {
 }
 
 /** Fixed native ribbon/wave publications, independent of warm-up and animation time. */
-function benchRibbons(): { radBeams: LiveRadBeam[]; waves: LiveWave[] } {
-  if (!fxIds.includes('beams') || spawned === null) return { radBeams: [], waves: [] };
+function benchRibbons(): { radBeams: LiveRadBeam[]; waves: LiveWave[]; mindControlLinks: LiveMindControlLink[] } {
+  const result = {
+    radBeams: [] as LiveRadBeam[],
+    waves: [] as LiveWave[],
+    mindControlLinks: [] as LiveMindControlLink[],
+  };
+  if (!fxIds.includes('beams') || spawned === null) return result;
   const value = Number(params.get('bprogress') ?? 0.5);
   const progress = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0.5;
+  const available = ['rad', 'chrono', 'eruption', 'magnetron', 'sonic', 'mindcontrol'];
+  const rows = (params.get('btypes') ?? available.join(',')).split(',').filter((type) => available.includes(type));
+  const tallRow = rows.indexOf('mindcontrol');
+  const rowCount = rows.length + (tallRow > 0 ? 2 : 0);
   const ends = (row: number) => {
-    const down = (row - 2) * 1.2 + 0.5;
+    const slot = row + (tallRow > 0 && row >= tallRow ? 2 : 0);
+    const down = (slot - (rowCount - 1) / 2) * 1.2 + 0.5;
     const source = at(cx + down - 2.5, cy + down + 2.5);
     const target = at(cx + down + 2.5, cy + down - 2.5);
     source.z += 104;
     target.z += 104;
     return { source, target };
   };
-  return {
-    radBeams: (['rad', 'temporal', 'eruption'] as const).map((type, row) => ({
-      id: 60_000 + row,
-      type,
-      ...ends(row),
-      color: [70, 255, 90],
-      period: 20,
-      amplitude: 40,
-      age: progress * 20,
-      sustained: false,
-      progress,
-    })),
-    waves: (['magnetron', 'sonic'] as const).map((type, row) => ({
-      id: 60_003 + row,
-      uid: 60_003 + row,
-      type,
-      ...ends(row + 3),
-      intensity: 100 * (1 - progress),
-      progress,
-    })),
-  };
+  rows.forEach((type, row) => {
+    const id = 60_000 + row;
+    if (type === 'mindcontrol') {
+      // Place the tall arch below the other rows, with enough space for its native 512-lepton rise.
+      const { source, target } = ends(row);
+      result.mindControlLinks.push({
+        id,
+        controller: id + 100,
+        targetId: id + 200,
+        source,
+        target,
+        color: [255, 32, 64],
+        arcHeight: 512,
+        remainingFrames: 15,
+        selected: false,
+      });
+    } else if (type === 'magnetron' || type === 'sonic') {
+      result.waves.push({ id, uid: id, type, ...ends(row), intensity: 100 * (1 - progress), progress });
+    } else {
+      const period = type === 'chrono' ? 15 : 20;
+      result.radBeams.push({
+        id,
+        type: type === 'eruption' ? 'eruption' : 'rad',
+        ...ends(row),
+        color: type === 'chrono' ? [128, 200, 255] : type === 'eruption' ? [255, 56, 9] : [70, 255, 90],
+        period,
+        amplitude: 40,
+        age: progress * period,
+        sustained: false,
+        progress,
+      });
+    }
+  });
+  return result;
 }
 
 /** &banims: the listed building layers as the engine's building anim list would hold them now (looping). */
