@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import fcntl
 import json
-import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -38,16 +36,12 @@ def read_image(path, mode=None):
 
 
 def atomic_write(path, writer):
-    """Replace the entry itself so variant symlinks never write into shared sources."""
+    """Stage output outside the farm and publish through the farm installer."""
     path = Path(path)
-    fd, temporary = tempfile.mkstemp(prefix='.tmp-', suffix=path.suffix, dir=path.parent)
-    os.close(fd)
-    temporary = Path(temporary)
-    try:
+    with tempfile.TemporaryDirectory(prefix='theatre-page-') as directory:
+        temporary = Path(directory) / ('output' + path.suffix)
         writer(temporary)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+        cache_farm.install_file(path.parent, path.name, temporary)
 
 
 def atomic_image(path, pixels):
@@ -55,24 +49,23 @@ def atomic_image(path, pixels):
 
 
 def patch_json(path, update, default=None):
-    # Read immediately before merging: only this tool's entries belong to it.
-    current = read_json(path, default)
-    update(current)
-    atomic_write(path, lambda tmp: tmp.write_text(json.dumps(current, indent=2), encoding='utf-8'))
+    path = Path(path)
+    options = {'default': default} if default is not None else {}
+    cache_farm.patch_json(path.parent, path.name, update, **options)
 
 
 def atomic_symlink(source, destination):
-    def link(tmp):
-        tmp.unlink()
-        tmp.symlink_to(os.path.relpath(Path(source).absolute(), Path(destination).parent.absolute()))
-    atomic_write(destination, link)
+    destination = Path(destination)
+    cache_farm.install_symlink(destination.parent, destination.name, source)
 
 
 @contextmanager
 def library_lock(directory):
     # Share building_redraw.compose's lock; protect page reads as well as publication.
-    with (Path(directory) / '.compose.lock').open('a') as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    directory = Path(directory)
+    farm = directory.parent.parent if directory.parent.name == '_library' else directory
+    cache_farm.ensure_directory(farm, str(directory.relative_to(farm)))
+    with cache_farm.lock_file(directory, '.compose.lock'):
         yield
 
 

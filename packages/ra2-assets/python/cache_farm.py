@@ -19,7 +19,16 @@ _MISSING = object()
 @contextlib.contextmanager
 def _locked(path: Path):
     # Keep the lock inode stable: unlinking it would let new callers bypass existing waiters.
-    with path.open("a") as lock:
+    # Realised directories can inherit lock-file symlinks. Borrow their existing
+    # inode read-only so current waiters still synchronize, without a writable
+    # handle into the base cache or creating a dangling link's target.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+    except OSError as error:
+        if error.errno != errno.ELOOP:
+            raise
+        fd = os.open(path, os.O_RDONLY)
+    with os.fdopen(fd, "rb") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             yield
@@ -93,6 +102,22 @@ def _destination(root: Path, rel: str) -> Path:
     return parent / relative.name
 
 
+def ensure_directory(root: Path, rel: str = ".") -> Path:
+    """Realise a farm directory chain before opening its stable coordination locks.
+
+    The explicit root bounds copy-on-write directory replacement; system symlinks
+    above it are not farm entries. No placeholder file is created.
+    """
+    return _destination(root, str(Path(rel) / ".cache-farm-directory")).parent
+
+
+@contextlib.contextmanager
+def lock_file(root: Path, rel: str):
+    """Hold a stable flock through a farm boundary without writable inherited links."""
+    with _locked(_destination(root, rel)):
+        yield
+
+
 @contextlib.contextmanager
 def _temporary_file(dst: Path):
     fd, name = tempfile.mkstemp(prefix=f".{dst.name}-", suffix=".tmp", dir=dst.parent)
@@ -120,6 +145,14 @@ def install_file(root: Path, rel: str, data_path: Path) -> None:
                 if error.errno != errno.EXDEV:
                     raise
         shutil.copyfile(source, tmp)
+
+
+def install_symlink(root: Path, rel: str, source: Path) -> None:
+    """Publish a relative symlink without writing through a farm directory link."""
+    dst = _destination(root, rel)
+    with _temporary_file(dst) as tmp:
+        tmp.unlink()
+        tmp.symlink_to(os.path.relpath(Path(source).absolute(), dst.parent))
 
 
 def patch_json(root: Path, rel: str, fn: Callable[[object], None], *, default=_MISSING) -> None:

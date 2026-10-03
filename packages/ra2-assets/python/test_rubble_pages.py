@@ -7,6 +7,7 @@ import io
 import json
 import math
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -276,6 +277,305 @@ class RubblePagesTests(unittest.TestCase):
                                    lab_base[15:-15, 15:-15].mean(axis=(0, 1)), atol=0.4)
         self.assertGreater(float(lab_locked[..., 0].std()), 2)
 
+    def shared_palette_fixture(self):
+        manifest, source4 = self.registration_fixture()
+        source_export = self.root / 'source-export'
+        source_upscaled = self.root / 'source-up4.png'
+        shutil.copytree(self.export, source_export)
+        shutil.copyfile(self.upscaled, source_upscaled)
+        # Same indices/anchors, but the target palette reverses material brightness.
+        self.palette[0, 1:] = 255 - self.palette[0, 1:]
+        self.write_fixture()
+        self.prepare_export()
+        redraws = self.root / 'shared-redraws'
+        rp.save_image(redraws, rp.frame_name(self.key), rp.to_u8(source4))
+        references = self.root / 'references.json'
+        rp.save_json(self.root, references.name, {self.key: {
+            'export': source_export.name, 'upscaled': source_upscaled.name, 'key': self.key}})
+        return manifest, redraws, references, source_export, source4
+
+    def test_shared_indices_register_in_source_palette_then_lock_to_target(self):
+        manifest, redraws, references, _, _ = self.shared_palette_fixture()
+        wrong_palette = rp.build_pages(self.export, self.upscaled, self.build, redraws)
+        self.assertIn('fit_score_below_0.5', wrong_palette['sprites'][self.key]['flags'])
+        self.assertLess(wrong_palette['sprites'][self.key]['fit_score'], 0.5)
+        target_indices = rp.read_image(self.export / rp.PAGE)
+        target4 = rp.crop(rp.load_upscaled(self.upscaled, target_indices), manifest['sprites'][self.key]['rect'], 4)
+        target_art = rp.crop(rp.read_image(self.export / 'rubble_rgba_1x.png'), manifest['sprites'][self.key]['rect'])[..., :3]
+        target2 = rp.unmatte(rp.downsample(target4), target_art, self.indices != 0, rp.alpha_2x(self.indices != 0))
+        with mock.patch.object(rp, 'colour_lock', wraps=rp.colour_lock) as colour_lock:
+            result = rp.build_pages(self.export, self.upscaled, self.build, redraws, redraw_references=references)
+        frame = result['sprites'][self.key]
+        self.assertFalse(frame['fallback'], frame)
+        self.assertGreater(frame['fit_score'], 0.95)
+        self.assertEqual(frame['method'], 'redraw')
+        self.assertEqual(frame['registration']['reference']['mode'], 'identical_indices_source')
+        self.assertLess(frame['registration']['target_fit_before_colour_lock'], 0.5)
+        np.testing.assert_array_equal(colour_lock.call_args.args[0], target2)
+        output = rp.crop(rp.read_image(self.build / rp.HD_PAGE), manifest['sprites'][self.key]['rect'], 2)
+        np.testing.assert_array_equal(output[..., 3], rp.to_u8(rp.alpha_2x(self.indices != 0) * 255))
+        self.assertEqual(rp.read_json(self.build / 'frames.json'), result)
+
+    def test_shared_reference_refuses_changed_indices_offsets_and_size(self):
+        _, redraws, references, source_export, _ = self.shared_palette_fixture()
+        source_manifest = rp.read_json(source_export / 'rubble.json')
+        source_page = rp.read_image(source_export / rp.PAGE)
+        for change in ('indices', 'offset', 'size'):
+            with self.subTest(change=change):
+                changed_manifest = copy.deepcopy(source_manifest)
+                changed_page = source_page.copy()
+                if change == 'indices':
+                    frame = changed_manifest['sprites'][self.key]
+                    rp.crop(changed_page, frame['rect'])[8, 9] = 99
+                elif change == 'offset':
+                    changed_manifest['sprites'][self.key]['offset'][0] += 1
+                else:
+                    changed_manifest['sprites'][self.key]['rect'][2] -= 1
+                rp.save_image(source_export, rp.PAGE, changed_page)
+                rp.save_json(source_export, 'rubble.json', changed_manifest)
+                result = rp.build_pages(self.export, self.upscaled, self.build, redraws, redraw_references=references)
+                frame = result['sprites'][self.key]
+                self.assertEqual(frame['method'], 'esrgan')
+                self.assertTrue(frame['fallback'])
+                self.assertEqual(frame['flags'], ['registration_failed'])
+                self.assertIn('geometry differs', frame['error'])
+
+    def test_shared_reference_keeps_fit_and_scale_rejection_gates(self):
+        _, redraws, references, _, source4 = self.shared_palette_fixture()
+        rp.save_image(redraws, rp.frame_name(self.key), np.full_like(source4, 118, dtype=np.uint8))
+        result = rp.build_pages(self.export, self.upscaled, self.build, redraws, redraw_references=references)
+        self.assertIn('fit_score_below_0.5', result['sprites'][self.key]['flags'])
+        self.assertTrue(result['sprites'][self.key]['fallback'])
+        h, w = source4.shape[:2]
+        scaled = cv2.warpAffine(source4, np.array([[1.3, 0, -16], [0, 1.3, -16]], np.float32), (w, h),
+                                borderMode=cv2.BORDER_CONSTANT, borderValue=(118, 118, 118))
+        rp.save_image(redraws, rp.frame_name(self.key), rp.to_u8(scaled))
+        with mock.patch.object(rp.hybrid_redraw, 'register', return_value=((1.3, -16, 1.3, -16), {})):
+            result = rp.build_pages(self.export, self.upscaled, self.build, redraws, redraw_references=references)
+        frame = result['sprites'][self.key]
+        self.assertGreater(frame['fit_score'], 0.95)
+        self.assertIn('scale_out_of_range', frame['flags'])
+        self.assertTrue(frame['fallback'])
+
+    def test_shared_reference_wrong_upscale_size_falls_back(self):
+        _, redraws, references, _, _ = self.shared_palette_fixture()
+        rp.save_image(self.root, 'source-up4.png', np.full((8, 8, 3), 118, np.uint8))
+        result = rp.build_pages(self.export, self.upscaled, self.build, redraws, redraw_references=references)
+        frame = result['sprites'][self.key]
+        self.assertTrue(frame['fallback'])
+        self.assertEqual(frame['flags'], ['registration_failed'])
+        self.assertIn('must be exactly 4x', frame['error'])
+
+    def test_build_cli_accepts_relative_source_reference_mapping(self):
+        _, redraws, references, _, _ = self.shared_palette_fixture()
+        with contextlib.redirect_stdout(io.StringIO()):
+            rp.main(['build', '--export', str(self.export), '--upscaled', str(self.upscaled),
+                     '--out', str(self.build), '--redraw-dir', str(redraws),
+                     '--redraw-references', str(references)])
+        frame = rp.read_json(self.build / 'frames.json')['sprites'][self.key]
+        self.assertFalse(frame['fallback'])
+        self.assertEqual(frame['registration']['reference']['key'], self.key)
+
+    def paint_lock_fixture(self):
+        """A red native T glyph is repainted blue; new fine material remains elsewhere."""
+        self.registration_fixture()
+        self.palette[0, 4] = [220, 44, 28]
+        self.indices[16:25, 14:26] = 1
+        self.indices[17:19, 16:24] = 4
+        self.indices[19:24, 19:21] = 4
+        self.library = self.fixture(self.indices)
+        self.write_fixture()
+        manifest = self.prepare_export()
+        indexed = rp.read_image(self.export / rp.PAGE)
+        rect = manifest['sprites'][self.key]['rect']
+        base4 = rp.crop(rp.load_upscaled(self.upscaled, indexed), rect, 4)
+        redraw = base4.copy()
+        glyph4 = (self.indices == 4).repeat(4, 0).repeat(4, 1)
+        redraw[glyph4] = [28, 100, 205]
+        yy, xx = np.mgrid[:redraw.shape[0], :redraw.shape[1]]
+        texture = np.where((xx // 2 + yy // 2) % 2 == 0, 14, -14)
+        material = (self.indices != 0).repeat(4, 0).repeat(4, 1) & ~glyph4
+        redraw[material] = np.clip(redraw[material] + texture[material, None], 0, 255)
+        redraws = self.root / 'paint-redraws'
+        rp.save_image(redraws, rp.frame_name(self.key), rp.to_u8(redraw))
+        regions = [{'rect': [14, 16, 12, 9], 'sigma': 0.3}]
+        locks = self.root / 'colour-locks.json'
+        rp.save_json(self.root, locks.name, {self.key: regions})
+        return manifest, redraws, locks, regions
+
+    def test_local_colour_lock_recovers_native_glyph_and_preserves_material_outside_region(self):
+        manifest, redraws, locks, regions = self.paint_lock_fixture()
+        baseline = self.root / 'paint-baseline'
+        unlocked = self.root / 'paint-unlocked'
+        rp.build_pages(self.export, self.upscaled, baseline)
+        ordinary = rp.build_pages(self.export, self.upscaled, unlocked, redraws)
+        locked = rp.build_pages(self.export, self.upscaled, self.build, redraws, colour_locks=locks)
+        frame = locked['sprites'][self.key]
+        self.assertEqual(frame['method'], 'redraw')
+        self.assertFalse(frame['fallback'], frame)
+        self.assertGreater(frame['fit_score'], 0.99)
+        self.assertEqual(frame['registration'], ordinary['sprites'][self.key]['registration'])
+        self.assertEqual(frame['colour_locks'], regions)
+        rect = manifest['sprites'][self.key]['rect']
+        reference, before, after = [rp.crop(rp.read_image(directory / rp.HD_PAGE), rect, 2)
+                                    for directory in (baseline, unlocked, self.build)]
+        glyph = (self.indices == 4).repeat(2, 0).repeat(2, 1)
+
+        def glyph_paint_error(image):
+            lab = cv2.cvtColor(image[..., :3].astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+            native = cv2.cvtColor(reference[..., :3].astype(np.float32) / 255, cv2.COLOR_RGB2LAB)
+            return float(np.linalg.norm(lab[..., 1:] - native[..., 1:], axis=-1)[glyph].mean())
+
+        # Registration/global locking alone retains the model's wrong blue paint.
+        self.assertGreater(glyph_paint_error(before), 80)
+        self.assertLess(glyph_paint_error(after), 15)
+        self.assertLess(glyph_paint_error(after), glyph_paint_error(before) * 0.2)
+        selected = np.zeros(after.shape[:2], bool)
+        rp.crop(selected, regions[0]['rect'], 2)[:] = True
+        np.testing.assert_array_equal(after[~selected], before[~selected])
+        np.testing.assert_array_equal(after[..., 3], reference[..., 3])
+        # New fine detail outside the painted glyph is still present, rather than
+        # replacing the whole frame with the native palette or the upscale.
+        material = ((self.indices == 1).repeat(2, 0).repeat(2, 1)
+                    & ~selected & (reference[..., 3] == 255))
+        self.assertGreater(float(np.abs(after[..., :3].astype(float)
+                                       - reference[..., :3])[material].mean()), 3)
+        self.assertEqual((self.build / rp.REMAP).read_bytes(), (unlocked / rp.REMAP).read_bytes())
+        self.assertEqual(rp.read_json(self.build / 'frames.json'), locked)
+
+    def test_empty_optional_colour_locks_preserve_existing_redraw_bytes_and_metadata(self):
+        _, redraws, _, _ = self.paint_lock_fixture()
+        default = rp.build_pages(self.export, self.upscaled, self.build, redraws)
+        before = {name: (self.build / name).read_bytes()
+                  for name in (rp.PAGE, rp.HD_PAGE, rp.REMAP, 'frames.json')}
+        empty = self.root / 'empty-colour-locks.json'
+        rp.save_json(self.root, empty.name, {})
+        unchanged = rp.build_pages(self.export, self.upscaled, self.build, redraws, colour_locks=empty)
+        self.assertEqual(unchanged, default)
+        self.assertNotIn('colour_locks', unchanged['sprites'][self.key])
+        self.assertEqual(before, {name: (self.build / name).read_bytes() for name in before})
+
+    def test_touching_colour_lock_regions_do_not_overlap_or_depend_on_order(self):
+        manifest, redraws, locks, regions = self.paint_lock_fixture()
+        # The second region touches the glyph region. A cumulative full-frame
+        # colour correction would let the first edit leak into the second.
+        regions.append({'rect': [26, 16, 8, 9], 'sigma': 2.0})
+        rp.save_json(self.root, locks.name, {self.key: regions})
+        forward = rp.build_pages(self.export, self.upscaled, self.build, redraws, colour_locks=locks)
+        reverse_dir = self.root / 'paint-reverse'
+        rp.save_json(self.root, locks.name, {self.key: list(reversed(regions))})
+        reverse = rp.build_pages(self.export, self.upscaled, reverse_dir, redraws, colour_locks=locks)
+        self.assertEqual(forward['sprites'][self.key]['colour_locks'], regions)
+        self.assertEqual(reverse['sprites'][self.key]['colour_locks'], list(reversed(regions)))
+        self.assertEqual((self.build / rp.HD_PAGE).read_bytes(), (reverse_dir / rp.HD_PAGE).read_bytes())
+        plain_dir = self.root / 'paint-plain'
+        rp.build_pages(self.export, self.upscaled, plain_dir, redraws)
+        rect = manifest['sprites'][self.key]['rect']
+        actual = rp.crop(rp.read_image(self.build / rp.HD_PAGE), rect, 2)
+        plain = rp.crop(rp.read_image(plain_dir / rp.HD_PAGE), rect, 2)
+        selected = np.zeros(actual.shape[:2], bool)
+        for region in regions:
+            rp.crop(selected, region['rect'], 2)[:] = True
+        np.testing.assert_array_equal(actual[~selected], plain[~selected])
+
+    def test_invalid_colour_locks_fail_before_upscale_or_output_publication(self):
+        self.prepare_export()
+        valid = {'rect': [2, 2, 5, 4], 'sigma': 0.5}
+        configs = [[], None, True, {self.key: []}, {self.key: valid},
+                   {'building:UNKNOWN': [valid]}, {self.key: [None]},
+                   {self.key: [{'rect': valid['rect']}]},
+                   {self.key: [{'sigma': 0.5}]},
+                   {self.key: [dict(valid, extra='unused')]},
+                   {self.key: [dict(valid, rect='2,2,5,4')]},
+                   {self.key: [dict(valid, rect=[2, 2, 5])]},
+                   {self.key: [dict(valid, rect=[True, 2, 5, 4])]},
+                   {self.key: [dict(valid, rect=[2.5, 2, 5, 4])]},
+                   {self.key: [dict(valid, rect=[-1, 2, 5, 4])]},
+                   {self.key: [dict(valid, rect=[2, 2, 0, 4])]},
+                   {self.key: [dict(valid, rect=[15, 2, 2, 4])]},
+                   {self.key: [dict(valid, rect=[2, 11, 5, 2])]},
+                   {self.key: [valid, dict(valid)]},
+                   {self.key: [valid, {'rect': [6, 5, 2, 2], 'sigma': 1}]}]
+        configs.extend({self.key: [dict(valid, sigma=value)]}
+                       for value in (0, -1, True, '0.5', None, math.nan, math.inf, -math.inf))
+        path = self.root / 'invalid-colour-locks.json'
+        for index, config in enumerate(configs):
+            with self.subTest(config=config):
+                # Python's JSON reader accepts NaN/Infinity, so validate them at
+                # the API boundary even though the writer never emits them.
+                path.write_text(json.dumps(config), encoding='utf-8')
+                output = self.root / f'invalid-output-{index}'
+                with mock.patch.object(rp, 'load_upscaled') as upscale, \
+                        mock.patch.object(rp.cache_farm, 'install_file') as install:
+                    with self.assertRaises(ValueError):
+                        rp.build_pages(self.export, self.upscaled, output, colour_locks=path)
+                    upscale.assert_not_called()
+                    install.assert_not_called()
+                self.assertFalse(output.exists())
+
+    def test_colour_lock_validation_does_not_replace_a_previous_valid_build(self):
+        self.prepare_build()
+        before = {path.name: path.read_bytes() for path in self.build.iterdir()}
+        locks = self.root / 'bad-colour-locks.json'
+        rp.save_json(self.root, locks.name, {self.key: [{'rect': [15, 0, 2, 1], 'sigma': 0.5}]})
+        with self.assertRaises(ValueError):
+            rp.build_pages(self.export, self.upscaled, self.build, colour_locks=locks)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.build.iterdir()})
+
+    def test_colour_locks_cannot_bypass_registration_fallback_or_apply_without_a_redraw(self):
+        _, base4 = self.registration_fixture()
+        baseline = self.root / 'fallback-baseline'
+        rp.build_pages(self.export, self.upscaled, baseline)
+        faithful = (baseline / rp.HD_PAGE).read_bytes()
+        redraws = self.root / 'rejected-redraws'
+        locks = self.root / 'fallback-colour-locks.json'
+        rp.save_json(self.root, locks.name, {self.key: [{'rect': [14, 16, 12, 9], 'sigma': 0.3}]})
+        h, w = base4.shape[:2]
+        scaled = cv2.warpAffine(base4, np.array([[1.3, 0, -16], [0, 1.3, -16]], np.float32),
+                                (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=(118, 118, 118))
+        cases = [('missing', None, None),
+                 ('bad-fit', np.full_like(base4, 118), None),
+                 ('bad-scale', scaled, ((1.3, -16, 1.3, -16), {})),
+                 ('failed-solve', base4, ValueError('synthetic registration failure'))]
+        for case, raw, solve in cases:
+            with self.subTest(case=case):
+                output = self.root / case
+                if raw is not None:
+                    rp.save_image(redraws, rp.frame_name(self.key), rp.to_u8(raw))
+                with contextlib.ExitStack() as stack:
+                    colour_lock = stack.enter_context(mock.patch.object(rp, 'colour_lock', wraps=rp.colour_lock))
+                    if solve is not None:
+                        options = {'side_effect': solve} if isinstance(solve, Exception) else {'return_value': solve}
+                        stack.enter_context(mock.patch.object(rp.hybrid_redraw, 'register', **options))
+                    result = rp.build_pages(self.export, self.upscaled, output,
+                                            redraws if raw is not None else None, colour_locks=locks)
+                frame = result['sprites'][self.key]
+                self.assertEqual(frame['method'], 'esrgan')
+                self.assertNotIn('colour_locks', frame)
+                self.assertEqual(frame['fallback'], raw is not None)
+                if case == 'bad-fit':
+                    self.assertIn('fit_score_below_0.5', frame['flags'])
+                elif case == 'bad-scale':
+                    self.assertIn('scale_out_of_range', frame['flags'])
+                    self.assertGreater(frame['fit_score'], 0.95)
+                elif case == 'failed-solve':
+                    self.assertEqual(frame['flags'], ['registration_failed'])
+                colour_lock.assert_not_called()
+                self.assertEqual((output / rp.HD_PAGE).read_bytes(), faithful)
+
+    def test_build_cli_forwards_and_applies_native_colour_lock_regions(self):
+        _, redraws, locks, regions = self.paint_lock_fixture()
+        with contextlib.redirect_stdout(io.StringIO()) as output, \
+                mock.patch.object(rp, 'build_pages', wraps=rp.build_pages) as build:
+            rp.main(['build', '--export', str(self.export), '--upscaled', str(self.upscaled),
+                     '--out', str(self.build), '--redraw-dir', str(redraws), '--colour-locks', str(locks)])
+        build.assert_called_once()
+        self.assertEqual(build.call_args.kwargs['colour_locks'], locks)
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
+        frame = rp.read_json(self.build / 'frames.json')['sprites'][self.key]
+        self.assertEqual(frame['method'], 'redraw')
+        self.assertEqual(frame['colour_locks'], regions)
+
     def readonly_base(self):
         files = [path for path in self.cache.rglob("*") if path.is_file()]
         directories = [self.cache, *(path for path in self.cache.rglob("*") if path.is_dir())]
@@ -414,6 +714,114 @@ class RubblePagesTests(unittest.TestCase):
                 with Image.open(self.export / "rubble_grey_1x.png") as image:
                     image.resize((image.width * 4, image.height * 4), Image.Resampling.NEAREST).save(self.upscaled)
         self.assertTrue((self.root / "redraws/building_TEST.png").is_file())
+
+
+class RubbleGroupingTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="rubble-groups-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.indices = np.array([[0, 2, 3], [4, 0, 5]], np.uint8)
+        self.offset = [-3, 2]
+
+    def export(self, theatre, entries, nested=False):
+        root = self.root / theatre
+        directory = root / "export" if nested else root
+        width = max(pixels.shape[1] for _, pixels, _ in entries) + 2
+        height = sum(pixels.shape[0] + 1 for _, pixels, _ in entries) + 1
+        indexed = np.zeros((height, width), np.uint8)
+        manifest = {"theatre": theatre, "page": {"width": width, "height": height}, "sprites": {}}
+        y = 1
+        for key, pixels, offset in entries:
+            h, w = pixels.shape
+            indexed[y:y + h, 1:1 + w] = pixels
+            manifest["sprites"][key] = {"rect": [1, y, w, h], "offset": offset}
+            y += h + 1
+        rp.save_image(directory, rp.PAGE, indexed)
+        rp.save_json(directory, "rubble.json", manifest)
+        return root
+
+    def groups_fixture(self):
+        temperate = self.export("temperate", [("building:TEST", self.indices, self.offset)], nested=True)
+        changed = self.indices.copy()
+        changed[0, 1] = 9
+        urban = self.export("urban", [
+            ("building:TEST", changed, self.offset),
+            ("building:MATCH", self.indices, self.offset),
+            ("building:RESHAPED", self.indices.reshape(3, 2), self.offset),
+            ("building:SHIFTED", self.indices, [-2, 2]),
+        ])
+        result = rp.group_exports({"temperate": temperate, "urban": urban})
+        path = self.root / "groups.json"
+        rp.save_json(path.parent, path.name, result)
+        return result, path, temperate, urban
+
+    def test_groups_match_indices_size_and_offset_across_direct_and_nested_exports(self):
+        result, _, _, _ = self.groups_fixture()
+        groups = list(result["groups"].values())
+        self.assertEqual(len(groups), 4)
+        matched = next(group for group in groups if len(group["members"]) == 2)
+        self.assertEqual(matched, {"members": [["temperate", "building:TEST"], ["urban", "building:MATCH"]],
+                                   "area": 4, "size": [3, 2]})
+        members = [tuple(member) for group in groups for member in group["members"]]
+        self.assertEqual(len(members), 5)
+        self.assertEqual(len(set(members)), 5)
+        self.assertTrue(all(len(group_id) == 16 for group_id in result["groups"]))
+
+    def test_distribute_selects_theatre_and_key_and_makes_independent_byte_copies(self):
+        _, groups, _, _ = self.groups_fixture()
+        redraw = self.root / "redraw.png"
+        Image.fromarray(np.full((6, 7, 3), [22, 111, 209], np.uint8)).save(redraw)
+        original = redraw.read_bytes()
+        output = self.root / "redraws"
+        paths = rp.distribute_redraw(groups, redraw, "building:TEST", "temperate", output)
+        self.assertEqual(paths, [output / "temperate/building_TEST.png", output / "urban/building_MATCH.png"])
+        self.assertTrue(all(path.read_bytes() == original for path in paths))
+        self.assertFalse((output / "urban/building_TEST.png").exists())
+        redraw.write_bytes(b"source changed")
+        self.assertTrue(all(path.read_bytes() == original for path in paths))
+        paths[0].write_bytes(b"one member changed")
+        self.assertEqual(paths[1].read_bytes(), original)
+
+    def test_distribute_rejects_missing_or_ambiguous_selection_before_writing(self):
+        result, groups, _, _ = self.groups_fixture()
+        output = self.root / "redraws"
+        for theatre, key in (("snow", "building:TEST"), ("urban", "building:UNKNOWN")):
+            with self.subTest(theatre=theatre, key=key), self.assertRaisesRegex(ValueError, "expected one group"):
+                rp.distribute_redraw(groups, self.root / "unused.png", key, theatre, output)
+        result["groups"]["duplicate"] = {"members": [["temperate", "building:TEST"]]}
+        rp.save_json(groups.parent, groups.name, result)
+        with self.assertRaisesRegex(ValueError, "found 2"):
+            rp.distribute_redraw(groups, self.root / "unused.png", "building:TEST", "temperate", output)
+        self.assertFalse(output.exists())
+
+    def test_distribute_validates_all_destination_components_before_writing(self):
+        result, groups, _, _ = self.groups_fixture()
+        group = next(group for group in result["groups"].values() if len(group["members"]) == 2)
+        group["members"].append(["../escape", "building:TEST"])
+        rp.save_json(groups.parent, groups.name, result)
+        output = self.root / "redraws"
+        with self.assertRaisesRegex(ValueError, "invalid path component"):
+            rp.distribute_redraw(groups, self.root / "unused.png", "building:TEST", "temperate", output)
+        self.assertFalse(output.exists())
+
+    def test_group_and_distribute_cli_accept_multiple_and_repeated_export_options(self):
+        expected, _, temperate, urban = self.groups_fixture()
+        output = self.root / "cli/groups.json"
+        for exports in (["--export", f"temperate={temperate}", f"urban={urban}"],
+                        ["--export", f"temperate={temperate}", "--export", f"urban={urban}"]):
+            with self.subTest(exports=exports), contextlib.redirect_stdout(io.StringIO()) as stdout:
+                rp.main(["groups", *exports, "--out", str(output)])
+                self.assertEqual(len(stdout.getvalue().splitlines()), 1)
+                self.assertEqual(rp.read_json(output), expected)
+        redraw = self.root / "redraw.png"
+        Image.fromarray(np.full((3, 4, 3), 92, np.uint8)).save(redraw)
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            rp.main(["distribute", "--groups", str(output), "--redraw", str(redraw),
+                     "--key", "building:TEST", "--theatre", "urban", "--out-root", str(self.root / "cli")])
+            self.assertEqual(len(stdout.getvalue().splitlines()), 1)
+        self.assertEqual((self.root / "cli/urban/building_TEST.png").read_bytes(), redraw.read_bytes())
+        self.assertFalse((self.root / "cli/temperate").exists())
 
 
 if __name__ == "__main__":

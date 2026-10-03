@@ -16,7 +16,6 @@ image-agent launcher are intentionally not part of this module.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import math
 import os
@@ -28,6 +27,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+import cache_farm
 import hybrid_redraw as hr
 import redetail_sprites as rd
 
@@ -180,10 +180,44 @@ def parse_part(p):
     return f'{kind}:{name}', int(fi)
 
 
-def comp2x(lib, parts, house='DarkBlue', box=None):
+def design_rgb(lib, c, palette):
+    """Lanczos-2x of the 1x composite in a named palette, blended over GREY with its HD alpha.
+
+    Art with a commented-out INI Palette line (YR CACITY01-04 and CITY01-06:
+    ';Palette=City') is colour noise with the unit palette. The theatre 'lib'
+    palette shows the intended building for model input and the colour lock.
+    Remappable parts use the composite's house ramp on indices 16..31, as in Lib.frame.
+    """
+    x0, y0 = c['origin']
+    w1, h1 = c['size1']
+    out = np.full((h1, w1, 3), GREY, np.float32)
+    for part in c['parts']:
+        sprite, frame = parse_part(part)
+        entry = lib.lib['sprites'][sprite]
+        pal = lib.pal[palette].copy()
+        if entry.get('remap'):
+            pal[16:32] = c['ramp'][:16]
+        f = entry['frames'][frame]
+        x, y, w, h = f['rect']
+        idx = lib.idx_page(f.get('page', 0))[y:y + h, x:x + w].astype(int)
+        ox, oy = f['offset'][0] - x0, f['offset'][1] - y0
+        xs, ys = max(0, ox), max(0, oy)
+        xe, ye = min(w1, ox + w), min(h1, oy + h)
+        if xe <= xs or ye <= ys:
+            continue
+        idx = idx[ys - oy:ye - oy, xs - ox:xe - ox]
+        mask = idx > 0
+        out[ys:ye, xs:xe][mask] = pal[idx][mask]
+    im = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)).resize((w1 * 2, h1 * 2), Image.LANCZOS)
+    rgb = np.asarray(im, np.float32)
+    return rgb * c['a'][..., None] + GREY * (1 - c['a'][..., None])
+
+
+def comp2x(lib, parts, house='DarkBlue', box=None, *, design_palette=None):
     """Composite parts (list of 'sprite:frame') at 2x. Returns dict with rgb (displayed, float), a (0..1), paint (0..1),
     origin (1x anchor-relative top-left of the box, excluding margin), size1, rects (per part 2x rect inside the box),
-    frames (Lib.frame dictionaries)."""
+    frames (Lib.frame dictionaries). A design_palette replaces rgb with the
+    1x indices rendered through that library palette and Lanczos-enlarged 2x."""
     ramp = lib.house(house)
     frames = [lib.frame(s, f, house=ramp) for s, f in map(parse_part, parts)]
     if box is None:
@@ -213,8 +247,11 @@ def comp2x(lib, parts, house='DarkBlue', box=None):
         rgb[sl] = f['hd'][fs][..., :3] * fa[..., None] + rgb[sl] * (1 - fa[..., None])
         pt[sl] = f['paint2'][fs] * fa + pt[sl] * (1 - fa)
         a[sl] = fa + a[sl] * (1 - fa)
-    return dict(rgb=rgb, a=a, paint=pt, origin=[x0, y0], size1=[x1 - x0, y1 - y0], rects=rects, frames=frames,
-                parts=parts, house=house, ramp=ramp)
+    c = dict(rgb=rgb, a=a, paint=pt, origin=[x0, y0], size1=[x1 - x0, y1 - y0], rects=rects, frames=frames,
+             parts=parts, house=house, ramp=ramp)
+    if design_palette is not None:
+        c['rgb'] = design_rgb(lib, c, design_palette)
+    return c
 
 
 def pad2(img, m2, fill):
@@ -651,7 +688,8 @@ def job_comp(lib, jobdir):
     lay = json.loads((Path(jobdir) / 'layout.json').read_text())
     x0, y0 = lay['origin']
     w, h = lay['size1']
-    return lay, comp2x(lib, lay['parts'], lay.get('house', 'DarkBlue'), box=(x0, y0, x0 + w, y0 + h))
+    return lay, comp2x(lib, lay['parts'], lay.get('house', 'DarkBlue'), box=(x0, y0, x0 + w, y0 + h),
+                      design_palette=lay.get('design_palette'))
 
 
 def finish_4x(lib, jobdir, img4x, over=None, parts=None):
@@ -661,7 +699,8 @@ def finish_4x(lib, jobdir, img4x, over=None, parts=None):
     if parts is not None:
         x0, y0 = lay['origin']
         w, h = lay['size1']
-        c = comp2x(lib, parts, lay.get('house', 'DarkBlue'), box=(x0, y0, x0 + w, y0 + h))
+        c = comp2x(lib, parts, lay.get('house', 'DarkBlue'), box=(x0, y0, x0 + w, y0 + h),
+                   design_palette=lay.get('design_palette'))
     H4, W4 = img4x.shape[:2]
     rep2m = cv2.resize(np.ascontiguousarray(img4x, np.float32), (W4 // 2, H4 // 2), interpolation=cv2.INTER_AREA)
     m2 = 2 * M
@@ -806,16 +845,19 @@ def factor(c):
     return max(4, min(10, round(1200 / (max(w, h) + 2 * M))))
 
 
-def body_make(kind, name, lib, specs, work, *, style_dir=None, sibling=None, storage=STORAGE):
+def body_make(kind, name, lib, specs, work, *, style_dir=None, sibling=None, storage=STORAGE, design_palette=None):
     spec = specs[name]
     d = Path(work) / f'{name}_{kind[0]}'
     d.mkdir(parents=True, exist_ok=True)
     parts = idle_parts(lib, name, kind == 'damaged', storage)
-    c = comp2x(lib, parts)
+    c = comp2x(lib, parts, design_palette=design_palette)
     F = factor(c)
     model_input(c, F).save(d / 'input.png')
-    write_json(d / 'layout.json', dict(parts=parts, house='DarkBlue', factor=F, origin=c['origin'],
-                                     size1=c['size1'], name=name, kind=kind, display_name=spec['name']))
+    lay = dict(parts=parts, house='DarkBlue', factor=F, origin=c['origin'], size1=c['size1'],
+               name=name, kind=kind, display_name=spec['name'])
+    if design_palette is not None:
+        lay['design_palette'] = design_palette
+    write_json(d / 'layout.json', lay)
     fmt = dict(spec, F=F, w1=c['size1'][0], details='\n'.join('- ' + x for x in spec['details']))
     if kind == 'intact':
         has_style = bool(spec.get('style'))
@@ -837,16 +879,35 @@ def body_make(kind, name, lib, specs, work, *, style_dir=None, sibling=None, sto
 
 
 def post(d, over=None, *, root=None, theater='urban'):
+    """Register and finish a body job against its chosen design palette and cache.
+
+    When root is omitted, layout['root'] may select an alternate composite and
+    colour-lock cache (for example an ESRGAN baseline replacing a drifted redraw).
+    An explicit root takes precedence; otherwise the usual HD_CACHE_DIR applies.
+    """
     d = Path(d)
     lay = json.loads((d / 'layout.json').read_text())
-    lib = lib_for(lay, root, theater)
+    lib = lib_for(lay, root if root is not None else lay.get('root'), theater)
     x0, y0 = lay['origin']
     w, h = lay['size1']
-    c = comp2x(lib, lay['parts'], lay.get('house', 'DarkBlue'), box=(x0, y0, x0 + w, y0 + h))
+    c = comp2x(lib, lay['parts'], lay.get('house', 'DarkBlue'), box=(x0, y0, x0 + w, y0 + h),
+               design_palette=lay.get('design_palette'))
     inp = load(d / 'input.png')
     raw = load(d / ('raw.png' if (d / 'raw.png').exists() else 'output.png'))
     params, diag = register_out(inp, raw)
     params = guard_registration(params, d.name)
+    if 'registration_params' in lay:
+        chosen = lay['registration_params']
+        if (not isinstance(chosen, (list, tuple)) or len(chosen) != 4
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+                       for v in chosen)
+                or not (0.8 < chosen[0] < 1.25 and 0.8 < chosen[2] < 1.25)):
+            raise ValueError('registration_params must be four finite numbers [sx, tx, sy, ty] with scales in 0.8..1.25')
+        # Repetitive facades can pull the automatic fit away from already aligned
+        # source boundaries. Keep its evidence when applying a reviewed local fit.
+        diag = dict(diag, auto_params=list(params), registration_source='layout',
+                    registration_note=lay.get('registration_note', ''))
+        params = tuple(float(v) for v in chosen)
     F = lay['factor']
     ch, cw = inp.shape[:2]
     rep2m = sample(raw, (cw, ch), params, F, 2)
@@ -1187,27 +1248,23 @@ def normals_assist(work, out, jobs, *, root=None, theater='urban', extra=None):
 
 
 
-def atomic_image(path, image):
-    """Replace the directory entry, including symlinks, without opening its target for writing."""
+def atomic_image(path, image, *, root=None):
+    """Stage outside the farm, then publish through its copy-on-write installer."""
     path = Path(path)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix='.png')
-    os.close(fd)
-    try:
+    root = Path(root) if root is not None else path.parent
+    with tempfile.TemporaryDirectory(prefix='building-image-') as directory:
+        tmp = Path(directory) / 'image.png'
         image.save(tmp, compress_level=1)
-        os.replace(tmp, path)
-    finally:
-        Path(tmp).unlink(missing_ok=True)
+        cache_farm.install_file(root, str(path.relative_to(root)), tmp)
 
 
-def atomic_json(path, value):
+def atomic_json(path, value, *, root=None):
     path = Path(path)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix='.json')
-    os.close(fd)
-    try:
+    root = Path(root) if root is not None else path.parent
+    with tempfile.TemporaryDirectory(prefix='building-json-') as directory:
+        tmp = Path(directory) / 'data.json'
         write_json(tmp, value)
-        os.replace(tmp, path)
-    finally:
-        Path(tmp).unlink(missing_ok=True)
+        cache_farm.install_file(root, str(path.relative_to(root)), tmp)
 
 
 def compose(library, patches, only=None, record='l4_frames_bldg.json'):
@@ -1219,8 +1276,9 @@ def compose(library, patches, only=None, record='l4_frames_bldg.json'):
     root = Path(library)
     if Path(record).name != record or not record.endswith('.json') or record == 'library.json':
         raise ValueError('record must be a JSON filename other than library.json')
-    with (root / '.compose.lock').open('a') as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    farm = root.parent.parent if root.parent.name == '_library' else root
+    cache_farm.ensure_directory(farm, str(root.relative_to(farm)))
+    with cache_farm.lock_file(root, '.compose.lock'):
         lib = read_json(root / 'library.json')
         groups = {}
         for p in sorted(Path(patches).glob('*#*.png')):
@@ -1270,13 +1328,13 @@ def compose(library, patches, only=None, record='l4_frames_bldg.json'):
                         arr[sl][..., :min(3, arr.shape[2])] = remap[..., None]
                 images.append((path, Image.fromarray(arr, mode)))
             for path, im in images:
-                atomic_image(path, im)
+                atomic_image(path, im, root=root)
             for sprite, fi, _, _ in items:
                 records.setdefault(sprite, [])
                 if fi not in records[sprite]:
                     records[sprite].append(fi)
             print(f'page {page}: {len(items)} frames')
-        atomic_json(record_path, {k: sorted(v) for k, v in sorted(records.items())})
+        atomic_json(record_path, {k: sorted(v) for k, v in sorted(records.items())}, root=root)
     return records
 
 
@@ -1400,6 +1458,41 @@ def coverage_tsv(rows):
     return '\n'.join(lines) + '\n'
 
 
+def pack_plan(items, cap, max_types):
+    """Greedily pack name/home/fam/area records without mutating them.
+
+    Items are ordered by home, family, then descending area. First-fit packs
+    accept their own family; after each item, other-family packs become open.
+    Homes never mix. An item larger than cap (a big building's intact + damaged
+    cells) gets a pack of its own and its factor F drops accordingly; non-positive
+    areas are rejected with ValueError.
+    """
+    if not math.isfinite(cap) or cap <= 0:
+        raise ValueError('cap must be positive and finite')
+    if not isinstance(max_types, int) or isinstance(max_types, bool) or max_types <= 0:
+        raise ValueError('max_types must be a positive integer')
+    items = list(items)
+    for item in items:
+        if not math.isfinite(item['area']) or item['area'] <= 0:
+            raise ValueError(f"area must be positive and finite: {item['name']}")
+    packs = []
+    for item in sorted(items, key=lambda it: (it['home'], it['fam'], -it['area'])):
+        for pack in packs:
+            if (pack['home'] == item['home'] and pack['area'] + item['area'] <= cap
+                    and len(pack['names']) < max_types and (pack['fam'] == item['fam'] or pack['open'])):
+                pack['names'].append(item['name'])
+                pack['area'] += item['area']
+                break
+        else:
+            packs.append(dict(names=[item['name']], home=item['home'], area=item['area'],
+                              fam=item['fam'], open=False))
+        for pack in packs:
+            if pack['fam'] != item['fam']:
+                pack['open'] = True
+    return [dict(names=p['names'], home=p['home'], area=p['area'],
+                 F=max(3, min(14, round(math.sqrt(2.6e6 / (1.35 * p['area'])))))) for p in packs]
+
+
 def pack_make(packdir, prompt, jobs, *, max_width=2600, refs=()):
     """Pack equal-factor job canvases with 48-pixel grey gaps; retain absolute job destinations."""
     if not jobs or max_width < 1:
@@ -1490,7 +1583,7 @@ def frame_range(text):
 
 def json_option(text):
     """Accept inline JSON or a UTF-8 JSON file."""
-    return json.loads(text) if text.lstrip().startswith('{') else read_json(text)
+    return json.loads(text) if text.lstrip().startswith(('{', '[')) else read_json(text)
 
 
 def parser():
@@ -1508,6 +1601,7 @@ def parser():
     p.add_argument('--work', type=Path, required=True)
     p.add_argument('--style-dir', type=Path)
     p.add_argument('--sibling', type=Path)
+    p.add_argument('--design-palette', help='library palette for the 1x design composite and colour lock')
     p.add_argument('--storage', default=','.join(sorted(STORAGE)))
     p.add_argument('names', nargs='+')
     p = commands.add_parser('post', help='register and finish a body job')
@@ -1584,6 +1678,10 @@ def parser():
     p.add_argument('--theater', default='urban')
     p.add_argument('--patches', type=Path, required=True)
     p.add_argument('sprites', nargs='+')
+    p = commands.add_parser('pack-plan', help='print a JSON pack plan for name/home/fam/area items')
+    p.add_argument('--items', type=json_option, required=True, help='JSON array or path to a JSON file')
+    p.add_argument('--cap', type=int, required=True, help='maximum total 1x area per pack')
+    p.add_argument('--max-types', type=int, required=True)
     p = commands.add_parser('pack')
     sub = p.add_subparsers(dest='action', required=True)
     q = sub.add_parser('make')
@@ -1606,7 +1704,8 @@ def main(argv=None):
             specs = read_json(args.specs)
             for name in args.names:
                 body_make(args.kind, name, lib, specs, args.work, style_dir=args.style_dir,
-                          sibling=args.sibling, storage=set(filter(None, args.storage.split(','))))
+                          sibling=args.sibling, storage=set(filter(None, args.storage.split(','))),
+                          design_palette=args.design_palette)
         elif args.command == 'post':
             post(args.jobdir, args.finish, root=args.root, theater=args.theater)
         elif args.command == 'patches':
@@ -1659,6 +1758,8 @@ def main(argv=None):
             normals_job(args.work, args.jobs)
         elif args.command == 'normals-assist':
             normals_assist(args.work, args.out, args.jobs, root=args.root, theater=args.theater, extra=args.extra)
+        elif args.command == 'pack-plan':
+            print(json.dumps(pack_plan(args.items, args.cap, args.max_types)))
         elif args.action == 'make':
             pack_make(args.packdir, args.prompt, args.jobs, max_width=args.max_width, refs=args.ref)
         else:
