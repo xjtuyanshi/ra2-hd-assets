@@ -1064,13 +1064,16 @@ and ambient occlusion 1. This is the material encoding in `python/sprite_normals
 For variant frames only, alpha is corrected where 2x area-downsampling would disagree with the theatre's 1x silhouette.
 Every output frame gets a QA check: downsampled alpha `> 0.5` must match `index > 0` on at least 99.5% of its pixels.
 Exact urban and fallback baseline bytes remain unchanged even when their input silhouette fails that check; failures
-are reported rather than silently changing those inputs.
+reject the whole destination page before staging colour, remap or material files. Existing HD/material bindings and
+their files remain unchanged; the tool preserves the failed count and source bytes for review.
 
 Pages publish as unique `sprites-N@2x-vxfer-<uuid>.png` files with `-remap` and `-normals` companions, filling missing HD
 entries by default. `--refresh-owned` can replace only current `-vxfer-` entries; other HD entries stay untouched.
 Each page prints urban-exact, variant, baseline and silhouette-QA failure counts. Atomic `variant-xfer-report.json`
-records those counts by page and sprite id, the parameters (including `tolerance` and `min_area`) and whether each page
-was published. Library and normals publication in `xfer`, `variant-xfer`, `overlay-walls` and `normals-merge` holds
+records those counts by page and sprite id, the parameters (including `tolerance` and `min_area`), whether each page
+was published and the rejection reason. The CLI prints `THEATRE_VARIANT_XFER_REJECTED` and exits 1 when any page fails
+silhouette QA, while independent valid pages may still publish. With no QA rejection it prints
+`THEATRE_VARIANT_XFER_DONE` and exits 0. Library and normals publication in `xfer`, `variant-xfer`, `overlay-walls` and `normals-merge` holds
 both `.compose.lock` and the corresponding
 cache-farm per-file lock (`.library.json.lock` or `.normals.json.lock`); atomic replacement materialises a farm symlink
 without writing through it to a shared source.

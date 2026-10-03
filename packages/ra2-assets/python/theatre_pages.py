@@ -356,9 +356,21 @@ def transfer_counts():
     return dict(urban_exact=0, variant=0, baseline=0, qa_silhouette_failures=0)
 
 
+class SilhouetteQaRejection(ValueError):
+    """Carry this invocation's rejection result after its report is saved."""
+
+    def __init__(self, rejected, published):
+        self.rejected, self.published = rejected, published
+        super().__init__(f'silhouette QA failed on pages {rejected}; published {published}')
+
+
 def variant_xfer(theatre, urban, baseline, pages=None, refresh_owned=False, detail=0.35, max_changed=0.6,
-                 tolerance=14, min_area=3):
-    """Reuse accepted redraws, replacing only aligned native-art differences."""
+                 tolerance=14, min_area=3, *, fail_on_rejection=False):
+    """Reuse accepted redraws, replacing only aligned native-art differences.
+
+    Return published page indices; strict callers raise on QA rejection after
+    writing the report and publishing any independent valid pages.
+    """
     if not np.isfinite(detail) or detail < 0:
         raise ValueError('detail must be finite and nonnegative')
     if not np.isfinite(max_changed) or not 0 <= max_changed <= 1:
@@ -490,6 +502,12 @@ def variant_xfer(theatre, urban, baseline, pages=None, refresh_owned=False, deta
                     total[key] += value
             print(f"page {page}: {counts['urban_exact']} urban-exact frames, {counts['variant']} variant frames, "
                   f"{counts['baseline']} baseline frames, {counts['qa_silhouette_failures']} QA silhouette failures")
+            if counts['qa_silhouette_failures']:
+                # Reject the whole page before staging any sidecars or replacing an
+                # owned binding; retain the input bytes and QA evidence for review.
+                counts['rejected'] = 'silhouette QA failed'
+                print(f'page {page}: silhouette QA failed, rejected')
+                continue
             if missing_baseline:
                 counts['skipped'] = 'missing baseline colour/remap'
                 print(f'page {page}: missing baseline colour/remap, skipped')
@@ -534,6 +552,9 @@ def variant_xfer(theatre, urban, baseline, pages=None, refresh_owned=False, deta
             report['pages'][str(page)]['published'] = True
         atomic_write(tdir / 'variant-xfer-report.json',
                      lambda tmp: tmp.write_text(json.dumps(report, indent=2), encoding='utf-8'))
+        rejected = sorted(int(page) for page, counts in report['pages'].items() if counts.get('rejected'))
+        if fail_on_rejection and rejected:
+            raise SilhouetteQaRejection(rejected, sorted(published))
         return sorted(published)
 
 
@@ -811,9 +832,14 @@ def main(argv=None):
         if args.command == 'xfer':
             print('THEATRE_XFER_DONE', xfer(args.theatre, args.urban, args.baseline, args.pages, args.refresh_owned))
         elif args.command == 'variant-xfer':
-            print('THEATRE_VARIANT_XFER_DONE', variant_xfer(args.theatre, args.urban, args.baseline, args.pages,
-                                                          args.refresh_owned, args.detail, args.max_changed,
-                                                          args.tolerance, args.min_area))
+            try:
+                published = variant_xfer(args.theatre, args.urban, args.baseline, args.pages, args.refresh_owned,
+                                         args.detail, args.max_changed, args.tolerance, args.min_area,
+                                         fail_on_rejection=True)
+            except SilhouetteQaRejection as rejected:
+                print('THEATRE_VARIANT_XFER_REJECTED', rejected.rejected, 'published', rejected.published)
+                return 1
+            print('THEATRE_VARIANT_XFER_DONE', published)
         elif args.command == 'overlay-walls':
             print('patched', len(overlay_walls(args.library, args.types)))
         elif args.command == 'copy-patches':

@@ -1084,13 +1084,74 @@ class VariantTransferTests(unittest.TestCase):
         self.assert_silhouette(colour, changed)
         self.assert_counts(variant=1)
 
-    def test_exact_silhouette_failure_is_reported_without_mutating_urban_art(self):
-        self.colour[:8, :8, 3] = 0
-        Image.fromarray(self.colour).save(self.urban / 'hd.png')
+    def test_exact_silhouette_failure_rejects_page_without_staging_or_changing_bindings(self):
+        bad = self.colour.copy()
+        bad[:16, :16, 3] = 0
+        Image.fromarray(bad).save(self.urban / 'hd.png')
+        before = (self.theatre / 'library.json').read_bytes()
+        source_bytes = (self.urban / 'hd.png').read_bytes()
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [])
+        self.assertEqual((self.theatre / 'library.json').read_bytes(), before)
+        self.assertEqual((self.urban / 'hd.png').read_bytes(), source_bytes)
+        self.assertFalse((self.theatre / 'normals.json').exists())
+        self.assertEqual(list(self.theatre.glob('*-vxfer-*')), [])
+        report = tp.read_json(self.theatre / 'variant-xfer-report.json')
+        self.assertEqual(report['pages']['0'], dict(urban_exact=1, variant=0, baseline=0,
+                                                   qa_silhouette_failures=1, published=False,
+                                                   rejected='silhouette QA failed'))
+        self.assertEqual(report['sprites'][self.sprite_id]['qa_silhouette_failures'], 1)
+
+    def test_failed_refresh_preserves_owned_colour_remap_material_and_metadata(self):
         self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline), [0])
-        _, colour, _, _ = self.outputs()
-        np.testing.assert_array_equal(colour, self.colour)
-        self.assert_counts(exact=1, qa=1)
+        before = {path.name: path.read_bytes() for path in self.theatre.iterdir() if path.suffix in ('.png', '.json')
+                  and path.name != 'variant-xfer-report.json'}
+        bad = self.colour.copy()
+        bad[:16, :16, 3] = 0
+        Image.fromarray(bad).save(self.urban / 'hd.png')
+        self.assertEqual(tp.variant_xfer(self.theatre, self.urban, self.baseline, refresh_owned=True), [])
+        after = {path.name: path.read_bytes() for path in self.theatre.iterdir() if path.name in before}
+        self.assertEqual(after, before)
+        self.assertEqual(len(list(self.theatre.glob('*-vxfer-*'))), 3)
+        self.assertFalse(tp.read_json(self.theatre / 'variant-xfer-report.json')['pages']['0']['published'])
+
+    def test_failed_baseline_page_does_not_block_an_independent_valid_page(self):
+        # Page 0 has no source counterpart and must use its rejected baseline.
+        self.target['spriteAtlases'].append(copy.deepcopy(self.target['spriteAtlases'][0]))
+        self.target['spriteAtlasesHd'].append(None)
+        self.target['sprites'][self.sprite_id]['frames'][0]['page'] = 1
+        self.target['sprites']['building:BASELINE'] = dict(palette='unit', frames=[
+            dict(page=0, rect=[0, 0, 24, 24], offset=[0, 0])])
+        write_json(self.theatre / 'library.json', self.target)
+        bad = self.base_colour.copy()
+        bad[:16, :16, 3] = 0
+        Image.fromarray(bad).save(self.baseline / 'sprites-0@2x.png')
+        with self.assertRaises(tp.SilhouetteQaRejection) as rejected:
+            tp.variant_xfer(self.theatre, self.urban, self.baseline, fail_on_rejection=True)
+        self.assertEqual(rejected.exception.rejected, [0])
+        self.assertEqual(rejected.exception.published, [1])
+        library = tp.read_json(self.theatre / 'library.json')
+        self.assertIsNone(library['spriteAtlasesHd'][0])
+        self.assertIsNotNone(library['spriteAtlasesHd'][1])
+        self.assertEqual(list(self.theatre.glob('sprites-0@2x-vxfer-*')), [])
+        self.assertEqual(set(tp.read_json(self.theatre / 'normals.json')['pages']), {'1'})
+        report = tp.read_json(self.theatre / 'variant-xfer-report.json')
+        self.assertEqual(report['pages']['0']['qa_silhouette_failures'], 1)
+        self.assertEqual(report['pages']['0']['rejected'], 'silhouette QA failed')
+        self.assertFalse(report['pages']['0']['published'])
+        self.assertTrue(report['pages']['1']['published'])
+
+    def test_cli_failed_silhouette_returns_nonzero_and_reports_rejection(self):
+        bad = self.colour.copy()
+        bad[:16, :16, 3] = 0
+        Image.fromarray(bad).save(self.urban / 'hd.png')
+        command = [sys.executable, '-B', tp.__file__, 'variant-xfer', str(self.theatre), str(self.urban),
+                   str(self.baseline), '--pages', '0']
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('silhouette QA failed, rejected', result.stdout)
+        self.assertIn('THEATRE_VARIANT_XFER_REJECTED [0] published []', result.stdout)
+        self.assertNotIn('THEATRE_VARIANT_XFER_DONE', result.stdout)
+        self.assertIsNone(tp.read_json(self.theatre / 'library.json')['spriteAtlasesHd'][0])
 
     def test_symlinked_json_and_report_are_replaced_and_refresh_is_limited_to_vxfer(self):
         shared = self.root / 'shared'
