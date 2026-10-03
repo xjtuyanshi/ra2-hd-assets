@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 from pathlib import Path
 
 CARRIED = ("shroud", "overlays", "smudges", "cells")
@@ -37,6 +38,41 @@ GRAVITY = 1.312
 def load_state(path: Path) -> dict:
     data = json.loads(path.read_text())
     return data.get("state", data) if isinstance(data, dict) else data
+
+
+def _plain_arrays(value):
+    """Convert dense numeric-key objects emitted for typed arrays to plain lists."""
+    if isinstance(value, dict):
+        if value and all(key.isdigit() for key in value):
+            if set(value) != {str(i) for i in range(len(value))}:
+                raise ValueError("typed-array object must have contiguous numeric keys")
+            return [_plain_arrays(value[str(i)]) for i in range(len(value))]
+        return {key: _plain_arrays(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain_arrays(item) for item in value]
+    return value
+
+
+def frozen_snapshots(state: dict) -> list[dict]:
+    """Settle one captured state over three adjacent frames without re-timing effects.
+
+    Port of stage-two units mkreplay: carried fields occur only on the first
+    snapshot, and sidebar state is omitted. This differs from densify's animation model.
+    """
+    state = copy.deepcopy(state)
+    state.pop("sidebar", None)
+    for key in CARRIED:
+        if key in state:
+            state[key] = _plain_arrays(state[key])
+    snapshots = []
+    for offset in (2, 1, 0):
+        snap = copy.deepcopy(state)
+        snap["frame"] = state["frame"] - offset
+        if offset != 2:
+            for key in CARRIED:
+                snap.pop(key, None)
+        snapshots.append(snap)
+    return snapshots
 
 
 def _one_shot_track(observations: list[tuple[int, dict]], rate: float) -> dict:
@@ -136,16 +172,30 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--states", nargs="+", type=Path, required=True, help="frozen snapshots (LiveSnapshot or pair JSON)")
     p.add_argument("--pre", type=Path, help="a snapshot from before the first state, for --restore")
     p.add_argument("--restore", type=int, nargs="*", default=[], help="object uids kept from --pre before the first state")
-    p.add_argument("--first", type=int, required=True, help="first logic frame of the replay")
-    p.add_argument("--last", type=int, required=True, help="last logic frame of the replay")
+    p.add_argument("--first", type=int, help="first logic frame of the replay")
+    p.add_argument("--last", type=int, help="last logic frame of the replay")
+    p.add_argument("--frozen", action="store_true", help="three settled copies of one state; no effect re-timing")
     p.add_argument("--rate", type=float, default=1.0, help="stages per logic frame when an anim was seen only once")
     p.add_argument("--fps", type=float, default=15)
     p.add_argument("--out", type=Path, required=True)
     a = p.parse_args(argv)
     states = [load_state(s) for s in a.states]
     pre = load_state(a.pre) if a.pre else None
-    snaps = densify(states, a.first, a.last, a.rate, pre, a.restore)
-    a.out.write_text(json.dumps({"fps": a.fps, "snapshots": snaps}, separators=(",", ":")))
+    if a.frozen:
+        if len(states) != 1 or a.first is not None or a.last is not None or a.pre or a.restore:
+            p.error("--frozen requires exactly one state and no frame range/restoration")
+        snaps = frozen_snapshots(states[0])
+        if a.out.is_symlink():
+            p.error("frozen replay output must not be a symlink")
+        a.out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = a.out.with_suffix(".part")
+        tmp.write_text(json.dumps({"fps": a.fps, "snapshots": snaps}))
+        os.replace(tmp, a.out)
+    else:
+        if a.first is None or a.last is None:
+            p.error("--first and --last are required without --frozen")
+        snaps = densify(states, a.first, a.last, a.rate, pre, a.restore)
+        a.out.write_text(json.dumps({"fps": a.fps, "snapshots": snaps}, separators=(",", ":")))
     print(a.out, len(snaps), "snapshots", a.out.stat().st_size // 1024, "KiB")
     return 0
 
