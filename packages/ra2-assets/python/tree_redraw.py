@@ -755,6 +755,9 @@ def fit_shadows(cache_root: Path, map_name: str, orig_dir: Path, work_dir: Path,
         sprite = man['sprites'].get(f'tree:{tree}')
         if sprite is None:
             continue
+        if not all(sprite['shadows'][0]['rect'][2:]):
+            result[tree] = {'state': 'empty_original_shadow_preserved', 'iou': None, 'params': None}
+            continue
         alpha = read_image(orig_dir / f'{map_name}_{tree}_f0_1x.png')[..., 3] / 255.0
         shadow = read_image(orig_dir / f'{map_name}_{tree}_s0_1x.png') > 0
         score, params = fit(alpha, sprite['frames'][0]['offset'], shadow, sprite['shadows'][0]['offset'])
@@ -861,6 +864,9 @@ def shadows(cache_root: Path, map_name: str, patch_dir: Path, fit_path: Path) ->
         s = man['sprites'][f'tree:{tree}']
         f = s['frames'][0]
         sh = s['shadows'][0]
+        if not all(sh['rect'][2:]):
+            report[tree] = {'state': 'empty_original_shadow_preserved', 'rect': sh['rect']}
+            continue
         x, y, w, h = f['rect']
         a_orig = (idx[y:y + h, x:x + w] > 0).astype(np.float32)
         new2 = read_image(p, 'RGBA')[..., 3].astype(np.float32) / 255.0

@@ -852,7 +852,22 @@ The `--cfg` above is the adopted setting (also recorded as `build_cfg` in the ex
 lock keeps the redraw's sun-side highlights and crown shade while hue family and chroma stay the original's. The optional `grade` then moves only green foliage (Lab hue 75-165 degrees, feathered; bark, autumn rust and
 near-neutral texels untouched) a share `k` towards a fresh grass-green Lab a/b, scales its chroma and lifts it, so
 trees are graded together with the repainted lawn instead of keeping each map's olive original. Sheets,
-model outputs, patches and variant caches are derived art and belong outside Git.
+model outputs, patches and variant caches are derived art and belong outside Git. An explicitly zero-size original
+shadow is recorded as `empty_original_shadow_preserved`; no replacement shadow is invented for that frame.
+
+`python/sprite_frame_patch.py` installs reviewed patches for arbitrary frame indices into a separate map cache or
+paged type library. This supports animated terrain objects and props without treating every frame as frame 0.
+Its JSON spec contains `frames`, with each entry naming `sprite`, integer `frame`, and a relative `hd` PNG path;
+optional `indexed` and `shadow` paths provide the R-channel palette-index patches produced by the redraw pipeline.
+The destination manifest supplies every rectangle/page, and its frame offsets and palettes remain unchanged.
+All patches are validated before writing. Existing regular variant atlases retain other tracks' edits, and edited
+symlinks are atomically replaced. The base must already contain 2x HD atlas metadata; a missing HD atlas fails
+instead of synthesizing unrelated art. Material/normal atlas regeneration and real renderer acceptance are separate.
+
+```bash
+python3 -B packages/ra2-assets/python/sprite_frame_patch.py --base "$BASE" --variant "$VARIANT" --spec "$SPEC"
+python3 -m pytest packages/ra2-assets/python/test_sprite_frame_patch.py packages/ra2-assets/python/test_tree_redraw.py -q
+```
 
 ## Ore and gem field redraw (Python, experimental)
 

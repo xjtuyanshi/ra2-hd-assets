@@ -18,6 +18,27 @@ from PIL import Image
 import tree_redraw as tr
 
 
+def test_explicit_zero_size_original_shadow_is_preserved_without_fabricating_one(tmp_path):
+    directory = tmp_path / 'cache' / 'EmptyShadow'
+    directory.mkdir(parents=True)
+    manifest = {'sprites': {'tree:TREE_ZERO': {'frames': [{'rect': [0, 0, 2, 2], 'offset': [0, 0]}],
+                                               'shadows': [{'rect': [0, 0, 0, 0], 'offset': [0, 0]}]}}}
+    (directory / 'manifest.json').write_text(json.dumps(manifest))
+    save(directory / 'sprites.png', np.zeros((4, 4, 4), np.uint8))
+    # An explicit zero-size shadow has no extracted image; the tool must not try to open one.
+    spec = {'selection': {'TREE_ZERO': 'chosen'}}
+    tr.fit_shadows(tmp_path / 'cache', 'EmptyShadow', tmp_path / 'orig', tmp_path / 'fit', spec)
+    fitted = json.loads((tmp_path / 'fit' / 'shadow_fit.json').read_text())
+    assert fitted['TREE_ZERO']['state'] == 'empty_original_shadow_preserved'
+    patch = tmp_path / 'patch' / 'EmptyShadow'
+    patch.mkdir(parents=True)
+    save(patch / 'TREE_ZERO_2x.png', np.full((4, 4, 4), 255, np.uint8))
+    tr.shadows(tmp_path / 'cache', 'EmptyShadow', tmp_path / 'patch', tmp_path / 'fit' / 'shadow_fit.json')
+    report = json.loads((patch / 'shadows.json').read_text())
+    assert report['TREE_ZERO']['state'] == 'empty_original_shadow_preserved'
+    assert not (patch / 'TREE_ZERO_s1x.png').exists()
+
+
 def save(path: Path, pixels: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(pixels).save(path)
