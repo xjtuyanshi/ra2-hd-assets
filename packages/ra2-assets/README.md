@@ -1563,6 +1563,39 @@ footprint selector at `0x6B60F5`; `DrawIt` divides it by Width at `0x6B562C`/`0x
 origin and passes body frame 0 at `0x6B56B1`. The live renderer must retain the cell selector separately from the
 sprite frame so multi-cell burn marks align correctly.
 
+### Assemble and install AI smudge decals
+
+`python/smudge_redraw.py` assembles locally generated RGBA reference sheets into isolated 2x smudge pages.
+It does not generate images or launch model sessions. Inputs are a compact `library.fragment.json` with original
+indexed pages/palettes, and a job directory containing `reference.png`, `generated.png`, and `slots.json`.
+Each slot supplies `theater`, `id`, `slot` and `content` pixel rectangles, its original `frame`, and `footprint`.
+The original indexed rects, offsets, negative gaps and footprint selectors remain authoritative. Registration
+discards separated neighbouring-slot spill and saturated matte artifacts; colour detail comes from the AI image,
+with neutral chroma and reference-constrained coarse light/dark placement. Alpha feathers inside the original
+support. Generated opaque sheets, missing assignments and insufficient core coverage fail rather than substitute
+baseline art. Review every output at 1:1; registration metrics do not establish visual quality or live acceptance.
+
+```bash
+python3 -B packages/ra2-assets/python/smudge_redraw.py assemble \
+  --job "$IMAGE_JOB" --sources "$ORIGINAL_FRAGMENTS" --out "$STAGED_DECALS"
+python3 -B packages/ra2-assets/python/smudge_redraw.py validate --source "$STAGED_DECALS/snow"
+python3 -B packages/ra2-assets/python/smudge_redraw.py boards \
+  --source "$STAGED_DECALS/snow" --originals "$ORIGINAL_FRAGMENTS/snow" \
+  --current "$HD_CACHE/_library/snow" --out "$DECAL_BOARDS"
+python3 -B packages/ra2-assets/python/smudge_redraw.py install \
+  --source "$STAGED_DECALS/snow" --destination "$CHOSEN_FARM/_library/snow"
+```
+
+Installation requires explicit matching theater/version/palette colours and complete soft-alpha HD pages. It holds
+the compose lock, installs content-addressed dedicated pages before atomically merging JSON, rebases source-local
+page indices against the current destination, and preserves unrelated sprites, overlays, palettes and sidecars.
+Repeating the same install reuses its dedicated pages. Existing missing-art diagnostics remain explicit; the tool
+does not invent legacy resources. No live-cache destination is assumed. Asset-free contract acceptance:
+
+```bash
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_smudge_redraw.py'
+```
+
 Ore and gems use the theater palette; walls use the unit palette with the current player's remap. In the pinned
 YR 1.001 executable, `DrawOverlay` tests `Wall` at `0x47F96A` and reads the current player's colour scheme at
 `0x47F9B2`; the wall-owner field is not the remap source. Other overlays use the iso palette. Shared draw rules keep
