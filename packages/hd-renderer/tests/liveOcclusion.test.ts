@@ -210,23 +210,42 @@ describe('LiveView physical occlusion scheduling', () => {
       const p = presentation();
       const art = p.live.cache.manifest.sprites['building:TESTBUILD']!;
       art.shadows = [...art.frames];
+      const weatherMask = new WeatherGroundMask(10, 10);
+      Object.assign(p.hd, { weatherGroundMask: weatherMask });
       const building = { ...object(512), id: 2, uid: 2, kind: 'building' as const, type: 'TESTBUILD', health };
       p.view.push({ ...snapshot(10, 256), objects: [object(256), building] }, 0);
       p.view.render(0);
       const visual = p.live.visuals.get(2);
       const cards = p.live.sprites.getInstances().map((s) => ({ frame: s.frame, shadow: s.shadow }));
       expect(cards).toHaveLength(2);
+      expect(weatherMask.texture.image.data[12]).toBe(255);
       p.view.push(snapshot(11, 256), 100);
       p.view.render(100);
       expect(p.live.visuals.get(2)).toBe(visual);
       expect(p.live.sprites.getInstances().map((s) => ({ frame: s.frame, shadow: s.shadow }))).toEqual(cards);
+      // Roof art remains drawable for this frame, so rain/snow and wet-film exclusions must remain too.
+      expect(weatherMask.texture.image.data[12]).toBe(255);
+      const version = weatherMask.texture.version;
+      p.view.render(110);
+      expect(weatherMask.texture.version).toBe(version);
+      // An art revision must refresh the retained footprint as well as the retained building cards.
+      art.foundation = [3, 2];
+      p.effectArt.revision++;
+      p.view.render(115);
+      expect(weatherMask.texture.image.data[24]).toBe(255);
+      expect(weatherMask.texture.image.data[45]).toBe(0);
+      const revisedVersion = weatherMask.texture.version;
       p.view.push(snapshot(11, 256), 120);
       p.view.render(120);
       expect(p.live.visuals.get(2)).toBe(visual);
+      expect(weatherMask.texture.image.data[12]).toBe(255);
+      expect(weatherMask.texture.version).toBe(revisedVersion);
       p.view.push(snapshot(12, 256), 200);
       p.view.render(200);
       expect(p.live.visuals.has(2)).toBe(false);
       expect(p.live.sprites.getInstances()).toHaveLength(0);
+      expect(weatherMask.texture.image.data[12]).toBe(0);
+      weatherMask.dispose();
     },
   );
 

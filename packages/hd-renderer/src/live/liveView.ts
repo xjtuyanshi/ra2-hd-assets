@@ -1401,7 +1401,8 @@ export class LiveView {
         const y = Math.floor(object.y / LEPTONS_PER_CELL);
         addRefineryFoundation(this.refineryCells, true, x, y, type.foundation);
       }
-      this.updateFoundations(current.snapshot.objects, current.snapshot.frame);
+      // Weather exclusions share the drawable building lifetime; native refinery rules use current state above.
+      this.updateFoundations(objects, current.snapshot.frame);
     }
     for (const object of objects) {
       const last = retained?.get(object.uid);
