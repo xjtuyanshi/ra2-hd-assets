@@ -8,6 +8,10 @@ that contract is `src/library.ts`.
 Everything the extractor writes is derived from EA game data. It goes to the gitignored `gameres/` directory and must
 never be committed or redistributed.
 
+Prepared HD map pages can be transferred across different native packing only
+after exact original-frame validation. See [atlas layout transfer](python/ATLAS_RELAYOUT.md)
+for the read-only audit, copy-on-write install and synthetic tests.
+
 ## Commands
 
 ```bash
