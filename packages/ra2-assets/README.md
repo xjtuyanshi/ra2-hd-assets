@@ -140,6 +140,44 @@ for all four tabs are needed by the renderer; pressed art is reserved until held
 Missing or broken tab art retains the loaded chrome and existing tab overlays. See
 [HD bridge](../../docs/remaster/HD_BRIDGE.md) for frame selection and the dev-only rendering boundary.
 
+## Accepted overlay crop installation (Python)
+
+`python/overlay_install.py` installs only the explicit `assets[].targets` in a version-1 accepted whitelist.
+The current indexed frame, decoded original palette, file, dimensions, offset, page, full sprite metadata and
+original source hashes must still match the supplied `frame-audit.json` and `library-<theatre>.json` evidence.
+It verifies the approved file and available generated-source SHA-256 chains before publication.
+
+The destination is an already created, separate copy-on-write farm. `--validate-only` reads inputs and makes
+no cache or receipt writes. An installation requires a new receipt directory and at least 25 GiB disk reserve
+plus its estimated output/backup space. Keep the whitelist, evidence, receipts, backups and prepared PNGs
+outside Git. Use `PYTHON` for an existing environment with Pillow, NumPy and the dependencies of
+`python/sprite_normals.py`. No game files or image models are downloaded.
+
+```bash
+"$PYTHON" -B packages/ra2-assets/python/overlay_install.py \
+  --base "$BASE_CACHE" --farm "$INTEGRATION_CACHE" \
+  --whitelist "$OVERLAY_OUT/staged/accepted-manifest.json" \
+  --evidence "$OVERLAY_OUT/evidence" --out "$INSTALL_RECEIPT" --validate-only
+# Repeat with the same arguments without --validate-only to install; the receipt directory must be new.
+# Optional repeated --theatre limits installation to those explicit theatre names.
+"$PYTHON" -B packages/ra2-assets/python/overlay_install.py --undo "$INSTALL_RECEIPT/install.json"
+```
+
+The tool reuses `sprite_frame_patch.prepare()` to validate and compose current colour pages. It changes
+only accepted rectangles; every other pixel, the original indexed pages, current house-remap planes,
+metadata, empty states and shadows stay unchanged. Inherited remap crops must match the current plane.
+Original house-paint pixels keep their current RGBA as well as their plane. If an accepted changed page
+already has a valid referenced normal atlas, only those frame rectangles are regenerated through
+`sprite_normals.frame_material()` at that atlas's existing 1x or 2x resolution. Unreferenced material pages
+are not created. Real lighting and material appearance require separate live acceptance.
+
+Preparation and source checks complete before farm writes. `cache_farm.install_file()` realises directory
+links and replaces file links atomically, preserving the base. `install.json` journals exact before/after hashes,
+backups and per-file states before replacement. Interrupted prepared/published states can be undone. Undo
+checks all destinations, unchanged cache inputs/metadata and backups before restoring anything; a later
+edit blocks rollback instead of discarding another track's work. The restored files may remain regular farm
+files, with byte-identical original contents. Receipts and prepared/backup files must remain immutable.
+
 ## Prepare a complete map cache
 
 `prepare-map` runs the existing Node steps in order: `extract,terrain,upscale,sprites,library,library-sprites`.

@@ -44,13 +44,12 @@ def atomic_image(image: Image.Image, path: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def apply(base: Path, variant: Path, spec_path: Path) -> dict:
-    base, variant = base.resolve(), variant.resolve()
-    if base == variant or base in variant.parents or variant in base.parents:
-        raise ValueError('base and variant must be separate, non-nested directories')
-    manifest_name = 'library.json' if (base / 'library.json').exists() else 'manifest.json'
-    manifest_path = variant / manifest_name
-    manifest = read(manifest_path if manifest_path.exists() else base / manifest_name)
+def prepare(manifest: dict, page_path, spec_path: Path) -> tuple[dict[str, Image.Image], dict]:
+    """Validate all frame patches and return edited pages without writing any destination.
+
+    The caller supplies the current metadata and a file resolver. Installers can use cache_farm to publish
+    these pages after source checks and backups, while apply() keeps its existing isolated-variant contract.
+    """
     hd_refs = manifest.get('spriteAtlasesHd') or [manifest.get('spriteAtlasHd')]
     indexed_refs = manifest.get('spriteAtlases') or [manifest.get('spriteAtlas')]
     if not hd_refs or any(ref is None for ref in hd_refs):
@@ -65,11 +64,8 @@ def apply(base: Path, variant: Path, spec_path: Path) -> dict:
     report = {'frames': [], 'atlases': []}
 
     def paste(file: str, rect: list[int], patch_name: str, scale: int, indexed: bool) -> None:
-        path = local_path(variant, file)
-        if any(parent.is_symlink() for parent in path.parents if parent != variant and variant in parent.parents):
-            raise ValueError(f'{file}: variant atlas parent must not be a symlink')
         if file not in pages:
-            existing = path if path.exists() else local_path(base, file)
+            existing = page_path(file)
             with Image.open(existing) as image:
                 pages[file] = image.copy()
         atlas = pages[file]
@@ -121,6 +117,25 @@ def apply(base: Path, variant: Path, spec_path: Path) -> dict:
             paste(indexed_refs[shadow.get('page', 0)]['file'], shadow['rect'], entry['shadow'], 1, True)
         report['frames'].append({'sprite': sprite, 'frame': frame, 'rect': body['rect'], 'page': page,
                                  'shadow_updated': bool(entry.get('shadow'))})
+
+    report['atlases'] = sorted(pages)
+    return pages, report
+
+
+def apply(base: Path, variant: Path, spec_path: Path) -> dict:
+    base, variant = base.resolve(), variant.resolve()
+    if base == variant or base in variant.parents or variant in base.parents:
+        raise ValueError('base and variant must be separate, non-nested directories')
+    manifest_name = 'library.json' if (base / 'library.json').exists() else 'manifest.json'
+    manifest_path = variant / manifest_name
+    manifest = read(manifest_path if manifest_path.exists() else base / manifest_name)
+    def page_path(file):
+        path = local_path(variant, file)
+        if any(parent.is_symlink() for parent in path.parents if parent != variant and variant in parent.parents):
+            raise ValueError(f'{file}: variant atlas parent must not be a symlink')
+        return path if path.exists() else local_path(base, file)
+
+    pages, report = prepare(manifest, page_path, spec_path)
 
     # Validation above reads all patches/pages before any output is created or modified.
     variant.mkdir(parents=True, exist_ok=True)
