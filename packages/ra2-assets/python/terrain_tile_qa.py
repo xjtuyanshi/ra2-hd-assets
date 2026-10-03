@@ -40,6 +40,61 @@ def measure(reference: np.ndarray, candidate: np.ndarray, land: np.ndarray) -> d
                 structural_correlation=structural, sample_pixels=int(land.sum()))
 
 
+def colour_boundary_fit(reference: np.ndarray, raw: np.ndarray, validity: np.ndarray):
+    """Recover registration from agreeing colour boundaries when grain spoils edge ECC.
+
+    Both independent Lab chroma channels must have measurable spatial structure,
+    converge above .9, agree within four pixels and individually stay below the
+    existing eight-pixel limit. Uniform/monochrome paint supplies no alternative
+    evidence. The original failed edge fit remains in the diagnostic report.
+    """
+    mask = cv2.erode((validity >= .98).astype(np.uint8), np.ones((17, 17), np.uint8))
+    if mask.sum() < 256:
+        return None
+    source, candidate = tt.to_lab(reference), tt.to_lab(raw)
+    fits = []
+    for channel in (1, 2):
+        a = tt.valid_blur(source[..., channel], 6, validity).astype(np.float32)
+        b = tt.valid_blur(candidate[..., channel], 6, validity).astype(np.float32)
+        if a[mask.astype(bool)].std() < 1 or b[mask.astype(bool)].std() < 1:
+            return None
+        warp = np.eye(2, 3, dtype=np.float32)
+        try:
+            score, warp = cv2.findTransformECC(a, b, warp, cv2.MOTION_AFFINE,
+                (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-6), mask, 5)
+        except cv2.error:
+            return None
+        distance = float(tt.displacement(warp, reference.shape[:2])[:4].max())
+        if not np.isfinite(score) or score < .9 or distance > 8:
+            return None
+        fits.append((float(score), warp.copy(), distance))
+    h, w = reference.shape[:2]
+    corners = np.array([[0,0],[w,0],[0,h],[w,h]], np.float32)
+    def points(warp): return corners @ warp[:, :2].T + warp[:, 2]
+    agreement = float(np.linalg.norm(points(fits[0][1])-points(fits[1][1]), axis=1).max())
+    if agreement > 4:
+        return None
+    warp = (fits[0][1]+fits[1][1])/2
+    return min(f[0] for f in fits), warp, dict(
+        channel_ecc=[f[0] for f in fits], channel_displacement=[f[2] for f in fits],
+        channel_agreement_max=agreement)
+
+
+def sample_aligned(reference, raw, validity, warp):
+    """Sample the selected fit without introducing off-map invented RGB."""
+    h, w = reference.shape[:2]
+    def sample(image):
+        return cv2.warpAffine(image, warp, (w,h), flags=cv2.INTER_CUBIC+cv2.WARP_INVERSE_MAP,
+                              borderMode=cv2.BORDER_REFLECT)
+    if np.all(validity == 1):
+        return sample(raw)
+    coverage = sample(validity)
+    painted = sample(raw.astype(np.float32)*validity[...,None])
+    result = np.divide(painted, coverage[...,None], out=reference.astype(np.float32),
+                       where=coverage[...,None] > 1e-6)
+    return np.round(np.clip(result,0,255)).astype(np.uint8)
+
+
 def condition(reference: np.ndarray, raw: np.ndarray, water: np.ndarray,
               *, alignment: bool = True) -> tuple[np.ndarray, dict]:
     if reference.ndim != 3 or reference.shape[2] != 4 or raw.shape != reference[..., :3].shape:
@@ -52,7 +107,15 @@ def condition(reference: np.ndarray, raw: np.ndarray, water: np.ndarray,
     fit[alpha == 0] = inp[alpha == 0]
     c0, cc, warp = tt.fit_affine(inp, fit) if alignment else (1, 1, np.eye(2, 3, dtype=np.float32))
     displacement = float(tt.displacement(warp, inp.shape[:2])[:4].max())
-    aligned = tt.align(inp, raw, validity=validity) if alignment else raw
+    registration = dict(method='edge ECC' if alignment else 'disabled',
+        edge_ecc=float(cc) if np.isfinite(cc) else None, edge_displacement_max=displacement)
+    if alignment and (not np.isfinite(cc) or cc < .75 or displacement > 8):
+        alternative = colour_boundary_fit(inp, fit, validity)
+        if alternative is not None:
+            cc, warp, evidence = alternative
+            displacement = float(tt.displacement(warp, inp.shape[:2])[:4].max())
+            registration.update(method='two-channel colour-boundary consensus', **evidence)
+    aligned = sample_aligned(inp, raw, validity, warp) if alignment and np.isfinite(cc) and displacement <= 8 else raw
     rgb = np.round(tt.colour_lock(inp, aligned, lock_l=1, lock_ab=1, validity=validity) * 255).astype(np.uint8)
     # Open-water art is replaced by the renderer. Do not leave hallucinated waves,
     # cyan shallows or transparent-margin RGB in a material remaster.
@@ -65,6 +128,7 @@ def condition(reference: np.ndarray, raw: np.ndarray, water: np.ndarray,
     report.update(registration_ecc=float(cc) if np.isfinite(cc) else None,
                   registration_correlation_before=float(c0),
                   registration_displacement_max=displacement,
+                  registration_diagnostics=registration,
                   alpha_exact=bool(np.array_equal(result[..., 3], alpha)),
                   protected_rgb_exact=bool(np.array_equal(result[..., :3][protected], inp[protected])))
     gain = report['texture_gain']

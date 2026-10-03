@@ -417,11 +417,27 @@ Texture gain is mean absolute luminance high-pass energy at sigma 1 composite pi
 to the native-derived reference at the same resolution. A gain above 1 rejects smoothing; it does **not** prove real
 material detail or accept geometry. Visual inspection at 1:1 remains mandatory and the report keeps `accepted: false`.
 The source and raw AI image are never overwritten. Shape errors fail instead of silently resizing a mismatched result.
+If new grain prevents edge registration, a conservative fallback requires two independently structured Lab chroma
+channels to agree within four pixels, each with ECC at least 0.9 and displacement at most eight pixels. Uniform
+or monochrome paint cannot supply this alternative evidence. The report retains the original failed fit and the
+fallback diagnostics; a genuine geometry shift still fails and visual acceptance is still separate.
 
 ```bash
 python3 -B packages/ra2-assets/python/terrain_tile_qa.py --reference "$REFERENCE_RGBA" --raw "$RAW_AI" \
   --water-mask "$WATER_MASK" --output "$CONDITIONED" --report "$QA_REPORT"
 python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_terrain_tile*.py'
+```
+
+`python/terrain_seam_boards.py` packs every adjacent overlap rectangle plus a small surrounding margin into
+review boards without resizing. Its JSON plan contains `pairs` with `tiles` labels, an `axis` (`vertical` or
+`horizontal`), and `overlap_box_2x` coordinates `[left, top, right, bottom]`. Wide overlaps at the map's last
+row or column remain complete. The output index records the image SHA, crop coordinates and board positions;
+all reviews start as pending. An existing output directory is rejected to preserve prior review evidence.
+
+```bash
+python3 -B packages/ra2-assets/python/terrain_seam_boards.py --image "$FINAL_TERRAIN" \
+  --plan "$SEAM_PLAN" --output "$NEW_REVIEW_DIRECTORY"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_terrain_seam_boards.py'
 ```
 
 These tools require NumPy, Pillow and OpenCV (`cv2`). All source images, cache and work directories are explicit

@@ -42,4 +42,40 @@ class TerrainQaTests(unittest.TestCase):
         np.testing.assert_array_equal(result,ref)
         self.assertIsNone(report['texture_gain']);self.assertFalse(report['accepted'])
 
+    def coloured_scene(self):
+        rgb=np.full((256,384,3),(135,139,133),np.uint8)
+        cv2.rectangle(rgb,(34,21),(139,154),(103,137,81),-1)
+        cv2.circle(rgb,(266,109),49,(164,105,81),-1)
+        cv2.rectangle(rgb,(173,189),(350,235),(104,123,154),-1)
+        return rgb
+
+    def test_colour_boundaries_recover_registration_despite_new_grain(self):
+        source=self.coloured_scene();rng=np.random.default_rng(12)
+        raw=np.clip(source.astype(float)+rng.normal(0,12,source.shape),0,255).astype(np.uint8)
+        raw=cv2.warpAffine(raw,np.array([[1,0,3],[0,1,-2]],np.float32),
+                           (source.shape[1],source.shape[0]),borderMode=cv2.BORDER_REFLECT)
+        fit=qa.colour_boundary_fit(source,raw,np.ones(source.shape[:2],np.float32))
+        self.assertIsNotNone(fit)
+        _,warp,evidence=fit
+        np.testing.assert_allclose(warp[:,2],[3,-2],atol=.6)
+        self.assertLess(evidence['channel_agreement_max'],1)
+        restored=qa.sample_aligned(source,raw,np.ones(source.shape[:2],np.float32),warp)
+        self.assertLess(np.abs(cv2.GaussianBlur(restored,(0,0),6).astype(float)
+                               -cv2.GaussianBlur(source,(0,0),6)).mean(),1)
+
+    def test_colour_boundaries_cannot_excuse_a_large_geometry_shift(self):
+        source=self.coloured_scene()
+        raw=cv2.warpAffine(source,np.array([[1,0,24],[0,1,0]],np.float32),
+                           (source.shape[1],source.shape[0]),borderMode=cv2.BORDER_REFLECT)
+        self.assertIsNone(qa.colour_boundary_fit(source,raw,np.ones(source.shape[:2],np.float32)))
+        reference=np.dstack([source,np.full(source.shape[:2],255,np.uint8)])
+        _,report=qa.condition(reference,raw,np.zeros(source.shape[:2],np.uint8))
+        self.assertFalse(report['numerical_pass'])
+        self.assertIn('registration needs repair',report['rejection_reasons'])
+
+    def test_monochrome_texture_has_no_colour_registration_evidence(self):
+        reference,_=self.reference()
+        self.assertIsNone(qa.colour_boundary_fit(reference[...,:3],reference[...,:3],
+                                                np.ones(reference.shape[:2],np.float32)))
+
 if __name__=='__main__':unittest.main()
