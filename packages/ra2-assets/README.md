@@ -428,6 +428,11 @@ arguments; keep generated art outside Git. They preserve terrain alpha and do no
   full Gaussian context across tile/strip boundaries; source alpha and high-frequency painted detail are preserved.
   Both corrections use source alpha to exclude invalid RGB outside the map from their normalized Gaussian averages,
   preventing transparent black borders from darkening opaque terrain when generated detail extends past the edge.
+  For registration, assembly restores only fully transparent source pixels to their input RGB in a temporary copy.
+  Warping instead normalizes the generated paint by sampled source alpha, so neither invented off-map paint nor the
+  restored transparent black can leak into filtered map edges. Paint at every nonzero-alpha pixel contributes;
+  samples without valid paint fall back to the input. Fully opaque tiles retain direct cubic sampling. The standalone
+  `check` has no source alpha and still reports raw, unmasked tile diagnostics.
   Assembly always writes PNG, including when an atomic cache-farm temporary path has a different suffix.
   The result feeds `materials.json.terrainMap`.
 - `python/lake_shore.py`: takes the colour-matched original `--classification`, repainted `--terrain` and original

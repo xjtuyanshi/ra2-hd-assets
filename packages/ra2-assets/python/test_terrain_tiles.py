@@ -349,6 +349,87 @@ class TileTests(unittest.TestCase):
             np.testing.assert_array_equal(result[..., 3], rgba[..., 3])
             self.assertLessEqual(np.abs(result[..., :3][valid].astype(int) - expected[valid]).max(), 1)
 
+    def test_assemble_registration_ignores_invisible_paint_and_keeps_visible_detail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            h, w = 320, 384
+            rng = np.random.default_rng(61)
+            yy, xx = np.mgrid[:h, :w]
+            valid = np.abs((xx - w / 2) / (w / 2 - 20)) + np.abs((yy - h / 2) / (h / 2 - 20)) < 1
+            grey = cv2.GaussianBlur(rng.integers(30, 220, (h, w), np.uint8), (0, 0), 3)
+            cv2.circle(grey, (150, 130), 27, 220, -1)
+            cv2.rectangle(grey, (224, 120), (250, 175), 45, -1)
+            cv2.line(grey, (90, 200), (220, 225), 230, 7)
+            rgb = np.repeat(grey[..., None], 3, axis=2)
+            rgb[~valid] = 0
+            alpha = np.where(valid, 255, 0).astype(np.uint8)
+            alpha[valid & (yy == 160)] = 96
+            rgba = np.dstack([rgb, alpha])
+            Image.fromarray(rgba).save(root / "source.png")
+            tile = root / "tiles/0_0"
+            tile.mkdir(parents=True)
+            (tile / "tile.json").write_text(json.dumps(dict(x=0, y=0)), encoding="utf-8")
+            Image.fromarray(rgb).save(tile / "input.png")
+            art = rgb.copy()
+            art[155:174, 180:204] = (230, 90, 60)  # New material absent from the input must survive registration.
+            shifted = cv2.warpAffine(art, np.float32([[1, 0, 3], [0, 1, -2]]), (w, h),
+                                     borderMode=cv2.BORDER_REFLECT)
+            roi = valid & (xx > 70) & (xx < 290) & (yy > 80) & (yy < 250)
+            argv = ["assemble", "--source", str(root / "source.png"), "--tiles", str(root / "tiles"),
+                    "--output", str(root / "assembled.png"), "--lock-l", "0", "--lock-ab", "0"]
+            results = []
+            for background in (0, 255, rng.integers(0, 256, (np.count_nonzero(~valid), 3), np.uint8)):
+                output = shifted.copy()
+                output[~valid] = background
+                Image.fromarray(output).save(tile / "output.png")
+                if not results:
+                    self.assertEqual(tt.main([*argv, "--no-align"]), 0)
+                    unaligned = tt.load_image(root / "assembled.png", "RGBA")
+                    unaligned_error = np.abs(unaligned[..., :3][roi].astype(float) - art[roi]).mean()
+                    # A partially transparent pixel is visible paint, not an off-map registration fill.
+                    np.testing.assert_array_equal(unaligned[160, 193], [230, 90, 60, 96])
+                self.assertEqual(tt.main(argv), 0)
+                result = tt.load_image(root / "assembled.png", "RGBA")
+                results.append(result)
+                np.testing.assert_array_equal(result[..., 3], alpha)
+                error = np.abs(result[..., :3][roi].astype(float) - art[roi]).mean()
+                self.assertLess(error, unaligned_error * 0.5)
+                red = valid & (result[..., 0].astype(int) - result[..., 2].astype(int) > 100)
+                self.assertGreater(np.count_nonzero(red), 350)
+                self.assertLess(abs(np.where(red)[1].mean() - 191.5), 2)
+                self.assertLess(abs(np.where(red)[0].mean() - 164), 2)
+            # Visible registration must be independent of arbitrary RGB in the invisible region.
+            for result in results[1:]:
+                np.testing.assert_array_equal(result[valid], results[0][valid])
+
+    def test_assemble_subpixel_warp_keeps_bright_filtered_map_edges(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rgba = np.zeros((80, 96, 4), np.uint8)
+            rgba[16:-16, 16:-16, :3] = 160
+            rgba[16:-16, 16:-16, 3] = 255
+            rgba[16, 16:-16, 3] = 96
+            valid = rgba[..., 3] > 0
+            Image.fromarray(rgba).save(root / "source.png")
+            tile = root / "tiles/0_0"
+            tile.mkdir(parents=True)
+            (tile / "tile.json").write_text(json.dumps(dict(x=0, y=0)), encoding="utf-8")
+            Image.fromarray(rgba[..., :3]).save(tile / "input.png")
+            # Isolate interpolation from ECC's fitting accuracy with a known fractional sampling transform.
+            warp = np.float32([[1, 0, 0.75], [0, 1, 0.75]])
+            for background in (0, 255, (20, 250, 90)):
+                paint = np.empty_like(rgba[..., :3])
+                paint[:] = background
+                paint[valid] = 210
+                Image.fromarray(paint).save(tile / "output.png")
+                with patch.object(tt, "fit_affine", return_value=(0.9, 0.99, warp)):
+                    self.assertEqual(tt.main(["assemble", "--source", str(root / "source.png"),
+                                              "--tiles", str(root / "tiles"), "--output", str(root / "out.png"),
+                                              "--lock-l", "0", "--lock-ab", "0"]), 0)
+                result = tt.load_image(root / "out.png", "RGBA")
+                np.testing.assert_array_equal(result[..., 3], rgba[..., 3])
+                self.assertLessEqual(np.abs(result[..., :3][valid].astype(int) - 210).max(), 1)
+
     def test_registration_corrects_small_translation_and_rejects_large_fit(self):
         inp = source(256, 192)[..., :3]
         moved = cv2.warpAffine(inp, np.array([[1, 0, 4], [0, 1, -3]], np.float32), (256, 192),

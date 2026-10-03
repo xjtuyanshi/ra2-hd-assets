@@ -184,8 +184,17 @@ def displacement(warp: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     return np.linalg.norm(points @ warp[:, :2].T + warp[:, 2] - points, axis=1)
 
 
-def align(inp: np.ndarray, out: np.ndarray, name: str = "") -> np.ndarray:
-    _, cc, warp = fit_affine(inp, out)
+def align(inp: np.ndarray, out: np.ndarray, name: str = "",
+          validity: np.ndarray | None = None) -> np.ndarray:
+    fit = out
+    if validity is not None:
+        if validity.shape != inp.shape[:2]:
+            raise ValueError("alignment validity must match the input dimensions")
+        # Off-map inventions are not registration features. Nonzero-alpha paint remains untouched.
+        fit = out.copy()
+        outside = validity == 0
+        fit[outside] = inp[outside]
+    _, cc, warp = fit_affine(inp, fit)
     if not np.isfinite(cc):
         print("  align: no convergence", name)
         return out
@@ -194,8 +203,20 @@ def align(inp: np.ndarray, out: np.ndarray, name: str = "") -> np.ndarray:
         print(f"  align: rejected (displacement {disp:.1f} px)", name)
         return out
     h, w = inp.shape[:2]
-    result = cv2.warpAffine(out, warp, (w, h), flags=cv2.INTER_CUBIC + cv2.WARP_INVERSE_MAP,
-                            borderMode=cv2.BORDER_REFLECT)
+    def sample(image: np.ndarray) -> np.ndarray:
+        return cv2.warpAffine(image, warp, (w, h), flags=cv2.INTER_CUBIC + cv2.WARP_INVERSE_MAP,
+                              borderMode=cv2.BORDER_REFLECT)
+
+    if validity is None or np.all(validity == 1):
+        result = sample(out)
+    else:
+        # Sampling the fit's restored black would darken filtered map edges; sampling raw RGB would
+        # leak invented off-map paint. Normalize the painted samples by their source alpha instead.
+        coverage = sample(validity.astype(np.float32, copy=False))
+        painted = sample(out.astype(np.float32) * validity[..., None])
+        result = np.divide(painted, coverage[..., None], out=inp.astype(np.float32),
+                           where=coverage[..., None] > 1e-6)
+        result = np.round(np.clip(result, 0, 255)).astype(np.uint8)
     print(f"  align {name}: ecc {cc:.3f} max displacement {disp:.1f} px")
     return result
 
@@ -333,9 +354,9 @@ def assemble(args: argparse.Namespace) -> int:
         out = load_image(output_path, "RGB")
         if out.shape[:2] != (th, tw):
             out = cv2.resize(out, (tw, th), interpolation=cv2.INTER_AREA)
-        if not args.no_align:
-            out = align(inp, out, directory.name)
         validity = source[y:y + th, x:x + tw, 3].astype(np.float32) / 255
+        if not args.no_align:
+            out = align(inp, out, directory.name, validity)
         painted = colour_lock(inp, out, args.sigma_l, args.sigma_ab, args.lock_l, args.lock_ab, validity)
         stitch(canvas, filled, painted, x, y, args.feather)
         used += 1
