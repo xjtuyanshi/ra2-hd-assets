@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DirectionalLight, HemisphereLight, Mesh, PerspectiveCamera, Scene, WebGPURenderer } from 'three/webgpu';
+import { DirectionalLight, HemisphereLight, PerspectiveCamera, Scene, Vector3, WebGPURenderer } from 'three/webgpu';
 import { lights } from 'three/tsl';
 import { AtmosphereNodes } from '../src/atmosphere';
 import { VOXEL_PBR_DEFAULTS, voxelPbrFor, voxelPbrLookupTexture, voxelPbrMaterialFor } from '../src/ra2/voxelPbr';
 import { ra2VoxelClass, VOXEL_CLASS_ID } from '../src/ra2/voxelClasses';
 import { buildSmoothPartGeometry } from '../src/ra2/voxelSmoothGeometry';
 import { smoothVoxelOptions } from '../src/ra2/voxelSmooth';
-import { instantiateVoxel } from '../src/ra2/voxels';
+import { instantiateVoxel, updateVoxelNativeDepth } from '../src/ra2/voxels';
 import { syntheticSection } from './fixtures/syntheticVoxels';
 import { applyLookParams, voxelLookParams } from '../sandbox/look';
 import type { HdRenderer } from '../src/HdRenderer';
@@ -97,39 +97,95 @@ describe('remaster palette material', () => {
     b.dispose();
     expect(dispose).toHaveBeenCalledOnce();
   });
-  it.each([false, true])('generates shaders with sun/sky and painter depth without a GPU (WebGL=%s)', (forceWebGL) => {
-    const nodes = new AtmosphereNodes();
-    const material = voxelPbrMaterialFor(null, nodes);
-    const geometry = buildSmoothPartGeometry([syntheticSection(2, true)], smoothVoxelOptions({ aoRays: 0 }));
-    const unit = instantiateVoxel([{ role: 'body', turretOffset: 0, geometry, material }], material);
-    const mesh = unit.root.children.find((o) => o instanceof Mesh && o.material === material) as Mesh;
-    // Only the renderer's CPU compiler is used. No init(), context, browser, device, or rendered-pixel claim.
-    const canvas = {
-      width: 64,
-      height: 64,
-      style: {},
-      addEventListener() {},
-      removeEventListener() {},
-      setAttribute() {},
-    };
-    const renderer = new WebGPURenderer({ canvas: canvas as unknown as HTMLCanvasElement, forceWebGL });
-    vi.spyOn(renderer, 'hasFeature').mockReturnValue(false);
-    const builder = renderer.backend.createNodeBuilder(mesh, renderer);
-    builder.scene = new Scene();
-    builder.camera = new PerspectiveCamera();
-    builder.lightsNode = lights([new DirectionalLight(), new HemisphereLight()]);
-    builder.build();
-    expect(builder.fragmentShader).toContain('voxelValueNoise');
-    expect(builder.fragmentShader).toContain('directSpecular');
-    expect(builder.fragmentShader).toContain('radiance');
-    expect(builder.fragmentShader).not.toMatch(/\b(?:NaN|undefined)\b/);
-    expect(builder.vertexShader).toContain('vpos');
-    expect(builder.vertexShader).toContain('pshade');
-    expect(builder.fragmentShader).toMatch(/\b(?:dFdx|dpdx)\b/);
-    expect(material.normalNode).toBeTruthy();
-    geometry.dispose();
-    nodes.dispose();
+  it('keeps cloned and copied variants on their source lighting without mutating another atmosphere', () => {
+    const a = new AtmosphereNodes();
+    const b = new AtmosphereNodes();
+    const source = voxelPbrMaterialFor(null, a);
+    const other = voxelPbrMaterialFor(null, b);
+    const copied = other.clone();
+    const otherState = voxelPbrFor(b);
+    otherState.brightness.value = 0.73;
+    b.sceneObjectMul.value.setRGB(0.2, 0.4, 0.6);
+    copied.copy(source);
+    const clone = copied.clone();
+    for (const variant of [copied, clone]) {
+      for (const key of ['ao', 'state', 'look', 'sceneMultiplier']) {
+        expect(Reflect.get(source, key)).toBeDefined();
+        expect(Reflect.get(variant, key)).toBe(Reflect.get(source, key));
+      }
+      expect(variant.colorNode).toBe(source.colorNode);
+      expect(variant.envNode).toBe(source.envNode);
+      expect(variant.normalNode).toBe(source.normalNode);
+    }
+    voxelPbrFor(a).brightness.value = 1.37;
+    expect(Reflect.get(clone, 'state').brightness.value).toBe(1.37);
+    expect(Reflect.get(other, 'state')).toBe(otherState);
+    expect(otherState.brightness.value).toBe(0.73);
+    expect(b.sceneObjectMul.value.toArray()).toEqual([0.2, 0.4, 0.6]);
+    copied.dispose();
+    clone.dispose();
+    a.dispose();
+    b.dispose();
   });
+  it.each(
+    [false, true].flatMap((forceWebGL) =>
+      (['physical', 'native-ground', 'translucent'] as const).map((pass) => ({ forceWebGL, pass })),
+    ),
+  )(
+    'generates shaders with sun/sky and painter depth without a GPU ($pass, WebGL=$forceWebGL)',
+    ({ forceWebGL, pass }) => {
+      const nodes = new AtmosphereNodes();
+      const material = voxelPbrMaterialFor(null, nodes);
+      const geometry = buildSmoothPartGeometry([syntheticSection(2, true)], smoothVoxelOptions({ aoRays: 0 }));
+      const unit = instantiateVoxel([{ role: 'body', turretOffset: 0, geometry, material }], material);
+      const mesh = unit.root.partMeshes[0]!;
+      if (pass === 'native-ground') updateVoxelNativeDepth(unit, new Vector3());
+      if (pass === 'translucent') {
+        updateVoxelNativeDepth(unit, new Vector3());
+        unit.root.setOpacity(0.5);
+      }
+      expect(mesh.material === material).toBe(pass === 'physical');
+      const sourceDispose = vi.spyOn(material, 'dispose');
+      const variantDispose = mesh.material !== material ? vi.spyOn(mesh.material as typeof material, 'dispose') : null;
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // Only the renderer's CPU compiler is used. No init(), context, browser, device, or rendered-pixel claim.
+      const canvas = {
+        width: 64,
+        height: 64,
+        style: {},
+        addEventListener() {},
+        removeEventListener() {},
+        setAttribute() {},
+      };
+      const renderer = new WebGPURenderer({ canvas: canvas as unknown as HTMLCanvasElement, forceWebGL });
+      vi.spyOn(renderer, 'hasFeature').mockReturnValue(false);
+      const builder = renderer.backend.createNodeBuilder(mesh, renderer);
+      builder.scene = new Scene();
+      builder.camera = new PerspectiveCamera();
+      builder.lightsNode = lights([new DirectionalLight(), new HemisphereLight()]);
+      try {
+        builder.build();
+        // TSL reports lifecycle exceptions and continues building; generated shader text alone misses this failure.
+        expect(errors.mock.calls).toEqual([]);
+        expect(builder.fragmentShader).toContain('voxelValueNoise');
+        expect(builder.fragmentShader).toContain('directSpecular');
+        expect(builder.fragmentShader).toContain('radiance');
+        expect(builder.fragmentShader).not.toMatch(/\b(?:NaN|undefined)\b/);
+        expect(builder.vertexShader).toContain('vpos');
+        expect(builder.vertexShader).toContain('pshade');
+        expect(builder.fragmentShader).toMatch(/\b(?:dFdx|dpdx)\b/);
+        expect(material.normalNode).toBeTruthy();
+      } finally {
+        errors.mockRestore();
+        unit.root.disposeOpacityMaterials();
+        expect(sourceDispose).not.toHaveBeenCalled();
+        geometry.dispose();
+        nodes.dispose();
+        expect(sourceDispose).toHaveBeenCalledOnce();
+        if (variantDispose) expect(variantDispose).toHaveBeenCalledOnce();
+      }
+    },
+  );
 });
 
 it('parses remaster geometry and shader parameters without changing engine defaults', () => {
