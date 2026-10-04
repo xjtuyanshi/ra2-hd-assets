@@ -272,6 +272,16 @@ class RemasterMaterial extends MeshStandardNodeMaterial {
   state!: VoxelPbrState;
   look!: SpriteLookState;
   sceneMultiplier!: ShaderNode;
+  override copy(source: this): this {
+    super.copy(source);
+    // Three's clone constructs an empty subclass; NodeMaterial.copy skips its undefined custom fields.
+    // Native-ground and per-unit opacity variants share the source atmosphere's nodes, not new owners/uniforms.
+    this.ao = source.ao;
+    this.state = source.state;
+    this.look = source.look;
+    this.sceneMultiplier = source.sceneMultiplier;
+    return this;
+  }
   override setupEnvironment(): EnvironmentNode | null {
     return this.envNode ? new SpecularSky(this.envNode) : null;
   }
