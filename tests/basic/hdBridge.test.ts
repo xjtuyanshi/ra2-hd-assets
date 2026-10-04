@@ -79,15 +79,18 @@ function setup(search = '?hd=1', backend: VmFrameRenderer['backend'] = 'WebGL2')
     getRenderState: vi.fn(async (): Promise<GameRenderState | null> => state),
     setTacticalPassthrough: vi.fn(async (_flags: number) => true),
   };
+  const status = vi.fn((_text: string | null) => undefined);
   const stop = startHdBridge({
     vm: vm as unknown as VmShell,
     screen: screen as unknown as HTMLCanvasElement,
     frameRenderer: renderer as unknown as VmFrameRenderer,
     invalidate: vi.fn(),
     frameSize: () => ({ width: 800, height: 600 }),
+    publishStatus: status,
   });
   return {
     stop,
+    status,
     vm,
     renderer,
     screen,
@@ -743,6 +746,137 @@ describe('HD 桥状态机', () => {
     harness.stop();
     expect(harness.vm.getRenderState).not.toHaveBeenCalled();
     expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
+  });
+});
+
+describe('HD bridge fallback notice', () => {
+  /** What the loader throws for a map directory that is not in the cache (see MapCacheMissingError). */
+  function missingCache(): Error {
+    return Object.assign(new Error('no HD cache'), { name: 'MapCacheMissingError' });
+  }
+
+  it('没有高清素材的地图：显示原版画面并在屏幕上说明，一局只说一次，到时收起', async () => {
+    const harness = setup();
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    liveView.create.mockRejectedValue(missingCache());
+    harness.setState(battle(1, 'NOCACHE.MAP'));
+    await advance(16);
+    await vi.waitFor(() => expect(harness.status).toHaveBeenCalledTimes(1));
+    const notice = harness.status.mock.calls[0]![0]!;
+    expect(notice).toContain('NOCACHE');
+    // The original picture: no transparent hole, no key, no passthrough, HD canvas hidden.
+    expect(harness.renderer.setTransparentRect).not.toHaveBeenCalledWith(expect.objectContaining({ width: 632 }));
+    expect(harness.renderer.setTransparentKey).not.toHaveBeenCalledWith(expect.objectContaining({ rect: TACTICAL }));
+    expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
+    expect(harness.hdCanvas.style.display).toBe('none');
+
+    // The game is still on its loading screen (the logic frame stands still): the notice waits for the battlefield.
+    await advance(1000, 20);
+    expect(harness.status).toHaveBeenCalledTimes(1);
+    // The notice is for the start of the match: once it runs, the notice goes away by itself after 12 seconds.
+    harness.setState(battle(2, 'NOCACHE.MAP'));
+    await advance(1000, 11);
+    expect(harness.status).toHaveBeenCalledTimes(1);
+    await advance(1000, 2);
+    expect(harness.status).toHaveBeenCalledTimes(2);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    // The failed retry (30 s after the first load) does not bring it back.
+    expect(liveView.create).toHaveBeenCalledTimes(2);
+    await advance(1000, 31);
+    expect(liveView.create).toHaveBeenCalledTimes(3);
+    await settle();
+    expect(harness.status).toHaveBeenCalledTimes(2);
+
+    // The logic frame moving on is the same match; starting over is the next match, which says it again.
+    harness.setState(battle(40, 'NOCACHE.MAP'));
+    await advance(1000);
+    expect(harness.status).toHaveBeenCalledTimes(2);
+    harness.setState(battle(1, 'NOCACHE.MAP'));
+    await advance(1000);
+    await vi.waitFor(() => expect(harness.status).toHaveBeenLastCalledWith(notice));
+    // Leaving the battle clears it at once.
+    harness.setState(null);
+    await advance(1000);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    harness.stop();
+  });
+
+  it('素材存在但加载失败时换一句话；稍后加载成功就收起并显示高清画面', async () => {
+    const harness = setup();
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    liveView.create.mockRejectedValueOnce(missingCache());
+    harness.setState(battle(1, 'NOCACHE.MAP'));
+    await advance(16);
+    await vi.waitFor(() => expect(harness.status).toHaveBeenCalledTimes(1));
+    const missing = harness.status.mock.calls[0]![0]!;
+    harness.setState(null);
+    await advance(1000);
+
+    liveView.create.mockRejectedValueOnce(new Error('WebGPU device lost'));
+    harness.setState(battle(1, 'BROKEN.MAP'));
+    await advance(1000);
+    await vi.waitFor(() => expect(harness.status).toHaveBeenCalledTimes(3));
+    const failedNotice = harness.status.mock.calls[2]![0]!;
+    expect(failedNotice).toContain('BROKEN');
+    expect(failedNotice.replace('BROKEN', 'NOCACHE')).not.toBe(missing);
+
+    // The retry in the same match loads the view: the HD picture shows and no notice is left or repeated.
+    const view = fakeView();
+    liveView.create.mockResolvedValue(view);
+    await advance(1000, 31);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    harness.setState(battle(2, 'BROKEN.MAP'));
+    await advance(16);
+    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
+    expect(harness.status).toHaveBeenCalledTimes(4);
+    harness.stop();
+    expect(harness.status).toHaveBeenCalledTimes(4);
+  });
+
+  it('切到原版画面（toggle）或停止时不留提示', async () => {
+    const harness = setup();
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    liveView.create.mockRejectedValue(missingCache());
+    harness.setState(battle(1, 'NOCACHE.MAP'));
+    await advance(16);
+    await vi.waitFor(() => expect(harness.status).toHaveBeenCalledTimes(1));
+    expect(harness.bridge()?.toggle()).toBe(false);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    expect(harness.bridge()?.toggle()).toBe(true);
+    expect(harness.status).toHaveBeenCalledTimes(2);
+
+    const next = setup();
+    liveView.create.mockRejectedValue(missingCache());
+    next.setState(battle(1, 'NOCACHE.MAP'));
+    await advance(16);
+    await vi.waitFor(() => expect(next.status).toHaveBeenCalledTimes(1));
+    next.stop();
+    expect(next.status).toHaveBeenLastCalledWith(null);
+  });
+
+  it('同一张地图的大小写变化（菜单里的 2Peaks、开局后的 2PEAKS.MAP）不是另一张地图：只加载一次', async () => {
+    const harness = setup();
+    const view = fakeView();
+    let finish!: (value: unknown) => void;
+    liveView.create.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    harness.setState(battle(1, '2Peaks'));
+    await advance(16);
+    await vi.waitFor(() => expect(liveView.create).toHaveBeenCalledTimes(1));
+    expect(liveView.create.mock.calls[0]![1]).toMatchObject({ mapBase: '/hd-cache/2Peaks' });
+    // The match starts while the view is still loading: same map, the load in flight is kept.
+    harness.setState(battle(2, '2PEAKS.MAP'));
+    await advance(1000, 2);
+    expect(liveView.create).toHaveBeenCalledTimes(1);
+    finish(view);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
+    harness.setState(battle(3, '2PEAKS.MAP'));
+    await advance(1000);
+    expect(view.dispose).not.toHaveBeenCalled();
+    expect(view.push).toHaveBeenCalled();
+    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
+    expect(harness.status).not.toHaveBeenCalledWith(expect.any(String));
+    harness.stop();
   });
 });
 

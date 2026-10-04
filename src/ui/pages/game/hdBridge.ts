@@ -10,6 +10,7 @@ import type { HdUi } from './hdUi';
 import type { LookPreset } from '../../../../packages/hd-renderer/src/HdRenderer';
 import type { LiveSnapshot, LiveView } from '../../../../packages/hd-renderer/src/live/liveView';
 import { parseWeatherParams } from '../../../../packages/hd-renderer/src/weatherParams';
+import { t } from '../../shared/i18n/translate';
 
 /**
  * HD remaster bridge (development only, `?hd=1`): draws the running match with the HD renderer on a canvas under the
@@ -28,7 +29,12 @@ import { parseWeatherParams } from '../../../../packages/hd-renderer/src/weather
  *
  * The map's HD cache must exist locally (pnpm hd:prepare -- --map <map>); without it, or outside a battle, the original
  * frame is shown as usual. A map whose view failed to load is tried again after LOAD_RETRY_MS or at the next match on
- * it, so a cache built while the page stays open is picked up without a reload.
+ * it, so a cache built while the page stays open is picked up without a reload. While a match runs on such a map the
+ * host is told why the original picture is shown (`publishStatus`), once per match (see NOTICE_MS).
+ *
+ * The game names the same scenario in different casings (the skirmish menu's `2Peaks`, then `2PEAKS.MAP` once the
+ * match runs) and the development server resolves cache names without regard to case, so maps are compared by their
+ * lower-cased name: a casing change is neither another map nor a reason to load the view a second time.
  */
 export interface HdBridgeHost {
   vm: VmShell;
@@ -40,6 +46,11 @@ export interface HdBridgeHost {
   frameSize(): { width: number; height: number } | null;
   /** Read-only local input position; cursor shape always comes from the guest snapshot. */
   pointerPosition?(): Readonly<{ x: number; y: number }> | null;
+  /**
+   * Show a short localized notice over the game picture, or clear it with null: why the running match shows the
+   * original picture instead of the HD view (the map has no HD cache, or its view failed to load).
+   */
+  publishStatus?(text: string | null): void;
 }
 
 /** YR's in-game layout around the tactical view: sidebar on the right, command bar at the bottom (engine pixels). */
@@ -66,6 +77,13 @@ const IDLE_POLL_MS = 1000;
  * without a cache costs one failed fetch per wait, not one per poll.
  */
 const LOAD_RETRY_MS = 30_000;
+/**
+ * How long the notice that a match shows the original picture stays up once the match is running. It is information
+ * for the start of a match, not a banner for all of it: it returns at the next match on a map without an HD view, not
+ * on every failed retry. The map is known, and its load fails, while the game still shows its loading screen, so the
+ * time counts from the first logic frame after the failure, not from the failure.
+ */
+const NOTICE_MS = 12_000;
 
 /**
  * `?hd-passthrough=`: comma list of category names, `all`, `none`, or a number. Default all: the HD renderer draws its
@@ -103,6 +121,7 @@ export function startHdBridge(host: HdBridgeHost): () => void {
   host.screen.parentElement!.insertBefore(canvas, host.screen);
 
   let live: LiveView | null = null;
+  /** Map names below are keys: lower-cased, without the extension (see `mapKey`). */
   let liveMap: string | null = null;
   /** Last snapshot pushed to `live`; readers return the identical object while nothing changed. */
   let pushed: GameRenderState | null = null;
@@ -123,6 +142,21 @@ export function startHdBridge(host: HdBridgeHost): () => void {
   let uiEnabled = params.get('hd-ui') === '1';
   let latestState: GameRenderState | null = null;
   let inBattle = false;
+  /**
+   * The map whose missing HD view was announced in this match, the logic frame at that moment, and until when the
+   * notice stays on screen (Infinity until the logic frame moves on: see NOTICE_MS).
+   */
+  let fallback: { map: string; frame: number; until: number } | null = null;
+  let published: string | null = null;
+  const publish = (text: string | null) => {
+    if (text === published) return;
+    published = text;
+    host.publishStatus?.(text);
+  };
+  const clearFallback = () => {
+    fallback = null;
+    publish(null);
+  };
   // The production graph walker follows page.ts -> hdBridge.ts, so the import itself must be under DEV.
   if (import.meta.env.DEV && params.get('hd-ui') === '1') {
     void import('./hdUi')
@@ -197,7 +231,8 @@ export function startHdBridge(host: HdBridgeHost): () => void {
     return { x: 0, y: 0, width: size.width - SIDEBAR_WIDTH, height: size.height - COMMAND_BAR_HEIGHT };
   };
 
-  const load = (mapId: string) => {
+  /** `mapId` is the key; `mapName` is the game's own spelling, for the cache URL and for messages. */
+  const load = (mapId: string, mapName: string) => {
     if (loading === mapId || performance.now() < (failed.get(mapId) ?? -Infinity)) return;
     loading = mapId;
     const look = params.get('hd-look');
@@ -218,7 +253,7 @@ export function startHdBridge(host: HdBridgeHost): () => void {
         // A preset's suggested hour stages day maps only: dusk and night maps keep their own [Lighting] hour.
         const dayHour = preset && renderer ? renderer.LOOK_PRESETS[preset].hour : undefined;
         const view = await LiveView.create(canvas, {
-          mapBase: `/hd-cache/${encodeURIComponent(mapId)}`,
+          mapBase: `/hd-cache/${encodeURIComponent(mapName)}`,
           libraryBase: '/hd-cache/_library',
           // Without hd-time, the map's own [Lighting] decides day, dusk or night (a preset's hour applies to day maps).
           ...(timeOfDay !== undefined ? { timeOfDay } : {}),
@@ -252,16 +287,28 @@ export function startHdBridge(host: HdBridgeHost): () => void {
         failed.delete(mapId);
         pushed = null;
         lastLayout = '';
-        console.info(`[HD] live view ready for ${mapId}`);
+        if (fallback?.map === mapId) clearFallback();
+        console.info(`[HD] live view ready for ${mapName}`);
       })
       .catch((error) => {
         if (stopped) return;
         failed.set(mapId, performance.now() + LOAD_RETRY_MS);
         console.warn(
-          `[HD] no HD view for ${mapId}; trying again in ${LOAD_RETRY_MS / 1000} s or at the next match on it ` +
-            `(build its cache with: pnpm hd:prepare -- --map ${mapId})`,
+          `[HD] no HD view for ${mapName}; trying again in ${LOAD_RETRY_MS / 1000} s or at the next match on it ` +
+            `(build its cache with: pnpm hd:prepare -- --map ${mapName})`,
           error,
         );
+        // Say so on screen while the match on this map is still the current one, once per match (not per retry).
+        if (stateMap !== mapId || fallback?.map === mapId) return;
+        fallback = { map: mapId, frame: stateFrame, until: Infinity };
+        // The loader's MapCacheMissingError: the map was never prepared, as opposed to a cache that fails to load.
+        const missing = (error as { name?: unknown } | null)?.name === 'MapCacheMissingError';
+        if (enabled)
+          publish(
+            missing
+              ? t('高清画面未启用：地图 {0} 没有高清素材，显示原版画面', mapName)
+              : t('高清画面加载失败：地图 {0} 显示原版画面，稍后自动重试', mapName),
+          );
       })
       .finally(() => {
         if (loading === mapId) loading = null;
@@ -275,19 +322,26 @@ export function startHdBridge(host: HdBridgeHost): () => void {
     latestState = state;
     inBattle = !!state?.map;
     ui?.update(state?.sidebar ?? null);
-    const mapId = state?.map?.fileName?.replace(/\.[^.]+$/, '') ?? null;
+    const mapName = state?.map?.fileName?.replace(/\.[^.]+$/, '') ?? null;
+    const mapId = mapName?.toLowerCase() ?? null;
     // A new match on a map (coming from another map or from outside a battle, or the logic frame starting over) may
-    // find a cache built since its last failed load.
-    if (state && mapId && (mapId !== stateMap || state.frame < stateFrame)) failed.delete(mapId);
+    // find a cache built since its last failed load; if not, it is told again that the original picture is shown.
+    if (state && mapId && (mapId !== stateMap || state.frame < stateFrame)) {
+      failed.delete(mapId);
+      clearFallback();
+    }
+    if (!mapId) clearFallback();
     stateMap = mapId;
     stateFrame = state?.frame ?? 0;
-    if (!state || !mapId || !state.view) {
+    if (fallback && fallback.until === Infinity && stateFrame > fallback.frame)
+      fallback.until = performance.now() + NOTICE_MS;
+    if (!state || !mapId || !mapName || !state.view) {
       setHole(null);
       return;
     }
     if (liveMap !== mapId || !live) {
       setHole(null);
-      load(mapId);
+      load(mapId, mapName);
       return;
     }
     if (state !== pushed) {
@@ -347,6 +401,7 @@ export function startHdBridge(host: HdBridgeHost): () => void {
     const now = performance.now();
     if (!polling && now - lastPollAt >= pollInterval()) poll(now);
     if (!hole && keyRect && now >= keyUntil) present();
+    if (fallback && now >= fallback.until) publish(null);
     if (live && (hole || keyRect)) {
       layout();
       live.render();
@@ -360,7 +415,11 @@ export function startHdBridge(host: HdBridgeHost): () => void {
       if (stopped) return enabled;
       enabled = !enabled;
       ui?.setEnabled(enabled && uiEnabled);
-      if (!enabled) setHole(null);
+      if (!enabled) {
+        setHole(null);
+        // The original picture was asked for: nothing to explain.
+        publish(null);
+      }
       return enabled;
     },
     ui: {
@@ -393,6 +452,7 @@ export function startHdBridge(host: HdBridgeHost): () => void {
     if (stopped) return;
     stopped = true;
     cancelAnimationFrame(frame);
+    clearFallback();
     ui?.dispose();
     ui = null;
     latestState = null;

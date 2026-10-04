@@ -367,6 +367,10 @@ export const englishMessages = {
   '非 AI': 'non-AI',
   'Canvas 2D（WebGL2 不可用或由 ?webgl=0 强制回退）': 'Canvas 2D (WebGL2 unavailable or forced by ?webgl=0)',
   '超分未启动：当前使用 Canvas 2D，已回退原图': 'Upscaling inactive: using Canvas 2D and original pixels',
+  '高清画面未启用：地图 {0} 没有高清素材，显示原版画面':
+    'HD view off: map {0} has no HD assets; showing the original picture',
+  '高清画面加载失败：地图 {0} 显示原版画面，稍后自动重试':
+    'HD view failed to load: map {0} shows the original picture; retrying shortly',
   浏览器无法创建游戏画面缓存上下文: 'Browser could not create a game-frame cache context',
   浏览器无法创建鼠标光标缓存上下文: 'Browser could not create a cursor cache context',
   'WebGL shader 编译失败：{0}': 'WebGL shader compilation failed: {0}',

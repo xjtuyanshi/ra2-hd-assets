@@ -234,10 +234,28 @@ export async function loadHdAtlas(base: string, ref: HdAtlasRef): Promise<HdAtla
   return { color, remap, paintSaturation: ref.paintSaturation ?? 1 };
 }
 
+/**
+ * The map has no cache at all: its manifest.json is not there (404, or the dev server's HTML fallback). Callers tell
+ * this apart from a cache that exists but fails to load, e.g. to say that the map was never prepared.
+ */
+export class MapCacheMissingError extends Error {
+  override readonly name = 'MapCacheMissingError';
+  constructor(readonly base: string) {
+    super(`${base}: no HD cache for this map (manifest.json not found)`);
+  }
+}
+
 export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}): Promise<Ra2Cache> {
   const nodes = options.nodes ?? new AtmosphereNodes();
   const url = (file: string) => `${base.replace(/\/$/, '')}/${file}`;
-  const manifestBytes = await (await fetch(url('manifest.json'))).arrayBuffer();
+  const manifestResponse = await fetch(url('manifest.json'));
+  if (
+    manifestResponse.status === 404 ||
+    (manifestResponse.ok && (manifestResponse.headers.get('content-type') ?? '').includes('text/html'))
+  )
+    throw new MapCacheMissingError(base);
+  if (!manifestResponse.ok) throw new Error(`${url('manifest.json')}: HTTP ${manifestResponse.status}`);
+  const manifestBytes = await manifestResponse.arrayBuffer();
   const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as HdCacheManifest;
   const tileBytes = decodeBase64(manifest.cells.tile);
   const tile = new Uint16Array(tileBytes.buffer, tileBytes.byteOffset, tileBytes.byteLength / 2);

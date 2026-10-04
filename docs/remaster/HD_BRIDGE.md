@@ -32,7 +32,14 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    the HD view shows the current map, and once a second while a snapshot would go unused (no HD cache for the map, the
    view still loading, the bridge toggled off, or the VM not answering). A map whose HD view failed to load (no or an
    incomplete cache, the development server restarting, a WebGPU error) is tried again after 30 seconds and at the
-   next match on it, never on every poll. While the HD view is shown the bridge switches
+   next match on it, never on every poll. Such a match shows the original picture, complete and unkeyed, and the
+   page says why in a notice at the top of the game frame (`#vm-hd-status`, styled like the upscale notice): that the
+   map has no HD assets (the loader's `MapCacheMissingError`: no `manifest.json`) or that its HD view failed to load.
+   The notice appears once per match, stays until the match has run for 12 seconds (the load already fails while the
+   game shows its loading screen) and goes when the battle ends or the view loads. The game spells
+   one scenario differently over time (`2Peaks` from the skirmish menu, `2PEAKS.MAP` once the match runs) and the
+   development server resolves cache names without regard to case, so the bridge compares map names lower-cased: a
+   change of casing neither reloads the view nor counts as another map. While the HD view is shown the bridge switches
    on the game's native overlay passthrough (`VmShell.setTacticalPassthrough`, see below) and asks the frame renderer
    to make only key-coloured pixels transparent (`VmFrameRenderer.setTransparentKey`); without passthrough it falls
    back to a transparent tactical rectangle (`setTransparentRect`). Both need the WebGL2 renderer's alpha drawing
@@ -254,6 +261,17 @@ pnpm hd:prepare -- --map XMP29U2        # a map id, a map file name, or a path; 
 
 A cache built while the game page is open needs no reload: the bridge retries a map that had no HD view 30 seconds
 after the failed load, or at once when a new match starts on it.
+
+A map is HD-playable when the served cache has a directory with the scenario's file name without its extension
+(case-insensitive; a `.yro` package's scenario carries the package name) holding `manifest.json` and the files it
+names: the terrain tile atlas, the indexed sprite atlas of the map's own trees and other map sprites with its
+optional 2x HD atlas and house-paint mask, palettes, map voxel models and the whole-map terrain composite with its
+water mask. Everything else is shared and bound by the manifest's `theater`: units, buildings, overlays and smudges
+come from `_library/<theatre>/` (`library.json` and its sprite pages with their HD pages), effects from
+`_library/common/effects/`, the interface from `_ui/`, vehicle redraw projections from the directory named by
+`hd-vproj`. The optional sidecars (`materials.json`, `lights.json`, `windows.json`, `normals.json`) refine one map
+and are not required. To serve many prepared maps at once, build a symlink farm over an existing cache with
+`packages/ra2-assets/python/play_farm.py` (see the asset tools guide) and point `RA2_HD_CACHE_DIR` at it.
 
 `--map` accepts maps stored inside the game's MIX archives (most multiplayer maps; the extractor looks in top-level
 archives and one level down in the stock map archives) as well as loose map files and `.yro`/`.mmx` packages. The
