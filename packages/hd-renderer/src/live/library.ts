@@ -36,6 +36,7 @@ export class LiveLibrary {
   /** Changes when asynchronous art settles; presentation can sleep while nothing has arrived. */
   revision = 0;
   private readonly voxels = new Map<string, VoxelModel | 'loading' | 'failed'>();
+  private voxelTypes?: Map<string, string>;
   private readonly hdPages = new Map<number, HdAtlas | 'loading' | 'failed'>();
   private readonly windowPages = new Map<number, Texture | 'loading' | 'failed'>();
   private readonly materialPages = new Map<number, SpriteMaterialAtlas | 'loading' | 'failed'>();
@@ -271,6 +272,20 @@ export class LiveLibrary {
       return null;
     }
     return typeof entry === 'string' ? null : entry;
+  }
+
+  /**
+   * The type id that draws library voxel `voxel` (a type names its unloading image by voxel id, the engine reports the
+   * image by type id): the type of the same name when it uses that voxel, else the first vehicle/aircraft that does.
+   */
+  voxelType(voxel: string): string | undefined {
+    let types = this.voxelTypes;
+    if (!types) {
+      types = this.voxelTypes = new Map();
+      for (const [id, type] of Object.entries(this.library.types))
+        if (type.voxel && (id === type.voxel || !types.has(type.voxel))) types.set(type.voxel, id);
+    }
+    return types.get(voxel);
   }
 
   /** Whether a voxel model is missing from the library or failed to load (as opposed to still loading). */
