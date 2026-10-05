@@ -23,6 +23,7 @@ import type { GameVmCallbacks } from '../app/session/runtimeEvents';
 import type { PcmPlayOptions, PcmWaveFormat } from '../vm86/audio';
 import type { VmFrame } from '../vm86/win32';
 import { withGameResolutionOverride } from '../games/resolution';
+import { withGameSpeedOverride } from '../games/gameSpeed';
 import { SerialTaskQueue } from '../utils/serialTaskQueue';
 import { FrameBufferPool } from './frameBufferPool';
 
@@ -440,9 +441,12 @@ export class VmWorkerController {
     const mounted = config.additionalFiles?.length
       ? mountCustomMapFiles(discoveredSource, new Map(config.additionalFiles.map(({ path, bytes }) => [path, bytes])))
       : discoveredSource;
-    const source = await withMultiplayerNameOverride(
-      await this.dependencies.applyResolution(mounted, config.resolution),
-      config.playerName,
+    const source = withGameSpeedOverride(
+      await withMultiplayerNameOverride(
+        await this.dependencies.applyResolution(mounted, config.resolution),
+        config.playerName,
+      ),
+      config.gameSpeed,
     );
     this.sourceTemplate = source.files;
     const callbacks: GameVmCallbacks = {

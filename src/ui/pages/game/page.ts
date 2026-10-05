@@ -45,6 +45,7 @@ import {
   type ResolutionChoice,
 } from './vmPageResolution';
 import type { GameResolution } from '../../../games/resolution';
+import { parseGameSpeed } from '../../../games/gameSpeed';
 
 let activeVm: VmShell | null = null;
 const pageController = new VmSessionController();
@@ -58,6 +59,8 @@ let activeRendererCleanup: (() => void) | null = null;
 /** HD remaster bridge (dev, ?hd=1): see hdBridge.ts. Stopped before the VM it polls is destroyed. */
 let activeHdCleanup: (() => void) | null = null;
 const hdBridgeRequested = import.meta.env.DEV && new URLSearchParams(window.location.search).get('hd') === '1';
+/** `?game-speed=`: startup speed of this page's sessions on the original scale (0 fastest, 3 normal, 6 slowest). */
+const sessionGameSpeed = parseGameSpeed(new URLSearchParams(window.location.search).get('game-speed'));
 /** Page shortcut that switches between the HD view and the original picture; the game's own key without a bridge. */
 const HD_VIEW_KEY = '\\';
 
@@ -565,6 +568,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
           gameSource!,
           {
             resolution: requestedResolution,
+            // ?game-speed=0..6 (original scale, 3 = normal): this session's startup speed; absent = the game's default.
+            ...(sessionGameSpeed !== undefined ? { gameSpeed: sessionGameSpeed } : {}),
             startupPage: new URLSearchParams(window.location.search).get('start-page') || undefined,
             // The HD bridge switches the game's native overlay passthrough; normal play installs no patches.
             renderPassthrough: hdBridgeEnabled,

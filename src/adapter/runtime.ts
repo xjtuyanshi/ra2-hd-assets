@@ -25,6 +25,7 @@ import type { GameFileEntry, VmInitConfig } from './vmProtocol';
 import type { VmPointerState, VmShell } from './vmShell';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
 import { withGameResolutionOverride } from '../games/resolution';
+import { withGameSpeedOverride } from '../games/gameSpeed';
 import { randomMultiplayerName, validateMultiplayerName, withMultiplayerNameOverride } from '../games/multiplayerName';
 import { parseRa2RelayUrl, type Ra2NetworkConfig } from '../games/ra2/networkTransport';
 
@@ -96,9 +97,12 @@ export async function createVmShell(
   ) {
     return new Win32GameVm(
       callbacks,
-      await withMultiplayerNameOverride(
-        await withGameResolutionOverride(mainThreadSource, options.resolution),
-        playerName,
+      withGameSpeedOverride(
+        await withMultiplayerNameOverride(
+          await withGameResolutionOverride(mainThreadSource, options.resolution),
+          playerName,
+        ),
+        options.gameSpeed,
       ),
       ra2Network,
       options.startupPage,
@@ -154,6 +158,7 @@ export async function createVmShell(
     ...(additionalFiles?.size ? { additionalFiles: collectTransferEntries(additionalFiles, transfer) } : {}),
     ...(options.resolution ? { resolution: options.resolution } : {}),
     playerName,
+    ...(options.gameSpeed !== undefined ? { gameSpeed: options.gameSpeed } : {}),
     startupPage: options.startupPage,
     ...(options.renderPassthrough ? { renderPassthrough: true } : {}),
     ...(ra2Network ? { ra2Network } : {}),
@@ -205,9 +210,12 @@ export async function createVmShell(
     await client.destroy();
     return new Win32GameVm(
       callbacks,
-      await withMultiplayerNameOverride(
-        await withGameResolutionOverride(mainThreadSource, options.resolution),
-        playerName,
+      withGameSpeedOverride(
+        await withMultiplayerNameOverride(
+          await withGameResolutionOverride(mainThreadSource, options.resolution),
+          playerName,
+        ),
+        options.gameSpeed,
       ),
       ra2Network,
       options.startupPage,

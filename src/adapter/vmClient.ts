@@ -30,6 +30,8 @@ export interface WorkerVmClientOptions {
   resolution?: GameResolution | null;
   /** Native [MultiPlayer] Handle for this VM; never shared with other tabs. */
   playerName?: string;
+  /** Startup game speed for this session (original INI scale, 0 fastest to 6 slowest); omitted = the catalog default. */
+  gameSpeed?: number;
   /** Worker injection for tests; production creates a module Worker by default. */
   workerFactory?: () => Worker;
   /** Audio-sink injection for tests; production creates WebAudioPcmSink by default. */

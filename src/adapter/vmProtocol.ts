@@ -46,6 +46,8 @@ export interface VmInitConfig {
   resolution?: GameResolution;
   /** Overlay the INI after rebuilding the Worker provider; development HTTP mode must retain the player name too. */
   playerName?: string;
+  /** Startup game speed for this session (original INI scale 0..6) in place of the catalog default. */
+  gameSpeed?: number;
   /** Room and EXE SHA-256 for explicitly enabled RA2 networking; omitted means single-player. */
   ra2Network?: Ra2NetworkConfig;
   /** The page owns the WS connection; the Worker sends and receives through a port transferred with init. */

@@ -4,7 +4,12 @@ import { type GameSource } from '../../src/games/source';
 import { supportedGame } from '../../src/games/catalog';
 import { gameResolutionIni, withGameResolutionOverride } from '../../src/games/resolution';
 import { withMultiplayerNameOverride } from '../../src/games/multiplayerName';
-import { patchGameSpeedIni, withGameSpeedDefault } from '../../src/games/gameSpeed';
+import {
+  parseGameSpeed,
+  patchGameSpeedIni,
+  withGameSpeedDefault,
+  withGameSpeedOverride,
+} from '../../src/games/gameSpeed';
 
 const encode = (s: string) => Uint8Array.from(s, (c) => c.charCodeAt(0));
 const decode = (b: Uint8Array) => String.fromCharCode(...b);
@@ -44,5 +49,35 @@ describe('原版启动速度', () => {
     expect(await files.read(path)).toEqual(original);
     const generic = { ...source, game: { ...source.game, defaultGameSpeed: undefined } };
     expect(await withGameSpeedDefault(generic)).toBe(generic);
+  });
+  it('本次会话指定的速度取代目录默认值，只进内存覆盖层；非原版档位不算请求', async () => {
+    const path = gameResolutionIni('yr'),
+      original = encode('[Options]\nGameSpeed=2\n[LAN]\nGameSpeed=4\n');
+    const files = new MemoryGameFileProvider(new Map([[path, original]]));
+    const source: GameSource = { game: supportedGame('yr'), files, executableBytes: new Uint8Array([1]) };
+    // The startup chain of the Worker and of the main thread: resolution, name, then the core's speed default.
+    const startupIni = async (from: GameSource) => {
+      const named = await withMultiplayerNameOverride(
+        await withGameResolutionOverride(from, { width: 1728, height: 1080 }),
+        'Bob',
+      );
+      return decode((await (await withGameSpeedDefault(named)).files.read(path))!);
+    };
+    expect(withGameSpeedOverride(source, undefined)).toBe(source);
+    expect(withGameSpeedOverride(source, null)).toBe(source);
+    const catalog = await startupIni(source);
+    const chosen = await startupIni(withGameSpeedOverride(source, 3));
+    expect(catalog.match(/GameSpeed=0/g)).toHaveLength(2);
+    expect(chosen).toBe(catalog.replaceAll('GameSpeed=0', 'GameSpeed=3'));
+    expect(chosen).toContain('[LAN]\nGameSpeed=4');
+    expect(source.game.defaultGameSpeed).toBe(0);
+    expect(await files.read(path)).toEqual(original);
+    // A game without a catalog default still honours the session's choice.
+    const generic = withGameSpeedOverride({ ...source, game: { ...source.game, defaultGameSpeed: undefined } }, 4);
+    expect(decode((await (await withGameSpeedDefault(generic)).files.read(path))!)).toContain('[Options]\nGameSpeed=4');
+    for (const speed of [-1, 7, 2.5, NaN]) expect(() => withGameSpeedOverride(source, speed)).toThrow();
+    expect(['0', '3', '6'].map((value) => parseGameSpeed(value))).toEqual([0, 3, 6]);
+    for (const value of [null, undefined, '', '7', '-1', '3.0', ' 3', 'normal'])
+      expect(parseGameSpeed(value)).toBeUndefined();
   });
 });

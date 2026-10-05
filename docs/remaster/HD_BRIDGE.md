@@ -343,9 +343,12 @@ device pixels. Any other scale resamples every texel: a 1152x744 game filling a 
   radii are given in view pixels follow the device pixels per game pixel (`HdRenderer.setBufferScale`).
 
 `scripts/remaster/play.sh` (or a double click on `scripts/remaster/play.command` on macOS) starts the development
-server and opens the HD page with the approved look, `resolution=display` and the skirmish setup as the first page;
-`--original` opens the original picture at exact pixels instead, `--print` only prints the address. It reads the
-player's game from `RA2_GAME_ROOT` (default `game/`) and the HD cache from `RA2_HD_CACHE_DIR`.
+server and opens the HD page with the approved look, `resolution=display`, `game-speed=3` (the original scale's normal
+speed; the page's own startup default is the fastest, see
+[the startup configuration](../RA2_COMMAND_LINE_AND_SPAWNER.md#current-startup-configuration)) and the skirmish setup as
+the first page; `--original` opens the original picture at exact pixels instead, `--print` only prints the address. It
+reads the player's game from `RA2_GAME_ROOT` (default `game/`), the HD cache from `RA2_HD_CACHE_DIR` (default: the
+newest play cache under `gameres/` that holds `_library/`) and the starting speed from `RA2_PLAY_SPEED`.
 
 ## HD interface layer (`hd-ui=1`)
 
