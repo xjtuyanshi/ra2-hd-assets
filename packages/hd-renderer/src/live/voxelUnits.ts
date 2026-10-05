@@ -17,6 +17,7 @@ import { LEVEL_HEIGHT } from '../world';
 import { smoothVoxelOptions, type SmoothVoxelOptions } from '../ra2/voxelSmooth';
 import { buildSmoothVoxelGeometry } from '../ra2/voxelSmoothGeometry';
 import { projectionParts, voxelProjectionLibrary, type VoxelProjectionLibrary } from '../ra2/voxelProjection';
+import { setShadowContact } from '../ra2/voxelShadow';
 
 export interface VoxelUnitsOptions {
   voxelLook?: 'engine' | 'remaster';
@@ -139,7 +140,7 @@ export class VoxelUnits {
    * Place a unit at an engine pose. Engine facing 0 = north (world -z), clockwise; the model's nose is local +x. The
    * turret yaws relative to the body (`turretFacing` in radians like `facing`; null = aligned with the body).
    */
-  pose(unit: VoxelUnit, pose: VoxelPose, turretFacing: number | null): void {
+  pose(unit: VoxelUnit, pose: VoxelPose, turretFacing: number | null, up?: Vector3 | null): void {
     unit.root.position.set(
       pose.x / LEPTONS_PER_CELL,
       (pose.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT,
@@ -147,6 +148,16 @@ export class VoxelUnits {
     );
     unit.root.rotation.y = Math.PI / 2 - pose.facing;
     if (unit.turret) unit.turret.rotation.y = pose.facing - (turretFacing ?? pose.facing);
+    // `up` (world axes) is the game's own body tilt; without it the root follows the registered ground.
+    if (unit.root instanceof VoxelRoot) unit.root.setSurfaceUp(up ?? null);
+  }
+
+  /**
+   * A unit standing on terrain or a bridge deck casts the engine's contact shadow at its own origin (see
+   * voxelShadow.ts setShadowContact); `normal` is the plane of a tilted body, absent = the ground's own.
+   */
+  setGroundContact(unit: VoxelUnit, grounded: boolean, normal?: Vector3): void {
+    setShadowContact(unit.root, grounded, normal);
   }
 
   /** Painter bias remains additive to either physical flight depth or the native ground card. */

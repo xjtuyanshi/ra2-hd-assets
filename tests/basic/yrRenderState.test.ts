@@ -1230,6 +1230,20 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(first.objects[0]!.renderOrder).toEqual({ layer: 2, index: 1, ySort: 768 });
   });
 
+  it('publishes the native body tilt of a vehicle as its own copy and omits it when the reader has none', () => {
+    const memory = keyMemory();
+    const { read, readState } = sources(memory);
+    const state = yrState(100);
+    const tilt = { x: 0.4896, y: 0, z: 0.872 };
+    state.objects[0]!.tilt = tilt;
+    readState.mockReturnValue(state);
+    const first = read()!;
+    expect(first.objects[0]!.tilt).toEqual(tilt);
+    expect(first.objects[0]!.tilt).not.toBe(tilt);
+    expect(first.objects[1]).not.toHaveProperty('tilt');
+    expect(structuredClone(first)).toEqual(first);
+  });
+
   it('reads effects without the fire scan and reuses the shroud scratch without handing it out', () => {
     const memory = keyMemory();
     let cells = [0, 1, 2, 0xff];

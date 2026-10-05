@@ -1,4 +1,4 @@
-import { Box3, Vector3, type Mesh, type NodeBuilder } from 'three/webgpu';
+import { Vector3, type Mesh, type NodeBuilder } from 'three/webgpu';
 import { Fn, cameraFar, cameraNear, depth, dot, floor, positionWorld, userData, vec3 } from 'three/tsl';
 import { isShadowPass } from '../painterDepth';
 import type { ShaderNode } from '../tsl';
@@ -46,34 +46,40 @@ export function voxelCardDelta(fragment: Vector3, anchor: Vector3, bottom: numbe
   return (1 - VOXEL_CARD_KAPPA) * (physical + nativeCardPush(voxelFragmentRow(fragment, anchor), bottom, bonus));
 }
 
-const bounds = new Box3();
-const partBounds = new Box3();
 const corner = new Vector3();
 
 /**
- * Native 0x754510 uses the rasterized bitmap's inclusive bottom. A posed world AABB is the asset-free HD
- * approximation: union the turned body, turret and barrel bounds, then project its eight corners. Callers
- * supply original part meshes only, so enlarged shadow/reflection/foam twins never extend the card.
+ * Rows the engine's voxel bitmap extends beyond the projected bounds of the model on every side (YR 1.001 0x754510:
+ * the surface is the bounds plus eight pixels, placed four pixels before their minimum).
+ */
+export const VOXEL_BITMAP_MARGIN = 4;
+
+/**
+ * Inclusive bottom row of the unit's bitmap below its draw point. The engine (0x754510) takes the screen bounds of
+ * the model as it is posed: turned, tilted on a ramp, turret and barrel articulated. Each part's own box is therefore
+ * projected corner by corner. (A world-axis box around the posed parts overshot by up to a third of a cell for a body
+ * turned 45 degrees or tilted, which let a vehicle draw over a tree or wall it stands behind.) Callers supply original
+ * part meshes only, so enlarged shadow/reflection/foam twins never extend the card.
  */
 export function voxelBitmapBottom(parts: readonly Mesh[], anchor: Vector3, updateMatrices = true): number {
-  bounds.makeEmpty();
+  let bottom = -Infinity;
   for (const mesh of parts) {
     if (updateMatrices) mesh.updateWorldMatrix(true, false);
     if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
     const local = mesh.geometry.boundingBox;
-    if (local && !local.isEmpty()) bounds.union(partBounds.copy(local).applyMatrix4(mesh.matrixWorld));
+    if (!local || local.isEmpty()) continue;
+    for (let bits = 0; bits < 8; bits++) {
+      corner
+        .set(
+          bits & 1 ? local.max.x : local.min.x,
+          bits & 2 ? local.max.y : local.min.y,
+          bits & 4 ? local.max.z : local.min.z,
+        )
+        .applyMatrix4(mesh.matrixWorld);
+      bottom = Math.max(bottom, voxelFragmentRow(corner, anchor));
+    }
   }
-  if (bounds.isEmpty()) return 0;
-  let bottom = -Infinity;
-  for (let bits = 0; bits < 8; bits++) {
-    corner.set(
-      bits & 1 ? bounds.max.x : bounds.min.x,
-      bits & 2 ? bounds.max.y : bounds.min.y,
-      bits & 4 ? bounds.max.z : bounds.min.z,
-    );
-    bottom = Math.max(bottom, voxelFragmentRow(corner, anchor));
-  }
-  return Math.floor(bottom);
+  return bottom === -Infinity ? 0 : Math.floor(bottom) + VOXEL_BITMAP_MARGIN - 1;
 }
 
 /** Ground cards and physical flight share one material; shadow passes always retain physical depth. */

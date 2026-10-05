@@ -39,6 +39,11 @@ export interface TerrainBuild {
   /** World-space height (y) sampled on the vertex grid; shared with water and weather. */
   heightTexture: DataTexture;
   heightAt(x: number, z: number): number;
+  /**
+   * Height of the drawn surface at an arbitrary point (heightAt answers with the nearest grid node, which on a slope
+   * is up to half a step away). Absent = only the grid is known.
+   */
+  surfaceHeightAt?(x: number, z: number): number;
   /** Water surface at the origin, or undefined on land/outside the map; independent of unit type. */
   waterHeightAt?(x: number, z: number): number | undefined;
   /** 0..1 surface wetness, raised by rain and dried over time. */

@@ -331,6 +331,21 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
     const value = hGrid[j * (W * SUB + 1) + i]!;
     return value >= 50 ? 0 : value;
   };
+  // The mesh's own surface: each cell interpolates its four corner levels, so a ramp is continuous and a cliff keeps
+  // each side's level up to the shared edge.
+  const surfaceHeightAt = (wx: number, wz: number) => {
+    const x = Math.min(W - 1, Math.max(0, Math.floor(wx)));
+    const y = Math.min(H - 1, Math.max(0, Math.floor(wz)));
+    if (!cellExists(x, y) || !tileAt(x, y)) return heightAt(wx, wz);
+    const u = Math.min(1, Math.max(0, wx - x));
+    const v = Math.min(1, Math.max(0, wz - y));
+    const level =
+      cornerLevel(x, y, x, y) * (1 - u) * (1 - v) +
+      cornerLevel(x, y, x + 1, y) * u * (1 - v) +
+      cornerLevel(x, y, x, y + 1) * (1 - u) * v +
+      cornerLevel(x, y, x + 1, y + 1) * u * v;
+    return surfaceLevel(x, y, level) * LEVEL_HEIGHT;
+  };
   const waterHeightAt = (wx: number, wz: number): number | undefined => {
     const x = Math.floor(wx),
       z = Math.floor(wz);
@@ -340,6 +355,7 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
     mesh,
     heightTexture,
     heightAt,
+    surfaceHeightAt,
     waterHeightAt,
     wetness,
     waterY: null,

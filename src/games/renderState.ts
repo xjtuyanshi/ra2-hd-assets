@@ -138,6 +138,11 @@ export interface GameRenderObject extends GameRenderPoint {
   infantryDrawFacingRaw?: number;
   /** Native painter layer, position within that layer and game-defined sort key, when available. */
   renderOrder?: { layer: number; index: number; ySort: number };
+  /**
+   * Unit up vector the game draws this vehicle's body with, in the object coordinate axes (z up); (0, 0, 1) is level.
+   * Absent when the game cannot report it: the renderer then follows its own terrain.
+   */
+  tilt?: GameRenderPoint;
   /** Current strength 0..1. */
   health: number;
   /** Selected by the local player. */
