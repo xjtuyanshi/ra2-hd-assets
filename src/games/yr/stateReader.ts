@@ -439,7 +439,29 @@ function readContactRoof(memory: GuestMemoryAccessor, contact: number | null | u
   }
 }
 
-/** Unit render wrapper 0x73B0B0..0x73B139 returns before Object::Render for every canonical door state. */
+/**
+ * BuildingClass second draw pass 0x43DA80..0x43DC16 (vtable +0x4E4): while GetCurrentMission is Unload 16, with any
+ * canonical door state, and the building's own tether byte B+0x418 is nonzero, it walks its radio links (capacity
+ * B+0xE8) and calls DrawIt (vtable +0x114, 0x43DC07) on every non-building contact that is not InLimbo. That is
+ * how a vehicle driving out of a war factory stays visible although its own wrapper skipped it.
+ */
+function buildingDrawsContact(memory: GuestMemoryAccessor, building: number, unit: number, effective: number): boolean {
+  if (effective !== 16) return false;
+  const o = YR_STATE_OFFSETS;
+  if (memory.u8(building + o.tethered) === 0 || memory.u8(unit + o.inLimbo) !== 0) return false;
+  const capacity = memory.i32(building + o.radioCapacity);
+  if (!Number.isInteger(capacity) || capacity < 1 || capacity > 64) return false;
+  const items = memory.u32(building + o.radioItems);
+  if (!isPlausiblePointer(memory, items, capacity * 4)) return false;
+  for (let i = 0; i < capacity; i++) if (memory.u32(items + i * 4) === unit) return true;
+  return false;
+}
+
+/**
+ * Unit render wrapper 0x73B0B0..0x73B139 returns before Object::Render for every canonical door state. The object
+ * is hidden only when the linked building does not draw it itself in the same frame (see buildingDrawsContact):
+ * queued Unload before the door mission starts, a building without its own tether, or a link the building lacks.
+ */
 export function readYrUnitNativeHidden(
   memory: GuestMemoryAccessor,
   pointer: number,
@@ -470,7 +492,9 @@ export function readYrUnitNativeHidden(
     if (![moving, targetOpen].every((flag) => flag === 0 || flag === 1)) return false;
     const current = memory.i32(contact + b.currentMission);
     const queued = memory.i32(contact + b.queuedMission);
-    return (current === -1 ? queued : current) === 16 || queued === 16;
+    const effective = current === -1 ? queued : current;
+    if (effective !== 16 && queued !== 16) return false;
+    return !buildingDrawsContact(memory, contact, pointer, effective);
   } catch {
     return false;
   }

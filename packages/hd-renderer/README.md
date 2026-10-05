@@ -411,7 +411,9 @@ falls back to `type`.
 
 Optional `nativeHidden` suppresses the complete live object, including shadows and HD extras. The YR reader
 uses this for tethered UnitClass vehicles whose validated building radio link has effective or queued Unload 16
-and canonical door booleans. All four door states qualify. Optional `translucent` is body opacity: the reader
+and canonical door booleans, unless that building draws the vehicle itself (effective Unload, its own tether byte
+set, the vehicle among its radio links): a vehicle leaving a war factory is drawn. All four door states qualify.
+Optional `translucent` is body opacity: the reader
 publishes 0.5 while either native chrono byte is nonzero, and SHP/voxel body parts blend at 50% without writing
 depth; shadows stay unchanged. Omitted fields retain normal rendering. These are independent predicates, and
 the chrono flags alone never hide the object. Selection brackets remain the game's native overlay; LiveView

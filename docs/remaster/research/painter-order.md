@@ -464,9 +464,26 @@ validated building, and either its effective mission or queued mission is Unload
 openness threshold. Building validation checks its object/type spans, vtables and type ID independently of
 whether InLimbo or snapshot filtering omits the linked building from publication; `contactUid` remains limited to
 published contacts. Effective mission uses `B+0xAC`, falling back to `B+0xB4` only when current is -1. Queued
-Unload can therefore hide a tethered unit before it selects the factory's replacement body. `nativeHidden=true`
-suppresses the whole HD visual, including shadows and owner extras, through the same visibility gate as
-InvisibleInGame art. Selection brackets and health bars remain native overlay pixels; LiveView does not generate
+Unload can therefore hide a tethered unit before it selects the factory's replacement body.
+
+The wrapper's early return does not mean that the unit is absent from the frame. The Ground walk calls a building's
+render wrapper `0x43CEA0` with its third argument set (`0x6D915B..0x6D916C`), which selects the building's second
+pass, virtual `+0x4E4` = `0x43DA80`, instead of DrawIt (`0x43CFCD..0x43CFE9`). That pass requires
+GetCurrentMission `16` (`0x43DAA7..0x43DAB7`), any of the four door predicates (`0x43DABD..0x43DAED`) and the
+building's own tether byte `B+0x418` (`0x43DAF3`). It then walks all `B+0xE8` radio links (`0x43DB01..0x43DC16`),
+skipping empty links, InLimbo contacts (`+0x81`) and buildings (kind `6`), and calls each remaining contact's DrawIt
+(`+0x114`, `0x43DC07`) at the building's position in the walk. A vehicle driving out of a war factory is therefore
+drawn by the factory for the whole drive-out, with the unit adjustment `-P(z)-3` of `0x7043A6..0x7043E0` instead of
+the ordinary `-P(z)-1`, and is still depth-tested against the delivery body. The reader publishes
+`nativeHidden=true` only when the wrapper gate holds and this building pass does not draw the unit: queued Unload
+before the effective mission is `16`, a building without its tether byte, or a unit missing from the building's
+links. A frozen same-frame GAWEAP/Grizzly drive-out (logic frames 16228..16336, every third frame) showed the tank
+in the original from the first frame it clears the door curtain; the earlier unconditional hide removed it from HD
+until link 0 was released. HD still draws such a contact in its own registration order and with the ordinary unit
+adjustment; the two-unit difference moves its lowest edge over a bib by at most two pixels.
+
+`nativeHidden=true` suppresses the whole HD visual, including shadows and owner extras, through the same
+visibility gate as InvisibleInGame art. Selection brackets and health bars remain native overlay pixels; LiveView does not generate
 selection geometry, and the bridge preserves `isSelected` as state rather than altering native input/selection.
 Owner-attached anims, particle systems and fire events are suppressed only when both UID and pointer match the
 hidden owner, including same-frame hide/unhide changes. Independent explosions and projectiles retain their

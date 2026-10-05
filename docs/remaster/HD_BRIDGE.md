@@ -434,7 +434,11 @@ inside the swap window can already see the unloading type for one snapshot. SCHP
 Optional `nativeHidden` suppresses a complete object visual, including its shadows and HD extras. YR emits true
 for the proven UnitClass gate: nonzero tether byte, a validated building in radio link 0, effective or queued
 Unload 16, and canonical door booleans. It covers opening, closing, open and closed; it is independent of the
-factory's own effective-mission-only delivery image rule. Invalid or inactive observations omit the flag. The
+factory's own effective-mission-only delivery image rule. The gate only says that the unit does not draw itself:
+a building in effective Unload whose own tether byte is set draws each of its radio contacts in its second pass,
+so such a contact (the vehicle driving out of a war factory) stays visible and the flag is omitted. The flag
+remains for a queued Unload before the door mission starts, an untethered building, and a link the building does
+not hold. Invalid or inactive observations omit the flag. The
 bridge preserves the object's simulation/selection state; selection brackets and health bars are native overlay
 pixels, and LiveView creates no selection geometry.
 Owner-attached anims, particle systems and fire events follow this gate when both UID and pointer match;

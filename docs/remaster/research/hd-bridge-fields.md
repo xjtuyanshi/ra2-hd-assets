@@ -10,7 +10,8 @@ H2 building and infantry state and H3 runtime cells (overlays and smudges, publi
 grids) are implemented end to end. H1 is partially implemented; remaining fields below are proposals.
 
 Native object draw eligibility is also implemented end to end through optional `LiveObject.nativeHidden` and
-`LiveObject.translucent`. YR publishes `nativeHidden: true` for the validated tether/building-Unload gate and
+`LiveObject.translucent`. YR publishes `nativeHidden: true` for the validated tether/building-Unload gate, except
+while the unloading building draws that contact in its own second pass, and
 `translucent: 0.5` for either native chrono byte; inactive or invalid observations leave these fields absent.
 The first flag hides the entire HD visual; the second blends only body parts, retaining shadows. The reader's
 same-frame change key includes tether, chrono, radio-link/capacity and door-state fields, in addition to missions.
