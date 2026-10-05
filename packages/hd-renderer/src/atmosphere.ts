@@ -252,6 +252,7 @@ export interface AtmosphereContext {
 /** Per-frame state handed to a world's dressing. */
 export interface FrameAtmosphere {
   now: number;
+  /** Night dressing weight 0..1 (lamps, lamp heads, lit windows): the lighting's `dressing`, not its moonlit `night`. */
   night: number;
   rain: number;
   wet: number;

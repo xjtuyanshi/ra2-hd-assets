@@ -10,6 +10,11 @@ export interface Ra2SceneLighting {
   override: [number, number, number] | null;
   event: 'storm' | 'nuke' | 'dominator' | 'timewarp' | null;
   storm?: { active: boolean; pending: boolean; ending: boolean; cell: { x: number; y: number } };
+  /**
+   * The engine's active light sources (leptons; intensity and tint in fractional [Lighting] units), when the adapter
+   * reads them from the game: the map light grade then follows the game itself instead of a map sidecar's type table.
+   */
+  sources?: { x: number; y: number; z: number; radius: number; intensity: number; tint: [number, number, number] }[];
 }
 
 export interface SceneMultipliers {

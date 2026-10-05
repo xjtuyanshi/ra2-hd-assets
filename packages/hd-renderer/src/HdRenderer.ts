@@ -306,12 +306,15 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       // the approved targets flip the original grass order (originals: battle grass S-weighted hue 59, park lawn 53;
       // targets: battle 52 golden, park 63 green) on shared foliage, so no global tile or grade change can serve both.
       // Keeping 15 % of the afternoon sun's colour on flat ground (whiteAdapt 0.85) warms the open battle grass
-      // (hue 63.6 -> 62.2) and the river's highlights (warmth 0.36 -> 0.37, target 0.44); fewer daytime lamp washes
-      // (mapSourcesByDay 0.2) keep the lamp-lit park lawn green (hue 58, the owner's floor) at L* 44 (target 45).
+      // (hue 63.6 -> 62.2) and the river's highlights (warmth 0.36 -> 0.37, target 0.44).
       // Noon flat-ground brightness (adaptExposure 1) helped the battle grass little and over-brightened the river.
+      // The map's light sources keep the engine's full share. A reduced daytime share (0.2, chosen against a concept
+      // image of the lamp-lit park) left everything near a lamp post darker than the game draws it: frozen native / HD
+      // pair of an XMP29U2 start 7.6 cells from an INGALITE post: ground 0.90, vehicles 0.83 and a civilian building
+      // 0.74 of the native luminance, against 1.03-1.06 / 0.91-0.94 at a start outside every lamp's reach.
       whiteAdapt: 0.85,
       mapTintAdapt: 0.3,
-      mapSourcesByDay: 0.2,
+      mapSourcesByDay: 1,
       gradeBalance: [0.955, 1, 1.085],
       gradeContrast: 0.14,
       gradePivotLift: 0.045,
@@ -358,12 +361,54 @@ export function mapPresentation(
   return {
     /** Extra exposure factor of the clear-light calibration (1 except authored dusk, see DUSK_EXPOSURE). */
     exposureScale: dusk ? 1 + (DUSK_EXPOSURE - 1) * (1 - night) : 1,
-    mapWeight: kind === 'day' || dusk ? 1 - night : 0,
+    // The engine's cell light is the map on every kind, night maps included (they are day maps with night dressing,
+    // see lighting.ts profileKeys). `night` is the moonlit HD presentation's weight: it replaces the grade only when
+    // an hour is forced towards night, and not at all below GRADE_NIGHT_START.
+    mapWeight: kind === undefined ? 0 : dusk ? 1 - night : 1 - gradeNight(night),
     sourceWeight: dusk ? 1 : settings.mapSourcesByDay,
     adaptExposure: dusk ? 0 : settings.adaptExposure,
     whiteAdapt: dusk ? 0 : settings.whiteAdapt,
     mapTintAdapt: dusk ? 0 : settings.mapTintAdapt,
   };
+}
+
+/**
+ * Night weight below which a day map still shows the engine's grade in full. The look presets stage day maps in the
+ * late afternoon (16.5), where the keys already carry a night weight of 0.067: the grade then applied at 0.933, which
+ * drew a map of Ambient 0.6 at 0.627 (4 % brighter than the game) and took a fifteenth of every map's tint away.
+ */
+export const GRADE_NIGHT_START = 0.1;
+
+/** Share of the moonlit presentation that replaces a day map's engine grade at a night weight (0 up to the start). */
+export function gradeNight(night: number): number {
+  return Math.min(1, Math.max(0, (night - GRADE_NIGHT_START) / (1 - GRADE_NIGHT_START)));
+}
+
+/**
+ * How much of a look's map-tint neutralisation applies to a [Lighting] tint, 0..1. The neutralisation is the approved
+ * look's cooling of warm-graded maps (XMP29U2: 1/0.8/0.68). Applied to a cool tint it works the other way round and
+ * warms the picture beyond the game's (frozen pairs under the cinematic look: XDeadman, 0.68/0.68/1, ground b* +4;
+ * XMP13S4, 0.75/0.75/1.2, b* +7), so only tints whose red exceeds their blue take it, fading in over 0.15 of the
+ * largest channel.
+ */
+export function tintWarmth(tint: { red: number; green: number; blue: number }): number {
+  const max = Math.max(tint.red, tint.green, tint.blue, 1e-6);
+  return Math.min(1, Math.max(0, (tint.red - tint.blue) / (0.15 * max)));
+}
+
+/**
+ * Gain of the static night dressing lights (HD street lamp pools, visible lamp pools) on a map authored as night and
+ * lit by the engine's grade. The light field multiplies the graded art; a lamp pool tuned on ungraded art under
+ * moonlight would shrink with the map's own darkness (art x nightLevel in linear light), so that is divided back out
+ * in proportion to the grade's weight: the pool adds the same light to the picture as it did under the moonlit
+ * staging. 1 for every other kind, and when the grade is off (an hour forced to night).
+ */
+export function dressingLightGain(
+  profile: Pick<AtmosphereProfile, 'kind' | 'nightLevel'> | null | undefined,
+  mapWeight: number,
+): number {
+  if (profile?.kind !== 'night') return 1;
+  return 1 + (1 / Math.max(0.1, profile.nightLevel) - 1) * Math.min(1, Math.max(0, mapWeight));
 }
 
 /**
@@ -450,6 +495,8 @@ export interface HdStats {
   exposure: number;
   hour: number;
   night: number;
+  /** Night dressing weight (lamps, lit windows); equals `night` except on maps authored as night. */
+  nightDressing: number;
   nightLevel: number | null;
   staticGain: number;
   staticLights: number;
@@ -625,6 +672,8 @@ export class HdRenderer {
   private lastFrameAt = 0;
   private resolving = false;
   private staticGain = 0;
+  /** Gain of the map light sources' own field (the moonlit presentation's share; see frame()). */
+  private baseNightGain = 0;
   private readonly dynamicLights: DynamicLight[] = [];
   private readonly dynamicEmitters: Emitter[] = [];
   /** Reused per frame (no allocation per light). */
@@ -1189,7 +1238,9 @@ export class HdRenderer {
       const noon = this.noonIrradiance;
       const k = Math.PI * this.settings.exposure;
       // Airless keys already remove the terrestrial sky colour; a per-channel noon white point would tint them again.
-      if (airless && nightGrade === 0) exposure.setScalar(k / noonFlatLuminance());
+      // Their day share stays scalar at every night weight (a look's afternoon hour carries a little: the per-channel
+      // branch then warmed MoonPatr's grey regolith by b* +3); the night share is the same scalar as everywhere.
+      if (airless) exposure.setScalar(k * ((1 - nightGrade) / noonFlatLuminance() + nightGrade / reference));
       else
         exposure.setRGB(
           k * (1 / noon.r + (1 / reference - 1 / noon.r) * nightGrade),
@@ -1224,7 +1275,11 @@ export class HdRenderer {
       const mapLight = this.world.mapLight;
       if (!airless && presentation.mapTintAdapt > 0 && mapLight) {
         // The map light's day weight is set below for this frame; last frame's weight is the same within a frame.
-        neutralizeMapTint(exposure, mapLight.lighting, presentation.mapTintAdapt * mapLight.currentWeight);
+        neutralizeMapTint(
+          exposure,
+          mapLight.lighting,
+          presentation.mapTintAdapt * mapLight.currentWeight * tintWarmth(mapLight.lighting),
+        );
       }
       if (presentation.exposureScale !== 1) exposure.multiplyScalar(presentation.exposureScale);
     } else {
@@ -1295,9 +1350,15 @@ export class HdRenderer {
       NIGHT_BLACK_LIFT[1] * nightGrade,
       NIGHT_BLACK_LIFT[2] * nightGrade,
     );
-    this.staticGain = smooth(0.2, 0.8, light.night);
-    this.emitters.lampGain.value = smooth(0.3, 0.8, light.night);
-    this.nodes.windowGain.value = this.atmosphere.windows ? smooth(WINDOW_NIGHT[0], WINDOW_NIGHT[1], light.night) : 0;
+    // Night dressing follows its own weight: a map authored as night is lit by the engine grade like a day map and
+    // still shows its lamps and lit windows. The map's own light sources are in that grade; their separate field
+    // follows the moonlit presentation instead (baseNightGain), so they are never applied twice.
+    this.staticGain = smooth(0.2, 0.8, light.dressing) * dressingLightGain(profile, presentation.mapWeight);
+    this.baseNightGain = smooth(0.2, 0.8, light.night);
+    this.emitters.lampGain.value = smooth(0.3, 0.8, light.dressing);
+    this.nodes.windowGain.value = this.atmosphere.windows
+      ? smooth(WINDOW_NIGHT[0], WINDOW_NIGHT[1], light.dressing)
+      : 0;
     this.emitters.wet.value = wet.value;
     this.emitters.sync();
     // Mist: none on a clear day, a trace in day rain, a thin veil at night (thicker in night rain). Capped.
@@ -1370,7 +1431,7 @@ export class HdRenderer {
 
     const frame = this.frameInfo;
     frame.now = now;
-    frame.night = light.night;
+    frame.night = light.dressing;
     frame.rain = rainAmount;
     frame.wet = wet.value;
     frame.profile = profile ?? DEFAULT_ATMOSPHERE;
@@ -1379,7 +1440,7 @@ export class HdRenderer {
     frame.toCamera.copy(toCamera);
     this.world?.dressing?.update(frame);
     if (this.layerNodes !== this.nodes) this.layerNodes.copyValuesFrom(this.nodes);
-    this.lightField.update(now, this.renderer, this.staticGain);
+    this.lightField.update(now, this.renderer, this.staticGain, this.baseNightGain);
     this.mirrorDynamicEmitters(now);
     this.renderPipeline();
     this.frames++;
@@ -1560,6 +1621,7 @@ export class HdRenderer {
       exposure: (this.exposure.value.r + this.exposure.value.g + this.exposure.value.b) / 3,
       hour: this.state.environment.timeOfDay,
       night: this.lighting.state.night,
+      nightDressing: this.lighting.state.dressing,
       nightLevel: this.lighting.nightLevel,
       staticGain: this.staticGain,
       staticLights: lf.static,
@@ -1609,7 +1671,7 @@ export class HdRenderer {
    * from it whether an atlas page's layer needs its window mask.
    */
   windowsWanted(): boolean {
-    return this.atmosphere.windows && this.lighting.nightAt(this.state.environment.timeOfDay) > WINDOW_NIGHT[0];
+    return this.atmosphere.windows && this.lighting.dressingAt(this.state.environment.timeOfDay) > WINDOW_NIGHT[0];
   }
 
   /** Whether per-pixel sprite materials can contribute, known before frame() updates the look uniforms. */

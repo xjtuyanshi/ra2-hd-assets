@@ -59,6 +59,26 @@ export interface GameRenderLighting {
     ending: boolean;
     cell: { x: number; y: number };
   };
+  /**
+   * The local light sources the engine applies to cells right now (lamp posts and other light-emitting objects that
+   * are switched on and pass the game's detail setting). Absent when the game cannot report them; an empty list is a
+   * scene without any.
+   */
+  sources?: GameRenderLightSource[];
+}
+
+/** One local light source, in the engine's own units. */
+export interface GameRenderLightSource {
+  /** World position in the game's fine units (the same as GameRenderObject x/y/z). */
+  x: number;
+  y: number;
+  z: number;
+  /** Reach in the same units; the light falls off linearly to zero there. */
+  radius: number;
+  /** Light added at the centre, in fractional [Lighting] units (negative darkens). */
+  intensity: number;
+  /** RGB added to the scene tint at the centre, in fractional [Lighting] units. */
+  tint: [number, number, number];
 }
 
 export interface GameRenderMap {

@@ -69,8 +69,16 @@ export interface LightKey {
   hemiGround: Color;
   hemiIntensity: number;
   exposure: number;
-  /** 0 = day, 1 = night: drives the night dressing (lamps, windows, mist) and how a map profile adjusts the key. */
+  /**
+   * 0 = day, 1 = night: how much of the moonlit HD night presentation (dim cool keys, scalar exposure, the Neutral
+   * display) applies, and how a map profile adjusts the key.
+   */
   night: number;
+  /**
+   * Night dressing weight (lamps, lamp heads, lit windows); absent = `night`. A map authored as a night map shows its
+   * dressing at every hour (1) while its light keys are those of any other map.
+   */
+  dressing?: number;
 }
 
 const KEYS: LightKey[] = [
@@ -249,19 +257,29 @@ const matchedGrey = (grey: Color, like: Color): Color =>
 /**
  * Light keys adjusted to a map's atmosphere profile. Day keys (night = 0) are the very same objects unless exposure
  * or airless daylight is requested. Exposure scales their sun/sky radiance; airless keys replace each colour with
- * luminance-matched grey carrying only the map tint, normalised to luminance 1. Night-weighted keys get:
+ * luminance-matched grey carrying only the map tint, normalised to luminance 1.
+ *
+ * A map authored as a night map (kind 'night') uses the same keys as a day map and marks every one with dressing 1.
+ * The game has no night: it draws such a map with the cell formula of every other map (palette x Ambient + Level x
+ * height, terrain tinted, objects not), so the engine grade owns its darkness and tint at the hour a day map would be
+ * staged at, and only the dressing (lamps, lit windows) tells it apart. Frozen native / HD pairs of XDeadman (Ambient
+ * 0.68, Red/Green/Blue 0.68/0.68/1, Level 0.028, base at height 8) and Transylv (0.6, 0.9/0.9/1) under the former
+ * moonlit staging at 22:00: vehicles 0.57-0.61, infantry 0.62-0.80 and the construction yard 0.71-0.93 of the native
+ * luminance, ground hue +24 to +28 degrees.
+ *
+ * Night-weighted keys (an hour forced to night on any map) get:
  *   - moon and night sky desaturated 30 % towards a luminance-matched grey (the original palettes stay readable);
- *   - the cool MOON_TINT, times the map's [Lighting] tint (square root) when the map was built as a night map, both
- *     normalised to luminance 1 and applied in proportion to the key's night weight;
+ *   - the cool MOON_TINT, normalised to luminance 1 and applied in proportion to the key's night weight;
  *   - intensities so flat unlit ground receives nightLevel x noon, split 40 % moon / 60 % sky (full-night keys), or
  *     at least that much (dawn/dusk keys, which keep their own balance).
  */
 export function profileKeys(profile: AtmosphereProfile): LightKey[] {
   const target = profile.nightLevel * NIGHT_TONE_COMPENSATION * noonFlatLuminance();
+  // The same cool moon on every map: the moonlit presentation is an HD staging of an hour forced to night, and a
+  // night map's own tint is in its engine grade at its authored staging.
   const moon = MOON_TINT.clone();
-  if (profile.kind === 'night')
-    moon.multiply(new Color(Math.sqrt(profile.tint[0]), Math.sqrt(profile.tint[1]), Math.sqrt(profile.tint[2])));
   moon.multiplyScalar(1 / Math.max(1e-6, luminanceOf(moon)));
+  const dressed = (key: LightKey): LightKey => (profile.kind === 'night' ? { ...key, dressing: 1 } : key);
   return KEYS.map((key) => {
     // Dusk is an authored daylight grade, not a partially moonlit night. Stage the golden-hour key at the map's
     // own hour; later hours still interpolate into the existing night keys. Its flat RGB is calibrated in update().
@@ -269,7 +287,7 @@ export function profileKeys(profile: AtmosphereProfile): LightKey[] {
       return { ...key, hour: Math.min(20.99, Math.max(16.01, profile.hour)), night: 0 };
     const n = key.night;
     if (n === 0) {
-      if (profile.exposure === undefined && !profile.airless) return key;
+      if (profile.exposure === undefined && !profile.airless) return dressed(key);
       const exposure = profile.exposure ?? 1;
       const tint = new Color(...profile.tint);
       const colour = (original: Color): Color => (profile.airless ? matchedGrey(tint, original) : original);
@@ -307,7 +325,7 @@ export function profileKeys(profile: AtmosphereProfile): LightKey[] {
       sunIntensity = key.sunIntensity * scale;
       hemiIntensity = key.hemiIntensity * scale;
     }
-    return { ...key, sun, hemiSky, sunIntensity, hemiIntensity };
+    return dressed({ ...key, sun, hemiSky, sunIntensity, hemiIntensity });
   });
 }
 
@@ -320,8 +338,10 @@ export interface LightingState {
   skyHorizon: Color;
   ambient: Color;
   exposure: number;
-  /** 0 = full day, 1 = night: drives emissive windows and lamp lights. */
+  /** 0 = full day, 1 = night: the moonlit HD night presentation (exposure, display transform, map-grade weight). */
   night: number;
+  /** 0..1 night dressing: emissive windows, lamp lights and heads. Equals `night` except on night maps (always 1). */
+  dressing: number;
   /** Day weather's direct-light fraction / clear direct-light fraction; use for independent shadow decals. */
   weatherSunShare: number;
   /** Day weather's flat-light multiplier; clear and the preserved night presentation return 1. */
@@ -347,6 +367,7 @@ export class Lighting {
     ambient: new Color(),
     exposure: 1,
     night: 0,
+    dressing: 0,
     weatherSunShare: 1,
     weatherBrightness: 1,
   };
@@ -466,6 +487,15 @@ export class Lighting {
 
   /** Night weight (0 day .. 1 night) of the day cycle at `hour`, without changing any state. */
   nightAt(hour: number): number {
+    return this.weightAt(hour, (key) => key.night);
+  }
+
+  /** Night dressing weight (lamps, windows) of the day cycle at `hour`, without changing any state. */
+  dressingAt(hour: number): number {
+    return this.weightAt(hour, dressingOf);
+  }
+
+  private weightAt(hour: number, weight: (key: LightKey) => number): number {
     const keys = this.keys;
     const h = this.profile?.kind === 'dusk' && hour >= 0 && hour < 24 ? hour : ((hour % 24) + 24) % 24;
     let i = 0;
@@ -473,7 +503,7 @@ export class Lighting {
     const a = keys[i]!;
     const b = keys[i + 1]!;
     const t = (h - a.hour) / (b.hour - a.hour);
-    return Math.min(1, Math.max(0, a.night + (b.night - a.night) * t));
+    return Math.min(1, Math.max(0, weight(a) + (weight(b) - weight(a)) * t));
   }
 
   /** Luminance of the flat-ground irradiance of the current sun and sky. */
@@ -525,6 +555,32 @@ export class Lighting {
       clearSun.g * direct + clearHemi.g * diffuse,
       clearSun.b * direct + clearHemi.b * diffuse,
     );
+    if (this.profile?.airless) {
+      // Airless daylight has no exposure adaptation: the palette grade alone dims the map. A look that stages its day
+      // maps in the afternoon would otherwise either dim the moon with the hour or, kept at noon, light its objects
+      // with a noon sun the look's relighting was not tuned for (frozen pair of MoonPatr at noon under the cinematic
+      // look: vehicles 1.17 of the native luminance against 0.85-0.95 on day maps). Keep the hour's sun/sky balance
+      // and direction, at the noon flat-ground luminance; the keys are neutral grey, so one factor serves all channels.
+      const day = 1 - lerp(a.night, b.night, t);
+      if (day < 1) {
+        // Dawn and dusk keys keep their terrestrial sunset colours (profileKeys greys the day keys only). There is
+        // no sky to colour a sunset here: the day share of a blended hour stays grey at its own luminance.
+        clearSun.lerp(this.grey.setScalar(luminanceOf(clearSun)), day);
+        clearHemi.lerp(this.grey.setScalar(luminanceOf(clearHemi)), day);
+        this.clearFlat.setRGB(
+          clearSun.r * direct + clearHemi.r * diffuse,
+          clearSun.g * direct + clearHemi.g * diffuse,
+          clearSun.b * direct + clearHemi.b * diffuse,
+        );
+      }
+      const scale = lerp(1, noonFlatLuminance() / Math.max(1e-6, luminanceOf(this.clearFlat)), day);
+      // At noon the keys already are the reference: leave them bit-identical.
+      if (Math.abs(scale - 1) > 1e-9) {
+        clearSun.multiplyScalar(scale);
+        clearHemi.multiplyScalar(scale);
+        this.clearFlat.multiplyScalar(scale);
+      }
+    }
     if (this.profile?.kind === 'dusk') {
       // The engine grade owns the dusk flat-ground colour and brightness, just as it does at noon on day maps.
       // Calibrate the clear light BEFORE weather, preserving each channel's warm-direct/cool-diffuse contrast.
@@ -585,6 +641,7 @@ export class Lighting {
     // Moonlight keys use sunIntensity 0.6, dusk 1.2, day 2.6+: map that onto 1 (night) .. 0 (day). At the keys this
     // equals their explicit `night`; the procedural sandbox keeps this curve between keys.
     this.state.night = Math.min(1, Math.max(0, 1 - (lerp(a.sunIntensity, b.sunIntensity, t) - 0.6) / 0.9));
+    this.state.dressing = this.state.night;
   }
 
   /**
@@ -666,6 +723,7 @@ export class Lighting {
     this.state.ambient.copy(this.hemi.color).multiplyScalar(this.hemi.intensity * 0.5);
     this.state.exposure = lerp(a.exposure, b.exposure, t);
     this.state.night = Math.min(1, Math.max(0, night));
+    this.state.dressing = Math.min(1, Math.max(0, lerp(dressingOf(a), dressingOf(b), t)));
   }
 
   /** The active profile's night level (unlit ground at night relative to noon), or null for the legacy keys. */
@@ -676,6 +734,11 @@ export class Lighting {
 
 function lerp(x: number, y: number, t: number): number {
   return x + (y - x) * t;
+}
+
+/** A key's night dressing weight: its own, else its night weight. */
+function dressingOf(key: LightKey): number {
+  return key.dressing ?? key.night;
 }
 
 /**

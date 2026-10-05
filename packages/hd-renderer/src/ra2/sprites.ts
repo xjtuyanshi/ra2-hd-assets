@@ -62,7 +62,7 @@ import { sceneLitColour } from '../lighting';
 import { bindUnlitSpriteMaterial } from './unlitSprites';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { type HdAtlas, type Ra2Cache } from './cache';
-import { objectLevelAt, srgbScale, terrainGradeAt } from './mapLighting';
+import { mapLightAt, srgbScale } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
 import { cardDepthNode, SPRITE_DECAL_LIFT } from './cardDepth';
 import { NATIVE_UNIT_RENDER_ORDER, type NativeSpriteDepth } from './nativeDepth';
@@ -102,8 +102,9 @@ export interface SpriteInstance {
   /** Flat decals only: 0..1 ground-crystal relighting, highlights and animated sparkle; absent = unchanged art. */
   glint?: number;
   /**
-   * Extra object light on top of the map's (default 1), applied to the palette colour in its own (sRGB) scale and
-   * clamped at white, like the engine's palette lighting.
+   * Extra object light on top of the map's (default 1 = none), applied to the palette colour in its own (sRGB) scale
+   * and clamped at white, like the engine's palette lighting. For objects (lighting 'ambient') the excess over 1 is
+   * ADDED to the map's object level, as the engine does (level + ExtraUnitLight); other classes are multiplied.
    */
   light?: number;
   /** Caller-selected exemption from the map grade; extra object light and HD received light are unchanged. */
@@ -384,15 +385,16 @@ export class SpriteLayer {
     const isUnlit: ShaderNode = step(2.5, aFlags.z);
     // Ungraded trees retain their former terrain event policy; self-lit overlays bypass scene lighting altogether.
     const sceneMultiplier: ShaderNode = mix(nodes.sceneObjectMul, nodes.sceneTerrainMul, max(isFull, isNone));
+    // Objects ('ambient'): the engine ADDS the extra light to the cell's object level (I + ExtraInfantryLight ...), so
+    // at Ambient 0.68 infantry shows at 0.88 of its palette, not 0.68 x 1.2 = 0.82. Terrain-class and unlit instances
+    // keep the plain factor (their `light` is 1 in practice).
+    const extraLight: ShaderNode = aFlags.y.sub(1);
+    const mapLight: ShaderNode = mapLightAt(cache.mapLight, aLightSample);
     const grade: ShaderNode = select(
       aGradeExempt.greaterThan(0.5),
-      vec3(1),
-      mix(
-        mix(vec3(objectLevelAt(cache.mapLight, aLightSample)), terrainGradeAt(cache.mapLight, aLightSample), isFull),
-        vec3(1),
-        isNone,
-      ),
-    ).mul(aFlags.y);
+      vec3(aFlags.y),
+      mix(mix(vec3(mapLight.a.add(extraLight)), mapLight.rgb.mul(aFlags.y), isFull), vec3(aFlags.y), isNone),
+    );
     const objectLit = (c: ShaderNode): ShaderNode => srgbScale(c, grade);
     const ppu = float(PIXELS_PER_CELL_EDGE);
 

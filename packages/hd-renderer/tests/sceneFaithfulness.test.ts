@@ -2,7 +2,16 @@ import { createHash } from 'node:crypto';
 import { Color, Mesh } from 'three/webgpu';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createScenario } from '../sandbox/scenario';
-import { applyLookPreset, DUSK_EXPOSURE, HdRenderer, mapPresentation } from '../src/HdRenderer';
+import {
+  applyLookPreset,
+  dressingLightGain,
+  DUSK_EXPOSURE,
+  GRADE_NIGHT_START,
+  gradeNight,
+  HdRenderer,
+  mapPresentation,
+  tintWarmth,
+} from '../src/HdRenderer';
 import type { AtmosphereProfile, MapLighting, Weather } from '../src/contract';
 import { Lighting } from '../src/lighting';
 import type { LightField } from '../src/lightField';
@@ -116,11 +125,21 @@ describe('authored dusk staging', () => {
       whiteAdapt: 0,
       mapTintAdapt: 0,
     });
+    // Day and night maps share one path: a night map is a day map with night dressing, and the engine grade is the
+    // map on both. The moonlit presentation replaces the grade only past GRADE_NIGHT_START of an hour forced to night.
     for (const kind of ['day', 'night'] as const) {
-      for (const night of [0, 0.29304, 1]) {
-        expect(mapPresentation(kind, night, settings)).toEqual({
+      for (const [night, mapWeight] of [
+        [0, 1],
+        [0.0666, 1],
+        [GRADE_NIGHT_START, 1],
+        [0.29304, 1 - (0.29304 - GRADE_NIGHT_START) / (1 - GRADE_NIGHT_START)],
+        [1, 0],
+      ] as const) {
+        const presentation = mapPresentation(kind, night, settings);
+        expect(presentation.mapWeight).toBeCloseTo(mapWeight, 12);
+        expect({ ...presentation, mapWeight: 0 }).toEqual({
           exposureScale: 1,
-          mapWeight: kind === 'day' ? 1 - night : 0,
+          mapWeight: 0,
           sourceWeight: 0.2,
           adaptExposure: 0.85,
           whiteAdapt: 0.85,
@@ -128,7 +147,37 @@ describe('authored dusk staging', () => {
         });
       }
     }
+    // Without a map (the procedural sandbox) there is no grade.
+    expect(mapPresentation(undefined, 0, settings).mapWeight).toBe(0);
     expect(settings).toEqual({ adaptExposure: 0.85, whiteAdapt: 0.85, mapTintAdapt: 0.3, mapSourcesByDay: 0.2 });
+  });
+
+  it('keeps the grade whole at a look hour whose keys already carry a little night', () => {
+    // The look presets stage day maps at 16.5, between the 16:00 (night 0) and 18:30 (night 1/3) keys.
+    const l = new Lighting(20, 20);
+    l.setProfile({ kind: 'day', hour: 12, nightLevel: 0.3, tint: [1, 1, 1] });
+    l.update(16.5, 0);
+    expect(l.state.night).toBeCloseTo(0.2 * 0.333, 12);
+    expect(gradeNight(l.state.night)).toBe(0);
+    expect(gradeNight(0)).toBe(0);
+    expect(gradeNight(GRADE_NIGHT_START)).toBe(0);
+    expect(gradeNight(0.55)).toBeCloseTo(0.5, 12);
+    expect(gradeNight(1)).toBe(1);
+    expect(gradeNight(2)).toBe(1);
+  });
+
+  it('neutralises a warm [Lighting] tint only: a cool tint keeps the game colours', () => {
+    // XMP29U2: the approved look takes part of its warm cast out.
+    expect(tintWarmth({ red: 1, green: 0.8, blue: 0.68 })).toBe(1);
+    // XDeadman, XMP13S4, Transylv: neutralising a blue tint would warm the picture beyond the game's.
+    expect(tintWarmth({ red: 0.68, green: 0.68, blue: 1 })).toBe(0);
+    expect(tintWarmth({ red: 0.75, green: 0.75, blue: 1.2 })).toBe(0);
+    expect(tintWarmth({ red: 0.9, green: 0.9, blue: 1 })).toBe(0);
+    expect(tintWarmth({ red: 1, green: 1, blue: 1 })).toBe(0);
+    // Fades in over 0.15 of the largest channel.
+    expect(tintWarmth({ red: 1, green: 1, blue: 0.925 })).toBeCloseTo(0.5, 12);
+    expect(tintWarmth({ red: 1, green: 0.95, blue: 0.85 })).toBeCloseTo(1, 12);
+    expect(tintWarmth({ red: 0, green: 0, blue: 0 })).toBe(0);
   });
 
   it('keeps source deltas in the engine grade and defers the separate irradiance field until night', () => {
@@ -159,26 +208,25 @@ describe('authored dusk staging', () => {
     }
   });
 
-  it.each(['day', 'night'] as const)('keeps the pre-fix %s light/uniform matrix bit-identical', (kind) => {
-    // SHA-256 of the complete numeric snapshots from the pre-fix lighting.ts, for 48 combinations per profile.
+  it('keeps the pre-fix day light/uniform matrix bit-identical', () => {
+    // SHA-256 of the complete numeric snapshots from the pre-fix lighting.ts, for 48 combinations.
     // Pin the old renderer's output, rather than deriving an expected value from the changed implementation.
-    const baseline = {
-      day: '0ee1adfdb7a59247c0dac0a44d70c68ce5ab897d2fb077ebf85fab88f2e6be32',
-      night: '01c7a2d661c6b95536f64b6cee351fc84879d2574ac4d263c6fae15c4525b724',
-    };
+    // (The night profile had its own pinned matrix until night maps became day maps with night dressing; the suite
+    // "night maps: day keys with night dressing" below compares their light with this day matrix hour by hour.)
+    const baseline = '0ee1adfdb7a59247c0dac0a44d70c68ce5ab897d2fb077ebf85fab88f2e6be32';
     const states = [];
     for (const arc of [false, true]) {
       for (const hour of [0, 5.5, 8, 12, 16.5, 18.2, 21, 22]) {
         for (const weather of ['clear', 'rain', 'snow'] as const) {
           const l = new Lighting(20, 20);
           l.sunArc = arc;
-          l.setProfile({ kind, hour: kind === 'day' ? 16.5 : 22, nightLevel: 0.3, tint: [1, 0.92, 0.8] });
+          l.setProfile({ kind: 'day', hour: 16.5, nightLevel: 0.3, tint: [1, 0.92, 0.8] });
           l.update(hour, overcastAt(weather), weather === 'snow' ? 0.06 : undefined, weatherAt(weather));
           states.push(snapshot(l));
         }
       }
     }
-    expect(createHash('sha256').update(JSON.stringify(states)).digest('hex')).toBe(baseline[kind]);
+    expect(createHash('sha256').update(JSON.stringify(states)).digest('hex')).toBe(baseline);
   });
 });
 
@@ -338,7 +386,8 @@ describe('renderer faithfulness controls', () => {
       expect(f.mapLight.currentWeight).toBe(1);
       expect(f.internals.nightDisplay.value).toBe(0);
       expect(f.internals.staticGain).toBe(0);
-      expect(f.fieldUpdate).toHaveBeenLastCalledWith(expect.any(Number), f.hd.renderer, 0);
+      // Neither the static dressing nor the map sources' own field: the grade holds the sources.
+      expect(f.fieldUpdate).toHaveBeenLastCalledWith(expect.any(Number), f.hd.renderer, 0, 0);
       const noon = f.internals.noonIrradiance;
       // Noon exposure (no adaptation) with the dusk calibration factor only.
       expectRgb(f.internals.exposure.value.toArray(), [
@@ -353,5 +402,123 @@ describe('renderer faithfulness controls', () => {
     } finally {
       f.dispose();
     }
+  });
+
+  it('lights a night map exactly like a day map and adds only the night dressing', () => {
+    // Same [Lighting], same hour (the look's 16.5), same settings: the two kinds must not differ in light.
+    const profile = (kind: 'day' | 'night'): AtmosphereProfile => ({
+      kind,
+      hour: 12,
+      nightLevel: 0.3,
+      tint: [0.9, 0.9, 1],
+    });
+    const day = headless(profile('day'), 'clear');
+    const night = headless(profile('night'), 'clear');
+    try {
+      for (const f of [day, night]) {
+        f.hd.state.environment.timeOfDay = 16.5;
+        f.hd.frame(0);
+      }
+      expect(night.controls()).toEqual(day.controls());
+      expect(night.mapLight.currentWeight).toBe(1);
+      expect(night.internals.nightDisplay.value).toBeCloseTo(0.2 * 0.333, 12);
+      expect(night.hd.nodes.night.value).toBe(day.hd.nodes.night.value);
+      expect(night.hd.nodes.sceneLevel.value.toArray()).toEqual(day.hd.nodes.sceneLevel.value.toArray());
+      // The dressing: lit windows, lamp heads and static lamp pools on the night map, none on the day map.
+      expect(day.hd.nodes.windowGain.value).toBe(0);
+      expect(day.hd.emitters.lampGain.value).toBe(0);
+      expect(day.internals.staticGain).toBe(0);
+      expect(night.hd.nodes.windowGain.value).toBe(1);
+      expect(night.hd.emitters.lampGain.value).toBe(1);
+      expect(night.hd.windowsWanted()).toBe(true);
+      expect(day.hd.windowsWanted()).toBe(false);
+      // Static pools are scaled back up by the darkness the grade gives the art they multiply.
+      expect(night.internals.staticGain).toBeCloseTo(1 / 0.3, 12);
+      // The map sources' own field stays off on both: the grade holds them.
+      expect(night.fieldUpdate).toHaveBeenLastCalledWith(
+        expect.any(Number),
+        night.hd.renderer,
+        night.internals.staticGain,
+        0,
+      );
+      expect(day.fieldUpdate).toHaveBeenLastCalledWith(expect.any(Number), day.hd.renderer, 0, 0);
+      expect(night.internals.lighting.state.dressing).toBe(1);
+      expect(day.internals.lighting.state.dressing).toBeCloseTo(0.2 * 0.333, 12);
+    } finally {
+      day.dispose();
+      night.dispose();
+    }
+  });
+
+  it('hands a night map to the moonlit presentation only when its hour is forced to night', () => {
+    const f = headless({ kind: 'night', hour: 12, nightLevel: 0.3, tint: [0.9, 0.9, 1] }, 'clear');
+    try {
+      f.hd.state.environment.timeOfDay = 22;
+      f.hd.frame(0);
+      expect(f.mapLight.currentWeight).toBe(0);
+      expect(f.internals.nightDisplay.value).toBe(1);
+      // Ungraded art again: the static pools at their tuned strength, and the map sources in their own field.
+      expect(f.internals.staticGain).toBe(1);
+      expect(f.fieldUpdate).toHaveBeenLastCalledWith(expect.any(Number), f.hd.renderer, 1, 1);
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it('scales the dressing pools by the grade weight on night maps only', () => {
+    const night = { kind: 'night', nightLevel: 0.26 } as const;
+    expect(dressingLightGain(night, 1)).toBeCloseTo(1 / 0.26, 12);
+    expect(dressingLightGain(night, 0)).toBe(1);
+    expect(dressingLightGain(night, 0.5)).toBeCloseTo(1 + (1 / 0.26 - 1) / 2, 12);
+    expect(dressingLightGain({ kind: 'night', nightLevel: 0 }, 1)).toBe(10);
+    expect(dressingLightGain({ kind: 'day', nightLevel: 0.3 }, 1)).toBe(1);
+    expect(dressingLightGain({ kind: 'dusk', nightLevel: 0.3 }, 1)).toBe(1);
+    expect(dressingLightGain(null, 1)).toBe(1);
+  });
+});
+
+describe('night maps: day keys with night dressing', () => {
+  const profile = (kind: 'day' | 'night'): AtmosphereProfile => ({
+    kind,
+    hour: 12,
+    nightLevel: 0.36,
+    tint: [0.62, 0.62, 1],
+  });
+
+  // Decorative weather is a separate matter: night maps keep the overcast curve they had (weatherLighting.test.ts).
+  it.each([false, true])('uses the very same clear light as a day map at every hour, arc = %s', (arc) => {
+    for (const hour of [0, 5.5, 8, 12, 16.5, 18.2, 21, 22]) {
+      for (const weather of ['clear'] as const) {
+        const states = (['day', 'night'] as const).map((kind) => {
+          const l = new Lighting(20, 20);
+          l.sunArc = arc;
+          l.setProfile(profile(kind));
+          l.update(hour, overcastAt(weather), weather === 'snow' ? 0.06 : undefined, weatherAt(weather));
+          return { light: snapshot(l), dressing: l.state.dressing, night: l.state.night };
+        });
+        const [day, night] = states as [(typeof states)[number], (typeof states)[number]];
+        expect(night.light, `${hour} ${weather}`).toEqual(day.light);
+        expect(night.night).toBe(day.night);
+        // Dressing: always on for the night map, the night weight for the day map.
+        expect(night.dressing).toBe(1);
+        expect(day.dressing).toBe(day.night);
+      }
+    }
+  });
+
+  it('reports the dressing weight ahead of a frame', () => {
+    const l = new Lighting(20, 20);
+    l.setProfile(profile('night'));
+    for (const hour of [0, 12, 16.5, 22]) expect(l.dressingAt(hour)).toBe(1);
+    expect(l.nightAt(12)).toBe(0);
+    expect(l.nightAt(22)).toBe(1);
+    l.setProfile(profile('day'));
+    expect(l.dressingAt(12)).toBe(0);
+    expect(l.dressingAt(22)).toBe(1);
+    expect(l.dressingAt(16.5)).toBeCloseTo(0.2 * 0.333, 12);
+    // Without a profile the legacy keys' dressing follows their night curve.
+    const legacy = new Lighting(20, 20);
+    legacy.update(22, 0);
+    expect(legacy.state.dressing).toBe(legacy.state.night);
   });
 });
