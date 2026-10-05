@@ -1993,8 +1993,21 @@ export class LiveView {
       const grounded = this.groundCard(object);
       this.voxelUnits.pose(unit, pose, this.poseTurret, this.poseUp);
       // On a ramp the native shadow lies in the plane the body is drawn in; a level body keeps the ground's own plane.
-      this.voxelUnits.setGroundContact(unit, grounded, this.poseUp && this.poseUp.y < 0.9999 ? this.poseUp : undefined);
-      this.voxelUnits.setNativeDepth(unit, unit.root.position, this.harvesterBonus(object), grounded);
+      // The engine's vehicle shadow is the footprint on the bottom face of the body section (UnitClass draw); landed
+      // aircraft keep the plane through their origin.
+      this.voxelUnits.setGroundContact(
+        unit,
+        grounded,
+        this.poseUp && this.poseUp.y < 0.9999 ? this.poseUp : undefined,
+        object.kind === 'vehicle',
+      );
+      this.voxelUnits.setNativeDepth(
+        unit,
+        unit.root.position,
+        this.harvesterBonus(object),
+        grounded,
+        this.world.terrainObjectCards,
+      );
     }
     for (const uid of this.visuals.keys()) {
       if (current.byUid.has(uid) || retained?.has(uid)) continue;

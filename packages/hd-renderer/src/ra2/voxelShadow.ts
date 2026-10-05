@@ -213,14 +213,68 @@ const shadowOrigins = new WeakMap<Object3D, Vector3>();
 export const CONTACT_SHADOW_OFFSET_PX = 3;
 /** World x (and -z) component of that offset: screen-right is (1, 0, -1) / sqrt 2 and a pixel is 1 / 42.4 units. */
 export const CONTACT_SHADOW_OFFSET = CONTACT_SHADOW_OFFSET_PX / PIXELS_PER_CELL_EDGE / Math.SQRT2;
-/** Edge softness of a contact shadow in cells: about half an engine pixel, so the band keeps its width. */
-export const CONTACT_SHADOW_PENUMBRA = 0.012;
+/**
+ * Edge softness of a contact shadow in cells: a sixth of an engine pixel, enough to anti-alias the edge. The engine's
+ * footprint is pixel-crisp and the visible band is only about three pixels wide: the earlier half-pixel penumbra
+ * showed as a dark line under the whole lower outline of a hull (frozen same-frame pairs: 18 shadow pixels below a
+ * miner driving towards the camera where the original has none).
+ */
+export const CONTACT_SHADOW_PENUMBRA = 0.004;
+/**
+ * A contact shadow darkens like the engine's own, whatever the look does to other shadows: the original halves the
+ * ground under a vehicle (frozen same-frame pairs: 0.49 to 0.50 of the ground's brightness), and the enhanced look's
+ * darker shadows (0.30 measured) turned the three-pixel band into a black outline that read as a gap under the hull.
+ */
+export const CONTACT_SHADOW_OPACITY = ENGINE_SHADOW_OPACITY;
 /** A contact unit within this height of the registered ground lies on it (ramp corners are not exact planes). */
 export const CONTACT_GROUND_TOLERANCE = 0.3 * LEVEL_HEIGHT;
+/**
+ * On sloped ground a contact footprint's depth plane is raised by this much beyond what its sample points ask for:
+ * the registered height is the cell's bilinear surface, and the drawn triangles of a corner ramp stand up to a
+ * quarter level above it.
+ */
+export const CONTACT_SLOPE_MARGIN = 0.25 * LEVEL_HEIGHT;
+/** The most a contact footprint's depth plane is raised (a footprint that reaches over a cliff edge stays behind it). */
+export const CONTACT_CLEARANCE_MAX = LEVEL_HEIGHT;
+
+const sample = new Vector3();
+/**
+ * How far the plane through `origin` with `normal` must rise so that it is nowhere under the ground beneath a contact
+ * footprint (`matrix` lays the body's local x/z box onto the drawn plane). The twin's depth is one analytic plane; the
+ * surface it lies on is not where a ramp begins or ends or on a corner ramp, and there the ground's own depth hid the
+ * footprint: a vehicle entering a ramp lost its shadow for several frames (frozen pairs with the hull hidden: 0 to 25
+ * visible pixels where the original shows 91 to 169). Level ground asks for nothing.
+ */
+export function contactClearance(
+  ground: ShadowGround,
+  normal: Vector3,
+  origin: Vector3,
+  matrix: Matrix4,
+  box: { min: Vector3; max: Vector3 } | null | undefined,
+): number {
+  if (!box || !(box.max.x >= box.min.x) || !(box.max.z >= box.min.z)) return 0;
+  let clear = 0;
+  let sloped = Math.abs(normal.y) < 0.9999;
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < 3; j++) {
+      sample
+        .set(box.min.x + ((box.max.x - box.min.x) * i) / 2, 0, box.min.z + ((box.max.z - box.min.z) * j) / 2)
+        .applyMatrix4(matrix);
+      const plane = origin.y - (normal.x * (sample.x - origin.x) + normal.z * (sample.z - origin.z)) / normal.y;
+      const surface = ground.height(sample.x, sample.z);
+      if (Math.abs(surface - origin.y) > 1e-3) sloped = true;
+      clear = Math.max(clear, surface - plane);
+    }
+  return sloped ? Math.min(clear + CONTACT_SLOPE_MARGIN, CONTACT_CLEARANCE_MAX) : 0;
+}
 
 interface ShadowContact {
   /** Plane the footprint is drawn in; null = the ground's own plane under the unit. */
   normal: Vector3 | null;
+  /** The footprint lies on the bottom face of the body's bounds instead of the plane through the unit's origin. */
+  bottomFace: boolean;
+  /** Rise of the depth plane over the ground under the footprint (contactClearance), set by the first twin. */
+  clearance: number;
 }
 const contacts = new WeakMap<Object3D, ShadowContact>();
 
@@ -228,15 +282,18 @@ const contacts = new WeakMap<Object3D, ShadowContact>();
  * Mark a unit root as standing on a surface at its own origin (terrain, a bridge deck): it then casts the engine's
  * contact shadow there instead of the sheared projection onto the registered ground. `normal` is the plane of a body
  * the host tilts itself; without it the footprint lies on the ground under the unit (level off the terrain).
- * `false` restores the ordinary rules (flight, water, shear).
+ * `false` restores the ordinary rules (flight, water, shear). `bottomFace` puts the footprint on the bottom face of
+ * the body's bounds, where the engine draws a vehicle's (the section's lowest voxel layer, which a few models keep
+ * well below their origin: the Chrono Miner by four voxels); without it the plane passes through the origin.
  */
-export function setShadowContact(unit: Object3D, contact: boolean, normal?: Vector3): void {
+export function setShadowContact(unit: Object3D, contact: boolean, normal?: Vector3, bottomFace = false): void {
   if (!contact) {
     contacts.delete(unit);
     return;
   }
   let stored = contacts.get(unit);
-  if (!stored) contacts.set(unit, (stored = { normal: null }));
+  if (!stored) contacts.set(unit, (stored = { normal: null, bottomFace, clearance: 0 }));
+  stored.bottomFace = bottomFace;
   if (!normal) stored.normal = null;
   else (stored.normal ??= new Vector3()).copy(normal).normalize();
 }
@@ -536,8 +593,9 @@ function createSurfaceMaterial(
     if (layer === 'reflection') return sourceMaterial ? WATER_REFLECTION_OPACITY : WATER_FLAT_REFLECTION_OPACITY;
     if (layer === 'foam') return shadowCopyOpacity(WATER_FOAM_OPACITY * (1 + 0.03 * (surface?.foamPulse ?? 0)));
     if (surface?.onWater) return shadowCopyOpacity(WATER_CONTACT_OPACITY * nodes.weatherSunShare.value);
-    const target =
-      look.enabled.value > 0.5 && look.shadowDarkness.value !== 1
+    const target = surface?.contact
+      ? CONTACT_SHADOW_OPACITY
+      : look.enabled.value > 0.5 && look.shadowDarkness.value !== 1
         ? Math.min(SHADOW_OPACITY * look.shadowDarkness.value, 0.9)
         : SHADOW_OPACITY;
     return shadowCopyOpacity(
@@ -626,6 +684,8 @@ class VoxelSurfaceMesh extends Mesh {
   readonly planeNormal = new Vector3(0, 1, 0);
   planeConstant = SHADOW_LIFT;
   onWater = false;
+  /** This twin currently draws the engine's contact footprint (see setShadowContact). */
+  contact = false;
   waterY = 0;
   foamPulse = 0;
   private readonly mode: VoxelShadowState;
@@ -666,6 +726,7 @@ class VoxelSurfaceMesh extends Mesh {
     if (this.layer === 'reflection') this.updateReflectionMaterial();
     const land = this.layer === 'shadow' && (this.copyIndex === 0 || this.mode.soft);
     this.onWater = false;
+    this.contact = false;
     const parent = this.parent;
     const ground = groundOf(this);
     if (!parent || !ground) {
@@ -690,12 +751,22 @@ class VoxelSurfaceMesh extends Mesh {
     if (this.layer !== 'shadow' && !this.onWater) return;
     if (contact) {
       if (this.source.parent !== parent) return;
+      this.contact = true;
       // Depth follows the ground the unit stands on (a ramp tilts the body more steeply than the terrain it is on).
       if (ground.normal && Math.abs(origin.y - ground.height(origin.x, origin.z)) < CONTACT_GROUND_TOLERANCE)
         ground.normal(origin.x, origin.z, normal);
       else normal.copy(UP);
       const drawn = contact.normal ?? normal;
-      bodyUp.set(e[4]!, e[5]!, e[6]!).normalize();
+      bodyUp.set(e[4]!, e[5]!, e[6]!);
+      // Height of the footprint's plane above the origin along the drawn normal: the body's lowest face.
+      let bottom = 0;
+      if (contact.bottomFace) {
+        const geometry = this.source.geometry;
+        if (!geometry.boundingBox) geometry.computeBoundingBox();
+        const box = geometry.boundingBox;
+        if (box && !box.isEmpty()) bottom = box.min.y * bodyUp.length();
+      }
+      bodyUp.normalize();
       retilt.setFromUnitVectors(bodyUp, drawn);
       axisX.set(e[0]!, e[1]!, e[2]!).applyQuaternion(retilt);
       axisZ.set(e[8]!, e[9]!, e[10]!).applyQuaternion(retilt);
@@ -713,22 +784,29 @@ class VoxelSurfaceMesh extends Mesh {
         axisX.x,
         0,
         axisZ.x,
-        origin.x + k + slide * view.x + cx,
+        origin.x + k + slide * view.x + cx + bottom * drawn.x,
         axisX.y,
         0,
         axisZ.y,
-        origin.y + slide * view.y + cy,
+        origin.y + slide * view.y + cy + bottom * drawn.y,
         axisX.z,
         0,
         axisZ.z,
-        origin.z - k + slide * view.z + cz,
+        origin.z - k + slide * view.z + cz + bottom * drawn.z,
         0,
         0,
         0,
         1,
       );
+      // One measure per unit and frame: the first twin samples the ground under the footprint, the others reuse it.
+      if (this.copyIndex === 0) {
+        const geometry = this.source.geometry;
+        if (!geometry.boundingBox) geometry.computeBoundingBox();
+        const box = geometry.boundingBox;
+        contact.clearance = contactClearance(ground, normal, origin, this.matrixWorld, box && !box.isEmpty() ? box : null);
+      }
       this.planeNormal.copy(normal);
-      this.planeConstant = normal.dot(origin) + SHADOW_LIFT + copy.lift;
+      this.planeConstant = normal.dot(origin) + SHADOW_LIFT + copy.lift + contact.clearance * normal.y;
       this.matrixWorldNeedsUpdate = false;
       for (const child of this.children) child.updateMatrixWorld(force);
       return;

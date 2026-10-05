@@ -538,9 +538,24 @@ enforcing the door-before-unit color order. Airborne and shadow materials keep t
 
 For ground SHP vehicles/infantry, e is the current frame's inclusive bottom; c=0/12 respectively. A type marked
 `harvester` gets c=13 while its current cell lies in a `refinery` foundation, independent of docking contacts or
-missions. Voxel vehicles/landed aircraft use the same card, with e approximated by the eight projected corners of
-the posed model's world AABB, including articulated turret/barrel parts and excluding shadow twins. Building voxel
-turrets use their own bottom and c=-1-turretVoxel.zAdjust. `src/ra2/voxelNativeDepth.ts` pulls physical fragment depth
+missions. Voxel vehicles/landed aircraft use the same card. e is the lowest projected corner of each part's own
+bounding box as it is posed (turned, tilted on a ramp, turret/barrel articulated; shadow twins excluded) plus the
+engine's bitmap margin: YR 1.001 `0x754510` sizes the voxel surface as the projected bounds plus eight pixels and
+places it four pixels before their minimum. (A world-axis box around the posed parts overshot by up to a third of a
+cell for a body turned 45 degrees or tilted, and a vehicle then drew over the tree it stood behind.) Building voxel
+turrets use their own bottom and c=-1-turretVoxel.zAdjust. Trees are the engine's own Z writers: measured in the
+tactical Z-buffer (global `0x887644`, frozen-frame dumps), a tree is a card from its frame's inclusive bottom row,
+one unit nearer per three rows up and 12 to 13 units nearer than the ground at that row. `terrainObjectDepth` gives
+static trees that card (c=12, `writer`), and `SpriteLayer` keeps writer cards in the depth-writing body pass instead
+of the late unit pass. A vehicle therefore shows in front of a tree only when its bitmap bottom is more than nine
+rows below the tree's. Where the two cards cross, the per-fragment depths cannot decide cleanly: each card steps at
+its own row phase and the voxel keeps 6% of its physical depth, so for about one row of travel the tree showed through
+the hull in stripes (sandbox sweep of a frozen frame in half-row steps). `TerrainObjectCards`
+(`src/ra2/terrainObjectCards.ts`, filled by `loadRa2World`, passed to `updateVoxelNativeDepth` by the live view)
+decides that case for the vehicle as a whole: unless every part of its posed bounds is in front of an overlapping
+tree, its card bonus is lowered until all of it is behind (at most about three units). The engine compares integer
+cards and draws a tree over every unit registered before it, and the original's frozen frame at such a tie shows the
+tree in front. SHP units keep their plain cards. `src/ra2/voxelNativeDepth.ts` pulls physical fragment depth
 94% toward the card, retaining 6% to order internal faces; its error is bounded by 6% of the fragment's original
 distance from the card. Flight and shadow passes keep their existing behavior. The additive painter bias,
 CARD_CLEARANCE, other terrain/effect paths and fireball capture codes remain separate.
@@ -1004,7 +1019,27 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   object level plus the units' extra light (rules `ExtraUnitLight`). Shadows are the model flattened onto the ground
   along a fixed light, with a 0.04-cell contact penumbra from five shared-geometry/material twins whose overlapping
   core keeps the original darkness (depth-tested once per layer, see `voxelShadow.ts`); `?vshadow=hard` restores one
-  crisp twin in the sandbox and replays. Grounded voxel origins on water are identified by the terrain's surface
+  crisp twin in the sandbox and replays. A unit the live view marks as standing on terrain or a bridge deck
+  (`setShadowContact`) instead casts the engine's own ground shadow: the top-down footprint of the body alone
+  (no turret or barrel, no shear by height) in the plane through the unit's origin, for vehicles on the bottom face
+  of the body's bounds (`bottomFace`; the Chrono Miner's lies four voxels below its origin), drawn three engine
+  pixels to the right of the draw point (YR 1.001 unit draw `0x73C47A`, shadow matrix `0x55A7D0`, offset vector at
+  `0x887420`). On a ramp the footprint lies in the plane the body is drawn in; its depth is the ground's plane at
+  the unit, raised until it is nowhere under the registered surface beneath the footprint plus a quarter level
+  (`contactClearance`, at most one level; level ground unchanged): one plane through the unit's origin dips under
+  the real ground where a ramp begins or ends and on corner ramps, and the ground's own depth then hid the footprint
+  (frozen pairs with the hull hidden: 0 to 25 visible pixels where the original shows 91 to 169). Its edge is crisp
+  (`CONTACT_SHADOW_PENUMBRA`, a sixth of an engine pixel: a half-pixel penumbra drew a dark line under the whole
+  lower outline of a hull) and its darkness is the engine's own whatever the look's `shadowDarkness` is
+  (`CONTACT_SHADOW_OPACITY`): the original halves the ground under a vehicle, and the enhanced look's 1.15 turned the
+  three-pixel band into a black outline. Measured on frozen same-frame pairs with exact masks (original: a shadow
+  pixel is the background with every 16-bit channel halved; HD: sandbox replays of the same state with the hulls
+  hidden): brightness under the shadow 0.49 original, 0.45 to 0.47 HD (0.30 with the look's figure); the whole HD
+  footprint covers the engine's at 0.93 to 0.97 intersection over union; the visible shadow is 0.96 to 1.2 times
+  the original's area for hulls facing north to west and 1.4 to 2.9 times for hulls pointing at the camera (east to
+  south), where the smooth HD hull's lower outline lies up to two pixels inside the engine's splatted voxels and
+  bares a strip of footprint the original covers. The sheared projection measured 2.2 to 5 times. Flight, water
+  contact and physical-origin overrides keep the earlier rules. Grounded voxel origins on water are identified by the terrain's surface
   lookup, regardless of unit type: five straight-down twins give 0.3 core contact darkness; five blue-white foam twins
   retain only source points near the waterline (smooth fade from 0.06 to 0.14 world units above it), scale 1.06 across
   the hull and 1.14 along its forward axis, and break their 0.3 core alpha with drifting 0.1/0.2-cell value noise

@@ -82,6 +82,86 @@ export function voxelBitmapBottom(parts: readonly Mesh[], anchor: Vector3, updat
   return bottom === -Infinity ? 0 : Math.floor(bottom) + VOXEL_BITMAP_MARGIN - 1;
 }
 
+// Camera screen-right in world axes (see world.ts): one native pixel is 1 / PIXELS_PER_CELL_EDGE along it.
+const SCREEN_RIGHT = new Vector3(Math.SQRT1_2, 0, -Math.SQRT1_2);
+
+/** Screen place of a world point in native pixels and its view depth in world units, on axes fixed to the map. */
+export function voxelScreenPlace(point: Vector3, out: { column: number; row: number; depth: number }): typeof out {
+  out.column = point.dot(SCREEN_RIGHT) * PIXELS_PER_CELL_EDGE;
+  out.row = point.dot(SCREEN_DOWN) * PIXELS_PER_CELL_EDGE;
+  out.depth = point.dot(VIEW_FORWARD);
+  return out;
+}
+
+export interface VoxelCardExtent {
+  /** Projected bounds of the posed parts relative to the draw point, native pixels (top is a row, down positive). */
+  left: number;
+  right: number;
+  top: number;
+  /** Least and greatest distance of those bounds behind the unit's own card, world units (see VOXEL_CARD_KAPPA). */
+  behindMin: number;
+  behindMax: number;
+}
+
+export function createVoxelCardExtent(): VoxelCardExtent {
+  return { left: 0, right: 0, top: 0, behindMin: 0, behindMax: 0 };
+}
+
+/**
+ * Screen bounds of the posed parts and the range of their distance behind the card with this bottom and bonus: the
+ * part of the fragment depth that the six percent of physical depth still varies by across the model.
+ */
+export function voxelCardExtent(
+  parts: readonly Mesh[],
+  anchor: Vector3,
+  bottom: number,
+  bonus: number,
+  out: VoxelCardExtent,
+  updateMatrices = true,
+): VoxelCardExtent {
+  out.left = out.top = out.behindMin = Infinity;
+  out.right = out.behindMax = -Infinity;
+  for (const mesh of parts) {
+    if (updateMatrices) mesh.updateWorldMatrix(true, false);
+    if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+    const local = mesh.geometry.boundingBox;
+    if (!local || local.isEmpty()) continue;
+    for (let bits = 0; bits < 8; bits++) {
+      corner
+        .set(
+          bits & 1 ? local.max.x : local.min.x,
+          bits & 2 ? local.max.y : local.min.y,
+          bits & 4 ? local.max.z : local.min.z,
+        )
+        .applyMatrix4(mesh.matrixWorld);
+      const row = voxelFragmentRow(corner, anchor);
+      corner.sub(anchor);
+      const column = corner.dot(SCREEN_RIGHT) * PIXELS_PER_CELL_EDGE;
+      const behind = corner.dot(VIEW_FORWARD) + nativeCardPush(Math.min(row, bottom), bottom, bonus);
+      out.left = Math.min(out.left, column);
+      out.right = Math.max(out.right, column);
+      out.top = Math.min(out.top, row);
+      out.behindMin = Math.min(out.behindMin, behind);
+      out.behindMax = Math.max(out.behindMax, behind);
+    }
+  }
+  if (out.left === Infinity) out.left = out.right = out.top = out.behindMin = out.behindMax = 0;
+  return out;
+}
+
+/**
+ * Whole-object resolution of a ground unit's card against static cards that write depth (the engine's terrain
+ * objects, see terrainObjectCards.ts). Two cards step one unit every three rows at their own phases and the unit keeps
+ * six percent of its physical depth, so where they nearly tie the winner would alternate from row to row.
+ */
+export interface VoxelCardTies {
+  /**
+   * Card units to add to the unit's bonus (zero or negative). `bias` is the unit's additive camera-space bias in
+   * world units, `extent` its bounds for the same anchor, bottom and bonus.
+   */
+  tieBonus(anchor: Vector3, bottom: number, bonus: number, bias: number, extent: VoxelCardExtent): number;
+}
+
 /** Ground cards and physical flight share one material; shadow passes always retain physical depth. */
 export function voxelNativeDepthNode(): ShaderNode {
   return Fn(([], builder: NodeBuilder) => {

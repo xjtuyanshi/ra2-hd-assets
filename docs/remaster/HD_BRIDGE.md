@@ -58,7 +58,10 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    pass after the mist and before bloom (`HdRenderer.setVisibility`). Native top-layer effect art uses a separate
    transparent pass above that mask, matching storm clouds over black shroud; ground/air effects remain masked. A
    camera framed in engine pixels from the game's `TacticalPos`, so the HD image lines up with the original pixel for
-   pixel. Positions and facings are interpolated between logic frames; every animation (walking, building layers,
+   pixel. Positions and facings are interpolated between logic frames: each step plays at one speed from the poses
+   on screen to the newest snapshot, due a period and a quarter after that frame's arrival on a de-jittered logic
+   clock (`LiveView.scheduleMotion`; snapshots arrive 30 to 75 ms apart, and interpolating over the last arrival
+   interval stalled and jumped). Every animation (walking, building layers,
    build-up, effects) is clocked on the engine's logic frames, not on the wall clock. Infantry, SHP vehicles and
    aircraft get the engine's extra object light (rules `ExtraInfantryLight`/`ExtraUnitLight`/`ExtraAircraftLight`, 0.2
    in YR); buildings get none. Capturable tech buildings (oil derrick, airport, ...) of a civilian house (the bridge's
@@ -596,6 +599,13 @@ pixels, and LiveView creates no selection geometry.
 Owner-attached anims, particle systems and fire events follow this gate when both UID and pointer match;
 independent explosions and projectiles keep their native publication lifetime. Same-frame unhide restores the
 attached presentation without restarting the snapshot's interpolation timestamp.
+
+Optional object `tilt` is the unit up vector the game draws a vehicle's body with, in object axes (z up; (0, 0, 1)
+is level). YR reads it for Drive locomotors from the locomotor's current and previous ramp, its slope timer and the
+engine's own ramp matrix table (`src/games/yr/unitTilt.ts`: `Draw_Matrix` `0x4AFF60`, table `0xB45188`; 29.31 degrees
+on edge ramps, 21.36 on corner ramps, a three-frame blend between ramps); locomotors that draw with the base matrix
+report level, the others nothing. LiveView tilts the voxel body with it, blends it between logic frames and lays the
+contact shadow in the same plane; without the field the body follows the renderer's terrain normal as before.
 
 Optional `translucent` is body opacity: YR emits 0.5 while BeingWarpedOut or WarpingOut is nonzero. SHP and voxel
 body parts use 50% opacity and do not write depth while shadows retain their normal opacity. The chrono bytes
