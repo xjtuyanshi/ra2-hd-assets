@@ -54,6 +54,9 @@ function presentation(interpolating: boolean) {
   const view = Object.assign(Object.create(LiveView.prototype) as object, {
     volumetricBlasts,
     buildingLightGate: new BuildingLightGate(),
+    voxelUnits: { revision: 0, loading: 0 },
+    pageUploads: { step: vi.fn() },
+    visuals: new Map(),
     current: { snapshot: { frame: 2, objects: [] }, at: 10 },
     previous: { snapshot: { frame: 1, objects: [] }, at: 0 },
     lastRender: 10,
@@ -377,6 +380,44 @@ describe('live presentation scheduling', () => {
     expect(p.applyObjects).toHaveBeenCalledTimes(3);
     expect(p.flushOverlayPages).toHaveBeenCalledTimes(3);
     expect(p.applyEffects).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('live preparation pace', () => {
+  it('gives a late frame the upload pixels of the frame that did not come, and no more than two frames worth', () => {
+    const p = presentation(false);
+    const fields = p.view as unknown as {
+      lastRender: number;
+      outOfSight: boolean;
+      hiddenUploadPixels: number;
+      pageUploads: { step: ReturnType<typeof vi.fn> };
+    };
+    const MP = 1 << 20;
+    Object.assign(fields, { outOfSight: false, hiddenUploadPixels: 8 * MP });
+    // A shown view at 60 Hz: 8 M pixels of atlas pages per frame.
+    fields.lastRender = 1000;
+    p.view.render(1000 + 1000 / 60);
+    expect(fields.pageUploads.step).toHaveBeenLastCalledWith(8 * MP);
+    // At 40 frames a second: one and a half frames' worth.
+    fields.lastRender = 2000;
+    p.view.render(2025);
+    expect(fields.pageUploads.step.mock.lastCall![0]).toBeCloseTo(12 * MP, 0);
+    // Out of sight at 8 frames a second, or after a second without a frame: twice, never more.
+    fields.outOfSight = true;
+    for (const late of [125, 1000]) {
+      fields.lastRender = 3000;
+      p.view.render(3000 + late);
+      expect(fields.pageUploads.step).toHaveBeenLastCalledWith(16 * MP);
+    }
+    // A faster display never gets less than one frame's share.
+    fields.lastRender = 5000;
+    p.view.render(5004);
+    expect(fields.pageUploads.step).toHaveBeenLastCalledWith(8 * MP);
+    // A host that sets no pace (a loading screen) keeps none.
+    fields.hiddenUploadPixels = Infinity;
+    fields.lastRender = 6000;
+    p.view.render(6016);
+    expect(fields.pageUploads.step).toHaveBeenLastCalledWith(Infinity);
   });
 });
 

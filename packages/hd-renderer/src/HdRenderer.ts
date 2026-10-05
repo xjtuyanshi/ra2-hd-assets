@@ -530,6 +530,10 @@ export class HdRenderer {
   /** Native top-layer effect art is composited after the ground visibility mask. */
   readonly topScene = new Scene();
   private topEffectsVisible = false;
+  /** The top pass is part of the post graph (see setTopEffectsVisible). */
+  private topEffectsPass = false;
+  /** The top target may still hold art of an earlier frame and is drawn (cleared) once more. */
+  private topEffectsStale = false;
   private sceneLighting: SceneLighting | null = null;
   /** Effect art follows the authored time/weather light, never a scene event's overcast or palette. */
   readonly effectLight = new Color(1, 1, 1);
@@ -870,10 +874,32 @@ export class HdRenderer {
     this.sceneLighting = lighting ? resolveSceneLighting(lighting) : null;
   }
 
-  /** Keep the old post graph exactly when no native top-layer art is present. */
+  /**
+   * Whether native top-layer art is on screen. Hosts without such art keep the old post graph exactly: the top pass
+   * joins the graph with the first visible top art (or enableTopEffects) and stays for the renderer's lifetime.
+   * Showing and hiding top art afterwards changes no graph: a rebuild makes new materials for every post pass
+   * (bloom, blurs, sharpening, the output), half a second of shader building on the thread that presents frames, and
+   * a live match shows and hides such art all the time (the marker of a unit behind a building). While nothing is
+   * visible the pass is not drawn at all (see buildPipeline) and adds exact zeros to the picture.
+   */
   setTopEffectsVisible(visible: boolean): void {
     if (visible === this.topEffectsVisible) return;
     this.topEffectsVisible = visible;
+    if (visible) this.enableTopEffects();
+  }
+
+  /** Whether the top pass is part of the post graph (it costs a multisampled target of its own). */
+  get topEffectsEnabled(): boolean {
+    return this.topEffectsPass;
+  }
+
+  /**
+   * Put the top pass into the post graph now. A host that knows top-layer art will show (its last match had some)
+   * calls this before the view is on screen, so that even the first such art changes no graph.
+   */
+  enableTopEffects(): void {
+    if (this.topEffectsPass) return;
+    this.topEffectsPass = true;
     if (this.pipeline) this.buildPipeline();
   }
 
@@ -919,7 +945,7 @@ export class HdRenderer {
     // No extra key/graph branch for faithful: preserve its original output path exactly.
     if (emissiveOverlayEnabled(this.settings, emissiveMrtSupported(this.renderer))) key.push('emissive');
     if (this.world && debugView === 'none') key.push('unlit');
-    if (this.topEffectsVisible) key.push('top-effects');
+    if (this.topEffectsPass) key.push('top-effects');
     return JSON.stringify(key);
   }
 
@@ -978,8 +1004,17 @@ export class HdRenderer {
     // Colour only: the canvas stays opaque, so shroud is black and not the page behind it.
     let shown: ShaderNode = vec4(misted.rgb.mul(visible), misted.a);
     let topAlpha: ShaderNode | null = null;
-    if (this.topEffectsVisible) {
+    if (this.topEffectsPass) {
       const topPass = pass(this.topScene, this.view.camera, { samples: antialias === 'msaa4' ? 4 : 0 });
+      // Draw the pass only while it has something to show, and once more afterwards to clear it: an empty target
+      // (transparent black, also what a new or resized target holds) composites as exact zeros below.
+      const draw = topPass.updateBefore.bind(topPass);
+      this.topEffectsStale = true;
+      topPass.updateBefore = (frame: Parameters<typeof draw>[0]) => {
+        if (!this.topEffectsVisible && !this.topEffectsStale) return;
+        this.topEffectsStale = this.topEffectsVisible;
+        return draw(frame);
+      };
       // Transparent clear is explicit: the renderer's main canvas is intentionally opaque. Normal/custom-alpha
       // blending produces premultiplied colour in this target, so composite it without multiplying alpha twice.
       topPass.setMRT(mrt({ output: materialOutput }).setClearColor('output', 0x000000, 0));

@@ -18,6 +18,7 @@ import { validateMapLights, type MapLightsSidecar } from '../../../ra2-assets/sr
 import { MAP_MATERIALS_FILE, type MapMaterials } from '../../../ra2-assets/src/mapMaterials';
 import { MapLightGrade, setPaletteGrade, setPaletteNodes } from './mapLighting';
 import { AtmosphereNodes } from '../atmosphere';
+import type { PageUpload } from '../pageUpload';
 import { buildCliffField, buildShoreField } from './shoreField';
 
 /** windows.json next to a lit-window mask (packages/ra2-assets src/node/lights.ts WindowsSidecar). */
@@ -231,12 +232,13 @@ export interface HdAtlas {
  * Straight alpha, no colour conversion: the texels are the PNG's own values (the pages carry no colour profile). The
  * texture owns the bitmap until its first upload (or disposal before first use) and keeps only the dimensions
  * afterwards, like loadIndexedPage: a page is immutable, and a decoded 8192 x 4096 page is 128 MiB. `upload` (the
- * renderer's initTexture) uploads at once, so the bitmap never outlives the load.
+ * renderer's initTexture, or a PageUploader that copies the page over several frames) uploads before the texture is
+ * handed out, so the bitmap never outlives the load.
  */
 export async function loadHdTexture(
   url: string,
   colorSpace: Texture['colorSpace'],
-  upload?: (texture: Texture) => void,
+  upload?: PageUpload,
 ): Promise<Texture> {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
@@ -264,7 +266,7 @@ export async function loadHdTexture(
   texture.needsUpdate = true;
   if (upload) {
     try {
-      upload(texture);
+      await upload(texture);
     } catch (error) {
       texture.dispose();
       throw error;
@@ -279,11 +281,7 @@ export async function loadHdTexture(
  * Load an HD sprite atlas pair: colour art (sRGB, filtered) and the house-paint mask (linear data). See loadHdTexture
  * for decoding and `upload`.
  */
-export async function loadHdAtlas(
-  base: string,
-  ref: HdAtlasRef,
-  upload?: (texture: Texture) => void,
-): Promise<HdAtlas> {
+export async function loadHdAtlas(base: string, ref: HdAtlasRef, upload?: PageUpload): Promise<HdAtlas> {
   const pages = await Promise.allSettled([
     loadHdTexture(`${base}/${ref.file}`, SRGBColorSpace, upload),
     loadHdTexture(`${base}/${ref.remap}`, NoColorSpace, upload),

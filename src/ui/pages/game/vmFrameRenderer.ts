@@ -104,6 +104,11 @@ interface FrameBackend {
    * nearest), and the cursor pass still draws on top. Takes precedence over setTransparentRect.
    */
   setTransparentKey(key: FrameKey | null): void;
+  /**
+   * Compile what setTransparentKey needs now. The first keyed frame otherwise compiles and links the key programs
+   * inside its draw (8 to 125 ms measured), which is the frame the HD view replaces the original picture in.
+   */
+  prepareTransparentKey(): void;
   draw(
     frame: VmFrame,
     targetWidth: number,
@@ -212,6 +217,9 @@ export function createVmFrameRenderer(
     setTransparentKey(key) {
       transparentKey = key;
       if (!destroyed) backend.setTransparentKey(key);
+    },
+    prepareTransparentKey() {
+      if (!destroyed) backend.prepareTransparentKey();
     },
     draw(...args) {
       if (!destroyed) backend.draw(...args);
@@ -611,6 +619,10 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
     this.transparentKey = key;
   }
 
+  prepareTransparentKey(): void {
+    this.keyPrograms ??= createKeyPrograms(this.gl);
+  }
+
   /**
    * Bind the frame's texture(s) (units 0/1 for indexed + palette, unit 2 for RGBA/RGB565) and upload them when the frame
    * object changed since the last upload. Shared by the normal and keyed paths so either can follow the other.
@@ -879,6 +891,7 @@ class CanvasFrameRenderer implements FrameBackend {
   setTransparentRects(): void {}
   setSmoothRect(): void {}
   setTransparentKey(): void {}
+  prepareTransparentKey(): void {}
 
   clear(): void {
     if (this.destroyed) return;

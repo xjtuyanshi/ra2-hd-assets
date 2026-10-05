@@ -1,6 +1,7 @@
 import { LinearFilter, LinearMipmapLinearFilter, NoColorSpace, SRGBColorSpace, type Texture } from 'three/webgpu';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadHdAtlas, loadHdTexture } from '../src/ra2/cache';
+import { loadSpriteMaterialAtlas } from '../src/ra2/spriteMaterials';
 
 interface FakeBitmap {
   width: number;
@@ -136,5 +137,55 @@ describe('HD atlas pages are decoded off the main thread', () => {
     expect((failure as Error).message).toContain('a@2x-remap.png: HTTP 404');
     expect(host.bitmaps).toHaveLength(1);
     expect(host.bitmaps[0]!.close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('sprite material pages do not keep their decoded bitmap', () => {
+  it('uploads at once when the host uploads eagerly and keeps only the size', async () => {
+    const host = stubHost();
+    const upload = vi.fn(rendererUpload);
+    const atlas = await loadSpriteMaterialAtlas('/hd-cache/_library/urban/sprites-0@2x-normals.png', upload);
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(upload).toHaveBeenCalledWith(atlas!.texture);
+    expect(host.bitmaps[0]!.close).toHaveBeenCalledTimes(1);
+    expect(atlas!.texture.image).toEqual({ width: 8, height: 4 });
+    // Material data, not colour: no conversion, mipmapped like the colour page it lies over.
+    expect(atlas!.texture.colorSpace).toBe(NoColorSpace);
+    expect(atlas!.texture.minFilter).toBe(LinearMipmapLinearFilter);
+    expect(atlas!.texture.magFilter).toBe(LinearFilter);
+    expect(atlas!.texture.flipY).toBe(false);
+    atlas!.texture.dispose();
+    expect(host.bitmaps[0]!.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('without an eager upload the bitmap lives until the first upload or the disposal, whichever comes first', async () => {
+    const host = stubHost();
+    const drawn = (await loadSpriteMaterialAtlas('/hd-cache/X/sprites@2x-normals.png'))!;
+    expect(drawn.texture.image).toBe(host.bitmaps[0]);
+    expect(drawn.texture.version).toBe(1);
+    expect(host.bitmaps[0]!.close).not.toHaveBeenCalled();
+    rendererUpload(drawn.texture);
+    expect(host.bitmaps[0]!.close).toHaveBeenCalledTimes(1);
+    expect(drawn.texture.image).toEqual({ width: 8, height: 4 });
+    const unused = (await loadSpriteMaterialAtlas('/hd-cache/X/sprites@2x-normals.png'))!;
+    unused.texture.dispose();
+    expect(host.bitmaps[1]!.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('an upload that does not report back still releases the decoded page, and a failed one is no atlas', async () => {
+    const host = stubHost(['missing.png']);
+    const silent = (await loadSpriteMaterialAtlas('/hd-cache/X/a.png', () => undefined))!;
+    expect(host.bitmaps[0]!.close).toHaveBeenCalledTimes(1);
+    expect(silent.texture.image).toEqual({ width: 8, height: 4 });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await loadSpriteMaterialAtlas('/hd-cache/X/missing.png')).toBeNull();
+    const failing = await loadSpriteMaterialAtlas('/hd-cache/X/b.png', () => {
+      throw new Error('device lost');
+    });
+    expect(failing).toBeNull();
+    // The page that could not be uploaded does not leak its bitmap.
+    expect(host.bitmaps[1]!.close).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
   });
 });

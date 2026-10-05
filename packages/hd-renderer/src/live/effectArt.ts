@@ -1,3 +1,4 @@
+import type { PageUpload } from '../pageUpload';
 import { LinearFilter, LinearMipmapLinearFilter, SRGBColorSpace, Texture } from 'three/webgpu';
 import type {
   EffectAnim,
@@ -46,6 +47,7 @@ export class EffectArt {
   private readonly pages = new Map<number, EffectPage | 'loading' | { failedAt: number }>();
   private hdLibrary: EffectHdLibrary | null = null;
   private hdLoading: Promise<void> | null = null;
+  private hdIndexLoading = false;
   private readonly hdPages = new Map<number, EffectPage | 'loading' | { failedAt: number }>();
   private readonly hdPinned = new Set<number>();
   private settledRevision = 0;
@@ -57,7 +59,7 @@ export class EffectArt {
   /** Anim ids without art, for diagnostics. */
   readonly missing = new Set<string>();
   /** Uploads a freshly decoded page straight to the GPU (the renderer's initTexture); see loadIndexedPage. */
-  uploadPage: ((texture: Texture) => void) | null = null;
+  uploadPage: PageUpload | null = null;
 
   constructor(
     /** Directory holding effects.json (…/_library/common/effects). */
@@ -98,8 +100,17 @@ export class EffectArt {
       });
   }
 
+  /** The index, HD index, pages and voxel models that were asked for and are still being fetched or decoded. */
+  get loading(): number {
+    let count = (this.state === 'loading' ? 1 : 0) + (this.hdIndexLoading ? 1 : 0);
+    for (const entries of [this.pages, this.hdPages, this.voxels])
+      for (const entry of entries.values()) if (entry === 'loading') count++;
+    return count;
+  }
+
   /** Fetch the optional HD index once; absence is informational and never prevents native effect art from loading. */
   loadHd(): Promise<void> {
+    if (!this.hdLoading) this.hdIndexLoading = true;
     return (this.hdLoading ??= fetch(`${this.hdBase}/effects-hd.json`)
       .then((r) => (r.ok ? (r.json() as Promise<EffectHdLibrary>) : Promise.reject(new Error(r.statusText))))
       .then((library) => {
@@ -110,6 +121,7 @@ export class EffectArt {
         console.info('[HD] no HD effect flipbook sidecar; effects keep their native art');
       })
       .finally(() => {
+        this.hdIndexLoading = false;
         this.settledRevision++;
       }));
   }
@@ -358,7 +370,7 @@ export class EffectArt {
  * Decode straight-alpha sRGB art without conversion. The texture owns its bitmap until upload (or disposal before
  * first use); eager renderer uploads release it immediately, just like loadIndexedPage, without a CPU pixel copy.
  */
-async function loadHdPage(url: string, upload?: (texture: Texture) => void): Promise<Texture> {
+async function loadHdPage(url: string, upload?: PageUpload): Promise<Texture> {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`${url}: ${response.status}`);
   const bitmap = await createImageBitmap(await response.blob(), {
@@ -384,7 +396,7 @@ async function loadHdPage(url: string, upload?: (texture: Texture) => void): Pro
   texture.needsUpdate = true;
   try {
     if (upload) {
-      upload(texture);
+      await upload(texture);
       // initTexture may already have called onUpdate synchronously.
       texture.onUpdate?.(texture);
     }

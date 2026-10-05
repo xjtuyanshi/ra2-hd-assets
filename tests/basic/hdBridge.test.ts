@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VmShell } from '../../src/adapter/vmShell';
 import type { GameRenderState } from '../../src/games/renderState';
-import { startHdBridge } from '../../src/ui/pages/game/hdBridge';
+import { startHdBridge, type HdBridgeTimeline } from '../../src/ui/pages/game/hdBridge';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
 import { hdSidebar } from '../helpers/hdSidebar';
 
@@ -21,6 +21,7 @@ interface BridgeHandle {
   toggle(): boolean;
   readonly ui: { enabled: boolean; readonly state: GameRenderState['sidebar']; toggle(): boolean };
   readonly live: unknown;
+  readonly timeline: HdBridgeTimeline;
   readonly passthrough: { flags: number; unsupported: boolean; keyed: boolean };
 }
 
@@ -30,22 +31,61 @@ const KEY = { rect: TACTICAL, rgb565: 0xf81f };
 
 let clock = 0;
 let frames: Array<() => void> = [];
+const stored = new Map<string, string>();
 
+/**
+ * A view that draws every snapshot completely at once (`settledFrames` is what the bridge waits for before it shows
+ * the view; tests of that wait set it themselves).
+ */
 function fakeView() {
-  return { push: vi.fn(), render: vi.fn(), resizePixels: vi.fn(), dispose: vi.fn() };
+  return {
+    push: vi.fn(),
+    render: vi.fn(),
+    resizePixels: vi.fn(),
+    dispose: vi.fn(),
+    settledFrames: 3,
+    hd: { topEffectsEnabled: false, enableTopEffects: vi.fn(), settings: {}, applySettings: vi.fn() },
+    outOfSight: false,
+    newArtPerFrame: 1,
+    hiddenUploadPixels: 0,
+    theater: 'urban',
+    warm: vi.fn(),
+    warmTypes: vi.fn((): unknown[] => []),
+    loadingArt: vi.fn(() => 0),
+  };
 }
 
 function fakeLookView() {
-  return { ...fakeView(), hd: { settings: {}, applySettings: vi.fn() } };
+  return fakeView();
 }
 
+/** The game's loading screen: the scenario is known and has a view, but no object exists yet. */
+function loadingScreen(fileName = 'XMP29U2.MAP'): GameRenderState {
+  return { ...battle(0, fileName), objects: [] };
+}
+
+/** A running match: the scenario has loaded, so there is at least one object (see `loadingScreen`). */
 function battle(frame: number, fileName = 'XMP29U2.MAP'): GameRenderState {
   return {
     frame,
     view: { x: 100, y: 200 },
     map: { fileName },
     houses: [],
-    objects: [],
+    objects: [
+      {
+        id: 1,
+        uid: 1,
+        kind: 'vehicle',
+        type: 'HTNK',
+        owner: 0,
+        x: 0,
+        y: 0,
+        z: 0,
+        facingRaw: 0,
+        health: 1,
+        isSelected: false,
+      },
+    ],
     shroud: null,
     overlays: null,
     smudges: null,
@@ -60,6 +100,11 @@ function setup(search = '?hd=1', backend: VmFrameRenderer['backend'] = 'WebGL2')
   const win: { location: { search: string }; __hdBridge?: BridgeHandle } = { location: { search } };
   const createElement = vi.fn(() => hdCanvas);
   vi.stubGlobal('window', win);
+  // What earlier matches showed (hdWarmStore.ts); empty unless a test fills it before the bridge reads it.
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => void stored.set(key, value),
+  });
   vi.stubGlobal('document', { createElement });
   vi.stubGlobal('requestAnimationFrame', (callback: () => void) => frames.push(callback));
   vi.stubGlobal('cancelAnimationFrame', vi.fn());
@@ -73,8 +118,9 @@ function setup(search = '?hd=1', backend: VmFrameRenderer['backend'] = 'WebGL2')
     offsetLeft: 0,
     offsetTop: 0,
   };
-  const renderer = { backend, setTransparentKey: vi.fn(), setTransparentRect: vi.fn() };
+  const renderer = { backend, setTransparentKey: vi.fn(), setTransparentRect: vi.fn(), prepareTransparentKey: vi.fn() };
   let state: GameRenderState | null = null;
+  let frameSize = { width: 800, height: 600 };
   const vm = {
     getRenderState: vi.fn(async (): Promise<GameRenderState | null> => state),
     setTacticalPassthrough: vi.fn(async (_flags: number) => true),
@@ -85,7 +131,7 @@ function setup(search = '?hd=1', backend: VmFrameRenderer['backend'] = 'WebGL2')
     screen: screen as unknown as HTMLCanvasElement,
     frameRenderer: renderer as unknown as VmFrameRenderer,
     invalidate: vi.fn(),
-    frameSize: () => ({ width: 800, height: 600 }),
+    frameSize: () => frameSize,
     publishStatus: status,
   });
   return {
@@ -99,6 +145,10 @@ function setup(search = '?hd=1', backend: VmFrameRenderer['backend'] = 'WebGL2')
     bridge: () => win.__hdBridge,
     setState(next: GameRenderState | null) {
       state = next;
+    },
+    /** The guest switched video mode (the game canvas keeps its 800x600 CSS box in this harness). */
+    setFrameSize(width: number, height: number) {
+      frameSize = { width, height };
     },
     polls: () => vm.getRenderState.mock.calls.length,
   };
@@ -124,13 +174,15 @@ async function goLive(harness: ReturnType<typeof setup>, view = fakeView()) {
   await advance(16);
   await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
   harness.setState(battle(2));
-  await advance(16);
+  // One frame pushes the match snapshot, the next finds the view complete and shows it.
+  await advance(16, 2);
   return view;
 }
 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  stored.clear();
   liveView.create.mockReset();
   hdRenderer.applyLookPreset.mockReset();
   hdUi.start.mockReset();
@@ -690,7 +742,8 @@ describe('HD 桥状态机', () => {
     expect(view.push).toHaveBeenCalledTimes(1);
     expect(harness.renderer.setTransparentKey).toHaveBeenCalledTimes(keyCalls);
     expect(harness.vm.setTacticalPassthrough).toHaveBeenCalledTimes(passthroughCalls + 1);
-    expect(harness.polls()).toBe(3);
+    // goLive: the load, the match snapshot, the frame that shows the view; then the poll left in flight.
+    expect(harness.polls()).toBe(4);
     harness.stop();
     expect(harness.vm.setTacticalPassthrough).toHaveBeenCalledTimes(passthroughCalls + 1);
   });
@@ -950,7 +1003,8 @@ describe('HD bridge fallback notice', () => {
     finish(view);
     await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
     harness.setState(battle(3, '2PEAKS.MAP'));
-    await advance(1000);
+    // One frame pushes the snapshot, the next finds the view complete and shows it.
+    await advance(1000, 2);
     expect(view.dispose).not.toHaveBeenCalled();
     expect(view.push).toHaveBeenCalled();
     expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
@@ -1005,5 +1059,303 @@ describe('HD interface bridge wiring', () => {
     late.stop();
     await settle();
     expect(hdUi.start).not.toHaveBeenCalled();
+  });
+});
+
+describe('HD bridge match start', () => {
+  const WARM_MAP = 'ra2-hd-warm:1:map:xmp29u2';
+  const WARM_THEATER = 'ra2-hd-warm:1:theater:urban';
+
+  /** Load the view behind the loading screen (no object yet). */
+  async function loadBehindLoadingScreen(harness: ReturnType<typeof setup>, view = fakeView()) {
+    liveView.create.mockResolvedValue(view);
+    harness.setState(loadingScreen());
+    await advance(16);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
+    await advance(16, 2);
+    return view;
+  }
+
+  it('keeps the original picture until the view has drawn the running match completely', async () => {
+    const harness = setup();
+    const view = fakeView();
+    view.settledFrames = 0;
+    liveView.create.mockResolvedValue(view);
+    harness.setState(battle(1));
+    await advance(16);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
+    harness.setState(battle(2));
+    await advance(16, 5);
+    // Art is still arriving: no transparent pixels, no passthrough, the canvas stays away, yet frames are drawn.
+    expect(view.push).toHaveBeenCalled();
+    expect(view.outOfSight).toBe(true);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
+    expect(harness.renderer.setTransparentKey).not.toHaveBeenCalledWith(KEY);
+    expect(view.render.mock.calls.length).toBeGreaterThanOrEqual(4);
+    // Laid out as it will be shown, so the frames drawn out of sight are the real ones.
+    expect(view.resizePixels).toHaveBeenLastCalledWith(632, 568, 632, 568);
+    // Two complete frames are not enough.
+    view.settledFrames = 2;
+    await advance(16, 2);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    view.settledFrames = 3;
+    await advance(16);
+    expect(view.outOfSight).toBe(false);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(7);
+    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
+    expect(harness.bridge()!.timeline).toMatchObject({ map: 'xmp29u2', revealReason: 'settled', revealLoading: 0 });
+    // Shown for the match: art that loads later no longer hides the view.
+    view.settledFrames = 0;
+    harness.setState(battle(3));
+    await advance(16, 3);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenCalledTimes(1);
+    harness.stop();
+  });
+
+  it('prepares behind the loading screen and shows the view only once the match runs', async () => {
+    const harness = setup();
+    const view = await loadBehindLoadingScreen(harness);
+    // Complete (there is nothing to draw yet), but the match has not started.
+    expect(view.outOfSight).toBe(true);
+    // Nothing moves behind the loading screen: no pacing of builds and uploads.
+    expect([view.newArtPerFrame, view.hiddenUploadPixels]).toEqual([Infinity, Infinity]);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
+    expect(view.warm).not.toHaveBeenCalled();
+    expect(view.push).toHaveBeenCalled();
+    // Out of sight and complete, the view is drawn now and then, not sixty times a second.
+    const drawn = view.render.mock.calls.length;
+    await advance(16, 24);
+    expect(view.render.mock.calls.length - drawn).toBe(2);
+    // The starting units exist, the logic frame is still 0: the game has not drawn the battlefield yet.
+    harness.setState(battle(0));
+    await advance(16, 3);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    // From here on the game's own picture may be on screen at any moment: one kind and 8 M pixels per frame.
+    expect([view.newArtPerFrame, view.hiddenUploadPixels]).toEqual([1, 8 << 20]);
+    expect(harness.bridge()!.timeline.matchAt).toBeNull();
+    harness.setState(battle(1));
+    await advance(16, 2);
+    expect(view.outOfSight).toBe(false);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
+    harness.stop();
+  });
+
+  it('hands the view what the last match on the map showed, and keeps that list until the match has objects', async () => {
+    stored.set(
+      WARM_MAP,
+      JSON.stringify([
+        ['vehicle', 'HTNK', '', 21, 0],
+        ['building', 'CAOILD', '', 5, 1],
+      ]),
+    );
+    stored.set(WARM_THEATER, JSON.stringify([['vehicle', 'MTNK', '', 17, 0]]));
+    const harness = setup();
+    const view = await loadBehindLoadingScreen(harness);
+    expect(view.warm).toHaveBeenCalledTimes(1);
+    expect(view.warm).toHaveBeenCalledWith([
+      { kind: 'vehicle', type: 'HTNK', colorIndex: 21 },
+      { kind: 'building', type: 'CAOILD', colorIndex: 5, civilian: true },
+    ]);
+    // The empty snapshots of the loading screen must not replace the list being prepared.
+    expect(view.push).not.toHaveBeenCalled();
+    await advance(16, 6);
+    expect(view.warm).toHaveBeenCalledTimes(1);
+    expect(view.push).not.toHaveBeenCalled();
+    expect(harness.bridge()!.timeline).toMatchObject({ warmTypes: 2, revealedAt: null });
+    expect(harness.bridge()!.timeline.warmSettledAt).not.toBeNull();
+    harness.setState(battle(1));
+    await advance(16, 2);
+    expect(view.push).toHaveBeenCalledTimes(1);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    harness.stop();
+  });
+
+  it('falls back to the list of the theater on a map that was not played yet', async () => {
+    stored.set(WARM_THEATER, JSON.stringify([['vehicle', 'MTNK', '', 17, 0]]));
+    const harness = setup();
+    const view = await loadBehindLoadingScreen(harness);
+    expect(view.warm).toHaveBeenCalledWith([{ kind: 'vehicle', type: 'MTNK', colorIndex: 17 }]);
+    harness.stop();
+  });
+
+  it('remembers the kinds of object of the opening for the next match', async () => {
+    const harness = setup();
+    const view = fakeView();
+    view.warmTypes.mockReturnValue([
+      { kind: 'vehicle', type: 'SMCV', colorIndex: 21 },
+      { kind: 'building', type: 'CAOILD', colorIndex: 5, civilian: true },
+    ]);
+    await goLive(harness, view);
+    expect(JSON.parse(stored.get(WARM_MAP)!)).toEqual([
+      ['vehicle', 'SMCV', '', 21, 0],
+      ['building', 'CAOILD', '', 5, 1],
+    ]);
+    // The theater's list, and the one for theaters not played yet, are for other maps: players' objects only.
+    expect(JSON.parse(stored.get(WARM_THEATER)!)).toEqual([['vehicle', 'SMCV', '', 21, 0]]);
+    expect(JSON.parse(stored.get('ra2-hd-warm:1:players')!)).toEqual([['vehicle', 'SMCV', '', 21, 0]]);
+    // The MCV deployed: what was seen stays, the new kind is added.
+    view.warmTypes.mockReturnValue([{ kind: 'building', type: 'NACNST', colorIndex: 21 }]);
+    harness.setState(battle(30));
+    await advance(16, 2);
+    expect(JSON.parse(stored.get(WARM_MAP)!)).toEqual([
+      ['vehicle', 'SMCV', '', 21, 0],
+      ['building', 'CAOILD', '', 5, 1],
+      ['building', 'NACNST', '', 21, 0],
+    ]);
+    // After the opening minutes nothing more is collected.
+    const reads = view.warmTypes.mock.calls.length;
+    harness.setState(battle(6001));
+    await advance(16, 2);
+    harness.setState(battle(6100));
+    await advance(16, 2);
+    expect(view.warmTypes).toHaveBeenCalledTimes(reads);
+    harness.stop();
+  });
+
+  it('prepares behind the loading screen at the layout the view was last shown with', async () => {
+    const LAYOUT = 'ra2-hd-warm:1:layout';
+    stored.set(LAYOUT, JSON.stringify([3120, 2096, 1560, 1048]));
+    const harness = setup();
+    const view = await loadBehindLoadingScreen(harness);
+    // The loading screen is 800x600; a view laid out for it would be rebuilt when the match's video mode arrives.
+    expect(view.resizePixels).toHaveBeenCalledTimes(1);
+    expect(view.resizePixels).toHaveBeenLastCalledWith(3120, 2096, 1560, 1048);
+    // The game switches to the match's mode, at another size than last time: the view follows what is real.
+    harness.setFrameSize(1024, 768);
+    await advance(16, 13);
+    expect(view.resizePixels).toHaveBeenCalledTimes(2);
+    expect(view.resizePixels).toHaveBeenLastCalledWith(669, 575, 856, 736);
+    harness.setState(battle(1));
+    await advance(16, 2);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    // The first frame drawn in sight records the layout: it is the one to prepare for next time.
+    await advance(16);
+    expect(view.resizePixels).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(stored.get(LAYOUT)!)).toEqual([669, 575, 856, 736]);
+    harness.stop();
+  });
+
+  it('prepares at the current frame size when no layout is remembered, and remembers the one it is shown with', async () => {
+    const harness = setup();
+    const view = await loadBehindLoadingScreen(harness);
+    expect(view.resizePixels).toHaveBeenLastCalledWith(632, 568, 632, 568);
+    expect(stored.has('ra2-hd-warm:1:layout')).toBe(false);
+    harness.setState(battle(1));
+    await advance(16, 3);
+    expect(JSON.parse(stored.get('ra2-hd-warm:1:layout')!)).toEqual([632, 568, 632, 568]);
+    harness.stop();
+  });
+
+  it('gives a view the top-layer pass before it is shown once a match has shown top-layer art', async () => {
+    const TOP = 'ra2-hd-warm:1:top-effects';
+    const harness = setup();
+    const view = await goLive(harness);
+    expect(view.hd.enableTopEffects).not.toHaveBeenCalled();
+    expect(stored.has(TOP)).toBe(false);
+    // The first top-layer art of the match put the pass into the view's post graph.
+    view.hd.topEffectsEnabled = true;
+    harness.setState(battle(3));
+    await advance(16, 2);
+    expect(stored.get(TOP)).toBe('1');
+    harness.stop();
+    // The next page load knows: its view has the pass from the start.
+    const next = setup();
+    const later = fakeView();
+    await goLive(next, later);
+    expect(later.hd.enableTopEffects).toHaveBeenCalledOnce();
+    next.stop();
+  });
+
+  it('shows the view after the deadline when its art never settles', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const harness = setup();
+    const view = fakeView();
+    view.settledFrames = 0;
+    view.loadingArt.mockReturnValue(2);
+    liveView.create.mockResolvedValue(view);
+    harness.setState(battle(1));
+    await advance(16);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
+    harness.setState(battle(2));
+    await advance(16, 2);
+    await advance(19_000);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    await advance(1_100);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect(harness.bridge()!.timeline).toMatchObject({ revealReason: 'deadline', revealLoading: 2 });
+    expect(warn).toHaveBeenCalledOnce();
+    harness.stop();
+  });
+
+  it('starts out of sight again when another match begins on the same map', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    harness.setState(battle(500));
+    await advance(16, 2);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    // The logic frame starts over: a new match, whose first snapshots the view has to draw completely first.
+    view.settledFrames = 0;
+    harness.setState(battle(1));
+    await advance(16, 2);
+    expect(view.outOfSight).toBe(true);
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
+    await advance(600);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    view.settledFrames = 3;
+    harness.setState(battle(2));
+    await advance(16, 2);
+    expect(view.outOfSight).toBe(false);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect(liveView.create).toHaveBeenCalledTimes(1);
+    harness.stop();
+  });
+
+  it('keeps the view of a match that had no snapshot for a while (an in-game menu), without waiting again', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    harness.setState(battle(300));
+    await advance(16, 2);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    // The options menu owns the screen: the VM reports no battle state, the original picture is shown.
+    harness.setState(null);
+    await advance(16, 2);
+    await advance(600);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(view.outOfSight).toBe(false);
+    // Back in the match, a few frames on. The view is not complete by its own count (art may be arriving), yet it
+    // was shown for this match: it returns with the first snapshot.
+    view.settledFrames = 0;
+    harness.setState(battle(301));
+    await advance(1100);
+    await advance(16);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect(view.outOfSight).toBe(false);
+    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
+    harness.stop();
+  });
+
+  it('does not draw out of sight while the HD view is switched off', async () => {
+    const harness = setup();
+    const view = fakeView();
+    view.settledFrames = 0;
+    liveView.create.mockResolvedValue(view);
+    harness.setState(battle(1));
+    await advance(16);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
+    expect(harness.bridge()!.toggle()).toBe(false);
+    const drawn = view.render.mock.calls.length;
+    await advance(1100, 3);
+    expect(view.render).toHaveBeenCalledTimes(drawn);
+    expect(harness.bridge()!.toggle()).toBe(true);
+    view.settledFrames = 3;
+    harness.setState(battle(2));
+    await advance(1100, 3);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    harness.stop();
   });
 });

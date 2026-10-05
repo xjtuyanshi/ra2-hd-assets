@@ -1,3 +1,4 @@
+import type { PageUpload } from '../pageUpload';
 import { LinearFilter, LinearMipmapLinearFilter, NoColorSpace, Texture } from 'three/webgpu';
 import { fetchOptionalJson } from './cache';
 import type { SpriteMaterialAtlas } from './spriteLook';
@@ -71,8 +72,14 @@ export async function loadSpriteMaterials(
   return loadSpriteMaterialAtlas(`${root}/${sidecar.file}`);
 }
 
-/** Decode material data identically for map atlases and lazily loaded library pages. */
-export async function loadSpriteMaterialAtlas(url: string): Promise<SpriteMaterialAtlas | null> {
+/**
+ * Decode material data identically for map atlases and lazily loaded library pages. Like loadHdTexture (cache.ts),
+ * the texture owns the decoded bitmap only until its upload (or disposal before first use) and keeps the dimensions
+ * afterwards: a page is immutable, and a decoded 8192 x 8096 page is 253 MiB that used to stay in memory for as long
+ * as its texture lived. `upload` (the view's PageUploader) uploads before the page is handed out, outside the frame
+ * that first draws it.
+ */
+export async function loadSpriteMaterialAtlas(url: string, upload?: PageUpload): Promise<SpriteMaterialAtlas | null> {
   try {
     const response = await fetch(url);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -80,6 +87,7 @@ export async function loadSpriteMaterialAtlas(url: string): Promise<SpriteMateri
       colorSpaceConversion: 'none',
       premultiplyAlpha: 'none',
     });
+    const { width, height } = bitmap;
     const texture = new Texture(bitmap);
     texture.flipY = false;
     texture.colorSpace = NoColorSpace;
@@ -87,8 +95,26 @@ export async function loadSpriteMaterialAtlas(url: string): Promise<SpriteMateri
     texture.magFilter = LinearFilter;
     texture.minFilter = LinearMipmapLinearFilter;
     texture.generateMipmaps = true;
+    const release = () => {
+      bitmap.close();
+      texture.image = { width, height } as unknown as ImageBitmap;
+      texture.onUpdate = null;
+      texture.removeEventListener('dispose', release);
+    };
+    texture.addEventListener('dispose', release);
+    // The renderer calls onUpdate after the upload and mipmap generation of a texture it draws or initialises.
+    texture.onUpdate = release;
     texture.needsUpdate = true;
-    texture.addEventListener('dispose', () => bitmap.close());
+    if (upload) {
+      try {
+        await upload(texture);
+      } catch (error) {
+        texture.dispose();
+        throw error;
+      }
+      // A host whose upload does not report back (onUpdate) still must not keep the decoded page.
+      texture.onUpdate?.(texture);
+    }
     return { texture };
   } catch (error) {
     console.warn(`${url}: failed to load`, error);
