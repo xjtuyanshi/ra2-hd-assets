@@ -852,6 +852,38 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(unloading.objects[0]!.imageType).toBe('HORV');
   });
 
+  it('publishes the gather sparks as an underlay and follows the harvesting flag inside one logic frame', () => {
+    const memory = keyMemory();
+    const h = sources(memory);
+    const state = yrState(100);
+    state.objects[0]!.type = 'HARV';
+    h.readState.mockReturnValue(state);
+    const unit = memory.technos[0]!;
+    memory.u32(unit, V.unit);
+    const first = h.read()!;
+    expect(first.objects[0]).not.toHaveProperty('underlay');
+    expect(h.read()).toBe(first);
+    // The harvesting flag (unit +0x6D2) changes the key before the frame counter moves.
+    memory.bytes[unit + 0x6d2] = 1;
+    const gather = { art: 'OREGATH', frame: 47, x: 1000, y: 2030, z: 0 };
+    state.objects[0]!.gather = gather;
+    const gathering = h.read()!;
+    expect(gathering).not.toBe(first);
+    expect(gathering.frame).toBe(first.frame);
+    expect(gathering.objects[0]!.underlay).toEqual(gather);
+    expect(gathering.objects[0]!.underlay).not.toBe(gather);
+    expect(gathering.objects[0]).not.toHaveProperty('gather');
+    expect(gathering.objects[1]).not.toHaveProperty('underlay');
+    expect(structuredClone(gathering)).toEqual(gathering);
+    expect(h.read()).toBe(gathering);
+    memory.bytes[unit + 0x6d2] = 0;
+    delete state.objects[0]!.gather;
+    const stopped = h.read()!;
+    expect(stopped).not.toBe(gathering);
+    expect(stopped.objects[0]).not.toHaveProperty('underlay');
+    expect(gathering.objects[0]!.underlay).toEqual(gather);
+  });
+
   it('publishes body-only translucency and whole-object hiding without changing older snapshots', () => {
     const memory = keyMemory();
     const h = sources(memory);
@@ -1196,6 +1228,20 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(next).not.toBe(first);
     expect(next.objects[0]!.renderOrder).toEqual({ layer: 2, index: 0, ySort: 768 });
     expect(first.objects[0]!.renderOrder).toEqual({ layer: 2, index: 1, ySort: 768 });
+  });
+
+  it('publishes the native body tilt of a vehicle as its own copy and omits it when the reader has none', () => {
+    const memory = keyMemory();
+    const { read, readState } = sources(memory);
+    const state = yrState(100);
+    const tilt = { x: 0.4896, y: 0, z: 0.872 };
+    state.objects[0]!.tilt = tilt;
+    readState.mockReturnValue(state);
+    const first = read()!;
+    expect(first.objects[0]!.tilt).toEqual(tilt);
+    expect(first.objects[0]!.tilt).not.toBe(tilt);
+    expect(first.objects[1]).not.toHaveProperty('tilt');
+    expect(structuredClone(first)).toEqual(first);
   });
 
   it('reads effects without the fire scan and reuses the shroud scratch without handing it out', () => {

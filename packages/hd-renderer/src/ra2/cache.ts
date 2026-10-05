@@ -216,28 +216,110 @@ export interface HdAtlas {
   paintSaturation?: number;
 }
 
-/** Load an HD sprite atlas pair: colour art (sRGB, filtered) and the house-paint mask (linear data). */
-export async function loadHdAtlas(base: string, ref: HdAtlasRef): Promise<HdAtlas> {
-  const loader = new TextureLoader();
-  const [color, remap] = await Promise.all([
-    loader.loadAsync(`${base}/${ref.file}`),
-    loader.loadAsync(`${base}/${ref.remap}`),
-  ]);
-  for (const texture of [color, remap]) {
-    texture.flipY = false;
-    texture.magFilter = LinearFilter;
-    texture.minFilter = LinearMipmapLinearFilter;
-    texture.generateMipmaps = true;
+/**
+ * One page of an HD sprite atlas as a filtered, mipmapped texture, decoded off the main thread.
+ *
+ * An image element (TextureLoader) is decoded lazily: the first upload decodes the whole PNG on the main thread, inside
+ * the frame that first draws the page. HD pages are up to 8192 x 8192 and arrive one after another while a match starts
+ * (every type on screen brings its page and mask). Measured in one session on the same two maps (a two- and a
+ * four-player skirmish start): each image-element upload of such a page held the main thread for about 0.4 s, 23 to 25
+ * of them (about 4 s) in the first minute; a bitmap decoded by createImageBitmap uploads in 0.02 to 0.09 s, 0.5 to 0.9 s
+ * in all. The picture is the same: opaque building texels differ less between the two loaders than between two matches
+ * with the old one. The start-up stutter that remains is not image upload: the same profile's other entries were
+ * voxel smoothing meshes and shader builds.
+ *
+ * Straight alpha, no colour conversion: the texels are the PNG's own values (the pages carry no colour profile). The
+ * texture owns the bitmap until its first upload (or disposal before first use) and keeps only the dimensions
+ * afterwards, like loadIndexedPage: a page is immutable, and a decoded 8192 x 4096 page is 128 MiB. `upload` (the
+ * renderer's initTexture) uploads at once, so the bitmap never outlives the load.
+ */
+export async function loadHdTexture(
+  url: string,
+  colorSpace: Texture['colorSpace'],
+  upload?: (texture: Texture) => void,
+): Promise<Texture> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+  const bitmap = await createImageBitmap(await response.blob(), {
+    colorSpaceConversion: 'none',
+    premultiplyAlpha: 'none',
+  });
+  const { width, height } = bitmap;
+  const texture = new Texture(bitmap as unknown as HTMLImageElement);
+  texture.colorSpace = colorSpace;
+  texture.flipY = false;
+  texture.premultiplyAlpha = false;
+  texture.magFilter = LinearFilter;
+  texture.minFilter = LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  const release = () => {
+    bitmap.close();
+    texture.image = { width, height } as unknown as HTMLImageElement;
+    texture.onUpdate = null;
+    texture.removeEventListener('dispose', release);
+  };
+  texture.addEventListener('dispose', release);
+  // The renderer calls onUpdate after the upload and mipmap generation of a texture it draws or initialises.
+  texture.onUpdate = release;
+  texture.needsUpdate = true;
+  if (upload) {
+    try {
+      upload(texture);
+    } catch (error) {
+      texture.dispose();
+      throw error;
+    }
+    // A host whose upload does not report back (onUpdate) still must not keep the decoded page.
+    texture.onUpdate?.(texture);
   }
-  color.colorSpace = SRGBColorSpace;
-  remap.colorSpace = NoColorSpace;
+  return texture;
+}
+
+/**
+ * Load an HD sprite atlas pair: colour art (sRGB, filtered) and the house-paint mask (linear data). See loadHdTexture
+ * for decoding and `upload`.
+ */
+export async function loadHdAtlas(
+  base: string,
+  ref: HdAtlasRef,
+  upload?: (texture: Texture) => void,
+): Promise<HdAtlas> {
+  const pages = await Promise.allSettled([
+    loadHdTexture(`${base}/${ref.file}`, SRGBColorSpace, upload),
+    loadHdTexture(`${base}/${ref.remap}`, NoColorSpace, upload),
+  ]);
+  const failed = pages.find((page) => page.status === 'rejected');
+  if (failed) {
+    // Half a pair is no atlas: free the page that did load (its GPU texture or its bitmap).
+    for (const page of pages) if (page.status === 'fulfilled') page.value.dispose();
+    throw failed.reason;
+  }
+  const [color, remap] = pages.map((page) => (page as PromiseFulfilledResult<Texture>).value) as [Texture, Texture];
   return { color, remap, paintSaturation: ref.paintSaturation ?? 1 };
+}
+
+/**
+ * The map has no cache at all: its manifest.json is not there (404, or the dev server's HTML fallback). Callers tell
+ * this apart from a cache that exists but fails to load, e.g. to say that the map was never prepared.
+ */
+export class MapCacheMissingError extends Error {
+  override readonly name = 'MapCacheMissingError';
+  constructor(readonly base: string) {
+    super(`${base}: no HD cache for this map (manifest.json not found)`);
+  }
 }
 
 export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}): Promise<Ra2Cache> {
   const nodes = options.nodes ?? new AtmosphereNodes();
   const url = (file: string) => `${base.replace(/\/$/, '')}/${file}`;
-  const manifestBytes = await (await fetch(url('manifest.json'))).arrayBuffer();
+  const manifestResponse = await fetch(url('manifest.json'));
+  if (
+    manifestResponse.status === 404 ||
+    (manifestResponse.ok && (manifestResponse.headers.get('content-type') ?? '').includes('text/html'))
+  )
+    throw new MapCacheMissingError(base);
+  if (!manifestResponse.ok) throw new Error(`${url('manifest.json')}: HTTP ${manifestResponse.status}`);
+  const manifestBytes = await manifestResponse.arrayBuffer();
   const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as HdCacheManifest;
   const tileBytes = decodeBase64(manifest.cells.tile);
   const tile = new Uint16Array(tileBytes.buffer, tileBytes.byteOffset, tileBytes.byteLength / 2);

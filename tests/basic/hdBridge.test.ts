@@ -32,7 +32,7 @@ let clock = 0;
 let frames: Array<() => void> = [];
 
 function fakeView() {
-  return { push: vi.fn(), render: vi.fn(), resize: vi.fn(), dispose: vi.fn() };
+  return { push: vi.fn(), render: vi.fn(), resizePixels: vi.fn(), dispose: vi.fn() };
 }
 
 function fakeLookView() {
@@ -79,15 +79,18 @@ function setup(search = '?hd=1', backend: VmFrameRenderer['backend'] = 'WebGL2')
     getRenderState: vi.fn(async (): Promise<GameRenderState | null> => state),
     setTacticalPassthrough: vi.fn(async (_flags: number) => true),
   };
+  const status = vi.fn((_text: string | null) => undefined);
   const stop = startHdBridge({
     vm: vm as unknown as VmShell,
     screen: screen as unknown as HTMLCanvasElement,
     frameRenderer: renderer as unknown as VmFrameRenderer,
     invalidate: vi.fn(),
     frameSize: () => ({ width: 800, height: 600 }),
+    publishStatus: status,
   });
   return {
     stop,
+    status,
     vm,
     renderer,
     screen,
@@ -131,6 +134,80 @@ afterEach(() => {
   liveView.create.mockReset();
   hdRenderer.applyLookPreset.mockReset();
   hdUi.start.mockReset();
+});
+
+describe('HD bridge control', () => {
+  it('returns a stop function that can also switch between the HD view and the original picture', async () => {
+    const harness = setup();
+    await goLive(harness);
+    await advance(16);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect(harness.stop.toggle()).toBe(false);
+    // Frames the game already drew may still carry the key colour: the HD canvas goes after the passthrough trail.
+    await advance(600);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(null);
+    expect(harness.bridge()!.toggle()).toBe(true);
+    await advance(16);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    harness.stop();
+    // A stopped bridge no longer switches anything.
+    expect(harness.stop.toggle()).toBe(true);
+    expect(harness.hdCanvas.remove).toHaveBeenCalledOnce();
+  });
+
+  it('has nothing to switch without the WebGL2 frame renderer', () => {
+    const harness = setup('?hd=1', 'Canvas 2D');
+    expect(harness.stop.toggle()).toBe(false);
+    harness.stop();
+  });
+});
+
+describe('HD bridge canvas layout', () => {
+  it('covers the tactical rectangle on whole device pixels with one buffer pixel per device pixel', async () => {
+    const harness = setup();
+    // A 1728x1080 game fitted at two device pixels per game pixel on a DPR-2 display, 20.25 CSS px from the top.
+    (window as unknown as { devicePixelRatio: number }).devicePixelRatio = 2;
+    Object.assign(harness.screen, {
+      offsetParent: { getBoundingClientRect: () => ({ left: 0, top: 0 }), clientLeft: 0, clientTop: 0 },
+      getBoundingClientRect: () => ({ left: 0, top: 20.25, width: 800, height: 600 }),
+    });
+    const view = fakeView();
+    await goLive(harness, view);
+    await advance(16);
+    // 800x600 frame shown at 800x600 CSS px = 2 device px per game px; the tactical view is 632x568 game px.
+    expect(view.resizePixels).toHaveBeenLastCalledWith(1264, 1136, 632, 568);
+    // The top edge is rounded to a whole device pixel (40.5 -> 41 device px = 20.5 CSS px).
+    expect(harness.hdCanvas.style).toMatchObject({ left: '0px', top: '20.5px', width: '632px', height: '568px' });
+    harness.stop();
+  });
+
+  it('keeps a fractional fit on whole device pixels and renders a huge rectangle at the pixel budget', async () => {
+    const harness = setup();
+    (window as unknown as { devicePixelRatio: number }).devicePixelRatio = 2;
+    Object.assign(harness.screen, {
+      offsetParent: { getBoundingClientRect: () => ({ left: 10, top: 0 }), clientLeft: 0, clientTop: 0 },
+      // 800x600 frame at 2.903 device px per game px: nothing lands on whole pixels by itself.
+      getBoundingClientRect: () => ({ left: 28, top: 0, width: 1161.2, height: 870.9 }),
+    });
+    const view = fakeView();
+    await goLive(harness, view);
+    await advance(16);
+    const [bufferWidth, bufferHeight, viewWidth, viewHeight] = view.resizePixels.mock.lastCall as number[];
+    expect([viewWidth, viewHeight]).toEqual([632, 568]);
+    expect(Number.isInteger(bufferWidth) && Number.isInteger(bufferHeight)).toBe(true);
+    expect(harness.hdCanvas.style.width).toBe(`${bufferWidth! / 2}px`);
+    expect(harness.hdCanvas.style.height).toBe(`${bufferHeight! / 2}px`);
+    expect(harness.hdCanvas.style.left).toBe('18px');
+    // A 6400x4800 device-pixel rectangle is over the budget: the buffer shrinks, the CSS box does not.
+    Object.assign(harness.screen, { getBoundingClientRect: () => ({ left: 10, top: 0, width: 4050.7, height: 3038 }) });
+    await advance(16);
+    const [width, height] = view.resizePixels.mock.lastCall as number[];
+    expect(width! * height!).toBeLessThanOrEqual(10_000_000 * 1.001);
+    expect(width! / height!).toBeCloseTo(632 / 568, 2);
+    expect(Number.parseFloat(harness.hdCanvas.style.width!)).toBeCloseTo((4050.7 * 632) / 800, 0);
+    harness.stop();
+  });
 });
 
 describe('HD bridge look parameters', () => {
@@ -242,6 +319,7 @@ describe('HD 桥状态机', () => {
         isSelected: true,
         nativeHidden: true,
         translucent: 0.5,
+        underlay: { art: 'OREGATH', frame: 47, x: 100, y: 230, z: 0 },
       },
     ];
     harness.setState(state);
@@ -249,8 +327,10 @@ describe('HD 桥状态机', () => {
     expect(view.push.mock.calls.at(-1)![0].objects[0]).toMatchObject({
       nativeHidden: true,
       translucent: 0.5,
+      underlay: { art: 'OREGATH', frame: 47, x: 100, y: 230, z: 0 },
       isSelected: true,
     });
+    expect(view.push.mock.calls.at(-1)![0].objects[0].underlay).not.toBe(state.objects[0]!.underlay);
 
     state.objects[0]!.nativeHidden = false;
     state.objects[0]!.translucent = 0;
@@ -260,8 +340,10 @@ describe('HD 桥状态机', () => {
 
     delete state.objects[0]!.nativeHidden;
     delete state.objects[0]!.translucent;
+    delete state.objects[0]!.underlay;
     harness.setState({ ...state });
     await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('underlay');
     expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('nativeHidden');
     expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('translucent');
     harness.stop();
@@ -743,6 +825,137 @@ describe('HD 桥状态机', () => {
     harness.stop();
     expect(harness.vm.getRenderState).not.toHaveBeenCalled();
     expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
+  });
+});
+
+describe('HD bridge fallback notice', () => {
+  /** What the loader throws for a map directory that is not in the cache (see MapCacheMissingError). */
+  function missingCache(): Error {
+    return Object.assign(new Error('no HD cache'), { name: 'MapCacheMissingError' });
+  }
+
+  it('没有高清素材的地图：显示原版画面并在屏幕上说明，一局只说一次，到时收起', async () => {
+    const harness = setup();
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    liveView.create.mockRejectedValue(missingCache());
+    harness.setState(battle(1, 'NOCACHE.MAP'));
+    await advance(16);
+    await vi.waitFor(() => expect(harness.status).toHaveBeenCalledTimes(1));
+    const notice = harness.status.mock.calls[0]![0]!;
+    expect(notice).toContain('NOCACHE');
+    // The original picture: no transparent hole, no key, no passthrough, HD canvas hidden.
+    expect(harness.renderer.setTransparentRect).not.toHaveBeenCalledWith(expect.objectContaining({ width: 632 }));
+    expect(harness.renderer.setTransparentKey).not.toHaveBeenCalledWith(expect.objectContaining({ rect: TACTICAL }));
+    expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
+    expect(harness.hdCanvas.style.display).toBe('none');
+
+    // The game is still on its loading screen (the logic frame stands still): the notice waits for the battlefield.
+    await advance(1000, 20);
+    expect(harness.status).toHaveBeenCalledTimes(1);
+    // The notice is for the start of the match: once it runs, the notice goes away by itself after 12 seconds.
+    harness.setState(battle(2, 'NOCACHE.MAP'));
+    await advance(1000, 11);
+    expect(harness.status).toHaveBeenCalledTimes(1);
+    await advance(1000, 2);
+    expect(harness.status).toHaveBeenCalledTimes(2);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    // The failed retry (30 s after the first load) does not bring it back.
+    expect(liveView.create).toHaveBeenCalledTimes(2);
+    await advance(1000, 31);
+    expect(liveView.create).toHaveBeenCalledTimes(3);
+    await settle();
+    expect(harness.status).toHaveBeenCalledTimes(2);
+
+    // The logic frame moving on is the same match; starting over is the next match, which says it again.
+    harness.setState(battle(40, 'NOCACHE.MAP'));
+    await advance(1000);
+    expect(harness.status).toHaveBeenCalledTimes(2);
+    harness.setState(battle(1, 'NOCACHE.MAP'));
+    await advance(1000);
+    await vi.waitFor(() => expect(harness.status).toHaveBeenLastCalledWith(notice));
+    // Leaving the battle clears it at once.
+    harness.setState(null);
+    await advance(1000);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    harness.stop();
+  });
+
+  it('素材存在但加载失败时换一句话；稍后加载成功就收起并显示高清画面', async () => {
+    const harness = setup();
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    liveView.create.mockRejectedValueOnce(missingCache());
+    harness.setState(battle(1, 'NOCACHE.MAP'));
+    await advance(16);
+    await vi.waitFor(() => expect(harness.status).toHaveBeenCalledTimes(1));
+    const missing = harness.status.mock.calls[0]![0]!;
+    harness.setState(null);
+    await advance(1000);
+
+    liveView.create.mockRejectedValueOnce(new Error('WebGPU device lost'));
+    harness.setState(battle(1, 'BROKEN.MAP'));
+    await advance(1000);
+    await vi.waitFor(() => expect(harness.status).toHaveBeenCalledTimes(3));
+    const failedNotice = harness.status.mock.calls[2]![0]!;
+    expect(failedNotice).toContain('BROKEN');
+    expect(failedNotice.replace('BROKEN', 'NOCACHE')).not.toBe(missing);
+
+    // The retry in the same match loads the view: the HD picture shows and no notice is left or repeated.
+    const view = fakeView();
+    liveView.create.mockResolvedValue(view);
+    await advance(1000, 31);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    harness.setState(battle(2, 'BROKEN.MAP'));
+    await advance(16);
+    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
+    expect(harness.status).toHaveBeenCalledTimes(4);
+    harness.stop();
+    expect(harness.status).toHaveBeenCalledTimes(4);
+  });
+
+  it('切到原版画面（toggle）或停止时不留提示', async () => {
+    const harness = setup();
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    liveView.create.mockRejectedValue(missingCache());
+    harness.setState(battle(1, 'NOCACHE.MAP'));
+    await advance(16);
+    await vi.waitFor(() => expect(harness.status).toHaveBeenCalledTimes(1));
+    expect(harness.bridge()?.toggle()).toBe(false);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    expect(harness.bridge()?.toggle()).toBe(true);
+    expect(harness.status).toHaveBeenCalledTimes(2);
+
+    const next = setup();
+    liveView.create.mockRejectedValue(missingCache());
+    next.setState(battle(1, 'NOCACHE.MAP'));
+    await advance(16);
+    await vi.waitFor(() => expect(next.status).toHaveBeenCalledTimes(1));
+    next.stop();
+    expect(next.status).toHaveBeenLastCalledWith(null);
+  });
+
+  it('同一张地图的大小写变化（菜单里的 2Peaks、开局后的 2PEAKS.MAP）不是另一张地图：只加载一次', async () => {
+    const harness = setup();
+    const view = fakeView();
+    let finish!: (value: unknown) => void;
+    liveView.create.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    harness.setState(battle(1, '2Peaks'));
+    await advance(16);
+    await vi.waitFor(() => expect(liveView.create).toHaveBeenCalledTimes(1));
+    expect(liveView.create.mock.calls[0]![1]).toMatchObject({ mapBase: '/hd-cache/2Peaks' });
+    // The match starts while the view is still loading: same map, the load in flight is kept.
+    harness.setState(battle(2, '2PEAKS.MAP'));
+    await advance(1000, 2);
+    expect(liveView.create).toHaveBeenCalledTimes(1);
+    finish(view);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
+    harness.setState(battle(3, '2PEAKS.MAP'));
+    await advance(1000);
+    expect(view.dispose).not.toHaveBeenCalled();
+    expect(view.push).toHaveBeenCalled();
+    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
+    expect(harness.status).not.toHaveBeenCalledWith(expect.any(String));
+    harness.stop();
   });
 });
 

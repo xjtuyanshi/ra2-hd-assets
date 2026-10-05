@@ -16,6 +16,16 @@ let canvasFullscreenFitListener: (() => void) | null = null;
 const UI_SHORTCUT_KEYS = new Set(['`', 'F11', '?', '[', ']']);
 
 /**
+ * Reserve a key for a page shortcut whose feature exists only in some sessions (true), or give it back to the game
+ * (false). The page calls this when the feature starts and stops, so the key reaches the game whenever the page has no
+ * use for it.
+ */
+export function setSessionShortcutKey(key: string, reserved: boolean): void {
+  if (reserved) UI_SHORTCUT_KEYS.add(key);
+  else UI_SHORTCUT_KEYS.delete(key);
+}
+
+/**
  * Canvas CSS-box cache refreshed by installCanvasFit after every fit, including fullscreen changes.
  * Frequent mousemove reads no longer call getBoundingClientRect each time.
  */
@@ -61,10 +71,21 @@ export interface GameFrameSize {
 
 export type GameFrameSizeProvider = () => GameFrameSize;
 
+export interface CanvasFitOptions {
+  /** Whole device pixels per frame pixel whenever the stage has room (see CanvasFitInput.integerScale). */
+  integerScale?(): boolean;
+  /**
+   * The fitted frame size, its device pixels per frame pixel and the scale that would fill the stage, whenever a fit
+   * ran.
+   */
+  onFit?(frameWidth: number, frameHeight: number, scale: number, fillScale: number): void;
+}
+
 export function installCanvasFit(
   canvas: HTMLCanvasElement,
   getFrameSize: GameFrameSizeProvider,
   onResized?: () => void,
+  options: CanvasFitOptions = {},
 ): ((frameWidth?: number, frameHeight?: number) => void) & { destroy(): void } {
   // The first fit() runs during page initialization before the render loop exists; run silently without callbacks.
   let ready = false;
@@ -99,8 +120,11 @@ export function installCanvasFit(
       frameWidth: nextFrameWidth,
       frameHeight: nextFrameHeight,
       devicePixelRatio: window.devicePixelRatio || 1,
+      integerScale: options.integerScale?.() ?? false,
     });
     if (!fit) return;
+    // Like onResized, not during the install-time fit: the page's callbacks may not exist yet.
+    if (ready) options.onFit?.(activeFrameWidth, activeFrameHeight, fit.scale, fit.fillScale);
     const width = fit.backingWidth;
     const height = fit.backingHeight;
     const cssWidth = `${fit.cssWidth}px`;
@@ -931,7 +955,7 @@ export function installGameInput(
     window,
     'keydown',
     (event) => {
-      // Page shortcuts (` debug / [ ] speed / F11 fullscreen / ? help) are not injected into the game.
+      // Page shortcuts (` debug / [ ] speed / F11 fullscreen / ? help / \\ HD view) are not injected into the game.
       if (UI_SHORTCUT_KEYS.has(event.key)) return;
       if (document.activeElement !== canvas || event.isComposing) return;
       const vk = virtualKey(event);

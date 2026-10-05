@@ -61,10 +61,14 @@ export function ScreenStatus() {
   const network = useStore(state.networkStatus),
     resource = useStore(state.resourceStatus);
   const upscale = useStore(state.upscaleStatus);
+  const hd = useStore(state.hdStatus);
   return (
     <>
       <output id="vm-upscale-status" role="status" aria-live="polite" hidden={upscale === null}>
         {upscale && localizeText(upscale)}
+      </output>
+      <output id="vm-hd-status" role="status" aria-live="polite" hidden={hd === null}>
+        {hd}
       </output>
       {network && <StatusView id="vm-network-status" bottom={38} value={network} />}
       {resource && <StatusView id="vm-resource-status" bottom={8} value={resource} />}

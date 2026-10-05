@@ -32,14 +32,22 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    the HD view shows the current map, and once a second while a snapshot would go unused (no HD cache for the map, the
    view still loading, the bridge toggled off, or the VM not answering). A map whose HD view failed to load (no or an
    incomplete cache, the development server restarting, a WebGPU error) is tried again after 30 seconds and at the
-   next match on it, never on every poll. While the HD view is shown the bridge switches
+   next match on it, never on every poll. Such a match shows the original picture, complete and unkeyed, and the
+   page says why in a notice at the top of the game frame (`#vm-hd-status`, styled like the upscale notice): that the
+   map has no HD assets (the loader's `MapCacheMissingError`: no `manifest.json`) or that its HD view failed to load.
+   The notice appears once per match, stays until the match has run for 12 seconds (the load already fails while the
+   game shows its loading screen) and goes when the battle ends or the view loads. The game spells
+   one scenario differently over time (`2Peaks` from the skirmish menu, `2PEAKS.MAP` once the match runs) and the
+   development server resolves cache names without regard to case, so the bridge compares map names lower-cased: a
+   change of casing neither reloads the view nor counts as another map. While the HD view is shown the bridge switches
    on the game's native overlay passthrough (`VmShell.setTacticalPassthrough`, see below) and asks the frame renderer
    to make only key-coloured pixels transparent (`VmFrameRenderer.setTransparentKey`); without passthrough it falls
    back to a transparent tactical rectangle (`setTransparentRect`). Both need the WebGL2 renderer's alpha drawing
    buffer: with Canvas 2D (`?webgl=0`, or no WebGL2 context) the page neither installs the passthrough patches nor
    starts the bridge. The page stops the bridge (passthrough off, HD view released) before it destroys the VM,
-   including when the game exits or the boot is cancelled. `__hdBridge.toggle()` in the console switches between the
-   HD view and the original picture; `__hdBridge.passthrough` shows the state.
+   including when the game exits or the boot is cancelled. The toolbar's picture button and the `\\` key switch between
+   the HD view and the original picture (the key is the page's only while a bridge runs; otherwise it reaches the
+   game), as does `__hdBridge.toggle()` in the console; `__hdBridge.passthrough` shows the state.
 3. **Live view.** `packages/hd-renderer/src/live/liveView.ts` draws the snapshot: static map content (terrain, water,
    trees) from the map cache; overlays (walls, fences, ore, gems) and smudges (craters, scorch and burn marks) from
    independent live cell snapshots when available, otherwise from the map cache; every building/vehicle/infantry/aircraft from the snapshot using the
@@ -255,6 +263,17 @@ pnpm hd:prepare -- --map XMP29U2        # a map id, a map file name, or a path; 
 A cache built while the game page is open needs no reload: the bridge retries a map that had no HD view 30 seconds
 after the failed load, or at once when a new match starts on it.
 
+A map is HD-playable when the served cache has a directory with the scenario's file name without its extension
+(case-insensitive; a `.yro` package's scenario carries the package name) holding `manifest.json` and the files it
+names: the terrain tile atlas, the indexed sprite atlas of the map's own trees and other map sprites with its
+optional 2x HD atlas and house-paint mask, palettes, map voxel models and the whole-map terrain composite with its
+water mask. Everything else is shared and bound by the manifest's `theater`: units, buildings, overlays and smudges
+come from `_library/<theatre>/` (`library.json` and its sprite pages with their HD pages), effects from
+`_library/common/effects/`, the interface from `_ui/`, vehicle redraw projections from the directory named by
+`hd-vproj`. The optional sidecars (`materials.json`, `lights.json`, `windows.json`, `normals.json`) refine one map
+and are not required. To serve many prepared maps at once, build a symlink farm over an existing cache with
+`packages/ra2-assets/python/play_farm.py` (see the asset tools guide) and point `RA2_HD_CACHE_DIR` at it.
+
 `--map` accepts maps stored inside the game's MIX archives (most multiplayer maps; the extractor looks in top-level
 archives and one level down in the stock map archives) as well as loose map files and `.yro`/`.mmx` packages. The
 individual steps remain available when one needs rerunning by hand (options, defaults and the upscaler binary are
@@ -300,6 +319,37 @@ applies the preset and, on day maps, its suggested hour unless `hd-time` is give
 the HD cache (e.g. `vehicles-hd`); `hd-rect=x,y,w,h`
 overrides the tactical rectangle (default: the frame minus YR's 168 px sidebar and 32 px command bar).
 
+## Display scale
+
+The HD art has two texels per game pixel, so it is only shown texel for pixel when one game pixel covers exactly two
+device pixels. Any other scale resamples every texel: a 1152x744 game filling a 3456x2160 screen stretches the art
+1.45 times, and a window with a device pixel ratio of 1 shows no more pixels than the original.
+
+- `?resolution=display` (toolbar: "match window") computes the game resolution at every start from the stage the
+  canvas is fitted into: half its device pixels, even numbers, within `GAME_RESOLUTION_LIMITS` (`src/games/resolution.ts`:
+  the 800x600 the shell pages are laid out for up to the 2560x1600 the display-mode shim accepts); a stage too small
+  for two device pixels per game pixel uses one. It is the default for `?hd=1` while the player has never chosen a
+  resolution, and is passed to the game as the usual in-memory INI overlay. `?resolution=WxH` requests any size within
+  the limits, `?resolution=ini` the game's own INI; the parameter wins over the stored toolbar choice for that page load,
+  and choosing in the toolbar removes it from the address.
+- The size is measured once, when the game starts: put the window in its final state (maximised or fullscreen) first.
+  The canvas fit then shows a display-matched frame at whole device pixels per game pixel (`calculateCanvasFit` with
+  `integerScale`), leaving a border instead of resampling; the toolbar shows the frame size and scale under the
+  resolution and suggests a reload when a matched frame no longer fits its window. The shell pages keep their own
+  800x600 frame and are shown at their own whole scale.
+- The HD canvas and the HD interface canvas are laid out on whole device pixels with one drawing-buffer pixel each
+  (`devicePixelBox.ts`, `LiveView.resizePixels`), up to a budget of 10 million pixels; the device pixel ratio is not
+  capped. Interpolated scrolling stays on the drawing buffer's pixel grid (`snapToPixelGrid`), and post passes whose
+  radii are given in view pixels follow the device pixels per game pixel (`HdRenderer.setBufferScale`).
+
+`scripts/remaster/play.sh` (or a double click on `scripts/remaster/play.command` on macOS) starts the development
+server and opens the HD page with the approved look, `resolution=display`, `game-speed=3` (the original scale's normal
+speed; the page's own startup default is the fastest, see
+[the startup configuration](../RA2_COMMAND_LINE_AND_SPAWNER.md#current-startup-configuration)) and the skirmish setup as
+the first page; `--original` opens the original picture at exact pixels instead, `--print` only prints the address. It
+reads the player's game from `RA2_GAME_ROOT` (default `game/`), the HD cache from `RA2_HD_CACHE_DIR` (default: the
+newest play cache under `gameres/` that holds `_library/`) and the starting speed from `RA2_PLAY_SPEED`.
+
 ## HD interface layer (`hd-ui=1`)
 
 In development, `?hd=1&hd-ui=1` adds a separate Canvas 2D interface controller (`hdUi.ts`). It consumes the optional
@@ -308,8 +358,8 @@ animated credits, native power slot counts, radar state, repair/sell modes and l
 without a battlefield HD cache. While enabled in a battle, uncached-map polls run at least every 50 ms; a live
 battlefield keeps its faster polling cadence. Unavailable snapshots and poll failures hide the interface.
 
-The `#hd-ui` canvas sits immediately before `#screen`, at z-index 0 above `#hd-screen`, matches the screen's CSS box
-and device pixel ratio, and receives no input. The WebGL2 frame renderer clears the covered rectangles after every
+The `#hd-ui` canvas sits immediately before `#screen`, at z-index 0 above `#hd-screen`, covers the screen's box on
+whole device pixels with one buffer pixel each, and receives no input. The WebGL2 frame renderer clears the covered rectangles after every
 frame path (plain, upscaled or keyed), before its independent native cursor pass. These extra rectangles are
 independent of the tactical key/hole. All pointer and keyboard input continues to reach the original game.
 The read-only native `sidebar.pointer` supplies cursor sheet frame and resolved hotspot; the input controller's
@@ -335,6 +385,12 @@ Optional art lives under the local HD cache's `_ui/` directory:
   two 492x32 command halves use x=0/492, y=0. Loaded chrome replaces procedural tab icons. When every piece of an
   anchor has the same art-to-frame scale, the pieces are composited once into one bitmap per anchor and drawn with a
   single scaled `drawImage`, so filtered piece edges cannot leave a dark seam at their joins.
+  Chrome art is a redraw at ONE frame size (`frame`). At another frame height the sidebar is cut the way the game
+  builds it (`chromeSlices` in `packages/hd-renderer/src/ui/sidebarView.ts`): the part above the cameo strip stays,
+  the strip shows as many rows as the live layout has (extra rows reuse the art's inner rows), and the part under the
+  strip follows the strip's bottom. That needs the game's row rule, published as the optional `layout.stripReserve`
+  (YR: `sidebarReader.ts`), and the anchor's art in one composite. An anchor whose width differs from the art (the
+  command bar of a wider frame is assembled from both ends) gets no chrome: its native picture stays visible.
   Optional `tabs` is `{ "file": "tabs.png", "scale": 4, "frames": [
 { "tab": 0, "state": "normal", "rect": { "x": 0, "y": 0, "width": 112, "height": 108 } } ] }`.
   Each rectangle is in atlas pixels and includes the whole native tab canvas with transparency; it is scaled into
@@ -430,6 +486,29 @@ selection, ownership and events. YR 1.001 UnitClass draw saves Type at `0x73D29C
 `0x73D2C4` and restores it at `0x73D3A2`. The reader validates the alternate UnitTypeClass pointer/vtable/id, so
 unloading HARV/CMIN draw HORV/CMON; absent or invalid fields and missing alternate art retain `type`. A rare poll
 inside the swap window can already see the unloading type for one snapshot. SCHP deployment is a separate policy.
+
+Optional object `underlay { art, frame, x, y, z }` is one frame of effect-library art the engine draws inside the
+object's own picture, right before its body: the art's canvas centre goes to the projection of the lepton point, the
+body covers it, and ground, overlays and shadows lie under it. YR emits it for the ore-gathering sparks
+(`src/games/yr/unitGatherState.ts`): UnitClass draw `0x73D0D1..0x73D283` blits `OREGATH.SHP` (loaded by name at
+`0x73CED6`) when the type is a Harvester (+`0xE0E`), the unit's harvesting flag (+`0x6D2`, written by the harvest
+mission at `0x73E87D`/`0x73E99A`/`0x73EB19`) is set, the locomotor's `Is_Moving_Now` is false, nothing targets it
+with a temporal weapon (+`0x278`) and neither chrono flag is set. The frame is
+`(FootClass +0x538 + CurrentFrame) % 15 + (7 - f8) * 15` with `f8` the body facing rounded to eight directions; the
+point is Location moved 30 leptons along that facing; the blit is opaque (flags `0x2A00`: centred, read-only Z test,
+ground gradient), with the anim palette and the unit's brightness. Its Z is the unit's adjustment minus 2, which on
+dumped native Z-buffers is two units in front of the ground of each screen row: every sprite pixel passes over ground,
+ore and the miner's own shadow, and only a terrain object's shadow written at the same Z cuts it. `Is_Moving_Now` is a COM call, so the reader
+evaluates the drive locomotor's (`0x4AFC20`: facing rotating, or moving with a head-to coordinate and a positive
+current speed) and the teleport locomotor's (`0x718080`) from their fields and reports nothing for any other
+locomotor. War Miner and Chrono Miner have `Harvester=yes`; the Slave Miner does not and never shows the sparks.
+Frozen native frames confirm the frame group, the pixel position and, with raw unit memory dumped at the same
+instant, the phase: the native picture is drawn before the logic tick the reader sees, so at the same frozen instant
+it shows the phase of `CurrentFrame - 1`. The same lag makes the picture keep (or lack) the sparks for one tick
+after the harvesting flag changes. The live view draws the frame as a ground decal through the effect sprite layer
+(`objectUnderlayCard` in `live/liveView.ts`), pulled in front of the unit shadow planes and behind upright bodies,
+with the native indexed art or, in the enhanced effect style, the `effects-hd.json` entry of the same id when one
+exists.
 
 Optional `nativeHidden` suppresses a complete object visual, including its shadows and HD extras. YR emits true
 for the proven UnitClass gate: nonzero tether byte, a validated building in radio link 0, effective or queued

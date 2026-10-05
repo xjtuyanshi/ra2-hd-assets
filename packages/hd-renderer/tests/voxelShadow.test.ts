@@ -10,6 +10,7 @@ import {
   MeshBasicNodeMaterial,
   MeshStandardNodeMaterial,
   NodeFrame,
+  Quaternion,
   Vector3,
   Vector4,
   WebGLCoordinateSystem,
@@ -18,12 +19,15 @@ import {
 import { positionGeometry, positionLocal, positionWorld, uniform, vec3 } from 'three/tsl';
 import { AtmosphereNodes } from '../src/atmosphere';
 import type { ShaderNode } from '../src/tsl';
-import { IsoCamera } from '../src/world';
+import { IsoCamera, PIXELS_PER_CELL_EDGE } from '../src/world';
 import { spriteLookFor } from '../src/ra2/spriteLook';
-import { instantiateVoxel, updateVoxelNativeDepth } from '../src/ra2/voxels';
+import { instantiateVoxel, updateVoxelNativeDepth, VoxelUnit } from '../src/ra2/voxels';
 import { registerVoxelReflectionColour, voxelReflectionColour } from '../src/ra2/voxelReflectionColour';
 import {
   AIRBORNE_HEIGHT,
+  CONTACT_SHADOW_OFFSET,
+  CONTACT_SHADOW_OFFSET_PX,
+  CONTACT_SHADOW_PENUMBRA,
   AIRBORNE_SHADOW_DRIFT_X,
   AIRBORNE_SHADOW_DRIFT_Z,
   AIRBORNE_SHADOW_HALF,
@@ -45,6 +49,7 @@ import {
   WATER_REFLECTION_FADE,
   WATER_REFLECTION_OPACITY,
   applyVoxelShadowParams,
+  setShadowContact,
   setShadowGround,
   setShadowOrigin,
   shadowOriginProjection,
@@ -783,6 +788,200 @@ describe('voxel shadow origin override', () => {
       }
     },
   );
+});
+
+describe('voxel contact shadow of a grounded unit', () => {
+  /** Screen axes of the fixed dimetric camera in world space: right, and the direction towards the camera. */
+  const RIGHT = new Vector3(1, 0, -1).normalize();
+  const VIEW = new Vector3(Math.sqrt(1.5), 1, Math.sqrt(1.5)).normalize();
+  const SCREEN_UP = new Vector3().crossVectors(VIEW, RIGHT).normalize();
+
+  function unit(ground: Parameters<typeof setShadowGround>[1]) {
+    const nodes = new AtmosphereNodes();
+    const placed = instantiateVoxel(
+      [
+        { role: 'body', turretOffset: 0, geometry: new BufferGeometry() },
+        { role: 'turret', turretOffset: 0.2, geometry: new BufferGeometry() },
+      ],
+      new MeshStandardNodeMaterial(),
+      nodes,
+    );
+    const scene = new Group();
+    scene.add(placed.root);
+    setShadowGround(scene, ground);
+    const shadows = placed.root.children.filter((o): o is VoxelShadowMesh => o instanceof VoxelShadowMesh);
+    const body = shadows.filter((twin) => twin.source.parent === placed.root);
+    const turret = shadows.filter((twin) => twin.source.parent !== placed.root);
+    return { nodes, scene, root: placed.root, body, turret };
+  }
+
+  it('draws the body footprint through the unit origin, three engine pixels to the right, without shear', () => {
+    const g = 0.4;
+    const u = unit(() => g);
+    try {
+      u.root.position.set(10, g, 20);
+      u.root.rotation.y = 0.7;
+      u.scene.updateMatrixWorld(true);
+      const sheared = u.body[0]!.matrixWorld.clone();
+      setShadowContact(u.root, true);
+      u.scene.updateMatrixWorld(true);
+      const twin = u.body[0]!;
+      const centre = new Vector3().applyMatrix4(twin.matrixWorld);
+      const offset = centre.clone().sub(u.root.position);
+      expect(offset.x).toBeCloseTo(CONTACT_SHADOW_OFFSET, 12);
+      expect(offset.y).toBeCloseTo(0, 12);
+      expect(offset.z).toBeCloseTo(-CONTACT_SHADOW_OFFSET, 12);
+      expect(offset.dot(RIGHT) * PIXELS_PER_CELL_EDGE).toBeCloseTo(CONTACT_SHADOW_OFFSET_PX, 10);
+      expect(offset.dot(SCREEN_UP)).toBeCloseTo(0, 12);
+      // Every height of the body lands on its own footprint: a hull point and one above it draw at the same place.
+      for (const height of [0, 0.3, 0.9]) {
+        const p = new Vector3(0.6, height, -0.2).applyMatrix4(twin.matrixWorld);
+        const footprint = new Vector3(0.6, 0, -0.2).applyAxisAngle(new Vector3(0, 1, 0), 0.7);
+        expect(p.distanceTo(u.root.position.clone().add(offset).add(footprint))).toBeLessThan(1e-12);
+      }
+      // The sheared projection threw the same point further with its height; the footprint does not grow.
+      const top = new Vector3(0.6, 0.9, -0.2);
+      expect(top.clone().applyMatrix4(sheared).x - top.clone().applyMatrix4(twin.matrixWorld).x).toBeGreaterThan(0.3);
+      expect(twin.planeNormal.toArray()).toEqual([0, 1, 0]);
+      expect(twin.planeConstant).toBeCloseTo(g + SHADOW_LIFT, 12);
+      // Turret and barrel cast nothing; the five body layers keep a penumbra of about half an engine pixel.
+      expect(u.body.map((t) => t.visible)).toEqual([true, true, true, true, true]);
+      expect(u.turret.some((t) => t.visible)).toBe(false);
+      const scale = CONTACT_SHADOW_PENUMBRA / SHADOW_PENUMBRA;
+      expect(CONTACT_SHADOW_PENUMBRA * PIXELS_PER_CELL_EDGE).toBeLessThan(0.75);
+      for (const copy of u.body) {
+        const c = SHADOW_COPIES[copy.copyIndex]!;
+        const p = new Vector3().applyMatrix4(copy.matrixWorld).sub(centre);
+        expect(p.x).toBeCloseTo(c.x * scale, 12);
+        expect(p.y).toBeCloseTo(0, 12);
+        expect(p.z).toBeCloseTo(c.z * scale, 12);
+        expect(copy.planeConstant).toBeCloseTo(g + SHADOW_LIFT + c.lift, 12);
+      }
+      // Leaving the ground (or losing the contact) restores the ordinary projection and the turret's shadow.
+      setShadowContact(u.root, false);
+      u.scene.updateMatrixWorld(true);
+      expect(twin.matrixWorld.elements).toEqual(sheared.elements);
+      expect(u.turret.every((t) => t.visible)).toBe(true);
+    } finally {
+      u.nodes.dispose();
+    }
+  });
+
+  it('lays the footprint in the plane of a tilted body and keeps the screen offset on a ramp', () => {
+    // Ground rising towards +x by 0.4 per cell; the game tilts the body more steeply than that.
+    const slope = new Vector3(-0.4, 1, 0).normalize();
+    const u = unit({ height: (x) => 0.4 * (x - 10), normal: (_x, _z, out) => out.copy(slope) });
+    try {
+      const bodyUp = new Vector3(-0.4896, 0.872, 0).normalize();
+      u.root.position.set(10, 0, 20);
+      u.root.rotation.y = -1.1;
+      (u.root as VoxelUnit).setSurfaceUp(bodyUp);
+      setShadowContact(u.root, true, bodyUp);
+      u.scene.updateMatrixWorld(true);
+      const twin = u.body[0]!;
+      const origin = u.root.position;
+      const centre = new Vector3().applyMatrix4(twin.matrixWorld);
+      const offset = centre.clone().sub(origin);
+      // In the body's plane, and on screen exactly three pixels to the right of the draw point.
+      expect(offset.dot(bodyUp)).toBeCloseTo(0, 12);
+      expect(offset.dot(RIGHT) * PIXELS_PER_CELL_EDGE).toBeCloseTo(CONTACT_SHADOW_OFFSET_PX, 10);
+      expect(offset.dot(SCREEN_UP)).toBeCloseTo(0, 12);
+      // The footprint is the body's own outline in that plane: same axes as the drawn body, no height.
+      const rotation = new Matrix4().extractRotation(u.root.matrixWorld);
+      for (const local of [new Vector3(0.6, 0, -0.2), new Vector3(-0.3, 0.8, 0.5)]) {
+        const p = local.clone().applyMatrix4(twin.matrixWorld);
+        const flat = new Vector3(local.x, 0, local.z).applyMatrix4(rotation);
+        expect(p.distanceTo(centre.clone().add(flat))).toBeLessThan(1e-12);
+        expect(p.clone().sub(origin).dot(bodyUp)).toBeCloseTo(0, 12);
+      }
+      // Depth follows the terrain the unit stands on, not the steeper body plane.
+      expect(twin.planeNormal.distanceTo(slope)).toBeLessThan(1e-12);
+      expect(twin.planeConstant).toBeCloseTo(slope.dot(origin) + SHADOW_LIFT, 12);
+      // A body the game keeps level (no plane passed) still lays its footprint on the slope under it.
+      (u.root as VoxelUnit).setSurfaceUp(new Vector3(0, 1, 0));
+      setShadowContact(u.root, true);
+      u.scene.updateMatrixWorld(true);
+      const level = new Vector3(0.6, 0.5, -0.2).applyMatrix4(twin.matrixWorld).sub(origin);
+      expect(level.dot(slope)).toBeCloseTo(0, 12);
+      expect(new Vector3().applyMatrix4(twin.matrixWorld).sub(origin).dot(RIGHT) * PIXELS_PER_CELL_EDGE).toBeCloseTo(
+        CONTACT_SHADOW_OFFSET_PX,
+        10,
+      );
+    } finally {
+      u.nodes.dispose();
+    }
+  });
+
+  it('keeps the water contact, flight and physical-origin rules ahead of a ground contact', () => {
+    let water: number | undefined;
+    const u = unit({ height: () => 0, waterHeight: () => water });
+    try {
+      u.root.position.set(3, 0, 4);
+      setShadowContact(u.root, true);
+      u.scene.updateMatrixWorld(true);
+      const contact = u.body[0]!.matrixWorld.clone();
+      water = 0;
+      u.scene.updateMatrixWorld(true);
+      expect(u.body[0]!.onWater).toBe(true);
+      expect(u.turret.every((t) => t.visible)).toBe(true);
+      expect(new Vector3(0.5, 0.7, 0).applyMatrix4(u.body[0]!.matrixWorld).x).toBeCloseTo(3.5, 12);
+      water = undefined;
+      const physical = new Vector3(3, 2, 4);
+      setShadowOrigin(u.root, physical);
+      u.scene.updateMatrixWorld(true);
+      expect(new Vector3().applyMatrix4(u.body[0]!.matrixWorld).x).toBeCloseTo(3 + SHADOW_SHEAR_X * 2, 12);
+      expect(u.turret.every((t) => t.visible)).toBe(true);
+      setShadowOrigin(u.root);
+      u.scene.updateMatrixWorld(true);
+      expect(u.body[0]!.matrixWorld.elements).toEqual(contact.elements);
+      // A bridge deck: the unit stands above the registered ground, so the footprint stays level at its own origin.
+      u.root.position.set(3, 1.6, 4);
+      u.scene.updateMatrixWorld(true);
+      const deck = new Vector3(0.4, 0.3, 0.1).applyMatrix4(u.body[0]!.matrixWorld);
+      expect(deck.y).toBeCloseTo(1.6, 12);
+      expect(deck.x).toBeCloseTo(3.4 + CONTACT_SHADOW_OFFSET, 12);
+      expect(u.body[0]!.planeConstant).toBeCloseTo(1.6 + SHADOW_LIFT, 12);
+    } finally {
+      u.nodes.dispose();
+    }
+  });
+});
+
+describe('voxel unit body tilt', () => {
+  it("uses the host's up vector when one is given and the registered ground otherwise", () => {
+    const slope = new Vector3(-0.4, 1, 0).normalize();
+    const scene = new Group();
+    const root = new VoxelUnit();
+    scene.add(root);
+    setShadowGround(scene, { height: (x) => 0.4 * x, normal: (_x, _z, out) => out.copy(slope) });
+    root.position.set(2, 0.8, 5);
+    root.rotation.y = 0.9;
+    const up = () => new Vector3().setFromMatrixColumn(root.matrixWorld, 1);
+    scene.updateMatrixWorld(true);
+    expect(up().distanceTo(slope)).toBeLessThan(1e-12);
+    const native = new Vector3(-0.4896, 0.872, 0).normalize();
+    root.setSurfaceUp(native);
+    native.set(9, 9, 9);
+    scene.updateMatrixWorld(true);
+    expect(up().distanceTo(new Vector3(-0.4896, 0.872, 0).normalize())).toBeLessThan(1e-12);
+    // The yaw is applied first, as the engine multiplies its ramp matrix onto the facing rotation.
+    const nose = new Vector3().setFromMatrixColumn(root.matrixWorld, 0);
+    const expected = new Vector3(1, 0, 0)
+      .applyAxisAngle(new Vector3(0, 1, 0), 0.9)
+      .applyQuaternion(new Quaternion().setFromUnitVectors(new Vector3(0, 1, 0), up()));
+    expect(nose.distanceTo(expected)).toBeLessThan(1e-12);
+    // A locomotor that never tilts stays level on the same slope, also away from the registered ground height.
+    root.setSurfaceUp(new Vector3(0, 1, 0));
+    scene.updateMatrixWorld(true);
+    expect(up().toArray()).toEqual([0, 1, 0]);
+    root.setSurfaceUp(null);
+    root.position.y = 0.8 + 0.2;
+    scene.updateMatrixWorld(true);
+    expect(up().toArray()).toEqual([0, 1, 0]);
+    root.position.y = 0.8;
+    scene.updateMatrixWorld(true);
+    expect(up().distanceTo(slope)).toBeLessThan(1e-12);
+  });
 });
 
 describe('voxel contact penumbra', () => {

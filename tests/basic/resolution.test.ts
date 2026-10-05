@@ -3,6 +3,7 @@ import { MemoryGameFileProvider } from '../../src/resources/providers/memory';
 import { type GameSource } from '../../src/games/source';
 import { supportedGame } from '../../src/games/catalog';
 import {
+  customGameResolution,
   gameResolutionIni,
   parseGameResolution,
   patchGameResolutionIni,
@@ -85,5 +86,14 @@ describe('RA2/YR 分辨率 INI 内存覆盖', () => {
     expect(patched).toBe('[Video]\nAllowHiResModes=yes\nScreenWidth=1024\nScreenHeight=768\n');
     expect(patched.startsWith('[')).toBe(true);
     expect(patched.endsWith('\n')).toBe(true);
+  });
+
+  it('自定义尺寸只接受 VM 显示模式范围内的整数', () => {
+    expect(customGameResolution(1728, 1080)).toEqual({ width: 1728, height: 1080 });
+    expect(customGameResolution(2560, 1600)).toEqual({ width: 2560, height: 1600 });
+    expect(customGameResolution(2562, 1600)).toBeNull();
+    expect(customGameResolution(640, 480)).toBeNull();
+    expect(customGameResolution(1728.5, 1080)).toBeNull();
+    expect(customGameResolution(Number.NaN, 1080)).toBeNull();
   });
 });

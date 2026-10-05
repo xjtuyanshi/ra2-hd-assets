@@ -1,4 +1,13 @@
-import { BoxGeometry, Color, Group, Mesh, MeshStandardNodeMaterial, type Texture, Vector3 } from 'three/webgpu';
+import {
+  BoxGeometry,
+  Color,
+  Group,
+  Mesh,
+  MeshStandardNodeMaterial,
+  type Texture,
+  Vector2,
+  Vector3,
+} from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import { mapAtmosphere, medianHeight, sidecarAtmosphere } from '../../../ra2-assets/src/lights';
 import type { AtmosphereSettings } from '../atmosphere';
@@ -22,7 +31,7 @@ import { NORMALIZED_RATE_FACTOR, animRateFrames } from '../../../ra2-assets/src/
 import type { SourceLight } from '../ra2/mapLights';
 import type { WindowBuilding } from '../ra2/nightDressing';
 import { sequenceFrame } from '../../../ra2-assets/src/art';
-import type { MapObject } from '../../../ra2-assets/src/manifest';
+import type { MapObject, VoxelModel } from '../../../ra2-assets/src/manifest';
 import type { TheaterId } from '../../../ra2-assets/src/theater';
 import { addHousePalettes, paletteFor, type Ra2Cache } from '../ra2/cache';
 import { SpriteLayer, cardPush, isUnlitMapOverlay, objectAnchor, type SpriteInstance } from '../ra2/sprites';
@@ -42,7 +51,7 @@ import {
   type EngulfFire,
   type EngulfObject,
 } from '../ra2/fireEngulf';
-import { foundationPointPush, GROUND_DEPTH } from '../ra2/cardDepth';
+import { EFFECT_DECAL_LIFT, foundationPointPush, GROUND_DEPTH } from '../ra2/cardDepth';
 import {
   addRefineryFoundation,
   harvesterRefineryBonus,
@@ -120,6 +129,11 @@ export interface LiveObject {
   nativeHidden?: boolean;
   /** Body opacity while the native draw mode is translucent; shadows keep their normal opacity. */
   translucent?: number;
+  /**
+   * One frame of effect-library art the engine draws inside this object's own picture, right before its body (the
+   * sparks at a harvesting miner's scoop): art id, absolute frame and the lepton point of the art's canvas centre.
+   */
+  underlay?: { art: string; frame: number; x: number; y: number; z: number };
   /** Bridge (H2): building construction state and the actual make SHP frame, including engine reversal. */
   buildState?: 'building' | 'selling' | 'done';
   buildupFrame?: number;
@@ -142,6 +156,11 @@ export interface LiveObject {
   infantryDrawFacingRaw?: number;
   /** Native tactical layer registration; absent in older snapshots. Ground keys exclude altitude/art offsets. */
   renderOrder?: { layer: number; index: number; ySort: number };
+  /**
+   * Unit up vector the game draws this vehicle's body with, in the engine axes of x/y/z (z up); (0, 0, 1) is level.
+   * Absent = the renderer tilts the body with its own terrain.
+   */
+  tilt?: { x: number; y: number; z: number };
 }
 
 export interface LiveHouse {
@@ -298,6 +317,37 @@ const LEPTONS_PER_CELL = 256;
 const LEPTONS_PER_LEVEL = 104;
 /** A logic-frame move longer than this (cells) is a teleport (chrono, reinforcement) and is not interpolated. */
 const TELEPORT_CELLS = 3;
+/**
+ * Motion playout (see LiveView.scheduleMotion and render). Snapshots of a 20 Hz logic arrive 30 to 75 ms apart
+ * (emulator slices plus the bridge's poll), so interpolating each step over the last arrival interval stalled a moving
+ * unit when the next snapshot was late and jumped it forward when one was early: on a cruising tank 6 to 10 % of the
+ * presented frames showed no movement and the per-frame speed varied by 45 to 80 % of its mean.
+ *
+ * Each step is instead played at an even speed from the poses on screen to the newest snapshot, which is due at
+ * ideal(frame) + (1 + MOTION_MARGIN) periods. ideal(frame) is the arrival time of a logic frame on a clock that
+ * advances one smoothed period per logic frame and follows the real arrivals only slowly, so an early or late
+ * snapshot no longer changes the speed: it only uses up (or adds to) the margin. A snapshot later than the margin has
+ * already let the units come to rest, so the clock moves to it at once (the margin grows quickly and shrinks slowly,
+ * like a jitter buffer). Replayed on recorded arrivals this leaves no stalled frame on a cruising tank and a speed
+ * variation of 7 to 20 %.
+ */
+/** Share of a logic period by which a step's end trails the next frame's expected arrival (the jitter it absorbs). */
+const MOTION_MARGIN = 0.25;
+/** Weight of a new arrival interval in the smoothed logic period, and the plausible range of one period (ms). */
+const MOTION_PERIOD_BLEND = 0.1;
+const MOTION_PERIOD_MIN = 15;
+const MOTION_PERIOD_MAX = 250;
+/** Share of an arrival's earliness or small lateness the clock follows per logic frame. */
+const MOTION_CLOCK_GAIN = 0.1;
+/** A snapshot this many periods ahead of the clock (a resumed tab, a faster game speed) restarts it. */
+const MOTION_RESYNC = 4;
+/** A step of n logic frames (n capped at MOTION_CATCH_UP) plays over at least this share of n periods. */
+const MOTION_MIN_STEP = 0.5;
+const MOTION_CATCH_UP = 4;
+/** Poses presented longer ago than this (ms) are not continued from then: the page was hidden or stalled. */
+const MOTION_PRESENT_GAP = 40;
+/** Units standing on a ramp read within this height (world units) of the surface: corner ramps are not planes. */
+const GROUND_TOLERANCE = 0.3 * LEVEL_HEIGHT;
 /** An object that moved within this many logic frames is walking (its walk frames play). */
 const WALK_FRAMES = 2;
 /** Buildings first seen after this many logic frames of the view were just placed (their build-up plays). */
@@ -349,7 +399,47 @@ interface Visual {
   buildingTurret?: VoxelUnit;
   /** Whether the building's turret model is drawn, still loading or missing (diagnostics). */
   turretState?: 'ready' | 'loading' | 'missing';
+  /** The type's alternate image (library unloadingVoxel) has been loaded ahead of its first use, or has none. */
+  alternateWarm?: boolean;
+  /** Presented motion of a mobile object (see MOTION_MARGIN). */
+  motion?: Motion;
 }
+
+/** Engine pose with 16-bit facings kept unwrapped as numbers, and the body's up vector when the game reports it. */
+interface MotionPose {
+  x: number;
+  y: number;
+  z: number;
+  facing: number;
+  turret: number;
+  tilt: boolean;
+  ux: number;
+  uy: number;
+  uz: number;
+}
+
+interface Motion {
+  /** The newest snapshot this object's current step leads to. */
+  segment: Timed | null;
+  /** Pose the step started from, when one was being shown. */
+  from: MotionPose;
+  hasFrom: boolean;
+  /** Pose of the last presentation. */
+  shown: MotionPose;
+  hasShown: boolean;
+}
+
+const motionPose = (): MotionPose => ({ x: 0, y: 0, z: 0, facing: 0, turret: 0, tilt: false, ux: 0, uy: 0, uz: 1 });
+/** Scratch of presentPose: the previous snapshot's pose of an object without a shown one, and the body's up vector. */
+const POSE_START = motionPose();
+const POSE_UP = new Vector3();
+const newMotion = (): Motion => ({
+  segment: null,
+  from: motionPose(),
+  hasFrom: false,
+  shown: motionPose(),
+  hasShown: false,
+});
 
 /** Interpolated engine pose: leptons and a facing in radians. */
 interface Pose {
@@ -500,6 +590,16 @@ export function layerFrame(
   return first + (step % (last - first));
 }
 
+/**
+ * `value` (engine pixels) on the nearest multiple of one drawing-buffer pixel, `pixelsPerUnit` of which cover an engine
+ * pixel; unchanged without a usable scale.
+ */
+export function snapToPixelGrid(value: number, pixelsPerUnit: number): number {
+  return pixelsPerUnit > 0 && Number.isFinite(pixelsPerUnit)
+    ? Math.round(value * pixelsPerUnit) / pixelsPerUnit
+    : value;
+}
+
 export class LiveView {
   private previous: Timed | null = null;
   private current: Timed | null = null;
@@ -525,6 +625,15 @@ export class LiveView {
   private readonly volumeInstances: VolumetricBlast[] = [];
   readonly volumetricBlasts: VolumetricBlastLayer;
   private readonly pose: Pose = { x: 0, y: 0, z: 0, facing: 0 };
+  /** Turret facing (radians) and body up vector (world axes) of the pose above; null = follow the terrain. */
+  private poseTurret = 0;
+  private poseUp: Vector3 | null = null;
+  /** Smoothed arrival interval of one logic frame (ms) and the de-jittered arrival time of the newest one. */
+  private motionPeriod?: number;
+  private motionClock?: { frame: number; time: number };
+  /** The current step: when the poses it starts from were presented and when it reaches the newest snapshot. */
+  private motionStart = 0;
+  private motionEnd?: number;
   private readonly shpPose: ReturnType<typeof shpUnitPose> = { state: 'stand', step: 0 };
   private readonly hidden = (x: number, y: number, z: number): boolean => this.shroud.isLocationShrouded(x, y, z);
   private readonly effectPalette = (resolved: ResolvedAnim, owner: number | undefined): string =>
@@ -580,6 +689,9 @@ export class LiveView {
   private readonly wind = new Vector3(Math.cos(0.6), 0, Math.sin(0.6)).multiplyScalar(0.3 * 0.8);
   private readonly warnedTypes = new Set<string>();
   private viewWidth = 800;
+  /** Drawing-buffer pixels per engine pixel (see frame()). */
+  private bufferScale = 1;
+  private readonly bufferSize = new Vector2();
   private viewHeight = 600;
   private lastRender = performance.now();
   private firstFrame: number | null = null;
@@ -831,15 +943,36 @@ export class LiveView {
   }
 
   /**
-   * Canvas size in CSS pixels, and the tactical view size in engine pixels. The camera frustum is set in engine pixels
-   * so the HD image lines up with the original pixel for pixel, whatever the display scale.
+   * Canvas size in CSS pixels (the drawing buffer follows the renderer's pixel ratio), and the tactical view size in
+   * engine pixels. The camera frustum is set in engine pixels so the HD image lines up with the original pixel for
+   * pixel, whatever the display scale.
    */
   resize(cssWidth: number, cssHeight: number, viewWidth: number, viewHeight: number): void {
+    this.hd.renderer.setSize(cssWidth, cssHeight, false);
+    this.frame(viewWidth, viewHeight);
+  }
+
+  /**
+   * Like resize, with the drawing buffer given in its own pixels: a host that lays the canvas out on whole device
+   * pixels gets exactly that many, with no rounding through a CSS size and a pixel ratio (and no cap on the ratio).
+   */
+  resizePixels(bufferWidth: number, bufferHeight: number, viewWidth: number, viewHeight: number): void {
+    this.hd.renderer.setDrawingBufferSize(
+      Math.max(1, Math.round(bufferWidth)),
+      Math.max(1, Math.round(bufferHeight)),
+      1,
+    );
+    this.frame(viewWidth, viewHeight);
+  }
+
+  private frame(viewWidth: number, viewHeight: number): void {
     this.viewWidth = viewWidth;
     this.viewHeight = viewHeight;
-    this.hd.renderer.setSize(cssWidth, cssHeight, false);
     this.hd.view.zoom = 1;
     this.hd.view.resize(viewWidth, viewHeight);
+    // Device pixels per engine pixel: post radii keep their size in the scene, and the camera can stay on the grid.
+    this.bufferScale = this.hd.renderer.getDrawingBufferSize(this.bufferSize).x / viewWidth;
+    this.hd.setBufferScale(this.bufferScale);
   }
 
   /** A logic frame is not a publication revision: AI and draw passes can still change it between polls. */
@@ -876,10 +1009,14 @@ export class LiveView {
       current.snapshot = snapshot;
       current.byUid = byUid;
       this.objectsFor = this.effectsFor = null;
-    } else this.current = { snapshot, at, byUid };
-    this.objectsInterpolate = false;
+    } else {
+      if (current) this.scheduleMotion(snapshot.frame - current.snapshot.frame, snapshot.frame, at - current.at, at);
+      this.current = { snapshot, at, byUid };
+    }
+    // A step still being played out keeps interpolating even when the newest frame moved nothing.
+    this.objectsInterpolate = this.objectsAlpha >= 0 && this.objectsAlpha < 1;
     const motionStart = sameFrame ? this.previous : current;
-    if (motionStart) {
+    if (motionStart && !this.objectsInterpolate) {
       for (const object of snapshot.objects) {
         const before = motionStart.byUid.get(object.uid);
         if (
@@ -1090,7 +1227,13 @@ export class LiveView {
       const materials = this.hd.materialsWanted();
       if (this.objectLibraryRevision !== libraryRevision || this.objectsMaterials !== materials)
         this.overlayPagesDirty = true;
-      const objectAlpha = this.objectsInterpolate ? alpha : 1;
+      // Objects play each step from the poses on screen to its due time (scheduleMotion); the camera keeps the
+      // arrival interval above.
+      const objectAlpha = !this.objectsInterpolate
+        ? 1
+        : previous && this.motionEnd !== undefined
+          ? Math.min(1, Math.max(0, (now - this.motionStart) / (this.motionEnd - this.motionStart)))
+          : alpha;
       if (
         this.objectsFor !== current ||
         this.objectsAlpha !== objectAlpha ||
@@ -1335,8 +1478,12 @@ export class LiveView {
   private applyCamera(from: LiveSnapshot['view'], to: LiveSnapshot['view'], alpha: number): void {
     if (!to) return;
     const jump = from ? Math.hypot(to.x - from.x, to.y - from.y) > 400 : true;
-    const x = jump || !from ? to.x : from.x + (to.x - from.x) * alpha;
-    const y = jump || !from ? to.y : from.y + (to.y - from.y) * alpha;
+    // Between two snapshots the view moves by fractions of an engine pixel. Keep it on the drawing buffer's pixel grid:
+    // art whose texels match the buffer's pixels (2x art at two device pixels per engine pixel) then stays texel-exact
+    // while the map scrolls instead of being resampled half a texel off on every in-between frame.
+    const grid = this.bufferScale;
+    const x = jump || !from ? to.x : snapToPixelGrid(from.x + (to.x - from.x) * alpha, grid);
+    const y = jump || !from ? to.y : snapToPixelGrid(from.y + (to.y - from.y) * alpha, grid);
     // The camera looks at the ground point (level 0) under the view's centre; orthographic, so height is irrelevant.
     const diff = (x + this.viewWidth / 2) / 30;
     const sum = (y + this.viewHeight / 2) / 15;
@@ -1416,18 +1563,12 @@ export class LiveView {
         !!object.nativeHidden || !!visual.libraryType?.invisible || !!this.cache.lights?.types[object.type]?.invisible;
       if (visual.root.visible === hidden) this.painterDirty = true;
       visual.root.visible = !hidden;
-      if (hidden) continue;
-      const before = last ? undefined : previous?.byUid.get(object.uid);
-      const near = before
-        ? Math.hypot(object.x - before.x, object.y - before.y) / LEPTONS_PER_CELL < TELEPORT_CELLS
-        : false;
-      const t = near ? alpha : 1;
-      const from = near ? before! : object;
+      if (hidden) {
+        if (visual.motion) visual.motion.hasShown = false;
+        continue;
+      }
       const pose = this.pose;
-      pose.x = lerp(from.x, object.x, t);
-      pose.y = lerp(from.y, object.y, t);
-      pose.z = lerp(from.z, object.z, t);
-      pose.facing = lerpAngle16(from.facingRaw, object.facingRaw, t);
+      this.presentPose(object, visual, last ? undefined : previous?.byUid.get(object.uid), current, alpha);
       const painter = (visual.painter ??= painterObject(2, 0));
       if (this.painterDirty) {
         const registered = object.renderOrder;
@@ -1480,9 +1621,11 @@ export class LiveView {
         this.voxelUnits.pose(unit, pose, null);
         continue;
       }
-      const turret = lerpAngle16(from.turretFacingRaw ?? from.facingRaw, object.turretFacingRaw ?? object.facingRaw, t);
-      this.voxelUnits.pose(unit, pose, turret);
-      this.voxelUnits.setNativeDepth(unit, unit.root.position, this.harvesterBonus(object), this.groundCard(object));
+      const grounded = this.groundCard(object);
+      this.voxelUnits.pose(unit, pose, this.poseTurret, this.poseUp);
+      // On a ramp the native shadow lies in the plane the body is drawn in; a level body keeps the ground's own plane.
+      this.voxelUnits.setGroundContact(unit, grounded, this.poseUp && this.poseUp.y < 0.9999 ? this.poseUp : undefined);
+      this.voxelUnits.setNativeDepth(unit, unit.root.position, this.harvesterBonus(object), grounded);
     }
     for (const uid of this.visuals.keys()) {
       if (current.byUid.has(uid) || retained?.has(uid)) continue;
@@ -1490,6 +1633,114 @@ export class LiveView {
       this.visuals.delete(uid);
     }
     if (!this.painterDirty) this.flushSprites(batch, false);
+  }
+
+  /**
+   * Time the step to a snapshot `frames` logic frames after the previous one, which arrived `elapsed` ms earlier (see
+   * MOTION_MARGIN). The poses on screen were presented at the last render and move on from that moment.
+   */
+  private scheduleMotion(frames: number, frame: number, elapsed: number, at: number): void {
+    const steps = Math.max(1, frames);
+    // Arrival interval per logic frame; a pause, a load or a stalled tab is not a period.
+    const sample = elapsed / steps;
+    if (frames > 0 && sample >= MOTION_PERIOD_MIN && sample <= MOTION_PERIOD_MAX)
+      this.motionPeriod =
+        this.motionPeriod === undefined
+          ? sample
+          : this.motionPeriod + (sample - this.motionPeriod) * MOTION_PERIOD_BLEND;
+    const period = this.motionPeriod;
+    if (period === undefined) {
+      this.motionEnd = undefined;
+      return;
+    }
+    const clock = (this.motionClock ??= { frame, time: at });
+    const expected = clock.time + (frame - clock.frame) * period;
+    const late = at - expected;
+    // An earlier save or another match (frames <= 0) starts the clock over, like a long gap.
+    const restart = frames <= 0 || late > MOTION_MARGIN * period || late < -MOTION_RESYNC * period;
+    clock.time = restart ? at : expected + late * MOTION_CLOCK_GAIN;
+    clock.frame = frame;
+    this.motionStart = Math.min(at, Math.max(this.lastRender, at - MOTION_PRESENT_GAP));
+    this.motionEnd = Math.max(
+      clock.time + (1 + MOTION_MARGIN) * period,
+      this.motionStart + MOTION_MIN_STEP * period * Math.min(steps, MOTION_CATCH_UP),
+    );
+  }
+
+  /**
+   * Fill this.pose (and the turret facing and body up vector) for one presentation. A mobile object plays each logic
+   * step from the pose it was last shown in, so a new snapshot never makes it jump; an object first seen, hidden
+   * until now or teleported starts from the snapshots as before.
+   */
+  private presentPose(
+    object: LiveObject,
+    visual: Visual,
+    before: LiveObject | undefined,
+    current: Timed,
+    alpha: number,
+  ): void {
+    const pose = this.pose;
+    const motion = (visual.motion ??= newMotion());
+    if (motion.segment !== current) {
+      motion.segment = current;
+      motion.hasFrom = motion.hasShown;
+      if (motion.hasShown) Object.assign(motion.from, motion.shown);
+    }
+    const tilt = object.tilt;
+    let start = motion.hasFrom ? motion.from : undefined;
+    if (!start && before) {
+      start = POSE_START;
+      start.x = before.x;
+      start.y = before.y;
+      start.z = before.z;
+      start.facing = before.facingRaw;
+      start.turret = before.turretFacingRaw ?? before.facingRaw;
+      start.tilt = !!before.tilt;
+      if (before.tilt) {
+        start.ux = before.tilt.x;
+        start.uy = before.tilt.y;
+        start.uz = before.tilt.z;
+      }
+    }
+    const near = !!start && Math.hypot(object.x - start.x, object.y - start.y) / LEPTONS_PER_CELL < TELEPORT_CELLS;
+    const shown = motion.shown;
+    if (near) {
+      const from = start!;
+      shown.x = lerp(from.x, object.x, alpha);
+      shown.y = lerp(from.y, object.y, alpha);
+      shown.z = lerp(from.z, object.z, alpha);
+      shown.facing = wrap16(lerpRaw16(from.facing, object.facingRaw, alpha));
+      shown.turret = wrap16(lerpRaw16(from.turret, object.turretFacingRaw ?? object.facingRaw, alpha));
+      if (tilt && from.tilt) {
+        const ux = lerp(from.ux, tilt.x, alpha);
+        const uy = lerp(from.uy, tilt.y, alpha);
+        const uz = lerp(from.uz, tilt.z, alpha);
+        const length = Math.hypot(ux, uy, uz) || 1;
+        shown.ux = ux / length;
+        shown.uy = uy / length;
+        shown.uz = uz / length;
+      }
+    } else {
+      shown.x = object.x;
+      shown.y = object.y;
+      shown.z = object.z;
+      shown.facing = object.facingRaw;
+      shown.turret = object.turretFacingRaw ?? object.facingRaw;
+    }
+    if (tilt && !(near && start!.tilt)) {
+      shown.ux = tilt.x;
+      shown.uy = tilt.y;
+      shown.uz = tilt.z;
+    }
+    shown.tilt = !!tilt;
+    motion.hasShown = true;
+    pose.x = shown.x;
+    pose.y = shown.y;
+    pose.z = shown.z;
+    pose.facing = (shown.facing / 65536) * Math.PI * 2;
+    this.poseTurret = (shown.turret / 65536) * Math.PI * 2;
+    // Engine axes (x, y, z up) to world axes (x, y up, z).
+    this.poseUp = tilt ? POSE_UP.set(shown.ux, shown.uz, shown.uy) : null;
   }
 
   /** Native current-cell policy uses the rules type, including while its unloading image is substituted. */
@@ -1508,7 +1759,11 @@ export class LiveView {
     const x = object.x / LEPTONS_PER_CELL;
     const y = object.y / LEPTONS_PER_CELL;
     const height = (object.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT;
-    const ground = this.world.terrain.heightAt(x, y);
+    // The surface under the unit, not the nearest grid node: on a ramp the node is up to a quarter level off, which
+    // dropped the ground card (and the contact shadow) for half of every cell driven.
+    const terrain = this.world.terrain;
+    if (terrain.surfaceHeightAt && height <= terrain.surfaceHeightAt(x, y) + GROUND_TOLERANCE) return true;
+    const ground = terrain.heightAt(x, y);
     if (height <= ground + 0.01) return true;
     if (Math.abs(height - ground - HIGH_BRIDGE_HEIGHT) > 0.01) return false;
     const cx = Math.floor(x);
@@ -1573,11 +1828,29 @@ export class LiveView {
     this.effectDriver.volumes(this.effectArt, this.volumeInstances);
     this.volumetricBlasts.setBlasts(this.volumeInstances);
     this.effectDriver.smokeCards(this.effectArt, instances);
+    this.underlayCards(snapshot, instances);
     const effects = visibleObjectEffects(snapshot);
     this.projectiles?.update(effects?.bullets ?? [], effects?.voxelAnims ?? [], this.hidden, instances);
     if (effects) this.particleCards(effects, instances);
     // An async art revision, rather than every presentation frame, schedules the next rebuild.
     this.painterDirty = true;
+  }
+
+  /** Art the engine draws inside an object's own picture, under its body (LiveObject.underlay). */
+  private underlayCards(snapshot: LiveSnapshot, out: EffectInstance[]): void {
+    const hd = this.effectDriver.style === 'enhanced' && this.effectDriver.hdEnabled;
+    for (const object of snapshot.objects) {
+      if (!object.underlay) continue;
+      const card = objectUnderlayCard(
+        object,
+        this.effectArt!,
+        hd,
+        this.hidden,
+        this.hd.emissiveOverlay.toCamera.value,
+        this.particlePool.anchor(),
+      );
+      if (card) out.push(card);
+    }
   }
 
   /** Particles the host reports one by one (bridge): their ParticleType art. */
@@ -2303,13 +2576,16 @@ export class LiveView {
 
   private visualFor(object: LiveObject, colorIndex: number, frame: number): Visual {
     const paletteKey = this.housePaletteKeys.get(colorIndex) ?? '';
-    const artType = this.artType(object);
+    const artType = this.drawArt(object, paletteKey);
     const existing = this.visuals.get(object.uid);
     const firstFrame = this.appearances.get(object.uid)?.frame ?? existing?.firstFrame ?? frame;
     if (existing) existing.firstFrame = firstFrame;
     // Owner changes (capture, mind control) and engine image changes rebuild the visual; pending art is retried.
     if (existing && existing.type === artType && existing.paletteKey === paletteKey) {
-      if (!existing.pending || !this.artReady(object)) return existing;
+      if (!existing.pending || !this.voxelSource(artType, paletteKey)) {
+        this.warmAlternate(existing, paletteKey);
+        return existing;
+      }
     }
     if (existing) this.removeVisual(existing);
     const visual = this.buildVisual(object, paletteKey, firstFrame);
@@ -2337,16 +2613,60 @@ export class LiveView {
       : object.type;
   }
 
-  /** Whether a pending object's library voxel has arrived. */
-  private artReady(object: LiveObject): boolean {
+  /**
+   * The art drawn this frame. An engine-selected image (a miner's unloading model) replaces the rules type's art only
+   * once it can draw its final look: while its voxel model or redraw projection is still loading (the first swap of
+   * a match) or has failed, the object keeps the rules type's picture instead of vanishing or changing look twice.
+   */
+  private drawArt(object: LiveObject, paletteKey: string): string {
     const artType = this.artType(object);
-    if (this.cache.voxels.has(artType)) return true;
+    if (artType === object.type || this.imageReady(object, artType, paletteKey)) return artType;
+    return object.type;
+  }
+
+  /** Whether image art other than the rules type's can be drawn now; sprite art draws from its own lazy pages. */
+  private imageReady(object: LiveObject, artType: string, paletteKey: string): boolean {
     const type = this.library?.type(artType);
-    return !!type?.voxel && !!this.library!.voxel(type.voxel);
+    if (type?.sprite && (object.kind === 'building' || object.kind === 'infantry' || type.shpUnit)) return true;
+    if (object.kind === 'building' && this.cache.manifest.sprites[`${object.kind}:${artType}`]?.frames.length)
+      return true;
+    const source = this.voxelSource(artType, paletteKey);
+    return !!source && this.voxelUnits.prepare(source.model, source.key, source.cacheKey);
+  }
+
+  /** A voxel art type's model (map cache first, then the library; null while it loads), palette row and cache key. */
+  private voxelSource(
+    artType: string,
+    paletteKey: string,
+  ): { model: VoxelModel; key: string; cacheKey: string } | null {
+    const libraryType = this.library?.type(artType);
+    const fromMap = this.cache.voxels.get(artType);
+    const fromLibrary = !fromMap && libraryType?.voxel ? this.library!.voxel(libraryType.voxel) : null;
+    const model = fromMap ?? fromLibrary;
+    if (!model) return null;
+    const basePalette = fromMap ? model.palette : this.libraryPalette(model.palette);
+    const key = paletteFor(this.cache, basePalette, libraryType?.remap ?? true, paletteKey || undefined);
+    return { model, key, cacheKey: `${artType}@${key}` };
+  }
+
+  /**
+   * Load the image a type swaps to (library unloadingVoxel) ahead of its first use: the model file, the shared
+   * geometry and the redraw projection are then ready when the engine selects it, so the swap takes one frame.
+   */
+  private warmAlternate(visual: Visual, paletteKey: string): void {
+    if (visual.alternateWarm) return;
+    const voxel = visual.mode === 'voxel' ? visual.libraryType?.unloadingVoxel : undefined;
+    const artType = voxel ? this.library?.voxelType(voxel) : undefined;
+    if (!voxel || !artType || this.library!.voxelFailed(voxel)) {
+      visual.alternateWarm = true;
+      return;
+    }
+    const source = this.voxelSource(artType, paletteKey);
+    if (source && this.voxelUnits.prepare(source.model, source.key, source.cacheKey)) visual.alternateWarm = true;
   }
 
   private buildVisual(object: LiveObject, paletteKey: string, firstFrame: number): Visual {
-    const artType = this.artType(object);
+    const artType = this.drawArt(object, paletteKey);
     const libraryType = this.library?.type(artType);
     const base = { type: artType, paletteKey, firstFrame };
     if (libraryType?.sprite && (object.kind === 'building' || object.kind === 'infantry'))
@@ -2357,13 +2677,9 @@ export class LiveView {
     const spriteId = `${object.kind}:${artType}`;
     if (object.kind === 'building' && this.cache.manifest.sprites[spriteId]?.frames.length)
       return { ...base, root: new Group(), mode: 'map-sprite', sprite: spriteId };
-    const fromMap = this.cache.voxels.get(artType);
-    const fromLibrary = !fromMap && libraryType?.voxel ? this.library!.voxel(libraryType.voxel) : null;
-    const model = fromMap ?? fromLibrary;
-    if (model) {
-      const basePalette = fromMap ? model.palette : this.libraryPalette(model.palette);
-      const key = paletteFor(this.cache, basePalette, libraryType?.remap ?? true, paletteKey || undefined);
-      const { root, turret } = this.voxelUnits.build(model, key, `${artType}@${key}`);
+    const source = this.voxelSource(artType, paletteKey);
+    if (source) {
+      const { root, turret } = this.voxelUnits.build(source.model, source.key, source.cacheKey);
       return { ...base, root, turret, mode: 'voxel', libraryType };
     }
     // No art (yet): the object stays tracked but draws nothing (a stand-in block would read as a real, oddly
@@ -2691,11 +3007,13 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
-/** Interpolate 16-bit engine facings along the short arc; returns radians (0 = north, clockwise). */
-function lerpAngle16(a: number, b: number, t: number): number {
+const wrap16 = (value: number): number => ((value % 65536) + 65536) % 65536;
+
+/** Interpolate 16-bit engine facings along the short arc; returns the facing in the same units, not wrapped. */
+function lerpRaw16(a: number, b: number, t: number): number {
   let delta = (((b - a) % 65536) + 65536) % 65536;
   if (delta > 32768) delta -= 65536;
-  return ((a + delta * t) / 65536) * Math.PI * 2;
+  return a + delta * t;
 }
 
 /** World position of an engine lepton coordinate, for hosts that place their own overlays. */
@@ -2726,6 +3044,64 @@ export function buildingTurretShadowOrigin(
     t = Math.max(Math.min(low, high), Math.min(Math.max(low, high), t));
   }
   return out.copy(drawnOrigin).addScaledVector(toCamera, t);
+}
+
+/**
+ * How far (world units along the view) an object's underlay sits in front of the ground under each of its pixels. The
+ * engine draws such art flat, a little in front of the ground layer and before the owner's body, so ground, overlays
+ * and shadows are under it and upright things cover it. Here the unit shadows are depth-writing planes above the
+ * ground (voxelShadow.ts: SHADOW_LIFT plus the penumbra copies, written at the nearest depth inside each pixel), so the
+ * underlay has to clear the highest of them by a screen pixel of ground slope; an ordinary effect decal
+ * (EFFECT_DECAL_LIFT) lies under those planes and the owner's own shadow cut the sparks away beside its hull. It
+ * stays under an upright body except within about two original pixel rows of the body's lowest row, where a card's
+ * depth meets the ground.
+ */
+export const UNDERLAY_DEPTH_PULL = 0.1;
+
+/**
+ * The effect card of an object's underlay, or null when there is nothing to draw (no underlay, a hidden object or
+ * point, art or frame not available yet). The engine blits such art flat (ground Z gradient, no Z write) immediately
+ * before the owner's body, so it is a ground decal here, pulled UNDERLAY_DEPTH_PULL towards the camera: the body,
+ * standing above the ground, covers it wherever the two overlap on screen, and ground, overlays and shadows stay under
+ * it. The pull is along the view (`toCamera`, the unit vector from the scene to the camera) and the decal's own lift is
+ * taken back out of the anchor, so the canvas centre stays exactly on the engine's pixel. The frame is the engine's on
+ * every logic frame; redrawn art (enhanced effects) replaces the pixels only and is held for the whole stage, never
+ * blended ahead.
+ */
+export function objectUnderlayCard(
+  object: Pick<LiveObject, 'underlay' | 'nativeHidden'>,
+  art: Pick<EffectArt, 'anim' | 'hdAnim' | 'hdPageState'>,
+  hd: boolean,
+  hidden: (x: number, y: number, z: number) => boolean,
+  toCamera: Vector3,
+  anchor = new Vector3(),
+): EffectInstance | null {
+  const under = object.underlay;
+  if (!under || object.nativeHidden || hidden(under.x, under.y, under.z)) return null;
+  const resolved = art.anim(under.art);
+  const frame = resolved?.sprite.frames[under.frame];
+  if (!resolved || !frame || frame.rect[2] <= 0) return null;
+  leptonAnchor(under.x, under.y, under.z, 0, 0, anchor);
+  anchor.y -= EFFECT_DECAL_LIFT;
+  anchor.addScaledVector(toCamera, UNDERLAY_DEPTH_PULL);
+  const card: EffectInstance = {
+    anchor,
+    frame,
+    palette: resolved.palette,
+    alpha: 1,
+    push: 0,
+    draw: 'flat',
+    pass: 'ground',
+    depth: ((under.x + under.y) * 15) / LEPTONS_PER_CELL - (under.z / LEPTONS_PER_LEVEL) * 15,
+    // Scene-lit like other original art. The engine blits it about 1.1x brighter (the owner's cell light plus the
+    // extra unit light), but the layer's glow lift turned the pale grains white in frozen pairs; the orange stays.
+    glow: false,
+  };
+  const redrawn = hd ? art.hdAnim(under.art) : null;
+  const hdFrame = redrawn?.frames[under.frame];
+  if (redrawn && hdFrame && art.hdPageState(hdFrame.page) !== null)
+    card.hd = { frame: hdFrame, next: null, scale: redrawn.scale, blend0: 0, t0: 0, stageSeconds: 1 };
+  return card;
 }
 
 /**

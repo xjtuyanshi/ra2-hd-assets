@@ -6,6 +6,7 @@ import { TerrainDepth } from '../src/terrainDepth';
 import { GROUND_DEPTH, NATIVE_UNIT_RENDER_ORDER, nativeCardPush } from '../src/ra2/nativeDepth';
 import { setShadowGround } from '../src/ra2/voxelShadow';
 import {
+  VOXEL_BITMAP_MARGIN,
   VOXEL_CARD_KAPPA,
   voxelBitmapBottom,
   voxelCardDelta,
@@ -92,7 +93,7 @@ describe('posed voxel bitmap bounds', () => {
     const flat = unit.root.nativeDepth.bottom;
     const scene = new Scene();
     scene.add(unit.root);
-    setShadowGround(scene, { height: () => 0, normal: (_x, _z, out) => out.set(-1, 1, 0).normalize() });
+    setShadowGround(scene, { height: () => 0, normal: (_x, _z, out) => out.set(0.3, 1, -0.6).normalize() });
     scene.updateMatrixWorld(true);
     expect(unit.root.nativeDepth.bottom).not.toBe(flat);
     expect(unit.root.nativeDepth.bottom).toBe(voxelBitmapBottom(unit.root.partMeshes, unit.root.position));
@@ -100,10 +101,10 @@ describe('posed voxel bitmap bounds', () => {
     material.dispose();
   });
 
-  it('projects all eight world AABB corners after facing and articulation while excluding every twin', () => {
+  it('projects every part box as it is posed, with the bitmap margin, while excluding every twin', () => {
     const body = new BoxGeometry(2, 1, 4);
     const barrel = new BoxGeometry(2, 0.2, 0.2);
-    barrel.translate(1, 1, 0);
+    barrel.translate(1, -0.4, 0);
     const material = new MeshStandardNodeMaterial();
     const unit = instantiateVoxel(
       [
@@ -116,8 +117,10 @@ describe('posed voxel bitmap bounds', () => {
     const anchor = unit.root.position.clone();
     updateVoxelNativeDepth(unit, anchor, 13);
     const firstBottom = unit.root.nativeDepth.bottom;
-    // Body has y=-0.5, and the offset barrel extends the union to x=5. The union's z maximum remains 2.
-    expect(firstBottom).toBe(Math.floor(15 * (5 + 2) + 0.5 * Math.cos(Math.PI / 6) * PIXELS_PER_CELL_EDGE));
+    const drop = 0.5 * Math.cos(Math.PI / 6) * PIXELS_PER_CELL_EDGE;
+    // Both parts reach y=-0.5; the offset barrel ends at x=5, z=0.1, lower on screen than the body corner (1, 2).
+    expect(firstBottom).toBe(Math.floor(15 * (5 + 0.1) + drop) + VOXEL_BITMAP_MARGIN - 1);
+    expect(VOXEL_BITMAP_MARGIN).toBe(4);
     expect(unit.root.nativeDepth).toMatchObject({ bonus: 13, enabled: 1 });
     for (const mesh of unit.root.partMeshes) expect(mesh.userData.voxelNativeDepth).toBe(unit.root.nativeDepth);
     for (const twin of unit.root.children.filter(
@@ -128,13 +131,33 @@ describe('posed voxel bitmap bounds', () => {
     }
     expect(voxelBitmapBottom(unit.root.partMeshes, anchor)).toBe(firstBottom);
 
+    // The barrel turned back over the hull: the body corner is the lowest point again.
     unit.turret!.rotation.y = Math.PI;
     updateVoxelNativeDepth(unit, anchor);
-    expect(unit.root.nativeDepth.bottom).toBeLessThan(firstBottom);
     const turnedTurret = unit.root.nativeDepth.bottom;
+    expect(turnedTurret).toBe(Math.floor(15 * (3 + 0.1) + drop) + VOXEL_BITMAP_MARGIN - 1);
+    // Turned 45 degrees the hull's own corners are projected: its long axis points down the screen (2 * sqrt 2
+    // cells). A world-axis box around the turned hull would reach 3 * sqrt 2 and claim 21 more rows.
     unit.root.rotation.y = Math.PI / 4;
     updateVoxelNativeDepth(unit, anchor);
-    expect(unit.root.nativeDepth.bottom).not.toBe(turnedTurret);
+    expect(unit.root.nativeDepth.bottom).toBe(Math.floor(15 * 2 * Math.SQRT2 + drop) + VOXEL_BITMAP_MARGIN - 1);
+    expect(unit.root.nativeDepth.bottom).toBeLessThan(Math.floor(15 * 3 * Math.SQRT2 + drop));
+    // Tilted on a ramp the bounds follow the tilted body too.
+    unit.root.setSurfaceUp(new Vector3(0.4896, 0.872, 0));
+    updateVoxelNativeDepth(unit, anchor);
+    const tilted = unit.root.nativeDepth.bottom;
+    expect(tilted).not.toBe(Math.floor(15 * 2 * Math.SQRT2 + drop) + VOXEL_BITMAP_MARGIN - 1);
+    let lowest = -Infinity;
+    for (const mesh of unit.root.partMeshes) {
+      const box = mesh.geometry.boundingBox!;
+      for (const x of [box.min.x, box.max.x])
+        for (const y of [box.min.y, box.max.y])
+          for (const z of [box.min.z, box.max.z])
+            lowest = Math.max(lowest, voxelFragmentRow(new Vector3(x, y, z).applyMatrix4(mesh.matrixWorld), anchor));
+    }
+    expect(tilted).toBe(Math.floor(lowest) + VOXEL_BITMAP_MARGIN - 1);
+    unit.root.setSurfaceUp(null);
+    updateVoxelNativeDepth(unit, anchor);
 
     // Ground/bridge anchor and model translate together: bitmap bounds remain relative to that draw point.
     const bottom = unit.root.nativeDepth.bottom;

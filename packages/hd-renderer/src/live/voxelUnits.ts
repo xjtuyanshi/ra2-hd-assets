@@ -17,6 +17,7 @@ import { LEVEL_HEIGHT } from '../world';
 import { smoothVoxelOptions, type SmoothVoxelOptions } from '../ra2/voxelSmooth';
 import { buildSmoothVoxelGeometry } from '../ra2/voxelSmoothGeometry';
 import { projectionParts, voxelProjectionLibrary, type VoxelProjectionLibrary } from '../ra2/voxelProjection';
+import { setShadowContact } from '../ra2/voxelShadow';
 
 export interface VoxelUnitsOptions {
   voxelLook?: 'engine' | 'remaster';
@@ -71,50 +72,65 @@ export class VoxelUnits {
   }
 
   /**
+   * The shared geometry set of `model` for palette row `paletteKey`, built once per `cacheKey`; its redraw projection
+   * (when the look has one) is requested here and repaints every waiting instance when it arrives.
+   */
+  private partsFor(model: VoxelModel, paletteKey: string, cacheKey: string): VoxelGeometry[] {
+    let parts = this.geometries.get(cacheKey);
+    if (parts) return parts;
+    parts =
+      this.voxelLook === 'remaster'
+        ? buildSmoothVoxelGeometry(model, this.cache.paletteRgb.get(paletteKey)!, this.hd.nodes, this.smoothVoxel)
+        : buildVoxelGeometry(model, this.cache.paletteRgb.get(paletteKey)!, this.hd.nodes);
+    this.geometries.set(cacheKey, parts);
+    const projection = this.projections;
+    if (!projection) return parts;
+    const palette = this.cache.paletteRgb.get(paletteKey)!;
+    const required = projectionParts(parts);
+    if (projectVoxelMaterials(parts, palette, projection.get(model.id, required), this.hd.nodes)) return parts;
+    const waiting = new Set<VoxelUnit>();
+    const target = parts;
+    this.pending.set(target, waiting);
+    void projection.loadType(model.id, required).then((asset) => {
+      if (projectVoxelMaterials(target, palette, asset, this.hd.nodes)) {
+        const materials = new Map(target.map((part) => [part.geometry, part.material!]));
+        for (const unit of waiting) {
+          unit.root.traverse((mesh) => {
+            // Shadow twins share geometry but own their shadow material and must never be repainted.
+            if (mesh instanceof Mesh && mesh.userData.painterDepth) {
+              const material = materials.get(mesh.geometry);
+              if (material) mesh.material = material;
+            }
+          });
+          // A resting unit may receive no new pose after this callback. Preserve its active color/depth
+          // pass immediately instead of showing the new physical source until a later publication.
+          if (unit.root instanceof VoxelRoot) {
+            const { anchor, bonus, enabled } = unit.root.nativeDepth;
+            updateVoxelNativeDepth(unit, anchor, bonus, enabled !== 0);
+          }
+        }
+      }
+      waiting.clear();
+      this.pending.delete(target);
+    });
+    return parts;
+  }
+
+  /**
+   * Build the shared geometry and request its projection ahead of the first instance. True once a new instance
+   * would draw its final look at once (the projection has arrived, is absent or failed); callers that swap one model
+   * for another on the same object keep the old one on screen until then.
+   */
+  prepare(model: VoxelModel, paletteKey: string, cacheKey: string): boolean {
+    return !this.pending.has(this.partsFor(model, paletteKey, cacheKey));
+  }
+
+  /**
    * A new instance of `model` drawn with palette row `paletteKey` (already resolved with paletteFor, so house-remapped
    * when the owner is known). `cacheKey` identifies the geometry set to share, e.g. `${type}@${paletteKey}`.
    */
   build(model: VoxelModel, paletteKey: string, cacheKey: string): VoxelUnit {
-    let parts = this.geometries.get(cacheKey);
-    if (!parts) {
-      parts =
-        this.voxelLook === 'remaster'
-          ? buildSmoothVoxelGeometry(model, this.cache.paletteRgb.get(paletteKey)!, this.hd.nodes, this.smoothVoxel)
-          : buildVoxelGeometry(model, this.cache.paletteRgb.get(paletteKey)!, this.hd.nodes);
-      this.geometries.set(cacheKey, parts);
-      const projection = this.projections;
-      if (projection) {
-        const palette = this.cache.paletteRgb.get(paletteKey)!;
-        const required = projectionParts(parts);
-        if (!projectVoxelMaterials(parts, palette, projection.get(model.id, required), this.hd.nodes)) {
-          const waiting = new Set<VoxelUnit>();
-          const target = parts;
-          this.pending.set(target, waiting);
-          void projection.loadType(model.id, required).then((asset) => {
-            if (projectVoxelMaterials(target, palette, asset, this.hd.nodes)) {
-              const materials = new Map(target.map((part) => [part.geometry, part.material!]));
-              for (const unit of waiting) {
-                unit.root.traverse((mesh) => {
-                  // Shadow twins share geometry but own their shadow material and must never be repainted.
-                  if (mesh instanceof Mesh && mesh.userData.painterDepth) {
-                    const material = materials.get(mesh.geometry);
-                    if (material) mesh.material = material;
-                  }
-                });
-                // A resting unit may receive no new pose after this callback. Preserve its active color/depth
-                // pass immediately instead of showing the new physical source until a later publication.
-                if (unit.root instanceof VoxelRoot) {
-                  const { anchor, bonus, enabled } = unit.root.nativeDepth;
-                  updateVoxelNativeDepth(unit, anchor, bonus, enabled !== 0);
-                }
-              }
-            }
-            waiting.clear();
-            this.pending.delete(target);
-          });
-        }
-      }
-    }
+    const parts = this.partsFor(model, paletteKey, cacheKey);
     const unit = instantiateVoxel(parts, this.material, this.hd.nodes);
     this.pending.get(parts)?.add(unit);
     return unit;
@@ -124,7 +140,7 @@ export class VoxelUnits {
    * Place a unit at an engine pose. Engine facing 0 = north (world -z), clockwise; the model's nose is local +x. The
    * turret yaws relative to the body (`turretFacing` in radians like `facing`; null = aligned with the body).
    */
-  pose(unit: VoxelUnit, pose: VoxelPose, turretFacing: number | null): void {
+  pose(unit: VoxelUnit, pose: VoxelPose, turretFacing: number | null, up?: Vector3 | null): void {
     unit.root.position.set(
       pose.x / LEPTONS_PER_CELL,
       (pose.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT,
@@ -132,6 +148,16 @@ export class VoxelUnits {
     );
     unit.root.rotation.y = Math.PI / 2 - pose.facing;
     if (unit.turret) unit.turret.rotation.y = pose.facing - (turretFacing ?? pose.facing);
+    // `up` (world axes) is the game's own body tilt; without it the root follows the registered ground.
+    if (unit.root instanceof VoxelRoot) unit.root.setSurfaceUp(up ?? null);
+  }
+
+  /**
+   * A unit standing on terrain or a bridge deck casts the engine's contact shadow at its own origin (see
+   * voxelShadow.ts setShadowContact); `normal` is the plane of a tilted body, absent = the ground's own.
+   */
+  setGroundContact(unit: VoxelUnit, grounded: boolean, normal?: Vector3): void {
+    setShadowContact(unit.root, grounded, normal);
   }
 
   /** Painter bias remains additive to either physical flight depth or the native ground card. */

@@ -494,6 +494,9 @@ export class VoxelUnit extends Group {
   readonly nativeDepth = createVoxelNativeDepth();
   private readonly translucentMaterials = new Map<MeshStandardNodeMaterial, MeshStandardNodeMaterial>();
   bodyOpacity = 1;
+  /** Up vector the game draws this body with (world axes), when its host reports one; null = follow the ground. */
+  private surfaceUp: Vector3 | null = null;
+  private readonly surfaceUpValue = new Vector3(0, 1, 0);
 
   constructor() {
     super();
@@ -539,7 +542,18 @@ export class VoxelUnit extends Group {
     this.translucentMaterials.clear();
   }
 
+  /** The host's own tilt replaces the ground lookup (a locomotor that never tilts passes straight up). */
+  setSurfaceUp(up: Vector3 | null): void {
+    this.surfaceUp = up ? this.surfaceUpValue.copy(up).normalize() : null;
+  }
+
   override updateMatrix(): void {
+    if (this.surfaceUp) {
+      tilt.setFromUnitVectors(UP, this.surfaceUp).multiply(this.quaternion);
+      this.matrix.compose(this.position, tilt, this.scale);
+      this.matrixWorldNeedsUpdate = true;
+      return;
+    }
     const ground = groundOf(this);
     const { x, y, z } = this.position;
     if (ground?.normal && Math.abs(y - ground.height(x, z)) < ON_GROUND) {

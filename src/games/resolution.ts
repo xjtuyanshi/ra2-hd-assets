@@ -17,6 +17,20 @@ export const GAME_RESOLUTIONS: readonly GameResolution[] = [
   { width: 1920, height: 1080 },
 ];
 
+/**
+ * Sizes a session overlay may request outside the presets: at least the 800x600 the games' shell pages are laid out
+ * for, at most what the VM's display-mode shim accepts (SetDisplayMode in src/vm86/shim/directx.ts).
+ */
+export const GAME_RESOLUTION_LIMITS = { minWidth: 800, minHeight: 600, maxWidth: 2560, maxHeight: 1600 } as const;
+
+/** A whole-pixel size within GAME_RESOLUTION_LIMITS (a preset or not), or null. */
+export function customGameResolution(width: number, height: number): GameResolution | null {
+  const { minWidth, minHeight, maxWidth, maxHeight } = GAME_RESOLUTION_LIMITS;
+  if (!Number.isInteger(width) || !Number.isInteger(height)) return null;
+  if (width < minWidth || width > maxWidth || height < minHeight || height > maxHeight) return null;
+  return { width, height };
+}
+
 export function gameResolutionValue(resolution: GameResolution): string {
   return `${resolution.width}x${resolution.height}`;
 }

@@ -743,7 +743,7 @@ export class HdRenderer {
     // Voxel units stand on (and tilt with) the ground or the water surface under them, and their flattened shadows
     // fall there (see ra2/voxelShadow.ts). Ramps rise one level per cell; anything steeper is a cliff edge.
     const shadowGround = groundFromHeights(
-      (x, z) => Math.max(this.terrain.heightAt(x, z), this.waterY),
+      (x, z) => Math.max(this.terrain.surfaceHeightAt?.(x, z) ?? this.terrain.heightAt(x, z), this.waterY),
       LEVEL_HEIGHT * 1.5,
     );
     shadowGround.waterHeight = this.terrain.waterHeightAt;
@@ -850,6 +850,27 @@ export class HdRenderer {
     if (this.pipeline) this.buildPipeline();
   }
 
+  /**
+   * Drawing-buffer pixels per view pixel when the buffer is not sized through the renderer's pixel ratio (the live
+   * view sizes it in device pixels and frames the camera in engine pixels); null follows the pixel ratio.
+   */
+  private bufferScale: number | null = null;
+
+  /**
+   * Tell the post passes how many drawing-buffer pixels one view pixel covers (LiveView: device pixels per engine
+   * pixel), so screen-space radii given in view pixels keep their size in the scene at every display scale. Null
+   * returns to the renderer's pixel ratio.
+   */
+  setBufferScale(scale: number | null): void {
+    this.bufferScale = scale !== null && Number.isFinite(scale) && scale > 0 ? scale : null;
+    if (this.pipeline && this.pipelineKey !== this.settingsPipelineKey()) this.buildPipeline();
+  }
+
+  /** Drawing-buffer pixels per view pixel (see setBufferScale). */
+  private viewPixelScale(): number {
+    return this.bufferScale ?? this.renderer.getPixelRatio();
+  }
+
   private settingsPipelineKey(): string {
     const { antialias, toneMapper, sharpness, debugView } = this.settings;
     const key: unknown[] = [
@@ -858,8 +879,8 @@ export class HdRenderer {
       sharpness,
       debugView,
       debugView === 'none' && hasCinematicGrade(this.settings),
-      // The clarity pass exists only while it is on; its blur radius follows the drawing buffer's pixel ratio.
-      this.settings.clarity > 0 ? Math.round(this.renderer.getPixelRatio() * 4) : 0,
+      // The clarity pass exists only while it is on; its blur radius follows the drawing buffer's pixel scale.
+      this.settings.clarity > 0 ? Math.round(this.viewPixelScale() * 4) : 0,
     ];
     // No extra key/graph branch for faithful: preserve its original output path exactly.
     if (emissiveOverlayEnabled(this.settings, emissiveMrtSupported(this.renderer))) key.push('emissive');
@@ -999,7 +1020,7 @@ export class HdRenderer {
     if (this.settings.clarity > 0 && debugView === 'none') {
       // Band-pass (difference of two half-resolution blurs): faces, crevices and canopy masses a few CSS px and up gain
       // contrast while pixel-scale texture (brick, asphalt grain) is left as it is; the plain unsharp mask doubled it.
-      const ratio = this.renderer.getPixelRatio();
+      const ratio = this.viewPixelScale();
       const fine: ShaderNode = gaussianBlur(display, null, (CLARITY_FINE * ratio) / 2, { resolutionScale: 0.5 });
       const broad: ShaderNode = gaussianBlur(display, null, (CLARITY_SIGMA * ratio) / 2, { resolutionScale: 0.5 });
       nodes.push(fine, broad);

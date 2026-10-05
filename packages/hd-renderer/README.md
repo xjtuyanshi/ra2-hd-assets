@@ -409,6 +409,19 @@ UnloadingClass at `0x73D2BA`, then swaps Type at `0x73D2C4` and restores it at `
 therefore draw HORV/CMON. Image changes rebuild the visual while retaining animation clocks; missing image art
 falls back to `type`.
 
+Optional `underlay { art, frame, x, y, z }` is one frame of effect-library art the engine draws inside the
+object's own picture right before its body; YR sends the ore-gathering sparks of a harvesting miner (`OREGATH`, see
+docs/remaster/HD_BRIDGE.md). `objectUnderlayCard` turns it into a ground-pass decal of the effect sprite layer at the
+engine's point: the body, standing above the ground, covers it where they overlap, and ore, ground and shadows stay
+under it. Unit shadows are depth-writing planes a little above the ground (`voxelShadow.ts`), over ordinary effect
+decals, so the underlay is pulled `UNDERLAY_DEPTH_PULL` (0.1 world units) along the view in front of the ground under
+each pixel: above every shadow layer, and behind a unit body from its third pixel row up (a body's depth is a card
+standing on its lowest row). The pull is applied to the anchor together with the decal's own lift, so the art stays on
+the engine's pixel. It is opaque, scene-lit with the art's palette (no glow lift: it turned the pale grains white in frozen
+pairs), follows the engine frame on every snapshot and is skipped for a hidden owner or a shrouded point. In the
+enhanced effect style an `effects-hd.json` entry of the same id replaces the pixels, held for the whole engine stage;
+its warm pixels are self-lit like other HD flipbooks, which is what keeps the sparks orange and readable.
+
 Optional `nativeHidden` suppresses the complete live object, including shadows and HD extras. The YR reader
 uses this for tethered UnitClass vehicles whose validated building radio link has effective or queued Unload 16
 and canonical door booleans, unless that building draws the vehicle itself (effective Unload, its own tether byte
@@ -739,7 +752,7 @@ shadow stretch takes the original calculation, and other neutral gains multiply 
 | `contactShade` (neutral 1; cinematic 1.5)       | Multiplies foundation contact alpha (`0.42 * contactShade`, final alpha capped at 0.85) and the terrain's contact darkening only while the enhanced look is enabled (darkening cap 0.85). Faithful terrain keeps its original contact attribute.                                                                                                                                                                                                        |
 | `shadowLength` (neutral 1; cinematic 1.4)       | Multiplies the elevation-derived SHP/voxel stretch and its cap (`MAX_SHADOW_STRETCH * shadowLength`), only with `shadowFollow > 0`; partial follow still blends from the original transform.                                                                                                                                                                                                                                                            |
 | `shadowDarkness` (neutral 1; cinematic 1.15)    | Multiplies enhanced building/vehicle SHP and voxel shadow opacity (cap 0.9). Their faithful path keeps `ENGINE_SHADOW_OPACITY`; infantry contact cores stay solid in all looks. Voxel shadow materials and uniforms share one renderer context and lifetime.                                                                                                                                                                                            |
-| `clarity` (neutral 0; cinematic 0.55)           | Mid-scale local contrast on the display image: the luminance band between Gaussian blurs of 1.25 and 5 CSS px is added back this many times (shaded side at half strength, mid-tones only). 0 leaves the pass out of the pipeline.                                                                                                                                                                                                                      |
+| `clarity` (neutral 0; cinematic 0.55)           | Mid-scale local contrast on the display image: the luminance band between Gaussian blurs of 1.25 and 5 view px (CSS px by default; engine px in the live view, which reports its device pixels per engine pixel through `setBufferScale`) is added back this many times (shaded side at half strength, mid-tones only). 0 leaves the pass out of the pipeline.                                                                                          |
 
 Building emitters are authored in `src/live/buildingLights.ts` (`BUILDING_LIGHTS`); foundation fractions and
 engine-pixel head heights come from the live type library. `LiveView` owns a pure `BuildingLightGate`: completed
@@ -925,7 +938,10 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   transparent texels HD atlas colours keep their hue but are never brighter than the original texel there (the
   upscaler's pale background fringe goes without a rim of raw palette colours). An HD page's optional
   `paintSaturation` (0..1, absent = 1) grades only the decoded house colour in linear light, preserving Rec.709
-  luminance before the coverage-mask mix. A value of 1 or absent adds no shader nodes. Building and vehicle SHP
+  luminance before the coverage-mask mix. A value of 1 or absent adds no shader nodes. HD pages and their paint masks
+  are decoded off the main thread (`loadHdTexture` in `ra2/cache.ts`: `createImageBitmap`, straight alpha, no colour
+  conversion) and a library page is uploaded as soon as it arrives; the bitmap is released after the first upload, so a
+  page cannot be uploaded a second time. Building and vehicle SHP
   shadows halve the displayed colour; infantry uses solid black palette-index-12 contact cores in all looks.
   Live object occlusion combines native BUILDNGZ body samples, ground-like parts and
   gradient-2 ground-unit cards (`ra2/nativeDepth.ts`) with small scene-wide traversal/component biases

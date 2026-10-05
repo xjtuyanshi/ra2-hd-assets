@@ -4,6 +4,7 @@ import { Palette, ShpFile, parseIni, type IniFile } from 'ra2-formats';
 import { animFrameAt, animRateFrames, effectSprite } from '../src/effects.ts';
 import type { InstallView } from '../src/node/artSource.ts';
 import {
+  ENGINE_ANIM_ART,
   animGraph,
   classifyAnim,
   collectEffects,
@@ -167,7 +168,8 @@ const FILES = {
 };
 
 describe('effect sidecar collection', () => {
-  const inst = fakeInstall(FILES, { 'rulesmd.ini': RULES, 'artmd.ini': ART });
+  const INIS = { 'rulesmd.ini': RULES, 'artmd.ini': ART };
+  const inst = fakeInstall(FILES, INIS);
   const collected = collectEffects([
     { theater: 'temperate', inst },
     { theater: 'snow', inst },
@@ -192,6 +194,25 @@ describe('effect sidecar collection', () => {
     expect(lib.anims['BURN']).toMatchObject({ loopCount: -1, rateFrames: 2 });
     expect(lib.anims['CORPSE']).toMatchObject({ palette: 'unit', flat: true, layer: 'ground', rateFrames: 90 });
     expect(lib.anims['BOOM']!.visW).toBeGreaterThan(20);
+  });
+
+  it('collects art the executable loads by file name, without a garnish row', () => {
+    const withEngineArt = collectEffects([
+      { theater: 'temperate', inst: fakeInstall({ ...FILES, 'oregath.shp': frames(120, 10) }, INIS) },
+    ]);
+    expect(ENGINE_ANIM_ART).toContain('OREGATH');
+    expect(withEngineArt.library.anims['OREGATH']).toMatchObject({
+      sprite: 'anim:OREGATH',
+      palette: 'anim',
+      start: 0,
+      frameCount: 120,
+      rateFrames: 1,
+    });
+    expect(withEngineArt.sprites.get('anim:OREGATH')?.frames).toHaveLength(120);
+    expect(withEngineArt.table['OREGATH']).toBeUndefined();
+    expect(withEngineArt.counts['anims:engine']).toBe(1);
+    // An install without the file simply has no entry.
+    expect(lib.anims['OREGATH']).toBeUndefined();
   });
 
   it('keeps theater variants apart when the art resolves to different files', () => {

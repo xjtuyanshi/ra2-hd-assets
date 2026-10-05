@@ -565,6 +565,43 @@ describe('projection loading and disposal', () => {
     expect(await loading).toBeNull();
     for (const close of closes) expect(close).toHaveBeenCalledOnce();
   });
+  it('prepares a model ahead of its first instance, which then draws the projected look at once', async () => {
+    mockAssets();
+    const nodes = new AtmosphereNodes();
+    const hd = { nodes, settings: { voxelLook: 'engine' } } as HdRenderer;
+    const world = { nodes, voxelProjection: '/vehicles-hd' } as HdWorld;
+    const cache = { paletteRgb: new Map([['unit', new Uint8Array(768)]]) } as Ra2Cache;
+    const units = new VoxelUnits(hd, world, cache);
+    // The redraw atlas is still loading: an instance built now would show the engine look, then change.
+    expect(units.prepare(model, 'unit', `${model.id}@unit`)).toBe(false);
+    expect(units.prepare(model, 'unit', `${model.id}@unit`)).toBe(false);
+    await vi.waitFor(() => expect(units.prepare(model, 'unit', `${model.id}@unit`)).toBe(true));
+    const unit = units.build(model, 'unit', `${model.id}@unit`);
+    const sources: Mesh[] = [];
+    unit.root.traverse((object) => {
+      if (object instanceof Mesh && object.userData.painterDepth) sources.push(object);
+    });
+    expect(sources.length).toBeGreaterThan(0);
+    for (const mesh of sources) expect((mesh.material as { name: string }).name).toContain('-projected');
+    nodes.dispose();
+  });
+  it.each(['no projection library', 'a type absent from the index'])('settles preparation at once with %s', async (kind) => {
+    mockAssets({ spec: turretManifest() });
+    const nodes = new AtmosphereNodes();
+    const hd = { nodes, settings: { voxelLook: 'engine' } } as HdRenderer;
+    const world = { nodes, ...(kind === 'no projection library' ? {} : { voxelProjection: '/vehicles-hd' }) } as HdWorld;
+    const cache = { paletteRgb: new Map([['unit', new Uint8Array(768)]]) } as Ra2Cache;
+    const units = new VoxelUnits(hd, world, cache);
+    if (kind === 'no projection library') expect(units.prepare(model, 'unit', `${model.id}@unit`)).toBe(true);
+    // An absent or failed type settles after its lookup and keeps the engine look: nothing more will change.
+    else await vi.waitFor(() => expect(units.prepare(model, 'unit', `${model.id}@unit`)).toBe(true));
+    const unit = units.build(model, 'unit', `${model.id}@unit`);
+    unit.root.traverse((object) => {
+      if (object instanceof Mesh && object.userData.painterDepth)
+        expect((object.material as { name: string }).name).not.toContain('-projected');
+    });
+    nodes.dispose();
+  });
   it.each([
     { model, spec: manifest(), opacity: 1 },
     { model: turretModel, spec: turretManifest(), opacity: 1 },

@@ -25,7 +25,7 @@ import {
 import { cardPush, objectAnchor, SpriteLayer, type SpriteInstance } from '../src/ra2/sprites';
 import { VOXEL_CLEARANCE } from '../src/ra2/voxels';
 import { TerrainDepth } from '../src/terrainDepth';
-import { groundPush, nativeCardPush } from '../src/ra2/nativeDepth';
+import { groundPush, nativeCardPush, TERRAIN_OBJECT_DEPTH_BONUS, terrainObjectDepth } from '../src/ra2/nativeDepth';
 import { IsoCamera, PIXELS_PER_CELL_EDGE } from '../src/world';
 
 const view = new IsoCamera();
@@ -429,6 +429,59 @@ describe('sprite depth attributes', () => {
     } finally {
       layer.mesh.geometry.dispose();
       layer.mesh.material.dispose();
+      capture.dispose();
+      atlas.dispose();
+    }
+  });
+
+  it('keeps a Z-writing terrain object card in the body pass, where later units are tested against it', () => {
+    const atlas = new Texture();
+    const capture = new TerrainDepth(1.5);
+    const cache = {
+      paletteAtlas: { image: { height: 1 } },
+      paletteRow: new Map(),
+      manifest: { spriteAtlas: { width: 32, height: 32 } },
+      spriteAtlas: atlas,
+    } as unknown as Ra2Cache;
+    const tree: SpriteInstance = {
+      anchor: new Vector3(),
+      frame: { rect: [0, 0, 40, 60], offset: [-20, -58] },
+      palette: '',
+      push: 0,
+      shadow: false,
+      nativeDepth: terrainObjectDepth({ rect: [0, 0, 40, 60], offset: [-20, -58] }),
+    };
+    const unit: SpriteInstance = { ...tree, nativeDepth: { mode: 'card', bottom: 3, bonus: 0 } };
+    const layer = new SpriteLayer(cache, [tree], 2, undefined, null, null, null, capture);
+    try {
+      expect(tree.nativeDepth).toEqual({ mode: 'card', bottom: 1, bonus: TERRAIN_OBJECT_DEPTH_BONUS, writer: true });
+      const flags = (layer as unknown as Buffers).flags;
+      // Card mode with its bottom and bonus, drawn by the depth-writing main pass (0), not the late unit pass (2).
+      expect([9, 10, 11, 16].map((component) => flags.getComponent(0, component))).toEqual([3, 1, 12, 0]);
+      expect(layer.unitMesh.visible).toBe(false);
+      layer.updateCaptureCodes(() => 7);
+      expect(layer.unitMesh.layers.isEnabled(31)).toBe(false);
+      expect(layer.mesh.layers.isEnabled(31)).toBe(true);
+      layer.setInstances([tree, unit]);
+      const uploaded = (layer as unknown as { uploaded: SpriteInstance[] }).uploaded;
+      expect(flags.getComponent(uploaded.indexOf(tree), 16)).toBe(0);
+      expect(flags.getComponent(uploaded.indexOf(unit), 16)).toBe(2);
+      expect(layer.unitMesh.visible).toBe(true);
+      // The rule the card encodes, for draw points on one screen row: a vehicle (bonus 0) is nearer than the tree
+      // only when its bitmap bottom is more than nine rows below the tree's, so it passes behind the crown.
+      const nearer = (unitBottom: number, treeBottom: number, row: number) =>
+        nativeCardPush(row, unitBottom) > nativeCardPush(row, treeBottom, TERRAIN_OBJECT_DEPTH_BONUS);
+      for (const row of [-40, -39, -38, -20, -5]) {
+        expect(nearer(0, 0, row)).toBe(false);
+        expect(nearer(6, 0, row)).toBe(false);
+        expect(nearer(9, 0, row)).toBe(false);
+        expect(nearer(10, 0, row)).toBe(true);
+        expect(nearer(12, 2, row)).toBe(true);
+      }
+    } finally {
+      layer.mesh.geometry.dispose();
+      layer.mesh.material.dispose();
+      layer.mesh.dispose();
       capture.dispose();
       atlas.dispose();
     }

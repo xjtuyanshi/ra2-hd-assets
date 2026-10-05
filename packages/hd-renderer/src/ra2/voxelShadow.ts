@@ -6,6 +6,7 @@ import {
   Matrix4,
   Mesh,
   MeshBasicNodeMaterial,
+  Quaternion,
   Vector2,
   Vector3,
   Vector4,
@@ -31,7 +32,7 @@ import {
 import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { sceneLitColour } from '../lighting';
-import { LEVEL_HEIGHT } from '../world';
+import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { spriteLookFor } from './spriteLook';
 import { voxelReflectionColour, voxelReflectionSource } from './voxelReflectionColour';
 
@@ -197,6 +198,48 @@ export function groundFromHeights(height: (x: number, z: number) => number, maxS
 
 const grounds = new WeakMap<Object3D, ShadowGround>();
 const shadowOrigins = new WeakMap<Object3D, Vector3>();
+
+/**
+ * The engine's shadow of a unit standing on the ground (YR 1.001 UnitClass draw 0x73C47A..0x73C5C4, FootClass
+ * 0x4DB0D0, TechnoClass 0x706BD0 / 0x707280 / 0x753F90, locomotor Shadow_Matrix 0x55A7D0 and Shadow_Point 0x55A8C0):
+ * the top-down silhouette of ONE body section (art ShadowIndex) on the bottom face of that section's bounds, turned
+ * with the body and with the ramp under it, and drawn 3 px to the right of the unit's draw point (0x887420 =
+ * -6 * light.x, light = (-0.5, -0.707, 0.5) from 0x754C00). No turret or barrel, no shear by height: the shadow is a
+ * footprint that hugs the hull, visible as a band about three pixels wide under its right and lower edges. Replayed
+ * offline from the voxel data, that model covers the darkened pixels of frozen original frames at 0.73 to 0.91
+ * intersection over union; the earlier sheared projection (and its sun-following stretch) showed 2.6 to 4.3 times
+ * the original's shadow area below the hull, which read as a vehicle hovering over a drop shadow.
+ */
+export const CONTACT_SHADOW_OFFSET_PX = 3;
+/** World x (and -z) component of that offset: screen-right is (1, 0, -1) / sqrt 2 and a pixel is 1 / 42.4 units. */
+export const CONTACT_SHADOW_OFFSET = CONTACT_SHADOW_OFFSET_PX / PIXELS_PER_CELL_EDGE / Math.SQRT2;
+/** Edge softness of a contact shadow in cells: about half an engine pixel, so the band keeps its width. */
+export const CONTACT_SHADOW_PENUMBRA = 0.012;
+/** A contact unit within this height of the registered ground lies on it (ramp corners are not exact planes). */
+export const CONTACT_GROUND_TOLERANCE = 0.3 * LEVEL_HEIGHT;
+
+interface ShadowContact {
+  /** Plane the footprint is drawn in; null = the ground's own plane under the unit. */
+  normal: Vector3 | null;
+}
+const contacts = new WeakMap<Object3D, ShadowContact>();
+
+/**
+ * Mark a unit root as standing on a surface at its own origin (terrain, a bridge deck): it then casts the engine's
+ * contact shadow there instead of the sheared projection onto the registered ground. `normal` is the plane of a body
+ * the host tilts itself; without it the footprint lies on the ground under the unit (level off the terrain).
+ * `false` restores the ordinary rules (flight, water, shear).
+ */
+export function setShadowContact(unit: Object3D, contact: boolean, normal?: Vector3): void {
+  if (!contact) {
+    contacts.delete(unit);
+    return;
+  }
+  let stored = contacts.get(unit);
+  if (!stored) contacts.set(unit, (stored = { normal: null }));
+  if (!normal) stored.normal = null;
+  else (stored.normal ??= new Vector3()).copy(normal).normalize();
+}
 
 /** Set a unit root's physical world-space shadow origin, forcing ground projection; absent restores normal shadows. */
 export function setShadowOrigin(unit: Object3D, origin?: Vector3): void {
@@ -570,6 +613,10 @@ const point = new Vector3();
 const origin = new Vector3();
 const normal = new Vector3();
 const projection = new Matrix4();
+const bodyUp = new Vector3();
+const axisX = new Vector3();
+const axisZ = new Vector3();
+const retilt = new Quaternion();
 
 /**
  * Flattened twin of a voxel part. Add it to the unit's root group after every part (the scene graph updates children
@@ -636,9 +683,56 @@ class VoxelSurfaceMesh extends Mesh {
     const height = origin.y - point.y;
     const waterY = !physicalOrigin && this.mode.naval ? ground.waterHeight?.(origin.x, origin.z) : undefined;
     this.onWater = waterY !== undefined && Math.abs(origin.y - waterY) <= AIRBORNE_HEIGHT;
-    // Water contact/foam always retain the penumbra, independently of land's hard review mode.
-    this.show(this.onWater || land);
+    const contact = physicalOrigin || this.onWater ? undefined : contacts.get(parent);
+    // Water contact/foam always retain the penumbra, independently of land's hard review mode. A contact shadow is
+    // the body's footprint alone: turret and barrel twins rest.
+    this.show(this.onWater || (land && !(contact && this.source.parent !== parent)));
     if (this.layer !== 'shadow' && !this.onWater) return;
+    if (contact) {
+      if (this.source.parent !== parent) return;
+      // Depth follows the ground the unit stands on (a ramp tilts the body more steeply than the terrain it is on).
+      if (ground.normal && Math.abs(origin.y - ground.height(origin.x, origin.z)) < CONTACT_GROUND_TOLERANCE)
+        ground.normal(origin.x, origin.z, normal);
+      else normal.copy(UP);
+      const drawn = contact.normal ?? normal;
+      bodyUp.set(e[4]!, e[5]!, e[6]!).normalize();
+      retilt.setFromUnitVectors(bodyUp, drawn);
+      axisX.set(e[0]!, e[1]!, e[2]!).applyQuaternion(retilt);
+      axisZ.set(e[8]!, e[9]!, e[10]!).applyQuaternion(retilt);
+      // Three pixels to the right on screen: slide that offset along the view ray into the footprint's plane.
+      const view = this.mode.toCamera;
+      const k = CONTACT_SHADOW_OFFSET;
+      const slide = -((drawn.x - drawn.z) * k) / drawn.dot(view);
+      const copy = SHADOW_COPIES[this.copyIndex]!;
+      const soft = CONTACT_SHADOW_PENUMBRA / SHADOW_PENUMBRA;
+      const cx = copy.x * soft;
+      const cz = copy.z * soft;
+      const cy = -(drawn.x * cx + drawn.z * cz) / drawn.y;
+      // The picture is exactly the footprint through the unit's origin; only the analytic depth is lifted.
+      this.matrixWorld.set(
+        axisX.x,
+        0,
+        axisZ.x,
+        origin.x + k + slide * view.x + cx,
+        axisX.y,
+        0,
+        axisZ.y,
+        origin.y + slide * view.y + cy,
+        axisX.z,
+        0,
+        axisZ.z,
+        origin.z - k + slide * view.z + cz,
+        0,
+        0,
+        0,
+        1,
+      );
+      this.planeNormal.copy(normal);
+      this.planeConstant = normal.dot(origin) + SHADOW_LIFT + copy.lift;
+      this.matrixWorldNeedsUpdate = false;
+      for (const child of this.children) child.updateMatrixWorld(force);
+      return;
+    }
     if (this.onWater) {
       this.waterY = waterY!;
       this.foamPulse = Math.sin(this.mode.time * Math.PI);
