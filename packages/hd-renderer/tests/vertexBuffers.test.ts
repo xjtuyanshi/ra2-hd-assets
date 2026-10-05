@@ -280,6 +280,11 @@ describe('r186 vertex and uniform binding budget', () => {
           expect(graded, label).toMatch(new RegExp(`\\.w \\+ \\( ${flags}\\.y - 1\\.0 \\)`));
           expect(graded, label).toMatch(new RegExp(`\\.xyz \\* vec3<f32>\\( ${flags}\\.y \\)`));
           expect(graded, label).not.toContain('max(');
+          // The look's added light (sun highlight, glass glint, mirrored sky) is scaled by what the map light does
+          // to white, so a dark map darkens relit art as a whole; without material data there is nothing to scale.
+          const gradeLight = fragmentShader.match(/spriteGradeLight/g)?.length ?? 0;
+          if (materials && mesh === layer.mesh) expect(gradeLight, label).toBeGreaterThanOrEqual(5);
+          else if (!materials) expect(gradeLight, label).toBe(0);
           expect(fragmentShader, label).not.toContain('spriteReceivedLightGain');
         }
         dispose(layer.mesh);

@@ -396,6 +396,12 @@ export class SpriteLayer {
       mix(mix(vec3(mapLight.a.add(extraLight)), mapLight.rgb.mul(aFlags.y), isFull), vec3(aFlags.y), isNone),
     );
     const objectLit = (c: ShaderNode): ShaderNode => srgbScale(c, grade);
+    // What the map's light does to white, in linear light: the look's added light (highlights, glints, mirrored sky)
+    // is scaled by it, because the game darkens the whole object, not only its painted colour. Left at full strength
+    // on a dark map they made relit buildings brighter than the map (frozen pairs under the cinematic look: the
+    // construction yard at 1.46 of the native luminance on MoonPatr and Transylv, object level 0.57-0.60, against
+    // 1.17-1.29 on maps at 0.98-1). 1 at an object level of 1 or more.
+    const gradeLight: ShaderNode = objectLit(vec3(1)).toVar('spriteGradeLight');
     const ppu = float(PIXELS_PER_CELL_EDGE);
 
     const material = new MeshBasicNodeMaterial();
@@ -719,6 +725,7 @@ export class SpriteLayer {
             // Facades and roofs: a physical GGX highlight, weak on matte classes.
             const highlight: ShaderNode = sunHighlight(m.normal, sun, view, roughness, float(0.03))
               .mul(look.sunLight)
+              .mul(gradeLight)
               .mul(look.specularSize.mul(look.specularSize))
               .mul(
                 look.specular
@@ -729,8 +736,11 @@ export class SpriteLayer {
               );
             // Glints only on the full inside of a pane (not its softer rim), so they never sparkle as single pixels.
             const core: ShaderNode = smoothstep(0.92, 0.99, m.spec).mul(weight);
-            const glint: ShaderNode = pane.glint.mul(look.sunLight).mul(look.glass.mul(core).mul(occlusion));
-            const sky: ShaderNode = sceneLitColour(pane.sky.mul(occlusion), sceneMultiplier);
+            const glint: ShaderNode = pane.glint
+              .mul(look.sunLight)
+              .mul(gradeLight)
+              .mul(look.glass.mul(core).mul(occlusion));
+            const sky: ShaderNode = sceneLitColour(pane.sky.mul(occlusion).mul(gradeLight), sceneMultiplier);
             const relit: ShaderNode = mix(base, sky, reflectance)
               .add(sceneLitColour(highlight, sceneMultiplier))
               .add(sceneLitColour(glint, sceneMultiplier));
