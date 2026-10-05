@@ -18,8 +18,30 @@ export type NativeSpriteDepth = NativeDepthOffset &
   (
     | { mode: 'body'; origin: readonly [number, number]; base: number }
     | { mode: 'ground'; bonus: number }
-    | { mode: 'card'; bottom: number; bonus: number }
+    | {
+        mode: 'card';
+        bottom: number;
+        bonus: number;
+        /**
+         * The engine writes this card to its Z-buffer (terrain objects) instead of only testing it (units). It is then
+         * drawn with the depth-writing body pass, so later test-only units are hidden behind it.
+         */
+        writer?: boolean;
+      }
   );
+
+/**
+ * Native Z of a terrain object (TerrainClass: trees, rocks). Measured in the engine's tactical Z-buffer (YR 1.001,
+ * global 0x887644, dumped from frozen frames): a tree is a vertical card from its frame's inclusive bottom row, one
+ * unit nearer per three rows up, and at that bottom row 12 to 13 units nearer than the ground there (the same
+ * adjustment infantry test with). A vehicle (bonus 0) therefore shows in front of a tree only when its own bitmap
+ * bottom is about nine rows lower on screen than the tree's: it passes behind the crown, never over it.
+ */
+export const TERRAIN_OBJECT_DEPTH_BONUS = 12;
+
+export function terrainObjectDepth(frame: SpriteFrame): NativeSpriteDepth {
+  return { mode: 'card', bottom: frameInclusiveBottom(frame), bonus: TERRAIN_OBJECT_DEPTH_BONUS, writer: true };
+}
 
 export interface BuildingZShape {
   pointMove?: readonly [number, number];

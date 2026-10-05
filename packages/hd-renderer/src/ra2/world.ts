@@ -29,7 +29,7 @@ import { loadVoxelLighting } from './vpl';
 import { smoothVoxelOptions, type SmoothVoxelOptions } from './voxelSmooth';
 import { buildSmoothVoxelGeometry } from './voxelSmoothGeometry';
 import { projectionParts, voxelProjectionLibrary, type VoxelProjectionLibrary } from './voxelProjection';
-import { frameInclusiveBottom } from './nativeDepth';
+import { frameInclusiveBottom, terrainObjectDepth } from './nativeDepth';
 
 /** A battlefield the HD renderer can draw: terrain, optional water, and everything standing on it. */
 export interface HdWorld {
@@ -292,7 +292,9 @@ export async function loadRa2World(
       nativeDepth:
         groundUnit && !flat
           ? { mode: 'card', bottom: frameInclusiveBottom(frame), bonus: object.kind === 'infantry' ? 12 : 0 }
-          : undefined,
+          : object.kind === 'tree' && !flat
+            ? terrainObjectDepth(frame)
+            : undefined,
     });
     for (const layer of entry.layers ?? []) {
       const art = manifest.sprites[layer];

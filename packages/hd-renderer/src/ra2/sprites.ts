@@ -1073,7 +1073,7 @@ export class SpriteLayer {
         const opacity = instanceCode(s) === 0 ? Math.max(0, Math.min(1, s.opacity ?? 1)) : 1;
         const blending = opacity < 1;
         const testOnly = !blending && s.depthWrite === false && instanceCode(s) === 0;
-        const unit = !testOnly && native?.mode === 'card' && !foundation;
+        const unit = !testOnly && native?.mode === 'card' && !native.writer && !foundation;
         this.flags.setComponent(i, at + 7, blending ? 3 + opacity : testOnly ? 1 : unit ? 2 : 0);
         readOnly ||= testOnly;
         units ||= !blending && unit;
@@ -1108,7 +1108,10 @@ export class SpriteLayer {
       this.flags.setComponent(i, 8, value);
       captured ||= value !== NOT_CAPTURED_CODE;
       unitsCaptured ||=
-        value !== NOT_CAPTURED_CODE && instance.nativeDepth?.mode === 'card' && !instance.painter?.foundation;
+        value !== NOT_CAPTURED_CODE &&
+        instance.nativeDepth?.mode === 'card' &&
+        !instance.nativeDepth.writer &&
+        !instance.painter?.foundation;
     }
     this.flags.flush();
     this.capture.setCaptured(this.mesh, captured);

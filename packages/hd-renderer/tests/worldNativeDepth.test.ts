@@ -96,7 +96,9 @@ describe('static map native ground cards', () => {
       fixture.sprites.find((sprite) => sprite.anchor.x === x + 0.5 && !sprite.shadow && !sprite.kind)!;
     expect(spriteAt(7).nativeDepth).toEqual({ mode: 'card', bottom: 4, bonus: 0 });
     expect(spriteAt(8).nativeDepth).toEqual({ mode: 'card', bottom: 4, bonus: 12 });
-    for (const x of [9, 10, 11, 12]) expect(spriteAt(x).nativeDepth).toBeUndefined();
+    // A tree is the engine's own Z writer: a card from its frame bottom with the terrain-object adjustment.
+    expect(spriteAt(10).nativeDepth).toEqual({ mode: 'card', bottom: 4, bonus: 12, writer: true });
+    for (const x of [9, 11, 12]) expect(spriteAt(x).nativeDepth).toBeUndefined();
     for (const sprite of fixture.sprites.filter((s) => s.shadow || s.kind === 'reflection'))
       expect(sprite.nativeDepth).toBeUndefined();
     for (const child of world.root.children)
