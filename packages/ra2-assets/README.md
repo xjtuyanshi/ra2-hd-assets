@@ -1533,6 +1533,25 @@ python3 -B packages/ra2-assets/python/effect_clean_page.py --effects "$FARM/_lib
 python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_effect_clean_page.py'
 ```
 
+## Delivery pictures that match the building body (Python)
+
+A war factory replaces its whole body picture with a delivery picture while a unit is delivered (`DeployingAnim` /
+`RoofDeployingAnim` over `UnderDoorAnim` / `UnderRoofDoorAnim`). The original delivery art repeats most of the body's
+indexed pixels; independently redrawn HD pages lose that identity, so the whole building changed its texture for the
+duration of every delivery. `python/delivery_body_sync.py` copies the HD body pixels (colour, house-paint mask and
+normals) into every delivery frame pixel whose indexed source equals the body's at the same draw-point position and
+keeps the delivery art where the indexed art is structurally different (a dense 3x3 difference in a region of at
+least 12 pixels, grown by two pixels: door, ramp). A frame whose shared pixels mostly differ from the body is another
+picture and is left alone. Frame i of a delivery sprite pairs with body frame i. The changed pages are installed into
+a copy-on-write farm through `cache_farm`; `--dry-run` only writes the review sheet (before | body | after | copied
+green, kept red) and `metrics.json` to `--out`.
+
+```sh
+python3 -B packages/ra2-assets/python/delivery_body_sync.py --library "$FARM/_library/temperate" \
+  --out "$STAGING" --install "$FARM"
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_delivery_body_sync.py'
+```
+
 ## Frozen live-pair review tools (Python)
 
 `python/live_pair_metrics.py` reads `orig-NN.png` / `hd-NN.png` captures of the whole 1152x744 guest frame from
