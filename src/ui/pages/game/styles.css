@@ -2185,6 +2185,22 @@ input[type='range']::-webkit-slider-thumb {
   font-size: 11px;
   line-height: 1.5;
 }
+/* The fitted frame size and its device-pixel scale sit on their own row under the resolution dropdown. */
+#vm-controls .resolution-size-controls {
+  flex-wrap: wrap;
+}
+#vm-controls .resolution-size-controls .game-select {
+  flex: 1;
+  min-width: 0;
+}
+#vm-resolution-status {
+  flex-basis: 100%;
+  font-size: 11px;
+  line-height: 1.5;
+}
+#vm-resolution-status:empty {
+  display: none;
+}
 
 /* English labels need a wider shared column while keeping dropdowns aligned. */
 :lang(en) #vm-controls:not(.collapsed) {

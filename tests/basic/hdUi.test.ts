@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CREDITS_BOTTOM,
   CREDITS_TOP,
+  chromeSlices,
   clockWashOf,
   drawPointer,
   drawSidebar,
@@ -521,6 +522,113 @@ describe('HD sidebar drawing', () => {
       [492, 712, 492, 32],
     ]);
     expect(calls.some((c) => c.style.fillStyle === '#1b1e24')).toBe(false);
+  });
+});
+
+describe('HD chrome at another frame size', () => {
+  const artFrame = { width: 1152, height: 744 };
+  const art = { sidebar: { x: 0, y: 0, width: 168, height: 744 }, commandBar: { x: 0, y: 0, width: 984, height: 32 } };
+  /** A Soviet sidebar of a frame `width` x `height`: strip top 227, 50 px rows, 25 px kept free below the strip. */
+  const sovietAt = (width: number, height: number) => {
+    const s = hdSidebar();
+    s.cameos = [];
+    // No native apertures to keep: the transparent rectangles are then exactly the chrome's own area.
+    s.radarActive = false;
+    delete s.controls;
+    delete s.tabFrames;
+    s.frame = { width, height };
+    const x = width - 168;
+    const rows = Math.floor((height - 227 - 25) / 50);
+    Object.assign(s.layout, {
+      sidebar: { x, y: 0, width: 168, height },
+      commandBar: { x: 0, y: height - 32, width: x, height: 32 },
+      strip: { x: x + 22, y: 227, width: 124, height: rows * 50 },
+      stripReserve: 25,
+      cameoPitch: { x: 64, y: 50 },
+      cameoOrigin: { x: x + 22, y: 228 },
+    });
+    return s;
+  };
+
+  it('uses each anchor whole at the frame size the art was made for', () => {
+    const s = sovietAt(1152, 744);
+    expect(chromeSlices(s, artFrame, art)).toEqual({
+      sidebar: [{ source: art.sidebar, target: { x: 984, y: 0, width: 168, height: 744 } }],
+      commandBar: [{ source: art.commandBar, target: { x: 0, y: 712, width: 984, height: 32 } }],
+    });
+  });
+
+  it('adds cameo rows from the inner rows of the art and moves the part under the strip down', () => {
+    const s = sovietAt(1728, 1080);
+    expect(s.layout.strip.height).toBe(800);
+    const slices = chromeSlices(s, artFrame, art);
+    // The wider command bar is assembled from both ends by the game: it stays native.
+    expect(slices.commandBar).toEqual([]);
+    const cut = (sourceY: number, targetY: number, height: number) => ({
+      source: { x: 0, y: sourceY, width: 168, height },
+      target: { x: 1560, y: targetY, width: 168, height },
+    });
+    expect(slices.sidebar).toEqual([
+      // Top section and the art's own nine rows.
+      cut(0, 0, 227 + 450),
+      // Rows 9..15 reuse the art's rows 1..7.
+      ...[0, 1, 2, 3, 4, 5, 6].map((i) => cut(227 + (1 + i) * 50, 677 + i * 50, 50)),
+      // 53 of the art's 67 px under the strip fit above the frame's bottom.
+      cut(677, 1027, 53),
+    ]);
+    // The slices tile the whole sidebar column without gaps or overlap.
+    let y = 0;
+    for (const { target } of slices.sidebar) {
+      expect(target.y).toBe(y);
+      y += target.height;
+    }
+    expect(y).toBe(1080);
+  });
+
+  it('drops rows at a lower frame and leaves what the art cannot reach to the native picture', () => {
+    const s = sovietAt(800, 600);
+    expect(s.layout.strip.height).toBe(300);
+    const slices = chromeSlices(s, artFrame, art);
+    expect(slices.sidebar).toEqual([
+      { source: { x: 0, y: 0, width: 168, height: 527 }, target: { x: 632, y: 0, width: 168, height: 527 } },
+      { source: { x: 0, y: 677, width: 168, height: 67 }, target: { x: 632, y: 527, width: 168, height: 67 } },
+    ]);
+    const assets: UiAssets = {
+      ...fallback,
+      chrome: () => ({
+        frame: artFrame,
+        pieces: [],
+        composites: {
+          sidebar: { rect: art.sidebar, bitmap: { width: 336, height: 1488 } as ImageBitmap },
+          commandBar: { rect: art.commandBar, bitmap: { width: 1968, height: 64 } as ImageBitmap },
+        },
+      }),
+    };
+    // Only the slices' targets become transparent: the last 6 px of the sidebar and the command bar stay native.
+    expect(transparentRects(s, assets)).toEqual(slices.sidebar.map((slice) => slice.target));
+    const { ctx, calls } = recording();
+    drawSidebar(ctx, s, assets, { scale: 2, time: 0 });
+    // Art pixels are twice the frame pixels here: sources are cut from the composite at that scale.
+    expect(calls.filter((call) => call.name === 'drawImage').map((call) => call.args.slice(1))).toEqual([
+      [0, 0, 336, 1054, 632, 0, 168, 527],
+      [0, 1354, 336, 134, 632, 527, 168, 67],
+    ]);
+  });
+
+  it('keeps the native sidebar when the row rule or a matching width is missing', () => {
+    const noRule = sovietAt(1728, 1080);
+    delete noRule.layout.stripReserve;
+    expect(chromeSlices(noRule, artFrame, art).sidebar).toEqual([]);
+    const narrow = sovietAt(1728, 1080);
+    narrow.layout.sidebar.width = 160;
+    expect(chromeSlices(narrow, artFrame, art).sidebar).toEqual([]);
+    const scrolling = sovietAt(1728, 1080);
+    scrolling.layout.strip.height = 790;
+    expect(chromeSlices(scrolling, artFrame, art).sidebar).toEqual([]);
+    // Separate pieces cannot be cut: with no composite the adapted sidebar is not drawn or made transparent.
+    const pieces = { ...fallback, chrome: () => ({ frame: artFrame, pieces: sidebarPieces() }) };
+    expect(transparentRects(sovietAt(1728, 1080), pieces)).toEqual([]);
+    expect(transparentRects(sovietAt(1152, 744), pieces)).toEqual([{ x: 984, y: 0, width: 168, height: 744 }]);
   });
 });
 

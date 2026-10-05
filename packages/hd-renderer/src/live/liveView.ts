@@ -1,4 +1,13 @@
-import { BoxGeometry, Color, Group, Mesh, MeshStandardNodeMaterial, type Texture, Vector3 } from 'three/webgpu';
+import {
+  BoxGeometry,
+  Color,
+  Group,
+  Mesh,
+  MeshStandardNodeMaterial,
+  type Texture,
+  Vector2,
+  Vector3,
+} from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import { mapAtmosphere, medianHeight, sidecarAtmosphere } from '../../../ra2-assets/src/lights';
 import type { AtmosphereSettings } from '../atmosphere';
@@ -500,6 +509,16 @@ export function layerFrame(
   return first + (step % (last - first));
 }
 
+/**
+ * `value` (engine pixels) on the nearest multiple of one drawing-buffer pixel, `pixelsPerUnit` of which cover an engine
+ * pixel; unchanged without a usable scale.
+ */
+export function snapToPixelGrid(value: number, pixelsPerUnit: number): number {
+  return pixelsPerUnit > 0 && Number.isFinite(pixelsPerUnit)
+    ? Math.round(value * pixelsPerUnit) / pixelsPerUnit
+    : value;
+}
+
 export class LiveView {
   private previous: Timed | null = null;
   private current: Timed | null = null;
@@ -580,6 +599,9 @@ export class LiveView {
   private readonly wind = new Vector3(Math.cos(0.6), 0, Math.sin(0.6)).multiplyScalar(0.3 * 0.8);
   private readonly warnedTypes = new Set<string>();
   private viewWidth = 800;
+  /** Drawing-buffer pixels per engine pixel (see frame()). */
+  private bufferScale = 1;
+  private readonly bufferSize = new Vector2();
   private viewHeight = 600;
   private lastRender = performance.now();
   private firstFrame: number | null = null;
@@ -831,15 +853,36 @@ export class LiveView {
   }
 
   /**
-   * Canvas size in CSS pixels, and the tactical view size in engine pixels. The camera frustum is set in engine pixels
-   * so the HD image lines up with the original pixel for pixel, whatever the display scale.
+   * Canvas size in CSS pixels (the drawing buffer follows the renderer's pixel ratio), and the tactical view size in
+   * engine pixels. The camera frustum is set in engine pixels so the HD image lines up with the original pixel for
+   * pixel, whatever the display scale.
    */
   resize(cssWidth: number, cssHeight: number, viewWidth: number, viewHeight: number): void {
+    this.hd.renderer.setSize(cssWidth, cssHeight, false);
+    this.frame(viewWidth, viewHeight);
+  }
+
+  /**
+   * Like resize, with the drawing buffer given in its own pixels: a host that lays the canvas out on whole device
+   * pixels gets exactly that many, with no rounding through a CSS size and a pixel ratio (and no cap on the ratio).
+   */
+  resizePixels(bufferWidth: number, bufferHeight: number, viewWidth: number, viewHeight: number): void {
+    this.hd.renderer.setDrawingBufferSize(
+      Math.max(1, Math.round(bufferWidth)),
+      Math.max(1, Math.round(bufferHeight)),
+      1,
+    );
+    this.frame(viewWidth, viewHeight);
+  }
+
+  private frame(viewWidth: number, viewHeight: number): void {
     this.viewWidth = viewWidth;
     this.viewHeight = viewHeight;
-    this.hd.renderer.setSize(cssWidth, cssHeight, false);
     this.hd.view.zoom = 1;
     this.hd.view.resize(viewWidth, viewHeight);
+    // Device pixels per engine pixel: post radii keep their size in the scene, and the camera can stay on the grid.
+    this.bufferScale = this.hd.renderer.getDrawingBufferSize(this.bufferSize).x / viewWidth;
+    this.hd.setBufferScale(this.bufferScale);
   }
 
   /** A logic frame is not a publication revision: AI and draw passes can still change it between polls. */
@@ -1335,8 +1378,12 @@ export class LiveView {
   private applyCamera(from: LiveSnapshot['view'], to: LiveSnapshot['view'], alpha: number): void {
     if (!to) return;
     const jump = from ? Math.hypot(to.x - from.x, to.y - from.y) > 400 : true;
-    const x = jump || !from ? to.x : from.x + (to.x - from.x) * alpha;
-    const y = jump || !from ? to.y : from.y + (to.y - from.y) * alpha;
+    // Between two snapshots the view moves by fractions of an engine pixel. Keep it on the drawing buffer's pixel grid:
+    // art whose texels match the buffer's pixels (2x art at two device pixels per engine pixel) then stays texel-exact
+    // while the map scrolls instead of being resampled half a texel off on every in-between frame.
+    const grid = this.bufferScale;
+    const x = jump || !from ? to.x : snapToPixelGrid(from.x + (to.x - from.x) * alpha, grid);
+    const y = jump || !from ? to.y : snapToPixelGrid(from.y + (to.y - from.y) * alpha, grid);
     // The camera looks at the ground point (level 0) under the view's centre; orthographic, so height is irrelevant.
     const diff = (x + this.viewWidth / 2) / 30;
     const sum = (y + this.viewHeight / 2) / 15;

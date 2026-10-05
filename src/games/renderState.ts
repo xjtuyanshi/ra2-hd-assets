@@ -346,6 +346,12 @@ export interface GameRenderSidebarLayout {
   creditsAnchor: { x: number; y: number };
   /** Visible cameo area; cameos are clipped to it while the strip scrolls. */
   strip: GameRenderRect;
+  /**
+   * Frame pixels the game keeps free below the strip when it sizes it: the strip holds
+   * floor((frame.height - strip.y - stripReserve) / cameoPitch.y) rows, and everything under the strip moves down with
+   * each added row. Lets sidebar art made at one frame height be laid out at another; absent when unknown.
+   */
+  stripReserve?: number;
   /** Size of one cameo picture and the column / row pitch of the cameo grid (first column at `strip.x`). */
   cameo: { width: number; height: number };
   cameoPitch: { x: number; y: number };

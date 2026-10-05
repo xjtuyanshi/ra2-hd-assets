@@ -267,6 +267,10 @@ describe('YR 1.001 read-only sidebar', () => {
     expect(r.layout.strip).toEqual({ x: 1006, y: 227, width: 124, height: 450 });
     expect(r.layout.cameoOrigin).toEqual({ x: 1006, y: 228 });
     expect(r.layout.cameoPitch).toEqual({ x: 64, y: 50 });
+    // 9 rows at 744: floor((744 - 227 - stripReserve) / 50), reserve 33 Allied / 25 Soviet and Yuri.
+    expect(Math.floor((r.frame.height - r.layout.strip.y - r.layout.stripReserve!) / 50) * 50).toBe(
+      r.layout.strip.height,
+    );
     expect(r.layout.cameo).toEqual({ width: 60, height: 48 });
     expect(r.layout.creditsAnchor).toEqual({ x: 1068, y: 2 });
     expect(r.layout.power).toEqual({ x: 984, y: 227, width: 16, slotHeight: 3, slots: 151 });

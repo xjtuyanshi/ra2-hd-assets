@@ -32,7 +32,7 @@ let clock = 0;
 let frames: Array<() => void> = [];
 
 function fakeView() {
-  return { push: vi.fn(), render: vi.fn(), resize: vi.fn(), dispose: vi.fn() };
+  return { push: vi.fn(), render: vi.fn(), resizePixels: vi.fn(), dispose: vi.fn() };
 }
 
 function fakeLookView() {
@@ -131,6 +131,80 @@ afterEach(() => {
   liveView.create.mockReset();
   hdRenderer.applyLookPreset.mockReset();
   hdUi.start.mockReset();
+});
+
+describe('HD bridge control', () => {
+  it('returns a stop function that can also switch between the HD view and the original picture', async () => {
+    const harness = setup();
+    await goLive(harness);
+    await advance(16);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect(harness.stop.toggle()).toBe(false);
+    // Frames the game already drew may still carry the key colour: the HD canvas goes after the passthrough trail.
+    await advance(600);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(null);
+    expect(harness.bridge()!.toggle()).toBe(true);
+    await advance(16);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    harness.stop();
+    // A stopped bridge no longer switches anything.
+    expect(harness.stop.toggle()).toBe(true);
+    expect(harness.hdCanvas.remove).toHaveBeenCalledOnce();
+  });
+
+  it('has nothing to switch without the WebGL2 frame renderer', () => {
+    const harness = setup('?hd=1', 'Canvas 2D');
+    expect(harness.stop.toggle()).toBe(false);
+    harness.stop();
+  });
+});
+
+describe('HD bridge canvas layout', () => {
+  it('covers the tactical rectangle on whole device pixels with one buffer pixel per device pixel', async () => {
+    const harness = setup();
+    // A 1728x1080 game fitted at two device pixels per game pixel on a DPR-2 display, 20.25 CSS px from the top.
+    (window as unknown as { devicePixelRatio: number }).devicePixelRatio = 2;
+    Object.assign(harness.screen, {
+      offsetParent: { getBoundingClientRect: () => ({ left: 0, top: 0 }), clientLeft: 0, clientTop: 0 },
+      getBoundingClientRect: () => ({ left: 0, top: 20.25, width: 800, height: 600 }),
+    });
+    const view = fakeView();
+    await goLive(harness, view);
+    await advance(16);
+    // 800x600 frame shown at 800x600 CSS px = 2 device px per game px; the tactical view is 632x568 game px.
+    expect(view.resizePixels).toHaveBeenLastCalledWith(1264, 1136, 632, 568);
+    // The top edge is rounded to a whole device pixel (40.5 -> 41 device px = 20.5 CSS px).
+    expect(harness.hdCanvas.style).toMatchObject({ left: '0px', top: '20.5px', width: '632px', height: '568px' });
+    harness.stop();
+  });
+
+  it('keeps a fractional fit on whole device pixels and renders a huge rectangle at the pixel budget', async () => {
+    const harness = setup();
+    (window as unknown as { devicePixelRatio: number }).devicePixelRatio = 2;
+    Object.assign(harness.screen, {
+      offsetParent: { getBoundingClientRect: () => ({ left: 10, top: 0 }), clientLeft: 0, clientTop: 0 },
+      // 800x600 frame at 2.903 device px per game px: nothing lands on whole pixels by itself.
+      getBoundingClientRect: () => ({ left: 28, top: 0, width: 1161.2, height: 870.9 }),
+    });
+    const view = fakeView();
+    await goLive(harness, view);
+    await advance(16);
+    const [bufferWidth, bufferHeight, viewWidth, viewHeight] = view.resizePixels.mock.lastCall as number[];
+    expect([viewWidth, viewHeight]).toEqual([632, 568]);
+    expect(Number.isInteger(bufferWidth) && Number.isInteger(bufferHeight)).toBe(true);
+    expect(harness.hdCanvas.style.width).toBe(`${bufferWidth! / 2}px`);
+    expect(harness.hdCanvas.style.height).toBe(`${bufferHeight! / 2}px`);
+    expect(harness.hdCanvas.style.left).toBe('18px');
+    // A 6400x4800 device-pixel rectangle is over the budget: the buffer shrinks, the CSS box does not.
+    Object.assign(harness.screen, { getBoundingClientRect: () => ({ left: 10, top: 0, width: 4050.7, height: 3038 }) });
+    await advance(16);
+    const [width, height] = view.resizePixels.mock.lastCall as number[];
+    expect(width! * height!).toBeLessThanOrEqual(10_000_000 * 1.001);
+    expect(width! / height!).toBeCloseTo(632 / 568, 2);
+    expect(Number.parseFloat(harness.hdCanvas.style.width!)).toBeCloseTo((4050.7 * 632) / 800, 0);
+    harness.stop();
+  });
 });
 
 describe('HD bridge look parameters', () => {

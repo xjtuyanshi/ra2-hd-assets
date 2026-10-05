@@ -2,6 +2,7 @@ import type { GameRenderSidebar } from '../../../games/renderState';
 import type { FrameRect, VmFrameRenderer } from './vmFrameRenderer';
 import { createUiAssets } from '../../../../packages/hd-renderer/src/ui/uiAssets';
 import { drawSidebar, transparentRects } from '../../../../packages/hd-renderer/src/ui/sidebarView';
+import { devicePixelBox } from './devicePixelBox';
 
 export interface HdUi {
   update(sidebar: GameRenderSidebar | null): void;
@@ -61,19 +62,12 @@ export function startHdUi(host: {
     sync();
     const size = host.frameSize();
     if (!visible() || !size || !ctx || !sidebar) return;
-    const width = host.screen.clientWidth;
-    const height = host.screen.clientHeight;
-    const dpr = window.devicePixelRatio || 1;
-    Object.assign(canvas.style, {
-      left: `${host.screen.offsetLeft}px`,
-      top: `${host.screen.offsetTop}px`,
-      width: `${width}px`,
-      height: `${height}px`,
-    });
-    const pixelWidth = Math.round(width * dpr);
-    const pixelHeight = Math.round(height * dpr);
-    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
-    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+    // The game canvas's own box on whole device pixels, one buffer pixel each: the 2x interface art is then drawn
+    // texel for pixel when a game pixel covers two device pixels, and never resampled by the compositor.
+    const box = devicePixelBox(host.screen, size, window.devicePixelRatio || 1);
+    Object.assign(canvas.style, box.style);
+    if (canvas.width !== box.width) canvas.width = box.width;
+    if (canvas.height !== box.height) canvas.height = box.height;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     const scale = canvas.width / size.width;

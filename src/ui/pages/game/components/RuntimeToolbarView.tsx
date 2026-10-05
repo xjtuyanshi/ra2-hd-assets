@@ -10,6 +10,7 @@ import { Modal } from './Modal';
 import { PerformanceDiagnostics } from './PerformanceDiagnostics';
 import { GameSelect } from './GameSelect';
 import type { UpscaleMode } from '../vmFrameRenderer';
+import { DISPLAY_RESOLUTION } from '../vmPageResolution';
 import { controlsCollapsed } from '../state/uiState';
 import { DEFAULT_VOLUME_PERCENT } from '../../../../adapter/audio';
 import { useStore } from '../../../shared/state/useStore';
@@ -56,12 +57,28 @@ export interface ToolbarModel {
   title: string;
   cheatGame: CheatGuideGameId | null;
   resolution: string;
+  /** Frame size and device pixels per frame pixel of the current canvas fit. */
+  resolutionStatus?: string;
   rate: number;
   upscaleMode: UpscaleMode;
   reshadeMode?: ReShadeMode;
   mapsAvailable: boolean;
+  /** HD view shown (true) or the original picture (false); null/absent: no HD bridge in this session. */
+  hdView?: boolean | null;
 }
-const resolutions = ['', '800x600', '1024x768', '1280x720', '1280x800', '1440x900', '1600x900', '1920x1080'];
+const resolutions = [
+  '',
+  DISPLAY_RESOLUTION,
+  '800x600',
+  '1024x768',
+  '1280x720',
+  '1280x800',
+  '1440x900',
+  '1600x900',
+  '1920x1080',
+];
+const resolutionLabel = (value: string) =>
+  value === '' ? t('跟随 INI') : value === DISPLAY_RESOLUTION ? t('匹配窗口（清晰 1:1）') : value.replace('x', '×');
 const errorText = (error: unknown) => localizeText(error instanceof Error ? error.message : String(error));
 function CheatContent({ game, callbacks }: { game: CheatGuideGameId | null; callbacks: RuntimeToolbarCallbacks }) {
   const [status, setStatus] = useState(t('页面只报告已交给 VM，不代表游戏接受。'));
@@ -321,16 +338,22 @@ export function RuntimeToolbarView({
           </button>
         ))}
       </div>
-      <div className="resolution-controls">
+      <div className="resolution-controls resolution-size-controls">
         <span className="label">{t('分辨率')}</span>
         <GameSelect
           id="vm-resolution"
           label={t('游戏分辨率')}
           value={model.resolution}
           disabled={changingResolution}
-          options={resolutions.map((value) => ({ value, label: value.replace('x', '×') || t('跟随 INI') }))}
+          // A size from ?resolution= need not be a preset; list it so the dropdown shows what is running.
+          options={(resolutions.includes(model.resolution) ? resolutions : [...resolutions, model.resolution]).map(
+            (value) => ({ value, label: resolutionLabel(value) }),
+          )}
           onChange={(value) => void chooseResolution(value)}
         />
+        <output id="vm-resolution-status" role="status">
+          {model.resolutionStatus ?? ''}
+        </output>
       </div>
       <div className="volume-controls slider-item">
         <span className="label">{t('主音量')}</span>
@@ -469,6 +492,18 @@ export function RuntimeToolbarView({
           onClick={() => void showEdgeMouseNotice(true)}
         >
           Edge 提醒
+        </button>
+      )}
+      {model.hdView !== null && model.hdView !== undefined && callbacks.onHdView && (
+        <button
+          id="vm-hd-view"
+          className="toolbar-button"
+          type="button"
+          aria-pressed={model.hdView}
+          title={t('切换高清画面与原版画面（快捷键 \\）')}
+          onClick={() => callbacks.onHdView?.()}
+        >
+          {model.hdView ? t('画面：高清') : t('画面：原版')}
         </button>
       )}
       <button

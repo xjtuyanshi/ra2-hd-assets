@@ -24,7 +24,7 @@ import { installAdaptiveTouchControls } from './touchControls';
 import { installWakeLock } from './wakeLock';
 import { createVmFrameRenderer } from './vmFrameRenderer';
 import { aiUpscaleEnabled, fsrUpscaleMode, scalefxUpscaleEnabled, spatialUpscaleEnabled } from './spatialUpscale';
-import { installCanvasFit, installGameInput, toggleImmersiveFullscreen } from './gameInput';
+import { installCanvasFit, installGameInput, setSessionShortcutKey, toggleImmersiveFullscreen } from './gameInput';
 import { installRuntimeToolbar } from './runtimeToolbar';
 import { restoreCachedGameSource } from './gameSourcePicker';
 import { progressiveFilesOf } from '../../../adapter/progressiveFiles';
@@ -36,7 +36,13 @@ import { type GameSource } from '../../../games/source';
 import { clearCachedGameFiles, loadCustomMapFiles } from '../../../adapter/cachedGameFiles';
 import { createVmRuntimeCallbacks } from './vmPageRuntimeCallbacks';
 import { createVmPageToolbarActions } from './vmPageToolbarActions';
-import { loadStoredResolution } from './vmPageResolution';
+import {
+  DISPLAY_RESOLUTION,
+  loadStoredResolutionChoice,
+  parseResolutionChoice,
+  resolveResolutionChoice,
+  type ResolutionChoice,
+} from './vmPageResolution';
 import type { GameResolution } from '../../../games/resolution';
 
 let activeVm: VmShell | null = null;
@@ -51,6 +57,8 @@ let activeRendererCleanup: (() => void) | null = null;
 /** HD remaster bridge (dev, ?hd=1): see hdBridge.ts. Stopped before the VM it polls is destroyed. */
 let activeHdCleanup: (() => void) | null = null;
 const hdBridgeRequested = import.meta.env.DEV && new URLSearchParams(window.location.search).get('hd') === '1';
+/** Page shortcut that switches between the HD view and the original picture; the game's own key without a bridge. */
+const HD_VIEW_KEY = '\\';
 
 // Actual frames update guest logical coordinates; 800x600 is only a compatibility default before the first frame.
 let gameFrameWidth = 800;
@@ -58,6 +66,8 @@ let gameFrameHeight = 600;
 let refitActiveCanvas: (frameWidth?: number, frameHeight?: number) => void = () => {};
 let canvasFitInstalled = false;
 let activeFitCleanup: (() => void) | null = null;
+/** The current session's resolution choice; the canvas fit shows a display-matched frame at whole device pixels. */
+let activeResolutionChoice: ResolutionChoice = null;
 
 export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const generation = ++pageGeneration;
@@ -69,6 +79,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   activeFitCleanup?.();
   activeFitCleanup = null;
   canvasFitInstalled = false;
+  activeResolutionChoice = null;
   await pageController.destroy();
   if (generation !== pageGeneration) return;
   activeVm = null;
@@ -82,6 +93,17 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
       () => ({ width: gameFrameWidth, height: gameFrameHeight }),
       () => {
         presenter.invalidate();
+      },
+      {
+        integerScale: () => activeResolutionChoice === DISPLAY_RESOLUTION,
+        onFit: (width, height, scale, fillScale) =>
+          toolbar.setDisplayScale(
+            width,
+            height,
+            scale,
+            fillScale,
+            activeResolutionChoice === DISPLAY_RESOLUTION ? requestedResolution : null,
+          ),
       },
     );
     refitActiveCanvas = fit;
@@ -105,7 +127,11 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const hdBridgeEnabled = hdBridgeRequested && frameRenderer.backend === 'WebGL2';
   if (hdBridgeRequested && !hdBridgeEnabled) console.warn('[HD] ?hd=1 needs the WebGL2 frame renderer; HD bridge off');
   /** This session's HD bridge; releaseRuntime stops it, and a bridge whose import resolves after release never starts. */
-  let hdCleanup: (() => void) | null = null;
+  let hdCleanup: ((() => void) & { toggle(): boolean }) | null = null;
+  /** Switch between the HD view and the original picture (toolbar button and the \\ key); no-op without a bridge. */
+  const toggleHdView = () => {
+    if (hdCleanup) toolbar.setHdView(hdCleanup.toggle());
+  };
   let runtimeReleased = false;
   const calls: string[] = [];
   /** Cumulative calls per Win32 API; the backtick panel shows top hotspots for performance diagnosis. */
@@ -205,6 +231,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
         performanceLine = summary;
       },
       onRestartForResolution: () => restartForResolution(),
+      onToggleHdView: () => toggleHdView(),
       onChangeGameSource: () => changeGameSource(),
       onSchedulePerformanceRender: () => schedulePerformanceRender(),
     }),
@@ -269,6 +296,11 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
       const next = event.key === ']' ? rates[Math.min(index + 1, rates.length - 1)]! : rates[Math.max(index - 1, 0)]!;
       if (next !== requestedClockRate) toolbar.pressClockRate(next);
       event.preventDefault();
+      return;
+    }
+    if (event.key === HD_VIEW_KEY && hdCleanup) {
+      event.preventDefault();
+      toggleHdView();
       return;
     }
     if (event.key === '?') {
@@ -367,8 +399,19 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const networkIndicator = networkStatus;
   activeNetworkCleanup = () => networkIndicator.set(null);
   selectedGameId = gameSource.game.id;
-  requestedResolution = loadStoredResolution(selectedGameId);
-  toolbar.setResolution(requestedResolution);
+  // ?resolution= (a size, `display` or `ini`) wins for this page load; otherwise the stored toolbar choice. Without
+  // either, the HD bridge defaults to the display-matched size: its art has two texels per game pixel and is only shown
+  // texel for pixel when one game pixel covers two device pixels.
+  const urlChoice = parseResolutionChoice(new URLSearchParams(window.location.search).get('resolution'), true);
+  const storedChoice = urlChoice === undefined ? loadStoredResolutionChoice(selectedGameId) : urlChoice;
+  activeResolutionChoice = storedChoice === undefined ? (hdBridgeRequested ? DISPLAY_RESOLUTION : null) : storedChoice;
+  requestedResolution = resolveResolutionChoice(
+    activeResolutionChoice,
+    canvas.closest('#stage'),
+    window.devicePixelRatio || 1,
+  );
+  toolbar.setResolution(activeResolutionChoice);
+  refitActiveCanvas();
   toolbar.setGameTitle(gameSource.game.title);
   mainPanel.set(null);
 
@@ -406,6 +449,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     hdCleanup?.();
     if (activeHdCleanup === hdCleanup) activeHdCleanup = null;
     hdCleanup = null;
+    toolbar.setHdView(null);
+    setSessionShortcutKey(HD_VIEW_KEY, false);
     effects.stop();
     activeNetworkCleanup?.();
     activeNetworkCleanup = null;
@@ -557,6 +602,9 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
           frameSize: () => (presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null),
           pointerPosition: () => inputPointerPosition?.() ?? null,
         });
+        // Only a running bridge has a view to switch: the button appears and the key stops reaching the game.
+        toolbar.setHdView(true);
+        setSessionShortcutKey(HD_VIEW_KEY, true);
       })
       .catch((error) => console.warn('[HD] bridge failed to start', error));
   }

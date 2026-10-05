@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { installGameInput, type InstalledGameInput } from '../../src/ui/pages/game/gameInput';
+import { installGameInput, setSessionShortcutKey, type InstalledGameInput } from '../../src/ui/pages/game/gameInput';
 import type { VmShell } from '../../src/adapter/runtime';
 
 let installed: InstalledGameInput | undefined;
@@ -135,6 +135,44 @@ describe('桌面鼠标跟手性', () => {
       [0x101, 27],
     ]);
   });
+  it('a key reserved for a session shortcut stays with the page and returns to the game when released', () => {
+    const { vm } = setup();
+    const press = () => {
+      for (const type of ['keydown', 'keyup']) {
+        window.dispatchEvent(
+          Object.assign(new Event(type, { cancelable: true }), {
+            key: '\\',
+            code: 'Backslash',
+            keyCode: 220,
+            altKey: false,
+            ctrlKey: false,
+            shiftKey: false,
+            metaKey: false,
+            repeat: false,
+            isComposing: false,
+          }),
+        );
+      }
+    };
+    const keyMessages = () =>
+      vm.postMessage.mock.calls
+        .filter(([message]) => message === 0x100 || message === 0x101)
+        .map(([m, key]) => [m, key]);
+    try {
+      setSessionShortcutKey('\\', true);
+      press();
+      expect(keyMessages()).toEqual([]);
+      setSessionShortcutKey('\\', false);
+      press();
+      expect(keyMessages()).toEqual([
+        [0x100, 220],
+        [0x101, 220],
+      ]);
+    } finally {
+      setSessionShortcutKey('\\', false);
+    }
+  });
+
   it('首个移动立即到达 VM，同帧后续位移合并且不丢距离', () => {
     const { vm, present, pointer, frames, flush } = setup();
     pointer('pointermove', { movementX: 3, movementY: 2 });
