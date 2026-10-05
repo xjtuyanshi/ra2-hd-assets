@@ -292,6 +292,11 @@ export interface LiveDiagnostics {
   placeholders: number;
   /** Rules types that have no art at all (each warned about once). */
   missingTypes: string[];
+  /**
+   * Building types drawn from the map cache's own body frame because the type library has no record of them: no
+   * animation layers, no buildup and no turret. A scenario-defined type without a scenario-types.json entry lands here.
+   */
+  mapCacheTypes: string[];
   /** Objects whose library art is still loading. */
   pendingArt: number;
   /** Buildings whose voxel turret (TurretAnimIsVoxel) has no model, and whose model is still loading. */
@@ -1819,9 +1824,11 @@ export class LiveView {
     let pendingArt = 0;
     let missingTurrets = 0;
     let pendingTurrets = 0;
+    const mapCacheTypes = new Set<string>();
     for (const visual of this.visuals.values()) {
       if (visual.turretState === 'missing') missingTurrets++;
       else if (visual.turretState === 'loading') pendingTurrets++;
+      if (visual.mode === 'map-sprite') mapCacheTypes.add(visual.type);
       if (visual.mode !== 'placeholder') continue;
       if (visual.pending) pendingArt++;
       else placeholders++;
@@ -1829,6 +1836,7 @@ export class LiveView {
     return {
       placeholders,
       missingTypes: [...this.warnedTypes].sort(),
+      mapCacheTypes: [...mapCacheTypes].sort(),
       pendingArt,
       missingTurrets,
       pendingTurrets,

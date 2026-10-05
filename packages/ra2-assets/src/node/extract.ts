@@ -32,6 +32,7 @@ import type {
   VoxelModel,
 } from '../manifest.ts';
 import { HD_CACHE_VERSION } from '../manifest.ts';
+import type { ScenarioTypesSidecar } from '../library.ts';
 import { packShelves } from '../atlas.ts';
 import {
   animStillFrame,
@@ -67,6 +68,7 @@ import {
 } from './artSource.ts';
 import { GameInstall, loadMap } from './install.ts';
 import { encodePng } from './png.ts';
+import { scenarioTypesSidecar, writeScenarioTypes } from './scenarioTypes.ts';
 import { paintTileRaster, TERRAIN_DEPTH_FILE, tmpTileSource } from './terrainDepth.ts';
 
 export interface ExtractOptions {
@@ -82,6 +84,8 @@ export interface ExtractResult {
   mapId: string;
   dir: string;
   manifest: HdCacheManifest;
+  /** Written next to the manifest when the scenario defines or redefines types (see node/scenarioTypes.ts). */
+  scenarioTypes?: ScenarioTypesSidecar;
 }
 
 export const DEFAULT_VOXELS = ['MTNK', 'HTNK', 'HARV', 'CMIN', 'SMCV', 'AMCV'];
@@ -415,7 +419,8 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
     const x = Number.parseInt(e.fields[3] ?? '', 10);
     const y = Number.parseInt(e.fields[4] ?? '', 10);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-    const { sec, image } = kind === 'infantry' ? src.infantryArtOf(e.type) : artOf(e.type);
+    // Infantry, vehicles and aircraft all take their file stem from the rules image (see ArtSource.unitArtOf).
+    const { sec, image } = kind === 'infantry' ? src.infantryArtOf(e.type) : src.unitArtOf(e.type);
     const facingField = kind === 'infantry' ? 7 : 5;
     const facing = Number.parseInt(e.fields[facingField] ?? '0', 10) || 0;
     const health = Number.parseInt(e.fields[2] ?? '256', 10);
@@ -471,7 +476,7 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   for (const t of opts.defaultVoxels ?? DEFAULT_VOXELS) voxelTypes.add(t.toUpperCase());
   const voxelModels = new Map<string, VoxelModel>();
   for (const type of [...voxelTypes].sort()) {
-    const { sec, image } = artOf(type);
+    const { sec, image } = src.unitArtOf(type);
     const turretOffset = Number.parseInt(sec?.getString('TurretOffset', '0') ?? '0', 10) || 0;
     const model = buildVoxelModel(type, unitVoxelParts(image, rulesBool(type, 'Turret')), turretOffset, inst, warn);
     if (model) {
@@ -587,5 +592,9 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   };
   writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 1));
   for (const w of warnings) log(`warning: ${w}`);
-  return { mapId: loaded.id, dir: outDir, manifest };
+  // Types the scenario's own rules define or redefine, for the live view (a stale sidecar is removed when none).
+  const scenarioTypes = scenarioTypesSidecar(inst, theaterId, mapIni, loaded.source);
+  writeScenarioTypes(outDir, scenarioTypes, true);
+  for (const w of scenarioTypes?.warnings ?? []) log(`warning: scenario type ${w}`);
+  return { mapId: loaded.id, dir: outDir, manifest, ...(scenarioTypes ? { scenarioTypes } : {}) };
 }

@@ -1,5 +1,5 @@
 import { DataTexture, NearestFilter, NoColorSpace, RedFormat, Texture, UnsignedByteType } from 'three/webgpu';
-import type { LibraryType, TypeLibrary } from '../../../ra2-assets/src/library';
+import { scenarioTypeTable, type LibraryType, type TypeLibrary } from '../../../ra2-assets/src/library';
 import { indexedBitmapPixels } from './indexedPixels';
 import type { PageUpload } from '../pageUpload';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
@@ -28,6 +28,10 @@ export const LIBRARY_PALETTE_PREFIX = 'lib:';
  * The per-theater type library (packages/ra2-assets/src/library.ts): art for every building, vehicle, infantry and
  * aircraft type, so a live match can draw what players build. Atlas pages and voxel models are loaded on first use;
  * callers ask again on a later frame until they are ready.
+ *
+ * The library knows the stock rules only. Types the scenario's own rules define or redefine (the map cache's
+ * scenario-types.json) are laid over this instance's type table when it loads, so every lookup by type id, here and
+ * in the cell layers, sees the match's types.
  */
 export class LiveLibrary {
   private readonly pages = new Map<
@@ -62,6 +66,16 @@ export class LiveLibrary {
     const response = await fetch(`${root}/library.json`).catch(() => null);
     if (!response?.ok) return null;
     const library = (await response.json()) as TypeLibrary;
+    const scenario = cache.scenarioTypes;
+    if (scenario && library.types) {
+      // A sidecar of another theatre names stock types by the same ids but was matched against other art.
+      if (scenario.theater !== library.theater)
+        console.warn(
+          `[HD] scenario types were made for ${scenario.theater}, the library is ${library.theater}: ignored`,
+        );
+      else
+        library.types = scenarioTypeTable(library.types, scenario.types, (message) => console.warn(`[HD] ${message}`));
+    }
     // HD pages recorded outside library.json (a sidecar written by a later tool, same shape as spriteAtlasesHd), so
     // library.json itself never has to be rewritten.
     if (!library.spriteAtlasesHd) {

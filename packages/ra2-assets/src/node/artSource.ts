@@ -122,6 +122,18 @@ export class ArtSource {
     return { ...this.artOf(id), image: (this.rulesGet(id, 'Image') ?? '').trim() || id };
   }
 
+  /**
+   * Vehicles and aircraft take their file stem (`<stem>.vxl`, `<stem>tur.vxl`, or the SHP of a non-voxel unit) from
+   * the rules ImageFile too: it is the same ObjectType field, and the art section's own `Image=` is not followed.
+   * Stock YR shows it: art [BFRT] carries a left-over `Image=SREF`, the install ships bfrt.vxl, and the game draws the
+   * Battle Fortress, not a Prism Tank hull. BFRT is the only stock vehicle or aircraft whose art section names another
+   * image, so this differs from artOf() for that type alone. The art section still supplies Voxel=, Remapable=,
+   * TurretOffset= and the SHP frame layout.
+   */
+  unitArtOf(id: string): { sec: IniSection | undefined; image: string; section: string } {
+    return this.infantryArtOf(id);
+  }
+
   /** SHP file candidates for an art image (theater extension for `Theater=yes`, else theater-letter substitution). */
   shpCandidates(image: string, sec: IniSection | undefined): string[] {
     return artFileCandidates(image, {

@@ -32,6 +32,9 @@ pnpm hd:terrain-map -- --map RiverRam [--cache <dir>]
 # Type library for live matches (defaults: all six theaters, --out <repo>/gameres/hd-cache/_library)
 pnpm hd:library -- [--game <install dir>] [--theater temperate --theater snow ...] [--out <dir>] [--preview]
 
+# Scenario types of existing map caches (new extractions write them): types the map's own rules define or redefine
+pnpm hd:scenario-types -- --game "$GAME_DIR" --cache "$HD_CACHE" [--map DeepFrze] [--map EB2=EB2.mmx] [--out <staging dir>]
+
 # Stage native depth inputs, then update existing copy-on-write theater libraries
 pnpm --filter ra2-assets zshape -- --game "$GAME_DIR" --out "$ZSHAPE_STAGE"
 python3 packages/ra2-assets/python/zshape_install.py --staging "$ZSHAPE_STAGE" --farm "$HD_CACHE"
@@ -1815,6 +1818,57 @@ result alongside the library to enable it in LiveLibrary; the renderer does not 
 - `palettes/<key>.png`: 256x1 RGB palettes actually used (`iso`, `unit`, `theater`, custom art `Palette=` names).
 - `voxels/<TYPE>.json`: body/turret/barrel VXL sections with HVA frame 0 transforms, for every voxel unit or aircraft
   the map places plus MTNK, HTNK, HARV, CMIN, SMCV and AMCV.
+- `scenario-types.json` (`ScenarioTypesSidecar`), only when the scenario's own rules define or redefine types; see
+  [Scenario types](#scenario-types-scenario-typesjson).
+
+## Scenario types (`scenario-types.json`)
+
+The engine reads a map file as one more rules pass after `rulesmd.ini`, so a scenario can register types of its own
+and change stock ones. Stock Yuri's Revenge maps do both: DeepFrze lists `GTGCANA` in its own `[BuildingTypes]` (a
+capturable Grand Cannon with `Image=GTGCAN`), the campaign maps ALL01UMD, ALL03UMD, ALL06UMD, SOV01UMD and SOV03UMD
+define numbered copies of the tech power plant and of the GUM buildings (`CAPOWR01`, `CARUS08A`, ...) and the T-Rex
+copy `DNOAA`, and EB2 / XEB2 turn the lamp-post dummy `INGRNLMP` visible with `InvisibleInGame=no`. The theater library
+is built from `rulesmd.ini` alone and knows none of this; without help a live match draws such a building from the
+map cache's single body frame (no layers, no turret) and such a unit not at all.
+
+Art keys live in `artmd.ini` only, so a scenario type always draws with art some stock type also uses. The sidecar
+therefore carries no art. Each entry (`ScenarioType` in `src/library.ts`) names the stock library type with the same
+art and records what the library extractor derives from rules, as the scenario sets it:
+
+```json
+{
+  "GTGCANA": {
+    "kind": "building",
+    "art": "GTGCAN",
+    "turret": true,
+    "turretVoxel": { "voxel": "GTGCAN:turret", "offset": [3, 28], "zAdjust": -60 }
+  }
+}
+```
+
+`src/node/scenarioTypes.ts` builds every candidate twice with the library extractor's own per-type code
+(`createTypeBuilder` in `src/node/library.ts`): over `rulesmd.ini`, and over `rulesmd.ini` under the scenario.
+Candidates are the ids the scenario adds to the four type lists and the stock ids that have a section in the map. A
+stock id is listed only when its two records differ; a stock type is accepted as the art donor only when the
+art-derived part of its record is identical, voxel models compared by content (a copy of a turreted tank with
+`Turret=no` finds no donor, because the stock model would add a turret). Rules-derived traits are never inherited
+from the donor: `turret`, `invisible`, `harvester`, `refinery`, `unloadingVoxel`, `deployingAnim` and the building's
+`turretVoxel` come from the entry or are absent (`scenarioLibraryType`). A type that cannot be bound stays out of
+`types` and is named in `warnings` with the reason; the renderer then keeps its fallback. A type without any art file
+is not reported: the engine draws nothing for it either.
+
+`extractMap` writes the file next to `manifest.json` and removes a stale one. For caches that already exist,
+`pnpm hd:scenario-types` reads each `manifest.json`, finds the scenario in the player's install (the manifest's source
+name, then the directory name as a `.yro`/`.mmx` package or archived `.map`, then the `.pkt` index of the loose
+packages; `--map <dir>=<file>` names it) and refuses one whose theater or size differs from the manifest. The file
+replaces its directory entry in one rename, so a linked file of a copy-on-write farm is replaced and never written
+through; a map directory that is itself a link is refused. For a farm, write to `--out <staging>` and install each
+`<staging>/<map>/scenario-types.json` with `python/cache_farm.py` `install_file`. The command exits with status 1
+when a scenario could not be found; an absent sidecar means "no scenario types" only for the maps it reports as such.
+
+The renderer lays the entries over the theater library's type table when a match loads
+(`scenarioTypeTable`, used by `packages/hd-renderer/src/live/library.ts`); a sidecar of another theater, or an entry
+whose stock type the library lacks, is ignored with a console warning.
 
 ## Type library (`<out>/_library/`)
 
@@ -2097,8 +2151,16 @@ shading intact; a missing or unreadable tile warns once and leaves the surface n
   the selected art section still supplies sequence/remap metadata, but its own `Image=` does not alias infantry
   files. In YR 1.001, ObjectType::LoadFromINI (`0x5F933B`) reads that field from the caller's rules INI and the
   Techno SHP loader (`0x7157B5`) uses it directly. Thus stock CAML loads `caml.shp` despite art `[CAML] Image=JOSH`.
-  Non-infantry art aliases retain their existing behavior. Old catalogs need a source-aware rebuild; fitting camel
-  art into inherited chimp atlas rectangles would lose the native silhouette and anchors.
+  Old catalogs need a source-aware rebuild; fitting camel art into inherited chimp atlas rectangles would lose the
+  native silhouette and anchors.
+- Vehicle and aircraft file stems (`<stem>.vxl`, `<stem>tur.vxl`, `<stem>barl.vxl`, or the SHP of a non-voxel unit)
+  follow the same rule (`ArtSource.unitArtOf`): the rules image, never the art section's own `Image=`. Stock art
+  `[BFRT]` carries a left-over `Image=SREF` while the install ships `bfrt.vxl` and the game draws the Battle Fortress;
+  following the art key built the library's BFRT model from the Prism Tank hull. BFRT is the only stock vehicle or
+  aircraft whose art section names another image, so no other library record changes. A library extracted before
+  this rule holds the wrong BFRT model (`common/voxels/BFRT.json` with `"file":"sref.vxl"`), and any redraw page
+  projected from it shows the wrong vehicle. Building, overlay, terrain and anim art keep following the art
+  section's `Image=` (`artOf`, `animArt`); no stock building differs either way.
 - Type library only: art `Remapable=` applies to infantry and vehicles too (animals are not house-coloured); art
   `TerrainPalette=yes` is recorded but the unit palette is kept (the lamp art is colour noise with the iso palette).
 
@@ -2141,6 +2203,9 @@ PNG encoder, palette remap, art naming and atlas packing; they need no game file
 infantry sequence parsing, the colour scheme order, paged atlas packing, theater art-name resolution, native depth
 metadata and full depth-template output built from a synthetic in-memory install (hand-made SHP files and INI text).
 `tests/zshape.test.ts` covers the signed-byte transform, frame-0 dimensions and native art/rules key parsing.
+`tests/scenarioTypes.test.ts` covers scenario types on a synthetic install with voxel parts: clones bound to stock
+art, stock types listed only when their record changes, refused donors, the record merge, sidecar validation,
+link-safe writing and the file written by map extraction.
 `tests/effectsLibrary.test.ts`
 does the same for the effect sidecar: anim timing and flags, theater variants, projectiles, overlays, smudges, the
 classification and the generated table.

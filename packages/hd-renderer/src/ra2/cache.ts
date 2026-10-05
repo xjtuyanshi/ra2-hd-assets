@@ -14,6 +14,7 @@ import {
   UnsignedByteType,
 } from 'three/webgpu';
 import type { HdCacheManifest, TileEntry, VoxelModel } from '../../../ra2-assets/src/manifest';
+import { SCENARIO_TYPES_FILE, validateScenarioTypes, type ScenarioTypesSidecar } from '../../../ra2-assets/src/library';
 import { validateMapLights, type MapLightsSidecar } from '../../../ra2-assets/src/lights';
 import { MAP_MATERIALS_FILE, type MapMaterials } from '../../../ra2-assets/src/mapMaterials';
 import { MapLightGrade, setPaletteGrade, setPaletteNodes } from './mapLighting';
@@ -88,6 +89,11 @@ export interface Ra2Cache {
   mapLight: MapLightGrade | null;
   /** Lit-window mask over the sprite atlas (same layout) and its index, when extracted. */
   windows: { texture: Texture; index: WindowsIndex } | null;
+  /**
+   * Types the scenario's own rules define or redefine (scenario-types.json, packages/ra2-assets ScenarioType), for the
+   * live library to lay over the theatre's stock types; null or absent when the map cache has none.
+   */
+  scenarioTypes?: ScenarioTypesSidecar | null;
 }
 
 export const NO_TILE = 0xffff;
@@ -471,6 +477,7 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     manifestBytes,
   );
   const windowsIndex = await fetchOptionalJson<WindowsIndex>(url('windows.json'));
+  const scenarioTypes = await fetchOptionalJson(url(SCENARIO_TYPES_FILE), validateScenarioTypes);
   const windowsTexture = windowsIndex ? await loadMaskTexture(url('windows.png')) : null;
   const windows = windowsIndex && windowsTexture ? { texture: windowsTexture, index: windowsIndex } : null;
 
@@ -496,6 +503,7 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     lights,
     mapLight,
     windows,
+    scenarioTypes,
     terrainMap,
     exists,
     height,

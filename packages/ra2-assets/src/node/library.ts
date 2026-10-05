@@ -16,6 +16,7 @@ import type { VoxelModel } from '../manifest.ts';
 import {
   BUILDING_LAYER_KEYS,
   buildingLayerArt,
+  type ArtSectionView,
   parseFoundation,
   parseInfantrySequences,
   parseIniFraction,
@@ -78,7 +79,7 @@ export interface LibraryResult {
 }
 
 /** Type-list sections of rulesmd.ini and the kind each yields. */
-const TYPE_LISTS: readonly [LibraryKind, string][] = [
+export const TYPE_LISTS: readonly [LibraryKind, string][] = [
   ['building', 'BuildingTypes'],
   ['vehicle', 'VehicleTypes'],
   ['infantry', 'InfantryTypes'],
@@ -374,22 +375,29 @@ function appendCellLibrary(
  * Resolve every TechnoType of `theaterId` against an install: type records, pending sprites (all frames), voxel models
  * and colour schemes. No I/O besides reading the install.
  */
-export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): CollectedLibrary {
-  const theater = THEATERS[theaterId];
-  const warnings: string[] = [];
-  const warn = (m: string): void => {
-    if (!warnings.includes(m)) warnings.push(m);
-  };
-  const src = new ArtSource(inst, theater, warn);
-  const { rules, art } = src;
+/** Type records over one rules view: rulesmd.ini alone (the theatre library) or rulesmd.ini under a scenario's INI. */
+export interface TypeBuilder {
+  /** Every sprite the built records refer to. */
+  collector: SpriteCollector;
+  /** Every voxel model the built records refer to, by voxel id. */
+  voxelModels: Map<string, VoxelModel>;
+  /** The record of one registered type; undefined, with one warning, when the install has no readable art for it. */
+  build(kind: LibraryKind, id: string): LibraryType | undefined;
+}
+
+/**
+ * The per-type half of the library extraction. Rules values come from `src` (so a scenario's own sections override
+ * rulesmd.ini when `src` was given them); art.ini is never overridden, as in the engine.
+ */
+export function createTypeBuilder(
+  inst: InstallView,
+  src: ArtSource,
+  warn: (m: string) => void,
+  count: (k: string, n?: number) => void = () => {},
+): TypeBuilder {
+  const { art } = src;
   const collector = new SpriteCollector(inst, warn, ['unit']);
   const has = (n: string): boolean => inst.has(n);
-
-  const counts: Record<string, number> = {};
-  const count = (k: string, n = 1): void => {
-    counts[k] = (counts[k] ?? 0) + n;
-  };
-  const types: Record<string, LibraryType> = {};
   const voxelModels = new Map<string, VoxelModel>();
   /** Skip a type with one warning naming the reason. */
   const skip = (kind: LibraryKind, id: string, reason: string): void => {
@@ -413,7 +421,7 @@ export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): Col
   };
   /** Voxel model of a rules vehicle/aircraft type keyed by its id (body + tur/barl for Turret=yes). */
   const unitVoxel = (id: string): string | undefined => {
-    const { sec, image } = src.artOf(id);
+    const { sec, image } = src.unitArtOf(id);
     const turretOffset = Number.parseInt(sec?.getString('TurretOffset', '0') ?? '0', 10) || 0;
     return voxelOf(id, unitVoxelParts(image, src.rulesBool(id, 'Turret')), turretOffset);
   };
@@ -568,7 +576,7 @@ export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): Col
 
   // ---------------------------------------------------------------- vehicles and aircraft
   const unit = (kind: 'vehicle' | 'aircraft', id: string): LibraryType | undefined => {
-    const { sec, image, section } = src.artOf(id);
+    const { sec, image, section } = src.unitArtOf(id);
     const remap = secBool(sec, 'Remapable', true);
     const base = { kind, image: section, drawOffset: coordDrawOffset(kind), lighting: 'ambient' as const, remap };
     let type: LibraryType;
@@ -613,6 +621,39 @@ export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): Col
     return type;
   };
 
+  /** The type's rules section as `src` resolves it (scenario sections first). */
+  const rulesView = (id: string): ArtSectionView => ({
+    has: (key) => src.rulesGet(id, key) !== undefined,
+    getString: (key, fallback = '') => src.rulesGet(id, key) ?? fallback,
+  });
+  return {
+    collector,
+    voxelModels,
+    build(kind, id) {
+      const t = kind === 'building' ? building(id) : kind === 'infantry' ? infantry(id) : unit(kind, id);
+      if (!t) return undefined;
+      Object.assign(t, readTypeDepthFlags(kind, rulesView(id)));
+      if (src.rulesBool(id, 'InvisibleInGame')) t.invisible = true;
+      return t;
+    },
+  };
+}
+
+export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): CollectedLibrary {
+  const theater = THEATERS[theaterId];
+  const warnings: string[] = [];
+  const warn = (m: string): void => {
+    if (!warnings.includes(m)) warnings.push(m);
+  };
+  const src = new ArtSource(inst, theater, warn);
+  const { rules } = src;
+  const counts: Record<string, number> = {};
+  const count = (k: string, n = 1): void => {
+    counts[k] = (counts[k] ?? 0) + n;
+  };
+  const types: Record<string, LibraryType> = {};
+  const { collector, voxelModels, build } = createTypeBuilder(inst, src, warn, count);
+
   for (const [kind, list] of TYPE_LISTS) {
     const ids = [
       ...new Set(
@@ -628,10 +669,8 @@ export function collectTypeLibrary(inst: InstallView, theaterId: TheaterId): Col
         warn(`${kind} ${id}: already listed as ${types[id]!.kind}, kept the first`);
         continue;
       }
-      const t = kind === 'building' ? building(id) : kind === 'infantry' ? infantry(id) : unit(kind, id);
+      const t = build(kind, id);
       if (!t) continue;
-      Object.assign(t, readTypeDepthFlags(kind, rules.getSection(id)));
-      if (src.rulesBool(id, 'InvisibleInGame')) t.invisible = true;
       types[id] = t;
       count(`types:${kind}`);
     }
