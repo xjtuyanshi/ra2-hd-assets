@@ -90,6 +90,33 @@ describe('terrain patch blending', () => {
   });
 });
 
+describe('terrain patch tone curve', () => {
+  it('carries patch luma to the target luma of the same rank in the unchanged surroundings', () => {
+    // 40 px row: the patch is a ramp 60..99; the target renders the same terrain darker and with more contrast
+    // (2v - 100). The first 32 pixels are unchanged surroundings, the last 8 are replaced (weight 1).
+    const n = 40;
+    const region = { x: 0, y: 0, width: n, height: 8, changed: 8 };
+    const patch = new Uint8Array(n * 8 * 3);
+    const target = flat(n, 8, [0, 0, 0, 255]);
+    const weights = new Float32Array(n * 8);
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < n; x++) {
+        const v = 60 + ((x * 7) % 32);
+        patch.fill(v, (y * n + x) * 3, (y * n + x) * 3 + 3);
+        target.data.fill(2 * v - 100, (y * n + x) * 4, (y * n + x) * 4 + 3);
+        if (x >= 32) weights[y * n + x] = 1;
+      }
+    }
+    // The replaced pixels hold values that also occur in the surroundings; a mean shift alone would leave them wrong.
+    const expected = Array.from({ length: 8 }, (_, k) => 2 * (60 + (((32 + k) * 7) % 32)) - 100);
+    for (let x = 32; x < n; x++) target.data.fill(255, x * 4, x * 4 + 3);
+    blendPatch(target, region, 1, patch, new Uint8Array(n * 8).fill(255), weights, true);
+    expect(Array.from({ length: 8 }, (_, k) => target.data[(32 + k) * 4])).toEqual(expected);
+    // Untouched surroundings.
+    expect(target.data[0]).toBe(2 * 60 - 100);
+  });
+});
+
 describe('patchUpscaledTerrain', () => {
   /** Stands in for Real-ESRGAN: every input pixel becomes a 4x4 block. */
   const nearest4x = async (_bin: string, args: string[]): Promise<void> => {

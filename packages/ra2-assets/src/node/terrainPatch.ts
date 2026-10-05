@@ -204,9 +204,13 @@ export function patchWeights(
 
 /**
  * Blend an upscaled region into `target` (RGBA at output scale, modified in place). `rgb` is the region at output
- * scale; `alpha` the corrected scale-1 alpha resized like the whole-map upscale does. With `matchTone` the patch is
- * first shifted by the mean colour difference to the target over the region's unchanged surroundings, so a patch
- * taken from the plain upscale sits in a redrawn terrain image without a tone step.
+ * scale; `alpha` the corrected scale-1 alpha resized like the whole-map upscale does.
+ *
+ * With `matchTone` the patch first takes on the tones of the image it goes into: the region's unchanged surroundings
+ * show the same terrain in the patch and in the target, so their two brightness distributions give a monotone curve
+ * (the target's luma at the same rank) that carries the patch to the target's rendering — a redrawn image's darker
+ * cliffs and its snow stay what they are. The curve moves luma only, so the patch keeps its own hue. With fewer than
+ * 256 such pixels only the mean colour difference is applied.
  */
 export function blendPatch(
   target: PngImage,
@@ -221,30 +225,69 @@ export function blendPatch(
   const h = region.height * scale;
   if (rgb.length !== w * h * 3 || alpha.length !== w * h || weights.length !== w * h)
     throw new RangeError('patch buffers do not match the region size');
+  const at = (x: number, y: number): number => ((region.y * scale + y) * target.width + region.x * scale + x) * 4;
+  const luma = (r: number, g: number, b: number): number => Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+  /** Luma offset per patch luma, and a constant colour offset. */
+  const lift = new Float32Array(256);
   const shift = [0, 0, 0];
   if (matchTone) {
+    const from = new Float64Array(256);
+    const to = new Float64Array(256);
     const sum = [0, 0, 0];
     let n = 0;
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
         if (weights[i]! > 0) continue;
-        const t = ((region.y * scale + y) * target.width + region.x * scale + x) * 4;
+        const t = at(x, y);
         if (target.data[t + 3]! < 255 || alpha[i]! < 255) continue;
+        from[luma(rgb[i * 3]!, rgb[i * 3 + 1]!, rgb[i * 3 + 2]!)]!++;
+        to[luma(target.data[t]!, target.data[t + 1]!, target.data[t + 2]!)]!++;
         for (let c = 0; c < 3; c++) sum[c]! += target.data[t + c]! - rgb[i * 3 + c]!;
         n++;
       }
     }
-    if (n) for (let c = 0; c < 3; c++) shift[c] = sum[c]! / n;
+    if (n > 0 && n < 256) for (let c = 0; c < 3; c++) shift[c] = sum[c]! / n;
+    if (n >= 256) {
+      // Rank matching at bin centres; patch lumas outside the sampled range keep the offset of the nearest sample.
+      let seen = 0;
+      let cursor = 0;
+      let below = 0;
+      let first = -1;
+      let last = -1;
+      for (let v = 0; v < 256; v++) {
+        const count = from[v]!;
+        if (!count) continue;
+        const rank = seen + count / 2;
+        while (cursor < 255 && below + to[cursor]! < rank) below += to[cursor++]!;
+        lift[v] = cursor - v;
+        seen += count;
+        if (first < 0) first = v;
+        last = v;
+      }
+      for (let v = 0; v < 256; v++) {
+        if (from[v]!) continue;
+        if (v < first) lift[v] = lift[first]!;
+        else if (v > last) lift[v] = lift[last]!;
+        else {
+          let lo = v;
+          let hi = v;
+          while (!from[lo]!) lo--;
+          while (!from[hi]!) hi++;
+          lift[v] = lift[lo]! + ((lift[hi]! - lift[lo]!) * (v - lo)) / (hi - lo);
+        }
+      }
+    }
   }
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y * w + x;
       const k = weights[i]!;
       if (k <= 0) continue;
-      const t = ((region.y * scale + y) * target.width + region.x * scale + x) * 4;
+      const t = at(x, y);
+      const up = lift[luma(rgb[i * 3]!, rgb[i * 3 + 1]!, rgb[i * 3 + 2]!)]!;
       for (let c = 0; c < 3; c++) {
-        const v = rgb[i * 3 + c]! + shift[c]!;
+        const v = rgb[i * 3 + c]! + up + shift[c]!;
         target.data[t + c] = Math.max(0, Math.min(255, Math.round(target.data[t + c]! * (1 - k) + v * k)));
       }
       target.data[t + 3] = Math.round(target.data[t + 3]! * (1 - k) + alpha[i]! * k);
