@@ -28,6 +28,8 @@
     "hd:effects": "pnpm --filter ra2-assets effects",
     "hd:preview": "pnpm --filter ra2-assets preview",
     "hd:terrain-map": "pnpm --filter ra2-assets terrain-map",
+    "hd:terrain-depth": "pnpm --filter ra2-assets terrain-depth",
+    "hd:terrain-patch": "pnpm --filter ra2-assets terrain-patch",
     "hd:upscale": "pnpm --filter ra2-assets upscale",
     "hd:sprites": "pnpm --filter ra2-assets sprites",
     "hd:library": "pnpm --filter ra2-assets library",

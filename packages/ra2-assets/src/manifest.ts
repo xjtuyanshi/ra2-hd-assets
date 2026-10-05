@@ -53,7 +53,7 @@ export interface HdCacheManifest {
   /** One entry per distinct (template file, sub-tile) used by the map. */
   tiles: TileEntry[];
   /** RGBA atlas of all tile images (palette applied: the theater iso palette). */
-  terrainAtlas: AtlasRef;
+  terrainAtlas: TerrainAtlasRef;
   /** Indexed SHP atlas (R8, or legacy RGBA with the index in red; 0 = transparent); see `palettes`. */
   spriteAtlas: AtlasRef;
   /** Optional offline 2x sprite colours and house-remap mask, with the source atlas's normalized UVs. */
@@ -136,6 +136,16 @@ export interface AtlasRef {
   height: number;
 }
 
+export interface TerrainAtlasRef extends AtlasRef {
+  /**
+   * Added: single-channel atlas with the same layout as `file`, holding the engine's TMP z byte of every opaque tile
+   * pixel (tileRaster.ts). Terrain compositors resolve overlapping tiles with it exactly as the engine's Z-buffer
+   * does. Caches extracted before this field existed lack it; compositors then fall back to the approximate
+   * diamonds-then-extras painter, which lets a cliff face cover ground in front of it.
+   */
+  depth?: string;
+}
+
 /** Optional offline sprite atlas. Source indexed art remains authoritative for shadows and palette lookup. */
 export interface SpriteAtlasHdRef extends AtlasRef {
   /** RGBA colour atlas, with remappable indices 16..31 replaced by a neutral grey ramp. */
@@ -167,6 +177,11 @@ export interface TileEntry {
    */
   rect: [x: number, y: number, w: number, h: number];
   anchor: [x: number, y: number];
+  /**
+   * Added: true when the TMP tile has no z-data. The engine draws such a tile without testing or writing depth, so
+   * it covers whatever was drawn before it and never blocks what is drawn after it.
+   */
+  noDepth?: true;
 }
 
 export interface SpriteFrame {

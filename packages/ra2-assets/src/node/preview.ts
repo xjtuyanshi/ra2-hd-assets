@@ -16,7 +16,7 @@ import { CELL_H, mapLightMultipliers, projectCorner } from '../iso.ts';
 import { applyRemap } from '../remap.ts';
 import { sectionNormalsMode } from '../voxelNormals.ts';
 import { decodePng, encodePng, type PngImage } from './png.ts';
-import { drawTerrainTiles, terrainLayout } from './terrain.ts';
+import { drawTerrainTiles, loadTerrainDepth, terrainLayout } from './terrain.ts';
 
 export { insideDiamond } from './terrain.ts';
 
@@ -92,7 +92,8 @@ export function renderPreview(opts: PreviewOptions): PreviewResult {
     drawn[k] = (drawn[k] ?? 0) + 1;
   };
 
-  const { cells, minX, minY, maxX, maxY } = terrainLayout(m);
+  const layout = terrainLayout(m);
+  const { minX, minY, maxX, maxY } = layout;
   // Room above the map for tall sprites and the optional voxel strip.
   const top = opts.modelStrip ? 220 : 120;
   const crop = !opts.full && m.visibleRect ? m.visibleRect : undefined;
@@ -126,7 +127,7 @@ export function renderPreview(opts: PreviewOptions): PreviewResult {
   };
   const clamp = (v: number): number => (v > 255 ? 255 : v);
 
-  drawTerrainTiles(m, terrain, cells, canvas, lightAt);
+  drawTerrainTiles(m, terrain, layout, canvas, lightAt, loadTerrainDepth(dir, m));
 
   // Palette per (palette key, owner, height level, lighting class): house remap, then the cell's lighting.
   const palCache = new Map<string, Uint8Array>();

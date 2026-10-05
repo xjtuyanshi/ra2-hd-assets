@@ -120,6 +120,12 @@ export interface TmpExtraGraphics {
    * transparent (skipped when compositing).
    */
   readonly bitmap: Uint8Array;
+  /**
+   * Per-pixel z (depth) bytes of the overlay, `width * height`, row-major like {@link bitmap}; `undefined` when the
+   * tile has no z-data flag or no extra z offset. The engine adds each byte to the cell's depth baseline exactly as
+   * it does for the diamond's {@link TmpTile.zData}.
+   */
+  readonly zData?: Uint8Array;
 }
 
 /**
@@ -251,7 +257,7 @@ export class TmpFile {
 
     let extra: TmpExtraGraphics | undefined;
     if (hasExtraData) {
-      extra = this.readExtra(dv, data, base);
+      extra = this.readExtra(dv, data, base, hasZData);
     }
 
     const tile: TmpTile = {
@@ -297,9 +303,10 @@ export class TmpFile {
    * Expand the diamond scanline data into a dense `tileWidth x tileHeight`
    * raster (row-major, index 0 outside the diamond). Ported from XCC
    * `decode_tile`: the diamond widens by four pixels per row down to the middle
-   * scanline, then narrows again.
+   * scanline, then narrows again. {@link TmpTile.zData} uses the same packed layout, so callers expand it with this
+   * method too.
    */
-  private expandDiamond(raw: Uint8Array): Uint8Array {
+  expandDiamond(raw: Uint8Array): Uint8Array {
     const w = this.tileWidth;
     const h = this.tileHeight;
     const out = new Uint8Array(w * h);
@@ -326,7 +333,7 @@ export class TmpFile {
   }
 
   /** Read and expand the extra overlay graphics for a present tile. */
-  private readExtra(dv: DataView, data: Uint8Array, base: number): TmpExtraGraphics {
+  private readExtra(dv: DataView, data: Uint8Array, base: number, hasZData: boolean): TmpExtraGraphics {
     const x = dv.getInt32(base + IMG.xExtra, true);
     const y = dv.getInt32(base + IMG.yExtra, true);
     const width = dv.getInt32(base + IMG.cxExtra, true);
@@ -341,6 +348,12 @@ export class TmpFile {
     }
     // Extra graphics are stored as a plain width*height row-major raster.
     const bitmap = data.slice(start, start + count);
+    // Extra z-data has the same plain raster layout (XCC `get_z_extra_data`); it exists only with the z-data flag.
+    const extraZOfs = hasZData ? dv.getInt32(base + IMG.extraZOfs, true) : 0;
+    const zStart = base + extraZOfs;
+    if (extraZOfs > 0 && zStart + count <= data.length) {
+      return { x, y, width, height, bitmap, zData: data.slice(zStart, zStart + count) };
+    }
     return { x, y, width, height, bitmap };
   }
 

@@ -44,6 +44,12 @@ pnpm hd:effects -- [--game <install dir>] [--theater urban ...] [--out <dir>] [-
 pnpm hd:upscale -- --map RiverRam [--cache <dir>] [--scale 2] [--model realesrgan-x4plus] [--tile 256]
 pnpm hd:upscale -- --map RiverRam --bin <binary-path> --compare 1200,700,160,100
 
+# Give a cache extracted before the tile-depth atlas existed its terrain-depth.png (from the install), then rebuild
+# the composite; repair existing upscaled or redrawn terrain images only where the composite changed
+pnpm hd:terrain-depth -- --game <install dir> --map RiverRam [--cache <dir>]
+pnpm hd:terrain-patch -- --before <old terrain-map.png> --after <new terrain-map.png> \
+  --target <terrain-map@2x.png>=<out.png> [--redraw <redrawn@2x.png>=<out.png>] [--bin <binary-path>]
+
 # Map light sidecars next to an existing cache: lights.json always; lit-window masks with --windows; review images
 # with --preview; per-page window masks of a type library with --library <theater> (never rewrites manifests)
 pnpm hd:lights -- --map XMP29U2 --map RiverRam [--game <install dir>] [--cache <dir>] [--windows] [--preview]
@@ -248,7 +254,28 @@ Both terrain commands default to `<repo>/gameres/hd-cache` and write into `<cach
 existing cache without modifying it, first copy the map directory to a disposable cache and pass `--cache` to both
 commands. The derived outputs must stay out of Git and must not be redistributed.
 
-`terrain-map` shares the preview's depth-sorted diamond and extra-graphics passes. It includes all extracted cells,
+`terrain-map` and the preview resolve overlapping tiles the way the engine's tile rasterizer does (`resolveTerrain` in
+`src/node/terrain.ts`, rule and evidence in `src/tileRaster.ts` and `docs/remaster/research/painter-order.md`): cells
+are swept in rows of constant `x + y`, left to right, and every opaque tile pixel is written when its depth
+`zByte - 15 * (x + y)` is not farther than what is already there. The z bytes come from the TMP files: extraction
+writes them to `terrain-depth.png`, a single-channel atlas with the layout of `terrain.png`, and records it as
+`manifest.terrainAtlas.depth`; a tile without TMP z-data is marked `noDepth` and drawn unconditionally. A flat diamond
+stores `29 - row` and a cliff face 15..29, so ground in front of a cliff covers the lower part of its face.
+
+A cache without `terrainAtlas.depth` falls back to the earlier painter (all diamonds by cell depth, then everything
+outside the diamonds). That approximation lets a cliff face overwrite the diamond of a cell in front of it, which shows
+as wedges of cliff or ground with a straight vertical edge along ridges (186 of 217 map caches checked on 2026-10-05
+differed from the engine rule, by 37 to 117,507 pixels, median 17,546). `terrain-depth` adds the atlas to such a cache: it rebuilds
+every manifest tile from the install, requires the cache's atlas rectangle, anchor and pixels to match (a cache from
+different game files is rejected), repaints atlas pixels only where an extra pixel loses to its own diamond, and sets
+`terrainAtlas.depth`, after which `prepare-map` reruns the terrain and upscale steps. `terrain-patch` is the cheap
+alternative to a whole-map upscale after such a correction: it finds the pixels that differ between the previous and
+the corrected scale-1 composite, upscales only those sites (with 20 px of context) through the same steps as `upscale`,
+and cross-fades them into existing upscaled images (full weight within 3 scale-1 px of a changed pixel, fading over the
+next 5), leaving every other byte of the image as it was. `--redraw` targets are images that were redrawn after the
+plain upscale; their patches are shifted to the mean tone of the unchanged surroundings first.
+
+The composite includes all extracted cells,
 uses tight terrain bounds without sprite margins, ignores map lighting, and retains raw atlas RGB/alpha. It writes
 `terrain-map.png` (RGBA) and `terrain-water.png` (grayscale), then updates `manifest.terrainMap`. The stored origin is
 the engine screen coordinate of the image's top-left pixel; subtract it to get scale-1 image coordinates.
