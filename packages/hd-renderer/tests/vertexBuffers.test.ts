@@ -37,6 +37,7 @@ import { buildTerrain } from '../src/terrain';
 import { buildRa2Terrain } from '../src/ra2/terrain';
 import { buildVoxelGeometry } from '../src/ra2/voxels';
 import { voxelPbrMaterialFor } from '../src/ra2/voxelPbr';
+import { buildSmoothVoxelGeometry, buildStandInVoxelParts } from '../src/ra2/voxelSmoothGeometry';
 import { VoxelWaterMesh, voxelShadowMaterial, voxelWaterMaterial } from '../src/ra2/voxelShadow';
 import { Ra2NightDressing } from '../src/ra2/nightDressing';
 import { AtmosphereNodes } from '../src/atmosphere';
@@ -691,6 +692,38 @@ describe('r186 vertex and uniform binding budget', () => {
     }
     [terrain.mesh, generic.mesh, water.mesh].forEach(dispose);
     weatherMask.dispose();
+    source.nodes!.dispose();
+  });
+
+  it('draws the stand-in voxel mesh with the shaders and vertex layout of the smooth mesh it stands in for', () => {
+    const source = cache();
+    const palette = new Uint8Array(768);
+    const model = syntheticModel([syntheticSection(6)]);
+    const [smooth] = buildSmoothVoxelGeometry(model, palette, source.nodes, { aoRays: 0, supersample: 2 });
+    const [standIn] = buildStandInVoxelParts(model);
+    // The remaster look's own material, then the surface twins every placed part has.
+    for (const material of [
+      smooth!.material!,
+      voxelShadowMaterial(),
+      voxelWaterMaterial(source.nodes!, 'foam'),
+      voxelWaterMaterial(source.nodes!, 'reflection', smooth!.material),
+    ]) {
+      const final = assertLimits(new Mesh(smooth!.geometry, material));
+      const interim = assertLimits(new Mesh(standIn!.geometry, material));
+      // The same generated code and the same buffer layouts: one pipeline draws both geometries.
+      expect(interim.vertexShader).toBe(final.vertexShader);
+      expect(interim.fragmentShader).toBe(final.fragmentShader);
+      expect(interim.buffers).toEqual(final.buffers);
+      expect(interim.attributes.map((attribute) => attribute.itemSize)).toEqual(
+        final.attributes.map((attribute) => attribute.itemSize),
+      );
+    }
+    // The PBR shader reads the smooth mesh's extra attributes; the stand-in supplies each of them itself.
+    const read = assertLimits(new Mesh(standIn!.geometry, smooth!.material)).attributes;
+    for (const name of ['pindex', 'pshade', 'occlusion', 'curvature', 'vpos'])
+      expect(read).toContain(standIn!.geometry.getAttribute(name));
+    smooth!.geometry.dispose();
+    standIn!.geometry.dispose();
     source.nodes!.dispose();
   });
 

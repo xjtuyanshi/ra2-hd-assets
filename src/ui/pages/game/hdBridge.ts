@@ -563,6 +563,13 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (!settled)
       console.warn(`[HD] view shown after ${REVEAL_DEADLINE_MS / 1000} s with ${timeline.revealLoading} loads pending`);
     setHole(tacticalRect());
+    // Shown before it was complete: the frame drawn a moment ago was drawn for a view out of sight, which leaves out
+    // what is not final (a voxel unit whose mesh is still being built). A shown view draws such a unit from its
+    // stand-in, so draw once more: the first frame the player sees has every unit the game shows.
+    if (!settled) {
+      layout();
+      live.render();
+    }
   };
 
   /** Full snapshots are only worth their cost while the HD view can show them (null replies are cheap). */

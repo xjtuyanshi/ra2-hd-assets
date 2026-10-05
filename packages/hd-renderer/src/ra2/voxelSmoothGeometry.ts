@@ -1,7 +1,7 @@
 import { BufferAttribute, BufferGeometry } from 'three/webgpu';
 import type { VoxelModel, VoxelSection } from '../../../ra2-assets/src/manifest';
 import type { AtmosphereNodes } from '../atmosphere';
-import type { VoxelGeometry } from './voxels';
+import { buildStandInPartGeometry, type VoxelGeometry, type VoxelShape } from './voxels';
 import { buildSmoothSection, smoothVoxelOptions, type SmoothMeshData, type SmoothVoxelOptions } from './voxelSmooth';
 import type { SmoothSectionBuilder } from './voxelSmoothPool';
 import { voxelPbrMaterialFor } from './voxelPbr';
@@ -125,6 +125,32 @@ function smoothParts(
     variants.set(key, parts);
   }
   return parts;
+}
+
+/**
+ * The model's shared smooth part geometries for one option set, in the order of `model.parts`; null while they have
+ * not been built (see prepareSmoothVoxelGeometry). Never builds.
+ */
+export function smoothVoxelPartGeometries(
+  model: VoxelModel,
+  options: Partial<SmoothVoxelOptions> = {},
+): BufferGeometry[] | null {
+  const parts = shared.get(model)?.get(JSON.stringify(smoothVoxelOptions(options)));
+  return parts ? parts.map((part) => part.geometry) : null;
+}
+
+/**
+ * A stand-in for the model's smooth geometry that is built on the calling thread in milliseconds: the plain
+ * exposed-face mesh of every part (voxels.ts buildStandInPartGeometry), in the smooth mesh's attribute layout and in
+ * the order of `model.parts`. The same model-local frame and scale as the smooth mesh, whose surface lies within a
+ * fraction of a voxel of these faces, so a unit drawn with one and then the other keeps its place, size and
+ * silhouette. Not cached: the caller owns the geometries and disposes them when the smooth mesh has replaced them.
+ */
+export function buildStandInVoxelParts(
+  model: VoxelModel,
+  shape?: Readonly<VoxelShape>,
+): { role: VoxelGeometry['role']; geometry: BufferGeometry }[] {
+  return model.parts.map((part) => ({ role: part.role, geometry: buildStandInPartGeometry(part.sections, shape) }));
 }
 
 /** Build the model's shared geometry on the calling thread when it is missing (no material is created). */

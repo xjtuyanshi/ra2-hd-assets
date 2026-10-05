@@ -40,7 +40,8 @@ export class LiveLibrary {
   >();
   /** Changes when asynchronous art settles; presentation can sleep while nothing has arrived. */
   revision = 0;
-  private readonly voxels = new Map<string, VoxelModel | 'loading' | 'failed'>();
+  /** 'ahead': being fetched before anything asked for it (preloadVoxels); it is nobody's missing art yet. */
+  private readonly voxels = new Map<string, VoxelModel | 'loading' | 'ahead' | 'failed'>();
   private voxelTypes?: Map<string, string>;
   private readonly hdPages = new Map<number, HdAtlas | 'loading' | 'failed'>();
   private readonly windowPages = new Map<number, Texture | 'loading' | 'failed'>();
@@ -280,21 +281,46 @@ export class LiveLibrary {
     const entry = this.voxels.get(id);
     const file = this.library.voxels[id];
     if (!file) return null;
-    if (entry === undefined) {
-      this.voxels.set(id, 'loading');
-      fetch(`${this.base}/${file}`)
-        .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-        .then((model: VoxelModel) => {
-          this.voxels.set(id, model);
-          this.revision++;
-        })
-        .catch(() => {
-          this.voxels.set(id, 'failed');
-          this.revision++;
-        });
-      return null;
+    if (entry === undefined) this.fetchVoxel(id, file, 'loading');
+    // Asked for while it is fetched ahead: from now on it is art on its way, and its arrival is news.
+    else if (entry === 'ahead') this.voxels.set(id, 'loading');
+    return typeof entry === 'object' ? entry : null;
+  }
+
+  private fetchVoxel(id: string, file: string, state: 'loading' | 'ahead'): void {
+    this.voxels.set(id, state);
+    const settle = (result: VoxelModel | 'failed') => {
+      // Only a model something waits for changes what is drawn; one fetched ahead arrives silently.
+      const wanted = this.voxels.get(id) === 'loading';
+      this.voxels.set(id, result);
+      if (wanted) this.revision++;
+    };
+    fetch(`${this.base}/${file}`)
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
+      .then(settle, () => settle('failed'));
+  }
+
+  /**
+   * Fetch the model files nothing has asked for yet, at most `inFlight` at a time; call again (every frame is fine)
+   * until it answers true: every model of the library has been requested. A model file is what a unit's first frame
+   * needs before anything can be drawn for it (its mesh has a stand-in, its file has none), and the whole set is
+   * small (94 files, 5.7 MB in the extracted library), so a view fetches it ahead once its opening art is in instead
+   * of at each kind's first appearance. Models fetched ahead do not count as `loading` and do not change `revision`.
+   */
+  preloadVoxels(inFlight = 2): boolean {
+    let ahead = 0;
+    for (const entry of this.voxels.values()) if (entry === 'ahead') ahead++;
+    let complete = true;
+    for (const [id, file] of Object.entries(this.library.voxels)) {
+      if (this.voxels.has(id)) continue;
+      if (ahead >= inFlight) {
+        complete = false;
+        break;
+      }
+      this.fetchVoxel(id, file, 'ahead');
+      ahead++;
     }
-    return typeof entry === 'string' ? null : entry;
+    return complete;
   }
 
   /**

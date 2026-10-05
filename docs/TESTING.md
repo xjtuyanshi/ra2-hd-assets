@@ -58,7 +58,9 @@ codes and child-pass cleanup. Grown cell, overlay and smudge pages keep the same
 binding count. Other fixtures cover all sixteen procedural effect pools (including the seven enhanced explosion
 pools), beams, emitters, light fields, rain/masked splashes/snow, data-sized night poles, terrain/cliffs, classic and enhanced
 water with and without scene reflections, voxel units/projectiles/debris/shadows, sandbox objects/windows and custom
-full-screen mist/tone mapping. These are shader-layout checks,
+full-screen mist/tone mapping. The stand-in voxel mesh (drawn while a model's smooth mesh is built off the presenting
+thread) must generate the same shader code and buffer layouts as the smooth mesh with every material that draws
+either, so that one pipeline serves both. These are shader-layout checks,
 not WebGPU pipeline validation, rendered-pixel acceptance or performance measurements.
 
 Current asset-enabled CI requires original-executable startup, the RA2 quick-game and RA2/YR save/cold-load regressions, and Worker/main-thread direct battlefield startup. Same-host two-client network tests remain manual and are excluded from CI until Chromium cleanup and runner memory capacity are confirmed. Select other real-game cases according to changes. Gonghui requires separate MOD resources; cache restoration requires original packages. Neither is implicitly covered by Basic.

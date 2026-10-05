@@ -421,6 +421,41 @@ describe('live preparation pace', () => {
   });
 });
 
+describe('voxel model files ahead of their first use', () => {
+  it('asks for them once the opening is in or the view is shown, a step per frame, until all are requested', () => {
+    const p = presentation(false);
+    const fields = p.view as unknown as {
+      outOfSight: boolean;
+      fetchAhead: (() => boolean) | null;
+      voxelUnits: { loading: number };
+    };
+    let answer = false;
+    const ahead = vi.fn(() => answer);
+    fields.fetchAhead = ahead;
+    // Out of sight with art still on its way: the opening comes first.
+    fields.outOfSight = true;
+    fields.voxelUnits.loading = 1;
+    p.view.render(20);
+    expect(ahead).not.toHaveBeenCalled();
+    // The opening has been drawn completely once: fetch ahead, out of sight or not.
+    fields.voxelUnits.loading = 0;
+    p.view.render(30);
+    expect(ahead).toHaveBeenCalledTimes(1);
+    // A shown view does not wait for anything to settle.
+    fields.outOfSight = false;
+    fields.voxelUnits.loading = 1;
+    p.view.render(40);
+    expect(ahead).toHaveBeenCalledTimes(2);
+    // Everything requested: never asked again.
+    answer = true;
+    p.view.render(50);
+    expect(ahead).toHaveBeenCalledTimes(3);
+    expect(fields.fetchAhead).toBeNull();
+    p.view.render(60);
+    expect(ahead).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe('live staging hour', () => {
   it("applies a preset's day hour to every map but authored dusk; an explicit time wins", async () => {
     const { liveTimeOfDay } = await import('../src/live/liveView');

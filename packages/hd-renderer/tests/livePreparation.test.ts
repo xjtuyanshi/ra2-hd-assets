@@ -93,9 +93,32 @@ function visualView() {
 }
 
 describe('live voxel meshes built off the main thread', () => {
-  it('draws nothing for a model until its mesh is there, without warning, then builds the unit', () => {
+  it('builds a shown unit at once although its mesh is not there (VoxelUnits draws its stand-in), without warning', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const h = visualView();
+    const tank = vehicle(1, 'HTNK');
+    const drawn = h.view.visualFor(tank, 0, 5);
+    expect(drawn.mode).toBe('voxel');
+    expect(drawn.pending).toBeFalsy();
+    expect(h.state.voxelUnits.build).toHaveBeenCalledTimes(1);
+    expect(h.state.voxelUnits.build).toHaveBeenCalledWith(
+      h.models.get('HTNK'),
+      'lib:unit@house0',
+      'HTNK@lib:unit@house0',
+    );
+    // Later frames, and the mesh arriving, keep the visual: VoxelUnits changes its geometry in place.
+    expect(h.view.visualFor(tank, 0, 6)).toBe(drawn);
+    h.meshed.add(h.models.get('HTNK')!);
+    expect(h.view.visualFor(tank, 0, 7)).toBe(drawn);
+    expect(h.state.voxelUnits.build).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('out of sight draws nothing for a model until its mesh is there, without warning, then builds the unit', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const h = visualView();
+    (h.view as unknown as { outOfSight: boolean }).outOfSight = true;
     const tank = vehicle(1, 'HTNK');
     const waiting = h.view.visualFor(tank, 0, 5);
     expect(waiting).toMatchObject({ mode: 'placeholder', pending: true });
@@ -113,9 +136,10 @@ describe('live voxel meshes built off the main thread', () => {
     warn.mockRestore();
   });
 
-  it('treats a map-cache model whose mesh is not there like one that is still loading', () => {
+  it('out of sight treats a map-cache model whose mesh is not there like one that is still loading', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const h = visualView();
+    (h.view as unknown as { outOfSight: boolean }).outOfSight = true;
     const model: VoxelModel = { id: 'TRUCK', palette: 'unit', normalsMode: 4, parts: [] };
     h.state.cache.voxels.set('TRUCK', model);
     h.state.cache.paletteRow.set('unit@house0', 1);
@@ -126,6 +150,23 @@ describe('live voxel meshes built off the main thread', () => {
     h.meshed.add(model);
     expect(h.view.visualFor(truck, 0, 2).mode).toBe('voxel');
     warn.mockRestore();
+  });
+
+  it('draws what waited out of sight in the frame after the view is shown, mesh or no mesh', () => {
+    const h = visualView();
+    const fields = h.view as unknown as { outOfSight: boolean; objectsFor: unknown };
+    fields.outOfSight = true;
+    const tank = vehicle(1, 'HTNK');
+    const waiting = h.view.visualFor(tank, 0, 5);
+    expect(waiting).toMatchObject({ mode: 'placeholder', pending: true });
+    // Objects were applied for the current snapshot; showing the view asks for them again (no new snapshot needed).
+    fields.objectsFor = { snapshot: {} };
+    fields.outOfSight = false;
+    expect(fields.objectsFor).toBeNull();
+    const shown = h.view.visualFor(tank, 0, 5);
+    expect(shown).not.toBe(waiting);
+    expect(shown.mode).toBe('voxel');
+    expect(h.state.voxelUnits.build).toHaveBeenCalledTimes(1);
   });
 });
 

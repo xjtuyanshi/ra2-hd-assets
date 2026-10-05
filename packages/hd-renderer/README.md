@@ -1145,11 +1145,38 @@ Use `?vlook=remaster&vproj=vehicles-hd` for [projected vehicle redraws](#project
 - A live view builds these meshes off the thread that presents frames: `VoxelUnits` owns a `SmoothVoxelPool`
   (`src/ra2/voxelSmoothPool.ts`, up to four `voxelSmoothWorker.ts` Workers, closed after 20 idle seconds and when
   the view is disposed). `VoxelUnits.geometryReady(model)` starts the build and answers false until
-  `prepareSmoothVoxelGeometry` has filled the same per-model cache `buildSmoothVoxelGeometry` reads; the view draws
-  nothing for the model meanwhile and `VoxelUnits.revision` tells it when to look again. Without Workers (tests,
-  other hosts, `smoothBuilder: null`) and in static worlds (`loadRa2World`) the mesh is built in place as before; a
-  Worker that fails falls back to that once, with a warning. Measured on one skirmish start (XMP29U2, two
-  players): 3.0 s of main-thread time before, 0.07 s (assembling the returned arrays) after.
+  `prepareSmoothVoxelGeometry` has filled the same per-model cache `buildSmoothVoxelGeometry` reads;
+  `VoxelUnits.revision` changes when it has. Without Workers (tests, other hosts, `smoothBuilder: null`) and in
+  static worlds (`loadRa2World`) the mesh is built in place as before; a Worker that fails falls back to that once,
+  with a warning. Measured on one skirmish start (XMP29U2, two players): 3.0 s of main-thread time before, 0.07 s
+  (assembling the returned arrays) after.
+- A unit never waits for that build. A smooth mesh takes 0.02 to 3.3 s of CPU (measured over the 94 models of the
+  extracted library; the War Miner 0.5 s) and longer on a busy machine with the Workers started anew (measured: 7.2 s
+  for a War Miner, during which the view drew nothing for it). `VoxelUnits.build` therefore instantiates a
+  **stand-in** while the mesh is on its way: the plain exposed-face mesh of the model
+  (`buildStandInPartGeometry` in `src/ra2/voxels.ts`, the engine look's geometry; 0.4 to 25 ms per model, 8.5 on
+  average) in the smooth mesh's attribute layout (`pshade` = the palette index, `curvature` 0, `vpos` = the lattice
+  position), drawn with the materials the smooth mesh gets (PBR, then the redraw projection when that arrives). The
+  layout is what three r186 keys a compiled shader on (`RenderObject.getGeometryCacheKey`), so the stand-in costs no
+  shader of its own. When the Worker answers, `VoxelUnits.adoptSmooth` exchanges the geometry of every placed unit
+  **in place** (`VoxelUnit.replaceGeometry`: part meshes and their shadow, foam and reflection twins) and releases
+  the stand-in: the unit is the same object before and after, so its place, facing, turret angle, opacity, capture
+  membership and depth card cannot jump. Measured on real models at two device pixels per voxel: the smooth
+  silhouette lies inside the stand-in's (IoU 0.97 for bodies, 0.91 to 0.96 for turrets, 0.85 to 0.89 for one-voxel
+  barrels), bounds differ by at most 0.23 voxel per side and the centroid moves 0.05 to 0.73 device pixels.
+  `VoxelUnits.isStandIn(unit)` and `standInUnits` (and `LiveView.diagnostics().standInVoxels`) report it.
+  `prepare()` stays false while only the stand-in exists: it is not the final look.
+- `LiveView` applies this to vehicles, aircraft and ships, to buildings' voxel turrets and to voxel shells and
+  debris (`voxelDrawable`): a **shown** view builds the unit in its first frame; a view **out of sight** still
+  waits for the mesh (nobody sees it, and it does not count as settled until then), and what waited is drawn in the
+  frame after `outOfSight` becomes false, with or without a new snapshot. The engine's alternate image of a unit
+  that already has a picture (a miner's unloading model) is different: the unit keeps its current picture until the
+  other one is final (`drawArt`), so it changes look once.
+- A model **file** has no stand-in: a unit whose file is still being fetched draws nothing. The files are therefore
+  fetched ahead: `LiveLibrary.preloadVoxels` requests every voxel model of the type library (94 files, 5.7 MB),
+  two at a time, once the view has drawn its opening completely or is shown; models fetched ahead do not count as
+  `loading` and do not change `revision`. `EffectArt.preloadVoxels` requests the ten debris and shell models with
+  the combat pages.
 - The exact separable boundary EDT uses samples on exposed cube faces. The distance to a union-of-cubes
   boundary is exact on this aligned lattice; its occupancy sign gives the inside and outside fields in one
   transform. This avoids the corner error of subtracting half a sample from a binary centre-distance EDT.
