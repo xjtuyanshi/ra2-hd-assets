@@ -9,10 +9,11 @@ import type { LiveWarmType } from '../../../../packages/hd-renderer/src/live/liv
  * match's view draws them out of sight while the game still loads (LiveView.warm). Only kinds are kept (rules type,
  * engine image, colour scheme): never positions, counts or anything else about a match.
  *
- * Two lists: one per map (everything that match showed, the map's own civilian buildings included) and one per
- * theater for maps not played yet (players' objects only: starting units and base buildings are the same on every map
- * of a theater, a map's dressing is not). A list that does not fit the next match (another side or colour) costs
- * nothing but the art it loaded: the view still waits for what the match really needs before it is shown.
+ * Three lists: one per map (everything that match showed, the map's own civilian buildings included), one per
+ * theater for maps not played yet, and one for theaters not played yet (both players' objects only: starting units
+ * and base buildings are the same on every map, a map's dressing is not; rules types are the same in every theater,
+ * each theater's library has its own art for them). A list that does not fit the next match (another side or colour)
+ * costs nothing but the art it loaded: the view still waits for what the match really needs before it is shown.
  */
 export interface HdWarmStorage {
   getItem(key: string): string | null;
@@ -26,6 +27,7 @@ export const WARM_TYPES_LIMIT = 320;
 
 const mapKey = (map: string): string => `${PREFIX}map:${map.toLowerCase()}`;
 const theaterKey = (theater: string): string => `${PREFIX}theater:${theater.toLowerCase()}`;
+const PLAYERS_KEY = `${PREFIX}players`;
 
 /** Identity of a kind: two objects that share it draw the same art with the same colours and kind of owner. */
 export function warmTypeKey(type: LiveWarmType): string {
@@ -82,8 +84,9 @@ const serialize = (types: readonly LiveWarmType[]): string =>
   );
 
 /**
- * The list to warm for a match on `map`: the map's own when it was played before, else the theater's. Null when
- * there is none (or storage is unavailable, e.g. private browsing): the view then prepares from the match itself.
+ * The list to warm for a match on `map`: the map's own when it was played before, else the theater's, else the
+ * players' objects of the last match anywhere. Null when there is none (or storage is unavailable, e.g. private
+ * browsing): the view then prepares from the match itself.
  */
 export function readWarmTypes(storage: HdWarmStorage | null, map: string, theater: string): LiveWarmType[] | null {
   if (!storage) return null;
@@ -91,7 +94,9 @@ export function readWarmTypes(storage: HdWarmStorage | null, map: string, theate
     const own = parse(storage.getItem(mapKey(map)));
     if (own?.length) return own;
     const shared = parse(storage.getItem(theaterKey(theater)));
-    return shared?.length ? shared : null;
+    if (shared?.length) return shared;
+    const players = parse(storage.getItem(PLAYERS_KEY));
+    return players?.length ? players : null;
   } catch {
     return null;
   }
@@ -106,8 +111,10 @@ export function writeWarmTypes(
 ): void {
   if (!storage || !types.length) return;
   try {
+    const players = serialize(types.filter((type) => !type.civilian));
     storage.setItem(mapKey(map), serialize(types));
-    storage.setItem(theaterKey(theater), serialize(types.filter((type) => !type.civilian)));
+    storage.setItem(theaterKey(theater), players);
+    storage.setItem(PLAYERS_KEY, players);
   } catch {
     // Nothing to do: the next match prepares from its own first snapshot.
   }

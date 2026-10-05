@@ -143,6 +143,7 @@ function presentation() {
     painterDirty: false,
     effectsDirty: false,
     pose: { x: 0, y: 0, z: 0, facing: 0 },
+    pageUploads: { step: vi.fn() },
     voxelUnits: {
       revision: 0,
       loading: 0,

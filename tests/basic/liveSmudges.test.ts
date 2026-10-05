@@ -309,6 +309,7 @@ function presentation(withLibrary = true, airless?: boolean) {
     sprites: { mesh: { count: 0 } },
     pageLayers: new Map(),
     voxelUnits: { revision: 0, loading: 0, disposeAll: vi.fn() },
+    pageUploads: { step: vi.fn(), dispose: vi.fn() },
   };
   const view = Object.assign(Object.create(LiveView.prototype), backing) as LiveView;
   const state = (): LiveSnapshot => ({ frame: 1, view: null, houses: [], objects: [], smudges: cells() });

@@ -372,6 +372,29 @@ describe('VmFrameRenderer 生命周期', () => {
     expect(gl.deletedPrograms).toHaveLength(7);
   });
 
+  it('prepareTransparentKey compiles the key programs ahead of the first keyed frame, once', () => {
+    const gl = new FakeWebGl();
+    const created = vi.spyOn(gl, 'createProgram');
+    const renderer = createVmFrameRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement);
+    const before = created.mock.calls.length;
+    renderer.prepareTransparentKey();
+    // One program per frame format (indexed, RGBA, RGB565).
+    expect(created.mock.calls.length - before).toBe(3);
+    renderer.prepareTransparentKey();
+    expect(created.mock.calls.length - before).toBe(3);
+    // The first keyed frame finds them: nothing is compiled inside its draw.
+    const frame = { ...indexedFrame(4, 2), rgb565: new Uint16Array(8) };
+    renderer.setTransparentKey({ rect: { x: 1, y: 0, width: 2, height: 2 }, rgb565: 0xf81f });
+    renderer.draw(frame, 8, 4);
+    expect(gl.calls).toContain('uniform1ui:keyPacked:63519');
+    expect(created.mock.calls.length - before).toBe(3);
+    renderer.destroy();
+    // The prepared programs are released with the rest, and a destroyed renderer prepares nothing.
+    expect(gl.deletedPrograms).toHaveLength(7);
+    renderer.prepareTransparentKey();
+    expect(created.mock.calls.length - before).toBe(3);
+  });
+
   it('切换放大档位时键色与透明矩形交给新管线', () => {
     const gl = new FakeWebGl();
     const renderer = createVmFrameRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement);

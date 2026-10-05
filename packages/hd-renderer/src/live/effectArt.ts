@@ -1,3 +1,4 @@
+import type { PageUpload } from '../pageUpload';
 import { LinearFilter, LinearMipmapLinearFilter, SRGBColorSpace, Texture } from 'three/webgpu';
 import type {
   EffectAnim,
@@ -58,7 +59,7 @@ export class EffectArt {
   /** Anim ids without art, for diagnostics. */
   readonly missing = new Set<string>();
   /** Uploads a freshly decoded page straight to the GPU (the renderer's initTexture); see loadIndexedPage. */
-  uploadPage: ((texture: Texture) => void) | null = null;
+  uploadPage: PageUpload | null = null;
 
   constructor(
     /** Directory holding effects.json (…/_library/common/effects). */
@@ -369,7 +370,7 @@ export class EffectArt {
  * Decode straight-alpha sRGB art without conversion. The texture owns its bitmap until upload (or disposal before
  * first use); eager renderer uploads release it immediately, just like loadIndexedPage, without a CPU pixel copy.
  */
-async function loadHdPage(url: string, upload?: (texture: Texture) => void): Promise<Texture> {
+async function loadHdPage(url: string, upload?: PageUpload): Promise<Texture> {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`${url}: ${response.status}`);
   const bitmap = await createImageBitmap(await response.blob(), {
@@ -395,7 +396,7 @@ async function loadHdPage(url: string, upload?: (texture: Texture) => void): Pro
   texture.needsUpdate = true;
   try {
     if (upload) {
-      upload(texture);
+      await upload(texture);
       // initTexture may already have called onUpdate synchronously.
       texture.onUpdate?.(texture);
     }

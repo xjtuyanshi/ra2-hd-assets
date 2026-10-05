@@ -80,6 +80,7 @@ import { LiveBeams } from './beams';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
 import { BuildingLightGate, buildingLightOverlay, buildingLightSources } from './buildingLights';
 import { BuildingVisualHistory } from './buildingVisualHistory';
+import { PageUploader } from '../pageUpload';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
 import { SmudgeInstanceCache, type LiveSmudgeCells, type SmudgePage } from './smudges';
@@ -557,6 +558,14 @@ const TURRET_DEPTH = 0.45;
 const LIVE_SPRITE_CAPACITY = 4096;
 
 /**
+ * Pixels of freshly decoded atlas pages copied to the GPU per rendered frame (see PageUploader): 8 M pixels, a
+ * 4096 x 2048 strip, 32 MiB. Measured in an otherwise idle page, such a strip costs 1 to 6 ms and a whole 8192 x 8096
+ * page 16 ms; next to a running match the same whole page held the thread for 100 to 330 ms, most of it waiting for
+ * the GPU process to take the data, and 32 M pixel strips still for 80 to 275 ms.
+ */
+export const UPLOAD_PIXELS_PER_FRAME = 8 << 20;
+
+/**
  * Instance capacity of a cell layer (overlays, smudges) that holds `count` sprites now. A layer cannot grow: its
  * instance buffers are part of its shader graph, so a fuller one is a new layer whose materials are built again
  * (measured: about 50 ms of shader building per layer, a frame of 100 ms when two ore pages grew by two cells in a
@@ -642,6 +651,27 @@ export class LiveView {
    * waited for instead of building the same sprite layer and its shaders twice.
    */
   outOfSight = false;
+  /**
+   * How many new kinds of art (a voxel model in a house's colours, a sprite page's layer) one frame may add to the
+   * scene while the view is out of sight. Each brings shaders that are built in the frame that first draws it, 30
+   * to 120 ms apiece: all of a match's opening in one frame is a second or more during which the page presents
+   * nothing, the picture it shows instead included (measured: 0.83 and 1.3 s). One per frame builds them just as
+   * fast (the builds are what takes the time) and keeps that other picture moving. The rest waits its turn and
+   * counts as art on its way (loadingArt), so the view is not shown before it is in. A shown view never waits.
+   * A host that knows nothing moves on screen (a loading screen) sets Infinity: every frame it does not have to
+   * render in between is time saved.
+   */
+  newArtPerFrame = 1;
+  /**
+   * Pixels of decoded atlas pages copied to the GPU per frame while the view is out of sight. Infinity uploads every
+   * page in the frame after it was decoded, for a host that knows nothing moves on screen (see newArtPerFrame).
+   */
+  hiddenUploadPixels = UPLOAD_PIXELS_PER_FRAME;
+  /** New kinds added in the frame being drawn, and kinds that had to wait for a later frame. */
+  private newArt = 0;
+  private waitingArt = 0;
+  /** Copies decoded atlas pages to the GPU a strip per frame; stepped by render(). */
+  private readonly pageUploads: PageUploader;
   private readonly visuals = new Map<number, Visual>();
   private buildingVisualHistory?: BuildingVisualHistory;
   /** Building appearance by match-unique UID; tolerate brief omissions without retaining every dead object. */
@@ -786,8 +816,10 @@ export class LiveView {
     this.root.name = 'live-objects';
     hd.scene.add(this.root);
     this.voxelUnits = new VoxelUnits(hd, world, cache, options.libraryBase, options);
-    // Atlas pages go to the GPU as decoded bitmaps (no main-thread repack of their 16.7 M pixels).
-    const upload = (texture: Texture) => hd.renderer.initTexture(texture);
+    // Atlas pages go to the GPU as decoded bitmaps (no main-thread repack of their 16.7 M pixels), in strips over
+    // the following frames (render() steps the uploader).
+    this.pageUploads = new PageUploader(hd.renderer);
+    const upload = (texture: Texture) => this.pageUploads.upload(texture);
     if (library) library.uploadPage = upload;
     this.shroud = new ShroudLayer(world.width, world.height);
     // The shroud darkens in the renderer's post pass, after the mist and before bloom (see ShroudLayer).
@@ -1260,6 +1292,8 @@ export class LiveView {
   render(now = performance.now()): void {
     const dt = Math.min(0.1, Math.max(0, (now - this.lastRender) / 1000));
     this.lastRender = now;
+    this.waitingArt = 0;
+    this.pageUploads.step(this.outOfSight ? this.hiddenUploadPixels : UPLOAD_PIXELS_PER_FRAME);
     const current = this.current;
     if (current) {
       const previous = this.previous;
@@ -1340,6 +1374,26 @@ export class LiveView {
     this.hd.frame(dt);
     // Loads settle between frames, never inside one: what is still on its way now was missing from this frame.
     this.settled = current && this.loadingArt() === 0 ? this.settled + 1 : 0;
+    if (this.waitingArt) {
+      // What waited for its turn is offered again in the next frame, with or without a new snapshot.
+      this.objectsFor = null;
+      this.overlayPagesDirty = this.smudgePagesDirty = true;
+    }
+    this.newArt = 0;
+  }
+
+  /**
+   * Whether a new kind of art may join the scene in this frame (see newArtPerFrame). Shown views never wait: an
+   * object that could be drawn and is not would be a hole in the picture.
+   */
+  private admitNewArt(): boolean {
+    if (!this.outOfSight) return true;
+    if (this.newArt >= this.newArtPerFrame) {
+      this.waitingArt++;
+      return false;
+    }
+    this.newArt++;
+    return true;
   }
 
   /**
@@ -1359,7 +1413,8 @@ export class LiveView {
    * arrive, and the object is reported by diagnostics() instead.
    */
   loadingArt(): number {
-    let count = (this.library?.loading ?? 0) + (this.effectArt?.loading ?? 0) + this.voxelUnits.loading;
+    let count =
+      (this.library?.loading ?? 0) + (this.effectArt?.loading ?? 0) + this.voxelUnits.loading + this.waitingArt;
     for (const visual of this.visuals.values()) {
       if (visual.turretState === 'loading') count++;
       if (visual.mode !== 'placeholder' || !visual.pending) continue;
@@ -1609,6 +1664,7 @@ export class LiveView {
     this.pageLayers.clear();
     for (const visual of this.visuals.values()) this.removeVisual(visual);
     this.voxelUnits.disposeAll();
+    this.pageUploads.dispose();
     this.volumetricBlasts.dispose();
     this.effectSprites?.setInstances([], Infinity);
     this.effectSprites?.topRoot.removeFromParent();
@@ -2113,6 +2169,7 @@ export class LiveView {
     if (existing && wantMaterials && !materials) return existing.layer;
     // Out of sight there is no first use to serve: wait for the material page and build the layer once.
     if (!existing && wantMaterials && !materials && this.outOfSight) return null;
+    if (!this.admitNewArt()) return existing?.layer ?? null;
     if (existing) {
       const mesh = existing.layer.mesh;
       this.root.remove(mesh);
@@ -2460,7 +2517,12 @@ export class LiveView {
         visual.libraryType!.remap,
         visual.paletteKey || undefined,
       );
-      visual.buildingTurret = this.voxelUnits.build(model, key, `${spec.voxel}@${key}`);
+      const cacheKey = `${spec.voxel}@${key}`;
+      if (this.outOfSight && !this.voxelUnits.built(cacheKey) && !this.admitNewArt()) {
+        visual.turretState = 'loading';
+        return;
+      }
+      visual.buildingTurret = this.voxelUnits.build(model, key, cacheKey);
       visual.root.add(visual.buildingTurret.root);
     }
     const unit = visual.buildingTurret;
@@ -2859,13 +2921,14 @@ export class LiveView {
     if (object.kind === 'building' && this.cache.manifest.sprites[spriteId]?.frames.length)
       return { ...base, root: new Group(), mode: 'map-sprite', sprite: spriteId };
     const source = this.voxelSource(artType, paletteKey);
-    if (source) {
+    // A kind not in the scene yet may have to wait a frame (admitNewArt); it is pending like a model still loading.
+    if (source && (!this.outOfSight || this.voxelUnits.built(source.cacheKey) || this.admitNewArt())) {
       const { root, turret } = this.voxelUnits.build(source.model, source.key, source.cacheKey);
       return { ...base, root, turret, mode: 'voxel', libraryType };
     }
     // No art (yet): the object stays tracked but draws nothing (a stand-in block would read as a real, oddly
     // coloured unit); library voxels still loading are retried on later frames.
-    const pending = !!libraryType?.voxel || this.cache.voxels.has(artType);
+    const pending = !!source || !!libraryType?.voxel || this.cache.voxels.has(artType);
     if (!pending && !this.warnedTypes.has(object.type)) {
       this.warnedTypes.add(object.type);
       console.warn(`[HD] no art for ${object.kind} ${object.type}: not drawn (see LiveView.diagnostics())`);
@@ -2957,6 +3020,7 @@ export class LiveView {
         layer = undefined;
       }
       if (!layer) {
+        if (!this.admitNewArt()) continue;
         layer = new SpriteLayer(this.cache, [], cellLayerCapacity(instances.length), atlas, hd);
         layer.mesh.name = `live-smudges-${page}`;
         layer.mesh.renderOrder = 3;
@@ -3030,6 +3094,7 @@ export class LiveView {
       }
       let layer = existing?.layer;
       const capacity = cellLayerCapacity(instances.length, layer?.capacity);
+      if ((!layer || layer.capacity < instances.length || upgrade) && !this.admitNewArt()) continue;
       if (layer && (layer.capacity < instances.length || upgrade)) {
         this.disposeOverlayLayer(layer);
         layer = undefined;

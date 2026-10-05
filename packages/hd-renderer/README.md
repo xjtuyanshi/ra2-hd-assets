@@ -98,6 +98,29 @@ context-owned fallback textures, voxel materials and lookup textures. A context 
 pass the same `nodes` option to loaders and constructors when explicitly composing them. Map grades remain per cache,
 and palette associations preserve existing voxel-builder signatures. CPU geometry can still be shared across contexts.
 
+A live view can be prepared before it is shown. `LiveView.settledFrames` counts the frames in a row that drew their
+snapshot completely (`loadingArt()` is the art still on its way: files, voxel meshes, objects that cannot draw yet);
+a host that keeps another picture on screen meanwhile sets `outOfSight`, renders, and shows the view after a few
+settled frames. `LiveView.warm(types)` draws one object of each listed kind (`LiveWarmType`: rules type, engine
+image, colour scheme, civilian owner) at the middle of the map through the normal snapshot path, before the match
+has any object; `warmTypes()` lists the kinds of the current match for the next one. The first match snapshot starts
+its own timeline: nothing is interpolated from, or counted as appearing after, the prepared list.
+
+Atlas pages reach the GPU through the view's `PageUploader` (`src/pageUpload.ts`): the texture is allocated empty
+(three's `Source.dataReady = false` path), its rows are copied in strips with a per-frame pixel budget
+(`render()` steps it: 8 M pixels per frame, or `hiddenUploadPixels` out of sight) and the mipmaps are generated after the
+last row; the loaders hand a page out only then. One `copyExternalImageToTexture` of an 8192 x 8096 page blocked
+the presenting thread for 100 to 330 ms. Pages up to 2048 x 2048, flipped pages and backends other than three's
+WebGPU backend as that module reads it (the WebGL2 fallback) are uploaded whole by `initTexture`, as before. Out
+of sight, `newArtPerFrame` bounds how many new voxel kinds and sprite layers a frame adds to the scene (their
+shaders are built in the frame that first draws them).
+
+The post graph is rebuilt (new materials for every post pass, about half a second of shader building) only when
+its settings change. `setTopEffectsVisible` therefore adds the top-layer pass with the first visible top-layer art
+and keeps it; while no such art is visible the pass is not drawn and its empty target composites as zeros.
+`enableTopEffects()` adds it ahead of time. The clarity pass's blur radius follows the buffer scale, so a host should
+lay the view out at its final size before the first frame (`resizePixels`), not at a temporary one.
+
 Asset-free state-isolation tests and the irradiance microbenchmark can be run with the existing root tools:
 
 ```bash
@@ -1000,6 +1023,14 @@ Use `?vlook=remaster&vproj=vehicles-hd` for [projected vehicle redraws](#project
 - `src/ra2/voxelSmooth.ts` is renderer-independent, returning typed arrays from `buildSmoothSection`.
   The thin `voxelSmoothGeometry.ts` wrapper merges sections in `buildSmoothPartGeometry`. Original bounds,
   section transforms, normal tables, voxel scale, turret pivots and flattened shadow geometry are retained.
+- A live view builds these meshes off the thread that presents frames: `VoxelUnits` owns a `SmoothVoxelPool`
+  (`src/ra2/voxelSmoothPool.ts`, up to four `voxelSmoothWorker.ts` Workers, closed after 20 idle seconds and when
+  the view is disposed). `VoxelUnits.geometryReady(model)` starts the build and answers false until
+  `prepareSmoothVoxelGeometry` has filled the same per-model cache `buildSmoothVoxelGeometry` reads; the view draws
+  nothing for the model meanwhile and `VoxelUnits.revision` tells it when to look again. Without Workers (tests,
+  other hosts, `smoothBuilder: null`) and in static worlds (`loadRa2World`) the mesh is built in place as before; a
+  Worker that fails falls back to that once, with a warning. Measured on one skirmish start (XMP29U2, two
+  players): 3.0 s of main-thread time before, 0.07 s (assembling the returned arrays) after.
 - The exact separable boundary EDT uses samples on exposed cube faces. The distance to a union-of-cubes
   boundary is exact on this aligned lattice; its occupancy sign gives the inside and outside fields in one
   transform. This avoids the corner error of subtracting half a sample from a binary centre-distance EDT.

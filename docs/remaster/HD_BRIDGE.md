@@ -185,6 +185,60 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    Details and evidence: `docs/remaster/research/tactical-passthrough.md`,
    `scripts/remaster/bridge/verifyPassthrough.mts`.
 
+## Match start
+
+A match must not open on a half-drawn or frozen battlefield. Measured on the base build (XMP29U2 skirmish, 1728x1080
+game at two device pixels per game pixel): the players' starting units do not exist until the game's loading screen
+ends, so the view first heard of them in the match's first snapshot and spent the next seconds on the thread that
+presents frames: 3.0 s building smooth voxel meshes (two freezes of 0.6 and 2.8 s), 1.2 s building shader graphs, and
+about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages arrived.
+
+- **The original picture stays until the view is complete.** The view is created while the game shows its loading
+  screen and draws out of sight from then on (`LiveView.outOfSight`; the canvas is not displayed, there is no
+  transparent rectangle and no passthrough, so the game draws its own battlefield). It replaces the original picture
+  once the match runs (logic frame 1 or later) and it has drawn three complete frames in a row
+  (`LiveView.settledFrames`: every page, mesh, redraw projection and effect page the frame asked for was there). If
+  that never happens the view is shown after 20 seconds with what it has, with a console warning. Once shown it stays
+  for the match; another match (the logic frame starts over, or another map) starts out of sight again.
+- **Nothing heavy on the presenting thread.** Smooth voxel meshes are built by a small pool of Workers
+  (`src/ra2/voxelSmoothPool.ts`, `voxelSmoothWorker.ts`); a model draws nothing until its mesh is there, exactly like a
+  model whose file is still loading. Out of sight a sprite layer waits for its material page instead of being built
+  twice. Decoded atlas pages are copied to the GPU in strips (`src/pageUpload.ts`) instead of 253 MiB in one call:
+  8 M pixels per frame while the view is shown. Out of sight the bridge sets the pace: behind the loading screen
+  (the scenario has no objects yet) everything is built and uploaded as it arrives; from the first objects on, when
+  the game's own picture is or is about to be on screen, one new kind of art per frame
+  (`LiveView.newArtPerFrame`: each brings shaders that are built in the frame that first draws it, and a whole
+  opening in one frame froze the page, the game's picture included, for a second) and the same 8 M pixels of
+  pages per frame (`LiveView.hiddenUploadPixels`). Sprite material pages no longer keep their decoded bitmap after the
+  upload.
+- **What the last match showed is prepared behind the loading screen.** The bridge stores the kinds of object of a
+  match's first five minutes in `localStorage` (`src/ui/pages/game/hdWarmStore.ts`: rules type, engine image, colour
+  scheme and whether a civilian house owns it; never positions or counts): one list per map, and for maps not
+  played yet one per theater and one for all theaters, both without civilian objects. While the next match loads,
+  `LiveView.warm` draws one object of
+  each kind at the middle of the map through the normal snapshot path, so exactly the art a match would load is
+  fetched, built and compiled before the first frame. A list that does not fit (another side or colour) costs only
+  the art it loaded: the view still waits for what the match really needs.
+- **No post-pass rebuilds.** The game shows its loading screen in 800x600 and switches to the match's video mode half
+  a second before the first logic frame; a view laid out for the loading screen rebuilt every post material at that
+  moment. The bridge remembers the layout the view was last shown with and prepares with it while the frame size is
+  still the loading screen's. The top-layer effect pass stays in the post graph once the first top-layer art has
+  shown (it used to be added and removed with every such anim, rebuilding the post chain each time) and is given to
+  the view before it is shown when an earlier match had such art. The frame renderer compiles its key programs when
+  the bridge starts (`VmFrameRenderer.prepareTransparentKey`), not inside the frame that first shows the view.
+
+`__hdBridge.timeline` (console) reports, in `performance.now()` milliseconds, when the current match's view loaded,
+was handed a list, first drew it completely, saw the first objects and the first logic frame, and was shown, and why
+(`settled` or `deadline`).
+
+Limits: the first match on a map in a browser profile has no list. The view then prepares from the match's own
+snapshots while the original picture is on screen (a few seconds), and the shader graphs it builds in that time still
+stop frames for 0.1 to 0.9 s each (measured: one of 0.83 s, seven of 0.1 to 0.25 s). The AI's colour is drawn anew
+each match, so the voxel materials of its vehicles (one per model and house palette) are built when the match starts
+even with a list. Art that first appears later in a match (a new unit type, the first explosion of a kind) still
+loads when it appears: its mesh is built off the main thread, its pages upload and its shaders build in the frame
+that first draws them.
+
 ## Object occlusion
 
 `ra2/painterOrder.ts` separates the object's tactical painter order from its screen placement and `cardPush`.

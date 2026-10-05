@@ -172,6 +172,11 @@ export class VoxelUnits {
     return parts;
   }
 
+  /** Whether a geometry set (and its materials) already exists for `cacheKey`: an instance of it builds no shader. */
+  built(cacheKey: string): boolean {
+    return this.geometries.has(cacheKey);
+  }
+
   /**
    * Build the shared geometry and request its projection ahead of the first instance. True once a new instance
    * would draw its final look at once (the projection has arrived, is absent or failed); callers that swap one model

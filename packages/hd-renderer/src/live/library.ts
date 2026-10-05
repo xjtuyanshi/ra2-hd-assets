@@ -1,6 +1,7 @@
 import { DataTexture, NearestFilter, NoColorSpace, RedFormat, Texture, UnsignedByteType } from 'three/webgpu';
 import type { LibraryType, TypeLibrary } from '../../../ra2-assets/src/library';
 import { indexedBitmapPixels } from './indexedPixels';
+import type { PageUpload } from '../pageUpload';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
 import type { SpriteMaterialAtlas } from '../ra2/spriteLook';
 import {
@@ -42,8 +43,8 @@ export class LiveLibrary {
   private readonly materialPages = new Map<number, SpriteMaterialAtlas | 'loading' | 'failed'>();
   private materialsDisposed = false;
   private depthTemplateDisposed = false;
-  /** Uploads a freshly decoded page straight to the GPU (the renderer's initTexture); see loadIndexedPage. */
-  uploadPage: ((texture: Texture) => void) | null = null;
+  /** Uploads a freshly decoded page straight to the GPU (the view's PageUploader); see loadIndexedPage. */
+  uploadPage: PageUpload | null = null;
 
   private constructor(
     readonly base: string,
@@ -122,7 +123,7 @@ export class LiveLibrary {
     if (entry === undefined) {
       this.materialPages.set(index, 'loading');
       const page = this.materials!.pages[String(index)]!;
-      void loadSpriteMaterialAtlas(`${this.base}/${page.file}`).then((atlas) => {
+      void loadSpriteMaterialAtlas(`${this.base}/${page.file}`, this.uploadPage ?? undefined).then((atlas) => {
         if (this.materialsDisposed) {
           atlas?.texture.dispose();
           return;
@@ -344,7 +345,7 @@ async function loadDepthTemplate(
  * thread never touches the 16.7 M pixels, and the bitmap is released right after the upload. Without it (tests, other
  * hosts), bounded strips yield between reads; the R8 CPU copy is released after the renderer's first upload.
  */
-export async function loadIndexedPage(url: string, upload?: (texture: Texture) => void): Promise<Texture> {
+export async function loadIndexedPage(url: string, upload?: PageUpload): Promise<Texture> {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`${url}: ${response.status}`);
   const bitmap = await createImageBitmap(await response.blob(), {
@@ -361,7 +362,7 @@ export async function loadIndexedPage(url: string, upload?: (texture: Texture) =
       texture.premultiplyAlpha = false;
       texture.needsUpdate = true;
       try {
-        upload(texture);
+        await upload(texture);
       } catch (error) {
         texture.dispose();
         throw error;

@@ -124,6 +124,13 @@ const REVEAL_SETTLED_FRAMES = 3;
  * with what it has, as it was before this wait existed.
  */
 const REVEAL_DEADLINE_MS = 20_000;
+/**
+ * Pace of the preparation once the scenario has objects (the game's own picture is, or is about to be, on screen):
+ * new kinds of art added per frame (LiveView.newArtPerFrame) and atlas-page pixels uploaded per frame
+ * (LiveView.hiddenUploadPixels), the same as a shown view uploads.
+ */
+const HIDDEN_NEW_ART_PER_FRAME = 1;
+const HIDDEN_UPLOAD_PIXELS = 8 << 20;
 /** Out of sight and complete, the view only needs an occasional frame until the match starts (every Nth tick). */
 const HIDDEN_IDLE_TICKS = 12;
 /**
@@ -479,6 +486,10 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     }
     const now = performance.now();
     prematch = state.objects.length === 0;
+    // Nothing moves behind a loading screen: prepare as fast as possible. Once the scenario has objects the game's
+    // own picture is about to be (or is) on screen, and the view prepares at a pace that leaves it its frames.
+    live.newArtPerFrame = prematch ? Infinity : HIDDEN_NEW_ART_PER_FRAME;
+    live.hiddenUploadPixels = prematch ? Infinity : HIDDEN_UPLOAD_PIXELS;
     if (!prematch) timeline.objectsAt ??= now;
     if (state.frame > 0) timeline.matchAt ??= now;
     if (prematch && !revealed && !warmed) {

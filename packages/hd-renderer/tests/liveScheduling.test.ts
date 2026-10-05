@@ -55,6 +55,7 @@ function presentation(interpolating: boolean) {
     volumetricBlasts,
     buildingLightGate: new BuildingLightGate(),
     voxelUnits: { revision: 0, loading: 0 },
+    pageUploads: { step: vi.fn() },
     visuals: new Map(),
     current: { snapshot: { frame: 2, objects: [] }, at: 10 },
     previous: { snapshot: { frame: 1, objects: [] }, at: 0 },

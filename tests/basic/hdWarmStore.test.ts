@@ -29,14 +29,24 @@ describe('HD warm lists', () => {
     const storage = memory();
     writeWarmTypes(storage, 'XMP29U2', 'URBAN', OPENING);
     expect(readWarmTypes(storage, 'xmp29u2', 'urban')).toEqual(OPENING);
-    expect([...storage.data.keys()].sort()).toEqual(['ra2-hd-warm:1:map:xmp29u2', 'ra2-hd-warm:1:theater:urban']);
+    expect([...storage.data.keys()].sort()).toEqual([
+      'ra2-hd-warm:1:map:xmp29u2',
+      'ra2-hd-warm:1:players',
+      'ra2-hd-warm:1:theater:urban',
+    ]);
   });
 
   it('offers the theater list, without civilian objects, to a map that was not played yet', () => {
     const storage = memory();
     writeWarmTypes(storage, 'xmp29u2', 'urban', OPENING);
     expect(readWarmTypes(storage, 'othermap', 'urban')).toEqual(OPENING.filter((type) => !type.civilian));
-    expect(readWarmTypes(storage, 'othermap', 'snow')).toBeNull();
+    // A theater not played yet: the players' objects of the last match anywhere (its own library has their art).
+    expect(readWarmTypes(storage, 'othermap', 'snow')).toEqual(OPENING.filter((type) => !type.civilian));
+    // The theater's own list wins over that once it exists.
+    writeWarmTypes(storage, 'icemap', 'snow', [{ kind: 'vehicle', type: 'AMCV', colorIndex: 3 }]);
+    expect(readWarmTypes(storage, 'othermap', 'snow')).toEqual([{ kind: 'vehicle', type: 'AMCV', colorIndex: 3 }]);
+    expect(readWarmTypes(storage, 'othermap', 'urban')).toEqual(OPENING.filter((type) => !type.civilian));
+    expect(readWarmTypes(memory(), 'othermap', 'snow')).toBeNull();
   });
 
   it('has no list without storage, and survives storage that throws', () => {

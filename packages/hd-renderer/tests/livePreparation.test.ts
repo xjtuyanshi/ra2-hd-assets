@@ -47,7 +47,12 @@ function visualView() {
   const loaded = new Set<string>(['HTNK', 'MTNK']);
   const failed = new Set<string>();
   const meshed = new Set<VoxelModel>();
+  const built = new Set<string>();
   const state = {
+    outOfSight: false,
+    newArtPerFrame: Infinity,
+    newArt: 0,
+    waitingArt: 0,
     library: {
       loading: 0,
       type: vi.fn((id: string) => types.get(id)),
@@ -65,7 +70,11 @@ function visualView() {
       loading: 0,
       geometryReady: vi.fn((model: VoxelModel) => meshed.has(model)),
       prepare: vi.fn(() => true),
-      build: vi.fn((_model: VoxelModel, _palette: string, _key: string) => ({ root: new Group() })),
+      built: vi.fn((key: string) => built.has(key)),
+      build: vi.fn((_model: VoxelModel, _palette: string, key: string) => {
+        built.add(key);
+        return { root: new Group() };
+      }),
       dispose: vi.fn((unit: { root: Group }) => unit.root.removeFromParent()),
     },
     root: new Group(),
@@ -80,7 +89,7 @@ function visualView() {
     visualFor(object: LiveObject, colorIndex: number, frame: number): TestVisual;
     loadingArt(): number;
   };
-  return { view, state, models, loaded, failed, meshed };
+  return { view, state, models, loaded, failed, meshed, built };
 }
 
 describe('live voxel meshes built off the main thread', () => {
@@ -117,6 +126,42 @@ describe('live voxel meshes built off the main thread', () => {
     h.meshed.add(model);
     expect(h.view.visualFor(truck, 0, 2).mode).toBe('voxel');
     warn.mockRestore();
+  });
+});
+
+describe('new kinds of art while another picture is on screen', () => {
+  it('adds one kind per frame out of sight and keeps the rest pending, but never holds back a shown view', () => {
+    const h = visualView();
+    for (const model of h.models.values()) h.meshed.add(model);
+    // The view object owns these fields (the fixture's `state` only seeded them).
+    const fields = h.view as unknown as {
+      outOfSight: boolean;
+      newArtPerFrame: number;
+      newArt: number;
+      waitingArt: number;
+    };
+    Object.assign(fields, { outOfSight: true, newArtPerFrame: 1 });
+    const heavy = vehicle(1, 'HTNK');
+    const second = vehicle(2, 'HTNK');
+    const medium = vehicle(3, 'MTNK');
+    // Frame 1: the first kind is built; another object of that kind costs nothing more; a second kind waits.
+    expect(h.view.visualFor(heavy, 0, 1).mode).toBe('voxel');
+    expect(h.view.visualFor(second, 0, 1).mode).toBe('voxel');
+    expect(h.view.visualFor(medium, 0, 1)).toMatchObject({ mode: 'placeholder', pending: true });
+    expect(h.state.voxelUnits.build).toHaveBeenCalledTimes(2);
+    expect(fields.waitingArt).toBe(1);
+    expect(h.view.loadingArt()).toBeGreaterThan(0);
+    // Frame 2 (render() clears the frame's counters): now it is the second kind's turn.
+    Object.assign(fields, { newArt: 0, waitingArt: 0 });
+    expect(h.view.visualFor(medium, 0, 2).mode).toBe('voxel');
+    expect(h.view.loadingArt()).toBe(0);
+    // A shown view draws whatever it can at once.
+    const shown = visualView();
+    for (const model of shown.models.values()) shown.meshed.add(model);
+    Object.assign(shown.view, { outOfSight: false, newArtPerFrame: 1 });
+    expect(shown.view.visualFor(heavy, 0, 1).mode).toBe('voxel');
+    expect(shown.view.visualFor(medium, 0, 1).mode).toBe('voxel');
+    expect((shown.view as unknown as { waitingArt: number }).waitingArt).toBe(0);
   });
 });
 

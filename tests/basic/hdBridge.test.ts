@@ -46,6 +46,8 @@ function fakeView() {
     settledFrames: 3,
     hd: { topEffectsEnabled: false, enableTopEffects: vi.fn(), settings: {}, applySettings: vi.fn() },
     outOfSight: false,
+    newArtPerFrame: 1,
+    hiddenUploadPixels: 0,
     theater: 'urban',
     warm: vi.fn(),
     warmTypes: vi.fn((): unknown[] => []),
@@ -1118,6 +1120,8 @@ describe('HD bridge match start', () => {
     const view = await loadBehindLoadingScreen(harness);
     // Complete (there is nothing to draw yet), but the match has not started.
     expect(view.outOfSight).toBe(true);
+    // Nothing moves behind the loading screen: no pacing of builds and uploads.
+    expect([view.newArtPerFrame, view.hiddenUploadPixels]).toEqual([Infinity, Infinity]);
     expect(harness.hdCanvas.style.display).toBe('none');
     expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
     expect(view.warm).not.toHaveBeenCalled();
@@ -1130,6 +1134,8 @@ describe('HD bridge match start', () => {
     harness.setState(battle(0));
     await advance(16, 3);
     expect(harness.hdCanvas.style.display).toBe('none');
+    // From here on the game's own picture may be on screen at any moment: one kind and 8 M pixels per frame.
+    expect([view.newArtPerFrame, view.hiddenUploadPixels]).toEqual([1, 8 << 20]);
     expect(harness.bridge()!.timeline.matchAt).toBeNull();
     harness.setState(battle(1));
     await advance(16, 2);
@@ -1189,8 +1195,9 @@ describe('HD bridge match start', () => {
       ['vehicle', 'SMCV', '', 21, 0],
       ['building', 'CAOILD', '', 5, 1],
     ]);
-    // The theater's list is for other maps: players' objects only.
+    // The theater's list, and the one for theaters not played yet, are for other maps: players' objects only.
     expect(JSON.parse(stored.get(WARM_THEATER)!)).toEqual([['vehicle', 'SMCV', '', 21, 0]]);
+    expect(JSON.parse(stored.get('ra2-hd-warm:1:players')!)).toEqual([['vehicle', 'SMCV', '', 21, 0]]);
     // The MCV deployed: what was seen stays, the new kind is added.
     view.warmTypes.mockReturnValue([{ kind: 'building', type: 'NACNST', colorIndex: 21 }]);
     harness.setState(battle(30));
