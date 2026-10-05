@@ -84,19 +84,24 @@ export class VoxelProjectionState {
   readonly paintShade = uniform(0.85);
   readonly paintSpec = uniform(0.5);
   /**
-   * Form light for the whole redraw (not only house paint). The image-model redraws are lit almost evenly, so at game
-   * scale a vehicle reads as a flat painting while the target look has dark lower hulls, bright top faces and glossy
-   * edges. formShade multiplies the redraw by the smooth mesh's Lambert term against the current sun (normalised to 1
-   * at n.l = 0.65), formAO applies the mesh's voxel occlusion (crevices, the hull under the turret), spec adds a
-   * luminance-gated Blinn-Phong glint toward the iso camera, and contrast is a hue-preserving luminance power around
-   * linear mid grey (full strength below it, about a third above it so light hulls do not clip). Defaults were
-   * chosen by 1:1 game-scale comparison with the approved S2 target frames; formShade:0,formAO:0,spec:0,contrast:1
-   * is the plain projection.
+   * Form light for the whole redraw (not only house paint). formShade multiplies the redraw by the smooth mesh's
+   * Lambert term against the current sun (normalised to 1 at n.l = 0.65), formAO applies the mesh's voxel occlusion
+   * (crevices, the hull under the turret), spec adds a luminance-gated Blinn-Phong glint toward the iso camera, and
+   * contrast is a hue-preserving luminance power around linear mid grey (full strength below it, about a third above
+   * it so light hulls do not clip). formShade:0,formAO:0,spec:0,contrast:1 is the plain projection.
+   *
+   * The pages are tone-locked to the voxel designs, which already carry the engine's own facing-dependent shade, so
+   * the three multiplying terms are kept mild. Measured against the original's frozen frames (20 vehicle types at
+   * four facings on a temperate, a snow and a lunar map, ships on water): formAO 0.75 / contrast 1.35 put 5 to 7
+   * points more hull pixels below luma 40 than the original shows (13 points on ships) and lowered the hull median by
+   * 5 %; the Lambert term at 0.85 added a facing- and map-dependent 2 to 4 points on top (7 points at one facing under
+   * the lunar sun). 0.7 / 0.25 / 1.15 centre the dark share (median difference about +1 point) and keep the Lambert
+   * term, the glint and a little occlusion as the vehicles' form; the glint alone is worth 8 % of the hull median.
    */
-  readonly formShade = uniform(0.85);
-  readonly formAO = uniform(0.75);
+  readonly formShade = uniform(0.7);
+  readonly formAO = uniform(0.25);
   readonly spec = uniform(0.5);
-  readonly contrast = uniform(1.35);
+  readonly contrast = uniform(1.15);
   /**
    * Light level the redraws were baked under. The bakes are screenshots of the engine look, so their colours already
    * carry the bake map's object light level; the projected colour is scaled by level / levelRef instead of level.
