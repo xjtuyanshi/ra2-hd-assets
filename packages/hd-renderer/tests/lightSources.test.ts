@@ -288,3 +288,31 @@ describe('ground-only source share', () => {
     }
   });
 });
+
+describe('base grid night gain', () => {
+  const baseGain = (field: LightField) => (field as unknown as { baseGain: { value: number } }).baseGain.value;
+  const encodeScale = (field: LightField) => (field as unknown as { encodeScale: number }).encodeScale;
+
+  it('follows the static gain unless the renderer gives the base grid its own night gain', () => {
+    const { field, renderer, dispose } = fixture();
+    try {
+      const cells = new Float32Array(8 * 8 * 3).fill(0.25);
+      field.setBase(cells, 3, true);
+      // One gain for both, as before.
+      field.update(0, renderer, 0.5);
+      expect(baseGain(field)).toBeCloseTo((3 * 0.5) / encodeScale(field), 12);
+      // A night map lit by its engine grade: the static dressing stays on, the map sources' own field is off.
+      field.update(0, renderer, 2.5, 0);
+      expect(baseGain(field)).toBe(0);
+      expect(field.stats(0).staticGain).toBe(2.5);
+      field.update(0, renderer, 1, 1);
+      expect(baseGain(field)).toBeCloseTo(3 / encodeScale(field), 12);
+      // A base that is always on (it does not follow the night) ignores both.
+      field.setBase(cells, 3, false);
+      field.update(0, renderer, 0, 0);
+      expect(baseGain(field)).toBeCloseTo(3 / encodeScale(field), 12);
+    } finally {
+      dispose();
+    }
+  });
+});

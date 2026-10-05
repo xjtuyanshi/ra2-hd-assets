@@ -166,10 +166,13 @@ export class Ra2NightDressing implements WorldDressing {
     return out;
   }
 
-  /** Live matches: the light-emitting buildings currently standing. */
-  setSources(sources: readonly SourceLight[]): void {
+  /**
+   * Live matches: the light-emitting buildings currently standing. `grade` false leaves the map light grade alone (its
+   * sources then come from the engine's own light list, see LiveView.updateNightSources).
+   */
+  setSources(sources: readonly SourceLight[], grade = true): void {
     this.mapLights?.setSources(sources);
-    this.options.mapLight?.setSources(sources);
+    if (grade) this.options.mapLight?.setSources(sources);
     this.version++;
   }
 

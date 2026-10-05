@@ -62,7 +62,7 @@ import { sceneLitColour } from '../lighting';
 import { bindUnlitSpriteMaterial } from './unlitSprites';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { type HdAtlas, type Ra2Cache } from './cache';
-import { objectLevelAt, srgbScale, terrainGradeAt } from './mapLighting';
+import { mapLightAt, srgbScale } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
 import { cardDepthNode, SPRITE_DECAL_LIFT } from './cardDepth';
 import { NATIVE_UNIT_RENDER_ORDER, type NativeSpriteDepth } from './nativeDepth';
@@ -102,8 +102,9 @@ export interface SpriteInstance {
   /** Flat decals only: 0..1 ground-crystal relighting, highlights and animated sparkle; absent = unchanged art. */
   glint?: number;
   /**
-   * Extra object light on top of the map's (default 1), applied to the palette colour in its own (sRGB) scale and
-   * clamped at white, like the engine's palette lighting.
+   * Extra object light on top of the map's (default 1 = none), applied to the palette colour in its own (sRGB) scale
+   * and clamped at white, like the engine's palette lighting. For objects (lighting 'ambient') the excess over 1 is
+   * ADDED to the map's object level, as the engine does (level + ExtraUnitLight); other classes are multiplied.
    */
   light?: number;
   /** Caller-selected exemption from the map grade; extra object light and HD received light are unchanged. */
@@ -384,16 +385,23 @@ export class SpriteLayer {
     const isUnlit: ShaderNode = step(2.5, aFlags.z);
     // Ungraded trees retain their former terrain event policy; self-lit overlays bypass scene lighting altogether.
     const sceneMultiplier: ShaderNode = mix(nodes.sceneObjectMul, nodes.sceneTerrainMul, max(isFull, isNone));
+    // Objects ('ambient'): the engine ADDS the extra light to the cell's object level (I + ExtraInfantryLight ...), so
+    // at Ambient 0.68 infantry shows at 0.88 of its palette, not 0.68 x 1.2 = 0.82. Terrain-class and unlit instances
+    // keep the plain factor (their `light` is 1 in practice).
+    const extraLight: ShaderNode = aFlags.y.sub(1);
+    const mapLight: ShaderNode = mapLightAt(cache.mapLight, aLightSample);
     const grade: ShaderNode = select(
       aGradeExempt.greaterThan(0.5),
-      vec3(1),
-      mix(
-        mix(vec3(objectLevelAt(cache.mapLight, aLightSample)), terrainGradeAt(cache.mapLight, aLightSample), isFull),
-        vec3(1),
-        isNone,
-      ),
-    ).mul(aFlags.y);
+      vec3(aFlags.y),
+      mix(mix(vec3(mapLight.a.add(extraLight)), mapLight.rgb.mul(aFlags.y), isFull), vec3(aFlags.y), isNone),
+    );
     const objectLit = (c: ShaderNode): ShaderNode => srgbScale(c, grade);
+    // What the map's light does to white, in linear light: the look's added light (highlights, glints, mirrored sky)
+    // is scaled by it, because the game darkens the whole object, not only its painted colour. Left at full strength
+    // on a dark map they made relit buildings brighter than the map (frozen pairs under the cinematic look: the
+    // construction yard at 1.46 of the native luminance on MoonPatr and Transylv, object level 0.57-0.60, against
+    // 1.17-1.29 on maps at 0.98-1). 1 at an object level of 1 or more.
+    const gradeLight: ShaderNode = objectLit(vec3(1)).toVar('spriteGradeLight');
     const ppu = float(PIXELS_PER_CELL_EDGE);
 
     const material = new MeshBasicNodeMaterial();
@@ -717,6 +725,7 @@ export class SpriteLayer {
             // Facades and roofs: a physical GGX highlight, weak on matte classes.
             const highlight: ShaderNode = sunHighlight(m.normal, sun, view, roughness, float(0.03))
               .mul(look.sunLight)
+              .mul(gradeLight)
               .mul(look.specularSize.mul(look.specularSize))
               .mul(
                 look.specular
@@ -727,8 +736,11 @@ export class SpriteLayer {
               );
             // Glints only on the full inside of a pane (not its softer rim), so they never sparkle as single pixels.
             const core: ShaderNode = smoothstep(0.92, 0.99, m.spec).mul(weight);
-            const glint: ShaderNode = pane.glint.mul(look.sunLight).mul(look.glass.mul(core).mul(occlusion));
-            const sky: ShaderNode = sceneLitColour(pane.sky.mul(occlusion), sceneMultiplier);
+            const glint: ShaderNode = pane.glint
+              .mul(look.sunLight)
+              .mul(gradeLight)
+              .mul(look.glass.mul(core).mul(occlusion));
+            const sky: ShaderNode = sceneLitColour(pane.sky.mul(occlusion).mul(gradeLight), sceneMultiplier);
             const relit: ShaderNode = mix(base, sky, reflectance)
               .add(sceneLitColour(highlight, sceneMultiplier))
               .add(sceneLitColour(glint, sceneMultiplier));

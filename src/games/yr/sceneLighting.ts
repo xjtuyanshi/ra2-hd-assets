@@ -1,4 +1,4 @@
-import type { GameRenderLighting } from '../renderState';
+import type { GameRenderLighting, GameRenderLightSource } from '../renderState';
 import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { isPlausiblePointer, YR_STATE_GLOBALS } from './stateReader';
 
@@ -22,6 +22,98 @@ export const YR_SCENE_LIGHTING = Object.freeze({
   /** 0x53C290 tests nonzero; TimeWarp identity is inferred from the sound key used at 0x53B52B. */
   timewarpState: 0xa9fab0,
 });
+
+/**
+ * LightSourceClass instances (YR 1.001). The cell relight at 0x484180 walks this vector (items 0x48428B, count
+ * 0x48427D), skips a light whose Activated byte is clear (0x484294) or whose DetailLevel exceeds the game's detail
+ * setting (0x48429F..0x4842AA), and takes the centre from +0x38/+0x3C (0x4842E2), the reach from +0x44 (0x4842F0),
+ * the intensity from +0x24 (0x4843BA) and the RGB tint from +0x28/+0x2C/+0x30 (0x4843DD/0x4843FE/0x48441F), all
+ * per-mille integers. The constructor 0x554760 fills the same fields and sets the vtable; BuildingClass creates one
+ * per building whose type has LightIntensity != 0 (0x440D6C) and switches it on (0x554A60).
+ */
+export const YR_LIGHT_SOURCES = Object.freeze({
+  /** DynamicVectorClass<LightSourceClass*>: Items pointer and Count. */
+  items: 0xabca14,
+  count: 0xabca20,
+  /** Game detail setting compared with each light's DetailLevel (the same global as YR_NATIVE_DETAIL.level). */
+  detailLevel: 0xa8eb78,
+  vtable: 0x7ed028,
+  intensity: 0x24,
+  tint: 0x28,
+  detail: 0x34,
+  position: 0x38,
+  radius: 0x44,
+  activated: 0x48,
+  size: 0x4c,
+  /** More lights than any map places; a larger count is a bad read. */
+  maxCount: 4096,
+});
+
+/**
+ * The light sources the engine applies now, or undefined when the vector cannot be read plausibly (the caller then
+ * keeps whatever it knows from the map). Lights that are switched off or gated by the detail setting are left out,
+ * as the cell relight leaves them out.
+ */
+export function readYrLightSources(
+  memory: GuestMemoryAccessor,
+  detailLevel?: number,
+): GameRenderLightSource[] | undefined {
+  const c = YR_LIGHT_SOURCES;
+  const view = (address: number, length: number): DataView | null => {
+    if (!Number.isInteger(address) || address < 0 || address + length > memory.size) return null;
+    const bytes = memory.bytes(address, length);
+    return bytes.length === length ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) : null;
+  };
+  try {
+    const head = view(c.items, c.count - c.items + 4);
+    if (!head) return undefined;
+    const items = head.getUint32(0, true);
+    const count = head.getInt32(c.count - c.items, true);
+    // The render-state poll samples the detail globals once and hands the level in; read it here only without one.
+    const detail = detailLevel ?? view(c.detailLevel, 4)?.getInt32(0, true);
+    if (detail === undefined || !integerIn(count, 0, c.maxCount) || !integerIn(detail, 0, 3)) return undefined;
+    if (count === 0) return [];
+    if (!isPlausiblePointer(memory, items, count * 4)) return undefined;
+    const pointers = view(items, count * 4);
+    if (!pointers) return undefined;
+    const sources: GameRenderLightSource[] = [];
+    for (let index = 0; index < count; index++) {
+      const pointer = pointers.getUint32(index * 4, true);
+      if (!isPlausiblePointer(memory, pointer, c.size)) return undefined;
+      const light = view(pointer, c.size);
+      if (!light || light.getUint32(0, true) !== c.vtable) return undefined;
+      const activated = light.getUint8(c.activated);
+      const level = light.getInt32(c.detail, true);
+      // (DetailLevel is 2 for every light the constructor makes; the game's setting runs 0..2.)
+      const intensity = light.getInt32(c.intensity, true);
+      const tint = [0, 4, 8].map((offset) => light.getInt32(c.tint + offset, true)) as [number, number, number];
+      const position = [0, 4, 8].map((offset) => light.getInt32(c.position + offset, true));
+      const radius = light.getInt32(c.radius, true);
+      // A type that sets LightIntensity without tints keeps the constructor's 1000.0 (per-mille 1000000).
+      if (
+        !integerIn(activated, 0, 1) ||
+        !integerIn(level, 0, 3) ||
+        !integerIn(intensity, -100000, 100000) ||
+        !tint.every((channel) => integerIn(channel, -10000000, 10000000)) ||
+        !position.every((value) => integerIn(value, -0x1000000, 0x1000000)) ||
+        !integerIn(radius, -0x1000000, 0x1000000)
+      )
+        return undefined;
+      if (activated === 0 || detail < level) continue;
+      sources.push({
+        x: position[0]!,
+        y: position[1]!,
+        z: position[2]!,
+        radius,
+        intensity: intensity / 1000,
+        tint: [tint[0] / 1000, tint[1] / 1000, tint[2] / 1000],
+      });
+    }
+    return sources;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Native values, kept numeric so corrupt booleans and states can be rejected rather than coerced. */
 export interface YrSceneLightingStatics {
@@ -118,7 +210,7 @@ export function decodeYrSceneLighting(
  * Pure read over a supplied accessor; the render-state factory owns executable-version validation. Exact byte
  * spans preserve unavailable versus zero despite GuestMemoryAccessor's scalar methods using zero on failure.
  */
-export function readYrSceneLighting(memory: GuestMemoryAccessor): GameRenderLighting | null {
+export function readYrSceneLighting(memory: GuestMemoryAccessor, detailLevel?: number): GameRenderLighting | null {
   const read = (address: number, length: number): DataView | null => {
     if (!Number.isInteger(address) || address < 0 || address + length > memory.size) return null;
     const bytes = memory.bytes(address, length);
@@ -135,7 +227,7 @@ export function readYrSceneLighting(memory: GuestMemoryAccessor): GameRenderLigh
     const cell = read(c.stormCell, 4);
     if (!lighting || !statics || !cell) return null;
     const words = Array.from({ length: lighting.byteLength / 4 }, (_, index) => lighting.getInt32(index * 4, true));
-    return decodeYrSceneLighting(words, {
+    const decoded = decodeYrSceneLighting(words, {
       stormActive: statics.getUint8(c.stormActive - c.timewarpState),
       stormEnding: statics.getUint8(c.stormEnding - c.timewarpState),
       stormDeferment: statics.getInt32(c.stormDeferment - c.timewarpState, true),
@@ -145,6 +237,10 @@ export function readYrSceneLighting(memory: GuestMemoryAccessor): GameRenderLigh
       dominatorState: statics.getInt32(c.dominatorState - c.timewarpState, true),
       timewarpState: statics.getInt32(0, true),
     });
+    if (!decoded) return null;
+    // Optional and independent: an unreadable light vector leaves the scene values valid and the sources unknown.
+    const sources = readYrLightSources(memory, detailLevel);
+    return sources ? { ...decoded, sources } : decoded;
   } catch {
     return null;
   }

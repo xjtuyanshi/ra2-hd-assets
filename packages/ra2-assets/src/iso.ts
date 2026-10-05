@@ -194,7 +194,8 @@ export const DEFAULT_LIGHT_LEVEL = 0.032;
  * the engine's own cell formula (lights.ts engineCellLight, YR 1.001 @0x484180): intensity = Ambient - Ground +
  * Level x z in the engine's truncated precision, clamped to [0, 2], and the per-channel tint normalised by its largest
  * channel. Classes (MapObject.lighting): 'full' = tiles, terrain objects, overlays, smudges (intensity x tint);
- * 'ambient' = buildings, units, infantry, aircraft, walls (intensity only); 'none' = ore, gems (unlit). Measured
+ * 'ambient' = buildings, units, infantry, aircraft, walls (the object level I only: no tint and not its largest
+ * channel, CellLight.level); 'none' = ore, gems (unlit). Measured
  * against same-moment captures of XMP29U2 in packages/hd-renderer (src/ra2/mapLighting.ts). Light sources, Ion Storm
  * and Dominator lighting are not included here.
  */
@@ -206,7 +207,9 @@ export function mapLightMultipliers(l: MapLighting, z: number, cls: LightingClas
     [],
   );
   const k = cell.intensity[0]!;
-  return cls === 'full' ? [k * cell.tint[0]!, k * cell.tint[1]!, k * cell.tint[2]!] : [k, k, k];
+  // Objects take the engine's object level (no tint and not its largest channel either, see CellLight.level).
+  const o = cell.level[0]!;
+  return cls === 'full' ? [k * cell.tint[0]!, k * cell.tint[1]!, k * cell.tint[2]!] : [o, o, o];
 }
 
 /**

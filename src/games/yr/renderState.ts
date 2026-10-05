@@ -146,7 +146,7 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
       return null;
     }
     const nativeDetail = readYrNativeDetail(memory);
-    const lighting = readYrSceneLighting(memory);
+    const lighting = readYrSceneLighting(memory, nativeDetail?.level);
     const key = readChangeKey(memory, nativeDetail, lighting);
     const at = now();
     const cellsDue = at - lastCellPoll >= YR_OVERLAY_POLL_MS;
@@ -411,6 +411,16 @@ function readChangeKey(
             Number(lighting.storm?.ending),
             lighting.storm?.cell.x ?? 0,
             lighting.storm?.cell.y ?? 0,
+            // Light sources appear and vanish with their buildings; -1 marks an unavailable list.
+            lighting.sources ? lighting.sources.length : -1,
+            ...(lighting.sources ?? []).flatMap((source) => [
+              source.x,
+              source.y,
+              source.z,
+              source.radius,
+              source.intensity,
+              ...source.tint,
+            ]),
           ]
         : [0]),
     ];

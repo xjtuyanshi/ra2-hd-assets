@@ -381,14 +381,110 @@ describe('live presentation scheduling', () => {
 });
 
 describe('live staging hour', () => {
-  it("applies a preset's day hour to day maps only; an explicit time wins", async () => {
+  it("applies a preset's day hour to every map but authored dusk; an explicit time wins", async () => {
     const { liveTimeOfDay } = await import('../src/live/liveView');
     expect(liveTimeOfDay({ kind: 'day', hour: 12 }, { dayHour: 16.5 })).toBe(16.5);
-    expect(liveTimeOfDay({ kind: 'night', hour: 22 }, { dayHour: 16.5 })).toBe(22);
+    // Night maps are lit like day maps (the engine grade is their night), so they take the look's hour as well.
+    expect(liveTimeOfDay({ kind: 'night', hour: 12 }, { dayHour: 16.5 })).toBe(16.5);
+    expect(liveTimeOfDay({ kind: 'night', hour: 12 }, {})).toBe(12);
     expect(liveTimeOfDay({ kind: 'dusk', hour: 19 }, { dayHour: 16.5 })).toBe(19);
-    expect(liveTimeOfDay({ kind: 'night', hour: 22 }, { timeOfDay: 12, dayHour: 16.5 })).toBe(12);
+    expect(liveTimeOfDay({ kind: 'night', hour: 12 }, { timeOfDay: 22, dayHour: 16.5 })).toBe(22);
     expect(liveTimeOfDay({ kind: 'day', hour: 12 }, {})).toBe(12);
-    expect(liveTimeOfDay({ kind: 'day', hour: 12, airless: true }, { dayHour: 16.5 })).toBe(12);
+    // Airless maps keep their noon brightness at any hour, so the look's hour gives them its sun as well.
+    expect(liveTimeOfDay({ kind: 'day', hour: 12, airless: true }, { dayHour: 16.5 })).toBe(16.5);
+    expect(liveTimeOfDay({ kind: 'day', hour: 12, airless: true }, {})).toBe(12);
     expect(liveTimeOfDay({ kind: 'day', hour: 12, airless: true }, { timeOfDay: 10, dayHour: 16.5 })).toBe(10);
+  });
+});
+
+describe('engine light sources', () => {
+  const lamp = {
+    x: 15232,
+    y: 17536,
+    z: 208,
+    radius: 4000,
+    intensity: 0.5,
+    tint: [0.05, 0.05, 0.01] as [number, number, number],
+  };
+  const snapshot = (sources?: (typeof lamp)[]): LiveSnapshot =>
+    ({
+      frame: 1,
+      objects: [],
+      houses: [],
+      view: null,
+      lighting: {
+        ambient: 1,
+        ground: 0,
+        level: 0,
+        tint: [1, 0.8, 0.68],
+        override: null,
+        event: null,
+        ...(sources ? { sources } : {}),
+      },
+    }) as unknown as LiveSnapshot;
+  function nightView(
+    dressing: {
+      setSources: ReturnType<typeof vi.fn>;
+      setBlockedCells: ReturnType<typeof vi.fn>;
+      setWindowBuildings?: ReturnType<typeof vi.fn>;
+    } | null,
+    types?: Record<string, unknown>,
+  ) {
+    const setSources = vi.fn();
+    const internals = {
+      world: { mapLight: { setSources }, dressing, width: 8 },
+      cache: { lights: types ? { types } : undefined },
+      shroud: { isLocationShrouded: () => false },
+      library: null,
+      lightKey: null,
+      lightKeyEngine: false,
+      engineLightKey: null,
+      windowKey: null,
+      blockedKey: null,
+    };
+    const view = Object.assign(Object.create(LiveView.prototype), internals) as unknown as {
+      updateNightSources(snapshot: LiveSnapshot): void;
+    };
+    return { view, setSources };
+  }
+
+  it("feeds the map light grade from the game's own list on a map without a light sidecar", () => {
+    const { view, setSources } = nightView(null);
+    view.updateNightSources(snapshot([lamp]));
+    expect(setSources).toHaveBeenCalledTimes(1);
+    expect(setSources).toHaveBeenLastCalledWith([
+      { position: [15232, 17536, 208], radius: 4000, intensity: 0.5, tint: [0.05, 0.05, 0.01] },
+    ]);
+    // Unchanged list: no recomputation of the cell grid.
+    view.updateNightSources(snapshot([{ ...lamp, tint: [0.05, 0.05, 0.01] }]));
+    expect(setSources).toHaveBeenCalledTimes(1);
+    // The engine switched the light off (or its building is gone): the grade follows.
+    view.updateNightSources(snapshot([]));
+    expect(setSources).toHaveBeenCalledTimes(2);
+    expect(setSources).toHaveBeenLastCalledWith([]);
+    // A host that reports no list leaves the grade as it is (the sidecar's sources, if any).
+    view.updateNightSources(snapshot());
+    expect(setSources).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the sidecar type table for the dressing only while the game supplies the list', () => {
+    const dressing = { setSources: vi.fn(), setBlockedCells: vi.fn(), setWindowBuildings: vi.fn() };
+    const types = {
+      INGALITE: { foundation: [1, 1], radius: 4000, intensity: 0.5, tint: [0.05, 0.05, 0.01], invisible: true },
+    };
+    const { view, setSources } = nightView(dressing, types);
+    const post = { kind: 'building', type: 'INGALITE', x: 59 * 256, y: 68 * 256, z: 208, health: 1 };
+    const withPost = (sources?: (typeof lamp)[]) =>
+      ({ ...snapshot(sources), objects: [post] }) as unknown as LiveSnapshot;
+    view.updateNightSources(withPost([lamp]));
+    expect(setSources).toHaveBeenCalledTimes(1);
+    // The dressing learns the typed source (lamp head, forced-night pools) but must not overwrite the grade.
+    expect(dressing.setSources).toHaveBeenCalledTimes(1);
+    expect(dressing.setSources.mock.calls[0]![1]).toBe(false);
+    expect(dressing.setSources.mock.calls[0]![0]).toMatchObject([{ type: 'INGALITE', cell: [59, 68], radius: 4000 }]);
+    // Without the game's list the sidecar types feed the grade again, through the dressing.
+    view.updateNightSources(withPost());
+    expect(dressing.setSources).toHaveBeenCalledTimes(2);
+    expect(dressing.setSources.mock.calls[1]![1]).toBe(true);
   });
 });

@@ -14,8 +14,13 @@ loaders; no third-party data. Addresses are virtual addresses in that executable
 | `BuildingTypeClass` light keys | 0x460C8C..0x460DC4 | `LightVisibility` (int, leptons), `LightIntensity`, `LightRedTint`/`LightGreenTint`/`LightBlueTint` stored as `int(v * 1000 + 0.1)`. |
 | `BuildingTypeClass` constructor | 0x45DE12 | `LightVisibility` 5000; the tints stay at 1000.0 (per-mille 1000000) when a type sets `LightIntensity` without tints. Kept as is. |
 | Light source creation | 0x440D6C, 0x4466D5 | A building creates a `LightSourceClass` only when `LightIntensity != 0`, centred on its foundation: (256x + 128w, 256y + 128h, 104z) leptons. TerrainTypes (TIBTRE ore trees) carry the keys but get no light source. |
-| Cell lighting | 0x484180 | See the formula below. |
+| Cell lighting | 0x484180 (full), 0x484680 (incremental) | See the formula below. Both keep three fields per cell: `+0x10A` = I (clamped 0..2000), `+0x10C` = I x M / 1000 (terrain), `+0x10E` = the same for the bridge level (z + 4). `+0x108` holds the summed light-source intensity, `+0x104` M x 65.536. |
 | Tint normalisation | 0x5558E0 | Divides the summed tint by its largest channel. |
+| Object brightness | units 0x73D06C/0x73D0B4, infantry 0x51940F/0x519444, aircraft 0x41491E, buildings 0x43D163..0x456E38 | Read the cell's `+0x10A`: I alone, without the tint and without its largest channel M. Units and infantry under a bridge cell (flag 0x10000) take -500; on a bridge + 4 x Level; aircraft and airborne infantry + Level x height. |
+| Terrain brightness | cell draw 0x47F9F6..0x47FB41 and the overlay/smudge/terrain-object draws | Read `+0x10C` and draw through the tinted converter. |
+| Extra object light | rules reader 0x66B69E..0x66B74E; uses 0x73D0C9, 0x519457, 0x41492A | `[AudioVisual]` ExtraUnitLight / ExtraInfantryLight / ExtraAircraftLight as `int(v * 1000)` at RulesClass `+0x17D4/+0x17D8/+0x17DC`, ADDED to the cell value. Buildings add nothing. |
+| Light source list | vector items 0xABCA14, count 0xABCA20; constructor 0x554760; switch 0x554A60/0x554A80 | `LightSourceClass` (vtable 0x7ED028, 0x4C bytes): `+0x24` intensity, `+0x28/+0x2C/+0x30` RGB tint, `+0x34` DetailLevel (2), `+0x38` position, `+0x44` LightVisibility, `+0x48` Activated. The cell relight skips a light that is switched off or whose DetailLevel exceeds the game's detail setting (0xA8EB78; 0x484294..0x4842AA). A building keeps its light at BuildingClass `+0x614`. |
+| Shade rows | converter creation 0x544F1E, table builder 0x556090, blitter lookup 0x420140 | A lighting converter has 53 shade rows when the normalised tint's channels sum to 2000 per mille or more, else 27. Row s multiplies the palette by 2 s C / (rows - 1) per tint channel C, so one row is 1/26 of the palette at 53 rows. The blitters pick the row as `lo x hi x (rows - 1) / 32258`, truncated (127 is the neutral byte). |
 
 The map's own sections override `rulesmd.ini` for every key above (scenario INIs are merged over rules).
 
@@ -35,6 +40,23 @@ intensity = min(2000, I * M / 1000);  tint = (R, G, B) / M
 
 Integer divisions truncate towards zero (negative lights such as `NEGLAMP` darken). `engineCellLight` in
 `packages/ra2-assets/src/lights.ts` is an exact port, covered by `packages/ra2-assets/tests/lights.test.ts`.
+
+`intensity` and `tint` above are what terrain is drawn with: palette x I x M x tint, in other words the palette times
+I times the absolute Red/Green/Blue. Objects are drawn with I itself (`CellLight.level`) plus their extra light, no
+tint and no M. The two differ on every map whose largest tint channel is not 1: with Red/Green/Blue 0.8/0.8/0.75
+(HillBtwn) terrain shows at 0.8 I while a building shows at I; with 1/1/1.5 (XMP30S6) terrain shows at 1.5 I on the
+blue channel; and under a light type that sets `LightIntensity` without tint keys (the constructor's 1000.0, which
+saturates all three channels at 2) the terrain field doubles while objects only gain the light's intensity.
+
+Neither is applied continuously: the draw picks a shade row (table above). `engineShade` models that for terrain as
+`trunc(trunc(I x 127) x 127 x 52 / 32258) / 26`. The table builder and the lookup are from the executable; the step
+from the 0..2000 intensity to its light byte was not located and is taken as `trunc(I x 127)`. Frozen native frames
+support the truncation: an exact-intensity render of the same instant measured 1.03-1.04 of the native ground at
+terrain intensity 0.98 and 0.77 (Fight, DeepFrze), 1.06-1.09 at 0.68-0.76 (XMP06T2, HillBtwn, XXmas) and 1.13 at 0.57
+(Transylv); truncation plus the loss of the 16-bit surface on dark colours predicts 1.04, 1.03, 1.065-1.075 and
+1.095, exact intensities predict 1.03-1.05 throughout, and rounding predicts the darkest map below the brightest.
+Objects keep the continuous level (they add their extra light before the row is picked and their level is sampled
+between cells).
 
 ## Stock scenarios
 
@@ -71,22 +93,32 @@ the same art (`gglite.shp`).
 
 ## HD mapping
 
-- `mapAtmosphere`: outside theater `lunar`, the class comes from the authored base ambient `base = Ambient - Ground` and the tint, with lamp
-  posts (positive `InvisibleInGame` light sources) as evidence: night when `base <= 0.70`, or `base <= 0.76` with a
-  blue tint or with two or more lamp posts (unless the tint is warm); dusk when `base <= 0.76` with a warm tint; day
-  otherwise. `Level * medianZ` is deliberately left out of the class: an earlier version classified on
-  `Ambient - Ground + Level * medianZ` and staged XMP06T2 (0.60 + 0.039 x 4 = 0.756), multimd a6506e58 = XMP13S4
-  (0.68 + 0.028 x 5) and amazon.mmx (0.68 + 0.029 x 6) as day. The height term still sets the night level (what unlit
-  ground at the typical height shows). `packages/ra2-assets/tests/lights.test.ts` checks the real (Ambient, RGB,
-  Ground, Level, medianZ, lamp posts) of XMP06T2, XMP13S4, amazon.mmx, sov07tmd, Transylv, NOWIMPS and XTN01T2 (all
-  night) and of XMP29U2, RiverRam and invasion.mmx (day). Renderers recompute the profile from the sidecar's raw data
+- `mapAtmosphere`: outside theater `lunar`, the night class comes from the object level the game shows at the map's
+  median height, `eff = Ambient - Ground + Level * medianZ`, and the tint, with lamp posts (positive
+  `InvisibleInGame` light sources) as evidence: night when `eff <= 0.72`, or `eff <= 0.76` with a blue tint or with
+  two or more lamp posts (unless the tint is warm); dusk when the authored base `Ambient - Ground <= 0.76` with a warm
+  tint; day otherwise. An earlier classifier left `Level * medianZ` out so that maps "built as night maps" with raised
+  ground stayed night (XMP06T2, 0.60 + 0.039 x 4 = 0.756; XMP13S4, 0.68 + 0.028 x 5; amazon.mmx, 0.68 + 0.029 x 6).
+  Frozen native frames show that the game does not draw those dark where players stand (next section), so the height
+  term is back in the class. `packages/ra2-assets/tests/lights.test.ts` checks the real values of sov07tmd, Transylv,
+  NOWIMPS, XTN01T2, XXmas and XMP06T2 with its lamp posts (night) and of XMP13S4, amazon.mmx, XDeadman, XMP15S4,
+  XMP29U2, RiverRam and invasion.mmx (day). Renderers recompute the profile from the sidecar's raw data
   (`sidecarAtmosphere`), including the theater, so sidecars written by an older classifier stage maps the current way.
-  Theater `lunar` takes the airless day profile described below; an omitted theater retains the prior classifier.
+  Theater `lunar` takes the airless day profile described below; an omitted theater retains the terrestrial classifier.
+- The class does not decide brightness. The engine's cell light (`MapLightGrade`) is the map on every class at its
+  authored staging; a night map is a day map (same keys, exposure, display transform and look, at noon or at the look
+  preset's hour) whose keys carry a night dressing weight of 1: lit windows, lamp heads and HD street lamp pools. The
+  moonlit presentation of the next two items is what an hour forced to night shows on any map.
 - Linear light from engine brightness: `engineToLinear(e) = 0.30 * (e / 0.62)^2.2` (the palette scales display
-  values, so linear light scales by v^2.2); a typical stock night (0.62) shows unlit ground at 30 % of noon. Night maps
-  are clamped to 26-40 % of noon so every night stays readable.
-- Light sources: the engine grid's difference to the unlit grid is added as irradiance, staged by the map's class
-  (`mapLightStaging` in `packages/hd-renderer/src/ra2/mapLights.ts`). Night maps get the engine exactly (full
+  values, so linear light scales by v^2.2); a typical stock night (0.62) shows unlit ground at 30 % of noon. The
+  profile's `nightLevel` is clamped to 26-40 % of noon; it sets the moonlit keys of a forced night.
+- Light sources at the authored staging are part of the grade (the engine's formula, per cell). In a live match the
+  grade takes the game's own active list (`readYrLightSources`, the LightSourceClass vector above), so it also holds
+  on maps without a light sidecar and follows lights the engine switches off; the sidecar's type table on the standing
+  buildings is the fallback.
+- Light sources under a forced night: the engine grid's difference to the unlit grid is added as irradiance, staged
+  by the map's class (`mapLightStaging` in `packages/hd-renderer/src/ra2/mapLights.ts`), with the gain of the moonlit
+  night weight. Night maps get the engine exactly (full
   `LightVisibility`, linear falloff, full strength, at the night ambient `nightBaseAmbient`): their mappers tuned
   lamps and `NEGLAMP` darkening for that formula. Dusk maps keep sources in the full engine grade at their authored
   hour; their separate field follows night gain only when the hour is forced towards night and the grade fades out.
@@ -94,23 +126,86 @@ the same art (`gglite.shp`).
   with the full 15.6-cell radius the seven `INGALITE` washes on XMP29U2 lit the park lawn to 0.77 of noon, a floodlit
   field, while the moon alone gives 0.26; there each source is a pool (0.45 x `LightVisibility`, the engine falloff
   squared via `engineLightDelta`'s `falloffPower`, 0.8 of the engine's strength): about 3.1x the moonlit ground at the
-  post, 1.5x three cells out, nothing past seven. By day the light sources are part of the map's day grade instead
-  (next item). No night-map cache has been rendered yet, so the night-map staging is unverified on screen.
+  post, 1.5x three cells out, nothing past seven.
 - The night keys aim 1.15x above the night level (`NIGHT_TONE_COMPENSATION` in `packages/hd-renderer/src/lighting.ts`)
   to offset the Neutral tone mapper's toe, so the displayed ground keeps the intended fraction of noon. Moonlight is
-  cool (`MOON_TINT`); only maps built as night maps tint it with their own `[Lighting]`, a day map's grade stays a
-  daylight choice.
-- Objects take the light at half saturation (`OBJECT_TINT`), a compromise with the engine's untinted object lighting.
-- By day the renderer applies the engine's cell light itself (`packages/hd-renderer/src/ra2/mapLighting.ts`): per
+  cool (`MOON_TINT`) on every map; a map's `[Lighting]` tint stays in its grade.
+- Objects take the light field's local lights (a forced night's sources, HD lamps, fires) at half saturation
+  (`OBJECT_TINT`), a compromise with the engine's untinted object lighting.
+- The renderer applies the engine's cell light itself (`packages/hd-renderer/src/ra2/mapLighting.ts`): per
   cell `engineCellLight` with the map's `[Lighting]` and light sources, multiplied into the palette colours in their
-  own sRGB scale, level x tint for terrain-class art and the level only for objects, as the engine draws them at all
-  times. Checked on XMP29U2 against same-moment captures: terrain 1.00/0.81/0.66 of the palette per channel, 1.345x
-  next to the `INGALITE` posts (1.340 predicted). Its weight fades with the night weight on day maps and is 0 on maps
-  staged as night, whose light the night presentation above derives from the same data (one owner at a time).
-  Authored dusk keeps weight 1 and source share 1 at its map hour, including under cinematic settings whose day-map
-  source share is 0.2. Airless lunar day profiles retain weight `1 - night`: this grade owns their ambient, tint and
-  map light sources, while their sun/sky keys stay neutral and do not multiply in the ambient again.
+  own sRGB scale: the shade row of I x M times the normalised tint for terrain-class art, the object level I (the
+  texture's alpha) plus the extra light for objects, as the engine draws them at all times. Checked on XMP29U2
+  against same-moment captures: terrain 1.00/0.81/0.66 of the palette per channel, 1.345x next to the `INGALITE`
+  posts (1.340 predicted; one shade row is 0.038). Its weight is 1 below a night weight of 0.1 (`gradeNight`; a look
+  preset's afternoon hour carries 0.067) and fades to 0 at a full forced night, on day and night maps alike.
+  Authored dusk keeps weight `1 - night` and source share 1 at its map hour whatever a look's day-map source share
+  (1 in every preset; a reduced share darkens everything near a lamp post, next section). On airless lunar maps this
+  grade owns the ambient, tint and map light sources, while their sun/sky keys stay neutral and do not multiply in the
+  ambient again.
   `mapLightMultipliers` in `packages/ra2-assets/src/iso.ts` (offline previews) uses the same formula.
+
+## Same-frame evidence against the game
+
+Frozen pairs of the owner's game in the play configuration (cinematic look, `hd-vlook=remaster`,
+`hd-vproj=vehicles-hd`, window 1728x1080 at device scale factor 2, normal game speed): the VM is held on one logic
+frame, the HD picture is captured at device pixels and the native frame is read from the game's own 16-bit
+framebuffer. Regions come from the frozen snapshot's object list and from the native frame only: ground = unshrouded
+pixels away from every object, vehicles = the pixels of tight boxes on vehicles that differ from the ground around
+them, yard = the pixels the deployed Soviet construction yard changed. Numbers are HD / native of the mean Rec.709
+luma on display code values, and the ground's hue and CIELAB a* / b* shift. They are observations of one base per
+map, not asset-free test results.
+
+"Before" is the play build as handed over (`s2-play2`), "after" this change; each side is its own frozen pair, so the
+two sides of a row may show different start positions of the map.
+
+| Map | Ambient, R/G/B, Ground, Level; base height | Before: ground | vehicles | yard | ground hue / a* / b* | After: ground | vehicles | yard | ground hue / a* / b* |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| XDeadman (temperate) | 0.68, 0.68/0.68/1, 0, 0.028; 8.0 | 1.04 | 0.57 | 0.71 | +28 / -6 / -3 | 1.11 | 0.93 | 1.26 | +4 / -1 / -2 |
+| XMP29U2 (urban), away from lamps | 1, 1/0.8/0.68, 0, 0; 2.0 | 1.05 | 0.90 | 1.23 | +2 / -1 / -4 | 1.09 | 0.88 | 1.23 | -0 / -0 / -3 |
+| XMP29U2, 7.6 cells from a lamp | 1, 1/0.8/0.68, 0, 0; 2.0 | 0.92 | 0.83 | 1.03 | +2 / -3 / -5 | 1.00 | 0.94 | 1.17 | +1 / -2 / -2 |
+| XHailMary (urban) | 1, 1/1/1, 0, 0.039; 0.0 | 0.97 | 0.86 | 1.18 | +1 / +0 / -3 | 1.04 | 0.89 | 1.23 | +2 / -1 / +1 |
+| Fight (newurban) | 1, 1/1/1, 0.05, 0.008; 4.0 | 1.08 | 0.88 | 1.25 | -7 / +1 / -4 | 1.08 | 0.93 | 1.26 | -6 / +1 / -3 |
+| DeepFrze (snow) | 0.8, 0.9/0.9/1, 0.05, 0.006; 4.0 | 1.10 | 0.94 | 1.27 | +2 / +0 / +1 | 1.06 | 0.93 | 1.22 | +2 / +1 / -1 |
+| XMP13S4 (snow) | 0.68, 0.75/0.75/1.2, 0, 0.028; 5.0 | 1.08 | 0.62 | 0.78 | -11 / -12 / +12 | 1.12 | 0.94 | 1.22 | -1 / -0 / -1 |
+| MoonPatr (lunar) | 0.65, 1/1/1.1, 0.05, 0.008; 0.0 | 1.15 | 1.60 | 2.02 | +1 / +1 / -1 | 1.05 | 0.98 | 1.35 | +2 / +0 / -0 |
+| XMP14T2 (dusk; DuskPen lighting) | 0.73, 1/0.92/0.8, 0, 0.035; 5.0 | 1.10 | 0.83 | 1.32 | +5 / -4 / +6 | 1.09 | 0.84 | 1.29 | +5 / -5 / +6 |
+| Transylv (newurban, night) | 0.6, 0.9/0.9/1, 0.05, 0.008; 2.0 | 0.97 | 0.61 | 0.93 | +24 / -4 / -6 | 1.10 | 0.89 | 1.35 | +9 / -3 / -1 |
+| XXmas (snow, night) | 0.68, 0.62/0.62/1, 0, 0.027; 0.0 | 1.52 | 0.68 | 0.93 | -7 / -5 / -0 | 1.09 | 0.96 | 1.28 | +1 / +4 / -8 |
+| XMP06T2 (temperate) | 0.6, 1/1/1, 0, 0.039; 4.0 | 0.80 | 0.68 | 0.86 | +74 / -0 / -16 | 1.06 | 0.90 | 1.29 | +7 / -2 / -0 |
+| HillBtwn (urban) | 1, 0.8/0.8/0.75, 0.05, 0.008; 0.0 | 1.16 | 0.74 | 1.08 | -5 / +0 / -4 | 1.08 | 0.95 | 1.26 | -4 / -0 / -4 |
+
+The lamp row's "after" pair was taken before the last two renderer changes of this work (lamp pools of night maps,
+added sprite light); neither acts on a day map at an object level of 1 or more.
+
+Read with these in mind:
+
+- Three offsets are the same on every map and are not map lighting. The remaster vehicle art is darker than the
+  original's (0.72-0.83 of the native luminance under the faithful look on every map measured, 0.84-0.98 under the
+  cinematic look), the redrawn construction yard is brighter (1.2-1.35; original civilian buildings sit at 1.0-1.13),
+  and the cinematic look lifts mid-tones by about 9 % in display values and cools the ground by b* 3-4 (the approved
+  cooling; on XXmas's saturated blue snow the same grade reads b* -8).
+- Before, the night class staged a map by its Ambient alone and drew it under a dim blue moon at 22:00 without the
+  engine grade: on XDeadman, XMP13S4, XMP06T2, Transylv and XXmas vehicles and infantry showed at 0.57-0.85 of the
+  native luminance with a blue cast, the ground's hue was off by up to 74 degrees and XXmas's snow was 1.52x too
+  bright. The game draws all of them with the ordinary cell formula; XDeadman's base at height 8 has object level 0.90.
+- Objects read I, not I x M: HillBtwn (Red/Green/Blue 0.8/0.8/0.75) drew vehicles at 0.74 and the yard at 1.08 while
+  its ground sat at 1.16, and MoonPatr, whose lamp types set no tint keys (M saturates at 2), drew objects at 1.6-2.0.
+  The native yard itself confirms the level: its luma per unit of I is 91.5 (XHailMary, I 1.0), 90.1 (XMP29U2, 1.0),
+  87.1 (Fight, 0.98), 84.2 (HillBtwn, 0.95; I x M would give 105), 87.3 (XMP14T2, 0.91), 84.3 (XDeadman, 0.90), 85.5
+  (XMP06T2, 0.76) and 80.6 (Transylv, 0.57), and its colour stays neutral under XDeadman's 0.68/0.68/1 tint.
+- A reduced lamp share darkens what stands near a lamp post (XMP29U2 row), and maps without a light sidecar had no
+  lamp light at all until the grade took the game's own light list (XHailMary's ground rose from 0.97 to the other
+  day maps' level).
+- The look's added sprite light (sun highlight, glass glint, mirrored sky) is scaled by the map's object light: at
+  full strength the yard read 1.46 on the two darkest maps (MoonPatr, Transylv) against 1.17-1.29 elsewhere.
+- HD street lamps (a night dressing the game does not have) keep their plain irradiance. Scaled up to their former
+  share of a moonlit ground they clipped under the day display: a Transylv base beside a lamp-lined road measured
+  ground 1.25 and a burnt-out tank.
+- Remaining outside 0.9-1.1 after the change: every yard (its art), vehicles on the dusk map and some day maps
+  (0.84-0.89, their art), and the ground of XDeadman and XMP13S4 by one or two hundredths. Authored dusk (XMP14T2)
+  was not changed and keeps its own warm low sun: ground b* +6, vehicles 0.84. The shade rows are modelled for
+  terrain only; objects on the darkest maps are drawn about one row (4 %) brighter than the game's.
 
 ## Dusk staging and unlit resource overlays
 

@@ -23,8 +23,10 @@ export interface MapLightStaging {
 }
 
 /**
- * A map built as a night map: its lamps and NEGLAMP darkening exactly as the engine applies them (full LightVisibility,
- * linear falloff, full strength) at its own night ambient. The mapper tuned these for that formula.
+ * A map built as a night map, when its hour is forced to night and the moonlit presentation replaces the engine
+ * grade: its lamps and NEGLAMP darkening exactly as the engine applies them (full LightVisibility, linear falloff,
+ * full strength) at its own night ambient. The mapper tuned these for that formula. At its authored staging the map
+ * light grade owns the sources, like on every other map, and this field is off (it follows the moonlit night weight).
  */
 export const NIGHT_MAP_STAGING: MapLightStaging = {
   radiusScale: 1,

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Color, DataTexture, Vector3 } from 'three/webgpu';
 import { mapAtmosphere } from '../../ra2-assets/src/lights';
 import type { AtmosphereProfile } from '../src/contract';
-import { applyLookPreset, HdRenderer } from '../src/HdRenderer';
+import { applyLookPreset, gradeNight, HdRenderer } from '../src/HdRenderer';
 import { Lighting, noonFlatLuminance, profileKeys, sunHeight } from '../src/lighting';
 import { MapLightGrade } from '../src/ra2/mapLighting';
 import { spriteLookFor } from '../src/ra2/spriteLook';
@@ -28,6 +28,39 @@ describe('airless daylight keys', () => {
     for (const colour of [key.sun, key.hemiSky, key.hemiGround, key.skyHorizon, key.skyZenith])
       chroma(colour).forEach((channel, i) => expect(channel).toBeCloseTo(tint[i]!, 12));
     expect(key.night).toBe(0);
+  });
+
+  it('keeps the noon flat-ground luminance and neutral grey at every daylight hour', () => {
+    const model = new Lighting(2, 2);
+    model.setProfile(lunar());
+    model.update(12, 0);
+    const noon = model.flatIrradianceColor(new Color());
+    const noonSun = model.sun.intensity * Math.max(0, model.state.sunDirection.y) * luma(model.sun.color);
+    expect(luma(noon)).toBeCloseTo(noonFlatLuminance(), 12);
+    for (const hour of [8, 10, 14, 16, 16.5]) {
+      model.update(hour, 0);
+      const flat = model.flatIrradianceColor(new Color());
+      // Hours whose keys carry no night keep the noon luminance and grey exactly; 16.5 (night 0.0666 from the dusk
+      // key) keeps both for its day share: within that share of noon, and of the dusk key's sunset colour.
+      if (model.state.night === 0) {
+        expect(luma(flat) / luma(noon)).toBeCloseTo(1, 12);
+        chroma(flat).forEach((channel) => expect(channel).toBeCloseTo(1, 12));
+        chroma(model.sun.color).forEach((channel) => expect(channel).toBeCloseTo(1, 12));
+      } else {
+        expect(luma(flat) / luma(noon)).toBeGreaterThan(1 - 2 * model.state.night);
+        chroma(flat).forEach((channel) => expect(Math.abs(channel - 1)).toBeLessThan(model.state.night));
+      }
+      expect(luma(model.clearFlatIrradianceColor(new Color())) / luma(noon)).toBeCloseTo(luma(flat) / luma(noon), 12);
+    }
+    // The hour still shapes the light: a lower afternoon sun gives flat ground a smaller direct share than noon's.
+    model.update(16, 0);
+    const lateSun = model.sun.intensity * Math.max(0, model.state.sunDirection.y) * luma(model.sun.color);
+    expect(lateSun / luma(model.flatIrradianceColor(new Color()))).toBeLessThan(noonSun / luma(noon));
+    // A terrestrial day map is not calibrated: its afternoon is dimmer and the look's exposure adaptation owns that.
+    const earth = new Lighting(2, 2);
+    earth.setProfile(day);
+    earth.update(16, 0);
+    expect(luma(earth.flatIrradianceColor(new Color())) / noonFlatLuminance()).toBeLessThan(0.9);
   });
 
   it.each(['rain', 'snow'] as const)('keeps explicit %s weather from replacing airless daylight with a sky', (kind) => {
@@ -185,7 +218,7 @@ describe('airless renderer staging', () => {
       expect(snow.object.visible).toBe(true);
       expect(frame.mist.amount.value).toBe(0);
       state.environment.weather = 'clear';
-      // Airless maps keep the engine's full lamp share whatever the look's daytime share (cinematic uses 0.2).
+      // Airless maps keep the engine's full lamp share whatever a look's daytime share.
       hd.settings.mapSourcesByDay = 0;
       hd.frame(0);
       expect(Array.from(mapLight.texture.image.data as Uint8Array)).toEqual(litTexels);
@@ -193,20 +226,34 @@ describe('airless renderer staging', () => {
       hd.settings.mapSourcesByDay = 1;
       hd.frame(0);
       expect(Array.from(mapLight.texture.image.data as Uint8Array)).toEqual(litTexels);
-      // A dimmer daylight hour detects accidental auto-adaptation even without a profile exposure override.
+      // Another daylight hour: the keys stay at the noon flat-ground luminance (Lighting.update), so a look's
+      // afternoon hour neither dims the moon nor needs exposure adaptation. The look's own adaptation stays out:
+      // toggling it must not move the exposure.
       state.environment.timeOfDay = 16;
       hd.settings.adaptExposure = 0;
       hd.frame(0);
       const unadapted = frame.exposure.value.toArray();
-      expect(luma(sprites.light.value.clone().multiply(frame.exposure.value))).toBeLessThan(0.9);
+      expect(new Set(unadapted).size).toBe(1);
+      expect(luma(sprites.light.value.clone().multiply(frame.exposure.value))).toBeCloseTo(1, 12);
+      expect(hd.nodes.night.value).toBe(0);
+      expect(mapLight.currentWeight).toBe(1);
       hd.settings.adaptExposure = 1;
       hd.frame(0);
       expect(frame.exposure.value.toArray()).toEqual(unadapted);
+      // The cinematic hour carries a night weight of 0.0666: still the whole grade, a scalar (untinted) exposure
+      // and, the keys' day share being calibrated, flat ground within that night share of its noon brightness.
+      state.environment.timeOfDay = 16.5;
+      hd.frame(0);
+      expect(hd.nodes.night.value).toBeCloseTo(0.2 * 0.333, 12);
+      expect(mapLight.currentWeight).toBe(1);
+      expect(new Set(frame.exposure.value.toArray()).size).toBe(1);
+      expect(luma(sprites.light.value.clone().multiply(frame.exposure.value))).toBeGreaterThan(0.93);
+      expect(luma(sprites.light.value.clone().multiply(frame.exposure.value))).toBeLessThan(1.001);
       state.environment.timeOfDay = 18.5;
       hd.frame(0);
       expect(hd.nodes.night.value).toBeGreaterThan(0);
       expect(hd.nodes.night.value).toBeLessThan(1);
-      expect(mapLight.currentWeight).toBeCloseTo(1 - hd.nodes.night.value, 12);
+      expect(mapLight.currentWeight).toBeCloseTo(1 - gradeNight(hd.nodes.night.value), 12);
       state.environment.timeOfDay = 21;
       hd.frame(0);
       expect(mapLight.currentWeight).toBe(0);
