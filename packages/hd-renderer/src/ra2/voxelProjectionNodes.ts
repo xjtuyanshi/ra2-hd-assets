@@ -81,7 +81,10 @@ export function projectedVoxelColour(
     const bias: ShaderNode = state.sharpen.clamp(0, 2).negate();
     const colour: ShaderNode = texture(part.colour, uv).bias(bias).toVar();
     const paint: ShaderNode = texture(part.paint, uv).bias(bias).rgb.toVar();
-    return { colour: sRGBTransferEOTF(colour.rgb), alpha: colour.a.mul(inside), paint };
+    // Pages with headroom store sRGB / exposure (see VoxelProjectionManifest.exposure); 1 leaves the sample as is.
+    const exposure = manifest.exposure ?? 1;
+    const encoded: ShaderNode = exposure === 1 ? colour.rgb : colour.rgb.mul(exposure);
+    return { colour: sRGBTransferEOTF(encoded), alpha: colour.a.mul(inside), paint };
   };
   const a = sample(k0),
     b = sample(k1);

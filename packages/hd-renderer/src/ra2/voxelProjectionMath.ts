@@ -28,6 +28,14 @@ export interface VoxelProjectionManifest {
   jacobian: ProjectionJacobian;
   house: { first: 16; count: 16 } | null;
   parts: { body?: ProjectionPartManifest; turret?: ProjectionPartManifest };
+  /**
+   * Page exposure: the colour pages store their sRGB values divided by this number and the shader multiplies it back
+   * before decoding (house paint is not on the colour pages and is not scaled). A page drawn from bakes at the bake
+   * level cannot hold anything brighter than the bake's white, so a light hull's top faces stop at
+   * 255 x level / levelRef on screen while the original reaches white; a page stored with headroom keeps them.
+   * Absent (every manifest written before this field existed): 1.
+   */
+  exposure?: number;
   registration: { part: ProjectionPartName; k: number; iou: number; scale: number; dx: number; dy: number }[];
 }
 
@@ -118,6 +126,8 @@ export function parseVoxelProjectionManifest(
     )
       throw new Error('Invalid projection registration');
   }
+  if (m.exposure !== undefined && (!finite(m.exposure) || m.exposure < 1 || m.exposure > 4))
+    throw new Error('Invalid projection page exposure');
   return m as unknown as VoxelProjectionManifest;
 }
 
