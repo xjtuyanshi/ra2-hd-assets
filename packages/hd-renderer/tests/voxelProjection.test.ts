@@ -264,7 +264,7 @@ describe('projected materials and shader compilation', () => {
     expect(voxelProjectionFor(other).relight.value).toBe(0);
     // Form light defaults are per atmosphere context too (formShade/formAO/spec/contrast, see VoxelProjectionState).
     voxelProjectionFor(nodes).formShade.value = 0;
-    expect(voxelProjectionFor(other).formShade.value).toBe(0.85);
+    expect(voxelProjectionFor(other).formShade.value).toBe(0.7);
     expect(voxelProjectionFor(other).formAO.value).toBe(0.25);
     expect(voxelProjectionFor(other).spec.value).toBe(0.5);
     expect(voxelProjectionFor(other).contrast.value).toBe(1.15);
@@ -326,6 +326,42 @@ describe('projected materials and shader compilation', () => {
     }
     expect(material.depthNode).toBeTruthy();
     nodes.dispose();
+  });
+  it('multiplies the colour page by the manifest exposure and adds nothing for pages without one', () => {
+    const fragment = (exposure?: number) => {
+      const nodes = new AtmosphereNodes();
+      const spec = { ...manifest(), ...(exposure === undefined ? {} : { exposure }) };
+      const texture = () => nodes.own(new DataTexture(new Uint8Array(320 * 32 * 4), 320, 32));
+      const body = createVoxelProjectionPart(spec, 'body', texture(), texture());
+      const material = voxelProjectedMaterialFor(new Uint8Array(768), body, nodes);
+      const parts = buildVoxelGeometry(model, null, nodes);
+      parts[0]!.material = material;
+      const unit = instantiateVoxel([parts[0]!], material);
+      const mesh = unit.root.children.find((o) => o instanceof Mesh && o.material === material) as Mesh;
+      const canvas = {
+        width: 64,
+        height: 64,
+        style: {},
+        addEventListener() {},
+        removeEventListener() {},
+        setAttribute() {},
+      };
+      const renderer = new WebGPURenderer({ canvas: canvas as unknown as HTMLCanvasElement, forceWebGL: true });
+      vi.spyOn(renderer, 'hasFeature').mockReturnValue(false);
+      const builder = renderer.backend.createNodeBuilder(mesh, renderer);
+      builder.scene = new Scene();
+      builder.camera = new PerspectiveCamera();
+      builder.lightsNode = lights([new DirectionalLight(), new HemisphereLight()]);
+      builder.build();
+      nodes.dispose();
+      return builder.fragmentShader as string;
+    };
+    // 1.625 is exact in binary and appears nowhere else in the projected material.
+    expect(fragment()).not.toContain('1.625');
+    expect(fragment(1)).not.toContain('1.625');
+    const exposed = fragment(1.625);
+    expect(exposed).toContain('1.625');
+    expect(exposed).not.toMatch(/\b(?:NaN|undefined)\b/);
   });
 });
 
