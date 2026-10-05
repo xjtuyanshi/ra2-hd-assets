@@ -124,6 +124,16 @@ map's whole-map 2x terrain must fit in one texture and in its upload staging buf
 needs about 320 MB and rendered black under the default buffer limit. Hardware below those sizes still fails
 validation for such maps; the WebGL2 fallback is unaffected.
 
+A material whose render pipeline the GPU refuses (more than 16 sampled textures or samplers in a stage, a shader
+that does not validate) is not an exception: three logs the error and drops every draw with that pipeline, so the
+object is silently missing. `src/materialFallback.ts` keeps the picture visible: a material may register a simpler
+stand-in (`setMaterialFallback`), and `HdRenderer.frame` checks every 15 frames for refused pipelines
+(`failedPipelineMaterials`: three r186 marks the pipeline's backend data and the GPU pipeline's label names the
+material) and swaps the stand-in into the meshes that draw the refused material (`applyMaterialFallbacks`), with a
+console warning. A stand-in may register its own. The original-map ground registers two: the same ground without
+mirrored reflections, then the painted art alone (`src/ra2/terrain.ts`). Renderers without those internals report
+nothing and keep their materials.
+
 Call `hd.dispose()` after stopping presentation. It releases the post pipeline, light-field targets and meshes, and
 context-owned fallback textures, voxel materials and lookup textures. A context belongs to one world/renderer lifetime;
 pass the same `nodes` option to loaders and constructors when explicitly composing them. Map grades remain per cache,
@@ -998,10 +1008,27 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   laps up and back with a thin foam line, breaker lines and wet sand, no surf at cliff feet, and rain rings. The default
   is the earlier `classic` look; sandbox `water=enhanced` (or `look=golden`), `LiveViewOptions.water` and in game
   `hd-water=enhanced` select the modern one (`waterPreset`, chosen before the world is built).
-  With `waterBed: true`, enhanced water uses one half-resolution colour/depth mirror per base water level with at
-  least 12 open-water cells, keeping the four largest levels. Each mirror renders only while its padded cell bounds
-  intersect the camera frustum; fragment height selects the matching plane, and other levels keep sky only. Classic
-  and legacy enhanced water retain the single lowest mirror. Optional `materials.json.waterDetail` supplies sRGB
+  With `waterBed: true`, enhanced water mirrors every base water level with at least 12 open-water cells, keeping
+  the four largest levels. All of them share one mirror atlas (`../mirrorAtlas.ts`): one colour and one depth
+  texture, a half-resolution tile per level (2 x 2 tiles for four levels, the pixels four separate mirrors had). A
+  level's tile renders only while its padded cell bounds intersect the camera frustum; fragment height selects the
+  matching plane, and other levels keep sky only. Classic and legacy enhanced water retain the single lowest mirror
+  (three's own reflector). The atlas exists because a fragment shader may sample only 16 textures on a default
+  WebGPU device: with a render target per level the ground of a map with four water terraces needed 22, its
+  pipeline was refused and the ground was not drawn. `tests/terrainTextureBudget.test.ts` builds the ground of a map
+  with every optional layer through three's WGSL builder and fails above 16; it is 15 today, whatever the number of
+  levels. The ground and wall lighting model also skips three's DFG lookup, which it never reads.
+  On maps staged as dusk or night (`AtmosphereProfile.kind`, see `ra2-assets/src/lights.ts` `mapAtmosphere`) the
+  renderer sets `WaterUniforms.artTone` to 1 and water with painted art keeps the tone the map paints it in: the
+  albedo is the painted water with its painted shore (no shallow band, foam, bared sand or inland band of the look),
+  and the look's reflected light is kept at the painted level and hue (`tonedReflection`, at most
+  `ART_TONE_REFLECTION` of the painted colour, fading in over `ART_TONE_SHORE` from the mask's edge). The daylight
+  looks read as glowing blue there, where the original water is near-black, and their shoreline traced the
+  cell-stepped edge of the water mask under cliffs. The terrain's cliff-foot contact shading is dropped from 1.5
+  cells inland of the mask to the water on those maps (`artToneContactRelief`): it darkens the ground at a cliff's
+  foot but not the wall above it, and painted water continues across the wall's lower edge, where the step showed
+  the cliff's cell staircase. The painted lake bed (`waterBed: true`) has no painted water in its composite and
+  ignores the tone. Optional `materials.json.waterDetail` supplies sRGB
   apparent water colour and alpha roughness/glitter weight over the composite's area (same aspect, any resolution).
   It shares the mask's top-down UVs and uses linear/mipmap filtering with clamped edges; load failures warn and leave it unused.
   `WATER_DETAIL` in `waterLook.ts` controls column blending, retained shallow turquoise and alpha modulation. Only the

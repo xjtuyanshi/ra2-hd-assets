@@ -4,10 +4,8 @@ import {
   BufferGeometry,
   DataTexture,
   FloatType,
-  Frustum,
-  Group,
+  LightingModel,
   LinearFilter,
-  Matrix4,
   Mesh,
   MeshStandardNodeMaterial,
   PhysicalLightingModel,
@@ -15,7 +13,6 @@ import {
   Vector3,
   type Object3D,
   type NodeBuilder,
-  type ReflectorNode,
 } from 'three/webgpu';
 import {
   BRDF_GGX,
@@ -59,6 +56,8 @@ import {
 } from '../atmosphere';
 import { createWaterUniforms, waterSurface, type WaterUniforms } from '../waterShading';
 import { finishSceneLighting, sceneLitColour } from '../lighting';
+import { setMaterialFallback } from '../materialFallback';
+import { MirrorAtlas } from '../mirrorAtlas';
 import type { TerrainBuild } from '../terrain';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT } from '../world';
@@ -66,7 +65,16 @@ import { NO_TILE, ra2Screen, type Ra2Cache, tileAtlasPixel } from './cache';
 import { srgbScale, terrainGradeAt } from './mapLighting';
 import { SHORE_MAX, SHORE_MIN } from './shoreField';
 import { spriteLookFor } from './spriteLook';
-import { bedWaterLook, reflectionOffset, rippledReflection, waterLook, waterPreset, wetShore } from './waterLook';
+import {
+  artToneContactRelief,
+  bedWaterLook,
+  reflectionOffset,
+  rippledReflection,
+  tonedWaterBody,
+  waterLook,
+  waterPreset,
+  wetShore,
+} from './waterLook';
 import { groupWaterCells, selectWaterMirrorLevels, type WaterCell, type WaterLevel } from './waterLevels';
 
 /**
@@ -100,8 +108,10 @@ export interface Ra2TerrainBuild extends TerrainBuild {
   waterY: number | null;
   /** Inputs of the per-pixel water shading, driven by the renderer's lighting and weather each frame. */
   water: WaterUniforms;
-  /** Water mirror target, or a group of per-level targets; must be in the scene graph. Null without a mirror. */
+  /** Water mirror target (of the single mirror, or of the per-level atlas); must be in the scene graph. Null without a mirror. */
   reflectionTarget: Object3D | null;
+  /** The enhanced lake bed's per-level mirrors, all in one colour and one depth texture; null on every other path. */
+  mirrorAtlas: MirrorAtlas | null;
 }
 
 /**
@@ -317,7 +327,16 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
 
   const wetness = uniform(0);
   const water = createWaterUniforms();
-  const materials = createMaterials(cache, wetness, water, groupWaterCells(waterCells));
+  const waterLevels = groupWaterCells(waterCells);
+  const materials = createMaterials(cache, wetness, water, waterLevels);
+  // Never a missing ground: if the GPU refuses the ground's pipeline the renderer swaps in the same ground without
+  // mirrored reflections, and if that is refused too, the painted art alone (materialFallback.ts).
+  setMaterialFallback(materials.ground, () => {
+    const simpler = createMaterials(cache, wetness, water, waterLevels, { mirrors: false });
+    simpler.wall.dispose();
+    setMaterialFallback(simpler.ground, () => createPlainGround(cache));
+    return simpler.ground;
+  });
   const mesh = new Mesh(geometry, [materials.ground, materials.wall]);
   mesh.name = 'ra2-terrain';
   mesh.receiveShadow = true;
@@ -361,6 +380,7 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
     waterY: null,
     water,
     reflectionTarget: materials.reflectionTarget,
+    mirrorAtlas: materials.mirrorAtlas,
   };
 }
 
@@ -582,6 +602,16 @@ class ArtLightingModel extends PhysicalLightingModel {
     super();
   }
 
+  /**
+   * Skip PhysicalLightingModel.start: with no clearcoat, sheen, iridescence or transmission all it adds is a sample of
+   * three's DFG lookup texture for the multi-scatter terms of its own direct and indirect specular, and this model
+   * replaces both (below). The unused sample still took one of the 16 textures a fragment shader may bind, in the
+   * material that needs the most of them (see tests/terrainTextureBudget.test.ts).
+   */
+  override start(builder: NodeBuilder): void {
+    LightingModel.prototype.start.call(this, builder);
+  }
+
   override finish(builder: NodeBuilder): void {
     super.finish(builder);
     finishSceneLighting(builder, this.sceneMultiplier);
@@ -622,40 +652,68 @@ class ArtMaterial extends MeshStandardNodeMaterial {
 }
 
 /**
- * Schedule one of the enhanced bed's per-level mirrors: skip its render while its level's water is off screen, and
- * keep the shared NodeFrame intact for the next mirror. three r186 runs every mirror of the ground material from the
- * same NodeFrame while drawing the ground; a mirror's nested scene render overwrites that frame's camera, material,
- * object and scene with the last object it drew, so without restoring them the second mirror rendered from the first
- * mirror's virtual camera and hid the wrong material: only one level ever showed reflections.
+ * World box of one water level's cells, padded by a cell: while it is off screen the level's mirror is not rendered
+ * (no fragment of that level is visible, so its tile of the atlas is never sampled).
  */
-function scheduleWaterMirror(mirror: ReflectorNode, level: WaterLevel): void {
+export function waterLevelBounds(level: WaterLevel): Box3 {
   const y = level.level * LEVEL_HEIGHT;
-  const bounds = new Box3(
+  return new Box3(
     new Vector3(level.minX, y, level.minY),
     new Vector3(level.maxX + 1, y, level.maxY + 1),
   ).expandByScalar(1);
-  const projectionView = new Matrix4();
-  const frustum = new Frustum();
-  // r186 schedules ReflectorBaseNode, shared by the colour and depth samples, rather than the texture wrapper.
-  const instance = mirror.reflector;
-  const updateBefore = instance.updateBefore;
-  instance.updateBefore = (frame) => {
-    const { camera, material, object, scene, renderer } = frame;
-    if (camera) {
-      projectionView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-      frustum.setFromProjectionMatrix(projectionView, camera.coordinateSystem, camera.reversedDepth);
-      // No fragment from this level is visible, so its previous colour/depth texture can safely remain untouched.
-      // No fragment from this level is visible, so its previous colour/depth texture can safely remain untouched.
-      if (!frustum.intersectsBox(bounds)) return;
-    }
-    const result = updateBefore.call(instance, frame);
-    frame.camera = camera;
-    frame.material = material;
-    frame.object = object;
-    frame.scene = scene;
-    frame.renderer = renderer;
-    return result;
+}
+
+/** Sampling of the terrain art (whole-map composite or tile atlas) by a vertex's UV, clamped inside its own raster. */
+function terrainArtSampler(cache: Ra2Cache) {
+  const colourMap = cache.terrainMap?.texture ?? cache.terrainAtlas;
+  const size = cache.terrainMap?.ref ?? cache.manifest.terrainAtlas;
+  const halfTexel = vec2(0.5 / size.width, 0.5 / size.height);
+  // Clamp inside the tile's own raster so linear filtering never bleeds a neighbouring atlas entry.
+  const sample = (uvName: string, rectName: string) => {
+    const rect: ShaderNode = attribute(rectName, 'vec4');
+    const uv: ShaderNode = clamp(attribute(uvName, 'vec2'), rect.xy.add(halfTexel), rect.zw.sub(halfTexel));
+    return { uv, colour: texture(colourMap, uv) as ShaderNode };
   };
+  return { colourMap, halfTexel, sample };
+}
+
+/**
+ * Painted art under the scene's light and nothing else: dry, matt, with the local lights (map light sources, lamps,
+ * fires, explosions) from the light field as diffuse irradiance. Cliff walls, and the ground's last stand-in.
+ */
+function plainArtMaterial(colour: ShaderNode, nodes: AtmosphereNodes): ArtMaterial {
+  const material = new ArtMaterial();
+  material.sceneMultiplier = nodes.sceneTerrainMul;
+  // The sun and sky see the night-desaturated albedo; local lights (emissive) the full colour.
+  material.colorNode = moonlit(colour, nodes);
+  material.gloss = float(0);
+  material.roughnessNode = float(0.95);
+  material.metalnessNode = float(0);
+  material.emissiveNode = localLightHeadroom(
+    sceneLitColour(
+      colour
+        .mul(nodes.sceneLevel)
+        .mul(nodes.referenceLevel)
+        .mul(1 / Math.PI),
+      nodes.sceneTerrainMul,
+    ),
+    colour.mul(sampleLightField(positionWorld.xz, nodes)).mul(1 / Math.PI),
+    nodes.localLightCap,
+  );
+  return material;
+}
+
+/**
+ * The ground as the map paints it, without wetness, water shading or reflections: what is drawn when the GPU refuses
+ * even the ground without mirrors (see materialFallback.ts). Three sampled textures at most.
+ */
+function createPlainGround(cache: Ra2Cache): MeshStandardNodeMaterial {
+  const { sample } = terrainArtSampler(cache);
+  const raw = sample('atlasUv', 'atlasRect').colour;
+  return plainArtMaterial(
+    srgbScale(raw.rgb, terrainGradeAt(cache.mapLight, positionWorld.xz)),
+    cache.nodes ?? DEFAULT_ATMOSPHERE_NODES,
+  );
 }
 
 /**
@@ -667,49 +725,31 @@ function createMaterials(
   wetness: ShaderNode,
   water: WaterUniforms,
   waterLevels: readonly WaterLevel[],
-): { ground: MeshStandardNodeMaterial; wall: MeshStandardNodeMaterial; reflectionTarget: Object3D | null } {
+  // mirrors: false builds the same ground without mirrored reflections (the water reflects sky only): the first
+  // stand-in when the GPU refuses the full material, two sampled textures lighter.
+  { mirrors = true }: { mirrors?: boolean } = {},
+): {
+  ground: MeshStandardNodeMaterial;
+  wall: MeshStandardNodeMaterial;
+  reflectionTarget: Object3D | null;
+  mirrorAtlas: MirrorAtlas | null;
+} {
   const nodes = cache.nodes ?? DEFAULT_ATMOSPHERE_NODES;
-  const colourMap = cache.terrainMap?.texture ?? cache.terrainAtlas;
-  const size = cache.terrainMap?.ref ?? cache.manifest.terrainAtlas;
-  const halfTexel = vec2(0.5 / size.width, 0.5 / size.height);
-  // Clamp inside the tile's own raster so linear filtering never bleeds a neighbouring atlas entry.
-  const sample = (uvName: string, rectName: string) => {
-    const rect: ShaderNode = attribute(rectName, 'vec4');
-    const uv: ShaderNode = clamp(attribute(uvName, 'vec2'), rect.xy.add(halfTexel), rect.zw.sub(halfTexel));
-    return { uv, colour: texture(colourMap, uv) as ShaderNode };
-  };
+  const { colourMap, halfTexel, sample } = terrainArtSampler(cache);
 
   // Cliff walls take the upper tile's art, else the lower tile's, else neutral rock where neither raster covers the face.
-  const wall = new ArtMaterial();
-  wall.sceneMultiplier = nodes.sceneTerrainMul;
-  {
-    const upper = sample('atlasUv', 'atlasRect').colour;
-    const lower = sample('atlasUv2', 'atlasRect2').colour;
-    const upperCover = smoothstep(0.2, 0.6, upper.a);
-    const lowerCover = smoothstep(0.2, 0.6, lower.a);
-    const colour = srgbScale(
+  // Ground rain never paints a water film on vertical art, even when the adjoining cell is paved.
+  const upper = sample('atlasUv', 'atlasRect').colour;
+  const lower = sample('atlasUv2', 'atlasRect2').colour;
+  const upperCover = smoothstep(0.2, 0.6, upper.a);
+  const lowerCover = smoothstep(0.2, 0.6, lower.a);
+  const wall = plainArtMaterial(
+    srgbScale(
       mix(mix(color(0x5a5248), lower.rgb, lowerCover), upper.rgb, upperCover),
       terrainGradeAt(cache.mapLight, positionWorld.xz),
-    );
-    // The sun and sky see the night-desaturated albedo; local lights (emissive) the full colour.
-    // Ground rain never paints a water film on vertical art, even when the adjoining cell is paved.
-    wall.colorNode = moonlit(colour, nodes);
-    wall.gloss = float(0);
-    wall.roughnessNode = float(0.95);
-    wall.metalnessNode = float(0);
-    // Local lights (map light sources, lamps, fires, explosions) from the light field, as diffuse irradiance.
-    wall.emissiveNode = localLightHeadroom(
-      sceneLitColour(
-        colour
-          .mul(nodes.sceneLevel)
-          .mul(nodes.referenceLevel)
-          .mul(1 / Math.PI),
-        nodes.sceneTerrainMul,
-      ),
-      colour.mul(sampleLightField(positionWorld.xz, nodes)).mul(1 / Math.PI),
-      nodes.localLightCap,
-    );
-  }
+    ),
+    nodes,
+  );
 
   const ground = new ArtMaterial();
   ground.sceneMultiplier = nodes.sceneTerrainMul;
@@ -733,6 +773,9 @@ function createMaterials(
   let sheen: ShaderNode = wetSheen(wet.albedo, localLight, water.skyHorizon, groundWetness, paved, wet.puddle, nodes);
   let weatherLand: ShaderNode = float(1);
   let reflectionTarget: Object3D | null = null;
+  let mirrorAtlas: MirrorAtlas | null = null;
+  // Share of the cliff-foot contact shading dropped near painted water (art tone); null where no path sets it.
+  let contactRelief: ShaderNode | null = null;
   const map = cache.terrainMap;
   if (map) {
     // Whole-map terrain: depth, foam and wet sand come from the signed shore distance, reflections from a mirrored
@@ -756,18 +799,18 @@ function createMaterials(
     let reflection: { colour: ShaderNode; coverage: ShaderNode } | undefined;
     if (map.waterBed && waterPreset.style === 'enhanced') {
       const levels = selectWaterMirrorLevels(waterLevels);
-      if (levels.length) {
-        const targets = new Group();
+      if (levels.length && mirrors) {
+        // One atlas for every level: a mirror of its own per level costs two sampled textures each, and four levels
+        // took the ground material past the 16 a fragment shader may sample (RiverRam: the ground was not drawn).
+        const atlas = new MirrorAtlas(
+          levels.map((level) => ({ y: level.level * LEVEL_HEIGHT, bounds: waterLevelBounds(level) })),
+          { resolutionScale: 0.5 },
+        );
         let colour: ShaderNode = vec3(0);
         let coverage: ShaderNode = float(0);
-        for (const level of levels) {
+        levels.forEach((level, index) => {
           const waterY = level.level * LEVEL_HEIGHT;
-          const mirror = reflector({ resolutionScale: 0.5, depth: true });
-          mirror.target.rotateX(-Math.PI / 2);
-          mirror.target.position.y = waterY;
-          targets.add(mirror.target);
-          scheduleWaterMirror(mirror, level);
-          const rippled = rippledReflection(mirror, positionWorld, water);
+          const rippled = rippledReflection(atlas.tiles[index]!, positionWorld, water);
           // Base levels are at least LEVEL_HEIGHT apart, so plane weights never overlap; omitted levels keep sky.
           const onPlane: ShaderNode = smoothstep(
             0.3 * LEVEL_HEIGHT,
@@ -776,11 +819,12 @@ function createMaterials(
           );
           colour = colour.add(rippled.colour.mul(onPlane));
           coverage = coverage.add(rippled.coverage.mul(onPlane));
-        }
+        });
         reflection = { colour, coverage };
-        reflectionTarget = targets;
+        reflectionTarget = atlas.target;
+        mirrorAtlas = atlas;
       }
-    } else if (waterLevels.length) {
+    } else if (waterLevels.length && mirrors) {
       // Classic and legacy enhanced water retain the single lowest mirror, including levels with fewer than 12 cells.
       const waterY = waterLevels.reduce((lowest, { level }) => Math.min(lowest, level), Infinity) * LEVEL_HEIGHT;
       const mirror = reflector({ resolutionScale: 0.5, depth: true });
@@ -837,7 +881,16 @@ function createMaterials(
       ground.emissiveNode = look.emission;
     } else {
       const look = waterLook(
-        { position: positionWorld, shore, waterness, art: art.rgb, uniforms: water, reflection, calm },
+        {
+          position: positionWorld,
+          shore,
+          waterness,
+          art: art.rgb,
+          uniforms: water,
+          reflection,
+          calm,
+          maskShore: painted,
+        },
         nodes,
       );
       // The original paints a grey-blue wet band along every shore. Replace that band with the ground found a little
@@ -854,12 +907,19 @@ function createMaterials(
         texture(colourMap, uv.sub(towardsWater.mul(reach).mul(smoothstep(-0.7, 0.0, shore)))).rgb,
         grade,
       );
-      const band = smoothstep(-0.55, -0.12, shore);
-      const sand = wetShore(shore);
+      // On maps staged as dusk or night (water.artTone) the water and its shore stay as the map paints them: the
+      // look's daylight body read as glowing blue where the original is near-black, and its shallows, foam and wet
+      // band traced the cell-stepped edge of the water mask under cliffs as a cyan sawtooth. Only the look's
+      // reflected light is kept, at the painted water's level (waterLook.ts tonedReflection), and the cliff-foot
+      // contact shading is dropped near that water (artToneContactRelief).
+      const ownShore: ShaderNode = float(1).sub(water.artTone);
+      const band = smoothstep(-0.55, -0.12, shore).mul(ownShore);
+      const sand = wetShore(shore).mul(ownShore);
       const land = mix(albedo, wetGround(inland, groundWetness, paved, nodes).albedo, band).mul(
         mix(float(1), float(0.8), sand),
       );
-      albedo = mix(land, waterForDisplay(look.body, nodes), waterness);
+      albedo = mix(land, tonedWaterBody(waterForDisplay(look.body, nodes), albedo, water.artTone), waterness);
+      contactRelief = artToneContactRelief(painted, water.artTone);
       roughness = mix(mix(roughness, float(0.35), sand), float(1), waterness);
       sheen = sheen.mul(float(1).sub(waterness));
       ground.emissiveNode = look.emission.mul(mix(float(1), float(WATER_LEVEL), nodes.faithfulDisplay));
@@ -896,7 +956,7 @@ function createMaterials(
     });
     return value;
   })();
-  albedo = albedo.mul(contact);
+  albedo = albedo.mul(contactRelief ? mix(contact, float(1), contactRelief) : contact);
   ground.colorNode = moonlit(albedo, nodes);
   // Dry original art has no sheen of its own; wet ground and puddles reflect the sun.
   ground.gloss = gloss;
@@ -920,5 +980,5 @@ function createMaterials(
       ),
     )
     .add(sheen);
-  return { ground, wall, reflectionTarget };
+  return { ground, wall, reflectionTarget, mirrorAtlas };
 }

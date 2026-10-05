@@ -31,6 +31,11 @@ export interface WaterUniforms {
   ambient: ShaderNode;
   rain: ShaderNode;
   wind: ShaderNode;
+  /**
+   * 0 = a water look draws its own daylight water; 1 = the water keeps the tone the map paints it in (maps staged as
+   * dusk or night: their painted water is near-black, and a look tuned for daylight read as glowing blue on them).
+   */
+  artTone: ShaderNode;
 }
 
 export function createWaterUniforms(): WaterUniforms {
@@ -43,6 +48,7 @@ export function createWaterUniforms(): WaterUniforms {
     ambient: uniform(new Color(0.4, 0.45, 0.5)),
     rain: uniform(0),
     wind: uniform(0.3),
+    artTone: uniform(0),
   };
 }
 
