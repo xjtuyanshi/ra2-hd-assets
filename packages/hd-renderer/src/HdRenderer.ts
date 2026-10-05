@@ -743,7 +743,7 @@ export class HdRenderer {
     // Voxel units stand on (and tilt with) the ground or the water surface under them, and their flattened shadows
     // fall there (see ra2/voxelShadow.ts). Ramps rise one level per cell; anything steeper is a cliff edge.
     const shadowGround = groundFromHeights(
-      (x, z) => Math.max(this.terrain.heightAt(x, z), this.waterY),
+      (x, z) => Math.max(this.terrain.surfaceHeightAt?.(x, z) ?? this.terrain.heightAt(x, z), this.waterY),
       LEVEL_HEIGHT * 1.5,
     );
     shadowGround.waterHeight = this.terrain.waterHeightAt;

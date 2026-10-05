@@ -147,6 +147,7 @@ function presentation() {
       pose: VoxelUnits.prototype.pose,
       setPainterBias: VoxelUnits.prototype.setPainterBias,
       setNativeDepth: VoxelUnits.prototype.setNativeDepth,
+      setGroundContact: VoxelUnits.prototype.setGroundContact,
       setOpacity: VoxelUnits.prototype.setOpacity,
     },
     viewWidth: 0,
@@ -168,6 +169,157 @@ function presentation() {
   const uploads = [staticCards, cellLayer, overlayLayer].map((layer) => vi.spyOn(layer, 'setInstances'));
   return { view, live, visual, mesh, order, uploads, effectSprites, effectDriver, effectArt, hd, shroud };
 }
+
+describe('LiveView ground motion', () => {
+  /** Drive along +x at `step` leptons per logic frame; snapshots arrive at `arrivals` (ms), the display runs at 60 Hz. */
+  function drive(arrivals: number[], step: number) {
+    const p = presentation();
+    const shown: number[] = [];
+    let next = 0;
+    for (let now = arrivals[0]!; now <= arrivals.at(-1)! + 120; now += 1000 / 60) {
+      for (; next < arrivals.length && arrivals[next]! <= now; next++)
+        p.view.push({ ...snapshot(next + 1, 0), objects: [object(256 + next * step)] }, arrivals[next]!);
+      p.view.render(now);
+      shown.push(p.visual.root.position.x * 256);
+    }
+    return { p, shown };
+  }
+
+  it('plays a drive at an even speed although snapshots arrive early and late', () => {
+    // A 20 Hz logic delivered 35 to 60 ms apart, as the live bridge does most of the time (mean 50 ms).
+    const gaps = [50, 35, 60, 50, 40, 60, 45, 55, 60, 40, 50, 35, 60, 50, 50, 40, 60, 50, 45, 55, 50, 60, 40, 50];
+    const arrivals = gaps.reduce((times, gap) => [...times, times.at(-1)! + gap], [0]);
+    const { shown } = drive(arrivals, 24);
+    // Skip the start (the period is still being learned) and the stop.
+    const from = shown.findIndex((x) => x > 256 + 6 * 24);
+    const to = shown.findIndex((x) => x > 256 + (arrivals.length - 3) * 24);
+    const steps = shown.slice(from + 1, to).map((x, i) => x - shown[from + i]!);
+    expect(steps.length).toBeGreaterThan(40);
+    const sorted = [...steps].sort((a, b) => a - b);
+    const median = sorted[sorted.length >> 1]!;
+    // 24 leptons per 50 ms logic frame at 60 Hz: 8 leptons per display frame.
+    expect(median).toBeGreaterThan(6.5);
+    expect(median).toBeLessThan(9.5);
+    // No display frame without movement and no jump: interpolating over the last arrival interval stalled until a
+    // late snapshot came and leapt forward when one came early (steps from 0 up to 3 times the median).
+    expect(sorted[0]!).toBeGreaterThan(0.75 * median);
+    expect(sorted.at(-1)!).toBeLessThan(1.25 * median);
+    const mean = steps.reduce((sum, step) => sum + step, 0) / steps.length;
+    const deviation = Math.sqrt(steps.reduce((sum, step) => sum + (step - mean) ** 2, 0) / steps.length);
+    expect(deviation / mean).toBeLessThan(0.1);
+    // Never ahead of the newest snapshot, and at rest exactly on the last one.
+    expect(shown.at(-1)).toBeCloseTo(256 + (arrivals.length - 1) * 24, 6);
+    for (let i = 1; i < shown.length; i++) expect(shown[i]!).toBeGreaterThanOrEqual(shown[i - 1]! - 1e-9);
+  });
+
+  it('rests on the newest pose when a snapshot is very late and resumes from there without a jump', () => {
+    const arrivals = [0, 50, 100, 150, 200, 250, 300, 420, 470, 520, 570, 620];
+    const { shown } = drive(arrivals, 24);
+    const at = (ms: number) => shown[Math.round(ms / (1000 / 60))]!;
+    // The step that arrived at 300 ms is played out by 362.5 ms; nothing is extrapolated while waiting.
+    expect(at(400)).toBeCloseTo(256 + 6 * 24, 6);
+    expect(at(416)).toBeCloseTo(256 + 6 * 24, 6);
+    const steps = shown.map((x, i) => (i ? x - shown[i - 1]! : 0));
+    const resumed = steps.slice(Math.round(420 / (1000 / 60)) + 1, Math.round(600 / (1000 / 60)));
+    expect(Math.min(...resumed)).toBeGreaterThan(3);
+    expect(Math.max(...resumed)).toBeLessThan(12);
+  });
+
+  it('starts a unit first seen, hidden or teleported at its snapshot pose instead of sweeping it in', () => {
+    const p = presentation();
+    p.view.push(snapshot(1, 256), 0);
+    p.view.render(0);
+    p.view.push(snapshot(2, 356), 50);
+    p.view.push(snapshot(3, 456), 100);
+    p.view.render(110);
+    const before = p.visual.root.position.x;
+    expect(before).toBeGreaterThan(256 / 256);
+    expect(before).toBeLessThan(456 / 256);
+    // Three cells or more in one logic frame is a teleport: shown at once.
+    p.view.push(snapshot(4, 456 + 4 * 256), 150);
+    p.view.render(151);
+    expect(p.visual.root.position.x).toBeCloseTo((456 + 4 * 256) / 256, 9);
+    // Hidden by the game for a while, then shown elsewhere nearby: no glide from the stale pose.
+    p.view.push({ ...snapshot(5, 0), objects: [{ ...object(456 + 4 * 256 + 100), nativeHidden: true }] }, 200);
+    p.view.render(210);
+    p.view.push({ ...snapshot(6, 0), objects: [{ ...object(456 + 4 * 256 + 200), nativeHidden: true }] }, 250);
+    p.view.render(260);
+    p.view.push(snapshot(7, 456 + 4 * 256 + 300), 300);
+    p.view.render(301);
+    const reappeared = p.visual.root.position.x * 256;
+    expect(reappeared).toBeGreaterThanOrEqual(456 + 4 * 256 + 200);
+    expect(reappeared).toBeLessThanOrEqual(456 + 4 * 256 + 300);
+  });
+
+  it("tilts a vehicle with the game's own up vector, blended between logic frames, and with the ground without one", () => {
+    const p = presentation();
+    const pose = vi.spyOn(p.live.voxelUnits, 'pose');
+    const contact = vi.spyOn(p.live.voxelUnits, 'setGroundContact');
+    const tilted = (frame: number, x: number, tilt?: LiveObject['tilt']): LiveSnapshot => ({
+      ...snapshot(frame, 0),
+      objects: [{ ...object(x), ...(tilt ? { tilt } : {}) }],
+    });
+    // Engine axes (x, y, z up) become world axes (x, y up, z): a body leaning east and south.
+    p.view.push(tilted(1, 256, { x: 0, y: 0, z: 1 }), 0);
+    p.view.render(0);
+    expect(pose.mock.lastCall![3]!.toArray()).toEqual([0, 1, 0]);
+    // A level body leaves the shadow in the ground's own plane.
+    expect(contact).toHaveBeenLastCalledWith(p.visual, true, undefined);
+    const edge = { x: 0.4896, y: 0.2, z: Math.sqrt(1 - 0.4896 ** 2 - 0.04) };
+    p.view.push(tilted(2, 280, edge), 50);
+    p.view.push(tilted(3, 304, edge), 100);
+    p.view.render(130);
+    const between = pose.mock.lastCall![3]!.clone();
+    expect(between.length()).toBeCloseTo(1, 9);
+    expect(between.x).toBeGreaterThan(0);
+    expect(between.x).toBeLessThan(edge.x);
+    expect(between.z).toBeGreaterThan(0);
+    expect(between.z).toBeLessThan(edge.y);
+    p.view.render(400);
+    const up = pose.mock.lastCall![3]!;
+    expect(up.x).toBeCloseTo(edge.x, 9);
+    expect(up.y).toBeCloseTo(edge.z, 9);
+    expect(up.z).toBeCloseTo(edge.y, 9);
+    // On the ramp the footprint shadow lies in the body's plane.
+    expect(contact.mock.lastCall![1]).toBe(true);
+    expect(contact.mock.lastCall![2]!.distanceTo(up)).toBe(0);
+    const column = new Vector3().setFromMatrixColumn(p.visual.root.matrix, 1);
+    p.visual.root.updateMatrix();
+    expect(column.setFromMatrixColumn(p.visual.root.matrix, 1).distanceTo(up)).toBeLessThan(1e-9);
+    // A unit the reader reports no tilt for (other locomotors) follows the renderer's own ground again.
+    p.view.push(tilted(4, 304), 450);
+    p.view.render(451);
+    expect(pose.mock.lastCall![3]).toBeNull();
+    expect(contact).toHaveBeenLastCalledWith(p.visual, true, undefined);
+    p.visual.root.updateMatrix();
+    expect(column.setFromMatrixColumn(p.visual.root.matrix, 1).toArray()).toEqual([0, 1, 0]);
+  });
+
+  it('keeps the ground card and the contact shadow all the way up a ramp, and drops both in the air', () => {
+    const p = presentation();
+    // A ramp rising one level per cell along +x: the grid lookup knows only the nodes at half cells.
+    const surface = (x: number) => Math.max(0, x - 1) * LEVEL_HEIGHT;
+    Object.assign(p.live.world.terrain, {
+      heightAt: (x: number) => surface(Math.round(x * 2) / 2),
+      surfaceHeightAt: (x: number) => surface(x),
+    });
+    const contact = vi.spyOn(p.live.voxelUnits, 'setGroundContact');
+    const depth = vi.spyOn(p.live.voxelUnits, 'setNativeDepth');
+    let frame = 1;
+    const at = (cell: number, level: number, layer = 2) => {
+      const unit = { ...object(cell * 256), z: Math.round(level * 104), renderOrder: { layer, index: 1, ySort: 0 } };
+      p.view.push({ ...snapshot(frame, 0), objects: [unit] }, frame * 1000);
+      p.view.render(frame++ * 1000 + 500);
+      return [contact.mock.lastCall![1], depth.mock.lastCall![3]];
+    };
+    for (const cell of [1.05, 1.2, 1.3, 1.45, 1.55, 1.7, 1.8, 1.95]) expect(at(cell, cell - 1)).toEqual([true, true]);
+    // The game's own ramp heights differ a little from the mesh on corner ramps.
+    expect(at(1.5, 0.5 + 0.25)).toEqual([true, true]);
+    expect(at(1.5, 0.5 + 0.4)).toEqual([false, false]);
+    expect(at(1.5, 3)).toEqual([false, false]);
+    expect(at(1.5, 0.5, 3)).toEqual([false, false]);
+  });
+});
 
 describe('LiveView physical occlusion scheduling', () => {
   it('hides the whole native-hidden voxel root and restores it on the same logic frame', () => {
@@ -603,7 +755,9 @@ describe('LiveView physical occlusion scheduling', () => {
     expect(p.effectSprites.displayScale.value).toBeCloseTo(1 / p.hd.meanExposure);
     p.view.push(withBuilding(2, 356), 100);
     p.view.render(120);
-    expect(p.visual.root.position.x).toBeCloseTo(276 / 256);
+    // The step is due a period and a quarter after its arrival (225 ms) and starts from the poses last presented,
+    // capped at 40 ms before the arrival (60 ms).
+    expect(p.visual.root.position.x).toBeCloseTo((256 + (100 * (120 - 60)) / (225 - 60)) / 256);
     const bias = p.mesh.userData.painterDepth.bias;
     const count = p.order.mock.calls.length;
     const sorts = sort.mock.calls.length;
@@ -615,6 +769,7 @@ describe('LiveView physical occlusion scheduling', () => {
       [160, 0.5],
       [180, 4],
       [200, 1],
+      [230, 1],
     ] as const) {
       p.hd.meanExposure = exposure;
       p.view.render(at);
@@ -628,7 +783,7 @@ describe('LiveView physical occlusion scheduling', () => {
     expect(p.effectSprites.now.value).toBe(p.hd.seconds());
     for (const upload of p.uploads) expect(upload).not.toHaveBeenCalled();
     p.effectArt.revision++;
-    p.view.render(210);
+    p.view.render(240);
     expect(p.order).toHaveBeenCalledTimes(count + 1);
     expect(p.effectSprites.setInstances).toHaveBeenCalledTimes(1);
     for (const upload of p.uploads) expect(upload).not.toHaveBeenCalled();
@@ -649,14 +804,18 @@ describe('LiveView physical occlusion scheduling', () => {
     expect(p.live.current).toBe(current);
     expect(p.live.previous).toBe(previous);
     expect(p.live.current?.at).toBe(100);
-    expect(p.visual.root.position.x).toBeCloseTo(306 / 256);
+    // Units play the step until it is due at 225 ms; the camera keeps the arrival interval.
+    const first = 256 + (100 * (150 - 60)) / (225 - 60);
+    expect(p.visual.root.position.x).toBeCloseTo(first / 256);
     expect(p.hd.view.target.x).toBeCloseTo(306 / 60);
     expect(p.live.current?.byUid.get(1)?.renderOrder?.index).toBe(8);
     expect(p.live.current?.byUid.get(1)?.x).toBe(356);
     expect(p.mesh.userData.painterDepth.bias).toBeGreaterThan(bias);
     p.view.push(snapshot(3, 456), 200);
     p.view.render(250);
-    expect(p.visual.root.position.x).toBeCloseTo(406 / 256);
+    // The next step (due at 325 ms) starts from the pose on screen at the last presentation (150 ms), not from the
+    // previous snapshot: no jump at its arrival.
+    expect(p.visual.root.position.x).toBeCloseTo((first + ((456 - first) * (250 - 160)) / (325 - 160)) / 256);
     expect(p.hd.view.target.x).toBeCloseTo(406 / 60);
   });
 
@@ -668,8 +827,10 @@ describe('LiveView physical occlusion scheduling', () => {
     p.view.render(150);
     expect(p.live.current?.at).toBe(100);
     expect(p.live.previous?.snapshot.objects[0]!.x).toBe(256);
-    expect(p.visual.root.position.x).toBeCloseTo(356 / 256);
+    expect(p.visual.root.position.x).toBeCloseTo((256 + (200 * (150 - 60)) / (225 - 60)) / 256);
     p.view.render(200);
+    expect(p.visual.root.position.x).toBeCloseTo((256 + (200 * (200 - 60)) / (225 - 60)) / 256);
+    p.view.render(225);
     expect(p.visual.root.position.x).toBeCloseTo(456 / 256);
   });
 

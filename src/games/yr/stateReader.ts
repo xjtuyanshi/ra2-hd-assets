@@ -2,6 +2,7 @@ import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { YR_STARTUP_PAGE_HASH } from './startupPage';
 import { readYrBuildingDockState, readYrBuildingRenderState, YR_BUILDING_RENDER_OFFSETS } from './buildingRenderState';
 import { readYrInfantryRenderState } from './infantryRenderState';
+import { readYrUnitTilt, type YrUnitTilt } from './unitTilt';
 
 /**
  * Read-only live battlefield state of Yuri's Revenge 1.001 (gamemd.exe, SHA-256 in YR_STARTUP_PAGE_HASH) for an
@@ -278,6 +279,8 @@ export interface YrObjectState {
   infantryDrawFacingRaw?: number;
   /** Native registered painter position; absent when the layer list cannot be read reliably. */
   renderOrder?: { layer: number; index: number; ySort: number };
+  /** Up vector the engine draws a vehicle's body with (ramp tilt, see unitTilt.ts); absent when not validated. */
+  tilt?: YrUnitTilt;
   /** Health / Strength clamped to 0..1. */
   health: number;
   isSelected: boolean;
@@ -736,6 +739,10 @@ function readYrStateSnapshot(
       ) {
         const unloading = readType(memory.u32(typePointer + o.technoTypeUnloadingClass), YR_STATE_VTABLES.unitType);
         if (unloading) object.imageType = unloading.id;
+      }
+      if (spec.kind === 'vehicle') {
+        const tilt = readYrUnitTilt(memory, pointer, frame);
+        if (tilt) object.tilt = tilt;
       }
       if (type.turret) {
         const turretRaw = readFacingRaw(memory, pointer + o.secondaryFacing, frame);

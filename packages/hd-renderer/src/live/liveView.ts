@@ -142,6 +142,11 @@ export interface LiveObject {
   infantryDrawFacingRaw?: number;
   /** Native tactical layer registration; absent in older snapshots. Ground keys exclude altitude/art offsets. */
   renderOrder?: { layer: number; index: number; ySort: number };
+  /**
+   * Unit up vector the game draws this vehicle's body with, in the engine axes of x/y/z (z up); (0, 0, 1) is level.
+   * Absent = the renderer tilts the body with its own terrain.
+   */
+  tilt?: { x: number; y: number; z: number };
 }
 
 export interface LiveHouse {
@@ -298,6 +303,37 @@ const LEPTONS_PER_CELL = 256;
 const LEPTONS_PER_LEVEL = 104;
 /** A logic-frame move longer than this (cells) is a teleport (chrono, reinforcement) and is not interpolated. */
 const TELEPORT_CELLS = 3;
+/**
+ * Motion playout (see LiveView.scheduleMotion and render). Snapshots of a 20 Hz logic arrive 30 to 75 ms apart
+ * (emulator slices plus the bridge's poll), so interpolating each step over the last arrival interval stalled a moving
+ * unit when the next snapshot was late and jumped it forward when one was early: on a cruising tank 6 to 10 % of the
+ * presented frames showed no movement and the per-frame speed varied by 45 to 80 % of its mean.
+ *
+ * Each step is instead played at an even speed from the poses on screen to the newest snapshot, which is due at
+ * ideal(frame) + (1 + MOTION_MARGIN) periods. ideal(frame) is the arrival time of a logic frame on a clock that
+ * advances one smoothed period per logic frame and follows the real arrivals only slowly, so an early or late
+ * snapshot no longer changes the speed: it only uses up (or adds to) the margin. A snapshot later than the margin has
+ * already let the units come to rest, so the clock moves to it at once (the margin grows quickly and shrinks slowly,
+ * like a jitter buffer). Replayed on recorded arrivals this leaves no stalled frame on a cruising tank and a speed
+ * variation of 7 to 20 %.
+ */
+/** Share of a logic period by which a step's end trails the next frame's expected arrival (the jitter it absorbs). */
+const MOTION_MARGIN = 0.25;
+/** Weight of a new arrival interval in the smoothed logic period, and the plausible range of one period (ms). */
+const MOTION_PERIOD_BLEND = 0.1;
+const MOTION_PERIOD_MIN = 15;
+const MOTION_PERIOD_MAX = 250;
+/** Share of an arrival's earliness or small lateness the clock follows per logic frame. */
+const MOTION_CLOCK_GAIN = 0.1;
+/** A snapshot this many periods ahead of the clock (a resumed tab, a faster game speed) restarts it. */
+const MOTION_RESYNC = 4;
+/** A step of n logic frames (n capped at MOTION_CATCH_UP) plays over at least this share of n periods. */
+const MOTION_MIN_STEP = 0.5;
+const MOTION_CATCH_UP = 4;
+/** Poses presented longer ago than this (ms) are not continued from then: the page was hidden or stalled. */
+const MOTION_PRESENT_GAP = 40;
+/** Units standing on a ramp read within this height (world units) of the surface: corner ramps are not planes. */
+const GROUND_TOLERANCE = 0.3 * LEVEL_HEIGHT;
 /** An object that moved within this many logic frames is walking (its walk frames play). */
 const WALK_FRAMES = 2;
 /** Buildings first seen after this many logic frames of the view were just placed (their build-up plays). */
@@ -349,7 +385,45 @@ interface Visual {
   buildingTurret?: VoxelUnit;
   /** Whether the building's turret model is drawn, still loading or missing (diagnostics). */
   turretState?: 'ready' | 'loading' | 'missing';
+  /** Presented motion of a mobile object (see MOTION_MARGIN). */
+  motion?: Motion;
 }
+
+/** Engine pose with 16-bit facings kept unwrapped as numbers, and the body's up vector when the game reports it. */
+interface MotionPose {
+  x: number;
+  y: number;
+  z: number;
+  facing: number;
+  turret: number;
+  tilt: boolean;
+  ux: number;
+  uy: number;
+  uz: number;
+}
+
+interface Motion {
+  /** The newest snapshot this object's current step leads to. */
+  segment: Timed | null;
+  /** Pose the step started from, when one was being shown. */
+  from: MotionPose;
+  hasFrom: boolean;
+  /** Pose of the last presentation. */
+  shown: MotionPose;
+  hasShown: boolean;
+}
+
+const motionPose = (): MotionPose => ({ x: 0, y: 0, z: 0, facing: 0, turret: 0, tilt: false, ux: 0, uy: 0, uz: 1 });
+/** Scratch of presentPose: the previous snapshot's pose of an object without a shown one, and the body's up vector. */
+const POSE_START = motionPose();
+const POSE_UP = new Vector3();
+const newMotion = (): Motion => ({
+  segment: null,
+  from: motionPose(),
+  hasFrom: false,
+  shown: motionPose(),
+  hasShown: false,
+});
 
 /** Interpolated engine pose: leptons and a facing in radians. */
 interface Pose {
@@ -525,6 +599,15 @@ export class LiveView {
   private readonly volumeInstances: VolumetricBlast[] = [];
   readonly volumetricBlasts: VolumetricBlastLayer;
   private readonly pose: Pose = { x: 0, y: 0, z: 0, facing: 0 };
+  /** Turret facing (radians) and body up vector (world axes) of the pose above; null = follow the terrain. */
+  private poseTurret = 0;
+  private poseUp: Vector3 | null = null;
+  /** Smoothed arrival interval of one logic frame (ms) and the de-jittered arrival time of the newest one. */
+  private motionPeriod?: number;
+  private motionClock?: { frame: number; time: number };
+  /** The current step: when the poses it starts from were presented and when it reaches the newest snapshot. */
+  private motionStart = 0;
+  private motionEnd?: number;
   private readonly shpPose: ReturnType<typeof shpUnitPose> = { state: 'stand', step: 0 };
   private readonly hidden = (x: number, y: number, z: number): boolean => this.shroud.isLocationShrouded(x, y, z);
   private readonly effectPalette = (resolved: ResolvedAnim, owner: number | undefined): string =>
@@ -876,10 +959,14 @@ export class LiveView {
       current.snapshot = snapshot;
       current.byUid = byUid;
       this.objectsFor = this.effectsFor = null;
-    } else this.current = { snapshot, at, byUid };
-    this.objectsInterpolate = false;
+    } else {
+      if (current) this.scheduleMotion(snapshot.frame - current.snapshot.frame, snapshot.frame, at - current.at, at);
+      this.current = { snapshot, at, byUid };
+    }
+    // A step still being played out keeps interpolating even when the newest frame moved nothing.
+    this.objectsInterpolate = this.objectsAlpha >= 0 && this.objectsAlpha < 1;
     const motionStart = sameFrame ? this.previous : current;
-    if (motionStart) {
+    if (motionStart && !this.objectsInterpolate) {
       for (const object of snapshot.objects) {
         const before = motionStart.byUid.get(object.uid);
         if (
@@ -1090,7 +1177,13 @@ export class LiveView {
       const materials = this.hd.materialsWanted();
       if (this.objectLibraryRevision !== libraryRevision || this.objectsMaterials !== materials)
         this.overlayPagesDirty = true;
-      const objectAlpha = this.objectsInterpolate ? alpha : 1;
+      // Objects play each step from the poses on screen to its due time (scheduleMotion); the camera keeps the
+      // arrival interval above.
+      const objectAlpha = !this.objectsInterpolate
+        ? 1
+        : previous && this.motionEnd !== undefined
+          ? Math.min(1, Math.max(0, (now - this.motionStart) / (this.motionEnd - this.motionStart)))
+          : alpha;
       if (
         this.objectsFor !== current ||
         this.objectsAlpha !== objectAlpha ||
@@ -1416,18 +1509,12 @@ export class LiveView {
         !!object.nativeHidden || !!visual.libraryType?.invisible || !!this.cache.lights?.types[object.type]?.invisible;
       if (visual.root.visible === hidden) this.painterDirty = true;
       visual.root.visible = !hidden;
-      if (hidden) continue;
-      const before = last ? undefined : previous?.byUid.get(object.uid);
-      const near = before
-        ? Math.hypot(object.x - before.x, object.y - before.y) / LEPTONS_PER_CELL < TELEPORT_CELLS
-        : false;
-      const t = near ? alpha : 1;
-      const from = near ? before! : object;
+      if (hidden) {
+        if (visual.motion) visual.motion.hasShown = false;
+        continue;
+      }
       const pose = this.pose;
-      pose.x = lerp(from.x, object.x, t);
-      pose.y = lerp(from.y, object.y, t);
-      pose.z = lerp(from.z, object.z, t);
-      pose.facing = lerpAngle16(from.facingRaw, object.facingRaw, t);
+      this.presentPose(object, visual, last ? undefined : previous?.byUid.get(object.uid), current, alpha);
       const painter = (visual.painter ??= painterObject(2, 0));
       if (this.painterDirty) {
         const registered = object.renderOrder;
@@ -1480,9 +1567,11 @@ export class LiveView {
         this.voxelUnits.pose(unit, pose, null);
         continue;
       }
-      const turret = lerpAngle16(from.turretFacingRaw ?? from.facingRaw, object.turretFacingRaw ?? object.facingRaw, t);
-      this.voxelUnits.pose(unit, pose, turret);
-      this.voxelUnits.setNativeDepth(unit, unit.root.position, this.harvesterBonus(object), this.groundCard(object));
+      const grounded = this.groundCard(object);
+      this.voxelUnits.pose(unit, pose, this.poseTurret, this.poseUp);
+      // On a ramp the native shadow lies in the plane the body is drawn in; a level body keeps the ground's own plane.
+      this.voxelUnits.setGroundContact(unit, grounded, this.poseUp && this.poseUp.y < 0.9999 ? this.poseUp : undefined);
+      this.voxelUnits.setNativeDepth(unit, unit.root.position, this.harvesterBonus(object), grounded);
     }
     for (const uid of this.visuals.keys()) {
       if (current.byUid.has(uid) || retained?.has(uid)) continue;
@@ -1490,6 +1579,114 @@ export class LiveView {
       this.visuals.delete(uid);
     }
     if (!this.painterDirty) this.flushSprites(batch, false);
+  }
+
+  /**
+   * Time the step to a snapshot `frames` logic frames after the previous one, which arrived `elapsed` ms earlier (see
+   * MOTION_MARGIN). The poses on screen were presented at the last render and move on from that moment.
+   */
+  private scheduleMotion(frames: number, frame: number, elapsed: number, at: number): void {
+    const steps = Math.max(1, frames);
+    // Arrival interval per logic frame; a pause, a load or a stalled tab is not a period.
+    const sample = elapsed / steps;
+    if (frames > 0 && sample >= MOTION_PERIOD_MIN && sample <= MOTION_PERIOD_MAX)
+      this.motionPeriod =
+        this.motionPeriod === undefined
+          ? sample
+          : this.motionPeriod + (sample - this.motionPeriod) * MOTION_PERIOD_BLEND;
+    const period = this.motionPeriod;
+    if (period === undefined) {
+      this.motionEnd = undefined;
+      return;
+    }
+    const clock = (this.motionClock ??= { frame, time: at });
+    const expected = clock.time + (frame - clock.frame) * period;
+    const late = at - expected;
+    // An earlier save or another match (frames <= 0) starts the clock over, like a long gap.
+    const restart = frames <= 0 || late > MOTION_MARGIN * period || late < -MOTION_RESYNC * period;
+    clock.time = restart ? at : expected + late * MOTION_CLOCK_GAIN;
+    clock.frame = frame;
+    this.motionStart = Math.min(at, Math.max(this.lastRender, at - MOTION_PRESENT_GAP));
+    this.motionEnd = Math.max(
+      clock.time + (1 + MOTION_MARGIN) * period,
+      this.motionStart + MOTION_MIN_STEP * period * Math.min(steps, MOTION_CATCH_UP),
+    );
+  }
+
+  /**
+   * Fill this.pose (and the turret facing and body up vector) for one presentation. A mobile object plays each logic
+   * step from the pose it was last shown in, so a new snapshot never makes it jump; an object first seen, hidden
+   * until now or teleported starts from the snapshots as before.
+   */
+  private presentPose(
+    object: LiveObject,
+    visual: Visual,
+    before: LiveObject | undefined,
+    current: Timed,
+    alpha: number,
+  ): void {
+    const pose = this.pose;
+    const motion = (visual.motion ??= newMotion());
+    if (motion.segment !== current) {
+      motion.segment = current;
+      motion.hasFrom = motion.hasShown;
+      if (motion.hasShown) Object.assign(motion.from, motion.shown);
+    }
+    const tilt = object.tilt;
+    let start = motion.hasFrom ? motion.from : undefined;
+    if (!start && before) {
+      start = POSE_START;
+      start.x = before.x;
+      start.y = before.y;
+      start.z = before.z;
+      start.facing = before.facingRaw;
+      start.turret = before.turretFacingRaw ?? before.facingRaw;
+      start.tilt = !!before.tilt;
+      if (before.tilt) {
+        start.ux = before.tilt.x;
+        start.uy = before.tilt.y;
+        start.uz = before.tilt.z;
+      }
+    }
+    const near = !!start && Math.hypot(object.x - start.x, object.y - start.y) / LEPTONS_PER_CELL < TELEPORT_CELLS;
+    const shown = motion.shown;
+    if (near) {
+      const from = start!;
+      shown.x = lerp(from.x, object.x, alpha);
+      shown.y = lerp(from.y, object.y, alpha);
+      shown.z = lerp(from.z, object.z, alpha);
+      shown.facing = wrap16(lerpRaw16(from.facing, object.facingRaw, alpha));
+      shown.turret = wrap16(lerpRaw16(from.turret, object.turretFacingRaw ?? object.facingRaw, alpha));
+      if (tilt && from.tilt) {
+        const ux = lerp(from.ux, tilt.x, alpha);
+        const uy = lerp(from.uy, tilt.y, alpha);
+        const uz = lerp(from.uz, tilt.z, alpha);
+        const length = Math.hypot(ux, uy, uz) || 1;
+        shown.ux = ux / length;
+        shown.uy = uy / length;
+        shown.uz = uz / length;
+      }
+    } else {
+      shown.x = object.x;
+      shown.y = object.y;
+      shown.z = object.z;
+      shown.facing = object.facingRaw;
+      shown.turret = object.turretFacingRaw ?? object.facingRaw;
+    }
+    if (tilt && !(near && start!.tilt)) {
+      shown.ux = tilt.x;
+      shown.uy = tilt.y;
+      shown.uz = tilt.z;
+    }
+    shown.tilt = !!tilt;
+    motion.hasShown = true;
+    pose.x = shown.x;
+    pose.y = shown.y;
+    pose.z = shown.z;
+    pose.facing = (shown.facing / 65536) * Math.PI * 2;
+    this.poseTurret = (shown.turret / 65536) * Math.PI * 2;
+    // Engine axes (x, y, z up) to world axes (x, y up, z).
+    this.poseUp = tilt ? POSE_UP.set(shown.ux, shown.uz, shown.uy) : null;
   }
 
   /** Native current-cell policy uses the rules type, including while its unloading image is substituted. */
@@ -1508,7 +1705,11 @@ export class LiveView {
     const x = object.x / LEPTONS_PER_CELL;
     const y = object.y / LEPTONS_PER_CELL;
     const height = (object.z / LEPTONS_PER_LEVEL) * LEVEL_HEIGHT;
-    const ground = this.world.terrain.heightAt(x, y);
+    // The surface under the unit, not the nearest grid node: on a ramp the node is up to a quarter level off, which
+    // dropped the ground card (and the contact shadow) for half of every cell driven.
+    const terrain = this.world.terrain;
+    if (terrain.surfaceHeightAt && height <= terrain.surfaceHeightAt(x, y) + GROUND_TOLERANCE) return true;
+    const ground = terrain.heightAt(x, y);
     if (height <= ground + 0.01) return true;
     if (Math.abs(height - ground - HIGH_BRIDGE_HEIGHT) > 0.01) return false;
     const cx = Math.floor(x);
@@ -2691,11 +2892,13 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
-/** Interpolate 16-bit engine facings along the short arc; returns radians (0 = north, clockwise). */
-function lerpAngle16(a: number, b: number, t: number): number {
+const wrap16 = (value: number): number => ((value % 65536) + 65536) % 65536;
+
+/** Interpolate 16-bit engine facings along the short arc; returns the facing in the same units, not wrapped. */
+function lerpRaw16(a: number, b: number, t: number): number {
   let delta = (((b - a) % 65536) + 65536) % 65536;
   if (delta > 32768) delta -= 65536;
-  return ((a + delta * t) / 65536) * Math.PI * 2;
+  return a + delta * t;
 }
 
 /** World position of an engine lepton coordinate, for hosts that place their own overlays. */

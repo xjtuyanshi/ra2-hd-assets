@@ -462,6 +462,7 @@ function projectObject(
     facingRaw,
     turretFacingRaw,
     renderOrder,
+    tilt,
     buildState,
     buildupFrame,
     buildingFrame,
@@ -503,6 +504,7 @@ function projectObject(
     ...(sequenceFrame !== undefined ? { sequenceFrame } : {}),
     ...(infantryDrawFacingRaw !== undefined ? { infantryDrawFacingRaw } : {}),
     ...(renderOrder !== undefined ? { renderOrder: { ...renderOrder } } : {}),
+    ...(tilt !== undefined ? { tilt: { x: tilt.x, y: tilt.y, z: tilt.z } } : {}),
     health,
     isSelected,
   };
