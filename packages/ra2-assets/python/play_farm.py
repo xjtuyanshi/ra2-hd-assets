@@ -325,6 +325,9 @@ def verify_map(farm: Path, name: str, limit: int, libraries: dict) -> dict:
 
         atlas = manifest['terrainAtlas']
         check.png(atlas['file'], 'terrain atlas', (atlas['width'], atlas['height']))
+        # Optional: the engine z byte of every tile pixel; terrain compositors require it to match the atlas.
+        if atlas.get('depth'):
+            check.png(atlas['depth'], 'terrain depth atlas', (atlas['width'], atlas['height']))
         for index, tile in enumerate(manifest['tiles']):
             x, y, w, h = tile['rect']
             if x < 0 or y < 0 or x + w > atlas['width'] or y + h > atlas['height']:
