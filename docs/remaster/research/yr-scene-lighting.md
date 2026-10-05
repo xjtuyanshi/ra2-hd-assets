@@ -111,8 +111,7 @@ the same art (`gglite.shp`).
   moonlit presentation of the next two items is what an hour forced to night shows on any map.
 - Linear light from engine brightness: `engineToLinear(e) = 0.30 * (e / 0.62)^2.2` (the palette scales display
   values, so linear light scales by v^2.2); a typical stock night (0.62) shows unlit ground at 30 % of noon. The
-  profile's `nightLevel` is clamped to 26-40 % of noon; it sets the moonlit keys of a forced night and scales the
-  night dressing's lamp pools on a night map (they multiply the graded art).
+  profile's `nightLevel` is clamped to 26-40 % of noon; it sets the moonlit keys of a forced night.
 - Light sources at the authored staging are part of the grade (the engine's formula, per cell). In a live match the
   grade takes the game's own active list (`readYrLightSources`, the LightSourceClass vector above), so it also holds
   on maps without a light sidecar and follows lights the engine switches off; the sidecar's type table on the standing

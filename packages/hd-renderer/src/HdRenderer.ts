@@ -397,21 +397,6 @@ export function tintWarmth(tint: { red: number; green: number; blue: number }): 
 }
 
 /**
- * Gain of the static night dressing lights (HD street lamp pools, visible lamp pools) on a map authored as night and
- * lit by the engine's grade. The light field multiplies the graded art; a lamp pool tuned on ungraded art under
- * moonlight would shrink with the map's own darkness (art x nightLevel in linear light), so that is divided back out
- * in proportion to the grade's weight: the pool adds the same light to the picture as it did under the moonlit
- * staging. 1 for every other kind, and when the grade is off (an hour forced to night).
- */
-export function dressingLightGain(
-  profile: Pick<AtmosphereProfile, 'kind' | 'nightLevel'> | null | undefined,
-  mapWeight: number,
-): number {
-  if (profile?.kind !== 'night') return 1;
-  return 1 + (1 / Math.max(0.1, profile.nightLevel) - 1) * Math.min(1, Math.max(0, mapWeight));
-}
-
-/**
  * Divide a map's [Lighting] colour tint out of the exposure in place (amount 0..1 as a power of the inverse tint),
  * keeping the Rec.709 luminance of a neutral surface under that tint unchanged.
  */
@@ -1352,8 +1337,12 @@ export class HdRenderer {
     );
     // Night dressing follows its own weight: a map authored as night is lit by the engine grade like a day map and
     // still shows its lamps and lit windows. The map's own light sources are in that grade; their separate field
-    // follows the moonlit presentation instead (baseNightGain), so they are never applied twice.
-    this.staticGain = smooth(0.2, 0.8, light.dressing) * dressingLightGain(profile, presentation.mapWeight);
+    // follows the moonlit presentation instead (baseNightGain), so they are never applied twice. The static pools
+    // (HD street lamps) keep their plain irradiance on the graded art: about 2.4x noon at the post, which lifts a
+    // stock night's ground (0.3 of noon) to about its ungraded brightness there, like one of the engine's own lamps.
+    // Scaled up to their old share of the moonlit ground they clipped white under the day display (frozen Transylv
+    // pair beside a lamp-lined road: ground 1.25, the yard 1.44 of the native luminance, a tank burnt out).
+    this.staticGain = smooth(0.2, 0.8, light.dressing);
     this.baseNightGain = smooth(0.2, 0.8, light.night);
     this.emitters.lampGain.value = smooth(0.3, 0.8, light.dressing);
     this.nodes.windowGain.value = this.atmosphere.windows

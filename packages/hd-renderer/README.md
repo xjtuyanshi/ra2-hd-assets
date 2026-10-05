@@ -197,8 +197,8 @@ the whole grade).
 - **Night maps.** A map authored as night is a day map with night dressing: the same light keys, exposure, display
   transform and look as a day map at the same hour, with the engine grade supplying its darkness, its tint (terrain
   only) and its light sources. Its keys carry a dressing weight of 1 at every hour (`LightingState.dressing`), which
-  drives lit windows, lamp heads and HD street lamp pools; the pools are scaled by `1 / nightLevel` because the light
-  field multiplies the graded (dark) art. The map sources' own light field follows the moonlit night weight instead
+  drives lit windows, lamp heads and HD street lamp pools (the pools keep their plain irradiance on the graded art:
+  about its ungraded brightness under the post, like one of the engine's own lamps). The map sources' own light field follows the moonlit night weight instead
   and is off at the authored staging, so no source is applied twice. Frozen same-frame pairs against the game under
   the cinematic look (docs/remaster/research/yr-scene-lighting.md lists them): ground 1.09-1.13, vehicles 0.89-0.96
   of the native luminance on Transylv and XXmas, against 0.97-1.52 and 0.61-0.68 under the former moonlit staging.

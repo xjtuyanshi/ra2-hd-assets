@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createScenario } from '../sandbox/scenario';
 import {
   applyLookPreset,
-  dressingLightGain,
   DUSK_EXPOSURE,
   GRADE_NIGHT_START,
   gradeNight,
@@ -432,15 +431,10 @@ describe('renderer faithfulness controls', () => {
       expect(night.hd.emitters.lampGain.value).toBe(1);
       expect(night.hd.windowsWanted()).toBe(true);
       expect(day.hd.windowsWanted()).toBe(false);
-      // Static pools are scaled back up by the darkness the grade gives the art they multiply.
-      expect(night.internals.staticGain).toBeCloseTo(1 / 0.3, 12);
-      // The map sources' own field stays off on both: the grade holds them.
-      expect(night.fieldUpdate).toHaveBeenLastCalledWith(
-        expect.any(Number),
-        night.hd.renderer,
-        night.internals.staticGain,
-        0,
-      );
+      // Static pools (HD street lamps) at their plain strength; the map sources' own field stays off on both: the
+      // grade holds them.
+      expect(night.internals.staticGain).toBe(1);
+      expect(night.fieldUpdate).toHaveBeenLastCalledWith(expect.any(Number), night.hd.renderer, 1, 0);
       expect(day.fieldUpdate).toHaveBeenLastCalledWith(expect.any(Number), day.hd.renderer, 0, 0);
       expect(night.internals.lighting.state.dressing).toBe(1);
       expect(day.internals.lighting.state.dressing).toBeCloseTo(0.2 * 0.333, 12);
@@ -457,23 +451,12 @@ describe('renderer faithfulness controls', () => {
       f.hd.frame(0);
       expect(f.mapLight.currentWeight).toBe(0);
       expect(f.internals.nightDisplay.value).toBe(1);
-      // Ungraded art again: the static pools at their tuned strength, and the map sources in their own field.
+      // The moonlit presentation: the static pools as ever, and the map sources back in their own field.
       expect(f.internals.staticGain).toBe(1);
       expect(f.fieldUpdate).toHaveBeenLastCalledWith(expect.any(Number), f.hd.renderer, 1, 1);
     } finally {
       f.dispose();
     }
-  });
-
-  it('scales the dressing pools by the grade weight on night maps only', () => {
-    const night = { kind: 'night', nightLevel: 0.26 } as const;
-    expect(dressingLightGain(night, 1)).toBeCloseTo(1 / 0.26, 12);
-    expect(dressingLightGain(night, 0)).toBe(1);
-    expect(dressingLightGain(night, 0.5)).toBeCloseTo(1 + (1 / 0.26 - 1) / 2, 12);
-    expect(dressingLightGain({ kind: 'night', nightLevel: 0 }, 1)).toBe(10);
-    expect(dressingLightGain({ kind: 'day', nightLevel: 0.3 }, 1)).toBe(1);
-    expect(dressingLightGain({ kind: 'dusk', nightLevel: 0.3 }, 1)).toBe(1);
-    expect(dressingLightGain(null, 1)).toBe(1);
   });
 });
 
