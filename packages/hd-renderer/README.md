@@ -927,9 +927,13 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   renderer sets `WaterUniforms.artTone` to 1 and water with painted art keeps the tone the map paints it in: the
   albedo is the painted water with its painted shore (no shallow band, foam, bared sand or inland band of the look),
   and the look's reflected light is kept at the painted level and hue (`tonedReflection`, at most
-  `ART_TONE_REFLECTION` of the painted colour). The daylight looks read as glowing blue there, where the original
-  water is near-black, and their shoreline traced the cell-stepped edge of the water mask under cliffs. The painted
-  lake bed (`waterBed: true`) has no painted water in its composite and ignores the tone. Optional `materials.json.waterDetail` supplies sRGB
+  `ART_TONE_REFLECTION` of the painted colour, fading in over `ART_TONE_SHORE` from the mask's edge). The daylight
+  looks read as glowing blue there, where the original water is near-black, and their shoreline traced the
+  cell-stepped edge of the water mask under cliffs. The terrain's cliff-foot contact shading is dropped from 1.5
+  cells inland of the mask to the water on those maps (`artToneContactRelief`): it darkens the ground at a cliff's
+  foot but not the wall above it, and painted water continues across the wall's lower edge, where the step showed
+  the cliff's cell staircase. The painted lake bed (`waterBed: true`) has no painted water in its composite and
+  ignores the tone. Optional `materials.json.waterDetail` supplies sRGB
   apparent water colour and alpha roughness/glitter weight over the composite's area (same aspect, any resolution).
   It shares the mask's top-down UVs and uses linear/mipmap filtering with clamped edges; load failures warn and leave it unused.
   `WATER_DETAIL` in `waterLook.ts` controls column blending, retained shallow turquoise and alpha modulation. Only the

@@ -125,8 +125,13 @@ describe('painted water tone in the terrain material', () => {
     'gives the water albedo and its reflected light to the art tone on maps with painted water (%s look)',
     (style) => {
       const body = vi.spyOn(waterLook, 'tonedWaterBody');
+      const relief = vi.spyOn(waterLook, 'artToneContactRelief');
       const { build, reached } = terrain(style, false);
       const tone = build.water.artTone;
+      // Cliff-foot contact shading is relieved by the same tone, measured from the painted mask's own edge.
+      expect(relief).toHaveBeenCalledTimes(1);
+      expect(relief.mock.calls[0]![1]).toBe(tone);
+      expect(reached.has(relief.mock.results[0]!.value)).toBe(true);
       // Albedo: the look's body against the painted water, by the renderer-driven tone.
       expect(body).toHaveBeenCalledTimes(1);
       expect(body.mock.calls[0]![2]).toBe(tone);
@@ -138,8 +143,10 @@ describe('painted water tone in the terrain material', () => {
 
   it('leaves the painted lake bed alone: its composite has no painted water to fall back to', () => {
     const body = vi.spyOn(waterLook, 'tonedWaterBody');
+    const relief = vi.spyOn(waterLook, 'artToneContactRelief');
     const { build, reached } = terrain('enhanced', true);
     expect(body).not.toHaveBeenCalled();
+    expect(relief).not.toHaveBeenCalled();
     expect(reached.has(build.water.artTone)).toBe(false);
   });
 
@@ -163,6 +170,12 @@ describe('painted water tone in the terrain material', () => {
     const depth = float(2);
     const toned = inputsOf(waterLook.tonedReflection(reflected, look, painted, tone, depth));
     for (const input of [reflected, look, painted, tone, depth]) expect(toned.has(input)).toBe(true);
+    const shore = float(-1);
+    const relief = inputsOf(waterLook.artToneContactRelief(shore, tone));
+    for (const input of [shore, tone]) expect(relief.has(input)).toBe(true);
+    // The relief covers the water and the cliff-foot cell beyond the mask, and is gone a cell further inland.
+    expect(waterLook.ART_TONE_CONTACT.near).toBeLessThanOrEqual(-1);
+    expect(waterLook.ART_TONE_CONTACT.far).toBeLessThan(waterLook.ART_TONE_CONTACT.near);
     // The added light starts inside the water mask, not at its (cell-stepped) edge.
     expect(waterLook.ART_TONE_SHORE.near).toBeGreaterThan(0);
     expect(waterLook.ART_TONE_SHORE.far).toBeGreaterThan(waterLook.ART_TONE_SHORE.near);

@@ -66,6 +66,7 @@ import { srgbScale, terrainGradeAt } from './mapLighting';
 import { SHORE_MAX, SHORE_MIN } from './shoreField';
 import { spriteLookFor } from './spriteLook';
 import {
+  artToneContactRelief,
   bedWaterLook,
   reflectionOffset,
   rippledReflection,
@@ -773,6 +774,8 @@ function createMaterials(
   let weatherLand: ShaderNode = float(1);
   let reflectionTarget: Object3D | null = null;
   let mirrorAtlas: MirrorAtlas | null = null;
+  // Share of the cliff-foot contact shading dropped near painted water (art tone); null where no path sets it.
+  let contactRelief: ShaderNode | null = null;
   const map = cache.terrainMap;
   if (map) {
     // Whole-map terrain: depth, foam and wet sand come from the signed shore distance, reflections from a mirrored
@@ -907,7 +910,8 @@ function createMaterials(
       // On maps staged as dusk or night (water.artTone) the water and its shore stay as the map paints them: the
       // look's daylight body read as glowing blue where the original is near-black, and its shallows, foam and wet
       // band traced the cell-stepped edge of the water mask under cliffs as a cyan sawtooth. Only the look's
-      // reflected light is kept, at the painted water's level (waterLook.ts tonedReflection).
+      // reflected light is kept, at the painted water's level (waterLook.ts tonedReflection), and the cliff-foot
+      // contact shading is dropped near that water (artToneContactRelief).
       const ownShore: ShaderNode = float(1).sub(water.artTone);
       const band = smoothstep(-0.55, -0.12, shore).mul(ownShore);
       const sand = wetShore(shore).mul(ownShore);
@@ -915,6 +919,7 @@ function createMaterials(
         mix(float(1), float(0.8), sand),
       );
       albedo = mix(land, tonedWaterBody(waterForDisplay(look.body, nodes), albedo, water.artTone), waterness);
+      contactRelief = artToneContactRelief(painted, water.artTone);
       roughness = mix(mix(roughness, float(0.35), sand), float(1), waterness);
       sheen = sheen.mul(float(1).sub(waterness));
       ground.emissiveNode = look.emission.mul(mix(float(1), float(WATER_LEVEL), nodes.faithfulDisplay));
@@ -951,7 +956,7 @@ function createMaterials(
     });
     return value;
   })();
-  albedo = albedo.mul(contact);
+  albedo = albedo.mul(contactRelief ? mix(contact, float(1), contactRelief) : contact);
   ground.colorNode = moonlit(albedo, nodes);
   // Dry original art has no sheen of its own; wet ground and puddles reflect the sun.
   ground.gloss = gloss;

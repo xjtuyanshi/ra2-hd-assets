@@ -339,6 +339,22 @@ export const ART_TONE_REFLECTION = 0.12;
  */
 export const ART_TONE_SHORE = { near: 0.25, far: 1.5 } as const;
 
+/**
+ * Signed distance to the water mask's edge (cells, negative on land) over which cliff-foot contact shading returns on
+ * maps whose water keeps its painted tone: none from `near` towards the water, all of it from `far` inland. Under a
+ * cliff the painted water runs on for a cell beyond the mask (the cliff-foot tiles), so the relief reaches inland.
+ */
+export const ART_TONE_CONTACT = { near: -1.5, far: -2.5 } as const;
+
+/**
+ * 0..1 share of the terrain's cliff-foot contact shading to drop for the current art tone. The shading darkens the
+ * ground at a cliff's foot but not the cliff wall above it; on the look's own water that reads as depth, but painted
+ * water continues across the wall's lower edge, where the step drew the cell staircase of the cliff as a sawtooth.
+ */
+export function artToneContactRelief(maskShore: ShaderNode, tone: ShaderNode): ShaderNode {
+  return tone.mul(smoothstep(ART_TONE_CONTACT.far, ART_TONE_CONTACT.near, maskShore));
+}
+
 /** Water albedo for the current art tone: the look's own body at 0, the water as the map paints it at 1. */
 export function tonedWaterBody(body: ShaderNode, painted: ShaderNode, tone: ShaderNode): ShaderNode {
   return mix(body, painted, tone);
