@@ -200,6 +200,7 @@ export class MirrorAtlasTile implements MirrorSource {
   readonly uvNode: ShaderNode = screenUV.flipX();
   readonly reflector: { hasOutput: boolean; getVirtualCamera(camera: Camera): Camera };
   private readonly cameras = new WeakMap<Camera, Camera>();
+  private readonly mapped = new WeakMap<object, ShaderNode>();
   private readonly depthSource: { sample(uv: ShaderNode): ShaderNode };
 
   constructor(
@@ -221,14 +222,22 @@ export class MirrorAtlasTile implements MirrorSource {
     this.depthSource = { sample: (uv) => atlas.depthNode.sample(this.atlasUv(uv)) };
   }
 
-  /** Atlas UV node of a mirrored-view UV node (see mirrorAtlasUv). */
+  /**
+   * Atlas UV node of a mirrored-view UV node (see mirrorAtlasUv). One node per UV node: a colour tap and a depth tap
+   * at the same place share it, as they share the UV on a mirror with a target of its own.
+   */
   atlasUv(uv: ShaderNode): ShaderNode {
-    const { columns, rows } = this.atlas.layout;
-    const margin: ShaderNode = this.atlas.texelMargin;
-    return uv
-      .clamp(margin, vec2(1).sub(margin))
-      .add(vec2(this.index % columns, Math.floor(this.index / columns)))
-      .mul(vec2(1 / columns, 1 / rows));
+    let mapped: ShaderNode = this.mapped.get(uv);
+    if (!mapped) {
+      const { columns, rows } = this.atlas.layout;
+      const margin: ShaderNode = this.atlas.texelMargin;
+      mapped = uv
+        .clamp(margin, vec2(1).sub(margin))
+        .add(vec2(this.index % columns, Math.floor(this.index / columns)))
+        .mul(vec2(1 / columns, 1 / rows));
+      this.mapped.set(uv, mapped);
+    }
+    return mapped;
   }
 
   sample(uv: ShaderNode): ShaderNode {

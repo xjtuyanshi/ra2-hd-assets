@@ -65,7 +65,15 @@ import { NO_TILE, ra2Screen, type Ra2Cache, tileAtlasPixel } from './cache';
 import { srgbScale, terrainGradeAt } from './mapLighting';
 import { SHORE_MAX, SHORE_MIN } from './shoreField';
 import { spriteLookFor } from './spriteLook';
-import { bedWaterLook, reflectionOffset, rippledReflection, waterLook, waterPreset, wetShore } from './waterLook';
+import {
+  bedWaterLook,
+  reflectionOffset,
+  rippledReflection,
+  tonedWaterBody,
+  waterLook,
+  waterPreset,
+  wetShore,
+} from './waterLook';
 import { groupWaterCells, selectWaterMirrorLevels, type WaterCell, type WaterLevel } from './waterLevels';
 
 /**
@@ -870,7 +878,16 @@ function createMaterials(
       ground.emissiveNode = look.emission;
     } else {
       const look = waterLook(
-        { position: positionWorld, shore, waterness, art: art.rgb, uniforms: water, reflection, calm },
+        {
+          position: positionWorld,
+          shore,
+          waterness,
+          art: art.rgb,
+          uniforms: water,
+          reflection,
+          calm,
+          maskShore: painted,
+        },
         nodes,
       );
       // The original paints a grey-blue wet band along every shore. Replace that band with the ground found a little
@@ -887,12 +904,17 @@ function createMaterials(
         texture(colourMap, uv.sub(towardsWater.mul(reach).mul(smoothstep(-0.7, 0.0, shore)))).rgb,
         grade,
       );
-      const band = smoothstep(-0.55, -0.12, shore);
-      const sand = wetShore(shore);
+      // On maps staged as dusk or night (water.artTone) the water and its shore stay as the map paints them: the
+      // look's daylight body read as glowing blue where the original is near-black, and its shallows, foam and wet
+      // band traced the cell-stepped edge of the water mask under cliffs as a cyan sawtooth. Only the look's
+      // reflected light is kept, at the painted water's level (waterLook.ts tonedReflection).
+      const ownShore: ShaderNode = float(1).sub(water.artTone);
+      const band = smoothstep(-0.55, -0.12, shore).mul(ownShore);
+      const sand = wetShore(shore).mul(ownShore);
       const land = mix(albedo, wetGround(inland, groundWetness, paved, nodes).albedo, band).mul(
         mix(float(1), float(0.8), sand),
       );
-      albedo = mix(land, waterForDisplay(look.body, nodes), waterness);
+      albedo = mix(land, tonedWaterBody(waterForDisplay(look.body, nodes), albedo, water.artTone), waterness);
       roughness = mix(mix(roughness, float(0.35), sand), float(1), waterness);
       sheen = sheen.mul(float(1).sub(waterness));
       ground.emissiveNode = look.emission.mul(mix(float(1), float(WATER_LEVEL), nodes.faithfulDisplay));

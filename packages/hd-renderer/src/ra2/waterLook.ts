@@ -93,6 +93,11 @@ export interface WaterLookInputs {
   reflection?: { colour: ShaderNode; coverage: ShaderNode };
   /** 0..1 sheltered water at a cliff foot: no surf, foam or exposed sand there (enhanced look). */
   calm?: ShaderNode;
+  /**
+   * Signed distance to the edge of the painted water mask alone, in cells: `shore` before a caller deepens it at
+   * cliff feet. Light added to water in the map's painted tone fades in from this edge. Defaults to `shore`.
+   */
+  maskShore?: ShaderNode;
 }
 
 export interface WaterLook {
@@ -228,8 +233,17 @@ function classicWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_NO
 
   // Foam is lit like the ground, but kept greyer at night so shorelines do not outline every water body in white.
   const foamColour = color(0xe9efef).mul(mix(float(1), float(0.5), night));
+  const reflectedLight = tonedReflection(
+    mirrored.mul(strength).add(glint),
+    body,
+    art,
+    uniforms.artTone,
+    max(inputs.maskShore ?? shore, 0),
+  );
+  // Water in the map's painted tone has the painted shoreline: no foam of the look's own cuts the reflection.
+  const drawnFoam = foam.mul(float(1).sub(uniforms.artTone));
   body = mix(body.mul(float(1).sub(strength)), foamColour, foam);
-  const emission = mirrored.mul(strength).add(glint).mul(float(1).sub(foam)).mul(waterness);
+  const emission = reflectedLight.mul(float(1).sub(drawnFoam)).mul(waterness);
   return { normal, body, emission, foam };
 }
 
@@ -309,6 +323,43 @@ const SKY_IN_WATER_LUMA = 0.2126 * 0.3 + 0.7152 * 0.62 + 0.0722 * 0.78;
 /** Airless reflections inherit the scene tint, without adding the look's terrestrial sky colour. */
 function skyFilter(uniforms: WaterUniforms): ShaderNode {
   return uniforms.airless.greaterThan(0).select(vec3(SKY_IN_WATER_LUMA), SKY_IN_WATER);
+}
+
+/**
+ * Water that keeps the map's painted tone (WaterUniforms.artTone = 1, maps staged as dusk or night; the terrain then
+ * shows the painted water itself instead of the look's body): share of the painted colour that the brightest
+ * reflection may add. The reflection keeps its motion but is expressed in the painted water's own colour, so the
+ * water gets neither bluer nor much brighter than the original's (near-black on those maps).
+ */
+export const ART_TONE_REFLECTION = 0.12;
+/**
+ * Cells from the edge of the water mask over which that reflection fades in. The mask ends at whole cells under
+ * cliffs while the painted water runs on to the cliff foot, so light added right up to the mask's edge would redraw
+ * that staircase; open water a cell and more out carries it.
+ */
+export const ART_TONE_SHORE = { near: 0.25, far: 1.5 } as const;
+
+/** Water albedo for the current art tone: the look's own body at 0, the water as the map paints it at 1. */
+export function tonedWaterBody(body: ShaderNode, painted: ShaderNode, tone: ShaderNode): ShaderNode {
+  return mix(body, painted, tone);
+}
+
+/**
+ * Reflected light (sky, mirrored scene, sun glitter) for the current art tone: unchanged at 0; at 1 the reflection
+ * relative to the look's own water body (at most 1), applied to the painted water colour `art` and faded in over
+ * ART_TONE_SHORE from the mask's edge (`depth`: cells from it, 0 on land).
+ */
+export function tonedReflection(
+  reflected: ShaderNode,
+  body: ShaderNode,
+  art: ShaderNode,
+  tone: ShaderNode,
+  depth: ShaderNode,
+): ShaderNode {
+  const luma = (c: ShaderNode): ShaderNode => dot(c, vec3(0.2126, 0.7152, 0.0722));
+  const relative: ShaderNode = clamp(luma(reflected).div(max(luma(body), 0.02)), 0, 1);
+  const open: ShaderNode = smoothstep(ART_TONE_SHORE.near, ART_TONE_SHORE.far, depth);
+  return mix(reflected, art.mul(relative.mul(ART_TONE_REFLECTION)).mul(open), tone);
 }
 /** Ground direction towards the fixed camera, and how far behind a point its mirrored local light is sampled. */
 const TOWARDS_CAMERA = vec2(Math.SQRT1_2, Math.SQRT1_2);
@@ -717,14 +768,22 @@ function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_N
   // Foam and wet sand are lit like the ground; foam is kept greyer at night so shorelines do not outline every water
   // body in white.
   const foamColour: ShaderNode = color(0xeef3f2).mul(mix(float(1), float(0.5), night));
+  // Sky, mirrored scene and sun glitter follow the art tone; mirrored fires and lamps stay light of their own.
+  const reflectedLight: ShaderNode = tonedReflection(
+    mirrored.mul(reflectance).add(glint),
+    body,
+    art,
+    uniforms.artTone,
+    max(inputs.maskShore ?? shore, 0),
+  );
+  // Water in the map's painted tone has the painted shoreline: no foam or bared sand of the look's own.
+  const ownShore: ShaderNode = float(1).sub(uniforms.artTone);
   body = mix(body, bed.mul(0.55), exposed);
   body = mix(body.mul(float(1).sub(reflectance)), foamColour, foam);
-  const emission: ShaderNode = mirrored
-    .mul(reflectance)
-    .add(glint)
+  const emission: ShaderNode = reflectedLight
     .add(lights)
-    .mul(float(1).sub(foam))
-    .mul(float(1).sub(exposed.mul(0.75)))
+    .mul(float(1).sub(foam.mul(ownShore)))
+    .mul(float(1).sub(exposed.mul(0.75).mul(ownShore)))
     .mul(waterness);
   return { normal, body, emission, foam };
 }

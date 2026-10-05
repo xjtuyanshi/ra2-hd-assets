@@ -314,7 +314,9 @@ Start a development server whose game root holds a skirmish setup (a scratch cop
 Snow stays dry and ground weather excludes building foundations and steep cells.
 `hd-look=<preset>` (`faithful|golden|cinematic`)
 applies the preset and, on day maps, its suggested hour unless `hd-time` is given (dusk and night maps keep their own
-`[Lighting]` hour; `cinematic` is the approved look with medium cooling); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=enhanced` the modern water;
+`[Lighting]` hour; `cinematic` is the approved look with medium cooling); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=enhanced` the modern water
+(on maps staged as dusk or night, water keeps the tone the map paints it in under either setting; see the water notes
+in `packages/hd-renderer/README.md`);
 `hd-vlook=remaster` selects the remaster voxel look; `hd-vproj=<dir>` selects vehicle redraw projection atlases under
 the HD cache (e.g. `vehicles-hd`); `hd-rect=x,y,w,h`
 overrides the tactical rectangle (default: the frame minus YR's 168 px sidebar and 32 px command bar).

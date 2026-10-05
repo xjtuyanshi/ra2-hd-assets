@@ -258,6 +258,20 @@ describe('mirror atlas rendering', () => {
     }
   });
 
+  it('samples colour and depth of one place through one shared atlas UV', () => {
+    const atlas = new MirrorAtlas(planes(4));
+    const tile = atlas.tiles[2]!;
+    const uv = tile.uvNode.add(0.01);
+    const colour = tile.sample(uv);
+    const depth = tile.getDepthNode().sample(uv);
+    expect(colour.uvNode).toBe(depth.uvNode);
+    expect(colour.uvNode).toBe(tile.atlasUv(uv));
+    // Another place, or the same place of another tile, has a UV of its own.
+    expect(tile.sample(tile.uvNode.add(0.02)).uvNode).not.toBe(colour.uvNode);
+    expect(atlas.tiles[1]!.sample(uv).uvNode).not.toBe(colour.uvNode);
+    atlas.dispose();
+  });
+
   it('keeps the scheduling node on every sample, so the material that samples the atlas renders it', () => {
     const atlas = new MirrorAtlas(planes(2));
     const colour = atlas.tiles[1]!.sample(atlas.tiles[1]!.uvNode);

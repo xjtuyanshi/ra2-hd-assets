@@ -1274,6 +1274,8 @@ export class HdRenderer {
       w.ambient.value.copy(light.ambient);
       w.rain.value = rainAmount;
       w.wind.value = env.windStrength + rainAmount * 0.3;
+      // Maps staged as dusk or night keep their painted water's tone (see WaterUniforms.artTone).
+      w.artTone.value = profile && profile.kind !== 'day' ? 1 : 0;
     }
     this.objects.night.value = light.night;
 
