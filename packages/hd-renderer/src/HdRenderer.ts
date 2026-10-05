@@ -62,6 +62,7 @@ import { EmitterLayer, type Emitter } from './emitters';
 import { EmissiveOverlay, emissiveMrtSupported } from './emissiveOverlay';
 import { LightField, type DynamicLight } from './lightField';
 import { Lighting, clearLightAt, noonFlatLuminance } from './lighting';
+import { applyMaterialFallbacks, failedPipelineMaterials, type PipelineHost } from './materialFallback';
 import { resolveSceneLighting, type SceneLighting } from './sceneLighting';
 import { Mist, MIST_CAP } from './mist';
 import { ObjectLayer } from './objects';
@@ -487,6 +488,9 @@ export interface HdStats {
 const BLOOM_THRESHOLD = 1.0;
 /** Bloom threshold of the night presentation, on the unexposed scene (as it was tuned). */
 const NIGHT_BLOOM_THRESHOLD = 0.85;
+
+/** Frames between two checks for materials whose pipeline the GPU refused (about a quarter of a second). */
+const PIPELINE_HEALTH_FRAMES = 15;
 
 /**
  * Consumes RenderState snapshots and draws the HD battlefield. It owns no game rules and never writes game state:
@@ -1384,6 +1388,24 @@ export class HdRenderer {
     this.renderPipeline();
     this.frames++;
     if (this.trackTimestamp && this.frames % 2 === 0) void this.collectGpuTimes();
+    if (this.frames % PIPELINE_HEALTH_FRAMES === 0) this.replaceRefusedMaterials();
+  }
+
+  private refusedMaterials = 0;
+
+  /**
+   * Swap the registered stand-in into meshes whose material the GPU refused (materialFallback.ts). The refusal is
+   * reported asynchronously and the refused material's draws are dropped meanwhile, so this is polled.
+   */
+  private replaceRefusedMaterials(): void {
+    const failed = failedPipelineMaterials(this.renderer as unknown as PipelineHost);
+    if (failed.size === this.refusedMaterials) return;
+    this.refusedMaterials = failed.size;
+    for (const { from, to } of applyMaterialFallbacks(this.scene, failed))
+      console.warn(
+        `[HD] the GPU refused the pipeline of material ${from.type} (${from.name || 'unnamed'}); ` +
+          `drawing its simpler stand-in ${to.type} instead`,
+      );
   }
 
   private renderPipeline(): void {

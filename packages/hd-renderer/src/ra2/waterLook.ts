@@ -27,8 +27,9 @@ import {
   vec2,
   vec3,
 } from 'three/tsl';
-import type { ReflectorNode, Texture } from 'three/webgpu';
+import type { Texture } from 'three/webgpu';
 import { DEFAULT_ATMOSPHERE_NODES, moonlit, sampleLightField } from '../atmosphere';
+import type { MirrorSource } from '../mirrorAtlas';
 import type { ShaderNode } from '../tsl';
 import type { WaterUniforms } from '../waterShading';
 import { RIPPLE_SLOPE_RANGE, WATER_TEXTURE_SIZE, waterTextures } from '../proceduralTextures';
@@ -771,7 +772,7 @@ const RIPPLED_REFLECTION = {
 
 /** Height-dependent distortion and three-tap vertical blur, using the bed normal's full ripple/swell/rain slope. */
 export function rippledReflection(
-  mirror: ReflectorNode,
+  mirror: MirrorSource,
   position: ShaderNode,
   uniforms: WaterUniforms,
 ): { colour: ShaderNode; coverage: ShaderNode } {
