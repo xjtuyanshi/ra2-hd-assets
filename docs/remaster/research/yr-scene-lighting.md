@@ -145,6 +145,68 @@ the same art (`gglite.shp`).
   ambient again.
   `mapLightMultipliers` in `packages/ra2-assets/src/iso.ts` (offline previews) uses the same formula.
 
+## Same-frame evidence against the game
+
+Frozen pairs of the owner's game in the play configuration (cinematic look, `hd-vlook=remaster`,
+`hd-vproj=vehicles-hd`, window 1728x1080 at device scale factor 2, normal game speed): the VM is held on one logic
+frame, the HD picture is captured at device pixels and the native frame is read from the game's own 16-bit
+framebuffer. Regions come from the frozen snapshot's object list and from the native frame only: ground = unshrouded
+pixels away from every object, vehicles = the pixels of tight boxes on vehicles that differ from the ground around
+them, yard = the pixels the deployed Soviet construction yard changed. Numbers are HD / native of the mean Rec.709
+luma on display code values, and the ground's hue and CIELAB a* / b* shift. They are observations of one base per
+map, not asset-free test results.
+
+"Before" is the play build as handed over (`s2-play2`), "after" this change; each side is its own frozen pair, so the
+two sides of a row may show different start positions of the map.
+
+| Map | Ambient, R/G/B, Ground, Level; base height | Before: ground | vehicles | yard | ground hue / a* / b* | After: ground | vehicles | yard | ground hue / a* / b* |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| XDeadman (temperate) | 0.68, 0.68/0.68/1, 0, 0.028; 8.0 | 1.04 | 0.57 | 0.71 | +28 / -6 / -3 | 1.11 | 0.93 | 1.26 | +4 / -1 / -2 |
+| XMP29U2 (urban), away from lamps | 1, 1/0.8/0.68, 0, 0; 2.0 | 1.05 | 0.90 | 1.23 | +2 / -1 / -4 | 1.09 | 0.88 | 1.23 | -0 / -0 / -3 |
+| XMP29U2, 7.6 cells from a lamp | 1, 1/0.8/0.68, 0, 0; 2.0 | 0.92 | 0.83 | 1.03 | +2 / -3 / -5 | 1.00 | 0.94 | 1.17 | +1 / -2 / -2 |
+| XHailMary (urban) | 1, 1/1/1, 0, 0.039; 0.0 | 0.97 | 0.86 | 1.18 | +1 / +0 / -3 | 1.04 | 0.89 | 1.23 | +2 / -1 / +1 |
+| Fight (newurban) | 1, 1/1/1, 0.05, 0.008; 4.0 | 1.08 | 0.88 | 1.25 | -7 / +1 / -4 | 1.08 | 0.93 | 1.26 | -6 / +1 / -3 |
+| DeepFrze (snow) | 0.8, 0.9/0.9/1, 0.05, 0.006; 4.0 | 1.10 | 0.94 | 1.27 | +2 / +0 / +1 | 1.06 | 0.93 | 1.22 | +2 / +1 / -1 |
+| XMP13S4 (snow) | 0.68, 0.75/0.75/1.2, 0, 0.028; 5.0 | 1.08 | 0.62 | 0.78 | -11 / -12 / +12 | 1.12 | 0.94 | 1.22 | -1 / -0 / -1 |
+| MoonPatr (lunar) | 0.65, 1/1/1.1, 0.05, 0.008; 0.0 | 1.15 | 1.60 | 2.02 | +1 / +1 / -1 | 1.05 | 0.98 | 1.35 | +2 / +0 / -0 |
+| XMP14T2 (dusk; DuskPen lighting) | 0.73, 1/0.92/0.8, 0, 0.035; 5.0 | 1.10 | 0.83 | 1.32 | +5 / -4 / +6 | 1.09 | 0.84 | 1.29 | +5 / -5 / +6 |
+| Transylv (newurban, night) | 0.6, 0.9/0.9/1, 0.05, 0.008; 2.0 | 0.97 | 0.61 | 0.93 | +24 / -4 / -6 | 1.10 | 0.89 | 1.35 | +9 / -3 / -1 |
+| XXmas (snow, night) | 0.68, 0.62/0.62/1, 0, 0.027; 0.0 | 1.52 | 0.68 | 0.93 | -7 / -5 / -0 | 1.09 | 0.96 | 1.28 | +1 / +4 / -8 |
+| XMP06T2 (temperate) | 0.6, 1/1/1, 0, 0.039; 4.0 | 0.80 | 0.68 | 0.86 | +74 / -0 / -16 | 1.06 | 0.90 | 1.29 | +7 / -2 / -0 |
+| HillBtwn (urban) | 1, 0.8/0.8/0.75, 0.05, 0.008; 0.0 | 1.16 | 0.74 | 1.08 | -5 / +0 / -4 | 1.08 | 0.95 | 1.26 | -4 / -0 / -4 |
+
+The lamp row's "after" pair was taken before the last two renderer changes of this work (lamp pools of night maps,
+added sprite light); neither acts on a day map at an object level of 1 or more.
+
+Read with these in mind:
+
+- Three offsets are the same on every map and are not map lighting. The remaster vehicle art is darker than the
+  original's (0.72-0.83 of the native luminance under the faithful look on every map measured, 0.84-0.98 under the
+  cinematic look), the redrawn construction yard is brighter (1.2-1.35; original civilian buildings sit at 1.0-1.13),
+  and the cinematic look lifts mid-tones by about 9 % in display values and cools the ground by b* 3-4 (the approved
+  cooling; on XXmas's saturated blue snow the same grade reads b* -8).
+- Before, the night class staged a map by its Ambient alone and drew it under a dim blue moon at 22:00 without the
+  engine grade: on XDeadman, XMP13S4, XMP06T2, Transylv and XXmas vehicles and infantry showed at 0.57-0.85 of the
+  native luminance with a blue cast, the ground's hue was off by up to 74 degrees and XXmas's snow was 1.52x too
+  bright. The game draws all of them with the ordinary cell formula; XDeadman's base at height 8 has object level 0.90.
+- Objects read I, not I x M: HillBtwn (Red/Green/Blue 0.8/0.8/0.75) drew vehicles at 0.74 and the yard at 1.08 while
+  its ground sat at 1.16, and MoonPatr, whose lamp types set no tint keys (M saturates at 2), drew objects at 1.6-2.0.
+  The native yard itself confirms the level: its luma per unit of I is 91.5 (XHailMary, I 1.0), 90.1 (XMP29U2, 1.0),
+  87.1 (Fight, 0.98), 84.2 (HillBtwn, 0.95; I x M would give 105), 87.3 (XMP14T2, 0.91), 84.3 (XDeadman, 0.90), 85.5
+  (XMP06T2, 0.76) and 80.6 (Transylv, 0.57), and its colour stays neutral under XDeadman's 0.68/0.68/1 tint.
+- A reduced lamp share darkens what stands near a lamp post (XMP29U2 row), and maps without a light sidecar had no
+  lamp light at all until the grade took the game's own light list (XHailMary's ground rose from 0.97 to the other
+  day maps' level).
+- The look's added sprite light (sun highlight, glass glint, mirrored sky) is scaled by the map's object light: at
+  full strength the yard read 1.46 on the two darkest maps (MoonPatr, Transylv) against 1.17-1.29 elsewhere.
+- HD street lamps (a night dressing the game does not have) keep their plain irradiance. Scaled up to their former
+  share of a moonlit ground they clipped under the day display: a Transylv base beside a lamp-lined road measured
+  ground 1.25 and a burnt-out tank.
+- Remaining outside 0.9-1.1 after the change: every yard (its art), vehicles on the dusk map and some day maps
+  (0.84-0.89, their art), and the ground of XDeadman and XMP13S4 by one or two hundredths. Authored dusk (XMP14T2)
+  was not changed and keeps its own warm low sun: ground b* +6, vehicles 0.84. The shade rows are modelled for
+  terrain only; objects on the darkest maps are drawn about one row (4 %) brighter than the game's.
+
 ## Dusk staging and unlit resource overlays
 
 The supplied same-frame DuskPen measurements use Ambient 0.73, RGB `(1, 0.92, 0.8)`, Level 0.035, median height 6,

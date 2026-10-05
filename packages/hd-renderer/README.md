@@ -200,7 +200,7 @@ the whole grade).
   drives lit windows, lamp heads and HD street lamp pools (the pools keep their plain irradiance on the graded art:
   about its ungraded brightness under the post, like one of the engine's own lamps). The map sources' own light field follows the moonlit night weight instead
   and is off at the authored staging, so no source is applied twice. Frozen same-frame pairs against the game under
-  the cinematic look (docs/remaster/research/yr-scene-lighting.md lists them): ground 1.09-1.13, vehicles 0.89-0.96
+  the cinematic look (docs/remaster/research/yr-scene-lighting.md lists them): ground 1.09-1.10, vehicles 0.89-0.96
   of the native luminance on Transylv and XXmas, against 0.97-1.52 and 0.61-0.68 under the former moonlit staging.
 
 - **Authored dusk.** A dusk profile places its warm sunset key at the map's hour (DuskPen: 18.2), with a 10-degree
