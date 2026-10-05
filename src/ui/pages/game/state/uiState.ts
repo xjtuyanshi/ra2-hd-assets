@@ -10,6 +10,8 @@ import { createStore } from '../../../shared/state/store';
 export const toolbarState = createStore<ComponentProps<typeof RuntimeToolbarView> | null>(null);
 export const controlsCollapsed = createStore(false);
 export const upscaleStatus = createStore<string | null>(null);
+/** HD bridge notice (development `?hd=1`): why a match shows the original picture; already localized, null = none. */
+export const hdStatus = createStore<string | null>(null);
 export const debugVisible = createStore(false);
 export const debugState = createStore<ComponentProps<typeof DebugPanel> | null>(null);
 export const helpVisible = createStore(false);

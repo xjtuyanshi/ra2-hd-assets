@@ -307,6 +307,16 @@ describe('VmWorkerController request-scoped errors', () => {
     await second.controller.handleMessage({ type: 'init', config: config(), requestId: 2 });
     expect(second.core.platform?.startupPage).toBeUndefined();
   });
+  it('本次会话的启动速度随 init 传到核心使用的游戏源，缺省保持目录默认', async () => {
+    const sources: GameSource[] = [];
+    const first = harness({ captureSource: (source) => sources.push(source) });
+    await first.controller.handleMessage({ type: 'init', config: { ...config(), gameSpeed: 3 }, requestId: 1 });
+    const second = harness({ captureSource: (source) => sources.push(source) });
+    await second.controller.handleMessage({ type: 'init', config: config(), requestId: 1 });
+    expect(sources.map((source) => source.gameSpeed)).toEqual([3, undefined]);
+    first.controller.dispose();
+    second.controller.dispose();
+  });
   it('原生叠加层直通：init 选择加入，开关请求带回写入结果', async () => {
     const first = harness();
     await first.controller.handleMessage({

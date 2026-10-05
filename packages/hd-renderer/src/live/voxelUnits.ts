@@ -73,50 +73,65 @@ export class VoxelUnits {
   }
 
   /**
+   * The shared geometry set of `model` for palette row `paletteKey`, built once per `cacheKey`; its redraw projection
+   * (when the look has one) is requested here and repaints every waiting instance when it arrives.
+   */
+  private partsFor(model: VoxelModel, paletteKey: string, cacheKey: string): VoxelGeometry[] {
+    let parts = this.geometries.get(cacheKey);
+    if (parts) return parts;
+    parts =
+      this.voxelLook === 'remaster'
+        ? buildSmoothVoxelGeometry(model, this.cache.paletteRgb.get(paletteKey)!, this.hd.nodes, this.smoothVoxel)
+        : buildVoxelGeometry(model, this.cache.paletteRgb.get(paletteKey)!, this.hd.nodes);
+    this.geometries.set(cacheKey, parts);
+    const projection = this.projections;
+    if (!projection) return parts;
+    const palette = this.cache.paletteRgb.get(paletteKey)!;
+    const required = projectionParts(parts);
+    if (projectVoxelMaterials(parts, palette, projection.get(model.id, required), this.hd.nodes)) return parts;
+    const waiting = new Set<VoxelUnit>();
+    const target = parts;
+    this.pending.set(target, waiting);
+    void projection.loadType(model.id, required).then((asset) => {
+      if (projectVoxelMaterials(target, palette, asset, this.hd.nodes)) {
+        const materials = new Map(target.map((part) => [part.geometry, part.material!]));
+        for (const unit of waiting) {
+          unit.root.traverse((mesh) => {
+            // Shadow twins share geometry but own their shadow material and must never be repainted.
+            if (mesh instanceof Mesh && mesh.userData.painterDepth) {
+              const material = materials.get(mesh.geometry);
+              if (material) mesh.material = material;
+            }
+          });
+          // A resting unit may receive no new pose after this callback. Preserve its active color/depth
+          // pass immediately instead of showing the new physical source until a later publication.
+          if (unit.root instanceof VoxelRoot) {
+            const { anchor, bonus, enabled } = unit.root.nativeDepth;
+            updateVoxelNativeDepth(unit, anchor, bonus, enabled !== 0);
+          }
+        }
+      }
+      waiting.clear();
+      this.pending.delete(target);
+    });
+    return parts;
+  }
+
+  /**
+   * Build the shared geometry and request its projection ahead of the first instance. True once a new instance
+   * would draw its final look at once (the projection has arrived, is absent or failed); callers that swap one model
+   * for another on the same object keep the old one on screen until then.
+   */
+  prepare(model: VoxelModel, paletteKey: string, cacheKey: string): boolean {
+    return !this.pending.has(this.partsFor(model, paletteKey, cacheKey));
+  }
+
+  /**
    * A new instance of `model` drawn with palette row `paletteKey` (already resolved with paletteFor, so house-remapped
    * when the owner is known). `cacheKey` identifies the geometry set to share, e.g. `${type}@${paletteKey}`.
    */
   build(model: VoxelModel, paletteKey: string, cacheKey: string): VoxelUnit {
-    let parts = this.geometries.get(cacheKey);
-    if (!parts) {
-      parts =
-        this.voxelLook === 'remaster'
-          ? buildSmoothVoxelGeometry(model, this.cache.paletteRgb.get(paletteKey)!, this.hd.nodes, this.smoothVoxel)
-          : buildVoxelGeometry(model, this.cache.paletteRgb.get(paletteKey)!, this.hd.nodes);
-      this.geometries.set(cacheKey, parts);
-      const projection = this.projections;
-      if (projection) {
-        const palette = this.cache.paletteRgb.get(paletteKey)!;
-        const required = projectionParts(parts);
-        if (!projectVoxelMaterials(parts, palette, projection.get(model.id, required), this.hd.nodes)) {
-          const waiting = new Set<VoxelUnit>();
-          const target = parts;
-          this.pending.set(target, waiting);
-          void projection.loadType(model.id, required).then((asset) => {
-            if (projectVoxelMaterials(target, palette, asset, this.hd.nodes)) {
-              const materials = new Map(target.map((part) => [part.geometry, part.material!]));
-              for (const unit of waiting) {
-                unit.root.traverse((mesh) => {
-                  // Shadow twins share geometry but own their shadow material and must never be repainted.
-                  if (mesh instanceof Mesh && mesh.userData.painterDepth) {
-                    const material = materials.get(mesh.geometry);
-                    if (material) mesh.material = material;
-                  }
-                });
-                // A resting unit may receive no new pose after this callback. Preserve its active color/depth
-                // pass immediately instead of showing the new physical source until a later publication.
-                if (unit.root instanceof VoxelRoot) {
-                  const { anchor, bonus, enabled } = unit.root.nativeDepth;
-                  updateVoxelNativeDepth(unit, anchor, bonus, enabled !== 0);
-                }
-              }
-            }
-            waiting.clear();
-            this.pending.delete(target);
-          });
-        }
-      }
-    }
+    const parts = this.partsFor(model, paletteKey, cacheKey);
     const unit = instantiateVoxel(parts, this.material, this.hd.nodes);
     this.pending.get(parts)?.add(unit);
     return unit;

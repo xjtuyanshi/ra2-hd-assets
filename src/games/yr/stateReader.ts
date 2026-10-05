@@ -2,6 +2,7 @@ import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { YR_STARTUP_PAGE_HASH } from './startupPage';
 import { readYrBuildingDockState, readYrBuildingRenderState, YR_BUILDING_RENDER_OFFSETS } from './buildingRenderState';
 import { readYrInfantryRenderState } from './infantryRenderState';
+import { readYrUnitGatherState, type YrUnitGatherState } from './unitGatherState';
 import { readYrUnitTilt, type YrUnitTilt } from './unitTilt';
 
 /**
@@ -237,6 +238,8 @@ export interface YrObjectState {
   nativeHidden?: boolean;
   /** Body opacity while native chrono blending is active; shadows retain their ordinary opacity. */
   translucent?: number;
+  /** Ore-gathering sparks the unit's own draw adds under its body on this frame (unitGatherState.ts). */
+  gather?: YrUnitGatherState;
   /** Owning house index in `houses`, or -1 when the owner pointer is not a known house. */
   owner: number;
   /**
@@ -783,6 +786,11 @@ function readYrStateSnapshot(
       const translucent = readChronoTranslucency(memory, object.id);
       if (translucent !== undefined) object.translucent = translucent;
       if (object.kind === 'vehicle' && readYrUnitNativeHidden(memory, object.id, contact)) object.nativeHidden = true;
+      // The sparks are part of the unit's draw: a unit the native wrapper skips draws none.
+      if (object.kind === 'vehicle' && !object.nativeHidden) {
+        const gather = readYrUnitGatherState(memory, object.id, frame, object.facingRaw);
+        if (gather) object.gather = gather;
+      }
     }
     if (object.kind === 'building') {
       const roof = readContactRoof(memory, contact);

@@ -31,6 +31,7 @@ import {
 import { createYrOverlayReader, type ReadYrOverlayOptions, type YrOverlays } from './overlayReader';
 import { createYrSidebarReader } from './sidebarReader';
 import { readYrSceneLighting } from './sceneLighting';
+import { readYrUnitGatherKey } from './unitGatherState';
 import { createYrSmudgeReader, type ReadYrSmudgeOptions, type YrSmudges } from './smudgeReader';
 import { createYrShroudReader, type ReadYrShroudOptions, type YrShroud } from './shroudReader';
 import {
@@ -305,6 +306,8 @@ function readChangeKey(
         word(m.u8(pointer + o.tethered));
         // A valid linked building need not still be registered in the techno/class vectors.
         word(Number(readYrUnitNativeHidden(m, pointer, radioContact)));
+        // The harvesting flag and the locomotor's stop decide the gather sparks before the frame counter moves.
+        word(readYrUnitGatherKey(m, pointer, m.i32(YR_STATE_GLOBALS.frame)));
       }
       if (vtable === YR_STATE_VTABLES.building) {
         const b = YR_BUILDING_RENDER_OFFSETS;
@@ -455,6 +458,7 @@ function projectObject(
     imageType,
     nativeHidden,
     translucent,
+    gather,
     owner,
     x,
     y,
@@ -486,6 +490,7 @@ function projectObject(
     ...(imageType ? { imageType } : {}),
     ...(nativeHidden !== undefined ? { nativeHidden } : {}),
     ...(translucent !== undefined ? { translucent } : {}),
+    ...(gather !== undefined ? { underlay: { ...gather } } : {}),
     owner,
     x,
     y,

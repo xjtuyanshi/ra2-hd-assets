@@ -66,6 +66,8 @@ RA2_BROWSER_ORIGIN=https://127.0.0.1:15175 pnpm run test:browser:startup-page
 
 Both RA2/YR catalogs pass `-SPEEDCONTROL` and default in-memory INI `[Options]` and `[Skirmish] GameSpeed` to **0 (fastest)** before VM creation. Imported resources, `[LAN]` / `[WonlinePref]` room speeds, and the VM clock are unchanged. Native options still adjust speed during play; restarting the VM reapplies startup defaults.
 
+`?game-speed=N` (N = 0 fastest to 6 slowest on the original scale; 3 is the normal speed, about 20 logic frames a second) replaces that default for the page's sessions: the host passes it as a session option (`gameSpeed`), the Worker and the main thread record it on the game source (`withGameSpeedOverride`), and the same in-memory overlay writes it instead of the catalog value. Any other value is ignored and the catalog default applies. `scripts/remaster/play.sh` sends `game-speed=3`.
+
 The generic shim assembles the command line without game-specific decisions. Module paths remain the original executable path; arguments do not enter `GetModuleFileNameA`. Tests cover argument boundaries, RA2/YR propagation, and INI overlays.
 
 RA2's Options speed is at `0xa40b18`, Session speed at `0xa3d2c8`, simulation-frame counter at `0xa40d2c`, and SpeedControl flag at `0xa40d84`. The main loop checks the flag at `0x53ffd7`; without it, `0x53ffe4` forces speed 2. Command-line parsing branches at `0x515429`. Verify Options speed at the stated address, not a Rules offset.

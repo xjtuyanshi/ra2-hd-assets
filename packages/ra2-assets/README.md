@@ -861,6 +861,40 @@ Any sprite key works (for example `building:YAREFN,anim:YAREFN_A,anim:YAREFNMK`,
 L5H values (gamma 0.35, floor 15 for INIT, SLAV and the deployed Slave Miner) were chosen against live frames of the
 original: saturated house-hue texels brighter than V 60 in the same frozen frame came to 0.89-1.15x the original's.
 
+## Play farm: a base cache plus prepared map batches
+
+`python/play_farm.py` makes the maps of a preparation batch (`scripts/remaster/MAP_BATCH.md`) loadable next to an
+existing cache without copying or changing either:
+
+```bash
+python3 packages/ra2-assets/python/play_farm.py build --base "$BASE_CACHE" --maps "$BATCH_OUT" --farm "$FARM" \
+  --report "$OUT/farm-build.json"
+python3 packages/ra2-assets/python/play_farm.py verify --farm "$FARM" --report "$OUT/integrity.json"
+```
+
+`build` links every top-level entry of `BASE` into `FARM` (theatre libraries, interface art, vehicle projections and
+the base's own maps stay shared) and then one link per prepared map directory. A map resolves in the farm exactly as
+in any cache: `<farm>/<map id>/manifest.json`, with the id compared without regard to case, and the manifest's
+`theater` selecting `_library/<theatre>/`. A base map with HD work of its own (2x terrain, an HD sprite atlas or a
+`materials.json`, `lights.json`, `windows.json`, `normals.json` or `sprite-frame-patches.json` sidecar) is kept; a
+base map without any is superseded by the prepared one. A kept map whose terrain composite is still scale 1 takes
+only the prepared 2x composite and water mask when both manifests describe the same cells at the same origin: its
+directory is realised in the farm through `cache_farm` and `terrainMap` is patched in the farm's manifest copy. The
+batch's `INVENTORY.json` (or `--inventory`) restricts the batch to rows with status `done` that are not
+`"active": false`. Running `build` again, also with another batch, leaves installed maps alone; the first batch to
+bring a map keeps it. `FARM` may not be inside or around `BASE` or the batch.
+
+`verify` checks every map directory of a farm without a browser: the manifest parses and is version 1; the terrain
+atlas, sprite atlas, HD sprite atlas and mask, palettes, voxel models, terrain composite, water mask and the files
+named by the optional sidecars exist, are complete PNG/JSON (a truncated PNG has no `IEND`) and have the recorded
+size; no image exceeds `--max-texture` (default 16384, the upscaler's own cap; WebGPU guarantees only 8192, the
+report lists maps above that as `aboveGuaranteedLimit`); cell arrays match the grid; tile and sprite rectangles lie
+inside their atlases; objects name existing sprites, frames and voxels; no path leaves the farm; and the map's
+theatre library has every page, HD page and palette. Documented fallbacks are warnings, not errors: a scale-1
+composite, a map without an HD sprite atlas, a library page without an HD page, map-start objects whose type the
+theatre library lacks, and a `lights.json` written for another manifest. Exit status 1 on any error or broken
+top-level link. It does not decode pixels and is not a visual check. Test: `python3 -m unittest test_play_farm`.
+
 ## Tree and vegetation redraw (Python, experimental)
 
 `python/tree_redraw.py` redraws a map's tree/bush TerrainTypes (`tree:TREE*` frame 0 and its shadow) in batches: one
@@ -1483,6 +1517,22 @@ in every frame, preserving debris over transparency or neutral smoke. This mode 
 late-debris processing. Add `--anims EXPLOLRG,TWLT070` to limit either mode to those anims (default: all anims on the
 selected pages); per-page pixel counts are printed and pages are still installed atomically through `cache_farm.install_file`.
 
+## Clean HD page of a native anim (Python)
+
+`python/effect_clean_page.py` gives an anim without a redrawn flipbook an `effects-hd.json` entry made only from its
+own indexed frames: coverage is the bilinear magnification of the opaque mask sharpened with
+`smoothstep(0.35, 0.65)`, colour the coverage-weighted mean of the opaque texels in linear light (the filter the live
+indexed-card shader applies), stored premultiplied at 2 (or 3, 4) texels per native pixel with the native frame count,
+order and canvas-centre offsets; empty frames stay null. The page `effects-hd-clean-<anim>-<n>.png` and the patched
+`effects-hd.json` are installed into a copy-on-write farm through `cache_farm`, never into the base cache; running it
+again, or packing an accepted redraw of the same anim later, replaces the entry.
+
+```sh
+python3 -B packages/ra2-assets/python/effect_clean_page.py --effects "$FARM/_library/common/effects" \
+  --farm "$FARM" --anim OREGATH
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_effect_clean_page.py'
+```
+
 ## Frozen live-pair review tools (Python)
 
 `python/live_pair_metrics.py` reads `orig-NN.png` / `hd-NN.png` captures of the whole 1152x744 guest frame from
@@ -2007,6 +2057,10 @@ match draws besides its units and buildings, so the live renderer can draw the e
   with the timing the engine derives (`frameCount` = art `End=` or the SHP's frame count, halved for `Shadow=yes`;
   `rateFrames` from `Rate=`/`Normalized=`, see `animRateFrames`), translucency, layer, flat and draw-offset flags,
   and the widths of its visible and hot pixels;
+- SHP art the executable loads by file name instead of through rules or art (`ENGINE_ANIM_ART`): `OREGATH`, the 8 x 15
+  frames of sparks YR 1.001's unit draw blits under a harvesting miner (name at `0x845904`, loaded at `0x73CED6`). It
+  is recorded under `anims` with the anim defaults and gets no garnish table row, because the engine never plays it as
+  an AnimClass;
 - projectiles with art (SHP frames, `Rotates=`, or a voxel model), VoxelAnims debris models, particle art, every
   `[OverlayTypes]` and `[SmudgeTypes]` entry, WalkRate/IdleRate of SHP vehicles and the ore storage buildings.
 

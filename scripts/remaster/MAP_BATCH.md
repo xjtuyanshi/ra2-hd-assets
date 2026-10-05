@@ -25,8 +25,10 @@ to finish independent extraction and terrain work. Those maps remain partial and
 successes. Run the default four-step command on a supported host to finish them; current outputs are reused by the
 existing planner. Directories missing their extraction manifest are re-extracted with `--force`.
 
-No AI `remat` pass, shared theatre-library generation, or installation into a live cache is performed. Copy only
-fully prepared maps into a deliberately selected isolated cache and retain separately approved libraries/effects.
+No AI `remat` pass, shared theatre-library generation, or installation into a live cache is performed. Install only
+fully prepared maps into a deliberately selected isolated cache and retain separately approved libraries/effects;
+`packages/ra2-assets/python/play_farm.py build` does that as a symlink farm over a base cache and `verify` checks the
+result headlessly (see [the asset guide](../../packages/ra2-assets/README.md#play-farm-a-base-cache-plus-prepared-map-batches)).
 File generation, code checks and build results do not establish live visual acceptance; review every theatre,
 large textures, water masks, sprite remap, seams, loading and performance in real matches separately.
 

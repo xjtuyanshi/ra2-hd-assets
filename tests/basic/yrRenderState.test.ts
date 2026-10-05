@@ -852,6 +852,38 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(unloading.objects[0]!.imageType).toBe('HORV');
   });
 
+  it('publishes the gather sparks as an underlay and follows the harvesting flag inside one logic frame', () => {
+    const memory = keyMemory();
+    const h = sources(memory);
+    const state = yrState(100);
+    state.objects[0]!.type = 'HARV';
+    h.readState.mockReturnValue(state);
+    const unit = memory.technos[0]!;
+    memory.u32(unit, V.unit);
+    const first = h.read()!;
+    expect(first.objects[0]).not.toHaveProperty('underlay');
+    expect(h.read()).toBe(first);
+    // The harvesting flag (unit +0x6D2) changes the key before the frame counter moves.
+    memory.bytes[unit + 0x6d2] = 1;
+    const gather = { art: 'OREGATH', frame: 47, x: 1000, y: 2030, z: 0 };
+    state.objects[0]!.gather = gather;
+    const gathering = h.read()!;
+    expect(gathering).not.toBe(first);
+    expect(gathering.frame).toBe(first.frame);
+    expect(gathering.objects[0]!.underlay).toEqual(gather);
+    expect(gathering.objects[0]!.underlay).not.toBe(gather);
+    expect(gathering.objects[0]).not.toHaveProperty('gather');
+    expect(gathering.objects[1]).not.toHaveProperty('underlay');
+    expect(structuredClone(gathering)).toEqual(gathering);
+    expect(h.read()).toBe(gathering);
+    memory.bytes[unit + 0x6d2] = 0;
+    delete state.objects[0]!.gather;
+    const stopped = h.read()!;
+    expect(stopped).not.toBe(gathering);
+    expect(stopped.objects[0]).not.toHaveProperty('underlay');
+    expect(gathering.objects[0]!.underlay).toEqual(gather);
+  });
+
   it('publishes body-only translucency and whole-object hiding without changing older snapshots', () => {
     const memory = keyMemory();
     const h = sources(memory);
