@@ -220,11 +220,13 @@ export interface HdAtlas {
  * One page of an HD sprite atlas as a filtered, mipmapped texture, decoded off the main thread.
  *
  * An image element (TextureLoader) is decoded lazily: the first upload decodes the whole PNG on the main thread, inside
- * the frame that first draws the page. HD pages are up to 8192 px wide and arrive one after another while a match
- * starts (every type on screen brings its page and mask), so those decodes froze the picture for seconds at a time:
- * a main-thread profile of the first seconds of a two-player match spent 42 % of its time in the renderer's image
- * upload, and four- to six-player matches drew about one frame per second for half a minute. A decoded bitmap
- * (createImageBitmap) leaves the main thread only the copy to the GPU.
+ * the frame that first draws the page. HD pages are up to 8192 x 8192 and arrive one after another while a match starts
+ * (every type on screen brings its page and mask). Measured in one session on the same two maps (a two- and a
+ * four-player skirmish start): each image-element upload of such a page held the main thread for about 0.4 s, 23 to 25
+ * of them (about 4 s) in the first minute; a bitmap decoded by createImageBitmap uploads in 0.02 to 0.09 s, 0.5 to 0.9 s
+ * in all. The picture is the same: opaque building texels differ less between the two loaders than between two matches
+ * with the old one. The start-up stutter that remains is not image upload: the same profile's other entries were
+ * voxel smoothing meshes and shader builds.
  *
  * Straight alpha, no colour conversion: the texels are the PNG's own values (the pages carry no colour profile). The
  * texture owns the bitmap until its first upload (or disposal before first use) and keeps only the dimensions
