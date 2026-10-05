@@ -204,7 +204,7 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   (`src/ra2/voxelSmoothPool.ts`, `voxelSmoothWorker.ts`); a model draws nothing until its mesh is there, exactly like a
   model whose file is still loading. Out of sight a sprite layer waits for its material page instead of being built
   twice. Decoded atlas pages are copied to the GPU in strips (`src/pageUpload.ts`) instead of 253 MiB in one call:
-  8 M pixels per frame while the view is shown. Out of sight the bridge sets the pace: behind the loading screen
+  8 M pixels per frame while the view is shown (up to twice that when a frame comes late). Out of sight the bridge sets the pace: behind the loading screen
   (the scenario has no objects yet) everything is built and uploaded as it arrives; from the first objects on, when
   the game's own picture is or is about to be on screen, one new kind of art per frame
   (`LiveView.newArtPerFrame`: each brings shaders that are built in the frame that first draws it, and a whole
@@ -233,13 +233,26 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
 was handed a list, first drew it completely, saw the first objects and the first logic frame, and was shown, and why
 (`settled` or `deadline`).
 
-Limits: the first match on a map in a browser profile has no list. The view then prepares from the match's own
-snapshots while the original picture is on screen (a few seconds), and the shader graphs it builds in that time still
-stop frames for 0.1 to 0.9 s each (measured: one of 0.83 s, seven of 0.1 to 0.25 s). The AI's colour is drawn anew
-each match, so the voxel materials of its vehicles (one per model and house palette) are built when the match starts
-even with a list. Art that first appears later in a match (a new unit type, the first explosion of a kind) still
-loads when it appears: its mesh is built off the main thread, its pages upload and its shaders build in the frame
-that first draws them.
+Measured with the same skirmish starts (test Chrome, the frame times of the first 20 seconds after the first logic
+frame): on XMP29U2 the base build had 12 to 15 frames over 100 ms, the longest 2.8 to 3.1 s; now a first match
+without any stored list shows the original picture for 2.7 s and then the complete HD view with no frame over 82 ms,
+and later matches show the HD view with the first logic frame, no frame over 52 ms. On the largest skirmish map
+(XMP20T6, 277 x 277 cells; base: 11 frames over 100 ms, the longest 2.8 s) a first match on the map shows the HD view
+after 0.9 s with four frames of 0.2 s before it, later matches after 0.0 to 0.7 s with at most one such frame.
+
+Limits:
+
+- A view's own load (`LiveView.create`: the map's terrain, masks and distance fields, partly on the presenting
+  thread) takes 2 s on a small map and 4 to 5 s on the largest; it normally ends 4 to 9 s before the match runs. If it
+  ends later (a slow disk, a busy machine), the list is not through when the match runs and the rest is prepared
+  behind the original picture.
+- A sprite layer's shaders are built in one piece, 0.1 to 0.2 s per layer: every kind of art that was not prepared
+  costs one such frame, behind the original picture at the start and in the shown view later in a match (a unit type
+  seen for the first time). Its mesh is built off the presenting thread and its pages arrive in strips.
+- Uploads wait for the GPU process. Next to other pages that load the same GPU, single strips were seen to block for
+  0.1 to 0.5 s and a first match without a list took 3 to 8 s to show the HD view.
+- The top-layer pass is remembered per browser profile, not per match: its first use ever still rebuilds the post
+  passes once.
 
 ## Object occlusion
 
