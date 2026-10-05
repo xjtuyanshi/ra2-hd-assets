@@ -690,7 +690,7 @@ class HdPageMesh {
         .add(layer.cameraRight.mul(x.div(ppu)))
         .sub(layer.cameraUp.mul(y.div(ppu)))
         .add(layer.toCamera.mul(aStyle.y));
-      const decal = aAnchor.xyz.add(vec3(x.div(60).add(y.div(30)), 0.025, y.div(30).sub(x.div(60))));
+      const decal = aAnchor.xyz.add(vec3(x.div(60).add(y.div(30)), EFFECT_DECAL_LIFT, y.div(30).sub(x.div(60))));
       return draw.greaterThan(0.5).select(decal, card);
     })();
     material.colorNode = Fn(() => {

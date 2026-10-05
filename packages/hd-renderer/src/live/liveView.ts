@@ -42,7 +42,7 @@ import {
   type EngulfFire,
   type EngulfObject,
 } from '../ra2/fireEngulf';
-import { foundationPointPush, GROUND_DEPTH } from '../ra2/cardDepth';
+import { EFFECT_DECAL_LIFT, foundationPointPush, GROUND_DEPTH } from '../ra2/cardDepth';
 import {
   addRefineryFoundation,
   harvesterRefineryBonus,
@@ -120,6 +120,11 @@ export interface LiveObject {
   nativeHidden?: boolean;
   /** Body opacity while the native draw mode is translucent; shadows keep their normal opacity. */
   translucent?: number;
+  /**
+   * One frame of effect-library art the engine draws inside this object's own picture, right before its body (the
+   * sparks at a harvesting miner's scoop): art id, absolute frame and the lepton point of the art's canvas centre.
+   */
+  underlay?: { art: string; frame: number; x: number; y: number; z: number };
   /** Bridge (H2): building construction state and the actual make SHP frame, including engine reversal. */
   buildState?: 'building' | 'selling' | 'done';
   buildupFrame?: number;
@@ -1573,11 +1578,29 @@ export class LiveView {
     this.effectDriver.volumes(this.effectArt, this.volumeInstances);
     this.volumetricBlasts.setBlasts(this.volumeInstances);
     this.effectDriver.smokeCards(this.effectArt, instances);
+    this.underlayCards(snapshot, instances);
     const effects = visibleObjectEffects(snapshot);
     this.projectiles?.update(effects?.bullets ?? [], effects?.voxelAnims ?? [], this.hidden, instances);
     if (effects) this.particleCards(effects, instances);
     // An async art revision, rather than every presentation frame, schedules the next rebuild.
     this.painterDirty = true;
+  }
+
+  /** Art the engine draws inside an object's own picture, under its body (LiveObject.underlay). */
+  private underlayCards(snapshot: LiveSnapshot, out: EffectInstance[]): void {
+    const hd = this.effectDriver.style === 'enhanced' && this.effectDriver.hdEnabled;
+    for (const object of snapshot.objects) {
+      if (!object.underlay) continue;
+      const card = objectUnderlayCard(
+        object,
+        this.effectArt!,
+        hd,
+        this.hidden,
+        this.hd.emissiveOverlay.toCamera.value,
+        this.particlePool.anchor(),
+      );
+      if (card) out.push(card);
+    }
   }
 
   /** Particles the host reports one by one (bridge): their ParticleType art. */
@@ -2726,6 +2749,64 @@ export function buildingTurretShadowOrigin(
     t = Math.max(Math.min(low, high), Math.min(Math.max(low, high), t));
   }
   return out.copy(drawnOrigin).addScaledVector(toCamera, t);
+}
+
+/**
+ * How far (world units along the view) an object's underlay sits in front of the ground under each of its pixels. The
+ * engine draws such art flat, a little in front of the ground layer and before the owner's body, so ground, overlays
+ * and shadows are under it and upright things cover it. Here the unit shadows are depth-writing planes above the
+ * ground (voxelShadow.ts: SHADOW_LIFT plus the penumbra copies, written at the nearest depth inside each pixel), so the
+ * underlay has to clear the highest of them by a screen pixel of ground slope; an ordinary effect decal
+ * (EFFECT_DECAL_LIFT) lies under those planes and the owner's own shadow cut the sparks away beside its hull. It
+ * stays under an upright body except within about two original pixel rows of the body's lowest row, where a card's
+ * depth meets the ground.
+ */
+export const UNDERLAY_DEPTH_PULL = 0.1;
+
+/**
+ * The effect card of an object's underlay, or null when there is nothing to draw (no underlay, a hidden object or
+ * point, art or frame not available yet). The engine blits such art flat (ground Z gradient, no Z write) immediately
+ * before the owner's body, so it is a ground decal here, pulled UNDERLAY_DEPTH_PULL towards the camera: the body,
+ * standing above the ground, covers it wherever the two overlap on screen, and ground, overlays and shadows stay under
+ * it. The pull is along the view (`toCamera`, the unit vector from the scene to the camera) and the decal's own lift is
+ * taken back out of the anchor, so the canvas centre stays exactly on the engine's pixel. The frame is the engine's on
+ * every logic frame; redrawn art (enhanced effects) replaces the pixels only and is held for the whole stage, never
+ * blended ahead.
+ */
+export function objectUnderlayCard(
+  object: Pick<LiveObject, 'underlay' | 'nativeHidden'>,
+  art: Pick<EffectArt, 'anim' | 'hdAnim' | 'hdPageState'>,
+  hd: boolean,
+  hidden: (x: number, y: number, z: number) => boolean,
+  toCamera: Vector3,
+  anchor = new Vector3(),
+): EffectInstance | null {
+  const under = object.underlay;
+  if (!under || object.nativeHidden || hidden(under.x, under.y, under.z)) return null;
+  const resolved = art.anim(under.art);
+  const frame = resolved?.sprite.frames[under.frame];
+  if (!resolved || !frame || frame.rect[2] <= 0) return null;
+  leptonAnchor(under.x, under.y, under.z, 0, 0, anchor);
+  anchor.y -= EFFECT_DECAL_LIFT;
+  anchor.addScaledVector(toCamera, UNDERLAY_DEPTH_PULL);
+  const card: EffectInstance = {
+    anchor,
+    frame,
+    palette: resolved.palette,
+    alpha: 1,
+    push: 0,
+    draw: 'flat',
+    pass: 'ground',
+    depth: ((under.x + under.y) * 15) / LEPTONS_PER_CELL - (under.z / LEPTONS_PER_LEVEL) * 15,
+    // Scene-lit like other original art. The engine blits it about 1.1x brighter (the owner's cell light plus the
+    // extra unit light), but the layer's glow lift turned the pale grains white in frozen pairs; the orange stays.
+    glow: false,
+  };
+  const redrawn = hd ? art.hdAnim(under.art) : null;
+  const hdFrame = redrawn?.frames[under.frame];
+  if (redrawn && hdFrame && art.hdPageState(hdFrame.page) !== null)
+    card.hd = { frame: hdFrame, next: null, scale: redrawn.scale, blend0: 0, t0: 0, stageSeconds: 1 };
+  return card;
 }
 
 /**

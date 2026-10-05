@@ -70,7 +70,11 @@ export interface EffectLibrary {
    * shadow half.
    */
   sprites: Record<string, SpriteEntry>;
-  /** Every [Animations] entry and every anim id rules or art reference, keyed by anim id. */
+  /**
+   * Every [Animations] entry and every anim id rules or art reference, keyed by anim id, plus the SHP art the
+   * executable loads by file name (node/effectsLibrary.ts ENGINE_ANIM_ART, e.g. OREGATH: the sparks under a harvesting
+   * miner), recorded with the anim defaults.
+   */
   anims: Record<string, EffectAnim>;
   /** BulletTypes with art (SHP or voxel), keyed by rules id. */
   bullets: Record<string, EffectBullet>;

@@ -81,6 +81,14 @@ export interface GameRenderPoint {
   z: number;
 }
 
+/** One frame of engine-selected art at a world point: the art's canvas centre is drawn at the point's projection. */
+export interface GameRenderObjectArt extends GameRenderPoint {
+  /** Art id in the renderer's effect art library, for example "OREGATH". */
+  art: string;
+  /** Absolute frame of that art. */
+  frame: number;
+}
+
 export interface GameRenderObject extends GameRenderPoint {
   /** Stable while the object lives, but may be reused after deletion; see `uid`. */
   id: number;
@@ -95,6 +103,12 @@ export interface GameRenderObject extends GameRenderPoint {
   nativeHidden?: boolean;
   /** Body opacity in 0..1; omitted for ordinary opaque drawing. Does not affect shadows. */
   translucent?: number;
+  /**
+   * Art the engine draws as part of this object's own picture right before its body (so the body covers it and the
+   * ground, overlays and shadows lie under it), for example the sparks at a harvesting miner's scoop. Absent on frames
+   * the engine draws none.
+   */
+  underlay?: GameRenderObjectArt;
   /** GameRenderHouse.index of the owner, or -1 when unknown. */
   owner: number;
   facingRaw: number;
