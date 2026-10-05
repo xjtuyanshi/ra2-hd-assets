@@ -155,8 +155,29 @@ export function chromeSlices(
   return result;
 }
 
+type Chrome = NonNullable<ReturnType<UiAssets['chrome']>>;
+
+/** The art of one native control state: a single image made for exactly this gadget size, else its atlas frame. */
+function controlArt(
+  chrome: Chrome | null,
+  button: { id: string; rect: Rect; frame: number },
+): { bitmap: ImageBitmap; source: Rect } | null {
+  const image = chrome?.controlImages?.find(
+    (entry) =>
+      entry.id === button.id &&
+      entry.frame === button.frame &&
+      entry.size.width === button.rect.width &&
+      entry.size.height === button.rect.height,
+  );
+  if (image)
+    return { bitmap: image.bitmap, source: { x: 0, y: 0, width: image.bitmap.width, height: image.bitmap.height } };
+  const atlas = chrome?.controls;
+  const source = atlas?.frames.find((frame) => frame.id === button.id && frame.frame === button.frame)?.rect;
+  return atlas && source ? { bitmap: atlas.bitmap, source } : null;
+}
+
 /** The chrome's slices for the live layout, from its composites (or, per anchor, its pieces at the art's own size). */
-function chromeLayout(sidebar: Sidebar, chrome: NonNullable<ReturnType<UiAssets['chrome']>>) {
+function chromeLayout(sidebar: Sidebar, chrome: Chrome) {
   const union = (anchor: 'sidebar' | 'commandBar'): Rect | undefined => {
     const composite = chrome.composites?.[anchor];
     if (composite) return composite.rect;
@@ -189,11 +210,9 @@ export function transparentRects(sidebar: Sidebar, assets: UiAssets): Rect[] {
     if (sidebar.radarActive) preserve.push(inflate(l.radar, 1));
     // New snapshots expose exact button state; never hide an unsupported/missing state with static chrome.
     if (sidebar.controls) {
-      const frameFor = (id: string, frame: number) =>
-        chrome.controls?.frames.some((f) => f.id === id && f.frame === frame);
-      for (const button of sidebar.controls) if (!frameFor(button.id, button.frame)) preserve.push(button.rect);
+      for (const button of sidebar.controls) if (!controlArt(chrome, button)) preserve.push(button.rect);
       for (const [id, r] of Object.entries(l.buttons))
-        if (r && !sidebar.controls.some((b) => b.id === id && frameFor(id, b.frame))) preserve.push(r);
+        if (r && !sidebar.controls.some((b) => b.id === id && controlArt(chrome, b))) preserve.push(r);
       if (l.commandBar && !sidebar.controls.some((button) => button.id.startsWith('command')))
         preserve.push(l.commandBar);
     }
@@ -358,6 +377,16 @@ export function drawSidebar(
     }
     // Soviet metal trim is subdued so faction artwork remains dominant.
     if (sidebar.side === 1) fill({ x: l.sidebar.x, y: l.sidebar.y, width: l.sidebar.width, height: 1 }, '#d4a548');
+    for (const overlay of chrome.overlays ?? []) {
+      const anchor = overlay.anchor === 'sidebar' ? l.sidebar : l.commandBar;
+      // Never on an anchor whose native picture stays.
+      if (!anchor || !slices[overlay.anchor].length) continue;
+      // Below the strip's top the sidebar art moves with the frame height; an overlay there fits one height only.
+      const fixed = overlay.anchor !== 'sidebar' || overlay.rect.y + overlay.rect.height <= l.strip.y - l.sidebar.y;
+      if (!fixed && sidebar.frame.height !== chrome.frame.height) continue;
+      const p = rect({ ...overlay.rect, x: anchor.x + overlay.rect.x, y: anchor.y + overlay.rect.y });
+      ctx.drawImage(overlay.bitmap, p.x, p.y, p.width, p.height);
+    }
     ctx.restore();
   } else {
     fill(l.strip, '#0d0f13');
@@ -469,12 +498,12 @@ export function drawSidebar(
     }
   }
   for (const button of sidebar.controls ?? []) {
-    const atlas = chrome?.controls;
-    const source = atlas?.frames.find((frame) => frame.id === button.id && frame.frame === button.frame)?.rect;
-    if (!atlas || !source) continue;
+    const art = controlArt(chrome, button);
+    if (!art) continue;
+    const { source } = art;
     const target = rect(button.rect);
     ctx.drawImage(
-      atlas.bitmap,
+      art.bitmap,
       source.x,
       source.y,
       source.width,

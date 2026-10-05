@@ -59,6 +59,37 @@ metal cannot bleed into the map. No reconstructed terrain, recolouring, second c
 used. Disable/dispose clears this region; backend replacement retains its setting. The default interface and
 Canvas 2D fallback do not allocate this pass.
 
+Two further optional entries hold single images at their own pixel scale (files may sit one directory below the
+manifest); each list is published whole or not at all, independently of the other:
+
+```json
+{
+  "controlImages": [
+    { "id": "options", "frame": 0, "file": "ui3/left-link-frame0@2x.png", "size": { "width": 72, "height": 22 } }
+  ],
+  "overlays": [
+    { "file": "ui3/top@2x.png", "anchor": "sidebar", "rect": { "x": 0, "y": 16, "width": 168, "height": 32 } }
+  ]
+}
+```
+
+- `controlImages`: one image per control id and native frame number, drawn whole into the live gadget rectangle.
+  `size` is the gadget size in frame pixels the image was made for; it is used only for a live gadget of exactly
+  that size (the image is a whole multiple of it) and then replaces the `controls` atlas frame of the same id and
+  frame. A state without an image or atlas frame keeps the native gadget. The id says which gadget, not which
+  glyph: the reader's `options` (`0xB04978`) is the left top button and `diplomacy` (`0xB04910`) the right one,
+  and the original draws `DIPLOBTN.SHP` in the left and `OPTBTN.SHP` in the right gadget.
+- `overlays`: art drawn over an anchor's chrome (`sidebar` or `commandBar`), `rect` in frame pixels relative to the
+  live anchor, after the anchor's own art and under the controls. Nothing is drawn on an anchor whose native picture
+  stays. A sidebar overlay must end above the cameo strip, the section that does not move with the frame height;
+  one that reaches lower is drawn only at the art's own frame height. The original draws `TOP.SHP` (168x32) at
+  sidebar y 16, under the two top buttons.
+
+The command bar is still one picture per frame width (the `commandBar` pieces): at another width the native bar
+stays. Its native layout is not two end caps around a rail: in the expanded state the left cap (`LENDCAP.SHP`) sits
+at x 48 under the toggle, command buttons follow from x 76 on `BTTNBKGD.SHP` tiles and the right cap ends the bar
+(matched in a 1728x1080 Soviet frame), so an any-width bar needs that layout, not a repeated middle tile.
+
 Private, offline reference extraction and exhaustive registered-type coverage audit:
 
 ```bash

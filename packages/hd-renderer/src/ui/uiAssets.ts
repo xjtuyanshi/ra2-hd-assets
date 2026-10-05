@@ -20,6 +20,18 @@ export interface ChromeManifest {
     scale: number;
     frames: { tab: number; state: 'normal' | 'active' | 'pressed' | 'disabled' | 'pressedActive'; rect: Rect }[];
   };
+  /**
+   * Single-image control states at their own pixel scale. `size` is the gadget size in frame pixels the image was
+   * drawn for: the image is used only for a live gadget of exactly that size and then replaces the `controls` atlas
+   * frame with the same id and native frame number. Files may sit one directory below the manifest.
+   */
+  controlImages?: { id: string; frame: number; file: string; size: { width: number; height: number } }[];
+  /**
+   * Art drawn over an anchor's chrome at its own pixel scale; rect is in frame pixels relative to the live anchor.
+   * A sidebar overlay has to end above the cameo strip (the part of the sidebar that never moves with the frame
+   * height); one that reaches lower is drawn only at the art's own frame height.
+   */
+  overlays?: { file: string; rect: Rect; anchor: 'sidebar' | 'commandBar' }[];
 }
 
 export interface CursorManifest {
@@ -38,6 +50,8 @@ export interface ChromeAssets {
   tabs?: NonNullable<ChromeManifest['tabs']> & { bitmap: ImageBitmap };
   controls?: NonNullable<ChromeManifest['controls']> & { bitmap: ImageBitmap };
   radar?: NonNullable<ChromeManifest['radar']> & { bitmap: ImageBitmap };
+  controlImages?: (Omit<NonNullable<ChromeManifest['controlImages']>[number], 'file'> & { bitmap: ImageBitmap })[];
+  overlays?: (Omit<NonNullable<ChromeManifest['overlays']>[number], 'file'> & { bitmap: ImageBitmap })[];
 }
 
 /** Place an anchor's pieces without resampling; incompatible scales retain per-piece drawing. */
@@ -216,6 +230,59 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
     });
     return valid ? { ...manifest, bitmap: image } : null;
   };
+  /** Optional single images of a chrome manifest; each list publishes whole or not at all, independently. */
+  const loadExtras = (dir: string, manifest: ChromeManifest, assets: ChromeAssets): void => {
+    const art = (file: unknown): Promise<ImageBitmap | null> =>
+      typeof file === 'string' && /^(?:[a-z0-9_-]+\/)?[a-z0-9_@-]+\.png$/i.test(file)
+        ? bitmap(`${dir}/${file}`)
+        : Promise.resolve(null);
+    const images = manifest.controlImages;
+    if (Array.isArray(images) && images.length && images.length <= 64) {
+      const keys = new Set(images.map((entry) => `${entry?.id}:${entry?.frame}`));
+      const sound = images.every(
+        (entry) =>
+          entry &&
+          typeof entry.id === 'string' &&
+          /^[a-z0-9_-]+$/i.test(entry.id) &&
+          Number.isInteger(entry.frame) &&
+          entry.frame >= 0 &&
+          entry.frame <= 4 &&
+          entry.size &&
+          [entry.size.width, entry.size.height].every((value) => Number.isInteger(value) && value > 0),
+      );
+      if (sound && keys.size === images.length) {
+        void Promise.all(images.map((entry) => art(entry.file))).then((loaded) => {
+          // An image has to be a whole multiple of the gadget it was drawn for, the same in both directions.
+          const fits = loaded.every(
+            (image, i) =>
+              image &&
+              Number.isInteger(image.width / images[i]!.size.width) &&
+              image.width * images[i]!.size.height === image.height * images[i]!.size.width,
+          );
+          if (!disposed && fits)
+            assets.controlImages = images.map(({ id, frame, size }, i) => ({ id, frame, size, bitmap: loaded[i]! }));
+        });
+      }
+    }
+    const overlays = manifest.overlays;
+    if (Array.isArray(overlays) && overlays.length && overlays.length <= 16) {
+      const sound = overlays.every(
+        (entry) =>
+          entry &&
+          (entry.anchor === 'sidebar' || entry.anchor === 'commandBar') &&
+          entry.rect &&
+          [entry.rect.x, entry.rect.y].every(Number.isFinite) &&
+          entry.rect.width > 0 &&
+          entry.rect.height > 0,
+      );
+      if (sound) {
+        void Promise.all(overlays.map((entry) => art(entry.file))).then((loaded) => {
+          if (!disposed && loaded.every(Boolean))
+            assets.overlays = overlays.map(({ rect, anchor }, i) => ({ rect, anchor, bitmap: loaded[i]! }));
+        });
+      }
+    }
+  };
   return {
     cursor(frame) {
       if (disposed) return null;
@@ -301,6 +368,7 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
               ).then((atlas) => {
                 if (!disposed && atlas) assets.radar = atlas;
               });
+              loadExtras(dir, manifest, assets);
               // Publish complete chrome first. Optional tab failures must never hide the other pieces.
               const tabs = manifest.tabs;
               if (

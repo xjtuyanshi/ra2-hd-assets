@@ -1251,3 +1251,265 @@ describe('native control and radar atlas presentation', () => {
     },
   );
 });
+
+describe('chrome extras: single control images and overlays', () => {
+  const image = (width: number, height: number) => ({ width, height }) as ImageBitmap;
+  const inside = (rects: { x: number; y: number; width: number; height: number }[], x: number, y: number) =>
+    rects.some((r) => x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height);
+  const link = image(144, 44);
+  const circle = image(144, 44);
+  const controlImages: NonNullable<ChromeAssets['controlImages']> = [
+    { id: 'options', frame: 0, size: { width: 72, height: 22 }, bitmap: link },
+    { id: 'diplomacy', frame: 0, size: { width: 72, height: 22 }, bitmap: circle },
+  ];
+  const atlasBitmap = image(256, 64);
+  const atlas = {
+    file: 'controls.png',
+    bitmap: atlasBitmap,
+    frames: [
+      { id: 'options', frame: 0, rect: { x: 0, y: 0, width: 96, height: 30 } },
+      { id: 'options', frame: 1, rect: { x: 96, y: 0, width: 96, height: 30 } },
+    ],
+  };
+
+  it('draws a single control image whole into a gadget of exactly its size, ahead of the atlas frame', () => {
+    const s = hdSidebar();
+    s.cameos = [];
+    s.controls = [
+      { id: 'options', rect: { x: 646, y: 21, width: 72, height: 22 }, frame: 0 },
+      { id: 'diplomacy', rect: { x: 718, y: 21, width: 72, height: 22 }, frame: 0 },
+    ];
+    const assets = { ...fallback, chrome: () => ({ ...chrome, controls: atlas, controlImages }) };
+    const { ctx, calls } = recording();
+    drawSidebar(ctx, s, assets, { scale: 2, time: 0 });
+    const drawn = calls.filter((c) => c.name === 'drawImage').map((c) => c.args);
+    expect(drawn.find((args) => args[0] === link)).toEqual([link, 0, 0, 144, 44, 646, 21, 72, 22]);
+    expect(drawn.find((args) => args[0] === circle)).toEqual([circle, 0, 0, 144, 44, 718, 21, 72, 22]);
+    expect(drawn.some((args) => args[0] === atlasBitmap)).toBe(false);
+  });
+
+  it('falls back to the atlas for another gadget size or state and to the native picture when neither has it', () => {
+    const s = hdSidebar();
+    s.cameos = [];
+    s.radarActive = false;
+    const assets = { ...fallback, chrome: () => ({ ...chrome, controls: atlas, controlImages }) };
+    // Another gadget size: the image was not drawn for it.
+    s.controls = [{ id: 'options', rect: { x: 646, y: 21, width: 70, height: 22 }, frame: 0 }];
+    let { ctx, calls } = recording();
+    drawSidebar(ctx, s, assets, { scale: 2, time: 0 });
+    expect(calls.find((c) => c.name === 'drawImage' && c.args[0] === atlasBitmap)?.args).toEqual([
+      atlasBitmap,
+      0,
+      0,
+      96,
+      30,
+      646,
+      21,
+      70,
+      22,
+    ]);
+    expect(calls.some((c) => c.name === 'drawImage' && c.args[0] === link)).toBe(false);
+    // A state only the atlas has.
+    s.controls = [{ id: 'options', rect: { x: 646, y: 21, width: 72, height: 22 }, frame: 1 }];
+    ({ ctx, calls } = recording());
+    drawSidebar(ctx, s, assets, { scale: 2, time: 0 });
+    expect(calls.find((c) => c.name === 'drawImage' && c.args[0] === atlasBitmap)?.args.slice(1, 5)).toEqual([
+      96, 0, 96, 30,
+    ]);
+    // A state nobody has (disabled) and a gadget with an image but no atlas at all.
+    s.controls = [
+      { id: 'options', rect: { x: 646, y: 21, width: 72, height: 22 }, frame: 2 },
+      { id: 'diplomacy', rect: { x: 718, y: 21, width: 72, height: 22 }, frame: 0 },
+    ];
+    const covered = transparentRects(s, assets);
+    expect(inside(covered, 660, 30)).toBe(false);
+    expect(inside(covered, 730, 30)).toBe(true);
+    const atlasOnly = { ...fallback, chrome: () => ({ ...chrome, controls: atlas }) };
+    expect(inside(transparentRects(s, atlasOnly), 730, 30)).toBe(false);
+  });
+
+  const top = image(336, 64);
+  const overlays: NonNullable<ChromeAssets['overlays']> = [
+    { anchor: 'sidebar', rect: { x: 0, y: 16, width: 168, height: 32 }, bitmap: top },
+  ];
+
+  it('draws an overlay over its anchor at its own scale, after the anchor art and under the controls', () => {
+    const s = hdSidebar();
+    s.cameos = [];
+    s.controls = [{ id: 'options', rect: { x: 646, y: 21, width: 72, height: 22 }, frame: 0 }];
+    const assets = { ...fallback, chrome: () => ({ ...chrome, overlays, controlImages }) };
+    const { ctx, calls } = recording();
+    drawSidebar(ctx, s, assets, { scale: 2, time: 0 });
+    const order = calls.filter((c) => c.name === 'drawImage').map((c) => c.args[0]);
+    expect(calls.find((c) => c.name === 'drawImage' && c.args[0] === top)?.args).toEqual([top, 632, 16, 168, 32]);
+    expect(order.indexOf(top)).toBeGreaterThan(order.indexOf(chrome.pieces[0]!.bitmap));
+    expect(order.indexOf(link)).toBeGreaterThan(order.indexOf(top));
+    // The overlay is HD chrome like the art under it: the native pixels there stay hidden.
+    expect(inside(transparentRects(s, assets), 640, 18)).toBe(true);
+  });
+
+  it('keeps an overlay above the strip at every frame height and one that reaches lower at the art height only', () => {
+    const low = image(336, 80);
+    const onBar = image(40, 20);
+    const art: ChromeAssets = {
+      frame: { width: 1152, height: 744 },
+      pieces: [
+        ...[0, 248, 496].map((y) => ({
+          file: `s${y}.png`,
+          anchor: 'sidebar' as const,
+          rect: { x: 0, y, width: 168, height: 248 },
+          bitmap: image(504, 744),
+        })),
+        { file: 'bar.png', anchor: 'commandBar', rect: { x: 0, y: 0, width: 984, height: 32 }, bitmap: image(984, 32) },
+      ],
+      composites: { sidebar: { rect: { x: 0, y: 0, width: 168, height: 744 }, bitmap: image(504, 2232) } },
+      overlays: [
+        ...overlays,
+        { anchor: 'sidebar', rect: { x: 0, y: 500, width: 168, height: 40 }, bitmap: low },
+        { anchor: 'commandBar', rect: { x: 4, y: 2, width: 20, height: 10 }, bitmap: onBar },
+      ],
+    };
+    const at = (width: number, height: number) => {
+      const s = hdSidebar();
+      s.cameos = [];
+      s.radarActive = false;
+      s.frame = { width, height };
+      const x = width - 168;
+      const rows = Math.floor((height - 227 - 25) / 50);
+      Object.assign(s.layout, {
+        sidebar: { x, y: 0, width: 168, height },
+        commandBar: { x: 0, y: height - 32, width: x, height: 32 },
+        strip: { x: x + 22, y: 227, width: 124, height: rows * 50 },
+        stripReserve: 25,
+        cameoPitch: { x: 64, y: 50 },
+        cameoOrigin: { x: x + 22, y: 228 },
+      });
+      const { ctx, calls } = recording();
+      drawSidebar(ctx, s, { ...fallback, chrome: () => art }, { scale: 2, time: 0 });
+      return calls.filter((c) => c.name === 'drawImage').map((c) => c.args);
+    };
+    const same = at(1152, 744);
+    expect(same.find((args) => args[0] === top)).toEqual([top, 984, 16, 168, 32]);
+    expect(same.find((args) => args[0] === low)).toEqual([low, 984, 500, 168, 40]);
+    expect(same.find((args) => args[0] === onBar)).toEqual([onBar, 4, 714, 20, 10]);
+    // A taller, wider frame: the sidebar is cut below the strip's top and the bar art does not fit, so the
+    // native bar stays and nothing is drawn on it.
+    const taller = at(1728, 1080);
+    expect(taller.find((args) => args[0] === top)).toEqual([top, 1560, 16, 168, 32]);
+    expect(taller.some((args) => args[0] === low)).toBe(false);
+    expect(taller.some((args) => args[0] === onBar)).toBe(false);
+  });
+
+  it('draws no overlay on an anchor whose native picture stays', () => {
+    const s = hdSidebar();
+    s.cameos = [];
+    // Another sidebar width: no sidebar slices, so the native sidebar and its top stay.
+    s.layout.sidebar = { x: 640, y: 0, width: 160, height: 600 };
+    const { ctx, calls } = recording();
+    drawSidebar(ctx, s, { ...fallback, chrome: () => ({ ...chrome, overlays }) }, { scale: 2, time: 0 });
+    expect(calls.some((c) => c.name === 'drawImage' && c.args[0] === top)).toBe(false);
+  });
+
+  const manifest = (extra: Record<string, unknown>) => ({
+    frame: chrome.frame,
+    pieces: [{ ...chrome.pieces[0], bitmap: undefined }],
+    ...extra,
+  });
+  const serve = (body: unknown, sizes: Record<string, [number, number]>, missing: string[] = []) => {
+    const closes: ReturnType<typeof vi.fn>[] = [];
+    const fetched: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (path: string) => {
+        fetched.push(path);
+        return {
+          ok: !missing.some((name) => path.endsWith(name)),
+          json: async () => body,
+          blob: async () => new Blob([path]),
+        };
+      }),
+    );
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async (blob: Blob) => {
+        const path = await blob.text();
+        const [width, height] = Object.entries(sizes).find(([name]) => path.endsWith(name))?.[1] ?? [8, 8];
+        const close = vi.fn();
+        closes.push(close);
+        return { width, height, close } as unknown as ImageBitmap;
+      }),
+    );
+    return { closes, fetched };
+  };
+  const extras = {
+    controlImages: [
+      { id: 'options', frame: 0, file: 'ui3/left-link-frame0@2x.png', size: { width: 72, height: 22 } },
+      { id: 'options', frame: 1, file: 'ui3/left-link-frame1@2x.png', size: { width: 72, height: 22 } },
+    ],
+    overlays: [{ file: 'ui3/top@2x.png', anchor: 'sidebar', rect: { x: 0, y: 16, width: 168, height: 32 } }],
+  };
+  const sizes: Record<string, [number, number]> = {
+    'left-link-frame0@2x.png': [144, 44],
+    'left-link-frame1@2x.png': [144, 44],
+    'top@2x.png': [336, 64],
+  };
+
+  it('loads both optional lists from one directory below the manifest and closes them on disposal', async () => {
+    const { closes, fetched } = serve(manifest(extras), sizes);
+    const assets = createUiAssets();
+    assets.chrome(1);
+    await settle();
+    const loaded = assets.chrome(1)!;
+    expect(fetched).toContain('/hd-cache/_ui/chrome/1/ui3/top@2x.png');
+    expect(loaded.controlImages?.map(({ id, frame, size, bitmap }) => [id, frame, size.width, bitmap.width])).toEqual([
+      ['options', 0, 72, 144],
+      ['options', 1, 72, 144],
+    ]);
+    expect(loaded.overlays?.map(({ anchor, rect, bitmap }) => [anchor, rect.y, rect.height, bitmap.height])).toEqual([
+      ['sidebar', 16, 32, 64],
+    ]);
+    assets.dispose();
+    expect(closes).toHaveLength(4);
+    for (const close of closes) expect(close).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['a missing control image', {}, ['left-link-frame1@2x.png'], 'controlImages'],
+    ['a control image of another shape', { 'left-link-frame0@2x.png': [144, 40] }, [], 'controlImages'],
+    ['a control image that is not a whole multiple', { 'left-link-frame0@2x.png': [108, 33] }, [], 'controlImages'],
+    ['a missing overlay', {}, ['top@2x.png'], 'overlays'],
+  ] as const)('withholds only the list with %s', async (_name, resized, missing, withheld) => {
+    serve(manifest(extras), { ...sizes, ...(resized as Record<string, [number, number]>) }, [...missing]);
+    const assets = createUiAssets();
+    assets.chrome(1);
+    await settle();
+    const loaded = assets.chrome(1)!;
+    for (const list of ['controlImages', 'overlays'] as const) expect(!!loaded[list], list).toBe(list !== withheld);
+    assets.dispose();
+  });
+
+  it.each([
+    ['a path that leaves the chrome directory', { overlays: [{ ...extras.overlays[0], file: '../1/top.png' }] }],
+    ['a nested path', { overlays: [{ ...extras.overlays[0], file: 'a/b/top.png' }] }],
+    ['an unknown anchor', { overlays: [{ ...extras.overlays[0], anchor: 'radar' }] }],
+    [
+      'an empty overlay rectangle',
+      { overlays: [{ ...extras.overlays[0], rect: { x: 0, y: 0, width: 0, height: 32 } }] },
+    ],
+    ['a duplicate control state', { controlImages: [extras.controlImages[0], extras.controlImages[0]] }],
+    ['a native frame number out of range', { controlImages: [{ ...extras.controlImages[0], frame: 5 }] }],
+    [
+      'a fractional gadget size',
+      { controlImages: [{ ...extras.controlImages[0], size: { width: 72.5, height: 22 } }] },
+    ],
+  ])('ignores %s and still publishes the chrome', async (_name, extra) => {
+    serve(manifest(extra), sizes);
+    const assets = createUiAssets();
+    assets.chrome(1);
+    await settle();
+    const loaded = assets.chrome(1)!;
+    expect(loaded.pieces).toHaveLength(1);
+    expect([loaded.controlImages, loaded.overlays]).toEqual([undefined, undefined]);
+    assets.dispose();
+  });
+});
