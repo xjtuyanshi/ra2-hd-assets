@@ -15,7 +15,13 @@ import type { HdWorld } from '../ra2/world';
 import { NOT_CAPTURED_CODE } from '../objectDepth';
 import { LEVEL_HEIGHT } from '../world';
 import { smoothVoxelOptions, type SmoothVoxelOptions } from '../ra2/voxelSmooth';
-import { buildSmoothVoxelGeometry } from '../ra2/voxelSmoothGeometry';
+import {
+  buildSmoothVoxelGeometry,
+  ensureSmoothVoxelGeometry,
+  hasSmoothVoxelGeometry,
+  prepareSmoothVoxelGeometry,
+} from '../ra2/voxelSmoothGeometry';
+import { createSmoothVoxelPool, type SmoothSectionBuilder } from '../ra2/voxelSmoothPool';
 import { projectionParts, voxelProjectionLibrary, type VoxelProjectionLibrary } from '../ra2/voxelProjection';
 import { setShadowContact } from '../ra2/voxelShadow';
 
@@ -23,6 +29,11 @@ export interface VoxelUnitsOptions {
   voxelLook?: 'engine' | 'remaster';
   smoothVoxel?: Partial<SmoothVoxelOptions>;
   voxelProjection?: string;
+  /**
+   * Where the remaster look's smooth meshes are built. Default: a pool of Workers when the host has Workers, else
+   * (and with null) on the calling thread at the first instance of a model.
+   */
+  smoothBuilder?: (SmoothSectionBuilder & { dispose?(): void }) | null;
 }
 
 const LEPTONS_PER_CELL = 256;
@@ -55,6 +66,13 @@ export class VoxelUnits {
   private readonly projections?: VoxelProjectionLibrary;
   /** Instances waiting for one asynchronous type load; cleared once, never visited by pose()/the frame loop. */
   private readonly pending = new Map<VoxelGeometry[], Set<VoxelUnit>>();
+  /** Builds the remaster look's meshes off this thread; null: built in place by the first instance. */
+  private readonly smoothBuilder: (SmoothSectionBuilder & { dispose?(): void }) | null;
+  /** Models whose mesh is being built by `smoothBuilder`. */
+  private readonly meshing = new Set<VoxelModel>();
+  private disposed = false;
+  /** Changes when a mesh or a redraw projection asked for earlier has arrived: what waited for it can draw now. */
+  revision = 0;
 
   constructor(
     readonly hd: HdRenderer,
@@ -69,6 +87,43 @@ export class VoxelUnits {
     this.projections = projectionBase ? voxelProjectionLibrary(projectionBase, hd.nodes) : world.projections;
     if (this.voxelLook === 'remaster') hd.settings.voxelLook = 'remaster';
     this.material = createVoxelMaterial(hd.nodes);
+    this.smoothBuilder =
+      this.voxelLook !== 'remaster'
+        ? null
+        : options.smoothBuilder !== undefined
+          ? options.smoothBuilder
+          : createSmoothVoxelPool();
+  }
+
+  /** Meshes being built and redraw projections being fetched: art that was asked for and is not on screen yet. */
+  get loading(): number {
+    return this.meshing.size + this.pending.size;
+  }
+
+  /**
+   * Whether build() would return without building a mesh on this thread. The remaster look's smooth mesh costs 0.1
+   * to 1 s of CPU per model (measured: 3 s for the vehicles of one skirmish start, the longest freeze of a match's
+   * first seconds), so it is built by Workers: the first call for a model starts that and answers false; `revision`
+   * changes when the mesh is there. Callers draw the model from then on and nothing (or what they drew before) until
+   * then. Without Workers the mesh is built by the first instance as before, and this is always true.
+   */
+  geometryReady(model: VoxelModel): boolean {
+    const builder = this.smoothBuilder;
+    if (!builder || this.voxelLook !== 'remaster' || hasSmoothVoxelGeometry(model, this.smoothVoxel)) return true;
+    if (this.meshing.has(model)) return false;
+    this.meshing.add(model);
+    prepareSmoothVoxelGeometry(model, this.smoothVoxel, builder)
+      .catch((error) => {
+        if (this.disposed) return;
+        // The Worker could not build it: build in place once rather than never drawing the model.
+        console.warn(`[HD] smooth voxel mesh of ${model.id} built on the main thread`, error);
+        ensureSmoothVoxelGeometry(model, this.smoothVoxel);
+      })
+      .finally(() => {
+        this.meshing.delete(model);
+        this.revision++;
+      });
+    return false;
   }
 
   /**
@@ -112,6 +167,7 @@ export class VoxelUnits {
       }
       waiting.clear();
       this.pending.delete(target);
+      this.revision++;
     });
     return parts;
   }
@@ -122,6 +178,7 @@ export class VoxelUnits {
    * for another on the same object keep the old one on screen until then.
    */
   prepare(model: VoxelModel, paletteKey: string, cacheKey: string): boolean {
+    if (!this.geometryReady(model)) return false;
     return !this.pending.has(this.partsFor(model, paletteKey, cacheKey));
   }
 
@@ -183,6 +240,13 @@ export class VoxelUnits {
 
   captureRadius(unit: VoxelUnit): number {
     return unit.root instanceof VoxelRoot ? unit.root.captureRadius : 0;
+  }
+
+  /** Stop the mesh Workers; the view that owns this calls it once, after its last unit is gone. */
+  disposeAll(): void {
+    this.disposed = true;
+    this.smoothBuilder?.dispose?.();
+    this.meshing.clear();
   }
 
   /** Take a unit out of the scene (geometry stays cached for the next instance of its type). */

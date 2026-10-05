@@ -51,6 +51,8 @@ function visualView() {
       ]),
     },
     voxelUnits: {
+      // Meshes are there (built off the main thread in a browser, see voxelSmoothPool.test.ts).
+      geometryReady: vi.fn((_model: VoxelModel) => true),
       // False while the model's redraw projection is still loading: an instance built now would change look later.
       prepare: vi.fn((_model: VoxelModel, _palette: string, _key: string) => true),
       build: vi.fn((_model: VoxelModel, _palette: string, _key: string) => ({ root: new Group() })),

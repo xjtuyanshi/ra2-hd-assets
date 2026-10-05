@@ -100,6 +100,14 @@ export class LiveLibrary {
     return new LiveLibrary(root, library, windows, materials, cache, depthTemplate);
   }
 
+  /** Pages, masks and voxel models that were asked for and are still being fetched or decoded. */
+  get loading(): number {
+    let count = 0;
+    for (const entries of [this.pages, this.hdPages, this.windowPages, this.materialPages, this.voxels])
+      for (const entry of entries.values()) if (entry === 'loading') count++;
+    return count;
+  }
+
   /** Whether a compatible material page exists and has not failed; this never requests the PNG. */
   hasMaterialsPage(index: number): boolean {
     return (

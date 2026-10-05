@@ -144,6 +144,9 @@ function presentation() {
     effectsDirty: false,
     pose: { x: 0, y: 0, z: 0, facing: 0 },
     voxelUnits: {
+      revision: 0,
+      loading: 0,
+      geometryReady: () => true,
       pose: VoxelUnits.prototype.pose,
       setPainterBias: VoxelUnits.prototype.setPainterBias,
       setNativeDepth: VoxelUnits.prototype.setNativeDepth,

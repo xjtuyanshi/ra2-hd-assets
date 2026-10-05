@@ -2,7 +2,8 @@ import { BufferAttribute, BufferGeometry } from 'three/webgpu';
 import type { VoxelModel, VoxelSection } from '../../../ra2-assets/src/manifest';
 import type { AtmosphereNodes } from '../atmosphere';
 import type { VoxelGeometry } from './voxels';
-import { buildSmoothSection, smoothVoxelOptions, type SmoothVoxelOptions } from './voxelSmooth';
+import { buildSmoothSection, smoothVoxelOptions, type SmoothMeshData, type SmoothVoxelOptions } from './voxelSmooth';
+import type { SmoothSectionBuilder } from './voxelSmoothPool';
 import { voxelPbrMaterialFor } from './voxelPbr';
 
 /** The only GPU-facing wrapper: the core's arrays can also arrive from a Worker or an offline build. */
@@ -10,7 +11,11 @@ export function buildSmoothPartGeometry(
   sections: readonly VoxelSection[],
   options: SmoothVoxelOptions,
 ): BufferGeometry {
-  const meshes = sections.map((section) => buildSmoothSection(section, options));
+  return smoothPartGeometry(sections.map((section) => buildSmoothSection(section, options)));
+}
+
+/** One part's geometry from the meshes of its sections, in section order (wherever they were built). */
+export function smoothPartGeometry(meshes: readonly SmoothMeshData[]): BufferGeometry {
   const vertices = meshes.reduce((n, m) => n + m.pindex.length, 0);
   const indexCount = meshes.reduce((n, m) => n + m.indices.length, 0);
   const geometry = new BufferGeometry();
@@ -54,13 +59,60 @@ export function buildSmoothPartGeometry(
 
 /** Like the engine path, geometry lifetime follows the model, while material/texture lifetime follows the world. */
 const shared = new WeakMap<VoxelModel, Map<string, { role: VoxelGeometry['role']; geometry: BufferGeometry }[]>>();
-export function buildSmoothVoxelGeometry(
+/** Builds running off the calling thread, per model and option set (see prepareSmoothVoxelGeometry). */
+const building = new WeakMap<VoxelModel, Map<string, Promise<void>>>();
+
+/** Whether buildSmoothVoxelGeometry would return this model's shared geometry without building anything. */
+export function hasSmoothVoxelGeometry(model: VoxelModel, options: Partial<SmoothVoxelOptions> = {}): boolean {
+  return !!shared.get(model)?.has(JSON.stringify(smoothVoxelOptions(options)));
+}
+
+/**
+ * Build the model's shared geometry with `builder` (a Worker pool) instead of on the calling thread; afterwards
+ * buildSmoothVoxelGeometry returns at once. The arrays are the ones the in-place build produces: the same function
+ * runs on the same sections. Concurrent calls share one build. If a section cannot be built by the builder (the
+ * Worker failed or was closed), the promise rejects and nothing is cached: the caller decides whether to build in
+ * place.
+ */
+export function prepareSmoothVoxelGeometry(
   model: VoxelModel,
-  palette: Uint8Array | null,
-  nodes?: AtmosphereNodes,
-  options: Partial<SmoothVoxelOptions> = {},
-): VoxelGeometry[] {
+  options: Partial<SmoothVoxelOptions>,
+  builder: SmoothSectionBuilder,
+): Promise<void> {
   const smooth = smoothVoxelOptions(options);
+  const key = JSON.stringify(smooth);
+  if (shared.get(model)?.has(key)) return Promise.resolve();
+  let pending = building.get(model);
+  if (!pending) building.set(model, (pending = new Map()));
+  let build = pending.get(key);
+  if (!build) {
+    build = Promise.all(
+      model.parts.map(async (part) => ({
+        role: part.role,
+        meshes: await Promise.all(part.sections.map((section) => builder.build(section, smooth))),
+      })),
+    )
+      .then((parts) => {
+        let variants = shared.get(model);
+        if (!variants) shared.set(model, (variants = new Map()));
+        // An in-place build may have finished first; keep the geometry instances already handed out.
+        if (!variants.has(key))
+          variants.set(
+            key,
+            parts.map((part) => ({ role: part.role, geometry: smoothPartGeometry(part.meshes) })),
+          );
+      })
+      .finally(() => pending!.delete(key));
+    pending.set(key, build);
+  }
+  return build;
+}
+
+/** The model's shared part geometries for one option set, built here when they do not exist yet. */
+function smoothParts(
+  model: VoxelModel,
+  smooth: Readonly<SmoothVoxelOptions>,
+): { role: VoxelGeometry['role']; geometry: BufferGeometry }[] {
   const key = JSON.stringify(smooth);
   let variants = shared.get(model);
   if (!variants) {
@@ -72,6 +124,21 @@ export function buildSmoothVoxelGeometry(
     parts = model.parts.map((part) => ({ role: part.role, geometry: buildSmoothPartGeometry(part.sections, smooth) }));
     variants.set(key, parts);
   }
+  return parts;
+}
+
+/** Build the model's shared geometry on the calling thread when it is missing (no material is created). */
+export function ensureSmoothVoxelGeometry(model: VoxelModel, options: Partial<SmoothVoxelOptions> = {}): void {
+  smoothParts(model, smoothVoxelOptions(options));
+}
+
+export function buildSmoothVoxelGeometry(
+  model: VoxelModel,
+  palette: Uint8Array | null,
+  nodes?: AtmosphereNodes,
+  options: Partial<SmoothVoxelOptions> = {},
+): VoxelGeometry[] {
+  const parts = smoothParts(model, smoothVoxelOptions(options));
   const material = voxelPbrMaterialFor(palette, nodes);
   return parts.map((part) => ({ ...part, turretOffset: (model.turretOffset ?? 0) / 256, material }));
 }

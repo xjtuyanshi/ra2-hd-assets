@@ -54,6 +54,8 @@ function presentation(interpolating: boolean) {
   const view = Object.assign(Object.create(LiveView.prototype) as object, {
     volumetricBlasts,
     buildingLightGate: new BuildingLightGate(),
+    voxelUnits: { revision: 0, loading: 0 },
+    visuals: new Map(),
     current: { snapshot: { frame: 2, objects: [] }, at: 10 },
     previous: { snapshot: { frame: 1, objects: [] }, at: 0 },
     lastRender: 10,

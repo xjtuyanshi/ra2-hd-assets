@@ -210,6 +210,25 @@ export interface LiveSnapshot {
   cells?: LiveCells | null;
 }
 
+/**
+ * One kind of object as LiveView.warm takes it: what selects art (rules type, engine image, house colours), nothing
+ * about where it stands. A host keeps the list of one match (LiveView.warmTypes) to prepare the next one.
+ */
+export interface LiveWarmType {
+  kind: LiveKind;
+  type: string;
+  imageType?: string;
+  /** The owner's colour scheme index (LiveHouse.colorIndex), -1 when unknown. */
+  colorIndex: number;
+  /** Owned by a civilian house (map dressing), not by a player. */
+  civilian?: boolean;
+}
+
+/** Logic frame of the snapshot warm() draws: later than any match, so the first real snapshot starts a new timeline. */
+const WARM_FRAME = Number.MAX_SAFE_INTEGER;
+/** UIDs of warm objects: outside the range a game hands out, one per listed type. */
+const WARM_UID_BASE = 0x7f00_0000;
+
 /** Attached presentation follows its owner's draw eligibility; independent explosions/projectiles remain native. */
 function visibleObjectEffects(snapshot: LiveSnapshot): LiveEffects | null | undefined {
   const effects = snapshot.effects;
@@ -536,6 +555,16 @@ const TURRET_DEPTH = 0.45;
 
 /** Live sprite instances (buildings: body, bib, shadow, anim layers). */
 const LIVE_SPRITE_CAPACITY = 4096;
+
+/**
+ * Instance capacity of a cell layer (overlays, smudges) that holds `count` sprites now. A layer cannot grow: its
+ * instance buffers are part of its shader graph, so a fuller one is a new layer whose materials are built again
+ * (measured: about 50 ms of shader building per layer, a frame of 100 ms when two ore pages grew by two cells in a
+ * match's first second). Room for twice the current count makes that rare: ore that spreads, craters that add up.
+ */
+export function cellLayerCapacity(count: number, current = 0): number {
+  return Math.max(64, current, 2 ** Math.ceil(Math.log2(Math.max(1, count) * 2)));
+}
 /** Legacy fallback only; native buildingFrame includes civilian, occupancy and gate policies. */
 const CONDITION_YELLOW = 0.5;
 
@@ -603,6 +632,16 @@ export function snapToPixelGrid(value: number, pixelsPerUnit: number): number {
 export class LiveView {
   private previous: Timed | null = null;
   private current: Timed | null = null;
+  /** The current snapshot is warm()'s own list, not a match (see warm). */
+  private warming = false;
+  /** Presented frames in a row that drew everything their snapshot asked for (see `settledFrames`). */
+  private settled = 0;
+  /**
+   * True while the host keeps this view out of sight (the original picture is on screen, or the game still loads).
+   * Out of sight nothing has to be drawn early, so art that arrives in steps (a page, then its material page) is
+   * waited for instead of building the same sprite layer and its shaders twice.
+   */
+  outOfSight = false;
   private readonly visuals = new Map<number, Visual>();
   private buildingVisualHistory?: BuildingVisualHistory;
   /** Building appearance by match-unique UID; tolerate brief omissions without retaining every dead object. */
@@ -977,6 +1016,19 @@ export class LiveView {
 
   /** A logic frame is not a publication revision: AI and draw passes can still change it between polls. */
   push(snapshot: LiveSnapshot, at = performance.now()): void {
+    if (this.warming && snapshot.frame !== WARM_FRAME) {
+      // The first match snapshot after warm(): the warm list is no earlier state of this match, so nothing is
+      // interpolated from it and no building of the match counts as having appeared after it.
+      this.warming = false;
+      this.current = this.previous = null;
+      this.objectsFor = this.effectsFor = null;
+      this.appearances.clear();
+      this.buildingVisualHistory?.clear();
+      this.firstFrame = null;
+      this.firstMissingCellsAt = undefined;
+      this.publishedCells = this.warnedCells = false;
+      this.settled = 0;
+    }
     const current = this.current;
     const hadEffects = !!current?.snapshot.effects;
     if (current?.snapshot === snapshot) return;
@@ -1221,7 +1273,8 @@ export class LiveView {
         ),
       );
       this.applyCamera(previous?.snapshot.view ?? null, current.snapshot.view, alpha);
-      const libraryRevision = this.library?.revision ?? 0;
+      // Sprite pages, voxel models, and the meshes and redraw projections built from them, arrive asynchronously.
+      const libraryRevision = (this.library?.revision ?? 0) + this.voxelUnits.revision;
       const artRevision = this.effectArt?.revision ?? 0;
       const windows = this.hd.windowsWanted();
       const materials = this.hd.materialsWanted();
@@ -1285,6 +1338,128 @@ export class LiveView {
       this.volumetricBlasts.toCamera.value,
     );
     this.hd.frame(dt);
+    // Loads settle between frames, never inside one: what is still on its way now was missing from this frame.
+    this.settled = current && this.loadingArt() === 0 ? this.settled + 1 : 0;
+  }
+
+  /**
+   * How many frames in a row this view has drawn its snapshot completely: every sprite page, voxel mesh, redraw
+   * projection and effect page the frame asked for was there, so no object was skipped and no art is about to change.
+   * The first such frame also built the shaders and pipelines of whatever was new in it, so from the second one on a
+   * frame costs what a frame costs. 0 while art is on its way (and before the first snapshot). A host that keeps the
+   * original picture on screen while the view prepares waits for a few of these before it shows the view.
+   */
+  get settledFrames(): number {
+    return this.settled;
+  }
+
+  /**
+   * Art that was asked for and is not on screen yet: files being fetched or decoded, voxel meshes being built,
+   * objects that draw nothing until their model arrives. A model that failed to load is not counted: it will never
+   * arrive, and the object is reported by diagnostics() instead.
+   */
+  loadingArt(): number {
+    let count = (this.library?.loading ?? 0) + (this.effectArt?.loading ?? 0) + this.voxelUnits.loading;
+    for (const visual of this.visuals.values()) {
+      if (visual.turretState === 'loading') count++;
+      if (visual.mode !== 'placeholder' || !visual.pending) continue;
+      const voxel = visual.libraryType?.voxel;
+      if (this.cache.voxels.has(visual.type) || (voxel && !this.library?.voxelFailed(voxel))) count++;
+    }
+    return count;
+  }
+
+  /** The map's theater: art libraries, and so the lists warm() takes, belong to one. */
+  get theater(): string {
+    return this.cache.manifest.theater;
+  }
+
+  /**
+   * The kinds of object in the current match snapshot, each once: the list to hand to warm() before the next match
+   * with the same players. Empty before the first match snapshot.
+   */
+  warmTypes(): LiveWarmType[] {
+    const snapshot = this.current?.snapshot;
+    if (!snapshot || this.warming) return [];
+    const types = new Map<string, LiveWarmType>();
+    for (const object of snapshot.objects) {
+      const colorIndex = this.houseColour.get(object.owner) ?? -1;
+      const civilian = this.civilian.has(object.owner);
+      const key = `${object.kind}:${object.type}:${object.imageType ?? ''}:${colorIndex}:${civilian}`;
+      if (types.has(key)) continue;
+      types.set(key, {
+        kind: object.kind,
+        type: object.type,
+        ...(object.imageType ? { imageType: object.imageType } : {}),
+        colorIndex,
+        ...(civilian ? { civilian: true } : {}),
+      });
+    }
+    return [...types.values()];
+  }
+
+  /**
+   * Prepare the art of `types` before any of them is in the match: the game creates the players' starting units
+   * only as its loading screen ends, and a view that first hears of them then needs seconds to fetch their pages,
+   * build their meshes and compile their shaders. One object of each listed kind is drawn at the middle of the map,
+   * through the same code as a match snapshot, so exactly what a match would load is loaded and nothing else. The
+   * host keeps the view out of sight meanwhile (`outOfSight`) and renders frames until `settledFrames` counts.
+   * The first match snapshot replaces the list and starts its own timeline; nothing of it is ever shown. Ignored once
+   * a match snapshot with objects is in.
+   */
+  warm(types: readonly LiveWarmType[]): void {
+    if (!types.length || (this.current && !this.warming && this.current.snapshot.objects.length)) return;
+    const { width, height } = this.cache.manifest.grid;
+    // The existing cell nearest the middle of the grid: objects there are inside the frustum, so they are drawn.
+    let cell = -1;
+    let nearest = Infinity;
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        if (!this.cache.exists[y * width + x]) continue;
+        const distance = (x - width / 2) ** 2 + (y - height / 2) ** 2;
+        if (distance < nearest) {
+          nearest = distance;
+          cell = y * width + x;
+        }
+      }
+    if (cell < 0) return;
+    const cx = cell % width;
+    const cy = Math.floor(cell / width);
+    const level = this.cache.height[cell] ?? 0;
+    // One house per colour scheme and kind of owner, flagged as the match's houses are inferred to be: civilian art
+    // is drawn differently (see libraryBuildingSprites), and a list is of no use if it prepares the other variant.
+    const houseKey = (type: LiveWarmType) => `${type.colorIndex}:${type.civilian ? 1 : 0}`;
+    const owners = [...new Set(types.filter((type) => type.colorIndex >= 0).map(houseKey))];
+    const objects: LiveObject[] = types.map((type, index) => ({
+      id: index + 1,
+      uid: WARM_UID_BASE + index,
+      kind: type.kind,
+      type: type.type,
+      ...(type.imageType ? { imageType: type.imageType } : {}),
+      owner: type.colorIndex < 0 ? -1 : owners.indexOf(houseKey(type)),
+      x: (cx + 0.5) * LEPTONS_PER_CELL,
+      y: (cy + 0.5) * LEPTONS_PER_CELL,
+      z: level * LEPTONS_PER_LEVEL,
+      facingRaw: 0,
+      health: 1,
+      isSelected: false,
+    }));
+    this.warming = true;
+    this.push({
+      frame: WARM_FRAME,
+      // applyCamera's inverse: the view whose centre is the chosen cell (at its own height on screen).
+      view: {
+        x: (cx - cy) * 30 - this.viewWidth / 2,
+        y: (cx + cy) * 15 - level * 15 - this.viewHeight / 2,
+      },
+      houses: owners.map((key, index) => ({
+        index,
+        colorIndex: Number(key.split(':')[0]),
+        civilian: key.endsWith(':1'),
+      })),
+      localHouse: -1,
+      objects,
+    });
   }
 
   /**
@@ -1433,6 +1608,7 @@ export class LiveView {
     for (const { layer } of this.pageLayers.values()) this.disposeOverlayLayer(layer);
     this.pageLayers.clear();
     for (const visual of this.visuals.values()) this.removeVisual(visual);
+    this.voxelUnits.disposeAll();
     this.volumetricBlasts.dispose();
     this.effectSprites?.setInstances([], Infinity);
     this.effectSprites?.topRoot.removeFromParent();
@@ -1935,6 +2111,8 @@ export class LiveView {
     if (wantWindows && !windows) return existing?.layer ?? null;
     // On first use, draw the available art while materials load. Later arrivals replace the mesh just once.
     if (existing && wantMaterials && !materials) return existing.layer;
+    // Out of sight there is no first use to serve: wait for the material page and build the layer once.
+    if (!existing && wantMaterials && !materials && this.outOfSight) return null;
     if (existing) {
       const mesh = existing.layer.mesh;
       this.root.remove(mesh);
@@ -2271,8 +2449,10 @@ export class LiveView {
     const spec = visual.libraryType?.building?.turretVoxel;
     if (!spec) return;
     if (!visual.buildingTurret) {
-      const model = this.library!.voxel(spec.voxel);
-      visual.turretState = model ? 'ready' : this.library!.voxelFailed(spec.voxel) ? 'missing' : 'loading';
+      const loaded = this.library!.voxel(spec.voxel);
+      // The mesh is built off this thread: until it is there the turret counts as loading, like its model file.
+      const model = loaded && this.voxelUnits.geometryReady(loaded) ? loaded : null;
+      visual.turretState = model ? 'ready' : !loaded && this.library!.voxelFailed(spec.voxel) ? 'missing' : 'loading';
       if (!model) return;
       const key = paletteFor(
         this.cache,
@@ -2643,7 +2823,8 @@ export class LiveView {
     const fromMap = this.cache.voxels.get(artType);
     const fromLibrary = !fromMap && libraryType?.voxel ? this.library!.voxel(libraryType.voxel) : null;
     const model = fromMap ?? fromLibrary;
-    if (!model) return null;
+    // A loaded model whose mesh is still being built (off this thread) is not drawable yet: retried like a load.
+    if (!model || !this.voxelUnits.geometryReady(model)) return null;
     const basePalette = fromMap ? model.palette : this.libraryPalette(model.palette);
     const key = paletteFor(this.cache, basePalette, libraryType?.remap ?? true, paletteKey || undefined);
     return { model, key, cacheKey: `${artType}@${key}` };
@@ -2684,7 +2865,7 @@ export class LiveView {
     }
     // No art (yet): the object stays tracked but draws nothing (a stand-in block would read as a real, oddly
     // coloured unit); library voxels still loading are retried on later frames.
-    const pending = !!libraryType?.voxel;
+    const pending = !!libraryType?.voxel || this.cache.voxels.has(artType);
     if (!pending && !this.warnedTypes.has(object.type)) {
       this.warnedTypes.add(object.type);
       console.warn(`[HD] no art for ${object.kind} ${object.type}: not drawn (see LiveView.diagnostics())`);
@@ -2776,8 +2957,7 @@ export class LiveView {
         layer = undefined;
       }
       if (!layer) {
-        const capacity = Math.max(64, 2 ** Math.ceil(Math.log2(instances.length)));
-        layer = new SpriteLayer(this.cache, [], capacity, atlas, hd);
+        layer = new SpriteLayer(this.cache, [], cellLayerCapacity(instances.length), atlas, hd);
         layer.mesh.name = `live-smudges-${page}`;
         layer.mesh.renderOrder = 3;
         this.shareSpriteUniforms(layer);
@@ -2849,7 +3029,7 @@ export class LiveView {
         continue;
       }
       let layer = existing?.layer;
-      const capacity = Math.max(layer?.capacity ?? 64, 2 ** Math.ceil(Math.log2(instances.length)));
+      const capacity = cellLayerCapacity(instances.length, layer?.capacity);
       if (layer && (layer.capacity < instances.length || upgrade)) {
         this.disposeOverlayLayer(layer);
         layer = undefined;

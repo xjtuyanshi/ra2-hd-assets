@@ -46,6 +46,7 @@ export class EffectArt {
   private readonly pages = new Map<number, EffectPage | 'loading' | { failedAt: number }>();
   private hdLibrary: EffectHdLibrary | null = null;
   private hdLoading: Promise<void> | null = null;
+  private hdIndexLoading = false;
   private readonly hdPages = new Map<number, EffectPage | 'loading' | { failedAt: number }>();
   private readonly hdPinned = new Set<number>();
   private settledRevision = 0;
@@ -98,8 +99,17 @@ export class EffectArt {
       });
   }
 
+  /** The index, HD index, pages and voxel models that were asked for and are still being fetched or decoded. */
+  get loading(): number {
+    let count = (this.state === 'loading' ? 1 : 0) + (this.hdIndexLoading ? 1 : 0);
+    for (const entries of [this.pages, this.hdPages, this.voxels])
+      for (const entry of entries.values()) if (entry === 'loading') count++;
+    return count;
+  }
+
   /** Fetch the optional HD index once; absence is informational and never prevents native effect art from loading. */
   loadHd(): Promise<void> {
+    if (!this.hdLoading) this.hdIndexLoading = true;
     return (this.hdLoading ??= fetch(`${this.hdBase}/effects-hd.json`)
       .then((r) => (r.ok ? (r.json() as Promise<EffectHdLibrary>) : Promise.reject(new Error(r.statusText))))
       .then((library) => {
@@ -110,6 +120,7 @@ export class EffectArt {
         console.info('[HD] no HD effect flipbook sidecar; effects keep their native art');
       })
       .finally(() => {
+        this.hdIndexLoading = false;
         this.settledRevision++;
       }));
   }

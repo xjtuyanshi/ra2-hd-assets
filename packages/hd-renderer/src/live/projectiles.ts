@@ -123,7 +123,8 @@ export class Projectiles {
     const known = this.meshes.get(key);
     if (known) return known;
     const model = this.art.voxel(voxel);
-    if (!model) return null;
+    // Not drawn until its model has loaded and its mesh is built (off this thread, see VoxelUnits.geometryReady).
+    if (!model || !this.voxels.geometryReady(model)) return null;
     const palette = this.voxelPalette(owner);
     const unit = this.voxels.build(model, palette, `fx:${voxel}@${palette}`);
     // The bridge does not report projectile/debris layer registrations. Use Air like the existing SHP shell pass;

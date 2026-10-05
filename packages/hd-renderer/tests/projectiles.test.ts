@@ -23,7 +23,7 @@ function fixture() {
   } as unknown as EffectArt;
   const build = vi.fn(() => ({ root: new Group() }));
   const dispose = vi.fn((unit: { root: Group }) => unit.root.removeFromParent());
-  const voxels = { build, dispose } as unknown as VoxelUnits;
+  const voxels = { build, dispose, geometryReady: () => true } as unknown as VoxelUnits;
   const parent = new Group();
   const palette = vi.fn((owner: number | undefined) => `unit:${owner ?? 'neutral'}`);
   const projectiles = new Projectiles(art, voxels, parent, palette);

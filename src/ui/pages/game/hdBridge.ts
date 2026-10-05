@@ -9,7 +9,19 @@ import type { FrameRect, VmFrameRenderer } from './vmFrameRenderer';
 import type { HdUi } from './hdUi';
 import { devicePixelBox } from './devicePixelBox';
 import type { LookPreset } from '../../../../packages/hd-renderer/src/HdRenderer';
-import type { LiveSnapshot, LiveView } from '../../../../packages/hd-renderer/src/live/liveView';
+import type { LiveSnapshot, LiveView, LiveWarmType } from '../../../../packages/hd-renderer/src/live/liveView';
+import {
+  browserWarmStorage,
+  readShownLayout,
+  readTopEffects,
+  readWarmTypes,
+  warmTypeKey,
+  writeShownLayout,
+  writeTopEffects,
+  writeWarmTypes,
+  WARM_TYPES_LIMIT,
+  type HdShownLayout,
+} from './hdWarmStore';
 import { parseWeatherParams } from '../../../../packages/hd-renderer/src/weatherParams';
 import { t } from '../../shared/i18n/translate';
 
@@ -32,6 +44,13 @@ import { t } from '../../shared/i18n/translate';
  * frame is shown as usual. A map whose view failed to load is tried again after LOAD_RETRY_MS or at the next match on
  * it, so a cache built while the page stays open is picked up without a reload. While a match runs on such a map the
  * host is told why the original picture is shown (`publishStatus`), once per match (see NOTICE_MS).
+ *
+ * A match does not start with a half-drawn battlefield. The view is created while the game shows its loading screen
+ * and draws out of sight from then on; the original picture stays (no transparent rectangle, no passthrough) until
+ * the match runs and the view has drawn REVEAL_SETTLED_FRAMES complete frames in a row (LiveView.settledFrames), or
+ * until REVEAL_DEADLINE_MS have passed. What a match showed in its first minutes is remembered (hdWarmStore.ts) and
+ * prepared during the next loading screen, so that wait is normally a few frames. Once shown, the view stays for the
+ * match: art that loads later appears as it arrives.
  *
  * The game names the same scenario in different casings (the skirmish menu's `2Peaks`, then `2PEAKS.MAP` once the
  * match runs) and the development server resolves cache names without regard to case, so maps are compared by their
@@ -92,6 +111,63 @@ const MAX_BUFFER_PIXELS = 10_000_000;
  * time counts from the first logic frame after the failure, not from the failure.
  */
 const NOTICE_MS = 12_000;
+
+/**
+ * Complete frames in a row (LiveView.settledFrames) before the view replaces the original picture. The first complete
+ * frame builds the shaders and pipelines of everything new in it and can take a quarter of a second; the following
+ * ones show that frames have their normal cost again.
+ */
+const REVEAL_SETTLED_FRAMES = 3;
+/**
+ * Longest a running match keeps the original picture while the view prepares. Art that never settles (a file that
+ * keeps loading, a server that went away) must not hide the HD view for a whole match: after this the view is shown
+ * with what it has, as it was before this wait existed.
+ */
+const REVEAL_DEADLINE_MS = 20_000;
+/** Out of sight and complete, the view only needs an occasional frame until the match starts (every Nth tick). */
+const HIDDEN_IDLE_TICKS = 12;
+/**
+ * The kinds of object a match shows are collected for the next match's preparation (hdWarmStore.ts) every
+ * WARM_COLLECT_FRAMES logic frames during its first WARM_COLLECT_UNTIL_FRAME (about five minutes at normal speed:
+ * starting units, the opening buildings and what they produce first). Later kinds are left to load when they appear,
+ * so a loading screen never has to prepare a whole tech tree.
+ */
+const WARM_COLLECT_FRAMES = 60;
+const WARM_COLLECT_UNTIL_FRAME = 6000;
+
+/** Times (performance.now(), ms) of the current match's HD start; null until reached. Diagnostics only. */
+export interface HdBridgeTimeline {
+  map: string | null;
+  /** The view's load began (the map became known) and ended (`live view ready`). */
+  loadAt: number | null;
+  readyAt: number | null;
+  /** A remembered list was handed to the view, with its length; when the view first drew it completely. */
+  warmAt: number | null;
+  warmTypes: number;
+  warmSettledAt: number | null;
+  /** First snapshot with objects; first snapshot whose logic frame is past 0 (the match runs). */
+  objectsAt: number | null;
+  matchAt: number | null;
+  /** The view replaced the original picture, and why: it was complete, or the deadline passed. */
+  revealedAt: number | null;
+  revealReason: 'settled' | 'deadline' | null;
+  /** Art still on its way when the view was shown (0 unless the deadline passed). */
+  revealLoading: number;
+}
+
+const emptyTimeline = (map: string | null): HdBridgeTimeline => ({
+  map,
+  loadAt: null,
+  readyAt: null,
+  warmAt: null,
+  warmTypes: 0,
+  warmSettledAt: null,
+  objectsAt: null,
+  matchAt: null,
+  revealedAt: null,
+  revealReason: null,
+  revealLoading: 0,
+});
 
 /**
  * `?hd-passthrough=`: comma list of category names, `all`, `none`, or a number. Default all: the HD renderer draws its
@@ -158,6 +234,26 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
    * notice stays on screen (Infinity until the logic frame moves on: see NOTICE_MS).
    */
   let fallback: { map: string; frame: number; until: number } | null = null;
+  /** The view has replaced the original picture in the current match (see REVEAL_SETTLED_FRAMES). */
+  let revealed = false;
+  /** Since when a running match has been waiting for the view (REVEAL_DEADLINE_MS counts from here). */
+  let waitingSince: number | null = null;
+  /** The match's snapshots have no objects yet: the game still loads the scenario. */
+  let prematch = true;
+  /** Whether the view of the current match was handed its remembered list (once per match). */
+  let warmed = false;
+  /** Kinds of object of the current match, for the next one (hdWarmStore.ts), and the last frame they were read at. */
+  const matchTypes = new Map<string, LiveWarmType>();
+  let collectedAt = -Infinity;
+  let hiddenTicks = 0;
+  const storage = browserWarmStorage();
+  /** Layout the view was last shown with (this page load or an earlier one), see `layout`. */
+  let shownLayout: HdShownLayout | null = readShownLayout(storage);
+  /** An earlier match showed top-layer art: views get its pass before they are shown (see readTopEffects). */
+  let topEffects = readTopEffects(storage);
+  /** Guest frame size when the current view finished loading: the loading screen's video mode, as a key. */
+  let loadingFrame: string | null = null;
+  let timeline = emptyTimeline(null);
   let published: string | null = null;
   const publish = (text: string | null) => {
     if (text === published) return;
@@ -190,6 +286,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   /** Key rectangle kept for PASSTHROUGH_TRAIL_MS after switching off (see PASSTHROUGH_TRAIL_MS). */
   let keyRect: FrameRect | null = null;
   let keyUntil = 0;
+
+  // The key programs are compiled now, not inside the frame that first shows the HD view.
+  if (keyable && !passthroughUnsupported) host.frameRenderer.prepareTransparentKey();
 
   const requestPassthrough = (flags: number) => {
     if (flags === passthroughRequest || (flags && passthroughUnsupported)) return;
@@ -246,6 +345,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   const load = (mapId: string, mapName: string) => {
     if (loading === mapId || performance.now() < (failed.get(mapId) ?? -Infinity)) return;
     loading = mapId;
+    if (timeline.map !== mapId) timeline = emptyTimeline(mapId);
+    timeline.loadAt ??= performance.now();
     const look = params.get('hd-look');
     const preset: LookPreset | undefined =
       look === 'faithful' || look === 'golden' || look === 'cinematic' ? look : undefined;
@@ -286,6 +387,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
           renderer.applyLookPreset(view.hd.settings, preset);
           view.hd.applySettings();
         }
+        if (topEffects) view.hd.enableTopEffects();
         return view;
       })
       .then((view) => {
@@ -298,6 +400,17 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         failed.delete(mapId);
         pushed = null;
         lastLayout = '';
+        // Out of sight until the match it is for has been drawn completely (see tick).
+        view.outOfSight = true;
+        // Its first frame is drawn at once, whatever it reports before it has drawn anything.
+        hiddenTicks = HIDDEN_IDLE_TICKS;
+        revealed = false;
+        waitingSince = null;
+        warmed = false;
+        if (timeline.map !== mapId) timeline = emptyTimeline(mapId);
+        timeline.readyAt = performance.now();
+        const frameSize = host.frameSize();
+        loadingFrame = frameSize ? `${frameSize.width}x${frameSize.height}` : null;
         if (fallback?.map === mapId) clearFallback();
         console.info(`[HD] live view ready for ${mapName}`);
       })
@@ -340,6 +453,15 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (state && mapId && (mapId !== stateMap || state.frame < stateFrame)) {
       failed.delete(mapId);
       clearFallback();
+      // Another match: its view (the same one when the map is the same) starts out of sight again.
+      revealed = false;
+      waitingSince = null;
+      warmed = false;
+      matchTypes.clear();
+      collectedAt = -Infinity;
+      if (live) live.outOfSight = true;
+      timeline = { ...emptyTimeline(mapId), loadAt: timeline.map === mapId ? timeline.loadAt : null };
+      if (liveMap === mapId && live) timeline.readyAt = performance.now();
     }
     if (!mapId) clearFallback();
     stateMap = mapId;
@@ -355,10 +477,69 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       load(mapId, mapName);
       return;
     }
-    if (state !== pushed) {
+    const now = performance.now();
+    prematch = state.objects.length === 0;
+    if (!prematch) timeline.objectsAt ??= now;
+    if (state.frame > 0) timeline.matchAt ??= now;
+    if (prematch && !revealed && !warmed) {
+      // The scenario is still loading: hand the view what the last match on this map (or theater) showed.
+      warmed = true;
+      const types = readWarmTypes(storage, mapId, live.theater);
+      if (types) {
+        live.warm(types);
+        timeline.warmAt = now;
+        timeline.warmTypes = types.length;
+      }
+    }
+    // A match snapshot ends the preparation; before the match has objects, a prepared view keeps its list.
+    if (state !== pushed && !(prematch && timeline.warmAt !== null && !revealed)) {
       live.push(toSnapshot(state));
       pushed = state;
     }
+    if (!topEffects && live.hd.topEffectsEnabled) {
+      topEffects = true;
+      writeTopEffects(storage);
+    }
+    // The opening is read at every snapshot: the starting units arrive in steps, and some are gone within seconds
+    // (an MCV that deploys at once).
+    if (
+      !prematch &&
+      state.frame <= WARM_COLLECT_UNTIL_FRAME &&
+      (state.frame < WARM_COLLECT_FRAMES || state.frame - collectedAt >= WARM_COLLECT_FRAMES)
+    ) {
+      collectedAt = state.frame;
+      let grew = false;
+      for (const type of live.warmTypes()) {
+        const key = warmTypeKey(type);
+        if (matchTypes.has(key) || matchTypes.size >= WARM_TYPES_LIMIT) continue;
+        matchTypes.set(key, type);
+        grew = true;
+      }
+      if (grew) writeWarmTypes(storage, mapId, live.theater, [...matchTypes.values()]);
+    }
+    // The original picture stays until tick() finds the view complete (see REVEAL_SETTLED_FRAMES).
+    setHole(revealed ? tacticalRect() : null);
+  };
+
+  /**
+   * Whether the view draws out of sight this tick: it belongs to the current map and has not been shown in this
+   * match. That is the time to fetch, build and compile, behind the game's loading screen or its original picture.
+   */
+  const preparing = () => enabled && !!live && liveMap === stateMap && stateMap !== null && !revealed && !pollFailed;
+
+  /** Show the view once the match runs and the frame just drawn (and the ones before it) lacked nothing. */
+  const reveal = (now: number) => {
+    if (!live || !preparing() || prematch || stateFrame < 1 || !pushed) return;
+    waitingSince ??= now;
+    const settled = live.settledFrames >= REVEAL_SETTLED_FRAMES;
+    if (!settled && now - waitingSince < REVEAL_DEADLINE_MS) return;
+    revealed = true;
+    live.outOfSight = false;
+    timeline.revealedAt = now;
+    timeline.revealReason = settled ? 'settled' : 'deadline';
+    timeline.revealLoading = live.loadingArt();
+    if (!settled)
+      console.warn(`[HD] view shown after ${REVEAL_DEADLINE_MS / 1000} s with ${timeline.revealLoading} loads pending`);
     setHole(tacticalRect());
   };
 
@@ -389,7 +570,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   };
 
   const layout = () => {
-    const rect = hole ?? keyRect;
+    const shown = hole ?? keyRect;
+    // Out of sight the view is laid out as it will be shown, so its buffers and pipelines are the final ones.
+    const rect = shown ?? (preparing() ? tacticalRect() : null);
     const size = host.frameSize();
     if (!rect || !size || !live) return;
     // Cover exactly the tactical rectangle of the (scaled) game canvas, on whole device pixels: the drawing buffer then
@@ -397,11 +580,27 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     // pixel larger than its buffer would be resampled, which softens the whole picture.
     const box = devicePixelBox(host.screen, size, window.devicePixelRatio || 1, rect);
     const budget = Math.min(1, Math.sqrt(MAX_BUFFER_PIXELS / (box.width * box.height)));
-    const key = [box.width, box.height, rect.width, rect.height, ...Object.values(box.style)].join();
+    let buffer: HdShownLayout = [
+      Math.max(1, Math.round(box.width * budget)),
+      Math.max(1, Math.round(box.height * budget)),
+      rect.width,
+      rect.height,
+    ];
+    // Behind the loading screen the game is still in the loading screen's video mode: a view laid out for it would
+    // build its post passes for a size it is never shown at, and again when the match's first frame arrives. Until
+    // the frame size changes (or the match runs), prepare for the layout of the last match instead.
+    if (!shown && shownLayout && stateFrame < 1 && `${size.width}x${size.height}` === loadingFrame)
+      buffer = shownLayout;
+    // What the view is shown with is what the next loading screen prepares for.
+    if (shown && !buffer.every((value, index) => value === shownLayout?.[index])) {
+      shownLayout = buffer;
+      writeShownLayout(storage, buffer);
+    }
+    const key = [...buffer, ...Object.values(box.style)].join();
     if (key === lastLayout) return;
     lastLayout = key;
     Object.assign(canvas.style, box.style);
-    live.resizePixels(box.width * budget, box.height * budget, rect.width, rect.height);
+    live.resizePixels(...buffer);
   };
 
   const tick = () => {
@@ -414,6 +613,16 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (live && (hole || keyRect)) {
       layout();
       live.render();
+    } else if (live && preparing()) {
+      // Draw out of sight: every frame while art is arriving or the match already runs, else now and then.
+      const complete = live.settledFrames >= REVEAL_SETTLED_FRAMES;
+      if (complete && timeline.warmAt !== null) timeline.warmSettledAt ??= now;
+      if (!complete || stateFrame >= 1 || ++hiddenTicks >= HIDDEN_IDLE_TICKS) {
+        hiddenTicks = 0;
+        layout();
+        live.render();
+      }
+      reveal(now);
     }
   };
   frame = requestAnimationFrame(tick);
@@ -449,6 +658,10 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     get live() {
       return live;
     },
+    /** When the current match's view loaded, prepared and was shown (copy; see HdBridgeTimeline). */
+    get timeline(): HdBridgeTimeline {
+      return { ...timeline };
+    },
     /** Native overlay passthrough: requested guest flags (0 = off) and whether the key path is in use. */
     get passthrough() {
       return { flags: passthroughRequest, unsupported: passthroughUnsupported, keyed: !!keyRect };
@@ -475,6 +688,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     loading = null;
     stateMap = null;
     pushed = null;
+    revealed = false;
+    matchTypes.clear();
     host.frameRenderer.setTransparentKey(null);
     host.frameRenderer.setTransparentRect(null);
     live?.dispose();
