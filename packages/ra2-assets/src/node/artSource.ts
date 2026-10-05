@@ -19,7 +19,7 @@ import type { IniFile, IniSection, ShpFile, VxlFile } from 'ra2-formats';
 import type { SpriteEntry, SpriteFrame, VoxelModel, VoxelPart } from '../manifest.ts';
 import { chooseAtlasWidth, packShelves, packShelvesPaged } from '../atlas.ts';
 import { animTimingArt, artFileCandidates, resolveArtFile, splitShadowHalf } from '../art.ts';
-import { drawOffsetFor } from '../iso.ts';
+import { drawOffsetFor, isHighBridgeOverlayIndex, overlayDrawOffset, type OverlayDrawRule } from '../iso.ts';
 import type { LibraryOverlay, LibrarySmudge } from '../library.ts';
 import type { TheaterInfo } from '../theater.ts';
 import type { GameInstall } from './install.ts';
@@ -132,12 +132,40 @@ export class ArtSource {
     });
   }
 
+  private overlayIndexes?: Map<string, number>;
+
   /**
-   * Overlay art rules shared by map and live-library extraction. Draw offsets/lighting preserve the map extractor's
-   * conventions. YR 1.001 DrawOverlay tests Wall at 0x47F96A and selects the current player's ColorSchemeIndex at
+   * The facts that place an overlay's draw point (iso.ts overlayDrawOffset). The index is the type's position among
+   * the distinct [OverlayTypes] entries, which is how the engine's type array numbers them; -1 when unlisted.
+   */
+  overlayDrawRule(id: string): OverlayDrawRule {
+    if (!this.overlayIndexes) {
+      this.overlayIndexes = new Map();
+      const ids = new Set(
+        this.rules
+          .readRegistry('OverlayTypes')
+          .map((v) => v.trim())
+          .filter(Boolean),
+      );
+      for (const listed of ids) this.overlayIndexes.set(listed.toUpperCase(), this.overlayIndexes.size);
+    }
+    return {
+      index: this.overlayIndexes.get(id.toUpperCase()) ?? -1,
+      wall: this.rulesBool(id, 'Wall'),
+      tiberium: this.rulesBool(id, 'Tiberium'),
+      crate: this.rulesBool(id, 'Crate'),
+      railroad: (this.rulesGet(id, 'Land') ?? '').trim().toLowerCase() === 'railroad',
+    };
+  }
+
+  /**
+   * Overlay art rules shared by map and live-library extraction. `drawOffset` is the engine draw point for
+   * OverlayData 0 (overlayDrawRule); `highBridge` marks the bridge-owner types whose frame and draw point also depend
+   * on the cell. YR 1.001 DrawOverlay tests Wall at 0x47F96A and selects the current player's ColorSchemeIndex at
    * 0x47F9B2; walls therefore use the unit palette with current-player remap, rather than WallOwnerIndex.
    */
   overlayArt(id: string): Omit<LibraryOverlay, 'sprite' | 'frames'> & { candidates: string[] } {
+    const rule = this.overlayDrawRule(id);
     if (this.rulesBool(id, 'IsRubble'))
       return {
         candidates: [],
@@ -147,21 +175,22 @@ export class ArtSource {
         tiberium: false,
         remap: false,
         flat: true,
-        drawOffset: drawOffsetFor('overlay'),
+        drawOffset: overlayDrawOffset({ index: rule.index }),
         lighting: 'full',
       };
     const { sec, image } = this.artOf(id);
-    const wall = this.rulesBool(id, 'Wall');
-    const tiberium = this.rulesBool(id, 'Tiberium');
-    const highBridge = /^(BRIDGE|BRIDGEB|RAILBRDG)[12]$/i.test(id);
+    const { wall = false, tiberium = false } = rule;
+    // Art that stands up as a card over its cell; the stock rail bridges are listed with the decks they resemble.
+    const deck = /^(BRIDGE|BRIDGEB|RAILBRDG)[12]$/i.test(id);
     return {
       candidates: this.shpCandidates(image, sec),
       palette: wall ? 'unit' : tiberium ? 'theater' : 'iso',
       wall,
       tiberium,
       remap: wall,
-      flat: !wall && !highBridge && (tiberium || this.rulesBool(id, 'DrawFlat', true)),
-      drawOffset: highBridge ? [0, -60] : drawOffsetFor('overlay', { isARock: this.rulesBool(id, 'IsARock') }),
+      flat: !wall && !deck && (tiberium || this.rulesBool(id, 'DrawFlat', true)),
+      drawOffset: overlayDrawOffset(rule),
+      ...(isHighBridgeOverlayIndex(rule.index) ? { highBridge: true as const } : {}),
       lighting: tiberium ? 'none' : wall ? 'ambient' : 'full',
     };
   }

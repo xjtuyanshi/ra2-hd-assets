@@ -45,6 +45,7 @@ import {
   cutoffTileHeight,
   DEFAULT_LIGHT_LEVEL,
   drawOffsetFor,
+  highBridgeCell,
   leptonDelta,
   localScreenRect,
   mapSizeCells,
@@ -259,8 +260,9 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   const count = (k: string): void => {
     counts[k] = (counts[k] ?? 0) + 1;
   };
-  // Engine draw points (see drawOffsetFor): overlays, smudges, buildings and tiberium trees put their canvas centre on
-  // the cell's top corner; rocks, other terrain objects and movable objects on the cell centre (or their coord).
+  // Engine draw points (see drawOffsetFor and overlayDrawOffset): smudges, buildings and tiberium trees put their
+  // canvas centre on the cell's top corner; terrain objects and movable objects on the cell centre (or their coord);
+  // overlays on the cell centre moved by their type's rule.
   const cellCentre = drawOffsetFor('vehicle');
   // YR writes these as percentages ("50%"); parseIniFraction reads them as the engine does.
   const conditionYellow = parseIniFraction(rules.getSection('AudioVisual')?.getString('ConditionYellow', ''), 0.5);
@@ -339,9 +341,12 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
     const id = `overlay:${type}`;
     const s = addShp(id, art.candidates, art.palette, art.remap);
     if (!s) continue;
-    let frame = od[i]!;
+    // A bridge-owner cell picks its deck variant and its rise from OverlayData and the cell (iso.ts highBridgeCell).
+    const data = od[i]!;
+    const bridge = art.highBridge ? highBridgeCell(data, x, y) : undefined;
+    let frame = bridge?.frame ?? data;
     if (frame >= s.frames.length) {
-      warn(`${id}: OverlayData ${frame} beyond ${s.frames.length} body frames (clamped)`);
+      warn(`${id}: OverlayData ${data} beyond ${s.frames.length} body frames (clamped)`);
       frame = s.frames.length - 1;
     }
     objects.push({
@@ -353,7 +358,7 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
       sprite: id,
       frame,
       flat: art.flat,
-      drawOffset: art.drawOffset,
+      drawOffset: bridge ? [art.drawOffset[0], art.drawOffset[1] - bridge.lift] : art.drawOffset,
       lighting: art.lighting,
     });
     count(

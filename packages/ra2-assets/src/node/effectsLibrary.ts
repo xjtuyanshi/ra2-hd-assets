@@ -1101,14 +1101,14 @@ export function collectEffects(installs: readonly { theater: TheaterId; inst: In
     if (palette === 'iso') usesIso = true;
     if (palette === 'theater') usesTheater = true;
     if (palette === 'unit') usesUnit = true;
-    const highBridge = /^(BRIDGE|BRIDGEB|RAILBRDG)[12]$/i.test(id);
-    const flat = !wall && !highBridge && (tiberium || primary.src.rulesBool(id, 'DrawFlat', true));
+    // Same card/decal and draw-point rules as the type library (ArtSource.overlayArt).
+    const art = primary.src.overlayArt(id);
     overlays[id] = {
       sprite: loaded.ref,
       palette,
       ...(wall ? { remap: true } : {}),
-      ...(flat ? { flat: true } : {}),
-      drawOffset: highBridge ? [0, -60] : drawOffsetFor('overlay', { isARock: primary.src.rulesBool(id, 'IsARock') }),
+      ...(art.flat ? { flat: true } : {}),
+      drawOffset: art.drawOffset,
     };
     count('overlays');
   }

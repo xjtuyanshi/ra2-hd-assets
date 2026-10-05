@@ -114,8 +114,16 @@ export interface LibraryOverlay {
   /** Stock YR walls use the current player's colour scheme, not the cell's wall-owner index. */
   remap: boolean;
   flat: boolean;
-  /** Offset from the projected cell top corner, shared with the map extractor. */
+  /**
+   * Engine draw point for OverlayData 0, from the projected top corner of the cell at the cell's level
+   * (iso.ts overlayDrawOffset), shared with the map extractor.
+   */
   drawOffset: [x: number, y: number];
+  /**
+   * Bridge-owner type: each cell picks its frame and an extra rise from its OverlayData and position
+   * (iso.ts highBridgeCell). Absent in libraries extracted before the rule was read from the engine.
+   */
+  highBridge?: true;
   lighting: LightingClass;
 }
 

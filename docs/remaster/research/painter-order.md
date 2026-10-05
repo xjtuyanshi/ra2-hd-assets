@@ -364,7 +364,8 @@ gates/lifecycle and actual r186 WGSL/buffer layouts. GPU execution, five-blast X
 performance remain UNVERIFIED by those tests.
 
 High-bridge cards use a horizontal plane at `4 * LEVEL_HEIGHT`; neighboring pieces have identical depth at the
-same screen pixel. Their draw offsets remain unchanged. Grounded unit cards anchor on the deck while their shadow
+same screen pixel, wherever on the owner cells' ground plane the draw point lies (the engine draws a deck at its
+owner cell, see LIVE_OVERLAYS.md, Draw points). Grounded unit cards anchor on the deck while their shadow
 twins and flat decals retain their physical ground-depth paths.
 
 Traversal bias remains independent of scene population: registered index i contributes `0.01 * i / (i + 32)`

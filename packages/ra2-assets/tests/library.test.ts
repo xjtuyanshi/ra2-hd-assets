@@ -19,6 +19,7 @@ import {
   collectSmudgeLibrary,
   collectTypeLibrary,
   readLibrary,
+  refreshOverlayRules,
   writeTypeLibrary,
 } from '../src/node/library.ts';
 import type { TypeLibrary } from '../src/library.ts';
@@ -732,10 +733,11 @@ IsARock=yes
       tiberium: false,
       remap: true,
       flat: false,
-      drawOffset: [0, 0],
+      drawOffset: [0, 3],
       lighting: 'ambient',
     });
     expect(collected.overlays['TIB01']).toMatchObject({
+      drawOffset: [0, 3],
       frames: 12,
       palette: 'theater',
       tiberium: true,
@@ -744,9 +746,17 @@ IsARock=yes
       lighting: 'none',
     });
     expect(collected.overlays['GEM01']).toMatchObject({ frames: 8, palette: 'theater', tiberium: true });
-    expect(collected.overlays['FENCE']).toMatchObject({ palette: 'iso', wall: false, remap: false });
+    expect(collected.overlays['FENCE']).toMatchObject({
+      palette: 'iso',
+      wall: false,
+      remap: false,
+      drawOffset: [0, 15],
+    });
     expect(collected.overlays['ROCK']!.drawOffset).toEqual([0, 15]);
-    expect(collected.overlays['BRIDGE1']).toMatchObject({ flat: false, drawOffset: [0, -60] });
+    // The engine recognises a bridge owner by its registry position (24, 25, 237, 238), not by its name: listed
+    // sixth, this deck art is an ordinary upright overlay on the cell centre.
+    expect(collected.overlays['BRIDGE1']).toMatchObject({ flat: false, drawOffset: [0, 15] });
+    expect(collected.overlays['BRIDGE1']!.highBridge).toBeUndefined();
     expect(collected.collector.sprites.get('overlay:GAWALL')!.shadows).toHaveLength(16);
     expect(collected.collector.sprites.get('overlay:TIB01')!.entry.file).toBe('tib01.tem');
     expect(collected.counts).toEqual({ 'listed:overlay': 7, 'types:overlay': 6, 'skipped:overlay': 1 });
@@ -787,7 +797,8 @@ IsARock=yes
       tiberium: false,
       remap: false,
       flat: true,
-      drawOffset: [0, 0],
+      // Only registry position 239 (the stock rubble carrier) is drawn on the cell's top corner.
+      drawOffset: [0, 15],
       lighting: 'full',
     });
     expect(collected.collector.sprites.has('overlay:RUBBLE_OVERLAY')).toBe(false);
@@ -809,6 +820,194 @@ IsARock=yes
     expect(Object.keys(saved.sprites).filter((key) => key.startsWith('overlay:'))).toEqual([]);
     expect(Object.values(saved.sprites).some((entry) => entry.file?.includes('srock'))).toBe(false);
     expect(saved.palettes['iso']).toBe('palettes/iso.png');
+  });
+
+  // Stock YR registry positions of the types whose draw point the engine special-cases; the rest are filler.
+  const stockOverlays = (): { inst: ReturnType<typeof fakeInstall>; rules: string } => {
+    const at: Record<number, string> = {
+      2: 'GAWALL',
+      24: 'BRIDGE1',
+      25: 'BRIDGE2',
+      39: 'TRACKS01',
+      59: 'RAILBRDG1',
+      74: 'LOBRDG01',
+      102: 'TIB01',
+      126: 'DUMMYOLD',
+      168: 'SROCK01',
+      179: 'CRATE',
+      237: 'BRIDGEB1',
+      238: 'BRIDGEB2',
+      239: 'RUBBLE_OVERLAY',
+      240: 'CAKRMW',
+    };
+    const list = Array.from({ length: 241 }, (_, i) => `${i}=${at[i] ?? `FILL${i}`}`);
+    // A repeated name does not take a new slot in the engine's type array.
+    list.splice(10, 0, '900=GAWALL');
+    const rules = `[OverlayTypes]\n${list.join('\n')}\n[GAWALL]\nWall=yes\n[CAKRMW]\nWall=yes\n[TIB01]\nTiberium=yes\n[TRACKS01]\nLand=Railroad\n[CRATE]\nCrate=yes\nDrawFlat=false\n[SROCK01]\nIsARock=yes\n[RUBBLE_OVERLAY]\nIsRubble=yes\n[LOBRDG01]\nLand=Road\n`;
+    const files: Record<string, Uint8Array> = {};
+    for (const id of Object.values(at))
+      if (id !== 'RUBBLE_OVERLAY') files[`${id.toLowerCase()}.shp`] = bodyAndShadow(18);
+    return { inst: fakeInstall(files, { 'rulesmd.ini': rules, 'artmd.ini': '' }), rules };
+  };
+
+  it('places every overlay family by the engine rule at its stock registry position', () => {
+    const { inst } = stockOverlays();
+    const src = new ArtSource(inst, THEATERS.temperate, () => {});
+    expect(src.overlayDrawRule('gawall')).toEqual({
+      index: 2,
+      wall: true,
+      tiberium: false,
+      crate: false,
+      railroad: false,
+    });
+    expect(src.overlayDrawRule('TRACKS01')).toMatchObject({ index: 39, railroad: true });
+    expect(src.overlayDrawRule('NOT_LISTED').index).toBe(-1);
+    const { overlays } = collectOverlayLibrary(inst, 'temperate');
+    const point = (id: string) => overlays[id]!.drawOffset;
+    expect(point('GAWALL')).toEqual([0, 3]);
+    expect(point('CAKRMW')).toEqual([0, 3]);
+    expect(point('TIB01')).toEqual([0, 3]);
+    expect(point('CRATE')).toEqual([0, 3]);
+    expect(point('TRACKS01')).toEqual([0, 14]);
+    expect(point('LOBRDG01')).toEqual([0, 15]);
+    expect(point('SROCK01')).toEqual([0, 15]);
+    expect(point('DUMMYOLD')).toEqual([0, 2]);
+    expect(point('RUBBLE_OVERLAY')).toEqual([0, 0]);
+    for (const id of ['BRIDGE1', 'BRIDGE2', 'BRIDGEB1', 'BRIDGEB2']) {
+      expect(overlays[id]).toMatchObject({ highBridge: true, flat: false, drawOffset: [0, -1] });
+    }
+    // The stock rail bridges are not bridge owners in the engine's placement code.
+    expect(point('RAILBRDG1')).toEqual([0, 15]);
+    expect(Object.values(overlays).filter((o) => o.highBridge)).toHaveLength(4);
+    expect(overlays['LOBRDG01']).not.toHaveProperty('highBridge');
+  });
+
+  it('refreshes the overlay rules of an existing library without repacking or rewriting anything else', () => {
+    const { inst } = stockOverlays();
+    const { out, dir, source } = makeCopy();
+    const fresh = appendOverlayLibrary(inst, 'temperate', out).library;
+    // A library extracted with the earlier draw points: top corner, rocks on the centre, decks 60 px up.
+    const stale = structuredClone(fresh);
+    for (const [id, entry] of Object.entries(stale.overlays!)) {
+      delete entry.highBridge;
+      entry.drawOffset = /^BRIDGE/.test(id) || id === 'RAILBRDG1' ? [0, -60] : id === 'SROCK01' ? [0, 15] : [0, 0];
+    }
+    (stale.overlays!['LOBRDG01'] as { highBridge?: true }).highBridge = true;
+    writeFileSync(join(dir, 'library.json'), JSON.stringify(stale));
+    const pages = readdirSync(dir).filter((file) => file.endsWith('.png'));
+    const before = new Map(pages.map((file) => [file, readFileSync(join(dir, file))]));
+
+    const result = refreshOverlayRules(inst, 'temperate', out);
+    const saved = readLibrary(dir);
+    expect(saved).toEqual(fresh);
+    expect(result.library).toEqual(fresh);
+    expect(readdirSync(dir).filter((file) => file.endsWith('.png'))).toEqual(pages);
+    for (const [file, bytes] of before) expect(readFileSync(join(dir, file))).toEqual(bytes);
+    expect(readdirSync(dir).some((file) => file.endsWith('.tmp'))).toBe(false);
+    // The source library the copy was made from is never touched.
+    expect(existsSync(join(source, 'sprites-overlays-0.png'))).toBe(false);
+
+    // Nothing left to correct: the file is not rewritten.
+    const settled = readFileSync(join(dir, 'library.json'));
+    const marker = Buffer.concat([settled, Buffer.from('\n')]);
+    writeFileSync(join(dir, 'library.json'), marker);
+    refreshOverlayRules(inst, 'temperate', out);
+    expect(readFileSync(join(dir, 'library.json'))).toEqual(marker);
+  });
+
+  it('gives the static map objects the same draw points, and bridge owners their cell variant and rise', () => {
+    // [OverlayPack] / [OverlayDataPack]: base64 of [u16 in][u16 out][LCW] chunks over a 512x512 array (y * 512 + x).
+    const pack = (cellsAt: Record<number, number>): string => {
+      const bytes = new Uint8Array(512 * 512).fill(0xff);
+      for (const [at, value] of Object.entries(cellsAt)) bytes[Number(at)] = value;
+      const out: number[] = [];
+      for (let o = 0; o < bytes.length; o += 8192) {
+        const lcw: number[] = [];
+        for (let i = o; i < o + 8192;) {
+          let j = i;
+          while (j < o + 8192 && bytes[j] === bytes[i]) j++;
+          lcw.push(0xfe, (j - i) & 255, (j - i) >> 8, bytes[i]!);
+          i = j;
+        }
+        lcw.push(0x80);
+        out.push(lcw.length & 255, lcw.length >> 8, 8192 & 255, 8192 >> 8, ...lcw);
+      }
+      const text = Buffer.from(out).toString('base64');
+      return (text.match(/.{1,70}/g) ?? []).map((line, i) => `${i + 1}=${line}`).join('\n');
+    };
+    const at = (x: number, y: number): number => y * 512 + x;
+    // type index and OverlayData per cell: wall, track, low bridge, three intact and one damaged BRIDGE1 cell,
+    // two BRIDGE2 cells of the second direction, and the rubble carrier (never drawn from a map file).
+    const placed: [x: number, y: number, type: number, data: number][] = [
+      [10, 10, 2, 5],
+      [11, 10, 39, 0],
+      [12, 10, 74, 1],
+      [20, 12, 24, 0],
+      [21, 12, 24, 0],
+      [22, 12, 24, 0],
+      [23, 12, 24, 6],
+      [30, 13, 25, 9],
+      [30, 14, 25, 14],
+      [5, 5, 239, 0],
+    ];
+    const { inst, rules } = stockOverlays();
+    const root = mkdtempSync(join(tmpdir(), 'ra2-overlay-map-'));
+    temp.push(root);
+    const install = fakeInstall(
+      Object.fromEntries(
+        ['gawall', 'tracks01', 'lobrdg01', 'bridge1', 'bridge2'].map((stem) => [
+          `${stem}.shp`,
+          inst.read(`${stem}.shp`)!,
+        ]),
+      ),
+      { 'rulesmd.ini': rules, 'artmd.ini': '', [THEATERS.temperate.controlIni]: '[General]\nClearTile=0\n' },
+    );
+    const opened = Object.assign(install, {
+      report: { mounted: [], missing: [], unreadable: [] },
+      tmp: () => undefined,
+    });
+    const spy = vi.spyOn(GameInstall, 'open').mockReturnValue(opened as unknown as GameInstall);
+    try {
+      const map = join(root, 'source.map');
+      writeFileSync(
+        map,
+        `[Map]\nTheater=TEMPERATE\n[OverlayPack]\n${pack(Object.fromEntries(placed.map(([x, y, type]) => [at(x, y), type])))}\n` +
+          `[OverlayDataPack]\n${pack(Object.fromEntries(placed.map(([x, y, , data]) => [at(x, y), data])))}\n`,
+      );
+      const { manifest } = extractMap({
+        gameDir: root,
+        map,
+        outDir: join(root, 'out'),
+        defaultVoxels: [],
+        log: () => {},
+      });
+      const overlays = manifest.objects.filter((o) => o.kind === 'overlay');
+      expect(overlays.map((o) => [o.type, o.x, o.y, o.frame, o.drawOffset])).toEqual([
+        ['GAWALL', 10, 10, 5, [0, 3]],
+        ['TRACKS01', 11, 10, 0, [0, 14]],
+        ['LOBRDG01', 12, 10, 1, [0, 15]],
+        // y & 3 = 0: variants 0, 1, 2 for x & 3 = 0, 1, 2; the damaged cell keeps its own frame.
+        ['BRIDGE1', 20, 12, 0, [0, -1]],
+        ['BRIDGE1', 21, 12, 1, [0, -1]],
+        ['BRIDGE1', 22, 12, 2, [0, -1]],
+        ['BRIDGE1', 23, 12, 6, [0, -1]],
+        // y & 3 = 1, x & 3 = 2: variant 1 on top of 9; the second direction is drawn 15 px higher.
+        ['BRIDGE2', 30, 13, 10, [0, -16]],
+        ['BRIDGE2', 30, 14, 14, [0, -16]],
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('refuses to refresh overlay rules of a library without an overlay section or of another theatre', () => {
+    const { inst } = stockOverlays();
+    const { out, dir, original } = makeCopy();
+    const untouched = readFileSync(join(dir, 'library.json'));
+    expect(() => refreshOverlayRules(inst, 'temperate', out)).toThrow('no overlay section');
+    writeFileSync(join(dir, 'library.json'), JSON.stringify({ ...original, theater: 'snow', overlays: {} }));
+    expect(() => refreshOverlayRules(inst, 'temperate', out)).toThrow('temperate library');
+    writeFileSync(join(dir, 'library.json'), untouched);
   });
 
   it('appends only new pages to a temp copy and preserves original metadata, pages, palettes and HD references', () => {

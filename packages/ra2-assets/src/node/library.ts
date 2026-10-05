@@ -60,8 +60,11 @@ export interface LibraryOptions {
   /** Library root (default <repo>/gameres/hd-cache/_library in the CLI). */
   outDir: string;
   theaters?: readonly TheaterId[];
-  /** Append only the selected cell art to each existing library; never repack its other sprites or voxels. */
-  only?: 'overlays' | 'smudges';
+  /**
+   * Append only the selected cell art to each existing library; never repack its other sprites or voxels.
+   * 'overlay-rules' writes no art at all: it re-derives the rule fields of the overlays already present.
+   */
+  only?: 'overlays' | 'smudges' | 'overlay-rules';
   log?: (msg: string) => void;
 }
 
@@ -128,6 +131,7 @@ function extractTheater(
 ): LibraryResult {
   const t0 = Date.now();
   const inst = GameInstall.open(opts.gameDir, theaterId);
+  if (opts.only === 'overlay-rules') return refreshOverlayRules(inst, theaterId, opts.outDir, log);
   if (opts.only === 'overlays') return appendOverlayLibrary(inst, theaterId, opts.outDir, log);
   if (opts.only === 'smudges') return appendSmudgeLibrary(inst, theaterId, opts.outDir, log);
   const lib = collectTypeLibrary(inst, theaterId);
@@ -242,6 +246,52 @@ export function appendSmudgeLibrary(
   log: (m: string) => void = () => {},
 ): LibraryResult {
   return appendCellLibrary(inst, theaterId, outDir, 'smudges', log);
+}
+
+/**
+ * Re-derive the engine rule fields (draw point, bridge-owner flag) of every overlay already in a library from the
+ * install's rules. Sprites, atlas pages, HD references and all other sections stay as they are, so a library
+ * extracted before a rule was corrected takes the correction without repacking or re-upscaling any art.
+ */
+export function refreshOverlayRules(
+  inst: InstallView,
+  theaterId: TheaterId,
+  outDir: string,
+  log: (m: string) => void = () => {},
+): LibraryResult {
+  const t0 = Date.now();
+  const dir = join(outDir, theaterId);
+  const existing = readLibrary(dir);
+  if (existing.version !== TYPE_LIBRARY_VERSION || existing.theater !== theaterId)
+    throw new Error(`overlay rules refresh requires a version ${TYPE_LIBRARY_VERSION} ${theaterId} library`);
+  if (!existing.overlays) throw new Error(`${theaterId}: the library has no overlay section to refresh`);
+  const src = new ArtSource(inst, THEATERS[theaterId], () => {});
+  const overlays: Record<string, LibraryOverlay> = {};
+  let changed = 0;
+  for (const [id, entry] of Object.entries(existing.overlays)) {
+    const art = src.overlayArt(id);
+    const { highBridge: _was, ...rest } = entry;
+    const next: LibraryOverlay = {
+      ...rest,
+      drawOffset: art.drawOffset,
+      ...(art.highBridge ? { highBridge: true as const } : {}),
+    };
+    if (JSON.stringify(next) !== JSON.stringify(entry)) changed++;
+    overlays[id] = next;
+  }
+  const library: TypeLibrary = { ...existing, overlays };
+  if (changed) {
+    const staging = join(dir, `library.overlay-rules-${process.pid}.tmp`);
+    try {
+      // Compact, like the installers that maintain a finished library: the renderer downloads this file.
+      writeFileSync(staging, JSON.stringify(library), { flag: 'wx' });
+      renameSync(staging, join(dir, 'library.json'));
+    } finally {
+      rmSync(staging, { force: true });
+    }
+  }
+  log(`${theaterId}: overlay rules refreshed, ${changed} of ${Object.keys(overlays).length} entries changed`);
+  return { theater: theaterId, dir, library, bytes: dirBytes(dir), ms: Date.now() - t0 };
 }
 
 function appendCellLibrary(

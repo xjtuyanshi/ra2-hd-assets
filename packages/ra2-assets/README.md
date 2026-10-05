@@ -1782,7 +1782,9 @@ result alongside the library to enable it in LiveLibrary; the renderer does not 
   anims, their damaged variants, offsets, ZAdjust/YSort/Powered, anim timing), bibs, buildup anims and voxel turrets;
   infantry `Sequence=` tables; SHP vehicle frame layouts; the runtime colour scheme array; ConditionYellow/Red;
   `extractor.warnings` naming every skipped type and why. `overlays` maps ids to sprite ids, body-frame counts,
-  palette, Wall/Tiberium flags, draw offsets, flat/lighting rules and remap; `OverlayData` selects the frame directly.
+  palette, Wall/Tiberium flags, the engine draw point for OverlayData 0 (`src/overlayDraw.ts`), flat/lighting rules and
+  remap; `OverlayData` selects the frame directly, except on `highBridge` types, whose cells pick a deck variant and
+  the rise of their second direction (`highBridgeCell`).
   `smudges` maps ids to sprite ids, body-frame counts and Width/Height footprints. The engine draws smudge body
   frame 0; `SmudgeData` selects a cell within the footprint (`dy * Width + dx`), not an animation frame.
 - `<theater>/buildngz.bin`: the engine-transformed `BUILDNGZ.SHA` frame 0, with dimensions from its frame
@@ -1846,6 +1848,14 @@ New page slots have no HD reference until processed by `hd:sprites`. `overlayExt
 counts and missing-art warnings. Repeated runs append new pages; old pages remain intact for existing references.
 The library JSON is replaced only after the new files exist. A failed extraction can leave unreferenced new files
 but retains the old JSON. `--only overlays` requires an existing library and does not run `--preview`.
+
+`--only overlay-rules` repacks nothing. It re-derives `drawOffset` and `highBridge` of the overlay records an existing
+library already holds from the install's rules and rewrites `library.json` only when a value differs, so a library
+extracted before a draw rule was corrected takes the correction with its pages and HD references intact:
+
+```bash
+pnpm hd:library -- --game "$YR_INSTALL" --out "$HD_CACHE/_library" --only overlay-rules
+```
 
 ### Install overlay art into a cache farm
 

@@ -1,7 +1,8 @@
+import { highBridgeCell } from '../../../ra2-assets/src/overlayDraw';
 import type { TypeLibrary } from '../../../ra2-assets/src/library';
 import { spriteClassGradeExempt, type AtmosphereProfile } from '../../../ra2-assets/src/lights';
 import { cardPush, objectAnchor, type SpriteInstance } from '../ra2/sprites';
-import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
+import { HIGH_BRIDGE_HEIGHT, highBridgeLight, isHighBridge } from '../ra2/bridgeDepth';
 
 /** Row-major live cell overlays. A negative index is empty; data is the engine's exact sprite frame. */
 export interface LiveOverlayCells {
@@ -34,7 +35,8 @@ export interface OverlayInstances {
 /**
  * Pure instance construction, separate from texture loading. Native overlay frames must not wrap or clamp: doing
  * so would show a different connection/growth state. Missing art is omitted and reported. Heights come from the map
- * terrain, and draw points, palettes and flat/card rules come from the extracted library.
+ * terrain, and draw points, palettes and flat/card rules come from the extracted library. A bridge-owner type takes
+ * its deck variant and the rise of its second direction from the cell, as the engine's cell pass does.
  */
 export function buildOverlayInstances(
   cells: LiveOverlayCells,
@@ -42,6 +44,8 @@ export function buildOverlayInstances(
   terrain: OverlayTerrain,
   palette: (key: string, remap: boolean) => string,
   atmosphere: Pick<AtmosphereProfile, 'airless'> = {},
+  /** Light of a bridge deck over an owner cell at this level, relative to the cell's own (bridgeDepth.ts). */
+  deckLight: (level: number) => number = () => 1,
 ): OverlayInstances {
   const pages = new Map<number, SpriteInstance[]>();
   const missingTypes = new Set<string>();
@@ -97,18 +101,21 @@ export function buildOverlayInstances(
       sprite = type.sprite ? library?.sprites[type.sprite] : undefined;
       frameIndex = cells.data[slot]!;
     }
+    const bridge = !isRubble && type.highBridge ? highBridgeCell(frameIndex, x, y) : undefined;
+    if (bridge) frameIndex = bridge.frame;
     const frame = isRubble || frameIndex < type.frames ? sprite?.frames[frameIndex] : undefined;
     if (!sprite || !frame) {
       missingTypes.add(isRubble ? `rubble:${rubble.get(slot)}` : id);
       continue;
     }
+    const level = terrain.levels[cell] ?? 0;
     const anchor = objectAnchor({
       kind: 'overlay',
       type: id,
       x,
       y,
-      z: terrain.levels[cell] ?? 0,
-      drawOffset: type.drawOffset,
+      z: level,
+      drawOffset: bridge ? [type.drawOffset[0], type.drawOffset[1] - bridge.lift] : type.drawOffset,
     });
     const paletteKey = palette(type.palette, isRubble ? false : type.remap);
     const shadow = sprite.shadows?.[frameIndex];
@@ -132,6 +139,7 @@ export function buildOverlayInstances(
       glint: !isRubble && type.tiberium === true ? 1 : undefined,
       unlit: !isRubble && type.tiberium === true,
       lighting: type.lighting,
+      light: bridge ? deckLight(level) : undefined,
       deckHeight: !isRubble && isHighBridge(id) ? HIGH_BRIDGE_HEIGHT : undefined,
       gradeExempt: spriteClassGradeExempt(atmosphere, !isRubble && type.tiberium ? 'ore' : 'overlay'),
     });
@@ -157,18 +165,28 @@ export class OverlayInstanceCache {
     paletteKey: string,
     palette: (key: string, remap: boolean) => string,
     atmosphere: Pick<AtmosphereProfile, 'airless'> = {},
+    /** The map's [Lighting] in force; bridge decks are lit four levels above their owner cells. */
+    lighting?: { ambient: number; ground: number; level: number },
   ): boolean {
     // Libraries extracted before the overlay section existed cannot replace the map's art yet.
     if (!library?.overlays) cells = null;
+    const lightKey = lighting ? `${lighting.ambient},${lighting.ground},${lighting.level}` : '';
     const key = cells
-      ? `${cells.revision}:${cells.originX}:${cells.originY}:${cells.width}:${cells.height}:${paletteKey}:${JSON.stringify(cells.rubble ?? [])}:${spriteClassGradeExempt(atmosphere, 'ore')}`
+      ? `${cells.revision}:${cells.originX}:${cells.originY}:${cells.width}:${cells.height}:${paletteKey}:${JSON.stringify(cells.rubble ?? [])}:${spriteClassGradeExempt(atmosphere, 'ore')}:${lightKey}`
       : null;
     if (key === this.key && library === this.library) return false;
     this.key = key;
     this.library = library;
     this.active = cells !== null;
     this.instances = cells
-      ? buildOverlayInstances(cells, library, this.terrain, palette, atmosphere)
+      ? buildOverlayInstances(
+          cells,
+          library,
+          this.terrain,
+          palette,
+          atmosphere,
+          lighting ? (level) => highBridgeLight(lighting, level) : undefined,
+        )
       : { pages: new Map(), missingTypes: new Set() };
     return true;
   }
