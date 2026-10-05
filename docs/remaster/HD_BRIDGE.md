@@ -201,16 +201,16 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   that never happens the view is shown after 20 seconds with what it has, with a console warning. Once shown it stays
   for the match; another match (the logic frame starts over, or another map) starts out of sight again.
 - **Nothing heavy on the presenting thread.** Smooth voxel meshes are built by a small pool of Workers
-  (`src/ra2/voxelSmoothPool.ts`, `voxelSmoothWorker.ts`); a model draws nothing until its mesh is there, exactly like a
-  model whose file is still loading. Out of sight a sprite layer waits for its material page instead of being built
-  twice. Decoded atlas pages are copied to the GPU in strips (`src/pageUpload.ts`) instead of 253 MiB in one call:
-  8 M pixels per frame while the view is shown (up to twice that when a frame comes late). Out of sight the bridge sets the pace: behind the loading screen
+  (`packages/hd-renderer/src/ra2/voxelSmoothPool.ts`, `voxelSmoothWorker.ts`); a model draws nothing until its mesh
+  is there, exactly like a model whose file is still loading. Out of sight a sprite layer waits for its material
+  page instead of being built twice. Decoded atlas pages are copied to the GPU in strips
+  (`packages/hd-renderer/src/pageUpload.ts`) instead of 253 MiB in one call: 8 M pixels per frame while the view is
+  shown (up to twice that when a frame comes late). Out of sight the bridge sets the pace: behind the loading screen
   (the scenario has no objects yet) everything is built and uploaded as it arrives; from the first objects on, when
-  the game's own picture is or is about to be on screen, one new kind of art per frame
-  (`LiveView.newArtPerFrame`: each brings shaders that are built in the frame that first draws it, and a whole
-  opening in one frame froze the page, the game's picture included, for a second) and the same 8 M pixels of
-  pages per frame (`LiveView.hiddenUploadPixels`). Sprite material pages no longer keep their decoded bitmap after the
-  upload.
+  the game's own picture is or is about to be on screen, one new kind of art per frame (`LiveView.newArtPerFrame`:
+  each brings shaders that are built in the frame that first draws it, and a whole opening in one frame froze the
+  page, the game's picture included, for a second) and the same 8 M pixels of pages per frame
+  (`LiveView.hiddenUploadPixels`). Sprite material pages no longer keep their decoded bitmap after the upload.
 - **What the last match showed is prepared behind the loading screen.** The bridge stores the kinds of object of a
   match's first five minutes in `localStorage` (`src/ui/pages/game/hdWarmStore.ts`: rules type, engine image, colour
   scheme and whether a civilian house owns it; never positions or counts): one list per map, and for maps not
