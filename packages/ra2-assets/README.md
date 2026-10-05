@@ -1517,6 +1517,22 @@ in every frame, preserving debris over transparency or neutral smoke. This mode 
 late-debris processing. Add `--anims EXPLOLRG,TWLT070` to limit either mode to those anims (default: all anims on the
 selected pages); per-page pixel counts are printed and pages are still installed atomically through `cache_farm.install_file`.
 
+## Clean HD page of a native anim (Python)
+
+`python/effect_clean_page.py` gives an anim without a redrawn flipbook an `effects-hd.json` entry made only from its
+own indexed frames: coverage is the bilinear magnification of the opaque mask sharpened with
+`smoothstep(0.35, 0.65)`, colour the coverage-weighted mean of the opaque texels in linear light (the filter the live
+indexed-card shader applies), stored premultiplied at 2 (or 3, 4) texels per native pixel with the native frame count,
+order and canvas-centre offsets; empty frames stay null. The page `effects-hd-clean-<anim>-<n>.png` and the patched
+`effects-hd.json` are installed into a copy-on-write farm through `cache_farm`, never into the base cache; running it
+again, or packing an accepted redraw of the same anim later, replaces the entry.
+
+```sh
+python3 -B packages/ra2-assets/python/effect_clean_page.py --effects "$FARM/_library/common/effects" \
+  --farm "$FARM" --anim OREGATH
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_effect_clean_page.py'
+```
+
 ## Frozen live-pair review tools (Python)
 
 `python/live_pair_metrics.py` reads `orig-NN.png` / `hd-NN.png` captures of the whole 1152x744 guest frame from
@@ -2041,6 +2057,10 @@ match draws besides its units and buildings, so the live renderer can draw the e
   with the timing the engine derives (`frameCount` = art `End=` or the SHP's frame count, halved for `Shadow=yes`;
   `rateFrames` from `Rate=`/`Normalized=`, see `animRateFrames`), translucency, layer, flat and draw-offset flags,
   and the widths of its visible and hot pixels;
+- SHP art the executable loads by file name instead of through rules or art (`ENGINE_ANIM_ART`): `OREGATH`, the 8 x 15
+  frames of sparks YR 1.001's unit draw blits under a harvesting miner (name at `0x845904`, loaded at `0x73CED6`). It
+  is recorded under `anims` with the anim defaults and gets no garnish table row, because the engine never plays it as
+  an AnimClass;
 - projectiles with art (SHP frames, `Rotates=`, or a voxel model), VoxelAnims debris models, particle art, every
   `[OverlayTypes]` and `[SmudgeTypes]` entry, WalkRate/IdleRate of SHP vehicles and the ore storage buildings.
 

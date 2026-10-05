@@ -539,6 +539,7 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
       ...(object.imageType ? { imageType: object.imageType } : {}),
       ...(object.nativeHidden !== undefined ? { nativeHidden: object.nativeHidden } : {}),
       ...(object.translucent !== undefined ? { translucent: object.translucent } : {}),
+      ...(object.underlay !== undefined ? { underlay: { ...object.underlay } } : {}),
       owner: object.owner,
       x: object.x,
       y: object.y,

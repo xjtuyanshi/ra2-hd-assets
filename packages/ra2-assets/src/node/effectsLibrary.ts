@@ -788,6 +788,14 @@ export function animGraph(rules: IniFile, art: IniFile): AnimGraph {
 
 // ------------------------------------------------------------------------------------------------ collection
 
+/**
+ * SHP art the executable loads by file name instead of through [Animations] or an art key. YR 1.001's unit draw
+ * (0x73CEC0) loads OREGATH.SHP once (name at 0x845904, load at 0x73CED6) and blits it under a harvesting miner with the
+ * anim palette (0x73D276). Such art has no art section, so it is collected with the anim defaults; it gets no garnish
+ * table row because the engine never plays it as an AnimClass.
+ */
+export const ENGINE_ANIM_ART: readonly string[] = ['OREGATH'];
+
 /** One theater's view of the install. */
 interface TheaterView {
   id: TheaterId;
@@ -893,7 +901,7 @@ export function collectEffects(installs: readonly { theater: TheaterId; inst: In
   const animPal = primary.inst.palette('anim.pal').rgb;
   const unitPal = primary.inst.palette(THEATERS[primary.id].unitPalette).rgb;
   let usesUnit = false;
-  for (const id of [...graph.ids].sort()) {
+  for (const id of [...new Set([...graph.ids, ...ENGINE_ANIM_ART])].sort()) {
     const sec = art.getSection(id);
     const image = sec?.getString('Image', '').trim() || id;
     const altPalette = secBool(sec, 'AltPalette');
@@ -961,6 +969,10 @@ export function collectEffects(installs: readonly { theater: TheaterId; inst: In
     entry.hotW = stats?.hotW ?? 0;
     entry.visW = stats?.visW ?? 0;
     anims[id] = entry;
+    if (!graph.ids.has(id)) {
+      count('anims:engine');
+      continue;
+    }
     table[id] = classifyAnim({
       id,
       refs: graph.refs.get(id) ?? [],

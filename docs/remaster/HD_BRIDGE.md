@@ -484,6 +484,29 @@ selection, ownership and events. YR 1.001 UnitClass draw saves Type at `0x73D29C
 unloading HARV/CMIN draw HORV/CMON; absent or invalid fields and missing alternate art retain `type`. A rare poll
 inside the swap window can already see the unloading type for one snapshot. SCHP deployment is a separate policy.
 
+Optional object `underlay { art, frame, x, y, z }` is one frame of effect-library art the engine draws inside the
+object's own picture, right before its body: the art's canvas centre goes to the projection of the lepton point, the
+body covers it, and ground, overlays and shadows lie under it. YR emits it for the ore-gathering sparks
+(`src/games/yr/unitGatherState.ts`): UnitClass draw `0x73D0D1..0x73D283` blits `OREGATH.SHP` (loaded by name at
+`0x73CED6`) when the type is a Harvester (+`0xE0E`), the unit's harvesting flag (+`0x6D2`, written by the harvest
+mission at `0x73E87D`/`0x73E99A`/`0x73EB19`) is set, the locomotor's `Is_Moving_Now` is false, nothing targets it
+with a temporal weapon (+`0x278`) and neither chrono flag is set. The frame is
+`(FootClass +0x538 + CurrentFrame) % 15 + (7 - f8) * 15` with `f8` the body facing rounded to eight directions; the
+point is Location moved 30 leptons along that facing; the blit is opaque (flags `0x2A00`: centred, read-only Z test,
+ground gradient), with the anim palette and the unit's brightness. Its Z is the unit's adjustment minus 2, which on
+dumped native Z-buffers is two units in front of the ground of each screen row: every sprite pixel passes over ground,
+ore and the miner's own shadow, and only a terrain object's shadow written at the same Z cuts it. `Is_Moving_Now` is a COM call, so the reader
+evaluates the drive locomotor's (`0x4AFC20`: facing rotating, or moving with a head-to coordinate and a positive
+current speed) and the teleport locomotor's (`0x718080`) from their fields and reports nothing for any other
+locomotor. War Miner and Chrono Miner have `Harvester=yes`; the Slave Miner does not and never shows the sparks.
+Frozen native frames confirm the frame group, the pixel position and, with raw unit memory dumped at the same
+instant, the phase: the native picture is drawn before the logic tick the reader sees, so at the same frozen instant
+it shows the phase of `CurrentFrame - 1`. The same lag makes the picture keep (or lack) the sparks for one tick
+after the harvesting flag changes. The live view draws the frame as a ground decal through the effect sprite layer
+(`objectUnderlayCard` in `live/liveView.ts`), pulled in front of the unit shadow planes and behind upright bodies,
+with the native indexed art or, in the enhanced effect style, the `effects-hd.json` entry of the same id when one
+exists.
+
 Optional `nativeHidden` suppresses a complete object visual, including its shadows and HD extras. YR emits true
 for the proven UnitClass gate: nonzero tether byte, a validated building in radio link 0, effective or queued
 Unload 16, and canonical door booleans. It covers opening, closing, open and closed; it is independent of the

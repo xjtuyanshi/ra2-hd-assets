@@ -409,6 +409,19 @@ UnloadingClass at `0x73D2BA`, then swaps Type at `0x73D2C4` and restores it at `
 therefore draw HORV/CMON. Image changes rebuild the visual while retaining animation clocks; missing image art
 falls back to `type`.
 
+Optional `underlay { art, frame, x, y, z }` is one frame of effect-library art the engine draws inside the
+object's own picture right before its body; YR sends the ore-gathering sparks of a harvesting miner (`OREGATH`, see
+docs/remaster/HD_BRIDGE.md). `objectUnderlayCard` turns it into a ground-pass decal of the effect sprite layer at the
+engine's point: the body, standing above the ground, covers it where they overlap, and ore, ground and shadows stay
+under it. Unit shadows are depth-writing planes a little above the ground (`voxelShadow.ts`), over ordinary effect
+decals, so the underlay is pulled `UNDERLAY_DEPTH_PULL` (0.1 world units) along the view in front of the ground under
+each pixel: above every shadow layer, and behind a unit body from its third pixel row up (a body's depth is a card
+standing on its lowest row). The pull is applied to the anchor together with the decal's own lift, so the art stays on
+the engine's pixel. It is opaque, scene-lit with the art's palette (no glow lift: it turned the pale grains white in frozen
+pairs), follows the engine frame on every snapshot and is skipped for a hidden owner or a shrouded point. In the
+enhanced effect style an `effects-hd.json` entry of the same id replaces the pixels, held for the whole engine stage;
+its warm pixels are self-lit like other HD flipbooks, which is what keeps the sparks orange and readable.
+
 Optional `nativeHidden` suppresses the complete live object, including shadows and HD extras. The YR reader
 uses this for tethered UnitClass vehicles whose validated building radio link has effective or queued Unload 16
 and canonical door booleans. All four door states qualify. Optional `translucent` is body opacity: the reader
