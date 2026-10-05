@@ -513,15 +513,46 @@ observes its removal. However, the wait path can render again after the incremen
 fixed one-frame picture lag is not established.
 
 LiveView uses a bounded presentation heuristic: a drawable building not selling or explicitly hidden keeps
-its last visual only for the first missing snapshot's logic frame, provided that frame is no more than one tick
-after its last observation. It expires as soon as that missing frame advances; same-frame polls do not extend
-the lifetime, and larger frame gaps or a rollback do not resurrect it. Pointer/UID replacement cancels the old
-visual. The cached descriptor and body frame stay frozen; no freed native pointer is read. Positive last-sampled
+its last visual through the logic frame after the last one it was published in. Repeated polls of a frame do not
+extend the lifetime, and larger frame gaps or a rollback do not resurrect it. Pointer/UID replacement cancels the
+old visual. The deadline counts from the last present frame, not from the first missing publication: a frozen
+NAPOWR death (pair stopped by a health <= 0 gate in the middle of logic frame 12407, then at the increments to
+12408 and 12409) showed the building already missing from a publication that still carried frame 12407, while the
+native picture kept the intact building at the 12408 stop and dropped it at 12409. Counting from the first
+missing publication removed the HD building one stop early. The cached descriptor and body frame stay frozen; no freed native pointer is read. Positive last-sampled
 health is eligible because lethal damage and removal can both occur between polls, without publishing HP=0.
 Explicit selling/hidden states remove the cached visual immediately. This one-tick cache has synthetic regression
-coverage, including actual LiveView body/shadow queuing and disposal, but exact last-picture parity is
-`UNCERTAIN`, and live acceptance is `UNVERIFIED`. Exact parity would need coherent render descriptors tied to the
-native image's presentation boundary, not arbitrary post-logic polling or an invented multi-tick death timer.
+coverage, including actual LiveView body/shadow queuing and disposal. Frozen pairs after the change (YAPOWR: stop
+on health <= 0 in frame 11529, stop on the removal still in frame 11529, then the 11530 and 11531 increments)
+showed the building in the native picture and in HD at the first three stops and in neither at the fourth. The
+explosion that replaces it is not delayed and starts one stop earlier in HD. Parity at every presentation phase
+remains `UNCERTAIN`: it would need render descriptors tied to the native image's presentation boundary.
+
+## Presentation phase of discrete state
+
+The native main loop waits, renders, runs Logic AI and only then increments the logic-frame counter (render
+`0x55D8F2`, Logic AI `0x55DC9E`, increment `0x55DE73..0x55DE81`). A probe in the VM Worker that timestamped
+counter changes and changes of the primary surface for 100 ticks at normal speed (GAWEAP base, nothing scrolling)
+saw one presentation per tick, 4 to 17 ms before each increment, and none for the following 30 to 45 ms. The
+native picture therefore shows the state of counter value N-1 for about three quarters of the time the counter
+reads N, and a poll that reads the state after the increment is one tick ahead of the picture. Stopped exactly at
+an increment, the native framebuffer is always one logic frame older than the published state.
+
+Frozen same-frame pairs at one-frame steps show the consequence for every discrete change. GAWEAP entered
+Unload in a mid-tick publication that still carried frame 8711; the native delivery picture was absent at that stop
+and present four frames later. The state left Unload at the 8835 stop; the native picture still showed the
+delivery image there and the ordinary body at 8836. A building removed during frame 12407 was still intact in the
+native picture at the 12408 stop. A newly built infantryman, aircraft or the first frame of an explosion is in the
+published state one stop before it is in the native picture.
+
+LiveView compensates two building cases with one logic frame of history (`BuildingVisualHistory`): the last
+visual of a vanished building (previous section) and the delivery image, which is taken from the first
+publication of the previous logic frame. Only the first publication of a frame is used because later ones can
+already carry the next tick's change. With this rule YAWEAP showed the closed door at the 7479 (mid-tick) and 7480
+stops and the open one at 7481, and the open door at 7609 and the closed one at 7610, in the native picture and
+in HD alike. A frame gap, the first sighting of a building or a rollback draws the current state. Positions,
+creation and removal of units, and effects are not delayed: they lead the native picture by one logic frame at a
+counter stop.
 
 ## Update ownership and regressions
 

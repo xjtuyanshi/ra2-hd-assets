@@ -2067,12 +2067,14 @@ export class LiveView {
       this.queue(batch, card, !bib.remap);
     }
     const layers = type.building?.layers ?? EMPTY_LAYERS;
-    const deployingKey = object.unloading === 'roof' ? 'RoofDeployingAnim' : 'DeployingAnim';
-    const doorKey = object.unloading === 'roof' ? 'UnderRoofDoorAnim' : 'UnderDoorAnim';
-    const deploying = object.unloading
-      ? sprites[layers.find((layer) => layer.key === deployingKey)?.sprite ?? '']
-      : undefined;
-    const door = object.unloading ? sprites[layers.find((layer) => layer.key === doorKey)?.sprite ?? ''] : undefined;
+    // The native picture changes the delivery image one logic frame after the state (BuildingVisualHistory).
+    const unloading = this.buildingVisualHistory
+      ? this.buildingVisualHistory.shownUnloading(object, frame)
+      : object.unloading;
+    const deployingKey = unloading === 'roof' ? 'RoofDeployingAnim' : 'DeployingAnim';
+    const doorKey = unloading === 'roof' ? 'UnderRoofDoorAnim' : 'UnderDoorAnim';
+    const deploying = unloading ? sprites[layers.find((layer) => layer.key === deployingKey)?.sprite ?? ''] : undefined;
+    const door = unloading ? sprites[layers.find((layer) => layer.key === doorKey)?.sprite ?? ''] : undefined;
     // Delivery images are body replacements. Explicit construction/selling state still owns the art path
     // even when a library has no make sprite. The interior uses the native ground gradient.
     const delivering =
@@ -2101,7 +2103,7 @@ export class LiveView {
           type.foundation ?? [1, 1],
           type.building?.zShape,
           object.buildState,
-          delivering ? object.unloading : undefined,
+          delivering ? unloading : undefined,
           this.cache.depthTemplate,
         )
       : undefined;

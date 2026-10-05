@@ -213,7 +213,10 @@ native `buildingFrame` keeps the body stage and damage offset instead of restart
 progress does not animate this replacement SHP. The native inclusive cap uses the source `frameCount / 2`
 rounded down (foreground plus shadow array lengths when legacy metadata is absent). It can select the first
 source shadow-half frame at its boundary, rather than the last foreground frame. Queued Unload alone does not open the
-door unless CurrentMission is -1. Missing art pairs retain the normal body. A YR reader instance latches a
+door unless CurrentMission is -1. Missing art pairs retain the normal body. LiveView draws the pair one logic frame
+after the published state, at both ends: the image of a frame is the `unloading` value of the first publication of
+the previous logic frame (see [Presentation phase](research/painter-order.md#presentation-phase-of-discrete-state)).
+A YR reader instance latches a
 published roof during the same
 continuous effective Unload and reuses it only for NULL link 0; unreadable roof state still omits `unloading`.
 It resets when the mission leaves `16`, the building disappears or its UID/type pointer changes, pruning entries
@@ -531,13 +534,15 @@ reader revisions, and restore ordinary rendering when omitted. Neither rule prov
 window. Static predicates and their limits are in
 [Native draw eligibility](research/painter-order.md#native-draw-eligibility-and-body-translucency).
 
-When a building last reported with health <= 0 disappears, LiveView retains its frozen last visual only for the
-first missing snapshot's logic frame, provided the last observation is no more than one tick old. It expires as
-soon as that frame advances. Selling, pointer/UID replacement, larger frame gaps and rollback do not retain it;
-same-frame polls do not extend it. This is a bounded presentation heuristic: native prelogic rendering can leave
-a previous picture on screen, but another native render can occur after the frame
-increment. Exact last-picture parity is `UNCERTAIN`, with live acceptance `UNVERIFIED`; see
-[Last destroyed-building visual](research/painter-order.md#last-destroyed-building-visual).
+When a drawable building disappears, LiveView retains its frozen last visual through the logic frame after the
+last one it was published in, whatever its last health. The deadline counts from that last present frame, not
+from the publication that first missed the building: a poll can already miss it under the old frame number,
+because the engine removes it in the middle of a logic tick. Selling, pointer/UID replacement, larger frame gaps
+and rollback do not retain it; repeated polls of a frame do not extend it. This is a bounded presentation
+heuristic: native prelogic rendering leaves the previous picture on screen at the frame increment, but another
+native render can occur after it. Frozen same-frame pairs stopped at the increment match (see
+[Last destroyed-building visual](research/painter-order.md#last-destroyed-building-visual)); parity at every
+presentation phase is `UNCERTAIN`.
 
 ## Known limits
 

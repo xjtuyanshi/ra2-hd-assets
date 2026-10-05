@@ -5,6 +5,7 @@ import type { SpriteInstance } from '../src/ra2/sprites';
 import type { LibraryType } from '../../ra2-assets/src/library';
 import type { SpriteEntry, SpriteFrame } from '../../ra2-assets/src/manifest';
 import { LiveView, type LiveObject, type LiveSnapshot } from '../src/live/liveView';
+import { BuildingVisualHistory } from '../src/live/buildingVisualHistory';
 import { SpritePool } from '../src/live/spritePool';
 
 /** Real libraryBuildingSprites, buildup, layer, palette and queue paths; no GPU or game assets. */
@@ -93,6 +94,31 @@ function deliveryView() {
 }
 
 describe('live delivery building image', () => {
+  it('swaps to and from the delivery pair one logic frame after the published state', () => {
+    const h = deliveryView();
+    const history = new BuildingVisualHistory();
+    Object.assign(h.view, { buildingVisualHistory: history });
+    const bodies = (frame: number, unloading?: 'door') => {
+      h.object.unloading = unloading;
+      history.update({ frame, houses: [], objects: [{ ...h.object }], view: null });
+      const cards = h.draw(frame).cards;
+      return { body: cards[2]!.frame, depth: cards[2]!.nativeDepth, count: cards.length };
+    };
+    const closed = { body: h.sprites.body!.frames[0], count: 4 };
+    const open = { body: h.sprites.deploy!.frames[0], count: 5 };
+    expect(bodies(20)).toMatchObject(closed);
+    // State enters Unload: the ordinary body, its depth and no interior card for one more frame.
+    const first = bodies(21, 'door');
+    expect(first).toMatchObject(closed);
+    expect(first.depth).toMatchObject({ mode: 'body', base: 16 });
+    const second = bodies(22, 'door');
+    expect(second).toMatchObject(open);
+    expect(second.depth).toMatchObject({ mode: 'body', base: 36 });
+    // State leaves Unload: the delivery pair stays for one more frame.
+    expect(bodies(23)).toMatchObject(open);
+    expect(bodies(24)).toMatchObject(closed);
+  });
+
   it.each(['door', 'roof'] as const)(
     'replaces body and shadow with the %s pair, before ordinary active layers',
     (unloading) => {
