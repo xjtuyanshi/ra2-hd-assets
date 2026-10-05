@@ -261,10 +261,15 @@ export interface CellGrid {
 export type EngineLight = Pick<MapLightSource, 'position' | 'radius' | 'intensity' | 'tint'>;
 
 export interface CellLight {
-  /** Normalised intensity per cell, 0..2 (1 = the palette unchanged). */
+  /** Terrain intensity per cell, 0..2 (1 = the palette unchanged): the engine's I x M / 1000 (CellClass +0x10C). */
   intensity: Float32Array;
   /** Tint per cell (RGB interleaved), each channel 0..1 after normalisation by the largest one. */
   tint: Float32Array;
+  /**
+   * Object level per cell, 0..2: the engine's I alone (CellClass +0x10A), without the tint and without its largest
+   * channel M. Buildings, vehicles, infantry and aircraft read this field and add their own extra light.
+   */
+  level: Float32Array;
 }
 
 const toMille = (v: number): number => Math.round(v * 1000);
@@ -277,6 +282,10 @@ const toMille = (v: number): number => Math.round(v * 1000);
  *   R, G, B = 1000 C + sum(t f / 1000), each clamped to [0, 2000]; M = max(R, G, B);
  *   M * 65.536 < 66 (M <= 1 per-mille) gives a black cell; otherwise intensity = min(2000, I M / 1000) and
  *   tint = (R, G, B) / M.
+ * The relight routines (@0x484180 full, @0x484680 incremental) keep both values per cell: +0x10A = I (clamped), read by
+ * the object draws (units @0x73D06C, infantry @0x51940F, aircraft @0x41491E, buildings @0x43D163...), and
+ * +0x10C = I M / 1000, read by the terrain draws (@0x47F9F6...). `level` is the first, `intensity` the second: on a
+ * map whose largest tint channel is not 1 (Red/Green/Blue 0.8/0.8/0.75, or 1/1/1.5) objects and terrain differ by M.
  * Integer divisions truncate towards zero like the engine's idiv (negative lights such as NEGLAMP).
  * `falloffPower` 1 is the engine exactly; presenters may pass more (f := floor(1000 (f / 1000)^p)) to shape each light
  * as a tighter pool while keeping its centre value.
@@ -289,7 +298,7 @@ export function engineCellLight(
   falloffPower = 1,
 ): CellLight {
   const n = grid.width * grid.height;
-  const result = out ?? { intensity: new Float32Array(n), tint: new Float32Array(n * 3) };
+  const result = out ?? { intensity: new Float32Array(n), tint: new Float32Array(n * 3), level: new Float32Array(n) };
   const ambient = toMille(lighting.ambient);
   const base = [toMille(lighting.red), toMille(lighting.green), toMille(lighting.blue)] as const;
   const level = toMille(lighting.level);
@@ -306,6 +315,7 @@ export function engineCellLight(
       const c = y * grid.width + x;
       if (!grid.exists[c]) {
         result.intensity[c] = 0;
+        result.level[c] = 0;
         result.tint.fill(0, c * 3, c * 3 + 3);
         continue;
       }
@@ -331,6 +341,7 @@ export function engineCellLight(
       }
       I += level * grid.z[c]! - ground;
       I = clampInt(I, 0, 2000);
+      result.level[c] = I / 1000;
       R = clampInt(R, 0, 2000);
       G = clampInt(G, 0, 2000);
       B = clampInt(B, 0, 2000);
@@ -350,6 +361,39 @@ export function engineCellLight(
 }
 
 const clampInt = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v);
+
+/**
+ * Shade rows of the engine's lighting converter for a normalised tint: 53 when its per-mille channels sum to 2000 or
+ * more, 27 otherwise (LightConvertClass creation @0x544F1E..0x544F2D).
+ */
+export function engineShadeRows(tint: readonly [number, number, number]): number {
+  return Math.round(tint[0] * 1000) + Math.round(tint[1] * 1000) + Math.round(tint[2] * 1000) >= 2000 ? 53 : 27;
+}
+
+/**
+ * The palette multiplier the engine really draws for a cell intensity (0..2): intensities are not applied
+ * continuously but pick one of the converter's shade rows.
+ *   - The table builder (@0x556090) fills row s with palette x 2 s C / (rows - 1) for each tint channel C (16.16
+ *     fixed point, accumulated per row @0x55649C..0x5564CB), so row (rows - 1) / 2 is the unchanged palette and one
+ *     row is 1/26 of it with 53 rows. (A fourth factor, s / K up to row K = max(floor(0.15 rows) - 1, 0), is handed
+ *     to the per-format table writers together with the converter's per-index flag table @0x5561FC..0x5562A8; which
+ *     palette entries take it was not established, and it is 1 from row 7 on, so it is not modelled.)
+ *   - The blitters' lookup (@0x420140) turns two light bytes into the row: lo x hi x (rows - 1) / 32258, truncated
+ *     (32258 = 2 x 127 x 127; 127 is the neutral byte), clamped to the last row.
+ * With the neutral second byte the row is trunc(byte x 127 x (rows - 1) / 32258) for the intensity's byte, taken here
+ * as trunc(intensity x 127): that conversion was not located in the executable. Frozen native frames agree with the
+ * truncation: an exact-intensity render of the same instant is 1.03-1.04 of the native ground at Ambient 0.98 and
+ * 1.13 at 0.57 (Transylv), where truncation plus the 16-bit surface predict 1.04 and 1.10 and rounding predicts less
+ * than at 0.98.
+ */
+export function engineShade(intensity: number, rows = 53): number {
+  if (!(intensity > 0)) return 0;
+  const last = rows - 1;
+  // Epsilons keep exact per-mille products (1.000 x 127) on their own side of the truncation.
+  const byte = Math.min(254, Math.trunc(intensity * 127 + 1e-6));
+  const row = Math.min(last, Math.trunc((byte * 127 * last) / 32258 + 1e-9));
+  return (2 * row) / last;
+}
 
 /**
  * HD anchor from engine brightness to linear light relative to clear noon. The palette scales display values, so
@@ -406,20 +450,28 @@ export function nightEvidence(lights: readonly Pick<MapLightSource, 'intensity' 
 }
 
 /**
- * Stage a map from its own [Lighting]. The class comes from the authored base ambient `base = Ambient - Ground` (the
- * part every cell shares) and the tint = RGB / max(RGB), plus lamp posts as evidence:
+ * Stage a map from its own [Lighting]. The engine lights every map with one cell formula (engineCellLight), so the
+ * renderer's map light grade owns brightness and tint on every map; the class only chooses the key light's style and
+ * whether the night dressing (lamps, lamp heads, lit windows) shows. It comes from the object level the game really
+ * shows at the map's typical height, `eff = Ambient - Ground + Level x medianZ`, and the tint = RGB / max(RGB), plus
+ * lamp posts as evidence:
  *   lunar is airless, neutral daylight at 12:00; its low ambient dims daylight rather than selecting night dressing;
- *   night when base <= 0.70, or base <= 0.76 with a blue tint (b - (r + g) / 2 >= 0.15) or with two or more lamp
- *   posts (unless the tint is warm), at 22:00;
- *   dusk when base <= 0.76 with a warm tint (r - b >= 0.15), at 18:12;
+ *   night when eff <= 0.72, or eff <= 0.76 with a blue tint (b - (r + g) / 2 >= 0.15) or with two or more lamp
+ *   posts (unless the tint is warm), at 12:00 like a day map: the game has no night, it draws a dark map, so the
+ *   renderer lights it as any other and adds the dressing;
+ *   dusk when the authored base `Ambient - Ground` <= 0.76 with a warm tint (r - b >= 0.15) and the map is not night,
+ *   at 18:12;
  *   day otherwise, at 12:00 (the 0.8 maps with a yellow grade, such as invasion.mmx, are sunny day maps).
- * Level x height is left out of the class on purpose: night maps with raised ground (XMP06T2 "Urban Rush", Level 0.039
- * at median height 4; the snow and jungle night maps at Level 0.028-0.029 on heights 5-6) would otherwise read as day.
- * Evidence: Ambient over all 220 stock scenarios with a [Lighting] section (all-scenarios-lighting.tsv, see the
- * research doc) clusters at 0.6 (5 maps), 0.7 (28), 0.8 (66), 0.9 (40) and 1.0 (77); the 0.55-0.70 maps are the ones
- * built as night maps (lamp posts, blue tints, NEGLAMP darkening), 0.8+ are day maps with a colour grade.
- * nightLevel (night maps): clamp(engineToLinear(Ambient - Ground + Level x medianZ), 0.26, 0.40), what unlit ground
- * at the map's typical height shows, kept readable; otherwise DEFAULT_NIGHT_LEVEL.
+ * Level x height belongs in the night class: frozen native / HD pairs of the owner's game show that a low Ambient
+ * with a strong Level is a normally lit picture where players stand. XDeadman (Ambient 0.68, Level 0.028, base at
+ * height 8: object level 0.90) and XMP13S4 (0.68 + 0.028 x 5 = 0.82) have bright native frames; staged as night by
+ * their Ambient alone, vehicles showed at 0.59-0.67 and infantry at 0.63-0.73 of the native luminance. An earlier
+ * classifier dropped the height term to keep such "built as night" maps (lamp posts, blue tints) under the night
+ * dressing; the game does not draw them dark, so they are day maps with the engine's own grade and lamp pools.
+ * Evidence for the Ambient clusters: Ambient over all 220 stock scenarios with a [Lighting] section
+ * (all-scenarios-lighting.tsv, see the research doc) clusters at 0.6 (5 maps), 0.7 (28), 0.8 (66), 0.9 (40), 1.0 (77).
+ * nightLevel (night maps): clamp(engineToLinear(eff), 0.26, 0.40), what unlit ground at the map's typical height shows
+ * in linear light (the night dressing scales its lamp pools by it); otherwise DEFAULT_NIGHT_LEVEL.
  * Lunar daylight leaves ambient, height and light sources to the engine-exact palette grade. Its neutral sun/sky
  * have no exposure multiplier, so the map dims the art once and retains its local lamp pools.
  */
@@ -448,13 +500,11 @@ export function mapAtmosphere(
   const warm = tint[0] - tint[2] >= 0.15 - 1e-9;
   const epsilon = 1e-9;
   let kind: AtmosphereProfile['kind'] = 'day';
-  if (
-    base <= 0.7 + epsilon ||
-    (base <= 0.76 + epsilon && !warm && (blueShift >= 0.15 - epsilon || evidence.lamps >= 2))
-  )
+  if (eff <= 0.72 + epsilon || (eff <= 0.76 + epsilon && !warm && (blueShift >= 0.15 - epsilon || evidence.lamps >= 2)))
     kind = 'night';
   else if (base <= 0.76 + epsilon && warm) kind = 'dusk';
-  const hour = kind === 'night' ? 22 : kind === 'dusk' ? 18.2 : 12;
+  // Night maps are staged like day maps: the engine grade is their darkness (see the function comment).
+  const hour = kind === 'dusk' ? 18.2 : 12;
   const nightLevel =
     kind === 'night'
       ? Math.min(NIGHT_LEVEL_RANGE[1], Math.max(NIGHT_LEVEL_RANGE[0], engineToLinear(eff)))

@@ -521,12 +521,13 @@ export class LightField {
 
   /**
    * Re-render the field when needed. `staticGain` scales static lights and, unless it is always on, the base grid (0 by
-   * day).
+   * day). `baseNightGain` gives the base grid its own night gain where the two differ (a renderer whose static night
+   * dressing stays on while the base grid's light is owned by something else); absent, it follows `staticGain`.
    */
-  update(now: number, renderer: WebGPURenderer, staticGain: number): boolean {
+  update(now: number, renderer: WebGPURenderer, staticGain: number, baseNightGain = staticGain): boolean {
     this.staticGain = staticGain;
     this.staticGainNode.value = staticGain;
-    const baseGain = this.baseStrength * (this.baseFollowsNight ? staticGain : 1);
+    const baseGain = this.baseStrength * (this.baseFollowsNight ? baseNightGain : 1);
     this.baseGain.value = baseGain / this.encodeScale;
     if (this.staticDirty) {
       this.staticDirty = false;

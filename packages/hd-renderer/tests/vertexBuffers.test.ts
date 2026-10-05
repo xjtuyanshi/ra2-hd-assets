@@ -266,14 +266,25 @@ describe('r186 vertex and uniform binding budget', () => {
           const label = `${mesh.name}: ${hd ? 'HD' : 'indexed'}, ${materials ? 'materials' : 'plain'}`;
           // Compile the real TSL graph: uploading an attribute alone does not prove the fragment shader reads it.
           expect(exemptionLines.join('\n'), label).toMatch(/spriteGradeExempt\s*=\s*\w+\.z;/);
-          // The per-instance flag chooses unit palette light; default instances keep the existing class grade.
+          // The per-instance flag chooses the instance's own light alone (no map grade); default instances keep the
+          // class grade: the map light read once, its alpha (the object level) plus the instance's extra light for
+          // objects, its rgb times the instance light for terrain-class art.
           const exemption = fragmentShader.match(
-            /if \( \( spriteGradeExempt > 0\.5 \) \) \{\s*(\w+) = vec3<f32>\( 1\.0, 1\.0, 1\.0 \);\s*\} else \{([\s\S]*?)\n\s*\}/,
+            /if \( \( spriteGradeExempt > 0\.5 \) \) \{\s*(\w+) = vec3<f32>\( (\w+)\.y \);\s*\} else \{([\s\S]*?)\n\s*\}/,
           );
           expect(exemption, label).not.toBeNull();
-          expect(exemption![2], label).toContain('mix(');
-          expect(exemption![2], label).toContain('max(');
-          expect(exemption![2], label).toContain('textureSample(');
+          const [, , flags, graded] = exemption!;
+          expect(graded, label).toContain('mix(');
+          expect(graded!.match(/textureSample\(/g), label).toHaveLength(1);
+          // Objects: level + (light - 1), added like the engine's extra unit light, never the largest tint channel.
+          expect(graded, label).toMatch(new RegExp(`\\.w \\+ \\( ${flags}\\.y - 1\\.0 \\)`));
+          expect(graded, label).toMatch(new RegExp(`\\.xyz \\* vec3<f32>\\( ${flags}\\.y \\)`));
+          expect(graded, label).not.toContain('max(');
+          // The look's added light (sun highlight, glass glint, mirrored sky) is scaled by what the map light does
+          // to white, so a dark map darkens relit art as a whole; without material data there is nothing to scale.
+          const gradeLight = fragmentShader.match(/spriteGradeLight/g)?.length ?? 0;
+          if (materials && mesh === layer.mesh) expect(gradeLight, label).toBeGreaterThanOrEqual(5);
+          else if (!materials) expect(gradeLight, label).toBe(0);
           expect(fragmentShader, label).not.toContain('spriteReceivedLightGain');
         }
         dispose(layer.mesh);

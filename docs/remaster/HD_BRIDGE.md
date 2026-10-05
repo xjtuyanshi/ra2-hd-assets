@@ -307,14 +307,14 @@ Game art and derived images remain outside Git.
 
 Start a development server whose game root holds a skirmish setup (a scratch copy of the installation with an edited
 `RA2MD.INI` `[Skirmish]` section, as described in `scripts/remaster/perf/README.md`), then open
-`/?start-page=battle&hd=1`. By default the HD lighting follows the map's own `[Lighting]` (day, dusk or night maps, see
-`pnpm hd:lights`); `hd-time=<hours>` overrides the hour. Decorative weather is off by default;
+`/?start-page=battle&hd=1`. By default the HD lighting follows the map's own `[Lighting]` (the engine's cell light on
+every map; day, dusk or night staging, see `pnpm hd:lights`); `hd-time=<hours>` overrides the hour. Decorative weather is off by default;
 `hd-weather=rain|snow|storm` enables it, with optional `hd-weather-intensity=<0..1>` (default 0.8 for rain/snow,
 1 for storm; finite values are clamped, invalid intensities use the default, unknown weather selects clear).
 Snow stays dry and ground weather excludes building foundations and steep cells.
 `hd-look=<preset>` (`faithful|golden|cinematic`)
-applies the preset and, on day maps, its suggested hour unless `hd-time` is given (dusk and night maps keep their own
-`[Lighting]` hour; `cinematic` is the approved look with medium cooling); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=enhanced` the modern water;
+applies the preset and its suggested hour unless `hd-time` is given (authored dusk maps keep their own hour; night
+maps are day maps with night dressing and take it; `cinematic` is the approved look with medium cooling); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=enhanced` the modern water;
 `hd-vlook=remaster` selects the remaster voxel look; `hd-vproj=<dir>` selects vehicle redraw projection atlases under
 the HD cache (e.g. `vehicles-hd`); `hd-rect=x,y,w,h`
 overrides the tactical rectangle (default: the frame minus YR's 168 px sidebar and 32 px command bar).
@@ -446,9 +446,13 @@ native anim frame/stage/alpha/layer/owner/attachment/buildingAnim and bullet typ
 the table also lists the remaining optional fields alongside implemented observer fields.
 
 `GameRenderState.lighting` is forwarded unchanged as `LiveSnapshot.lighting`: current ambient, selected ground/level
-in `[Lighting]` fractions, normal `tint`, raw palette `override`, `event`, and storm active/pending/ending/target-cell
-state. `src/games/yr/sceneLighting.ts` validates the ScenarioClass pointer and reads native words/statics; invalid
-or unavailable reads publish null, never fabricated zero light. Lighting participates in the YR same-frame cache
+in `[Lighting]` fractions, normal `tint`, raw palette `override`, `event`, storm active/pending/ending/target-cell
+state, and `sources`: the local light sources the engine applies to cells right now (position, reach, intensity and
+RGB tint in engine units), read from the game's own LightSourceClass vector with its switched-off and detail-gated
+lights left out. The map light grade takes them on every map, including the many without a `lights.json` sidecar.
+`src/games/yr/sceneLighting.ts` validates the ScenarioClass pointer and reads native words/statics; invalid
+or unavailable reads publish null, never fabricated zero light, and an unreadable light vector leaves `sources`
+absent (the view then keeps the sidecar's types on the standing buildings) rather than empty. Lighting participates in the YR same-frame cache
 key, so event transitions can publish without waiting for the next logic-frame number. No event timing is inferred
 from animations. See [Scene lighting events](research/yr-scene-lighting.md#scene-lighting-events) for addresses,
 independent palette/height selection priorities and the limits of global state versus per-cell engine caches.
@@ -576,8 +580,9 @@ increment. Exact last-picture parity is `UNCERTAIN`, with live acceptance `UNVER
   optional `infantryDrawFacingRaw`. Invalid branch/target reads retain primary facing. Spy disguise type substitution
   remains unprojected. Real-game same-moment HD build/sell/infantry comparison is separate
   acceptance from reader tests and executable disassembly.
-- The day-time brightening around the map's lamp posts and other light sources (the engine adds them to every cell's
-  light, up to 1.34x next to an INGALITE post) is not part of the live view; it belongs to the renderer's map lighting.
+- The brightening around the map's lamp posts and other light sources (the engine adds them to every cell's
+  light, up to 1.34x next to an INGALITE post) belongs to the renderer's map lighting, which the live view feeds with
+  the game's active light list (`lighting.sources`).
 - The normalized anim rate (`NORMALIZED_RATE_FACTOR`), the build-up rate, the smoke kinematics and the shroud edge
   (`EDGE_INSET`, `EDGE_SOFTNESS`) were fitted on XMP29U2 skirmishes at the development settings; other game speeds may
   need the bridge's exact values. The build-up rate estimate is used only when engine H2 state is unavailable.

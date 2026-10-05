@@ -236,12 +236,12 @@ export interface LiveViewOptions extends VoxelUnitsOptions {
   forceWebGL?: boolean;
   /** 16 remap colours (palette indices 16..31) for a colour scheme index; defaults to ramps of HOUSE_COLORS. */
   houseRemap?: (colorIndex: number) => [number, number, number][];
-  /** Hour of day; undefined = the map's own staging (its [Lighting]: noon for day maps, 22:00 for night maps). */
+  /** Hour of day; undefined = the map's own staging (noon; 18:12 for authored dusk). */
   timeOfDay?: number;
   /**
-   * Hour for maps whose own [Lighting] reads as day (a look preset's suggested hour, e.g. cinematic 16.5); dusk and night
-   * maps keep their own staging hour. `timeOfDay` overrides both. A preset hour applied to every map rendered stock
-   * night maps (ambient about 0.6, lamp posts) as a sunny afternoon, so the night presentation never appeared in play.
+   * Hour for every map but authored dusk (a look preset's suggested hour, e.g. cinematic 16.5); dusk keeps its own
+   * staging hour. `timeOfDay` overrides both. Night maps take it too: the engine's own grade makes them dark at any
+   * hour, as the game draws them, and their night dressing (lamps, lit windows) does not depend on the hour.
    */
   dayHour?: number;
   weather?: Weather;
@@ -290,15 +290,17 @@ export interface LiveDiagnostics {
   smudgeTypesWithoutArt: string[];
 }
 
-/** Initial hour: an explicit time, else the preset's day hour on atmospheric day maps, else the map's staging. */
+/**
+ * Initial hour: an explicit time, else the preset's day hour, else the map's staging. Only authored dusk keeps its own
+ * hour under a preset: night maps are lit like day maps (the engine grade is their night, lighting.ts profileKeys) and
+ * airless maps keep their noon brightness at any hour (Lighting.update), so both take the hour the look was tuned at.
+ */
 export function liveTimeOfDay(
   atmosphere: Pick<AtmosphereProfile, 'kind' | 'hour' | 'airless'>,
   options: Pick<LiveViewOptions, 'timeOfDay' | 'dayHour'>,
 ): number {
   if (options.timeOfDay !== undefined) return options.timeOfDay;
-  return atmosphere.kind === 'day' && !atmosphere.airless && options.dayHour !== undefined
-    ? options.dayHour
-    : atmosphere.hour;
+  return atmosphere.kind !== 'dusk' && options.dayHour !== undefined ? options.dayHour : atmosphere.hour;
 }
 
 /** Runtime presentation changes (no reload): time, weather and the night dressing switches. */
@@ -719,6 +721,9 @@ export class LiveView {
    * first snapshot, which always replaces the sidecar's map-placed sources (even when it has none).
    */
   private lightKey: string | null = null;
+  /** Whether the engine supplied the grade's light list when lightKey was last applied, and that list's identity. */
+  private lightKeyEngine = false;
+  private engineLightKey: string | null = null;
   private windowKey: string | null = null;
   private blockedKey: string | null = null;
 
@@ -1087,6 +1092,20 @@ export class LiveView {
   private updateNightSources(snapshot: LiveSnapshot): void {
     const dressing = this.world.dressing;
     const types = this.cache.lights?.types;
+    // The engine's own active light sources, when the host reads them: the map light grade follows the game on
+    // every map, including the many without a light sidecar (whose lamp posts otherwise lit nothing in HD), and it
+    // follows lights the engine switches off. The sidecar's type table below remains for the HD dressing (lamp heads,
+    // pools of a forced night) and as the grade's source when the host reports no list.
+    const engine = snapshot.lighting?.sources;
+    if (engine) {
+      const key = engine.map((s) => `${s.x},${s.y},${s.z}:${s.radius}:${s.intensity}:${s.tint.join(',')}`).join(';');
+      if (key !== this.engineLightKey) {
+        this.engineLightKey = key;
+        this.world.mapLight?.setSources(
+          engine.map((s) => ({ position: [s.x, s.y, s.z], radius: s.radius, intensity: s.intensity, tint: s.tint })),
+        );
+      }
+    }
     if (!dressing) return;
     const buildings = snapshot.objects.filter((o) => o.kind === 'building' && !o.nativeHidden);
     const shrouded = (b: LiveObject) => this.shroud.isLocationShrouded(b.x, b.y, b.z);
@@ -1114,9 +1133,10 @@ export class LiveView {
         });
       }
       const key = sources.map((s) => `${s.type}@${s.cell[0]},${s.cell[1]}`).join(';');
-      if (key !== this.lightKey) {
+      if (key !== this.lightKey || !!engine !== this.lightKeyEngine) {
         this.lightKey = key;
-        dressing.setSources(sources);
+        this.lightKeyEngine = !!engine;
+        dressing.setSources(sources, !engine);
       }
     }
     // HD street lamps never stand inside a building: foundations of the visible buildings standing now block their

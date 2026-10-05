@@ -7,6 +7,8 @@ import {
   classifyTileSurface,
   engineCellLight,
   engineLightDelta,
+  engineShade,
+  engineShadeRows,
   enginePerMille,
   enginePercent,
   engineToLinear,
@@ -150,6 +152,10 @@ describe('engineCellLight', () => {
     // Centre: I = 1000 + 500 = 1500; RGB = 1050/850/690; M = 1050; I * M / 1000 = 1575.
     const centre = at(5, 5);
     expect(centre[0]).toBeCloseTo(1.575, 6);
+    // Objects read I itself (CellClass +0x10A), without M.
+    expect(out.level[5 * 24 + 5]).toBeCloseTo(1.5, 6);
+    expect(out.level[5 * 24 + 12]).toBeCloseTo(1.276, 6);
+    expect(out.level[23 * 24 + 23]).toBe(1);
     expect(centre[1]).toBe(1);
     expect(centre[2]).toBeCloseTo(850 / 1050, 6);
     expect(centre[3]).toBeCloseTo(690 / 1050, 6);
@@ -173,11 +179,35 @@ describe('engineCellLight', () => {
   it('clamps at 2000, at 0 for negative lights, and blacks out a zero tint', () => {
     const bright = engineCellLight(grid, XMP_LIGHTING, [lampAt(5, 5, { intensity: 2, tint: [2, 2, 2] })]);
     expect(bright.intensity[5 * 24 + 5]).toBe(2);
+    expect(bright.level[5 * 24 + 5]).toBe(2);
     const neg = engineCellLight(grid, XMP_LIGHTING, [lampAt(5, 5, { intensity: -1.5, tint: [0, 0, 0] })]);
     expect(neg.intensity[5 * 24 + 5]).toBe(0);
+    expect(neg.level[5 * 24 + 5]).toBe(0);
     const black = engineCellLight(grid, { ...XMP_LIGHTING, red: 0, green: 0, blue: 0 }, []);
     expect(black.intensity[0]).toBe(0);
     expect([...black.tint.slice(0, 3)]).toEqual([0, 0, 0]);
+    // A black tint blacks the terrain out; the object level does not depend on the tint.
+    expect(black.level[0]).toBe(1);
+  });
+
+  it('keeps the object level apart from the largest tint channel', () => {
+    // Red/Green/Blue 0.8/0.8/0.75 (HillBtwn): M = 800, so the terrain field is I x 0.8 and objects stay at I.
+    const dim = engineCellLight(
+      flatGrid(1, 1),
+      { ambient: 1, red: 0.8, green: 0.8, blue: 0.75, ground: 0.05, level: 0.008 },
+      [],
+    );
+    expect(dim.level[0]).toBeCloseTo(0.95, 6);
+    expect(dim.intensity[0]).toBeCloseTo(0.76, 6);
+    expect([...dim.tint]).toEqual([1, 1, Math.fround(0.9375)]);
+    // Blue 1.5 (XMP30S6): the terrain field is I x 1.5.
+    const blue = engineCellLight(
+      flatGrid(1, 1, 2),
+      { ambient: 0.75, red: 1, green: 1, blue: 1.5, ground: 0, level: 0.008 },
+      [],
+    );
+    expect(blue.level[0]).toBeCloseTo(0.766, 6);
+    expect(blue.intensity[0]).toBeCloseTo(1.149, 6);
   });
 
   it('leaves missing cells dark', () => {
@@ -186,6 +216,39 @@ describe('engineCellLight', () => {
     const out = engineCellLight(g, XMP_LIGHTING, []);
     expect(out.intensity[0]).toBe(1);
     expect(out.intensity[1]).toBe(0);
+  });
+});
+
+describe('engineShade', () => {
+  it('picks 53 shade rows unless the normalised tint sums below 2000 per mille', () => {
+    expect(engineShadeRows([1, 0.8, 0.68])).toBe(53);
+    expect(engineShadeRows([1, 0.5, 0.5])).toBe(53);
+    expect(engineShadeRows([1, 0.5, 0.499])).toBe(27);
+    expect(engineShadeRows([1, 1, 1])).toBe(53);
+  });
+
+  it('draws an intensity as a whole shade row: trunc(trunc(I x 127) x 127 x (rows - 1) / 32258)', () => {
+    // The unchanged palette and the clamp are exact rows.
+    expect(engineShade(1)).toBe(1);
+    expect(engineShade(2)).toBe(2);
+    expect(engineShade(2.5)).toBe(2);
+    expect(engineShade(0)).toBe(0);
+    expect(engineShade(-0.2)).toBe(0);
+    // Transylv 0.566: byte 71, row 14. XXmas 0.68: byte 86, row 17. XDeadman at height 8, 0.904: byte 114, row 23.
+    expect(engineShade(0.566)).toBeCloseTo(14 / 26, 12);
+    expect(engineShade(0.68)).toBeCloseTo(17 / 26, 12);
+    expect(engineShade(0.904)).toBeCloseTo(23 / 26, 12);
+    // Next to a lamp post, 1.34: byte 170, row 34.
+    expect(engineShade(1.34)).toBeCloseTo(34 / 26, 12);
+    // Never brighter than the continuous intensity, and at most one row plus one byte below it.
+    for (let i = 1; i <= 2000; i++) {
+      const shade = engineShade(i / 1000);
+      expect(shade).toBeLessThanOrEqual(i / 1000 + 1e-12);
+      expect(i / 1000 - shade).toBeLessThan(1 / 26 + 1 / 127);
+    }
+    // 27 rows: one row is 1/13 of the palette.
+    expect(engineShade(1, 27)).toBe(1);
+    expect(engineShade(0.566, 27)).toBeCloseTo(7 / 13, 12);
   });
 });
 
@@ -234,7 +297,8 @@ describe('mapAtmosphere', () => {
     expect(mapAtmosphere(L(1, 1, 0.8, 0.68), 2)).toMatchObject({ kind: 'day', hour: 12 });
     expect(mapAtmosphere(L(0.9, 1, 0.9, 0.9, 0.05, 0.008), 4)).toMatchObject({ kind: 'day' });
     const night = mapAtmosphere(L(0.6, 1, 1, 1, 0, 0.039), 2);
-    expect(night).toMatchObject({ kind: 'night', hour: 22 });
+    // A night map is lit like a day map (the engine grade is its darkness): staged at noon, not at a moonlit hour.
+    expect(night).toMatchObject({ kind: 'night', hour: 12 });
     expect(night.nightLevel).toBeGreaterThanOrEqual(0.26);
     expect(night.nightLevel).toBeLessThanOrEqual(0.4);
     expect(mapAtmosphere(L(0.68, 0.75, 0.75, 1.2), 0).kind).toBe('night');
@@ -291,24 +355,46 @@ describe('mapAtmosphere', () => {
     expect(sidecarAtmosphere({ lighting, cells, lights: [] })).toEqual(mapAtmosphere(lighting.normal, 3));
   });
 
-  // The stock night maps listed in docs/remaster/research/yr-scene-lighting.md, with their real [Lighting], median
-  // cell height (the extractor's missing-cell fill) and lamp posts (positive InvisibleInGame light sources).
-  const NIGHT_MAPS: [name: string, lighting: ReturnType<typeof L>, medianZ: number, lamps: number][] = [
-    ['XMP06T2 Urban Rush', L(0.6, 1, 1, 1, 0, 0.039), 4, 8],
-    ['XMP13S4 (multimd a6506e58)', L(0.68, 0.75, 0.75, 1.2, 0, 0.028), 5, 8],
-    ['amazon.mmx', L(0.68, 0.68, 0.8, 1, 0, 0.029), 6, 5],
-    ['sov07tmd.map', L(0.55, 0.4, 0.4, 0.7, 0, 0.003), 2, 12],
-    ['Transylv.yro', L(0.6, 0.9, 0.9, 1, 0.05, 0.008), 2, 4],
-    ['NOWIMPS', L(0.7, 1, 1, 1, 0.05, 0.008), 0, 20],
-    ['XTN01T2', L(0.68, 1, 1, 1, 0, 0.017), 2, 6],
+  // Stock maps the game itself shows dark at their median height, with their real [Lighting], median cell height
+  // (the extractor's missing-cell fill) and lamp posts (positive InvisibleInGame light sources). The last column is
+  // the class without the lamp evidence: Urban Rush (object level 0.6 + 0.039 x 4 = 0.756) is night by its lamp
+  // posts only.
+  const NIGHT_MAPS: [
+    name: string,
+    lighting: ReturnType<typeof L>,
+    medianZ: number,
+    lamps: number,
+    withoutLamps: 'night' | 'day',
+  ][] = [
+    ['XMP06T2 Urban Rush', L(0.6, 1, 1, 1, 0, 0.039), 4, 8, 'day'],
+    ['sov07tmd.map', L(0.55, 0.4, 0.4, 0.7, 0, 0.003), 2, 12, 'night'],
+    ['Transylv.yro', L(0.6, 0.9, 0.9, 1, 0.05, 0.008), 2, 4, 'night'],
+    ['NOWIMPS', L(0.7, 1, 1, 1, 0.05, 0.008), 0, 20, 'night'],
+    ['XTN01T2', L(0.68, 1, 1, 1, 0, 0.017), 2, 6, 'night'],
+    ['XXmas', L(0.68, 0.62, 0.62, 1, 0, 0.027), 0, 0, 'night'],
   ];
-  it.each(NIGHT_MAPS)('stages %s as night', (_name, lighting, medianZ, lamps) => {
+  it.each(NIGHT_MAPS)('stages %s as night', (_name, lighting, medianZ, lamps, withoutLamps) => {
     const profile = mapAtmosphere(lighting, medianZ, { lamps });
-    expect(profile).toMatchObject({ kind: 'night', hour: 22 });
+    expect(profile).toMatchObject({ kind: 'night', hour: 12 });
     expect(profile.nightLevel).toBeGreaterThanOrEqual(0.26);
     expect(profile.nightLevel).toBeLessThanOrEqual(0.4);
-    // Without the lamp evidence they are night maps by their authored ambient alone.
-    expect(mapAtmosphere(lighting, medianZ).kind).toBe('night');
+    expect(mapAtmosphere(lighting, medianZ).kind).toBe(withoutLamps);
+  });
+
+  // Low Ambient with a strong Level: the game draws these normally lit where players stand, whatever their lamp
+  // posts and blue tints suggest. Frozen native frames: XDeadman's base at height 8 shows object level 0.90 and
+  // light grey vehicles; XMP13S4's snow at height 5 is brighter than its palette (0.82 x 1.2 on the blue channel).
+  // Staged as night by their Ambient alone, their vehicles drew at 0.59-0.67 of the native luminance.
+  const LIT_MAPS: [name: string, lighting: ReturnType<typeof L>, medianZ: number, lamps: number][] = [
+    ['XMP13S4 (multimd a6506e58)', L(0.68, 0.75, 0.75, 1.2, 0, 0.028), 5, 8],
+    ['amazon.mmx', L(0.68, 0.68, 0.8, 1, 0, 0.029), 6, 5],
+    ['XDeadman', L(0.68, 0.68, 0.68, 1, 0, 0.028), 4, 0],
+    ['XMP15S4', L(0.68, 1.1, 1, 1, 0, 0.028), 7, 0],
+  ];
+  it.each(LIT_MAPS)('stages %s by what the game shows at its median height: day', (_name, lighting, medianZ, lamps) => {
+    expect(mapAtmosphere(lighting, medianZ, { lamps })).toMatchObject({ kind: 'day', hour: 12 });
+    // The same [Lighting] on flat low ground is dark, and night.
+    expect(mapAtmosphere(lighting, 0, { lamps }).kind).toBe('night');
   });
 
   it('stages the cached day maps and warm grades as day or dusk', () => {

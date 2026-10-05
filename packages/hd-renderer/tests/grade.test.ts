@@ -161,7 +161,6 @@ describe('cinematic preset and sandbox parameters', () => {
         [
           'whiteAdapt',
           'mapTintAdapt',
-          'mapSourcesByDay',
           'sunGain',
           'specularSize',
           'aoPower',
@@ -181,8 +180,9 @@ describe('cinematic preset and sandbox parameters', () => {
       // L5G: 15 % of the afternoon sun's colour stays on flat ground (battle grass warmth from the light).
       whiteAdapt: 0.85,
       mapTintAdapt: 0.3,
-      // Street lamps keep 20 % of their daytime engine light (the lamp-lit park lawn stays green and near L* 45).
-      mapSourcesByDay: 0.2,
+      // Light sources keep the engine's full share, like golden: a reduced share left everything near a lamp post
+      // darker than the game draws it (frozen XMP29U2 pair 7.6 cells from a post: ground 0.90, a building 0.74).
+      mapSourcesByDay: 1,
       gradeBalance: [0.955, 1, 1.085],
       gradeContrast: 0.14,
       gradePivotLift: 0.045,

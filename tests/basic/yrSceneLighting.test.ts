@@ -3,7 +3,9 @@ import { createByteViewAccessor, type GuestMemoryAccessor } from '../../src/game
 import { createYrRenderStateReaderFrom } from '../../src/games/yr/renderState';
 import {
   decodeYrSceneLighting,
+  readYrLightSources,
   readYrSceneLighting,
+  YR_LIGHT_SOURCES as S,
   YR_SCENE_LIGHTING as L,
   type YrSceneLightingStatics,
 } from '../../src/games/yr/sceneLighting';
@@ -159,7 +161,11 @@ describe('YR scene lighting memory reader and publication', () => {
   it('reads complete little-endian spans without changing guest memory', () => {
     const f = fixture();
     const before = f.bytes.slice();
-    expect(readYrSceneLighting(f.memory)).toEqual(decodeYrSceneLighting(stormWords, { ...noEvents, stormActive: 1 }));
+    // The fixture's light vector is empty: a readable scene without local lights, not an unknown one.
+    expect(readYrSceneLighting(f.memory)).toEqual({
+      ...decodeYrSceneLighting(stormWords, { ...noEvents, stormActive: 1 }),
+      sources: [],
+    });
     expect(f.bytes.every((value, index) => value === before[index])).toBe(true);
   });
 
@@ -221,5 +227,146 @@ describe('YR scene lighting memory reader and publication', () => {
     expect(read()!.lighting).toEqual(clear.lighting);
     f.view.setUint32(G.scenario, 0, true);
     expect(read()!.lighting).toBeNull();
+  });
+});
+
+describe('YR light sources (LightSourceClass vector)', () => {
+  const items = 0xc00000;
+  /** Write one LightSourceClass at `at`: per-mille intensity and tint, lepton position and reach. */
+  function light(
+    view: DataView,
+    at: number,
+    values: { intensity: number; tint: [number, number, number]; position: [number, number, number]; radius: number },
+    activated = 1,
+    detail = 2,
+  ) {
+    view.setUint32(at, S.vtable, true);
+    view.setInt32(at + S.intensity, values.intensity, true);
+    values.tint.forEach((channel, i) => view.setInt32(at + S.tint + i * 4, channel, true));
+    view.setInt32(at + S.detail, detail, true);
+    values.position.forEach((value, i) => view.setInt32(at + S.position + i * 4, value, true));
+    view.setInt32(at + S.radius, values.radius, true);
+    view.setUint8(at + S.activated, activated);
+  }
+  function vector(lights: number[]) {
+    const f = fixture();
+    f.view.setUint32(S.items, items, true);
+    f.view.setInt32(S.count, lights.length, true);
+    f.view.setInt32(S.detailLevel, 2, true);
+    lights.forEach((pointer, i) => f.view.setUint32(items + i * 4, pointer, true));
+    return f;
+  }
+  // INGALITE as the rules give it, and a NEGLAMP-style darkening light.
+  const lamp = {
+    intensity: 500,
+    tint: [50, 50, 10] as [number, number, number],
+    position: [15232, 17536, 208] as [number, number, number],
+    radius: 4000,
+  };
+  const negative = {
+    intensity: -150,
+    tint: [0, 0, 0] as [number, number, number],
+    position: [2688, 2688, 0] as [number, number, number],
+    radius: 1500,
+  };
+
+  it('reads active lights in engine units and leaves out what the cell relight leaves out', () => {
+    const f = vector([0xc10000, 0xc10100, 0xc10200, 0xc10300]);
+    light(f.view, 0xc10000, lamp);
+    light(f.view, 0xc10100, negative);
+    light(f.view, 0xc10200, lamp, 0); // switched off (0x484294)
+    light(f.view, 0xc10300, lamp, 1, 3); // above the detail setting (0x4842AA)
+    const before = f.bytes.slice();
+    expect(readYrLightSources(f.memory)).toEqual([
+      { x: 15232, y: 17536, z: 208, radius: 4000, intensity: 0.5, tint: [0.05, 0.05, 0.01] },
+      { x: 2688, y: 2688, z: 0, radius: 1500, intensity: -0.15, tint: [0, 0, 0] },
+    ]);
+    expect(f.bytes.every((value, index) => value === before[index])).toBe(true);
+    // A lower detail setting gates every light (their DetailLevel is 2); a supplied level replaces the global's.
+    expect(readYrLightSources(f.memory, 1)).toEqual([]);
+    f.view.setInt32(S.detailLevel, 0, true);
+    expect(readYrLightSources(f.memory)).toEqual([]);
+    expect(readYrLightSources(f.memory, 2)).toHaveLength(2);
+    // The scene read carries the list.
+    expect(readYrSceneLighting(f.memory, 2)?.sources).toHaveLength(2);
+  });
+
+  it('keeps a type without tint keys at the constructor value', () => {
+    const f = vector([0xc10000]);
+    light(f.view, 0xc10000, { ...lamp, tint: [1000000, 1000000, 1000000] });
+    expect(readYrLightSources(f.memory)![0]!.tint).toEqual([1000, 1000, 1000]);
+  });
+
+  it('reports unknown, never an empty scene, for implausible vectors', () => {
+    const empty = vector([]);
+    expect(readYrLightSources(empty.memory)).toEqual([]);
+    for (const count of [-1, S.maxCount + 1]) {
+      const f = vector([0xc10000]);
+      light(f.view, 0xc10000, lamp);
+      f.view.setInt32(S.count, count, true);
+      expect(readYrLightSources(f.memory)).toBeUndefined();
+    }
+    for (const pointer of [0, 2, 0xffffff, 0xfffffffc]) {
+      const f = vector([pointer]);
+      expect(readYrLightSources(f.memory)).toBeUndefined();
+    }
+    const wrongClass = vector([0xc10000]);
+    light(wrongClass.view, 0xc10000, lamp);
+    wrongClass.view.setUint32(0xc10000, 0x7e3ebc, true);
+    expect(readYrLightSources(wrongClass.memory)).toBeUndefined();
+    const badItems = vector([0xc10000]);
+    light(badItems.view, 0xc10000, lamp);
+    badItems.view.setUint32(S.items, 3, true);
+    expect(readYrLightSources(badItems.memory)).toBeUndefined();
+    for (const corrupt of [
+      (view: DataView) => view.setUint8(0xc10000 + S.activated, 2),
+      (view: DataView) => view.setInt32(0xc10000 + S.intensity, 0x7fffffff, true),
+      (view: DataView) => view.setInt32(0xc10000 + S.radius, 0x7fffffff, true),
+      (view: DataView) => view.setInt32(0xc10000 + S.detail, 9, true),
+    ]) {
+      const f = vector([0xc10000]);
+      light(f.view, 0xc10000, lamp);
+      corrupt(f.view);
+      expect(readYrLightSources(f.memory)).toBeUndefined();
+    }
+    const detail = vector([0xc10000]);
+    light(detail.view, 0xc10000, lamp);
+    detail.view.setInt32(S.detailLevel, 77, true);
+    expect(readYrLightSources(detail.memory)).toBeUndefined();
+    // An unreadable vector leaves the scene values valid and its sources unknown.
+    const scene = readYrSceneLighting(detail.memory);
+    expect(scene).not.toBeNull();
+    expect(scene).not.toHaveProperty('sources');
+    const short: GuestMemoryAccessor = {
+      ...empty.memory,
+      bytes: (address, length) => (address === S.items ? new Uint8Array(0) : empty.memory.bytes(address, length)),
+    };
+    expect(readYrLightSources(short)).toBeUndefined();
+  });
+
+  it('publishes a new snapshot when a light appears within the same logic frame', () => {
+    const f = vector([]);
+    const read = createYrRenderStateReaderFrom({
+      memory: () => f.memory,
+      readState: () => readYrState(f.memory),
+      createShroudReader: () => null,
+      createEffectsReader: () => null,
+      createOverlayReader: () => null,
+      createSmudgeReader: () => null,
+      now: () => 0,
+    });
+    const dark = read()!;
+    expect(dark.lighting?.sources).toEqual([]);
+    expect(read()).toBe(dark);
+    light(f.view, 0xc10000, lamp);
+    f.view.setUint32(items, 0xc10000, true);
+    f.view.setInt32(S.count, 1, true);
+    const lit = read()!;
+    expect(lit).not.toBe(dark);
+    expect(lit.frame).toBe(dark.frame);
+    expect(lit.lighting?.sources).toEqual([
+      { x: 15232, y: 17536, z: 208, radius: 4000, intensity: 0.5, tint: [0.05, 0.05, 0.01] },
+    ]);
+    expect(dark.lighting?.sources).toEqual([]);
   });
 });
