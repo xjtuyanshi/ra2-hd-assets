@@ -135,10 +135,13 @@ describe('live diagnostics', () => {
       effectDriver: { unknownTypes: new Set<string>(), logicFps: 0 },
       overlayInstances: { active: false },
       smudgeInstances: { active: false, instances: { missingTypes: new Set<string>() } },
+      // The diagnostics also count voxel units drawn from a stand-in mesh: none in this fixture.
+      voxelUnits: { standInUnits: 0 },
       cellsFromEngine: false,
     }) as LiveView;
     const found = view.diagnostics();
     expect(found.mapCacheTypes).toEqual(['CAPOWR01', 'GTGCANA']);
+    expect(found.standInVoxels).toBe(0);
     // The fallback is not a placeholder: before this list existed a match with such buildings reported nothing.
     expect(found.placeholders).toBe(0);
     expect(found.missingTypes).toEqual([]);
