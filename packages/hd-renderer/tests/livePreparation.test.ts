@@ -250,17 +250,22 @@ describe('preparing art before the match', () => {
     expect(view.theater).toBe('urban');
     view.warm(TYPES);
     const snapshot = state.current!.snapshot;
-    expect(snapshot.objects.map((o) => [o.kind, o.type, o.imageType, o.owner])).toEqual([
-      ['vehicle', 'HTNK', undefined, 0],
-      ['vehicle', 'MTNK', undefined, 1],
-      ['vehicle', 'HARV', 'HORV', 0],
-      ['building', 'CAOILD', undefined, -1],
+    // Houses and UIDs lie outside what a match uses (indices from a million up, negative UIDs).
+    expect(snapshot.objects.map((o) => [o.kind, o.type, o.imageType, o.owner, o.buildState])).toEqual([
+      ['vehicle', 'HTNK', undefined, 1_000_000, undefined],
+      ['vehicle', 'MTNK', undefined, 1_000_001, undefined],
+      ['vehicle', 'HARV', 'HORV', 1_000_000, undefined],
+      ['building', 'CAOILD', undefined, -1, undefined],
+      // A building once more, under construction: its build-up art is on other pages than its body.
+      ['building', 'CAOILD', undefined, -1, 'building'],
     ]);
     expect(snapshot.houses).toEqual([
-      { index: 0, colorIndex: 21, civilian: false },
-      { index: 1, colorIndex: 17, civilian: false },
+      { index: 1_000_000, colorIndex: 21, civilian: false },
+      { index: 1_000_001, colorIndex: 17, civilian: false },
     ]);
-    expect(new Set(snapshot.objects.map((o) => o.uid)).size).toBe(4);
+    expect(snapshot.objects.every((o) => o.uid < -1)).toBe(true);
+    expect(new Set(snapshot.objects.map((o) => o.uid)).size).toBe(5);
+    expect(new Set(snapshot.objects.map((o) => o.id)).size).toBe(5);
     // Cell (1, 2) is nearer the middle (2, 1.5) than (3, 0); it lies two levels up.
     for (const object of snapshot.objects) expect([object.x, object.y, object.z]).toEqual([1.5 * 256, 2.5 * 256, 208]);
     // The view whose centre is that cell at its own height: engine pixels (cx - cy) * 30 and (cx + cy) * 15 - z.
@@ -274,7 +279,8 @@ describe('preparing art before the match', () => {
   it('starts the match on its own timeline: nothing is carried over from the prepared list', () => {
     const { view, state } = timeline();
     view.warm([{ kind: 'building', type: 'GAPOWR', colorIndex: 21 }]);
-    expect(state.appearances.size).toBe(1);
+    // The listed building, standing and under construction.
+    expect(state.appearances.size).toBe(2);
     state.settled = 5;
     state.objectsFor = state.current;
     const match: LiveSnapshot = {
@@ -298,6 +304,75 @@ describe('preparing art before the match', () => {
     expect(state.current!.snapshot).toBe(match);
   });
 
+  it('keeps an unfinished list alongside the first match snapshots while they are out of sight', () => {
+    const { view, state } = timeline();
+    const fields = view as unknown as { outOfSight: boolean; settled: number; finishWarmList(): void };
+    fields.outOfSight = true;
+    view.warm(TYPES);
+    // The scenario's first objects arrive before the list was drawn completely (settled is still 0).
+    const first: LiveSnapshot = {
+      frame: 0,
+      view: { x: 60 - 300, y: 90 - 200 },
+      houses: [{ index: 0, colorIndex: 21 }],
+      objects: [vehicle(7, 'HTNK')],
+    };
+    view.push(first, 10);
+    const merged = state.current!.snapshot;
+    expect(merged).not.toBe(first);
+    expect(merged.frame).toBe(0);
+    expect(merged.objects[0]).toBe(first.objects[0]);
+    expect(merged.objects).toHaveLength(1 + 5);
+    expect(merged.houses.map((house) => house.index)).toEqual([0, 1_000_000, 1_000_001]);
+    // The list stands at the existing cell nearest the middle of the view: (60, 90) px is cell (4, 2), so (3, 0).
+    for (const object of merged.objects.slice(1)) expect([object.x, object.y]).toEqual([3.5 * 256, 0.5 * 256]);
+    // Such frames are not frames of the match, whatever was drawn; the match's own kinds are reported as they are.
+    fields.settled = 4;
+    expect(view.settledFrames).toBe(0);
+    expect(view.warmTypes()).toEqual([{ kind: 'vehicle', type: 'HTNK', colorIndex: 21 }]);
+    // The same publication again changes nothing; another one of the same logic frame keeps the list.
+    view.push(first, 20);
+    expect(state.current!.snapshot).toBe(merged);
+    const second: LiveSnapshot = { ...first, objects: [vehicle(7, 'HTNK'), vehicle(8, 'MTNK')] };
+    view.push(second, 30);
+    expect(state.current!.snapshot.objects).toHaveLength(2 + 5);
+    // The list has been drawn completely: the match snapshot is published again alone, on the same logic frame.
+    fields.finishWarmList();
+    expect(state.current!.snapshot).toBe(second);
+    expect(fields.settled).toBe(0);
+    expect(view.settledFrames).toBe(0);
+    fields.settled = 3;
+    expect(view.settledFrames).toBe(3);
+    // From then on snapshots are the match's own.
+    const third: LiveSnapshot = { ...first, frame: 1 };
+    view.push(third, 40);
+    expect(state.current!.snapshot).toBe(third);
+  });
+
+  it('drops an unfinished list when the match runs or the view is shown', () => {
+    for (const end of ['frame', 'shown'] as const) {
+      const { view, state } = timeline();
+      const fields = view as unknown as { outOfSight: boolean; settled: number };
+      fields.outOfSight = true;
+      view.warm([{ kind: 'building', type: 'GAPOWR', colorIndex: 21 }]);
+      const first: LiveSnapshot = { frame: 0, view: { x: 0, y: 0 }, houses: [], objects: [vehicle(7, 'HTNK')] };
+      view.push(first, 10);
+      expect(state.current!.snapshot.objects).toHaveLength(3);
+      fields.settled = 2;
+      if (end === 'shown') fields.outOfSight = false;
+      const next: LiveSnapshot = { ...first, frame: end === 'frame' ? 1 : 0 };
+      view.push(next, 20);
+      expect(state.current!.snapshot).toBe(next);
+      // The frames drawn with the list do not count, and none of its buildings lingers as just destroyed.
+      expect(fields.settled).toBe(0);
+      expect(state.buildingVisualHistory.retained.size).toBe(0);
+      // Nothing of the list returns later.
+      fields.outOfSight = true;
+      const later: LiveSnapshot = { ...first, frame: next.frame };
+      view.push(later, 30);
+      expect(state.current!.snapshot).toBe(later);
+    }
+  });
+
   it('replaces an empty loading-screen snapshot, and does nothing with an empty list or a map without cells', () => {
     const { view, state } = timeline();
     view.warm([]);
@@ -305,7 +380,7 @@ describe('preparing art before the match', () => {
     const loading: LiveSnapshot = { frame: 0, view: { x: 0, y: 0 }, houses: [], objects: [] };
     view.push(loading, 0);
     view.warm(TYPES);
-    expect(state.current!.snapshot.objects).toHaveLength(4);
+    expect(state.current!.snapshot.objects).toHaveLength(5);
     const empty = timeline();
     empty.state.cache.exists.fill(0);
     empty.view.warm(TYPES);
@@ -357,12 +432,12 @@ describe('preparing art before the match', () => {
     ]);
     const snapshot = state.current!.snapshot;
     expect(snapshot.houses).toEqual([
-      { index: 0, colorIndex: 5, civilian: false },
-      { index: 1, colorIndex: 5, civilian: true },
+      { index: 1_000_000, colorIndex: 5, civilian: false },
+      { index: 1_000_001, colorIndex: 5, civilian: true },
     ]);
-    expect(snapshot.objects.map((o) => o.owner)).toEqual([0, 1, 1]);
+    expect(snapshot.objects.map((o) => o.owner)).toEqual([1_000_000, 1_000_001, 1_000_001, 1_000_001, 1_000_001]);
     // The flags decide, not what the houses happen to own in the list.
-    expect([...state.civilian]).toEqual([1]);
+    expect([...state.civilian]).toEqual([1_000_001]);
   });
 });
 

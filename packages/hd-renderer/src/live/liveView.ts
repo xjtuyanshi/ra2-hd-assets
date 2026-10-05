@@ -227,8 +227,10 @@ export interface LiveWarmType {
 
 /** Logic frame of the snapshot warm() draws: later than any match, so the first real snapshot starts a new timeline. */
 const WARM_FRAME = Number.MAX_SAFE_INTEGER;
-/** UIDs of warm objects: outside the range a game hands out, one per listed type. */
-const WARM_UID_BASE = 0x7f00_0000;
+/** UIDs of warm objects count down from here: negative, so none can be a match object's (-1 means "none"). */
+const WARM_UID_BASE = -1000;
+/** House indices of warm objects start here, above any index a match uses (negative owners mean "unknown"). */
+const WARM_HOUSE_BASE = 1_000_000;
 
 /** Attached presentation follows its owner's draw eligibility; independent explosions/projectiles remain native. */
 function visibleObjectEffects(snapshot: LiveSnapshot): LiveEffects | null | undefined {
@@ -643,6 +645,14 @@ export class LiveView {
   private current: Timed | null = null;
   /** The current snapshot is warm()'s own list, not a match (see warm). */
   private warming = false;
+  /** The list warm() was given, until it has been drawn completely once or the match runs (see push). */
+  private warmList: readonly LiveWarmType[] | null = null;
+  /** Logic frame of the first match snapshot the list was drawn alongside. */
+  private warmFirstFrame: number | null = null;
+  /** The current snapshot is a match snapshot with the list's objects added. */
+  private warmMerged = false;
+  /** The newest match snapshot as the host pushed it (without the list's objects). */
+  private matchSnapshot: LiveSnapshot | null = null;
   /** Presented frames in a row that drew everything their snapshot asked for (see `settledFrames`). */
   private settled = 0;
   /**
@@ -1048,6 +1058,71 @@ export class LiveView {
 
   /** A logic frame is not a publication revision: AI and draw passes can still change it between polls. */
   push(snapshot: LiveSnapshot, at = performance.now()): void {
+    if (snapshot.frame !== WARM_FRAME) {
+      if (this.matchSnapshot === snapshot) return;
+      this.matchSnapshot = snapshot;
+    }
+    const merged = this.withWarmList(snapshot);
+    if (this.warmMerged && merged === snapshot) {
+      // The list's objects leave the picture: no building of the list lingers as "just destroyed", and the frames
+      // drawn with them do not count for the match.
+      this.buildingVisualHistory?.clear();
+      this.settled = 0;
+    }
+    this.warmMerged = merged !== snapshot;
+    this.publish(merged, at);
+  }
+
+  /**
+   * The match snapshot with the objects of an unfinished warm list added, while that is still wanted: the game
+   * creates the first objects of a scenario a second or two before the match runs, and a list that was not through
+   * by then (a large map's view is ready late) would otherwise be dropped half prepared. The list's objects stand
+   * at the middle of the view (inside the frustum, so their shaders are built) until everything has been drawn
+   * completely once (render), the logic frame moves on (the match runs: what is not prepared by now loads when it
+   * appears, as without a list) or the view is shown. A shown view never contains them.
+   */
+  private withWarmList(snapshot: LiveSnapshot): LiveSnapshot {
+    const list = this.warmList;
+    if (!list || snapshot.frame === WARM_FRAME) return snapshot;
+    this.warmFirstFrame ??= snapshot.frame;
+    if (!this.outOfSight || snapshot.frame !== this.warmFirstFrame) {
+      this.warmList = null;
+      return snapshot;
+    }
+    const view = snapshot.view;
+    const extra = this.warmObjects(
+      list,
+      view
+        ? [
+            ((view.y + this.viewHeight / 2) / 15 + (view.x + this.viewWidth / 2) / 30) / 2,
+            ((view.y + this.viewHeight / 2) / 15 - (view.x + this.viewWidth / 2) / 30) / 2,
+          ]
+        : null,
+    );
+    if (!extra) {
+      this.warmList = null;
+      return snapshot;
+    }
+    return {
+      ...snapshot,
+      houses: [...snapshot.houses, ...extra.houses],
+      objects: [...snapshot.objects, ...extra.objects],
+    };
+  }
+
+  /**
+   * The warm list has been drawn completely: its art, meshes and shaders exist. A match snapshot that carried its
+   * objects is published again without them (same logic frame: nothing of the match restarts).
+   */
+  private finishWarmList(): void {
+    this.warmList = null;
+    const match = this.matchSnapshot;
+    if (!this.warmMerged || !match || !this.current) return;
+    this.matchSnapshot = null;
+    this.push(match, this.current.at);
+  }
+
+  private publish(snapshot: LiveSnapshot, at: number): void {
     if (this.warming && snapshot.frame !== WARM_FRAME) {
       // The first match snapshot after warm(): the warm list is no earlier state of this match, so nothing is
       // interpolated from it and no building of the match counts as having appeared after it.
@@ -1374,6 +1449,7 @@ export class LiveView {
     this.hd.frame(dt);
     // Loads settle between frames, never inside one: what is still on its way now was missing from this frame.
     this.settled = current && this.loadingArt() === 0 ? this.settled + 1 : 0;
+    if (this.warmList && this.settled >= 1) this.finishWarmList();
     if (this.waitingArt) {
       // What waited for its turn is offered again in the next frame, with or without a new snapshot.
       this.objectsFor = null;
@@ -1404,7 +1480,8 @@ export class LiveView {
    * original picture on screen while the view prepares waits for a few of these before it shows the view.
    */
   get settledFrames(): number {
-    return this.settled;
+    // Frames that still contain a warm list's objects are not frames of the match.
+    return this.warmMerged ? 0 : this.settled;
   }
 
   /**
@@ -1434,7 +1511,7 @@ export class LiveView {
    * with the same players. Empty before the first match snapshot.
    */
   warmTypes(): LiveWarmType[] {
-    const snapshot = this.current?.snapshot;
+    const snapshot = this.matchSnapshot;
     if (!snapshot || this.warming) return [];
     const types = new Map<string, LiveWarmType>();
     for (const object of snapshot.objects) {
@@ -1456,28 +1533,58 @@ export class LiveView {
   /**
    * Prepare the art of `types` before any of them is in the match: the game creates the players' starting units
    * only as its loading screen ends, and a view that first hears of them then needs seconds to fetch their pages,
-   * build their meshes and compile their shaders. One object of each listed kind is drawn at the middle of the map,
-   * through the same code as a match snapshot, so exactly what a match would load is loaded and nothing else. The
-   * host keeps the view out of sight meanwhile (`outOfSight`) and renders frames until `settledFrames` counts.
-   * The first match snapshot replaces the list and starts its own timeline; nothing of it is ever shown. Ignored once
-   * a match snapshot with objects is in.
+   * build their meshes and compile their shaders. One object of each listed kind (a building twice: standing and at
+   * the first frame of its build-up) is drawn at the middle of the map, through the same code as a match snapshot,
+   * so exactly what a match would load is loaded and nothing else. The host keeps the view out of sight meanwhile
+   * (`outOfSight`) and renders frames until `settledFrames` counts. The first match snapshot starts its own
+   * timeline; a list that is not through by then stays alongside the match's first snapshots while they are out of
+   * sight (see withWarmList). Nothing of a list is ever shown. Ignored once a match snapshot with objects is in.
    */
   warm(types: readonly LiveWarmType[]): void {
     if (!types.length || (this.current && !this.warming && this.current.snapshot.objects.length)) return;
+    const extra = this.warmObjects(types, null);
+    if (!extra) return;
+    this.warming = true;
+    this.warmList = [...types];
+    this.warmFirstFrame = null;
+    const [cx, cy, level] = extra.cell;
+    this.push({
+      frame: WARM_FRAME,
+      // applyCamera's inverse: the view whose centre is the chosen cell (at its own height on screen).
+      view: {
+        x: (cx - cy) * 30 - this.viewWidth / 2,
+        y: (cx + cy) * 15 - level * 15 - this.viewHeight / 2,
+      },
+      houses: extra.houses,
+      localHouse: -1,
+      objects: extra.objects,
+    });
+  }
+
+  /**
+   * One object per listed kind (a building twice: standing and under construction, whose art lies on other pages)
+   * with their houses, standing on the existing cell nearest `near` (cell coordinates; the middle of the grid when
+   * null). Null when the map has no cell. UIDs and house indices lie outside what a match uses and are the same for
+   * a list every time, so the visuals built for it are kept from one snapshot to the next.
+   */
+  private warmObjects(
+    types: readonly LiveWarmType[],
+    near: readonly [number, number] | null,
+  ): { objects: LiveObject[]; houses: LiveHouse[]; cell: [number, number, number] } | null {
     const { width, height } = this.cache.manifest.grid;
-    // The existing cell nearest the middle of the grid: objects there are inside the frustum, so they are drawn.
+    const [nearX, nearY] = near ?? [width / 2, height / 2];
     let cell = -1;
     let nearest = Infinity;
     for (let y = 0; y < height; y++)
       for (let x = 0; x < width; x++) {
         if (!this.cache.exists[y * width + x]) continue;
-        const distance = (x - width / 2) ** 2 + (y - height / 2) ** 2;
+        const distance = (x - nearX) ** 2 + (y - nearY) ** 2;
         if (distance < nearest) {
           nearest = distance;
           cell = y * width + x;
         }
       }
-    if (cell < 0) return;
+    if (cell < 0) return null;
     const cx = cell % width;
     const cy = Math.floor(cell / width);
     const level = this.cache.height[cell] ?? 0;
@@ -1487,11 +1594,11 @@ export class LiveView {
     const owners = [...new Set(types.filter((type) => type.colorIndex >= 0).map(houseKey))];
     const objects: LiveObject[] = types.map((type, index) => ({
       id: index + 1,
-      uid: WARM_UID_BASE + index,
+      uid: WARM_UID_BASE - index,
       kind: type.kind,
       type: type.type,
       ...(type.imageType ? { imageType: type.imageType } : {}),
-      owner: type.colorIndex < 0 ? -1 : owners.indexOf(houseKey(type)),
+      owner: type.colorIndex < 0 ? -1 : WARM_HOUSE_BASE + owners.indexOf(houseKey(type)),
       x: (cx + 0.5) * LEPTONS_PER_CELL,
       y: (cy + 0.5) * LEPTONS_PER_CELL,
       z: level * LEPTONS_PER_LEVEL,
@@ -1499,22 +1606,23 @@ export class LiveView {
       health: 1,
       isSelected: false,
     }));
-    this.warming = true;
-    this.push({
-      frame: WARM_FRAME,
-      // applyCamera's inverse: the view whose centre is the chosen cell (at its own height on screen).
-      view: {
-        x: (cx - cy) * 30 - this.viewWidth / 2,
-        y: (cx + cy) * 15 - level * 15 - this.viewHeight / 2,
-      },
+    for (const object of [...objects])
+      if (object.kind === 'building')
+        objects.push({
+          ...object,
+          id: objects.length + 1,
+          uid: WARM_UID_BASE - objects.length,
+          buildState: 'building',
+        });
+    return {
+      objects,
       houses: owners.map((key, index) => ({
-        index,
+        index: WARM_HOUSE_BASE + index,
         colorIndex: Number(key.split(':')[0]),
         civilian: key.endsWith(':1'),
       })),
-      localHouse: -1,
-      objects,
-    });
+      cell: [cx, cy, level],
+    };
   }
 
   /**

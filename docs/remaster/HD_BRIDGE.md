@@ -215,10 +215,12 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   match's first five minutes in `localStorage` (`src/ui/pages/game/hdWarmStore.ts`: rules type, engine image, colour
   scheme and whether a civilian house owns it; never positions or counts): one list per map, and for maps not
   played yet one per theater and one for all theaters, both without civilian objects. While the next match loads,
-  `LiveView.warm` draws one object of
-  each kind at the middle of the map through the normal snapshot path, so exactly the art a match would load is
-  fetched, built and compiled before the first frame. A list that does not fit (another side or colour) costs only
-  the art it loaded: the view still waits for what the match really needs.
+  `LiveView.warm` draws one object of each kind (a building twice: standing and under construction) at the middle
+  of the map through the normal snapshot path, so exactly the art a match would load is fetched, built and compiled
+  before the first frame. A list that is not through when the scenario's first objects appear (a second or two
+  before the match runs) stays alongside them, in the middle of the hidden view, until it has been drawn completely
+  or the logic frame moves on. A list that does not fit (another side or colour) costs only the art it loaded: the
+  view still waits for what the match really needs.
 - **No post-pass rebuilds.** The game shows its loading screen in 800x600 and switches to the match's video mode half
   a second before the first logic frame; a view laid out for the loading screen rebuilt every post material at that
   moment. The bridge remembers the layout the view was last shown with and prepares with it while the frame size is

@@ -1315,6 +1315,30 @@ describe('HD bridge match start', () => {
     harness.stop();
   });
 
+  it('keeps the view of a match that had no snapshot for a while (an in-game menu), without waiting again', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    harness.setState(battle(300));
+    await advance(16, 2);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    // The options menu owns the screen: the VM reports no battle state, the original picture is shown.
+    harness.setState(null);
+    await advance(16, 2);
+    await advance(600);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(view.outOfSight).toBe(false);
+    // Back in the match, a few frames on. The view is not complete by its own count (art may be arriving), yet it
+    // was shown for this match: it returns with the first snapshot.
+    view.settledFrames = 0;
+    harness.setState(battle(301));
+    await advance(1100);
+    await advance(16);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect(view.outOfSight).toBe(false);
+    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
+    harness.stop();
+  });
+
   it('does not draw out of sight while the HD view is switched off', async () => {
     const harness = setup();
     const view = fakeView();

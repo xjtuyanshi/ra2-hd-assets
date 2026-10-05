@@ -241,6 +241,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
    * notice stays on screen (Infinity until the logic frame moves on: see NOTICE_MS).
    */
   let fallback: { map: string; frame: number; until: number } | null = null;
+  /** Map and newest logic frame of the match the reveal state below belongs to (kept while no snapshot arrives). */
+  let matchMap: string | null = null;
+  let matchFrame = 0;
   /** The view has replaced the original picture in the current match (see REVEAL_SETTLED_FRAMES). */
   let revealed = false;
   /** Since when a running match has been waiting for the view (REVEAL_DEADLINE_MS counts from here). */
@@ -460,7 +463,11 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (state && mapId && (mapId !== stateMap || state.frame < stateFrame)) {
       failed.delete(mapId);
       clearFallback();
-      // Another match: its view (the same one when the map is the same) starts out of sight again.
+    }
+    // Another match (another map, or the logic frame starting over): its view, the same one when the map is the
+    // same, starts out of sight again. A match that merely had no snapshot for a while (an in-game menu owned the
+    // screen) goes on where it was: its view is complete, and hiding it would flash the original picture.
+    if (state && mapId && (mapId !== matchMap || state.frame < matchFrame)) {
       revealed = false;
       waitingSince = null;
       warmed = false;
@@ -469,6 +476,10 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       if (live) live.outOfSight = true;
       timeline = { ...emptyTimeline(mapId), loadAt: timeline.map === mapId ? timeline.loadAt : null };
       if (liveMap === mapId && live) timeline.readyAt = performance.now();
+    }
+    if (state && mapId) {
+      matchMap = mapId;
+      matchFrame = state.frame;
     }
     if (!mapId) clearFallback();
     stateMap = mapId;
@@ -700,6 +711,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     stateMap = null;
     pushed = null;
     revealed = false;
+    matchMap = null;
     matchTypes.clear();
     host.frameRenderer.setTransparentKey(null);
     host.frameRenderer.setTransparentRect(null);
