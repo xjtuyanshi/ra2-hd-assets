@@ -234,11 +234,14 @@ was handed a list, first drew it completely, saw the first objects and the first
 (`settled` or `deadline`).
 
 Measured with the same skirmish starts (test Chrome, the frame times of the first 20 seconds after the first logic
-frame): on XMP29U2 the base build had 12 to 15 frames over 100 ms, the longest 2.8 to 3.1 s; now a first match
-without any stored list shows the original picture for 2.7 s and then the complete HD view with no frame over 82 ms,
-and later matches show the HD view with the first logic frame, no frame over 52 ms. On the largest skirmish map
-(XMP20T6, 277 x 277 cells; base: 11 frames over 100 ms, the longest 2.8 s) a first match on the map shows the HD view
-after 0.9 s with four frames of 0.2 s before it, later matches after 0.0 to 0.7 s with at most one such frame.
+frame): on XMP29U2 the base build had 12 to 15 frames over 100 ms, the longest 2.8 to 3.1 s. Now matches after the
+first show the HD view with the first logic frame and no frame over 62 ms in five of six runs (the sixth had one
+frame of 0.23 s while the page's own thread was idle). A first match without any stored list shows the original
+picture for 2.7 s and then the complete HD view with no frame over 82 ms in the best run; with other WebGPU pages
+running on the same machine it took 3 to 12 s, with frames of 0.1 to 0.8 s in between (see the limits). On the
+largest skirmish map (XMP20T6, 277 x 277 cells; base: 11 frames over 100 ms, the longest 2.8 s) a first match on the
+map shows the HD view after 0.9 s with four frames of 0.2 s before it, later matches after 0.0 to 0.7 s with at most
+one such frame.
 
 Limits:
 
@@ -250,7 +253,8 @@ Limits:
   costs one such frame, behind the original picture at the start and in the shown view later in a match (a unit type
   seen for the first time). Its mesh is built off the presenting thread and its pages arrive in strips.
 - Uploads wait for the GPU process. Next to other pages that load the same GPU, single strips were seen to block for
-  0.1 to 0.5 s and a first match without a list took 3 to 8 s to show the HD view.
+  0.1 to 0.6 s, and the preparation of a first match without a list, which is paced by frames, took that much
+  longer.
 - The top-layer pass is remembered per browser profile, not per match: its first use ever still rebuilds the post
   passes once.
 
