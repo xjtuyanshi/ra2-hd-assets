@@ -13,6 +13,7 @@ interface TestVisual {
   sprite?: string;
   libraryType?: LibraryType;
   pending?: boolean;
+  alternateWarm?: boolean;
   lastMoveFrame?: number;
   firedFrame?: number;
   deadFrame?: number;
@@ -33,10 +34,13 @@ function visualView() {
     });
     models.set(`${id}-voxel`, { id, palette: 'unit', normalsMode: 4, parts: [] });
   }
+  const failed = new Set<string>();
   const state = {
     library: {
       type: vi.fn((id: string) => types.get(id)),
       voxel: vi.fn((id: string) => models.get(id) ?? null),
+      voxelType: vi.fn((voxel: string) => [...types].find(([, type]) => type.voxel === voxel)?.[0]),
+      voxelFailed: vi.fn((voxel: string) => failed.has(voxel)),
     },
     cache: {
       voxels: new Map<string, VoxelModel>(),
@@ -47,6 +51,8 @@ function visualView() {
       ]),
     },
     voxelUnits: {
+      // False while the model's redraw projection is still loading: an instance built now would change look later.
+      prepare: vi.fn((_model: VoxelModel, _palette: string, _key: string) => true),
       build: vi.fn((_model: VoxelModel, _palette: string, _key: string) => ({ root: new Group() })),
       dispose: vi.fn((unit: { root: Group }) => unit.root.removeFromParent()),
     },
@@ -64,7 +70,6 @@ function visualView() {
   const view = Object.assign(Object.create(LiveView.prototype), state) as {
     visualFor(object: LiveObject, colorIndex: number, frame: number): TestVisual;
     buildVisual(object: LiveObject, paletteKey: string, firstFrame: number): TestVisual;
-    artReady(object: LiveObject): boolean;
   };
   const object: LiveObject = {
     id: 1,
@@ -79,7 +84,7 @@ function visualView() {
     health: 1,
     isSelected: false,
   };
-  return { view, state, types, models, object };
+  return { view, state, types, models, failed, object };
 }
 
 describe('live engine-selected draw images', () => {
@@ -129,7 +134,6 @@ describe('live engine-selected draw images', () => {
     h.types.delete('HORV');
     const model = h.models.get('HORV-voxel')!;
     h.state.cache.voxels.set('HORV', model);
-    expect(h.view.artReady(h.object)).toBe(true);
     expect(h.view.visualFor(h.object, 0, 10)).toMatchObject({ type: 'HORV', mode: 'voxel' });
     expect(h.state.voxelUnits.build).toHaveBeenLastCalledWith(model, 'unit', 'HORV@unit');
   });
@@ -156,36 +160,109 @@ describe('live engine-selected draw images', () => {
     );
   });
 
-  it('retries the selected image when its voxel arrives and releases pending images when unloading ends', () => {
+  it('keeps drawing the rules art while the selected image loads, then swaps once', () => {
     const h = visualView();
     const model = h.models.get('HORV-voxel')!;
     h.models.delete('HORV-voxel');
+    const normal = h.view.visualFor(h.object, 0, 9);
     h.object.imageType = 'HORV';
-    const pending = h.view.visualFor(h.object, 0, 10);
-    expect(pending).toMatchObject({ type: 'HORV', pending: true });
-    expect(h.view.artReady(h.object)).toBe(false);
-    expect(h.view.visualFor(h.object, 0, 11)).toBe(pending);
-    delete h.object.imageType;
-    expect(h.view.visualFor(h.object, 0, 12)).toMatchObject({ type: 'HARV', mode: 'voxel' });
-    h.object.imageType = 'HORV';
-    const retry = h.view.visualFor(h.object, 0, 13);
-    expect(retry.pending).toBe(true);
+    // The first unload of a match: the unloading model file has not arrived. The miner must not vanish.
+    expect(h.view.visualFor(h.object, 0, 10)).toBe(normal);
+    expect(normal).toMatchObject({ type: 'HARV', mode: 'voxel' });
+    expect(normal.pending).toBeFalsy();
+    expect(h.state.voxelUnits.dispose).not.toHaveBeenCalled();
+    expect(h.state.root.children).toEqual([normal.root]);
+    // The model arrived but its redraw projection has not: an instance built now would change look a moment later.
     h.models.set('HORV-voxel', model);
-    expect(h.view.artReady(h.object)).toBe(true);
-    const ready = h.view.visualFor(h.object, 0, 14);
-    expect(ready).not.toBe(retry);
-    expect(ready).toMatchObject({ type: 'HORV', mode: 'voxel' });
+    h.state.voxelUnits.prepare.mockReturnValue(false);
+    expect(h.view.visualFor(h.object, 0, 11)).toBe(normal);
+    expect(h.state.voxelUnits.prepare).toHaveBeenLastCalledWith(model, 'lib:unit@house0', 'HORV@lib:unit@house0');
+    expect(h.state.voxelUnits.build).toHaveBeenCalledTimes(1);
+    h.state.voxelUnits.prepare.mockReturnValue(true);
+    const unloading = h.view.visualFor(h.object, 0, 12);
+    expect(unloading).not.toBe(normal);
+    expect(unloading).toMatchObject({ type: 'HORV', mode: 'voxel' });
+    expect(h.state.voxelUnits.dispose).toHaveBeenCalledWith(normal);
+    expect(h.state.root.children).toEqual([unloading.root]);
+    delete h.object.imageType;
+    expect(h.view.visualFor(h.object, 0, 13)).toMatchObject({ type: 'HARV', mode: 'voxel' });
   });
 
-  it('rebuilds a pending visual for a different image even when both voxels are still loading', () => {
+  it('draws the rules art for an object first seen with an image that is still loading', () => {
     const h = visualView();
+    h.models.delete('HORV-voxel');
+    h.object.imageType = 'HORV';
+    const first = h.view.visualFor(h.object, 0, 10);
+    expect(first).toMatchObject({ type: 'HARV', mode: 'voxel' });
+    expect(first.pending).toBeFalsy();
+    expect(h.view.buildVisual(h.object, 'house0', 10)).toMatchObject({ type: 'HARV', mode: 'voxel' });
+  });
+
+  it('keeps one pending rules visual while both voxels are still loading and repaints it on owner change', () => {
+    const h = visualView();
+    const models = new Map(h.models);
     h.models.clear();
     const pending = h.view.visualFor(h.object, 0, 10);
+    expect(pending).toMatchObject({ type: 'HARV', pending: true });
     h.object.imageType = 'HORV';
-    const unloading = h.view.visualFor(h.object, 0, 11);
-    expect(unloading).not.toBe(pending);
-    expect(unloading).toMatchObject({ type: 'HORV', pending: true });
-    expect(h.view.visualFor(h.object, 1, 12)).toMatchObject({ type: 'HORV', pending: true, paletteKey: 'house1' });
+    expect(h.view.visualFor(h.object, 0, 11)).toBe(pending);
+    expect(h.view.visualFor(h.object, 1, 12)).toMatchObject({ type: 'HARV', pending: true, paletteKey: 'house1' });
+    // The image arriving first is drawn at once; the rules art is retried when unloading ends.
+    h.models.set('HORV-voxel', models.get('HORV-voxel')!);
+    expect(h.view.visualFor(h.object, 1, 13)).toMatchObject({ type: 'HORV', mode: 'voxel' });
+    delete h.object.imageType;
+    const retry = h.view.visualFor(h.object, 1, 14);
+    expect(retry).toMatchObject({ type: 'HARV', pending: true });
+    h.models.set('HARV-voxel', models.get('HARV-voxel')!);
+    const ready = h.view.visualFor(h.object, 1, 15);
+    expect(ready).not.toBe(retry);
+    expect(ready).toMatchObject({ type: 'HARV', mode: 'voxel' });
+  });
+
+  it('loads a type\'s unloading image ahead of its first use and stops asking once it is ready', () => {
+    const h = visualView();
+    h.types.get('HARV')!.unloadingVoxel = 'HORV-voxel';
+    const model = h.models.get('HORV-voxel')!;
+    h.models.delete('HORV-voxel');
+    const normal = h.view.visualFor(h.object, 0, 10);
+    // Building the visual does not warm; every later frame asks until the model and its projection are ready.
+    expect(h.state.voxelUnits.prepare).not.toHaveBeenCalled();
+    h.view.visualFor(h.object, 0, 11);
+    expect(h.state.library.voxel).toHaveBeenCalledWith('HORV-voxel');
+    expect(h.state.voxelUnits.prepare).not.toHaveBeenCalled();
+    expect(normal.alternateWarm).toBeFalsy();
+    h.models.set('HORV-voxel', model);
+    h.state.voxelUnits.prepare.mockReturnValue(false);
+    h.view.visualFor(h.object, 0, 12);
+    expect(h.state.voxelUnits.prepare).toHaveBeenLastCalledWith(model, 'lib:unit@house0', 'HORV@lib:unit@house0');
+    expect(normal.alternateWarm).toBeFalsy();
+    h.state.voxelUnits.prepare.mockReturnValue(true);
+    h.view.visualFor(h.object, 0, 13);
+    expect(normal.alternateWarm).toBe(true);
+    const calls = h.state.voxelUnits.prepare.mock.calls.length;
+    expect(h.view.visualFor(h.object, 0, 14)).toBe(normal);
+    expect(h.state.voxelUnits.prepare).toHaveBeenCalledTimes(calls);
+    // The warmed image then swaps in on the very frame the engine selects it.
+    h.object.imageType = 'HORV';
+    expect(h.view.visualFor(h.object, 0, 15)).toMatchObject({ type: 'HORV', mode: 'voxel' });
+    expect(h.state.voxelUnits.build).toHaveBeenLastCalledWith(model, 'lib:unit@house0', 'HORV@lib:unit@house0');
+  });
+
+  it.each(['no unloading image', 'a failed model', 'no type for the voxel'])('stops warming with %s', (reason) => {
+    const h = visualView();
+    if (reason !== 'no unloading image') h.types.get('HARV')!.unloadingVoxel = 'HORV-voxel';
+    if (reason === 'a failed model') {
+      h.models.delete('HORV-voxel');
+      h.failed.add('HORV-voxel');
+    }
+    if (reason === 'no type for the voxel') h.types.delete('HORV');
+    const normal = h.view.visualFor(h.object, 0, 10);
+    expect(h.view.visualFor(h.object, 0, 11)).toBe(normal);
+    expect(normal.alternateWarm).toBe(true);
+    expect(h.state.voxelUnits.prepare).not.toHaveBeenCalled();
+    // A failed image never replaces the rules art, however long the engine selects it.
+    h.object.imageType = 'HORV';
+    if (reason === 'a failed model') expect(h.view.visualFor(h.object, 0, 12)).toBe(normal);
   });
 
   it('chooses library sprite art and map sprite ids from the image type', () => {

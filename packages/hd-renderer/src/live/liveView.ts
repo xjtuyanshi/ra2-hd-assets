@@ -31,7 +31,7 @@ import { NORMALIZED_RATE_FACTOR, animRateFrames } from '../../../ra2-assets/src/
 import type { SourceLight } from '../ra2/mapLights';
 import type { WindowBuilding } from '../ra2/nightDressing';
 import { sequenceFrame } from '../../../ra2-assets/src/art';
-import type { MapObject } from '../../../ra2-assets/src/manifest';
+import type { MapObject, VoxelModel } from '../../../ra2-assets/src/manifest';
 import type { TheaterId } from '../../../ra2-assets/src/theater';
 import { addHousePalettes, paletteFor, type Ra2Cache } from '../ra2/cache';
 import { SpriteLayer, cardPush, isUnlitMapOverlay, objectAnchor, type SpriteInstance } from '../ra2/sprites';
@@ -358,6 +358,8 @@ interface Visual {
   buildingTurret?: VoxelUnit;
   /** Whether the building's turret model is drawn, still loading or missing (diagnostics). */
   turretState?: 'ready' | 'loading' | 'missing';
+  /** The type's alternate image (library unloadingVoxel) has been loaded ahead of its first use, or has none. */
+  alternateWarm?: boolean;
 }
 
 /** Interpolated engine pose: leptons and a facing in radians. */
@@ -2350,13 +2352,16 @@ export class LiveView {
 
   private visualFor(object: LiveObject, colorIndex: number, frame: number): Visual {
     const paletteKey = this.housePaletteKeys.get(colorIndex) ?? '';
-    const artType = this.artType(object);
+    const artType = this.drawArt(object, paletteKey);
     const existing = this.visuals.get(object.uid);
     const firstFrame = this.appearances.get(object.uid)?.frame ?? existing?.firstFrame ?? frame;
     if (existing) existing.firstFrame = firstFrame;
     // Owner changes (capture, mind control) and engine image changes rebuild the visual; pending art is retried.
     if (existing && existing.type === artType && existing.paletteKey === paletteKey) {
-      if (!existing.pending || !this.artReady(object)) return existing;
+      if (!existing.pending || !this.voxelSource(artType, paletteKey)) {
+        this.warmAlternate(existing, paletteKey);
+        return existing;
+      }
     }
     if (existing) this.removeVisual(existing);
     const visual = this.buildVisual(object, paletteKey, firstFrame);
@@ -2384,16 +2389,60 @@ export class LiveView {
       : object.type;
   }
 
-  /** Whether a pending object's library voxel has arrived. */
-  private artReady(object: LiveObject): boolean {
+  /**
+   * The art drawn this frame. An engine-selected image (a miner's unloading model) replaces the rules type's art only
+   * once it can draw its final look: while its voxel model or redraw projection is still loading (the first swap of
+   * a match) or has failed, the object keeps the rules type's picture instead of vanishing or changing look twice.
+   */
+  private drawArt(object: LiveObject, paletteKey: string): string {
     const artType = this.artType(object);
-    if (this.cache.voxels.has(artType)) return true;
+    if (artType === object.type || this.imageReady(object, artType, paletteKey)) return artType;
+    return object.type;
+  }
+
+  /** Whether image art other than the rules type's can be drawn now; sprite art draws from its own lazy pages. */
+  private imageReady(object: LiveObject, artType: string, paletteKey: string): boolean {
     const type = this.library?.type(artType);
-    return !!type?.voxel && !!this.library!.voxel(type.voxel);
+    if (type?.sprite && (object.kind === 'building' || object.kind === 'infantry' || type.shpUnit)) return true;
+    if (object.kind === 'building' && this.cache.manifest.sprites[`${object.kind}:${artType}`]?.frames.length)
+      return true;
+    const source = this.voxelSource(artType, paletteKey);
+    return !!source && this.voxelUnits.prepare(source.model, source.key, source.cacheKey);
+  }
+
+  /** A voxel art type's model (map cache first, then the library; null while it loads), palette row and cache key. */
+  private voxelSource(
+    artType: string,
+    paletteKey: string,
+  ): { model: VoxelModel; key: string; cacheKey: string } | null {
+    const libraryType = this.library?.type(artType);
+    const fromMap = this.cache.voxels.get(artType);
+    const fromLibrary = !fromMap && libraryType?.voxel ? this.library!.voxel(libraryType.voxel) : null;
+    const model = fromMap ?? fromLibrary;
+    if (!model) return null;
+    const basePalette = fromMap ? model.palette : this.libraryPalette(model.palette);
+    const key = paletteFor(this.cache, basePalette, libraryType?.remap ?? true, paletteKey || undefined);
+    return { model, key, cacheKey: `${artType}@${key}` };
+  }
+
+  /**
+   * Load the image a type swaps to (library unloadingVoxel) ahead of its first use: the model file, the shared
+   * geometry and the redraw projection are then ready when the engine selects it, so the swap takes one frame.
+   */
+  private warmAlternate(visual: Visual, paletteKey: string): void {
+    if (visual.alternateWarm) return;
+    const voxel = visual.mode === 'voxel' ? visual.libraryType?.unloadingVoxel : undefined;
+    const artType = voxel ? this.library?.voxelType(voxel) : undefined;
+    if (!voxel || !artType || this.library!.voxelFailed(voxel)) {
+      visual.alternateWarm = true;
+      return;
+    }
+    const source = this.voxelSource(artType, paletteKey);
+    if (source && this.voxelUnits.prepare(source.model, source.key, source.cacheKey)) visual.alternateWarm = true;
   }
 
   private buildVisual(object: LiveObject, paletteKey: string, firstFrame: number): Visual {
-    const artType = this.artType(object);
+    const artType = this.drawArt(object, paletteKey);
     const libraryType = this.library?.type(artType);
     const base = { type: artType, paletteKey, firstFrame };
     if (libraryType?.sprite && (object.kind === 'building' || object.kind === 'infantry'))
@@ -2404,13 +2453,9 @@ export class LiveView {
     const spriteId = `${object.kind}:${artType}`;
     if (object.kind === 'building' && this.cache.manifest.sprites[spriteId]?.frames.length)
       return { ...base, root: new Group(), mode: 'map-sprite', sprite: spriteId };
-    const fromMap = this.cache.voxels.get(artType);
-    const fromLibrary = !fromMap && libraryType?.voxel ? this.library!.voxel(libraryType.voxel) : null;
-    const model = fromMap ?? fromLibrary;
-    if (model) {
-      const basePalette = fromMap ? model.palette : this.libraryPalette(model.palette);
-      const key = paletteFor(this.cache, basePalette, libraryType?.remap ?? true, paletteKey || undefined);
-      const { root, turret } = this.voxelUnits.build(model, key, `${artType}@${key}`);
+    const source = this.voxelSource(artType, paletteKey);
+    if (source) {
+      const { root, turret } = this.voxelUnits.build(source.model, source.key, source.cacheKey);
       return { ...base, root, turret, mode: 'voxel', libraryType };
     }
     // No art (yet): the object stays tracked but draws nothing (a stand-in block would read as a real, oddly
