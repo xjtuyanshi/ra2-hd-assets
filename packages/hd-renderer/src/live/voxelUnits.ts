@@ -155,10 +155,11 @@ export class VoxelUnits {
 
   /**
    * A unit standing on terrain or a bridge deck casts the engine's contact shadow at its own origin (see
-   * voxelShadow.ts setShadowContact); `normal` is the plane of a tilted body, absent = the ground's own.
+   * voxelShadow.ts setShadowContact); `normal` is the plane of a tilted body, absent = the ground's own. `bottomFace`
+   * lays the footprint on the bottom face of the body's bounds (vehicles).
    */
-  setGroundContact(unit: VoxelUnit, grounded: boolean, normal?: Vector3): void {
-    setShadowContact(unit.root, grounded, normal);
+  setGroundContact(unit: VoxelUnit, grounded: boolean, normal?: Vector3, bottomFace = false): void {
+    setShadowContact(unit.root, grounded, normal, bottomFace);
   }
 
   /** Painter bias remains additive to either physical flight depth or the native ground card. */

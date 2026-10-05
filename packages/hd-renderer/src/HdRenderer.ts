@@ -488,6 +488,14 @@ const BLOOM_THRESHOLD = 1.0;
 /** Bloom threshold of the night presentation, on the unexposed scene (as it was tuned). */
 const NIGHT_BLOOM_THRESHOLD = 0.85;
 
+/** WebGPU device limits requested at the adapter's own maximum instead of the specification's default. */
+const RAISED_DEVICE_LIMITS = [
+  'maxTextureDimension2D',
+  'maxBufferSize',
+  'maxSampledTexturesPerShaderStage',
+  'maxSamplersPerShaderStage',
+] as const;
+
 /**
  * Consumes RenderState snapshots and draws the HD battlefield. It owns no game rules and never writes game state:
  * visual randomness, interpolation and effects live entirely on this side of the contract.
@@ -684,19 +692,27 @@ export class HdRenderer {
   /**
    * WebGPU devices default to 8192 px textures and 256 MiB buffers; ask for what the adapter really supports (16384 px
    * and 4 GiB on Apple GPUs) so a large map's upscaled whole-map terrain fits in one texture and its upload staging
-   * buffer (DeepFrze's 12000x6664 @2x terrain needs 320 MB, which rendered black under the default). Empty when WebGPU
-   * is unavailable.
+   * buffer (DeepFrze's 12000x6664 @2x terrain needs 320 MB, which rendered black under the default). The same goes
+   * for the textures one fragment shader may sample: the default is 16, and the live terrain material of a map with
+   * every layer (redrawn ground, normals, water, shore, shroud, lights) reached 22, so its pipeline was refused and the
+   * ground stayed black while units were drawn (RiverRam in the game page; Apple GPUs allow 48). Empty when WebGPU is
+   * unavailable.
    */
   static async adapterLimits(): Promise<Record<string, number>> {
     const gpu = (
       navigator as Navigator & { gpu?: { requestAdapter(): Promise<{ limits: Record<string, number> } | null> } }
     ).gpu;
     const adapter = await gpu?.requestAdapter().catch(() => null);
+    return HdRenderer.requiredLimitsFor(adapter?.limits);
+  }
+
+  /** The device limits worth raising to what an adapter offers (see adapterLimits); absent ones keep the default. */
+  static requiredLimitsFor(adapter: Readonly<Record<string, number>> | null | undefined): Record<string, number> {
     const limits: Record<string, number> = {};
-    const max = adapter?.limits.maxTextureDimension2D;
-    if (max) limits.maxTextureDimension2D = max;
-    const buffer = adapter?.limits.maxBufferSize;
-    if (buffer) limits.maxBufferSize = buffer;
+    for (const key of RAISED_DEVICE_LIMITS) {
+      const value = adapter?.[key];
+      if (value) limits[key] = value;
+    }
     return limits;
   }
 

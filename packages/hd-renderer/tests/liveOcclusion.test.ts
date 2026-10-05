@@ -265,7 +265,7 @@ describe('LiveView ground motion', () => {
     p.view.render(0);
     expect(pose.mock.lastCall![3]!.toArray()).toEqual([0, 1, 0]);
     // A level body leaves the shadow in the ground's own plane.
-    expect(contact).toHaveBeenLastCalledWith(p.visual, true, undefined);
+    expect(contact).toHaveBeenLastCalledWith(p.visual, true, undefined, true);
     const edge = { x: 0.4896, y: 0.2, z: Math.sqrt(1 - 0.4896 ** 2 - 0.04) };
     p.view.push(tilted(2, 280, edge), 50);
     p.view.push(tilted(3, 304, edge), 100);
@@ -291,7 +291,7 @@ describe('LiveView ground motion', () => {
     p.view.push(tilted(4, 304), 450);
     p.view.render(451);
     expect(pose.mock.lastCall![3]).toBeNull();
-    expect(contact).toHaveBeenLastCalledWith(p.visual, true, undefined);
+    expect(contact).toHaveBeenLastCalledWith(p.visual, true, undefined, true);
     p.visual.root.updateMatrix();
     expect(column.setFromMatrixColumn(p.visual.root.matrix, 1).toArray()).toEqual([0, 1, 0]);
   });

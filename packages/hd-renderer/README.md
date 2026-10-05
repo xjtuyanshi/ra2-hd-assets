@@ -979,12 +979,25 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   core keeps the original darkness (depth-tested once per layer, see `voxelShadow.ts`); `?vshadow=hard` restores one
   crisp twin in the sandbox and replays. A unit the live view marks as standing on terrain or a bridge deck
   (`setShadowContact`) instead casts the engine's own ground shadow: the top-down footprint of the body alone
-  (no turret or barrel, no shear by height) in the plane through the unit's origin, drawn three engine pixels to
-  the right of the draw point with a penumbra of about half a pixel (YR 1.001 unit draw `0x73C47A`, shadow matrix
-  `0x55A7D0`, offset vector at `0x887420`). On a ramp the footprint lies in the plane the body is drawn in. Frozen
-  same-frame pairs showed the sheared projection at 2.2 to 5 times the original's shadow area, which read as a
-  vehicle hovering over a drop shadow; the footprint measures 0.85 to 1.7 times. Flight, water contact and
-  physical-origin overrides keep the earlier rules. Grounded voxel origins on water are identified by the terrain's surface
+  (no turret or barrel, no shear by height) in the plane through the unit's origin, for vehicles on the bottom face
+  of the body's bounds (`bottomFace`; the Chrono Miner's lies four voxels below its origin), drawn three engine
+  pixels to the right of the draw point (YR 1.001 unit draw `0x73C47A`, shadow matrix `0x55A7D0`, offset vector at
+  `0x887420`). On a ramp the footprint lies in the plane the body is drawn in; its depth is the ground's plane at
+  the unit, raised until it is nowhere under the registered surface beneath the footprint plus a quarter level
+  (`contactClearance`, at most one level; level ground unchanged): one plane through the unit's origin dips under
+  the real ground where a ramp begins or ends and on corner ramps, and the ground's own depth then hid the footprint
+  (frozen pairs with the hull hidden: 0 to 25 visible pixels where the original shows 91 to 169). Its edge is crisp
+  (`CONTACT_SHADOW_PENUMBRA`, a sixth of an engine pixel: a half-pixel penumbra drew a dark line under the whole
+  lower outline of a hull) and its darkness is the engine's own whatever the look's `shadowDarkness` is
+  (`CONTACT_SHADOW_OPACITY`): the original halves the ground under a vehicle, and the enhanced look's 1.15 turned the
+  three-pixel band into a black outline. Measured on frozen same-frame pairs with exact masks (original: a shadow
+  pixel is the background with every 16-bit channel halved; HD: sandbox replays of the same state with the hulls
+  hidden): brightness under the shadow 0.49 original, 0.45 to 0.47 HD (0.30 with the look's figure); the whole HD
+  footprint covers the engine's at 0.93 to 0.97 intersection over union; the visible shadow is 0.96 to 1.2 times
+  the original's area for hulls facing north to west and 1.4 to 2.9 times for hulls pointing at the camera (east to
+  south), where the smooth HD hull's lower outline lies up to two pixels inside the engine's splatted voxels and
+  bares a strip of footprint the original covers. The sheared projection measured 2.2 to 5 times. Flight, water
+  contact and physical-origin overrides keep the earlier rules. Grounded voxel origins on water are identified by the terrain's surface
   lookup, regardless of unit type: five straight-down twins give 0.3 core contact darkness; five blue-white foam twins
   retain only source points near the waterline (smooth fade from 0.06 to 0.14 world units above it), scale 1.06 across
   the hull and 1.14 along its forward axis, and break their 0.3 core alpha with drifting 0.1/0.2-cell value noise

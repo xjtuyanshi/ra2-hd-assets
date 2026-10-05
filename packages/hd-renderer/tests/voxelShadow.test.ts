@@ -27,7 +27,11 @@ import {
   AIRBORNE_HEIGHT,
   CONTACT_SHADOW_OFFSET,
   CONTACT_SHADOW_OFFSET_PX,
+  CONTACT_SHADOW_OPACITY,
   CONTACT_SHADOW_PENUMBRA,
+  CONTACT_CLEARANCE_MAX,
+  CONTACT_SLOPE_MARGIN,
+  ENGINE_SHADOW_OPACITY,
   AIRBORNE_SHADOW_DRIFT_X,
   AIRBORNE_SHADOW_DRIFT_Z,
   AIRBORNE_SHADOW_HALF,
@@ -796,11 +800,11 @@ describe('voxel contact shadow of a grounded unit', () => {
   const VIEW = new Vector3(Math.sqrt(1.5), 1, Math.sqrt(1.5)).normalize();
   const SCREEN_UP = new Vector3().crossVectors(VIEW, RIGHT).normalize();
 
-  function unit(ground: Parameters<typeof setShadowGround>[1]) {
+  function unit(ground: Parameters<typeof setShadowGround>[1], bodyGeometry: BufferGeometry = new BufferGeometry()) {
     const nodes = new AtmosphereNodes();
     const placed = instantiateVoxel(
       [
-        { role: 'body', turretOffset: 0, geometry: new BufferGeometry() },
+        { role: 'body', turretOffset: 0, geometry: bodyGeometry },
         { role: 'turret', turretOffset: 0.2, geometry: new BufferGeometry() },
       ],
       new MeshStandardNodeMaterial(),
@@ -908,6 +912,159 @@ describe('voxel contact shadow of a grounded unit', () => {
         10,
       );
     } finally {
+      u.nodes.dispose();
+    }
+  });
+
+  it('darkens like the engine whatever the look does to other shadows, with a crisp edge', () => {
+    const u = unit(() => 0);
+    const look = spriteLookFor(u.nodes);
+    const frame = new NodeFrame();
+    const composed = (twin: VoxelShadowMesh) => {
+      const opacity = (twin.material as MeshBasicNodeMaterial).opacityNode!;
+      frame.object = twin;
+      opacity.update(frame);
+      return 1 - (1 - (opacity as unknown as { value: number }).value) ** SHADOW_COPIES.length;
+    };
+    try {
+      // The enhanced look darkens ordinary shadows by 1.15; the engine halves the ground under a vehicle.
+      look.enabled.value = 1;
+      look.shadowDarkness.value = 1.15;
+      u.root.position.set(1, 0, 2);
+      setShadowContact(u.root, true);
+      u.scene.updateMatrixWorld(true);
+      const twin = u.body[0]!;
+      expect(twin.contact).toBe(true);
+      expect(CONTACT_SHADOW_OPACITY).toBe(ENGINE_SHADOW_OPACITY);
+      expect(composed(twin)).toBeCloseTo(CONTACT_SHADOW_OPACITY, 14);
+      // Displayed brightness of the ground under it: half, as in the original's frozen frames.
+      expect((1 - composed(twin)) ** (1 / 2.2)).toBeCloseTo(0.5, 12);
+      // The same twin off the ground (sheared projection, flight) follows the look again.
+      setShadowContact(u.root, false);
+      u.scene.updateMatrixWorld(true);
+      expect(twin.contact).toBe(false);
+      expect(composed(twin)).toBeCloseTo(Math.min(SHADOW_OPACITY * 1.15, 0.9), 14);
+      // A turret twin never draws a contact footprint.
+      setShadowContact(u.root, true);
+      u.scene.updateMatrixWorld(true);
+      expect(u.turret.every((t) => !t.contact)).toBe(true);
+      // The edge is anti-aliasing only: the three-pixel band must not grow a visible rim.
+      expect(CONTACT_SHADOW_PENUMBRA * PIXELS_PER_CELL_EDGE).toBeLessThan(0.25);
+      expect(CONTACT_SHADOW_PENUMBRA).toBeGreaterThan(0);
+    } finally {
+      u.nodes.dispose();
+    }
+  });
+
+  it('lays a vehicle footprint on the bottom face of the body bounds, level and tilted', () => {
+    // A body whose lowest face is 0.1 below its origin (the Chrono Miner's is four voxels below) and 0.3 above it.
+    const body = new BoxGeometry(1, 0.4, 0.6).translate(0, 0.1, 0);
+    const u = unit(() => 0, body);
+    try {
+      u.root.position.set(5, 0, 7);
+      u.root.rotation.y = 0.4;
+      setShadowContact(u.root, true);
+      u.scene.updateMatrixWorld(true);
+      const twin = u.body[0]!;
+      const origin = u.root.position;
+      // Without the option the plane passes through the origin, as for landed aircraft.
+      expect(new Vector3(0.3, 0.2, 0.1).applyMatrix4(twin.matrixWorld).y).toBeCloseTo(0, 12);
+      setShadowContact(u.root, true, undefined, true);
+      u.scene.updateMatrixWorld(true);
+      const through = new Vector3().applyMatrix4(twin.matrixWorld).sub(origin);
+      // (Bounds come from single-precision vertices.)
+      expect(through.y).toBeCloseTo(-0.1, 6);
+      expect(through.x).toBeCloseTo(CONTACT_SHADOW_OFFSET, 12);
+      expect(through.z).toBeCloseTo(-CONTACT_SHADOW_OFFSET, 12);
+      for (const height of [-0.1, 0.1, 0.3])
+        expect(new Vector3(0.3, height, 0.1).applyMatrix4(twin.matrixWorld).y).toBeCloseTo(-0.1, 6);
+      // The analytic depth still follows the ground the unit stands on.
+      expect(twin.planeConstant).toBeCloseTo(SHADOW_LIFT, 12);
+      // Tilted with the body: the same distance along the body's own up axis.
+      const bodyUp = new Vector3(-0.4896, 0.872, 0).normalize();
+      (u.root as VoxelUnit).setSurfaceUp(bodyUp);
+      setShadowContact(u.root, true, bodyUp, true);
+      u.scene.updateMatrixWorld(true);
+      for (const local of [new Vector3(0.3, 0.3, 0.1), new Vector3(-0.4, -0.1, -0.2)]) {
+        const p = local.clone().applyMatrix4(twin.matrixWorld).sub(origin);
+        expect(p.dot(bodyUp)).toBeCloseTo(-0.1, 6);
+      }
+      // An empty body (no bounds) keeps the origin plane.
+      const empty = unit(() => 0);
+      try {
+        setShadowContact(empty.root, true, undefined, true);
+        empty.scene.updateMatrixWorld(true);
+        expect(new Vector3(0.3, 0.2, 0.1).applyMatrix4(empty.body[0]!.matrixWorld).y).toBeCloseTo(0, 12);
+      } finally {
+        empty.nodes.dispose();
+      }
+    } finally {
+      body.dispose();
+      u.nodes.dispose();
+    }
+  });
+
+  it('raises the depth plane over the ground under the footprint where a ramp begins, never on level ground', () => {
+    // Level up to x = 10, then rising 0.4 per cell: a unit just onto the ramp has half its footprint over the flat.
+    const height = (x: number) => Math.max(0, 0.4 * (x - 10));
+    const slope = new Vector3(-0.4, 1, 0).normalize();
+    const body = new BoxGeometry(1, 0.4, 0.6);
+    const u = unit(
+      { height, normal: (x, _z, out) => (x > 10 ? out.copy(slope) : out.set(0, 1, 0)) },
+      body,
+    );
+    try {
+      u.root.position.set(10.2, height(10.2), 20);
+      setShadowContact(u.root, true);
+      u.scene.updateMatrixWorld(true);
+      const origin = u.root.position;
+      // The slope's plane through the origin runs 0.4 * 0.2 below the flat ground at x = 10 and further below
+      // behind it; the footprint's rear edge is half a body length (projected onto the slope) behind the origin.
+      const rear = new Vector3(-0.5, 0, 0).applyMatrix4(u.body[0]!.matrixWorld);
+      const planeAtRear = origin.y + 0.4 * (rear.x - origin.x);
+      const expected = height(rear.x) - planeAtRear + CONTACT_SLOPE_MARGIN;
+      expect(expected).toBeGreaterThan(CONTACT_SLOPE_MARGIN + 0.05);
+      for (const copy of u.body) {
+        const c = SHADOW_COPIES[copy.copyIndex]!;
+        expect(copy.planeNormal.distanceTo(slope)).toBeLessThan(1e-12);
+        expect(copy.planeConstant).toBeCloseTo(slope.dot(origin) + SHADOW_LIFT + c.lift + expected * slope.y, 6);
+      }
+      // The lifted plane is nowhere under the ground beneath the footprint.
+      for (const x of [-0.5, 0, 0.5])
+        for (const z of [-0.3, 0, 0.3]) {
+          const p = new Vector3(x, 0, z).applyMatrix4(u.body[0]!.matrixWorld);
+          const plane = (u.body[0]!.planeConstant - SHADOW_LIFT - slope.x * p.x - slope.z * p.z) / slope.y;
+          expect(plane).toBeGreaterThanOrEqual(height(p.x) - 1e-9);
+        }
+      // Mid-ramp the plane is the ground: only the corner-ramp margin is added. A cliff next to the unit is capped.
+      u.root.position.set(13, height(13), 20);
+      u.scene.updateMatrixWorld(true);
+      expect(u.body[0]!.planeConstant).toBeCloseTo(
+        slope.dot(u.root.position) + SHADOW_LIFT + CONTACT_SLOPE_MARGIN * slope.y,
+        6,
+      );
+      const cliff = unit({ height: (x) => (x > 5.3 ? 4 : 0) }, new BoxGeometry(1, 0.4, 0.6));
+      try {
+        cliff.root.position.set(5, 0, 5);
+        setShadowContact(cliff.root, true);
+        cliff.scene.updateMatrixWorld(true);
+        expect(cliff.body[0]!.planeConstant).toBeCloseTo(SHADOW_LIFT + CONTACT_CLEARANCE_MAX, 9);
+      } finally {
+        cliff.nodes.dispose();
+      }
+      // Level ground: exactly the plane of before.
+      const level = unit(() => 0.4, new BoxGeometry(1, 0.4, 0.6));
+      try {
+        level.root.position.set(3, 0.4, 4);
+        setShadowContact(level.root, true);
+        level.scene.updateMatrixWorld(true);
+        for (const copy of level.body)
+          expect(copy.planeConstant).toBeCloseTo(0.4 + SHADOW_LIFT + SHADOW_COPIES[copy.copyIndex]!.lift, 12);
+      } finally {
+        level.nodes.dispose();
+      }
+    } finally {
+      body.dispose();
       u.nodes.dispose();
     }
   });
