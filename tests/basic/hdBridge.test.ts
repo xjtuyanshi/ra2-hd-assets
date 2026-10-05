@@ -1277,6 +1277,11 @@ describe('HD bridge match start', () => {
     const view = fakeView();
     view.settledFrames = 0;
     view.loadingArt.mockReturnValue(2);
+    // What each frame was drawn for, and whether the canvas was on screen when it was drawn.
+    const drawn: { outOfSight: boolean; displayed: boolean }[] = [];
+    view.render.mockImplementation(() => {
+      drawn.push({ outOfSight: view.outOfSight, displayed: harness.hdCanvas.style.display === 'block' });
+    });
     liveView.create.mockResolvedValue(view);
     harness.setState(battle(1));
     await advance(16);
@@ -1285,10 +1290,18 @@ describe('HD bridge match start', () => {
     await advance(16, 2);
     await advance(19_000);
     expect(harness.hdCanvas.style.display).toBe('none');
+    expect(drawn.every((frame) => frame.outOfSight && !frame.displayed)).toBe(true);
     await advance(1_100);
     expect(harness.hdCanvas.style.display).toBe('block');
     expect(harness.bridge()!.timeline).toMatchObject({ revealReason: 'deadline', revealLoading: 2 });
     expect(warn).toHaveBeenCalledOnce();
+    // The view was incomplete when it was shown: it is drawn again as a shown view at once, so no frame drawn for a
+    // view out of sight (which leaves out units whose mesh is still being built) is ever on screen.
+    expect(drawn.some((frame) => !frame.outOfSight)).toBe(true);
+    expect(drawn.filter((frame) => frame.displayed).every((frame) => !frame.outOfSight)).toBe(true);
+    const shownFrom = drawn.findIndex((frame) => !frame.outOfSight);
+    expect(drawn[shownFrom]).toEqual({ outOfSight: false, displayed: true });
+    expect(drawn[shownFrom - 1]).toEqual({ outOfSight: true, displayed: false });
     harness.stop();
   });
 

@@ -294,6 +294,8 @@ export interface LiveDiagnostics {
   missingTypes: string[];
   /** Objects whose library art is still loading. */
   pendingArt: number;
+  /** Voxel units, turrets and projectiles on screen with a stand-in mesh while their own is being built. */
+  standInVoxels: number;
   /** Buildings whose voxel turret (TurretAnimIsVoxel) has no model, and whose model is still loading. */
   missingTurrets: number;
   pendingTurrets: number;
@@ -661,10 +663,20 @@ export class LiveView {
   private settled = 0;
   /**
    * True while the host keeps this view out of sight (the original picture is on screen, or the game still loads).
-   * Out of sight nothing has to be drawn early, so art that arrives in steps (a page, then its material page) is
-   * waited for instead of building the same sprite layer and its shaders twice.
+   * Out of sight nothing has to be drawn early, so art that arrives in steps (a page, then its material page, or a
+   * voxel model's stand-in mesh and then its own) is waited for instead of building it twice. A shown view never
+   * waits: what the game shows is drawn with the best art that is there.
    */
-  outOfSight = false;
+  get outOfSight(): boolean {
+    return this.hiddenFromSight;
+  }
+  set outOfSight(value: boolean) {
+    if (value === this.hiddenFromSight) return;
+    this.hiddenFromSight = value;
+    // What waited out of sight is drawn in the next frame, with or without a new snapshot (a paused match).
+    this.objectsFor = null;
+  }
+  private hiddenFromSight = false;
   /**
    * How many new kinds of art (a voxel model in a house's colours, a sprite page's layer) one frame may add to the
    * scene while the view is out of sight. Each brings shaders that are built in the frame that first draws it, 30
@@ -683,6 +695,8 @@ export class LiveView {
    * page in the frame after it was decoded, for a host that knows nothing moves on screen (see newArtPerFrame).
    */
   hiddenUploadPixels = UPLOAD_PIXELS_PER_FRAME;
+  /** Requests more of the library's voxel model files; null once every one has been requested (see render). */
+  private fetchAhead: (() => boolean) | null = null;
   /** New kinds added in the frame being drawn, and kinds that had to wait for a later frame. */
   private newArt = 0;
   private waitingArt = 0;
@@ -839,7 +853,10 @@ export class LiveView {
     // the following frames (render() steps the uploader).
     this.pageUploads = new PageUploader(hd.renderer);
     const upload = (texture: Texture) => this.pageUploads.upload(texture);
-    if (library) library.uploadPage = upload;
+    if (library) {
+      library.uploadPage = upload;
+      this.fetchAhead = () => library.preloadVoxels();
+    }
     this.shroud = new ShroudLayer(world.width, world.height);
     // The shroud darkens in the renderer's post pass, after the mist and before bloom (see ShroudLayer).
     hd.setVisibility(this.shroud.mask);
@@ -857,6 +874,7 @@ export class LiveView {
     // The pages of the common combat anims and smoke particles load up front, the rest on first use.
     void this.effectArt?.load().then(() => {
       this.effectArt?.preload(COMBAT_ANIMS, [...new Set(Object.values(SMOKE_SYSTEMS).map((r) => r.particle))]);
+      this.effectArt?.preloadVoxels();
       if (this.effectDriver.style === 'enhanced' && this.effectDriver.hdEnabled)
         void this.effectArt?.loadHd().then(() => this.effectArt?.preloadHd(COMBAT_ANIMS));
     });
@@ -1478,6 +1496,10 @@ export class LiveView {
     this.hd.frame(dt);
     // Loads settle between frames, never inside one: what is still on its way now was missing from this frame.
     this.settled = current && this.loadingArt() === 0 ? this.settled + 1 : 0;
+    // Once the opening is in (or the view is shown anyway), the model files of kinds that have not appeared yet are
+    // fetched ahead, so the first frame of a new kind of unit has a model to draw (see LiveLibrary.preloadVoxels).
+    if (this.fetchAhead && current && (this.settled >= 1 || !this.outOfSight) && this.fetchAhead())
+      this.fetchAhead = null;
     if (this.warmList && this.settled >= 1) this.finishWarmList();
     if (this.waitingArt) {
       // What waited for its turn is offered again in the next frame, with or without a new snapshot.
@@ -1830,6 +1852,7 @@ export class LiveView {
       placeholders,
       missingTypes: [...this.warnedTypes].sort(),
       pendingArt,
+      standInVoxels: this.voxelUnits.standInUnits,
       missingTurrets,
       pendingTurrets,
       effectCards: this.effectStats.drawn,
@@ -2652,15 +2675,17 @@ export class LiveView {
    * uses the unpushed draw anchor and the turret's own bitmap card, retaining only the KAPPA physical residual.
    * Its shadow uses a bounded
    * physical origin on that view ray nearest the foundation centre, with ordinary ground shear instead of flight drift.
-   * The model loads on first use; until then (and when it is missing) it counts in diagnostics().
+   * The model file loads on first use (or ahead, see LiveLibrary.preloadVoxels); until then (and when it is missing)
+   * it counts in diagnostics().
    */
   private buildingTurret(object: LiveObject, visual: Visual, turretFacing: number | null): void {
     const spec = visual.libraryType?.building?.turretVoxel;
     if (!spec) return;
     if (!visual.buildingTurret) {
       const loaded = this.library!.voxel(spec.voxel);
-      // The mesh is built off this thread: until it is there the turret counts as loading, like its model file.
-      const model = loaded && this.voxelUnits.geometryReady(loaded) ? loaded : null;
+      // The mesh is built off this thread. A shown turret is drawn from its stand-in until then; out of sight it
+      // counts as loading, like its model file (see voxelDrawable).
+      const model = loaded && this.voxelDrawable(loaded) ? loaded : null;
       visual.turretState = model ? 'ready' : !loaded && this.library!.voxelFailed(spec.voxel) ? 'missing' : 'loading';
       if (!model) return;
       const key = paletteFor(
@@ -2976,7 +3001,8 @@ export class LiveView {
     if (existing) existing.firstFrame = firstFrame;
     // Owner changes (capture, mind control) and engine image changes rebuild the visual; pending art is retried.
     if (existing && existing.type === artType && existing.paletteKey === paletteKey) {
-      if (!existing.pending || !this.voxelSource(artType, paletteKey)) {
+      const source = existing.pending ? this.voxelSource(artType, paletteKey) : null;
+      if (!source || !this.voxelDrawable(source.model)) {
         this.warmAlternate(existing, paletteKey);
         return existing;
       }
@@ -3028,7 +3054,10 @@ export class LiveView {
     return !!source && this.voxelUnits.prepare(source.model, source.key, source.cacheKey);
   }
 
-  /** A voxel art type's model (map cache first, then the library; null while it loads), palette row and cache key. */
+  /**
+   * A voxel art type's model (map cache first, then the library; null while its file loads), palette row and cache
+   * key. The model's mesh may still be being built: see voxelDrawable.
+   */
   private voxelSource(
     artType: string,
     paletteKey: string,
@@ -3037,11 +3066,21 @@ export class LiveView {
     const fromMap = this.cache.voxels.get(artType);
     const fromLibrary = !fromMap && libraryType?.voxel ? this.library!.voxel(libraryType.voxel) : null;
     const model = fromMap ?? fromLibrary;
-    // A loaded model whose mesh is still being built (off this thread) is not drawable yet: retried like a load.
-    if (!model || !this.voxelUnits.geometryReady(model)) return null;
+    if (!model) return null;
     const basePalette = fromMap ? model.palette : this.libraryPalette(model.palette);
     const key = paletteFor(this.cache, basePalette, libraryType?.remap ?? true, paletteKey || undefined);
     return { model, key, cacheKey: `${artType}@${key}` };
+  }
+
+  /**
+   * Whether a loaded voxel model is instantiated now. A shown view always does: while the model's smooth mesh is
+   * being built (off this thread, 0.02 to 3.3 s of CPU and more on a busy machine) VoxelUnits.build draws its
+   * stand-in mesh in the same place, facing and depth, and changes to the smooth mesh in place when it arrives, so a
+   * unit the game shows is never missing. Out of sight nobody would see the stand-in: the view waits for the mesh
+   * (asking starts the build) and counts as not settled until then.
+   */
+  private voxelDrawable(model: VoxelModel): boolean {
+    return !this.outOfSight || this.voxelUnits.geometryReady(model);
   }
 
   /**
@@ -3073,13 +3112,18 @@ export class LiveView {
     if (object.kind === 'building' && this.cache.manifest.sprites[spriteId]?.frames.length)
       return { ...base, root: new Group(), mode: 'map-sprite', sprite: spriteId };
     const source = this.voxelSource(artType, paletteKey);
-    // A kind not in the scene yet may have to wait a frame (admitNewArt); it is pending like a model still loading.
-    if (source && (!this.outOfSight || this.voxelUnits.built(source.cacheKey) || this.admitNewArt())) {
+    // Out of sight a kind waits for its mesh, and one not in the scene yet may have to wait a frame (admitNewArt);
+    // it is pending like a model still loading. A shown view builds it at once (see voxelDrawable).
+    if (
+      source &&
+      this.voxelDrawable(source.model) &&
+      (!this.outOfSight || this.voxelUnits.built(source.cacheKey) || this.admitNewArt())
+    ) {
       const { root, turret } = this.voxelUnits.build(source.model, source.key, source.cacheKey);
       return { ...base, root, turret, mode: 'voxel', libraryType };
     }
-    // No art (yet): the object stays tracked but draws nothing (a stand-in block would read as a real, oddly
-    // coloured unit); library voxels still loading are retried on later frames.
+    // No art (yet): the object stays tracked but draws nothing (a block in its place would read as a real, oddly
+    // coloured unit); library voxels whose file is still loading are retried on later frames.
     const pending = !!source || !!libraryType?.voxel || this.cache.voxels.has(artType);
     if (!pending && !this.warnedTypes.has(object.type)) {
       this.warnedTypes.add(object.type);

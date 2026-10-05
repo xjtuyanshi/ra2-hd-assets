@@ -311,7 +311,26 @@ function sectionGrid(section: VoxelSection): SectionGrid {
   return { section, raw, filled, cells, faces, faceOffsets, faceCount, px, pxy };
 }
 
-function buildPartGeometry(sections: readonly VoxelSection[], shape: Readonly<VoxelShape>): BufferGeometry {
+/**
+ * The exposed-face mesh of a part in the attribute layout of the smooth mesh (voxelSmoothGeometry.ts): the same
+ * names and sizes, so a material written for the smooth mesh draws this one with the shader it already has, and a
+ * placed mesh can change from one geometry to the other without a rebuild. Per vertex: `pshade` is the voxel's own
+ * palette index (no ramp smoothing), `curvature` 0 (no wear, no edge light) and `vpos` the corner's place on the
+ * section's lattice. Built in milliseconds (measured over the 94 library models: 0.4 to 25 ms, 8.5 on average, where
+ * the smooth mesh takes 19 to 3350 ms), which is why it stands in for the smooth mesh while that is being built.
+ */
+export function buildStandInPartGeometry(
+  sections: readonly VoxelSection[],
+  shape: Readonly<VoxelShape> = voxelShape,
+): BufferGeometry {
+  return buildPartGeometry(sections, shape, true);
+}
+
+function buildPartGeometry(
+  sections: readonly VoxelSection[],
+  shape: Readonly<VoxelShape>,
+  smoothLayout = false,
+): BufferGeometry {
   const grids = sections.map(sectionGrid);
   let vertexCount = 0;
   for (const grid of grids) vertexCount += grid.faceCount * 4;
@@ -320,6 +339,7 @@ function buildPartGeometry(sections: readonly VoxelSection[], shape: Readonly<Vo
   const normals = new Float32Array(vertexCount * 3);
   const pindices = new Float32Array(vertexCount);
   const occlusion = new Float32Array(vertexCount);
+  const lattice = smoothLayout ? new Float32Array(vertexCount * 3) : null;
   const indices = vertexCount > 65535 ? new Uint32Array((vertexCount / 4) * 6) : new Uint16Array((vertexCount / 4) * 6);
   let vertex = 0;
   let index = 0;
@@ -329,6 +349,11 @@ function buildPartGeometry(sections: readonly VoxelSection[], shape: Readonly<Vo
   geometry.setAttribute('normal', new BufferAttribute(normals, 3));
   geometry.setAttribute('pindex', new BufferAttribute(pindices, 1));
   geometry.setAttribute('occlusion', new BufferAttribute(occlusion, 1));
+  if (lattice) {
+    geometry.setAttribute('pshade', new BufferAttribute(pindices.slice(), 1));
+    geometry.setAttribute('curvature', new BufferAttribute(new Float32Array(vertexCount), 1));
+    geometry.setAttribute('vpos', new BufferAttribute(lattice, 3));
+  }
   geometry.setIndex(new BufferAttribute(indices, 1));
   geometry.computeBoundingSphere();
   return geometry;
@@ -347,6 +372,7 @@ function buildPartGeometry(sections: readonly VoxelSection[], shape: Readonly<Vo
     const cornerDone = new Uint8Array(cxy * (sz + 1));
     // Adjacent faces share the same final position as well as the same rounded corner offset.
     const cornerPositions = new Float32Array(cornerDone.length * 3);
+    const cornerLattice = lattice ? new Float32Array(cornerDone.length * 3) : null;
     const cornerOrigin = 1 + px + pxy;
     const cornerPosition = (cx: number, cy: number, cz: number): number => {
       const k = cx + cx1 * cy + cxy * cz;
@@ -363,9 +389,17 @@ function buildPartGeometry(sections: readonly VoxelSection[], shape: Readonly<Vo
         (filled[o + pxy + px]! << 6) |
         (filled[o + pxy + px + 1]! << 7);
       const off = mask * 3;
-      const bxp = section.minBounds[0] + (cx + relax * CORNER_OFFSETS[off]!) * step0;
-      const byp = section.minBounds[1] + (cy + relax * CORNER_OFFSETS[off + 1]!) * step1;
-      const bzp = section.minBounds[2] + (cz + relax * CORNER_OFFSETS[off + 2]!) * step2;
+      const lx = cx + relax * CORNER_OFFSETS[off]!;
+      const ly = cy + relax * CORNER_OFFSETS[off + 1]!;
+      const lz = cz + relax * CORNER_OFFSETS[off + 2]!;
+      if (cornerLattice) {
+        cornerLattice[p] = lx;
+        cornerLattice[p + 1] = ly;
+        cornerLattice[p + 2] = lz;
+      }
+      const bxp = section.minBounds[0] + lx * step0;
+      const byp = section.minBounds[1] + ly * step1;
+      const bzp = section.minBounds[2] + lz * step2;
       const X = m[0]! * bxp + m[1]! * byp + m[2]! * bzp + m[3]!;
       const Y = m[4]! * bxp + m[5]! * byp + m[6]! * bzp + m[7]!;
       const Z = m[8]! * bxp + m[9]! * byp + m[10]! * bzp + m[11]!;
@@ -443,6 +477,11 @@ function buildPartGeometry(sections: readonly VoxelSection[], shape: Readonly<Vo
           positions[p] = cornerPositions[o]!;
           positions[p + 1] = cornerPositions[o + 1]!;
           positions[p + 2] = cornerPositions[o + 2]!;
+          if (lattice) {
+            lattice[p] = cornerLattice![o]!;
+            lattice[p + 1] = cornerLattice![o + 1]!;
+            lattice[p + 2] = cornerLattice![o + 2]!;
+          }
           // The engine lights a voxel by its stored normal, not its cube faces: keep the smooth retail look.
           normals[p] = nx0;
           normals[p + 1] = ny0;
@@ -495,6 +534,8 @@ export const VOXEL_CLEARANCE = CARD_CLEARANCE + 0.005;
 export class VoxelUnit extends Group {
   /** Only body/turret/barrel originals; never infer membership by traversing shadow/reflection/foam children. */
   readonly partMeshes: Mesh[] = [];
+  /** |TurretOffset| of the model each part came from, parallel to `partMeshes` (see updateCaptureRadius). */
+  private readonly partOffsets: number[] = [];
   /** Rotation-independent world radius about the root, including articulated turret offsets. */
   captureRadius = 0;
   private readonly painterDepth = createPainterDepth();
@@ -511,10 +552,42 @@ export class VoxelUnit extends Group {
   }
 
   /** Real meshes share card state and painter bias; shadow twins retain ordinary ground depth. */
-  addSourceMesh(mesh: Mesh): void {
+  addSourceMesh(mesh: Mesh, turretOffset = 0): void {
     mesh.userData.painterDepth = this.painterDepth;
     mesh.userData.voxelNativeDepth = this.nativeDepth;
     this.partMeshes.push(mesh);
+    this.partOffsets.push(Math.abs(turretOffset));
+    this.updateCaptureRadius();
+  }
+
+  /** The radius about the root that holds every part at any facing (its geometry's bounds plus the turret offset). */
+  private updateCaptureRadius(): void {
+    let radius = 0;
+    this.partMeshes.forEach((mesh, index) => {
+      if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
+      const sphere = mesh.geometry.boundingSphere!;
+      radius = Math.max(radius, sphere.center.length() + sphere.radius + this.partOffsets[index]!);
+    });
+    this.captureRadius = radius;
+  }
+
+  /**
+   * Exchange part geometries in place (`swap`: current geometry -> its replacement), for the parts and for the
+   * shadow, foam and reflection twins that draw the same geometry. The unit stays the object it was: its place,
+   * facing, turret yaw, materials, opacity, capture membership and depth card are untouched; only what depends on the
+   * geometry's bounds is measured again. Returns whether any mesh changed.
+   */
+  replaceGeometry(swap: ReadonlyMap<BufferGeometry, BufferGeometry>): boolean {
+    let changed = false;
+    this.traverse((object) => {
+      if (!(object instanceof Mesh)) return;
+      const next = swap.get(object.geometry as BufferGeometry);
+      if (!next) return;
+      object.geometry = next;
+      changed = true;
+    });
+    if (changed) this.updateCaptureRadius();
+    return changed;
   }
 
   setPainterBias(bias: number): void {
@@ -678,13 +751,7 @@ export function instantiateVoxel(
     const sourceMaterial = part.material ?? material;
     // Palette materials are shared. The node reads the currently rendered mesh's depth slot.
     if (!sourceMaterial.depthNode) sourceMaterial.depthNode = voxelNativeDepthNode();
-    root.addSourceMesh(mesh);
-    if (!part.geometry.boundingSphere) part.geometry.computeBoundingSphere();
-    const sphere = part.geometry.boundingSphere!;
-    root.captureRadius = Math.max(
-      root.captureRadius,
-      sphere.center.length() + sphere.radius + Math.abs(part.turretOffset),
-    );
+    root.addSourceMesh(mesh, part.turretOffset);
     mesh.castShadow = false;
     mesh.receiveShadow = false;
     meshes.push(mesh);

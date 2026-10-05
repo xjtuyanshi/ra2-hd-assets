@@ -68,7 +68,9 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    flag or, without it, a house that owns no buildable building) keep their powered layers on the first frame, as the
    engine does until a player captures them; layers whose art has `Shadow=yes` draw their shadow frames. An object
    whose art is missing is tracked but drawn as nothing (`LiveView.diagnostics()` lists such types and counts missing
-   voxel turrets; `?hd-debug=placeholders` shows a small grey box instead). Light sources and lit windows of the
+   voxel turrets; `?hd-debug=placeholders` shows a small grey box instead). A voxel model whose smooth mesh is still
+   being built is not missing art: it is drawn from a stand-in mesh (`diagnostics().standInVoxels`). Light sources
+   and lit windows of the
    buildings standing in the match feed the night dressing (map light sources, HD street lamps, windows).
    Overlay and smudge polls run at most once per 250 ms, with an immediate reset for a new battle. The reader reuses scratch
    arrays, compares contents exactly, and only copies changed publications. Missing host cells warn only after five
@@ -204,8 +206,16 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   that never happens the view is shown after 20 seconds with what it has, with a console warning. Once shown it stays
   for the match; another match (the logic frame starts over, or another map) starts out of sight again.
 - **Nothing heavy on the presenting thread.** Smooth voxel meshes are built by a small pool of Workers
-  (`packages/hd-renderer/src/ra2/voxelSmoothPool.ts`, `voxelSmoothWorker.ts`); a model draws nothing until its mesh
-  is there, exactly like a model whose file is still loading. Out of sight a sprite layer waits for its material
+  (`packages/hd-renderer/src/ra2/voxelSmoothPool.ts`, `voxelSmoothWorker.ts`). Out of sight a model waits for its
+  mesh; a **shown** view never does: a vehicle, aircraft, ship, building turret or voxel shell that appears while
+  its mesh is being built is drawn at once from a stand-in mesh (the plain exposed-face mesh, milliseconds to
+  build, same materials) in the same place, facing and depth, and changes to the smooth mesh in place when the
+  Worker answers (`VoxelUnits.build` / `adoptSmooth`; see the renderer README). Before that rule a new kind of
+  vehicle was missing from the HD picture until its mesh arrived (measured: 281 presented frames, 7.2 s, for a War
+  Miner on a loaded machine). The voxel model files themselves are fetched ahead once the opening is in
+  (`LiveLibrary.preloadVoxels`), so a new kind has a model in its first frame. When the view is shown by the
+  deadline below while art is still on its way, the bridge draws it once more as a shown view before the first
+  frame the player sees. Out of sight a sprite layer waits for its material
   page instead of being built twice. Decoded atlas pages are copied to the GPU in strips
   (`packages/hd-renderer/src/pageUpload.ts`) instead of 253 MiB in one call: 8 M pixels per frame while the view is
   shown (up to twice that when a frame comes late). Out of sight the bridge sets the pace: behind the loading screen

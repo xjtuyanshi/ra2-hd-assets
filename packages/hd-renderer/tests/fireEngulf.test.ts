@@ -379,6 +379,7 @@ it('toggles capture layers on voxel body/turret/barrel originals only and restor
   const driver = {
     hd: { terrainDepth: depth },
     pending: new Map(),
+    standIns: new Map(),
     setCaptureCode: VoxelUnits.prototype.setCaptureCode,
   };
   const setCode = VoxelUnits.prototype.setCaptureCode;

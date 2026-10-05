@@ -358,6 +358,14 @@ export class EffectArt {
     return typeof entry === 'string' ? null : entry;
   }
 
+  /**
+   * Request every voxel model of the sidecar (debris pieces, voxel shells: ten files, 48 kB in the extracted
+   * library), so a shell in flight or a piece of wreckage is not skipped while its file loads on first use.
+   */
+  preloadVoxels(): void {
+    for (const id of Object.keys(this.library?.voxels ?? {})) this.voxel(id);
+  }
+
   /** Every atlas page a sprite's frames (and shadows) sit on. */
   static pagesOf(sprite: SpriteEntry): number[] {
     const pages = new Set<number>();
