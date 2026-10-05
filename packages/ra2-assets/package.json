@@ -28,6 +28,7 @@
     "lights": "tsx src/cli/lights.mts",
     "materials": "tsx src/cli/materials.mts",
     "ui": "tsx src/cli/ui.mts",
+    "scenario-types": "tsx src/cli/scenarioTypes.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

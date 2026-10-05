@@ -297,3 +297,128 @@ export interface LibraryShpUnit {
   /** Raw art frame layout keys when present (StartWalkFrame, WalkFrames, StartFiringFrame, FiringFrames, ...). */
   frames: Record<string, number>;
 }
+
+/** File name of a map cache's scenario-type sidecar, next to its manifest.json. */
+export const SCENARIO_TYPES_FILE = 'scenario-types.json';
+export const SCENARIO_TYPES_VERSION = 1;
+
+/**
+ * A type whose picture depends on the scenario's own rules. A map file is one more rules pass for the engine: it can
+ * register new types (its own [BuildingTypes], [InfantryTypes] ... lists plus a section, e.g. the capturable Grand
+ * Cannon clone `GTGCANA` with `Image=GTGCAN`) and change stock ones (a lamp post made visible with
+ * `InvisibleInGame=no`). The theatre library is built from rulesmd.ini alone and knows neither, so the map cache
+ * records them here.
+ *
+ * An entry never carries art of its own: `art` names the stock library type drawn with the same art (same art
+ * section, and for voxel units a model of the same parts), and the remaining fields are the traits the extractor
+ * derives from rules, as the scenario sets them. scenarioLibraryType() turns an entry into a LibraryType.
+ */
+export interface ScenarioType {
+  kind: LibraryKind;
+  /** Stock type id in the theatre library whose art this type uses (the type itself when only its rules changed). */
+  art: string;
+  /** rules Turret=. */
+  turret?: true;
+  /** rules InvisibleInGame=. */
+  invisible?: true;
+  /** rules Harvester= (vehicles) and Refinery= (buildings). */
+  harvester?: true;
+  refinery?: true;
+  /** rules UnloadingClass: a voxel id of the theatre library. */
+  unloadingVoxel?: string;
+  /** rules DeployingAnim: an anim sprite id of the theatre library. */
+  deployingAnim?: string;
+  /** Building voxel turret: a voxel id of the theatre library, with the scenario's TurretAnimX/Y/ZAdjust. */
+  turretVoxel?: NonNullable<LibraryBuilding['turretVoxel']>;
+}
+
+/** <map cache>/scenario-types.json. Absent when the scenario changes no type's picture. */
+export interface ScenarioTypesSidecar {
+  version: typeof SCENARIO_TYPES_VERSION;
+  theater: TheaterId;
+  /** Map source file name, as in the manifest. */
+  source: string;
+  types: Record<string, ScenarioType>;
+  /** Scenario types that could not be bound to library art (they keep the renderer's fallback), with the reason. */
+  warnings: string[];
+}
+
+/**
+ * The library record of a scenario type: the art-derived fields of the stock type it shares art with, and the
+ * rules-derived traits of the scenario entry. Nothing rules-derived is inherited from the stock type: a clone without
+ * a turret must not get the stock type's turret.
+ */
+export function scenarioLibraryType(stock: LibraryType, entry: ScenarioType): LibraryType {
+  const {
+    turret: _turret,
+    invisible: _invisible,
+    harvester: _harvester,
+    refinery: _refinery,
+    unloadingVoxel: _unloadingVoxel,
+    deployingAnim: _deployingAnim,
+    building,
+    ...art
+  } = stock;
+  const type: LibraryType = { ...art };
+  if (entry.turret) type.turret = true;
+  if (entry.invisible) type.invisible = true;
+  if (entry.harvester) type.harvester = true;
+  if (entry.refinery) type.refinery = true;
+  if (entry.unloadingVoxel) type.unloadingVoxel = entry.unloadingVoxel;
+  if (entry.deployingAnim) type.deployingAnim = entry.deployingAnim;
+  if (building) {
+    const { turretVoxel: _turretVoxel, ...body } = building;
+    type.building = { ...body, ...(entry.turretVoxel ? { turretVoxel: entry.turretVoxel } : {}) };
+  }
+  return type;
+}
+
+/**
+ * A library's type table with a scenario's types laid over it: scenario-defined ids are added, redefined stock ids
+ * replaced. An entry whose stock type this library does not have (a sidecar made for another library generation) is
+ * reported through `warn` and skipped, leaving whatever the table had.
+ */
+export function scenarioTypeTable(
+  stock: Readonly<Record<string, LibraryType>>,
+  entries: Readonly<Record<string, ScenarioType>>,
+  warn: (message: string) => void = () => {},
+): Record<string, LibraryType> {
+  const types: Record<string, LibraryType> = { ...stock };
+  for (const [id, entry] of Object.entries(entries)) {
+    const donor = stock[entry.art];
+    if (!donor || donor.kind !== entry.kind) {
+      warn(`scenario type ${id}: the library has no ${entry.kind} ${entry.art} to draw it with`);
+      continue;
+    }
+    types[id] = scenarioLibraryType(donor, entry);
+  }
+  return types;
+}
+
+/** Shape check of a scenario-type sidecar; throws with the offending path so a renderer never guesses. */
+export function validateScenarioTypes(json: unknown): ScenarioTypesSidecar {
+  const fail = (what: string): never => {
+    throw new Error(`${SCENARIO_TYPES_FILE}: ${what}`);
+  };
+  if (!json || typeof json !== 'object') fail('not an object');
+  const sidecar = json as ScenarioTypesSidecar;
+  if (sidecar.version !== SCENARIO_TYPES_VERSION) fail(`unsupported version ${String(sidecar.version)}`);
+  if (!sidecar.types || typeof sidecar.types !== 'object' || Array.isArray(sidecar.types)) fail('types is not a map');
+  const kinds: readonly string[] = ['building', 'vehicle', 'infantry', 'aircraft'];
+  for (const [id, entry] of Object.entries(sidecar.types)) {
+    if (!entry || typeof entry !== 'object') fail(`types.${id} is not an object`);
+    if (!kinds.includes(entry.kind)) fail(`types.${id}.kind is ${String(entry.kind)}`);
+    if (typeof entry.art !== 'string' || !entry.art) fail(`types.${id}.art is missing`);
+    const turret = entry.turretVoxel;
+    if (
+      turret !== undefined &&
+      (typeof turret.voxel !== 'string' ||
+        !Array.isArray(turret.offset) ||
+        turret.offset.length !== 2 ||
+        !turret.offset.every(Number.isFinite) ||
+        !Number.isFinite(turret.zAdjust))
+    )
+      fail(`types.${id}.turretVoxel is malformed`);
+  }
+  return sidecar;
+}

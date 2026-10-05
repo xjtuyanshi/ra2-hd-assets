@@ -63,8 +63,15 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    aircraft get the engine's extra object light (rules `ExtraInfantryLight`/`ExtraUnitLight`/`ExtraAircraftLight`, 0.2
    in YR); buildings get none. Capturable tech buildings (oil derrick, airport, ...) of a civilian house (the bridge's
    flag or, without it, a house that owns no buildable building) keep their powered layers on the first frame, as the
-   engine does until a player captures them; layers whose art has `Shadow=yes` draw their shadow frames. An object
-   whose art is missing is tracked but drawn as nothing (`LiveView.diagnostics()` lists such types and counts missing
+   engine does until a player captures them; layers whose art has `Shadow=yes` draw their shadow frames. Types the
+   scenario's own rules define or redefine (DeepFrze's `GTGCANA`, the campaign's numbered tech power plants, a
+   lamp-post dummy made visible) are not in the theater library, which is built from `rulesmd.ini` alone: the map
+   cache's `scenario-types.json` binds each to the stock type with the same art and carries its rules-derived traits,
+   and `live/library.ts` lays those entries over the library's type table when the match loads (see "Scenario types"
+   in `packages/ra2-assets/README.md`). Without that file such a building falls back to the map cache's single body
+   frame, without layers or turret. An object
+   whose art is missing is tracked but drawn as nothing (`LiveView.diagnostics()` lists such types, the building
+   types drawn from the map cache's body frame for want of a library record (`mapCacheTypes`), and counts missing
    voxel turrets; `?hd-debug=placeholders` shows a small grey box instead). Light sources and lit windows of the
    buildings standing in the match feed the night dressing (map light sources, HD street lamps, windows).
    Overlay and smudge polls run at most once per 250 ms, with an immediate reset for a new battle. The reader reuses scratch
