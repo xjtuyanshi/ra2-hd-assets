@@ -17,6 +17,8 @@ export interface Sidebar {
     radar: Rect;
     credits: Rect;
     strip: Rect;
+    /** Frame pixels kept free below the strip when the game sizes it (see chromeSlices); absent when unknown. */
+    stripReserve?: number;
     creditsAnchor: { x: number; y: number };
     cameo: { width: number; height: number };
     cameoPitch: { x: number; y: number };
@@ -94,12 +96,95 @@ const inflate = (r: Rect, by: number): Rect => ({
   height: r.height + 2 * by,
 });
 
+/** A cut of an anchor's chrome art (frame pixels of the art's own layout) and where it goes in the live frame. */
+export interface ChromeSlice {
+  source: Rect;
+  target: Rect;
+}
+
+/**
+ * Lay chrome art out on the live frame. The art is a redraw of the sidebar and the command bar at ONE frame size
+ * (`artFrame`; `art` holds each anchor's rectangle relative to its live anchor). At that size every anchor is one
+ * slice. At another frame height the sidebar is cut the way the game builds it: the part above the cameo strip stays,
+ * the strip shows as many cameo rows as the live layout has (the art's rows repeat; extra rows reuse its inner rows),
+ * and the part under the strip follows the strip's bottom, as far as the art reaches. That needs the game's row rule
+ * (`layout.stripReserve`); without it, or for an anchor whose width differs (the command bar of a wider or narrower
+ * frame is assembled from the left AND the right), the anchor gets no slices and the native picture stays.
+ */
+export function chromeSlices(
+  sidebar: Sidebar,
+  artFrame: { width: number; height: number },
+  art: { sidebar?: Rect; commandBar?: Rect },
+): { sidebar: ChromeSlice[]; commandBar: ChromeSlice[] } {
+  const l = sidebar.layout;
+  const whole = (anchor: Rect, r: Rect): ChromeSlice => ({
+    source: r,
+    target: { x: anchor.x + r.x, y: anchor.y + r.y, width: r.width, height: r.height },
+  });
+  const result: { sidebar: ChromeSlice[]; commandBar: ChromeSlice[] } = { sidebar: [], commandBar: [] };
+  const bar = art.commandBar;
+  // The command bar keeps its height at every frame size; only its width can differ.
+  if (bar && l.commandBar && valid(bar) && l.commandBar.width === bar.x + bar.width)
+    result.commandBar = [whole(l.commandBar, bar)];
+  const side = art.sidebar;
+  if (!side || !valid(side) || l.sidebar.width !== side.x + side.width) return result;
+  if (sidebar.frame.height === artFrame.height) {
+    result.sidebar = [whole(l.sidebar, side)];
+    return result;
+  }
+  const pitch = l.cameoPitch.y;
+  const reserve = l.stripReserve;
+  // The top section has the same height at every frame height, so the art's strip starts where the live one does.
+  const top = l.strip.y - l.sidebar.y;
+  if (reserve === undefined || !(pitch > 0) || l.strip.height % pitch || side.y !== 0 || top <= 0) return result;
+  const rows = l.strip.height / pitch;
+  const artRows = Math.floor((artFrame.height - l.strip.y - reserve) / pitch);
+  if (rows < 1 || artRows < 1 || top + artRows * pitch > side.height) return result;
+  const slice = (sourceY: number, targetY: number, height: number): ChromeSlice => ({
+    source: { x: side.x, y: sourceY, width: side.width, height },
+    target: { x: l.sidebar.x + side.x, y: l.sidebar.y + targetY, width: side.width, height },
+  });
+  const shared = Math.min(rows, artRows);
+  result.sidebar.push(slice(0, 0, top + shared * pitch));
+  // Rows beyond the art's own reuse its inner rows: the first and last ones meet the top and bottom sections.
+  const inner = artRows > 2 ? { first: 1, count: artRows - 2 } : { first: 0, count: artRows };
+  for (let row = shared; row < rows; row++)
+    result.sidebar.push(slice(top + (inner.first + ((row - shared) % inner.count)) * pitch, top + row * pitch, pitch));
+  const below = Math.min(side.height - (top + artRows * pitch), l.sidebar.height - (top + rows * pitch));
+  if (below > 0) result.sidebar.push(slice(top + artRows * pitch, top + rows * pitch, below));
+  return result;
+}
+
+/** The chrome's slices for the live layout, from its composites (or, per anchor, its pieces at the art's own size). */
+function chromeLayout(sidebar: Sidebar, chrome: NonNullable<ReturnType<UiAssets['chrome']>>) {
+  const union = (anchor: 'sidebar' | 'commandBar'): Rect | undefined => {
+    const composite = chrome.composites?.[anchor];
+    if (composite) return composite.rect;
+    const rects = chrome.pieces.filter((piece) => piece.anchor === anchor).map((piece) => piece.rect);
+    if (!rects.length) return undefined;
+    const x = Math.min(...rects.map((r) => r.x));
+    const y = Math.min(...rects.map((r) => r.y));
+    return {
+      x,
+      y,
+      width: Math.max(...rects.map((r) => r.x + r.width)) - x,
+      height: Math.max(...rects.map((r) => r.y + r.height)) - y,
+    };
+  };
+  const slices = chromeSlices(sidebar, chrome.frame, { sidebar: union('sidebar'), commandBar: union('commandBar') });
+  // Cutting needs the anchor's art in one image; separate pieces are only drawn whole.
+  for (const anchor of ['sidebar', 'commandBar'] as const)
+    if (slices[anchor].length > 1 && !chrome.composites?.[anchor]) slices[anchor] = [];
+  return slices;
+}
+
 export function transparentRects(sidebar: Sidebar, assets: UiAssets): Rect[] {
   const l = sidebar.layout;
   const tooltip = sidebar.tooltip ? [sidebar.tooltip.rect] : [];
   const chrome = assets.chrome(sidebar.side);
   if (chrome) {
-    let covered = [l.sidebar, ...(l.commandBar ? [l.commandBar] : [])].filter(valid);
+    const slices = chromeLayout(sidebar, chrome);
+    let covered = [...slices.sidebar, ...slices.commandBar].map((slice) => slice.target).filter(valid);
     const preserve: Rect[] = [];
     if (sidebar.radarActive) preserve.push(inflate(l.radar, 1));
     // New snapshots expose exact button state; never hide an unsupported/missing state with static chrome.
@@ -237,17 +322,39 @@ export function drawSidebar(
     ctx.clip();
     fill(l.sidebar, '#101216');
     if (l.commandBar) fill(l.commandBar, '#101216');
-    const drawn = new Set<string>();
-    for (const piece of chrome.pieces) {
-      const anchor = piece.anchor === 'sidebar' ? l.sidebar : l.commandBar;
-      if (!anchor) continue;
-      const composite = chrome.composites?.[piece.anchor];
-      if (composite && drawn.has(piece.anchor)) continue;
-      const source = composite ?? piece;
-      const target = { ...source.rect, x: anchor.x + source.rect.x, y: anchor.y + source.rect.y };
-      const p = rect(target);
-      ctx.drawImage(source.bitmap, p.x, p.y, p.width, p.height);
-      if (composite) drawn.add(piece.anchor);
+    const slices = chromeLayout(sidebar, chrome);
+    for (const name of ['sidebar', 'commandBar'] as const) {
+      const anchor = name === 'sidebar' ? l.sidebar : l.commandBar;
+      if (!anchor || !slices[name].length) continue;
+      const composite = chrome.composites?.[name];
+      if (composite) {
+        // Art pixels per frame pixel; slices are cut on whole art pixels (frame-pixel cuts of whole-scale art).
+        const scale = composite.bitmap.width / composite.rect.width;
+        for (const { source, target } of slices[name]) {
+          const p = rect(target);
+          if (source === composite.rect) {
+            ctx.drawImage(composite.bitmap, p.x, p.y, p.width, p.height);
+            continue;
+          }
+          ctx.drawImage(
+            composite.bitmap,
+            (source.x - composite.rect.x) * scale,
+            (source.y - composite.rect.y) * scale,
+            source.width * scale,
+            source.height * scale,
+            p.x,
+            p.y,
+            p.width,
+            p.height,
+          );
+        }
+        continue;
+      }
+      for (const piece of chrome.pieces) {
+        if (piece.anchor !== name) continue;
+        const p = rect({ ...piece.rect, x: anchor.x + piece.rect.x, y: anchor.y + piece.rect.y });
+        ctx.drawImage(piece.bitmap, p.x, p.y, p.width, p.height);
+      }
     }
     // Soviet metal trim is subdued so faction artwork remains dominant.
     if (sidebar.side === 1) fill({ x: l.sidebar.x, y: l.sidebar.y, width: l.sidebar.width, height: 1 }, '#d4a548');

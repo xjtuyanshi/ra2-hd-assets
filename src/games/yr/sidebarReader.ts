@@ -707,6 +707,9 @@ export function createYrSidebarReader(
           credits: { x: lower.x, y: 0, width, height: 16 },
           creditsAnchor: { x: lower.x + Math.trunc(width / 2), y: 2 },
           strip,
+          // 0x6A51E9..0x6A5243 (YR 1.001): rows = (frame height - strip top - margin - 7) / 50, margin 0x1A for the
+          // Allied sidebar and 0x12 for the Soviet and Yuri ones; the strip top is sidebar bounds y + 69 (0x6A5090).
+          stripReserve: (side === 0 ? 0x1a : 0x12) + 7,
           cameo: { width: 60, height: 48 },
           cameoPitch: { x: pitchX, y: pitchY },
           cameoOrigin: { x, y: y + 1 },

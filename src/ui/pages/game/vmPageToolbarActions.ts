@@ -14,8 +14,7 @@ import type { FrameEffectController } from '../../../app/session/frameEffectCont
 import type { FramePresenter } from '../../../graphics/framePresenter';
 import type { VmFrameRenderer } from './vmFrameRenderer';
 import type { RuntimeToolbar, RuntimeToolbarCallbacks } from './runtimeToolbar';
-import { parseGameResolution } from '../../../games/resolution';
-import { storeResolution } from './vmPageResolution';
+import { DISPLAY_RESOLUTION, parseResolutionChoice, storeResolutionChoice } from './vmPageResolution';
 import { collectPerformanceReport } from './performanceDiagnostics';
 import { upscaleStatus } from './state/uiState';
 import { sendCheatKey, sendCheatSequence } from './input';
@@ -46,6 +45,8 @@ export interface VmPageToolbarActionDeps {
   setRequestedVolume: (linear: number) => void;
   setPerformanceLine: (summary: string) => void;
   onRestartForResolution: () => Promise<void>;
+  /** Switch between the HD view and the original picture (development HD bridge only). */
+  onToggleHdView?: () => void;
   onChangeGameSource: () => Promise<void>;
   onSchedulePerformanceRender: () => void;
 }
@@ -68,6 +69,7 @@ export function createVmPageToolbarActions(deps: VmPageToolbarActionDeps): Runti
     setRequestedVolume,
     setPerformanceLine,
     onRestartForResolution,
+    onToggleHdView,
     onChangeGameSource,
     onSchedulePerformanceRender,
   } = deps;
@@ -122,13 +124,20 @@ export function createVmPageToolbarActions(deps: VmPageToolbarActionDeps): Runti
       upscaleStatus.set(frameRenderer.upscaleStatus);
       presenter.invalidate();
     },
+    onHdView: onToggleHdView,
     async onResolution(value) {
       const gameId = getSelectedGameId();
       if (!gameId) return;
-      const resolution = parseGameResolution(value);
-      if (value && !resolution) throw new Error(t('不支持的分辨率：{0}', value));
-      storeResolution(gameId, resolution);
-      setRequestedResolution(resolution);
+      const choice = parseResolutionChoice(value);
+      if (choice === undefined) throw new Error(t('不支持的分辨率：{0}', value));
+      storeResolutionChoice(gameId, choice);
+      // The restart re-reads the choice; a ?resolution= in the address would override what was just picked.
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('resolution')) {
+        url.searchParams.delete('resolution');
+        window.history.replaceState(window.history.state, '', url);
+      }
+      setRequestedResolution(choice === DISPLAY_RESOLUTION ? null : choice);
       await onRestartForResolution();
     },
     onVolume(linear) {

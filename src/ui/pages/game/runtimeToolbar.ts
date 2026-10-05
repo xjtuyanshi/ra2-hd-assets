@@ -5,7 +5,8 @@ import type { ToolbarModel } from './components/RuntimeToolbarView';
 import type { UpscaleMode } from './vmFrameRenderer';
 import type { ProbeImage } from './experiments/modelProbe';
 import type { CheatGuideGameId } from './cheatGuides';
-import { gameResolutionValue, type GameResolution } from '../../../games/resolution';
+import type { GameResolution } from '../../../games/resolution';
+import { displayMatchIsStale, resolutionChoiceValue, type ResolutionChoice } from './vmPageResolution';
 
 export interface RuntimeToolbar {
   getPerformanceSettings(): Pick<ToolbarModel, 'rate' | 'resolution' | 'upscaleMode' | 'reshadeMode'>;
@@ -15,10 +16,24 @@ export interface RuntimeToolbar {
   recordLogicFrame(count?: number): void;
   recordPresentedFrame(): void;
   setCheatGame(game: CheatGuideGameId | null): void;
-  setResolution(resolution: GameResolution | null): void;
+  setResolution(choice: ResolutionChoice): void;
+  /**
+   * The fitted frame size, how many device pixels one of its pixels covers and how many would fill the stage (shown
+   * under the resolution). `matched` is the size a display-matched session measured at its start (null otherwise): a
+   * frame of that size that no longer fits the window gets a hint to reload.
+   */
+  setDisplayScale(
+    frameWidth: number,
+    frameHeight: number,
+    scale: number,
+    fillScale: number,
+    matched: GameResolution | null,
+  ): void;
   setReShadeMode(mode: ReShadeMode): void;
   setUpscaleMode(mode: UpscaleMode): void;
   setMapsAvailable(available: boolean): void;
+  /** Whether the HD view (true) or the original picture (false) is shown; null without an HD bridge (no button). */
+  setHdView(on: boolean | null): void;
   /** Select the clock multiplier for both buttons and [ ] shortcuts: synchronize aria-pressed and notify the page. */
   pressClockRate(rate: number): void;
   destroy(): void;
@@ -28,6 +43,8 @@ export interface RuntimeToolbarCallbacks {
   onCollectPerformance?(signal: AbortSignal, progress: (remainingSeconds: number) => void): Promise<string>;
   onClockRate(rate: number): void;
   onResolution(value: string): Promise<void>;
+  /** Switch between the HD view and the original picture. */
+  onHdView?(): void;
   onVolume(linear: number): void;
   onPerformance(summary: string): void;
   onSendCheatText(text: string): void;
@@ -68,10 +85,12 @@ export function installRuntimeToolbar(
     rendererDetail,
     cheatGame: null,
     resolution: '',
+    resolutionStatus: '',
     rate: 1,
     upscaleMode: 'off',
     reshadeMode: 'off',
     mapsAvailable: false,
+    hdView: null,
   };
   const publish = () => {
     if (disposed) return;
@@ -158,6 +177,12 @@ export function installRuntimeToolbar(
         publish();
       }
     },
+    setHdView(on) {
+      if (model.hdView !== on) {
+        model.hdView = on;
+        publish();
+      }
+    },
     setGameTitle(title) {
       model.title = title;
       publish();
@@ -177,8 +202,22 @@ export function installRuntimeToolbar(
         publish();
       }
     },
-    setResolution(resolution) {
-      model.resolution = resolution ? gameResolutionValue(resolution) : '';
+    setResolution(choice) {
+      model.resolution = resolutionChoiceValue(choice);
+      publish();
+    },
+    setDisplayScale(frameWidth, frameHeight, scale, fillScale, matched) {
+      const whole = Math.abs(scale - Math.round(scale)) < 1e-6;
+      const stale = displayMatchIsStale(matched, { width: frameWidth, height: frameHeight }, scale, fillScale);
+      const status =
+        t(
+          '{0}×{1} · 每像素 {2} 设备像素',
+          frameWidth,
+          frameHeight,
+          whole ? String(Math.round(scale)) : scale.toFixed(2),
+        ) + (stale ? t(' · 窗口已变，刷新页面重新匹配') : '');
+      if (status === model.resolutionStatus) return;
+      model.resolutionStatus = status;
       publish();
     },
     pressClockRate,

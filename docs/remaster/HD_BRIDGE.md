@@ -38,8 +38,9 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    back to a transparent tactical rectangle (`setTransparentRect`). Both need the WebGL2 renderer's alpha drawing
    buffer: with Canvas 2D (`?webgl=0`, or no WebGL2 context) the page neither installs the passthrough patches nor
    starts the bridge. The page stops the bridge (passthrough off, HD view released) before it destroys the VM,
-   including when the game exits or the boot is cancelled. `__hdBridge.toggle()` in the console switches between the
-   HD view and the original picture; `__hdBridge.passthrough` shows the state.
+   including when the game exits or the boot is cancelled. The toolbar's picture button and the `\\` key switch between
+   the HD view and the original picture (the key is the page's only while a bridge runs; otherwise it reaches the
+   game), as does `__hdBridge.toggle()` in the console; `__hdBridge.passthrough` shows the state.
 3. **Live view.** `packages/hd-renderer/src/live/liveView.ts` draws the snapshot: static map content (terrain, water,
    trees) from the map cache; overlays (walls, fences, ore, gems) and smudges (craters, scorch and burn marks) from
    independent live cell snapshots when available, otherwise from the map cache; every building/vehicle/infantry/aircraft from the snapshot using the
@@ -300,6 +301,34 @@ applies the preset and, on day maps, its suggested hour unless `hd-time` is give
 the HD cache (e.g. `vehicles-hd`); `hd-rect=x,y,w,h`
 overrides the tactical rectangle (default: the frame minus YR's 168 px sidebar and 32 px command bar).
 
+## Display scale
+
+The HD art has two texels per game pixel, so it is only shown texel for pixel when one game pixel covers exactly two
+device pixels. Any other scale resamples every texel: a 1152x744 game filling a 3456x2160 screen stretches the art
+1.45 times, and a window with a device pixel ratio of 1 shows no more pixels than the original.
+
+- `?resolution=display` (toolbar: "match window") computes the game resolution at every start from the stage the
+  canvas is fitted into: half its device pixels, even numbers, within `GAME_RESOLUTION_LIMITS` (`src/games/resolution.ts`:
+  the 800x600 the shell pages are laid out for up to the 2560x1600 the display-mode shim accepts); a stage too small
+  for two device pixels per game pixel uses one. It is the default for `?hd=1` while the player has never chosen a
+  resolution, and is passed to the game as the usual in-memory INI overlay. `?resolution=WxH` requests any size within
+  the limits, `?resolution=ini` the game's own INI; the parameter wins over the stored toolbar choice for that page load,
+  and choosing in the toolbar removes it from the address.
+- The size is measured once, when the game starts: put the window in its final state (maximised or fullscreen) first.
+  The canvas fit then shows a display-matched frame at whole device pixels per game pixel (`calculateCanvasFit` with
+  `integerScale`), leaving a border instead of resampling; the toolbar shows the frame size and scale under the
+  resolution and suggests a reload when a matched frame no longer fits its window. The shell pages keep their own
+  800x600 frame and are shown at their own whole scale.
+- The HD canvas and the HD interface canvas are laid out on whole device pixels with one drawing-buffer pixel each
+  (`devicePixelBox.ts`, `LiveView.resizePixels`), up to a budget of 10 million pixels; the device pixel ratio is not
+  capped. Interpolated scrolling stays on the drawing buffer's pixel grid (`snapToPixelGrid`), and post passes whose
+  radii are given in view pixels follow the device pixels per game pixel (`HdRenderer.setBufferScale`).
+
+`scripts/remaster/play.sh` (or a double click on `scripts/remaster/play.command` on macOS) starts the development
+server and opens the HD page with the approved look, `resolution=display` and the skirmish setup as the first page;
+`--original` opens the original picture at exact pixels instead, `--print` only prints the address. It reads the
+player's game from `RA2_GAME_ROOT` (default `game/`) and the HD cache from `RA2_HD_CACHE_DIR`.
+
 ## HD interface layer (`hd-ui=1`)
 
 In development, `?hd=1&hd-ui=1` adds a separate Canvas 2D interface controller (`hdUi.ts`). It consumes the optional
@@ -308,8 +337,8 @@ animated credits, native power slot counts, radar state, repair/sell modes and l
 without a battlefield HD cache. While enabled in a battle, uncached-map polls run at least every 50 ms; a live
 battlefield keeps its faster polling cadence. Unavailable snapshots and poll failures hide the interface.
 
-The `#hd-ui` canvas sits immediately before `#screen`, at z-index 0 above `#hd-screen`, matches the screen's CSS box
-and device pixel ratio, and receives no input. The WebGL2 frame renderer clears the covered rectangles after every
+The `#hd-ui` canvas sits immediately before `#screen`, at z-index 0 above `#hd-screen`, covers the screen's box on
+whole device pixels with one buffer pixel each, and receives no input. The WebGL2 frame renderer clears the covered rectangles after every
 frame path (plain, upscaled or keyed), before its independent native cursor pass. These extra rectangles are
 independent of the tactical key/hole. All pointer and keyboard input continues to reach the original game.
 The read-only native `sidebar.pointer` supplies cursor sheet frame and resolved hotspot; the input controller's
@@ -335,6 +364,12 @@ Optional art lives under the local HD cache's `_ui/` directory:
   two 492x32 command halves use x=0/492, y=0. Loaded chrome replaces procedural tab icons. When every piece of an
   anchor has the same art-to-frame scale, the pieces are composited once into one bitmap per anchor and drawn with a
   single scaled `drawImage`, so filtered piece edges cannot leave a dark seam at their joins.
+  Chrome art is a redraw at ONE frame size (`frame`). At another frame height the sidebar is cut the way the game
+  builds it (`chromeSlices` in `packages/hd-renderer/src/ui/sidebarView.ts`): the part above the cameo strip stays,
+  the strip shows as many rows as the live layout has (extra rows reuse the art's inner rows), and the part under the
+  strip follows the strip's bottom. That needs the game's row rule, published as the optional `layout.stripReserve`
+  (YR: `sidebarReader.ts`), and the anchor's art in one composite. An anchor whose width differs from the art (the
+  command bar of a wider frame is assembled from both ends) gets no chrome: its native picture stays visible.
   Optional `tabs` is `{ "file": "tabs.png", "scale": 4, "frames": [
 { "tab": 0, "state": "normal", "rect": { "x": 0, "y": 0, "width": 112, "height": 108 } } ] }`.
   Each rectangle is in atlas pixels and includes the whole native tab canvas with transparency; it is scaled into

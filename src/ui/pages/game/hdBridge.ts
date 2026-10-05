@@ -7,6 +7,7 @@ import {
 } from '../../../games/renderPassthrough';
 import type { FrameRect, VmFrameRenderer } from './vmFrameRenderer';
 import type { HdUi } from './hdUi';
+import { devicePixelBox } from './devicePixelBox';
 import type { LookPreset } from '../../../../packages/hd-renderer/src/HdRenderer';
 import type { LiveSnapshot, LiveView } from '../../../../packages/hd-renderer/src/live/liveView';
 import { parseWeatherParams } from '../../../../packages/hd-renderer/src/weatherParams';
@@ -66,6 +67,13 @@ const IDLE_POLL_MS = 1000;
  * without a cache costs one failed fetch per wait, not one per poll.
  */
 const LOAD_RETRY_MS = 30_000;
+/**
+ * Most drawing-buffer pixels of the HD canvas. The buffer normally has exactly the device pixels the canvas covers
+ * (about 7.3 million for a 1920x1080 game at two device pixels per game pixel); the multisampled scene targets cost
+ * roughly 100 bytes per pixel, so a larger rectangle (a 5K display, a browser zoomed far in) renders at this budget and
+ * is scaled up by the compositor instead of exhausting GPU memory.
+ */
+const MAX_BUFFER_PIXELS = 10_000_000;
 
 /**
  * `?hd-passthrough=`: comma list of category names, `all`, `none`, or a number. Default all: the HD renderer draws its
@@ -80,11 +88,14 @@ export function parsePassthroughFlags(value: string | null): number {
   return flags;
 }
 
-export function startHdBridge(host: HdBridgeHost): () => void {
+/** Stops the bridge when called; `toggle` switches between the HD view and the original picture (true: HD shown). */
+export type HdBridgeControl = (() => void) & { toggle(): boolean };
+
+export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   if (host.frameRenderer.backend !== 'WebGL2') {
     // Canvas 2D draws every frame opaque: neither the key nor the transparent rectangle could show the HD view.
     console.warn('[HD] the HD bridge needs the WebGL2 frame renderer; showing the original picture');
-    return () => undefined;
+    return Object.assign(() => undefined, { toggle: () => false });
   }
   const params = new URLSearchParams(window.location.search);
   const canvas = document.createElement('canvas');
@@ -327,18 +338,16 @@ export function startHdBridge(host: HdBridgeHost): () => void {
     const rect = hole ?? keyRect;
     const size = host.frameSize();
     if (!rect || !size || !live) return;
-    // Cover exactly the tactical rectangle of the (scaled) game canvas.
-    const scaleX = host.screen.clientWidth / size.width;
-    const scaleY = host.screen.clientHeight / size.height;
-    const left = host.screen.offsetLeft + rect.x * scaleX;
-    const top = host.screen.offsetTop + rect.y * scaleY;
-    const width = rect.width * scaleX;
-    const height = rect.height * scaleY;
-    const key = [left, top, width, height, rect.width, rect.height].map((v) => v.toFixed(2)).join();
+    // Cover exactly the tactical rectangle of the (scaled) game canvas, on whole device pixels: the drawing buffer then
+    // has one pixel per device pixel and the compositor shows it as it is. A CSS box that is a fraction of a device
+    // pixel larger than its buffer would be resampled, which softens the whole picture.
+    const box = devicePixelBox(host.screen, size, window.devicePixelRatio || 1, rect);
+    const budget = Math.min(1, Math.sqrt(MAX_BUFFER_PIXELS / (box.width * box.height)));
+    const key = [box.width, box.height, rect.width, rect.height, ...Object.values(box.style)].join();
     if (key === lastLayout) return;
     lastLayout = key;
-    Object.assign(canvas.style, { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` });
-    live.resize(width, height, rect.width, rect.height);
+    Object.assign(canvas.style, box.style);
+    live.resizePixels(box.width * budget, box.height * budget, rect.width, rect.height);
   };
 
   const tick = () => {
@@ -389,7 +398,7 @@ export function startHdBridge(host: HdBridgeHost): () => void {
   const globals = window as unknown as { __hdBridge?: typeof handle };
   globals.__hdBridge = handle;
 
-  return () => {
+  const stop = () => {
     if (stopped) return;
     stopped = true;
     cancelAnimationFrame(frame);
@@ -415,6 +424,7 @@ export function startHdBridge(host: HdBridgeHost): () => void {
     host.screen.style.zIndex = screenStyle.zIndex;
     if (globals.__hdBridge === handle) delete globals.__hdBridge;
   };
+  return Object.assign(stop, { toggle: () => handle.toggle() });
 }
 
 function toSnapshot(state: GameRenderState): LiveSnapshot {
