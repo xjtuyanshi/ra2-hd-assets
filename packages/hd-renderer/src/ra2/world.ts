@@ -30,6 +30,7 @@ import { smoothVoxelOptions, type SmoothVoxelOptions } from './voxelSmooth';
 import { buildSmoothVoxelGeometry } from './voxelSmoothGeometry';
 import { projectionParts, voxelProjectionLibrary, type VoxelProjectionLibrary } from './voxelProjection';
 import { frameInclusiveBottom, terrainObjectDepth } from './nativeDepth';
+import { TerrainObjectCards } from './terrainObjectCards';
 
 /** A battlefield the HD renderer can draw: terrain, optional water, and everything standing on it. */
 export interface HdWorld {
@@ -51,6 +52,8 @@ export interface HdWorld {
   /** Where the camera starts (world units). */
   focus: Vector3;
   sprites?: SpriteLayer;
+  /** Depth cards of the map's upright terrain objects, for whole-object ties with ground units. */
+  terrainObjectCards?: TerrainObjectCards;
   /** Shared map sprite materials, loaded once with this world and reused by live map-cache cell layers. */
   spriteMaterials?: SpriteMaterialAtlas | null;
   cache?: Ra2Cache;
@@ -155,6 +158,7 @@ export async function loadRa2World(
   const voxelMaterial = createVoxelMaterial(nodes);
   const geometries = new Map<string, VoxelGeometry[]>();
   const sprites: SpriteInstance[] = [];
+  const terrainObjectCards = new TerrainObjectCards();
   const weatherFoundations: WeatherFoundation[] = [];
   // Enhanced-look decals (spriteLook.ts; drawn only while their effect is on): ground contact shades first, under
   // every other decal, and wet-paving mirror images of upright art.
@@ -277,6 +281,7 @@ export async function loadRa2World(
         painter,
         kind: 'reflection',
       });
+    if (object.kind === 'tree' && !flat) terrainObjectCards.add(anchor, frame);
     sprites.push({
       anchor,
       frame,
@@ -351,6 +356,7 @@ export async function loadRa2World(
     root,
     focus,
     sprites: spriteLayer,
+    terrainObjectCards,
     spriteMaterials: materials,
     cache,
     surface,

@@ -20,7 +20,14 @@ import { voxelFill, voxelMaterialFor, voxelProjectedMaterialFor } from './vpl';
 import type { VoxelProjectionAsset } from './voxelProjection';
 import { CARD_CLEARANCE } from './cardDepth';
 import { VOXEL_TO_WORLD } from './voxelScale';
-import { createVoxelNativeDepth, voxelBitmapBottom, voxelNativeDepthNode } from './voxelNativeDepth';
+import {
+  createVoxelCardExtent,
+  createVoxelNativeDepth,
+  voxelBitmapBottom,
+  voxelCardExtent,
+  voxelNativeDepthNode,
+  type VoxelCardTies,
+} from './voxelNativeDepth';
 import { NATIVE_UNIT_RENDER_ORDER } from './nativeDepth';
 import { registerVoxelReflectionVariant } from './voxelReflectionColour';
 
@@ -514,6 +521,11 @@ export class VoxelUnit extends Group {
     this.painterDepth.bias = VOXEL_CLEARANCE + bias;
   }
 
+  /** Additive camera-space bias of the original parts (clearance plus painter bias), world units. */
+  get depthBias(): number {
+    return this.painterDepth.bias;
+  }
+
   /** Only this unit's original parts use these variants; cached palette sources and every surface twin stay intact. */
   setOpacity(opacity: number): void {
     const next = Number.isFinite(opacity) ? Math.max(0, Math.min(1, opacity)) : 1;
@@ -616,19 +628,35 @@ function setVoxelNativePass(root: VoxelUnit, enabled: boolean): void {
   }
 }
 
-/** Update after posing all parts. Non-ground layers opt out without changing shared materials or geometry. */
+const cardExtent = createVoxelCardExtent();
+
+/**
+ * Update after posing all parts. Non-ground layers opt out without changing shared materials or geometry. `ties`
+ * lowers the bonus of a unit whose card nearly ties with a static depth-writing card (see VoxelCardTies).
+ */
 export function updateVoxelNativeDepth(
   unit: Object3D | { root: Object3D },
   anchor: Vector3,
   bonus = 0,
   enabled = true,
+  ties?: VoxelCardTies | null,
 ): void {
   const root = unit instanceof Object3D ? unit : unit.root;
   if (!(root instanceof VoxelUnit)) return;
   root.nativeDepth.enabled = enabled ? 1 : 0;
   root.nativeDepth.anchor.copy(anchor);
   root.nativeDepth.bonus = bonus;
-  if (enabled) root.nativeDepth.bottom = voxelBitmapBottom(root.partMeshes, anchor);
+  if (enabled) {
+    const bottom = (root.nativeDepth.bottom = voxelBitmapBottom(root.partMeshes, anchor));
+    if (ties)
+      root.nativeDepth.bonus += ties.tieBonus(
+        anchor,
+        bottom,
+        bonus,
+        root.depthBias,
+        voxelCardExtent(root.partMeshes, anchor, bottom, bonus, cardExtent, false),
+      );
+  }
   setVoxelNativePass(root, enabled);
 }
 

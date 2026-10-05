@@ -18,6 +18,7 @@ import { smoothVoxelOptions, type SmoothVoxelOptions } from '../ra2/voxelSmooth'
 import { buildSmoothVoxelGeometry } from '../ra2/voxelSmoothGeometry';
 import { projectionParts, voxelProjectionLibrary, type VoxelProjectionLibrary } from '../ra2/voxelProjection';
 import { setShadowContact } from '../ra2/voxelShadow';
+import type { VoxelCardTies } from '../ra2/voxelNativeDepth';
 
 export interface VoxelUnitsOptions {
   voxelLook?: 'engine' | 'remaster';
@@ -155,9 +156,12 @@ export class VoxelUnits {
     if (unit.root instanceof VoxelRoot) unit.root.setOpacity(opacity);
   }
 
-  /** Call after pose/turret updates; anchor is the world-space ground draw point, including bridge elevation. */
-  setNativeDepth(unit: VoxelUnit, anchor: Vector3, bonus = 0, enabled = true): void {
-    updateVoxelNativeDepth(unit, anchor, bonus, enabled);
+  /**
+   * Call after pose/turret updates; anchor is the world-space ground draw point, including bridge elevation. `ties`
+   * resolves near-ties with the map's depth-writing cards for this unit as a whole.
+   */
+  setNativeDepth(unit: VoxelUnit, anchor: Vector3, bonus = 0, enabled = true, ties?: VoxelCardTies | null): void {
+    updateVoxelNativeDepth(unit, anchor, bonus, enabled, ties);
   }
 
   /** Whole-object capture membership belongs only to original part meshes, including articulated barrels. */

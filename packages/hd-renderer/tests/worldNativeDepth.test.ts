@@ -98,6 +98,8 @@ describe('static map native ground cards', () => {
     expect(spriteAt(8).nativeDepth).toEqual({ mode: 'card', bottom: 4, bonus: 12 });
     // A tree is the engine's own Z writer: a card from its frame bottom with the terrain-object adjustment.
     expect(spriteAt(10).nativeDepth).toEqual({ mode: 'card', bottom: 4, bonus: 12, writer: true });
+    // ... and the only card registered for whole-object ties with vehicles.
+    expect(world.terrainObjectCards?.size).toBe(1);
     for (const x of [9, 11, 12]) expect(spriteAt(x).nativeDepth).toBeUndefined();
     for (const sprite of fixture.sprites.filter((s) => s.shadow || s.kind === 'reflection'))
       expect(sprite.nativeDepth).toBeUndefined();

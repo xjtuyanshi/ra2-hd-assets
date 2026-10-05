@@ -13,6 +13,7 @@ import { cardDepthPush } from '../src/ra2/cardDepth';
 import { biasedDepth } from '../src/painterDepth';
 import { painterObject, spritePainterBias, type PainterObject } from '../src/ra2/painterOrder';
 import { cardPush, SpriteLayer, type SpriteInstance } from '../src/ra2/sprites';
+import { TerrainObjectCards } from '../src/ra2/terrainObjectCards';
 import { VOXEL_CLEARANCE, VoxelUnit } from '../src/ra2/voxels';
 import { VolumetricBlastLayer } from '../src/volumetricBlasts';
 import { WeatherGroundMask } from '../src/weatherGroundMask';
@@ -305,11 +306,15 @@ describe('LiveView ground motion', () => {
     });
     const contact = vi.spyOn(p.live.voxelUnits, 'setGroundContact');
     const depth = vi.spyOn(p.live.voxelUnits, 'setNativeDepth');
+    // The map's tree cards go with every ground card, so a near-tie with a tree is resolved for the whole vehicle.
+    const cards = new TerrainObjectCards();
+    Object.assign(p.live.world, { terrainObjectCards: cards });
     let frame = 1;
     const at = (cell: number, level: number, layer = 2) => {
       const unit = { ...object(cell * 256), z: Math.round(level * 104), renderOrder: { layer, index: 1, ySort: 0 } };
       p.view.push({ ...snapshot(frame, 0), objects: [unit] }, frame * 1000);
       p.view.render(frame++ * 1000 + 500);
+      expect(depth.mock.lastCall![4]).toBe(cards);
       return [contact.mock.lastCall![1], depth.mock.lastCall![3]];
     };
     for (const cell of [1.05, 1.2, 1.3, 1.45, 1.55, 1.7, 1.8, 1.95]) expect(at(cell, cell - 1)).toEqual([true, true]);

@@ -197,8 +197,10 @@ foundation. The library flags `harvester` and `refinery` identify those types. R
 state, distance from the pad and the traversal order are not predicates for this bonus.
 
 Voxel vehicles and landed aircraft use c=0 or the same harvester bonus. `ra2/voxelNativeDepth.ts` approximates the
-native bitmap bottom with the eight projected corners of the posed world-space model AABB, recomputed as pose or
-facing changes and including articulated turret/barrel parts, excluding shadow/reflection twins. Building voxel
+native bitmap bottom with the lowest projected corner of each part's own bounding box as it is posed (turned, tilted
+on a ramp, turret/barrel articulated) plus the engine's four-pixel bitmap margin (`0x754510`), recomputed as pose or
+facing changes and excluding shadow/reflection twins. A world-axis box around the posed parts overshot by up to a
+third of a cell for a body turned 45 degrees or tilted. Building voxel
 turrets use their own bottom and `c = -1 - turretVoxel.zAdjust`. With ground draw anchor a, fragment p, view-forward
 unit vector F and `py_frag` projected in the same native pixel scale:
 
@@ -214,7 +216,24 @@ the native bitmap, not physical voxel tactical depth. Only grounded layer-2 unit
 use cards; flight and shadow passes keep their existing depth. Absolute native 16-bit wrap/modulo-three phase and
 all special locomotor/effect branches are outside this relative model.
 
-Trees, cell overlays, bridges, effects, decals, shadows, wet reflections and the fireball capture/code policy
+Trees are depth writers with the same card and c=12 (`terrainObjectDepth`; terrain-object `DrawIt` adjusts Z by
+-12 at `0x71C2EA`, and frozen-frame dumps of the tactical Z-buffer at `0x887644` show the card starting at the
+frame's inclusive bottom row). They stay in the depth-writing body pass, so later test-only unit cards are hidden
+behind them. A voxel vehicle's fragments differ from its ideal card by up to one step of row phase and by the retained
+six percent, so a near-tie with a tree is decided once for the whole vehicle on the CPU (`ra2/terrainObjectCards.ts`):
+with tree anchor t, unit anchor a, tree card rows r_t = e_t + 12, d the unit's bottom row minus the tree's and
+`behind` the range of `dot(p-a,F) + push_card` over the posed part boxes,
+
+```text
+diff = dot(a - t, F) + G * (r_t - e - c - floor(d / 3) - {0, 1}) + KAPPA * behind + CARD_CLEARANCE - bias
+```
+
+is the unit's fragment depth minus the tree's. If its largest value is positive (some part would be behind) and its
+smallest is below half a unit, the unit's c is lowered until the smallest reaches half a unit: the vehicle is wholly
+behind the tree until it is wholly in front. This replaces row-interleaved stripes over about one row of travel; the
+original's frozen frame at such a tie shows the tree in front. SHP units keep plain cards.
+
+Cell overlays, bridges, effects, decals, shadows, wet reflections and the fireball capture/code policy
 retain their prior paths. With no template, buildings retain the analytic foundation facade and voxel turrets retain
 their physical depth with the existing facade placement; generic cards still
 use the existing ground/vertical profile. The former dock pull/propagation, measured door/roof recess constants and
