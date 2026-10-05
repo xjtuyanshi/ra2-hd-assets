@@ -3,11 +3,14 @@ import { describe, expect, it } from 'vitest';
 import {
   cutoffTileHeight,
   drawOffsetFor,
+  highBridgeCell,
+  isHighBridgeOverlayIndex,
   leptonDelta,
   localScreenRect,
   mapLightMultipliers,
   mapSizeCells,
   mergeTileExtra,
+  overlayDrawOffset,
   projectCellCentre,
   projectCorner,
   projectSubCell,
@@ -92,18 +95,67 @@ describe('sprite offsets', () => {
     expect(shpFrameOffset([91, 65], { x: 0, y: 0 })).toEqual([-45, -32]);
   });
 
-  it('puts cell-bound art on the top corner and movable objects on the cell centre', () => {
-    expect(drawOffsetFor('overlay')).toEqual([0, 0]);
+  it('puts smudges and buildings on the top corner, overlays and movable objects on the cell centre', () => {
+    expect(drawOffsetFor('overlay')).toEqual([0, 15]);
     expect(drawOffsetFor('smudge')).toEqual([0, 0]);
     expect(drawOffsetFor('building')).toEqual([0, 0]);
     expect(drawOffsetFor('vehicle')).toEqual([0, 15]);
     expect(drawOffsetFor('infantry')).toEqual([0, 15]);
   });
 
-  it('draws rocks and ordinary trees at the cell centre, tiberium trees on the top corner', () => {
-    expect(drawOffsetFor('overlay', { isARock: true })).toEqual([0, 15]);
+  it('draws ordinary trees at the cell centre, tiberium trees on the top corner', () => {
     expect(drawOffsetFor('tree')).toEqual([0, 15]);
     expect(drawOffsetFor('tree', { spawnsTiberium: true })).toEqual([0, 0]);
+  });
+});
+
+describe('overlay draw point (YR 1.001 0x5FDCC0 + 0x480110)', () => {
+  // Stock [OverlayTypes] positions: 0 GASAND, 2 GAWALL, 39 TRACKS01, 74 LOBRDG01, 102 TIB01, 168 SROCK01, 179 CRATE.
+  it('centres plain overlays, rocks and low bridges on the cell', () => {
+    for (const index of [0, 74, 168, 59, 60, 240]) expect(overlayDrawOffset({ index })).toEqual([0, 15]);
+    // Neither frame data nor an unlisted type moves an ordinary overlay.
+    expect(overlayDrawOffset({ index: 74 }, 12)).toEqual([0, 15]);
+    expect(overlayDrawOffset({ index: -1 })).toEqual([0, 15]);
+  });
+
+  it('raises walls, ore, gems and crates by 12 px and rail tracks by 1 px', () => {
+    expect(overlayDrawOffset({ index: 2, wall: true })).toEqual([0, 3]);
+    expect(overlayDrawOffset({ index: 102, tiberium: true })).toEqual([0, 3]);
+    expect(overlayDrawOffset({ index: 179, crate: true })).toEqual([0, 3]);
+    expect(overlayDrawOffset({ index: 39, railroad: true })).toEqual([0, 14]);
+    // The engine adds the rules up; a railroad wall would take both.
+    expect(overlayDrawOffset({ index: 2, wall: true, railroad: true })).toEqual([0, 2]);
+  });
+
+  it('keys the vein, rubble and bridge-owner rules on the registry index', () => {
+    expect(overlayDrawOffset({ index: 126 })).toEqual([0, 2]);
+    expect(overlayDrawOffset({ index: 239 })).toEqual([0, 0]);
+    expect([24, 25, 237, 238].every(isHighBridgeOverlayIndex)).toBe(true);
+    expect([23, 26, 59, 60, 236, 239, -1].some(isHighBridgeOverlayIndex)).toBe(false);
+    for (const index of [24, 25, 237, 238]) {
+      for (let data = 0; data <= 8; data++) expect(overlayDrawOffset({ index }, data)).toEqual([0, -1]);
+      for (let data = 9; data <= 17; data++) expect(overlayDrawOffset({ index }, data)).toEqual([0, -16]);
+      expect(overlayDrawOffset({ index }, 18)).toEqual([0, -1]);
+    }
+    // The second direction's rise belongs to bridge owners only.
+    expect(overlayDrawOffset({ index: 239 }, 9)).toEqual([0, 0]);
+  });
+
+  it('gives intact deck cells one of four variants by position and leaves damaged frames alone', () => {
+    const table = [0, 1, 2, 3, 3, 2, 1, 0, 2, 3, 0, 1, 1, 0, 3, 2];
+    for (let y = 0; y < 8; y++)
+      for (let x = 0; x < 8; x++) {
+        const variant = table[(y & 3) * 4 + (x & 3)]!;
+        expect(highBridgeCell(0, x + 92, y + 100)).toEqual({ frame: variant, lift: 0 });
+        expect(highBridgeCell(9, x + 60, y + 44)).toEqual({ frame: 9 + variant, lift: 15 });
+      }
+    // Every variant occurs equally often, so a long deck never repeats one slab.
+    const seen = [0, 0, 0, 0];
+    for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) seen[highBridgeCell(0, x, y).frame]!++;
+    expect(seen).toEqual([4, 4, 4, 4]);
+    for (const data of [1, 4, 8]) expect(highBridgeCell(data, 3, 2)).toEqual({ frame: data, lift: 0 });
+    for (const data of [10, 13, 17]) expect(highBridgeCell(data, 3, 2)).toEqual({ frame: data, lift: 15 });
+    expect(highBridgeCell(18, 1, 1)).toEqual({ frame: 18, lift: 0 });
   });
 });
 

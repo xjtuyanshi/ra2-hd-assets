@@ -51,6 +51,48 @@ authoritative even with an old library, so removed map-start smudges do not ling
 Terrain elevation still comes from the map cache; dynamic terrain deformation is outside this contract. Footprint
 dimensions come from the theater library rules; custom-map Width/Height overrides require matching metadata.
 
+### Draw points
+
+Where an overlay is drawn is the engine's rule, read from YR 1.001 and stored per type in the library
+(`packages/ra2-assets/src/overlayDraw.ts`, `overlayDrawOffset`). CellClass::DrawOverlay (0x47F6A0) centres every
+overlay SHP on the cell's top corner at Z = 0 plus the cell's overlay offset (0x480110): the cell centre at the cell's
+own level, i.e. (0, +15) px from the projected top corner, plus the type offset (0x5FDCC0) and the bridge terms:
+
+| overlay                                                                                         | offset from the cell's top corner |
+| ----------------------------------------------------------------------------------------------- | --------------------------------- |
+| ordinary overlays, rocks, low bridges, fences, crates and pallets used as props                 | (0, +15)                          |
+| `Wall=yes`, `Tiberium=yes` (ore, gems), `Crate=yes`: 12 px higher                               | (0, +3)                           |
+| `Land=Railroad` (tracks, track tunnels): 1 px higher                                            | (0, +14)                          |
+| registry index 239 (stock `RUBBLE_OVERLAY`): 15 px higher, the source building's own draw point | (0, 0)                            |
+| registry index 126 (stock `DUMMYOLD`, no art)                                                   | (0, +2)                           |
+| bridge-owner cell, OverlayData 0..8                                                             | (0, -1)                           |
+| bridge-owner cell, OverlayData 9..17 (the second direction)                                     | (0, -16)                          |
+
+`IsARock` and `DrawFlat` change only the Z arguments of the blit. Bridge owners are the cells the overlay placement
+(0x5FC570) marks for registry indexes 24, 25, 237 and 238 (stock `BRIDGE1`, `BRIDGE2`, `BRIDGEB1`, `BRIDGEB2`); the
+library flags these types `highBridge`. Their frames carry the four-level rise of the deck, so the draw point stays at
+the owner cell on the river. A bridge-owner cell whose OverlayData is 0 or 9 (an intact deck) draws frame
+`OverlayData + T[(y & 3) * 4 + (x & 3)]` with `T = 0,1,2,3, 3,2,1,0, 2,3,0,1, 1,0,3,2` (table at 0x81CC30), so
+neighbouring deck cells show different slabs; every other value is its own frame. The stock rail bridges
+(`RAILBRDG1/2`, registry 59 and 60) are not bridge owners in that code and no stock map places them. Smudges are drawn
+centred on the top corner of their origin cell (SmudgeTypeClass draw 0x6B55F0).
+
+A bridge owner is also lit at its deck, not at the river: the cell light update (0x484680) keeps a separate bridge
+intensity, `ambient - Ground + Level x (cell level + 4)` (cell field +0x10E), which DrawOverlay passes for bridge
+owners; walls take the cell's own intensity (+0x10A) and other overlays that intensity times the cell's factor
+(+0x10C). LiveView gives a deck instance the ratio of the two (`highBridgeLight` in
+`packages/hd-renderer/src/ra2/bridgeDepth.ts`) on top of the cell light it samples; on a map with a strong level
+light the decks were otherwise visibly darker than the bridge heads at their ends (DuskPen: 0.80 against 0.94).
+
+Frozen original frames of CrctBrd, IsleLand, DuskPen and IrvineCa agree with every row to the pixel. The earlier
+library values, (0, 0) for everything but rocks and (0, -60) for high bridges, drew tracks, props and low bridges
+15 px, walls and ore 3 px and high bridges 59 or 44 px too high. Ground decals also sat 0.73 px high because their
+plane was lifted straight up; `SpriteLayer` now slides the art down that plane by the same amount
+(`SPRITE_DECAL_LIFT_ROWS`), which leaves the plane and its depth unchanged.
+
+A library extracted before this rule keeps its old points until its overlay rules are refreshed (see Upgrade existing
+caches); no art is repacked for that.
+
 ### Rubble of destroyed buildings
 
 Rules `[RUBBLE_OVERLAY]` has `Image=SROCK01` and `IsRubble=yes`, but YR 1.001 never draws an IsRubble overlay's own
@@ -104,6 +146,15 @@ requires an existing `library.json`; a missing theater library must first be ext
 command. The overlay-only mode appends atlas pages and replaces the overlay section, preserving existing type records,
 palettes, voxel paths and atlas files. Do not run a full extraction merely to update overlays. Missing art is reported
 by the extractor and cannot be counted as successful visual coverage.
+
+Refresh only the overlay rules (draw point and bridge-owner flag) of libraries that already hold an overlay section:
+
+```bash
+pnpm hd:library -- --game "$YR_INSTALL" --out "$HD_CACHE/_library" --only overlay-rules
+```
+
+This rewrites `library.json` alone, and only when a value differs: no atlas page, palette, sprite record or HD
+reference changes. In a symlink farm, realise `_library/<theatre>` first so the write stays inside the farm.
 
 Serve that cache through the existing development route and use the server's printed port:
 

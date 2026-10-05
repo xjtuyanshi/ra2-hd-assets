@@ -11,6 +11,8 @@
 import { engineCellLight, engineLighting } from './lights.ts';
 import type { LightingClass, MapLighting, MapObjectKind } from './manifest.ts';
 
+export * from './overlayDraw.ts';
+
 export const CELL_W = 60;
 export const CELL_H = 30;
 export const LEVEL_H = 15;
@@ -140,13 +142,12 @@ export function mapSizeCells(width: number, height: number): { x: number; y: num
  * for objects standing on the cell's centre spot. Measured on the player's install and matched against the
  * Chrono Divide-derived reference (huangkaoya/ts-redalert2 src/game/art/ObjectArt.ts getDefaultDrawOffset and
  * getDrawOffset):
- *   - overlays: the union of all TIB01/GEM01 frames spans x -26..26, y 1..26 around the canvas centre, i.e. exactly
- *     the cell diamond hanging below its top corner -> (0, 0). Walls, low bridges and other overlays share it.
- *   - rocks (overlays with rules IsARock=yes: SROCK, TROCK, LUNRK) are drawn at the cell centre -> (0, 15); with
- *     (0, 0) about 70 % of srock01 would sit above its cell.
+ *   - overlays: the cell centre -> (0, 15); this is only the base of the engine's rule, see overlayDrawOffset for
+ *     walls, ore, crates, rail tracks, rubble and high bridges.
  *   - terrain objects (trees, lamps) are drawn at the cell centre -> (0, 15) (tree01's trunk base lands on the
  *     centre), except tiberium-spawning trees (TIBTRE, SpawnsTiberium=yes), which use (0, 0).
- *   - smudges: (0, 0), like overlays.
+ *   - smudges: (0, 0). YR 1.001 SmudgeTypeClass draw (0x6B55F0) centres frame 0 on its caller's point; frozen
+ *     original frames put that point on the cell's top corner for every crater and scorch type.
  *   - buildings: averaging the left/right extents of frame 0 against the WxH foundation puts the foundation's top
  *     corner within 1 px of the canvas centre for GACNST 4x4, GAPOWR 2x2, GAPILE 3x2, NAPOWR 3x2, NAHAND 2x2 and
  *     CABHUT 1x1, and no frame reaches below the foundation's bottom corner -> (0, 0).
@@ -154,13 +155,8 @@ export function mapSizeCells(width: number, height: number): { x: number; y: num
  *     is the sub-cell ground point itself; the cell-centre spot is (0, 15).
  *   - SHP vehicles, voxels and aircraft stand on the cell centre -> (0, 15).
  */
-export function drawOffsetFor(
-  kind: MapObjectKind,
-  variant: { isARock?: boolean; spawnsTiberium?: boolean } = {},
-): [number, number] {
+export function drawOffsetFor(kind: MapObjectKind, variant: { spawnsTiberium?: boolean } = {}): [number, number] {
   switch (kind) {
-    case 'overlay':
-      return variant.isARock ? [0, CELL_H / 2] : [0, 0];
     case 'tree':
       return variant.spawnsTiberium ? [0, 0] : [0, CELL_H / 2];
     case 'smudge':

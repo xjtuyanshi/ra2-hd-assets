@@ -64,7 +64,7 @@ import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { type HdAtlas, type Ra2Cache } from './cache';
 import { mapLightAt, srgbScale } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
-import { cardDepthNode, SPRITE_DECAL_LIFT } from './cardDepth';
+import { cardDepthNode, SPRITE_DECAL_LIFT, SPRITE_DECAL_LIFT_ROWS } from './cardDepth';
 import { NATIVE_UNIT_RENDER_ORDER, type NativeSpriteDepth } from './nativeDepth';
 import { comparePainterOrder, spritePainterBias, type PainterObject } from './painterOrder';
 import {
@@ -512,9 +512,13 @@ export class SpriteLayer {
           .mul(float(1).sub(step(1.5, aFlat)))
           .mul(step(1e-4, aFlags.w));
         const rowBias: ShaderNode = clamp(py.div(15), -3, 3).mul(-CRYSTAL_DECAL_ROW_BIAS).mul(crystalDecal);
-        const decal = aAnchor
-          .add(vec3(px.div(60).add(py.div(30)), SPRITE_DECAL_LIFT, py.div(30).sub(px.div(60))))
-          .add(this.toCamera.mul(rowBias));
+        // The decal plane sits SPRITE_DECAL_LIFT above the ground; the art slides down that plane by the rows the lift
+        // would raise it on screen, so its pixels stay exactly where the engine draws them (see SPRITE_DECAL_LIFT_ROWS).
+        const lifted = (gx: ShaderNode, gz: ShaderNode): ShaderNode =>
+          aAnchor.add(
+            vec3(gx.add(SPRITE_DECAL_LIFT_ROWS / 30), SPRITE_DECAL_LIFT, gz.add(SPRITE_DECAL_LIFT_ROWS / 30)),
+          );
+        const decal = lifted(px.div(60).add(py.div(30)), py.div(30).sub(px.div(60))).add(this.toCamera.mul(rowBias));
         const placed = aFlat.greaterThan(0.5).select(decal, card);
         // Enhanced look (spriteLook.ts). Shadows follow the sun: their ground offsets turn and stretch about the object's
         // base (the foundation's centre, or the draw point); the faithful path keeps the untouched decal.
@@ -525,7 +529,7 @@ export class SpriteLayer {
         const turned: ShaderNode = centre.add(
           vec2(m.x.mul(offset.x).add(m.z.mul(offset.y)), m.y.mul(offset.x).add(m.w.mul(offset.y))),
         );
-        const followed = aAnchor.add(vec3(turned.x, SPRITE_DECAL_LIFT, turned.y));
+        const followed = lifted(turned.x, turned.y);
         // Inline infantry footprints share the body's screen offsets; rotating them would detach them from its feet.
         const follow: ShaderNode = isShadowKind
           .mul(float(1).sub(isInfantryShadow))
@@ -534,7 +538,7 @@ export class SpriteLayer {
         // Contact shades and reflections exist only while their effect is on; otherwise they collapse to a point.
         const rows: ShaderNode = reflectionRows();
         const qy = rows.x.add(gv.mul(rows.y.sub(rows.x)));
-        const mirrored = aAnchor.add(vec3(px.div(60).add(qy.div(30)), SPRITE_DECAL_LIFT, qy.div(30).sub(px.div(60))));
+        const mirrored = lifted(px.div(60).add(qy.div(30)), qy.div(30).sub(px.div(60)));
         const contactOn: ShaderNode = step(1e-4, look.occlusion).mul(look.enabled);
         const reflectionOn: ShaderNode = step(1e-4, look.reflections.mul(look.wetness)).mul(look.enabled);
         const hidden: ShaderNode = isContact

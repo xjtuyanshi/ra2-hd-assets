@@ -3199,6 +3199,7 @@ export class LiveView {
       house ?? '',
       (palette, remap) => paletteFor(this.cache, LIBRARY_PALETTE_PREFIX + palette, remap, house),
       this.state.map.atmosphere,
+      this.state.map.lighting,
     );
     if (!changed) return;
     if (wasActive !== this.overlayInstances.active) this.cellsDirty = true;

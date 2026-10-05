@@ -1,10 +1,12 @@
 /**
- * pnpm --filter ra2-assets library -- --game <install dir> [--theater temperate ...] [--out <dir>] [--only overlays|smudges] [--preview]
+ * pnpm --filter ra2-assets library -- --game <install dir> [--theater temperate ...] [--out <dir>] [--only overlays|smudges|overlay-rules] [--preview]
  *
  * Extracts the per-theater type library (art for every building, vehicle, infantry and aircraft type) from the
  * player's own install into <out>/<theater>/ (default <repo>/gameres/hd-cache/_library, all six theaters), with voxel
  * models shared in <out>/common/. `--preview` also writes <out>/<theater>/library-preview.png (+ .json index), a
- * contact sheet for eyeballing the result. The output is derived game data and must never be committed.
+ * contact sheet for eyeballing the result. `--only overlay-rules` repacks nothing: it rewrites the draw point and the
+ * bridge-owner flag of the overlays an existing library already holds from the install's rules. The output is derived
+ * game data and must never be committed.
  */
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,8 +32,13 @@ if (unknown.length) {
   console.error(`unknown theater(s) ${unknown.join(', ')}; expected ${ALL_THEATERS.join(', ')}`);
   process.exit(2);
 }
-if (values.only !== undefined && values.only !== 'overlays' && values.only !== 'smudges') {
-  console.error('--only accepts overlays or smudges');
+if (
+  values.only !== undefined &&
+  values.only !== 'overlays' &&
+  values.only !== 'smudges' &&
+  values.only !== 'overlay-rules'
+) {
+  console.error('--only accepts overlays, smudges or overlay-rules');
   process.exit(2);
 }
 const t0 = Date.now();
@@ -44,7 +51,8 @@ const results = extractLibrary({
 for (const r of results) {
   const c = r.library.extractor.counts;
   if (values.only) {
-    console.log(`  ${r.theater}: ${Object.keys(r.library[values.only] ?? {}).length} ${values.only} -> ${r.dir}`);
+    const section = values.only === 'smudges' ? 'smudges' : 'overlays';
+    console.log(`  ${r.theater}: ${Object.keys(r.library[section] ?? {}).length} ${values.only} -> ${r.dir}`);
     continue;
   }
   console.log(

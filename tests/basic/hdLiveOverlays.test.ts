@@ -8,6 +8,7 @@ import {
   type LiveOverlayCells,
   type OverlayTerrain,
 } from '../../packages/hd-renderer/src/live/overlays';
+import { highBridgeLight } from '../../packages/hd-renderer/src/ra2/bridgeDepth';
 import { LEVEL_HEIGHT } from '../../packages/hd-renderer/src/world';
 
 const frame = (page: number, n: number): SpriteFrame => ({ rect: [n * 8, 0, 8, 8], offset: [-4, -4], page });
@@ -161,6 +162,98 @@ describe('live overlay instances', () => {
     expect(wall.push).toBeGreaterThan(0);
     expect([ore.glint, gems.glint, wall.glint, rock.glint]).toEqual([1, 1, undefined, undefined]);
     expect([ore.unlit, gems.unlit, wall.unlit, rock.unlit]).toEqual([true, true, false, false]);
+  });
+
+  it('draws a bridge owner cell as the engine does: deck variant by position, second direction 15 px higher', () => {
+    const base = library();
+    const deck = (id: string, page: number) => ({
+      overlay: overlay(id, {
+        frames: 18,
+        tiberium: false,
+        flat: false,
+        palette: 'iso',
+        lighting: 'full',
+        drawOffset: [0, -1],
+        highBridge: true,
+      }),
+      sprite: { ...sprite(page, 'iso'), frames: Array.from({ length: 18 }, (_, n) => frame(page, n)) },
+    });
+    const first = deck('BRIDGE1', 5);
+    const second = deck('BRIDGE2', 6);
+    const art = {
+      ...base,
+      overlays: { ...base.overlays, BRIDGE1: first.overlay, BRIDGE2: second.overlay },
+      sprites: { ...base.sprites, 'overlay:BRIDGE1': first.sprite, 'overlay:BRIDGE2': second.sprite },
+    };
+    const state: LiveOverlayCells = {
+      originX: 0,
+      originY: 4,
+      width: 4,
+      height: 2,
+      index: new Int16Array([0, 0, 0, 0, 1, 1, 1, -1]),
+      // Row y=4: three intact cells of the first direction and a damaged one. Row y=5: the second direction.
+      data: new Uint8Array([0, 0, 0, 5, 9, 9, 14, 0]),
+      types: ['BRIDGE1', 'BRIDGE2'],
+      revision: 1,
+    };
+    const built = buildOverlayInstances(state, art, terrain(), palette);
+    expect(built.missingTypes.size).toBe(0);
+    const firstCells = built.pages.get(5)!;
+    const secondCells = built.pages.get(6)!;
+    // Engine table row for y & 3 = 0 is 0, 1, 2, 3 and for y & 3 = 1 is 3, 2, 1, 0.
+    expect(firstCells.map((i) => first.sprite.frames.indexOf(i.frame))).toEqual([0, 1, 2, 5]);
+    expect(secondCells.map((i) => second.sprite.frames.indexOf(i.frame))).toEqual([9 + 3, 9 + 2, 14]);
+    // Draw points on the level-2 ground plane: (0, -1) px is 1/30 cell up both axes, (0, -16) px is 16/30.
+    const up = (px: number) => px / 30;
+    firstCells.forEach((instance, x) => {
+      expect(instance.anchor.x).toBeCloseTo(x - up(1), 9);
+      expect(instance.anchor.z).toBeCloseTo(4 - up(1), 9);
+      expect(instance.anchor.y).toBeCloseTo(2 * LEVEL_HEIGHT, 9);
+    });
+    secondCells.forEach((instance, x) => {
+      expect(instance.anchor.x).toBeCloseTo(x - up(16), 9);
+      expect(instance.anchor.z).toBeCloseTo(5 - up(16), 9);
+    });
+    for (const instance of [...firstCells, ...secondCells]) {
+      expect(instance.flat).toBe(false);
+      expect(instance.deckHeight).toBeCloseTo(4 * LEVEL_HEIGHT, 9);
+      // Without a map lighting the deck takes its cell's light unchanged.
+      expect(instance.light).toBe(1);
+    }
+    // The engine lights a deck four levels above its owner cell (level 2 here): (0.73 + 6 x 0.035) / (0.73 + 2 x 0.035).
+    const dusk = { ambient: 0.73, ground: 0, level: 0.035 };
+    expect(highBridgeLight(dusk, 2)).toBeCloseTo(0.94 / 0.8, 12);
+    expect(highBridgeLight({ ambient: 1, ground: 0.05, level: 0 }, 5)).toBe(1);
+    expect(highBridgeLight({ ambient: 1.95, ground: 0, level: 0.05 }, 0)).toBeCloseTo(2 / 1.95, 12);
+    expect(highBridgeLight({ ambient: 0, ground: 0.2, level: 0.01 }, 3)).toBe(1);
+    const lit = buildOverlayInstances(state, art, terrain(), palette, {}, (level) => highBridgeLight(dusk, level));
+    for (const instance of [...lit.pages.get(5)!, ...lit.pages.get(6)!]) expect(instance.light).toBeCloseTo(1.175, 12);
+    // Only bridge owners: every other overlay keeps its cell's light.
+    const others = buildOverlayInstances(cells(), library(), terrain(), palette, {}, () => 1.5);
+    for (const list of others.pages.values()) for (const instance of list) expect(instance.light).toBeUndefined();
+    // The instance cache rebuilds when the map's light changes (a trigger, a storm) and not otherwise.
+    const cache = new OverlayInstanceCache(terrain());
+    expect(cache.update(state, art, 'house', palette, {}, dusk)).toBe(true);
+    expect(cache.instances.pages.get(5)![0]!.light).toBeCloseTo(1.175, 12);
+    expect(cache.update(state, art, 'house', palette, {}, { ...dusk })).toBe(false);
+    expect(cache.update(state, art, 'house', palette, {}, { ...dusk, ambient: 1 })).toBe(true);
+    expect(cache.instances.pages.get(5)![0]!.light).toBeCloseTo(1.21 / 1.07, 12);
+    // A variant the art lacks is reported, never replaced by another slab.
+    const short = { ...art, overlays: { ...art.overlays, BRIDGE1: { ...first.overlay, frames: 2 } } };
+    const clipped = buildOverlayInstances(state, short, terrain(), palette);
+    expect(clipped.pages.get(5)!.map((i) => first.sprite.frames.indexOf(i.frame))).toEqual([0, 1]);
+    expect([...clipped.missingTypes]).toEqual(['BRIDGE1']);
+    // A library without the bridge-owner flag keeps drawing the cell's own frame at its own draw point.
+    const legacy = {
+      ...art,
+      overlays: {
+        ...art.overlays,
+        BRIDGE2: { ...second.overlay, highBridge: undefined, drawOffset: [0, -60] as [number, number] },
+      },
+    };
+    const old = buildOverlayInstances(state, legacy, terrain(), palette).pages.get(6)!;
+    expect(old.map((i) => second.sprite.frames.indexOf(i.frame))).toEqual([9, 9, 14]);
+    expect(old[0]!.anchor.z).toBeCloseTo(5 - up(60), 9);
   });
 
   it('classifies arbitrary ore/gem types by the type flag, preserving normal overlays and rubble', () => {

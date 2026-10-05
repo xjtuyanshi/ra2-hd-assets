@@ -12,7 +12,7 @@ import { SpriteLayer, cardPush, isUnlitMapOverlay, objectAnchor, type SpriteInst
 import { loadSpriteMaterials } from './spriteMaterials';
 import type { SpriteMaterialAtlas } from './spriteLook';
 import { objectYSort, painterObject } from './painterOrder';
-import { HIGH_BRIDGE_HEIGHT, isHighBridge } from './bridgeDepth';
+import { HIGH_BRIDGE_HEIGHT, highBridgeLight, isHighBridge } from './bridgeDepth';
 import { buildRa2Terrain } from './terrain';
 import {
   buildVoxelGeometry,
@@ -292,6 +292,8 @@ export async function loadRa2World(
       glint: object.kind === 'overlay' && flat && lighting === 'none' ? 1 : undefined,
       unlit: isUnlitMapOverlay(object),
       lighting,
+      // A deck is lit at its own height, four levels above the owner cell on the river (bridgeDepth.ts).
+      light: deckHeight !== undefined && manifest.lighting ? highBridgeLight(manifest.lighting, object.z) : undefined,
       painter: object.kind === 'overlay' ? undefined : painter,
       deckHeight,
       nativeDepth:

@@ -9,6 +9,7 @@ import {
   CARD_CLEARANCE,
   EFFECT_DECAL_LIFT,
   SPRITE_DECAL_LIFT,
+  SPRITE_DECAL_LIFT_ROWS,
   cardDepthPush,
   foundationPointPush,
 } from '../src/ra2/cardDepth';
@@ -206,18 +207,56 @@ describe('YR traversal and physical occlusion', () => {
     }
   });
 
+  it('keeps a lifted ground decal on the screen pixels of the unlifted art and on the same lifted plane', () => {
+    // Raised straight up, a decal sits 0.73 native px above the engine's picture; every flat overlay, ore cell and
+    // smudge measured one pixel high against the original. Sliding the art SPRITE_DECAL_LIFT_ROWS down its plane
+    // lifts it along the view ray instead.
+    expect(SPRITE_DECAL_LIFT_ROWS).toBeCloseTo(0.735, 3);
+    for (const [x, z, y] of [
+      [50, 50, 0],
+      [37.25, 61.5, 0.8],
+    ] as const)
+      for (const [px, py] of [
+        [0, 0],
+        [-29, 14],
+        [17, -6],
+      ] as const) {
+        const ground = new Vector3(x + px / 60 + py / 30, y, z + py / 30 - px / 60);
+        const straightUp = ground.clone().setY(y + SPRITE_DECAL_LIFT);
+        const k = SPRITE_DECAL_LIFT_ROWS / 30;
+        const placed = new Vector3(ground.x + k, y + SPRITE_DECAL_LIFT, ground.z + k);
+        expect(screen(ground)[1] - screen(straightUp)[1]).toBeCloseTo(SPRITE_DECAL_LIFT_ROWS, 9);
+        expect(screen(placed)[0]).toBeCloseTo(screen(ground)[0], 9);
+        expect(screen(placed)[1]).toBeCloseTo(screen(ground)[1], 9);
+        // Still exactly SPRITE_DECAL_LIFT / sin 30 degrees nearer than the ground under the same pixel.
+        expect(depthAt(ground) - depthAt(placed)).toBeCloseTo(SPRITE_DECAL_LIFT / Math.sin(Math.PI / 6) / range, 9);
+      }
+  });
+
   it('tests under/on bridge units against one elevated plane across neighbouring deck cells', () => {
-    const deck = (x: number) =>
-      objectAnchor({ kind: 'overlay', type: 'BRIDGE1', x, y: 10, z: 0, drawOffset: [0, -60] });
+    // Engine draw points of a bridge owner: (0, -1) for the first direction, (0, -16) for the second. The deck's
+    // depth plane is four levels over the owner cells wherever on that ground plane the draw point lies, so both
+    // directions (and the former 60 px offset) give one plane.
+    const deck = (x: number, drawOffset: [number, number] = [0, -1]) =>
+      objectAnchor({ kind: 'overlay', type: 'BRIDGE1', x, y: 10, z: 0, drawOffset });
     for (const height of [0.3, HIGH_BRIDGE_HEIGHT, HIGH_BRIDGE_HEIGHT + 0.3]) {
       const unit = new Vector3(22, height, 10.5);
       const pixel = screen(unit);
       const depths = [21, 22, 23].map((x) => cardAt(deck(x), pixel, -1, HIGH_BRIDGE_HEIGHT));
       expect(depths[0]).toBe(depths[1]);
       expect(depths[1]).toBe(depths[2]);
+      expect(cardAt(deck(22, [0, -16]), pixel, -1, HIGH_BRIDGE_HEIGHT)).toBeCloseTo(depths[0]!, 6);
+      expect(cardAt(deck(22, [0, -60]), pixel, -1, HIGH_BRIDGE_HEIGHT)).toBeCloseTo(depths[0]!, 6);
       if (height < HIGH_BRIDGE_HEIGHT) expect(depthAt(unit)).toBeGreaterThan(depths[0]!);
       else expect(biasedDepth(depthAt(unit), VOXEL_CLEARANCE, range)).toBeLessThan(depths[0]!);
     }
+    // The deck surface drawn at a pixel is the point of that plane under the pixel: four levels up, in front of the
+    // water below it and behind a unit standing on it.
+    const surface = new Vector3(22.5, HIGH_BRIDGE_HEIGHT, 10.5);
+    const water = new Vector3(22.5 - 2, 0, 10.5 - 2);
+    expect(screen(water)[1]).toBeCloseTo(screen(surface)[1], 6);
+    expect(cardAt(deck(22), screen(surface), -1, HIGH_BRIDGE_HEIGHT)).toBeLessThan(depthAt(water));
+    expect(cardAt(deck(22), screen(surface), -1, HIGH_BRIDGE_HEIGHT)).toBeLessThan(depthAt(surface));
     expect(isHighBridge('BRIDGEB2')).toBe(true);
     expect(isHighBridge('RAILBRDG1')).toBe(true);
     expect(isHighBridge('GASAND')).toBe(false);

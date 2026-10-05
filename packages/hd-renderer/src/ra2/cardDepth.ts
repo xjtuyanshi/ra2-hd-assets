@@ -7,6 +7,13 @@ import { GROUND_DEPTH, VERTICAL_DEPTH } from './nativeDepth';
 export { GROUND_DEPTH, VERTICAL_DEPTH } from './nativeDepth';
 const FOUNDATION_DEPTH = 1 / (Math.SQRT2 * Math.cos(Math.PI / 6));
 export const SPRITE_DECAL_LIFT = 0.02;
+/**
+ * Native screen rows a ground decal would rise when lifted SPRITE_DECAL_LIFT straight up (one world unit of height is
+ * cos 30 degrees x 60 / sqrt 2 px): 0.73 px, which showed every flat overlay, ore cell, smudge and shadow one pixel
+ * above the original's. The placement moves the art that many rows down its plane instead, i.e. it lifts along the
+ * view ray: same plane and depth at every pixel, no screen shift.
+ */
+export const SPRITE_DECAL_LIFT_ROWS = SPRITE_DECAL_LIFT * Math.cos(Math.PI / 6) * (60 / Math.SQRT2);
 export const EFFECT_DECAL_LIFT = 0.025;
 // At the SAME screen pixel, raising a horizontal decal by h pulls its depth forward by h / sin(30 degrees),
 // not h * sin(30 degrees). Upright lower rows must clear that plane: 0.03 let SHP shadows cut holes in walls.
