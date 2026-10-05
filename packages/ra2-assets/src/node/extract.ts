@@ -27,6 +27,7 @@ import type {
   MapLighting,
   MapObject,
   MapObjectKind,
+  TerrainAtlasRef,
   TileEntry,
   VoxelModel,
 } from '../manifest.ts';
@@ -49,11 +50,10 @@ import {
   leptonDelta,
   localScreenRect,
   mapSizeCells,
-  mergeTileExtra,
   SUBCELL_LEPTONS,
-  tileAnchor,
 } from '../iso.ts';
 import { parseHsv, remapRamp } from '../remap.ts';
+import { mergeTileRaster, type TileRaster } from '../tileRaster.ts';
 import { THEATERS, buildTileTable, resolveCellTile, theaterFromMap, type TemplateShape } from '../theater.ts';
 import {
   ArtSource,
@@ -67,6 +67,7 @@ import {
 } from './artSource.ts';
 import { GameInstall, loadMap } from './install.ts';
 import { encodePng } from './png.ts';
+import { paintTileRaster, TERRAIN_DEPTH_FILE, tmpTileSource } from './terrainDepth.ts';
 
 export interface ExtractOptions {
   gameDir: string;
@@ -151,7 +152,7 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   const tileIdx = new Uint16Array(gridW * gridH).fill(0xffff);
   const tileKeys = new Map<string, number>();
   const tiles: TileEntry[] = [];
-  const tileRasters: { width: number; height: number; bitmap: Uint8Array }[] = [];
+  const tileRasters: TileRaster[] = [];
   let substituted = 0;
   let unresolved = 0;
 
@@ -175,24 +176,7 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
         unresolved++;
         continue;
       }
-      const place = mergeTileExtra(tile, tile.extra, shape.tmp.tileWidth, shape.tmp.tileHeight);
-      const bitmap = new Uint8Array(place.width * place.height);
-      const tw = shape.tmp.tileWidth;
-      for (let py = 0; py < shape.tmp.tileHeight; py++) {
-        for (let px = 0; px < tw; px++) {
-          const v = tile.bitmap[py * tw + px]!;
-          if (v) bitmap[(py + place.diamond[1]) * place.width + px + place.diamond[0]] = v;
-        }
-      }
-      if (tile.extra) {
-        const e = tile.extra;
-        for (let py = 0; py < e.height; py++) {
-          for (let px = 0; px < e.width; px++) {
-            const v = e.bitmap[py * e.width + px]!;
-            if (v) bitmap[(py + place.extra[1]) * place.width + px + place.extra[0]] = v;
-          }
-        }
-      }
+      const raster = mergeTileRaster(tmpTileSource(shape.tmp, tile), shape.tmp.tileWidth, shape.tmp.tileHeight);
       index = tiles.length;
       tileKeys.set(key, index);
       tiles.push({
@@ -201,10 +185,11 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
         height: tile.height,
         rampType: tile.rampType,
         terrainType: tile.terrainType,
-        rect: [0, 0, place.width, place.height],
-        anchor: tileAnchor(place.diamond[0], place.diamond[1]),
+        rect: [0, 0, raster.width, raster.height],
+        anchor: raster.anchor,
+        ...(raster.depthTested ? {} : { noDepth: true as const }),
       });
-      tileRasters.push({ width: place.width, height: place.height, bitmap });
+      tileRasters.push(raster);
     }
     tileIdx[i] = index;
   }
@@ -216,20 +201,11 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
     1,
   );
   const terrainRgba = new Uint8Array(terrainPack.width * terrainPack.height * 4);
+  const terrainDepth = new Uint8Array(terrainPack.width * terrainPack.height);
   tileRasters.forEach((r, i) => {
     const rect = terrainPack.rects[i]!;
     tiles[i]!.rect = [rect.x, rect.y, rect.w, rect.h];
-    for (let py = 0; py < r.height; py++) {
-      for (let px = 0; px < r.width; px++) {
-        const v = r.bitmap[py * r.width + px]!;
-        if (!v) continue;
-        const d = ((rect.y + py) * terrainPack.width + rect.x + px) * 4;
-        terrainRgba[d] = isoPal[v * 3]!;
-        terrainRgba[d + 1] = isoPal[v * 3 + 1]!;
-        terrainRgba[d + 2] = isoPal[v * 3 + 2]!;
-        terrainRgba[d + 3] = 255;
-      }
-    }
+    paintTileRaster(r, rect.x, rect.y, isoPal, terrainRgba, terrainDepth, terrainPack.width);
   });
   const heightAt = (x: number, y: number): number =>
     x >= 0 && y >= 0 && x < gridW && y < gridH ? heights[y * gridW + x]! : 0;
@@ -522,10 +498,19 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   const outDir = join(opts.outDir, loaded.id);
   mkdirSync(join(outDir, 'voxels'), { recursive: true });
 
-  const terrainAtlas: AtlasRef = { file: 'terrain.png', width: terrainPack.width, height: terrainPack.height };
+  const terrainAtlas: TerrainAtlasRef = {
+    file: 'terrain.png',
+    width: terrainPack.width,
+    height: terrainPack.height,
+    depth: TERRAIN_DEPTH_FILE,
+  };
   writeFileSync(
     join(outDir, terrainAtlas.file),
     encodePng({ width: terrainPack.width, height: terrainPack.height, channels: 4, data: terrainRgba }),
+  );
+  writeFileSync(
+    join(outDir, TERRAIN_DEPTH_FILE),
+    encodePng({ width: terrainPack.width, height: terrainPack.height, channels: 1, data: terrainDepth }),
   );
 
   // Sprite atlas: body + shadow frames of every sprite, R = palette index, A = 255 where index != 0.

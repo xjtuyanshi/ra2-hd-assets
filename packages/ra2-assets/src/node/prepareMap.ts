@@ -268,7 +268,8 @@ function planStep(
       !invalidated &&
       !extracted &&
       m.terrainMap &&
-      fresh(base, [mapFile(m.terrainAtlas.file)]) &&
+      // The tile-depth atlas decides which tile is visible, so it is a source of the composite like the atlas itself.
+      fresh(base, [m.terrainAtlas.file, ...(m.terrainAtlas.depth ? [m.terrainAtlas.depth] : [])].map(mapFile)) &&
       compatible(state, step, terrainInputs(m))
     )
       return skip('scale-1 terrain and mask are current');

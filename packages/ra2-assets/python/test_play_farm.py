@@ -286,6 +286,14 @@ class VerifyTest(unittest.TestCase):
         self.assertIn('sprite tree01 frame 0', errors)
         self.assertIn('sprite tree99 not in the manifest', errors)
 
+    def test_named_terrain_depth_atlas_must_exist_at_the_atlas_size(self):
+        self.rewrite(lambda manifest: manifest['terrainAtlas'].update(depth='terrain-depth.png'))
+        self.assertIn('terrain depth atlas: terrain-depth.png is missing', self.result()['errors'])
+        (self.map / 'terrain-depth.png').write_bytes(png(60, 30))
+        self.assertIn('terrain depth atlas: terrain-depth.png is 60x30, recorded 64x32', self.result()['errors'])
+        (self.map / 'terrain-depth.png').write_bytes(png(64, 32))
+        self.assertEqual(self.result()['errors'], [])
+
     def test_paths_may_not_leave_the_farm(self):
         outside = Path(self.tmp.name) / 'outside.png'
         outside.write_bytes(png(64, 32))

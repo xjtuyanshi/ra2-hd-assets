@@ -20,6 +20,8 @@ interface TileOpts {
   withZData?: boolean;
   /** [x, y, w, h, fillByte] for an extra-graphics overlay. */
   extra?: [number, number, number, number, number];
+  /** Fill byte for an extra z-data raster stored after the extra graphics (needs `withZData` and `extra`). */
+  extraZ?: number;
 }
 
 /**
@@ -40,16 +42,19 @@ function makeTile(opts: TileOpts): Uint8Array {
     cursor += DIAMOND_BYTES;
   }
   let extraOfs = 0;
+  let extraZOfs = 0;
   if (opts.extra) {
     flags |= 0x1;
     extraOfs = cursor;
+    cursor += opts.extra[2] * opts.extra[3];
+    if (opts.extraZ !== undefined) extraZOfs = cursor;
   }
 
   hv.setInt32(0, opts.x ?? 0, true);
   hv.setInt32(4, opts.y ?? 0, true);
   hv.setInt32(8, extraOfs, true);
   hv.setInt32(12, opts.withZData ? zOfs : 0, true);
-  hv.setInt32(16, 0, true); // extra z offset (unused here)
+  hv.setInt32(16, extraZOfs, true);
   hv.setInt32(20, opts.extra ? opts.extra[0] : 0, true);
   hv.setInt32(24, opts.extra ? opts.extra[1] : 0, true);
   hv.setInt32(28, opts.extra ? opts.extra[2] : 0, true);
@@ -77,6 +82,7 @@ function makeTile(opts: TileOpts): Uint8Array {
   if (opts.extra) {
     const [, , w, h, ef] = opts.extra;
     parts.push(new Uint8Array(w * h).fill(ef));
+    if (opts.extraZ !== undefined) parts.push(new Uint8Array(w * h).fill(opts.extraZ));
   }
 
   const total = parts.reduce((n, p) => n + p.length, 0);
@@ -245,6 +251,29 @@ describe('TmpFile.parse', () => {
     expect(tile.hasExtraData).toBe(true);
     expect(tile.zData!.every((b) => b === 0x7f)).toBe(true);
     expect(tile.extra!.bitmap.every((b) => b === 0x42)).toBe(true);
+    expect(tile.extra!.zData).toBeUndefined();
+  });
+
+  it('reads extra z-data only when the tile carries the z-data flag', () => {
+    const withZ = TmpFile.parse(
+      makeTmp(1, 1, [makeTile({ withZData: true, extra: [0, -4, 6, 5, 0x42], extraZ: 0x15 })]),
+    ).getTile(0)!;
+    expect(withZ.extra!.zData).toHaveLength(30);
+    expect(withZ.extra!.zData!.every((b) => b === 0x15)).toBe(true);
+    expect(withZ.extra!.bitmap.every((b) => b === 0x42)).toBe(true);
+    // Without the flag the header's extra z offset is not meaningful (stock files leave it uninitialised).
+    const noFlag = TmpFile.parse(makeTmp(1, 1, [makeTile({ extra: [0, -4, 6, 5, 0x42], extraZ: 0x15 })])).getTile(0)!;
+    expect(noFlag.extra!.zData).toBeUndefined();
+  });
+
+  it('expands packed diamond scanlines such as z-data into a dense raster', () => {
+    const file = TmpFile.parse(makeTmp(1, 1, [makeTile({ withZData: true })]));
+    const dense = file.expandDiamond(file.getTile(0)!.zData!);
+    expect(dense).toHaveLength(TILE_W * TILE_H);
+    expect(dense[0 * TILE_W + 28]).toBe(0x7f);
+    expect(dense[0 * TILE_W + 27]).toBe(0);
+    expect(dense[14 * TILE_W + 0]).toBe(0x7f);
+    expect(dense[29 * TILE_W + 30]).toBe(0);
   });
 });
 

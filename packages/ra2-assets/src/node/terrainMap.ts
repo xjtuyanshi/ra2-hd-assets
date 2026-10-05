@@ -1,10 +1,10 @@
-/** Unlit whole-map terrain and open-water mask, derived only from the terrain atlas. */
+/** Unlit whole-map terrain and open-water mask, derived only from the terrain atlas and its tile-depth atlas. */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { HdCacheManifest } from '../manifest.ts';
 import { buildWaterMaskBytes } from '../waterMask.ts';
 import { decodePng, encodePng } from './png.ts';
-import { drawTerrainTiles, terrainLayout } from './terrain.ts';
+import { drawTerrainTiles, loadTerrainDepth, terrainLayout } from './terrain.ts';
 
 export interface TerrainMapResult {
   file: string;
@@ -23,27 +23,34 @@ export function renderTerrainMap(opts: { cacheDir: string; writeManifest?: boole
   const manifestFile = join(opts.cacheDir, 'manifest.json');
   const manifest = JSON.parse(readFileSync(manifestFile, 'utf8')) as HdCacheManifest;
   const terrain = decodePng(readFileSync(join(opts.cacheDir, manifest.terrainAtlas.file)));
-  const { cells, minX, minY, maxX, maxY } = terrainLayout(manifest);
+  const layout = terrainLayout(manifest);
   // Include every extracted cell as in preview --full, without space reserved for sprites or model strips.
-  const originX = Math.floor(minX);
-  const originY = Math.floor(minY);
-  const width = Math.ceil(maxX) - originX;
-  const height = Math.ceil(maxY) - originY;
+  const originX = Math.floor(layout.minX);
+  const originY = Math.floor(layout.minY);
+  const width = Math.ceil(layout.maxX) - originX;
+  const height = Math.ceil(layout.maxY) - originY;
   const rgba = new Uint8Array(width * height * 4);
   const tileAt = new Int32Array(width * height).fill(-1);
-  drawTerrainTiles(manifest, terrain, cells, {
-    put(x, y, r, g, b, alpha, tile) {
-      const px = Math.round(x) - originX;
-      const py = Math.round(y) - originY;
-      if (px < 0 || py < 0 || px >= width || py >= height) return;
-      const i = py * width + px;
-      rgba[i * 4] = r;
-      rgba[i * 4 + 1] = g;
-      rgba[i * 4 + 2] = b;
-      rgba[i * 4 + 3] = alpha;
-      tileAt[i] = tile;
+  drawTerrainTiles(
+    manifest,
+    terrain,
+    layout,
+    {
+      put(x, y, r, g, b, alpha, tile) {
+        const px = Math.round(x) - originX;
+        const py = Math.round(y) - originY;
+        if (px < 0 || py < 0 || px >= width || py >= height) return;
+        const i = py * width + px;
+        rgba[i * 4] = r;
+        rgba[i * 4 + 1] = g;
+        rgba[i * 4 + 2] = b;
+        rgba[i * 4 + 3] = alpha;
+        tileAt[i] = tile;
+      },
     },
-  });
+    undefined,
+    loadTerrainDepth(opts.cacheDir, manifest),
+  );
   const mask = buildWaterMaskBytes(rgba, width, height, tileAt, manifest.tiles);
   const file = join(opts.cacheDir, 'terrain-map.png');
   const waterMask = join(opts.cacheDir, 'terrain-water.png');

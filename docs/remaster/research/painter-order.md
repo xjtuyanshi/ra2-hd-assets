@@ -131,6 +131,35 @@ The repository TMP decoder independently records the file's Z and extra-Z offset
 `packages/ra2-formats/src/tmp/tmpFile.ts`. The HD terrain mesh remains the existing physical approximation;
 this change does not port every TMP/software rasterizer branch.
 
+### Tile against tile: the baseline, extra graphics and sweep order
+
+The offline terrain composite (`packages/ra2-assets/src/tileRaster.ts`, `src/node/terrain.ts`) reproduces the tile
+rasterizer's ordinary path. Its evidence, all in `0x547CF0` unless stated:
+
+- Arguments from the cell renderer `0x480350` (call at `0x480499`): the cell's level (`cell+0x11B`) and the draw
+  position, whose Y is the cell's ground-plane screen Y minus 15 per level (`0x480416`–`0x48042E`, `0x480489`).
+- Baseline (`0x547F63`–`0x547F97`): `ZBuffer+0x24 + ZBuffer+0x04 - drawY - tileHeight(30)`, then minus
+  `tileHeight * level / 2`. The two level terms cancel, so the baseline is `K - groundY - 30` for every level.
+- Diamond pixel (`0x5487A5`–`0x5487EB`): `candidate = baseline + zByte`; `cmp [z], candidate; jb skip` (unsigned
+  16-bit), so the pixel is written when `candidate <= existing`, depth first, then colour.
+- Extra graphics (`0x549133` on): drawn at `(xExtra - x, yExtra - y)` from the diamond box (`0x549161`–`0x54917A`),
+  each non-zero colour byte with `candidate = baseline + extraZByte` from header `+0x10` (`0x54931F`–`0x549326`,
+  `0x54939D`–`0x5493AA`) and the same `<=` test and writes. The baseline is the cell's own, not shifted by the
+  graphic's height.
+- No z-data flag (`0x54816D`–`0x548178`): the depth switch is cleared for the whole tile; diamond and extra graphics
+  are then drawn without testing or writing depth.
+- Sweep order (`0x6D7560` and `0x6D71E0`): the outer loop steps the start cell by alternating X and Y (rows of
+  constant `x + y`, top of the screen first); the inner loop does `inc X` / `dec Y` (`0x6D7804`–`0x6D780D`,
+  `0x6D751F`–`0x6D7528`), i.e. left to right. Height is not a sort key.
+
+Stock flat tiles store `29 - row` in the diamond, so a flat pixel's depth is `K - screenY - 15 * level - 1`; this is
+the `K - y - 31` measured for level-2 ground in the native Z-buffer dumps used for the building validation above.
+Cliff faces store 15..29 across the whole face. Hence the relative depth of any two tile pixels at one screen position
+is `zByte - 15 * (x + y)`, smaller is nearer, equal goes to the later cell in the sweep. The composite was checked
+against frozen native frames of DeepFrze on 2026-10-05: of the pixels the rule changes against the earlier
+diamonds-then-extras painter, 5,194 of 5,587 (view at engine -1620, 2140) and 7,081 of 8,705 (view at -2880, 1636, with
+1,346 under buildings) agree with the native picture and 345 / 278 with the old painter.
+
 Stock high bridges in the asset policy (`packages/ra2-assets/src/node/artSource.ts`) are
 `BRIDGE1/2`, `BRIDGEB1/2`, `RAILBRDG1/2`, with `drawOffset [0,-60]` and non-flat art.
 Their deck is four height levels above the cell. This stock-art inference supplies the HD horizontal

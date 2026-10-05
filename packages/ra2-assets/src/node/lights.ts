@@ -41,7 +41,7 @@ import { detectBuildingWindows, roofBottom, seededRandom, stringSeed, windowColu
 import { GameInstall, loadMap } from './install.ts';
 import { Sheet } from './libraryPreview.ts';
 import { decodePng, encodePng, type PngImage } from './png.ts';
-import { insideDiamond, terrainLayout } from './terrain.ts';
+import { insideDiamond, loadTerrainDepth, resolveTerrain, terrainLayout } from './terrain.ts';
 
 /** Theaters that get HD street lamps (the city theaters; lamp posts belong on city streets). */
 export const STREET_LAMP_THEATERS: readonly string[] = ['urban', 'newurban'];
@@ -651,21 +651,15 @@ function lightsPreview(
   const layout = terrainLayout(manifest);
   const originX = Math.floor(layout.minX);
   const originY = Math.floor(layout.minY);
-  // Which cell drew each composite pixel (same painter order as the composite).
+  // Which cell drew each composite pixel: the composite's own tile resolution.
+  const resolved = resolveTerrain(manifest, terrain, layout, loadTerrainDepth(mapDir, manifest));
   const cellAt = new Int32Array(base.width * base.height).fill(-1);
-  for (const pass of [0, 1]) {
-    for (const c of layout.cells) {
-      const t = manifest.tiles[c.t]!;
-      const [rx, ry, rw, rh] = t.rect;
-      for (let py = 0; py < rh; py++) {
-        for (let px = 0; px < rw; px++) {
-          if (terrain.data[((ry + py) * terrain.width + rx + px) * 4 + 3] === 0) continue;
-          if (insideDiamond(px, py, t.anchor) !== (pass === 0)) continue;
-          const X = Math.round(c.sx + px) - originX;
-          const Y = Math.round(c.sy + py) - originY;
-          if (X >= 0 && Y >= 0 && X < base.width && Y < base.height) cellAt[Y * base.width + X] = c.y * W + c.x;
-        }
-      }
+  for (let Y = 0; Y < Math.min(base.height, resolved.height); Y++) {
+    for (let X = 0; X < Math.min(base.width, resolved.width); X++) {
+      const k = resolved.cell[Y * resolved.width + X]!;
+      if (k < 0) continue;
+      const c = layout.cells[k]!;
+      cellAt[Y * base.width + X] = c.y * W + c.x;
     }
   }
   const grid = { width: W, height: H, z: heights, exists };
