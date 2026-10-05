@@ -289,7 +289,10 @@ native `buildingFrame` keeps the body stage and damage offset instead of restart
 progress does not animate this replacement SHP. The native inclusive cap uses the source `frameCount / 2`
 rounded down (foreground plus shadow array lengths when legacy metadata is absent). It can select the first
 source shadow-half frame at its boundary, rather than the last foreground frame. Queued Unload alone does not open the
-door unless CurrentMission is -1. Missing art pairs retain the normal body. A YR reader instance latches a
+door unless CurrentMission is -1. Missing art pairs retain the normal body. LiveView draws the pair one logic frame
+after the published state, at both ends: the image of a frame is the `unloading` value of the first publication of
+the previous logic frame (see [Presentation phase](research/painter-order.md#presentation-phase-of-discrete-state)).
+A YR reader instance latches a
 published roof during the same
 continuous effective Unload and reuses it only for NULL link 0; unreadable roof state still omits `unloading`.
 It resets when the mission leaves `16`, the building disappears or its UID/type pointer changes, pruning entries
@@ -593,7 +596,11 @@ exists.
 Optional `nativeHidden` suppresses a complete object visual, including its shadows and HD extras. YR emits true
 for the proven UnitClass gate: nonzero tether byte, a validated building in radio link 0, effective or queued
 Unload 16, and canonical door booleans. It covers opening, closing, open and closed; it is independent of the
-factory's own effective-mission-only delivery image rule. Invalid or inactive observations omit the flag. The
+factory's own effective-mission-only delivery image rule. The gate only says that the unit does not draw itself:
+a building in effective Unload whose own tether byte is set draws each of its radio contacts in its second pass,
+so such a contact (the vehicle driving out of a war factory) stays visible and the flag is omitted. The flag
+remains for a queued Unload before the door mission starts, an untethered building, and a link the building does
+not hold. Invalid or inactive observations omit the flag. The
 bridge preserves the object's simulation/selection state; selection brackets and health bars are native overlay
 pixels, and LiveView creates no selection geometry.
 Owner-attached anims, particle systems and fire events follow this gate when both UID and pointer match;
@@ -614,13 +621,15 @@ reader revisions, and restore ordinary rendering when omitted. Neither rule prov
 window. Static predicates and their limits are in
 [Native draw eligibility](research/painter-order.md#native-draw-eligibility-and-body-translucency).
 
-When a building last reported with health <= 0 disappears, LiveView retains its frozen last visual only for the
-first missing snapshot's logic frame, provided the last observation is no more than one tick old. It expires as
-soon as that frame advances. Selling, pointer/UID replacement, larger frame gaps and rollback do not retain it;
-same-frame polls do not extend it. This is a bounded presentation heuristic: native prelogic rendering can leave
-a previous picture on screen, but another native render can occur after the frame
-increment. Exact last-picture parity is `UNCERTAIN`, with live acceptance `UNVERIFIED`; see
-[Last destroyed-building visual](research/painter-order.md#last-destroyed-building-visual).
+When a drawable building disappears, LiveView retains its frozen last visual through the logic frame after the
+last one it was published in, whatever its last health. The deadline counts from that last present frame, not
+from the publication that first missed the building: a poll can already miss it under the old frame number,
+because the engine removes it in the middle of a logic tick. Selling, pointer/UID replacement, larger frame gaps
+and rollback do not retain it; repeated polls of a frame do not extend it. This is a bounded presentation
+heuristic: native prelogic rendering leaves the previous picture on screen at the frame increment, but another
+native render can occur after it. Frozen same-frame pairs stopped at the increment match (see
+[Last destroyed-building visual](research/painter-order.md#last-destroyed-building-visual)); parity at every
+presentation phase is `UNCERTAIN`.
 
 ## Known limits
 

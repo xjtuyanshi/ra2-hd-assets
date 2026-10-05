@@ -463,7 +463,9 @@ its warm pixels are self-lit like other HD flipbooks, which is what keeps the sp
 
 Optional `nativeHidden` suppresses the complete live object, including shadows and HD extras. The YR reader
 uses this for tethered UnitClass vehicles whose validated building radio link has effective or queued Unload 16
-and canonical door booleans. All four door states qualify. Optional `translucent` is body opacity: the reader
+and canonical door booleans, unless that building draws the vehicle itself (effective Unload, its own tether byte
+set, the vehicle among its radio links): a vehicle leaving a war factory is drawn. All four door states qualify.
+Optional `translucent` is body opacity: the reader
 publishes 0.5 while either native chrono byte is nonzero, and SHP/voxel body parts blend at 50% without writing
 depth; shadows stay unchanged. Omitted fields retain normal rendering. These are independent predicates, and
 the chrono flags alone never hide the object. Selection brackets remain the game's native overlay; LiveView
@@ -491,13 +493,18 @@ Both cards retain their anchor, palette/remap routing and geometry placement. Wi
 template, the replacement body uses BUILDNGZ with `NormalZAdjust = -20` for door delivery or -40 for roof delivery;
 the interior card uses native gradient 0 with k=1. Opaque foreground posts keep their body depth, so the floor
 plane and posts can occlude the same unit differently. Missing/empty pairs retain the ordinary body. Queued Unload
-alone does not open the door unless CurrentMission is the -1 sentinel.
+alone does not open the door unless CurrentMission is the -1 sentinel. The pair is drawn one logic frame after the
+published state, on appearing and on leaving: `BuildingVisualHistory.shownUnloading` returns the `unloading` value
+of the first publication of the previous logic frame, because the native picture at a counter stop is one logic
+frame older than the state read after it. Without an observation of exactly the previous frame (first sighting,
+frame gap, rollback) the current value is drawn.
 
-A vanished drawable building can retain its frozen visual only for the first missing
-snapshot's logic frame, provided the last observation is no more than one tick old. It expires as soon as that
-frame advances. The last published health need not be zero: a fatal hit and removal can occur between polls.
-Selling, native-hidden objects, pointer/UID replacement, larger frame gaps and rollback do not retain it; same-frame
-polls do not extend the lifetime. This is a bounded presentation heuristic, not established exact native frame
+A vanished drawable building retains its frozen visual through the logic frame after the last one it was
+published in, and expires when a later frame arrives. The deadline counts from the last present frame: the engine
+removes a building in the middle of a tick, so a poll can miss it under the old frame number. The last published
+health need not be zero: a fatal hit and removal can occur between polls. Selling, native-hidden objects,
+pointer/UID replacement, larger frame gaps and rollback do not retain it; repeated polls of a frame do not extend
+the lifetime. This is a bounded presentation heuristic, not established exact native frame
 parity: the normal prelogic render can leave old pixels, but native wait paths can render after the frame increment.
 Exact parity is `UNCERTAIN`; live original/HD acceptance is `UNVERIFIED`. See the
 [native eligibility and presentation evidence](../../docs/remaster/research/painter-order.md#native-draw-eligibility-and-body-translucency).

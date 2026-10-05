@@ -256,6 +256,63 @@ describe('YR 1.001 state reader', () => {
     },
   );
 
+  it('keeps a tethered vehicle visible while its unloading building draws the radio contact itself', () => {
+    // Native second building pass 0x43DA80..0x43DC16: effective Unload + building tether + a reciprocal link.
+    const { m, tank, soldier, yard } = battlefield();
+    radio(m, tank, yard);
+    m.u8(tank + O.tethered, 1);
+    const links = radio(m, yard, tank, 2);
+    m.u8(yard + O.tethered, 1);
+    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects.find((object) => object.id === tank);
+    for (const [current, queued] of [
+      [16, -1],
+      [-1, 16],
+      [16, 5],
+    ]) {
+      m.i32(yard + B.currentMission, current!);
+      m.i32(yard + B.queuedMission, queued!);
+      for (const [moving, targetOpen] of [
+        [0, 0],
+        [0, 1],
+        [1, 0],
+        [1, 1],
+      ]) {
+        m.u8(yard + B.doorMoving, moving!);
+        m.u8(yard + B.doorTargetOpen, targetOpen!);
+        expect(read()).toMatchObject({ contactUid: 15 });
+        expect(read()).not.toHaveProperty('nativeHidden');
+      }
+    }
+    // Any link slot below the capacity counts; the first one may hold another contact.
+    m.u32(links, soldier);
+    m.u32(links + 4, tank);
+    expect(read()).not.toHaveProperty('nativeHidden');
+
+    // Queued Unload before the door mission starts: the wrapper skips the unit and the building does not draw it.
+    m.i32(yard + B.currentMission, 5);
+    m.i32(yard + B.queuedMission, 16);
+    expect(read()).toHaveProperty('nativeHidden', true);
+    m.i32(yard + B.currentMission, 16);
+    m.i32(yard + B.queuedMission, -1);
+    expect(read()).not.toHaveProperty('nativeHidden');
+
+    // Without the building's own tether byte, its link, or with a link beyond the capacity, nothing draws the unit.
+    m.u8(yard + O.tethered, 0);
+    expect(read()).toHaveProperty('nativeHidden', true);
+    m.u8(yard + O.tethered, 255);
+    expect(read()).not.toHaveProperty('nativeHidden');
+    m.u32(links + 4, 0);
+    expect(read()).toHaveProperty('nativeHidden', true);
+    m.u32(links + 8, tank);
+    expect(read()).toHaveProperty('nativeHidden', true);
+    m.i32(yard + O.radioCapacity, 0);
+    expect(read()).toHaveProperty('nativeHidden', true);
+    m.i32(yard + O.radioCapacity, 65);
+    expect(read()).toHaveProperty('nativeHidden', true);
+    m.i32(yard + O.radioCapacity, 3);
+    expect(read()).not.toHaveProperty('nativeHidden');
+  });
+
   it('never infers a tether hide from invalid links, a nonbuilding contact or noncanonical door booleans', () => {
     const { m, tank, soldier, yard } = battlefield();
     const items = radio(m, tank, yard);

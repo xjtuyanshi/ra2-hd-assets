@@ -97,16 +97,42 @@ describe('vanished building last visual', () => {
     history.update(snap(11));
     expect([...history.retained.keys()]).toEqual([2]);
     expect(history.retained.get(2)?.object).toEqual(replacement);
+    // The replacement was last present in frame 11, so its own deadline is frame 12; the predecessor stays gone.
+    history.update(snap(12));
+    expect([...history.retained.keys()]).toEqual([2]);
+    expect(history.retained.get(2)?.object).toEqual(replacement);
+    history.update(snap(13));
+    expect(history.retained.size).toBe(0);
+  });
+
+  it('keeps a building first missed under its last frame number through the next logic frame only', () => {
+    // Live frozen pairs (NAPOWR, logic frames 12407..12409): the engine removes the building in the middle of the
+    // tick, so a poll misses it while the counter still reads 12407; the native picture keeps the intact building
+    // when the counter stops at 12408 and drops it at 12409. The deadline counts from the last present frame.
+    const history = new BuildingVisualHistory();
+    const last = snap(10, [building]);
+    history.update(last);
+    history.update(snap(10));
+    expect(history.retained.get(1)).toMatchObject({ object: building, snapshot: last });
+    for (let i = 0; i < 3; i++) history.update(snap(10));
+    expect(history.retained.size).toBe(1);
+    history.update(snap(11));
+    expect(history.retained.get(1)).toMatchObject({ object: building, snapshot: last });
+    for (let i = 0; i < 3; i++) history.update(snap(11));
+    expect(history.retained.size).toBe(1);
+    history.update(snap(12));
+    expect(history.retained.size).toBe(0);
+    // Returning to the retained frame number cannot revive it.
     history.update(snap(12));
     expect(history.retained.size).toBe(0);
   });
 
-  it('does not stretch a same-frame disappearance into another logic frame', () => {
+  it('drops a building first missed under its last frame number when the next publication skips a frame', () => {
     const history = new BuildingVisualHistory();
     history.update(snap(10, [building]));
     history.update(snap(10));
     expect(history.retained.size).toBe(1);
-    history.update(snap(11));
+    history.update(snap(12));
     expect(history.retained.size).toBe(0);
   });
 
@@ -132,5 +158,78 @@ describe('vanished building last visual', () => {
     expect(history.retained.size).toBe(0);
     history.update(snap(11));
     expect(history.retained.size).toBe(0);
+  });
+});
+
+describe('delivery image presentation frame', () => {
+  const factory = (unloading?: 'door' | 'roof'): LiveObject => ({ ...building, health: 1, unloading });
+
+  it('shows the delivery image one logic frame after the state, at both ends', () => {
+    // Frozen GAWEAP pairs at one-frame steps: the state entered Unload in a mid-tick publication of frame 8711 and
+    // left it at the 8835 stop; the native picture changed at the following counter stops.
+    const history = new BuildingVisualHistory();
+    const shown = (frame: number, object: LiveObject) => {
+      history.update(snap(frame, [object]));
+      return history.shownUnloading(object, frame);
+    };
+    expect(shown(10, factory())).toBeUndefined();
+    expect(shown(11, factory())).toBeUndefined();
+    // The change is first published under the old frame number: nothing changes in that frame ...
+    expect(shown(11, factory('door'))).toBeUndefined();
+    // ... nor in the next one, whose predecessor's first publication was still closed.
+    expect(shown(12, factory('door'))).toBeUndefined();
+    expect(shown(12, factory('door'))).toBeUndefined();
+    expect(shown(13, factory('door'))).toBe('door');
+    expect(shown(14, factory('door'))).toBe('door');
+    // Closing: the first publication of frame 15 already lacks the state; the image stays for that frame.
+    expect(shown(15, factory())).toBe('door');
+    expect(shown(15, factory())).toBe('door');
+    expect(shown(16, factory())).toBeUndefined();
+  });
+
+  it('follows a change that is first published with a new frame number one frame later', () => {
+    const history = new BuildingVisualHistory();
+    const shown = (frame: number, object: LiveObject) => {
+      history.update(snap(frame, [object]));
+      return history.shownUnloading(object, frame);
+    };
+    expect(shown(10, factory())).toBeUndefined();
+    expect(shown(11, factory('roof'))).toBeUndefined();
+    expect(shown(12, factory('roof'))).toBe('roof');
+    expect(shown(13, factory())).toBe('roof');
+    expect(shown(14, factory())).toBeUndefined();
+  });
+
+  it('draws the current state without an observation of exactly the previous frame', () => {
+    const history = new BuildingVisualHistory();
+    // First sighting.
+    history.update(snap(10, [factory('door')]));
+    expect(history.shownUnloading(factory('door'), 10)).toBe('door');
+    // Frame gap.
+    history.update(snap(13, [factory()]));
+    expect(history.shownUnloading(factory(), 13)).toBeUndefined();
+    // A frame other than the newest observed one, and an unknown building.
+    expect(history.shownUnloading(factory('roof'), 12)).toBe('roof');
+    expect(history.shownUnloading({ ...factory('door'), uid: 9 }, 13)).toBe('door');
+    // Rollback forgets every observation.
+    history.update(snap(14, [factory('door')]));
+    history.update(snap(9, [factory('door')]));
+    expect(history.shownUnloading(factory('door'), 9)).toBe('door');
+    history.update(snap(10, [factory()]));
+    expect(history.shownUnloading(factory(), 10)).toBe('door');
+  });
+
+  it('keeps the lagged image of a vanished building while its last visual is retained, then forgets it', () => {
+    const history = new BuildingVisualHistory();
+    history.update(snap(10, [factory()]));
+    history.update(snap(11, [factory('door')]));
+    history.update(snap(12));
+    const last = history.retained.get(1)!;
+    expect(last.snapshot.frame).toBe(11);
+    expect(history.shownUnloading(last.object, last.snapshot.frame)).toBeUndefined();
+    history.update(snap(13));
+    // A new building with the same UID starts without history.
+    history.update(snap(14, [factory('door')]));
+    expect(history.shownUnloading(factory('door'), 14)).toBe('door');
   });
 });
