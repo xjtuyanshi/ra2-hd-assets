@@ -231,7 +231,7 @@ export class LiveLibrary {
     const entry = this.hdPages.get(index);
     if (entry === undefined) {
       this.hdPages.set(index, 'loading');
-      loadHdAtlas(this.base, ref)
+      loadHdAtlas(this.base, ref, this.uploadPage ?? undefined)
         .then((atlas) => {
           this.hdPages.set(index, atlas);
           this.revision++;

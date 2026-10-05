@@ -10,6 +10,7 @@ import {
   resourceStatus,
   networkStatus,
   upscaleStatus,
+  hdStatus,
   selectGameFiles,
   cancelSourceRequest,
   mapRequest,
@@ -601,6 +602,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
           invalidate: () => presenter.invalidate(),
           frameSize: () => (presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null),
           pointerPosition: () => inputPointerPosition?.() ?? null,
+          publishStatus: (text) => hdStatus.set(text),
         });
         // Only a running bridge has a view to switch: the button appears and the key stops reaching the game.
         toolbar.setHdView(true);

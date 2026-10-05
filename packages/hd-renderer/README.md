@@ -923,7 +923,10 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   transparent texels HD atlas colours keep their hue but are never brighter than the original texel there (the
   upscaler's pale background fringe goes without a rim of raw palette colours). An HD page's optional
   `paintSaturation` (0..1, absent = 1) grades only the decoded house colour in linear light, preserving Rec.709
-  luminance before the coverage-mask mix. A value of 1 or absent adds no shader nodes. Building and vehicle SHP
+  luminance before the coverage-mask mix. A value of 1 or absent adds no shader nodes. HD pages and their paint masks
+  are decoded off the main thread (`loadHdTexture` in `ra2/cache.ts`: `createImageBitmap`, straight alpha, no colour
+  conversion) and a library page is uploaded as soon as it arrives; the bitmap is released after the first upload, so a
+  page cannot be uploaded a second time. Building and vehicle SHP
   shadows halve the displayed colour; infantry uses solid black palette-index-12 contact cores in all looks.
   Live object occlusion combines native BUILDNGZ body samples, ground-like parts and
   gradient-2 ground-unit cards (`ra2/nativeDepth.ts`) with small scene-wide traversal/component biases
