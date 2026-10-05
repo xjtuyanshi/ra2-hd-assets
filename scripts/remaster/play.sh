@@ -13,7 +13,8 @@
 # Environment (all optional):
 #   RA2_GAME_ROOT      folder that holds the player's own game in ra2/   (default: <main checkout>/game)
 #   RA2_HD_CACHE_DIR   HD asset cache root                               (default: the first of <main checkout>/gameres/
-#                      hd-cache-play2, hd-cache-play that holds _library/, otherwise <main checkout>/gameres/hd-cache)
+#                      hd-cache-play3, hd-cache-play2, hd-cache-play that holds _library/, otherwise
+#                      <main checkout>/gameres/hd-cache)
 #   RA2_PLAY_SPEED     game speed the session starts with, original scale 0 fastest .. 6 slowest (default: 3, normal;
 #                      "default" keeps the page's own default, which is the fastest)
 #   RA2_PLAY_PORT      port of the development server                    (default: 15400)
@@ -60,7 +61,7 @@ game="${RA2_GAME_ROOT:-$main/game}"
 cache="${RA2_HD_CACHE_DIR:-}"
 if [ -z "$cache" ]; then
   cache="$main/gameres/hd-cache"
-  for name in hd-cache-play hd-cache-play2; do
+  for name in hd-cache-play hd-cache-play2 hd-cache-play3; do
     [ -d "$main/gameres/$name/_library" ] && cache="$main/gameres/$name"
   done
 fi
