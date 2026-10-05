@@ -566,6 +566,8 @@ const LIVE_SPRITE_CAPACITY = 4096;
  * the GPU process to take the data, and 32 M pixel strips still for 80 to 275 ms.
  */
 export const UPLOAD_PIXELS_PER_FRAME = 8 << 20;
+/** The frame time the per-frame budgets are meant for (a 60 Hz display). */
+const FRAME_MS = 1000 / 60;
 
 /**
  * Instance capacity of a cell layer (overlays, smudges) that holds `count` sprites now. A layer cannot grow: its
@@ -668,6 +670,8 @@ export class LiveView {
    * nothing, the picture it shows instead included (measured: 0.83 and 1.3 s). One per frame builds them just as
    * fast (the builds are what takes the time) and keeps that other picture moving. The rest waits its turn and
    * counts as art on its way (loadingArt), so the view is not shown before it is in. A shown view never waits.
+   * Not scaled with the frame time: a build is this thread's own work, and a late frame that may build more is
+   * followed by a later one (tried: 0.8 s frames).
    * A host that knows nothing moves on screen (a loading screen) sets Infinity: every frame it does not have to
    * render in between is time saved.
    */
@@ -1366,9 +1370,14 @@ export class LiveView {
 
   render(now = performance.now()): void {
     const dt = Math.min(0.1, Math.max(0, (now - this.lastRender) / 1000));
+    // The upload budget is a rate: a frame that comes late (a display at 30 Hz, a busy GPU) gets the share of the
+    // frame that did not come, but no more than two frames' worth. Per frame alone, a view at 8 frames a second
+    // uploaded one atlas page every three seconds and was shown after 23; with more than twice, the upload of one
+    // late frame makes the next one late (tried with eight: frames of 0.6 s).
+    const frames = Number.isFinite(now - this.lastRender) ? Math.max(1, (now - this.lastRender) / FRAME_MS) : 1;
     this.lastRender = now;
     this.waitingArt = 0;
-    this.pageUploads.step(this.outOfSight ? this.hiddenUploadPixels : UPLOAD_PIXELS_PER_FRAME);
+    this.pageUploads.step((this.outOfSight ? this.hiddenUploadPixels : UPLOAD_PIXELS_PER_FRAME) * Math.min(2, frames));
     const current = this.current;
     if (current) {
       const previous = this.previous;
