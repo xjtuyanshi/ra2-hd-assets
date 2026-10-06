@@ -268,11 +268,19 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   the view's gate and the page's "loaded ahead" answer to both.
   The indexed stand-in layers draw with shader graphs of their own ("indexed page through the palette": every
   final layer draws HD art), and a graph's first layer costs six shader builds in the presenting thread plus
-  pipelines that are compiled off the frame, during which the layer draws nothing. `LiveView.warmStandIns` keeps
-  one hidden, empty layer of each such graph in the scene (a library page's sprites with the capture code, the
-  same with the lit-window mask on a night map, and a live overlay or smudge page), so the warm frames behind the
-  loading screen (`HdRenderer.warm`) build and compile them and a stand-in made during the match is a clone of
-  materials that are ready (`packages/hd-renderer/tests/liveStandInWarm.test.ts`). Cell decorations are not announced by anything (rubble, a
+  pipelines that are compiled off the frame, during which the layer draws nothing. The same holds for a final
+  layer that is the first of its look in a shown view (HD art with or without a material page, with or without a
+  lit-window mask): measured in a live match with the type library's HD pages 90 s late, conscripts were not drawn
+  for 15 presented frames when their HD page replaced the stand-in and an overlay page for 0.65 s, and in a
+  six-player match a page's first layer of a new look cost 0.2 to 0.4 s without its objects two and a half minutes
+  in. `LiveView.warmStandIns` keeps one hidden, empty layer of each such graph in the scene: a library page's
+  sprites from the indexed page with the capture code, the same with the lit-window mask on a night map, a live
+  overlay or smudge page from the indexed page, and, for every look the library's HD pages can have
+  (`LiveLibrary.hdPageLooks`, read from the library's records without loading a page), the final layer of a page
+  and of a cell page without and with the material page (and with the mask at night). The warm frames behind the
+  loading screen (`HdRenderer.warm`) build and compile them, so a layer made during the match is a clone of
+  materials that are ready; a graph the opening builds anyway is not built twice
+  (`packages/hd-renderer/tests/liveStandInWarm.test.ts`). Cell decorations are not announced by anything (rubble, a
   crater, a crate), so the indexed pages of the overlay types that are not walls and of every smudge type, three
   small pages, are fetched when the view is created (`cellArtPages`). What still has nothing to draw from is the
   first frames of a building, infantry or SHP-vehicle type that nothing announced (an object the engine creates in

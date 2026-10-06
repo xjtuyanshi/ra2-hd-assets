@@ -360,6 +360,27 @@ export class LiveLibrary {
     return this.entry(this.hdPages, index, ahead, (upload) => loadHdAtlas(this.base, ref, upload));
   }
 
+  /**
+   * The distinct looks the HD layers of this library's pages can have, read from the library's own records without
+   * loading a page: house-paint saturation, whether a compatible material page exists, whether a lit-window mask
+   * exists. Each is a shader graph of its own (ra2/sprites.ts SpriteGraph); a view builds them before it is shown
+   * (LiveView.warmStandIns).
+   */
+  hdPageLooks(): { paintSaturation: number; materials: boolean; windows: boolean }[] {
+    const refs = (this.library as TypeLibrary & { spriteAtlasesHd?: (HdAtlasRef | null)[] }).spriteAtlasesHd ?? [];
+    const looks = new Map<string, { paintSaturation: number; materials: boolean; windows: boolean }>();
+    refs.forEach((ref, index) => {
+      if (!ref) return;
+      const look = {
+        paintSaturation: ref.paintSaturation ?? 1,
+        materials: this.hasMaterialsPage(index),
+        windows: this.hasWindowsPage(index),
+      };
+      looks.set(`${look.paintSaturation}|${look.materials}|${look.windows}`, look);
+    });
+    return [...looks.values()];
+  }
+
   /** Whether the page has an HD atlas that has not failed to load. */
   hasHdPage(index: number): boolean {
     const refs = (this.library as TypeLibrary & { spriteAtlasesHd?: (HdAtlasRef | null)[] }).spriteAtlasesHd;

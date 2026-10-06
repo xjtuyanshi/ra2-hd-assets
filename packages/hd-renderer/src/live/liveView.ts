@@ -3,11 +3,13 @@ import {
   Color,
   DataTexture,
   Group,
+  LinearFilter,
   Mesh,
   MeshStandardNodeMaterial,
   NearestFilter,
   NoColorSpace,
   RedFormat,
+  SRGBColorSpace,
   type Texture,
   UnsignedByteType,
   Vector2,
@@ -38,7 +40,7 @@ import type { WindowBuilding } from '../ra2/nightDressing';
 import { sequenceFrame } from '../../../ra2-assets/src/art';
 import type { MapObject, VoxelModel } from '../../../ra2-assets/src/manifest';
 import type { TheaterId } from '../../../ra2-assets/src/theater';
-import { addHousePalettes, paletteFor, type Ra2Cache } from '../ra2/cache';
+import { addHousePalettes, paletteFor, type HdAtlas, type Ra2Cache } from '../ra2/cache';
 import { SpriteLayer, cardPush, isUnlitMapOverlay, objectAnchor, type SpriteInstance } from '../ra2/sprites';
 import {
   assignPainterBias,
@@ -562,6 +564,22 @@ function warmPageTexture(): DataTexture {
   texture.needsUpdate = true;
   return texture;
 }
+
+/**
+ * One texel of the kind of an HD page: filtered, like the colour art (sRGB), its house-paint mask (one channel) and
+ * the material page (linear RGBA) the loaders make (loadHdTexture, loadSpriteMaterialAtlas).
+ */
+function warmFilteredTexture(kind: 'colour' | 'mask' | 'data'): DataTexture {
+  const texture =
+    kind === 'mask'
+      ? new DataTexture(new Uint8Array(1), 1, 1, RedFormat, UnsignedByteType)
+      : new DataTexture(new Uint8Array(4), 1, 1);
+  texture.colorSpace = kind === 'colour' ? SRGBColorSpace : NoColorSpace;
+  texture.magFilter = texture.minFilter = LinearFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return texture;
+}
 const EMPTY_LAYERS: readonly LibraryAnimLayer[] = [];
 const EMPTY_IDS: readonly string[] = [];
 
@@ -759,9 +777,11 @@ export class LiveView {
   private hiddenFromSight = false;
   /** Warm-ups done in this stretch out of sight (see render): 0 none, 1 with the scene, 2 with the match's opening. */
   private warmStage = 0;
-  /** Hidden, empty layers of the shader graphs an indexed stand-in draws with (see warmStandIns). */
-  private readonly standInWarm = new Map<'page' | 'page-windows' | 'cells', SpriteLayer>();
+  /** Hidden, empty layers of the shader graphs a library page's layers draw with (see warmStandIns), by graph. */
+  private readonly standInWarm = new Map<string, SpriteLayer>();
   private standInWarmPage: DataTexture | null = null;
+  /** The one-texel pages the warm HD layers hold: colour, house-paint mask, material page. */
+  private standInWarmHd: { colour: DataTexture; mask: DataTexture; data: DataTexture } | null = null;
   /**
    * How many new kinds of art (a voxel model in a house's colours, a sprite page's layer) one frame may add to the
    * scene while the view is out of sight. Each brings shaders that are built in the frame that first draws it, 30
@@ -1111,27 +1131,34 @@ export class LiveView {
   }
 
   /**
-   * Put one hidden, empty layer of each shader graph an indexed stand-in draws with into the scene.
+   * Put one hidden, empty layer of each shader graph a library page's sprite layers draw with into the scene.
    *
    * A shown view draws a page's sprites from the page's indexed layer while its HD art loads (flushSprites; live
-   * overlay and smudge pages do the same in their own flushes). In most matches that layer is the first of its shader
-   * graph: every final layer draws HD art, and the stand-in is "the indexed page through the palette". A graph's first
-   * layer costs what sharing a graph saves every later one (ra2/sprites.ts SpriteGraph): six shader builds on the
-   * thread that presents the frames, and pipelines that are compiled off the frame (asyncPipelines.ts), during which
-   * the layer draws nothing. The stand-in exists so that a building is on screen in its first frame; it would have
-   * been missing for exactly the frames its own pipelines took. The warm frames (HdRenderer.warm) draw what is
-   * hidden, in every pass, so with these layers in the scene the stand-in graphs are built and compiled behind the
-   * loading screen, and a stand-in layer made during the match is a clone of materials that are ready.
+   * overlay and smudge pages do the same in their own flushes), and moves them to the final layer in the flush
+   * that builds it. Either layer can be the first of its shader graph (ra2/sprites.ts SpriteGraph): the stand-in
+   * almost always is ("the indexed page through the palette" where every final layer draws HD art), and a final
+   * layer is whenever the match's opening had no page of its look (HD art with or without a material page, with or
+   * without a lit-window mask; all of them when the view was shown by the deadline before any HD page was in). A
+   * graph's first layer costs what sharing a graph saves every later one: six shader builds on the thread that
+   * presents the frames, and pipelines that are compiled off the frame (asyncPipelines.ts), during which the layer
+   * draws nothing. Measured before this: conscripts not drawn for 15 presented frames when their HD page replaced
+   * the stand-in, an overlay page for 0.65 s, and in a six-player match a page's first layer of a new look two and
+   * a half minutes in, 0.2 to 0.4 s without its objects. The warm frames (HdRenderer.warm) draw what is hidden, in
+   * every pass, so with these layers in the scene every such graph is built and compiled behind the loading screen,
+   * and a layer made during the match is a clone of materials that are ready. A graph the opening builds anyway
+   * costs nothing a second time: three finds the built shader.
    *
-   * Three graphs: a library page's sprites (pageLayer with a negative key: depth-captured), the same with the
-   * lit-window mask (a night map whose mask came in before the HD art), and a live overlay or smudge page (no
-   * capture code of its own; overlay pages are registered as occluders). Called again before each warm-up: the
-   * hour, and so whether masks are wanted, is known only once the match's light is.
+   * The graphs: a library page's sprites from the indexed page (pageLayer with a negative key: depth-captured), the
+   * same with the lit-window mask (a night map), a live overlay or smudge page from the indexed page (no capture
+   * code of its own; overlay pages are registered as occluders); and for every look the library's HD pages have
+   * (LiveLibrary.hdPageLooks), the final layer of a page and of a cell page, without and with the material page,
+   * and at night with the mask. Called again before each warm-up: the hour, and so whether masks are wanted, is
+   * known only once the match's light is.
    */
   private warmStandIns(): void {
     const library = this.library;
     if (!library) return;
-    const add = (key: 'page' | 'page-windows' | 'cells', build: (page: StandInPage) => SpriteLayer): void => {
+    const add = (key: string, build: (page: StandInPage) => SpriteLayer): void => {
       if (this.standInWarm.has(key)) return;
       const texture = (this.standInWarmPage ??= warmPageTexture());
       const layer = build({ texture, width: 1, height: 1 });
@@ -1148,18 +1175,53 @@ export class LiveView {
       this.hd.terrainDepth.setCaptured(layer.unitMesh, true);
       return layer;
     };
-    // The arguments are pageLayer's for an indexed-only layer, by day and with the mask.
-    add('page', (page) => captured(new SpriteLayer(this.cache, [], 1, page, null, null, null, this.hd.terrainDepth)));
-    if (library.windows && this.hd.windowsWanted())
-      add('page-windows', (page) =>
-        captured(new SpriteLayer(this.cache, [], 1, page, null, page.texture, null, this.hd.terrainDepth)),
-      );
-    // flushSmudgePages' and flushOverlayPages' layer of a page whose HD art is still loading.
-    add('cells', (page) => {
-      const layer = new SpriteLayer(this.cache, [], 1, page, null);
+    const occluder = (layer: SpriteLayer): SpriteLayer => {
       this.registerOverlayOccluder(layer);
       return layer;
+    };
+    const depth = this.hd.terrainDepth;
+    const windowsWanted = this.hd.windowsWanted();
+    // The arguments are pageLayer's for an indexed-only layer, by day and with the mask.
+    add('page', (page) => captured(new SpriteLayer(this.cache, [], 1, page, null, null, null, depth)));
+    if (library.windows && windowsWanted)
+      add('page-windows', (page) =>
+        captured(new SpriteLayer(this.cache, [], 1, page, null, page.texture, null, depth)),
+      );
+    // flushSmudgePages' and flushOverlayPages' layer of a page whose HD art is still loading.
+    add('cells', (page) => occluder(new SpriteLayer(this.cache, [], 1, page, null)));
+    // The final layers: pageLayer's arguments for a page with its HD art, flushOverlayPages' / flushSmudgePages' for
+    // a cell page, in each state a shown view can build them (the material page and the mask may come later).
+    const looks = library.hdPageLooks();
+    if (!looks.length) return;
+    const materialsWanted = this.hd.materialsWanted();
+    const textures = (this.standInWarmHd ??= {
+      colour: warmFilteredTexture('colour'),
+      mask: warmFilteredTexture('mask'),
+      data: warmFilteredTexture('data'),
     });
+    const material = { texture: textures.data };
+    for (const paintSaturation of new Set(looks.map((look) => look.paintSaturation))) {
+      const hd: HdAtlas = { color: textures.colour, remap: textures.mask, paintSaturation };
+      const mine = looks.filter((look) => look.paintSaturation === paintSaturation);
+      const key = `hd${paintSaturation}`;
+      add(`page-${key}`, (page) => captured(new SpriteLayer(this.cache, [], 1, page, hd, null, null, depth)));
+      add(`cells-${key}`, (page) => occluder(new SpriteLayer(this.cache, [], 1, page, hd)));
+      const materials = materialsWanted && mine.some((look) => look.materials);
+      if (materials) {
+        add(`page-${key}-materials`, (page) =>
+          captured(new SpriteLayer(this.cache, [], 1, page, hd, null, material, depth)),
+        );
+        add(`cells-${key}-materials`, (page) => occluder(new SpriteLayer(this.cache, [], 1, page, hd, null, material)));
+      }
+      if (!windowsWanted || !mine.some((look) => look.windows)) continue;
+      add(`page-${key}-windows`, (page) =>
+        captured(new SpriteLayer(this.cache, [], 1, page, hd, page.texture, null, depth)),
+      );
+      if (materialsWanted && mine.some((look) => look.windows && look.materials))
+        add(`page-${key}-windows-materials`, (page) =>
+          captured(new SpriteLayer(this.cache, [], 1, page, hd, page.texture, material, depth)),
+        );
+    }
   }
 
   /**
@@ -2078,6 +2140,8 @@ export class LiveView {
     this.standInWarm.clear();
     this.standInWarmPage?.dispose();
     this.standInWarmPage = null;
+    if (this.standInWarmHd) for (const texture of Object.values(this.standInWarmHd)) texture.dispose();
+    this.standInWarmHd = null;
     for (const visual of this.visuals.values()) this.removeVisual(visual);
     this.voxelUnits.disposeAll();
     this.pageUploads.dispose();

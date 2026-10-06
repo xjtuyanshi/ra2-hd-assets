@@ -1,12 +1,21 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DataTexture, Group, type Mesh, NearestFilter, RedFormat, type Texture, UnsignedByteType } from 'three/webgpu';
+import {
+  DataTexture,
+  Group,
+  LinearFilter,
+  type Mesh,
+  NearestFilter,
+  RedFormat,
+  type Texture,
+  UnsignedByteType,
+} from 'three/webgpu';
 // @ts-expect-error r186 exposes this internal module without a matching @types/three declaration.
 import RenderObject from 'three/src/renderers/common/RenderObject.js';
 import { AtmosphereNodes } from '../src/atmosphere';
 import type { InstancedQuad } from '../src/instancedQuad';
 import { LiveView } from '../src/live/liveView';
 import { hasSlotBinder, samplingClass } from '../src/materialSlots';
-import type { Ra2Cache } from '../src/ra2/cache';
+import type { HdAtlas, Ra2Cache } from '../src/ra2/cache';
 import { MapLightGrade } from '../src/ra2/mapLighting';
 import { SpriteLayer } from '../src/ra2/sprites';
 import { TERRAIN_DEPTH_LAYER, TerrainDepth } from '../src/terrainDepth';
@@ -30,6 +39,7 @@ const passes = (layer: SpriteLayer): InstancedQuad[] => [
   layer.translucentMesh,
   ...layer.groundPasses,
 ];
+const keys = (layer: SpriteLayer): number[] => passes(layer).map(builderKey);
 
 /** An indexed library page as loadIndexedPage makes it: one channel, never filtered. */
 function indexedPage(size: number) {
@@ -44,6 +54,16 @@ function mask(): Texture {
   texture.magFilter = texture.minFilter = NearestFilter;
   return texture;
 }
+
+/** A filtered page as loadHdTexture / loadSpriteMaterialAtlas make them (the mask of an HD pair has one channel). */
+function filtered(red = false): Texture {
+  const texture = red
+    ? new DataTexture(new Uint8Array(4), 2, 2, RedFormat, UnsignedByteType)
+    : new DataTexture(new Uint8Array(16), 2, 2);
+  texture.magFilter = texture.minFilter = LinearFilter;
+  return texture;
+}
+const hdAtlas = (paintSaturation = 1): HdAtlas => ({ color: filtered(), remap: filtered(true), paintSaturation });
 
 function cache(): Ra2Cache {
   const atlas = new DataTexture(new Uint8Array(256 * 4 * 4), 256, 4);
@@ -65,24 +85,29 @@ function cache(): Ra2Cache {
   } as unknown as Ra2Cache;
 }
 
+type Look = { paintSaturation: number; materials: boolean; windows: boolean };
+
 /** The view's own warm-up and layer selection over real sprite layers; pages and masks arrive when the test says. */
-function view(night = false) {
+function view(options: { night?: boolean; materials?: boolean; looks?: Look[] } = {}) {
   const pages = new Map<number, ReturnType<typeof indexedPage>>();
+  const hd = new Map<number, HdAtlas>();
   const masks = new Map<number, Texture>();
+  const normals = new Map<number, { texture: Texture }>();
   const library = {
     windows: { pages: { '3': 'windows-3.png' }, frames: {} },
+    hdPageLooks: vi.fn(() => options.looks ?? []),
     page: vi.fn((page: number) => pages.get(page) ?? null),
-    hdPage: vi.fn(() => null),
+    hdPage: vi.fn((page: number) => hd.get(page) ?? null),
     hasHdPage: vi.fn(() => true),
     hasWindowsPage: vi.fn(() => true),
     windowsPage: vi.fn((page: number) => masks.get(page) ?? null),
     hasMaterialsPage: vi.fn(() => true),
-    materialsPage: vi.fn(() => null),
+    materialsPage: vi.fn((page: number) => normals.get(page) ?? null),
   };
   const terrainDepth = new TerrainDepth(1);
   const root = new Group();
   const live = Object.assign(Object.create(LiveView.prototype), {
-    hd: { windowsWanted: () => night, materialsWanted: () => true, terrainDepth },
+    hd: { windowsWanted: () => !!options.night, materialsWanted: () => options.materials !== false, terrainDepth },
     library,
     cache: cache(),
     root,
@@ -90,6 +115,7 @@ function view(night = false) {
     pageLayers: new Map(),
     standInWarm: new Map(),
     standInWarmPage: null,
+    standInWarmHd: null,
     hiddenFromSight: false,
     newArt: 0,
     newArtPerFrame: 1,
@@ -101,8 +127,11 @@ function view(night = false) {
     standInWarm: Map<string, SpriteLayer>;
     cache: Ra2Cache;
   };
-  return { live, library, pages, masks, root, terrainDepth };
+  return { live, library, pages, hd, masks, normals, root, terrainDepth };
 }
+
+const PLAIN: Look = { paintSaturation: 1, materials: false, windows: false };
+const WITH_MATERIALS: Look = { paintSaturation: 1, materials: true, windows: false };
 
 describe('the indexed stand-in layers draw with shaders built behind the loading screen', () => {
   it('keeps one hidden, empty layer of each stand-in graph in the scene for the warm frames', () => {
@@ -136,8 +165,8 @@ describe('the indexed stand-in layers draw with shaders built behind the loading
     const { live, pages, library } = view();
     live.warmStandIns();
     const warm = passes(live.standInWarm.get('page')!);
-    const keys = warm.map(builderKey);
-    expect(new Set(keys).size).toBe(6);
+    const warmKeys = warm.map(builderKey);
+    expect(new Set(warmKeys).size).toBe(6);
     // A building is placed: its indexed page is in, its HD art is not. The view builds the page's indexed layer.
     pages.set(3, indexedPage(4096));
     const standIn = live.pageLayer(-4);
@@ -146,7 +175,7 @@ describe('the indexed stand-in layers draw with shaders built behind the loading
     passes(standIn!).forEach((mesh, pass) => {
       // The same builder key as the warm layer's pass: three finds the built shader, and with the same shader text,
       // material state and vertex layout the compiled pipeline.
-      expect(builderKey(mesh), mesh.name).toBe(keys[pass]);
+      expect(builderKey(mesh), mesh.name).toBe(warmKeys[pass]);
       expect(mesh.material, mesh.name).not.toBe(warm[pass]!.material);
       expect(Object.keys(mesh.geometry.attributes).sort(), mesh.name).toEqual(
         Object.keys(warm[pass]!.geometry.attributes).sort(),
@@ -154,45 +183,149 @@ describe('the indexed stand-in layers draw with shaders built behind the loading
     });
     // Another page's stand-in, of another size: still the same shaders.
     pages.set(7, indexedPage(2048));
-    passes(live.pageLayer(-8)!).forEach((mesh, pass) => expect(builderKey(mesh), mesh.name).toBe(keys[pass]));
+    expect(keys(live.pageLayer(-8)!)).toEqual(warmKeys);
   });
 
   it("builds the stand-in of a live overlay or smudge page with the warm cell layer's shaders", () => {
     const { live } = view();
     live.warmStandIns();
-    const keys = passes(live.standInWarm.get('cells')!).map(builderKey);
+    const warmKeys = keys(live.standInWarm.get('cells')!);
     // flushSmudgePages / flushOverlayPages: the page's indexed atlas, no HD art yet, no capture code of its own.
     const smudges = new SpriteLayer(live.cache, [], 64, indexedPage(1024), null);
     const overlays = new SpriteLayer(live.cache, [], 512, indexedPage(4096), null, null, null);
-    for (const layer of [smudges, overlays])
-      passes(layer).forEach((mesh, pass) => expect(builderKey(mesh), mesh.name).toBe(keys[pass]));
+    for (const layer of [smudges, overlays]) expect(keys(layer)).toEqual(warmKeys);
     // Not the page graph: a page layer carries a capture code per instance.
-    expect(keys[0]).not.toBe(builderKey(live.standInWarm.get('page')!.mesh));
+    expect(warmKeys[0]).not.toBe(builderKey(live.standInWarm.get('page')!.mesh));
   });
 
   it('warms the lit-window variant as well once the hour wants the masks', () => {
-    const night = view(true);
+    const night = view({ night: true });
     night.live.warmStandIns();
     expect([...night.live.standInWarm.keys()]).toEqual(['page', 'page-windows', 'cells']);
-    const keys = passes(night.live.standInWarm.get('page-windows')!).map(builderKey);
+    const lit = keys(night.live.standInWarm.get('page-windows')!);
     // A night map: the page's stand-in is first built without its mask (a shown view does not wait for it) ...
     night.pages.set(3, indexedPage(4096));
-    const plain = passes(night.live.standInWarm.get('page')!).map(builderKey);
-    passes(night.live.pageLayer(-4)!).forEach((mesh, pass) => expect(builderKey(mesh), mesh.name).toBe(plain[pass]));
+    const plain = keys(night.live.standInWarm.get('page')!);
+    expect(keys(night.live.pageLayer(-4)!)).toEqual(plain);
     // ... and rebuilt with it when the mask is in before the HD art: the other warm graph.
     night.masks.set(3, mask());
-    const lit = night.live.pageLayer(-4)!;
-    passes(lit).forEach((mesh, pass) => expect(builderKey(mesh), mesh.name).toBe(keys[pass]));
-    expect(keys[0]).not.toBe(plain[0]);
+    expect(keys(night.live.pageLayer(-4)!)).toEqual(lit);
+    expect(lit[0]).not.toBe(plain[0]);
   });
 
   it('gives the warm layers up with the view', () => {
-    const { live, root, terrainDepth } = view();
+    const { live, root, terrainDepth } = view({ looks: [WITH_MATERIALS] });
     live.warmStandIns();
     const layers = [...live.standInWarm.values()];
+    expect(layers).toHaveLength(6);
     for (const layer of layers) live.disposeOverlayLayer(layer);
     expect(root.children).toHaveLength(0);
     for (const layer of layers) expect(layer.mesh.layers.isEnabled(TERRAIN_DEPTH_LAYER)).toBe(false);
     terrainDepth.dispose();
+  });
+});
+
+describe('the final layers of a library page draw with shaders built behind the loading screen', () => {
+  it('keeps a hidden layer for every look the HD pages of the library can have', () => {
+    // Some pages have a material page and some do not (the stock libraries: 22 to 24 pages with, 6 to 9 without).
+    const day = view({ looks: [WITH_MATERIALS, PLAIN] });
+    day.live.warmStandIns();
+    day.live.warmStandIns();
+    expect([...day.live.standInWarm.keys()]).toEqual([
+      'page',
+      'cells',
+      'page-hd1',
+      'cells-hd1',
+      'page-hd1-materials',
+      'cells-hd1-materials',
+    ]);
+    for (const layer of day.live.standInWarm.values()) {
+      expect(layer.mesh.visible).toBe(false);
+      for (const mesh of passes(layer)) expect(mesh.instances, mesh.name).toBe(0);
+    }
+    // A look that does not want material pages (faithful) builds none of their shaders.
+    const faithful = view({ looks: [WITH_MATERIALS], materials: false });
+    faithful.live.warmStandIns();
+    expect([...faithful.live.standInWarm.keys()]).toEqual(['page', 'cells', 'page-hd1', 'cells-hd1']);
+    // A library without HD art has only the stand-in graphs, which are then the final ones.
+    const indexedOnly = view();
+    indexedOnly.live.warmStandIns();
+    expect([...indexedOnly.live.standInWarm.keys()]).toEqual(['page', 'cells']);
+    // Another house-paint saturation is another shader.
+    const muted = view({ looks: [PLAIN, { ...PLAIN, paintSaturation: 0.7 }], materials: false });
+    muted.live.warmStandIns();
+    expect([...muted.live.standInWarm.keys()]).toEqual([
+      'page',
+      'cells',
+      'page-hd1',
+      'cells-hd1',
+      'page-hd0.7',
+      'cells-hd0.7',
+    ]);
+    expect(keys(muted.live.standInWarm.get('page-hd0.7')!)).not.toEqual(keys(muted.live.standInWarm.get('page-hd1')!));
+  });
+
+  it("moves a page from its stand-in to the HD layer with the warm layer's shaders, then to the material one", () => {
+    const { live, pages, hd, normals } = view({ looks: [WITH_MATERIALS] });
+    live.warmStandIns();
+    const plain = keys(live.standInWarm.get('page-hd1')!);
+    const lit = keys(live.standInWarm.get('page-hd1-materials')!);
+    expect(new Set([...plain, ...lit]).size).toBe(12);
+    pages.set(3, indexedPage(4096));
+    // The HD art arrives after the view was shown, its material page later still: the layer is built without the
+    // material page first (a shown view does not wait for it) and once more with it. Both are warm graphs.
+    hd.set(3, hdAtlas());
+    const first = live.pageLayer(3)!;
+    expect(keys(first)).toEqual(plain);
+    normals.set(3, { texture: filtered() });
+    const second = live.pageLayer(3)!;
+    expect(second).not.toBe(first);
+    expect(keys(second)).toEqual(lit);
+    // Their vertex layout is the warm layer's too (the capture code is one more scalar per instance).
+    passes(second).forEach((mesh, pass) =>
+      expect(Object.keys(mesh.geometry.attributes).sort(), mesh.name).toEqual(
+        Object.keys(passes(live.standInWarm.get('page-hd1-materials')!)[pass]!.geometry.attributes).sort(),
+      ),
+    );
+  });
+
+  it("builds the HD layer of an overlay or smudge page with the warm cell layers' shaders", () => {
+    const { live } = view({ looks: [WITH_MATERIALS] });
+    live.warmStandIns();
+    // flushSmudgePages: atlas + HD art; flushOverlayPages: the same, and with the material page once it is in.
+    const smudges = new SpriteLayer(live.cache, [], 64, indexedPage(1024), hdAtlas());
+    const overlays = new SpriteLayer(live.cache, [], 512, indexedPage(4096), hdAtlas(), null, null);
+    const shaded = new SpriteLayer(live.cache, [], 512, indexedPage(4096), hdAtlas(), null, { texture: filtered() });
+    expect(keys(smudges)).toEqual(keys(live.standInWarm.get('cells-hd1')!));
+    expect(keys(overlays)).toEqual(keys(live.standInWarm.get('cells-hd1')!));
+    expect(keys(shaded)).toEqual(keys(live.standInWarm.get('cells-hd1-materials')!));
+    for (const key of ['cells-hd1', 'cells-hd1-materials'])
+      expect(live.standInWarm.get(key)!.mesh.layers.isEnabled(TERRAIN_DEPTH_LAYER)).toBe(true);
+  });
+
+  it('adds the lit-window looks at night, for the pages that have a mask', () => {
+    const looks = [{ ...WITH_MATERIALS, windows: true }, PLAIN];
+    const night = view({ night: true, looks });
+    night.live.warmStandIns();
+    expect([...night.live.standInWarm.keys()]).toEqual([
+      'page',
+      'page-windows',
+      'cells',
+      'page-hd1',
+      'cells-hd1',
+      'page-hd1-materials',
+      'cells-hd1-materials',
+      'page-hd1-windows',
+      'page-hd1-windows-materials',
+    ]);
+    night.pages.set(3, indexedPage(4096));
+    night.hd.set(3, hdAtlas());
+    night.masks.set(3, mask());
+    night.normals.set(3, { texture: filtered() });
+    expect(keys(night.live.pageLayer(3)!)).toEqual(keys(night.live.standInWarm.get('page-hd1-windows-materials')!));
+    // By day the same library warms no mask shader.
+    const day = view({ looks });
+    day.live.warmStandIns();
+    expect([...day.live.standInWarm.keys()].filter((key) => key.includes('windows'))).toEqual([]);
   });
 });

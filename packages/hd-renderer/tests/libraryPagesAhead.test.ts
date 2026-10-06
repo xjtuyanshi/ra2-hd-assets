@@ -211,6 +211,13 @@ describe('atlas pages fetched ahead of their first use', () => {
     expect(second.page(2)).not.toBeNull();
   });
 
+  it('lists the looks its HD pages can have without loading one', async () => {
+    const { lib, requested } = await library();
+    // Three HD pages, none with a material page or a lit-window mask in this library: one look.
+    expect(lib.hdPageLooks()).toEqual([{ paintSaturation: 1, materials: false, windows: false }]);
+    expect(requested()).toEqual([]);
+  });
+
   it("decodes its pages inside the view's gate, and tells the gate which pages nothing waits for", async () => {
     const { lib, arrive } = await library();
     // What the view hands the library: its uploader with the decode gate attached (LiveView's constructor).

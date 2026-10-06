@@ -1262,8 +1262,10 @@ Use `?vlook=remaster&vproj=vehicles-hd` for [projected vehicle redraws](#project
   or house colours when the final layer takes over), keeps an object's last complete picture while a change of
   state waits for a page (`live/heldPicture.ts`), and loads what is announced before its object exists
   (`LiveView.prepare`: sidebar productions through the bridge, the objects the map cache lists, deploy targets).
-  The stand-in layers' shader graphs are built and compiled behind the loading screen from hidden, empty layers
-  (`LiveView.warmStandIns`), so the first stand-in of a match builds no shader and waits for no pipeline.
+  The shader graphs of the stand-in layers and of every look a page's final layer can have
+  (`LiveLibrary.hdPageLooks`) are built and compiled behind the loading screen from hidden, empty layers
+  (`LiveView.warmStandIns`), so neither the first stand-in of a match nor the layer that replaces it builds a
+  shader or waits for a pipeline.
   `diagnostics()` counts `indexedSprites`, `heldPictures` and `incompletePictures`; see "A sprite the game shows is
   never missing" in `docs/remaster/HD_BRIDGE.md`.
 - A model **file** has no stand-in: a unit whose file is still being fetched draws nothing. The files are therefore
