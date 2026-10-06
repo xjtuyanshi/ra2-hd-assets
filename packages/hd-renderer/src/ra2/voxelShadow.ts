@@ -32,6 +32,7 @@ import {
 import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { sceneLitColour } from '../lighting';
+import { bindSlots } from '../materialSlots';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { spriteLookFor } from './spriteLook';
 import { voxelReflectionColour, voxelReflectionSource } from './voxelReflectionColour';
@@ -710,6 +711,14 @@ class VoxelSurfaceMesh extends Mesh {
     this.visible = this.wanted = layer === 'shadow' && (copyIndex === 0 || this.mode.soft);
   }
 
+  /**
+   * The colour reflection reads the source part's palette and redraw through the slots of the source material's
+   * shader graph (materialSlots.ts): bind the part this twin mirrors before it is drawn.
+   */
+  override onBeforeRender = (): void => {
+    if (this.layer === 'reflection') bindSlots(this.source.material);
+  };
+
   /** Visibility the review modes and the water test ask for, applied only when it changes: hiding by other code (the
    * sandbox bake's isolation, review tooling) is never overridden every frame. */
   private wanted: boolean;
@@ -803,7 +812,13 @@ class VoxelSurfaceMesh extends Mesh {
         const geometry = this.source.geometry;
         if (!geometry.boundingBox) geometry.computeBoundingBox();
         const box = geometry.boundingBox;
-        contact.clearance = contactClearance(ground, normal, origin, this.matrixWorld, box && !box.isEmpty() ? box : null);
+        contact.clearance = contactClearance(
+          ground,
+          normal,
+          origin,
+          this.matrixWorld,
+          box && !box.isEmpty() ? box : null,
+        );
       }
       this.planeNormal.copy(normal);
       this.planeConstant = normal.dot(origin) + SHADOW_LIFT + copy.lift + contact.clearance * normal.y;

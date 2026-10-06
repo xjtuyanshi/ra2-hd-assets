@@ -13,7 +13,7 @@ import {
 } from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
-import type { ShaderNode } from '../tsl';
+import { textureSlot } from '../materialSlots';
 import {
   parseVoxelProjectionIndex,
   parseVoxelProjectionManifest,
@@ -23,11 +23,11 @@ import {
 } from './voxelProjectionMath';
 
 /**
- * One part's redraw atlas with everything the shader needs to read it. Nothing of a part is written into the shader
- * text: its numbers are uniforms and its frame table is a texture, so every part's material generates the same
- * shader code and the GPU compiles one pipeline for all of them (the Jacobian and the atlas size as literals gave
+ * One part's redraw atlas and the numbers that go with it. None of it is written into shader text: the shader reads
+ * the atlases, the frame table and the numbers from the slots of VoxelProjectionInputs, so every part draws with the
+ * same shader and the GPU compiles one pipeline for all of them. (The Jacobian and the atlas size as literals gave
  * each of the 92 library types a shader module and a render pipeline of its own, compiled when its first unit was
- * drawn, per pass).
+ * drawn, per pass.)
  */
 export interface VoxelProjectionPart {
   manifest: VoxelProjectionManifest;
@@ -39,17 +39,41 @@ export interface VoxelProjectionPart {
    * width, height), in atlas pixels. PROJECTION_TABLE_FRAMES columns whatever the manifest's frame count.
    */
   frameTable: DataTexture;
+}
+
+/**
+ * The slots a projected material's shader reads a part from (see materialSlots.ts): two atlases, the frame table and
+ * the part's numbers. One instance per shader graph; `bind` writes a part into it before an object is drawn.
+ */
+export class VoxelProjectionInputs {
+  readonly colour = textureSlot('filtered');
+  readonly paint = textureSlot('filtered');
+  readonly frameTable = textureSlot(emptyFrameTable());
   /** Rows of the bake's screen Jacobian (atlas pixels per world unit). */
-  jacobianX: ShaderNode;
-  jacobianY: ShaderNode;
+  readonly jacobianX = uniform(new Vector3());
+  readonly jacobianY = uniform(new Vector3());
   /** Atlas size in pixels. */
-  atlasSize: ShaderNode;
+  readonly atlasSize = uniform(new Vector2(1, 1));
   /** Page exposure (see VoxelProjectionManifest.exposure); 1 for pages stored without headroom. */
-  exposure: ShaderNode;
+  readonly exposure = uniform(1);
   /** Bake frames per turn, facing units (of 256) between two frames, and the same step in radians. */
-  frameCount: ShaderNode;
-  facingStep: ShaderNode;
-  frameAngle: ShaderNode;
+  readonly frameCount = uniform(16);
+  readonly facingStep = uniform(16);
+  readonly frameAngle = uniform(Math.PI / 8);
+
+  bind(part: VoxelProjectionPart): void {
+    const { manifest, spec } = part;
+    this.colour.value = part.colour;
+    this.paint.value = part.paint;
+    this.frameTable.value = part.frameTable;
+    (this.jacobianX.value as Vector3).fromArray(manifest.jacobian[0]);
+    (this.jacobianY.value as Vector3).fromArray(manifest.jacobian[1]);
+    (this.atlasSize.value as Vector2).fromArray(spec.size);
+    this.exposure.value = manifest.exposure ?? 1;
+    this.frameCount.value = manifest.frames;
+    this.facingStep.value = manifest.facingStep;
+    this.frameAngle.value = (manifest.facingStep * 2 * Math.PI) / 256;
+  }
 }
 
 export interface VoxelProjectionAsset {
@@ -65,6 +89,22 @@ export function manifestPartsFor(type: string): ProjectionPartName[] {
 /** Columns of a frame table: the largest frame count a manifest may have. */
 export const PROJECTION_TABLE_FRAMES = 32;
 
+function frameTableTexture(data: Float32Array): DataTexture {
+  const table = new DataTexture(data, PROJECTION_TABLE_FRAMES, 2, RGBAFormat, FloatType);
+  table.colorSpace = NoColorSpace;
+  table.magFilter = table.minFilter = NearestFilter;
+  table.generateMipmaps = false;
+  table.flipY = false;
+  table.needsUpdate = true;
+  return table;
+}
+
+/** What the frame-table slot holds before the first part is bound: the same kind of texture, all zeros. */
+let noFrames: DataTexture | null = null;
+function emptyFrameTable(): DataTexture {
+  return (noFrames ??= frameTableTexture(new Float32Array(PROJECTION_TABLE_FRAMES * 2 * 4)));
+}
+
 /** The frame table of a part as float texels (see VoxelProjectionPart.frameTable). */
 export function projectionFrameTable(spec: ProjectionPartManifest): DataTexture {
   const data = new Float32Array(PROJECTION_TABLE_FRAMES * 2 * 4);
@@ -73,13 +113,7 @@ export function projectionFrameTable(spec: ProjectionPartManifest): DataTexture 
     data.set(frame.pivot, k * 4);
     data.set(frame.rect, (PROJECTION_TABLE_FRAMES + k) * 4);
   });
-  const table = new DataTexture(data, PROJECTION_TABLE_FRAMES, 2, RGBAFormat, FloatType);
-  table.colorSpace = NoColorSpace;
-  table.magFilter = table.minFilter = NearestFilter;
-  table.generateMipmaps = false;
-  table.flipY = false;
-  table.needsUpdate = true;
-  return table;
+  return frameTableTexture(data);
 }
 
 /** Frame tables are texel loads, so only the two colour and two paint atlas reads cost filtered texture samples. */
@@ -91,20 +125,7 @@ export function createVoxelProjectionPart(
 ): VoxelProjectionPart {
   const spec = manifest.parts[name];
   if (!spec) throw new Error(`Missing projection part: ${name}`);
-  return {
-    manifest,
-    spec,
-    colour,
-    paint,
-    frameTable: projectionFrameTable(spec),
-    jacobianX: uniform(new Vector3(...manifest.jacobian[0])),
-    jacobianY: uniform(new Vector3(...manifest.jacobian[1])),
-    atlasSize: uniform(new Vector2(...spec.size)),
-    exposure: uniform(manifest.exposure ?? 1),
-    frameCount: uniform(manifest.frames),
-    facingStep: uniform(manifest.facingStep),
-    frameAngle: uniform((manifest.facingStep * 2 * Math.PI) / 256),
-  };
+  return { manifest, spec, colour, paint, frameTable: projectionFrameTable(spec) };
 }
 
 /** Object light level of the XMP29U2 noon bakes (see VoxelProjectionState.levelRef). */

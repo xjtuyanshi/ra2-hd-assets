@@ -17,6 +17,7 @@ import {
 } from 'three/webgpu';
 import { lights, positionGeometry, uniform, vec3 } from 'three/tsl';
 import { AtmosphereNodes } from '../src/atmosphere';
+import { bindSlots, hasSlotBinder } from '../src/materialSlots';
 import {
   facingFromMatrix,
   parseVoxelProjectionIndex,
@@ -28,6 +29,7 @@ import {
 import {
   createVoxelProjectionPart,
   PROJECTION_TABLE_FRAMES,
+  VoxelProjectionInputs,
   manifestPartsFor,
   projectionParts,
   voxelProjectionFor,
@@ -312,10 +314,12 @@ describe('projected materials and shader compilation', () => {
     builder.scene = new Scene();
     builder.camera = new PerspectiveCamera();
     builder.lightsNode = lights([new DirectionalLight(), new HemisphereLight()]);
+    // What the renderer does before it draws the mesh (Object3D.onBeforeRender): the part's atlases are in the slots.
+    bindSlots(material);
     builder.build();
     expect(builder.fragmentShader).not.toMatch(/\b(?:NaN|undefined)\b/);
     expect(builder.fragmentShader).toMatch(/atan/);
-    // Uniform frame tables do not consume texture samples; each atlas must be read exactly twice.
+    // Frame tables are texel loads of their own texture; each atlas must be read exactly twice.
     for (const atlas of [body.colour, body.paint]) {
       const entry = builder.uniforms.fragment.find((u) => (u.node as unknown as { value: unknown }).value === atlas);
       expect(entry).toBeDefined();
@@ -349,6 +353,7 @@ describe('projected materials and shader compilation', () => {
       setAttribute() {},
     };
     const build = (object: Mesh) => {
+      bindSlots(material);
       const renderer = new WebGPURenderer({ canvas: canvas as unknown as HTMLCanvasElement, forceWebGL });
       vi.spyOn(renderer, 'hasFeature').mockReturnValue(false);
       const builder = renderer.backend.createNodeBuilder(object, renderer);
@@ -363,21 +368,22 @@ describe('projected materials and shader compilation', () => {
     return out;
   };
 
-  it('keeps the page exposure in a uniform: 1 for pages stored without headroom', () => {
+  it('keeps the page exposure in a slot: 1 for pages stored without headroom', () => {
     const exposed = shaders({ ...manifest(), exposure: 1.625 });
     const plain = shaders(manifest());
-    expect((exposed.part.exposure as unknown as { value: number }).value).toBe(1.625);
-    expect((plain.part.exposure as unknown as { value: number }).value).toBe(1);
+    const inputs = new VoxelProjectionInputs();
+    inputs.bind(exposed.part);
+    expect(inputs.exposure.value).toBe(1.625);
+    inputs.bind(plain.part);
+    expect(inputs.exposure.value).toBe(1);
     // 1.625 is exact in binary and appears nowhere else in the projected material: the number is not shader text.
     expect(exposed.main.fragment).not.toContain('1.625');
     expect(exposed.main.fragment).toBe(plain.main.fragment);
     expect(exposed.main.fragment).not.toMatch(/\b(?:NaN|undefined)\b/);
   });
 
-  it.each([false, true])('generates one shader for every part, whatever its numbers: WebGL=%s', (forceWebGL) => {
-    // The library's 92 types each have their own Jacobian and atlas size; half of them an exposure. As shader text
-    // those gave every type its own shader module and render pipeline, compiled when its first unit was drawn.
-    const a = manifest();
+  /** A second manifest with the numbers of a real library type: another Jacobian, atlas sizes and an exposure. */
+  const otherManifest = (): VoxelProjectionManifest => {
     const part = (name: string, width: number, height: number) => ({
       colour: `X_${name}.png`,
       paint: `X_${name}_paint.png`,
@@ -389,8 +395,8 @@ describe('projected materials and shader compilation', () => {
         rect: [i * 50 + 2, 3, 44, 97] as [number, number, number, number],
       })),
     });
-    const b: VoxelProjectionManifest = {
-      ...a,
+    return {
+      ...manifest(),
       type: 'AEGIS',
       scale: 0.7709090909090909,
       jacobian: [
@@ -400,21 +406,34 @@ describe('projected materials and shader compilation', () => {
       exposure: 1.6,
       parts: { body: part('body', 832, 1090), turret: part('turret', 960, 1214) },
     };
-    const first = shaders(a, forceWebGL);
-    const second = shaders(b, forceWebGL);
-    const turret = shaders(b, forceWebGL, true);
+  };
+
+  it.each([false, true])('generates one shader for every part, whatever its numbers: WebGL=%s', (forceWebGL) => {
+    // The library's 92 types each have their own Jacobian and atlas size; two thirds an exposure. As shader text
+    // those gave every type its own shader module and render pipeline, compiled when its first unit was drawn.
+    const first = shaders(manifest(), forceWebGL);
+    const second = shaders(otherManifest(), forceWebGL);
+    const turret = shaders(otherManifest(), forceWebGL, true);
     for (const pass of ['main', 'reflection'] as const) {
       expect(second[pass].vertex).toBe(first[pass].vertex);
       expect(second[pass].fragment).toBe(first[pass].fragment);
       expect(turret[pass].fragment).toBe(first[pass].fragment);
     }
-    // The numbers are where the shader reads them from.
-    const value = <T>(node: unknown) => (node as { value: T }).value;
-    expect(value<Vector3>(second.part.jacobianX).toArray()).toEqual([92.5090909090909, 0, -92.5090909090909]);
-    expect(value<{ x: number; y: number }>(second.part.atlasSize)).toMatchObject({ x: 832, y: 1090 });
-    expect(value<number>(second.part.frameCount)).toBe(16);
-    expect(value<number>(second.part.facingStep)).toBe(16);
-    expect(value<number>(second.part.frameAngle)).toBeCloseTo(Math.PI / 8, 12);
+    // The numbers are where the shader reads them from once the part is bound.
+    const inputs = new VoxelProjectionInputs();
+    inputs.bind(second.part);
+    expect((inputs.jacobianX.value as Vector3).toArray()).toEqual([92.5090909090909, 0, -92.5090909090909]);
+    expect((inputs.jacobianY.value as Vector3).toArray()).toEqual([
+      46.25454545454545, -113.30003112727272, 46.25454545454545,
+    ]);
+    expect(inputs.atlasSize.value).toMatchObject({ x: 832, y: 1090 });
+    expect(inputs.exposure.value).toBe(1.6);
+    expect(inputs.frameCount.value).toBe(16);
+    expect(inputs.facingStep.value).toBe(16);
+    expect(inputs.frameAngle.value).toBeCloseTo(Math.PI / 8, 12);
+    expect(inputs.colour.value).toBe(second.part.colour);
+    expect(inputs.paint.value).toBe(second.part.paint);
+    expect(inputs.frameTable.value).toBe(second.part.frameTable);
     const table = second.part.frameTable.image as unknown as { data: Float32Array; width: number; height: number };
     expect([table.width, table.height]).toEqual([PROJECTION_TABLE_FRAMES, 2]);
     expect([...table.data.subarray(3 * 4, 3 * 4 + 2)]).toEqual([167.25, 61.5]);
@@ -427,6 +446,108 @@ describe('projected materials and shader compilation', () => {
     const house = shaders(manifest());
     const plain = shaders({ ...manifest(), house: null });
     expect(plain.main.fragment).not.toBe(house.main.fragment);
+  });
+
+  it('draws every palette and every part with clones of one shader graph, each bound to its own data', () => {
+    const nodes = new AtmosphereNodes();
+    const texture = () => nodes.own(new DataTexture(new Uint8Array(4), 1, 1));
+    const a = createVoxelProjectionPart(manifest(), 'body', texture(), texture());
+    const b = createVoxelProjectionPart(otherManifest(), 'turret', texture(), texture());
+    const red = new Uint8Array(768).fill(1);
+    const blue = new Uint8Array(768).fill(2);
+    const materials = [
+      voxelProjectedMaterialFor(red, a, nodes),
+      voxelProjectedMaterialFor(blue, a, nodes),
+      voxelProjectedMaterialFor(red, b, nodes),
+    ];
+    // three keys a built shader by the material's node graph (customProgramCacheKey: the node instances) and its
+    // state: clones of one prototype share both, so a new palette or part builds no shader and no pipeline.
+    const key = (material: (typeof materials)[number]) => [
+      material.customProgramCacheKey(),
+      material.transparent,
+      material.depthWrite,
+      material.side,
+      material.name,
+    ];
+    for (const material of materials.slice(1)) {
+      expect(material).not.toBe(materials[0]);
+      expect(key(material)).toEqual(key(materials[0]!));
+      expect(material.colorNode).toBe(materials[0]!.colorNode);
+      expect(material.emissiveNode).toBe(materials[0]!.emissiveNode);
+    }
+    expect(materials.every(hasSlotBinder)).toBe(true);
+    // The plain palette material and the remaster material are graphs of their own, shared the same way.
+    for (const make of [voxelMaterialFor, voxelPbrMaterialFor]) {
+      const first = make(red, nodes);
+      const second = make(blue, nodes);
+      expect(second).not.toBe(first);
+      expect(key(second)).toEqual(key(first));
+      expect(key(first)[0]).not.toBe(key(materials[0]!)[0]);
+    }
+    // Binding is what tells the objects apart: build the shader once and watch the slots it reads.
+    const parts = buildVoxelGeometry(model, null, nodes);
+    const unit = instantiateVoxel([{ ...parts[0]!, material: materials[0]! }], materials[0]!, nodes);
+    const mesh = unit.root.partMeshes[0]!;
+    const canvas = {
+      width: 64,
+      height: 64,
+      style: {},
+      addEventListener() {},
+      removeEventListener() {},
+      setAttribute() {},
+    };
+    const renderer = new WebGPURenderer({ canvas: canvas as unknown as HTMLCanvasElement });
+    vi.spyOn(renderer, 'hasFeature').mockReturnValue(false);
+    const builder = renderer.backend.createNodeBuilder(mesh, renderer);
+    builder.scene = new Scene();
+    builder.camera = new PerspectiveCamera();
+    builder.lightsNode = lights([new DirectionalLight(), new HemisphereLight()]);
+    const draw = (material: (typeof materials)[number]) =>
+      // The renderer calls the mesh's onBeforeRender with the material it is about to draw.
+      (mesh.onBeforeRender as unknown as (...args: unknown[]) => void).call(mesh, null, null, null, null, material);
+    draw(materials[0]!);
+    builder.build();
+    const textures = () =>
+      builder.uniforms.fragment
+        .map((entry) => (entry.node as unknown as { value: unknown }).value)
+        .filter((value) => (value as { isTexture?: boolean })?.isTexture);
+    expect(textures()).toEqual(expect.arrayContaining([a.colour, a.paint, a.frameTable]));
+    const lookups = (list: unknown[]) =>
+      list.filter((value) => (value as DataTexture).isDataTexture && (value as DataTexture).image.width === 256);
+    const redLookup = lookups(textures());
+    expect(redLookup).toHaveLength(1);
+    draw(materials[2]!);
+    expect(textures()).toEqual(expect.arrayContaining([b.colour, b.paint, b.frameTable]));
+    expect(textures()).not.toContain(a.colour);
+    expect(lookups(textures())).toEqual(redLookup);
+    draw(materials[1]!);
+    expect(textures()).toEqual(expect.arrayContaining([a.colour, a.paint, a.frameTable]));
+    expect(lookups(textures())).toHaveLength(1);
+    expect(lookups(textures())).not.toEqual(redLookup);
+    // A unit's translucent and native-depth variants are clones of its material: same graph, same data.
+    updateVoxelNativeDepth(unit, unit.root.position);
+    unit.root.setOpacity(0.5);
+    const variant = mesh.material as (typeof materials)[number];
+    expect(variant).not.toBe(materials[0]);
+    expect(variant.colorNode).toBe(materials[0]!.colorNode);
+    draw(materials[2]!);
+    draw(variant);
+    expect(textures()).toEqual(expect.arrayContaining([a.colour, a.paint, a.frameTable]));
+    // The water twin mirrors its source part: it binds that part's data, and its material is one for all parts.
+    const twin = unit.root.children.find((o) => o instanceof Mesh && o.name === 'voxel-reflection') as Mesh;
+    const other = instantiateVoxel([{ ...parts[0]!, material: materials[2]! }], materials[2]!, nodes);
+    // Units give their materials the depth node; it is the same node, so the clones still share their graph.
+    expect(materials[2]!.depthNode).toBeTruthy();
+    expect(materials[2]!.depthNode).toBe(materials[0]!.depthNode);
+    expect(key(materials[2]!)).toEqual(key(materials[0]!));
+    const otherTwin = other.root.children.find((o) => o instanceof Mesh && o.name === 'voxel-reflection') as Mesh;
+    expect(otherTwin.material).toBe(twin.material);
+    (otherTwin.onBeforeRender as unknown as () => void)();
+    expect(textures()).toEqual(expect.arrayContaining([b.colour, b.paint, b.frameTable]));
+    (twin.onBeforeRender as unknown as () => void)();
+    expect(textures()).toEqual(expect.arrayContaining([a.colour, a.paint, a.frameTable]));
+    unit.root.disposeOpacityMaterials();
+    nodes.dispose();
   });
 });
 
@@ -482,6 +603,8 @@ describe('voxel reflection source colour', () => {
     if (pass !== 'physical') expect(current).not.toBe(source);
     const material = nodes.own(new MeshBasicNodeMaterial());
     material.colorNode = voxelReflectionColour(current, original);
+    // The water twin binds the part it mirrors before it is drawn (VoxelSurfaceMesh.onBeforeRender).
+    bindSlots(current);
     // Reflection ripple is allowed to change positionLocal. Atlas coordinates must still read positionGeometry.
     material.positionNode = positionGeometry.add(vec3(0.1, 0, -0.1));
     const mesh = new Mesh(geometry, material);

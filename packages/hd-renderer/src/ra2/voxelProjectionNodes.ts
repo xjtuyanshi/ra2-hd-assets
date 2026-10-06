@@ -23,7 +23,7 @@ import {
   vec4,
 } from 'three/tsl';
 import type { ShaderNode } from '../tsl';
-import type { VoxelProjectionPart, VoxelProjectionState } from './voxelProjection';
+import type { VoxelProjectionInputs, VoxelProjectionState } from './voxelProjection';
 import { highlightExponent, type SpriteLookState } from './spriteLook';
 
 /** Upright source coordinates for a projected twin whose draw matrix has been flattened or mirrored. */
@@ -33,9 +33,14 @@ interface ProjectionBasis {
   normal: ShaderNode;
 }
 
-/** Exactly four atlas samples, independent of instance count. Positions and yaw follow the complete mesh matrix. */
+/**
+ * Exactly four atlas samples, independent of instance count. Positions and yaw follow the complete mesh matrix.
+ * `part` is the slot set the drawn object's part is bound to; `house` (a part with house paint or without) is the
+ * only thing about a part that changes the shader.
+ */
 export function projectedVoxelColour(
-  part: VoxelProjectionPart,
+  part: VoxelProjectionInputs,
+  house: boolean,
   state: VoxelProjectionState,
   rawPalette: (index: ShaderNode) => ShaderNode,
   referenceLight: ShaderNode,
@@ -43,7 +48,6 @@ export function projectedVoxelColour(
   look: SpriteLookState,
   basis?: ProjectionBasis,
 ): { colour: ShaderNode; albedo: ShaderNode; coverage: ShaderNode; paint: ShaderNode } {
-  const { manifest } = part;
   const matrix = basis?.matrix ?? modelWorldMatrix;
   const axis: ShaderNode = matrix.mul(vec4(1, 0, 0, 0)).xyz;
   const theta: ShaderNode = axis.z.negate().atan(axis.x).toVar();
@@ -101,7 +105,7 @@ export function projectedVoxelColour(
   const n: ShaderNode = basis?.normal ?? normalWorld;
   const highlightGain: ShaderNode = look.specularSize.mul(look.specularSize);
   let albedo: ShaderNode = colour;
-  if (manifest.house) {
+  if (house) {
     const ramp: ShaderNode = a.paint.gb.mul(ma).add(b.paint.gb.mul(mb)).div(max(paintWeight, 1e-5));
     const index: ShaderNode = ramp.x.mul(15).add(16);
     const lower: ShaderNode = floor(index);
@@ -169,6 +173,6 @@ export function projectedVoxelColour(
     colour: colour.mul(mix(1, ratio, state.relight.clamp())),
     albedo,
     coverage: coverage.mul(state.strength.clamp()),
-    paint: manifest.house ? mask : float(0),
+    paint: house ? mask : float(0),
   };
 }

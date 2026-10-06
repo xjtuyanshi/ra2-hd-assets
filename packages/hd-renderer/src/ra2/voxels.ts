@@ -30,6 +30,7 @@ import {
 } from './voxelNativeDepth';
 import { NATIVE_UNIT_RENDER_ORDER } from './nativeDepth';
 import { registerVoxelReflectionVariant } from './voxelReflectionColour';
+import { bindSlotsBeforeRender } from '../materialSlots';
 
 /**
  * Original VXL units, rendered as real meshes. The engine draws voxels through a pure rotation (the default voxel
@@ -748,6 +749,8 @@ export function instantiateVoxel(
   const meshes: Mesh[] = [];
   for (const part of parts) {
     const mesh = new Mesh(part.geometry, part.material ?? material);
+    // Palette and projected materials share one shader graph; this mesh's palette and part are bound per draw.
+    mesh.onBeforeRender = bindSlotsBeforeRender;
     const sourceMaterial = part.material ?? material;
     // Palette materials are shared. The node reads the currently rendered mesh's depth slot.
     if (!sourceMaterial.depthNode) sourceMaterial.depthNode = voxelNativeDepthNode();
