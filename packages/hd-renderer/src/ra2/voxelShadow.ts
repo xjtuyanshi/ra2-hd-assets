@@ -34,7 +34,7 @@ import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { sceneLitColour } from '../lighting';
 import { bindSlots } from '../materialSlots';
-import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
+import { LEVEL_HEIGHT, MIRROR_SKIP_LAYER, PIXELS_PER_CELL_EDGE } from '../world';
 import { spriteLookFor } from './spriteLook';
 import { voxelReflectionColour, voxelReflectionSource } from './voxelReflectionColour';
 
@@ -782,6 +782,8 @@ class VoxelSurfaceMesh extends Mesh {
     this.nodes = nodes;
     if (layer === 'reflection') this.updateReflectionMaterial();
     this.name = `voxel-${layer}`;
+    // Flat on the ground or on the water: no mirror shows it (one draw less per twin and water plane).
+    this.layers.set(MIRROR_SKIP_LAYER);
     this.matrixAutoUpdate = false;
     this.castShadow = false;
     this.receiveShadow = false;

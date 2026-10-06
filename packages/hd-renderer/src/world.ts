@@ -11,6 +11,16 @@ import { OrthographicCamera, Vector3 } from 'three/webgpu';
 export const LEVEL_HEIGHT = 15 / (Math.cos(Math.PI / 6) * (60 / Math.SQRT2));
 export const PIXELS_PER_CELL_EDGE = 60 / Math.SQRT2;
 
+/**
+ * Layer of objects that no mirror draws: flat things that lie on the ground or on the water itself (a unit's ground
+ * shadow, its waterline foam and reflection decal). A mirror shows what stands above its plane, seen from below;
+ * such an object could at most darken ground that the mirror hardly shows, and costs one draw per object and plane
+ * (measured with four water levels in view: most of the mirror passes' draws were the five shadow copies of every
+ * vehicle). An object opts out with `object.layers.set(MIRROR_SKIP_LAYER)`. The camera that draws the scene itself
+ * must enable the layer (IsoCamera below does); the cameras of the mirror tiles (mirrorAtlas.ts) have it disabled.
+ */
+export const MIRROR_SKIP_LAYER = 30;
+
 export function cellToWorld(x: number, y: number, z: number, out = new Vector3()): Vector3 {
   return out.set(x, z * LEVEL_HEIGHT, y);
 }
@@ -24,6 +34,8 @@ export class IsoCamera {
 
   constructor() {
     this.camera = new OrthographicCamera(-1, 1, 1, -1, 0.1, 400);
+    // The scene's own camera also draws what mirrors leave out (see MIRROR_SKIP_LAYER).
+    this.camera.layers.enable(MIRROR_SKIP_LAYER);
     const pitch = Math.PI / 6;
     // RA2 screens show the map's +X axis running down-right and +Y down-left, so screen-down is +x +y (world +x +z):
     // the camera sits on that side of the target and looks back towards -x -z.

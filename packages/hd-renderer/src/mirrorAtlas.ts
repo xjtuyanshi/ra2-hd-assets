@@ -1,3 +1,4 @@
+import { MIRROR_SKIP_LAYER } from './world';
 import {
   Box3,
   DepthTexture,
@@ -214,6 +215,7 @@ export class MirrorAtlasTile implements MirrorSource {
         let virtual = this.cameras.get(camera);
         if (!virtual) {
           virtual = camera.clone();
+          virtual.layers.disable(MIRROR_SKIP_LAYER);
           this.cameras.set(camera, virtual);
         }
         return virtual;
