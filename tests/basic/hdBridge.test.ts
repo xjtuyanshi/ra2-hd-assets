@@ -1405,10 +1405,13 @@ describe('HD bridge frame-time safeguard', () => {
     await advance(30, 185);
     expect(view.hd.quality).toBe(2);
     expect(harness.quality).toHaveBeenLastCalledWith(2, 4);
+    // (A steady 18.2 ms, 55 frames a second, is over budget too: see FRAME_BUDGET_MARGIN.)
+    await advance(18.2, 185);
+    expect(view.hd.quality).toBe(3);
     // A pause of the page (a dialog, another tab) is not load.
     await advance(4000);
     await advance(30, 80);
-    expect(view.hd.quality).toBe(2);
+    expect(view.hd.quality).toBe(3);
     // Another match on the map: out of sight again, at full quality, and the host hears that no HD view is shown
     // until this one is.
     harness.quality.mockClear();

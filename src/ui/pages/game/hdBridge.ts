@@ -85,6 +85,12 @@ export interface HdBridgeHost {
  * (QualityGovernor). `?hd-governor=0` keeps every pass whatever the frame rate.
  */
 const FRAME_BUDGET_MS = 1000 / 60;
+/**
+ * How far over the budget the median frame of a window may be before the window counts as over it. A browser does
+ * not always pace a slow view in whole refresh intervals: a view short of time was measured presenting a steady 18.1
+ * to 18.4 ms (55 frames a second), which a wide margin took for holding 60. On budget the median is 16.6 to 16.8 ms.
+ */
+const FRAME_BUDGET_MARGIN = 1.06;
 
 /** YR's in-game layout around the tactical view: sidebar on the right, command bar at the bottom (engine pixels). */
 const SIDEBAR_WIDTH = 168;
@@ -439,7 +445,11 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         governor =
           params.get('hd-governor') === '0'
             ? null
-            : new QualityGovernor({ tiers: view.hd.qualityTiers, budgetMs: FRAME_BUDGET_MS });
+            : new QualityGovernor({
+                tiers: view.hd.qualityTiers,
+                budgetMs: FRAME_BUDGET_MS,
+                overFactor: FRAME_BUDGET_MARGIN,
+              });
         // Out of sight until the match it is for has been drawn completely (see tick).
         view.outOfSight = true;
         // Its first frame is drawn at once, whatever it reports before it has drawn anything.
