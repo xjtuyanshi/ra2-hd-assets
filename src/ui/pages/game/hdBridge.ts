@@ -23,6 +23,7 @@ import {
   type HdShownLayout,
 } from './hdWarmStore';
 import { parseWeatherParams } from '../../../../packages/hd-renderer/src/weatherParams';
+import { QualityGovernor } from '../../../../packages/hd-renderer/src/qualityGovernor';
 import { t } from '../../shared/i18n/translate';
 
 /**
@@ -71,7 +72,19 @@ export interface HdBridgeHost {
    * original picture instead of the HD view (the map has no HD cache, or its view failed to load).
    */
   publishStatus?(text: string | null): void;
+  /**
+   * The quality tier the shown HD view draws with (0 = everything, see HdRenderer.setQualityTier) out of `tiers`, or
+   * null while the original picture is on screen. Called when it changes.
+   */
+  publishQuality?(tier: number | null, tiers: number): void;
 }
+
+/**
+ * The frame time the shown view is held to (60 presented frames a second, also on a faster display): when frames stay
+ * above it the view gives up its least visible passes tier by tier, and takes them back after a calm stretch
+ * (QualityGovernor). `?hd-governor=0` keeps every pass whatever the frame rate.
+ */
+const FRAME_BUDGET_MS = 1000 / 60;
 
 /** YR's in-game layout around the tactical view: sidebar on the right, command bar at the bottom (engine pixels). */
 const SIDEBAR_WIDTH = 168;
@@ -256,6 +269,16 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   const matchTypes = new Map<string, LiveWarmType>();
   let collectedAt = -Infinity;
   let hiddenTicks = 0;
+  /** Frame-time safeguard of the shown view (null with ?hd-governor=0 and before a view exists). */
+  let governor: QualityGovernor | null = null;
+  /** When the shown view drew its previous frame (null while it is not shown). */
+  let shownAt: number | null = null;
+  let publishedTier: number | null = null;
+  const publishTier = (tier: number | null) => {
+    if (tier === publishedTier) return;
+    publishedTier = tier;
+    host.publishQuality?.(tier, live?.hd.qualityTiers ?? 0);
+  };
   const storage = browserWarmStorage();
   /** Layout the view was last shown with (this page load or an earlier one), see `layout`. */
   let shownLayout: HdShownLayout | null = readShownLayout(storage);
@@ -398,6 +421,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
           view.hd.applySettings();
         }
         if (topEffects) view.hd.enableTopEffects();
+        // A watched view never waits for a pipeline compiler: what is new appears a few frames later instead of the
+        // whole picture standing still (?hd-pipelines=sync keeps three's own behaviour).
+        if (params.get('hd-pipelines') !== 'sync') view.hd.enableAsyncPipelines();
         return view;
       })
       .then((view) => {
@@ -410,6 +436,10 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         failed.delete(mapId);
         pushed = null;
         lastLayout = '';
+        governor =
+          params.get('hd-governor') === '0'
+            ? null
+            : new QualityGovernor({ tiers: view.hd.qualityTiers, budgetMs: FRAME_BUDGET_MS });
         // Out of sight until the match it is for has been drawn completely (see tick).
         view.outOfSight = true;
         // Its first frame is drawn at once, whatever it reports before it has drawn anything.
@@ -473,7 +503,12 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       warmed = false;
       matchTypes.clear();
       collectedAt = -Infinity;
-      if (live) live.outOfSight = true;
+      if (live) {
+        live.outOfSight = true;
+        // Another match starts with everything; what it can afford shows once it is on screen.
+        governor?.reset();
+        live.hd.setQualityTier(0);
+      }
       timeline = { ...emptyTimeline(mapId), loadAt: timeline.map === mapId ? timeline.loadAt : null };
       if (liveMap === mapId && live) timeline.readyAt = performance.now();
     }
@@ -641,8 +676,14 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (fallback && now >= fallback.until) publish(null);
     if (live && (hole || keyRect)) {
       layout();
+      // Frames of the shown view feed the safeguard: the interval between two of them is what the player sees.
+      if (governor && shownAt !== null) live.hd.setQualityTier(governor.frame(now - shownAt));
+      shownAt = now;
       live.render();
+      publishTier(live.hd.quality);
     } else if (live && preparing()) {
+      shownAt = null;
+      publishTier(null);
       // Draw out of sight: every frame while art is arriving or the match already runs, else now and then.
       const complete = live.settledFrames >= REVEAL_SETTLED_FRAMES;
       if (complete && timeline.warmAt !== null) timeline.warmSettledAt ??= now;
@@ -652,6 +693,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         live.render();
       }
       reveal(now);
+    } else {
+      shownAt = null;
+      publishTier(null);
     }
   };
   frame = requestAnimationFrame(tick);
@@ -724,6 +768,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     host.frameRenderer.setTransparentRect(null);
     live?.dispose();
     live = null;
+    governor = null;
+    publishTier(null);
     canvas.remove();
     host.screen.style.position = screenStyle.position;
     host.screen.style.zIndex = screenStyle.zIndex;
