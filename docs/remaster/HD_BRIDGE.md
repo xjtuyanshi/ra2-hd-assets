@@ -262,9 +262,13 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   mesh and projection are prepared in the local player's colours. All of it is loaded "ahead"
   (`LiveLibrary.preloadPage`): it does not count as art on its way and does not delay the view being shown, and
   the uploader copies pages that are waited for before pages loaded ahead, the smallest first, so an indexed page
-  does not queue behind the HD pages decoded before it. What still has nothing to draw from is the first frames of
-  a sprite type that nothing announced (an object the engine creates in view without a production: its indexed page
-  is then fetched, decoded and uploaded while it stands there) and an effect whose own page is not in.
+  does not queue behind the HD pages decoded before it. Cell decorations are not announced by anything (rubble, a
+  crater, a crate), so the indexed pages of the overlay types that are not walls and of every smudge type, three
+  small pages, are fetched when the view is created (`cellArtPages`). What still has nothing to draw from is the
+  first frames of a building, infantry or SHP-vehicle type that nothing announced (an object the engine creates in
+  view without a production: its indexed page is then fetched, decoded and uploaded while it stands there; keeping
+  every type page resident would close it at about 380 MB of GPU memory per theatre) and an effect whose own page
+  is not in.
 - **What the last match showed is prepared behind the loading screen.** The bridge stores the kinds of object of a
   match's first five minutes in `localStorage` (`src/ui/pages/game/hdWarmStore.ts`: rules type, engine image, colour
   scheme and whether a civilian house owns it; never positions or counts): one list per map, and for maps not

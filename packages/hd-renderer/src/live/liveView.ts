@@ -81,7 +81,7 @@ import { LiveBeams } from './beams';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
 import { BuildingLightGate, buildingLightOverlay, buildingLightSources } from './buildingLights';
 import { BuildingVisualHistory } from './buildingVisualHistory';
-import { DEPLOY_TARGETS, overlayTypePages } from './artAhead';
+import { DEPLOY_TARGETS, cellArtPages, overlayTypePages } from './artAhead';
 import { HeldPicture } from './heldPicture';
 import { PageUploader } from '../pageUpload';
 import { countCompilations } from '../compileCounter';
@@ -1072,6 +1072,18 @@ export class LiveView {
     for (const object of cache.manifest.objects)
       if (object.kind !== 'tree' && object.kind !== 'overlay' && object.kind !== 'smudge') placed.add(object.type);
     this.prepare(placed, false);
+    this.preloadCellPages();
+  }
+
+  /**
+   * Fetch the indexed pages of the cell decorations nothing announces now (see cellArtPages): the first rubble,
+   * crater or crate of a match then has its indexed page in its first frame, and a shown view draws it from that
+   * page while the HD art loads (flushOverlayPages, flushSmudgePages). Ahead of need like prepare(): silent, never
+   * waited for.
+   */
+  private preloadCellPages(): void {
+    const library = this.library;
+    if (library) for (const page of cellArtPages(library.library)) library.preloadPage(page);
   }
 
   static async create(canvas: HTMLCanvasElement, options: LiveViewOptions): Promise<LiveView> {

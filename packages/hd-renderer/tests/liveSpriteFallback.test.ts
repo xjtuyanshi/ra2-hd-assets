@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BufferGeometry, Group, InstancedMesh, MeshBasicMaterial, Texture, Vector3 } from 'three/webgpu';
 import type { LibraryType } from '../../ra2-assets/src/library';
 import type { SpriteEntry, SpriteFrame } from '../../ra2-assets/src/manifest';
-import { DEPLOY_TARGETS, overlayTypePages } from '../src/live/artAhead';
+import { DEPLOY_TARGETS, cellArtPages, overlayTypePages } from '../src/live/artAhead';
 import { LiveView, type LiveDiagnostics, type LiveObject, type LiveSnapshot } from '../src/live/liveView';
 import { SpritePool } from '../src/live/spritePool';
 import { painterObject } from '../src/ra2/painterOrder';
@@ -726,6 +726,49 @@ describe('what an object turns into', () => {
     expect(prepare).not.toHaveBeenCalled();
     view.buildVisual(unit('SMCV'), 'house0', 0);
     expect(prepare.mock.calls).toEqual([[['NACNST']]]);
+  });
+});
+
+describe('cell decorations that nothing announces', () => {
+  const library = {
+    overlays: {
+      TIB01: { sprite: 'overlay:TIB01' },
+      RUBBLE: { sprite: 'overlay:RUBBLE' },
+      NOART: { sprite: 'overlay:NOART' },
+      // A wall's art sits on a building page; the sidebar announces it.
+      NAWALL: { sprite: 'overlay:NAWALL', wall: true },
+    },
+    smudges: { CRATER01: { sprite: 'smudge:CRATER01' }, BURNT01: { sprite: 'smudge:BURNT01' } },
+    sprites: {
+      'overlay:TIB01': { frames: [frame(0, 24), frame(1, 23)], shadows: [] },
+      'overlay:RUBBLE': { frames: [frame(0, 25)], shadows: [frame(1, 25)] },
+      'smudge:CRATER01': { frames: [frame(0, 29)] },
+      'smudge:BURNT01': { frames: [frame(1, 28)] },
+      'overlay:NAWALL': { frames: [frame(0, 1)] },
+      // A building's art is not a cell decoration.
+      'building:NAPOWR': { frames: [frame(0, 0)] },
+    },
+  } as unknown as Parameters<typeof cellArtPages>[0];
+
+  it('lists every page of the overlay types that are not walls and of every smudge type, once, in page order', () => {
+    expect(cellArtPages(library)).toEqual([23, 24, 25, 28, 29]);
+    // A library extracted before overlays and smudges were added has none.
+    expect(cellArtPages({ sprites: {} } as unknown as Parameters<typeof cellArtPages>[0])).toEqual([]);
+  });
+
+  it('has its indexed pages fetched when the view is created: rubble, a crater or a crate draws in its first frame', () => {
+    const preloadPage = vi.fn(() => false);
+    const view = Object.assign(Object.create(LiveView.prototype), { library: { library, preloadPage } }) as unknown as {
+      preloadCellPages(): void;
+    };
+    view.preloadCellPages();
+    // The indexed page alone (one argument): the HD art of such a page loads when a cell first uses it.
+    expect(preloadPage.mock.calls).toEqual([[23], [24], [25], [28], [29]]);
+    // Without a type library there is nothing to fetch.
+    const bare = Object.assign(Object.create(LiveView.prototype), { library: null }) as unknown as {
+      preloadCellPages(): void;
+    };
+    expect(() => bare.preloadCellPages()).not.toThrow();
   });
 });
 
