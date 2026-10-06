@@ -144,26 +144,29 @@ describe('hard shores from tiles and the painted-waterline mask', () => {
 });
 
 describe('the look at a hard shore', () => {
-  it('sees deep water from the waterline on, and the unchanged distance on a beach and on land', () => {
-    const { depth, edge } = waterLook.HARD_SHORE;
+  it('sees deep water wherever the water covers a hard shore, and the unchanged distance on a beach and on land', () => {
+    const { depth, cover } = waterLook.HARD_SHORE;
     // The enhanced look's turquoise shallows end at 0.42 cells of depth, the classic look's at 0.9.
-    for (const painted of [edge, 0.1, 0.3, 1, 4]) {
-      expect(waterLook.hardShoreDistance(painted, 1)).toBeCloseTo(painted + depth, 12);
-      expect(waterLook.hardShoreDistance(painted, 1)).toBeGreaterThan(0.9);
+    for (const painted of [0, 0.01, 0.1, 0.3, 1, 4]) {
+      expect(waterLook.hardShoreDistance(painted, 1, 1)).toBeCloseTo(painted + depth, 12);
+      expect(waterLook.hardShoreDistance(painted, 1, 1)).toBeGreaterThan(0.9);
     }
-    // A beach (hard = 0) is untouched at any distance, and so is the land side of a hard shore: the waterline stays
-    // the mask's, to the pixel.
+    // The distance field is coarser than the mask: under the first pixels of water it can still say "land". Covered
+    // water is deep there too (it was drawn as bared sand: a yellow sliver along the rock).
+    for (const painted of [-0.05, -0.01]) expect(waterLook.hardShoreDistance(painted, 1, 1)).toBe(depth);
+    expect(waterLook.hardShoreDistance(-0.02, 1, cover)).toBe(depth);
+    // A beach (hard = 0) is untouched at any distance and coverage, and so is dry land at a hard shore: the
+    // waterline stays the mask's, to the pixel.
     for (const painted of [-3, -0.5, -0.01, 0, 0.01, 0.2, 2])
-      expect(waterLook.hardShoreDistance(painted, 0)).toBe(painted);
-    for (const painted of [-3, -0.5, -0.01, 0]) expect(waterLook.hardShoreDistance(painted, 1)).toBe(painted);
-    // Continuous across the waterline, monotonic in between.
-    let previous = 0;
-    for (let painted = 0; painted <= edge * 2; painted += edge / 20) {
-      const value = waterLook.hardShoreDistance(painted, 1);
+      for (const waterness of [0, 0.5, 1]) expect(waterLook.hardShoreDistance(painted, 0, waterness)).toBe(painted);
+    for (const painted of [-3, -0.5, -0.01, 0]) expect(waterLook.hardShoreDistance(painted, 1, 0)).toBe(painted);
+    // Monotonic in the coverage across the soft edge of the water.
+    let previous = -Infinity;
+    for (let waterness = 0; waterness <= 1.0001; waterness += 0.05) {
+      const value = waterLook.hardShoreDistance(-0.01, 1, waterness);
       expect(value).toBeGreaterThanOrEqual(previous);
       previous = value;
     }
-    expect(waterLook.hardShoreDistance(1e-6, 1)).toBeLessThan(1e-5);
   });
 
   it('drops the cliff-foot contact shading on the land beside the water and returns it inland', () => {
@@ -175,6 +178,9 @@ describe('the look at a hard shore', () => {
     expect(waterLook.hardShoreRelief((near + far) / 2, 1)).toBeCloseTo(0.5, 12);
     expect(waterLook.hardShoreRelief(-0.2, 0)).toBe(0); // A beach under a cliff keeps its shading.
     expect(waterLook.hardShoreRelief(-0.2, 0.5)).toBe(0.5);
+    // The water keeps the shading: it reads as depth under the cliff.
+    expect(waterLook.hardShoreRelief(0.3, 1, 1)).toBe(0);
+    expect(waterLook.hardShoreRelief(0, 1, 0.25)).toBe(0.75);
   });
 
   it('builds every output from its inputs', () => {
@@ -193,12 +199,10 @@ describe('the look at a hard shore', () => {
     const calm = float(0);
     const waterness = float(1);
     const out = waterLook.hardShoreInputs(painted, hard, calm, waterness);
-    for (const input of [painted, hard]) expect(inputsOf(out.shore).has(input)).toBe(true);
+    for (const input of [painted, hard, waterness]) expect(inputsOf(out.shore).has(input)).toBe(true);
     for (const input of [calm, hard]) expect(inputsOf(out.calm).has(input)).toBe(true);
     expect(inputsOf(out.beach).has(hard)).toBe(true);
     for (const input of [painted, hard, waterness]) expect(inputsOf(out.relief).has(input)).toBe(true);
-    // The waterline is not an input of where the water is: nothing here depends on, or feeds, the mask's edge.
-    expect(inputsOf(out.shore).has(waterness)).toBe(false);
   });
 });
 
@@ -214,7 +218,7 @@ afterEach(() => {
  * A strip of sea (x 0..5) meeting a cliff-foot cell (x 6) with rock behind it, with whole-map art. `painted` selects
  * a mask that follows the painted waterline (water reaches into the cliff-foot cell) and the sidecar flag.
  */
-function terrain(style: WaterStyle, painted: boolean) {
+function terrain(style: WaterStyle, painted: boolean, theater?: string) {
   waterPreset.style = style;
   const width = 10;
   const ref = { file: 'terrain.png', ...layout(width, 1) };
@@ -236,6 +240,7 @@ function terrain(style: WaterStyle, painted: boolean) {
     tile,
     mapLight: null,
     manifest: {
+      theater,
       grid: { width, height: 1 },
       tiles: [
         { terrainType: 9, rampType: 0, file: 'water01.sno', rect: [0, 0, 1, 1], anchor: [0, 0] },
@@ -332,6 +337,36 @@ describe('hard shores in the terrain material', () => {
       // Only the enhanced look has surf to calm.
       expect(reached.has(out.calm)).toBe(style === 'enhanced');
       void attributes;
+    },
+  );
+
+  it('treats every shore of a snow map as a hard one, whatever its mask: ice is not a beach', () => {
+    for (const painted of [false, true]) {
+      const { build, inputs } = terrain('enhanced', painted, 'snow');
+      expect(!!build.mesh.geometry.getAttribute('hardShore')).toBe(painted);
+      expect(inputs).toHaveBeenCalledTimes(1);
+      // The weight is the constant 1: no tile or height test can turn the look's sand beach back on.
+      const hard = inputs.mock.calls[0]![1] as unknown as { value?: number; node?: { value?: number } };
+      expect(hard.node?.value ?? hard.value).toBe(1);
+      const seen = new Set<unknown>();
+      const attributes: string[] = [];
+      const visit = (n: { getChildren(): Iterable<unknown>; _attributeName?: string }) => {
+        if (!n || seen.has(n)) return;
+        seen.add(n);
+        if (typeof n._attributeName === 'string') attributes.push(n._attributeName);
+        for (const child of n.getChildren()) visit(child as never);
+      };
+      visit(hard as never);
+      expect(attributes).toEqual([]);
+      inputs.mockClear();
+    }
+  });
+
+  it.each(['temperate', 'urban', 'newurban', 'desert', undefined])(
+    "keeps the look's beach on %s maps with the whole-cell mask",
+    (theater) => {
+      const { inputs } = terrain('enhanced', false, theater);
+      expect(inputs).not.toHaveBeenCalled();
     },
   );
 

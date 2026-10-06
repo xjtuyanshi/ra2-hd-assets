@@ -412,6 +412,14 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
 const CLIFF_WATER_DEPTH = 1.5;
 
 /**
+ * Theatres whose shore tiles are not sand. Snow's are ice: the look's beach (a sand-coloured bed, bared sand as the
+ * swash runs back, turquoise shallows) drew an orange line and a tropical glow around every ice floe, where the
+ * original paints pale cracked ice straight into dark water. Every shore of such a map is a hard one (waterLook.ts
+ * HARD_SHORE): deep water up to the painted ice, which keeps its own art.
+ */
+const BEACHLESS_THEATERS: ReadonlySet<string> = new Set(['snow']);
+
+/**
  * Contact shading at the feet of cliffs and raised ground (no sun shadow: original maps take none, see the mesh's
  * castShadow). For each ground vertex, every one of eight directions contributes its strongest rise within
  * CONTACT_REACH cells: full at CONTACT_RISE levels or more, fading with distance over CONTACT_FALLOFF cells. The mean,
@@ -815,21 +823,25 @@ function createMaterials(
     // Sheltered water within about 1.5 cells of a cliff: no surf there, so the scree the art paints at a cliff foot is
     // not outlined in foam (the enhanced look's `calm`).
     const sheltered: ShaderNode = clamp(float(1).sub(attribute('contact', 'float')).mul(12), 0, 1);
-    // A mask that follows the painted waterline (MapMaterials.waterline) already reaches the rock: no extension of
-    // the water onto land, and hard shores come from the tiles as well (hardShore.ts), because the height step is
-    // often more than a cell behind the painted foot of a cliff.
+    // A mask that follows the painted waterline (MapMaterials.waterline) already reaches the rock: the water is not
+    // extended onto land at cliff feet.
     const cliffWater: ShaderNode = map.paintedWaterline ? float(0) : nearCliff.mul(smoothstep(-0.45, -0.15, painted));
+    const deepened: ShaderNode = painted.add(cliffWater.mul(CLIFF_WATER_DEPTH));
     // Water wherever the painted mask or the distance field says so; the soft painted shore band (grey foam art) is
     // replaced by our own shoreline instead of blending with it.
-    const waterness: ShaderNode = map.paintedWaterline
-      ? smoothstep(0.3, 0.55, texture(map.waterMask, uv).r).max(smoothstep(0.0, 0.08, painted))
-      : smoothstep(0.3, 0.55, texture(map.waterMask, uv).r)
-          .max(smoothstep(0.0, 0.08, painted.add(cliffWater.mul(CLIFF_WATER_DEPTH))))
-          .max(cliffWater);
-    const waterline = map.paintedWaterline
-      ? hardShoreInputs(painted, max(attribute('hardShore', 'float'), nearCliff), sheltered, waterness)
-      : null;
-    const shore: ShaderNode = waterline ? waterline.shore : painted.add(cliffWater.mul(CLIFF_WATER_DEPTH));
+    const waterness: ShaderNode = smoothstep(0.3, 0.55, texture(map.waterMask, uv).r)
+      .max(smoothstep(0.0, 0.08, deepened))
+      .max(cliffWater);
+    // Hard shores (waterLook.ts HARD_SHORE): every shore of a theatre without sand; on a painted-waterline map the
+    // shores its tiles mark (hardShore.ts: the height step is often more than a cell behind the painted foot of a
+    // cliff) joined with the cliff feet the height step does find. Other maps keep the look's beach everywhere.
+    const hard: ShaderNode | null = BEACHLESS_THEATERS.has(cache.manifest.theater ?? '')
+      ? float(1)
+      : map.paintedWaterline
+        ? max(attribute('hardShore', 'float'), nearCliff)
+        : null;
+    const waterline = hard ? hardShoreInputs(deepened, hard, sheltered, waterness) : null;
+    const shore: ShaderNode = waterline ? waterline.shore : deepened;
     weatherLand = float(1).sub(waterness);
     let reflection: { colour: ShaderNode; coverage: ShaderNode } | undefined;
     if (map.waterBed && waterPreset.style === 'enhanced') {
