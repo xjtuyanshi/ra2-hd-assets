@@ -16,6 +16,7 @@ import type { EffectArt, ResolvedAnim } from './effectArt';
 import {
   animAlpha,
   animAlphaSmooth,
+  effectPageLoaded,
   engineAnchor,
   engineDepth,
   type EffectInstance,
@@ -649,9 +650,11 @@ export class LiveEffectsDriver {
       const hd = this.hdEnabled && this.style === 'enhanced' ? art.hdAnim(anim.type) : null;
       if (hd) {
         const hdFrame = hd.frames[index];
-        // Empty native stages stay empty, including their shadow. Unknown or failed HD pages retain native art.
+        // Empty native stages stay empty, including their shadow. Unknown or failed HD pages retain native art, and
+        // so does a page that is still loading (asking starts the load): the anim is drawn from its own art until
+        // the redrawn frames are there, instead of not at all.
         if (hdFrame === null) continue;
-        if (hdFrame && art.hdPageState(hdFrame.page) !== null) {
+        if (hdFrame && effectPageLoaded(art.hdPageState(hdFrame.page))) {
           const size = hdSize(tracked.row) * this.mergeSize(tracked, this.pushedAt);
           const rate = Math.max(1, anim.rate ?? a.rateFrames);
           const blend0 = anim.stage === undefined ? ((this.logicFrame - tracked.since) % rate) / rate : 0;

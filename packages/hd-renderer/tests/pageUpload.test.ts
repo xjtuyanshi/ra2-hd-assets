@@ -180,6 +180,58 @@ describe('atlas pages uploaded in strips', () => {
     expect(second.updated).toHaveBeenCalledTimes(1);
   });
 
+  it('takes a page that is waited for before one loaded ahead, and the smaller of two first', async () => {
+    const host = gpuHost();
+    const uploader = new PageUploader(host.renderer, 16);
+    const hd = page(8, 8);
+    const ahead = page(8, 3);
+    const indexed = page(8, 4);
+    let promoted = false;
+    const done = [
+      uploader.upload(hd.texture),
+      // Nothing waits for this one yet (asked again every time the next page is chosen).
+      uploader.upload(ahead.texture, () => !promoted),
+      uploader.upload(indexed.texture),
+    ] as Promise<void>[];
+    const order = () => host.copies.map((copy) => (copy.texture as { gpuOf: Texture }).gpuOf);
+    // The indexed page an object can already be drawn from does not queue behind the larger HD page before it.
+    uploader.step(8 * 4);
+    expect(order()).toEqual([indexed.texture]);
+    await done[2];
+    // A page whose rows are going in is finished before another is begun, whatever arrives or changes meanwhile.
+    uploader.step(8 * 2);
+    expect(order().slice(1)).toEqual([hd.texture]);
+    const late = page(8, 3);
+    done.push(uploader.upload(late.texture) as Promise<void>);
+    uploader.step(8 * 6);
+    expect(order().slice(1)).toEqual([hd.texture, hd.texture]);
+    await done[0];
+    // Now the page that is waited for; the page loaded ahead, as small and older, stays last.
+    uploader.step(8 * 3);
+    expect(order().at(-1)).toBe(late.texture);
+    await done[3];
+    expect(uploader.pending).toBe(1);
+    uploader.step(8 * 3);
+    expect(order().at(-1)).toBe(ahead.texture);
+    await done[1];
+    expect(uploader.pending).toBe(0);
+  });
+
+  it('moves a page loaded ahead in front of larger ones the moment something waits for it', async () => {
+    const host = gpuHost();
+    const uploader = new PageUploader(host.renderer, 16);
+    const large = page(8, 8);
+    const ahead = page(8, 4);
+    let wanted = false;
+    const done = [uploader.upload(large.texture), uploader.upload(ahead.texture, () => !wanted)] as Promise<void>[];
+    wanted = true;
+    uploader.step(8 * 4);
+    expect(host.copies.map((copy) => (copy.texture as { gpuOf: Texture }).gpuOf)).toEqual([ahead.texture]);
+    await done[1];
+    uploader.step(8 * 8);
+    await done[0];
+  });
+
   it('uploads small pages, flipped pages and unsupported backends whole, at once', () => {
     const host = gpuHost();
     const uploader = new PageUploader(host.renderer, 64);

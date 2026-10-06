@@ -20,6 +20,8 @@
 #   RA2_PLAY_PORT      port of the development server                    (default: 15400)
 #   RA2_PLAY_BROWSER   macOS application to open the page with           (default: Google Chrome)
 #   RA2_PLAY_OPEN=0    start the server without opening a browser
+#   RA2_PERF_LOG       file the HD page's stall recorder appends to, one JSON line per presented frame that came more
+#                      than 150 ms late (default: <main checkout>/gameres/s2x/play/perfmon/stalls.jsonl; 0 = no log)
 set -u
 # A double-clicked play.command may start without the shell profile that puts Node and pnpm on the PATH.
 PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
@@ -112,8 +114,12 @@ fi
   done
   open_page
 ) &
+# Where the page's stall recorder writes (the development server's /__perf/stalls route); outside Git like the cache.
+perf="${RA2_PERF_LOG:-$main/gameres/s2x/play/perfmon/stalls.jsonl}"
+[ "$perf" = 0 ] && perf=""
 echo "Game: $game"
 echo "HD cache: $cache"
+[ -n "$perf" ] && echo "Stall log: $perf"
 echo "Page: $url"
 echo "Keep this window open while you play; Ctrl+C stops the server."
-RA2_DEV_HTTP=1 RA2_GAME_ROOT="$game" RA2_HD_CACHE_DIR="$cache" exec node_modules/.bin/vite --port "$port" --strictPort --host localhost
+RA2_DEV_HTTP=1 RA2_GAME_ROOT="$game" RA2_HD_CACHE_DIR="$cache" RA2_PERF_LOG="$perf" exec node_modules/.bin/vite --port "$port" --strictPort --host localhost

@@ -1,5 +1,5 @@
 import type { VmShell } from '../../../adapter/vmShell';
-import type { GameRenderState } from '../../../games/renderState';
+import type { GameRenderSidebar, GameRenderState } from '../../../games/renderState';
 import {
   RENDER_PASSTHROUGH,
   RENDER_PASSTHROUGH_ALL,
@@ -7,6 +7,7 @@ import {
 } from '../../../games/renderPassthrough';
 import type { FrameRect, VmFrameRenderer } from './vmFrameRenderer';
 import type { HdUi } from './hdUi';
+import type { HdStallMonitor } from './hdStallMonitor';
 import { devicePixelBox } from './devicePixelBox';
 import type { LookPreset } from '../../../../packages/hd-renderer/src/HdRenderer';
 import type { LiveSnapshot, LiveView, LiveWarmType } from '../../../../packages/hd-renderer/src/live/liveView';
@@ -77,6 +78,11 @@ export interface HdBridgeHost {
    * null while the original picture is on screen. Called when it changes.
    */
   publishQuality?(tier: number | null, tiers: number): void;
+  /**
+   * Stalls of the current match: how many presented frames came more than 150 ms late while it ran, and the longest
+   * such gap in ms; (0, 0) when another match begins (see hdStallMonitor.ts).
+   */
+  publishStalls?(count: number, longestMs: number): void;
 }
 
 /**
@@ -208,6 +214,23 @@ export function parsePassthroughFlags(value: string | null): number {
   return flags;
 }
 
+/**
+ * Rules types the native sidebar shows as on their way: being produced (its clock runs or is on hold), queued, or
+ * finished and waiting to be placed or to leave its factory. The view loads their art now (LiveView.prepare), so it is
+ * in when the object appears seconds later; before, a building was drawn as nothing for most of a second after it was
+ * placed, until its atlas pages had loaded. Superweapons are not objects. The reader reports the cameos of the tab on
+ * screen that are inside the strip, which is where a production is started from; one started without its cameo ever
+ * being on screen is first heard of when its object appears, as before.
+ */
+export function sidebarUpcomingTypes(sidebar: GameRenderSidebar | null | undefined): string[] {
+  const types: string[] = [];
+  for (const cameo of sidebar?.cameos ?? []) {
+    if (cameo.kind === 'super' || types.includes(cameo.id)) continue;
+    if (cameo.progress !== null || cameo.ready || cameo.queued > 0) types.push(cameo.id);
+  }
+  return types;
+}
+
 /** Stops the bridge when called; `toggle` switches between the HD view and the original picture (true: HD shown). */
 export type HdBridgeControl = (() => void) & { toggle(): boolean };
 
@@ -252,6 +275,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let stopped = false;
   let enabled = true;
   let ui: HdUi | null = null;
+  let stallMonitor: HdStallMonitor | null = null;
   let uiEnabled = params.get('hd-ui') === '1';
   let latestState: GameRenderState | null = null;
   let inBattle = false;
@@ -271,6 +295,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let prematch = true;
   /** Whether the view of the current match was handed its remembered list (once per match). */
   let warmed = false;
+  /** The sidebar's upcoming types as last handed to the current view (see sidebarUpcomingTypes). */
+  let upcomingKey = '';
   /** Kinds of object of the current match, for the next one (hdWarmStore.ts), and the last frame they were read at. */
   const matchTypes = new Map<string, LiveWarmType>();
   let collectedAt = -Infinity;
@@ -313,6 +339,20 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         ui.update(latestState?.sidebar ?? null);
       })
       .catch((error) => console.warn('[HD] interface layer unavailable', error));
+  }
+  // The stall recorder and its development-server sink: like the interface layer, behind DEV so that neither the
+  // recorder nor a request to the log route exists in a production build.
+  if (import.meta.env.DEV) {
+    void import('./hdStallMonitor')
+      .then(({ startHdStallMonitor }) => {
+        if (stopped) return;
+        stallMonitor = startHdStallMonitor({
+          match: () => ({ map: stateMap, frame: stateFrame, shown: revealed && !!hole }),
+          activity: () => live?.activity() ?? null,
+          publish: (count, longestMs) => host.publishStalls?.(count, longestMs),
+        });
+      })
+      .catch((error) => console.warn('[HD] stall recorder unavailable', error));
   }
   let frame = 0;
   let lastLayout = '';
@@ -441,6 +481,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         liveMap = mapId;
         failed.delete(mapId);
         pushed = null;
+        upcomingKey = '';
         lastLayout = '';
         governor =
           params.get('hd-governor') === '0'
@@ -513,6 +554,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       warmed = false;
       matchTypes.clear();
       collectedAt = -Infinity;
+      stallMonitor?.newMatch();
       if (live) {
         live.outOfSight = true;
         // Another match starts with everything; what it can afford shows once it is on screen.
@@ -566,6 +608,11 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (!topEffects && live.hd.topEffectsEnabled) {
       topEffects = true;
       writeTopEffects(storage);
+    }
+    const upcoming = sidebarUpcomingTypes(state.sidebar);
+    if (upcoming.join() !== upcomingKey) {
+      upcomingKey = upcoming.join();
+      live.prepare(upcoming);
     }
     // The opening is read at every snapshot: the starting units arrive in steps, and some are gone within seconds
     // (an MCV that deploys at once).
@@ -681,6 +728,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (stopped) return;
     frame = requestAnimationFrame(tick);
     const now = performance.now();
+    stallMonitor?.frame(now);
     if (!polling && now - lastPollAt >= pollInterval()) poll(now);
     if (!hole && keyRect && now >= keyUntil) present();
     if (fallback && now >= fallback.until) publish(null);
@@ -741,6 +789,10 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     get live() {
       return live;
     },
+    /** Presented frames that came more than 150 ms late, oldest first (the last 500; see hdStallMonitor.ts). */
+    get stalls() {
+      return stallMonitor?.entries() ?? [];
+    },
     /** When the current match's view loaded, prepared and was shown (copy; see HdBridgeTimeline). */
     get timeline(): HdBridgeTimeline {
       return { ...timeline };
@@ -760,6 +812,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     clearFallback();
     ui?.dispose();
     ui = null;
+    stallMonitor?.dispose();
+    stallMonitor = null;
     latestState = null;
     if (passthroughRequest) void host.vm.setTacticalPassthrough(0).catch(() => undefined);
     // Pending polls, loads and passthrough replies check `stopped`; reset the rest so nothing refers to this session.

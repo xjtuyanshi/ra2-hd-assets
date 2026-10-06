@@ -99,8 +99,10 @@ describe('live object underlay', () => {
     const enhanced = objectUnderlayCard({ underlay }, art({ hd }), true, shown, toCamera)!;
     expect(enhanced.hd).toMatchObject({ frame: hdFrames[47], next: null, scale: 2, blend0: 0 });
     expect(enhanced).toMatchObject({ draw: 'flat', pass: 'ground', alpha: 1 });
-    // The page is still loading: the HD instance waits on it (the layer skips it until then).
-    expect(objectUnderlayCard({ underlay }, art({ hd, hdPage: 'loading' }), true, shown, toCamera)!.hd).toBeDefined();
+    // A redrawn page on its way leaves the engine's own frame on screen: the sparks are not skipped meanwhile.
+    const loading = objectUnderlayCard({ underlay }, art({ hd, hdPage: 'loading' }), true, shown, toCamera)!;
+    expect(loading.hd).toBeUndefined();
+    expect(loading.frame).toBeDefined();
     // A failed page or a frame the redraw does not hold keeps the native pixels.
     expect(objectUnderlayCard({ underlay }, art({ hd, hdPage: 'failed' }), true, shown, toCamera)!.hd).toBeUndefined();
     expect(

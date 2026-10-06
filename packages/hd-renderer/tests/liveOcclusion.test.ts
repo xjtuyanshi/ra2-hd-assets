@@ -136,6 +136,9 @@ function presentation() {
     overlayInstances: { instances: { pages: new Map([[0, overlayLayer.getInstances()]]) } },
     uploadedOverlays: new Map([[0, overlayLayer.getInstances()]]),
     pageLayers: new Map(),
+    indexedMeanwhile: new Map(),
+    aheadPages: new Set<number>(),
+    aheadVoxels: new Set<string>(),
     spriteBatch: new Map(),
     spritePool: new SpritePool(),
     particlePool: new SpritePool(),
@@ -468,6 +471,8 @@ describe('LiveView physical occlusion scheduling', () => {
         library: { sprites: { body: art, unit: art } },
         page: () => ({}),
         hasHdPage: () => false,
+        typePages: () => [],
+        preloadPage: () => true,
       },
     });
     Object.assign(p.effectArt, { storesOre: () => false });
@@ -581,6 +586,8 @@ describe('LiveView physical occlusion scheduling', () => {
         library: { sprites: { body: art(bodyFrame), unit: art(unitFrame) } },
         page: () => ({}),
         hasHdPage: () => false,
+        typePages: () => [],
+        preloadPage: () => true,
       },
     });
     Object.assign(p.effectArt, { storesOre: () => false });

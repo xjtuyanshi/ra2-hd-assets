@@ -39,6 +39,11 @@ export interface RuntimeToolbar {
    * the frame rate (hdBridge.ts FRAME_BUDGET_MS); null while the HD view is not on screen.
    */
   setHdQuality(tier: number | null, tiers?: number): void;
+  /**
+   * Stalls of the current match as the HD bridge's recorder counts them (presented frames more than 150 ms late) and
+   * the longest of them in ms: one line under the frame rates. A count of 0 clears the line.
+   */
+  setStalls(count: number, longestMs: number): void;
   /** Select the clock multiplier for both buttons and [ ] shortcuts: synchronize aria-pressed and notify the page. */
   pressClockRate(rate: number): void;
   destroy(): void;
@@ -91,6 +96,7 @@ export function installRuntimeToolbar(
     cheatGame: null,
     resolution: '',
     resolutionStatus: '',
+    stalls: '',
     rate: 1,
     upscaleMode: 'off',
     reshadeMode: 'off',
@@ -196,6 +202,12 @@ export function installRuntimeToolbar(
         if (tier !== null) model.hdQualityTiers = tiers;
         publish();
       }
+    },
+    setStalls(count, longestMs) {
+      const stalls = count > 0 ? t('卡顿 {0} 次，最长 {1} 秒', count, (longestMs / 1000).toFixed(1)) : '';
+      if (stalls === model.stalls) return;
+      model.stalls = stalls;
+      publish();
     },
     setGameTitle(title) {
       model.title = title;

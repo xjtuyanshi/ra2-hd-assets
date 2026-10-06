@@ -50,7 +50,7 @@ function presentation() {
     pageLayer(key: number): SpriteLayer | null;
     root: Group;
     flushOverlayPages(): void;
-    overlayLayers: Map<number, { layer: SpriteLayer; materials: boolean }>;
+    overlayLayers: Map<number, { layer: SpriteLayer; materials: boolean; indexed?: boolean }>;
     overlayInstances: { instances: { pages: Map<number, unknown[]> } };
     overlayPagesDirty: boolean;
   };
@@ -183,6 +183,70 @@ describe('live overlay page materials', () => {
     expect(p.view.overlayPagesDirty).toBe(false);
     expect(p.view.overlayLayers.get(0)!.layer).toBe(first);
     expect(SpriteLayer).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('live overlay pages whose HD art has not arrived', () => {
+  it('draws a shown page from its indexed art and rebuilds the layer once with the HD art', () => {
+    const p = presentation();
+    p.library.hdPage.mockReturnValue(null as unknown as typeof p.hd);
+    p.view.flushOverlayPages();
+    // The wall is on the map in the first frame: a layer of the indexed page alone.
+    const indexed = p.view.overlayLayers.get(0)!;
+    expect(vi.mocked(SpriteLayer).mock.calls[0]!.slice(3, 5)).toEqual([p.atlas, null]);
+    expect(indexed).toMatchObject({ materials: false, indexed: true });
+    expect(indexed.layer.setInstances).toHaveBeenCalledTimes(1);
+    expect(p.view.overlayPagesDirty).toBe(true);
+    const dispose = vi.spyOn(indexed.layer.mesh, 'dispose');
+    // While the art loads the page is asked for again; nothing is rebuilt or uploaded.
+    p.view.flushOverlayPages();
+    p.view.flushOverlayPages();
+    expect(SpriteLayer).toHaveBeenCalledTimes(1);
+    expect(indexed.layer.setInstances).toHaveBeenCalledTimes(1);
+    p.library.hdPage.mockReturnValue(p.hd);
+    p.view.flushOverlayPages();
+    const final = p.view.overlayLayers.get(0)!;
+    expect(final.layer).not.toBe(indexed.layer);
+    expect(final.indexed).toBe(false);
+    expect(vi.mocked(SpriteLayer).mock.calls[1]!.slice(3, 5)).toEqual([p.atlas, p.hd]);
+    // The same instances, handed to the new layer: the overlays do not move.
+    expect(vi.mocked(final.layer.setInstances).mock.calls[0]![0]).toBe(
+      vi.mocked(indexed.layer.setInstances).mock.calls[0]![0],
+    );
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(p.depth.setCaptured).toHaveBeenCalledWith(indexed.layer.mesh, false);
+    expect(p.view.overlayPagesDirty).toBe(false);
+    p.view.flushOverlayPages();
+    expect(SpriteLayer).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the indexed layer when the HD art fails, without asking for it on every frame', () => {
+    const p = presentation();
+    p.library.hdPage.mockReturnValue(null as unknown as typeof p.hd);
+    p.view.flushOverlayPages();
+    const indexed = p.view.overlayLayers.get(0)!;
+    // LiveLibrary.hasHdPage answers false once the art has failed.
+    p.library.hasHdPage.mockReturnValue(false);
+    p.view.flushOverlayPages();
+    expect(p.view.overlayLayers.get(0)).toBe(indexed);
+    expect(indexed.indexed).toBe(false);
+    expect(p.view.overlayPagesDirty).toBe(false);
+    expect(SpriteLayer).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the HD art out of sight, where a layer is built once', () => {
+    const p = presentation();
+    Object.assign(p.view, { outOfSight: true, newArt: 0, newArtPerFrame: Infinity, waitingArt: 0 });
+    p.library.hdPage.mockReturnValue(null as unknown as typeof p.hd);
+    p.view.flushOverlayPages();
+    p.view.flushOverlayPages();
+    expect(SpriteLayer).not.toHaveBeenCalled();
+    expect(p.view.overlayPagesDirty).toBe(true);
+    p.library.hdPage.mockReturnValue(p.hd);
+    p.view.flushOverlayPages();
+    expect(SpriteLayer).toHaveBeenCalledTimes(1);
+    expect(p.view.overlayLayers.get(0)).toMatchObject({ indexed: false });
+    expect(p.view.overlayPagesDirty).toBe(false);
   });
 });
 

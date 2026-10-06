@@ -3,8 +3,15 @@ import type { Texture } from 'three/webgpu';
 /**
  * What an atlas-page loader calls to put a decoded page on the GPU; a promise when the upload takes several frames.
  * With a `gate`, the loader decodes inside it (see PageGate), so pages that wait for their upload are bounded.
+ * `background` answers, when the gate or the uploader chooses its next page, whether nothing on screen waits for this
+ * one (a page loaded ahead of its first use): such a page lets every page that is waited for go first. The uploader
+ * gets it as the second argument; the gate is asked before a texture exists, so an upload made for one page carries
+ * the same answer as its `background` property.
  */
-export type PageUpload = ((texture: Texture) => void | Promise<void>) & { gate?: PageGate };
+export type PageUpload = ((texture: Texture, background?: () => boolean) => void | Promise<void>) & {
+  gate?: PageGate;
+  background?: () => boolean;
+};
 
 /** Decoded pixels allowed to exist at once: two of the largest atlas pages (8192 x 8192), 512 MiB of RGBA. */
 export const PAGE_GATE_PIXELS = 2 * 8192 * 8192;
@@ -18,11 +25,14 @@ export const PAGE_GATE_PIXELS = 2 * 8192 * 8192;
  * the loading screen's own work) nothing drains. Measured on a six-player start: the tab reached 8 GiB. Through the
  * gate a loader holds its turn from before the decode until the page is on the GPU and its bitmap is closed, so
  * the decoded pages in existence never exceed `capacity` pixels (one page larger than that still runs, alone).
- * Strictly first come, first served: a large page is never overtaken for ever by small ones.
+ * First come, first served among the pages that are waited for: a large page is never overtaken for ever by small
+ * ones. A page loaded ahead of its use (`background`, asked each time a turn is given, so a page something starts to
+ * wait for counts as waited for from then on, at the place it arrived) takes its turn only when no waited-for page
+ * waits: an indexed page an object on screen is drawn from must not sit behind HD pages nothing shows yet.
  */
 export class PageGate {
   private used = 0;
-  private readonly waiting: { pixels: number; start(): void }[] = [];
+  private readonly waiting: { pixels: number; background?: () => boolean; start(): void }[] = [];
 
   constructor(readonly capacity = PAGE_GATE_PIXELS) {}
 
@@ -34,12 +44,17 @@ export class PageGate {
     return this.waiting.length;
   }
 
-  /** Run `task` (decode, upload, release) when `pixels` more decoded pixels fit; resolves or rejects with it. */
-  async run<T>(pixels: number, task: () => Promise<T>): Promise<T> {
+  /**
+   * Run `task` (decode, upload, release) when `pixels` more decoded pixels fit and no task that goes before it
+   * waits; resolves or rejects with it.
+   */
+  async run<T>(pixels: number, task: () => Promise<T>, background?: () => boolean): Promise<T> {
     const size = Number.isFinite(pixels) && pixels > 0 ? pixels : 0;
-    if (this.waiting.length || (this.used > 0 && this.used + size > this.capacity))
+    // A waited-for page passes the pages loaded ahead that wait; nothing passes a waited-for page.
+    const behind = background?.() ? this.waiting.length > 0 : this.waiting.some((entry) => !entry.background?.());
+    if (behind || (this.used > 0 && this.used + size > this.capacity))
       // admit() accounts for the task before it wakes it.
-      await new Promise<void>((start) => this.waiting.push({ pixels: size, start }));
+      await new Promise<void>((start) => this.waiting.push({ pixels: size, background, start }));
     else this.used += size;
     try {
       return await task();
@@ -51,9 +66,12 @@ export class PageGate {
 
   private admit(): void {
     while (this.waiting.length) {
-      const next = this.waiting[0]!;
+      // The oldest page that is waited for, else the oldest.
+      let index = this.waiting.findIndex((entry) => !entry.background?.());
+      if (index < 0) index = 0;
+      const next = this.waiting[index]!;
       if (this.used > 0 && this.used + next.pixels > this.capacity) break;
-      this.waiting.shift();
+      this.waiting.splice(index, 1);
       this.used += next.pixels;
       next.start();
     }
@@ -81,7 +99,7 @@ export async function withDecodedPage<T>(
   const decode = async () =>
     use(await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' }));
   const gate = upload?.gate;
-  return gate ? gate.run(await pngPixels(blob), decode) : decode();
+  return gate ? gate.run(await pngPixels(blob), decode, upload.background) : decode();
 }
 
 /** The part of the renderer the uploader uses (three's Renderer, or a stand-in in tests). */
@@ -118,6 +136,7 @@ interface Job {
   height: number;
   /** Rows already copied. */
   row: number;
+  background?: () => boolean;
   resolve(): void;
   reject(error: Error): void;
 }
@@ -135,6 +154,11 @@ export const WHOLE_UPLOAD_PIXELS = 4 << 20;
  * path: sized, with its mip chain, no data), rows are copied with the same call and the same flags three uses for the
  * whole image, and the mipmaps are generated when the last row is in. A page is handed to its sprite layer only after
  * that (the loader's promise), so no frame ever samples a partly filled page.
+ *
+ * Pages do not go in the order they were decoded. The page whose rows are going in is finished; the next one is a
+ * page that is waited for before one loaded ahead of its use (`background`), and the smallest of those (the oldest
+ * among equals): a 17 M pixel indexed page that an object on screen can already be drawn from must not queue behind
+ * the 67 M pixel HD pages that happened to be decoded before it.
  *
  * `step` is called once per rendered frame by the view that owns the uploader: no timer of its own. Where the
  * backend is not three's WebGPU backend as read here (the WebGL2 fallback, tests, a later three), a page is uploaded
@@ -159,7 +183,7 @@ export class PageUploader {
    * as after `initTexture`); otherwise a promise that settles when the last strip and the mipmaps are in (onUpdate
    * runs then) or the uploader is disposed (rejected).
    */
-  upload(texture: Texture): void | Promise<void> {
+  upload(texture: Texture, background?: () => boolean): void | Promise<void> {
     if (this.disposed) throw new Error('page uploader disposed');
     const image = texture.image as { width?: number; height?: number } | null | undefined;
     const backend = this.backend();
@@ -195,19 +219,20 @@ export class PageUploader {
       return;
     }
     return new Promise<void>((resolve, reject) => {
-      this.jobs.push({ texture, image, gpu, width, height, row: 0, resolve, reject });
+      this.jobs.push({ texture, image, gpu, width, height, row: 0, resolve, reject, background });
     });
   }
 
   /**
-   * Copy up to `pixels` pixels of the waiting pages, oldest first; at least one row when anything waits. Call once per
-   * frame.
+   * Copy up to `pixels` pixels of the waiting pages (see the class comment for their order); at least one row when
+   * anything waits. Call once per frame.
    */
   step(pixels: number): void {
     const backend = this.backend();
     let budget = pixels;
     while (this.jobs.length && budget > 0) {
-      const job = this.jobs[0]!;
+      const index = this.next();
+      const job = this.jobs[index]!;
       const rows = Math.min(job.height - job.row, Math.max(1, Math.floor(budget / job.width)));
       try {
         if (!backend) throw new Error('GPU backend lost');
@@ -226,15 +251,34 @@ export class PageUploader {
         if (job.row < job.height) continue;
         if (job.texture.generateMipmaps) backend.generateMipmaps!(job.texture);
       } catch (error) {
-        this.jobs.shift();
+        this.jobs.splice(index, 1);
         job.reject(error instanceof Error ? error : new Error(String(error)));
         continue;
       }
-      this.jobs.shift();
+      this.jobs.splice(index, 1);
       // What initTexture does after an upload: the loader releases the decoded page here.
       job.texture.onUpdate?.(job.texture);
       job.resolve();
     }
+  }
+
+  /** Index of the page to copy rows of now: the one already begun, else waited-for before ahead, smallest first. */
+  private next(): number {
+    let best = 0;
+    let bestBackground = true;
+    let bestPixels = Infinity;
+    for (let i = 0; i < this.jobs.length; i++) {
+      const job = this.jobs[i]!;
+      if (job.row > 0) return i;
+      const background = job.background?.() ?? false;
+      const pixels = job.width * job.height;
+      if (background === bestBackground ? pixels < bestPixels : !background) {
+        best = i;
+        bestBackground = background;
+        bestPixels = pixels;
+      }
+    }
+    return best;
   }
 
   /** Reject what is still waiting (its loader releases the decoded page); later uploads throw. */

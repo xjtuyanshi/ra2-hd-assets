@@ -25,6 +25,20 @@ import {
 export const LIBRARY_PALETTE_PREFIX = 'lib:';
 
 /**
+ * A file that is not there (yet): being fetched for something that waits for it, being fetched 'ahead' of its first
+ * use (preloadPage, preloadVoxels: nobody's missing art yet, so it neither counts as loading nor changes `revision`
+ * when it arrives), or failed.
+ */
+type Pending = 'loading' | 'ahead' | 'failed';
+
+/** An indexed atlas page as the sprite layers take it. */
+export interface IndexedPage {
+  texture: Texture;
+  width: number;
+  height: number;
+}
+
+/**
  * The per-theater type library (packages/ra2-assets/src/library.ts): art for every building, vehicle, infantry and
  * aircraft type, so a live match can draw what players build. Atlas pages and voxel models are loaded on first use;
  * callers ask again on a later frame until they are ready.
@@ -34,18 +48,15 @@ export const LIBRARY_PALETTE_PREFIX = 'lib:';
  * in the cell layers, sees the match's types.
  */
 export class LiveLibrary {
-  private readonly pages = new Map<
-    number,
-    { texture: Texture; width: number; height: number } | 'loading' | 'failed'
-  >();
+  private readonly pages = new Map<number, IndexedPage | Pending>();
   /** Changes when asynchronous art settles; presentation can sleep while nothing has arrived. */
   revision = 0;
-  /** 'ahead': being fetched before anything asked for it (preloadVoxels); it is nobody's missing art yet. */
-  private readonly voxels = new Map<string, VoxelModel | 'loading' | 'ahead' | 'failed'>();
+  private readonly voxels = new Map<string, VoxelModel | Pending>();
   private voxelTypes?: Map<string, string>;
-  private readonly hdPages = new Map<number, HdAtlas | 'loading' | 'failed'>();
-  private readonly windowPages = new Map<number, Texture | 'loading' | 'failed'>();
-  private readonly materialPages = new Map<number, SpriteMaterialAtlas | 'loading' | 'failed'>();
+  private readonly hdPages = new Map<number, HdAtlas | Pending>();
+  private readonly windowPages = new Map<number, Texture | Pending>();
+  private readonly materialPages = new Map<number, SpriteMaterialAtlas | Pending>();
+  private readonly typePageLists = new WeakMap<LibraryType, readonly number[]>();
   private materialsDisposed = false;
   private depthTemplateDisposed = false;
   /** Uploads a freshly decoded page straight to the GPU (the view's PageUploader); see loadIndexedPage. */
@@ -133,21 +144,54 @@ export class LiveLibrary {
 
   /** Material data loads only when an enhanced look needs it. A pending/failed page keeps the existing art. */
   materialsPage(index: number): SpriteMaterialAtlas | null {
+    return this.materialsEntry(index, false);
+  }
+
+  private materialsEntry(index: number, ahead: boolean): SpriteMaterialAtlas | null {
     if (!this.hasMaterialsPage(index)) return null;
-    const entry = this.materialPages.get(index);
+    const page = this.materials!.pages[String(index)]!;
+    return this.entry(this.materialPages, index, ahead, async (upload) => {
+      const atlas = await loadSpriteMaterialAtlas(`${this.base}/${page.file}`, upload);
+      if (!this.materialsDisposed) return atlas;
+      // The view was disposed while the page was on its way: nothing keeps it.
+      atlas?.texture.dispose();
+      return null;
+    });
+  }
+
+  /**
+   * The loaded entry `index` of `entries`, or null while it is on its way (asked for now when nothing has yet) or
+   * failed. A load that only `ahead` callers have asked for stays silent (see Pending); the first caller that waits
+   * for it turns it into art on its way, and its arrival into news.
+   */
+  private entry<T extends object>(
+    entries: Map<number, T | Pending>,
+    index: number,
+    ahead: boolean,
+    load: (upload: PageUpload | undefined) => Promise<T | null>,
+  ): T | null {
+    const entry = entries.get(index);
     if (entry === undefined) {
-      this.materialPages.set(index, 'loading');
-      const page = this.materials!.pages[String(index)]!;
-      void loadSpriteMaterialAtlas(`${this.base}/${page.file}`, this.uploadPage ?? undefined).then((atlas) => {
-        if (this.materialsDisposed) {
-          atlas?.texture.dispose();
-          return;
-        }
-        this.materialPages.set(index, atlas ?? 'failed');
-        this.revision++;
-      });
+      entries.set(index, ahead ? 'ahead' : 'loading');
+      const settle = (result: T | 'failed') => {
+        const wanted = entries.get(index) === 'loading';
+        entries.set(index, result);
+        if (wanted) this.revision++;
+      };
+      const uploadPage = this.uploadPage;
+      // A page nothing waits for lets the pages that are waited for be decoded (PageGate) and reach the GPU
+      // (PageUploader) first. The wrapper keeps the view's gate: without it the loader would decode at once.
+      const background = () => entries.get(index) === 'ahead';
+      const upload: PageUpload | undefined = uploadPage
+        ? Object.assign((texture: Texture) => uploadPage(texture, background), { gate: uploadPage.gate, background })
+        : undefined;
+      load(upload).then(
+        (result) => settle(result ?? 'failed'),
+        () => settle('failed'),
+      );
       return null;
     }
+    if (entry === 'ahead' && !ahead) entries.set(index, 'loading');
     return typeof entry === 'string' ? null : entry;
   }
 
@@ -174,18 +218,13 @@ export class LiveLibrary {
 
   /** The page's lit-window mask, null while it loads or when the page has none. */
   windowsPage(index: number): Texture | null {
+    return this.windowsEntry(index, false);
+  }
+
+  private windowsEntry(index: number, ahead: boolean): Texture | null {
     const file = this.windows?.pages?.[String(index)];
     if (!file) return null;
-    const entry = this.windowPages.get(index);
-    if (entry === undefined) {
-      this.windowPages.set(index, 'loading');
-      void loadMaskTexture(`${this.base}/${file}`).then((texture) => {
-        this.windowPages.set(index, texture ?? 'failed');
-        this.revision++;
-      });
-      return null;
-    }
-    return typeof entry === 'string' ? null : entry;
+    return this.entry(this.windowPages, index, ahead, () => loadMaskTexture(`${this.base}/${file}`));
   }
 
   /** Lit window pixels of a building sprite's frame (0 when none or unknown). */
@@ -220,24 +259,85 @@ export class LiveLibrary {
   }
 
   /** The atlas page texture, or null while it loads (or if it failed). */
-  page(index: number): { texture: Texture; width: number; height: number } | null {
-    const entry = this.pages.get(index);
+  page(index: number): IndexedPage | null {
+    return this.pageEntry(index, false);
+  }
+
+  private pageEntry(index: number, ahead: boolean): IndexedPage | null {
     const ref = this.library.spriteAtlases[index];
     if (!ref) return null;
-    if (entry === undefined) {
-      this.pages.set(index, 'loading');
-      loadIndexedPage(`${this.base}/${ref.file}`, this.uploadPage ?? undefined)
-        .then((texture) => {
-          this.pages.set(index, { texture, width: ref.width, height: ref.height });
-          this.revision++;
-        })
-        .catch(() => {
-          this.pages.set(index, 'failed');
-          this.revision++;
-        });
-      return null;
+    return this.entry(this.pages, index, ahead, async (upload) => ({
+      texture: await loadIndexedPage(`${this.base}/${ref.file}`, upload),
+      width: ref.width,
+      height: ref.height,
+    }));
+  }
+
+  /**
+   * Whether nothing more is to come for an indexed page: it is loaded, it failed, or the library has no such page.
+   * Never requests it.
+   */
+  pageSettled(index: number): boolean {
+    const entry = this.pages.get(index);
+    return !this.library.spriteAtlases[index] || typeof entry === 'object' || entry === 'failed';
+  }
+
+  /**
+   * Every atlas page a type's art sits on: body, bib, build-up, every layer (and its damaged variant), deploy anim
+   * and their shadows, with the pages the extractor recorded (LibraryType.atlasPages). What a state change of an
+   * object of the type may draw from next.
+   */
+  typePages(type: LibraryType): readonly number[] {
+    let pages = this.typePageLists.get(type);
+    if (!pages) {
+      const found = new Set<number>(type.atlasPages ?? []);
+      const add = (id: string | undefined) => {
+        const sprite = id ? this.library.sprites[id] : undefined;
+        if (!sprite) return;
+        for (const frame of sprite.frames) if (frame.rect[2] > 0) found.add(frame.page ?? 0);
+        for (const frame of sprite.shadows ?? []) if (frame.rect[2] > 0) found.add(frame.page ?? 0);
+      };
+      add(type.sprite);
+      add(type.deployingAnim);
+      add(type.building?.bib);
+      add(type.building?.buildup);
+      for (const layer of type.building?.layers ?? []) {
+        add(layer.sprite);
+        add(layer.damagedSprite);
+      }
+      pages = [...found].sort((a, b) => a - b);
+      this.typePageLists.set(type, pages);
     }
-    return typeof entry === 'string' ? null : entry;
+    return pages;
+  }
+
+  /**
+   * Fetch a page ahead of its first use: the indexed page alone, or with `final` everything its sprite layer is built
+   * from (its HD art, and the lit-window mask and material page when the caller's look wants them). Silent like
+   * preloadVoxels: nothing counts as `loading` and `revision` does not change, so a view that is out of sight is not
+   * kept waiting for it; whatever asks for the page in earnest meanwhile makes it art on its way. Call again (every
+   * frame is fine) until it answers true: everything asked for has arrived or failed.
+   *
+   * The indexed page (about 2 MB and 17 M pixels in the extracted library) is in long before its HD art (about 50 MB
+   * and 67 M pixels): it is what an object is drawn from until then, see LiveView.flushSprites.
+   */
+  preloadPage(index: number, final = false, windows = false, materials = false): boolean {
+    this.pageEntry(index, true);
+    let settled = this.pageSettled(index);
+    if (!final) return settled;
+    if (this.hasHdPage(index)) {
+      this.hdEntry(index, true);
+      settled &&= typeof this.hdPages.get(index) === 'object' || !this.hasHdPage(index);
+    }
+    if (windows && this.hasWindowsPage(index)) {
+      this.windowsEntry(index, true);
+      settled &&= typeof this.windowPages.get(index) === 'object' || !this.hasWindowsPage(index);
+    }
+    if (materials && this.hasMaterialsPage(index)) {
+      this.materialsEntry(index, true);
+      settled &&= typeof this.materialPages.get(index) === 'object' || !this.hasMaterialsPage(index);
+    }
+    return settled;
   }
 
   /** A missing/failed page is settled, so infrequently changing cell layers need not retry it every frame. */
@@ -250,24 +350,14 @@ export class LiveLibrary {
    * indexed page until it arrives.
    */
   hdPage(index: number): HdAtlas | null {
+    return this.hdEntry(index, false);
+  }
+
+  private hdEntry(index: number, ahead: boolean): HdAtlas | null {
     const refs = (this.library as TypeLibrary & { spriteAtlasesHd?: (HdAtlasRef | null)[] }).spriteAtlasesHd;
     const ref = refs?.[index];
     if (!ref) return null;
-    const entry = this.hdPages.get(index);
-    if (entry === undefined) {
-      this.hdPages.set(index, 'loading');
-      loadHdAtlas(this.base, ref, this.uploadPage ?? undefined)
-        .then((atlas) => {
-          this.hdPages.set(index, atlas);
-          this.revision++;
-        })
-        .catch(() => {
-          this.hdPages.set(index, 'failed');
-          this.revision++;
-        });
-      return null;
-    }
-    return typeof entry === 'string' ? null : entry;
+    return this.entry(this.hdPages, index, ahead, (upload) => loadHdAtlas(this.base, ref, upload));
   }
 
   /** Whether the page has an HD atlas that has not failed to load. */

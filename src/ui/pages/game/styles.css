@@ -975,6 +975,12 @@ canvas {
 #vm-performance {
   color: #8ab8d8;
 }
+#vm-stalls {
+  color: #d8b98a;
+}
+#vm-controls #vm-stalls:empty {
+  display: none;
+}
 #vm-controls .toolbar-button {
   width: 100%;
   min-height: 32px;
@@ -1303,7 +1309,8 @@ input[type='range']::-moz-range-thumb {
   color: #ef7777;
 }
 @media (max-width: 640px) {
-  #vm-performance {
+  #vm-performance,
+  #vm-stalls {
     display: none;
   }
   #vm-controls {
@@ -1793,6 +1800,9 @@ dialog {
 }
 #vm-performance {
   color: #8fc8e8 !important;
+}
+#vm-stalls {
+  color: #e8cf8f !important;
 }
 #vm-controls .toolbar-button {
   min-height: 28px;

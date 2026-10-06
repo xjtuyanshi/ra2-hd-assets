@@ -9,6 +9,7 @@ import type { PreviewServer, ViteDevServer } from 'vite';
 import { createGameRelay } from 'relay-package/server';
 import { parseRelayFaultConfig } from 'relay-package/faults';
 import { createThirdPartyCacheHandler } from './src/server/thirdPartyCache';
+import { createStallLogHandler } from './src/server/perfStallLog';
 
 type ViteHttpServer = NonNullable<ViteDevServer['httpServer']> | NonNullable<PreviewServer['httpServer']>;
 
@@ -34,6 +35,11 @@ function gameAssetsPlugin(): Plugin {
       server.middlewares.use('/game', serveGameAsset);
       // HD remaster bridge (dev only): the locally extracted HD cache, derived from the player's own files.
       server.middlewares.use('/hd-cache', serveHdCache);
+      // Stall records of the HD page (dev only) go to the file RA2_PERF_LOG names; without it the route answers 404.
+      server.middlewares.use(
+        '/__perf/stalls',
+        createStallLogHandler(process.env.RA2_PERF_LOG ? resolve(process.env.RA2_PERF_LOG) : undefined),
+      );
     },
     configurePreviewServer(server) {
       server.middlewares.use('/game', serveGameAsset);

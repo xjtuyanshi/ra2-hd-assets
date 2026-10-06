@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { DISPLAY_RESOLUTION, parseResolutionChoice } from '../../src/ui/pages/game/vmPageResolution';
@@ -44,6 +45,17 @@ describe.skipIf(process.platform === 'win32')('scripts/remaster/play.sh', () => 
     expect(() =>
       execFileSync('bash', [script, '--print'], { stdio: 'pipe', env: { ...process.env, RA2_PLAY_SPEED: '9' } }),
     ).toThrow();
+  });
+
+  it('names the stall log for the development server, next to the play tools unless told otherwise or off', () => {
+    // --print starts nothing, so the server's environment is read from the script itself.
+    const text = readFileSync(script, 'utf8');
+    expect(text).toContain('perf="${RA2_PERF_LOG:-$main/gameres/s2x/play/perfmon/stalls.jsonl}"');
+    expect(text).toContain('[ "$perf" = 0 ] && perf=""');
+    const server = text.split('\n').find((line) => line.includes('exec node_modules/.bin/vite'))!;
+    expect(server).toContain('RA2_PERF_LOG="$perf"');
+    // The address is the same with or without a log.
+    expect(address([], { RA2_PERF_LOG: '0' }).href).toBe(address([]).href);
   });
 
   it('rejects an unknown option', () => {

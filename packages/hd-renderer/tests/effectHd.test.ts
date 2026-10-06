@@ -89,7 +89,9 @@ function fixture() {
     remap: false,
   };
   const hdAnim = vi.fn(() => hd as EffectHdAnim | null);
-  const hdPageState = vi.fn((): EffectPage | 'loading' | null => 'loading');
+  // The redrawn page is there: a page that is still loading keeps the anim's own art on screen (see below).
+  const hdPage: EffectPage = { texture: new DataTexture(new Uint8Array(4), 1, 1), width: 64, height: 16 };
+  const hdPageState = vi.fn((): EffectPage | 'loading' | null => hdPage);
   const art = { ready: true, anim: () => resolved, hdAnim, hdPageState } as unknown as EffectArt;
   const explode = vi.fn();
   const muzzleFlash = vi.fn();
@@ -267,6 +269,14 @@ describe('live HD flipbook selection', () => {
     expect(f.cards().out[0]!.hd!.next).toBeNull();
     f.hdPageState.mockReturnValue(null);
     expect(f.cards().out.map((card) => card.draw)).toEqual(['shadow', 'card']);
+    // A page on its way: the anim is drawn from its own art until then, not skipped.
+    f.hdPageState.mockReturnValue('loading');
+    const meanwhile = f.cards().out;
+    expect(meanwhile.map((card) => card.draw)).toEqual(['shadow', 'card']);
+    expect(meanwhile.every((card) => card.hd === undefined)).toBe(true);
+    expect(meanwhile[1]!.frame).toBe(f.resolved.sprite.frames[2]);
+    f.hdPageState.mockReturnValue({ texture: new DataTexture(new Uint8Array(4), 1, 1), width: 64, height: 16 });
+    expect(f.cards().out[0]!.hd!.frame).toBe(f.hd.frames[2]);
     f.hdAnim.mockReturnValue(null);
     expect(f.cards().out.every((card) => card.hd === undefined)).toBe(true);
   });

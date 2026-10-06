@@ -49,7 +49,8 @@ function fixture(style: 'enhanced' | 'faithful' = 'enhanced') {
     ready: true,
     anim: (type: string) => resolved(type),
     hdAnim: (type: string) => (HD_TYPES.has(type) ? hd : null),
-    hdPageState: () => 'loading',
+    // The redrawn page is there (one still loading keeps the anims' own art on screen).
+    hdPageState: () => ({ texture: {}, width: 256, height: 32 }),
   } as unknown as EffectArt;
   const explode = vi.fn();
   const driver = new LiveEffectsDriver({ setBeams: vi.fn(), explode } as unknown as EffectsLayer, () => false);

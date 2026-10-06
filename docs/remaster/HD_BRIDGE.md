@@ -10,7 +10,7 @@ development-only dynamic imports and resolve to null, and nothing calls the rema
 `render-state` and `tactical-passthrough` messages, the VM core's opt-in (`renderPassthrough`) handling and the frame
 renderer's key and transparent-rectangle paths. The page bridge, three.js and `packages/hd-renderer`, the YR state,
 shroud, overlay, smudge and effects readers, the guest gate engine with the YR passthrough patch table, and the development server's
-`/hd-cache` route are not part of production builds or `vite preview`. `tests/basic/architecture/dependencies.test.ts`
+`/hd-cache` and `/__perf/stalls` routes are not part of production builds or `vite preview`. `tests/basic/architecture/dependencies.test.ts`
 walks the production import graph from `index.html` (Worker and worklet entries included) and fails if the YR readers,
 the passthrough patch table or the guest gate engine become reachable outside an `import.meta.env.DEV` branch. The
 page bridge's gate is the `hdBridgeRequested` constant rather than the flag itself, so the walk counts the bridge as
@@ -76,7 +76,11 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    whose art is missing is tracked but drawn as nothing (`LiveView.diagnostics()` lists such types, the building
    types drawn from the map cache's body frame for want of a library record (`mapCacheTypes`), and counts missing
    voxel turrets; `?hd-debug=placeholders` shows a small grey box instead). A voxel model whose smooth mesh is still
-   being built is not missing art: it is drawn from a stand-in mesh (`diagnostics().standInVoxels`). Light sources
+   being built is not missing art: it is drawn from a stand-in mesh (`diagnostics().standInVoxels`). Nor is a
+   sprite whose atlas page is in while the page's HD art is not: it is drawn from the indexed page
+   (`indexedSprites`), and a sprite object whose new state needs a page that has not arrived keeps its previous
+   picture (`heldPictures`); `incompletePictures` counts the objects of which a part had nothing to draw from and
+   no earlier picture to show (see "A sprite the game shows is never missing" below). Light sources
    and lit windows of the
    buildings standing in the match feed the night dressing (map light sources, HD street lamps, windows).
    Overlay and smudge polls run at most once per 250 ms, with an immediate reset for a new battle. The reader reuses scratch
@@ -231,6 +235,40 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   each brings shaders that are built in the frame that first draws it, and a whole opening in one frame froze the
   page, the game's picture included, for a second) and the same 8 M pixels of pages per frame
   (`LiveView.hiddenUploadPixels`). Sprite material pages no longer keep their decoded bitmap after the upload.
+- **A sprite the game shows is never missing.** A page's sprite layer is built from its indexed page (about 2 MB)
+  and its HD art (about 50 MB, 67 M pixels); the layer used to wait for both, so a building placed on a page nothing
+  had drawn from yet had no picture at all until the HD art was decoded and uploaded (measured before this rule,
+  cold start: 46 and 47 presented frames for a construction yard and a refinery on a quiet machine, 25.8 s for the
+  refinery on a loaded one; infantry 10 s after a view shown by the deadline). A **shown** view now draws such a
+  page's sprites through the page's indexed layer (the one that already draws art which is always indexed) and
+  moves them to the final layer in the flush that builds it (`LiveView.flushSprites`): the records are the same
+  (anchor, frame rectangle, palette row with the house colours, depth profile) and both layers place a frame by
+  the indexed atlas's pixels, so nothing moves or changes size. Live overlays and smudges do the same with their
+  own layers (built from the indexed page, rebuilt once with the HD art), a first layer no longer waits for a
+  night map's lit-window mask, and an anim whose redrawn page is still loading is drawn from its own art. Out of
+  sight nothing is drawn early: the page counts as art on its way, as before.
+  A change of state can move an object onto another page (a build-up on one page and the body on the next; damage,
+  a sale, a door, a production layer; a soldier whose sequences span two pages). Every page of an object's type is
+  fetched as an indexed page when the object first appears, and while a page is still missing the object keeps its
+  last complete picture in place instead of losing its body (`live/heldPicture.ts`).
+  What can be known before an object exists is loaded before it exists (`LiveView.prepare`): the bridge hands over
+  the types the sidebar shows as being produced, queued or waiting to be placed (`sidebarUpcomingTypes`; the
+  reader reports the cameos of the tab on screen), the view prepares what the map cache lists as placed on the map
+  when it is created, behind the loading screen, and what a vehicle deploys into when the vehicle appears (rules
+  DeploysInto is not in the library: `live/artAhead.ts` holds the four stock pairs). Their pages are fetched whole
+  and their layer is built one page per frame before the first sprite is drawn from it (three r186 builds the
+  shaders of a layer's main pass in the first frame the layer is in the scene, whether or not it has instances:
+  `Renderer._renderObjectDirect` updates the pipeline before the draw that an empty mesh skips); a vehicle's model,
+  mesh and projection are prepared in the local player's colours. All of it is loaded "ahead"
+  (`LiveLibrary.preloadPage`): it does not count as art on its way and does not delay the view being shown, and
+  the uploader copies pages that are waited for before pages loaded ahead, the smallest first, so an indexed page
+  does not queue behind the HD pages decoded before it. Cell decorations are not announced by anything (rubble, a
+  crater, a crate), so the indexed pages of the overlay types that are not walls and of every smudge type, three
+  small pages, are fetched when the view is created (`cellArtPages`). What still has nothing to draw from is the
+  first frames of a building, infantry or SHP-vehicle type that nothing announced (an object the engine creates in
+  view without a production: its indexed page is then fetched, decoded and uploaded while it stands there; keeping
+  every type page resident would close it at about 380 MB of GPU memory per theatre) and an effect whose own page
+  is not in.
 - **What the last match showed is prepared behind the loading screen.** The bridge stores the kinds of object of a
   match's first five minutes in `localStorage` (`src/ui/pages/game/hdWarmStore.ts`: rules type, engine image, colour
   scheme and whether a civilian house owns it; never positions or counts): one list per map, and for maps not
@@ -484,7 +522,36 @@ speed; the page's own startup default is the fastest, see
 [the startup configuration](../RA2_COMMAND_LINE_AND_SPAWNER.md#current-startup-configuration)) and the skirmish setup as
 the first page; `--original` opens the original picture at exact pixels instead, `--print` only prints the address. It
 reads the player's game from `RA2_GAME_ROOT` (default `game/`), the HD cache from `RA2_HD_CACHE_DIR` (default: the
-newest play cache under `gameres/` that holds `_library/`) and the starting speed from `RA2_PLAY_SPEED`.
+newest play cache under `gameres/` that holds `_library/`) and the starting speed from `RA2_PLAY_SPEED`, and names
+the stall log for the development server in `RA2_PERF_LOG` (default `gameres/s2x/play/perfmon/stalls.jsonl` under
+the main checkout; `0` for none).
+
+## Stall recorder
+
+A hitch a player reports cannot be looked into from outside the browser, so the HD page records its own. The bridge's
+frame loop reports every animation frame to `src/ui/pages/game/hdStallMonitor.ts` (loaded behind
+`import.meta.env.DEV`, like the interface layer); the generic parts are in `src/utils/stallRecorder.ts`. A frame
+more than 150 ms after the one before it is a stall. An ordinary frame costs one subtraction and one comparison;
+everything below happens only when a frame is late.
+
+A record holds the wall-clock time, the gap, whether the tab was visible and whether it was hidden at some time
+during the gap, the map, the logic frame and the measured logic rate, whether the HD view was shown, and what the
+view was busy with (`LiveView.activity`): atlas pages still being uploaded, voxel meshes and projections on their
+way, everything still loading, the shader modules and render pipelines the frame before the gap had the backend
+create (`packages/hd-renderer/src/compileCounter.ts` wraps the two backend calls three r186 makes only on a cache
+miss, so nothing is counted per frame), and the kinds of object whose first visual that frame built. Long tasks
+(`PerformanceObserver`, where the browser has it) tell whose stall it was: `cause` is `main-thread` when long tasks
+cover at least half the gap, `not-delivered` when they do not (the page's thread was free and the frame still did
+not come: GPU process, compositor, another process), `hidden` when the tab was, and `unknown` without the observer.
+The last 500 records are kept (`__hdBridge.stalls` in the console).
+
+Two sinks. The development server appends records as JSON lines to the file named by `RA2_PERF_LOG`
+(`POST /__perf/stalls`, `src/server/perfStallLog.ts`: same-origin JSON only, 256 KiB at most, each line written from
+the parsed record with the time it was received); without the variable the route answers 404 and the page stops
+posting for the session. The page posts new records in batches at most every five seconds (`fetch` with
+`keepalive`), hands the rest to `navigator.sendBeacon` when the tab is hidden or the page goes away, and does not
+retry a refused batch by itself: it goes out again with the next stall. The toolbar shows one line for the current
+match, "卡顿 N 次，最长 X 秒" (`RuntimeToolbar.setStalls`): stalls while the match ran and the tab was on screen.
 
 ## HD interface layer (`hd-ui=1`)
 
