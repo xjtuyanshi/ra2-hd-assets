@@ -171,18 +171,23 @@ type GroundPass = 'main' | 'under' | 'over' | 'readOnly' | 'unit' | 'translucent
 export const GROUND_PULL = { shadow: [0.019, 0.027], infantryCore: 0.028, reflection: 0.0285 } as const;
 /**
  * The original infantry blob is solid palette index 12 (black) inside the body frames, not the half-colour shadow
- * blitter used by buildings and voxels: frozen same-frame pairs show its darkest pixels at 0.00 of the ground on snow
- * and on temperate ground alike. This is the opacity of that native footprint, and the faithful look's. An enhanced
- * look may draw the footprint as a shadow instead (SpriteLook.infantryShadow, HdSettings.infantryShadow): at twice the
- * resolution the solid blob is a smooth-edged black disc under every soldier, which reads as a hole in bright ground
- * (owner feedback on snow) where the original's few hard pixels read as a contact shadow.
+ * blitter used by buildings and voxels: frozen same-frame pairs show the ground under it at 0.00 of the ground beside
+ * it, on snow and on temperate ground alike. This is the opacity of that native footprint, and the faithful look's.
+ * An enhanced look may draw the footprint as a shadow instead (SpriteLook.infantryShadow, HdSettings.infantryShadow):
+ * at twice the resolution the solid blob is a smooth-edged black disc under every soldier, which reads as a hole in
+ * bright ground (owner feedback on snow) where the original's few hard pixels read as a contact shadow.
  */
 export const INFANTRY_SHADOW_OPACITY = 1;
 /**
- * The footprint drawn as a shadow like every other one of the engine: half the displayed colour (the cinematic
- * look's HdSettings.infantryShadow). Vehicle contact shadows use the same opacity (voxelShadow.ts).
+ * The footprint as a shadow (the cinematic look's HdSettings.infantryShadow): with it the ground under a soldier
+ * shows at about half its brightness, like under every other shadow of the engine and under the HD vehicles'
+ * contact shadows (0.45 to 0.47 of the ground). This is NOT ENGINE_SHADOW_OPACITY: the HD infantry body pages
+ * already carry a soft contact shadow of their own in the footprint's place (alpha 0.25 to 0.5), which the solid
+ * footprint used to hide, and the two multiply. Calibrated on same-frame sweeps of this value in frozen live frames
+ * (12 conscripts each): 1 -> 0.02 / 0.03 of the ground (snow / temperate), 0.78 -> 0.26 / 0.23, 0.6 -> 0.37 / 0.33,
+ * 0.4 -> 0.47 / 0.42, 0.2 -> 0.55 / 0.50, 0 (the body page's shadow alone) -> 0.62 / 0.56.
  */
-export const INFANTRY_SHADOW_SOFT_OPACITY = ENGINE_SHADOW_OPACITY;
+export const INFANTRY_SHADOW_SOFT_OPACITY = 0.35;
 /**
  * Coverage ramp of infantry contact shadows. The original draws them as solid palette-index-12 blobs inside the body
  * frames; the filtered/upscaled mask is only ~0.5 at the blob's own edge, so a linear ramp left half of every blob

@@ -177,8 +177,8 @@ export interface HdSettings extends CinematicGradeParams {
   shadowDarkness: number;
   /**
    * Core opacity of the infantry footprint in an enhanced look, in linear light: 1 (neutral, and always in the
-   * faithful look) is the original's solid black blob; INFANTRY_SHADOW_SOFT_OPACITY halves the displayed ground like
-   * the engine's other shadows.
+   * faithful look) is the original's solid black blob; INFANTRY_SHADOW_SOFT_OPACITY (calibrated together with the
+   * soft shadow the HD body pages carry) shows the ground at about half its brightness, like the other shadows.
    */
   infantryShadow: number;
   /** 'fixed': the classic light azimuth at every hour; 'arc': the sun travels east to west (Lighting.sunArc). */
@@ -307,8 +307,9 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       contactShade: 1.5,
       shadowLength: 1.4,
       shadowDarkness: 1.15,
-      // The infantry footprint as a shadow (half the displayed ground, like a vehicle's contact shadow) instead of the
-      // original's solid black blob: see INFANTRY_SHADOW_OPACITY for the measurement and the owner's feedback.
+      // The infantry footprint as a shadow (about half the displayed ground, like a vehicle's contact shadow)
+      // instead of the original's solid black blob: see INFANTRY_SHADOW_OPACITY for the measurements and the
+      // owner's feedback.
       infantryShadow: INFANTRY_SHADOW_SOFT_OPACITY,
       // L5 depth pass (scratchpad finallook5/light, metrics against the battle and park targets): the band-pass clarity
       // brings mid-scale local contrast to the battle target's (|blur2 - blur8| of L* 5.0 -> 5.7, target 5.7) without

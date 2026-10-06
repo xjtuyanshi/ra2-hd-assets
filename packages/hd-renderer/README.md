@@ -851,7 +851,8 @@ shadow stretch takes the original calculation, and other neutral gains multiply 
 | `aoPower` (neutral 1; cinematic 1.5)            | Raises baked sprite AO and voxel crease AO to this power, bypassing `pow` at 1. Includes VPL, PBR and the projected vehicle's mesh form AO; baked occlusion inside redraw textures cannot be separated.                                                                                                                                                                                                                                         |
 | `contactShade` (neutral 1; cinematic 1.5)       | Multiplies foundation contact alpha (`0.42 * contactShade`, final alpha capped at 0.85) and the terrain's contact darkening only while the enhanced look is enabled (darkening cap 0.85). Faithful terrain keeps its original contact attribute.                                                                                                                                                                                                |
 | `shadowLength` (neutral 1; cinematic 1.4)       | Multiplies the elevation-derived SHP/voxel stretch and its cap (`MAX_SHADOW_STRETCH * shadowLength`), only with `shadowFollow > 0`; partial follow still blends from the original transform.                                                                                                                                                                                                                                                    |
-| `shadowDarkness` (neutral 1; cinematic 1.15)    | Multiplies enhanced building/vehicle SHP and voxel shadow opacity (cap 0.9). Their faithful path keeps `ENGINE_SHADOW_OPACITY`; infantry contact cores stay solid in all looks. Voxel shadow materials and uniforms share one renderer context and lifetime.                                                                                                                                                                                    |
+| `shadowDarkness` (neutral 1; cinematic 1.15)    | Multiplies enhanced building/vehicle SHP and voxel shadow opacity (cap 0.9). Their faithful path keeps `ENGINE_SHADOW_OPACITY`; infantry footprints have their own setting (`infantryShadow`). Voxel shadow materials and uniforms share one renderer context and lifetime.                                                                                                                                                                     |
+| `infantryShadow` (neutral 1; cinematic 0.35)    | Core opacity of the infantry footprint in an enhanced look (linear light): 1 is the original's solid black blob; 0.35 shows the ground under a soldier at about half its brightness, together with the soft contact shadow the HD body pages carry. The faithful look always uses 1. Shape, place and fringe of the footprint do not change.                                                                                                    |
 | `clarity` (neutral 0; cinematic 0.55)           | Mid-scale local contrast on the display image: the luminance band between Gaussian blurs of 1.25 and 5 view px (CSS px by default; engine px in the live view, which reports its device pixels per engine pixel through `setBufferScale`) is added back this many times (shaded side at half strength, mid-tones only). 0 leaves the pass out of the pipeline.                                                                                  |
 
 Building emitters are authored in `src/live/buildingLights.ts` (`BUILDING_LIGHTS`); foundation fractions and
@@ -1028,7 +1029,22 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   cells inland of the mask to the water on those maps (`artToneContactRelief`): it darkens the ground at a cliff's
   foot but not the wall above it, and painted water continues across the wall's lower edge, where the step showed
   the cliff's cell staircase. The painted lake bed (`waterBed: true`) has no painted water in its composite and
-  ignores the tone. Optional `materials.json.waterDetail` supplies sRGB
+  ignores the tone.
+  Day maps: the extractor's water mask ends at whole water cells under cliffs, quays and overpasses, 1 to 30
+  original pixels short of the painted waterline, and the look drew its turquoise shallows and foam along that
+  staircase with a strip of contact-shaded painted water behind it. A sidecar with `waterline: "painted"`
+  (`ra2-assets/python/waterline_mask.py`) names a mask that follows the painted waterline; `terrainMap.paintedWaterline`
+  then turns off the cliff-foot extension of the water onto land, and `ra2/hardShore.ts` gives the ground a
+  `hardShore` vertex attribute (no texture: the ground stays at 15 sampled textures): 1 on cells of tiles outside the
+  extractor's water families that hold, or touch, mask water (a cliff face is painted on low cells, often more than
+  a cell in front of the height step the `contact` attribute finds), fading over 1.5 cells. At a hard shore
+  (`waterLook.ts` `hardShoreInputs`) the look sees deep water wherever the water covers (`HARD_SHORE`: no shallows,
+  sandy bed, swash or foam), the land keeps its art (no wet band or inland replacement) and the cliff-foot contact
+  shading is dropped on the land within 1.5 cells of the water (`HARD_SHORE_CONTACT`; ground triangles were shaded,
+  wall quads not, which showed the cells as dark facets on the rock). Every shore of a snow map is a hard one
+  (`BEACHLESS_THEATERS` in `ra2/terrain.ts`): its shore tiles are ice, and the sand beach drew an orange line and a
+  turquoise glow around every floe. Beaches of the other theatres, open water and the lake-bed path are unchanged.
+  Optional `materials.json.waterDetail` supplies sRGB
   apparent water colour and alpha roughness/glitter weight over the composite's area (same aspect, any resolution).
   It shares the mask's top-down UVs and uses linear/mipmap filtering with clamped edges; load failures warn and leave it unused.
   `WATER_DETAIL` in `waterLook.ts` controls column blending, retained shallow turquoise and alpha modulation. Only the
@@ -1062,7 +1078,8 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   are decoded off the main thread (`loadHdTexture` in `ra2/cache.ts`: `createImageBitmap`, straight alpha, no colour
   conversion) and a library page is uploaded as soon as it arrives; the bitmap is released after the first upload, so a
   page cannot be uploaded a second time. Building and vehicle SHP
-  shadows halve the displayed colour; infantry uses solid black palette-index-12 contact cores in all looks.
+  shadows halve the displayed colour; infantry uses solid black palette-index-12 contact cores in the faithful and
+  golden looks and a calibrated half-brightness footprint in `cinematic` (see "Infantry contact shadows").
   Live object occlusion combines native BUILDNGZ body samples, ground-like parts and
   gradient-2 ground-unit cards (`ra2/nativeDepth.ts`) with small scene-wide traversal/component biases
   (`ra2/painterOrder.ts`). Atlas pages share a depth template; a current-cell Harvester/Refinery predicate supplies
@@ -1313,19 +1330,30 @@ retains the original material path and defaults. Build player-supplied assets us
 
 Live infantry queues the shadow matching its selected body/sequence frame, including a dedicated library page.
 Only infantry shadows carry a contact marker (cleared whenever a sprite-pool record is reused). Their
-core opacity is **1** (`INFANTRY_SHADOW_OPACITY`) in both faithful and enhanced looks, matching solid
-palette-index-12 pixels instead of the half-colour shadow blitter. Full opacity is reached at filtered coverage
+native core opacity is **1** (`INFANTRY_SHADOW_OPACITY`), matching solid palette-index-12 pixels instead of the
+half-colour shadow blitter: in frozen same-frame pairs the original shows the ground under a conscript's footprint
+at 0.00 of the ground beside it, on snow and on temperate ground. The faithful and golden looks draw exactly that.
+An enhanced look can draw the footprint as a shadow instead (`HdSettings.infantryShadow`, the look uniform
+`SpriteLook.infantryShadow`, read every frame): at twice the resolution the solid blob is a smooth black disc under
+every soldier and reads as a hole in bright ground. `cinematic` uses `INFANTRY_SHADOW_SOFT_OPACITY` = 0.35. That is
+not the engine's shadow opacity (0.78): the HD infantry body pages already carry a soft contact shadow in the
+footprint's place (alpha 0.25 to 0.5 in all 54 infantry sprites of the library), which the solid footprint used to
+hide, and the two multiply. Same-frame sweeps of the value in frozen live frames (12 conscripts each; ground under
+the footprint / ground beside it, snow / temperate): 1 -> 0.02 / 0.03, 0.78 -> 0.26 / 0.23, 0.6 -> 0.37 / 0.33,
+0.4 -> 0.47 / 0.42, 0.2 -> 0.55 / 0.50, 0 -> 0.62 / 0.56; the HD vehicles' contact shadows measure 0.45 to 0.47.
+A library whose infantry pages lack that baked shadow needs a higher value. Full opacity is reached at filtered coverage
 0.22 (`INFANTRY_SHADOW_RAMP`, smoothstep 0.02-0.22), with an antialiased exterior. The upscaled mask is only
 about 0.5 at the original blob's edge, so a linear ramp would leave the edge transmitting bright ground.
 Their original SHP offsets remain attached to the feet even in `cinematic`. Sun following,
 shadow-length transforms and the distance-based blur are bypassed for infantry. The dedicated 2x black RGBA page
 supplies alpha coverage with a solid core and antialiased exterior; the indexed page is the loading fallback. Both
-colour and over-pass depth use that same coverage. Look strength controls do not weaken the infantry core. Building and
+colour and over-pass depth use that same coverage. The other look strength controls (`shadowDarkness`, softness, sun
+following) do not touch the infantry footprint. Building and
 vehicle shadows retain their existing indexed coverage, transforms, opacity, softness and ground-depth ordering.
 In the enhanced ground pass, the infantry core has a 0.028 depth pull, ahead of ordinary shadow ranks (up to 0.027)
 but behind reflections and upright feet. Thus an earlier building shadow cannot reject its solid core in LessDepth.
 Build/repair the library with [the infantry shadow tool](../ra2-assets/README.md#infantry-shadow-repair-python--typescript).
 Fixture tests cover coverage, sprite-pool reuse, dedicated page routing and generated main/ground-pass shaders.
 Full alpha removes ground transmission before postprocessing; mist, bloom and night tone mapping can still affect
-displayed colour. The tests do not establish displayed-pixel strength: live GI, Initiate, Slave and Conscript
-comparisons remain `UNVERIFIED`.
+displayed colour. The tests do not establish displayed-pixel strength: conscripts were measured on frozen live
+frames (above); live GI, Initiate and Slave comparisons remain `UNVERIFIED`.

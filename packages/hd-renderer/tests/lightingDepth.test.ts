@@ -10,6 +10,7 @@ import {
   shadowStretch,
   spriteLookFor,
 } from '../src/ra2/spriteLook';
+import { INFANTRY_SHADOW_SOFT_OPACITY } from '../src/ra2/sprites';
 import {
   ENGINE_SHADOW_OPACITY,
   VoxelShadowMesh,
@@ -37,7 +38,7 @@ const cinematic = {
   contactShade: 1.5,
   shadowLength: 1.4,
   shadowDarkness: 1.15,
-  infantryShadow: ENGINE_SHADOW_OPACITY,
+  infantryShadow: INFANTRY_SHADOW_SOFT_OPACITY,
 };
 const shaderGains = [
   'sunGain',

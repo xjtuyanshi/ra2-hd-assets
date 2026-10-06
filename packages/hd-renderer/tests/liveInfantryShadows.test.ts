@@ -144,18 +144,24 @@ describe('live infantry footprint', () => {
     expect(INFANTRY_SHADOW_OPACITY).toBe(1);
     expect(shadowDisplayRatio(infantryShadowAlpha(1))).toBe(0);
     for (const preset of ['faithful', 'golden'] as const) expect(LOOK_PRESETS[preset].settings.infantryShadow).toBe(1);
-    // The cinematic look: half the displayed ground, the engine's shadow, exactly like a vehicle's contact shadow.
+    // The cinematic look draws it as a shadow. Its opacity is weaker than the engine's shadow opacity on purpose:
+    // the HD body pages carry a soft contact shadow of their own under it, and the two multiply (same-frame sweeps
+    // in frozen live frames: 0.4 -> 0.47 of the ground on snow, 0.42 on temperate ground; 0.2 -> 0.55 / 0.50).
     const soft = LOOK_PRESETS.cinematic.settings.infantryShadow;
     expect(soft).toBe(INFANTRY_SHADOW_SOFT_OPACITY);
-    expect(soft).toBe(ENGINE_SHADOW_OPACITY);
-    expect(soft).toBe(CONTACT_SHADOW_OPACITY);
+    expect(soft).toBeGreaterThanOrEqual(0.2);
+    expect(soft).toBeLessThanOrEqual(0.4);
+    expect(soft).toBeLessThan(ENGINE_SHADOW_OPACITY);
+    expect(CONTACT_SHADOW_OPACITY).toBe(ENGINE_SHADOW_OPACITY);
     for (const coverage of [INFANTRY_SHADOW_RAMP.to, 0.5, 1]) {
       const alpha = infantryShadowAlpha(coverage, soft);
       expect(alpha).toBeCloseTo(soft, 12);
-      expect(shadowDisplayRatio(alpha)).toBeCloseTo(0.5, 12);
-      // Whatever the ground: snow, grass, sand or paving transmit the same share, never none.
-      for (const ground of [0.05, 0.5, 1, 4]) expect(ground * (1 - alpha)).toBeCloseTo(ground * 0.5 ** 2.2, 12);
+      // On its own the footprint never blacks the ground out: snow, grass, sand or paving keep the same share.
+      for (const ground of [0.05, 0.5, 1, 4]) expect(ground * (1 - alpha)).toBeCloseTo(ground * (1 - soft), 12);
+      expect(shadowDisplayRatio(alpha)).toBeGreaterThan(0.75);
     }
+    // The engine's own shadow opacity halves the displayed ground (what the other shadows use).
+    expect(shadowDisplayRatio(ENGINE_SHADOW_OPACITY)).toBeCloseTo(0.5, 12);
     // Shape and fringe are the footprint's own in both: only the core's opacity differs.
     for (const coverage of [0, 0.02, 0.1, 0.2, 0.5, 1])
       expect(infantryShadowAlpha(coverage, soft)).toBeCloseTo(infantryShadowAlpha(coverage) * soft, 12);
