@@ -355,6 +355,60 @@ export function artToneContactRelief(maskShore: ShaderNode, tone: ShaderNode): S
   return tone.mul(smoothstep(ART_TONE_CONTACT.far, ART_TONE_CONTACT.near, maskShore));
 }
 
+/**
+ * Hard shores (hardShore.ts): rock, a cliff's foot, masonry or ice at the water's edge instead of a beach. `depth`
+ * cells are added to the shore distance wherever the water covers a hard shore (fully from a coverage of `cover`
+ * on), so the look's column is the deep one right up to the rock: its turquoise shallows end at 0.42 cells, its sandy
+ * bed and swash well before. The deepening follows the water's own coverage, not the distance field: the field is
+ * coarser than the mask, and where it still said "shore" under the first pixel of water that pixel was drawn as bared
+ * sand. The look's beach (bared sand, foam, the wet band on land) is off at a hard shore. The waterline itself stays
+ * the mask's: nothing is added on land.
+ */
+export const HARD_SHORE = { depth: 1.5, cover: 0.3 } as const;
+
+/**
+ * Signed distance to the waterline (cells, negative on land) over which the terrain's cliff-foot contact shading
+ * returns on the LAND of a hard shore: none from `near` to the water, all of it from `far` inland. The shading darkens
+ * the ground triangles at a cliff's foot but not the cliff wall above them, and the rock a cliff paints at its foot
+ * lies on both: beside the water the step showed the cells as dark facets. The water keeps the shading (it reads as
+ * depth under the cliff).
+ */
+export const HARD_SHORE_CONTACT = { near: -1.5, far: -2.5 } as const;
+
+/** CPU twin of hardShoreInputs().shore: the shore distance the look sees (cells, positive over water). */
+export function hardShoreDistance(painted: number, hard: number, waterness: number): number {
+  const t = Math.min(1, Math.max(0, waterness / HARD_SHORE.cover));
+  const k = hard * t * t * (3 - 2 * t);
+  return painted + (Math.max(painted, 0) + HARD_SHORE.depth - painted) * k;
+}
+
+/** CPU twin of hardShoreInputs().relief: the share of the contact shading dropped. */
+export function hardShoreRelief(painted: number, hard: number, waterness = 0): number {
+  const { near, far } = HARD_SHORE_CONTACT;
+  const t = Math.min(1, Math.max(0, (painted - far) / (near - far)));
+  return hard * t * t * (3 - 2 * t) * (1 - waterness);
+}
+
+/**
+ * The look's shore inputs with hard shores: `painted` is the signed distance to the water's edge (cells), `hard` 0..1
+ * the hard-shore weight, `calm` the shelter the terrain already found, `waterness` the water's coverage. Returns the
+ * shore distance for the look, its calm, the share of the look's beach dressing left (1 on a beach) and the share of
+ * the cliff-foot contact shading to drop.
+ */
+export function hardShoreInputs(
+  painted: ShaderNode,
+  hard: ShaderNode,
+  calm: ShaderNode,
+  waterness: ShaderNode,
+): { shore: ShaderNode; calm: ShaderNode; beach: ShaderNode; relief: ShaderNode } {
+  return {
+    shore: mix(painted, max(painted, 0).add(HARD_SHORE.depth), hard.mul(smoothstep(0, HARD_SHORE.cover, waterness))),
+    calm: max(calm, hard),
+    beach: float(1).sub(hard),
+    relief: hard.mul(smoothstep(HARD_SHORE_CONTACT.far, HARD_SHORE_CONTACT.near, painted)).mul(float(1).sub(waterness)),
+  };
+}
+
 /** Water albedo for the current art tone: the look's own body at 0, the water as the map paints it at 1. */
 export function tonedWaterBody(body: ShaderNode, painted: ShaderNode, tone: ShaderNode): ShaderNode {
   return mix(body, painted, tone);

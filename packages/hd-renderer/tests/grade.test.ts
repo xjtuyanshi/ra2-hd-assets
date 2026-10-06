@@ -167,6 +167,7 @@ describe('cinematic preset and sandbox parameters', () => {
           'contactShade',
           'shadowLength',
           'shadowDarkness',
+          'infantryShadow',
           'clarity',
         ].includes(key) ||
         key in neutralGrade()

@@ -18,6 +18,14 @@ export interface MapMaterials {
    */
   waterMask?: string;
   /**
+   * 'painted' when waterMask follows the waterline the map paints pixel by pixel, including water painted inside
+   * tiles of other families (the feet of water cliffs, rocks standing in the sea), as python/waterline_mask.py builds
+   * it. The extractor's own mask ends at whole water cells there, and renderers bridge that gap with an extension
+   * of their own; with this value they must not, and may tell those hard shores from beaches by the tile under the
+   * water. Absent for the extractor's mask.
+   */
+  waterline?: 'painted';
+  /**
    * Same size/layout as the water mask; greyscale values >= 128 exclude land (cliff tops and walls beside water in
    * screen space) from the shoreline distance field. Ignored land stays dry; water keeps its original classification.
    */

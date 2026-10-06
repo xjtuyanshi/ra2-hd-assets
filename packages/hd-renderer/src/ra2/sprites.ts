@@ -172,10 +172,24 @@ type GroundPass = 'main' | 'under' | 'over' | 'readOnly' | 'unit' | 'translucent
  */
 export const GROUND_PULL = { shadow: [0.019, 0.027], infantryCore: 0.028, reflection: 0.0285 } as const;
 /**
- * The original infantry blob is solid palette index 12 (black), not the half-colour shadow blitter used by
- * buildings and voxels. Its covered core must not transmit the ground, in either faithful or enhanced looks.
+ * The original infantry blob is solid palette index 12 (black) inside the body frames, not the half-colour shadow
+ * blitter used by buildings and voxels: frozen same-frame pairs show the ground under it at 0.00 of the ground beside
+ * it, on snow and on temperate ground alike. This is the opacity of that native footprint, and the faithful look's.
+ * An enhanced look may draw the footprint as a shadow instead (SpriteLook.infantryShadow, HdSettings.infantryShadow):
+ * at twice the resolution the solid blob is a smooth-edged black disc under every soldier, which reads as a hole in
+ * bright ground (owner feedback on snow) where the original's few hard pixels read as a contact shadow.
  */
 export const INFANTRY_SHADOW_OPACITY = 1;
+/**
+ * The footprint as a shadow (the cinematic look's HdSettings.infantryShadow): with it the ground under a soldier
+ * shows at about half its brightness, like under every other shadow of the engine and under the HD vehicles'
+ * contact shadows (0.45 to 0.47 of the ground). This is NOT ENGINE_SHADOW_OPACITY: the HD infantry body pages
+ * already carry a soft contact shadow of their own in the footprint's place (alpha 0.25 to 0.5), which the solid
+ * footprint used to hide, and the two multiply. Calibrated on same-frame sweeps of this value in frozen live frames
+ * (12 conscripts each): 1 -> 0.02 / 0.03 of the ground (snow / temperate), 0.78 -> 0.26 / 0.23, 0.6 -> 0.37 / 0.33,
+ * 0.4 -> 0.47 / 0.42, 0.2 -> 0.55 / 0.50, 0 (the body page's shadow alone) -> 0.62 / 0.56.
+ */
+export const INFANTRY_SHADOW_SOFT_OPACITY = 0.35;
 /**
  * Coverage ramp of infantry contact shadows. The original draws them as solid palette-index-12 blobs inside the body
  * frames; the filtered/upscaled mask is only ~0.5 at the blob's own edge, so a linear ramp left half of every blob
@@ -184,13 +198,24 @@ export const INFANTRY_SHADOW_OPACITY = 1;
  */
 export const INFANTRY_SHADOW_RAMP = { from: 0.02, to: 0.22 } as const;
 
-/** CPU twin of the infantry shadow alpha for a filtered mask coverage (0..1), shared by all looks. */
-export function infantryShadowAlpha(coverage: number): number {
+/**
+ * CPU twin of the infantry shadow alpha for a filtered mask coverage (0..1). `opacity` is the look's core opacity
+ * (SpriteLook.infantryShadow): the native solid footprint by default.
+ */
+export function infantryShadowAlpha(coverage: number, opacity = INFANTRY_SHADOW_OPACITY): number {
   const t = Math.min(
     1,
     Math.max(0, (coverage - INFANTRY_SHADOW_RAMP.from) / (INFANTRY_SHADOW_RAMP.to - INFANTRY_SHADOW_RAMP.from)),
   );
-  return t * t * (3 - 2 * t) * INFANTRY_SHADOW_OPACITY;
+  return t * t * (3 - 2 * t) * INFANTRY_SHADOW_OPACITY * opacity;
+}
+
+/**
+ * Displayed brightness of the ground under a shadow of linear-light opacity `alpha`, relative to the ground beside it,
+ * for a display transform of gamma 2.2 (the scene blends in linear light): 0.5 for ENGINE_SHADOW_OPACITY.
+ */
+export function shadowDisplayRatio(alpha: number): number {
+  return Math.pow(Math.max(0, 1 - alpha), 1 / 2.2);
 }
 
 /**
@@ -733,7 +758,14 @@ class SpriteGraph {
             );
             result.assign(select(crystal.greaterThan(0), vec4(crystalColour.add(litGlow), litAlpha), result));
           }
-          // Only half-colour shadows respond to look controls. Infantry keeps its solid native contact core.
+          // Half-colour shadows respond to the look's darkness, length and softness. The infantry footprint keeps its
+          // native shape and place; only its core opacity is the look's (1 = the original's solid black).
+          If(
+            isShadow.greaterThan(0.5).and(isInfantryShadow.greaterThan(0.5)).and(look.infantryShadow.notEqual(1)),
+            () => {
+              result.assign(vec4(0, 0, 0, infantryAlpha.mul(look.infantryShadow).min(1)));
+            },
+          );
           const shadowOpacity: ShaderNode = look.shadowDarkness.mul(SHADOW_OPACITY).min(0.9);
           If(isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(look.shadowDarkness.notEqual(1)), () => {
             const alpha: ShaderNode = shadowCoverage.mul(shadowOpacity);

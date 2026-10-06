@@ -77,6 +77,7 @@ import { buildWater, type WaterUniforms } from './water';
 import { buildRain, buildSnow, type RainSystem } from './weather';
 import { steepWeatherCells, WeatherGroundMask } from './weatherGroundMask';
 import { VOXEL_FILL } from './ra2/voxels';
+import { INFANTRY_SHADOW_SOFT_OPACITY } from './ra2/sprites';
 import { groundFromHeights, setShadowGround, shadowShear, voxelShadowFor } from './ra2/voxelShadow';
 import { voxelLightingFor } from './ra2/vpl';
 import { voxelPbrFor } from './ra2/voxelPbr';
@@ -177,6 +178,12 @@ export interface HdSettings extends CinematicGradeParams {
   shadowLength: number;
   /** Enhanced SHP/voxel shadow opacity gain (capped at 0.9); neutral: 1, faithful retains engine opacity. */
   shadowDarkness: number;
+  /**
+   * Core opacity of the infantry footprint in an enhanced look, in linear light: 1 (neutral, and always in the
+   * faithful look) is the original's solid black blob; INFANTRY_SHADOW_SOFT_OPACITY (calibrated together with the
+   * soft shadow the HD body pages carry) shows the ground at about half its brightness, like the other shadows.
+   */
+  infantryShadow: number;
   /** 'fixed': the classic light azimuth at every hour; 'arc': the sun travels east to west (Lighting.sunArc). */
   sunPath: 'fixed' | 'arc';
   /** 0: daylight keeps noon's exposure (faithful); 1: flat ground keeps noon's brightness at every daylight hour. */
@@ -219,6 +226,7 @@ type LookSettings = Partial<HdSettings> &
     | 'contactShade'
     | 'shadowLength'
     | 'shadowDarkness'
+    | 'infantryShadow'
   >;
 
 const GOLDEN_SETTINGS: LookSettings = {
@@ -237,6 +245,7 @@ const GOLDEN_SETTINGS: LookSettings = {
   contactShade: 1,
   shadowLength: 1,
   shadowDarkness: 1,
+  infantryShadow: 1,
   clarity: 0,
   sunPath: 'arc',
   adaptExposure: 0.85,
@@ -268,6 +277,7 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       contactShade: 1,
       shadowLength: 1,
       shadowDarkness: 1,
+      infantryShadow: 1,
       clarity: 0,
       sunPath: 'fixed',
       adaptExposure: 0,
@@ -300,6 +310,10 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       contactShade: 1.5,
       shadowLength: 1.4,
       shadowDarkness: 1.15,
+      // The infantry footprint as a shadow (about half the displayed ground, like a vehicle's contact shadow)
+      // instead of the original's solid black blob: see INFANTRY_SHADOW_OPACITY for the measurements and the
+      // owner's feedback.
+      infantryShadow: INFANTRY_SHADOW_SOFT_OPACITY,
       // L5 depth pass (scratchpad finallook5/light, metrics against the battle and park targets): the band-pass clarity
       // brings mid-scale local contrast to the battle target's (|blur2 - blur8| of L* 5.0 -> 5.7, target 5.7) without
       // pixel-scale grain; a gentler S-curve with a higher pivot lifts the too-dark mid-tones and deep-shade share
@@ -614,6 +628,7 @@ export class HdRenderer {
     contactShade: 1,
     shadowLength: 1,
     shadowDarkness: 1,
+    infantryShadow: 1,
     clarity: 0,
     sunPath: 'fixed',
     adaptExposure: 0,
@@ -1785,6 +1800,7 @@ export class HdRenderer {
     look.contactShade.value = on ? s.contactShade : 1;
     look.shadowLength.value = on ? s.shadowLength : 1;
     look.shadowDarkness.value = on ? s.shadowDarkness : 1;
+    look.infantryShadow.value = on ? s.infantryShadow : 1;
     for (const pass of look.groundPasses) pass.visible = on;
     updateUnlitSpriteLook(look, s);
     if (!on) {

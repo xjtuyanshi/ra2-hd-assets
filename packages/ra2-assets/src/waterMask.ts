@@ -3,6 +3,15 @@ import type { TileEntry } from './manifest.ts';
 
 /** Templates that can contain water: sea, shores, water cliffs and bridges over water. */
 const WATER_FAMILIES = /^(water|shore|w-a-|w-b-|wbrdge|wtr|bank)/i;
+
+/**
+ * Whether the extractor's mask can mark water inside this tile: open-water tiles (land type 9) entirely, the listed
+ * families by colour. Water painted in any other tile (a cliff's foot, rocks) is outside that mask.
+ */
+export function isWaterFamilyTile(tile: Pick<TileEntry, 'terrainType' | 'file'>): boolean {
+  return tile.terrainType === 9 || WATER_FAMILIES.test(tile.file.replace(/\d+\..*$/, ''));
+}
+
 const NEIGHBOURS = [
   [1, 0],
   [-1, 0],
@@ -32,9 +41,7 @@ export function buildWaterMaskBytes(
     throw new RangeError('water mask RGBA and tile attribution must match the image size');
   }
   // Avoid matching a filename once per pixel on a whole-map image.
-  const kinds = tiles.map((tile) =>
-    tile.terrainType === 9 ? 2 : WATER_FAMILIES.test(tile.file.replace(/\d+\..*$/, '')) ? 1 : 0,
-  );
+  const kinds = tiles.map((tile) => (tile.terrainType === 9 ? 2 : isWaterFamilyTile(tile) ? 1 : 0));
   const mask = new Float32Array(size);
   const opaque = new Uint8Array(size);
   for (let i = 0; i < size; i++) {

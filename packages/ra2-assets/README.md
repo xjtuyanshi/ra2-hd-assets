@@ -652,6 +652,39 @@ with exclusive right/bottom bounds. Polygons are `"x,y;x,y;..."`, filled by the 
 
 Run from `packages/ra2-assets/python`: `python3 -m unittest -q test_emissive_metrics` (synthetic, asset-free).
 
+## Water mask along the painted waterline (Python)
+
+`python/waterline_mask.py` rebuilds a prepared map's open-water mask so that it follows the waterline of the original
+picture. The extractor's mask (`src/waterMask.ts`) marks whole cells of open-water tiles and, by colour, the water of
+the shore families; water painted inside any other tile is missing, so under a cliff the mask ends in a staircase
+of cell diamonds (on the stock snow map XMP26S6: median 8, at most 31 original pixels short of the rock; on urban
+quays up to 60). The original 1x composite `terrain-map.png` is paletted art, so open water is a small set of exact
+colours: the tool takes every colour holding at least 0.2 % of the existing mask's interior, adds the pixels of
+those colours that are 4-connected to the existing water within 192 original pixels (a water colour that is also
+common on land more than 96 px from any water, like urban asphalt, only counts where at least 15 % of the 9 x 9
+pixels around it have colours of the water's own, so a road ending at a quay is not flooded), settles single-pixel dither
+with a 3 x 3 majority, keeps only real gaps (water more than 2.5 px from the old mask, and the added water within
+8 px of it: the one-pixel rim along a well-masked beach is left alone, while holes of the extractor's colour test
+on shore tiles are filled), and joins the result to the old mask with a 0.9 px soft edge at the HD terrain's
+resolution; mask bytes farther than 4 px from added water are unchanged. It needs no game files, only the map directory.
+
+```sh
+FARM="$PWD/gameres/hd-cache-next"   # a copy-on-write farm you own; nothing is written through a link
+python3 -B packages/ra2-assets/python/waterline_mask.py derive --base "$PWD/gameres/hd-cache" --farm "$FARM"
+python3 -B packages/ra2-assets/python/waterline_mask.py install --farm "$FARM" --all --jobs 4 --log "$FARM/waterline.jsonl"
+python3 -B packages/ra2-assets/python/waterline_mask.py install --farm "$FARM" --maps XMP26S6 IsleLand
+python3 -B packages/ra2-assets/python/waterline_mask.py build "$FARM/XMP26S6" --out /tmp/mask.png   # review only
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_waterline_mask.py'
+```
+
+`install` publishes `<old mask stem>-wl.png` next to the old mask, sets `waterMask` and `waterline: "painted"` in the
+map's `materials.json` (created when absent, other entries kept) and writes the receipt `.waterline.json` (the mask
+it started from, pixels added, the old mask's distance from the painted waterline, tile families of the added
+water). A second run starts from the mask named in the receipt, so it is idempotent. One JSON line per map reports
+`installed`, `skipped` with the reason (lake-bed maps with `waterBed: true`, whose mask `lake_shore.py` already built
+along the painted bed; maps without water or without `terrain-map.png`; masks that already reach every painted water
+pixel) or `failed`. `derive` creates a farm of links to another farm's entries.
+
 ## Water surface, detail and cliff-foot stripe tools (Python)
 
 These NumPy/Pillow/OpenCV tools take all input and output paths as arguments, generate PNGs outside Git, and never
@@ -2097,6 +2130,13 @@ Version 1 map sidecars also accept `waterMask` (a replacement for `manifest.terr
 that mask. Include the old painted shallow band in the replacement mask. Together with the `enhanced` water style,
 the bed flag enables refracted bed optics, wet sand and swash onto land. Omitted/false `waterBed` and the `classic`
 style retain their existing shaders. `colourMatched: false` bypasses the entire sidecar, including these overrides.
+
+Optional `waterline: "painted"` says that `waterMask` follows the waterline the map paints pixel by pixel, including
+water painted inside tiles of other families (the feet of water cliffs, quays, rocks, overpasses), as
+[`python/waterline_mask.py`](#water-mask-along-the-painted-waterline-python) builds it. The extractor's own mask
+ends at whole water cells there. With the flag the renderer adds no cliff-foot extension to the water and tells hard
+shores from beaches by the tile under the water; without it (or with `waterBed: true`, or without a sidecar mask)
+nothing changes.
 
 Optional `shoreIgnore` names an 8-bit greyscale image with the water mask's size/layout. Values >= 128 mark land
 that never forms a shoreline, such as cliff tops and walls beside water in screen space. A field texel must have at

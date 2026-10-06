@@ -10,6 +10,7 @@ import {
   shadowStretch,
   spriteLookFor,
 } from '../src/ra2/spriteLook';
+import { INFANTRY_SHADOW_SOFT_OPACITY } from '../src/ra2/sprites';
 import {
   ENGINE_SHADOW_OPACITY,
   VoxelShadowMesh,
@@ -21,7 +22,15 @@ import { instantiateVoxel } from '../src/ra2/voxels';
 import { voxelMaterialFor } from '../src/ra2/vpl';
 import { createScenario } from '../sandbox/scenario';
 
-const neutral = { sunGain: 1, specularSize: 1, aoPower: 1, contactShade: 1, shadowLength: 1, shadowDarkness: 1 };
+const neutral = {
+  sunGain: 1,
+  specularSize: 1,
+  aoPower: 1,
+  contactShade: 1,
+  shadowLength: 1,
+  shadowDarkness: 1,
+  infantryShadow: 1,
+};
 const cinematic = {
   sunGain: 1.25,
   specularSize: 1.6,
@@ -29,8 +38,17 @@ const cinematic = {
   contactShade: 1.5,
   shadowLength: 1.4,
   shadowDarkness: 1.15,
+  infantryShadow: INFANTRY_SHADOW_SOFT_OPACITY,
 };
-const shaderGains = ['sunGain', 'specularSize', 'aoPower', 'contactShade', 'shadowLength', 'shadowDarkness'] as const;
+const shaderGains = [
+  'sunGain',
+  'specularSize',
+  'aoPower',
+  'contactShade',
+  'shadowLength',
+  'shadowDarkness',
+  'infantryShadow',
+] as const;
 
 /** No backend initialization or draws: exercise only the renderer's per-frame CPU uniform update. */
 function headlessRenderer(): HdRenderer {

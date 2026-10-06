@@ -65,9 +65,12 @@ import { NO_TILE, ra2Screen, type Ra2Cache, tileAtlasPixel } from './cache';
 import { srgbScale, terrainGradeAt } from './mapLighting';
 import { SHORE_MAX, SHORE_MIN } from './shoreField';
 import { spriteLookFor } from './spriteLook';
+import { isWaterFamilyTile } from '../../../ra2-assets/src/waterMask';
+import { hardShoreField } from './hardShore';
 import {
   artToneContactRelief,
   bedWaterLook,
+  hardShoreInputs,
   reflectionOffset,
   rippledReflection,
   tonedWaterBody,
@@ -306,6 +309,27 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
   geometry.setAttribute('atlasUv', new BufferAttribute(new Float32Array(uvs), 2));
   geometry.setAttribute('atlasRect', new BufferAttribute(new Float32Array(rects), 4));
   geometry.setAttribute('wall', new BufferAttribute(new Float32Array(walls), 1));
+  if (cache.terrainMap?.paintedWaterline) {
+    // Hard shores of a mask that follows the painted waterline (hardShore.ts), per vertex like the contact shading.
+    const mask = cache.terrainMap.waterMask.image as { data: ArrayLike<number>; width: number; height: number };
+    const field = hardShoreField(
+      W,
+      H,
+      SUB,
+      (x, y) => {
+        const t = cellExists(x, y) ? tileAt(x, y) : undefined;
+        return t ? { level: baseLevel(x, y), waterFamily: isWaterFamilyTile(t) } : null;
+      },
+      mask,
+      cache.terrainMap.ref,
+    );
+    const hard = new Float32Array(count);
+    for (let v = 0; v < count; v++) {
+      if (walls[v] === 1) continue;
+      hard[v] = field[Math.round(positions[v * 3 + 2]! * SUB) * (W * SUB + 1) + Math.round(positions[v * 3]! * SUB)]!;
+    }
+    geometry.setAttribute('hardShore', new BufferAttribute(hard, 1));
+  }
   geometry.setAttribute('atlasUv2', new BufferAttribute(new Float32Array(uvs2), 2));
   geometry.setAttribute('atlasRect2', new BufferAttribute(new Float32Array(rects2), 4));
   // Ground triangles first, then cliff walls, each drawn with its own material (see createMaterials).
@@ -386,6 +410,14 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
 
 /** Extra shore distance (cells) given to water right at a cliff foot, so it reads as deep water (see waterLook). */
 const CLIFF_WATER_DEPTH = 1.5;
+
+/**
+ * Theatres whose shore tiles are not sand. Snow's are ice: the look's beach (a sand-coloured bed, bared sand as the
+ * swash runs back, turquoise shallows) drew an orange line and a tropical glow around every ice floe, where the
+ * original paints pale cracked ice straight into dark water. Every shore of such a map is a hard one (waterLook.ts
+ * HARD_SHORE): deep water up to the painted ice, which keeps its own art.
+ */
+const BEACHLESS_THEATERS: ReadonlySet<string> = new Set(['snow']);
 
 /**
  * Contact shading at the feet of cliffs and raised ground (no sun shadow: original maps take none, see the mesh's
@@ -788,16 +820,35 @@ function createMaterials(
     const painted: ShaderNode = texture(map.shore, uv)
       .r.mul(SHORE_MAX - SHORE_MIN)
       .add(SHORE_MIN);
-    const cliffWater: ShaderNode = nearCliff.mul(smoothstep(-0.45, -0.15, painted));
-    const shore: ShaderNode = painted.add(cliffWater.mul(CLIFF_WATER_DEPTH));
+    // Sheltered water within about 1.5 cells of a cliff: no surf there, so the scree the art paints at a cliff foot is
+    // not outlined in foam (the enhanced look's `calm`).
+    const sheltered: ShaderNode = clamp(float(1).sub(attribute('contact', 'float')).mul(12), 0, 1);
+    // A mask that follows the painted waterline (MapMaterials.waterline) already reaches the rock: the water is not
+    // extended onto land at cliff feet.
+    const cliffWater: ShaderNode = map.paintedWaterline ? float(0) : nearCliff.mul(smoothstep(-0.45, -0.15, painted));
+    const deepened: ShaderNode = painted.add(cliffWater.mul(CLIFF_WATER_DEPTH));
     // Water wherever the painted mask or the distance field says so; the soft painted shore band (grey foam art) is
     // replaced by our own shoreline instead of blending with it.
     const waterness: ShaderNode = smoothstep(0.3, 0.55, texture(map.waterMask, uv).r)
-      .max(smoothstep(0.0, 0.08, shore))
+      .max(smoothstep(0.0, 0.08, deepened))
       .max(cliffWater);
+    // Hard shores (waterLook.ts HARD_SHORE): every shore of a theatre without sand; on a painted-waterline map the
+    // shores its tiles mark (hardShore.ts: the height step is often more than a cell behind the painted foot of a
+    // cliff) joined with the cliff feet the height step does find. Other maps keep the look's beach everywhere, and
+    // so does the painted lake bed, whose shoreline (beach profile, cliff field, swash) is built on its own mask.
+    const lakeBed = map.waterBed && waterPreset.style === 'enhanced';
+    const hard: ShaderNode | null = lakeBed
+      ? null
+      : BEACHLESS_THEATERS.has(cache.manifest.theater ?? '')
+        ? float(1)
+        : map.paintedWaterline
+          ? max(attribute('hardShore', 'float'), nearCliff)
+          : null;
+    const waterline = hard ? hardShoreInputs(deepened, hard, sheltered, waterness) : null;
+    const shore: ShaderNode = waterline ? waterline.shore : deepened;
     weatherLand = float(1).sub(waterness);
     let reflection: { colour: ShaderNode; coverage: ShaderNode } | undefined;
-    if (map.waterBed && waterPreset.style === 'enhanced') {
+    if (lakeBed) {
       const levels = selectWaterMirrorLevels(waterLevels);
       if (levels.length && mirrors) {
         // One atlas for every level: a mirror of its own per level costs two sampled textures each, and four levels
@@ -837,10 +888,8 @@ function createMaterials(
       reflection = { colour: (mirror as ShaderNode).rgb, coverage: smoothstep(0.9999, 0.999, depth.x) };
       reflectionTarget = mirror.target;
     }
-    // Sheltered water within about 1.5 cells of a cliff: no surf there, so the scree the art paints at a cliff foot is
-    // not outlined in foam (the enhanced look's `calm`).
-    const calm: ShaderNode = clamp(float(1).sub(attribute('contact', 'float')).mul(12), 0, 1);
-    if (map.waterBed && waterPreset.style === 'enhanced') {
+    const calm: ShaderNode = waterline ? waterline.calm : sheltered;
+    if (lakeBed) {
       // No inland band replacement: the mask includes the old shallows and the composite already paints real sand.
       const bedAt = (offsetXZ: ShaderNode): ShaderNode => {
         // World xz -> original engine screen pixels -> composite UV; height does not change under refraction.
@@ -912,7 +961,10 @@ function createMaterials(
       // band traced the cell-stepped edge of the water mask under cliffs as a cyan sawtooth. Only the look's
       // reflected light is kept, at the painted water's level (waterLook.ts tonedReflection), and the cliff-foot
       // contact shading is dropped near that water (artToneContactRelief).
-      const ownShore: ShaderNode = float(1).sub(water.artTone);
+      // Nor at a hard shore: the rock at the water's edge is the map's own art, not a beach to dress.
+      const ownShore: ShaderNode = waterline
+        ? float(1).sub(water.artTone).mul(waterline.beach)
+        : float(1).sub(water.artTone);
       const band = smoothstep(-0.55, -0.12, shore).mul(ownShore);
       const sand = wetShore(shore).mul(ownShore);
       const land = mix(albedo, wetGround(inland, groundWetness, paved, nodes).albedo, band).mul(
@@ -920,6 +972,7 @@ function createMaterials(
       );
       albedo = mix(land, tonedWaterBody(waterForDisplay(look.body, nodes), albedo, water.artTone), waterness);
       contactRelief = artToneContactRelief(painted, water.artTone);
+      if (waterline) contactRelief = max(contactRelief, waterline.relief);
       roughness = mix(mix(roughness, float(0.35), sand), float(1), waterness);
       sheen = sheen.mul(float(1).sub(waterness));
       ground.emissiveNode = look.emission.mul(mix(float(1), float(WATER_LEVEL), nodes.faithfulDisplay));

@@ -117,6 +117,8 @@ export class SpriteLookState {
   /** CPU-side stretch input; the resulting SHP transform is uploaded through shadowMatrix. */
   readonly shadowLength = uniform(1);
   readonly shadowDarkness = uniform(1);
+  /** Opacity of the infantry footprint's core (HdSettings.infantryShadow): 1 = the original's solid black. */
+  readonly infantryShadow = uniform(1);
   /** SHP shadow decals follow the sun: 0 = the art's own shadows, 1 = fully turned and stretched. */
   readonly shadowFollow = uniform(0);
   /** Penumbra growth of those shadows with distance from their object (0 = the art's crisp shadow). */
