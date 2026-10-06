@@ -1,7 +1,14 @@
 import { BufferAttribute, BufferGeometry } from 'three/webgpu';
 import type { VoxelModel, VoxelSection } from '../../../ra2-assets/src/manifest';
 import type { AtmosphereNodes } from '../atmosphere';
-import { buildStandInPartGeometry, type VoxelGeometry, type VoxelShape } from './voxels';
+import {
+  buildOutlinePartGeometry,
+  buildStandInPartGeometry,
+  voxelShape,
+  type VoxelGeometry,
+  type VoxelShape,
+} from './voxels';
+import { registerSilhouetteGeometry } from './voxelShadow';
 import { buildSmoothSection, smoothVoxelOptions, type SmoothMeshData, type SmoothVoxelOptions } from './voxelSmooth';
 import type { SmoothSectionBuilder } from './voxelSmoothPool';
 import { voxelPbrMaterialFor } from './voxelPbr';
@@ -57,6 +64,22 @@ export function smoothPartGeometry(meshes: readonly SmoothMeshData[]): BufferGeo
   return geometry;
 }
 
+/**
+ * A part geometry with its silhouette registered (voxelShadow.ts): shadow and foam twins draw the part's
+ * exposed-face outline, with the stand-in mesh's corners, whichever mesh the part itself shows. The outline is the
+ * same before and after the smooth mesh replaces the stand-in, so a shadow does not change when that happens.
+ */
+function withSilhouette(
+  geometry: BufferGeometry,
+  sections: readonly VoxelSection[],
+  shape: Readonly<VoxelShape> = voxelShape,
+): BufferGeometry {
+  // The shape in use when the geometry is made (legacy tooling may edit the default object afterwards).
+  const relax = { cornerRelax: shape.cornerRelax, normalBlend: shape.normalBlend };
+  registerSilhouetteGeometry(geometry, () => buildOutlinePartGeometry(sections, relax));
+  return geometry;
+}
+
 /** Like the engine path, geometry lifetime follows the model, while material/texture lifetime follows the world. */
 const shared = new WeakMap<VoxelModel, Map<string, { role: VoxelGeometry['role']; geometry: BufferGeometry }[]>>();
 /** Builds running off the calling thread, per model and option set (see prepareSmoothVoxelGeometry). */
@@ -99,7 +122,10 @@ export function prepareSmoothVoxelGeometry(
         if (!variants.has(key))
           variants.set(
             key,
-            parts.map((part) => ({ role: part.role, geometry: smoothPartGeometry(part.meshes) })),
+            parts.map((part, index) => ({
+              role: part.role,
+              geometry: withSilhouette(smoothPartGeometry(part.meshes), model.parts[index]!.sections),
+            })),
           );
       })
       .finally(() => pending!.delete(key));
@@ -121,7 +147,10 @@ function smoothParts(
   }
   let parts = variants.get(key);
   if (!parts) {
-    parts = model.parts.map((part) => ({ role: part.role, geometry: buildSmoothPartGeometry(part.sections, smooth) }));
+    parts = model.parts.map((part) => ({
+      role: part.role,
+      geometry: withSilhouette(buildSmoothPartGeometry(part.sections, smooth), part.sections),
+    }));
     variants.set(key, parts);
   }
   return parts;
@@ -150,7 +179,10 @@ export function buildStandInVoxelParts(
   model: VoxelModel,
   shape?: Readonly<VoxelShape>,
 ): { role: VoxelGeometry['role']; geometry: BufferGeometry }[] {
-  return model.parts.map((part) => ({ role: part.role, geometry: buildStandInPartGeometry(part.sections, shape) }));
+  return model.parts.map((part) => ({
+    role: part.role,
+    geometry: withSilhouette(buildStandInPartGeometry(part.sections, shape), part.sections, shape),
+  }));
 }
 
 /** Build the model's shared geometry on the calling thread when it is missing (no material is created). */

@@ -1,5 +1,6 @@
 import {
   BackSide,
+  BufferGeometry,
   Color,
   DoubleSide,
   LessDepth,
@@ -668,6 +669,81 @@ function createSurfaceMaterial(
   return material;
 }
 
+/**
+ * Silhouette geometries: a coarse mesh with the outline of a part geometry (within a fraction of a voxel), built
+ * on first use. A twin that draws a part's outline alone (the ground shadow, the waterline foam: flat colour through
+ * a projection that flattens the part) draws it in place of the part's own geometry: a redraw-quality part has
+ * dozens of triangles per screen pixel, five shadow twins of every part drew all of them again, and in a battle
+ * four of every five triangles of the frame were shadow (measured: 48 of 59 million with a hundred vehicles in view).
+ * The colour reflection reads the part's own attributes and keeps its geometry.
+ */
+const silhouettes = new WeakMap<BufferGeometry, BufferGeometry | (() => BufferGeometry)>();
+
+/**
+ * `build` makes the silhouette of `geometry` when a twin first needs it; it is disposed with `geometry`. Call once
+ * per geometry, by whoever builds it (it knows what the geometry was made from).
+ */
+export function registerSilhouetteGeometry(geometry: BufferGeometry, build: () => BufferGeometry): void {
+  silhouettes.set(geometry, build);
+  const release = (): void => {
+    geometry.removeEventListener('dispose', release);
+    const made = silhouettes.get(geometry);
+    silhouettes.delete(geometry);
+    if (made && typeof made !== 'function') made.dispose();
+  };
+  geometry.addEventListener('dispose', release);
+}
+
+/** The registered silhouette of `geometry` (built now if this is its first use), or `geometry` itself. */
+export function silhouetteGeometry(geometry: BufferGeometry): BufferGeometry {
+  const entry = silhouettes.get(geometry);
+  if (!entry) return geometry;
+  if (typeof entry !== 'function') return entry;
+  const made = entry();
+  silhouettes.set(geometry, made);
+  return made;
+}
+
+/** What a twin of `layer` draws for a part with `geometry`. */
+function surfaceGeometry(geometry: BufferGeometry, layer: SurfaceLayer): BufferGeometry {
+  return layer === 'reflection' ? geometry : silhouetteGeometry(geometry);
+}
+
+/**
+ * `userData` key of a silhouette geometry: how many of its leading indices draw the faces that look up the part's
+ * own up axis (+y). A closed surface's upward faces cover everything the whole surface covers once it is flattened
+ * along that axis, and they are the faces that survive back-face culling there: the contact footprint draws only
+ * them (the others were transformed and then culled, five times per part and frame).
+ */
+export const SILHOUETTE_FOOTPRINT = 'silhouetteFootprintIndices';
+const footprints = new WeakMap<BufferGeometry, BufferGeometry>();
+
+/** The leading footprint range of `silhouette` as a geometry over the same buffers, or `silhouette` without one. */
+export function footprintGeometry(silhouette: BufferGeometry): BufferGeometry {
+  const count: unknown = silhouette.userData[SILHOUETTE_FOOTPRINT];
+  const index = silhouette.index;
+  if (typeof count !== 'number' || !index || count <= 0 || count >= index.count) return silhouette;
+  let view = footprints.get(silhouette);
+  if (!view) {
+    view = new BufferGeometry();
+    // The same attribute and index objects: three keeps one GPU buffer for each.
+    for (const name of Object.keys(silhouette.attributes)) view.setAttribute(name, silhouette.getAttribute(name));
+    view.setIndex(index);
+    view.setDrawRange(0, count);
+    view.boundingSphere = silhouette.boundingSphere;
+    view.boundingBox = silhouette.boundingBox;
+    footprints.set(silhouette, view);
+    const made = view;
+    const release = (): void => {
+      silhouette.removeEventListener('dispose', release);
+      footprints.delete(silhouette);
+      made.dispose();
+    };
+    silhouette.addEventListener('dispose', release);
+  }
+  return view;
+}
+
 const point = new Vector3();
 const origin = new Vector3();
 const normal = new Vector3();
@@ -698,7 +774,10 @@ class VoxelSurfaceMesh extends Mesh {
     readonly copyIndex = 0,
     readonly layer: SurfaceLayer = 'shadow',
   ) {
-    super(source.geometry, voxelSurfaceMaterial(nodes, layer));
+    const outline = surfaceGeometry(source.geometry, layer);
+    super(outline, voxelSurfaceMaterial(nodes, layer));
+    this.sourceGeometry = source.geometry;
+    this.outline = outline;
     this.mode = voxelShadowFor(nodes);
     this.nodes = nodes;
     if (layer === 'reflection') this.updateReflectionMaterial();
@@ -719,6 +798,11 @@ class VoxelSurfaceMesh extends Mesh {
     if (this.layer === 'reflection') bindSlots(this.source.material);
   };
 
+  /** The source's geometry this twin's own was chosen for (a part changes geometry when its final mesh arrives). */
+  private sourceGeometry: BufferGeometry;
+  /** What this twin draws of it: the part's silhouette, or the part itself (see surfaceGeometry). */
+  private outline: BufferGeometry;
+
   /** Visibility the review modes and the water test ask for, applied only when it changes: hiding by other code (the
    * sandbox bake's isolation, review tooling) is never overridden every frame. */
   private wanted: boolean;
@@ -732,6 +816,16 @@ class VoxelSurfaceMesh extends Mesh {
   }
 
   override updateMatrixWorld(force?: boolean): void {
+    if (this.sourceGeometry !== this.source.geometry) {
+      this.sourceGeometry = this.source.geometry;
+      this.outline = surfaceGeometry(this.sourceGeometry, this.layer);
+    }
+    const drawn = this.place(force) ? footprintGeometry(this.outline) : this.outline;
+    if (this.geometry !== drawn) this.geometry = drawn;
+  }
+
+  /** Pose this twin for the frame. True when it draws the contact footprint: the part flattened along its up axis. */
+  private place(force?: boolean): boolean {
     if (this.layer === 'reflection') this.updateReflectionMaterial();
     const land = this.layer === 'shadow' && (this.copyIndex === 0 || this.mode.soft);
     this.onWater = false;
@@ -741,7 +835,7 @@ class VoxelSurfaceMesh extends Mesh {
     if (!parent || !ground) {
       this.show(land);
       super.updateMatrixWorld(force);
-      return;
+      return false;
     }
     // An override casts from a physical origin instead of a render-offset root, always with ground shear. Otherwise
     // vehicles use their own origin; aircraft and jumpjets drop onto the terrain/water and shrink with their height.
@@ -757,9 +851,9 @@ class VoxelSurfaceMesh extends Mesh {
     // Water contact/foam always retain the penumbra, independently of land's hard review mode. A contact shadow is
     // the body's footprint alone: turret and barrel twins rest.
     this.show(this.onWater || (land && !(contact && this.source.parent !== parent)));
-    if (this.layer !== 'shadow' && !this.onWater) return;
+    if (this.layer !== 'shadow' && !this.onWater) return false;
     if (contact) {
-      if (this.source.parent !== parent) return;
+      if (this.source.parent !== parent) return false;
       this.contact = true;
       // Depth follows the ground the unit stands on (a ramp tilts the body more steeply than the terrain it is on).
       if (ground.normal && Math.abs(origin.y - ground.height(origin.x, origin.z)) < CONTACT_GROUND_TOLERANCE)
@@ -824,7 +918,8 @@ class VoxelSurfaceMesh extends Mesh {
       this.planeConstant = normal.dot(origin) + SHADOW_LIFT + copy.lift + contact.clearance * normal.y;
       this.matrixWorldNeedsUpdate = false;
       for (const child of this.children) child.updateMatrixWorld(force);
-      return;
+      // Flattened along the body's own up axis: its upward faces are the whole footprint.
+      return true;
     }
     if (this.onWater) {
       this.waterY = waterY!;
@@ -866,6 +961,7 @@ class VoxelSurfaceMesh extends Mesh {
     this.matrixWorld.multiplyMatrices(projection, this.source.matrixWorld);
     this.matrixWorldNeedsUpdate = false;
     for (const child of this.children) child.updateMatrixWorld(force);
+    return false;
   }
 }
 
