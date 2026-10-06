@@ -65,6 +65,9 @@ export interface ToolbarModel {
   mapsAvailable: boolean;
   /** HD view shown (true) or the original picture (false); null/absent: no HD bridge in this session. */
   hdView?: boolean | null;
+  /** Quality tier of the shown HD view (0 = everything) out of `hdQualityTiers`; null/absent while it is not shown. */
+  hdQuality?: number | null;
+  hdQualityTiers?: number;
 }
 const resolutions = [
   '',
@@ -215,6 +218,9 @@ export function RuntimeToolbarView({
   });
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState('');
+  // The HD view is on screen (not merely available): with the native overlay passthrough the original picture is
+  // then drawn in one keyed 1:1 pass, without upscaling, AI inference or post-processing (vmFrameRenderer.ts draw).
+  const hdShown = model.hdView === true && model.hdQuality !== null && model.hdQuality !== undefined;
   const file = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const sync = () => setFullscreen(!!document.fullscreenElement);
@@ -291,6 +297,11 @@ export function RuntimeToolbarView({
           ]}
           onChange={(value) => callbacks.onUpscaleMode?.(value as UpscaleMode)}
         />
+        {hdShown && model.upscaleMode !== 'off' && (
+          <output id="vm-upscale-hd-note" role="status">
+            {t('高清画面显示时不运行（只作用于原版画面）')}
+          </output>
+        )}
       </div>
       <div className="resolution-controls reshade-controls">
         <span className="label" title={t('SweetFX 的 Vibrance 与 LumaSharpen 浏览器移植')}>
@@ -316,11 +327,13 @@ export function RuntimeToolbarView({
           }}
         />
         <output id="vm-reshade-status" role="status">
-          {model.reshadeMode === 'compare'
-            ? t('左：原图 · 右：增强')
-            : model.reshadeMode === 'enhance'
-              ? t('已开启 · 色彩 + 锐化')
-              : t('已关闭')}
+          {hdShown && (model.reshadeMode ?? 'off') !== 'off'
+            ? t('高清画面显示时不运行（只作用于原版画面）')
+            : model.reshadeMode === 'compare'
+              ? t('左：原图 · 右：增强')
+              : model.reshadeMode === 'enhance'
+                ? t('已开启 · 色彩 + 锐化')
+                : t('已关闭')}
         </output>
       </div>
       <div className="rate-controls vm-clock-controls" role="group" aria-label={t('时钟倍率')}>
@@ -500,10 +513,20 @@ export function RuntimeToolbarView({
           className="toolbar-button"
           type="button"
           aria-pressed={model.hdView}
-          title={t('切换高清画面与原版画面（快捷键 \\）')}
+          title={
+            model.hdView && model.hdQuality
+              ? t(
+                  '帧率不足，已自动减少最不显眼的效果（热浪与半透明特效混色、抗锯齿、软影）；精灵与地形仍是 1:1，帧率恢复后自动还原',
+                )
+              : t('切换高清画面与原版画面（快捷键 \\）')
+          }
           onClick={() => callbacks.onHdView?.()}
         >
-          {model.hdView ? t('画面：高清') : t('画面：原版')}
+          {!model.hdView
+            ? t('画面：原版')
+            : model.hdQuality
+              ? t('画面：高清 · 减负 {0}/{1}', model.hdQuality, Math.max(1, (model.hdQualityTiers ?? 1) - 1))
+              : t('画面：高清')}
         </button>
       )}
       <button

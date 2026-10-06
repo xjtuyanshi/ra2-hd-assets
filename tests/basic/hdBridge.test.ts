@@ -44,7 +44,18 @@ function fakeView() {
     resizePixels: vi.fn(),
     dispose: vi.fn(),
     settledFrames: 3,
-    hd: { topEffectsEnabled: false, enableTopEffects: vi.fn(), settings: {}, applySettings: vi.fn() },
+    hd: {
+      topEffectsEnabled: false,
+      enableTopEffects: vi.fn(),
+      settings: {},
+      applySettings: vi.fn(),
+      qualityTiers: 4,
+      quality: 0,
+      enableAsyncPipelines: vi.fn(() => true),
+      setQualityTier: vi.fn(function (this: { quality: number }, tier: number) {
+        this.quality = tier;
+      }),
+    },
     outOfSight: false,
     newArtPerFrame: 1,
     hiddenUploadPixels: 0,
@@ -126,6 +137,7 @@ function setup(search = '?hd=1', backend: VmFrameRenderer['backend'] = 'WebGL2')
     setTacticalPassthrough: vi.fn(async (_flags: number) => true),
   };
   const status = vi.fn((_text: string | null) => undefined);
+  const quality = vi.fn((_tier: number | null, _tiers: number) => undefined);
   const stop = startHdBridge({
     vm: vm as unknown as VmShell,
     screen: screen as unknown as HTMLCanvasElement,
@@ -133,10 +145,12 @@ function setup(search = '?hd=1', backend: VmFrameRenderer['backend'] = 'WebGL2')
     invalidate: vi.fn(),
     frameSize: () => frameSize,
     publishStatus: status,
+    publishQuality: quality,
   });
   return {
     stop,
     status,
+    quality,
     vm,
     renderer,
     screen,
@@ -1370,5 +1384,57 @@ describe('HD bridge match start', () => {
     await advance(1100, 3);
     expect(harness.hdCanvas.style.display).toBe('block');
     harness.stop();
+  });
+});
+
+describe('HD bridge frame-time safeguard', () => {
+  it('steps the shown view down while frames stay over budget, says so, and starts the next match with everything', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    harness.setState(battle(3));
+    await advance(16, 4);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    // On budget: the view draws with everything, and the host knows.
+    await advance(16, 300);
+    expect(view.hd.quality).toBe(0);
+    expect(harness.quality).toHaveBeenLastCalledWith(0, 4);
+    // 30 ms frames: one tier down after two windows of frames, the next one after two more.
+    await advance(30, 185);
+    expect(view.hd.quality).toBe(1);
+    expect(harness.quality).toHaveBeenLastCalledWith(1, 4);
+    await advance(30, 185);
+    expect(view.hd.quality).toBe(2);
+    expect(harness.quality).toHaveBeenLastCalledWith(2, 4);
+    // (A steady 18.2 ms, 55 frames a second, is over budget too: see FRAME_BUDGET_MARGIN.)
+    await advance(18.2, 185);
+    expect(view.hd.quality).toBe(3);
+    // A pause of the page (a dialog, another tab) is not load.
+    await advance(4000);
+    await advance(30, 80);
+    expect(view.hd.quality).toBe(3);
+    // Another match on the map: out of sight again, at full quality, and the host hears that no HD view is shown
+    // until this one is.
+    harness.quality.mockClear();
+    view.settledFrames = 0;
+    harness.setState(battle(1));
+    // (Frames the game drew before it heard of the change may still carry the key colour for half a second.)
+    await advance(16, 45);
+    expect(view.outOfSight).toBe(true);
+    expect(view.hd.quality).toBe(0);
+    expect(harness.quality).toHaveBeenLastCalledWith(null, 4);
+    harness.stop();
+  });
+
+  it('keeps every pass with ?hd-governor=0', async () => {
+    const harness = setup('?hd=1&hd-governor=0');
+    const view = await goLive(harness);
+    harness.setState(battle(3));
+    await advance(16, 4);
+    await advance(40, 600);
+    expect(view.hd.setQualityTier).not.toHaveBeenCalled();
+    expect(view.hd.quality).toBe(0);
+    expect(harness.quality).toHaveBeenLastCalledWith(0, 4);
+    harness.stop();
+    expect(harness.quality).toHaveBeenLastCalledWith(null, 0);
   });
 });

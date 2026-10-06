@@ -42,9 +42,15 @@ import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLight, type AtmosphereNodes } 
 import type { ShaderNode } from '../tsl';
 import { finishSceneLighting, sceneLitColour } from '../lighting';
 import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrade } from './mapLighting';
-import { voxelProjectionFor, type VoxelProjectionPart } from './voxelProjection';
+import { inheritSlotBinder, slotMaterial, textureSlot } from '../materialSlots';
+import { VoxelProjectionInputs, voxelProjectionFor, type VoxelProjectionPart } from './voxelProjection';
 import { projectedVoxelColour } from './voxelProjectionNodes';
-import { registerVoxelReflectionColour, voxelReflectionAmbient, voxelReflectionNormal } from './voxelReflectionColour';
+import {
+  registerVoxelReflectionColour,
+  registerVoxelReflectionVariant,
+  voxelReflectionAmbient,
+  voxelReflectionNormal,
+} from './voxelReflectionColour';
 import { highlightRoughness, poweredOcclusion, spriteLookFor, type SpriteLookState } from './spriteLook';
 
 /**
@@ -151,6 +157,21 @@ export class VoxelLightingState {
   loadingUrl = '';
   readonly byPalette = new WeakMap<Uint8Array, MeshStandardNodeMaterial>();
   readonly byProjection = new WeakMap<VoxelProjectionPart, WeakMap<Uint8Array, MeshStandardNodeMaterial>>();
+  /** Shader graphs by `sections|kind` and map grade: every material above is a clone of one of their prototypes. */
+  readonly graphs = new Map<string, Map<MapLightGrade | null, VoxelGraph>>();
+  /** Lookup texture of a palette for the table it was made with. */
+  readonly lookups = new WeakMap<Uint8Array, { table: LoadedTable | null; texture: DataTexture }>();
+}
+
+/**
+ * One shader graph for every palette and every projected part: the prototype material and the slots its shader reads
+ * the palette's lookup texture and the part from (see materialSlots.ts). A house colour or a unit type seen for the
+ * first time then costs a clone and a small texture, no shader build and no pipeline.
+ */
+interface VoxelGraph {
+  prototype: VoxelMaterial;
+  lookup: ShaderNode;
+  projection: VoxelProjectionInputs | null;
 }
 
 const states = new WeakMap<AtmosphereNodes, VoxelLightingState>();
@@ -277,6 +298,8 @@ class VoxelMaterial extends MeshStandardNodeMaterial {
     this.state = source.state;
     this.look = source.look;
     this.sceneMultiplier = source.sceneMultiplier;
+    // A clone draws the palette and the part its source draws (opacity and native-depth variants of one unit).
+    inheritSlotBinder(this, source);
     return this;
   }
   override setupLightingModel(): PhysicalLightingModel {
@@ -339,13 +362,16 @@ function lookupTexture(palette: Uint8Array, table: LoadedTable | null): DataText
   return lut;
 }
 
-function createMaterial(
-  lut: DataTexture,
+/**
+ * The shader graph of one kind of voxel material: plain, or projected with or without house paint (`house`: the only
+ * thing about a redraw that changes the shader). The palette's lookup texture and the projected part are slots.
+ */
+function createGraph(
   sections: number,
   grade: MapLightGrade | null,
   nodes: AtmosphereNodes,
-  projection?: VoxelProjectionPart,
-): MeshStandardNodeMaterial {
+  house: boolean | null,
+): VoxelGraph {
   const state = voxelLightingFor(nodes);
   const { voxelFill, voxelDebug, voxelExtraLight, voxelOcclusion, voxelSunDiffuse, lightDirection } = state;
   const material = new VoxelMaterial();
@@ -353,7 +379,8 @@ function createMaterial(
   material.state = state;
   const look = (material.look = spriteLookFor(nodes));
   nodes.own(material);
-  nodes.own(lut);
+  const lut = textureSlot();
+  const projection = house === null ? null : new VoxelProjectionInputs();
   material.name = sections ? 'voxel-vpl' : 'voxel-fallback';
   if (projection) material.name += '-projected';
   const rows = sections + 2;
@@ -410,6 +437,7 @@ function createMaterial(
   if (projection) {
     const projected = projectedVoxelColour(
       projection,
+      house === true,
       voxelProjectionFor(nodes),
       (index) => sRGBTransferEOTF(texture(lut, vec2(index.add(0.5).div(256), (sections + 0.5) / rows)).rgb),
       lightDirection,
@@ -453,6 +481,7 @@ function createMaterial(
       const projState = voxelProjectionFor(nodes);
       const projected = projectedVoxelColour(
         projection,
+        house === true,
         projState,
         (index) => sRGBTransferEOTF(texture(lut, vec2(index.add(0.5).div(256), (sections + 0.5) / rows)).rgb),
         lightDirection,
@@ -477,6 +506,52 @@ function createMaterial(
     // bound so darker source faces stay dark; direct sun/glints above never add radiance to the water twin.
     return voxelReflectionAmbient(albedo, voxelFill, ceiling);
   });
+  return { prototype: material, lookup: lut, projection };
+}
+
+/** The graph for the lighting table in use, a palette's map grade and a kind of projection, built on first use. */
+function graphFor(
+  state: VoxelLightingState,
+  nodes: AtmosphereNodes,
+  grade: MapLightGrade | null,
+  house: boolean | null,
+): VoxelGraph {
+  const sections = state.loaded?.sections ?? 0;
+  const key = `${sections}|${house === null ? 'plain' : house ? 'projected-house' : 'projected'}`;
+  let grades = state.graphs.get(key);
+  if (!grades) state.graphs.set(key, (grades = new Map()));
+  let graph = grades.get(grade);
+  if (!graph) grades.set(grade, (graph = createGraph(sections, grade, nodes, house)));
+  return graph;
+}
+
+/** A palette's lookup texture for the lighting table in use (one per palette, whatever draws with it). */
+function lookupFor(state: VoxelLightingState, nodes: AtmosphereNodes, palette: Uint8Array): DataTexture {
+  const cached = state.lookups.get(palette);
+  if (cached && cached.table === state.loaded) return cached.texture;
+  const texture = nodes.own(lookupTexture(palette, state.loaded));
+  state.lookups.set(palette, { table: state.loaded, texture });
+  return texture;
+}
+
+/**
+ * A material of `graph` for one palette (and one projected part): a clone of the prototype, which three draws with
+ * the prototype's shader and pipeline, bound to its own lookup texture and part before each of its objects is drawn.
+ */
+function graphMaterial(
+  graph: VoxelGraph,
+  nodes: AtmosphereNodes,
+  lookup: DataTexture,
+  part?: VoxelProjectionPart,
+): MeshStandardNodeMaterial {
+  const material = nodes.own(
+    slotMaterial(graph.prototype, () => {
+      graph.lookup.value = lookup;
+      if (part) graph.projection!.bind(part);
+    }),
+  );
+  // The water twin of every clone is the prototype's (see voxelShadow.ts): one more shader that is built once.
+  registerVoxelReflectionVariant(material, graph.prototype);
   return material;
 }
 
@@ -491,12 +566,13 @@ export function voxelMaterialFor(
   palette: Uint8Array | null,
   nodes = paletteNodes(palette) ?? DEFAULT_ATMOSPHERE_NODES,
 ): MeshStandardNodeMaterial {
-  const { byPalette, loaded } = voxelLightingFor(nodes);
+  const state = voxelLightingFor(nodes);
   const key = palette ?? GREY;
-  let material = byPalette.get(key);
+  let material = state.byPalette.get(key);
   if (!material) {
-    material = createMaterial(lookupTexture(key, loaded), loaded?.sections ?? 0, paletteGrade(palette), nodes);
-    byPalette.set(key, material);
+    const graph = graphFor(state, nodes, paletteGrade(palette), null);
+    material = graphMaterial(graph, nodes, lookupFor(state, nodes, key));
+    state.byPalette.set(key, material);
   }
   return material;
 }
@@ -516,13 +592,8 @@ export function voxelProjectedMaterialFor(
   const key = palette ?? GREY;
   let material = palettes.get(key);
   if (!material) {
-    material = createMaterial(
-      lookupTexture(key, state.loaded),
-      state.loaded?.sections ?? 0,
-      paletteGrade(palette),
-      nodes,
-      projection,
-    );
+    const graph = graphFor(state, nodes, paletteGrade(palette), !!projection.manifest.house);
+    material = graphMaterial(graph, nodes, lookupFor(state, nodes, key), projection);
     palettes.set(key, material);
   }
   return material;

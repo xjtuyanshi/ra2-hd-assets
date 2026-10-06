@@ -848,6 +848,12 @@ export class EffectsLayer {
   private readonly charLedger = new CharLedger();
   /** Enhanced style: heat shimmer (refracts the frame drawn so far). */
   private readonly shimmer: ParticlePool;
+  /**
+   * Whether new blasts get a heat shimmer. Its refraction reads a copy of the frame drawn so far, for which the
+   * multisampled scene pass is ended, resolved and loaded again (2 to 3 ms at 3120x2096): the first thing a renderer
+   * short of frame time gives up (HdRenderer.setQualityTier). Shimmers already rising finish.
+   */
+  heatShimmer = true;
   /** Enhanced style: dust rings over the ground. */
   private readonly dust: ParticlePool;
   /** Enhanced style: boiling fireballs over the native art. */
@@ -1950,7 +1956,8 @@ export class EffectsLayer {
         at.y,
       );
     }
-    this.shimmer.spawn(now + 0.05, at, this.zeroVelocity, e.shimmer.width * width, e.shimmer.life);
+    if (this.heatShimmer)
+      this.shimmer.spawn(now + 0.05, at, this.zeroVelocity, e.shimmer.width * width, e.shimmer.life);
     this.dust.spawn(now, at, this.zeroVelocity, e.dust.width * width, e.dust.life);
     if (options.hotCrater) {
       this.embers.spawn(now + e.crater.delay, at, this.zeroVelocity, e.crater.width * width, e.crater.life, 1);

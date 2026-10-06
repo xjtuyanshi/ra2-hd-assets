@@ -71,6 +71,8 @@
  *                             replays from packages/ra2-assets/python/live_replay.py write them only on change);
  *                             &rstart=N pushes only the first N snapshots before `ready`, and __fx.advance(ms) pushes
  *                             the rest as the clock passes their frames (frame sequences of one replay)
+ *   &pipelines=async          compile render pipelines off the frame, as the game page does (HdRenderer
+ *                             enableAsyncPipelines): wait for `__fx.live.hd.pendingPipelines === 0` before a capture
  *
  * `performance.now` and `Math.random` are replaced by a controllable clock and a seeded generator before the renderer
  * exists, so the same query always renders the same picture. `window.__fx` exposes the view, a `step` helper (whole
@@ -133,6 +135,8 @@ const live = await LiveView.create(canvas, {
   effectsHdBase: params.get('fxhdbase') ?? undefined,
   water: params.get('water') === 'enhanced' ? 'enhanced' : 'classic',
 });
+// As the game page shows it: pipelines compiled off the frame (objects appear when theirs is ready).
+if (params.get('pipelines') === 'async') live.hd.enableAsyncPipelines();
 (window as unknown as { __hd: unknown }).__hd = {
   hd: live.hd,
   world: live.world,

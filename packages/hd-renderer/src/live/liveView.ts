@@ -80,7 +80,7 @@ import { LiveBeams } from './beams';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
 import { BuildingLightGate, buildingLightOverlay, buildingLightSources } from './buildingLights';
 import { BuildingVisualHistory } from './buildingVisualHistory';
-import { PageUploader } from '../pageUpload';
+import { PageGate, PageUploader, type PageUpload } from '../pageUpload';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
 import { SmudgeInstanceCache, type LiveSmudgeCells, type SmudgePage } from './smudges';
@@ -678,10 +678,14 @@ export class LiveView {
   set outOfSight(value: boolean) {
     if (value === this.hiddenFromSight) return;
     this.hiddenFromSight = value;
+    // The next stretch out of sight (another match on this map) warms again: only what is new is built.
+    if (value) this.warmStage = 0;
     // What waited out of sight is drawn in the next frame, with or without a new snapshot (a paused match).
     this.objectsFor = null;
   }
   private hiddenFromSight = false;
+  /** Warm-ups done in this stretch out of sight (see render): 0 none, 1 with the scene, 2 with the match's opening. */
+  private warmStage = 0;
   /**
    * How many new kinds of art (a voxel model in a house's colours, a sprite page's layer) one frame may add to the
    * scene while the view is out of sight. Each brings shaders that are built in the frame that first draws it, 30
@@ -707,6 +711,8 @@ export class LiveView {
   private waitingArt = 0;
   /** Copies decoded atlas pages to the GPU a strip per frame; stepped by render(). */
   private readonly pageUploads: PageUploader;
+  /** Bounds the decoded atlas pages waiting for their upload (library, effect and material pages alike). */
+  readonly pageGate = new PageGate();
   private readonly visuals = new Map<number, Visual>();
   private buildingVisualHistory?: BuildingVisualHistory;
   /** Building appearance by match-unique UID; tolerate brief omissions without retaining every dead object. */
@@ -857,7 +863,10 @@ export class LiveView {
     // Atlas pages go to the GPU as decoded bitmaps (no main-thread repack of their 16.7 M pixels), in strips over
     // the following frames (render() steps the uploader).
     this.pageUploads = new PageUploader(hd.renderer);
-    const upload = (texture: Texture) => this.pageUploads.upload(texture);
+    // Pages are decoded inside the gate: a match start asks for dozens of pages at once (see PageGate).
+    const upload: PageUpload = Object.assign((texture: Texture) => this.pageUploads.upload(texture), {
+      gate: this.pageGate,
+    });
     if (library) {
       library.uploadPage = upload;
       this.fetchAhead = () => library.preloadVoxels();
@@ -1488,6 +1497,8 @@ export class LiveView {
     if (!current) this.hd.setSceneLighting(null);
     this.liveBeams.displayScale.value = 1 / Math.max(1e-3, this.hd.meanExposure);
     if (this.effectSprites) {
+      // Quality tier 1 and up: no copy of the frame for translucent engine effects (see EffectSpriteLayer.backdropMix).
+      this.effectSprites.backdropMix = !(this.hd.quality >= 1);
       this.effectSprites.now.value = this.hd.seconds();
       this.effectSprites.displayScale.value = 1 / Math.max(1e-3, this.hd.meanExposure);
     }
@@ -1498,9 +1509,22 @@ export class LiveView {
       this.volumetricBlasts.cameraUp.value,
       this.volumetricBlasts.toCamera.value,
     );
+    // Out of sight is the time to build: once when there is a scene at all (behind the game's loading screen), and
+    // once more when the match's opening is in, so the passes and quality tiers have the shaders of its units too.
+    if (this.hiddenFromSight && current && !this.hd.warming) {
+      const stage = current.snapshot.frame > 0 && this.settled >= 1 && !this.warmMerged ? 2 : 1;
+      if (stage > this.warmStage) {
+        this.warmStage = stage;
+        this.effectSprites?.warm();
+        this.hd.warm();
+      }
+    }
     this.hd.frame(dt);
-    // Loads settle between frames, never inside one: what is still on its way now was missing from this frame.
-    this.settled = current && this.loadingArt() === 0 ? this.settled + 1 : 0;
+    // Loads settle between frames, never inside one: what is still on its way now was missing from this frame. A
+    // warm frame (HdRenderer.warm) is not a frame of the match either: it draws what is hidden and builds shaders.
+    // Nor is one whose objects still wait for their pipelines (compiled off the frame: see asyncPipelines.ts).
+    const complete = this.loadingArt() === 0 && !this.hd.warming && !this.hd.pendingPipelines;
+    this.settled = current && complete ? this.settled + 1 : 0;
     // Once the opening is in (or the view is shown anyway), the model files of kinds that have not appeared yet are
     // fetched ahead, so the first frame of a new kind of unit has a model to draw (see LiveLibrary.preloadVoxels).
     if (this.fetchAhead && current && (this.settled >= 1 || !this.outOfSight) && this.fetchAhead())
@@ -2313,7 +2337,7 @@ export class LiveView {
    */
   private flushSprites(batch: SpriteBatch, reorder = true): void {
     const map = batch.get('map') ?? EMPTY_SPRITES;
-    if (map.length || this.sprites.mesh.count) this.sprites.setInstances(map, reorder);
+    if (map.length || this.sprites.mesh.instances) this.sprites.setInstances(map, reorder);
     for (const key of batch.keys()) {
       const instances = batch.get(key)!;
       if (key === 'map' || !instances.length) continue;
@@ -2321,7 +2345,7 @@ export class LiveView {
     }
     for (const page of this.pageLayers.keys()) {
       const layer = this.pageLayers.get(page)!.layer;
-      if (!batch.get(page)?.length && layer.mesh.count) layer.setInstances(EMPTY_SPRITES);
+      if (!batch.get(page)?.length && layer.mesh.instances) layer.setInstances(EMPTY_SPRITES);
     }
   }
 
@@ -3192,7 +3216,7 @@ export class LiveView {
     const pages = this.smudgeInstances.instances.pages;
     for (const [page, layer] of this.smudgeLayers) {
       if (pages.has(page)) continue;
-      if (layer.mesh.count) layer.setInstances([]);
+      if (layer.mesh.instances) layer.setInstances([]);
       this.uploadedSmudges.delete(page);
     }
     for (const [page, instances] of pages) {
@@ -3273,7 +3297,7 @@ export class LiveView {
     const pages = this.overlayInstances.instances.pages;
     for (const [page, { layer }] of this.overlayLayers) {
       if (pages.has(page)) continue;
-      if (layer.mesh.count) layer.setInstances([]);
+      if (layer.mesh.instances) layer.setInstances([]);
       this.uploadedOverlays.delete(page);
     }
     for (const [page, instances] of pages) {

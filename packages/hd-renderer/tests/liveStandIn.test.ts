@@ -14,7 +14,7 @@ import { VoxelUnits, type VoxelUnit } from '../src/live/voxelUnits';
 import type { Ra2Cache } from '../src/ra2/cache';
 import { voxelPbrMaterialFor } from '../src/ra2/voxelPbr';
 import { VOXEL_TO_WORLD } from '../src/ra2/voxelScale';
-import { VoxelShadowMesh } from '../src/ra2/voxelShadow';
+import { silhouetteGeometry, VoxelShadowMesh } from '../src/ra2/voxelShadow';
 import { smoothVoxelOptions } from '../src/ra2/voxelSmooth';
 import {
   buildStandInVoxelParts,
@@ -219,10 +219,13 @@ describe('a voxel unit whose smooth mesh is still being built', () => {
       expect(mesh.material).toBe(material);
       expect(mesh.visible).toBe(true);
     }
-    // Every shadow twin draws the stand-in too: the unit has its contact shadow from the first frame.
+    // Every shadow twin draws the stand-in's outline: the unit has its contact shadow from the first frame.
     const twins = root.children.filter((child) => child instanceof VoxelShadowMesh) as VoxelShadowMesh[];
     expect(twins.length).toBeGreaterThanOrEqual(3);
-    for (const twin of twins) expect(twin.geometry).toBe(twin.source.geometry);
+    for (const twin of twins) {
+      expect(twin.geometry).toBe(silhouetteGeometry(twin.source.geometry));
+      expect(twin.geometry).not.toBe(twin.source.geometry);
+    }
     expect(root.captureRadius).toBeGreaterThan(0);
     h.dispose();
   });
@@ -313,8 +316,10 @@ describe('a voxel unit whose smooth mesh is still being built', () => {
     expect(root.parent).toBe(scene);
     expect(partGeometries(unit)).toEqual(smooth);
     expect(root.partMeshes.map((mesh) => mesh.material)).toEqual(before.materials);
+    // The twins follow to the smooth mesh's outline at their next matrix update (the scene's, every frame).
+    root.updateMatrixWorld(true);
     for (const twin of root.children.filter((child) => child instanceof VoxelShadowMesh) as VoxelShadowMesh[])
-      expect(twin.geometry).toBe(twin.source.geometry);
+      expect(twin.geometry).toBe(silhouetteGeometry(twin.source.geometry));
     expect(root.position.equals(before.position)).toBe(true);
     expect(root.rotation.y).toBe(before.yaw);
     expect(unit.turret!.rotation.y).toBe(before.turretYaw);

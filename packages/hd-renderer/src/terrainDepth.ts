@@ -124,6 +124,7 @@ export class TerrainDepth {
   private ready = false;
   private disposed = false;
   private needed = false;
+  private warmNext = false;
 
   constructor(private readonly frontDistance: number) {
     this.target.texture.name = 'output';
@@ -209,6 +210,10 @@ export class TerrainDepth {
   }
   codeNode(anchor: ShaderNode): ShaderNode {
     return anchor.xz.sub(this.reference.xz).dot(this.horizontal);
+  }
+  /** Capture once in the next render even if nothing needs it (a warm frame: see HdRenderer.warm). */
+  warm(): void {
+    this.warmNext = true;
   }
   setNeeded(needed: boolean): void {
     this.needed = needed;
@@ -324,7 +329,9 @@ export class TerrainDepth {
   }
   render(renderer: WebGPURenderer, scene: Scene, view: OrthographicCamera): void {
     this.ready = false;
-    if (!this.needed || this.disposed || !supported(renderer)) return;
+    const warm = this.warmNext;
+    this.warmNext = false;
+    if ((!this.needed && !warm) || this.disposed || !supported(renderer)) return;
     this.resize(renderer);
     this.captureNear.value = view.near;
     this.captureRange.value = view.far - view.near;
@@ -350,7 +357,10 @@ export class TerrainDepth {
       renderer.clear(true, true, false);
       this.captureActive = true;
       for (const [mesh] of this.meshes) {
-        if ('count' in mesh && mesh.count === 0) continue;
+        // Nothing to draw: an instanced mesh without instances (the count is the mesh's or its geometry's).
+        const instanced = mesh.geometry as { isInstancedBufferGeometry?: boolean; instanceCount?: number };
+        if (instanced.isInstancedBufferGeometry ? instanced.instanceCount === 0 : 'count' in mesh && mesh.count === 0)
+          continue;
         let object: import('three/webgpu').Object3D | null = mesh;
         while (object?.visible) object = object.parent;
         if (object !== null) continue;

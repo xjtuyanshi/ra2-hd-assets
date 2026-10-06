@@ -162,8 +162,18 @@ export interface VoxelCardTies {
   tieBonus(anchor: Vector3, bottom: number, bonus: number, bias: number, extent: VoxelCardExtent): number;
 }
 
-/** Ground cards and physical flight share one material; shadow passes always retain physical depth. */
+let nativeDepthNode: ShaderNode | null = null;
+
+/**
+ * Ground cards and physical flight share one material; shadow passes always retain physical depth. One node for
+ * every material: it reads the drawn mesh's own depth slots, and materials that are clones of one shader graph must
+ * keep sharing that graph once a unit is made of them (a node of their own each would be a shader of their own).
+ */
 export function voxelNativeDepthNode(): ShaderNode {
+  return (nativeDepthNode ??= createVoxelNativeDepthNode());
+}
+
+function createVoxelNativeDepthNode(): ShaderNode {
   return Fn(([], builder: NodeBuilder) => {
     if (isShadowPass(builder)) return depth;
     const anchor: ShaderNode = userData('voxelNativeDepth.anchor', 'vec3');

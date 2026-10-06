@@ -1,7 +1,88 @@
 import type { Texture } from 'three/webgpu';
 
-/** What an atlas-page loader calls to put a decoded page on the GPU; a promise when the upload takes several frames. */
-export type PageUpload = (texture: Texture) => void | Promise<void>;
+/**
+ * What an atlas-page loader calls to put a decoded page on the GPU; a promise when the upload takes several frames.
+ * With a `gate`, the loader decodes inside it (see PageGate), so pages that wait for their upload are bounded.
+ */
+export type PageUpload = ((texture: Texture) => void | Promise<void>) & { gate?: PageGate };
+
+/** Decoded pixels allowed to exist at once: two of the largest atlas pages (8192 x 8192), 512 MiB of RGBA. */
+export const PAGE_GATE_PIXELS = 2 * 8192 * 8192;
+
+/**
+ * Bounds the decoded pages that exist at one time.
+ *
+ * A page is decoded when its file has arrived and released when its upload is through, and uploads are paced by
+ * the frames of the view (PageUploader.step). Files arrive much faster than that: a match start asks for two dozen
+ * 66-megapixel pages within a second, each 253 MiB once decoded, and while the frames are held up (shader builds,
+ * the loading screen's own work) nothing drains. Measured on a six-player start: the tab reached 8 GiB. Through the
+ * gate a loader holds its turn from before the decode until the page is on the GPU and its bitmap is closed, so
+ * the decoded pages in existence never exceed `capacity` pixels (one page larger than that still runs, alone).
+ * Strictly first come, first served: a large page is never overtaken for ever by small ones.
+ */
+export class PageGate {
+  private used = 0;
+  private readonly waiting: { pixels: number; start(): void }[] = [];
+
+  constructor(readonly capacity = PAGE_GATE_PIXELS) {}
+
+  /** Decoded pixels the running tasks account for, and the tasks still waiting. */
+  get inFlight(): number {
+    return this.used;
+  }
+  get queued(): number {
+    return this.waiting.length;
+  }
+
+  /** Run `task` (decode, upload, release) when `pixels` more decoded pixels fit; resolves or rejects with it. */
+  async run<T>(pixels: number, task: () => Promise<T>): Promise<T> {
+    const size = Number.isFinite(pixels) && pixels > 0 ? pixels : 0;
+    if (this.waiting.length || (this.used > 0 && this.used + size > this.capacity))
+      // admit() accounts for the task before it wakes it.
+      await new Promise<void>((start) => this.waiting.push({ pixels: size, start }));
+    else this.used += size;
+    try {
+      return await task();
+    } finally {
+      this.used -= size;
+      this.admit();
+    }
+  }
+
+  private admit(): void {
+    while (this.waiting.length) {
+      const next = this.waiting[0]!;
+      if (this.used > 0 && this.used + next.pixels > this.capacity) break;
+      this.waiting.shift();
+      this.used += next.pixels;
+      next.start();
+    }
+  }
+}
+
+/**
+ * Pixel count of a PNG from its header (the IHDR chunk is always first), 0 when the bytes are not a PNG: what a
+ * loader tells the gate before it decodes.
+ */
+export async function pngPixels(blob: Blob): Promise<number> {
+  if (blob.size < 24) return 0;
+  const head = new DataView(await blob.slice(0, 24).arrayBuffer());
+  if (head.getUint32(0) !== 0x89504e47 || head.getUint32(4) !== 0x0d0a1a0a || head.getUint32(12) !== 0x49484452)
+    return 0;
+  return head.getUint32(16) * head.getUint32(20);
+}
+
+/** Decode `blob` and hand the bitmap to `use` inside the upload's gate (without a gate: at once, as before). */
+export async function withDecodedPage<T>(
+  blob: Blob,
+  upload: PageUpload | undefined,
+  use: (bitmap: ImageBitmap) => Promise<T>,
+): Promise<T> {
+  const decode = async () =>
+    use(await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' }));
+  const gate = upload?.gate;
+  return gate ? gate.run(await pngPixels(blob), decode) : decode();
+}
 
 /** The part of the renderer the uploader uses (three's Renderer, or a stand-in in tests). */
 export interface PageUploadHost {

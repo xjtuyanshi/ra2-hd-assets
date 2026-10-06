@@ -34,6 +34,11 @@ export interface RuntimeToolbar {
   setMapsAvailable(available: boolean): void;
   /** Whether the HD view (true) or the original picture (false) is shown; null without an HD bridge (no button). */
   setHdView(on: boolean | null): void;
+  /**
+   * The quality tier the shown HD view draws with: 0 everything, higher ones give up its least visible passes to hold
+   * the frame rate (hdBridge.ts FRAME_BUDGET_MS); null while the HD view is not on screen.
+   */
+  setHdQuality(tier: number | null, tiers?: number): void;
   /** Select the clock multiplier for both buttons and [ ] shortcuts: synchronize aria-pressed and notify the page. */
   pressClockRate(rate: number): void;
   destroy(): void;
@@ -91,6 +96,8 @@ export function installRuntimeToolbar(
     reshadeMode: 'off',
     mapsAvailable: false,
     hdView: null,
+    hdQuality: null,
+    hdQualityTiers: 0,
   };
   const publish = () => {
     if (disposed) return;
@@ -180,6 +187,13 @@ export function installRuntimeToolbar(
     setHdView(on) {
       if (model.hdView !== on) {
         model.hdView = on;
+        publish();
+      }
+    },
+    setHdQuality(tier, tiers = 0) {
+      if (model.hdQuality !== tier || (tier !== null && model.hdQualityTiers !== tiers)) {
+        model.hdQuality = tier;
+        if (tier !== null) model.hdQualityTiers = tiers;
         publish();
       }
     },

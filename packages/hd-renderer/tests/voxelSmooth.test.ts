@@ -11,7 +11,7 @@ import {
 } from '../src/ra2/voxelSmooth';
 import { buildSmoothPartGeometry, buildSmoothVoxelGeometry } from '../src/ra2/voxelSmoothGeometry';
 import { VOXEL_TO_WORLD, instantiateVoxel } from '../src/ra2/voxels';
-import { VoxelShadowMesh } from '../src/ra2/voxelShadow';
+import { silhouetteGeometry, VoxelShadowMesh } from '../src/ra2/voxelShadow';
 import { VoxelUnits } from '../src/live/voxelUnits';
 import type { HdRenderer } from '../src/HdRenderer';
 import type { HdWorld } from '../src/ra2/world';
@@ -324,7 +324,9 @@ it('shares equal options across houses and worlds, keeps depth/shadow twins, and
     if (o instanceof VoxelShadowMesh) twins.push(o);
   });
   expect(twins).toHaveLength(5);
-  expect(twins[0]!.geometry).toBe(first[0]!.geometry);
+  // Shadow twins draw the part's outline (voxelShadow.ts registerSilhouetteGeometry), one for all five copies.
+  for (const twin of twins) expect(twin.geometry).toBe(silhouetteGeometry(first[0]!.geometry));
+  expect(twins[0]!.geometry).not.toBe(first[0]!.geometry);
   expect(first[0]!.material!.depthNode).toBeTruthy();
   const changed = buildSmoothVoxelGeometry(model, null, a, { aoRays: 0, bandOut: 0.1 });
   expect(changed[0]!.geometry).not.toBe(first[0]!.geometry);
@@ -334,7 +336,8 @@ it('shares equal options across houses and worlds, keeps depth/shadow twins, and
     variant[0]!.geometry.dispose();
   }
   const merged = buildSmoothPartGeometry(
-    Array.from({ length: 24 }, () => section),
+    // Enough sections for more than 65535 vertices at the default density.
+    Array.from({ length: 64 }, () => section),
     smoothVoxelOptions(options),
   );
   expect(merged.getIndex()!.array).toBeInstanceOf(Uint32Array);

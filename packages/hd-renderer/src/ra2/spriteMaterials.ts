@@ -1,4 +1,4 @@
-import type { PageUpload } from '../pageUpload';
+import { withDecodedPage, type PageUpload } from '../pageUpload';
 import { LinearFilter, LinearMipmapLinearFilter, NoColorSpace, Texture } from 'three/webgpu';
 import { fetchOptionalJson } from './cache';
 import type { SpriteMaterialAtlas } from './spriteLook';
@@ -83,39 +83,38 @@ export async function loadSpriteMaterialAtlas(url: string, upload?: PageUpload):
   try {
     const response = await fetch(url);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const bitmap = await createImageBitmap(await response.blob(), {
-      colorSpaceConversion: 'none',
-      premultiplyAlpha: 'none',
-    });
-    const { width, height } = bitmap;
-    const texture = new Texture(bitmap);
-    texture.flipY = false;
-    texture.colorSpace = NoColorSpace;
-    texture.premultiplyAlpha = false;
-    texture.magFilter = LinearFilter;
-    texture.minFilter = LinearMipmapLinearFilter;
-    texture.generateMipmaps = true;
-    const release = () => {
-      bitmap.close();
-      texture.image = { width, height } as unknown as ImageBitmap;
-      texture.onUpdate = null;
-      texture.removeEventListener('dispose', release);
-    };
-    texture.addEventListener('dispose', release);
-    // The renderer calls onUpdate after the upload and mipmap generation of a texture it draws or initialises.
-    texture.onUpdate = release;
-    texture.needsUpdate = true;
-    if (upload) {
-      try {
-        await upload(texture);
-      } catch (error) {
-        texture.dispose();
-        throw error;
+    // Decoded inside the upload's gate: the page exists decoded only from here until its upload is through.
+    return await withDecodedPage(await response.blob(), upload, async (bitmap) => {
+      const { width, height } = bitmap;
+      const texture = new Texture(bitmap);
+      texture.flipY = false;
+      texture.colorSpace = NoColorSpace;
+      texture.premultiplyAlpha = false;
+      texture.magFilter = LinearFilter;
+      texture.minFilter = LinearMipmapLinearFilter;
+      texture.generateMipmaps = true;
+      const release = () => {
+        bitmap.close();
+        texture.image = { width, height } as unknown as ImageBitmap;
+        texture.onUpdate = null;
+        texture.removeEventListener('dispose', release);
+      };
+      texture.addEventListener('dispose', release);
+      // The renderer calls onUpdate after the upload and mipmap generation of a texture it draws or initialises.
+      texture.onUpdate = release;
+      texture.needsUpdate = true;
+      if (upload) {
+        try {
+          await upload(texture);
+        } catch (error) {
+          texture.dispose();
+          throw error;
+        }
+        // A host whose upload does not report back (onUpdate) still must not keep the decoded page.
+        texture.onUpdate?.(texture);
       }
-      // A host whose upload does not report back (onUpdate) still must not keep the decoded page.
-      texture.onUpdate?.(texture);
-    }
-    return { texture };
+      return { texture };
+    });
   } catch (error) {
     console.warn(`${url}: failed to load`, error);
     return null;

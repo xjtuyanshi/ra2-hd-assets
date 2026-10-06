@@ -1,6 +1,7 @@
 import { expect, it } from 'vitest';
 import { DataTexture, Group, Mesh, type MeshBasicNodeMaterial, Vector3 } from 'three/webgpu';
 import type { EffectsLayer } from '../src/effects';
+import type { InstancedQuad } from '../src/instancedQuad';
 import type { EffectArt } from '../src/live/effectArt';
 import { EffectSpriteLayer, MESH_IDLE_SECONDS, type EffectInstance } from '../src/live/effectSprites';
 import { LiveEffectsDriver, type LiveEffects } from '../src/live/effects';
@@ -70,8 +71,8 @@ it.each([1, 0.5])('depth-tests Air animations, projectiles and particles with op
   const layer = new EffectSpriteLayer(cache, () => ({ texture, width: 256, height: 1 }));
   for (const card of cards) card.alpha = alpha;
   layer.setInstances(cards, 0);
-  const mesh = layer.root.children[0] as Mesh;
-  expect(mesh.count).toBe(6);
+  const mesh = layer.root.children[0] as InstancedQuad;
+  expect(mesh.instances).toBe(6);
   expect(mesh.renderOrder).toBe(7);
   expect(mesh.material).toMatchObject({ depthTest: true, depthWrite: false });
   expect((mesh.material as MeshBasicNodeMaterial).depthNode).not.toBeNull();

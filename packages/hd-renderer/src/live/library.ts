@@ -1,7 +1,7 @@
 import { DataTexture, NearestFilter, NoColorSpace, RedFormat, Texture, UnsignedByteType } from 'three/webgpu';
 import { scenarioTypeTable, type LibraryType, type TypeLibrary } from '../../../ra2-assets/src/library';
 import { indexedBitmapPixels } from './indexedPixels';
-import type { PageUpload } from '../pageUpload';
+import { withDecodedPage, type PageUpload } from '../pageUpload';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
 import type { SpriteMaterialAtlas } from '../ra2/spriteLook';
 import {
@@ -388,10 +388,11 @@ async function loadDepthTemplate(
 export async function loadIndexedPage(url: string, upload?: PageUpload): Promise<Texture> {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`${url}: ${response.status}`);
-  const bitmap = await createImageBitmap(await response.blob(), {
-    colorSpaceConversion: 'none',
-    premultiplyAlpha: 'none',
-  });
+  // Decoded inside the upload's gate: the page exists decoded only from here until its upload is through.
+  return withDecodedPage(await response.blob(), upload, (bitmap) => indexedPageTexture(bitmap, upload));
+}
+
+async function indexedPageTexture(bitmap: ImageBitmap, upload?: PageUpload): Promise<Texture> {
   const { width, height } = bitmap;
   try {
     if (upload) {

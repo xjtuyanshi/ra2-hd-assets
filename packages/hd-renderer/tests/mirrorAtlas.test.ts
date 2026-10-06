@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { reflector } from 'three/tsl';
 import {
   Box3,
+  BufferGeometry,
+  Mesh,
+  MeshBasicNodeMaterial,
   NodeFrame,
+  Object3D,
   OrthographicCamera,
   PerspectiveCamera,
   Vector2,
@@ -20,7 +24,9 @@ import {
   mirrorCamera,
   type MirrorAtlasRenderer,
 } from '../src/mirrorAtlas';
+import { VoxelShadowMesh } from '../src/ra2/voxelShadow';
 import type { ShaderNode } from '../src/tsl';
+import { IsoCamera, MIRROR_SKIP_LAYER } from '../src/world';
 
 /** A fixed dimetric camera above the ground, looking at (x, 0, z) from 30 degrees above the horizon. */
 function dimetric(x = 13, z = -9, coordinateSystem = WebGPUCoordinateSystem): OrthographicCamera {
@@ -306,6 +312,21 @@ describe('mirror atlas rendering', () => {
     expect(calls).toHaveLength(0);
     expect(state.target).toBeNull();
     expect(hidden.visible).toBe(true);
+
+    // A warm frame (HdRenderer.warm): one tile is rendered although no plane is in view, once.
+    atlas.warm();
+    expect(atlas.render(renderer, scene, away, hidden)).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.viewport).toEqual(mirrorAtlasTileRect(0, 2, 640, 360));
+    expect(state.target).toBeNull();
+    expect(hidden.visible).toBe(true);
+    calls.length = 0;
+    expect(atlas.render(renderer, scene, away, hidden)).toBe(0);
+    expect(calls).toHaveLength(0);
+    // With a plane in view the request changes nothing: what is visible is what is rendered.
+    atlas.warm();
+    expect(atlas.render(renderer, scene, camera, hidden)).toBe(1);
+    expect(calls[0]!.viewport).toEqual(mirrorAtlasTileRect(1, 2, 640, 360));
     atlas.dispose();
   });
 
@@ -367,5 +388,24 @@ describe('mirror atlas rendering', () => {
     expect(atlas.tileSize(1280, 720)).toEqual([960, 540]);
     atlas.dispose();
     expect(() => new MirrorAtlas([])).toThrow();
+  });
+  it("leaves objects on the mirror-skip layer out of the tiles, while the scene's own camera draws them", () => {
+    const atlas = new MirrorAtlas(planes(1));
+    const main = new IsoCamera().camera;
+    const flat = new Object3D();
+    flat.layers.set(MIRROR_SKIP_LAYER);
+    const upright = new Object3D();
+    expect(flat.layers.test(main.layers)).toBe(true);
+    expect(upright.layers.test(main.layers)).toBe(true);
+    const virtual = atlas.tiles[0]!.reflector.getVirtualCamera(main);
+    expect(flat.layers.test(virtual.layers)).toBe(false);
+    expect(upright.layers.test(virtual.layers)).toBe(true);
+    // One camera per view, kept: the layer mask is set once.
+    expect(atlas.tiles[0]!.reflector.getVirtualCamera(main)).toBe(virtual);
+    // A ground shadow twin of a voxel part is such an object.
+    const twin = new VoxelShadowMesh(new Mesh(new BufferGeometry(), new MeshBasicNodeMaterial()));
+    expect(twin.layers.test(main.layers)).toBe(true);
+    expect(twin.layers.test(virtual.layers)).toBe(false);
+    atlas.dispose();
   });
 });

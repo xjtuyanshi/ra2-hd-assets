@@ -15,7 +15,7 @@ import type { AtmosphereNodes } from '../atmosphere';
 import { createPainterDepth } from '../painterDepth';
 import { decodeBase64 } from './cache';
 import { paletteNodes } from './mapLighting';
-import { SHADOW_COPIES, VoxelShadowMesh, VoxelWaterMesh, groundOf } from './voxelShadow';
+import { SHADOW_COPIES, SILHOUETTE_FOOTPRINT, VoxelShadowMesh, VoxelWaterMesh, groundOf } from './voxelShadow';
 import { voxelFill, voxelMaterialFor, voxelProjectedMaterialFor } from './vpl';
 import type { VoxelProjectionAsset } from './voxelProjection';
 import { CARD_CLEARANCE } from './cardDepth';
@@ -30,6 +30,7 @@ import {
 } from './voxelNativeDepth';
 import { NATIVE_UNIT_RENDER_ORDER } from './nativeDepth';
 import { registerVoxelReflectionVariant } from './voxelReflectionColour';
+import { bindSlotsBeforeRender } from '../materialSlots';
 
 /**
  * Original VXL units, rendered as real meshes. The engine draws voxels through a pure rotation (the default voxel
@@ -312,6 +313,154 @@ function sectionGrid(section: VoxelSection): SectionGrid {
 }
 
 /**
+ * The lattice corners of one section, each moved towards the surface by `relax` (see VoxelShape.cornerRelax) and put
+ * in the model's frame; computed on first use and shared by every face that meets there. `at` answers the corner's
+ * offset in `positions` (and in `lattice`, the corner's place on the section's own lattice, when that is kept).
+ */
+function sectionCorners(
+  { section, filled, px, pxy }: SectionGrid,
+  relax: number,
+  keepLattice: boolean,
+): { at: (cx: number, cy: number, cz: number) => number; positions: Float32Array; lattice: Float32Array | null } {
+  const [sx, sy, sz] = section.size;
+  const step0 = (section.maxBounds[0] - section.minBounds[0]) / Math.max(1, sx);
+  const step1 = (section.maxBounds[1] - section.minBounds[1]) / Math.max(1, sy);
+  const step2 = (section.maxBounds[2] - section.minBounds[2]) / Math.max(1, sz);
+  const m = section.transform;
+  const cx1 = sx + 1;
+  const cxy = cx1 * (sy + 1);
+  const cornerDone = new Uint8Array(cxy * (sz + 1));
+  // Adjacent faces share the same final position as well as the same rounded corner offset.
+  const cornerPositions = new Float32Array(cornerDone.length * 3);
+  const cornerLattice = keepLattice ? new Float32Array(cornerDone.length * 3) : null;
+  const cornerOrigin = 1 + px + pxy;
+  const cornerPosition = (cx: number, cy: number, cz: number): number => {
+    const k = cx + cx1 * cy + cxy * cz;
+    const p = k * 3;
+    if (cornerDone[k]) return p;
+    const o = cornerOrigin + cx + px * cy + pxy * cz;
+    const mask =
+      filled[o]! |
+      (filled[o + 1]! << 1) |
+      (filled[o + px]! << 2) |
+      (filled[o + px + 1]! << 3) |
+      (filled[o + pxy]! << 4) |
+      (filled[o + pxy + 1]! << 5) |
+      (filled[o + pxy + px]! << 6) |
+      (filled[o + pxy + px + 1]! << 7);
+    const off = mask * 3;
+    const lx = cx + relax * CORNER_OFFSETS[off]!;
+    const ly = cy + relax * CORNER_OFFSETS[off + 1]!;
+    const lz = cz + relax * CORNER_OFFSETS[off + 2]!;
+    if (cornerLattice) {
+      cornerLattice[p] = lx;
+      cornerLattice[p + 1] = ly;
+      cornerLattice[p + 2] = lz;
+    }
+    const bxp = section.minBounds[0] + lx * step0;
+    const byp = section.minBounds[1] + ly * step1;
+    const bzp = section.minBounds[2] + lz * step2;
+    const X = m[0]! * bxp + m[1]! * byp + m[2]! * bzp + m[3]!;
+    const Y = m[4]! * bxp + m[5]! * byp + m[6]! * bzp + m[7]!;
+    const Z = m[8]! * bxp + m[9]! * byp + m[10]! * bzp + m[11]!;
+    cornerPositions[p] = X * VOXEL_TO_WORLD;
+    cornerPositions[p + 1] = Z * VOXEL_TO_WORLD;
+    cornerPositions[p + 2] = -Y * VOXEL_TO_WORLD;
+    cornerDone[k] = 1;
+    return p;
+  };
+  return { at: cornerPosition, positions: cornerPositions, lattice: cornerLattice };
+}
+
+/**
+ * The silhouette mesh of a part: its exposed voxel faces with the corners of the stand-in mesh
+ * (buildStandInPartGeometry), positions only, every lattice corner one shared vertex. One quad per voxel face, where
+ * the smooth mesh has supersample^2 of them with four vertices of 52 bytes each: what draws a part's outline alone
+ * (the flattened ground shadow, the waterline foam; see voxelShadow.ts registerSilhouetteGeometry) draws this.
+ * Its surface lies within a fraction of a voxel of the smooth mesh's (under a device pixel at the engine's size).
+ * The faces that look up come first in the index (voxelShadow.ts SILHOUETTE_FOOTPRINT). Built in a few milliseconds
+ * at most (one pass over the exposed faces).
+ */
+export function buildOutlinePartGeometry(
+  sections: readonly VoxelSection[],
+  shape: Readonly<VoxelShape> = voxelShape,
+): BufferGeometry {
+  const grids = sections.map(sectionGrid);
+  let faceCount = 0;
+  for (const grid of grids) faceCount += grid.faceCount;
+  // At most four corners per face; shared corners make it about one.
+  const positions = new Float32Array(faceCount * 12);
+  // Faces whose outside looks up the part's own up axis come first (see SILHOUETTE_FOOTPRINT).
+  const upward = new Uint32Array(faceCount * 6);
+  const others = new Uint32Array(faceCount * 6);
+  let vertices = 0;
+  let upwardCount = 0;
+  let otherCount = 0;
+  const quad = [0, 0, 0, 0];
+  for (const grid of grids) {
+    const corners = sectionCorners(grid, shape.cornerRelax, false);
+    const vertexOf = new Int32Array(corners.positions.length / 3).fill(-1);
+    const { raw, cells, faces } = grid;
+    for (let v = 0; v < cells.length; v++) {
+      const mask = faces[v]!;
+      if (!mask) continue;
+      const i = v * 5;
+      for (let f = 0; f < 6; f++) {
+        if (!(mask & (1 << f))) continue;
+        for (let corner = 0; corner < 4; corner++) {
+          const t = (f * 4 + corner) * 3;
+          const o = corners.at(
+            raw[i]! + FACE_CORNERS[t]!,
+            raw[i + 1]! + FACE_CORNERS[t + 1]!,
+            raw[i + 2]! + FACE_CORNERS[t + 2]!,
+          );
+          let id = vertexOf[o / 3]!;
+          if (id < 0) {
+            id = vertexOf[o / 3] = vertices++;
+            positions[id * 3] = corners.positions[o]!;
+            positions[id * 3 + 1] = corners.positions[o + 1]!;
+            positions[id * 3 + 2] = corners.positions[o + 2]!;
+          }
+          quad[corner] = id;
+        }
+        // The y component of each triangle's normal (the stand-in mesh's winding: outside is counter-clockwise).
+        const a = quad[0]! * 3;
+        const b = quad[1]! * 3;
+        const c = quad[2]! * 3;
+        const d = quad[3]! * 3;
+        const ax = positions[a]!;
+        const az = positions[a + 2]!;
+        const cx = positions[c]! - ax;
+        const cz = positions[c + 2]! - az;
+        const first = (positions[b + 2]! - az) * cx - (positions[b]! - ax) * cz;
+        const second = cz * (positions[d]! - ax) - cx * (positions[d + 2]! - az);
+        const up = first > 0 || second > 0;
+        const target = up ? upward : others;
+        let n = up ? upwardCount : otherCount;
+        target[n++] = quad[0]!;
+        target[n++] = quad[1]!;
+        target[n++] = quad[2]!;
+        target[n++] = quad[0]!;
+        target[n++] = quad[2]!;
+        target[n++] = quad[3]!;
+        if (up) upwardCount = n;
+        else otherCount = n;
+      }
+    }
+  }
+  const count = upwardCount + otherCount;
+  const indices = vertices > 65535 ? new Uint32Array(count) : new Uint16Array(count);
+  indices.set(upward.subarray(0, upwardCount));
+  indices.set(others.subarray(0, otherCount), upwardCount);
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(positions.slice(0, vertices * 3), 3));
+  geometry.setIndex(new BufferAttribute(indices, 1));
+  geometry.userData[SILHOUETTE_FOOTPRINT] = upwardCount;
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+/**
  * The exposed-face mesh of a part in the attribute layout of the smooth mesh (voxelSmoothGeometry.ts): the same
  * names and sizes, so a material written for the smooth mesh draws this one with the shader it already has, and a
  * placed mesh can change from one geometry to the other without a rebuild. Per vertex: `pshade` is the voxel's own
@@ -358,57 +507,15 @@ function buildPartGeometry(
   geometry.computeBoundingSphere();
   return geometry;
 
-  function addSection({ section, raw, filled, cells, faces, faceOffsets, px, pxy }: SectionGrid) {
+  function addSection(grid: SectionGrid) {
+    const { section, raw, filled, cells, faces, faceOffsets, px, pxy } = grid;
     // Each section has its own normal table; models such as the Rhino mix them (see voxelNormals.ts).
     const table = normalTableFor(sectionNormalsMode(section, raw));
-    const [sx, sy, sz] = section.size;
-    const step0 = (section.maxBounds[0] - section.minBounds[0]) / Math.max(1, sx);
-    const step1 = (section.maxBounds[1] - section.minBounds[1]) / Math.max(1, sy);
-    const step2 = (section.maxBounds[2] - section.minBounds[2]) / Math.max(1, sz);
     const m = section.transform;
-    const relax = shape.cornerRelax;
-    const cx1 = sx + 1;
-    const cxy = cx1 * (sy + 1);
-    const cornerDone = new Uint8Array(cxy * (sz + 1));
-    // Adjacent faces share the same final position as well as the same rounded corner offset.
-    const cornerPositions = new Float32Array(cornerDone.length * 3);
-    const cornerLattice = lattice ? new Float32Array(cornerDone.length * 3) : null;
-    const cornerOrigin = 1 + px + pxy;
-    const cornerPosition = (cx: number, cy: number, cz: number): number => {
-      const k = cx + cx1 * cy + cxy * cz;
-      const p = k * 3;
-      if (cornerDone[k]) return p;
-      const o = cornerOrigin + cx + px * cy + pxy * cz;
-      const mask =
-        filled[o]! |
-        (filled[o + 1]! << 1) |
-        (filled[o + px]! << 2) |
-        (filled[o + px + 1]! << 3) |
-        (filled[o + pxy]! << 4) |
-        (filled[o + pxy + 1]! << 5) |
-        (filled[o + pxy + px]! << 6) |
-        (filled[o + pxy + px + 1]! << 7);
-      const off = mask * 3;
-      const lx = cx + relax * CORNER_OFFSETS[off]!;
-      const ly = cy + relax * CORNER_OFFSETS[off + 1]!;
-      const lz = cz + relax * CORNER_OFFSETS[off + 2]!;
-      if (cornerLattice) {
-        cornerLattice[p] = lx;
-        cornerLattice[p + 1] = ly;
-        cornerLattice[p + 2] = lz;
-      }
-      const bxp = section.minBounds[0] + lx * step0;
-      const byp = section.minBounds[1] + ly * step1;
-      const bzp = section.minBounds[2] + lz * step2;
-      const X = m[0]! * bxp + m[1]! * byp + m[2]! * bzp + m[3]!;
-      const Y = m[4]! * bxp + m[5]! * byp + m[6]! * bzp + m[7]!;
-      const Z = m[8]! * bxp + m[9]! * byp + m[10]! * bzp + m[11]!;
-      cornerPositions[p] = X * VOXEL_TO_WORLD;
-      cornerPositions[p + 1] = Z * VOXEL_TO_WORLD;
-      cornerPositions[p + 2] = -Y * VOXEL_TO_WORLD;
-      cornerDone[k] = 1;
-      return p;
-    };
+    const corners = sectionCorners(grid, shape.cornerRelax, !!lattice);
+    const cornerPositions = corners.positions;
+    const cornerLattice = corners.lattice;
+    const cornerPosition = corners.at;
 
     // Keep the original Float32 rounding before blending neighbouring stored normals.
     const exposedNormal = new Float32Array(filled.length * 3);
@@ -748,6 +855,8 @@ export function instantiateVoxel(
   const meshes: Mesh[] = [];
   for (const part of parts) {
     const mesh = new Mesh(part.geometry, part.material ?? material);
+    // Palette and projected materials share one shader graph; this mesh's palette and part are bound per draw.
+    mesh.onBeforeRender = bindSlotsBeforeRender;
     const sourceMaterial = part.material ?? material;
     // Palette materials are shared. The node reads the currently rendered mesh's depth slot.
     if (!sourceMaterial.depthNode) sourceMaterial.depthNode = voxelNativeDepthNode();

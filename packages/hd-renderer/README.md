@@ -175,6 +175,70 @@ full-match FPS, or visual equivalence on a physical device.
 See [CPU performance and equivalence checks](benchmarks/README.md) for beam/card uploads, indexed atlas lifetime,
 shroud and voxel baselines, regression commands and hardware acceptance boundaries.
 
+## Frame cost: shaders, pipelines and quality tiers
+
+What a frame costs was measured on one machine class (Apple M-series GPU, a 3120x2096 drawing buffer at two device
+pixels per engine pixel, three r186) with a recorded battle of about a hundred vehicles in view; the figures below
+are that scene's and say what each mechanism is for, not what any other scene will cost.
+
+**One shader per graph, not per art (`src/materialSlots.ts`).** three builds a shader on the calling thread (15 to
+100 ms) for every material whose node graph it has not drawn in a pass, and compiles a pipeline for every new shader
+text. Art that differs only in data therefore shares one graph: the material of a layer, page, palette or unit type
+is a clone of a prototype (`slotMaterial`), and what differs (its atlas page, its size, its lookup table, its redraw
+projection) sits in slot nodes that the clone's binder writes in `Object3D.onBeforeRender`. Sprite layers
+(`ra2/sprites.ts` `SpriteGraph`), engine effect pages (`live/effectSprites.ts`), voxel materials (`ra2/vpl.ts`,
+`ra2/voxelPbr.ts`) and redraw projections (`ra2/voxelProjection.ts`: the per-type constants are uniforms and a small
+frame table texture) work this way. Three things three decides from the texture a slot holds when the shader is built
+must be equal for every texture of a slot: its sampling class (`samplingClass`: a texture whose filters are both
+nearest is read with texel loads), its sample type and its wrap mode. `NodeMaterial.clone()` in r186 does not copy
+`alphaTest` or `userData`; `slotMaterial` restores both.
+
+**Instance data are geometry attributes.** Batches whose shader places the instances (`src/instancedQuad.ts`) keep
+their instance count on an `InstancedBufferGeometry` and their per-instance buffers as named attributes of it. A
+mesh with `count > 1` gets a shader build of its own in r186 (its uuid is part of the builder's cache key), and the
+layout of node attributes is not part of three's pipeline cache key: two layers with the same shader text and
+different instance strides shared one pipeline, and the second read its instances with the first one's stride (seen
+as ground passes that drew nothing or the wrong instances). Named geometry attributes are in the key.
+
+**Outlines for what only needs an outline (`ra2/voxelShadow.ts` `registerSilhouetteGeometry`).** A voxel part's
+ground shadow and waterline foam are the part flattened and drawn in one colour, five offset copies for a soft edge.
+They draw a silhouette geometry (`ra2/voxels.ts` `buildOutlinePartGeometry`: one quad per exposed voxel face, shared
+corners, positions only) in place of the part's render mesh, and the contact footprint draws only its leading range
+of upward faces (`SILHOUETTE_FOOTPRINT`). In the measured scene shadows were 48 of 59 million triangles per frame.
+
+**Mirrors leave flat twins out (`MIRROR_SKIP_LAYER`, `src/world.ts`).** Every water plane in view draws the scene
+once more into its mirror tile. Objects that lie flat on the ground or on the water (a voxel unit's shadow copies,
+its waterline foam and reflection decal) set their layers to this one: the scene's own camera enables it, the mirror
+cameras do not. With four water levels in view most of the mirror draws were such twins.
+
+**Pipelines compiled off the frame (`src/asyncPipelines.ts`, `HdRenderer.enableAsyncPipelines`).** For views that
+are watched live. The draw loop's pipeline requests take three's asynchronous path; an object is drawn from the
+frame its pipeline is ready (`HdRenderer.pendingPipelines` counts the ones still compiling). Full-screen passes stay
+synchronous. Tools that draw a frame and read it back keep the default.
+
+**Warm frames (`HdRenderer.warm`).** While a view is out of sight, a warm frame draws everything that exists, hidden
+or not, in every pass (the depth capture and one water mirror tile are forced), once per set of passes that the
+quality tiers use. `LiveView` asks for them behind the loading screen and again when the opening's art is in, and
+does not count as settled while they run or while pipelines are pending; `EffectSpriteLayer.warm` adds one idle
+page mesh of every kind and pass for them to build.
+
+**Quality tiers (`HdRenderer.setQualityTier`, `HdRenderer.QUALITY_TIERS`).** What the renderer gives up to hold a
+frame rate, least visible first; no tier changes the resolution of anything:
+
+| Tier | Gives up                                                                                                                                                                               |
+| ---: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    0 | nothing                                                                                                                                                                                |
+|    1 | copies of the frame (no heat shimmer on new blasts; translucent engine effects blend in linear light, not the engine's display-space mix); the light field is drawn every second frame |
+|    2 | and multisampling (it smooths the outlines of voxel units and their shadows only)                                                                                                      |
+|    3 | and the soft edge of unit shadows (one flattened copy for five)                                                                                                                        |
+
+Tiers 0/1 and 2/3 draw the same passes. The post graph of each pair is built once and parked while the other draws
+(only the scene and top pass give up their render targets), so a change of tier builds and compiles nothing. The
+scene pass keeps one MRT node per set of outputs for the renderer's lifetime: three keys a render context, and with
+it every built shader of the scene, by that node. `src/qualityGovernor.ts` (`QualityGovernor`) chooses the tier from
+the intervals between presented frames: down after two windows of frames whose median is over budget, one tier up on
+trial after a calm stretch, with the wait doubling after a trial that fails.
+
 ## Run the sandbox
 
 ```bash
@@ -1215,6 +1279,9 @@ Geometry review parameters, captured before loading:
 ```text
 ?vlook=remaster&vsmooth=supersample:3,shape:imls,imlsRadius:1.1,bandIn:0.3,bandOut:0.3,storedNormals:0.35,aoRays:48
 ```
+
+`supersample` defaults to 2: quads of half a voxel, about one device pixel at the engine's size on a 2x display.
+3 costs 2.25 times the triangles, vertex memory and build time and shows only in captures at higher zoom.
 
 Other geometry defaults: `smoothSigma:0.55`, `aoLength:10`, `groundOcclusion:true`, `shadeRadius:1.5`,
 `shadeThreshold:3`, `shadeRamp:16`. `shape:occupancy` selects

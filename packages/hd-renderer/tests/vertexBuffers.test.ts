@@ -192,6 +192,116 @@ function dispose(mesh: Mesh): void {
 }
 
 describe('r186 vertex and uniform binding budget', () => {
+  it('draws every sprite layer of one feature set with one shader graph, each layer bound to its own pages', () => {
+    const source = cache();
+    const capture = new TerrainDepth(1);
+    const page = (size: number) => ({ texture: texture(), width: size, height: size });
+    const hdPair = () => ({ color: texture(), remap: texture() });
+    const pages = [page(4096), page(2048)] as const;
+    const hds = [hdPair(), hdPair()] as const;
+    const normals = [{ texture: texture() }, { texture: texture() }] as const;
+    const layers = pages.map((atlas, i) => new SpriteLayer(source, [], 64, atlas, hds[i]!, null, normals[i]!, capture));
+    const [a, b] = layers as [SpriteLayer, SpriteLayer];
+    const meshes = (layer: SpriteLayer) =>
+      [layer.mesh, layer.readOnlyMesh, layer.unitMesh, layer.translucentMesh, ...layer.groundPasses] as Mesh[];
+    // three r186 keys a built shader by RenderObject.getMaterialCacheKey: the material's node graph and state, the
+    // geometry's attribute layout, the render pass, and the object's uuid for every mesh with count > 1.
+    const key = (mesh: Mesh) =>
+      RenderObject.prototype.getMaterialCacheKey.call({
+        object: mesh,
+        material: mesh.material,
+        geometry: mesh.geometry,
+        renderer: { backend: { isWebGPUBackend: true } },
+        clippingContextCacheKey: '',
+        context: { id: 7 },
+        getGeometryCacheKey: RenderObject.prototype.getGeometryCacheKey,
+      });
+    meshes(a).forEach((mesh, pass) => {
+      const other = meshes(b)[pass]!;
+      expect(other.material).not.toBe(mesh.material);
+      expect(other.geometry).not.toBe(mesh.geometry);
+      expect(key(other), mesh.name).toBe(key(mesh));
+      // The pass keeps its alpha test: r186 drops it from a cloned node material (see materialSlots.ts).
+      expect(other.material.alphaTest, mesh.name).toBe(0.04);
+      expect(mesh.material.alphaTest, mesh.name).toBe(0.04);
+      // The instance count is the geometry's, so the uuid stays out of the key.
+      expect(mesh.count).toBe(1);
+      expect((mesh.geometry as unknown as { isInstancedBufferGeometry: boolean }).isInstancedBufferGeometry).toBe(true);
+    });
+    // The six passes are six shaders (and the capture-enabled layer differs from one without capture).
+    expect(new Set(meshes(a).map(key)).size).toBe(6);
+    const plain = new SpriteLayer(source, [], 64, pages[0], hds[0], null, normals[0]);
+    expect(key(plain.mesh)).not.toBe(key(a.mesh));
+    const indexed = new SpriteLayer(source, [], 64, pages[0]);
+    const indexed2 = new SpriteLayer(source, [], 8, pages[1]);
+    expect(key(indexed.mesh)).not.toBe(key(plain.mesh));
+    expect(key(indexed2.mesh)).toBe(key(indexed.mesh));
+    // Another cache is another graph (its palettes, light grade and atmosphere nodes are in the shader).
+    const elsewhere = new SpriteLayer(cache(), [], 64, pages[0], hds[0], null, normals[0], capture);
+    expect(key(elsewhere.mesh)).not.toBe(key(a.mesh));
+    // The layers share the graph's uniforms: what the renderer writes for one is written for all.
+    expect(b.light).toBe(a.light);
+    expect(b.cameraRight).toBe(a.cameraRight);
+    expect(b.toCamera).toBe(a.toCamera);
+
+    // What tells the layers apart is bound before each draw (Object3D.onBeforeRender, called by the renderer with
+    // the material it is about to draw): build one layer's shader and watch the textures and sizes it reads.
+    const draw = (mesh: Mesh) =>
+      (mesh.onBeforeRender as unknown as (...args: unknown[]) => void).call(
+        mesh,
+        { getRenderTarget: () => ({ width: 64, height: 64 }) },
+        null,
+        new OrthographicCamera(-1, 1, 1, -1, 0.1, 400),
+        mesh.geometry,
+        mesh.material,
+      );
+    draw(a.mesh);
+    const renderer = new WebGPURenderer({ canvas: { width: 1, height: 1 } as HTMLCanvasElement });
+    renderer.hasFeature = () => false;
+    renderer.hasCompatibility = () => false;
+    const builder = (renderer.backend as unknown as LayoutBackend).createNodeBuilder(a.mesh, renderer) as unknown as {
+      camera: OrthographicCamera;
+      scene: Scene;
+      build(): void;
+      uniforms: Record<'vertex' | 'fragment', { node: { value: unknown } }[]>;
+    };
+    builder.camera = new OrthographicCamera(-1, 1, 1, -1, 0.1, 400);
+    builder.scene = new Scene();
+    builder.build();
+    const values = () => [...builder.uniforms.vertex, ...builder.uniforms.fragment].map((entry) => entry.node.value);
+    const sizes = () =>
+      values()
+        .filter((value) => (value as { isVector2?: boolean })?.isVector2)
+        .map((value) => (value as { x: number }).x);
+    const own = (i: number) => [pages[i]!.texture, hds[i]!.color, hds[i]!.remap, normals[i]!.texture];
+    expect(values()).toEqual(expect.arrayContaining(own(0)));
+    for (const texture of own(1)) expect(values()).not.toContain(texture);
+    expect(sizes()).toContain(4096);
+    for (const mesh of meshes(b)) {
+      draw(a.mesh);
+      draw(mesh);
+      expect(values(), mesh.name).toEqual(expect.arrayContaining(own(1)));
+      for (const texture of own(0)) expect(values(), mesh.name).not.toContain(texture);
+      expect(sizes()).toContain(2048);
+      expect(sizes()).not.toContain(4096);
+    }
+    draw(a.groundPasses[1]!);
+    expect(values()).toEqual(expect.arrayContaining(own(0)));
+    // A layer's six passes draw one geometry: one instance count for all of them.
+    a.setInstances([
+      {
+        anchor: new Vector3(),
+        frame: { rect: [0, 0, 16, 24], offset: [-8, -12] },
+        palette: '',
+        push: 0,
+        shadow: false,
+      },
+    ]);
+    for (const mesh of meshes(a)) expect((mesh as InstancedQuad).instances).toBe(1);
+    for (const mesh of meshes(b)) expect((mesh as InstancedQuad).instances).toBe(0);
+    for (const layer of [a, b, plain, indexed, indexed2, elsewhere]) dispose(layer.mesh);
+  });
+
   it('builds solid infantry contact alpha in indexed and HD main/ground passes before enhanced look controls', () => {
     const source = cache();
     const look = spriteLookFor(source.nodes);
@@ -442,7 +552,7 @@ describe('r186 vertex and uniform binding budget', () => {
         expect(mesh.geometry.getAttribute('normal')).toBeUndefined();
         expect('instanceMatrix' in mesh).toBe(false);
         expect(mesh.capacity).toBe(capacity);
-        expect(mesh.count).toBe(0);
+        expect(mesh.instances).toBe(0);
         expect(assertLimits(mesh, 16384).buffers.length).toBe(6);
       }
       dispose(layer.mesh);
@@ -510,8 +620,8 @@ describe('r186 vertex and uniform binding budget', () => {
       )!;
       const result = assertLimits(hd);
       expect(result.fragmentShader.includes('terrainDepthPullEnabled')).toBe(pass === 'air');
-      // Six vec4 instance fields, one position buffer and one fallback matrix buffer: no seventh field.
-      expect(result.buffers.length).toBe(8);
+      // Six vec4 instance fields and one position buffer (the count is the geometry's: no fallback matrix buffer).
+      expect(result.buffers.length).toBe(7);
       if (pass === 'top') {
         // Top never tests/writes fragment depth; only draw mode is needed for its vertex placement.
         expect(result.fragmentShader).not.toContain('sqrt(');

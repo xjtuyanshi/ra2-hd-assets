@@ -241,6 +241,15 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   before the match runs) stays alongside them, in the middle of the hidden view, until it has been drawn completely
   or the logic frame moves on. A list that does not fit (another side or colour) costs only the art it loaded: the
   view still waits for what the match really needs.
+- **No compiler in a shown frame.** Art that differs only in data shares one shader (the renderer README's "Frame
+  cost" section): a new sprite page, palette, house colour or unit type builds none. What does have to be built is
+  built out of sight: the view draws warm frames behind the loading screen and again when the opening's art is in
+  (`HdRenderer.warm`: everything that exists, hidden or not, in every pass and for every quality tier's set of
+  passes), render pipelines are compiled asynchronously (`HdRenderer.enableAsyncPipelines`; `?hd-pipelines=sync`
+  keeps three's own behaviour), and the view counts as complete only when no warm frame is due and no pipeline is
+  still compiling (`LiveView.settledFrames`). In a shown view a pipeline that is new after all (a unit type's first
+  appearance, a blend state not met before) delays that object by the time its compile takes (0.3 s typical), not
+  the frame.
 - **No post-pass rebuilds.** The game shows its loading screen in 800x600 and switches to the match's video mode half
   a second before the first logic frame; a view laid out for the loading screen rebuilt every post material at that
   moment. The bridge remembers the layout the view was last shown with and prepares with it while the frame size is
@@ -269,14 +278,41 @@ Limits:
   thread) takes 2 s on a small map and 4 to 5 s on the largest; it normally ends 4 to 9 s before the match runs. If it
   ends later (a slow disk, a busy machine), the list is not through when the match runs and the rest is prepared
   behind the original picture.
-- A sprite layer's shaders are built in one piece, 0.1 to 0.2 s per layer: every kind of art that was not prepared
-  costs one such frame, behind the original picture at the start and in the shown view later in a match (a unit type
-  seen for the first time). Its mesh is built off the presenting thread and its pages arrive in strips.
+- A shader graph that no art has used yet is still built in one piece on the presenting thread (5 to 25 ms each;
+  a sprite graph has six passes). Warm frames cover the graphs that exist when the view is prepared; a graph first
+  needed later (a page with a feature combination not seen before) costs such a frame in the shown view. Meshes are
+  built off the presenting thread and pages arrive in strips.
 - Uploads wait for the GPU process. Next to other pages that load the same GPU, single strips were seen to block for
   0.1 to 0.6 s, and the preparation of a first match without a list, which is paced by frames, took that much
   longer.
 - The top-layer pass is remembered per browser profile, not per match: its first use ever still rebuilds the post
   passes once.
+
+## Frame rate
+
+The shown view is held to 60 presented frames a second (`FRAME_BUDGET_MS` in `hdBridge.ts`, also on a faster
+display). Its frame intervals feed a `QualityGovernor` (`packages/hd-renderer/src/qualityGovernor.ts`): when the
+median of a window of frames stays over budget the renderer gives up its least visible passes tier by tier
+(`HdRenderer.setQualityTier`: first what reads a copy of the frame, the heat shimmer and the display-space colour mix of translucent engine effects, then multisampling, then the soft edge of unit shadows), and after a calm stretch it tries one tier up again, waiting twice as long after a trial
+that fails. No tier changes a resolution: sprites and terrain stay texel-exact. A change of tier builds and compiles
+nothing (both post graphs are kept once built) and costs one frame of 30 to 60 ms for the scene pass's render
+targets. The play toolbar's HD button reads `画面：高清 · 减负 n/3` while a tier above 0 is in use
+(`RuntimeToolbar.setHdQuality`); `?hd-governor=0` keeps every pass whatever the frame rate.
+
+Measured with the base this work started from (the same staged skirmish battle on XMP29U2: about 270 objects with a
+hundred vehicles in view and 80 to 100 engine animations, 3120x2096 drawing buffer, test Chrome on an Apple M-series
+laptop): 23 to 26 frames a second before; 38 to 44 with every pass (tier 0, governor off); 57 to 60 with the
+governor, which settled on tier 2 for the fight. At the skirmish speed slider's 5 (`game-speed=1`, 60 logic frames a
+second) the emulator reached 59 to 63 logic frames a second under the HD view in that battle: the view's own work
+per logic frame is about 1.3 ms (snapshot push and object update).
+
+**The original picture under the HD view.** With native overlay passthrough (the default) the frame renderer draws
+the game's frame in one keyed 1:1 pass (`vmFrameRenderer.ts` `drawKeyed`) plus the smoothed region, the punched
+rectangle and the cursor. The page's own picture options (bicubic, FSR and ScaleFX upscaling, the AI models, the
+ReShade pass) are not run in that path; they apply again when the original picture is shown (`\` or the toolbar
+button), and the toolbar says so next to an option that is switched on. Without passthrough
+(`?hd-passthrough=none`) the frame is drawn as usual and the tactical rectangle is punched out of it afterwards:
+those options then run for the whole frame.
 
 ## Object occlusion
 
@@ -416,6 +452,8 @@ in `packages/hd-renderer/README.md`);
 `hd-vlook=remaster` selects the remaster voxel look; `hd-vproj=<dir>` selects vehicle redraw projection atlases under
 the HD cache (e.g. `vehicles-hd`); `hd-rect=x,y,w,h`
 overrides the tactical rectangle (default: the frame minus YR's 168 px sidebar and 32 px command bar).
+`hd-governor=0` switches the frame-rate safeguard off and `hd-pipelines=sync` the asynchronous pipeline compiles
+(see "Frame rate" and "Match start").
 
 ## Display scale
 

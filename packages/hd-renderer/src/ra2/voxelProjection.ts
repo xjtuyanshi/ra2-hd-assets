@@ -1,15 +1,19 @@
 import {
   ClampToEdgeWrapping,
+  DataTexture,
+  FloatType,
   LinearFilter,
   LinearMipmapLinearFilter,
+  NearestFilter,
   NoColorSpace,
+  RGBAFormat,
   Texture,
   Vector2,
-  Vector4,
+  Vector3,
 } from 'three/webgpu';
-import { uniform, uniformArray } from 'three/tsl';
+import { uniform } from 'three/tsl';
 import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
-import type { ShaderNode } from '../tsl';
+import { textureSlot } from '../materialSlots';
 import {
   parseVoxelProjectionIndex,
   parseVoxelProjectionManifest,
@@ -18,13 +22,58 @@ import {
   type VoxelProjectionManifest,
 } from './voxelProjectionMath';
 
+/**
+ * One part's redraw atlas and the numbers that go with it. None of it is written into shader text: the shader reads
+ * the atlases, the frame table and the numbers from the slots of VoxelProjectionInputs, so every part draws with the
+ * same shader and the GPU compiles one pipeline for all of them. (The Jacobian and the atlas size as literals gave
+ * each of the 92 library types a shader module and a render pipeline of its own, compiled when its first unit was
+ * drawn, per pass.)
+ */
 export interface VoxelProjectionPart {
   manifest: VoxelProjectionManifest;
   spec: ProjectionPartManifest;
   colour: Texture;
   paint: Texture;
-  pivots: ShaderNode;
-  rects: ShaderNode;
+  /**
+   * Frame table, read with texel loads: column k is bake frame k, row 0 its pivot (x, y), row 1 its rect (x, y,
+   * width, height), in atlas pixels. PROJECTION_TABLE_FRAMES columns whatever the manifest's frame count.
+   */
+  frameTable: DataTexture;
+}
+
+/**
+ * The slots a projected material's shader reads a part from (see materialSlots.ts): two atlases, the frame table and
+ * the part's numbers. One instance per shader graph; `bind` writes a part into it before an object is drawn.
+ */
+export class VoxelProjectionInputs {
+  readonly colour = textureSlot('filtered');
+  readonly paint = textureSlot('filtered');
+  readonly frameTable = textureSlot(emptyFrameTable());
+  /** Rows of the bake's screen Jacobian (atlas pixels per world unit). */
+  readonly jacobianX = uniform(new Vector3());
+  readonly jacobianY = uniform(new Vector3());
+  /** Atlas size in pixels. */
+  readonly atlasSize = uniform(new Vector2(1, 1));
+  /** Page exposure (see VoxelProjectionManifest.exposure); 1 for pages stored without headroom. */
+  readonly exposure = uniform(1);
+  /** Bake frames per turn, facing units (of 256) between two frames, and the same step in radians. */
+  readonly frameCount = uniform(16);
+  readonly facingStep = uniform(16);
+  readonly frameAngle = uniform(Math.PI / 8);
+
+  bind(part: VoxelProjectionPart): void {
+    const { manifest, spec } = part;
+    this.colour.value = part.colour;
+    this.paint.value = part.paint;
+    this.frameTable.value = part.frameTable;
+    (this.jacobianX.value as Vector3).fromArray(manifest.jacobian[0]);
+    (this.jacobianY.value as Vector3).fromArray(manifest.jacobian[1]);
+    (this.atlasSize.value as Vector2).fromArray(spec.size);
+    this.exposure.value = manifest.exposure ?? 1;
+    this.frameCount.value = manifest.frames;
+    this.facingStep.value = manifest.facingStep;
+    this.frameAngle.value = (manifest.facingStep * 2 * Math.PI) / 256;
+  }
 }
 
 export interface VoxelProjectionAsset {
@@ -37,7 +86,37 @@ export function manifestPartsFor(type: string): ProjectionPartName[] {
   return type.endsWith(':turret') ? ['turret'] : ['body'];
 }
 
-/** Frame tables are uniforms, so only the two colour and two paint atlas reads cost texture samples. */
+/** Columns of a frame table: the largest frame count a manifest may have. */
+export const PROJECTION_TABLE_FRAMES = 32;
+
+function frameTableTexture(data: Float32Array): DataTexture {
+  const table = new DataTexture(data, PROJECTION_TABLE_FRAMES, 2, RGBAFormat, FloatType);
+  table.colorSpace = NoColorSpace;
+  table.magFilter = table.minFilter = NearestFilter;
+  table.generateMipmaps = false;
+  table.flipY = false;
+  table.needsUpdate = true;
+  return table;
+}
+
+/** What the frame-table slot holds before the first part is bound: the same kind of texture, all zeros. */
+let noFrames: DataTexture | null = null;
+function emptyFrameTable(): DataTexture {
+  return (noFrames ??= frameTableTexture(new Float32Array(PROJECTION_TABLE_FRAMES * 2 * 4)));
+}
+
+/** The frame table of a part as float texels (see VoxelProjectionPart.frameTable). */
+export function projectionFrameTable(spec: ProjectionPartManifest): DataTexture {
+  const data = new Float32Array(PROJECTION_TABLE_FRAMES * 2 * 4);
+  spec.frames.forEach((frame, k) => {
+    if (k >= PROJECTION_TABLE_FRAMES) return;
+    data.set(frame.pivot, k * 4);
+    data.set(frame.rect, (PROJECTION_TABLE_FRAMES + k) * 4);
+  });
+  return frameTableTexture(data);
+}
+
+/** Frame tables are texel loads, so only the two colour and two paint atlas reads cost filtered texture samples. */
 export function createVoxelProjectionPart(
   manifest: VoxelProjectionManifest,
   name: ProjectionPartName,
@@ -46,20 +125,7 @@ export function createVoxelProjectionPart(
 ): VoxelProjectionPart {
   const spec = manifest.parts[name];
   if (!spec) throw new Error(`Missing projection part: ${name}`);
-  return {
-    manifest,
-    spec,
-    colour,
-    paint,
-    pivots: uniformArray(
-      spec.frames.map((f) => new Vector2(...f.pivot)),
-      'vec2',
-    ),
-    rects: uniformArray(
-      spec.frames.map((f) => new Vector4(...f.rect)),
-      'vec4',
-    ),
-  };
+  return { manifest, spec, colour, paint, frameTable: projectionFrameTable(spec) };
 }
 
 /** Object light level of the XMP29U2 noon bakes (see VoxelProjectionState.levelRef). */
@@ -239,6 +305,7 @@ export class VoxelProjectionLibrary {
         parts[name] = createVoxelProjectionPart(manifest, name, textures[i * 2]!, textures[i * 2 + 1]!);
       });
       for (const texture of textures) this.textures.add(texture);
+      for (const part of Object.values(parts)) this.textures.add(part.frameTable);
       const asset = { manifest, parts };
       this.loaded.set(type, asset);
       return asset;

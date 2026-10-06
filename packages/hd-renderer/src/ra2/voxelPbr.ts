@@ -47,9 +47,11 @@ import { highlightRoughness, poweredOcclusion, spriteLookFor, type SpriteLookSta
 import { ra2VoxelClass, VOXEL_CLASS_ID } from './voxelClasses';
 import { VOXEL_TO_WORLD } from './voxelScale';
 import { voxelLightingFor } from './vpl';
+import { inheritSlotBinder, slotMaterial, textureSlot } from '../materialSlots';
 import {
   VOXEL_REFLECTION_AMBIENT,
   registerVoxelReflectionColour,
+  registerVoxelReflectionVariant,
   voxelReflectionAmbient,
   voxelReflectionNormal,
 } from './voxelReflectionColour';
@@ -113,6 +115,8 @@ export class VoxelPbrState {
   readonly reflectionSky = uniform(new Color(0, 0, 0));
   readonly reflectionGround = uniform(new Color(0, 0, 0));
   readonly byPalette = new WeakMap<Uint8Array, MeshStandardNodeMaterial>();
+  /** Shader graphs by map grade: every palette's material is a clone of one prototype (see materialSlots.ts). */
+  readonly graphs = new Map<MapLightGrade | null, { prototype: MeshStandardNodeMaterial; lookup: ShaderNode }>();
 }
 const states = new WeakMap<AtmosphereNodes, VoxelPbrState>();
 export function voxelPbrFor(nodes: AtmosphereNodes = DEFAULT_ATMOSPHERE_NODES): VoxelPbrState {
@@ -280,6 +284,8 @@ class RemasterMaterial extends MeshStandardNodeMaterial {
     this.state = source.state;
     this.look = source.look;
     this.sceneMultiplier = source.sceneMultiplier;
+    // A clone draws the palette its source draws (opacity and native-depth variants of one unit).
+    inheritSlotBinder(this, source);
     return this;
   }
   override setupEnvironment(): EnvironmentNode | null {
@@ -290,15 +296,15 @@ class RemasterMaterial extends MeshStandardNodeMaterial {
   }
 }
 
-function createMaterial(
-  lut: DataTexture,
+/** The shader graph of the remaster material; the palette's lookup texture is its slot. */
+function createGraph(
   grade: MapLightGrade | null,
   nodes: AtmosphereNodes,
-): MeshStandardNodeMaterial {
+): { prototype: MeshStandardNodeMaterial; lookup: ShaderNode } {
   const state = voxelPbrFor(nodes);
   const material = nodes.own(new RemasterMaterial());
   material.sceneMultiplier = nodes.sceneObjectMul;
-  nodes.own(lut);
+  const lut = textureSlot();
   material.name = 'voxel-remaster';
   material.state = state;
   const u: ShaderNode = attribute('pindex', 'float').add(0.5).div(256);
@@ -463,7 +469,7 @@ function createMaterial(
     const ambient: ShaderNode = hemisphere.mul(float(1).sub(surfaceMetalness(reflectedSurface)));
     return voxelReflectionAmbient(gradedSurface(reflectedSurface), ambient, diffuseFloor);
   });
-  return material;
+  return { prototype: material, lookup: lut };
 }
 
 const GREY = new Uint8Array(768).map((_, i) => Math.floor(i / 3));
@@ -477,7 +483,19 @@ export function voxelPbrMaterialFor(
   if (!material) {
     const shades = voxelLightingFor(nodes).loaded;
     const row = (globalThis as { __vplRow?: number }).__vplRow ?? VPL_ALBEDO_ROW;
-    material = createMaterial(voxelPbrLookupTexture(key, shades, row), paletteGrade(palette), nodes);
+    const grade = paletteGrade(palette);
+    let graph = state.graphs.get(grade);
+    if (!graph) state.graphs.set(grade, (graph = createGraph(grade, nodes)));
+    const { prototype, lookup: slot } = graph;
+    const lookup = nodes.own(voxelPbrLookupTexture(key, shades, row));
+    // A clone of the prototype: three draws it with the prototype's shader and pipeline, and its water twin is the
+    // prototype's. A house colour seen for the first time costs this lookup texture, not a shader.
+    material = nodes.own(
+      slotMaterial(prototype, () => {
+        slot.value = lookup;
+      }),
+    );
+    registerVoxelReflectionVariant(material, prototype);
     state.byPalette.set(key, material);
   }
   return material;
