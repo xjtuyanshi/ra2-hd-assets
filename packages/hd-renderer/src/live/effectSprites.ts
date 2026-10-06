@@ -398,6 +398,11 @@ export interface EffectPage {
   height: number;
 }
 
+/** Whether a page source answered with the page itself: not 'loading', and not null (failed or unknown). */
+export function effectPageLoaded(state: EffectPage | 'loading' | null): state is EffectPage {
+  return state !== null && state !== 'loading';
+}
+
 /** Seconds a page mesh may stay empty before it is disposed (and its page released when nothing else uses it). */
 export const MESH_IDLE_SECONDS = 90;
 

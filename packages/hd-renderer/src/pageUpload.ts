@@ -1,7 +1,11 @@
 import type { Texture } from 'three/webgpu';
 
-/** What an atlas-page loader calls to put a decoded page on the GPU; a promise when the upload takes several frames. */
-export type PageUpload = (texture: Texture) => void | Promise<void>;
+/**
+ * What an atlas-page loader calls to put a decoded page on the GPU; a promise when the upload takes several frames.
+ * `background` answers, when the uploader chooses its next page, whether nothing on screen waits for this one (a page
+ * loaded ahead of its first use): such a page lets every page that is waited for go first.
+ */
+export type PageUpload = (texture: Texture, background?: () => boolean) => void | Promise<void>;
 
 /** The part of the renderer the uploader uses (three's Renderer, or a stand-in in tests). */
 export interface PageUploadHost {
@@ -37,6 +41,7 @@ interface Job {
   height: number;
   /** Rows already copied. */
   row: number;
+  background?: () => boolean;
   resolve(): void;
   reject(error: Error): void;
 }
@@ -54,6 +59,11 @@ export const WHOLE_UPLOAD_PIXELS = 4 << 20;
  * path: sized, with its mip chain, no data), rows are copied with the same call and the same flags three uses for the
  * whole image, and the mipmaps are generated when the last row is in. A page is handed to its sprite layer only after
  * that (the loader's promise), so no frame ever samples a partly filled page.
+ *
+ * Pages do not go in the order they were decoded. The page whose rows are going in is finished; the next one is a
+ * page that is waited for before one loaded ahead of its use (`background`), and the smallest of those (the oldest
+ * among equals): a 17 M pixel indexed page that an object on screen can already be drawn from must not queue behind
+ * the 67 M pixel HD pages that happened to be decoded before it.
  *
  * `step` is called once per rendered frame by the view that owns the uploader: no timer of its own. Where the
  * backend is not three's WebGPU backend as read here (the WebGL2 fallback, tests, a later three), a page is uploaded
@@ -78,7 +88,7 @@ export class PageUploader {
    * as after `initTexture`); otherwise a promise that settles when the last strip and the mipmaps are in (onUpdate
    * runs then) or the uploader is disposed (rejected).
    */
-  upload(texture: Texture): void | Promise<void> {
+  upload(texture: Texture, background?: () => boolean): void | Promise<void> {
     if (this.disposed) throw new Error('page uploader disposed');
     const image = texture.image as { width?: number; height?: number } | null | undefined;
     const backend = this.backend();
@@ -114,19 +124,20 @@ export class PageUploader {
       return;
     }
     return new Promise<void>((resolve, reject) => {
-      this.jobs.push({ texture, image, gpu, width, height, row: 0, resolve, reject });
+      this.jobs.push({ texture, image, gpu, width, height, row: 0, resolve, reject, background });
     });
   }
 
   /**
-   * Copy up to `pixels` pixels of the waiting pages, oldest first; at least one row when anything waits. Call once per
-   * frame.
+   * Copy up to `pixels` pixels of the waiting pages (see the class comment for their order); at least one row when
+   * anything waits. Call once per frame.
    */
   step(pixels: number): void {
     const backend = this.backend();
     let budget = pixels;
     while (this.jobs.length && budget > 0) {
-      const job = this.jobs[0]!;
+      const index = this.next();
+      const job = this.jobs[index]!;
       const rows = Math.min(job.height - job.row, Math.max(1, Math.floor(budget / job.width)));
       try {
         if (!backend) throw new Error('GPU backend lost');
@@ -145,15 +156,34 @@ export class PageUploader {
         if (job.row < job.height) continue;
         if (job.texture.generateMipmaps) backend.generateMipmaps!(job.texture);
       } catch (error) {
-        this.jobs.shift();
+        this.jobs.splice(index, 1);
         job.reject(error instanceof Error ? error : new Error(String(error)));
         continue;
       }
-      this.jobs.shift();
+      this.jobs.splice(index, 1);
       // What initTexture does after an upload: the loader releases the decoded page here.
       job.texture.onUpdate?.(job.texture);
       job.resolve();
     }
+  }
+
+  /** Index of the page to copy rows of now: the one already begun, else waited-for before ahead, smallest first. */
+  private next(): number {
+    let best = 0;
+    let bestBackground = true;
+    let bestPixels = Infinity;
+    for (let i = 0; i < this.jobs.length; i++) {
+      const job = this.jobs[i]!;
+      if (job.row > 0) return i;
+      const background = job.background?.() ?? false;
+      const pixels = job.width * job.height;
+      if (background === bestBackground ? pixels < bestPixels : !background) {
+        best = i;
+        bestBackground = background;
+        bestPixels = pixels;
+      }
+    }
+    return best;
   }
 
   /** Reject what is still waiting (its loader releases the decoded page); later uploads throw. */

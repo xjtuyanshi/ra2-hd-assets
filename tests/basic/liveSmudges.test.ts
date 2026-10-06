@@ -2,7 +2,7 @@ import { BuildingLightGate } from '../../packages/hd-renderer/src/live/buildingL
 import { describe, expect, it, vi } from 'vitest';
 import type { LibraryOverlay, LibrarySmudge, TypeLibrary } from '../../packages/ra2-assets/src/library';
 import type { MapObject, SpriteEntry, SpriteFrame } from '../../packages/ra2-assets/src/manifest';
-import type { Ra2Cache } from '../../packages/hd-renderer/src/ra2/cache';
+import type { HdAtlas, Ra2Cache } from '../../packages/hd-renderer/src/ra2/cache';
 import { SpriteLayer, type SpriteInstance } from '../../packages/hd-renderer/src/ra2/sprites';
 import { LiveView, type LiveSnapshot } from '../../packages/hd-renderer/src/live/liveView';
 import { OverlayInstanceCache, type OverlayTerrain } from '../../packages/hd-renderer/src/live/overlays';
@@ -230,7 +230,8 @@ function presentation(withLibrary = true, airless?: boolean) {
     { kind: 'smudge', type: 'CR1', x: 1, y: 2, z: 2, sprite: 'smudge:CR1', flat: true },
     { kind: 'overlay', type: 'TIB01', x: 2, y: 2, z: 2, sprite: 'overlay:TIB01', flat: true },
   ];
-  const available = { indexed: true, hd: true, failed: false };
+  // `hd` false: the page has HD art that has not arrived; `hdAtlas` is that art once it has.
+  const available = { indexed: true, hd: true, failed: false, hdAtlas: null as HdAtlas | null };
   const typeLibrary: Pick<TypeLibrary, 'smudges' | 'overlays' | 'sprites' | 'types'> = {
     ...(withLibrary ? art : { sprites: {} }),
     types: {},
@@ -239,7 +240,7 @@ function presentation(withLibrary = true, airless?: boolean) {
     library: typeLibrary,
     revision: 0,
     page: vi.fn(() => (available.indexed ? { texture: cache.spriteAtlas, width: 64, height: 64 } : null)),
-    hdPage: vi.fn(() => null),
+    hdPage: vi.fn(() => available.hdAtlas),
     hasHdPage: () => !available.hd,
     pageFailed: () => available.failed,
     disposeMaterials: vi.fn(),
@@ -268,7 +269,11 @@ function presentation(withLibrary = true, airless?: boolean) {
     overlayLayers: new Map<number, { layer: SpriteLayer; materials: boolean }>(),
     uploadedOverlays: new Map(),
     smudgeLayers: new Map<SmudgePage, SpriteLayer>(),
+    indexedSmudgeLayers: new Set<SmudgePage>(),
     uploadedSmudges: new Map(),
+    aheadPages: new Set<number>(),
+    aheadVoxels: new Set<string>(),
+    indexedMeanwhile: new Map(),
     cellObjects: new Map([[1, mapObjects]]),
     cellInstances: [],
     cellPool: new SpritePool(),
@@ -477,6 +482,8 @@ describe('LiveView smudge integration', () => {
 
   it('retries pending pages without rebuilding the grid and disposes owned layers', () => {
     const p = presentation();
+    // Out of sight a page's first layer waits for its HD art: nothing is seen, and the layer is built once.
+    (p.view as unknown as { outOfSight: boolean }).outOfSight = true;
     p.available.indexed = false;
     p.view.push(p.state());
     const built = p.backing.smudgeInstances.instances;
@@ -484,6 +491,8 @@ describe('LiveView smudge integration', () => {
     p.view.render(2);
     expect(p.backing.smudgeLayers.size).toBe(0);
     expect(p.backing.smudgeInstances.instances).toBe(built);
+    // The HD art was asked for beside the indexed page, not after it.
+    expect(p.liveLibrary.hdPage).toHaveBeenCalledWith(1);
     p.available.indexed = true;
     p.available.hd = false;
     p.view.render(3);
@@ -506,6 +515,61 @@ describe('LiveView smudge integration', () => {
     expect(p.backing.uploadedSmudges.size).toBe(0);
     expect(p.liveLibrary.disposeMaterials).toHaveBeenCalledTimes(1);
     expect(p.liveLibrary.disposeDepthTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  it('draws a shown page from its indexed art while the HD art loads and rebuilds the layer once with it', () => {
+    const p = presentation();
+    p.available.hd = false;
+    p.view.push(p.state());
+    p.view.render(1);
+    // The crater is on the ground in the first frame, from the indexed page.
+    const indexed = p.backing.smudgeLayers.get(1)!;
+    expect(indexed.mesh.count).toBe(1);
+    expect([...p.backing.indexedSmudgeLayers]).toEqual([1]);
+    const record = { ...indexed.getInstances()[0]! };
+    const upload = vi.spyOn(indexed, 'setInstances');
+    const disposed = vi.spyOn(indexed.mesh, 'dispose');
+    // While the art is on its way the page is asked for again, and nothing is uploaded or rebuilt.
+    p.view.render(2);
+    p.view.render(3);
+    expect(upload).not.toHaveBeenCalled();
+    expect(p.backing.smudgeLayers.get(1)).toBe(indexed);
+    expect(p.liveLibrary.hdPage.mock.calls.length).toBeGreaterThanOrEqual(3);
+    // Any texture stands in for the page's HD art here (no shader is built without a GPU).
+    p.available.hdAtlas = { color: p.backing.cache.spriteAtlas, remap: p.backing.cache.spriteAtlas };
+    p.view.render(4);
+    const final = p.backing.smudgeLayers.get(1)!;
+    expect(final).not.toBe(indexed);
+    expect(disposed).toHaveBeenCalledTimes(1);
+    expect(p.backing.indexedSmudgeLayers.size).toBe(0);
+    // The same mark in the same place: only the layer it is drawn by has changed.
+    expect(final.mesh.count).toBe(1);
+    const swapped = final.getInstances()[0]!;
+    expect(swapped.frame).toBe(record.frame);
+    expect(swapped.anchor.equals(record.anchor)).toBe(true);
+    expect(swapped.palette).toBe(record.palette);
+    const again = vi.spyOn(final, 'setInstances');
+    p.view.render(5);
+    expect(again).not.toHaveBeenCalled();
+    p.view.dispose();
+  });
+
+  it('keeps a shown page on its indexed art when the HD art fails to load', () => {
+    const p = presentation();
+    p.available.hd = false;
+    p.view.push(p.state());
+    p.view.render(1);
+    const indexed = p.backing.smudgeLayers.get(1)!;
+    // LiveLibrary.hasHdPage answers false once the art has failed.
+    p.available.hd = true;
+    const asked = p.liveLibrary.hdPage.mock.calls.length;
+    p.view.render(2);
+    p.view.render(3);
+    expect(p.backing.smudgeLayers.get(1)).toBe(indexed);
+    expect(p.backing.indexedSmudgeLayers.size).toBe(0);
+    // Settled: the page is not asked for on every frame.
+    expect(p.liveLibrary.hdPage.mock.calls.length).toBe(asked);
+    p.view.dispose();
   });
 
   it('grows a page without truncating marks and disposes the replaced mesh', () => {

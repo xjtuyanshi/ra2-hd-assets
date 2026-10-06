@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VmShell } from '../../src/adapter/vmShell';
 import type { GameRenderState } from '../../src/games/renderState';
-import { startHdBridge, type HdBridgeTimeline } from '../../src/ui/pages/game/hdBridge';
+import { sidebarUpcomingTypes, startHdBridge, type HdBridgeTimeline } from '../../src/ui/pages/game/hdBridge';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
 import { hdSidebar } from '../helpers/hdSidebar';
 
@@ -52,6 +52,7 @@ function fakeView() {
     warm: vi.fn(),
     warmTypes: vi.fn((): unknown[] => []),
     loadingArt: vi.fn(() => 0),
+    prepare: vi.fn(),
   };
 }
 
@@ -1059,6 +1060,63 @@ describe('HD interface bridge wiring', () => {
     late.stop();
     await settle();
     expect(hdUi.start).not.toHaveBeenCalled();
+  });
+});
+
+describe('art of what the sidebar announces', () => {
+  it('lists the types being produced, queued or waiting to be placed, each once, and no superweapon', () => {
+    expect(sidebarUpcomingTypes(null)).toEqual([]);
+    expect(sidebarUpcomingTypes(undefined)).toEqual([]);
+    const sidebar = hdSidebar();
+    // The helper's power plant is being built, its GI is ready and its tank is on hold in a queue of twelve.
+    expect(sidebarUpcomingTypes(sidebar)).toEqual(['GAPOWR', 'E1', 'MTNK']);
+    const idle = { ...sidebar.cameos[0]!, progress: null, ready: false, queued: 0 };
+    const charging = { ...sidebar.cameos[0]!, id: 'NukeSpecial', kind: 'super' as const, progress: 0.5 };
+    const queued = { ...idle, id: 'E2', queued: 1 };
+    sidebar.cameos = [idle, charging, queued, { ...queued }, sidebar.cameos[1]!];
+    expect(sidebarUpcomingTypes(sidebar)).toEqual(['E2', 'E1']);
+  });
+
+  it("hands them to the view when they change, so a building's art is in before it is placed", async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    expect(view.prepare).not.toHaveBeenCalled();
+    const sidebar = hdSidebar();
+    harness.setState({ ...battle(3), sidebar });
+    await advance(16);
+    expect(view.prepare.mock.calls).toEqual([[['GAPOWR', 'E1', 'MTNK']]]);
+    // The clock moving on is no news: the view is not asked again on every poll.
+    harness.setState({ ...battle(4), sidebar: { ...sidebar, cameos: sidebar.cameos.map((c) => ({ ...c })) } });
+    await advance(16, 3);
+    expect(view.prepare).toHaveBeenCalledTimes(1);
+    // The refinery's production starts.
+    const refinery = { ...sidebar.cameos[0]!, id: 'NAREFN', progress: 0.01, queued: 0 };
+    harness.setState({ ...battle(5), sidebar: { ...sidebar, cameos: [...sidebar.cameos, refinery] } });
+    await advance(16);
+    expect(view.prepare).toHaveBeenLastCalledWith(['GAPOWR', 'E1', 'MTNK', 'NAREFN']);
+    // Nothing in production any more: nothing to ask for (what was asked for stays prepared in the view).
+    harness.setState({ ...battle(6), sidebar: { ...sidebar, cameos: [] } });
+    await advance(16);
+    expect(view.prepare).toHaveBeenLastCalledWith([]);
+    harness.stop();
+  });
+
+  it('asks a new view again: another map has another library', async () => {
+    const harness = setup();
+    const first = await goLive(harness);
+    const sidebar = hdSidebar();
+    harness.setState({ ...battle(3), sidebar });
+    await advance(16);
+    expect(first.prepare).toHaveBeenCalledTimes(1);
+    const second = fakeView();
+    liveView.create.mockResolvedValue(second);
+    harness.setState({ ...battle(1, 'OTHER.MAP'), sidebar });
+    await advance(1000);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(second));
+    harness.setState({ ...battle(2, 'OTHER.MAP'), sidebar });
+    await advance(16, 2);
+    expect(second.prepare.mock.calls).toEqual([[['GAPOWR', 'E1', 'MTNK']]]);
+    harness.stop();
   });
 });
 

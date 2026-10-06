@@ -72,6 +72,7 @@ import {
   EffectSpriteLayer,
   animAlpha,
   effectDisplayBounds,
+  effectPageLoaded,
   type EffectDisplayBounds,
   type EffectInstance,
 } from './effectSprites';
@@ -80,6 +81,8 @@ import { LiveBeams } from './beams';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
 import { BuildingLightGate, buildingLightOverlay, buildingLightSources } from './buildingLights';
 import { BuildingVisualHistory } from './buildingVisualHistory';
+import { DEPLOY_TARGETS, overlayTypePages } from './artAhead';
+import { HeldPicture } from './heldPicture';
 import { PageUploader } from '../pageUpload';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
@@ -299,6 +302,18 @@ export interface LiveDiagnostics {
   mapCacheTypes: string[];
   /** Objects whose library art is still loading. */
   pendingArt: number;
+  /**
+   * Sprites in the frame last drawn that came from their indexed atlas page because the page's HD art (its final
+   * layer) was not there yet: drawn in place, at the original's resolution.
+   */
+  indexedSprites: number;
+  /** Sprite objects that showed their previous complete picture because art of their new state had not arrived. */
+  heldPictures: number;
+  /**
+   * Sprite objects of which a part had no art to draw from at all (its page had not arrived) and no earlier picture
+   * to show instead: a first appearance that nothing announced (see LiveView.prepare).
+   */
+  incompletePictures: number;
   /** Voxel units, turrets and projectiles on screen with a stand-in mesh while their own is being built. */
   standInVoxels: number;
   /** Buildings whose voxel turret (TurretAnimIsVoxel) has no model, and whose model is still loading. */
@@ -434,6 +449,21 @@ interface Visual {
   alternateWarm?: boolean;
   /** Presented motion of a mobile object (see MOTION_MARGIN). */
   motion?: Motion;
+  /** The last complete picture of a sprite object, kept while pages of its type are on their way (HeldPicture). */
+  held?: HeldPicture;
+  /** Every atlas page of the type has arrived (or failed): no sprite of the object can lack a source any more. */
+  pagesIn?: boolean;
+}
+
+/** The sprites queued for the object being drawn, while pages of its type are on their way (see beginPicture). */
+interface Picture {
+  sprites: SpriteInstance[];
+  indexed: boolean[];
+  /** Batch key each sprite was queued under. */
+  keys: number[];
+  count: number;
+  /** A sprite other than a shadow had no page to draw from. */
+  incomplete: boolean;
 }
 
 /** Engine pose with 16-bit facings kept unwrapped as numbers, and the body's up vector when the game reports it. */
@@ -705,6 +735,20 @@ export class LiveView {
   /** New kinds added in the frame being drawn, and kinds that had to wait for a later frame. */
   private newArt = 0;
   private waitingArt = 0;
+  /** Rules types asked for ahead of their first object (see prepare), and what is still on its way for them. */
+  private readonly preparedTypes = new Set<string>();
+  private readonly aheadPages = new Set<number>();
+  private readonly aheadVoxels = new Set<string>();
+  /** Set while applyObjects draws a sprite object whose type still waits for pages (see beginPicture). */
+  private picture: Picture | null = null;
+  private readonly pictureScratch: Picture = { sprites: [], indexed: [], keys: [], count: 0, incomplete: false };
+  private readonly pictureBase = new Vector3();
+  /** Per flush: sprites of pages whose final layer is not there, by page (see flushSprites). */
+  private readonly indexedMeanwhile = new Map<number, SpriteInstance[]>();
+  /** Counted while objects are applied and flushed, for diagnostics(). */
+  private indexedSprites = 0;
+  private heldPictures = 0;
+  private incompletePictures = 0;
   /** Copies decoded atlas pages to the GPU a strip per frame; stepped by render(). */
   private readonly pageUploads: PageUploader;
   private readonly visuals = new Map<number, Visual>();
@@ -772,7 +816,8 @@ export class LiveView {
   private readonly cellObjects = new Map<number, MapObject[]>();
   private cellsDirty = true;
   private readonly overlayInstances: OverlayInstanceCache;
-  private readonly overlayLayers = new Map<number, { layer: SpriteLayer; materials: boolean }>();
+  /** `indexed`: built from the indexed page while the page's HD art loads (a shown view), to be rebuilt with it. */
+  private readonly overlayLayers = new Map<number, { layer: SpriteLayer; materials: boolean; indexed?: boolean }>();
   private readonly uploadedOverlays = new Map<number, readonly SpriteInstance[]>();
   private overlayPagesDirty = false;
   private readonly warnedOverlayTypes = new Set<string>();
@@ -780,6 +825,8 @@ export class LiveView {
   private warnedOverlayLibrary = false;
   private readonly smudgeInstances: SmudgeInstanceCache;
   private readonly smudgeLayers = new Map<SmudgePage, SpriteLayer>();
+  /** Smudge layers built from the indexed page while the page's HD art loads (see overlayLayers). */
+  private readonly indexedSmudgeLayers = new Set<SmudgePage>();
   private readonly uploadedSmudges = new Map<SmudgePage, readonly SpriteInstance[]>();
   private smudgePagesDirty = false;
   private readonly warnedSmudgeTypes = new Set<string>();
@@ -980,6 +1027,12 @@ export class LiveView {
     };
     this.overlayInstances = new OverlayInstanceCache(cellTerrain);
     this.smudgeInstances = new SmudgeInstanceCache(cellTerrain, cache.manifest.sprites);
+    // What the map itself places will be in the match's first snapshot: the map cache lists it, so its art starts
+    // loading now, behind the loading screen, and not when the game has created the objects (see prepare).
+    const placed = new Set<string>();
+    for (const object of cache.manifest.objects)
+      if (object.kind !== 'tree' && object.kind !== 'overlay' && object.kind !== 'smudge') placed.add(object.type);
+    this.prepare(placed, false);
   }
 
   static async create(canvas: HTMLCanvasElement, options: LiveViewOptions): Promise<LiveView> {
@@ -1498,6 +1551,8 @@ export class LiveView {
       this.volumetricBlasts.cameraUp.value,
       this.volumetricBlasts.toCamera.value,
     );
+    // After everything this frame's own objects needed: art ahead of need takes what is left of the frame's pace.
+    this.stepAhead();
     this.hd.frame(dt);
     // Loads settle between frames, never inside one: what is still on its way now was missing from this frame.
     this.settled = current && this.loadingArt() === 0 ? this.settled + 1 : 0;
@@ -1860,6 +1915,9 @@ export class LiveView {
       missingTypes: [...this.warnedTypes].sort(),
       mapCacheTypes: [...mapCacheTypes].sort(),
       pendingArt,
+      indexedSprites: this.indexedSprites,
+      heldPictures: this.heldPictures,
+      incompletePictures: this.incompletePictures,
       standInVoxels: this.voxelUnits.standInUnits,
       missingTurrets,
       pendingTurrets,
@@ -1938,6 +1996,7 @@ export class LiveView {
     const batch = this.spriteBatch;
     for (const list of batch.values()) list.length = 0;
     this.spritePool.begin();
+    this.heldPictures = this.incompletePictures = 0;
     if (this.painterDirty) {
       this.refineryCells = new Set<string>();
       for (const object of current.snapshot.objects) {
@@ -2004,13 +2063,15 @@ export class LiveView {
         continue;
       }
       if (visual.mode === 'library-sprite') {
-        if (object.kind === 'building') {
-          const standing = this.libraryBuildingSprites(object, visual, batch, snapshot);
-          // A building's turret aims with its PrimaryFacing (the reader's facingRaw): recorded sentry guns turned it
-          // (5793 .. 28312) while their SecondaryFacing (turretFacingRaw) stayed 0.
-          this.buildingTurret(object, visual, standing ? pose.facing : null);
-        } else if (object.kind === 'infantry') this.libraryInfantrySprites(object, pose, visual, batch, frame);
+        const recorded = this.beginPicture(visual, pose);
+        let standing = false;
+        if (object.kind === 'building') standing = this.libraryBuildingSprites(object, visual, batch, snapshot);
+        else if (object.kind === 'infantry') this.libraryInfantrySprites(object, pose, visual, batch, frame);
         else this.libraryShpUnitSprites(object, pose, visual, batch, frame);
+        if (recorded) this.endPicture(visual, batch);
+        // A building's turret aims with its PrimaryFacing (the reader's facingRaw): recorded sentry guns turned it
+        // (5793 .. 28312) while their SecondaryFacing (turretFacingRaw) stayed 0.
+        if (object.kind === 'building') this.buildingTurret(object, visual, standing ? pose.facing : null);
         continue;
       }
       const unit = visual;
@@ -2310,19 +2371,64 @@ export class LiveView {
   /**
    * Hand each atlas its instances; library pages get their sprite layer when their texture has loaded. Layers that
    * were empty and stay empty are not touched; retained layers compare and upload only dirty attribute ranges.
+   *
+   * A page's final layer needs its HD art, 50 MB that are still being decoded and uploaded when the 2 MB indexed page
+   * is long in. A shown view does not leave the page's objects undrawn until then (measured before this: a
+   * construction yard and a refinery without any picture for 46 and 47 presented frames after they were placed, and
+   * 25.8 s for the refinery on a loaded machine): their sprites go to the page's indexed layer meanwhile, the one
+   * `queue` uses for art that is always drawn indexed. The records are the same ones the final
+   * layer gets when it exists (anchor, frame rectangle, palette row with the house colours, depth profile), and both
+   * layers place a frame by the indexed atlas's own pixels, so the change to HD art moves and resizes nothing. Out of
+   * sight nothing is drawn early: the page counts as art on its way and the view is not shown before it is in.
    */
   private flushSprites(batch: SpriteBatch, reorder = true): void {
     const map = batch.get('map') ?? EMPTY_SPRITES;
     if (map.length || this.sprites.mesh.count) this.sprites.setInstances(map, reorder);
+    const meanwhile = this.indexedMeanwhile;
+    for (const list of meanwhile.values()) list.length = 0;
+    this.indexedSprites = 0;
     for (const key of batch.keys()) {
       const instances = batch.get(key)!;
-      if (key === 'map' || !instances.length) continue;
+      if (key === 'map' || key < 0 || !instances.length) continue;
+      const layer = this.pageLayer(key);
+      if (layer) {
+        layer.setInstances(instances, reorder);
+        continue;
+      }
+      if (this.outOfSight) continue;
+      this.requestMasks(key);
+      let list = meanwhile.get(key);
+      if (!list) meanwhile.set(key, (list = []));
+      for (const instance of instances) list.push(instance);
+      this.indexedSprites += instances.length;
+    }
+    for (const [page, list] of meanwhile) {
+      if (!list.length) continue;
+      // With the page's own indexed sprites in one layer; the layer orders its cards itself.
+      for (const instance of batch.get(-1 - page) ?? EMPTY_SPRITES) list.push(instance);
+      this.pageLayer(-1 - page)?.setInstances(list, reorder);
+    }
+    for (const key of batch.keys()) {
+      const instances = batch.get(key)!;
+      if (key === 'map' || key >= 0 || !instances.length || meanwhile.get(-1 - key)?.length) continue;
       this.pageLayer(key)?.setInstances(instances, reorder);
     }
-    for (const page of this.pageLayers.keys()) {
-      const layer = this.pageLayers.get(page)!.layer;
-      if (!batch.get(page)?.length && layer.mesh.count) layer.setInstances(EMPTY_SPRITES);
+    for (const key of this.pageLayers.keys()) {
+      const layer = this.pageLayers.get(key)!.layer;
+      if (!layer.mesh.count || batch.get(key)?.length) continue;
+      if (key < 0 && meanwhile.get(-1 - key)?.length) continue;
+      layer.setInstances(EMPTY_SPRITES);
     }
+  }
+
+  /**
+   * Ask for the masks the final layer of `page` will be built with, while its sprites are drawn from the indexed page:
+   * they load beside the HD art instead of after it, so the layer is usually built once, complete.
+   */
+  private requestMasks(page: number): void {
+    const library = this.library!;
+    if (this.hd.windowsWanted() && library.hasWindowsPage(page)) library.windowsPage(page);
+    if (this.hd.materialsWanted() && library.hasMaterialsPage(page)) library.materialsPage(page);
   }
 
   /** Sprite layer of a library page; negative keys (-1 - page) are the page's indexed-only layer (see queue). */
@@ -2338,14 +2444,16 @@ export class LiveView {
     if (existing && (existing.windows || !wantWindows) && (existing.materials || !wantMaterials)) return existing.layer;
     const atlas = this.library?.page(page);
     if (!atlas) return existing?.layer ?? null;
-    // Wait for the page's HD art when it has it, so a layer is never built twice for its colour texture.
+    // Wait for the page's HD art when it has it, so a layer is never built twice for its colour texture. Meanwhile
+    // a shown view draws the page's sprites from its indexed layer (flushSprites).
     const hd = indexedOnly ? null : this.library!.hdPage(page);
     if (!indexedOnly && !hd && this.library!.hasHdPage(page)) return existing?.layer ?? null;
     // Retain already attached masks when the other sidecar arrives, even if the hour/look changed meanwhile.
     const windows = wantWindows || existing?.windows ? this.library!.windowsPage(page) : null;
     const materials = wantMaterials || existing?.materials ? this.library!.materialsPage(page) : null;
-    // While a wanted mask loads, keep drawing what exists (or wait, like for HD art) instead of building twice.
-    if (wantWindows && !windows) return existing?.layer ?? null;
+    // While a wanted mask loads, keep drawing what exists instead of building twice. A first layer waits for it out
+    // of sight only: a shown view draws the page's art without lit windows until the mask is in.
+    if (wantWindows && !windows && (existing || this.outOfSight)) return existing?.layer ?? null;
     // On first use, draw the available art while materials load. Later arrivals replace the mesh just once.
     if (existing && wantMaterials && !materials) return existing.layer;
     // Out of sight there is no first use to serve: wait for the material page and build the layer once.
@@ -2398,11 +2506,72 @@ export class LiveView {
    */
   private queue(batch: SpriteBatch, instance: ObjectSprite, indexed = false): void {
     const page = instance.frame.page ?? 0;
-    if (!this.library?.page(page)) return;
+    const picture = this.picture;
+    if (!this.library?.page(page)) {
+      // Nothing to draw this sprite from yet. Its HD art is asked for now, beside the indexed page and not after it.
+      if (!indexed) this.library?.hdPage(page);
+      // A missing shadow leaves a picture usable; a missing part does not.
+      if (picture && !instance.shadow) picture.incomplete = true;
+      return;
+    }
     const key = indexed && this.library.hasHdPage(page) ? -1 - page : page;
     let list = batch.get(key);
     if (!list) batch.set(key, (list = []));
     list.push(instance);
+    if (!picture) return;
+    const i = picture.count++;
+    picture.sprites[i] = instance;
+    picture.indexed[i] = indexed;
+    picture.keys[i] = key;
+  }
+
+  /**
+   * Start recording the sprites of the object about to be drawn, when pages of its type are still on their way (see
+   * HeldPicture); false once they are all in, which is the normal case and costs one test per object and frame.
+   * `pose` is the object's presented position.
+   *
+   * The type's pages are fetched here, all of them and as indexed pages only: the one the object draws from now is
+   * asked for by `queue` anyway, and the others (a build-up on one page and the body on the next, a soldier whose
+   * sequences span two) are what a change of state draws from next.
+   */
+  private beginPicture(visual: Visual, pose: Pose): boolean {
+    if (visual.pagesIn) return false;
+    const library = this.library!;
+    let pagesIn = true;
+    for (const page of library.typePages(visual.libraryType!)) if (!library.preloadPage(page)) pagesIn = false;
+    if (pagesIn) {
+      visual.pagesIn = true;
+      visual.held = undefined;
+      return false;
+    }
+    leptonAnchor(pose.x, pose.y, pose.z, 0, 0, this.pictureBase);
+    const picture = (this.picture = this.pictureScratch);
+    picture.count = 0;
+    picture.incomplete = false;
+    return true;
+  }
+
+  /**
+   * The object's sprites are queued. A complete picture is kept; an incomplete one is replaced by the picture kept
+   * before, so a change of state shows the old art until the new art can be drawn. Without an earlier picture (the
+   * object's first frames) what could be queued stays.
+   */
+  private endPicture(visual: Visual, batch: SpriteBatch): void {
+    const picture = this.picture!;
+    this.picture = null;
+    if (!picture.incomplete) {
+      (visual.held ??= new HeldPicture()).capture(this.pictureBase, picture.sprites, picture.indexed, picture.count);
+      return;
+    }
+    const held = visual.held;
+    if (!held?.size) {
+      this.incompletePictures++;
+      return;
+    }
+    // The object's own sprites are the last ones of their lists: objects are drawn one after another.
+    for (let i = picture.count - 1; i >= 0; i--) batch.get(picture.keys[i]!)!.pop();
+    held.replay(this.spritePool, this.pictureBase, (instance, indexed) => this.queue(batch, instance, indexed));
+    this.heldPictures++;
   }
 
   /**
@@ -3111,6 +3280,9 @@ export class LiveView {
     const artType = this.drawArt(object, paletteKey);
     const libraryType = this.library?.type(artType);
     const base = { type: artType, paletteKey, firstFrame };
+    // What this object deploys into is prepared like a type in production (see prepare).
+    const target = DEPLOY_TARGETS.get(object.type);
+    if (target) this.prepare([target]);
     if (libraryType?.sprite && (object.kind === 'building' || object.kind === 'infantry'))
       return { ...base, root: new Group(), mode: 'library-sprite', libraryType };
     // SHP vehicles and aircraft (terror drone, squid, dolphin) have directional sprites, not voxels.
@@ -3152,6 +3324,82 @@ export class LiveView {
       root.add(mesh);
     }
     return { ...base, root, mode: 'placeholder', libraryType, pending };
+  }
+
+  /**
+   * Art of these rules types will be needed soon: the host calls this when a type's production starts in the sidebar
+   * or it waits to be placed, and the view itself for what the map cache lists as placed on the map (in its
+   * constructor: behind the loading screen, before the game has created those objects) and for what an object
+   * deploys into (buildVisual). Until then a type's pages were asked for in the frame its first object appeared, and
+   * the object was drawn as nothing until they had loaded.
+   *
+   * Their atlas pages are fetched whole (indexed page, HD art, the masks the look wants) and each page's sprite
+   * layer, with its shaders, is built before the first sprite is drawn from it (stepAhead); a vehicle's model, mesh
+   * and redraw projection are prepared in the local player's colours. All of it is ahead of need: it does not count
+   * as art on its way, so a view that is out of sight is not kept from being shown by it. Types the library does not
+   * know, and types asked for before, cost nothing. `local` false leaves vehicles out: their colours are not the
+   * local player's (the map's own objects).
+   */
+  prepare(types: Iterable<string>, local = true): void {
+    const library = this.library;
+    if (!library) return;
+    for (const id of types) {
+      if (this.preparedTypes.has(id)) continue;
+      this.preparedTypes.add(id);
+      const type = library.type(id);
+      if (type?.sprite) for (const page of library.typePages(type)) this.aheadPages.add(page);
+      else if (local && (type?.voxel || this.cache.voxels.has(id))) this.aheadVoxels.add(id);
+      // A wall is a building in the sidebar and an overlay on the map.
+      for (const page of overlayTypePages(library.library, id)) this.aheadPages.add(page);
+    }
+  }
+
+  /**
+   * One step of what prepare() asked for, once per rendered frame, after the frame's own objects: requests go out at
+   * once, and a page whose files are all in gets its layer built, one page per frame (the frame that builds a layer
+   * also builds its shaders; out of sight only in what the frame's own art left of newArtPerFrame, and never as art
+   * that waits its turn). A page stays listed until its layer exists with everything the look wants.
+   */
+  private stepAhead(): void {
+    const library = this.library;
+    if (!library || (!this.aheadPages.size && !this.aheadVoxels.size)) return;
+    const windowsWanted = this.hd.windowsWanted();
+    const materialsWanted = this.hd.materialsWanted();
+    let built = 0;
+    for (const page of this.aheadPages) {
+      const windows = windowsWanted && library.hasWindowsPage(page);
+      const materials = materialsWanted && library.hasMaterialsPage(page);
+      if (!library.preloadPage(page, true, windows, materials)) continue;
+      if (library.pageFailed(page)) {
+        this.aheadPages.delete(page);
+        continue;
+      }
+      const existing = this.pageLayers.get(page);
+      if (!existing || (windows && !existing.windows) || (materials && !existing.materials)) {
+        if (this.outOfSight ? this.newArt >= this.newArtPerFrame : built > 0) continue;
+        built++;
+        // Everything is in: this builds the layer (or rebuilds it with a mask that came later).
+        if (!this.pageLayer(page)) continue;
+      }
+      this.aheadPages.delete(page);
+    }
+    // A model's mesh is built off this thread and counts as art on its way: not before the view is shown.
+    if (!this.aheadVoxels.size || this.outOfSight) return;
+    const local = this.current?.snapshot.localHouse;
+    const colorIndex = local === undefined ? undefined : this.houseColour.get(local);
+    const paletteKey = colorIndex === undefined ? undefined : this.housePaletteKeys.get(colorIndex);
+    // The mesh and the projection belong to a model in its owner's colours: nothing to prepare before they are known.
+    if (paletteKey === undefined) return;
+    for (const id of this.aheadVoxels) {
+      const voxel = library.type(id)?.voxel;
+      const source = this.voxelSource(id, paletteKey);
+      if (
+        source
+          ? this.voxelUnits.prepare(source.model, source.key, source.cacheKey)
+          : !voxel || library.voxelFailed(voxel)
+      )
+        this.aheadVoxels.delete(id);
+    }
   }
 
   private ensureHouse(colorIndex: number): void {
@@ -3196,7 +3444,15 @@ export class LiveView {
       this.uploadedSmudges.delete(page);
     }
     for (const [page, instances] of pages) {
-      if (this.uploadedSmudges.get(page) === instances) continue;
+      // A layer that draws from the indexed page until the page's HD art is in (see below); art that failed stays out.
+      let waitingHd = page !== 'map' && this.indexedSmudgeLayers.has(page);
+      if (waitingHd && page !== 'map' && !this.library!.hasHdPage(page)) {
+        this.indexedSmudgeLayers.delete(page);
+        waitingHd = false;
+      }
+      const hdArrived = waitingHd && page !== 'map' && !!this.library!.hdPage(page);
+      if (waitingHd && !hdArrived) this.smudgePagesDirty = true;
+      if (this.uploadedSmudges.get(page) === instances && !hdArrived) continue;
       const atlas =
         page === 'map'
           ? {
@@ -3206,20 +3462,27 @@ export class LiveView {
             }
           : this.library?.page(page);
       if (!atlas) {
-        if (page !== 'map' && this.library && !this.library.pageFailed(page)) this.smudgePagesDirty = true;
-        else if (page !== 'map' && !this.warnedSmudgePages.has(page)) {
+        if (page !== 'map' && this.library && !this.library.pageFailed(page)) {
+          this.smudgePagesDirty = true;
+          // Its HD art is asked for beside the indexed page, not after it.
+          this.library.hdPage(page);
+        } else if (page !== 'map' && !this.warnedSmudgePages.has(page)) {
           this.warnedSmudgePages.add(page);
           console.warn(`[HD] live smudge atlas page ${page} failed to load.`);
         }
         continue;
       }
       const hd = page === 'map' ? this.cache.spriteAtlasHd : this.library!.hdPage(page);
-      if (page !== 'map' && !hd && this.library!.hasHdPage(page)) {
-        this.smudgePagesDirty = true;
-        continue;
-      }
+      const hdPending = page !== 'map' && !hd && this.library!.hasHdPage(page);
       let layer = this.smudgeLayers.get(page);
-      if (layer && layer.capacity < instances.length) {
+      if (hdPending) {
+        this.smudgePagesDirty = true;
+        // Out of sight a page's first layer waits for its HD art and is built once. A shown view draws the first
+        // crater of a page from the indexed page meanwhile: the mark is on the ground the moment the game puts it
+        // there, and gets its HD art in place.
+        if (this.outOfSight && !layer) continue;
+      }
+      if (layer && (layer.capacity < instances.length || hdArrived)) {
         this.disposeOverlayLayer(layer);
         layer = undefined;
       }
@@ -3231,6 +3494,8 @@ export class LiveView {
         this.shareSpriteUniforms(layer);
         this.root.add(layer.mesh);
         this.smudgeLayers.set(page, layer);
+        if (hdPending) this.indexedSmudgeLayers.add(page);
+        else this.indexedSmudgeLayers.delete(page);
       }
       layer.setInstances(instances);
       this.uploadedSmudges.set(page, instances);
@@ -3281,21 +3546,32 @@ export class LiveView {
       const wantMaterials = this.hd.materialsWanted() && !!this.library?.hasMaterialsPage(page);
       const materials = wantMaterials || existing?.materials ? this.library!.materialsPage(page) : null;
       if (wantMaterials && !materials) this.overlayPagesDirty = true;
-      const upgrade = !!materials && !existing?.materials;
+      // A layer that draws from the indexed page until the page's HD art is in (see below); art that failed stays out.
+      if (existing?.indexed && !this.library!.hasHdPage(page)) existing.indexed = false;
+      const hdArrived = !!existing?.indexed && !!this.library!.hdPage(page);
+      if (existing?.indexed && !hdArrived) this.overlayPagesDirty = true;
+      const upgrade = (!!materials && !existing?.materials) || hdArrived;
       if (this.uploadedOverlays.get(page) === instances && !upgrade) continue;
       const atlas = this.library?.page(page);
       if (!atlas) {
-        if (this.library && !this.library.pageFailed(page)) this.overlayPagesDirty = true;
-        else if (!this.warnedOverlayPages.has(page)) {
+        if (this.library && !this.library.pageFailed(page)) {
+          this.overlayPagesDirty = true;
+          // Its HD art is asked for beside the indexed page, not after it.
+          this.library.hdPage(page);
+        } else if (!this.warnedOverlayPages.has(page)) {
           this.warnedOverlayPages.add(page);
           console.warn(`[HD] live overlay atlas page ${page} failed to load.`);
         }
         continue;
       }
       const hd = this.library!.hdPage(page);
-      if (!hd && this.library!.hasHdPage(page)) {
+      const hdPending = !hd && this.library!.hasHdPage(page);
+      if (hdPending) {
         this.overlayPagesDirty = true;
-        continue;
+        // Out of sight a page's first layer waits for its HD art and is built once. A shown view draws the page's
+        // first overlays (a wall the player has just placed) from the indexed page meanwhile, and rebuilds the layer
+        // with the HD art when it is in.
+        if (this.outOfSight && !existing) continue;
       }
       let layer = existing?.layer;
       const capacity = cellLayerCapacity(instances.length, layer?.capacity);
@@ -3310,7 +3586,7 @@ export class LiveView {
         this.hd.terrainDepth.register(layer.mesh);
         this.shareSpriteUniforms(layer);
         this.root.add(layer.mesh);
-        this.overlayLayers.set(page, { layer, materials: !!materials });
+        this.overlayLayers.set(page, { layer, materials: !!materials, indexed: hdPending });
       }
       layer.setInstances(instances);
       this.uploadedOverlays.set(page, instances);
@@ -3549,7 +3825,8 @@ export function objectUnderlayCard(
   };
   const redrawn = hd ? art.hdAnim(under.art) : null;
   const hdFrame = redrawn?.frames[under.frame];
-  if (redrawn && hdFrame && art.hdPageState(hdFrame.page) !== null)
+  // A redrawn page that is still loading (asking starts the load) leaves the engine's own art on screen meanwhile.
+  if (redrawn && hdFrame && effectPageLoaded(art.hdPageState(hdFrame.page)))
     card.hd = { frame: hdFrame, next: null, scale: redrawn.scale, blend0: 0, t0: 0, stageSeconds: 1 };
   return card;
 }

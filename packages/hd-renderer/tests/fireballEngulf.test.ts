@@ -260,7 +260,7 @@ describe('explosion selection and packed instance data', () => {
         ready: true,
         anim: () => ({ art: { layer: 'air', start: 0, frameCount: 1 }, sprite: { frames: [card.frame] } }),
         hdAnim: () => ({ scale: 2, frames: [card.hd!.frame] }),
-        hdPageState: () => 'loading',
+        hdPageState: () => ({ texture, width: 256, height: 1 }),
       } as unknown as EffectArt;
       const driver = new LiveEffectsDriver({ setBeams() {} } as unknown as EffectsLayer, () => false);
       driver.style = style;

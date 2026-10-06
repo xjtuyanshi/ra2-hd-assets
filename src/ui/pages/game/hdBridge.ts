@@ -1,5 +1,5 @@
 import type { VmShell } from '../../../adapter/vmShell';
-import type { GameRenderState } from '../../../games/renderState';
+import type { GameRenderSidebar, GameRenderState } from '../../../games/renderState';
 import {
   RENDER_PASSTHROUGH,
   RENDER_PASSTHROUGH_ALL,
@@ -189,6 +189,23 @@ export function parsePassthroughFlags(value: string | null): number {
   return flags;
 }
 
+/**
+ * Rules types the native sidebar shows as on their way: being produced (its clock runs or is on hold), queued, or
+ * finished and waiting to be placed or to leave its factory. The view loads their art now (LiveView.prepare), so it is
+ * in when the object appears seconds later; before, a building was drawn as nothing for most of a second after it was
+ * placed, until its atlas pages had loaded. Superweapons are not objects. The reader reports the cameos of the tab on
+ * screen that are inside the strip, which is where a production is started from; one started without its cameo ever
+ * being on screen is first heard of when its object appears, as before.
+ */
+export function sidebarUpcomingTypes(sidebar: GameRenderSidebar | null | undefined): string[] {
+  const types: string[] = [];
+  for (const cameo of sidebar?.cameos ?? []) {
+    if (cameo.kind === 'super' || types.includes(cameo.id)) continue;
+    if (cameo.progress !== null || cameo.ready || cameo.queued > 0) types.push(cameo.id);
+  }
+  return types;
+}
+
 /** Stops the bridge when called; `toggle` switches between the HD view and the original picture (true: HD shown). */
 export type HdBridgeControl = (() => void) & { toggle(): boolean };
 
@@ -252,6 +269,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let prematch = true;
   /** Whether the view of the current match was handed its remembered list (once per match). */
   let warmed = false;
+  /** The sidebar's upcoming types as last handed to the current view (see sidebarUpcomingTypes). */
+  let upcomingKey = '';
   /** Kinds of object of the current match, for the next one (hdWarmStore.ts), and the last frame they were read at. */
   const matchTypes = new Map<string, LiveWarmType>();
   let collectedAt = -Infinity;
@@ -409,6 +428,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         liveMap = mapId;
         failed.delete(mapId);
         pushed = null;
+        upcomingKey = '';
         lastLayout = '';
         // Out of sight until the match it is for has been drawn completely (see tick).
         view.outOfSight = true;
@@ -521,6 +541,11 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (!topEffects && live.hd.topEffectsEnabled) {
       topEffects = true;
       writeTopEffects(storage);
+    }
+    const upcoming = sidebarUpcomingTypes(state.sidebar);
+    if (upcoming.join() !== upcomingKey) {
+      upcomingKey = upcoming.join();
+      live.prepare(upcoming);
     }
     // The opening is read at every snapshot: the starting units arrive in steps, and some are gone within seconds
     // (an MCV that deploys at once).
