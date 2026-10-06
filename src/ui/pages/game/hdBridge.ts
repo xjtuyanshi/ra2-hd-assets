@@ -7,6 +7,7 @@ import {
 } from '../../../games/renderPassthrough';
 import type { FrameRect, VmFrameRenderer } from './vmFrameRenderer';
 import type { HdUi } from './hdUi';
+import type { HdStallMonitor } from './hdStallMonitor';
 import { devicePixelBox } from './devicePixelBox';
 import type { LookPreset } from '../../../../packages/hd-renderer/src/HdRenderer';
 import type { LiveSnapshot, LiveView, LiveWarmType } from '../../../../packages/hd-renderer/src/live/liveView';
@@ -71,6 +72,11 @@ export interface HdBridgeHost {
    * original picture instead of the HD view (the map has no HD cache, or its view failed to load).
    */
   publishStatus?(text: string | null): void;
+  /**
+   * Stalls of the current match: how many presented frames came more than 150 ms late while it ran, and the longest
+   * such gap in ms; (0, 0) when another match begins (see hdStallMonitor.ts).
+   */
+  publishStalls?(count: number, longestMs: number): void;
 }
 
 /** YR's in-game layout around the tactical view: sidebar on the right, command bar at the bottom (engine pixels). */
@@ -250,6 +256,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let stopped = false;
   let enabled = true;
   let ui: HdUi | null = null;
+  let stallMonitor: HdStallMonitor | null = null;
   let uiEnabled = params.get('hd-ui') === '1';
   let latestState: GameRenderState | null = null;
   let inBattle = false;
@@ -303,6 +310,20 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         ui.update(latestState?.sidebar ?? null);
       })
       .catch((error) => console.warn('[HD] interface layer unavailable', error));
+  }
+  // The stall recorder and its development-server sink: like the interface layer, behind DEV so that neither the
+  // recorder nor a request to the log route exists in a production build.
+  if (import.meta.env.DEV) {
+    void import('./hdStallMonitor')
+      .then(({ startHdStallMonitor }) => {
+        if (stopped) return;
+        stallMonitor = startHdStallMonitor({
+          match: () => ({ map: stateMap, frame: stateFrame, shown: revealed && !!hole }),
+          activity: () => live?.activity() ?? null,
+          publish: (count, longestMs) => host.publishStalls?.(count, longestMs),
+        });
+      })
+      .catch((error) => console.warn('[HD] stall recorder unavailable', error));
   }
   let frame = 0;
   let lastLayout = '';
@@ -493,6 +514,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       warmed = false;
       matchTypes.clear();
       collectedAt = -Infinity;
+      stallMonitor?.newMatch();
       if (live) live.outOfSight = true;
       timeline = { ...emptyTimeline(mapId), loadAt: timeline.map === mapId ? timeline.loadAt : null };
       if (liveMap === mapId && live) timeline.readyAt = performance.now();
@@ -661,6 +683,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (stopped) return;
     frame = requestAnimationFrame(tick);
     const now = performance.now();
+    stallMonitor?.frame(now);
     if (!polling && now - lastPollAt >= pollInterval()) poll(now);
     if (!hole && keyRect && now >= keyUntil) present();
     if (fallback && now >= fallback.until) publish(null);
@@ -712,6 +735,10 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     get live() {
       return live;
     },
+    /** Presented frames that came more than 150 ms late, oldest first (the last 500; see hdStallMonitor.ts). */
+    get stalls() {
+      return stallMonitor?.entries() ?? [];
+    },
     /** When the current match's view loaded, prepared and was shown (copy; see HdBridgeTimeline). */
     get timeline(): HdBridgeTimeline {
       return { ...timeline };
@@ -731,6 +758,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     clearFallback();
     ui?.dispose();
     ui = null;
+    stallMonitor?.dispose();
+    stallMonitor = null;
     latestState = null;
     if (passthroughRequest) void host.vm.setTacticalPassthrough(0).catch(() => undefined);
     // Pending polls, loads and passthrough replies check `stopped`; reset the rest so nothing refers to this session.

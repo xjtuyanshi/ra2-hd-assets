@@ -59,6 +59,8 @@ export interface ToolbarModel {
   resolution: string;
   /** Frame size and device pixels per frame pixel of the current canvas fit. */
   resolutionStatus?: string;
+  /** Stalls of the current match ("卡顿 N 次，最长 X 秒"), empty while there were none or no recorder runs. */
+  stalls?: string;
   rate: number;
   upscaleMode: UpscaleMode;
   reshadeMode?: ReShadeMode;
@@ -271,6 +273,9 @@ export function RuntimeToolbarView({
       </output>
       <output id="vm-performance" title={localizeText(message || model.performanceTitle)}>
         {localizeText(message || model.performance)}
+      </output>
+      <output id="vm-stalls" role="status" title={t('本局中画面停顿超过 150 毫秒的次数与最长一次的时长')}>
+        {model.stalls ?? ''}
       </output>
       <div className="resolution-controls">
         <span className="label">{t('超分')}</span>

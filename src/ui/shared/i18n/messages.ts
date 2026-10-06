@@ -213,6 +213,9 @@ export const englishMessages = {
   '切换高清画面与原版画面（快捷键 \\）': 'Switch between the HD and the original picture (shortcut \\)',
   '高清画面 / 原版画面（仅高清模式）': 'HD / original picture (HD mode only)',
   '{0}×{1} · 每像素 {2} 设备像素': '{0}×{1} · {2} device px per pixel',
+  '卡顿 {0} 次，最长 {1} 秒': 'Stalls: {0}, longest {1} s',
+  '本局中画面停顿超过 150 毫秒的次数与最长一次的时长':
+    'Frames of this match that came more than 150 ms late, and the longest such gap',
   ' · 窗口已变，刷新页面重新匹配': ' · window changed, reload to match again',
   主音量: 'Master volume',
   主音量读数: 'Master volume value',

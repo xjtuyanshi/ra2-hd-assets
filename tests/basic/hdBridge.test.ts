@@ -16,6 +16,9 @@ vi.mock('../../packages/hd-renderer/src/HdRenderer', () => ({
 
 const hdUi = vi.hoisted(() => ({ start: vi.fn() }));
 vi.mock('../../src/ui/pages/game/hdUi', () => ({ startHdUi: hdUi.start }));
+// The stall recorder listens to the document and posts to the development server: a stub records its wiring.
+const stallMonitor = vi.hoisted(() => ({ start: vi.fn() }));
+vi.mock('../../src/ui/pages/game/hdStallMonitor', () => ({ startHdStallMonitor: stallMonitor.start }));
 
 interface BridgeHandle {
   toggle(): boolean;
@@ -53,7 +56,13 @@ function fakeView() {
     warmTypes: vi.fn((): unknown[] => []),
     loadingArt: vi.fn(() => 0),
     prepare: vi.fn(),
+    activity: vi.fn(() => ({ pageUploads: 1, logicFps: 20 })),
   };
+}
+
+/** What the bridge gets back from the stall monitor it starts. */
+function fakeStallMonitor() {
+  return { frame: vi.fn(), newMatch: vi.fn(), entries: vi.fn((): unknown[] => [{ seq: 1 }]), dispose: vi.fn() };
 }
 
 function fakeLookView() {
@@ -127,6 +136,7 @@ function setup(search = '?hd=1', backend: VmFrameRenderer['backend'] = 'WebGL2')
     setTacticalPassthrough: vi.fn(async (_flags: number) => true),
   };
   const status = vi.fn((_text: string | null) => undefined);
+  const stalls = vi.fn((_count: number, _longestMs: number) => undefined);
   const stop = startHdBridge({
     vm: vm as unknown as VmShell,
     screen: screen as unknown as HTMLCanvasElement,
@@ -134,10 +144,12 @@ function setup(search = '?hd=1', backend: VmFrameRenderer['backend'] = 'WebGL2')
     invalidate: vi.fn(),
     frameSize: () => frameSize,
     publishStatus: status,
+    publishStalls: stalls,
   });
   return {
     stop,
     status,
+    stalls,
     vm,
     renderer,
     screen,
@@ -187,6 +199,7 @@ afterEach(() => {
   liveView.create.mockReset();
   hdRenderer.applyLookPreset.mockReset();
   hdUi.start.mockReset();
+  stallMonitor.start.mockReset();
 });
 
 describe('HD bridge control', () => {
@@ -1060,6 +1073,79 @@ describe('HD interface bridge wiring', () => {
     late.stop();
     await settle();
     expect(hdUi.start).not.toHaveBeenCalled();
+  });
+});
+
+describe('stall recorder wiring', () => {
+  it('reports every animation frame with its clock, and what it knows when one comes late', async () => {
+    const monitor = fakeStallMonitor();
+    stallMonitor.start.mockReturnValue(monitor);
+    const harness = setup();
+    await settle();
+    expect(stallMonitor.start).toHaveBeenCalledTimes(1);
+    const host = stallMonitor.start.mock.calls[0]![0] as {
+      match(): { map: string | null; frame: number; shown: boolean };
+      activity(): unknown;
+      publish(count: number, longestMs: number): void;
+    };
+    // Before any battle: no map, no view.
+    expect(host.match()).toEqual({ map: null, frame: 0, shown: false });
+    expect(host.activity()).toBeNull();
+    const before = monitor.frame.mock.calls.length;
+    await advance(16, 3);
+    expect(monitor.frame.mock.calls.slice(before).map(([now]) => now)).toEqual([clock - 32, clock - 16, clock]);
+    const view = await goLive(harness);
+    await advance(16);
+    expect(host.match()).toEqual({ map: 'xmp29u2', frame: 2, shown: true });
+    expect(host.activity()).toEqual({ pageUploads: 1, logicFps: 20 });
+    expect(view.activity).toHaveBeenCalledTimes(1);
+    // The original picture is shown instead: the match goes on, the HD view is not what the player sees.
+    harness.stop.toggle();
+    await advance(16);
+    expect(host.match()).toMatchObject({ map: 'xmp29u2', shown: false });
+    // The count of the match reaches the page (its toolbar line).
+    host.publish(3, 1730);
+    expect(harness.stalls).toHaveBeenLastCalledWith(3, 1730);
+    // The console handle shows what was recorded.
+    expect((harness.bridge() as unknown as { stalls: unknown[] }).stalls).toEqual([{ seq: 1 }]);
+    harness.stop();
+    expect(monitor.dispose).toHaveBeenCalledTimes(1);
+    const frames = monitor.frame.mock.calls.length;
+    await advance(16, 2);
+    expect(monitor.frame.mock.calls.length).toBe(frames);
+  });
+
+  it('starts the count over with every match, and not when a match merely goes on', async () => {
+    const monitor = fakeStallMonitor();
+    stallMonitor.start.mockReturnValue(monitor);
+    const harness = setup();
+    await settle();
+    await goLive(harness);
+    const first = monitor.newMatch.mock.calls.length;
+    expect(first).toBeGreaterThanOrEqual(1);
+    harness.setState(battle(50));
+    await advance(16, 3);
+    expect(monitor.newMatch).toHaveBeenCalledTimes(first);
+    // The logic frame starts over: another match on the same map.
+    harness.setState(battle(1));
+    await advance(16);
+    expect(monitor.newMatch).toHaveBeenCalledTimes(first + 1);
+    harness.stop();
+  });
+
+  it('runs without a recorder when the monitor cannot start', async () => {
+    stallMonitor.start.mockImplementation(() => {
+      throw new Error('no document');
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const harness = setup();
+    await settle();
+    await goLive(harness);
+    await advance(16, 2);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect((harness.bridge() as unknown as { stalls: unknown[] }).stalls).toEqual([]);
+    expect(warn.mock.calls.some(([text]) => String(text).includes('stall recorder unavailable'))).toBe(true);
+    harness.stop();
   });
 });
 

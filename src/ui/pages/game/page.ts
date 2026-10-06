@@ -454,6 +454,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     if (activeHdCleanup === hdCleanup) activeHdCleanup = null;
     hdCleanup = null;
     toolbar.setHdView(null);
+    toolbar.setStalls(0, 0);
     setSessionShortcutKey(HD_VIEW_KEY, false);
     effects.stop();
     activeNetworkCleanup?.();
@@ -608,6 +609,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
           frameSize: () => (presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null),
           pointerPosition: () => inputPointerPosition?.() ?? null,
           publishStatus: (text) => hdStatus.set(text),
+          publishStalls: (count, longestMs) => toolbar.setStalls(count, longestMs),
         });
         // Only a running bridge has a view to switch: the button appears and the key stops reaching the game.
         toolbar.setHdView(true);

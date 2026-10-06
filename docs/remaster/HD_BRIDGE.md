@@ -10,7 +10,7 @@ development-only dynamic imports and resolve to null, and nothing calls the rema
 `render-state` and `tactical-passthrough` messages, the VM core's opt-in (`renderPassthrough`) handling and the frame
 renderer's key and transparent-rectangle paths. The page bridge, three.js and `packages/hd-renderer`, the YR state,
 shroud, overlay, smudge and effects readers, the guest gate engine with the YR passthrough patch table, and the development server's
-`/hd-cache` route are not part of production builds or `vite preview`. `tests/basic/architecture/dependencies.test.ts`
+`/hd-cache` and `/__perf/stalls` routes are not part of production builds or `vite preview`. `tests/basic/architecture/dependencies.test.ts`
 walks the production import graph from `index.html` (Worker and worklet entries included) and fails if the YR readers,
 the passthrough patch table or the guest gate engine become reachable outside an `import.meta.env.DEV` branch. The
 page bridge's gate is the `hdBridgeRequested` constant rather than the flag itself, so the walk counts the bridge as
@@ -480,7 +480,36 @@ speed; the page's own startup default is the fastest, see
 [the startup configuration](../RA2_COMMAND_LINE_AND_SPAWNER.md#current-startup-configuration)) and the skirmish setup as
 the first page; `--original` opens the original picture at exact pixels instead, `--print` only prints the address. It
 reads the player's game from `RA2_GAME_ROOT` (default `game/`), the HD cache from `RA2_HD_CACHE_DIR` (default: the
-newest play cache under `gameres/` that holds `_library/`) and the starting speed from `RA2_PLAY_SPEED`.
+newest play cache under `gameres/` that holds `_library/`) and the starting speed from `RA2_PLAY_SPEED`, and names
+the stall log for the development server in `RA2_PERF_LOG` (default `gameres/s2x/play/perfmon/stalls.jsonl` under
+the main checkout; `0` for none).
+
+## Stall recorder
+
+A hitch a player reports cannot be looked into from outside the browser, so the HD page records its own. The bridge's
+frame loop reports every animation frame to `src/ui/pages/game/hdStallMonitor.ts` (loaded behind
+`import.meta.env.DEV`, like the interface layer); the generic parts are in `src/utils/stallRecorder.ts`. A frame
+more than 150 ms after the one before it is a stall. An ordinary frame costs one subtraction and one comparison;
+everything below happens only when a frame is late.
+
+A record holds the wall-clock time, the gap, whether the tab was visible and whether it was hidden at some time
+during the gap, the map, the logic frame and the measured logic rate, whether the HD view was shown, and what the
+view was busy with (`LiveView.activity`): atlas pages still being uploaded, voxel meshes and projections on their
+way, everything still loading, the shader modules and render pipelines the frame before the gap had the backend
+create (`packages/hd-renderer/src/compileCounter.ts` wraps the two backend calls three r186 makes only on a cache
+miss, so nothing is counted per frame), and the kinds of object whose first visual that frame built. Long tasks
+(`PerformanceObserver`, where the browser has it) tell whose stall it was: `cause` is `main-thread` when long tasks
+cover at least half the gap, `not-delivered` when they do not (the page's thread was free and the frame still did
+not come: GPU process, compositor, another process), `hidden` when the tab was, and `unknown` without the observer.
+The last 500 records are kept (`__hdBridge.stalls` in the console).
+
+Two sinks. The development server appends records as JSON lines to the file named by `RA2_PERF_LOG`
+(`POST /__perf/stalls`, `src/server/perfStallLog.ts`: same-origin JSON only, 256 KiB at most, each line written from
+the parsed record with the time it was received); without the variable the route answers 404 and the page stops
+posting for the session. The page posts new records in batches at most every five seconds (`fetch` with
+`keepalive`), hands the rest to `navigator.sendBeacon` when the tab is hidden or the page goes away, and does not
+retry a refused batch by itself: it goes out again with the next stall. The toolbar shows one line for the current
+match, "卡顿 N 次，最长 X 秒" (`RuntimeToolbar.setStalls`): stalls while the match ran and the tab was on screen.
 
 ## HD interface layer (`hd-ui=1`)
 

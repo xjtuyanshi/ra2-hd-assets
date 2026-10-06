@@ -84,6 +84,7 @@ import { BuildingVisualHistory } from './buildingVisualHistory';
 import { DEPLOY_TARGETS, overlayTypePages } from './artAhead';
 import { HeldPicture } from './heldPicture';
 import { PageUploader } from '../pageUpload';
+import { countCompilations } from '../compileCounter';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
 import { SmudgeInstanceCache, type LiveSmudgeCells, type SmudgePage } from './smudges';
@@ -335,6 +336,26 @@ export interface LiveDiagnostics {
 }
 
 /**
+ * What the view was busy with when it rendered its last frame, for a host that records late frames (see
+ * LiveView.activity). Counts of work in progress, and of what that one frame started.
+ */
+export interface LiveActivity {
+  /** Atlas pages whose rows are still being copied to the GPU. */
+  pageUploads: number;
+  /** Voxel meshes being built and redraw projections being fetched. */
+  voxelMeshes: number;
+  /** Everything that was asked for and is not on screen yet (LiveView.loadingArt). */
+  loadingArt: number;
+  /** Shader modules and render pipelines the last frame had the backend create; null when they cannot be counted. */
+  shaders: number | null;
+  pipelines: number | null;
+  /** Kinds of object ("building:NAREFN") whose first visual was built in the last frame, at most eight. */
+  newKinds: string[];
+  /** Measured logic frames per second. */
+  logicFps: number;
+}
+
+/**
  * Initial hour: an explicit time, else the preset's day hour, else the map's staging. Only authored dusk keeps its own
  * hour under a preset: night maps are lit like day maps (the engine grade is their night, lighting.ts profileKeys) and
  * airless maps keep their noon brightness at any hour (Lighting.update), so both take the hour the look was tuned at.
@@ -449,6 +470,8 @@ interface Visual {
   alternateWarm?: boolean;
   /** Presented motion of a mobile object (see MOTION_MARGIN). */
   motion?: Motion;
+  /** Clock of the frame that built this visual (LiveView.lastRender), see LiveView.activity. */
+  builtAt?: number;
   /** The last complete picture of a sprite object, kept while pages of its type are on their way (HeldPicture). */
   held?: HeldPicture;
   /** Every atlas page of the type has arrived (or failed): no sprite of the object can lack a source any more. */
@@ -745,6 +768,11 @@ export class LiveView {
   private readonly pictureBase = new Vector3();
   /** Per flush: sprites of pages whose final layer is not there, by page (see flushSprites). */
   private readonly indexedMeanwhile = new Map<number, SpriteInstance[]>();
+  /**
+   * Shader modules and pipelines created in the frame whose clock is `at` (see countCompilations); null when the
+   * backend's creations cannot be counted.
+   */
+  private compiled: { at: number; shaders: number; pipelines: number } | null = null;
   /** Counted while objects are applied and flushed, for diagnostics(). */
   private indexedSprites = 0;
   private heldPictures = 0;
@@ -904,6 +932,17 @@ export class LiveView {
     // Atlas pages go to the GPU as decoded bitmaps (no main-thread repack of their 16.7 M pixels), in strips over
     // the following frames (render() steps the uploader).
     this.pageUploads = new PageUploader(hd.renderer);
+    const compiled = { at: NaN, shaders: 0, pipelines: 0 };
+    const counted = countCompilations(hd.renderer.backend, (kind) => {
+      // Stamped with the frame that asked for it: nothing is reset per frame.
+      if (compiled.at !== this.lastRender) {
+        compiled.at = this.lastRender;
+        compiled.shaders = compiled.pipelines = 0;
+      }
+      if (kind === 'shader') compiled.shaders++;
+      else compiled.pipelines++;
+    });
+    if (counted) this.compiled = compiled;
     const upload = (texture: Texture) => this.pageUploads.upload(texture);
     if (library) {
       library.uploadPage = upload;
@@ -1610,6 +1649,36 @@ export class LiveView {
       if (this.cache.voxels.has(visual.type) || (voxel && !this.library?.voxelFailed(voxel))) count++;
     }
     return count;
+  }
+
+  /**
+   * What the frame rendered last was busy with (see LiveActivity). For a host that records stalls: it asks when a
+   * frame comes late, before it renders the next one, and learns what the frame before that gap had started. Nothing
+   * is counted per frame for this: shader and pipeline creations stamp themselves with their frame's clock, and the
+   * visuals built in that frame are looked up here.
+   */
+  activity(): LiveActivity {
+    const frame = this.lastRender;
+    const older = new Set<string>();
+    const fresh = new Set<string>();
+    for (const [uid, visual] of this.visuals) {
+      const object = this.current?.byUid.get(uid);
+      if (!object) continue;
+      (visual.builtAt === frame ? fresh : older).add(`${object.kind}:${visual.type}`);
+    }
+    const newKinds: string[] = [];
+    for (const kind of fresh) if (!older.has(kind) && newKinds.length < 8) newKinds.push(kind);
+    const compiled = this.compiled;
+    const counted = compiled?.at === frame;
+    return {
+      pageUploads: this.pageUploads.pending,
+      voxelMeshes: this.voxelUnits.loading,
+      loadingArt: this.loadingArt(),
+      shaders: compiled ? (counted ? compiled.shaders : 0) : null,
+      pipelines: compiled ? (counted ? compiled.pipelines : 0) : null,
+      newKinds,
+      logicFps: Math.round(this.effectDriver.logicFps * 10) / 10,
+    };
   }
 
   /** The map's theater: art libraries, and so the lists warm() takes, belong to one. */
@@ -3279,7 +3348,7 @@ export class LiveView {
   private buildVisual(object: LiveObject, paletteKey: string, firstFrame: number): Visual {
     const artType = this.drawArt(object, paletteKey);
     const libraryType = this.library?.type(artType);
-    const base = { type: artType, paletteKey, firstFrame };
+    const base = { type: artType, paletteKey, firstFrame, builtAt: this.lastRender };
     // What this object deploys into is prepared like a type in production (see prepare).
     const target = DEPLOY_TARGETS.get(object.type);
     if (target) this.prepare([target]);
