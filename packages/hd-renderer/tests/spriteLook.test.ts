@@ -146,7 +146,9 @@ describe('enhanced look: sprite instances', () => {
         expect(mesh).toBeInstanceOf(InstancedQuad);
         expect('instanceMatrix' in mesh).toBe(false);
         expect(mesh.geometry).toBe(layer.mesh.geometry);
-        expect(mesh.count).toBe(count);
+        expect(mesh.instances).toBe(count);
+        // The count is the shared geometry's: three then gives layers with one shader graph one built shader.
+        expect(mesh.count).toBe(1);
       }
     }
     layer.mesh.geometry.dispose();

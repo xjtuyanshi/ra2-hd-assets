@@ -16,6 +16,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EffectHdAnim, EffectHdLibrary } from '../../ra2-assets/src/effects';
 import type { DirtyAttribute } from '../src/dirtyAttribute';
+import { bindSlots } from '../src/materialSlots';
 import { BlastCrowd, EffectsLayer, ENHANCED } from '../src/effects';
 import { EffectArt, PAGE_RETRY_SECONDS, type ResolvedAnim } from '../src/live/effectArt';
 import {
@@ -514,7 +515,10 @@ describe('HD page routing and placement buffers', () => {
       () => ({ texture, width: 128, height: 32 }),
     );
     layer.setInstances([{ ...card(), pass: 'ground' }], 0);
-    const builder = renderer.backend.createNodeBuilder(layer.root.children[0]!, renderer);
+    const mesh = layer.root.children[0] as Mesh;
+    // What the renderer does before it draws the mesh (Object3D.onBeforeRender): the page is in the graph's slot.
+    bindSlots(mesh.material);
+    const builder = renderer.backend.createNodeBuilder(mesh, renderer);
     builder.scene = new Scene();
     builder.camera = new OrthographicCamera();
     builder.build();

@@ -85,7 +85,7 @@ describe('live infantry footprint', () => {
         2, 1, 0, 0, 0, 0, 0, 0,
       ]);
     expect(layer.groundPasses).toHaveLength(2);
-    expect(layer.groundPasses.every((mesh) => mesh.count === 3)).toBe(true);
+    expect(layer.groundPasses.every((mesh) => mesh.instances === 3)).toBe(true);
     const settings = {} as HdSettings;
     applyLookPreset(settings, 'cinematic');
     expect(settings.shadowFollow).toBeGreaterThan(0);

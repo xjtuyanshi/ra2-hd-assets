@@ -2,14 +2,12 @@ import {
   Color,
   CustomBlending,
   Group,
-  InstancedMesh,
-  type Mesh,
   MeshBasicNodeMaterial,
   NormalBlending,
   OneFactor,
   OneMinusSrcAlphaFactor,
-  PlaneGeometry,
   type Texture,
+  Vector2,
   Vector3,
 } from 'three/webgpu';
 import {
@@ -17,7 +15,7 @@ import {
   clamp,
   float,
   floor,
-  instancedBufferAttribute,
+  attribute,
   length,
   max,
   min,
@@ -39,7 +37,8 @@ import {
 import type { EffectHdFrame } from '../../../ra2-assets/src/effects';
 import type { SpriteFrame } from '../../../ra2-assets/src/manifest';
 import { DirtyAttribute } from '../dirtyAttribute';
-import { InstancedQuad } from '../instancedQuad';
+import { InstancedQuad, instancedQuadGeometry } from '../instancedQuad';
+import { bindSlotsBeforeRender, samplingClass, slotMaterial, textureSlot } from '../materialSlots';
 import type { ShaderNode } from '../tsl';
 import type { TerrainDepth } from '../terrainDepth';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
@@ -265,6 +264,20 @@ export class EffectSpriteLayer {
    */
   readonly backdrop: ShaderNode = viewportSharedTexture(screenUV);
   private readonly meshes = new Map<string, PageMesh | HdPageMesh>();
+  /**
+   * Shader graphs by kind and pass (see materialSlots.ts): every page mesh of a kind draws with a clone of its
+   * graph's material, bound to its own page before each draw. Pages differ in size and texture only; as shader text
+   * (the atlas size was a literal) each of the 48 effect pages had a shader module and a pipeline of its own per
+   * pass, built when its first anim played and again whenever its mesh had been idle and was disposed.
+   */
+  private readonly graphs = new Map<string, EffectGraph>();
+  /**
+   * Page meshes that went idle, by graph: the next page of that kind and pass draws with one of them (its buffers,
+   * its materials and the shaders three built for it), bound to the new page. Disposing an idle mesh, as before,
+   * dropped the built shader and the pipeline with the last mesh of a kind, and the next battle built them again in
+   * the frame of its first explosion.
+   */
+  private readonly spare = new Map<EffectGraph, (PageMesh | HdPageMesh)[]>();
   /** Pages that failed to load and were already reported (their instances are skipped, not retried per frame). */
   private readonly failedPages = new Set<string>();
   private readonly pageGroups = new Map<string, Record<EffectPass, PageGroup>>();
@@ -323,19 +336,20 @@ export class EffectSpriteLayer {
         if (!list.length && now - mesh.lastUsed > MESH_IDLE_SECONDS) this.idle.push(key);
       }
     }
-    if (this.idle.length) this.evict(this.idle);
+    // `now` = Infinity empties the layer for good (the view is disposed): nothing is kept for reuse.
+    if (this.idle.length || now === Infinity) this.evict(this.idle, now === Infinity);
     return complete;
   }
 
   /** Instances currently drawn (for diagnostics). */
   get count(): number {
     let n = 0;
-    for (const mesh of this.meshes.values()) n += mesh.mesh.count;
+    for (const mesh of this.meshes.values()) n += mesh.mesh.instances;
     return n;
   }
 
   get topVisible(): boolean {
-    return this.topRoot.children.some((child) => child.visible && (child as Mesh).count > 0);
+    return this.topRoot.children.some((child) => child.visible && (child as InstancedQuad).instances > 0);
   }
 
   /** Page meshes alive, and how many of them hold translucent cards now (diagnostics, perf checks). */
@@ -347,6 +361,25 @@ export class EffectSpriteLayer {
       if (mesh.mesh.visible && mesh.translucent) translucent++;
     }
     return { meshes: this.meshes.size, visible, translucent };
+  }
+
+  /** The graph of a kind of page mesh ('indexed', 'indexed-translucent' or 'hd') in a pass, built on first use. */
+  graph(
+    kind: string,
+    pass: EffectPass,
+    atlas: EffectPage,
+    build: (page: EffectGraph) => MeshBasicNodeMaterial,
+  ): EffectGraph {
+    // The page's sampling class is part of the shader (see samplingClass): pages of another class get another graph.
+    const sampling = samplingClass(atlas.texture);
+    const key = `${kind}:${pass}:${sampling}`;
+    let graph = this.graphs.get(key);
+    if (!graph) {
+      graph = { atlas: textureSlot(sampling), atlasSize: uniform(new Vector2(1, 1)), material: null! };
+      graph.material = build(graph);
+      this.graphs.set(key, graph);
+    }
+    return graph;
   }
 
   private mesh(key: string): PageMesh | HdPageMesh | 'loading' | null {
@@ -367,22 +400,37 @@ export class EffectSpriteLayer {
       return null;
     }
     this.failedPages.delete(pageKey);
-    const mesh = hd ? new HdPageMesh(this, atlas, pass) : new PageMesh(this, this.cache, atlas, pass);
+    const graph = hd ? HdPageMesh.graph(this, atlas, pass) : PageMesh.graph(this, this.cache, atlas, pass);
+    const mesh =
+      this.spare.get(graph)?.pop()?.reuse(atlas) ??
+      (hd ? new HdPageMesh(this, atlas, pass) : new PageMesh(this, this.cache, atlas, pass));
     this.meshes.set(key, mesh);
     (pass === 'top' ? this.topRoot : this.root).add(mesh.mesh);
     return mesh;
   }
 
-  /** Dispose idle meshes; release pages that no remaining mesh draws from. */
-  private evict(keys: readonly string[]): void {
+  /**
+   * Take idle meshes out of the scene and release pages that no remaining mesh draws from. The meshes are kept for
+   * the next page of their kind (see `spare`), unless the layer is being emptied for good (`dispose`).
+   */
+  private evict(keys: readonly string[], dispose = false): void {
     const pages = this.releaseCandidates;
     pages.clear();
     for (const key of keys) {
       const mesh = this.meshes.get(key)!;
       this.meshes.delete(key);
       mesh.mesh.removeFromParent();
-      mesh.dispose();
+      if (dispose) mesh.dispose();
+      else {
+        let spare = this.spare.get(mesh.graph);
+        if (!spare) this.spare.set(mesh.graph, (spare = []));
+        spare.push(mesh);
+      }
       pages.add(key.slice(0, key.lastIndexOf(':')));
+    }
+    if (dispose) {
+      for (const spare of this.spare.values()) for (const mesh of spare) mesh.dispose();
+      this.spare.clear();
     }
     for (const key of this.meshes.keys()) pages.delete(key.slice(0, key.lastIndexOf(':')));
     for (const page of pages)
@@ -396,6 +444,22 @@ export interface EffectPage {
   texture: Texture;
   width: number;
   height: number;
+}
+
+/** A shader graph of page meshes: the prototype material and the slots its shader reads the page from. */
+interface EffectGraph {
+  material: MeshBasicNodeMaterial;
+  atlas: ShaderNode;
+  atlasSize: ShaderNode;
+}
+
+/** A page mesh's own material of a graph: a clone, bound to the mesh's current page before each draw. */
+function pageMaterial(graph: EffectGraph, page: () => EffectPage): MeshBasicNodeMaterial {
+  return slotMaterial(graph.material, () => {
+    const atlas = page();
+    graph.atlas.value = atlas.texture;
+    (graph.atlasSize.value as Vector2).set(atlas.width, atlas.height);
+  });
 }
 
 /** Seconds a page mesh may stay empty before it is disposed (and its page released when nothing else uses it). */
@@ -415,23 +479,36 @@ class PageMesh {
   /** Built on the first translucent card (pages of opaque art never compile it). */
   private translucentMaterial: MeshBasicNodeMaterial | null = null;
 
+  /** The opaque graph of indexed pages like `atlas` in `pass`: also what decides which idle meshes can be reused. */
+  static graph(layer: EffectSpriteLayer, cache: Ra2Cache, atlas: EffectPage, pass: EffectPass): EffectGraph {
+    return layer.graph('indexed', pass, atlas, (page) => PageMesh.buildMaterial(layer, cache, pass, false, page));
+  }
+
+  readonly graph: EffectGraph;
+
   constructor(
     private readonly layer: EffectSpriteLayer,
     private readonly cache: Ra2Cache,
-    private readonly atlas: EffectPage,
+    private atlas: EffectPage,
     private readonly pass: EffectPass,
   ) {
+    this.graph = PageMesh.graph(layer, cache, atlas, pass);
     this.anchor = new DirtyAttribute(new Float32Array(CAPACITY * 3), 3);
     this.rect = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
     // x, y = frame offset from the canvas centre (px); z = palette row; w = push.
     this.params = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
     // x = opacity; y = draw mode + sphere R/4 (see packEffectDrawRadius); z = glow; w = traversal + legacy bias.
     this.style = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
-    this.opaqueMaterial = this.buildMaterial(false);
-    this.mesh = new InstancedQuad(this.opaqueMaterial, CAPACITY);
+    this.opaqueMaterial = this.material(false);
+    const geometry = instancedQuadGeometry();
+    geometry.setAttribute('fxAnchor', this.anchor);
+    geometry.setAttribute('fxRect', this.rect);
+    geometry.setAttribute('fxParams', this.params);
+    geometry.setAttribute('fxStyle', this.style);
+    this.mesh = new InstancedQuad(this.opaqueMaterial, CAPACITY, geometry);
+    this.mesh.onBeforeRender = bindSlotsBeforeRender;
     this.mesh.renderOrder = RENDER_ORDER[pass];
     this.mesh.name = `live-effects-${pass}`;
-    this.mesh.count = 0;
     // Hidden while empty: a hidden mesh runs no node updates (a visible one with count 0 still would).
     this.mesh.visible = false;
   }
@@ -440,14 +517,39 @@ class PageMesh {
    * The card material. `translucent` mixes cards with alpha < 1 into the scene below in display space (the engine's
    * 16-bit colour mix) and needs the layer's backdrop copy; the opaque variant draws the same art without it.
    */
-  private buildMaterial(translucent: boolean): MeshBasicNodeMaterial {
-    const { layer, cache, atlas } = this;
-    const aAnchor: ShaderNode = instancedBufferAttribute(this.anchor, 'vec3');
-    const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
-    const aParams: ShaderNode = instancedBufferAttribute(this.params, 'vec4');
-    const aStyle: ShaderNode = instancedBufferAttribute(this.style, 'vec4');
+  private material(translucent: boolean): MeshBasicNodeMaterial {
+    const { layer, cache, pass } = this;
+    const graph = translucent
+      ? layer.graph('indexed-translucent', pass, this.atlas, (page) =>
+          PageMesh.buildMaterial(layer, cache, pass, true, page),
+        )
+      : this.graph;
+    // The mesh's page, whichever it is when the mesh is drawn (an idle mesh is reused for another page).
+    return pageMaterial(graph, () => this.atlas);
+  }
+
+  /** Draw another page of the same kind with this (idle) mesh. */
+  reuse(atlas: EffectPage): this {
+    this.atlas = atlas;
+    this.lastUsed = -Infinity;
+    return this;
+  }
+
+  /** The graph's material: instance data by attribute name from the drawn mesh's geometry, the page from `page`. */
+  private static buildMaterial(
+    layer: EffectSpriteLayer,
+    cache: Ra2Cache,
+    pass: EffectPass,
+    translucent: boolean,
+    page: EffectGraph,
+  ): MeshBasicNodeMaterial {
+    const atlas = { texture: page.atlas as unknown as Texture };
+    const aAnchor: ShaderNode = attribute('fxAnchor', 'vec3');
+    const aRect: ShaderNode = attribute('fxRect', 'vec4');
+    const aParams: ShaderNode = attribute('fxParams', 'vec4');
+    const aStyle: ShaderNode = attribute('fxStyle', 'vec4');
     const { draw, radius } = unpackEffectDrawRadiusNode(aStyle.y);
-    const atlasSize = vec2(atlas.width, atlas.height);
+    const atlasSize: ShaderNode = page.atlasSize;
     const paletteRows = float(cache.paletteAtlas.image.height);
     const ppu = float(PIXELS_PER_CELL_EDGE);
     const margin = float(MARGIN);
@@ -455,7 +557,7 @@ class PageMesh {
     const material = new MeshBasicNodeMaterial();
     material.transparent = true;
     material.depthWrite = false;
-    material.depthTest = this.pass !== 'top';
+    material.depthTest = pass !== 'top';
     material.blending = NormalBlending;
     const u: ShaderNode = uv().x;
     const v: ShaderNode = float(1).sub(uv().y);
@@ -476,7 +578,7 @@ class PageMesh {
     );
     // Native Layer=air covers the entire ground layer, including the card's corners beyond its sphere.
     // Per-pass selection also covers smoke/muzzle Air art; flat/shadow instances retain their original depth.
-    if (this.pass === 'air' && layer.terrainDepth)
+    if (pass === 'air' && layer.terrainDepth)
       material.depthNode = layer.terrainDepth.node(
         material.depthNode,
         aAnchor.xyz,
@@ -546,13 +648,13 @@ class PageMesh {
       const fire: ShaderNode = warm.and(aStyle.z.greaterThan(0.5)).select(float(1), float(0));
       // Native Top cloud art remains bright over black shroud; it does not inherit the event's scene illumination.
       const lit: ShaderNode = art.mul(
-        this.pass === 'top' ? vec3(layer.displayScale) : mix(layer.light, vec3(FX_GLOW), fire),
+        pass === 'top' ? vec3(layer.displayScale) : mix(layer.light, vec3(FX_GLOW), fire),
       );
       const isShadow = draw.greaterThan(1.5);
       const shadow = vec4(0, 0, 0, mask.mul(0.5).mul(aStyle.x));
       const a: ShaderNode = mask.mul(aStyle.x);
       // Top has a transparent target, not the scene backdrop; normal alpha composition happens after shroud.
-      if (!translucent || this.pass === 'top') return isShadow.select(shadow, vec4(lit, a));
+      if (!translucent || pass === 'top') return isShadow.select(shadow, vec4(lit, a));
       // The engine's translucent draw mixes 16-bit DISPLAY colours (e.g. 50 % of the art, 50 % of what is below), so
       // do the mix in display (sRGB-encoded) space against the scene drawn so far: a linear mix is brighter and lifts
       // the dark channel, turning an orange edge over grey pavement salmon-pink. Normal blending then adds
@@ -572,7 +674,7 @@ class PageMesh {
   set(instances: EffectInstance[], cache: Ra2Cache, now: number): void {
     if (instances.length) this.lastUsed = now;
     // An idle mesh that stays idle uploads nothing.
-    if (instances.length === 0 && this.mesh.count === 0) return;
+    if (instances.length === 0 && this.mesh.instances === 0) return;
     // Preserve the decal/shadow partition; upright Ground cards use shared slots, other passes retain screen-y order.
     instances.sort(compareCards);
     const count = Math.min(instances.length, CAPACITY);
@@ -596,9 +698,9 @@ class PageMesh {
     this.params.flush();
     this.style.flush();
     this.translucent = translucent;
-    if (translucent) this.translucentMaterial ??= this.buildMaterial(true);
+    if (translucent) this.translucentMaterial ??= this.material(true);
     this.mesh.material = translucent ? this.translucentMaterial! : this.opaqueMaterial;
-    this.mesh.count = count;
+    this.mesh.instances = count;
     this.mesh.visible = count > 0;
   }
 
@@ -617,12 +719,12 @@ class PageMesh {
  * stage; the presentation clock interpolates only, and never chooses or advances an engine frame.
  */
 class HdPageMesh {
-  readonly mesh: InstancedMesh;
+  readonly mesh: InstancedQuad;
   /** HD alpha uses linear premultiplied blending, never the indexed path's display-space backdrop copy. */
   readonly translucent = false;
   lastUsed = -Infinity;
-  // WebGPU allows 8 vertex buffers per pipeline: the card geometry keeps only its positions (uv is derived from them)
-  // and the instance matrix takes one more, so the per-instance data is packed into six vec4 attributes.
+  // WebGPU allows 8 vertex buffers per pipeline: the card geometry's positions take one (uv is derived from them), so
+  // the per-instance data is packed into six vec4 attributes.
   /** xyz = world anchor; w = opacity. */
   private readonly anchor = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
   private readonly rect = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
@@ -634,24 +736,60 @@ class HdPageMesh {
   /** x = blend at push; y = push time; z = seconds per engine stage; w = display size. */
   private readonly timing = new DirtyAttribute(new Float32Array(CAPACITY * 4), 4);
   private readonly material: MeshBasicNodeMaterial;
+  readonly graph: EffectGraph;
 
-  constructor(layer: EffectSpriteLayer, atlas: EffectPage, pass: EffectPass) {
-    const aAnchor: ShaderNode = instancedBufferAttribute(this.anchor, 'vec4');
-    const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
-    const aNextRect: ShaderNode = instancedBufferAttribute(this.nextRect, 'vec4');
-    const aOffsets: ShaderNode = instancedBufferAttribute(this.offsets, 'vec4');
-    const aStyle: ShaderNode = instancedBufferAttribute(this.style, 'vec4');
+  /** The graph of RGBA pages like `atlas` in `pass`: also what decides which idle meshes can be reused. */
+  static graph(layer: EffectSpriteLayer, atlas: EffectPage, pass: EffectPass): EffectGraph {
+    return layer.graph('hd', pass, atlas, (page) => HdPageMesh.buildMaterial(layer, page, pass));
+  }
+
+  /** Draw another page of the same kind with this (idle) mesh. */
+  reuse(atlas: EffectPage): this {
+    this.atlas = atlas;
+    this.lastUsed = -Infinity;
+    return this;
+  }
+
+  constructor(
+    layer: EffectSpriteLayer,
+    private atlas: EffectPage,
+    pass: EffectPass,
+  ) {
+    this.graph = HdPageMesh.graph(layer, atlas, pass);
+    this.material = pageMaterial(this.graph, () => this.atlas);
+    const geometry = instancedQuadGeometry();
+    geometry.setAttribute('fxAnchor', this.anchor);
+    geometry.setAttribute('fxRect', this.rect);
+    geometry.setAttribute('fxNextRect', this.nextRect);
+    geometry.setAttribute('fxOffsets', this.offsets);
+    geometry.setAttribute('fxStyle', this.style);
+    geometry.setAttribute('fxTiming', this.timing);
+    this.mesh = new InstancedQuad(this.material, CAPACITY, geometry);
+    this.mesh.onBeforeRender = bindSlotsBeforeRender;
+    this.mesh.renderOrder = RENDER_ORDER[pass];
+    this.mesh.name = `live-effects-hd-${pass}`;
+    this.mesh.visible = false;
+  }
+
+  /** The graph's material: instance data by attribute name from the drawn mesh's geometry, the page from `page`. */
+  private static buildMaterial(layer: EffectSpriteLayer, page: EffectGraph, pass: EffectPass): MeshBasicNodeMaterial {
+    const atlas = { texture: page.atlas as unknown as Texture };
+    const aAnchor: ShaderNode = attribute('fxAnchor', 'vec4');
+    const aRect: ShaderNode = attribute('fxRect', 'vec4');
+    const aNextRect: ShaderNode = attribute('fxNextRect', 'vec4');
+    const aOffsets: ShaderNode = attribute('fxOffsets', 'vec4');
+    const aStyle: ShaderNode = attribute('fxStyle', 'vec4');
     const { draw, radius } = unpackEffectDrawRadiusNode(aStyle.x);
-    const aTiming: ShaderNode = instancedBufferAttribute(this.timing, 'vec4');
+    const aTiming: ShaderNode = attribute('fxTiming', 'vec4');
     const scale: ShaderNode = aStyle.w;
     // Union of the current and next frame rects in native pixels (top-left, size).
     const lo: ShaderNode = min(aOffsets.xy, aOffsets.zw);
     const hi: ShaderNode = max(aOffsets.xy.add(aRect.zw.div(scale)), aOffsets.zw.add(aNextRect.zw.div(scale)));
     const aBounds: ShaderNode = vec4(lo, hi.sub(lo));
-    const atlasSize = vec2(atlas.width, atlas.height);
+    const atlasSize: ShaderNode = page.atlasSize;
     const ppu = float(PIXELS_PER_CELL_EDGE);
     const margin = float(MARGIN);
-    const material = (this.material = new MeshBasicNodeMaterial());
+    const material = new MeshBasicNodeMaterial();
     material.transparent = true;
     material.depthWrite = false;
     // Native Air ordering and whole-object engulf use the combination below. The sphere remains the fallback
@@ -753,20 +891,12 @@ class HdPageMesh {
       const fade: ShaderNode = pow(aAnchor.w, mix(layer.hdSmokeFade, layer.hdFlameFade, e));
       return vec4(lit.mul(fade), rgba.a.mul(fade));
     })();
-    const quad = new PlaneGeometry(1, 1);
-    quad.deleteAttribute('normal');
-    quad.deleteAttribute('uv');
-    this.mesh = new InstancedMesh(quad, material, CAPACITY);
-    this.mesh.frustumCulled = false;
-    this.mesh.renderOrder = RENDER_ORDER[pass];
-    this.mesh.name = `live-effects-hd-${pass}`;
-    this.mesh.count = 0;
-    this.mesh.visible = false;
+    return material;
   }
 
   set(instances: EffectInstance[], _cache: Ra2Cache, now: number): void {
     if (instances.length) this.lastUsed = now;
-    if (instances.length === 0 && this.mesh.count === 0) return;
+    if (instances.length === 0 && this.mesh.instances === 0) return;
     instances.sort(compareCards);
     const count = Math.min(instances.length, CAPACITY);
     for (let i = 0; i < count; i++) {
@@ -794,7 +924,7 @@ class HdPageMesh {
     this.offsets.flush();
     this.style.flush();
     this.timing.flush();
-    this.mesh.count = count;
+    this.mesh.instances = count;
     this.mesh.visible = count > 0;
   }
 

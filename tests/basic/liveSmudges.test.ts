@@ -357,17 +357,17 @@ describe('LiveView smudge integration', () => {
     p.view.render(1);
     const ore = p.backing.overlayLayers.get(3)!.layer;
     const crater = p.backing.smudgeLayers.get(1)!;
-    expect([ore.mesh.count, crater.mesh.count, p.cellLayer.mesh.count]).toEqual([1, 1, 0]);
+    expect([ore.mesh.instances, crater.mesh.instances, p.cellLayer.mesh.instances]).toEqual([1, 1, 0]);
     expect(Boolean(ore.getInstances()[0]!.gradeExempt)).toBe(airless === true);
     expect(crater.getInstances()[0]!.gradeExempt).toBeUndefined();
     const oreUploads = vi.spyOn(ore, 'setInstances');
     p.view.push({ ...state, smudges: { ...state.smudges!, revision: 2, index: new Int16Array(4).fill(-1) } });
     p.view.render(2);
-    expect([ore.mesh.count, crater.mesh.count]).toEqual([1, 0]);
+    expect([ore.mesh.instances, crater.mesh.instances]).toEqual([1, 0]);
     expect(oreUploads).not.toHaveBeenCalled();
     p.view.push({ ...state, overlays: { ...state.overlays, revision: 2, index: new Int16Array(4).fill(-1) } });
     p.view.render(3);
-    expect([ore.mesh.count, crater.mesh.count]).toEqual([0, 1]);
+    expect([ore.mesh.instances, crater.mesh.instances]).toEqual([0, 1]);
     expect(p.view.diagnostics()).toMatchObject({ overlaysFromEngine: true, smudgesFromEngine: true });
     p.view.dispose();
   });
@@ -408,7 +408,7 @@ describe('LiveView smudge integration', () => {
     p.view.render(1);
     const debris = p.backing.overlayLayers.get(3)!.layer;
     const shadow = p.backing.overlayLayers.get(4)!.layer;
-    expect([debris.mesh.count, shadow.mesh.count]).toEqual([1, 1]);
+    expect([debris.mesh.instances, shadow.mesh.instances]).toEqual([1, 1]);
     expect(debris.getInstances()[0]).toMatchObject({ frame: body.frames[3], palette: 'lib:iso', flat: true });
     expect(shadow.getInstances()[0]).toMatchObject({ frame: body.shadows![3], shadow: true });
     expect(Boolean(debris.getInstances()[0]!.gradeExempt)).toBe(false);
@@ -416,8 +416,8 @@ describe('LiveView smudge integration', () => {
     expect(p.backing.smudgeLayers.get(1)!.getInstances()[0]!.gradeExempt).toBeUndefined();
     p.view.push({ ...p.state(), overlays: { ...overlays, revision: 2, rubble: [] } });
     p.view.render(2);
-    expect([debris.mesh.count, shadow.mesh.count]).toEqual([0, 0]);
-    expect(p.backing.smudgeLayers.get(1)!.mesh.count).toBe(1);
+    expect([debris.mesh.instances, shadow.mesh.instances]).toEqual([0, 0]);
+    expect(p.backing.smudgeLayers.get(1)!.mesh.instances).toBe(1);
     p.view.dispose();
   });
 
@@ -426,16 +426,16 @@ describe('LiveView smudge integration', () => {
     const state = p.state();
     p.view.push(state);
     p.view.render(1);
-    expect(p.cellLayer.mesh.count).toBe(1); // Map overlay remains; the map-start crater is suppressed.
+    expect(p.cellLayer.mesh.instances).toBe(1); // Map overlay remains; the map-start crater is suppressed.
     const layer = p.backing.smudgeLayers.get(1)!;
-    expect(layer.mesh.count).toBe(1);
+    expect(layer.mesh.instances).toBe(1);
     expect(layer.mesh.renderOrder).toBeLessThan(p.cellLayer.mesh.renderOrder);
     const upload = vi.spyOn(layer, 'setInstances');
     const changed = { ...state, smudges: { ...state.smudges!, index: new Int16Array(4).fill(-1), revision: 2 } };
     p.view.push(changed);
     p.view.render(2);
-    expect(layer.mesh.count).toBe(0);
-    expect(p.cellLayer.mesh.count).toBe(1);
+    expect(layer.mesh.instances).toBe(0);
+    expect(p.cellLayer.mesh.instances).toBe(1);
     expect(p.view.diagnostics()).toMatchObject({
       cellsFromEngine: true,
       smudgesFromEngine: true,
@@ -446,7 +446,7 @@ describe('LiveView smudge integration', () => {
     expect(upload).toHaveBeenCalledTimes(1);
     p.view.push({ ...state, smudges: null });
     p.view.render(4);
-    expect(p.cellLayer.mesh.count).toBe(2);
+    expect(p.cellLayer.mesh.instances).toBe(2);
     expect(p.view.diagnostics().smudgesFromEngine).toBe(false);
     p.view.dispose();
   });
@@ -458,7 +458,7 @@ describe('LiveView smudge integration', () => {
       const state = p.state();
       p.view.push(state);
       p.view.render(1);
-      expect(p.backing.smudgeLayers.get('map')!.mesh.count).toBe(1);
+      expect(p.backing.smudgeLayers.get('map')!.mesh.instances).toBe(1);
       const missing = { ...state, frame: 2, smudges: { ...state.smudges!, types: ['NEW-CRATER'], revision: 2 } };
       p.view.push(missing);
       p.view.render(2);
@@ -466,8 +466,8 @@ describe('LiveView smudge integration', () => {
       p.view.render(3);
       expect(warning.mock.calls.filter(([text]) => String(text).includes('no smudges section'))).toHaveLength(1);
       expect(warning.mock.calls.filter(([text]) => String(text).includes('NEW-CRATER'))).toHaveLength(1);
-      expect(p.backing.smudgeLayers.get('map')!.mesh.count).toBe(0);
-      expect(p.cellLayer.mesh.count).toBe(1);
+      expect(p.backing.smudgeLayers.get('map')!.mesh.instances).toBe(0);
+      expect(p.cellLayer.mesh.instances).toBe(1);
       expect(p.view.diagnostics().smudgeTypesWithoutArt).toEqual(['NEW-CRATER']);
       p.view.dispose();
     } finally {
@@ -491,7 +491,7 @@ describe('LiveView smudge integration', () => {
     p.available.hd = true;
     p.view.render(4);
     const layer = p.backing.smudgeLayers.get(1)!;
-    expect(layer.mesh.count).toBe(1);
+    expect(layer.mesh.instances).toBe(1);
     expect(p.backing.shareSpriteUniforms).toHaveBeenCalledWith(layer);
     const upload = vi.spyOn(layer, 'setInstances');
     p.view.render(5);
@@ -529,7 +529,7 @@ describe('LiveView smudge integration', () => {
     p.view.render(2);
     const after = p.backing.smudgeLayers.get(1)!;
     expect(after).not.toBe(before);
-    expect(after.mesh.count).toBe(128);
+    expect(after.mesh.instances).toBe(128);
     expect(after.capacity).toBeGreaterThanOrEqual(128);
     expect(disposed).toHaveBeenCalledTimes(1);
     expect(p.backing.root.remove).toHaveBeenCalledWith(before.mesh);
@@ -553,7 +553,7 @@ describe('LiveView smudge integration', () => {
         1,
       );
       expect(p.backing.smudgeLayers.size).toBe(0);
-      expect(p.cellLayer.mesh.count).toBe(1);
+      expect(p.cellLayer.mesh.instances).toBe(1);
       p.view.dispose();
     } finally {
       warning.mockRestore();

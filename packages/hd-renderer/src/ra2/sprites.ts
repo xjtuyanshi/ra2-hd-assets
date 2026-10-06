@@ -1,9 +1,11 @@
 import type { TerrainDepth } from '../terrainDepth';
 import { NOT_CAPTURED_CODE } from '../objectDepth';
 import { DirtyAttribute } from '../dirtyAttribute';
-import { InstancedQuad } from '../instancedQuad';
+import { InstancedQuad, instancedQuadGeometry } from '../instancedQuad';
+import { bindSlots, bindSlotsBeforeRender, samplingClass, slotMaterial, textureSlot } from '../materialSlots';
 import {
   Color,
+  InterleavedBufferAttribute,
   LessDepth,
   MeshBasicNodeMaterial,
   NormalBlending,
@@ -24,7 +26,7 @@ import {
   exp,
   float,
   floor,
-  instancedBufferAttribute,
+  attribute,
   length,
   max,
   min,
@@ -254,122 +256,87 @@ export function cardPush(frame: SpriteFrame): number {
   return below * Math.sqrt(3) + 0.03;
 }
 
-/**
- * Original SHP art as camera-facing cards. With the fixed orthographic camera a card of w x h pixels / PPU world units
- * covers exactly the pixels the engine would draw, so placement matches the original frame for frame. Colour comes
- * from the palette atlas at draw time (index 0 transparent, 16-31 house-remapped), which is also where HD
- * replacements will later plug in.
- */
-export class SpriteLayer {
-  readonly mesh: InstancedQuad;
-  /** Test-only sprite parts share every instance buffer; visible only when such a part exists. */
-  readonly readOnlyMesh: InstancedQuad;
-  /** Ground cards follow test-only parts, so a door cannot paint over a unit that passed the body. */
-  readonly unitMesh: InstancedQuad;
-  /** Translucent bodies follow native unit color, retaining depth tests without writing an opaque silhouette. */
-  readonly translucentMesh: InstancedQuad;
+/** What changes a sprite layer's shader (as opposed to the data it draws). */
+interface SpriteGraphFeatures {
+  /** HD colour page and house-paint mask (else the indexed page through the palette). */
+  hd: boolean;
+  /** The HD page's house-paint saturation; below 1 it adds nodes. */
+  paintSaturation: number;
+  windows: boolean;
+  materials: boolean;
+  capture: TerrainDepth | null;
   /**
-   * The enhanced look's ground passes ('under', 'over'; children of `mesh`, shown by HdRenderer only while the look is
-   * on). They share this layer's instance buffers.
+   * Sampling class of each page (see samplingClass): three writes a texel load or a filtered sample into the shader
+   * by the texture's filters, so layers whose pages differ in class cannot share a shader.
    */
-  readonly groundPasses: InstancedQuad[];
-  /** Ground-plane depth coefficients of the 'over' pass (see groundPlaneDepth), set per draw. */
-  private readonly planeCoefficients = uniform(new Vector4());
+  sampling: {
+    atlas: SamplingClass;
+    hd: SamplingClass;
+    remap: SamplingClass;
+    windows: SamplingClass;
+    materials: SamplingClass;
+  };
+}
+
+type SamplingClass = ReturnType<typeof samplingClass>;
+
+/**
+ * The shader graph of sprite layers: the six pass materials every layer with the same features draws with, and the
+ * slots their shader reads a layer's pages from (materialSlots.ts). A layer's materials are clones of these, so three
+ * builds each pass's shader once per render pass, not once per layer: a layer for an atlas page a match shows for the
+ * first time costs its buffers and bind groups, where it used to cost six shader builds of 70 to 100 ms each (again
+ * for the mirror and capture passes) on the thread that presents the frames. Per-instance data comes from the drawn
+ * mesh's geometry by attribute name.
+ */
+class SpriteGraph {
   /** Palette sprites' scene light level; display-referred instances bypass it. */
   readonly light = uniform(new Color(1, 1, 1));
   readonly cameraRight = uniform(new Vector3(1, 0, 0));
   readonly cameraUp = uniform(new Vector3(0, 1, 0));
   readonly toCamera = uniform(new Vector3(0, 1, 0));
-  readonly capacity: number;
-  private readonly anchor: DirtyAttribute;
-  private readonly rect: DirtyAttribute;
-  private readonly params: DirtyAttribute;
-  /**
-   * x: card/decal/shadow/contact/reflection (instanceCode); y: object light; z: map lighting class; w: bounded
-   * traversal bias in world units for cards, ground-crystal weight for plain flat decals, or infantry shadow marker.
-   * The second vec4 holds foundation width/height and draw-point offsets; width -1 selects an elevated deck.
-   * Capture-enabled layers retain their relative anchor code at scalar 8. Two additional vec4s hold the native
-   * depth mode/profile and owner offsets/pass (0 ordinary, 1 test-only, 2 ground unit, 3 + opacity translucent).
-   * All attributes share one buffer: stride 16, or 17 with
-   * capture, so native depth adds no vertex buffer (WebGPU allows eight).
-   */
-  private readonly flags: DirtyAttribute;
-  private instances: readonly SpriteInstance[] = [];
-  private readonly orderedCards: SpriteInstance[] = [];
-  private instanceCount = 0;
-  private readonly uploaded: SpriteInstance[] = [];
+  /** Ground-plane depth coefficients of the 'over' pass (see groundPlaneDepth), set per draw. */
+  readonly planeCoefficients = uniform(new Vector4());
+  /** Slots: the indexed page and its size in texels, the HD pair with its scale to the indexed page, the sidecars. */
+  readonly atlasPage: ShaderNode;
+  readonly atlasSize = uniform(new Vector2(1, 1));
+  readonly hdColour: ShaderNode;
+  readonly hdRemap: ShaderNode;
+  readonly hdScale = uniform(1);
+  readonly windowsPage: ShaderNode;
+  readonly materialPage: ShaderNode;
+  /** Per-instance anchor code of capture-enabled layers, for the materials that are captured. */
+  captureCode: ShaderNode | null = null;
+  readonly materials: Record<'main' | 'readOnly' | 'unit' | 'translucent' | 'under' | 'over', MeshBasicNodeMaterial>;
 
-  /** Current records; static layers keep these and their depth profiles until the layer itself changes. */
-  getInstances(): readonly SpriteInstance[] {
-    return this.instances;
-  }
-
-  /** `capacity` > instances.length reserves room for setInstances (live objects). */
-  constructor(
-    private readonly cache: Ra2Cache,
-    instances: SpriteInstance[],
-    capacity = instances.length,
-    /** Indexed atlas to read frames from (a type-library page); defaults to the map cache's sprite atlas. */
-    atlas: { texture: Texture; width: number; height: number } = {
-      texture: cache.spriteAtlas,
-      width: cache.manifest.spriteAtlas.width,
-      height: cache.manifest.spriteAtlas.height,
-    },
-    /**
-     * Optional HD version of the same atlas (same layout, normalized UVs unchanged at any scale): full-colour art with
-     * house-paint pixels written as a grey ramp, plus a mask of those pixels (see packages/ra2-assets spriteHd).
-     * Shadows keep using the indexed atlas.
-     */
-    hd: HdAtlas | null = null,
-    /**
-     * Lit-window mask over the same atlas (R = lit, G = variant; ra2-assets windows.ts), same normalized UVs as the
-     * indexed and HD atlases. Null: no windows.
-     */
-    windows: Texture | null = null,
-    /**
-     * Material atlas over the same atlas (sprites@2x-normals.png: world normal, specular class, occlusion; see
-     * spriteLook.ts), same normalized UVs; its pixel dimensions can differ from both colour and indexed atlases.
-     * Null: the enhanced look has no per-pixel normals for this layer (shadows, contact shades and reflections still
-     * follow it).
-     */
-    materials: SpriteMaterialAtlas | null = null,
-    private readonly capture: TerrainDepth | null = null,
-  ) {
+  constructor(cache: Ra2Cache, features: SpriteGraphFeatures) {
     const nodes = cache.nodes ?? DEFAULT_ATMOSPHERE_NODES;
     const { referenceLevel, windowGain } = nodes;
     const look = spriteLookFor(nodes);
-    this.capacity = Math.max(1, capacity, instances.length);
-    const count = this.capacity;
-    // Pack related fields into shared vertex buffers. Capacity never introduces an unused instance matrix.
-    // Draw anchor, map-light sample and grade exemption share one buffer/attribute pair.
-    this.anchor = new DirtyAttribute(new Float32Array(count * 6), 6);
-    this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
-    this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
-    const nativeOffset = capture ? 9 : 8;
-    this.flags = new DirtyAttribute(new Float32Array(count * (nativeOffset + 8)), nativeOffset + 8);
+    const { capture, sampling } = features;
+    this.atlasPage = textureSlot(sampling.atlas);
+    this.hdColour = textureSlot(sampling.hd);
+    this.hdRemap = textureSlot(sampling.remap);
+    this.windowsPage = textureSlot(sampling.windows);
+    this.materialPage = textureSlot(sampling.materials);
+    // The texture slots stand where the layer's own textures stood: texture() takes a texture node as well.
+    const atlasPage = this.atlasPage as unknown as Texture;
+    const hdColour = this.hdColour as unknown as Texture;
+    const hdRemap = this.hdRemap as unknown as Texture;
+    const windowsPage = this.windowsPage as unknown as Texture;
+    const materialPage = { texture: this.materialPage as unknown as Texture };
 
-    const atlasSize = vec2(atlas.width, atlas.height);
+    const atlasSize: ShaderNode = this.atlasSize;
     const paletteRows = float(cache.paletteAtlas.image.height);
-    const aAnchor: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec3', 6, 0);
-    const aRect: ShaderNode = instancedBufferAttribute(this.rect, 'vec4');
-    const aParams: ShaderNode = instancedBufferAttribute(this.params, 'vec4');
-    const aLighting: ShaderNode = instancedBufferAttribute(this.anchor.interleaved(), 'vec3', 6, 3);
+    const aAnchor: ShaderNode = attribute('spriteAnchor', 'vec3');
+    const aRect: ShaderNode = attribute('spriteRect', 'vec4');
+    const aParams: ShaderNode = attribute('spriteParams', 'vec4');
+    const aLighting: ShaderNode = attribute('spriteLighting', 'vec3');
     const aLightSample: ShaderNode = aLighting.xy;
     const aGradeExempt: ShaderNode = aLighting.z.toVar('spriteGradeExempt');
-    const aFlags: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', this.flags.itemSize, 0);
-    const aOcclusion: ShaderNode = instancedBufferAttribute(this.flags.interleaved(), 'vec4', this.flags.itemSize, 4);
-    const aNative: ShaderNode = instancedBufferAttribute(
-      this.flags.interleaved(),
-      'vec4',
-      this.flags.itemSize,
-      nativeOffset,
-    );
-    const aNativeOffset: ShaderNode = instancedBufferAttribute(
-      this.flags.interleaved(),
-      'vec4',
-      this.flags.itemSize,
-      nativeOffset + 4,
-    );
+    const aFlags: ShaderNode = attribute('spriteFlags', 'vec4');
+    const aOcclusion: ShaderNode = attribute('spriteOcclusion', 'vec4');
+    const aNative: ShaderNode = attribute('spriteNative', 'vec4');
+    const aNativeOffset: ShaderNode = attribute('spriteNativeOffset', 'vec4');
     const aFlat: ShaderNode = aFlags.x;
     const bodyOpacity: ShaderNode = aNativeOffset.w
       .greaterThanEqual(3)
@@ -586,7 +553,7 @@ export class SpriteLayer {
           for (const ox of [-1, 0, 1]) {
             const k: ShaderNode = k0.add(vec2(ox, oy));
             const inside: ShaderNode = step(lo, k).mul(float(1).sub(step(hi, k)));
-            const i: ShaderNode = floor(texture(atlas.texture, k.add(0.5).div(atlasSize)).r.mul(255).add(0.5)).toVar();
+            const i: ShaderNode = floor(texture(atlasPage, k.add(0.5).div(atlasSize)).r.mul(255).add(0.5)).toVar();
             const occupied: ShaderNode = step(0.5, i).mul(inside.x).mul(inside.y).toVar();
             const w: ShaderNode = weights(ox).x.mul(weights(oy).y).mul(occupied).toVar();
             coverage.addAssign(w);
@@ -602,8 +569,8 @@ export class SpriteLayer {
         // Shadows take the filtered coverage itself: solid shadow art stays solid with a soft edge, and the stippled
         // shadows of trees and bushes become an even half shadow (their average at 1x) instead of blotches.
         // Existing building/vehicle shadows retain indexed coverage. Only the new infantry page supplies HD alpha.
-        const shadowCoverage: ShaderNode = hd
-          ? mix(clamp(coverage, 0, 1), max(clamp(coverage, 0, 1), texture(hd.color, atlasUv).a), isInfantryShadow)
+        const shadowCoverage: ShaderNode = features.hd
+          ? mix(clamp(coverage, 0, 1), max(clamp(coverage, 0, 1), texture(hdColour, atlasUv).a), isInfantryShadow)
           : clamp(coverage, 0, 1);
         const infantryAlpha: ShaderNode = smoothstep(INFANTRY_SHADOW_RAMP.from, INFANTRY_SHADOW_RAMP.to, shadowCoverage)
           .mul(INFANTRY_SHADOW_OPACITY)
@@ -650,8 +617,8 @@ export class SpriteLayer {
         // with its own brightness; variants above 0.85 stay dark. Kept below the tone mapper's shoulder so panes stay
         // amber instead of washing out to white.
         let glow: ShaderNode = vec3(0, 0, 0);
-        if (windows) {
-          const mask: ShaderNode = texture(windows, atlasUv);
+        if (features.windows) {
+          const mask: ShaderNode = texture(windowsPage, atlasUv);
           const variant = mask.g.div(0.85);
           const brightness = float(0.9).add(variant.mul(7.3).fract().mul(0.4));
           const tint = mix(vec3(1.0, 0.64, 0.27), vec3(0.62, 0.68, 0.8), step(0.85, variant));
@@ -662,7 +629,7 @@ export class SpriteLayer {
         let lit: ShaderNode;
         let litAlpha: ShaderNode;
         let litGlow: ShaderNode;
-        if (!hd) {
+        if (!features.hd) {
           const shown: ShaderNode = mix(fill, index, step(0.5, index));
           const paint: ShaderNode = step(15.5, shown).mul(step(shown, 31.5));
           lit = shade(paletteColour(shown), paint).toVar();
@@ -670,18 +637,18 @@ export class SpriteLayer {
           litAlpha = edge.toVar();
           art = vec4(lit.add(litGlow), litAlpha);
         } else {
-          const hdArt: ShaderNode = texture(hd.color, atlasUv);
-          const paint: ShaderNode = texture(hd.remap, atlasUv).r;
+          const hdArt: ShaderNode = texture(hdColour, atlasUv);
+          const paint: ShaderNode = texture(hdRemap, atlasUv).r;
           // House paint was written as grey(i) = 255 - (i - 16) * 15 in sRGB; invert it to a fractional remap index and
           // take the instance's house colours from its palette row, blending between neighbouring entries.
           const grey = pow(hdArt.g.max(0), 1 / 2.2).mul(255);
           const remapIndex = clamp(float(16).add(float(255).sub(grey).div(15)), 16, 31);
           const i0 = floor(remapIndex);
           let house: ShaderNode = mix(paletteColour(i0), paletteColour(i0.add(1).min(31)), remapIndex.sub(i0));
-          if ((hd.paintSaturation ?? 1) < 1) {
+          if (features.paintSaturation < 1) {
             // Palette samples are linear; preserve Rec.709 luminance and the encoded shading. Default pages add no nodes.
             const greyHouse = house.dot(vec3(0.2126, 0.7152, 0.0722));
-            house = mix(vec3(greyHouse), house, hd.paintSaturation!);
+            house = mix(vec3(greyHouse), house, features.paintSaturation);
           }
           const colour = mix(hdArt.rgb, house, paint);
           // The upscaler saw the art over a flat background, so HD texels next to transparent ones carry a light fringe
@@ -707,8 +674,8 @@ export class SpriteLayer {
           const sun: ShaderNode = look.sunDirection;
           const wet: ShaderNode = look.wetness;
           // Upright art with material data: relight as a delta on the baked shading, occlusion, highlights, glass.
-          if (materials) {
-            const m = sampleMaterial(materials, atlasUv);
+          if (features.materials) {
+            const m = sampleMaterial(materialPage, atlasUv);
             const weight: ShaderNode = m.has.mul(float(1).sub(step(0.5, aFlat)));
             const factor: ShaderNode = mix(vec3(1), relightFactor(m.normal, look), look.relight.mul(weight));
             const occlusion: ShaderNode = mix(
@@ -752,9 +719,7 @@ export class SpriteLayer {
             const isDecal: ShaderNode = step(0.5, aFlat).mul(float(1).sub(step(1.5, aFlat)));
             const crystal: ShaderNode = aFlags.w.mul(isDecal).mul(m.has);
             // Use colour-atlas pixels, not material pixels: material sidecars may have a different resolution.
-            const hdScale = hd
-              ? ((hd.color.image as { width?: number } | null)?.width ?? atlas.width) / atlas.width
-              : 1;
+            const hdScale: ShaderNode = this.hdScale;
             const crystalColour = groundCrystalColour(
               lit,
               m,
@@ -763,7 +728,7 @@ export class SpriteLayer {
               view,
               look,
               aAnchor.xz,
-              (pixel) => sampleMaterial(materials, pixel.div(hdScale).div(atlasSize)),
+              (pixel) => sampleMaterial(materialPage, pixel.div(hdScale).div(atlasSize)),
               isUnlit,
             );
             result.assign(select(crystal.greaterThan(0), vec4(crystalColour.add(litGlow), litAlpha), result));
@@ -787,7 +752,7 @@ export class SpriteLayer {
                 const r = i % 2 === 0 ? 1 : 0.55;
                 const k: ShaderNode = floor(texel.add(vec2(cos(angle), sin(angle)).mul(radius.mul(r))));
                 const inside: ShaderNode = step(lo, k).mul(float(1).sub(step(hi, k)));
-                const occupied: ShaderNode = step(0.5, texture(atlas.texture, k.add(0.5).div(atlasSize)).r.mul(255));
+                const occupied: ShaderNode = step(0.5, texture(atlasPage, k.add(0.5).div(atlasSize)).r.mul(255));
                 soft.addAssign(occupied.mul(inside.x).mul(inside.y));
               }
               const blended: ShaderNode = mix(clamp(coverage, 0, 1), soft.div(8), smoothstep(0.3, 1.5, radius));
@@ -846,10 +811,10 @@ export class SpriteLayer {
     if (capture) {
       // Every vertex of an instance shares the anchor code, including across its SHP component pages.
       const code: ShaderNode = varying(
-        instancedBufferAttribute(this.flags.interleaved(), 'float', this.flags.itemSize, 8),
+        attribute('spriteCaptureCode', 'float'),
         'objectDepthInstanceCode',
       ).setInterpolation('flat', 'either');
-      material.userData.objectDepthCodeNode = code;
+      this.captureCode = code;
       const kind: ShaderNode = varying(aFlat, 'objectDepthInstanceKind').setInterpolation('flat', 'either');
       material.colorNode = Fn(() => {
         // This object-group gate is recomputed for the actual capture target/camera. Main/mirror output and depth
@@ -862,9 +827,6 @@ export class SpriteLayer {
     } else material.colorNode = mainColour;
 
     bindUnlitSpriteMaterial(material, isUnlit, nodes);
-    this.mesh = new InstancedQuad(material, count);
-    this.mesh.renderOrder = 4;
-    this.mesh.name = 'ra2-sprites';
 
     const readOnlyMaterial = new MeshBasicNodeMaterial();
     readOnlyMaterial.name = 'ra2-sprites-read-only';
@@ -875,15 +837,6 @@ export class SpriteLayer {
     readOnlyMaterial.colorNode = colourNode();
     readOnlyMaterial.depthNode = cardDepth();
     readOnlyMaterial.depthWrite = false;
-    this.readOnlyMesh = new InstancedQuad(readOnlyMaterial, count, this.mesh.geometry);
-    this.readOnlyMesh.name = 'ra2-sprites-read-only';
-    const main = this.mesh;
-    Object.defineProperty(this.readOnlyMesh, 'renderOrder', {
-      get: () => main.renderOrder + 0.001,
-      set: () => {},
-      configurable: true,
-    });
-    this.mesh.add(this.readOnlyMesh);
 
     const unitMaterial = new MeshBasicNodeMaterial();
     unitMaterial.name = 'ra2-sprites-ground-units';
@@ -893,11 +846,6 @@ export class SpriteLayer {
     unitMaterial.positionNode = placement('unit');
     unitMaterial.colorNode = material.colorNode;
     unitMaterial.depthNode = cardDepth();
-    unitMaterial.userData.objectDepthCodeNode = material.userData.objectDepthCodeNode;
-    this.unitMesh = new InstancedQuad(unitMaterial, count, this.mesh.geometry);
-    this.unitMesh.name = 'ra2-sprites-ground-units';
-    this.unitMesh.renderOrder = NATIVE_UNIT_RENDER_ORDER;
-    this.mesh.add(this.unitMesh);
 
     const translucentMaterial = new MeshBasicNodeMaterial();
     translucentMaterial.name = 'ra2-sprites-translucent';
@@ -908,10 +856,6 @@ export class SpriteLayer {
     translucentMaterial.colorNode = colourNode();
     translucentMaterial.depthNode = cardDepth();
     translucentMaterial.depthWrite = false;
-    this.translucentMesh = new InstancedQuad(translucentMaterial, count, this.mesh.geometry);
-    this.translucentMesh.name = 'ra2-sprites-translucent';
-    this.translucentMesh.renderOrder = NATIVE_UNIT_RENDER_ORDER + 0.001;
-    this.mesh.add(this.translucentMesh);
 
     // Enhanced-look ground passes. In one draw call every ground decal wrote depth on the same plane (0.02 above the
     // ground), so coplanar decals z-fought: SHP shadows over contact shades, bibs and each other passed or failed by
@@ -939,9 +883,9 @@ export class SpriteLayer {
         .add(c.z.mul(screenCoordinate.y))
         .add(c.w.mul(level));
       const texel = vec2(aRect.x.add(uv().x.mul(aRect.z)), aRect.y.add(vCard.mul(aRect.w)));
-      const indexedCoverage = frameCoverage(atlas.texture, atlasSize, texel, aRect);
-      const coverage = hd
-        ? mix(indexedCoverage, max(indexedCoverage, texture(hd.color, texel.div(atlasSize)).a), isInfantryShadow)
+      const indexedCoverage = frameCoverage(atlasPage, atlasSize, texel, aRect);
+      const coverage = features.hd
+        ? mix(indexedCoverage, max(indexedCoverage, texture(hdColour, texel.div(atlasSize)).a), isInfantryShadow)
         : indexedCoverage;
       const level5: ShaderNode = floor(clamp(coverage, 0, 1).mul(4).add(0.5));
       // A solid infantry core must pass an earlier half-colour shadow, even when its filtered coverage is only .22.
@@ -972,12 +916,230 @@ export class SpriteLayer {
       }
       return m;
     };
+    this.materials = {
+      main: material,
+      readOnly: readOnlyMaterial,
+      unit: unitMaterial,
+      translucent: translucentMaterial,
+      under: passMaterial('under'),
+      over: passMaterial('over'),
+    };
+  }
+}
+
+const spriteGraphs = new WeakMap<Ra2Cache, Map<string, SpriteGraph>>();
+const objectIds = new WeakMap<object, number>();
+let nextObjectId = 1;
+
+/** A number for an object that is part of a graph's shader (0 for none). */
+function objectId(object: object | null | undefined): number {
+  if (!object) return 0;
+  let id = objectIds.get(object);
+  if (!id) objectIds.set(object, (id = nextObjectId++));
+  return id;
+}
+
+/** The graph for a cache and a set of features, built on first use (the graphs live as long as the cache). */
+function spriteGraphFor(cache: Ra2Cache, features: SpriteGraphFeatures): SpriteGraph {
+  let graphs = spriteGraphs.get(cache);
+  if (!graphs) spriteGraphs.set(cache, (graphs = new Map()));
+  const key = [
+    features.hd ? `hd${features.paintSaturation < 1 ? features.paintSaturation : ''}` : 'indexed',
+    features.windows ? 'windows' : '',
+    features.materials ? 'materials' : '',
+    objectId(features.capture),
+    // The cache's depth template is read by the shader (its texture and size) and arrives with the type library,
+    // after the map's own layers were built: layers made before and after it are different shaders.
+    objectId(cache.depthTemplate),
+    // Read by the shader as well; fixed for a cache's lifetime today, keyed so that a replaced one cannot be missed.
+    objectId(cache.paletteAtlas),
+    objectId(cache.mapLight),
+    features.sampling.atlas,
+    features.hd ? `${features.sampling.hd}/${features.sampling.remap}` : '',
+    features.windows ? features.sampling.windows : '',
+    features.materials ? features.sampling.materials : '',
+  ].join('|');
+  let graph = graphs.get(key);
+  if (!graph) graphs.set(key, (graph = new SpriteGraph(cache, features)));
+  return graph;
+}
+
+/**
+ * Original SHP art as camera-facing cards. With the fixed orthographic camera a card of w x h pixels / PPU world units
+ * covers exactly the pixels the engine would draw, so placement matches the original frame for frame. Colour comes
+ * from the palette atlas at draw time (index 0 transparent, 16-31 house-remapped), which is also where HD
+ * replacements will later plug in.
+ */
+export class SpriteLayer {
+  readonly mesh: InstancedQuad;
+  /** Test-only sprite parts share every instance buffer; visible only when such a part exists. */
+  readonly readOnlyMesh: InstancedQuad;
+  /** Ground cards follow test-only parts, so a door cannot paint over a unit that passed the body. */
+  readonly unitMesh: InstancedQuad;
+  /** Translucent bodies follow native unit color, retaining depth tests without writing an opaque silhouette. */
+  readonly translucentMesh: InstancedQuad;
+  /**
+   * The enhanced look's ground passes ('under', 'over'; children of `mesh`, shown by HdRenderer only while the look is
+   * on). They share this layer's instance buffers.
+   */
+  readonly groundPasses: InstancedQuad[];
+  /**
+   * Palette sprites' scene light level (display-referred instances bypass it) and the camera basis the cards face:
+   * the uniforms of this layer's shader graph, shared by every layer of the same cache and features.
+   */
+  readonly light: SpriteGraph['light'];
+  readonly cameraRight: SpriteGraph['cameraRight'];
+  readonly cameraUp: SpriteGraph['cameraUp'];
+  readonly toCamera: SpriteGraph['toCamera'];
+  readonly capacity: number;
+  private readonly anchor: DirtyAttribute;
+  private readonly rect: DirtyAttribute;
+  private readonly params: DirtyAttribute;
+  /**
+   * x: card/decal/shadow/contact/reflection (instanceCode); y: object light; z: map lighting class; w: bounded
+   * traversal bias in world units for cards, ground-crystal weight for plain flat decals, or infantry shadow marker.
+   * The second vec4 holds foundation width/height and draw-point offsets; width -1 selects an elevated deck.
+   * Capture-enabled layers retain their relative anchor code at scalar 8. Two additional vec4s hold the native
+   * depth mode/profile and owner offsets/pass (0 ordinary, 1 test-only, 2 ground unit, 3 + opacity translucent).
+   * All attributes share one buffer: stride 16, or 17 with
+   * capture, so native depth adds no vertex buffer (WebGPU allows eight).
+   */
+  private readonly flags: DirtyAttribute;
+  private instances: readonly SpriteInstance[] = [];
+  private readonly orderedCards: SpriteInstance[] = [];
+  private instanceCount = 0;
+  private readonly uploaded: SpriteInstance[] = [];
+
+  /** Current records; static layers keep these and their depth profiles until the layer itself changes. */
+  getInstances(): readonly SpriteInstance[] {
+    return this.instances;
+  }
+
+  /** `capacity` > instances.length reserves room for setInstances (live objects). */
+  constructor(
+    private readonly cache: Ra2Cache,
+    instances: SpriteInstance[],
+    capacity = instances.length,
+    /** Indexed atlas to read frames from (a type-library page); defaults to the map cache's sprite atlas. */
+    atlas: { texture: Texture; width: number; height: number } = {
+      texture: cache.spriteAtlas,
+      width: cache.manifest.spriteAtlas.width,
+      height: cache.manifest.spriteAtlas.height,
+    },
+    /**
+     * Optional HD version of the same atlas (same layout, normalized UVs unchanged at any scale): full-colour art with
+     * house-paint pixels written as a grey ramp, plus a mask of those pixels (see packages/ra2-assets spriteHd).
+     * Shadows keep using the indexed atlas.
+     */
+    hd: HdAtlas | null = null,
+    /**
+     * Lit-window mask over the same atlas (R = lit, G = variant; ra2-assets windows.ts), same normalized UVs as the
+     * indexed and HD atlases. Null: no windows.
+     */
+    windows: Texture | null = null,
+    /**
+     * Material atlas over the same atlas (sprites@2x-normals.png: world normal, specular class, occlusion; see
+     * spriteLook.ts), same normalized UVs; its pixel dimensions can differ from both colour and indexed atlases.
+     * Null: the enhanced look has no per-pixel normals for this layer (shadows, contact shades and reflections still
+     * follow it).
+     */
+    materials: SpriteMaterialAtlas | null = null,
+    private readonly capture: TerrainDepth | null = null,
+  ) {
+    const nodes = cache.nodes ?? DEFAULT_ATMOSPHERE_NODES;
+    const look = spriteLookFor(nodes);
+    this.capacity = Math.max(1, capacity, instances.length);
+    const count = this.capacity;
+    // Pack related fields into shared vertex buffers. Capacity never introduces an unused instance matrix.
+    // Draw anchor, map-light sample and grade exemption share one buffer/attribute pair.
+    this.anchor = new DirtyAttribute(new Float32Array(count * 6), 6);
+    this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
+    this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
+    const nativeOffset = capture ? 9 : 8;
+    this.flags = new DirtyAttribute(new Float32Array(count * (nativeOffset + 8)), nativeOffset + 8);
+
+    // The shader is the graph's, shared by every layer with the same features: this layer brings its instance
+    // buffers (attributes of its geometry, read by name) and its pages (bound to the graph's slots before each draw).
+    const graph = spriteGraphFor(cache, {
+      hd: !!hd,
+      paintSaturation: hd ? (hd.paintSaturation ?? 1) : 1,
+      windows: !!windows,
+      materials: !!materials,
+      capture,
+      sampling: {
+        atlas: samplingClass(atlas.texture),
+        hd: hd ? samplingClass(hd.color) : 'filtered',
+        remap: hd ? samplingClass(hd.remap) : 'filtered',
+        windows: windows ? samplingClass(windows) : 'filtered',
+        materials: materials ? samplingClass(materials.texture) : 'filtered',
+      },
+    });
+    this.light = graph.light;
+    this.cameraRight = graph.cameraRight;
+    this.cameraUp = graph.cameraUp;
+    this.toCamera = graph.toCamera;
+    const geometry = instancedQuadGeometry();
+    const anchors = this.anchor.interleaved();
+    const flags = this.flags.interleaved();
+    geometry.setAttribute('spriteAnchor', new InterleavedBufferAttribute(anchors, 3, 0));
+    geometry.setAttribute('spriteLighting', new InterleavedBufferAttribute(anchors, 3, 3));
+    geometry.setAttribute('spriteRect', this.rect);
+    geometry.setAttribute('spriteParams', this.params);
+    geometry.setAttribute('spriteFlags', new InterleavedBufferAttribute(flags, 4, 0));
+    geometry.setAttribute('spriteOcclusion', new InterleavedBufferAttribute(flags, 4, 4));
+    if (capture) geometry.setAttribute('spriteCaptureCode', new InterleavedBufferAttribute(flags, 1, 8));
+    geometry.setAttribute('spriteNative', new InterleavedBufferAttribute(flags, 4, nativeOffset));
+    geometry.setAttribute('spriteNativeOffset', new InterleavedBufferAttribute(flags, 4, nativeOffset + 4));
+    // Use colour-atlas pixels, not material pixels: material sidecars may have a different resolution.
+    const hdScale = hd ? ((hd.color.image as { width?: number } | null)?.width ?? atlas.width) / atlas.width : 1;
+    const bind = (): void => {
+      graph.atlasPage.value = atlas.texture;
+      (graph.atlasSize.value as Vector2).set(atlas.width, atlas.height);
+      graph.hdScale.value = hdScale;
+      if (hd) {
+        graph.hdColour.value = hd.color;
+        graph.hdRemap.value = hd.remap;
+      }
+      if (windows) graph.windowsPage.value = windows;
+      if (materials) graph.materialPage.value = materials.texture;
+    };
+    /** This layer's material for one pass: the graph's, drawn with this layer's pages. */
+    const own = (prototype: MeshBasicNodeMaterial, captured = false): MeshBasicNodeMaterial => {
+      const material = slotMaterial(prototype, bind);
+      if (captured && graph.captureCode) material.userData.objectDepthCodeNode = graph.captureCode;
+      return material;
+    };
+    const quad = (prototype: MeshBasicNodeMaterial, name: string, captured = false): InstancedQuad => {
+      const mesh = new InstancedQuad(own(prototype, captured), count, geometry);
+      mesh.name = name;
+      mesh.onBeforeRender = bindSlotsBeforeRender;
+      return mesh;
+    };
+    const material = graph.materials;
+    this.mesh = quad(material.main, 'ra2-sprites', true);
+    this.mesh.renderOrder = 4;
+
+    this.readOnlyMesh = quad(material.readOnly, 'ra2-sprites-read-only');
+    const main = this.mesh;
+    Object.defineProperty(this.readOnlyMesh, 'renderOrder', {
+      get: () => main.renderOrder + 0.001,
+      set: () => {},
+      configurable: true,
+    });
+    this.mesh.add(this.readOnlyMesh);
+
+    this.unitMesh = quad(material.unit, 'ra2-sprites-ground-units', true);
+    this.unitMesh.renderOrder = NATIVE_UNIT_RENDER_ORDER;
+    this.mesh.add(this.unitMesh);
+
+    this.translucentMesh = quad(material.translucent, 'ra2-sprites-translucent');
+    this.translucentMesh.renderOrder = NATIVE_UNIT_RENDER_ORDER + 0.001;
+    this.mesh.add(this.translucentMesh);
+
     this.groundPasses = (['under', 'over'] as const).map((pass, i) => {
-      const passMesh = new InstancedQuad(passMaterial(pass), count, this.mesh.geometry);
+      const passMesh = quad(material[pass], `ra2-sprites-${pass}`);
       passMesh.visible = false;
-      passMesh.name = `ra2-sprites-${pass}`;
       // Just before this layer's own pass, whatever renderOrder its owner gives the layer later.
-      const main = this.mesh;
       Object.defineProperty(passMesh, 'renderOrder', {
         get: () => main.renderOrder - 0.02 + i * 0.01,
         set: () => {},
@@ -986,19 +1148,20 @@ export class SpriteLayer {
       this.mesh.add(passMesh);
       look.groundPasses.add(passMesh);
       if (pass === 'over')
-        passMesh.onBeforeRender = (renderer, _scene, camera) => {
+        // The ground plane's depth coefficients are set per draw from the camera and target actually rendering
+        // (see SpriteGraph), so a pass with another camera (a reflection's mirrored one) gets its own.
+        passMesh.onBeforeRender = (renderer, _scene, camera, _geometry, drawn) => {
+          bindSlots(drawn);
           const target = renderer.getRenderTarget();
           if (target) planeSize.set(target.width, target.height);
           else renderer.getDrawingBufferSize(planeSize);
-          groundPlaneDepth(camera as OrthographicCamera, planeSize.x, planeSize.y, this.planeCoefficients.value);
+          groundPlaneDepth(camera as OrthographicCamera, planeSize.x, planeSize.y, graph.planeCoefficients.value);
         };
       return passMesh;
     });
-    material.addEventListener('dispose', () => {
-      readOnlyMaterial.dispose();
-      unitMaterial.dispose();
-      translucentMaterial.dispose();
-      for (const passMesh of this.groundPasses) (passMesh.material as MeshBasicNodeMaterial).dispose();
+    const passes = [this.readOnlyMesh, this.unitMesh, this.translucentMesh, ...this.groundPasses];
+    this.mesh.material.addEventListener('dispose', () => {
+      for (const passMesh of passes) passMesh.material.dispose();
     });
     this.mesh.addEventListener('dispose', () => {
       this.readOnlyMesh.dispose();
@@ -1097,14 +1260,11 @@ export class SpriteLayer {
       }
     }
     if (this.capture) this.uploaded.length = count;
-    this.mesh.count = count;
-    this.readOnlyMesh.count = count;
+    // Every pass draws the layer's one geometry: its instance count is theirs.
+    this.mesh.instances = count;
     this.readOnlyMesh.visible = readOnly;
-    this.unitMesh.count = count;
     this.unitMesh.visible = units;
-    this.translucentMesh.count = count;
     this.translucentMesh.visible = translucent;
-    for (const passMesh of this.groundPasses) passMesh.count = count;
     this.anchor.flush();
     this.rect.flush();
     this.params.flush();

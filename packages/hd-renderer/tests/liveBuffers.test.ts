@@ -58,7 +58,7 @@ describe('live sprite buffers', () => {
     attrs.forEach((a) => a.clearUpdateRanges());
     const moved = attrs.map((a) => a.version);
     layer.setInstances([]);
-    expect(layer.mesh.count).toBe(0);
+    expect(layer.mesh.instances).toBe(0);
     expect(attrs.map((a) => a.version)).toEqual(moved);
   });
 

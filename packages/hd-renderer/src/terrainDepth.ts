@@ -350,7 +350,10 @@ export class TerrainDepth {
       renderer.clear(true, true, false);
       this.captureActive = true;
       for (const [mesh] of this.meshes) {
-        if ('count' in mesh && mesh.count === 0) continue;
+        // Nothing to draw: an instanced mesh without instances (the count is the mesh's or its geometry's).
+        const instanced = mesh.geometry as { isInstancedBufferGeometry?: boolean; instanceCount?: number };
+        if (instanced.isInstancedBufferGeometry ? instanced.instanceCount === 0 : 'count' in mesh && mesh.count === 0)
+          continue;
         let object: import('three/webgpu').Object3D | null = mesh;
         while (object?.visible) object = object.parent;
         if (object !== null) continue;

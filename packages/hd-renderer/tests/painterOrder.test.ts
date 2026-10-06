@@ -404,7 +404,7 @@ describe('sprite depth attributes', () => {
       layer.setInstances([{ ...card, nativeDepth: { mode: 'ground', bonus: 6 }, depthWrite: false }]);
       expect(Array.from(flags.array.slice(8, 16))).toEqual([2, 0, 0, 6, 0, 0, 0, 1]);
       expect(layer.readOnlyMesh.visible).toBe(true);
-      expect(layer.readOnlyMesh.count).toBe(1);
+      expect(layer.readOnlyMesh.instances).toBe(1);
       expect(layer.readOnlyMesh.material.depthWrite).toBe(false);
       expect(layer.mesh.material.depthWrite).toBe(true);
       expect(layer.readOnlyMesh.geometry).toBe(layer.mesh.geometry);
