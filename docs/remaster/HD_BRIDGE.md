@@ -262,7 +262,17 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   mesh and projection are prepared in the local player's colours. All of it is loaded "ahead"
   (`LiveLibrary.preloadPage`): it does not count as art on its way and does not delay the view being shown, and
   the uploader copies pages that are waited for before pages loaded ahead, the smallest first, so an indexed page
-  does not queue behind the HD pages decoded before it. Cell decorations are not announced by anything (rubble, a
+  does not queue behind the HD pages decoded before it. The decode gate in front of the uploader (`PageGate`, which
+  bounds the decoded pages in existence) follows the same rule: first come, first served among waited-for pages,
+  and a page loaded ahead takes its turn only when no waited-for page waits; the library's per-page upload carries
+  the view's gate and the page's "loaded ahead" answer to both.
+  The indexed stand-in layers draw with shader graphs of their own ("indexed page through the palette": every
+  final layer draws HD art), and a graph's first layer costs six shader builds in the presenting thread plus
+  pipelines that are compiled off the frame, during which the layer draws nothing. `LiveView.warmStandIns` keeps
+  one hidden, empty layer of each such graph in the scene (a library page's sprites with the capture code, the
+  same with the lit-window mask on a night map, and a live overlay or smudge page), so the warm frames behind the
+  loading screen (`HdRenderer.warm`) build and compile them and a stand-in made during the match is a clone of
+  materials that are ready (`packages/hd-renderer/tests/liveStandInWarm.test.ts`). Cell decorations are not announced by anything (rubble, a
   crater, a crate), so the indexed pages of the overlay types that are not walls and of every smudge type, three
   small pages, are fetched when the view is created (`cellArtPages`). What still has nothing to draw from is the
   first frames of a building, infantry or SHP-vehicle type that nothing announced (an object the engine creates in

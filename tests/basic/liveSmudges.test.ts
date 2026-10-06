@@ -274,6 +274,9 @@ function presentation(withLibrary = true, airless?: boolean) {
     aheadPages: new Set<number>(),
     aheadVoxels: new Set<string>(),
     indexedMeanwhile: new Map(),
+    // The warm layers of the stand-in shader graphs (LiveView.warmStandIns) have their own test.
+    standInWarm: new Map(),
+    warmStandIns: vi.fn(),
     cellObjects: new Map([[1, mapObjects]]),
     cellInstances: [],
     cellPool: new SpritePool(),

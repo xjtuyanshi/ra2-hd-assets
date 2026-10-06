@@ -7,6 +7,7 @@ import {
   PageUploader,
   WHOLE_UPLOAD_PIXELS,
   pngPixels,
+  withDecodedPage,
   type PageUpload,
 } from '../src/pageUpload';
 import { loadHdAtlas, loadHdTexture } from '../src/ra2/cache';
@@ -470,6 +471,110 @@ describe('decoded pages are bounded', () => {
     release.c!();
     await c;
     expect(peak).toBe(1);
+  });
+
+  it('lets a page that is waited for pass the pages loaded ahead, and never the other way round', async () => {
+    const gate = new PageGate(100);
+    const order: string[] = [];
+    const release: Record<string, () => void> = {};
+    const ahead = new Set(['hd1', 'hd2', 'hd3']);
+    const task = (name: string, pixels: number) =>
+      gate.run(
+        pixels,
+        async () => {
+          order.push(name);
+          await new Promise<void>((done) => (release[name] = done));
+        },
+        () => ahead.has(name),
+      );
+    // Two HD pages loaded ahead of their use fill the gate; a third waits.
+    const hd1 = task('hd1', 50);
+    const hd2 = task('hd2', 40);
+    const hd3 = task('hd3', 50);
+    await Promise.resolve();
+    expect(order).toEqual(['hd1', 'hd2']);
+    // An indexed page an object on screen is drawn from arrives: it fits beside what runs and does not queue behind
+    // the page loaded ahead.
+    const indexed = task('indexed', 10);
+    await Promise.resolve();
+    expect(order).toEqual(['hd1', 'hd2', 'indexed']);
+    // A second waited-for page does not fit: it waits, in front of the page loaded ahead that came before it, and a
+    // page loaded ahead that would fit now does not pass either of them.
+    const wanted = task('wanted', 60);
+    ahead.add('small');
+    const small = task('small', 1);
+    await Promise.resolve();
+    expect(order).toEqual(['hd1', 'hd2', 'indexed']);
+    expect(gate.queued).toBe(3);
+    release.hd1!();
+    await hd1;
+    await Promise.resolve();
+    // 50 pixels are in flight: the waited-for page (60) does not fit yet, and nothing loaded ahead overtakes it.
+    expect(order).toEqual(['hd1', 'hd2', 'indexed']);
+    release.hd2!();
+    await hd2;
+    await vi.waitFor(() => expect(order).toEqual(['hd1', 'hd2', 'indexed', 'wanted']));
+    release.indexed!();
+    await indexed;
+    release.wanted!();
+    await wanted;
+    // Then the pages loaded ahead, oldest first.
+    await vi.waitFor(() => expect(order).toEqual(['hd1', 'hd2', 'indexed', 'wanted', 'hd3', 'small']));
+    release.hd3!();
+    release.small!();
+    await Promise.all([hd3, small]);
+    expect(gate.inFlight).toBe(0);
+    expect(gate.queued).toBe(0);
+  });
+
+  it('gives a page loaded ahead its place among the waited-for pages once something waits for it', async () => {
+    const gate = new PageGate(100);
+    const order: string[] = [];
+    const release: Record<string, () => void> = {};
+    const ahead = new Set(['early']);
+    const task = (name: string) =>
+      gate.run(
+        100,
+        async () => {
+          order.push(name);
+          await new Promise<void>((done) => (release[name] = done));
+        },
+        () => ahead.has(name),
+      );
+    const first = task('first');
+    const early = task('early');
+    const later = task('later');
+    await Promise.resolve();
+    expect(order).toEqual(['first']);
+    // An object appears that is drawn from the page loaded ahead: it arrived before `later`, and goes before it.
+    ahead.delete('early');
+    release.first!();
+    await first;
+    await vi.waitFor(() => expect(order).toEqual(['first', 'early']));
+    release.early!();
+    await early;
+    await vi.waitFor(() => expect(order).toEqual(['first', 'early', 'later']));
+    release.later!();
+    await later;
+  });
+
+  it('asks the gate with the answer the upload carries for its page', async () => {
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 8, height: 8, close: vi.fn() })),
+    );
+    const gate = new PageGate(64);
+    const asked: (boolean | undefined)[] = [];
+    const run = gate.run.bind(gate);
+    vi.spyOn(gate, 'run').mockImplementation((pixels, task, background) => {
+      asked.push(background?.());
+      return run(pixels, task, background);
+    });
+    const plain: PageUpload = Object.assign((_page: Texture) => undefined, { gate });
+    const loadedAhead: PageUpload = Object.assign((_page: Texture) => undefined, { gate, background: () => true });
+    await withDecodedPage(pngHeader(8, 8), plain, async () => undefined);
+    await withDecodedPage(pngHeader(8, 8), loadedAhead, async () => undefined);
+    expect(asked).toEqual([undefined, true]);
   });
 
   it('decodes a page only when the pages before it are on the GPU and released', async () => {

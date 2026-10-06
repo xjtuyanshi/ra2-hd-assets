@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Texture } from 'three/webgpu';
 import type { LibraryType } from '../../ra2-assets/src/library';
 import { LiveLibrary } from '../src/live/library';
+import { PageGate, type PageUpload } from '../src/pageUpload';
 import type { Ra2Cache } from '../src/ra2/cache';
 
 afterEach(() => {
@@ -208,5 +209,36 @@ describe('atlas pages fetched ahead of their first use', () => {
     expect(answers).toEqual([true, false]);
     expect(ask).toBeDefined();
     expect(second.page(2)).not.toBeNull();
+  });
+
+  it("decodes its pages inside the view's gate, and tells the gate which pages nothing waits for", async () => {
+    const { lib, arrive } = await library();
+    // What the view hands the library: its uploader with the decode gate attached (LiveView's constructor).
+    const gate = new PageGate();
+    const turns: { pixels: number; background: boolean | undefined }[] = [];
+    const run = gate.run.bind(gate);
+    vi.spyOn(gate, 'run').mockImplementation((pixels, task, background) => {
+      turns.push({ pixels, background: background?.() });
+      return run(pixels, task, background);
+    });
+    const handed: (boolean | undefined)[] = [];
+    const upload: PageUpload = Object.assign(
+      (texture: Texture, background?: () => boolean) => {
+        handed.push(background?.());
+        texture.onUpdate?.(texture);
+      },
+      { gate },
+    );
+    lib.uploadPage = upload;
+    // One page loaded ahead, one that an object waits for: each takes its turn at the view's gate, and both the gate
+    // and the uploader are told which is which.
+    lib.preloadPage(0);
+    lib.page(1);
+    await arrive('sprites-0.png');
+    await arrive('sprites-1.png');
+    expect(turns.map((turn) => turn.background)).toEqual([true, false]);
+    expect(handed).toEqual([true, false]);
+    expect(gate.inFlight).toBe(0);
+    expect(lib.page(1)).not.toBeNull();
   });
 });

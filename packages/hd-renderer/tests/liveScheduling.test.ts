@@ -55,6 +55,7 @@ function presentation(interpolating: boolean) {
     sunDirection: uniform(new Vector3(0, 1, 0)),
   });
   const updateVolumes = vi.spyOn(volumetricBlasts, 'update');
+  const warmStandIns = vi.fn();
   const view = Object.assign(Object.create(LiveView.prototype) as object, {
     volumetricBlasts,
     buildingLightGate: new BuildingLightGate(),
@@ -78,8 +79,21 @@ function presentation(interpolating: boolean) {
     applyObjects,
     applyEffects,
     applyPainterOrder: vi.fn(),
+    // The hidden layers of the stand-in shader graphs (liveStandInWarm.test.ts): made before each warm-up.
+    warmStandIns,
   }) as unknown as LiveView;
-  return { view, art, library, applyObjects, applyEffects, flushOverlayPages, hd, volumetricBlasts, updateVolumes };
+  return {
+    view,
+    art,
+    library,
+    applyObjects,
+    applyEffects,
+    flushOverlayPages,
+    hd,
+    volumetricBlasts,
+    updateVolumes,
+    warmStandIns,
+  };
 }
 
 describe('live presentation scheduling', () => {
@@ -450,6 +464,9 @@ describe('warm-up out of sight', () => {
     p.view.render(30);
     expect(hd.warm).toHaveBeenCalledTimes(1);
     expect(effects).toHaveBeenCalledTimes(1);
+    // The stand-in graphs' hidden layers are in the scene before the warm frames are drawn.
+    expect(p.warmStandIns).toHaveBeenCalledTimes(1);
+    expect(p.warmStandIns.mock.invocationCallOrder[0]).toBeLessThan(hd.warm.mock.invocationCallOrder[0]!);
     p.view.render(40);
     expect(hd.warm).toHaveBeenCalledTimes(1);
 

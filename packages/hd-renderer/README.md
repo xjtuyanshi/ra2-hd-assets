@@ -155,7 +155,8 @@ the presenting thread for 100 to 330 ms. Pages up to 2048 x 2048, flipped pages 
 WebGPU backend as that module reads it (the WebGL2 fallback) are uploaded whole by `initTexture`, as before. The
 uploader finishes the page it has begun and then takes a page that is waited for before one loaded ahead of its
 use (`LiveLibrary.preloadPage`), the smallest first: an indexed page that an object can already be drawn from does
-not queue behind HD pages decoded earlier. Out
+not queue behind HD pages decoded earlier. The decode gate (`PageGate`) gives its turns by the same answer: first
+come, first served among waited-for pages, pages loaded ahead only when none of those waits. Out
 of sight, `newArtPerFrame` bounds how many new voxel kinds and sprite layers a frame adds to the scene (their
 shaders are built in the frame that first draws them).
 
@@ -1261,6 +1262,8 @@ Use `?vlook=remaster&vproj=vehicles-hd` for [projected vehicle redraws](#project
   or house colours when the final layer takes over), keeps an object's last complete picture while a change of
   state waits for a page (`live/heldPicture.ts`), and loads what is announced before its object exists
   (`LiveView.prepare`: sidebar productions through the bridge, the objects the map cache lists, deploy targets).
+  The stand-in layers' shader graphs are built and compiled behind the loading screen from hidden, empty layers
+  (`LiveView.warmStandIns`), so the first stand-in of a match builds no shader and waits for no pipeline.
   `diagnostics()` counts `indexedSprites`, `heldPictures` and `incompletePictures`; see "A sprite the game shows is
   never missing" in `docs/remaster/HD_BRIDGE.md`.
 - A model **file** has no stand-in: a unit whose file is still being fetched draws nothing. The files are therefore
