@@ -19,8 +19,17 @@ export interface SmoothVoxelOptions {
   shadeRamp: number;
 }
 
+/**
+ * `supersample` is the lattice's samples per voxel edge: the mesh has supersample^2 quads per exposed voxel face.
+ * A voxel is 1.4 to 2 device pixels at the engine's size on a 2x display, so 2 already gives quads of a pixel or
+ * less; 3 gave four to nine triangles per pixel, which cost 2.25 times the vertices, memory (52 bytes each; 642 MB
+ * for the 37 part meshes of one battle scene) and build time, and under 4x MSAA shaded every unit pixel up to four
+ * times. Measured on the same battle frame (3120x2096, a hundred vehicles in view): 3 -> 2 takes 9 ms off a 36 ms
+ * scene pass and a third off the depth capture, with unit pixels differing only along silhouettes (mean absolute
+ * difference 0.13 of 255 over the frame). Review captures at higher zoom can ask for more (`vsmooth=supersample:3`).
+ */
 export const DEFAULT_SMOOTH_VOXEL: Readonly<SmoothVoxelOptions> = Object.freeze({
-  supersample: 3,
+  supersample: 2,
   shape: 'occupancy',
   smoothSigma: 0.55,
   imlsRadius: 1.1,

@@ -1216,6 +1216,9 @@ Geometry review parameters, captured before loading:
 ?vlook=remaster&vsmooth=supersample:3,shape:imls,imlsRadius:1.1,bandIn:0.3,bandOut:0.3,storedNormals:0.35,aoRays:48
 ```
 
+`supersample` defaults to 2: quads of half a voxel, about one device pixel at the engine's size on a 2x display.
+3 costs 2.25 times the triangles, vertex memory and build time and shows only in captures at higher zoom.
+
 Other geometry defaults: `smoothSigma:0.55`, `aoLength:10`, `groundOcclusion:true`, `shadeRadius:1.5`,
 `shadeThreshold:3`, `shadeRamp:16`. `shape:occupancy` selects
 Gaussian smoothing. Uniforms can be changed through `?vk=aoStrength:0.8,wear:0.5` or, without reloading,
