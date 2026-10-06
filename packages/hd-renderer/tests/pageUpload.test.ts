@@ -1,8 +1,16 @@
 import { LinearMipmapLinearFilter, NearestFilter, RedFormat, SRGBColorSpace, Texture } from 'three/webgpu';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadIndexedPage } from '../src/live/library';
-import { PageUploader, WHOLE_UPLOAD_PIXELS } from '../src/pageUpload';
-import { loadHdTexture } from '../src/ra2/cache';
+import {
+  PAGE_GATE_PIXELS,
+  PageGate,
+  PageUploader,
+  WHOLE_UPLOAD_PIXELS,
+  pngPixels,
+  type PageUpload,
+} from '../src/pageUpload';
+import { loadHdAtlas, loadHdTexture } from '../src/ra2/cache';
+import { loadSpriteMaterialAtlas } from '../src/ra2/spriteMaterials';
 
 interface Copy {
   source: unknown;
@@ -299,5 +307,188 @@ describe('page loaders wait for an upload that takes several frames', () => {
     uploader.dispose();
     await expect(loading).rejects.toThrow('disposed');
     expect(bitmaps[0]!.close).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** The first bytes of a PNG file of the given size (signature and IHDR). */
+function pngHeader(width: number, height: number): Blob {
+  const bytes = new Uint8Array(33);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, 0x89504e47);
+  view.setUint32(4, 0x0d0a1a0a);
+  view.setUint32(8, 13);
+  view.setUint32(12, 0x49484452);
+  view.setUint32(16, width);
+  view.setUint32(20, height);
+  return new Blob([bytes]);
+}
+
+describe('decoded pages are bounded', () => {
+  it('reads the pixel count of a PNG from its header', async () => {
+    expect(await pngPixels(pngHeader(8192, 8096))).toBe(8192 * 8096);
+    expect(await pngPixels(new Blob(['not a png, but long enough to hold a header']))).toBe(0);
+    expect(await pngPixels(new Blob(['short']))).toBe(0);
+  });
+
+  it('holds two of the largest pages by default', () => {
+    expect(new PageGate().capacity).toBe(PAGE_GATE_PIXELS);
+    expect(PAGE_GATE_PIXELS).toBe(2 * 8192 * 8192);
+  });
+
+  it('runs tasks first come, first served while their pixels fit', async () => {
+    const gate = new PageGate(100);
+    const order: string[] = [];
+    const release: Record<string, () => void> = {};
+    const task = (name: string, pixels: number) =>
+      gate.run(pixels, async () => {
+        order.push(`start ${name}`);
+        await new Promise<void>((done) => (release[name] = done));
+        order.push(`end ${name}`);
+        return name;
+      });
+    const a = task('a', 60);
+    const b = task('b', 40);
+    const c = task('c', 30);
+    const d = task('d', 10);
+    await Promise.resolve();
+    // a and b fill the gate; c does not fit, and d (which would) must not overtake it.
+    expect(order).toEqual(['start a', 'start b']);
+    expect(gate.inFlight).toBe(100);
+    expect(gate.queued).toBe(2);
+    release.b!();
+    expect(await b).toBe('b');
+    await Promise.resolve();
+    expect(order).toEqual(['start a', 'start b', 'end b', 'start c', 'start d']);
+    expect(gate.inFlight).toBe(100);
+    release.a!();
+    release.c!();
+    release.d!();
+    expect(await Promise.all([a, c, d])).toEqual(['a', 'c', 'd']);
+    expect(gate.inFlight).toBe(0);
+    expect(gate.queued).toBe(0);
+  });
+
+  it('runs a page larger than the whole gate alone, and frees the gate when a task fails', async () => {
+    const gate = new PageGate(100);
+    const started: string[] = [];
+    let releaseHuge!: () => void;
+    const huge = gate.run(500, async () => {
+      started.push('huge');
+      await new Promise<void>((done) => (releaseHuge = done));
+    });
+    const small = gate.run(1, async () => {
+      started.push('small');
+      throw new Error('decode failed');
+    });
+    const last = gate.run(1, async () => void started.push('last'));
+    await Promise.resolve();
+    expect(started).toEqual(['huge']);
+    releaseHuge();
+    await huge;
+    await expect(small).rejects.toThrow('decode failed');
+    await last;
+    expect(started).toEqual(['huge', 'small', 'last']);
+    expect(gate.inFlight).toBe(0);
+  });
+
+  it('never lets a late arrival in ahead of a task that was just admitted', async () => {
+    const gate = new PageGate(100);
+    const running = new Set<string>();
+    let peak = 0;
+    const release: Record<string, () => void> = {};
+    const task = (name: string) =>
+      gate.run(60, async () => {
+        running.add(name);
+        peak = Math.max(peak, running.size);
+        await new Promise<void>((done) => (release[name] = done));
+        running.delete(name);
+      });
+    const a = task('a');
+    const b = task('b');
+    await Promise.resolve();
+    release.a!();
+    await a;
+    // b was admitted when a ended but has not run a statement yet: c arrives in that gap.
+    const c = task('c');
+    await vi.waitFor(() => expect(running.has('b')).toBe(true));
+    expect(running.has('c')).toBe(false);
+    release.b!();
+    await b;
+    await vi.waitFor(() => expect(running.has('c')).toBe(true));
+    release.c!();
+    await c;
+    expect(peak).toBe(1);
+  });
+
+  it('decodes a page only when the pages before it are on the GPU and released', async () => {
+    let live = 0;
+    let peak = 0;
+    const decoded: string[] = [];
+    let current = '';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        current = url;
+        return new Response(pngHeader(8, 8));
+      }),
+    );
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => {
+        live++;
+        peak = Math.max(peak, live);
+        decoded.push(current);
+        return { width: 8, height: 8, close: vi.fn(() => void live--) };
+      }),
+    );
+    const host = gpuHost();
+    const uploader = new PageUploader(host.renderer, 16);
+    // Room for one 8 x 8 page at a time.
+    const upload: PageUpload = Object.assign((page: Texture) => uploader.upload(page), { gate: new PageGate(64) });
+    const loads = [
+      loadHdTexture('/a.png', SRGBColorSpace, upload),
+      loadIndexedPage('/b.png', upload),
+      loadSpriteMaterialAtlas('/c.png', upload),
+      loadHdTexture('/d.png', SRGBColorSpace, upload),
+    ];
+    let settled = false;
+    const all = Promise.all(loads).finally(() => (settled = true));
+    // The view's frames: each steps the uploader, which is what lets the next page into the gate.
+    for (let frame = 0; frame < 200 && !settled; frame++) {
+      await new Promise((r) => setTimeout(r, 0));
+      uploader.step(32);
+    }
+    const pages = await all;
+    expect(pages.every(Boolean)).toBe(true);
+    expect(decoded).toHaveLength(4);
+    expect(peak).toBe(1);
+    expect(live).toBe(0);
+    expect(upload.gate!.inFlight).toBe(0);
+  });
+
+  it('keeps the house-paint mask of an HD atlas in one channel', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(pngHeader(8, 8))),
+    );
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 8, height: 8, close: vi.fn() })),
+    );
+    const host = gpuHost();
+    const uploader = new PageUploader(host.renderer, 16);
+    const loading = loadHdAtlas(
+      '/hd-cache/_library/urban',
+      { file: 'sprites-0@2x.png', remap: 'sprites-0@2x-remap.png' },
+      (page) => uploader.upload(page),
+    );
+    await vi.waitFor(() => expect(uploader.pending).toBe(2));
+    uploader.step(1024);
+    const atlas = await loading;
+    // The shader reads the mask's red channel only: R8 with mipmaps, a quarter of the RGBA page's GPU memory.
+    expect(atlas.remap.format).toBe(RedFormat);
+    expect(atlas.remap.minFilter).toBe(LinearMipmapLinearFilter);
+    expect(atlas.color.format).not.toBe(RedFormat);
+    expect(host.mipmaps).toEqual(expect.arrayContaining([atlas.color, atlas.remap]));
   });
 });

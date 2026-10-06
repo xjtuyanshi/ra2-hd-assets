@@ -80,7 +80,7 @@ import { LiveBeams } from './beams';
 import { CAPTURABLE_BUILDINGS, EXTRA_LIGHT, NORMALIZED_BUILDINGS, SMOKE_SYSTEMS } from './effectTable';
 import { BuildingLightGate, buildingLightOverlay, buildingLightSources } from './buildingLights';
 import { BuildingVisualHistory } from './buildingVisualHistory';
-import { PageUploader } from '../pageUpload';
+import { PageGate, PageUploader, type PageUpload } from '../pageUpload';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
 import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
 import { SmudgeInstanceCache, type LiveSmudgeCells, type SmudgePage } from './smudges';
@@ -707,6 +707,8 @@ export class LiveView {
   private waitingArt = 0;
   /** Copies decoded atlas pages to the GPU a strip per frame; stepped by render(). */
   private readonly pageUploads: PageUploader;
+  /** Bounds the decoded atlas pages waiting for their upload (library, effect and material pages alike). */
+  readonly pageGate = new PageGate();
   private readonly visuals = new Map<number, Visual>();
   private buildingVisualHistory?: BuildingVisualHistory;
   /** Building appearance by match-unique UID; tolerate brief omissions without retaining every dead object. */
@@ -857,7 +859,10 @@ export class LiveView {
     // Atlas pages go to the GPU as decoded bitmaps (no main-thread repack of their 16.7 M pixels), in strips over
     // the following frames (render() steps the uploader).
     this.pageUploads = new PageUploader(hd.renderer);
-    const upload = (texture: Texture) => this.pageUploads.upload(texture);
+    // Pages are decoded inside the gate: a match start asks for dozens of pages at once (see PageGate).
+    const upload: PageUpload = Object.assign((texture: Texture) => this.pageUploads.upload(texture), {
+      gate: this.pageGate,
+    });
     if (library) {
       library.uploadPage = upload;
       this.fetchAhead = () => library.preloadVoxels();
@@ -2313,7 +2318,7 @@ export class LiveView {
    */
   private flushSprites(batch: SpriteBatch, reorder = true): void {
     const map = batch.get('map') ?? EMPTY_SPRITES;
-    if (map.length || this.sprites.mesh.count) this.sprites.setInstances(map, reorder);
+    if (map.length || this.sprites.mesh.instances) this.sprites.setInstances(map, reorder);
     for (const key of batch.keys()) {
       const instances = batch.get(key)!;
       if (key === 'map' || !instances.length) continue;
@@ -2321,7 +2326,7 @@ export class LiveView {
     }
     for (const page of this.pageLayers.keys()) {
       const layer = this.pageLayers.get(page)!.layer;
-      if (!batch.get(page)?.length && layer.mesh.count) layer.setInstances(EMPTY_SPRITES);
+      if (!batch.get(page)?.length && layer.mesh.instances) layer.setInstances(EMPTY_SPRITES);
     }
   }
 
@@ -3192,7 +3197,7 @@ export class LiveView {
     const pages = this.smudgeInstances.instances.pages;
     for (const [page, layer] of this.smudgeLayers) {
       if (pages.has(page)) continue;
-      if (layer.mesh.count) layer.setInstances([]);
+      if (layer.mesh.instances) layer.setInstances([]);
       this.uploadedSmudges.delete(page);
     }
     for (const [page, instances] of pages) {
@@ -3273,7 +3278,7 @@ export class LiveView {
     const pages = this.overlayInstances.instances.pages;
     for (const [page, { layer }] of this.overlayLayers) {
       if (pages.has(page)) continue;
-      if (layer.mesh.count) layer.setInstances([]);
+      if (layer.mesh.instances) layer.setInstances([]);
       this.uploadedOverlays.delete(page);
     }
     for (const [page, instances] of pages) {

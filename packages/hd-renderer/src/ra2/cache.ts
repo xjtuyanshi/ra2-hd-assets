@@ -19,7 +19,7 @@ import { validateMapLights, type MapLightsSidecar } from '../../../ra2-assets/sr
 import { MAP_MATERIALS_FILE, type MapMaterials } from '../../../ra2-assets/src/mapMaterials';
 import { MapLightGrade, setPaletteGrade, setPaletteNodes } from './mapLighting';
 import { AtmosphereNodes } from '../atmosphere';
-import type { PageUpload } from '../pageUpload';
+import { withDecodedPage, type PageUpload } from '../pageUpload';
 import { buildCliffField, buildShoreField } from './shoreField';
 
 /** windows.json next to a lit-window mask (packages/ra2-assets src/node/lights.ts WindowsSidecar). */
@@ -245,42 +245,49 @@ export async function loadHdTexture(
   url: string,
   colorSpace: Texture['colorSpace'],
   upload?: PageUpload,
+  /** 'red': the page is a grey mask read through its red channel only (the house-paint mask). */
+  channels: 'rgba' | 'red' = 'rgba',
 ): Promise<Texture> {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
-  const bitmap = await createImageBitmap(await response.blob(), {
-    colorSpaceConversion: 'none',
-    premultiplyAlpha: 'none',
-  });
-  const { width, height } = bitmap;
-  const texture = new Texture(bitmap as unknown as HTMLImageElement);
-  texture.colorSpace = colorSpace;
-  texture.flipY = false;
-  texture.premultiplyAlpha = false;
-  texture.magFilter = LinearFilter;
-  texture.minFilter = LinearMipmapLinearFilter;
-  texture.generateMipmaps = true;
-  const release = () => {
-    bitmap.close();
-    texture.image = { width, height } as unknown as HTMLImageElement;
-    texture.onUpdate = null;
-    texture.removeEventListener('dispose', release);
-  };
-  texture.addEventListener('dispose', release);
-  // The renderer calls onUpdate after the upload and mipmap generation of a texture it draws or initialises.
-  texture.onUpdate = release;
-  texture.needsUpdate = true;
-  if (upload) {
-    try {
-      await upload(texture);
-    } catch (error) {
-      texture.dispose();
-      throw error;
+  // Decoded inside the upload's gate: the page exists decoded only from here until its upload is through.
+  return withDecodedPage(await response.blob(), upload, async (bitmap) => {
+    const { width, height } = bitmap;
+    const texture = new Texture(bitmap as unknown as HTMLImageElement);
+    texture.colorSpace = colorSpace;
+    texture.flipY = false;
+    texture.premultiplyAlpha = false;
+    texture.magFilter = LinearFilter;
+    texture.minFilter = LinearMipmapLinearFilter;
+    texture.generateMipmaps = true;
+    if (channels === 'red') {
+      // One channel of a grey page: a quarter of the GPU memory (the upload writes the red channel, as for indexed
+      // pages; see loadIndexedPage).
+      texture.format = RedFormat;
+      texture.type = UnsignedByteType;
     }
-    // A host whose upload does not report back (onUpdate) still must not keep the decoded page.
-    texture.onUpdate?.(texture);
-  }
-  return texture;
+    const release = () => {
+      bitmap.close();
+      texture.image = { width, height } as unknown as HTMLImageElement;
+      texture.onUpdate = null;
+      texture.removeEventListener('dispose', release);
+    };
+    texture.addEventListener('dispose', release);
+    // The renderer calls onUpdate after the upload and mipmap generation of a texture it draws or initialises.
+    texture.onUpdate = release;
+    texture.needsUpdate = true;
+    if (upload) {
+      try {
+        await upload(texture);
+      } catch (error) {
+        texture.dispose();
+        throw error;
+      }
+      // A host whose upload does not report back (onUpdate) still must not keep the decoded page.
+      texture.onUpdate?.(texture);
+    }
+    return texture;
+  });
 }
 
 /**
@@ -290,7 +297,7 @@ export async function loadHdTexture(
 export async function loadHdAtlas(base: string, ref: HdAtlasRef, upload?: PageUpload): Promise<HdAtlas> {
   const pages = await Promise.allSettled([
     loadHdTexture(`${base}/${ref.file}`, SRGBColorSpace, upload),
-    loadHdTexture(`${base}/${ref.remap}`, NoColorSpace, upload),
+    loadHdTexture(`${base}/${ref.remap}`, NoColorSpace, upload, 'red'),
   ]);
   const failed = pages.find((page) => page.status === 'rejected');
   if (failed) {
