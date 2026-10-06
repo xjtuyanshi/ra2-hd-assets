@@ -218,7 +218,7 @@ afterEach(() => {
  * A strip of sea (x 0..5) meeting a cliff-foot cell (x 6) with rock behind it, with whole-map art. `painted` selects
  * a mask that follows the painted waterline (water reaches into the cliff-foot cell) and the sidecar flag.
  */
-function terrain(style: WaterStyle, painted: boolean, theater?: string) {
+function terrain(style: WaterStyle, painted: boolean, theater?: string, waterBed = false) {
   waterPreset.style = style;
   const width = 10;
   const ref = { file: 'terrain.png', ...layout(width, 1) };
@@ -253,7 +253,7 @@ function terrain(style: WaterStyle, painted: boolean, theater?: string) {
       waterMask: textures.mask,
       shore: textures.shore,
       cliff: null,
-      waterBed: false,
+      waterBed,
       waterDetail: null,
       waterSurface: null,
       paintedWaterline: painted,
@@ -369,6 +369,14 @@ describe('hard shores in the terrain material', () => {
       expect(inputs).not.toHaveBeenCalled();
     },
   );
+
+  it('leaves the painted lake bed its own shoreline, even on a snow map', () => {
+    const bed = terrain('enhanced', false, 'snow', true);
+    expect(bed.inputs).not.toHaveBeenCalled();
+    bed.inputs.mockClear();
+    // The classic look has no bed optics: a snow lake map drawn with it has ice shores like any other snow map.
+    expect(terrain('classic', false, 'snow', true).inputs).toHaveBeenCalledTimes(1);
+  });
 
   it('leaves a map with the whole-cell mask exactly as it was: no attribute, no hard-shore inputs', () => {
     const { build, inputs, attributes } = terrain('enhanced', false);

@@ -834,17 +834,21 @@ function createMaterials(
       .max(cliffWater);
     // Hard shores (waterLook.ts HARD_SHORE): every shore of a theatre without sand; on a painted-waterline map the
     // shores its tiles mark (hardShore.ts: the height step is often more than a cell behind the painted foot of a
-    // cliff) joined with the cliff feet the height step does find. Other maps keep the look's beach everywhere.
-    const hard: ShaderNode | null = BEACHLESS_THEATERS.has(cache.manifest.theater ?? '')
-      ? float(1)
-      : map.paintedWaterline
-        ? max(attribute('hardShore', 'float'), nearCliff)
-        : null;
+    // cliff) joined with the cliff feet the height step does find. Other maps keep the look's beach everywhere, and
+    // so does the painted lake bed, whose shoreline (beach profile, cliff field, swash) is built on its own mask.
+    const lakeBed = map.waterBed && waterPreset.style === 'enhanced';
+    const hard: ShaderNode | null = lakeBed
+      ? null
+      : BEACHLESS_THEATERS.has(cache.manifest.theater ?? '')
+        ? float(1)
+        : map.paintedWaterline
+          ? max(attribute('hardShore', 'float'), nearCliff)
+          : null;
     const waterline = hard ? hardShoreInputs(deepened, hard, sheltered, waterness) : null;
     const shore: ShaderNode = waterline ? waterline.shore : deepened;
     weatherLand = float(1).sub(waterness);
     let reflection: { colour: ShaderNode; coverage: ShaderNode } | undefined;
-    if (map.waterBed && waterPreset.style === 'enhanced') {
+    if (lakeBed) {
       const levels = selectWaterMirrorLevels(waterLevels);
       if (levels.length && mirrors) {
         // One atlas for every level: a mirror of its own per level costs two sampled textures each, and four levels
@@ -885,7 +889,7 @@ function createMaterials(
       reflectionTarget = mirror.target;
     }
     const calm: ShaderNode = waterline ? waterline.calm : sheltered;
-    if (map.waterBed && waterPreset.style === 'enhanced') {
+    if (lakeBed) {
       // No inland band replacement: the mask includes the old shallows and the composite already paints real sand.
       const bedAt = (offsetXZ: ShaderNode): ShaderNode => {
         // World xz -> original engine screen pixels -> composite UV; height does not change under refraction.
