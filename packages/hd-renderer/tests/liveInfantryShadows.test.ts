@@ -1,19 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { Texture, Vector3 } from 'three/webgpu';
+import { DataTexture, Mesh, OrthographicCamera, Scene, Texture, Vector3, WebGPURenderer } from 'three/webgpu';
 import { LiveView, type LiveObject } from '../src/live/liveView';
 import { SpritePool } from '../src/live/spritePool';
 import {
   INFANTRY_SHADOW_OPACITY,
   INFANTRY_SHADOW_RAMP,
+  INFANTRY_SHADOW_SOFT_OPACITY,
   GROUND_PULL,
   infantryShadowAlpha,
+  shadowDisplayRatio,
   SpriteLayer,
   type SpriteInstance,
 } from '../src/ra2/sprites';
 import type { Ra2Cache } from '../src/ra2/cache';
 import type { DirtyAttribute } from '../src/dirtyAttribute';
-import { applyLookPreset, type HdSettings } from '../src/HdRenderer';
+import { applyLookPreset, LOOK_PRESETS, type HdSettings } from '../src/HdRenderer';
+import { AtmosphereNodes } from '../src/atmosphere';
 import { CARD_CLEARANCE } from '../src/ra2/cardDepth';
+import { spriteLookFor } from '../src/ra2/spriteLook';
+import { CONTACT_SHADOW_OPACITY, ENGINE_SHADOW_OPACITY } from '../src/ra2/voxelShadow';
 
 const body = {
   rect: [0, 0, 10, 20] as [number, number, number, number],
@@ -92,6 +97,9 @@ describe('live infantry footprint', () => {
     expect(settings.shadowSoftness).toBeGreaterThan(0);
     expect(settings.shadowLength).toBeGreaterThan(1);
     expect(INFANTRY_SHADOW_OPACITY).toBe(1);
+    expect(settings.infantryShadow).toBe(INFANTRY_SHADOW_SOFT_OPACITY);
+    applyLookPreset(settings, 'faithful');
+    expect(settings.infantryShadow).toBe(1);
     pool.begin();
     expect(pool.take(new Vector3(), shadow, 'library:unit', 0, true, true)).toBe(infantry);
     expect(infantry.infantryShadow).toBeUndefined();
@@ -129,6 +137,78 @@ describe('live infantry footprint', () => {
       }
       expect(ground * (1 - infantryShadowAlpha(0))).toBe(ground);
     }
+  });
+
+  it("keeps the original's solid footprint in the faithful looks and draws it as a shadow in the cinematic one", () => {
+    // Frozen same-frame pairs (snow and temperate): the original's footprint is black, 0.00 of the ground.
+    expect(INFANTRY_SHADOW_OPACITY).toBe(1);
+    expect(shadowDisplayRatio(infantryShadowAlpha(1))).toBe(0);
+    for (const preset of ['faithful', 'golden'] as const) expect(LOOK_PRESETS[preset].settings.infantryShadow).toBe(1);
+    // The cinematic look: half the displayed ground, the engine's shadow, exactly like a vehicle's contact shadow.
+    const soft = LOOK_PRESETS.cinematic.settings.infantryShadow;
+    expect(soft).toBe(INFANTRY_SHADOW_SOFT_OPACITY);
+    expect(soft).toBe(ENGINE_SHADOW_OPACITY);
+    expect(soft).toBe(CONTACT_SHADOW_OPACITY);
+    for (const coverage of [INFANTRY_SHADOW_RAMP.to, 0.5, 1]) {
+      const alpha = infantryShadowAlpha(coverage, soft);
+      expect(alpha).toBeCloseTo(soft, 12);
+      expect(shadowDisplayRatio(alpha)).toBeCloseTo(0.5, 12);
+      // Whatever the ground: snow, grass, sand or paving transmit the same share, never none.
+      for (const ground of [0.05, 0.5, 1, 4]) expect(ground * (1 - alpha)).toBeCloseTo(ground * 0.5 ** 2.2, 12);
+    }
+    // Shape and fringe are the footprint's own in both: only the core's opacity differs.
+    for (const coverage of [0, 0.02, 0.1, 0.2, 0.5, 1])
+      expect(infantryShadowAlpha(coverage, soft)).toBeCloseTo(infantryShadowAlpha(coverage) * soft, 12);
+  });
+
+  it('reads the footprint opacity in the sprite shader, from the look of the renderer that owns the sprites', () => {
+    const nodes = new AtmosphereNodes();
+    const look = spriteLookFor(nodes);
+    expect(look.infantryShadow.value).toBe(1);
+    const pool = new SpritePool();
+    const infantry = pool.take(new Vector3(), shadow, 'library:unit', 0, true, true);
+    infantry.infantryShadow = true;
+    const paletteAtlas = new DataTexture(new Uint8Array(256 * 4), 256, 1);
+    const layer = new SpriteLayer({ ...cache, nodes, paletteAtlas } as unknown as Ra2Cache, [infantry]);
+    // r186's own WGSL builder (no device): the uniforms the fragment shader binds are the ones its code reads.
+    const renderer = new WebGPURenderer({ canvas: { width: 1, height: 1 } as HTMLCanvasElement });
+    renderer.hasFeature = () => false;
+    renderer.hasCompatibility = () => false;
+    const backend = renderer.backend as unknown as {
+      createNodeBuilder(
+        mesh: Mesh,
+        renderer: WebGPURenderer,
+      ): {
+        camera: OrthographicCamera;
+        scene: Scene;
+        build(): void;
+        fragmentShader: string;
+        getBindings(): { bindings: { uniforms?: { nodeUniform?: { node: unknown } }[] }[] }[];
+      };
+    };
+    const builder = backend.createNodeBuilder(new Mesh(layer.mesh.geometry, layer.mesh.material), renderer);
+    builder.camera = new OrthographicCamera(-1, 1, 1, -1, 0.1, 400);
+    builder.scene = new Scene();
+    builder.build();
+    const read = builder
+      .getBindings()
+      .flatMap((group) => group.bindings)
+      .flatMap((binding) => (binding.uniforms ?? []).map((uniform) => uniform.nodeUniform?.node));
+    expect(read).toContain(look.infantryShadow);
+    expect(builder.fragmentShader).toContain('spriteInfantryShadowAlpha');
+    // Another renderer's look is another uniform: its setting does not reach these sprites.
+    const other = new AtmosphereNodes();
+    expect(read).not.toContain(spriteLookFor(other).infantryShadow);
+    other.dispose();
+    layer.mesh.geometry.dispose();
+    layer.mesh.material.dispose();
+    layer.mesh.dispose();
+    for (const mesh of layer.groundPasses) {
+      mesh.material.dispose();
+      mesh.dispose();
+    }
+    paletteAtlas.dispose();
+    nodes.dispose();
   });
 
   it('places the solid core ahead of ordinary shadows but behind reflections and upright feet', () => {
