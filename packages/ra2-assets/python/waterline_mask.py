@@ -9,7 +9,9 @@ pixels short of the rock, and the renderer draws its own shoreline along that st
 How: the original 1x composite (terrain-map.png) is paletted art, so the open water is a small set of exact colours.
 Those colours are taken from the interior of the existing mask (every colour holding at least COLOUR_SHARE of it);
 pixels of those colours that are 4-connected to the existing water and within REACH original pixels of it are painted
-water too. Single-pixel dither is settled with a 3 x 3 majority, enclosed specks of at most SPECK pixels are filled,
+water too. Some theatres reuse a few water colours on land (urban asphalt shares a fifth of the water's pixels'
+colours): a colour that is also common on land far from any water only counts where the colours water does NOT
+share with land are dense around it (DISTINCT, TEXTURE), so a road that ends at a quay is not flooded. Single-pixel dither is settled with a 3 x 3 majority, enclosed specks of at most SPECK pixels are filled,
 and the result is unioned with the existing mask, blurred by EDGE_SIGMA original pixels and resampled to the
 resolution of the map's HD terrain. Only pixels within a few original pixels of added water change; every other mask
 byte is the existing mask's (beaches keep their shoreline exactly).
@@ -54,6 +56,12 @@ Image.MAX_IMAGE_PIXELS = None
 
 #: A palette colour is an open-water colour when it holds at least this share of the existing mask's interior.
 COLOUR_SHARE = 0.002
+#: A water colour is the water's own when its share of the land farther than REACH from any water is at most this
+#: fraction of its share of the water's interior; other water colours are shared with land art.
+DISTINCT = 0.02
+#: A pixel in a shared colour is water only where at least this share of the 5 x 5 pixels around it have colours of
+#: the water's own (inside the water's dither, not on asphalt or rock of the same colour).
+TEXTURE = 0.3
 #: The interior is the fully marked mask eroded by this many original pixels (keeps soft and bled edges out).
 CORE_ERODE = 4
 #: Fewer interior pixels than this is not a body of water to learn colours from.
@@ -77,14 +85,31 @@ WATERLINE = "painted"
 RECEIPT = ".waterline.json"
 
 
-def water_colours(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Packed 0xRRGGBB colours of open water: those holding COLOUR_SHARE of the mask's interior (may be empty)."""
+def water_colours(rgb: np.ndarray, mask: np.ndarray, opaque: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Packed 0xRRGGBB colours of open water: (the water's own, those shared with land far from water).
+
+    Both hold COLOUR_SHARE of the mask's interior; either may be empty. Without `opaque` (or without any land beyond
+    REACH) every colour is the water's own.
+    """
+    none = np.zeros(0, np.int32)
     core = cv2.erode((mask == 255).astype(np.uint8), np.ones((2 * CORE_ERODE + 1,) * 2, np.uint8)) > 0
     total = int(core.sum())
     if total < MIN_CORE:
-        return np.zeros(0, np.int32)
-    values, counts = np.unique(pack(rgb)[core], return_counts=True)
-    return values[counts >= COLOUR_SHARE * total]
+        return none, none
+    keys = pack(rgb)
+    values, counts = np.unique(keys[core], return_counts=True)
+    keep = counts >= COLOUR_SHARE * total
+    values, shares = values[keep], counts[keep] / total
+    if opaque is None:
+        return values, none
+    far = opaque & (cv2.distanceTransform((mask < 128).astype(np.uint8), cv2.DIST_L2, 5) > REACH)
+    land = int(far.sum())
+    if not land:
+        return values, none
+    far_values, far_counts = np.unique(keys[far], return_counts=True)
+    on_land = dict(zip(far_values.tolist(), (far_counts / land).tolist()))
+    own = np.array([on_land.get(int(v), 0.0) <= DISTINCT * share for v, share in zip(values, shares)], bool)
+    return values[own], values[~own]
 
 
 def pack(rgb: np.ndarray) -> np.ndarray:
@@ -101,12 +126,20 @@ def painted_water(rgb: np.ndarray, opaque: np.ndarray, mask: np.ndarray) -> tupl
     if rgb.shape[:2] != mask.shape or opaque.shape != mask.shape:
         raise ValueError("composite, alpha and water mask must have the same size")
     seeds = mask >= 128
-    colours = water_colours(rgb, mask)
-    if not len(colours):
+    own, shared = water_colours(rgb, mask, opaque)
+    colours = np.concatenate([own, shared])
+    if not len(own):
         return np.zeros(mask.shape, bool), colours
     distance = cv2.distanceTransform((~seeds).astype(np.uint8), cv2.DIST_L2, 5)
     near = distance <= REACH
-    candidate = np.isin(pack(rgb), colours) & opaque & near & ~seeds
+    keys = pack(rgb)
+    is_own = np.isin(keys, own) & opaque
+    candidate = is_own
+    if len(shared):
+        # Shared colours count inside the water's own texture only (the existing water vouches for its pixels).
+        texture = cv2.blur((is_own | seeds).astype(np.float32), (5, 5), borderType=cv2.BORDER_REPLICATE) >= TEXTURE
+        candidate = is_own | (np.isin(keys, shared) & opaque & texture)
+    candidate = candidate & near & ~seeds
     # Settle single-pixel dither first: a pixel joins (or leaves) when most of its 3 x 3 neighbourhood is water.
     water = (candidate | seeds).astype(np.uint8)
     votes = cv2.boxFilter(water, cv2.CV_16S, (3, 3), normalize=False, borderType=cv2.BORDER_REPLICATE)

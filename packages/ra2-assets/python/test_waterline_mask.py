@@ -20,10 +20,10 @@ SAND = (214, 192, 146)
 FOAM = (120, 150, 180)  # The pale band the art paints between water and rock: not a water colour.
 
 
-def scene(width=240, height=160):
+def scene(width=240, height=160, base=60):
     """A paletted composite: sea below a wavy painted waterline, rock above it. Returns (rgba, waterline y per x)."""
     rng = np.random.default_rng(7)
-    line = (60 + 12 * np.sin(np.arange(width) / 17.0) + 5 * np.sin(np.arange(width) / 5.0)).round().astype(int)
+    line = (base + 12 * np.sin(np.arange(width) / 17.0) + 5 * np.sin(np.arange(width) / 5.0)).round().astype(int)
     rgb = np.zeros((height, width, 3), np.uint8)
     water = np.arange(height)[:, None] >= line[None, :]
     palette = np.array(WATER, np.uint8)
@@ -52,6 +52,8 @@ class PaintedWaterTests(unittest.TestCase):
         mask = cell_mask(line, rgba.shape[0])
         added, colours = wm.painted_water(rgba[..., :3], rgba[..., 3] >= 128, mask)
         self.assertEqual(sorted(colours.tolist()), sorted((r << 16) | (g << 8) | b for r, g, b in WATER))
+        own, shared = wm.water_colours(rgba[..., :3], mask, rgba[..., 3] >= 128)
+        self.assertEqual((len(own), len(shared)), (3, 0))
         grown = (mask >= 128) | added
         # Top of the water in each column against the painted line: the staircase was up to 19 px short of it.
         before = np.array([np.argmax(mask[:, x] >= 128) for x in range(mask.shape[1])]) - line
@@ -80,6 +82,28 @@ class PaintedWaterTests(unittest.TestCase):
         self.assertFalse(added[:40].any())
         self.assertTrue(added.any())
 
+    def test_does_not_flood_land_that_shares_a_water_colour(self):
+        # Urban asphalt reuses a water colour: a road ending at a quay must stay dry, the water under the quay must not.
+        rgba, line = scene(width=420, height=420, base=260)
+        height, width = rgba.shape[:2]
+        rng = np.random.default_rng(3)
+        asphalt = np.array([WATER[0], (70, 70, 76)], np.uint8)       # Half of its pixels have a water colour.
+        road = np.zeros((height, width), bool)
+        road[:, 190:230] = np.arange(height)[:, None] < line[None, 190:230] - 2   # Down to the pale band at the water.
+        road[:60, :] |= True                                                      # ... and far inland (beyond REACH).
+        mask = cell_mask(line, height)
+        # The far band lies beyond REACH of any water: there the colour is known to be land's too.
+        self.assertGreater(int(line.min()), wm.REACH + 60)
+        rgba[road, :3] = asphalt[rng.integers(0, 2, int(road.sum()))]
+        own, shared = wm.water_colours(rgba[..., :3], mask, rgba[..., 3] >= 128)
+        self.assertEqual(shared.tolist(), [(WATER[0][0] << 16) | (WATER[0][1] << 8) | WATER[0][2]])
+        self.assertEqual(len(own), 2)
+        added, _ = wm.painted_water(rgba[..., :3], rgba[..., 3] >= 128, mask)
+        self.assertFalse((added & road).any())
+        grown = (mask >= 128) | added
+        after = np.array([np.argmax(grown[:, x]) for x in range(width)]) - line
+        self.assertLessEqual(np.abs(after[2:-2]).max(), 1)
+
     def test_does_not_climb_thin_water_coloured_lines_or_keep_specks(self):
         rgba, line = scene()
         mask = cell_mask(line, rgba.shape[0])
@@ -91,19 +115,35 @@ class PaintedWaterTests(unittest.TestCase):
         self.assertTrue(((mask >= 128) | added)[line[x] + 9, x + 20])
 
     def test_stops_at_the_reach_and_needs_a_body_of_water(self):
-        rgba, _ = scene()
-        rgba[..., :3] = np.array(WATER, np.uint8)[np.random.default_rng(1).integers(0, 3, rgba.shape[:2])]
-        mask = np.zeros(rgba.shape[:2], np.uint8)
-        mask[:, :40] = 255
-        added, _ = wm.painted_water(rgba[..., :3], rgba[..., 3] >= 128, mask)
+        # A long narrow channel of water colours leaves the masked sea: it is followed for REACH pixels, no further.
+        rng = np.random.default_rng(1)
+        height, width = 300, 420
+        rgb = np.array(ROCK, np.uint8)[rng.integers(0, 3, (height, width))]
+        sea = np.zeros((height, width), bool)
+        sea[:, :40] = True
+        channel = np.zeros((height, width), bool)
+        channel[146:154, 40:330] = True
+        water = np.array(WATER, np.uint8)
+        rgb[sea | channel] = water[rng.integers(0, 3, int((sea | channel).sum()))]
+        opaque = np.ones((height, width), bool)
+        mask = np.where(sea, 255, 0).astype(np.uint8)
+        added, _ = wm.painted_water(rgb, opaque, mask)
+        # (The 3 x 3 majority rounds the two inner corners where the channel leaves the sea by one pixel.)
+        self.assertFalse((added & ~(cv2.dilate(channel.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)).any())
+        self.assertLessEqual(int((added & ~channel).sum()), 2)
         columns = np.flatnonzero(added.any(axis=0))
         self.assertEqual(columns.min(), 40)
         self.assertLessEqual(columns.max(), 40 + wm.REACH)
         self.assertGreater(columns.max(), 40 + wm.REACH - 3)
+        # A puddle is not a body of water to learn colours from.
         tiny = np.zeros_like(mask)
         tiny[:8, :8] = 255
-        added, colours = wm.painted_water(rgba[..., :3], rgba[..., 3] >= 128, tiny)
+        added, colours = wm.painted_water(rgb, opaque, tiny)
         self.assertEqual(len(colours), 0)
+        self.assertFalse(added.any())
+        # Water colours that cover the land far from the water as well are no evidence of water: nothing is added.
+        everywhere = water[rng.integers(0, 3, (height, width))]
+        added, _ = wm.painted_water(everywhere, opaque, mask)
         self.assertFalse(added.any())
 
     def test_composed_mask_is_soft_at_the_new_edge_and_identical_away_from_it(self):

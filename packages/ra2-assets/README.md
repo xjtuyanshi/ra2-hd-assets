@@ -660,7 +660,9 @@ the shore families; water painted inside any other tile is missing, so under a c
 of cell diamonds (on the stock snow map XMP26S6: median 8, at most 31 original pixels short of the rock; on urban
 quays up to 60). The original 1x composite `terrain-map.png` is paletted art, so open water is a small set of exact
 colours: the tool takes every colour holding at least 0.2 % of the existing mask's interior, adds the pixels of
-those colours that are 4-connected to the existing water within 96 original pixels, settles single-pixel dither
+those colours that are 4-connected to the existing water within 96 original pixels (a water colour that is also
+common on land far from water, like urban asphalt, only counts inside the water's own dither, so a road ending at a
+quay is not flooded), settles single-pixel dither
 with a 3 x 3 majority, keeps only real gaps (more than 2.5 px from the old mask; the one-pixel rim along beaches is
 left alone, so beaches keep their mask byte for byte), and joins the result to the old mask with a 0.9 px soft
 edge at the HD terrain's resolution. It needs no game files, only the map directory.
