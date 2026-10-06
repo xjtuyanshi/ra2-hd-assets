@@ -90,10 +90,10 @@ class PaintedWaterTests(unittest.TestCase):
         asphalt = np.array([WATER[0], (70, 70, 76)], np.uint8)       # Half of its pixels have a water colour.
         road = np.zeros((height, width), bool)
         road[:, 190:230] = np.arange(height)[:, None] < line[None, 190:230] - 2   # Down to the pale band at the water.
-        road[:60, :] |= True                                                      # ... and far inland (beyond REACH).
+        road[:60, :] |= True                                                      # ... and far inland (beyond FAR).
         mask = cell_mask(line, height)
-        # The far band lies beyond REACH of any water: there the colour is known to be land's too.
-        self.assertGreater(int(line.min()), wm.REACH + 60)
+        # The far band lies beyond FAR of any water: there the colour is known to be land's too.
+        self.assertGreater(int(line.min()), wm.FAR + 60)
         rgba[road, :3] = asphalt[rng.integers(0, 2, int(road.sum()))]
         own, shared = wm.water_colours(rgba[..., :3], mask, rgba[..., 3] >= 128)
         self.assertEqual(shared.tolist(), [(WATER[0][0] << 16) | (WATER[0][1] << 8) | WATER[0][2]])
@@ -117,12 +117,12 @@ class PaintedWaterTests(unittest.TestCase):
     def test_stops_at_the_reach_and_needs_a_body_of_water(self):
         # A long narrow channel of water colours leaves the masked sea: it is followed for REACH pixels, no further.
         rng = np.random.default_rng(1)
-        height, width = 300, 420
+        height, width = 600, 420   # Enough land that the channel's far end is a sliver of it (see DISTINCT).
         rgb = np.array(ROCK, np.uint8)[rng.integers(0, 3, (height, width))]
         sea = np.zeros((height, width), bool)
         sea[:, :40] = True
         channel = np.zeros((height, width), bool)
-        channel[146:154, 40:330] = True
+        channel[296:304, 40:400] = True
         water = np.array(WATER, np.uint8)
         rgb[sea | channel] = water[rng.integers(0, 3, int((sea | channel).sum()))]
         opaque = np.ones((height, width), bool)

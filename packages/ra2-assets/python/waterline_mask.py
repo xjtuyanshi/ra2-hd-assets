@@ -59,7 +59,7 @@ Image.MAX_IMAGE_PIXELS = None
 
 #: A palette colour is an open-water colour when it holds at least this share of the existing mask's interior.
 COLOUR_SHARE = 0.002
-#: A water colour is the water's own when its share of the land farther than REACH from any water is at most this
+#: A water colour is the water's own when its share of the land farther than FAR from any water is at most this
 #: fraction of its share of the water's interior; other water colours are shared with land art.
 DISTINCT = 0.02
 #: A pixel in a shared colour is water only where at least this share of the 5 x 5 pixels around it have colours of
@@ -69,8 +69,13 @@ TEXTURE = 0.3
 CORE_ERODE = 4
 #: Fewer interior pixels than this is not a body of water to learn colours from.
 MIN_CORE = 400
-#: Painted water is followed at most this far (original pixels) from the existing mask: about three cells.
-REACH = 96
+#: Painted water is followed at most this far (original pixels) from the existing mask: about six cells. On the stock
+#: maps the farthest painted water is 96 px from the mask (a quay pocket of Manhatta); a limit below that left the
+#: pocket's end out, with an arc for a waterline.
+REACH = 192
+#: Land farther than this (original pixels) from the existing mask is certainly not water: its colours tell the
+#: water's own colours from those shared with land (DISTINCT).
+FAR = 96
 #: Enclosed non-water specks of at most this many original pixels inside added water become water (sparkle pixels).
 SPECK = 6
 #: Added water must lie farther than this (original pixels) from the existing mask somewhere nearby: the rim of one or
@@ -92,7 +97,7 @@ def water_colours(rgb: np.ndarray, mask: np.ndarray, opaque: np.ndarray | None =
     """Packed 0xRRGGBB colours of open water: (the water's own, those shared with land far from water).
 
     Both hold COLOUR_SHARE of the mask's interior; either may be empty. Without `opaque` (or without any land beyond
-    REACH) every colour is the water's own.
+    FAR) every colour is the water's own.
     """
     none = np.zeros(0, np.int32)
     core = cv2.erode((mask == 255).astype(np.uint8), np.ones((2 * CORE_ERODE + 1,) * 2, np.uint8)) > 0
@@ -105,7 +110,7 @@ def water_colours(rgb: np.ndarray, mask: np.ndarray, opaque: np.ndarray | None =
     values, shares = values[keep], counts[keep] / total
     if opaque is None:
         return values, none
-    far = opaque & (cv2.distanceTransform((mask < 128).astype(np.uint8), cv2.DIST_L2, 5) > REACH)
+    far = opaque & (cv2.distanceTransform((mask < 128).astype(np.uint8), cv2.DIST_L2, 5) > FAR)
     land = int(far.sum())
     if not land:
         return values, none
