@@ -1043,7 +1043,7 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   shading is dropped on the land within 1.5 cells of the water (`HARD_SHORE_CONTACT`; ground triangles were shaded,
   wall quads not, which showed the cells as dark facets on the rock). Every shore of a snow map is a hard one
   (`BEACHLESS_THEATERS` in `ra2/terrain.ts`): its shore tiles are ice, and the sand beach drew an orange line and a
-  turquoise glow around every floe. Beaches of the other theatres, open water and the lake-bed path are unchanged.
+  turquoise glow around every floe. The look on beaches of the other theatres, on open water and on the lake-bed path is unchanged.
   Optional `materials.json.waterDetail` supplies sRGB
   apparent water colour and alpha roughness/glitter weight over the composite's area (same aspect, any resolution).
   It shares the mask's top-down UVs and uses linear/mipmap filtering with clamped edges; load failures warn and leave it unused.

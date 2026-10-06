@@ -663,9 +663,10 @@ colours: the tool takes every colour holding at least 0.2 % of the existing mask
 those colours that are 4-connected to the existing water within 96 original pixels (a water colour that is also
 common on land far from water, like urban asphalt, only counts inside the water's own dither, so a road ending at a
 quay is not flooded), settles single-pixel dither
-with a 3 x 3 majority, keeps only real gaps (more than 2.5 px from the old mask; the one-pixel rim along beaches is
-left alone, so beaches keep their mask byte for byte), and joins the result to the old mask with a 0.9 px soft
-edge at the HD terrain's resolution. It needs no game files, only the map directory.
+with a 3 x 3 majority, keeps only real gaps (water more than 2.5 px from the old mask, and the added water within
+8 px of it: the one-pixel rim along a well-masked beach is left alone, while holes of the extractor's colour test
+on shore tiles are filled), and joins the result to the old mask with a 0.9 px soft edge at the HD terrain's
+resolution; mask bytes farther than 4 px from added water are unchanged. It needs no game files, only the map directory.
 
 ```sh
 FARM="$PWD/gameres/hd-cache-next"   # a copy-on-write farm you own; nothing is written through a link

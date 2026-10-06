@@ -11,10 +11,13 @@ Those colours are taken from the interior of the existing mask (every colour hol
 pixels of those colours that are 4-connected to the existing water and within REACH original pixels of it are painted
 water too. Some theatres reuse a few water colours on land (urban asphalt shares a fifth of the water's pixels'
 colours): a colour that is also common on land far from any water only counts where the colours water does NOT
-share with land are dense around it (DISTINCT, TEXTURE), so a road that ends at a quay is not flooded. Single-pixel dither is settled with a 3 x 3 majority, enclosed specks of at most SPECK pixels are filled,
-and the result is unioned with the existing mask, blurred by EDGE_SIGMA original pixels and resampled to the
-resolution of the map's HD terrain. Only pixels within a few original pixels of added water change; every other mask
-byte is the existing mask's (beaches keep their shoreline exactly).
+share with land are dense around it (DISTINCT, TEXTURE), so a road that ends at a quay is not flooded.
+Single-pixel dither is settled with a 3 x 3 majority, enclosed specks of at most SPECK pixels are filled, and the
+result is unioned with the existing mask, blurred by EDGE_SIGMA original pixels and resampled to the resolution of
+the map's HD terrain. Only real gaps are filled (water farther than GAP from the existing mask, and the added water
+within GAP_REACH of it): a beach whose mask is within GAP of the painted water keeps it exactly, and where the
+extractor's colour test left holes or stopped short of the painted water the beach follows it too. Mask bytes
+farther than TOUCH original pixels from added water are the existing mask's.
 
 The new mask is published next to the old one as `<old stem>-wl.png` and selected through materials.json
 (`waterMask`, plus `waterline: "painted"`, which tells the renderer that the mask needs no cliff-foot extension).
