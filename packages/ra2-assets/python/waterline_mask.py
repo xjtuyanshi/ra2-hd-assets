@@ -62,9 +62,12 @@ COLOUR_SHARE = 0.002
 #: A water colour is the water's own when its share of the land farther than FAR from any water is at most this
 #: fraction of its share of the water's interior; other water colours are shared with land art.
 DISTINCT = 0.02
-#: A pixel in a shared colour is water only where at least this share of the 5 x 5 pixels around it have colours of
-#: the water's own (inside the water's dither, not on asphalt or rock of the same colour).
-TEXTURE = 0.3
+#: A pixel in a shared colour is water only where at least this share of the TEXTURE_WINDOW x TEXTURE_WINDOW pixels
+#: around it have colours of the water's own (inside the water's dither, not on asphalt or rock of the same colour).
+#: Asphalt has none of them; the water under a quay wall, where the art dithers towards the shared dark tones, still
+#: has this many (at 0.3 over 5 x 5 px a rim of 2 to 6 px of painted water stayed out along urban quay walls).
+TEXTURE = 0.15
+TEXTURE_WINDOW = 9
 #: The interior is the fully marked mask eroded by this many original pixels (keeps soft and bled edges out).
 CORE_ERODE = 4
 #: Fewer interior pixels than this is not a body of water to learn colours from.
@@ -145,7 +148,8 @@ def painted_water(rgb: np.ndarray, opaque: np.ndarray, mask: np.ndarray) -> tupl
     candidate = is_own
     if len(shared):
         # Shared colours count inside the water's own texture only (the existing water vouches for its pixels).
-        texture = cv2.blur((is_own | seeds).astype(np.float32), (5, 5), borderType=cv2.BORDER_REPLICATE) >= TEXTURE
+        window = (TEXTURE_WINDOW, TEXTURE_WINDOW)
+        texture = cv2.blur((is_own | seeds).astype(np.float32), window, borderType=cv2.BORDER_REPLICATE) >= TEXTURE
         candidate = is_own | (np.isin(keys, shared) & opaque & texture)
     candidate = candidate & near & ~seeds
     # Settle single-pixel dither first: a pixel joins (or leaves) when most of its 3 x 3 neighbourhood is water.

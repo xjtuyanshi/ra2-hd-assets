@@ -661,8 +661,8 @@ of cell diamonds (on the stock snow map XMP26S6: median 8, at most 31 original p
 quays up to 60). The original 1x composite `terrain-map.png` is paletted art, so open water is a small set of exact
 colours: the tool takes every colour holding at least 0.2 % of the existing mask's interior, adds the pixels of
 those colours that are 4-connected to the existing water within 192 original pixels (a water colour that is also
-common on land more than 96 px from any water, like urban asphalt, only counts inside the water's own dither, so a
-road ending at a quay is not flooded), settles single-pixel dither
+common on land more than 96 px from any water, like urban asphalt, only counts where at least 15 % of the 9 x 9
+pixels around it have colours of the water's own, so a road ending at a quay is not flooded), settles single-pixel dither
 with a 3 x 3 majority, keeps only real gaps (water more than 2.5 px from the old mask, and the added water within
 8 px of it: the one-pixel rim along a well-masked beach is left alone, while holes of the extractor's colour test
 on shore tiles are filled), and joins the result to the old mask with a 0.9 px soft edge at the HD terrain's

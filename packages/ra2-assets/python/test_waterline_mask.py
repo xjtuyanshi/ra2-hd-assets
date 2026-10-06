@@ -102,7 +102,11 @@ class PaintedWaterTests(unittest.TestCase):
         self.assertFalse((added & road).any())
         grown = (mask >= 128) | added
         after = np.array([np.argmax(grown[:, x]) for x in range(width)]) - line
-        self.assertLessEqual(np.abs(after[2:-2]).max(), 1)
+        beside = np.ones(width, bool)
+        beside[185:235] = False
+        self.assertLessEqual(np.abs(after[beside][2:-2]).max(), 1)
+        # Where the road meets the water the two-pixel pale band between them may join the water, nothing more.
+        self.assertLessEqual(np.abs(after[185:235]).max(), 2)
 
     def test_does_not_climb_thin_water_coloured_lines_or_keep_specks(self):
         rgba, line = scene()
