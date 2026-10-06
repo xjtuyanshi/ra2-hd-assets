@@ -1,13 +1,17 @@
 import {
   ClampToEdgeWrapping,
+  DataTexture,
+  FloatType,
   LinearFilter,
   LinearMipmapLinearFilter,
+  NearestFilter,
   NoColorSpace,
+  RGBAFormat,
   Texture,
   Vector2,
-  Vector4,
+  Vector3,
 } from 'three/webgpu';
-import { uniform, uniformArray } from 'three/tsl';
+import { uniform } from 'three/tsl';
 import { DEFAULT_ATMOSPHERE_NODES, type AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import {
@@ -18,13 +22,34 @@ import {
   type VoxelProjectionManifest,
 } from './voxelProjectionMath';
 
+/**
+ * One part's redraw atlas with everything the shader needs to read it. Nothing of a part is written into the shader
+ * text: its numbers are uniforms and its frame table is a texture, so every part's material generates the same
+ * shader code and the GPU compiles one pipeline for all of them (the Jacobian and the atlas size as literals gave
+ * each of the 92 library types a shader module and a render pipeline of its own, compiled when its first unit was
+ * drawn, per pass).
+ */
 export interface VoxelProjectionPart {
   manifest: VoxelProjectionManifest;
   spec: ProjectionPartManifest;
   colour: Texture;
   paint: Texture;
-  pivots: ShaderNode;
-  rects: ShaderNode;
+  /**
+   * Frame table, read with texel loads: column k is bake frame k, row 0 its pivot (x, y), row 1 its rect (x, y,
+   * width, height), in atlas pixels. PROJECTION_TABLE_FRAMES columns whatever the manifest's frame count.
+   */
+  frameTable: DataTexture;
+  /** Rows of the bake's screen Jacobian (atlas pixels per world unit). */
+  jacobianX: ShaderNode;
+  jacobianY: ShaderNode;
+  /** Atlas size in pixels. */
+  atlasSize: ShaderNode;
+  /** Page exposure (see VoxelProjectionManifest.exposure); 1 for pages stored without headroom. */
+  exposure: ShaderNode;
+  /** Bake frames per turn, facing units (of 256) between two frames, and the same step in radians. */
+  frameCount: ShaderNode;
+  facingStep: ShaderNode;
+  frameAngle: ShaderNode;
 }
 
 export interface VoxelProjectionAsset {
@@ -37,7 +62,27 @@ export function manifestPartsFor(type: string): ProjectionPartName[] {
   return type.endsWith(':turret') ? ['turret'] : ['body'];
 }
 
-/** Frame tables are uniforms, so only the two colour and two paint atlas reads cost texture samples. */
+/** Columns of a frame table: the largest frame count a manifest may have. */
+export const PROJECTION_TABLE_FRAMES = 32;
+
+/** The frame table of a part as float texels (see VoxelProjectionPart.frameTable). */
+export function projectionFrameTable(spec: ProjectionPartManifest): DataTexture {
+  const data = new Float32Array(PROJECTION_TABLE_FRAMES * 2 * 4);
+  spec.frames.forEach((frame, k) => {
+    if (k >= PROJECTION_TABLE_FRAMES) return;
+    data.set(frame.pivot, k * 4);
+    data.set(frame.rect, (PROJECTION_TABLE_FRAMES + k) * 4);
+  });
+  const table = new DataTexture(data, PROJECTION_TABLE_FRAMES, 2, RGBAFormat, FloatType);
+  table.colorSpace = NoColorSpace;
+  table.magFilter = table.minFilter = NearestFilter;
+  table.generateMipmaps = false;
+  table.flipY = false;
+  table.needsUpdate = true;
+  return table;
+}
+
+/** Frame tables are texel loads, so only the two colour and two paint atlas reads cost filtered texture samples. */
 export function createVoxelProjectionPart(
   manifest: VoxelProjectionManifest,
   name: ProjectionPartName,
@@ -51,14 +96,14 @@ export function createVoxelProjectionPart(
     spec,
     colour,
     paint,
-    pivots: uniformArray(
-      spec.frames.map((f) => new Vector2(...f.pivot)),
-      'vec2',
-    ),
-    rects: uniformArray(
-      spec.frames.map((f) => new Vector4(...f.rect)),
-      'vec4',
-    ),
+    frameTable: projectionFrameTable(spec),
+    jacobianX: uniform(new Vector3(...manifest.jacobian[0])),
+    jacobianY: uniform(new Vector3(...manifest.jacobian[1])),
+    atlasSize: uniform(new Vector2(...spec.size)),
+    exposure: uniform(manifest.exposure ?? 1),
+    frameCount: uniform(manifest.frames),
+    facingStep: uniform(manifest.facingStep),
+    frameAngle: uniform((manifest.facingStep * 2 * Math.PI) / 256),
   };
 }
 
@@ -239,6 +284,7 @@ export class VoxelProjectionLibrary {
         parts[name] = createVoxelProjectionPart(manifest, name, textures[i * 2]!, textures[i * 2 + 1]!);
       });
       for (const texture of textures) this.textures.add(texture);
+      for (const part of Object.values(parts)) this.textures.add(part.frameTable);
       const asset = { manifest, parts };
       this.loaded.set(type, asset);
       return asset;

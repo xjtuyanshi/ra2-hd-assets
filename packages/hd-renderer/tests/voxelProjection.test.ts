@@ -27,6 +27,7 @@ import {
 } from '../src/ra2/voxelProjectionMath';
 import {
   createVoxelProjectionPart,
+  PROJECTION_TABLE_FRAMES,
   manifestPartsFor,
   projectionParts,
   voxelProjectionFor,
@@ -327,41 +328,105 @@ describe('projected materials and shader compilation', () => {
     expect(material.depthNode).toBeTruthy();
     nodes.dispose();
   });
-  it('multiplies the colour page by the manifest exposure and adds nothing for pages without one', () => {
-    const fragment = (exposure?: number) => {
-      const nodes = new AtmosphereNodes();
-      const spec = { ...manifest(), ...(exposure === undefined ? {} : { exposure }) };
-      const texture = () => nodes.own(new DataTexture(new Uint8Array(320 * 32 * 4), 320, 32));
-      const body = createVoxelProjectionPart(spec, 'body', texture(), texture());
-      const material = voxelProjectedMaterialFor(new Uint8Array(768), body, nodes);
-      const parts = buildVoxelGeometry(model, null, nodes);
-      parts[0]!.material = material;
-      const unit = instantiateVoxel([parts[0]!], material);
-      const mesh = unit.root.children.find((o) => o instanceof Mesh && o.material === material) as Mesh;
-      const canvas = {
-        width: 64,
-        height: 64,
-        style: {},
-        addEventListener() {},
-        removeEventListener() {},
-        setAttribute() {},
-      };
-      const renderer = new WebGPURenderer({ canvas: canvas as unknown as HTMLCanvasElement, forceWebGL: true });
+  /** WebGPU (WGSL) or WebGL2 (GLSL) shaders of a projected body part and of its water reflection twin. */
+  const shaders = (spec: VoxelProjectionManifest, forceWebGL = false, turret = false) => {
+    const nodes = new AtmosphereNodes();
+    const size = spec.parts.body!.size;
+    const texture = () => nodes.own(new DataTexture(new Uint8Array(size[0] * size[1] * 4), size[0], size[1]));
+    const part = createVoxelProjectionPart(spec, turret ? 'turret' : 'body', texture(), texture());
+    const material = voxelProjectedMaterialFor(new Uint8Array(768), part, nodes);
+    const parts = buildVoxelGeometry(model, null, nodes);
+    parts[0]!.material = material;
+    const unit = instantiateVoxel([parts[0]!], material, nodes);
+    const mesh = unit.root.children.find((o) => o instanceof Mesh && o.material === material) as Mesh;
+    const twin = unit.root.children.find((o) => o instanceof Mesh && o.name === 'voxel-reflection') as Mesh;
+    const canvas = {
+      width: 64,
+      height: 64,
+      style: {},
+      addEventListener() {},
+      removeEventListener() {},
+      setAttribute() {},
+    };
+    const build = (object: Mesh) => {
+      const renderer = new WebGPURenderer({ canvas: canvas as unknown as HTMLCanvasElement, forceWebGL });
       vi.spyOn(renderer, 'hasFeature').mockReturnValue(false);
-      const builder = renderer.backend.createNodeBuilder(mesh, renderer);
+      const builder = renderer.backend.createNodeBuilder(object, renderer);
       builder.scene = new Scene();
       builder.camera = new PerspectiveCamera();
       builder.lightsNode = lights([new DirectionalLight(), new HemisphereLight()]);
       builder.build();
-      nodes.dispose();
-      return builder.fragmentShader as string;
+      return { vertex: builder.vertexShader as string, fragment: builder.fragmentShader as string };
     };
-    // 1.625 is exact in binary and appears nowhere else in the projected material.
-    expect(fragment()).not.toContain('1.625');
-    expect(fragment(1)).not.toContain('1.625');
-    const exposed = fragment(1.625);
-    expect(exposed).toContain('1.625');
-    expect(exposed).not.toMatch(/\b(?:NaN|undefined)\b/);
+    const out = { main: build(mesh), reflection: build(twin), part };
+    nodes.dispose();
+    return out;
+  };
+
+  it('keeps the page exposure in a uniform: 1 for pages stored without headroom', () => {
+    const exposed = shaders({ ...manifest(), exposure: 1.625 });
+    const plain = shaders(manifest());
+    expect((exposed.part.exposure as unknown as { value: number }).value).toBe(1.625);
+    expect((plain.part.exposure as unknown as { value: number }).value).toBe(1);
+    // 1.625 is exact in binary and appears nowhere else in the projected material: the number is not shader text.
+    expect(exposed.main.fragment).not.toContain('1.625');
+    expect(exposed.main.fragment).toBe(plain.main.fragment);
+    expect(exposed.main.fragment).not.toMatch(/\b(?:NaN|undefined)\b/);
+  });
+
+  it.each([false, true])('generates one shader for every part, whatever its numbers: WebGL=%s', (forceWebGL) => {
+    // The library's 92 types each have their own Jacobian and atlas size; half of them an exposure. As shader text
+    // those gave every type its own shader module and render pipeline, compiled when its first unit was drawn.
+    const a = manifest();
+    const part = (name: string, width: number, height: number) => ({
+      colour: `X_${name}.png`,
+      paint: `X_${name}_paint.png`,
+      size: [width, height] as [number, number],
+      frames: Array.from({ length: 16 }, (_, i) => ({
+        k: i * 2,
+        facing: i * 16,
+        pivot: [i * 50 + 17.25, 61.5] as [number, number],
+        rect: [i * 50 + 2, 3, 44, 97] as [number, number, number, number],
+      })),
+    });
+    const b: VoxelProjectionManifest = {
+      ...a,
+      type: 'AEGIS',
+      scale: 0.7709090909090909,
+      jacobian: [
+        [92.5090909090909, 0, -92.5090909090909],
+        [46.25454545454545, -113.30003112727272, 46.25454545454545],
+      ],
+      exposure: 1.6,
+      parts: { body: part('body', 832, 1090), turret: part('turret', 960, 1214) },
+    };
+    const first = shaders(a, forceWebGL);
+    const second = shaders(b, forceWebGL);
+    const turret = shaders(b, forceWebGL, true);
+    for (const pass of ['main', 'reflection'] as const) {
+      expect(second[pass].vertex).toBe(first[pass].vertex);
+      expect(second[pass].fragment).toBe(first[pass].fragment);
+      expect(turret[pass].fragment).toBe(first[pass].fragment);
+    }
+    // The numbers are where the shader reads them from.
+    const value = <T>(node: unknown) => (node as { value: T }).value;
+    expect(value<Vector3>(second.part.jacobianX).toArray()).toEqual([92.5090909090909, 0, -92.5090909090909]);
+    expect(value<{ x: number; y: number }>(second.part.atlasSize)).toMatchObject({ x: 832, y: 1090 });
+    expect(value<number>(second.part.frameCount)).toBe(16);
+    expect(value<number>(second.part.facingStep)).toBe(16);
+    expect(value<number>(second.part.frameAngle)).toBeCloseTo(Math.PI / 8, 12);
+    const table = second.part.frameTable.image as unknown as { data: Float32Array; width: number; height: number };
+    expect([table.width, table.height]).toEqual([PROJECTION_TABLE_FRAMES, 2]);
+    expect([...table.data.subarray(3 * 4, 3 * 4 + 2)]).toEqual([167.25, 61.5]);
+    expect([...table.data.subarray((PROJECTION_TABLE_FRAMES + 3) * 4, (PROJECTION_TABLE_FRAMES + 3) * 4 + 4)]).toEqual([
+      152, 3, 44, 97,
+    ]);
+  });
+
+  it('keeps a part without house paint apart from one with it (the only structural difference)', () => {
+    const house = shaders(manifest());
+    const plain = shaders({ ...manifest(), house: null });
+    expect(plain.main.fragment).not.toBe(house.main.fragment);
   });
 });
 
@@ -628,23 +693,29 @@ describe('projection loading and disposal', () => {
     for (const mesh of sources) expect((mesh.material as { name: string }).name).toContain('-projected');
     nodes.dispose();
   });
-  it.each(['no projection library', 'a type absent from the index'])('settles preparation at once with %s', async (kind) => {
-    mockAssets({ spec: turretManifest() });
-    const nodes = new AtmosphereNodes();
-    const hd = { nodes, settings: { voxelLook: 'engine' } } as HdRenderer;
-    const world = { nodes, ...(kind === 'no projection library' ? {} : { voxelProjection: '/vehicles-hd' }) } as HdWorld;
-    const cache = { paletteRgb: new Map([['unit', new Uint8Array(768)]]) } as Ra2Cache;
-    const units = new VoxelUnits(hd, world, cache);
-    if (kind === 'no projection library') expect(units.prepare(model, 'unit', `${model.id}@unit`)).toBe(true);
-    // An absent or failed type settles after its lookup and keeps the engine look: nothing more will change.
-    else await vi.waitFor(() => expect(units.prepare(model, 'unit', `${model.id}@unit`)).toBe(true));
-    const unit = units.build(model, 'unit', `${model.id}@unit`);
-    unit.root.traverse((object) => {
-      if (object instanceof Mesh && object.userData.painterDepth)
-        expect((object.material as { name: string }).name).not.toContain('-projected');
-    });
-    nodes.dispose();
-  });
+  it.each(['no projection library', 'a type absent from the index'])(
+    'settles preparation at once with %s',
+    async (kind) => {
+      mockAssets({ spec: turretManifest() });
+      const nodes = new AtmosphereNodes();
+      const hd = { nodes, settings: { voxelLook: 'engine' } } as HdRenderer;
+      const world = {
+        nodes,
+        ...(kind === 'no projection library' ? {} : { voxelProjection: '/vehicles-hd' }),
+      } as HdWorld;
+      const cache = { paletteRgb: new Map([['unit', new Uint8Array(768)]]) } as Ra2Cache;
+      const units = new VoxelUnits(hd, world, cache);
+      if (kind === 'no projection library') expect(units.prepare(model, 'unit', `${model.id}@unit`)).toBe(true);
+      // An absent or failed type settles after its lookup and keeps the engine look: nothing more will change.
+      else await vi.waitFor(() => expect(units.prepare(model, 'unit', `${model.id}@unit`)).toBe(true));
+      const unit = units.build(model, 'unit', `${model.id}@unit`);
+      unit.root.traverse((object) => {
+        if (object instanceof Mesh && object.userData.painterDepth)
+          expect((object.material as { name: string }).name).not.toContain('-projected');
+      });
+      nodes.dispose();
+    },
+  );
   it.each([
     { model, spec: manifest(), opacity: 1 },
     { model: turretModel, spec: turretManifest(), opacity: 1 },

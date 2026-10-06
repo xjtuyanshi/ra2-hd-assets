@@ -5,6 +5,7 @@ import {
   floor,
   fract,
   int,
+  ivec2,
   max,
   mix,
   modelWorldMatrix,
@@ -16,6 +17,7 @@ import {
   sin,
   step,
   texture,
+  textureLoad,
   vec2,
   vec3,
   vec4,
@@ -41,7 +43,7 @@ export function projectedVoxelColour(
   look: SpriteLookState,
   basis?: ProjectionBasis,
 ): { colour: ShaderNode; albedo: ShaderNode; coverage: ShaderNode; paint: ShaderNode } {
-  const { manifest, spec } = part;
+  const { manifest } = part;
   const matrix = basis?.matrix ?? modelWorldMatrix;
   const axis: ShaderNode = matrix.mul(vec4(1, 0, 0, 0)).xyz;
   const theta: ShaderNode = axis.z.negate().atan(axis.x).toVar();
@@ -50,17 +52,17 @@ export function projectedVoxelColour(
       .sub(theta)
       .div(2 * Math.PI),
   ).mul(256);
-  const f: ShaderNode = facing.div(manifest.facingStep);
+  const f: ShaderNode = facing.div(part.facingStep);
   const k0: ShaderNode = floor(f);
-  const k1: ShaderNode = k0.add(1).mod(manifest.frames);
+  const k1: ShaderNode = k0.add(1).mod(part.frameCount);
   const fraction: ShaderNode = fract(f);
   const weight: ShaderNode = mix(step(0.5, fraction), fraction, state.blend.clamp()).toVar();
   const worldOffset: ShaderNode = matrix.mul(vec4(basis?.position ?? positionLocal, 0)).xyz.toVar();
-  const jx = vec3(...manifest.jacobian[0]),
-    jy = vec3(...manifest.jacobian[1]);
+  const jx = part.jacobianX,
+    jy = part.jacobianY;
   const sample = (k: ShaderNode): { colour: ShaderNode; alpha: ShaderNode; paint: ShaderNode } => {
     const delta: ShaderNode = float(Math.PI / 2)
-      .sub(k.mul((manifest.facingStep * 2 * Math.PI) / 256))
+      .sub(k.mul(part.frameAngle))
       .sub(theta);
     const c: ShaderNode = cos(delta),
       s: ShaderNode = sin(delta);
@@ -69,22 +71,21 @@ export function projectedVoxelColour(
       worldOffset.y,
       s.negate().mul(worldOffset.x).add(c.mul(worldOffset.z)),
     );
-    const pivot: ShaderNode = part.pivots.element(int(k));
-    const rect: ShaderNode = part.rects.element(int(k));
+    const pivot: ShaderNode = textureLoad(part.frameTable, ivec2(int(k), 0)).xy;
+    const rect: ShaderNode = textureLoad(part.frameTable, ivec2(int(k), 1));
     const px: ShaderNode = pivot.add(vec2(jx.dot(d), jy.dot(d))).toVar();
     const inside: ShaderNode = step(rect.x, px.x)
       .mul(step(rect.y, px.y))
       .mul(float(1).sub(step(rect.x.add(rect.z), px.x)))
       .mul(float(1).sub(step(rect.y.add(rect.w), px.y)));
     // Top-left atlas convention, upload flipY=false. Clamp to this frame even when coverage is zero.
-    const uv: ShaderNode = px.clamp(rect.xy.add(0.5), rect.xy.add(rect.zw).sub(0.5)).div(vec2(...spec.size));
+    const uv: ShaderNode = px.clamp(rect.xy.add(0.5), rect.xy.add(rect.zw).sub(0.5)).div(part.atlasSize);
     const bias: ShaderNode = state.sharpen.clamp(0, 2).negate();
     const colour: ShaderNode = texture(part.colour, uv).bias(bias).toVar();
     const paint: ShaderNode = texture(part.paint, uv).bias(bias).rgb.toVar();
-    // Pages with headroom store sRGB / exposure (see VoxelProjectionManifest.exposure); 1 leaves the sample as is.
-    const exposure = manifest.exposure ?? 1;
-    const encoded: ShaderNode = exposure === 1 ? colour.rgb : colour.rgb.mul(exposure);
-    return { colour: sRGBTransferEOTF(encoded), alpha: colour.a.mul(inside), paint };
+    // Pages with headroom store sRGB / exposure (see VoxelProjectionManifest.exposure); 1 leaves the sample as is
+    // (a product with 1 is exact), and as a uniform it keeps the shader text the same for every page.
+    return { colour: sRGBTransferEOTF(colour.rgb.mul(part.exposure)), alpha: colour.a.mul(inside), paint };
   };
   const a = sample(k0),
     b = sample(k1);
