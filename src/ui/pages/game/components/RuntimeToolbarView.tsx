@@ -515,7 +515,9 @@ export function RuntimeToolbarView({
           aria-pressed={model.hdView}
           title={
             model.hdView && model.hdQuality
-              ? t('帧率不足，已自动减少最不显眼的效果（热浪、抗锯齿、软影）；精灵与地形仍是 1:1，帧率恢复后自动还原')
+              ? t(
+                  '帧率不足，已自动减少最不显眼的效果（热浪与半透明特效混色、抗锯齿、软影）；精灵与地形仍是 1:1，帧率恢复后自动还原',
+                )
               : t('切换高清画面与原版画面（快捷键 \\）')
           }
           onClick={() => callbacks.onHdView?.()}

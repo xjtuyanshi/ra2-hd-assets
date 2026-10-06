@@ -1497,6 +1497,8 @@ export class LiveView {
     if (!current) this.hd.setSceneLighting(null);
     this.liveBeams.displayScale.value = 1 / Math.max(1e-3, this.hd.meanExposure);
     if (this.effectSprites) {
+      // Quality tier 1 and up: no copy of the frame for translucent engine effects (see EffectSpriteLayer.backdropMix).
+      this.effectSprites.backdropMix = !(this.hd.quality >= 1);
       this.effectSprites.now.value = this.hd.seconds();
       this.effectSprites.displayScale.value = 1 / Math.max(1e-3, this.hd.meanExposure);
     }

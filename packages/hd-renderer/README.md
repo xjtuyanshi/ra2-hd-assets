@@ -225,12 +225,12 @@ page mesh of every kind and pass for them to build.
 **Quality tiers (`HdRenderer.setQualityTier`, `HdRenderer.QUALITY_TIERS`).** What the renderer gives up to hold a
 frame rate, least visible first; no tier changes the resolution of anything:
 
-| Tier | Gives up                                                                          |
-| ---: | --------------------------------------------------------------------------------- |
-|    0 | nothing                                                                           |
-|    1 | the light field is drawn every second frame; new blasts have no heat shimmer      |
-|    2 | and multisampling (it smooths the outlines of voxel units and their shadows only) |
-|    3 | and the soft edge of unit shadows (one flattened copy for five)                   |
+| Tier | Gives up                                                                                                                                                                               |
+| ---: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    0 | nothing                                                                                                                                                                                |
+|    1 | copies of the frame (no heat shimmer on new blasts; translucent engine effects blend in linear light, not the engine's display-space mix); the light field is drawn every second frame |
+|    2 | and multisampling (it smooths the outlines of voxel units and their shadows only)                                                                                                      |
+|    3 | and the soft edge of unit shadows (one flattened copy for five)                                                                                                                        |
 
 Tiers 0/1 and 2/3 draw the same passes. The post graph of each pair is built once and parked while the other draws
 (only the scene and top pass give up their render targets), so a change of tier builds and compiles nothing. The

@@ -213,8 +213,8 @@ export const englishMessages = {
   '画面：高清 · 减负 {0}/{1}': 'Picture: HD · saver {0}/{1}',
   '高清画面显示时不运行（只作用于原版画面）':
     'Not run while the HD picture is shown (it applies to the original picture)',
-  '帧率不足，已自动减少最不显眼的效果（热浪、抗锯齿、软影）；精灵与地形仍是 1:1，帧率恢复后自动还原':
-    'The frame rate was low: the least visible effects were reduced automatically (heat shimmer, anti-aliasing, soft shadows). Sprites and terrain stay 1:1; everything returns when there is headroom',
+  '帧率不足，已自动减少最不显眼的效果（热浪与半透明特效混色、抗锯齿、软影）；精灵与地形仍是 1:1，帧率恢复后自动还原':
+    'The frame rate was low: the least visible effects were reduced automatically (heat shimmer and the colour mix of translucent effects, anti-aliasing, soft shadows). Sprites and terrain stay 1:1; everything returns when there is headroom',
   '切换高清画面与原版画面（快捷键 \\）': 'Switch between the HD and the original picture (shortcut \\)',
   '高清画面 / 原版画面（仅高清模式）': 'HD / original picture (HD mode only)',
   '{0}×{1} · 每像素 {2} 设备像素': '{0}×{1} · {2} device px per pixel',

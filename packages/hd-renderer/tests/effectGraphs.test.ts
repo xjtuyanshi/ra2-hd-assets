@@ -197,4 +197,24 @@ describe('effect pages share shader graphs', () => {
       expect(keys.has(builderKey(mesh))).toBe(true);
     }
   });
+  it('draws translucent cards without the backdrop copy when the display-space mix is switched off', () => {
+    const { layer, meshes } = fixture();
+    layer.setInstances([card(0, 'air', 0.5)], 1);
+    const mesh = meshes().find((candidate) => candidate.visible)!;
+    const mixed = mesh.material;
+    // The same cards again with the mix off: the page's opaque material (normal blending), which reads no backdrop.
+    layer.backdropMix = false;
+    layer.setInstances([card(0, 'air', 0.5)], 2);
+    expect(mesh.material).not.toBe(mixed);
+    expect(layer.meshStats().translucent).toBe(0);
+    layer.setInstances([card(0, 'air', 1)], 3);
+    const opaque = mesh.material;
+    layer.setInstances([card(0, 'air', 0.5)], 4);
+    expect(mesh.material).toBe(opaque);
+    // And back on.
+    layer.backdropMix = true;
+    layer.setInstances([card(0, 'air', 0.5)], 5);
+    expect(mesh.material).toBe(mixed);
+    expect(layer.meshStats().translucent).toBe(1);
+  });
 });

@@ -293,8 +293,7 @@ Limits:
 The shown view is held to 60 presented frames a second (`FRAME_BUDGET_MS` in `hdBridge.ts`, also on a faster
 display). Its frame intervals feed a `QualityGovernor` (`packages/hd-renderer/src/qualityGovernor.ts`): when the
 median of a window of frames stays over budget the renderer gives up its least visible passes tier by tier
-(`HdRenderer.setQualityTier`: the light field at half rate and no heat shimmer, then multisampling, then the soft
-edge of unit shadows), and after a calm stretch it tries one tier up again, waiting twice as long after a trial
+(`HdRenderer.setQualityTier`: first what reads a copy of the frame, the heat shimmer and the display-space colour mix of translucent engine effects, then multisampling, then the soft edge of unit shadows), and after a calm stretch it tries one tier up again, waiting twice as long after a trial
 that fails. No tier changes a resolution: sprites and terrain stay texel-exact. A change of tier builds and compiles
 nothing (both post graphs are kept once built) and costs one frame of 30 to 60 ms for the scene pass's render
 targets. The play toolbar's HD button reads `画面：高清 · 减负 n/3` while a tier above 0 is in use

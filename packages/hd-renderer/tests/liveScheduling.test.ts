@@ -44,6 +44,8 @@ function presentation(interpolating: boolean) {
     frame: vi.fn(),
     warm: vi.fn(),
     warming: false,
+    quality: 0,
+    pendingPipelines: 0,
     setSceneLighting: vi.fn(),
     windowsWanted: () => false,
     materialsWanted: vi.fn(() => false),
@@ -469,6 +471,14 @@ describe('warm-up out of sight', () => {
     for (const at of [100, 110, 120]) p.view.render(at);
     expect(p.view.settledFrames).toBe(3);
     expect(hd.warm).toHaveBeenCalledTimes(2);
+
+    // The safeguard's tier reaches the effect layer: from tier 1 on its translucent cards read no copy of the frame.
+    const layer = fields.effectSprites as unknown as { backdropMix?: boolean };
+    expect(layer.backdropMix).toBe(true);
+    (hd as unknown as { quality: number }).quality = 1;
+    p.view.render(125);
+    expect(layer.backdropMix).toBe(false);
+    (hd as unknown as { quality: number }).quality = 0;
 
     // Shown, then out of sight again (the next match on this map): the stages start over.
     fields.outOfSight = false;

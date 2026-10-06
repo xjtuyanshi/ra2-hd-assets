@@ -1607,8 +1607,10 @@ export class HdRenderer {
    * Tiers of the frame-time safeguard (qualityGovernor.ts), cheapest last. Each gives up what shows least for its
    * cost; none touches the resolution, so sprites and terrain stay texel-exact at every tier:
    *  0  everything;
-   *  1  explosion and lamp lights are drawn again every second frame, and blasts have no heat shimmer (it refracts a
-   *     copy of the frame, which ends and restarts the multisampled scene pass);
+   *  1  nothing reads a copy of the frame any more: new blasts have no heat shimmer (it refracts one) and the live
+   *     view's translucent engine effects blend in linear light instead of the engine's display-space mix
+   *     (EffectSpriteLayer.backdropMix). Each copy ends, resolves and reloads the multisampled scene pass. Explosion
+   *     and lamp lights are drawn again every second frame;
    *  2  and no multisampling (it smooths only the outlines of voxel units and their shadows: sprite art carries its
    *     own soft edges);
    *  3  and unit shadows with a hard edge (one flattened copy for five).

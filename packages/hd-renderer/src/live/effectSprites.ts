@@ -265,6 +265,14 @@ export class EffectSpriteLayer {
    * it, and empty meshes are hidden, so a frame without translucent cards copies nothing.
    */
   readonly backdrop: ShaderNode = viewportSharedTexture(screenUV);
+  /**
+   * Whether translucent cards mix with the scene in display space (see `backdrop`). Off, they blend in linear light
+   * like every other card and no copy of the frame is made: half-transparent art over mid-tones comes out a little
+   * lighter, and the multisampled scene pass is not ended and restarted for the copy (2 to 3 ms at 3120x2096). A
+   * renderer short of frame time switches it off (LiveView, from HdRenderer.quality); it applies from the next time
+   * the instances are set.
+   */
+  backdropMix = true;
   private readonly meshes = new Map<string, PageMesh | HdPageMesh>();
   /**
    * Shader graphs by kind and pass (see materialSlots.ts): every page mesh of a kind draws with a clone of its
@@ -747,6 +755,7 @@ class PageMesh {
     this.rect.flush();
     this.params.flush();
     this.style.flush();
+    translucent &&= this.layer.backdropMix;
     this.translucent = translucent;
     if (translucent) this.translucentMaterial ??= this.material(true);
     this.mesh.material = translucent ? this.translucentMaterial! : this.opaqueMaterial;
