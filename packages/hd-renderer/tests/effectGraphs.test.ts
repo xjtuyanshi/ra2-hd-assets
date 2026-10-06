@@ -163,4 +163,38 @@ describe('effect pages share shader graphs', () => {
       expect.arrayContaining(['live-effects-air', 'live-effects-air geometry', 'live-effects-hd-air']),
     );
   });
+  it('warms one idle mesh per kind and pass, which the first pages of that kind then draw with', () => {
+    const { layer, meshes } = fixture();
+    layer.warm();
+    layer.warm();
+    const warm = [...(layer.root.children as InstancedQuad[]), ...(layer.topRoot.children as InstancedQuad[])];
+    // Indexed opaque, indexed translucent and redrawn RGBA, in each of the three passes; hidden and empty.
+    expect(warm).toHaveLength(9);
+    for (const mesh of warm) {
+      expect(mesh.visible).toBe(false);
+      expect(mesh.instances).toBe(0);
+    }
+    expect(new Set(warm.map((mesh) => mesh.name))).toEqual(
+      new Set([
+        'live-effects-ground',
+        'live-effects-air',
+        'live-effects-top',
+        'live-effects-hd-ground',
+        'live-effects-hd-air',
+        'live-effects-hd-top',
+      ]),
+    );
+    // The first real pages take the warm meshes (no new mesh object, so no new shader either): an opaque card and a
+    // translucent one in the air pass draw with the two warm air meshes of indexed pages.
+    const before = new Set(meshes());
+    expect(layer.setInstances([card(0), card(1, 'air', 0.5), hdCard(0)], 1)).toBe(true);
+    for (const mesh of meshes()) expect(before.has(mesh)).toBe(true);
+    const used = meshes().filter((mesh) => mesh.visible);
+    expect(used).toHaveLength(3);
+    const keys = new Set(warm.filter((mesh) => mesh.name.endsWith('air')).map(builderKey));
+    for (const mesh of used) {
+      bindSlots(mesh.material);
+      expect(keys.has(builderKey(mesh))).toBe(true);
+    }
+  });
 });

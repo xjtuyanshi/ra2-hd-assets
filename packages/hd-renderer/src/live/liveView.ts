@@ -678,10 +678,14 @@ export class LiveView {
   set outOfSight(value: boolean) {
     if (value === this.hiddenFromSight) return;
     this.hiddenFromSight = value;
+    // The next stretch out of sight (another match on this map) warms again: only what is new is built.
+    if (value) this.warmStage = 0;
     // What waited out of sight is drawn in the next frame, with or without a new snapshot (a paused match).
     this.objectsFor = null;
   }
   private hiddenFromSight = false;
+  /** Warm-ups done in this stretch out of sight (see render): 0 none, 1 with the scene, 2 with the match's opening. */
+  private warmStage = 0;
   /**
    * How many new kinds of art (a voxel model in a house's colours, a sprite page's layer) one frame may add to the
    * scene while the view is out of sight. Each brings shaders that are built in the frame that first draws it, 30
@@ -1503,9 +1507,22 @@ export class LiveView {
       this.volumetricBlasts.cameraUp.value,
       this.volumetricBlasts.toCamera.value,
     );
+    // Out of sight is the time to build: once when there is a scene at all (behind the game's loading screen), and
+    // once more when the match's opening is in, so the passes and quality tiers have the shaders of its units too.
+    if (this.hiddenFromSight && current && !this.hd.warming) {
+      const stage = current.snapshot.frame > 0 && this.settled >= 1 && !this.warmMerged ? 2 : 1;
+      if (stage > this.warmStage) {
+        this.warmStage = stage;
+        this.effectSprites?.warm();
+        this.hd.warm();
+      }
+    }
     this.hd.frame(dt);
-    // Loads settle between frames, never inside one: what is still on its way now was missing from this frame.
-    this.settled = current && this.loadingArt() === 0 ? this.settled + 1 : 0;
+    // Loads settle between frames, never inside one: what is still on its way now was missing from this frame. A
+    // warm frame (HdRenderer.warm) is not a frame of the match either: it draws what is hidden and builds shaders.
+    // Nor is one whose objects still wait for their pipelines (compiled off the frame: see asyncPipelines.ts).
+    const complete = this.loadingArt() === 0 && !this.hd.warming && !this.hd.pendingPipelines;
+    this.settled = current && complete ? this.settled + 1 : 0;
     // Once the opening is in (or the view is shown anyway), the model files of kinds that have not appeared yet are
     // fetched ahead, so the first frame of a new kind of unit has a model to draw (see LiveLibrary.preloadVoxels).
     if (this.fetchAhead && current && (this.settled >= 1 || !this.outOfSight) && this.fetchAhead())

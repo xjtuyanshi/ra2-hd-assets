@@ -20,6 +20,8 @@ import {
   type Texture,
   type ToneMapping,
   type NodeBuilder,
+  type Object3D,
+  type RenderTarget,
 } from 'three/webgpu';
 import {
   Fn,
@@ -63,6 +65,7 @@ import { EmissiveOverlay, emissiveMrtSupported } from './emissiveOverlay';
 import { LightField, type DynamicLight } from './lightField';
 import { Lighting, clearLightAt, noonFlatLuminance } from './lighting';
 import { applyMaterialFallbacks, failedPipelineMaterials, type PipelineHost } from './materialFallback';
+import { installAsyncPipelines, type AsyncPipelines } from './asyncPipelines';
 import { resolveSceneLighting, type SceneLighting } from './sceneLighting';
 import { Mist, MIST_CAP } from './mist';
 import { ObjectLayer } from './objects';
@@ -532,6 +535,14 @@ const RAISED_DEVICE_LIMITS = [
 /** Frames between two checks for materials whose pipeline the GPU refused (about a quarter of a second). */
 const PIPELINE_HEALTH_FRAMES = 15;
 
+/** A post graph kept for a quality tier that is not drawing (see HdRenderer.switchPipeline). */
+interface ParkedPipeline {
+  pipeline: RenderPipeline;
+  nodes: { dispose(): void }[];
+  /** The scene pass first, then the top pass when the graph has one. */
+  mainPasses: { renderTarget: RenderTarget }[];
+}
+
 /**
  * Consumes RenderState snapshots and draws the HD battlefield. It owns no game rules and never writes game state:
  * visual randomness, interpolation and effects live entirely on this side of the contract.
@@ -544,6 +555,32 @@ export class HdRenderer {
   private topEffectsVisible = false;
   /** The top pass is part of the post graph (see setTopEffectsVisible). */
   private topEffectsPass = false;
+  /**
+   * The MRT node of each set of scene-pass outputs, made once. three keys a render context by the target's attachment
+   * state and the MRT node's id, and a built shader by its context: a new node for the same outputs (every rebuild of
+   * the post graph made one) had every material of the scene built again, 73 builds and 0.4 s on the thread that
+   * presents frames in a battle. With the node kept, a rebuild (mist on or off, the top pass joining, a quality tier)
+   * builds the post passes only, and a tier that was drawn before costs nothing to return to.
+   */
+  private readonly mrtSets = new Map<string, ReturnType<typeof mrt>>();
+  /**
+   * Post graphs of other quality tiers, built once and kept while the current one draws (see drawTier): a change of
+   * tier then builds and compiles nothing, it only takes the render targets of one scene pass for those of the other.
+   * Any other rebuild of the post graph (mist, the top pass, a setting) discards them: they would be stale.
+   */
+  private readonly parkedPipelines = new Map<string, ParkedPipeline>();
+  /** The scene and top pass of the current post graph (their render targets are the large ones). */
+  private mainPasses: { renderTarget: RenderTarget }[] = [];
+  /** Set while pipelines are compiled off the frame (see enableAsyncPipelines). */
+  private asyncPipelines: AsyncPipelines | null = null;
+  /** The frame-time safeguard's tier in use (see setQualityTier). */
+  private qualityTier = 0;
+  /** The soft-shadow setting a tier switched off, to restore it. */
+  private softShadows: boolean | null = null;
+  /** Tiers still to be drawn once out of sight (see warm); null while not warming. */
+  private warmQueue: number[] | null = null;
+  /** The tier the pipeline is built for (the governor's, or the one a warm frame draws). */
+  private drawnTier = 0;
   /** The top target may still hold art of an earlier frame and is drawn (cleared) once more. */
   private topEffectsStale = false;
   private sceneLighting: SceneLighting | null = null;
@@ -951,8 +988,14 @@ export class HdRenderer {
     return this.bufferScale ?? this.renderer.getPixelRatio();
   }
 
+  /** Multisampling in use: the setting, unless the quality tier gives it up. */
+  private antialiasInUse(): Antialias {
+    return this.drawnTier >= 2 && this.settings.antialias === 'msaa4' ? 'none' : this.settings.antialias;
+  }
+
   private settingsPipelineKey(): string {
-    const { antialias, toneMapper, sharpness, debugView } = this.settings;
+    const { toneMapper, sharpness, debugView } = this.settings;
+    const antialias = this.antialiasInUse();
     const key: unknown[] = [
       antialias,
       toneMapper,
@@ -969,18 +1012,31 @@ export class HdRenderer {
     return JSON.stringify(key);
   }
 
-  private buildPipeline(): void {
-    const { antialias, toneMapper, sharpness, debugView } = this.settings;
+  /**
+   * Build the post graph for the settings and tier in use. `fresh` (every caller but a change of tier) replaces the
+   * current graph and discards the parked ones; without it the current graph has been parked and is left alone.
+   */
+  private buildPipeline(fresh = true): void {
+    const { toneMapper, sharpness, debugView } = this.settings;
+    const antialias = this.antialiasInUse();
     const overlay = emissiveOverlayEnabled(this.settings, emissiveMrtSupported(this.renderer));
     const unlit = !!this.world && debugView === 'none';
     this.emissiveOverlay.setEnabled(overlay);
     this.pipelineKey = this.settingsPipelineKey();
     // Release the previous pipeline's render targets and output material before building the new one (the MSAA scene
     // target alone is over 100 MB at 2400x1500).
-    this.pipeline?.dispose();
-    for (const node of this.pipelineNodes) node.dispose();
+    if (fresh) {
+      this.pipeline?.dispose();
+      for (const node of this.pipelineNodes) node.dispose();
+      for (const parked of this.parkedPipelines.values()) {
+        parked.pipeline.dispose();
+        for (const node of parked.nodes) node.dispose();
+      }
+      this.parkedPipelines.clear();
+    }
     const nodes: { dispose(): void }[] = (this.pipelineNodes = []);
     const scenePass = pass(this.scene, this.view.camera, { samples: antialias === 'msaa4' ? 4 : 0 });
+    this.mainPasses = [scenePass];
     this.terrainDepth.setMainPass(scenePass.renderTarget, this.view.camera);
     if (this.painterDepthEnabled || overlay || unlit) {
       const outputs: Record<string, ShaderNode> = { output: materialOutput };
@@ -992,17 +1048,25 @@ export class HdRenderer {
       }
       if (overlay) outputs.emissive = vec4(0, 0, 0, materialOutput.a);
       if (unlit) outputs.unlit = vec4(0, 0, 0, materialOutput.a);
-      const attachments = mrt(outputs);
-      if (this.painterDepthEnabled)
-        attachments
-          .setBlendMode('physicalDepth', new BlendMode(NormalBlending))
-          .setClearColor('physicalDepth', 0x000000, 0);
-      // Use each foreground material's blending: opaque art clears emission, alpha art covers it, additive FX add zero.
-      if (overlay)
-        attachments.setBlendMode('emissive', new BlendMode(MaterialBlending)).setClearColor('emissive', 0x000000, 0);
-      // Same blending as the main output, including on WebGL without indexed blend support. Foreground art clears
-      // or attenuates captured self-lit colour; this needs at most four attachments with depth and emission enabled.
-      if (unlit) attachments.setBlendMode('unlit', new BlendMode(MaterialBlending)).setClearColor('unlit', 0x000000, 0);
+      // One node per set of outputs for the renderer's lifetime (see mrtSets).
+      const set = Object.keys(outputs).join('+');
+      let attachments = this.mrtSets.get(set);
+      if (!attachments) {
+        attachments = mrt(outputs);
+        if (this.painterDepthEnabled)
+          attachments
+            .setBlendMode('physicalDepth', new BlendMode(NormalBlending))
+            .setClearColor('physicalDepth', 0x000000, 0);
+        // Use each foreground material's blending: opaque art clears emission, alpha art covers it, additive FX add
+        // zero.
+        if (overlay)
+          attachments.setBlendMode('emissive', new BlendMode(MaterialBlending)).setClearColor('emissive', 0x000000, 0);
+        // Same blending as the main output, including on WebGL without indexed blend support. Foreground art clears
+        // or attenuates captured self-lit colour; this needs at most four attachments with depth and emission enabled.
+        if (unlit)
+          attachments.setBlendMode('unlit', new BlendMode(MaterialBlending)).setClearColor('unlit', 0x000000, 0);
+        this.mrtSets.set(set, attachments);
+      }
       scenePass.setMRT(attachments);
     }
     nodes.push(scenePass);
@@ -1037,8 +1101,14 @@ export class HdRenderer {
       };
       // Transparent clear is explicit: the renderer's main canvas is intentionally opaque. Normal/custom-alpha
       // blending produces premultiplied colour in this target, so composite it without multiplying alpha twice.
-      topPass.setMRT(mrt({ output: materialOutput }).setClearColor('output', 0x000000, 0));
+      let topOutputs = this.mrtSets.get('top');
+      if (!topOutputs) {
+        topOutputs = mrt({ output: materialOutput }).setClearColor('output', 0x000000, 0);
+        this.mrtSets.set('top', topOutputs);
+      }
+      topPass.setMRT(topOutputs);
       nodes.push(topPass);
+      this.mainPasses.push(topPass);
       const top: ShaderNode = topPass.getTextureNode('output');
       topAlpha = top.a;
       shown = vec4(shown.rgb.mul(float(1).sub(top.a)).add(top.rgb), 1);
@@ -1486,9 +1556,13 @@ export class HdRenderer {
     frame.toCamera.copy(toCamera);
     this.world?.dressing?.update(frame);
     if (this.layerNodes !== this.nodes) this.layerNodes.copyValuesFrom(this.nodes);
-    this.lightField.update(now, this.renderer, this.staticGain, this.baseNightGain);
+    // Tier 1 and up: the light field (explosion flashes, lamps) is drawn again every second frame; it lives in
+    // world space, so the frame in between reads last frame's lights at the right places.
+    if (this.drawnTier < 1 || this.frames % 2 === 0)
+      this.lightField.update(now, this.renderer, this.staticGain, this.baseNightGain);
     this.mirrorDynamicEmitters(now);
-    this.renderPipeline();
+    if (this.warmQueue) this.renderWarmFrame();
+    else this.renderPipeline();
     this.frames++;
     if (this.trackTimestamp && this.frames % 2 === 0) void this.collectGpuTimes();
     if (this.frames % PIPELINE_HEALTH_FRAMES === 0) this.replaceRefusedMaterials();
@@ -1502,6 +1576,8 @@ export class HdRenderer {
    */
   private replaceRefusedMaterials(): void {
     const failed = failedPipelineMaterials(this.renderer as unknown as PipelineHost);
+    // A refused asynchronous creation leaves no labelled pipeline to find the material by.
+    for (const id of this.asyncPipelines?.failedMaterials ?? []) failed.add(id);
     if (failed.size === this.refusedMaterials) return;
     this.refusedMaterials = failed.size;
     for (const { from, to } of applyMaterialFallbacks(this.scene, failed))
@@ -1509,6 +1585,170 @@ export class HdRenderer {
         `[HD] the GPU refused the pipeline of material ${from.type} (${from.name || 'unnamed'}); ` +
           `drawing its simpler stand-in ${to.type} instead`,
       );
+  }
+
+  /**
+   * Compile render pipelines off the frame from now on (asyncPipelines.ts): an object is drawn from the frame its
+   * pipeline is ready, instead of every frame waiting for the compiler. For views that are watched live; tools that
+   * render a frame and read it back keep the default, where a drawn frame is complete. Returns false when the
+   * renderer cannot do it (it then stays as it is).
+   */
+  enableAsyncPipelines(): boolean {
+    this.asyncPipelines ??= installAsyncPipelines(this.renderer);
+    return this.asyncPipelines !== null;
+  }
+
+  /** Pipelines being compiled off the frame: what they draw is not on screen yet. Always 0 without async pipelines. */
+  get pendingPipelines(): number {
+    return this.asyncPipelines?.pending ?? 0;
+  }
+
+  /**
+   * Tiers of the frame-time safeguard (qualityGovernor.ts), cheapest last. Each gives up what shows least for its
+   * cost; none touches the resolution, so sprites and terrain stay texel-exact at every tier:
+   *  0  everything;
+   *  1  explosion and lamp lights are drawn again every second frame, and blasts have no heat shimmer (it refracts a
+   *     copy of the frame, which ends and restarts the multisampled scene pass);
+   *  2  and no multisampling (it smooths only the outlines of voxel units and their shadows: sprite art carries its
+   *     own soft edges);
+   *  3  and unit shadows with a hard edge (one flattened copy for five).
+   * Tiers 0 and 1 draw the same passes, and so do 2 and 3: only the step between 1 and 2 changes the post graph, and
+   * both graphs are kept once built (see switchPipeline), so no step compiles anything after the first time.
+   */
+  static readonly QUALITY_TIERS = 4;
+
+  /** The safeguard's tier in use. */
+  get quality(): number {
+    return this.qualityTier;
+  }
+
+  /** How many tiers there are (for a governor that has only the instance). */
+  get qualityTiers(): number {
+    return HdRenderer.QUALITY_TIERS;
+  }
+
+  /** Draw with tier `tier` from the next frame on (see QUALITY_TIERS). */
+  setQualityTier(tier: number): void {
+    const next = Math.min(Math.max(0, Math.floor(tier) || 0), HdRenderer.QUALITY_TIERS - 1);
+    if (next === this.qualityTier) return;
+    this.qualityTier = next;
+    // Warm frames draw their own tiers; the last of them returns to this one.
+    if (!this.warmQueue) this.drawTier(next);
+  }
+
+  private drawTier(tier: number): void {
+    if (tier === this.drawnTier) return;
+    this.drawnTier = tier;
+    this.effects.heatShimmer = tier < 1;
+    const shadows = voxelShadowFor(this.nodes);
+    if (tier >= 3) {
+      this.softShadows ??= shadows.soft;
+      shadows.soft = false;
+    } else if (this.softShadows !== null) {
+      shadows.soft = this.softShadows;
+      this.softShadows = null;
+    }
+    if (this.pipeline && this.pipelineKey !== this.settingsPipelineKey()) this.switchPipeline();
+  }
+
+  /**
+   * Draw with the post graph of the tier in use: the one parked for it, or a new one; the graph that drew until now
+   * is parked. A parked graph keeps its nodes, materials and compiled pipelines and gives up only the render targets
+   * of its scene and top pass (most of a gigabyte with multisampling at 3120x2096), which three allocates again when
+   * the pass is next drawn.
+   */
+  private switchPipeline(): void {
+    const key = this.settingsPipelineKey();
+    for (const main of this.mainPasses) main.renderTarget.dispose();
+    this.parkedPipelines.set(this.pipelineKey, {
+      pipeline: this.pipeline!,
+      nodes: this.pipelineNodes,
+      mainPasses: this.mainPasses,
+    });
+    const parked = this.parkedPipelines.get(key);
+    if (!parked) {
+      this.buildPipeline(false);
+      return;
+    }
+    this.parkedPipelines.delete(key);
+    this.pipeline = parked.pipeline;
+    this.pipelineNodes = parked.nodes;
+    this.mainPasses = parked.mainPasses;
+    this.pipelineKey = key;
+    this.terrainDepth.setMainPass(parked.mainPasses[0]!.renderTarget, this.view.camera);
+    // Its top target was given up with the others: draw it once even if no top art is on screen.
+    this.topEffectsStale = true;
+  }
+
+  /**
+   * Spend the next few frames building instead of showing: call while the view is out of sight (`warming` says when it
+   * is done). three builds a material's shader and compiles its pipeline when an object is first drawn with it in a
+   * pass, on the thread that presents frames, and the GPU process stops presenting while it compiles: a match's first
+   * explosion, its first top-layer art, the first frame with water in view or with a fireball next to a building each
+   * cost a quarter of a second to a second and a half that way (measured in a six-player match). A warm frame draws
+   * everything that exists, hidden or not, in every pass: the idle effect pools, water twins of land units, the depth
+   * capture and the water mirrors even when nothing asks for them. One frame is drawn per quality tier whose passes
+   * differ, so a later change of tier compiles nothing either.
+   */
+  warm(): void {
+    if (!this.pipeline || this.warmQueue) return;
+    const tier = this.drawnTier;
+    const keyOf = (t: number): string => {
+      this.drawnTier = t;
+      return this.settingsPipelineKey();
+    };
+    // One frame per set of passes, cheapest first; the tier in use stands for its own set and comes last: its render
+    // targets are the ones that stay.
+    const keys = new Set<string>([keyOf(this.qualityTier)]);
+    const queue: number[] = [];
+    for (let t = HdRenderer.QUALITY_TIERS - 1; t >= 0; t--) {
+      const key = keyOf(t);
+      if (keys.has(key)) continue;
+      keys.add(key);
+      queue.push(t);
+    }
+    this.drawnTier = tier;
+    queue.push(this.qualityTier);
+    this.warmQueue = queue;
+  }
+
+  /** Whether warm frames are still being drawn (see warm). */
+  get warming(): boolean {
+    return this.warmQueue !== null;
+  }
+
+  private renderWarmFrame(): void {
+    const queue = this.warmQueue!;
+    const tier = queue.shift()!;
+    // The tier's own state without its pipeline key being compared against the governor's tier.
+    this.drawTier(tier);
+    const hidden: Object3D[] = [];
+    try {
+      // Poses and the visibility that follows from them first (shadow twins decide theirs while their matrices are
+      // updated): what is flipped below is flipped back afterwards and nothing else changes in between.
+      this.scene.updateMatrixWorld();
+      this.topScene.updateMatrixWorld();
+      for (const root of [this.scene, this.topScene])
+        root.traverse((object) => {
+          if (object.visible) return;
+          object.visible = true;
+          hidden.push(object);
+        });
+      this.topEffectsStale = true;
+      this.terrainDepth.warm();
+      (this.terrain as { mirrorAtlas?: { warm(): void } | null } | undefined)?.mirrorAtlas?.warm();
+      this.renderPipeline();
+    } catch (error) {
+      // Something that is hidden cannot be drawn yet: no warm-up then, and frames go on as before.
+      console.warn('[HD] warm frame failed; shaders will be built when first used', error);
+      queue.length = 0;
+    } finally {
+      for (const object of hidden) object.visible = false;
+    }
+    if (!queue.length) {
+      this.warmQueue = null;
+      this.drawTier(this.qualityTier);
+    }
   }
 
   private renderPipeline(): void {
@@ -1751,6 +1991,11 @@ export class HdRenderer {
     this.pipeline?.dispose();
     for (const node of this.pipelineNodes) node.dispose();
     this.pipelineNodes.length = 0;
+    for (const parked of this.parkedPipelines.values()) {
+      parked.pipeline.dispose();
+      for (const node of parked.nodes) node.dispose();
+    }
+    this.parkedPipelines.clear();
     this.lightField?.dispose();
     this.rain?.dispose();
     this.snow?.dispose();

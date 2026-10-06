@@ -124,6 +124,7 @@ export class TerrainDepth {
   private ready = false;
   private disposed = false;
   private needed = false;
+  private warmNext = false;
 
   constructor(private readonly frontDistance: number) {
     this.target.texture.name = 'output';
@@ -209,6 +210,10 @@ export class TerrainDepth {
   }
   codeNode(anchor: ShaderNode): ShaderNode {
     return anchor.xz.sub(this.reference.xz).dot(this.horizontal);
+  }
+  /** Capture once in the next render even if nothing needs it (a warm frame: see HdRenderer.warm). */
+  warm(): void {
+    this.warmNext = true;
   }
   setNeeded(needed: boolean): void {
     this.needed = needed;
@@ -324,7 +329,9 @@ export class TerrainDepth {
   }
   render(renderer: WebGPURenderer, scene: Scene, view: OrthographicCamera): void {
     this.ready = false;
-    if (!this.needed || this.disposed || !supported(renderer)) return;
+    const warm = this.warmNext;
+    this.warmNext = false;
+    if ((!this.needed && !warm) || this.disposed || !supported(renderer)) return;
     this.resize(renderer);
     this.captureNear.value = view.near;
     this.captureRange.value = view.far - view.near;

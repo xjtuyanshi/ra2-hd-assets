@@ -306,6 +306,21 @@ describe('mirror atlas rendering', () => {
     expect(calls).toHaveLength(0);
     expect(state.target).toBeNull();
     expect(hidden.visible).toBe(true);
+
+    // A warm frame (HdRenderer.warm): one tile is rendered although no plane is in view, once.
+    atlas.warm();
+    expect(atlas.render(renderer, scene, away, hidden)).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.viewport).toEqual(mirrorAtlasTileRect(0, 2, 640, 360));
+    expect(state.target).toBeNull();
+    expect(hidden.visible).toBe(true);
+    calls.length = 0;
+    expect(atlas.render(renderer, scene, away, hidden)).toBe(0);
+    expect(calls).toHaveLength(0);
+    // With a plane in view the request changes nothing: what is visible is what is rendered.
+    atlas.warm();
+    expect(atlas.render(renderer, scene, camera, hidden)).toBe(1);
+    expect(calls[0]!.viewport).toEqual(mirrorAtlasTileRect(1, 2, 640, 360));
     atlas.dispose();
   });
 

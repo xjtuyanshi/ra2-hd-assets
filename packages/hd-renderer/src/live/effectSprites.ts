@@ -1,7 +1,9 @@
 import {
   Color,
   CustomBlending,
+  DataTexture,
   Group,
+  LinearFilter,
   MeshBasicNodeMaterial,
   NormalBlending,
   OneFactor,
@@ -341,6 +343,33 @@ export class EffectSpriteLayer {
     return complete;
   }
 
+  /**
+   * Put one idle page mesh of every kind and pass into the scene (indexed opaque, indexed translucent, redrawn RGBA;
+   * hidden, without instances), so that a warm frame (HdRenderer.warm) builds their shaders and pipelines before the
+   * view is shown: a match's first explosion otherwise builds them in the frame that shows it, once per render pass
+   * that draws the scene. The meshes then wait as spares for the first pages of their kind.
+   */
+  warm(): void {
+    if (this.warmed) return;
+    this.warmed = true;
+    const indexed = placeholderPage(false);
+    const redrawn = placeholderPage(true);
+    for (const pass of ['ground', 'air', 'top'] as const) {
+      const meshes: (PageMesh | HdPageMesh)[] = [
+        new PageMesh(this, this.cache, indexed, pass),
+        new PageMesh(this, this.cache, indexed, pass).warmTranslucent(),
+      ];
+      if (this.hdPageSource) meshes.push(new HdPageMesh(this, redrawn, pass));
+      for (const mesh of meshes) {
+        (pass === 'top' ? this.topRoot : this.root).add(mesh.mesh);
+        let spare = this.spare.get(mesh.graph);
+        if (!spare) this.spare.set(mesh.graph, (spare = []));
+        spare.push(mesh);
+      }
+    }
+  }
+  private warmed = false;
+
   /** Instances currently drawn (for diagnostics). */
   get count(): number {
     let n = 0;
@@ -446,6 +475,20 @@ export interface EffectPage {
   height: number;
 }
 
+const placeholders: Partial<Record<'indexed' | 'redrawn', EffectPage>> = {};
+/** A one-texel page of the sampling class of real pages (indexed: texel loads; redrawn RGBA: filtered samples). */
+function placeholderPage(redrawn: boolean): EffectPage {
+  const kind = redrawn ? 'redrawn' : 'indexed';
+  let page = placeholders[kind];
+  if (!page) {
+    const texture = new DataTexture(new Uint8Array(4), 1, 1);
+    if (redrawn) texture.magFilter = texture.minFilter = LinearFilter;
+    texture.needsUpdate = true;
+    page = placeholders[kind] = { texture, width: 1, height: 1 };
+  }
+  return page;
+}
+
 /** A shader graph of page meshes: the prototype material and the slots its shader reads the page from. */
 interface EffectGraph {
   material: MeshBasicNodeMaterial;
@@ -532,6 +575,13 @@ class PageMesh {
   reuse(atlas: EffectPage): this {
     this.atlas = atlas;
     this.lastUsed = -Infinity;
+    return this;
+  }
+
+  /** Draw with the translucent material from the start (a warm frame builds it; `set` chooses again per frame). */
+  warmTranslucent(): this {
+    this.translucentMaterial ??= this.material(true);
+    this.mesh.material = this.translucentMaterial;
     return this;
   }
 

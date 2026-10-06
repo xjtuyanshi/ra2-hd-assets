@@ -315,6 +315,7 @@ export class MirrorAtlas {
   readonly tiles: readonly MirrorAtlasTile[];
   /** Tile size as a fraction of the drawing buffer; below 1, so a tile is never mistaken for the whole target. */
   readonly resolutionScale: number;
+  private warmNext = false;
 
   constructor(planes: readonly MirrorAtlasPlane[], options: { resolutionScale?: number } = {}) {
     if (!planes.length) throw new Error('MirrorAtlas needs at least one plane');
@@ -357,11 +358,20 @@ export class MirrorAtlas {
     );
     const webgpu = renderer.coordinateSystem === WebGPUCoordinateSystem;
     normal.set(0, 1, 0).transformDirection(this.target.matrixWorld);
-    const visible = this.tiles.filter((tile) => {
-      if (tile.plane.bounds && !frustum.intersectsBox(tile.plane.bounds)) return false;
+    const warm = this.warmNext;
+    this.warmNext = false;
+    const mirrored = (tile: MirrorAtlasTile): boolean => {
       planePoint.set(0, tile.plane.y, 0).applyMatrix4(this.target.matrixWorld);
       return mirrorCamera(camera, tile.reflector.getVirtualCamera(camera), planePoint, normal, webgpu);
-    });
+    };
+    const visible = this.tiles.filter(
+      (tile) => (!tile.plane.bounds || frustum.intersectsBox(tile.plane.bounds)) && mirrored(tile),
+    );
+    if (!visible.length && warm) {
+      // A warm frame: one tile is rendered although no plane is in view, so the mirror pass has its shaders.
+      const tile = this.tiles.find(mirrored);
+      if (tile) visible.push(tile);
+    }
     if (!visible.length) return 0;
 
     renderer.getDrawingBufferSize(size);
@@ -407,6 +417,11 @@ export class MirrorAtlas {
       hidden.visible = wasVisible;
     }
     return visible.length;
+  }
+
+  /** Render a tile in the next render even if no plane is in view (a warm frame: see HdRenderer.warm). */
+  warm(): void {
+    this.warmNext = true;
   }
 
   dispose(): void {

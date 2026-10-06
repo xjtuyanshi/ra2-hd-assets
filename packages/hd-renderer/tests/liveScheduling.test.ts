@@ -42,6 +42,8 @@ function presentation(interpolating: boolean) {
     settings: { sourceLights: 0 },
     seconds: () => 1,
     frame: vi.fn(),
+    warm: vi.fn(),
+    warming: false,
     setSceneLighting: vi.fn(),
     windowsWanted: () => false,
     materialsWanted: vi.fn(() => false),
@@ -418,6 +420,62 @@ describe('live preparation pace', () => {
     fields.lastRender = 6000;
     p.view.render(6016);
     expect(fields.pageUploads.step).toHaveBeenLastCalledWith(Infinity);
+  });
+});
+
+describe('warm-up out of sight', () => {
+  it('warms once with the scene and once when the opening is in, and counts no warm frame as a frame of the match', () => {
+    const p = presentation(false);
+    const fields = p.view as unknown as {
+      outOfSight: boolean;
+      current: { snapshot: { frame: number; objects: unknown[] } };
+      voxelUnits: { loading: number };
+      effectSprites: { warm: () => void; now: { value: number }; displayScale: { value: number } };
+    };
+    const hd = p.hd as unknown as { warm: ReturnType<typeof vi.fn>; warming: boolean };
+    const effects = vi.fn();
+    fields.effectSprites = { warm: effects, now: { value: 0 }, displayScale: { value: 1 } };
+    // A shown view never spends a frame on it.
+    p.view.render(20);
+    expect(hd.warm).not.toHaveBeenCalled();
+
+    // Out of sight behind the loading screen (the scenario's frame 0): the first frame asks for a warm-up.
+    fields.outOfSight = true;
+    fields.current.snapshot.frame = 0;
+    fields.voxelUnits.loading = 1;
+    p.view.render(30);
+    expect(hd.warm).toHaveBeenCalledTimes(1);
+    expect(effects).toHaveBeenCalledTimes(1);
+    p.view.render(40);
+    expect(hd.warm).toHaveBeenCalledTimes(1);
+
+    // The match runs and its art is still arriving: nothing yet. Then the opening is in: once more.
+    fields.current.snapshot.frame = 5;
+    p.view.render(50);
+    expect(hd.warm).toHaveBeenCalledTimes(1);
+    fields.voxelUnits.loading = 0;
+    p.view.render(60);
+    expect(p.view.settledFrames).toBe(1);
+    expect(hd.warm).toHaveBeenCalledTimes(1);
+    p.view.render(70);
+    expect(hd.warm).toHaveBeenCalledTimes(2);
+    // While the renderer draws its warm frames the view does not count as settled, and asks for nothing more.
+    hd.warming = true;
+    p.view.render(80);
+    p.view.render(90);
+    expect(p.view.settledFrames).toBe(0);
+    expect(hd.warm).toHaveBeenCalledTimes(2);
+    hd.warming = false;
+    for (const at of [100, 110, 120]) p.view.render(at);
+    expect(p.view.settledFrames).toBe(3);
+    expect(hd.warm).toHaveBeenCalledTimes(2);
+
+    // Shown, then out of sight again (the next match on this map): the stages start over.
+    fields.outOfSight = false;
+    p.view.render(130);
+    fields.outOfSight = true;
+    p.view.render(140);
+    expect(hd.warm).toHaveBeenCalledTimes(3);
   });
 });
 
