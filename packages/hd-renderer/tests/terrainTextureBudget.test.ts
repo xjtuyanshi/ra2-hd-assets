@@ -109,7 +109,7 @@ const isMirror = (texture: Texture) =>
  * A map with every optional terrain layer the cache can carry (whole-map art, water mask, shore and cliff distance
  * fields, water detail, painted water surface, map light grade) and `levels` water terraces of 12 or more cells each.
  */
-function fullMap(levels: number, style: WaterStyle, waterBed = true) {
+function fullMap(levels: number, style: WaterStyle, waterBed = true, paintedWaterline = false) {
   waterPreset.style = style;
   const width = 16;
   const height = Math.max(levels, 1) * 8;
@@ -157,6 +157,7 @@ function fullMap(levels: number, style: WaterStyle, waterBed = true) {
       shore: own(pixel()),
       cliff: own(new DataTexture(new Uint16Array([0]), 1, 1, RedFormat, HalfFloatType)),
       waterBed,
+      paintedWaterline,
       waterDetail: own(pixel()),
       waterSurface: { texture: own(pixel()), scale: 13 },
       ref: { file: 'terrain.png', width: 128, height: 64, scale: 1, originX: 0, originY: 0 },
@@ -197,6 +198,20 @@ describe('terrain material texture budget', () => {
       }
       // The fixture really reaches the layers: the ground is the material with the most textures of the renderer.
       expect(fragmentBindings(build.mesh.geometry, ground).textures.length).toBeGreaterThanOrEqual(waterBed ? 9 : 8);
+    },
+  );
+
+  it.each(['enhanced', 'classic'] as const)(
+    'binds no texture more for a mask that follows the painted waterline: hard shores are a vertex attribute (%s water)',
+    (style) => {
+      const count = (painted: boolean) => {
+        const { build, ground } = fullMap(4, style, false, painted);
+        expect(!!build.mesh.geometry.getAttribute('hardShore')).toBe(painted);
+        const bound = fragmentBindings(build.mesh.geometry, ground);
+        expect(bound.textures.length).toBeLessThanOrEqual(MAX_SAMPLED_TEXTURES);
+        return `${bound.textures.length}/${bound.samplers}`;
+      };
+      expect(count(true)).toBe(count(false));
     },
   );
 

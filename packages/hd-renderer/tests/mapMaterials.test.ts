@@ -35,6 +35,7 @@ describe('map material water overrides', () => {
       waterDetail: undefined,
       waterSurface: undefined,
       waterSurfaceScale: 13,
+      paintedWaterline: false,
     });
   });
 
@@ -47,6 +48,7 @@ describe('map material water overrides', () => {
       waterDetail: undefined,
       waterSurface: undefined,
       waterSurfaceScale: 13,
+      paintedWaterline: false,
     });
   });
 
@@ -67,6 +69,7 @@ describe('map material water overrides', () => {
       waterDetail: 'water-detail.png',
       waterSurface: undefined,
       waterSurfaceScale: 13,
+      paintedWaterline: false,
     });
     expect(ref.waterMask).toBe('water.png');
   });
@@ -80,7 +83,22 @@ describe('map material water overrides', () => {
       waterDetail: undefined,
       waterSurface: undefined,
       waterSurfaceScale: 13,
+      paintedWaterline: false,
     });
+  });
+
+  it('follows the painted waterline only for a sidecar that says so about its own mask, never with a lake bed', () => {
+    const painted = (material: Record<string, unknown>) =>
+      resolveTerrainMaterials(ref, JSON.parse(JSON.stringify({ version: 1, ...material })) as MapMaterials)
+        .paintedWaterline;
+    expect(painted({ waterMask: 'water-wl.png', waterline: 'painted' })).toBe(true);
+    // The flag describes the replacement mask: without one the manifest's whole-cell mask is in use.
+    expect(painted({ waterline: 'painted' })).toBe(false);
+    expect(painted({ waterMask: 'water-wl.png' })).toBe(false);
+    expect(painted({ waterMask: 'water-wl.png', waterline: true })).toBe(false);
+    expect(painted({ waterMask: 'water-wl.png', waterline: 'cells' })).toBe(false);
+    // The lake-bed shoreline has its own mask and distance fields.
+    expect(painted({ waterMask: 'water-wl.png', waterline: 'painted', waterBed: true })).toBe(false);
   });
 
   it('can supply a mask when the manifest has none, without inventing a missing mask', () => {
@@ -103,6 +121,7 @@ describe('map material water overrides', () => {
       waterDetail: undefined,
       waterSurface: undefined,
       waterSurfaceScale: 13,
+      paintedWaterline: false,
     });
   });
 
@@ -116,6 +135,7 @@ describe('map material water overrides', () => {
       waterDetail: undefined,
       waterSurface: undefined,
       waterSurfaceScale: 13,
+      paintedWaterline: false,
     });
   });
 
@@ -137,6 +157,7 @@ describe('map material water overrides', () => {
       waterDetail: undefined,
       waterSurface: undefined,
       waterSurfaceScale: 13,
+      paintedWaterline: false,
     });
   });
 
@@ -149,6 +170,7 @@ describe('map material water overrides', () => {
       waterDetail: undefined,
       waterSurface: 'surface.png',
       waterSurfaceScale,
+      paintedWaterline: false,
     });
   });
 
@@ -166,6 +188,7 @@ describe('map material water overrides', () => {
         waterDetail: undefined,
         waterSurface: undefined,
         waterSurfaceScale: 7,
+        paintedWaterline: false,
       });
     },
   );
@@ -184,6 +207,7 @@ describe('map material water overrides', () => {
         waterDetail: undefined,
         waterSurface: 'surface.png',
         waterSurfaceScale: 13,
+        paintedWaterline: false,
       });
     },
   );

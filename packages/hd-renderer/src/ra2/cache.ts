@@ -67,6 +67,11 @@ export interface Ra2Cache {
     shore: DataTexture;
     /** Normalised cliff contact distance (CLIFF_FIELD_MAX cells = 1); null without a loaded shore-ignore mask. */
     cliff: DataTexture | null;
+    /**
+     * The water mask follows the painted waterline (MapMaterials.waterline): the terrain adds no cliff-foot extension
+     * to it and tells hard shores from beaches by the tile under the water (hardShore.ts). Absent = false.
+     */
+    paintedWaterline?: boolean;
     ref: NonNullable<HdCacheManifest['terrainMap']>;
   };
   spriteAtlas: Texture;
@@ -467,6 +472,8 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
         mask && shoreIgnore
           ? buildCliffField(mask.bytes, shoreIgnore, mask.width, mask.height, ref.scale, downsample).texture
           : null,
+      // Without its mask there is no waterline to follow, whatever the sidecar says.
+      paintedWaterline: !!mask && material.paintedWaterline,
       ref,
     };
   }
@@ -536,10 +543,14 @@ export function resolveTerrainMaterials(
   waterDetail: string | undefined;
   waterSurface: string | undefined;
   waterSurfaceScale: number;
+  paintedWaterline: boolean;
 } {
   return {
     file: materials?.terrainMap ?? ref.file,
     waterMask: materials?.waterMask ?? ref.waterMask,
+    // The flag describes the sidecar's own mask; the lake-bed path has its own shoreline and never reads it.
+    paintedWaterline:
+      materials?.waterline === 'painted' && typeof materials.waterMask === 'string' && materials.waterBed !== true,
     shoreIgnore: typeof materials?.shoreIgnore === 'string' ? materials.shoreIgnore : undefined,
     waterBed: materials?.waterBed === true,
     waterDetail: typeof materials?.waterDetail === 'string' ? materials.waterDetail : undefined,
