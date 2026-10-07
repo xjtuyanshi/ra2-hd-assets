@@ -225,7 +225,11 @@ const teams: TrainingLesson = {
       hint: '按住 Option（⌥）再按数字 1。',
       detect: chordWithEffect(['Alt+Digit1'], ({ state }) => {
         const group = pick(state, own, inGroup(0));
-        return group.length > 0 && viewCentreDistance(state, yrProjection, centroid(group)) < 260;
+        if (group.length === 0) return false;
+        const at = centroid(group);
+        // Near a map edge the view cannot centre on the team (it stops at the edge), so a team well inside the view
+        // counts as well: the step before this one required the team to be out of sight.
+        return viewCentreDistance(state, yrProjection, at) < 260 || viewShows(state, yrProjection, at, 40);
       }),
     },
   ],
