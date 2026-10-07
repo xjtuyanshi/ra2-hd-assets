@@ -28,6 +28,7 @@ import { withGameResolutionOverride } from '../games/resolution';
 import { withGameSpeedOverride } from '../games/gameSpeed';
 import { SerialTaskQueue } from '../utils/serialTaskQueue';
 import { FrameBufferPool } from './frameBufferPool';
+import { supportedGame } from '../games/catalog';
 
 export interface VmWorkerCore {
   getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics>;
@@ -39,12 +40,14 @@ export interface VmWorkerCore {
   setCursorPosition(x: number, y: number): void;
   setGameClockRate(rate: number): number;
   setMasterVolume(linear: number): void;
-  getPointerState(): VmPointerState | null;
+  getPointerState(): VmPointerState | null | Promise<VmPointerState | null>;
   getGamePerformance(): Promise<GamePerformanceSample | null>;
   getRenderState(): Promise<GameRenderState | null>;
   getCommandState(): Promise<GameCommandState | null>;
-  setGameSpeedFlag(value: number): number | null;
-  setTacticalPassthrough(flags: number): boolean;
+  setGameSpeedFlag(value: number): number | null | Promise<number | null>;
+  setTacticalPassthrough(flags: number): boolean | Promise<boolean>;
+  /** Native picture credit is released only after presentation consumption. */
+  requestNextFrame?(): void;
   startMemRecord(): boolean;
   stopMemRecord(): GuestMemRecordResult | null;
   setFileProvider(files: GameFileProvider): void;
@@ -55,7 +58,12 @@ export interface VmWorkerControllerDependencies {
   createProvider?: (config: VmInitConfig) => GameFileProvider;
   discoverSources?: (provider: GameFileProvider) => Promise<GameSource[]>;
   applyResolution?: typeof withGameResolutionOverride;
-  createCore?: (callbacks: GameVmCallbacks, source: GameSource, platform: VmCorePlatform) => VmWorkerCore;
+  createCore?: (
+    callbacks: GameVmCallbacks,
+    source: GameSource,
+    platform: VmCorePlatform,
+    config?: VmInitConfig,
+  ) => VmWorkerCore | Promise<VmWorkerCore>;
   fetchBytes?: (url: string) => Promise<Uint8Array>;
   audio?: VmAudioSink;
 }
@@ -178,6 +186,7 @@ export class VmWorkerController {
   private lastRenderState: GameRenderState | null = null;
   private sourceTemplate: GameFileProvider | null = null;
   private started = false;
+  private nativeBackend = false;
   private initReady: Promise<void> = Promise.resolve();
   private pendingClock: number | null = null;
   private pendingVolume: number | null = null;
@@ -208,7 +217,28 @@ export class VmWorkerController {
     this.dependencies = {
       discoverSources: dependencies.discoverSources ?? discoverGameSources,
       applyResolution: dependencies.applyResolution ?? withGameResolutionOverride,
-      createCore: dependencies.createCore ?? ((callbacks, source, platform) => new VmCore(callbacks, source, platform)),
+      createCore:
+        dependencies.createCore ??
+        (async (callbacks, source, platform, config) => {
+          if (config?.native) {
+            if (import.meta.env.DEV) {
+              if (source.game.id !== 'yr') throw new Error('Native host policy is unsupported for this game');
+              const [{ NativeCore }, { createYrNativeHostPolicy }] = await Promise.all([
+                import('./native/core'),
+                import('../games/yr/nativeHost'),
+              ]);
+              return new NativeCore(
+                callbacks,
+                { ...config.native, renderPassthrough: config.renderPassthrough },
+                (memory, metadata, hash) => createYrNativeHostPolicy(memory, () => memory.accessor(), hash, metadata),
+                platform.scheduleFrame,
+                source.executableBytes,
+              );
+            }
+            throw new Error('Native host is available only in development');
+          }
+          return new VmCore(callbacks, source, platform);
+        }),
       fetchBytes: dependencies.fetchBytes ?? fetchBytes,
       createProvider: dependencies.createProvider,
       audio: dependencies.audio,
@@ -308,21 +338,21 @@ export class VmWorkerController {
             type: 'state-reply',
             requestId: message.requestId,
             kind: message.kind,
-            value: this.core?.getPointerState() ?? null,
+            value: (await this.core?.getPointerState()) ?? null,
           });
           break;
         case 'guest-speed-flag':
           this.post({
             type: 'guest-speed-flag-reply',
             requestId: message.requestId,
-            value: this.core?.setGameSpeedFlag(message.value) ?? null,
+            value: (await this.core?.setGameSpeedFlag(message.value)) ?? null,
           });
           break;
         case 'tactical-passthrough':
           this.post({
             type: 'tactical-passthrough-reply',
             requestId: message.requestId,
-            value: this.core?.setTacticalPassthrough(message.flags) ?? false,
+            value: (await this.core?.setTacticalPassthrough(message.flags)) ?? false,
           });
           break;
         case 'mem-record-start':
@@ -344,6 +374,7 @@ export class VmWorkerController {
           this.post({ type: 'flush-done', requestId: message.requestId });
           break;
         case 'attach-maps': {
+          if (this.nativeBackend) throw new Error('Native host does not support page file attachment');
           if (!this.core || !this.sourceTemplate) throw new Error('VM 尚未初始化');
           const { provider, result } = await prepareDynamicMaps(
             this.sourceTemplate,
@@ -430,6 +461,54 @@ export class VmWorkerController {
     this.pendingClock ??= config.clockRate;
     this.pendingVolume ??= config.masterVolume;
     this.callTracing = config.traceCalls;
+    const callbacks: GameVmCallbacks = {
+      onNetworkStatus: (status) => this.post({ type: 'network-status', status }),
+      onStatus: (status) => this.post({ type: 'status', phase: status.phase, detail: status.detail }),
+      onCall: (call, ordinal) => this.recordCall(call, ordinal),
+      onBlocked: (call) => this.post({ type: 'blocked', call }),
+      onFrame: (frame) => this.sendFrame(frame),
+      onLogicFrame: (count) => {
+        this.callBatchLogicFrames += count;
+      },
+      onShellPage: (title) => this.post({ type: 'shell-page', title }),
+    };
+    if (config.native) {
+      if (!import.meta.env.DEV || config.provider.kind !== 'native')
+        throw new Error('Invalid development native-host configuration');
+      this.nativeBackend = true;
+      const unsupported = (): never => {
+        throw new Error('Native host has no page-owned file or emulator backend');
+      };
+      const files: GameFileProvider = {
+        label: 'Native game files are owned by the native process',
+        read: async () => unsupported(),
+        write: async () => unsupported(),
+        flush: async () => unsupported(),
+        list: async () => unsupported(),
+      };
+      const source: GameSource = {
+        game: supportedGame(config.preferredGameId),
+        files,
+        executableBytes: config.selectedExecutable?.bytes ?? new Uint8Array(),
+      };
+      const platform: VmCorePlatform = {
+        resourcePolicy: {
+          prepareSource: async () => unsupported(),
+          isSessionStatic: unsupported,
+          preloadFallbackUrl: unsupported,
+        },
+        fetchBytes: async () => unsupported(),
+        createEmulator: unsupported,
+        createShim: unsupported,
+        scheduleFrame: (emit) => this.scheduleFrameWithBackpressure(emit),
+        audio: this.dependencies.audio ?? new ProxyAudioSink(this.post),
+        fastFileRead: false,
+      };
+      this.core = await this.dependencies.createCore(callbacks, source, platform, config);
+      this.callBatchTimer ??= globalThis.setInterval(() => this.flushCallBatch(), 500);
+      return;
+    }
+    if (config.provider.kind === 'native') throw new Error('Native provider requires native attachment options');
     let provider = this.dependencies.createProvider
       ? this.dependencies.createProvider(config)
       : this.buildProvider(config);
@@ -463,17 +542,6 @@ export class VmWorkerController {
       config.gameSpeed,
     );
     this.sourceTemplate = source.files;
-    const callbacks: GameVmCallbacks = {
-      onNetworkStatus: (status) => this.post({ type: 'network-status', status }),
-      onStatus: (status) => this.post({ type: 'status', phase: status.phase, detail: status.detail }),
-      onCall: (call, ordinal) => this.recordCall(call, ordinal),
-      onBlocked: (call) => this.post({ type: 'blocked', call }),
-      onFrame: (frame) => this.sendFrame(frame),
-      onLogicFrame: () => {
-        this.callBatchLogicFrames++;
-      },
-      onShellPage: (title) => this.post({ type: 'shell-page', title }),
-    };
     const probe = new BrowserEmulatorProbe();
     const platform: VmCorePlatform = {
       createEmulator: (options) =>
@@ -495,7 +563,7 @@ export class VmWorkerController {
       audio: this.dependencies.audio ?? new ProxyAudioSink(this.post),
       fastFileRead: config.fastFileRead,
     };
-    this.core = this.dependencies.createCore(callbacks, source, platform);
+    this.core = await this.dependencies.createCore(callbacks, source, platform, config);
     this.callBatchTimer ??= globalThis.setInterval(() => this.flushCallBatch(), 500);
   }
 
@@ -504,8 +572,10 @@ export class VmWorkerController {
     if (this.started) return;
     this.started = true;
     await this.core.start();
-    this.core.setGameClockRate(this.pendingClock ?? 1);
-    this.core.setMasterVolume(this.pendingVolume ?? 0.25);
+    if (!this.nativeBackend) {
+      this.core.setGameClockRate(this.pendingClock ?? 1);
+      this.core.setMasterVolume(this.pendingVolume ?? 0.25);
+    }
   }
 
   private recordCall(call: Parameters<NonNullable<GameVmCallbacks['onCall']>>[0], ordinal: number): void {
@@ -562,6 +632,7 @@ export class VmWorkerController {
     this.inFlightFrameId = 0;
     const next = this.pendingFrameEmit;
     this.pendingFrameEmit = null;
+    if (!next) this.core?.requestNextFrame?.();
     if (next) {
       const generation = ++this.frameScheduleGeneration;
       queueMicrotask(() => {

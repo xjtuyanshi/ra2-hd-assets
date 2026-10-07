@@ -13,6 +13,7 @@ import {
   writeGateSwitches,
   type GateMismatch,
   type GateSpec,
+  type GuestGateOptions,
   type InstalledGates,
 } from '../shared/guestGates';
 import { le32 } from '../shared/bytes';
@@ -294,10 +295,11 @@ export type YrPassthroughResult =
 export function installYrTacticalPassthrough(
   memory: GuestMemory,
   reserve: (size: number, alignment?: number) => number,
+  thread: GuestGateOptions['thread'] = YR_GATE_THREAD,
 ): YrPassthroughResult {
   const data = reserve(DATA_BYTES, DATA_BYTES);
   const code = reserve(CODE_BYTES, DATA_BYTES);
-  const builder = new GuestGateBuilder(memory, data, code, code + CODE_BYTES, { thread: YR_GATE_THREAD });
+  const builder = new GuestGateBuilder(memory, data, code, code + CODE_BYTES, { thread });
   // Custom terrain site first, so its stub sits at the start of the code page.
   const fill = builder.asm.here;
   emitTerrainFill(builder);
@@ -325,8 +327,10 @@ export function installYrTacticalPassthrough(
 
 function emitTerrainFill(builder: GuestGateBuilder): void {
   const { asm } = builder;
+  builder.emitOwnerThreadCheck('terrain:fill:original');
   const terrain = builder.switchWord('terrain:fill');
   asm.btMem(terrain.address, terrain.bit).jc('terrain:fill:key');
+  asm.label('terrain:fill:original');
   // Original copy: Composite->CopyFromPart(&ViewBounds, Tile(eax), &ViewBounds, 0, 1).
   asm.pushImm(1).pushImm(0).pushImm(YR_TACTICAL_VIEW_BOUNDS).raw(0x50).pushImm(YR_TACTICAL_VIEW_BOUNDS);
   asm.raw(0x8b, 0x11, 0xff, 0x52, 0x08).ret(); // mov edx,[ecx]; call [edx+8]
@@ -338,6 +342,7 @@ function emitTerrainFill(builder: GuestGateBuilder): void {
 
 function emitRedrawRequest(builder: GuestGateBuilder): void {
   const { asm } = builder;
+  builder.emitOwnerThreadCheck('redraw:read');
   const request = builder.userWord(WORD.redrawRequest);
   asm.cmpMemImm8(request, 0).je('redraw:read');
   asm.movMemImm(request, 0).incMem(builder.userWord(WORD.redraws));
@@ -399,10 +404,11 @@ function createControl(gates: InstalledGates, userBase: number): RenderPassthrou
 export function prepareYrRenderPassthrough(
   memory: GuestMemory,
   reserve: (size: number, alignment?: number) => number,
+  thread: GuestGateOptions['thread'] = YR_GATE_THREAD,
 ): RenderPassthroughControl | null {
   let result: YrPassthroughResult;
   try {
-    result = installYrTacticalPassthrough(memory, reserve);
+    result = installYrTacticalPassthrough(memory, reserve, thread);
   } catch (error) {
     // No room or unreadable memory: run the game unpatched rather than fail the session.
     console.warn('[passthrough] YR tactical passthrough not installed:', error);

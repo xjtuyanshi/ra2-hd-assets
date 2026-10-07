@@ -2,6 +2,7 @@ import type { GuestMemory } from '../../vm86/win32';
 import type { GameFrameReader } from '../performance';
 import { createFrameCounterReader } from '../shared/frameCounter';
 import { YR_STARTUP_PAGE_HASH } from './startupPage';
+import type { NativeHostMetadata } from '../nativeHost';
 
 const YR_GAME_SPEED = 0xa8eb60;
 /** SessionClass game mode: 0 campaign, 5 skirmish, the values between are network sessions. */
@@ -54,13 +55,34 @@ function limiterMatches(memory: GuestMemory): boolean {
  * YR 1.001: read the frame counter at 0x55de73, INC EDX at 0x55de7e, and write back at 0x55de81. The target rate is
  * added only when the limiter's own instructions match as well; without them the counters stay as they were.
  */
-export function createYrFrameReader(memory: GuestMemory, hash: string): GameFrameReader | null {
+export function createYrFrameReader(
+  memory: GuestMemory,
+  hash: string,
+  verifiedNativeHook?: NativeHostMetadata['verifiedNativeHook'],
+): GameFrameReader | null {
+  const signature = [
+    0x8b, 0x15, 0x84, 0xed, 0xa8, 0, 0xa1, 0x84, 0x77, 0xb0, 0, 0x42, 0x3b, 0xc7, 0x89, 0x15, 0x84, 0xed, 0xa8, 0,
+  ];
+  if (verifiedNativeHook) {
+    const { site, original, patched } = verifiedNativeHook;
+    if (
+      site !== 0x55de81 ||
+      original.length !== 6 ||
+      !original.every((byte, index) => byte === signature[index + 14]) ||
+      patched.length !== 6 ||
+      patched[0] !== 0xe9 ||
+      patched[5] !== 0x90 ||
+      !patched.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+    )
+      return null;
+    // The agent supplies its verified detour, and the reader checks those exact
+    // bytes in memory. Neither unrecognized hooks nor fabricated original reads are accepted.
+    signature.splice(14, 6, ...patched);
+  }
   const counters = createFrameCounterReader(memory, hash, {
     hash: YR_STARTUP_PAGE_HASH,
     site: 0x55de73,
-    signature: [
-      0x8b, 0x15, 0x84, 0xed, 0xa8, 0, 0xa1, 0x84, 0x77, 0xb0, 0, 0x42, 0x3b, 0xc7, 0x89, 0x15, 0x84, 0xed, 0xa8, 0,
-    ],
+    signature,
     frame: 0xa8ed84,
     gameSpeed: YR_GAME_SPEED,
     sessionSpeed: 0xa8b268,

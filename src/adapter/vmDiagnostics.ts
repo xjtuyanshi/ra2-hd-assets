@@ -9,6 +9,8 @@ import type { VmPhase } from '../app/session/runtimeEvents';
 export type VmDiagnosticAction = 'start' | 'sample' | 'stop' | 'usage';
 
 export interface VmRuntimeInfo {
+  /** Execution engine; omitted by older clients. */
+  backend?: 'v86' | 'native';
   mode: 'worker' | 'main-thread';
   reason: 'default' | 'requested' | 'worker-unavailable' | 'probe-failed';
   workerProbeMs: number | null;
@@ -45,6 +47,8 @@ export interface VmDiagnostics {
   clockRate: number;
   execution: VmExecutionSample | null;
   game: GamePerformanceSample | null;
+  /** Native-backend counters; emulator-only numeric fields are unsupported sentinels. */
+  native?: Readonly<Record<string, unknown>>;
   /** Present once a `usage` request has switched the accounting on. */
   usage?: VmUsage | null;
 }

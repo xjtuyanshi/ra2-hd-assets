@@ -200,6 +200,25 @@ const delta = (after: Record<string, number>, before: Record<string, number>, ke
 const COUNTS = ['drawCount', 'blitCount', 'skipCount', 'hits:draw', 'hits:blit', 'hits:skip'] as const;
 
 describe('可运行时切换的客体代码闸门（真实 v86）', () => {
+  it('native FS thread guards preserve original calls for a different owner without a VM hypercall address', async () => {
+    for (const owner of [77, 78])
+      await withGuestMachine(async (machine) => {
+        const sites = writeProgram(machine);
+        // Synthetic boot.bin configures FS over this TEB page. No game-derived bytes are used.
+        machine.write(0x70024, 77);
+        const gates = install(machine, sites, { thread: { fsOffset: 0x24, owner } });
+        writeGateSwitches(machine.memory, gates, ['draw', 'blit', 'skip']);
+        await machine.run();
+        const observed = observe(machine, gates);
+        expect(observed).toMatchObject(
+          owner === 77
+            ? { drawCount: 1, blitCount: 1, skipCount: 0, depthInDraw: 1, 'hits:draw': 1 }
+            : { drawCount: 1, blitCount: 3, skipCount: 1, depthInDraw: 0, 'hits:draw': 0 },
+        );
+        expect(observed.espAfter).toBe(observed.espBefore);
+        expect(observed.esiAfter).toBe(0x5a5a_5a5a);
+      });
+  });
   it('开关全关时原样执行：结果、栈与被调用者保存寄存器不变', async () => {
     const r = await run([]);
     expect(r).toMatchObject({ drawCount: 1, blitCount: 3, skipCount: 1, depthInDraw: 0, depthInHelper: 0 });

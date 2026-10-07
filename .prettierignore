@@ -11,3 +11,7 @@ packages/ra2-formats/src/
 
 # Raw research exports for the remaster plan (agent JSON output, kept verbatim).
 docs/remaster/research/
+
+# Native-host third-party sources retain upstream formatting.
+packages/native-host/third_party/
+packages/native-host/build/

@@ -127,3 +127,20 @@ it('YR 帧计数只有在限帧指令也吻合时才附带应有帧率，且不�
   const sample = new GamePerformanceMeter().sample(createYrFrameReader(memory, YR_STARTUP_PAGE_HASH)!()!, 10, true);
   expect(sample.targetFps).toBe(62.5);
 });
+
+it('native counter accepts only its explicitly verified six-byte detour and still checks the surrounding signature', () => {
+  const memory = createGuestMemory();
+  const patched = [0xe9, 0x12, 0x34, 0x56, 0, 0x90];
+  memory.write_memory([...YR_COUNTER.bytes.slice(0, 14), ...patched], YR_COUNTER.site);
+  writeU32(memory, YR_COUNTER.frame, 456);
+  const metadata = { site: 0x55de81, original: YR_COUNTER.bytes.slice(14), patched };
+  expect(createYrFrameReader(memory, YR_STARTUP_PAGE_HASH)).toBeNull();
+  expect(createYrFrameReader(memory, YR_STARTUP_PAGE_HASH, metadata)!()?.frame).toBe(456);
+  expect(createYrFrameReader(memory, YR_STARTUP_PAGE_HASH, { ...metadata, site: 0x55de80 })).toBeNull();
+  expect(createYrFrameReader(memory, YR_STARTUP_PAGE_HASH, { ...metadata, original: [0, 0, 0, 0, 0, 0] })).toBeNull();
+  expect(
+    createYrFrameReader(memory, YR_STARTUP_PAGE_HASH, { ...metadata, patched: [0xe9, 1, 2, 3, 4, 0x90] }),
+  ).toBeNull();
+  memory.write_memory([0x90], YR_COUNTER.site);
+  expect(createYrFrameReader(memory, YR_STARTUP_PAGE_HASH, metadata)).toBeNull();
+});

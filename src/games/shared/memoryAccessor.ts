@@ -2,9 +2,10 @@ import type { GuestMemory } from '../../vm86/win32';
 
 /**
  * Read-only little-endian access to guest memory for high-frequency observers (for example a renderer bridge polling
- * native object state every presented frame). Every method is total: an address outside the backing store reads as 0
- * (or an empty array) instead of throwing, so a stale pointer can never abort a poll. Callers still validate pointers
- * themselves; `size` lets them reject addresses beyond guest memory before following them.
+ * native object state every presented frame). Dense VM implementations are total: an address outside the backing
+ * store reads as 0 (or an empty array). Sparse native mirrors instead throw a typed miss for unavailable pages, and
+ * their host discards the entire operation even when a reader catches that miss. Callers validate pointer plausibility;
+ * `size` lets them reject addresses beyond the guest address space before following them.
  */
 export interface GuestMemoryAccessor {
   /** Guest memory size in bytes; addresses at or above it are never valid. */

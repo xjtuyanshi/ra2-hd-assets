@@ -22,6 +22,8 @@ export interface GameFileEntry {
 }
 
 export interface VmInitConfig {
+  /** Development-only native attachment; the game is already running outside the page. */
+  native?: { url: string; token: string };
   startupPage?: string;
   /** HD bridge opt-in: install the game's inert native overlay passthrough patches before the entry point. */
   renderPassthrough?: boolean;
@@ -30,6 +32,7 @@ export interface VmInitConfig {
    * Provider instances cannot be structured-cloned; rebuild and rediscover in the Worker, also rebuilding the game's sourceTransform. Directory overlays contain online-package layers above the directory, innermost first with later layers overriding earlier ones, matching the page's Overlay-chain precedence.
    */
   provider:
+    | { kind: 'native' }
     | { kind: 'directory'; handle: FileSystemDirectoryHandle; overlays?: GameFileEntry[] }
     | { kind: 'memory'; files: GameFileEntry[]; label: string }
     /** Two-stage loading: send the complete directory first, then read bytes through the port on demand; unextracted files wait for their producer. */

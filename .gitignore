@@ -34,3 +34,6 @@ __pycache__/
 *.bik
 *.wav
 *.aud
+
+# Native-host build outputs are local artifacts.
+/packages/native-host/build/

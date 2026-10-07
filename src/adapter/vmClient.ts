@@ -63,7 +63,7 @@ export class WorkerVmClient implements VmShell {
   private readonly probeStartedAt = performance.now();
   private readonly worker: Worker;
   private readonly onTerminated: (() => void) | undefined;
-  private readonly audio: WebAudioPcmSink;
+  private readonly audio: WebAudioPcmSink | null;
   private readonly requests = new Map<number, PendingRequest>();
   private readonly callbacks: GameVmCallbacks;
   private readonly initConfig: VmInitConfig;
@@ -91,14 +91,16 @@ export class WorkerVmClient implements VmShell {
     this.recycleFrames = options.recycleFrames ?? false;
     this.callbacks = callbacks;
     this.initConfig = initConfig;
+    this.runtimeInfo.backend = initConfig.native ? 'native' : 'v86';
     this.startupTimeoutMs = options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS;
     this.initTransfer = options.initTransfer;
-    this.audio =
-      options.audio ??
-      new WebAudioPcmSink({
-        onError: (error) => console.warn('[VM audio]', error),
-        diagnosticsIntervalMs: AUDIO_DIAGNOSTICS_INTERVAL_MS,
-      });
+    this.audio = initConfig.native
+      ? null
+      : (options.audio ??
+        new WebAudioPcmSink({
+          onError: (error) => console.warn('[VM audio]', error),
+          diagnosticsIntervalMs: AUDIO_DIAGNOSTICS_INTERVAL_MS,
+        }));
     this.worker =
       options.workerFactory?.() ?? new Worker(new URL('./vmWorker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
@@ -130,7 +132,7 @@ export class WorkerVmClient implements VmShell {
 
   async start(): Promise<void> {
     this.ensureActive();
-    this.removeAudioUnlock = this.audio.installUserGestureUnlock(document);
+    this.removeAudioUnlock = this.audio?.installUserGestureUnlock(document) ?? null;
     // Unload cannot await: pagehide makes a best-effort flush of queued save writes, executed in the Worker via a flush message.
     const flushOnPagehide = () => {
       void this.flushFiles().catch(() => {});
@@ -178,6 +180,7 @@ export class WorkerVmClient implements VmShell {
   }
 
   setGameClockRate(rate: number): number {
+    if (this.initConfig.native) return 0;
     const normalized = normalizeGameClockRate(rate);
     this.send({ type: 'clock', rate: normalized });
     return normalized;
@@ -185,6 +188,10 @@ export class WorkerVmClient implements VmShell {
 
   /** Master volume: linear gain 0..1 after combining all guest audio. */
   setMasterVolume(linear: number): void {
+    if (this.initConfig.native) {
+      console.warn('[native] Page audio volume is unsupported; native game owns audio');
+      return;
+    }
     this.send({ type: 'volume', linear });
   }
 
@@ -393,9 +400,9 @@ export class WorkerVmClient implements VmShell {
         this.applyAudioOp(message.op);
         break;
       case 'audio-control':
-        if (message.action === 'master-volume') this.audio.setMasterVolume(message.linear);
-        else if (message.action === 'stop-all') this.audio.stopAll();
-        else if (message.action === 'destroy') void this.audio.destroy();
+        if (message.action === 'master-volume') this.audio?.setMasterVolume(message.linear);
+        else if (message.action === 'stop-all') this.audio?.stopAll();
+        else if (message.action === 'destroy') void this.audio?.destroy();
         break;
       case 'init-done':
         this.resolveRequest(message.requestId, undefined);
@@ -490,7 +497,7 @@ export class WorkerVmClient implements VmShell {
     this.worker.onmessageerror = null;
     this.worker.terminate();
     this.onTerminated?.();
-    await this.audio.destroy();
+    await this.audio?.destroy();
     const reason = this.lifecycleError();
     for (const request of this.requests.values()) request.reject(reason);
     this.requests.clear();
@@ -515,6 +522,7 @@ export class WorkerVmClient implements VmShell {
   }
 
   private applyAudioOp(op: AudioOp): void {
+    if (!this.audio) throw new Error('Native host does not provide page audio operations');
     switch (op.op) {
       case 'createBuffer':
         this.audio.createBuffer(op.id, op.byteLength, op.format);

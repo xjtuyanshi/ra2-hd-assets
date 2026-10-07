@@ -85,6 +85,35 @@ export async function createVmShell(
   source: GameSource,
   options: WorkerVmClientOptions = {},
 ): Promise<VmShell> {
+  const nativeQuery = typeof window === 'undefined' ? null : new URLSearchParams(window.location.search);
+  if (nativeQuery?.get('backend') === 'native') {
+    if (!import.meta.env.DEV) throw new Error('Native host is available only in development');
+    if (typeof Worker === 'undefined' || nativeQuery.get('vm-worker') === '0')
+      throw new Error('Native host requires the Worker backend');
+    const url = nativeQuery.get('agent');
+    const token = nativeQuery.get('agent-token');
+    if (!url || !token) throw new Error('Native host requires agent and agent-token options');
+    const executable = source.executableBytes.slice();
+    const config: VmInitConfig = {
+      native: { url, token },
+      provider: { kind: 'native' },
+      preferredGameId: source.game.id,
+      selectedExecutable: { path: source.game.executable, bytes: executable },
+      renderPassthrough: options.renderPassthrough,
+      fastFileRead: false,
+      clockRate: 0,
+      masterVolume: 0,
+      traceCalls: false,
+    };
+    const client = new WorkerVmClient(callbacks, config, { ...options, initTransfer: [executable.buffer] });
+    try {
+      await client.waitProbe();
+      return client;
+    } catch (error) {
+      await client.destroy();
+      throw error;
+    }
+  }
   // Carry this explicitly into the Worker; an overlay added only on the page would be lost by the HTTP backend.
   const additionalFiles = source.additionalFiles;
   const mainThreadSource = additionalFiles ? mountCustomMapFiles(source, additionalFiles) : source;

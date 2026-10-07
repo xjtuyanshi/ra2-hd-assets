@@ -105,8 +105,9 @@ export function createYrRenderStateReader(
   memory: GuestMemory,
   size: number,
   hash: string,
+  createAccessor?: () => GuestMemoryAccessor,
 ): GameRenderStateReader | null {
-  const accessor = () => createByteViewAccessor(memory.read_memory(0, size));
+  const accessor = createAccessor ?? (() => createByteViewAccessor(memory.read_memory(0, size)));
   const readState = createYrStateReader(accessor, hash);
   if (!readState) return null;
   return createYrRenderStateReaderFrom({
@@ -173,13 +174,7 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
     const at = now();
     // A due cell-layer poll is never held back: in a running game it falls on a new logic frame anyway.
     const cellPollDue = !!last?.map && at - lastCellPoll >= YR_OVERLAY_POLL_MS;
-    if (
-      last &&
-      lastKey &&
-      !cellPollDue &&
-      at - lastLook < YR_SAME_FRAME_REREAD_MS &&
-      sameFrameAndView(memory, lastKey)
-    )
+    if (last && lastKey && !cellPollDue && at - lastLook < YR_SAME_FRAME_REREAD_MS && sameFrameAndView(memory, lastKey))
       return (last = publishSidebar(last));
     lastLook = at;
     const nativeDetail = readYrNativeDetail(memory);

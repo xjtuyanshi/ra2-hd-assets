@@ -250,9 +250,12 @@ export interface GuestGateOptions {
   /**
    * Restrict every gate to one guest thread: the dword at `currentAddress` holds the running thread's id (maintained by
    * the VM across switches), and gates act only while it equals `owner`. Supplied by the caller, which knows both the
-   * VM's thread bookkeeping and which thread runs the gated code; without it gates act on every thread.
+   * VM's thread bookkeeping and which thread runs the gated code. Native x86 hosts can instead supply the TEB field
+   * at `fsOffset`; both comparisons leave general-purpose registers untouched. Without it gates act on every thread.
    */
-  readonly thread?: { readonly currentAddress: number; readonly owner: number };
+  readonly thread?:
+    | { readonly currentAddress: number; readonly owner: number; readonly fsOffset?: never }
+    | { readonly fsOffset: number; readonly owner: number; readonly currentAddress?: never };
 }
 
 /**
@@ -277,7 +280,14 @@ export class GuestGateBuilder {
     if (data % 0x1000) throw new Error('gate data page must be 4 KiB aligned');
     if (code < data + GATE_DATA.size && codeLimit > data) throw new Error('gate code must not share the data page');
     const thread = options.thread;
-    if (thread && (!Number.isInteger(thread.currentAddress) || !Number.isInteger(thread.owner)))
+    if (
+      thread &&
+      (!Number.isInteger(thread.currentAddress ?? thread.fsOffset) ||
+        !Number.isInteger(thread.owner) ||
+        thread.owner < 0 ||
+        thread.owner > 0xffff_ffff ||
+        (thread.currentAddress !== undefined && thread.fsOffset !== undefined))
+    )
       throw new Error('bad gate thread configuration');
     this.asm = new GateAssembler(code);
     this.emitPost();
@@ -307,6 +317,15 @@ export class GuestGateBuilder {
 
   get depthAddress(): number {
     return this.data + GATE_DATA.depth;
+  }
+
+  /** Game-specific custom stubs use the same ownership guard as ordinary gates. */
+  emitOwnerThreadCheck(continuation: string): void {
+    const thread = this.options.thread;
+    if (!thread) return;
+    if (thread.fsOffset !== undefined)
+      this.asm.raw(0x64, 0x81, 0x3d).u32(thread.fsOffset).u32(thread.owner).jne(continuation);
+    else this.asm.cmpMemImm(thread.currentAddress, thread.owner).jne(continuation);
   }
 
   /**
@@ -357,8 +376,7 @@ export class GuestGateBuilder {
       asm.btMem(own.address, own.bit).jnc(cont);
     }
     asm.label(on);
-    const thread = this.options.thread;
-    if (thread) asm.cmpMemImm(thread.currentAddress, thread.owner).jne(cont);
+    this.emitOwnerThreadCheck(cont);
     asm.incMem(counter);
     if (action.kind === 'skip' || action.kind === 'blit') {
       asm.movEaxImm(action.returnValue ?? 0).ret(action.returnBytes);
