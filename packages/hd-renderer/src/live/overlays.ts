@@ -141,10 +141,35 @@ export function buildOverlayInstances(
       lighting: type.lighting,
       light: bridge ? deckLight(level) : undefined,
       deckHeight: !isRubble && isHighBridge(id) ? HIGH_BRIDGE_HEIGHT : undefined,
+      // Walls, fences and the like: neighbouring pieces overlap at their joints (see overlayTieBias). Bridge decks
+      // keep their physical depth: units stand on them.
+      tieBias: type.flat || isHighBridge(id) ? undefined : overlayTieBias(x, y),
       gradeExempt: spriteClassGradeExempt(atmosphere, !isRubble && type.tiberium ? 'ore' : 'overlay'),
     });
   }
   return { pages, missingTypes };
+}
+
+/** Nearness per step towards the camera, and the number of cell diagonals after which overlayTieBias starts over. */
+export const OVERLAY_TIE_STEP = 0.0008;
+export const OVERLAY_TIE_PERIOD = 64;
+
+/**
+ * Tie-break between the upright overlay cards of neighbouring cells (wall and fence runs, their corners and gates'
+ * neighbours). Each piece's art reaches into the next cell, and below its base line a card's depth follows the
+ * ground, so where two pieces overlap low down their depths are equal: which one a pixel showed was decided by
+ * float rounding, row by row (measured on a frozen frame of a concrete wall corner and a fortress wall corner:
+ * about 100 single-row stripes of the two pieces per joint, dark stub against lit wall, at device pixels). The
+ * engine paints the cells back to front, so the piece of the cell nearer the camera (larger x + y) is the one that
+ * shows: every step of x + y adds OVERLAY_TIE_STEP of nearness, 16 times more than the rounding it has to beat.
+ * The count starts over every OVERLAY_TIE_PERIOD diagonals so the whole bias stays below the clearance an upright
+ * card already has over the ground (cardDepth.ts CARD_CLEARANCE, 0.06): 0.05 at most, a twelfth of the depth of
+ * one cell, so nothing that stands in another cell changes sides. On the one diagonal in 64 where the count
+ * starts over the farther piece wins its joints: still one piece, not stripes.
+ */
+export function overlayTieBias(x: number, y: number): number {
+  const diagonal = Math.round(x + y);
+  return OVERLAY_TIE_STEP * (((diagonal % OVERLAY_TIE_PERIOD) + OVERLAY_TIE_PERIOD) % OVERLAY_TIE_PERIOD);
 }
 
 /**

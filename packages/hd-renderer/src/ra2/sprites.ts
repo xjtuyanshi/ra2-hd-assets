@@ -125,6 +125,12 @@ export interface SpriteInstance {
   /** Optional traversal tie-break and building foundation. Decals/shadows retain physical ground depth. */
   painter?: PainterObject;
   painterPart?: number;
+  /**
+   * Nearness (world units) added to an upright card without a painter object, to settle depth ties between cards of
+   * neighbouring cells: below its base line a card follows the ground under each pixel, so two cards that overlap
+   * there have the very same depth and rounding picked the winner row by row (live/overlays.ts overlayTieBias).
+   */
+  tieBias?: number;
   /** Horizontal high-bridge depth at this height above the draw anchor; leaves screen placement unchanged. */
   deckHeight?: number;
   /** Original-engine body template, horizontal part or bitmap-bottom card; absent preserves analytic depth. */
@@ -1256,7 +1262,9 @@ export class SpriteLayer {
               ? 1
               : s.flat || s.shadow || s.kind
                 ? 0
-                : spritePainterBias(s.painter, s.painterPart),
+                : s.painter
+                  ? spritePainterBias(s.painter, s.painterPart)
+                  : (s.tieBias ?? 0),
         );
         const foundation = s.painter?.foundation;
         const dx = foundation ? s.anchor.x - s.painter!.x : 0;
