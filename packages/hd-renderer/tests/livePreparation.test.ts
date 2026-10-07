@@ -507,6 +507,8 @@ describe('top-layer pass of the post graph', () => {
       topEffectsVisible: false,
       topEffectsPass: false,
       topEffectsStale: false,
+      warmMist: null,
+      mist: { amount: { value: 0 } },
       renderer: { getPixelRatio: () => 1, backend: {} },
     };
     const hd = Object.assign(Object.create(HdRenderer.prototype), state) as HdRenderer;

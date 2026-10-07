@@ -555,7 +555,7 @@ const RAISED_DEVICE_LIMITS = [
 /** Frames between two checks for materials whose pipeline the GPU refused (about a quarter of a second). */
 const PIPELINE_HEALTH_FRAMES = 15;
 
-/** A post graph kept for a quality tier that is not drawing (see HdRenderer.switchPipeline). */
+/** A post graph that is not drawing: kept for a form the frame takes again (see HdRenderer.switchPipeline). */
 interface ParkedPipeline {
   pipeline: RenderPipeline;
   nodes: { dispose(): void }[];
@@ -584,11 +584,20 @@ export class HdRenderer {
    */
   private readonly mrtSets = new Map<string, ReturnType<typeof mrt>>();
   /**
-   * Post graphs of other quality tiers, built once and kept while the current one draws (see drawTier): a change of
-   * tier then builds and compiles nothing, it only takes the render targets of one scene pass for those of the other.
-   * Any other rebuild of the post graph (mist, the top pass, a setting) discards them: they would be stale.
+   * Post graphs of the other forms a frame takes in a match (with and without mist), built once and kept while the
+   * current one draws: going back to a form builds and compiles nothing, it only takes the render targets of one
+   * scene pass for those of the other. A rebuild for a setting discards them: they would be stale.
    */
   private readonly parkedPipelines = new Map<string, ParkedPipeline>();
+  /**
+   * Post graphs a rebuild replaced, disposed only after the graph that replaced them has drawn a frame. three counts
+   * the users of a compiled shader and pipeline and drops them with the last one: disposing the old graph first made
+   * the new one compile every post pass again (bloom, blurs, sharpening: about thirty small pipelines, one frame of
+   * 0.26 to 0.48 s in a match), although most of them are the same shader text in the same state.
+   */
+  private retiredPipelines: ParkedPipeline[] = [];
+  /** Mist in the post graph while a warm frame draws a form the frame does not have now; null otherwise. */
+  private warmMist: boolean | null = null;
   /** The scene and top pass of the current post graph (their render targets are the large ones). */
   private mainPasses: { renderTarget: RenderTarget }[] = [];
   /** Set while pipelines are compiled off the frame (see enableAsyncPipelines). */
@@ -602,9 +611,9 @@ export class HdRenderer {
   private qualityTier = 0;
   /** The soft-shadow setting a tier switched off, to restore it. */
   private softShadows: boolean | null = null;
-  /** Tiers still to be drawn once out of sight (see warm); null while not warming. */
-  private warmQueue: number[] | null = null;
-  /** The tier the pipeline is built for (the governor's, or the one a warm frame draws). */
+  /** Forms of the post graph (with mist or without) still to be drawn out of sight (see warm); null while not warming. */
+  private warmQueue: boolean[] | null = null;
+  /** The tier whose state is applied (see drawTier). */
   private drawnTier = 0;
   /** The top target may still hold art of an earlier frame and is drawn (cleared) once more. */
   private topEffectsStale = false;
@@ -971,7 +980,7 @@ export class HdRenderer {
     if (visible) this.enableTopEffects();
   }
 
-  /** Whether the top pass is part of the post graph (it costs a multisampled target of its own). */
+  /** Whether the top pass is part of the post graph (it costs a scene-sized colour and depth target of its own). */
   get topEffectsEnabled(): boolean {
     return this.topEffectsPass;
   }
@@ -1014,9 +1023,14 @@ export class HdRenderer {
     return this.bufferScale ?? this.renderer.getPixelRatio();
   }
 
-  /** Multisampling in use: the setting, unless the quality tier gives it up. */
+  /** Anti-aliasing in use: the setting at every quality tier (no tier changes the post graph). */
   private antialiasInUse(): Antialias {
-    return this.drawnTier >= 2 && this.settings.antialias === 'msaa4' ? 'none' : this.settings.antialias;
+    return this.settings.antialias;
+  }
+
+  /** Whether the post graph in use (or the one a warm frame asks for) has the mist pass. */
+  private mistWanted(): boolean {
+    return this.warmMist ?? this.mist.amount.value > 0;
   }
 
   private settingsPipelineKey(): string {
@@ -1035,12 +1049,14 @@ export class HdRenderer {
     if (emissiveOverlayEnabled(this.settings, emissiveMrtSupported(this.renderer))) key.push('emissive');
     if (this.world && debugView === 'none') key.push('unlit');
     if (this.topEffectsPass) key.push('top-effects');
+    if (this.mistWanted()) key.push('mist');
     return JSON.stringify(key);
   }
 
   /**
-   * Build the post graph for the settings and tier in use. `fresh` (every caller but a change of tier) replaces the
-   * current graph and discards the parked ones; without it the current graph has been parked and is left alone.
+   * Build the post graph for the settings in use. `fresh` (every caller but a change between parked forms) replaces
+   * the current graph and the parked ones, which are disposed once the new graph has drawn (see retiredPipelines);
+   * without it the current graph has been parked and is left alone.
    */
   private buildPipeline(fresh = true): void {
     const { toneMapper, sharpness, debugView } = this.settings;
@@ -1049,15 +1065,14 @@ export class HdRenderer {
     const unlit = !!this.world && debugView === 'none';
     this.emissiveOverlay.setEnabled(overlay);
     this.pipelineKey = this.settingsPipelineKey();
-    // Release the previous pipeline's render targets and output material before building the new one (the MSAA scene
-    // target alone is over 100 MB at 2400x1500).
+    // The previous graphs give up their large render targets now (the scene target with its four attachments and
+    // depth is over 200 MB at 3120x2096) and are disposed after the new graph's first frame.
     if (fresh) {
-      this.pipeline?.dispose();
-      for (const node of this.pipelineNodes) node.dispose();
-      for (const parked of this.parkedPipelines.values()) {
-        parked.pipeline.dispose();
-        for (const node of parked.nodes) node.dispose();
+      if (this.pipeline) {
+        for (const main of this.mainPasses) main.renderTarget.dispose();
+        this.retiredPipelines.push({ pipeline: this.pipeline, nodes: this.pipelineNodes, mainPasses: this.mainPasses });
       }
+      this.retiredPipelines.push(...this.parkedPipelines.values());
       this.parkedPipelines.clear();
     }
     const nodes: { dispose(): void }[] = (this.pipelineNodes = []);
@@ -1103,8 +1118,8 @@ export class HdRenderer {
       : scenePass.getTextureNode('depth');
     const world = this.mist.worldPosition(depth, screenUV);
     // Mist sits in the scene before bloom so lamp halos in it glow like the lamps themselves. With no mist the
-    // pipeline leaves it out entirely (frame() rebuilds it when the mist starts or stops).
-    this.mistInPipeline = this.mist.amount.value > 0;
+    // pipeline leaves it out entirely (frame() changes graph when the mist starts or stops).
+    this.mistInPipeline = this.mistWanted();
     const misted: ShaderNode = this.mistInPipeline ? this.mist.apply(hdr, depth, world) : hdr;
     // The shroud covers the mist and everything under it, and what it hides never feeds the bloom.
     const texel: ShaderNode = texture(
@@ -1216,8 +1231,10 @@ export class HdRenderer {
       // Band-pass (difference of two half-resolution blurs): faces, crevices and canopy masses a few CSS px and up gain
       // contrast while pixel-scale texture (brick, asphalt grain) is left as it is; the plain unsharp mask doubled it.
       const ratio = this.viewPixelScale();
-      const fine: ShaderNode = gaussianBlur(display, null, (CLARITY_FINE * ratio) / 2, { resolutionScale: 0.5 });
-      const broad: ShaderNode = gaussianBlur(display, null, (CLARITY_SIGMA * ratio) / 2, { resolutionScale: 0.5 });
+      // Both blurs read one copy of the picture: handed the expression, each drew a full-size copy of its own.
+      const picture: ShaderNode = convertToTexture(display);
+      const fine: ShaderNode = gaussianBlur(picture, null, (CLARITY_FINE * ratio) / 2, { resolutionScale: 0.5 });
+      const broad: ShaderNode = gaussianBlur(picture, null, (CLARITY_SIGMA * ratio) / 2, { resolutionScale: 0.5 });
       nodes.push(fine, broad);
       const luma = vec3(0.2126, 0.7152, 0.0722);
       const lum = dot(display.rgb, luma);
@@ -1526,7 +1543,8 @@ export class HdRenderer {
         ? 0.06 * snowAmount
         : 0.05 * light.night;
     this.mist.amount.value = airless ? 0 : Math.min(MIST_CAP, baseMist * this.atmosphere.mist);
-    if (this.mist.amount.value > 0 !== this.mistInPipeline) this.buildPipeline();
+    // With or without mist is another post graph: both are kept once built (see switchPipeline).
+    if (this.pipeline && !this.warmQueue && this.mistWanted() !== this.mistInPipeline) this.switchPipeline();
 
     this.rain.intensity.value = rainAmount;
     this.rain.object.visible = rainAmount > 0;
@@ -1647,19 +1665,17 @@ export class HdRenderer {
 
   /**
    * Tiers of the frame-time safeguard (qualityGovernor.ts), cheapest last. Each gives up what shows least for its
-   * cost; none touches the resolution, so sprites and terrain stay texel-exact at every tier:
+   * cost; none touches the resolution or the outline pass, so sprites and terrain stay texel-exact and outlines
+   * smooth at every tier:
    *  0  everything;
    *  1  nothing reads a copy of the frame any more: new blasts have no heat shimmer (it refracts one) and the live
    *     view's translucent engine effects blend in linear light instead of the engine's display-space mix
-   *     (EffectSpriteLayer.backdropMix). Each copy ends, resolves and reloads the multisampled scene pass. Explosion
-   *     and lamp lights are drawn again every second frame;
-   *  2  and no multisampling (it smooths only the outlines of voxel units and their shadows: sprite art carries its
-   *     own soft edges);
-   *  3  and unit shadows with a hard edge (one flattened copy for five).
-   * Tiers 0 and 1 draw the same passes, and so do 2 and 3: only the step between 1 and 2 changes the post graph, and
-   * both graphs are kept once built (see switchPipeline), so no step compiles anything after the first time.
+   *     (EffectSpriteLayer.backdropMix). Explosion and lamp lights are drawn again every second frame;
+   *  2  and unit shadows with a hard edge (one flattened copy for five).
+   * Every tier draws the same passes with the same post graph: a step compiles nothing and allocates nothing.
+   * (Multisampling used to be a tier of its own: it cost as much as everything else in the scene pass together.)
    */
-  static readonly QUALITY_TIERS = 4;
+  static readonly QUALITY_TIERS = 3;
 
   /** The safeguard's tier in use. */
   get quality(): number {
@@ -1676,8 +1692,7 @@ export class HdRenderer {
     const next = Math.min(Math.max(0, Math.floor(tier) || 0), HdRenderer.QUALITY_TIERS - 1);
     if (next === this.qualityTier) return;
     this.qualityTier = next;
-    // Warm frames draw their own tiers; the last of them returns to this one.
-    if (!this.warmQueue) this.drawTier(next);
+    this.drawTier(next);
   }
 
   private drawTier(tier: number): void {
@@ -1685,21 +1700,20 @@ export class HdRenderer {
     this.drawnTier = tier;
     this.effects.heatShimmer = tier < 1;
     const shadows = voxelShadowFor(this.nodes);
-    if (tier >= 3) {
+    if (tier >= 2) {
       this.softShadows ??= shadows.soft;
       shadows.soft = false;
     } else if (this.softShadows !== null) {
       shadows.soft = this.softShadows;
       this.softShadows = null;
     }
-    if (this.pipeline && this.pipelineKey !== this.settingsPipelineKey()) this.switchPipeline();
   }
 
   /**
-   * Draw with the post graph of the tier in use: the one parked for it, or a new one; the graph that drew until now
-   * is parked. A parked graph keeps its nodes, materials and compiled pipelines and gives up only the render targets
-   * of its scene and top pass (most of a gigabyte with multisampling at 3120x2096), which three allocates again when
-   * the pass is next drawn.
+   * Draw with the post graph of the form in use (see settingsPipelineKey): the one parked for it, or a new one; the
+   * graph that drew until now is parked. A parked graph keeps its nodes, materials and compiled pipelines and gives
+   * up only the render targets of its scene and top pass (the large ones), which three allocates again when the pass
+   * is next drawn.
    */
   private switchPipeline(): void {
     const key = this.settingsPipelineKey();
@@ -1719,6 +1733,7 @@ export class HdRenderer {
     this.pipelineNodes = parked.nodes;
     this.mainPasses = parked.mainPasses;
     this.pipelineKey = key;
+    this.mistInPipeline = this.mistWanted();
     this.terrainDepth.setMainPass(parked.mainPasses[0]!.renderTarget, this.view.camera);
     // Its top target was given up with the others: draw it once even if no top art is on screen.
     this.topEffectsStale = true;
@@ -1731,29 +1746,19 @@ export class HdRenderer {
    * explosion, its first top-layer art, the first frame with water in view or with a fireball next to a building each
    * cost a quarter of a second to a second and a half that way (measured in a six-player match). A warm frame draws
    * everything that exists, hidden or not, in every pass: the idle effect pools, water twins of land units, the depth
-   * capture and the water mirrors even when nothing asks for them. One frame is drawn per quality tier whose passes
-   * differ, so a later change of tier compiles nothing either.
+   * capture and the water mirrors even when nothing asks for them. The top pass joins the post graph now (it is drawn
+   * only while top-layer art shows), and one frame is drawn per form of the post graph, with mist and without, so
+   * the first top-layer art and the first mist of a match build nothing either.
    */
   warm(): void {
     if (!this.pipeline || this.warmQueue) return;
-    const tier = this.drawnTier;
-    const keyOf = (t: number): string => {
-      this.drawnTier = t;
-      return this.settingsPipelineKey();
-    };
-    // One frame per set of passes, cheapest first; the tier in use stands for its own set and comes last: its render
-    // targets are the ones that stay.
-    const keys = new Set<string>([keyOf(this.qualityTier)]);
-    const queue: number[] = [];
-    for (let t = HdRenderer.QUALITY_TIERS - 1; t >= 0; t--) {
-      const key = keyOf(t);
-      if (keys.has(key)) continue;
-      keys.add(key);
-      queue.push(t);
+    if (!this.topEffectsPass) {
+      this.topEffectsPass = true;
+      this.buildPipeline();
     }
-    this.drawnTier = tier;
-    queue.push(this.qualityTier);
-    this.warmQueue = queue;
+    // The form in use comes last: its render targets are the ones that stay.
+    const mist = this.mist.amount.value > 0;
+    this.warmQueue = [!mist, mist];
   }
 
   /** Whether warm frames are still being drawn (see warm). */
@@ -1763,9 +1768,8 @@ export class HdRenderer {
 
   private renderWarmFrame(): void {
     const queue = this.warmQueue!;
-    const tier = queue.shift()!;
-    // The tier's own state without its pipeline key being compared against the governor's tier.
-    this.drawTier(tier);
+    this.warmMist = queue.shift()!;
+    if (this.pipelineKey !== this.settingsPipelineKey()) this.switchPipeline();
     const hidden: Object3D[] = [];
     try {
       // Poses and the visibility that follows from them first (shadow twins decide theirs while their matrices are
@@ -1791,7 +1795,8 @@ export class HdRenderer {
     }
     if (!queue.length) {
       this.warmQueue = null;
-      this.drawTier(this.qualityTier);
+      this.warmMist = null;
+      if (this.pipelineKey !== this.settingsPipelineKey()) this.switchPipeline();
     }
   }
 
@@ -1800,6 +1805,17 @@ export class HdRenderer {
     this.beforeDepthCapture?.();
     this.terrainDepth.render(this.renderer, this.scene, this.view.camera);
     this.terrainDepth.renderMainPass(() => this.pipeline!.render());
+    // The graph that just drew holds every shader and pipeline it shares with the ones it replaced.
+    if (this.retiredPipelines.length) this.disposeRetiredPipelines();
+  }
+
+  private disposeRetiredPipelines(): void {
+    const retired = this.retiredPipelines;
+    this.retiredPipelines = [];
+    for (const graph of retired) {
+      graph.pipeline.dispose();
+      for (const node of graph.nodes) node.dispose();
+    }
   }
 
   private readonly scratchColor = new Color();
@@ -2036,6 +2052,7 @@ export class HdRenderer {
     this.pipeline?.dispose();
     for (const node of this.pipelineNodes) node.dispose();
     this.pipelineNodes.length = 0;
+    this.disposeRetiredPipelines();
     for (const parked of this.parkedPipelines.values()) {
       parked.pipeline.dispose();
       for (const node of parked.nodes) node.dispose();
