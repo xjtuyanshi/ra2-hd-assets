@@ -859,7 +859,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         shownFrames++;
         publishTier(live.hd.quality);
       }
-      samplePace(now);
+      // Not while the view is being switched off (the key colour's trail): the game repaints its whole picture then.
+      if (hole) samplePace(now);
     } else if (live && preparing()) {
       shownAt = null;
       publishTier(null);

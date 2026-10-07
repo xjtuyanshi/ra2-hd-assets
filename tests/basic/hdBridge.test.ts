@@ -1784,6 +1784,37 @@ describe('HD bridge frame pacing', () => {
     off.stop();
   });
 
+  it('does not judge the game while the view is switched off: the pace it had is the pace it comes back with', async () => {
+    const harness = setup();
+    let logicFps = 62.5;
+    const asked = gameAt(
+      harness,
+      () => logicFps,
+      () => 0.3,
+    );
+    const view = await goLive(harness);
+    harness.setState(battle(3));
+    await advance(1000 / 120, 360);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 0 });
+    // The original picture is asked for: the game repaints everything and falls behind for a moment. The view still
+    // draws for half a second (frames already rendered carry the key colour), but nothing is asked any more.
+    harness.bridge()!.toggle();
+    logicFps = 30;
+    const before = asked.mock.calls.length;
+    await advance(1000 / 120, 600);
+    expect(asked.mock.calls.length).toBe(before);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 0, rate: 60 });
+    // Shown again with the game on target: still 60.
+    logicFps = 62.5;
+    harness.bridge()!.toggle();
+    await advance(1000 / 120, 360);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect(harness.bridge()?.pace).toMatchObject({ level: 0, rate: 60 });
+    expect(asked.mock.calls.length).toBeGreaterThan(before);
+    expect(view.render).toHaveBeenCalled();
+    harness.stop();
+  });
+
   it('starts another match at 60 again, and keeps its pace when the game cannot be asked', async () => {
     const harness = setup();
     let logicFps = 40;
