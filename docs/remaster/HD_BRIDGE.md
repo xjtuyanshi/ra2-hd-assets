@@ -433,9 +433,11 @@ In the staged battles the guest's own work decides the rate (5 to 16 million ins
 in every window, so their logic rates do not compare window to window); what the pacer changes there is the
 emulator's throughput under the same input, 264 to 307 thousand guest instructions per ms of CPU loop before and 306
 to 357 with it (354 to 403 hidden). What is left of that gap is the view at 30 frames a second, the snapshot reads
-(5 to 7 % of the emulator's thread) and the native frame snapshots, which follow the display rate while the mouse
-moves (up to 106 a second on the 120 Hz display against 62 native renders; holding them to 60 measured about 6 % more
-throughput and is not done).
+(5 to 7 % of the emulator's thread) and the rest of the page's drawing at the display rate: while the mouse moves
+the native frame is snapshotted and presented up to 106 times a second on the 120 Hz display against 62 native
+renders. Holding every animation callback of the page to 60 a second, holding only the frame acknowledgements to
+60, or switching the interface layer off each measured 3 to 6 % more throughput, within the spread between two
+windows of the same case; none of it is done.
 
 `?hd-pace=<rate>` holds a fixed rate (10 to 240; `cap` is 60) whatever the game does, and `?hd-pace=off` draws on
 every display frame as before the pacer existed, both for measurements. `__hdBridge.pace` shows the mode, the level,
