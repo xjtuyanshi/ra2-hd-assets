@@ -21,6 +21,16 @@
   about 300 slots, so the stock table was never full there: the play page's speed telemetry reports modules
   compiled and given up per window (`jitFreed`), which is where a clear in a long match would show.
 
+- Measured with the pinned v86 0.5.441 on YR 1.001 in a six-player battle (CPU profile of the VM worker, staged
+  scene of about 500 objects; baseline `51368c7`): three quarters of the guest's time ran in JIT-compiled modules
+  and under 1 % in the interpreter, so the hot game routines are compiled; x87 arithmetic, which v86 computes in
+  80-bit software floating point, took about 11 % of it, dispatch between compiled modules about 6 %, and no
+  memory slow path, page walk or timer callback reached 0.1 %. Larger JIT modules (`set_jit_config`: 12 pages and
+  1000 extra basic blocks instead of 3 and 250) changed the guest's instruction rate by less than the run-to-run
+  noise in a side-by-side run and are not used. The guest ran about 246 million instructions a second with nothing
+  else on the machine and 110 to 160 with one or two more browser sessions next to it: the VM thread is CPU-bound
+  and loses directly to other load.
+
 ## Maintenance and verification
 
 Protocol changes must update both endpoints, cancellation/destruction, and rejection of pending requests. Fallback must not leave an old Worker behind or run two VMs simultaneously. Transfer frames only through independent buffers; never transfer guest WASM memory.
