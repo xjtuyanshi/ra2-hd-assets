@@ -213,4 +213,301 @@ export const runtimeEnglishMessages = {
   '本地归档（两层加载）': 'Local archive (two-layer loading)',
   启动层缺少资源目录: 'Startup layer has no resource directory',
   本地归档: 'Local archive',
+  // Practice lessons and the hotkey cheat sheet (src/games/yr/training/lessons.ts, src/games/yr/hotkeys.ts).
+  '第 1 课 镜头与选择': 'Lesson 1: camera and selection',
+  '方向键滚屏、回基地、跳到事件、框选、选同类、加选。':
+    'Scroll with the arrow keys, back to base, jump to an event, box select, select the same type, add to the selection.',
+  方向键滚动画面: 'Scroll with the arrow keys',
+  '按住键盘方向键，把画面移开至少半个屏幕。': 'Hold the arrow keys and move the view away by at least half a screen.',
+  '键盘右下角的 ← ↑ → ↓。先用鼠标点一下战场，让游戏画面获得键盘。':
+    'The ← ↑ → ↓ keys at the bottom right of the keyboard. Click the battlefield once first so the game has the keyboard.',
+  'H 回到基地': 'H: back to base',
+  '按 H，镜头回到你的建造厂。': 'Press H: the view returns to your construction yard.',
+  '直接按字母键 H（不用按 Shift）。如果没反应，先点一下战场。':
+    'Press the letter H (no Shift). If nothing happens, click the battlefield first.',
+  空格跳到事件: 'Space: jump to the event',
+  '远处的前哨遭到攻击，雷达上有一个闪动的圈。按空格，镜头直接跳到出事的地方。':
+    'The far outpost is under attack and a circle is flashing on the radar. Press Space: the view jumps straight to where it happens.',
+  '按一下空格键。（连按两下会跳到更早的一次事件。）':
+    'Press Space once. (Pressing it twice quickly jumps to an earlier event.)',
+  '再按 H 回来': 'H again to come back',
+  '看完就回家：再按一次 H。': 'Seen it, now go home: press H once more.',
+  '按 H。': 'Press H.',
+  框选: 'Box select',
+  '按住左键拖出一个方框，一次框住至少 3 个单位。': 'Hold the left button and drag a box around at least 3 units.',
+  '在单位左上方的空地按下左键，拖到右下方再松开。':
+    'Press the left button on empty ground above and left of the units, drag to the lower right, release.',
+  右键取消选择: 'Right click to deselect',
+  '在空地上点一下右键，取消选择。': 'Right click once on empty ground to drop the selection.',
+  '触控板：双指轻点；鼠标：右键。': 'Trackpad: tap with two fingers; mouse: right button.',
+  选同类: 'Select the same type',
+  '点一辆犀牛坦克，再按 T（或直接双击它）：屏幕里所有犀牛坦克都被选中。':
+    'Click a Rhino tank, then press T (or simply double-click it): every Rhino tank on the screen is selected.',
+  '先左键单击一辆坦克，再按 T。': 'Left click one tank first, then press T.',
+  'Shift 加选': 'Shift to add',
+  '保持坦克被选中，按住 Shift 再点（或框）动员兵，把他们加进来。':
+    'Keep the tanks selected, hold Shift and click (or box) conscripts to add them.',
+  '按住 Shift 不放，左键点一个动员兵。选中的单位里要同时有坦克和步兵。':
+    'Keep Shift held and left click a conscript. The selection must hold both tanks and infantry.',
+  'P 全选战斗单位': 'P: select all combat units',
+  '按 P：地图上你所有的战斗单位一次全选。': 'Press P: all your combat units on the map are selected at once.',
+  '按字母键 P。': 'Press the letter P.',
+  '方向键 滚动画面': 'Arrow keys: scroll the view',
+  '空格 跳到最近的事件': 'Space: jump to the latest event',
+  '左键拖框 框选': 'Left drag: box select',
+  'T / 双击 选同类': 'T / double click: select the same type',
+  'Shift+左键 加选': 'Shift+left click: add to the selection',
+  'P 选中全部战斗单位': 'P: select all combat units',
+  '右键 取消选择': 'Right click: deselect',
+  '第 2 课 编队': 'Lesson 2: teams',
+  '建立编队、叫回编队、加选编队、把镜头切到编队。':
+    'Create teams, recall a team, add a team to the selection, move the view to a team.',
+  '坦克编为 1 队': 'Tanks become team 1',
+  '选中犀牛坦克（至少 3 辆），按 ⌘+1（或 Control+1）。':
+    'Select the Rhino tanks (at least 3) and press ⌘+1 (or Control+1).',
+  '先框选或用 T 选中坦克；按住 ⌘ 再按数字 1。': 'Box them or use T to select the tanks; hold ⌘ and press the digit 1.',
+  '步兵编为 2 队': 'Infantry becomes team 2',
+  '选中动员兵（至少 3 个），按 ⌘+2。': 'Select the conscripts (at least 3) and press ⌘+2.',
+  '点一个动员兵再按 T 选中全部，然后 ⌘+2。': 'Click a conscript, press T to select them all, then ⌘+2.',
+  '按 1 叫回 1 队': 'Press 1 to recall team 1',
+  '按数字 1：1 队被选中，其他单位不再被选中。':
+    'Press the digit 1: team 1 is selected and nothing else stays selected.',
+  '只按数字键 1，不要按 ⌘ 或 Shift。': 'Only the digit key 1, without ⌘ or Shift.',
+  'Shift+2 加选 2 队': 'Shift+2 adds team 2',
+  '1 队还选着，按 Shift+2 把 2 队也加进来。': 'With team 1 still selected, press Shift+2 to add team 2.',
+  '按住 Shift 再按数字 2。': 'Hold Shift and press the digit 2.',
+  把镜头移开: 'Move the view away',
+  '用方向键把画面移到看不见部队的地方。': 'Use the arrow keys to move the view to where the troops are out of sight.',
+  '按住方向键一两秒。': 'Hold an arrow key for a second or two.',
+  'Option+1 跳到 1 队': 'Option+1 jumps to team 1',
+  '按 Option+1：选中 1 队，镜头同时移到它们身上。': 'Press Option+1: team 1 is selected and the view moves onto it.',
+  '按住 Option（⌥）再按数字 1。': 'Hold Option (⌥) and press the digit 1.',
+  'Ctrl/⌘+数字 建立编队': 'Ctrl/⌘+digit: create a team',
+  '数字 选中编队': 'Digit: select a team',
+  'Shift+数字 加选编队': 'Shift+digit: add a team to the selection',
+  'Option+数字 选中并把镜头移过去': 'Option+digit: select a team and move the view to it',
+  '第 3 课 下命令': 'Lesson 3: giving orders',
+  '移动、停止、攻击、强制攻击、强制移动碾压、移动攻击、散开、警戒、护送。':
+    'Move, stop, attack, force fire, force move and crushing, attack-move, scatter, guard, escort.',
+  移动: 'Move',
+  '选中犀牛坦克，左键点一块空地，让它们开过去。':
+    'Select the Rhino tanks and left click empty ground to send them there.',
+  '先选中坦克（框选或 T），再在空地上点一下左键。':
+    'Select the tanks first (box or T), then left click once on empty ground.',
+  'S 停止': 'S: stop',
+  '坦克还在路上时按 S，让它们立刻停下。': 'Press S while the tanks are still on their way to stop them at once.',
+  '先下一个远一点的移动命令，坦克开动后按 S。':
+    'Give a longer move order first and press S once the tanks are rolling.',
+  攻击: 'Attack',
+  '基地前方有两座敌方电厂。选中坦克，左键点其中一座。':
+    'Two enemy power plants stand in front of the base. Select the tanks and left click one of them.',
+  '把鼠标移到敌方建筑上，光标变成红色准星后点左键。':
+    'Move the pointer onto the enemy building and left click when it turns into the red target cursor.',
+  强制攻击: 'Force fire',
+  '按住 ⌘（或 Control）点一块空地：坦克会朝那块地开火。封路、清树、打桥都用它。':
+    'Hold ⌘ (or Control) and click empty ground: the tanks fire at that spot. Use it to block a road, clear trees or hit a bridge.',
+  '先按 S 停火，再按住 ⌘ 不放，左键点空地。':
+    'Press S to cease fire first, then keep ⌘ held and left click empty ground.',
+  强制移动碾压: 'Force move and crush',
+  '旁边站着几个平民。选中坦克，按住 Option 点一个平民：坦克会直接压过去。':
+    'A few civilians stand nearby. Select the tanks, hold Option and click a civilian: the tanks drive straight over him.',
+  '按住 Option（⌥）不放，把鼠标移到平民身上点左键。压到一个就算完成。':
+    'Keep Option (⌥) held, move the pointer onto a civilian and left click. One crushed civilian completes the task.',
+  移动攻击: 'Attack-move',
+  '按住 ⌘+Shift 点敌方电厂附近的空地：部队开过去，路上遇敌就打。':
+    'Hold ⌘+Shift and click empty ground near the enemy power plants: the troops drive there and fight what they meet.',
+  '同时按住 ⌘ 和 Shift，左键点一块空地。': 'Hold ⌘ and Shift together and left click empty ground.',
+  'X 散开': 'X: scatter',
+  '让坦克停下（S），再按 X：它们会各自挪开几步。躲碾压、躲范围伤害就靠它。':
+    'Stop the tanks (S), then press X: each moves a few steps aside. This is how you dodge crushing and area damage.',
+  '选中至少 2 个单位，按字母键 X。': 'Select at least 2 units and press the letter X.',
+  'G 警戒': 'G: guard',
+  '选中坦克按 G：它们守住这一片，敌人靠近会主动迎上去。':
+    'Select the tanks and press G: they hold this area and go for enemies that come close.',
+  '按字母键 G。': 'Press the letter G.',
+  护送: 'Escort',
+  '选中防空履带车，按住 ⌘+Option 点一辆犀牛坦克：防空车会跟着它走。':
+    'Select the flak tracks, hold ⌘+Option and click a Rhino tank: the flak tracks follow it.',
+  '先选中防空履带车；同时按住 ⌘ 和 Option，左键点一辆自己的坦克。':
+    'Select the flak tracks first; hold ⌘ and Option together and left click one of your own tanks.',
+  'Ctrl/⌘+左键 强制攻击': 'Ctrl/⌘+left click: force fire',
+  'Option+左键 强制移动（碾压）': 'Option+left click: force move (crush)',
+  'Ctrl/⌘+Shift+左键 移动攻击': 'Ctrl/⌘+Shift+left click: attack-move',
+  'Ctrl/⌘+Option+左键 护送': 'Ctrl/⌘+Option+left click: escort',
+  '第 4 课 建造与生产': 'Lesson 4: building and production',
+  '部署、页签键、放置建筑、集结点、修理与变卖、边打边造。':
+    'Deploy, tab keys, placing buildings, rally point, repair and sell, building while fighting.',
+  'D 部署基地车': 'D: deploy the MCV',
+  '点选基地车，按 D 把它展开成建造厂。': 'Select the MCV and press D to unfold it into a construction yard.',
+  '基地车是最大的那辆车。单击选中它，再按字母键 D。':
+    'The MCV is the largest vehicle. Click it once, then press the letter D.',
+  造电厂并放下: 'Build a power plant and place it',
+  '在右侧建造栏点“磁能反应炉”，造好后再点一次图标，在建造厂旁边点左键放下。':
+    'Click the Tesla reactor in the build bar on the right; when it is ready click the icon again and left click next to the construction yard.',
+  '图标上出现“就绪”后：点图标，把鼠标移到基地旁的空地，格子全绿时点左键。':
+    'Once the icon says ready: click it, move the pointer to free ground next to the base and left click when all cells are green.',
+  造兵营并放下: 'Build a barracks and place it',
+  '同样的做法造一座兵营。': 'Build a barracks the same way.',
+  '建筑页里的“兵营”。电厂放下以后它才会出现。':
+    'The barracks is on the structures tab. It appears after the power plant is placed.',
+  'E 切到步兵页': 'E: infantry tab',
+  '按 E，建造栏切到步兵页。（Q 建筑、W 防御、E 步兵、R 车辆）':
+    'Press E: the build bar switches to the infantry tab. (Q structures, W defences, E infantry, R vehicles)',
+  '按字母键 E。步兵页里有东西时才切得过去。': 'Press the letter E. The tab only opens when it has something in it.',
+  设集结点: 'Set a rally point',
+  '点选兵营，再在基地外的空地上点一下左键：以后造出来的兵都会走到那里。':
+    'Select the barracks, then left click free ground outside the base: troops trained from now on walk there.',
+  '先单击兵营（它被选中后有一圈框），再左键点空地。':
+    'Click the barracks once (a frame shows it is selected), then left click free ground.',
+  '造 3 个动员兵': 'Train 3 conscripts',
+  '在步兵页连点三下“动员兵”，等他们走到集结点。':
+    'Click the conscript three times on the infantry tab and wait for them to reach the rally point.',
+  '按 E 回到步兵页，左键点动员兵图标三次。':
+    'Press E for the infantry tab and left click the conscript icon three times.',
+  'Q 回建筑页': 'Q: back to the structures tab',
+  '按 Q 回到建筑页。': 'Press Q to return to the structures tab.',
+  '按字母键 Q。': 'Press the letter Q.',
+  'K 修理': 'K: repair',
+  '基地旁那座冒烟的电厂只剩不到一半血。按 K 进入修理模式，点它一下，再按 K 退出。':
+    'The smoking power plant next to the base has less than half its health. Press K for repair mode, click it, press K again to leave.',
+  '按 K 后鼠标变成扳手，左键点受损的电厂。':
+    'After K the pointer becomes a wrench; left click the damaged power plant.',
+  'L 变卖': 'L: sell',
+  '基地旁有一座用不上的哨戒炮。按 L 进入变卖模式，点它把它卖掉。':
+    'A sentry gun next to the base is of no use. Press L for sell mode and click it to sell it.',
+  '按 L 后鼠标变成 $，左键点哨戒炮；卖完再按 L 退出。':
+    'After L the pointer becomes a $; left click the sentry gun, then press L again to leave.',
+  边打边造: 'Build while fighting',
+  '让坦克去打前方的敌方电厂；趁它们开火时按 E，再造 2 个动员兵。前线和后方不能只顾一头。':
+    'Send the tanks at the enemy power plants in front; while they fire, press E and train 2 more conscripts. Front and base both need you.',
+  '先选中坦克点敌方电厂；不用等它打完，马上按 E 点动员兵。':
+    'Select the tanks and click an enemy power plant; do not wait for it to fall, press E and click the conscript right away.',
+  'D 部署': 'D: deploy',
+  'Q 建筑页': 'Q: structures tab',
+  'W 防御页': 'W: defences tab',
+  'E 步兵页': 'E: infantry tab',
+  'R 车辆页': 'R: vehicles tab',
+  'K 修理模式': 'K: repair mode',
+  'L 变卖模式': 'L: sell mode',
+  镜头: 'Camera',
+  滚动画面: 'Scroll the view',
+  '手不离键盘就能挪镜头，用触控板时比右键拖动顺手。':
+    'Moves the camera without leaving the keyboard; on a trackpad it is easier than dragging with the right button.',
+  '回到基地（建造厂）': 'Back to base (construction yard)',
+  '基地出事、要放建筑时一键回家。': 'One key home when the base is in trouble or a building has to be placed.',
+  空格: 'Space',
+  跳到最近一次语音提示的地点: 'Jump to the place of the latest voice alert',
+  '听到“遭到攻击”“建造完成”立刻按，比去点雷达快。':
+    'Press it the moment you hear "under attack" or "construction complete"; faster than clicking the radar.',
+  选中编队并把镜头移过去: 'Select a team and move the view to it',
+  '多线操作时在几支部队之间来回切。': 'Switch between several groups when you fight on more than one front.',
+  '回到书签 1–4': 'Go to bookmark 1-4',
+  '矿区、前线、敌人门口各存一个，按一下就到。':
+    "Store your ore field, the front and the enemy's door, and reach each with one key.",
+  '把当前画面存成书签 1–4': 'Store the current view as bookmark 1-4',
+  '开局先给自己的矿区存一个。': 'Store your ore field first thing in a match.',
+  '镜头跟随选中的单位（再按一次取消）': 'The camera follows the selected unit (press again to stop)',
+  '跟随时方向键不起作用；画面“卡住”多半是误按了它。':
+    'Arrow keys do nothing while it follows; a view that seems stuck is usually this key pressed by accident.',
+  右键按住拖动: 'Hold the right button and drag',
+  拖动画面: 'Drag the view',
+  '想细调位置时用；大范围移动还是方向键和雷达快。':
+    'For fine adjustments; arrow keys and the radar are faster for long distances.',
+  选择: 'Selection',
+  '左键单击 / 拖框': 'Left click / drag a box',
+  '选中一个 / 框选一片': 'Select one / box a group',
+  '框选从空地起手，别从单位身上起手。': 'Start the box on empty ground, not on a unit.',
+  '双击单位，或选中后按 T': 'Double-click a unit, or select it and press T',
+  选中屏幕里所有同类单位: 'Select every unit of that type on the screen',
+  '新造的坦克散在各处时一次拢起来。': 'Gathers freshly built tanks that stand all over the place.',
+  'Shift+单击 / 拖框': 'Shift+click / drag a box',
+  '加选；点已选中的单位则减选': 'Add to the selection; clicking a selected unit removes it',
+  '往选好的部队里补几个单位，不用重新框。': 'Add a few units to a chosen force without boxing again.',
+  选中地图上全部战斗单位: 'Select every combat unit on the map',
+  '全军出击或全军回防时用。': 'For an all-out attack or an all-out retreat.',
+  '下一个 / 上一个单位': 'Next / previous unit',
+  '找闲着没事的单位。': 'Finds units that are standing idle.',
+  按等级挑选单位: 'Pick units by rank',
+  '把升了星的老兵挑出来单独保护。': 'Pick out the promoted veterans to protect them.',
+  右键单击空地: 'Right click empty ground',
+  '取消选择；也用来取消放置、退出修理和变卖': 'Deselect; also cancels placing and leaves repair and sell mode',
+  '下错命令前先右键，手就干净了。': 'Right click before giving an order you are unsure of: your hands are clean again.',
+  编队: 'Teams',
+  '把选中的单位编成 1–10 队': 'Make the selected units team 1-10',
+  '主力坦克 1 队、防空 2 队、特殊单位 3 队，养成固定习惯。':
+    'Main tanks team 1, anti-air team 2, special units team 3: keep the same habit every game.',
+  选中该队: 'Select that team',
+  '交战中用数字键切部队，比框选快得多。': 'Switching forces with digit keys in a fight is far faster than boxing.',
+  把该队加进当前选择: 'Add that team to the current selection',
+  '新坦克出厂后：选中它，Shift+1，再 ⌘+1 并进 1 队。':
+    'When a new tank leaves the factory: select it, Shift+1, then ⌘+1 to join it to team 1.',
+  命令: 'Orders',
+  '左键点地面 / 点敌人': 'Left click ground / an enemy',
+  '移动 / 攻击': 'Move / attack',
+  '集火：全队点同一个目标，先打掉一个再换下一个。':
+    'Focus fire: the whole group clicks one target, kills it, then the next.',
+  'Ctrl+左键': 'Ctrl+left click',
+  '强制攻击（地面、桥、中立或自己的东西）': 'Force fire (ground, bridges, neutral or your own things)',
+  '封路口、清树、炸桥，或者打掉挡路的东西。':
+    'Block a road, clear trees, blow a bridge, or remove what stands in the way.',
+  '⌘+左键': '⌘+left click',
+  'Alt+左键': 'Alt+left click',
+  '强制移动；坦克会直接压过步兵': 'Force move; tanks drive straight over infantry',
+  '坦克对步兵最省血的打法就是碾过去。': 'Running infantry over is the cheapest way for tanks to deal with it.',
+  '⌥+左键': '⌥+left click',
+  'Ctrl+Shift+左键': 'Ctrl+Shift+left click',
+  '移动攻击：开过去，路上遇敌就打': 'Attack-move: drive there and fight what is met on the way',
+  '推进时用它，部队不会一路挨打走到头。': 'Use it to advance: the force does not walk to the end under fire.',
+  '⌘+⇧+左键': '⌘+⇧+left click',
+  'Ctrl+Alt+左键点自己的单位': 'Ctrl+Alt+left click one of your own units',
+  护送它: 'Escort it',
+  '让防空车跟着主力坦克走。': 'Lets the anti-air follow the main tanks.',
+  '⌘+⌥+左键点自己的单位': '⌘+⌥+left click one of your own units',
+  停止: 'Stop',
+  '走错路、追过头时马上按。': 'Press at once when units take a wrong road or chase too far.',
+  散开: 'Scatter',
+  '步兵躲碾压、坦克躲范围伤害。': 'Infantry dodges crushing, tanks dodge area damage.',
+  区域警戒: 'Area guard',
+  '放在路口，敌人靠近会主动迎上去。': 'Put units at a crossing; they go for enemies that come close.',
+  '部署（基地车展开、步兵蹲下等）': 'Deploy (unfold the MCV, infantry digs in, and so on)',
+  '开局第一件事：选中基地车按 D。': 'The first thing in a match: select the MCV and press D.',
+  '按住 Z 依次点地面，松开 Z': 'Hold Z, click ground points in order, release Z',
+  '路径点：按顺序走完这些点': 'Waypoints: walk through these points in order',
+  '让部队绕开防御，或几路同时出发。': 'Send a force around defences, or several groups off at the same moment.',
+  建造: 'Building',
+  '建筑 / 防御 / 步兵 / 车辆页': 'Structures / defences / infantry / vehicles tab',
+  '不用鼠标找页签；页里没有东西时切不过去。': 'No mouse needed to find a tab; an empty tab cannot be opened.',
+  左键点图标: 'Left click an icon',
+  '开始建造；造好后再点一次，到地图上放置': 'Start building; when it is ready click again and place it on the map',
+  '钱够就别让建造厂闲着。': 'Never leave the construction yard idle while there is money.',
+  右键点图标: 'Right click an icon',
+  '暂停；再右键一次取消并退钱': 'Hold; right click once more to cancel with a refund',
+  '钱不够时先停掉不急的。': 'Hold what is not urgent when money is short.',
+  选中兵营或工厂后左键点地面: 'Select a barracks or factory, then left click ground',
+  '把集结点设在前线后方，新兵不用再手动拉。': 'Put the rally point behind the front: new troops need no hand-leading.',
+  '修理模式（再按一次退出）': 'Repair mode (press again to leave)',
+  '打完一波马上修，别等下一波。': 'Repair right after a wave, not when the next one arrives.',
+  '变卖模式（再按一次退出）': 'Sell mode (press again to leave)',
+  '守不住的建筑先卖掉，能换回一半钱和几个兵。': 'Sell what cannot be held: part of the cost comes back.',
+  'Shift+左键点图标': 'Shift+left click an icon',
+  '连点 10 次（网页功能，只在右侧建造栏有效）':
+    'Ten clicks at once (a feature of the page; only on the build bar on the right)',
+  '一次排 10 个兵或 10 辆坦克。': 'Queue 10 soldiers or 10 tanks at once.',
+  其他: 'Other',
+  '游戏菜单（游戏暂停；点“回到任务”继续）': 'Game menu (the game pauses; click "resume mission" to go on)',
+  '需要停下来想一想时用。': 'When you need to stop and think.',
+  '结盟 / 信标 / 欢呼 / 呼叫玩家，叫嚣': 'Ally / beacon / cheer / page a player, taunts',
+  '只在联机对战里有用。': 'Only useful in multiplayer matches.',
+  '这台 Mac 上：⌘ 就是游戏里的 Ctrl（Control 键本身也可以用）；Option（⌥）就是 Alt。':
+    "On this Mac: ⌘ is the game's Ctrl (the Control key itself works too); Option (⌥) is Alt.",
+  'F1–F12 要同时按 fn，除非在“系统设置 › 键盘”里打开“将 F1、F2 等键用作标准功能键”。Control+F2/F3/F4 被 macOS 占用，设书签请用 ⌘。':
+    'F1-F12 need fn held, unless "Use F1, F2, etc. keys as standard function keys" is on in System Settings › Keyboard. Control+F2/F3/F4 belong to macOS: use ⌘ to store bookmarks.',
+  'MacBook 自带键盘没有小键盘：“观点置中”（小键盘 5）、建造栏上下卷（小键盘 8 / 2）、“删除”（小键盘 .）这几个默认键按不到；建造栏可以用鼠标点下方的箭头。':
+    'A MacBook\'s built-in keyboard has no numeric keypad: the default keys of "centre view" (keypad 5), scrolling the build bar (keypad 8 / 2) and "delete" (keypad .) cannot be pressed; scroll the build bar with the arrows below it using the mouse.',
+  '⌘+W、⌘+Q、⌘+H、⌘+M、⌘+Tab 归浏览器和 macOS 所有：按住 ⌘ 时别碰 W、Q、H、M。全屏后网页会向浏览器申请键盘锁，能挡住其中一部分。':
+    '⌘+W, ⌘+Q, ⌘+H, ⌘+M and ⌘+Tab belong to the browser and macOS: keep off W, Q, H and M while ⌘ is held. In fullscreen the page asks the browser for a keyboard lock, which stops some of them.',
+  '网页自己占用的键：[ 和 ]（时钟倍率）、\\（高清 / 原版）、?（网页帮助）、F11（全屏）；` 在训练启动器里已还给游戏。':
+    'Keys the page keeps for itself: [ and ] (clock multiplier), \\ (HD / original picture), ? (page help), F11 (fullscreen); ` is given back to the game by the practice launcher.',
+  '网上流传的几个说法在这个版本里不成立：U 不是“按血量选兵”（它是呼叫玩家，“生命值顺序”默认没有键）；Alt+左键不是路径点（Z 才是）；Ctrl+左键不是移动攻击（它是强制攻击）。':
+    'Some claims found on the web do not hold in this version: U is not "select by health" (it pages a player; "health order" has no default key); Alt+left click is not waypoint mode (Z is); Ctrl+left click is not attack-move (it is force fire).',
 } as const;
