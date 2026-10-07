@@ -5,6 +5,8 @@ import type { ImportArgBytes } from '../vm86/pe';
 import type { GameShimProfile } from '../vm86/shim/gameProfile';
 import type { GameRuntimeHooks } from './runtimeHooks';
 import type { GameSourceTransform } from './discovery';
+import type { GameHotkeySheet } from './hotkeys';
+import type { TrainingLesson } from './training';
 import { RA2_SHIM_PROFILE } from './ra2/profile';
 import { RA2_RUNTIME_HOOKS } from './ra2/runtimeHooks';
 import { YR_SHIM_PROFILE } from './yr/profile';
@@ -39,6 +41,19 @@ export interface SupportedGame {
   fastFileMirrorTop?: number;
   /** Only these frequently used archives stay in the persistent mirror; synchronous providers still cache and read other files on demand. */
   fastFileMirrorFiles?: readonly string[];
+  /**
+   * Width in guest pixels of the build sidebar along the right frame edge. The page's Shift + left click repeat (a
+   * build-queue convenience) is limited to this strip, because in the tactical view Shift + click is the game's own
+   * "add to the selection" command. Absent: the repeat applies to the whole frame.
+   */
+  buildStripWidth?: number;
+  /**
+   * Practice lessons of this game (development builds only; resolves to an empty list otherwise). Loaded on demand so
+   * production bundles do not carry them.
+   */
+  loadTrainingLessons?: () => Promise<readonly TrainingLesson[]>;
+  /** The game's key and mouse operations as a cheat sheet for the page's overlay; loaded on demand. */
+  loadHotkeySheet?: () => Promise<GameHotkeySheet>;
   /** Explicit compatibility capabilities passed to Win32; the shared shim does not inspect game IDs. */
   shimProfile: GameShimProfile;
   runtimeHooks?: GameRuntimeHooks;
@@ -62,6 +77,7 @@ export const SUPPORTED_GAMES: readonly SupportedGame[] = [
     id: 'ra2',
     title: '红色警戒 2',
     executable: 'game.exe',
+    buildStripWidth: 168,
     commandLineArguments: '-SPEEDCONTROL',
     defaultGameSpeed: 0,
     folder: 'ra2',
@@ -91,6 +107,10 @@ export const SUPPORTED_GAMES: readonly SupportedGame[] = [
     id: 'yr',
     title: '尤里的復仇',
     executable: 'gamemd.exe',
+    buildStripWidth: 168,
+    loadTrainingLessons: async () =>
+      import.meta.env.DEV ? (await import('./yr/training/lessons')).YR_TRAINING_LESSONS : [],
+    loadHotkeySheet: async () => (await import('./yr/hotkeys')).YR_HOTKEY_SHEET,
     commandLineArguments: '-SPEEDCONTROL',
     defaultGameSpeed: 0,
     folder: 'ra2',

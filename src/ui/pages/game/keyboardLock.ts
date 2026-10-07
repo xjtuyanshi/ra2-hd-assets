@@ -1,16 +1,21 @@
 export type KeyboardLockState = 'inactive' | 'pending' | 'active' | 'unavailable' | 'denied';
 
 interface KeyboardLock {
-  lock(keys: string[]): Promise<void>;
+  lock(keys?: string[]): Promise<void>;
   unlock(): void;
 }
 
 let controllerGeneration = 0;
 
-/** Capture real Esc only during game fullscreen; unlock events do not identify a source key and must never synthesize Esc. */
+/**
+ * Capture real Esc only during game fullscreen; unlock events do not identify a source key and must never synthesize Esc.
+ * `keys` are the key codes to lock; null asks for every key the browser can hand over (used on Apple keyboards, where
+ * the game's Ctrl role is played by ⌘ and the browser would otherwise take ⌘ combinations such as ⌘W first).
+ */
 export function installFullscreenKeyboardLock(
   canvas: HTMLCanvasElement,
   report: (state: KeyboardLockState) => void,
+  keys: readonly string[] | null = ['Escape'],
 ): () => void {
   const generation = ++controllerGeneration;
   const keyboard = (navigator as Navigator & { keyboard?: KeyboardLock }).keyboard;
@@ -32,7 +37,7 @@ export function installFullscreenKeyboardLock(
     report('pending');
     void (async () => {
       try {
-        await keyboard.lock(['Escape']);
+        await (keys ? keyboard.lock([...keys]) : keyboard.lock());
         // A previous VM's permission result must not unlock the new VM's keyboard after switching games.
         if (generation !== controllerGeneration) return;
         // Permission dialogs may finish after fullscreen exit or VM destruction; leave no keyboard lock behind.
