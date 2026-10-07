@@ -130,7 +130,7 @@ export const YR_HOTKEY_SHEET: GameHotkeySheet = Object.freeze({
         { keys: '右键点图标', action: '暂停；再右键一次取消并退钱', tip: '钱不够时先停掉不急的。' },
         { keys: '选中兵营或工厂后左键点地面', action: '设集结点', tip: '把集结点设在前线后方，新兵不用再手动拉。' },
         { keys: 'K', action: '修理模式（再按一次退出）', tip: '打完一波马上修，别等下一波。' },
-        { keys: 'L', action: '变卖模式（再按一次退出）', tip: '守不住的建筑先卖掉，能换回一半钱和几个兵。' },
+        { keys: 'L', action: '变卖模式（再按一次退出）', tip: '守不住的建筑先卖掉，能换回一部分钱。' },
         {
           keys: 'Shift+左键点图标',
           action: '连点 10 次（网页功能，只在右侧建造栏有效）',

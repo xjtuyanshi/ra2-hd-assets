@@ -168,7 +168,8 @@ export const englishMessages = {
   '锁定鼠标；全屏可授权将 Esc 交给游戏': 'Lock the pointer; fullscreen can request permission to send Esc to the game',
   '获键盘锁授权后交给游戏；长按退出锁定': 'Sent to the game after keyboard-lock permission; hold to unlock',
   'Shift + 左键': 'Shift + left click',
-  '连点 ×10（50ms 间隔）': 'Click 10 times (50 ms apart)',
+  '在建造栏上连点 ×10（50ms 间隔）；战场上照常是加选':
+    'Click 10 times (50 ms apart) on the build bar; on the battlefield it adds to the selection as usual',
   沉浸式全屏: 'Immersive fullscreen',
   '时钟倍率 慢 / 快': 'Slower / faster clock',
   开发调试面板: 'Developer debug panel',

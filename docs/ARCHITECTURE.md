@@ -36,6 +36,7 @@ Players select resources before the application detects bootable games. A single
 | `src/utils/`                  | Generic hashing, asynchronous tasks, archive extraction                     | No dependency on other src business modules; no session or game-policy ownership |
 | `src/adapter/`                | VM execution adaptation, Worker bridges, audio adaptation                   | Game behavior is injected through configuration                                  |
 | `src/app/session/`            | Session startup, replacement, failure, and destruction                      | Owns VM and surrounding-task lifecycles                                          |
+| `src/app/training/`           | Practice-lesson engine: task order, timing, hints, summary                  | Pure logic over the lesson contract in `src/games/training.ts`                   |
 | `src/graphics/`               | Frame presentation, scheduling, and buffer release                          | Does not alter guest simulation speed                                            |
 | `src/ui/`                     | One React tree, user interaction, status presentation                       | Frequent data stays out of React state                                           |
 | `packages/relay/`             | Generic binary protocol, client, server                                     | No game/application imports                                                      |

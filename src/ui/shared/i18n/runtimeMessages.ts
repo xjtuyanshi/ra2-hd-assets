@@ -488,7 +488,7 @@ export const runtimeEnglishMessages = {
   '修理模式（再按一次退出）': 'Repair mode (press again to leave)',
   '打完一波马上修，别等下一波。': 'Repair right after a wave, not when the next one arrives.',
   '变卖模式（再按一次退出）': 'Sell mode (press again to leave)',
-  '守不住的建筑先卖掉，能换回一半钱和几个兵。': 'Sell what cannot be held: part of the cost comes back.',
+  '守不住的建筑先卖掉，能换回一部分钱。': 'Sell what cannot be held: part of the cost comes back.',
   'Shift+左键点图标': 'Shift+left click an icon',
   '连点 10 次（网页功能，只在右侧建造栏有效）':
     'Ten clicks at once (a feature of the page; only on the build bar on the right)',
