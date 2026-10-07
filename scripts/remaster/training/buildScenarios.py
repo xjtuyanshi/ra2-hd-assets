@@ -189,11 +189,20 @@ def link_farm(farm: Path, out: Path) -> None:
             os.symlink(entry.resolve(), target)
 
 
+def default_farm() -> Path:
+    """The newest play cache that exists, in the launcher's order (scripts/remaster/play.sh)."""
+    names = ('hd-cache-play6', 'hd-cache-play5', 'hd-cache-play4', 'hd-cache-play3', 'hd-cache-play2', 'hd-cache-play')
+    for name in names:
+        if (MAIN / 'gameres' / name / '_library').is_dir():
+            return MAIN / 'gameres' / name
+    return MAIN / 'gameres' / 'hd-cache'
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--out', type=Path, default=MAIN / 'gameres' / 's2x' / 'play' / 'train')
     parser.add_argument('--install', type=Path, default=MAIN / 'game' / 'ra2')
-    parser.add_argument('--farm', type=Path, default=MAIN / 'gameres' / 'hd-cache-play5')
+    parser.add_argument('--farm', type=Path, default=default_farm())
     parser.add_argument('--only', nargs='*')
     parser.add_argument('--speed', type=int, default=3)
     args = parser.parse_args()
