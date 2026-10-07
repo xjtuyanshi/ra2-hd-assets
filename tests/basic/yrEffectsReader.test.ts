@@ -327,6 +327,7 @@ describe('YR 1.001 effects reader', () => {
         owner: 0,
         inviso: false,
         arcing: true,
+        firersPalette: false,
         frame: 7,
       },
       // A torn velocity reads as zero rather than NaN.
@@ -458,6 +459,42 @@ describe('YR 1.001 effects reader', () => {
     });
   });
 
+  it('publishes a vertical projectile far above the flight levels: the nuclear missile on its way down', () => {
+    const b = battle();
+    const read = () => readYrEffects(createByteViewAccessor(b.m.bytes));
+    const original = read().bullets.find((x) => x.id === b.shell)!;
+    // The falling missile is created 20000 leptons above its target and keeps that point as its source; on screen it
+    // only comes into view below roughly 60 levels, long after the reader used to drop it for its source alone.
+    const ground = original.z;
+    b.m.i32(b.shell + O.bulletSource + 8, ground + 20000);
+    b.m.i32(b.shell + O.location + 8, ground + 3000);
+    const falling = read().bullets.find((x) => x.id === b.shell)!;
+    expect(falling).toBeDefined();
+    expect(falling.z).toBe(ground + 3000);
+    expect(falling.source.z).toBe(ground + 20000);
+    expect(read().stats.invalid.bullets).toBe(0);
+    // Still high above the map: published, the renderer decides what is in view.
+    b.m.i32(b.shell + O.location + 8, ground + 19990);
+    expect(read().bullets.some((x) => x.id === b.shell)).toBe(true);
+    // The rules allow a DetonationAltitude of 30000; beyond the bound it is a torn read again.
+    b.m.i32(b.shell + O.location + 8, ground + 30000);
+    expect(read().bullets.some((x) => x.id === b.shell)).toBe(true);
+    b.m.i32(b.shell + O.location + 8, YR_EFFECTS_LIMITS.maxProjectileHeight + 1);
+    expect(read().bullets.some((x) => x.id === b.shell)).toBe(false);
+    expect(read().stats.invalid.bullets).toBe(1);
+    // FirersPalette (BulletTypeClass +0x2A9): the missile wears the firing house's unit colours.
+    b.m.i32(b.shell + O.location + 8, ground + 3000);
+    expect(falling.firersPalette).toBe(false);
+    const missileType = b.m.view.getUint32(b.shell + O.bulletType, true);
+    b.m.u8(missileType + O.bulletTypeFirersPalette, 1);
+    expect(read().bullets.find((x) => x.id === b.shell)!.firersPalette).toBe(true);
+    b.m.u8(missileType + O.bulletTypeFirersPalette, 0);
+    // A trailer anim left at the missile's height is kept too.
+    b.m.i32(b.shell + O.location + 8, ground + 3000);
+    b.m.i32(b.boom + O.location + 8, 12000);
+    expect(read().anims.some((a) => a.id === b.boom && a.z === 12000)).toBe(true);
+  });
+
   it('rejects implausible vectors, coordinates and values', () => {
     const b = battle();
     const read = () => readYrEffects(createByteViewAccessor(b.m.bytes));
@@ -465,7 +502,7 @@ describe('YR 1.001 effects reader', () => {
     b.m.i32(b.boom + O.location, YR_EFFECTS_LIMITS.maxCoordinate + 1);
     expect(read().anims.some((a) => a.id === b.boom)).toBe(false);
     b.m.i32(b.boom + O.location, 1000);
-    b.m.i32(b.shell + O.bulletTargetCoords + 8, YR_EFFECTS_LIMITS.maxHeight + 1);
+    b.m.i32(b.shell + O.bulletTargetCoords + 8, YR_EFFECTS_LIMITS.maxProjectileHeight + 1);
     expect(read().bullets.some((x) => x.id === b.shell)).toBe(false);
     b.m.i32(b.shell + O.bulletTargetCoords + 8, 0);
     // A type ID that is not printable ASCII is invalid.

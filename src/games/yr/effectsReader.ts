@@ -163,6 +163,11 @@ export const YR_EFFECTS_OFFSETS = Object.freeze({
   /** BulletTypeClass::Arcing / Inviso (bools). */
   bulletTypeArcing: 0x29b,
   bulletTypeInviso: 0x29e,
+  /**
+   * BulletTypeClass::FirersPalette (bool; BulletTypeClass::LoadFromINI stores the key at 0x46C378): the projectile is
+   * drawn with the firing house's unit palette, not the animation palette (both nuclear missiles).
+   */
+  bulletTypeFirersPalette: 0x2a9,
 
   /** ParticleSystemClass::Type (ParticleSystemTypeClass*). */
   particleSystemType: 0xac,
@@ -264,6 +269,14 @@ export const YR_EFFECTS_LIMITS = Object.freeze({
   maxCoordinate: 512 * 256,
   /** |Z| in leptons: 64 height levels, far above the flight level. */
   maxHeight: 64 * 104,
+  /**
+   * |Z| of projectiles and of the anims they leave behind. Vertical projectiles leave the flight levels: the falling
+   * nuclear missile is created 20000 leptons above its target (trigger action 95 at 0x6E34F7 adds 0x4E20; the
+   * superweapon does the same from its DetonationAltitude), the rising one climbs to DetonationAltitude=20000, and
+   * the rules allow up to 30000. A projectile that high is far above its own cell on screen and still in the picture
+   * of a view further north, so it is published like any other.
+   */
+  maxProjectileHeight: 0x10000,
   /** Attachment chains (anim on anim on object) followed at most this deep. */
   attachDepth: 4,
   /**
@@ -375,6 +388,8 @@ export interface YrBulletEffect {
   /** BulletTypeClass::Inviso: never drawn by the original (instant-hit weapons); Arcing: ballistic. */
   inviso: boolean;
   arcing: boolean;
+  /** BulletTypeClass::FirersPalette: drawn in the firing house's unit palette. */
+  firersPalette: boolean;
   /** BulletClass::AnimFrame (image frame of animated or rotating projectiles). */
   frame: number;
 }
@@ -538,6 +553,12 @@ const withinWorld = (x: number, y: number, z: number) =>
   Math.abs(y) <= YR_EFFECTS_LIMITS.maxCoordinate &&
   Math.abs(z) <= YR_EFFECTS_LIMITS.maxHeight;
 
+/** Like withinWorld for what flies above the flight levels (see YR_EFFECTS_LIMITS.maxProjectileHeight). */
+const withinAirspace = (x: number, y: number, z: number) =>
+  Math.abs(x) <= YR_EFFECTS_LIMITS.maxCoordinate &&
+  Math.abs(y) <= YR_EFFECTS_LIMITS.maxCoordinate &&
+  Math.abs(z) <= YR_EFFECTS_LIMITS.maxProjectileHeight;
+
 function readPoint(memory: GuestMemoryAccessor, address: number): YrPoint3 {
   return { x: memory.i32(address), y: memory.i32(address + 4), z: memory.i32(address + 8) };
 }
@@ -677,7 +698,8 @@ export function readYrEffects(memory: GuestMemoryAccessor, options: ReadYrEffect
       }
       position = { x: base.x + position.x, y: base.y + position.y, z: base.z + position.z };
     }
-    if (!withinWorld(position.x, position.y, position.z)) {
+    // Trailer anims are left behind by projectiles at their own height.
+    if (!withinAirspace(position.x, position.y, position.z)) {
       stats.invalid.anims++;
       continue;
     }
@@ -764,15 +786,15 @@ export function readYrEffects(memory: GuestMemoryAccessor, options: ReadYrEffect
       continue;
     }
     const typePointer = memory.u32(pointer + o.bulletType);
-    const type = readType(typePointer, V.bulletType, o.bulletTypeInviso + 1);
+    const type = readType(typePointer, V.bulletType, o.bulletTypeFirersPalette + 1);
     const at = readPoint(memory, pointer + o.location);
     const source = readPoint(memory, pointer + o.bulletSource);
     const target = readPoint(memory, pointer + o.bulletTargetCoords);
     if (
       !type ||
-      !withinWorld(at.x, at.y, at.z) ||
-      !withinWorld(source.x, source.y, source.z) ||
-      !withinWorld(target.x, target.y, target.z)
+      !withinAirspace(at.x, at.y, at.z) ||
+      !withinAirspace(source.x, source.y, source.z) ||
+      !withinAirspace(target.x, target.y, target.z)
     ) {
       stats.invalid.bullets++;
       continue;
@@ -795,6 +817,7 @@ export function readYrEffects(memory: GuestMemoryAccessor, options: ReadYrEffect
         firer && TECHNO_KINDS.has(memory.u32(firerPointer)) ? houseOf(memory.u32(firerPointer + o.technoOwner)) : -1,
       inviso: memory.u8(typePointer + o.bulletTypeInviso) !== 0,
       arcing: memory.u8(typePointer + o.bulletTypeArcing) !== 0,
+      firersPalette: memory.u8(typePointer + o.bulletTypeFirersPalette) === 1,
       frame: memory.u8(pointer + o.bulletFrame),
     });
   }

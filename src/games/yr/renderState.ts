@@ -582,7 +582,7 @@ function projectEffects(effects: YrEffects): GameRenderEffects {
         attachedTo: attachedTo && { ...attachedTo },
       }),
     ),
-    bullets: effects.bullets.map(({ id, uid, x, y, z, inviso, type, frame, velocity }) => ({
+    bullets: effects.bullets.map(({ id, uid, x, y, z, inviso, type, frame, velocity, owner, firersPalette }) => ({
       id,
       uid,
       x,
@@ -592,6 +592,8 @@ function projectEffects(effects: YrEffects): GameRenderEffects {
       type,
       frame,
       velocity: point(velocity),
+      owner,
+      ...(firersPalette ? { ownerPalette: true } : {}),
     })),
     lasers: effects.lasers.map(({ source, target, innerColor }) => ({
       source: point(source),

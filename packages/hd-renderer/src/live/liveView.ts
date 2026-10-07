@@ -38,7 +38,7 @@ import { NORMALIZED_RATE_FACTOR, animRateFrames } from '../../../ra2-assets/src/
 import type { SourceLight } from '../ra2/mapLights';
 import type { WindowBuilding } from '../ra2/nightDressing';
 import { sequenceFrame } from '../../../ra2-assets/src/art';
-import type { MapObject, VoxelModel } from '../../../ra2-assets/src/manifest';
+import type { MapObject, SpriteFrame, VoxelModel } from '../../../ra2-assets/src/manifest';
 import type { TheaterId } from '../../../ra2-assets/src/theater';
 import { addHousePalettes, paletteFor, type HdAtlas, type Ra2Cache } from '../ra2/cache';
 import { SpriteLayer, cardPush, isUnlitMapOverlay, objectAnchor, type SpriteInstance } from '../ra2/sprites';
@@ -2972,10 +2972,17 @@ export class LiveView {
       );
     const bodyFrame =
       bodyArt.frames[shownBody] ?? (delivering ? bodyArt.shadows?.[shownBody - bodyArt.frames.length] : undefined);
-    const push = bodyFrame ? cardPush(bodyFrame) : 0.03;
-    const nativeDepth = bodyFrame
+    // A body frame without pixels still places the building's layers: the nuclear silo's body SHP is empty and
+    // the whole building is its SuperAnim layers. With the empty rectangle the layers took a push of nothing and the
+    // depth of a body ending at the canvas top, 101 px above the draw point, so the ground hid the silo entirely
+    // (only the tip of its missile showed). The SHP's whole canvas stands in for the body: its push, and the depth of
+    // a building of this foundation whose picture fills the canvas. (A flat card at the building's sort line was
+    // tried instead: everything below the draw point's row, half the silo, was then cut by the ground.)
+    const depthFrame = bodyFrame && bodyFrame.rect[2] <= 0 ? (canvasFrame(bodyArt) ?? bodyFrame) : bodyFrame;
+    const push = depthFrame ? cardPush(depthFrame) : 0.03;
+    const nativeDepth = depthFrame
       ? buildingDepthProfile(
-          bodyFrame,
+          depthFrame,
           type.foundation ?? [1, 1],
           type.building?.zShape,
           object.buildState,
@@ -4017,6 +4024,16 @@ function animId(sprite: string): string {
   let id = ANIM_IDS.get(sprite);
   if (id === undefined) ANIM_IDS.set(sprite, (id = sprite.replace(/^anim:/, '')));
   return id;
+}
+
+/**
+ * The frame an SHP's whole canvas would be (the canvas centre is the draw origin): what stands in for a body frame
+ * without pixels when its layers need a push and a depth profile. Undefined without a canvas size.
+ */
+export function canvasFrame(art: { canvas?: readonly [number, number] }): SpriteFrame | undefined {
+  const canvas = art.canvas;
+  if (!canvas || !(canvas[0] > 0) || !(canvas[1] > 0)) return undefined;
+  return { rect: [0, 0, canvas[0], canvas[1]], offset: [-Math.floor(canvas[0] / 2), -Math.floor(canvas[1] / 2)] };
 }
 
 /** Bright-to-dark ramp of a house colour, shaped like the engine's 16-entry remap range. */

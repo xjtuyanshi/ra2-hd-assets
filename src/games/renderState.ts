@@ -260,6 +260,10 @@ export interface GameRenderBullet extends GameRenderPoint {
   type?: string;
   frame?: number;
   velocity?: GameRenderPoint;
+  /** GameRenderHouse.index of the house that fired it, or -1 when unknown. */
+  owner?: number;
+  /** The game draws this projectile in the firing house's unit colours instead of the effect palette. */
+  ownerPalette?: boolean;
 }
 
 export interface GameRenderLaser {

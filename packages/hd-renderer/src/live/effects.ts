@@ -90,6 +90,10 @@ export interface LiveBullet {
   warhead?: string | null;
   /** BulletClass::AnimFrame. */
   frame?: number;
+  /** Index of the firing house in LiveSnapshot.houses, -1 or absent when unknown. */
+  owner?: number;
+  /** Drawn in the firing house's unit colours, not the effect palette (the nuclear missiles). */
+  ownerPalette?: boolean;
   /** Leptons per logic frame. */
   velocity?: { x: number; y: number; z: number };
   source?: { x: number; y: number; z: number };

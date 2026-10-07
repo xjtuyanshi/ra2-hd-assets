@@ -189,6 +189,7 @@ function yrEffects(frame: number): YrEffects {
         owner: 0,
         inviso: false,
         arcing: false,
+        firersPalette: false,
         frame: 0,
       },
     ],
@@ -816,11 +817,13 @@ describe('YR 1.001 render state for the HD bridge', () => {
       anims: [
         { id: 1, uid: 2, type: 'TWLT070', x: 10, y: 20, z: 30, frameCount: 20, buildingAnim: false, invisible: false },
       ],
-      bullets: [{ id: 3, uid: 4, x: 5, y: 6, z: 7, inviso: false }],
+      bullets: [{ id: 3, uid: 4, x: 5, y: 6, z: 7, inviso: false, owner: 0 }],
       lasers: [{ source: { x: 1, y: 2, z: 3 }, target: { x: 1, y: 2, z: 3 }, innerColor: [255, 0, 0] }],
       electricBolts: [{ source: { x: 1, y: 2, z: 3 }, target: { x: 1, y: 2, z: 3 }, alternateColor: true }],
       particleSystems: [{ id: 7, uid: 8, behavesLike: 'smoke', x: 1, y: 1, z: 1 }],
     });
+    // An ordinary shell says nothing about its palette; only FirersPalette projectiles carry the flag.
+    expect(state.effects!.bullets[0]).not.toHaveProperty('ownerPalette');
     // The snapshot must survive a structured clone (the Worker reply).
     expect(structuredClone(state)).toEqual(state);
   });

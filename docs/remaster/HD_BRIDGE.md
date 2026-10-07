@@ -800,6 +800,14 @@ each mesh is drawn). The shader multiplies the finished colour in display scale,
 level x factor stays within the cap, clips at white and adds the colour (`packages/hd-renderer/src/objectTint.ts`).
 The flash of a targeted object is not published.
 
+Projectiles are read up to 65536 leptons above the map (`YR_EFFECTS_LIMITS.maxProjectileHeight`), not the 64 levels
+of ordinary objects: the falling nuclear missile is created 20000 leptons above its target and keeps that point as
+its source, so the narrower bound rejected it for its whole flight. A bullet also carries `owner` and, for types with
+FirersPalette (BulletTypeClass +0x2A9: both nuclear missiles), `ownerPalette`: LiveView then draws its SHP as a solid
+body in the firing house's unit palette instead of a glowing effect in the animation palette. A building whose body
+frame has no pixels (the nuclear silo is drawn entirely by the SuperAnim layer the engine lists as a building anim)
+gives its layers the push and the body depth of the SHP's whole canvas; with the empty rectangle the ground hid them.
+
 When a drawable building disappears, LiveView retains its frozen last visual through the logic frame after the
 last one it was published in, whatever its last health. The deadline counts from that last present frame, not
 from the publication that first missed the building: a poll can already miss it under the old frame number,

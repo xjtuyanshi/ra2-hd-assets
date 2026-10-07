@@ -860,7 +860,18 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
       anims: state.effects.anims.filter((anim) => !anim.invisible && anim.frameCount > 0),
       bullets: state.effects.bullets
         .filter((bullet) => !bullet.inviso)
-        .map(({ id, uid, x, y, z, type, frame, velocity }) => ({ id, uid, x, y, z, type, frame, velocity })),
+        .map(({ id, uid, x, y, z, type, frame, velocity, owner, ownerPalette }) => ({
+          id,
+          uid,
+          x,
+          y,
+          z,
+          type,
+          frame,
+          velocity,
+          ...(owner !== undefined ? { owner } : {}),
+          ...(ownerPalette ? { ownerPalette } : {}),
+        })),
       beams: [
         ...state.effects.lasers.map(({ source, target, innerColor }) => ({
           source,
