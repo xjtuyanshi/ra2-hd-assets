@@ -48,7 +48,15 @@ a scratch map, and returns true (or 1) when the task is done, or a number below 
 - Count by identity (`byUid`) rather than by totals: the scenario also holds objects of the player at the far start.
 - Texts are Chinese source strings; add their English to `runtimeMessages.ts` (a test lists what is missing).
 
+- A detector may leave a string under `note` in its scratch map when it completes (what was measured: a side, a
+  distance, a time); the coach panel shows it with the finished task. Values an earlier task measured reach a later
+  one through the lesson-wide `shared` map.
+
 `tests/basic/yrTrainingLessons.test.ts` holds a good and a bad synthetic case for every task.
+
+The YR lessons, in order: camera and selection, teams, orders (what troops do on their own and what has to be ordered:
+[research note](research/yr-auto-attack.md)), building and production, and the engineer drill with a flak track
+([research note](research/yr-transport.md)).
 
 ## Scenarios
 
@@ -72,3 +80,4 @@ observed in live sessions:
   wrong key per task that must not complete it. It needs the player's files and is not part of the asset-free checks.
 
 Not covered yet: waypoint and patrol practice, timed openings, micro and a full match against the computer.
+Research scenarios used for the two notes above are staged by scripts kept with the live-session tools outside Git.
