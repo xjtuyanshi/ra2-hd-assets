@@ -6,6 +6,9 @@ import {
   debugState,
   debugVisible,
   helpVisible,
+  hotkeySheet,
+  hotkeySheetVisible,
+  trainingPanel,
   mainPanel,
   resourceStatus,
   networkStatus,
@@ -25,9 +28,17 @@ import { installAdaptiveTouchControls } from './touchControls';
 import { installWakeLock } from './wakeLock';
 import { createVmFrameRenderer } from './vmFrameRenderer';
 import { aiUpscaleEnabled, fsrUpscaleMode, scalefxUpscaleEnabled, spatialUpscaleEnabled } from './spatialUpscale';
-import { installCanvasFit, installGameInput, setSessionShortcutKey, toggleImmersiveFullscreen } from './gameInput';
+import {
+  installCanvasFit,
+  installGameInput,
+  setSessionShortcutKey,
+  toggleImmersiveFullscreen,
+  type GameInputObservation,
+} from './gameInput';
 import { installRuntimeToolbar } from './runtimeToolbar';
 import { restoreCachedGameSource } from './gameSourcePicker';
+import { parseTrainingQuery, trainingHref } from './training/trainingQuery';
+import { supportedGame } from '../../../games/catalog';
 import { progressiveFilesOf } from '../../../adapter/progressiveFiles';
 import { VmSessionController, guardVmCallbacks } from '../../../app/session/vmSessionController';
 import { startSessionRuntime } from '../../../app/session/startSessionRuntime';
@@ -61,6 +72,18 @@ let activeHdCleanup: (() => void) | null = null;
 const hdBridgeRequested = import.meta.env.DEV && new URLSearchParams(window.location.search).get('hd') === '1';
 /** `?game-speed=`: startup speed of this page's sessions on the original scale (0 fastest, 3 normal, 6 slowest). */
 const sessionGameSpeed = parseGameSpeed(new URLSearchParams(window.location.search).get('game-speed'));
+/**
+ * `?mac-cmd-ctrl=0` turns off the Apple-keyboard mapping that lets ⌘ act as the game's Ctrl key (on by default; it has no
+ * effect on other platforms). `?debug-key=0` gives the backquote key back to the game instead of toggling the debug
+ * panel, for play sessions where a slip next to the "1" key must not open it.
+ */
+const metaAsControl = new URLSearchParams(window.location.search).get('mac-cmd-ctrl') !== '0';
+const debugKeyEnabled = new URLSearchParams(window.location.search).get('debug-key') !== '0';
+/** Observer of forwarded inputs (practice lessons); replaced per session, never able to block input. */
+let inputObserver: ((observation: GameInputObservation) => void) | null = null;
+/** Practice mode (development, `?train=`): see training/trainingQuery.ts. Stopped before the VM it polls is destroyed. */
+const trainingQuery = parseTrainingQuery(window.location.search);
+let activeTrainingCleanup: (() => void) | null = null;
 /** Page shortcut that switches between the HD view and the original picture; the game's own key without a bridge. */
 const HD_VIEW_KEY = '\\';
 
@@ -76,6 +99,7 @@ let activeResolutionChoice: ResolutionChoice = null;
 export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const generation = ++pageGeneration;
   // Release the old presentation and size listeners before switching sessions so resize callbacks cannot retain prior closures.
+  activeTrainingCleanup?.();
   activeHdCleanup?.();
   activeHdCleanup = null;
   activeRendererCleanup?.();
@@ -278,7 +302,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
 
   if (activeKeyHandler) window.removeEventListener('keydown', activeKeyHandler);
   activeKeyHandler = (event) => {
-    if (event.key === '`') {
+    if (event.key === '`' && debugKeyEnabled) {
       event.preventDefault();
       ensureDebugPanel();
       debugVisible.set(!debugVisible.getSnapshot());
@@ -313,6 +337,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     }
   };
   window.addEventListener('keydown', activeKeyHandler);
+  // Without the debug shortcut the backquote key is an ordinary key of the game again.
+  setSessionShortcutKey('`', debugKeyEnabled);
   if (debugAutoOpen) {
     // ?debug=1 is explicit: open even in production or on touch devices; backtick still toggles it.
     ensureDebugPanel();
@@ -366,7 +392,23 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   presenter.render();
   // Restore and start directly from the last persisted complete import without showing the picker;
   // missing/incomplete caches, such as quota-reduced sets, return to the picker.
-  const cachedSource = await restoreCachedGameSource().catch(() => null);
+  if (trainingQuery && trainingQuery.lesson === null) {
+    // Practice mode without a lesson: show the lesson list and start nothing.
+    const lessons = (await supportedGame(trainingQuery.game).loadTrainingLessons?.()) ?? [];
+    if (generation !== pageGeneration) return;
+    trainingPanel.set({
+      mode: 'menu',
+      lessons: lessons.map((lesson) => ({
+        id: lesson.id,
+        title: lesson.title,
+        summary: lesson.summary,
+        href: trainingHref(window.location.href, lesson.id, lesson.scenario),
+      })),
+    });
+    return;
+  }
+  // A practice lesson always plays its own scenario from the development files, never a cached import.
+  const cachedSource = trainingQuery ? null : await restoreCachedGameSource().catch(() => null);
   if (generation !== pageGeneration) return;
   gameSource = cachedSource ?? (await selectGameFiles());
   if (generation !== pageGeneration) {
@@ -403,6 +445,11 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const networkIndicator = networkStatus;
   activeNetworkCleanup = () => networkIndicator.set(null);
   selectedGameId = gameSource.game.id;
+  hotkeySheetVisible.set(false);
+  hotkeySheet.set(null);
+  void gameSource.game.loadHotkeySheet?.().then((sheet) => {
+    if (generation === pageGeneration) hotkeySheet.set(sheet);
+  });
   // ?resolution= (a size, `display` or `ini`) wins for this page load; otherwise the stored toolbar choice. Without
   // either, the HD bridge defaults to the display-matched size: its art has two texels per game pixel and is only shown
   // texel for pixel when one game pixel covers two device pixels.
@@ -450,6 +497,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     runtimeReleased = true;
     // Stop the HD bridge while the VM still runs: it switches the game's passthrough off and must not keep polling (and
     // holding its GPU view) after the VM is gone.
+    activeTrainingCleanup?.();
     hdCleanup?.();
     if (activeHdCleanup === hdCleanup) activeHdCleanup = null;
     hdCleanup = null;
@@ -509,10 +557,19 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     // cursor to current guest-frame bounds for sustained edge scrolling; ?mouse-lock=0 restores absolute coordinates.
     const mouseLock = new URLSearchParams(window.location.search).get('mouse-lock');
     const lockDesktopMouse = mouseLock === null ? true : mouseLock !== '0';
-    const installedInput = installGameInput(canvas, startedVm, lockDesktopMouse, presentHostCursor, () => ({
-      width: gameFrameWidth,
-      height: gameFrameHeight,
-    }));
+    const buildStrip = gameSource.game.buildStripWidth;
+    const installedInput = installGameInput(
+      canvas,
+      startedVm,
+      lockDesktopMouse,
+      presentHostCursor,
+      () => ({ width: gameFrameWidth, height: gameFrameHeight }),
+      {
+        metaAsControl,
+        ...(buildStrip === undefined ? {} : { shiftClickRepeat: (x, _y, frame) => x >= frame.width - buildStrip }),
+        observe: (observation) => inputObserver?.(observation),
+      },
+    );
     const pointerProbeTimer = debugAutoOpen ? window.setInterval(refreshPointerProbe, 250) : null;
     adaptInputResolution = installedInput.adaptResolution;
     inputPointerPosition = installedInput.pointerPosition;
@@ -595,6 +652,50 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   vm.setMasterVolume(requestedVolume);
   activeVm = vm;
   toolbar.setMapsAvailable(status.phase === 'running');
+  if (trainingQuery?.lesson) {
+    const trainingVm = vm;
+    const lessonId = trainingQuery.lesson;
+    void Promise.all([import('./training/trainingSession'), gameSource.game.loadTrainingLessons?.() ?? []])
+      .then(([{ startTrainingSession }, lessons]) => {
+        if (generation !== pageGeneration || runtimeReleased) return;
+        const index = lessons.findIndex((lesson) => lesson.id === lessonId);
+        const lesson = lessons[index];
+        if (!lesson) {
+          console.warn('[train] unknown lesson', lessonId);
+          return;
+        }
+        const next = lessons[index + 1];
+        let finished = false;
+        activeTrainingCleanup?.();
+        const session = startTrainingSession({
+          lesson,
+          getCommandState: () => trainingVm.getCommandState(),
+          publish: (view) => {
+            trainingPanel.set({
+              mode: 'lesson',
+              view,
+              restartHref: trainingHref(window.location.href, lesson.id, lesson.scenario),
+              nextHref: next ? trainingHref(window.location.href, next.id, next.scenario) : null,
+              menuHref: trainingHref(window.location.href, null),
+              note: null,
+            });
+            if (view.phase === 'done' && !finished) {
+              finished = true;
+              // The summary's links need the mouse: hand the pointer back once the last task is done.
+              if (document.pointerLockElement === canvas) document.exitPointerLock();
+            }
+          },
+        });
+        inputObserver = session.observe;
+        activeTrainingCleanup = () => {
+          session.stop();
+          inputObserver = null;
+          trainingPanel.set(null);
+          activeTrainingCleanup = null;
+        };
+      })
+      .catch((error) => console.warn('[train] lesson failed to start', error));
+  }
   if (hdBridgeEnabled) {
     const bridgeVm = vm;
     void import('./hdBridge')
@@ -694,6 +795,7 @@ export function stopVmPage(): void {
   activeInputCleanup = null;
   activeToolbarCleanup?.();
   activeToolbarCleanup = null;
+  activeTrainingCleanup?.();
   activeHdCleanup?.();
   activeHdCleanup = null;
   activeRendererCleanup?.();

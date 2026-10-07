@@ -11,6 +11,10 @@ import { EdgeNotice, edgeRequest } from './edgeMouseNotice';
 const GameSourcePickerView = lazy(() =>
   import('./GameSourcePickerView').then((module) => ({ default: module.GameSourcePickerView })),
 );
+const TrainingPanels = {
+  GameOverlays: lazy(() => import('./TrainingPanels').then((module) => ({ default: module.GameOverlays }))),
+  TrainingMenu: lazy(() => import('./TrainingPanels').then((module) => ({ default: module.TrainingMenu }))),
+};
 const CustomMapDialog = lazy(() => import('./CustomMapDialog').then((module) => ({ default: module.CustomMapDialog })));
 
 // Each region subscribes only to its own low-frequency snapshot; toolbar counters do not rerender the canvas or resource picker.
@@ -36,8 +40,14 @@ export function MainRegion() {
   const request = useStore(state.sourceRequest),
     panel = useStore(state.mainPanel);
   const help = useStore(state.helpVisible);
+  const training = useStore(state.trainingPanel);
   return (
     <div id="ui">
+      {training?.mode === 'menu' && (
+        <Suspense fallback={null}>
+          <TrainingPanels.TrainingMenu lessons={training.lessons} />
+        </Suspense>
+      )}
       {request && (
         <Suspense fallback={<p role="status">{t('正在加载资源选择器…')}</p>}>
           <GameSourcePickerView key={request.id} onSelected={request.finish} />
@@ -52,6 +62,16 @@ export function MainRegion() {
       {help && <ShortcutHelp close={() => state.helpVisible.set(false)} />}
     </div>
   );
+}
+/** Overlays drawn over the game picture; loaded only once a cheat sheet or a practice lesson exists. */
+export function OverlayRegion() {
+  const sheet = useStore(state.hotkeySheet);
+  const training = useStore(state.trainingPanel);
+  return sheet !== null || training?.mode === 'lesson' ? (
+    <Suspense fallback={null}>
+      <TrainingPanels.GameOverlays />
+    </Suspense>
+  ) : null;
 }
 export function BootRegion() {
   const boot = useStore(state.bootState);

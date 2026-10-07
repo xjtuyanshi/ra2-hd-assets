@@ -3,6 +3,7 @@ import { GAME_ARCHIVE_DIRECTORY_RULES } from '../../../games/archivePolicy';
 import { SUPPORTED_GAMES, supportedGame, type SupportedGameId } from '../../../games/catalog';
 import { HttpGameFileProvider } from '../../../platform/browser/files/http';
 import { loadPreferredGame, rememberPreferredGame } from '../../../platform/browser/files/directoryAccess';
+import { developmentGameRoot } from './training/trainingQuery';
 import { validateGameDirectory } from '../../../resources/discovery/discoverGameSources';
 import { OverlayGameFileProvider } from '../../../resources/providers/overlay';
 import { ScopedGameFileProvider } from '../../../resources/providers/scoped';
@@ -279,7 +280,9 @@ export function createGameSourcePicker(resolve: (source: GameSource) => void) {
     },
     development() {
       // RA2/YR share a development resource directory and use the same version discovery as player imports.
-      return use(() => developmentSourceProvider(new HttpGameFileProvider()));
+      return use(() =>
+        developmentSourceProvider(new HttpGameFileProvider(), developmentGameRoot(window.location.search)),
+      );
     },
     dispose() {
       disposed = true;
@@ -289,8 +292,13 @@ export function createGameSourcePicker(resolve: (source: GameSource) => void) {
   };
 }
 
-export async function developmentSourceProvider(provider: HttpGameFileProvider): Promise<GameFileProvider> {
-  return new ScopedGameFileProvider(provider, supportedGame('ra2').folder);
+/**
+ * `root` (the page's `?game-root=`, see training/trainingQuery.ts) names a sub-folder of the development server's game
+ * directory that holds a session's own game folder, for example a practice scenario's.
+ */
+export async function developmentSourceProvider(provider: HttpGameFileProvider, root = ''): Promise<GameFileProvider> {
+  const folder = supportedGame('ra2').folder;
+  return new ScopedGameFileProvider(provider, root ? `${root}/${folder}` : folder);
 }
 
 /**
