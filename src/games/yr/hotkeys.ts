@@ -10,6 +10,42 @@ import type { GameHotkeySheet } from '../hotkeys';
 export const YR_HOTKEY_SHEET: GameHotkeySheet = Object.freeze({
   groups: [
     {
+      // Observed in live matches on the pinned build (docs/remaster/research/yr-auto-attack.md); not key bindings.
+      title: '部队什么时候会自己打',
+      rows: [
+        {
+          keys: '闲着，有武器的敌人走进射程',
+          action: '会打（射程最外面大约一格不算）',
+          tip: '被打也会还手；但旁边的友军挨打它不管，每个单位只管自己够得着的。',
+        },
+        {
+          keys: '旁边是没有武器的建筑',
+          action: '不打，站多久都不打',
+          tip: '电厂、兵营、建造厂都要你点名：左键点它；中立建筑要按住 ⌘ 再点。',
+        },
+        {
+          keys: '左键点地面开进敌方基地',
+          action: '到了只打射程内有武器的目标',
+          tip: '开进去“傻站着”是原版规则，不是改版：基地里大多是没有武器的建筑。',
+        },
+        {
+          keys: '⌘+Shift+左键（移动攻击）',
+          action: '有武器的敌人进了射程会停下来打掉',
+          tip: '推进用它；建筑仍然要自己点。',
+        },
+        {
+          keys: 'G（区域警戒）',
+          action: '主动走过去打十格左右内有武器的敌人',
+          tip: '守家、守路口用它；步兵射程短，管得也近。',
+        },
+        {
+          keys: '⌘+⌥+左键点自己的单位（护送）',
+          action: '跟着它走，它打谁就一起打谁',
+          tip: '没被编进护送的单位，十几格外看着也不会来帮忙。',
+        },
+      ],
+    },
+    {
       title: '镜头',
       rows: [
         { keys: '← ↑ → ↓', action: '滚动画面', tip: '手不离键盘就能挪镜头，用触控板时比右键拖动顺手。' },

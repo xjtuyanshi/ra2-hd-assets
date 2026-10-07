@@ -287,8 +287,6 @@ export const runtimeEnglishMessages = {
   'Shift+数字 加选编队': 'Shift+digit: add a team to the selection',
   'Option+数字 选中并把镜头移过去': 'Option+digit: select a team and move the view to it',
   '第 3 课 下命令': 'Lesson 3: giving orders',
-  '移动、停止、攻击、强制攻击、强制移动碾压、移动攻击、散开、警戒、护送。':
-    'Move, stop, attack, force fire, force move and crushing, attack-move, scatter, guard, escort.',
   移动: 'Move',
   '选中犀牛坦克，左键点一块空地，让它们开过去。':
     'Select the Rhino tanks and left click empty ground to send them there.',
@@ -299,31 +297,20 @@ export const runtimeEnglishMessages = {
   '先下一个远一点的移动命令，坦克开动后按 S。':
     'Give a longer move order first and press S once the tanks are rolling.',
   攻击: 'Attack',
-  '基地前方有两座敌方电厂。选中坦克，左键点其中一座。':
-    'Two enemy power plants stand in front of the base. Select the tanks and left click one of them.',
   '把鼠标移到敌方建筑上，光标变成红色准星后点左键。':
     'Move the pointer onto the enemy building and left click when it turns into the red target cursor.',
   强制攻击: 'Force fire',
-  '按住 ⌘（或 Control）点一块空地：坦克会朝那块地开火。封路、清树、打桥都用它。':
-    'Hold ⌘ (or Control) and click empty ground: the tanks fire at that spot. Use it to block a road, clear trees or hit a bridge.',
-  '先按 S 停火，再按住 ⌘ 不放，左键点空地。':
-    'Press S to cease fire first, then keep ⌘ held and left click empty ground.',
   强制移动碾压: 'Force move and crush',
   '旁边站着几个平民。选中坦克，按住 Option 点一个平民：坦克会直接压过去。':
     'A few civilians stand nearby. Select the tanks, hold Option and click a civilian: the tanks drive straight over him.',
   '按住 Option（⌥）不放，把鼠标移到平民身上点左键。压到一个就算完成。':
     'Keep Option (⌥) held, move the pointer onto a civilian and left click. One crushed civilian completes the task.',
   移动攻击: 'Attack-move',
-  '按住 ⌘+Shift 点敌方电厂附近的空地：部队开过去，路上遇敌就打。':
-    'Hold ⌘+Shift and click empty ground near the enemy power plants: the troops drive there and fight what they meet.',
-  '同时按住 ⌘ 和 Shift，左键点一块空地。': 'Hold ⌘ and Shift together and left click empty ground.',
   'X 散开': 'X: scatter',
   '让坦克停下（S），再按 X：它们会各自挪开几步。躲碾压、躲范围伤害就靠它。':
     'Stop the tanks (S), then press X: each moves a few steps aside. This is how you dodge crushing and area damage.',
   '选中至少 2 个单位，按字母键 X。': 'Select at least 2 units and press the letter X.',
   'G 警戒': 'G: guard',
-  '选中坦克按 G：它们守住这一片，敌人靠近会主动迎上去。':
-    'Select the tanks and press G: they hold this area and go for enemies that come close.',
   '按字母键 G。': 'Press the letter G.',
   护送: 'Escort',
   '选中防空履带车，按住 ⌘+Option 点一辆犀牛坦克：防空车会跟着它走。':
@@ -510,4 +497,48 @@ export const runtimeEnglishMessages = {
     'Keys the page keeps for itself: [ and ] (clock multiplier), \\ (HD / original picture), ? (page help), F11 (fullscreen); ` is given back to the game by the practice launcher.',
   '网上流传的几个说法在这个版本里不成立：U 不是“按血量选兵”（它是呼叫玩家，“生命值顺序”默认没有键）；Alt+左键不是路径点（Z 才是）；Ctrl+左键不是移动攻击（它是强制攻击）。':
     'Some claims found on the web do not hold in this version: U is not "select by health" (it pages a player; "health order" has no default key); Alt+left click is not waypoint mode (Z is); Ctrl+left click is not attack-move (it is force fire).',
+  '移动、停止、点名攻击建筑、强制攻击、碾压、移动攻击进据点、散开、在家警戒、护送。':
+    'Move, stop, attack a building by name, force fire, crush, attack-move into a post, scatter, guard at home, escort.',
+  攻击建筑: 'Attack a building',
+  '部队不会自己去打没有武器的建筑，必须你来点。基地前方有两座敌方电厂：选中坦克，左键点其中一座。':
+    'Troops never attack an unarmed building on their own: you have to click it. Two enemy power plants stand in front of the base: select the tanks and left click one of them.',
+  强制攻击中立建筑: 'Force fire on a neutral building',
+  '平民旁边那座电厂不属于任何人，鼠标移上去不会变成准星。按住 ⌘（或 Control）再点它，坦克才会开火。':
+    'The power plant next to the civilians belongs to nobody and the pointer does not turn into a target over it. Hold ⌘ (or Control) and click it: only then do the tanks fire.',
+  '先按 S 停火；按住 ⌘ 不放，左键点那座中立电厂。':
+    'Press S to cease fire first; keep ⌘ held and left click the neutral power plant.',
+  移动攻击进据点: 'Attack-move into a post',
+  '另一侧有个敌方据点：一座哨戒炮守着一座电厂。选中坦克，按住 ⌘+Shift 点哨戒炮旁边的地面（不要点炮本身）：部队开过去，会自己把有武器的目标打掉。':
+    'On another side stands an enemy post: a sentry gun guarding a power plant. Select the tanks, hold ⌘+Shift and click the ground next to the sentry gun (not the gun itself): the troops drive there and take out armed targets by themselves.',
+  '同时按住 ⌘ 和 Shift，左键点据点里的空地。之后不要再点哨戒炮，看它们自己动手。':
+    'Hold ⌘ and Shift together and left click free ground inside the post. Do not click the sentry gun afterwards: watch them do it.',
+  'G 在家警戒': 'G: guard at home',
+  '把坦克带回基地旁边，按 G：它们会主动迎击靠近的敌人，范围比站着不动时大得多。守家用它。':
+    'Bring the tanks back next to the base and press G: they go for enemies that come near, from much farther than when they just stand. Use it to hold the base.',
+  '按 H 回基地，选中坦克左键点基地旁的空地，等它们到了再按 G。':
+    'Press H for the base, select the tanks and left click ground next to the base; press G once they are there.',
+  部队什么时候会自己打: 'When troops attack on their own',
+  '闲着，有武器的敌人走进射程': 'Idle, an armed enemy comes into weapon range',
+  '会打（射程最外面大约一格不算）': 'They attack (the outermost cell or so of the range does not count)',
+  '被打也会还手；但旁边的友军挨打它不管，每个单位只管自己够得着的。':
+    'They also return fire when hit; but they ignore a neighbour under attack: every unit minds only what it can reach.',
+  旁边是没有武器的建筑: 'Next to a building without weapons',
+  '不打，站多久都不打': 'They do not attack it, however long they stand there',
+  '电厂、兵营、建造厂都要你点名：左键点它；中立建筑要按住 ⌘ 再点。':
+    'Power plants, barracks and construction yards must be named by you: left click them; hold ⌘ for a neutral building.',
+  左键点地面开进敌方基地: 'Left click on ground to drive into the enemy base',
+  到了只打射程内有武器的目标: 'On arrival they only fight armed targets in range',
+  '开进去“傻站着”是原版规则，不是改版：基地里大多是没有武器的建筑。':
+    'Standing around inside a base is the original rule, not a modification: most of a base is unarmed buildings.',
+  '⌘+Shift+左键（移动攻击）': '⌘+Shift+left click (attack-move)',
+  有武器的敌人进了射程会停下来打掉: 'They stop for armed enemies that come into range and destroy them',
+  '推进用它；建筑仍然要自己点。': 'Use it to advance; buildings still have to be clicked.',
+  'G（区域警戒）': 'G (area guard)',
+  主动走过去打十格左右内有武器的敌人: 'They walk up to armed enemies within about ten cells and fight them',
+  '守家、守路口用它；步兵射程短，管得也近。':
+    'For holding the base or a crossing; infantry has a short range and covers less.',
+  '⌘+⌥+左键点自己的单位（护送）': '⌘+⌥+left click one of your own units (escort)',
+  '跟着它走，它打谁就一起打谁': 'They follow it and fight what it fights',
+  '没被编进护送的单位，十几格外看着也不会来帮忙。':
+    'Units that are not escorting watch from a dozen cells away and do not come to help.',
 } as const;

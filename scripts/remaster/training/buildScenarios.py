@@ -71,17 +71,33 @@ def basic(m: mapkit.MapText, terrain: mapkit.Terrain, starts: list[tuple[int, in
         crowd = terrain.spots(plan['side'], 5, spacing=1, max_distance=6)
         for i, cell in enumerate(crowd):
             m.infantry('Neutral', ('CIV1', 'CIV2', 'CIV3')[i % 3], *cell, mission='Sleep')
+        # A building nobody owns (it stays Neutral): units never fire at it unless forced.
+        level = terrain.cell(*start)[0]
+        idle_plant = terrain.spots(plan['side'], 1, w=2, h=3, spacing=2, max_distance=14, level=level)[0]
+        m.structure('Neutral', 'NAPOWR', *idle_plant)
+        # A small enemy post in a third direction: a sentry gun guarding a power plant, for attack-move practice.
+        def room(p):
+            return sum(terrain.free(p[0] + i, p[1] + j, level) for i in range(-4, 5) for j in range(-4, 5))
+
+        apart = lambda p, q: abs(p[0] - q[0]) + abs(p[1] - q[1])
+        candidates = [p for distance in (16, 19, 22, 26) for p in mapkit.open_sites(terrain, start, distance)
+                      if apart(p, plan['front']) >= 10 and apart(p, plan['side']) >= 10]
+        post = max(candidates, key=room)
+        post_plant = terrain.spots(post, 1, w=2, h=3, max_distance=12, level=level)[0]
+        post_gun = terrain.spots((post_plant[0] + 1, post_plant[1] + 1), 1, min_distance=3, max_distance=7, level=level)[0]
+        m.structure('Neutral', 'NALASR', *post_gun, tag=tags[other])
+        m.structure('Neutral', 'NAPOWR', *post_plant, tag=tags[other])
         # An outpost far from the base under fire from a sentry gun of the other player: the game raises an alert
         # there, which stays the newest event for "jump to the last event" after the outpost is gone.
         outpost_site = mapkit.open_sites(terrain, start, 46, radius=4)[0]
-        level = terrain.cell(*start)[0]
         gun = terrain.spots(outpost_site, 1, max_distance=10, level=level)[0]
         outpost = terrain.spots(gun, 2, w=2, h=3, spacing=1, max_distance=5, level=level)
         m.structure('Neutral', 'NALASR', *gun, tag=tags[other])
         for cell in outpost:
             m.structure('Neutral', 'NAPOWR', *cell, tag=tags[own])
         info[own] = {'start': start, 'yard': yard, 'power': power, 'tanks': tanks, 'flak': flak, 'troops': troops,
-                     'targets': targets, 'crowd': crowd, 'outpost': outpost, 'outpostGun': gun}
+                     'targets': targets, 'crowd': crowd, 'outpost': outpost, 'outpostGun': gun,
+                     'neutralPlant': idle_plant, 'postGun': post_gun, 'postPlant': post_plant}
     return info
 
 

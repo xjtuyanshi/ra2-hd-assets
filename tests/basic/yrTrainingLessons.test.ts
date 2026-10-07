@@ -47,6 +47,8 @@ const away = { x: home.x + 2000, y: home.y };
 const enemyPlant = unit({ owner: 1, kind: 'building', type: 'NAPOWR', ...cell(25, 95) });
 const civilians = () =>
   [0, 1].map((i) => unit({ owner: 2, kind: 'infantry', type: `CIV${i + 1}`, ...cell(20 + i, 120) }));
+const neutralPlant = unit({ owner: 2, kind: 'building', type: 'NAPOWR', ...cell(32, 121) });
+const enemyGun = unit({ owner: 1, kind: 'building', type: 'NALASR', ...cell(16, 102) });
 
 const CASES: Record<string, Record<string, Case>> = {
   'yr-camera': {
@@ -188,14 +190,24 @@ const CASES: Record<string, Record<string, Case>> = {
       },
     },
     'force-fire': {
-      origin: state(tanks({ selected: true })),
+      origin: state([...tanks({ selected: true }), ...civilians(), neutralPlant]),
       good: {
-        state: state(tanks({ selected: true, mission: 'Attack', target: { kind: 'cell', x: 30, y: 99 } })),
+        state: state([
+          ...tanks({ selected: true, mission: 'Attack', target: { kind: 'object', uid: neutralPlant.uid } }),
+          ...civilians(),
+          neutralPlant,
+        ]),
         inputs: [key('Mouse0', { ctrl: true })],
       },
+      // An enemy building needs no force: attacking it is not the taught operation.
       bad: {
-        state: state(tanks({ selected: true, mission: 'Attack', target: { kind: 'cell', x: 30, y: 99 } })),
-        inputs: [key('Mouse0')],
+        state: state([
+          ...tanks({ selected: true, mission: 'Attack', target: { kind: 'object', uid: enemyPlant.uid } }),
+          ...civilians(),
+          neutralPlant,
+          enemyPlant,
+        ]),
+        inputs: [key('Mouse0', { ctrl: true })],
       },
     },
     crush: {
@@ -204,14 +216,21 @@ const CASES: Record<string, Record<string, Case>> = {
       bad: { state: state([...tanks({ selected: true }), civilians()[0]!]), inputs: [key('Mouse0', { ctrl: true })] },
     },
     'attack-move': {
-      origin: state(tanks({ selected: true })),
+      origin: state([...tanks({ selected: true }), enemyGun]),
       good: {
-        state: state(tanks({ selected: true, mission: 'Move', destination: { kind: 'cell', x: 30, y: 97 } })),
+        state: state([
+          ...tanks({ selected: true, mission: 'Attack', target: { kind: 'object', uid: enemyGun.uid } }),
+          enemyGun,
+        ]),
         inputs: [key('Mouse0', { ctrl: true, shift: true })],
       },
+      // The gun was clicked directly after the attack-move order: the units did not pick it themselves.
       bad: {
-        state: state(tanks({ selected: true, mission: 'Move', destination: { kind: 'cell', x: 30, y: 97 } })),
-        inputs: [key('Mouse0')],
+        state: state([
+          ...tanks({ selected: true, mission: 'Attack', target: { kind: 'object', uid: enemyGun.uid } }),
+          enemyGun,
+        ]),
+        inputs: [key('Mouse0', { ctrl: true, shift: true }), input('Mouse0', 950)],
       },
     },
     guard: {
@@ -247,6 +266,28 @@ describe('YR practice lessons', () => {
 
   it('yr-orders / scatter and escort', () => {
     const lesson = lessonOf('yr-orders');
+    // Attack-move: the gun destroyed after the order also proves it; with no gun left the order itself is enough.
+    const tanksMoving = tanks({ selected: true, mission: 'Move', destination: { kind: 'cell', x: 17, y: 101 } });
+    const attackMove = [key('Mouse0', { ctrl: true, shift: true })];
+    expect(
+      run(lesson, 'attack-move', state([...tanks(), enemyGun]), { state: state(tanks()), inputs: attackMove }),
+    ).toBe(1);
+    expect(
+      run(lesson, 'attack-move', state([...tanks(), enemyGun]), {
+        state: state([...tanksMoving, enemyGun]),
+        inputs: attackMove,
+      }),
+    ).toBe(0.5);
+    expect(run(lesson, 'attack-move', state(tanks()), { state: state(tanksMoving), inputs: attackMove })).toBe(1);
+    // Guard at home: the same key far from the base is not it.
+    const farGuard = tanks({ selected: true, mission: 'Area_Guard' }).map((tank) => ({
+      ...tank,
+      x: tank.x + 60 * 256,
+    }));
+    expect(
+      run(lesson, 'guard', state([yard()]), { state: state([yard(), ...farGuard]), inputs: [key('KeyG')] }),
+    ).toBeLessThan(1);
+
     const before = tanks({ selected: true });
     const moved = before.map((tank, i) => ({ ...tank, x: tank.x + (i === 0 ? 300 : 0) }));
     expect(run(lesson, 'scatter', state(before), { state: state(moved), inputs: [key('KeyX')] })).toBe(1);

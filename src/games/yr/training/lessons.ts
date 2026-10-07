@@ -234,7 +234,7 @@ const teams: TrainingLesson = {
 const orders: TrainingLesson = {
   id: 'yr-orders',
   title: '第 3 课 下命令',
-  summary: '移动、停止、攻击、强制攻击、强制移动碾压、移动攻击、散开、警戒、护送。',
+  summary: '移动、停止、点名攻击建筑、强制攻击、碾压、移动攻击进据点、散开、在家警戒、护送。',
   scenario: 'basic',
   ready: kitReady,
   hotkeys: [
@@ -274,8 +274,8 @@ const orders: TrainingLesson = {
     },
     {
       id: 'attack',
-      title: '攻击',
-      instruction: '基地前方有两座敌方电厂。选中坦克，左键点其中一座。',
+      title: '攻击建筑',
+      instruction: '部队不会自己去打没有武器的建筑，必须你来点。基地前方有两座敌方电厂：选中坦克，左键点其中一座。',
       hint: '把鼠标移到敌方建筑上，光标变成红色准星后点左键。',
       detect: chordWithEffect(
         [LEFT],
@@ -286,13 +286,23 @@ const orders: TrainingLesson = {
     },
     {
       id: 'force-fire',
-      title: '强制攻击',
-      instruction: '按住 ⌘（或 Control）点一块空地：坦克会朝那块地开火。封路、清树、打桥都用它。',
-      hint: '先按 S 停火，再按住 ⌘ 不放，左键点空地。',
-      detect: chordWithEffect(
-        ['Ctrl+Mouse0'],
-        (context) => ordered(context, ['Attack'], (o) => o.target?.kind === 'cell').length >= 1,
-      ),
+      title: '强制攻击中立建筑',
+      instruction: '平民旁边那座电厂不属于任何人，鼠标移上去不会变成准星。按住 ⌘（或 Control）再点它，坦克才会开火。',
+      hint: '先按 S 停火；按住 ⌘ 不放，左键点那座中立电厂。',
+      detect: chordWithEffect(['Ctrl+Mouse0'], (context) => {
+        const neutral = pick(context.state, civilians)[0]?.owner;
+        return (
+          ordered(context, ['Attack'], (o) => {
+            const target = o.target?.kind === 'object' ? byUid(context.state, o.target.uid) : undefined;
+            return (
+              !!target &&
+              target.kind === 'building' &&
+              target.owner !== context.state.localHouse &&
+              (neutral === undefined || target.owner === neutral)
+            );
+          }).length >= 1
+        );
+      }),
     },
     {
       id: 'crush',
@@ -307,13 +317,32 @@ const orders: TrainingLesson = {
     },
     {
       id: 'attack-move',
-      title: '移动攻击',
-      instruction: '按住 ⌘+Shift 点敌方电厂附近的空地：部队开过去，路上遇敌就打。',
-      hint: '同时按住 ⌘ 和 Shift，左键点一块空地。',
-      detect: chordWithEffect(
-        ['Ctrl+Shift+Mouse0'],
-        (context) => ordered(context, ['Move', 'AttackMove', 'Attack'], (o) => o.destination !== null).length >= 1,
-      ),
+      title: '移动攻击进据点',
+      instruction:
+        '另一侧有个敌方据点：一座哨戒炮守着一座电厂。选中坦克，按住 ⌘+Shift 点哨戒炮旁边的地面（不要点炮本身）：部队开过去，会自己把有武器的目标打掉。',
+      hint: '同时按住 ⌘ 和 Shift，左键点据点里的空地。之后不要再点哨戒炮，看它们自己动手。',
+      hintAfterMs: 45_000,
+      detect: (context) => {
+        const chord = lastChord(context.inputs, ['Ctrl+Shift+Mouse0']);
+        if (!chord) return 0;
+        // The engagement must be the units' own: no plain attack click after the attack-move order.
+        const direct = lastChord(context.inputs, [LEFT]);
+        if (direct && direct.time > chord.time) return 0.25;
+        const guns = pick(context.origin, ofType('NALASR')).filter(
+          (object) => object.owner !== context.origin.localHouse && nearBase(context.origin, 30)(object),
+        );
+        const engaged = pick(context.state, own, mobile).some(
+          (object) =>
+            object.target?.kind === 'object' && guns.some((gun) => gun.uid === (object.target as { uid: number }).uid),
+        );
+        if (!guns.length) {
+          // The post was already cleared earlier in the lesson: the order itself is all that can be shown.
+          return ordered(context, ['Move', 'AttackMove', 'Attack'], (o) => o.destination !== null).length >= 1
+            ? 1
+            : 0.5;
+        }
+        return engaged || gone(context, guns).length > 0 ? 1 : 0.5;
+      },
     },
     {
       id: 'scatter',
@@ -335,10 +364,14 @@ const orders: TrainingLesson = {
     },
     {
       id: 'guard',
-      title: 'G 警戒',
-      instruction: '选中坦克按 G：它们守住这一片，敌人靠近会主动迎上去。',
-      hint: '按字母键 G。',
-      detect: chordWithEffect(['KeyG'], (context) => ordered(context, ['Area_Guard'], () => true).length >= 1),
+      title: 'G 在家警戒',
+      instruction: '把坦克带回基地旁边，按 G：它们会主动迎击靠近的敌人，范围比站着不动时大得多。守家用它。',
+      hint: '按 H 回基地，选中坦克左键点基地旁的空地，等它们到了再按 G。',
+      hintAfterMs: 40_000,
+      detect: chordWithEffect(
+        ['KeyG'],
+        (context) => ordered(context, ['Area_Guard'], nearBase(context.state, 16)).length >= 1,
+      ),
     },
     {
       id: 'escort',
