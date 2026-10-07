@@ -6,6 +6,7 @@ import {
   debugState,
   debugVisible,
   helpVisible,
+  gameFocus,
   hotkeySheet,
   hotkeySheetVisible,
   trainingPanel,
@@ -447,6 +448,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   selectedGameId = gameSource.game.id;
   hotkeySheetVisible.set(false);
   hotkeySheet.set(null);
+  gameFocus.set(() => canvas.focus({ preventScroll: true }));
   void gameSource.game.loadHotkeySheet?.().then((sheet) => {
     if (generation === pageGeneration) hotkeySheet.set(sheet);
   });
@@ -513,6 +515,9 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     if (document.pointerLockElement === canvas) await document.exitPointerLock();
     bootState.set(null);
     helpVisible.set(false);
+    hotkeySheetVisible.set(false);
+    hotkeySheet.set(null);
+    gameFocus.set(null);
     activeInputCleanup?.();
     activeInputCleanup = null;
     if (activeKeyHandler) window.removeEventListener('keydown', activeKeyHandler);
@@ -807,6 +812,9 @@ export function stopVmPage(): void {
   debugState.set(null);
   debugVisible.set(false);
   helpVisible.set(false);
+  hotkeySheetVisible.set(false);
+  hotkeySheet.set(null);
+  gameFocus.set(null);
   gameRunning.set(false);
   void pageController.destroy();
 }

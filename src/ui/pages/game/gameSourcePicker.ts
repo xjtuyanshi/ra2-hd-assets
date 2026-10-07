@@ -281,7 +281,10 @@ export function createGameSourcePicker(resolve: (source: GameSource) => void) {
     development() {
       // RA2/YR share a development resource directory and use the same version discovery as player imports.
       return use(() =>
-        developmentSourceProvider(new HttpGameFileProvider(), developmentGameRoot(window.location.search)),
+        developmentSourceProvider(
+          new HttpGameFileProvider(),
+          developmentGameRoot(typeof window === 'undefined' ? '' : window.location.search),
+        ),
       );
     },
     dispose() {

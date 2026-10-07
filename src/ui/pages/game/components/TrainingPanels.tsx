@@ -10,7 +10,7 @@ const applePlatform = () =>
   /(?:Macintosh|MacIntel|iPhone|iPad|iPod)/i.test(`${navigator.platform} ${navigator.userAgent}`);
 
 /** Give the keyboard back to the game after a click on one of the overlay's own controls. */
-const refocusGame = () => document.getElementById('screen')?.focus({ preventScroll: true });
+const refocusGame = () => state.gameFocus.getSnapshot()?.();
 
 const seconds = (ms: number) => {
   const total = Math.floor(ms / 1000);

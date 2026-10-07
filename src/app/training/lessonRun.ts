@@ -85,7 +85,8 @@ export function createLessonRun(lesson: TrainingLesson, options: LessonRunOption
   const view = (): LessonRunView => {
     const used: string[] = [];
     const unused: string[] = [];
-    for (const hotkey of lesson.hotkeys) (hotkey.chords.some((chord) => usedChords.has(chord)) ? used : unused).push(hotkey.label);
+    for (const hotkey of lesson.hotkeys)
+      (hotkey.chords.some((chord) => usedChords.has(chord)) ? used : unused).push(hotkey.label);
     return {
       lessonId: lesson.id,
       title: lesson.title,

@@ -17,6 +17,8 @@ export const hdStatus = createStore<string | null>(null);
 export const debugVisible = createStore(false);
 export const debugState = createStore<ComponentProps<typeof DebugPanel> | null>(null);
 export const helpVisible = createStore(false);
+/** Gives the keyboard back to the game picture; set by the page while a game runs (overlay controls call it). */
+export const gameFocus = createStore<(() => void) | null>(null);
 /** The running game's cheat sheet (null: the game has none) and whether its overlay is open. */
 export const hotkeySheet = createStore<GameHotkeySheet | null>(null);
 export const hotkeySheetVisible = createStore(false);
