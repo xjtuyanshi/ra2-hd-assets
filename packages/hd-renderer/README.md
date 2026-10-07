@@ -710,10 +710,15 @@ these contracts. The source native body formula matched 9,316/9,370 opaque pixel
 The native addresses, bounds and remaining approximations are recorded in
 `docs/remaster/research/painter-order.md`.
 
-Live cell overlays (`src/live/overlays.ts`) draw each overlay's library frame at its cell. Rubble overlays
-(`LibraryOverlay.rubble`, rules IsRubble) never draw their own image: the carrier cell named in the snapshot's
-`overlays.rubble` draws its destroyed building's body frame 3 and shadow with the overlay's ISO palette, lighting and
-flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`); other rubble cells stay empty.
+Live cell overlays (`src/live/overlays.ts`) draw each overlay's library frame at its cell. Upright pieces (walls,
+fences; not flat overlays, not bridge decks) carry `overlayTieBias`: 0.0008 of nearness per step of x + y, starting
+over every 64 diagonals (0.05 at most, under `CARD_CLEARANCE`). Below its base line a card follows the ground, so
+where two neighbouring pieces overlap their depths were equal and rounding picked the winner row by row (stripes at
+wall corners); now the piece of the nearer cell shows, as the engine's back-to-front cell order has it. Rubble
+overlays (`LibraryOverlay.rubble`, rules IsRubble) never draw their own image: the carrier cell named in the
+snapshot's `overlays.rubble` draws its destroyed building's body frame 3 and shadow with the overlay's ISO palette,
+lighting and flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`); other rubble cells stay
+empty.
 
 ## What v0 covers
 
