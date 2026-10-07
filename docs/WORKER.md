@@ -10,6 +10,17 @@
 - File providers are not cloned directly into the Worker. Session resources are accessed on demand through file ports. The executable must be an independent copy of the exact version selected by the page, with no fallback to a different local version.
 - `src/app/session/` owns sessions; `src/graphics/` owns presentation scheduling. Do not duplicate the session controller in the Worker layer.
 
+## Emulator settings
+
+- `?jit-modules=expanded` (off by default; main thread and Worker alike) gives the pinned v86 build room for 2019
+  compiled modules instead of its own 899: `src/vm86/jitModuleTable.ts` rewrites nine immediates of the binary's
+  free-slot list after checking its SHA-256 and every site, and `src/platform/browser/emulator.ts` loads the
+  rewritten binary with a function table grown to match, falling back to the stock binary on any failure. v86 never
+  evicts a compiled module and throws its whole compiled cache away when a 900th is needed; asset-free tests run a
+  guest with 1000 hot code pages in the real emulator both ways. The staged six-player battles measured so far used
+  about 300 slots, so the stock table was never full there: the play page's speed telemetry reports modules
+  compiled and given up per window (`jitFreed`), which is where a clear in a long match would show.
+
 ## Maintenance and verification
 
 Protocol changes must update both endpoints, cancellation/destruction, and rejection of pending requests. Fallback must not leave an old Worker behind or run two VMs simultaneously. Transfer frames only through independent buffers; never transfer guest WASM memory.

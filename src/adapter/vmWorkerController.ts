@@ -476,7 +476,8 @@ export class VmWorkerController {
     };
     const probe = new BrowserEmulatorProbe();
     const platform: VmCorePlatform = {
-      createEmulator: (options) => createBrowserEmulator(options, probe),
+      createEmulator: (options) =>
+        createBrowserEmulator(options, probe, { expandJitModules: config.expandJitModules === true }),
       executionProbe: probe,
       ...gameVmConfiguration(
         source.game,

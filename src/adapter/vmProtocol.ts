@@ -55,6 +55,8 @@ export interface VmInitConfig {
   /** The page owns the WS connection; the Worker sends and receives through a port transferred with init. */
   relayPort?: MessagePort;
   fastFileRead: boolean;
+  /** Run the emulator with the larger compiled-module table (?jit-modules=expanded); see src/vm86/jitModuleTable.ts. */
+  expandJitModules?: boolean;
   clockRate: number;
   masterVolume: number;
   /** F2/?debug call hotspots; when disabled, the Worker only increments an integer per HC. */

@@ -174,6 +174,7 @@ export async function createVmShell(
     ...(ra2Network ? { ra2Network } : {}),
     fastFileRead:
       typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('fast-files') !== '0',
+    ...(expandJitModulesRequested() ? { expandJitModules: true } : {}),
     clockRate: 1,
     masterVolume: DEFAULT_MASTER_VOLUME,
     traceCalls: typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1',
@@ -262,7 +263,8 @@ export class Win32GameVm implements VmShell {
     this.fileProvider = source.files;
     const probe = new BrowserEmulatorProbe();
     const platform: VmCorePlatform = {
-      createEmulator: (options) => createBrowserEmulator(options, probe),
+      createEmulator: (options) =>
+        createBrowserEmulator(options, probe, { expandJitModules: expandJitModulesRequested() }),
       executionProbe: probe,
       ...gameVmConfiguration(source.game, callbacks.onNetworkStatus, ra2Network),
       startupPage,
@@ -382,4 +384,12 @@ export class Win32GameVm implements VmShell {
     this.removePagehideFlush = null;
     await this.core.destroy();
   }
+}
+
+/**
+ * `?jit-modules=expanded`: give the pinned emulator build the larger compiled-module table instead of its own 899
+ * slots (src/vm86/jitModuleTable.ts). Off unless asked for; main thread and Worker read the same switch.
+ */
+function expandJitModulesRequested(): boolean {
+  return typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('jit-modules') === 'expanded';
 }
