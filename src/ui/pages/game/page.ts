@@ -58,6 +58,7 @@ import {
 } from './vmPageResolution';
 import type { GameResolution } from '../../../games/resolution';
 import { parseGameSpeed } from '../../../games/gameSpeed';
+import type { HdBridgeControl } from './hdBridge';
 
 let activeVm: VmShell | null = null;
 const pageController = new VmSessionController();
@@ -156,7 +157,11 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const hdBridgeEnabled = hdBridgeRequested && frameRenderer.backend === 'WebGL2';
   if (hdBridgeRequested && !hdBridgeEnabled) console.warn('[HD] ?hd=1 needs the WebGL2 frame renderer; HD bridge off');
   /** This session's HD bridge; releaseRuntime stops it, and a bridge whose import resolves after release never starts. */
-  let hdCleanup: ((() => void) & { toggle(): boolean }) | null = null;
+  let hdCleanup: HdBridgeControl | null = null;
+  /** Game-speed telemetry of this session (development only, see speedTelemetry.ts); stopped with the runtime. */
+  let speedCleanup: (() => void) | null = null;
+  /** Game frames presented since the page started this session (the telemetry takes differences). */
+  let presentedFrames = 0;
   /** Switch between the HD view and the original picture (toolbar button and the \\ key); no-op without a bridge. */
   const toggleHdView = () => {
     if (hdCleanup) toolbar.setHdView(hdCleanup.toggle());
@@ -209,6 +214,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     transform: (frame) => effects.transform(frame),
     presented: () => {
       effects.publishStatus(frameRenderer.upscaleStatus);
+      presentedFrames++;
       toolbar.recordPresentedFrame();
     },
     tick: () => renderDebug(),
@@ -506,6 +512,9 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     toolbar.setHdView(null);
     toolbar.setHdQuality(null);
     toolbar.setStalls(0, 0);
+    speedCleanup?.();
+    speedCleanup = null;
+    toolbar.setGameSpeed(null);
     setSessionShortcutKey(HD_VIEW_KEY, false);
     effects.stop();
     activeNetworkCleanup?.();
@@ -700,6 +709,34 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
         };
       })
       .catch((error) => console.warn('[train] lesson failed to start', error));
+  }
+  // Game-speed telemetry: like the stall recorder, behind DEV so that neither the module nor a request to the log
+  // route exists in a production build. It runs with or without the HD bridge.
+  if (import.meta.env.DEV) {
+    const telemetryVm = vm;
+    void import('./speedTelemetry')
+      .then(({ startSpeedTelemetry }) => {
+        if (generation !== pageGeneration || runtimeReleased) return;
+        const telemetry = startSpeedTelemetry({
+          diagnostics: () => telemetryVm.getDiagnostics('usage'),
+          presentedFrames: () => presentedFrames,
+          frameSize: () => (presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null),
+          scene: () => hdCleanup?.scene() ?? null,
+          publish: (actual, target) => toolbar.setGameSpeed(actual, target),
+        });
+        const globals = window as unknown as { __speedTelemetry?: { readonly records: unknown[] } };
+        const handle = {
+          get records() {
+            return telemetry.records();
+          },
+        };
+        globals.__speedTelemetry = handle;
+        speedCleanup = () => {
+          telemetry.dispose();
+          if (globals.__speedTelemetry === handle) delete globals.__speedTelemetry;
+        };
+      })
+      .catch((error) => console.warn('[speed] telemetry unavailable', error));
   }
   if (hdBridgeEnabled) {
     const bridgeVm = vm;

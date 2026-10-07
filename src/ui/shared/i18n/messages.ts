@@ -222,6 +222,11 @@ export const englishMessages = {
   '卡顿 {0} 次，最长 {1} 秒': 'Stalls: {0}, longest {1} s',
   '本局中画面停顿超过 150 毫秒的次数与最长一次的时长':
     'Frames of this match that came more than 150 ms late, and the longest such gap',
+  '游戏速度 实际 {0} / 应有 {1}': 'Game speed: {0} of {1} frames/s',
+  '游戏速度 实际 {0} / 不限速': 'Game speed: {0} frames/s (no limit)',
+  '游戏速度 实际 {0}': 'Game speed: {0} frames/s',
+  '游戏每秒实际推进的逻辑帧数，与当前速度档位应有的帧数（最近 5 秒）':
+    'Logic frames the game advanced a second, and what the current speed setting allows (last 5 seconds)',
   ' · 窗口已变，刷新页面重新匹配': ' · window changed, reload to match again',
   主音量: 'Master volume',
   主音量读数: 'Master volume value',

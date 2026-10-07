@@ -109,3 +109,72 @@ it('restores uninstrumented methods if the capture client disappears', () => {
   expect(vi.getTimerCount()).toBe(0);
   probe.detach();
 });
+
+it('meters CPU-loop time only once asked, below a capture, and gives the loop back on detach', () => {
+  let at = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => at);
+  const engine = {
+    tick_counter: 0,
+    yield: (_delay: number, _tick: number) => {},
+    yield_callback(_tick: number) {},
+    cpu: {
+      main_loop() {
+        at += 3;
+        return 0;
+      },
+    },
+  };
+  const loop = engine.cpu.main_loop;
+  const probe = new BrowserEmulatorProbe();
+  expect(probe.usage()).toBeNull(); // nothing attached yet
+  probe.attach(engine, 'message-channel');
+  expect(engine.cpu.main_loop).toBe(loop); // attaching alone wraps nothing
+  engine.cpu.main_loop();
+  expect(probe.usage()).toEqual({ guestMs: 0, slices: 0 });
+  expect(engine.cpu.main_loop).not.toBe(loop);
+  expect(engine.cpu.main_loop()).toBe(0);
+  engine.cpu.main_loop();
+  expect(probe.usage()).toEqual({ guestMs: 6, slices: 2 });
+  // A capture wraps the metered loop and restores it: the accounting goes on through and after the capture.
+  const metered = engine.cpu.main_loop;
+  probe.start();
+  engine.cpu.main_loop();
+  expect(probe.sample().cpuSlices).toMatchObject({ count: 1, totalMs: 3 });
+  probe.stop();
+  expect(engine.cpu.main_loop).toBe(metered);
+  engine.cpu.main_loop();
+  expect(probe.usage()).toEqual({ guestMs: 12, slices: 4 });
+  probe.detach();
+  expect(engine.cpu.main_loop).toBe(loop);
+  expect(probe.usage()).toBeNull();
+});
+
+it('starts the accounting after a running capture instead of under its restore', () => {
+  let at = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => at);
+  const engine = {
+    tick_counter: 0,
+    yield: (_delay: number, _tick: number) => {},
+    yield_callback(_tick: number) {},
+    cpu: {
+      main_loop() {
+        at += 2;
+        return 0;
+      },
+    },
+  };
+  const loop = engine.cpu.main_loop;
+  const probe = new BrowserEmulatorProbe();
+  probe.attach(engine, 'message-channel');
+  probe.start();
+  expect(probe.usage()).toBeNull();
+  engine.cpu.main_loop();
+  probe.stop();
+  expect(probe.usage()).toEqual({ guestMs: 0, slices: 0 });
+  engine.cpu.main_loop();
+  expect(probe.usage()).toEqual({ guestMs: 2, slices: 1 });
+  // Detached in the middle of a capture: both layers come off.
+  probe.start();
+  probe.detach();
+  expect(engine.cpu.main_loop).toBe(loop);
+});

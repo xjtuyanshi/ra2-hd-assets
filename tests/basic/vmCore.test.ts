@@ -708,3 +708,90 @@ describe('VmCore HD bridge opt-in', () => {
     }
   });
 });
+
+describe('VmCore usage accounting (development telemetry)', () => {
+  it('takes no clock reading until asked, then accounts host calls, guest waits, state reads and frames', async () => {
+    const emulator = new FakeEmulator();
+    let at = 1000;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => at);
+    // A guest wait of 5 ms that really took 7.
+    const timeout = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void) => {
+      at += 7;
+      queueMicrotask(run);
+      return 0;
+    }) as unknown as typeof setTimeout);
+    let delay = 0;
+    const shim = Object.assign(
+      fakeShim(() => {
+        at += 3;
+        return { eax: 0 };
+      }),
+      { prepareGuestThreadReturn: () => delay, completeGuestThreadDelay: () => ({ delayMs: 0 }) },
+    );
+    const probe = {
+      start: vi.fn(),
+      stop: vi.fn(),
+      sample: vi.fn(() => null as never),
+      usage: vi.fn(() => ({ guestMs: 40, slices: 9 })),
+    };
+    let presentFrame: (() => void) | undefined;
+    const fixture = source();
+    fixture.game = {
+      ...fixture.game,
+      runtimeHooks: {
+        createRenderStateReader: async () => () => {
+          at += 2;
+          return null;
+        },
+      },
+    };
+    const core = new VmCore({}, fixture, {
+      ...platform(emulator, new FakeAudio(), () => shim),
+      executionProbe: probe,
+      createShim: (_emulator, options) => {
+        presentFrame = () => options?.onFrame?.({} as never);
+        return shim;
+      },
+    });
+    const hypercall = async () => {
+      writeU32(emulator, HYPERCALL_REQUEST, 1);
+      await (core as unknown as { poll(): Promise<void> }).poll();
+    };
+    try {
+      await core.start();
+      await hypercall();
+      presentFrame!();
+      expect((await core.getDiagnostics('sample')).usage).toBeNull();
+      expect(probe.usage).not.toHaveBeenCalled();
+      // What happened before the first request is not in the accounting, except the frame count.
+      expect((await core.getDiagnostics('usage')).usage).toEqual({
+        guestMs: 40,
+        slices: 9,
+        hostCallMs: 0,
+        guestWaitMs: 0,
+        stateReadMs: 0,
+        stateReads: 0,
+        frames: 1,
+      });
+      await hypercall();
+      delay = 5;
+      await hypercall();
+      await core.getRenderState();
+      presentFrame!();
+      // Once on, every diagnostics answer carries it; a capture's own actions do not switch it off.
+      expect((await core.getDiagnostics('sample')).usage).toEqual({
+        guestMs: 40,
+        slices: 9,
+        hostCallMs: 6,
+        guestWaitMs: 7,
+        stateReadMs: 2,
+        stateReads: 1,
+        frames: 2,
+      });
+    } finally {
+      now.mockRestore();
+      timeout.mockRestore();
+      await core.destroy();
+    }
+  });
+});

@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import { GamePerformanceMeter } from '../../src/adapter/gamePerformance';
 import { createRa2FrameReader } from '../../src/games/ra2/performance';
-import { createYrFrameReader } from '../../src/games/yr/performance';
+import { createYrFrameReader, yrTargetLogicFps } from '../../src/games/yr/performance';
 import { RA2_STARTUP_PAGE_HASH } from '../../src/games/ra2/startupPage';
 import { YR_STARTUP_PAGE_HASH } from '../../src/games/yr/startupPage';
 import { createGuestMemory, writeU32 } from '../helpers/guestMemory';
@@ -69,4 +69,61 @@ it('按实际窗口时长加权，预热不足返回不可用，重置使报告�
   expect(summarizeGamePerformance(samples, 30000)).toBeNull();
   samples.push(meter.sample(counters(0), 6000, true));
   expect(summarizeGamePerformance(samples)).toMatchObject({ valid: false, invalidWindows: 1 });
+});
+
+const YR_COUNTER = profiles[1]!;
+const YR_TIMER = { site: 0x6c8c40, bytes: [0xff, 0x15, 0x30, 0x15, 0x7e, 0x00, 0xc1, 0xe8, 0x04, 0xc3] };
+const YR_LIMITER = {
+  site: 0x55d79e,
+  bytes: [
+    0x8b, 0x35, 0x60, 0xeb, 0xa8, 0x00, 0x8d, 0x4c, 0x24, 0x14, 0xe8, 0x93, 0xb4, 0x16, 0x00, 0x8b, 0x4c, 0x24, 0x14,
+    0xa3, 0x48, 0x73, 0x88, 0x00, 0x89, 0x0d, 0x4c, 0x73, 0x88, 0x00, 0x89, 0x35, 0x50, 0x73, 0x88, 0x00, 0xa1, 0x38,
+    0xb2, 0xa8, 0x00, 0x85, 0xc0, 0x74, 0x09, 0x83, 0xf8, 0x05,
+  ],
+};
+it('YR 的应有帧率来自限帧指令：每档 16 毫秒一拍，0 档不限速，联机会话不给出', () => {
+  expect(yrTargetLogicFps(5, 1)).toBe(62.5);
+  expect(yrTargetLogicFps(5, 3)).toBeCloseTo(20.83, 2);
+  expect(yrTargetLogicFps(0, 2)).toBe(31.25);
+  expect(yrTargetLogicFps(5, 6)).toBeCloseTo(10.42, 2);
+  expect(yrTargetLogicFps(5, 0)).toBeNull();
+  expect(yrTargetLogicFps(3, 1)).toBeUndefined();
+  expect(yrTargetLogicFps(5, 7)).toBeUndefined();
+});
+it('YR 帧计数只有在限帧指令也吻合时才附带应有帧率，且不写内存', () => {
+  const memory = createGuestMemory();
+  memory.write_memory(YR_COUNTER.bytes, YR_COUNTER.site);
+  writeU32(memory, YR_COUNTER.frame, 900);
+  writeU32(memory, 0xa8eb60, 1); // GameSpeed
+  writeU32(memory, 0xa8b238, 5); // skirmish
+  // Counter signature alone: the counters, no target.
+  expect(createYrFrameReader(memory, YR_STARTUP_PAGE_HASH)!()).toEqual({
+    frame: 900,
+    gameSpeed: 1,
+    sessionSpeed: 0,
+    requestedFps: 0,
+  });
+  memory.write_memory(YR_TIMER.bytes, YR_TIMER.site);
+  memory.write_memory(YR_LIMITER.bytes, YR_LIMITER.site);
+  const write = vi.spyOn(memory, 'write_memory');
+  const read = createYrFrameReader(memory, YR_STARTUP_PAGE_HASH)!;
+  expect(read()).toMatchObject({ frame: 900, gameSpeed: 1, targetFps: 62.5 });
+  expect(write).not.toHaveBeenCalled();
+  write.mockRestore();
+  // The setting is read at every sample: the in-game slider moves it during a match.
+  writeU32(memory, 0xa8eb60, 3);
+  expect(read()!.targetFps).toBeCloseTo(20.83, 2);
+  writeU32(memory, 0xa8eb60, 0);
+  expect(read()!.targetFps).toBeNull();
+  writeU32(memory, 0xa8b238, 3); // a network session paces itself from the negotiated rate
+  expect(read()).not.toHaveProperty('targetFps');
+  // One changed limiter byte: the reader still counts frames but claims no target.
+  memory.write_memory([0x05], YR_TIMER.site + 8);
+  writeU32(memory, 0xa8b238, 5);
+  expect(createYrFrameReader(memory, YR_STARTUP_PAGE_HASH)!()).not.toHaveProperty('targetFps');
+  // The meter passes the target through to the sample the page reads.
+  memory.write_memory(YR_TIMER.bytes, YR_TIMER.site);
+  writeU32(memory, 0xa8eb60, 1);
+  const sample = new GamePerformanceMeter().sample(createYrFrameReader(memory, YR_STARTUP_PAGE_HASH)!()!, 10, true);
+  expect(sample.targetFps).toBe(62.5);
 });

@@ -57,7 +57,7 @@ import type { GameSource } from '../games/source';
 import type { VmPointerState } from './vmShell';
 import type { GameVmCallbacks, VmStatus } from '../app/session/runtimeEvents';
 import type { VmExecutionProbe } from '../vm86/diagnostics';
-import type { VmDiagnosticAction, VmDiagnostics } from './vmDiagnostics';
+import type { VmDiagnosticAction, VmDiagnostics, VmUsage } from './vmDiagnostics';
 
 const DEFAULT_GUEST_MEMORY_SIZE = 128 * 1024 * 1024;
 /** Recording sample interval: v86 has no per-write hook, so modification counts approximate sampling windows, incrementing once per window. */
@@ -143,6 +143,13 @@ export class VmCore {
   /** Control of the game's native overlay passthrough patches; null unless the platform opted in and they installed. */
   private renderPassthrough: RenderPassthroughControl | null = null;
   private readonly gamePerformance = new GamePerformanceMeter();
+  /**
+   * Accounting of this thread's time for development telemetry, created by the first `usage` diagnostics request
+   * (see VmUsage). Null in every session that never asks: the paths below then take no clock reading.
+   */
+  private usage: { hostCallMs: number; guestWaitMs: number; stateReadMs: number; stateReads: number } | null = null;
+  /** Game frames handed to presentation since the VM started. */
+  private presentedFrames = 0;
   private guestMemoryBytes = DEFAULT_GUEST_MEMORY_SIZE;
   private memRecordBase: Uint8Array | null = null;
   private memRecordPrev: Uint8Array | null = null;
@@ -319,6 +326,7 @@ export class VmCore {
         fastFileMirrorFiles: game.fastFileMirrorFiles,
         onFrame: (frame) => {
           this.hasPresentedFrame = true;
+          this.presentedFrames++;
           this.callbacks.onFrame?.(frame);
         },
         onLogicFrame: () => this.callbacks.onLogicFrame?.(1),
@@ -453,7 +461,7 @@ export class VmCore {
       if (this.renderStateReader === pending) this.renderStateReader = null;
       return null;
     }
-    return reader();
+    return this.meterStateRead(reader);
   }
 
   /**
@@ -482,7 +490,20 @@ export class VmCore {
       if (this.commandStateReader === pending) this.commandStateReader = null;
       return null;
     }
-    return reader();
+    return this.meterStateRead(reader);
+  }
+
+  /** A state read for the page runs on the guest's thread: its time is part of the usage accounting. */
+  private meterStateRead<T>(read: () => T): T {
+    const usage = this.usage;
+    if (!usage) return read();
+    const at = performance.now();
+    try {
+      return read();
+    } finally {
+      usage.stateReadMs += performance.now() - at;
+      usage.stateReads++;
+    }
   }
 
   async getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics> {
@@ -491,6 +512,8 @@ export class VmCore {
       this.platform.executionProbe?.start();
     } else if (action === 'stop') {
       this.platform.executionProbe?.stop();
+    } else if (action === 'usage') {
+      this.usage ??= { hostCallMs: 0, guestWaitMs: 0, stateReadMs: 0, stateReads: 0 };
     }
     try {
       const game = await this.getGamePerformance();
@@ -501,11 +524,19 @@ export class VmCore {
         clockRate: this.gameClockRate,
         execution: this.platform.executionProbe?.sample() ?? null,
         game,
+        usage: this.readUsage(),
       };
     } catch (error) {
       if (action === 'start') this.platform.executionProbe?.stop();
       throw error;
     }
+  }
+
+  private readUsage(): VmUsage | null {
+    const usage = this.usage;
+    if (!usage) return null;
+    const loop = this.platform.executionProbe?.usage?.() ?? null;
+    return { guestMs: loop?.guestMs ?? null, slices: loop?.slices ?? null, ...usage, frames: this.presentedFrames };
   }
 
   /** Write the speed state explicitly supplied by the current game; return null if unavailable. */
@@ -618,6 +649,7 @@ export class VmCore {
     this.commandStateReader = null;
     this.renderPassthrough = null;
     this.gamePerformance.reset();
+    this.usage = null;
     this.shim = null;
     this.image = null;
     if (this.memRecordTimer !== null) {
@@ -703,6 +735,9 @@ export class VmCore {
     const id = this.readU32(HYPERCALL_REQUEST);
     if (id === 0) return;
     this.handling = true;
+    const usage = this.usage;
+    const startedAt = usage ? performance.now() : 0;
+    let waitedMs = 0;
     try {
       const imported: PeImport | undefined = this.image.importList[id - 1] ?? this.shim.resolveDynamicImport(id);
       if (!imported || imported.id !== id) throw new Error(`非法 hypercall id: ${id}`);
@@ -778,7 +813,9 @@ export class VmCore {
 
       let threadDelay = this.shim.prepareGuestThreadReturn(call, result);
       while (threadDelay) {
+        const waitAt = usage ? performance.now() : 0;
         await new Promise<void>((resolve) => globalThis.setTimeout(resolve, threadDelay));
+        if (usage) waitedMs += performance.now() - waitAt;
         const completion = this.shim.completeGuestThreadDelay();
         if (completion.result !== undefined) result.eax = completion.result;
         threadDelay = completion.delayMs;
@@ -816,6 +853,10 @@ export class VmCore {
         : '';
       this.status('error', `${message}${diagnostic}`);
     } finally {
+      if (usage) {
+        usage.guestWaitMs += waitedMs;
+        usage.hostCallMs += performance.now() - startedAt - waitedMs;
+      }
       this.handling = false;
     }
   }

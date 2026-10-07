@@ -978,7 +978,11 @@ canvas {
 #vm-stalls {
   color: #d8b98a;
 }
-#vm-controls #vm-stalls:empty {
+#vm-game-speed {
+  color: #c9c3e6;
+}
+#vm-controls #vm-stalls:empty,
+#vm-controls #vm-game-speed:empty {
   display: none;
 }
 #vm-controls .toolbar-button {
@@ -1310,7 +1314,8 @@ input[type='range']::-moz-range-thumb {
 }
 @media (max-width: 640px) {
   #vm-performance,
-  #vm-stalls {
+  #vm-stalls,
+  #vm-game-speed {
     display: none;
   }
   #vm-controls {
@@ -1803,6 +1808,9 @@ dialog {
 }
 #vm-stalls {
   color: #e8cf8f !important;
+}
+#vm-game-speed {
+  color: #cfc8f0 !important;
 }
 #vm-controls .toolbar-button {
   min-height: 28px;

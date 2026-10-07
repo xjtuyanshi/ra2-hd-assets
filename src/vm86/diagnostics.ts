@@ -16,8 +16,22 @@ export interface VmExecutionSample {
   wasmMemoryBytes: number | null;
 }
 
+/** Cumulative CPU-loop accounting on the execution thread's clock, counted from the first `usage` request. */
+export interface VmExecutionUsage {
+  /** Milliseconds inside the emulator's CPU loop: guest code and the device callbacks it runs inline. */
+  guestMs: number;
+  /** CPU-loop slices (the loop is left at every guest halt, host call and scheduler yield). */
+  slices: number;
+}
+
 export interface VmExecutionProbe {
   start(): void;
   sample(): VmExecutionSample;
   stop(): void;
+  /**
+   * Lasting, light accounting for development telemetry: the first request starts it (one clock pair per CPU slice,
+   * nothing per wait) and it stays until the probe is detached. Null while the emulator cannot be metered. A session
+   * that never asks keeps the unwrapped loop.
+   */
+  usage?(): VmExecutionUsage | null;
 }

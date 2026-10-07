@@ -44,6 +44,11 @@ export interface RuntimeToolbar {
    * the longest of them in ms: one line under the frame rates. A count of 0 clears the line.
    */
   setStalls(count: number, longestMs: number): void;
+  /**
+   * The logic rate the game reached in the telemetry's last window and the rate its speed setting allows (null: the
+   * fastest setting has no limit; undefined: unknown): one line, "游戏速度 实际 X / 应有 Y". `actual` null clears it.
+   */
+  setGameSpeed(actual: number | null, target?: number | null): void;
   /** Select the clock multiplier for both buttons and [ ] shortcuts: synchronize aria-pressed and notify the page. */
   pressClockRate(rate: number): void;
   destroy(): void;
@@ -97,6 +102,7 @@ export function installRuntimeToolbar(
     resolution: '',
     resolutionStatus: '',
     stalls: '',
+    gameSpeed: '',
     rate: 1,
     upscaleMode: 'off',
     reshadeMode: 'off',
@@ -207,6 +213,20 @@ export function installRuntimeToolbar(
       const stalls = count > 0 ? t('卡顿 {0} 次，最长 {1} 秒', count, (longestMs / 1000).toFixed(1)) : '';
       if (stalls === model.stalls) return;
       model.stalls = stalls;
+      publish();
+    },
+    setGameSpeed(actual, target) {
+      const rate = (value: number) => value.toFixed(1);
+      const line =
+        actual === null
+          ? ''
+          : typeof target === 'number'
+            ? t('游戏速度 实际 {0} / 应有 {1}', rate(actual), rate(target))
+            : target === null
+              ? t('游戏速度 实际 {0} / 不限速', rate(actual))
+              : t('游戏速度 实际 {0}', rate(actual));
+      if (line === model.gameSpeed) return;
+      model.gameSpeed = line;
       publish();
     },
     setGameTitle(title) {

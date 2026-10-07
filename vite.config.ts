@@ -35,9 +35,14 @@ function gameAssetsPlugin(): Plugin {
       server.middlewares.use('/game', serveGameAsset);
       // HD remaster bridge (dev only): the locally extracted HD cache, derived from the player's own files.
       server.middlewares.use('/hd-cache', serveHdCache);
-      // Stall records of the HD page (dev only) go to the file RA2_PERF_LOG names; without it the route answers 404.
+      // Stall records of the HD page and the play page's game-speed records (dev only) go to the file RA2_PERF_LOG
+      // names, one JSON line each (speed records carry `kind: "speed"`); without it both routes answer 404.
       server.middlewares.use(
         '/__perf/stalls',
+        createStallLogHandler(process.env.RA2_PERF_LOG ? resolve(process.env.RA2_PERF_LOG) : undefined),
+      );
+      server.middlewares.use(
+        '/__perf/speed',
         createStallLogHandler(process.env.RA2_PERF_LOG ? resolve(process.env.RA2_PERF_LOG) : undefined),
       );
     },

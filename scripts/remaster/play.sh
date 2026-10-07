@@ -26,7 +26,8 @@
 #   RA2_PLAY_BROWSER   macOS application to open the page with           (default: Google Chrome)
 #   RA2_PLAY_OPEN=0    start the server without opening a browser
 #   RA2_PERF_LOG       file the HD page's stall recorder appends to, one JSON line per presented frame that came more
-#                      than 150 ms late (default: <main checkout>/gameres/s2x/play/perfmon/stalls.jsonl; 0 = no log)
+#                      than 150 ms late, and the game-speed telemetry one line ("kind":"speed") per five seconds of
+#                      a running battle (default: <main checkout>/gameres/s2x/play/perfmon/stalls.jsonl; 0 = no log)
 set -u
 # A double-clicked play.command may start without the shell profile that puts Node and pnpm on the PATH.
 PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"

@@ -61,6 +61,8 @@ export interface ToolbarModel {
   resolutionStatus?: string;
   /** Stalls of the current match ("卡顿 N 次，最长 X 秒"), empty while there were none or no recorder runs. */
   stalls?: string;
+  /** Logic rate reached and allowed ("游戏速度 实际 X / 应有 Y"), empty outside a battle or without telemetry. */
+  gameSpeed?: string;
   rate: number;
   upscaleMode: UpscaleMode;
   reshadeMode?: ReShadeMode;
@@ -284,6 +286,13 @@ export function RuntimeToolbarView({
       </output>
       <output id="vm-stalls" role="status" title={t('本局中画面停顿超过 150 毫秒的次数与最长一次的时长')}>
         {model.stalls ?? ''}
+      </output>
+      <output
+        id="vm-game-speed"
+        role="status"
+        title={t('游戏每秒实际推进的逻辑帧数，与当前速度档位应有的帧数（最近 5 秒）')}
+      >
+        {model.gameSpeed ?? ''}
       </output>
       <div className="resolution-controls">
         <span className="label">{t('超分')}</span>

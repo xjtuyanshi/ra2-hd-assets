@@ -233,14 +233,27 @@ export function sidebarUpcomingTypes(sidebar: GameRenderSidebar | null | undefin
   return types;
 }
 
-/** Stops the bridge when called; `toggle` switches between the HD view and the original picture (true: HD shown). */
-export type HdBridgeControl = (() => void) & { toggle(): boolean };
+/** What the speed telemetry reads from the bridge (speedTelemetry.ts `SpeedScene`); null outside a battle. */
+export interface HdBridgeScene {
+  map: string | null;
+  objects: number;
+  localObjects: number;
+  hdShown: boolean;
+  tier: number | null;
+  hdFrames: number;
+}
+
+/**
+ * Stops the bridge when called; `toggle` switches between the HD view and the original picture (true: HD shown);
+ * `scene` describes the running match for the speed telemetry.
+ */
+export type HdBridgeControl = (() => void) & { toggle(): boolean; scene(): HdBridgeScene | null };
 
 export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   if (host.frameRenderer.backend !== 'WebGL2') {
     // Canvas 2D draws every frame opaque: neither the key nor the transparent rectangle could show the HD view.
     console.warn('[HD] the HD bridge needs the WebGL2 frame renderer; showing the original picture');
-    return Object.assign(() => undefined, { toggle: () => false });
+    return Object.assign(() => undefined, { toggle: () => false, scene: () => null });
   }
   const params = new URLSearchParams(window.location.search);
   const canvas = document.createElement('canvas');
@@ -307,6 +320,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let governor: QualityGovernor | null = null;
   /** When the shown view drew its previous frame (null while it is not shown). */
   let shownAt: number | null = null;
+  /** Frames the shown view has drawn (cumulative; the speed telemetry takes differences). */
+  let shownFrames = 0;
   let publishedTier: number | null = null;
   const publishTier = (tier: number | null) => {
     if (tier === publishedTier) return;
@@ -740,6 +755,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       if (governor && shownAt !== null) live.hd.setQualityTier(governor.frame(now - shownAt));
       shownAt = now;
       live.render();
+      shownFrames++;
       publishTier(live.hd.quality);
     } else if (live && preparing()) {
       shownAt = null;
@@ -841,7 +857,22 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     host.screen.style.zIndex = screenStyle.zIndex;
     if (globals.__hdBridge === handle) delete globals.__hdBridge;
   };
-  return Object.assign(stop, { toggle: () => handle.toggle() });
+  const scene = (): HdBridgeScene | null => {
+    const state = latestState;
+    if (stopped || !state?.map) return null;
+    let localObjects = 0;
+    for (const object of state.objects) if (object.owner === state.localHouse) localObjects++;
+    const hdShown = !!live && !!hole;
+    return {
+      map: stateMap,
+      objects: state.objects.length,
+      localObjects,
+      hdShown,
+      tier: hdShown ? live!.hd.quality : null,
+      hdFrames: shownFrames,
+    };
+  };
+  return Object.assign(stop, { toggle: () => handle.toggle(), scene });
 }
 
 function toSnapshot(state: GameRenderState): LiveSnapshot {

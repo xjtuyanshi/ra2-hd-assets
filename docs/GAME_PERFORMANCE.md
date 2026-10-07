@@ -7,6 +7,7 @@ GameRuntimeHooks.createFrameReader exposes read-only native simulation counters.
 - frame is the cumulative native simulation-frame count; logicFps is the frame delta divided by actual host elapsed time.
 - sampledAtMs and intervalMs represent the sampling host's monotonic timestamp and actual interval. Different Workers may have different time origins; compute each player's values independently.
 - requestedFps is a native LAN negotiation variable. In single-player or before negotiation it may be only an initial value, not measured FPS or a single-player cap. gameSpeed and sessionSpeed are native speed settings.
+- targetFps, when a game module supplies it, is the rate its validated frame limiter allows at the current setting (null: no limit); it is a property of the setting, not a measurement. YR 1.001 derives it in src/games/yr/performance.ts from the 16 ms system-timer tick at 0x6C8C40 and the frame timer of GameSpeed ticks at 0x55D79E, for campaign and skirmish sessions only.
 - status is baseline for the first reading, sample for normal readings, reset for counter rollback or invalid time, and inactive in menus or when stopped. FPS is null outside sample status; a running simulation with no advancement reports 0.
 - Unknown executables, signature mismatch, short reads, and unloaded/destroyed VMs return null and cannot count as passes.
 
@@ -35,6 +36,12 @@ requested waits, guest clocks, or game settings. Superseded callbacks are counte
 restored on stop/destruction, with a 30-second watchdog for a lost client. Outside captures there are no probe wrappers,
 rAF loops, or per-second diagnostic RPCs. Captures add measurement overhead; CPU slice time is not whole-Worker or
 whole-device CPU usage, and JIT enabled/cache size alone does not establish compilation throughput.
+
+Development telemetry uses a fourth diagnostics action, `usage`, outside captures: its first request switches on a
+lasting account of the execution thread's time (`VmDiagnostics.usage`: CPU loop, host calls, guest-requested waits,
+state reads for the page, frames handed to presentation) that costs one clock pair per CPU slice and per host call
+and is never started by the three capture actions. The HD play page reads it every five seconds
+(docs/remaster/HD_BRIDGE.md, "Game-speed telemetry").
 
 Timing aggregates are cumulative within a capture. VM samples use the execution thread's monotonic clock;
 requestMs includes RPC transport and probe work, so it is not pure message latency. Native FPS is weighted by its

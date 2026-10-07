@@ -584,6 +584,39 @@ posting for the session. The page posts new records in batches at most every fiv
 retry a refused batch by itself: it goes out again with the next stall. The toolbar shows one line for the current
 match, "卡顿 N 次，最长 X 秒" (`RuntimeToolbar.setStalls`): stalls while the match ran and the tab was on screen.
 
+## Game-speed telemetry
+
+The HD view presents 60 frames a second whether or not the game in the emulator keeps up with its speed setting,
+so "it feels slow" has its own measurement. In development the play page (with or without the bridge) loads
+`src/ui/pages/game/speedTelemetry.ts` behind `import.meta.env.DEV`. Every five seconds it asks the VM once
+(`VmShell.getDiagnostics('usage')`) and turns the difference from the previous answer into one record:
+
+- `logicFps`: logic frames the game advanced a second (the native frame counter against the VM thread's clock);
+  `targetFps`: what the current speed setting allows, from the game module (`GameFrameCounters.targetFps`; for YR
+  1.001 `src/games/yr/performance.ts` reads it off the frame limiter: 62.5 / GameSpeed in a campaign or skirmish,
+  so 62.5 at the skirmish slider's 5 and 20.8 at its 3; `uncapped` at the fastest setting; unknown in a network
+  session). The setting is read at every sample, so moving the in-game slider shows in the next record;
+- `presentedFps` (game frames the page presented), `hdFps`, `hdShown` and the HD view's quality `tier`;
+- `objects` / `localObjects` and `map` from the bridge's last snapshot, `resolution` of the game frame, `gameSpeed`,
+  `logicFrame`, `visible`;
+- `hypercallsPerS` and `vm`: where the emulator's thread spent the window, in percent (`VmUsage` in
+  `src/adapter/vmDiagnostics.ts`): `guestPct` inside the CPU loop (guest code), `hostCallPct` handling the guest's
+  Win32/DirectX calls, `guestWaitPct` in waits the guest asked for (its frame limiter's Sleep: near zero means the
+  game is behind schedule and never waits), `stateReadPct` reading snapshots for the page, `otherPct` the rest
+  (scheduler turnaround between slices, frame snapshots, messages), with `slicesPerS`, `stateReadsPerS` and
+  `framesPerS` (game frames handed to presentation).
+
+The accounting behind `vm` starts with the first `usage` request and costs one clock pair per CPU slice and per
+host call; a session that never asks (every production build) keeps the unwrapped loop and takes no reading.
+Records exist only for windows of a running battle: menus, the loading screen, a stopped VM and the window in which
+another match begins are skipped.
+
+Two sinks, like the stall recorder: the development server appends each record as a JSON line with
+`"kind":"speed"` to the same `RA2_PERF_LOG` file (`POST /__perf/speed`, the same handler; a 404 stops the posting for
+the session), and the toolbar shows one line under the stall line, "游戏速度 实际 X / 应有 Y"
+(`RuntimeToolbar.setGameSpeed`), the last window's rate against the allowed one. `__speedTelemetry.records` in the
+console holds the last 240 records.
+
 ## HD interface layer (`hd-ui=1`)
 
 In development, `?hd=1&hd-ui=1` adds a separate Canvas 2D interface controller (`hdUi.ts`). It consumes the optional

@@ -1,5 +1,5 @@
 import { TimingStats } from '../../utils/timingStats';
-import type { VmExecutionProbe, VmExecutionSample } from '../../vm86/diagnostics';
+import type { VmExecutionProbe, VmExecutionSample, VmExecutionUsage } from '../../vm86/diagnostics';
 
 interface Engine {
   tick_counter: number;
@@ -24,8 +24,12 @@ export class BrowserEmulatorProbe implements VmExecutionProbe {
   private immediate = new TimingStats();
   private delayed = new TimingStats();
   private stale = 0;
+  /** Lasting CPU-loop accounting (see `usage`); installed below a capture's wrapper, never above it. */
+  private meter: { guestMs: number; slices: number; restore: () => void } | null = null;
+  private meterWanted = false;
 
   attach(candidate: unknown, scheduler: string): void {
+    this.dropMeter();
     this.stop();
     this.scheduler = scheduler;
     const engine = candidate as Engine | null;
@@ -112,10 +116,56 @@ export class BrowserEmulatorProbe implements VmExecutionProbe {
     this.restore?.();
     this.restore = null;
     this.stoppedAt ??= performance.now();
+    // A capture restores the loop it found: accounting asked for while it ran starts now.
+    this.installMeter();
+  }
+
+  /**
+   * Time inside the CPU loop since the first request (development telemetry). Unlike a capture it stays for the
+   * session and wraps only the loop: one clock pair per slice, no wait statistics, no watchdog.
+   */
+  usage(): VmExecutionUsage | null {
+    this.meterWanted = true;
+    this.installMeter();
+    return this.meter ? { guestMs: this.meter.guestMs, slices: this.meter.slices } : null;
   }
 
   detach(): void {
+    this.dropMeter();
     this.stop();
     this.engine = null;
+  }
+
+  private installMeter(): void {
+    const engine = this.engine;
+    if (!engine || this.meter || this.restore || !this.meterWanted) return;
+    const loop = engine.cpu.main_loop;
+    const meter = {
+      guestMs: 0,
+      slices: 0,
+      restore: () => {
+        engine.cpu.main_loop = loop;
+      },
+    };
+    engine.cpu.main_loop = () => {
+      const at = performance.now();
+      try {
+        return loop.call(engine.cpu);
+      } finally {
+        meter.guestMs += performance.now() - at;
+        meter.slices++;
+      }
+    };
+    this.meter = meter;
+  }
+
+  private dropMeter(): void {
+    this.meterWanted = false;
+    if (!this.meter) return;
+    // A capture above the meter holds the metered loop as its original: end it first so the engine's own loop returns.
+    this.restore?.();
+    this.restore = null;
+    this.meter.restore();
+    this.meter = null;
   }
 }
