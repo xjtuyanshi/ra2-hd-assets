@@ -79,6 +79,25 @@ export interface YrRenderStateSources {
 /** Both cell decoration layers share this cadence, independently of the logic frame. */
 export const YR_OVERLAY_POLL_MS = 250;
 
+/**
+ * The shroud is read on the cell layers' cadence instead of with every snapshot. Its reader walks every cell of the
+ * map (tens of thousands) and was the largest single part of a snapshot: measured on the emulator's thread in a
+ * six-player battle, 2 ms of a 4.8 ms read. The game keeps no counter that says the shroud changed, so the cadence
+ * stands in for one: the mask an external renderer draws trails the game's by at most this long (about the time a
+ * fast unit needs for one cell), while objects, effects and the view position stay as fresh as before.
+ */
+export const YR_SHROUD_POLL_MS = 250;
+
+/**
+ * One snapshot per logic frame. A snapshot is read on the thread that runs the game, and a poll that arrives while
+ * the logic frame and the view are what the last snapshot had finds only half-updated objects: reading them again
+ * took the emulator 2.6 full reads per logic frame in a busy battle (a sixth of its thread). Such a poll gets the
+ * last snapshot back until this much time has passed since the last look, after which the change key decides as
+ * before: a game that stands still (a pause, a slow frame) still shows an animation step or an expired beam within
+ * a tenth of a second, and scrolling (the view moves without a logic frame) is followed at every poll.
+ */
+export const YR_SAME_FRAME_REREAD_MS = 100;
+
 /** Guarded factory over the live guest memory; null unless the image is the pinned YR 1.001 build. */
 export function createYrRenderStateReader(
   memory: GuestMemory,
@@ -133,6 +152,9 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
   let smudges: GameRenderSmudges | null = null;
   let smudgeRevision = 0;
   let lastCellPoll = -Infinity;
+  let lastShroudPoll = -Infinity;
+  /** When the change key was last computed (a full read or an unchanged key); see YR_SAME_FRAME_REREAD_MS. */
+  let lastLook = -Infinity;
   const now = sources.now ?? (() => performance.now());
   return () => {
     pollSidebar();
@@ -143,13 +165,24 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
       last = lastKey = null;
       overlayScratch = overlays = null;
       smudgeScratch = smudges = null;
-      lastCellPoll = -Infinity;
+      lastCellPoll = lastShroudPoll = -Infinity;
       return null;
     }
+    const at = now();
+    // A due cell-layer poll is never held back: in a running game it falls on a new logic frame anyway.
+    const cellPollDue = !!last?.map && at - lastCellPoll >= YR_OVERLAY_POLL_MS;
+    if (
+      last &&
+      lastKey &&
+      !cellPollDue &&
+      at - lastLook < YR_SAME_FRAME_REREAD_MS &&
+      sameFrameAndView(memory, lastKey)
+    )
+      return (last = publishSidebar(last));
+    lastLook = at;
     const nativeDetail = readYrNativeDetail(memory);
     const lighting = readYrSceneLighting(memory, nativeDetail?.level);
     const key = readChangeKey(memory, nativeDetail, lighting);
-    const at = now();
     const cellsDue = at - lastCellPoll >= YR_OVERLAY_POLL_MS;
     const unchangedKey = key && lastKey && sameKey(key, lastKey);
     if (last && unchangedKey && (!last.map || !cellsDue)) return (last = publishSidebar(last));
@@ -158,7 +191,7 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
       last = lastKey = null;
       overlayScratch = overlays = null;
       smudgeScratch = smudges = null;
-      lastCellPoll = -Infinity;
+      lastCellPoll = lastShroudPoll = -Infinity;
       return null;
     }
     let effects: GameRenderEffects | null = null;
@@ -170,7 +203,7 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
       if (newBattle) {
         overlayScratch = overlays = null;
         smudgeScratch = smudges = null;
-        lastCellPoll = -Infinity;
+        lastCellPoll = lastShroudPoll = -Infinity;
       }
       if (newBattle || cellsDue) {
         readOverlays ??= sources.createOverlayReader();
@@ -194,15 +227,19 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
         return (last = publishSidebar(last));
       readShroud ??= sources.createShroudReader();
       readEffects ??= sources.createEffectsReader();
-      scratch = readShroud?.({ reuse: scratch }) ?? null;
-      shroud = scratch ? publishShroud(scratch, shroud) : null;
+      // An unavailable shroud is asked for again at every snapshot; an available one on its own cadence.
+      if (!scratch || at - lastShroudPoll >= YR_SHROUD_POLL_MS) {
+        scratch = readShroud?.({ reuse: scratch }) ?? null;
+        shroud = scratch ? publishShroud(scratch, shroud) : null;
+        lastShroudPoll = at;
+      }
       // fireWindow 0 skips the per-techno fire scan: the renderer does not use fire events.
       const read = readEffects?.({ fireWindow: 0 });
       effects = read ? projectEffects(read) : null;
     } else {
       overlayScratch = overlays = null;
       smudgeScratch = smudges = null;
-      lastCellPoll = -Infinity;
+      lastCellPoll = lastShroudPoll = -Infinity;
     }
     last = {
       frame: state.frame,
@@ -225,6 +262,22 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
     lastKey = key;
     return last;
   };
+}
+
+/**
+ * Whether the logic frame, the scenario and the tactical view position are still what the change key `key` recorded
+ * (its first five entries, see readChangeKey): five words, read without touching any object.
+ */
+function sameFrameAndView(m: GuestMemoryAccessor, key: readonly number[]): boolean {
+  if (m.i32(YR_STATE_GLOBALS.frame) !== key[0] || m.u32(YR_STATE_GLOBALS.scenario) !== key[1]) return false;
+  const tactical = m.u32(YR_STATE_GLOBALS.tactical);
+  const view = isPlausiblePointer(m, tactical, YR_STATE_OFFSETS.tacticalPos + 8);
+  if ((view ? 1 : 0) !== key[2]) return false;
+  return (
+    !view ||
+    (m.i32(tactical + YR_STATE_OFFSETS.tacticalPos) === key[3] &&
+      m.i32(tactical + YR_STATE_OFFSETS.tacticalPos + 4) === key[4])
+  );
 }
 
 /** Scratch arrays never escape to a main-thread consumer or a Worker message. Copy only changed publications. */
@@ -271,8 +324,17 @@ function readChangeKey(
       word(nativeDetail.min);
       word(nativeDetail.buffer);
     }
+    // The key is computed at every poll over some forty words of each techno and whole effect objects: read them
+    // from the word view when there is one (same values in the same order as `u32`, without a call per word).
+    const words = m.words;
     const span = (pointer: number, start: number, end: number) => {
       if (!isPlausiblePointer(m, pointer, end)) throw new Error('unavailable render key');
+      const from = pointer + start;
+      if (words && (from & 3) === 0) {
+        for (let index = from >>> 2, stop = (pointer + end + 3) >>> 2; index < stop; index++)
+          hash = Math.imul(hash ^ (words[index]! | 0), 0x01000193);
+        return;
+      }
       for (let at = start; at < end; at += 4) word(m.u32(pointer + at));
     };
     for (const pointer of technos) {

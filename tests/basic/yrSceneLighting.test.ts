@@ -11,6 +11,15 @@ import {
 } from '../../src/games/yr/sceneLighting';
 import { readYrState, YR_STATE_GLOBALS as G } from '../../src/games/yr/stateReader';
 
+/**
+ * A reader clock on which every poll comes a second after the one before: past the shroud cadence and past the
+ * one-look-per-logic-frame bound, so a case that changes something inside one logic frame tests the change key.
+ */
+const farApart = () => {
+  let at = 0;
+  return () => (at += 1000);
+};
+
 // Numeric facts from the XMP29U2 live sample: Scenario+0x3528..0x3590. No original game asset is required.
 const stormWords = [
   100, 87, 87, 100, 80, 68, 0, 0, 87, 30, 40, 75, 0, 0, 200, 175, 150, 125, 100, 100, 1, 150, 85, 20, 30, 0, 0,
@@ -209,7 +218,7 @@ describe('YR scene lighting memory reader and publication', () => {
       createEffectsReader: () => null,
       createOverlayReader: () => null,
       createSmudgeReader: () => null,
-      now: () => 0,
+      now: farApart(),
     });
     const storm = read()!;
     expect(storm.lighting?.event).toBe('storm');
@@ -353,7 +362,7 @@ describe('YR light sources (LightSourceClass vector)', () => {
       createEffectsReader: () => null,
       createOverlayReader: () => null,
       createSmudgeReader: () => null,
-      now: () => 0,
+      now: farApart(),
     });
     const dark = read()!;
     expect(dark.lighting?.sources).toEqual([]);

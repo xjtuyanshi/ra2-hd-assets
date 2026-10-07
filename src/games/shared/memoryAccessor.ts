@@ -15,7 +15,15 @@ export interface GuestMemoryAccessor {
   i32(address: number): number;
   /** Returns a copy, truncated at the end of guest memory. */
   bytes(address: number, length: number): Uint8Array;
+  /**
+   * The same memory as little-endian 32-bit words (index = address / 4): a live view, never a copy, present only
+   * when the backing store is word-aligned on a little-endian host. For loops over thousands of fields whose range
+   * the caller has validated: a word beyond the end reads as undefined, which callers must treat as 0 like `u32`.
+   */
+  readonly words?: Uint32Array;
 }
+
+const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 
 /**
  * Accessor over a Uint8Array covering guest address 0 upwards. v86's `read_memory(0, size)` returns such a view of
@@ -29,6 +37,8 @@ export function createByteViewAccessor(view: Uint8Array): GuestMemoryAccessor {
     Number.isInteger(address) && address >= 0 && address + width <= size;
   return {
     size,
+    ...(LITTLE_ENDIAN &&
+      view.byteOffset % 4 === 0 && { words: new Uint32Array(view.buffer, view.byteOffset, view.byteLength >>> 2) }),
     u8: (address) => (inside(address, 1) ? view[address]! : 0),
     u16: (address) => (inside(address, 2) ? data.getUint16(address, true) : 0),
     u32: (address) => (inside(address, 4) ? data.getUint32(address, true) : 0),

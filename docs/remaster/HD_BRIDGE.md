@@ -584,6 +584,31 @@ posting for the session. The page posts new records in batches at most every fiv
 retry a refused batch by itself: it goes out again with the next stall. The toolbar shows one line for the current
 match, "卡顿 N 次，最长 X 秒" (`RuntimeToolbar.setStalls`): stalls while the match ran and the tab was on screen.
 
+## Snapshot cost on the emulator's thread
+
+A snapshot is read on the thread that runs the game, so its time is taken from the game's logic rate. Measured
+with the usage accounting below and a CPU profile of the VM worker in a staged six-player battle (about 500
+objects, the game far behind its speed setting): one full read took 4.8 ms, of which the shroud walk (every cell of
+the map) 2.0 ms, the change key 1.1 ms and objects 1.6 ms, and the page's 60 polls a second found half-updated
+objects in the middle of every logic frame, so there were 2.6 full reads per logic frame: 17 to 20 % of the thread.
+Three rules of the YR reader (`src/games/yr/renderState.ts`) keep that down; what a snapshot says about objects and
+effects once a logic frame is complete is unchanged:
+
+- one look per logic frame: a poll that finds the logic frame, the scenario and the view position of the last
+  snapshot gets that snapshot back (five words read) until `YR_SAME_FRAME_REREAD_MS` (100 ms) have passed since the
+  last look; then the change key decides as before. A new logic frame and a moved view (scrolling) are read at once,
+  and a game that stands still still shows a same-frame change within a tenth of a second;
+- the shroud is read every `YR_SHROUD_POLL_MS` (250 ms, the cell layers' cadence) instead of with every snapshot;
+  the game keeps no counter for shroud changes, so the mask the view draws trails the game's by at most that long
+  (about one cell of a fast unit), and a new battle or a shroud that was unavailable is read at once;
+- the change key hashes its words from a 32-bit view of guest memory when the accessor has one
+  (`GuestMemoryAccessor.words`): the same values in the same order as before.
+
+The decoding itself still runs on the emulator's thread. Moving it to another thread needs the raw bytes there
+first: guest memory is never shared across threads (docs/ARCHITECTURE.md), and the readers follow pointers through
+the whole heap (objects, their types, cells, effects), so a copy step would have to know those ranges before the
+decode that finds them.
+
 ## Game-speed telemetry
 
 The HD view presents 60 frames a second whether or not the game in the emulator keeps up with its speed setting,
@@ -604,7 +629,10 @@ so "it feels slow" has its own measurement. In development the play page (with o
   Win32/DirectX calls, `guestWaitPct` in waits the guest asked for (its frame limiter's Sleep: near zero means the
   game is behind schedule and never waits), `stateReadPct` reading snapshots for the page, `otherPct` the rest
   (scheduler turnaround between slices, frame snapshots, messages), with `slicesPerS`, `stateReadsPerS` and
-  `framesPerS` (game frames handed to presentation).
+  `framesPerS` (game frames handed to presentation), and `jitCompiled` / `jitFreed`: modules of guest code the
+  emulator compiled and gave up in the window. A few of each are normal; several hundred given up at once is the
+  emulator throwing its whole compiled cache away (`src/vm86/jitModuleTable.ts`), after which the game runs
+  interpreted, several times slower, until its code has been counted hot again.
 
 The accounting behind `vm` starts with the first `usage` request and costs one clock pair per CPU slice and per
 host call; a session that never asks (every production build) keeps the unwrapped loop and takes no reading.

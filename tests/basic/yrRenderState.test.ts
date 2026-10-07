@@ -15,7 +15,12 @@ import { YR_BUILDING_RENDER_OFFSETS as BR, YR_BUILDING_RULES as R } from '../../
 import { YR_BUILDING_ACTIVE_ANIM as A, YR_NATIVE_DETAIL as D } from '../../src/games/yr/buildingActiveAnim';
 import type { ReadYrSmudgeOptions, YrSmudges } from '../../src/games/yr/smudgeReader';
 import type { ReadYrOverlayOptions, YrOverlays } from '../../src/games/yr/overlayReader';
-import { createYrRenderStateReader, createYrRenderStateReaderFrom } from '../../src/games/yr/renderState';
+import {
+  createYrRenderStateReader,
+  createYrRenderStateReaderFrom,
+  YR_SAME_FRAME_REREAD_MS,
+  YR_SHROUD_POLL_MS,
+} from '../../src/games/yr/renderState';
 import { YR_RUNTIME_HOOKS } from '../../src/games/yr/runtimeHooks';
 import { YR_SHROUD_STATE, type ReadYrShroudOptions, type YrShroud } from '../../src/games/yr/shroudReader';
 import {
@@ -26,6 +31,15 @@ import {
   type YrState,
 } from '../../src/games/yr/stateReader';
 import { createGuestMemory } from '../helpers/guestMemory';
+
+/**
+ * A reader clock on which every poll comes a second after the one before: past the shroud cadence and past the
+ * one-look-per-logic-frame bound, so a case that changes something inside one logic frame tests the change key.
+ */
+const farApart = () => {
+  let at = 0;
+  return () => (at += 1000);
+};
 
 /**
  * Memory for the change key's globals and mutable native render fields. The readers themselves are injected,
@@ -291,7 +305,7 @@ function sources(
     createOverlayReader,
     createSmudgeReader,
     createSidebarReader: options.sidebar ? () => options.sidebar! : undefined,
-    now: options.now ?? (() => 0),
+    now: options.now ?? farApart(),
   });
   return {
     read,
@@ -386,7 +400,7 @@ describe('YR 1.001 render state for the HD bridge', () => {
       createEffectsReader: harness.createEffectsReader,
       createOverlayReader: harness.createOverlayReader,
       createSmudgeReader: harness.createSmudgeReader,
-      now: () => 0,
+      now: farApart(),
     });
     expect(read()!.objects.map((object) => object.activeAnim)).toEqual(['none', 'none']);
     read(); // Cached polls still observe the native draw gate.
@@ -417,7 +431,7 @@ describe('YR 1.001 render state for the HD bridge', () => {
       createEffectsReader: harness.createEffectsReader,
       createOverlayReader: harness.createOverlayReader,
       createSmudgeReader: harness.createSmudgeReader,
-      now: () => 0,
+      now: farApart(),
     });
     expect(read()).not.toBeNull();
     unavailable = true;
@@ -512,7 +526,7 @@ describe('YR 1.001 render state for the HD bridge', () => {
       createOverlayReader: () => null,
       createSmudgeReader: () => null,
       createSidebarReader: () => null,
-      now: () => 0,
+      now: farApart(),
     });
     const first = read()!;
     expect(first.sidebar).toBeNull();
@@ -747,14 +761,17 @@ describe('YR 1.001 render state for the HD bridge', () => {
 
   it('returns the identical snapshot until the frame, the view or the selection changes', () => {
     const memory = keyMemory();
-    const { read, readState } = sources(memory);
+    let at = 0;
+    const { read, readState } = sources(memory, { now: () => at });
     const first = read();
+    at += YR_SAME_FRAME_REREAD_MS;
     expect(read()).toBe(first);
     expect(readState).toHaveBeenCalledTimes(1);
 
     memory.frame(101);
     const second = read();
     expect(second).not.toBe(first);
+    at += YR_SAME_FRAME_REREAD_MS;
     expect(read()).toBe(second);
 
     memory.scroll(30, 0);
@@ -762,13 +779,16 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(scrolled).not.toBe(second);
 
     memory.select(memory.technos[1]!, true);
+    at += YR_SAME_FRAME_REREAD_MS;
     const selected = read();
     expect(selected).not.toBe(scrolled);
+    at += YR_SAME_FRAME_REREAD_MS;
     expect(read()).toBe(selected);
     expect(readState).toHaveBeenCalledTimes(4);
 
     // An implausible techno vector disables the cache instead of trusting a torn key.
     memory.corruptTechnos();
+    at += YR_SAME_FRAME_REREAD_MS;
     read();
     read();
     expect(readState).toHaveBeenCalledTimes(6);
@@ -1273,7 +1293,8 @@ describe('YR 1.001 render state for the HD bridge', () => {
   it('reads effects without the fire scan and reuses the shroud scratch without handing it out', () => {
     const memory = keyMemory();
     let cells = [0, 1, 2, 0xff];
-    const { read, readShroud, readEffects } = sources(memory, { cells: () => cells });
+    let at = 0;
+    const { read, readShroud, readEffects } = sources(memory, { cells: () => cells, now: () => at });
     const first = read()!;
     expect(readEffects).toHaveBeenCalledWith({ fireWindow: 0 });
     const scratch = readShroud.mock.results[0]!.value as YrShroud;
@@ -1281,6 +1302,7 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(first.shroud!.cells).not.toBe(scratch.cells);
 
     memory.frame(101);
+    at += YR_SHROUD_POLL_MS;
     const same = read()!;
     expect(readShroud).toHaveBeenLastCalledWith({ reuse: scratch });
     expect(same).not.toBe(first);
@@ -1288,10 +1310,161 @@ describe('YR 1.001 render state for the HD bridge', () => {
 
     cells = [2, 2, 2, 0xff];
     memory.frame(102);
+    at += YR_SHROUD_POLL_MS;
     const changed = read()!;
     expect(changed.shroud).not.toBe(first.shroud);
     expect([...changed.shroud!.cells]).toEqual(cells);
     expect([...first.shroud!.cells]).toEqual([0, 1, 2, 0xff]);
+  });
+
+  it('computes the same change key from a word-aligned view and from one without a word view', () => {
+    const aligned = keyMemory();
+    // The same bytes one byte into a larger buffer: no word view, every field goes through the checked accessors.
+    const backing = new Uint8Array(aligned.bytes.length + 8);
+    const shifted = backing.subarray(1, 1 + aligned.bytes.length);
+    const words = createByteViewAccessor(aligned.bytes).words!;
+    expect(words).toBeInstanceOf(Uint32Array);
+    expect(createByteViewAccessor(shifted).words).toBeUndefined();
+    // A live view of the same memory, not a copy.
+    aligned.u32(0x1000, 0x1234_5678);
+    expect(words[0x1000 >>> 2]).toBe(0x1234_5678);
+    const reader = (bytes: Uint8Array) =>
+      createYrRenderStateReaderFrom({
+        memory: () => createByteViewAccessor(bytes),
+        readState: () => yrState(1),
+        createShroudReader: () => null,
+        createEffectsReader: () => null,
+        createOverlayReader: () => null,
+        createSmudgeReader: () => null,
+        now: farApart(),
+      });
+    const fast = reader(aligned.bytes),
+      slow = reader(shifted);
+    shifted.set(aligned.bytes);
+    let lastFast = fast(),
+      lastSlow = slow();
+    const step = (what: string, change: () => void, changed: boolean) => {
+      change();
+      shifted.set(aligned.bytes);
+      const nextFast = fast(),
+        nextSlow = slow();
+      expect(nextFast !== lastFast, `${what} (word view)`).toBe(changed);
+      expect(nextSlow !== lastSlow, `${what} (accessors)`).toBe(changed);
+      lastFast = nextFast;
+      lastSlow = nextSlow;
+    };
+    const [first, second] = aligned.technos as [number, number];
+    step('nothing', () => undefined, false);
+    step('health, first word of a span', () => aligned.u32(first + 0x6c, 77), true);
+    step('nothing', () => undefined, false);
+    step('last word of the facing span', () => aligned.u32(second + 0x3b4, 5), true);
+    step('first word after that span', () => aligned.u32(second + 0x3b8, 5), false);
+    // A span that starts on an odd offset (the chrono flags) is read through the accessors in both readers.
+    step('chrono flag byte', () => (aligned.bytes[second + O.beingWarpedOut] = 1), true);
+    step('nothing', () => undefined, false);
+  });
+
+  it('takes one look per logic frame: a poll inside the same frame and view gets the last snapshot back', () => {
+    const memory = keyMemory();
+    let at = 5000;
+    const { read, readState } = sources(memory, { now: () => at });
+    const first = read()!;
+    // Half-updated objects in the middle of a logic frame: not read again while the frame and the view stand.
+    memory.select(memory.technos[0]!, true);
+    for (const step of [1, 5, 10, 14]) {
+      at += step;
+      expect(read()).toBe(first);
+    }
+    expect(readState).toHaveBeenCalledTimes(1);
+    // The next logic frame is read at once, with what changed meanwhile.
+    memory.frame(101);
+    at += 1;
+    const next = read()!;
+    expect(next).not.toBe(first);
+    expect(readState).toHaveBeenCalledTimes(2);
+    // Scrolling moves the view without a logic frame: followed at every poll.
+    memory.scroll(64, 8);
+    at += 1;
+    const scrolled = read()!;
+    expect(scrolled).not.toBe(next);
+    // A game that stands still (a pause, a slow frame) is looked at again a tenth of a second after the last look.
+    memory.select(memory.technos[1]!, true);
+    at += YR_SAME_FRAME_REREAD_MS - 1;
+    expect(read()).toBe(scrolled);
+    at += 1;
+    const late = read()!;
+    expect(late).not.toBe(scrolled);
+    // That look counts: the next one is a tenth of a second later again, changed or not.
+    memory.select(memory.technos[1]!, false);
+    at += YR_SAME_FRAME_REREAD_MS - 1;
+    expect(read()).toBe(late);
+    at += 1;
+    expect(read()).not.toBe(late);
+    expect(readState).toHaveBeenCalledTimes(5);
+  });
+
+  it('reads the shroud on the cell cadence while objects and effects are read with every logic frame', () => {
+    const memory = keyMemory();
+    let cells = [0, 1, 2, 0xff];
+    let at = 1000;
+    const { read, readState, readShroud, readEffects } = sources(memory, { cells: () => cells, now: () => at });
+    const first = read()!;
+    expect(readShroud).toHaveBeenCalledTimes(1);
+    // Logic frames 16 ms apart: every one a snapshot with fresh objects and effects, no shroud walk for 250 ms.
+    cells = [2, 2, 2, 0xff];
+    let frame = 100;
+    let snapshots = 1;
+    let previous = first;
+    while (at + 16 - 1000 < YR_SHROUD_POLL_MS) {
+      memory.frame(++frame);
+      at += 16;
+      const next = read()!;
+      snapshots++;
+      expect(next).not.toBe(previous);
+      expect(next.shroud).toBe(first.shroud);
+      previous = next;
+    }
+    expect(snapshots).toBe(16);
+    expect(readState).toHaveBeenCalledTimes(snapshots);
+    expect(readEffects).toHaveBeenCalledTimes(snapshots);
+    expect(readShroud).toHaveBeenCalledTimes(1);
+    // The first snapshot at or past the cadence walks the shroud again, and starts the next interval.
+    memory.frame(++frame);
+    at += 16;
+    const caught = read()!;
+    expect(readShroud).toHaveBeenCalledTimes(2);
+    expect([...caught.shroud!.cells]).toEqual(cells);
+    memory.frame(++frame);
+    at += YR_SHROUD_POLL_MS - 1;
+    expect(read()!.shroud).toBe(caught.shroud);
+    expect(readShroud).toHaveBeenCalledTimes(2);
+    memory.frame(++frame);
+    at += 1;
+    read();
+    expect(readShroud).toHaveBeenCalledTimes(3);
+  });
+
+  it('reads the shroud at once for another battle, and keeps asking while it is unavailable', () => {
+    const memory = keyMemory();
+    let at = 0;
+    const cells = [2, 2, 0, 0xff];
+    const { read, readShroud } = sources(memory, { cells: () => cells, now: () => at });
+    read();
+    expect(readShroud).toHaveBeenCalledTimes(1);
+    // The logic frame starting over is another match: its shroud is read without waiting for the cadence.
+    memory.frame(3);
+    at += 5;
+    expect(read()!.shroud).not.toBeNull();
+    expect(readShroud).toHaveBeenCalledTimes(2);
+    // A reader that has nothing yet (tables not filled in) is asked again at the next snapshot, whatever the time.
+    readShroud.mockReturnValueOnce(null as never);
+    memory.frame(4);
+    at += YR_SHROUD_POLL_MS;
+    expect(read()!.shroud).toBeNull();
+    memory.frame(5);
+    at += 1;
+    expect(read()!.shroud).not.toBeNull();
+    expect(readShroud).toHaveBeenCalledTimes(4);
   });
 
   it('creates the shroud and effects readers inside a battle only, retrying while they are unavailable', () => {
