@@ -606,6 +606,37 @@ export function installGameInput(
     }
   };
 
+  /**
+   * A modifier the page still holds although this keyboard event reports it up has lost its keyup (a system shortcut
+   * or overlay took the release without the window losing focus). Release it here: a Ctrl or Alt left down turns
+   * every later click into a forced order (force fire, force move) and Shift into an add-to-selection. Only keyboard
+   * events decide this; pointer events can drop modifier flags during Pointer Lock.
+   */
+  const releaseStaleModifiers = (event: KeyboardEvent) => {
+    for (const [held, state] of [...heldKeys]) {
+      const generic =
+        state.vk === 0x10 || state.vk === 0xa0 || state.vk === 0xa1
+          ? 0x10
+          : state.vk === 0x11 || state.vk === 0xa2 || state.vk === 0xa3
+            ? 0x11
+            : state.vk === 0x12 || state.vk === 0xa4 || state.vk === 0xa5
+              ? 0x12
+              : 0;
+      if (!generic) continue;
+      const down =
+        generic === 0x10
+          ? event.shiftKey
+          : generic === 0x12
+            ? event.altKey
+            : event.ctrlKey || (metaAsControl && event.metaKey);
+      if (down) continue;
+      heldKeys.delete(held);
+      if (reconciledModifiers.get(generic) === held) reconciledModifiers.delete(generic);
+      syncKeyState(held, state.vk, false);
+      vm.postMessage(state.system ? 0x0105 : 0x0101, state.vk, 0xc000_0001);
+    }
+  };
+
   const releaseKeys = () => {
     for (const [code, state] of heldKeys) {
       heldKeys.delete(code);
@@ -1061,6 +1092,7 @@ export function installGameInput(
       // Page shortcuts (` debug / [ ] speed / F11 fullscreen / ? help / \\ HD view) are not injected into the game.
       if (UI_SHORTCUT_KEYS.has(event.key)) return;
       if (document.activeElement !== canvas || event.isComposing) return;
+      releaseStaleModifiers(event);
       const code = forwardedCode(event.code);
       const mapped = code !== event.code;
       const key: KeyLike = mapped

@@ -185,6 +185,33 @@ describe('⌘ as the game Ctrl on Apple keyboards', () => {
   });
 });
 
+describe('modifier whose keyup never arrived', () => {
+  it('is released by the next key press that reports it up, so later clicks are plain again', () => {
+    const h = setup({});
+    h.key('keydown', 'AltLeft', { altKey: true });
+    h.key('keydown', 'ControlLeft', { ctrlKey: true, altKey: true });
+    // Both releases are swallowed by the system. The next key press says: nothing is held.
+    h.key('keydown', 'KeyS');
+    expect(h.vm.setKeyState).toHaveBeenCalledWith(0x12, false);
+    expect(h.vm.setKeyState).toHaveBeenCalledWith(0x11, false);
+    expect(
+      h.vm.postMessage.mock.calls.filter((call) => call[0] === 0x0105 || call[0] === 0x0101).map((call) => call[1]),
+    ).toEqual(expect.arrayContaining([0x12, 0x11]));
+    h.pointer('pointerdown');
+    expect(h.messages(WM.ldown)[0]![1] & 0x0008).toBe(0);
+  });
+
+  it('keeps a modifier that the key press reports down, including ⌘ in the Ctrl role', () => {
+    const h = setup({ metaAsControl: true, shiftClickRepeat: strip }, 'mac');
+    h.key('keydown', 'MetaLeft', { metaKey: true });
+    h.key('keydown', 'ShiftLeft', { metaKey: true, shiftKey: true });
+    h.key('keydown', 'KeyT', { metaKey: true, shiftKey: true });
+    h.pointer('pointerdown', { metaKey: true, shiftKey: true });
+    // MK_CONTROL and MK_SHIFT still on the click.
+    expect(h.messages(WM.ldown)[0]![1] & 0x000c).toBe(0x000c);
+  });
+});
+
 describe('input observers', () => {
   it('report forwarded keys and buttons with the modifiers the game sees, and cannot break delivery', () => {
     const seen: GameInputObservation[] = [];
