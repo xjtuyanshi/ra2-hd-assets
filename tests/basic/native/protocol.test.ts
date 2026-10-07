@@ -111,6 +111,35 @@ describe('native binary protocol', () => {
       'bounds',
     );
   });
+  it('preserves nested follow offsets in the five-word rule layout and validates optional capabilities', () => {
+    const rules = ([4, 5, 6, 7, 8] as const).map((kind) => ({
+      kind,
+      source: 0x9000,
+      bytes: 0x800,
+      maxCount: 4096,
+      stride: kind >= 7 ? 0x58 * 0x10000 + 0x53bc : 0xbc,
+    }));
+    const bytes = encodeSubscription({ ranges: [], rules, maxPages: 4096, budgetUs: 4000, sampleCount: 0 });
+    expect(bytes.length).toBe(20 + 5 * 20);
+    expect([...new Uint32Array(bytes.buffer)].slice(5)).toEqual(
+      rules.flatMap((rule) => [rule.kind, rule.source, rule.bytes, rule.maxCount, rule.stride]),
+    );
+    expect(() =>
+      encodeSubscription({
+        ranges: [],
+        rules: [{ ...rules[0]!, stride: 0xfffffff0 }],
+        maxPages: 4096,
+        budgetUs: 4000,
+        sampleCount: 0,
+      }),
+    ).toThrow('follow rule');
+    const limits = { ...syntheticHello.limits, followRuleKinds: [1, 2, 3, 4, 5, 6, 7, 8] };
+    expect(decodeHello(json({ ...syntheticHello, limits })).limits.followRuleKinds).toEqual(limits.followRuleKinds);
+    for (const followRuleKinds of [[0], [9], [4, 4], [1.5], '1,2'])
+      expect(() => decodeHello(json({ ...syntheticHello, limits: { ...limits, followRuleKinds } }))).toThrow(
+        'capabilities',
+      );
+  });
   it('decodes frame-boundary pages and same-frame samples with exact lengths', () => {
     const page = new Uint8Array(NATIVE_PAGE_SIZE);
     page[71] = 0xae;

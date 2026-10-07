@@ -14,7 +14,13 @@ import { NativeConnection } from './connection';
 import type { NativeConnectionOptions } from './connection';
 import { NativeMessageType, NATIVE_PAGE_SIZE, decodeJson, encodeSubscription, encodeU32 } from './protocol';
 import type { NativeHello, NativeMirrorUpdate, NativePicture } from './protocol';
-import { NativeMirrorMemory, NativeMemoryMiss, readNativeWithRetry, runNativeTransaction } from './memory';
+import {
+  NativeMirrorMemory,
+  NativeMemoryMiss,
+  NativeReaderWorkingSet,
+  readNativeWithRetry,
+  runNativeTransaction,
+} from './memory';
 import type { NativeRange, NativeTransactionHost, NativeWrite } from './memory';
 
 export class NativeUnsupportedError extends Error {
@@ -41,6 +47,7 @@ interface ReaderSlot<T> {
   reader: (() => T | null) | null;
   previous: T | null;
   error: string | null;
+  coldAt?: number;
 }
 interface MirrorWaiter {
   resolve(): void;
@@ -106,11 +113,13 @@ export class NativeCore {
   private readonly unsubscribe: (() => void)[] = [];
   private readonly waiters = new Set<MirrorWaiter>();
   private subscribed: NativeRange[] = [];
-  private learnedRanges: NativeRange[] = [];
+  private readonly workingSet = new NativeReaderWorkingSet();
   private additionalRanges: NativeRange[] = [];
   private resetSerial = 0;
   private hookStarted = false;
   private metadata: NativeHostMetadata = { gameThreadId: 0 };
+  private policyPrepared = false;
+  private policyPreparation: Promise<void> | null = null;
   private recovering = false;
   private recoveryAttempts = 0;
   private recoveryWindowAt = 0;
@@ -235,17 +244,14 @@ export class NativeCore {
       }
       this.policy = this.createPolicy(this.memory, { gameThreadId: this.hello.gameThreadId }, this.hello.exe.sha256);
       await this.subscribe([]);
-      const first = this.nextMirror();
-      await Promise.all([
-        this.connection.request(NativeMessageType.Hook, encodeU32(1)).then(() => {
-          this.hookStarted = true;
-        }),
-        first,
-      ]);
-      const diagnostics = decodeJson(await this.connection.request(NativeMessageType.Diagnostics));
-      this.metadata = metadataOf(diagnostics, this.hello);
-      this.policy = this.createPolicy(this.memory, this.metadata, this.hello.exe.sha256);
-      await this.subscribe([]);
+      await this.connection.request(NativeMessageType.Hook, encodeU32(1));
+      this.hookStarted = true;
+      const input = decodeJson(await this.connection.request(NativeMessageType.InputState)) as { modal?: boolean };
+      // A menu has native pictures and input but no logic-frame callbacks. Do
+      // not manufacture a mirror or a logic-thread ID to make it attachable.
+      // An attachment outside a menu still requires a complete initial mirror.
+      if (!this.memory.complete && !input.modal) await this.nextMirror();
+      if (this.memory.complete) await this.preparePolicy();
       this.running = true;
       this.status('running', '已连接本机游戏');
       this.requestNextFrame();
@@ -258,11 +264,31 @@ export class NativeCore {
     }
   }
 
-  private subscribe(ranges: readonly NativeRange[]): Promise<void> {
-    this.learnedRanges = mergeRanges([...this.learnedRanges, ...ranges]);
+  private preparePolicy(): Promise<void> {
+    if (this.policyPrepared) return Promise.resolve();
+    if (this.policyPreparation) return this.policyPreparation;
+    const pending = (async () => {
+      if (!this.hello || !this.memory.complete) return;
+      const diagnostics = decodeJson(await this.connection.request(NativeMessageType.Diagnostics));
+      const metadata = metadataOf(diagnostics, this.hello);
+      this.policy = this.createPolicy(this.memory, metadata, this.hello.exe.sha256);
+      this.metadata = metadata;
+      this.policyPrepared = true;
+    })();
+    this.policyPreparation = pending;
+    void pending
+      .finally(() => {
+        this.policyPreparation = null;
+      })
+      .catch(() => undefined);
+    return pending;
+  }
+
+  private subscribe(ranges: readonly NativeRange[], owner: unknown = 'transaction'): Promise<void> {
+    this.workingSet.learn(owner, ranges);
     const operation = async () => {
       if (!this.policy || !this.hello || this.closed) return;
-      const next = mergeRanges([...this.policy.ranges, ...this.learnedRanges, ...this.additionalRanges]);
+      const next = mergeRanges([...this.policy.ranges, ...this.workingSet.ranges, ...this.additionalRanges]);
       if (sameRanges(next, this.subscribed)) return;
       const beforeReset = this.resetSerial;
       await this.connection.request(
@@ -316,7 +342,7 @@ export class NativeCore {
         if (!(error instanceof NativeMemoryMiss)) throw error;
       }
       if (this.memory.operationMissed) {
-        await this.subscribe(this.memory.missingRanges);
+        await this.subscribe(this.memory.missingRanges, 'policy');
         await this.nextMirror();
         continue;
       }
@@ -324,7 +350,7 @@ export class NativeCore {
       if (!sameRanges(next, this.additionalRanges)) {
         // A new map scope replaces prior cells instead of retaining freed pages.
         this.additionalRanges = next;
-        this.learnedRanges = [];
+        this.workingSet.clear();
         this.render.reader = this.command.reader = this.frame.reader = null;
         await this.subscribe([]);
       }
@@ -343,7 +369,7 @@ export class NativeCore {
     try {
       if (++this.recoveryAttempts > 3)
         throw new Error('Native mirror repeatedly contains invalid pages; attachment stopped');
-      this.learnedRanges = [];
+      this.workingSet.clear();
       this.additionalRanges = [];
       this.subscribed = [];
       this.render.reader = this.command.reader = this.frame.reader = null;
@@ -355,11 +381,18 @@ export class NativeCore {
       this.recovering = false;
     }
   }
-  private async read<T>(slot: ReaderSlot<T>, factory: () => (() => T | null) | null): Promise<T | null> {
+  private read<T>(slot: ReaderSlot<T>, factory: () => (() => T | null) | null): Promise<T | null> {
+    return this.exclusive(() => this.readExclusive(slot, factory));
+  }
+  private async readExclusive<T>(slot: ReaderSlot<T>, factory: () => (() => T | null) | null): Promise<T | null> {
     if (!this.running || !this.policy || !this.memory.complete || this.recovering) return slot.previous;
     const at = performance.now();
     try {
+      await this.preparePolicy();
       await this.expandPolicyRanges();
+      // Refresh cached reader dependencies before retiring their old allocation footprint.
+      let cold = !slot.reader || slot.coldAt === undefined || at - slot.coldAt >= 1000;
+      if (cold) slot.reader = null;
       const result = await readNativeWithRetry(
         this.memory,
         () => {
@@ -367,9 +400,10 @@ export class NativeCore {
           return slot.reader?.() ?? null;
         },
         slot.previous,
-        this.host,
+        { ...this.host, subscribe: (ranges) => this.subscribe(ranges, slot) },
         () => {
           slot.reader = null;
+          cold = true;
         },
         8,
       );
@@ -379,12 +413,18 @@ export class NativeCore {
       }
       slot.previous = result;
       slot.error = null;
+      if (result !== null) {
+        this.workingSet.complete(slot, this.memory, cold);
+        if (cold) slot.coldAt = performance.now();
+        await this.subscribe([]);
+      }
       return result;
     } catch (error) {
       if (error instanceof NativeMemoryMiss || error instanceof NativeMirrorUnavailable) {
         slot.error = error.message;
         return slot.previous;
       }
+      slot.error = error instanceof Error ? error.message : String(error);
       throw error;
     } finally {
       this.stateReadMs += performance.now() - at;
@@ -416,13 +456,15 @@ export class NativeCore {
   }
   setGameSpeedFlag(value: number): Promise<number | null> {
     return this.exclusive(async () => {
-      if (!this.running || !this.policy) return null;
+      if (!this.running || !this.policy || !this.memory.complete) return null;
+      await this.preparePolicy();
       return runNativeTransaction(this.memory, (transaction) => this.policy!.setSpeed(transaction, value), this.host);
     });
   }
   setTacticalPassthrough(flags: number): Promise<boolean> {
     return this.exclusive(async () => {
-      if (!this.running || !this.policy || !this.options.renderPassthrough) return false;
+      if (!this.running || !this.policy || !this.options.renderPassthrough || !this.memory.complete) return false;
+      await this.preparePolicy();
       if (!this.passthrough) {
         this.passthrough = await runNativeTransaction(
           this.memory,
@@ -533,6 +575,7 @@ export class NativeCore {
         ...native,
         mirrorFrame: this.memory.frame,
         mirrorComplete: this.memory.complete,
+        awaitingLogicMirror: !this.policyPrepared || !this.memory.complete,
         mirrorMisses: this.memory.misses,
         lastReaderError: this.render.error ?? this.command.error ?? this.frame.error,
         readerErrors: { render: this.render.error, command: this.command.error, performance: this.frame.error },
@@ -576,6 +619,7 @@ export class NativeCore {
       this.unsubscribe.length = 0;
       this.rejectWaiters(new Error('Native session stopped'));
       this.memory.reset();
+      this.workingSet.clear();
       this.meter.reset();
       this.status('stopped', '本机游戏连接已关闭');
     }

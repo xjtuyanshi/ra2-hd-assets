@@ -1,4 +1,6 @@
 #include <windows.h>
+/* Native-host bridge: hidden sessions do not install physical keyboard hooks. */
+#include "hidden.h"
 #include "debug.h"
 #include "hook.h"
 #include "dd.h"
@@ -13,6 +15,7 @@ HHOOK g_keyboard_hook;
 
 void keyboard_hook_init()
 {
+    if (nh_hidden_active()) return;
     if (g_keyboard_hook && UnhookWindowsHookEx(g_keyboard_hook))
     {
         g_keyboard_hook = NULL;

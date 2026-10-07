@@ -1,6 +1,7 @@
 #include <windows.h>
 /* Native-host bridge: optional agent; inactive paths retain upstream behavior. */
 #include "agent.h"
+#include "hidden.h"
 #include <windowsx.h>
 #include <math.h>
 #include "dllmain.h"
@@ -22,6 +23,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
 {
     /* Native-host bridge: tagged remote input bypasses physical scaling and locks. */
     LRESULT native_result;
+    if (nh_hidden_window_message(hWnd, uMsg, wParam, lParam, &native_result)) return native_result;
+    if (nh_picture_message(hWnd, uMsg, wParam)) return 0;
     if (nh_input_message(hWnd, uMsg, wParam, lParam, &native_result)) return native_result;
     /* The virtual client owns game focus without changing the OS focus. */
     if (nh_input_active() && (uMsg == WM_KILLFOCUS || (uMsg == WM_ACTIVATE && LOWORD(wParam) == WA_INACTIVE) ||
@@ -291,7 +294,7 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
 
             int menu_height = GetMenu(g_ddraw.hwnd) ? real_GetSystemMetrics(SM_CYMENU) : 0;
 
-            real_SetWindowPos(
+            nh_hidden_set_window_pos(
                 g_ddraw.hwnd,
                 HWND_TOPMOST,
                 1,
@@ -300,7 +303,7 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
                 g_ddraw.render.height + menu_height,
                 SWP_SHOWWINDOW);
 
-            real_SetWindowPos(
+            nh_hidden_set_window_pos(
                 g_ddraw.hwnd,
                 HWND_TOPMOST,
                 0,
@@ -737,6 +740,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
     }
     case WM_ACTIVATEAPP:
     {
+        /* Native-host bridge: notify the game without host display/input effects. */
+        if (nh_hidden_active()) break;
         if (wParam)
         {
             if (!g_config.windowed)
@@ -744,7 +749,7 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
                 if (g_ddraw.renderer != d3d9_render_main || g_config.nonexclusive)
                 {
                     ChangeDisplaySettings(&g_ddraw.render.mode, CDS_FULLSCREEN);
-                    real_ShowWindow(g_ddraw.hwnd, SW_RESTORE);
+                    nh_hidden_show_window(g_ddraw.hwnd, SW_RESTORE);
                     mouse_lock();
                 }
             }
@@ -769,7 +774,7 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
             {
                 if (g_ddraw.renderer != d3d9_render_main || g_config.nonexclusive)
                 {
-                    real_ShowWindow(g_ddraw.hwnd, SW_MINIMIZE);
+                    nh_hidden_show_window(g_ddraw.hwnd, SW_MINIMIZE);
                     ChangeDisplaySettings(NULL, g_ddraw.bnet_active ? CDS_FULLSCREEN : 0);
                 }
             }
@@ -820,8 +825,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
     case WM_AUTORENDERER:
     {
         mouse_unlock();
-        real_SetWindowPos(g_ddraw.hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-        real_SetWindowPos(g_ddraw.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        nh_hidden_set_window_pos(g_ddraw.hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        nh_hidden_set_window_pos(g_ddraw.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
         mouse_lock();
         return 0;
     }

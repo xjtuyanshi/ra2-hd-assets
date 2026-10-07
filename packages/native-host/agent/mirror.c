@@ -1,6 +1,8 @@
 /* Native host frame-boundary mirror. Game policy is restricted to the validated
  * YR 1.001 detour; subscriptions and follow rules are generic memory mechanisms. */
 #include "mirror-internal.h"
+#include "mirror-pages.h"
+#include "x86-relative.h"
 #include <tlhelp32.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,7 +27,9 @@ static struct nh_subscription subscription;
 static struct nh_page *shadow_pages, *capture_pages;
 static uint8_t *shadow_bytes, *capture_bytes, *packet;
 static uint32_t shadow_count, capture_count, page_hash[NH_MIRROR_HASH_SIZE];
+static struct nh_page_seed fixed_seed, next_seed;
 static uint32_t rule_items[65536];
+static uint32_t rule_parent_items[65536];
 static uint32_t subscription_revision, applied_revision, random_state;
 static uint64_t generation, published_generation;
 static uint32_t published_frame;
@@ -136,11 +140,9 @@ static int suspend_threads(struct suspended_threads *threads) {
     }
     return 1;
 }
-static void emit_relative(uint8_t **p, uint8_t opcode, uintptr_t target) {
-    int32_t relative;
-    *(*p)++ = opcode;
-    relative = (int32_t)(target - (uintptr_t)(*p + 4));
-    memcpy(*p, &relative, 4); *p += 4;
+static void emit_relative(uint8_t **p, uint8_t opcode, uint32_t origin, uintptr_t target) {
+    nh_x86_relative(*p, opcode, origin, (uint32_t)target);
+    *p += 5;
 }
 static int prepare_trampoline(void) {
     uint8_t *p;
@@ -167,14 +169,16 @@ static int prepare_trampoline(void) {
      * observes the incremented frame; restore CMP flags for the subsequent Jcc. */
     memcpy(p, frame_signature + 14, NH_HOOK_BYTES); p += NH_HOOK_BYTES;
     memcpy(p, save, sizeof(save)); p += sizeof(save);
-    emit_relative(&p, 0xe8, (uintptr_t)&nh_logic_tick);
+    emit_relative(&p, 0xe8, (uint32_t)(uintptr_t)p, (uintptr_t)&nh_logic_tick);
     memcpy(p, restore, sizeof(restore)); p += sizeof(restore);
-    emit_relative(&p, 0xe9, NH_HOOK_ADDRESS + NH_HOOK_BYTES);
+    emit_relative(&p, 0xe9, (uint32_t)(uintptr_t)p, NH_HOOK_ADDRESS + NH_HOOK_BYTES);
     if (!VirtualProtect(trampoline, NH_PAGE_SIZE, PAGE_EXECUTE_READ, &previous)) {
         VirtualFree(trampoline, 0, MEM_RELEASE); trampoline = NULL; return 0;
     }
     FlushInstructionCache(GetCurrentProcess(), trampoline, (SIZE_T)(p - trampoline));
-    p = detour; emit_relative(&p, 0xe9, (uintptr_t)trampoline); *p = 0x90;
+    p = detour; emit_relative(&p, 0xe9, NH_HOOK_ADDRESS, (uintptr_t)trampoline); *p = 0x90;
+    if (nh_x86_relative_target(detour, NH_HOOK_ADDRESS) != (uint32_t)(uintptr_t)trampoline)
+        return 0;
     return 1;
 }
 static int switch_hook(int wanted) {
@@ -247,21 +251,32 @@ static int compare_pages(const void *a, const void *b) {
     uint32_t x = ((const struct nh_page *)a)->address, y = ((const struct nh_page *)b)->address;
     return x > y ? 1 : x < y ? -1 : 0;
 }
-static int old_page(uint32_t address) {
-    uint32_t low = 0, high = shadow_count;
-    while (low < high) {
-        uint32_t middle = low + (high - low) / 2;
-        if (shadow_pages[middle].address < address) low = middle + 1;
-        else high = middle;
+static void follow_member_vector(uint32_t member, const struct nh_rule *rule, int capacity_span,
+    uint32_t *flags, LARGE_INTEGER start) {
+    uint8_t descriptor[20];
+    uint32_t descriptor_bytes = capacity_span ? 12 : 20;
+    add_range(member, descriptor_bytes, flags, start);
+    if (*flags) return;
+    if (!nh_safe_read(member, descriptor, descriptor_bytes)) { *flags |= NH_MIRROR_INVALID; return; }
+    uint32_t items = get_u32(descriptor + 4), count = get_u32(descriptor + (capacity_span ? 8 : 16));
+    if (count > rule->max_count) { *flags |= NH_MIRROR_TRUNCATED; return; }
+    if (!count) return;
+    if (!items) { *flags |= NH_MIRROR_INVALID; return; }
+    uint64_t span = (uint64_t)count * (capacity_span ? rule->bytes : 4);
+    if (span > UINT32_MAX || (uint64_t)items + span > UINT64_C(0x100000000)) { *flags |= NH_MIRROR_INVALID; return; }
+    add_range(items, (uint32_t)span, flags, start);
+    if (*flags || capacity_span) return;
+    if (!nh_safe_read(items, rule_items, (uint32_t)span)) { *flags |= NH_MIRROR_INVALID; return; }
+    for (uint32_t k = 0; k < count && !*flags; ++k) {
+        if (expired(start, subscription.budget_us)) { *flags |= NH_MIRROR_TRUNCATED; break; }
+        if (rule_items[k]) add_range(rule_items[k], rule->bytes, flags, start);
     }
-    return low < shadow_count && shadow_pages[low].address == address ? (int)low : -1;
 }
 static uint32_t resolve_union(LARGE_INTEGER start) {
-    uint32_t i, flags = 0;
-    capture_count = 0;
-    memset(page_hash, 0xff, sizeof(page_hash));
-    for (i = 0; i < subscription.range_count && !flags; ++i)
-        add_range(subscription.ranges[i].address, subscription.ranges[i].length, &flags, start);
+    uint32_t i, flags = fixed_seed.flags;
+    capture_count = fixed_seed.count;
+    memcpy(page_hash, fixed_seed.hash, sizeof(page_hash));
+    for (i = 0; i < capture_count; ++i) capture_pages[i].address = fixed_seed.pages[i];
     for (i = 0; i < subscription.rule_count && !flags; ++i) {
         const struct nh_rule *rule = &subscription.rules[i];
         uint32_t pointer, count, j;
@@ -288,11 +303,35 @@ static uint32_t resolve_union(LARGE_INTEGER start) {
             uint64_t span = (uint64_t)count * 4;
             if (span > UINT32_MAX || (uint64_t)pointer + span > UINT64_C(0x100000000)) { flags |= NH_MIRROR_INVALID; break; }
             add_range(pointer, (uint32_t)span, &flags, start);
-            if (!flags && !nh_safe_read(pointer, rule_items, (uint32_t)span)) flags |= NH_MIRROR_INVALID;
+            uint32_t *parents = rule->kind >= 4 ? rule_parent_items : rule_items;
+            if (!flags && !nh_safe_read(pointer, parents, (uint32_t)span)) flags |= NH_MIRROR_INVALID;
             for (j = 0; j < count && !flags; ++j) {
-                uint32_t item = rule_items[j];
+                uint32_t item = parents[j];
                 if (expired(start, subscription.budget_us)) { flags |= NH_MIRROR_TRUNCATED; break; }
-                if (item) add_range(item, rule->bytes, &flags, start);
+                if (!item) continue;
+                if (rule->kind == 2) { add_range(item, rule->bytes, &flags, start); continue; }
+                /* The caller injects a member offset; no game layout belongs
+                 * here. Resolve both levels at this same logic boundary. */
+                uint64_t member = (uint64_t)item + (rule->kind >= 7 ? rule->stride & 0xffffu : rule->stride);
+                uint32_t member_bytes = rule->kind == 6 ? 12 : rule->kind == 4 ? 20 : 4;
+                if (member + member_bytes > UINT64_C(0x100000000)) { flags |= NH_MIRROR_INVALID; break; }
+                add_range((uint32_t)member, member_bytes, &flags, start);
+                if (flags) break;
+                if (rule->kind >= 7) {
+                    uint32_t target;
+                    if (!nh_safe_read((uint32_t)member, &target, 4)) { flags |= NH_MIRROR_INVALID; break; }
+                    if (!target) continue;
+                    member = (uint64_t)target + (rule->stride >> 16);
+                    member_bytes = rule->kind == 7 ? 20 : 4;
+                    if (member + member_bytes > UINT64_C(0x100000000)) { flags |= NH_MIRROR_INVALID; break; }
+                    add_range((uint32_t)member, member_bytes, &flags, start);
+                    if (flags) break;
+                }
+                if (rule->kind == 5 || rule->kind == 8) {
+                    uint32_t child;
+                    if (!nh_safe_read((uint32_t)member, &child, 4)) { flags |= NH_MIRROR_INVALID; break; }
+                    if (child) add_range(child, rule->bytes, &flags, start);
+                } else follow_member_vector((uint32_t)member, rule, rule->kind == 6, &flags, start);
             }
         }
     }
@@ -326,6 +365,13 @@ void nh_logic_tick(void) {
     }
     InterlockedIncrement(&logic_frames);
     if (!enabled || !nh_connected() || initialized != 2 || !TryEnterCriticalSection(&state_lock)) return;
+    /* The client has one outstanding mirror. Keep its exact published shadow
+     * until ACK instead of copying intermediate frames that cannot be sent.
+     * The next available logic boundary resolves the complete current union
+     * and compares against that acknowledged image: changed bytes and changed
+     * membership still produce a fresh delta/reset, with same-frame samples.
+     * Subscription revisions likewise wait for the outstanding ACK below. */
+    if (in_flight) { InterlockedIncrement(&dropped_updates); goto done; }
     frame = nh_current_frame();
     if (frame == NH_NO_FRAME || (!subscription.range_count && !subscription.rule_count)) goto done;
     if (pending_flags && !in_flight) {
@@ -356,10 +402,11 @@ void nh_logic_tick(void) {
             flags |= NH_MIRROR_INVALID; break;
         }
         for (j = i; j < i + run; ++j) {
-            int old = old_page(capture_pages[j].address);
-            if (reset_pending || old < 0 || memcmp(capture_bytes + j * NH_PAGE_SIZE, shadow_bytes + (uint32_t)old * NH_PAGE_SIZE, NH_PAGE_SIZE))
+            /* Sorted membership was compared above. An unchanged union has
+             * identical indices; a reset needs no old-page lookup at all. */
+            if (reset_pending || memcmp(capture_bytes + j * NH_PAGE_SIZE, shadow_bytes + j * NH_PAGE_SIZE, NH_PAGE_SIZE))
                 capture_pages[j].dirty = next_generation;
-            else capture_pages[j].dirty = shadow_pages[old].dirty;
+            else capture_pages[j].dirty = shadow_pages[j].dirty;
         }
         i += run;
     }
@@ -578,13 +625,18 @@ void nh_dispatch_mirror(uint16_t type, uint32_t id, const uint8_t *payload, uint
             rule->kind = get_u32(payload + offset); rule->source = get_u32(payload + offset + 4);
             rule->bytes = get_u32(payload + offset + 8); rule->max_count = get_u32(payload + offset + 12);
             rule->stride = get_u32(payload + offset + 16);
-            if (rule->kind < 1 || rule->kind > 3 || !rule->bytes || rule->bytes > NH_MAX_PAGES * NH_PAGE_SIZE ||
+            if (rule->kind < 1 || rule->kind > 8 || !rule->bytes || rule->bytes > NH_MAX_PAGES * NH_PAGE_SIZE ||
                 (uint64_t)rule->source + (rule->kind == 1 ? 4 : 20) > UINT64_C(0x100000000) ||
                 (rule->kind != 1 && (!rule->max_count || rule->max_count > 65536)) ||
                 (rule->kind == 3 && !rule->stride)) { fail(id, "invalid follow rule"); return; }
         }
+        /* This request path has one I/O owner. Preparing membership does not
+         * read game bytes, and cannot consume the game-thread time budget. */
+        nh_page_seed_init(&next_seed);
+        for (i = 0; i < next.range_count && !next_seed.flags; ++i)
+            nh_page_seed_range(&next_seed, next.ranges[i].address, next.ranges[i].length, next.max_pages);
         EnterCriticalSection(&state_lock);
-        subscription = next; ++subscription_revision;
+        subscription = next; fixed_seed = next_seed; ++subscription_revision;
         LeaveCriticalSection(&state_lock);
         nh_send(type, id, NULL, 0); return;
     }
@@ -634,7 +686,7 @@ void nh_mirror_disconnect(void) {
     LeaveCriticalSection(&patch_lock);
     switch_hook(0);
     EnterCriticalSection(&state_lock);
-    memset(&subscription, 0, sizeof(subscription));
+    memset(&subscription, 0, sizeof(subscription)); nh_page_seed_init(&fixed_seed);
     ++subscription_revision; shadow_count = 0; in_flight = 0; reset_pending = 1; pending_flags = 0; fixed_sample_count = 0;
     LeaveCriticalSection(&state_lock);
 }

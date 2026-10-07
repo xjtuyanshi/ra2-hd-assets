@@ -184,6 +184,79 @@ afterEach(async () => {
 });
 
 describe('native core session and presenter lifecycle', () => {
+  it('attaches pictures and protocol input at a menu, then prepares readers only from a real battle mirror', async () => {
+    const statuses = vi.fn(),
+      frames = vi.fn();
+    const { core, agent, policyFactory, renderFactory, scheduled } = setup({ onStatus: statuses, onFrame: frames });
+    agent.modal = true;
+    agent.threadId = 0;
+    agent.mirrorOnHook = false;
+    const start = core.start();
+    agent.hello();
+    await start;
+    expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'running' });
+    expect(core.memory.complete).toBe(false);
+    expect(policyFactory).toHaveBeenCalledTimes(1);
+    expect(renderFactory).not.toHaveBeenCalled();
+    expect(agent.count(NativeMessageType.Diagnostics)).toBe(0);
+    expect(agent.count(NativeMessageType.Credit)).toBe(1);
+    agent.picture(0);
+    scheduled.shift()!();
+    expect(frames).toHaveBeenCalledOnce();
+    core.setCursorPosition(10, 20);
+    core.postMessage(0x201, 1, 0x0014000a);
+    await flush();
+    expect(agent.count(NativeMessageType.Input)).toBe(2);
+    expect(await core.getRenderState()).toBeNull();
+    expect(await core.getCommandState()).toBeNull();
+    expect(await core.getGamePerformance()).toBeNull();
+    expect(await core.setGameSpeedFlag(1)).toBeNull();
+    expect(await core.setTacticalPassthrough(1)).toBe(false);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      mirrorComplete: false,
+      awaitingLogicMirror: true,
+      lastReaderError: null,
+    });
+    agent.modal = false;
+    expect(await core.getRenderState()).toBeNull();
+    expect(renderFactory).not.toHaveBeenCalled();
+    agent.threadId = 77;
+    agent.mirror(100, [{ address: 0x1000, bytes: agent.initial }], 2);
+    expect((await core.getRenderState())?.frame).toBe(7);
+    expect(policyFactory).toHaveBeenLastCalledWith(
+      core.memory,
+      {
+        gameThreadId: 77,
+        verifiedNativeHook: { site: 0x2000, original: [1, 2], patched: [3, 4] },
+      },
+      'a'.repeat(64),
+    );
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      mirrorComplete: true,
+      awaitingLogicMirror: false,
+    });
+    expect(agent.count(NativeMessageType.Read)).toBe(0);
+    expect(agent.closes).toBe(0);
+  });
+  it('rejects unverified logic-owner metadata after menu warm-up instead of publishing a reader result', async () => {
+    const { core, agent, renderFactory } = setup();
+    agent.modal = true;
+    agent.threadId = 0;
+    agent.mirrorOnHook = false;
+    const start = core.start();
+    agent.hello();
+    await start;
+    agent.modal = false;
+    agent.mirror(100, [{ address: 0x1000, bytes: agent.initial }], 2);
+    await expect(core.getRenderState()).rejects.toThrow('logic thread has not been observed');
+    expect(renderFactory).not.toHaveBeenCalled();
+    agent.modal = true;
+    expect(await core.getRenderState()).toBeNull();
+    const diagnostics = core.getDiagnostics('sample');
+    await expect(diagnostics).rejects.toThrow('logic thread has not been observed');
+    expect(renderFactory).not.toHaveBeenCalled();
+    expect(agent.count(NativeMessageType.Read)).toBe(0);
+  });
   it('waits for a complete mirror and verified owner metadata before reporting running', async () => {
     const statuses = vi.fn();
     const { core, agent, policyFactory } = await started({ onStatus: statuses });

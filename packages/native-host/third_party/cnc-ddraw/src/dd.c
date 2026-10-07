@@ -1,4 +1,6 @@
 #include <windows.h>
+/* Native-host bridge: hidden geometry updates cannot map or activate a window. */
+#include "hidden.h"
 #include <math.h>
 #include "ddraw.h"
 #include "IDirectDraw.h"
@@ -1116,7 +1118,7 @@ HRESULT dd_SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwFl
         }
 
         if (util_is_minimized(g_ddraw.hwnd))
-            real_ShowWindow(g_ddraw.hwnd, SW_RESTORE);
+            nh_hidden_show_window(g_ddraw.hwnd, SW_RESTORE);
 
         RECT dst = { x, y, g_ddraw.render.width + x, g_ddraw.render.height + y };
 
@@ -1125,7 +1127,7 @@ HRESULT dd_SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwFl
 
         AdjustWindowRectEx(&dst, style, GetMenu(g_ddraw.hwnd) != NULL, exstyle);
 
-        real_SetWindowPos(
+        nh_hidden_set_window_pos(
             g_ddraw.hwnd, 
             HWND_NOTOPMOST, 
             dst.left, 
@@ -1214,9 +1216,9 @@ HRESULT dd_SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwFl
             if (g_config.nonexclusive)
             {
                 if (util_is_minimized(g_ddraw.hwnd))
-                    real_ShowWindow(g_ddraw.hwnd, SW_RESTORE);
+                    nh_hidden_show_window(g_ddraw.hwnd, SW_RESTORE);
 
-                real_SetWindowPos(
+                nh_hidden_set_window_pos(
                     g_ddraw.hwnd,
                     HWND_TOPMOST,
                     0,
@@ -1285,9 +1287,9 @@ HRESULT dd_SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwFl
         }
 
         if (util_is_minimized(g_ddraw.hwnd))
-            real_ShowWindow(g_ddraw.hwnd, SW_RESTORE);
+            nh_hidden_show_window(g_ddraw.hwnd, SW_RESTORE);
 
-        real_SetWindowPos(
+        nh_hidden_set_window_pos(
             g_ddraw.hwnd,
             HWND_TOPMOST,
             0,
@@ -1316,7 +1318,7 @@ HRESULT dd_SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwFl
 
         if (_strcmpi(class_name, "Edit") == 0)
         {
-            real_SetWindowPos(
+            nh_hidden_set_window_pos(
                 g_ddraw.textbox.hwnd,
                 0,
                 (int)(g_ddraw.render.viewport.x + (g_ddraw.textbox.x * g_ddraw.render.scale_w)),
@@ -1372,6 +1374,8 @@ HRESULT dd_SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwFl
 
 HRESULT dd_SetCooperativeLevel(HWND hwnd, DWORD dwFlags)
 {
+    /* Native-host bridge: dialogs created internally on this thread share the guard. */
+    nh_hidden_install();
     dbg_dump_scl_flags(dwFlags);
 
     if (!hwnd)
@@ -1402,6 +1406,15 @@ HRESULT dd_SetCooperativeLevel(HWND hwnd, DWORD dwFlags)
         g_ddraw.wndproc = (WNDPROC)real_SetWindowLongA(g_ddraw.hwnd, GWL_WNDPROC, (LONG)fake_WndProc);
         g_ddraw.gui_thread_id = GetWindowThreadProcessId(g_ddraw.hwnd, NULL);
 
+        /* Native-host bridge: the hidden game keeps logical focus without OS activation. */
+        if (nh_hidden_active())
+        {
+            nh_hidden_set_window_pos(g_ddraw.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            CallWindowProcA(g_ddraw.wndproc, g_ddraw.hwnd, WM_ACTIVATEAPP, TRUE, GetCurrentThreadId());
+            CallWindowProcA(g_ddraw.wndproc, g_ddraw.hwnd, WM_ACTIVATE, WA_ACTIVE, 0);
+        }
+
         keyboard_hook_init();
 
         if (!g_ddraw.render.hdc)
@@ -1424,25 +1437,28 @@ HRESULT dd_SetCooperativeLevel(HWND hwnd, DWORD dwFlags)
             }
         }
 
-        if (!g_config.devmode)
+        if (!nh_hidden_active())
         {
-            InterlockedExchange((LONG*)&g_ddraw.old_cursor, (LONG)real_SetCursor(LoadCursor(NULL, IDC_ARROW)));
-        }
+            if (!g_config.devmode)
+            {
+                InterlockedExchange((LONG*)&g_ddraw.old_cursor, (LONG)real_SetCursor(LoadCursor(NULL, IDC_ARROW)));
+            }
 
-        int cursor_count = real_ShowCursor(TRUE) - 1;
-        InterlockedExchange((LONG*)&g_ddraw.show_cursor_count, cursor_count);
-        real_ShowCursor(FALSE);
+            int cursor_count = real_ShowCursor(TRUE) - 1;
+            InterlockedExchange((LONG*)&g_ddraw.show_cursor_count, cursor_count);
+            real_ShowCursor(FALSE);
 
-        /* Make sure the cursor is visible in windowed mode initially */
-        if (g_config.windowed && !g_config.fullscreen && !g_config.devmode && cursor_count < 0)
-        {
-            while (real_ShowCursor(TRUE) < 0);
-        }
+            /* Make sure the cursor is visible in windowed mode initially */
+            if (g_config.windowed && !g_config.fullscreen && !g_config.devmode && cursor_count < 0)
+            {
+                while (real_ShowCursor(TRUE) < 0);
+            }
 
-        /* Starcraft locks the cursor before ddraw.dll was loaded */
-        if (g_config.windowed)
-        {
-            real_ClipCursor(NULL);
+            /* Starcraft locks the cursor before ddraw.dll was loaded */
+            if (g_config.windowed)
+            {
+                real_ClipCursor(NULL);
+            }
         }
 
         GetWindowText(g_ddraw.hwnd, (LPTSTR)&g_ddraw.title, sizeof(g_ddraw.title));

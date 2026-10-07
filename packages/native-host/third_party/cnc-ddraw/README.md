@@ -17,29 +17,59 @@ upstream Makefile.
 
 Every integration edit in C source is marked `Native-host bridge`.
 
-- `src/dllmain.c`: include the agent contract; request agent startup after the
-  existing hooks initialize and request nonblocking shutdown before teardown.
-  The agent does nothing unless explicitly configured.
+- `src/dllmain.c`: validate agent configuration and configure the optional hidden
+  host before any game window is created; request agent startup after the existing
+  hooks initialize and request nonblocking shutdown before teardown. The agent
+  does nothing unless explicitly configured.
 - `src/ddsurface.c`: include the contract and tap the primary surface where
   upstream publishes Blt, BltFast, Flip, ReleaseDC, and Unlock changes. Pixels
   come from `dds_GetBuffer`, following the existing screenshot implementation.
   RGB555 is identified as an unsupported 15-bit format instead of interpreting
-  it as RGB565.
+  it as RGB565. A private GUI-thread credit refresh captures the current primary
+  even when a static menu does not present again. Nonblocking renderer/surface
+  locks protect the copy; a bounded GUI timer retries contention.
+- `inc/ddsurface.h`: declare the private GUI-owner current-primary capture helper.
+- Hidden menu capture paints native controls into a private primary-baseline DIB:
+  real game/control `WM_PAINT` handlers render their own resources. Scoped
+  `GetDC`/`BeginPaint` and paired release/end imports target the scratch HDC;
+  changed pixels are committed only after fresh surface
+  lifetime validation, with no lock or extra COM reference spanning callbacks.
+  The bounded pass preserves physical invisibility,
+  defers intermediate picture publication and does not repaint ordinary battle
+  frames. Hidden game-facing style and show notifications retain logical visibility;
+  owned visible GDI blit destinations also reach the native primary.
 - `src/winapi_hooks.c`: consult virtual client cursor/key state before the stock
   cursor/key paths; avoid OS cursor clipping/warping and foreground selection
-  for a connected input client. Expose virtual game foreground focus.
-- `inc/hook.h`: increase the internal hook table capacity from 39 to 41,
-  preserving the existing entries and terminating sentinel after the two new
-  focus hooks. The table is private to the wrapper, with no exported ABI change.
+  for a connected input client. Expose virtual game foreground focus. Preserve
+  physical hiding around game-owned dialog subclasses and virtual visibility.
+- `src/hook.c`, `inc/winapi_hooks.h`, `src/winapi_hooks.c`: add scoped hidden-paint
+  `GetDC`, `ReleaseDC` and `EndPaint` imports; the existing `BeginPaint` hook
+  also participates. Outside synchronous hidden painting they use real APIs.
+- `inc/hook.h`: increase the internal hook table capacity from 39 to 52,
+  preserving the existing entries and terminating sentinel after the additional
+  focus, visibility, mouse-capture, and dialog-lifetime hooks. The table is private to the wrapper,
+  with no exported ABI change.
 - `src/hook.c`: add game-facing `GetFocus` and `GetActiveWindow` IAT hooks
   that use authenticated virtual focus and retain the physical results when no
-  client is active. Saved original pointers participate in stock hook teardown.
+  client is active. Add hidden-session focus setters, visibility and capture
+  hooks. Saved original pointers participate in stock hook teardown.
 - `src/mouse.c`: suppress physical mouse lock/unlock work while virtual input is
   active, so it does not move or capture the real cursor.
 - `src/wndproc.c`: dispatch tagged, bounded remote input on the window's game
-  thread through its original WndProc, bypassing physical coordinate transforms
-  and cursor-lock swallowing; suppress physical focus-loss notifications during
-  virtual client focus. No-client input follows the upstream path.
+  thread into the agent router, bypassing physical coordinate transforms and
+  cursor-lock swallowing. The router retains the original battlefield WndProc
+  and routes owned dialogs/child controls with virtual capture/focus. Suppress
+  physical focus-loss notifications during virtual client focus. Unconfigured
+  no-client input follows the upstream path. Handle private picture-refresh
+  messages on that same GUI owner.
+- `src/dd.c`: install the hidden-window guard on the GUI thread, maintain logical
+  game activation without physical focus, and route private geometry/show calls
+  through the hidden-mode guard. Align the hidden primary client origin with
+  native picture origin. Skip physical cursor initialization for hidden
+  sessions. The original DirectDraw surface and presentation taps remain active.
+- `src/utils.c`: route private window-position updates through the optional
+  hidden-mode guard so fullscreen/maximize helpers cannot show or activate them.
+- `src/keyboard.c`: hidden sessions do not install the physical keyboard hook.
 - `README.md`: replaced with this provenance/change inventory; the original was
   renamed to `README.upstream.md` without editing its contents.
 

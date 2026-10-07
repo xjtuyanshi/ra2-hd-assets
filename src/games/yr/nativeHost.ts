@@ -2,8 +2,9 @@ import type { GuestMemory } from '../../vm86/win32';
 import type { NativeGamePolicy, NativeHostFollowRule, NativeHostMetadata, NativeHostRange } from '../nativeHost';
 import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { createYrCommandStateReaderFrom } from './commandState';
-import { YR_EFFECTS_GLOBALS } from './effectsReader';
+import { YR_EFFECTS_GLOBALS, YR_EFFECTS_OFFSETS } from './effectsReader';
 import { YR_BEAMS_GLOBALS } from './beamsReader';
+import { YR_MIND_CONTROL_GLOBALS, YR_MIND_CONTROL_LIMITS, YR_MIND_CONTROL_OFFSETS } from './mindControlLinkReader';
 import { createYrFrameReader } from './performance';
 import { createYrRenderStateReader } from './renderState';
 import { writeYrGameSpeed } from './runtimeHooks';
@@ -30,6 +31,51 @@ const pointer = (source: number, bytes: number): NativeHostFollowRule => ({
   maxCount: 1,
   stride: 0,
 });
+const nestedVector = (source: number, offset: number, bytes: number, maxCount: number): NativeHostFollowRule => ({
+  kind: 4,
+  source,
+  bytes,
+  maxCount,
+  stride: offset,
+});
+const memberPointer = (source: number, offset: number, bytes: number, maxCount: number): NativeHostFollowRule => ({
+  kind: 5,
+  source,
+  bytes,
+  maxCount,
+  stride: offset,
+});
+const capacitySpan = (source: number, offset: number, bytes: number, maxCount: number): NativeHostFollowRule => ({
+  kind: 6,
+  source,
+  bytes,
+  maxCount,
+  stride: offset,
+});
+const indirect = (
+  kind: 7 | 8,
+  source: number,
+  pointerOffset: number,
+  childOffset: number,
+  bytes: number,
+  maxCount: number,
+): NativeHostFollowRule => ({
+  kind,
+  source,
+  bytes,
+  maxCount,
+  stride: pointerOffset + childOffset * 0x10000,
+});
+
+/** Constructor-verified type arrays of the pinned executable; effect types exist before their first instance. */
+export const YR_NATIVE_EFFECT_TYPE_ARRAYS = Object.freeze({
+  anim: 0x8b4150, // AnimTypeClass ctor 0x42777E..0x4277C6.
+  bullet: 0xa83c80, // BulletTypeClass ctor 0x46BD33..0x46BD7B.
+  particleSystem: 0xa83d68, // ParticleSystemTypeClass ctor 0x6441BB..0x644205.
+  voxelAnim: 0xa8eb28, // VoxelAnimTypeClass ctor 0x74AF09..0x74AF53.
+  weapon: 0x887568, // WeaponTypeClass ctor 0x771E96..0x771EE0.
+  warhead: 0x8874c0, // WarheadTypeClass ctor 0x75D0E8..0x75D132.
+});
 
 /** Mutable root pages, vtable tables and fixed reader tables of the pinned YR 1.001 image. */
 export const YR_NATIVE_RANGES: readonly NativeHostRange[] = Object.freeze([
@@ -41,12 +87,16 @@ export const YR_NATIVE_RANGES: readonly NativeHostRange[] = Object.freeze([
   { address: 0xb04000, length: 0x20000 },
   { address: 0xb45000, length: 0x2000 },
   { address: 0xb73000, length: 0x1000 },
+  { address: 0xac4000, length: 0x1000 }, // Mind-control planning flag; sidebar native power shape pointer.
+  { address: 0x8192b8, length: 0xb0 }, // Building foundation width/height tables used by effect coordinates.
+  { address: YR_MIND_CONTROL_GLOBALS.trigScale, length: 4 },
+  { address: YR_MIND_CONTROL_GLOBALS.trig, length: 10240 * 4 },
 ]);
 
 /**
- * The native agent resolves these on the game thread. Larger/nested optional blocks are discovered by strict reader
- * misses, never filled with zeros. Type and house tables are followed so adding a new object need not rediscover
- * its existing type or owner. Counts remain defensive reader bounds, not fabricated game capacities.
+ * The native agent resolves these on the game thread. Live effect/type/house/production graphs are followed before
+ * publishing a frame, so a newly allocated child does not require a stale fixed heap range. Counts remain defensive
+ * reader bounds, not fabricated game capacities. Remaining strict misses are explicit, never filled with zeros.
  */
 export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.freeze([
   vector(G.technos, 0x800, L.objectsPerKind * 4),
@@ -65,15 +115,37 @@ export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.fr
   vector(0xa8b218, 0x1000, 4096), // AircraftTypeClass::Array.
   vector(0xa83d80, 0x2c0, 255), // OverlayTypeClass::Array.
   vector(0xa8ec18, 0x40, 0x8000), // SmudgeTypeClass::Array.
+  vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.anim, 0x36c, 4096),
+  vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.bullet, 0x2ac, 4096),
+  vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.particleSystem, 0x2b8, 4096),
+  vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.voxelAnim, 0x40, 4096),
+  vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.weapon, 0x40, 4096),
+  vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.warhead, 0x40, 4096),
+  vector(0xa83dc8, 0xa8, 65536), // ParticleClass ctor 0x62B786..0x62B7CF; coordinates are read through +0xA7.
   vector(YR_EFFECTS_GLOBALS.anims, 0x1b0, 8192),
   vector(YR_EFFECTS_GLOBALS.bullets, 0x160, 4096),
   vector(YR_EFFECTS_GLOBALS.particleSystems, 0x110, 2048),
+  nestedVector(YR_EFFECTS_GLOBALS.particleSystems, YR_EFFECTS_OFFSETS.particleSystemParticles, 0xa8, 2048),
   vector(YR_EFFECTS_GLOBALS.lasers, 0x60, 1024),
   vector(YR_EFFECTS_GLOBALS.electricBolts, 0x40, 1024),
   vector(YR_EFFECTS_GLOBALS.voxelAnims, 0x150, 4096),
   vector(YR_BEAMS_GLOBALS.radBeams, 0x90, 1024),
   vector(YR_BEAMS_GLOBALS.waves, 0x1e0, 1024),
+  vector(YR_MIND_CONTROL_GLOBALS.managers, 0x4c, YR_MIND_CONTROL_LIMITS.managers),
+  nestedVector(YR_MIND_CONTROL_GLOBALS.managers, YR_MIND_CONTROL_OFFSETS.nodes, 0x14, YR_MIND_CONTROL_LIMITS.nodes),
+  ...[G.units, G.infantry, G.aircraft].map((source) =>
+    memberPointer(source, YR_MIND_CONTROL_OFFSETS.locomotor, 0x30, L.objectsPerKind),
+  ),
   vector(0xabca10, 0x4c, 4096), // LightSourceClass::Array (+4 Items, +16 Count).
+  ...[0x53ac, 0x53b0, 0x53b4, 0x53b8, 0x53bc].map((offset) => memberPointer(G.houses, offset, 0x74, L.houses)),
+  ...[0x5500, 0x5514, 0x5528, 0x553c, 0x55a0, 0x55b4, 0x55c8, 0x55dc].map((offset) =>
+    capacitySpan(G.houses, offset, 4, 4096),
+  ),
+  ...[0x53ac, 0x53b0, 0x53b4, 0x53b8, 0x53bc].flatMap((offset) => [
+    indirect(7, G.houses, offset, 0x40, 0x64, 4096), // FactoryClass queue of type pointers.
+    indirect(8, G.houses, offset, 0x58, 0x800, L.houses), // In-production object may not yet belong to a global live array.
+  ]),
+  ...[0xa83c68, 0xa8e348, 0xa83ce0, 0xa8b218].map((source) => memberPointer(source, 0x60, 512, 4096)),
   ...Array.from({ length: 5 }, (_, index) => vector(G.renderLayers + index * 0x18, 0x200, L.objectsPerLayer)),
 ]);
 

@@ -18,8 +18,8 @@ typedef struct HOOKLISTDATA {
     HMODULE mod;
 } HOOKLISTDATA;
 
-/* Native-host bridge: two added focus entries plus the existing end sentinel. */
-typedef struct HOOKLIST { char module_name[32]; HOOKLISTDATA data[41]; } HOOKLIST;
+/* Native-host bridge: focus/visibility/capture/scoped-paint entries and sentinel. */
+typedef struct HOOKLIST { char module_name[32]; HOOKLISTDATA data[52]; } HOOKLIST;
 
 typedef BOOL(WINAPI* GETCURSORPOSPROC)(LPPOINT);
 typedef BOOL(WINAPI* CLIPCURSORPROC)(const RECT*);
@@ -66,6 +66,9 @@ typedef BOOL(WINAPI* ENUMDISPLAYSETTINGSAPROC)(LPCSTR, DWORD, DEVMODEA*);
 typedef LRESULT(WINAPI* DEFWINDOWPROCAPROC)(HWND, UINT, WPARAM, LPARAM);
 typedef HWND(WINAPI* SETPARENTPROC)(HWND, HWND);
 typedef HDC (WINAPI* BEGINPAINTPROC)(HWND, LPPAINTSTRUCT);
+typedef BOOL (WINAPI* ENDPAINTPROC)(HWND, const PAINTSTRUCT *);
+typedef HDC (WINAPI* GETDCPROC)(HWND);
+typedef int (WINAPI* RELEASEDCPROC)(HWND, HDC);
 typedef SHORT(WINAPI* GETKEYSTATEPROC)(int);
 typedef SHORT(WINAPI* GETASYNCKEYSTATEPROC)(int);
 
@@ -130,6 +133,9 @@ extern ENUMDISPLAYSETTINGSAPROC real_EnumDisplaySettingsA;
 extern DEFWINDOWPROCAPROC real_DefWindowProcA;
 extern SETPARENTPROC real_SetParent;
 extern BEGINPAINTPROC real_BeginPaint;
+extern ENDPAINTPROC real_EndPaint;
+extern GETDCPROC real_GetDC;
+extern RELEASEDCPROC real_ReleaseDC;
 extern GETKEYSTATEPROC real_GetKeyState;
 extern GETASYNCKEYSTATEPROC real_GetAsyncKeyState;
 extern GETDEVICECAPSPROC real_GetDeviceCaps;

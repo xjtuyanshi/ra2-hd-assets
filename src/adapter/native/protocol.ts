@@ -44,14 +44,14 @@ export interface NativeHello {
   gameThreadId: number;
   exe: { size: number; peTimestamp: number; sha256: string; verified: boolean };
   surface: { width: number; height: number; bpp: number; format: 'RGB565' };
-  limits: { messageBytes: number; pages: number; rules: number };
+  limits: { messageBytes: number; pages: number; rules: number; followRuleKinds?: readonly number[] };
 }
 export interface NativeRange {
   address: number;
   length: number;
 }
 export interface NativeFollowRule {
-  kind: 1 | 2 | 3;
+  kind: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
   source: number;
   bytes: number;
   maxCount: number;
@@ -184,6 +184,13 @@ export function decodeHello(payload: Uint8Array): NativeHello {
   ) {
     throw new NativeProtocolError('Invalid native limits or surface');
   }
+  if (
+    hello.limits.followRuleKinds !== undefined &&
+    (!Array.isArray(hello.limits.followRuleKinds) ||
+      hello.limits.followRuleKinds.some((kind) => ![1, 2, 3, 4, 5, 6, 7, 8].includes(kind)) ||
+      new Set(hello.limits.followRuleKinds).size !== hello.limits.followRuleKinds.length)
+  )
+    throw new NativeProtocolError('Invalid native follow-rule capabilities');
   return hello as NativeHello;
 }
 
@@ -211,11 +218,14 @@ export function encodeSubscription(subscription: NativeSubscription): Uint8Array
   }
   for (const rule of rules) {
     if (
-      ![1, 2, 3].includes(rule.kind) ||
+      ![1, 2, 3, 4, 5, 6, 7, 8].includes(rule.kind) ||
       rule.bytes < 1 ||
       rule.bytes > NATIVE_MAX_PAGES * NATIVE_PAGE_SIZE ||
       (rule.kind !== 1 && (!rule.maxCount || rule.maxCount > 65536)) ||
-      (rule.kind === 3 && !rule.stride)
+      (rule.kind === 3 && !rule.stride) ||
+      (rule.kind >= 4 &&
+        rule.kind <= 6 &&
+        rule.stride + (rule.kind === 4 ? 20 : rule.kind === 6 ? 12 : 4) > 0x100000000)
     ) {
       throw new NativeProtocolError('Invalid follow rule');
     }

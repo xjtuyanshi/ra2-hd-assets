@@ -1,4 +1,7 @@
 #include "agent.h"
+#include "hidden.h"
+#include "dd.h"
+#include "ddsurface.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -12,6 +15,8 @@ static uint8_t *encoded;
 static uint32_t capacity_pixels, baseline_width, baseline_height;
 static uint32_t pending_width, pending_height;
 static int baseline_valid, credit, in_flight;
+#define NH_WM_PICTURE (WM_APP + 0x149)
+static unsigned refresh_retries;
 
 static void initialize(void)
 {
@@ -57,7 +62,49 @@ void nh_picture_credit(uint32_t id, const uint8_t *payload, uint32_t length)
     }
     credit = 1;
     LeaveCriticalSection(&picture_lock);
+    /* Static menus do not present again after a credit arrives. Wake their
+     * owning GUI thread instead of retaining a surface pointer on the I/O
+     * thread; it captures the current primary through the same delta path. */
+    if (!g_ddraw.hwnd || !PostMessageA(g_ddraw.hwnd, NH_WM_PICTURE, 0, 0))
+    {
+        EnterCriticalSection(&picture_lock);
+        credit = 0;
+        LeaveCriticalSection(&picture_lock);
+        const char *error = "game picture thread unavailable";
+        nh_send(NH_ERROR, id, error, (uint32_t)strlen(error));
+        return;
+    }
     nh_send(NH_CREDIT, id, NULL, 0);
+}
+
+int nh_picture_message(HWND window, UINT message, WPARAM wparam)
+{
+    if (message != NH_WM_PICTURE && !(message == WM_TIMER && wparam == NH_WM_PICTURE)) return 0;
+    if (InterlockedCompareExchange(&initialized, 0, 0) != 2) return 1;
+    KillTimer(window, NH_WM_PICTURE);
+    if (message == NH_WM_PICTURE) refresh_retries = 0;
+    dds_NativeCapturePrimary();
+    int pending;
+    EnterCriticalSection(&picture_lock);
+    pending = credit && !in_flight && nh_connected();
+    if (pending && ++refresh_retries > 64) credit = pending = 0;
+    LeaveCriticalSection(&picture_lock);
+    /* Surface locks can be owned while the game pumps messages. Retry on the
+     * GUI timer without blocking that owner or spinning its message pump. */
+    if (pending && !SetTimer(window, NH_WM_PICTURE, 16, NULL))
+    {
+        EnterCriticalSection(&picture_lock);
+        credit = 0;
+        LeaveCriticalSection(&picture_lock);
+        const char *error = "game picture refresh unavailable";
+        nh_send(NH_ERROR, 0, error, (uint32_t)strlen(error));
+    }
+    else if (refresh_retries > 64)
+    {
+        const char *error = "game picture surface remained busy";
+        nh_send(NH_ERROR, 0, error, (uint32_t)strlen(error));
+    }
+    return 1;
 }
 
 void nh_picture_sent(void)
@@ -116,7 +163,7 @@ void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pi
     InterlockedExchange(&surface_width, (LONG)width);
     InterlockedExchange(&surface_height, (LONG)height);
     InterlockedExchange(&surface_bpp, (LONG)bpp);
-    if (!nh_connected() || !pixels || bpp != 16 || !width || !height || width > 4096 || height > 4096 ||
+    if (nh_hidden_painting() || !nh_connected() || !pixels || bpp != 16 || !width || !height || width > 4096 || height > 4096 ||
         pitch < width * 2 || (uint64_t)width * height > 2u * 1024u * 1024u ||
         InterlockedCompareExchange(&initialized, 0, 0) != 2 || !TryEnterCriticalSection(&picture_lock)) return;
     if (!credit || in_flight)

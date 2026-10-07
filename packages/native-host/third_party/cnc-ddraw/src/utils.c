@@ -1,4 +1,6 @@
 #include <windows.h>
+/* Native-host bridge: hidden geometry updates cannot map or activate a window. */
+#include "hidden.h"
 #include <intrin.h>
 #include <stdio.h>
 #include <math.h>
@@ -580,7 +582,7 @@ void util_update_bnet_pos(int new_x, int new_y)
 
         OffsetRect(&rc, new_x - old_x, new_y - old_y);
 
-        real_SetWindowPos(
+        nh_hidden_set_window_pos(
             hwnd,
             0,
             rc.left,
@@ -627,7 +629,7 @@ void util_update_bnet_pos(int new_x, int new_y)
 
             OffsetRect(&rc, adj_x, adj_y);
 
-            real_SetWindowPos(
+            nh_hidden_set_window_pos(
                 hwnd,
                 0,
                 rc.left,
@@ -1007,7 +1009,7 @@ BOOL CALLBACK util_enum_child_proc(HWND hwnd, LPARAM lparam)
             {
                 real_SetWindowLongA(hwnd, GWL_EXSTYLE, exstyle | WS_EX_TRANSPARENT);
 
-                real_SetWindowPos(
+                nh_hidden_set_window_pos(
                     hwnd,
                     0,
                     0,

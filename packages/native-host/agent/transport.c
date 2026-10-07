@@ -9,6 +9,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "agent.h"
+#include "hidden.h"
 
 #define NH_REPLY_SLOTS 16u
 #define NH_ALLOC_SLOTS 64u
@@ -26,6 +27,7 @@ typedef struct { uint32_t address, size; int pinned; } nh_allocation;
 
 static volatile LONG nh_running, nh_ready, nh_client_present;
 static volatile LONG nh_identity_ok;
+static LONG nh_configured;
 static SOCKET nh_listener = INVALID_SOCKET, nh_client = INVALID_SOCKET;
 static HANDLE nh_wake;
 static CRITICAL_SECTION nh_queue_lock;
@@ -283,6 +285,11 @@ static int nh_configuration(void) {
     return 1;
 }
 
+/* Read only the configuration before window hooks are installed. Socket and
+ * identity work remain on the I/O thread outside the loader lock. */
+void nh_agent_configure(void) { nh_configured = nh_configuration(); }
+int nh_agent_configured(void) { return nh_configured != 0; }
+
 static void nh_base64(const uint8_t *bytes, uint32_t length, char *out) {
     static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     uint32_t i, j = 0;
@@ -505,11 +512,12 @@ static int nh_receive(SOCKET socket, uint8_t *buffer) {
     else if (type == NH_INPUT || type == NH_INPUT_STATE || type == NH_CREDIT)
         nh_dispatch_input(type, id, buffer + 16, payload_length);
     else if (type == NH_DIAGNOSTICS) {
-        char fragment[2048], diagnostic[2304];
+        char fragment[2048], hidden_host[768], diagnostic[3072];
         if (payload_length) nh_error(id, "DIAGNOSTICS takes no payload");
         else {
             nh_mirror_diagnostics(fragment, sizeof(fragment));
-            snprintf(diagnostic, sizeof(diagnostic), "{%s,\"gameThreadId\":%u,\"allocatedBytes\":%u,\"replyQueue\":%u}", fragment, nh_game_thread_id(), nh_allocated, nh_reply_count);
+            nh_hidden_diagnostics(hidden_host, sizeof(hidden_host));
+            snprintf(diagnostic, sizeof(diagnostic), "{%s,\"gameThreadId\":%u,\"allocatedBytes\":%u,\"replyQueue\":%u,\"hidden\":%s,\"hiddenHost\":%s}", fragment, nh_game_thread_id(), nh_allocated, nh_reply_count, nh_hidden_active() ? "true" : "false", hidden_host);
             nh_send(type, id, diagnostic, (uint32_t)strlen(diagnostic));
         }
     } else nh_error(id, "Unsupported request type");
@@ -549,12 +557,13 @@ static int nh_flush(SOCKET socket, uint8_t **staging) {
 }
 
 static void nh_session(SOCKET socket, uint8_t *receive, uint8_t **staging) {
-    char hello[768];
+    char hello[1536], hidden_host[768];
     uint32_t width = 0, height = 0, bpp = 0;
     nh_packet packet;
     nh_surface_info(&width, &height, &bpp);
-    snprintf(hello, sizeof(hello), "{\"protocol\":%u,\"pid\":%lu,\"gameThreadId\":%u,\"exe\":{\"size\":%u,\"peTimestamp\":%u,\"sha256\":\"%s\",\"verified\":%s},\"surface\":{\"width\":%u,\"height\":%u,\"bpp\":%u,\"format\":\"RGB565\"},\"limits\":{\"messageBytes\":%u,\"pages\":%u,\"rules\":%u}}",
-        NH_VERSION, (unsigned long)GetCurrentProcessId(), nh_game_thread_id(), nh_exe_size, nh_pe_timestamp, nh_hash,
+    nh_hidden_diagnostics(hidden_host, sizeof(hidden_host));
+    snprintf(hello, sizeof(hello), "{\"protocol\":%u,\"pid\":%lu,\"gameThreadId\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"exe\":{\"size\":%u,\"peTimestamp\":%u,\"sha256\":\"%s\",\"verified\":%s},\"surface\":{\"width\":%u,\"height\":%u,\"bpp\":%u,\"format\":\"RGB565\"},\"limits\":{\"messageBytes\":%u,\"pages\":%u,\"rules\":%u,\"followRuleKinds\":[1,2,3,4,5,6,7,8]}}",
+        NH_VERSION, (unsigned long)GetCurrentProcessId(), nh_game_thread_id(), nh_hidden_active() ? "true" : "false", hidden_host, nh_exe_size, nh_pe_timestamp, nh_hash,
         nh_identity_verified() ? "true" : "false", width, height, bpp, NH_MAX_MESSAGE, NH_MAX_PAGES, NH_MAX_RULES);
     memset(&packet, 0, sizeof(packet)); packet.type = NH_HELLO; packet.length = (uint32_t)strlen(hello); packet.bytes = (uint8_t *)hello;
     if (!nh_send_packet(socket, &packet)) return;
@@ -581,7 +590,7 @@ static DWORD WINAPI nh_io_thread(void *unused) {
     uint32_t i;
     int initialized = 0;
     (void)unused;
-    if (!nh_configuration()) { InterlockedExchange(&nh_running, 0); return 0; }
+    if (!nh_agent_configured()) { InterlockedExchange(&nh_running, 0); return 0; }
     /* A configured agent owns process-lifetime executable reservations and its
      * worker may still be unwinding after nonblocking DllMain teardown. Pin the
      * containing module before any hooks or callbacks become reachable. This is
@@ -631,6 +640,8 @@ done:
 
 void nh_agent_start(void) {
     HANDLE thread;
+    if (!nh_agent_configured()) nh_agent_configure();
+    if (!nh_agent_configured()) return;
     if (InterlockedCompareExchange(&nh_running, 1, 0)) return;
     thread = CreateThread(NULL, 0, nh_io_thread, NULL, 0, NULL);
     if (thread) CloseHandle(thread); else InterlockedExchange(&nh_running, 0);

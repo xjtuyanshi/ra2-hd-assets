@@ -10,7 +10,7 @@ export interface NativeHostRange {
   length: number;
 }
 export interface NativeHostFollowRule {
-  kind: 1 | 2 | 3;
+  kind: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
   source: number;
   bytes: number;
   maxCount: number;

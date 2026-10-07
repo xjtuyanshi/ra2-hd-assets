@@ -1,6 +1,7 @@
 #include <windows.h>
 /* Native-host bridge: optional agent; inactive paths retain upstream behavior. */
 #include "agent.h"
+#include "hidden.h"
 #include <windowsx.h>
 #include <math.h>
 #include <vfw.h>
@@ -369,7 +370,8 @@ BOOL WINAPI fake_SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int
         }
     }
 
-    return real_SetWindowPos(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
+    /* Native-host bridge: geometry remains usable without showing/activating. */
+    return nh_hidden_set_window_pos(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
 }
 
 BOOL WINAPI fake_MoveWindow(HWND hWnd, int X, int Y, int nWidth, int nHeight, BOOL bRepaint)
@@ -458,6 +460,9 @@ LRESULT WINAPI fake_SendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lPar
 
 LONG WINAPI fake_SetWindowLongA(HWND hWnd, int nIndex, LONG dwNewLong)
 {
+    /* Native-host bridge: preserve the hidden guard around game dialog subclasses. */
+    LONG native_previous;
+    if (nIndex == GWL_WNDPROC && nh_hidden_set_window_proc(hWnd, dwNewLong, &native_previous)) return native_previous;
     if (g_ddraw.ref && g_ddraw.hwnd && g_ddraw.hwnd == hWnd)
     {
         if (nIndex == GWL_STYLE)
@@ -477,6 +482,9 @@ LONG WINAPI fake_SetWindowLongA(HWND hWnd, int nIndex, LONG dwNewLong)
 
 LONG WINAPI fake_SetWindowLongW(HWND hWnd, int nIndex, LONG dwNewLong)
 {
+    /* Native-host bridge: the hidden dialog guard also survives Unicode callers. */
+    LONG native_previous;
+    if (nIndex == GWL_WNDPROC && nh_hidden_set_window_proc(hWnd, dwNewLong, &native_previous)) return native_previous;
     if (g_ddraw.ref && g_ddraw.hwnd && g_ddraw.hwnd == hWnd)
     {
         if (nIndex == GWL_STYLE)
@@ -488,6 +496,15 @@ LONG WINAPI fake_SetWindowLongW(HWND hWnd, int nIndex, LONG dwNewLong)
 
 LONG WINAPI fake_GetWindowLongA(HWND hWnd, int nIndex)
 {
+    /* Native-host bridge: callers see their own dialog subclass chain. */
+    LONG native_procedure;
+    if (nIndex == GWL_WNDPROC && nh_hidden_get_window_proc(hWnd, &native_procedure)) return native_procedure;
+    if (nIndex == GWL_STYLE && nh_hidden_owned(hWnd))
+    {
+        LONG style = real_GetWindowLongA(hWnd, nIndex);
+        if (!(style & WS_CHILD)) style = (style & ~WS_VISIBLE) | (nh_hidden_visible(hWnd) ? WS_VISIBLE : 0);
+        return style;
+    }
     if (g_ddraw.ref && g_ddraw.hwnd == hWnd)
     {
         if (nIndex == GWL_WNDPROC)
@@ -545,6 +562,8 @@ int WINAPI fake_MapWindowPoints(HWND hWndFrom, HWND hWndTo, LPPOINT lpPoints, UI
 
 BOOL WINAPI fake_ShowWindow(HWND hWnd, int nCmdShow)
 {
+    /* Native-host bridge: visible is logical while the OS window stays hidden. */
+    if (nh_hidden_owned(hWnd)) return nh_hidden_show_window(hWnd, nCmdShow);
     /* Don't hide the taskbar (Some of The Learning Company games) */
     if (nCmdShow == SW_HIDE && hWnd && hWnd != g_ddraw.hwnd && hWnd == FindWindowA("Shell_TrayWnd", NULL))
     {
@@ -586,7 +605,7 @@ HWND WINAPI fake_GetTopWindow(HWND hWnd)
 HWND WINAPI fake_GetForegroundWindow()
 {
     /* Native-host bridge: authenticated client supplies virtual game focus. */
-    if (nh_input_active() && g_ddraw.hwnd) return g_ddraw.hwnd;
+    if (nh_input_active() && g_ddraw.hwnd) return nh_input_get_active_window();
     if (g_ddraw.ref && g_config.windowed && g_ddraw.hwnd)
     {
         return g_ddraw.hwnd;
@@ -597,6 +616,8 @@ HWND WINAPI fake_GetForegroundWindow()
 
 BOOL WINAPI fake_SetForegroundWindow(HWND hWnd)
 {
+    /* Native-host bridge: configured hidden windows never claim OS foreground. */
+    if (nh_hidden_owned(hWnd)) return TRUE;
     /* Native-host bridge: virtual input must not select an OS window. */
     if (nh_input_active() && hWnd == g_ddraw.hwnd) return TRUE;
     if (g_ddraw.ref && g_ddraw.bnet_active)
@@ -937,6 +958,8 @@ HWND WINAPI fake_SetParent(HWND hWndChild, HWND hWndNewParent)
 
 HDC WINAPI fake_BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint)
 {
+    HDC scratch = lpPaint ? nh_hidden_paint_dc(hWnd, 1, lpPaint) : NULL;
+    if (scratch) return scratch;
     if (g_ddraw.ref && g_ddraw.width && g_ddraw.hwnd && g_ddraw.hwnd == hWnd && lpPaint)
     {
         HDC result = real_BeginPaint(hWnd, lpPaint);
@@ -953,6 +976,24 @@ HDC WINAPI fake_BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint)
     }
 
     return real_BeginPaint(hWnd, lpPaint);
+}
+
+BOOL WINAPI fake_EndPaint(HWND hWnd, const PAINTSTRUCT *paint)
+{
+    int scoped = paint ? nh_hidden_finish_dc(hWnd, paint->hdc, 1) : -1;
+    return scoped >= 0 ? scoped : real_EndPaint(hWnd, paint);
+}
+
+HDC WINAPI fake_GetDC(HWND hWnd)
+{
+    HDC scratch = nh_hidden_paint_dc(hWnd, 0, NULL);
+    return scratch ? scratch : real_GetDC(hWnd);
+}
+
+int WINAPI fake_ReleaseDC(HWND hWnd, HDC dc)
+{
+    int scoped = nh_hidden_finish_dc(hWnd, dc, 0);
+    return scoped >= 0 ? scoped : real_ReleaseDC(hWnd, dc);
 }
 
 SHORT WINAPI fake_GetKeyState(int nVirtKey)
@@ -1091,7 +1132,7 @@ BOOL WINAPI fake_StretchBlt(
     }
 
     if (g_ddraw.ref && g_ddraw.hwnd &&
-        (hwnd == g_ddraw.hwnd ||
+        (hwnd == g_ddraw.hwnd || (nh_hidden_owned(hwnd) && nh_hidden_visible(hwnd)) ||
             (g_config.fixchilds && IsChild(g_ddraw.hwnd, hwnd) &&
                 (g_config.fixchilds == FIX_CHILDS_DETECT_HIDE ||
                     strcmp(class_name, "VideoRenderer") == 0 ||
@@ -1153,7 +1194,7 @@ BOOL WINAPI fake_StretchBlt(
                 {
                     real_SetWindowLongA(hwnd, GWL_EXSTYLE, exstyle | WS_EX_TRANSPARENT);
 
-                    real_SetWindowPos(
+                    nh_hidden_set_window_pos(
                         hwnd,
                         0,
                         0,
@@ -1228,7 +1269,7 @@ BOOL WINAPI fake_BitBlt(
     }
 
     if (g_ddraw.ref && g_ddraw.hwnd &&
-        (hwnd == g_ddraw.hwnd ||
+        (hwnd == g_ddraw.hwnd || (nh_hidden_owned(hwnd) && nh_hidden_visible(hwnd)) ||
             (g_config.fixchilds && IsChild(g_ddraw.hwnd, hwnd) &&
                 (g_config.fixchilds == FIX_CHILDS_DETECT_HIDE ||
                     strcmp(class_name, "VideoRenderer") == 0 ||
@@ -2024,6 +2065,9 @@ HWND WINAPI fake_CreateWindowExA(
     DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle, int X, int Y,
     int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam)
 {
+    /* Native-host bridge: install the guard on every game GUI creator thread. */
+    nh_hidden_install();
+    int native_visible = (dwStyle & WS_VISIBLE) != 0;
     TRACE("-> CreateWindowExA("
         "dwExStyle=%08X, lpClassName=%p, lpWindowName=%p, dwStyle=%08X, X=%d, Y=%d, nWidth=%d, "
         "nHeight=%d, hWndParent=%p, hMenu=%p, hInstance=%p, lpParam=%p) [%p]\n", 
@@ -2253,6 +2297,12 @@ HWND WINAPI fake_CreateWindowExA(
         }
     }
 
+    /* Native-host bridge: never map or activate a hidden top-level window. */
+    if (nh_hidden_active() && !(dwStyle & WS_CHILD))
+    {
+        dwStyle &= ~WS_VISIBLE;
+        dwExStyle = (dwExStyle & ~WS_EX_TOPMOST) | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+    }
     HWND hwnd = real_CreateWindowExA(
         dwExStyle,
         lpClassName,
@@ -2266,6 +2316,8 @@ HWND WINAPI fake_CreateWindowExA(
         hMenu,
         hInstance,
         lpParam);
+
+    if (nh_hidden_active()) nh_hidden_initial_visibility(hwnd, native_visible);
 
     /* Age Of Empires 2 textbox align */
     if (!dwExStyle &&

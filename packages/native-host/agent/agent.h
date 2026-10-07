@@ -20,7 +20,13 @@ enum nh_type { NH_HELLO=1, NH_READ=2, NH_WRITE=3, NH_ALLOC=4, NH_FREE=5, NH_SUBS
  WRITE addr,len,bytes; ALLOC size,preferred,executable => addr,size; FREE addr.
  SUBSCRIBE rangeCount,ruleCount,maxPages,budgetUs,sampleCount; ranges addr,len;
  rules kind,source,bytes,maxCount,stride. Kinds: 1 pointer; 2 vector (+4 items,+16 count);
- 3 span vector (same descriptor; contiguous count*stride). All fields u32.
+ 3 span vector (same descriptor; contiguous count*stride); 4 outer pointer vector
+ to embedded pointer vector at member offset=stride (maxCount bounds both);
+ 5 outer pointer vector to pointer field at member offset=stride;
+ 6 outer pointer vector to embedded capacity span vector (+4 Items,+8 count),
+ bytes=element width; 7/8 outer pointer vector to pointerfield then embedded
+ pointervector/pointerfield (stride low16=first offset,high16=second offset).
+ Null pointers/empty vectors are valid; maxCount bounds each vector. All fields u32.
  MIRROR frame,flags,pageCount,sampleCount; page addr,4096 bytes; samples addr,len,bytes.
  flags: 1 truncated, 2 reset, 4 invalid pages. Samples direct-read on game thread same frame.
  CREDIT count; PICTURE frame,width,height,rowCount; rows y,encodedBytes,segments;
@@ -34,6 +40,8 @@ int nh_safe_write(uint32_t address, const void *bytes, uint32_t length);
 uint32_t nh_current_frame(void);
 uint32_t nh_game_thread_id(void);
 void nh_agent_start(void);
+void nh_agent_configure(void);
+int nh_agent_configured(void);
 void nh_agent_stop(void);
 int nh_connected(void);
 /* The mirror retains dirty versions until ACK; stream mailboxes never overwrite pending deltas. */
@@ -57,9 +65,12 @@ int nh_input_set_cursor(int x, int y);
 int nh_input_active(void);
 HWND WINAPI nh_input_get_focus(void);
 HWND WINAPI nh_input_get_active_window(void);
+HWND nh_input_target_window(void);
+int nh_input_focus_window(HWND window);
 int nh_input_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam, LRESULT *result);
 void nh_picture_sent(void);
 void nh_picture_disconnect(void);
 void nh_surface_info(uint32_t *width, uint32_t *height, uint32_t *bpp);
 void nh_picture_credit(uint32_t id, const uint8_t *payload, uint32_t length);
+int nh_picture_message(HWND window, UINT message, WPARAM wparam);
 #endif

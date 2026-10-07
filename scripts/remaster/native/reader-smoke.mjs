@@ -12,6 +12,7 @@ const { values: o } = parseArgs({
     token: { type: 'string', default: process.env.RA2_NATIVE_AGENT_TOKEN },
     origin: { type: 'string', default: process.env.RA2_NATIVE_AGENT_ORIGIN || 'http://127.0.0.1:15451' },
     seconds: { type: 'string', default: '60' },
+    warmup: { type: 'string', default: '15' },
     out: { type: 'string' },
     record: { type: 'boolean', default: false },
     replay: { type: 'string' },
@@ -20,12 +21,13 @@ const { values: o } = parseArgs({
 });
 if (o.help) {
   console.log(
-    'node scripts/remaster/native/reader-smoke.mjs --token HEX [--seconds 60 --record --out OUT]\nnode scripts/remaster/native/reader-smoke.mjs --replay OUT/recordings/session.nhrec\nRuns the existing YR render reader, prints counts by kind, misses and reader time. Recordings and JSON reports stay under gameres.',
+    'node scripts/remaster/native/reader-smoke.mjs --token HEX [--seconds 60 --warmup 15 --record --out OUT]\nnode scripts/remaster/native/reader-smoke.mjs --replay OUT/recordings/session.nhrec\nRuns the existing YR render reader, prints counts by kind, misses and reader time. The fixed warm-up precedes the measured interval. Recordings and JSON reports stay under gameres.',
   );
   process.exit(0);
 }
 if (!Number.isFinite(+o.seconds) || +o.seconds <= 0 || +o.seconds > 3600) throw new Error('Invalid seconds');
-const { NativeMirrorMemory, NativeMemoryMiss } = await tsImport(
+if (!Number.isFinite(+o.warmup) || +o.warmup < 0 || +o.warmup > 300) throw new Error('Invalid warmup');
+const { NativeMirrorMemory, NativeMemoryMiss, NativeReaderWorkingSet } = await tsImport(
   '../../../src/adapter/native/memory.ts',
   import.meta.url,
 );
@@ -66,8 +68,27 @@ let startedAt = performance.now(),
 let readerMs = 0,
   readerCalls = 0,
   missesAtGood = null;
+let measurementStart = null,
+  measurementMs = 0,
+  measurementCalls = 0,
+  measuredGood = 0,
+  measuredDirect = 0,
+  measuredCountMismatches = 0,
+  measuredMissingDirect = 0,
+  measurementMisses = null,
+  measurementTruncated = 0,
+  firstMeasuredFrame = null,
+  lastMeasuredFrame = null,
+  lastGoodAt = null,
+  lastAdvancingAt = null,
+  lastGoodLogicFrame = null,
+  mirrorWork = Promise.resolve(),
+  pictureTimer = null;
 let dynamicRanges = [];
-const learned = new Map();
+const learned = new NativeReaderWorkingSet();
+const missObservations = [];
+let coldReaderAt = null,
+  coldReaderPending = true;
 let subscribedKey = '';
 const progressTimer = setInterval(
   () =>
@@ -89,6 +110,8 @@ const summary = {
   frames: 0,
   readerFrames: 0,
   warmupSeconds: null,
+  requestedWarmupSeconds: +o.warmup,
+  measurementSeconds: null,
   postWarmupMisses: null,
   directCountSamples: 0,
   countMismatches: 0,
@@ -99,6 +122,7 @@ const summary = {
 function rebuild() {
   renderReader = null;
   rawReader = null;
+  coldReaderPending = true;
   policy = createYrNativeHostPolicy(memory, () => memory.accessor(), hello.exe.sha256, metadata);
 }
 function mergeRanges(ranges) {
@@ -121,8 +145,8 @@ function mergeRanges(ranges) {
 async function subscribe(extra = []) {
   if (!connection || !policy) return false;
   dynamicRanges = extra;
-  for (const r of memory.missingRanges) learned.set(r.address, r);
-  const ranges = mergeRanges([...policy.ranges, ...dynamicRanges, ...learned.values()]),
+  learned.learn('reader', memory.missingRanges);
+  const ranges = mergeRanges([...policy.ranges, ...dynamicRanges, ...learned.ranges]),
     key = JSON.stringify(ranges);
   if (key === subscribedKey) return false;
   await connection.request(
@@ -133,9 +157,11 @@ async function subscribe(extra = []) {
   return true;
 }
 async function processUpdate(update) {
+  const measured = measurementStart !== null;
   seen++;
   if (!memory.apply(update)) {
     truncated++;
+    if (measured) measurementTruncated++;
     if (connection && update.flags & 4) {
       learned.clear();
       dynamicRanges = [];
@@ -155,6 +181,10 @@ async function processUpdate(update) {
   try {
     const ranges = policy.additionalRanges?.() ?? [];
     if (await subscribe(ranges)) return;
+    if (coldReaderAt === null || performance.now() - coldReaderAt >= 1000) {
+      renderReader = rawReader = null;
+      coldReaderPending = true;
+    }
     readerBegin = performance.now();
     renderReader ??= policy.createRenderReader();
     rawReader ??= createYrStateReader(() => memory.accessor(), hello.exe.sha256);
@@ -167,9 +197,20 @@ async function processUpdate(update) {
     elapsed = performance.now() - readerBegin;
     readerMs += elapsed;
     readerCalls++;
+    if (measured) {
+      measurementMs += elapsed;
+      measurementCalls++;
+    }
   }
   if (memory.operationMissed) {
     missedFrames++;
+    if (missObservations.length < 64)
+      missObservations.push({
+        frame: update.frame,
+        measured,
+        ranges: memory.missingRanges.slice(0, 32),
+        readerHadResult: !!rendered,
+      });
     rebuild();
     await subscribe(dynamicRanges);
     return;
@@ -178,7 +219,18 @@ async function processUpdate(update) {
     latest = { frame: update.frame, status: 'NO BATTLE OR UNSUPPORTED READER', misses: memory.misses };
     return;
   }
+  learned.complete('reader', memory, coldReaderPending);
+  if (coldReaderPending) coldReaderAt = performance.now();
+  coldReaderPending = false;
   good++;
+  lastGoodAt = performance.now();
+  if (lastGoodLogicFrame === null || lastGoodLogicFrame !== update.frame) lastAdvancingAt = lastGoodAt;
+  lastGoodLogicFrame = update.frame;
+  if (measured) {
+    measuredGood++;
+    firstMeasuredFrame ??= update.frame;
+    lastMeasuredFrame = update.frame;
+  }
   renderPrevious = rendered;
   if (firstGood === null) {
     firstGood = performance.now();
@@ -191,6 +243,10 @@ async function processUpdate(update) {
     const own = new DataView(sample.bytes.buffer, sample.bytes.byteOffset, 4).getUint32(0, true);
     equalities++;
     if (raw.objects.length !== own) countMismatches++;
+    if (measured) {
+      measuredDirect++;
+      if (raw.objects.length !== own) measuredCountMismatches++;
+    }
     latest = {
       frame: update.frame,
       objects: byKind,
@@ -203,6 +259,7 @@ async function processUpdate(update) {
     };
   } else {
     missingDirect++;
+    if (measured) measuredMissingDirect++;
     latest = {
       frame: update.frame,
       objects: byKind,
@@ -217,6 +274,7 @@ async function processUpdate(update) {
     console.log(JSON.stringify(latest));
     lastPrint = performance.now();
   }
+  await subscribe(dynamicRanges);
 }
 async function replay(path) {
   const file = await open(path, 'r');
@@ -262,6 +320,49 @@ async function replay(path) {
     await file.close();
   }
 }
+function finalizeSummary() {
+  summary.frames = seen;
+  summary.readerFrames = good;
+  summary.misses = memory.misses;
+  summary.firstGoodSeconds = firstGood === null ? null : (firstGood - startedAt) / 1000;
+  summary.warmupSeconds =
+    measurementStart === null ? (o.replay ? summary.firstGoodSeconds : null) : (measurementStart - startedAt) / 1000;
+  if (measurementStart !== null && summary.measurementSeconds === null)
+    summary.measurementSeconds = (performance.now() - measurementStart) / 1000;
+  summary.postWarmupMisses =
+    measurementMisses === null
+      ? o.replay && missesAtGood !== null
+        ? memory.misses - missesAtGood
+        : null
+      : memory.misses - measurementMisses;
+  summary.missedFrames = missedFrames;
+  summary.directCountSamples = equalities;
+  summary.missingDirectSamples = missingDirect;
+  summary.countMismatches = countMismatches;
+  summary.truncated = truncated;
+  summary.readerMsPerFrame = readerCalls ? readerMs / readerCalls : null;
+  summary.measuredReaderFrames = measuredGood;
+  summary.measuredDirectCountSamples = measuredDirect;
+  summary.measuredCountMismatches = measuredCountMismatches;
+  summary.measuredMissingDirectSamples = measuredMissingDirect;
+  summary.measuredTruncated = measurementTruncated;
+  summary.measuredReaderMsPerFrame = measurementCalls ? measurementMs / measurementCalls : null;
+  summary.measuredLogicFrames = firstMeasuredFrame === null ? 0 : (lastMeasuredFrame - firstMeasuredFrame) >>> 0;
+  summary.last = latest;
+  summary.lastGoodFrame = renderPrevious?.frame ?? null;
+  summary.learnedPages = learned.ranges.reduce((n, range) => n + range.length / 4096, 0);
+  summary.missObservations = missObservations;
+  summary.gates = {
+    objectCounts: o.replay
+      ? equalities > 0 && countMismatches === 0 && missingDirect === 0
+      : measuredDirect > 0 && measuredCountMismatches === 0 && measuredMissingDirect === 0,
+    zeroMissesAfterWarmup: summary.postWarmupMisses === 0,
+    completeFrames: o.replay ? truncated === 0 : measurementTruncated === 0,
+    live: o.replay ? 'UNVERIFIED: replay is not a live gate' : measuredGood > 0 && summary.measuredLogicFrames > 0,
+    sixtySeconds: o.replay ? 'UNVERIFIED: replay is not a live gate' : summary.measurementSeconds >= 60,
+    errorFree: !summary.error,
+  };
+}
 try {
   if (o.replay) {
     if (!resolve(o.replay).split(/[\\/]/).includes('gameres'))
@@ -287,11 +388,32 @@ try {
     hello = await connection.connect();
     summary.hello = hello;
     if (!hello.exe.verified) throw new Error('Unsupported executable');
+    const inputState = decodeJson(await connection.request(T.InputState));
+    const before = await connection.read(0xa8ed84, 4);
+    const beforeFrame = new DataView(before.bytes.buffer, before.bytes.byteOffset, 4).getUint32(0, true);
+    if (inputState.modal) {
+      summary.preflight = { inputState, beforeFrame, advancing: false };
+      throw new Error('Native modal dialog is active; resume the real mission before reader measurement');
+    }
+    await delay(500);
+    const after = await connection.read(0xa8ed84, 4);
+    const afterFrame = new DataView(after.bytes.buffer, after.bytes.byteOffset, 4).getUint32(0, true);
+    const advanced = (afterFrame - beforeFrame) >>> 0;
+    summary.preflight = {
+      inputState,
+      beforeFrame,
+      afterFrame,
+      advanced,
+      advancing: advanced > 0 && advanced < 0x80000000,
+    };
+    if (!summary.preflight.advancing)
+      throw new Error('Real logic frame counter is not advancing before reader measurement');
     rebuild();
     await subscribe();
     await connection.request(T.Sample, encodeU32(1, 0xa8ec88, 4));
     connection.onMirror((update) => {
-      processUpdate(update)
+      mirrorWork = mirrorWork
+        .then(() => processUpdate(update))
         .catch((e) => {
           failure = e;
         })
@@ -304,7 +426,6 @@ try {
         });
     });
     await connection.request(T.Hook, encodeU32(1));
-    let pictureTimer = null;
     connection.onPicture(() => {
       if (o.record)
         pictureTimer = setTimeout(() => {
@@ -314,40 +435,44 @@ try {
         }, 100);
     });
     if (o.record) await connection.request(T.Credit, encodeU32(1));
-    const until = performance.now() + +o.seconds * 1000;
-    while (performance.now() < until) {
+    const warmupUntil = performance.now() + +o.warmup * 1000;
+    while (performance.now() < warmupUntil) {
       if (failure) throw failure;
       await delay(100);
     }
+    await mirrorWork;
+    if (!good) throw new Error('Reader produced no good frame during the fixed warm-up');
+    measurementStart = performance.now();
+    measurementMisses = memory.misses;
+    const until = measurementStart + +o.seconds * 1000;
+    while (performance.now() < until) {
+      if (failure) throw failure;
+      if (lastGoodAt === null || performance.now() - lastGoodAt > 5000)
+        throw new Error('No complete reader frame for five seconds during measurement');
+      if (lastAdvancingAt === null || performance.now() - lastAdvancingAt > 5000)
+        throw new Error('Reader frame counter stopped advancing for five seconds during measurement');
+      await delay(100);
+    }
     if (pictureTimer) clearTimeout(pictureTimer);
-    await connection.request(T.Diagnostics);
+    await mirrorWork;
+    summary.measurementSeconds = (performance.now() - measurementStart) / 1000;
+    summary.diagnostics = decodeJson(await connection.request(T.Diagnostics));
   }
-  summary.frames = seen;
-  summary.readerFrames = good;
-  summary.warmupSeconds = firstGood === null ? null : (firstGood - startedAt) / 1000;
-  summary.postWarmupMisses = missesAtGood === null ? null : memory.misses - missesAtGood;
-  summary.missedFrames = missedFrames;
-  summary.directCountSamples = equalities;
-  summary.missingDirectSamples = missingDirect;
-  summary.countMismatches = countMismatches;
-  summary.truncated = truncated;
-  summary.readerMsPerFrame = readerCalls ? readerMs / readerCalls : null;
-  summary.last = latest;
-  summary.lastGoodFrame = renderPrevious?.frame ?? null;
-  summary.gates = {
-    objectCounts: equalities > 0 && countMismatches === 0 && missingDirect === 0,
-    zeroMissesAfterWarmup: summary.postWarmupMisses === 0,
-    completeFrames: truncated === 0,
-    live: o.replay ? 'UNVERIFIED: replay is not a live gate' : good > 0,
-  };
-  if (!good || !equalities || missingDirect || countMismatches || truncated || summary.postWarmupMisses !== 0)
-    process.exitCode = 1;
+  finalizeSummary();
+  if (!good || Object.values(summary.gates).some((gate) => gate === false)) process.exitCode = 1;
 } catch (e) {
   summary.error = e.stack;
   process.exitCode = 1;
   console.error(e.message);
 } finally {
+  finalizeSummary();
   clearInterval(progressTimer);
+  if (pictureTimer) clearTimeout(pictureTimer);
+  try {
+    if (connection && !summary.diagnostics) summary.diagnostics = decodeJson(await connection.request(T.Diagnostics));
+  } catch (e) {
+    summary.diagnosticsError = e.message;
+  }
   try {
     if (connection) await connection.request(T.Hook, encodeU32(0));
   } catch (e) {

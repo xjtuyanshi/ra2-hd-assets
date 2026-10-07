@@ -1,6 +1,7 @@
 #include <windows.h>
 /* Native-host bridge: virtual focus hooks preserve the no-client API path. */
 #include "agent.h"
+#include "hidden.h"
 #include <stdio.h>
 #include "directinput.h"
 #include "dd.h"
@@ -58,6 +59,9 @@ ENUMDISPLAYSETTINGSAPROC real_EnumDisplaySettingsA = EnumDisplaySettingsA;
 DEFWINDOWPROCAPROC real_DefWindowProcA = DefWindowProcA;
 SETPARENTPROC real_SetParent = SetParent;
 BEGINPAINTPROC real_BeginPaint = BeginPaint;
+ENDPAINTPROC real_EndPaint = EndPaint;
+GETDCPROC real_GetDC = GetDC;
+RELEASEDCPROC real_ReleaseDC = ReleaseDC;
 GETKEYSTATEPROC real_GetKeyState = GetKeyState;
 GETASYNCKEYSTATEPROC real_GetAsyncKeyState = GetAsyncKeyState;
 GETDEVICECAPSPROC real_GetDeviceCaps = GetDeviceCaps;
@@ -88,6 +92,14 @@ SETWINDOWLONGWPROC real_SetWindowLongW;
 /* Native-host bridge: saved originals let the existing hook teardown restore IAT entries. */
 static GETFOREGROUNDWINDOWPROC native_real_GetFocus = GetFocus;
 static GETFOREGROUNDWINDOWPROC native_real_GetActiveWindow = GetActiveWindow;
+static HWND (WINAPI *native_real_SetFocus)(HWND) = SetFocus;
+static HWND (WINAPI *native_real_SetActiveWindow)(HWND) = SetActiveWindow;
+static BOOL (WINAPI *native_real_BringWindowToTop)(HWND) = BringWindowToTop;
+static BOOL (WINAPI *native_real_IsWindowVisible)(HWND) = IsWindowVisible;
+static HWND (WINAPI *native_real_SetCapture)(HWND) = SetCapture;
+static HWND (WINAPI *native_real_GetCapture)(void) = GetCapture;
+static BOOL (WINAPI *native_real_ReleaseCapture)(void) = ReleaseCapture;
+static BOOL (WINAPI *native_real_EndDialog)(HWND, INT_PTR) = EndDialog;
 
 HOOKLIST g_hook_hooklist[] =
 {
@@ -122,6 +134,15 @@ HOOKLIST g_hook_hooklist[] =
             /* Native-host bridge: the game also checks thread focus/activation. */
             { "GetFocus", (PROC)nh_input_get_focus, (PROC*)&native_real_GetFocus, 0 },
             { "GetActiveWindow", (PROC)nh_input_get_active_window, (PROC*)&native_real_GetActiveWindow, 0 },
+            /* Native-host bridge: hidden sessions own only logical activation. */
+            { "SetFocus", (PROC)nh_hidden_set_focus, (PROC*)&native_real_SetFocus, 0 },
+            { "SetActiveWindow", (PROC)nh_hidden_set_active_window, (PROC*)&native_real_SetActiveWindow, 0 },
+            { "BringWindowToTop", (PROC)nh_hidden_bring_to_top, (PROC*)&native_real_BringWindowToTop, 0 },
+            { "IsWindowVisible", (PROC)nh_hidden_is_window_visible, (PROC*)&native_real_IsWindowVisible, 0 },
+            { "SetCapture", (PROC)nh_hidden_set_capture, (PROC*)&native_real_SetCapture, 0 },
+            { "GetCapture", (PROC)nh_hidden_get_capture, (PROC*)&native_real_GetCapture, 0 },
+            { "ReleaseCapture", (PROC)nh_hidden_release_capture, (PROC*)&native_real_ReleaseCapture, 0 },
+            { "EndDialog", (PROC)nh_hidden_end_dialog, (PROC*)&native_real_EndDialog, 0 },
             { "PeekMessageA", (PROC)fake_PeekMessageA, (PROC*)&real_PeekMessageA, 0 },
             { "GetMessageA", (PROC)fake_GetMessageA, (PROC*)&real_GetMessageA, 0 },
             { "GetWindowPlacement", (PROC)fake_GetWindowPlacement, (PROC*)&real_GetWindowPlacement, 0 },
@@ -130,6 +151,9 @@ HOOKLIST g_hook_hooklist[] =
             { "DefWindowProcA", (PROC)fake_DefWindowProcA, (PROC*)&real_DefWindowProcA, 0 },
             { "SetParent", (PROC)fake_SetParent, (PROC*)&real_SetParent, 0 },
             { "BeginPaint", (PROC)fake_BeginPaint, (PROC*)&real_BeginPaint, 0 },
+            { "EndPaint", (PROC)fake_EndPaint, (PROC*)&real_EndPaint, 0 },
+            { "GetDC", (PROC)fake_GetDC, (PROC*)&real_GetDC, 0 },
+            { "ReleaseDC", (PROC)fake_ReleaseDC, (PROC*)&real_ReleaseDC, 0 },
             { "GetKeyState", (PROC)fake_GetKeyState, (PROC*)&real_GetKeyState, 0 },
             { "GetAsyncKeyState", (PROC)fake_GetAsyncKeyState, (PROC*)&real_GetAsyncKeyState, 0 },
             { "SetForegroundWindow", (PROC)fake_SetForegroundWindow, (PROC*)&real_SetForegroundWindow, 0 },

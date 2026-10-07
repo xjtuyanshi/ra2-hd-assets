@@ -35,6 +35,8 @@ HRESULT dds_Unlock(IDirectDrawSurfaceImpl* This, LPRECT lpRect);
 HRESULT dds_GetDDInterface(IDirectDrawSurfaceImpl* This, LPVOID* lplpDD);
 HRESULT dds_SetSurfaceDesc(IDirectDrawSurfaceImpl* This, LPDDSURFACEDESC2 lpDDSD, DWORD dwFlags);
 void* dds_GetBuffer(IDirectDrawSurfaceImpl* This);
+/* Native-host bridge: invoked only by the primary window's GUI thread. */
+void dds_NativeCapturePrimary(void);
 HRESULT dd_CreateSurface(IDirectDrawImpl* This, LPDDSURFACEDESC lpDDSurfaceDesc, IDirectDrawSurfaceImpl** lpDDSurface, IUnknown FAR* unkOuter);
 
 extern LONG g_dds_gdi_handles;

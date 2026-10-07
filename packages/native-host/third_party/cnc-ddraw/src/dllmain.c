@@ -1,6 +1,7 @@
 #include <windows.h>
 /* Native-host bridge: optional agent; inactive paths retain upstream behavior. */
 #include "agent.h"
+#include "hidden.h"
 #include "ddraw.h"
 #include <stdio.h>
 #include "dllmain.h"
@@ -50,6 +51,10 @@ BOOL WINAPI DllMain(HANDLE hDll, DWORD dwReason, LPVOID lpReserved)
 #endif
 
         cfg_load();
+
+        /* Native-host bridge: configure before any game window can be created. */
+        nh_agent_configure();
+        nh_hidden_configure();
 
         PVOID(WINAPI * add_handler)(ULONG, PVECTORED_EXCEPTION_HANDLER) =
             (void*)real_GetProcAddress(GetModuleHandleA("Kernel32.dll"), "AddVectoredExceptionHandler");

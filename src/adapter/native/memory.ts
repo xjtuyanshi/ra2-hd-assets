@@ -50,6 +50,7 @@ function checkRange(address: number, length: number): void {
 export class NativeMirrorMemory implements GuestMemory {
   private pages = new Map<number, Uint8Array>();
   private missing = new Set<number>();
+  private accessed = new Set<number>();
   private observedMiss = false;
   frame: number | null = null;
   complete = false;
@@ -80,15 +81,21 @@ export class NativeMirrorMemory implements GuestMemory {
     this.frame = null;
     this.complete = false;
     this.observedMiss = false;
+    this.accessed.clear();
   }
   beginOperation(): void {
     this.observedMiss = false;
+    this.accessed.clear();
   }
   get operationMissed(): boolean {
     return this.observedMiss;
   }
   get missingRanges(): NativeRange[] {
     return coalesceNativePages([...this.missing]);
+  }
+  /** Includes caught misses; callers may retire a scope only after a complete successful reader operation. */
+  get operationRanges(): NativeRange[] {
+    return coalesceNativePages([...this.accessed]);
   }
   /** Explicit direct-read fetches are for installer transactions only, never merged into a frame image. */
   snapshot(): NativeMirrorMemory {
@@ -111,8 +118,10 @@ export class NativeMirrorMemory implements GuestMemory {
       let page = Math.floor(address / NATIVE_PAGE_SIZE) * NATIVE_PAGE_SIZE;
       page < address + length;
       page += NATIVE_PAGE_SIZE
-    )
+    ) {
+      this.accessed.add(page);
       if (!this.pages.has(page)) missed.push(page);
+    }
     if (missed.length) {
       for (const page of missed) this.missing.add(page);
       this.observedMiss = true;
@@ -159,6 +168,48 @@ export function coalesceNativePages(pages: readonly number[]): NativeRange[] {
     else ranges.push({ address, length: NATIVE_PAGE_SIZE });
   }
   return ranges;
+}
+/** Reader caches own their footprints. A cold complete pass replaces only that owner's former heap pages. */
+export class NativeReaderWorkingSet {
+  private learned = new Set<number>();
+  private owners = new Map<unknown, Set<number>>();
+  constructor(private readonly maxPages = 4096) {}
+  private pages(ranges: readonly NativeRange[]): Set<number> {
+    const pages = new Set<number>();
+    for (const range of ranges) {
+      checkRange(range.address, range.length);
+      if (!range.length) continue;
+      for (
+        let page = Math.floor(range.address / NATIVE_PAGE_SIZE) * NATIVE_PAGE_SIZE;
+        page < range.address + range.length;
+        page += NATIVE_PAGE_SIZE
+      )
+        pages.add(page);
+    }
+    return pages;
+  }
+  learn(owner: unknown, ranges: readonly NativeRange[]): void {
+    const pages = this.pages(ranges),
+      next = new Set([...this.learned, ...pages]);
+    if (next.size > this.maxPages) throw new Error('Native reader working set exceeds page limit');
+    this.learned = next;
+    this.owners.set(owner, new Set([...(this.owners.get(owner) ?? []), ...pages]));
+  }
+  complete(owner: unknown, memory: NativeMirrorMemory, cold: boolean): boolean {
+    if (!memory.complete || memory.operationMissed) return false;
+    const pages = this.pages(memory.operationRanges);
+    this.owners.set(owner, cold ? pages : new Set([...(this.owners.get(owner) ?? []), ...pages]));
+    const active = new Set([...this.owners.values()].flatMap((scope) => [...scope]));
+    for (const page of this.learned) if (!active.has(page)) this.learned.delete(page);
+    return true;
+  }
+  get ranges(): NativeRange[] {
+    return coalesceNativePages([...this.learned]);
+  }
+  clear(): void {
+    this.learned.clear();
+    this.owners.clear();
+  }
 }
 /** Keep writes local until the entire installer has completed without even a caught miss. */
 export class NativeMemoryTransaction implements GuestMemory {

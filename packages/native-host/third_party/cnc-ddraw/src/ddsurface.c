@@ -1,6 +1,7 @@
 #include <windows.h>
 /* Native-host bridge: optional agent; inactive paths retain upstream behavior. */
 #include "agent.h"
+#include "hidden.h"
 #include <stdio.h>
 #include "dllmain.h"
 #include "dd.h"
@@ -1388,6 +1389,23 @@ void* dds_GetBuffer(IDirectDrawSurfaceImpl* This)
         return (void*)InterlockedExchangeAdd((LONG*)&This->surface, 0);
 
     return This->surface;
+}
+
+/* Native-host bridge: a paused/static dialog still has a real current primary.
+ * Its GUI owner resolves the surface now, never from a retained I/O pointer. */
+void dds_NativeCapturePrimary(void)
+{
+    nh_hidden_paint();
+    if (!g_ddraw.ref || GetCurrentThreadId() != g_ddraw.gui_thread_id || !TryEnterCriticalSection(&g_ddraw.cs))
+        return;
+    IDirectDrawSurfaceImpl* primary = g_ddraw.primary;
+    if (primary && (!g_config.lock_surfaces || TryEnterCriticalSection(&primary->cs)))
+    {
+        nh_present(dds_GetBuffer(primary), primary->width, primary->height, primary->pitch,
+            g_config.rgb555 && primary->bpp == 16 ? 15 : primary->bpp);
+        if (g_config.lock_surfaces) LeaveCriticalSection(&primary->cs);
+    }
+    LeaveCriticalSection(&g_ddraw.cs);
 }
 
 HRESULT dd_CreateSurface(
