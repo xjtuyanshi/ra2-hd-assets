@@ -6,6 +6,12 @@ import { readYrUnitGatherState, type YrUnitGatherState } from './unitGatherState
 import { readYrUnitCargo, type YrUnitCargo } from './unitCargoState';
 import { readYrUnitTilt, type YrUnitTilt } from './unitTilt';
 import { readYrTechnoTint, yrTechnoTintSignaturesMatch, type YrTechnoTint } from './technoTint';
+import {
+  readYrTechnoVisual,
+  yrTechnoVisibilitySignaturesMatch,
+  yrVisualPresentation,
+  type YrVisual,
+} from './technoVisibility';
 
 /**
  * Read-only live battlefield state of Yuri's Revenge 1.001 (gamemd.exe, SHA-256 in YR_STARTUP_PAGE_HASH) for an
@@ -242,6 +248,11 @@ export interface YrObjectState {
   translucent?: number;
   /** Brightness factor and added colour of the whole picture (technoTint.ts); absent when drawn unchanged. */
   tint?: YrTechnoTint;
+  /**
+   * How the local player sees a cloaking or cloaked object (technoVisibility.ts), when it is not the ordinary
+   * picture: 'hidden' also sets nativeHidden, the translucent kinds lower `translucent`.
+   */
+  visual?: Exclude<YrVisual, 'normal'>;
   /** Ore-gathering sparks the unit's own draw adds under its body on this frame (unitGatherState.ts). */
   gather?: YrUnitGatherState;
   /** What a Harvester=yes unit carries (unitCargoState.ts); absent for other objects and on an implausible read. */
@@ -632,6 +643,7 @@ export function readYrState(memory: GuestMemoryAccessor, options: ReadYrStateOpt
   return readYrStateSnapshot(memory, options, {
     roofDeliveries: new Map(),
     tint: yrTechnoTintSignaturesMatch(memory),
+    visibility: yrTechnoVisibilitySignaturesMatch(memory),
   });
 }
 
@@ -639,6 +651,8 @@ interface YrStateHistory {
   roofDeliveries: Map<number, { uid: number; type: number }>;
   /** The image holds the draw routines technoTint.ts was read from; otherwise no tint is published. */
   tint: boolean;
+  /** The same for technoVisibility.ts (cloak). */
+  visibility: boolean;
 }
 
 function readYrStateSnapshot(
@@ -827,6 +841,18 @@ function readYrStateSnapshot(
     if (object.kind !== 'building') {
       const translucent = readChronoTranslucency(memory, object.id);
       if (translucent !== undefined) object.translucent = translucent;
+      if (history.visibility) {
+        // The cloak decides before anything else is drawn: an object the local player cannot see is not drawn at
+        // all, one he sees through its cloak is translucent (the stronger of this and the chrono blend).
+        const spec = KINDS.find((entry) => entry.kind === object.kind)!;
+        const visual = readYrTechnoVisual(memory, object.id, object.kind, memory.u32(object.id + spec.typeOffset));
+        const shown = visual ? yrVisualPresentation(visual) : null;
+        if (shown && visual && visual !== 'normal') {
+          object.visual = visual;
+          if ('hidden' in shown) object.nativeHidden = true;
+          else object.translucent = Math.min(object.translucent ?? 1, shown.opacity);
+        }
+      }
       if (object.kind === 'vehicle' && readYrUnitNativeHidden(memory, object.id, contact)) object.nativeHidden = true;
       // The sparks are part of the unit's draw: a unit the native wrapper skips draws none.
       if (object.kind === 'vehicle' && !object.nativeHidden) {
@@ -888,6 +914,7 @@ export function createYrStateReader(
   const history: YrStateHistory = {
     roofDeliveries: new Map(),
     tint: yrTechnoTintSignaturesMatch(memory()),
+    visibility: yrTechnoVisibilitySignaturesMatch(memory()),
   };
   return (options) => {
     try {

@@ -25,6 +25,7 @@ import { YR_STARTUP_PAGE_HASH } from '../../src/games/yr/startupPage';
 import { YR_BUILDING_RENDER_OFFSETS as B, YR_BUILDING_RULES as R } from '../../src/games/yr/buildingRenderState';
 import { YR_INFANTRY_RENDER_OFFSETS as I } from '../../src/games/yr/infantryRenderState';
 import { YR_TECHNO_TINT as TT, YR_TECHNO_TINT_SIGNATURES } from '../../src/games/yr/technoTint';
+import { YR_TECHNO_VISIBILITY as TV, YR_TECHNO_VISIBILITY_SIGNATURES } from '../../src/games/yr/technoVisibility';
 
 /** Synthetic 16 MiB guest memory: enough for every YR 1.001 global and a small heap above 0xb00000. */
 function syntheticMemory() {
@@ -415,6 +416,51 @@ describe('YR 1.001 state reader', () => {
     m.i32(tank + TT.tintStage, 4096);
     expect(read().objects.find((object) => object.id === tank)).not.toHaveProperty('tint');
     expect(read().objects.find((object) => object.id === yard)!.tint).toBeDefined();
+  });
+
+  it('does not draw a cloaked enemy, shows the player his own cloaked unit half transparent, and fades the stages', () => {
+    const { m, tank, soldier, yard, player, ai } = battlefield();
+    for (const { address, bytes } of YR_TECHNO_VISIBILITY_SIGNATURES) m.bytes.set(bytes, address);
+    m.u32(TV.cloakHides, 1);
+    const rules = m.alloc(0x2000);
+    m.u32(TV.rules, rules);
+    m.i32(rules + TV.rulesCloakingStages, 9);
+    const read = () => readYrState(createByteViewAccessor(m.bytes));
+    const of = (state: ReturnType<typeof read>, id: number) => state.objects.find((object) => object.id === id)!;
+    // The AI's soldier is cloaked: the local player (owner of the tank) must not see it.
+    m.i32(soldier + TV.cloakState, 2);
+    let state = read();
+    expect(of(state, soldier)).toMatchObject({ visual: 'hidden', nativeHidden: true });
+    expect(of(state, soldier)).not.toHaveProperty('translucent');
+    // The player's own tank, cloaked: +0x41A is set for what he may see.
+    m.i32(tank + TV.cloakState, 2);
+    m.u8(tank + TV.visibleToPlayer, 1);
+    state = read();
+    expect(of(state, tank)).toMatchObject({ visual: 'shadowy', translucent: 0.5 });
+    expect(of(state, tank)).not.toHaveProperty('nativeHidden');
+    // Uncloaking: the first stages are a quarter transparent; a chrono blend at the same time keeps the stronger 0.5.
+    m.i32(tank + TV.cloakState, 3);
+    m.i32(tank + TV.cloakProgress, 1);
+    expect(of(read(), tank)).toMatchObject({ visual: 'indistinct', translucent: 0.75 });
+    m.u8(tank + O.beingWarpedOut, 1);
+    expect(of(read(), tank)).toMatchObject({ visual: 'indistinct', translucent: 0.5 });
+    m.u8(tank + O.beingWarpedOut, 0);
+    // A cloaked building of the stock game does not exist; the routine draws buildings normally.
+    m.i32(yard + TV.cloakState, 2);
+    expect(of(read(), yard)).not.toHaveProperty('visual');
+    // A sensor of the local house over the soldier's cell reveals it as a shadow.
+    const cells = m.alloc(4 * 0x40000);
+    const cell = m.alloc(0x200);
+    m.u32(TV.map + TV.mapCellItems, cells);
+    m.u32(cells + (((2000 >> 8) << 9) + (1000 >> 8)) * 4, cell);
+    m.u16(cell + TV.cellSensors + 0 * 2, 1);
+    expect(of(read(), soldier)).toMatchObject({ visual: 'shadowy', translucent: 0.5 });
+    expect(of(read(), soldier)).not.toHaveProperty('nativeHidden');
+    void player;
+    void ai;
+    // Another build: no cloak logic at all, everything is drawn.
+    m.bytes[YR_TECHNO_VISIBILITY_SIGNATURES[0]!.address] ^= 0xff;
+    for (const object of read().objects) expect(object).not.toHaveProperty('visual');
   });
 
   it('contains failed optional visibility reads without losing the object', () => {

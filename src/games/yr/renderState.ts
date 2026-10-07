@@ -33,6 +33,7 @@ import { createYrSidebarReader } from './sidebarReader';
 import { readYrSceneLighting } from './sceneLighting';
 import { YR_UNIT_CARGO } from './unitCargoState';
 import { YR_TECHNO_TINT } from './technoTint';
+import { YR_TECHNO_VISIBILITY } from './technoVisibility';
 import { readYrUnitGatherKey } from './unitGatherState';
 import { createYrSmudgeReader, type ReadYrSmudgeOptions, type YrSmudges } from './smudgeReader';
 import { createYrShroudReader, type ReadYrShroudOptions, type YrShroud } from './shroudReader';
@@ -300,6 +301,9 @@ function readChangeKey(
       // airstrike pointer beside it. The pulse itself advances with the frame counter of the key.
       span(pointer, YR_TECHNO_TINT.spanStart, YR_TECHNO_TINT.spanEnd);
       span(pointer, YR_TECHNO_TINT.airstrike, YR_TECHNO_TINT.berzerk + 4);
+      // Cloak state and progress, and the bytes saying whether the local player sees the techno (+0x41A).
+      span(pointer, YR_TECHNO_VISIBILITY.cloakState, YR_TECHNO_VISIBILITY.cloakProgress + 4);
+      span(pointer, 0x418, 0x41c);
       span(pointer, 0x2b4, 0x2b8); // Target used by the infantry draw-facing branch.
       span(pointer, 0x388, 0x3b8); // Both facing interpolators.
       span(pointer, 0x520, 0x53c); // Building type and current/queued mode.

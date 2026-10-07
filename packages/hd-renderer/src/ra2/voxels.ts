@@ -734,6 +734,10 @@ export class VoxelUnit extends Group {
     let material = this.translucentMaterials.get(source);
     if (!material) {
       material = source.clone();
+      // three's clone leaves userData empty; its values are nodes the scene pass reads from the drawn material (the
+      // silhouette code). Without them the variant's shader did not build ("Type 'null' not found") and a unit being
+      // erased by a Chrono Legionnaire, or seen through its cloak, was drawn as a solid black shape.
+      Object.assign(material.userData, source.userData);
       material.name = `${source.name}:translucent`;
       material.transparent = true;
       material.depthWrite = false;

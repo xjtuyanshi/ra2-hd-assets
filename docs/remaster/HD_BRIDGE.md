@@ -808,6 +808,16 @@ body in the firing house's unit palette instead of a glowing effect in the anima
 frame has no pixels (the nuclear silo is drawn entirely by the SuperAnim layer the engine lists as a building anim)
 gives its layers the push and the body depth of the SHP's whole canvas; with the empty rectangle the ground hid them.
 
+Cloak: `src/games/yr/technoVisibility.ts` is the read-only twin of TechnoClass::VisualCharacter (0x703860) as the
+draw helpers call it for the local player, behind its own instruction signatures. A cloaked techno (CloakState +0x220
+= 2) the local player may not see is published with `nativeHidden` (not drawn, shadow included); one he may see (his
+own, an ally's both ways, or on a cell his sensors cover) and the fading stages (progress +0x224 over the rules'
+CloakingStages) lower `translucent` to 0.75 or 0.5, the complement of the engine's 25 % and 50 % blitters. The
+engine's ripple distortion of the last stages is not drawn. The translucent variant of a voxel material keeps the nodes
+its source carries in `userData` (three's clone drops them); without them its shader did not build and every half
+transparent voxel unit, chrono-erased or seen through its cloak, was a solid black shape. The answers of
+special locomotors are not reproduced.
+
 When a drawable building disappears, LiveView retains its frozen last visual through the logic frame after the
 last one it was published in, whatever its last health. The deadline counts from that last present frame, not
 from the publication that first missed the building: a poll can already miss it under the old frame number,
