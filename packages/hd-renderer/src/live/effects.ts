@@ -167,9 +167,12 @@ export function effectRow(type: string): EffectTableRow {
   return EFFECT_TABLE[type] ?? EFFECT_TABLE[type.toUpperCase()] ?? NO_GARNISH;
 }
 
-/** Display scale shared by an HD flipbook and the garnish around its enlarged footprint. */
-function hdSize(row: EffectTableRow): number {
-  return ENHANCED.hdSize[row.c as keyof typeof ENHANCED.hdSize] ?? 1;
+/**
+ * Display scale shared by an HD flipbook and the garnish around its enlarged footprint. An anim the effects data
+ * marks `asPainted` keeps the original's size whatever its category.
+ */
+export function hdSize(row: EffectTableRow): number {
+  return row.asPainted ? 1 : (ENHANCED.hdSize[row.c as keyof typeof ENHANCED.hdSize] ?? 1);
 }
 
 /** Engine pixels per world unit along a card. */
@@ -687,6 +690,7 @@ export class LiveEffectsDriver {
               next: next?.page === hdFrame.page ? next : null,
               scale: hd.scale,
               size,
+              ...(tracked.row.asPainted ? { asPainted: true } : {}),
               blend0,
               t0: this.pushedAt,
               stageSeconds: rate / this.logicFps,
@@ -739,8 +743,14 @@ export class LiveEffectsDriver {
     if (this.style !== 'enhanced' || !this.garnishEnabled || !this.hdEnabled) return;
     const m = FIREBALL_MERGE;
     this.clusters = this.clusters.filter((c) => now - c.t0 <= m.hold && now >= c.t0);
+    // An anim shown as painted is nobody's lead and is never absorbed: it is drawn where and as large as the
+    // engine draws it (the nuclear mushroom among the blasts of what it destroys).
     const blasts = fresh.filter(
-      (t) => t.row.c === 'explosion' && t.row.fx === 'explosion' && !this.hidden(t.anim.x, t.anim.y, t.anim.z),
+      (t) =>
+        t.row.c === 'explosion' &&
+        t.row.fx === 'explosion' &&
+        !t.row.asPainted &&
+        !this.hidden(t.anim.x, t.anim.y, t.anim.z),
     );
     if (!blasts.length) return;
     const near2 = (a: Vector3, b: Vector3, r: number) => (a.x - b.x) ** 2 + (a.z - b.z) ** 2 <= r * r;

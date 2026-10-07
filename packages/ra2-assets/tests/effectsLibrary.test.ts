@@ -4,11 +4,12 @@ import { Palette, ShpFile, parseIni, type IniFile } from 'ra2-formats';
 import { animFrameAt, animRateFrames, effectSprite } from '../src/effects.ts';
 import type { InstallView } from '../src/node/artSource.ts';
 import {
-  ENGINE_ANIM_ART,
   animGraph,
   classifyAnim,
   collectEffects,
   effectRulesTable,
+  ENGINE_ANIM_ART,
+  HD_AS_PAINTED,
   renderEffectTable,
   shpStats,
 } from '../src/node/effectsLibrary.ts';
@@ -305,6 +306,38 @@ describe('classifyAnim', () => {
     expect(classifyAnim({ id: 'P', refs, combat: true, art: base, stats: stats(0.9, 0.05, 19, 18), flags }).fx).toBe(
       'spark',
     );
+  });
+
+  it('marks the two sheets finished to the original colours as painted, whatever their category', () => {
+    expect([...HD_AS_PAINTED].sort()).toEqual(['CDGAS', 'NUKEANIM']);
+    const nuke = classifyAnim({
+      id: 'NUKEANIM',
+      refs: [{ ctx: 'warhead.AnimList', from: 'NUKE' }],
+      combat: true,
+      art: base,
+      stats: stats(0.6, 0.15, 120, 150),
+      flags,
+    });
+    expect(nuke.asPainted).toBe(1);
+    const gas = classifyAnim({ id: 'cdgas', refs: [], combat: false, art: base, stats: stats(0.5, 0, 0, 60), flags });
+    expect(gas.asPainted).toBe(1);
+    const other = classifyAnim({
+      id: 'NUKEBALL',
+      refs: [{ ctx: 'warhead.AnimList', from: 'NUKE' }],
+      combat: true,
+      art: base,
+      stats: stats(0.6, 0.15, 120, 150),
+      flags,
+    });
+    expect(other).not.toHaveProperty('asPainted');
+    // The flag changes nothing else about the row, and the generated table writes it last.
+    expect({ ...nuke, asPainted: undefined }).toEqual({ ...other, asPainted: undefined });
+    const source = renderEffectTable({ CDGAS: gas, NUKEBALL: other });
+    expect(source).toContain(
+      `  CDGAS: { c: '${gas.c}', fx: '${gas.fx}', s: ${gas.s}, life: ${gas.life}, asPainted: 1 },`,
+    );
+    expect(source).toContain('  asPainted?: 1;');
+    expect(source.split('\n').find((line) => line.startsWith('  NUKEBALL:'))).not.toContain('asPainted');
   });
 
   it('gives trail puffs one smoke puff and keeps super-weapon rows the only shaking ones', () => {

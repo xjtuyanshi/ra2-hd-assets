@@ -775,7 +775,15 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   fringe), spends the middle heats on orange and yellow-orange and ends in a warm white, with a heat gamma of 1.25
   (L5: a red-heavy ramp with gamma 2.3 turned the mid-life fireball red-orange around a dark core). Low-coverage
   pixels count as added light only when they are coloured (fire glow, arcs); neutral low-coverage smoke rims are
-  scene-lit, which removed a white outline around redrawn smoke. HD cards of the ground and air layers are
+  scene-lit, which removed a white outline around redrawn smoke.
+  An anim whose effect-table row says `asPainted: 1` is shown as its sheet is painted: at the original's size
+  whatever its category (`hdSize` answers 1, for the card and the garnish around it), outside the fireball merge
+  (neither a lead nor absorbed), without the flame re-map and without the white-hot gain; its fire is still
+  self-lit at the painted colour and its smoke still takes the scene's light. The flag is effects data, not renderer
+  code: `HD_AS_PAINTED` in `packages/ra2-assets/src/node/effectsLibrary.ts` lists NUKEANIM (the nuclear mushroom: a
+  pure yellow stem and a pale cap that the ramp turns orange) and CDGAS (the Chaos Drone's red-pink gas, 89 % of
+  whose coverage passes the fire test), and the generator writes it into the table. On the card it travels in the
+  sign of the size (`packHdSize`), so no vertex buffer is added; `hdFlameGradeDisplay` is the grade's CPU twin. HD cards of the ground and air layers are
   depth-tested like the native cards (only Top is untested). Native `Layer=air` draws over the ground layer. The final P-L5H-3b policy is per **(fire, object)**:
   `front=objectCode-fireCode`; less than **FRONT_DISTANCE=1.5 horizontal cells** covers the complete owner;
   at least 1.5 keeps it completely in front. Rhino 5009 is 1.83848 cells ahead of EXPLOLRG but 0.84853

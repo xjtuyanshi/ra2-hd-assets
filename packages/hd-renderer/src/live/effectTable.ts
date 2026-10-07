@@ -38,6 +38,8 @@ export interface EffectTableRow {
   /** Linear RGB and radius in cells. */
   light?: [number, number, number, number];
   shake?: 1;
+  /** HD frames keep the original size and the art colours: no enlargement, no flame grade (HD_AS_PAINTED). */
+  asPainted?: 1;
 }
 
 export const EFFECT_TABLE: Record<string, EffectTableRow> = {
@@ -142,7 +144,7 @@ export const EFFECT_TABLE: Record<string, EffectTableRow> = {
   CAWSH12A: { c: 'impact', fx: 'spark', s: 3.45, life: 40, loop: 1 },
   CAWSH12D: { c: 'collapse', fx: 'explosion', s: 1.7, life: 90, smoke: 0.64, light: [1, 0.62, 0.28, 1.74] },
   CAWSH18A: { c: 'ignore', fx: 'none', s: 0, life: 40, loop: 1 },
-  CDGAS: { c: 'psychic', fx: 'none', s: 0, life: 80 },
+  CDGAS: { c: 'psychic', fx: 'none', s: 0, life: 80, asPainted: 1 },
   CHEMISLE: { c: 'ui', fx: 'none', s: 0, life: 138 },
   CHRONOAR: { c: 'ui', fx: 'none', s: 0, life: 66, loop: 1 },
   CHRONOBM: { c: 'ui', fx: 'none', s: 0, life: 60 },
@@ -444,7 +446,15 @@ export const EFFECT_TABLE: Record<string, EffectTableRow> = {
   NAYARD_S2D: { c: 'ignore', fx: 'none', s: 0, life: 252, loop: 1 },
   NAYARD_S3: { c: 'ignore', fx: 'none', s: 0, life: 252 },
   NAYARD_S3D: { c: 'ignore', fx: 'none', s: 0, life: 252 },
-  NUKEANIM: { c: 'explosion', fx: 'explosion', s: 2.56, life: 78, smoke: 0.15, light: [1, 0.62, 0.28, 2.38] },
+  NUKEANIM: {
+    c: 'explosion',
+    fx: 'explosion',
+    s: 2.56,
+    life: 78,
+    smoke: 0.15,
+    light: [1, 0.62, 0.28, 2.38],
+    asPainted: 1,
+  },
   NUKEBALL: { c: 'explosion', fx: 'explosion', s: 0.96, life: 20, scorch: 1, smoke: 0, light: [1, 0.62, 0.28, 0.91] },
   NUKEDIE: { c: 'infantry-death', fx: 'none', s: 0, life: 60 },
   NUKEPUFF: { c: 'smoke', fx: 'smoke', s: 1, life: 40, smoke: 1 },
