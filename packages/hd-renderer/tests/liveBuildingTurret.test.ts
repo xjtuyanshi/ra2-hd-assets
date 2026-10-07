@@ -41,7 +41,11 @@ function building(foundation: [number, number], offset: [number, number], level:
     library: { library: { sprites: {} } },
     spritePool: new SpritePool(),
     pose: { x: 0, y: 0, z: 0, facing: 0 },
-    voxelUnits: { pose: VoxelUnits.prototype.pose, setNativeDepth: VoxelUnits.prototype.setNativeDepth },
+    voxelUnits: {
+      pose: VoxelUnits.prototype.pose,
+      setNativeDepth: VoxelUnits.prototype.setNativeDepth,
+      setTint: VoxelUnits.prototype.setTint,
+    },
   };
   const view = Object.assign(Object.create(LiveView.prototype), state) as {
     buildingTurret(object: LiveObject, visual: unknown, facing: number | null): void;

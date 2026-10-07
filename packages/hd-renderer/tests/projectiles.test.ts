@@ -111,4 +111,29 @@ describe('voxel projectile painter entries', () => {
     expect([...f.projectiles.painterEntries()]).toEqual([]);
     expect(f.dispose).toHaveBeenCalledTimes(2);
   });
+
+  it("draws an owner-coloured SHP missile as a solid body in the firing house's unit palette", () => {
+    const f = fixture();
+    const cards: EffectInstance[] = [];
+    // The falling nuclear missile: 3000 leptons up, created 20000 above its target, fired by house 4.
+    const missile = bullet({
+      type: 'GiantNukeDown',
+      z: 3000,
+      owner: 4,
+      ownerPalette: true,
+      velocity: { x: 0, y: 0, z: -179 },
+    });
+    f.projectiles.update([missile, bullet({ uid: 2, type: 'SHELL', owner: 4 })], [], () => false, cards);
+    expect(cards).toHaveLength(2);
+    expect(cards[0]).toMatchObject({ pass: 'air', draw: 'card', palette: 'unit:4', glow: false, alpha: 1 });
+    expect(f.palette).toHaveBeenCalledWith(4);
+    // An ordinary shell of the same house keeps the effect palette and may glow.
+    expect(cards[1]).toMatchObject({ palette: 'fx:anim', glow: true });
+    // Its card stands at the missile's own height: the anchor follows z.
+    expect(cards[0]!.anchor.y).toBeCloseTo((3000 / 104) * LEVEL_HEIGHT, 4);
+    // Without a known firer the neutral unit palette is used rather than the effect palette.
+    cards.length = 0;
+    f.projectiles.update([{ ...missile, owner: undefined }], [], () => false, cards);
+    expect(cards[0]).toMatchObject({ palette: 'unit:neutral', glow: false });
+  });
 });

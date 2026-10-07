@@ -32,6 +32,7 @@ import {
 import { NATIVE_UNIT_RENDER_ORDER } from './nativeDepth';
 import { registerVoxelReflectionVariant } from './voxelReflectionColour';
 import { bindSlotsBeforeRender } from '../materialSlots';
+import { setMeshObjectTint, type ObjectTint } from '../objectTint';
 
 /**
  * Original VXL units, rendered as real meshes. The engine draws voxels through a pure rotation (the default voxel
@@ -721,10 +722,22 @@ export class VoxelUnit extends Group {
     setVoxelNativePass(this, this.nativeDepth.enabled !== 0);
   }
 
+  /**
+   * Picture tint of this unit (objectTint.ts): data of its part meshes, read by the shared graph when each is drawn.
+   * Shadow, foam and reflection twins keep their own look.
+   */
+  setTint(tint: ObjectTint | undefined): void {
+    for (const mesh of this.partMeshes) setMeshObjectTint(mesh, tint);
+  }
+
   translucentMaterial(source: MeshStandardNodeMaterial): MeshStandardNodeMaterial {
     let material = this.translucentMaterials.get(source);
     if (!material) {
       material = source.clone();
+      // three's clone leaves userData empty; its values are nodes the scene pass reads from the drawn material (the
+      // silhouette code). Without them the variant's shader did not build ("Type 'null' not found") and a unit being
+      // erased by a Chrono Legionnaire, or seen through its cloak, was drawn as a solid black shape.
+      Object.assign(material.userData, source.userData);
       material.name = `${source.name}:translucent`;
       material.transparent = true;
       material.depthWrite = false;

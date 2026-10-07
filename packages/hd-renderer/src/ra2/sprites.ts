@@ -2,6 +2,7 @@ import type { TerrainDepth } from '../terrainDepth';
 import { NOT_CAPTURED_CODE } from '../objectDepth';
 import { DirtyAttribute } from '../dirtyAttribute';
 import { InstancedQuad, instancedQuadGeometry } from '../instancedQuad';
+import { applyObjectTint } from '../objectTint';
 import { instanceSilhouette, setSilhouette } from '../silhouette';
 import { bindSlots, bindSlotsBeforeRender, samplingClass, slotMaterial, textureSlot } from '../materialSlots';
 import {
@@ -110,6 +111,12 @@ export interface SpriteInstance {
    * ADDED to the map's object level, as the engine does (level + ExtraUnitLight); other classes are multiplied.
    */
   light?: number;
+  /**
+   * Picture tint of the object this card belongs to (objectTint.ts): the factor on its light level, default 1, and
+   * the packed added colour, default 0 (none). Per-instance data; shadows and ground extras never carry one.
+   */
+  tintLight?: number;
+  tintColour?: number;
   /** Caller-selected exemption from the map grade; extra object light and HD received light are unchanged. */
   gradeExempt?: boolean;
   /**
@@ -364,6 +371,12 @@ class SpriteGraph {
     const aParams: ShaderNode = attribute('spriteParams', 'vec4');
     const aLighting: ShaderNode = attribute('spriteLighting', 'vec3');
     const aLightSample: ShaderNode = aLighting.xy;
+    // Constant over an instance: flat, so the untinted value stays exactly (1, 0) in every fragment.
+    // (The varying must not share the attribute's name: three then resolves one through the other without end.)
+    const aTint: ShaderNode = varying(attribute('spriteTint', 'vec2'), 'spriteTintFlat').setInterpolation(
+      'flat',
+      'either',
+    );
     const aGradeExempt: ShaderNode = aLighting.z.toVar('spriteGradeExempt');
     const aFlags: ShaderNode = attribute('spriteFlags', 'vec4');
     const aOcclusion: ShaderNode = attribute('spriteOcclusion', 'vec4');
@@ -844,7 +857,11 @@ class SpriteGraph {
         If(isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(sunShare.notEqual(1)), () => {
           result.a.mulAssign(sunShare);
         });
-        return vec4(result.rgb, result.a.mul(bodyOpacity));
+        // The object's picture tint last: the game darkens, flashes and colours the whole finished picture.
+        return vec4(
+          applyObjectTint(result.rgb, aTint.x, aTint.y, grade.x, look.unlitBaseLight),
+          result.a.mul(bodyOpacity),
+        );
       })();
     const mainColour = colourNode();
     if (capture) {
@@ -1096,7 +1113,8 @@ export class SpriteLayer {
     const count = this.capacity;
     // Pack related fields into shared vertex buffers. Capacity never introduces an unused instance matrix.
     // Draw anchor, map-light sample and grade exemption share one buffer/attribute pair.
-    this.anchor = new DirtyAttribute(new Float32Array(count * 6), 6);
+    // The picture tint (light factor, packed colour) rides in the same buffer: two more floats, no vertex buffer.
+    this.anchor = new DirtyAttribute(new Float32Array(count * 8), 8);
     this.rect = new DirtyAttribute(new Float32Array(count * 4), 4);
     this.params = new DirtyAttribute(new Float32Array(count * 4), 4);
     const nativeOffset = capture ? 9 : 8;
@@ -1127,6 +1145,7 @@ export class SpriteLayer {
     const flags = this.flags.interleaved();
     geometry.setAttribute('spriteAnchor', new InterleavedBufferAttribute(anchors, 3, 0));
     geometry.setAttribute('spriteLighting', new InterleavedBufferAttribute(anchors, 3, 3));
+    geometry.setAttribute('spriteTint', new InterleavedBufferAttribute(anchors, 2, 6));
     geometry.setAttribute('spriteRect', this.rect);
     geometry.setAttribute('spriteParams', this.params);
     geometry.setAttribute('spriteFlags', new InterleavedBufferAttribute(flags, 4, 0));
@@ -1249,6 +1268,9 @@ export class SpriteLayer {
         this.anchor.setComponent(i, 3, s.lightSample?.[0] ?? s.anchor.x);
         this.anchor.setComponent(i, 4, s.lightSample?.[1] ?? s.anchor.z);
         this.anchor.setComponent(i, 5, s.gradeExempt ? 1 : 0);
+        const tinted = !s.shadow && !s.kind;
+        this.anchor.setComponent(i, 6, tinted ? (s.tintLight ?? 1) : 1);
+        this.anchor.setComponent(i, 7, tinted ? (s.tintColour ?? 0) : 0);
         this.rect.setXYZW(i, s.frame.rect[0], s.frame.rect[1], s.frame.rect[2], s.frame.rect[3]);
         this.params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], this.cache.paletteRow.get(s.palette) ?? 0, s.push);
         this.flags.setXYZW(

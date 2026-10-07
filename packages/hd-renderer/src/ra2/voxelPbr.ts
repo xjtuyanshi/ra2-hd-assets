@@ -23,6 +23,7 @@ import {
   modelPosition,
   normalView,
   normalWorld,
+  output,
   positionGeometry,
   positionLocal,
   positionView,
@@ -49,6 +50,7 @@ import { VOXEL_TO_WORLD } from './voxelScale';
 import { voxelLightingFor } from './vpl';
 import { inheritSlotBinder, slotMaterial, textureSlot } from '../materialSlots';
 import { setSilhouette } from '../silhouette';
+import { applyObjectTint, meshObjectTint } from '../objectTint';
 import {
   VOXEL_REFLECTION_AMBIENT,
   registerVoxelReflectionColour,
@@ -419,7 +421,12 @@ function createGraph(
   const surfaceMetalness = ({ grime, dust }: ReturnType<typeof surfaceTerms>): ShaderNode =>
     mix(mix(mix(params.g, 0.9, wear), 0, grime), 0, dust).clamp();
   material.metalnessNode = surfaceMetalness(surface);
-  const lit = srgbScale(albedo, objectLevelAt(grade, modelPosition.xz).add(voxelLightingFor(nodes).voxelExtraLight));
+  const level: ShaderNode = objectLevelAt(grade, modelPosition.xz).add(voxelLightingFor(nodes).voxelExtraLight);
+  const lit = srgbScale(albedo, level);
+  // The drawn unit's picture tint (objectTint.ts) on the finished colour: per-mesh data of this one graph.
+  material.outputNode = Fn(() =>
+    vec4(applyObjectTint(output.rgb, meshObjectTint.x, meshObjectTint.y, level, look.unlitBaseLight), output.a),
+  )();
   // Standard Lambert already divides irradiance by pi. HdRenderer's noon exposure is pi/E_noon; no emissive
   // daylight fill or second exposure factor belongs here. Metal energy conservation and GGX remain physical.
   material.colorNode = mix(moonlit(lit, nodes), lit, house);

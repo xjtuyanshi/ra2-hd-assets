@@ -613,6 +613,14 @@ alone cannot distinguish body suppression from a framebuffer that still shows th
 Attached anims, particle systems and fire events follow the hidden owner's UID/pointer match, including same-frame
 hide/unhide; independent explosions and projectiles retain their native publication lifetime.
 
+Optional `tint` (`{ light, add? }`, `src/objectTint.ts`) is the game's change of a whole object picture on one frame:
+a factor on its light level (the Iron Curtain's pulse between 0.2 and 0.5 and its flashes to 2) and a colour added
+afterwards (the Force Shield's blue, a Berserk unit's red). It is per-instance data of the sprite layers (`spriteTint`,
+two floats beside the anchor; shadows, contact shades and reflections stay untinted) and a per-mesh uniform of the
+voxel materials (`objectTint`, set through `VoxelUnit.setTint`), applied to the finished colour in display scale and
+limited so that level x factor stays within the engine's cap of 2. Nothing about a tint selects a material: the shader
+text and the pipelines are the same with and without it (`tests/objectTint.test.ts`).
+
 Live technos may report `contactUid`, the validated radio contact's stable ID in the same snapshot. Buildings also
 report `dock` (refinery, repair or helipad policy) and `unloading: 'door' | 'roof'` while their effective mission is
 Unload. The YR reader instance latches a previously published roof during that continuous Unload when link 0

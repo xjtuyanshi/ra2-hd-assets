@@ -44,7 +44,7 @@ export class Projectiles {
     private readonly art: EffectArt,
     private readonly voxels: VoxelUnits,
     private readonly parent: Group,
-    /** Palette row key for voxel art (house-remapped when the owner is known). */
+    /** Unit palette row key (house-remapped when the owner is known): voxel art and owner-coloured SHP projectiles. */
     private readonly voxelPalette: (owner: number | undefined) => string,
   ) {}
 
@@ -85,17 +85,20 @@ export class Projectiles {
       if (!sprite?.frames.length) continue;
       const frame = sprite.frames[bulletFrame(bullet, sprite.frames.length, !!found.art.rotates)];
       if (!frame || frame.rect[2] <= 0) continue;
+      // FirersPalette projectiles (the nuclear missiles) are painted objects in the firing house's unit colours: a
+      // solid body like a unit's, never a glowing effect. In the effect palette they came out as coloured noise.
+      const owned = !!bullet.ownerPalette;
       out.push({
         anchor: engineAnchor(bullet.x, bullet.y, bullet.z),
         frame,
-        palette: 'fx:anim',
+        palette: owned ? this.voxelPalette(bullet.owner) : 'fx:anim',
         alpha: found.art.translucent ? 0.5 : 1,
         push: cardPush(frame),
         draw: 'card',
         pass: 'air',
         depth: engineDepth(bullet.x, bullet.y, bullet.z),
         // Translucent shells mix like the engine's; only opaque ones may glow.
-        glow: !found.art.translucent,
+        glow: !found.art.translucent && !owned,
       });
     }
     for (const piece of debris) {

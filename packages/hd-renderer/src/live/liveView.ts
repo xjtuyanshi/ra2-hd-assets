@@ -38,7 +38,7 @@ import { NORMALIZED_RATE_FACTOR, animRateFrames } from '../../../ra2-assets/src/
 import type { SourceLight } from '../ra2/mapLights';
 import type { WindowBuilding } from '../ra2/nightDressing';
 import { sequenceFrame } from '../../../ra2-assets/src/art';
-import type { MapObject, VoxelModel } from '../../../ra2-assets/src/manifest';
+import type { MapObject, SpriteFrame, VoxelModel } from '../../../ra2-assets/src/manifest';
 import type { TheaterId } from '../../../ra2-assets/src/theater';
 import { addHousePalettes, paletteFor, type HdAtlas, type Ra2Cache } from '../ra2/cache';
 import { SpriteLayer, cardPush, isUnlitMapOverlay, objectAnchor, type SpriteInstance } from '../ra2/sprites';
@@ -50,6 +50,7 @@ import {
   type PainterObject,
 } from '../ra2/painterOrder';
 import { NOT_CAPTURED_CODE } from '../objectDepth';
+import { packTintColour, tintLight, type ObjectTint } from '../objectTint';
 import {
   isNearEngulfFire,
   engulfAnchor,
@@ -142,6 +143,12 @@ export interface LiveObject {
   nativeHidden?: boolean;
   /** Body opacity while the native draw mode is translucent; shadows keep their normal opacity. */
   translucent?: number;
+  /**
+   * How the game changes the whole picture on this frame (objectTint.ts): a factor on its light level (the Iron
+   * Curtain's pulse between 0.2 and 0.5, its flashes to 2) and a colour added afterwards (the Force Shield's blue, a
+   * Berserk unit's red). Shadows are not tinted. Absent: drawn unchanged.
+   */
+  tint?: ObjectTint;
   /**
    * One frame of effect-library art the engine draws inside this object's own picture, right before its body (the
    * sparks at a harvesting miner's scoop): art id, absolute frame and the lepton point of the art's canvas centre.
@@ -2330,6 +2337,9 @@ export class LiveView {
         painter.z = Math.floor(object.y / LEPTONS_PER_CELL);
       }
       this.spritePool.painter = painter;
+      // Every card of this object carries its tint as instance data; the next object sets its own.
+      this.spritePool.tintLight = tintLight(object.tint);
+      this.spritePool.tintColour = packTintColour(object.tint?.add);
       if (visual.mode === 'placeholder') {
         visual.root.position.set(
           pose.x / LEPTONS_PER_CELL,
@@ -2356,6 +2366,7 @@ export class LiveView {
       }
       const unit = visual;
       this.voxelUnits.setOpacity(unit, object.translucent ?? 1);
+      this.voxelUnits.setTint(unit, object.tint);
       // Buildings are never turned (facing pi/2 is the identity rotation).
       if (object.kind === 'building') {
         pose.facing = Math.PI / 2;
@@ -2961,10 +2972,17 @@ export class LiveView {
       );
     const bodyFrame =
       bodyArt.frames[shownBody] ?? (delivering ? bodyArt.shadows?.[shownBody - bodyArt.frames.length] : undefined);
-    const push = bodyFrame ? cardPush(bodyFrame) : 0.03;
-    const nativeDepth = bodyFrame
+    // A body frame without pixels still places the building's layers: the nuclear silo's body SHP is empty and
+    // the whole building is its SuperAnim layers. With the empty rectangle the layers took a push of nothing and the
+    // depth of a body ending at the canvas top, 101 px above the draw point, so the ground hid the silo entirely
+    // (only the tip of its missile showed). The SHP's whole canvas stands in for the body: its push, and the depth of
+    // a building of this foundation whose picture fills the canvas. (A flat card at the building's sort line was
+    // tried instead: everything below the draw point's row, half the silo, was then cut by the ground.)
+    const depthFrame = bodyFrame && bodyFrame.rect[2] <= 0 ? (canvasFrame(bodyArt) ?? bodyFrame) : bodyFrame;
+    const push = depthFrame ? cardPush(depthFrame) : 0.03;
+    const nativeDepth = depthFrame
       ? buildingDepthProfile(
-          bodyFrame,
+          depthFrame,
           type.foundation ?? [1, 1],
           type.building?.zShape,
           object.buildState,
@@ -3204,6 +3222,7 @@ export class LiveView {
     pose.z = (at.y / LEVEL_HEIGHT) * LEPTONS_PER_LEVEL;
     pose.facing = Math.PI / 2;
     this.voxelUnits.pose(unit, pose, turretFacing);
+    this.voxelUnits.setTint(unit, object.tint);
     this.voxelUnits.setNativeDepth(
       unit,
       groundAnchor,
@@ -4005,6 +4024,16 @@ function animId(sprite: string): string {
   let id = ANIM_IDS.get(sprite);
   if (id === undefined) ANIM_IDS.set(sprite, (id = sprite.replace(/^anim:/, '')));
   return id;
+}
+
+/**
+ * The frame an SHP's whole canvas would be (the canvas centre is the draw origin): what stands in for a body frame
+ * without pixels when its layers need a push and a depth profile. Undefined without a canvas size.
+ */
+export function canvasFrame(art: { canvas?: readonly [number, number] }): SpriteFrame | undefined {
+  const canvas = art.canvas;
+  if (!canvas || !(canvas[0] > 0) || !(canvas[1] > 0)) return undefined;
+  return { rect: [0, 0, canvas[0], canvas[1]], offset: [-Math.floor(canvas[0] / 2), -Math.floor(canvas[1] / 2)] };
 }
 
 /** Bright-to-dark ramp of a house colour, shaped like the engine's 16-entry remap range. */

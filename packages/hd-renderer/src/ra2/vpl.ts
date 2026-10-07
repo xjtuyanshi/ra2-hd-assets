@@ -13,6 +13,7 @@ import {
 import {
   BRDF_GGX,
   BRDF_Lambert,
+  Fn,
   attribute,
   clamp,
   diffuseColor,
@@ -26,6 +27,7 @@ import {
   modelWorldMatrix,
   normalView,
   normalWorld,
+  output,
   positionGeometry,
   positionWorld,
   roughness,
@@ -44,6 +46,7 @@ import { finishSceneLighting, sceneLitColour } from '../lighting';
 import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrade } from './mapLighting';
 import { inheritSlotBinder, slotMaterial, textureSlot } from '../materialSlots';
 import { setSilhouette } from '../silhouette';
+import { applyObjectTint, meshObjectTint } from '../objectTint';
 import { VoxelProjectionInputs, voxelProjectionFor, type VoxelProjectionPart } from './voxelProjection';
 import { projectedVoxelColour } from './voxelProjectionNodes';
 import {
@@ -463,6 +466,11 @@ function createGraph(
   material.roughnessNode = matp.x;
   // Metalness only shapes the highlight (see VoxelLightingModel); the diffuse term stays a plain weak Lambert.
   material.metalnessNode = float(0);
+  // The drawn unit's picture tint (objectTint.ts) on the finished colour, highlights included: per-mesh data of this
+  // one graph, so a unit under the Iron Curtain compiles nothing.
+  material.outputNode = Fn(() =>
+    vec4(applyObjectTint(output.rgb, meshObjectTint.x, meshObjectTint.y, level, look.unlitBaseLight), output.a),
+  )();
   registerVoxelReflectionColour(material, (sourceMatrix) => {
     const sourceNormal = voxelReflectionNormal(sourceMatrix);
     const sourceOrigin: ShaderNode = sourceMatrix.mul(vec4(0, 0, 0, 1)).xyz;

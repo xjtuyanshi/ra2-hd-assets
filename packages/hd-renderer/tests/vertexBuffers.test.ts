@@ -353,7 +353,8 @@ describe('r186 vertex and uniform binding budget', () => {
       const readOnly = assertLimits(layer.readOnlyMesh);
       expect(main.buffers.length).toBe(6);
       expect(readOnly.buffers.length).toBe(6);
-      expect(main.attributes.length).toBe(10);
+      // Quad position and uv, anchor, lighting, picture tint, rect, params, flags, occlusion, native, native offset.
+      expect(main.attributes.length).toBe(11);
       expect(main.fragmentShader).toContain('textureLoad(');
       expect(main.fragmentShader).toContain('>= 128.0');
       expect(main.fragmentShader).toContain('- 256.0');
@@ -511,7 +512,7 @@ describe('r186 vertex and uniform binding budget', () => {
       const main = assertLimits(layer.mesh);
       const captured = assertLimits(layer.mesh, MAX_UNIFORM_BYTES, terrainDepth);
       expect(captured.buffers.length).toBe(6);
-      expect(captured.attributes.length).toBe(11);
+      expect(captured.attributes.length).toBe(12);
       expect(captured.fragmentShader).toContain('@location( 0 ) m0 : vec4<f32>');
       expect(captured.fragmentShader).toContain('objectDepthInstanceCode');
       // Material MRT colour outputs must not replace the capture's code/coverage contract or its blend alpha.
@@ -528,7 +529,7 @@ describe('r186 vertex and uniform binding budget', () => {
         const result = mesh === layer.mesh ? main : assertLimits(mesh);
         expect(result.buffers.length).toBe(6);
         expect(result.attributes.length).toBe(
-          mesh === layer.mesh || mesh === layer.unitMesh ? 11 : mesh === layer.groundPasses[1] ? 9 : 10,
+          mesh === layer.mesh || mesh === layer.unitMesh ? 12 : mesh === layer.groundPasses[1] ? 10 : 11,
         );
         expect(result.fragmentShader.includes('objectDepthCaptureEnabled')).toBe(
           mesh === layer.mesh || mesh === layer.unitMesh,

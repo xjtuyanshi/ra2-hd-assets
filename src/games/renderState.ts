@@ -109,6 +109,20 @@ export interface GameRenderObjectArt extends GameRenderPoint {
   frame: number;
 }
 
+/**
+ * How the game changes the look of an object's whole picture on this frame (a protective field's pulse, a status
+ * colour): brightness first, then the added colour. Shadows are not affected.
+ */
+export interface GameRenderObjectTint {
+  /**
+   * Factor on the object's own light level in the game's palette scale (1 = unchanged, 0.2 = a fifth as bright). The
+   * lit level is capped at twice the palette's brightness, as the game caps it.
+   */
+  light: number;
+  /** Colour added to the lit picture, 0..1 per channel in display (sRGB) scale and clipped at white; absent = none. */
+  add?: [number, number, number];
+}
+
 export interface GameRenderObject extends GameRenderPoint {
   /** Stable while the object lives, but may be reused after deletion; see `uid`. */
   id: number;
@@ -123,6 +137,8 @@ export interface GameRenderObject extends GameRenderPoint {
   nativeHidden?: boolean;
   /** Body opacity in 0..1; omitted for ordinary opaque drawing. Does not affect shadows. */
   translucent?: number;
+  /** Brightness and colour change of the whole picture; omitted when the game draws the object unchanged. */
+  tint?: GameRenderObjectTint;
   /**
    * Art the engine draws as part of this object's own picture right before its body (so the body covers it and the
    * ground, overlays and shadows lie under it), for example the sparks at a harvesting miner's scoop. Absent on frames
@@ -244,6 +260,10 @@ export interface GameRenderBullet extends GameRenderPoint {
   type?: string;
   frame?: number;
   velocity?: GameRenderPoint;
+  /** GameRenderHouse.index of the house that fired it, or -1 when unknown. */
+  owner?: number;
+  /** The game draws this projectile in the firing house's unit colours instead of the effect palette. */
+  ownerPalette?: boolean;
 }
 
 export interface GameRenderLaser {

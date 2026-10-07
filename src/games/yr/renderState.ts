@@ -32,6 +32,8 @@ import { createYrOverlayReader, type ReadYrOverlayOptions, type YrOverlays } fro
 import { createYrSidebarReader } from './sidebarReader';
 import { readYrSceneLighting } from './sceneLighting';
 import { YR_UNIT_CARGO } from './unitCargoState';
+import { YR_TECHNO_TINT } from './technoTint';
+import { YR_TECHNO_VISIBILITY } from './technoVisibility';
 import { readYrUnitGatherKey } from './unitGatherState';
 import { createYrSmudgeReader, type ReadYrSmudgeOptions, type YrSmudges } from './smudgeReader';
 import { createYrShroudReader, type ReadYrShroudOptions, type YrShroud } from './shroudReader';
@@ -357,6 +359,13 @@ function readChangeKey(
       span(pointer, 0xf8, 0xfc); // Techno animation stage.
       span(pointer, 0x21c, 0x220); // Owner.
       span(pointer, o.beingWarpedOut, o.warpingOut + 3); // Chrono body blend, independent of shadow visibility.
+      // Iron Curtain / Force Shield timers and stages, airstrike tint, deactivation; the Berzerk byte and the
+      // airstrike pointer beside it. The pulse itself advances with the frame counter of the key.
+      span(pointer, YR_TECHNO_TINT.spanStart, YR_TECHNO_TINT.spanEnd);
+      span(pointer, YR_TECHNO_TINT.airstrike, YR_TECHNO_TINT.berzerk + 4);
+      // Cloak state and progress, and the bytes saying whether the local player sees the techno (+0x41A).
+      span(pointer, YR_TECHNO_VISIBILITY.cloakState, YR_TECHNO_VISIBILITY.cloakProgress + 4);
+      span(pointer, 0x418, 0x41c);
       span(pointer, 0x2b4, 0x2b8); // Target used by the infantry draw-facing branch.
       span(pointer, 0x388, 0x3b8); // Both facing interpolators.
       span(pointer, 0x520, 0x53c); // Building type and current/queued mode.
@@ -533,6 +542,7 @@ function projectObject(
     imageType,
     nativeHidden,
     translucent,
+    tint,
     gather,
     cargo,
     owner,
@@ -566,6 +576,9 @@ function projectObject(
     ...(imageType ? { imageType } : {}),
     ...(nativeHidden !== undefined ? { nativeHidden } : {}),
     ...(translucent !== undefined ? { translucent } : {}),
+    ...(tint !== undefined
+      ? { tint: { light: tint.light, ...(tint.add ? { add: [...tint.add] as typeof tint.add } : {}) } }
+      : {}),
     ...(gather !== undefined ? { underlay: { ...gather } } : {}),
     ...(cargo !== undefined ? { cargo: { ore: cargo.ore, gems: cargo.gems } } : {}),
     owner,
@@ -635,7 +648,7 @@ function projectEffects(effects: YrEffects): GameRenderEffects {
         attachedTo: attachedTo && { ...attachedTo },
       }),
     ),
-    bullets: effects.bullets.map(({ id, uid, x, y, z, inviso, type, frame, velocity }) => ({
+    bullets: effects.bullets.map(({ id, uid, x, y, z, inviso, type, frame, velocity, owner, firersPalette }) => ({
       id,
       uid,
       x,
@@ -645,6 +658,8 @@ function projectEffects(effects: YrEffects): GameRenderEffects {
       type,
       frame,
       velocity: point(velocity),
+      owner,
+      ...(firersPalette ? { ownerPalette: true } : {}),
     })),
     lasers: effects.lasers.map(({ source, target, innerColor }) => ({
       source: point(source),

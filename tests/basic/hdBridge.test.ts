@@ -399,6 +399,7 @@ describe('HD 桥状态机', () => {
         isSelected: true,
         nativeHidden: true,
         translucent: 0.5,
+        tint: { light: 0.2, add: [0, 0, 24 / 31] },
         underlay: { art: 'OREGATH', frame: 47, x: 100, y: 230, z: 0 },
         cargo: { ore: 3, gems: 12 },
       },
@@ -414,6 +415,8 @@ describe('HD 桥状态机', () => {
     expect(view.push.mock.calls.at(-1)![0].objects[0].underlay).not.toBe(state.objects[0]!.underlay);
     expect(view.push.mock.calls.at(-1)![0].objects[0].cargo).toEqual({ ore: 3, gems: 12 });
     expect(view.push.mock.calls.at(-1)![0].objects[0].cargo).not.toBe(state.objects[0]!.cargo);
+    expect(view.push.mock.calls.at(-1)![0].objects[0].tint).toEqual({ light: 0.2, add: [0, 0, 24 / 31] });
+    expect(view.push.mock.calls.at(-1)![0].objects[0].tint).not.toBe(state.objects[0]!.tint);
 
     state.objects[0]!.nativeHidden = false;
     state.objects[0]!.translucent = 0;
@@ -425,8 +428,10 @@ describe('HD 桥状态机', () => {
     delete state.objects[0]!.translucent;
     delete state.objects[0]!.underlay;
     delete state.objects[0]!.cargo;
+    delete state.objects[0]!.tint;
     harness.setState({ ...state });
     await advance(16);
+    expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('tint');
     expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('underlay');
     expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('cargo');
     expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('nativeHidden');
