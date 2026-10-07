@@ -1542,17 +1542,22 @@ describe('HD bridge frame-time safeguard', () => {
     await advance(16, 300);
     expect(view.hd.quality).toBe(0);
     expect(harness.quality).toHaveBeenLastCalledWith(0, 4);
-    // 30 ms frames: one tier down after two windows of frames, the next one after two more.
-    await advance(30, 185);
+    // A steady 18.2 ms (55 frames a second) is over budget (see FRAME_BUDGET_MARGIN): one tier down after about a
+    // second of frames, the next one after another second.
+    await advance(18.2, 60);
     expect(view.hd.quality).toBe(1);
     expect(harness.quality).toHaveBeenLastCalledWith(1, 4);
-    await advance(30, 185);
+    await advance(18.2, 60);
     expect(view.hd.quality).toBe(2);
     expect(harness.quality).toHaveBeenLastCalledWith(2, 4);
-    // (A steady 18.2 ms, 55 frames a second, is over budget too: see FRAME_BUDGET_MARGIN.)
-    await advance(18.2, 185);
+    // A pause of the page (a dialog, another tab) is not load: the frames before it are forgotten.
+    await advance(18.2, 20);
+    await advance(4000);
+    await advance(18.2, 40);
+    expect(view.hd.quality).toBe(2);
+    // 30 ms frames, far over budget: down again within about a second.
+    await advance(30, 40);
     expect(view.hd.quality).toBe(3);
-    // A pause of the page (a dialog, another tab) is not load.
     await advance(4000);
     await advance(30, 80);
     expect(view.hd.quality).toBe(3);

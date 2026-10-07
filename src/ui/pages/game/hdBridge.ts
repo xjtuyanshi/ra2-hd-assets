@@ -92,11 +92,13 @@ export interface HdBridgeHost {
  */
 const FRAME_BUDGET_MS = 1000 / 60;
 /**
- * How far over the budget the median frame of a window may be before the window counts as over it. A browser does
- * not always pace a slow view in whole refresh intervals: a view short of time was measured presenting a steady 18.1
- * to 18.4 ms (55 frames a second), which a wide margin took for holding 60. On budget the median is 16.6 to 16.8 ms.
+ * How far over the budget the frames of a verdict window may be on average (without the window's longest frames, see
+ * QualityGovernor) before the window counts as over it. A browser does not always pace a slow view in whole refresh
+ * intervals: a view short of time was measured presenting a steady 18.1 to 18.4 ms (55 frames a second), which a wide
+ * margin took for holding 60; on budget the frames are 16.6 to 16.8 ms. Paced in whole intervals, this margin is
+ * crossed when more than about one frame in eleven is late (below 55 frames a second).
  */
-const FRAME_BUDGET_MARGIN = 1.06;
+const FRAME_BUDGET_MARGIN = 1.04;
 
 /** YR's in-game layout around the tactical view: sidebar on the right, command bar at the bottom (engine pixels). */
 const SIDEBAR_WIDTH = 168;
