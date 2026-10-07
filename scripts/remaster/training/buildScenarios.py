@@ -121,10 +121,62 @@ def build(m: mapkit.MapText, terrain: mapkit.Terrain, starts: list[tuple[int, in
     return info
 
 
+def heist(m: mapkit.MapText, terrain: mapkit.Terrain, starts: list[tuple[int, int]]) -> dict:
+    """Lesson 5: a flak track and three engineers; three enemy buildings to capture, each with free ground to its south:
+    a power plant alone, a barracks wedged between two power plants, a radar watched by a sentry gun."""
+    info = {}
+    tags = {letter: m.tag_for_house(letter) for letter in 'AB'}
+    for start, own, other in ((starts[0], 'A', 'B'), (starts[1], 'B', 'A')):
+        level = terrain.cell(*start)[0]
+        for dx in range(-3, 4):
+            for dy in range(-3, 4):
+                terrain.occupied.add((start[0] + dx, start[1] + dy))
+        vehicle = terrain.spots(start, 1, min_distance=4, max_distance=9, level=level)[0]
+        m.unit('Neutral', 'HTK', *vehicle, tag=tags[own])
+        crew = terrain.spots(vehicle, 3, spacing=1, min_distance=1, max_distance=5, level=level)
+        for cell in crew:
+            m.infantry('Neutral', 'SENGINEER', *cell, tag=tags[own])
+
+        def site(width: int, height: int, west: int, east: int, tried: list[tuple[int, int]]):
+            """The nearest cell (14..36 cells out) for a width x height building with `west` / `east` free cells beside
+            it and four free rows to its south, at least 11 cells from the sites already used."""
+            cells = sorted(((x, y) for x in range(start[0] - 36, start[0] + 37) for y in range(start[1] - 36, start[1] + 37)),
+                           key=lambda c: (c[0] - start[0]) ** 2 + (c[1] - start[1]) ** 2)
+            for x, y in cells:
+                distance = ((x - start[0]) ** 2 + (y - start[1]) ** 2) ** 0.5
+                if distance < 14 or distance > 36 or any(abs(x - t[0]) + abs(y - t[1]) < 11 for t in tried):
+                    continue
+                if all(terrain.free(x + i, y + j, level) for i in range(-west, width + east) for j in range(-1, height + 4)):
+                    return (x, y)
+            raise SystemExit(f'heist: no site for a {width}x{height} building near {start}')
+
+        tried: list[tuple[int, int]] = []
+        plant = site(3, 2, 2, 2, tried)
+        tried.append(plant)
+        m.structure('Neutral', 'NAPOWR', *plant, tag=tags[other])
+        terrain.take(plant[0] - 1, plant[1] - 1, 5, 8)
+        barracks = site(2, 2, 5, 6, tried)
+        tried.append(barracks)
+        m.structure('Neutral', 'NAHAND', *barracks, tag=tags[other])
+        # Blockers one cell west and east of the barracks: only a one-cell alley is left on each side.
+        m.structure('Neutral', 'NAPOWR', barracks[0] - 4, barracks[1], tag=tags[other])
+        m.structure('Neutral', 'NAPOWR', barracks[0] + 3, barracks[1], tag=tags[other])
+        terrain.take(barracks[0] - 5, barracks[1] - 1, 12, 8)
+        radar = site(2, 2, 2, 6, tried)
+        tried.append(radar)
+        m.structure('Neutral', 'NARADR', *radar, tag=tags[other])
+        gun = (radar[0] + 4, radar[1] + 1)
+        m.structure('Neutral', 'NALASR', *gun, tag=tags[other])
+        terrain.take(radar[0] - 1, radar[1] - 1, 7, 8)
+        info[own] = {'start': start, 'vehicle': vehicle, 'crew': crew, 'plant': plant, 'barracks': barracks, 'radar': radar, 'gun': gun}
+    return info
+
+
 SCENARIOS = {
     # name: (map package, start waypoints of the stock map to keep, builder, settings)
     'basic': ('Unrepent', (0, 3), basic, {'side': 'soviet', 'credits': 10000, 'units': 0, 'ai': [EASY], 'passive': True}),
     'build': ('Unrepent', (0, 3), build, {'side': 'soviet', 'credits': 10000, 'units': 0, 'ai': [EASY], 'passive': True}),
+    'heist': ('Unrepent', (0, 3), heist, {'side': 'soviet', 'credits': 10000, 'units': 0, 'ai': [EASY], 'passive': True}),
 }
 
 

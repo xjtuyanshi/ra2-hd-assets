@@ -531,5 +531,146 @@ const build: TrainingLesson = {
   ],
 };
 
+/**
+ * Transport drill (flak track + engineer). Mechanics measured live on the pinned build
+ * (docs/remaster/research/yr-transport.md): passengers leave at the REAR of the vehicle, last in first out, the first
+ * 12 frames after the deploy key; the vehicle's facing is the direction of its last step; a passenger keeps its team
+ * number. Footprints in cells (width along X, height along Y) are the buildings' own.
+ */
+const FOOTPRINT: Readonly<Record<string, readonly [number, number]>> = {
+  NAPOWR: [3, 2],
+  NAHAND: [2, 2],
+  NARADR: [2, 2],
+};
+const track = (state: GameCommandState) => pick(state, own, ofType('HTK'))[0];
+const engineers = ofType('SENGINEER');
+/** Distance in cells from a point to a building's footprint (0 inside it). */
+const edgeDistance = (point: { x: number; y: number }, building: GameCommandObject) => {
+  const [w, h] = FOOTPRINT[building.type] ?? [2, 2];
+  const x0 = building.x - CELL / 2;
+  const y0 = building.y - CELL / 2;
+  const dx = Math.max(x0 - point.x, 0, point.x - (x0 + w * CELL));
+  const dy = Math.max(y0 - point.y, 0, point.y - (y0 + h * CELL));
+  return Math.hypot(dx, dy) / CELL;
+};
+const centreOf = (building: GameCommandObject) => {
+  const [w, h] = FOOTPRINT[building.type] ?? [2, 2];
+  return { x: building.x + ((w - 1) * CELL) / 2, y: building.y + ((h - 1) * CELL) / 2 };
+};
+/** Which side of a vehicle points at a spot: its facing is 0 for the map's north (-Y), clockwise, 64 for +X. */
+const sideToward = (vehicle: GameCommandObject, spot: { x: number; y: number }): '车尾' | '车头' | '侧面' => {
+  const angle = (vehicle.facing / 256) * Math.PI * 2;
+  const dx = spot.x - vehicle.x;
+  const dy = spot.y - vehicle.y;
+  const along = (dx * Math.sin(angle) - dy * Math.cos(angle)) / (Math.hypot(dx, dy) || 1);
+  return along <= -0.5 ? '车尾' : along >= 0.5 ? '车头' : '侧面';
+};
+/** The best the proof driver reached from "vehicle stopped" to "building captured", in logic frames. */
+export const YR_HEIST_BEST_FRAMES = 166;
+const one = (value: number) => (Math.round(value * 10) / 10).toFixed(1);
+
+function heistRound(round: number, type: string, what: string, where: string): TrainingLesson['tasks'] {
+  const key = `target${round}`;
+  /** The round's building: the enemy one of its type nearest to the flak track when first asked. */
+  const target = (context: TrainingContext): GameCommandObject | undefined => {
+    const known = context.shared.get(key) as number | undefined;
+    if (known !== undefined) return byUid(context.state, known);
+    const vehicle = track(context.state);
+    if (!vehicle) return undefined;
+    const found = pick(context.state, ofType(type), ofKind('building'))
+      .filter((object) => object.owner !== context.state.localHouse)
+      .sort((a, b) => Math.hypot(a.x - vehicle.x, a.y - vehicle.y) - Math.hypot(b.x - vehicle.x, b.y - vehicle.y))[0];
+    if (found) context.shared.set(key, found.uid);
+    return found;
+  };
+  return [
+    {
+      id: `load${round}`,
+      title: `第 ${round} 趟：装车`,
+      instruction: `选中一个工程师，左键点防空履带车，让他上车。这一趟的目标是${what}。`,
+      hint: '先单击一个工程师（提公文包的），再把鼠标移到履带车上，光标变成“进入”后点左键。想省事：上车前先给他编个队（⌘+3）。',
+      detect: (context) => {
+        target(context);
+        return chordWithEffect([LEFT], ({ state }) => (track(state)?.passengers ?? 0) >= 1, 30_000)(context);
+      },
+    },
+    {
+      id: `park${round}`,
+      title: `第 ${round} 趟：停到${where}，车尾对着它`,
+      instruction:
+        '乘客从车尾下车，车头朝向就是最后一步的行驶方向。先把车开到建筑旁边，再朝“离开建筑”的方向点一格：车尾就对着建筑了。',
+      hint: '两下左键：第一下点紧挨建筑的空地，等车到了，第二下点它身后（远离建筑）的那一格。',
+      hintAfterMs: 35_000,
+      detect: (context) => {
+        const vehicle = track(context.state);
+        const building = target(context);
+        if (!vehicle || !building || vehicle.passengers < 1) return 0;
+        const gap = edgeDistance(vehicle, building);
+        if (gap > 3.2) return gap < 8 ? 0.4 : 0.1;
+        const side = sideToward(vehicle, centreOf(building));
+        // Done when the vehicle stands with its rear toward the building, or, parked any other way, as soon as the
+        // player unloads there: the note then says which side it really was.
+        const unloading = usedChord(context, ['KeyD']);
+        if (!unloading && (vehicle.destination !== null || side !== '车尾')) return 0.6;
+        if (unloading) context.shared.set(`unloading${round}`, true);
+        context.shared.set('stop', { time: context.time, frame: context.state.frame });
+        context.memo.set('note', `停好了：${side}对着目标，车离建筑 ${one(gap)} 格。`);
+        return 1;
+      },
+    },
+    {
+      id: `unload${round}`,
+      title: `第 ${round} 趟：D 下车`,
+      instruction: '选中履带车按 D：工程师从车尾出来。',
+      hint: '单击履带车，按字母键 D。',
+      detect: (context) => {
+        if (!usedChord(context, ['KeyD']) && !context.shared.get(`unloading${round}`)) return 0;
+        const out = fresh(context, 'SENGINEER')[0];
+        const building = target(context);
+        if (!out || !building) return 0.5;
+        context.memo.set('note', `工程师下车的位置离建筑 ${one(edgeDistance(out, building))} 格。`);
+        return 1;
+      },
+    },
+    {
+      id: `capture${round}`,
+      title: `第 ${round} 趟：占领`,
+      instruction: '选中刚下车的工程师（单击他，或按他的编队数字），左键点目标建筑。',
+      hint: '工程师下车后会自己走开一步，别等：马上选中他点建筑。',
+      detect: (context) => {
+        const building = target(context);
+        if (!building || building.owner !== context.state.localHouse) return 0;
+        const stop = context.shared.get('stop') as { time: number; frame: number } | undefined;
+        if (stop) {
+          const frames = context.state.frame - stop.frame;
+          context.memo.set(
+            'note',
+            `从停车到占领 ${one((context.time - stop.time) / 1000)} 秒（${frames} 帧；脚本实测最好 ${YR_HEIST_BEST_FRAMES} 帧）。`,
+          );
+        }
+        return 1;
+      },
+    },
+  ];
+}
+
+const heist: TrainingLesson = {
+  id: 'yr-engineer',
+  title: '第 5 课 皮包哥偷家',
+  summary: '工程师坐防空履带车进敌人基地：车尾对着建筑停，下车就占。三趟：空地、夹缝、炮火下。',
+  scenario: 'heist',
+  ready: (state) => !!track(state) && pick(state, own, engineers).length >= 3,
+  hotkeys: [
+    { chords: ['KeyD'], label: 'D 下车' },
+    { chords: ['Ctrl+Digit3', 'Ctrl+Digit1', 'Ctrl+Digit2'], label: 'Ctrl/⌘+数字 上车前给工程师编队' },
+    { chords: ['Digit3', 'Digit1', 'Digit2'], label: '数字 下车后一键选中工程师' },
+  ],
+  tasks: [
+    ...heistRound(1, 'NAPOWR', '空地上那座孤零零的敌方电厂', '电厂旁边'),
+    ...heistRound(2, 'NAHAND', '夹在两座电厂中间的敌方兵营（只能从南面进）', '兵营南面'),
+    ...heistRound(3, 'NARADR', '有哨戒炮看着的敌方雷达（要快，履带车很薄）', '雷达旁边'),
+  ],
+};
+
 /** In teaching order. */
-export const YR_TRAINING_LESSONS: readonly TrainingLesson[] = Object.freeze([camera, teams, orders, build]);
+export const YR_TRAINING_LESSONS: readonly TrainingLesson[] = Object.freeze([camera, teams, orders, build, heist]);

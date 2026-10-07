@@ -38,6 +38,10 @@ export interface GameCommandObject {
   x: number;
   y: number;
   z: number;
+  /** Body direction, 0..255 (0 = the map's north, increasing clockwise as seen on screen). */
+  facing: number;
+  /** Units carried inside (a transport's passengers); 0 for everything else. */
+  passengers: number;
   /** Remaining strength, 0..1. */
   health: number;
   selected: boolean;

@@ -54,8 +54,13 @@ export interface TrainingContext {
   originTime: number;
   /** Every input since the task became active, oldest first (bounded by the engine). */
   inputs: readonly TrainingInput[];
-  /** Scratch values of this task, kept between samples and dropped when the task ends. */
+  /**
+   * Scratch values of this task, kept between samples and dropped when the task ends. A string stored under "note"
+   * when the task completes is shown to the player with the finished task (what was measured, for example).
+   */
   memo: Map<string, unknown>;
+  /** Values shared by all tasks of the lesson run (something an earlier task measured that a later one reports). */
+  shared: Map<string, unknown>;
 }
 
 /**

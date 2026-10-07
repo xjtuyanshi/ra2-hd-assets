@@ -97,6 +97,39 @@ describe('lesson engine', () => {
     expect(view.tasks[0]!.elapsedMs).toBe(1500);
   });
 
+  it('keeps a note of a finished task and shares values between tasks', () => {
+    const run = createLessonRun({
+      ...lesson(),
+      tasks: [
+        {
+          id: 'measure',
+          title: 'measure',
+          instruction: '',
+          hint: '',
+          detect: (context) => {
+            context.shared.set('value', 42);
+            context.memo.set('note', 'measured');
+            return true;
+          },
+        },
+        {
+          id: 'report',
+          title: 'report',
+          instruction: '',
+          hint: '',
+          detect: (context) => {
+            context.memo.set('note', `value ${String(context.shared.get('value'))}`);
+            return usedChord(context, ['KeyS']);
+          },
+        },
+      ],
+    });
+    let view = run.push(sample(0, state([])));
+    expect(view.tasks.map((task) => task.note)).toEqual(['measured', null]);
+    view = run.push(sample(100, state([]), [input('KeyS', 50)]));
+    expect(view.tasks.map((task) => task.note)).toEqual(['measured', 'value 42']);
+  });
+
   it('waits for the lesson to be ready and survives a detector that throws', () => {
     const run = createLessonRun({
       ...lesson(),

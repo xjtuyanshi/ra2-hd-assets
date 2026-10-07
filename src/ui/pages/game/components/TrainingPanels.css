@@ -78,6 +78,11 @@
 #coach-panel p {
   margin: 3px 0;
 }
+#coach-panel .coach-note {
+  margin: 0 0 2px 14px;
+  color: #bfe3ff;
+  font-size: 12px;
+}
 #coach-panel .coach-hint {
   color: #ffb86b;
 }

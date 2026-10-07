@@ -541,4 +541,58 @@ export const runtimeEnglishMessages = {
   '跟着它走，它打谁就一起打谁': 'They follow it and fight what it fights',
   '没被编进护送的单位，十几格外看着也不会来帮忙。':
     'Units that are not escorting watch from a dozen cells away and do not come to help.',
+  '第 5 课 皮包哥偷家': 'Lesson 5: the engineer heist',
+  '工程师坐防空履带车进敌人基地：车尾对着建筑停，下车就占。三趟：空地、夹缝、炮火下。':
+    'An engineer rides a flak track into the enemy base: park with the rear toward the building and capture on leaving. Three runs: open ground, a tight spot, under fire.',
+  'D 下车': 'D: unload',
+  'Ctrl/⌘+数字 上车前给工程师编队': 'Ctrl/⌘+digit: give the engineer a team before boarding',
+  '数字 下车后一键选中工程师': 'Digit: select the engineer with one key after unloading',
+  '第 {0} 趟：装车': 'Run {0}: board',
+  '选中一个工程师，左键点防空履带车，让他上车。这一趟的目标是{0}。':
+    'Select an engineer and left click the flak track so he boards it. The target of this run is {0}.',
+  空地上那座孤零零的敌方电厂: 'the lone enemy power plant in open ground',
+  '夹在两座电厂中间的敌方兵营（只能从南面进）':
+    'the enemy barracks wedged between two power plants (reachable from the south only)',
+  '有哨戒炮看着的敌方雷达（要快，履带车很薄）':
+    'the enemy radar watched by a sentry gun (be quick: the flak track is thin-skinned)',
+  '先单击一个工程师（提公文包的），再把鼠标移到履带车上，光标变成“进入”后点左键。想省事：上车前先给他编个队（⌘+3）。':
+    'Click an engineer (the one with the briefcase), move the pointer onto the flak track and left click when it turns into the enter cursor. To save effort, give him a team first (⌘+3).',
+  '第 {0} 趟：停到{1}，车尾对着它': 'Run {0}: park {1}, rear toward it',
+  电厂旁边: 'next to the power plant',
+  兵营南面: 'south of the barracks',
+  雷达旁边: 'next to the radar',
+  '乘客从车尾下车，车头朝向就是最后一步的行驶方向。先把车开到建筑旁边，再朝“离开建筑”的方向点一格：车尾就对着建筑了。':
+    'Passengers leave at the rear, and the vehicle faces the way its last step went. Drive up next to the building, then click one cell directly away from it: now the rear points at the building.',
+  '两下左键：第一下点紧挨建筑的空地，等车到了，第二下点它身后（远离建筑）的那一格。':
+    'Two left clicks: first the free ground right next to the building; when the vehicle is there, the cell behind it (away from the building).',
+  '第 {0} 趟：D 下车': 'Run {0}: D to unload',
+  '选中履带车按 D：工程师从车尾出来。': 'Select the flak track and press D: the engineer comes out at the rear.',
+  '单击履带车，按字母键 D。': 'Click the flak track and press the letter D.',
+  '第 {0} 趟：占领': 'Run {0}: capture',
+  '选中刚下车的工程师（单击他，或按他的编队数字），左键点目标建筑。':
+    'Select the engineer who just got out (click him, or press his team digit) and left click the target building.',
+  '工程师下车后会自己走开一步，别等：马上选中他点建筑。':
+    'After getting out the engineer walks a step on his own; do not wait: select him at once and click the building.',
+  '停好了：{0}对着目标，车离建筑 {1} 格。': 'Parked: the {0} faces the target, {1} cells from the building.',
+  车尾: 'rear',
+  车头: 'front',
+  侧面: 'side',
+  '工程师下车的位置离建筑 {0} 格。': 'The engineer got out {0} cells from the building.',
+  '从停车到占领 {0} 秒（{1} 帧；脚本实测最好 {2} 帧）。':
+    '{0} s from parking to capture ({1} frames; best measured by the test driver: {2} frames).',
+  '运兵车和工程师（皮包哥偷家）': 'Transports and engineers (the engineer heist)',
+  乘客从哪边下车: 'Where passengers get out',
+  '车尾（车头的正后方）；后上的先下': 'At the rear (straight behind the front); last in, first out',
+  '按 D 后大约半秒出第一个，之后每隔一秒一个。盟军多功能步兵车一样。':
+    'The first is out about half a second after D, the others a second apart. The Allied IFV does the same.',
+  怎么让车尾对着建筑: 'How to point the rear at a building',
+  '先开到建筑旁边，再朝离开建筑的方向点一格':
+    'Drive up next to the building, then click one cell directly away from it',
+  '车头朝向就是最后一步的行驶方向。这是规则，不是手感。':
+    'The vehicle faces the way its last step went. That is a rule, not a knack.',
+  最快的顺序: 'The fastest order of keys',
+  '上车前 ⌘+3 编队 → 开到位 → D → 3 → 左键点建筑':
+    '⌘+3 before boarding → drive into place → D → 3 → left click the building',
+  '人在车里时编队键选不到他，下车后编队还在。要练的只有“D 之后马上 3、点建筑”。':
+    'The team key cannot select him while he is inside; the team is still his after he gets out. The only part to practise is "3 and the click right after D".',
 } as const;

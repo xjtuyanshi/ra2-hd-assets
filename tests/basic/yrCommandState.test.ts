@@ -98,6 +98,8 @@ function image() {
   u32(attacker + C.target, plant);
   u32(attacker + C.queuedMission, 11);
   u32(attacker + C.focus, mover);
+  u32(mover + C.passengers, 2);
+  data.setUint16(mover + O.primaryFacing, 0x4000, true);
   const hidden = object(V.unit, O.unitType, rhino, 12, 0, 0, 0);
   bytes[hidden + O.inLimbo] = 1;
   vector(G.technos, [plant, mover, attacker, hidden, 0x123]);
@@ -129,6 +131,9 @@ describe('YR command state reader', () => {
       queuedMission: null,
       destination: { kind: 'cell', x: 40, y: 101 },
       target: null,
+      // A quarter turn clockwise from north, and two units inside.
+      facing: 64,
+      passengers: 2,
     });
     expect(attacker).toMatchObject({
       selected: false,

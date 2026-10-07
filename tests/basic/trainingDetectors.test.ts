@@ -26,6 +26,7 @@ const context = (fields: Partial<TrainingContext>): TrainingContext => ({
   originTime: 0,
   inputs: [],
   memo: new Map(),
+  shared: new Map(),
   ...fields,
 });
 const flat = (point: { x: number; y: number }) => ({ x: point.x, y: point.y });

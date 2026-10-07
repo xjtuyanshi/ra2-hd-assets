@@ -5,6 +5,7 @@ import type { TrainingContext, TrainingInput, TrainingLesson } from '../../src/g
 import { YR_TRAINING_LESSONS, yrProjection } from '../../src/games/yr/training/lessons';
 import { YR_HOTKEY_SHEET } from '../../src/games/yr/hotkeys';
 import { runtimeEnglishMessages } from '../../src/ui/shared/i18n/runtimeMessages';
+import { localizeText } from '../../src/ui/shared/i18n/translate';
 import { input, sidebar, state, unit } from './trainingFixtures';
 
 /**
@@ -38,6 +39,7 @@ const run = (lesson: TrainingLesson, task: string, origin: GameCommandState, ste
     originTime: 0,
     inputs: step.inputs,
     memo: new Map(step.memo ?? []),
+    shared: new Map(),
   };
   return Number(lesson.tasks.find((entry) => entry.id === task)!.detect(context));
 };
@@ -242,13 +244,19 @@ const CASES: Record<string, Record<string, Case>> = {
 };
 
 describe('YR practice lessons', () => {
-  it('offers the four lessons in teaching order, each with tasks, hotkeys and a scenario', () => {
-    expect(YR_TRAINING_LESSONS.map((lesson) => lesson.id)).toEqual(['yr-camera', 'yr-teams', 'yr-orders', 'yr-build']);
+  it('offers the lessons in teaching order, each with tasks, hotkeys and a scenario', () => {
+    expect(YR_TRAINING_LESSONS.map((lesson) => lesson.id)).toEqual([
+      'yr-camera',
+      'yr-teams',
+      'yr-orders',
+      'yr-build',
+      'yr-engineer',
+    ]);
     for (const lesson of YR_TRAINING_LESSONS) {
       expect(lesson.tasks.length).toBeGreaterThanOrEqual(6);
       expect(new Set(lesson.tasks.map((task) => task.id)).size).toBe(lesson.tasks.length);
       expect(lesson.hotkeys.length).toBeGreaterThan(0);
-      expect(['basic', 'build']).toContain(lesson.scenario);
+      expect(['basic', 'build', 'heist']).toContain(lesson.scenario);
     }
   });
 
@@ -380,6 +388,76 @@ describe('YR practice lessons', () => {
     expect(play([])).toBe('running');
   });
 
+  it('yr-engineer: boarding, parking with a graded side, unloading at the rear and the capture time', () => {
+    const lesson = lessonOf('yr-engineer');
+    const plant = unit({ owner: 1, kind: 'building', type: 'NAPOWR', ...cell(24, 95) });
+    const farPlant = unit({ owner: 1, kind: 'building', type: 'NAPOWR', ...cell(150, 80) });
+    const engineer = unit({ kind: 'infantry', type: 'SENGINEER', ...cell(24, 99) });
+    const empty = unit({ type: 'HTK', ...cell(25, 104) });
+    const { ready: _ready, ...plain } = lesson;
+    const engine = createLessonRun({ ...plain, tasks: lesson.tasks.slice(0, 4) });
+    let time = 0;
+    const push = (objects: GameCommandObject[], inputs: TrainingInput[] = [], frame = 100) =>
+      engine.push({ time: (time += 500), state: state([plant, farPlant, ...objects], { frame }), inputs });
+    push([empty, engineer]);
+    // Boarding needs the click and a passenger inside.
+    expect(push([{ ...empty, passengers: 1 }]).taskIndex).toBe(0);
+    expect(push([{ ...empty, passengers: 1 }], [input('Mouse0', time)]).taskIndex).toBe(1);
+    // Driving up: not parked while far away or still moving.
+    const south = { ...empty, passengers: 1, ...cell(25, 98) };
+    expect(push([{ ...south, ...cell(25, 103) }]).taskIndex).toBe(1);
+    expect(push([{ ...south, destination: { kind: 'cell' as const, x: 25, y: 97 } }]).taskIndex).toBe(1);
+    // Parked two cells south of the plant after a last step southwards: facing south (128), rear toward the plant.
+    let view = push([{ ...south, facing: 128 }], [], 200);
+    expect(view.taskIndex).toBe(2);
+    expect(view.tasks[1]!.note).toBe('停好了：车尾对着目标，车离建筑 1.5 格。');
+    expect(localizeText(view.tasks[1]!.note!, 'en')).toBe(
+      'Parked: the rear faces the target, 1.5 cells from the building.',
+    );
+    // D without anybody out yet is not enough; the engineer appearing behind the vehicle completes it.
+    expect(push([{ ...south, facing: 128 }], [input('KeyD', time)], 210).taskIndex).toBe(2);
+    const out = { ...engineer, ...cell(25, 97) };
+    view = push([{ ...south, facing: 128, passengers: 0 }, out], [], 222);
+    expect(view.taskIndex).toBe(3);
+    expect(view.tasks[2]!.note).toBe('工程师下车的位置离建筑 0.5 格。');
+    // Captured: the building is the player's; the far plant of the same type never counted as the target.
+    expect(push([{ ...south, facing: 128, passengers: 0 }, out], [], 300).phase).toBe('running');
+    const captured = { ...plant, owner: 0 };
+    view = engine.push({
+      time: (time += 500),
+      state: state([captured, farPlant, { ...south, facing: 128, passengers: 0 }], { frame: 366 }),
+      inputs: [],
+    });
+    expect(view.phase).toBe('done');
+    expect(view.tasks[3]!.note).toBe('从停车到占领 2.0 秒（166 帧；脚本实测最好 166 帧）。');
+  });
+
+  it('yr-engineer: names the side that faces the target when the vehicle is parked the wrong way round', () => {
+    const lesson = lessonOf('yr-engineer');
+    const plant = unit({ owner: 1, kind: 'building', type: 'NAPOWR', ...cell(24, 95) });
+    const note = (facing: number, inputs: TrainingInput[] = []) => {
+      const parked = unit({ type: 'HTK', passengers: 1, facing, ...cell(25, 98) });
+      const context: TrainingContext = {
+        time: 1000,
+        state: state([plant, parked]),
+        origin: state([plant, parked]),
+        originTime: 0,
+        inputs,
+        memo: new Map(),
+        shared: new Map(),
+      };
+      lesson.tasks.find((task) => task.id === 'park1')!.detect(context);
+      return context.memo.get('note');
+    };
+    // The plant lies to the north. Facing it or showing it a side is not "parked" yet: no note, task still open.
+    expect(note(0)).toBeUndefined();
+    expect(note(64)).toBeUndefined();
+    // Unloading there anyway ends the parking task with the side it really was.
+    expect(note(0, [input('KeyD', 900)])).toBe('停好了：车头对着目标，车离建筑 1.5 格。');
+    expect(note(64, [input('KeyD', 900)])).toBe('停好了：侧面对着目标，车离建筑 1.5 格。');
+    expect(note(128)).toBe('停好了：车尾对着目标，车离建筑 1.5 格。');
+  });
+
   it('has an English text for every lesson and cheat-sheet string', () => {
     const texts = new Set<string>();
     for (const lesson of YR_TRAINING_LESSONS) {
@@ -396,7 +474,8 @@ describe('YR practice lessons', () => {
     }
     for (const note of YR_HOTKEY_SHEET.notes) texts.add(note);
     const missing = [...texts].filter(
-      (text) => /\p{Script=Han}/u.test(text) && !Object.hasOwn(runtimeEnglishMessages, text),
+      // Exact entries, or texts built from a pattern with numbered slots (a run number, a measured value).
+      (text) => !Object.hasOwn(runtimeEnglishMessages, text) && /\p{Script=Han}/u.test(localizeText(text, 'en')),
     );
     expect(missing).toEqual([]);
   });

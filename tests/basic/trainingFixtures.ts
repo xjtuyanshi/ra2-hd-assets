@@ -13,6 +13,8 @@ export function unit(fields: Partial<GameCommandObject> = {}): GameCommandObject
     x: 30 * 256,
     y: 100 * 256,
     z: 0,
+    facing: 0,
+    passengers: 0,
     health: 1,
     selected: false,
     group: -1,

@@ -134,6 +134,7 @@ export function CoachPanel({ panel }: { panel: state.TrainingLessonState }) {
                 {localizeText(task.title)}
                 {task.status !== 'pending' && <em>{seconds(task.elapsedMs)}</em>}
               </span>
+              {task.status === 'done' && task.note && <p className="coach-note">{localizeText(task.note)}</p>}
               {task.status === 'active' && <p>{localizeText(task.instruction)}</p>}
               {task.status === 'active' && task.hintVisible && (
                 <p className="coach-hint">

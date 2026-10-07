@@ -5,8 +5,10 @@ import type { GuestMemory } from '../../vm86/win32';
 import { createYrSidebarReader } from './sidebarReader';
 import { YR_STARTUP_PAGE_HASH } from './startupPage';
 import {
+  facingToByte,
   isPlausiblePointer,
   readAsciiZ,
+  readFacingRaw,
   readPointerVector,
   YR_STATE_GLOBALS as G,
   YR_STATE_LIMITS as L,
@@ -31,6 +33,11 @@ export const YR_COMMAND_OFFSETS = Object.freeze({
   focus: 0x218,
   /** TechnoClass::Target (AbstractClass*). TechnoClass::SetTarget reads it at 0x6FCDBE. */
   target: 0x2b4,
+  /**
+   * TechnoClass::Passengers (count, then the newest passenger). 0x41532E takes its address and calls the getter
+   * 0x473450 (`mov eax,[ecx+4]; ret`); live, the count went 0, 1, 3 as three infantry entered a flak track.
+   */
+  passengers: 0x114,
   /** FootClass::Destination (AbstractClass*). FootClass::SetDestination stores it at 0x4D9510. */
   destination: 0x5a4,
   /** CellClass::MapCoords (two shorts: X, Y). */
@@ -54,6 +61,8 @@ export const YR_COMMAND_SIGNATURES: ReadonlyArray<{ address: number; bytes: read
   { address: 0x70c614, bytes: [0x89, 0x81, 0x18, 0x02, 0x00, 0x00] },
   { address: 0x6fcdbe, bytes: [0x8b, 0x86, 0xb4, 0x02, 0x00, 0x00] },
   { address: 0x4d9510, bytes: [0x89, 0xb5, 0xa4, 0x05, 0x00, 0x00] },
+  { address: 0x41532e, bytes: [0x8d, 0x8e, 0x14, 0x01, 0x00, 0x00, 0xe8] },
+  { address: 0x473450, bytes: [0x8b, 0x41, 0x04, 0xc3] },
   { address: 0x660bb0, bytes: [0x8b, 0xc1, 0x8b, 0x0d, 0x88, 0x4d, 0xb0, 0x00, 0x83, 0xf9, 0xff] },
 ]);
 
@@ -133,6 +142,7 @@ export function readYrCommandState(
     if (isPlausiblePointer(memory, house, O.houseArrayIndex + 4))
       houseIndex.set(house, memory.i32(house + O.houseArrayIndex));
   }
+  const frame = memory.i32(G.frame);
   const objects: GameCommandObject[] = [];
   for (const pointer of technos) {
     if (!isPlausiblePointer(memory, pointer, 0x6c8)) continue;
@@ -160,6 +170,8 @@ export function readYrCommandState(
       x,
       y,
       z,
+      facing: facingToByte(readFacingRaw(memory, pointer + O.primaryFacing, frame)),
+      passengers: Math.max(0, Math.min(64, memory.i32(pointer + YR_COMMAND_OFFSETS.passengers))),
       health: strength > 0 ? Math.max(0, Math.min(1, memory.i32(pointer + O.health) / strength)) : 0,
       selected: memory.u8(pointer + O.isSelected) !== 0,
       group: group >= 0 && group < 10 ? group : -1,
@@ -173,7 +185,7 @@ export function readYrCommandState(
   const localPointer = memory.u32(G.localHouse);
   const tactical = memory.u32(G.tactical);
   return {
-    frame: memory.i32(G.frame),
+    frame,
     localHouse: houseIndex.get(localPointer) ?? -1,
     view: isPlausiblePointer(memory, tactical, O.tacticalPos + 8)
       ? { x: memory.i32(tactical + O.tacticalPos), y: memory.i32(tactical + O.tacticalPos + 4) }

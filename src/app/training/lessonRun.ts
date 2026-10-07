@@ -24,6 +24,8 @@ export interface LessonTaskView {
   /** Time the task was active while the battle ran, in milliseconds. */
   elapsedMs: number;
   hintVisible: boolean;
+  /** What the task's detector noted when it completed, or null. */
+  note: string | null;
 }
 
 export interface LessonRunView {
@@ -61,6 +63,8 @@ export function createLessonRun(lesson: TrainingLesson, options: LessonRunOption
   const maxInputs = options.maxInputs ?? 400;
   const elapsed = lesson.tasks.map(() => 0);
   const hinted = lesson.tasks.map(() => false);
+  const notes = lesson.tasks.map((): string | null => null);
+  const shared = new Map<string, unknown>();
   const usedChords = new Set<string>();
   let index = 0;
   let ready = false;
@@ -100,6 +104,7 @@ export function createLessonRun(lesson: TrainingLesson, options: LessonRunOption
         status: i < index ? 'done' : i === index && ready ? 'active' : 'pending',
         elapsedMs: elapsed[i]!,
         hintVisible: hinted[i]! && i === index,
+        note: notes[i]!,
       })),
       totalMs: elapsed.reduce((sum, value) => sum + value, 0),
       hotkeysUsed: used,
@@ -138,7 +143,7 @@ export function createLessonRun(lesson: TrainingLesson, options: LessonRunOption
           if (inputs.length > maxInputs) inputs = inputs.slice(inputs.length - maxInputs);
           fresh = [];
         }
-        const context: TrainingContext = { time: sample.time, state, origin, originTime, inputs, memo };
+        const context: TrainingContext = { time: sample.time, state, origin, originTime, inputs, memo, shared };
         let result: boolean | number;
         try {
           result = task.detect(context);
@@ -148,6 +153,8 @@ export function createLessonRun(lesson: TrainingLesson, options: LessonRunOption
         }
         const value = result === true ? 1 : result === false ? 0 : Math.max(0, Math.min(1, result));
         if (value >= 1) {
+          const note = memo.get('note');
+          notes[index] = typeof note === 'string' ? note : null;
           index += 1;
           beginTask();
           continue;

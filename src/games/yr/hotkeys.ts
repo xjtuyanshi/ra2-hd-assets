@@ -46,6 +46,27 @@ export const YR_HOTKEY_SHEET: GameHotkeySheet = Object.freeze({
       ],
     },
     {
+      // Measured live (docs/remaster/research/yr-transport.md): flak track and IFV behave the same.
+      title: '运兵车和工程师（皮包哥偷家）',
+      rows: [
+        {
+          keys: '乘客从哪边下车',
+          action: '车尾（车头的正后方）；后上的先下',
+          tip: '按 D 后大约半秒出第一个，之后每隔一秒一个。盟军多功能步兵车一样。',
+        },
+        {
+          keys: '怎么让车尾对着建筑',
+          action: '先开到建筑旁边，再朝离开建筑的方向点一格',
+          tip: '车头朝向就是最后一步的行驶方向。这是规则，不是手感。',
+        },
+        {
+          keys: '最快的顺序',
+          action: '上车前 ⌘+3 编队 → 开到位 → D → 3 → 左键点建筑',
+          tip: '人在车里时编队键选不到他，下车后编队还在。要练的只有“D 之后马上 3、点建筑”。',
+        },
+      ],
+    },
+    {
       title: '镜头',
       rows: [
         { keys: '← ↑ → ↓', action: '滚动画面', tip: '手不离键盘就能挪镜头，用触控板时比右键拖动顺手。' },
