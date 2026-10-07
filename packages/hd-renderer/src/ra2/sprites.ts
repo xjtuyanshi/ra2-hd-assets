@@ -2,6 +2,7 @@ import type { TerrainDepth } from '../terrainDepth';
 import { NOT_CAPTURED_CODE } from '../objectDepth';
 import { DirtyAttribute } from '../dirtyAttribute';
 import { InstancedQuad, instancedQuadGeometry } from '../instancedQuad';
+import { instanceSilhouette, setSilhouette } from '../silhouette';
 import { bindSlots, bindSlotsBeforeRender, samplingClass, slotMaterial, textureSlot } from '../materialSlots';
 import {
   Color,
@@ -124,6 +125,12 @@ export interface SpriteInstance {
   /** Optional traversal tie-break and building foundation. Decals/shadows retain physical ground depth. */
   painter?: PainterObject;
   painterPart?: number;
+  /**
+   * Nearness (world units) added to an upright card without a painter object, to settle depth ties between cards of
+   * neighbouring cells: below its base line a card follows the ground under each pixel, so two cards that overlap
+   * there have the very same depth and rounding picked the winner row by row (live/overlays.ts overlayTieBias).
+   */
+  tieBias?: number;
   /** Horizontal high-bridge depth at this height above the draw anchor; leaves screen placement unchanged. */
   deckHeight?: number;
   /** Original-engine body template, horizontal part or bitmap-bottom card; absent preserves analytic depth. */
@@ -956,6 +963,11 @@ class SpriteGraph {
       under: passMaterial('under'),
       over: passMaterial('over'),
     };
+    // Upright cards have an outline of their own for the frame's outline pass (silhouette.ts), one per draw point:
+    // the cards of one object (a building's body and the animations at its draw point) share it. Decals, shadows,
+    // contact shades and wet reflections belong to the ground.
+    const silhouette = instanceSilhouette(aAnchor, float(1).sub(step(0.5, aFlat)));
+    for (const one of Object.values(this.materials)) setSilhouette(one, silhouette);
   }
 }
 
@@ -1250,7 +1262,9 @@ export class SpriteLayer {
               ? 1
               : s.flat || s.shadow || s.kind
                 ? 0
-                : spritePainterBias(s.painter, s.painterPart),
+                : s.painter
+                  ? spritePainterBias(s.painter, s.painterPart)
+                  : (s.tieBias ?? 0),
         );
         const foundation = s.painter?.foundation;
         const dx = foundation ? s.anchor.x - s.painter!.x : 0;

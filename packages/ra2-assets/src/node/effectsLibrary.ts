@@ -102,7 +102,24 @@ export interface EffectTableRow {
   /** Light colour (linear RGB) and radius in world units (cells). */
   light?: [number, number, number, number];
   shake?: 1;
+  /** Redrawn (HD) frames of this anim are shown as painted, see HD_AS_PAINTED. */
+  asPainted?: 1;
 }
+
+/**
+ * Anims whose redrawn (HD) frames the renderer shows as painted: at the original's size and in the art's own colours.
+ * The HD flipbook path was made for redrawn explosions: it draws the explosion-like categories larger and re-maps
+ * bright red-over-blue texels through a flame ramp (white-hot to orange to red). Two sheets are finished to the
+ * original's colours and must keep them:
+ *
+ *   - NUKEANIM, the nuclear mushroom: its stem is a pure yellow band and its cap pale, which the ramp turns orange;
+ *     the cloud's size is the blast's reach on the map, so it is not enlarged either.
+ *   - CDGAS, the Chaos Drone's gas: red-pink (hue about 5 degrees); 89 % of its coverage passes the fire test and
+ *     comes out orange.
+ *
+ * A fact about these two pieces of art, not a rule derived from the rules files, hence a list.
+ */
+export const HD_AS_PAINTED: ReadonlySet<string> = new Set(['NUKEANIM', 'CDGAS']);
 
 /**
  * Rules facts the live renderer needs besides the garnish rows (generated into the same table; ids and numbers only).
@@ -257,6 +274,11 @@ const PSYCHIC_LIGHT: [number, number, number] = [0.75, 0.35, 1];
  * say so (VTMUZZLE) and trail puffs (NUKEPUFF) are found through the weapon/trailer keys that create them.
  */
 export function classifyAnim(f: AnimFacts): EffectTableRow {
+  const row = classifyAnimKind(f);
+  return HD_AS_PAINTED.has(f.id.toUpperCase()) ? { ...row, asPainted: 1 } : row;
+}
+
+function classifyAnimKind(f: AnimFacts): EffectTableRow {
   const { id, refs, stats, art, flags } = f;
   const life = Math.max(1, art.frameCount * art.rateFrames);
   const loop = art.loopCount < 0;
@@ -505,6 +527,7 @@ export function renderEffectTable(rows: Record<string, EffectTableRow>, rules?: 
     if (r.smoke !== undefined) parts.push(`smoke: ${r.smoke}`);
     if (r.light) parts.push(`light: [${r.light.join(', ')}]`);
     if (r.shake) parts.push('shake: 1');
+    if (r.asPainted) parts.push('asPainted: 1');
     const key = /^[A-Za-z_$][\w$]*$/.test(id) ? id : `'${id}'`;
     const line = `  ${key}: { ${parts.join(', ')} },`;
     // The repository's Prettier style (print width 120): long rows break one property per line.
@@ -555,6 +578,8 @@ export function renderEffectTable(rows: Record<string, EffectTableRow>, rules?: 
     '  /** Linear RGB and radius in cells. */',
     '  light?: [number, number, number, number];',
     '  shake?: 1;',
+    '  /** HD frames keep the original size and the art colours: no enlargement, no flame grade (HD_AS_PAINTED). */',
+    '  asPainted?: 1;',
     '}',
     '',
     'export const EFFECT_TABLE: Record<string, EffectTableRow> = {',

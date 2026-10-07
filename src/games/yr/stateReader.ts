@@ -3,6 +3,7 @@ import { YR_STARTUP_PAGE_HASH } from './startupPage';
 import { readYrBuildingDockState, readYrBuildingRenderState, YR_BUILDING_RENDER_OFFSETS } from './buildingRenderState';
 import { readYrInfantryRenderState } from './infantryRenderState';
 import { readYrUnitGatherState, type YrUnitGatherState } from './unitGatherState';
+import { readYrUnitCargo, type YrUnitCargo } from './unitCargoState';
 import { readYrUnitTilt, type YrUnitTilt } from './unitTilt';
 
 /**
@@ -240,6 +241,8 @@ export interface YrObjectState {
   translucent?: number;
   /** Ore-gathering sparks the unit's own draw adds under its body on this frame (unitGatherState.ts). */
   gather?: YrUnitGatherState;
+  /** What a Harvester=yes unit carries (unitCargoState.ts); absent for other objects and on an implausible read. */
+  cargo?: YrUnitCargo;
   /** Owning house index in `houses`, or -1 when the owner pointer is not a known house. */
   owner: number;
   /**
@@ -761,11 +764,14 @@ function readYrStateSnapshot(
         spec.kind === 'vehicle' &&
         isPlausiblePointer(memory, typePointer, o.unitTypeHarvester + 1) &&
         isPlausiblePointer(memory, pointer, o.unitUnloading + 1) &&
-        memory.u8(typePointer + o.unitTypeHarvester) &&
-        memory.u8(pointer + o.unitUnloading)
+        memory.u8(typePointer + o.unitTypeHarvester)
       ) {
-        const unloading = readType(memory.u32(typePointer + o.technoTypeUnloadingClass), YR_STATE_VTABLES.unitType);
-        if (unloading) object.imageType = unloading.id;
+        if (memory.u8(pointer + o.unitUnloading)) {
+          const unloading = readType(memory.u32(typePointer + o.technoTypeUnloadingClass), YR_STATE_VTABLES.unitType);
+          if (unloading) object.imageType = unloading.id;
+        }
+        const cargo = readYrUnitCargo(memory, pointer);
+        if (cargo) object.cargo = cargo;
       }
       if (spec.kind === 'vehicle') {
         const tilt = readYrUnitTilt(memory, pointer, frame);

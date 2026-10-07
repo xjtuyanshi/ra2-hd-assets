@@ -231,6 +231,23 @@ describe('terrain material texture budget', () => {
     expect(Number(counts[0]!.split('/')[0])).toBeLessThan(MAX_SAMPLED_TEXTURES);
   });
 
+  it.each(['enhanced', 'classic'] as const)(
+    'reads the single mirror through its box of cliff taps from the same two textures (%s water)',
+    (style) => {
+      // Not a lake bed: one reflector at the lowest level, softened where it mirrors a cliff (cliffSoftMirror).
+      const { build, ground } = fullMap(1, style, false, true);
+      expect(build.mirrorAtlas).toBeNull();
+      const { textures } = fragmentBindings(build.mesh.geometry, ground);
+      const mirrors = textures.filter(isMirror);
+      expect(mirrors).toHaveLength(2);
+      expect(mirrors.filter((texture) => (texture as { isDepthTexture?: boolean }).isDepthTexture)).toHaveLength(1);
+      expect(textures.length).toBeLessThan(MAX_SAMPLED_TEXTURES);
+      // The zone travels with the contact shade in one vertex attribute.
+      const contact = build.mesh.geometry.getAttribute('contact');
+      expect(contact.itemSize).toBe(2);
+    },
+  );
+
   it("does not bind three's DFG lookup, which the art lighting model never reads", () => {
     const { build, ground, wall } = fullMap(1, 'enhanced');
     for (const material of [ground, wall])

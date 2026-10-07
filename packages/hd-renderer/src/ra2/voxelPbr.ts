@@ -48,6 +48,7 @@ import { ra2VoxelClass, VOXEL_CLASS_ID } from './voxelClasses';
 import { VOXEL_TO_WORLD } from './voxelScale';
 import { voxelLightingFor } from './vpl';
 import { inheritSlotBinder, slotMaterial, textureSlot } from '../materialSlots';
+import { setSilhouette } from '../silhouette';
 import {
   VOXEL_REFLECTION_AMBIENT,
   registerVoxelReflectionColour,
@@ -302,7 +303,7 @@ function createGraph(
   nodes: AtmosphereNodes,
 ): { prototype: MeshStandardNodeMaterial; lookup: ShaderNode } {
   const state = voxelPbrFor(nodes);
-  const material = nodes.own(new RemasterMaterial());
+  const material = nodes.own(setSilhouette(new RemasterMaterial()));
   material.sceneMultiplier = nodes.sceneObjectMul;
   const lut = textureSlot();
   material.name = 'voxel-remaster';

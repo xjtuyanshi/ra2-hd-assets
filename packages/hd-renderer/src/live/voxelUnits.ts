@@ -212,9 +212,10 @@ export class VoxelUnits {
 
   /**
    * The shared geometry set of `model` for palette row `paletteKey`, built once per `cacheKey`; its redraw projection
-   * (when the look has one) is requested here and repaints every waiting instance when it arrives.
+   * (when the look has one) is requested here and repaints every waiting instance when it arrives. `variant` names
+   * the redraw's page variant the set is painted with (VoxelProjectionLibrary.get); callers put it in `cacheKey`.
    */
-  private partsFor(model: VoxelModel, paletteKey: string, cacheKey: string): VoxelGeometry[] {
+  private partsFor(model: VoxelModel, paletteKey: string, cacheKey: string, variant = ''): VoxelGeometry[] {
     let parts = this.geometries.get(cacheKey);
     if (parts) return parts;
     const palette = this.cache.paletteRgb.get(paletteKey)!;
@@ -228,11 +229,11 @@ export class VoxelUnits {
     const projection = this.projections;
     if (!projection) return parts;
     const required = projectionParts(parts);
-    if (projectVoxelMaterials(parts, palette, projection.get(model.id, required), this.hd.nodes)) return parts;
+    if (projectVoxelMaterials(parts, palette, projection.get(model.id, required, variant), this.hd.nodes)) return parts;
     const waiting = new Set<VoxelUnit>();
     const target = parts;
     this.pending.set(target, waiting);
-    void projection.loadType(model.id, required).then((asset) => {
+    void projection.loadType(model.id, required, variant).then((asset) => {
       if (projectVoxelMaterials(target, palette, asset, this.hd.nodes)) {
         const materials = new Map(target.map((part) => [part.geometry, part.material!]));
         for (const unit of waiting) {
@@ -268,9 +269,18 @@ export class VoxelUnits {
    * would draw its final look at once (the mesh is built; the projection has arrived, is absent or failed); callers
    * that swap one model for another on the same object keep the old one on screen until then.
    */
-  prepare(model: VoxelModel, paletteKey: string, cacheKey: string): boolean {
+  prepare(model: VoxelModel, paletteKey: string, cacheKey: string, variant = ''): boolean {
     if (!this.geometryReady(model)) return false;
-    return !this.pending.has(this.partsFor(model, paletteKey, cacheKey));
+    return !this.pending.has(this.partsFor(model, paletteKey, cacheKey, variant));
+  }
+
+  /**
+   * Whether the model's redraw has pages of its own for `variant`. False while the redraw loads and for a model
+   * without that variant: such a unit is drawn (and keyed) as the base look, so it is never rebuilt for a variant
+   * that would look the same.
+   */
+  hasVariant(model: VoxelModel, variant: string): boolean {
+    return !!variant && !!this.projections?.hasVariant(model.id, variant);
   }
 
   /**
@@ -282,8 +292,8 @@ export class VoxelUnits {
    * materials the smooth mesh gets, and changes to the smooth mesh in place when it arrives (adoptSmooth). A unit
    * the game shows is therefore on screen from its first frame, where it belongs.
    */
-  build(model: VoxelModel, paletteKey: string, cacheKey: string): VoxelUnit {
-    const parts = this.partsFor(model, paletteKey, cacheKey);
+  build(model: VoxelModel, paletteKey: string, cacheKey: string, variant = ''): VoxelUnit {
+    const parts = this.partsFor(model, paletteKey, cacheKey, variant);
     const unit = instantiateVoxel(parts, this.material, this.hd.nodes);
     this.pending.get(parts)?.add(unit);
     this.standInOf.get(parts)?.units.add(unit.root);

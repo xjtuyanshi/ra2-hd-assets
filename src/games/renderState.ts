@@ -129,6 +129,11 @@ export interface GameRenderObject extends GameRenderPoint {
    * the engine draws none.
    */
   underlay?: GameRenderObjectArt;
+  /**
+   * What a resource collector carries, in the game's own storage units, by kind of resource (ordinary ore and the
+   * more valuable gems); absent for every other object and when the game cannot report it.
+   */
+  cargo?: { ore: number; gems: number };
   /** GameRenderHouse.index of the owner, or -1 when unknown. */
   owner: number;
   facingRaw: number;

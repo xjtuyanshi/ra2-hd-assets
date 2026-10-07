@@ -400,6 +400,7 @@ describe('HD 桥状态机', () => {
         nativeHidden: true,
         translucent: 0.5,
         underlay: { art: 'OREGATH', frame: 47, x: 100, y: 230, z: 0 },
+        cargo: { ore: 3, gems: 12 },
       },
     ];
     harness.setState(state);
@@ -411,6 +412,8 @@ describe('HD 桥状态机', () => {
       isSelected: true,
     });
     expect(view.push.mock.calls.at(-1)![0].objects[0].underlay).not.toBe(state.objects[0]!.underlay);
+    expect(view.push.mock.calls.at(-1)![0].objects[0].cargo).toEqual({ ore: 3, gems: 12 });
+    expect(view.push.mock.calls.at(-1)![0].objects[0].cargo).not.toBe(state.objects[0]!.cargo);
 
     state.objects[0]!.nativeHidden = false;
     state.objects[0]!.translucent = 0;
@@ -421,9 +424,11 @@ describe('HD 桥状态机', () => {
     delete state.objects[0]!.nativeHidden;
     delete state.objects[0]!.translucent;
     delete state.objects[0]!.underlay;
+    delete state.objects[0]!.cargo;
     harness.setState({ ...state });
     await advance(16);
     expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('underlay');
+    expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('cargo');
     expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('nativeHidden');
     expect(view.push.mock.calls.at(-1)![0].objects[0]).not.toHaveProperty('translucent');
     harness.stop();
@@ -1542,17 +1547,22 @@ describe('HD bridge frame-time safeguard', () => {
     await advance(16, 300);
     expect(view.hd.quality).toBe(0);
     expect(harness.quality).toHaveBeenLastCalledWith(0, 4);
-    // 30 ms frames: one tier down after two windows of frames, the next one after two more.
-    await advance(30, 185);
+    // A steady 18.2 ms (55 frames a second) is over budget (see FRAME_BUDGET_MARGIN): one tier down after about a
+    // second of frames, the next one after another second.
+    await advance(18.2, 60);
     expect(view.hd.quality).toBe(1);
     expect(harness.quality).toHaveBeenLastCalledWith(1, 4);
-    await advance(30, 185);
+    await advance(18.2, 60);
     expect(view.hd.quality).toBe(2);
     expect(harness.quality).toHaveBeenLastCalledWith(2, 4);
-    // (A steady 18.2 ms, 55 frames a second, is over budget too: see FRAME_BUDGET_MARGIN.)
-    await advance(18.2, 185);
+    // A pause of the page (a dialog, another tab) is not load: the frames before it are forgotten.
+    await advance(18.2, 20);
+    await advance(4000);
+    await advance(18.2, 40);
+    expect(view.hd.quality).toBe(2);
+    // 30 ms frames, far over budget: down again within about a second.
+    await advance(30, 40);
     expect(view.hd.quality).toBe(3);
-    // A pause of the page (a dialog, another tab) is not load.
     await advance(4000);
     await advance(30, 80);
     expect(view.hd.quality).toBe(3);

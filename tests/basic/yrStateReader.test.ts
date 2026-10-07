@@ -20,6 +20,7 @@ import {
   readYrWaypoint,
   worldVectorToFacing,
 } from '../../src/games/yr/stateReader';
+import { YR_UNIT_CARGO } from '../../src/games/yr/unitCargoState';
 import { YR_STARTUP_PAGE_HASH } from '../../src/games/yr/startupPage';
 import { YR_BUILDING_RENDER_OFFSETS as B, YR_BUILDING_RULES as R } from '../../src/games/yr/buildingRenderState';
 import { YR_INFANTRY_RENDER_OFFSETS as I } from '../../src/games/yr/infantryRenderState';
@@ -644,6 +645,36 @@ describe('YR 1.001 state reader', () => {
     m.u8(unloadingType + O.unitTypeHarvester, 1);
     expect(read()).toMatchObject({ type: imageId });
     expect(read()).not.toHaveProperty('imageType');
+  });
+
+  it('publishes what a harvester carries: ore of three Tiberium types and gems, nothing for other units', () => {
+    const m = syntheticMemory();
+    const minerType = m.type(V.unitType, 'HARV', 1000);
+    const tankType = m.type(V.unitType, 'MTNK', 300);
+    const miner = m.object(V.unit, O.unitType, minerType, 0, { x: 256, y: 512, health: 1000, uid: 1 });
+    const tank = m.object(V.unit, O.unitType, tankType, 0, { x: 768, y: 512, health: 300, uid: 2 });
+    m.vector(G.units, [miner, tank]);
+    m.u8(minerType + O.unitTypeHarvester, 1);
+    const view = new DataView(m.bytes.buffer);
+    const load = (unit: number, amounts: number[]) =>
+      amounts.forEach((amount, type) => view.setFloat32(unit + YR_UNIT_CARGO.storage + type * 4, amount, true));
+    const read = () => readYrState(createByteViewAccessor(m.bytes)).objects;
+    // A new miner: four zeros.
+    expect(read()[0]).toMatchObject({ type: 'HARV', cargo: { ore: 0, gems: 0 } });
+    expect(read()[1]).not.toHaveProperty('cargo');
+    // Riparius, Cruentus (gems), Vinifera, Aboreus, in bales.
+    load(miner, [11, 6.5, 2, 1]);
+    load(tank, [5, 5, 5, 5]);
+    expect(read()[0]!.cargo).toEqual({ ore: 14, gems: 6.5 });
+    expect(read()[1]).not.toHaveProperty('cargo');
+    // The unloading image is selected independently of the load.
+    m.u8(miner + O.unitUnloading, 1);
+    expect(read()[0]).toMatchObject({ cargo: { ore: 14, gems: 6.5 } });
+    // A torn read (not a number, negative, beyond any Storage=) reports nothing rather than a guess.
+    for (const bad of [Number.NaN, -1, 1e9]) {
+      load(miner, [11, bad, 0, 0]);
+      expect(read()[0]).not.toHaveProperty('cargo');
+    }
   });
 
   it('ignores a non-harvester UnloadingClass, including the separate SCHP deployment path', () => {

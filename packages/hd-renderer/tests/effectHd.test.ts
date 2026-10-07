@@ -25,11 +25,15 @@ import {
   EffectSpriteLayer,
   engineAnchor,
   engineDepth,
+  hdFlameGradeDisplay,
   MESH_IDLE_SECONDS,
+  packHdSize,
+  unpackHdSize,
   type EffectInstance,
   type EffectPage,
 } from '../src/live/effectSprites';
-import { LiveEffectsDriver, type LiveAnim } from '../src/live/effects';
+import { EFFECT_TABLE } from '../src/live/effectTable';
+import { hdSize, LiveEffectsDriver, type LiveAnim } from '../src/live/effects';
 import type { Ra2Cache } from '../src/ra2/cache';
 import { assignPainterBias, painterObject } from '../src/ra2/painterOrder';
 import { cardPush } from '../src/ra2/sprites';
@@ -191,6 +195,66 @@ describe('live HD flipbook selection', () => {
       }
     },
   );
+
+  it('shows an anim the effects data marks as painted at the original size, and says so on the card', () => {
+    expect(EFFECT_TABLE.NUKEANIM).toMatchObject({ c: 'explosion', fx: 'explosion', asPainted: 1 });
+    expect(EFFECT_TABLE.CDGAS).toMatchObject({ c: 'psychic', asPainted: 1 });
+    // Only these two: the blue control ring, the nuclear fireballs and every other explosion keep the default.
+    expect(
+      Object.entries(EFFECT_TABLE)
+        .filter(([, row]) => row.asPainted)
+        .map(([id]) => id),
+    ).toEqual(['CDGAS', 'NUKEANIM']);
+    expect(hdSize(EFFECT_TABLE.NUKEANIM!)).toBe(1);
+    expect(hdSize(EFFECT_TABLE.NUKEBALL!)).toBe(1.3);
+    expect(hdSize({ c: 'explosion', fx: 'explosion', s: 1, life: 10 })).toBe(1.3);
+    expect(hdSize({ c: 'impact', fx: 'spark', s: 1, life: 10, asPainted: 1 })).toBe(1);
+    for (const type of ['NUKEANIM', 'CDGAS']) {
+      const f = fixture();
+      f.driver.artWidth = () => 2;
+      f.push({ type, frame: 2 });
+      const card = f.cards().out[0]!;
+      expect(card.hd).toMatchObject({ frame: f.hd.frames[2], size: 1, asPainted: true });
+      // Native placement: the frame's own rect and offset, not enlarged.
+      expect(card.push).toBe(cardPush({ rect: [0, 0, 10, 12], offset: [-6.5, -6] }));
+      // The garnish around the mushroom keeps the art's width as well.
+      if (type === 'NUKEANIM') expect(f.explode.mock.calls[0]![4]).toMatchObject({ hdArt: true, maxSize: 2 });
+      else expect(f.explode).not.toHaveBeenCalled();
+    }
+    const f = fixture();
+    f.push({ type: 'TWLT070', frame: 2 });
+    expect(f.cards().out[0]!.hd).not.toHaveProperty('asPainted');
+  });
+
+  it('keeps the colours of a card shown as painted and grades every other flame', () => {
+    const hue = ([r, g, b]: readonly number[]) => {
+      const max = Math.max(r!, g!, b!);
+      const d = max - Math.min(r!, g!, b!);
+      const h = max === r ? ((g! - b!) / d) % 6 : max === g ? (b! - r!) / d + 2 : (r! - g!) / d + 4;
+      return (h * 60 + 360) % 360;
+    };
+    // The Chaos Drone's gas (red-pink) and the mushroom's yellow stem, opaque texels, display-referred.
+    const gas: [number, number, number] = [0.92, 0.36, 0.42];
+    const stem: [number, number, number] = [1, 0.93, 0.25];
+    expect(hue(gas)).toBeGreaterThan(350);
+    const gradedGas = hdFlameGradeDisplay(gas, 1);
+    // Through the flame ramp the pink turns orange and the yellow loses its saturation: what the opt-out is for.
+    expect(hue(gradedGas)).toBeGreaterThan(15);
+    expect(hue(gradedGas)).toBeLessThan(45);
+    const gradedStem = hdFlameGradeDisplay(stem, 1);
+    expect(gradedStem[2]).toBeGreaterThan(stem[2] + 0.08);
+    expect(hdFlameGradeDisplay(gas, 1, true)).toEqual(gas);
+    expect(hdFlameGradeDisplay(stem, 1, true)).toEqual(stem);
+    // Smoke (no red-over-blue excess) and faint glow are never graded.
+    expect(hdFlameGradeDisplay([0.5, 0.5, 0.5], 1)).toEqual([0.5, 0.5, 0.5]);
+    expect(hdFlameGradeDisplay(gas, 0.1)).toEqual(gas);
+    // The size attribute carries the flag in its sign.
+    expect(packHdSize(1.3, false)).toBe(1.3);
+    expect(packHdSize(1, true)).toBe(-1);
+    expect(packHdSize(0, true)).toBe(-1);
+    expect(unpackHdSize(packHdSize(1.3, true))).toEqual({ size: 1.3, asPainted: true });
+    expect(unpackHdSize(packHdSize(1.15, false))).toEqual({ size: 1.15, asPainted: false });
+  });
 
   it('leaves unknown HD garnish widths uncapped', () => {
     const f = fixture();
@@ -590,6 +654,13 @@ describe('HD page routing and placement buffers', () => {
     // Display-only changes use timing.w; frame crops, interpolation and all six vertex buffers stay the same.
     instance.hd!.size = undefined;
     layer.setInstances([instance], 2.5);
+    expect(page.timing.getW(0)).toBe(1);
+    // A card shown as painted: the same buffer, the sign of the size.
+    instance.hd!.asPainted = true;
+    layer.setInstances([instance], 2.6);
+    expect(page.timing.getW(0)).toBe(-1);
+    instance.hd!.asPainted = false;
+    layer.setInstances([instance], 2.7);
     expect(page.timing.getW(0)).toBe(1);
     expect([page.rect, page.nextRect, page.offsets, page.style].map((attribute) => attribute.version)).toEqual(
       versions.slice(0, 4),

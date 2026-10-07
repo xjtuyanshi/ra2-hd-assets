@@ -57,7 +57,7 @@ import {
 import { createWaterUniforms, waterSurface, type WaterUniforms } from '../waterShading';
 import { finishSceneLighting, sceneLitColour } from '../lighting';
 import { setMaterialFallback } from '../materialFallback';
-import { MirrorAtlas } from '../mirrorAtlas';
+import { MirrorAtlas, type MirrorSource } from '../mirrorAtlas';
 import type { TerrainBuild } from '../terrain';
 import type { ShaderNode } from '../tsl';
 import { LEVEL_HEIGHT } from '../world';
@@ -72,6 +72,7 @@ import {
   bedWaterLook,
   hardShoreInputs,
   reflectionOffset,
+  cliffSoftMirror,
   rippledReflection,
   tonedWaterBody,
   waterLook,
@@ -298,10 +299,19 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
   const geometry = new BufferGeometry();
   const count = positions.length / 3;
   geometry.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3));
-  geometry.setAttribute(
-    'contact',
-    new BufferAttribute(contactShade(positions, walls, hGrid, W * SUB + 1, H * SUB + 1), 1),
-  );
+  // x: the cliff-foot contact shade; y: where the water mirrors raised ground (cliffMirrorZone), per vertex. One
+  // attribute for both: the ground material already binds as many vertex buffers as a WebGPU pipeline may.
+  const shade = contactShade(positions, walls, hGrid, W * SUB + 1, H * SUB + 1);
+  const mirrorZone = cliffMirrorZone(hGrid, W * SUB + 1, H * SUB + 1, SUB);
+  const contact = new Float32Array(count * 2);
+  for (let v = 0; v < count; v++) {
+    contact[v * 2] = shade[v]!;
+    if (walls[v] === 1) continue;
+    const gx = Math.round(positions[v * 3]! * SUB);
+    const gz = Math.round(positions[v * 3 + 2]! * SUB);
+    contact[v * 2 + 1] = mirrorZone[gz * (W * SUB + 1) + gx] ?? 0;
+  }
+  geometry.setAttribute('contact', new BufferAttribute(contact, 2));
   // The tile art already contains the engine's slope shading; flat shading normals avoid lighting it twice.
   const normals = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) normals[i * 3 + 1] = 1;
@@ -470,6 +480,65 @@ function contactShade(positions: number[], walls: number[], grid: Float32Array, 
     out[v] = Math.max(CONTACT_FLOOR, 1 - (CONTACT_STRENGTH * sum) / dirs.length);
   }
   return out;
+}
+
+/**
+ * Rise of the mirrored view ray per cell it travels away from the camera along both ground axes: the fixed camera
+ * looks along (-1, -sqrt(2/3), -1), so a point seen in the water at distance t (cells in x and in z) from a wall
+ * shows that wall at height sqrt(2/3) * t. A cliff of n levels (0.408 each) therefore mirrors out to n / 2 cells.
+ */
+export const MIRROR_RISE_PER_CELL = Math.sqrt(2 / 3);
+/** How far (cells in x and in z) the search for mirrored ground goes: cliffs up to twelve levels. */
+const CLIFF_MIRROR_REACH = 6;
+/** Height above the mirroring point (levels) below which ground is not a cliff: slopes and shore steps. */
+const CLIFF_MIRROR_RISE = 0.75;
+
+/**
+ * Where the water mirrors raised ground, on the height grid (`sub` points per cell, 50 = no cell): 1 where the
+ * mirrored view ray from a point meets ground at least CLIFF_MIRROR_RISE levels above it, spread by a cell and a half
+ * and smoothed over half a cell so the zone also covers the box of taps that softens the mirror there (waterLook.ts
+ * cliffSoftMirror) and ends without a step. Raised ground stands on whole cells, so the far edge of its mirror image
+ * is a staircase of cell diagonals; this marks where that staircase is and nothing else (a tree, a building or a
+ * unit mirrored in open water keeps its single sharp tap).
+ */
+export function cliffMirrorZone(grid: Float32Array, gw: number, gh: number, sub: number): Float32Array {
+  const hit = new Uint8Array(gw * gh);
+  const reach = CLIFF_MIRROR_REACH * sub;
+  for (let z = 0; z < gh; z++)
+    for (let x = 0; x < gw; x++) {
+      const own = grid[z * gw + x]!;
+      if (own >= 50) continue;
+      for (let d = 1; d <= reach && x - d >= 0 && z - d >= 0; d++) {
+        const h = grid[(z - d) * gw + (x - d)]!;
+        if (h >= 50) continue;
+        const rise = h - own;
+        if (rise >= CLIFF_MIRROR_RISE * LEVEL_HEIGHT && rise >= (MIRROR_RISE_PER_CELL * d) / sub - 1e-6) {
+          hit[z * gw + x] = 1;
+          break;
+        }
+      }
+    }
+  // Spread by a cell and a half (a square), then a box of half a cell: separable passes.
+  const pass = (source: ArrayLike<number>, radius: number, mean: boolean): Float32Array => {
+    const across = new Float32Array(gw * gh);
+    const out = new Float32Array(gw * gh);
+    const run = (from: ArrayLike<number>, to: Float32Array, stride: number, length: number, start: number) => {
+      for (let i = 0; i < length; i++) {
+        let value = 0;
+        let n = 0;
+        for (let k = Math.max(0, i - radius); k <= Math.min(length - 1, i + radius); k++) {
+          const sample = from[start + k * stride]!;
+          value = mean ? value + sample : Math.max(value, sample);
+          n++;
+        }
+        to[start + i * stride] = mean ? value / n : value;
+      }
+    };
+    for (let z = 0; z < gh; z++) run(source, across, 1, gw, z * gw);
+    for (let x = 0; x < gw; x++) run(across, out, gw, gh, x);
+    return out;
+  };
+  return pass(pass(hit, Math.round(1.5 * sub), false), Math.max(1, Math.round(sub / 2)), true);
 }
 
 /** Water templates: TMP land type 9 marks open water in TS/RA2; fall back to template names for safety. */
@@ -816,13 +885,13 @@ function createMaterials(
     // mask leaves small islands of shore rock that the upscaled art smears into pale blotches ringed with foam, so
     // water and land within a few tenths of a cell of it at a cliff foot become deep water: no islands, sandy bed,
     // caustics or lapping foam. Land further from the water keeps its art.
-    const nearCliff: ShaderNode = clamp(float(1).sub(attribute('contact', 'float')).mul(6), 0, 1);
+    const nearCliff: ShaderNode = clamp(float(1).sub(attribute('contact', 'vec2').x).mul(6), 0, 1);
     const painted: ShaderNode = texture(map.shore, uv)
       .r.mul(SHORE_MAX - SHORE_MIN)
       .add(SHORE_MIN);
     // Sheltered water within about 1.5 cells of a cliff: no surf there, so the scree the art paints at a cliff foot is
     // not outlined in foam (the enhanced look's `calm`).
-    const sheltered: ShaderNode = clamp(float(1).sub(attribute('contact', 'float')).mul(12), 0, 1);
+    const sheltered: ShaderNode = clamp(float(1).sub(attribute('contact', 'vec2').x).mul(12), 0, 1);
     // A mask that follows the painted waterline (MapMaterials.waterline) already reaches the rock: the water is not
     // extended onto land at cliff feet.
     const cliffWater: ShaderNode = map.paintedWaterline ? float(0) : nearCliff.mul(smoothstep(-0.45, -0.15, painted));
@@ -883,9 +952,13 @@ function createMaterials(
       mirror.target.position.y = waterY;
       const offset: ShaderNode = reflectionOffset(positionWorld.xz, water.wind, water.rain);
       mirror.uvNode = (mirror.uvNode as ShaderNode).add(offset);
-      const depth = mirror.getDepthNode() as ShaderNode;
-      depth.uvNode = mirror.uvNode;
-      reflection = { colour: (mirror as ShaderNode).rgb, coverage: smoothstep(0.9999, 0.999, depth.x) };
+      // Where the water mirrors a cliff the mirror is read through a box of taps (cliffSoftMirror); elsewhere, and
+      // with the zone at 0, this is the single tap it always was.
+      reflection = cliffSoftMirror(
+        mirror as unknown as MirrorSource,
+        mirror.uvNode as ShaderNode,
+        attribute('contact', 'vec2').y.mul(water.cliffSoft),
+      );
       reflectionTarget = mirror.target;
     }
     const calm: ShaderNode = waterline ? waterline.calm : sheltered;
@@ -991,7 +1064,7 @@ function createMaterials(
   // albedo, local lights (emissive, below) the full colour.
   const look = spriteLookFor(nodes);
   const contact = Fn(() => {
-    const value: ShaderNode = attribute('contact', 'float').toVar();
+    const value: ShaderNode = attribute('contact', 'vec2').x.toVar();
     If(look.enabled.greaterThan(0.5).and(look.contactShade.notEqual(1)), () => {
       value.assign(float(1).sub(float(1).sub(value).mul(look.contactShade).min(0.85)));
     });

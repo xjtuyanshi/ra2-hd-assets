@@ -8,7 +8,7 @@ import { FIREBALL_MERGE, LiveEffectsDriver, type LiveAnim } from '../src/live/ef
 import { fireballDepthBias } from '../src/ra2/fireballDepth';
 import { MAX_PAINTER_BIAS } from '../src/ra2/painterOrder';
 
-const HD_TYPES = new Set(['S_BANG48', 'S_TUMU60', 'TWLT070']);
+const HD_TYPES = new Set(['S_BANG48', 'S_TUMU60', 'TWLT070', 'NUKEANIM']);
 
 function resolved(id: string): ResolvedAnim {
   const frames = Array.from({ length: 8 }, (_, i) => ({
@@ -73,6 +73,30 @@ function fixture(style: 'enhanced' | 'faithful' = 'enhanced') {
 }
 
 describe('clustered explosions merge into one or two big fireballs (FIREBALL_MERGE)', () => {
+  it('leaves an anim shown as painted out of the merge: the mushroom is neither a lead nor absorbed', () => {
+    const f = fixture();
+    // The nuclear cloud in the middle of the blasts of what it destroys, all on one logic frame.
+    f.spawn('NUKEANIM', 10, 10);
+    f.spawn('S_BANG48', 10.4, 10);
+    f.spawn('S_TUMU60', 10, 10.5);
+    f.spawn('TWLT070', 9.6, 10.2);
+    f.push(100, 1);
+    const cards = f.cards();
+    const nuke = cards.filter((card) => card.hd?.asPainted);
+    expect(nuke).toHaveLength(1);
+    expect(nuke[0]!.hd!.size).toBe(1);
+    expect(nuke[0]!.anchor).toEqual(engineAnchor(2560, 2560, 0, [0, 0]));
+    // The three blasts merge among themselves: one lead, grown for three members, at their centroid.
+    const blasts = cards.filter((card) => card.hd && !card.hd.asPainted);
+    expect(blasts).toHaveLength(1);
+    f.push(101, 1 + FIREBALL_MERGE.grow);
+    const grown = f.cards().filter((card) => card.hd && !card.hd.asPainted)[0]!;
+    expect(grown.hd!.size).toBeCloseTo(
+      ENHANCED.hdSize.explosion * Math.min(FIREBALL_MERGE.maxSize, 1 + 2 * FIREBALL_MERGE.perMember),
+    );
+    expect(f.cards().filter((card) => card.hd?.asPainted)[0]!.hd!.size).toBe(1);
+  });
+
   it('draws a building death batch as one lead at the centroid, growing with its members', () => {
     const f = fixture();
     // The live oil derrick's Explosion= list: three S_BANG48, one S_TUMU60 and an S_CLSN22 without HD art.

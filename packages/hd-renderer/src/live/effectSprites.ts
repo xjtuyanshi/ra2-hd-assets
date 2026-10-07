@@ -13,21 +13,23 @@ import {
   Vector3,
 } from 'three/webgpu';
 import {
-  Fn,
+  abs,
+  attribute,
   clamp,
   float,
   floor,
-  attribute,
+  Fn,
   length,
   max,
   min,
   mix,
   positionGeometry,
   pow,
-  sRGBTransferEOTF,
-  sRGBTransferOETF,
   screenUV,
   smoothstep,
+  sRGBTransferEOTF,
+  sRGBTransferOETF,
+  step,
   texture,
   uniform,
   uv,
@@ -97,10 +99,31 @@ export interface EffectInstance {
     scale: number;
     /** Display size around the native canvas centre; atlas sampling stays in native pixels. Defaults to 1. */
     size?: number;
+    /**
+     * Show the frames in their own colours: no flame grade and no white-hot gain (effect table `asPainted`). Fire is
+     * still self-lit at its painted colour and smoke still takes the scene's light.
+     */
+    asPainted?: boolean;
     blend0: number;
     t0: number;
     stageSeconds: number;
   };
+}
+
+/**
+ * The fourth component of an HD card's timing attribute: its display size, negative for a card shown as painted
+ * (EffectInstance.hd.asPainted). One float carries both because the mesh already uses every vertex buffer a WebGPU
+ * pipeline is guaranteed to have room for alongside its own (the quad's positions and six instance attributes), and a
+ * size is never 0 or negative.
+ */
+export function packHdSize(size: number, asPainted: boolean): number {
+  const magnitude = size > 0 ? size : 1;
+  return asPainted ? -magnitude : magnitude;
+}
+
+/** CPU twin of the shader's read of packHdSize. */
+export function unpackHdSize(packed: number): { size: number; asPainted: boolean } {
+  return { size: Math.abs(packed), asPainted: packed < 0 };
 }
 
 /** Fire-coloured pixels (hue 15..65 degrees, value > 0.7) are brightened by this, just over the bloom threshold. */
@@ -133,6 +156,37 @@ const FLAME_STOPS: readonly [number, [number, number, number]][] = [
   [0.74, [1.0, 0.83, 0.4]],
   [1, [1.0, 0.97, 0.86]],
 ];
+/**
+ * CPU twin of the flame grade in HdPageMesh's colour node, for one texel: `rgb` is the straight display-referred
+ * (sRGB-encoded, 0..1) colour and `alpha` its coverage. Returns the display colour the card shows before light and
+ * fade. A card shown as painted (`asPainted`) returns the texel unchanged, whatever its colour.
+ */
+export function hdFlameGradeDisplay(
+  rgb: readonly [number, number, number],
+  alpha: number,
+  asPainted = false,
+  grade = HD_FX_GRADE,
+  gamma = HD_FX_GAMMA,
+): [number, number, number] {
+  const smooth = (lo: number, hi: number, x: number) => {
+    const t = Math.min(1, Math.max(0, (x - lo) / (hi - lo)));
+    return t * t * (3 - 2 * t);
+  };
+  const [r, g, b] = rgb;
+  const fire = smooth(0.42, 0.85, Math.max(r, g, b)) * smooth(0.06, 0.3, r - b);
+  const weight = asPainted ? 0 : fire * smooth(0.15, 0.45, alpha) * grade;
+  if (weight <= 0) return [r, g, b];
+  const heat = Math.pow(0.25 * r + 0.5 * g + 0.25 * b, gamma);
+  let ramp: [number, number, number] = [...FLAME_STOPS[0]![1]];
+  for (let i = 1; i < FLAME_STOPS.length; i++) {
+    const [t0] = FLAME_STOPS[i - 1]!;
+    const [t1, c1] = FLAME_STOPS[i]!;
+    const t = Math.min(1, Math.max(0, (heat - t0) / (t1 - t0)));
+    ramp = [ramp[0] + (c1[0] - ramp[0]) * t, ramp[1] + (c1[1] - ramp[1]) * t, ramp[2] + (c1[2] - ramp[2]) * t];
+  }
+  return [r + (ramp[0] - r) * weight, g + (ramp[1] - g) * weight, b + (ramp[2] - b) * weight];
+}
+
 function flameRampDisplay(heat: ShaderNode): ShaderNode {
   let rgb: ShaderNode = vec3(...FLAME_STOPS[0]![1]);
   for (let i = 1; i < FLAME_STOPS.length; i++) {
@@ -869,9 +923,12 @@ class HdPageMesh {
     const gv: ShaderNode = float(0.5).sub(positionGeometry.y);
     const px: ShaderNode = aBounds.x.sub(margin).add(gu.mul(aBounds.z.add(margin.mul(2))));
     const py: ShaderNode = aBounds.y.sub(margin).add(gv.mul(aBounds.w.add(margin.mul(2))));
-    const x = px.mul(aTiming.w);
-    const y = py.mul(aTiming.w);
-    const centre = aBounds.xy.add(aBounds.zw.mul(0.5)).mul(aTiming.w);
+    // packHdSize: the magnitude is the display size, a negative sign marks a card shown as painted.
+    const size: ShaderNode = abs(aTiming.w);
+    const asPainted: ShaderNode = step(aTiming.w, float(0));
+    const x = px.mul(size);
+    const y = py.mul(size);
+    const centre = aBounds.xy.add(aBounds.zw.mul(0.5)).mul(size);
     const r = length(vec2(x, y).sub(centre).div(ppu));
     material.depthNode = cardDepthNode(
       x,
@@ -938,7 +995,11 @@ class HdPageMesh {
       // little coverage (additive glow) keep their colour: their straight colour is not recoverable.
       const heat = s0.dot(vec3(0.25, 0.5, 0.25));
       const graded: ShaderNode = flameRampDisplay(pow(heat, layer.hdFireGamma));
-      const gradeWeight = fire.mul(smoothstep(0.15, 0.45, rgba.a)).mul(layer.hdFireGrade);
+      // A card shown as painted (the nuclear mushroom's yellow stem, the Chaos Drone's pink gas) skips the re-map.
+      const gradeWeight = fire
+        .mul(smoothstep(0.15, 0.45, rgba.a))
+        .mul(layer.hdFireGrade)
+        .mul(float(1).sub(asPainted));
       const s = mix(s0, graded, gradeWeight);
       const colour = mix(
         rgba.rgb,
@@ -946,7 +1007,10 @@ class HdPageMesh {
         gradeWeight.greaterThan(0).select(float(1), float(0)),
       );
       // White-hot: the pale core of the flame (display green and blue both high); orange and red keep their hue.
-      const hot = smoothstep(0.72, 0.95, s.g).mul(smoothstep(0.35, 0.75, s.b));
+      // Not for a card shown as painted: the gain would clip its pale yellows to white.
+      const hot = smoothstep(0.72, 0.95, s.g)
+        .mul(smoothstep(0.35, 0.75, s.b))
+        .mul(float(1).sub(asPainted));
       const gain: ShaderNode = mix(layer.hdFireGain, layer.hdHotGain, hot).mul(layer.displayScale);
       const lit = colour.mul(pass === 'top' ? vec3(layer.displayScale) : mix(layer.light, vec3(gain), e));
       // The anim's translucency fade (animAlphaSmooth) is the engine's stand-in for a dissipating cloud; the redrawn
@@ -980,7 +1044,7 @@ class HdPageMesh {
         cardPainterBias(s) + (s.depthBias ?? 0),
         hd.scale,
       );
-      this.timing.setXYZW(i, hd.blend0, hd.t0, hd.stageSeconds, hd.size ?? 1);
+      this.timing.setXYZW(i, hd.blend0, hd.t0, hd.stageSeconds, packHdSize(hd.size ?? 1, hd.asPainted === true));
     }
     this.anchor.flush();
     this.rect.flush();

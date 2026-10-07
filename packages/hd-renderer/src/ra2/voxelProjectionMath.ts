@@ -17,6 +17,17 @@ export interface ProjectionPartManifest {
   paint: string;
   size: Point2;
   frames: ProjectionFrame[];
+  /**
+   * Other colour pages of the same frames (same size, rects, pivots and paint page), by variant name: what a game
+   * policy draws the part with in another state of the object (a harvester's bin by its load). Absent: the part has
+   * one look. A variant a part does not name is drawn with `colour`.
+   */
+  variants?: Record<string, string>;
+}
+
+/** Variant names are lower-case words: they become part of cache keys and file names. */
+export function projectionVariantName(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(value);
 }
 
 export interface VoxelProjectionManifest {
@@ -83,6 +94,11 @@ export function parseVoxelProjectionManifest(
     if (!projectionPath(part.colour) || !projectionPath(part.paint)) throw new Error('Invalid projection atlas path');
     if (!tuple(part.size, 2) || !part.size.every((n) => Number.isInteger(n) && n > 0) || part.size[0]! > 4096)
       throw new Error('Invalid projection atlas size');
+    if (part.variants !== undefined) {
+      const variants = record(part.variants, `projection ${name} variants`);
+      for (const [variant, file] of Object.entries(variants))
+        if (!projectionVariantName(variant) || !projectionPath(file)) throw new Error('Invalid projection variant');
+    }
     if (!Array.isArray(part.frames) || part.frames.length !== m.frames) throw new Error('Incomplete projection frames');
     const ks = new Set<number>();
     part.frames.forEach((value, i) => {

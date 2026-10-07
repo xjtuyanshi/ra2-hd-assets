@@ -221,27 +221,55 @@ frame its pipeline is ready (`HdRenderer.pendingPipelines` counts the ones still
 synchronous. Tools that draw a frame and read it back keep the default.
 
 **Warm frames (`HdRenderer.warm`).** While a view is out of sight, a warm frame draws everything that exists, hidden
-or not, in every pass (the depth capture and one water mirror tile are forced), once per set of passes that the
-quality tiers use. `LiveView` asks for them behind the loading screen and again when the opening's art is in, and
-does not count as settled while they run or while pipelines are pending; `EffectSpriteLayer.warm` adds one idle
-page mesh of every kind and pass for them to build.
+or not, in every pass (the depth capture and one water mirror tile are forced), once per form of the post graph:
+with mist and without. The first request also puts the top-layer pass into the post graph (it is drawn only while
+top-layer art shows), so neither the first top-layer art nor the first mist of a match builds anything. `LiveView`
+asks for warm frames behind the loading screen and again when the opening's art is in, and does not count as
+settled while they run or while pipelines are pending; `EffectSpriteLayer.warm` adds one idle page mesh of every
+kind and pass for them to build.
 
 **Quality tiers (`HdRenderer.setQualityTier`, `HdRenderer.QUALITY_TIERS`).** What the renderer gives up to hold a
-frame rate, least visible first; no tier changes the resolution of anything:
+frame rate, least visible first; no tier changes the resolution of anything or the outline pass (see "Outlines"
+below):
 
 | Tier | Gives up                                                                                                                                                                               |
 | ---: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 |    0 | nothing                                                                                                                                                                                |
 |    1 | copies of the frame (no heat shimmer on new blasts; translucent engine effects blend in linear light, not the engine's display-space mix); the light field is drawn every second frame |
-|    2 | and multisampling (it smooths the outlines of voxel units and their shadows only)                                                                                                      |
-|    3 | and the soft edge of unit shadows (one flattened copy for five)                                                                                                                        |
+|    2 | and the soft edge of unit shadows (one flattened copy for five)                                                                                                                        |
 
-Tiers 0/1 and 2/3 draw the same passes. The post graph of each pair is built once and parked while the other draws
-(only the scene and top pass give up their render targets), so a change of tier builds and compiles nothing. The
-scene pass keeps one MRT node per set of outputs for the renderer's lifetime: three keys a render context, and with
-it every built shader of the scene, by that node. `src/qualityGovernor.ts` (`QualityGovernor`) chooses the tier from
-the intervals between presented frames: down after two windows of frames whose median is over budget, one tier up on
-trial after a calm stretch, with the wait doubling after a trial that fails.
+Every tier draws the same passes with the same post graph: a step builds, compiles and allocates nothing.
+(Multisampling used to be a tier of its own. It smoothed only the outlines of voxel units and cost as much as the
+rest of the scene pass together: 13 ms of a 30 ms frame in the staged battle below.) `src/qualityGovernor.ts`
+(`QualityGovernor`) chooses the tier from the intervals between presented frames. Every half second it judges the
+last second of frames by their mean interval without the longest twentieth: over budget is one tier down, far over
+budget (one and a half times) straight to the last tier; after a calm stretch it tries one tier up, returns at the
+first verdict over budget and then waits twice as long. A view that misses every tenth refresh is over budget
+although its median frame is on time, which is why the verdict is a trimmed mean.
+
+**Post graph forms (`HdRenderer.switchPipeline`).** The post graph has two forms in a match, with the mist pass and
+without it. Each is built once and parked while the other draws (only the scene and top pass give up their render
+targets). A rebuild for any other reason (a setting, the buffer scale, the top pass joining outside a warm-up)
+retires the old graph and disposes it after the new one has drawn a frame: three counts the users of a compiled
+shader and pipeline and drops them with the last one, so disposing first made the new graph compile about thirty
+small pipelines again in one frame. The scene pass keeps one MRT node per set of outputs for the renderer's
+lifetime: three keys a render context, and with it every built shader of the scene, by that node.
+
+**Outlines (`src/silhouette.ts`, `antialias: 'edges'`).** Object outlines are smoothed by the frame's last pass
+instead of by multisampling. Every surface that writes depth also writes a silhouette code into the green and blue
+channels of the physical-depth attachment: (0, 0) for ground-class surfaces (terrain, decals, shadows, wet
+reflections), a pair per draw point for upright sprite cards (`instanceSilhouette`, made in the vertex stage and
+rounded per fragment) and a pair per unit and part for voxel meshes (`userData.silhouette`, `silhouetteCode`). The
+last pass, which used to copy the finished picture to the canvas, compares each pixel's code with its four
+neighbours'. Where they are equal the pixel is a `textureLoad` copy, bit for bit. Where they differ it searches the
+outline up to `HdRenderer.outlineSearch` (12) pixels each way for the next step, takes the straight line through the
+middle of both steps and mixes the pixel with its neighbour across the outline by the area the line cuts off, in
+linear light and along one axis only (morphological anti-aliasing with codes for edges). Nothing of the scene pass
+changes: depth, discards and blending are as without the pass, so what covers what is untouched.
+`smoothSilhouettes` is the same arithmetic on arrays (tests, and checks of the GPU pass against captures:
+`debugView: 'silhouette'` shows the codes as bytes). Measured on a frozen frame of the staged battle (3120x2096,
+Apple M-series GPU): the pass adds 0.11 ms to the last pass; 1.4 % of the pixels change, every one of them on an
+outline; the GPU result is within one 8-bit level of the twin everywhere.
 
 ## Run the sandbox
 
@@ -682,10 +710,15 @@ these contracts. The source native body formula matched 9,316/9,370 opaque pixel
 The native addresses, bounds and remaining approximations are recorded in
 `docs/remaster/research/painter-order.md`.
 
-Live cell overlays (`src/live/overlays.ts`) draw each overlay's library frame at its cell. Rubble overlays
-(`LibraryOverlay.rubble`, rules IsRubble) never draw their own image: the carrier cell named in the snapshot's
-`overlays.rubble` draws its destroyed building's body frame 3 and shadow with the overlay's ISO palette, lighting and
-flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`); other rubble cells stay empty.
+Live cell overlays (`src/live/overlays.ts`) draw each overlay's library frame at its cell. Upright pieces (walls,
+fences; not flat overlays, not bridge decks) carry `overlayTieBias`: 0.0008 of nearness per step of x + y, starting
+over every 64 diagonals (0.05 at most, under `CARD_CLEARANCE`). Below its base line a card follows the ground, so
+where two neighbouring pieces overlap their depths were equal and rounding picked the winner row by row (stripes at
+wall corners); now the piece of the nearer cell shows, as the engine's back-to-front cell order has it. Rubble
+overlays (`LibraryOverlay.rubble`, rules IsRubble) never draw their own image: the carrier cell named in the
+snapshot's `overlays.rubble` draws its destroyed building's body frame 3 and shadow with the overlay's ISO palette,
+lighting and flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`); other rubble cells stay
+empty.
 
 ## What v0 covers
 
@@ -747,7 +780,15 @@ flat flag, exactly like YR 1.001 (evidence in `docs/remaster/LIVE_OVERLAYS.md`);
   fringe), spends the middle heats on orange and yellow-orange and ends in a warm white, with a heat gamma of 1.25
   (L5: a red-heavy ramp with gamma 2.3 turned the mid-life fireball red-orange around a dark core). Low-coverage
   pixels count as added light only when they are coloured (fire glow, arcs); neutral low-coverage smoke rims are
-  scene-lit, which removed a white outline around redrawn smoke. HD cards of the ground and air layers are
+  scene-lit, which removed a white outline around redrawn smoke.
+  An anim whose effect-table row says `asPainted: 1` is shown as its sheet is painted: at the original's size
+  whatever its category (`hdSize` answers 1, for the card and the garnish around it), outside the fireball merge
+  (neither a lead nor absorbed), without the flame re-map and without the white-hot gain; its fire is still
+  self-lit at the painted colour and its smoke still takes the scene's light. The flag is effects data, not renderer
+  code: `HD_AS_PAINTED` in `packages/ra2-assets/src/node/effectsLibrary.ts` lists NUKEANIM (the nuclear mushroom: a
+  pure yellow stem and a pale cap that the ramp turns orange) and CDGAS (the Chaos Drone's red-pink gas, 89 % of
+  whose coverage passes the fire test), and the generator writes it into the table. On the card it travels in the
+  sign of the size (`packHdSize`), so no vertex buffer is added; `hdFlameGradeDisplay` is the grade's CPU twin. HD cards of the ground and air layers are
   depth-tested like the native cards (only Top is untested). Native `Layer=air` draws over the ground layer. The final P-L5H-3b policy is per **(fire, object)**:
   `front=objectCode-fireCode`; less than **FRONT_DISTANCE=1.5 horizontal cells** covers the complete owner;
   at least 1.5 keeps it completely in front. Rhino 5009 is 1.83848 cells ahead of EXPLOLRG but 0.84853
@@ -851,16 +892,16 @@ Units and buildings are placeholders (`src/objects.ts`) until real assets exist;
 | `bloom`      | `0.55`       | Bloom strength. By day only exposed luminance above 1 (effect cores, glints) blooms; the night keeps its 0.85 threshold on the unexposed scene.                                                                                                                                                                                                                            |
 | `vignette`   | `0.25`       | Screen-edge darkening (the live view sets 0, like the original).                                                                                                                                                                                                                                                                                                           |
 | `shadows`    | `true`       | Sun shadows of the procedural scenario; original maps never cast them.                                                                                                                                                                                                                                                                                                     |
-| `antialias`  | `'msaa4'`    | `'msaa4'` (4x multisampled scene pass), `'fxaa'` or `'none'`. `defaultAntialias()` picks `'fxaa'` on devices reporting 4 GB of memory or less.                                                                                                                                                                                                                             |
+| `antialias`  | `'edges'`    | `'edges'` (single-sample scene pass, outlines smoothed by the last pass: see "Outlines"), `'msaa4'` (4x multisampled scene pass), `'fxaa'` or `'none'`; the last three are for comparisons.                                                                                                                                                                                |
 | `sharpness`  | `1`          | RCAS sharpening after the display transform (0 strongest, 2 off, below 0 disabled).                                                                                                                                                                                                                                                                                        |
-| `debugView`  | `'none'`     | `'overbright'` marks exposed luminance above 1; `'voxel-xy'` / `'voxel-z'` write voxel palette index, world normal and corner occlusion raw to the screen, for fitting the voxel lighting against captures of the original.                                                                                                                                                |
+| `debugView`  | `'none'`     | `'overbright'` marks exposed luminance above 1; `'voxel-xy'` / `'voxel-z'` write voxel palette index, world normal and corner occlusion raw to the screen, for fitting the voxel lighting against captures of the original; `'silhouette'` writes the silhouette codes to red and green as byte values.                                                                    |
 
 Call `applySettings()` after changing a setting; structural changes rebuild the post pipeline and free its previous
 targets, while uniform changes update the existing pipeline.
 
 GPU memory of the post targets at 2400x1500 device pixels (estimated from their formats): with `'msaa4'` the scene
 colour takes about 115 MB multisampled (RGBA16F) plus a 29 MB resolve texture and its depth about 58 MB; with
-`'fxaa'` or `'none'` about 29 MB and 14 MB. The bloom chain (half resolution and below, RGBA16F) adds about 20 MB and
+`'edges'`, `'fxaa'` or `'none'` about 29 MB and 14 MB. The bloom chain (half resolution and below, RGBA16F) adds about 20 MB and
 the sharpening target about 29 MB. Live painter ordering adds an RGBA16F physical-depth attachment: about 29 MB
 single-sampled, or 115 MB multisampled plus 29 MB resolve with `'msaa4'`, at the same resolution. When enabled,
 the emissive overlay adds another RGBA16F attachment of the same size (29 MB single-sampled, or 115 MB plus 29 MB
@@ -1082,10 +1123,18 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   texture, a half-resolution tile per level (2 x 2 tiles for four levels, the pixels four separate mirrors had). A
   level's tile renders only while its padded cell bounds intersect the camera frustum; fragment height selects the
   matching plane, and other levels keep sky only. Classic and legacy enhanced water retain the single lowest mirror
-  (three's own reflector). The atlas exists because a fragment shader may sample only 16 textures on a default
-  WebGPU device: with a render target per level the ground of a map with four water terraces needed 22, its
-  pipeline was refused and the ground was not drawn. `tests/terrainTextureBudget.test.ts` builds the ground of a map
-  with every optional layer through three's WGSL builder and fails above 16; it is 15 today, whatever the number of
+  (three's own reflector). Where that mirror shows raised ground it is read through a box of five taps one cell
+  diamond wide (`cliffSoftMirror`, `CLIFF_MIRROR_TAPS`): the mirror renders the terrain's own geometry, whose cliffs
+  stand on whole cells, so a mirrored cliff ended in a staircase of cell diagonals out in the water, where the painted
+  cliff is one line. The zone is a ground-vertex value (`cliffMirrorZone`, packed with the contact shade in the
+  `contact` attribute): the points whose mirrored view ray meets ground 0.75 levels or more above them within six
+  cells (a cliff of n levels mirrors n / 2 cells towards the camera), spread by a cell and a half. Outside it, and for
+  trees, buildings and units mirrored in open water, the lookup is the single tap it was; the two mirror textures are
+  the only ones bound whatever the tap count. `WaterUniforms.cliffSoft` (1) is the review switch. The atlas exists
+  because a fragment shader may sample only 16 textures on a default WebGPU device: with a render target per level the
+  ground of a map with four water terraces needed 22, its pipeline was refused and the ground was not drawn.
+  `tests/terrainTextureBudget.test.ts` builds the ground of a map with every optional layer through three's WGSL
+  builder and fails above 16; it is 15 today, whatever the number of
   levels. The ground and wall lighting model also skips three's DFG lookup, which it never reads.
   On maps staged as dusk or night (`AtmosphereProfile.kind`, see `ra2-assets/src/lights.ts` `mapAtmosphere`) the
   renderer sets `WaterUniforms.artTone` to 1 and water with painted art keeps the tone the map paints it in: the
@@ -1366,6 +1415,15 @@ Vite. The map viewer and live bench (`?fx=units&vlook=remaster&vproj=vehicles-hd
 An absent index, missing type, invalid manifest or incomplete part set logs once and retains that type's selected
 engine/PBR look. Live types load asynchronously and update existing instances once the complete set arrives.
 Building turrets (`TYPE:turret`) use turret-only manifests in `vehicles-hd`, with the building body remaining a sprite.
+
+A part may name other colour pages of the same frames, `"variants": { "<name>": "<file>" }` (same size, rects, pivots
+and paint page). They are fetched together with the type, and `VoxelProjectionLibrary.get(type, parts, variant)`
+answers the asset painted with that page (a name the type lacks, or a page that failed to load, is the page as
+drawn). Which variant an object is drawn with is game policy: a harvester reports its load (`LiveObject.cargo`, bales
+of ore and of gems; YR keeps them per Tiberium type at TechnoClass +0x33C, `src/games/yr/unitCargoState.ts`), and
+`src/ra2/cargoLook.ts` turns it into `empty`, `gems`, `mixed` or the page as drawn (gold ore). `LiveView` keys a voxel
+unit's geometry set by the variant and rebuilds the visual when the look changes, exactly as it does for an
+engine-selected image; a farm without variant pages draws every load with the base page.
 
 The projection layer reads `<base>/index.json`, each listed type's manifest, and colour/paint atlases. It uses
 the mesh's complete world matrix (including parent turret yaw, scale and ground tilt) to select adjacent baked

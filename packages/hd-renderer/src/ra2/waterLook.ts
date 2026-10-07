@@ -952,6 +952,52 @@ export function rippledReflection(
   return { colour: colour.div(max(coverage, 0.00001)), coverage: coverage.div(3).mul(keep) };
 }
 
+/**
+ * Tap positions of cliffSoftMirror across the screen, in cell diamonds: a box exactly one diamond wide. The staircase
+ * a cliff's mirror image ends in has one tooth per cell, so a box of one diamond averages a cliff that runs across
+ * the screen to its mean line (a ramp half a tooth deep) and smears the teeth of one that runs up the screen.
+ */
+export const CLIFF_MIRROR_TAPS = [-0.4, -0.2, 0, 0.2, 0.4] as const;
+
+/**
+ * The mirrored scene of single-mirror water, softened where it shows a cliff. The mirror renders the terrain's own
+ * geometry: raised ground stands on whole cells and its walls on cell edges, so the far edge of a mirrored cliff is
+ * a staircase of cell diagonals out in the water, where the painted cliff's outline is one continuous line. `zone`
+ * (terrain.ts cliffMirrorZone, 0..1) spreads CLIFF_MIRROR_TAPS: at 0 every tap is the plain lookup at `uv`, at 1
+ * they span one cell diamond. Taps are averaged premultiplied by their coverage, so sky texels never darken the
+ * edge. Two textures as before (colour and depth of the one mirror), whatever the number of taps.
+ */
+export function cliffSoftMirror(
+  mirror: Pick<MirrorSource, 'sample' | 'getDepthNode'>,
+  uv: ShaderNode,
+  zone: ShaderNode,
+): { colour: ShaderNode; coverage: ShaderNode } {
+  const depth = mirror.getDepthNode();
+  // One cell diamond across the screen is sqrt(2) world units along the camera's right axis.
+  const diamond: ShaderNode = (cameraProjectionMatrix as ShaderNode)
+    .element(0)
+    .x.abs()
+    .mul(0.5 * Math.SQRT2)
+    .mul(zone.clamp());
+  let colour: ShaderNode = vec3(0);
+  let coverage: ShaderNode = float(0);
+  for (const tap of CLIFF_MIRROR_TAPS) {
+    const at: ShaderNode = uv.add(vec2(diamond.mul(tap), 0));
+    const covered: ShaderNode = smoothstep(0.9999, 0.999, depth.sample(at).x);
+    colour = colour.add(mirror.sample(at).rgb.mul(covered));
+    coverage = coverage.add(covered);
+  }
+  return { colour: colour.div(max(coverage, 0.00001)), coverage: coverage.div(CLIFF_MIRROR_TAPS.length) };
+}
+
+/** CPU twin of cliffSoftMirror's coverage for one row of the mirror: `coverageAt(x)` in cell diamonds across the screen. */
+export function cliffSoftCoverage(coverageAt: (x: number) => number, x: number, zone: number): number {
+  const spread = Math.min(1, Math.max(0, zone));
+  let sum = 0;
+  for (const tap of CLIFF_MIRROR_TAPS) sum += coverageAt(x + tap * spread);
+  return sum / CLIFF_MIRROR_TAPS.length;
+}
+
 /** Beach profile: shelf width (cells), initial optical-depth slope, then quadratic deepening beyond the shelf. */
 export const BEACH_PROFILE = { shelf: 0.45, slope: 2.0, drop: 40 } as const;
 /** Beer-Lambert absorption per unit optical depth (RGB): red disappears first; the bed is lost by 0.8-1 cells. */

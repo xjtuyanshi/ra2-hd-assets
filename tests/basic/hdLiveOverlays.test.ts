@@ -4,11 +4,15 @@ import { mapAtmosphere } from '../../packages/ra2-assets/src/lights';
 import type { SpriteEntry, SpriteFrame } from '../../packages/ra2-assets/src/manifest';
 import {
   buildOverlayInstances,
+  OVERLAY_TIE_PERIOD,
+  OVERLAY_TIE_STEP,
   OverlayInstanceCache,
+  overlayTieBias,
   type LiveOverlayCells,
   type OverlayTerrain,
 } from '../../packages/hd-renderer/src/live/overlays';
 import { highBridgeLight } from '../../packages/hd-renderer/src/ra2/bridgeDepth';
+import { CARD_CLEARANCE } from '../../packages/hd-renderer/src/ra2/cardDepth';
 import { LEVEL_HEIGHT } from '../../packages/hd-renderer/src/world';
 
 const frame = (page: number, n: number): SpriteFrame => ({ rect: [n * 8, 0, 8, 8], offset: [-4, -4], page });
@@ -162,6 +166,40 @@ describe('live overlay instances', () => {
     expect(wall.push).toBeGreaterThan(0);
     expect([ore.glint, gems.glint, wall.glint, rock.glint]).toEqual([1, 1, undefined, undefined]);
     expect([ore.unlit, gems.unlit, wall.unlit, rock.unlit]).toEqual([true, true, false, false]);
+    // Upright pieces carry the tie-break of their cell's diagonal; flat ones none.
+    expect(wall.tieBias).toBe(overlayTieBias(1, 3));
+    expect(rock.tieBias).toBe(overlayTieBias(2, 3));
+    expect(ore.tieBias).toBeUndefined();
+    expect(gems.tieBias).toBeUndefined();
+  });
+
+  it('settles depth ties between neighbouring wall pieces towards the camera, within the ground clearance', () => {
+    // One step of x + y nearer the camera always wins, in both directions along a run and across a corner.
+    for (const [x, y] of [
+      [10, 10],
+      [0, 0],
+      [200, 37],
+    ] as const) {
+      const here = overlayTieBias(x, y);
+      if ((x + y + 1) % OVERLAY_TIE_PERIOD !== 0) {
+        expect(overlayTieBias(x + 1, y)).toBeCloseTo(here + OVERLAY_TIE_STEP, 9);
+        expect(overlayTieBias(x, y + 1)).toBeCloseTo(here + OVERLAY_TIE_STEP, 9);
+      }
+      // Side by side on one diagonal the pieces do not overlap: no order needed, none invented.
+      expect(overlayTieBias(x + 1, y - 1)).toBe(here);
+    }
+    let largest = 0;
+    for (let d = 0; d < 3 * OVERLAY_TIE_PERIOD; d++) {
+      const bias = overlayTieBias(d, 0);
+      expect(bias).toBeGreaterThanOrEqual(0);
+      largest = Math.max(largest, bias);
+    }
+    // Below an upright card's clearance over the ground (cardDepth.ts CARD_CLEARANCE = 0.06).
+    expect(largest).toBeCloseTo(OVERLAY_TIE_STEP * (OVERLAY_TIE_PERIOD - 1), 9);
+    expect(largest).toBeLessThan(CARD_CLEARANCE);
+    // Float rounding of a card depth (world coordinates of a few hundred units in 32-bit floats) is about 5e-5.
+    expect(OVERLAY_TIE_STEP).toBeGreaterThan(10 * 5e-5);
+    expect(overlayTieBias(-1, 0)).toBeCloseTo(OVERLAY_TIE_STEP * (OVERLAY_TIE_PERIOD - 1), 9);
   });
 
   it('draws a bridge owner cell as the engine does: deck variant by position, second direction 15 px higher', () => {

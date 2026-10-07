@@ -31,6 +31,7 @@ import {
 import { createYrOverlayReader, type ReadYrOverlayOptions, type YrOverlays } from './overlayReader';
 import { createYrSidebarReader } from './sidebarReader';
 import { readYrSceneLighting } from './sceneLighting';
+import { YR_UNIT_CARGO } from './unitCargoState';
 import { readYrUnitGatherKey } from './unitGatherState';
 import { createYrSmudgeReader, type ReadYrSmudgeOptions, type YrSmudges } from './smudgeReader';
 import { createYrShroudReader, type ReadYrShroudOptions, type YrShroud } from './shroudReader';
@@ -308,6 +309,8 @@ function readChangeKey(
         word(Number(readYrUnitNativeHidden(m, pointer, radioContact)));
         // The harvesting flag and the locomotor's stop decide the gather sparks before the frame counter moves.
         word(readYrUnitGatherKey(m, pointer, m.i32(YR_STATE_GLOBALS.frame)));
+        // What a harvester carries selects the look of its bin; it changes while the unit stands still.
+        span(pointer, YR_UNIT_CARGO.storage, YR_UNIT_CARGO.storage + YR_UNIT_CARGO.types * 4);
       }
       if (vtable === YR_STATE_VTABLES.building) {
         const b = YR_BUILDING_RENDER_OFFSETS;
@@ -469,6 +472,7 @@ function projectObject(
     nativeHidden,
     translucent,
     gather,
+    cargo,
     owner,
     x,
     y,
@@ -501,6 +505,7 @@ function projectObject(
     ...(nativeHidden !== undefined ? { nativeHidden } : {}),
     ...(translucent !== undefined ? { translucent } : {}),
     ...(gather !== undefined ? { underlay: { ...gather } } : {}),
+    ...(cargo !== undefined ? { cargo: { ore: cargo.ore, gems: cargo.gems } } : {}),
     owner,
     x,
     y,
