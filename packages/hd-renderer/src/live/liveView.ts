@@ -1204,9 +1204,7 @@ export class LiveView {
     // sidecars, flushOverlayPages passes the material page whatever the colour page is): two more graphs, seen
     // being built 35 s into a six-player match (an overlay page: six shader builds, one frame of 0.17 s).
     if (materialsWanted && looks.some((look) => look.materials)) {
-      add('page-materials', (page) =>
-        captured(new SpriteLayer(this.cache, [], 1, page, null, null, material, depth)),
-      );
+      add('page-materials', (page) => captured(new SpriteLayer(this.cache, [], 1, page, null, null, material, depth)));
       add('cells-materials', (page) => occluder(new SpriteLayer(this.cache, [], 1, page, null, null, material)));
       if (library.windows && windowsWanted)
         add('page-windows-materials', (page) =>

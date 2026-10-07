@@ -300,8 +300,8 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
 - **No compiler in a shown frame.** Art that differs only in data shares one shader (the renderer README's "Frame
   cost" section): a new sprite page, palette, house colour or unit type builds none. What does have to be built is
   built out of sight: the view draws warm frames behind the loading screen and again when the opening's art is in
-  (`HdRenderer.warm`: everything that exists, hidden or not, in every pass and for every quality tier's set of
-  passes), render pipelines are compiled asynchronously (`HdRenderer.enableAsyncPipelines`; `?hd-pipelines=sync`
+  (`HdRenderer.warm`: everything that exists, hidden or not, in every pass and for both forms of the post graph,
+  with mist and without; the top-layer pass joins the graph then), render pipelines are compiled asynchronously (`HdRenderer.enableAsyncPipelines`; `?hd-pipelines=sync`
   keeps three's own behaviour), and the view counts as complete only when no warm frame is due and no pipeline is
   still compiling (`LiveView.settledFrames`). In a shown view a pipeline that is new after all (a unit type's first
   appearance, a blend state not met before) delays that object by the time its compile takes (0.3 s typical), not
@@ -347,13 +347,19 @@ Limits:
 ## Frame rate
 
 The shown view is held to 60 presented frames a second (`FRAME_BUDGET_MS` in `hdBridge.ts`, also on a faster
-display). Its frame intervals feed a `QualityGovernor` (`packages/hd-renderer/src/qualityGovernor.ts`): when the
-median of a window of frames stays over budget the renderer gives up its least visible passes tier by tier
-(`HdRenderer.setQualityTier`: first what reads a copy of the frame, the heat shimmer and the display-space colour mix of translucent engine effects, then multisampling, then the soft edge of unit shadows), and after a calm stretch it tries one tier up again, waiting twice as long after a trial
-that fails. No tier changes a resolution: sprites and terrain stay texel-exact. A change of tier builds and compiles
-nothing (both post graphs are kept once built) and costs one frame of 30 to 60 ms for the scene pass's render
-targets. The play toolbar's HD button reads `画面：高清 · 减负 n/3` while a tier above 0 is in use
+display). Its frame intervals feed a `QualityGovernor` (`packages/hd-renderer/src/qualityGovernor.ts`): every half
+second it judges the last second of frames (their mean interval without the longest twentieth); over budget the
+renderer gives up its least visible work one tier down (`HdRenderer.setQualityTier`: first what reads a copy of the
+frame, the heat shimmer and the display-space colour mix of translucent engine effects, then the soft edge of unit
+shadows), far over budget it goes straight to the last tier, and after a calm stretch it tries one tier up again,
+waiting twice as long after a trial that fails. No tier changes a resolution or the outline pass: sprites and
+terrain stay texel-exact and outlines smooth. Every tier draws the same passes: a change of tier builds, compiles and
+allocates nothing. The play toolbar's HD button reads `画面：高清 · 减负 n/2` while a tier above 0 is in use
 (`RuntimeToolbar.setHdQuality`); `?hd-governor=0` keeps every pass whatever the frame rate.
+
+Outlines are smoothed without multisampling: the scene pass writes a silhouette code per object and the frame's
+last pass rebuilds the outline between pixels of different codes (`packages/hd-renderer/src/silhouette.ts`, the
+renderer README's "Outlines"). Pixels inside an object and on the ground are copied unchanged.
 
 Measured with the base this work started from (the same staged skirmish battle on XMP29U2: about 270 objects with a
 hundred vehicles in view and 80 to 100 engine animations, 3120x2096 drawing buffer, test Chrome on an Apple M-series
@@ -361,6 +367,12 @@ laptop): 23 to 26 frames a second before; 38 to 44 with every pass (tier 0, gove
 governor, which settled on tier 2 for the fight. At the skirmish speed slider's 5 (`game-speed=1`, 60 logic frames a
 second) the emulator reached 59 to 63 logic frames a second under the HD view in that battle: the view's own work
 per logic frame is about 1.3 ms (snapshot push and object update).
+
+Measured again after multisampling was replaced by the outline pass (same staged battle at the slider's 5, same
+machine, no other session on it): with every pass (tier 0, governor off) 54 to 56 frames a second in the first twelve
+seconds after the battle is revealed (about 300 objects, 140 engine animations and 720 to 750 draws; 1 % low 42 to 45) and 60 from then on (1 % low 47 to 55); with the governor 55 to 58 in the first twelve seconds and 60 from then
+on. The opening seconds are bound by the main thread, not by a pass a tier can give up: the view's own work is 9 to
+11 ms a frame there, 6.5 to 9 afterwards.
 
 **The original picture under the HD view.** With native overlay passthrough (the default) the frame renderer draws
 the game's frame in one keyed 1:1 pass (`vmFrameRenderer.ts` `drawKeyed`) plus the smoothed region, the punched

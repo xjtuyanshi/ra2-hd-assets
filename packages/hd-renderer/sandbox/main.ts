@@ -383,7 +383,10 @@ look
   .name('阴影')
   .onChange(() => hd.applySettings());
 look
-  .add(hd.settings, 'antialias', { 'MSAA 4x': 'msaa4', FXAA: 'fxaa', 关: 'none' } satisfies Record<string, Antialias>)
+  .add(hd.settings, 'antialias', { 轮廓: 'edges', 'MSAA 4x': 'msaa4', FXAA: 'fxaa', 关: 'none' } satisfies Record<
+    string,
+    Antialias
+  >)
   .name('抗锯齿')
   .onChange(() => hd.applySettings());
 look

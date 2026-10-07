@@ -221,27 +221,55 @@ frame its pipeline is ready (`HdRenderer.pendingPipelines` counts the ones still
 synchronous. Tools that draw a frame and read it back keep the default.
 
 **Warm frames (`HdRenderer.warm`).** While a view is out of sight, a warm frame draws everything that exists, hidden
-or not, in every pass (the depth capture and one water mirror tile are forced), once per set of passes that the
-quality tiers use. `LiveView` asks for them behind the loading screen and again when the opening's art is in, and
-does not count as settled while they run or while pipelines are pending; `EffectSpriteLayer.warm` adds one idle
-page mesh of every kind and pass for them to build.
+or not, in every pass (the depth capture and one water mirror tile are forced), once per form of the post graph:
+with mist and without. The first request also puts the top-layer pass into the post graph (it is drawn only while
+top-layer art shows), so neither the first top-layer art nor the first mist of a match builds anything. `LiveView`
+asks for warm frames behind the loading screen and again when the opening's art is in, and does not count as
+settled while they run or while pipelines are pending; `EffectSpriteLayer.warm` adds one idle page mesh of every
+kind and pass for them to build.
 
 **Quality tiers (`HdRenderer.setQualityTier`, `HdRenderer.QUALITY_TIERS`).** What the renderer gives up to hold a
-frame rate, least visible first; no tier changes the resolution of anything:
+frame rate, least visible first; no tier changes the resolution of anything or the outline pass (see "Outlines"
+below):
 
 | Tier | Gives up                                                                                                                                                                               |
 | ---: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 |    0 | nothing                                                                                                                                                                                |
 |    1 | copies of the frame (no heat shimmer on new blasts; translucent engine effects blend in linear light, not the engine's display-space mix); the light field is drawn every second frame |
-|    2 | and multisampling (it smooths the outlines of voxel units and their shadows only)                                                                                                      |
-|    3 | and the soft edge of unit shadows (one flattened copy for five)                                                                                                                        |
+|    2 | and the soft edge of unit shadows (one flattened copy for five)                                                                                                                        |
 
-Tiers 0/1 and 2/3 draw the same passes. The post graph of each pair is built once and parked while the other draws
-(only the scene and top pass give up their render targets), so a change of tier builds and compiles nothing. The
-scene pass keeps one MRT node per set of outputs for the renderer's lifetime: three keys a render context, and with
-it every built shader of the scene, by that node. `src/qualityGovernor.ts` (`QualityGovernor`) chooses the tier from
-the intervals between presented frames: down after two windows of frames whose median is over budget, one tier up on
-trial after a calm stretch, with the wait doubling after a trial that fails.
+Every tier draws the same passes with the same post graph: a step builds, compiles and allocates nothing.
+(Multisampling used to be a tier of its own. It smoothed only the outlines of voxel units and cost as much as the
+rest of the scene pass together: 13 ms of a 30 ms frame in the staged battle below.) `src/qualityGovernor.ts`
+(`QualityGovernor`) chooses the tier from the intervals between presented frames. Every half second it judges the
+last second of frames by their mean interval without the longest twentieth: over budget is one tier down, far over
+budget (one and a half times) straight to the last tier; after a calm stretch it tries one tier up, returns at the
+first verdict over budget and then waits twice as long. A view that misses every tenth refresh is over budget
+although its median frame is on time, which is why the verdict is a trimmed mean.
+
+**Post graph forms (`HdRenderer.switchPipeline`).** The post graph has two forms in a match, with the mist pass and
+without it. Each is built once and parked while the other draws (only the scene and top pass give up their render
+targets). A rebuild for any other reason (a setting, the buffer scale, the top pass joining outside a warm-up)
+retires the old graph and disposes it after the new one has drawn a frame: three counts the users of a compiled
+shader and pipeline and drops them with the last one, so disposing first made the new graph compile about thirty
+small pipelines again in one frame. The scene pass keeps one MRT node per set of outputs for the renderer's
+lifetime: three keys a render context, and with it every built shader of the scene, by that node.
+
+**Outlines (`src/silhouette.ts`, `antialias: 'edges'`).** Object outlines are smoothed by the frame's last pass
+instead of by multisampling. Every surface that writes depth also writes a silhouette code into the green and blue
+channels of the physical-depth attachment: (0, 0) for ground-class surfaces (terrain, decals, shadows, wet
+reflections), a pair per draw point for upright sprite cards (`instanceSilhouette`, made in the vertex stage and
+rounded per fragment) and a pair per unit and part for voxel meshes (`userData.silhouette`, `silhouetteCode`). The
+last pass, which used to copy the finished picture to the canvas, compares each pixel's code with its four
+neighbours'. Where they are equal the pixel is a `textureLoad` copy, bit for bit. Where they differ it searches the
+outline up to `HdRenderer.outlineSearch` (12) pixels each way for the next step, takes the straight line through the
+middle of both steps and mixes the pixel with its neighbour across the outline by the area the line cuts off, in
+linear light and along one axis only (morphological anti-aliasing with codes for edges). Nothing of the scene pass
+changes: depth, discards and blending are as without the pass, so what covers what is untouched.
+`smoothSilhouettes` is the same arithmetic on arrays (tests, and checks of the GPU pass against captures:
+`debugView: 'silhouette'` shows the codes as bytes). Measured on a frozen frame of the staged battle (3120x2096,
+Apple M-series GPU): the pass adds 0.11 ms to the last pass; 1.4 % of the pixels change, every one of them on an
+outline; the GPU result is within one 8-bit level of the twin everywhere.
 
 ## Run the sandbox
 
@@ -851,16 +879,16 @@ Units and buildings are placeholders (`src/objects.ts`) until real assets exist;
 | `bloom`      | `0.55`       | Bloom strength. By day only exposed luminance above 1 (effect cores, glints) blooms; the night keeps its 0.85 threshold on the unexposed scene.                                                                                                                                                                                                                            |
 | `vignette`   | `0.25`       | Screen-edge darkening (the live view sets 0, like the original).                                                                                                                                                                                                                                                                                                           |
 | `shadows`    | `true`       | Sun shadows of the procedural scenario; original maps never cast them.                                                                                                                                                                                                                                                                                                     |
-| `antialias`  | `'msaa4'`    | `'msaa4'` (4x multisampled scene pass), `'fxaa'` or `'none'`. `defaultAntialias()` picks `'fxaa'` on devices reporting 4 GB of memory or less.                                                                                                                                                                                                                             |
+| `antialias`  | `'edges'`    | `'edges'` (single-sample scene pass, outlines smoothed by the last pass: see "Outlines"), `'msaa4'` (4x multisampled scene pass), `'fxaa'` or `'none'`; the last three are for comparisons.                                                                                                                                                                                |
 | `sharpness`  | `1`          | RCAS sharpening after the display transform (0 strongest, 2 off, below 0 disabled).                                                                                                                                                                                                                                                                                        |
-| `debugView`  | `'none'`     | `'overbright'` marks exposed luminance above 1; `'voxel-xy'` / `'voxel-z'` write voxel palette index, world normal and corner occlusion raw to the screen, for fitting the voxel lighting against captures of the original.                                                                                                                                                |
+| `debugView`  | `'none'`     | `'overbright'` marks exposed luminance above 1; `'voxel-xy'` / `'voxel-z'` write voxel palette index, world normal and corner occlusion raw to the screen, for fitting the voxel lighting against captures of the original; `'silhouette'` writes the silhouette codes to red and green as byte values.                                                                    |
 
 Call `applySettings()` after changing a setting; structural changes rebuild the post pipeline and free its previous
 targets, while uniform changes update the existing pipeline.
 
 GPU memory of the post targets at 2400x1500 device pixels (estimated from their formats): with `'msaa4'` the scene
 colour takes about 115 MB multisampled (RGBA16F) plus a 29 MB resolve texture and its depth about 58 MB; with
-`'fxaa'` or `'none'` about 29 MB and 14 MB. The bloom chain (half resolution and below, RGBA16F) adds about 20 MB and
+`'edges'`, `'fxaa'` or `'none'` about 29 MB and 14 MB. The bloom chain (half resolution and below, RGBA16F) adds about 20 MB and
 the sharpening target about 29 MB. Live painter ordering adds an RGBA16F physical-depth attachment: about 29 MB
 single-sampled, or 115 MB multisampled plus 29 MB resolve with `'msaa4'`, at the same resolution. When enabled,
 the emissive overlay adds another RGBA16F attachment of the same size (29 MB single-sampled, or 115 MB plus 29 MB

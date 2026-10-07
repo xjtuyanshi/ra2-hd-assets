@@ -117,7 +117,9 @@ export function silhouetteSmooth(colour: ShaderNode, codes: ShaderNode, search =
     const at = (q: ShaderNode): ShaderNode => (clamp as ShaderNode)(q, ivec2(0, 0), last);
     const code = (q: ShaderNode): ShaderNode => codes.load(at(q)).yz;
     const differs = (a: ShaderNode, b: ShaderNode): ShaderNode =>
-      abs(a.x.sub(b.x)).add(abs(a.y.sub(b.y))).greaterThan(DIFFERENT);
+      abs(a.x.sub(b.x))
+        .add(abs(a.y.sub(b.y)))
+        .greaterThan(DIFFERENT);
 
     const centre: ShaderNode = colour.load(p);
     const result: ShaderNode = vec4(centre).toVar();

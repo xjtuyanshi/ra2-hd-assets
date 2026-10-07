@@ -47,14 +47,23 @@ function picture(rows: string[]) {
       const code = kind === '#' ? OBJECT : kind === 'o' ? OTHER : GROUND;
       codes.set(code, 2 * i);
       const ground = 40 + ((x * 7 + y * 13) % 23);
-      colour.set(kind === '#' ? [200, 180, 160, 255] : kind === 'o' ? [20, 60, 220, 255] : [ground, ground, ground, 255], 4 * i);
+      colour.set(
+        kind === '#' ? [200, 180, 160, 255] : kind === 'o' ? [20, 60, 220, 255] : [ground, ground, ground, 255],
+        4 * i,
+      );
     }
   }
   return { width, height, colour, codes };
 }
 
 /** The object's share of a pixel after smoothing, from the red channel (both sides flat there), in linear light. */
-function objectShare(out: Float64Array, frame: ReturnType<typeof picture>, x: number, y: number, ground: number): number {
+function objectShare(
+  out: Float64Array,
+  frame: ReturnType<typeof picture>,
+  x: number,
+  y: number,
+  ground: number,
+): number {
   const linear = (v: number) => Math.pow(v / 255, SILHOUETTE_GAMMA);
   const value = out[4 * (y * frame.width + x)]!;
   return (linear(value) - linear(ground)) / (linear(200) - linear(ground));
@@ -139,8 +148,7 @@ describe('outline smoothing (CPU twin of the last pass)', () => {
     }
     const frame = picture(rows);
     const out = smoothSilhouettes(frame);
-    const code = (x: number, y: number) =>
-      rows[Math.min(23, Math.max(0, y))]![Math.min(63, Math.max(0, x))]!;
+    const code = (x: number, y: number) => rows[Math.min(23, Math.max(0, y))]![Math.min(63, Math.max(0, x))]!;
     let changed = 0;
     for (let y = 0; y < 24; y++) {
       for (let x = 0; x < 64; x++) {
@@ -176,8 +184,7 @@ describe('outline smoothing (CPU twin of the last pass)', () => {
       }
       const frame = picture(rows);
       // A flat ground for this check, so the object's share can be read back from the colour.
-      for (let i = 0; i < width * height; i++)
-        if (frame.codes[2 * i] === 0) frame.colour.set([60, 60, 60, 255], 4 * i);
+      for (let i = 0; i < width * height; i++) if (frame.codes[2 * i] === 0) frame.colour.set([60, 60, 60, 255], 4 * i);
       const out = smoothSilhouettes(frame);
       // The run of row 6: object columns [5 run - ... ] end at 4 * run; row 5 above ends at 3 * run. Along the
       // horizontal outline between rows 5 (ground) and 6 (object) for x in [3 run, 4 run): the line falls from half a
@@ -255,7 +262,12 @@ describe('outline smoothing (CPU twin of the last pass)', () => {
 
   it('does not reach further than the search distance', () => {
     const long = 3 * SILHOUETTE_SEARCH;
-    const rows = ['.'.repeat(long * 2), '.'.repeat(long) + '#'.repeat(long), '#'.repeat(long * 2), '#'.repeat(long * 2)];
+    const rows = [
+      '.'.repeat(long * 2),
+      '.'.repeat(long) + '#'.repeat(long),
+      '#'.repeat(long * 2),
+      '#'.repeat(long * 2),
+    ];
     const frame = picture(rows);
     const out = smoothSilhouettes(frame);
     for (let x = 0; x < long * 2; x++) {
