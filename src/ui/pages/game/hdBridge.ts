@@ -25,6 +25,7 @@ import {
 } from './hdWarmStore';
 import { parseWeatherParams } from '../../../../packages/hd-renderer/src/weatherParams';
 import { QualityGovernor } from '../../../../packages/hd-renderer/src/qualityGovernor';
+import { FramePacer } from '../../../graphics/framePacer';
 import { t } from '../../shared/i18n/translate';
 
 /**
@@ -91,6 +92,33 @@ export interface HdBridgeHost {
  * (QualityGovernor). `?hd-governor=0` keeps every pass whatever the frame rate.
  */
 const FRAME_BUDGET_MS = 1000 / 60;
+/**
+ * Frame rates the shown view is held to (FramePacer, src/graphics/framePacer.ts): 60 while the game keeps up with its
+ * speed setting, 40 and then 30 while it does not. The emulator's thread is scheduled below the threads that draw, so
+ * every frame the view draws costs the game speed: with the view drawing on every frame of a 120 Hz display a
+ * six-player match reached 40 logic frames a second of the 62.5 its setting asks for, held to 40 frames it reached 62
+ * (measurements in docs/remaster/HD_BRIDGE.md, "Frame rate").
+ */
+const PACE_RATES = [60, 40, 30] as const;
+/** How often the shown view asks how the game is doing: one diagnostics request on the emulator's thread. */
+const PACE_SAMPLE_MS = 1000;
+
+/** `?hd-pace=`: what holds the shown view's frame rate (see parseHdPace). */
+export type HdPaceMode = { kind: 'auto' } | { kind: 'fixed'; rate: number } | { kind: 'off' };
+
+/**
+ * `?hd-pace=`: `auto` (default) holds the view to 60 frames a second and lowers that while the game is behind its
+ * speed setting; a number (10..240) holds it to that rate whatever the game does (`cap` is 60); `off` draws on every
+ * display frame, as before the pacer existed (measurements and A/B checks).
+ */
+export function parseHdPace(value: string | null): HdPaceMode {
+  if (value === 'off') return { kind: 'off' };
+  if (value === 'cap') return { kind: 'fixed', rate: PACE_RATES[0] };
+  const rate = value === null || value.trim() === '' ? NaN : Number(value);
+  if (Number.isFinite(rate) && rate >= 10 && rate <= 240) return { kind: 'fixed', rate };
+  return { kind: 'auto' };
+}
+
 /**
  * How far over the budget the frames of a verdict window may be on average (without the window's longest frames, see
  * QualityGovernor) before the window counts as over it. A browser does not always pace a slow view in whole refresh
@@ -241,6 +269,8 @@ export interface HdBridgeScene {
   hdShown: boolean;
   tier: number | null;
   hdFrames: number;
+  /** Frame rate the shown view is held to right now (see PACE_RATES); null when nothing holds it. */
+  pace: number | null;
 }
 
 /**
@@ -322,6 +352,16 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let shownAt: number | null = null;
   /** Frames the shown view has drawn (cumulative; the speed telemetry takes differences). */
   let shownFrames = 0;
+  const paceMode = parseHdPace(params.get('hd-pace'));
+  /** Holds the shown view's frame rate (null with ?hd-pace=off: every display frame is drawn). */
+  const pacer =
+    paceMode.kind === 'off'
+      ? null
+      : new FramePacer({ rates: paceMode.kind === 'fixed' ? [paceMode.rate] : PACE_RATES });
+  /** The game's counters at the last pace sample (the emulator thread's clock); null before one and after a gap. */
+  let paceLast: { atMs: number; frame: number; waitMs: number | null } | null = null;
+  let paceAsking = false;
+  let paceAskedAt = -Infinity;
   let publishedTier: number | null = null;
   const publishTier = (tier: number | null) => {
     if (tier === publishedTier) return;
@@ -578,6 +618,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         governor?.reset();
         live.hd.setQualityTier(0);
       }
+      pacer?.reset();
+      paceLast = null;
       timeline = { ...emptyTimeline(mapId), loadAt: timeline.map === mapId ? timeline.loadAt : null };
       if (liveMap === mapId && live) timeline.readyAt = performance.now();
     }
@@ -687,7 +729,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       ? 50
       : !enabled || pollFailed || (stateMap !== null && (liveMap !== stateMap || !live))
         ? IDLE_POLL_MS
-        : ACTIVE_POLL_MS;
+        : // A view held below 60 frames a second needs no more snapshots than it draws frames: each one is read
+          // on the emulator's thread.
+          Math.max(ACTIVE_POLL_MS, pacer ? 1000 / pacer.rate - 2 : 0);
 
   const poll = (now: number) => {
     polling = true;
@@ -705,6 +749,61 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       .finally(() => {
         polling = false;
       });
+  };
+
+  /**
+   * About once a second while the view is shown: what the game reached against what its speed setting asks for,
+   * for the pacer. One request at a time; a VM that cannot answer leaves the pace where it is.
+   */
+  const samplePace = (now: number) => {
+    if (!pacer || paceMode.kind !== 'auto' || paceAsking || now - paceAskedAt < PACE_SAMPLE_MS) return;
+    if (typeof host.vm.getDiagnostics !== 'function') return;
+    paceAsking = true;
+    paceAskedAt = now;
+    host.vm
+      .getDiagnostics('usage')
+      .then(
+        (diagnostics) => {
+          if (stopped) return;
+          const game = diagnostics.game;
+          // Frame 0 is the scenario still loading; outside a running battle there is no rate to judge.
+          const running = diagnostics.phase === 'running' && !!game && game.status !== 'inactive' && game.frame > 0;
+          const previous = paceLast;
+          paceLast = running
+            ? { atMs: diagnostics.sampledAtMs, frame: game.frame, waitMs: diagnostics.usage?.guestWaitMs ?? null }
+            : null;
+          if (!previous || !paceLast || !game || paceLast.frame < previous.frame) return;
+          const intervalMs = paceLast.atMs - previous.atMs;
+          // A window far longer than the period (a hidden tab, a stopped guest) is not one stretch of play.
+          if (!(intervalMs > 0) || intervalMs > PACE_SAMPLE_MS * 3) return;
+          pacer.sample({
+            intervalMs,
+            rate: ((paceLast.frame - previous.frame) * 1000) / intervalMs,
+            targetRate: game.targetFps,
+            idleShare:
+              paceLast.waitMs !== null && previous.waitMs !== null
+                ? Math.min(1, Math.max(0, (paceLast.waitMs - previous.waitMs) / intervalMs))
+                : null,
+          });
+        },
+        () => {
+          paceLast = null;
+        },
+      )
+      .finally(() => {
+        paceAsking = false;
+      });
+  };
+
+  /**
+   * The interval between two drawn frames as the frame-time safeguard should judge it. A view the pacer holds to
+   * fewer frames than the safeguard's budget (30 a second while the game is behind, 55 on a 165 Hz display) is on
+   * time when it keeps that pace: its intervals are scaled to the budget. A view that draws every display frame, or
+   * is paced at the budget itself, is judged as it is.
+   */
+  const judgedInterval = (intervalMs: number) => {
+    const paced = pacer && pacer.stride > 1 ? pacer.pacedIntervalMs : null;
+    return paced !== null && paced > FRAME_BUDGET_MS ? (intervalMs * FRAME_BUDGET_MS) / paced : intervalMs;
   };
 
   const layout = () => {
@@ -741,7 +840,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     live.resizePixels(...buffer);
   };
 
-  const tick = () => {
+  const tick = (frameTime?: number) => {
     if (stopped) return;
     frame = requestAnimationFrame(tick);
     const now = performance.now();
@@ -750,13 +849,17 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (!hole && keyRect && now >= keyUntil) present();
     if (fallback && now >= fallback.until) publish(null);
     if (live && (hole || keyRect)) {
-      layout();
-      // Frames of the shown view feed the safeguard: the interval between two of them is what the player sees.
-      if (governor && shownAt !== null) live.hd.setQualityTier(governor.frame(now - shownAt));
-      shownAt = now;
-      live.render();
-      shownFrames++;
-      publishTier(live.hd.quality);
+      // The display frame's own time is steady from frame to frame; the clock read inside the callback is not.
+      if (!pacer || pacer.due(typeof frameTime === 'number' ? frameTime : now)) {
+        layout();
+        // Frames of the shown view feed the safeguard: the interval between two of them is what the player sees.
+        if (governor && shownAt !== null) live.hd.setQualityTier(governor.frame(judgedInterval(now - shownAt)));
+        shownAt = now;
+        live.render();
+        shownFrames++;
+        publishTier(live.hd.quality);
+      }
+      samplePace(now);
     } else if (live && preparing()) {
       shownAt = null;
       publishTier(null);
@@ -819,6 +922,15 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     get passthrough() {
       return { flags: passthroughRequest, unsupported: passthroughUnsupported, keyed: !!keyRect };
     },
+    /**
+     * Frame pacing of the shown view: the mode asked for, the level in use (0 = fastest), the rate it holds the view
+     * to and how many display frames lie between two drawn ones; null with ?hd-pace=off.
+     */
+    get pace() {
+      return pacer
+        ? { mode: paceMode.kind, level: pacer.level, levels: pacer.levels, rate: pacer.rate, stride: pacer.stride }
+        : null;
+    },
   };
   const globals = window as unknown as { __hdBridge?: typeof handle };
   globals.__hdBridge = handle;
@@ -870,6 +982,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       hdShown,
       tier: hdShown ? live!.hd.quality : null,
       hdFrames: shownFrames,
+      pace: hdShown && pacer ? pacer.rate : null,
     };
   };
   return Object.assign(stop, { toggle: () => handle.toggle(), scene });

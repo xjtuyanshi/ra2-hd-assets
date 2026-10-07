@@ -101,6 +101,10 @@ describe('one record per window of a running battle', () => {
       1000,
       scene({ hdFrames: 300 }),
     );
+    // The bridge held its view to 40 frames a second at the end of the window.
+    expect(speedRecord(before, after, context({ scene: scene({ hdFrames: 300, pace: 40 }) }))).toMatchObject({
+      hdPace: 40,
+    });
     expect(speedRecord(before, after, context())).toEqual({
       kind: 'speed',
       time: '2026-10-07T07:00:00.000Z',
@@ -114,6 +118,7 @@ describe('one record per window of a running battle', () => {
       hdFps: 59.9,
       hdShown: true,
       tier: 1,
+      hdPace: null,
       objects: 412,
       localObjects: 61,
       resolution: '1728x1080',
@@ -151,6 +156,7 @@ describe('one record per window of a running battle', () => {
       hdFps: null,
       hdShown: false,
       tier: null,
+      hdPace: null,
       objects: null,
       localObjects: null,
       map: null,

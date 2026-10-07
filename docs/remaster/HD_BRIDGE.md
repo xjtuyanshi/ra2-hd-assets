@@ -346,8 +346,8 @@ Limits:
 
 ## Frame rate
 
-The shown view is held to 60 presented frames a second (`FRAME_BUDGET_MS` in `hdBridge.ts`, also on a faster
-display). Its frame intervals feed a `QualityGovernor` (`packages/hd-renderer/src/qualityGovernor.ts`): every half
+The shown view is held to at most 60 drawn frames a second, also on a faster display, and to fewer while the game
+is behind its speed setting (see "Frame pacing" below). Its frame intervals feed a `QualityGovernor` (`packages/hd-renderer/src/qualityGovernor.ts`): every half
 second it judges the last second of frames (their mean interval without the longest twentieth); over budget the
 renderer gives up its least visible work one tier down (`HdRenderer.setQualityTier`: first what reads a copy of the
 frame, the heat shimmer and the display-space colour mix of translucent engine effects, then the soft edge of unit
@@ -373,6 +373,75 @@ machine, no other session on it): with every pass (tier 0, governor off) 54 to 5
 seconds after the battle is revealed (about 300 objects, 140 engine animations and 720 to 750 draws; 1 % low 42 to 45) and 60 from then on (1 % low 47 to 55); with the governor 55 to 58 in the first twelve seconds and 60 from then
 on. The opening seconds are bound by the main thread, not by a pass a tier can give up: the view's own work is 9 to
 11 ms a frame there, 6.5 to 9 afterwards.
+
+### Frame pacing: the game's speed comes first
+
+Every frame the HD view draws is taken from the game's speed. The emulator runs on a Worker thread, and the browser
+schedules that thread below every thread that takes part in drawing: in the test browser on macOS the Worker runs at
+priority 37, the page's main thread and the GPU process's threads at 47 (`ps -M`). While the view draws, the
+emulator executes the same guest code more slowly: it does not get less work, it gets less of the machine. Measured
+on the build before the pacer (`8532d5c`), a natural six-player skirmish at the slider's 5 (62.5 logic frames a second
+asked for), about 260 objects, 1728 px wide game at two device pixels per game pixel, a headed test Chrome on a 120 Hz
+laptop display, mouse moving, the map scrolled every second and band selections made (12 s windows of one match):
+
+| HD view                                   | drawn frames/s | logic frames/s | guest instructions per ms of CPU loop | emulator thread idle |
+| ----------------------------------------- | -------------- | -------------- | ------------------------------------- | -------------------- |
+| every display frame (main thread at 99 %) | 81 to 93       | 39 to 41       | 145 to 149 k                          | 0 %                  |
+| every second display frame                | 60             | 55             | 213 k                                 | 5 %                  |
+| every third                               | 40             | 62             | 261 k                                 | 19 %                 |
+| every fourth                              | 30             | 62             | 265 k                                 | 25 %                 |
+
+The guest executed 2.6 to 2.8 million instructions per logic frame in every row, and exactly one native render per
+logic frame (one `IDirectDrawSurface::Blt` of the frame, one key-colour fill): the mouse, scrolling and selections
+add a few percent of guest work, not a second render. With the view's drawing switched off and its snapshot polls
+and the native frame snapshots left running, the emulator ran as fast as with the tab hidden; a main thread that
+merely burned 15 ms of CPU per frame without drawing cost nothing; a smaller drawing buffer or a lower quality tier
+changed nothing. What costs is the per-frame work of the WebGPU view itself (the scene traversal on the main thread
+and the several hundred draws the GPU process decodes), so only fewer frames give the time back.
+
+`FramePacer` (`src/graphics/framePacer.ts`, used by `hdBridge.ts`) therefore decides for every display frame whether
+the shown view draws it:
+
+- It holds the view to a frame rate in whole display frames, by the time since the last drawn frame (within 10 %):
+  at 60 a 120 Hz display draws every second frame and a 165 Hz display every third (55 a second); a 60 Hz display
+  draws every frame. No display rate is configured.
+- Once a second while the view is shown, the bridge asks the emulator for its counters (`getDiagnostics('usage')`,
+  one request on its thread) and hands the pacer what the game reached: its logic rate against the rate its speed
+  setting allows (`GameFrameCounters.targetFps`) and the share of its thread it spent in waits it asked for. Behind
+  the setting (below 95.5 %) on two samples in a row: one level down, 60 to 40 to 30 (straight to 30 when the game
+  is below 80 % of its rate); the game's limiter never catches up a late frame, so it can be behind while its thread
+  still waits a tenth of the time, and only a game that mostly waits (a paused one) is not behind whatever its rate. Holding the setting with a tenth of its thread idle for eight seconds:
+  one level up is tried; if the game then falls behind, the level is given up at once, the wait before the next try
+  doubles (up to two minutes) and that level asks for more idle share before it is tried again. A game without a
+  limited speed setting (the fastest setting, a network match) has no rate to protect: the view stays at 60.
+- Snapshots are polled no faster than frames are drawn (each one is read on the emulator's thread), and the
+  frame-time safeguard above judges a view that is held to fewer frames by the interval it is held to, not by the
+  60 it would otherwise have to reach.
+
+Measured with the pacer against the build before it, same machine, display, match kind and input script, one
+session at a time (the hidden reference is the same page with its animation frames held: no HD drawing, no polls, no
+frame acknowledgements):
+
+| Scene (objects)                                 | before: logic frames/s (HD frames/s) | with the pacer (HD frames/s)       | hidden reference |
+| ----------------------------------------------- | ------------------------------------ | ---------------------------------- | ---------------- |
+| natural six-player match (240 to 272)           | 42.8 to 59.2, mean 51.5 (72 to 100)  | 57.8 to 61.6, mean 60.5 (40 to 58) | 62.4 to 62.5     |
+| calm two-player match (73 to 89)                | 62.4 to 62.5 (119 to 120)            | 62.5 (58 to 59)                    | 62.5             |
+| staged battle at six bases (435 to 445)         | 32.1 to 40.9 (62 to 75)              | 32.0 to 42.7 (30)                  | 57.1 to 62.1     |
+| staged battle at six bases, larger (514 to 559) | 33.8 to 37.5 (51 to 55)              | 19.0 to 45.3 (30)                  | 51.1 to 61.3     |
+
+In the staged battles the guest's own work decides the rate (5 to 16 million instructions per logic frame, different
+in every window, so their logic rates do not compare window to window); what the pacer changes there is the
+emulator's throughput under the same input, 264 to 307 thousand guest instructions per ms of CPU loop before and 306
+to 357 with it (354 to 403 hidden). What is left of that gap is the view at 30 frames a second, the snapshot reads
+(5 to 7 % of the emulator's thread) and the native frame snapshots, which follow the display rate while the mouse
+moves (up to 106 a second on the 120 Hz display against 62 native renders; holding them to 60 measured about 6 % more
+throughput and is not done).
+
+`?hd-pace=<rate>` holds a fixed rate (10 to 240; `cap` is 60) whatever the game does, and `?hd-pace=off` draws on
+every display frame as before the pacer existed, both for measurements. `__hdBridge.pace` shows the mode, the level,
+the rate and how many display frames lie between two drawn ones; the speed telemetry's records carry the rate as
+`hdPace`. The native picture over the view (sidebar, radar, selection brackets, health bars, text), the HD interface
+layer and the cursor are not paced: they keep their own rate.
 
 **The original picture under the HD view.** With native overlay passthrough (the default) the frame renderer draws
 the game's frame in one keyed 1:1 pass (`vmFrameRenderer.ts` `drawKeyed`) plus the smoothed region, the punched
@@ -520,8 +589,9 @@ in `packages/hd-renderer/README.md`);
 `hd-vlook=remaster` selects the remaster voxel look; `hd-vproj=<dir>` selects vehicle redraw projection atlases under
 the HD cache (e.g. `vehicles-hd`); `hd-rect=x,y,w,h`
 overrides the tactical rectangle (default: the frame minus YR's 168 px sidebar and 32 px command bar).
-`hd-governor=0` switches the frame-rate safeguard off and `hd-pipelines=sync` the asynchronous pipeline compiles
-(see "Frame rate" and "Match start").
+`hd-governor=0` switches the frame-rate safeguard off, `hd-pace=<rate>|cap|off` replaces the frame pacer's own
+choice of rate, and `hd-pipelines=sync` switches the asynchronous pipeline compiles off (see "Frame rate" and
+"Match start").
 
 ## Display scale
 
@@ -611,8 +681,8 @@ decode that finds them.
 
 ## Game-speed telemetry
 
-The HD view presents 60 frames a second whether or not the game in the emulator keeps up with its speed setting,
-so "it feels slow" has its own measurement. In development the play page (with or without the bridge) loads
+The picture says little about whether the game in the emulator keeps up with its speed setting, so "it feels
+slow" has its own measurement. In development the play page (with or without the bridge) loads
 `src/ui/pages/game/speedTelemetry.ts` behind `import.meta.env.DEV`. Every five seconds it asks the VM once
 (`VmShell.getDiagnostics('usage')`) and turns the difference from the previous answer into one record:
 
@@ -621,7 +691,8 @@ so "it feels slow" has its own measurement. In development the play page (with o
   1.001 `src/games/yr/performance.ts` reads it off the frame limiter: 62.5 / GameSpeed in a campaign or skirmish,
   so 62.5 at the skirmish slider's 5 and 20.8 at its 3; `uncapped` at the fastest setting; unknown in a network
   session). The setting is read at every sample, so moving the in-game slider shows in the next record;
-- `presentedFps` (game frames the page presented), `hdFps`, `hdShown` and the HD view's quality `tier`;
+- `presentedFps` (game frames the page presented), `hdFps`, `hdShown`, the HD view's quality `tier` and `hdPace`,
+  the frame rate the view was held to at the end of the window (see "Frame pacing");
 - `objects` / `localObjects` and `map` from the bridge's last snapshot, `resolution` of the game frame, `gameSpeed`,
   `logicFrame`, `visible`;
 - `hypercallsPerS` and `vm`: where the emulator's thread spent the window, in percent (`VmUsage` in

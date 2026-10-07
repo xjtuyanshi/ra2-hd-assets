@@ -27,6 +27,11 @@ export interface SpeedScene {
   tier: number | null;
   /** HD frames drawn while shown, cumulative. */
   hdFrames: number;
+  /**
+   * Frame rate the shown HD view is held to (the bridge's frame pacer lowers it while the game is behind its speed
+   * setting); null or absent when nothing holds it.
+   */
+  pace?: number | null;
 }
 
 export interface SpeedTelemetryHost {
@@ -152,6 +157,8 @@ export interface SpeedRecord {
   hdFps: number | null;
   hdShown: boolean;
   tier: number | null;
+  /** Frame rate the HD view was held to at the end of the window; null when nothing held it. */
+  hdPace: number | null;
   objects: number | null;
   localObjects: number | null;
   resolution: string | null;
@@ -221,6 +228,7 @@ export function speedRecord(
         : null,
     hdShown: scene?.hdShown ?? false,
     tier: scene?.tier ?? null,
+    hdPace: scene?.pace ?? null,
     objects: scene?.map ? scene.objects : null,
     localObjects: scene?.map ? scene.localObjects : null,
     resolution: frameSize ? `${frameSize.width}x${frameSize.height}` : null,

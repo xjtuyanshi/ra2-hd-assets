@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VmShell } from '../../src/adapter/vmShell';
 import type { GameRenderState } from '../../src/games/renderState';
-import { sidebarUpcomingTypes, startHdBridge, type HdBridgeTimeline } from '../../src/ui/pages/game/hdBridge';
+import {
+  parseHdPace,
+  sidebarUpcomingTypes,
+  startHdBridge,
+  type HdBridgeTimeline,
+} from '../../src/ui/pages/game/hdBridge';
+import type { VmDiagnostics } from '../../src/adapter/vmDiagnostics';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
 import { hdSidebar } from '../helpers/hdSidebar';
 
@@ -26,6 +32,7 @@ interface BridgeHandle {
   readonly live: unknown;
   readonly timeline: HdBridgeTimeline;
   readonly passthrough: { flags: number; unsupported: boolean; keyed: boolean };
+  readonly pace: { mode: string; level: number; levels: number; rate: number; stride: number } | null;
 }
 
 /** 800x600 frame minus YR's 168 px sidebar and 32 px command bar. */
@@ -1595,5 +1602,213 @@ describe('HD bridge frame-time safeguard', () => {
     expect(harness.quality).toHaveBeenLastCalledWith(0, 4);
     harness.stop();
     expect(harness.quality).toHaveBeenLastCalledWith(null, 0);
+  });
+});
+
+describe('HD bridge frame pacing', () => {
+  /**
+   * The emulator's answer to a pace sample: a game at slider 5 (62.5 logic frames a second asked for) whose frame
+   * counter and waits follow the test clock at the given rate and idle share.
+   */
+  function gameAt(harness: ReturnType<typeof setup>, logicFps: () => number, idleShare: () => number) {
+    let frame = 100;
+    let waitMs = 0;
+    let at = clock;
+    const getDiagnostics = vi.fn(async (_action: string): Promise<VmDiagnostics> => {
+      frame += ((clock - at) * logicFps()) / 1000;
+      waitMs += (clock - at) * idleShare();
+      at = clock;
+      return {
+        sampledAtMs: clock,
+        phase: 'running',
+        hypercalls: 0,
+        clockRate: 1,
+        execution: null,
+        game: {
+          frame: Math.floor(frame),
+          gameSpeed: 1,
+          sessionSpeed: 1,
+          requestedFps: 60,
+          targetFps: 62.5,
+          sampledAtMs: clock,
+          intervalMs: null,
+          logicFps: null,
+          status: 'sample',
+        },
+        usage: {
+          guestMs: 0,
+          slices: 0,
+          jitCompiled: 0,
+          jitFreed: 0,
+          hostCallMs: 0,
+          guestWaitMs: waitMs,
+          stateReadMs: 0,
+          stateReads: 0,
+          frames: 0,
+        },
+      };
+    });
+    (harness.vm as unknown as { getDiagnostics: typeof getDiagnostics }).getDiagnostics = getDiagnostics;
+    return getDiagnostics;
+  }
+
+  /** Frames the view drew and snapshots the bridge asked for while `count` display frames `ms` apart went by. */
+  async function count(
+    harness: ReturnType<typeof setup>,
+    view: ReturnType<typeof fakeView>,
+    ms: number,
+    frames: number,
+  ) {
+    const drawn = view.render.mock.calls.length;
+    const polls = harness.polls();
+    await advance(ms, frames);
+    return { drawn: view.render.mock.calls.length - drawn, polls: harness.polls() - polls };
+  }
+
+  it('reads ?hd-pace: auto by default, a fixed rate, or off', () => {
+    expect(parseHdPace(null)).toEqual({ kind: 'auto' });
+    expect(parseHdPace('')).toEqual({ kind: 'auto' });
+    expect(parseHdPace('auto')).toEqual({ kind: 'auto' });
+    expect(parseHdPace('nonsense')).toEqual({ kind: 'auto' });
+    expect(parseHdPace('off')).toEqual({ kind: 'off' });
+    expect(parseHdPace('cap')).toEqual({ kind: 'fixed', rate: 60 });
+    expect(parseHdPace('40')).toEqual({ kind: 'fixed', rate: 40 });
+    // Out of range is not a rate.
+    expect(parseHdPace('5')).toEqual({ kind: 'auto' });
+    expect(parseHdPace('1000')).toEqual({ kind: 'auto' });
+  });
+
+  it('holds the shown view to 60 frames a second on a 120 Hz display and draws every frame of a 60 Hz one', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    harness.setState(battle(3));
+    await advance(1000 / 120, 8);
+    expect((await count(harness, view, 1000 / 120, 120)).drawn).toBe(60);
+    expect(harness.bridge()?.pace).toEqual({ mode: 'auto', level: 0, levels: 3, rate: 60, stride: 2 });
+    expect(harness.stop.scene()?.pace).toBe(60);
+    await advance(1000 / 60, 40);
+    expect((await count(harness, view, 1000 / 60, 60)).drawn).toBe(60);
+    expect(harness.bridge()?.pace?.stride).toBe(1);
+    harness.stop();
+  });
+
+  it('gives the game its speed back: fewer frames and fewer snapshot reads while it is behind its setting', async () => {
+    const harness = setup();
+    let logicFps = 62.5;
+    let idle = 0.3;
+    const asked = gameAt(
+      harness,
+      () => logicFps,
+      () => idle,
+    );
+    const view = await goLive(harness);
+    harness.setState(battle(3));
+    // On target with time to spare: 60 frames a second, a snapshot asked for with every drawn frame.
+    await advance(1000 / 120, 240);
+    expect(await count(harness, view, 1000 / 120, 120)).toEqual({ drawn: 60, polls: 60 });
+    expect(harness.bridge()?.pace).toMatchObject({ level: 0, rate: 60 });
+    // One request a second on the emulator's thread, with the usage accounting it needs.
+    expect(asked.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(asked.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(asked).toHaveBeenLastCalledWith('usage');
+    // The game falls to 55 with no waits: 40 frames a second after two samples behind.
+    logicFps = 55;
+    idle = 0;
+    for (let i = 0; i < 480 && harness.bridge()?.pace?.level === 0; i++) await advance(1000 / 120);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 1, rate: 40, stride: 3 });
+    // At 40 the game holds its setting with nothing to spare: the view stays there.
+    logicFps = 62.5;
+    idle = 0.02;
+    expect(await count(harness, view, 1000 / 120, 120)).toEqual({ drawn: 40, polls: 40 });
+    expect(harness.stop.scene()?.pace).toBe(40);
+    await advance(1000 / 120, 120 * 20);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 1 });
+    // Behind again: 30. It stays there however long the game is behind.
+    logicFps = 55;
+    idle = 0;
+    await advance(1000 / 120, 360);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 2, rate: 30, stride: 4 });
+    expect(await count(harness, view, 1000 / 120, 120)).toEqual({ drawn: 30, polls: 30 });
+    await advance(1000 / 120, 1200);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 2 });
+    // The game holds its setting again with a quarter of its thread idle: one level back after eight seconds.
+    logicFps = 62.5;
+    idle = 0.25;
+    await advance(1000 / 120, 120 * 10);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 1, rate: 40 });
+    harness.stop();
+  });
+
+  it('does not take a view it holds back for a slow one, and still sees a slow one', async () => {
+    // 30 frames a second on a 60 Hz display: every second display frame, 33 ms apart, is on time.
+    const harness = setup('?hd=1&hd-pace=30');
+    const view = await goLive(harness);
+    harness.setState(battle(3));
+    await advance(1000 / 60, 8);
+    expect((await count(harness, view, 1000 / 60, 600)).drawn).toBe(300);
+    expect(view.hd.quality).toBe(0);
+    expect(harness.bridge()?.pace).toEqual({ mode: 'fixed', level: 0, levels: 1, rate: 30, stride: 2 });
+    // Display frames 50 ms apart: the view cannot keep even its held rate, and gives up its passes.
+    await advance(50, 120);
+    expect(view.hd.quality).toBeGreaterThan(0);
+    harness.stop();
+  });
+
+  it('asks the game nothing at a fixed rate, and draws every display frame with ?hd-pace=off', async () => {
+    const fixed = setup('?hd=1&hd-pace=40');
+    const asked = gameAt(
+      fixed,
+      () => 30,
+      () => 0,
+    );
+    const view = await goLive(fixed);
+    fixed.setState(battle(3));
+    await advance(1000 / 120, 600);
+    expect(asked).not.toHaveBeenCalled();
+    expect((await count(fixed, view, 1000 / 120, 120)).drawn).toBe(40);
+    fixed.stop();
+
+    const off = setup('?hd=1&hd-pace=off');
+    const offAsked = gameAt(
+      off,
+      () => 30,
+      () => 0,
+    );
+    const offView = await goLive(off);
+    off.setState(battle(3));
+    await advance(1000 / 120, 600);
+    expect(await count(off, offView, 1000 / 120, 120)).toEqual({ drawn: 120, polls: 60 });
+    expect(offAsked).not.toHaveBeenCalled();
+    expect(off.bridge()?.pace).toBeNull();
+    expect(off.stop.scene()?.pace).toBeNull();
+    off.stop();
+  });
+
+  it('starts another match at 60 again, and keeps its pace when the game cannot be asked', async () => {
+    const harness = setup();
+    let logicFps = 40;
+    gameAt(
+      harness,
+      () => logicFps,
+      () => 0,
+    );
+    const view = await goLive(harness);
+    harness.setState(battle(3));
+    // Far behind: straight to the last level.
+    await advance(1000 / 120, 480);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 2, rate: 30 });
+    // The emulator stops answering: the pace stays where it is.
+    (harness.vm as unknown as { getDiagnostics: () => Promise<never> }).getDiagnostics = vi.fn(async () => {
+      throw new Error('VM gone');
+    });
+    await advance(1000 / 120, 480);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 2 });
+    // Another match on the map (the logic frame starts over).
+    logicFps = 62.5;
+    view.settledFrames = 0;
+    harness.setState(battle(1));
+    await advance(1000 / 120, 4);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 0, rate: 60 });
+    harness.stop();
   });
 });
