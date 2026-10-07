@@ -13,6 +13,7 @@ import type { VoxelModel, VoxelSection } from '../../../ra2-assets/src/manifest'
 import { sectionNormalsMode } from '../../../ra2-assets/src/voxelNormals';
 import type { AtmosphereNodes } from '../atmosphere';
 import { createPainterDepth } from '../painterDepth';
+import { silhouetteCode } from '../silhouette';
 import { decodeBase64 } from './cache';
 import { paletteNodes } from './mapLighting';
 import { SHADOW_COPIES, SILHOUETTE_FOOTPRINT, VoxelShadowMesh, VoxelWaterMesh, groundOf } from './voxelShadow';
@@ -638,6 +639,9 @@ export const VOXEL_CLEARANCE = CARD_CLEARANCE + 0.005;
  * unit additionally tilts onto the ground's surface, the way the engine applies its ramp matrix to units standing on
  * ramps (applied in world space, after the yaw).
  */
+/** Units are numbered as they are made: neighbours on screen get different silhouette codes. */
+let nextSilhouetteSerial = 1;
+
 export class VoxelUnit extends Group {
   /** Only body/turret/barrel originals; never infer membership by traversing shadow/reflection/foam children. */
   readonly partMeshes: Mesh[] = [];
@@ -647,6 +651,7 @@ export class VoxelUnit extends Group {
   captureRadius = 0;
   private readonly painterDepth = createPainterDepth();
   readonly nativeDepth = createVoxelNativeDepth();
+  private readonly silhouetteSerial = nextSilhouetteSerial++;
   private readonly translucentMaterials = new Map<MeshStandardNodeMaterial, MeshStandardNodeMaterial>();
   bodyOpacity = 1;
   /** Up vector the game draws this body with (world axes), when its host reports one; null = follow the ground. */
@@ -662,6 +667,8 @@ export class VoxelUnit extends Group {
   addSourceMesh(mesh: Mesh, turretOffset = 0): void {
     mesh.userData.painterDepth = this.painterDepth;
     mesh.userData.voxelNativeDepth = this.nativeDepth;
+    // Each part has an outline of its own for the frame's outline pass (silhouette.ts): a turret over its hull too.
+    mesh.userData.silhouette = silhouetteCode(this.silhouetteSerial, this.partMeshes.length);
     this.partMeshes.push(mesh);
     this.partOffsets.push(Math.abs(turretOffset));
     this.updateCaptureRadius();
@@ -776,6 +783,8 @@ function nativeVoxelMaterial(source: MeshStandardNodeMaterial): MeshStandardNode
   let material = nativeMaterials.get(source);
   if (!material) {
     material = source.clone();
+    // three's clone drops userData: the variant writes the same silhouette code as its source.
+    material.userData.silhouetteNode = source.userData.silhouetteNode;
     material.name = `${source.name}:native-ground`;
     material.transparent = true;
     material.depthWrite = true;

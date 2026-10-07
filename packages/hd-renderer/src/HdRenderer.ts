@@ -34,6 +34,7 @@ import {
   mrt,
   neutralToneMapping,
   output as materialOutput,
+  convertToTexture,
   pass,
   renderOutput,
   screenUV,
@@ -41,6 +42,7 @@ import {
   texture,
   toneMapping,
   uniform,
+  vec2,
   vec3,
   vec4,
 } from 'three/tsl';
@@ -69,6 +71,7 @@ import { installAsyncPipelines, type AsyncPipelines } from './asyncPipelines';
 import { resolveSceneLighting, type SceneLighting } from './sceneLighting';
 import { Mist, MIST_CAP } from './mist';
 import { ObjectLayer } from './objects';
+import { SILHOUETTE_LEVELS, SILHOUETTE_SEARCH, silhouetteOf, silhouetteSmooth } from './silhouette';
 import { cinematicGrade, faithfulToneMap, hasCinematicGrade, neutralGrade, type CinematicGradeParams } from './post';
 import { buildTerrain, type TerrainBuild } from './terrain';
 import type { ShaderNode } from './tsl';
@@ -97,12 +100,15 @@ import { IsoCamera, LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE, cellToWorld } from './wo
 export type ToneMapper = 'faithful' | 'agx' | 'neutral' | 'aces';
 
 /**
- * 'msaa4': 4x multisampled scene pass (default); 'fxaa': single-sample pass plus FXAA, the cheaper fallback. At
- * 2400x1500 device pixels the multisampled scene colour (RGBA16F) and depth take about 115 MB and 58 MB (plus a
- * 29 MB resolve texture), against about 29 MB and 14 MB single-sampled; devices reporting 4 GB of memory or less
- * (navigator.deviceMemory) default to 'fxaa'.
+ * 'edges' (default): a single-sample scene pass, and the frame's last pass smooths the outlines of objects from the
+ * silhouette codes the scene pass wrote (silhouette.ts): every pixel away from an outline is the texel-exact picture,
+ * at about the cost of 'none'. It needs the physical-depth attachment (a map with sprites); without it the frame is
+ * drawn as 'none'. 'msaa4': 4x multisampled scene pass, which smooths only geometry outlines (voxel units and their
+ * shadows, not sprite art) and about doubles the cost of the scene pass at 3120x2096 (the multisampled colour and
+ * depth targets take four times the memory as well); 'fxaa': single-sample pass plus FXAA, which softens art detail
+ * too. Both are kept for comparisons.
  */
-export type Antialias = 'msaa4' | 'fxaa' | 'none';
+export type Antialias = 'edges' | 'msaa4' | 'fxaa' | 'none';
 
 /** Without supported MRT blending, keep the legacy scene graph and omit the overlay entirely. */
 export function emissiveOverlayEnabled(
@@ -112,10 +118,9 @@ export function emissiveOverlayEnabled(
   return supportsMrt && settings.sourceLights > 0 && settings.debugView === 'none';
 }
 
-/** Default anti-aliasing for this device (see Antialias). */
+/** Default anti-aliasing (see Antialias): the same on every device, it is the cheapest one that smooths anything. */
 export function defaultAntialias(): Antialias {
-  const memory = (globalThis.navigator as { deviceMemory?: number } | undefined)?.deviceMemory;
-  return memory !== undefined && memory <= 4 ? 'fxaa' : 'msaa4';
+  return 'edges';
 }
 
 export interface HdSettings extends CinematicGradeParams {
@@ -139,9 +144,10 @@ export interface HdSettings extends CinematicGradeParams {
   /**
    * Diagnostics: 'overbright' shows white where the exposed scene (before bloom and tone map) exceeds luminance 1;
    * 'voxel-xy' / 'voxel-z' write raw voxel attributes (see ra2/vpl.ts voxelDebug) straight to the screen, for fitting
-   * the voxel lighting against captures of the original.
+   * the voxel lighting against captures of the original. 'silhouette' writes the silhouette codes (silhouette.ts) to
+   * red and green as whole byte values, for checking the outline pass against captures.
    */
-  debugView: 'none' | 'overbright' | 'voxel-xy' | 'voxel-z';
+  debugView: 'none' | 'overbright' | 'voxel-xy' | 'voxel-z' | 'silhouette';
   /**
    * Enhanced look on original art (ra2/spriteLook.ts), opt-in: with every effect strength 0 and the depth gains below
    * at 1 the frame is the faithful one, bit for bit. relight: the sun relights building and tree art as a delta on its
@@ -587,6 +593,11 @@ export class HdRenderer {
   private mainPasses: { renderTarget: RenderTarget }[] = [];
   /** Set while pipelines are compiled off the frame (see enableAsyncPipelines). */
   private asyncPipelines: AsyncPipelines | null = null;
+  /**
+   * Pixels the outline pass ('edges', see Antialias) searches along an outline in each direction. Change it before
+   * applySettings(); the post graph is rebuilt.
+   */
+  outlineSearch = SILHOUETTE_SEARCH;
   /** The frame-time safeguard's tier in use (see setQualityTier). */
   private qualityTier = 0;
   /** The soft-shadow setting a tier switched off, to restore it. */
@@ -1012,7 +1023,7 @@ export class HdRenderer {
     const { toneMapper, sharpness, debugView } = this.settings;
     const antialias = this.antialiasInUse();
     const key: unknown[] = [
-      antialias,
+      antialias === 'edges' ? `edges${this.outlineSearch}` : antialias,
       toneMapper,
       sharpness,
       debugView,
@@ -1057,8 +1068,9 @@ export class HdRenderer {
       const outputs: Record<string, ShaderNode> = { output: materialOutput };
       if (this.painterDepthEnabled) {
         // Physical-depth alpha follows depth writes, independently of art coverage; overlays never write depth.
+        // Green and blue carry the silhouette code of the surface that wrote the depth (silhouette.ts).
         outputs.physicalDepth = Fn(([], builder: NodeBuilder) =>
-          vec4(float(1).sub(physicalDepth), 0, 0, builder.material.depthWrite ? 1 : 0),
+          vec4(float(1).sub(physicalDepth), silhouetteOf(builder.material), builder.material.depthWrite ? 1 : 0),
         )();
       }
       if (overlay) outputs.emissive = vec4(0, 0, 0, materialOutput.a);
@@ -1147,6 +1159,15 @@ export class HdRenderer {
       this.pipeline.outputNode = vec4(vec3(luminance.greaterThan(1).select(float(1), float(0))), 1);
       return;
     }
+    if (debugView === 'silhouette') {
+      const codes: ShaderNode = this.painterDepthEnabled ? scenePass.getTextureNode('physicalDepth').yz : vec2(0, 0);
+      this.pipeline.outputNode = renderOutput(
+        vec4(codes.mul(SILHOUETTE_LEVELS / 255), 0, 1),
+        NoToneMapping,
+        NoColorSpace,
+      );
+      return;
+    }
     if (debugView !== 'none') {
       // Raw values, no exposure, tone map or colour conversion: screenshots read them back byte for byte.
       this.pipeline.outputNode = renderOutput(vec4(hdr.rgb, 1), NoToneMapping, NoColorSpace);
@@ -1217,6 +1238,12 @@ export class HdRenderer {
     if (sharpness >= 0 && sharpness < 2) {
       display = sharpen(display, sharpness);
       nodes.push(display);
+    }
+    if (antialias === 'edges' && this.painterDepthEnabled) {
+      // Last of all, on the finished picture: what the pass does not touch reaches the canvas exactly as before.
+      const finished: ShaderNode =
+        (display as { getTextureNode?: () => ShaderNode }).getTextureNode?.() ?? convertToTexture(display);
+      display = silhouetteSmooth(finished, scenePass.getTextureNode('physicalDepth'), this.outlineSearch);
     }
     this.pipeline.outputNode = display;
   }

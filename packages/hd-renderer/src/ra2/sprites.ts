@@ -2,6 +2,7 @@ import type { TerrainDepth } from '../terrainDepth';
 import { NOT_CAPTURED_CODE } from '../objectDepth';
 import { DirtyAttribute } from '../dirtyAttribute';
 import { InstancedQuad, instancedQuadGeometry } from '../instancedQuad';
+import { instanceSilhouette, setSilhouette } from '../silhouette';
 import { bindSlots, bindSlotsBeforeRender, samplingClass, slotMaterial, textureSlot } from '../materialSlots';
 import {
   Color,
@@ -956,6 +957,11 @@ class SpriteGraph {
       under: passMaterial('under'),
       over: passMaterial('over'),
     };
+    // Upright cards have an outline of their own for the frame's outline pass (silhouette.ts), one per draw point:
+    // the cards of one object (a building's body and the animations at its draw point) share it. Decals, shadows,
+    // contact shades and wet reflections belong to the ground.
+    const silhouette = instanceSilhouette(aAnchor, float(1).sub(step(0.5, aFlat)));
+    for (const one of Object.values(this.materials)) setSilhouette(one, silhouette);
   }
 }
 

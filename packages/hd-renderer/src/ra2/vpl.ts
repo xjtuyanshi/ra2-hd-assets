@@ -43,6 +43,7 @@ import type { ShaderNode } from '../tsl';
 import { finishSceneLighting, sceneLitColour } from '../lighting';
 import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrade } from './mapLighting';
 import { inheritSlotBinder, slotMaterial, textureSlot } from '../materialSlots';
+import { setSilhouette } from '../silhouette';
 import { VoxelProjectionInputs, voxelProjectionFor, type VoxelProjectionPart } from './voxelProjection';
 import { projectedVoxelColour } from './voxelProjectionNodes';
 import {
@@ -374,7 +375,8 @@ function createGraph(
 ): VoxelGraph {
   const state = voxelLightingFor(nodes);
   const { voxelFill, voxelDebug, voxelExtraLight, voxelOcclusion, voxelSunDiffuse, lightDirection } = state;
-  const material = new VoxelMaterial();
+  // Every part mesh drawn with a material of this graph carries its unit's silhouette code (see VoxelUnit).
+  const material = setSilhouette(new VoxelMaterial());
   material.sceneMultiplier = nodes.sceneObjectMul;
   material.state = state;
   const look = (material.look = spriteLookFor(nodes));
