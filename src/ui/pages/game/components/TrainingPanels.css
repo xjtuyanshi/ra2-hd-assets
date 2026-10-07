@@ -34,6 +34,12 @@
   overflow: hidden;
   padding: 8px 10px;
 }
+#coach-panel[data-toolbar='open'] {
+  left: 176px;
+}
+#screen-frame:fullscreen #coach-panel {
+  left: 8px;
+}
 #coach-panel header,
 #hotkey-sheet header {
   display: flex;
@@ -84,10 +90,16 @@
   margin-top: 6px;
 }
 #hotkey-sheet {
-  inset: 8px 8px 44px 8px;
-  padding: 10px 12px;
+  inset: 8px 8px 44px 176px;
+  z-index: 45;
+  padding: 8px 12px;
   overflow: hidden;
-  font-size: 12px;
+  background: rgba(8, 10, 8, 0.95);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+#screen-frame:fullscreen #hotkey-sheet {
+  left: 8px;
 }
 #hotkey-sheet .hotkey-groups {
   column-count: 3;
@@ -119,11 +131,15 @@
 }
 #hotkey-sheet td small {
   display: block;
+  font-size: 10.5px;
   opacity: 0.7;
 }
 #hotkey-sheet .hotkey-notes {
-  margin: 8px 0 0;
+  column-count: 2;
+  column-gap: 24px;
+  margin: 6px 0 0;
   padding-left: 16px;
+  font-size: 10.5px;
   opacity: 0.85;
 }
 @media (max-width: 1100px) {

@@ -280,11 +280,13 @@ describe('YR practice lessons', () => {
       { state: state([built('NACNST')]), inputs: [key('KeyD')] },
       { state: state([mcv]), inputs: [key('KeyD')] },
     );
+    const home = built('NACNST', cell(25, 114));
+    const oldPlant = built('NAPOWR');
     check(
       'power',
-      state([built('NACNST'), built('NAPOWR')]),
-      { state: state([built('NACNST'), built('NAPOWR'), built('NAPOWR')]), inputs: [] },
-      { state: state([built('NACNST'), built('NAPOWR')]), inputs: [key('Mouse0')] },
+      state([home, oldPlant]),
+      { state: state([home, oldPlant, built('NAPOWR')]), inputs: [] },
+      { state: state([home, oldPlant]), inputs: [key('Mouse0')] },
     );
     check('barracks', state([]), { state: state([built('NAHAND')]), inputs: [] }, { state: state([]), inputs: [] });
     const tab = (activeTab: number) => state([], { sidebar: sidebar({ activeTab }) });
@@ -300,6 +302,9 @@ describe('YR practice lessons', () => {
     const made = (n: number) => Array.from({ length: n }, () => unit({ kind: 'infantry', type: 'E2' }));
     expect(run(lesson, 'train', state([]), { state: state(made(3)), inputs: [] })).toBe(1);
     expect(run(lesson, 'train', state([]), { state: state(made(1)), inputs: [] })).toBeCloseTo(1 / 3);
+    // Conscripts that were already there do not count.
+    const old = made(3);
+    expect(run(lesson, 'train', state(old), { state: state(old), inputs: [] })).toBe(0);
     const damaged = built('NAPOWR', { health: 0.4 });
     check(
       'repair',
@@ -307,13 +312,18 @@ describe('YR practice lessons', () => {
       { state: state([{ ...damaged, health: 0.5 }]), inputs: [key('KeyK')] },
       { state: state([{ ...damaged, health: 0.5 }]), inputs: [key('Mouse0')] },
     );
-    const gun = built('NALASR');
+    const gun = built('NALASR', cell(27, 118));
+    const farGun = built('NALASR', cell(150, 80));
     check(
       'sell',
-      state([gun]),
-      { state: state([]), inputs: [key('KeyL')] },
-      { state: state([]), inputs: [key('Mouse0')] },
+      state([home, gun, farGun]),
+      { state: state([home, farGun]), inputs: [key('KeyL')] },
+      { state: state([home, farGun]), inputs: [key('Mouse0')] },
     );
+    // A gun of the player's lost at the far start is not a sale.
+    expect(
+      run(lesson, 'sell', state([home, gun, farGun]), { state: state([home, gun]), inputs: [key('KeyL')] }),
+    ).toBeLessThan(1);
     // Building while fighting: two conscripts must appear while a tank attacks an enemy, and E must have been used.
     const fightingTank = unit({ mission: 'Attack', target: { kind: 'object', uid: enemyPlant.uid } });
     const play = (inputs: TrainingInput[]) => {

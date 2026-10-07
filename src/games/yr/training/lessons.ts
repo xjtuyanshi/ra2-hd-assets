@@ -254,7 +254,8 @@ const orders: TrainingLesson = {
       hint: '先选中坦克（框选或 T），再在空地上点一下左键。',
       detect: chordWithEffect(
         [LEFT],
-        (context) => ordered(context, ['Move'], (o) => o.kind === 'vehicle' && o.destination?.kind === 'cell').length >= 2,
+        (context) =>
+          ordered(context, ['Move'], (o) => o.kind === 'vehicle' && o.destination?.kind === 'cell').length >= 2,
       ),
     },
     {
@@ -279,11 +280,8 @@ const orders: TrainingLesson = {
       detect: chordWithEffect(
         [LEFT],
         (context) =>
-          ordered(
-            context,
-            ['Attack'],
-            (o) => o.target?.kind === 'object' && isEnemy(context.state, o.target.uid),
-          ).length >= 1,
+          ordered(context, ['Attack'], (o) => o.target?.kind === 'object' && isEnemy(context.state, o.target.uid))
+            .length >= 1,
       ),
     },
     {
@@ -302,10 +300,9 @@ const orders: TrainingLesson = {
       instruction: '旁边站着几个平民。选中坦克，按住 Option 点一个平民：坦克会直接压过去。',
       hint: '按住 Option（⌥）不放，把鼠标移到平民身上点左键。压到一个就算完成。',
       detect: (context) => {
-        const before = pick(context.origin, civilians).length;
-        const now = pick(context.state, civilians).length;
         if (!usedChord(context, ['Alt+Mouse0'])) return 0;
-        return now < before ? 1 : 0.5;
+        const crowd = pick(context.origin, civilians).filter(nearBase(context.origin, 30));
+        return gone(context, crowd).length > 0 ? 1 : 0.5;
       },
     },
     {
@@ -329,7 +326,9 @@ const orders: TrainingLesson = {
         const chosen = selection(context.state);
         const moved = chosen.filter((object) => {
           const before = byUid(context.origin, object.uid);
-          return object.destination !== null || (!!before && Math.hypot(object.x - before.x, object.y - before.y) > CELL / 2);
+          return (
+            object.destination !== null || (!!before && Math.hypot(object.x - before.x, object.y - before.y) > CELL / 2)
+          );
         });
         return chosen.length >= 2 && moved.length >= 1 && context.time - key.time < 4000 ? 1 : 0.5;
       },
@@ -361,6 +360,21 @@ const orders: TrainingLesson = {
 
 const tabOf = (state: GameCommandState) => state.sidebar?.activeTab ?? -1;
 const count = (state: GameCommandState, ...types: string[]) => pick(state, own, ofType(...types)).length;
+/**
+ * Own objects of these types that did not exist when the task started. Counting by identity, not by totals: the
+ * scenario also holds the player's objects at the far start, which the computer player may destroy at any time.
+ */
+const fresh = (context: TrainingContext, ...types: string[]) =>
+  pick(context.state, own, ofType(...types)).filter((object) => !byUid(context.origin, object.uid));
+/** Objects of the task's start that are gone now. */
+const gone = (context: TrainingContext, objects: readonly GameCommandObject[]) =>
+  objects.filter((object) => !byUid(context.state, object.uid));
+/** Within `cells` of the player's construction yard (or of his vehicles before one stands). */
+const nearBase = (state: GameCommandState, cells: number) => {
+  const anchor = centroid(pick(state, own, ofType('NACNST'))) ?? centroid(pick(state, own, tanks));
+  return (object: GameCommandObject) =>
+    !!anchor && Math.hypot(object.x - anchor.x, object.y - anchor.y) <= cells * CELL;
+};
 
 const build: TrainingLesson = {
   id: 'yr-build',
@@ -391,7 +405,7 @@ const build: TrainingLesson = {
       instruction: '在右侧建造栏点“磁能反应炉”，造好后再点一次图标，在建造厂旁边点左键放下。',
       hint: '图标上出现“就绪”后：点图标，把鼠标移到基地旁的空地，格子全绿时点左键。',
       hintAfterMs: 40_000,
-      detect: (context) => (count(context.state, 'NAPOWR') > count(context.origin, 'NAPOWR') ? 1 : 0),
+      detect: (context) => (fresh(context, 'NAPOWR').length > 0 ? 1 : 0),
     },
     {
       id: 'barracks',
@@ -423,7 +437,7 @@ const build: TrainingLesson = {
       instruction: '在步兵页连点三下“动员兵”，等他们走到集结点。',
       hint: '按 E 回到步兵页，左键点动员兵图标三次。',
       hintAfterMs: 40_000,
-      detect: (context) => Math.min(1, (count(context.state, 'E2') - count(context.origin, 'E2')) / 3),
+      detect: (context) => Math.min(1, fresh(context, 'E2').length / 3),
     },
     {
       id: 'tab-build',
@@ -453,7 +467,8 @@ const build: TrainingLesson = {
       hint: '按 L 后鼠标变成 $，左键点哨戒炮；卖完再按 L 退出。',
       detect: (context) => {
         if (!usedChord(context, ['KeyL'])) return 0;
-        return count(context.state, 'NALASR') < count(context.origin, 'NALASR') ? 1 : 0.5;
+        const guns = pick(context.origin, own, ofType('NALASR')).filter(nearBase(context.origin, 30));
+        return gone(context, guns).length > 0 ? 1 : 0.5;
       },
     },
     {
@@ -466,11 +481,16 @@ const build: TrainingLesson = {
         const fighting = pick(context.state, own, tanks, withMission('Attack')).some(
           (object) => object.target?.kind === 'object' && isEnemy(context.state, object.target.uid),
         );
-        if (fighting && count(context.state, 'E2') > ((context.memo.get('troops') as number | undefined) ?? Infinity)) {
-          context.memo.set('made', ((context.memo.get('made') as number | undefined) ?? 0) + 1);
+        // Conscripts that appear while a tank is firing at an enemy count; the ones trained in a lull do not.
+        const counted = (context.memo.get('counted') as Set<number> | undefined) ?? new Set<number>();
+        const seen = (context.memo.get('seen') as Set<number> | undefined) ?? new Set<number>();
+        for (const object of fresh(context, 'E2')) {
+          if (!seen.has(object.uid) && fighting) counted.add(object.uid);
+          seen.add(object.uid);
         }
-        context.memo.set('troops', count(context.state, 'E2'));
-        const made = (context.memo.get('made') as number | undefined) ?? 0;
+        context.memo.set('counted', counted);
+        context.memo.set('seen', seen);
+        const made = counted.size;
         if (!usedChord(context, ['KeyE'])) return Math.min(0.4, made / 5);
         return Math.min(1, made / 2);
       },

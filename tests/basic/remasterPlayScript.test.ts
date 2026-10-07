@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { DISPLAY_RESOLUTION, parseResolutionChoice } from '../../src/ui/pages/game/vmPageResolution';
 import { parseGameSpeed } from '../../src/games/gameSpeed';
+import { parseTrainingQuery } from '../../src/ui/pages/game/training/trainingQuery';
 
 const script = fileURLToPath(new URL('../../scripts/remaster/play.sh', import.meta.url));
 /** The address the launcher would open; --print starts nothing and needs neither game files nor an HD cache. */
@@ -37,6 +38,17 @@ describe.skipIf(process.platform === 'win32')('scripts/remaster/play.sh', () => 
   it('opens the original picture at exact pixels, at the main menu, on request', () => {
     const url = address(['--original', '--menu']);
     expect(Object.fromEntries(url.searchParams)).toEqual({ resolution: 'display', 'game-speed': '3' });
+  });
+
+  it('opens the practice lesson list with the HD look and gives the backquote key to the game', () => {
+    const url = address(['--train'], { RA2_PLAY_PORT: '15403' });
+    expect(url.origin).toBe('http://localhost:15403');
+    expect(url.searchParams.get('train')).toBe('menu');
+    expect(url.searchParams.get('debug-key')).toBe('0');
+    expect(url.searchParams.get('hd')).toBe('1');
+    // The lesson list starts nothing: the lesson's own address names the start page.
+    expect(url.searchParams.has('start-page')).toBe(false);
+    expect(parseTrainingQuery(url.search, true)).toEqual({ lesson: null, game: 'yr' });
   });
 
   it('starts at another speed, or at the page default, on request and rejects anything else', () => {

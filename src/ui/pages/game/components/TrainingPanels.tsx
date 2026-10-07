@@ -96,11 +96,18 @@ export function TrainingMenu({ lessons }: { lessons: state.TrainingMenuState['le
 /** Coach panel over the game picture: the task list while practising, the summary at the end. */
 export function CoachPanel({ panel }: { panel: state.TrainingLessonState }) {
   const [collapsed, setCollapsed] = useState(false);
+  // The page toolbar lies over the left edge of the picture while it is open (never in fullscreen).
+  const toolbarOpen = !useStore(state.controlsCollapsed);
   const { view } = panel;
   const done = view.phase === 'done';
   const active = view.tasks[view.taskIndex];
   return (
-    <aside id="coach-panel" data-phase={view.phase} aria-label={t('训练教练')}>
+    <aside
+      id="coach-panel"
+      data-phase={view.phase}
+      data-toolbar={toolbarOpen ? 'open' : 'closed'}
+      aria-label={t('训练教练')}
+    >
       <header>
         <strong>{localizeText(view.title)}</strong>
         <span className="coach-progress">
