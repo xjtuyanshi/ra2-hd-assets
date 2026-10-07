@@ -1,5 +1,6 @@
 import type { GameFrameReader } from './performance';
 import type { RenderPassthroughControl } from './renderPassthrough';
+import type { CreateGameCommandStateReader } from './commandState';
 import type { CreateGameRenderStateReader } from './renderState';
 import type { GuestMemory } from '../vm86/win32';
 
@@ -15,6 +16,11 @@ export interface GameRuntimeHooks {
    * its readers on demand and leave them out of production builds.
    */
   createRenderStateReader?: CreateGameRenderStateReader;
+  /**
+   * Opt-in (practice sessions only): read-only order state of the local player; see commandState.ts. Asynchronous for
+   * the same reason as createRenderStateReader.
+   */
+  createCommandStateReader?: CreateGameCommandStateReader;
   /** Apply narrow version-specific compatibility patches after copying the PE image into guest memory and before executing its entry point. */
   prepareImage?(memory: GuestMemory): void;
   /**

@@ -1,4 +1,5 @@
 import type { GamePerformanceSample } from '../games/performance';
+import type { GameCommandState } from '../games/commandState';
 import type { GameRenderState } from '../games/renderState';
 import type { VmDiagnosticAction, VmDiagnostics } from './vmDiagnostics';
 import type { PcmPlayOptions, PcmWaveFormat } from '../vm86/audio';
@@ -33,7 +34,8 @@ export interface VmInitConfig {
     | { kind: 'memory'; files: GameFileEntry[]; label: string }
     /** Two-stage loading: send the complete directory first, then read bytes through the port on demand; unextracted files wait for their producer. */
     | { kind: 'port'; port: MessagePort; names: string[]; label: string }
-    | { kind: 'http' };
+    /** `root`: sub-folder of the development server's game directory that holds this session's game folder. */
+    | { kind: 'http'; root?: string };
   /** Selected game in a multi-game directory; the Worker uses this after rediscovery. */
   preferredGameId: SupportedGameId;
   /**
@@ -63,6 +65,7 @@ export type MainToWorkerMessage =
   | { type: 'diagnostics'; action: VmDiagnosticAction; requestId: number }
   | { type: 'game-performance'; requestId: number }
   | { type: 'render-state'; requestId: number }
+  | { type: 'command-state'; requestId: number }
   | { type: 'attach-maps'; files: GameFileEntry[]; requestId: number }
   | { type: 'init'; config: VmInitConfig; requestId: number }
   | { type: 'wm'; m: number; w: number; l: number }
@@ -88,6 +91,7 @@ export type WorkerToMainMessage =
   | { type: 'diagnostics-reply'; requestId: number; value: VmDiagnostics }
   | { type: 'game-performance-reply'; requestId: number; value: GamePerformanceSample | null }
   | { type: 'render-state-reply'; requestId: number; value: GameRenderState | null }
+  | { type: 'command-state-reply'; requestId: number; value: GameCommandState | null }
   /** An omitted cell layer retains the preceding ordered reply's publication; explicit null clears it. */
   | {
       type: 'render-state-cells-unchanged';

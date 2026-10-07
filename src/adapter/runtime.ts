@@ -1,4 +1,5 @@
 import type { GamePerformanceSample } from '../games/performance';
+import type { GameCommandState } from '../games/commandState';
 import type { GameRenderState } from '../games/renderState';
 import { serveRelayPort, relayAddressCandidates, relayRoomFromPath } from 'relay-package/client';
 import { createBrowserEmulator } from '../platform/browser/emulator';
@@ -119,6 +120,7 @@ export async function createVmShell(
   const transfer: Transferable[] = [];
   let closeFilePort: (() => void) | undefined;
   let provider: VmInitConfig['provider'];
+  let httpRoot = '';
   if (sessionFilesOf(source.files)) {
     // Both first imports and restored caches use on-demand reads, preserving unextracted files without copying the entire package at init.
     // Serve the entire selected source, including scopes and overlays, so the Worker uses game-root-relative paths.
@@ -137,7 +139,12 @@ export async function createVmShell(
       : { kind: 'directory', handle };
   } else {
     // Sources that are neither session-backed nor authorized directories retain the development HTTP backend.
-    provider = { kind: 'http' };
+    // A session-specific game folder (for example a practice scenario's) lies one level down: the Worker scopes its
+    // backend to that sub-folder, so both sides read and write the same paths.
+    const scope = directoryScopeOf(source.files);
+    const folder = `/${source.game.folder}`.toLowerCase();
+    httpRoot = scope.toLowerCase().endsWith(folder) ? scope.slice(0, scope.length - folder.length) : '';
+    provider = httpRoot ? { kind: 'http', root: httpRoot } : { kind: 'http' };
   }
   const config: VmInitConfig = {
     provider,
@@ -146,7 +153,10 @@ export async function createVmShell(
     selectedExecutable: collectTransferEntries(
       new Map([
         [
-          [provider.kind === 'port' ? '' : directoryScopeOf(source.files), source.game.executable]
+          [
+            provider.kind === 'port' ? '' : httpRoot ? source.game.folder : directoryScopeOf(source.files),
+            source.game.executable,
+          ]
             .filter(Boolean)
             .join('/'),
           source.executableBytes,
@@ -331,6 +341,10 @@ export class Win32GameVm implements VmShell {
 
   getRenderState(): Promise<GameRenderState | null> {
     return this.core.getRenderState();
+  }
+
+  getCommandState(): Promise<GameCommandState | null> {
+    return this.core.getCommandState();
   }
 
   getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics> {

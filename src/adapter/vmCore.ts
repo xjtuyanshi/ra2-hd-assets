@@ -1,5 +1,11 @@
 import { GamePerformanceMeter, type GameFrameReader, type GamePerformanceSample } from './gamePerformance';
-import type { GameRenderState, GameRenderStateReader, RenderPassthroughControl } from './renderState';
+import type {
+  GameCommandState,
+  GameCommandStateReader,
+  GameRenderState,
+  GameRenderStateReader,
+  RenderPassthroughControl,
+} from './renderState';
 import { V86 } from 'v86';
 import { RangePrefetch } from './rangePrefetch';
 import { readGuestFileSearch } from './fileSearch';
@@ -133,6 +139,7 @@ export class VmCore {
   private executableHash: Promise<string> | null = null;
   /** Created on the first HD bridge poll in a running game; resolves to null (and is retried) when unsupported. */
   private renderStateReader: Promise<GameRenderStateReader | null> | null = null;
+  private commandStateReader: Promise<GameCommandStateReader | null> | null = null;
   /** Control of the game's native overlay passthrough patches; null unless the platform opted in and they installed. */
   private renderPassthrough: RenderPassthroughControl | null = null;
   private readonly gamePerformance = new GamePerformanceMeter();
@@ -449,6 +456,35 @@ export class VmCore {
     return reader();
   }
 
+  /**
+   * Practice sessions (dev only): the local player's orders, read from guest memory through a view and never written.
+   * Created lazily like the render-state reader; a shell page (menu, options, score screen) yields null.
+   */
+  async getCommandState(): Promise<GameCommandState | null> {
+    const emulator = this.emulator;
+    const create = this.source.game.runtimeHooks?.createCommandStateReader;
+    if (!emulator || !this.image || !create || this.currentPhase !== 'running') return null;
+    if (this.shim?.inspectShellPageTitle() !== '') return null;
+    const pending = (this.commandStateReader ??= (async () => {
+      this.executableHash ??= import('../utils/sha256').then(({ sha256Hex }) => sha256Hex(this.source.executableBytes));
+      const hash = await this.executableHash;
+      return this.emulator === emulator ? create(emulator, this.guestMemoryBytes, hash) : null;
+    })());
+    let reader: GameCommandStateReader | null;
+    try {
+      reader = await pending;
+    } catch (error) {
+      if (this.commandStateReader === pending) this.commandStateReader = null;
+      throw error;
+    }
+    if (this.emulator !== emulator || this.currentPhase !== 'running') return null;
+    if (!reader) {
+      if (this.commandStateReader === pending) this.commandStateReader = null;
+      return null;
+    }
+    return reader();
+  }
+
   async getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics> {
     if (action === 'start') {
       this.gamePerformance.reset();
@@ -579,6 +615,7 @@ export class VmCore {
     this.emulator = null;
     this.frameReader = null;
     this.renderStateReader = null;
+    this.commandStateReader = null;
     this.renderPassthrough = null;
     this.gamePerformance.reset();
     this.shim = null;
