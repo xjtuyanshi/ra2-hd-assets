@@ -24,6 +24,9 @@ export interface VmUsage {
   /** In the emulator's CPU loop; null when the platform cannot meter it (see VmExecutionProbe.usage). */
   guestMs: number | null;
   slices: number | null;
+  /** Guest code modules the emulator's JIT compiled and gave up (see VmExecutionUsage); null when unknown. */
+  jitCompiled: number | null;
+  jitFreed: number | null;
   /** Handling the guest's host calls (Win32 and DirectX shims), without the waits below; includes awaited file reads. */
   hostCallMs: number;
   /** Waits the guest asked for: Sleep and blocking waits while none of its threads can run. */

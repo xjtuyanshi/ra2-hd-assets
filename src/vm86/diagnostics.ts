@@ -22,6 +22,12 @@ export interface VmExecutionUsage {
   guestMs: number;
   /** CPU-loop slices (the loop is left at every guest halt, host call and scheduler yield). */
   slices: number;
+  /**
+   * Modules of guest code the emulator's JIT compiled and gave up; null when it does not expose those hooks. Many
+   * given up at once is its whole compiled cache being thrown away (src/vm86/jitModuleTable.ts).
+   */
+  jitCompiled: number | null;
+  jitFreed: number | null;
 }
 
 export interface VmExecutionProbe {

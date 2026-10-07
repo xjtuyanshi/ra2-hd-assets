@@ -536,7 +536,14 @@ export class VmCore {
     const usage = this.usage;
     if (!usage) return null;
     const loop = this.platform.executionProbe?.usage?.() ?? null;
-    return { guestMs: loop?.guestMs ?? null, slices: loop?.slices ?? null, ...usage, frames: this.presentedFrames };
+    return {
+      guestMs: loop?.guestMs ?? null,
+      slices: loop?.slices ?? null,
+      jitCompiled: loop?.jitCompiled ?? null,
+      jitFreed: loop?.jitFreed ?? null,
+      ...usage,
+      frames: this.presentedFrames,
+    };
   }
 
   /** Write the speed state explicitly supplied by the current game; return null if unavailable. */

@@ -22,6 +22,8 @@ afterEach(() => {
 const usage = (over: Partial<VmUsage> = {}): VmUsage => ({
   guestMs: 0,
   slices: 0,
+  jitCompiled: 0,
+  jitFreed: 0,
   hostCallMs: 0,
   guestWaitMs: 0,
   stateReadMs: 0,
@@ -86,6 +88,8 @@ describe('one record per window of a running battle', () => {
         usage: usage({
           guestMs: 4100,
           slices: 30_050,
+          jitCompiled: 37,
+          jitFreed: 899,
           hostCallMs: 400,
           guestWaitMs: 50,
           stateReadMs: 150,
@@ -125,6 +129,8 @@ describe('one record per window of a running battle', () => {
         slicesPerS: 6000,
         stateReadsPerS: 60,
         framesPerS: 41.8,
+        jitCompiled: 37,
+        jitFreed: 899,
       },
     } satisfies SpeedRecord);
   });
@@ -151,12 +157,16 @@ describe('one record per window of a running battle', () => {
       resolution: null,
     });
     expect(pair({ usage: null }).vm).toBeNull();
-    expect(pair({ usage: usage({ guestMs: null, slices: null }) }).vm).toMatchObject({
-      guestPct: null,
-      otherPct: null,
-      slicesPerS: null,
-      hostCallPct: 0,
-    });
+    expect(pair({ usage: usage({ guestMs: null, slices: null, jitCompiled: null, jitFreed: null }) }).vm).toMatchObject(
+      {
+        guestPct: null,
+        otherPct: null,
+        slicesPerS: null,
+        hostCallPct: 0,
+        jitCompiled: null,
+        jitFreed: null,
+      },
+    );
   });
 
   it('records nothing across a menu, a loading scenario, a stopped VM or another match', () => {

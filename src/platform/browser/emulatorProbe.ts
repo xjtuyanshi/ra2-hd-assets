@@ -7,6 +7,8 @@ interface Engine {
   yield_callback(tick: number): void;
   cpu: {
     main_loop(): number;
+    codegen_finalize?: (...args: never[]) => unknown;
+    jit_clear_func?: (...args: never[]) => unknown;
     wasm_memory?: WebAssembly.Memory;
     wm?: { exports?: { get_jit_config?: (index: number) => number; jit_get_cache_size?: () => number } };
   };
@@ -25,7 +27,13 @@ export class BrowserEmulatorProbe implements VmExecutionProbe {
   private delayed = new TimingStats();
   private stale = 0;
   /** Lasting CPU-loop accounting (see `usage`); installed below a capture's wrapper, never above it. */
-  private meter: { guestMs: number; slices: number; restore: () => void } | null = null;
+  private meter: {
+    guestMs: number;
+    slices: number;
+    jitCompiled: number | null;
+    jitFreed: number | null;
+    restore: () => void;
+  } | null = null;
   private meterWanted = false;
 
   attach(candidate: unknown, scheduler: string): void {
@@ -127,7 +135,10 @@ export class BrowserEmulatorProbe implements VmExecutionProbe {
   usage(): VmExecutionUsage | null {
     this.meterWanted = true;
     this.installMeter();
-    return this.meter ? { guestMs: this.meter.guestMs, slices: this.meter.slices } : null;
+    const meter = this.meter;
+    return meter
+      ? { guestMs: meter.guestMs, slices: meter.slices, jitCompiled: meter.jitCompiled, jitFreed: meter.jitFreed }
+      : null;
   }
 
   detach(): void {
@@ -139,14 +150,32 @@ export class BrowserEmulatorProbe implements VmExecutionProbe {
   private installMeter(): void {
     const engine = this.engine;
     if (!engine || this.meter || this.restore || !this.meterWanted) return;
-    const loop = engine.cpu.main_loop;
-    const meter = {
+    const cpu = engine.cpu;
+    const loop = cpu.main_loop;
+    // v86's wasm imports call these two through the cpu object, so counting wrappers on it see every module.
+    const finalize = cpu.codegen_finalize;
+    const free = cpu.jit_clear_func;
+    const meter: NonNullable<BrowserEmulatorProbe['meter']> = {
       guestMs: 0,
       slices: 0,
+      jitCompiled: typeof finalize === 'function' ? 0 : null,
+      jitFreed: typeof free === 'function' ? 0 : null,
       restore: () => {
-        engine.cpu.main_loop = loop;
+        cpu.main_loop = loop;
+        if (typeof finalize === 'function') cpu.codegen_finalize = finalize;
+        if (typeof free === 'function') cpu.jit_clear_func = free;
       },
     };
+    if (typeof finalize === 'function')
+      cpu.codegen_finalize = function (this: unknown, ...args: never[]) {
+        meter.jitCompiled!++;
+        return finalize.apply(this, args);
+      };
+    if (typeof free === 'function')
+      cpu.jit_clear_func = function (this: unknown, ...args: never[]) {
+        meter.jitFreed!++;
+        return free.apply(this, args);
+      };
     engine.cpu.main_loop = () => {
       const at = performance.now();
       try {

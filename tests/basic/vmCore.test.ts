@@ -732,7 +732,7 @@ describe('VmCore usage accounting (development telemetry)', () => {
       start: vi.fn(),
       stop: vi.fn(),
       sample: vi.fn(() => null as never),
-      usage: vi.fn(() => ({ guestMs: 40, slices: 9 })),
+      usage: vi.fn(() => ({ guestMs: 40, slices: 9, jitCompiled: 3, jitFreed: null })),
     };
     let presentFrame: (() => void) | undefined;
     const fixture = source();
@@ -767,6 +767,8 @@ describe('VmCore usage accounting (development telemetry)', () => {
       expect((await core.getDiagnostics('usage')).usage).toEqual({
         guestMs: 40,
         slices: 9,
+        jitCompiled: 3,
+        jitFreed: null,
         hostCallMs: 0,
         guestWaitMs: 0,
         stateReadMs: 0,
@@ -782,6 +784,8 @@ describe('VmCore usage accounting (development telemetry)', () => {
       expect((await core.getDiagnostics('sample')).usage).toEqual({
         guestMs: 40,
         slices: 9,
+        jitCompiled: 3,
+        jitFreed: null,
         hostCallMs: 6,
         guestWaitMs: 7,
         stateReadMs: 2,

@@ -128,6 +128,12 @@ export interface SpeedVmShares {
   slicesPerS: number | null;
   stateReadsPerS: number;
   framesPerS: number;
+  /**
+   * Modules of guest code the emulator compiled and gave up in the window (null when unknown). Hundreds given up
+   * at once: its compiled cache was thrown away and the game runs interpreted until the code is hot again.
+   */
+  jitCompiled: number | null;
+  jitFreed: number | null;
 }
 
 export interface SpeedRecord {
@@ -195,6 +201,8 @@ export function speedRecord(
       slicesPerS: a.slices !== null && b.slices !== null ? perSecond(b.slices - a.slices, vmMs) : null,
       stateReadsPerS: perSecond(b.stateReads - a.stateReads, vmMs),
       framesPerS: perSecond(b.frames - a.frames, vmMs),
+      jitCompiled: a.jitCompiled !== null && b.jitCompiled !== null ? b.jitCompiled - a.jitCompiled : null,
+      jitFreed: a.jitFreed !== null && b.jitFreed !== null ? b.jitFreed - a.jitFreed : null,
     };
   }
   return {
