@@ -36,6 +36,11 @@ export interface WaterUniforms {
    * dusk or night: their painted water is near-black, and a look tuned for daylight read as glowing blue on them).
    */
   artTone: ShaderNode;
+  /**
+   * Share of the softening of mirrored cliff edges (waterLook.ts cliffSoftMirror): 1 as drawn, 0 reads the mirror
+   * with its single plain tap everywhere (for same-frame look reviews).
+   */
+  cliffSoft: ShaderNode;
 }
 
 export function createWaterUniforms(): WaterUniforms {
@@ -49,6 +54,7 @@ export function createWaterUniforms(): WaterUniforms {
     rain: uniform(0),
     wind: uniform(0.3),
     artTone: uniform(0),
+    cliffSoft: uniform(1),
   };
 }
 

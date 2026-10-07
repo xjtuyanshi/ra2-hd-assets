@@ -1118,10 +1118,18 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
   texture, a half-resolution tile per level (2 x 2 tiles for four levels, the pixels four separate mirrors had). A
   level's tile renders only while its padded cell bounds intersect the camera frustum; fragment height selects the
   matching plane, and other levels keep sky only. Classic and legacy enhanced water retain the single lowest mirror
-  (three's own reflector). The atlas exists because a fragment shader may sample only 16 textures on a default
-  WebGPU device: with a render target per level the ground of a map with four water terraces needed 22, its
-  pipeline was refused and the ground was not drawn. `tests/terrainTextureBudget.test.ts` builds the ground of a map
-  with every optional layer through three's WGSL builder and fails above 16; it is 15 today, whatever the number of
+  (three's own reflector). Where that mirror shows raised ground it is read through a box of five taps one cell
+  diamond wide (`cliffSoftMirror`, `CLIFF_MIRROR_TAPS`): the mirror renders the terrain's own geometry, whose cliffs
+  stand on whole cells, so a mirrored cliff ended in a staircase of cell diagonals out in the water, where the painted
+  cliff is one line. The zone is a ground-vertex value (`cliffMirrorZone`, packed with the contact shade in the
+  `contact` attribute): the points whose mirrored view ray meets ground 0.75 levels or more above them within six
+  cells (a cliff of n levels mirrors n / 2 cells towards the camera), spread by a cell and a half. Outside it, and for
+  trees, buildings and units mirrored in open water, the lookup is the single tap it was; the two mirror textures are
+  the only ones bound whatever the tap count. `WaterUniforms.cliffSoft` (1) is the review switch. The atlas exists
+  because a fragment shader may sample only 16 textures on a default WebGPU device: with a render target per level the
+  ground of a map with four water terraces needed 22, its pipeline was refused and the ground was not drawn.
+  `tests/terrainTextureBudget.test.ts` builds the ground of a map with every optional layer through three's WGSL
+  builder and fails above 16; it is 15 today, whatever the number of
   levels. The ground and wall lighting model also skips three's DFG lookup, which it never reads.
   On maps staged as dusk or night (`AtmosphereProfile.kind`, see `ra2-assets/src/lights.ts` `mapAtmosphere`) the
   renderer sets `WaterUniforms.artTone` to 1 and water with painted art keeps the tone the map paints it in: the
