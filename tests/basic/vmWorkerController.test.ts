@@ -171,6 +171,9 @@ class FakeCore implements VmWorkerCore {
   async getGamePerformance(): Promise<null> {
     return null;
   }
+  async getCommandState(): Promise<null> {
+    return null;
+  }
   setTacticalPassthrough(flags: number): boolean {
     this.passthroughFlags.push(flags);
     return flags === 3;

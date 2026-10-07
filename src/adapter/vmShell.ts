@@ -1,5 +1,6 @@
 import type { SessionRuntime } from '../app/session/runtime';
 import type { GamePerformanceSample } from '../games/performance';
+import type { GameCommandState } from '../games/commandState';
 import type { GameRenderState } from '../games/renderState';
 import type { GuestMemRecordResult } from './memRecord';
 import type { VmDiagnosticAction, VmDiagnostics, VmRuntimeInfo } from './vmDiagnostics';
@@ -59,6 +60,11 @@ export interface VmShell extends SessionRuntime {
    * has not changed it resolves to the identical object again, so callers can skip their work by comparing references.
    */
   getRenderState(): Promise<GameRenderState | null>;
+  /**
+   * Practice sessions: the local player's selection, control groups and orders (src/games/commandState.ts); null when
+   * unsupported, left out of the build, or not in a battle. Read-only, on request only.
+   */
+  getCommandState(): Promise<GameCommandState | null>;
   /** Set the current RA2/YR game-speed setting; return the value actually written to the guest. */
   setGameSpeedFlag(value: number): Promise<number | null>;
   /**

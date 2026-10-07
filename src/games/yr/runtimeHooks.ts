@@ -35,11 +35,21 @@ export function skipYrStartupMovies(memory: GuestMemory): boolean {
  * constant, so production bundles contain none of that code and the hooks resolve to null there. A static import of
  * any of those modules elsewhere would ship them again; tests/basic/architecture/dependencies.test.ts rejects that.
  */
-const YR_HD_BRIDGE_HOOKS: Pick<GameRuntimeHooks, 'createRenderStateReader' | 'prepareRenderPassthrough'> = {
+const YR_HD_BRIDGE_HOOKS: Pick<
+  GameRuntimeHooks,
+  'createRenderStateReader' | 'createCommandStateReader' | 'prepareRenderPassthrough'
+> = {
   async createRenderStateReader(memory, size, hash) {
     if (import.meta.env.DEV) {
       const { createYrRenderStateReader } = await import('./renderState');
       return createYrRenderStateReader(memory, size, hash);
+    }
+    return null;
+  },
+  async createCommandStateReader(memory, size, hash) {
+    if (import.meta.env.DEV) {
+      const { createYrCommandStateReader } = await import('./commandState');
+      return createYrCommandStateReader(memory, size, hash);
     }
     return null;
   },

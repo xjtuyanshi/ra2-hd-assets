@@ -168,7 +168,8 @@ export const englishMessages = {
   '锁定鼠标；全屏可授权将 Esc 交给游戏': 'Lock the pointer; fullscreen can request permission to send Esc to the game',
   '获键盘锁授权后交给游戏；长按退出锁定': 'Sent to the game after keyboard-lock permission; hold to unlock',
   'Shift + 左键': 'Shift + left click',
-  '连点 ×10（50ms 间隔）': 'Click 10 times (50 ms apart)',
+  '在建造栏上连点 ×10（50ms 间隔）；战场上照常是加选':
+    'Click 10 times (50 ms apart) on the build bar; on the battlefield it adds to the selection as usual',
   沉浸式全屏: 'Immersive fullscreen',
   '时钟倍率 慢 / 快': 'Slower / faster clock',
   开发调试面板: 'Developer debug panel',
@@ -422,4 +423,24 @@ export const englishMessages = {
     '{0}This will overwrite {1} save files and restart the game:\n\n{2}\n\nFull list:\n{3}\n\nContinue?',
   界面出现错误: 'UI error',
   重新加载页面: 'Reload page',
+  '在游戏画面上显示全部按键；显示时游戏照常接收键盘和鼠标':
+    'Show every key over the game picture; the game keeps receiving the keyboard and mouse while it is shown',
+  '{0} 分 {1} 秒': '{0} min {1} s',
+  '{0} 秒': '{0} s',
+  操作训练: 'Controls practice',
+  '选一课开始。每一课都会自己检查你的按键和游戏里的结果，做对一步进下一步；卡住时会给提示。':
+    'Pick a lesson. Each lesson checks your key presses and the result in the game by itself, moves on when a step is right, and gives a hint when you are stuck.',
+  '先把浏览器窗口最大化或全屏，再点课程。进入游戏后按一次 Esc 跳过片头；训练中想看全部按键，点左侧工具栏的“快捷键”。':
+    'Maximise the browser window or make it fullscreen before picking a lesson. Press Esc once in the game to skip the intro; for every key, use "Hotkeys" in the toolbar on the left.',
+  训练教练: 'Practice coach',
+  展开: 'Expand',
+  收起: 'Collapse',
+  '正在准备场景…进入战场后开始计时。': 'Preparing the scenario… the clock starts once the battle is up.',
+  '提示：': 'Hint: ',
+  '本课完成，用时 {0}。': 'Lesson complete in {0}.',
+  '用到的操作：': 'Operations used: ',
+  '这次没用到：': 'Not used this time: ',
+  重新开始: 'Restart',
+  下一课: 'Next lesson',
+  课程列表: 'Lesson list',
 } as const;

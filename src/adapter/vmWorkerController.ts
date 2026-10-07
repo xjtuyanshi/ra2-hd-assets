@@ -1,4 +1,5 @@
 import type { GamePerformanceSample } from '../games/performance';
+import type { GameCommandState } from '../games/commandState';
 import type { GameRenderState } from '../games/renderState';
 import { PortRelaySocket } from 'relay-package/client';
 import { createBrowserEmulator } from '../platform/browser/emulator';
@@ -7,6 +8,7 @@ import type { VmDiagnosticAction, VmDiagnostics } from './vmDiagnostics';
 import { DirectoryGameFileProvider } from '../platform/browser/files/directory';
 import { gameVmConfiguration } from '../games/vmConfiguration';
 import { HttpGameFileProvider } from '../platform/browser/files/http';
+import { ScopedGameFileProvider } from '../resources/providers/scoped';
 import { OverlayGameFileProvider } from '../resources/providers/overlay';
 import { discoverGameSources } from '../resources/discovery/discoverGameSources';
 import { type GameFileProvider } from '../resources/contracts';
@@ -40,6 +42,7 @@ export interface VmWorkerCore {
   getPointerState(): VmPointerState | null;
   getGamePerformance(): Promise<GamePerformanceSample | null>;
   getRenderState(): Promise<GameRenderState | null>;
+  getCommandState(): Promise<GameCommandState | null>;
   setGameSpeedFlag(value: number): number | null;
   setTacticalPassthrough(flags: number): boolean;
   startMemRecord(): boolean;
@@ -152,6 +155,7 @@ function requestIdOf(message: MainToWorkerMessage): number | undefined {
     case 'diagnostics':
     case 'game-performance':
     case 'render-state':
+    case 'command-state':
     case 'init':
     case 'state':
     case 'guest-speed-flag':
@@ -258,6 +262,13 @@ export class VmWorkerController {
             type: 'game-performance-reply',
             requestId: message.requestId,
             value: (await this.core?.getGamePerformance()) ?? null,
+          });
+          break;
+        case 'command-state':
+          this.post({
+            type: 'command-state-reply',
+            requestId: message.requestId,
+            value: (await this.core?.getCommandState()) ?? null,
           });
           break;
         case 'render-state': {
@@ -407,7 +418,10 @@ export class VmWorkerController {
         true,
       );
     }
-    return new HttpGameFileProvider();
+    const http = new HttpGameFileProvider();
+    return config.provider.kind === 'http' && config.provider.root
+      ? new ScopedGameFileProvider(http, config.provider.root)
+      : http;
   }
 
   private async handleInit(config: VmInitConfig): Promise<void> {

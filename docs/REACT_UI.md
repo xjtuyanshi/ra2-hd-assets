@@ -14,6 +14,7 @@ The directory is organized by page; see the [UI directory guide](../src/ui/READM
 - `src/ui/pages/game/hooks/`: effect/ref interfaces for file pickers and browser events; unmount cleans up listeners and asynchronous requests.
 - `src/ui/pages/game/state/`: game-page state; generic stores and the `useSyncExternalStore` subscription hook live in `src/ui/shared/state/`.
 - `gameSourcePicker.ts`, `runtimeToolbar.ts`, and `page.ts`: file import, performance sampling, and VM lifecycle services. They neither render components nor mutate ordinary UI nodes.
+- `src/ui/pages/game/training/` and `components/TrainingPanels.tsx`: practice lessons (development, `?train=`) and the hotkey cheat sheet. The session controller owns one interval timer and publishes low-frequency views to `uiState.trainingPanel`; the panels are drawn inside `#screen-frame`, let every pointer event through to the game except on their own buttons and links, and return keyboard focus through `uiState.gameFocus`. See [Practice lessons](remaster/TRAINING.md).
 - `src/ui/shared/i18n/`: typed UI messages, browser-language selection, and presentation-boundary translation of existing metadata and diagnostics.
 
 ## Localization

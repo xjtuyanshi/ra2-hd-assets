@@ -1,9 +1,10 @@
 import { t, localizeLabel, localizeText } from '../../../shared/i18n/translate';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { parseRa2RelayUrl } from '../../../../games/ra2/networkTransport';
 import type { GameSource } from '../../../../games/source';
 import { useGameSourcePicker } from '../hooks/useGameSourcePicker';
 import { SUPPORTED_GAMES } from '../../../../games/catalog';
+import { parseTrainingQuery } from '../training/trainingQuery';
 import './GameSourcePicker.css';
 
 export function GameSourcePickerView({ onSelected }: { onSelected(source: GameSource): void }) {
@@ -13,6 +14,19 @@ export function GameSourcePickerView({ onSelected }: { onSelected(source: GameSo
     const query = new URLSearchParams(window.location.search);
     return query.get('network') !== '0' && (query.get('network') === '1' || query.has('relay'));
   });
+  // Practice lessons (development, ?train=<lesson>): go straight to the development files and the lesson's game.
+  const autoStart = useRef<'idle' | 'picked' | 'chosen'>('idle');
+  useEffect(() => {
+    const training = parseTrainingQuery(window.location.search);
+    if (!training?.lesson || props.busy) return;
+    if (autoStart.current === 'idle') {
+      autoStart.current = 'picked';
+      props.pick('development');
+    } else if (autoStart.current === 'picked' && props.games.includes(training.game)) {
+      autoStart.current = 'chosen';
+      void props.chooseGame(training.game);
+    }
+  }, [props]);
   let relayError = '';
   try {
     if (networkEnabled) parseRa2RelayUrl(relay);

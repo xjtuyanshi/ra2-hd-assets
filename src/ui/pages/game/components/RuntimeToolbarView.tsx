@@ -11,7 +11,7 @@ import { PerformanceDiagnostics } from './PerformanceDiagnostics';
 import { GameSelect } from './GameSelect';
 import type { UpscaleMode } from '../vmFrameRenderer';
 import { DISPLAY_RESOLUTION } from '../vmPageResolution';
-import { controlsCollapsed } from '../state/uiState';
+import { controlsCollapsed, hotkeySheet, hotkeySheetVisible } from '../state/uiState';
 import { DEFAULT_VOLUME_PERCENT } from '../../../../adapter/audio';
 import { useStore } from '../../../shared/state/useStore';
 import { isDesktopEdge, showEdgeMouseNotice } from './edgeMouseNotice';
@@ -204,6 +204,8 @@ export function RuntimeToolbarView({
   setResolution(value: string): void;
 }) {
   const collapsed = useStore(controlsCollapsed);
+  const hotkeys = useStore(hotkeySheet) !== null;
+  const hotkeysShown = useStore(hotkeySheetVisible);
   const [fullscreen, setFullscreen] = useState(!!document.fullscreenElement);
   const [changingResolution, setChangingResolution] = useState(false);
   const [cheats, setCheats] = useState(false);
@@ -532,6 +534,21 @@ export function RuntimeToolbarView({
             : model.hdQuality
               ? t('画面：高清 · 减负 {0}/{1}', model.hdQuality, Math.max(1, (model.hdQualityTiers ?? 1) - 1))
               : t('画面：高清')}
+        </button>
+      )}
+      {hotkeys && (
+        <button
+          id="vm-hotkeys"
+          className="toolbar-button"
+          type="button"
+          aria-pressed={hotkeysShown}
+          title={t('在游戏画面上显示全部按键；显示时游戏照常接收键盘和鼠标')}
+          onClick={() => {
+            hotkeySheetVisible.set(!hotkeysShown);
+            canvas.focus({ preventScroll: true });
+          }}
+        >
+          {t('快捷键')}
         </button>
       )}
       <button

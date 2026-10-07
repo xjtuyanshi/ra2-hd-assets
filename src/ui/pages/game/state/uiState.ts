@@ -5,6 +5,8 @@ import type { GameSource } from '../../../../games/source';
 import type { SupportedGame, SupportedGameId } from '../../../../games/catalog';
 import type { DebugPanel } from '../components/DebugPanel';
 import type { RuntimeToolbarView } from '../components/RuntimeToolbarView';
+import type { LessonRunView } from '../../../../app/training/lessonRun';
+import type { GameHotkeySheet } from '../../../../games/hotkeys';
 import { createStore } from '../../../shared/state/store';
 
 export const toolbarState = createStore<ComponentProps<typeof RuntimeToolbarView> | null>(null);
@@ -15,6 +17,26 @@ export const hdStatus = createStore<string | null>(null);
 export const debugVisible = createStore(false);
 export const debugState = createStore<ComponentProps<typeof DebugPanel> | null>(null);
 export const helpVisible = createStore(false);
+/** Gives the keyboard back to the game picture; set by the page while a game runs (overlay controls call it). */
+export const gameFocus = createStore<(() => void) | null>(null);
+/** The running game's cheat sheet (null: the game has none) and whether its overlay is open. */
+export const hotkeySheet = createStore<GameHotkeySheet | null>(null);
+export const hotkeySheetVisible = createStore(false);
+/** Practice mode (development, `?train=`): the lesson list, or the coach panel of the running lesson. */
+export interface TrainingMenuState {
+  mode: 'menu';
+  lessons: { id: string; title: string; summary: string; href: string }[];
+}
+export interface TrainingLessonState {
+  mode: 'lesson';
+  view: LessonRunView;
+  restartHref: string;
+  nextHref: string | null;
+  menuHref: string;
+  /** Shown while the lesson waits for the battle (for example why it is being restarted). */
+  note: string | null;
+}
+export const trainingPanel = createStore<TrainingMenuState | TrainingLessonState | null>(null);
 export const gameRunning = createStore(false);
 export const mainPanel = createStore<{ phase: 'blocked' | 'error' | 'exited'; detail: string } | null>(null);
 export interface BootState {

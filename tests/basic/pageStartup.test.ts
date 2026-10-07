@@ -20,6 +20,7 @@ function shell(): VmShell {
     getPointerState: async () => null,
     getGamePerformance: async () => null,
     getRenderState: async () => null,
+    getCommandState: async () => null,
     setGameSpeedFlag: async () => null,
     setTacticalPassthrough: async () => false,
     startMemRecord: async () => false,

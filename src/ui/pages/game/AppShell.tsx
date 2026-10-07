@@ -1,6 +1,14 @@
 import { t } from '../../shared/i18n/translate';
 import { useEffect, useRef } from 'react';
-import { BootRegion, DebugRegion, Dialogs, MainRegion, ScreenStatus, Toolbar } from './components/AppRegions';
+import {
+  BootRegion,
+  DebugRegion,
+  Dialogs,
+  MainRegion,
+  OverlayRegion,
+  ScreenStatus,
+  Toolbar,
+} from './components/AppRegions';
 import { gameRunning, mainPanel, sourceRequest } from './state/uiState';
 import { useStore } from '../../shared/state/useStore';
 import { usePanelWheelAcceleration } from './hooks/usePanelWheelAcceleration';
@@ -39,6 +47,7 @@ export function AppShell() {
           <div id="screen-frame">
             <canvas ref={canvas} id="screen" width="800" height="600"></canvas>
             <ScreenStatus />
+            <OverlayRegion />
             <span className="lock-corner lock-corner-tl" aria-hidden="true"></span>
             <span className="lock-corner lock-corner-tr" aria-hidden="true"></span>
             <span className="lock-corner lock-corner-bl" aria-hidden="true"></span>

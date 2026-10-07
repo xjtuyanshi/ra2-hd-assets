@@ -4,6 +4,8 @@
 #   scripts/remaster/play.sh              HD picture, skirmish setup as the first page
 #   scripts/remaster/play.sh --original   the original picture at exact 2x pixels (no HD bridge)
 #   scripts/remaster/play.sh --menu       start at the game's main menu instead of the skirmish setup
+#   scripts/remaster/play.sh --train      practice lessons: the lesson list (docs/remaster/TRAINING.md); builds the
+#                                         practice scenarios below <main checkout>/gameres/s2x/play/train on first use
 #   scripts/remaster/play.sh --print      only print the address (nothing is started)
 #
 # The game resolution is matched to the browser window when the game starts (one game pixel = two device pixels, the
@@ -38,6 +40,7 @@ for arg in "$@"; do
   case "$arg" in
     --original) mode=original ;;
     --menu) page=menu ;;
+    --train) page=train ;;
     --print) print=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
@@ -53,11 +56,24 @@ case "$speed" in
   *) echo "RA2_PLAY_SPEED must be 0..6 or default: $speed" >&2; exit 2 ;;
 esac
 [ "$page" = skirmish ] && query="$query&start-page=skirmish"
+# Practice: the lesson list; the backquote key goes to the game instead of the page's debug panel.
+[ "$page" = train ] && query="$query&train=menu&debug-key=0"
 [ "$mode" = hd ] && query="hd=1&hd-look=cinematic&hd-fx=enhanced&hd-water=enhanced&hd-vlook=remaster&hd-vproj=vehicles-hd&hd-ui=1&$query"
 url="http://localhost:$port/?$query"
 if [ "$print" = 1 ]; then echo "$url"; exit 0; fi
 
 game="${RA2_GAME_ROOT:-$main/game}"
+train="${RA2_TRAIN_DIR:-$main/gameres/s2x/play/train}"
+if [ "$page" = train ]; then
+  # Scenario game folders (links to the installation + one scratch map each) and a cache root of links.
+  install="$game/ra2"
+  if [ ! -d "$train/gameroots/ra2" ] || [ ! -d "$train/hd-cache/_library" ]; then
+    echo "Preparing the practice scenarios in $train ..."
+    python3 "$here/scripts/remaster/training/buildScenarios.py" --out "$train" --install "$install" ${RA2_HD_CACHE_DIR:+--farm "$RA2_HD_CACHE_DIR"} || exit 1
+  fi
+  game="$train/gameroots"
+  RA2_HD_CACHE_DIR="$train/hd-cache"
+fi
 # The play cache (every prepared map; the newest build first) when one was built, otherwise the default cache of the
 # development server.
 cache="${RA2_HD_CACHE_DIR:-}"

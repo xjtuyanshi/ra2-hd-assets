@@ -550,7 +550,8 @@ device pixels. Any other scale resamples every texel: a 1152x744 game filling a 
 server and opens the HD page with the approved look, `resolution=display`, `game-speed=3` (the original scale's normal
 speed; the page's own startup default is the fastest, see
 [the startup configuration](../RA2_COMMAND_LINE_AND_SPAWNER.md#current-startup-configuration)) and the skirmish setup as
-the first page; `--original` opens the original picture at exact pixels instead, `--print` only prints the address. It
+the first page; `--original` opens the original picture at exact pixels instead, `--train` opens the practice lessons
+([Practice lessons](TRAINING.md)), `--print` only prints the address. It
 reads the player's game from `RA2_GAME_ROOT` (default `game/`), the HD cache from `RA2_HD_CACHE_DIR` (default: the
 newest play cache under `gameres/` that holds `_library/`) and the starting speed from `RA2_PLAY_SPEED`, and names
 the stall log for the development server in `RA2_PERF_LOG` (default `gameres/s2x/play/perfmon/stalls.jsonl` under

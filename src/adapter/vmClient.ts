@@ -1,4 +1,5 @@
 import type { GamePerformanceSample } from '../games/performance';
+import type { GameCommandState } from '../games/commandState';
 import type { GameRenderState } from '../games/renderState';
 import type { VmDiagnosticAction, VmDiagnostics, VmRuntimeInfo } from './vmDiagnostics';
 import { normalizeGameClockRate } from '../vm86/clock';
@@ -196,6 +197,10 @@ export class WorkerVmClient implements VmShell {
     return this.request((requestId) => ({ type: 'render-state', requestId }));
   }
 
+  async getCommandState(): Promise<GameCommandState | null> {
+    return this.request((requestId) => ({ type: 'command-state', requestId }));
+  }
+
   async getPointerState(): Promise<VmPointerState | null> {
     return this.request((requestId) => ({ type: 'state', kind: 'pointer', requestId }));
   }
@@ -369,6 +374,7 @@ export class WorkerVmClient implements VmShell {
         this.resolveRequest(message.requestId, this.lastRenderState);
         break;
       case 'game-performance-reply':
+      case 'command-state-reply':
       case 'diagnostics-reply':
       case 'state-reply':
         this.resolveRequest(message.requestId, message.value);

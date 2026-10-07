@@ -1,6 +1,13 @@
 import { t } from '../../shared/i18n/translate';
 import type { VmShell } from '../../../adapter/runtime';
-import { keyLParam, normalizePointerButton, rescaleLogicalPointer, virtualKey, win32CharacterCode } from './input';
+import {
+  keyLParam,
+  normalizePointerButton,
+  rescaleLogicalPointer,
+  virtualKey,
+  win32CharacterCode,
+  type KeyLike,
+} from './input';
 import { calculateCanvasFit } from './canvasFit';
 import { installFullscreenKeyboardLock, type KeyboardLockState } from './keyboardLock';
 
@@ -190,6 +197,37 @@ export function installCanvasFit(
   });
 }
 
+/** One input as it was forwarded to the game (modifiers as the game sees them), for observers such as practice lessons. */
+export interface GameInputObservation {
+  type: 'keydown' | 'pointerdown' | 'pointerup';
+  /** KeyboardEvent.code of a key (after the page's modifier mapping), or "Mouse0" / "Mouse1" / "Mouse2". */
+  code: string;
+  ctrl: boolean;
+  alt: boolean;
+  shift: boolean;
+  /** Guest frame pixel of a pointer input. */
+  x?: number;
+  y?: number;
+}
+
+export interface GameInputOptions {
+  /**
+   * Where Shift + left button is replaced by ten plain clicks (the page's build-queue convenience). Without it the
+   * repeat applies everywhere, which also swallows the game's own Shift + click (add to the selection); a game passes
+   * its sidebar region here so the tactical view receives Shift + click unchanged.
+   */
+  shiftClickRepeat?: (x: number, y: number, frame: GameFrameSize) => boolean;
+  /**
+   * Apple keyboards: forward ⌘ as the game's Ctrl key (in addition to Control itself). macOS keeps several Control
+   * combinations for itself (Control + click is the secondary click, Control + F2..F4 and Control + arrows are system
+   * shortcuts) while ⌘ has no meaning in the game. macOS delivers no keyup for other keys while ⌘ is held, so such keys
+   * are released by the page shortly after they were pressed.
+   */
+  metaAsControl?: boolean;
+  /** Called for every key press and mouse button change that was forwarded; never able to change or block it. */
+  observe?: (observation: GameInputObservation) => void;
+}
+
 export interface InstalledGameInput {
   adaptResolution(width: number, height: number): void;
   /** Latest locally tracked guest coordinates, copied for presentation without dispatching input. */
@@ -203,6 +241,7 @@ export function installGameInput(
   lockDesktopMouse = true,
   onCursorPresentation?: (x: number, y: number, visible: boolean) => void,
   getFrameSize: GameFrameSizeProvider = () => ({ width: 800, height: 600 }),
+  options: GameInputOptions = {},
 ): InstalledGameInput {
   // Retain system mouse acceleration/speed by default; raw counts are not the system cursor's screen displacement.
   // Only explicit ?raw-mouse=1 bypasses system adjustment; never enable it automatically on Windows.
@@ -244,7 +283,46 @@ export function installGameInput(
   let compatibilityCtrlPrimaryActive = false;
   const hostPlatform = `${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`;
   const normalizedPointerButtons = new Map<number, number>();
-  const heldKeys = new Map<string, { vk: number; system: boolean }>();
+  const heldKeys = new Map<string, { vk: number; system: boolean; meta?: boolean }>();
+  const applePlatform = /(?:Macintosh|MacIntel|iPhone|iPad|iPod)/i.test(hostPlatform);
+  const metaAsControl = !!options.metaAsControl && applePlatform;
+  /** Keys released by the page because ⌘ was held (see GameInputOptions.metaAsControl): their real keyup is dropped. */
+  const metaReleased = new Set<string>();
+  const metaReleaseTimers = new Map<string, number>();
+  const META_KEY_RELEASE_MS = 60;
+  /** The code a key is forwarded as: ⌘ plays Ctrl when the mapping is on. */
+  const forwardedCode = (code: string): string =>
+    metaAsControl && code === 'MetaLeft'
+      ? 'ControlLeft'
+      : metaAsControl && code === 'MetaRight'
+        ? 'ControlRight'
+        : code;
+  const MODIFIER_CODES = new Set([
+    'ShiftLeft',
+    'ShiftRight',
+    'ControlLeft',
+    'ControlRight',
+    'AltLeft',
+    'AltRight',
+    'MetaLeft',
+    'MetaRight',
+  ]);
+  const observe = options.observe;
+  const notify = (type: GameInputObservation['type'], code: string, lParam?: number): void => {
+    if (!observe) return;
+    try {
+      observe({
+        type,
+        code,
+        ctrl: heldModifier(0x11),
+        alt: heldModifier(0x12),
+        shift: heldModifier(0x10),
+        ...(lParam === undefined ? {} : { x: lParam & 0xffff, y: (lParam >>> 16) & 0xffff }),
+      });
+    } catch {
+      // An observer must never disturb input delivery.
+    }
+  };
   // Modifiers may already be held before the canvas gains focus; synthesize their missing down edges on pointerdown,
   // then release normally on keyup/blur to keep RA2's key-state table aligned with browser physical state.
   const reconciledModifiers = new Map<number, string>();
@@ -402,10 +480,21 @@ export function installGameInput(
       if (
         state.vk === genericVk ||
         (genericVk === 0x10 && (state.vk === 0xa0 || state.vk === 0xa1)) ||
-        (genericVk === 0x11 && (state.vk === 0xa2 || state.vk === 0xa3))
+        (genericVk === 0x11 && (state.vk === 0xa2 || state.vk === 0xa3)) ||
+        (genericVk === 0x12 && (state.vk === 0xa4 || state.vk === 0xa5))
       )
         return true;
     }
+    return false;
+  };
+  /**
+   * The physical Control key, for the macOS "Control + primary button is a secondary click" repair only: ⌘ playing
+   * Ctrl must not turn a real secondary click into a primary one.
+   */
+  const physicalControl = (event: MouseEvent): boolean => {
+    if (event.ctrlKey) return true;
+    for (const state of heldKeys.values())
+      if (!state.meta && (state.vk === 0x11 || state.vk === 0xa2 || state.vk === 0xa3)) return true;
     return false;
   };
   const modifierFlags = (event: MouseEvent): number => {
@@ -495,7 +584,7 @@ export function installGameInput(
   const reconcileMouseModifiers = (event: MouseEvent) => {
     const modifiers: Array<{ active: boolean; generic: number; code: string; scanCode: number }> = [
       { active: event.shiftKey, generic: 0x10, code: 'ShiftLeft', scanCode: 0x2a },
-      { active: event.ctrlKey, generic: 0x11, code: 'ControlLeft', scanCode: 0x1d },
+      { active: event.ctrlKey || (metaAsControl && event.metaKey), generic: 0x11, code: 'ControlLeft', scanCode: 0x1d },
     ];
     for (const modifier of modifiers) {
       if (!modifier.active) continue;
@@ -506,10 +595,45 @@ export function installGameInput(
           (modifier.generic === 0x11 && (state.vk === 0xa2 || state.vk === 0xa3)),
       );
       if (alreadyForwarded) continue;
-      heldKeys.set(modifier.code, { vk: modifier.generic, system: false });
+      heldKeys.set(modifier.code, {
+        vk: modifier.generic,
+        system: false,
+        ...(modifier.generic === 0x11 && !event.ctrlKey ? { meta: true } : {}),
+      });
       reconciledModifiers.set(modifier.generic, modifier.code);
       syncKeyState(modifier.code, modifier.generic, true);
       vm.postMessage(0x0100, modifier.generic, 1 | (modifier.scanCode << 16)); // WM_KEYDOWN
+    }
+  };
+
+  /**
+   * A modifier the page still holds although this keyboard event reports it up has lost its keyup (a system shortcut
+   * or overlay took the release without the window losing focus). Release it here: a Ctrl or Alt left down turns
+   * every later click into a forced order (force fire, force move) and Shift into an add-to-selection. Only keyboard
+   * events decide this; pointer events can drop modifier flags during Pointer Lock.
+   */
+  const releaseStaleModifiers = (event: KeyboardEvent) => {
+    for (const [held, state] of [...heldKeys]) {
+      const generic =
+        state.vk === 0x10 || state.vk === 0xa0 || state.vk === 0xa1
+          ? 0x10
+          : state.vk === 0x11 || state.vk === 0xa2 || state.vk === 0xa3
+            ? 0x11
+            : state.vk === 0x12 || state.vk === 0xa4 || state.vk === 0xa5
+              ? 0x12
+              : 0;
+      if (!generic) continue;
+      const down =
+        generic === 0x10
+          ? event.shiftKey
+          : generic === 0x12
+            ? event.altKey
+            : event.ctrlKey || (metaAsControl && event.metaKey);
+      if (down) continue;
+      heldKeys.delete(held);
+      if (reconciledModifiers.get(generic) === held) reconciledModifiers.delete(generic);
+      syncKeyState(held, state.vk, false);
+      vm.postMessage(state.system ? 0x0105 : 0x0101, state.vk, 0xc000_0001);
     }
   };
 
@@ -520,6 +644,9 @@ export function installGameInput(
       vm.postMessage(state.system ? 0x0105 : 0x0101, state.vk, 0xc000_0001);
     }
     reconciledModifiers.clear();
+    for (const timer of metaReleaseTimers.values()) window.clearTimeout(timer);
+    metaReleaseTimers.clear();
+    metaReleased.clear();
   };
 
   const clearTouchTimer = () => {
@@ -760,7 +887,7 @@ export function installGameInput(
         return;
       }
       if (!event.isPrimary) return;
-      const controlDown = event.ctrlKey || heldModifier(0x11);
+      const controlDown = physicalControl(event);
       const button = normalizePointerButton(event.button, controlDown, hostPlatform, event.buttons);
       const info = pointerButton(button);
       if (!info) return;
@@ -776,11 +903,17 @@ export function installGameInput(
       if (lockDesktopMouse && desktopMouse && document.pointerLockElement !== canvas) lockAfterPointerUp = true;
       mouseFlags |= info.flag;
       vm.setKeyState(info.vk, true);
-      if (desktopMouse && info.vk === 0x01 && event.shiftKey) {
+      const repeat =
+        desktopMouse &&
+        info.vk === 0x01 &&
+        event.shiftKey &&
+        (options.shiftClickRepeat?.(lParam & 0xffff, (lParam >>> 16) & 0xffff, getFrameSize()) ?? true);
+      if (repeat) {
         startShiftBurst(lParam, modifierFlags(event));
       } else {
         vm.postMessage(info.down, modifierFlags(event), lParam);
       }
+      notify('pointerdown', `Mouse${button}`, lParam);
       // Always capture before locking so the initial pointerup returns to the same canvas before Pointer Lock;
       // after locking, events already remain directed to the canvas.
       if (!desktopMouse || document.pointerLockElement !== canvas) {
@@ -806,11 +939,12 @@ export function installGameInput(
       if (!event.isPrimary) return;
       const button =
         normalizedPointerButtons.get(event.pointerId) ??
-        normalizePointerButton(event.button, event.ctrlKey || heldModifier(0x11), hostPlatform, event.buttons);
+        normalizePointerButton(event.button, physicalControl(event), hostPlatform, event.buttons);
       normalizedPointerButtons.delete(event.pointerId);
       const info = pointerButton(button);
       if (!info) return;
       flushDesktopMove();
+      notify('pointerup', `Mouse${button}`, mouseLParam(event));
       const desktopMouse = event.pointerType === 'mouse';
       if (info.vk === 0x01 && shiftBurstTimer !== null) {
         // During Shift-repeat, the repeater already sends each down/up pair; physical up only clears state without another event.
@@ -839,7 +973,7 @@ export function installGameInput(
   // PointerEvent. Normal PointerEvent handling records lastCtrlPrimaryDispatch first,
   // so supplement only when absent to avoid duplicate DOWN/UP on other browsers.
   on(canvas, 'mousedown', (event) => {
-    const controlDown = event.ctrlKey || heldModifier(0x11);
+    const controlDown = physicalControl(event);
     if (!controlDown || normalizePointerButton(event.button, controlDown, hostPlatform, event.buttons) !== 0) return;
     const lParam = mouseLParam(event);
     if (
@@ -958,16 +1092,40 @@ export function installGameInput(
       // Page shortcuts (` debug / [ ] speed / F11 fullscreen / ? help / \\ HD view) are not injected into the game.
       if (UI_SHORTCUT_KEYS.has(event.key)) return;
       if (document.activeElement !== canvas || event.isComposing) return;
-      const vk = virtualKey(event);
+      releaseStaleModifiers(event);
+      const code = forwardedCode(event.code);
+      const mapped = code !== event.code;
+      const key: KeyLike = mapped
+        ? { code, key: 'Control', location: event.location, altKey: event.altKey, ctrlKey: true, metaKey: false }
+        : event;
+      const vk = virtualKey(key);
       if (!vk) return;
-      const wasDown = heldKeys.has(event.code);
-      const system = event.altKey || event.code === 'AltLeft' || event.code === 'AltRight';
-      heldKeys.set(event.code, { vk, system });
-      syncKeyState(event.code, vk, true);
-      const lParam = keyLParam(event, false, wasDown);
+      const wasDown = heldKeys.has(code);
+      const system = event.altKey || code === 'AltLeft' || code === 'AltRight';
+      heldKeys.set(code, mapped ? { vk, system, meta: true } : { vk, system });
+      syncKeyState(code, vk, true);
+      const lParam = keyLParam(key, false, wasDown);
       vm.postMessage(system ? 0x0104 : 0x0100, vk, lParam); // WM_SYSKEYDOWN / WM_KEYDOWN
       const character = win32CharacterCode(event);
       if (character !== null) vm.postMessage(0x0102, character, lParam); // WM_CHAR
+      if (!wasDown && !MODIFIER_CODES.has(event.code)) notify('keydown', code);
+      if (metaAsControl && event.metaKey && !MODIFIER_CODES.has(event.code)) {
+        // macOS sends no keyup for this key while ⌘ stays down: release it here so it can be pressed again.
+        const previous = metaReleaseTimers.get(code);
+        if (previous !== undefined) window.clearTimeout(previous);
+        metaReleaseTimers.set(
+          code,
+          window.setTimeout(() => {
+            metaReleaseTimers.delete(code);
+            const state = heldKeys.get(code);
+            if (!state) return;
+            heldKeys.delete(code);
+            metaReleased.add(code);
+            syncKeyState(code, state.vk, false);
+            vm.postMessage(state.system ? 0x0105 : 0x0101, state.vk, keyLParam(key, true, true));
+          }, META_KEY_RELEASE_MS),
+        );
+      }
       event.preventDefault();
       event.stopPropagation();
     },
@@ -978,26 +1136,37 @@ export function installGameInput(
     'keyup',
     (event) => {
       if (UI_SHORTCUT_KEYS.has(event.key)) return;
+      const code = forwardedCode(event.code);
+      if (metaReleased.delete(code)) {
+        // Already released by the page while ⌘ was held; the late physical keyup has nothing left to do.
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       const genericModifier =
-        event.code === 'ShiftLeft' || event.code === 'ShiftRight'
+        code === 'ShiftLeft' || code === 'ShiftRight'
           ? 0x10
-          : event.code === 'ControlLeft' || event.code === 'ControlRight'
+          : code === 'ControlLeft' || code === 'ControlRight'
             ? 0x11
             : 0;
       const reconciledCode = genericModifier ? reconciledModifiers.get(genericModifier) : undefined;
-      const state = heldKeys.get(event.code) ?? (reconciledCode ? heldKeys.get(reconciledCode) : undefined);
+      const state = heldKeys.get(code) ?? (reconciledCode ? heldKeys.get(reconciledCode) : undefined);
       if (document.activeElement !== canvas && !state) return;
-      const vk = state?.vk ?? virtualKey(event);
+      const key: KeyLike =
+        code !== event.code
+          ? { code, key: 'Control', location: event.location, altKey: event.altKey, ctrlKey: false, metaKey: false }
+          : event;
+      const vk = state?.vk ?? virtualKey(key);
       if (!vk) return;
-      const system = state?.system || event.altKey || event.code === 'AltLeft' || event.code === 'AltRight';
+      const system = state?.system || event.altKey || code === 'AltLeft' || code === 'AltRight';
       if (reconciledCode) {
         heldKeys.delete(reconciledCode);
         reconciledModifiers.delete(genericModifier);
         syncKeyState(reconciledCode, genericModifier, false);
       }
-      heldKeys.delete(event.code);
-      syncKeyState(event.code, vk, false);
-      vm.postMessage(system ? 0x0105 : 0x0101, vk, keyLParam(event, true, true)); // WM_SYSKEYUP / WM_KEYUP
+      heldKeys.delete(code);
+      syncKeyState(code, vk, false);
+      vm.postMessage(system ? 0x0105 : 0x0101, vk, keyLParam(key, true, true)); // WM_SYSKEYUP / WM_KEYUP
       event.preventDefault();
       event.stopPropagation();
     },
@@ -1035,11 +1204,15 @@ export function installGameInput(
     lockHint.classList.add('show');
   };
   removers.push(
-    installFullscreenKeyboardLock(canvas, (state) => {
-      keyboardLockState = state;
-      if (state !== 'inactive' || document.pointerLockElement === canvas) showLockHint();
-      else lockHint.classList.remove('show');
-    }),
+    installFullscreenKeyboardLock(
+      canvas,
+      (state) => {
+        keyboardLockState = state;
+        if (state !== 'inactive' || document.pointerLockElement === canvas) showLockHint();
+        else lockHint.classList.remove('show');
+      },
+      metaAsControl ? null : ['Escape'],
+    ),
   );
 
   const pointerLockChanged = () => {
