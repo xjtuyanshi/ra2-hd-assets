@@ -59,6 +59,7 @@ import {
   type EngulfObject,
 } from '../ra2/fireEngulf';
 import { EFFECT_DECAL_LIFT, foundationPointPush, GROUND_DEPTH } from '../ra2/cardDepth';
+import { cargoLook } from '../ra2/cargoLook';
 import {
   addRefineryFoundation,
   harvesterRefineryBonus,
@@ -146,6 +147,11 @@ export interface LiveObject {
    * sparks at a harvesting miner's scoop): art id, absolute frame and the lepton point of the art's canvas centre.
    */
   underlay?: { art: string; frame: number; x: number; y: number; z: number };
+  /**
+   * What a harvester carries, in the game's storage units (bales) of ordinary ore and of gems; absent for every
+   * other object. Selects the look of the bin (ra2/cargoLook.ts).
+   */
+  cargo?: { ore: number; gems: number };
   /** Bridge (H2): building construction state and the actual make SHP frame, including engine reversal. */
   buildState?: 'building' | 'selling' | 'done';
   buildupFrame?: number;
@@ -452,6 +458,8 @@ interface Visual {
   painter?: PainterObject;
   /** Resolved art type, including an engine-selected image or its rules-type fallback. */
   type: string;
+  /** The redraw page variant a voxel unit is painted with ('' or absent: the pages as drawn), see artVariant. */
+  variant?: string;
   paletteKey: string;
   root: Group;
   turret?: Group;
@@ -3445,12 +3453,20 @@ export class LiveView {
   private visualFor(object: LiveObject, colorIndex: number, frame: number): Visual {
     const paletteKey = this.housePaletteKeys.get(colorIndex) ?? '';
     const artType = this.drawArt(object, paletteKey);
+    const variant = artVariant(object);
     const existing = this.visuals.get(object.uid);
     const firstFrame = this.appearances.get(object.uid)?.frame ?? existing?.firstFrame ?? frame;
     if (existing) existing.firstFrame = firstFrame;
-    // Owner changes (capture, mind control) and engine image changes rebuild the visual; pending art is retried.
-    if (existing && existing.type === artType && existing.paletteKey === paletteKey) {
-      const source = existing.pending ? this.voxelSource(artType, paletteKey) : null;
+    // Owner changes (capture, mind control), engine image changes and a change of page variant (a miner's load)
+    // rebuild the visual; pending art is retried. Only a voxel unit is painted with a variant: any other visual
+    // stays as it is whatever its object carries.
+    if (
+      existing &&
+      existing.type === artType &&
+      existing.paletteKey === paletteKey &&
+      (existing.mode !== 'voxel' || (existing.variant ?? '') === variant)
+    ) {
+      const source = existing.pending ? this.voxelSource(artType, paletteKey, variant) : null;
       if (!source || !this.voxelDrawable(source.model)) {
         this.warmAlternate(existing, paletteKey);
         return existing;
@@ -3499,8 +3515,8 @@ export class LiveView {
     if (type?.sprite && (object.kind === 'building' || object.kind === 'infantry' || type.shpUnit)) return true;
     if (object.kind === 'building' && this.cache.manifest.sprites[`${object.kind}:${artType}`]?.frames.length)
       return true;
-    const source = this.voxelSource(artType, paletteKey);
-    return !!source && this.voxelUnits.prepare(source.model, source.key, source.cacheKey);
+    const source = this.voxelSource(artType, paletteKey, artVariant(object));
+    return !!source && this.voxelUnits.prepare(source.model, source.key, source.cacheKey, source.variant);
   }
 
   /**
@@ -3510,7 +3526,8 @@ export class LiveView {
   private voxelSource(
     artType: string,
     paletteKey: string,
-  ): { model: VoxelModel; key: string; cacheKey: string } | null {
+    variant = '',
+  ): { model: VoxelModel; key: string; cacheKey: string; variant: string } | null {
     const libraryType = this.library?.type(artType);
     const fromMap = this.cache.voxels.get(artType);
     const fromLibrary = !fromMap && libraryType?.voxel ? this.library!.voxel(libraryType.voxel) : null;
@@ -3518,7 +3535,8 @@ export class LiveView {
     if (!model) return null;
     const basePalette = fromMap ? model.palette : this.libraryPalette(model.palette);
     const key = paletteFor(this.cache, basePalette, libraryType?.remap ?? true, paletteKey || undefined);
-    return { model, key, cacheKey: `${artType}@${key}` };
+    // A page variant is a geometry set of its own (same meshes, other materials), so it is part of the key.
+    return { model, key, cacheKey: variant ? `${artType}@${key}#${variant}` : `${artType}@${key}`, variant };
   }
 
   /**
@@ -3563,7 +3581,8 @@ export class LiveView {
     const spriteId = `${object.kind}:${artType}`;
     if (object.kind === 'building' && this.cache.manifest.sprites[spriteId]?.frames.length)
       return { ...base, root: new Group(), mode: 'map-sprite', sprite: spriteId };
-    const source = this.voxelSource(artType, paletteKey);
+    const variant = artVariant(object);
+    const source = this.voxelSource(artType, paletteKey, variant);
     // Out of sight a kind waits for its mesh, and one not in the scene yet may have to wait a frame (admitNewArt);
     // it is pending like a model still loading. A shown view builds it at once (see voxelDrawable).
     if (
@@ -3571,8 +3590,8 @@ export class LiveView {
       this.voxelDrawable(source.model) &&
       (!this.outOfSight || this.voxelUnits.built(source.cacheKey) || this.admitNewArt())
     ) {
-      const { root, turret } = this.voxelUnits.build(source.model, source.key, source.cacheKey);
-      return { ...base, root, turret, mode: 'voxel', libraryType };
+      const { root, turret } = this.voxelUnits.build(source.model, source.key, source.cacheKey, source.variant);
+      return { ...base, root, turret, mode: 'voxel', libraryType, variant };
     }
     // No art (yet): the object stays tracked but draws nothing (a block in its place would read as a real, oddly
     // coloured unit); library voxels whose file is still loading are retried on later frames.
@@ -4042,6 +4061,14 @@ export function buildingTurretShadowOrigin(
     t = Math.max(Math.min(low, high), Math.min(Math.max(low, high), t));
   }
   return out.copy(drawnOrigin).addScaledVector(toCamera, t);
+}
+
+/**
+ * The redraw page variant an object's state selects: a vehicle that reports a load (a harvester) is painted with the
+ * bin of that load. '' for everything else: the pages as drawn.
+ */
+export function artVariant(object: Pick<LiveObject, 'kind' | 'cargo'>): string {
+  return object.kind === 'vehicle' ? cargoLook(object.cargo) : '';
 }
 
 /**

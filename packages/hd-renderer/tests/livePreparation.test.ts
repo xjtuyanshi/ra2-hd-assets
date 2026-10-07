@@ -105,6 +105,7 @@ describe('live voxel meshes built off the main thread', () => {
       h.models.get('HTNK'),
       'lib:unit@house0',
       'HTNK@lib:unit@house0',
+      '',
     );
     // Later frames, and the mesh arriving, keep the visual: VoxelUnits changes its geometry in place.
     expect(h.view.visualFor(tank, 0, 6)).toBe(drawn);

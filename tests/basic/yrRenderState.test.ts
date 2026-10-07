@@ -884,6 +884,32 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(gathering.objects[0]!.underlay).toEqual(gather);
   });
 
+  it("publishes a harvester's load and takes a new snapshot when the storage changes inside one logic frame", () => {
+    const memory = keyMemory();
+    const h = sources(memory);
+    const state = yrState(100);
+    state.objects[0]!.type = 'HARV';
+    state.objects[0]!.cargo = { ore: 0, gems: 0 };
+    h.readState.mockReturnValue(state);
+    const unit = memory.technos[0]!;
+    memory.u32(unit, V.unit);
+    const empty = h.read()!;
+    expect(empty.objects[0]!.cargo).toEqual({ ore: 0, gems: 0 });
+    expect(empty.objects[0]!.cargo).not.toBe(state.objects[0]!.cargo);
+    expect(empty.objects[1]).not.toHaveProperty('cargo');
+    expect(structuredClone(empty)).toEqual(empty);
+    expect(h.read()).toBe(empty);
+    // One bale of gems (TechnoClass +0x33C, float[4]: the second is Cruentus) without the frame counter moving.
+    new DataView(memory.bytes.buffer).setFloat32(unit + 0x33c + 4, 1, true);
+    state.objects[0]!.cargo = { ore: 0, gems: 1 };
+    const loaded = h.read()!;
+    expect(loaded).not.toBe(empty);
+    expect(loaded.frame).toBe(empty.frame);
+    expect(loaded.objects[0]!.cargo).toEqual({ ore: 0, gems: 1 });
+    expect(empty.objects[0]!.cargo).toEqual({ ore: 0, gems: 0 });
+    expect(h.read()).toBe(loaded);
+  });
+
   it('publishes body-only translucency and whole-object hiding without changing older snapshots', () => {
     const memory = keyMemory();
     const h = sources(memory);

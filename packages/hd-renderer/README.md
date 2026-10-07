@@ -1395,6 +1395,15 @@ An absent index, missing type, invalid manifest or incomplete part set logs once
 engine/PBR look. Live types load asynchronously and update existing instances once the complete set arrives.
 Building turrets (`TYPE:turret`) use turret-only manifests in `vehicles-hd`, with the building body remaining a sprite.
 
+A part may name other colour pages of the same frames, `"variants": { "<name>": "<file>" }` (same size, rects, pivots
+and paint page). They are fetched together with the type, and `VoxelProjectionLibrary.get(type, parts, variant)`
+answers the asset painted with that page (a name the type lacks, or a page that failed to load, is the page as
+drawn). Which variant an object is drawn with is game policy: a harvester reports its load (`LiveObject.cargo`, bales
+of ore and of gems; YR keeps them per Tiberium type at TechnoClass +0x33C, `src/games/yr/unitCargoState.ts`), and
+`src/ra2/cargoLook.ts` turns it into `empty`, `gems`, `mixed` or the page as drawn (gold ore). `LiveView` keys a voxel
+unit's geometry set by the variant and rebuilds the visual when the look changes, exactly as it does for an
+engine-selected image; a farm without variant pages draws every load with the base page.
+
 The projection layer reads `<base>/index.json`, each listed type's manifest, and colour/paint atlases. It uses
 the mesh's complete world matrix (including parent turret yaw, scale and ground tilt) to select adjacent baked
 facings and project local positions through the recorded orthographic Jacobian. Turret and barrel share the

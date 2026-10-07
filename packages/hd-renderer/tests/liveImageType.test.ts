@@ -109,6 +109,7 @@ describe('live engine-selected draw images', () => {
       h.models.get(`${imageType}-voxel`),
       'lib:unit@house0',
       `${imageType}@lib:unit@house0`,
+      '',
     );
     expect(h.state.root.children).toEqual([unloading.root]);
     expect(h.view.visualFor(h.object, 0, 13)).toBe(unloading);
@@ -137,7 +138,7 @@ describe('live engine-selected draw images', () => {
     const model = h.models.get('HORV-voxel')!;
     h.state.cache.voxels.set('HORV', model);
     expect(h.view.visualFor(h.object, 0, 10)).toMatchObject({ type: 'HORV', mode: 'voxel' });
-    expect(h.state.voxelUnits.build).toHaveBeenLastCalledWith(model, 'unit', 'HORV@unit');
+    expect(h.state.voxelUnits.build).toHaveBeenLastCalledWith(model, 'unit', 'HORV@unit', '');
   });
 
   it('repaints a selected image on owner change and preserves motion/fire/death state', () => {
@@ -159,6 +160,7 @@ describe('live engine-selected draw images', () => {
       h.models.get('HORV-voxel'),
       'lib:unit@house1',
       'HORV@lib:unit@house1',
+      '',
     );
   });
 
@@ -178,7 +180,7 @@ describe('live engine-selected draw images', () => {
     h.models.set('HORV-voxel', model);
     h.state.voxelUnits.prepare.mockReturnValue(false);
     expect(h.view.visualFor(h.object, 0, 11)).toBe(normal);
-    expect(h.state.voxelUnits.prepare).toHaveBeenLastCalledWith(model, 'lib:unit@house0', 'HORV@lib:unit@house0');
+    expect(h.state.voxelUnits.prepare).toHaveBeenLastCalledWith(model, 'lib:unit@house0', 'HORV@lib:unit@house0', '');
     expect(h.state.voxelUnits.build).toHaveBeenCalledTimes(1);
     h.state.voxelUnits.prepare.mockReturnValue(true);
     const unloading = h.view.visualFor(h.object, 0, 12);
@@ -221,7 +223,7 @@ describe('live engine-selected draw images', () => {
     expect(ready).toMatchObject({ type: 'HARV', mode: 'voxel' });
   });
 
-  it('loads a type\'s unloading image ahead of its first use and stops asking once it is ready', () => {
+  it("loads a type's unloading image ahead of its first use and stops asking once it is ready", () => {
     const h = visualView();
     h.types.get('HARV')!.unloadingVoxel = 'HORV-voxel';
     const model = h.models.get('HORV-voxel')!;
@@ -247,7 +249,7 @@ describe('live engine-selected draw images', () => {
     // The warmed image then swaps in on the very frame the engine selects it.
     h.object.imageType = 'HORV';
     expect(h.view.visualFor(h.object, 0, 15)).toMatchObject({ type: 'HORV', mode: 'voxel' });
-    expect(h.state.voxelUnits.build).toHaveBeenLastCalledWith(model, 'lib:unit@house0', 'HORV@lib:unit@house0');
+    expect(h.state.voxelUnits.build).toHaveBeenLastCalledWith(model, 'lib:unit@house0', 'HORV@lib:unit@house0', '');
   });
 
   it.each(['no unloading image', 'a failed model', 'no type for the voxel'])('stops warming with %s', (reason) => {

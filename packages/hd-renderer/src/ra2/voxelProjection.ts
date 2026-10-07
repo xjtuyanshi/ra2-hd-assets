@@ -79,6 +79,12 @@ export class VoxelProjectionInputs {
 export interface VoxelProjectionAsset {
   manifest: VoxelProjectionManifest;
   parts: { body?: VoxelProjectionPart; turret?: VoxelProjectionPart };
+  /**
+   * The same asset with the colour pages of a named variant (ProjectionPartManifest.variants), for every variant a
+   * part names and whose page loaded. Parts without that variant are the base parts themselves, so they keep their
+   * materials.
+   */
+  variants?: Map<string, VoxelProjectionAsset>;
 }
 
 /** Building bodies use sprites; their voxel projection manifests only require the turret atlas. */
@@ -245,7 +251,11 @@ export class VoxelProjectionLibrary {
     console.warn(`[HD] voxel projection ${this.base}/${key}: ${String(error)}; keeping the current look`);
   }
 
-  get(type: string, required: readonly ProjectionPartName[] = ['body']): VoxelProjectionAsset | null {
+  /**
+   * The loaded asset of `type`, drawn with `variant` where its manifest names one ('' and a name the type does not
+   * have: the pages as drawn). A type's variants arrive together with it, so a change of variant never waits.
+   */
+  get(type: string, required: readonly ProjectionPartName[] = ['body'], variant = ''): VoxelProjectionAsset | null {
     if (this.disposed) return null;
     const asset = this.loaded.get(type);
     if (!asset) return null;
@@ -253,12 +263,18 @@ export class VoxelProjectionLibrary {
       this.warn(type, 'incomplete part set');
       return null;
     }
-    return asset;
+    return (variant && asset.variants?.get(variant)) || asset;
+  }
+
+  /** Whether the loaded asset of `type` has pages of its own for `variant` (false while it loads). */
+  hasVariant(type: string, variant: string): boolean {
+    return !!variant && !!this.loaded.get(type)?.variants?.has(variant);
   }
 
   async loadType(
     type: string,
     required: readonly ProjectionPartName[] = ['body'],
+    variant = '',
   ): Promise<VoxelProjectionAsset | null> {
     if (this.disposed) return null;
     let pending = this.pending.get(type);
@@ -267,7 +283,7 @@ export class VoxelProjectionLibrary {
       this.pending.set(type, pending);
     }
     await pending;
-    return this.get(type, required);
+    return this.get(type, required, variant);
   }
 
   private async load(type: string): Promise<VoxelProjectionAsset | null> {
@@ -306,13 +322,54 @@ export class VoxelProjectionLibrary {
       });
       for (const texture of textures) this.textures.add(texture);
       for (const part of Object.values(parts)) this.textures.add(part.frameTable);
-      const asset = { manifest, parts };
+      const asset: VoxelProjectionAsset = { manifest, parts };
+      const variants = await this.loadVariants(type, directory, asset);
+      if (this.disposed) return null;
+      if (variants.size) asset.variants = variants;
       this.loaded.set(type, asset);
       return asset;
     } catch (error) {
       this.warn(type, error);
       return null;
     }
+  }
+
+  /**
+   * The variant pages a manifest names, fetched with the type (they are small next to the type's own pages and a
+   * unit must be able to change look in the frame its state changes). A variant page that fails to load is reported
+   * once and that part keeps its base page in the variant; a variant with no page left is not listed at all.
+   */
+  private async loadVariants(
+    type: string,
+    directory: string,
+    base: VoxelProjectionAsset,
+  ): Promise<Map<string, VoxelProjectionAsset>> {
+    const wanted: { variant: string; name: ProjectionPartName; file: string }[] = [];
+    for (const name of Object.keys(base.parts) as ProjectionPartName[])
+      for (const [variant, file] of Object.entries(base.manifest.parts[name]?.variants ?? {}))
+        wanted.push({ variant, name, file });
+    const variants = new Map<string, VoxelProjectionAsset>();
+    if (!wanted.length) return variants;
+    const results = await Promise.allSettled(
+      wanted.map(({ name, file }) => loadAtlas(directory + file, base.manifest.parts[name]!.size, this.abort.signal)),
+    );
+    results.forEach((result, i) => {
+      const { variant, name, file } = wanted[i]!;
+      if (result.status === 'rejected') {
+        this.warn(`${type}@${variant}`, `${file}: ${String(result.reason)}`);
+        return;
+      }
+      if (this.disposed) {
+        result.value.dispose();
+        return;
+      }
+      this.textures.add(result.value);
+      let asset = variants.get(variant);
+      if (!asset) variants.set(variant, (asset = { manifest: base.manifest, parts: { ...base.parts } }));
+      // Same frames and paint page: only the colour page differs, so the frame table is the base part's own.
+      asset.parts[name] = { ...base.parts[name]!, colour: result.value };
+    });
+    return variants;
   }
 
   dispose(): void {
