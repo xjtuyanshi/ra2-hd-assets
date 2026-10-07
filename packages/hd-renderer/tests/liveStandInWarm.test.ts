@@ -217,7 +217,7 @@ describe('the indexed stand-in layers draw with shaders built behind the loading
     const { live, root, terrainDepth } = view({ looks: [WITH_MATERIALS] });
     live.warmStandIns();
     const layers = [...live.standInWarm.values()];
-    expect(layers).toHaveLength(6);
+    expect(layers).toHaveLength(8);
     for (const layer of layers) live.disposeOverlayLayer(layer);
     expect(root.children).toHaveLength(0);
     for (const layer of layers) expect(layer.mesh.layers.isEnabled(TERRAIN_DEPTH_LAYER)).toBe(false);
@@ -234,6 +234,9 @@ describe('the final layers of a library page draw with shaders built behind the 
     expect([...day.live.standInWarm.keys()]).toEqual([
       'page',
       'cells',
+      // The stand-ins with a material page that came before the HD art.
+      'page-materials',
+      'cells-materials',
       'page-hd1',
       'cells-hd1',
       'page-hd1-materials',
@@ -311,6 +314,9 @@ describe('the final layers of a library page draw with shaders built behind the 
       'page',
       'page-windows',
       'cells',
+      'page-materials',
+      'cells-materials',
+      'page-windows-materials',
       'page-hd1',
       'cells-hd1',
       'page-hd1-materials',

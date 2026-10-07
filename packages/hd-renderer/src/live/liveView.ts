@@ -1150,9 +1150,9 @@ export class LiveView {
    *
    * The graphs: a library page's sprites from the indexed page (pageLayer with a negative key: depth-captured), the
    * same with the lit-window mask (a night map), a live overlay or smudge page from the indexed page (no capture
-   * code of its own; overlay pages are registered as occluders); and for every look the library's HD pages have
-   * (LiveLibrary.hdPageLooks), the final layer of a page and of a cell page, without and with the material page,
-   * and at night with the mask. Called again before each warm-up: the hour, and so whether masks are wanted, is
+   * code of its own; overlay pages are registered as occluders), both also with a material page but no HD art yet;
+   * and for every look the library's HD pages have (LiveLibrary.hdPageLooks), the final layer of a page and of a
+   * cell page, without and with the material page, and at night with the mask. Called again before each warm-up: the hour, and so whether masks are wanted, is
    * known only once the match's light is.
    */
   private warmStandIns(): void {
@@ -1200,6 +1200,19 @@ export class LiveView {
       data: warmFilteredTexture('data'),
     });
     const material = { texture: textures.data };
+    // A stand-in whose material page arrives before its HD art is rebuilt with it (pageLayer keeps attached
+    // sidecars, flushOverlayPages passes the material page whatever the colour page is): two more graphs, seen
+    // being built 35 s into a six-player match (an overlay page: six shader builds, one frame of 0.17 s).
+    if (materialsWanted && looks.some((look) => look.materials)) {
+      add('page-materials', (page) =>
+        captured(new SpriteLayer(this.cache, [], 1, page, null, null, material, depth)),
+      );
+      add('cells-materials', (page) => occluder(new SpriteLayer(this.cache, [], 1, page, null, null, material)));
+      if (library.windows && windowsWanted)
+        add('page-windows-materials', (page) =>
+          captured(new SpriteLayer(this.cache, [], 1, page, null, page.texture, material, depth)),
+        );
+    }
     for (const paintSaturation of new Set(looks.map((look) => look.paintSaturation))) {
       const hd: HdAtlas = { color: textures.colour, remap: textures.mask, paintSaturation };
       const mine = looks.filter((look) => look.paintSaturation === paintSaturation);
