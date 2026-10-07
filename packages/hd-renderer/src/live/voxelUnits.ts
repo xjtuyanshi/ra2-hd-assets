@@ -1,6 +1,7 @@
 import { Mesh, type BufferGeometry, type Group, type Vector3 } from 'three/webgpu';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
 import type { HdRenderer } from '../HdRenderer';
+import type { ObjectTint } from '../objectTint';
 import type { Ra2Cache } from '../ra2/cache';
 import {
   buildVoxelGeometry,
@@ -331,6 +332,11 @@ export class VoxelUnits {
   }
 
   /** Native chrono blending changes body/turret/barrel alpha, never the separately rendered ground shadows. */
+  /** The unit's picture tint (objectTint.ts); undefined draws it unchanged. */
+  setTint(unit: VoxelUnit, tint: ObjectTint | undefined): void {
+    if (unit.root instanceof VoxelRoot) unit.root.setTint(tint);
+  }
+
   setOpacity(unit: VoxelUnit, opacity: number): void {
     if (unit.root instanceof VoxelRoot) unit.root.setOpacity(opacity);
   }

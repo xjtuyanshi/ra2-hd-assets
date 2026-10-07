@@ -776,6 +776,30 @@ reader revisions, and restore ordinary rendering when omitted. Neither rule prov
 window. Static predicates and their limits are in
 [Native draw eligibility](research/painter-order.md#native-draw-eligibility-and-body-translucency).
 
+Optional `tint` is how the game changes the whole picture of an object on one frame: `light`, a factor on the
+object's own light level, and `add`, a colour added afterwards (0..1 per channel in display scale). YR
+(`src/games/yr/technoTint.ts`) derives both from the fields its draw routines read, after checking the instruction
+bytes those offsets were taken from (`YR_TECHNO_TINT_SIGNATURES`; a different build publishes no tint):
+
+- Iron Curtain and Force Shield share one timer (techno +0x18C, IsIronCurtained 0x41BF40) and one tint stage machine
+  (+0x1A4 with its timer at +0x198, stepped at 0x70E5A0). The factor is the engine's own arithmetic (0x70E380): a
+  flash to 2 over six frames, held four, a fall to 0.2, a pulse between 0.2 and 0.5 every 24 frames (8 up, 16
+  down), and the same flash 30 frames before the end; each object runs its own phase. The engine caps the lit level
+  at twice the palette's brightness. A frozen native frame shows the factor of the previous logic frame.
+- Colours are entries of the rules' [ColorAdd] list in the engine's 5/6/5 bits: ForceShieldColor on a force-shielded
+  building, IronCurtainColor on a curtained vehicle (colour 0, none, in the stock rules: the Iron Curtain only
+  darkens), BerserkColor on Berserk vehicles and infantry, LaserTargetColor on a building with an airstrike. Several
+  colours are OR-ed as the engine does.
+- A deactivated vehicle is drawn at half its level; a building that is the target of its airstrike takes the laser
+  designator's pulse between 1 and 2 (0x70E4B0).
+
+LiveView carries the tint as data, never as a material or shader variant, so the first tinted object compiles
+nothing: two floats per sprite instance (`spriteTint` in the anchor buffer: every body card, layer and bib of the
+object, not its shadows) and one per-mesh uniform for voxel parts and building turrets (`objectTint`, written when
+each mesh is drawn). The shader multiplies the finished colour in display scale, limits the factor so that
+level x factor stays within the cap, clips at white and adds the colour (`packages/hd-renderer/src/objectTint.ts`).
+The flash of a targeted object is not published.
+
 When a drawable building disappears, LiveView retains its frozen last visual through the logic frame after the
 last one it was published in, whatever its last health. The deadline counts from that last present frame, not
 from the publication that first missed the building: a poll can already miss it under the old frame number,

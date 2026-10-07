@@ -24,6 +24,7 @@ import { YR_UNIT_CARGO } from '../../src/games/yr/unitCargoState';
 import { YR_STARTUP_PAGE_HASH } from '../../src/games/yr/startupPage';
 import { YR_BUILDING_RENDER_OFFSETS as B, YR_BUILDING_RULES as R } from '../../src/games/yr/buildingRenderState';
 import { YR_INFANTRY_RENDER_OFFSETS as I } from '../../src/games/yr/infantryRenderState';
+import { YR_TECHNO_TINT as TT, YR_TECHNO_TINT_SIGNATURES } from '../../src/games/yr/technoTint';
 
 /** Synthetic 16 MiB guest memory: enough for every YR 1.001 global and a small heap above 0xb00000. */
 function syntheticMemory() {
@@ -383,6 +384,37 @@ describe('YR 1.001 state reader', () => {
     m.u8(tank + O.beingWarpedOut, 0);
     m.u8(tank + O.warpingOut, 0);
     for (const object of read().objects) expect(object).not.toHaveProperty('translucent');
+  });
+
+  it('publishes the Iron Curtain pulse only where the image holds the draw routines it was read from', () => {
+    const { m, tank, soldier, yard } = battlefield();
+    // Frame 1000 (battlefield): a curtain started ten frames ago with 500 to go, in the held dark stage.
+    const curtain = (unit: number, forceShield: boolean) => {
+      m.i32(unit + TT.ironCurtainTimer, 990);
+      m.i32(unit + TT.ironCurtainTimer + TT.timerLeft, 500);
+      m.i32(unit + TT.tintTimer, -1);
+      m.i32(unit + TT.tintStage, 6);
+      m.i32(unit + TT.forceShielded, forceShield ? 1 : 0);
+    };
+    curtain(tank, false);
+    curtain(yard, true);
+    const read = () => readYrState(createByteViewAccessor(m.bytes));
+    // An image without the routines (another build): the fields mean nothing, so nothing is published.
+    for (const object of read().objects) expect(object).not.toHaveProperty('tint');
+    const guarded = createYrStateReader(() => createByteViewAccessor(m.bytes), YR_STARTUP_PAGE_HASH);
+    for (const { address, bytes } of YR_TECHNO_TINT_SIGNATURES) m.bytes.set(bytes, address);
+    const state = read();
+    const of = (id: number) => state.objects.find((object) => object.id === id)!;
+    expect(of(tank).tint).toEqual({ light: 51 / 256, shield: 'ironCurtain' });
+    // No rules object in this fixture: the Force Shield's brightness is published, its colour is unknown.
+    expect(of(yard).tint).toEqual({ light: 51 / 256, shield: 'forceShield' });
+    expect(of(soldier)).not.toHaveProperty('tint');
+    // The guarded reader decides once, when it is created: one made before the routines were there stays silent.
+    if (guarded) for (const object of guarded()!.objects) expect(object).not.toHaveProperty('tint');
+    // An implausible stage drops the tint and keeps the object.
+    m.i32(tank + TT.tintStage, 4096);
+    expect(read().objects.find((object) => object.id === tank)).not.toHaveProperty('tint');
+    expect(read().objects.find((object) => object.id === yard)!.tint).toBeDefined();
   });
 
   it('contains failed optional visibility reads without losing the object', () => {

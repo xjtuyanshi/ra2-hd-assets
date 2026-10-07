@@ -341,11 +341,12 @@ describe('sprite depth attributes', () => {
       return Array.from(attribute.array.slice(index * attribute.itemSize, (index + 1) * attribute.itemSize));
     };
     try {
-      expect(buffers.anchor.itemSize).toBe(6);
+      expect(buffers.anchor.itemSize).toBe(8);
       expect(buffers.flags.itemSize).toBe(17);
       layer.updateCaptureCodes((instance) => (instance === body ? 23 : 7));
-      expect(row(buffers.anchor, body)).toEqual([4.5, 2, 6.25, 9.5, 10.5, 1]);
-      expect(row(buffers.anchor, unit)).toEqual([7, 3, 8, 7, 8, 0]);
+      // Anchor, light sample, grade exemption, then the picture tint (light factor 1, no colour).
+      expect(row(buffers.anchor, body)).toEqual([4.5, 2, 6.25, 9.5, 10.5, 1, 1, 0]);
+      expect(row(buffers.anchor, unit)).toEqual([7, 3, 8, 7, 8, 0, 1, 0]);
       // Translucent art deliberately stays out of capture, while its neighboring opaque card keeps its code.
       expect(row(buffers.flags, body).slice(8)).toEqual([-65504, 1, 198, 386, 91, 12, 9, 0.5, 3.25]);
       expect(row(buffers.flags, unit).slice(8)).toEqual([7, 3, 3, 12, 0, 0, 0, 0, 2]);
@@ -356,7 +357,7 @@ describe('sprite depth attributes', () => {
       // The same pooled records are uploaded without sorting; every independent field must be reset.
       layer.setInstances([body, unit], false);
       expect(row(buffers.flags, body).slice(8)).toEqual([-65504, 1, 198, 386, 91, 12, 9, 0.5, 0]);
-      expect(row(buffers.anchor, body)).toEqual([4.5, 2, 6.25, 9.5, 10.5, 1]);
+      expect(row(buffers.anchor, body)).toEqual([4.5, 2, 6.25, 9.5, 10.5, 1, 1, 0]);
       expect(row(buffers.params, body)).toEqual(params);
       expect(layer.translucentMesh.visible).toBe(false);
       layer.updateCaptureCodes((instance) => (instance === body ? 31 : 11));
@@ -366,7 +367,7 @@ describe('sprite depth attributes', () => {
       body.opacity = 0.5;
       layer.setInstances([body, unit], false);
       layer.updateCaptureCodes((instance) => (instance === body ? 31 : 11));
-      expect(row(buffers.anchor, body)).toEqual([4.5, 2, 6.25, 9.5, 10.5, 0]);
+      expect(row(buffers.anchor, body)).toEqual([4.5, 2, 6.25, 9.5, 10.5, 0, 1, 0]);
       expect(row(buffers.flags, body).slice(8)).toEqual([-65504, 1, 198, 386, 91, 12, 9, 0.5, 3.5]);
       expect(row(buffers.flags, unit).slice(8)).toEqual([11, 3, 3, 12, 0, 0, 0, 0, 2]);
       expect(row(buffers.params, body)).toEqual(params);
@@ -555,7 +556,7 @@ describe('sprite depth attributes', () => {
       const anchor = Array.from(buffers.anchor.array);
       layer.setInstances([{ ...card, nativeDepth: { mode: 'ground', bonus: 1 } }]);
       expect(Array.from(buffers.flags.array.slice(4, 8))).toEqual([4, 2, 0, 0]);
-      expect(buffers.anchor.itemSize).toBe(6);
+      expect(buffers.anchor.itemSize).toBe(8);
       expect(Array.from(buffers.anchor.array)).toEqual(anchor);
       expect(Array.from(buffers.params.array)).toEqual(placement);
       layer.setInstances([{ ...card, anchor: new Vector3(50.75, 0, 50.25) }]);

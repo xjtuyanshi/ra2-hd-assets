@@ -52,8 +52,9 @@ describe('live sprite buffers', () => {
     expect(attrs.every((a) => a.updateRanges.length === 0)).toBe(true);
     cards[0]!.anchor.x += 0.25;
     layer.setInstances(cards);
-    // Moving the anchor also moves its default light sample in the shared six-component buffer.
-    expect(buffers.anchor.updateRanges).toEqual([{ start: 18, count: 4 }]);
+    // Moving the anchor also moves its default light sample in the shared buffer (anchor, light sample, grade
+    // exemption and the two picture-tint floats: eight components per instance).
+    expect(buffers.anchor.updateRanges).toEqual([{ start: 24, count: 4 }]);
     expect(attrs.slice(1).map((a) => a.version)).toEqual(versions.slice(1));
     attrs.forEach((a) => a.clearUpdateRanges());
     const moved = attrs.map((a) => a.version);

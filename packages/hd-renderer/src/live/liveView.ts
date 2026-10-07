@@ -50,6 +50,7 @@ import {
   type PainterObject,
 } from '../ra2/painterOrder';
 import { NOT_CAPTURED_CODE } from '../objectDepth';
+import { packTintColour, tintLight, type ObjectTint } from '../objectTint';
 import {
   isNearEngulfFire,
   engulfAnchor,
@@ -142,6 +143,12 @@ export interface LiveObject {
   nativeHidden?: boolean;
   /** Body opacity while the native draw mode is translucent; shadows keep their normal opacity. */
   translucent?: number;
+  /**
+   * How the game changes the whole picture on this frame (objectTint.ts): a factor on its light level (the Iron
+   * Curtain's pulse between 0.2 and 0.5, its flashes to 2) and a colour added afterwards (the Force Shield's blue, a
+   * Berserk unit's red). Shadows are not tinted. Absent: drawn unchanged.
+   */
+  tint?: ObjectTint;
   /**
    * One frame of effect-library art the engine draws inside this object's own picture, right before its body (the
    * sparks at a harvesting miner's scoop): art id, absolute frame and the lepton point of the art's canvas centre.
@@ -2330,6 +2337,9 @@ export class LiveView {
         painter.z = Math.floor(object.y / LEPTONS_PER_CELL);
       }
       this.spritePool.painter = painter;
+      // Every card of this object carries its tint as instance data; the next object sets its own.
+      this.spritePool.tintLight = tintLight(object.tint);
+      this.spritePool.tintColour = packTintColour(object.tint?.add);
       if (visual.mode === 'placeholder') {
         visual.root.position.set(
           pose.x / LEPTONS_PER_CELL,
@@ -2356,6 +2366,7 @@ export class LiveView {
       }
       const unit = visual;
       this.voxelUnits.setOpacity(unit, object.translucent ?? 1);
+      this.voxelUnits.setTint(unit, object.tint);
       // Buildings are never turned (facing pi/2 is the identity rotation).
       if (object.kind === 'building') {
         pose.facing = Math.PI / 2;
@@ -3204,6 +3215,7 @@ export class LiveView {
     pose.z = (at.y / LEVEL_HEIGHT) * LEPTONS_PER_LEVEL;
     pose.facing = Math.PI / 2;
     this.voxelUnits.pose(unit, pose, turretFacing);
+    this.voxelUnits.setTint(unit, object.tint);
     this.voxelUnits.setNativeDepth(
       unit,
       groundAnchor,

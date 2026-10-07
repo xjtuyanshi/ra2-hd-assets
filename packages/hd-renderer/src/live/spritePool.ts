@@ -8,6 +8,12 @@ export class SpritePool {
   /** Painter owner of subsequent upright records; reset by begin so reused records never keep an old owner. */
   painter?: PainterObject;
   deckHeight?: number;
+  /**
+   * Picture tint of the object whose cards are being taken (objectTint.ts: light factor and packed colour); reset
+   * by begin and set per object, so every body card, layer and bib of one object carries the same tint.
+   */
+  tintLight = 1;
+  tintColour = 0;
   private readonly instances: SpriteInstance[] = [];
   private used = 0;
   private readonly anchors: Vector3[] = [];
@@ -17,6 +23,8 @@ export class SpritePool {
     this.used = this.anchorsUsed = 0;
     this.painter = undefined;
     this.deckHeight = undefined;
+    this.tintLight = 1;
+    this.tintColour = 0;
   }
 
   anchor(): Vector3 {
@@ -53,6 +61,8 @@ export class SpritePool {
     instance.unlit = undefined;
     instance.light = light;
     instance.gradeExempt = undefined;
+    instance.tintLight = shadow ? 1 : this.tintLight;
+    instance.tintColour = shadow ? 0 : this.tintColour;
     instance.lighting = lighting;
     instance.painter = !flat && !shadow ? this.painter : undefined;
     instance.painterPart = painterPart;

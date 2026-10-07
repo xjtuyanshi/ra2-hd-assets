@@ -32,6 +32,7 @@ import {
 import { NATIVE_UNIT_RENDER_ORDER } from './nativeDepth';
 import { registerVoxelReflectionVariant } from './voxelReflectionColour';
 import { bindSlotsBeforeRender } from '../materialSlots';
+import { setMeshObjectTint, type ObjectTint } from '../objectTint';
 
 /**
  * Original VXL units, rendered as real meshes. The engine draws voxels through a pure rotation (the default voxel
@@ -719,6 +720,14 @@ export class VoxelUnit extends Group {
     if (next === this.bodyOpacity) return;
     this.bodyOpacity = next;
     setVoxelNativePass(this, this.nativeDepth.enabled !== 0);
+  }
+
+  /**
+   * Picture tint of this unit (objectTint.ts): data of its part meshes, read by the shared graph when each is drawn.
+   * Shadow, foam and reflection twins keep their own look.
+   */
+  setTint(tint: ObjectTint | undefined): void {
+    for (const mesh of this.partMeshes) setMeshObjectTint(mesh, tint);
   }
 
   translucentMaterial(source: MeshStandardNodeMaterial): MeshStandardNodeMaterial {

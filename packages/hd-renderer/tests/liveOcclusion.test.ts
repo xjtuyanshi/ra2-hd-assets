@@ -157,6 +157,7 @@ function presentation() {
       setNativeDepth: VoxelUnits.prototype.setNativeDepth,
       setGroundContact: VoxelUnits.prototype.setGroundContact,
       setOpacity: VoxelUnits.prototype.setOpacity,
+      setTint: VoxelUnits.prototype.setTint,
     },
     viewWidth: 0,
     viewHeight: 0,

@@ -884,6 +884,38 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(gathering.objects[0]!.underlay).toEqual(gather);
   });
 
+  it('publishes the picture tint as plain data and takes a new snapshot when a tint field changes in one frame', () => {
+    const memory = keyMemory();
+    const h = sources(memory);
+    const state = yrState(100);
+    state.objects[0]!.tint = { light: 0.2, add: [0, 0, 24 / 31], shield: 'forceShield' };
+    h.readState.mockReturnValue(state);
+    const unit = memory.technos[0]!;
+    memory.u32(unit, V.unit);
+    const first = h.read()!;
+    // The contract carries the factor and the colour; which protection it is stays in the YR layer.
+    expect(first.objects[0]!.tint).toEqual({ light: 0.2, add: [0, 0, 24 / 31] });
+    expect(first.objects[0]!.tint).not.toBe(state.objects[0]!.tint);
+    expect(first.objects[0]!.tint!.add).not.toBe(state.objects[0]!.tint!.add);
+    expect(first.objects[1]).not.toHaveProperty('tint');
+    expect(structuredClone(first)).toEqual(first);
+    expect(h.read()).toBe(first);
+    // The tint stage (+0x1A4), the Force Shield flag (+0x1C4) and the Berzerk byte (+0x298) are part of the key.
+    for (const offset of [0x1a4, 0x1c4, 0x298, 0x18c, 0x1c8]) {
+      const before = h.read()!;
+      memory.bytes[unit + offset] ^= 1;
+      const changed = h.read()!;
+      expect(changed).not.toBe(before);
+      expect(changed.frame).toBe(before.frame);
+    }
+    state.objects[0]!.tint = { light: 0.5 };
+    memory.bytes[unit + 0x1a0] ^= 1;
+    expect(h.read()!.objects[0]!.tint).toEqual({ light: 0.5 });
+    delete state.objects[0]!.tint;
+    memory.bytes[unit + 0x1a0] ^= 1;
+    expect(h.read()!.objects[0]).not.toHaveProperty('tint');
+  });
+
   it("publishes a harvester's load and takes a new snapshot when the storage changes inside one logic frame", () => {
     const memory = keyMemory();
     const h = sources(memory);

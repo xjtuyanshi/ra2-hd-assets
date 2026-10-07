@@ -5,6 +5,7 @@ import { readYrInfantryRenderState } from './infantryRenderState';
 import { readYrUnitGatherState, type YrUnitGatherState } from './unitGatherState';
 import { readYrUnitCargo, type YrUnitCargo } from './unitCargoState';
 import { readYrUnitTilt, type YrUnitTilt } from './unitTilt';
+import { readYrTechnoTint, yrTechnoTintSignaturesMatch, type YrTechnoTint } from './technoTint';
 
 /**
  * Read-only live battlefield state of Yuri's Revenge 1.001 (gamemd.exe, SHA-256 in YR_STARTUP_PAGE_HASH) for an
@@ -239,6 +240,8 @@ export interface YrObjectState {
   nativeHidden?: boolean;
   /** Body opacity while native chrono blending is active; shadows retain their ordinary opacity. */
   translucent?: number;
+  /** Brightness factor and added colour of the whole picture (technoTint.ts); absent when drawn unchanged. */
+  tint?: YrTechnoTint;
   /** Ore-gathering sparks the unit's own draw adds under its body on this frame (unitGatherState.ts). */
   gather?: YrUnitGatherState;
   /** What a Harvester=yes unit carries (unitCargoState.ts); absent for other objects and on an implausible read. */
@@ -626,11 +629,16 @@ export interface ReadYrStateOptions {
  * list and a null map. Use createYrStateReader for continuous roof-delivery history across publications.
  */
 export function readYrState(memory: GuestMemoryAccessor, options: ReadYrStateOptions = {}): YrState {
-  return readYrStateSnapshot(memory, options, { roofDeliveries: new Map() });
+  return readYrStateSnapshot(memory, options, {
+    roofDeliveries: new Map(),
+    tint: yrTechnoTintSignaturesMatch(memory),
+  });
 }
 
 interface YrStateHistory {
   roofDeliveries: Map<number, { uid: number; type: number }>;
+  /** The image holds the draw routines technoTint.ts was read from; otherwise no tint is published. */
+  tint: boolean;
 }
 
 function readYrStateSnapshot(
@@ -777,6 +785,10 @@ function readYrStateSnapshot(
         const tilt = readYrUnitTilt(memory, pointer, frame);
         if (tilt) object.tilt = tilt;
       }
+      if (history.tint) {
+        const tint = readYrTechnoTint(memory, pointer, spec.kind, frame);
+        if (tint) object.tint = tint;
+      }
       if (type.turret) {
         const turretRaw = readFacingRaw(memory, pointer + o.secondaryFacing, frame);
         object.turretFacingRaw = turretRaw;
@@ -873,7 +885,10 @@ export function createYrStateReader(
       return first >= 0x401000 && first < 0x800000;
     });
   if (!imageValid(memory())) return null;
-  const history: YrStateHistory = { roofDeliveries: new Map() };
+  const history: YrStateHistory = {
+    roofDeliveries: new Map(),
+    tint: yrTechnoTintSignaturesMatch(memory()),
+  };
   return (options) => {
     try {
       return readYrStateSnapshot(memory(), options ?? {}, history);
