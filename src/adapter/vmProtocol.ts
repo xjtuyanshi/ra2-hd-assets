@@ -23,7 +23,7 @@ export interface GameFileEntry {
 
 export interface VmInitConfig {
   /** Development-only native attachment; the game is already running outside the page. */
-  native?: { url: string; token: string };
+  native?: { url: string; token: string; pageCursor?: boolean };
   startupPage?: string;
   /** HD bridge opt-in: install the game's inert native overlay passthrough patches before the entry point. */
   renderPassthrough?: boolean;

@@ -182,12 +182,14 @@ export async function installDll(source, target, runDirectory) {
   };
 }
 
-export async function findPorts() {
+export async function findPorts(serverFactory) {
   const { createServer } = await import('node:net');
   const held = [];
   try {
     for (let port = 15450; port <= 15459 && held.length < 2; port++) {
-      const server = createServer();
+      // Reservation listeners must reject probes: close() otherwise waits for a
+      // polling client's accepted connection before the real agent can launch.
+      const server = (serverFactory ?? createServer)((socket) => socket.destroy());
       try {
         await new Promise((resolve, reject) => {
           server.once('error', reject);

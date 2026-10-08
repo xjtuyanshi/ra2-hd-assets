@@ -21,6 +21,8 @@ import {
   NativeMessageType,
   NATIVE_PAGE_SIZE,
   NATIVE_INPUT_STATE_MINIMAL,
+  NATIVE_INPUT_STATE_CURSOR,
+  decodeCursorSnapshot,
   decodeJson,
   encodeSubscription,
   encodeU32,
@@ -49,6 +51,7 @@ class NativeMirrorUnavailable extends Error {
 }
 export interface NativeCoreOptions extends NativeConnectionOptions {
   renderPassthrough?: boolean;
+  pageCursor?: boolean;
 }
 export type NativeGamePolicyFactory = (
   memory: NativeMirrorMemory,
@@ -200,6 +203,12 @@ export class NativeCore {
   private previousLogicFrame: number | null = null;
   private inputQueue: NativeInputOperation[] = [];
   private inputOutstanding = false;
+  private pointer: VmFrame['pointer'] = null;
+  private pointerReadPending = false;
+  private pointerReadPicture: NativePicture | null = null;
+  private pointerSuppressed = false;
+  private pointerUndo: NativeWrite[] = [];
+  private systemCursor: VmFrame['cursor'];
 
   constructor(
     private readonly callbacks: GameVmCallbacks,
@@ -288,12 +297,65 @@ export class NativeCore {
       pixels: new Uint8Array(),
       palette: new Uint8Array(),
       rgb565: picture.pixels,
+      ...(this.options.pageCursor !== undefined
+        ? {
+            pointer: this.pointer,
+            ...(!this.pointer && this.systemCursor
+              ? { cursor: { ...this.systemCursor, rgba: this.systemCursor.rgba.slice() } }
+              : {}),
+          }
+        : {}),
     };
+    this.refreshPointer(picture);
     this.scheduleFrame(() => {
       if (this.closed || !this.running) return;
       this.hostFrames++;
       this.callbacks.onFrame?.(frame);
     });
+  }
+
+  private refreshPointer(picture: NativePicture): void {
+    if (this.options.pageCursor === undefined || !this.policy?.readPointer) return;
+    this.pointerReadPicture = picture;
+    if (this.pointerReadPending) return;
+    this.pointerReadPending = true;
+    const update = async () => {
+      while (this.pointerReadPicture && !this.closed && this.running) {
+        const current = this.pointerReadPicture;
+        this.pointerReadPicture = null;
+        await this.readCurrentPointer(current.width, current.height);
+      }
+    };
+    void update().finally(() => {
+      this.pointerReadPending = false;
+    });
+  }
+
+  private async readCurrentPointer(width: number, height: number): Promise<void> {
+    if (!this.policy?.readPointer) return;
+    try {
+      const pointer = await this.policy.readPointer(
+        async (address, length) => (await this.connection.read(address, length)).bytes,
+        width,
+        height,
+      );
+      const system =
+        !pointer && this.hello?.limits.cursorSnapshot
+          ? decodeCursorSnapshot(
+              await this.connection.request(NativeMessageType.InputState, encodeU32(NATIVE_INPUT_STATE_CURSOR)),
+            )
+          : undefined;
+      if (!this.closed) {
+        this.pointer = pointer;
+        this.systemCursor = system;
+      }
+    } catch {
+      // Invalid/unavailable current state hides the page cursor; it never invents a cursor type.
+      if (!this.closed) {
+        this.pointer = null;
+        this.systemCursor = undefined;
+      }
+    }
   }
 
   async start(): Promise<void> {
@@ -320,12 +382,33 @@ export class NativeCore {
       await this.subscribe([]);
       await this.connection.request(NativeMessageType.Hook, encodeU32(1));
       this.hookStarted = true;
+      if (this.options.pageCursor && this.policy.setPointerDrawing && this.policy.readPointer) {
+        this.pointerSuppressed = await runNativeTransaction(
+          this.memory,
+          (transaction) => this.policy!.setPointerDrawing!(transaction, false),
+          {
+            ...this.host,
+            commit: async (writes) => {
+              if (!writes.length) return;
+              await this.connection.batch(writes);
+              this.pointerUndo = writes.map((write) => ({
+                address: write.address,
+                expected: write.bytes.slice(),
+                bytes: write.expected.slice(),
+              }));
+            },
+          },
+        );
+        if (!this.pointerSuppressed) throw new Error('Native cursor drawing signature is unsupported');
+      }
       const input = decodeJson(await this.connection.request(NativeMessageType.InputState)) as { modal?: boolean };
       // A menu has native pictures and input but no logic-frame callbacks. Do
       // not manufacture a mirror or a logic-thread ID to make it attachable.
       // An attachment outside a menu still requires a complete initial mirror.
       if (!this.memory.complete && !input.modal) await this.nextMirror();
       if (this.memory.complete) await this.preparePolicy();
+      if (this.options.pageCursor !== undefined && this.hello.surface.width > 0 && this.hello.surface.height > 0)
+        await this.readCurrentPointer(this.hello.surface.width, this.hello.surface.height);
       this.running = true;
       this.status('running', '已连接本机游戏');
       this.requestNextFrame();
@@ -711,6 +794,20 @@ export class NativeCore {
         frames: this.hostFrames,
         inputQueueLength: this.inputQueue.length,
         inputOutstanding: this.inputOutstanding,
+        cursor: {
+          pagePresentation: this.pointerSuppressed,
+          software: this.pointer ?? null,
+          hardware: this.systemCursor
+            ? {
+                handle: this.systemCursor.handle,
+                width: this.systemCursor.width,
+                height: this.systemCursor.height,
+                hotspotX: this.systemCursor.hotspotX,
+                hotspotY: this.systemCursor.hotspotY,
+              }
+            : null,
+          readPending: this.pointerReadPending,
+        },
       },
     };
   }
@@ -791,9 +888,16 @@ export class NativeCore {
     if (this.closed) return;
     this.running = false;
     this.inputQueue.length = 0;
+    this.pointerReadPicture = null;
     await this.operationTail;
     let cleanupError: unknown;
     try {
+      if (this.pointerUndo.length) {
+        await this.connection.batch(this.pointerUndo);
+        this.pointerUndo = [];
+        this.pointerSuppressed = false;
+        this.pointer = null;
+      }
       if (this.passthrough) {
         await runNativeTransaction(this.memory, (transaction) => this.passthrough!.set(transaction, 0), this.host);
         // Only restore external signatures that still exactly match the installed

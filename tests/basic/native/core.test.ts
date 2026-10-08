@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NativeCore, NativeUnsupportedError } from '../../../src/adapter/native/core';
-import type { NativeGamePolicyFactory } from '../../../src/adapter/native/core';
+import type { NativeCoreOptions, NativeGamePolicyFactory } from '../../../src/adapter/native/core';
 import type { NativeWebSocket } from '../../../src/adapter/native/connection';
 import {
   NativeMessageType,
@@ -50,6 +50,7 @@ class FakeAgent implements NativeWebSocket {
   initial = new Uint8Array(NATIVE_PAGE_SIZE);
   revisionSupport = false;
   subscriptionRevision = 0;
+  surface = { width: 0, height: 0, bpp: 0, format: 'RGB565' };
   constructor() {
     this.initial[0] = 7;
   }
@@ -110,7 +111,7 @@ class FakeAgent implements NativeWebSocket {
         pid: 10,
         gameThreadId: 0,
         exe: { size: 1000, peTimestamp: 123, sha256: 'a'.repeat(64), verified },
-        surface: { width: 0, height: 0, bpp: 0, format: 'RGB565' },
+        surface: this.surface,
         limits: {
           messageBytes: NATIVE_MAX_MESSAGE,
           pages: 4096,
@@ -166,7 +167,7 @@ function state(frame: number): GameRenderState {
   };
 }
 const active: NativeCore[] = [];
-function setup(callbacks: GameVmCallbacks = {}) {
+function setup(callbacks: GameVmCallbacks = {}, options: Partial<NativeCoreOptions> = {}) {
   const agent = new FakeAgent();
   const scheduled: (() => void)[] = [];
   const renderFactory = vi.fn();
@@ -198,7 +199,7 @@ function setup(callbacks: GameVmCallbacks = {}) {
   }));
   const core = new NativeCore(
     callbacks,
-    { url: 'ws://127.0.0.1:15450', token: 'a'.repeat(32), createWebSocket: () => agent, timeoutMs: 100 },
+    { url: 'ws://127.0.0.1:15450', token: 'a'.repeat(32), createWebSocket: () => agent, timeoutMs: 100, ...options },
     policyFactory,
     (emit) => scheduled.push(emit),
   );
@@ -221,6 +222,31 @@ afterEach(async () => {
 });
 
 describe('native core session and presenter lifecycle', () => {
+  it('primes genuine cursor metadata before the first fallback picture without suppressing the game cursor', async () => {
+    const frames = vi.fn();
+    const { core, agent, policyFactory, scheduled } = setup({ onFrame: frames }, { pageCursor: false });
+    agent.surface = { width: 2, height: 1, bpp: 16, format: 'RGB565' };
+    const factory = vi.mocked(policyFactory).getMockImplementation()!;
+    const pointer = { frame: 93, x: 1, y: 0, hotspotX: 16, hotspotY: 32 };
+    const readPointer = vi.fn(async () => pointer);
+    const drawing = vi.fn(() => true);
+    vi.mocked(policyFactory).mockImplementation((...args) => ({
+      ...factory(...args),
+      readPointer,
+      setPointerDrawing: drawing,
+    }));
+    const pending = core.start();
+    agent.hello();
+    await pending;
+    expect(readPointer).toHaveBeenCalledOnce();
+    expect(drawing).not.toHaveBeenCalled();
+    expect(agent.count(NativeMessageType.Batch)).toBe(0);
+    agent.picture(1);
+    scheduled.shift()!();
+    expect(frames.mock.calls[0]![0].pointer).toEqual(pointer);
+    await flush();
+    expect(readPointer).toHaveBeenCalledTimes(2);
+  });
   it('coalesces 30000 pointer updates with one input in flight and preserves every event and position barrier', async () => {
     const statuses = vi.fn();
     const { core, agent } = await started({ onStatus: statuses });

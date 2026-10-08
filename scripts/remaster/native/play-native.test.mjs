@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -97,6 +97,50 @@ test('port selection skips a live listener and stays inside the assigned range',
     assert.notEqual(port, original.agent);
   }
   assert.notEqual(ports.agent, ports.page);
+});
+
+test('temporary reservations close even when a startup poller connects before selection completes', async () => {
+  const servers = [],
+    probes = [],
+    accepted = [];
+  let deadline;
+  const makeServer = (onConnection) => {
+    const server = createServer(onConnection);
+    const listen = server.listen.bind(server);
+    server.listen = (options, ready) => {
+      // Use ephemeral ports so this regression cannot disturb an owner's game.
+      listen({ ...options, port: 0 }, () => {
+        const probe = createConnection({ host: '127.0.0.1', port: server.address().port });
+        probes.push(probe);
+        probe.on('error', () => {});
+        server.once('connection', (socket) => {
+          accepted.push(socket);
+          ready();
+        });
+      });
+      return server;
+    };
+    servers.push(server);
+    return server;
+  };
+  try {
+    const result = await Promise.race([
+      findPorts(makeServer),
+      new Promise((_, reject) => {
+        deadline = setTimeout(() => reject(new Error('accepted startup probe blocked reservation release')), 2000);
+      }),
+    ]);
+    assert.notEqual(result.agent, result.page);
+    assert.equal(accepted.length, 2);
+    assert.ok(accepted.every((socket) => socket.destroyed));
+    assert.ok(servers.every((server) => !server.listening));
+  } finally {
+    clearTimeout(deadline);
+    for (const socket of [...probes, ...accepted]) socket.destroy();
+    await Promise.all(
+      servers.filter((server) => server.listening).map((server) => new Promise((resolve) => server.close(resolve))),
+    );
+  }
 });
 
 test('missing game configuration produces a useful error before any startup', async () => {

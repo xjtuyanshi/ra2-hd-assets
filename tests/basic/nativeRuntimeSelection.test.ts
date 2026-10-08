@@ -54,7 +54,7 @@ describe('development native URL selection', () => {
       original = supplied.executableBytes.slice();
     await createVmShell({}, supplied, { renderPassthrough: true });
     const config = state.configs[0]!;
-    expect(config.native).toEqual({ url: 'ws://127.0.0.1:15450', token: 'ab'.repeat(32) });
+    expect(config.native).toEqual({ url: 'ws://127.0.0.1:15450', token: 'ab'.repeat(32), pageCursor: true });
     expect(config.provider).toEqual({ kind: 'native' });
     expect(config.renderPassthrough).toBe(true);
     expect(config.selectedExecutable!.bytes).toEqual(original);
@@ -63,6 +63,16 @@ describe('development native URL selection', () => {
     expect(supplied.files.write).not.toHaveBeenCalled();
     expect(supplied.files.list).not.toHaveBeenCalled();
     expect(supplied.executableBytes).toEqual(original);
+  });
+  it('preserves game cursor presentation when requested or page art is unavailable', async () => {
+    vi.stubEnv('DEV', true);
+    const nativeUrl = '?backend=native&agent=ws%3A%2F%2F127.0.0.1%3A15450&agent-token=' + 'ab'.repeat(32);
+    browser(nativeUrl + '&native-cursor=game');
+    await createVmShell({}, source());
+    expect(state.configs[0]!.native!.pageCursor).toBe(false);
+    browser(nativeUrl);
+    await createVmShell({}, source(), { nativePageCursor: false });
+    expect(state.configs[1]!.native!.pageCursor).toBe(false);
   });
   it('keeps the existing Worker configuration when native was not requested', async () => {
     browser('');

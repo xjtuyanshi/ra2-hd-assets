@@ -70,6 +70,7 @@ export interface HdBridgeHost {
   frameSize(): { width: number; height: number } | null;
   /** Read-only local input position; cursor shape always comes from the guest snapshot. */
   pointerPosition?(): Readonly<{ x: number; y: number }> | null;
+  pageCursor?(): boolean | undefined;
   /**
    * Show a short localized notice over the game picture, or clear it with null: why the running match shows the
    * original picture instead of the HD view (the map has no HD cache, or its view failed to load).

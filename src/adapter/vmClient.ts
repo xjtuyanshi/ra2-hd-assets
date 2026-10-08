@@ -27,6 +27,8 @@ export interface WorkerVmClientOptions {
   startupPage?: string;
   /** HD bridge opt-in: install the game's inert native overlay passthrough patches (dev `?hd=1`). */
   renderPassthrough?: boolean;
+  /** Development native cursor presentation; unavailable page art can preserve the game-drawn cursor. */
+  nativePageCursor?: boolean;
   /** In-memory resolution overlay injected into RA2.INI/RA2MD.INI at startup. */
   resolution?: GameResolution | null;
   /** Native [MultiPlayer] Handle for this VM; never shared with other tabs. */

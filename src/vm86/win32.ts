@@ -110,6 +110,14 @@ export interface VmFrame {
   rgba?: Uint8Array;
   /** Compact RGB565 when host controls need no composition; no row padding, allowing direct integer-texture upload. */
   rgb565?: Uint16Array;
+  /** Current native software-cursor sheet frame; position is presentation-independent from the picture pixels. */
+  pointer?: {
+    frame: number;
+    x: number;
+    y: number;
+    hotspotX: number;
+    hotspotY: number;
+  } | null;
   /** Independent small Win32 cursor texture; the host moves it without retransmitting the full framebuffer. */
   cursor?: {
     handle: number;

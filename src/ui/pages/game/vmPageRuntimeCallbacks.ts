@@ -16,6 +16,7 @@ import { formatNetworkStatus } from './networkStatus';
 import { activeCheatGameForPhase } from './cheatGuides';
 import { gameRunning, networkStatus } from './state/uiState';
 import type { RuntimeToolbar } from './runtimeToolbar';
+import type { VmFrame } from '../../../vm86/win32';
 
 export interface VmPageRuntimeCallbackDeps {
   canvas: HTMLCanvasElement;
@@ -41,6 +42,7 @@ export interface VmPageRuntimeCallbackDeps {
   onFinishExited: (detail: string) => void;
   onExposeRuntimeCallProbe: () => void;
   onAppendCall: (lines: string[], call: Win32Call, ordinal: number, suffix?: string) => void;
+  onCursorFrame?: (frame: VmFrame) => void;
 }
 
 export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameVmCallbacks {
@@ -143,6 +145,7 @@ export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameV
         getRefitActiveCanvas()(frame.width, frame.height);
       }
       presenter.submit(frame);
+      deps.onCursorFrame?.(frame);
       if (debugAutoOpen) {
         canvas.dataset.vmFrame = `${presenter.frameVersion}`;
         canvas.dataset.vmResolution = `${frame.width}x${frame.height}`;

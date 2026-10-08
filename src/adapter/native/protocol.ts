@@ -7,6 +7,8 @@ export const NATIVE_PAGE_SIZE = 4096;
 export const NATIVE_NO_FRAME = 0xffffffff;
 /** Skip cross-thread control metadata while retaining modal/input state. Empty payload stays full. */
 export const NATIVE_INPUT_STATE_MINIMAL = 1;
+/** Request the current game-selected Win32 cursor bitmap without controls or input-counter side effects. */
+export const NATIVE_INPUT_STATE_CURSOR = 2;
 
 export enum NativeMessageType {
   Hello = 1,
@@ -54,6 +56,7 @@ export interface NativeHello {
     pageRemovals?: boolean;
     maxBudgetUs?: number;
     subscribeRevision?: boolean;
+    cursorSnapshot?: boolean;
   };
 }
 export interface NativeRange {
@@ -97,6 +100,38 @@ export interface NativeBatchWrite {
   address: number;
   expected: Uint8Array;
   bytes: Uint8Array;
+}
+
+export function decodeCursorSnapshot(bytes: Uint8Array) {
+  if (bytes.length < 28) throw new NativeProtocolError('Short native cursor snapshot');
+  const source = view(bytes);
+  const handle = source.getUint32(0, true),
+    width = source.getUint32(4, true),
+    height = source.getUint32(8, true);
+  if (bytes.length === 28 && bytes.every((byte) => byte === 0)) return undefined;
+  const hotspotX = source.getUint32(12, true),
+    hotspotY = source.getUint32(16, true);
+  if (
+    !handle ||
+    width < 1 ||
+    width > 256 ||
+    height < 1 ||
+    height > 256 ||
+    hotspotX > width ||
+    hotspotY > height ||
+    bytes.length !== 28 + width * height * 4
+  )
+    throw new NativeProtocolError('Invalid native cursor snapshot');
+  return {
+    handle,
+    width,
+    height,
+    hotspotX,
+    hotspotY,
+    x: source.getInt32(20, true),
+    y: source.getInt32(24, true),
+    rgba: bytes.slice(28),
+  };
 }
 
 function uint(value: number, name: string): number {
@@ -208,6 +243,8 @@ export function decodeHello(payload: Uint8Array): NativeHello {
     throw new NativeProtocolError('Invalid native page-removal capability');
   if (hello.limits.subscribeRevision !== undefined && typeof hello.limits.subscribeRevision !== 'boolean')
     throw new NativeProtocolError('Invalid native subscription-revision capability');
+  if (hello.limits.cursorSnapshot !== undefined && typeof hello.limits.cursorSnapshot !== 'boolean')
+    throw new NativeProtocolError('Invalid native cursor-snapshot capability');
   if (
     hello.limits.maxBudgetUs !== undefined &&
     (!Number.isInteger(hello.limits.maxBudgetUs) || hello.limits.maxBudgetUs < 100 || hello.limits.maxBudgetUs > 20000)

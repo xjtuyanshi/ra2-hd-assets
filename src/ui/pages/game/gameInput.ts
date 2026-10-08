@@ -33,19 +33,30 @@ export function setSessionShortcutKey(key: string, reserved: boolean): void {
 }
 
 /**
- * Canvas CSS-box cache refreshed by installCanvasFit after every fit, including fullscreen changes.
+ * Per-canvas CSS-box cache refreshed by layout owners after every fit or observed layout change.
  * Frequent mousemove reads no longer call getBoundingClientRect each time.
  */
-let canvasRectCache: { left: number; top: number; width: number; height: number } | null = null;
+const canvasRectCache = new WeakMap<HTMLCanvasElement, { left: number; top: number; width: number; height: number }>();
 
-function refreshCanvasRect(canvas: HTMLCanvasElement): { left: number; top: number; width: number; height: number } {
+export function refreshCanvasRect(canvas: HTMLCanvasElement): {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+} {
   const rect = canvas.getBoundingClientRect();
-  canvasRectCache = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-  return canvasRectCache;
+  const box = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+  canvasRectCache.set(canvas, box);
+  return box;
 }
 
-function currentCanvasRect(canvas: HTMLCanvasElement): { left: number; top: number; width: number; height: number } {
-  return canvasRectCache ?? refreshCanvasRect(canvas);
+export function currentCanvasRect(canvas: HTMLCanvasElement): {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+} {
+  return canvasRectCache.get(canvas) ?? refreshCanvasRect(canvas);
 }
 
 /** Fullscreen frame and lock hints, excluding toolbar/debug layers; input lifecycle owns keyboard locking. */
@@ -252,10 +263,10 @@ export function installGameInput(
   canvas.style.touchAction = 'none';
   canvas.style.userSelect = 'none';
   const removers: Array<() => void> = [];
-  // RA2 uses the Win32 hardware cursor on its menus. The browser is the hardware
-  // cursor in this adapter, so keep it explicit when pointer lock is disabled;
-  // inherited page styles or a stale game cursor must not leave the menu cursorless.
-  if (!lockDesktopMouse) {
+  // The emulator uses the browser's hardware cursor on menus in absolute mode.
+  // Native sessions own the exact cursor art in the page or frame presenter and
+  // must keep their CSS ownership when input is installed after a warm frame.
+  if (!lockDesktopMouse && vm.runtimeInfo?.backend !== 'native') {
     const previousCursor = canvas.style.getPropertyValue('cursor');
     const previousCursorPriority = canvas.style.getPropertyPriority('cursor');
     canvas.style.setProperty('cursor', 'default', 'important');

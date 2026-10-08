@@ -355,8 +355,14 @@ void nh_dispatch_input(uint16_t type, uint32_t id, const uint8_t *payload, uint3
     {
         uint32_t flags = 0;
         if (length == 4) memcpy(&flags, payload, 4);
-        if ((length != 0 && length != 4) || (length == 4 && flags != 1))
-        { error(id, "input state takes no payload or skip-controls flag one"); return; }
+        if ((length != 0 && length != 4) || (length == 4 && flags != 1 && flags != 2))
+        { error(id, "input state takes no payload, skip-controls flag one, or cursor-snapshot flag two"); return; }
+        if (flags == 2)
+        {
+            nh_cursor_snapshot(id, (int)InterlockedCompareExchange(&cursor_x, 0, 0),
+                (int)InterlockedCompareExchange(&cursor_y, 0, 0));
+            return;
+        }
         /* Frequent readers need modal ownership, not GUI control queries.
          * Empty requests retain the complete diagnostic response. */
         input_state(id, flags == 1);

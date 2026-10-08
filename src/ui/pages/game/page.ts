@@ -49,6 +49,7 @@ import { forgetGameDirectory } from '../../../platform/browser/files/directoryAc
 import { type GameSource } from '../../../games/source';
 import { clearCachedGameFiles, loadCustomMapFiles } from '../../../adapter/cachedGameFiles';
 import { createVmRuntimeCallbacks } from './vmPageRuntimeCallbacks';
+import { createNativeCursorFrames } from './nativeCursorFrames';
 import { createVmPageToolbarActions } from './vmPageToolbarActions';
 import {
   DISPLAY_RESOLUTION,
@@ -161,6 +162,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   let hdCleanup: HdBridgeControl | null = null;
   /** Game-speed telemetry of this session (development only, see speedTelemetry.ts); stopped with the runtime. */
   let speedCleanup: (() => void) | null = null;
+  let nativeCursor: Awaited<ReturnType<(typeof import('./nativeCursor'))['createNativeCursor']>> = null;
   /** Game frames presented since the page started this session (the telemetry takes differences). */
   let presentedFrames = 0;
   /** Switch between the HD view and the original picture (toolbar button and the \\ key); no-op without a bridge. */
@@ -382,6 +384,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   };
 
   const presentHostCursor = (x: number, y: number, visible: boolean) => {
+    nativeCursor?.position(x, y, visible);
+    if (!nativeCursor && vm?.runtimeInfo.backend === 'native' && presenter.frame?.cursor) visible = true;
     if (debugAutoOpen) {
       canvas.dataset.vmCursor = `${x},${y}/${gameFrameWidth}x${gameFrameHeight}`;
       const now = performance.now();
@@ -393,7 +397,16 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     presenter.presentCursor(x, y, visible);
   };
 
+  const nativeCursorFrames = createNativeCursorFrames({
+    screen: canvas,
+    pageCursor: () => nativeCursor,
+    presentCursor: (x, y, visible) => presenter.presentCursor(x, y, visible),
+    isReleased: () => runtimeReleased,
+  });
   activeRendererCleanup = () => {
+    nativeCursorFrames.dispose();
+    nativeCursor?.destroy();
+    nativeCursor = null;
     effects.stop();
     presenter.destroy();
   };
@@ -505,6 +518,9 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
 
   const releaseRuntime = async () => {
     runtimeReleased = true;
+    nativeCursorFrames.dispose();
+    nativeCursor?.destroy();
+    nativeCursor = null;
     // Stop the HD bridge while the VM still runs: it switches the game's passthrough off and must not keep polling (and
     // holding its GPU view) after the VM is gone.
     activeTrainingCleanup?.();
@@ -604,6 +620,22 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     };
   };
 
+  if (
+    import.meta.env.DEV &&
+    new URLSearchParams(window.location.search).get('backend') === 'native' &&
+    new URLSearchParams(window.location.search).get('native-cursor') !== 'game'
+  ) {
+    try {
+      const { createNativeCursor } = await import('./nativeCursor');
+      nativeCursor = await createNativeCursor(canvas);
+    } catch (error) {
+      console.warn('[native] Cursor art unavailable; retaining game cursor', error);
+    }
+    if (generation !== pageGeneration || runtimeReleased) {
+      nativeCursor?.destroy();
+      return;
+    }
+  }
   vm = await startSessionRuntime(
     () =>
       pageController.start(({ isCurrent }) =>
@@ -640,6 +672,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
               onFinishExited: finishExitedRuntime,
               onExposeRuntimeCallProbe: exposeRuntimeCallProbe,
               onAppendCall: appendCall,
+              onCursorFrame: nativeCursorFrames.onFrame,
             }),
             isCurrent,
           ),
@@ -652,6 +685,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
             // The HD bridge switches the game's native overlay passthrough; normal play installs no patches.
             renderPassthrough: hdBridgeEnabled,
             recycleFrames: true,
+            nativePageCursor: nativeCursor !== null,
           },
         ),
       ),
@@ -758,6 +792,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
           invalidate: () => presenter.invalidate(),
           frameSize: () => (presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null),
           pointerPosition: () => inputPointerPosition?.() ?? null,
+          pageCursor: () => (vm?.runtimeInfo.backend === 'native' ? nativeCursor !== null : undefined),
           publishStatus: (text) => hdStatus.set(text),
           publishQuality: (tier, tiers) => toolbar.setHdQuality(tier, tiers),
           publishStalls: (count, longestMs) => toolbar.setStalls(count, longestMs),

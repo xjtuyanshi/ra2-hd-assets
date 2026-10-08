@@ -1063,6 +1063,7 @@ describe('HD UI controller', () => {
     const insert = vi.fn();
     const setTransparentRects = vi.fn();
     const invalidate = vi.fn();
+    let pageCursor: boolean | undefined;
     const host = {
       screen: {
         offsetLeft: 17,
@@ -1074,6 +1075,7 @@ describe('HD UI controller', () => {
       frameRenderer: { setTransparentRects, setSmoothRect: vi.fn() } as unknown as VmFrameRenderer,
       invalidate,
       frameSize: () => ({ width: 800, height: 600 }),
+      pageCursor: () => pageCursor,
     };
     const ui = startHdUi(host);
     const s = hdSidebar();
@@ -1101,6 +1103,17 @@ describe('HD UI controller', () => {
     s.tooltip = null;
     ui.update(s);
     expect(setTransparentRects).toHaveBeenLastCalledWith(transparentRects(s, fallback));
+    pageCursor = false;
+    ui.update(s);
+    expect(canvas.style.display).toBe('none');
+    expect(setTransparentRects).toHaveBeenLastCalledWith([]);
+    expect(host.frameRenderer.setSmoothRect).toHaveBeenLastCalledWith(null);
+    expect(scheduled.size).toBe(0);
+    pageCursor = undefined;
+    ui.update(s);
+    expect(canvas.style.display).toBe('block');
+    expect(setTransparentRects).toHaveBeenLastCalledWith(transparentRects(s, fallback));
+    expect(scheduled.size).toBe(1);
     ui.setEnabled(false);
     expect(canvas.style.display).toBe('none');
     expect(setTransparentRects).toHaveBeenLastCalledWith([]);

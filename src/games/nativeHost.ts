@@ -1,4 +1,4 @@
-import type { GuestMemory } from '../vm86/win32';
+import type { GuestMemory, VmFrame } from '../vm86/win32';
 import type { GameRenderStateReader } from './renderState';
 import type { GameCommandStateReader } from './commandState';
 import type { GameFrameReader } from './performance';
@@ -40,4 +40,12 @@ export interface NativeGamePolicy {
     reserve: (size: number, alignment?: number) => number,
   ): RenderPassthroughControl | null;
   setSpeed(memory: GuestMemory, value: number): number | null;
+  /** Version-validated drawing-only patch. A false result keeps the game's original cursor. */
+  setPointerDrawing?(memory: GuestMemory, enabled: boolean): boolean;
+  /** Read actual current cursor state independently of battlefield logic ticks (menus have none). */
+  readPointer?(
+    read: (address: number, length: number) => Promise<Uint8Array>,
+    width: number,
+    height: number,
+  ): Promise<VmFrame['pointer']>;
 }

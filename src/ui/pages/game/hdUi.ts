@@ -17,6 +17,8 @@ export function startHdUi(host: {
   invalidate(): void;
   frameSize(): { width: number; height: number } | null;
   pointerPosition?(): Readonly<{ x: number; y: number }> | null;
+  /** Undefined retains the legacy UI path; false preserves all native sidebar pixels for the game-cursor fallback. */
+  pageCursor?(): boolean | undefined;
 }): HdUi {
   const canvas = document.createElement('canvas');
   canvas.id = 'hd-ui';
@@ -38,7 +40,7 @@ export function startHdUi(host: {
     host.frameRenderer.setTransparentRects(rects);
     host.invalidate();
   };
-  const visible = () => !!ctx && enabled && !!sidebar && !!host.frameSize();
+  const visible = () => !!ctx && enabled && !!sidebar && !!host.frameSize() && host.pageCursor?.() !== false;
   const sync = () => {
     const show = visible();
     canvas.style.display = show ? 'block' : 'none';
@@ -75,7 +77,11 @@ export function startHdUi(host: {
       ctx.save();
       // Match even a nonuniformly sized screen box without changing the snapshot's frame coordinates.
       ctx.scale(1, canvas.height / size.height / scale);
-      drawSidebar(ctx, sidebar, assets, { scale, time, pointerPosition: host.pointerPosition?.() ?? null });
+      drawSidebar(ctx, host.pageCursor?.() ? { ...sidebar, pointer: null } : sidebar, assets, {
+        scale,
+        time,
+        pointerPosition: host.pointerPosition?.() ?? null,
+      });
       ctx.restore();
     }
   };
