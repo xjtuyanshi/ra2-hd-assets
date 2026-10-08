@@ -14,6 +14,15 @@ import {
   nativeMainMenuReady,
   runLauncher,
 } from './play-native.mjs';
+import { HD_PLAY_OPTIONS } from '../play-options.mjs';
+import {
+  NATIVE_RESOLUTION_LIMITS,
+  capNativeResolution,
+  configureNativeResolution,
+  nativeResolutionIniName,
+  parseNativeSize,
+  patchNativeResolutionIni,
+} from './native-resolution.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 
@@ -92,6 +101,77 @@ test('port selection skips a live listener and stays inside the assigned range',
 
 test('missing game configuration produces a useful error before any startup', async () => {
   await assert.rejects(runLauncher([], {}), /RA2_NATIVE_GAME_DIR/);
+});
+
+test('native size parsing and main-display capping respect game and picture bounds', () => {
+  assert.deepEqual(parseNativeSize('1512x982'), { width: 1512, height: 982 });
+  assert.deepEqual(capNativeResolution({ width: 1512, height: 982 }), { width: 1512, height: 982 });
+  for (const size of [
+    { width: 5120, height: 2880 },
+    { width: 99999, height: 600 },
+    { width: 800, height: 99999 },
+  ]) {
+    const capped = capNativeResolution(size);
+    assert.ok(capped.width >= 800 && capped.width <= 2560);
+    assert.ok(capped.height >= 600 && capped.height <= 1600);
+    assert.ok(capped.width * capped.height <= NATIVE_RESOLUTION_LIMITS.maxPixels);
+  }
+  for (const value of [undefined, '1270', '700x600', '1280x599', '1280x720junk'])
+    assert.throws(() => parseNativeSize(value), /--size/);
+  assert.throws(() => capNativeResolution({ width: 0, height: 600 }), /valid size/);
+});
+
+test('native resolution patch preserves unrelated ANSI bytes, comments, sections and line endings', () => {
+  const before = Buffer.from(
+    '; \xff player comment\r\n[Video]\r\n ScreenWidth = 800 ; width\r\nScreenHeight=600\r\nScreenWidth=1024\r\nAllowHiResModes=no\r\n[Options]\r\nGameSpeed=1\r\nSoundVolume=0.7\r\n',
+    'latin1',
+  );
+  const after = patchNativeResolutionIni(before, { width: 1512, height: 982 });
+  assert.equal(
+    after.toString('latin1'),
+    '; \xff player comment\r\n[Video]\r\n ScreenWidth = 1512 ; width\r\nScreenHeight=982\r\nScreenWidth=1512\r\nAllowHiResModes=yes\r\n[Options]\r\nGameSpeed=1\r\nSoundVolume=0.7\r\n',
+  );
+  assert.ok(patchNativeResolutionIni(after, { width: 1512, height: 982 }).equals(after));
+  assert.match(patchNativeResolutionIni(Buffer.alloc(0), { width: 1280, height: 720 }).toString(), /^\[Video\]\n/);
+});
+
+test('native resolution configuration backs up the supplied case-insensitive INI and rejects symlinks', async (t) => {
+  const { dir, run } = await fixture(t);
+  const target = join(dir, 'ra2md.ini');
+  const original = Buffer.from('[Options]\r\nGameSpeed=1\r\n');
+  await writeFile(target, original, { mode: 0o640 });
+  const configured = await configureNativeResolution(dir, run, { width: 1280, height: 720 });
+  assert.equal(configured.target, target);
+  assert.deepEqual(await readFile(configured.backup), original);
+  assert.equal((await lstat(target)).mode & 0o777, 0o640);
+  assert.match((await readFile(target)).toString(), /ScreenWidth=1280\r\nScreenHeight=720/);
+  assert.equal((await configureNativeResolution(dir, run, { width: 1280, height: 720 })).changed, false);
+  const linkedGame = join(dir, 'linked');
+  await mkdir(linkedGame);
+  await symlink(target, join(linkedGame, 'RA2MD.INI'));
+  await assert.rejects(configureNativeResolution(linkedGame, run, { width: 1280, height: 720 }), /non-regular/);
+});
+
+test('native resolution refuses Unicode BOM files without rewriting or creating a backup', async (t) => {
+  const { dir, run } = await fixture(t);
+  const target = join(dir, 'RA2MD.INI');
+  const original = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('[Video]\r\nScreenWidth=800\r\n', 'utf16le')]);
+  await writeFile(target, original);
+  await assert.rejects(configureNativeResolution(dir, run, { width: 1280, height: 720 }), /Unicode BOM/);
+  assert.deepEqual(await readFile(target), original);
+  await assert.rejects(lstat(join(run, 'RA2MD.original.ini')), { code: 'ENOENT' });
+  for (const bom of [
+    [0xef, 0xbb, 0xbf],
+    [0xfe, 0xff],
+    [0, 0, 0xfe, 0xff],
+  ])
+    assert.throws(() => patchNativeResolutionIni(Buffer.from(bom), { width: 1280, height: 720 }), /Unicode BOM/);
+});
+
+test('native resolution refuses ambiguous INI case variants rather than choosing a file', () => {
+  assert.equal(nativeResolutionIniName(['other.ini', 'ra2md.INI']), 'ra2md.INI');
+  assert.equal(nativeResolutionIniName(['other.ini']), 'RA2MD.INI');
+  assert.throws(() => nativeResolutionIniName(['RA2MD.INI', 'ra2md.ini']), /Multiple case variants/);
 });
 
 test('readiness rejects empty native executable identity before printing a play URL', () => {
@@ -209,7 +289,7 @@ if (args[0] === 'winepath.exe') {
 `,
       { mode: 0o755 },
     );
-    const child = spawn('bash', ['scripts/remaster/native/play-native.sh'], {
+    const child = spawn('bash', ['scripts/remaster/native/play-native.sh', '--size', '1280x720'], {
       cwd: repository,
       env: {
         ...process.env,
@@ -247,6 +327,10 @@ if (args[0] === 'winepath.exe') {
     assert.match(output, /Play URL: /, output);
     const url = new URL(output.match(/Play URL: (\S+)/)[1]);
     assert.equal(url.searchParams.get('backend'), 'native');
+    assert.equal(url.searchParams.get('native-autostart'), 'yr');
+    assert.equal(url.searchParams.get('resolution'), '1280x720');
+    for (const [key, value] of Object.entries(HD_PLAY_OPTIONS)) assert.equal(url.searchParams.get(key), value);
+    assert.match(output, /Native resolution: 1280x720 \(fixed for this session/);
     assert.match(url.searchParams.get('agent-token'), /^[a-f0-9]{64}$/);
     const listingResponse = await fetch(`${url.origin}/game/.list?dir=ra2`);
     assert.equal(listingResponse.status, 200);

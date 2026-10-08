@@ -14,6 +14,9 @@ import type { NativePacket } from '../../../src/adapter/native/protocol';
 import type { GameRenderState } from '../../../src/games/renderState';
 import type { GameVmCallbacks } from '../../../src/app/session/runtimeEvents';
 import type { GameFileProvider } from '../../../src/resources/contracts';
+import { createYrNativeHouseTailDiscovery } from '../../../src/games/yr/nativeHost';
+import { YR_STATE_GLOBALS as YG, YR_STATE_OFFSETS as YO } from '../../../src/games/yr/stateReader';
+import { createGuestMemory, writeU32 } from '../../helpers/guestMemory';
 
 function concat(...parts: Uint8Array[]): Uint8Array {
   const bytes = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
@@ -204,6 +207,191 @@ afterEach(async () => {
 });
 
 describe('native core session and presenter lifecycle', () => {
+  it('subscribes every discovered house-tail page and waits for its complete applied revision before reading it', async () => {
+    const { core, agent, policyFactory } = setup(),
+      factory = vi.mocked(policyFactory).getMockImplementation()!,
+      source = createGuestMemory(),
+      house = 0xd00000;
+    let tailsEnabled = false;
+    writeU32(source, YG.frame, 20);
+    writeU32(source, YG.houses + 4, 0xc00000);
+    writeU32(source, YG.houses + 16, 1);
+    writeU32(source, 0xc00000, house);
+    writeU32(source, house + YO.houseColorScheme, 42);
+    vi.mocked(policyFactory).mockImplementation((...args) => {
+      const policy = factory(...args),
+        memory = args[0],
+        discover = createYrNativeHouseTailDiscovery(() => memory.accessor());
+      return {
+        ...policy,
+        ranges: [
+          ...policy.ranges,
+          { address: 0xa80000, length: 4096 },
+          { address: 0xa8e000, length: 4096 },
+          { address: 0xc00000, length: 4096 },
+        ],
+        additionalRanges: () => (tailsEnabled ? discover() : []),
+        createRenderReader: () => () => state(tailsEnabled ? memory.accessor().i32(house + YO.houseColorScheme) : 7),
+      };
+    });
+    agent.mirrorOnHook = false;
+    const start = core.start();
+    agent.hello(true, true);
+    await flush();
+    agent.mirror(
+      20,
+      [0x1000, 0xa80000, 0xa8e000, 0xc00000].map((address) => ({ address, bytes: source.read_memory(address, 4096) })),
+      2,
+      1,
+    );
+    await start;
+    expect((await core.getRenderState())?.frame).toBe(7);
+    tailsEnabled = true;
+    let settled = false;
+    const pending = core.getRenderState().then((result) => {
+      settled = true;
+      return result;
+    });
+    await flush();
+    expect(agent.subscriptionRevision).toBe(2);
+    expect(core.getMirrorFootprint().ranges.additional).toEqual([{ address: 0xd15000, length: 8192 }]);
+    const subscription = agent.requests.filter((request) => request.type === NativeMessageType.Subscribe).at(-1)!;
+    const subscribed = Array.from({ length: u32(subscription.payload, 0) }, (_, index) => ({
+      address: u32(subscription.payload, 20 + index * 8),
+      length: u32(subscription.payload, 24 + index * 8),
+    }));
+    expect(subscribed).toContainEqual({ address: 0xd15000, length: 8192 });
+    agent.mirror(21, [{ address: 0xd15000, bytes: source.read_memory(0xd15000, 4096) }], 0, 1);
+    await flush();
+    expect(settled).toBe(false);
+    agent.mirror(22, [], 1);
+    await flush();
+    expect(settled).toBe(false);
+    agent.mirror(
+      23,
+      [0xd15000, 0xd16000].map((address) => ({ address, bytes: source.read_memory(address, 4096) })),
+      0,
+      2,
+    );
+    expect((await pending)?.frame).toBe(42);
+    expect(core.memory.misses).toBe(0);
+  });
+  it('rejects unknown policy discovery without replacing the prior reader result or subscription scope', async () => {
+    const { core, agent, policyFactory } = setup(),
+      factory = vi.mocked(policyFactory).getMockImplementation()!;
+    let unknown = false;
+    vi.mocked(policyFactory).mockImplementation((...args) => {
+      const policy = factory(...args);
+      return {
+        ...policy,
+        additionalRanges: () => {
+          if (unknown) throw new RangeError('Invalid native pointer-table descriptor');
+          return policy.additionalRanges?.() ?? [];
+        },
+      };
+    });
+    const start = core.start();
+    agent.hello();
+    await start;
+    const good = await core.getRenderState(),
+      footprint = core.getMirrorFootprint(),
+      subscriptions = agent.count(NativeMessageType.Subscribe);
+    unknown = true;
+    await expect(core.getRenderState()).rejects.toThrow('descriptor');
+    expect(core.getMirrorFootprint().ranges).toEqual(footprint.ranges);
+    expect(agent.count(NativeMessageType.Subscribe)).toBe(subscriptions);
+    agent.mirror(2, [], 1);
+    expect(await core.getRenderState()).toBe(good);
+    unknown = false;
+    agent.mirror(3, [], 0);
+    expect((await core.getRenderState())?.frame).toBe(7);
+  });
+  it('reports a detached copy of the actual subscribed rules rather than a later policy mutation', async () => {
+    const { core, agent, policyFactory } = setup(),
+      factory = vi.mocked(policyFactory).getMockImplementation()!,
+      rule = { kind: 1 as const, source: 0x1000, bytes: 4096, maxCount: 1, stride: 0 };
+    vi.mocked(policyFactory).mockImplementation((...args) => ({ ...factory(...args), rules: [rule] }));
+    const start = core.start();
+    agent.hello();
+    await start;
+    rule.source = 0x9000;
+    const requests = agent.requests.length,
+      footprint = core.getMirrorFootprint();
+    expect(footprint.rules).toEqual([{ kind: 1, source: 0x1000, bytes: 4096, maxCount: 1, stride: 0 }]);
+    footprint.rules[0]!.bytes = 0;
+    expect(core.getMirrorFootprint().rules[0]!.bytes).toBe(4096);
+    expect(agent.requests).toHaveLength(requests);
+  });
+  it('audits subscription owners without reading the guest or reporting incomplete demand as current', async () => {
+    const { core, agent, mode } = await started();
+    await core.getRenderState();
+    mode.missing = true;
+    const pending = core.getRenderState();
+    await flush();
+    agent.mirror(
+      2,
+      [
+        { address: 0x1000, bytes: agent.initial },
+        { address: 0x9000, bytes: agent.initial },
+        { address: 0x2000, bytes: agent.initial },
+      ],
+      2,
+    );
+    await flush();
+    const fresh = new Uint8Array(NATIVE_PAGE_SIZE);
+    fresh[0] = 42;
+    agent.mirror(3, [{ address: 0x9000, bytes: fresh }]);
+    expect((await pending)?.frame).toBe(42);
+    const requests = agent.requests.length,
+      reads = core.memory.operationRanges,
+      footprint = core.getMirrorFootprint();
+    expect(footprint.pageLimit).toBe(4096);
+    expect(footprint.pageCounts).toEqual({
+      fixed: 1,
+      additional: 0,
+      learned: 1,
+      baseUnion: 1,
+      requestedSeedUnion: 2,
+      subscribed: 2,
+      lastPublishedMirror: 3,
+      knownPublishedOutsideSubscribed: 1,
+    });
+    expect(footprint.owners).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'render',
+          accessedPages: 2,
+          learnedPages: 1,
+          exclusiveLearnedOutsideBase: 1,
+          readerCached: true,
+        }),
+      ]),
+    );
+    footprint.ranges.subscribed[0]!.address = 0;
+    footprint.mirror.ranges.length = 0;
+    footprint.owners[0]!.learnedPages = 999;
+    expect(core.getMirrorFootprint().pageCounts).toEqual({
+      fixed: 1,
+      additional: 0,
+      learned: 1,
+      baseUnion: 1,
+      requestedSeedUnion: 2,
+      subscribed: 2,
+      lastPublishedMirror: 3,
+      knownPublishedOutsideSubscribed: 1,
+    });
+    expect(core.memory.operationRanges).toEqual(reads);
+    expect(agent.requests).toHaveLength(requests);
+    agent.mirror(4, [], 1);
+    expect(core.getMirrorFootprint().mirror).toMatchObject({
+      complete: false,
+      lastPublishedFrame: 3,
+      lastFlags: 1,
+      currentFollowDemand: 'unknown',
+    });
+    expect(core.getMirrorFootprint().pageCounts.lastPublishedMirror).toBe(3);
+    expect(core.getMirrorFootprint().pageCounts.learned).toBe(1);
+  });
   it('negotiates page-removal deltas only when hello advertises support', async () => {
     for (const supported of [undefined, false, true]) {
       const { core, agent } = setup();

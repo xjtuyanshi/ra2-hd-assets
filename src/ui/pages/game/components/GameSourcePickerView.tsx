@@ -5,6 +5,7 @@ import type { GameSource } from '../../../../games/source';
 import { useGameSourcePicker } from '../hooks/useGameSourcePicker';
 import { SUPPORTED_GAMES } from '../../../../games/catalog';
 import { parseTrainingQuery } from '../training/trainingQuery';
+import { nativeAutoStart } from '../nativeStartup';
 import './GameSourcePicker.css';
 
 export function GameSourcePickerView({ onSelected }: { onSelected(source: GameSource): void }) {
@@ -18,13 +19,14 @@ export function GameSourcePickerView({ onSelected }: { onSelected(source: GameSo
   const autoStart = useRef<'idle' | 'picked' | 'chosen'>('idle');
   useEffect(() => {
     const training = parseTrainingQuery(window.location.search);
-    if (!training?.lesson || props.busy) return;
+    const game = nativeAutoStart(window.location.search) ?? (training?.lesson ? training.game : null);
+    if (!game || props.busy) return;
     if (autoStart.current === 'idle') {
       autoStart.current = 'picked';
       props.pick('development');
-    } else if (autoStart.current === 'picked' && props.games.includes(training.game)) {
+    } else if (autoStart.current === 'picked' && props.games.includes(game)) {
       autoStart.current = 'chosen';
-      void props.chooseGame(training.game);
+      void props.chooseGame(game);
     }
   }, [props]);
   let relayError = '';

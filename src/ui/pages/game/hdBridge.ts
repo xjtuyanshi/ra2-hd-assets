@@ -1,5 +1,5 @@
 import type { VmShell } from '../../../adapter/vmShell';
-import type { GameRenderSidebar, GameRenderState } from '../../../games/renderState';
+import type { GameRenderEffects, GameRenderSidebar, GameRenderState } from '../../../games/renderState';
 import {
   RENDER_PASSTHROUGH,
   RENDER_PASSTHROUGH_ALL,
@@ -26,6 +26,7 @@ import {
 import { parseWeatherParams } from '../../../../packages/hd-renderer/src/weatherParams';
 import { QualityGovernor } from '../../../../packages/hd-renderer/src/qualityGovernor';
 import { FramePacer } from '../../../graphics/framePacer';
+import { createWebGpuFrameCapture } from '../../../graphics/webGpuFrameCapture';
 import { t } from '../../shared/i18n/translate';
 
 /**
@@ -224,6 +225,103 @@ export interface HdBridgeTimeline {
   revealLoading: number;
 }
 
+/** Page-clock observations at the bridge boundary, independent of rAF and the game's target frame rate. */
+export interface HdBridgeCounters {
+  distinctStates: number;
+  drawnFrames: number;
+  shownFrames: number;
+  /** First successful LiveView.render(), including preparation out of sight. */
+  firstDrawAtMs: number | null;
+  /** First completed HD picture shown on this page (performance.now(), from navigation). */
+  firstShownDrawAtMs: number | null;
+  lastStateAtMs: number | null;
+  lastStateFrame: number | null;
+  lastStateMap: string | null;
+}
+
+/** Only the native visibility, camera bounds and weapon effects needed by combat observation. */
+export interface HdBridgeCombatState extends Pick<GameRenderState, 'frame' | 'view' | 'shroud'> {
+  sidebar: {
+    frame: GameRenderSidebar['frame'];
+    layout: Pick<GameRenderSidebar['layout'], 'sidebar' | 'commandBar'>;
+  } | null;
+  effects:
+    | (Pick<GameRenderEffects, 'anims' | 'bullets' | 'lasers' | 'electricBolts' | 'radBeams' | 'waves'> & {
+        /** Partial animation evidence must not establish complete combat observation. */
+        animsTruncated: boolean;
+      })
+    | null;
+}
+
+/** Development-only readback of an actual completed HD canvas draw. */
+export interface HdBridgeDrawCapture {
+  frame: number;
+  drawAtMs: number;
+  shown: boolean;
+  nativeSize: { width: number; height: number };
+  view: GameRenderState['view'];
+  map: string | null;
+  rect: FrameRect;
+  state: HdBridgeCombatState;
+  passthrough: { flags: number; keyed: boolean; unsupported: boolean };
+  interpolation: 'normal LiveView interpolation';
+  width: number;
+  height: number;
+  format: string;
+  pixels: Uint8Array;
+}
+
+const MAX_COMBAT_DIAGNOSTIC_ANIMS = 8192;
+const combatSnapshot = (state: GameRenderState | null): HdBridgeCombatState | null => {
+  if (!state) return null;
+  const { frame, view, shroud, sidebar, effects } = state;
+  return structuredClone({
+    frame,
+    view,
+    shroud,
+    sidebar: sidebar
+      ? {
+          frame: sidebar.frame,
+          layout: { sidebar: sidebar.layout.sidebar, commandBar: sidebar.layout.commandBar },
+        }
+      : null,
+    effects: effects
+      ? {
+          // The bridge reports real animation metadata without assigning game
+          // meaning to type IDs. A development observer owns that policy.
+          anims: effects.anims.slice(0, MAX_COMBAT_DIAGNOSTIC_ANIMS),
+          animsTruncated: effects.anims.length > MAX_COMBAT_DIAGNOSTIC_ANIMS,
+          bullets: effects.bullets,
+          lasers: effects.lasers,
+          electricBolts: effects.electricBolts,
+          radBeams: effects.radBeams,
+          waves: effects.waves,
+        }
+      : null,
+  });
+};
+
+export interface HdBridgeCapture {
+  startAtMs: number;
+  endAtMs: number | null;
+  startStateFrame: number | null;
+  endStateFrame: number | null;
+  startStateMap: string | null;
+  endStateMap: string | null;
+  distinctStates: number;
+  drawnFrames: number;
+  shownFrames: number;
+  /** Arrival timestamps for distinct map/logic-frame identities, not requests or repeated unchanged replies. */
+  deliveries: { atMs: number; frame: number; map: string }[];
+  /** Completed render calls, including whether the HD picture was shown at that draw. */
+  draws: { atMs: number; frame: number; shown: boolean }[];
+  /** Records beyond the bound are counted above, but omitted from the timestamp arrays. */
+  truncated: boolean;
+}
+
+/** Enough for a minute at 240 Hz; a forgotten development capture must not grow without a bound. */
+const CAPTURE_RECORDS = 20_000;
+
 const emptyTimeline = (map: string | null): HdBridgeTimeline => ({
   map,
   firstStateAt: null,
@@ -391,6 +489,143 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   /** Guest frame size when the current view finished loading: the loading screen's video mode, as a key. */
   let loadingFrame: string | null = null;
   let timeline = emptyTimeline(null);
+  // This bridge is a development entry, but keep the measurement buffers and read-only probe surface under DEV
+  // as well: production builds neither collect records nor gain a game-state console interface.
+  const diagnostics = import.meta.env.DEV
+    ? (() => {
+        const counters: HdBridgeCounters = {
+          distinctStates: 0,
+          drawnFrames: 0,
+          shownFrames: 0,
+          firstDrawAtMs: null,
+          firstShownDrawAtMs: null,
+          lastStateAtMs: null,
+          lastStateFrame: null,
+          lastStateMap: null,
+        };
+        let previousState: string | null = null;
+        let capture: HdBridgeCapture | null = null;
+        const frameCapture = createWebGpuFrameCapture(({ atMs, shown }: { atMs: number; shown: boolean }) => {
+          const rect = hole ?? keyRect;
+          const nativeSize = host.frameSize();
+          const state = combatSnapshot(pushed);
+          if (!live || !rect || !nativeSize || !state) return null;
+          return {
+            backend: live.hd.renderer.backend,
+            metadata: {
+              frame: state.frame,
+              drawAtMs: atMs,
+              shown,
+              nativeSize: { ...nativeSize },
+              view: state.view,
+              map: liveMap,
+              rect: { ...rect },
+              state,
+              passthrough: { flags: passthroughRequest, keyed: !!keyRect, unsupported: passthroughUnsupported },
+              interpolation: 'normal LiveView interpolation' as const,
+            },
+          };
+        });
+        const append = <T>(records: T[], record: T) => {
+          if (records.length < CAPTURE_RECORDS) records.push(record);
+          else if (capture) capture.truncated = true;
+        };
+        const snapshot = () => (capture ? structuredClone(capture) : null);
+        return {
+          state(state: GameRenderState | null) {
+            const map = state?.map?.fileName?.replace(/\.[^.]+$/, '').toLowerCase() ?? null;
+            const key = state && map ? `${map}:${state.frame}` : null;
+            if (key !== null && key !== previousState && state && map) {
+              const atMs = performance.now();
+              counters.distinctStates++;
+              counters.lastStateAtMs = atMs;
+              counters.lastStateFrame = state.frame;
+              counters.lastStateMap = map;
+              if (capture && capture.endAtMs === null) {
+                capture.distinctStates++;
+                capture.endStateFrame = state.frame;
+                capture.endStateMap = map;
+                append(capture.deliveries, { atMs, frame: state.frame, map });
+              }
+            }
+            previousState = key;
+          },
+          draw(shown: boolean) {
+            const atMs = performance.now();
+            counters.drawnFrames++;
+            counters.firstDrawAtMs ??= atMs;
+            if (shown) {
+              counters.shownFrames++;
+              counters.firstShownDrawAtMs ??= atMs;
+            }
+            if (capture && capture.endAtMs === null) {
+              capture.drawnFrames++;
+              if (shown) capture.shownFrames++;
+              append(capture.draws, { atMs, frame: stateFrame, shown });
+            }
+            frameCapture.draw({ atMs, shown });
+          },
+          cancelFrameCapture: (reason: string) => frameCapture.cancel(reason),
+          dispose: () => frameCapture.dispose(),
+          reveal() {
+            // A settled picture was rendered out of sight immediately before it became visible. Its completed
+            // render counts once; the first-visible time belongs to reveal, not to the following display frame.
+            counters.firstShownDrawAtMs ??= performance.now();
+          },
+          handle: {
+            get enabled() {
+              return enabled;
+            },
+            get shown() {
+              return enabled && revealed && !!hole;
+            },
+            get state() {
+              return latestState ? structuredClone(latestState) : null;
+            },
+            get combatState(): HdBridgeCombatState | null {
+              // Observe the last delivered snapshot without copying map/object layers or issuing another RPC.
+              // Detached copies keep diagnostics from changing the data consumed by the live renderer.
+              return combatSnapshot(latestState);
+            },
+            get counters(): HdBridgeCounters {
+              return { ...counters };
+            },
+            get capture(): HdBridgeCapture | null {
+              return snapshot();
+            },
+            startCapture(): HdBridgeCapture {
+              capture = {
+                startAtMs: performance.now(),
+                endAtMs: null,
+                startStateFrame: counters.lastStateFrame,
+                endStateFrame: counters.lastStateFrame,
+                startStateMap: counters.lastStateMap,
+                endStateMap: counters.lastStateMap,
+                distinctStates: 0,
+                drawnFrames: 0,
+                shownFrames: 0,
+                deliveries: [],
+                draws: [],
+                truncated: false,
+              };
+              return snapshot()!;
+            },
+            finishCapture(): HdBridgeCapture | null {
+              if (capture && capture.endAtMs === null) capture.endAtMs = performance.now();
+              return snapshot();
+            },
+            async captureNextDraw(timeoutMs = 10_000): Promise<HdBridgeDrawCapture> {
+              const { metadata, ...image } = await frameCapture.request(timeoutMs);
+              return { ...metadata, ...image };
+            },
+            getCommandState: () => host.vm.getCommandState(),
+            getGamePerformance: () => host.vm.getGamePerformance(),
+            getPointerState: () => host.vm.getPointerState(),
+            getVmDiagnostics: () => host.vm.getDiagnostics('sample'),
+          },
+        };
+      })()
+    : null;
   let published: string | null = null;
   const publish = (text: string | null) => {
     if (text === published) return;
@@ -551,6 +786,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         if (!view) return;
         // Stopped, or superseded by a load for another map while this one was in flight.
         if (stopped || loading !== mapId) return view.dispose();
+        diagnostics?.cancelFrameCapture('HD view replaced');
         live?.dispose();
         live = view;
         liveMap = mapId;
@@ -609,6 +845,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     // A reply that was already in flight when the bridge stopped belongs to a session being torn down.
     if (stopped) return;
     pollFailed = false;
+    diagnostics?.state(state);
     latestState = state;
     inBattle = !!state?.map;
     ui?.update(state?.sidebar ?? null);
@@ -739,7 +976,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (!settled) {
       layout();
       live.render();
+      diagnostics?.draw(true);
     }
+    diagnostics?.reveal();
   };
 
   /** Full snapshots are only worth their cost while the HD view can show them (null replies are cheap). */
@@ -831,13 +1070,22 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     // Count from the request's start, so decoding time does not add another
     // complete poll interval. The previous request has finished before scheduling.
     const delay = Math.max(0, lastPollAt + interval - performance.now());
-    nativePollTimer = setTimeout(() => {
+    const timer = setTimeout(() => {
+      if (nativePollTimer !== timer) return;
       nativePollTimer = null;
       if (stopped) return;
       const now = performance.now();
+      // Timer delays are rounded by the browser. A callback already queued when an animation frame took its
+      // turn must also respect the latest request's actual start, without overlapping or catching up in bursts.
+      if (polling) return;
+      if (now - lastPollAt < (enabled ? NATIVE_POLL_MS : IDLE_POLL_MS)) {
+        scheduleNativePoll();
+        return;
+      }
       poll(now);
       if (hole) samplePace(now);
     }, Math.ceil(delay));
+    nativePollTimer = timer;
   };
 
   /**
@@ -890,6 +1138,14 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     frame = requestAnimationFrame(tick);
     const now = performance.now();
     stallMonitor?.frame(now);
+    // Take a due native request before drawing can delay its timer. The independent timer still delivers states
+    // without display callbacks or ready art; both paths share the same minimum interval and outstanding request.
+    if (native && enabled && !polling && now - lastPollAt >= NATIVE_POLL_MS) {
+      if (nativePollTimer !== null) clearTimeout(nativePollTimer);
+      nativePollTimer = null;
+      poll(performance.now());
+      if (hole) samplePace(now);
+    }
     if (!native && !polling && now - lastPollAt >= pollInterval()) poll(now);
     if (!hole && keyRect && now >= keyUntil) present();
     if (fallback && now >= fallback.until) publish(null);
@@ -901,6 +1157,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         if (governor && shownAt !== null) live.hd.setQualityTier(governor.frame(judgedInterval(now - shownAt)));
         shownAt = now;
         live.render();
+        diagnostics?.draw(enabled && revealed && !!hole);
         shownFrames++;
         publishTier(live.hd.quality);
       }
@@ -916,6 +1173,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         hiddenTicks = 0;
         layout();
         live.render();
+        diagnostics?.draw(false);
       }
       reveal(now);
     } else {
@@ -928,6 +1186,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
 
   // Console handle for A/B checks: __hdBridge.toggle() switches between the HD view and the original picture.
   const handle = {
+    ...(diagnostics ? { diagnostics: diagnostics.handle } : {}),
     toggle() {
       if (stopped) return enabled;
       enabled = !enabled;
@@ -990,6 +1249,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   const stop = () => {
     if (stopped) return;
     stopped = true;
+    diagnostics?.dispose();
     cancelAnimationFrame(frame);
     if (nativePollTimer !== null) clearTimeout(nativePollTimer);
     nativePollTimer = null;

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { observePageCombat } from './page-battle-input.mjs';
+import { retainFreshCombat } from './browser-combat-observer.mjs';
 
 function scene() {
   return {
@@ -85,4 +86,72 @@ test('raised combat is checked against the flat cells the native renderer covers
   });
   state.shroud.cells[1 * 16 + 2] = 1;
   assert.equal(observePageCombat(state, 0.1).visible, 0);
+});
+
+test('instant-hit evidence requires an actual visible resolved weapon muzzle', () => {
+  const state = scene();
+  state.effects.bullets = [];
+  const muzzle = {
+    id: 20,
+    uid: 100,
+    type: 'GUNFIRE',
+    x: 512,
+    y: 256,
+    z: 0,
+    frameCount: 6,
+    invisible: false,
+    buildingAnim: false,
+  };
+  state.effects.anims = [muzzle];
+  assert.equal(observePageCombat(state, 0.5).inView, 1);
+  for (const invalid of [
+    { type: 'S_CLSN16' },
+    { type: 'SMOKE' },
+    { invisible: true },
+    { buildingAnim: true },
+    { frameCount: 0 },
+    { uid: null },
+  ]) {
+    state.effects.anims = [{ ...muzzle, ...invalid }];
+    assert.equal(observePageCombat(state, 0.5).inView, 0);
+  }
+  state.effects.anims = [muzzle];
+  state.shroud.cells[1 * 16 + 2] = 1;
+  assert.equal(observePageCombat(state, 0.5).inView, 0);
+  state.effects.animsTruncated = true;
+  assert.equal(observePageCombat(state, 0.5).animsTruncated, true);
+});
+
+test('one native muzzle instance cannot manufacture continuing fire or reentry evidence', () => {
+  const state = scene();
+  state.effects.bullets = [];
+  const muzzle = {
+    id: 20,
+    uid: 100,
+    type: 'GUNFIRE',
+    x: 512,
+    y: 256,
+    z: 0,
+    frameCount: 6,
+    invisible: false,
+    buildingAnim: false,
+  };
+  state.effects.anims = [muzzle];
+  const seen = new Set(observePageCombat(state, 0.5).muzzleKeys);
+  assert.equal(retainFreshCombat(observePageCombat(state, 0.5), seen).inView, 0);
+  state.effects.anims = [{ ...muzzle, uid: 101 }];
+  assert.equal(retainFreshCombat(observePageCombat(state, 0.5), seen).inView, 1);
+  for (let frame = 101; frame < 130; frame++) {
+    state.frame = frame;
+    assert.equal(retainFreshCombat(observePageCombat(state, 0.5), seen).inView, 0);
+  }
+  state.effects.anims = [{ ...muzzle, uid: 102 }];
+  state.shroud.cells[1 * 16 + 2] = 0;
+  retainFreshCombat(observePageCombat(state, 0.5), seen);
+  state.shroud.cells[1 * 16 + 2] = 2;
+  assert.equal(retainFreshCombat(observePageCombat(state, 0.5), seen).inView, 0);
+  state.effects.anims = [{ ...muzzle, uid: 103, invisible: true, frameCount: 0 }];
+  retainFreshCombat(observePageCombat(state, 0.5), seen);
+  state.effects.anims = [{ ...muzzle, uid: 103 }];
+  assert.equal(retainFreshCombat(observePageCombat(state, 0.5), seen).inView, 0);
 });

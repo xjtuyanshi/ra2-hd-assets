@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createByteViewAccessor } from '../../src/games/shared/memoryAccessor';
-import { NativeMirrorMemory } from '../../src/adapter/native/memory';
+import { NativeMirrorMemory, readNativeWithRetry } from '../../src/adapter/native/memory';
 import {
   createYrNativeCellDiscovery,
+  createYrNativeHouseTailDiscovery,
   createYrNativeHostPolicy,
   YR_NATIVE_FOLLOW_RULES,
   YR_NATIVE_EFFECT_TYPE_ARRAYS,
   YR_NATIVE_RANGES,
+  YR_NATIVE_HOUSE_SPANS,
 } from '../../src/games/yr/nativeHost';
 import {
   readYrEffects,
@@ -26,7 +28,7 @@ import {
 import { createGuestMemory, writeAsciiZ, writeU32, readU32, type FakeGuestMemory } from '../helpers/guestMemory';
 
 /** Resolve policy-selected live graphs independently of any reader miss discovery. */
-function policyPages(source: FakeGuestMemory): Set<number> {
+function policyPages(source: FakeGuestMemory, includeAdditional = false): Set<number> {
   const pages = new Set<number>();
   const add = (address: number, bytes: number) => {
     for (let page = Math.floor(address / 4096) * 4096; page < address + bytes; page += 4096) pages.add(page);
@@ -73,10 +75,169 @@ function policyPages(source: FakeGuestMemory): Set<number> {
       } else for (const child of entries(member)) add(child, rule.bytes);
     }
   }
+  if (includeAdditional) {
+    const policy = createYrNativeHostPolicy(source, () => createByteViewAccessor(source.bytes), YR_STARTUP_PAGE_HASH, {
+      gameThreadId: 1,
+    });
+    for (const range of policy.additionalRanges!()) add(range.address, range.length);
+  }
   return pages;
+}
+function covers(ranges: readonly { address: number; length: number }[], address: number, length = 4): boolean {
+  return ranges.some((range) => range.address <= address && range.address + range.length >= address + length);
 }
 
 describe('native YR policy and bulk cell discovery', () => {
+  it('covers all actual houses and cells while omitting the unused middle of each house allocation', () => {
+    const source = createGuestMemory(),
+      mirror = new NativeMirrorMemory(),
+      houses = [0xc00000, 0xd00000, 0xe00000],
+      names = ['Human', 'Neutral', 'Special'];
+    for (const address of Object.values(YR_STATE_VTABLES)) writeU32(source, address, 0x401000);
+    writeU32(source, G.frame, 20);
+    writeU32(source, G.houses + 4, 0xba0000);
+    writeU32(source, G.houses + 16, houses.length);
+    writeU32(source, G.localHouse, houses[0]!);
+    houses.forEach((house, index) => {
+      writeU32(source, 0xba0000 + index * 4, house);
+      writeU32(source, house + S.houseArrayIndex, index);
+      writeU32(source, house + S.houseHuman, Number(index === 0));
+      writeU32(source, house + S.houseStartingPoint, index + 1);
+      writeU32(source, house + S.houseColorScheme, index + 2);
+      writeAsciiZ(source, house + S.housePlainName, names[index]!);
+      source.write_memory(
+        [...names[index]!, '\0'].flatMap((char) => [char.charCodeAt(0), 0]),
+        house + S.houseUIName,
+      );
+    });
+    writeU32(source, G.scenario, 0xc80000);
+    writeU32(source, G.map + 0x13c, 0xbc0000);
+    writeU32(source, G.map + 0x140, 1024);
+    writeU32(source, 0xbc0000, 0xc90000);
+    const pages = policyPages(source, true);
+    expect(YR_NATIVE_FOLLOW_RULES.find((rule) => rule.source === G.houses)).toMatchObject({
+      bytes: 0x5800,
+      maxCount: L.houses,
+    });
+    for (const house of houses) {
+      for (const offset of [
+        0, 0x30, 0x34, 0x68, 0x1ec, 0x1f5, 0x254, 0x2bf, 0x2c0, 0x53a4, 0x53bc, 0x55dc, 0x56f9, 0x5788, 0x15ff4,
+        0x1602a, 0x16054, 0x16058,
+      ])
+        expect(
+          pages.has(Math.floor((house + offset) / 4096) * 4096),
+          `missing house field +${offset.toString(16)}`,
+        ).toBe(true);
+      expect(pages.has(house + 0x10000)).toBe(false);
+    }
+    expect(pages.has(0xbc0000)).toBe(true);
+    expect(pages.has(0xc90000)).toBe(true);
+    // Signature checks use the executable image before this test isolates heap field coverage.
+    let accessor = createByteViewAccessor(source.bytes);
+    const read = createYrStateReader(() => accessor, YR_STARTUP_PAGE_HASH)!;
+    mirror.apply({
+      frame: 20,
+      flags: 2,
+      pages: [...pages].map((address) => ({ address, bytes: source.read_memory(address, 4096) })),
+    });
+    mirror.beginOperation();
+    accessor = mirror.accessor();
+    const state = read();
+    expect(state?.houses).toEqual(
+      names.map((name, index) =>
+        expect.objectContaining({
+          name,
+          plainName: name,
+          colorIndex: index + 2,
+          startingPoint: index + 1,
+          isHuman: index === 0,
+          defeated: false,
+        }),
+      ),
+    );
+    expect(mirror.operationMissed).toBe(false);
+  });
+
+  it('refreshes house tails on same-count in-place pointer replacement, vector relocation and frame rewind', () => {
+    const source = createGuestMemory(),
+      discover = createYrNativeHouseTailDiscovery(() => createByteViewAccessor(source.bytes));
+    writeU32(source, G.frame, 20);
+    writeU32(source, G.houses + 4, 0xba0000);
+    writeU32(source, G.houses + 16, 2);
+    writeU32(source, 0xba0000, 0xc00000);
+    writeU32(source, 0xba0004, 0xd00000);
+    const first = discover();
+    expect(covers(first, 0xc00000 + S.housePlainName, 0x6c)).toBe(true);
+    writeU32(source, G.frame, 21);
+    expect(discover()).toBe(first);
+    writeU32(source, 0xba0000, 0xe00000);
+    const replaced = discover();
+    expect(covers(replaced, 0xc00000 + S.housePlainName)).toBe(false);
+    expect(covers(replaced, 0xe00000 + S.housePlainName, 0x6c)).toBe(true);
+    expect(covers(replaced, 0xd00000 + S.housePlainName, 0x6c)).toBe(true);
+    writeU32(source, G.houses + 4, 0xbb0000);
+    writeU32(source, 0xbb0000, 0xe00000);
+    writeU32(source, 0xbb0004, 0xd00000);
+    const relocated = discover();
+    expect(relocated).toEqual(replaced);
+    expect(relocated).not.toBe(replaced);
+    writeU32(source, G.frame, 1);
+    const rewound = discover();
+    expect(rewound).toEqual(relocated);
+    expect(rewound).not.toBe(relocated);
+    writeU32(source, G.houses + 16, 0);
+    writeU32(source, G.houses + 4, 0);
+    expect(discover()).toEqual([]);
+  });
+
+  it('rejects unknown house counts, invalid pointers and short or missing tables without caching partial tails', () => {
+    const source = createGuestMemory(),
+      accessor = createByteViewAccessor(source.bytes);
+    writeU32(source, G.frame, 20);
+    writeU32(source, G.houses + 4, 0xba0000);
+    writeU32(source, G.houses + 16, 1);
+    writeU32(source, 0xba0000, 0xc00000);
+    let unknown = false,
+      short = false,
+      missing = false;
+    const discover = createYrNativeHouseTailDiscovery(() => ({
+        ...accessor,
+        i32: (address) => (unknown && address === G.houses + 16 ? Number.NaN : accessor.i32(address)),
+        bytes: (address, length) => {
+          if (missing) throw new Error('strict house mirror miss');
+          return short ? new Uint8Array() : accessor.bytes(address, length);
+        },
+      })),
+      first = discover();
+    for (const [address, value] of [
+      [G.houses + 16, L.houses + 1],
+      [G.houses + 16, 0xffffffff],
+      [G.houses + 4, 0],
+      [G.houses + 4, 0xba0001],
+      [0xba0000, 0],
+      [0xba0000, 0xc00001],
+      [0xba0000, 0xff0000],
+    ]) {
+      const previous = readU32(source, address!);
+      writeU32(source, address!, value!);
+      expect(discover).toThrow('native house');
+      writeU32(source, address!, previous);
+      expect(discover()).toBe(first);
+    }
+    unknown = true;
+    expect(discover).toThrow('count');
+    unknown = false;
+    short = true;
+    expect(discover).toThrow('Incomplete');
+    short = false;
+    missing = true;
+    expect(discover).toThrow('mirror miss');
+    missing = false;
+    expect(discover()).toBe(first);
+    writeU32(source, G.houses + 16, L.houses);
+    for (let index = 0; index < L.houses; index++) writeU32(source, 0xba0000 + index * 4, 0xc00000 + index * 0x10000);
+    expect(covers(discover(), 0xc00000 + (L.houses - 1) * 0x10000 + YR_NATIVE_HOUSE_SPANS.tailOffset)).toBe(true);
+  });
   it('runs the existing render reader through an injected accessor without requesting a dense address-space view', () => {
     const memory = createGuestMemory();
     for (const address of Object.values(YR_STATE_VTABLES)) writeU32(memory, address, 0x401000);
@@ -98,7 +259,7 @@ describe('native YR policy and bulk cell discovery', () => {
     expect(YR_NATIVE_FOLLOW_RULES.find((rule) => rule.source === G.technos)).toMatchObject({ kind: 2, bytes: 0x800 });
     expect(YR_NATIVE_FOLLOW_RULES.find((rule) => rule.source === G.map + 0x13c)).toMatchObject({
       kind: 1,
-      bytes: 512 * 512 * 4,
+      bytes: 4,
     });
     const policy = createYrNativeHostPolicy(
       memory,
@@ -132,13 +293,133 @@ describe('native YR policy and bulk cell discovery', () => {
     writeU32(memory, items + ((5 << 9) + 5) * 4, 0xd08000); // outside bounds and neighbours
     const discover = createYrNativeCellDiscovery(() => createByteViewAccessor(memory.read_memory(0, 0x1000000)));
     const first = discover();
-    expect(first).toContainEqual({ address: 0xd00000, length: 0x3000 });
+    expect(first).toContainEqual({ address: 0xc00000, length: 0x103000 });
     expect(first.some((range) => range.address <= 0xd08000 && range.address + range.length > 0xd08000)).toBe(false);
     writeU32(memory, G.frame, 21);
     expect(discover()).toBe(first);
     writeU32(memory, G.frame, 1);
     writeU32(memory, items + ((1 << 9) + 1) * 4, 0xd04000);
     expect(discover()).toContainEqual({ address: 0xd04000, length: 0x1000 });
+  });
+  it('subscribes the entire actual pointer table on growth and relocation without capturing its maximum-capacity tail', () => {
+    const memory = createGuestMemory(),
+      items = 0xc00000;
+    writeU32(memory, G.scenario, 0xc80000);
+    writeU32(memory, G.frame, 20);
+    writeU32(memory, G.map + 0x13c, items);
+    writeU32(memory, G.map + 0x140, 2048);
+    writeU32(memory, items, 0xd00000);
+    const discover = createYrNativeCellDiscovery(() => createByteViewAccessor(memory.bytes)),
+      first = discover();
+    expect(covers(first, items, 2048 * 4)).toBe(true);
+    expect(covers(first, 0xd00000, 0x148)).toBe(true);
+    expect(covers(first, items + 2048 * 4)).toBe(false);
+    writeU32(memory, G.frame, 21);
+    writeU32(memory, G.map + 0x140, 4096);
+    writeU32(memory, items + 4, 0xd02000);
+    const grown = discover();
+    expect(covers(grown, items, 4096 * 4)).toBe(true);
+    expect(covers(grown, 0xd02000, 0x148)).toBe(true);
+    expect(covers(grown, items + 4096 * 4)).toBe(false);
+    writeU32(memory, G.frame, 22);
+    writeU32(memory, G.map + 0x13c, 0xe00000);
+    writeU32(memory, G.map + 0x140, 1024);
+    writeU32(memory, 0xe00000, 0xd04000);
+    const moved = discover();
+    expect(covers(moved, 0xe00000, 4096)).toBe(true);
+    expect(covers(moved, 0xd04000, 0x148)).toBe(true);
+    expect(covers(moved, items)).toBe(false);
+    expect(covers(moved, 0xd00000)).toBe(false);
+    expect(covers(moved, 0xd02000)).toBe(false);
+  });
+
+  it('bootstraps a cross-page actual pointer table through strict complete-mirror retry before publishing its cells', async () => {
+    const source = createGuestMemory(),
+      mirror = new NativeMirrorMemory(),
+      items = 0xc00ffc;
+    writeU32(source, G.scenario, 0xc80000);
+    writeU32(source, G.map + 0x13c, items);
+    writeU32(source, G.map + 0x140, 1028);
+    writeU32(source, items, 0xd00000);
+    const pages = policyPages(source),
+      capture = () =>
+        mirror.apply({
+          frame: 1,
+          flags: 2,
+          pages: [...pages].map((address) => ({ address, bytes: source.read_memory(address, 4096) })),
+        });
+    capture();
+    expect(pages.has(0xc00000)).toBe(true);
+    expect(pages.has(0xc01000)).toBe(false);
+    expect(pages.has(0xc02000)).toBe(false);
+    const discover = createYrNativeCellDiscovery(() => mirror.accessor()),
+      requested: { address: number; length: number }[][] = [];
+    const result = await readNativeWithRetry(
+      mirror,
+      discover,
+      [],
+      {
+        subscribe: async (ranges) => {
+          requested.push(ranges.map((range) => ({ ...range })));
+          for (const range of ranges)
+            for (let page = range.address; page < range.address + range.length; page += 4096) pages.add(page);
+        },
+        nextMirror: async () => {
+          capture();
+        },
+      },
+      () => undefined,
+    );
+    expect(requested).toEqual([[{ address: 0xc01000, length: 8192 }]]);
+    expect(mirror.misses).toBe(1);
+    expect(mirror.operationMissed).toBe(false);
+    expect(covers(result, items, 1028 * 4)).toBe(true);
+    expect(covers(result, 0xd00000, 0x148)).toBe(true);
+    expect(covers(result, 0xc03000)).toBe(false);
+  });
+
+  it('rejects invalid, unknown and short descriptors without replacing a successful discovery with an empty scope', () => {
+    const memory = createGuestMemory();
+    writeU32(memory, G.scenario, 0xc80000);
+    writeU32(memory, G.frame, 20);
+    writeU32(memory, G.map + 0x13c, 0xc00000);
+    writeU32(memory, G.map + 0x140, 1024);
+    writeU32(memory, 0xc00000, 0xd00000);
+    const accessor = createByteViewAccessor(memory.bytes);
+    let unknown = false,
+      short = false;
+    const discover = createYrNativeCellDiscovery(() => ({
+        ...accessor,
+        i32: (address) => (unknown && address === G.map + 0x140 ? Number.NaN : accessor.i32(address)),
+        bytes: (address, length) => (short ? new Uint8Array() : accessor.bytes(address, length)),
+      })),
+      first = discover();
+    for (const [address, value] of [
+      [G.map + 0x140, 0],
+      [G.map + 0x140, 0xffffffff],
+      [G.map + 0x140, 512 * 512 + 1],
+      [G.map + 0x13c, 0],
+      [G.map + 0x13c, 0xc00001],
+      [G.map + 0x13c, 0xffff00],
+    ]) {
+      const previous = readU32(memory, address!);
+      writeU32(memory, address!, value!);
+      expect(discover).toThrow('descriptor');
+      writeU32(memory, address!, previous);
+      expect(discover()).toBe(first);
+    }
+    unknown = true;
+    expect(discover).toThrow('descriptor');
+    unknown = false;
+    expect(discover()).toBe(first);
+    writeU32(memory, G.map + 0x140, 2048);
+    short = true;
+    expect(discover).toThrow('Incomplete');
+    short = false;
+    expect(covers(discover(), 0xc00000, 8192)).toBe(true);
+    writeU32(memory, G.map + 0x124, 2);
+    writeU32(memory, G.map + 0x12c, 1);
+    expect(discover).toThrow('coordinate bounds');
   });
   it('prepopulates effect types and follows current nested production allocations at each native frame', () => {
     for (const source of Object.values(YR_NATIVE_EFFECT_TYPE_ARRAYS))
@@ -205,7 +486,7 @@ describe('native YR policy and bulk cell discovery', () => {
 
     // Select only current graph pages, independently of the reader's addresses or miss discovery.
     const capture = (frame: number) => {
-      const pages = policyPages(source);
+      const pages = policyPages(source, true);
       writeU32(source, E.frame, frame);
       mirror.apply({
         frame,
@@ -279,7 +560,7 @@ describe('native YR policy and bulk cell discovery', () => {
       writeU32(source, unit + YR_GATHER_OFFSETS.locomotor, locomotor);
       writeU32(source, locomotor, YR_GATHER_LOCOMOTORS.drive);
       writeU32(source, locomotor + YR_GATHER_OFFSETS.locomotorLinkedTo, unit);
-      const pages = policyPages(source);
+      const pages = policyPages(source, true);
       expect(pages.has(0xfff000)).toBe(false);
       expect(pages.has(0x1000000)).toBe(false);
       mirror.apply({

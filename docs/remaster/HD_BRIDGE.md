@@ -318,6 +318,42 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
 was handed a list, first drew it completely, saw the first objects and the first logic frame, and was shown, and why
 (`settled` or `deadline`).
 
+In development, `__hdBridge.diagnostics` exposes the current `enabled`/`shown` flags, a detached copy of the last
+delivered render `state`, cumulative `counters`, and read-only `getCommandState()`, `getGamePerformance()`, `getPointerState()` and
+`getVmDiagnostics()` probes. `startCapture()` begins a bounded browser-clock capture; `finishCapture()` freezes it
+and returns its duration endpoints, counts, state-arrival `deliveries` and completed-render `draws`. Both methods
+and the `capture` getter return detached copies. A distinct state is a changed map/logic-frame identity at reply
+arrival, including replies that reuse unchanged map-cell layers; repeated replies for the same frame do not count.
+Draws are counted after `LiveView.render()` returns, with a `shown` flag separating preparation from the displayed
+HD view, rather than counting display callbacks. Each timestamp array retains at most 20,000 records; counts keep
+advancing and `truncated` reports an exceeded bound. `counters.firstDrawAtMs` includes hidden preparation;
+`firstShownDrawAtMs` is the first completed HD picture made visible. Both use `performance.now()` from page
+navigation, independently of game startup or map loading. Capturing or reading these diagnostics does not inject
+input or change the game's clock, speed, resources or rendering policy.
+
+`diagnostics.captureNextDraw()` requests a one-shot readback of the next actual presented HD canvas draw. In the
+same task immediately after the normal `LiveView.render()`, it takes three r186.1's actual WebGPU current canvas
+texture (already configured with `COPY_SRC`) and submits a copy to one owned `COPY_DST | MAP_READ` buffer. Mapping
+then completes asynchronously in GPU queue order. It does not render another frame, reconfigure the canvas,
+preserve the drawing buffer, or modify textures, art or postprocessing. Only RGBA8/BGRA8 unorm formats and their
+sRGB variants are accepted; aligned rows are removed and BGRA bytes are swizzled without changing colour or alpha.
+The detached RGBA result carries the draw timestamp, native source frame and combat-state subset, camera view,
+map, native size, actual tactical rectangle and passthrough flags fixed at that draw. Normal LiveView interpolation
+continues and is explicitly named in the result. A Backslash trail draw may correctly report `shown=false`.
+Readback accepts at most ten million pixels, a 48 MiB aligned buffer, and one pending request/buffer; another
+request, unsupported backend/format/usage, failed mapping or a ten-second timeout rejects. Bridge stop or view
+replacement rejects the request and destroys its buffer; late mapping replies cannot revive the session. The
+generic ownership and byte-copy mechanism lives in `src/graphics/webGpuFrameCapture.ts`; only the development
+bridge exposes the diagnostic, and ordinary diagnostics do not include image bytes.
+
+`diagnostics.combatState` is a detached, narrower copy of the last delivered state for repeated combat observation:
+logic `frame`, camera `view`, local-player `shroud`, sidebar frame and tactical bounds, and bullets, lasers, electric
+bolts, radiation beams, waves and up to 8192 real animation instances, with `effects.animsTruncated` identifying an
+exceeded bound. This detached animation metadata is also fixed in a captured draw's state. The generic bridge does
+not classify game-specific animation types or synthesize firing state. It excludes objects, map-cell layers, sidebar
+cameos and particle systems, avoiding their copy cost without issuing another render request. Null or unavailable fields remain null or
+absent; visibility and in-view tests use the same native coordinates and shroud as the complete `state` getter.
+
 Measured with the same skirmish starts (test Chrome, the frame times of the first 20 seconds after the first logic
 frame): on XMP29U2 the base build had 12 to 15 frames over 100 ms, the longest 2.8 to 3.1 s. Now matches after the
 first show the HD view with the first logic frame and no frame over 62 ms in five of six runs (the sixth had one
@@ -422,7 +458,11 @@ the shown view draws it:
 - While the native HD bridge is enabled, state polling runs independently of display callbacks, view loading and
   draw pacing. One request starts immediately; subsequent requests start no sooner than 1/60 second after the
   previous start, with at most one request outstanding. Disposal cancels the timer and late replies cannot restart
-  it. Native performance sampling also uses that timer while the HD view is shown. Display callbacks still own
+  it. A display callback may take an already due request before drawing delays its timer; it cancels that timer,
+  obeys the same minimum interval and outstanding-request guard, and leaves the independent timer as a fallback.
+  Early timer callbacks rearm without reading, and a canceled callback cannot replace a newer timer. No missed
+  polling slots are caught up in a burst. Native performance sampling also uses either polling opportunity while
+  the HD view is shown. Display callbacks still own
   drawing and art reveal; the existing settled-frame or 20-second reveal deadline is unchanged. The match timeline
   records first state arrival and passthrough request/acceptance separately from art readiness and reveal.
 - Emulator snapshots are polled no faster than frames are drawn (each one is read on the emulator's thread), and the

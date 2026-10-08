@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include "agent.h"
 #include "mirror-internal.h"
+#include "mirror-region-read.h"
 #include "hidden.h"
 
 #define NH_REPLY_SLOTS 16u
@@ -65,11 +66,31 @@ static int nh_range(uint32_t address, uint32_t length, int write) {
     return 1;
 }
 
-int nh_safe_read(uint32_t address, void *out, uint32_t length) {
+static int nh_copy_exact(uint32_t address, void *out, uint32_t length) {
     SIZE_T copied = 0;
+    return ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)address, out, length, &copied) && copied == length;
+}
+
+static int nh_query_read_region(uint32_t address, struct nh_read_region *region) {
+    MEMORY_BASIC_INFORMATION info;
+    DWORD protection;
+    if (!VirtualQuery((const void *)(uintptr_t)address, &info, sizeof(info))) return 0;
+    protection = info.Protect & 0xffu;
+    region->base = (uint64_t)(uintptr_t)info.BaseAddress;
+    region->end = region->base + info.RegionSize;
+    region->readable = info.State == MEM_COMMIT && !(info.Protect & PAGE_GUARD) &&
+        protection && protection != PAGE_NOACCESS && protection != PAGE_EXECUTE;
+    return 1;
+}
+
+int nh_safe_read_scoped(struct nh_read_region_cursor *cursor, uint32_t address, void *out, uint32_t length) {
+    return nh_read_region_copy(cursor, address, out, length, nh_query_read_region, nh_copy_exact);
+}
+
+int nh_safe_read(uint32_t address, void *out, uint32_t length) {
     if (!length) return 1;
     if (!out || !nh_range(address, length, 0)) return 0;
-    return ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)address, out, length, &copied) && copied == length;
+    return nh_copy_exact(address, out, length);
 }
 
 /* Validate the complete range first, then restore protection for each region even on failure. */

@@ -62,7 +62,10 @@ esac
 [ "$page" = skirmish ] && query="$query&start-page=skirmish"
 # Practice: the lesson list; the backquote key goes to the game instead of the page's debug panel.
 [ "$page" = train ] && query="$query&train=menu&debug-key=0"
-[ "$mode" = hd ] && query="hd=1&hd-look=cinematic&hd-fx=enhanced&hd-water=enhanced&hd-vlook=remaster&hd-vproj=vehicles-hd&hd-ui=1&$query"
+if [ "$mode" = hd ]; then
+  hd_query="$(node "$here/scripts/remaster/play-options.mjs")" || exit 1
+  query="$hd_query&$query"
+fi
 url="http://localhost:$port/?$query"
 if [ "$print" = 1 ]; then echo "$url"; exit 0; fi
 

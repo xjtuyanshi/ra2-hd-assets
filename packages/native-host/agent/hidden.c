@@ -5,6 +5,7 @@
 #include "dllmain.h"
 #include "dd.h"
 #include "ddsurface.h"
+#include "window-target.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -24,6 +25,7 @@ static __thread struct { HWND window; int saved, begin_paint; } dc_routes[16];
 static __thread unsigned dc_route_count;
 static volatile LONG paint_in_progress;
 static unsigned last_painted, last_owner_drawn, last_dc_acquires;
+static volatile LONG last_paint_root, last_paint_root_enabled, disabled_dialog_paints;
 static HWND captured;
 static char desktop_name[128], desktop_expected[128], desktop_class[64];
 static int desktop_hidden;
@@ -299,8 +301,12 @@ void nh_hidden_diagnostics(char *json, uint32_t capacity)
     for (char *p = desktop_expected; *p; p++) if (*p == '"' || *p == '\\' || (unsigned char)*p < 32) *p = '?';
     POINT origin = {0};
     if (g_ddraw.hwnd) real_ClientToScreen(g_ddraw.hwnd, &origin);
-    snprintf(json, capacity, "{\"enabled\":%s,\"desktopName\":\"%s\",\"desktopExpected\":\"%s\",\"desktopClass\":\"%s\",\"desktopHidden\":%s,\"clientOrigin\":[%ld,%ld],\"paintedControls\":%u,\"ownerDrawnControls\":%u,\"paintDcAcquires\":%u}",
-        nh_hidden_active() ? "true" : "false", desktop_name, desktop_expected, desktop_class, desktop_hidden ? "true" : "false", origin.x, origin.y, last_painted, last_owner_drawn, last_dc_acquires);
+    LONG paint_root = InterlockedCompareExchange(&last_paint_root, 0, 0);
+    snprintf(json, capacity, "{\"enabled\":%s,\"desktopName\":\"%s\",\"desktopExpected\":\"%s\",\"desktopClass\":\"%s\",\"desktopHidden\":%s,\"clientOrigin\":[%ld,%ld],\"paintedControls\":%u,\"ownerDrawnControls\":%u,\"paintDcAcquires\":%u,"
+        "\"lastPaintRootHwnd\":%u,\"lastPaintRootEnabled\":%s,\"disabledDialogPaints\":%ld}",
+        nh_hidden_active() ? "true" : "false", desktop_name, desktop_expected, desktop_class, desktop_hidden ? "true" : "false", origin.x, origin.y, last_painted, last_owner_drawn, last_dc_acquires,
+        (uint32_t)paint_root, paint_root ? InterlockedCompareExchange(&last_paint_root_enabled, 0, 0) ? "true" : "false" : "null",
+        InterlockedCompareExchange(&disabled_dialog_paints, 0, 0));
 }
 
 int nh_hidden_painting(void) { return InterlockedCompareExchange(&paint_in_progress, 0, 0) != 0; }
@@ -412,7 +418,7 @@ void nh_hidden_paint(void)
     if (!nh_hidden_active() || painting || !g_ddraw.ref || GetCurrentThreadId() != g_ddraw.gui_thread_id || !g_ddraw.primary)
         return;
     struct paint_windows state = {0};
-    state.root = nh_input_target_window();
+    state.root = nh_window_target(NH_WINDOW_PAINT);
     if (!state.root || GetWindowThreadProcessId(state.root, NULL) != g_ddraw.gui_thread_id) return;
     /* No control redraw is added to ordinary match pictures. Paused dialogs
      * and menu controls need genuine paint because their ancestors stay hidden. */
@@ -485,9 +491,10 @@ void nh_hidden_paint(void)
     scratch_root = state.root;
     dc_route_count = 0;
     last_painted = last_owner_drawn = last_dc_acquires = 0;
+    int root_enabled = IsWindowEnabled(state.root) != 0;
     for (unsigned i = 0; i < state.count; i++)
     {
-        if (g_ddraw.hwnd != initial_main || nh_input_target_window() != state.root) break;
+        if (g_ddraw.hwnd != initial_main || nh_window_target(NH_WINDOW_PAINT) != state.root) break;
         HWND window = state.windows[i];
         RECT client;
         POINT origin = {0};
@@ -521,6 +528,12 @@ void nh_hidden_paint(void)
         last_painted++;
         RestoreDC(dc, saved);
     }
+    if (last_painted)
+    {
+        InterlockedExchange(&last_paint_root, (LONG)(uintptr_t)state.root);
+        InterlockedExchange(&last_paint_root_enabled, root_enabled);
+        if (state.root != initial_main && !root_enabled) InterlockedIncrement(&disabled_dialog_paints);
+    }
     GdiFlush();
     if (g_ddraw.ref && GetCurrentThreadId() == g_ddraw.gui_thread_id && g_ddraw.hwnd == initial_main &&
         TryEnterCriticalSection(&g_ddraw.cs))
@@ -532,7 +545,7 @@ void nh_hidden_paint(void)
             (!g_config.lock_surfaces || TryEnterCriticalSection(&current->cs)))
         {
             BYTE *destination = dds_GetBuffer(current);
-            if (destination == initial_buffer && nh_input_target_window() == state.root && nh_hidden_visible(state.root))
+            if (destination == initial_buffer && nh_window_target(NH_WINDOW_PAINT) == state.root && nh_hidden_visible(state.root))
                 for (DWORD y = 0; y < height; y++)
                 {
                     if (bpp == 16)

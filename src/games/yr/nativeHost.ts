@@ -18,6 +18,12 @@ import { YR_GATHER_OFFSETS } from './unitGatherState';
 const PAGE_BYTES = 4096;
 const MAX_CELL_SLOTS = 512 * 512;
 const CELL_BYTES = 0x148;
+/** Sidebar counters/allies end before +0x5800; names, palette and starting point occupy the separated tail. */
+export const YR_NATIVE_HOUSE_SPANS = Object.freeze({
+  prefixBytes: 0x5800,
+  tailOffset: O.housePlainName,
+  tailEnd: 0x16060,
+});
 
 const vector = (source: number, bytes: number, maxCount: number): NativeHostFollowRule => ({
   kind: 2,
@@ -113,7 +119,7 @@ export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.fr
   vector(G.infantry, 0x800, L.objectsPerKind),
   vector(G.buildings, 0x800, L.objectsPerKind),
   vector(G.aircraft, 0x800, L.objectsPerKind),
-  vector(G.houses, 0x16060, L.houses),
+  vector(G.houses, YR_NATIVE_HOUSE_SPANS.prefixBytes, L.houses),
   memberPointer(G.houses, O.houseType, 0x130, L.houses), // Country ID and unit-speed multiplier at +0x12C.
   nestedVector(G.houses, 0x68, 0x800, L.objectsPerKind), // The sidebar's current owned-building list can reallocate.
   nestedVector(G.houses, 0x254, 0x80, 4096), // Live SuperClass instances used by superweapon cameos.
@@ -124,7 +130,8 @@ export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.fr
   pointer(G.scenario, 0x3600),
   pointer(G.tactical, 0xe14), // Mind-control source projection reads the inverse matrix at +0xDE4.
   pointer(0x8871e0, 0x1900), // RulesClass/Settings instance, used by tint/detail and speed policies.
-  pointer(G.map + YR_SHROUD_OFFSETS.cellItems, MAX_CELL_SLOTS * 4),
+  // Discovery subscribes the actual capacity's entire pointer table after a strict coherent read.
+  pointer(G.map + YR_SHROUD_OFFSETS.cellItems, 4),
   vector(0xa83c68, 0x1800, 4096), // BuildingTypeClass::Array.
   vector(0xa8e348, 0x1000, 4096), // InfantryTypeClass::Array.
   vector(0xa83ce0, 0x1000, 4096), // UnitTypeClass::Array.
@@ -195,7 +202,16 @@ export function createYrNativeCellDiscovery(accessor: () => GuestMemoryAccessor)
     const frame = memory.u32(G.frame);
     const items = memory.u32(G.map + YR_SHROUD_OFFSETS.cellItems);
     const capacity = memory.i32(G.map + YR_SHROUD_OFFSETS.cellCapacity);
-    if (capacity <= 0 || capacity > MAX_CELL_SLOTS || items < L.minPointer || items % 4) return [];
+    if (
+      !Number.isInteger(capacity) ||
+      capacity <= 0 ||
+      capacity > MAX_CELL_SLOTS ||
+      !Number.isInteger(items) ||
+      items < L.minPointer ||
+      items % 4 ||
+      items + capacity * 4 > memory.size
+    )
+      throw new RangeError('Invalid native cell pointer-table descriptor');
     const bounds = G.map + YR_SHROUD_OFFSETS.mapCoordBounds;
     let left = memory.i32(bounds),
       top = memory.i32(bounds + 4);
@@ -204,7 +220,8 @@ export function createYrNativeCellDiscovery(accessor: () => GuestMemoryAccessor)
     if (!(left >= 0 && top >= 0 && right >= left && bottom >= top && right < 512 && bottom < 512)) {
       const width = memory.i32(G.map + YR_SHROUD_OFFSETS.mapRect + 8);
       const height = memory.i32(G.map + YR_SHROUD_OFFSETS.mapRect + 12);
-      if (!(width > 0 && height > 0 && width + height + 1 < 512)) return [];
+      if (!(width > 0 && height > 0 && width + height + 1 < 512))
+        throw new RangeError('Unavailable native cell coordinate bounds');
       left = top = 0;
       right = bottom = width + height + 1;
     }
@@ -214,6 +231,7 @@ export function createYrNativeCellDiscovery(accessor: () => GuestMemoryAccessor)
       return ranges;
     }
     const bytes = memory.bytes(items, capacity * 4);
+    if (bytes.byteLength !== capacity * 4) throw new RangeError('Incomplete native cell pointer table');
     const pointers = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const pages = new Set<number>();
     const add = (address: number, length: number) => {
@@ -221,6 +239,7 @@ export function createYrNativeCellDiscovery(accessor: () => GuestMemoryAccessor)
       for (let page = Math.floor(address / PAGE_BYTES) * PAGE_BYTES; page < address + length; page += PAGE_BYTES)
         pages.add(page);
     };
+    add(items, capacity * 4);
     add(YR_SHROUD_GLOBALS.invalidCell, CELL_BYTES);
     for (let y = Math.max(0, top - 1); y <= Math.min(511, bottom + 1); y++)
       for (let x = Math.max(0, left - 1); x <= Math.min(511, right + 1); x++) {
@@ -228,6 +247,59 @@ export function createYrNativeCellDiscovery(accessor: () => GuestMemoryAccessor)
         if (index < capacity) add(pointers.getUint32(index * 4, true), CELL_BYTES);
       }
     // Cache only after all strict reads and discovery have completed.
+    ranges = pageRanges(pages);
+    key = nextKey;
+    lastFrame = frame;
+    return ranges;
+  };
+}
+
+/** Capture every current house's name/palette tail without mirroring the unrelated middle of HouseClass. */
+export function createYrNativeHouseTailDiscovery(
+  accessor: () => GuestMemoryAccessor,
+): () => readonly NativeHostRange[] {
+  let key = '';
+  let lastFrame = -1;
+  let ranges: readonly NativeHostRange[] = [];
+  return () => {
+    const memory = accessor(),
+      frame = memory.u32(G.frame),
+      count = memory.i32(G.houses + 16);
+    if (!Number.isInteger(count) || count < 0 || count > L.houses)
+      throw new RangeError('Invalid native house-vector count');
+    if (count === 0) {
+      key = '';
+      lastFrame = frame;
+      ranges = [];
+      return ranges;
+    }
+    const items = memory.u32(G.houses + 4);
+    if (!Number.isInteger(items) || items < L.minPointer || items % 4 || items + count * 4 > memory.size)
+      throw new RangeError('Invalid native house-vector pointer table');
+    const bytes = memory.bytes(items, count * 4);
+    if (bytes.byteLength !== count * 4) throw new RangeError('Incomplete native house pointer table');
+    const pointers = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+      houses: number[] = [];
+    for (let index = 0; index < count; index++) {
+      const house = pointers.getUint32(index * 4, true);
+      if (house < L.minPointer || house % 4 || house + YR_NATIVE_HOUSE_SPANS.tailEnd > memory.size)
+        throw new RangeError('Invalid native house tail address');
+      houses.push(house);
+    }
+    // A vector can replace a pointer in place without changing its count or allocation.
+    const nextKey = `${items}:${count}:${houses.join(':')}`;
+    if (key === nextKey && frame >= lastFrame) {
+      lastFrame = frame;
+      return ranges;
+    }
+    const pages = new Set<number>();
+    for (const house of houses)
+      for (
+        let page = Math.floor((house + YR_NATIVE_HOUSE_SPANS.tailOffset) / PAGE_BYTES) * PAGE_BYTES;
+        page < house + YR_NATIVE_HOUSE_SPANS.tailEnd;
+        page += PAGE_BYTES
+      )
+        pages.add(page);
     ranges = pageRanges(pages);
     key = nextKey;
     lastFrame = frame;
@@ -243,10 +315,12 @@ export function createYrNativeHostPolicy(
   metadata: NativeHostMetadata,
 ): NativeGamePolicy {
   if (hash !== YR_STARTUP_PAGE_HASH) throw new Error('Native YR policy requires the pinned executable identity');
+  const cells = createYrNativeCellDiscovery(accessor),
+    houses = createYrNativeHouseTailDiscovery(accessor);
   return {
     ranges: YR_NATIVE_RANGES,
     rules: YR_NATIVE_FOLLOW_RULES,
-    additionalRanges: createYrNativeCellDiscovery(accessor),
+    additionalRanges: () => [...cells(), ...houses()],
     createRenderReader: () => createYrRenderStateReader(memory, 0x100000000, hash, accessor),
     createCommandReader: () => createYrCommandStateReaderFrom(accessor, hash),
     createFrameReader: () => createYrFrameReader(memory, hash, metadata.verifiedNativeHook),

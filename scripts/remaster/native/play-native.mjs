@@ -21,10 +21,17 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AgentClient, Type } from './wire.mjs';
+import { HD_PLAY_OPTIONS } from '../play-options.mjs';
+import {
+  capNativeResolution,
+  configureNativeResolution,
+  mainDisplaySize,
+  parseNativeSize,
+} from './native-resolution.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const packageDirectory = join(repository, 'packages/native-host');
-const help = `Usage: scripts/remaster/native/play-native.sh [--open]
+const help = `Usage: scripts/remaster/native/play-native.sh [--open] [--size WxH]
 
 Required environment:
   RA2_NATIVE_GAME_DIR           Player-owned game copy containing gamemd.exe.
@@ -36,10 +43,14 @@ Optional environment:
   RA2_HD_CACHE_DIR              Existing HD cache, passed unchanged to Vite.
   NATIVE_HOST_CC/WINDRES/GO      Installed local build tools.
 
-Starts a hidden native game and the local development page. Prints the private
-play URL; --open opens it in the default browser. Keep this terminal open.
+Starts a hidden native game and the local development page, attached directly to
+the supplied YR copy with the shared HD play look. --open opens Google Chrome.
+--size defaults to the main macOS display's size in points, capped to supported
+game/picture bounds. Writes only the resolution keys in the supplied RA2MD.INI
+before start and retains its original backup. Native resolution stays fixed for
+the session; resizing Chrome scales its picture. Keep this terminal open.
 Ctrl-C stops the owned game/page and restores a backed-up DLL. No downloads,
-game-setting rewrites, bottle-wide shutdown, or game automation are performed.`;
+bottle-wide shutdown, or game automation are performed.`;
 
 async function exists(path) {
   try {
@@ -257,7 +268,14 @@ export async function runLauncher(arguments_, environment = process.env) {
     console.log(help);
     return;
   }
-  if (arguments_.some((value) => value !== '--open')) throw new Error(`Unknown argument; use --help`);
+  let openBrowser = false;
+  let requestedSize = null;
+  for (let index = 0; index < arguments_.length; index++) {
+    const argument = arguments_[index];
+    if (argument === '--open') openBrowser = true;
+    else if (argument === '--size') requestedSize = parseNativeSize(arguments_[++index]);
+    else throw new Error(`Unknown argument: ${argument}; use --help`);
+  }
   if (!environment.RA2_NATIVE_GAME_DIR)
     throw new Error('Set RA2_NATIVE_GAME_DIR to your separately owned game copy containing gamemd.exe');
   const gameDirectory = resolve(environment.RA2_NATIVE_GAME_DIR);
@@ -270,6 +288,7 @@ export async function runLauncher(arguments_, environment = process.env) {
     sha256: createHash('sha256').update(executableBytes).digest('hex'),
   };
   const wine = await wineConfiguration(environment);
+  const resolution = capNativeResolution(requestedSize ?? mainDisplaySize());
   const vite = join(repository, 'node_modules/vite/bin/vite.js');
   if (!(await exists(vite)))
     throw new Error('Installed repository dependencies are missing; prepare them before running this launcher');
@@ -399,6 +418,10 @@ export async function runLauncher(arguments_, environment = process.env) {
     const gameRoot = join(runDirectory, 'game');
     await mkdir(gameRoot);
     await symlink(gameDirectory, join(gameRoot, 'ra2'), 'dir');
+    const configured = await configureNativeResolution(gameDirectory, runDirectory, resolution);
+    console.log(
+      `Native resolution: ${resolution.width}x${resolution.height} (fixed for this session; ${configured.target})`,
+    );
     installation = await installDll(dll, join(gameDirectory, 'ddraw.dll'), runDirectory);
     const { open } = await import('node:fs/promises');
     const pageLog = await open(join(runDirectory, 'page.log'), 'wx', 0o600);
@@ -474,13 +497,18 @@ export async function runLauncher(arguments_, environment = process.env) {
       await delay(100);
     }
     const url = new URL(origin);
-    url.search = new URLSearchParams({ backend: 'native', agent: agentUrl, 'agent-token': token, hd: '1' }).toString();
+    url.search = new URLSearchParams({
+      ...HD_PLAY_OPTIONS,
+      backend: 'native',
+      agent: agentUrl,
+      'agent-token': token,
+      'native-autostart': 'yr',
+      resolution: `${resolution.width}x${resolution.height}`,
+    }).toString();
     console.log(`Native process ${hello.pid}; agent ${ports.agent}; page ${ports.page}`);
     console.log(`Play URL: ${url.href}`);
-    console.log(
-      "Select Yuri's Revenge and your supplied resources in the page. Keep this terminal open; Ctrl-C stops this session.",
-    );
-    if (arguments_.includes('--open')) await complete(start('/usr/bin/open', [url.href]));
+    console.log('The page attaches directly to this owned game. Keep this terminal open; Ctrl-C stops this session.');
+    if (openBrowser) await complete(start('/usr/bin/open', ['-a', 'Google Chrome', url.href]));
     await Promise.race([launcher.done, page.done]);
     if (!stopping && page.exited) throw new Error('Development page stopped; closing the owned game');
     if (!stopping && launcher.error) throw launcher.error;

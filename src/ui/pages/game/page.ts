@@ -38,6 +38,7 @@ import {
 } from './gameInput';
 import { installRuntimeToolbar } from './runtimeToolbar';
 import { restoreCachedGameSource } from './gameSourcePicker';
+import { desktopPointerLock, nativeAutoStart } from './nativeStartup';
 import { parseTrainingQuery, trainingHref } from './training/trainingQuery';
 import { supportedGame } from '../../../games/catalog';
 import { progressiveFilesOf } from '../../../adapter/progressiveFiles';
@@ -415,7 +416,10 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     return;
   }
   // A practice lesson always plays its own scenario from the development files, never a cached import.
-  const cachedSource = trainingQuery ? null : await restoreCachedGameSource().catch(() => null);
+  const cachedSource =
+    trainingQuery || nativeAutoStart(window.location.search)
+      ? null
+      : await restoreCachedGameSource().catch(() => null);
   if (generation !== pageGeneration) return;
   gameSource = cachedSource ?? (await selectGameFiles());
   if (generation !== pageGeneration) {
@@ -569,8 +573,11 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     // Overlay RA2's Win32 hardware cursor as a small independent framebuffer texture; it remains visible after Pointer Lock
     // hides the system cursor and moves without retransmitting the whole frame. At screen edges, clamp the logical
     // cursor to current guest-frame bounds for sustained edge scrolling; ?mouse-lock=0 restores absolute coordinates.
-    const mouseLock = new URLSearchParams(window.location.search).get('mouse-lock');
-    const lockDesktopMouse = mouseLock === null ? true : mouseLock !== '0';
+    // Native menus consume absolute browser positions, including a press with
+    // no preceding move. Pointer Lock discards those positions and interprets
+    // automation/browser-pane movement as deltas from the previous press.
+    // Keep the emulator's established default and allow explicit relative input.
+    const lockDesktopMouse = desktopPointerLock(window.location.search, startedVm.runtimeInfo.backend);
     const buildStrip = gameSource.game.buildStripWidth;
     const installedInput = installGameInput(
       canvas,

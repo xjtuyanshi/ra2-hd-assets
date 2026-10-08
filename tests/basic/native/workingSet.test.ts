@@ -61,4 +61,30 @@ describe('native reader allocation working set', () => {
     working.clear();
     expect(working.ranges).toEqual([]);
   });
+
+  it('exposes detached owner footprints and retains last published membership across incomplete updates', () => {
+    const memory = new NativeMirrorMemory(),
+      working = new NativeReaderWorkingSet();
+    working.learn('render', [{ address: 0x20000, length: 8192 }]);
+    working.learn('command', [{ address: 0x21000, length: 4096 }]);
+    const scopes = working.scopes;
+    scopes[0]!.ranges[0]!.address = 0;
+    scopes[1]!.ranges.length = 0;
+    expect(working.scopes).toEqual([
+      { owner: 'render', ranges: [{ address: 0x20000, length: 8192 }] },
+      { owner: 'command', ranges: [{ address: 0x21000, length: 4096 }] },
+    ]);
+    memory.apply({ frame: 12, flags: 2, pages: [page(0x20000), page(0x21000)] });
+    memory.beginOperation();
+    const published = memory.publishedRanges;
+    published[0]!.length = 0;
+    expect(memory.operationRanges).toEqual([]);
+    expect(memory.operationMissed).toBe(false);
+    memory.apply({ frame: 13, flags: 1, pages: [] });
+    expect(memory.complete).toBe(false);
+    expect(memory.frame).toBe(12);
+    expect(memory.publishedRanges).toEqual([{ address: 0x20000, length: 8192 }]);
+    expect(working.complete('render', memory, true)).toBe(false);
+    expect(working.ranges).toEqual([{ address: 0x20000, length: 8192 }]);
+  });
 });

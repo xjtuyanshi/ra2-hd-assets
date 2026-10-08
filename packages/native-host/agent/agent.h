@@ -41,6 +41,8 @@ enum nh_type { NH_HELLO=1, NH_READ=2, NH_WRITE=3, NH_ALLOC=4, NH_FREE=5, NH_SUBS
  HELLO / DIAGNOSTICS UTF-8 JSON. Ordinary successful replies are empty unless stated.
  */
 int nh_safe_read(uint32_t address, void *out, uint32_t length);
+struct nh_read_region_cursor;
+int nh_safe_read_scoped(struct nh_read_region_cursor *cursor, uint32_t address, void *out, uint32_t length);
 int nh_safe_write(uint32_t address, const void *bytes, uint32_t length);
 uint32_t nh_current_frame(void);
 uint32_t nh_game_thread_id(void);

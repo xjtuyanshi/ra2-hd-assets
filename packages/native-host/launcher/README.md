@@ -44,11 +44,39 @@ avoids discovery. `WINEPREFIX` is accepted when neither explicit scope variable
 is supplied. A game folder, scope and executable are required; the launcher
 never creates a Wine prefix or obtains game resources.
 
+`--open` opens **Google Chrome** explicitly. The printed URL goes straight to
+the supplied YR development resources and attaches to the running native game;
+no resource-picker or game-version clicks are needed. Both this launcher and
+`scripts/remaster/play.sh` obtain the HD picture options from
+`scripts/remaster/play-options.mjs`, including the cinematic look, enhanced
+effects/water, remaster vehicles, HD vehicle projection and HD UI.
+
+`--size WxH` selects the native match resolution, for example
+`--size 1280x720`. Without it, the launcher measures the primary macOS display
+in **points**, not Retina pixels. Sizes conservatively reuse the repository's
+shared 800×600 through 2560×1600 session range and the existing native picture
+protocol's 2,097,152-pixel limit;
+an oversized display is reduced proportionally. The launcher prints the applied
+size and writes only `ScreenWidth`, `ScreenHeight` and `AllowHiResModes` in the
+supplied copy's `RA2MD.INI` **before** starting the game. It preserves unrelated
+settings, ANSI bytes, comments and line endings, refuses symlinks, Unicode BOMs
+and ambiguous INI case variants, and keeps
+an exclusive original backup in the private launch directory when changing an
+existing file. The selected resolution remains in that supplied copy after
+exit. A process with no macOS display access must provide `--size` explicitly.
+
+The **native resolution is fixed for the session**. Resizing Chrome only scales
+the current picture; stop and relaunch with another `--size` to change the game
+resolution. The native main menu retains its original menu dimensions until a
+match begins. The v86 launcher's `resolution=display` boot-time behavior is
+unchanged; the native URL records its already applied explicit size.
+
 The entry point builds the DLL/helper only when missing, builds the existing
 relay library, and selects two currently free loopback ports in 15450–15459.
 It creates a fresh 256-bit token and configures hidden agent operation through
-the game's environment. Existing `ddraw.ini`, game INIs and Wine registry
-settings are not rewritten. The native DLL override is scoped to that process.
+the game's environment. The resolution keys above are the only game-setting
+changes; existing `ddraw.ini` and Wine registry settings are not rewritten. The
+native DLL override is scoped to that process.
 
 Before installing `ddraw.dll`, the launcher makes an exclusive byte-verified
 backup of any existing regular file. Symlink DLLs are refused. Private logs,
@@ -76,8 +104,8 @@ claimed when NativeCore would reject the executable. The agent reads executable
 identity through the wide Windows path APIs so spaces and non-ASCII game paths
 retain their exact identity. It closes
 this readiness connection before browser use; the agent admits one client.
-`--open` opens the URL in the default browser; without it, copy the printed URL
-into Chrome. Keep the terminal open. Ctrl-C, SIGHUP, an owned game exit or a page
+Without `--open`, copy the printed URL into Chrome. Keep the terminal open.
+Ctrl-C, SIGHUP, an owned game exit or a page
 exit stops the processes created by that launch and restores its DLL.
 
 Build/readiness checks do not prove a rendered browser match. Actual Wine
@@ -93,8 +121,9 @@ node --test scripts/remaster/native/play-native.test.mjs
 ```
 
 The Node suite checks backup/restoration, new-file removal, preservation of
-later edits, symlink refusal, allowed-port selection, complete supported identity
-and genuine modal-menu readiness. Its process lifecycle
+later edits, symlink refusal, allowed-port selection, complete supported identity,
+genuine modal-menu readiness, size bounds and byte-preserving INI configuration.
+Its process lifecycle
 check starts the real Vite server plus a synthetic authenticated agent, using
 temporary synthetic game/prefix files. It does not run Wine or a real game.
 

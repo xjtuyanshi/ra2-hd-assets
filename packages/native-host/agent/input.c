@@ -3,6 +3,8 @@
 #include "hook.h"
 #include "mouse.h"
 #include "hidden.h"
+#include "input-capture.h"
+#include "window-target.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -18,11 +20,13 @@ static volatile LONG key_state[256], key_pressed[256], cursor_x, cursor_y;
 static volatile LONG cursor_reads, key_reads, async_key_reads, cursor_writes;
 static volatile LONG injected_key_reads, last_injected_key, cursor_last_read_x, cursor_last_read_y;
 static int activated;
-static HWND virtual_focus, virtual_capture;
+static HWND virtual_focus;
+static struct nh_input_capture virtual_capture;
 static int focus_known;
 static unsigned focus_depth;
 static uint32_t focus_generation;
 static uint32_t dialog_messages, last_target, last_target_id;
+static uint32_t redirected_captured_releases, consumed_captured_releases;
 
 static void initialize(void)
 {
@@ -86,47 +90,18 @@ int nh_input_set_cursor(int x, int y)
     return 1;
 }
 
-static int owned_window(HWND hwnd)
-{
-    DWORD pid = 0;
-    GetWindowThreadProcessId(hwnd, &pid);
-    if (pid != GetCurrentProcessId()) return 0;
-    HWND ancestor = hwnd;
-    for (int depth = 0; ancestor && depth < 32; depth++)
-    {
-        if (ancestor == g_ddraw.hwnd) return 1;
-        HWND parent = GetParent(ancestor);
-        ancestor = parent ? parent : GetWindow(ancestor, GW_OWNER);
-    }
-    return 0;
-}
-
-static BOOL CALLBACK find_modal(HWND hwnd, LPARAM context)
-{
-    if (hwnd == g_ddraw.hwnd || !owned_window(hwnd) || !nh_hidden_visible(hwnd) || !IsWindowEnabled(hwnd)) return TRUE;
-    char class_name[64] = {0};
-    GetClassNameA(hwnd, class_name, sizeof(class_name));
-    if (strcmp(class_name, "#32770") != 0) return TRUE;
-    *(HWND *)context = hwnd;
-    return FALSE;
-}
-
 /* Topmost enabled owned dialogs take input even while their real windows are hidden.
  * Selecting by ownership prevents another process's dialog from receiving input. */
 HWND nh_input_target_window(void)
 {
-    HWND dialog = NULL;
-    if (!g_ddraw.hwnd) return NULL;
-    EnumWindows(find_modal, (LPARAM)&dialog);
-    if (!dialog) EnumChildWindows(g_ddraw.hwnd, find_modal, (LPARAM)&dialog);
-    return dialog ? dialog : g_ddraw.hwnd;
+    return nh_window_target(NH_WINDOW_INPUT);
 }
 
 int nh_input_focus_window(HWND hwnd)
 {
     DWORD gui = g_ddraw.gui_thread_id;
     if (!gui || GetCurrentThreadId() != gui ||
-        (hwnd && (!owned_window(hwnd) || GetWindowThreadProcessId(hwnd, NULL) != gui))) return 0;
+        (hwnd && (!nh_window_owned(hwnd) || GetWindowThreadProcessId(hwnd, NULL) != gui))) return 0;
     if (focus_known && hwnd == virtual_focus) return 1;
     /* SetFocus callbacks may synchronously select a different owned control.
      * Publish the logical target first, then abandon stale outer notifications.
@@ -137,10 +112,10 @@ int nh_input_focus_window(HWND hwnd)
     virtual_focus = hwnd;
     focus_known = 1;
     focus_depth++;
-    if (previous && owned_window(previous) && GetWindowThreadProcessId(previous, NULL) == gui)
+    if (previous && nh_window_owned(previous) && GetWindowThreadProcessId(previous, NULL) == gui)
         SendMessageA(previous, WM_KILLFOCUS, (WPARAM)hwnd, 0);
     if (generation == focus_generation && virtual_focus == hwnd && hwnd &&
-        g_ddraw.gui_thread_id == gui && owned_window(hwnd) && GetWindowThreadProcessId(hwnd, NULL) == gui)
+        g_ddraw.gui_thread_id == gui && nh_window_owned(hwnd) && GetWindowThreadProcessId(hwnd, NULL) == gui)
         SendMessageA(hwnd, WM_SETFOCUS, (WPARAM)previous, 0);
     focus_depth--;
     return 1;
@@ -184,7 +159,7 @@ static HWND child_at(HWND root, POINT screen, int depth)
 
 static int popup_for(HWND hwnd, HWND root)
 {
-    if (!owned_window(hwnd) || !nh_hidden_visible(hwnd) || !IsWindowEnabled(hwnd)) return 0;
+    if (!nh_window_owned(hwnd) || !nh_hidden_visible(hwnd) || !IsWindowEnabled(hwnd)) return 0;
     char class_name[64] = {0};
     GetClassNameA(hwnd, class_name, sizeof(class_name));
     if (_stricmp(class_name, "ComboLBox") != 0) return 0;
@@ -323,7 +298,8 @@ static void input_state(uint32_t id)
         "\"lastMessage\":%u,\"lastKeyMessage\":%u,\"lastKeyVirtualKey\":%u,\"injectedKeyReads\":%ld,"
         "\"lastInjectedKey\":%ld,\"cursorLastReadX\":%ld,\"cursorLastReadY\":%ld,\"modal\":%s,"
         "\"dialogMessages\":%u,\"lastTargetHwnd\":%u,\"lastTargetId\":%u,\"dialogHwnd\":%u,"
-        "\"focusHwnd\":%u,\"gameCaptureHwnd\":%u,\"directInput\":\"unsupported\",\"controls\":[",
+        "\"focusHwnd\":%u,\"gameCaptureHwnd\":%u,\"redirectedCapturedReleases\":%u,"
+        "\"consumedCapturedReleases\":%u,\"directInput\":\"unsupported\",\"controls\":[",
         InterlockedCompareExchange(&cursor_x, 0, 0), InterlockedCompareExchange(&cursor_y, 0, 0), held,
         InterlockedCompareExchange(&cursor_reads, 0, 0), InterlockedCompareExchange(&key_reads, 0, 0),
         InterlockedCompareExchange(&async_key_reads, 0, 0), InterlockedCompareExchange(&cursor_writes, 0, 0),
@@ -331,7 +307,8 @@ static void input_state(uint32_t id)
         InterlockedCompareExchange(&injected_key_reads, 0, 0), InterlockedCompareExchange(&last_injected_key, 0, 0),
         InterlockedCompareExchange(&cursor_last_read_x, 0, 0), InterlockedCompareExchange(&cursor_last_read_y, 0, 0), modal ? "true" : "false",
         dialog_messages, last_target, last_target_id, (uint32_t)(uintptr_t)(modal ? target : NULL),
-        (uint32_t)(uintptr_t)nh_input_get_focus(), (uint32_t)(uintptr_t)nh_hidden_get_capture());
+        (uint32_t)(uintptr_t)nh_input_get_focus(), (uint32_t)(uintptr_t)nh_hidden_get_capture(),
+        redirected_captured_releases, consumed_captured_releases);
     LeaveCriticalSection(&input_lock);
     struct controls_context controls = {json, sizeof(json), (uint32_t)strlen(json), 0, 0, 0, target};
     if (target)
@@ -411,22 +388,45 @@ static void record_dialog_target(HWND target)
 static LRESULT route_message(HWND main, UINT message, WPARAM wparam, LPARAM lparam)
 {
     HWND root = nh_input_target_window();
+    int release = message == WM_LBUTTONUP || message == WM_RBUTTONUP || message == WM_MBUTTONUP || message == WM_XBUTTONUP;
+    HWND pressed = (HWND)virtual_capture.target, pressed_root = (HWND)virtual_capture.root;
+    HWND native_capture = nh_hidden_get_capture();
+    int pressed_valid = pressed && IsWindow(pressed) && IsWindow(pressed_root) &&
+        nh_window_owned(pressed) && GetWindowThreadProcessId(pressed, NULL) == g_ddraw.gui_thread_id &&
+        (belongs_to(pressed, pressed_root) || popup_for(pressed, pressed_root));
+    int native_capture_valid = native_capture &&
+        (belongs_to(native_capture, pressed_root) || popup_for(native_capture, pressed_root)) &&
+        GetWindowThreadProcessId(native_capture, NULL) == g_ddraw.gui_thread_id &&
+        nh_hidden_visible(native_capture) && IsWindowEnabled(native_capture);
+    struct nh_input_release captured_release = nh_input_capture_release(&virtual_capture, release,
+        (uintptr_t)root, !root || root == main, pressed_valid, (uintptr_t)native_capture, native_capture_valid);
+    if (captured_release.route != NH_RELEASE_CURRENT)
+    {
+        /* Clear before a callback: a nested handler may establish a new press.
+         * A destroyed old target must not release onto the newly exposed page. */
+        nh_input_capture_clear(&virtual_capture);
+        if (captured_release.route == NH_RELEASE_CONSUMED)
+        {
+            EnterCriticalSection(&input_lock); consumed_captured_releases++; LeaveCriticalSection(&input_lock);
+            return 0;
+        }
+        HWND target = (HWND)captured_release.target;
+        POINT local = game_to_screen((SHORT)LOWORD(lparam), (SHORT)HIWORD(lparam));
+        ScreenToClient(target, &local);
+        EnterCriticalSection(&input_lock); redirected_captured_releases++; LeaveCriticalSection(&input_lock);
+        record_dialog_target(target);
+        return SendMessageA(target, message, wparam, MAKELPARAM(local.x, local.y));
+    }
     /* Preserve the battle path: its original WndProc consumes logical coordinates
      * directly, bypassing cnc-ddraw's physical scaling and cursor locking. */
     if (!root || root == main)
     {
-        virtual_capture = NULL;
+        nh_input_capture_main_route(&virtual_capture, release);
         return CallWindowProcA(g_ddraw.wndproc, main, message, wparam, lparam);
     }
     HWND target = root;
     if (message >= WM_MOUSEMOVE && message <= WM_MOUSEHWHEEL)
     {
-        int release = message == WM_LBUTTONUP || message == WM_RBUTTONUP || message == WM_MBUTTONUP || message == WM_XBUTTONUP;
-        /* A captured popup may destroy itself during button-down. Delivering
-         * that press's release to a newly exposed control would activate a
-         * different control without a corresponding press. */
-        if (release && virtual_capture && !IsWindow(virtual_capture))
-        { virtual_capture = NULL; return 0; }
         POINT screen = game_to_screen((SHORT)LOWORD(lparam), (SHORT)HIWORD(lparam));
         struct popup_context popup = {root, NULL, screen};
         EnumWindows(find_popup_at, (LPARAM)&popup);
@@ -438,11 +438,11 @@ static LRESULT route_message(HWND main, UINT message, WPARAM wparam, LPARAM lpar
          * on its owner. Its real capture takes precedence over the agent's
          * press target, including clicks outside the popup used to dismiss it. */
         target = captured ? game_capture :
-            belongs_to(virtual_capture, root) || popup_for(virtual_capture, root) ? virtual_capture :
+            belongs_to((HWND)virtual_capture.target, root) || popup_for((HWND)virtual_capture.target, root) ? (HWND)virtual_capture.target :
             popup.target ? popup.target : child_at(root, screen, 0);
         if (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN || message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN)
         {
-            virtual_capture = target;
+            nh_input_capture_begin(&virtual_capture, (uintptr_t)target, (uintptr_t)root);
             /* Capture does not imply focus. The popup's owner must retain the
              * focus selected by the game's original handlers. */
             if (!captured) focus_control(target);
@@ -490,10 +490,9 @@ static LRESULT route_message(HWND main, UINT message, WPARAM wparam, LPARAM lpar
          * than disappearing into a focused ordinary button's default proc. */
         if (shortcut && !control_shortcut) target = root;
     }
+    if (release) nh_input_capture_clear(&virtual_capture);
     record_dialog_target(target);
     LRESULT result = SendMessageA(target, message, wparam, lparam);
-    if (message == WM_LBUTTONUP || message == WM_RBUTTONUP || message == WM_MBUTTONUP || message == WM_XBUTTONUP)
-        virtual_capture = NULL;
     return result;
 }
 
@@ -556,7 +555,7 @@ void nh_input_disconnect(void)
     InterlockedExchange(&enabled, 0);
     if (InterlockedCompareExchange(&initialized, 0, 0) != 2) return;
     EnterCriticalSection(&input_lock);
-    memset(queue, 0, sizeof(queue)); activated = 0; virtual_capture = NULL;
+    memset(queue, 0, sizeof(queue)); activated = 0; nh_input_capture_clear(&virtual_capture);
     /* Hidden logical focus belongs to the game lifetime, not the client.
      * Clearing it without WM_KILLFOCUS would desynchronize native controls. */
     if (!nh_hidden_active()) { virtual_focus = NULL; focus_known = 0; }

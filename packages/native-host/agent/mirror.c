@@ -3,6 +3,7 @@
 #include "mirror-internal.h"
 #include "mirror-pages.h"
 #include "mirror-read-cache.h"
+#include "mirror-region-read.h"
 #include "mirror-membership.h"
 #include "x86-relative.h"
 #include <tlhelp32.h>
@@ -60,6 +61,7 @@ static uint32_t capture_stage, capture_rule = UINT32_MAX;
 struct mirror_fault { uint32_t stage, rule, source, address, value, limit, reason; };
 static struct mirror_fault current_fault, last_fault;
 static struct nh_read_cache read_cache;
+static struct nh_read_region_cursor capture_region;
 static uint32_t hook_times[16384], hook_time_count, hook_time_cursor;
 static uint64_t hook_calls;
 static void fault(uint32_t reason, uint32_t address, uint32_t value, uint32_t limit) {
@@ -70,6 +72,7 @@ static void fault(uint32_t reason, uint32_t address, uint32_t value, uint32_t li
 }
 static int capture_read(uint32_t address, void *out, uint32_t length) {
     if (capture_stage == 1 ? nh_read_cache_copy(&read_cache, capture_bytes, address, out, length, nh_safe_read) :
+        capture_stage == 2 ? nh_safe_read_scoped(&capture_region, address, out, length) :
         nh_safe_read(address, out, length)) return 1;
     fault(3, address, length, 0); return 0;
 }
@@ -426,6 +429,7 @@ void nh_logic_tick(void) {
     flags = resolve_union(start);
     if (flags) { publish_incomplete(frame, flags, start); goto done; }
     capture_stage = 2; capture_rule = UINT32_MAX;
+    nh_read_region_clear(&capture_region);
     qsort(capture_pages, capture_count, sizeof(*capture_pages), compare_pages);
     next_generation = generation + 1;
     removed_count = nh_merge_membership(capture_pages, capture_count, shadow_pages, shadow_count,

@@ -21,6 +21,21 @@ export function observePageCombat(state, zFactor) {
     };
   const shroud = state.shroud;
   const effects = [];
+  // Policy belongs to the pinned YR acceptance tool, not the generic bridge.
+  // These are weapon Anim references in the supplied original rules. Require
+  // a resolved native animation; smoke, impacts and building loops do not count.
+  const muzzles = (state.effects.anims ?? []).filter(
+    (anim) =>
+      ['GUNFIRE', 'APMUZZLE', 'VTMUZZLE'].includes(anim.type) &&
+      anim.buildingAnim === false &&
+      anim.invisible === false &&
+      Number.isInteger(anim.frameCount) &&
+      anim.frameCount > 0 &&
+      Number.isSafeInteger(anim.id) &&
+      anim.id > 0 &&
+      Number.isSafeInteger(anim.uid) &&
+      anim.uid >= 0,
+  );
   const add = (kind, object, p, id = object.id ?? null) => {
     if (!p || ![p.x, p.y, p.z].every(Number.isFinite)) return;
     // Match MapClass::IsLocationShrouded and the actual renderer's flat mask:
@@ -81,11 +96,16 @@ export function observePageCombat(state, zFactor) {
     add('wave-source', wave, wave.source);
     add('wave-target', wave, wave.target);
   }
+  for (const anim of muzzles) add('muzzle', anim, anim);
   return {
     frame: state.frame,
     view: state.view,
     bounds,
     effects,
+    muzzleKeys: (state.effects.anims ?? [])
+      .filter((anim) => Number.isSafeInteger(anim.id) && anim.id > 0 && Number.isSafeInteger(anim.uid) && anim.uid >= 0)
+      .map((anim) => `${anim.id}:${anim.uid}`),
+    animsTruncated: state.effects.animsTruncated === true,
     visible: effects.length,
     inView: effects.filter((effect) => effect.inView).length,
   };

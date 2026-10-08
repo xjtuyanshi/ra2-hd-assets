@@ -1,5 +1,10 @@
 import type { GameVmCallbacks, VmPhase } from '../../app/session/runtimeEvents';
-import type { NativeGamePolicy, NativeHostMetadata, NativeHostRange } from '../../games/nativeHost';
+import type {
+  NativeGamePolicy,
+  NativeHostFollowRule,
+  NativeHostMetadata,
+  NativeHostRange,
+} from '../../games/nativeHost';
 import type { GameRenderState } from '../../games/renderState';
 import type { GameCommandState } from '../../games/commandState';
 import type { GameFrameCounters, GamePerformanceSample } from '../../games/performance';
@@ -43,6 +48,37 @@ export type NativeGamePolicyFactory = (
   metadata: NativeHostMetadata,
   hash: string,
 ) => NativeGamePolicy;
+export interface NativeMirrorFootprint {
+  sampledAtMs: number;
+  pageLimit: number | null;
+  mirror: {
+    complete: boolean;
+    lastPublishedFrame: number | null;
+    lastFlags: number;
+    currentFollowDemand: 'last-complete-mirror' | 'unknown';
+    ranges: NativeRange[];
+  };
+  ranges: { fixed: NativeRange[]; additional: NativeRange[]; learned: NativeRange[]; subscribed: NativeRange[] };
+  pageCounts: {
+    fixed: number;
+    additional: number;
+    learned: number;
+    baseUnion: number;
+    requestedSeedUnion: number;
+    subscribed: number;
+    lastPublishedMirror: number;
+    knownPublishedOutsideSubscribed: number;
+  };
+  owners: {
+    name: string;
+    accessedPages: number;
+    learnedPages: number;
+    exclusiveLearnedOutsideBase: number;
+    coldAtMs: number | null;
+    readerCached: boolean | null;
+  }[];
+  rules: NativeHostFollowRule[];
+}
 interface ReaderSlot<T> {
   reader: (() => T | null) | null;
   previous: T | null;
@@ -82,6 +118,12 @@ function sameRanges(a: readonly NativeRange[], b: readonly NativeRange[]): boole
     a.every((range, index) => range.address === b[index]!.address && range.length === b[index]!.length)
   );
 }
+function rangePages(ranges: readonly NativeRange[]): Set<number> {
+  const pages = new Set<number>();
+  for (const range of ranges)
+    for (let page = range.address; page < range.address + range.length; page += NATIVE_PAGE_SIZE) pages.add(page);
+  return pages;
+}
 function metadataOf(value: unknown, hello: NativeHello): NativeHostMetadata {
   const diagnostics = value as { gameThreadId?: number; frameHook?: NativeHostMetadata['verifiedNativeHook'] } | null;
   const thread = diagnostics?.gameThreadId ?? hello.gameThreadId;
@@ -117,6 +159,7 @@ export class NativeCore {
   private readonly unsubscribe: (() => void)[] = [];
   private readonly waiters = new Set<MirrorWaiter>();
   private subscribed: NativeRange[] = [];
+  private subscribedRules: NativeHostFollowRule[] = [];
   private readonly workingSet = new NativeReaderWorkingSet();
   private additionalRanges: NativeRange[] = [];
   private resetSerial = 0;
@@ -307,11 +350,12 @@ export class NativeCore {
       if (sameRanges(next, this.subscribed)) return;
       const beforeReset = this.resetSerial;
       const revisionSupported = this.hello.limits.pageRemovals === true && this.hello.limits.subscribeRevision === true;
+      const rules = this.policy.rules.map((rule) => ({ ...rule }));
       const response = await this.connection.request(
         NativeMessageType.Subscribe,
         encodeSubscription({
           ranges: next,
-          rules: this.policy.rules,
+          rules,
           maxPages: this.hello.limits.pages,
           budgetUs: Math.min(12000, this.hello.limits.maxBudgetUs ?? 4000),
           sampleCount: 0,
@@ -324,6 +368,7 @@ export class NativeCore {
         ? new DataView(response.buffer, response.byteOffset, response.byteLength).getUint32(0, true)
         : undefined;
       this.subscribed = next;
+      this.subscribedRules = rules;
       if (this.hookStarted) {
         if (revision !== undefined) {
           if (!this.memory.complete || !revisionReached(this.completeRevision, revision))
@@ -398,6 +443,7 @@ export class NativeCore {
       this.workingSet.clear();
       this.additionalRanges = [];
       this.subscribed = [];
+      this.subscribedRules = [];
       this.render.reader = this.command.reader = this.frame.reader = null;
       this.policy = this.createPolicy(this.memory, this.metadata, this.hello.exe.sha256);
       await this.subscribe([]);
@@ -609,6 +655,78 @@ export class NativeCore {
         stateReads: this.stateReads,
         frames: this.hostFrames,
       },
+    };
+  }
+
+  /** Optional read-only audit surface, independent of the VM diagnostic/Worker ABI and guest reads. */
+  getMirrorFootprint(): NativeMirrorFootprint {
+    const fixed = mergeRanges(this.policy?.ranges ?? []),
+      additional = this.additionalRanges.map((range) => ({ ...range })),
+      learned = this.workingSet.ranges,
+      subscribed = this.subscribed.map((range) => ({ ...range })),
+      published = this.memory.publishedRanges,
+      fixedPages = rangePages(fixed),
+      additionalPages = rangePages(additional),
+      learnedPages = rangePages(learned),
+      subscribedPages = rangePages(subscribed),
+      publishedPages = rangePages(published),
+      basePages = new Set([...fixedPages, ...additionalPages]),
+      requestedPages = new Set([...basePages, ...learnedPages]),
+      scopes = this.workingSet.scopes.map((scope) => ({ ...scope, pages: rangePages(scope.ranges) })),
+      references = new Map<number, number>();
+    for (const scope of scopes) for (const page of scope.pages) references.set(page, (references.get(page) ?? 0) + 1);
+    return {
+      sampledAtMs: performance.now(),
+      pageLimit: this.hello?.limits.pages ?? null,
+      mirror: {
+        complete: this.memory.complete,
+        lastPublishedFrame: this.memory.frame,
+        lastFlags: this.lastMirrorFlags,
+        currentFollowDemand: this.memory.complete ? 'last-complete-mirror' : 'unknown',
+        ranges: published,
+      },
+      ranges: { fixed, additional, learned, subscribed },
+      pageCounts: {
+        fixed: fixedPages.size,
+        additional: additionalPages.size,
+        learned: learnedPages.size,
+        baseUnion: basePages.size,
+        requestedSeedUnion: requestedPages.size,
+        subscribed: subscribedPages.size,
+        lastPublishedMirror: publishedPages.size,
+        knownPublishedOutsideSubscribed: [...publishedPages].filter((page) => !subscribedPages.has(page)).length,
+      },
+      owners: scopes.map(({ owner, pages }) => {
+        const name =
+            owner === this.render
+              ? 'render'
+              : owner === this.command
+                ? 'command'
+                : owner === this.frame
+                  ? 'performance'
+                  : typeof owner === 'string'
+                    ? owner
+                    : 'opaque',
+          slot =
+            owner === this.render
+              ? this.render
+              : owner === this.command
+                ? this.command
+                : owner === this.frame
+                  ? this.frame
+                  : null;
+        return {
+          name,
+          accessedPages: pages.size,
+          learnedPages: [...pages].filter((page) => learnedPages.has(page)).length,
+          exclusiveLearnedOutsideBase: [...pages].filter(
+            (page) => learnedPages.has(page) && !basePages.has(page) && references.get(page) === 1,
+          ).length,
+          coldAtMs: slot?.coldAt ?? null,
+          readerCached: slot ? slot.reader !== null : null,
+        };
+      }),
+      rules: this.subscribedRules.map((rule) => ({ ...rule })),
     };
   }
 

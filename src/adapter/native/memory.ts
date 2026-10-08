@@ -140,6 +140,10 @@ export class NativeMirrorMemory implements GuestMemory {
   get operationRanges(): NativeRange[] {
     return coalesceNativePages([...this.accessed]);
   }
+  /** Detached membership of the last accepted mirror, retained when a later update is incomplete. */
+  get publishedRanges(): NativeRange[] {
+    return coalesceNativePages([...this.pages.keys()]);
+  }
   /** Explicit direct-read fetches are for installer transactions only, never merged into a frame image. */
   snapshot(): NativeMirrorMemory {
     const m = new NativeMirrorMemory(this.onMiss);
@@ -283,6 +287,10 @@ export class NativeReaderWorkingSet {
   }
   get ranges(): NativeRange[] {
     return coalesceNativePages([...this.learned]);
+  }
+  /** Owner identities stay opaque; no mutable allocation sets escape the working set. */
+  get scopes(): { owner: unknown; ranges: NativeRange[] }[] {
+    return [...this.owners].map(([owner, pages]) => ({ owner, ranges: coalesceNativePages([...pages]) }));
   }
   clear(): void {
     this.learned.clear();

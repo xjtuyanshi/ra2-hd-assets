@@ -5,11 +5,16 @@ import {
   parseHdPace,
   sidebarUpcomingTypes,
   startHdBridge,
+  type HdBridgeCapture,
+  type HdBridgeCombatState,
+  type HdBridgeCounters,
+  type HdBridgeDrawCapture,
   type HdBridgeTimeline,
 } from '../../src/ui/pages/game/hdBridge';
 import type { VmDiagnostics } from '../../src/adapter/vmDiagnostics';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
 import { hdSidebar } from '../helpers/hdSidebar';
+import { createWebGpuFrameCapture } from '../../src/graphics/webGpuFrameCapture';
 
 // The bridge loads LiveView (three.js, WebGPU) through a dynamic import; a stub stands in for it.
 const liveView = vi.hoisted(() => ({ create: vi.fn() }));
@@ -33,6 +38,21 @@ interface BridgeHandle {
   readonly timeline: HdBridgeTimeline;
   readonly passthrough: { flags: number; unsupported: boolean; keyed: boolean };
   readonly pace: { mode: string; level: number; levels: number; rate: number; stride: number } | null;
+  readonly diagnostics: {
+    readonly enabled: boolean;
+    readonly shown: boolean;
+    readonly state: GameRenderState | null;
+    readonly combatState: HdBridgeCombatState | null;
+    readonly counters: HdBridgeCounters;
+    readonly capture: HdBridgeCapture | null;
+    startCapture(): HdBridgeCapture;
+    finishCapture(): HdBridgeCapture | null;
+    captureNextDraw(timeoutMs?: number): Promise<HdBridgeDrawCapture>;
+    getCommandState(): ReturnType<VmShell['getCommandState']>;
+    getGamePerformance(): ReturnType<VmShell['getGamePerformance']>;
+    getPointerState(): ReturnType<VmShell['getPointerState']>;
+    getVmDiagnostics(): Promise<VmDiagnostics>;
+  };
 }
 
 /** 800x600 frame minus YR's 168 px sidebar and 32 px command bar. */
@@ -85,6 +105,41 @@ function fakeStallMonitor() {
 
 function fakeLookView() {
   return fakeView();
+}
+
+function fakeGpuFrame(width = 2, height = 2, format = 'bgra8unorm') {
+  const events: string[] = [];
+  const texture = { width, height, format, usage: 17, sampleCount: 1, depthOrArrayLayers: 1 };
+  const bytesPerRow = Math.ceil((width * 4) / 256) * 256;
+  const bytes = new Uint8Array(Math.max(0, bytesPerRow * height));
+  let resolveMap!: () => void;
+  const mapping = new Promise<void>((resolve) => (resolveMap = resolve));
+  const buffer = {
+    mapAsync: vi.fn(async () => {
+      events.push('map');
+      await mapping;
+    }),
+    getMappedRange: vi.fn(() => bytes.buffer),
+    unmap: vi.fn(),
+    destroy: vi.fn(),
+  };
+  const encoder = {
+    copyTextureToBuffer: vi.fn(() => events.push('copy')),
+    finish: vi.fn(() => 'copy-commands'),
+  };
+  const device = {
+    createBuffer: vi.fn(() => buffer),
+    createCommandEncoder: vi.fn(() => encoder),
+    queue: { submit: vi.fn(() => events.push('submit')) },
+    pushErrorScope: vi.fn(),
+    popErrorScope: vi.fn(async (): Promise<{ message: string } | null> => null),
+  };
+  const backend = {
+    isWebGPUBackend: true,
+    context: { getCurrentTexture: vi.fn(() => texture) },
+    device,
+  };
+  return { backend, texture, device, encoder, buffer, bytes, bytesPerRow, resolveMap, events };
 }
 
 /** The game's loading screen: the scenario is known and has a view, but no object exists yet. */
@@ -254,6 +309,535 @@ describe('HD bridge control', () => {
     const harness = setup('?hd=1', 'Canvas 2D');
     expect(harness.stop.toggle()).toBe(false);
     harness.stop();
+  });
+});
+
+describe('HD bridge development measurement', () => {
+  it('forwards a bounded next-draw timeout and releases a stalled capture without another render', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const harness = setup('?hd=1&hd-pace=off');
+    const view = await goLive(harness);
+    const gpu = fakeGpuFrame();
+    Object.assign(view.hd, { renderer: { backend: gpu.backend } });
+    const before = view.render.mock.calls.length;
+    const result = harness.bridge()!.diagnostics.captureNextDraw(500);
+    const rejected = expect(result).rejects.toThrow('timed out');
+    expect(view.render).toHaveBeenCalledTimes(before);
+    await advance(20);
+    expect(gpu.device.queue.submit).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(500);
+    await rejected;
+    expect(gpu.buffer.destroy).toHaveBeenCalledTimes(1);
+    gpu.resolveMap();
+    await settle();
+    expect(gpu.buffer.getMappedRange).not.toHaveBeenCalled();
+    harness.stop();
+  });
+
+  it('copies the actual next submitted draw with fixed detached metadata and no additional render', async () => {
+    const harness = setup('?hd=1&hd-pace=off');
+    const view = await goLive(harness);
+    const gpu = fakeGpuFrame();
+    Object.assign(view.hd, { renderer: { backend: gpu.backend } });
+    const native = battle(42);
+    native.sidebar = hdSidebar();
+    native.effects = {
+      anims: [
+        {
+          id: 4,
+          uid: 44,
+          type: 'ANY-GAME-TYPE',
+          x: 256,
+          y: 512,
+          z: 104,
+          frameCount: 12,
+          buildingAnim: false,
+          invisible: false,
+        },
+      ],
+      bullets: [],
+      lasers: [],
+      electricBolts: [],
+      particleSystems: [],
+    };
+    harness.setState(native);
+    await advance(20, 3);
+    const probe = harness.bridge()!.diagnostics;
+    const expectedFrame = probe.state!.frame;
+    const before = view.render.mock.calls.length;
+    const result = probe.captureNextDraw();
+    expect(view.render).toHaveBeenCalledTimes(before);
+    await advance(20);
+    expect(view.render).toHaveBeenCalledTimes(before + 1);
+    expect(gpu.events).toEqual(['copy', 'submit', 'map']);
+    // The map reply arrives after the live source and the current clock have moved on.
+    native.view!.x = 9999;
+    native.effects.anims[0]!.x = 9999;
+    gpu.resolveMap();
+    const image = await result;
+    expect(image.frame).toBe(expectedFrame);
+    expect(image.state.frame).toBe(image.frame);
+    expect(image.drawAtMs).toBe(clock);
+    expect(image.shown).toBe(true);
+    expect(image.rect).toEqual(TACTICAL);
+    expect(image.nativeSize).toEqual({ width: 800, height: 600 });
+    expect(image.view).toEqual({ x: 100, y: 200 });
+    expect(image.state.effects!.anims[0]).toMatchObject({ uid: 44, type: 'ANY-GAME-TYPE', x: 256 });
+    expect(image.state.effects!.animsTruncated).toBe(false);
+    expect(image.passthrough).toEqual(harness.bridge()!.passthrough);
+    expect(image.interpolation).toBe('normal LiveView interpolation');
+    expect(image.pixels).toHaveLength(16);
+    expect(gpu.buffer.destroy).toHaveBeenCalledTimes(1);
+    image.state.view!.x = -1;
+    image.state.effects!.anims[0]!.x = -1;
+    expect(native.view!.x).toBe(9999);
+    expect(native.effects.anims[0]!.x).toBe(9999);
+    expect(view.render).toHaveBeenCalledTimes(before + 1);
+    harness.stop();
+  });
+
+  it('preserves shown=false for an actual Backslash-trail draw and cancels an owned readback on stop', async () => {
+    const harness = setup('?hd=1&hd-pace=off');
+    const view = await goLive(harness);
+    const gpu = fakeGpuFrame();
+    Object.assign(view.hd, { renderer: { backend: gpu.backend } });
+    harness.bridge()!.toggle();
+    const result = harness.bridge()!.diagnostics.captureNextDraw();
+    await advance(20);
+    gpu.resolveMap();
+    expect((await result).shown).toBe(false);
+    const next = fakeGpuFrame();
+    Object.assign(view.hd, { renderer: { backend: next.backend } });
+    const pending = harness.bridge()!.diagnostics.captureNextDraw();
+    const rejected = expect(pending).rejects.toThrow('disposed');
+    await advance(20);
+    harness.stop();
+    await rejected;
+    expect(next.buffer.destroy).toHaveBeenCalledTimes(1);
+    next.resolveMap();
+    await settle();
+    expect(next.buffer.getMappedRange).not.toHaveBeenCalled();
+  });
+
+  it('counts distinct delivered logic frames and completed draws, not repeated snapshots or display callbacks', async () => {
+    const harness = setup('?hd=1&hd-pace=30');
+    const view = await goLive(harness);
+    await advance(16, 20);
+    const probe = harness.bridge()!.diagnostics;
+    expect(probe.enabled).toBe(true);
+    expect(probe.shown).toBe(true);
+    expect(probe.counters.firstDrawAtMs).not.toBeNull();
+    expect(probe.counters.firstShownDrawAtMs).not.toBeNull();
+    expect(probe.counters.firstShownDrawAtMs!).toBeGreaterThanOrEqual(probe.counters.firstDrawAtMs!);
+    const renderedBefore = view.render.mock.calls.length;
+    const capture = probe.startCapture();
+    const state = battle(10);
+    harness.setState(state);
+    await advance(20);
+    // Workers reconstruct the unchanged-cells fast reply. A new reference of the same logic frame is not a
+    // distinct logic state; the next frame is, even while every map-cell layer remains unchanged.
+    harness.setState({ ...state });
+    await advance(20);
+    harness.setState({ ...state, frame: 11 });
+    await advance(20, 3);
+    const measured = probe.finishCapture()!;
+    expect(measured.startAtMs).toBe(capture.startAtMs);
+    expect(measured.endAtMs).toBe(clock);
+    expect(measured.distinctStates).toBe(2);
+    expect(measured.deliveries).toEqual([
+      { atMs: capture.startAtMs + 40, frame: 10, map: 'xmp29u2' },
+      { atMs: capture.startAtMs + 80, frame: 11, map: 'xmp29u2' },
+    ]);
+    expect(measured.drawnFrames).toBe(view.render.mock.calls.length - renderedBefore);
+    expect(measured.drawnFrames).toBeGreaterThan(0);
+    expect(measured.drawnFrames).toBeLessThan(5);
+    expect(measured.shownFrames).toBe(measured.drawnFrames);
+    expect(measured.draws.every((draw) => draw.shown)).toBe(true);
+    expect(measured.truncated).toBe(false);
+    const liveState = probe.state!;
+    liveState.objects[0]!.type = 'DETACHED';
+    expect(probe.state!.objects[0]!.type).toBe('HTNK');
+    measured.deliveries.length = 0;
+    expect(probe.capture!.deliveries).toHaveLength(2);
+    // Finishing the capture freezes its interval and arrays, while cumulative drawing counters keep advancing.
+    const finished = probe.capture;
+    await advance(20, 3);
+    expect(probe.finishCapture()).toEqual(finished);
+    expect(probe.counters.drawnFrames).toBe(view.render.mock.calls.length);
+    harness.bridge()!.toggle();
+    expect(probe.enabled).toBe(false);
+    expect(probe.shown).toBe(false);
+    harness.stop();
+  });
+
+  it('exposes existing read-only game probes without issuing a new render-state request', async () => {
+    const harness = setup();
+    const command = { frame: 41 };
+    const performanceSample = { frame: 41, sampledAtMs: 1000 };
+    const pointer = { x: 123, y: 45 };
+    const vmDiagnostics = { sampledAtMs: 1000 };
+    const probes = {
+      getCommandState: vi.fn(async () => command),
+      getGamePerformance: vi.fn(async () => performanceSample),
+      getPointerState: vi.fn(async () => pointer),
+      getDiagnostics: vi.fn(async () => vmDiagnostics),
+    };
+    Object.assign(harness.vm, probes);
+    const probe = harness.bridge()!.diagnostics;
+    expect(await probe.getCommandState()).toBe(command);
+    expect(await probe.getGamePerformance()).toBe(performanceSample);
+    expect(await probe.getPointerState()).toBe(pointer);
+    expect(await probe.getVmDiagnostics()).toBe(vmDiagnostics);
+    expect(probes.getDiagnostics).toHaveBeenCalledExactlyOnceWith('sample');
+    expect(harness.polls()).toBe(0);
+    harness.stop();
+  });
+
+  it('copies combat visibility and weapon data without traversing object, map, art or sidebar lists', async () => {
+    const harness = setup();
+    await goLive(harness);
+    const state = battle(42);
+    state.shroud = { originX: -1, originY: 2, width: 2, height: 2, cells: new Uint8Array([0, 1, 2, 255]) };
+    state.sidebar = hdSidebar();
+    const source = { x: 256, y: 512, z: 104 },
+      target = { x: 512, y: 768, z: 208 };
+    state.effects = {
+      anims: [
+        {
+          id: 4,
+          uid: 44,
+          type: 'ANY-GAME-TYPE',
+          ...source,
+          frameCount: 12,
+          frame: 3,
+          stage: 3,
+          buildingAnim: false,
+          invisible: false,
+          attachedTo: { id: 5, uid: 55, kind: 'vehicle' },
+        },
+      ],
+      particleSystems: [],
+      mindControlLinks: [],
+      bullets: [{ id: 1, uid: 11, type: 'TEST', ...source, inviso: false }],
+      lasers: [{ source, target, innerColor: [255, 0, 0] }],
+      electricBolts: [{ source, target, alternateColor: false }],
+      radBeams: [
+        {
+          id: 2,
+          type: 'rad',
+          source,
+          target,
+          color: [0, 255, 0],
+          period: 20,
+          amplitude: 40,
+          age: 10,
+          sustained: false,
+          progress: 0.5,
+        },
+      ],
+      waves: [{ id: 3, uid: 33, type: 'sonic', source, target, intensity: 50, progress: 0.5 }],
+    };
+    harness.setState(state);
+    await advance(20, 2);
+    const omittedReads = vi.fn();
+    const watch = (object: object, key: string) => {
+      const value = Reflect.get(object, key);
+      Object.defineProperty(object, key, {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          omittedReads(key);
+          return value;
+        },
+      });
+    };
+    for (const key of ['map', 'houses', 'objects', 'overlays', 'smudges', 'lighting']) watch(state, key);
+    for (const key of ['particleSystems', 'mindControlLinks']) watch(state.effects, key);
+    for (const key of ['cameos', 'tabs', 'controls']) watch(state.sidebar, key);
+    const probe = harness.bridge()!.diagnostics;
+    const polls = harness.polls();
+    const copy = probe.combatState!;
+    expect(Object.keys(copy).sort()).toEqual(['effects', 'frame', 'shroud', 'sidebar', 'view']);
+    expect(copy.frame).toBe(42);
+    expect(copy.sidebar).toEqual({
+      frame: state.sidebar.frame,
+      layout: { sidebar: state.sidebar.layout.sidebar, commandBar: state.sidebar.layout.commandBar },
+    });
+    expect(Object.keys(copy.effects!).sort()).toEqual([
+      'anims',
+      'animsTruncated',
+      'bullets',
+      'electricBolts',
+      'lasers',
+      'radBeams',
+      'waves',
+    ]);
+    expect(copy.effects!.animsTruncated).toBe(false);
+    for (const list of Object.values(copy.effects!).filter(Array.isArray)) expect(list).toHaveLength(1);
+    const original = structuredClone(copy);
+    copy.view!.x = -999;
+    copy.shroud!.cells.fill(0);
+    copy.sidebar!.frame.width = 1;
+    copy.sidebar!.layout.sidebar.x = -1;
+    copy.sidebar!.layout.commandBar!.y = -1;
+    copy.effects!.bullets[0]!.inviso = true;
+    copy.effects!.anims[0]!.x = -1;
+    copy.effects!.anims[0]!.type = 'DETACHED';
+    copy.effects!.anims[0]!.attachedTo!.uid = -1;
+    copy.effects!.lasers[0]!.source.x = -1;
+    copy.effects!.electricBolts[0]!.target.y = -1;
+    copy.effects!.radBeams![0]!.source.z = -1;
+    copy.effects!.waves![0]!.target.x = -1;
+    expect(probe.combatState).toEqual(original);
+    expect(omittedReads).not.toHaveBeenCalled();
+    expect(harness.polls()).toBe(polls);
+    harness.stop();
+  });
+
+  it('bounds detached animation diagnostics and exposes truncation without filtering game type IDs', async () => {
+    const harness = setup();
+    await goLive(harness);
+    const state = battle(42);
+    const anims = Array.from({ length: 8193 }, (_, id) => ({
+      id,
+      uid: id + 1,
+      type: `TYPE-${id}`,
+      x: 256,
+      y: 512,
+      z: 104,
+      frameCount: 12,
+      buildingAnim: id % 2 === 0,
+      invisible: id % 3 === 0,
+    }));
+    state.effects = { anims, bullets: [], lasers: [], electricBolts: [], particleSystems: [] };
+    harness.setState(state);
+    await advance(20, 2);
+    const probe = harness.bridge()!.diagnostics;
+    const polls = harness.polls();
+    const copy = probe.combatState!;
+    expect(copy.effects!.anims).toHaveLength(8192);
+    expect(copy.effects!.animsTruncated).toBe(true);
+    expect(copy.effects!.anims[0]).toMatchObject({ type: 'TYPE-0', invisible: true, buildingAnim: true });
+    expect(copy.effects!.anims.at(-1)!.type).toBe('TYPE-8191');
+    copy.effects!.anims[0]!.uid = -1;
+    expect(anims[0]!.uid).toBe(1);
+    expect(state.effects.anims).toHaveLength(8193);
+    expect(harness.polls()).toBe(polls);
+    harness.stop();
+  });
+
+  it('keeps unavailable combat fields and missing optional weapon readers unavailable', async () => {
+    const harness = setup();
+    const probe = harness.bridge()!.diagnostics;
+    expect(probe.combatState).toBeNull();
+    await goLive(harness);
+    expect(probe.combatState).toMatchObject({ frame: 2, shroud: null, sidebar: null, effects: null });
+    harness.setState({
+      ...battle(3),
+      view: null,
+      effects: { anims: [], particleSystems: [], bullets: [], lasers: [], electricBolts: [] },
+    });
+    await advance(20, 2);
+    expect(probe.combatState!.view).toBeNull();
+    expect(probe.combatState!.effects).toEqual({
+      anims: [],
+      animsTruncated: false,
+      bullets: [],
+      lasers: [],
+      electricBolts: [],
+      radBeams: undefined,
+      waves: undefined,
+    });
+    harness.setState(null);
+    await advance(20, 2);
+    expect(probe.combatState).toBeNull();
+    harness.stop();
+  });
+
+  it('bounds forgotten capture records while preserving the distinct-state count', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(1000);
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    vi.mocked(performance.now).mockImplementation(() => Date.now());
+    liveView.create.mockReturnValue(new Promise(() => {}));
+    let nextFrame = 1;
+    harness.vm.getRenderState.mockImplementation(async () => battle(nextFrame++));
+    await settle();
+    const probe = harness.bridge()!.diagnostics;
+    probe.startCapture();
+    // No display callbacks or ready art: native arrival accounting still runs, with a fixed storage bound.
+    await vi.advanceTimersByTimeAsync(350_000);
+    const measured = probe.finishCapture()!;
+    expect(measured.distinctStates).toBeGreaterThan(20_000);
+    expect(measured.deliveries).toHaveLength(20_000);
+    expect(measured.truncated).toBe(true);
+    expect(measured.draws).toHaveLength(0);
+    expect(probe.counters.drawnFrames).toBe(0);
+    harness.stop();
+  });
+});
+
+describe('submitted WebGPU frame readback ownership', () => {
+  it('rejects unbounded caller timeouts without owning a request or allocating a buffer', async () => {
+    const gpu = fakeGpuFrame();
+    const capture = createWebGpuFrameCapture(() => ({ backend: gpu.backend, metadata: null }));
+    for (const timeoutMs of [49, 10001, NaN, Infinity])
+      await expect(capture.request(timeoutMs)).rejects.toThrow('between 50 and 10000');
+    capture.draw(null);
+    expect(gpu.device.createBuffer).not.toHaveBeenCalled();
+    const result = capture.request(50);
+    capture.draw(null);
+    gpu.resolveMap();
+    expect((await result).pixels).toHaveLength(16);
+    capture.dispose();
+  });
+
+  it('releases a short expired request and isolates its late reply from the next request', async () => {
+    vi.useFakeTimers();
+    const old = fakeGpuFrame();
+    const next = fakeGpuFrame(1, 1, 'rgba8unorm');
+    let gpu = old;
+    const capture = createWebGpuFrameCapture((frame: number) => ({ backend: gpu.backend, metadata: frame }));
+    const result = capture.request(500);
+    const rejected = expect(result).rejects.toThrow('timed out');
+    capture.draw(1);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(old.buffer.destroy).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    expect(old.buffer.destroy).toHaveBeenCalledTimes(1);
+    gpu = next;
+    const replacement = capture.request(50);
+    capture.draw(2);
+    old.resolveMap();
+    await settle();
+    expect(old.buffer.getMappedRange).not.toHaveBeenCalled();
+    next.resolveMap();
+    expect((await replacement).metadata).toBe(2);
+    expect(next.buffer.destroy).toHaveBeenCalledTimes(1);
+    capture.dispose();
+  });
+
+  it('submits synchronously before awaiting mapping, removes row padding, and preserves BGRA alpha', async () => {
+    const gpu = fakeGpuFrame();
+    gpu.bytes.fill(0xee);
+    gpu.bytes.set([1, 2, 3, 4, 5, 6, 7, 8], 0);
+    gpu.bytes.set([9, 10, 11, 12, 13, 14, 15, 16], gpu.bytesPerRow);
+    const source = vi.fn((metadata: { frame: number }) => ({ backend: gpu.backend, metadata }));
+    const capture = createWebGpuFrameCapture(source);
+    capture.draw({ frame: 0 });
+    expect(source).not.toHaveBeenCalled();
+    const result = capture.request();
+    capture.draw({ frame: 7 });
+    expect(gpu.events).toEqual(['copy', 'submit', 'map']);
+    expect(gpu.device.createBuffer).toHaveBeenCalledWith({ label: 'HD next-draw readback', size: 512, usage: 9 });
+    expect(gpu.encoder.copyTextureToBuffer).toHaveBeenCalledWith(
+      { texture: gpu.texture },
+      { buffer: gpu.buffer, bytesPerRow: 256, rowsPerImage: 2 },
+      { width: 2, height: 2, depthOrArrayLayers: 1 },
+    );
+    gpu.resolveMap();
+    const image = await result;
+    expect(Array.from(image.pixels)).toEqual([3, 2, 1, 4, 7, 6, 5, 8, 11, 10, 9, 12, 15, 14, 13, 16]);
+    expect(image.metadata).toEqual({ frame: 7 });
+    expect(gpu.buffer.unmap).toHaveBeenCalledTimes(1);
+    expect(gpu.buffer.destroy).toHaveBeenCalledTimes(1);
+    capture.dispose();
+  });
+
+  it('preserves RGBA bytes and refuses overlapping requests while a readback is mapping', async () => {
+    const gpu = fakeGpuFrame(1, 1, 'rgba8unorm-srgb');
+    gpu.bytes.set([17, 29, 53, 71]);
+    const capture = createWebGpuFrameCapture(() => ({ backend: gpu.backend, metadata: null }));
+    const first = capture.request();
+    capture.draw(null);
+    await expect(capture.request()).rejects.toThrow('already pending');
+    capture.draw(null);
+    expect(gpu.device.queue.submit).toHaveBeenCalledTimes(1);
+    gpu.resolveMap();
+    expect(Array.from((await first).pixels)).toEqual([17, 29, 53, 71]);
+    capture.dispose();
+    await expect(capture.request()).rejects.toThrow('disposed');
+  });
+
+  it.each([
+    { change: { width: 0 }, error: 'dimensions' },
+    { change: { width: 10001, height: 1000 }, error: 'dimensions' },
+    { change: { format: 'rgba16float' }, error: 'format' },
+    { change: { usage: 16 }, error: 'COPY_SRC' },
+    { change: { sampleCount: 4 }, error: 'dimensions' },
+  ])('rejects unsupported source properties $change before allocating a buffer', async ({ change, error }) => {
+    const gpu = fakeGpuFrame();
+    Object.assign(gpu.texture, change);
+    const capture = createWebGpuFrameCapture(() => ({ backend: gpu.backend, metadata: null }));
+    const result = capture.request();
+    const rejected = expect(result).rejects.toThrow(error);
+    capture.draw(null);
+    await rejected;
+    expect(gpu.device.createBuffer).not.toHaveBeenCalled();
+    capture.dispose();
+  });
+
+  it('rejects GPU validation and mapping failures and releases each buffer', async () => {
+    for (const failure of ['validation', 'mapping']) {
+      const gpu = fakeGpuFrame();
+      if (failure === 'validation') gpu.device.popErrorScope.mockResolvedValue({ message: 'invalid copy' });
+      else gpu.buffer.mapAsync.mockRejectedValue(new Error('device lost'));
+      const capture = createWebGpuFrameCapture(() => ({ backend: gpu.backend, metadata: null }));
+      const result = capture.request();
+      const rejected = expect(result).rejects.toThrow(failure === 'validation' ? 'invalid copy' : 'device lost');
+      capture.draw(null);
+      gpu.resolveMap();
+      await rejected;
+      expect(gpu.buffer.destroy).toHaveBeenCalledTimes(1);
+      capture.dispose();
+    }
+  });
+
+  it('rejects absent draws or stalled mapping after ten seconds and ignores late replies', async () => {
+    vi.useFakeTimers();
+    const gpu = fakeGpuFrame();
+    const capture = createWebGpuFrameCapture(() => ({ backend: gpu.backend, metadata: null }));
+    const result = capture.request();
+    const rejected = expect(result).rejects.toThrow('timed out');
+    capture.draw(null);
+    await vi.advanceTimersByTimeAsync(10000);
+    await rejected;
+    expect(gpu.buffer.destroy).toHaveBeenCalledTimes(1);
+    gpu.resolveMap();
+    await settle();
+    expect(gpu.buffer.getMappedRange).not.toHaveBeenCalled();
+    const waiting = createWebGpuFrameCapture(() => null);
+    const missing = waiting.request();
+    const absent = expect(missing).rejects.toThrow('timed out');
+    waiting.draw(null);
+    await vi.advanceTimersByTimeAsync(10000);
+    await absent;
+    capture.dispose();
+    waiting.dispose();
+  });
+
+  it('cancels an old view without letting its late map reply affect a new request', async () => {
+    const old = fakeGpuFrame();
+    const next = fakeGpuFrame(1, 1, 'rgba8unorm');
+    let gpu = old;
+    const capture = createWebGpuFrameCapture((frame: number) => ({ backend: gpu.backend, metadata: frame }));
+    const abandoned = capture.request();
+    const rejected = expect(abandoned).rejects.toThrow('view replaced');
+    capture.draw(1);
+    capture.cancel('view replaced');
+    await rejected;
+    gpu = next;
+    const result = capture.request();
+    capture.draw(2);
+    old.resolveMap();
+    await settle();
+    expect(old.buffer.getMappedRange).not.toHaveBeenCalled();
+    next.resolveMap();
+    expect((await result).metadata).toBe(2);
+    expect(old.buffer.destroy).toHaveBeenCalledTimes(1);
+    expect(next.buffer.destroy).toHaveBeenCalledTimes(1);
+    capture.dispose();
   });
 });
 
@@ -1768,6 +2352,10 @@ describe('HD bridge frame pacing', () => {
     expect(harness.stop.scene()?.objects).toBe(1);
     expect(harness.bridge()?.timeline.firstStateAt).toBeLessThanOrEqual(1017);
     expect(harness.bridge()?.timeline.readyAt).toBeNull();
+    const deliveryCounters = harness.bridge()!.diagnostics.counters;
+    expect(deliveryCounters.distinctStates).toBe(requestedAt.length);
+    expect(deliveryCounters.drawnFrames).toBe(0);
+    expect(deliveryCounters.firstDrawAtMs).toBeNull();
     // One display frame a second still receives the same bounded native stream.
     const beforeSlowDisplay = requestedAt.length;
     await advance(1000, 3);
@@ -1802,6 +2390,93 @@ describe('HD bridge frame pacing', () => {
     await vi.advanceTimersByTimeAsync(3000);
     expect(harness.polls()).toBe(2);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('takes a due native request before a rounded or late timer, without duplicate or early requests', async () => {
+    const timers = new Map<number, { at: number; run: () => void }>();
+    let nextTimer = 1;
+    vi.stubGlobal('setTimeout', (run: () => void, ms: number) => {
+      const id = nextTimer++;
+      timers.set(id, { at: clock + ms, run });
+      return id;
+    });
+    vi.stubGlobal('clearTimeout', (id: number) => timers.delete(id));
+    liveView.create.mockReturnValue(new Promise(() => {}));
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    const starts = [clock];
+    harness.vm.getRenderState.mockImplementation(async () => {
+      starts.push(clock);
+      return battle(starts.length);
+    });
+    await settle();
+    const rounded = [...timers.values()][0]!;
+    expect(rounded.at).toBe(1017);
+    // A display callback at 16.7 ms can start the due read before the ceil-rounded 17 ms timer.
+    await advance(16.7);
+    expect(starts).toEqual([1000, 1016.7]);
+    expect([...timers.values()]).not.toContain(rounded);
+    expect(timers.size).toBe(1);
+    // A canceled callback must not erase or duplicate the replacement timer even if a queued turn invokes it.
+    rounded.run();
+    await settle();
+    expect(starts).toHaveLength(2);
+    expect(timers.size).toBe(1);
+    // Rendering blocked the main-thread timer turn. The next display callback gets a chance before drawing
+    // again, cancels that late timer and schedules one replacement after its reply, rather than two reads.
+    const late = [...timers.values()][0]!;
+    await advance(22);
+    expect(starts).toEqual([1000, 1016.7, 1038.7]);
+    expect([...timers.values()]).not.toContain(late);
+    expect(timers.size).toBe(1);
+    // Once callbacks stop, the independently scheduled timer remains the owner of state delivery.
+    const [id, next] = [...timers][0]!;
+    timers.delete(id);
+    clock = next.at;
+    next.run();
+    await settle();
+    expect(starts).toHaveLength(4);
+    expect(starts.slice(1).every((at, i) => at - starts[i]! >= 1000 / 60)).toBe(true);
+    expect(timers.size).toBe(1);
+    harness.stop();
+    expect(timers.size).toBe(0);
+  });
+
+  it('rearms an early native timer and keeps a slow request exclusive across display callbacks', async () => {
+    const timers = new Map<number, () => void>();
+    let nextTimer = 1;
+    vi.stubGlobal('setTimeout', (run: () => void) => {
+      const id = nextTimer++;
+      timers.set(id, run);
+      return id;
+    });
+    vi.stubGlobal('clearTimeout', (id: number) => timers.delete(id));
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    await settle();
+    const [id, early] = [...timers][0]!;
+    timers.delete(id);
+    clock += 8;
+    early();
+    await settle();
+    expect(harness.polls()).toBe(1);
+    expect(timers.size).toBe(1);
+    let reply!: (state: GameRenderState) => void;
+    harness.vm.getRenderState.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          reply = resolve;
+        }),
+    );
+    await advance(9);
+    expect(harness.polls()).toBe(2);
+    expect(timers.size).toBe(0);
+    await advance(16.7, 5);
+    expect(harness.polls()).toBe(2);
+    harness.stop();
+    reply(battle(1));
+    await settle();
+    await advance(100);
+    expect(harness.polls()).toBe(2);
+    expect(timers.size).toBe(0);
   });
 
   it('gives the game its speed back: fewer frames and fewer snapshot reads while it is behind its setting', async () => {

@@ -182,7 +182,17 @@ try {
           await expect(page.locator('#vm-upscale-mode')).toHaveValue('off');
           await page.locator('#vm-resolution-toggle').click();
           await expect(options).toBeVisible();
-          await expect(options.getByRole('option')).toHaveCount(8);
+          await expect(options.getByRole('option')).toHaveText([
+            text('跟随 INI'),
+            text('匹配窗口（清晰 1:1）'),
+            '800×600',
+            '1024×768',
+            '1280×720',
+            '1280×800',
+            '1440×900',
+            '1600×900',
+            '1920×1080',
+          ]);
           const popupBox = await options.boundingBox();
           expect(popupBox!.y).toBeGreaterThanOrEqual(0);
           expect(popupBox!.y + popupBox!.height).toBeLessThanOrEqual(viewport.height);
