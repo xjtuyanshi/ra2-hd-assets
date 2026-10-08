@@ -103,6 +103,25 @@ describe('which display frames a paced view draws', () => {
 });
 
 describe('how the workload moves the level', () => {
+  it('keeps an independent workload at the display cap when its own counters hold the target', () => {
+    const pacer = new FramePacer({ sharedDrawingScheduler: false });
+    for (let i = 0; i < 60; i++) expect(pacer.sample(game(62, null))).toBe(0);
+    expect(run(pacer, 1000 / 60, 1000).drawn).toBe(60);
+    // A real counter deficit can lower the rate, but recovery needs no emulator
+    // wait measurement or eight-second trial on an independent scheduler.
+    pacer.sample(game(40, null));
+    expect(pacer.sample(game(40, null))).toBe(2);
+    expect(pacer.sample(game(62, null))).toBe(0);
+    expect(pacer.rate).toBe(60);
+  });
+
+  it('ignores emulator wait telemetry when an independent workload is actually behind', () => {
+    const pacer = new FramePacer({ sharedDrawingScheduler: false });
+    pacer.sample(game(55, 1));
+    expect(pacer.sample(game(55, 1))).toBe(1);
+    expect(pacer.sample(game(55, 1, null))).toBe(0);
+  });
+
   it('steps down after two samples behind with no waits, one level at a time', () => {
     const pacer = new FramePacer();
     expect(pacer.sample(game(55))).toBe(0);

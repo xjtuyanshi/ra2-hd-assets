@@ -31,6 +31,11 @@ Install only into a separately owned development copy of the game. Keep the
 previous stock DLL for comparison/rollback. Enable the native `ddraw` override
 in that copy's Wine bottle; the original game directory is never changed.
 
+For a scoped macOS game/page launch, use
+`scripts/remaster/native/play-native.sh`; its required environment, private
+backup/restore behavior and local Go helper are documented in
+[launcher/README.md](launcher/README.md).
+
 ## Agent behavior
 
 - A single authenticated binary WebSocket serves memory, mirror, RGB565 native

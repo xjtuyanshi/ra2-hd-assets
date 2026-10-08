@@ -414,7 +414,18 @@ the shown view draws it:
   one level up is tried; if the game then falls behind, the level is given up at once, the wait before the next try
   doubles (up to two minutes) and that level asks for more idle share before it is tried again. A game without a
   limited speed setting (the fastest setting, a network match) has no rate to protect: the view stays at 60.
-- Snapshots are polled no faster than frames are drawn (each one is read on the emulator's thread), and the
+- Native-host sessions use `getGamePerformance` and differences of the game's own frame counter and its
+  `sampledAtMs`, rather than an emulator diagnostics timestamp or wait accounting. Drawing does not share the
+  native game's scheduler: while those counters hold its target the view stays at the display cap, and after an
+  actual deficit it returns to the cap as soon as the target is held. Only a counter rate below the same 95.5 %
+  threshold on two consecutive samples permits a lower level; missing or unlimited targets keep the cap.
+- While the native HD bridge is enabled, state polling runs independently of display callbacks, view loading and
+  draw pacing. One request starts immediately; subsequent requests start no sooner than 1/60 second after the
+  previous start, with at most one request outstanding. Disposal cancels the timer and late replies cannot restart
+  it. Native performance sampling also uses that timer while the HD view is shown. Display callbacks still own
+  drawing and art reveal; the existing settled-frame or 20-second reveal deadline is unchanged. The match timeline
+  records first state arrival and passthrough request/acceptance separately from art readiness and reveal.
+- Emulator snapshots are polled no faster than frames are drawn (each one is read on the emulator's thread), and the
   frame-time safeguard above judges a view that is held to fewer frames by the interval it is held to, not by the
   60 it would otherwise have to reach.
 

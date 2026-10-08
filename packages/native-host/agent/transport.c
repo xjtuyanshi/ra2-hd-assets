@@ -200,20 +200,23 @@ static int nh_crypto(ALG_ID algorithm, const void *bytes, DWORD length, uint8_t 
 }
 
 static void nh_executable_identity(void) {
-    char path[MAX_PATH];
+    WCHAR path[32768];
     HANDLE file = INVALID_HANDLE_VALUE;
     HCRYPTPROV provider = 0;
     HCRYPTHASH hash = 0;
     uint8_t block[65536], digest[32];
-    DWORD received, digest_length = sizeof(digest);
+    DWORD received, path_length, digest_length = sizeof(digest);
     LARGE_INTEGER size;
     IMAGE_DOS_HEADER dos;
     IMAGE_NT_HEADERS32 pe;
     uint32_t i;
     int headers_verified = 0;
     nh_hash[0] = 0;
-    if (!GetModuleFileNameA(NULL, path, sizeof(path))) return;
-    file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    /* Wine paths supplied by the owner can contain characters outside the
+     * process ANSI code page. Identity must hash that exact Unicode path. */
+    path_length = GetModuleFileNameW(NULL, path, sizeof(path) / sizeof(path[0]));
+    if (!path_length || path_length >= sizeof(path) / sizeof(path[0])) return;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return;
     if (!GetFileSizeEx(file, &size) || size.HighPart || size.LowPart == INVALID_FILE_SIZE) goto done;
     nh_exe_size = size.LowPart;

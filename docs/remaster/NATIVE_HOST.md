@@ -4,6 +4,18 @@ The native host runs the player's original 32-bit executable in its own process.
 
 ## Build and ownership
 
+On macOS, [the owner launcher](../../packages/native-host/launcher/README.md) provides a single entry point:
+
+```sh
+RA2_NATIVE_GAME_DIR="$GAME_COPY" \
+RA2_NATIVE_WINE_BOTTLE="$BOTTLE_NAME" \
+RA2_NATIVE_WINE="$WINE_EXECUTABLE" \
+RA2_HD_CACHE_DIR="$HD_CACHE" \
+scripts/remaster/native/play-native.sh --open
+```
+
+Use `RA2_NATIVE_WINE_PREFIX="$WINE_PREFIX"` instead of a named CrossOver bottle for plain Wine. The launcher builds missing local binaries, backs up the supplied copy's existing DLL before replacement, uses two free allowed ports and a fresh token, starts the hidden owned game and loopback page, and prints the exact private URL. Exit stops only processes it created and conditionally restores its DLL. It does not rewrite game settings or obtain resources. Native Wine process ownership and browser rendering require a real owner run; build and synthetic lifecycle checks are separate evidence.
+
 Run `bash packages/native-host/build.sh` with the installed i686 MinGW tools. No download or package installation is performed. The ignored output is `packages/native-host/build/ddraw.dll`. Copy it into a dedicated copy of the player's game, retaining the previous DLL for rollback. The vendored MIT source and its exact changes are described in [the vendor README](../../packages/native-host/third_party/cnc-ddraw/README.md); our C implementation lives in `packages/native-host/agent/`.
 
 The agent is disabled without explicit configuration, preserving stock drawing, physical input and game pacing. A configured agent defaults to hidden operation, including before a client connects and after it disconnects. The DLL never changes the game speed on its own. A client may request the game's existing speed setting; smoke tools restore it after measurement.
@@ -83,6 +95,12 @@ Input state also reports raw `focusHwnd` and `gameCaptureHwnd`. Combo controls a
 
 ## Smoke tools and recordings
 
+`node scripts/remaster/native/page-smoke.mjs --seconds 60 --warmup 15 --passthrough 7` exercises the production Worker controller, NativeCore and WorkerVmClient in a real Node worker thread. It retains structured cloning/transfers, identical-object replies, cell-layer reuse, 60 Hz maximum polling, one-second performance queries and presenter picture ACKs. Only browser transport construction and the display callback clock are adapted to Node; no emulator or replacement reader is used. Reports retain every distinct delivered frame, interval, a conservative post-delivery native-counter lag bound and its observation latency, mirror quality, original reader CPU, and attach/state/passthrough/picture-credit times. Counter observations never write game state or delay the next state poll.
+
+`--display-hz 1 --poll-clock display` reproduces drawing-bound polling under delayed display callbacks; `--display-hz 1 --poll-clock timer` retains the independent native 60 Hz scheduler with the same delayed picture ACKs. The page's native state scheduler is independent of drawing and art readiness; emulator state polling retains its original drawing cadence. The HD stall monitor records display callback gaps, not RPC delivery gaps. Use the distinct-state report to assess the latter.
+
+`--battle` operates the page input seam and verifies native selection, ground movement, drag selection, factory production, camera scrolling, Escape and Resume. It can deploy the local MCV to make ordinary building cameos available and starts one production item; it does not automate combat. `--wait-fighting 120` waits for genuine local-visible weapon effects and moves only the tactical camera through arrow keys, then starts the requested warm-up and measured interval. Shrouded effects, invisible projectiles and effects covered by the sidebar/command bar do not establish fighting in view. These are private live-game observations, not browser/GPU/art acceptance. Stop the owned native game after every run.
+
 Start a six-player XMP26S6 match with five Easy AIs in the dedicated game copy and bottle. Use 150–250 technos for the speed comparison.
 
 ```bash
@@ -109,6 +127,8 @@ For a focused three-minute crash window, use `agent-smoke.mjs --phase3 --seconds
 Recordings have `NHREC1\n`, followed by records `(relativeTimeMs:f64,length:u32,rawPacket)`. They contain game-derived memory and frames and must stay outside Git under `gameres/`. Use `reader-smoke.mjs --seconds 60 --record` to capture the full reader subscription. The smaller Stage A recording exercises protocol/frame replay but may require pages it never subscribed. A recording can be replayed through the actual decoder/readers by `reader-smoke.mjs --replay "$OUT/recordings/session.nhrec"`; no private recording is a public test fixture.
 
 ## Browser start order
+
+The owner launcher above performs the startup sequence and owns cleanup. The following manual sequence remains available for development.
 
 1. Build and install the DLL into the dedicated game copy. Set the agent token and exact HTTP development origin in the copy's `ddraw.ini` or launcher environment. Set `RA2_NATIVE_AGENT_HIDDEN=1` explicitly for product-mode acceptance.
 2. Start the original game through the existing GUI launcher in the dedicated Wine bottle, without creating an explorer virtual desktop. For example, `wine --bottle ra2dev 'C:\tools\ra2launch.exe' 'C:\YURI\gamemd.exe'`. Run GUI control helpers without explorer too. The game starts at its hidden main menu. One game at a time. Keep browser and smoke clients sequential because the agent admits one client.

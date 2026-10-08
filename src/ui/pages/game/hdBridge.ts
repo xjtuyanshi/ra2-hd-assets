@@ -140,6 +140,8 @@ const PASSTHROUGH_TRAIL_MS = 500;
  * or third frame; LiveView interpolates between snapshots.
  */
 const ACTIVE_POLL_MS = 15;
+/** Native simulation snapshots must keep arriving when display frames or art preparation are slow. */
+const NATIVE_POLL_MS = 1000 / 60;
 /**
  * Poll interval while a snapshot would be read for nothing: the current map has no HD view (cache missing or still
  * loading), the bridge is toggled off, or the VM does not answer. Polling continues only to notice a map change, and
@@ -200,6 +202,11 @@ const WARM_COLLECT_UNTIL_FRAME = 6000;
 /** Times (performance.now(), ms) of the current match's HD start; null until reached. Diagnostics only. */
 export interface HdBridgeTimeline {
   map: string | null;
+  /** First complete snapshot for this match, before art preparation or reveal. */
+  firstStateAt: number | null;
+  /** First nonzero passthrough request and its successful reply for this match. */
+  passthroughRequestedAt: number | null;
+  passthroughAcceptedAt: number | null;
   /** The view's load began (the map became known) and ended (`live view ready`). */
   loadAt: number | null;
   readyAt: number | null;
@@ -219,6 +226,9 @@ export interface HdBridgeTimeline {
 
 const emptyTimeline = (map: string | null): HdBridgeTimeline => ({
   map,
+  firstStateAt: null,
+  passthroughRequestedAt: null,
+  passthroughAcceptedAt: null,
   loadAt: null,
   readyAt: null,
   warmAt: null,
@@ -317,6 +327,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let polling = false;
   let pollFailed = false;
   let lastPollAt = -Infinity;
+  let nativePollTimer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
   let enabled = true;
   let ui: HdUi | null = null;
@@ -353,12 +364,16 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   /** Frames the shown view has drawn (cumulative; the speed telemetry takes differences). */
   let shownFrames = 0;
   const paceMode = parseHdPace(params.get('hd-pace'));
+  const native = host.vm.runtimeInfo?.backend === 'native';
   /** Holds the shown view's frame rate (null with ?hd-pace=off: every display frame is drawn). */
   const pacer =
     paceMode.kind === 'off'
       ? null
-      : new FramePacer({ rates: paceMode.kind === 'fixed' ? [paceMode.rate] : PACE_RATES });
-  /** The game's counters at the last pace sample (the emulator thread's clock); null before one and after a gap. */
+      : new FramePacer({
+          rates: paceMode.kind === 'fixed' ? [paceMode.rate] : PACE_RATES,
+          sharedDrawingScheduler: !native,
+        });
+  /** The game's counters at the last pace sample, with their own timestamp; null before one and after a gap. */
   let paceLast: { atMs: number; frame: number; waitMs: number | null } | null = null;
   let paceAsking = false;
   let paceAskedAt = -Infinity;
@@ -429,11 +444,14 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   const requestPassthrough = (flags: number) => {
     if (flags === passthroughRequest || (flags && passthroughUnsupported)) return;
     passthroughRequest = flags;
+    const requestedTimeline = timeline;
+    if (flags) requestedTimeline.passthroughRequestedAt ??= performance.now();
     if (!flags) keyUntil = performance.now() + PASSTHROUGH_TRAIL_MS;
     void host.vm.setTacticalPassthrough(flags).then(
       (accepted) => {
         // After cleanup the renderer and presenter belong to a session that is being torn down.
         if (stopped) return;
+        if (flags && accepted && timeline === requestedTimeline) timeline.passthroughAcceptedAt ??= performance.now();
         if (flags && !accepted && passthroughRequest === flags) {
           passthroughUnsupported = true;
           passthroughRequest = 0;
@@ -624,6 +642,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       if (liveMap === mapId && live) timeline.readyAt = performance.now();
     }
     if (state && mapId) {
+      timeline.firstStateAt ??= performance.now();
       matchMap = mapId;
       matchFrame = state.frame;
     }
@@ -748,6 +767,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       .catch((error) => console.warn('[HD] could not apply the render state', error))
       .finally(() => {
         polling = false;
+        if (native) scheduleNativePoll();
       });
   };
 
@@ -757,21 +777,31 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
    */
   const samplePace = (now: number) => {
     if (!pacer || paceMode.kind !== 'auto' || paceAsking || now - paceAskedAt < PACE_SAMPLE_MS) return;
-    if (typeof host.vm.getDiagnostics !== 'function') return;
+    if (typeof (native ? host.vm.getGamePerformance : host.vm.getDiagnostics) !== 'function') return;
     paceAsking = true;
     paceAskedAt = now;
-    host.vm
-      .getDiagnostics('usage')
+    const request = native
+      ? host.vm.getGamePerformance().then((game) => ({
+          game,
+          sampledAtMs: game?.sampledAtMs ?? now,
+          running: !!game && game.status !== 'inactive',
+          waitMs: null,
+        }))
+      : host.vm.getDiagnostics('usage').then((diagnostics) => ({
+          game: diagnostics.game,
+          sampledAtMs: diagnostics.sampledAtMs,
+          running: diagnostics.phase === 'running',
+          waitMs: diagnostics.usage?.guestWaitMs ?? null,
+        }));
+    request
       .then(
-        (diagnostics) => {
+        (sample) => {
           if (stopped) return;
-          const game = diagnostics.game;
+          const game = sample.game;
           // Frame 0 is the scenario still loading; outside a running battle there is no rate to judge.
-          const running = diagnostics.phase === 'running' && !!game && game.status !== 'inactive' && game.frame > 0;
+          const running = sample.running && !!game && game.status !== 'inactive' && game.frame > 0;
           const previous = paceLast;
-          paceLast = running
-            ? { atMs: diagnostics.sampledAtMs, frame: game.frame, waitMs: diagnostics.usage?.guestWaitMs ?? null }
-            : null;
+          paceLast = running ? { atMs: sample.sampledAtMs, frame: game.frame, waitMs: sample.waitMs } : null;
           if (!previous || !paceLast || !game || paceLast.frame < previous.frame) return;
           const intervalMs = paceLast.atMs - previous.atMs;
           // A window far longer than the period (a hidden tab, a stopped guest) is not one stretch of play.
@@ -793,6 +823,21 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       .finally(() => {
         paceAsking = false;
       });
+  };
+
+  const scheduleNativePoll = () => {
+    if (stopped || nativePollTimer !== null) return;
+    const interval = enabled ? NATIVE_POLL_MS : IDLE_POLL_MS;
+    // Count from the request's start, so decoding time does not add another
+    // complete poll interval. The previous request has finished before scheduling.
+    const delay = Math.max(0, lastPollAt + interval - performance.now());
+    nativePollTimer = setTimeout(() => {
+      nativePollTimer = null;
+      if (stopped) return;
+      const now = performance.now();
+      poll(now);
+      if (hole) samplePace(now);
+    }, Math.ceil(delay));
   };
 
   /**
@@ -845,7 +890,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     frame = requestAnimationFrame(tick);
     const now = performance.now();
     stallMonitor?.frame(now);
-    if (!polling && now - lastPollAt >= pollInterval()) poll(now);
+    if (!native && !polling && now - lastPollAt >= pollInterval()) poll(now);
     if (!hole && keyRect && now >= keyUntil) present();
     if (fallback && now >= fallback.until) publish(null);
     if (live && (hole || keyRect)) {
@@ -860,7 +905,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         publishTier(live.hd.quality);
       }
       // Not while the view is being switched off (the key colour's trail): the game repaints its whole picture then.
-      if (hole) samplePace(now);
+      if (!native && hole) samplePace(now);
     } else if (live && preparing()) {
       shownAt = null;
       publishTier(null);
@@ -879,12 +924,18 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     }
   };
   frame = requestAnimationFrame(tick);
+  if (native) poll(performance.now());
 
   // Console handle for A/B checks: __hdBridge.toggle() switches between the HD view and the original picture.
   const handle = {
     toggle() {
       if (stopped) return enabled;
       enabled = !enabled;
+      if (native && !polling) {
+        if (nativePollTimer !== null) clearTimeout(nativePollTimer);
+        nativePollTimer = null;
+        scheduleNativePoll();
+      }
       ui?.setEnabled(enabled && uiEnabled);
       if (!enabled) {
         setHole(null);
@@ -940,6 +991,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (stopped) return;
     stopped = true;
     cancelAnimationFrame(frame);
+    if (nativePollTimer !== null) clearTimeout(nativePollTimer);
+    nativePollTimer = null;
     clearFallback();
     ui?.dispose();
     ui = null;

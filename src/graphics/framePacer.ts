@@ -25,6 +25,8 @@
  *    setting) has nothing to fall behind: the pacer returns to its first level.
  */
 export interface FramePacerOptions {
+  /** Whether drawing competes with the workload's scheduler. Independent workloads recover the cap on target. */
+  sharedDrawingScheduler?: boolean;
   /** Frame rates the view may be held to, fastest first. Default [60, 40, 30]. */
   rates?: readonly number[];
   /** A frame is due once the level's interval divided by this has passed. Default 1.1. */
@@ -67,6 +69,7 @@ export interface WorkloadSample {
 const REFRESH_WINDOW = 32;
 
 export class FramePacer {
+  private readonly sharedDrawingScheduler: boolean;
   private readonly rates: readonly number[];
   private readonly intervals: readonly number[];
   private readonly tolerance: number;
@@ -100,6 +103,7 @@ export class FramePacer {
   private readonly needed: number[];
 
   constructor(options: FramePacerOptions = {}) {
+    this.sharedDrawingScheduler = options.sharedDrawingScheduler ?? true;
     const rates = options.rates ?? [60, 40, 30];
     if (!rates.length || rates.some((rate, index) => !(rate > 0) || (index > 0 && rate >= rates[index - 1]!)))
       throw new RangeError('Frame rates must be positive and descending');
@@ -189,7 +193,7 @@ export class FramePacer {
       return this.current;
     }
     const last = this.intervals.length - 1;
-    const waiting = idleShare !== null && idleShare >= this.busyIdleShare;
+    const waiting = this.sharedDrawingScheduler && idleShare !== null && idleShare >= this.busyIdleShare;
     if (rate < targetRate * this.behindShare && !waiting) {
       this.calm = 0;
       if (this.trial > 0) {
@@ -208,6 +212,12 @@ export class FramePacer {
         this.current = rate < targetRate * this.farBehindShare ? last : this.current + 1;
         this.behindRun = 0;
       }
+      return this.current;
+    }
+    // An independent workload does not need the drawing scheduler's measured
+    // slack or an emulator trial to sustain its observed rate.
+    if (!this.sharedDrawingScheduler) {
+      this.settle(0);
       return this.current;
     }
     this.behindRun = 0;

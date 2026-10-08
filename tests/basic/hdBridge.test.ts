@@ -121,7 +121,11 @@ function battle(frame: number, fileName = 'XMP29U2.MAP'): GameRenderState {
   } as unknown as GameRenderState;
 }
 
-function setup(search = '?hd=1', backend: VmFrameRenderer['backend'] = 'WebGL2') {
+function setup(
+  search = '?hd=1',
+  backend: VmFrameRenderer['backend'] = 'WebGL2',
+  runtimeBackend: 'v86' | 'native' = 'v86',
+) {
   clock = 1000;
   frames = [];
   const hdCanvas = { id: '', style: {} as Record<string, string>, remove: vi.fn() };
@@ -150,6 +154,7 @@ function setup(search = '?hd=1', backend: VmFrameRenderer['backend'] = 'WebGL2')
   let state: GameRenderState | null = null;
   let frameSize = { width: 800, height: 600 };
   const vm = {
+    runtimeInfo: { backend: runtimeBackend },
     getRenderState: vi.fn(async (): Promise<GameRenderState | null> => state),
     setTacticalPassthrough: vi.fn(async (_flags: number) => true),
   };
@@ -196,6 +201,7 @@ async function settle(): Promise<void> {
 async function advance(ms: number, count = 1): Promise<void> {
   for (let i = 0; i < count; i++) {
     clock += ms;
+    if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(ms);
     for (const callback of frames.splice(0)) callback();
     await settle();
   }
@@ -214,6 +220,7 @@ async function goLive(harness: ReturnType<typeof setup>, view = fakeView()) {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   stored.clear();
@@ -1690,6 +1697,111 @@ describe('HD bridge frame pacing', () => {
     expect((await count(harness, view, 1000 / 60, 60)).drawn).toBe(60);
     expect(harness.bridge()?.pace?.stride).toBe(1);
     harness.stop();
+  });
+
+  it('paces native drawing from the native game counters and their timestamps, without emulator diagnostics', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(1000);
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    vi.mocked(performance.now).mockImplementation(() => Date.now());
+    const diagnostics = gameAt(
+      harness,
+      () => 40,
+      () => 0,
+    );
+    let logicFps = 62;
+    let frame = 100;
+    let at = performance.now();
+    const getGamePerformance = vi.fn(async () => {
+      const now = performance.now();
+      frame += ((now - at) * logicFps) / 1000;
+      at = now;
+      return {
+        frame: Math.floor(frame),
+        gameSpeed: 1,
+        sessionSpeed: 1,
+        requestedFps: 60,
+        targetFps: 62.5,
+        sampledAtMs: at,
+        intervalMs: null,
+        logicFps: null,
+        status: 'sample' as const,
+      };
+    });
+    (harness.vm as unknown as { getGamePerformance: typeof getGamePerformance }).getGamePerformance =
+      getGamePerformance;
+    const view = await goLive(harness);
+    harness.setState(battle(3));
+    await advance(1000 / 120, 120 * 60);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 0, rate: 60, stride: 2 });
+    expect((await count(harness, view, 1000 / 120, 120)).drawn).toBe(60);
+    expect(diagnostics).not.toHaveBeenCalled();
+    expect(getGamePerformance.mock.calls.length).toBeGreaterThanOrEqual(59);
+    expect(getGamePerformance.mock.calls.length).toBeLessThanOrEqual(63);
+    // Only the game's observed logic counter deficit permits a lower level.
+    logicFps = 40;
+    await advance(1000 / 120, 480);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 2, rate: 30 });
+    logicFps = 62;
+    await advance(1000 / 120, 240);
+    expect(harness.bridge()?.pace).toMatchObject({ level: 0, rate: 60 });
+    harness.stop();
+  });
+
+  it('delivers native states without display frames or ready art, at no more than 60 requests a second', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(1000);
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    vi.mocked(performance.now).mockImplementation(() => Date.now());
+    liveView.create.mockReturnValue(new Promise(() => {}));
+    const requestedAt: number[] = [];
+    harness.vm.getRenderState.mockImplementation(async () => {
+      requestedAt.push(performance.now());
+      return battle(requestedAt.length);
+    });
+    await settle();
+    // There is no animation-frame callback in this interval. Art stays pending.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(requestedAt.length).toBeGreaterThanOrEqual(55);
+    expect(requestedAt.length).toBeLessThanOrEqual(60);
+    expect(requestedAt.slice(1).every((at, i) => at - requestedAt[i]! >= 1000 / 60)).toBe(true);
+    expect(harness.stop.scene()?.objects).toBe(1);
+    expect(harness.bridge()?.timeline.firstStateAt).toBeLessThanOrEqual(1017);
+    expect(harness.bridge()?.timeline.readyAt).toBeNull();
+    // One display frame a second still receives the same bounded native stream.
+    const beforeSlowDisplay = requestedAt.length;
+    await advance(1000, 3);
+    expect(requestedAt.length - beforeSlowDisplay).toBeGreaterThanOrEqual(55 * 3);
+    expect(requestedAt.length - beforeSlowDisplay).toBeLessThanOrEqual(60 * 3);
+    const beforeStop = requestedAt.length;
+    harness.stop();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(requestedAt).toHaveLength(beforeStop);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps one native state request outstanding and does not restart it after disposal', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(1000);
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    vi.mocked(performance.now).mockImplementation(() => Date.now());
+    let reply!: (state: GameRenderState) => void;
+    harness.vm.getRenderState.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          reply = resolve;
+        }),
+    );
+    await settle();
+    await vi.advanceTimersByTimeAsync(3000);
+    // The initial immediate request, then exactly one still-unanswered timer request.
+    expect(harness.polls()).toBe(2);
+    harness.stop();
+    reply(battle(1));
+    await settle();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(harness.polls()).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('gives the game its speed back: fewer frames and fewer snapshot reads while it is behind its setting', async () => {
