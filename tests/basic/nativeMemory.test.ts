@@ -33,6 +33,118 @@ it('cross-page read and frame updates retain exact bytes while incomplete snapsh
   m.apply({ frame: 10, flags: 0, pages: [page(8192, 44)] });
   expect(m.read_memory(8191, 2)).toEqual(new Uint8Array([17, 44]));
 });
+it('page removals retire allocations without resetting retained pages and allow later reallocation', () => {
+  const m = new NativeMirrorMemory();
+  m.apply({ frame: 1, flags: 2, pages: [page(0x1000, 17), page(0x2000, 33)] });
+  m.apply({ frame: 2, flags: 8, pages: [page(0x3000, 44)], removedPages: [0x1000] });
+  expect(m.read_memory(0x2000, 1)[0]).toBe(33);
+  expect(m.read_memory(0x3000, 1)[0]).toBe(44);
+  expect(() => m.read_memory(0x1000, 1)).toThrow(NativeMemoryMiss);
+  m.apply({ frame: 3, flags: 0, pages: [page(0x1000, 55)] });
+  expect(m.read_memory(0x1000, 1)[0]).toBe(55);
+  expect(m.missingRanges).toEqual([]);
+});
+it('malformed pages and removals cannot partially change a published frame or its miss footprint', () => {
+  const m = new NativeMirrorMemory();
+  m.apply({ frame: 1, flags: 2, pages: [page(0x1000, 17), page(0x2000, 33)] });
+  expect(() => m.read_memory(0x3000, 1)).toThrow(NativeMemoryMiss);
+  const missing = m.missingRanges;
+  for (const update of [
+    { frame: 2, flags: 2, pages: [page(0x3000), page(0x4001)] },
+    { frame: 2, flags: 8, pages: [page(0x3000), page(0x4001)], removedPages: [0x1000] },
+    { frame: 2, flags: 8, pages: [], removedPages: [0x1000, 0x1000] },
+    { frame: 2, flags: 8, pages: [], removedPages: [0x2000, 0x1000] },
+    { frame: 2, flags: 8, pages: [page(0x1000)], removedPages: [0x1000] },
+    { frame: 2, flags: 8, pages: [], removedPages: Array.from({ length: 4097 }, (_, index) => index * 4096) },
+    { frame: 2, flags: 0, pages: [], removedPages: [0x1000] },
+  ]) {
+    expect(() => m.apply(update)).toThrow();
+    expect(m.frame).toBe(1);
+    expect(m.complete).toBe(true);
+    expect(m.missingRanges).toEqual(missing);
+    expect(m.read_memory(0x1000, 1)[0]).toBe(17);
+    expect(m.read_memory(0x2000, 1)[0]).toBe(33);
+  }
+});
+it('scalar accessors decode unaligned and cross-page values without calling the copying byte API', () => {
+  const bytes = Uint8Array.from({ length: 8192 }, (_, index) => (index * 37 + 11) & 255),
+    expected = new DataView(bytes.buffer),
+    m = new NativeMirrorMemory();
+  m.apply({
+    frame: 1,
+    flags: 2,
+    pages: [
+      { address: 0x80000000, bytes: bytes.subarray(0, 4096) },
+      { address: 0x80001000, bytes: bytes.subarray(4096) },
+    ],
+  });
+  const accessor = m.accessor();
+  m.read_memory = () => {
+    throw new Error('Scalar requested a byte copy');
+  };
+  m.beginOperation();
+  for (const offset of [0, 1, 4092, 4093, 4094, 4095, 4096, 5001]) {
+    const address = 0x80000000 + offset;
+    expect(accessor.u8(address)).toBe(expected.getUint8(offset));
+    expect(accessor.u16(address)).toBe(expected.getUint16(offset, true));
+    expect(accessor.u32(address)).toBe(expected.getUint32(offset, true));
+    expect(accessor.i32(address)).toBe(expected.getInt32(offset, true));
+  }
+  expect(m.operationRanges).toEqual([{ address: 0x80000000, length: 8192 }]);
+  expect(m.misses).toBe(0);
+  m.beginOperation();
+  accessor.u32(0x80001000);
+  accessor.u32(0x80001004);
+  expect(m.operationRanges).toEqual([{ address: 0x80001000, length: 4096 }]);
+});
+it('scalar misses remain strict, coalesce both crossing pages and validate address-space boundaries', () => {
+  const misses: unknown[] = [],
+    m = new NativeMirrorMemory((ranges) => misses.push(ranges)),
+    accessor = m.accessor();
+  m.beginOperation();
+  expect(() => accessor.u32(0x3fff)).toThrow(NativeMemoryMiss);
+  expect(m.misses).toBe(1);
+  expect(m.operationMissed).toBe(true);
+  expect(m.operationRanges).toEqual([{ address: 0x3000, length: 8192 }]);
+  expect(m.missingRanges).toEqual([{ address: 0x3000, length: 8192 }]);
+  expect(misses).toEqual([[{ address: 0x3000, length: 8192 }]]);
+  m.apply({ frame: 1, flags: 2, pages: [page(0xfffff000, 255)] });
+  expect(accessor.u8(0xffffffff)).toBe(255);
+  expect(accessor.u16(0xfffffffe)).toBe(65535);
+  expect(accessor.u32(0xfffffffc)).toBe(0xffffffff);
+  expect(accessor.i32(0xfffffffc)).toBe(-1);
+  for (const address of [-1, 1.5, NaN, Infinity, 0x100000000, 0xfffffffd])
+    expect(() => accessor.u32(address)).toThrow(RangeError);
+});
+it('scalar caches preserve snapshot bytes across update, removal and fetch', () => {
+  const m = new NativeMirrorMemory(),
+    input = page(0x1000, 17);
+  m.apply({ frame: 1, flags: 2, pages: [input] });
+  input.bytes.fill(99);
+  const old = m.snapshot(),
+    liveAccessor = m.accessor(),
+    oldAccessor = old.accessor();
+  m.beginOperation();
+  old.beginOperation();
+  expect(liveAccessor.u32(0x1000)).toBe(0x11111111);
+  expect(oldAccessor.u32(0x1000)).toBe(0x11111111);
+  expect(liveAccessor.u32(0x1004)).toBe(0x11111111);
+  expect(m.operationRanges).toEqual([{ address: 0x1000, length: 4096 }]);
+  expect(old.operationRanges).toEqual([{ address: 0x1000, length: 4096 }]);
+  m.apply({ frame: 2, flags: 0, pages: [page(0x1000, 33)] });
+  expect(liveAccessor.u32(0x1000)).toBe(0x21212121);
+  expect(oldAccessor.u32(0x1000)).toBe(0x11111111);
+  const copy = m.read_memory(0x1000, 4);
+  copy.fill(0);
+  expect(liveAccessor.u32(0x1000)).toBe(0x21212121);
+  m.apply({ frame: 3, flags: 8, pages: [], removedPages: [0x1000] });
+  expect(() => liveAccessor.u8(0x1000)).toThrow(NativeMemoryMiss);
+  m.installFetchedPage(0x1000, new Uint8Array(4096).fill(44));
+  expect(liveAccessor.u32(0x1000)).toBe(0x2c2c2c2c);
+  expect(oldAccessor.u32(0x1000)).toBe(0x11111111);
+  m.reset();
+  expect(() => liveAccessor.u32(0x1000)).toThrow(NativeMemoryMiss);
+});
 it('reader retry abandons swallowed misses and returns previous good result when the range never arrives', async () => {
   const m = new NativeMirrorMemory();
   let discarded = 0,

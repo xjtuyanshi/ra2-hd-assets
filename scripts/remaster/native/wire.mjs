@@ -49,14 +49,17 @@ export function decodeMirror(payload) {
     flags = b.readUInt32LE(4),
     n = b.readUInt32LE(8),
     sn = b.readUInt32LE(12);
-  if (n > 4096 || sn > 64) throw new Error('Mirror bounds');
+  if (flags & ~31 || (flags & 8 && flags & 7) || (flags & 16 && flags & 5) || n > 4096 || sn > 64)
+    throw new Error('Mirror bounds');
   let at = 16;
   const pages = [],
-    samples = [];
+    samples = [],
+    seen = new Set();
   for (let i = 0; i < n; i++) {
     if (at + 4 + PAGE > b.length) throw new Error('Short page');
     const address = b.readUInt32LE(at);
-    if (address % PAGE) throw new Error('Unaligned page');
+    if (address % PAGE || seen.has(address)) throw new Error('Invalid or duplicate page');
+    seen.add(address);
     pages.push({ address, bytes: b.subarray(at + 4, at + 4 + PAGE) });
     at += 4 + PAGE;
   }
@@ -65,20 +68,85 @@ export function decodeMirror(payload) {
     const address = b.readUInt32LE(at),
       length = b.readUInt32LE(at + 4);
     at += 8;
-    if (length > PAGE || at + length > b.length) throw new Error('Sample bounds');
+    if (!length || length > PAGE || address + length > 0x100000000 || at + length > b.length)
+      throw new Error('Sample bounds');
     samples.push({ address, bytes: b.subarray(at, at + length) });
     at += length;
   }
+  let removedPages;
+  if (flags & 8) {
+    if (at + 4 > b.length) throw new Error('Short removal count');
+    const count = b.readUInt32LE(at);
+    at += 4;
+    if (count > 4096 || at + count * 4 > b.length) throw new Error('Removal bounds');
+    removedPages = [];
+    let previous = -1;
+    for (let i = 0; i < count; i++) {
+      const address = b.readUInt32LE(at);
+      if (address % PAGE || address <= previous || seen.has(address)) throw new Error('Invalid removal page');
+      removedPages.push(address);
+      previous = address;
+      at += 4;
+    }
+  }
+  let subscriptionRevision;
+  if (flags & 16) {
+    if (at + 4 > b.length) throw new Error('Short subscription revision');
+    subscriptionRevision = b.readUInt32LE(at);
+    at += 4;
+  }
   if (at !== b.length) throw new Error('Trailing mirror data');
-  return { frame, flags, pages, samples };
+  return {
+    frame,
+    flags,
+    pages,
+    samples,
+    ...(removedPages ? { removedPages } : {}),
+    ...(subscriptionRevision !== undefined ? { subscriptionRevision } : {}),
+  };
 }
 export class Mirror {
   pages = new Map();
   frame = 0;
   apply(update) {
-    if (update.flags & 2) this.pages.clear();
-    for (const p of update.pages) this.pages.set(p.address, Buffer.from(p.bytes));
+    if (update.flags & 5) return false;
+    const removed = update.removedPages ?? [];
+    if (
+      update.flags & ~31 ||
+      (update.flags & 8 && update.flags & 2) ||
+      (update.flags & 8 && update.removedPages === undefined) ||
+      (update.removedPages !== undefined && !(update.flags & 8)) ||
+      removed.length > 4096 ||
+      update.pages.length > 4096
+    )
+      throw new Error('Mirror removal bounds');
+    const next = update.flags & 2 ? new Map() : new Map(this.pages);
+    let previous = -1;
+    for (const address of removed) {
+      if (!Number.isInteger(address) || address < 0 || address > 0xfffff000 || address % PAGE || address <= previous)
+        throw new Error('Invalid removal page');
+      next.delete(address);
+      previous = address;
+    }
+    const seen = new Set(),
+      removedSet = new Set(removed);
+    for (const p of update.pages) {
+      if (
+        !Number.isInteger(p.address) ||
+        p.address < 0 ||
+        p.address > 0xfffff000 ||
+        p.address % PAGE ||
+        p.bytes.length !== PAGE ||
+        seen.has(p.address) ||
+        removedSet.has(p.address)
+      )
+        throw new Error('Invalid mirror page');
+      seen.add(p.address);
+      next.set(p.address, Buffer.from(p.bytes));
+    }
+    this.pages = next;
     this.frame = update.frame;
+    return true;
   }
   read(address, length) {
     const out = Buffer.alloc(length);
@@ -144,11 +212,28 @@ export class Picture {
     return { frame, width: w, height: h, pixels: this.pixels };
   }
 }
-export function subscription(ranges, rules = [], { maxPages = 4096, budgetUs = 1500, sampleCount = 32 } = {}) {
-  if (ranges.length > 4096 || rules.length > 256 || maxPages > 4096 || sampleCount > 64)
+export function subscription(
+  ranges,
+  rules = [],
+  { maxPages = 4096, budgetUs = 1500, sampleCount = 32, pageRemovals = false } = {},
+) {
+  if (
+    ranges.length > 4096 ||
+    rules.length > 256 ||
+    !Number.isInteger(maxPages) ||
+    maxPages < 1 ||
+    maxPages > 4096 ||
+    !Number.isInteger(budgetUs) ||
+    budgetUs < 100 ||
+    budgetUs > 20000 ||
+    !Number.isInteger(sampleCount) ||
+    sampleCount < 0 ||
+    sampleCount > 64 ||
+    typeof pageRemovals !== 'boolean'
+  )
     throw new Error('Subscription bounds');
   return Buffer.concat([
-    words(ranges.length, rules.length, maxPages, budgetUs, sampleCount),
+    words(ranges.length, rules.length, maxPages, budgetUs, sampleCount + (pageRemovals ? 0x80000000 : 0)),
     ...ranges.map((r) => words(r.address, r.length)),
     ...rules.map((r) => words(r.kind, r.source, r.bytes, r.maxCount ?? 4096, r.stride ?? 4)),
   ]);

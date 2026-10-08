@@ -19,6 +19,8 @@ enum nh_type { NH_HELLO=1, NH_READ=2, NH_WRITE=3, NH_ALLOC=4, NH_FREE=5, NH_SUBS
 /* READ request addr,len,expectedFrame; reply frame,addr,len,bytes. Error UTF-8.
  WRITE addr,len,bytes; ALLOC size,preferred,executable => addr,size; FREE addr.
  SUBSCRIBE rangeCount,ruleCount,maxPages,budgetUs,sampleCount; ranges addr,len;
+ sampleCount bit31 opts into advertised pageRemovals/subscribeRevision; remaining bits
+ hold its count. Opted-in SUBSCRIBE success replies contain the installed revision u32.
  rules kind,source,bytes,maxCount,stride. Kinds: 1 pointer; 2 vector (+4 items,+16 count);
  3 span vector (same descriptor; contiguous count*stride); 4 outer pointer vector
  to embedded pointer vector at member offset=stride (maxCount bounds both);
@@ -28,7 +30,10 @@ enum nh_type { NH_HELLO=1, NH_READ=2, NH_WRITE=3, NH_ALLOC=4, NH_FREE=5, NH_SUBS
  pointervector/pointerfield (stride low16=first offset,high16=second offset).
  Null pointers/empty vectors are valid; maxCount bounds each vector. All fields u32.
  MIRROR frame,flags,pageCount,sampleCount; page addr,4096 bytes; samples addr,len,bytes.
- flags: 1 truncated, 2 reset, 4 invalid pages. Samples direct-read on game thread same frame.
+ flags: 1 truncated, 2 reset, 4 invalid pages, 8 removed membership. Flag8 appends
+ removedCount then sorted removed page addresses after all samples (complete non-reset only).
+ Flag16 appends the applied subscription revision u32 after any removal list (complete only).
+ Samples direct-read on game thread same frame.
  CREDIT count; PICTURE frame,width,height,rowCount; rows y,encodedBytes,segments;
  segments u16: high bit key run, lower15 count; literal segments followed by RGB565 pixels.
  INPUT kind,a,b,c (1 postMessage,2 key,3 cursor); HOOK enabled; INPUT_STATE reply JSON.

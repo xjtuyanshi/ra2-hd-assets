@@ -43,6 +43,8 @@ class FakeAgent implements NativeWebSocket {
   refuseInput = false;
   modal = false;
   initial = new Uint8Array(NATIVE_PAGE_SIZE);
+  revisionSupport = false;
+  subscriptionRevision = 0;
   constructor() {
     this.initial[0] = 7;
   }
@@ -55,6 +57,9 @@ class FakeAgent implements NativeWebSocket {
       this.emit(request.type, request.id);
       if (this.hookEnabled && this.mirrorOnHook)
         queueMicrotask(() => this.mirror(1, [{ address: 0x1000, bytes: this.initial }], 2));
+    } else if (request.type === NativeMessageType.Subscribe && this.revisionSupport) {
+      this.subscriptionRevision++;
+      this.emit(request.type, request.id, encodeU32(this.subscriptionRevision));
     } else if (request.type === NativeMessageType.Diagnostics) {
       this.emit(
         request.type,
@@ -78,7 +83,8 @@ class FakeAgent implements NativeWebSocket {
   emit(type: NativeMessageType, id: number, payload: Uint8Array = new Uint8Array()): void {
     this.onmessage?.({ data: encodePacket(type, id, payload) });
   }
-  hello(verified = true): void {
+  hello(verified = true, pageRemovals?: boolean, maxBudgetUs?: number, subscribeRevision = pageRemovals): void {
+    this.revisionSupport = subscribeRevision === true && pageRemovals === true;
     this.emit(
       NativeMessageType.Hello,
       0,
@@ -88,17 +94,31 @@ class FakeAgent implements NativeWebSocket {
         gameThreadId: 0,
         exe: { size: 1000, peTimestamp: 123, sha256: 'a'.repeat(64), verified },
         surface: { width: 0, height: 0, bpp: 0, format: 'RGB565' },
-        limits: { messageBytes: NATIVE_MAX_MESSAGE, pages: 4096, rules: 256 },
+        limits: {
+          messageBytes: NATIVE_MAX_MESSAGE,
+          pages: 4096,
+          rules: 256,
+          pageRemovals,
+          maxBudgetUs,
+          subscribeRevision,
+        },
       }),
     );
   }
-  mirror(frame: number, pages: { address: number; bytes: Uint8Array }[], flags = 0): void {
+  mirror(
+    frame: number,
+    pages: { address: number; bytes: Uint8Array }[],
+    flags = 0,
+    revision = this.subscriptionRevision,
+  ): void {
+    const includeRevision = this.revisionSupport && !(flags & 5);
     this.emit(
       NativeMessageType.Mirror,
       0,
       concat(
-        encodeU32(frame, flags, pages.length, 0),
+        encodeU32(frame, flags | (includeRevision ? 16 : 0), pages.length, 0),
         ...pages.flatMap((page) => [encodeU32(page.address), page.bytes]),
+        ...(includeRevision ? [encodeU32(revision)] : []),
       ),
     );
   }
@@ -184,6 +204,68 @@ afterEach(async () => {
 });
 
 describe('native core session and presenter lifecycle', () => {
+  it('negotiates page-removal deltas only when hello advertises support', async () => {
+    for (const supported of [undefined, false, true]) {
+      const { core, agent } = setup();
+      const start = core.start();
+      agent.hello(true, supported);
+      await start;
+      const subscription = agent.requests.find((request) => request.type === NativeMessageType.Subscribe)!;
+      expect(u32(subscription.payload, 16)).toBe(supported ? 0x80000000 : 0);
+      expect(u32(subscription.payload, 12)).toBe(4000);
+    }
+  });
+  it('uses the larger bootstrap budget only when advertised by the agent', async () => {
+    for (const [advertised, expected] of [
+      [8000, 8000],
+      [20000, 12000],
+    ]) {
+      const { core, agent } = setup();
+      const start = core.start();
+      agent.hello(true, true, advertised);
+      await start;
+      const subscription = agent.requests.find((request) => request.type === NativeMessageType.Subscribe)!;
+      expect(u32(subscription.payload, 12)).toBe(expected);
+    }
+  });
+  it('waits for the applied subscription revision rather than an older in-flight delta or a reset', async () => {
+    const { core, agent, mode } = setup();
+    const start = core.start();
+    agent.hello(true, true);
+    await start;
+    expect((await core.getRenderState())?.frame).toBe(7);
+    const old = new Uint8Array(NATIVE_PAGE_SIZE);
+    old[0] = 9;
+    agent.mirror(2, [{ address: 0x9000, bytes: old }]);
+    mode.missing = true;
+    mode.additionalAddress = 0x9000;
+    let settled = false;
+    const pending = core.getRenderState().then((value) => {
+      settled = true;
+      return value;
+    });
+    await flush();
+    expect(agent.subscriptionRevision).toBe(2);
+    agent.mirror(3, [], 0, 1);
+    await flush();
+    expect(settled).toBe(false);
+    agent.mirror(4, [], 1);
+    await flush();
+    expect(settled).toBe(false);
+    const fresh = new Uint8Array(NATIVE_PAGE_SIZE);
+    fresh[0] = 42;
+    agent.mirror(5, [{ address: 0x9000, bytes: fresh }], 0, 2);
+    expect((await pending)?.frame).toBe(42);
+    expect(core.memory.misses).toBe(0);
+  });
+  it('keeps reset-based subscriptions when revision negotiation is unavailable', async () => {
+    const { core, agent } = setup();
+    const start = core.start();
+    agent.hello(true, true, undefined, false);
+    await start;
+    const subscription = agent.requests.find((request) => request.type === NativeMessageType.Subscribe)!;
+    expect(u32(subscription.payload, 16)).toBe(0);
+  });
   it('attaches pictures and protocol input at a menu, then prepares readers only from a real battle mirror', async () => {
     const statuses = vi.fn(),
       frames = vi.fn();

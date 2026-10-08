@@ -344,7 +344,7 @@ int nh_hidden_finish_dc(HWND window, HDC dc, int end_paint)
     return 1;
 }
 
-struct paint_windows { HWND root, windows[128]; unsigned count; };
+struct paint_windows { HWND root, windows[128]; unsigned count, visited; };
 
 static BOOL CALLBACK collect_paint_child(HWND window, LPARAM context)
 {
@@ -353,6 +353,36 @@ static BOOL CALLBACK collect_paint_child(HWND window, LPARAM context)
     if (GetWindowThreadProcessId(window, NULL) == g_ddraw.gui_thread_id && nh_hidden_visible(window))
         state->windows[state->count++] = window;
     return TRUE;
+}
+
+static void collect_paint_tree(HWND parent, struct paint_windows *state, unsigned depth)
+{
+    if (depth >= 16 || state->count >= sizeof(state->windows) / sizeof(state->windows[0])) return;
+    HWND first = GetWindow(parent, GW_CHILD);
+    /* Native child enumeration starts at the top of the z-order. Paint each
+     * parent before its children, but siblings from bottom to top, so genuine
+     * overlapping popup controls remain above the controls they cover. */
+    for (HWND child = first ? GetWindow(first, GW_HWNDLAST) : NULL; child; )
+    {
+        if (++state->visited > 512 || state->count >= sizeof(state->windows) / sizeof(state->windows[0])) return;
+        HWND previous = GetWindow(child, GW_HWNDPREV);
+        if (GetParent(child) == parent && GetWindowThreadProcessId(child, NULL) == g_ddraw.gui_thread_id &&
+            nh_hidden_visible(child))
+        {
+            state->windows[state->count++] = child;
+            collect_paint_tree(child, state, depth + 1);
+        }
+        if (previous == child) return;
+        child = previous;
+    }
+}
+
+static int system_paint_dc(const char *class_name)
+{
+    return !_stricmp(class_name, "Button") || !_stricmp(class_name, "Edit") ||
+        !_stricmp(class_name, "Static") || !_stricmp(class_name, "ComboBox") ||
+        !_stricmp(class_name, "ComboLBox") || !_stricmp(class_name, "ListBox") ||
+        !_stricmp(class_name, "ScrollBar") || !_stricmp(class_name, "msctls_trackbar32");
 }
 
 static BOOL CALLBACK collect_paint_popup(HWND window, LPARAM context)
@@ -389,7 +419,7 @@ void nh_hidden_paint(void)
     if (state.root != g_ddraw.hwnd)
     {
         state.windows[state.count++] = state.root;
-        EnumChildWindows(state.root, collect_paint_child, (LPARAM)&state);
+        collect_paint_tree(state.root, &state, 0);
     }
     EnumWindows(collect_paint_popup, (LPARAM)&state);
     if (!state.count) return;
@@ -483,7 +513,7 @@ void nh_hidden_paint(void)
          * game WM_PAINT handlers. Unsubclassed system controls can consume a DC
          * supplied as wParam because their internal APIs bypass the game's IAT. */
         InvalidateRect(window, NULL, FALSE);
-        SendMessageA(window, WM_PAINT, procedure == standard && strcmp(class_name, "#32770") ? (WPARAM)dc : 0, 0);
+        SendMessageA(window, WM_PAINT, procedure == standard && system_paint_dc(class_name) ? (WPARAM)dc : 0, 0);
         scratch_window = NULL;
         if (!_stricmp(class_name, "Button") && (real_GetWindowLongA(window, GWL_STYLE) & BS_TYPEMASK) == BS_OWNERDRAW)
             last_owner_drawn++;

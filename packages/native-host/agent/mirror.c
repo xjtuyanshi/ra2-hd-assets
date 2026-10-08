@@ -2,6 +2,8 @@
  * YR 1.001 detour; subscriptions and follow rules are generic memory mechanisms. */
 #include "mirror-internal.h"
 #include "mirror-pages.h"
+#include "mirror-read-cache.h"
+#include "mirror-membership.h"
 #include "x86-relative.h"
 #include <tlhelp32.h>
 #include <stdio.h>
@@ -15,6 +17,8 @@
 #define NH_MIRROR_TRUNCATED 1u
 #define NH_MIRROR_RESET 2u
 #define NH_MIRROR_INVALID 4u
+#define NH_MIRROR_REMOVED 8u
+#define NH_MIRROR_REVISION 16u
 
 static const uint8_t frame_signature[20] = {
     0x8b,0x15,0x84,0xed,0xa8,0x00,0xa1,0x84,0x77,0xb0,
@@ -27,6 +31,7 @@ static struct nh_subscription subscription;
 static struct nh_page *shadow_pages, *capture_pages;
 static uint8_t *shadow_bytes, *capture_bytes, *packet;
 static uint32_t shadow_count, capture_count, page_hash[NH_MIRROR_HASH_SIZE];
+static uint32_t old_indices[NH_MAX_PAGES], removed_pages[NH_MAX_PAGES];
 static struct nh_page_seed fixed_seed, next_seed;
 static uint32_t rule_items[65536];
 static uint32_t rule_parent_items[65536];
@@ -49,6 +54,25 @@ static uint8_t detour[NH_HOOK_BYTES];
 static volatile LONG logic_frames, dropped_updates, truncated_updates, invalid_updates;
 static volatile LONG game_thread_id;
 static uint64_t mirror_bytes, hook_us_total, hook_us_max, budget_overruns;
+/* Keep the first actual fault for each incomplete publication. Stage and rule
+ * metadata distinguish policy bounds from time budgets and retired heap pages. */
+static uint32_t capture_stage, capture_rule = UINT32_MAX;
+struct mirror_fault { uint32_t stage, rule, source, address, value, limit, reason; };
+static struct mirror_fault current_fault, last_fault;
+static struct nh_read_cache read_cache;
+static uint32_t hook_times[16384], hook_time_count, hook_time_cursor;
+static uint64_t hook_calls;
+static void fault(uint32_t reason, uint32_t address, uint32_t value, uint32_t limit) {
+    if (current_fault.reason) return;
+    current_fault.stage = capture_stage; current_fault.rule = capture_rule;
+    current_fault.source = capture_rule < subscription.rule_count ? subscription.rules[capture_rule].source : 0;
+    current_fault.address = address; current_fault.value = value; current_fault.limit = limit; current_fault.reason = reason;
+}
+static int capture_read(uint32_t address, void *out, uint32_t length) {
+    if (capture_stage == 1 ? nh_read_cache_copy(&read_cache, capture_bytes, address, out, length, nh_safe_read) :
+        nh_safe_read(address, out, length)) return 1;
+    fault(3, address, length, 0); return 0;
+}
 
 static uint32_t get_u32(const uint8_t *p) {
     uint32_t n; memcpy(&n, p, sizeof(n)); return n;
@@ -87,6 +111,7 @@ static int init_mirror(void) {
         InterlockedExchange(&initialized, -1);
         return 0;
     }
+    reset_pending = 1;
     InterlockedExchange(&initialized, 2);
     return 1;
 }
@@ -229,7 +254,7 @@ static int add_page(uint32_t address, uint32_t *flags) {
         if (page_hash[slot] == address) return 1;
         slot = (slot + 1) & (NH_MIRROR_HASH_SIZE - 1);
     }
-    if (capture_count == subscription.max_pages) { *flags |= NH_MIRROR_TRUNCATED; return 0; }
+    if (capture_count == subscription.max_pages) { fault(2, address, capture_count, subscription.max_pages); *flags |= NH_MIRROR_TRUNCATED; return 0; }
     page_hash[slot] = address;
     capture_pages[capture_count++].address = address;
     return 1;
@@ -238,9 +263,9 @@ static int add_range(uint32_t address, uint32_t length, uint32_t *flags, LARGE_I
     uint64_t end = (uint64_t)address + length;
     uint32_t page = address & ~(NH_PAGE_SIZE - 1);
     if (!length) return 1;
-    if (end > UINT64_C(0x100000000)) { *flags |= NH_MIRROR_INVALID; return 0; }
+    if (end > UINT64_C(0x100000000)) { fault(5, address, length, 0); *flags |= NH_MIRROR_INVALID; return 0; }
     do {
-        if (expired(start, subscription.budget_us)) { *flags |= NH_MIRROR_TRUNCATED; return 0; }
+        if (expired(start, subscription.budget_us)) { fault(1, address, length, subscription.budget_us); *flags |= NH_MIRROR_TRUNCATED; return 0; }
         if (!add_page(page, flags)) return 0;
         if ((uint64_t)page + NH_PAGE_SIZE >= end) break;
         page += NH_PAGE_SIZE;
@@ -257,79 +282,83 @@ static void follow_member_vector(uint32_t member, const struct nh_rule *rule, in
     uint32_t descriptor_bytes = capacity_span ? 12 : 20;
     add_range(member, descriptor_bytes, flags, start);
     if (*flags) return;
-    if (!nh_safe_read(member, descriptor, descriptor_bytes)) { *flags |= NH_MIRROR_INVALID; return; }
+    if (!capture_read(member, descriptor, descriptor_bytes)) { *flags |= NH_MIRROR_INVALID; return; }
     uint32_t items = get_u32(descriptor + 4), count = get_u32(descriptor + (capacity_span ? 8 : 16));
-    if (count > rule->max_count) { *flags |= NH_MIRROR_TRUNCATED; return; }
+    if (count > rule->max_count) { fault(4, member, count, rule->max_count); *flags |= NH_MIRROR_TRUNCATED; return; }
     if (!count) return;
-    if (!items) { *flags |= NH_MIRROR_INVALID; return; }
+    if (!items) { fault(6, member, count, 0); *flags |= NH_MIRROR_INVALID; return; }
     uint64_t span = (uint64_t)count * (capacity_span ? rule->bytes : 4);
-    if (span > UINT32_MAX || (uint64_t)items + span > UINT64_C(0x100000000)) { *flags |= NH_MIRROR_INVALID; return; }
+    if (span > UINT32_MAX || (uint64_t)items + span > UINT64_C(0x100000000)) { fault(5, items, count, rule->bytes); *flags |= NH_MIRROR_INVALID; return; }
     add_range(items, (uint32_t)span, flags, start);
     if (*flags || capacity_span) return;
-    if (!nh_safe_read(items, rule_items, (uint32_t)span)) { *flags |= NH_MIRROR_INVALID; return; }
+    if (!capture_read(items, rule_items, (uint32_t)span)) { *flags |= NH_MIRROR_INVALID; return; }
     for (uint32_t k = 0; k < count && !*flags; ++k) {
-        if (expired(start, subscription.budget_us)) { *flags |= NH_MIRROR_TRUNCATED; break; }
+        if (expired(start, subscription.budget_us)) { fault(1, 0, capture_count, subscription.budget_us); *flags |= NH_MIRROR_TRUNCATED; break; }
         if (rule_items[k]) add_range(rule_items[k], rule->bytes, flags, start);
     }
 }
 static uint32_t resolve_union(LARGE_INTEGER start) {
     uint32_t i, flags = fixed_seed.flags;
+    capture_stage = 1; capture_rule = UINT32_MAX;
+    nh_read_cache_clear(&read_cache);
+    if (flags) fault(7, 0, fixed_seed.count, subscription.max_pages);
     capture_count = fixed_seed.count;
     memcpy(page_hash, fixed_seed.hash, sizeof(page_hash));
     for (i = 0; i < capture_count; ++i) capture_pages[i].address = fixed_seed.pages[i];
     for (i = 0; i < subscription.rule_count && !flags; ++i) {
         const struct nh_rule *rule = &subscription.rules[i];
+        capture_rule = i;
         uint32_t pointer, count, j;
-        if (expired(start, subscription.budget_us)) { flags |= NH_MIRROR_TRUNCATED; break; }
+        if (expired(start, subscription.budget_us)) { fault(1, 0, capture_count, subscription.budget_us); flags |= NH_MIRROR_TRUNCATED; break; }
         add_range(rule->source, rule->kind == 1 ? 4 : 20, &flags, start);
         if (flags) break;
         if (rule->kind == 1) {
-            if (!nh_safe_read(rule->source, &pointer, 4)) { flags |= NH_MIRROR_INVALID; break; }
+            if (!capture_read(rule->source, &pointer, 4)) { flags |= NH_MIRROR_INVALID; break; }
             if (pointer) add_range(pointer, rule->bytes, &flags, start);
             continue;
         }
         { uint8_t descriptor[20];
-          if (!nh_safe_read(rule->source, descriptor, sizeof(descriptor))) { flags |= NH_MIRROR_INVALID; break; }
+          if (!capture_read(rule->source, descriptor, sizeof(descriptor))) { flags |= NH_MIRROR_INVALID; break; }
           pointer = get_u32(descriptor + 4); count = get_u32(descriptor + 16); }
         /* Negative counts become large unsigned values and fail the same bound. */
-        if (count > rule->max_count) { flags |= NH_MIRROR_TRUNCATED; break; }
+        if (count > rule->max_count) { fault(4, rule->source, count, rule->max_count); flags |= NH_MIRROR_TRUNCATED; break; }
         if (!count) continue;
-        if (!pointer) { flags |= NH_MIRROR_INVALID; break; }
+        if (!pointer) { fault(6, rule->source, count, 0); flags |= NH_MIRROR_INVALID; break; }
         if (rule->kind == 3) {
             uint64_t span = (uint64_t)(count - 1) * rule->stride + rule->bytes;
-            if (span > UINT32_MAX) flags |= NH_MIRROR_INVALID;
+            if (span > UINT32_MAX) { fault(5, pointer, count, rule->stride); flags |= NH_MIRROR_INVALID; }
             else add_range(pointer, (uint32_t)span, &flags, start);
         } else {
             uint64_t span = (uint64_t)count * 4;
-            if (span > UINT32_MAX || (uint64_t)pointer + span > UINT64_C(0x100000000)) { flags |= NH_MIRROR_INVALID; break; }
+            if (span > UINT32_MAX || (uint64_t)pointer + span > UINT64_C(0x100000000)) { fault(5, pointer, count, 4); flags |= NH_MIRROR_INVALID; break; }
             add_range(pointer, (uint32_t)span, &flags, start);
             uint32_t *parents = rule->kind >= 4 ? rule_parent_items : rule_items;
-            if (!flags && !nh_safe_read(pointer, parents, (uint32_t)span)) flags |= NH_MIRROR_INVALID;
+            if (!flags && !capture_read(pointer, parents, (uint32_t)span)) flags |= NH_MIRROR_INVALID;
             for (j = 0; j < count && !flags; ++j) {
                 uint32_t item = parents[j];
-                if (expired(start, subscription.budget_us)) { flags |= NH_MIRROR_TRUNCATED; break; }
+                if (expired(start, subscription.budget_us)) { fault(1, 0, capture_count, subscription.budget_us); flags |= NH_MIRROR_TRUNCATED; break; }
                 if (!item) continue;
                 if (rule->kind == 2) { add_range(item, rule->bytes, &flags, start); continue; }
                 /* The caller injects a member offset; no game layout belongs
                  * here. Resolve both levels at this same logic boundary. */
                 uint64_t member = (uint64_t)item + (rule->kind >= 7 ? rule->stride & 0xffffu : rule->stride);
                 uint32_t member_bytes = rule->kind == 6 ? 12 : rule->kind == 4 ? 20 : 4;
-                if (member + member_bytes > UINT64_C(0x100000000)) { flags |= NH_MIRROR_INVALID; break; }
+                if (member + member_bytes > UINT64_C(0x100000000)) { fault(5, item, rule->stride, member_bytes); flags |= NH_MIRROR_INVALID; break; }
                 add_range((uint32_t)member, member_bytes, &flags, start);
                 if (flags) break;
                 if (rule->kind >= 7) {
                     uint32_t target;
-                    if (!nh_safe_read((uint32_t)member, &target, 4)) { flags |= NH_MIRROR_INVALID; break; }
+                    if (!capture_read((uint32_t)member, &target, 4)) { flags |= NH_MIRROR_INVALID; break; }
                     if (!target) continue;
                     member = (uint64_t)target + (rule->stride >> 16);
                     member_bytes = rule->kind == 7 ? 20 : 4;
-                    if (member + member_bytes > UINT64_C(0x100000000)) { flags |= NH_MIRROR_INVALID; break; }
+                    if (member + member_bytes > UINT64_C(0x100000000)) { fault(5, item, rule->stride, member_bytes); flags |= NH_MIRROR_INVALID; break; }
                     add_range((uint32_t)member, member_bytes, &flags, start);
                     if (flags) break;
                 }
                 if (rule->kind == 5 || rule->kind == 8) {
                     uint32_t child;
-                    if (!nh_safe_read((uint32_t)member, &child, 4)) { flags |= NH_MIRROR_INVALID; break; }
+                    if (!capture_read((uint32_t)member, &child, 4)) { flags |= NH_MIRROR_INVALID; break; }
                     if (child) add_range(child, rule->bytes, &flags, start);
                 } else follow_member_vector((uint32_t)member, rule, rule->kind == 6, &flags, start);
             }
@@ -338,8 +367,13 @@ static uint32_t resolve_union(LARGE_INTEGER start) {
     return flags;
 }
 static void publish_incomplete(uint32_t frame, uint32_t flags, LARGE_INTEGER start) {
-    if (flags & NH_MIRROR_TRUNCATED) InterlockedIncrement(&truncated_updates);
-    if (flags & NH_MIRROR_INVALID) InterlockedIncrement(&invalid_updates);
+    if (current_fault.reason) last_fault = current_fault;
+    /* One capture failure may need a later fresh budget to flush. Count the
+     * cause once; repeatedly flushing the same pending flags is not a failure. */
+    if (!pending_flags) {
+        if (flags & NH_MIRROR_TRUNCATED) InterlockedIncrement(&truncated_updates);
+        if (flags & NH_MIRROR_INVALID) InterlockedIncrement(&invalid_updates);
+    }
     pending_flags |= flags;
     if (in_flight || !packet || expired(start, subscription.budget_us)) return;
     put_u32(packet, frame); put_u32(packet + 4, pending_flags);
@@ -352,7 +386,8 @@ static void publish_incomplete(uint32_t frame, uint32_t flags, LARGE_INTEGER sta
 }
 void nh_logic_tick(void) {
     LARGE_INTEGER start, finish;
-    uint32_t frame, flags, i, dirty_count = 0, sample_count = 0, length = 16;
+    uint32_t frame, flags, i, dirty_count = 0, sample_count = 0, length = 16, removed_count;
+    int membership_changed;
     uint64_t next_generation;
     QueryPerformanceCounter(&start);
     if (!game_thread_id) {
@@ -380,82 +415,109 @@ void nh_logic_tick(void) {
         publish_incomplete(frame, pending_flags, start); goto done;
     }
     if (applied_revision != subscription_revision && !in_flight) {
-        shadow_count = 0; applied_revision = subscription_revision; reset_pending = 1;
+        /* Opted-in clients identify the exact applied recipe by revision.
+         * Legacy clients retain their original RESET subscription handshake. */
+        if (!subscription.page_removals) { shadow_count = 0; reset_pending = 1; }
+        applied_revision = subscription_revision;
     }
     /* Finish acknowledging the previous subscription before applying a replacement. */
     if (applied_revision != subscription_revision) goto done;
+    memset(&current_fault, 0, sizeof(current_fault));
     flags = resolve_union(start);
     if (flags) { publish_incomplete(frame, flags, start); goto done; }
+    capture_stage = 2; capture_rule = UINT32_MAX;
     qsort(capture_pages, capture_count, sizeof(*capture_pages), compare_pages);
     next_generation = generation + 1;
-    if (capture_count != shadow_count) reset_pending = 1;
-    else for (i = 0; i < capture_count; ++i)
-        if (capture_pages[i].address != shadow_pages[i].address) { reset_pending = 1; break; }
+    removed_count = nh_merge_membership(capture_pages, capture_count, shadow_pages, shadow_count,
+        old_indices, removed_pages, &membership_changed);
+    if (membership_changed && !subscription.page_removals) reset_pending = 1;
     for (i = 0; i < capture_count;) {
         uint32_t run = 1, j;
-        if (expired(start, subscription.budget_us)) { flags |= NH_MIRROR_TRUNCATED; break; }
+        if (expired(start, subscription.budget_us)) { fault(1, 0, capture_count, subscription.budget_us); flags |= NH_MIRROR_TRUNCATED; break; }
         /* Read contiguous runs with one validated kernel copy, capped at 64 KiB
          * so both syscall count and unchecked work between budget probes stay bounded. */
         while (run < 16 && i + run < capture_count &&
             (uint64_t)capture_pages[i + run].address == (uint64_t)capture_pages[i].address + run * NH_PAGE_SIZE) ++run;
-        if (!nh_safe_read(capture_pages[i].address, capture_bytes + i * NH_PAGE_SIZE, run * NH_PAGE_SIZE)) {
+        if (!capture_read(capture_pages[i].address, capture_bytes + i * NH_PAGE_SIZE, run * NH_PAGE_SIZE)) {
             flags |= NH_MIRROR_INVALID; break;
         }
         for (j = i; j < i + run; ++j) {
-            /* Sorted membership was compared above. An unchanged union has
-             * identical indices; a reset needs no old-page lookup at all. */
-            if (reset_pending || memcmp(capture_bytes + j * NH_PAGE_SIZE, shadow_bytes + j * NH_PAGE_SIZE, NH_PAGE_SIZE))
+            uint32_t old = old_indices[j];
+            if (reset_pending || old == UINT32_MAX ||
+                memcmp(capture_bytes + j * NH_PAGE_SIZE, shadow_bytes + old * NH_PAGE_SIZE, NH_PAGE_SIZE))
                 capture_pages[j].dirty = next_generation;
-            else capture_pages[j].dirty = shadow_pages[j].dirty;
+            else capture_pages[j].dirty = shadow_pages[old].dirty;
         }
         i += run;
     }
     if (flags) { publish_incomplete(frame, flags, start); goto done; }
-    /* Swap ownership only after a complete same-thread snapshot. No partially
-     * copied image ever becomes the comparison baseline or a reader publication. */
-    { uint8_t *bytes = shadow_bytes; struct nh_page *pages = shadow_pages;
-      shadow_bytes = capture_bytes; capture_bytes = bytes;
-      shadow_pages = capture_pages; capture_pages = pages; }
-    shadow_count = capture_count; generation = next_generation;
     if (in_flight) { InterlockedIncrement(&dropped_updates); goto done; }
-    for (i = 0; i < shadow_count; ++i) {
-        if (!shadow_pages[i].dirty) continue;
-        if (expired(start, subscription.budget_us)) { flags |= NH_MIRROR_TRUNCATED; break; }
-        put_u32(packet + length, shadow_pages[i].address); length += 4;
-        memcpy(packet + length, shadow_bytes + i * NH_PAGE_SIZE, NH_PAGE_SIZE); length += NH_PAGE_SIZE;
+    capture_stage = 3;
+    for (i = 0; i < capture_count; ++i) {
+        if (!capture_pages[i].dirty) continue;
+        if (expired(start, subscription.budget_us)) { fault(1, 0, capture_count, subscription.budget_us); flags |= NH_MIRROR_TRUNCATED; break; }
+        put_u32(packet + length, capture_pages[i].address); length += 4;
+        memcpy(packet + length, capture_bytes + i * NH_PAGE_SIZE, NH_PAGE_SIZE); length += NH_PAGE_SIZE;
         ++dirty_count;
     }
     if (flags) { publish_incomplete(frame, flags, start); goto done; }
-    for (i = 0; i < subscription.sample_count && (shadow_count || i < fixed_sample_count); ++i) {
+    capture_stage = 4;
+    for (i = 0; i < subscription.sample_count && (capture_count || i < fixed_sample_count); ++i) {
         uint32_t address, bytes;
         if (i < fixed_sample_count) {
             address = fixed_samples[i].address; bytes = fixed_samples[i].length;
         } else {
-            uint32_t page = random_u32() % shadow_count;
+            uint32_t page = random_u32() % capture_count;
             uint32_t offset;
             bytes = 8 + random_u32() % 57;
             offset = random_u32() % (NH_PAGE_SIZE - bytes + 1);
-            address = shadow_pages[page].address + offset;
+            address = capture_pages[page].address + offset;
         }
-        if (expired(start, subscription.budget_us)) { flags |= NH_MIRROR_TRUNCATED; break; }
+        if (expired(start, subscription.budget_us)) { fault(1, 0, capture_count, subscription.budget_us); flags |= NH_MIRROR_TRUNCATED; break; }
         put_u32(packet + length, address); put_u32(packet + length + 4, bytes);
         /* This is an independent direct read, not a copy of the staged bytes. */
-        if (!nh_safe_read(address, packet + length + 8, bytes)) { flags |= NH_MIRROR_INVALID; break; }
+        if (!capture_read(address, packet + length + 8, bytes)) { flags |= NH_MIRROR_INVALID; break; }
         length += 8 + bytes; ++sample_count;
     }
     if (flags || expired(start, subscription.budget_us)) {
+        if (!flags) fault(1, 0, capture_count, subscription.budget_us);
         publish_incomplete(frame, flags ? flags : NH_MIRROR_TRUNCATED, start); goto done;
     }
-    put_u32(packet, frame); put_u32(packet + 4, reset_pending ? NH_MIRROR_RESET : 0);
+    if (subscription.page_removals && !reset_pending && removed_count) {
+        put_u32(packet + length, removed_count); length += 4;
+        for (i = 0; i < removed_count; ++i) {
+            put_u32(packet + length, removed_pages[i]); length += 4;
+        }
+    }
+    if (subscription.page_removals) {
+        put_u32(packet + length, applied_revision); length += 4;
+    }
+    if (expired(start, subscription.budget_us)) {
+        fault(1, 0, capture_count, subscription.budget_us);
+        publish_incomplete(frame, NH_MIRROR_TRUNCATED, start); goto done;
+    }
+    put_u32(packet, frame);
+    put_u32(packet + 4, (reset_pending ? NH_MIRROR_RESET :
+        subscription.page_removals && removed_count ? NH_MIRROR_REMOVED : 0) |
+        (subscription.page_removals ? NH_MIRROR_REVISION : 0));
     put_u32(packet + 8, dirty_count); put_u32(packet + 12, sample_count);
     if (nh_publish_move(NH_MIRROR, &packet, length)) {
+        /* Only a completely serialized, accepted publication replaces the
+         * authoritative image. Failed sends retain removals and dirty changes. */
+        { uint8_t *bytes = shadow_bytes; struct nh_page *pages = shadow_pages;
+          shadow_bytes = capture_bytes; capture_bytes = bytes;
+          shadow_pages = capture_pages; capture_pages = pages; }
+        shadow_count = capture_count; generation = next_generation;
         in_flight = 1; published_frame = frame; published_generation = generation;
         reset_pending = 0; mirror_bytes += length;
     } else InterlockedIncrement(&dropped_updates);
 done:
     QueryPerformanceCounter(&finish);
     { uint64_t us = (uint64_t)(finish.QuadPart - start.QuadPart) * 1000000u / (uint64_t)frequency.QuadPart;
-      hook_us_total += us; if (us > hook_us_max) hook_us_max = us;
+      hook_us_total += us; ++hook_calls;
+      hook_times[hook_time_cursor++ % 16384] = (uint32_t)us;
+      if (hook_time_count < 16384) ++hook_time_count;
+      if (us > hook_us_max) hook_us_max = us;
       if (subscription.budget_us && us > subscription.budget_us) ++budget_overruns; }
     LeaveCriticalSection(&state_lock);
 }
@@ -603,12 +665,13 @@ void nh_dispatch_mirror(uint16_t type, uint32_t id, const uint8_t *payload, uint
     }
     if (type == NH_SUBSCRIBE) {
         struct nh_subscription next;
-        uint32_t offset;
+        uint32_t offset, revision;
         if (length < 20) { fail(id, "short SUBSCRIBE header"); return; }
         memset(&next, 0, sizeof(next));
         next.range_count = get_u32(payload); next.rule_count = get_u32(payload + 4);
         next.max_pages = get_u32(payload + 8); next.budget_us = get_u32(payload + 12);
-        next.sample_count = get_u32(payload + 16);
+        next.page_removals = get_u32(payload + 16) >> 31;
+        next.sample_count = get_u32(payload + 16) & 0x7fffffffu;
         if (next.range_count > NH_MAX_RANGES || next.rule_count > NH_MAX_RULES ||
             !next.max_pages || next.max_pages > NH_MAX_PAGES || next.sample_count > NH_MAX_SAMPLES ||
             next.budget_us < NH_MIRROR_MIN_BUDGET_US || next.budget_us > NH_MIRROR_MAX_BUDGET_US ||
@@ -636,9 +699,12 @@ void nh_dispatch_mirror(uint16_t type, uint32_t id, const uint8_t *payload, uint
         for (i = 0; i < next.range_count && !next_seed.flags; ++i)
             nh_page_seed_range(&next_seed, next.ranges[i].address, next.ranges[i].length, next.max_pages);
         EnterCriticalSection(&state_lock);
-        subscription = next; fixed_seed = next_seed; ++subscription_revision;
+        subscription = next; fixed_seed = next_seed; revision = ++subscription_revision;
         LeaveCriticalSection(&state_lock);
-        nh_send(type, id, NULL, 0); return;
+        if (next.page_removals) {
+            uint8_t reply[4]; put_u32(reply, revision); nh_send(type, id, reply, sizeof(reply));
+        } else nh_send(type, id, NULL, 0);
+        return;
     }
     fail(id, "unsupported mirror operation");
 }
@@ -690,22 +756,37 @@ void nh_mirror_disconnect(void) {
     ++subscription_revision; shadow_count = 0; in_flight = 0; reset_pending = 1; pending_flags = 0; fixed_sample_count = 0;
     LeaveCriticalSection(&state_lock);
 }
+static int compare_times(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x > y ? 1 : x < y ? -1 : 0;
+}
 void nh_mirror_diagnostics(char *out, uint32_t capacity) {
-    char hook[256];
+    char hook[256], detail[384];
+    uint32_t times[16384], time_count, p99;
     if (!capacity) return;
     if (initialized != 2) {
         snprintf(out, capacity, "\"logicFrames\":0,\"mirrorBytes\":0,\"hookUs\":0,\"droppedUpdates\":0,\"hookInstalled\":false");
         return;
     }
     EnterCriticalSection(&state_lock);
+    time_count = hook_time_count;
+    memcpy(times, hook_times, time_count * sizeof(*times));
+    LeaveCriticalSection(&state_lock);
+    qsort(times, time_count, sizeof(*times), compare_times);
+    p99 = time_count ? times[(time_count * 99 + 99) / 100 - 1] : 0;
+    EnterCriticalSection(&state_lock);
+    snprintf(detail, sizeof(detail), ",\"hookCalls\":%llu,\"hookP99Us\":%lu,\"hookPercentileSamples\":%lu,\"lastMirrorFault\":{\"reason\":%lu,\"stage\":%lu,\"rule\":%lu,\"source\":%lu,\"address\":%lu,\"value\":%lu,\"limit\":%lu}",
+        (unsigned long long)hook_calls, (unsigned long)p99, (unsigned long)time_count,
+        (unsigned long)last_fault.reason, (unsigned long)last_fault.stage, (unsigned long)last_fault.rule,
+        (unsigned long)last_fault.source, (unsigned long)last_fault.address, (unsigned long)last_fault.value, (unsigned long)last_fault.limit);
     if (installed) snprintf(hook, sizeof(hook), "{\"site\":%lu,\"original\":[137,21,132,237,168,0],\"patched\":[%u,%u,%u,%u,%u,%u]}",
         (unsigned long)NH_HOOK_ADDRESS, detour[0],detour[1],detour[2],detour[3],detour[4],detour[5]);
     else strcpy(hook, "null");
-    snprintf(out, capacity, "\"logicFrames\":%lu,\"mirrorBytes\":%llu,\"hookUs\":%llu,\"hookMaxUs\":%llu,\"budgetOverruns\":%llu,\"droppedUpdates\":%lu,\"truncatedUpdates\":%lu,\"invalidUpdates\":%lu,\"hookInstalled\":%s,\"mirrorPages\":%lu,\"inFlight\":%s,\"gameThreadId\":%lu,\"frameHook\":%s,\"teardownFailures\":%lu,\"ownedExternalPatches\":%lu",
+    snprintf(out, capacity, "\"logicFrames\":%lu,\"mirrorBytes\":%llu,\"hookUs\":%llu,\"hookMaxUs\":%llu,\"budgetOverruns\":%llu,\"droppedUpdates\":%lu,\"truncatedUpdates\":%lu,\"invalidUpdates\":%lu,\"hookInstalled\":%s,\"mirrorPages\":%lu,\"inFlight\":%s,\"gameThreadId\":%lu,\"frameHook\":%s,\"teardownFailures\":%lu,\"ownedExternalPatches\":%lu%s",
         (unsigned long)logic_frames, (unsigned long long)mirror_bytes, (unsigned long long)hook_us_total,
         (unsigned long long)hook_us_max, (unsigned long long)budget_overruns, (unsigned long)dropped_updates,
         (unsigned long)truncated_updates, (unsigned long)invalid_updates, installed ? "true" : "false",
         (unsigned long)shadow_count, in_flight ? "true" : "false", (unsigned long)game_thread_id, hook,
-        (unsigned long)teardown_failures, (unsigned long)owned_count);
+        (unsigned long)teardown_failures, (unsigned long)owned_count, detail);
     LeaveCriticalSection(&state_lock);
 }

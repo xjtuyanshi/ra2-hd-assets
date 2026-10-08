@@ -54,6 +54,7 @@ interface MirrorWaiter {
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
   afterReset?: number;
+  atRevision?: number;
 }
 
 function mergeRanges(ranges: readonly NativeHostRange[]): NativeRange[] {
@@ -98,6 +99,9 @@ function metadataOf(value: unknown, hello: NativeHello): NativeHostMetadata {
     throw new Error('Native agent did not report a verified frame hook');
   return { gameThreadId: thread, verifiedNativeHook: hook };
 }
+function revisionReached(actual: number | null, expected: number): boolean {
+  return actual !== null && (actual - expected) >>> 0 < 0x80000000;
+}
 
 /** Reusable host mechanics. Executable addresses, signatures, and follow policies are injected. */
 export class NativeCore {
@@ -116,6 +120,7 @@ export class NativeCore {
   private readonly workingSet = new NativeReaderWorkingSet();
   private additionalRanges: NativeRange[] = [];
   private resetSerial = 0;
+  private completeRevision: number | null = null;
   private hookStarted = false;
   private metadata: NativeHostMetadata = { gameThreadId: 0 };
   private policyPrepared = false;
@@ -169,13 +174,14 @@ export class NativeCore {
     }
     this.waiters.clear();
   }
-  private nextMirror(afterReset?: number): Promise<void> {
+  private nextMirror(afterReset?: number, atRevision?: number): Promise<void> {
     if (this.closed) return Promise.reject(new Error('Native host is closed'));
     return new Promise((resolve, reject) => {
       const waiter: MirrorWaiter = {
         resolve,
         reject,
         afterReset,
+        atRevision,
         timer: setTimeout(() => {
           this.waiters.delete(waiter);
           reject(new NativeMirrorUnavailable(this.lastMirrorFlags));
@@ -186,6 +192,13 @@ export class NativeCore {
   }
   private mirrorArrived(update: NativeMirrorUpdate): void {
     if (this.closed) return;
+    if (
+      !(update.flags & 5) &&
+      this.hello?.limits.pageRemovals &&
+      this.hello.limits.subscribeRevision &&
+      update.subscriptionRevision === undefined
+    )
+      throw new Error('Native mirror omitted negotiated subscription revision');
     this.lastMirrorFlags = update.flags;
     const complete = this.memory.apply(update);
     this.connection.notify(NativeMessageType.Ack, encodeU32(update.frame));
@@ -194,11 +207,13 @@ export class NativeCore {
       return;
     }
     if (update.flags & 2) this.resetSerial++;
+    this.completeRevision = update.subscriptionRevision ?? null;
     if (this.previousLogicFrame !== null && update.frame >= this.previousLogicFrame)
       this.callbacks.onLogicFrame?.(update.frame - this.previousLogicFrame);
     this.previousLogicFrame = update.frame;
     for (const waiter of this.waiters) {
       if (waiter.afterReset !== undefined && this.resetSerial <= waiter.afterReset) continue;
+      if (waiter.atRevision !== undefined && !revisionReached(this.completeRevision, waiter.atRevision)) continue;
       clearTimeout(waiter.timer);
       waiter.resolve();
       this.waiters.delete(waiter);
@@ -291,19 +306,30 @@ export class NativeCore {
       const next = mergeRanges([...this.policy.ranges, ...this.workingSet.ranges, ...this.additionalRanges]);
       if (sameRanges(next, this.subscribed)) return;
       const beforeReset = this.resetSerial;
-      await this.connection.request(
+      const revisionSupported = this.hello.limits.pageRemovals === true && this.hello.limits.subscribeRevision === true;
+      const response = await this.connection.request(
         NativeMessageType.Subscribe,
         encodeSubscription({
           ranges: next,
           rules: this.policy.rules,
           maxPages: this.hello.limits.pages,
-          budgetUs: 4000,
+          budgetUs: Math.min(12000, this.hello.limits.maxBudgetUs ?? 4000),
           sampleCount: 0,
+          pageRemovals: revisionSupported,
         }),
       );
+      if (revisionSupported && response.byteLength !== 4)
+        throw new Error('Native subscription omitted negotiated revision');
+      const revision = revisionSupported
+        ? new DataView(response.buffer, response.byteOffset, response.byteLength).getUint32(0, true)
+        : undefined;
       this.subscribed = next;
-      if (this.hookStarted && (this.resetSerial <= beforeReset || !this.memory.complete))
-        await this.nextMirror(beforeReset);
+      if (this.hookStarted) {
+        if (revision !== undefined) {
+          if (!this.memory.complete || !revisionReached(this.completeRevision, revision))
+            await this.nextMirror(undefined, revision);
+        } else if (this.resetSerial <= beforeReset || !this.memory.complete) await this.nextMirror(beforeReset);
+      }
     };
     const pending = this.subscriptionTail.then(operation);
     this.subscriptionTail = pending.catch(() => undefined);

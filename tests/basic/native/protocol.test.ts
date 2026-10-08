@@ -107,7 +107,7 @@ describe('native binary protocol', () => {
     expect(() => encodeSubscription({ ranges: [], rules: [], maxPages: 4097, budgetUs: 500, sampleCount: 0 })).toThrow(
       'bounds',
     );
-    expect(() => encodeSubscription({ ranges: [], rules: [], maxPages: 1, budgetUs: 5000, sampleCount: 0 })).toThrow(
+    expect(() => encodeSubscription({ ranges: [], rules: [], maxPages: 1, budgetUs: 20001, sampleCount: 0 })).toThrow(
       'bounds',
     );
   });
@@ -160,6 +160,75 @@ describe('native binary protocol', () => {
       'duplicate',
     );
     expect(() => decodeMirror(concat(encodeU32(1, 0, 1, 0), encodeU32(0x9001), page))).toThrow('page');
+  });
+  it('opts into page removals while preserving the legacy subscription and hello contract', () => {
+    const options = { ranges: [], rules: [], maxPages: 4096, budgetUs: 4000, sampleCount: 64 };
+    expect([...new Uint32Array(encodeSubscription(options).buffer)]).toEqual([0, 0, 4096, 4000, 64]);
+    expect([...new Uint32Array(encodeSubscription({ ...options, pageRemovals: true }).buffer)]).toEqual([
+      0, 0, 4096, 4000, 0x80000040,
+    ]);
+    expect(
+      decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, pageRemovals: true } })).limits
+        .pageRemovals,
+    ).toBe(true);
+    expect(() =>
+      decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, pageRemovals: 1 } })),
+    ).toThrow('capability');
+  });
+  it('decodes sorted removals after samples and rejects malformed removal tails', () => {
+    const page = new Uint8Array(NATIVE_PAGE_SIZE).fill(0x42);
+    const payload = concat(
+      encodeU32(101, 8, 1, 1),
+      encodeU32(0x9000),
+      page,
+      encodeU32(0x9001, 1),
+      new Uint8Array([0x42]),
+      encodeU32(2, 0x1000, 0x8000),
+    );
+    expect(decodeMirror(payload)).toMatchObject({
+      frame: 101,
+      removedPages: [0x1000, 0x8000],
+      samples: [{ address: 0x9001, bytes: new Uint8Array([0x42]) }],
+    });
+    expect(decodeMirror(encodeU32(102, 8, 0, 0, 0)).removedPages).toEqual([]);
+    expect(decodeMirror(encodeU32(102, 0, 0, 0))).not.toHaveProperty('removedPages');
+    for (const tail of [
+      encodeU32(4097),
+      encodeU32(1),
+      encodeU32(2, 0x1000, 0x1000),
+      encodeU32(2, 0x8000, 0x1000),
+      encodeU32(1, 0x1001),
+    ])
+      expect(() => decodeMirror(concat(encodeU32(102, 8, 0, 0), tail))).toThrow('removal');
+    expect(() => decodeMirror(encodeU32(102, 8, 0, 0))).toThrow('removal');
+    expect(() => decodeMirror(concat(encodeU32(102, 8, 1, 0), encodeU32(0x9000), page, encodeU32(1, 0x9000)))).toThrow(
+      'removal',
+    );
+    expect(() => decodeMirror(encodeU32(102, 10, 0, 0, 0))).toThrow('bounds');
+    expect(() => decodeMirror(encodeU32(102, 0, 0, 0, 0))).toThrow('Trailing');
+  });
+  it('bounds advertised capture budgets and accepts the negotiated full-map bootstrap budget', () => {
+    const limits = { ...syntheticHello.limits, maxBudgetUs: 20000 };
+    expect(decodeHello(json({ ...syntheticHello, limits })).limits.maxBudgetUs).toBe(20000);
+    for (const maxBudgetUs of [99, 20001, 1.5, '20000'])
+      expect(() => decodeHello(json({ ...syntheticHello, limits: { ...limits, maxBudgetUs } }))).toThrow('budget');
+    expect([
+      ...new Uint32Array(
+        encodeSubscription({ ranges: [], rules: [], maxPages: 4096, budgetUs: 12000, sampleCount: 0 }).buffer,
+      ),
+    ]).toEqual([0, 0, 4096, 12000, 0]);
+  });
+  it('decodes the negotiated revision after both samples and removals, including initial reset', () => {
+    expect(decodeMirror(encodeU32(100, 18, 0, 0, 7))).toMatchObject({ flags: 18, subscriptionRevision: 7 });
+    expect(
+      decodeMirror(concat(encodeU32(101, 24, 0, 1, 0x2000, 1), new Uint8Array([33]), encodeU32(1, 0x1000, 8))),
+    ).toMatchObject({ removedPages: [0x1000], subscriptionRevision: 8 });
+    expect(() => decodeMirror(encodeU32(101, 16, 0, 0))).toThrow('revision');
+    expect(() => decodeMirror(encodeU32(101, 17, 0, 0, 8))).toThrow('bounds');
+    expect(() => decodeMirror(encodeU32(101, 20, 0, 0, 8))).toThrow('bounds');
+    expect(() =>
+      decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, subscribeRevision: 1 } })),
+    ).toThrow('revision');
   });
   it('encodes compare-and-write batches and enforces equal original byte signatures', () => {
     const bytes = encodeBatch([{ address: 0x4000, expected: new Uint8Array([1, 2]), bytes: new Uint8Array([3, 4]) }]);

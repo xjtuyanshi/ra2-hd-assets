@@ -14,12 +14,16 @@ const { values: o } = parseArgs({
     out: { type: 'string' },
     step: { type: 'string', default: 'all' },
     control: { type: 'string' },
+    choice: { type: 'string' },
+    'row-y': { type: 'string' },
+    'restore-row-y': { type: 'string' },
+    'split-teams': { type: 'boolean', default: false },
     help: { type: 'boolean' },
   },
 });
 if (o.help) {
   console.log(
-    'node scripts/remaster/native/menu-smoke.mjs [--step all|state|main-options|main-options-close|single-player|skirmish|allied-six|start|deploy-mcv|options-open|options-close|quit-open|quit-cancel|click|combo-probe|combo-cycle|combo-popup --control id=NNN]\nRun at the main menu after the runner writes XMP26S6 / five Easy AIs. Every action uses INPUT cursor/key/postMessage only; no window handles, BM_CLICK or game-state writes are sent by the client. Step mode permits external ctl windows observations between actions. all exercises main options, starts a six-player match, opens pause/options, cancels quit and resumes. deploy-mcv separately cycles normal unit selection, deploys the selected MCV and observes a real construction yard. Combo steps change an actual selection through keyboard or popup mouse input and restore the observed original selection; use a skirmish country control rather than resolution. combo-probe records native state/pictures after ordinary mouse-down and after its guaranteed release, without selection commands. Optional allied-six selects team index 1 through ordinary input in all six existing Team controls, records the preset and leaves it applied for a crash soak; all never invokes this preset.',
+    'node scripts/remaster/native/menu-smoke.mjs [--step all|match|state|main-options|main-options-close|single-player|skirmish|allied-six|start|deploy-mcv|options-open|options-close|quit-open|quit-cancel|click|combo-probe|combo-inspect|combo-cancel|combo-cycle|combo-popup --control id=NNN --choice N --row-y Y --restore-row-y Y]\nRun at the main menu after the runner writes XMP26S6 / five Easy AIs. Every action uses INPUT cursor/key/postMessage only; no window handles, BM_CLICK or game-state writes are sent by the client. Step mode permits external ctl windows observations between actions. all exercises main options, starts a six-player match, opens pause/options, cancels quit and resumes. deploy-mcv separately cycles normal unit selection, deploys the selected MCV and observes a real construction yard. Combo steps observe genuine popups, select visible items and restore the observed original selection. Custom popup --row-y and --restore-row-y must come from inspected native PNGs; standard list geometry is not invented. combo-inspect verifies colour/start/team outside cancellation. Use skirmish controls rather than resolution. combo-probe records native state/pictures after ordinary mouse-down and after its guaranteed release, without selection commands. Optional allied-six selects team index 1 through ordinary input in all six existing Team controls; --split-teams assigns the last three to index 2 for a legitimate 3v3 benchmark. It records every actual selection and leaves the preset applied for the measurement; all never invokes this preset.',
   );
   process.exit(0);
 }
@@ -86,6 +90,32 @@ async function state(label, print = true) {
   return s;
 }
 const usable = (c) => c.visible && c.enabled && c.rect[2] > c.rect[0] && c.rect[3] > c.rect[1];
+// The game skin creates a captured child popup instead of the system ComboLBox.
+// Keep the system dropped flag truthful and observe the real owned popup separately.
+function comboPopup(s, control, requireCapture = true) {
+  if (!control) return null;
+  return (
+    s.controls.find(
+      (c) =>
+        usable(c) &&
+        ((c.class === 'ComboLBox' && control.combo?.dropped === true) ||
+          (c.class === 'ComboDropWin' &&
+            c.parentHwnd === control.parentHwnd &&
+            (!requireCapture || c.hwnd === s.gameCaptureHwnd) &&
+            c.rect[0] === control.rect[0] &&
+            c.rect[2] <= control.rect[2] &&
+            c.rect[1] >= control.rect[3] &&
+            c.rect[1] <= control.rect[3] + 4)),
+    ) ?? null
+  );
+}
+function comboOpened(s, match) {
+  const control = find(s, match);
+  return control?.combo?.dropped === true || comboPopup(s, control) !== null;
+}
+function comboClosed(s, match) {
+  return find(s, match)?.combo?.dropped === false && !comboPopup(s, find(s, match), false);
+}
 function find(s, match) {
   return s.controls.find((c) => usable(c) && (typeof match === 'number' ? c.id === match : match.test(c.text)));
 }
@@ -271,6 +301,17 @@ async function comboProbe() {
     }),
   );
 }
+async function comboCancel(match) {
+  const before = await state('combo-cancel-ready'),
+    original = find(before, match);
+  if (!comboOpened(before, match)) await click(match, 'combo-cancel-focus');
+  await waitFor('combo-cancel-open', (s) => comboOpened(s, match));
+  await mouseAt(610, 450);
+  await waitFor(
+    'combo-cancel-closed',
+    (s) => comboClosed(s, match) && find(s, match)?.combo?.selection === original.combo.selection,
+  );
+}
 async function comboCycle(mouse) {
   const match = controlSelector(),
     before = await waitFor('combo-cycle-ready', (s) => !!find(s, match)),
@@ -286,39 +327,73 @@ async function comboCycle(mouse) {
   )
     throw new Error(`Cannot observe a bounded real Combo selection: ${JSON.stringify(original)}`);
   const direction = original.combo.selection + 1 < original.combo.count ? 40 : 38,
-    desired = original.combo.selection + (direction === 40 ? 1 : -1),
-    opened = (s) => find(s, match)?.combo?.dropped === true,
-    closedOriginal = (s) =>
-      find(s, match)?.combo?.dropped === false && find(s, match)?.combo?.selection === original.combo.selection;
+    desired = o.choice === undefined ? original.combo.selection + (direction === 40 ? 1 : -1) : +o.choice,
+    opened = (s) => comboOpened(s, match),
+    closedOriginal = (s) => comboClosed(s, match) && find(s, match)?.combo?.selection === original.combo.selection;
   let changed = null,
     popup = null;
+  if (
+    !Number.isInteger(desired) ||
+    desired < 0 ||
+    desired >= original.combo.count ||
+    desired === original.combo.selection
+  )
+    throw new Error('Choose a different bounded real Combo item');
   try {
     await click(match, 'combo-focus');
     const open = await waitFor('combo-popup-open', opened);
-    popup = open.controls.find((c) => usable(c) && c.class === 'ComboLBox');
+    popup = comboPopup(open, find(open, match));
     if (mouse) {
-      if (
-        !Number.isInteger(popup?.list?.topIndex) ||
-        !Number.isInteger(popup?.list?.itemHeight) ||
-        popup.list.itemHeight <= 0 ||
-        desired < popup.list.topIndex
-      )
-        throw new Error(`Native popup item geometry unavailable: ${JSON.stringify(popup)}`);
-      const x = Math.floor((popup.rect[0] + popup.rect[2]) / 2),
-        y = Math.floor(popup.rect[1] + 1 + (desired - popup.list.topIndex + 0.5) * popup.list.itemHeight);
-      if (y >= popup.rect[3]) throw new Error('Adjacent popup choice is outside the visible list');
-      await mouseAt(x, y);
-    } else await key(direction);
+      if (popup?.class === 'ComboDropWin') {
+        const y = +o['row-y'];
+        if (!Number.isInteger(y) || y <= popup.rect[1] || y >= popup.rect[3])
+          throw new Error('Custom popup needs --row-y from its inspected native PNG; item geometry is not assumed');
+        await mouseAt(Math.floor((popup.rect[0] + popup.rect[2]) / 2), y);
+      } else {
+        if (
+          !Number.isInteger(popup?.list?.topIndex) ||
+          !Number.isInteger(popup?.list?.itemHeight) ||
+          popup.list.itemHeight <= 0 ||
+          desired < popup.list.topIndex
+        )
+          throw new Error(`Native popup item geometry unavailable: ${JSON.stringify(popup)}`);
+        const x = Math.floor((popup.rect[0] + popup.rect[2]) / 2),
+          y = Math.floor(popup.rect[1] + 1 + (desired - popup.list.topIndex + 0.5) * popup.list.itemHeight);
+        if (y >= popup.rect[3]) throw new Error('Adjacent popup choice is outside the visible list');
+        await mouseAt(x, y);
+      }
+    } else {
+      // Custom popups do not own keyboard focus. Dismiss by a captured outside
+      // click, then use the real closed Combo's ordinary keyboard selection.
+      if (popup?.class === 'ComboDropWin') {
+        await mouseAt(610, 450);
+        await waitFor('combo-popup-cancelled', (s) => comboClosed(s, match));
+      }
+      await key(direction);
+    }
     changed = await waitFor('combo-selection-changed', (s) => find(s, match)?.combo?.selection === desired);
-    if (!mouse) await key(27);
-    await waitFor('combo-popup-closed', (s) => find(s, match)?.combo?.dropped === false);
+    if (!mouse && popup?.class !== 'ComboDropWin') await key(27);
+    await waitFor('combo-popup-closed', (s) => comboClosed(s, match));
   } finally {
     const current = await state('combo-restore-observation', false);
     if (!closedOriginal(current)) {
-      if (!opened(current)) await click(match, 'combo-restore-focus');
-      await key(36);
-      for (let i = 0; i < original.combo.selection; i++) await key(40);
-      await key(13);
+      if (opened(current)) {
+        if (comboPopup(current, find(current, match))?.class === 'ComboDropWin') await mouseAt(610, 450);
+        else await key(27);
+        await waitFor('combo-restore-closed', (s) => comboClosed(s, match));
+      }
+      if (popup?.class === 'ComboDropWin') {
+        await click(match, 'combo-restore-focus');
+        const restoreOpen = await waitFor('combo-restore-popup', opened),
+          restorePopup = comboPopup(restoreOpen, find(restoreOpen, match)),
+          y = +o['restore-row-y'];
+        if (!Number.isInteger(y) || y <= restorePopup.rect[1] || y >= restorePopup.rect[3])
+          throw new Error('Custom popup restoration needs --restore-row-y from its inspected native PNG');
+        await mouseAt(Math.floor((restorePopup.rect[0] + restorePopup.rect[2]) / 2), y);
+      } else {
+        await key(36);
+        for (let i = 0; i < original.combo.selection; i++) await key(40);
+      }
       await waitFor('combo-original-restored', closedOriginal);
     }
   }
@@ -356,26 +431,30 @@ async function alliedSix() {
       !Number.isInteger(original.combo?.selection)
     )
       throw new Error(`Cannot observe a bounded real Team control: ${JSON.stringify(original)}`);
+    const desired = o['split-teams'] && id >= 1904 ? 2 : 1;
     await click(id, `team-${id}-focus`);
-    await waitFor(`team-${id}-popup`, (s) => find(s, id)?.combo?.dropped === true);
-    await key(36); // Normal Home/Down selects the requested team index.
-    await key(40);
-    await key(13);
-    await waitFor(
-      `team-${id}-applied`,
-      (s) => find(s, id)?.combo?.selection === 1 && find(s, id)?.combo?.dropped === false,
-    );
+    const open = await waitFor(`team-${id}-popup`, (s) => comboOpened(s, id));
+    if (comboPopup(open, find(open, id))?.class === 'ComboDropWin') {
+      const popup = comboPopup(open, find(open, id));
+      // The inspected pinned skirmish PNG places A/B at +34/+57 pixels.
+      await mouseAt(Math.floor((popup.rect[0] + popup.rect[2]) / 2), popup.rect[1] + (desired === 1 ? 34 : 57));
+    } else {
+      await key(36);
+      for (let i = 0; i < desired; i++) await key(40);
+      await key(13);
+    }
+    await waitFor(`team-${id}-applied`, (s) => find(s, id)?.combo?.selection === desired && comboClosed(s, id));
   }
   const after = await state('allied-six-applied');
-  if (!ids.every((id) => find(after, id)?.combo?.selection === 1))
+  if (!ids.every((id) => find(after, id)?.combo?.selection === (o['split-teams'] && id >= 1904 ? 2 : 1)))
     throw new Error('Not all six observed Team selections equal the requested preset');
   report.teamPreset = {
-    name: 'allied-six',
-    selectedIndex: 1,
+    name: o['split-teams'] ? 'three-v-three' : 'allied-six',
+    selectedIndices: ids.map((id) => (o['split-teams'] && id >= 1904 ? 2 : 1)),
     controlIds: ids,
     originalSelections: ids.map((id) => find(before, id).combo.selection),
     actualSelections: ids.map((id) => find(after, id).combo.selection),
-    appliedThrough: 'protocol cursor and keyboard input',
+    appliedThrough: 'protocol cursor and mouse/keyboard input',
     acceptanceScope: 'six-player crash soak; does not establish combat reliability',
   };
   console.log('team-preset', JSON.stringify(report.teamPreset));
@@ -440,6 +519,15 @@ const actions = {
     await waitFor('quit-cancelled', (s) => !find(s, 1737) && (!s.modal || !!find(s, 1314)));
     if (!(await state('quit-cancel-status', false)).modal) await battle();
   },
+  async 'combo-cancel'() {
+    await comboCancel(controlSelector());
+  },
+  async 'combo-inspect'() {
+    const s = await state('combo-inspect-ready', false);
+    const active = s.controls.find((c) => c.class === 'ComboDropWin' && usable(c));
+    if (active) await mouseAt(610, 450);
+    for (const id of [1698, 1699, 1901]) await comboCancel(id);
+  },
   async 'combo-cycle'() {
     await comboCycle(false);
   },
@@ -462,7 +550,9 @@ try {
     report.hello.exe.sha256 !== '7b8a068535d6af06845edf95ae829b113d00c02909330e16f197426cd7db94b6'
   )
     throw new Error('Menu smoke memory observations require the supported YR executable');
-  if (o.step === 'all') {
+  if (o.step === 'match') {
+    for (const step of ['single-player', 'skirmish', 'start']) await actions[step]();
+  } else if (o.step === 'all') {
     for (const step of [
       'main-options',
       'main-options-close',

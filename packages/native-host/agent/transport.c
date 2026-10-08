@@ -9,6 +9,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "agent.h"
+#include "mirror-internal.h"
 #include "hidden.h"
 
 #define NH_REPLY_SLOTS 16u
@@ -183,7 +184,6 @@ int nh_publish_move(uint16_t type, uint8_t **payload, uint32_t length) {
         result = 1;
     }
     LeaveCriticalSection(&nh_queue_lock);
-    if (result) SetEvent(nh_wake);
     return result;
 }
 
@@ -340,9 +340,8 @@ static int nh_send_ws(SOCKET socket, uint8_t opcode, const void *payload, uint32
 }
 
 static int nh_send_packet(SOCKET socket, const nh_packet *packet) {
-    uint8_t header[16];
-    uint8_t ws[10];
-    uint32_t total = packet->length + sizeof(header), ws_length;
+    uint8_t envelope[26], *ws = envelope, *header;
+    uint32_t total = packet->length + 16, ws_length;
     ws[0] = 0x82;
     if (total < 126) { ws[1] = (uint8_t)total; ws_length = 2; }
     else if (total <= 65535) { ws[1] = 126; ws[2] = (uint8_t)(total >> 8); ws[3] = (uint8_t)total; ws_length = 4; }
@@ -350,10 +349,11 @@ static int nh_send_packet(SOCKET socket, const nh_packet *packet) {
         ws[1] = 127; memset(ws + 2, 0, 4); ws[6] = (uint8_t)(total >> 24); ws[7] = (uint8_t)(total >> 16);
         ws[8] = (uint8_t)(total >> 8); ws[9] = (uint8_t)total; ws_length = 10;
     }
+    header = envelope + ws_length;
     nh_put32(header, NH_MAGIC); header[4] = NH_VERSION; header[5] = 0;
     header[6] = (uint8_t)packet->type; header[7] = (uint8_t)(packet->type >> 8);
     nh_put32(header + 8, packet->id); nh_put32(header + 12, packet->length);
-    return nh_send_all(socket, ws, ws_length) && nh_send_all(socket, header, sizeof(header))
+    return nh_send_all(socket, envelope, ws_length + 16)
         && (!packet->length || nh_send_all(socket, packet->bytes, packet->length));
 }
 
@@ -562,9 +562,9 @@ static void nh_session(SOCKET socket, uint8_t *receive, uint8_t **staging) {
     nh_packet packet;
     nh_surface_info(&width, &height, &bpp);
     nh_hidden_diagnostics(hidden_host, sizeof(hidden_host));
-    snprintf(hello, sizeof(hello), "{\"protocol\":%u,\"pid\":%lu,\"gameThreadId\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"exe\":{\"size\":%u,\"peTimestamp\":%u,\"sha256\":\"%s\",\"verified\":%s},\"surface\":{\"width\":%u,\"height\":%u,\"bpp\":%u,\"format\":\"RGB565\"},\"limits\":{\"messageBytes\":%u,\"pages\":%u,\"rules\":%u,\"followRuleKinds\":[1,2,3,4,5,6,7,8]}}",
+    snprintf(hello, sizeof(hello), "{\"protocol\":%u,\"pid\":%lu,\"gameThreadId\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"exe\":{\"size\":%u,\"peTimestamp\":%u,\"sha256\":\"%s\",\"verified\":%s},\"surface\":{\"width\":%u,\"height\":%u,\"bpp\":%u,\"format\":\"RGB565\"},\"limits\":{\"messageBytes\":%u,\"pages\":%u,\"rules\":%u,\"pageRemovals\":true,\"subscribeRevision\":true,\"maxBudgetUs\":%u,\"followRuleKinds\":[1,2,3,4,5,6,7,8]}}",
         NH_VERSION, (unsigned long)GetCurrentProcessId(), nh_game_thread_id(), nh_hidden_active() ? "true" : "false", hidden_host, nh_exe_size, nh_pe_timestamp, nh_hash,
-        nh_identity_verified() ? "true" : "false", width, height, bpp, NH_MAX_MESSAGE, NH_MAX_PAGES, NH_MAX_RULES);
+        nh_identity_verified() ? "true" : "false", width, height, bpp, NH_MAX_MESSAGE, NH_MAX_PAGES, NH_MAX_RULES, NH_MIRROR_MAX_BUDGET_US);
     memset(&packet, 0, sizeof(packet)); packet.type = NH_HELLO; packet.length = (uint32_t)strlen(hello); packet.bytes = (uint8_t *)hello;
     if (!nh_send_packet(socket, &packet)) return;
     InterlockedExchange(&nh_client_present, 1);

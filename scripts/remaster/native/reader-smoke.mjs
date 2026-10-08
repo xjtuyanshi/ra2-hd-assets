@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { open, writeFile, appendFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -13,20 +14,44 @@ const { values: o } = parseArgs({
     origin: { type: 'string', default: process.env.RA2_NATIVE_AGENT_ORIGIN || 'http://127.0.0.1:15451' },
     seconds: { type: 'string', default: '60' },
     warmup: { type: 'string', default: '15' },
+    'wait-objects': { type: 'string', default: '60' },
     out: { type: 'string' },
     record: { type: 'boolean', default: false },
+    'cpu-prof': { type: 'boolean', default: false },
+    'direct-reader': { type: 'boolean', default: false },
     replay: { type: 'string' },
     help: { type: 'boolean' },
   },
 });
 if (o.help) {
   console.log(
-    'node scripts/remaster/native/reader-smoke.mjs --token HEX [--seconds 60 --warmup 15 --record --out OUT]\nnode scripts/remaster/native/reader-smoke.mjs --replay OUT/recordings/session.nhrec\nRuns the existing YR render reader, prints counts by kind, misses and reader time. The fixed warm-up precedes the measured interval. Recordings and JSON reports stay under gameres.',
+    'node scripts/remaster/native/reader-smoke.mjs --token HEX [--seconds 60 --warmup 15 --record --out OUT]\nnode scripts/remaster/native/reader-smoke.mjs --replay OUT/recordings/session.nhrec\nLive default runs the page NativeCore render, command and performance readers. --direct-reader isolates the legacy reader path; --cpu-prof saves a Node CPU profile. Prints counts, misses and pure decoder/whole-core costs. The fixed warm-up precedes the measured interval. Recordings and JSON reports stay under gameres.',
   );
   process.exit(0);
 }
+if (o['cpu-prof']) {
+  const child = spawnSync(
+    process.execPath,
+    [
+      '--cpu-prof',
+      `--cpu-prof-dir=${outputDirectory(o.out)}`,
+      process.argv[1],
+      ...process.argv.slice(2).filter((arg) => arg !== '--cpu-prof'),
+    ],
+    { stdio: 'inherit' },
+  );
+  if (child.error) throw child.error;
+  process.exit(child.status ?? 1);
+}
 if (!Number.isFinite(+o.seconds) || +o.seconds <= 0 || +o.seconds > 3600) throw new Error('Invalid seconds');
+if (!Number.isFinite(+o['wait-objects']) || +o['wait-objects'] < 0 || +o['wait-objects'] > 120)
+  throw new Error('Invalid wait-objects');
 if (!Number.isFinite(+o.warmup) || +o.warmup < 0 || +o.warmup > 300) throw new Error('Invalid warmup');
+if (!o.replay && !o['direct-reader']) {
+  const { runCoreReaderSmoke } = await import('./core-reader-smoke.mjs');
+  const summary = await runCoreReaderSmoke(o);
+  process.exit(Object.values(summary.gates).every((gate) => gate === true) ? 0 : 1);
+}
 const { NativeMirrorMemory, NativeMemoryMiss, NativeReaderWorkingSet } = await tsImport(
   '../../../src/adapter/native/memory.ts',
   import.meta.url,
@@ -77,6 +102,11 @@ let measurementStart = null,
   measuredMissingDirect = 0,
   measurementMisses = null,
   measurementTruncated = 0,
+  measurementInvalid = 0,
+  measurementPageTruncations = 0,
+  measuredMinObjects = null,
+  measuredMaxObjects = null,
+  measuredReaderTimes = [],
   firstMeasuredFrame = null,
   lastMeasuredFrame = null,
   lastGoodAt = null,
@@ -151,7 +181,14 @@ async function subscribe(extra = []) {
   if (key === subscribedKey) return false;
   await connection.request(
     T.Subscribe,
-    encodeSubscription({ ranges, rules: policy.rules, maxPages: hello.limits.pages, budgetUs: 4000, sampleCount: 16 }),
+    encodeSubscription({
+      ranges,
+      rules: policy.rules,
+      maxPages: hello.limits.pages,
+      budgetUs: Math.min(12000, hello.limits.maxBudgetUs ?? 4000),
+      sampleCount: 16,
+      pageRemovals: hello.limits.pageRemovals === true,
+    }),
   );
   subscribedKey = key;
   return true;
@@ -161,7 +198,11 @@ async function processUpdate(update) {
   seen++;
   if (!memory.apply(update)) {
     truncated++;
-    if (measured) measurementTruncated++;
+    if (measured) {
+      measurementTruncated++;
+      if (update.flags & 4) measurementInvalid++;
+      if (update.flags & 1) measurementPageTruncations++;
+    }
     if (connection && update.flags & 4) {
       learned.clear();
       dynamicRanges = [];
@@ -200,6 +241,7 @@ async function processUpdate(update) {
     if (measured) {
       measurementMs += elapsed;
       measurementCalls++;
+      measuredReaderTimes.push(elapsed);
     }
   }
   if (memory.operationMissed) {
@@ -246,6 +288,8 @@ async function processUpdate(update) {
     if (measured) {
       measuredDirect++;
       if (raw.objects.length !== own) measuredCountMismatches++;
+      measuredMinObjects = Math.min(measuredMinObjects ?? own, own);
+      measuredMaxObjects = Math.max(measuredMaxObjects ?? own, own);
     }
     latest = {
       frame: update.frame,
@@ -346,7 +390,13 @@ function finalizeSummary() {
   summary.measuredCountMismatches = measuredCountMismatches;
   summary.measuredMissingDirectSamples = measuredMissingDirect;
   summary.measuredTruncated = measurementTruncated;
+  summary.measuredIncompleteUpdates = measurementTruncated;
+  summary.measuredInvalidUpdates = measurementInvalid;
+  summary.measuredPageTruncations = measurementPageTruncations;
+  summary.measuredObjectRange = { min: measuredMinObjects, max: measuredMaxObjects };
   summary.measuredReaderMsPerFrame = measurementCalls ? measurementMs / measurementCalls : null;
+  const sortedTimes = [...measuredReaderTimes].sort((a, b) => a - b);
+  summary.measuredReaderP95Ms = sortedTimes.length ? sortedTimes[Math.ceil(sortedTimes.length * 0.95) - 1] : null;
   summary.measuredLogicFrames = firstMeasuredFrame === null ? 0 : (lastMeasuredFrame - firstMeasuredFrame) >>> 0;
   summary.last = latest;
   summary.lastGoodFrame = renderPrevious?.frame ?? null;
@@ -359,6 +409,9 @@ function finalizeSummary() {
     zeroMissesAfterWarmup: summary.postWarmupMisses === 0,
     completeFrames: o.replay ? truncated === 0 : measurementTruncated === 0,
     live: o.replay ? 'UNVERIFIED: replay is not a live gate' : measuredGood > 0 && summary.measuredLogicFrames > 0,
+    objectRange: o.replay
+      ? 'UNVERIFIED: replay is not a live gate'
+      : measuredMinObjects >= 150 && measuredMaxObjects <= 250,
     sixtySeconds: o.replay ? 'UNVERIFIED: replay is not a live gate' : summary.measurementSeconds >= 60,
     errorFree: !summary.error,
   };
@@ -408,6 +461,17 @@ try {
     };
     if (!summary.preflight.advancing)
       throw new Error('Real logic frame counter is not advancing before reader measurement');
+    const objectDeadline = performance.now() + +o['wait-objects'] * 1000;
+    let sceneObjects;
+    do {
+      const count = await connection.read(0xa8ec88, 4);
+      sceneObjects = new DataView(count.bytes.buffer, count.bytes.byteOffset, 4).getUint32(0, true);
+      if (sceneObjects >= 150 && sceneObjects <= 250) break;
+      if (performance.now() >= objectDeadline) throw new Error(`Scene has ${sceneObjects} objects; requires 150-250`);
+      await delay(500);
+    } while (true);
+    summary.preflight.sceneObjects = sceneObjects;
+    startedAt = performance.now();
     rebuild();
     await subscribe();
     await connection.request(T.Sample, encodeU32(1, 0xa8ec88, 4));
@@ -444,6 +508,7 @@ try {
     if (!good) throw new Error('Reader produced no good frame during the fixed warm-up');
     measurementStart = performance.now();
     measurementMisses = memory.misses;
+    summary.measurementDiagnosticsStart = decodeJson(await connection.request(T.Diagnostics));
     const until = measurementStart + +o.seconds * 1000;
     while (performance.now() < until) {
       if (failure) throw failure;

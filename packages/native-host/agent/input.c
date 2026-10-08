@@ -322,14 +322,16 @@ static void input_state(uint32_t id)
         "\"asyncKeyReads\":%ld,\"cursorWrites\":%ld,\"acceptedInputs\":%u,\"deliveredMessages\":%u,"
         "\"lastMessage\":%u,\"lastKeyMessage\":%u,\"lastKeyVirtualKey\":%u,\"injectedKeyReads\":%ld,"
         "\"lastInjectedKey\":%ld,\"cursorLastReadX\":%ld,\"cursorLastReadY\":%ld,\"modal\":%s,"
-        "\"dialogMessages\":%u,\"lastTargetHwnd\":%u,\"lastTargetId\":%u,\"dialogHwnd\":%u,\"directInput\":\"unsupported\",\"controls\":[",
+        "\"dialogMessages\":%u,\"lastTargetHwnd\":%u,\"lastTargetId\":%u,\"dialogHwnd\":%u,"
+        "\"focusHwnd\":%u,\"gameCaptureHwnd\":%u,\"directInput\":\"unsupported\",\"controls\":[",
         InterlockedCompareExchange(&cursor_x, 0, 0), InterlockedCompareExchange(&cursor_y, 0, 0), held,
         InterlockedCompareExchange(&cursor_reads, 0, 0), InterlockedCompareExchange(&key_reads, 0, 0),
         InterlockedCompareExchange(&async_key_reads, 0, 0), InterlockedCompareExchange(&cursor_writes, 0, 0),
         accepted, delivered, last_message, last_key_message, last_key,
         InterlockedCompareExchange(&injected_key_reads, 0, 0), InterlockedCompareExchange(&last_injected_key, 0, 0),
         InterlockedCompareExchange(&cursor_last_read_x, 0, 0), InterlockedCompareExchange(&cursor_last_read_y, 0, 0), modal ? "true" : "false",
-        dialog_messages, last_target, last_target_id, (uint32_t)(uintptr_t)(modal ? target : NULL));
+        dialog_messages, last_target, last_target_id, (uint32_t)(uintptr_t)(modal ? target : NULL),
+        (uint32_t)(uintptr_t)nh_input_get_focus(), (uint32_t)(uintptr_t)nh_hidden_get_capture());
     LeaveCriticalSection(&input_lock);
     struct controls_context controls = {json, sizeof(json), (uint32_t)strlen(json), 0, 0, 0, target};
     if (target)
@@ -419,15 +421,31 @@ static LRESULT route_message(HWND main, UINT message, WPARAM wparam, LPARAM lpar
     HWND target = root;
     if (message >= WM_MOUSEMOVE && message <= WM_MOUSEHWHEEL)
     {
+        int release = message == WM_LBUTTONUP || message == WM_RBUTTONUP || message == WM_MBUTTONUP || message == WM_XBUTTONUP;
+        /* A captured popup may destroy itself during button-down. Delivering
+         * that press's release to a newly exposed control would activate a
+         * different control without a corresponding press. */
+        if (release && virtual_capture && !IsWindow(virtual_capture))
+        { virtual_capture = NULL; return 0; }
         POINT screen = game_to_screen((SHORT)LOWORD(lparam), (SHORT)HIWORD(lparam));
         struct popup_context popup = {root, NULL, screen};
         EnumWindows(find_popup_at, (LPARAM)&popup);
-        target = belongs_to(virtual_capture, root) || popup_for(virtual_capture, root) ? virtual_capture :
+        HWND game_capture = nh_hidden_get_capture();
+        int captured = (belongs_to(game_capture, root) || popup_for(game_capture, root)) &&
+            GetWindowThreadProcessId(game_capture, NULL) == g_ddraw.gui_thread_id &&
+            nh_hidden_visible(game_capture) && IsWindowEnabled(game_capture);
+        /* The game can capture a newly created popup while handling the press
+         * on its owner. Its real capture takes precedence over the agent's
+         * press target, including clicks outside the popup used to dismiss it. */
+        target = captured ? game_capture :
+            belongs_to(virtual_capture, root) || popup_for(virtual_capture, root) ? virtual_capture :
             popup.target ? popup.target : child_at(root, screen, 0);
         if (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN || message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN)
         {
             virtual_capture = target;
-            focus_control(target);
+            /* Capture does not imply focus. The popup's owner must retain the
+             * focus selected by the game's original handlers. */
+            if (!captured) focus_control(target);
         }
         POINT local = screen;
         if (message != WM_MOUSEWHEEL && message != WM_MOUSEHWHEEL) ScreenToClient(target, &local);

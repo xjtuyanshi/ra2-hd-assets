@@ -9,9 +9,11 @@ import { createYrFrameReader } from './performance';
 import { createYrRenderStateReader } from './renderState';
 import { writeYrGameSpeed } from './runtimeHooks';
 import { YR_SHROUD_GLOBALS, YR_SHROUD_OFFSETS } from './shroudReader';
-import { YR_STATE_GLOBALS as G, YR_STATE_LIMITS as L } from './stateReader';
+import { YR_STATE_GLOBALS as G, YR_STATE_LIMITS as L, YR_STATE_OFFSETS as O } from './stateReader';
+import { YR_TECHNO_TINT } from './technoTint';
 import { YR_STARTUP_PAGE_HASH } from './startupPage';
 import { installYrTacticalPassthrough } from './tacticalPassthrough';
+import { YR_GATHER_OFFSETS } from './unitGatherState';
 
 const PAGE_BYTES = 4096;
 const MAX_CELL_SLOTS = 512 * 512;
@@ -21,6 +23,13 @@ const vector = (source: number, bytes: number, maxCount: number): NativeHostFoll
   kind: 2,
   source,
   bytes,
+  maxCount,
+  stride: 4,
+});
+const pointerList = (source: number, maxCount: number): NativeHostFollowRule => ({
+  kind: 3,
+  source,
+  bytes: 4,
   maxCount,
   stride: 4,
 });
@@ -105,8 +114,15 @@ export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.fr
   vector(G.buildings, 0x800, L.objectsPerKind),
   vector(G.aircraft, 0x800, L.objectsPerKind),
   vector(G.houses, 0x16060, L.houses),
+  memberPointer(G.houses, O.houseType, 0x130, L.houses), // Country ID and unit-speed multiplier at +0x12C.
+  nestedVector(G.houses, 0x68, 0x800, L.objectsPerKind), // The sidebar's current owned-building list can reallocate.
+  nestedVector(G.houses, 0x254, 0x80, 4096), // Live SuperClass instances used by superweapon cameos.
+  // Rule kinds 4/6 share their bound between parent and member counts. The root can contain all four techno kinds;
+  // the reader independently validates each RadioLinks VectorClass capacity at 64 before using its contacts.
+  capacitySpan(G.technos, O.radioItems - 4, 4, L.objectsPerKind * 4),
+  memberPointer(G.buildings, YR_TECHNO_TINT.airstrike, YR_TECHNO_TINT.airstrikeTarget + 4, L.objectsPerKind),
   pointer(G.scenario, 0x3600),
-  pointer(G.tactical, 0x200),
+  pointer(G.tactical, 0xe14), // Mind-control source projection reads the inverse matrix at +0xDE4.
   pointer(0x8871e0, 0x1900), // RulesClass/Settings instance, used by tint/detail and speed policies.
   pointer(G.map + YR_SHROUD_OFFSETS.cellItems, MAX_CELL_SLOTS * 4),
   vector(0xa83c68, 0x1800, 4096), // BuildingTypeClass::Array.
@@ -115,6 +131,7 @@ export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.fr
   vector(0xa8b218, 0x1000, 4096), // AircraftTypeClass::Array.
   vector(0xa83d80, 0x2c0, 255), // OverlayTypeClass::Array.
   vector(0xa8ec18, 0x40, 0x8000), // SmudgeTypeClass::Array.
+  vector(0xa8e330, 0xe8, 4096), // SuperWeaponTypeClass::Array resolved by the sidebar.
   vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.anim, 0x36c, 4096),
   vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.bullet, 0x2ac, 4096),
   vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.particleSystem, 0x2b8, 4096),
@@ -134,7 +151,7 @@ export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.fr
   vector(YR_MIND_CONTROL_GLOBALS.managers, 0x4c, YR_MIND_CONTROL_LIMITS.managers),
   nestedVector(YR_MIND_CONTROL_GLOBALS.managers, YR_MIND_CONTROL_OFFSETS.nodes, 0x14, YR_MIND_CONTROL_LIMITS.nodes),
   ...[G.units, G.infantry, G.aircraft].map((source) =>
-    memberPointer(source, YR_MIND_CONTROL_OFFSETS.locomotor, 0x30, L.objectsPerKind),
+    memberPointer(source, YR_MIND_CONTROL_OFFSETS.locomotor, YR_GATHER_OFFSETS.driveHeadTo + 12, L.objectsPerKind),
   ),
   vector(0xabca10, 0x4c, 4096), // LightSourceClass::Array (+4 Items, +16 Count).
   ...[0x53ac, 0x53b0, 0x53b4, 0x53b8, 0x53bc].map((offset) => memberPointer(G.houses, offset, 0x74, L.houses)),
@@ -145,8 +162,10 @@ export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.fr
     indirect(7, G.houses, offset, 0x40, 0x64, 4096), // FactoryClass queue of type pointers.
     indirect(8, G.houses, offset, 0x58, 0x800, L.houses), // In-production object may not yet belong to a global live array.
   ]),
-  ...[0xa83c68, 0xa8e348, 0xa83ce0, 0xa8b218].map((source) => memberPointer(source, 0x60, 512, 4096)),
-  ...Array.from({ length: 5 }, (_, index) => vector(G.renderLayers + index * 0x18, 0x200, L.objectsPerLayer)),
+  ...[0xa83c68, 0xa8e348, 0xa83ce0, 0xa8b218, 0xa8e330].map((source) => memberPointer(source, 0x60, 512, 4096)),
+  // Layer observers read membership/order only. Child classes have different allocation sizes and their own rules;
+  // following a blanket body span here can cross an allocation's final committed page (notably short-lived anims).
+  ...Array.from({ length: 5 }, (_, index) => pointerList(G.renderLayers + index * 0x18, L.objectsPerLayer)),
 ]);
 
 function pageRanges(pages: ReadonlySet<number>): NativeHostRange[] {

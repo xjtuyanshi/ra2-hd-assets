@@ -44,7 +44,15 @@ export interface NativeHello {
   gameThreadId: number;
   exe: { size: number; peTimestamp: number; sha256: string; verified: boolean };
   surface: { width: number; height: number; bpp: number; format: 'RGB565' };
-  limits: { messageBytes: number; pages: number; rules: number; followRuleKinds?: readonly number[] };
+  limits: {
+    messageBytes: number;
+    pages: number;
+    rules: number;
+    followRuleKinds?: readonly number[];
+    pageRemovals?: boolean;
+    maxBudgetUs?: number;
+    subscribeRevision?: boolean;
+  };
 }
 export interface NativeRange {
   address: number;
@@ -63,6 +71,7 @@ export interface NativeSubscription {
   maxPages: number;
   budgetUs: number;
   sampleCount: number;
+  pageRemovals?: boolean;
 }
 export interface NativePage {
   address: number;
@@ -73,6 +82,8 @@ export interface NativeMirrorUpdate {
   flags: number;
   pages: NativePage[];
   samples: NativePage[];
+  removedPages?: number[];
+  subscriptionRevision?: number;
 }
 export interface NativePicture {
   frame: number;
@@ -191,11 +202,20 @@ export function decodeHello(payload: Uint8Array): NativeHello {
       new Set(hello.limits.followRuleKinds).size !== hello.limits.followRuleKinds.length)
   )
     throw new NativeProtocolError('Invalid native follow-rule capabilities');
+  if (hello.limits.pageRemovals !== undefined && typeof hello.limits.pageRemovals !== 'boolean')
+    throw new NativeProtocolError('Invalid native page-removal capability');
+  if (hello.limits.subscribeRevision !== undefined && typeof hello.limits.subscribeRevision !== 'boolean')
+    throw new NativeProtocolError('Invalid native subscription-revision capability');
+  if (
+    hello.limits.maxBudgetUs !== undefined &&
+    (!Number.isInteger(hello.limits.maxBudgetUs) || hello.limits.maxBudgetUs < 100 || hello.limits.maxBudgetUs > 20000)
+  )
+    throw new NativeProtocolError('Invalid native hook-budget capability');
   return hello as NativeHello;
 }
 
 export function encodeSubscription(subscription: NativeSubscription): Uint8Array {
-  const { ranges, rules, maxPages, budgetUs, sampleCount } = subscription;
+  const { ranges, rules, maxPages, budgetUs, sampleCount, pageRemovals } = subscription;
   if (
     ranges.length > 4096 ||
     rules.length > 256 ||
@@ -204,14 +224,15 @@ export function encodeSubscription(subscription: NativeSubscription): Uint8Array
     maxPages > NATIVE_MAX_PAGES ||
     !Number.isInteger(budgetUs) ||
     budgetUs < 100 ||
-    budgetUs > 4000 ||
+    budgetUs > 20000 ||
     !Number.isInteger(sampleCount) ||
     sampleCount < 0 ||
-    sampleCount > 64
+    sampleCount > 64 ||
+    (pageRemovals !== undefined && typeof pageRemovals !== 'boolean')
   ) {
     throw new NativeProtocolError('Subscription exceeds bounds');
   }
-  const values = [ranges.length, rules.length, maxPages, budgetUs, sampleCount];
+  const values = [ranges.length, rules.length, maxPages, budgetUs, sampleCount + (pageRemovals ? 0x80000000 : 0)];
   for (const item of ranges) {
     range(item.address, item.length);
     values.push(item.address, item.length);
@@ -255,7 +276,13 @@ export function decodeMirror(payload: Uint8Array): NativeMirrorUpdate {
   const flags = source.getUint32(4, true);
   const pageCount = source.getUint32(8, true);
   const sampleCount = source.getUint32(12, true);
-  if (flags & ~7 || pageCount > NATIVE_MAX_PAGES || sampleCount > 64)
+  if (
+    flags & ~31 ||
+    (flags & 8 && flags & 7) ||
+    (flags & 16 && flags & 5) ||
+    pageCount > NATIVE_MAX_PAGES ||
+    sampleCount > 64
+  )
     throw new NativeProtocolError('Invalid mirror bounds');
   let offset = 16;
   const pages: NativePage[] = [],
@@ -282,8 +309,39 @@ export function decodeMirror(payload: Uint8Array): NativeMirrorUpdate {
     samples.push({ address, bytes: payload.subarray(offset, offset + length) });
     offset += length;
   }
+  let removedPages: number[] | undefined;
+  if (flags & 8) {
+    if (offset + 4 > payload.byteLength) throw new NativeProtocolError('Truncated mirror removal count');
+    const removedCount = source.getUint32(offset, true);
+    offset += 4;
+    if (removedCount > NATIVE_MAX_PAGES || offset + removedCount * 4 > payload.byteLength)
+      throw new NativeProtocolError('Invalid mirror removal bounds');
+    removedPages = [];
+    let previous = -1;
+    for (let index = 0; index < removedCount; index++) {
+      const address = source.getUint32(offset, true);
+      if (address % NATIVE_PAGE_SIZE || address <= previous || seen.has(address))
+        throw new NativeProtocolError('Invalid mirror removal page');
+      removedPages.push(address);
+      previous = address;
+      offset += 4;
+    }
+  }
+  let subscriptionRevision: number | undefined;
+  if (flags & 16) {
+    if (offset + 4 > payload.byteLength) throw new NativeProtocolError('Truncated mirror subscription revision');
+    subscriptionRevision = source.getUint32(offset, true);
+    offset += 4;
+  }
   if (offset !== payload.byteLength) throw new NativeProtocolError('Trailing mirror bytes');
-  return { frame, flags, pages, samples };
+  return {
+    frame,
+    flags,
+    pages,
+    samples,
+    ...(removedPages ? { removedPages } : {}),
+    ...(subscriptionRevision !== undefined ? { subscriptionRevision } : {}),
+  };
 }
 
 export function encodeWrite(address: number, bytes: Uint8Array): Uint8Array {

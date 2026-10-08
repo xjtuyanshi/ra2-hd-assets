@@ -10,6 +10,7 @@ export interface NativeMirrorUpdate {
   frame: number;
   flags: number;
   pages: readonly NativePage[];
+  removedPages?: readonly number[];
 }
 export interface NativeRange {
   address: number;
@@ -46,12 +47,27 @@ function checkRange(address: number, length: number): void {
   )
     throw new RangeError('Invalid native memory range');
 }
+interface MirrorPageData {
+  readonly bytes: Uint8Array;
+  readonly view: DataView;
+  accessedEpoch?: symbol;
+}
+function mirrorPageData(input: Uint8Array): MirrorPageData {
+  const bytes = new Uint8Array(input);
+  return {
+    bytes,
+    view: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+  };
+}
 /** No dense address-space allocation and no zero substitution. Pages are immutable once published. */
 export class NativeMirrorMemory implements GuestMemory {
-  private pages = new Map<number, Uint8Array>();
+  private pages = new Map<number, MirrorPageData>();
   private missing = new Set<number>();
   private accessed = new Set<number>();
   private observedMiss = false;
+  private operationEpoch = Symbol();
+  private lastPageAddress = -1;
+  private lastPage: MirrorPageData | undefined;
   frame: number | null = null;
   complete = false;
   misses = 0;
@@ -61,22 +77,48 @@ export class NativeMirrorMemory implements GuestMemory {
       this.complete = false;
       return false;
     }
-    if (update.flags & 2) this.missing.clear();
-    const next = update.flags & 2 ? new Map<number, Uint8Array>() : new Map(this.pages);
+    const next = update.flags & 2 ? new Map<number, MirrorPageData>() : new Map(this.pages);
+    const removed = update.removedPages ?? [];
+    if (
+      update.flags & ~31 ||
+      (update.flags & 8 && update.flags & 2) ||
+      (update.flags & 8 && update.removedPages === undefined) ||
+      (update.removedPages !== undefined && !(update.flags & 8)) ||
+      removed.length > 4096 ||
+      update.pages.length > 4096
+    )
+      throw new Error('Invalid mirror removal bounds');
+    let previous = -1;
+    for (const address of removed) {
+      checkRange(address, NATIVE_PAGE_SIZE);
+      if (address % NATIVE_PAGE_SIZE || address <= previous) throw new Error('Invalid mirror removal page');
+      next.delete(address);
+      previous = address;
+    }
+    const seen = new Set<number>(),
+      removedSet = new Set(removed);
     for (const page of update.pages) {
       checkRange(page.address, NATIVE_PAGE_SIZE);
-      if (page.address % NATIVE_PAGE_SIZE || page.bytes.length !== NATIVE_PAGE_SIZE)
+      if (page.address % NATIVE_PAGE_SIZE || page.bytes.length !== NATIVE_PAGE_SIZE || seen.has(page.address))
         throw new Error('Invalid mirror page');
-      next.set(page.address, page.bytes.slice());
-      this.missing.delete(page.address);
+      if (removedSet.has(page.address)) throw new Error('Removed mirror page also updated');
+      seen.add(page.address);
+      next.set(page.address, mirrorPageData(page.bytes));
     }
+    if (update.flags & 2) this.missing.clear();
+    for (const address of removed) this.missing.delete(address);
+    for (const page of update.pages) this.missing.delete(page.address);
     this.pages = next;
+    this.lastPageAddress = -1;
+    this.lastPage = undefined;
     this.frame = update.frame;
     this.complete = true;
     return true;
   }
   reset(): void {
     this.pages.clear();
+    this.lastPageAddress = -1;
+    this.lastPage = undefined;
     this.missing.clear();
     this.frame = null;
     this.complete = false;
@@ -86,6 +128,7 @@ export class NativeMirrorMemory implements GuestMemory {
   beginOperation(): void {
     this.observedMiss = false;
     this.accessed.clear();
+    this.operationEpoch = Symbol();
   }
   get operationMissed(): boolean {
     return this.observedMiss;
@@ -107,8 +150,53 @@ export class NativeMirrorMemory implements GuestMemory {
   }
   installFetchedPage(address: number, bytes: Uint8Array): void {
     if (address % NATIVE_PAGE_SIZE || bytes.length !== NATIVE_PAGE_SIZE) throw new Error('Invalid fetched page');
-    this.pages.set(address, bytes.slice());
+    this.pages.set(address, mirrorPageData(bytes));
+    this.lastPageAddress = -1;
+    this.lastPage = undefined;
     this.missing.delete(address);
+  }
+  private pageData(address: number): MirrorPageData | undefined {
+    const page = this.lastPageAddress === address ? this.lastPage : this.pages.get(address);
+    if (this.lastPageAddress !== address) {
+      this.lastPageAddress = address;
+      this.lastPage = page;
+    }
+    // Symbols separate footprints even when snapshots share immutable page storage.
+    if (!page || page.accessedEpoch !== this.operationEpoch) {
+      this.accessed.add(address);
+      if (page) page.accessedEpoch = this.operationEpoch;
+    }
+    return page;
+  }
+  private reportMiss(missed: number[]): never {
+    for (const page of missed) this.missing.add(page);
+    this.observedMiss = true;
+    this.misses++;
+    const ranges = coalesceNativePages(missed);
+    this.onMiss?.(ranges);
+    throw new NativeMemoryMiss(ranges);
+  }
+  private scalar(address: number, width: 1 | 2 | 4, signed = false): number {
+    checkRange(address, width);
+    const pageAddress = (address >>> 12) * NATIVE_PAGE_SIZE,
+      offset = address & (NATIVE_PAGE_SIZE - 1),
+      first = this.pageData(pageAddress);
+    if (offset + width <= NATIVE_PAGE_SIZE) {
+      if (!first) return this.reportMiss([pageAddress]);
+      if (width === 1) return first.bytes[offset]!;
+      if (width === 2) return first.view.getUint16(offset, true);
+      return signed ? first.view.getInt32(offset, true) : first.view.getUint32(offset, true);
+    }
+    const second = this.pageData(pageAddress + NATIVE_PAGE_SIZE);
+    if (!first || !second)
+      return this.reportMiss([...(first ? [] : [pageAddress]), ...(second ? [] : [pageAddress + NATIVE_PAGE_SIZE])]);
+    let value = 0;
+    for (let index = 0; index < width; index++) {
+      const at = offset + index,
+        byte = at < NATIVE_PAGE_SIZE ? first.bytes[at]! : second.bytes[at - NATIVE_PAGE_SIZE]!;
+      value |= byte << (index * 8);
+    }
+    return signed ? value : value >>> 0;
   }
   read_memory(address: number, length: number): Uint8Array {
     checkRange(address, length);
@@ -119,16 +207,10 @@ export class NativeMirrorMemory implements GuestMemory {
       page < address + length;
       page += NATIVE_PAGE_SIZE
     ) {
-      this.accessed.add(page);
-      if (!this.pages.has(page)) missed.push(page);
+      if (!this.pageData(page)) missed.push(page);
     }
     if (missed.length) {
-      for (const page of missed) this.missing.add(page);
-      this.observedMiss = true;
-      this.misses++;
-      const ranges = coalesceNativePages(missed);
-      this.onMiss?.(ranges);
-      throw new NativeMemoryMiss(ranges);
+      return this.reportMiss(missed);
     }
     const result = new Uint8Array(length);
     for (let at = 0; at < length;) {
@@ -136,7 +218,7 @@ export class NativeMirrorMemory implements GuestMemory {
         page = Math.floor(a / NATIVE_PAGE_SIZE) * NATIVE_PAGE_SIZE,
         offset = a - page,
         count = Math.min(length - at, NATIVE_PAGE_SIZE - offset);
-      result.set(this.pages.get(page)!.subarray(offset, offset + count), at);
+      result.set(this.pages.get(page)!.bytes.subarray(offset, offset + count), at);
       at += count;
     }
     return result;
@@ -145,16 +227,12 @@ export class NativeMirrorMemory implements GuestMemory {
     throw new Error('Native mirror is read-only; use a buffered transaction');
   }
   accessor(size = 0x100000000): GuestMemoryAccessor {
-    const view = (address: number, length: number) => {
-      const b = this.read_memory(address, length);
-      return new DataView(b.buffer, b.byteOffset, b.byteLength);
-    };
     return {
       size,
-      u8: (a) => this.read_memory(a, 1)[0]!,
-      u16: (a) => view(a, 2).getUint16(0, true),
-      u32: (a) => view(a, 4).getUint32(0, true),
-      i32: (a) => view(a, 4).getInt32(0, true),
+      u8: (a) => this.scalar(a, 1),
+      u16: (a) => this.scalar(a, 2),
+      u32: (a) => this.scalar(a, 4),
+      i32: (a) => this.scalar(a, 4, true),
       bytes: (a, n) => this.read_memory(a, n),
     };
   }
