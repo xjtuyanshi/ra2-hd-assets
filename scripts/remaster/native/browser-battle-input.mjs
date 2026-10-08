@@ -210,7 +210,8 @@ export async function runBrowserBattleInput(api) {
       const p = project(object, before.view);
       if (!inTactical(p, before)) throw new Error(`Owned object ${uid} leaves tactical view before selection`);
       // Clicking a unit already in a selected group retains that whole group.
-      // Real cancel input must clear it before requesting a single-unit order.
+      // Cancel on empty tactical ground: right-clicking the unit itself invokes
+      // its contextual action (notably MCV deployment), rather than deselection.
       const selectedBefore = local(before).filter((obj) => obj.selected);
       if (!forceClick && selectedBefore.length === 1 && selectedBefore[0].uid === uid)
         return {
@@ -223,8 +224,38 @@ export async function runBrowserBattleInput(api) {
           alreadyExclusive: true,
         };
       if (selectedBefore.length > 1 || selectedBefore.some((obj) => obj.uid !== uid)) {
-        await click(p.x, p.y, 'no-move', 'right');
-        await stateWait('native selection cancelled', (next) => !local(next).some((obj) => obj.selected));
+        const cancel = [
+          [80, 80],
+          [-80, 80],
+          [80, -80],
+          [-80, -80],
+          [140, 0],
+          [-140, 0],
+        ]
+          .map(([dx, dy]) => ({ x: p.x + dx, y: p.y + dy }))
+          .find(
+            (candidate) =>
+              inTactical(candidate, before) &&
+              before.objects.every((obj) => {
+                const at = project(obj, before.view);
+                return Math.hypot(candidate.x - at.x, candidate.y - at.y) >= 48;
+              }),
+          );
+        if (!cancel) throw new Error('No empty tactical ground for real right-click deselection');
+        await click(cancel.x, cancel.y, 'no-move', 'right');
+        const cleared = await stateWait(
+          'native selection cancelled',
+          (next) => !local(next).some((obj) => obj.selected),
+        );
+        await record('right-click-ground-deselect', {
+          point: cancel,
+          selectedBefore,
+          frame: cleared.state.frame,
+          selectedAfter: [],
+          verified: true,
+          correction: 'Cancel on empty ground instead of invoking the target unit contextual action',
+        });
+        await shot('deselected');
       }
       await click(p.x, p.y, mode, 'left');
       const after = await stateWait('native single-unit click selection', (next) => {
@@ -275,7 +306,21 @@ export async function runBrowserBattleInput(api) {
     if (!target) throw new Error('No visible owned ground unit for browser selection/move acceptance');
     const selection = await select(target.uid);
     await record('left-click-select', { ...selection, verified: true });
+    await h.move(selection.point.x + 45, selection.point.y + 45);
+    await delay(150);
     await shot('selected');
+    await shot('cursor');
+    if (api.selectionComparison) {
+      await h.key('Backslash');
+      await wait('selected original picture', async () => !(await h.diagnostic()).enabled);
+      await delay(600);
+      await shot('selected-original');
+      await record('selected-original-state', { state: await peek(), diagnostic: await h.diagnostic() });
+      await h.key('Backslash');
+      await wait('selected keyed HD restored', async () => (await h.diagnostic()).shown);
+      await delay(150);
+      await shot('selected-restored');
+    }
 
     const attempts = [];
     let moved = null;
@@ -381,6 +426,7 @@ export async function runBrowserBattleInput(api) {
         await h.move(start.x + ((finish.x - start.x) * i) / 12, start.y + ((finish.y - start.y) * i) / 12);
         await delay(25);
       }
+      await shot('drag-band');
     } finally {
       await page.mouse.up({ button: 'left' });
     }
@@ -604,6 +650,30 @@ export async function runBrowserBattleInput(api) {
       await record('deploy-mcv-for-production', { mcv, yard, attempts: deploymentAttempts, verified: true });
       await shot('yard');
     }
+    const builtYard = await stateWait('construction yard finished deploying', (next) =>
+      local(next).find((obj) => obj.uid === yard.uid && obj.mission !== 'Construction'),
+    );
+    state = builtYard.state;
+    yard = builtYard.proof;
+    const yardPoint = project(yard, state.view);
+    // Deployment already selects the yard; clicking its unfinished base can
+    // deselect it before the original building hit test becomes available.
+    if (!yard.selected) await click(yardPoint.x, yardPoint.y, 'quick', 'left');
+    const selectedBuilding = await stateWait('native selected building', (next) =>
+      local(next).find((obj) => obj.uid === yard.uid && obj.selected),
+    );
+    await h.move(yardPoint.x + 170, yardPoint.y + 100);
+    await delay(150);
+    await shot('selected-building');
+    await record('building-selection-feedback', selectedBuilding);
+    if (api.selectionComparison) {
+      await h.key('Backslash');
+      await wait('selected building original picture', async () => !(await h.diagnostic()).enabled);
+      await delay(600);
+      await shot('selected-building-original');
+      await h.key('Backslash');
+      await wait('selected building keyed HD restored', async () => (await h.diagnostic()).shown);
+    }
     state = await peek();
     const tab = state.sidebar?.layout.tabs[0];
     if (!tab) throw new Error('Native building sidebar tab is unavailable');
@@ -814,7 +884,7 @@ export async function runBrowserBattleInput(api) {
   return h.finish();
 }
 
-/** End the measured match through the actual options/score/main-menu path. */
+/** End through the original defeat/score route or Abort Mission's direct setup route, then return to the menu. */
 export async function runBrowserEnd(api) {
   const h = browserContext(api);
   try {
@@ -1325,7 +1395,7 @@ export async function runBrowserEnd(api) {
     // Retain a visible picture even when native diagnostics cannot identify it.
     // A later human screenshot review is separate from this script's verdict.
     await delay(650);
-    const scorePicture = await h.shot('score');
+    const scorePicture = await h.shot(scoreSkippedByAbort ? 'abort-returned-setup' : 'score');
     visualCandidates.push({
       screenshot: scorePicture,
       controls: score?.controls ?? current.controls,
@@ -1333,7 +1403,7 @@ export async function runBrowserEnd(api) {
       phase: 'score-wait-complete',
     });
     let visualVerification = null;
-    if (!score && typeof api.scoreVisualVerifier === 'function') {
+    if (!scoreSkippedByAbort && !score && typeof api.scoreVisualVerifier === 'function') {
       // The root may supply actual screenshot-review evidence. A screenshot
       // path alone never turns a defeat prompt or main menu into a score pass.
       const evidence = await api.scoreVisualVerifier(visualCandidates);
@@ -1358,14 +1428,16 @@ export async function runBrowserEnd(api) {
       visualVerification,
       scoreSkippedByAbort,
       verified: !scoreSkippedByAbort && (!!score || !!visualVerification),
+      expectedAbortRoute: scoreSkippedByAbort,
+      scoreRequired: !scoreSkippedByAbort,
       verification: scoreSkippedByAbort
-        ? 'FAIL: Abort Mission skipped the score and returned to setup'
+        ? 'Expected original Abort Mission route: directly to skirmish setup; no score screen'
         : score
           ? 'native score labels and Continue plus screenshot'
           : visualVerification
             ? 'root screenshot review'
             : 'UNVERIFIED: screenshot review required',
-      visualVerificationRequired: !score && !visualVerification,
+      visualVerificationRequired: !scoreSkippedByAbort && !score && !visualVerification,
     });
     let returned = null;
     const actions = [];
@@ -1411,11 +1483,9 @@ export async function runBrowserEnd(api) {
       actions,
       verified: true,
     });
-    h.report.scoreVisualVerificationRequired = !score && !visualVerification;
+    h.report.scoreVisualVerificationRequired = !scoreSkippedByAbort && !score && !visualVerification;
     h.report.scoreSkippedByAbort = scoreSkippedByAbort;
-    if (scoreSkippedByAbort)
-      throw new Error('Abort Mission returned directly to skirmish setup and skipped the score screen');
-    if (!score && !visualVerification)
+    if (!scoreSkippedByAbort && !score && !visualVerification)
       throw new Error('Returned to main menu, but visible score screen was not identified by native diagnostics');
     h.report.met = true;
   } catch (error) {

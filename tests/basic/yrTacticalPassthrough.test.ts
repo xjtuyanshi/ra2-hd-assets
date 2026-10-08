@@ -64,6 +64,16 @@ describe('YR 1.001 原生叠加层直通补丁', () => {
     expect([...memory.read_memory(REGION, 0x4000)].every((byte) => byte === 0)).toBe(true);
   });
 
+  it('建筑后方选择角框的 DrawBehind 槽在安装和全部类别开启后保持原样', () => {
+    const { memory, reserve } = imageWithOriginals();
+    const buildingDrawBehind = 0x007e_3ebc + 0x10c;
+    memory.write_memory([0xd0, 0x60, 0x6f, 0x00], buildingDrawBehind);
+    const result = installYrTacticalPassthrough(memory, reserve);
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.control.set(memory, 7)).toBe(true);
+    expect(readU32(memory, buildingDrawBehind)).toBe(0x006f_60d0);
+  });
+
   it('按类别写待定开关位（下一帧开头才锁存）；类别变化时请求一次整屏重绘', () => {
     const { memory, reserve } = imageWithOriginals();
     const result = installYrTacticalPassthrough(memory, reserve);

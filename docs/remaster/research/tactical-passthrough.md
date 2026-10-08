@@ -91,6 +91,14 @@ The layer render 0x6D8DB0 walks the five layers (0x8A0360): per object `DrawBehi
 veterancy (0x454), brackets and group numbers on top of all objects. `DrawIt` also registers selectable objects
 (`TacticalClass::AddSelectable` 0x6D9EF0, used by band selection), so it must still run.
 
+Building selection brackets span both `DrawBehind` and `DrawExtras`. The pinned `DrawBehind` at 0x6F60D0 exits
+unless the runtime type is Building (6, checked at 0x6F60D8..0x6F60DE) and the selected byte at +0x83 is nonzero
+(0x6F60E4..0x6F60EC). Its remaining code only projects the building bounds and calls the bracket-line helper
+0x6F5EF0; it contains no SHP or voxel body drawing. The building vtable +0x10C therefore stays unpatched. Its rear
+brackets and the front brackets from `DrawExtras` both remain native. Selected vehicles take the non-building branch
+at 0x6F539C..0x6F53A2 directly to `DrawHealthBar` at 0x6F5E17; the large projected corner-line branch belongs to
+buildings. `DrawHealthBar` supplies the selected mobile object's SHP border and health pips at 0x6F68E8..0x6F6A4A.
+
 Object draw virtuals (vtable slot contents; DrawIt is +0x114):
 
 | Class          | vtable   | DrawIfVisible | DrawBehind | Category |
@@ -126,7 +134,7 @@ bytes is `yrPassthroughOriginalBytes()`, checked against the real executable by
 - **Terrain passes** (`terrain:pass1..8`): the eight `call rel32` sites above return at once while terrain passthrough
   is on (the frame never shows the cache then), and so does the ore-glint call at 0x6D492B (`terrain:ore-glints`),
   which writes pixels directly into the locked surface where no blitter gate sees them.
-- **Objects/effects**: vtable slots +0x104 (and +0x10C for technos) point to *suppress* stubs: the original runs with
+- **Objects/effects**: vtable slots +0x104 (and +0x10C for mobile technos) point to *suppress* stubs: the original runs with
   a suppression depth raised; the return address is kept on a private return stack so arguments and calling
   convention do not matter.
 - **Blitters**: entries of 0x4AED70 (`81 EC 94 00 00 00`), 0x706640 (`83 EC 40 53 55`) and 0x706BD0

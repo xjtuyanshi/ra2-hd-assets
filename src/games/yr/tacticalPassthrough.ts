@@ -126,7 +126,8 @@ export const YR_PASSTHROUGH_GATES: readonly YrGate[] = [
   suppressSlot('infantry:draw', 'objects', 0x007e_b058, DRAW_IF_VISIBLE, 0x005f_4b10),
   suppressSlot('infantry:behind', 'objects', 0x007e_b058, DRAW_BEHIND, 0x006f_60d0),
   suppressSlot('building:draw', 'objects', 0x007e_3ebc, DRAW_IF_VISIBLE, 0x0043_cea0),
-  suppressSlot('building:behind', 'objects', 0x007e_3ebc, DRAW_BEHIND, 0x006f_60d0),
+  // Pinned 0x6F60D0 draws only selected-building rear brackets (type 6 and +0x83 at 0x6F60D8..0x6F60EC),
+  // not world art. Keep the building +0x10C slot untouched so its line primitives stay native overlays.
   suppressSlot('aircraft:draw', 'objects', 0x007e_22a4, DRAW_IF_VISIBLE, 0x005f_4b10),
   suppressSlot('aircraft:behind', 'objects', 0x007e_22a4, DRAW_BEHIND, 0x006f_60d0),
   suppressSlot('terrain-object:draw', 'objects', 0x007f_522c, DRAW_IF_VISIBLE, 0x0071_cc50),

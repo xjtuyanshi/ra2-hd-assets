@@ -40,6 +40,8 @@ describe('YR 1.001 原生叠加层直通：原版 gamemd.exe 站点', () => {
       return next;
     });
     expect(result.ok ? [] : result.mismatches).toEqual([]);
+    // This shared virtual draws only selected-building rear brackets, not the building's body.
+    expect([...memory.read_memory(0x007e_3ebc + 0x10c, 4)]).toEqual(le32(0x006f_60d0));
   });
 
   it('特效列表的处理依据：EBolt/LineTrail/RadBeam 的 DrawAll 自己负责老化与释放，逐条绘制只经所记录的图元', () => {

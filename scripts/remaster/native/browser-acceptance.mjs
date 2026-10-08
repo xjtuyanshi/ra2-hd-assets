@@ -28,6 +28,7 @@ const { values: o } = parseArgs({
     harass: { type: 'boolean', default: false },
     'short-game': { type: 'string', default: 'original' },
     'skip-comparison': { type: 'boolean', default: false },
+    'interactions-only': { type: 'boolean', default: false },
     'fight-windows': { type: 'string', default: '3' },
     size: { type: 'string' },
     seconds: { type: 'string', default: '60' },
@@ -38,7 +39,7 @@ const { values: o } = parseArgs({
 });
 if (o.help) {
   console.log(
-    'browser-acceptance.mjs --out OUT [--config private.json] [--mode reproduce|accept|visual] [--teams original|free-for-all|three-versus-three] [--ai original|easy|medium|hard] [--scout] [--harass] [--short-game original|true|false] [--skip-comparison] [--fight-windows 1..3] [--size WxH]',
+    'browser-acceptance.mjs --out OUT [--config private.json] [--mode reproduce|accept|visual] [--teams original|free-for-all|three-versus-three] [--ai original|easy|medium|hard] [--scout] [--harass] [--short-game original|true|false] [--skip-comparison] [--interactions-only] [--fight-windows 1..3] [--size WxH]',
   );
   process.exit(0);
 }
@@ -136,6 +137,38 @@ async function shot(label) {
   const path = join(out, `${stamp}-${label}.png`);
   await page.screenshot({ path, scale: 'css', timeout: 15000 });
   report.screenshots.push({ label, path });
+  if (/^battle-(selected|selected-building|drag-band|placement-preview|cursor)$/.test(label)) {
+    const native = await worker().evaluate(() => {
+      const picture = globalThis.__auditCore?.connection?.pictureDecoder?.previous;
+      if (!picture?.pixels?.length) return null;
+      return { width: picture.width, height: picture.height, frame: picture.frame, pixels: Array.from(picture.pixels) };
+    });
+    if (native) {
+      const png = await page.evaluate(({ width, height, pixels }) => {
+        const source = document.createElement('canvas');
+        source.width = width;
+        source.height = height;
+        const context = source.getContext('2d');
+        const image = context.createImageData(width, height);
+        for (let i = 0; i < pixels.length; i++) {
+          const p = pixels[i],
+            r = (p >>> 11) & 31,
+            g = (p >>> 5) & 63,
+            b = p & 31;
+          image.data.set([(r << 3) | (r >>> 2), (g << 2) | (g >>> 4), (b << 3) | (b >>> 2), 255], i * 4);
+        }
+        context.putImageData(image, 0, 0);
+        const output = document.createElement('canvas');
+        output.width = Math.min(1600, width);
+        output.height = Math.round((height * output.width) / width);
+        output.getContext('2d').drawImage(source, 0, 0, output.width, output.height);
+        return output.toDataURL('image/png');
+      }, native);
+      const nativePath = join(out, `${stamp}-${label}-native.png`);
+      await writeFile(nativePath, Buffer.from(png.split(',')[1], 'base64'));
+      report.screenshots.push({ label: `${label}-native`, path: nativePath, frame: native.frame });
+    }
+  }
   await save();
   return path;
 }
@@ -491,7 +524,8 @@ async function restoreTeamPreferences(teams, api, endingState, runBrowserEnd) {
         !singlePlayer(current)
       ) {
         // A failed natural defeat attempt must not strand changed preferences.
-        // Abort is only a restoration exit; its skipped score remains a failure.
+        // Abort restores preferences through its normal direct-to-setup route;
+        // a failed natural defeat attempt retains its own earlier failure.
         restoration.fallbackEnding = await runBrowserEnd({ ...api, eliminateHuman: false });
         await record('restoration-abort-fallback', restoration.fallbackEnding);
         remaining();
@@ -616,6 +650,7 @@ async function accept() {
     originalShortGame,
     originalAi: null,
     eliminateHuman: false,
+    selectionComparison: o['interactions-only'],
     reviewNativePopupRequest,
   };
   const endingState = { attempted: false, result: null };
@@ -694,6 +729,7 @@ async function accept() {
       frame: state.frame,
       counters: await page.evaluate(() => window.__hdBridge.diagnostics.counters),
       timeline: await page.evaluate(() => window.__hdBridge.timeline),
+      preparationStalls: await page.evaluate(() => window.__hdBridge.stalls),
     });
     assert.equal(await toolbarToggle.getAttribute('aria-expanded'), 'false', 'Toolbar remains collapsed');
     await record('toolbar-remains-collapsed', { expanded: await toolbarToggle.getAttribute('aria-expanded') });
@@ -702,7 +738,11 @@ async function accept() {
     assert(interactions.met, interactions.error);
     await record('battle-mirror-footprint', await mirrorFootprint());
     await record('battle-map-descriptor', await mapDescriptor());
-    api.eliminateHuman = true;
+    if (o['interactions-only']) {
+      await record('interactions-only', { met: true, performance: 'not requested' });
+      return;
+    }
+    api.eliminateHuman = o.mode !== 'visual';
     if (!o.scout) {
       const before = await commandState();
       for (const key of ['KeyH', 'KeyP', 'KeyS']) {
@@ -988,6 +1028,19 @@ async function captureVisualFight() {
   originalUrl.searchParams.delete('hd-passthrough');
   let pair = { met: false };
   try {
+    const former = worker();
+    let closed = false;
+    former.once('close', () => (closed = true));
+    const visualUrl = new URL(page.url());
+    visualUrl.searchParams.set('hd-passthrough', 'none');
+    await page.goto(visualUrl.href);
+    await wait('normal worker closed before visual comparison', () => closed, 10000);
+    await wait(
+      'visual comparison HD visible',
+      () => page.evaluate(() => window.__hdBridge?.diagnostics?.shown),
+      120000,
+    );
+    await focusGameCanvas('visual-comparison-canvas-focus');
     await record('independent-visual-audit', {
       identity,
       map,
@@ -1660,11 +1713,6 @@ try {
   }
   let url = await wait('launcher URL', () => launchLog.match(/http:\/\/127\.0\.0\.1:\d+\/\?[^\s]+/)?.[0], 120000);
   launchedUrl = url;
-  if (o.mode === 'visual') {
-    const visual = new URL(url);
-    visual.searchParams.set('hd-passthrough', 'none');
-    url = visual.href;
-  }
   if (o['mouse-lock'] !== undefined) {
     assert(['0', '1'].includes(o['mouse-lock']));
     const selected = new URL(url);
