@@ -47,8 +47,8 @@ export interface SpeedTelemetryHost {
    * `actual` null clears the line (no battle running).
    */
   publish?(actual: number | null, target: number | null | undefined): void;
-  /** Where records go; default '/__perf/speed'. */
-  endpoint?: string;
+  /** Where records go; default '/__perf/speed'. Null keeps records and toolbar updates local. */
+  endpoint?: string | null;
   /** Window length; default SPEED_INTERVAL_MS. */
   intervalMs?: number;
   environment?: Partial<SpeedEnvironment>;
@@ -250,7 +250,7 @@ const SPEED_HISTORY = 240;
 
 export function startSpeedTelemetry(host: SpeedTelemetryHost): SpeedTelemetry {
   const environment: SpeedEnvironment = { ...browserEnvironment, ...host.environment };
-  const endpoint = host.endpoint ?? '/__perf/speed';
+  const endpoint = host.endpoint === undefined ? '/__perf/speed' : host.endpoint;
   const history: SpeedRecord[] = [];
   let previous: SpeedSample | null = null;
   let asking = false;
@@ -289,7 +289,7 @@ export function startSpeedTelemetry(host: SpeedTelemetryHost): SpeedTelemetry {
         if (history.length > SPEED_HISTORY) history.shift();
         shown = true;
         host.publish?.(record.logicFps, current.targetFps);
-        if (sinkGone) return;
+        if (sinkGone || endpoint === null) return;
         void environment.post(endpoint, JSON.stringify([record])).then(
           (result) => {
             if (result === 'gone') sinkGone = true;

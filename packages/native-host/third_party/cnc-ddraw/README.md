@@ -43,9 +43,12 @@ Every integration edit in C source is marked `Native-host bridge`.
   for a connected input client. Expose virtual game foreground focus. Preserve
   physical hiding around game-owned dialog subclasses and virtual visibility.
 - `src/hook.c`, `inc/winapi_hooks.h`, `src/winapi_hooks.c`: add scoped hidden-paint
-  `GetDC`, `ReleaseDC` and `EndPaint` imports; the existing `BeginPaint` hook
-  also participates. Outside synchronous hidden painting they use real APIs.
-- `inc/hook.h`: increase the internal hook table capacity from 39 to 52,
+  `GetDC`, `ReleaseDC`, `EndPaint` and `GetUpdateRect` imports; the existing
+  `BeginPaint` hook also participates. The current forced control repaint exposes
+  its actual full client as the update region, since physically hidden ancestors
+  cannot retain a User32 invalid region. Outside synchronous hidden painting
+  these imports use real APIs.
+- `inc/hook.h`: increase the internal hook table capacity from 39 to 53,
   preserving the existing entries and terminating sentinel after the additional
   focus, visibility, mouse-capture, and dialog-lifetime hooks. The table is private to the wrapper,
   with no exported ABI change.

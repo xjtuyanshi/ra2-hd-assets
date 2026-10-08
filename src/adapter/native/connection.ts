@@ -36,11 +36,17 @@ interface Pending {
   type: NativeMessageType;
   resolve: (bytes: Uint8Array) => void;
   reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 interface Notification {
   type: NativeMessageType;
-  timer: ReturnType<typeof setTimeout>;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+interface Outgoing {
+  type: NativeMessageType;
+  payload: Uint8Array;
+  resolve?: (bytes: Uint8Array) => void;
+  reject?: (error: Error) => void;
 }
 
 /** A session owns one socket; disconnect rejects all pending work and never replays mutations. */
@@ -55,6 +61,9 @@ export class NativeConnection {
   private nextId = 1;
   private pending = new Map<number, Pending>();
   private notifications = new Map<number, Notification>();
+  private outgoing: Outgoing[] = [];
+  private drainTimer: ReturnType<typeof setTimeout> | null = null;
+  private draining = false;
   private mirrors = new Set<(update: NativeMirrorUpdate) => void>();
   private pictures = new Set<(picture: NativePicture) => void>();
   private errors = new Set<(error: Error) => void>();
@@ -149,18 +158,20 @@ export class NativeConnection {
         const notification = this.notifications.get(packet.id);
         if (!notification) return;
         this.notifications.delete(packet.id);
-        clearTimeout(notification.timer);
+        if (notification.timer) clearTimeout(notification.timer);
         if (packet.type === NativeMessageType.Error)
           this.reportError(new Error(new TextDecoder().decode(packet.payload)));
         else if (packet.type !== notification.type)
           this.reportError(new NativeProtocolError('Native notification response type mismatch'));
+        this.drain();
         return;
       }
       this.pending.delete(packet.id);
-      clearTimeout(pending.timer);
+      if (pending.timer) clearTimeout(pending.timer);
       if (packet.type === NativeMessageType.Error) pending.reject(new Error(new TextDecoder().decode(packet.payload)));
       else if (packet.type !== pending.type) pending.reject(new NativeProtocolError('Native response type mismatch'));
       else pending.resolve(packet.payload);
+      this.drain();
       return;
     }
     if (packet.type === NativeMessageType.Mirror) {
@@ -178,54 +189,96 @@ export class NativeConnection {
   private send(type: NativeMessageType, id: number, payload: Uint8Array): void {
     if (this.closed || !this.hello || !this.socket || this.socket.readyState !== 1)
       throw new Error('Native agent is not connected');
-    if ((this.socket.bufferedAmount ?? 0) > NATIVE_MAX_MESSAGE)
-      throw new Error('Native outgoing socket backlog exceeds limit');
     this.socket.send(encodePacket(type, id, payload));
+  }
+
+  private waitsForGame(type: NativeMessageType): boolean {
+    // Native menus/load screens and socket backpressure can delay valid input
+    // or read-only results. Keep waiting for completion or connection loss;
+    // retrying queued input could double-click.
+    return (
+      type === NativeMessageType.Input ||
+      type === NativeMessageType.Credit ||
+      type === NativeMessageType.InputState ||
+      type === NativeMessageType.Diagnostics ||
+      type === NativeMessageType.Read
+    );
+  }
+
+  private drain(): void {
+    if (this.draining || this.closed) return;
+    this.draining = true;
+    try {
+      while (this.outgoing.length) {
+        if (!this.hello || !this.socket || this.socket.readyState !== 1) {
+          const error = new Error('Native agent is not connected');
+          for (const queued of this.outgoing.splice(0)) queued.reject?.(error);
+          return;
+        }
+        if ((this.socket.bufferedAmount ?? 0) > NATIVE_MAX_MESSAGE) {
+          // WebSocket has no drain event. Keep bytes owned by this connection
+          // until the browser can accept them, without starting a reply timer.
+          if (!this.drainTimer)
+            this.drainTimer = setTimeout(() => {
+              this.drainTimer = null;
+              this.drain();
+            }, 0);
+          return;
+        }
+        const queued = this.outgoing[0]!;
+        if (queued.type !== NativeMessageType.Ack && this.pending.size + this.notifications.size >= 16) return;
+        this.outgoing.shift();
+        const id = this.nextId++;
+        if (this.nextId > 0xffffffff) this.nextId = 1;
+        const timer =
+          queued.type === NativeMessageType.Ack || this.waitsForGame(queued.type)
+            ? null
+            : setTimeout(() => {
+                this.pending.delete(id);
+                this.notifications.delete(id);
+                const error = new Error(`Native request ${queued.type} timed out; host completion is unknown`);
+                if (queued.reject) queued.reject(error);
+                else this.reportError(error);
+                this.drain();
+              }, this.timeoutMs);
+        if (queued.resolve && queued.reject)
+          this.pending.set(id, { type: queued.type, resolve: queued.resolve, reject: queued.reject, timer });
+        else if (queued.type !== NativeMessageType.Ack) this.notifications.set(id, { type: queued.type, timer });
+        try {
+          this.send(queued.type, id, queued.payload);
+        } catch (cause) {
+          if (timer) clearTimeout(timer);
+          this.pending.delete(id);
+          this.notifications.delete(id);
+          const error = cause instanceof Error ? cause : new Error(String(cause));
+          if (queued.reject) queued.reject(error);
+          else this.reportError(error);
+        }
+      }
+    } finally {
+      this.draining = false;
+    }
   }
 
   request(type: NativeMessageType, payload: Uint8Array = new Uint8Array()): Promise<Uint8Array> {
     if (type === NativeMessageType.Ack) return Promise.reject(new Error('Native ACK is a notification'));
-    if (this.pending.size + this.notifications.size >= 16)
-      return Promise.reject(new Error('Native request limit reached'));
-    const id = this.nextId++;
-    if (this.nextId > 0xffffffff) this.nextId = 1;
+    if (this.closed || !this.hello || !this.socket || this.socket.readyState !== 1)
+      return Promise.reject(new Error('Native agent is not connected'));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Native request ${type} timed out; host completion is unknown`));
-      }, this.timeoutMs);
-      this.pending.set(id, { type, resolve, reject, timer });
-      try {
-        this.send(type, id, payload);
-      } catch (error) {
-        clearTimeout(timer);
-        this.pending.delete(id);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
+      this.outgoing.push({ type, payload: payload.slice(), resolve, reject });
+      this.drain();
     });
   }
 
   notify(type: NativeMessageType, payload: Uint8Array = new Uint8Array()): void {
-    if (type !== NativeMessageType.Ack && this.pending.size + this.notifications.size >= 16)
-      throw new Error('Native notification limit reached');
-    const id = this.nextId++;
-    if (this.nextId > 0xffffffff) this.nextId = 1;
-    if (type === NativeMessageType.Ack) {
-      this.send(type, id, payload);
-      return;
-    }
-    const timer = setTimeout(() => {
-      this.notifications.delete(id);
-      this.reportError(new Error(`Native notification ${type} timed out; host completion is unknown`));
-    }, this.timeoutMs);
-    this.notifications.set(id, { type, timer });
-    try {
-      this.send(type, id, payload);
-    } catch (error) {
-      clearTimeout(timer);
-      this.notifications.delete(id);
-      throw error;
-    }
+    if (this.closed || !this.hello || !this.socket || this.socket.readyState !== 1)
+      throw new Error('Native agent is not connected');
+    // Mirror ACKs release the host's stream slot and must not wait behind the
+    // correlated-request window. They still respect browser socket backpressure.
+    const queued = { type, payload: payload.slice() };
+    if (type === NativeMessageType.Ack) this.outgoing.unshift(queued);
+    else this.outgoing.push(queued);
+    this.drain();
   }
 
   async read(
@@ -284,11 +337,14 @@ export class NativeConnection {
     this.rejectHello?.(error);
     this.resolveHello = this.rejectHello = null;
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
+      if (pending.timer) clearTimeout(pending.timer);
       pending.reject(error);
     }
     this.pending.clear();
-    for (const notification of this.notifications.values()) clearTimeout(notification.timer);
+    for (const queued of this.outgoing.splice(0)) queued.reject?.(error);
+    if (this.drainTimer) clearTimeout(this.drainTimer);
+    this.drainTimer = null;
+    for (const notification of this.notifications.values()) if (notification.timer) clearTimeout(notification.timer);
     this.notifications.clear();
     if (this.socket) {
       this.socket.onopen = this.socket.onmessage = this.socket.onerror = this.socket.onclose = null;

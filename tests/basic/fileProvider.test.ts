@@ -2,7 +2,7 @@
  * Game file layer unit tests (migrated from scripts/fileProviderSmoke.mts):
  * Memory/Directory provider path normalization and discovery (including fake File System Access handles), plus Win32Shim critical sections, GetDriveTypeA, MCIWndCreateA+MM_MCINOTIFY, coalesced small _lwrite writes, and save -> load reopening.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DirectoryGameFileProvider } from '../../src/platform/browser/files/directory';
 import { collectDirectoryOverlays, directoryScopeOf } from '../../src/platform/browser/files/directoryAccess';
 import { validateGameDirectory } from '../../src/resources/discovery/discoverGameSources';
@@ -35,6 +35,27 @@ describe('MemoryGameFileProvider', () => {
 });
 
 describe('discoverGameSources', () => {
+  it('已作用域安装目录不会再次枚举不存在的同名子目录', async () => {
+    const root = new MemoryGameFileProvider(new Map([['ra2/gamemd.exe', new Uint8Array([0x4d, 0x5a, 5])]]));
+    const listing = vi.spyOn(root, 'list');
+    const detected = await discoverGameSources(new ScopedGameFileProvider(root, 'ra2'));
+    expect(detected.map((source) => source.game.id)).toEqual(['yr']);
+    expect(listing.mock.calls).toEqual([['ra2']]);
+    await detected[0]!.files.write('Save/slot.sav', new Uint8Array([7]));
+    expect(await root.read('ra2/save/slot.sav')).toEqual(new Uint8Array([7]));
+  });
+
+  it('根目录枚举不受支持时仍尝试约定子目录，不把未知当成不存在', async () => {
+    const root = new MemoryGameFileProvider(new Map([['ra2/gamemd.exe', new Uint8Array([0x4d, 0x5a, 5])]]));
+    const originalList = root.list.bind(root);
+    const listing = vi
+      .spyOn(root, 'list')
+      .mockImplementation((directory) => (directory ? originalList(directory) : Promise.resolve(null)));
+    const detected = await discoverGameSources(root);
+    expect(detected.map((source) => source.game.id)).toEqual(['yr']);
+    expect(listing.mock.calls).toEqual([[''], ['ra2']]);
+  });
+
   it('在共享安装目录中分别发现 RA2 与 YR，并保持 scoped 写回', async () => {
     const developmentRoot = new MemoryGameFileProvider(
       new Map([

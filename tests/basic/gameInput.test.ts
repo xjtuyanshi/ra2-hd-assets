@@ -222,6 +222,40 @@ describe('桌面鼠标跟手性', () => {
     expect(vm.postMessage).toHaveBeenCalledTimes(3);
   });
 
+  it('键盘按下和释放先冲刷最新移动，不让键盘事件越过尚未执行的鼠标帧', () => {
+    const { vm, pointer, frames, flush } = setup();
+    const key = (type: string) =>
+      window.dispatchEvent(
+        Object.assign(new Event(type, { cancelable: true }), {
+          code: 'KeyA',
+          key: 'a',
+          location: 0,
+          altKey: false,
+          ctrlKey: false,
+          metaKey: false,
+          shiftKey: false,
+        }),
+      );
+    pointer('pointermove', { movementX: 1 });
+    pointer('pointermove', { movementX: 2 });
+    expect(vm.postMessage).toHaveBeenCalledTimes(1);
+    key('keydown');
+    expect(vm.postMessage.mock.calls.map(([message]) => message)).toEqual([0x200, 0x200, 0x100, 0x102]);
+    expect(vm.postMessage.mock.calls[1]).toEqual([0x200, 0, (300 << 16) | 403]);
+    expect(vm.setCursorPosition).toHaveBeenLastCalledWith(403, 300);
+    pointer('pointermove', { movementX: 3 });
+    pointer('pointermove', { movementX: 4 });
+    key('keyup');
+    expect(vm.postMessage.mock.calls.map(([message]) => message)).toEqual([
+      0x200, 0x200, 0x100, 0x102, 0x200, 0x200, 0x101,
+    ]);
+    expect(vm.postMessage.mock.calls[5]).toEqual([0x200, 0, (300 << 16) | 410]);
+    expect(vm.setCursorPosition).toHaveBeenLastCalledWith(410, 300);
+    expect(frames.size).toBe(0);
+    flush();
+    expect(vm.postMessage).toHaveBeenCalledTimes(7);
+  });
+
   it('失焦后取消尚未投递的移动', () => {
     const { canvas, vm, pointer, flush } = setup();
     pointer('pointermove', { movementX: 10 });

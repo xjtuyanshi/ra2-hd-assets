@@ -3,6 +3,7 @@
 #include "dd.h"
 #include "ddsurface.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 /* A credit grants one picture. Its exact baseline is committed only after the
@@ -16,7 +17,22 @@ static uint32_t capacity_pixels, baseline_width, baseline_height;
 static uint32_t pending_width, pending_height;
 static int baseline_valid, credit, in_flight;
 #define NH_WM_PICTURE (WM_APP + 0x149)
-static unsigned refresh_retries;
+static volatile LONG captures, last_encode_us, maximum_encode_us, last_encoded_bytes, last_changed_rows;
+
+static uint32_t elapsed_us(LARGE_INTEGER start)
+{
+    LARGE_INTEGER now, frequency;
+    if (!QueryPerformanceCounter(&now) || !QueryPerformanceFrequency(&frequency) || !frequency.QuadPart) return 0;
+    return (uint32_t)((now.QuadPart - start.QuadPart) * 1000000 / frequency.QuadPart);
+}
+
+void nh_picture_diagnostics(char *json, uint32_t capacity)
+{
+    snprintf(json, capacity, "{\"captures\":%ld,\"lastEncodeUs\":%ld,\"maxEncodeUs\":%ld,\"lastBytes\":%ld,\"lastChangedRows\":%ld}",
+        InterlockedCompareExchange(&captures, 0, 0), InterlockedCompareExchange(&last_encode_us, 0, 0),
+        InterlockedCompareExchange(&maximum_encode_us, 0, 0), InterlockedCompareExchange(&last_encoded_bytes, 0, 0),
+        InterlockedCompareExchange(&last_changed_rows, 0, 0));
+}
 
 static void initialize(void)
 {
@@ -53,19 +69,15 @@ void nh_picture_credit(uint32_t id, const uint8_t *payload, uint32_t length)
     }
     initialize();
     EnterCriticalSection(&picture_lock);
-    if (credit || in_flight)
-    {
-        LeaveCriticalSection(&picture_lock);
-        const char *error = "picture credit outstanding; wait for its picture";
-        nh_send(NH_ERROR, id, error, (uint32_t)strlen(error));
-        return;
-    }
+    /* Permission is coalesced, never an additional picture mailbox. A credit
+     * arriving while the preceding packet is being sent requests the next
+     * current picture, with its baseline committed by nh_picture_sent first. */
     credit = 1;
     LeaveCriticalSection(&picture_lock);
     /* Static menus do not present again after a credit arrives. Wake their
      * owning GUI thread instead of retaining a surface pointer on the I/O
      * thread; it captures the current primary through the same delta path. */
-    if (!g_ddraw.hwnd || !PostMessageA(g_ddraw.hwnd, NH_WM_PICTURE, 0, 0))
+    if (!g_ddraw.hwnd)
     {
         EnterCriticalSection(&picture_lock);
         credit = 0;
@@ -74,6 +86,8 @@ void nh_picture_credit(uint32_t id, const uint8_t *payload, uint32_t length)
         nh_send(NH_ERROR, id, error, (uint32_t)strlen(error));
         return;
     }
+    if (!PostMessageA(g_ddraw.hwnd, NH_WM_PICTURE, 0, 0))
+        SetTimer(g_ddraw.hwnd, NH_WM_PICTURE, 16, NULL);
     nh_send(NH_CREDIT, id, NULL, 0);
 }
 
@@ -82,28 +96,14 @@ int nh_picture_message(HWND window, UINT message, WPARAM wparam)
     if (message != NH_WM_PICTURE && !(message == WM_TIMER && wparam == NH_WM_PICTURE)) return 0;
     if (InterlockedCompareExchange(&initialized, 0, 0) != 2) return 1;
     KillTimer(window, NH_WM_PICTURE);
-    if (message == NH_WM_PICTURE) refresh_retries = 0;
     dds_NativeCapturePrimary();
     int pending;
     EnterCriticalSection(&picture_lock);
     pending = credit && !in_flight && nh_connected();
-    if (pending && ++refresh_retries > 64) credit = pending = 0;
     LeaveCriticalSection(&picture_lock);
     /* Surface locks can be owned while the game pumps messages. Retry on the
      * GUI timer without blocking that owner or spinning its message pump. */
-    if (pending && !SetTimer(window, NH_WM_PICTURE, 16, NULL))
-    {
-        EnterCriticalSection(&picture_lock);
-        credit = 0;
-        LeaveCriticalSection(&picture_lock);
-        const char *error = "game picture refresh unavailable";
-        nh_send(NH_ERROR, 0, error, (uint32_t)strlen(error));
-    }
-    else if (refresh_retries > 64)
-    {
-        const char *error = "game picture surface remained busy";
-        nh_send(NH_ERROR, 0, error, (uint32_t)strlen(error));
-    }
+    if (pending) SetTimer(window, NH_WM_PICTURE, 16, NULL);
     return 1;
 }
 
@@ -121,7 +121,9 @@ void nh_picture_sent(void)
         baseline_valid = 1;
         in_flight = 0;
     }
+    int pending = credit;
     LeaveCriticalSection(&picture_lock);
+    if (pending && g_ddraw.hwnd) PostMessageA(g_ddraw.hwnd, NH_WM_PICTURE, 0, 0);
 }
 
 void nh_picture_disconnect(void)
@@ -163,6 +165,9 @@ void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pi
     InterlockedExchange(&surface_width, (LONG)width);
     InterlockedExchange(&surface_height, (LONG)height);
     InterlockedExchange(&surface_bpp, (LONG)bpp);
+    /* Forced native paint callbacks may present intermediate background-only
+     * primaries before their control pass commits. Publish the completed
+     * current primary after that pass, retaining all native dialog controls. */
     if (nh_hidden_painting() || !nh_connected() || !pixels || bpp != 16 || !width || !height || width > 4096 || height > 4096 ||
         pitch < width * 2 || (uint64_t)width * height > 2u * 1024u * 1024u ||
         InterlockedCompareExchange(&initialized, 0, 0) != 2 || !TryEnterCriticalSection(&picture_lock)) return;
@@ -171,6 +176,8 @@ void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pi
         LeaveCriticalSection(&picture_lock);
         return;
     }
+    LARGE_INTEGER encoding_start;
+    QueryPerformanceCounter(&encoding_start);
     uint32_t pixels_count = width * height;
     /* Worst alternating literal/key pixels cost three bytes per pixel; the
      * conservative four-byte bound also includes segment and row headers. */
@@ -220,10 +227,18 @@ void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pi
         rows++;
     }
     memcpy(encoded + 12, &rows, 4);
+    uint32_t duration = elapsed_us(encoding_start);
+    InterlockedIncrement(&captures);
+    InterlockedExchange(&last_encode_us, (LONG)duration);
+    if (duration > (uint32_t)InterlockedCompareExchange(&maximum_encode_us, 0, 0)) InterlockedExchange(&maximum_encode_us, (LONG)duration);
+    InterlockedExchange(&last_encoded_bytes, (LONG)offset);
+    InterlockedExchange(&last_changed_rows, (LONG)rows);
     /* Publish only accepts an empty mailbox. Setting pending first prevents the
      * send callback from observing half-built baseline metadata. */
     pending_width = width; pending_height = height; in_flight = 1;
-    if (nh_publish(NH_PICTURE, encoded, offset)) credit = 0;
+    /* Hand off the owned encoded buffer, using the idle mailbox allocation for
+     * the next encode. Full menu repaints need no second payload-sized copy. */
+    if (nh_publish_move(NH_PICTURE, &encoded, offset)) credit = 0;
     else in_flight = 0;
     LeaveCriticalSection(&picture_lock);
 }

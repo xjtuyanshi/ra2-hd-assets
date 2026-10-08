@@ -28,10 +28,13 @@ typedef struct {
 typedef struct { uint32_t address, size; int pinned; } nh_allocation;
 
 static volatile LONG nh_running, nh_ready, nh_client_present;
+static volatile LONG nh_client_generation;
 static volatile LONG nh_identity_ok;
 static LONG nh_configured;
 static SOCKET nh_listener = INVALID_SOCKET, nh_client = INVALID_SOCKET;
-static HANDLE nh_wake;
+static HANDLE nh_wake, nh_reply_space;
+static DWORD nh_io_thread_id;
+static uint8_t **nh_active_staging;
 static CRITICAL_SECTION nh_queue_lock;
 static nh_packet nh_replies[NH_REPLY_SLOTS], nh_streams[2];
 static uint32_t nh_reply_head, nh_reply_count, nh_reply_bytes;
@@ -40,6 +43,7 @@ static uint32_t nh_allocated;
 static char nh_token[129], nh_origin[256], nh_hash[65];
 static uint32_t nh_exe_size, nh_pe_timestamp;
 static uint16_t nh_port;
+static int nh_flush(SOCKET socket, uint8_t **staging);
 
 static uint32_t nh_u32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -121,6 +125,7 @@ int nh_safe_write(uint32_t address, const void *bytes, uint32_t length) {
 }
 
 int nh_connected(void) { return InterlockedCompareExchange(&nh_client_present, 0, 0) != 0; }
+uint32_t nh_connection_generation(void) { return (uint32_t)InterlockedCompareExchange(&nh_client_generation, 0, 0); }
 int nh_identity_verified(void) { return InterlockedCompareExchange(&nh_identity_ok, 0, 0) != 0; }
 int nh_allocation_contains(uint32_t address, uint32_t length) {
     uint32_t i;
@@ -149,8 +154,10 @@ static void nh_disconnect_socket(void) {
     if (nh_wake) SetEvent(nh_wake);
 }
 
-/* Replies are bounded; disconnect instead of silently discarding a mutation result. */
-void nh_send(uint16_t type, uint32_t id, const void *payload, uint32_t length) {
+/* Replies remain bounded. A full mailbox is backpressure, not a transport
+ * failure: the I/O owner drains it while other producers wait outside locks.
+ * The authenticated request result is never discarded during a busy moment. */
+void nh_send_for_connection(uint32_t generation, uint16_t type, uint32_t id, const void *payload, uint32_t length) {
     nh_packet *packet;
     uint8_t *copy = NULL;
     if (!nh_ready || !nh_connected() || length > NH_MAX_MESSAGE || (length && !payload)) return;
@@ -159,12 +166,22 @@ void nh_send(uint16_t type, uint32_t id, const void *payload, uint32_t length) {
         if (!copy) { nh_disconnect_socket(); return; }
         memcpy(copy, payload, length);
     }
-    EnterCriticalSection(&nh_queue_lock);
-    if (nh_reply_count >= NH_REPLY_SLOTS || length > NH_MAX_MESSAGE - nh_reply_bytes || !nh_connected()) {
+    for (;;) {
+        EnterCriticalSection(&nh_queue_lock);
+        if (!nh_connected() || (generation && generation != nh_connection_generation())) {
+            LeaveCriticalSection(&nh_queue_lock);
+            free(copy);
+            return;
+        }
+        if (nh_reply_count < NH_REPLY_SLOTS && length <= NH_MAX_MESSAGE - nh_reply_bytes) break;
         LeaveCriticalSection(&nh_queue_lock);
-        free(copy);
-        nh_disconnect_socket();
-        return;
+        if (GetCurrentThreadId() == nh_io_thread_id && nh_active_staging) {
+            if (!nh_flush(nh_client, nh_active_staging)) {
+                free(copy);
+                nh_disconnect_socket();
+                return;
+            }
+        } else if (nh_reply_space) WaitForSingleObject(nh_reply_space, 16);
     }
     packet = &nh_replies[(nh_reply_head + nh_reply_count) % NH_REPLY_SLOTS];
     packet->type = type; packet->id = id; packet->length = length; packet->bytes = copy; packet->ready = 1;
@@ -172,6 +189,10 @@ void nh_send(uint16_t type, uint32_t id, const void *payload, uint32_t length) {
     nh_reply_bytes += length;
     LeaveCriticalSection(&nh_queue_lock);
     SetEvent(nh_wake);
+}
+
+void nh_send(uint16_t type, uint32_t id, const void *payload, uint32_t length) {
+    nh_send_for_connection(0, type, id, payload, length);
 }
 
 int nh_publish(uint16_t type, const void *payload, uint32_t length) {
@@ -536,12 +557,13 @@ static int nh_receive(SOCKET socket, uint8_t *buffer) {
     else if (type == NH_INPUT || type == NH_INPUT_STATE || type == NH_CREDIT)
         nh_dispatch_input(type, id, buffer + 16, payload_length);
     else if (type == NH_DIAGNOSTICS) {
-        char fragment[2048], hidden_host[768], diagnostic[3072];
+        char fragment[2048], hidden_host[1024], picture[256], diagnostic[4096];
         if (payload_length) nh_error(id, "DIAGNOSTICS takes no payload");
         else {
             nh_mirror_diagnostics(fragment, sizeof(fragment));
             nh_hidden_diagnostics(hidden_host, sizeof(hidden_host));
-            snprintf(diagnostic, sizeof(diagnostic), "{%s,\"gameThreadId\":%u,\"allocatedBytes\":%u,\"replyQueue\":%u,\"hidden\":%s,\"hiddenHost\":%s}", fragment, nh_game_thread_id(), nh_allocated, nh_reply_count, nh_hidden_active() ? "true" : "false", hidden_host);
+            nh_picture_diagnostics(picture, sizeof(picture));
+            snprintf(diagnostic, sizeof(diagnostic), "{%s,\"gameThreadId\":%u,\"allocatedBytes\":%u,\"replyQueue\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"picture\":%s}", fragment, nh_game_thread_id(), nh_allocated, nh_reply_count, nh_hidden_active() ? "true" : "false", hidden_host, picture);
             nh_send(type, id, diagnostic, (uint32_t)strlen(diagnostic));
         }
     } else nh_error(id, "Unsupported request type");
@@ -557,6 +579,7 @@ static void nh_clear_queue(void) {
     nh_reply_head = nh_reply_count = nh_reply_bytes = 0;
     nh_streams[0].ready = nh_streams[1].ready = 0;
     LeaveCriticalSection(&nh_queue_lock);
+    if (nh_reply_space) SetEvent(nh_reply_space);
 }
 
 static int nh_flush(SOCKET socket, uint8_t **staging) {
@@ -573,6 +596,7 @@ static int nh_flush(SOCKET socket, uint8_t **staging) {
         *staging = packet.bytes; found = 1; break;
     }
     LeaveCriticalSection(&nh_queue_lock);
+    if (reply && nh_reply_space) SetEvent(nh_reply_space);
     if (!found) return 1;
     ok = nh_send_packet(socket, &packet);
     if (ok && packet.type == NH_PICTURE) nh_picture_sent();
@@ -581,7 +605,7 @@ static int nh_flush(SOCKET socket, uint8_t **staging) {
 }
 
 static void nh_session(SOCKET socket, uint8_t *receive, uint8_t **staging) {
-    char hello[1536], hidden_host[768];
+    char hello[2048], hidden_host[1024];
     uint32_t width = 0, height = 0, bpp = 0;
     nh_packet packet;
     nh_surface_info(&width, &height, &bpp);
@@ -591,6 +615,8 @@ static void nh_session(SOCKET socket, uint8_t *receive, uint8_t **staging) {
         nh_identity_verified() ? "true" : "false", width, height, bpp, NH_MAX_MESSAGE, NH_MAX_PAGES, NH_MAX_RULES, NH_MIRROR_MAX_BUDGET_US);
     memset(&packet, 0, sizeof(packet)); packet.type = NH_HELLO; packet.length = (uint32_t)strlen(hello); packet.bytes = (uint8_t *)hello;
     if (!nh_send_packet(socket, &packet)) return;
+    nh_active_staging = staging;
+    if (!InterlockedIncrement(&nh_client_generation)) InterlockedIncrement(&nh_client_generation);
     InterlockedExchange(&nh_client_present, 1);
     while (nh_running && nh_connected()) {
         fd_set readable;
@@ -614,6 +640,7 @@ static DWORD WINAPI nh_io_thread(void *unused) {
     uint32_t i;
     int initialized = 0;
     (void)unused;
+    nh_io_thread_id = GetCurrentThreadId();
     if (!nh_agent_configured()) { InterlockedExchange(&nh_running, 0); return 0; }
     /* A configured agent owns process-lifetime executable reservations and its
      * worker may still be unwinding after nonblocking DllMain teardown. Pin the
@@ -625,9 +652,10 @@ static DWORD WINAPI nh_io_thread(void *unused) {
     }
     InitializeCriticalSection(&nh_queue_lock); initialized = 1;
     nh_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+    nh_reply_space = CreateEventA(NULL, FALSE, FALSE, NULL);
     for (i = 0; i < 2; i++) nh_streams[i].bytes = (uint8_t *)malloc(NH_MAX_MESSAGE);
     receive = (uint8_t *)malloc(NH_MAX_MESSAGE + 16); staging = (uint8_t *)malloc(NH_MAX_MESSAGE);
-    if (!nh_wake || !nh_streams[0].bytes || !nh_streams[1].bytes || !receive || !staging) goto done;
+    if (!nh_wake || !nh_reply_space || !nh_streams[0].bytes || !nh_streams[1].bytes || !receive || !staging) goto done;
     nh_executable_identity();
     if (WSAStartup(MAKEWORD(2, 2), &winsock)) goto done;
     nh_listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -645,6 +673,7 @@ static DWORD WINAPI nh_io_thread(void *unused) {
         setsockopt(nh_client, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof(timeout));
         { BOOL nodelay = TRUE; setsockopt(nh_client, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay)); }
         if (peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK) && nh_handshake(nh_client)) nh_session(nh_client, receive, &staging);
+        nh_active_staging = NULL;
         InterlockedExchange(&nh_client_present, 0);
         shutdown(nh_client, SD_BOTH); closesocket(nh_client); nh_client = INVALID_SOCKET;
         nh_mirror_disconnect(); nh_input_disconnect(); nh_picture_disconnect(); nh_clear_queue();
@@ -658,6 +687,7 @@ done:
     if (initialized) nh_clear_queue();
     free(receive); free(staging); for (i = 0; i < 2; i++) { free(nh_streams[i].bytes); nh_streams[i].bytes = NULL; }
     if (nh_wake) { CloseHandle(nh_wake); nh_wake = NULL; }
+    if (nh_reply_space) { CloseHandle(nh_reply_space); nh_reply_space = NULL; }
     /* Do not free agent allocations on disconnect: installed guest trampolines may still reference them. */
     return 0;
 }

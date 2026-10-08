@@ -63,8 +63,8 @@ export interface HdStallMonitorHost {
   activity(): HdStallActivity | null;
   /** Stalls of the current match (while it runs, tab visible) and the longest of them in ms; (0, 0) for a new match. */
   publish?(count: number, longestMs: number): void;
-  /** Where batches go; default '/__perf/stalls'. */
-  endpoint?: string;
+  /** Where batches go; default '/__perf/stalls'. Null keeps records and toolbar updates local. */
+  endpoint?: string | null;
   /** Browser pieces, replaceable in tests. */
   environment?: Partial<HdStallEnvironment>;
 }
@@ -161,7 +161,7 @@ export function stallLogRecord(entry: StallEntry<HdStallContext>): Record<string
 
 export function startHdStallMonitor(host: HdStallMonitorHost): HdStallMonitor {
   const environment: HdStallEnvironment = { ...browserEnvironment, ...host.environment };
-  const endpoint = host.endpoint ?? '/__perf/stalls';
+  const endpoint = host.endpoint === undefined ? '/__perf/stalls' : host.endpoint;
   const tasks = new LongTaskLog();
   const observer = environment.longTasks((start, duration) => tasks.add(start, duration));
   /** When the tab was last hidden, on the loop's clock; a gap that contains it is not a stall of the page. */
@@ -214,7 +214,7 @@ export function startHdStallMonitor(host: HdStallMonitorHost): HdStallMonitor {
   };
   const body = (entries: StallEntry<HdStallContext>[]) => JSON.stringify(entries.map((e) => stallLogRecord(settle(e))));
   const batcher = new StallBatcher(recorder, {
-    send: (entries) => environment.post(endpoint, body(entries)),
+    send: (entries) => (endpoint === null ? Promise.resolve('gone') : environment.post(endpoint, body(entries))),
     now: environment.now,
   });
   const unsubscribe = environment.onVisibility((visible) => {
@@ -223,7 +223,7 @@ export function startHdStallMonitor(host: HdStallMonitorHost): HdStallMonitor {
     if (visible) return;
     hiddenAt = environment.now();
     const rest = batcher.takeRest();
-    if (rest.length) environment.beacon(endpoint, body(rest));
+    if (rest.length && endpoint !== null) environment.beacon(endpoint, body(rest));
   });
   return {
     frame: (now) => recorder.frame(now),

@@ -18,7 +18,7 @@ const IDLE: HdStallActivity = {
 };
 
 /** The monitor on a manual clock, with the browser's pieces replaced: visibility, long tasks, the two senders. */
-function monitor(options: { longTasks?: boolean } = {}) {
+function monitor(options: { longTasks?: boolean; endpoint?: string | null } = {}) {
   vi.useFakeTimers();
   let clock = 0;
   let visible = true;
@@ -35,6 +35,7 @@ function monitor(options: { longTasks?: boolean } = {}) {
   const stop = vi.fn();
   const unsubscribe = vi.fn();
   const stalls = startHdStallMonitor({
+    endpoint: options.endpoint,
     match: () => ({ ...match }),
     activity: () => activity,
     publish,
@@ -99,6 +100,19 @@ function monitor(options: { longTasks?: boolean } = {}) {
 }
 
 describe('HD page stall monitor: what a record says', () => {
+  it('keeps local stall evidence without HTTP or beacon when endpoint is null', async () => {
+    const m = monitor({ endpoint: null });
+    m.frame(0);
+    m.frame(151);
+    expect(m.stalls.entries()).toHaveLength(1);
+    expect(m.publish).toHaveBeenLastCalledWith(1, 151);
+    await m.pass(5000);
+    m.setVisible(false);
+    expect(m.posted).toHaveLength(0);
+    expect(m.beacons).toHaveLength(0);
+    expect(m.stalls.entries()).toHaveLength(1);
+    m.end();
+  });
   it('records a late frame with the match, the view and what the view was building', () => {
     const m = monitor();
     m.frame(0);

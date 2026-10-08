@@ -706,6 +706,8 @@ posting for the session. The page posts new records in batches at most every fiv
 `keepalive`), hands the rest to `navigator.sendBeacon` when the tab is hidden or the page goes away, and does not
 retry a refused batch by itself: it goes out again with the next stall. The toolbar shows one line for the current
 match, "卡顿 N 次，最长 X 秒" (`RuntimeToolbar.setStalls`): stalls while the match ran and the tab was on screen.
+Native-host sessions keep the same local records and toolbar counters with `endpoint: null`; they do not probe
+the emulator development-log route or send a beacon. An omitted endpoint retains the emulator's server sink.
 
 ## Snapshot cost on the emulator's thread
 
@@ -768,6 +770,8 @@ Two sinks, like the stall recorder: the development server appends each record a
 the session), and the toolbar shows one line under the stall line, "游戏速度 实际 X / 应有 Y"
 (`RuntimeToolbar.setGameSpeed`), the last window's rate against the allowed one. `__speedTelemetry.records` in the
 console holds the last 240 records.
+Native-host sessions use `endpoint: null` to keep these records and toolbar rates local without requesting the
+optional emulator log route. The default endpoint and server-log behavior remain unchanged for emulator sessions.
 
 ## HD interface layer (`hd-ui=1`)
 

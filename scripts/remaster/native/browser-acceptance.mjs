@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile, appendFile, readdir, lstat, open } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { createWriteStream } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { createConnection } from 'node:net';
 import { homedir } from 'node:os';
@@ -16,6 +17,7 @@ import { observePageCombat } from './page-battle-input.mjs';
 import { startBrowserCombatObserver } from './browser-combat-observer.mjs';
 import { outputDirectory } from './artifacts.mjs';
 import { nativeResolutionIniName } from './native-resolution.mjs';
+import { disableWorkerNetworkPayloadObservation, createPhase7EvidenceStream } from './phase7-input-stream.mjs';
 
 const { values: o } = parseArgs({
   options: {
@@ -59,6 +61,10 @@ const out = join(outputDirectory(o.out), 'browser');
 await mkdir(out, { recursive: true });
 const stamp = new Date().toISOString().replaceAll(':', '-');
 const reportPath = join(out, `${stamp}-${o.mode}.json`);
+const stepsPath = join(out, `${stamp}-${o.mode}-steps.ndjson`);
+const stepEvidence = await createPhase7EvidenceStream(stepsPath);
+const launcherLogPath = join(out, `${stamp}-launcher.log`);
+const launcherEvidence = createWriteStream(launcherLogPath, { flags: 'wx', mode: 0o600 });
 const report = {
   startedAt: new Date().toISOString(),
   mode: o.mode,
@@ -67,6 +73,9 @@ const report = {
   errors: [],
   cleanup: {},
   error: null,
+  stepsPath,
+  totalSteps: 0,
+  nodeRssHighBytes: Math.max(process.memoryUsage().rss, process.resourceUsage().maxRSS * 1024),
 };
 const allowed = new Set([
   'RA2_NATIVE_GAME_DIR',
@@ -90,14 +99,38 @@ let launcher,
   exited,
   privateDirectory,
   launchLog = '',
+  launchPending = '',
   stopping = false,
   cleanupPromise,
   launchedUrl,
-  dllBefore;
+  dllBefore,
+  ownedBrowserProcess;
 const redact = (s) => String(s).replace(/agent-token=[a-f0-9]+/gi, 'agent-token=[redacted]');
+const rssMonitor = setInterval(() => {
+  report.nodeRssHighBytes = Math.max(
+    report.nodeRssHighBytes,
+    process.memoryUsage().rss,
+    process.resourceUsage().maxRSS * 1024,
+  );
+}, 1000);
+rssMonitor.unref();
 const save = () => writeFile(reportPath, JSON.stringify(report, null, 2));
 const record = async (name, proof) => {
-  report.steps.push({ name, at: new Date().toISOString(), proof });
+  const entry = { name, at: new Date().toISOString(), proof };
+  await stepEvidence.append(entry);
+  report.totalSteps++;
+  // Full evidence stays on disk. Keep the familiar inline contract for small
+  // records, with explicit references for large/older records.
+  const text = JSON.stringify(proof);
+  report.steps.push(
+    text.length <= 65536 ? entry : { ...entry, proof: { evidencePath: stepsPath, record: report.totalSteps } },
+  );
+  if (report.steps.length > 256) report.steps.shift();
+  report.nodeRssHighBytes = Math.max(
+    report.nodeRssHighBytes,
+    process.memoryUsage().rss,
+    process.resourceUsage().maxRSS * 1024,
+  );
   console.log(name, JSON.stringify(proof).slice(0, 1200));
   await save();
 };
@@ -931,8 +964,16 @@ async function focusCombat(zFactor, timeout = 240000) {
     return commandState();
   };
   while (Date.now() < until) {
-    const state = await page.evaluate(() => window.__hdBridge.diagnostics.combatState);
-    combat = observePageCombat(state, zFactor);
+    // Observe inside the page: shroud and animation layers must never be
+    // serialized through Playwright on each combat-search iteration.
+    combat = await page.evaluate(
+      ({ source, zFactor }) => {
+        const observe = Function(`return (${source})`)();
+        return observe(window.__hdBridge.diagnostics.combatState, zFactor);
+      },
+      { source: observePageCombat.toString(), zFactor },
+    );
+    const state = { view: combat.view };
     if (combat.inView) {
       if (combat.frame !== lastCombatFrame) consecutive++;
       lastCombatFrame = combat.frame;
@@ -1626,14 +1667,16 @@ async function cleanup() {
         }),
         delay(10000, false),
       ]);
-      if (!closed && browserServer) {
+      if (!closed && (browserServer || ownedBrowserProcess)) {
         report.cleanup.browserEscalated = true;
         await Promise.race([
-          browserServer.kill().catch((e) => (report.cleanup.browserKillError = String(e))),
+          (browserServer ? browserServer.kill() : ownedBrowserProcess.kill()).catch(
+            (e) => (report.cleanup.browserKillError = String(e)),
+          ),
           delay(5000),
         ]);
       }
-      const process = browserServer?.process();
+      const process = browserServer?.process() ?? ownedBrowserProcess?.process;
       report.cleanup.browserProcess = process
         ? { pid: process.pid, exitCode: process.exitCode, signalCode: process.signalCode }
         : null;
@@ -1678,7 +1721,6 @@ async function cleanup() {
       report.error ??= 'Owned browser/game/launcher cleanup did not pass every gate';
       process.exitCode = 1;
     }
-    await writeFile(join(out, `${stamp}-launcher.log`), redact(launchLog));
     await save();
   })();
   return cleanupPromise;
@@ -1706,12 +1748,22 @@ try {
   for (const stream of [launcher.stdout, launcher.stderr]) {
     stream.setEncoding('utf8');
     stream.on('data', (chunk) => {
-      launchLog += chunk;
+      launchLog = (launchLog + chunk).slice(-65536);
+      launchPending += chunk;
+      let cut = launchPending.lastIndexOf('\n') + 1;
+      if (!cut && launchPending.length > 65536) cut = launchPending.length - 512;
+      const persisted = launchPending.slice(0, cut);
+      launchPending = launchPending.slice(cut);
+      if (persisted && !launcherEvidence.write(redact(persisted))) {
+        stream.pause();
+        launcherEvidence.once('drain', () => stream.resume());
+      }
       const m = launchLog.match(/Private launch logs and DLL backups: (.+)/);
       if (m) privateDirectory = m[1];
+      launchedUrl ??= launchLog.match(/http:\/\/127\.0\.0\.1:\d+\/\?[^\s]+/)?.[0];
     });
   }
-  let url = await wait('launcher URL', () => launchLog.match(/http:\/\/127\.0\.0\.1:\d+\/\?[^\s]+/)?.[0], 120000);
+  let url = await wait('launcher URL', () => launchedUrl, 120000);
   launchedUrl = url;
   if (o['mouse-lock'] !== undefined) {
     assert(['0', '1'].includes(o['mouse-lock']));
@@ -1719,7 +1771,6 @@ try {
     selected.searchParams.set('mouse-lock', o['mouse-lock']);
     url = selected.href;
   }
-  await writeFile(join(out, `${stamp}-launcher.log`), redact(launchLog));
   const cache = join(homedir(), 'Library/Caches/ms-playwright/chromium-1243');
   const exe = join(
     cache,
@@ -1727,8 +1778,9 @@ try {
     'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
   );
   await record('launcher-ready', {});
-  browserServer = await chromium.launchServer({
-    host: '127.0.0.1',
+  // In-process transport avoids copying native binary WebSocket inspector
+  // events through a second JSON WebSocket and its unbounded driver queue.
+  browser = await chromium.launch({
     headless: false,
     executablePath: exe,
     args: [
@@ -1740,7 +1792,7 @@ try {
       '--enable-webgpu-developer-features',
     ],
   });
-  browser = await chromium.connect(browserServer.wsEndpoint());
+  ownedBrowserProcess = browser._connection.toImpl(browser).options.browserProcess;
   await record('browser-started', {});
   const context = await browser.newContext({
     viewport: { width: 1280, height: 850 },
@@ -1783,12 +1835,20 @@ try {
   });
   page = await context.newPage();
   cdp = await context.newCDPSession(page);
-  page.on('websocket', (ws) => {
-    ws.on('socketerror', (e) => report.errors.push('websocket ' + e));
+  page.on('worker', async () => {
+    await delay(150);
+    await disableWorkerNetworkPayloadObservation(page).catch(() => {});
   });
-  page.on('pageerror', (e) => report.errors.push(String(e)));
+  const retainError = (error) => {
+    report.errorsTotal = (report.errorsTotal ?? 0) + 1;
+    if (report.errors.length < 128) report.errors.push(String(error).slice(0, 700));
+  };
+  page.on('websocket', (ws) => {
+    ws.on('socketerror', (e) => retainError('websocket ' + e));
+  });
+  page.on('pageerror', retainError);
   page.on('console', (m) => {
-    if (m.type() === 'error' || m.type() === 'warning') report.errors.push(m.text().slice(0, 700));
+    if (m.type() === 'error' || m.type() === 'warning') retainError(m.text());
   });
   await page.goto(url);
   await page.bringToFront();
@@ -1798,6 +1858,7 @@ try {
   // transient picker would race the auto-start effect and conceal a startup failure.
   assert.equal(new URL(url).searchParams.get('native-autostart'), 'yr');
   await wait('native worker', () => worker(), 120000);
+  await record('bounded-worker-inspector', await disableWorkerNetworkPayloadObservation(page));
   await delay(2000);
   await record(
     'worker-status',
@@ -1828,6 +1889,14 @@ try {
 } finally {
   clearTimeout(deadline);
   await cleanup();
+  clearInterval(rssMonitor);
+  report.stepEvidence = await stepEvidence.close();
+  await new Promise((resolve, reject) => {
+    launcherEvidence.once('error', reject);
+    if (launchPending) launcherEvidence.write(redact(launchPending));
+    launcherEvidence.end(resolve);
+  });
+  await save();
   await appendFile(
     resolve(o.out, 'NOTES.md'),
     `\n### Phase5 browser ${stamp}\n- ${o.mode}: ${report.error ? 'FAIL ' + report.error.split('\n')[0] : 'completed'}; ${report.steps.length} observations; cleanup ${JSON.stringify(report.cleanup)}; ${reportPath}\n`,

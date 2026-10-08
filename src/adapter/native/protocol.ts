@@ -5,6 +5,8 @@ export const NATIVE_MAX_MESSAGE = 32 * 1024 * 1024;
 export const NATIVE_MAX_PAGES = 4096;
 export const NATIVE_PAGE_SIZE = 4096;
 export const NATIVE_NO_FRAME = 0xffffffff;
+/** Skip cross-thread control metadata while retaining modal/input state. Empty payload stays full. */
+export const NATIVE_INPUT_STATE_MINIMAL = 1;
 
 export enum NativeMessageType {
   Hello = 1,

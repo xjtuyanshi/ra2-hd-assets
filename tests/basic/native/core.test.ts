@@ -44,6 +44,8 @@ class FakeAgent implements NativeWebSocket {
   hookEnabled = false;
   threadId = 77;
   refuseInput = false;
+  holdInput = false;
+  pendingInput: NativePacket[] = [];
   modal = false;
   initial = new Uint8Array(NATIVE_PAGE_SIZE);
   revisionSupport = false;
@@ -69,13 +71,25 @@ class FakeAgent implements NativeWebSocket {
         request.id,
         json({ gameThreadId: this.threadId, frameHook: { site: 0x2000, original: [1, 2], patched: [3, 4] } }),
       );
-    } else if (request.type === NativeMessageType.Input && this.refuseInput) {
-      this.emit(NativeMessageType.Error, request.id, new TextEncoder().encode('input unsupported'));
+    } else if (request.type === NativeMessageType.Input) {
+      if (this.holdInput) this.pendingInput.push(request);
+      else if (this.refuseInput)
+        this.emit(NativeMessageType.Error, request.id, new TextEncoder().encode('input unsupported'));
+      else this.emit(request.type, request.id);
     } else if (request.type === NativeMessageType.InputState) {
       this.emit(
         request.type,
         request.id,
-        json({ modal: this.modal, x: 0, y: 0, lastMessage: 0, lastKeyMessage: 0, lastKeyVirtualKey: 0 }),
+        // Legacy agents ignore request flags and still return full metadata.
+        json({
+          modal: this.modal,
+          x: 0,
+          y: 0,
+          lastMessage: 0,
+          lastKeyMessage: 0,
+          lastKeyVirtualKey: 0,
+          controls: [{ id: 12, class: 'ListBox', list: { count: 2, selection: 0, topIndex: 0, itemHeight: 19 } }],
+        }),
       );
     } else this.emit(request.type, request.id);
   }
@@ -207,6 +221,53 @@ afterEach(async () => {
 });
 
 describe('native core session and presenter lifecycle', () => {
+  it('coalesces 30000 pointer updates with one input in flight and preserves every event and position barrier', async () => {
+    const statuses = vi.fn();
+    const { core, agent } = await started({ onStatus: statuses });
+    agent.holdInput = true;
+    core.setCursorPosition(1, 2);
+    const move = (x: number, y: number) => {
+      core.setCursorPosition(x, y);
+      core.postMessage(0x0200, 0, (y << 16) | x);
+    };
+    for (let index = 0; index < 30000; index++) move(index % 1200, index % 600);
+    core.setKeyState(1, true);
+    core.postMessage(0x0201, 1, (599 << 16) | 1199);
+    core.setKeyState(1, false);
+    core.postMessage(0x0202, 0, (599 << 16) | 1199);
+    for (let index = 0; index < 1000; index++) move(index % 300, index % 200);
+    core.setKeyState(65, true);
+    core.postMessage(0x0100, 65, 1);
+    core.setKeyState(65, false);
+    core.postMessage(0x0101, 65, 0xc0000001);
+    core.postMessage(0x020a, 120 << 16, (199 << 16) | 99);
+    expect(agent.pendingInput).toHaveLength(1);
+    expect(agent.count(NativeMessageType.Input)).toBe(1);
+    const operations: number[][] = [];
+    while (agent.pendingInput.length) {
+      expect(agent.pendingInput).toHaveLength(1);
+      const packet = agent.pendingInput.shift()!;
+      operations.push([u32(packet.payload), u32(packet.payload, 4), u32(packet.payload, 8), u32(packet.payload, 12)]);
+      agent.emit(packet.type, packet.id);
+      await flush();
+    }
+    expect(operations).toEqual([
+      [3, 1, 2, 0],
+      [1, 0x0200, 0, (599 << 16) | 1199],
+      [2, 1, 1, 0],
+      [1, 0x0201, 1, (599 << 16) | 1199],
+      [2, 1, 0, 0],
+      [1, 0x0202, 0, (599 << 16) | 1199],
+      [1, 0x0200, 0, (199 << 16) | 99],
+      [2, 65, 1, 0],
+      [1, 0x0100, 65, 1],
+      [2, 65, 0, 0],
+      [1, 0x0101, 65, 0xc0000001],
+      [1, 0x020a, 120 << 16, (199 << 16) | 99],
+    ]);
+    expect(statuses.mock.calls.map(([status]) => status.phase)).not.toContain('error');
+    expect(agent.closes).toBe(0);
+  });
   it('subscribes every discovered house-tail page and waits for its complete applied revision before reading it', async () => {
     const { core, agent, policyFactory } = setup(),
       factory = vi.mocked(policyFactory).getMockImplementation()!,
@@ -660,6 +721,19 @@ describe('native core session and presenter lifecycle', () => {
     expect((await core.getRenderState())?.frame).toBe(7);
     agent.modal = true;
     expect(await core.getRenderState()).toBeNull();
+    agent.modal = false;
+    expect((await core.getRenderState())?.frame).toBe(7);
+  });
+  it('requests lightweight modal checks for frequent readers and accepts legacy full-metadata replies', async () => {
+    const { core, agent } = await started();
+    const startup = agent.requests.filter((request) => request.type === NativeMessageType.InputState);
+    expect(startup).toHaveLength(1);
+    expect(startup[0]!.payload).toEqual(new Uint8Array());
+    agent.modal = true;
+    expect(await core.getRenderState()).toBeNull();
+    expect(await core.getCommandState()).toBeNull();
+    const frequent = agent.requests.filter((request) => request.type === NativeMessageType.InputState).slice(1);
+    expect(frequent.map((request) => request.payload)).toEqual([encodeU32(1), encodeU32(1)]);
     agent.modal = false;
     expect((await core.getRenderState())?.frame).toBe(7);
   });

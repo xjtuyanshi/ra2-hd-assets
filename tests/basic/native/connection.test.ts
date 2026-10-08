@@ -100,7 +100,7 @@ describe('native connection lifecycle', () => {
     expect(socket.onmessage).toBeNull();
     await expect(connection.connect()).rejects.toThrow('closed');
   });
-  it('times out mutations without replay and bounds the number of requests', async () => {
+  it('times out sent mutations without replay and queues requests beyond the in-flight window', async () => {
     vi.useFakeTimers();
     const { socket, connection } = await connected();
     const pending = connection.request(NativeMessageType.Write);
@@ -109,11 +109,86 @@ describe('native connection lifecycle', () => {
     await rejected;
     expect(socket.sent).toHaveLength(1);
     socket.emit(NativeMessageType.Write, decodePacket(socket.sent[0]!).id);
-    const requests = Array.from({ length: 16 }, () => connection.request(NativeMessageType.Read));
-    const rejections = requests.map((request) => expect(request).rejects.toThrow('closed'));
-    await expect(connection.request(NativeMessageType.Read)).rejects.toThrow('limit');
+    const requests = Array.from({ length: 40 }, () => connection.request(NativeMessageType.Read));
+    expect(socket.sent).toHaveLength(17);
+    const first = decodePacket(socket.sent[1]!);
+    socket.emit(first.type, first.id);
+    expect(socket.sent).toHaveLength(18);
+    expect(await requests[0]).toEqual(new Uint8Array());
+    const rejections = requests.slice(1).map((request) => expect(request).rejects.toThrow('closed'));
     connection.close();
     await Promise.all(rejections);
+  });
+  it('waits through socket backpressure and native GUI delays without a busy error or replay', async () => {
+    vi.useFakeTimers();
+    const { socket, connection } = await connected();
+    const errors = vi.fn();
+    connection.onError(errors);
+    socket.bufferedAmount = NATIVE_MAX_MESSAGE + 1;
+    const payload = encodeU32(3, 10, 20, 0);
+    const input = connection.request(NativeMessageType.Input, payload);
+    payload[4] = 99;
+    connection.notify(NativeMessageType.Ack, encodeU32(42));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(socket.sent).toHaveLength(0);
+    expect(errors).not.toHaveBeenCalled();
+    socket.bufferedAmount = 0;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(socket.sent.map((bytes) => decodePacket(bytes).type)).toEqual([
+      NativeMessageType.Ack,
+      NativeMessageType.Input,
+    ]);
+    expect(decodePacket(socket.sent[1]!).payload).toEqual(encodeU32(3, 10, 20, 0));
+    const delayed = [NativeMessageType.Credit, NativeMessageType.InputState, NativeMessageType.Diagnostics].map(
+      (type) => connection.request(type),
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(errors).not.toHaveBeenCalled();
+    expect(socket.sent).toHaveLength(5);
+    for (const bytes of socket.sent.slice(1)) {
+      const packet = decodePacket(bytes);
+      socket.emit(packet.type, packet.id);
+    }
+    await Promise.all([input, ...delayed]);
+  });
+  it('allows mirror ACKs through a saturated request window and rejects all queued work on close', async () => {
+    const { socket, connection } = await connected();
+    const requests = Array.from({ length: 50 }, () => connection.request(NativeMessageType.InputState));
+    const closed = requests.map((request) => expect(request).rejects.toThrow('closed'));
+    expect(socket.sent).toHaveLength(16);
+    connection.notify(NativeMessageType.Ack, encodeU32(42));
+    expect(socket.sent).toHaveLength(17);
+    expect(decodePacket(socket.sent[16]!).type).toBe(NativeMessageType.Ack);
+    connection.close();
+    await Promise.all(closed);
+  });
+  it('waits for delayed read-only memory results and rejects unresolved reads on socket close without replay', async () => {
+    vi.useFakeTimers();
+    const { socket, connection } = await connected();
+    const errors = vi.fn();
+    const completed = vi.fn();
+    const failed = vi.fn();
+    connection.onError(errors);
+    const read = connection.read(0x1234, 2, 10);
+    void read.then(completed, failed);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(completed).not.toHaveBeenCalled();
+    expect(failed).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+    expect(socket.sent).toHaveLength(1);
+    const response = new Uint8Array(14);
+    response.set(encodeU32(10, 0x1234, 2));
+    response.set([7, 8], 12);
+    socket.emit(NativeMessageType.Read, decodePacket(socket.sent[0]!).id, response);
+    await expect(read).resolves.toEqual({ frame: 10, address: 0x1234, bytes: new Uint8Array([7, 8]) });
+    const pending = connection.read(0x1234, 2, 10);
+    const rejected = expect(pending).rejects.toThrow('closed');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(socket.sent).toHaveLength(2);
+    expect(errors).not.toHaveBeenCalled();
+    socket.onclose?.({});
+    await rejected;
+    expect(socket.sent).toHaveLength(2);
   });
   it('rejects handshake timeout and non-loopback connection parameters', async () => {
     vi.useFakeTimers();

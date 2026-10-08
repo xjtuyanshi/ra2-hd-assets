@@ -46,9 +46,12 @@ backup/restore behavior and local Go helper are documented in
   without blocking the game.
 - One picture credit grants one delta picture. The delta baseline advances only
   after that exact packet is sent. Clients request their next credit after
-  receiving/decoding the previous picture; early outstanding credits are errors.
+  receiving/decoding the previous picture; an early credit coalesces into the
+  single pending next picture instead of replacing an in-flight delta.
   Resolution changes and reconnections produce a complete picture. Changed rows
-  use RGB565 literals and compressed `0xF81F` runs.
+  use RGB565 literals and compressed `0xF81F` runs. Surface contention defers
+  capture through the GUI timer without a busy error or retry cutoff. Encoded
+  pictures hand off an owned buffer rather than copying the full payload again.
 - Input passes through game-facing WinAPI cursor/key hooks and bounded tagged
   messages on the game window thread. Battle input reaches its original WndProc;
   logically visible owned dialogs route picture-coordinate mouse messages to
@@ -57,6 +60,10 @@ backup/restore behavior and local Go helper are documented in
   exposes accepted/delivered/API-consumption counters and bounded control IDs,
   text, geometry, bounded Combo selection/list diagnostics and routing counters. DirectInput is explicitly unsupported.
   Native dialog/battle interactions and browser overlays require live acceptance.
+- Request/reply concurrency is bounded with backpressure. Pending work waits for
+  room; input success follows GUI consumption of its cursor/key state before
+  original callbacks that may enter a modal loop. Native reply mailbox pressure
+  likewise defers publication instead of closing the authenticated session.
 
 Run the lead's Stage A/B smoke tools described in the protocol guide. Game-derived
 PNGs, mirror dumps, and recordings must remain outside Git under the configured
@@ -78,21 +85,37 @@ the environment overrides `ddraw.ini` `[agent] hidden=0` or `hidden=1`.
 Hidden mode keeps top-level native windows physically hidden and provides logical
 visibility, focus, cursor/key state, and mouse capture to the game. Controls retain
 their geometry and requested visibility for protocol input. The primary RGB565
-surface remains available to picture credits. Static menu captures use bounded
+surface remains available to picture credits. A forced control paint pass is
+published only after it commits, so an intermediate background-only primary
+cannot erase the dialog's controls. The private DIB is never published directly.
+Static menu captures use bounded
 genuine native control painting: original game/control `WM_PAINT` handlers
 render into a private DIB copied from the actual current primary. Scoped
 `GetDC`/`BeginPaint` imports and paired release/end calls target that scratch HDC
 only during synchronous hidden control painting.
+Stock system control procedures receive that DC directly through `WM_PAINT`.
+Game subclasses receive the ordinary message and retain their primary paint;
+passing their forwarded stock procedure a DC could overwrite genuine native
+text with an empty generic control. Picture credits preserve the genuine
+top-level paint lifecycle before child/popup painting completes the picture.
+Their nonclient borders and scrollbars use `WM_PRINT` with `PRF_NONCLIENT` against
+the same private DIB. The actual game paint chain remains responsible for control
+contents; no dialog-specific text or list is synthesized.
+Scoped `GetUpdateRect` queries expose the forced repaint's actual full client
+region, allowing game handlers to enter their own native item/text paint path
+despite physically hidden ancestors. Outside that synchronous pass the real
+User32 update-region API remains unchanged.
 Logical show notifications and game-facing style visibility stay intact; ordinary
 battlefield pictures receive no additional control redraw. Complete text and
 open Combo popup coverage require saved native-picture evidence.
-Hidden sessions temporarily use windowed GDI presentation with the hidden primary
-client at screen origin `(0,0)`,
+Configured native sessions temporarily use windowed GDI presentation with the
+requested primary client screen origin `(0,0)` in hidden and visible development mode,
 avoid changing the host display mode, and disable
-cnc-ddraw window-settings persistence so hidden geometry is not saved into the
-player's normal configuration. Matching physical and picture origins also keeps
-custom native controls within the picture when they combine game-facing geometry
-hooks with User32's internal control layout. The original game clock and logic
+cnc-ddraw window-settings persistence so transient geometry is not saved into the
+player's normal configuration. The diagnostic `hiddenHost.clientOrigin` must be verified before comparing
+custom native controls: Wine/macOS visible windows can retain a desktop work-area
+offset, and controls that combine game-facing geometry hooks with User32 internal
+layout can then be displaced. The original game clock and logic
 remain intact.
 
 Under Wine, `[agent] desktop` or `RA2_NATIVE_AGENT_DESKTOP` names the isolated

@@ -11,11 +11,14 @@
 /* Private messages carry a bounded queue ticket, never a client-supplied pointer. */
 #define NH_WM_INPUT (WM_APP + 0x148)
 #define INPUT_QUEUE_SIZE 256
-struct input_event { uint32_t ticket, kind, a, b, c; };
+struct input_event { uint32_t ticket, id, generation, connection_generation, kind, a, b, c; LARGE_INTEGER received_at; };
 static struct input_event queue[INPUT_QUEUE_SIZE];
 static CRITICAL_SECTION input_lock;
 static volatile LONG initialized, enabled;
 static uint32_t next_ticket, accepted, delivered, last_message, last_key_message, last_key;
+static uint32_t input_generation;
+static LARGE_INTEGER input_frequency;
+static uint64_t last_delivery_queue_us, max_delivery_queue_us, last_handler_us, max_handler_us;
 static volatile LONG key_state[256], key_pressed[256], cursor_x, cursor_y;
 static volatile LONG cursor_reads, key_reads, async_key_reads, cursor_writes;
 static volatile LONG injected_key_reads, last_injected_key, cursor_last_read_x, cursor_last_read_y;
@@ -33,8 +36,17 @@ static void initialize(void)
     if (InterlockedCompareExchange(&initialized, 1, 0) == 0)
     {
         InitializeCriticalSection(&input_lock);
+        QueryPerformanceFrequency(&input_frequency);
         InterlockedExchange(&initialized, 2);
     }
+}
+
+static uint64_t elapsed_us(LARGE_INTEGER start)
+{
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return input_frequency.QuadPart > 0 ?
+        (uint64_t)((now.QuadPart - start.QuadPart) * 1000000 / input_frequency.QuadPart) : 0;
 }
 
 int nh_input_active(void)
@@ -248,7 +260,7 @@ static BOOL CALLBACK describe_control(HWND hwnd, LPARAM context)
         snprintf(combo, sizeof(combo), ",\"combo\":{\"count\":%s,\"selection\":%s,\"dropped\":%s}",
             count_json, selection_json, dropped_json);
     }
-    else if (_stricmp(class_name, "ComboLBox") == 0)
+    else if (_stricmp(class_name, "ComboLBox") == 0 || _stricmp(class_name, "ListBox") == 0)
     {
         int32_t count, selection, top, height;
         char count_json[32] = "null", selection_json[32] = "null", top_json[32] = "null", height_json[32] = "null";
@@ -279,7 +291,7 @@ static BOOL CALLBACK describe_popup(HWND hwnd, LPARAM context)
     return TRUE;
 }
 
-static void input_state(uint32_t id)
+static void input_state(uint32_t id, int skip_controls)
 {
     char json[65536], held[1024];
     HWND target = nh_input_target_window();
@@ -299,7 +311,8 @@ static void input_state(uint32_t id)
         "\"lastInjectedKey\":%ld,\"cursorLastReadX\":%ld,\"cursorLastReadY\":%ld,\"modal\":%s,"
         "\"dialogMessages\":%u,\"lastTargetHwnd\":%u,\"lastTargetId\":%u,\"dialogHwnd\":%u,"
         "\"focusHwnd\":%u,\"gameCaptureHwnd\":%u,\"redirectedCapturedReleases\":%u,"
-        "\"consumedCapturedReleases\":%u,\"directInput\":\"unsupported\",\"controls\":[",
+        "\"consumedCapturedReleases\":%u,\"lastDeliveryQueueUs\":%llu,\"maxDeliveryQueueUs\":%llu,"
+        "\"lastHandlerUs\":%llu,\"maxHandlerUs\":%llu,\"directInput\":\"unsupported\",\"controls\":[",
         InterlockedCompareExchange(&cursor_x, 0, 0), InterlockedCompareExchange(&cursor_y, 0, 0), held,
         InterlockedCompareExchange(&cursor_reads, 0, 0), InterlockedCompareExchange(&key_reads, 0, 0),
         InterlockedCompareExchange(&async_key_reads, 0, 0), InterlockedCompareExchange(&cursor_writes, 0, 0),
@@ -308,10 +321,12 @@ static void input_state(uint32_t id)
         InterlockedCompareExchange(&cursor_last_read_x, 0, 0), InterlockedCompareExchange(&cursor_last_read_y, 0, 0), modal ? "true" : "false",
         dialog_messages, last_target, last_target_id, (uint32_t)(uintptr_t)(modal ? target : NULL),
         (uint32_t)(uintptr_t)nh_input_get_focus(), (uint32_t)(uintptr_t)nh_hidden_get_capture(),
-        redirected_captured_releases, consumed_captured_releases);
+        redirected_captured_releases, consumed_captured_releases,
+        (unsigned long long)last_delivery_queue_us, (unsigned long long)max_delivery_queue_us,
+        (unsigned long long)last_handler_us, (unsigned long long)max_handler_us);
     LeaveCriticalSection(&input_lock);
     struct controls_context controls = {json, sizeof(json), (uint32_t)strlen(json), 0, 0, 0, target};
-    if (target)
+    if (target && !skip_controls)
     {
         describe_control(target, (LPARAM)&controls);
         EnumChildWindows(target, describe_control, (LPARAM)&controls);
@@ -336,34 +351,72 @@ void nh_dispatch_input(uint16_t type, uint32_t id, const uint8_t *payload, uint3
 {
     if (type == NH_CREDIT) { nh_picture_credit(id, payload, length); return; }
     initialize();
-    if (type == NH_INPUT_STATE) { input_state(id); return; }
+    if (type == NH_INPUT_STATE)
+    {
+        uint32_t flags = 0;
+        if (length == 4) memcpy(&flags, payload, 4);
+        if ((length != 0 && length != 4) || (length == 4 && flags != 1))
+        { error(id, "input state takes no payload or skip-controls flag one"); return; }
+        /* Frequent readers need modal ownership, not GUI control queries.
+         * Empty requests retain the complete diagnostic response. */
+        input_state(id, flags == 1);
+        return;
+    }
     if (type != NH_INPUT || length != 16) { error(id, "invalid input request"); return; }
     uint32_t fields[4];
     memcpy(fields, payload, 16);
     uint32_t kind = fields[0], a = fields[1], b = fields[2], c = fields[3];
+    LARGE_INTEGER received_at;
+    QueryPerformanceCounter(&received_at);
     if (!g_ddraw.hwnd || !g_ddraw.wndproc) { error(id, "game window unavailable"); return; }
     if (kind < 1 || kind > 3 || (kind == 1 && !allowed_message(a)) ||
         (kind == 2 && (a > 255 || b > 1))) { error(id, "unsupported input operation"); return; }
     EnterCriticalSection(&input_lock);
-    uint32_t ticket = ++next_ticket;
-    if (!ticket) ticket = ++next_ticket;
+    uint32_t ticket = next_ticket + 1;
+    if (!ticket) ticket++;
     struct input_event *slot = &queue[ticket % INPUT_QUEUE_SIZE];
-    if (slot->ticket)
+    /* The page waits for GUI consumption before sending another input. Other
+     * protocol clients can still fill the bounded ticket ring: stop receiving
+     * more work until the genuine GUI thread releases this slot, without
+     * dropping the event or turning temporary load into a runtime error. */
+    while (slot->ticket)
     {
         LeaveCriticalSection(&input_lock);
-        error(id, "input queue full"); return;
+        if (!nh_connected()) return;
+        Sleep(1);
+        EnterCriticalSection(&input_lock);
     }
-    slot->ticket = ticket; slot->kind = kind; slot->a = a; slot->b = b; slot->c = c;
-    if (!PostMessageA(g_ddraw.hwnd, NH_WM_INPUT, ticket, 0))
+    next_ticket = ticket;
+    slot->ticket = ticket; slot->id = id; slot->generation = input_generation;
+    slot->connection_generation = nh_connection_generation();
+    slot->kind = kind; slot->a = a; slot->b = b; slot->c = c;
+    slot->received_at = received_at;
+    while (!PostMessageA(g_ddraw.hwnd, NH_WM_INPUT, ticket, 0))
     {
-        slot->ticket = 0;
+        DWORD reason = GetLastError();
         LeaveCriticalSection(&input_lock);
-        error(id, "input queue delivery failed"); return;
+        if (!nh_connected()) return;
+        if (reason != ERROR_NOT_ENOUGH_QUOTA || !IsWindow(g_ddraw.hwnd))
+        {
+            EnterCriticalSection(&input_lock); slot->ticket = 0; LeaveCriticalSection(&input_lock);
+            error(id, "input queue delivery failed"); return;
+        }
+        Sleep(1);
+        EnterCriticalSection(&input_lock);
     }
     InterlockedExchange(&enabled, 1);
     accepted++;
     LeaveCriticalSection(&input_lock);
-    nh_send(NH_INPUT, id, NULL, 0);
+}
+
+static void input_consumed(const struct input_event *event)
+{
+    /* Disconnect retires request IDs. The transport checks connection ownership
+     * again when space becomes available, without holding a game input lock. */
+    EnterCriticalSection(&input_lock);
+    int current = event->generation == input_generation;
+    LeaveCriticalSection(&input_lock);
+    if (current) nh_send_for_connection(event->connection_generation, NH_INPUT, event->id, NULL, 0);
 }
 
 static int belongs_to(HWND hwnd, HWND root)
@@ -510,20 +563,9 @@ int nh_input_message(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, LRES
     }
     struct input_event event = *slot;
     slot->ticket = 0;
-    if (!activated)
-    {
-        activated = 1;
-        LeaveCriticalSection(&input_lock);
-        /* Drop a preexisting physical capture without warping the OS pointer. */
-        real_ClipCursor(NULL);
-        ReleaseCapture();
-        g_mouse_locked = FALSE;
-        /* Virtual focus belongs to this authenticated client. This notification
-         * changes the game's focus state without selecting an OS window. */
-        CallWindowProcA(g_ddraw.wndproc, hwnd, WM_ACTIVATEAPP, TRUE, GetCurrentThreadId());
-        CallWindowProcA(g_ddraw.wndproc, hwnd, WM_ACTIVATE, WA_ACTIVE, 0);
-    }
-    else LeaveCriticalSection(&input_lock);
+    last_delivery_queue_us = elapsed_us(event.received_at);
+    if (last_delivery_queue_us > max_delivery_queue_us) max_delivery_queue_us = last_delivery_queue_us;
+    LeaveCriticalSection(&input_lock);
     if (event.kind == 2)
     {
         LONG previous = InterlockedCompareExchange(&key_state[event.a], 0, 0);
@@ -536,12 +578,33 @@ int nh_input_message(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, LRES
         InterlockedExchange(&key_state[event.a], (event.b ? 0x8000 : 0) | toggle);
     }
     else if (event.kind == 3) nh_input_set_cursor((int)event.a, (int)event.b);
-    else
+    else if (event.a >= WM_MOUSEMOVE && event.a <= WM_MOUSEHWHEEL)
+        nh_input_set_cursor((SHORT)LOWORD(event.c), (SHORT)HIWORD(event.c));
+    /* A native handler can enter a nested modal loop or run its own animation.
+     * Consumption and cursor/key state precede ACK; callback return does not.
+     * This bounds queued tickets while allowing the next real release to reach
+     * the modal loop instead of waiting for that loop to finish. */
+    input_consumed(&event);
+    if (!activated)
     {
-        if (event.a >= WM_MOUSEMOVE && event.a <= WM_MOUSEHWHEEL)
-            nh_input_set_cursor((SHORT)LOWORD(event.c), (SHORT)HIWORD(event.c));
+        activated = 1;
+        /* Drop a preexisting physical capture without warping the OS pointer. */
+        real_ClipCursor(NULL);
+        ReleaseCapture();
+        g_mouse_locked = FALSE;
+        /* Virtual focus belongs to this authenticated client. This notification
+         * changes the game's focus state without selecting an OS window. */
+        CallWindowProcA(g_ddraw.wndproc, hwnd, WM_ACTIVATEAPP, TRUE, GetCurrentThreadId());
+        CallWindowProcA(g_ddraw.wndproc, hwnd, WM_ACTIVATE, WA_ACTIVE, 0);
+    }
+    if (event.kind == 1)
+    {
+        LARGE_INTEGER handler_at;
+        QueryPerformanceCounter(&handler_at);
         *result = route_message(hwnd, event.a, event.b, (LPARAM)event.c);
         EnterCriticalSection(&input_lock);
+        last_handler_us = elapsed_us(handler_at);
+        if (last_handler_us > max_handler_us) max_handler_us = last_handler_us;
         delivered++; last_message = event.a;
         if (event.a >= WM_KEYDOWN && event.a <= WM_SYSDEADCHAR)
         { last_key_message = event.a; last_key = event.b & 255; }
@@ -555,6 +618,7 @@ void nh_input_disconnect(void)
     InterlockedExchange(&enabled, 0);
     if (InterlockedCompareExchange(&initialized, 0, 0) != 2) return;
     EnterCriticalSection(&input_lock);
+    input_generation++;
     memset(queue, 0, sizeof(queue)); activated = 0; nh_input_capture_clear(&virtual_capture);
     /* Hidden logical focus belongs to the game lifetime, not the client.
      * Clearing it without WM_KILLFOCUS would desynchronize native controls. */

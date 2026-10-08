@@ -657,6 +657,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
           match: () => ({ map: stateMap, frame: stateFrame, shown: revealed && !!hole }),
           activity: () => live?.activity() ?? null,
           publish: (count, longestMs) => host.publishStalls?.(count, longestMs),
+          endpoint: native ? null : undefined,
         });
       })
       .catch((error) => console.warn('[HD] stall recorder unavailable', error));

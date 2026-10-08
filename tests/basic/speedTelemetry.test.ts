@@ -196,7 +196,11 @@ describe('one record per window of a running battle', () => {
 });
 
 /** The telemetry with a hand-driven timer, clock and sink. */
-function telemetry(answers: Array<VmDiagnostics | Error>, post: SpeedEnvironment['post'] = async () => true) {
+function telemetry(
+  answers: Array<VmDiagnostics | Error>,
+  post: SpeedEnvironment['post'] = async () => true,
+  endpoint?: string | null,
+) {
   let run: () => void = () => undefined;
   const stopped = vi.fn();
   let at = 0;
@@ -209,6 +213,7 @@ function telemetry(answers: Array<VmDiagnostics | Error>, post: SpeedEnvironment
     return next;
   });
   const handle = startSpeedTelemetry({
+    endpoint,
     diagnostics: diagnosticsCall,
     presentedFrames: () => Math.round(at * 0.06),
     frameSize: () => ({ width: 1728, height: 1080 }),
@@ -248,6 +253,15 @@ function telemetry(answers: Array<VmDiagnostics | Error>, post: SpeedEnvironment
 }
 
 describe('the telemetry loop', () => {
+  it('retains local records and toolbar rates without probing a server sink when endpoint is null', async () => {
+    const t = telemetry([diagnostics(100, 1000), diagnostics(5100, 1210)], undefined, null);
+    await t.settle();
+    await t.tick();
+    expect(t.handle.records()).toHaveLength(1);
+    expect(t.publish).toHaveBeenLastCalledWith(42, 62.5);
+    expect(t.posted).toHaveLength(0);
+    t.handle.dispose();
+  });
   it('asks with the usage action, posts one record a window to the speed route and tells the toolbar both rates', async () => {
     const t = telemetry([diagnostics(100, 1000), diagnostics(5100, 1210), diagnostics(10_100, 1522)]);
     await t.settle();

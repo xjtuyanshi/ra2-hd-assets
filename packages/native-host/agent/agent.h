@@ -51,8 +51,10 @@ void nh_agent_configure(void);
 int nh_agent_configured(void);
 void nh_agent_stop(void);
 int nh_connected(void);
+uint32_t nh_connection_generation(void);
 /* The mirror retains dirty versions until ACK; stream mailboxes never overwrite pending deltas. */
 void nh_send(uint16_t type, uint32_t id, const void *payload, uint32_t length);
+void nh_send_for_connection(uint32_t generation, uint16_t type, uint32_t id, const void *payload, uint32_t length);
 int nh_publish(uint16_t type, const void *payload, uint32_t length);
 /* Swap a caller-owned NH_MAX_MESSAGE allocation into an empty mailbox without copying. */
 int nh_publish_move(uint16_t type, uint8_t **payload, uint32_t length);
@@ -79,5 +81,6 @@ void nh_picture_sent(void);
 void nh_picture_disconnect(void);
 void nh_surface_info(uint32_t *width, uint32_t *height, uint32_t *bpp);
 void nh_picture_credit(uint32_t id, const uint8_t *payload, uint32_t length);
+void nh_picture_diagnostics(char *json, uint32_t capacity);
 int nh_picture_message(HWND window, UINT message, WPARAM wparam);
 #endif

@@ -978,6 +978,14 @@ HDC WINAPI fake_BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint)
     return real_BeginPaint(hWnd, lpPaint);
 }
 
+/* Native-host bridge: physical hidden ancestors cannot own an invalid region
+ * for the genuine full-client WM_PAINT requested by the capture owner. */
+BOOL WINAPI fake_GetUpdateRect(HWND hWnd, LPRECT rect, BOOL erase)
+{
+    int scoped = nh_hidden_update_rect(hWnd, rect, erase);
+    return scoped >= 0 ? scoped : real_GetUpdateRect(hWnd, rect, erase);
+}
+
 BOOL WINAPI fake_EndPaint(HWND hWnd, const PAINTSTRUCT *paint)
 {
     int scoped = paint ? nh_hidden_finish_dc(hWnd, paint->hdc, 1) : -1;

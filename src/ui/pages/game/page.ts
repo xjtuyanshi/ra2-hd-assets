@@ -417,9 +417,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   }
   // A practice lesson always plays its own scenario from the development files, never a cached import.
   const cachedSource =
-    trainingQuery || nativeAutoStart(window.location.search)
-      ? null
-      : await restoreCachedGameSource().catch(() => null);
+    trainingQuery || nativeAutoStart(window.location.search) ? null : await restoreCachedGameSource().catch(() => null);
   if (generation !== pageGeneration) return;
   gameSource = cachedSource ?? (await selectGameFiles());
   if (generation !== pageGeneration) {
@@ -730,6 +728,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
           frameSize: () => (presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null),
           scene: () => hdCleanup?.scene() ?? null,
           publish: (actual, target) => toolbar.setGameSpeed(actual, target),
+          endpoint: telemetryVm.runtimeInfo?.backend === 'native' ? null : undefined,
         });
         const globals = window as unknown as { __speedTelemetry?: { readonly records: unknown[] } };
         const handle = {

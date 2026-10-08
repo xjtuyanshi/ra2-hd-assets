@@ -17,7 +17,14 @@ import type { VmFrame } from '../../vm86/win32';
 import { GamePerformanceMeter } from '../gamePerformance';
 import { NativeConnection } from './connection';
 import type { NativeConnectionOptions } from './connection';
-import { NativeMessageType, NATIVE_PAGE_SIZE, decodeJson, encodeSubscription, encodeU32 } from './protocol';
+import {
+  NativeMessageType,
+  NATIVE_PAGE_SIZE,
+  NATIVE_INPUT_STATE_MINIMAL,
+  decodeJson,
+  encodeSubscription,
+  encodeU32,
+} from './protocol';
 import type { NativeHello, NativeMirrorUpdate, NativePicture } from './protocol';
 import {
   NativeMirrorMemory,
@@ -91,6 +98,13 @@ interface MirrorWaiter {
   timer: ReturnType<typeof setTimeout>;
   afterReset?: number;
   atRevision?: number;
+}
+interface NativeInputOperation {
+  kind: number;
+  a: number;
+  b: number;
+  c: number;
+  position: boolean;
 }
 
 function mergeRanges(ranges: readonly NativeHostRange[]): NativeRange[] {
@@ -184,6 +198,8 @@ export class NativeCore {
   private stateReads = 0;
   private lastMirrorFlags = 0;
   private previousLogicFrame: number | null = null;
+  private inputQueue: NativeInputOperation[] = [];
+  private inputOutstanding = false;
 
   constructor(
     private readonly callbacks: GameVmCallbacks,
@@ -505,13 +521,25 @@ export class NativeCore {
   }
   async getRenderState(): Promise<GameRenderState | null> {
     if (!this.running) return null;
-    if ((decodeJson(await this.connection.request(NativeMessageType.InputState)) as { modal?: boolean }).modal)
+    if (
+      (
+        decodeJson(
+          await this.connection.request(NativeMessageType.InputState, encodeU32(NATIVE_INPUT_STATE_MINIMAL)),
+        ) as { modal?: boolean }
+      ).modal
+    )
       return null;
     return this.read(this.render, () => this.policy!.createRenderReader());
   }
   async getCommandState(): Promise<GameCommandState | null> {
     if (!this.running) return null;
-    if ((decodeJson(await this.connection.request(NativeMessageType.InputState)) as { modal?: boolean }).modal)
+    if (
+      (
+        decodeJson(
+          await this.connection.request(NativeMessageType.InputState, encodeU32(NATIVE_INPUT_STATE_MINIMAL)),
+        ) as { modal?: boolean }
+      ).modal
+    )
       return null;
     return this.read(this.command, () => this.policy!.createCommandReader());
   }
@@ -571,9 +599,36 @@ export class NativeCore {
   }
   private input(kind: number, a: number, b: number, c: number): void {
     if (!this.running || this.closed) return;
+    const position = kind === 3 || (kind === 1 && a === 0x0200);
+    const operation = { kind, a, b, c, position };
+    const trailing = this.inputQueue.at(-1);
+    if (position && trailing?.position) {
+      // Coalesce only the unsent tail. A button, key or wheel operation is an
+      // ordering barrier, so its preceding position cannot change afterwards.
+      if (kind === 3 && trailing.kind === 1) {
+        trailing.c = (((b & 0xffff) << 16) | (a & 0xffff)) >>> 0;
+      } else this.inputQueue[this.inputQueue.length - 1] = operation;
+    } else this.inputQueue.push(operation);
+    this.drainInput();
+  }
+  private drainInput(): void {
+    if (this.inputOutstanding || !this.running || this.closed) return;
+    const operation = this.inputQueue.shift();
+    if (!operation) return;
+    this.inputOutstanding = true;
     void this.connection
-      .request(NativeMessageType.Input, encodeU32(kind, a >>> 0, b >>> 0, c >>> 0))
-      .catch((error) => this.fail(error instanceof Error ? error : new Error(String(error))));
+      .request(
+        NativeMessageType.Input,
+        encodeU32(operation.kind, operation.a >>> 0, operation.b >>> 0, operation.c >>> 0),
+      )
+      .then(() => {
+        this.inputOutstanding = false;
+        this.drainInput();
+      })
+      .catch((error) => {
+        this.inputOutstanding = false;
+        this.fail(error instanceof Error ? error : new Error(String(error)));
+      });
   }
   postMessage(message: number, wParam = 0, lParam = 0): void {
     this.input(1, message, wParam, lParam);
@@ -654,6 +709,8 @@ export class NativeCore {
         stateReadMs: this.stateReadMs,
         stateReads: this.stateReads,
         frames: this.hostFrames,
+        inputQueueLength: this.inputQueue.length,
+        inputOutstanding: this.inputOutstanding,
       },
     };
   }
@@ -733,6 +790,7 @@ export class NativeCore {
   async stop(): Promise<void> {
     if (this.closed) return;
     this.running = false;
+    this.inputQueue.length = 0;
     await this.operationTail;
     let cleanupError: unknown;
     try {

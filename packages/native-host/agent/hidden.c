@@ -25,6 +25,9 @@ static __thread struct { HWND window; int saved, begin_paint; } dc_routes[16];
 static __thread unsigned dc_route_count;
 static volatile LONG paint_in_progress;
 static unsigned last_painted, last_owner_drawn, last_dc_acquires;
+static unsigned last_system_dc_paints, last_nonclient_paints;
+static unsigned last_update_rect_queries;
+static volatile LONG last_paint_us, maximum_paint_us;
 static volatile LONG last_paint_root, last_paint_root_enabled, disabled_dialog_paints;
 static HWND captured;
 static char desktop_name[128], desktop_expected[128], desktop_class[64];
@@ -196,22 +199,23 @@ void nh_hidden_configure(void)
     char environment[16];
     DWORD length = GetEnvironmentVariableA("RA2_NATIVE_AGENT_HIDDEN", environment, sizeof(environment));
     if (length && length < sizeof(environment)) strcpy(value, environment);
-    if (!strcmp(value, "0")) return;
-    InterlockedExchange(&hidden, 1);
-    /* Hidden sessions cannot change the host display mode or persist hidden
-     * geometry into the player's normal cnc-ddraw configuration. Native pixels
-     * are tapped at the DirectDraw primary, before the presentation renderer. */
+    /* Configured native sessions keep the same transient geometry in hidden
+     * and visible development mode. Native pixels are tapped at the DirectDraw
+     * primary, before the presentation renderer; no host mode or persisted
+     * cnc-ddraw window geometry is changed. */
     g_config.windowed = TRUE;
     g_config.fullscreen = FALSE;
     /* cnc-ddraw's game-facing screen space starts at the primary origin. A
      * centered physical client would give custom native controls a second
-     * origin when they mix those hooks with User32's internal geometry. Hidden
-     * sessions have no visible placement, so make both origins exactly zero. */
+     * origin when they mix those hooks with User32's internal geometry. Keep
+     * both origins exactly zero, including visible development comparisons. */
     g_config.border = FALSE;
     g_config.window_rect.left = g_config.window_rect.top = 0;
     g_config.save_settings = 0;
     strcpy(g_config.renderer, "gdi");
     g_config.fix_alt_key_stuck = FALSE;
+    if (!strcmp(value, "0")) return;
+    InterlockedExchange(&hidden, 1);
     /* Wine's named virtual desktop is an explorer-owned native host window.
      * The private development desktop may otherwise remain visible after every
      * game window is hidden. Never alter Windows' desktop or a differently named
@@ -303,13 +307,31 @@ void nh_hidden_diagnostics(char *json, uint32_t capacity)
     if (g_ddraw.hwnd) real_ClientToScreen(g_ddraw.hwnd, &origin);
     LONG paint_root = InterlockedCompareExchange(&last_paint_root, 0, 0);
     snprintf(json, capacity, "{\"enabled\":%s,\"desktopName\":\"%s\",\"desktopExpected\":\"%s\",\"desktopClass\":\"%s\",\"desktopHidden\":%s,\"clientOrigin\":[%ld,%ld],\"paintedControls\":%u,\"ownerDrawnControls\":%u,\"paintDcAcquires\":%u,"
-        "\"lastPaintRootHwnd\":%u,\"lastPaintRootEnabled\":%s,\"disabledDialogPaints\":%ld}",
+        "\"lastPaintRootHwnd\":%u,\"lastPaintRootEnabled\":%s,\"disabledDialogPaints\":%ld,"
+        "\"systemDcPaints\":%u,\"nonclientPaints\":%u,\"paintUpdateRectQueries\":%u,\"lastPaintUs\":%ld,\"maxPaintUs\":%ld}",
         nh_hidden_active() ? "true" : "false", desktop_name, desktop_expected, desktop_class, desktop_hidden ? "true" : "false", origin.x, origin.y, last_painted, last_owner_drawn, last_dc_acquires,
         (uint32_t)paint_root, paint_root ? InterlockedCompareExchange(&last_paint_root_enabled, 0, 0) ? "true" : "false" : "null",
-        InterlockedCompareExchange(&disabled_dialog_paints, 0, 0));
+        InterlockedCompareExchange(&disabled_dialog_paints, 0, 0), last_system_dc_paints, last_nonclient_paints, last_update_rect_queries,
+        InterlockedCompareExchange(&last_paint_us, 0, 0), InterlockedCompareExchange(&maximum_paint_us, 0, 0));
 }
 
 int nh_hidden_painting(void) { return InterlockedCompareExchange(&paint_in_progress, 0, 0) != 0; }
+
+int nh_hidden_update_rect(HWND window, RECT *rect, BOOL erase)
+{
+    if (!painting || !scratch_dc || !nh_hidden_owned(window) ||
+        GetWindowThreadProcessId(window, NULL) != g_ddraw.gui_thread_id ||
+        window != scratch_window) return -1;
+    RECT client;
+    if (!GetClientRect(window, &client) || client.right <= client.left || client.bottom <= client.top) return 0;
+    if (rect) *rect = client;
+    last_update_rect_queries++;
+    /* The bridge explicitly requested this full client repaint. Physical
+     * hidden ancestors cannot supply its User32 invalid region, so preserve
+     * that genuine scoped request at the game's update-region query boundary. */
+    if (erase) SendMessageA(window, WM_ERASEBKGND, (WPARAM)scratch_dc, 0);
+    return 1;
+}
 
 HDC nh_hidden_paint_dc(HWND window, int begin_paint, PAINTSTRUCT *paint)
 {
@@ -424,11 +446,16 @@ void nh_hidden_paint(void)
      * and menu controls need genuine paint because their ancestors stay hidden. */
     if (state.root != g_ddraw.hwnd)
     {
+        /* Hidden top-level dialogs do not receive the physical window's paint
+         * lifecycle. Their genuine handler must seed background, labels and
+         * child layout before the control pass can complete that picture. */
         state.windows[state.count++] = state.root;
         collect_paint_tree(state.root, &state, 0);
     }
     EnumWindows(collect_paint_popup, (LPARAM)&state);
     if (!state.count) return;
+    LARGE_INTEGER paint_start;
+    QueryPerformanceCounter(&paint_start);
     /* Paint callbacks can enter game code, so no wrapper lock, retained surface
      * dereference or auxiliary COM reference may span them. Surface Release has
      * compatibility behavior even at a nonzero reference count. Copy a genuine
@@ -491,6 +518,8 @@ void nh_hidden_paint(void)
     scratch_root = state.root;
     dc_route_count = 0;
     last_painted = last_owner_drawn = last_dc_acquires = 0;
+    last_system_dc_paints = last_nonclient_paints = 0;
+    last_update_rect_queries = 0;
     int root_enabled = IsWindowEnabled(state.root) != 0;
     for (unsigned i = 0; i < state.count; i++)
     {
@@ -516,11 +545,35 @@ void nh_hidden_paint(void)
         LONG procedure = real_GetWindowLongA(window, GWL_WNDPROC);
         nh_hidden_get_window_proc(window, &procedure);
         LONG standard = (LONG)GetClassLongA(window, GCL_WNDPROC);
-        /* A genuine invalid region and the ordinary zero wParam reach custom
-         * game WM_PAINT handlers. Unsubclassed system controls can consume a DC
-         * supplied as wParam because their internal APIs bypass the game's IAT. */
+        int system_class = system_paint_dc(class_name);
+        /* Game subclasses can render their text into the primary, then forward
+         * WM_PAINT unchanged. Supplying that forwarded stock handler a DC can
+         * overwrite the native text with a generic empty control. Preserve the
+         * ordinary game message; only stock handlers need the explicit DC. */
+        int supplied_dc = system_class && procedure == standard;
         InvalidateRect(window, NULL, FALSE);
-        SendMessageA(window, WM_PAINT, procedure == standard && system_paint_dc(class_name) ? (WPARAM)dc : 0, 0);
+        SendMessageA(window, WM_PAINT, supplied_dc ? (WPARAM)dc : 0, 0);
+        if (supplied_dc) last_system_dc_paints++;
+        /* List scrolling and control borders belong to the nonclient paint
+         * path. WM_PRINT supplies its DC directly without requiring any
+         * physically visible ancestor, and never replaces the client paint. */
+        RECT outer;
+        POINT window_origin;
+        if (system_class && GetWindowRect(window, &outer))
+        {
+            window_origin.x = outer.left; window_origin.y = outer.top;
+            real_ScreenToClient(g_ddraw.hwnd, &window_origin);
+            int nonclient_saved = SaveDC(dc);
+            if (nonclient_saved)
+            {
+                SelectClipRgn(dc, NULL);
+                SetViewportOrgEx(dc, window_origin.x, window_origin.y, NULL);
+                IntersectClipRect(dc, 0, 0, outer.right - outer.left, outer.bottom - outer.top);
+                SendMessageA(window, WM_PRINT, (WPARAM)dc, PRF_NONCLIENT);
+                RestoreDC(dc, nonclient_saved);
+                last_nonclient_paints++;
+            }
+        }
         scratch_window = NULL;
         if (!_stricmp(class_name, "Button") && (real_GetWindowLongA(window, GWL_STYLE) & BS_TYPEMASK) == BS_OWNERDRAW)
             last_owner_drawn++;
@@ -579,6 +632,13 @@ void nh_hidden_paint(void)
     DeleteDC(dc);
     DeleteObject(dib);
     HeapFree(GetProcessHeap(), 0, baseline);
+    LARGE_INTEGER now, frequency;
+    if (QueryPerformanceCounter(&now) && QueryPerformanceFrequency(&frequency) && frequency.QuadPart)
+    {
+        uint32_t duration = (uint32_t)((now.QuadPart - paint_start.QuadPart) * 1000000 / frequency.QuadPart);
+        InterlockedExchange(&last_paint_us, (LONG)duration);
+        if (duration > (uint32_t)InterlockedCompareExchange(&maximum_paint_us, 0, 0)) InterlockedExchange(&maximum_paint_us, (LONG)duration);
+    }
 }
 
 HWND WINAPI nh_hidden_set_capture(HWND window)

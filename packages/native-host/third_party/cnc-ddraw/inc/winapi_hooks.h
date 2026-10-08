@@ -40,6 +40,8 @@ BOOL WINAPI fake_EnumDisplaySettingsA(LPCSTR lpszDeviceName, DWORD iModeNum, DEV
 LRESULT WINAPI fake_DefWindowProcA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
 HWND WINAPI fake_SetParent(HWND hWndChild, HWND hWndNewParent);
 HDC WINAPI fake_BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint);
+/* Native-host bridge: expose only the current forced hidden paint region. */
+BOOL WINAPI fake_GetUpdateRect(HWND hWnd, LPRECT rect, BOOL erase);
 BOOL WINAPI fake_EndPaint(HWND hWnd, const PAINTSTRUCT *paint);
 HDC WINAPI fake_GetDC(HWND hWnd);
 int WINAPI fake_ReleaseDC(HWND hWnd, HDC dc);

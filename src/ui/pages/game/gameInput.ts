@@ -1092,6 +1092,9 @@ export function installGameInput(
       // Page shortcuts (` debug / [ ] speed / F11 fullscreen / ? help / \\ HD view) are not injected into the game.
       if (UI_SHORTCUT_KEYS.has(event.key)) return;
       if (document.activeElement !== canvas || event.isComposing) return;
+      // A key can follow a physical move before the pending pointer rAF runs.
+      // Preserve that position before key state/messages reach either backend.
+      flushDesktopMove();
       releaseStaleModifiers(event);
       const code = forwardedCode(event.code);
       const mapped = code !== event.code;
@@ -1119,6 +1122,7 @@ export function installGameInput(
             metaReleaseTimers.delete(code);
             const state = heldKeys.get(code);
             if (!state) return;
+            flushDesktopMove();
             heldKeys.delete(code);
             metaReleased.add(code);
             syncKeyState(code, state.vk, false);
@@ -1158,6 +1162,7 @@ export function installGameInput(
           : event;
       const vk = state?.vk ?? virtualKey(key);
       if (!vk) return;
+      flushDesktopMove();
       const system = state?.system || event.altKey || code === 'AltLeft' || code === 'AltRight';
       if (reconciledCode) {
         heldKeys.delete(reconciledCode);

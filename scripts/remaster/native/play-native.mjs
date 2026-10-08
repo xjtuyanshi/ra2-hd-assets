@@ -450,7 +450,9 @@ export async function runLauncher(arguments_, environment = process.env) {
       RA2_NATIVE_AGENT_PORT: String(ports.agent),
       RA2_NATIVE_AGENT_TOKEN: token,
       RA2_NATIVE_AGENT_ORIGIN: origin,
-      RA2_NATIVE_AGENT_HIDDEN: '1',
+      // Visible operation is an explicit diagnostic comparison mode. Owner
+      // launches retain hidden operation unless this exact opt-out is supplied.
+      RA2_NATIVE_AGENT_HIDDEN: process.env.RA2_NATIVE_AGENT_HIDDEN === '0' ? '0' : '1',
       WINEDLLOVERRIDES: `${wine.environment.WINEDLLOVERRIDES ? `${wine.environment.WINEDLLOVERRIDES};` : ''}ddraw=n,b`,
     };
     try {
@@ -475,7 +477,8 @@ export async function runLauncher(arguments_, environment = process.env) {
         hello = await client.connect();
         receivedHello = true;
         if (hello.pid !== status.pid) throw new Error('Agent process identity differs from the owned launcher process');
-        if (!hello.hiddenHost?.enabled) throw new Error('The owned agent did not report hidden operation');
+        if (!!hello.hiddenHost?.enabled !== (gameEnvironment.RA2_NATIVE_AGENT_HIDDEN === '1'))
+          throw new Error('The owned agent did not report the requested visibility mode');
         assertOwnedExecutableIdentity(hello, expectedIdentity);
         receivedHello = false; // A valid identity can precede the native menu.
         const inputState = JSON.parse((await client.request(Type.INPUT_STATE)).toString());

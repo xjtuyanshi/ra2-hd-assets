@@ -18,7 +18,7 @@ const DEEP_DISCOVERY_MAX_DEPTH = 12;
 const DEEP_DISCOVERY_MAX_SCOPES = 2000;
 
 /**
- * Discover game EXEs automatically: enumerate the root and each supported game's conventional subdirectory once, collect case-insensitive *.exe files, exclude EXCLUDED_EXECUTABLE_MARKERS, and check MZ magic as PE candidates. Classify known games by filename; unknown EXEs can also start with the default compatibility layer. Each game's sourceTransform identifies and unwraps installers/patches; the generic file layer contains no game names or hashes.
+ * Discover game EXEs automatically: enumerate the root and listed conventional game subdirectories, collect case-insensitive *.exe files, exclude EXCLUDED_EXECUTABLE_MARKERS, and check MZ magic as PE candidates. Unknown root enumeration retains conventional-directory probing. Classify known games by filename; unknown EXEs can also start with the default compatibility layer. Each game's sourceTransform identifies and unwraps installers/patches; the generic file layer contains no game names or hashes.
  */
 export async function discoverGameSources(provider: GameFileProvider): Promise<GameSource[]> {
   type Candidate = {
@@ -34,7 +34,17 @@ export async function discoverGameSources(provider: GameFileProvider): Promise<G
   const candidates: Candidate[] = [];
   const transformedByScope = new Map<string, { game: SupportedGame; result: GameSourceTransformResult }>();
   // RA2 and Yuri's Revenge share an installation directory; enumerate it once to avoid duplicate candidates.
-  const scopes = [...new Set(['', ...SUPPORTED_GAMES.map((game) => game.folder)])];
+  const rootEntries = await provider.list('');
+  const conventionalFolders = [...new Set(SUPPORTED_GAMES.map((game) => game.folder))];
+  // A scoped installation is already the game root. Do not probe its absent
+  // conventional child again (for example ra2/ra2 over development HTTP).
+  // Unsupported enumeration is unknown, so preserve the legacy probes there.
+  const scopes = [
+    '',
+    ...conventionalFolders.filter(
+      (folder) => rootEntries === null || rootEntries.some((name) => name.toLowerCase() === folder.toLowerCase()),
+    ),
+  ];
   if (provider.deepDiscovery) {
     // Memory sources extracted from ZIP/installers have variable layouts; recursively enumerate subdirectories as candidate scopes,
     // then classify by filename/import table to locate each game. Limits guard against ZIP-bomb-style directory trees.
@@ -43,7 +53,7 @@ export async function discoverGameSources(provider: GameFileProvider): Promise<G
     while (pending.length && visited.size < DEEP_DISCOVERY_MAX_SCOPES) {
       const scope = pending.pop()!;
       if (scope.split('/').length >= DEEP_DISCOVERY_MAX_DEPTH) continue;
-      for (const name of (await provider.list(scope)) ?? []) {
+      for (const name of (scope ? await provider.list(scope) : rootEntries) ?? []) {
         const child = scope ? `${scope}/${name}` : name;
         const key = child.toLowerCase();
         if (visited.has(key)) continue;
@@ -58,7 +68,7 @@ export async function discoverGameSources(provider: GameFileProvider): Promise<G
     }
   }
   for (const scope of scopes) {
-    for (const name of (await provider.list(scope)) ?? []) {
+    for (const name of (scope ? await provider.list(scope) : rootEntries) ?? []) {
       const lower = name.toLowerCase();
       if (!lower.endsWith('.exe') || EXCLUDED_EXECUTABLE_MARKERS.some((marker) => lower.includes(marker))) continue;
       const path = scope ? `${scope}/${name}` : name;
