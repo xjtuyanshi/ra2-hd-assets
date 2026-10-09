@@ -52,6 +52,8 @@ async function ownerIdle() {
     await writeFile(join(out, 'held'), 'Owner playing; waiting\n');
     await delay(1000);
   }
+  // The owner probe is asynchronous; cancellation may arrive while it waits.
+  await bounded();
 }
 
 const record = async (name, proof) => {
@@ -218,6 +220,21 @@ async function execute(c) {
     });
   }
   if (c.action === 'command-state') return worker().evaluate(() => globalThis.__auditCore.getCommandState());
+  if (c.action === 'ending-checkpoint') {
+    const m = await import('./phase11-endings.mjs');
+    return m.capturePhase11EndingCheckpoint({
+      page,
+      worker,
+      inputState: state,
+      shot,
+      record,
+      ownerIdle,
+      out,
+      label: c.label,
+      expectedScreen: c.expectedScreen,
+      compareWith: c.compareWith,
+    });
+  }
   if (c.action === 'abort-observe') {
     const st = await state();
     const yes = st.controls.find((v) => usable(v) && v.id === 1737);
@@ -716,6 +733,7 @@ for (const signal of ['SIGINT', 'SIGTERM'])
 try {
   await ownerIdle();
   dllBefore = await dllIdentity();
+  await ownerIdle();
   launch = spawn(
     process.execPath,
     [join(wt, 'scripts/remaster/native/phase8-launch-trace.mjs'), '--size', '1728x1117'],

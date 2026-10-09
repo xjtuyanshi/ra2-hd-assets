@@ -54,6 +54,7 @@ class FakeAgent implements NativeWebSocket {
   surface = { width: 0, height: 0, bpp: 0, format: 'RGB565' };
   cursorSnapshot = false;
   cursorPayload: Uint8Array = new Uint8Array(28);
+  cursorError: string | null = null;
   constructor() {
     this.initial[0] = 7;
   }
@@ -82,7 +83,9 @@ class FakeAgent implements NativeWebSocket {
       else this.emit(request.type, request.id);
     } else if (request.type === NativeMessageType.InputState) {
       if (this.cursorSnapshot && request.payload.length === 4 && u32(request.payload) === 2) {
-        this.emit(request.type, request.id, this.cursorPayload);
+        if (this.cursorError)
+          this.emit(NativeMessageType.Error, request.id, new TextEncoder().encode(this.cursorError));
+        else this.emit(request.type, request.id, this.cursorPayload);
         return;
       }
       this.emit(
@@ -301,6 +304,50 @@ describe('native core session and presenter lifecycle', () => {
     agent.cursorPayload = new Uint8Array(28);
     await present(8);
     const hidden = await present(9);
+    expect(hidden.pointer).toBeNull();
+    expect(hidden.cursor).toBeUndefined();
+  });
+  it('retains hardware art on correlated capture errors without failing input, then clears confirmed hidden art', async () => {
+    const frames = vi.fn(),
+      statuses = vi.fn();
+    const { core, agent, policyFactory, scheduled } = setup(
+      { onFrame: frames, onStatus: statuses },
+      { pageCursor: false },
+    );
+    agent.surface = { width: 2, height: 1, bpp: 16, format: 'RGB565' };
+    agent.cursorSnapshot = true;
+    const rgba = Uint8Array.from([17, 29, 43, 255]);
+    agent.cursorPayload = concat(encodeU32(321, 1, 1, 0, 0, 1, 0), rgba);
+    const factory = vi.mocked(policyFactory).getMockImplementation()!;
+    vi.mocked(policyFactory).mockImplementation((...args) => ({ ...factory(...args), readPointer: async () => null }));
+    const pending = core.start();
+    agent.hello();
+    await pending;
+    const present = async (frame: number) => {
+      agent.picture(frame, frame === 1);
+      scheduled.shift()!();
+      await flush();
+      return frames.mock.calls.at(-1)![0] as VmFrame;
+    };
+    expect((await present(1)).cursor?.handle).toBe(321);
+    for (const error of ['native cursor capture unavailable', 'native cursor selection changed during capture']) {
+      agent.cursorError = error;
+      await present(2);
+      const retained = await present(3);
+      expect(retained.pointer).toBeNull();
+      expect(retained.cursor?.handle).toBe(321);
+      expect(retained.cursor?.rgba).toEqual(rgba);
+      expect(agent.readyState).toBe(1);
+      expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'running' });
+      const inputs = agent.count(NativeMessageType.Input);
+      core.postMessage(0x0201, 1, 1);
+      await flush();
+      expect(agent.count(NativeMessageType.Input)).toBe(inputs + 1);
+    }
+    agent.cursorError = null;
+    agent.cursorPayload = new Uint8Array(28);
+    await present(4);
+    const hidden = await present(5);
     expect(hidden.pointer).toBeNull();
     expect(hidden.cursor).toBeUndefined();
   });

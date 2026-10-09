@@ -158,6 +158,16 @@ done:
     if (white_dc) DeleteDC(white_dc);
     if (icon.hbmColor) DeleteObject(icon.hbmColor);
     if (icon.hbmMask) DeleteObject(icon.hbmMask);
-    nh_send(NH_INPUT_STATE, id, valid ? (const void *)packet : (const void *)empty, valid ? length : sizeof(empty));
+    if (valid) nh_send(NH_INPUT_STATE, id, packet, length);
+    else if (failure == CURSOR_NO_HANDLE || failure == CURSOR_HIDDEN)
+        nh_send(NH_INPUT_STATE, id, empty, sizeof(empty));
+    else
+    {
+        /* An unavailable sample is not an observed hidden cursor. Reject only
+         * this optional request so the page retains its last validated art. */
+        const char *error = failure == CURSOR_CHANGED ?
+            "native cursor selection changed during capture" : "native cursor capture unavailable";
+        nh_send(NH_ERROR, id, error, (uint32_t)strlen(error));
+    }
     free(packet);
 }
