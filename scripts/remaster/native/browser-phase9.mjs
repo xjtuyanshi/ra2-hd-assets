@@ -892,12 +892,17 @@ async function execute(c) {
         const name = new TextDecoder().decode((await core.connection.read(p + 0x15ff4, 21)).bytes).split('\0')[0];
         const human = (await core.connection.read(p + 0x1ec, 1)).bytes[0] !== 0;
         const allies = (await read(p + 0x5788, 4)).getUint32(0, true);
-        houses.push({ index: i, name, human, allies });
+        // The same pinned HouseClass::Defeated field used by ending checkpoints.
+        // Record every player so a surviving local house is never mistaken for a win.
+        const originalDefeatedByte = (await core.connection.read(p + 0x1f5, 1)).bytes[0];
+        houses.push({ index: i, pointer: p, name, human, allies, originalDefeatedByte });
       }
+      const localPointer = (await read(0xa83d4c, 4)).getUint32(0, true);
+      const localHouse = houses.find((house) => house.pointer === localPointer)?.index ?? null;
       const s = await core.getCommandState();
       return {
         frame: s?.frame,
-        localHouse: s?.localHouse,
+        localHouse,
         view: s?.view,
         performance: await core.getGamePerformance(),
         houses,
