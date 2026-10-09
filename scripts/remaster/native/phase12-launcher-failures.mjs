@@ -1,18 +1,23 @@
 #!/usr/bin/env node
 // Exercise genuine prerequisite failures in the current CLI without permitting
 // Wine, build tools, page servers or other subprocesses inside that CLI.
+// Optional live-failure uses the real Wine/launcher with an unchanged owned
+// executable in an isolated directory missing its required DLLs/resources.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { outputDirectory, WT } from './artifacts.mjs';
 import { ownerOpenBoundary } from './owner-open-boundary.mjs';
+import { readWineSelfCheckEvidence } from './launcher-wine-evidence.mjs';
 
 const base = outputDirectory();
 const phaseName = process.argv[2] || 'phase12';
 assert(/^phase[0-9]+$/.test(phaseName), 'A numbered session is required');
+const liveFailure = process.argv[3] === 'live-failure';
+assert(process.argv[3] === undefined || liveFailure, 'Expected optional live-failure mode');
 const phase = join(base, phaseName);
 const boundary = await ownerOpenBoundary(phase, { ownerPausePath: resolve(base, '../play/_slots/PAUSE') });
 const active = () => boundary.assertActive();
@@ -67,10 +72,18 @@ assert(!before['gamemd.exe'].absent, 'The supplied development game copy is requ
 await mkdir(join(phase, 'preflight-faults'), { recursive: true });
 const run = await mkdtemp(join(phase, 'preflight-faults/run-'));
 await chmod(run, 0o700);
+const isolatedGame = join(run, 'incomplete-owned-game');
+if (liveFailure) {
+  await mkdir(isolatedGame, { mode: 0o700 });
+  await copyFile(join(gameDirectory, 'gamemd.exe'), join(isolatedGame, 'gamemd.exe'));
+  const isolatedExecutable = await identity(join(isolatedGame, 'gamemd.exe'));
+  assert.equal(isolatedExecutable.sha256, before['gamemd.exe'].sha256, 'The isolated executable must be unchanged');
+}
 const guardPath = join(run, 'no-subprocess-import.mjs');
-await writeFile(
-  guardPath,
-  `import childProcess from 'node:child_process';
+if (!liveFailure)
+  await writeFile(
+    guardPath,
+    `import childProcess from 'node:child_process';
 import {syncBuiltinESMExports} from 'node:module';
 import {appendFileSync} from 'node:fs';
 const path=process.env.NATIVE_PREFLIGHT_GUARD_LOG;
@@ -82,11 +95,12 @@ for(const name of ['spawn','spawnSync','exec','execSync','execFile','execFileSyn
   };
 syncBuiltinESMExports();
 `,
-  { mode: 0o600 },
-);
+    { mode: 0o600 },
+  );
 const report = {
-  scope:
-    'Current CLI prerequisite failures with real configured development paths and actual filesystem absence; Wine execution is prohibited',
+  scope: liveFailure
+    ? 'Real successful Wine self-check followed by a genuine game startup failure from an isolated unchanged player-owned executable missing its dependencies/resources'
+    : 'Current CLI prerequisite failures with real configured development paths and actual filesystem absence; Wine execution is prohibited',
   startedAt: new Date().toISOString(),
   realWineRun: false,
   gameStarted: false,
@@ -96,37 +110,56 @@ const report = {
     launcher: await identity(join(WT, 'scripts/remaster/native/play-native.mjs')),
     driver: await identity(fileURLToPath(import.meta.url)),
     boundary: await identity(join(WT, 'scripts/remaster/native/owner-open-boundary.mjs')),
-    guard: await identity(guardPath),
+    guard: liveFailure ? null : await identity(guardPath),
+    trace: liveFailure ? await identity(join(WT, 'scripts/remaster/native/phase8-launch-trace.mjs')) : null,
   },
   cases: [],
   before,
   after: null,
   protectedFilesUnchanged: false,
-  limitations: [
-    'Game startup failure after a real successful Wine self-check is not exercised by this no-start preflight review',
-  ],
+  limitations: liveFailure
+    ? [
+        'Wine uses the existing dedicated scope; the driver does not alter bottle configuration. No complete bottle-file comparison is made.',
+      ]
+    : [
+        'Game startup failure after a real successful Wine self-check is not exercised by this no-start preflight review',
+      ],
   error: null,
 };
-const scenarios = [
-  {
-    name: 'missing-game-folder',
-    overrides: { RA2_NATIVE_GAME_DIR: join(run, 'absent-game') },
-    expected: /找不到游戏程序/,
-  },
-  {
-    name: 'missing-wine-executable',
-    overrides: { RA2_NATIVE_WINE: join(run, 'absent-wine') },
-    expected: /找不到 Wine 程序/,
-  },
-  { name: 'missing-hd-cache', overrides: { RA2_HD_CACHE_DIR: join(run, 'absent-cache') }, expected: /找不到高清缓存/ },
-];
+const scenarios = liveFailure
+  ? [
+      {
+        name: 'game-not-up-after-wine-check',
+        overrides: { RA2_NATIVE_GAME_DIR: isolatedGame },
+        expected: /游戏未能正常启动或已退出|游戏在 60 秒内没有进入可操作的主菜单/,
+      },
+    ]
+  : [
+      {
+        name: 'missing-game-folder',
+        overrides: { RA2_NATIVE_GAME_DIR: join(run, 'absent-game') },
+        expected: /找不到游戏程序/,
+      },
+      {
+        name: 'missing-wine-executable',
+        overrides: { RA2_NATIVE_WINE: join(run, 'absent-wine') },
+        expected: /找不到 Wine 程序/,
+      },
+      {
+        name: 'missing-hd-cache',
+        overrides: { RA2_HD_CACHE_DIR: join(run, 'absent-cache') },
+        expected: /找不到高清缓存/,
+      },
+    ];
 try {
   for (const scenario of scenarios) {
     await boundary.waitForOwnerIdle();
     const guardLog = join(run, scenario.name + '-guard.jsonl');
     const child = spawn(
       process.execPath,
-      ['--import', guardPath, join(WT, 'scripts/remaster/native/play-native.mjs'), '--size', '1728x1117'],
+      liveFailure
+        ? [join(WT, 'scripts/remaster/native/phase8-launch-trace.mjs'), '--size', '1728x1117']
+        : ['--import', guardPath, join(WT, 'scripts/remaster/native/play-native.mjs'), '--size', '1728x1117'],
       {
         cwd: WT,
         env: { ...environment, ...scenario.overrides, NATIVE_PREFLIGHT_GUARD_LOG: guardLog },
@@ -135,10 +168,15 @@ try {
     );
     let output = '';
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGKILL');
-    }, 10000);
+    const timer = setTimeout(
+      () => {
+        timedOut = true;
+        // The real launcher owns its detached descendants and must unwind them
+        // itself. A timed-out live attempt is never accepted as the intended fault.
+        child.kill(liveFailure ? 'SIGTERM' : 'SIGKILL');
+      },
+      liveFailure ? 150000 : 10000,
+    );
     for (const stream of [child.stdout, child.stderr]) {
       stream.setEncoding('utf8');
       stream.on('data', (chunk) => (output = (output + chunk).slice(-65536)));
@@ -153,10 +191,12 @@ try {
       clearTimeout(timer);
     }
     await writeFile(join(run, scenario.name + '-output.log'), output, { mode: 0o600 });
-    const guardRecords = (await readFile(guardLog, 'utf8'))
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line));
+    const guardRecords = liveFailure
+      ? []
+      : (await readFile(guardLog, 'utf8'))
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line));
     const attempts = guardRecords.filter((item) => item.kind === 'subprocess-refused');
     const result = {
       name: scenario.name,
@@ -175,14 +215,40 @@ try {
       !timedOut && exit.code === 1 && !exit.signal,
       'The current CLI must exit through its actual prerequisite error',
     );
-    assert(
-      result.guardInstalled && attempts.length === 0,
-      'The prerequisite error must occur before any internal subprocess attempt',
-    );
-    assert(
-      result.expectedChineseFailure && result.startedNoRunDirectory && result.printedNoPlayUrl,
-      'Unexpected prerequisite result',
-    );
+    if (liveFailure) {
+      result.runDirectory = output.match(/Private launch logs and DLL backups: ([^\r\n]+)/)?.[1] ?? null;
+      assert(
+        result.runDirectory?.startsWith(join(WT, 'packages/native-host/build/play-')),
+        'Owned launch directory required',
+      );
+      const wine = await readWineSelfCheckEvidence(result.runDirectory);
+      report.realWineRun = wine.successful;
+      result.wineSelfCheck = wine;
+      result.launcherLog = await readFile(join(result.runDirectory, 'launcher.log'), 'utf8');
+      result.wineLog = await readFile(join(result.runDirectory, 'wine.log'), 'utf8');
+      result.nativeGameProcessCreated = /started pid=\d+/.test(result.launcherLog);
+      result.realLauncherAttempted =
+        result.nativeGameProcessCreated ||
+        /CreateProcess|handshake did not complete|binkw32|c0000135/i.test(result.launcherLog + result.wineLog);
+      result.sessionState = JSON.parse(await readFile(join(result.runDirectory, 'session-state.json'), 'utf8'));
+      result.isolatedDllRemoved = (await identity(join(isolatedGame, 'ddraw.dll'))).absent === true;
+      assert(wine.successful && output.includes('Wine 自检通过。'), 'Real Wine self-check must succeed first');
+      assert(result.realLauncherAttempted, 'Actual Wine/game startup failure evidence is required');
+      assert(result.expectedChineseFailure && result.printedNoPlayUrl, 'Expected actual game-not-up failure');
+      assert(
+        result.sessionState.state === 'failed' && result.isolatedDllRemoved,
+        'Failed launch cleanup must complete',
+      );
+    } else {
+      assert(
+        result.guardInstalled && attempts.length === 0,
+        'The prerequisite error must occur before any internal subprocess attempt',
+      );
+      assert(
+        result.expectedChineseFailure && result.startedNoRunDirectory && result.printedNoPlayUrl,
+        'Unexpected prerequisite result',
+      );
+    }
     await active();
   }
 } catch (error) {
@@ -191,11 +257,11 @@ try {
   report.after = await protectedFiles();
   report.protectedFilesUnchanged = JSON.stringify(report.before) === JSON.stringify(report.after);
   report.finishedAt = new Date().toISOString();
-  report.met = !report.error && report.cases.length === 3 && report.protectedFilesUnchanged;
+  report.met = !report.error && report.cases.length === (liveFailure ? 1 : 3) && report.protectedFilesUnchanged;
   const reportPath = join(run, 'summary.json');
   await writeFile(reportPath, JSON.stringify(report, null, 2) + '\n', { mode: 0o600 });
   await writeFile(
-    join(phase, 'launcher-preflight-faults-current.json'),
+    join(phase, liveFailure ? 'launcher-live-startup-failure-current.json' : 'launcher-preflight-faults-current.json'),
     JSON.stringify({ reportPath, ...report }, null, 2) + '\n',
     { mode: 0o600 },
   );

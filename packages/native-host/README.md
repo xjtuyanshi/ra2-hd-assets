@@ -96,7 +96,12 @@ only during synchronous hidden control painting.
 Stock system control procedures receive that DC directly through `WM_PAINT`.
 Game subclasses receive the ordinary message and retain their primary paint;
 passing their forwarded stock procedure a DC could overwrite genuine native
-text with an empty generic control. Picture credits preserve the genuine
+text with an empty generic control. Owner-drawn buttons also notify their real
+parent with `WM_DRAWITEM`: pressed/checked state comes from `BM_GETSTATE`, and
+focus/enabled state comes from the current owned control. Hidden User32 does
+not supply that notification, so a direct `WM_PAINT` can otherwise keep a stale
+unpressed item state. The original parent/control handlers still paint all art.
+Picture credits preserve the genuine
 top-level paint lifecycle before child/popup painting completes the picture.
 Ordinary siblings retain native User32 enumeration order because game-owned
 DirectDraw backgrounds can otherwise erase overlapping labels. A captured child

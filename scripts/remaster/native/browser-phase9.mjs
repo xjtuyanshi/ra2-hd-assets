@@ -262,15 +262,62 @@ async function execute(c) {
     assert(/^[a-zA-Z0-9_-]+$/.test(label));
     assert(privateDir, 'Owned launcher private directory required');
     await writeFile(join(privateDir, 'stop'), 'stop\n', { mode: 0o600 });
-    await wait(
-      'Chinese normal close notice',
-      () =>
-        page
-          .locator('.game-folder-panel h3')
-          .filter({ hasText: /^游戏已关闭$/ })
-          .isVisible(),
-      15000,
-    );
+    try {
+      await wait(
+        'Chinese normal close notice',
+        () =>
+          page
+            .locator('.game-folder-panel h3')
+            .filter({ hasText: /^游戏已关闭$/ })
+            .isVisible(),
+        15000,
+      );
+    } catch (error) {
+      // Retain the actual failure surface before cleanup closes the tab. A
+      // clean process exit cannot substitute for this missing UI acceptance.
+      const capture = await cdp.send('Page.captureScreenshot', {
+        format: 'png',
+        fromSurface: true,
+        captureBeyondViewport: false,
+      });
+      const screenshot = join(out, label + '-failed.png');
+      await writeFile(screenshot, Buffer.from(capture.data, 'base64'));
+      const nativeWorker = worker();
+      const core = nativeWorker
+        ? await nativeWorker
+            .evaluate(() => {
+              const core = globalThis.__auditCore;
+              return core
+                ? {
+                    phase: core.phase,
+                    running: core.running,
+                    failing: core.failing,
+                    closed: core.closed,
+                    mirrorWaiters: core.waiters.size,
+                    connectionClosed: core.connection.closed,
+                    socketReadyState: core.connection.socket?.readyState ?? null,
+                    pendingRequests: core.connection.pending.size,
+                  }
+                : null;
+            })
+            .catch((error) => ({ unavailable: String(error) }))
+        : null;
+      const proof = {
+        screenshot,
+        core,
+        page: await page.evaluate(() => ({
+          panels: [...document.querySelectorAll('.game-folder-panel')].map((panel) => panel.textContent),
+          canvasStatus: document.querySelector('#screen')?.dataset.vmStatus ?? null,
+          fullscreen: document.fullscreenElement?.id ?? null,
+        })),
+        sessionState: await readFile(join(privateDir, 'session-state.json'), 'utf8').catch(() => null),
+        gameStatus: await readFile(join(privateDir, 'status.json'), 'utf8').catch(() => null),
+        source: 'Actual timed-out close UI and read-only current Worker/launcher state; failure remains a failure',
+      };
+      await writeFile(join(out, label + '-failed.json'), JSON.stringify(proof, null, 2));
+      await record('normal-close-notice-failure', proof);
+      throw error;
+    }
     const text = await page.locator('.game-folder-panel').innerText();
     assert(text.includes('请重新运行启动器'), 'Launcher restart instruction required');
     assert(!/Runtime error|Native WebSocket closed|运行错误/.test(text), 'Normal close must not show an error');
@@ -426,6 +473,34 @@ async function execute(c) {
         ),
       record,
       shot,
+    });
+  }
+  if (c.action === 'attack-visible') {
+    const { attackVisibleEnemyBuilding } = await import('./browser-combat-attack.mjs');
+    const readBytes = (a, n) =>
+      worker().evaluate(
+        async ([a, n]) => Array.from((await globalThis.__auditCore.connection.read(a, n)).bytes),
+        [a, n],
+      );
+    const current = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
+    assert(current?.localHouse >= 0 && current.localHouse <= 5, 'Actual six-player local house required');
+    const vector = Buffer.from(await readBytes(0xa80228, 20));
+    assert(vector.readInt32LE(16) > current.localHouse, 'Actual house vector required');
+    const house = Buffer.from(await readBytes(vector.readUInt32LE(4) + current.localHouse * 4, 4)).readUInt32LE();
+    const mask = Buffer.from(await readBytes(house + 0x5788, 4)).readUInt32LE();
+    return attackVisibleEnemyBuilding({
+      page,
+      point,
+      click: (x, y, mode, button) => click(x, y, button ?? 'left'),
+      shot,
+      record,
+      readBytes,
+      commandState: async () => {
+        await ownerIdle();
+        return worker().evaluate(() => globalThis.__auditCore.getCommandState());
+      },
+      combatUnits: true,
+      alliedHouses: Array.from({ length: 6 }, (_, index) => index).filter((index) => mask & (1 << index)),
     });
   }
   if (c.action === 'base-play') {
@@ -983,6 +1058,16 @@ try {
         needle,
         'if (!destroyed) { backend.draw(...args); window.__phase7Presentation?.draw(args); }',
       ),
+    });
+  });
+  await context.route('**/src/ui/pages/game/nativeCursor.ts*', async (route) => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const needle = 'frame = next;\n      render();';
+    assert(source.includes(needle));
+    await route.fulfill({
+      response,
+      body: source.replace(needle, needle + ' window.__phase9PointerProbe?.frame(next);'),
     });
   });
   page = await context.newPage();

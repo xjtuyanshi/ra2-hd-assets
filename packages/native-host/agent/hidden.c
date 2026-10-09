@@ -637,6 +637,49 @@ void nh_hidden_paint(void)
          * ordinary game message; only stock handlers need the explicit DC. */
         int supplied_dc = system_class && procedure == standard;
         InvalidateRect(window, NULL, FALSE);
+        int owner_drawn_button = !_stricmp(class_name, "Button") &&
+            (real_GetWindowLongA(window, GWL_STYLE) & BS_TYPEMASK) == BS_OWNERDRAW;
+        HWND parent = owner_drawn_button ? GetParent(window) : NULL;
+        if (parent && nh_hidden_owned(parent) && GetWindowThreadProcessId(parent, NULL) == g_ddraw.gui_thread_id)
+        {
+            /* User32 skips the owner-draw notification beneath a physically
+             * hidden ancestor. WM_PAINT alone can then reuse stale item state
+             * even while the real button is pressed. Restore that paint
+             * notification from the control's actual state, leaving the
+             * original parent/control handlers responsible for its art. */
+            LRESULT button_state = SendMessageA(window, BM_GETSTATE, 0, 0);
+            DRAWITEMSTRUCT item = {0};
+            item.CtlType = ODT_BUTTON;
+            item.CtlID = (UINT)GetDlgCtrlID(window);
+            item.itemAction = ODA_DRAWENTIRE;
+            item.itemState = (button_state & BST_PUSHED ? ODS_SELECTED : 0) |
+                (button_state & BST_CHECKED ? ODS_CHECKED : 0) |
+                (nh_input_get_focus() == window ? ODS_FOCUS : 0) |
+                (!IsWindowEnabled(window) ? ODS_DISABLED : 0);
+            item.hwndItem = window;
+            item.hDC = dc;
+            item.rcItem = client;
+            SendMessageA(parent, WM_DRAWITEM, item.CtlID, (LPARAM)&item);
+            /* The original parent may synchronously change the dialog/control
+             * while painting. Retire that old scope before a further message
+             * or nonclient paint can target the replaced lifetime/layout. */
+            RECT current_client;
+            POINT current_origin = {0};
+            LONG current_procedure = real_GetWindowLongA(window, GWL_WNDPROC);
+            nh_hidden_get_window_proc(window, &current_procedure);
+            real_MapWindowPoints(window, g_ddraw.hwnd, &current_origin, 1);
+            if (g_ddraw.hwnd != initial_main || nh_window_target(NH_WINDOW_PAINT) != state.root ||
+                !nh_hidden_owned(window) || !nh_hidden_visible(window) || GetParent(window) != parent ||
+                GetWindowThreadProcessId(window, NULL) != g_ddraw.gui_thread_id || current_procedure != procedure ||
+                !GetClientRect(window, &current_client) || !EqualRect(&current_client, &client) ||
+                current_origin.x != origin.x || current_origin.y != origin.y)
+            {
+                scratch_window = NULL;
+                while (dc_route_count > route_base) RestoreDC(dc, dc_routes[--dc_route_count].saved);
+                RestoreDC(dc, saved);
+                continue;
+            }
+        }
         paint_calls[paint_call_depth++] = window;
         SendMessageA(window, WM_PAINT, supplied_dc ? (WPARAM)dc : 0, 0);
         paint_call_depth--;
@@ -662,8 +705,7 @@ void nh_hidden_paint(void)
             }
         }
         scratch_window = NULL;
-        if (!_stricmp(class_name, "Button") && (real_GetWindowLongA(window, GWL_STYLE) & BS_TYPEMASK) == BS_OWNERDRAW)
-            last_owner_drawn++;
+        if (owner_drawn_button) last_owner_drawn++;
         while (dc_route_count > route_base) RestoreDC(dc, dc_routes[--dc_route_count].saved);
         last_painted++;
         RestoreDC(dc, saved);

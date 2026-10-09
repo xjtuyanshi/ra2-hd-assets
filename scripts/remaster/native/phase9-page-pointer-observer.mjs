@@ -20,6 +20,7 @@ export async function installPhase9PagePointerObserver(page, { maxSamples = 1638
         latestEvent: null,
         sceneFirstPointerEvent: null,
         latestFrame: presentation.latestFrame,
+        latestCursorFrame: null,
         nativeSnapshot: null,
         previousArt: null,
         artBitmap: null,
@@ -42,11 +43,19 @@ export async function installPhase9PagePointerObserver(page, { maxSamples = 1638
       };
       const current = ({ includeBitmap = false, target = null } = {}) => {
         const canvas = document.getElementById('native-page-cursor');
-        const frame = probe.latestFrame;
+        // The presenter intentionally removes hardware cursor RGBA after the
+        // page overlay consumes it. The optional update seam observes that
+        // actual pre-removal metadata and must survive later presenter draws.
+        const frame = probe.latestCursorFrame ?? probe.latestFrame;
         const box = screen.getBoundingClientRect();
         const cursorBox = canvas?.getBoundingClientRect();
-        const pointer = frame?.pointer ?? probe.nativeSnapshot?.pointer ?? null;
-        const hardware = !pointer ? (probe.nativeSnapshot?.hardware ?? null) : null;
+        const actualCursorFrame = probe.latestCursorFrame;
+        const pointer = frame && 'pointer' in frame ? frame.pointer : (probe.nativeSnapshot?.pointer ?? null);
+        const hardware = !pointer
+          ? actualCursorFrame
+            ? (actualCursorFrame.cursor ?? null)
+            : (probe.nativeSnapshot?.hardware ?? null)
+          : null;
         const scaleX = frame ? box.width / frame.width : null;
         const scaleY = frame ? box.height / frame.height : null;
         const hotspotX = pointer?.hotspotX ?? hardware?.hotspotX ?? null;
@@ -57,6 +66,15 @@ export async function installPhase9PagePointerObserver(page, { maxSamples = 1638
             ? { x: transform.m41 + hotspotX * scaleX, y: transform.m42 + hotspotY * scaleY }
             : null;
         const style = canvas ? getComputedStyle(canvas) : null;
+        // The first real pointer event can paint art before the next native
+        // draw. Refresh a changed canvas size so that this synchronous paint
+        // is not misreported using the previous empty bitmap cache.
+        const artBitmap =
+          includeBitmap ||
+          (canvas && (canvas.width !== probe.artBitmap?.width || canvas.height !== probe.artBitmap?.height))
+            ? bitmap(canvas)
+            : probe.artBitmap;
+        probe.artBitmap = artBitmap;
         return {
           at: at(),
           scene: probe.scene,
@@ -68,8 +86,8 @@ export async function installPhase9PagePointerObserver(page, { maxSamples = 1638
             style?.display !== 'none' &&
             style?.visibility !== 'hidden' &&
             style?.opacity !== '0' &&
-            (probe.artBitmap?.visiblePixels ?? 0) > 0,
-          visibleArtPixels: probe.artBitmap?.visiblePixels ?? null,
+            (artBitmap?.visiblePixels ?? 0) > 0,
+          visibleArtPixels: artBitmap?.visiblePixels ?? null,
           screenCursor: getComputedStyle(screen).cursor,
           documentHasFocus: document.hasFocus(),
           documentHidden: document.hidden,
@@ -85,17 +103,29 @@ export async function installPhase9PagePointerObserver(page, { maxSamples = 1638
           clipPath: canvas?.style.clipPath ?? null,
           scale: { x: scaleX, y: scaleY },
           pointer: pointer ? { ...pointer } : null,
-          hardware: hardware ? { ...hardware } : null,
-          metadataSource: frame?.pointer
-            ? 'Actual frame delivered to renderer'
-            : probe.nativeSnapshot
-              ? 'Read-only NativeCore snapshot, sampled separately'
-              : null,
+          hardware: hardware
+            ? {
+                handle: hardware.handle,
+                width: hardware.width,
+                height: hardware.height,
+                hotspotX: hardware.hotspotX,
+                hotspotY: hardware.hotspotY,
+                x: hardware.x ?? null,
+                y: hardware.y ?? null,
+              }
+            : null,
+          metadataSource: actualCursorFrame
+            ? 'Actual nativeCursor.update frame, before presenter cursor removal'
+            : frame?.pointer
+              ? 'Actual frame delivered to renderer'
+              : probe.nativeSnapshot
+                ? 'Read-only NativeCore snapshot, sampled separately'
+                : null,
           nativeSnapshotAt: probe.nativeSnapshot?.at ?? null,
           actualHotspot,
           hotspotError:
             target && actualHotspot ? { x: actualHotspot.x - target.x, y: actualHotspot.y - target.y } : null,
-          bitmap: includeBitmap ? bitmap(canvas) : null,
+          bitmap: includeBitmap ? artBitmap : null,
         };
       };
       const art = () => {
@@ -143,6 +173,7 @@ export async function installPhase9PagePointerObserver(page, { maxSamples = 1638
         recordArt('Actual renderer draw, after native page-cursor frame update');
         return result;
       };
+      const eventSamples = new WeakMap();
       const event = (e) => {
         if (e.target !== screen || e.pointerType !== 'mouse') return;
         const sample = {
@@ -161,10 +192,7 @@ export async function installPhase9PagePointerObserver(page, { maxSamples = 1638
         probe.latestEvent = sample;
         probe.sceneFirstPointerEvent ??= sample;
         put(sample);
-        // Capture after all actual target listeners, including nativeCursor.move.
-        queueMicrotask(() => {
-          sample.afterHandlers = current({ target: { x: sample.x, y: sample.y } });
-        });
+        eventSamples.set(e, sample);
         requestAnimationFrame(() => {
           sample.nextRafAt = at();
           sample.nextDisplayFrame = probe.displayFrame;
@@ -190,9 +218,7 @@ export async function installPhase9PagePointerObserver(page, { maxSamples = 1638
           beforeHandlers: current({ includeBitmap: true }),
         };
         put(sample);
-        queueMicrotask(() => {
-          sample.afterHandlers = current({ includeBitmap: true });
-        });
+        eventSamples.set(event, sample);
         requestAnimationFrame(() => {
           sample.nextRafAt = at();
           sample.atNextRaf = current({ includeBitmap: true });
@@ -209,6 +235,25 @@ export async function installPhase9PagePointerObserver(page, { maxSamples = 1638
         [document, 'fullscreenchange', false],
       ];
       for (const [target, type, capture] of lifecycleListeners) target.addEventListener(type, lifecycle, capture);
+      // A capture-listener microtask can run before the target listeners. Only
+      // an actual ancestor bubble callback establishes synchronous post-target
+      // observation. Non-bubbling events retain rAF evidence without inventing
+      // an after-handler sample.
+      const afterTarget = (event) => {
+        if (event.eventPhase !== Event.BUBBLING_PHASE) return;
+        const sample = eventSamples.get(event);
+        if (!sample || sample.afterHandlers) return;
+        sample.afterHandlers = current({
+          includeBitmap: sample.kind === 'page-pointer-lifecycle',
+          target: sample.kind === 'page-pointer-event' ? { x: sample.x, y: sample.y } : null,
+        });
+        sample.afterHandlersSource = 'Actual document/window bubble listener after target input listeners';
+      };
+      const bubbleTypes = [...new Set([...types, ...lifecycleListeners.map(([, type]) => type)])];
+      for (const type of bubbleTypes) {
+        document.addEventListener(type, afterTarget);
+        window.addEventListener(type, afterTarget);
+      }
       let latestDisplay = document.getElementById('native-page-cursor')?.style.display ?? null;
       const visibilityObserver = new MutationObserver(() => {
         const display = document.getElementById('native-page-cursor')?.style.display ?? null;
@@ -238,7 +283,25 @@ export async function installPhase9PagePointerObserver(page, { maxSamples = 1638
         put({ kind: 'scene-start', scene, at: at(), observation: current({ includeBitmap: true }) });
       };
       probe.frame = (frame) => {
-        probe.latestFrame = frame;
+        // Retain only bounded metadata, never the recyclable native picture
+        // buffer or a second copy of the hardware cursor's RGBA.
+        const cursor = frame.cursor;
+        probe.latestCursorFrame = {
+          width: frame.width,
+          height: frame.height,
+          ...('pointer' in frame ? { pointer: frame.pointer ? { ...frame.pointer } : frame.pointer } : {}),
+          cursor: cursor
+            ? {
+                handle: cursor.handle,
+                width: cursor.width,
+                height: cursor.height,
+                hotspotX: cursor.hotspotX,
+                hotspotY: cursor.hotspotY,
+                x: cursor.x,
+                y: cursor.y,
+              }
+            : null,
+        };
         recordArt('Actual nativeCursor.update post-render source seam');
       };
       probe.stop = () => {
@@ -246,6 +309,10 @@ export async function installPhase9PagePointerObserver(page, { maxSamples = 1638
         probe.destroyed = true;
         for (const type of types) window.removeEventListener(type, event, true);
         for (const [target, type, capture] of lifecycleListeners) target.removeEventListener(type, lifecycle, capture);
+        for (const type of bubbleTypes) {
+          document.removeEventListener(type, afterTarget);
+          window.removeEventListener(type, afterTarget);
+        }
         visibilityObserver.disconnect();
         cancelAnimationFrame(probe.raf);
         if (presentation.draw !== originalDraw) presentation.draw = originalDraw;
@@ -436,9 +503,15 @@ export async function readPhase9PagePointerObserver(
           supersededBeforeNextRaf: events.filter((sample) => sample.supersededBeforeNextRaf).length,
           pointerToNextRaf: summarize(presented.map((sample) => sample.pointerToNextRafMs)),
           afterHandlerHotspotSamples: events.filter((sample) => sample.afterHandlers?.hotspotError).length,
+          afterHandlerSamples: events.filter((sample) => sample.afterHandlers).length,
+          noAfterHandlerObservation: events.filter((sample) => !sample.afterHandlers).length,
           missingAtHandler: events.filter((sample) => sample.afterHandlers && !sample.afterHandlers.visible).length,
           missingAtNextRaf: presented.filter((sample) => !sample.atNextRaf?.visible).length,
           duplicatePageCursorElements: presented.filter((sample) => sample.atNextRaf?.pageCursorElements !== 1).length,
+          maxHotspotErrorAtHandlerCssPx: events.reduce((maximum, sample) => {
+            const error = sample.afterHandlers?.hotspotError;
+            return error ? Math.max(maximum ?? 0, Math.abs(error.x), Math.abs(error.y)) : maximum;
+          }, null),
           maxHotspotErrorAtNextRafCssPx: presented.reduce((maximum, sample) => {
             const error = sample.atNextRaf?.hotspotError;
             return error ? Math.max(maximum ?? 0, Math.abs(error.x), Math.abs(error.y)) : maximum;

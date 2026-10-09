@@ -323,18 +323,26 @@ export async function runPhase9BasePlay(api) {
       verified: true,
     });
     await shot(label + '-trained');
-    await select(trained.observed[0].uid);
-    await guard();
-    await api.page.keyboard.down('Shift');
-    try {
-      for (const unit of trained.observed.slice(1)) {
-        state = await peek();
-        const current = own(state).find((value) => value.uid === unit.uid);
-        if (!current) throw new Error('A newly trained unit was eliminated before group selection');
-        await click(project(current, state.view));
+    if (kind === 'vehicle') {
+      // A freshly delivered tank can still be behind the factory's roof. Its
+      // ground point then hits the building, not the tank. Use the original
+      // combat-unit selection hotkey and still verify every newly trained UID.
+      await key('p');
+      await record('base-' + label + '-group-selection', { input: 'Ordinary P combat-unit selection' });
+    } else {
+      await select(trained.observed[0].uid);
+      await guard();
+      await api.page.keyboard.down('Shift');
+      try {
+        for (const unit of trained.observed.slice(1)) {
+          state = await peek();
+          const current = own(state).find((value) => value.uid === unit.uid);
+          if (!current) throw new Error('A newly trained unit was eliminated before group selection');
+          await click(project(current, state.view));
+        }
+      } finally {
+        await api.page.keyboard.up('Shift');
       }
-    } finally {
-      await api.page.keyboard.up('Shift');
     }
     const selected = await stateWait('all newly trained units selected', (next) => {
       const selectedUnits = own(next).filter(
