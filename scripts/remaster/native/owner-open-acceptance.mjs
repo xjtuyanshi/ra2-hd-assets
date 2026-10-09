@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
+import { ownerOpenBoundary } from './owner-open-boundary.mjs';
 
 const { values: options } = parseArgs({
   options: {
@@ -14,13 +15,14 @@ const { values: options } = parseArgs({
     config: { type: 'string' },
     size: { type: 'string' },
     'hold-seconds': { type: 'string', default: '60' },
+    'session-dir': { type: 'string' },
     help: { type: 'boolean' },
   },
 });
 if (options.help) {
   console.log(
-    'owner-open-acceptance.mjs --out OUT [--config private.json] [--size WxH] [--hold-seconds 1..90]\n' +
-      'Starts play-native.sh --open in Google Chrome. Private OUT/browser/owner-open-current.json contains the exact URL and closeProofPath for CUA review. The default display size is used unless --size is supplied. Holds the ready page for 60 seconds by default; root must close the exact launch tab through CUA and write its closure proof. Finally stops its owned launcher/game. This wrapper does not establish visible UI acceptance or control Chrome tabs.',
+    'owner-open-acceptance.mjs --out OUT [--config private.json] [--size WxH] [--hold-seconds 1..90] [--session-dir DIR]\n' +
+      'Starts play-native.sh --open in Google Chrome. Private OUT/browser/owner-open-current.json contains the exact URL and closeProofPath for CUA review. The default display size is used unless --size is supplied. Holds the ready page for 60 seconds by default; root must close the exact launch tab through CUA and write its closure proof. --session-dir opts into deadline.json/cancel guards and waiting for the owner connection to close before launch; the same guards stop this owned run after cancellation/expiry. Finally stops its owned launcher/game. This wrapper does not establish visible UI acceptance or control Chrome tabs.',
   );
   process.exit(0);
 }
@@ -146,9 +148,21 @@ const signal = () => {
 };
 for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(name, signal);
 const dllPath = join(resolve(environment.RA2_NATIVE_GAME_DIR), 'ddraw.dll');
+let boundary;
 try {
+  if (options['session-dir']) {
+    boundary = await ownerOpenBoundary(options['session-dir'], {
+      ownerPausePath: resolve(out, '../play/_slots/PAUSE'),
+    });
+    report.sessionBoundary = { directory: boundary.sessionDirectory, deadlineAt: boundary.deadlineAt };
+    await boundary.waitForOwnerIdle();
+  }
   report.dllBefore = await dllIdentity(dllPath);
   await save();
+  // File observation and report writes are asynchronous. Recheck owner state,
+  // cancellation and expiry immediately before creating the owned child.
+  if (boundary) await boundary.waitForOwnerIdle();
+  if (interrupted) throw new Error('Owner-open run interrupted before launch');
   child = spawn(
     'bash',
     [
@@ -185,7 +199,11 @@ try {
     stream.on('data', receive);
   }
   const startupDeadline = Date.now() + 90000;
-  while (!report.url && !exited && !interrupted && Date.now() < startupDeadline) await delay(100);
+  while (!report.url && !exited && !interrupted && Date.now() < startupDeadline) {
+    if (boundary) await boundary.assertActive();
+    await delay(100);
+  }
+  if (boundary) await boundary.assertActive();
   if (!report.url)
     throw new Error(
       interrupted ? 'Owner-open run interrupted before readiness' : 'No owner play URL before exit/startup deadline',
@@ -204,6 +222,7 @@ try {
     throw new Error('Launcher returned an unexpected owned run directory');
   report.ports = { page: Number(url.port), agent: Number(agent.port) };
   const status = JSON.parse(await readFile(join(report.runDirectory, 'status.json'), 'utf8'));
+  if (boundary) await boundary.assertActive();
   report.observedPid = status.pid;
   report.nativeResolution = url.searchParams.get('resolution');
   report.gates.readyUrl = status.running === true && status.handshake === true;
@@ -225,7 +244,9 @@ try {
   );
   const holdDeadline = Date.now() + holdSeconds * 1000;
   while (!exited && !interrupted && Date.now() < holdDeadline) {
+    if (boundary) await boundary.assertActive();
     if (await readCloseProof()) break;
+    if (boundary) await boundary.assertActive();
     await delay(100);
   }
   if (exited) throw new Error('Owner launcher exited during the CUA review window');

@@ -26,17 +26,26 @@ export async function createPhase7EvidenceStream(path) {
   const handle = await open(path, 'wx', 0o600);
   let bytes = 0;
   let records = 0;
+  let writeTail = Promise.resolve();
   return {
     async append(record) {
       // Callers await writes: disk backpressure cannot accumulate promises or
       // entire-session records in the acceptance process.
       const line = JSON.stringify(record) + '\n';
-      await handle.write(line);
-      bytes += Buffer.byteLength(line);
-      records++;
+      const pending = writeTail.then(async () => {
+        await handle.write(line);
+        bytes += Buffer.byteLength(line);
+        records++;
+      });
+      writeTail = pending;
+      await pending;
     },
     async close() {
-      await handle.close();
+      try {
+        await writeTail;
+      } finally {
+        await handle.close();
+      }
       return { path, bytes, records };
     },
   };
@@ -521,6 +530,8 @@ export async function runPhase7InputStream({
   record,
   shot,
   waitOwnerIdle,
+  asyncOwnerNotifications = false,
+  onInputCheckpoint,
   observeState,
   requireBattle = false,
 }) {
@@ -584,15 +595,49 @@ export async function runPhase7InputStream({
   let ownerWaitMs = 0;
   const activeElapsedMs = () => performance.now() - start - ownerWaitMs;
   let emitted = 0;
-  let nextFlush = start + 500;
   let dragging = false;
+  let rightHeld = false;
+  let shiftHeld = false;
+  let ownerPaused = false;
+  let pauseStartedAt = null;
+  let pauseReason = null;
+  let resumeOwner;
+  let ownerResume = Promise.resolve();
+  let resumingOwner = null;
+  let collectingStopped = false;
+  let stopCollecting;
+  const collectorStop = new Promise((resolve) => {
+    stopCollecting = resolve;
+  });
+  let collection;
+  let guarding;
   let lastActionBucket = -1;
   let rssHighBytes = Math.max(process.memoryUsage().rss, process.resourceUsage().maxRSS * 1024);
   let totals = { counts: {}, lostEvidence: 0, firstAt: null, lastAt: null, cursorDraws: 0, cursorMatches: 0 };
   let streamStopReason = null;
   let streamError = null;
   let inputStoppedAt = null;
+  let inputCheckpointStarted = false;
+  let inputCheckpointEnded = false;
   const cleanupErrors = [];
+  const pointerIntervals = {
+    events: 0,
+    trustedEvents: 0,
+    firstAt: null,
+    lastAt: null,
+    maxGapMs: null,
+    halfSecondBuckets: 0,
+    emptyHalfSecondBuckets: 0,
+    continuousAtRequestedRate: 'UNVERIFIED',
+    limitation:
+      'Actual event timestamps, gaps and half-second counts expose bursts; an overall average is not continuous input evidence',
+  };
+  let pointerBucket = null;
+  const finishPointerBucket = async () => {
+    if (!pointerBucket) return;
+    await evidence.append({ kind: 'received-pointer-half-second', ...pointerBucket });
+    pointerIntervals.halfSecondBuckets++;
+  };
   const latencyBins = new Map();
   let cursorSamples = 0;
   let cursorMaxMs = null;
@@ -621,6 +666,38 @@ export async function runPhase7InputStream({
     for (const sample of totals.samples) {
       await evidence.append(sample);
       if (sample.kind === 'page-input' && sample.type === 'pointermove') {
+        pointerIntervals.events++;
+        if (sample.trusted) pointerIntervals.trustedEvents++;
+        pointerIntervals.firstAt ??= sample.at;
+        if (pointerIntervals.lastAt !== null)
+          pointerIntervals.maxGapMs = Math.max(pointerIntervals.maxGapMs ?? 0, sample.at - pointerIntervals.lastAt);
+        pointerIntervals.lastAt = sample.at;
+        const bucket = Math.floor((sample.at - pointerIntervals.firstAt) / 500);
+        if (pointerBucket?.index !== bucket) {
+          await finishPointerBucket();
+          if (pointerBucket && bucket > pointerBucket.index + 1) {
+            const count = bucket - pointerBucket.index - 1;
+            pointerIntervals.emptyHalfSecondBuckets += count;
+            await evidence.append({
+              kind: 'received-pointer-empty-half-seconds',
+              firstIndex: pointerBucket.index + 1,
+              count,
+              firstAt: pointerIntervals.firstAt,
+              bucketMs: 500,
+            });
+          }
+          pointerBucket = {
+            index: bucket,
+            startAt: pointerIntervals.firstAt + bucket * 500,
+            endAt: pointerIntervals.firstAt + (bucket + 1) * 500,
+            events: 0,
+            trustedEvents: 0,
+            coalescedPositions: 0,
+          };
+        }
+        pointerBucket.events++;
+        if (sample.trusted) pointerBucket.trustedEvents++;
+        pointerBucket.coalescedPositions += Math.max(0, sample.coalesced - 1);
         cursorCoverage.firstMovementAt ??= sample.at;
         cursorCoverage.lastMovementAt = sample.at;
       }
@@ -676,12 +753,29 @@ export async function runPhase7InputStream({
             observation.state.ownAliveAssets === 0
               ? 'Battle ended: genuine observation reports zero living owned assets'
               : 'Battle interface left: genuine native modal state is active';
+        } else if (
+          requireBattle &&
+          (observation.state?.nativeModal !== false ||
+            observation.state?.renderReaderError ||
+            !Number.isInteger(observation.state?.localHouse) ||
+            observation.state.localHouse < 0 ||
+            !Number.isFinite(observation.state?.logicFrame) ||
+            !Number.isFinite(observation.state?.ownAliveAssets))
+        ) {
+          streamStopReason ??= 'Battle continuity UNVERIFIED: required genuine state is unknown';
         }
       } catch (error) {
         nativeMatchStateErrors++;
         await evidence.append({ kind: 'native-match-state-error', at: Date.now(), error: String(error) });
+        if (requireBattle)
+          streamStopReason ??= `Battle continuity UNVERIFIED: state observation failed: ${String(error)}`;
       }
     }
+  };
+  const checkpoint = async (stage, detail = {}) => {
+    const description = { label, rate, requireBattle, atNodeMs: performance.now(), ...detail };
+    await evidence.append({ kind: 'input-window-checkpoint', stage, ...description });
+    await onInputCheckpoint?.(stage, description);
   };
   const retainFailure = async (stage, error) => {
     const description = `${stage}: ${String(error)}`;
@@ -699,8 +793,88 @@ export async function runPhase7InputStream({
       await retainFailure(stage, error);
     }
   };
+  const pauseForOwner = async (reason = 'positive-owner-hold') => {
+    if (ownerPaused || collectingStopped) return;
+    ownerPaused = true;
+    pauseStartedAt = performance.now();
+    pauseReason = reason;
+    ownerResume = new Promise((resolve) => {
+      resumeOwner = resolve;
+    });
+    await checkpoint('wait-start');
+  };
+  const resumeAfterOwner = async () => {
+    if (!ownerPaused) return;
+    if (resumingOwner) return resumingOwner;
+    resumingOwner = (async () => {
+      await checkpoint('wait-end', {
+        ownerHeld: pauseReason === 'positive-owner-hold' ? true : 'UNVERIFIED',
+        elapsedMs: performance.now() - pauseStartedAt,
+      });
+      const elapsed = performance.now() - pauseStartedAt;
+      ownerWaitMs += elapsed;
+      end += elapsed;
+      ownerPaused = false;
+      resumeOwner?.();
+      resumeOwner = null;
+    })();
+    try {
+      await resumingOwner;
+    } finally {
+      resumingOwner = null;
+    }
+  };
+  const ordinaryInput = async (method, payload) => {
+    while (ownerPaused && !streamStopReason) await Promise.race([ownerResume, collectorStop]);
+    if (streamStopReason || collectingStopped) throw new Error('Input producer stopped by its owning guard');
+    return cdp.send(method, payload);
+  };
   try {
+    if (requireBattle && !observeState) throw new Error('Battle continuity UNVERIFIED: no genuine state observer');
+    await checkpoint('start');
+    inputCheckpointStarted = true;
+    if (requireBattle) await flush();
+    collection = (async () => {
+      while (!collectingStopped && !streamStopReason) {
+        await Promise.race([delay(500), collectorStop]);
+        if (collectingStopped || streamStopReason) break;
+        try {
+          await flush();
+        } catch (error) {
+          await retainFailure('evidence-collector', error);
+          resumeOwner?.();
+          break;
+        }
+      }
+    })();
+    guarding = (async () => {
+      while (!collectingStopped && !streamStopReason && waitOwnerIdle) {
+        await Promise.race([delay(500), collectorStop]);
+        if (collectingStopped || streamStopReason) break;
+        try {
+          // Guard polling is independent of disk/page collection as well as
+          // the single writer. A slow flush cannot delay detecting a hold or
+          // cancellation. Only an already dispatched group may finish.
+          if (waitOwnerIdle && !asyncOwnerNotifications) await pauseForOwner('legacy-owner-guard');
+          await waitOwnerIdle?.({
+            onHeld: pauseForOwner,
+            onBlocked: () => {
+              streamStopReason ??= 'Owner input guard blocked';
+              resumeOwner?.();
+            },
+            isStopped: () => collectingStopped || !!streamStopReason,
+          });
+          await resumeAfterOwner();
+        } catch (error) {
+          await retainFailure('owner-guard', error);
+          resumeOwner?.();
+          break;
+        }
+      }
+    })();
     while (!streamStopReason && performance.now() < end) {
+      while (ownerPaused && !streamStopReason) await Promise.race([ownerResume, collectorStop]);
+      if (streamStopReason) break;
       const now = performance.now();
       const wanted = Math.min(Math.floor(((now - start - ownerWaitMs) * rate) / 1000) + 1, seconds * rate);
       const sends = [];
@@ -713,7 +887,7 @@ export async function runPhase7InputStream({
           y: area.y + area.height * (0.5 + 0.4 * Math.sin(phase * 1.9)),
         };
         sends.push(
-          cdp.send('Input.dispatchMouseEvent', {
+          ordinaryInput('Input.dispatchMouseEvent', {
             type: 'mouseMoved',
             ...css(point),
             buttons: dragging ? 1 : 0,
@@ -722,19 +896,21 @@ export async function runPhase7InputStream({
         );
         emitted++;
       }
-      await Promise.all(sends);
+      const sent = await Promise.allSettled(sends);
+      const failedSend = sent.find((result) => result.status === 'rejected');
+      if (failedSend) throw failedSend.reason;
       const actionBucket = Math.floor(activeElapsedMs() / 2000);
       if (actionBucket !== lastActionBucket) {
         lastActionBucket = actionBucket;
         const point = css(clickPoint ?? { x: area.x + area.width * 0.5, y: area.y + area.height * 0.5 });
-        await cdp.send('Input.dispatchMouseEvent', {
+        await ordinaryInput('Input.dispatchMouseEvent', {
           type: 'mouseMoved',
           ...point,
           buttons: dragging ? 1 : 0,
           button: dragging ? 'left' : 'none',
         });
         if (actionBucket % 3 === 0) {
-          await cdp.send('Input.dispatchMouseEvent', {
+          await ordinaryInput('Input.dispatchMouseEvent', {
             type: 'mousePressed',
             ...point,
             button: 'left',
@@ -743,7 +919,7 @@ export async function runPhase7InputStream({
           });
           dragging = true;
         } else if (dragging) {
-          await cdp.send('Input.dispatchMouseEvent', {
+          await ordinaryInput('Input.dispatchMouseEvent', {
             type: 'mouseReleased',
             ...point,
             button: 'left',
@@ -752,29 +928,31 @@ export async function runPhase7InputStream({
           });
           dragging = false;
         } else {
-          await cdp.send('Input.dispatchMouseEvent', {
+          await ordinaryInput('Input.dispatchMouseEvent', {
             type: 'mousePressed',
             ...point,
             button: 'right',
             buttons: 2,
             clickCount: 1,
           });
-          await cdp.send('Input.dispatchMouseEvent', {
+          rightHeld = true;
+          await ordinaryInput('Input.dispatchMouseEvent', {
             type: 'mouseReleased',
             ...point,
             button: 'right',
             buttons: 0,
             clickCount: 1,
           });
+          rightHeld = false;
         }
-        await cdp.send('Input.dispatchMouseEvent', {
+        await ordinaryInput('Input.dispatchMouseEvent', {
           type: 'mouseWheel',
           ...point,
           deltaX: 0,
           deltaY: actionBucket % 2 ? 80 : -80,
           buttons: dragging ? 1 : 0,
         });
-        await cdp.send('Input.dispatchKeyEvent', {
+        await ordinaryInput('Input.dispatchKeyEvent', {
           type: 'keyDown',
           key: 'Shift',
           code: 'ShiftLeft',
@@ -782,7 +960,8 @@ export async function runPhase7InputStream({
           nativeVirtualKeyCode: 16,
           modifiers: 8,
         });
-        await cdp.send('Input.dispatchKeyEvent', {
+        shiftHeld = true;
+        await ordinaryInput('Input.dispatchKeyEvent', {
           type: 'keyUp',
           key: 'Shift',
           code: 'ShiftLeft',
@@ -790,18 +969,7 @@ export async function runPhase7InputStream({
           nativeVirtualKeyCode: 16,
           modifiers: 0,
         });
-      }
-      if (performance.now() >= nextFlush) {
-        await flush();
-        if (streamStopReason) break;
-        if (waitOwnerIdle) {
-          const waitStartedAt = performance.now();
-          await waitOwnerIdle();
-          const elapsed = performance.now() - waitStartedAt;
-          ownerWaitMs += elapsed;
-          end += elapsed;
-        }
-        nextFlush = performance.now() + 500;
+        shiftHeld = false;
       }
       if (emitted >= Math.floor((activeElapsedMs() * rate) / 1000)) await delay(1);
     }
@@ -809,9 +977,26 @@ export async function runPhase7InputStream({
     await retainFailure('stream', error);
   } finally {
     inputStoppedAt = performance.now();
+    collectingStopped = true;
+    stopCollecting();
+    resumeOwner?.();
+    await cleanupStep('end-owned-wait', resumeAfterOwner);
+    if (inputCheckpointStarted)
+      await cleanupStep('input-window-end', async () => {
+        await checkpoint('end', {
+          completed: !streamStopReason && !streamError,
+          reason: streamStopReason,
+          nativeMatchStateErrors,
+          inputStoppedAtNodeMs: inputStoppedAt,
+        });
+        inputCheckpointEnded = true;
+      });
+    await cleanupStep('stop-evidence-collector', async () => {
+      await Promise.all([collection, guarding]);
+    });
     if (dragging)
       await cleanupStep('release-drag', async () => {
-        await waitOwnerIdle?.();
+        // Release an already owned press even after cancellation or deadline.
         await cdp.send('Input.dispatchMouseEvent', {
           type: 'mouseReleased',
           ...css(clickPoint ?? { x: area.x + area.width * 0.5, y: area.y + area.height * 0.5 }),
@@ -820,6 +1005,27 @@ export async function runPhase7InputStream({
           clickCount: 1,
         });
       });
+    if (rightHeld)
+      await cleanupStep('release-right-button', () =>
+        cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseReleased',
+          ...css(clickPoint ?? { x: area.x + area.width * 0.5, y: area.y + area.height * 0.5 }),
+          button: 'right',
+          buttons: 0,
+          clickCount: 1,
+        }),
+      );
+    if (shiftHeld)
+      await cleanupStep('release-shift', () =>
+        cdp.send('Input.dispatchKeyEvent', {
+          type: 'keyUp',
+          key: 'Shift',
+          code: 'ShiftLeft',
+          windowsVirtualKeyCode: 16,
+          nativeVirtualKeyCode: 16,
+          modifiers: 0,
+        }),
+      );
     await delay(100);
     await cleanupStep('final-evidence-flush', flush);
     if (agent) {
@@ -839,6 +1045,15 @@ export async function runPhase7InputStream({
       });
     }
   }
+  await finishPointerBucket();
+  if (inputCheckpointStarted)
+    await cleanupStep('input-window-result', () =>
+      checkpoint('result', {
+        completed: !streamStopReason && !streamError,
+        reason: streamStopReason,
+        nativeMatchStateErrors,
+      }),
+    );
   const artifact = await evidence.close();
   const lastMeasured = cursorCoverage.lastMatchedPresentationAt ?? cursorCoverage.firstMovementAt;
   if (lastMeasured !== null && cursorCoverage.lastMovementAt !== null) {
@@ -869,6 +1084,15 @@ export async function runPhase7InputStream({
     activeSeconds: duration - ownerWaitMs / 1000,
     inputActiveSeconds: (inputStoppedAt - start - ownerWaitMs) / 1000,
     ownerWaitSeconds: ownerWaitMs / 1000,
+    inputCheckpoints: { started: inputCheckpointStarted, ended: inputCheckpointEnded },
+    producer: {
+      singleWriter: true,
+      pointerCommandsInFlightLimit: 16,
+      readOnlyCollectorIndependent: true,
+      asyncOwnerNotifications,
+      ownerGuardMode: asyncOwnerNotifications ? 'Positive hold/cancellation notification' : 'Legacy conservative pause',
+    },
+    pointerIntervals,
     sentPointerCommands: emitted,
     pageEvents: totals.counts,
     receivedPointerEventsHz: (totals.counts.pointermove ?? 0) / inputSeconds,

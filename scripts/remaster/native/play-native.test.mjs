@@ -15,8 +15,10 @@ import {
   runLauncher,
   validateHdCache,
   waitForStartupCommand,
+  wineCheckAcknowledgement,
 } from './play-native.mjs';
 import { HD_PLAY_OPTIONS } from '../play-options.mjs';
+import { readWineSelfCheckEvidence } from './launcher-wine-evidence.mjs';
 import {
   NATIVE_RESOLUTION_LIMITS,
   capNativeResolution,
@@ -228,6 +230,54 @@ test('an owned startup command has a bounded wait even when the child does not c
   await waitForStartupCommand({ done: Promise.resolve() }, 20, 'unexpected timeout');
 });
 
+test('Wine acknowledgement survives trailing logs and chunk splits without accepting an embedded marker', () => {
+  for (const chunks of [
+    ['RA2_NATIVE_WINE_OK\n', 'diagnostic noise '.repeat(8192)],
+    ['\tRA2_NAT', 'IVE_WINE_', 'OK\r', '\n'],
+    ['RA2_NATIVE_WINE_OK'],
+    [' '.repeat(20000), 'RA2_NATIVE_WINE_OK', ' '.repeat(20000), '\n'],
+  ]) {
+    const acknowledgement = wineCheckAcknowledgement();
+    for (const chunk of chunks) acknowledgement.append(chunk);
+    assert.equal(acknowledgement.finish(), true);
+  }
+  for (const chunks of [
+    ['prefix RA2_NATIVE_WINE_OK\n'],
+    ['RA2_NATIVE_WINE_OK suffix\n'],
+    ['RA2_NATIVE_', ' ', 'WINE_OK\n'],
+    ['x'.repeat(8192), 'RA2_NATIVE_WINE_OK\n'],
+    ['RA2_NATIVE_WINE_OK\rRA2_NATIVE_WINE_OK'],
+    [''],
+  ]) {
+    const acknowledgement = wineCheckAcknowledgement();
+    for (const chunk of chunks) acknowledgement.append(chunk);
+    assert.equal(acknowledgement.finish(), false);
+  }
+});
+
+test('Wine evidence falls back only for old launches without an observation, never for failed or invalid observations', async (t) => {
+  const { run } = await fixture(t);
+  await writeFile(join(run, 'wine-check.log'), 'RA2_NATIVE_WINE_OK\n');
+  const historical = await readWineSelfCheckEvidence(run);
+  assert.equal(historical.observationPath, null);
+  assert.equal(historical.successful, true);
+  await writeFile(
+    join(run, 'wine-check.json'),
+    JSON.stringify({
+      source: 'stdout-exact-trimmed-line',
+      acknowledged: true,
+      closed: false,
+      exitCode: 0,
+      error: null,
+    }),
+  );
+  assert.equal((await readWineSelfCheckEvidence(run)).successful, false);
+  await writeFile(join(run, 'wine-check.json'), 'null');
+  await assert.rejects(readWineSelfCheckEvidence(run), /observation object/);
+  await writeFile(join(run, 'wine-check.json'), 'not json');
+  await assert.rejects(readWineSelfCheckEvidence(run), SyntaxError);
+});
+
 for (const scenario of [
   {
     name: 'failed self-check',
@@ -329,6 +379,12 @@ for (const scenario of [
     const runPath = output.match(/Private launch logs and DLL backups: (.+)/)[1];
     if (scenario.name !== 'oversized path mapping')
       assert.match(await readFile(join(runPath, 'wine-check.log'), 'utf8'), /synthetic/);
+    const evidence = await readWineSelfCheckEvidence(runPath);
+    assert.equal(evidence.successful, scenario.name === 'oversized path mapping');
+    if (['hung self-check', 'exited wrapper with inherited pipes'].includes(scenario.name)) {
+      assert.equal(evidence.observation.closed, false);
+      assert.match(evidence.observation.error, /30 秒/);
+    }
   });
 
 test('native size parsing and main-display capping respect game and picture bounds', () => {
@@ -409,7 +465,7 @@ test('readiness rejects empty native executable identity before printing a play 
         { exe: { size: 0, sha256: '', verified: false } },
         { size: 100, sha256: 'a'.repeat(64) },
       ),
-    /empty size\/SHA-256/,
+    /游戏未能完成启动.*文件大小或 SHA-256 为空/,
   );
 });
 
@@ -420,7 +476,7 @@ test('readiness rejects a different executable even when its agent verified flag
         { exe: { size: 100, sha256: 'b'.repeat(64), verified: true } },
         { size: 100, sha256: 'a'.repeat(64) },
       ),
-    /differs from the supplied owned game copy/,
+    /游戏未能完成启动.*指定副本.*不一致/,
   );
 });
 
@@ -431,7 +487,7 @@ test('readiness reports an unsupported owned build explicitly rather than claimi
         { exe: { size: 100, sha256: 'a'.repeat(64), verified: false } },
         { size: 100, sha256: 'a'.repeat(64) },
       ),
-    /unsupported by the native page policy/,
+    /游戏未能完成启动.*当前游戏版本尚不受支持.*SHA-256/,
   );
   assert.doesNotThrow(() =>
     assertOwnedExecutableIdentity(
@@ -489,6 +545,7 @@ if (args[0] === 'winepath.exe') {
 } else if (args[0] === 'cmd.exe') {
   console.log('synthetic noisy Wine self-check '.repeat(8192));
   console.log('RA2_NATIVE_WINE_OK');
+  console.log('synthetic trailing Wine self-check '.repeat(8192));
 } else {
   const value = (name) => unix(args[args.indexOf(name) + 1]);
   const stop = value('--stop-file');
@@ -586,7 +643,18 @@ if (args[0] === 'winepath.exe') {
     const runPath = output.match(/Private launch logs and DLL backups: (.+)/)[1];
     const checkLog = await readFile(join(runPath, 'wine-check.log'), 'utf8');
     assert.ok(checkLog.length <= 16385);
-    assert.match(checkLog, /RA2_NATIVE_WINE_OK\n/);
+    assert.match(checkLog, /synthetic trailing Wine self-check/);
+    assert.doesNotMatch(checkLog, /RA2_NATIVE_WINE_OK/);
+    const evidence = await readWineSelfCheckEvidence(runPath);
+    assert.deepEqual(evidence.observation, {
+      source: 'stdout-exact-trimmed-line',
+      acknowledged: true,
+      closed: true,
+      exitCode: 0,
+      error: null,
+    });
+    assert.equal(evidence.observedExactOkLine, true);
+    assert.equal(evidence.successful, true);
     const status = JSON.parse(await readFile(join(runPath, 'status.json'), 'utf8'));
     assert.equal(status.running, false);
   },

@@ -6,6 +6,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { outputDirectory } from './artifacts.mjs';
+import { readWineSelfCheckEvidence } from './launcher-wine-evidence.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const base = outputDirectory();
@@ -133,14 +134,15 @@ try {
     /^[a-f0-9]{64}$/.test(report.installedDllSnapshot.sha256 ?? '') &&
     report.installedDllSnapshot.sha256 === report.currentBuiltDll.sha256;
   if (mode === 'owner') report.gates.currentInstalledDll = report.gates.currentInstalledDllSnapshot;
-  const wineCheckPath = join(report.runDirectory, 'wine-check.log');
-  const wineCheck = await readFile(wineCheckPath, 'utf8');
+  const wineCheck = await readWineSelfCheckEvidence(report.runDirectory);
   report.wineSelfCheck = {
-    artifact: relative(repository, wineCheckPath),
-    ...(await identity(wineCheckPath)),
-    observedExactOkLine: wineCheck.split(/\r?\n/).some((line) => line.trim() === 'RA2_NATIVE_WINE_OK'),
+    artifact: relative(repository, wineCheck.logPath),
+    ...(await identity(wineCheck.logPath)),
+    observationArtifact: wineCheck.observationPath ? await identity(wineCheck.observationPath) : null,
+    observation: wineCheck.observation,
+    observedExactOkLine: wineCheck.observedExactOkLine,
   };
-  report.gates.realWineSelfCheck = report.wineSelfCheck.observedExactOkLine;
+  report.gates.realWineSelfCheck = wineCheck.successful;
   report.gates.currentSession =
     !!deadline?.startedAt &&
     !!report.liveRunStartedAt &&
@@ -149,8 +151,10 @@ try {
     [
       'scripts/remaster/native/play-native.sh',
       'scripts/remaster/native/play-native.mjs',
+      'scripts/remaster/native/launcher-wine-evidence.mjs',
       'scripts/remaster/native/native-resolution.mjs',
       'scripts/remaster/native/owner-open-acceptance.mjs',
+      'scripts/remaster/native/owner-open-boundary.mjs',
       'scripts/remaster/native/browser-phase9.mjs',
       'packages/native-host/build/ddraw.dll',
       'packages/native-host/build/ra2launch.exe',

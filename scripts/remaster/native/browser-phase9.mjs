@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded real-browser inspection. Commands are private review artifacts, never guest-state writes.
 import assert from 'node:assert/strict';
-import { spawn, execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile, appendFile, readdir, lstat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, resolve, dirname } from 'node:path';
@@ -11,9 +11,11 @@ import { createConnection } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from '@playwright/test';
 import { writePng, outputDirectory } from './artifacts.mjs';
+import { ownerConnected } from './owner-open-boundary.mjs';
 const wt = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const base = outputDirectory();
 const phase = process.env.NATIVE_BROWSER_PHASE || 'phase9';
+const naturalWindowDimensions = process.env.NATIVE_BROWSER_USE_WINDOW_DIMENSIONS === '1';
 assert(/^phase[0-9]+$/.test(phase));
 const tag = process.argv[2] || 'hidden';
 assert(/^[a-zA-Z0-9_-]+$/.test(tag));
@@ -22,7 +24,13 @@ await mkdir(out, { recursive: true });
 await writeFile(join(out, 'harness-pid'), String(process.pid) + '\n');
 const config = JSON.parse(await readFile(join(base, 'run/owner-launch-smoke.json'), 'utf8'));
 const pause = resolve(base, '../play/_slots/PAUSE');
-const exists = async (p) => !!(await lstat(p).catch(() => null));
+const exists = async (p) =>
+  lstat(p)
+    .then(() => true)
+    .catch((error) => {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    });
 const scopeDeadline = await readFile(join(base, phase, 'deadline.json'), 'utf8')
   .then((t) => Date.parse(JSON.parse(t).deadlineAt))
   .catch(() => Infinity);
@@ -31,29 +39,38 @@ let ownerConnectionActive = false;
 async function ownerPlaying() {
   if (await exists(pause)) return true;
   if (Date.now() - ownerConnectionCheckedAt >= 1000) {
-    const output = await new Promise((resolve) => {
-      execFile('lsof', ['-nP', '-iTCP', '-sTCP:ESTABLISHED'], { timeout: 20000 }, (_error, stdout) =>
-        resolve(stdout || ''),
-      );
-    });
-    ownerConnectionActive = /:1540\d\b/.test(output);
+    ownerConnectionActive = await ownerConnected();
     ownerConnectionCheckedAt = Date.now();
   }
-  return ownerConnectionActive;
+  return ownerConnectionActive || (await exists(pause));
 }
-async function ownerIdle() {
+async function ownerIdle(options = {}) {
+  let held = false;
   const bounded = async () => {
-    if (await exists(join(out, 'cancel'))) throw new Error('Owned acceptance cancelled');
-    if (Date.now() > scopeDeadline) throw new Error('Bounded task deadline reached');
+    if (await exists(join(out, 'cancel'))) {
+      await options.onBlocked?.();
+      throw new Error('Owned acceptance cancelled');
+    }
+    if (Date.now() > scopeDeadline) {
+      await options.onBlocked?.();
+      throw new Error('Bounded task deadline reached');
+    }
   };
   await bounded();
+  if (options.isStopped?.()) return { held, stopped: true };
   while (await ownerPlaying()) {
+    await bounded();
+    if (options.isStopped?.()) return { held, stopped: true };
+    if (!held) await options.onHeld?.();
+    held = true;
     await bounded();
     await writeFile(join(out, 'held'), 'Owner playing; waiting\n');
     await delay(1000);
   }
   // The owner probe is asynchronous; cancellation may arrive while it waits.
   await bounded();
+  if (options.isStopped?.()) return { held, stopped: true };
+  return { held };
 }
 
 const record = async (name, proof) => {
@@ -173,6 +190,29 @@ async function shot(label) {
       outerWidth,
       outerHeight,
       dpr: devicePixelRatio,
+      display: {
+        width: screen.width,
+        height: screen.height,
+        availableWidth: screen.availWidth,
+        availableHeight: screen.availHeight,
+        availableLeft: screen.availLeft,
+        availableTop: screen.availTop,
+      },
+      visualViewport: window.visualViewport
+        ? {
+            width: visualViewport.width,
+            height: visualViewport.height,
+            scale: visualViewport.scale,
+            offsetLeft: visualViewport.offsetLeft,
+            offsetTop: visualViewport.offsetTop,
+          }
+        : null,
+      canvasBacking: {
+        width: document.querySelector('#screen')?.width,
+        height: document.querySelector('#screen')?.height,
+      },
+      fullscreen: !!document.fullscreenElement,
+      screenBox: document.querySelector('#screen')?.getBoundingClientRect().toJSON(),
     })),
   });
   return path;
@@ -184,15 +224,40 @@ async function point(x, y) {
 }
 async function click(x, y, button = 'left') {
   const [px, py] = await point(x, y);
+  await ownerIdle();
   await page.mouse.move(px, py);
+  await ownerIdle();
   await page.mouse.down({ button });
-  await delay(40);
-  await page.mouse.up({ button });
+  try {
+    await delay(40);
+  } finally {
+    // Releases remain allowed after cancellation so an owned press cannot stick.
+    await page.mouse.up({ button });
+  }
 }
 const usable = (c) => c.visible && c.enabled && c.rect?.[2] > c.rect?.[0];
 async function execute(c) {
   if (c.action === 'close') return { closing: true };
   await ownerIdle();
+  if (c.action === 'window-fullscreen') {
+    const owned = await cdp.send('Browser.getWindowForTarget');
+    await ownerIdle();
+    await cdp.send('Browser.setWindowBounds', { windowId: owned.windowId, bounds: { windowState: 'fullscreen' } });
+    await delay(1000);
+    return shot(c.label ?? 'window-fullscreen');
+  }
+  if (c.action === 'fullscreen') {
+    if (await page.evaluate(() => !!document.fullscreenElement)) return shot(c.label ?? 'fullscreen');
+    const toggle = page.locator('#vm-controls-toggle');
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') {
+      await ownerIdle();
+      await toggle.click();
+    }
+    await ownerIdle();
+    await page.locator('#vm-fullscreen').click();
+    await wait('actual page fullscreen', () => page.evaluate(() => !!document.fullscreenElement));
+    return shot(c.label ?? 'fullscreen');
+  }
   if (c.action === 'pointer-observe') {
     const m = await import('./phase9-page-pointer-observer.mjs');
     await m.installPhase9PagePointerObserver(page);
@@ -529,6 +594,23 @@ async function execute(c) {
           out,
           record,
           label: (c.label ?? 'stream') + '-rates',
+          externallyDismissedDialogs: true,
+          readNativeLogicEndpoint: () =>
+            worker().evaluate(async () => {
+              // YR 1.001 frame counter, already validated by the NativeCore game policy.
+              // A direct read reply cannot silently substitute the previous mirror reader result.
+              const core = globalThis.__auditCore;
+              const bytes = (await core.connection.read(0xa8ed84, 4)).bytes;
+              if (bytes.byteLength !== 4) throw new Error('Incomplete direct native logic counter read');
+              return {
+                frame: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true),
+                atMs: performance.now(),
+                timeOrigin: performance.timeOrigin,
+                clockContext: 'worker',
+                fresh: true,
+                source: 'Direct read-only NativeConnection.read reply for the validated YR logic frame counter',
+              };
+            }),
         })
       : null;
     let result, rates;
@@ -541,6 +623,8 @@ async function execute(c) {
         record,
         shot,
         waitOwnerIdle: ownerIdle,
+        asyncOwnerNotifications: true,
+        onInputCheckpoint: monitor ? (stage, detail) => monitor.inputCheckpoint(stage, detail) : undefined,
         observeState: () =>
           worker().evaluate(async () => {
             const core = globalThis.__auditCore;
@@ -553,6 +637,7 @@ async function execute(c) {
               nativeModal: nativeState.modal,
               nativePictureFrame: core.connection.pictureDecoder.previous?.frame ?? null,
               logicFrame: state?.frame ?? null,
+              renderReaderError: core.render?.error ?? null,
               localHouse: state?.localHouse ?? null,
               ownAliveAssets:
                 state?.localHouse >= 0
@@ -592,6 +677,7 @@ async function execute(c) {
       shot,
       record,
       wait,
+      ownerIdle,
       selectionComparison: false,
       eliminateHuman: c.eliminateHuman ?? false,
     };
@@ -776,7 +862,9 @@ try {
       '--enable-webgpu-developer-features',
     ],
   });
-  const context = await browser.newContext({ viewport: { width: 1728, height: 1117 }, deviceScaleFactor: 2 });
+  const context = await browser.newContext(
+    naturalWindowDimensions ? { viewport: null } : { viewport: { width: 1728, height: 1117 }, deviceScaleFactor: 2 },
+  );
   await context.grantPermissions(['local-network-access'], { origin: new URL(url).origin });
   await context.route('**/src/adapter/vmWorker.ts*', async (route) => {
     const r = await route.fetch();
@@ -824,6 +912,12 @@ try {
     if (r.status() >= 400) record('http-error', { status: r.status(), url: redact(r.url()) });
   });
   page.on('pageerror', (e) => record('pageerror', { error: String(e) }));
+  page.on('dialog', (dialog) => {
+    void record('javascript-dialog', { type: dialog.type(), message: dialog.message() });
+    // Attaching a listener replaces Playwright's default auto-dismissal.
+    // Keep that behavior after recording whole-session failure evidence.
+    void dialog.dismiss().catch((error) => record('javascript-dialog-dismiss-error', { error: String(error) }));
+  });
   page.on('console', (m) => {
     if (m.type() === 'error') record('console-error', { text: m.text().slice(0, 1000) });
   });
@@ -832,13 +926,15 @@ try {
   await page.goto(pageUrl.toString());
   await page.bringToFront();
   const ownedWindow = await cdp.send('Browser.getWindowForTarget');
-  await page.setViewportSize({ width: 1728, height: 1117 });
-  await cdp.send('Emulation.setDeviceMetricsOverride', {
-    width: 1728,
-    height: 1117,
-    deviceScaleFactor: 2,
-    mobile: false,
-  });
+  if (!naturalWindowDimensions) {
+    await page.setViewportSize({ width: 1728, height: 1117 });
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 1728,
+      height: 1117,
+      deviceScaleFactor: 2,
+      mobile: false,
+    });
+  }
   await delay(1000);
   await wait(
     'native main menu',
@@ -872,6 +968,7 @@ try {
     tag,
     phase,
     browserExecutable: exe,
+    naturalWindowDimensions,
     browserVersion: browser.version(),
     installedAgent: await dllIdentity(),
     viewport: await page.evaluate(() => ({
@@ -880,6 +977,27 @@ try {
       outerWidth,
       outerHeight,
       dpr: devicePixelRatio,
+      display: {
+        width: screen.width,
+        height: screen.height,
+        availableWidth: screen.availWidth,
+        availableHeight: screen.availHeight,
+        availableLeft: screen.availLeft,
+        availableTop: screen.availTop,
+      },
+      visualViewport: window.visualViewport
+        ? {
+            width: visualViewport.width,
+            height: visualViewport.height,
+            scale: visualViewport.scale,
+            offsetLeft: visualViewport.offsetLeft,
+            offsetTop: visualViewport.offsetTop,
+          }
+        : null,
+      canvasBacking: {
+        width: document.querySelector('#screen')?.width,
+        height: document.querySelector('#screen')?.height,
+      },
     })),
     browserWindow: await cdp.send('Browser.getWindowForTarget'),
     hello: await worker().evaluate(() => globalThis.__auditCore.hello),

@@ -9,7 +9,14 @@ import { createPhase7EvidenceStream } from './phase7-input-stream.mjs';
  * sample does not limit those measurements to one state or frame per second.
  * Stop before leaving the match. This owns only its observer and evidence file.
  */
-export async function startPhase10MatchRates({ page, out, record, label = 'match-rates' }) {
+export async function startPhase10MatchRates({
+  page,
+  out,
+  record,
+  label = 'match-rates',
+  readNativeLogicEndpoint,
+  externallyDismissedDialogs = false,
+}) {
   assert(/^[a-zA-Z0-9_-]+$/.test(label), 'Simple evidence label required');
   const evidence = await createPhase7EvidenceStream(join(out, `${label}.ndjson`));
   // Observer cleanup must still return if a JavaScript dialog blocks the page.
@@ -211,6 +218,10 @@ export async function startPhase10MatchRates({ page, out, record, label = 'match
       dismissal: 'pending',
     };
     if (dialogs.length < 64) dialogs.push(entry);
+    if (externallyDismissedDialogs) {
+      entry.dismissal = 'Owned by whole-session harness dialog observer';
+      return;
+    }
     // Adding this listener disables Playwright's default dismissal. Preserve
     // it after recording the failure; never accept a confirm or prompt.
     const pending = bounded(
@@ -237,8 +248,8 @@ export async function startPhase10MatchRates({ page, out, record, label = 'match
     page.off('dialog', onDialog);
     await Promise.all([...pendingDialogDismissals]);
   };
-  const read = () =>
-    evaluate(
+  const read = async () => {
+    const observed = await evaluate(
       async ({ slot, owner }) => {
         const probe = window[slot];
         if (probe?.owner !== owner || !probe.active())
@@ -249,6 +260,8 @@ export async function startPhase10MatchRates({ page, out, record, label = 'match
         if (!diagnostic) throw new Error('The current page has no real HD bridge diagnostics');
         const snapshot = {
           atMs: performance.now(),
+          timeOrigin: performance.timeOrigin,
+          clockContext: 'page',
           counters: diagnostic.counters,
           enabled: diagnostic.enabled,
           shown: diagnostic.shown,
@@ -264,12 +277,18 @@ export async function startPhase10MatchRates({ page, out, record, label = 'match
       },
       { slot: problemSlot, owner: problemOwner },
     );
+    const nativeLogic = readNativeLogicEndpoint
+      ? await bounded(readNativeLogicEndpoint(), 'Direct native logic endpoint')
+      : null;
+    return { ...observed, nativeLogic };
+  };
   let first;
   let last;
   let samples = 0;
   let mapsChanged = 0;
   let countersReset = false;
   let gameFrameReset = false;
+  let nativeLogicFreshAtAllSamples = true;
   let hdShownAtAllSamples = true;
   let pageVisibleAtAllSamples = true;
   let ownerSizeAtAllSamples = true;
@@ -277,11 +296,25 @@ export async function startPhase10MatchRates({ page, out, record, label = 'match
   let stopped = false;
   let observerFailed = false;
   let stopPromise;
+  const inputWindow = {
+    binding: 'UNVERIFIED',
+    completed: false,
+    label: null,
+    rate: null,
+    start: null,
+    end: null,
+    activeSegments: [],
+    ownerWaits: [],
+    ownerHoldInterrupted: false,
+  };
+  let activeStart = null;
+  let pendingWait = null;
+  let sampleTail = Promise.resolve();
   let wake;
   const stopRequested = new Promise((resolve) => {
     wake = resolve;
   });
-  const sample = async () => {
+  const sampleNow = async () => {
     const observed = await read();
     await evidence.append({ kind: 'real-match-cumulative-counters', at: new Date().toISOString(), ...observed });
     if (last) {
@@ -289,8 +322,8 @@ export async function startPhase10MatchRates({ page, out, record, label = 'match
       countersReset ||= ['distinctStates', 'drawnFrames', 'shownFrames'].some(
         (key) => observed.counters[key] < last.counters[key],
       );
-      if (Number.isFinite(observed.game?.frame) && Number.isFinite(last.game?.frame))
-        gameFrameReset ||= observed.game.frame < last.game.frame;
+      if (Number.isFinite(observed.nativeLogic?.frame) && Number.isFinite(last.nativeLogic?.frame))
+        gameFrameReset ||= observed.nativeLogic.frame < last.nativeLogic.frame;
       if (observed.game && first.game)
         speedSettingsChanged ||= ['gameSpeed', 'sessionSpeed', 'targetFps'].some(
           (key) => observed.game[key] !== first.game[key],
@@ -299,11 +332,25 @@ export async function startPhase10MatchRates({ page, out, record, label = 'match
     first ??= observed;
     last = observed;
     samples++;
+    nativeLogicFreshAtAllSamples &&=
+      observed.nativeLogic?.fresh === true &&
+      Number.isFinite(observed.nativeLogic.frame) &&
+      Number.isFinite(observed.nativeLogic.atMs);
     hdShownAtAllSamples &&= observed.shown === true;
     pageVisibleAtAllSamples &&= observed.visibility === 'visible';
     ownerSizeAtAllSamples &&=
       observed.viewport.width === 1728 && observed.viewport.height === 1117 && observed.viewport.dpr === 2;
     return observed;
+  };
+  const sample = () => {
+    const pending = sampleTail.then(sampleNow);
+    sampleTail = pending.catch(() => {});
+    return pending;
+  };
+  const closeActiveSegment = (end) => {
+    if (!activeStart) return;
+    inputWindow.activeSegments.push({ start: activeStart, end });
+    activeStart = null;
   };
   try {
     await sample();
@@ -337,6 +384,46 @@ export async function startPhase10MatchRates({ page, out, record, label = 'match
   return {
     // The caller may inspect this without another native read or input action.
     latest: () => last,
+    inputCheckpoint: async (stage, detail) => {
+      if (stopped) throw new Error('Cannot bind input to a stopped rate observer');
+      if (stage === 'result') {
+        inputWindow.completed = detail.completed === true;
+        inputWindow.result = detail;
+        await evidence.append({ kind: 'rate-input-result', detail });
+        return;
+      }
+      const endpoint = await sample();
+      await evidence.append({ kind: 'rate-input-checkpoint', stage, detail, endpoint });
+      if (stage === 'start') {
+        if (inputWindow.start) throw new Error('Input window already started');
+        inputWindow.label = detail.label;
+        inputWindow.rate = detail.rate;
+        inputWindow.start = endpoint;
+        activeStart = endpoint;
+      } else if (stage === 'wait-start') {
+        if (!activeStart || pendingWait) throw new Error('Input wait checkpoint is out of order');
+        pendingWait = { start: endpoint, detail };
+      } else if (stage === 'wait-end') {
+        if (!pendingWait) throw new Error('Input wait end has no start');
+        const wait = { ...pendingWait, end: endpoint, detail };
+        inputWindow.ownerWaits.push(wait);
+        // A fast idle check does not interrupt the input window. A genuine
+        // owner hold (or unknown outcome) cannot count as continuous input.
+        if (detail.ownerHeld !== false) {
+          closeActiveSegment(pendingWait.start);
+          activeStart = endpoint;
+          inputWindow.ownerHoldInterrupted = true;
+        }
+        pendingWait = null;
+      } else if (stage === 'end') {
+        if (!inputWindow.start || inputWindow.end || pendingWait)
+          throw new Error('Input end checkpoint is out of order');
+        closeActiveSegment(endpoint);
+        inputWindow.end = endpoint;
+        inputWindow.completed = detail.completed === true;
+        inputWindow.binding = 'Same page input start/end and owner-wait endpoints sampled before input cleanup';
+      } else throw new Error(`Unknown input checkpoint: ${stage}`);
+    },
     stop: () => {
       if (stopPromise) return stopPromise;
       stopped = true;
@@ -362,28 +449,45 @@ export async function startPhase10MatchRates({ page, out, record, label = 'match
           readErrorCount++;
           if (errors.length < 64) errors.push(applicationProblemPanel.cleanupError);
         }
-        const seconds = (last.atMs - first.atMs) / 1000;
-        const countDelta = (key) => last.counters[key] - first.counters[key];
-        const logicMs = last.game?.sampledAtMs - first.game?.sampledAtMs;
-        const logicFrames = last.game?.frame - first.game?.frame;
+        const observationSeconds = (last.atMs - first.atMs) / 1000;
+        const segments = inputWindow.activeSegments;
+        const inputBound = inputWindow.start !== null && inputWindow.end !== null && pendingWait === null;
+        const seconds = inputBound ? segments.reduce((sum, s) => sum + (s.end.atMs - s.start.atMs) / 1000, 0) : null;
+        const uninterruptedInputSeconds = inputBound
+          ? Math.max(0, ...segments.map((s) => (s.end.atMs - s.start.atMs) / 1000))
+          : null;
+        const countDelta = (key) =>
+          inputBound ? segments.reduce((sum, s) => sum + s.end.counters[key] - s.start.counters[key], 0) : null;
+        const logicMs = inputBound
+          ? segments.reduce((sum, s) => sum + (s.end.nativeLogic?.atMs - s.start.nativeLogic?.atMs), 0)
+          : null;
+        const logicFrames = inputBound
+          ? segments.reduce((sum, s) => sum + (s.end.nativeLogic?.frame - s.start.nativeLogic?.frame), 0)
+          : null;
         const logicPerSecond =
-          !gameFrameReset && logicMs > 0 && logicFrames >= 0 ? (logicFrames * 1000) / logicMs : null;
+          nativeLogicFreshAtAllSamples && !gameFrameReset && logicMs > 0 && logicFrames >= 0
+            ? (logicFrames * 1000) / logicMs
+            : null;
         const shownPerSecond = !countersReset && seconds > 0 ? countDelta('shownFrames') / seconds : null;
         const statesPerSecond = !countersReset && seconds > 0 ? countDelta('distinctStates') / seconds : null;
         const drawnPerSecond = !countersReset && seconds > 0 ? countDelta('drawnFrames') / seconds : null;
         const result = {
           source:
-            'Existing HD bridge cumulative distinct-state/completed-draw counters; genuine native frame/time endpoints',
+            'Existing HD bridge cumulative distinct-state/completed-draw counters; direct read-only native frame/time endpoints',
           scope:
-            'Rate evidence only; input, base building, visible fighting and endings require their separate current-run evidence',
+            'Rates are bound to the same page input checkpoints; base building, fighting and match identity still require separate current-run evidence',
+          observationSeconds,
           seconds,
-          durationAtLeastTenMinutes: seconds >= 600,
+          uninterruptedInputSeconds,
+          durationAtLeastTenMinutes: inputBound && inputWindow.completed && uninterruptedInputSeconds >= 600,
+          inputWindow,
           samples,
           first,
           last,
           mapsChanged,
           countersReset,
           gameFrameReset,
+          nativeLogicFreshAtAllSamples,
           speedSettingsChanged,
           hdShownAtAllSamples,
           pageVisibleAtAllSamples,
@@ -413,9 +517,12 @@ export async function startPhase10MatchRates({ page, out, record, label = 'match
             applicationProblemPanel?.everPresent === false &&
             applicationProblemPanel?.omittedEvents === 0,
           rateTargetsMet:
+            inputBound &&
+            inputWindow.completed &&
             !mapsChanged &&
             !countersReset &&
             !gameFrameReset &&
+            nativeLogicFreshAtAllSamples &&
             !speedSettingsChanged &&
             ownerSizeAtAllSamples &&
             pageVisibleAtAllSamples &&

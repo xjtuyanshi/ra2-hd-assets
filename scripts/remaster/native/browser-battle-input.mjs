@@ -13,8 +13,44 @@ const control = (state, match) =>
     (item) => usable(item) && (typeof match === 'number' ? item.id === match : match.test(item.text)),
   );
 
+// Outcome labels are observations only. Original house metadata and screenshot
+// review remain separate; a generic Continue/score label cannot establish a win.
+export function readBrowserEndingLabels(state) {
+  const controls = state.controls?.filter(usable) ?? [];
+  const defeat = controls.filter((item) =>
+    /^(?:GUI:)?(?:Defeat|You\s*Lose|Mission\s*Failed|战败|戰敗|败北|敗北|任务失败|任務失敗)[.!]?$/i.test(item.text),
+  );
+  const victory = controls.filter((item) =>
+    /^(?:GUI:)?(?:Victory|You\s*Win|Mission\s*Accomplished|胜利|勝利|任务完成|任務完成)[.!]?$/i.test(item.text),
+  );
+  return {
+    defeat,
+    victory,
+    labelledOutcome:
+      defeat.length > 0 && !victory.length ? 'defeat' : victory.length > 0 && !defeat.length ? 'victory' : null,
+  };
+}
+
 function browserContext(api) {
-  const { page, click, point, commandState, readBytes, inputState, shot } = api;
+  const { page, shot } = api;
+  const guard = async () => api.ownerIdle?.();
+  const observe =
+    (fn) =>
+    async (...args) => {
+      await guard();
+      const value = await fn(...args);
+      // A hold or cancellation can arrive during an asynchronous observation.
+      await guard();
+      return value;
+    };
+  const click = async (...args) => {
+    await guard();
+    return api.click(...args);
+  };
+  const point = observe(api.point);
+  const commandState = observe(api.commandState);
+  const readBytes = observe(api.readBytes);
+  const inputState = observe(api.inputState);
   const report = {
     startedAt: performance.now(),
     input: 'trusted browser mouse and keyboard events',
@@ -33,7 +69,9 @@ function browserContext(api) {
     const until = performance.now() + timeout;
     let last = null;
     while (performance.now() < until) {
+      await guard();
       last = await observe();
+      await guard();
       if (last) return last;
       await delay(75);
     }
@@ -61,9 +99,11 @@ function browserContext(api) {
   };
   const move = async (x, y, steps = 1) => {
     const p = await pagePoint(x, y);
+    await guard();
     await page.mouse.move(p.x, p.y, { steps });
   };
   const ensureKeyboardFocus = async () => {
+    await guard();
     const focus = () =>
       page.evaluate(() => ({
         canvasFocused: document.activeElement === document.querySelector('#screen'),
@@ -74,7 +114,10 @@ function browserContext(api) {
     if (before.canvasFocused && before.documentFocused) return;
     const nativeBefore = await inputState();
     const toggle = page.locator('#vm-controls-toggle');
-    if ((await toggle.getAttribute('aria-expanded')) === 'true') await toggle.click();
+    if ((await toggle.getAttribute('aria-expanded')) === 'true') {
+      await guard();
+      await toggle.click();
+    }
     const bounds = await page.locator('#screen').boundingBox();
     if (!bounds || bounds.width <= 0 || bounds.height <= 0)
       throw new Error('Game canvas is unavailable for real focus');
@@ -83,7 +126,9 @@ function browserContext(api) {
     // used. Right-click also cancels a pending order/mode, so selection-sensitive
     // callers must establish their selection before issuing their next command.
     const at = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+    await guard();
     await page.mouse.move(at.x, at.y);
+    await guard();
     await page.mouse.down({ button: 'right' });
     try {
       await delay(80);
@@ -108,6 +153,7 @@ function browserContext(api) {
   };
   const key = async (value, hold = 80) => {
     await ensureKeyboardFocus();
+    await guard();
     await page.keyboard.down(value);
     try {
       await delay(hold);
@@ -122,7 +168,7 @@ function browserContext(api) {
     await delay(1200);
     await click((item.rect[0] + item.rect[2]) / 2, (item.rect[1] + item.rect[3]) / 2, mode, 'left');
   };
-  const diagnostic = () =>
+  const diagnostic = observe(() =>
     page.evaluate(() => {
       const bridge = window.__hdBridge;
       return {
@@ -131,7 +177,8 @@ function browserContext(api) {
         timeline: bridge?.timeline ?? null,
         shellPage: document.querySelector('#screen')?.dataset.shellPage ?? null,
       };
-    });
+    }),
+  );
   const finish = () => {
     report.finishedAt = performance.now();
     report.durationMs = report.finishedAt - report.startedAt;
@@ -139,6 +186,12 @@ function browserContext(api) {
   };
   return {
     ...api,
+    guard,
+    click,
+    point,
+    commandState,
+    readBytes,
+    inputState,
     report,
     record,
     memory,
@@ -152,7 +205,12 @@ function browserContext(api) {
     clickControl,
     diagnostic,
     finish,
-    shot: async (label) => shot?.(`battle-${label}`),
+    shot: async (label) => {
+      await guard();
+      const screenshot = await shot?.(`battle-${label}`);
+      await guard();
+      return screenshot;
+    },
   };
 }
 
@@ -325,6 +383,7 @@ export async function runBrowserBattleInput(api) {
     const attempts = [];
     let moved = null;
     for (const button of ['right', 'left']) {
+      await h.guard();
       await select(target.uid, 'quick');
       const beforeStop = local(await peek()).find((obj) => obj.uid === target.uid);
       await h.key('s');
@@ -346,6 +405,7 @@ export async function runBrowserBattleInput(api) {
       let observedOrder = null;
       const samples = [];
       while (performance.now() < until) {
+        await h.guard();
         state = await peek();
         last = local(state).find((obj) => obj.uid === target.uid);
         if (!last) throw new Error('Move-test unit was eliminated in the live battle');
@@ -420,9 +480,11 @@ export async function runBrowserBattleInput(api) {
     if (!inTactical(start, state, 1) || !inTactical(finish, state, 1))
       throw new Error('Observed group bounds leave tactical view');
     await h.move(start.x, start.y);
+    await h.guard();
     await page.mouse.down({ button: 'left' });
     try {
       for (let i = 1; i <= 12; i++) {
+        await h.guard();
         await h.move(start.x + ((finish.x - start.x) * i) / 12, start.y + ((finish.y - start.y) * i) / 12);
         await delay(25);
       }
@@ -480,6 +542,7 @@ export async function runBrowserBattleInput(api) {
           yard: null,
         };
         if (method === 'keyboard-d') {
+          await h.guard();
           await page.keyboard.down('d');
           try {
             await delay(100);
@@ -501,11 +564,13 @@ export async function runBrowserBattleInput(api) {
           await delay(150);
           proof.inputAfterHover = await inputState();
           const pixel = await pointToBrowser(point);
+          await h.guard();
           await page.mouse.dblclick(pixel.x, pixel.y, { button: 'left', delay: 80 });
         }
         proof.inputAfter = await inputState();
         const until = performance.now() + 4500;
         while (performance.now() < until) {
+          await h.guard();
           const next = await commandState();
           proof.samples.push({ at: performance.now(), command: commandSample(next), input: await inputState() });
           const building = next ? local(next).find((obj) => obj.kind === 'building' && /CNST$/.test(obj.type)) : null;
@@ -524,7 +589,7 @@ export async function runBrowserBattleInput(api) {
         return proof;
       };
       const pointToBrowser = async (p) => {
-        const value = await api.point(Math.round(p.x), Math.round(p.y));
+        const value = await h.point(Math.round(p.x), Math.round(p.y));
         return Array.isArray(value) ? { x: value[0], y: value[1] } : value;
       };
       // Spawn locations ordinarily allow deployment. Try the original game
@@ -544,6 +609,7 @@ export async function runBrowserBattleInput(api) {
         [-5, -5],
       ];
       for (const [dx, dy] of offsets) {
+        await h.guard();
         if (yard) break;
         state = await peek();
         const currentMcv = local(state).find((obj) => obj.uid === mcv.uid);
@@ -762,6 +828,7 @@ export async function runBrowserBattleInput(api) {
       [0, -115],
     ];
     for (const [dx, dy] of offsets) {
+      await h.guard();
       state = await peek();
       const currentYard = local(state).find((obj) => obj.uid === yard.uid);
       if (!currentYard) throw new Error('Construction yard was eliminated before placement');
@@ -778,6 +845,7 @@ export async function runBrowserBattleInput(api) {
       const until = performance.now() + 1400;
       let observed = null;
       while (performance.now() < until) {
+        await h.guard();
         const next = await commandState();
         if (next?.view) {
           observed = local(next).find(
@@ -809,6 +877,7 @@ export async function runBrowserBattleInput(api) {
     const scrollAttempts = [];
     let scroll = null;
     for (const value of ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp']) {
+      await h.guard();
       const before = await peek();
       await h.key(value, 500);
       const after = await peek();
@@ -850,6 +919,7 @@ export async function runBrowserBattleInput(api) {
     const hdBefore = await h.diagnostic();
     if (hdBefore.enabled !== true || hdBefore.shown !== true)
       throw new Error('HD picture must be shown before Backslash acceptance');
+    await h.guard();
     await page.keyboard.press('Backslash');
     const original = await wait('Backslash exposes original picture', async () => {
       const next = await h.diagnostic();
@@ -858,6 +928,7 @@ export async function runBrowserBattleInput(api) {
     // The HD keyhole trail remains for about 500 ms after disabling the bridge.
     await delay(650);
     await shot('original-toggle');
+    await h.guard();
     await page.keyboard.press('Backslash');
     const hdAfter = await wait(
       'Backslash restores HD picture',
@@ -869,11 +940,12 @@ export async function runBrowserBattleInput(api) {
     );
     await record('backslash-original-hd', { before: hdBefore, original, after: hdAfter, verified: true });
     await shot('hd-toggle');
+    await h.guard();
     h.report.met = true;
   } catch (error) {
     h.report.error = String(error.stack ?? error);
     h.report.inputAtFailure = await inputState().catch(() => null);
-    h.report.commandAtFailure = await api.commandState().catch(() => null);
+    h.report.commandAtFailure = await h.commandState().catch(() => null);
     await shot('failure').catch(() => undefined);
   } finally {
     await page.mouse.up({ button: 'left' }).catch(() => undefined);
@@ -894,14 +966,6 @@ export async function runBrowserEnd(api) {
     const mainControl = (state) => control(state, 1667);
     const setupControl = (state) => control(state, 1559);
     const optionsControl = (state) => control(state, /resume|save.?game|load.?game|abort.*mission/i);
-    const defeatLabels = (state) =>
-      state.controls?.filter(
-        (item) =>
-          usable(item) &&
-          /defeat|victory|mission.?failed|you.?lose|you.?win|战败|戰敗|败北|敗北|胜利|勝利|任务失败|任務失敗/i.test(
-            item.text,
-          ),
-      ) ?? [];
     let originalHouse = null;
     const localOutcome = async () => {
       // Render houses contain only colour/index. These pinned read-only fields
@@ -1054,6 +1118,7 @@ export async function runBrowserEnd(api) {
         const until = Math.min(deadline, performance.now() + (shortGame === 0 ? 180000 : 15000));
         const observations = [];
         while (performance.now() < until) {
+          await h.guard();
           outcome = await localOutcome();
           const observation = {
             at: performance.now(),
@@ -1090,6 +1155,7 @@ export async function runBrowserEnd(api) {
       };
       await h.key('h', 80);
       for (let sale = 0; sale < 32; sale++) {
+        await h.guard();
         checkDeadline();
         const outcome = await localOutcome();
         if (outcome.defeated === true) {
@@ -1106,6 +1172,7 @@ export async function runBrowserEnd(api) {
         const target = buildings[0];
         let point = null;
         for (let camera = 0; camera < 24; camera++) {
+          await h.guard();
           checkDeadline();
           state = await h.peek();
           const object = ownedBuildings(state).find((item) => item.uid === target.uid);
@@ -1161,6 +1228,7 @@ export async function runBrowserEnd(api) {
           const samples = [];
           let latest = null;
           do {
+            await h.guard();
             checkDeadline();
             latest = await readSell();
             if (samples.length < 32)
@@ -1251,41 +1319,49 @@ export async function runBrowserEnd(api) {
       if (remaining?.view && ownedBuildings(remaining).length === 0) return waitAfterBases();
       throw new Error('Natural elimination exceeded the bounded 32-building sale limit');
     };
-    let continuedDefeat = false;
+    let continuedEnding = false;
+    let observedOutcome = null;
     let aborted = false;
     const visualCandidates = [];
-    const continueDefeat = async (state, outcome) => {
+    const continueEnding = async (state, outcome) => {
+      const labels = readBrowserEndingLabels(state);
+      const kind = labels.labelledOutcome ?? 'unidentified-ending';
+      observedOutcome = labels.labelledOutcome;
       const next = continueControl(state) ?? control(state, /^GUI:OK$|^OK$|确定|確定/i);
-      const screenshot = await h.shot('defeat-overlay-before-continue');
+      const screenshot = await h.shot(kind + '-overlay-before-continue');
       // A native owner-drawn score may expose only Continue. Retain this image
       // before advancing an unlabelled overlay so later visual review can tell
       // whether it was the defeat prompt or the actual score table.
-      visualCandidates.push({ screenshot, controls: state.controls, outcome, phase: 'before-defeat-continue' });
-      await h.record('defeat-overlay', {
+      visualCandidates.push({ screenshot, controls: state.controls, outcome, phase: 'before-ending-continue' });
+      await h.record(kind + '-overlay', {
         controls: state.controls,
-        labels: defeatLabels(state),
+        labels,
         outcome,
         continueControl: next,
         screenshot,
-        verified: defeatLabels(state).length > 0 || outcome.defeated === true,
+        verified: false,
+        labelledOutcomeObserved: state.modal && labels.labelledOutcome !== null,
+        visualReviewRequired: true,
+        establishesCorrectEndingScreen: false,
       });
       if (next) await h.clickControl(next, 'quick');
       else await h.key('Enter', 80);
-      continuedDefeat = true;
-      await h.record('defeat-overlay-continue', { input: next ? { click: next } : { key: 'Enter' }, sentOnce: true });
+      continuedEnding = true;
+      await h.record(kind + '-overlay-continue', { input: next ? { click: next } : { key: 'Enter' }, sentOnce: true });
       await delay(1500);
     };
     let current = await h.inputState();
     let initialOutcome = await localOutcome();
     const initialScore = scoreLabels(current).length > 0 && continueControl(current);
-    const alreadyDefeated =
+    const alreadyEnded =
+      current.modal === true &&
       !mainControl(current) &&
       !setupControl(current) &&
       !initialScore &&
       !optionsControl(current) &&
-      (initialOutcome.defeated === true || defeatLabels(current).length > 0);
-    if (alreadyDefeated) {
-      await continueDefeat(current, initialOutcome);
+      (initialOutcome.defeated === true || readBrowserEndingLabels(current).labelledOutcome !== null);
+    if (alreadyEnded) {
+      await continueEnding(current, initialOutcome);
     } else if (api.eliminateHuman === true && !initialScore && !mainControl(current) && !setupControl(current)) {
       if (current.modal) {
         const resume = control(current, /resume.*mission/i);
@@ -1296,8 +1372,8 @@ export async function runBrowserEnd(api) {
       initialOutcome = await eliminateHuman();
       await delay(1500);
       current = await h.inputState();
-      if (!scoreLabels(current).length && !mainControl(current) && !setupControl(current))
-        await continueDefeat(current, initialOutcome);
+      if (current.modal && !scoreLabels(current).length && !mainControl(current) && !setupControl(current))
+        await continueEnding(current, initialOutcome);
     } else if (
       !initialScore &&
       !mainControl(current) &&
@@ -1342,6 +1418,7 @@ export async function runBrowserEnd(api) {
     let score = null;
     let scoreSkippedByAbort = false;
     while (performance.now() < scoreDeadline) {
+      await h.guard();
       current = await h.inputState();
       const diagnostic = await h.diagnostic();
       const labels = scoreLabels(current);
@@ -1386,8 +1463,14 @@ export async function runBrowserEnd(api) {
         });
         break;
       }
-      if (!continuedDefeat && !options && labels.length === 0 && defeatLabels(current).length > 0) {
-        await continueDefeat(current, outcome);
+      if (
+        !continuedEnding &&
+        !options &&
+        labels.length === 0 &&
+        current.modal &&
+        (outcome.defeated === true || readBrowserEndingLabels(current).labelledOutcome !== null)
+      ) {
+        await continueEnding(current, outcome);
         continue;
       }
       await delay(200);
@@ -1442,6 +1525,7 @@ export async function runBrowserEnd(api) {
     let returned = null;
     const actions = [];
     for (let attempt = 0; attempt < 8; attempt++) {
+      await h.guard();
       current = await h.inputState();
       if (mainControl(current)) {
         returned = current;
@@ -1485,8 +1569,11 @@ export async function runBrowserEnd(api) {
     });
     h.report.scoreVisualVerificationRequired = !scoreSkippedByAbort && !score && !visualVerification;
     h.report.scoreSkippedByAbort = scoreSkippedByAbort;
+    h.report.observedOutcome = aborted ? 'abort' : observedOutcome;
+    h.report.endingVisualReviewRequired = true;
     if (!scoreSkippedByAbort && !score && !visualVerification)
       throw new Error('Returned to main menu, but visible score screen was not identified by native diagnostics');
+    await h.guard();
     h.report.met = true;
   } catch (error) {
     h.report.error = String(error.stack ?? error);

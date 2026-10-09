@@ -92,6 +92,35 @@ export async function waitForStartupCommand(item, milliseconds, message) {
   }
 }
 
+// Recognize the exact trimmed line independently of the diagnostic tail, with
+// constant memory even when Wine emits an arbitrarily long diagnostic line.
+export function wineCheckAcknowledgement() {
+  const marker = 'RA2_NATIVE_WINE_OK';
+  let matched = 0;
+  let invalid = false;
+  let acknowledged = false;
+  const finishLine = () => {
+    if (!invalid && matched === marker.length) acknowledged = true;
+    matched = 0;
+    invalid = false;
+  };
+  return {
+    append(chunk) {
+      for (const character of chunk) {
+        if (character === '\n') finishLine();
+        else if (character.trim() === '') {
+          if (matched !== 0 && matched !== marker.length) invalid = true;
+        } else if (character === marker[matched]) matched++;
+        else invalid = true;
+      }
+    },
+    finish() {
+      finishLine();
+      return acknowledged;
+    },
+  };
+}
+
 async function sameFile(left, right) {
   try {
     const [a, b] = await Promise.all([readFile(left), readFile(right)]);
@@ -105,16 +134,14 @@ async function sameFile(left, right) {
 export function assertOwnedExecutableIdentity(hello, expected) {
   const identity = hello.exe;
   if (!Number.isSafeInteger(identity?.size) || identity.size <= 0 || !/^[a-f0-9]{64}$/i.test(identity.sha256 ?? ''))
-    throw new Error(
-      'Native agent could not read the owned executable identity (empty size/SHA-256); NativeCore cannot attach',
-    );
+    throw new Error('游戏未能完成启动：无法读取游戏程序的身份（文件大小或 SHA-256 为空）。请查看本次启动记录。');
   if (identity.size !== expected.size || identity.sha256.toLowerCase() !== expected.sha256)
     throw new Error(
-      'Native agent executable identity differs from the supplied owned game copy; NativeCore cannot attach',
+      '游戏未能完成启动：运行的游戏程序与指定副本的文件大小或 SHA-256 不一致。请检查游戏文件夹并查看本次启动记录。',
     );
   if (identity.verified !== true)
     throw new Error(
-      `Owned game build is unsupported by the native page policy: size=${identity.size}, SHA-256=${identity.sha256}; NativeCore cannot attach`,
+      `游戏未能完成启动：当前游戏版本尚不受支持（文件大小=${identity.size}，SHA-256=${identity.sha256}）。请查看本次启动记录。`,
     );
 }
 
@@ -435,32 +462,47 @@ export async function runLauncher(arguments_, environment = process.env) {
     console.log('正在检查 Wine 是否能正常运行……');
     let checkOutput = '';
     let checkErrors = '';
+    const acknowledgement = wineCheckAcknowledgement();
     const wineCheck = start(wine.wine, [...wine.args, 'cmd.exe', '/c', 'echo RA2_NATIVE_WINE_OK'], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     wineCheck.child.stdout.setEncoding('utf8');
     wineCheck.child.stderr.setEncoding('utf8');
     wineCheck.child.stdout.on('data', (chunk) => {
+      acknowledgement.append(chunk);
       checkOutput = (checkOutput + chunk).slice(-8192);
     });
     wineCheck.child.stderr.on('data', (chunk) => {
       checkErrors = (checkErrors + chunk).slice(-8192);
     });
+    let checkFailure = null;
+    let checkAcknowledged = false;
     try {
       await waitForStartupCommand(
         { done: wineCheck.closedDone },
         30000,
         'Wine 自检超过 30 秒仍未完成，游戏尚未启动。请检查 Wine 或 CrossOver 能否运行程序后再试；详情见 wine-check.log。',
       );
+    } catch (error) {
+      checkFailure = error;
+      throw error;
     } finally {
+      checkAcknowledged = acknowledgement.finish();
       await writeFile(join(runDirectory, 'wine-check.log'), `${checkOutput}\n${checkErrors}`, { mode: 0o600 });
+      await writeFile(
+        join(runDirectory, 'wine-check.json'),
+        JSON.stringify({
+          source: 'stdout-exact-trimmed-line',
+          acknowledged: checkAcknowledged,
+          closed: wineCheck.closed,
+          exitCode: wineCheck.code,
+          error: wineCheck.error?.message ?? checkFailure?.message ?? null,
+        }) + '\n',
+        { mode: 0o600 },
+      );
     }
     if (stopping) throw new Error('启动已取消。');
-    if (
-      wineCheck.error ||
-      wineCheck.code !== 0 ||
-      !checkOutput.split(/\r?\n/).some((line) => line.trim() === 'RA2_NATIVE_WINE_OK')
-    )
+    if (wineCheck.error || wineCheck.code !== 0 || !checkAcknowledged)
       throw new Error(
         'Wine 自检失败，游戏尚未启动。请检查 Wine 或 CrossOver 和所选容器是否能正常运行程序；详情见 wine-check.log。',
       );
@@ -566,9 +608,10 @@ export async function runLauncher(arguments_, environment = process.env) {
         client = new AgentClient(agentUrl, token, origin);
         hello = await client.connect();
         receivedHello = true;
-        if (hello.pid !== status.pid) throw new Error('Agent process identity differs from the owned launcher process');
+        if (hello.pid !== status.pid)
+          throw new Error('游戏未能完成启动：连接到的游戏进程与本次启动的进程不一致。请查看本次启动记录。');
         if (!!hello.hiddenHost?.enabled !== (gameEnvironment.RA2_NATIVE_AGENT_HIDDEN === '1'))
-          throw new Error('The owned agent did not report the requested visibility mode');
+          throw new Error('游戏未能完成启动：游戏窗口显示模式与本次设置不一致。请查看本次启动记录。');
         assertOwnedExecutableIdentity(hello, expectedIdentity);
         receivedHello = false; // A valid identity can precede the native menu.
         const inputState = JSON.parse((await client.request(Type.INPUT_STATE)).toString());

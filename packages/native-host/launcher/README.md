@@ -51,6 +51,12 @@ produce Chinese guidance before any game-file modification. Before building
 or mapping paths, the launcher runs a scoped Wine command-line self-check and
 requires its expected reply within 30 seconds. A failed or hung check leaves
 the game unstarted and records bounded output in private `wine-check.log`.
+The exact successful reply is recognized incrementally, so later diagnostic
+output cannot erase an already observed acknowledgement from the bounded log.
+The private `wine-check.json` records that observation, command completion,
+exit code and failures separately; it never inserts an acknowledgement into
+Wine's stdout. Evidence readers use this observation and use the log only for
+historical launches with no observation JSON.
 Wine path mapping has the same bounded wait. These startup timeouts do not
 establish runtime performance or browser acceptance.
 
@@ -109,7 +115,8 @@ checks the complete executable size/SHA-256 against the supplied game copy,
 requires that identity to be supported by the native page policy, and waits for
 the actual modal main menu with a visible enabled Single Player control inside
 the native picture before printing the exact private play URL. A missing,
-different or unsupported identity is reported explicitly; no usable page URL is
+different or unsupported identity is reported in Chinese; process or visibility
+identity mismatches likewise explain why startup was refused. No usable page URL is
 claimed when NativeCore would reject the executable. The agent reads executable
 identity through the wide Windows path APIs so spaces and non-ASCII game paths
 retain their exact identity. It closes
