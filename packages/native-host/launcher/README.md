@@ -124,6 +124,21 @@ this readiness connection before browser use; the agent admits one client.
 Without `--open`, copy the printed URL into Chrome. Keep the terminal open.
 Ctrl-C, SIGHUP, an owned game exit or a page
 exit stops the processes created by that launch and restores its DLL.
+For a normal game exit or an explicit launcher stop, the page releases its
+runtime and shows a Chinese notice to run the launcher again for a fresh URL.
+It leaves the game frame's immersive fullscreen before showing that page panel;
+the fullscreen top layer would otherwise hide its sibling even with a visible DOM box.
+The authenticated development-only session endpoint returns only this launch's
+coarse state. The launcher keeps its page server alive briefly during shutdown
+after closing the owned game process groups and their native sockets, so the
+Worker can distinguish a confirmed normal exit from transport loss and paint
+its notice before the page server stops.
+A crashed game, an unavailable status endpoint or an unexplained disconnect
+still produces the runtime error panel.
+An explicit stop also wakes the launcher's final wait independently of the
+private stop-file. If that file cannot be written, it reports the failure and
+continues the existing bounded shutdown of its owned process groups, followed
+by conditional DLL restoration; it never shuts down a whole Wine bottle.
 
 Build/readiness checks do not prove a rendered browser match. Actual Wine
 job-object support, game startup, native menu interaction and Chrome/WebGPU

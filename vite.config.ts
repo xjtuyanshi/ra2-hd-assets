@@ -1,6 +1,6 @@
 import { defineConfig, type Plugin } from 'vite';
 import basicSsl from '@vitejs/plugin-basic-ssl';
-import { createReadStream, readdirSync, statSync, type Stats } from 'node:fs';
+import { createReadStream, readFileSync, readdirSync, statSync, type Stats } from 'node:fs';
 import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -33,6 +33,43 @@ function gameAssetsPlugin(): Plugin {
         ),
       );
       server.middlewares.use('/game', serveGameAsset);
+      // The launcher exposes only this run's coarse state, never its private
+      // paths, process identity, credentials or helper diagnostics.
+      server.middlewares.use('/__native/session', (req, res) => {
+        const statusPath = process.env.RA2_NATIVE_SESSION_STATUS;
+        const token = process.env.RA2_NATIVE_SESSION_TOKEN;
+        if (
+          req.method !== 'GET' ||
+          !statusPath ||
+          !token ||
+          req.headers.authorization !== `Bearer ${token}` ||
+          req.socket.remoteAddress !== '127.0.0.1'
+        ) {
+          res.statusCode = 404;
+          res.end();
+          return;
+        }
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Content-Type', 'application/json');
+        try {
+          let { state } = JSON.parse(readFileSync(statusPath, 'utf8'));
+          if (!['running', 'closed', 'failed'].includes(state)) throw new Error('Invalid launch status');
+          if (state === 'running' && process.env.RA2_NATIVE_LAUNCH_STATUS) {
+            // The helper observes process exit before its Wine wrapper exits.
+            // Read its atomic status so normal quit does not race that wrapper.
+            try {
+              const game = JSON.parse(readFileSync(process.env.RA2_NATIVE_LAUNCH_STATUS, 'utf8'));
+              if (game.running === false) state = game.exitCode === 0 ? 'closed' : 'failed';
+            } catch {
+              // Unavailable helper state never confirms a normal exit.
+            }
+          }
+          res.end(JSON.stringify({ state }));
+        } catch {
+          res.statusCode = 503;
+          res.end('{}');
+        }
+      });
       // HD remaster bridge (dev only): the locally extracted HD cache, derived from the player's own files.
       server.middlewares.use('/hd-cache', serveHdCache);
       // Stall records of the HD page and the play page's game-speed records (dev only) go to the file RA2_PERF_LOG

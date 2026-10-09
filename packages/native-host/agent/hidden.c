@@ -389,22 +389,23 @@ static BOOL CALLBACK collect_paint_child(HWND window, LPARAM context)
 static void collect_paint_tree(HWND parent, struct paint_windows *state, unsigned depth)
 {
     if (depth >= 16 || state->count >= sizeof(state->windows) / sizeof(state->windows[0])) return;
-    HWND first = GetWindow(parent, GW_CHILD);
-    /* Native child enumeration starts at the top of the z-order. Paint each
-     * parent before its children, but siblings from bottom to top, so genuine
-     * overlapping popup controls remain above the controls they cover. */
-    for (HWND child = first ? GetWindow(first, GW_HWNDLAST) : NULL; child; )
+    /* Preserve User32's native child enumeration order. Game subclasses can
+     * paint backgrounds and labels directly into one DirectDraw surface, where
+     * sibling window clipping cannot protect text from a later background.
+     * Reversing that order makes overlapping background controls erase labels.
+     * Separately owned popups are collected after this ordinary child tree. */
+    for (HWND child = GetWindow(parent, GW_CHILD); child; )
     {
         if (++state->visited > 512 || state->count >= sizeof(state->windows) / sizeof(state->windows[0])) return;
-        HWND previous = GetWindow(child, GW_HWNDPREV);
+        HWND next = GetWindow(child, GW_HWNDNEXT);
         if (GetParent(child) == parent && GetWindowThreadProcessId(child, NULL) == g_ddraw.gui_thread_id &&
             nh_hidden_visible(child))
         {
             state->windows[state->count++] = child;
             collect_paint_tree(child, state, depth + 1);
         }
-        if (previous == child) return;
-        child = previous;
+        if (next == child) return;
+        child = next;
     }
 }
 
@@ -482,6 +483,40 @@ static BOOL CALLBACK collect_paint_popup(HWND window, LPARAM context)
     return TRUE;
 }
 
+static void order_captured_child_overlay(struct paint_windows *state)
+{
+    HWND overlay = captured, parent = GetParent(overlay), scrollbar = NULL;
+    RECT bounds;
+    if (!nh_hidden_owned(overlay) || !IsChild(state->root, overlay) || !nh_hidden_visible(overlay) ||
+        GetWindowThreadProcessId(overlay, NULL) != g_ddraw.gui_thread_id ||
+        !GetWindowRect(overlay, &bounds) || bounds.right <= bounds.left || bounds.bottom <= bounds.top) return;
+    int found = 0;
+    for (unsigned i = 0; i < state->count; i++)
+    {
+        HWND window = state->windows[i];
+        if (window == overlay) { found = 1; continue; }
+        RECT rect;
+        char class_name[64] = {0};
+        if (GetParent(window) != parent || !nh_hidden_visible(window) ||
+            !(real_GetWindowLongA(window, GWL_STYLE) & SBS_VERT) || !GetWindowRect(window, &rect) ||
+            rect.top != bounds.top || rect.bottom != bounds.bottom ||
+            (rect.left != bounds.right && rect.right != bounds.left)) continue;
+        GetClassNameA(window, class_name, sizeof(class_name));
+        if (!_stricmp(class_name, "ScrollBar") && !scrollbar) scrollbar = window;
+    }
+    if (!found || !scrollbar) return;
+    /* A captured child list and its adjoining scrollbar form a temporary
+     * overlay. Preserve ordinary native order, then restore this pair above
+     * the controls it covers, without changing its geometry or game contents. */
+    unsigned count = 0;
+    for (unsigned i = 0; i < state->count; i++)
+        if (state->windows[i] != overlay && state->windows[i] != scrollbar)
+            state->windows[count++] = state->windows[i];
+    state->windows[count++] = overlay;
+    state->windows[count++] = scrollbar;
+    state->count = count;
+}
+
 void nh_hidden_paint(void)
 {
     if (!nh_hidden_active() || painting || !g_ddraw.ref || GetCurrentThreadId() != g_ddraw.gui_thread_id || !g_ddraw.primary)
@@ -498,6 +533,7 @@ void nh_hidden_paint(void)
          * child layout before the control pass can complete that picture. */
         state.windows[state.count++] = state.root;
         collect_paint_tree(state.root, &state, 0);
+        order_captured_child_overlay(&state);
     }
     EnumWindows(collect_paint_popup, (LPARAM)&state);
     if (!state.count) return;

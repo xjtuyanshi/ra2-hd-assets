@@ -15,7 +15,7 @@ import type { GuestMemRecordResult } from '../memRecord';
 import type { VmPointerState } from '../vmShell';
 import type { VmFrame } from '../../vm86/win32';
 import { GamePerformanceMeter } from '../gamePerformance';
-import { NativeConnection } from './connection';
+import { NativeConnection, NativeConnectionLostError } from './connection';
 import type { NativeConnectionOptions } from './connection';
 import {
   NativeMessageType,
@@ -52,6 +52,7 @@ class NativeMirrorUnavailable extends Error {
 export interface NativeCoreOptions extends NativeConnectionOptions {
   renderPassthrough?: boolean;
   pageCursor?: boolean;
+  sessionStatusUrl?: string;
 }
 export type NativeGamePolicyFactory = (
   memory: NativeMirrorMemory,
@@ -209,6 +210,7 @@ export class NativeCore {
   private pointerSuppressed = false;
   private pointerUndo: NativeWrite[] = [];
   private systemCursor: VmFrame['cursor'];
+  private failing = false;
 
   constructor(
     private readonly callbacks: GameVmCallbacks,
@@ -225,15 +227,54 @@ export class NativeCore {
     this.callbacks.onStatus?.({ phase, detail });
   }
   private fail(error: Error): void {
-    if (this.closed) return;
+    if (this.closed || this.failing) return;
+    this.failing = true;
     const shouldStop = this.running;
     this.running = false;
-    this.status('error', error.message);
     this.rejectWaiters(error);
-    if (shouldStop)
-      void this.stop()
-        .catch((cleanup) => console.warn('[native] Error cleanup:', cleanup))
-        .finally(() => this.status('error', error.message));
+    void (async () => {
+      const normalExit = error instanceof NativeConnectionLostError && (await this.launcherClosedNormally());
+      if (!normalExit) this.status('error', error.message);
+      if (shouldStop)
+        await this.stop().catch((cleanup) => {
+          if (!normalExit) console.warn('[native] Error cleanup:', cleanup);
+        });
+      this.status(normalExit ? 'exited' : 'error', normalExit ? '游戏已关闭' : error.message);
+    })();
+  }
+  private async launcherClosedNormally(): Promise<boolean> {
+    // Socket loss alone cannot distinguish quitting from a crash. Only the
+    // authenticated status of this launch can turn it into a normal exit.
+    if (!this.hello || !this.options.sessionStatusUrl) return false;
+    let url: URL;
+    try {
+      url = new URL(this.options.sessionStatusUrl);
+    } catch {
+      return false;
+    }
+    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !/^1545[0-9]$/.test(url.port)) return false;
+    const abort = new AbortController();
+    const timeout = setTimeout(() => abort.abort(), 1500);
+    try {
+      while (!abort.signal.aborted) {
+        const response = await fetch(url, {
+          signal: abort.signal,
+          cache: 'no-store',
+          redirect: 'error',
+          headers: { Authorization: `Bearer ${this.options.token}` },
+        });
+        if (!response.ok) return false;
+        const status = (await response.json()) as { state?: unknown };
+        if (status.state === 'closed') return true;
+        if (status.state !== 'running') return false;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } catch {
+      // Missing status, a stopped page server, and invalid replies remain errors.
+    } finally {
+      clearTimeout(timeout);
+    }
+    return false;
   }
   private rejectWaiters(error: Error): void {
     for (const waiter of this.waiters) {

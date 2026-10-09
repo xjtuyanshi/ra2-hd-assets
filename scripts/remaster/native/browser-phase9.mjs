@@ -166,6 +166,24 @@ async function shot(label) {
   if (native) writePng(join(out, label + '-native.png'), { ...native, pixels: Buffer.from(native.pixels, 'base64') });
   const s = await state();
   await writeFile(join(out, label + '-controls.json'), JSON.stringify(s, null, 2));
+  const combat = await page.evaluate(() => {
+    const state = window.__hdBridge?.diagnostics?.combatState;
+    if (!state) return null;
+    return {
+      frame: state.frame,
+      view: state.view,
+      sidebar: state.sidebar,
+      effects: state.effects,
+      shroud: state.shroud,
+    };
+  });
+  if (combat) {
+    const owned = await worker().evaluate(async () => {
+      const state = await globalThis.__auditCore.getCommandState();
+      return { frame: state?.frame, objects: state?.objects.filter((object) => object.owner === state.localHouse) };
+    });
+    await writeFile(join(out, label + '-combat.json'), JSON.stringify({ ...combat, owned }));
+  }
   const diagnostics = await worker().evaluate(async () =>
     JSON.parse(new TextDecoder().decode(await globalThis.__auditCore.connection.request(11))),
   );
@@ -239,6 +257,72 @@ const usable = (c) => c.visible && c.enabled && c.rect?.[2] > c.rect?.[0];
 async function execute(c) {
   if (c.action === 'close') return { closing: true };
   await ownerIdle();
+  if (c.action === 'launcher-stop-notice') {
+    const label = c.label ?? 'launcher-closed';
+    assert(/^[a-zA-Z0-9_-]+$/.test(label));
+    assert(privateDir, 'Owned launcher private directory required');
+    await writeFile(join(privateDir, 'stop'), 'stop\n', { mode: 0o600 });
+    await wait(
+      'Chinese normal close notice',
+      () =>
+        page
+          .locator('.game-folder-panel h3')
+          .filter({ hasText: /^游戏已关闭$/ })
+          .isVisible(),
+      15000,
+    );
+    const text = await page.locator('.game-folder-panel').innerText();
+    assert(text.includes('请重新运行启动器'), 'Launcher restart instruction required');
+    assert(!/Runtime error|Native WebSocket closed|运行错误/.test(text), 'Normal close must not show an error');
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await delay(250);
+    const presentation = await page.locator('.game-folder-panel').evaluate((panel) => {
+      const bounds = panel.getBoundingClientRect();
+      const middle = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+      const style = getComputedStyle(panel);
+      return {
+        bounds: bounds.toJSON(),
+        innerWidth,
+        innerHeight,
+        fullscreen: document.fullscreenElement?.id ?? null,
+        display: style.display,
+        visibility: style.visibility,
+        opacity: style.opacity,
+        insideViewport: bounds.x >= 0 && bounds.y >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight,
+        centerBelongsToPanel: !!middle && panel.contains(middle),
+      };
+    });
+    const capture = await cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      fromSurface: true,
+      captureBeyondViewport: false,
+    });
+    const screenshot = join(out, label + '.png');
+    await writeFile(screenshot, Buffer.from(capture.data, 'base64'));
+    await delay(250);
+    const settledCapture = await cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      fromSurface: true,
+      captureBeyondViewport: false,
+    });
+    const settledScreenshot = join(out, label + '-settled.png');
+    await writeFile(settledScreenshot, Buffer.from(settledCapture.data, 'base64'));
+    const exit = await Promise.race([launchExit, delay(18000).then(() => ({ timeout: true }))]);
+    const proof = {
+      text,
+      screenshot,
+      settledScreenshot,
+      presentation,
+      exit,
+      source: 'Actual owned launcher stop and browser-rendered notice',
+    };
+    await writeFile(join(out, label + '.json'), JSON.stringify(proof, null, 2));
+    assert(
+      presentation.insideViewport && presentation.centerBelongsToPanel,
+      'Close notice must reach the painted viewport',
+    );
+    return proof;
+  }
   if (c.action === 'window-fullscreen') {
     const owned = await cdp.send('Browser.getWindowForTarget');
     await ownerIdle();

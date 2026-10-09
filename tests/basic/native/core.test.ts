@@ -229,6 +229,7 @@ async function flush(): Promise<void> {
 }
 afterEach(async () => {
   await Promise.all(active.splice(0).map((core) => core.stop().catch(() => undefined)));
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -845,6 +846,49 @@ describe('native core session and presenter lifecycle', () => {
     expect(await core.getRenderState()).toBeNull();
     expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'error' });
     expect(agent.closes).toBe(1);
+  });
+  it('reports normal exit only when this authenticated launcher confirms closure', async () => {
+    for (const closingInput of [false, true]) {
+      const statuses = vi.fn();
+      const fetchStatus = vi.fn().mockResolvedValue(new Response(JSON.stringify({ state: 'closed' })));
+      vi.stubGlobal('fetch', fetchStatus);
+      const { core, agent } = setup(
+        { onStatus: statuses },
+        { sessionStatusUrl: 'http://127.0.0.1:15451/__native/session' },
+      );
+      const start = core.start();
+      agent.hello();
+      await start;
+      if (closingInput) {
+        agent.readyState = 2;
+        core.setCursorPosition(12, 34);
+      } else agent.onclose?.({});
+      await flush();
+      expect(fetchStatus).toHaveBeenCalledWith(
+        new URL('http://127.0.0.1:15451/__native/session'),
+        expect.objectContaining({ headers: { Authorization: `Bearer ${'a'.repeat(32)}` }, redirect: 'error' }),
+      );
+      expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'exited', detail: '游戏已关闭' });
+      expect(statuses.mock.calls.map(([status]) => status.phase)).not.toContain('error');
+      expect(await core.getRenderState()).toBeNull();
+    }
+  });
+  it('keeps failed or unavailable launcher status as a transport error', async () => {
+    for (const result of [new Response(JSON.stringify({ state: 'failed' })), new Response('{}', { status: 503 })]) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(result));
+      const statuses = vi.fn();
+      const { core, agent } = setup(
+        { onStatus: statuses },
+        { sessionStatusUrl: 'http://127.0.0.1:15451/__native/session' },
+      );
+      const start = core.start();
+      agent.hello();
+      await start;
+      agent.onerror?.({});
+      await flush();
+      expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'error', detail: 'Native WebSocket error' });
+      expect(statuses.mock.calls.map(([status]) => status.phase)).not.toContain('exited');
+    }
   });
   it('hides HD state while a native modal owns the surface', async () => {
     const { core, agent } = await started();

@@ -95,7 +95,12 @@ export async function createVmShell(
     if (!url || !token) throw new Error('Native host requires agent and agent-token options');
     const executable = source.executableBytes.slice();
     const config: VmInitConfig = {
-      native: { url, token, pageCursor: options.nativePageCursor ?? nativeQuery.get('native-cursor') !== 'game' },
+      native: {
+        url,
+        token,
+        pageCursor: options.nativePageCursor ?? nativeQuery.get('native-cursor') !== 'game',
+        sessionStatusUrl: new URL('/__native/session', window.location.href).href,
+      },
       provider: { kind: 'native' },
       preferredGameId: source.game.id,
       selectedExecutable: { path: source.game.executable, bytes: executable },

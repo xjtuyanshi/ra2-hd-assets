@@ -11,7 +11,9 @@ import { outputDirectory, WT } from './artifacts.mjs';
 import { ownerOpenBoundary } from './owner-open-boundary.mjs';
 
 const base = outputDirectory();
-const phase = join(base, 'phase12');
+const phaseName = process.argv[2] || 'phase12';
+assert(/^phase[0-9]+$/.test(phaseName), 'A numbered session is required');
+const phase = join(base, phaseName);
 const boundary = await ownerOpenBoundary(phase, { ownerPausePath: resolve(base, '../play/_slots/PAUSE') });
 const active = () => boundary.assertActive();
 await boundary.waitForOwnerIdle();

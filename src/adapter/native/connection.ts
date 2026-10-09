@@ -14,6 +14,14 @@ import {
 } from './protocol';
 import type { NativeHello, NativeMirrorUpdate, NativePicture, NativeBatchWrite } from './protocol';
 
+/** Only transport loss is eligible for the launcher's independently confirmed exit status. */
+export class NativeConnectionLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NativeConnectionLostError';
+  }
+}
+
 /** Browser WebSocket and Node ws both expose these event properties. */
 export interface NativeWebSocket {
   binaryType: string;
@@ -114,8 +122,8 @@ export class NativeConnection {
             this.fail(error instanceof Error ? error : new Error(String(error)));
           }
         };
-        this.socket.onerror = () => this.fail(new Error('Native WebSocket error'));
-        this.socket.onclose = () => this.fail(new Error('Native WebSocket closed'));
+        this.socket.onerror = () => this.fail(new NativeConnectionLostError('Native WebSocket error'));
+        this.socket.onclose = () => this.fail(new NativeConnectionLostError('Native WebSocket closed'));
       } catch (error) {
         this.fail(error instanceof Error ? error : new Error(String(error)));
       }
@@ -188,7 +196,7 @@ export class NativeConnection {
 
   private send(type: NativeMessageType, id: number, payload: Uint8Array): void {
     if (this.closed || !this.hello || !this.socket || this.socket.readyState !== 1)
-      throw new Error('Native agent is not connected');
+      throw new NativeConnectionLostError('Native agent is not connected');
     this.socket.send(encodePacket(type, id, payload));
   }
 
@@ -211,7 +219,7 @@ export class NativeConnection {
     try {
       while (this.outgoing.length) {
         if (!this.hello || !this.socket || this.socket.readyState !== 1) {
-          const error = new Error('Native agent is not connected');
+          const error = new NativeConnectionLostError('Native agent is not connected');
           for (const queued of this.outgoing.splice(0)) queued.reject?.(error);
           return;
         }
@@ -263,7 +271,7 @@ export class NativeConnection {
   request(type: NativeMessageType, payload: Uint8Array = new Uint8Array()): Promise<Uint8Array> {
     if (type === NativeMessageType.Ack) return Promise.reject(new Error('Native ACK is a notification'));
     if (this.closed || !this.hello || !this.socket || this.socket.readyState !== 1)
-      return Promise.reject(new Error('Native agent is not connected'));
+      return Promise.reject(new NativeConnectionLostError('Native agent is not connected'));
     return new Promise((resolve, reject) => {
       this.outgoing.push({ type, payload: payload.slice(), resolve, reject });
       this.drain();
@@ -272,7 +280,7 @@ export class NativeConnection {
 
   notify(type: NativeMessageType, payload: Uint8Array = new Uint8Array()): void {
     if (this.closed || !this.hello || !this.socket || this.socket.readyState !== 1)
-      throw new Error('Native agent is not connected');
+      throw new NativeConnectionLostError('Native agent is not connected');
     // Mirror ACKs release the host's stream slot and must not wait behind the
     // correlated-request window. They still respect browser socket backpressure.
     const queued = { type, payload: payload.slice() };
@@ -322,16 +330,16 @@ export class NativeConnection {
 
   private fail(error: Error): void {
     if (this.closed) return;
-    this.close(error.message);
+    this.close(error);
     this.reportError(error);
   }
   private reportError(error: Error): void {
     for (const handler of this.errors) handler(error);
   }
-  close(reason = 'Native connection closed'): void {
+  close(reason: string | Error = 'Native connection closed'): void {
     if (this.closed) return;
     this.closed = true;
-    const error = new Error(reason);
+    const error = reason instanceof Error ? reason : new Error(reason);
     if (this.helloTimer) clearTimeout(this.helloTimer);
     this.helloTimer = null;
     this.rejectHello?.(error);

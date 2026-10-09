@@ -98,6 +98,11 @@ Game subclasses receive the ordinary message and retain their primary paint;
 passing their forwarded stock procedure a DC could overwrite genuine native
 text with an empty generic control. Picture credits preserve the genuine
 top-level paint lifecycle before child/popup painting completes the picture.
+Ordinary siblings retain native User32 enumeration order because game-owned
+DirectDraw backgrounds can otherwise erase overlapping labels. A captured child
+list and its same-parent, geometrically adjoining vertical scrollbar paint after
+ordinary children; separately owned popups remain last. No popup geometry or
+contents are changed.
 Their nonclient borders and scrollbars use `WM_PRINT` with `PRF_NONCLIENT` against
 the same private DIB. The actual game paint chain remains responsible for control
 contents; no dialog-specific text or list is synthesized.

@@ -362,11 +362,24 @@ export async function runLauncher(arguments_, environment = process.env) {
   console.log(`Private launch logs and DLL backups: ${runDirectory}`);
   const stopPath = join(runDirectory, 'stop');
   const statusPath = join(runDirectory, 'status.json');
+  const sessionStatusPath = join(runDirectory, 'session-state.json');
+  async function publishSessionState(state) {
+    const pending = sessionStatusPath + '.tmp';
+    await writeFile(pending, JSON.stringify({ state }), { mode: 0o600 });
+    await rename(pending, sessionStatusPath);
+  }
+  await publishSessionState('running');
   const owned = new Set();
   let installation;
   let launcher;
+  let page;
   let cleanupPromise;
   let stopping = false;
+  let normalClosure = false;
+  let resolveStop;
+  const stopRequested = new Promise((resolve) => {
+    resolveStop = resolve;
+  });
   function start(command, args, options = {}) {
     if (stopping) throw new Error('启动已取消。');
     const child = spawn(command, args, {
@@ -419,17 +432,35 @@ export async function runLauncher(arguments_, environment = process.env) {
     if (cleanupPromise) return cleanupPromise;
     stopping = true;
     cleanupPromise = (async () => {
-      await writeFile(stopPath, 'stop\n', { mode: 0o600 });
+      await publishSessionState(normalClosure ? 'closed' : 'failed').catch((error) =>
+        console.error(`无法更新关闭提示，仍会关闭本次游戏：${error.message}`),
+      );
+      await writeFile(stopPath, 'stop\n', { mode: 0o600 }).catch((error) =>
+        console.error(`无法写入停止请求，将继续关闭本次游戏：${error.message}`),
+      );
       // The helper watches this private file and its job contains only its game.
       // Never kill a whole Wine server, prefix, executable name or another page.
       if (launcher && !launcher.exited) await Promise.race([launcher.done, delay(5000, undefined, { ref: false })]);
-      for (const item of owned) kill(item, 'SIGTERM');
+      // Wine descendants can retain the native socket after the helper exits.
+      // Close those owned groups first; the page must still serve authenticated
+      // status when its Worker finally observes native transport loss.
+      const gameItems = [...owned].filter((item) => item !== page);
+      for (const item of gameItems) kill(item, 'SIGTERM');
       await Promise.race([
-        Promise.all([...owned].map((item) => item.closedDone)),
+        Promise.all(gameItems.map((item) => item.closedDone)),
         delay(1500, undefined, { ref: false }),
       ]);
-      for (const item of owned) kill(item, 'SIGKILL');
-      await Promise.all([...owned].map((item) => item.closedDone));
+      for (const item of gameItems) kill(item, 'SIGKILL');
+      await Promise.all(gameItems.map((item) => item.closedDone));
+      // Allow the existing 1500 ms classification window and the following
+      // fullscreen/React paint to finish after native handles have closed.
+      if (page && !page.exited) await delay(2000);
+      if (page) {
+        kill(page, 'SIGTERM');
+        await Promise.race([page.closedDone, delay(1500, undefined, { ref: false })]);
+        kill(page, 'SIGKILL');
+        await page.closedDone;
+      }
       if (installation) {
         const result = await installation.restore();
         console.log(result.reason);
@@ -439,14 +470,18 @@ export async function runLauncher(arguments_, environment = process.env) {
   }
   const signalHandler = () => {
     stopping = true;
+    normalClosure = true;
+    // Wake the final wait even when the private stop-file cannot be delivered.
+    // Startup transactions still unwind through their existing owners first.
+    resolveStop();
     // Let the current file transaction finish before final restoration. Killing
     // finite startup/page children breaks awaited work; the helper gets its own
     // targeted stop request and keeps its job handle until the game exits.
     void writeFile(stopPath, 'stop\n', { mode: 0o600 }).catch((error) =>
-      console.error(`Stop request failed: ${error.message}`),
+      console.error(`停止请求失败，将继续关闭本次游戏：${error.message}`),
     );
     for (const item of owned) {
-      if (item !== launcher) {
+      if (item !== launcher && item !== page) {
         try {
           kill(item, 'SIGTERM');
         } catch (error) {
@@ -556,10 +591,16 @@ export async function runLauncher(arguments_, environment = process.env) {
     installation = await installDll(dll, join(gameDirectory, 'ddraw.dll'), runDirectory);
     const { open } = await import('node:fs/promises');
     const pageLog = await open(join(runDirectory, 'page.log'), 'wx', 0o600);
-    let page;
     try {
       page = start(process.execPath, [vite, '--host', '127.0.0.1', '--port', String(ports.page), '--strictPort'], {
-        env: { ...wine.environment, RA2_DEV_HTTP: '1', RA2_GAME_ROOT: gameRoot },
+        env: {
+          ...wine.environment,
+          RA2_DEV_HTTP: '1',
+          RA2_GAME_ROOT: gameRoot,
+          RA2_NATIVE_SESSION_STATUS: sessionStatusPath,
+          RA2_NATIVE_LAUNCH_STATUS: statusPath,
+          RA2_NATIVE_SESSION_TOKEN: token,
+        },
         stdio: ['ignore', pageLog.fd, pageLog.fd],
       });
     } finally {
@@ -647,11 +688,16 @@ export async function runLauncher(arguments_, environment = process.env) {
     console.log(`Play URL: ${url.href}`);
     console.log('请在 Chrome 打开上面的游戏网址。保留本窗口；按 Ctrl-C 可退出本次游戏。');
     if (openBrowser) await complete(start('/usr/bin/open', ['-a', 'Google Chrome', url.href]));
-    await Promise.race([launcher.done, page.done]);
+    await Promise.race([launcher.done, page.done, stopRequested]);
     if (!stopping && page.exited) throw new Error('游戏页面已停止，正在关闭本次游戏。');
     if (!stopping && launcher.error) throw launcher.error;
     if (!stopping && launcher.code !== 0)
       throw new Error(`游戏启动器异常退出，退出码 ${launcher.code}。请查看本次启动记录。`);
+    if (!stopping) {
+      const gameStatus = JSON.parse(await readFile(statusPath, 'utf8'));
+      normalClosure = gameStatus.running === false && gameStatus.exitCode === 0;
+      if (!normalClosure) throw new Error('游戏异常退出。请查看本次启动记录中的 launcher.log 和 wine.log。');
+    }
   } finally {
     await cleanup();
     process.off('SIGINT', signalHandler);

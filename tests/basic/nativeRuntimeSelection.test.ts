@@ -35,7 +35,7 @@ function source(): GameSource {
   };
 }
 function browser(search: string) {
-  vi.stubGlobal('window', { location: { search } });
+  vi.stubGlobal('window', { location: new URL(search, 'http://127.0.0.1:15451/') });
   vi.stubGlobal('Worker', class {});
 }
 afterEach(() => {
@@ -54,7 +54,12 @@ describe('development native URL selection', () => {
       original = supplied.executableBytes.slice();
     await createVmShell({}, supplied, { renderPassthrough: true });
     const config = state.configs[0]!;
-    expect(config.native).toEqual({ url: 'ws://127.0.0.1:15450', token: 'ab'.repeat(32), pageCursor: true });
+    expect(config.native).toEqual({
+      url: 'ws://127.0.0.1:15450',
+      token: 'ab'.repeat(32),
+      pageCursor: true,
+      sessionStatusUrl: 'http://127.0.0.1:15451/__native/session',
+    });
     expect(config.provider).toEqual({ kind: 'native' });
     expect(config.renderPassthrough).toBe(true);
     expect(config.selectedExecutable!.bytes).toEqual(original);

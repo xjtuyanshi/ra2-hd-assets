@@ -57,6 +57,13 @@ export function ProblemPanel({ phase, detail }: { phase: 'blocked' | 'error'; de
 export function ExitPanel({ detail }: { detail: string }) {
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
+  if (new URLSearchParams(window.location.search).get('backend') === 'native')
+    return (
+      <section className="panel game-folder-panel" style={panelStyle}>
+        <h3>游戏已关闭</h3>
+        <p>如需继续游戏，请重新运行启动器；它会提供新的游戏网址。</p>
+      </section>
+    );
   return (
     <section className="panel game-folder-panel" style={panelStyle}>
       <h3>{t('已回到网页')}</h3>

@@ -18,6 +18,7 @@ import {
   wineCheckAcknowledgement,
 } from './play-native.mjs';
 import { HD_PLAY_OPTIONS } from '../play-options.mjs';
+import { AgentClient } from './wire.mjs';
 import { readWineSelfCheckEvidence } from './launcher-wine-evidence.mjs';
 import {
   NATIVE_RESOLUTION_LIMITS,
@@ -515,23 +516,24 @@ test('readiness waits for a real modal menu with a visible enabled control insid
   assert.equal(nativeMainMenuReady(hello, { ...state, controls: [{ ...state.controls[0], enabled: false }] }), false);
 });
 
-test(
-  'CLI lifecycle uses real Vite plus a synthetic authenticated agent; SIGINT restores only its DLL and frees both ports',
-  { timeout: 45000 },
-  async (t) => {
-    const { dir, target } = await fixture(t);
-    const prefix = join(dir, 'prefix');
-    await mkdir(prefix);
-    await writeFile(join(prefix, 'system.reg'), 'synthetic prefix');
-    await mkdir(join(dir, '_library'));
-    await writeFile(join(dir, 'gamemd.exe'), 'synthetic executable, never run');
-    await writeFile(target, 'player DLL preserved by lifecycle test');
-    const wine = join(dir, 'mock-wine.mjs');
-    const wsPath = join(repository, 'node_modules/ws/index.js');
-    const wirePath = join(repository, 'scripts/remaster/native/wire.mjs');
-    await writeFile(
-      wine,
-      `#!${process.execPath}
+for (const stopFailure of [false, true])
+  test(
+    `CLI lifecycle uses real Vite plus a synthetic authenticated agent; ${stopFailure ? 'failed stop-file delivery still restores its DLL and frees both ports' : 'SIGINT restores only its DLL and frees both ports'}`,
+    { timeout: 45000 },
+    async (t) => {
+      const { dir, target } = await fixture(t);
+      const prefix = join(dir, 'prefix');
+      await mkdir(prefix);
+      await writeFile(join(prefix, 'system.reg'), 'synthetic prefix');
+      await mkdir(join(dir, '_library'));
+      await writeFile(join(dir, 'gamemd.exe'), 'synthetic executable, never run');
+      await writeFile(target, 'player DLL preserved by lifecycle test');
+      const wine = join(dir, 'mock-wine.mjs');
+      const wsPath = join(repository, 'node_modules/ws/index.js');
+      const wirePath = join(repository, 'scripts/remaster/native/wire.mjs');
+      await writeFile(
+        wine,
+        `#!${process.execPath}
 import { readFile, writeFile, access } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
@@ -571,91 +573,118 @@ if (args[0] === 'winepath.exe') {
   const timer = setInterval(async () => {
     try { await access(stop); } catch { return; }
     clearInterval(timer);
-    await writeFile(status, JSON.stringify({pid:123456, handshake:true, running:false}));
+    await writeFile(status, JSON.stringify({pid:123456, handshake:true, running:false, exitCode:0}));
     server.close(() => process.exit(0));
   }, 50);
 }
 `,
-      { mode: 0o755 },
-    );
-    const child = spawn('bash', ['scripts/remaster/native/play-native.sh', '--size', '1280x720'], {
-      cwd: repository,
-      env: {
-        ...process.env,
-        RA2_NATIVE_GAME_DIR: dir,
-        RA2_NATIVE_WINE_PREFIX: prefix,
-        RA2_NATIVE_WINE: wine,
-        RA2_HD_CACHE_DIR: dir,
-        RA2_NATIVE_WINE_BOTTLE: '',
-        WINEPREFIX: '',
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let output = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (data) => {
-      output += data;
-    });
-    child.stderr.on('data', (data) => {
-      output += data;
-    });
-    let exited = false;
-    const exit = new Promise((resolve) =>
-      child.once('exit', (code) => {
-        exited = true;
-        resolve(code);
-      }),
-    );
-    t.after(async () => {
-      if (!exited) child.kill('SIGINT');
-      await Promise.race([exit, delay(7000)]);
-      if (!exited) child.kill('SIGKILL');
-    });
-    const deadline = Date.now() + 30000;
-    while (!output.includes('Play URL: ') && !exited && Date.now() < deadline) await delay(100);
-    assert.match(output, /Play URL: /, output);
-    const url = new URL(output.match(/Play URL: (\S+)/)[1]);
-    assert.equal(url.searchParams.get('backend'), 'native');
-    assert.equal(url.searchParams.get('native-autostart'), 'yr');
-    assert.equal(url.searchParams.get('resolution'), '1280x720');
-    for (const [key, value] of Object.entries(HD_PLAY_OPTIONS)) assert.equal(url.searchParams.get(key), value);
-    assert.match(output, /Native resolution: 1280x720 \(fixed for this session/);
-    assert.match(url.searchParams.get('agent-token'), /^[a-f0-9]{64}$/);
-    const listingResponse = await fetch(`${url.origin}/game/.list?dir=ra2`);
-    assert.equal(listingResponse.status, 200);
-    assert.ok((await listingResponse.json()).includes('gamemd.exe'));
-    const executableResponse = await fetch(`${url.origin}/game/ra2/gamemd.exe`);
-    assert.equal(executableResponse.status, 200);
-    assert.equal(await executableResponse.text(), 'synthetic executable, never run');
-    assert.deepEqual(await readFile(target), await readFile(join(repository, 'packages/native-host/build/ddraw.dll')));
-    child.kill('SIGINT');
-    assert.equal(await exit, 0, output);
-    assert.equal(await readFile(target, 'utf8'), 'player DLL preserved by lifecycle test');
-    for (const port of [+url.port, +new URL(url.searchParams.get('agent')).port]) {
-      const server = createServer();
-      await new Promise((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(port, '127.0.0.1', resolve);
+        { mode: 0o755 },
+      );
+      const child = spawn('bash', ['scripts/remaster/native/play-native.sh', '--size', '1280x720'], {
+        cwd: repository,
+        env: {
+          ...process.env,
+          RA2_NATIVE_GAME_DIR: dir,
+          RA2_NATIVE_WINE_PREFIX: prefix,
+          RA2_NATIVE_WINE: wine,
+          RA2_HD_CACHE_DIR: dir,
+          RA2_NATIVE_WINE_BOTTLE: '',
+          WINEPREFIX: '',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
-      await new Promise((resolve) => server.close(resolve));
-    }
-    const runPath = output.match(/Private launch logs and DLL backups: (.+)/)[1];
-    const checkLog = await readFile(join(runPath, 'wine-check.log'), 'utf8');
-    assert.ok(checkLog.length <= 16385);
-    assert.match(checkLog, /synthetic trailing Wine self-check/);
-    assert.doesNotMatch(checkLog, /RA2_NATIVE_WINE_OK/);
-    const evidence = await readWineSelfCheckEvidence(runPath);
-    assert.deepEqual(evidence.observation, {
-      source: 'stdout-exact-trimmed-line',
-      acknowledged: true,
-      closed: true,
-      exitCode: 0,
-      error: null,
-    });
-    assert.equal(evidence.observedExactOkLine, true);
-    assert.equal(evidence.successful, true);
-    const status = JSON.parse(await readFile(join(runPath, 'status.json'), 'utf8'));
-    assert.equal(status.running, false);
-  },
-);
+      let output = '';
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (data) => {
+        output += data;
+      });
+      child.stderr.on('data', (data) => {
+        output += data;
+      });
+      let exited = false;
+      const exit = new Promise((resolve) =>
+        child.once('exit', (code) => {
+          exited = true;
+          resolve(code);
+        }),
+      );
+      t.after(async () => {
+        if (!exited) child.kill('SIGINT');
+        await Promise.race([exit, delay(7000)]);
+        if (!exited) child.kill('SIGKILL');
+      });
+      const deadline = Date.now() + 30000;
+      while (!output.includes('Play URL: ') && !exited && Date.now() < deadline) await delay(100);
+      assert.match(output, /Play URL: /, output);
+      const url = new URL(output.match(/Play URL: (\S+)/)[1]);
+      const runPath = output.match(/Private launch logs and DLL backups: (.+)/)[1];
+      assert.equal(url.searchParams.get('backend'), 'native');
+      assert.equal(url.searchParams.get('native-autostart'), 'yr');
+      assert.equal(url.searchParams.get('resolution'), '1280x720');
+      for (const [key, value] of Object.entries(HD_PLAY_OPTIONS)) assert.equal(url.searchParams.get(key), value);
+      assert.match(output, /Native resolution: 1280x720 \(fixed for this session/);
+      assert.match(url.searchParams.get('agent-token'), /^[a-f0-9]{64}$/);
+      const listingResponse = await fetch(`${url.origin}/game/.list?dir=ra2`);
+      assert.equal(listingResponse.status, 200);
+      assert.ok((await listingResponse.json()).includes('gamemd.exe'));
+      const executableResponse = await fetch(`${url.origin}/game/ra2/gamemd.exe`);
+      assert.equal(executableResponse.status, 200);
+      assert.equal(await executableResponse.text(), 'synthetic executable, never run');
+      assert.deepEqual(
+        await readFile(target),
+        await readFile(join(repository, 'packages/native-host/build/ddraw.dll')),
+      );
+      const statusUrl = `${url.origin}/__native/session`;
+      assert.equal((await fetch(statusUrl)).status, 404);
+      const statusOptions = { headers: { Authorization: `Bearer ${url.searchParams.get('agent-token')}` } };
+      assert.deepEqual(await (await fetch(statusUrl, statusOptions)).json(), { state: 'running' });
+      // Keep the synthetic native transport open until owned-group teardown,
+      // mirroring Wine handles which can outlive the helper's exit status.
+      const agent = new AgentClient(url.searchParams.get('agent'), url.searchParams.get('agent-token'), url.origin);
+      t.after(() => agent.close());
+      const nativeClosed = new Promise((resolve) => agent.once('closed', resolve));
+      await agent.connect();
+      if (stopFailure) await symlink(join(dir, 'missing-stop-parent', 'stop'), join(runPath, 'stop'));
+      child.kill('SIGINT');
+      const noticeDeadline = Date.now() + 1000;
+      let closure;
+      do {
+        closure = await (await fetch(statusUrl, statusOptions)).json();
+        if (closure.state === 'closed') break;
+        await delay(20);
+      } while (Date.now() < noticeDeadline);
+      assert.deepEqual(closure, { state: 'closed' });
+      await nativeClosed;
+      await delay(200);
+      assert.deepEqual(await (await fetch(statusUrl, statusOptions)).json(), { state: 'closed' });
+      assert.equal(await exit, 0, output);
+      assert.equal(await readFile(target, 'utf8'), 'player DLL preserved by lifecycle test');
+      for (const port of [+url.port, +new URL(url.searchParams.get('agent')).port]) {
+        const server = createServer();
+        await new Promise((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(port, '127.0.0.1', resolve);
+        });
+        await new Promise((resolve) => server.close(resolve));
+      }
+      const checkLog = await readFile(join(runPath, 'wine-check.log'), 'utf8');
+      assert.ok(checkLog.length <= 16385);
+      assert.match(checkLog, /synthetic trailing Wine self-check/);
+      assert.doesNotMatch(checkLog, /RA2_NATIVE_WINE_OK/);
+      const evidence = await readWineSelfCheckEvidence(runPath);
+      assert.deepEqual(evidence.observation, {
+        source: 'stdout-exact-trimmed-line',
+        acknowledged: true,
+        closed: true,
+        exitCode: 0,
+        error: null,
+      });
+      assert.equal(evidence.observedExactOkLine, true);
+      assert.equal(evidence.successful, true);
+      const status = JSON.parse(await readFile(join(runPath, 'status.json'), 'utf8'));
+      // Forced cleanup must not invent an exit acknowledgement from the helper.
+      assert.equal(status.running, stopFailure);
+      if (stopFailure) assert.match(output, /无法写入停止请求，将继续关闭本次游戏/);
+    },
+  );

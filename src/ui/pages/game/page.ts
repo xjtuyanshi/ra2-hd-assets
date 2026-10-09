@@ -500,12 +500,18 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     },
   });
   const hideBootOverlay = () => bootState.set(null);
+  const leaveGameFullscreen = async () => {
+    // Runtime panels are siblings of the game frame. A fullscreen frame's top
+    // layer otherwise hides them even when their DOM boxes remain visible.
+    if (document.fullscreenElement?.contains(canvas))
+      await document.exitFullscreen().catch((error) => console.warn('[VM] Fullscreen release:', error));
+  };
   let problemPanelShown = false;
   const showProblemPanel = (phase: 'blocked' | 'error', detail: string) => {
     if (problemPanelShown) return;
     problemPanelShown = true;
     hideBootOverlay();
-    mainPanel.set({ phase, detail });
+    void leaveGameFullscreen().then(() => mainPanel.set({ phase, detail }));
   };
   const updateBootOverlay = (next: VmStatus) => {
     if (next.phase === 'blocked' || next.phase === 'error') showProblemPanel(next.phase, next.detail);
@@ -540,6 +546,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     activeResourceCleanup?.();
     activeResourceCleanup = null;
     if (document.pointerLockElement === canvas) await document.exitPointerLock();
+    await leaveGameFullscreen();
     bootState.set(null);
     helpVisible.set(false);
     hotkeySheetVisible.set(false);
