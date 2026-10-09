@@ -64,6 +64,7 @@ GETDCPROC real_GetDC = GetDC;
 RELEASEDCPROC real_ReleaseDC = ReleaseDC;
 /* Native-host bridge: retain the real API outside scoped forced painting. */
 GETUPDATERECTPROC real_GetUpdateRect = GetUpdateRect;
+UPDATEWINDOWPROC real_UpdateWindow = UpdateWindow;
 GETKEYSTATEPROC real_GetKeyState = GetKeyState;
 GETASYNCKEYSTATEPROC real_GetAsyncKeyState = GetAsyncKeyState;
 GETDEVICECAPSPROC real_GetDeviceCaps = GetDeviceCaps;
@@ -158,6 +159,7 @@ HOOKLIST g_hook_hooklist[] =
             { "ReleaseDC", (PROC)fake_ReleaseDC, (PROC*)&real_ReleaseDC, 0 },
             /* Native-host bridge: hidden native controls query their paint region. */
             { "GetUpdateRect", (PROC)fake_GetUpdateRect, (PROC*)&real_GetUpdateRect, 0 },
+            { "UpdateWindow", (PROC)fake_UpdateWindow, (PROC*)&real_UpdateWindow, 0 },
             { "GetKeyState", (PROC)fake_GetKeyState, (PROC*)&real_GetKeyState, 0 },
             { "GetAsyncKeyState", (PROC)fake_GetAsyncKeyState, (PROC*)&real_GetAsyncKeyState, 0 },
             { "SetForegroundWindow", (PROC)fake_SetForegroundWindow, (PROC*)&real_SetForegroundWindow, 0 },

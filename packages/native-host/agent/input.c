@@ -30,6 +30,10 @@ static unsigned focus_depth;
 static uint32_t focus_generation;
 static uint32_t dialog_messages, last_target, last_target_id;
 static uint32_t redirected_captured_releases, consumed_captured_releases;
+static HWND wheel_list;
+static int wheel_remainder;
+static uint32_t owner_drawn_wheels, owner_drawn_wheel_fallbacks, last_wheel_target;
+static int last_wheel_delta, last_wheel_top_before = -1, last_wheel_top_after = -1;
 
 static void initialize(void)
 {
@@ -197,6 +201,29 @@ static BOOL CALLBACK find_popup_at(HWND hwnd, LPARAM context)
     return TRUE;
 }
 
+/* The hidden host receives no physical hit-test/WM_SETCURSOR sequence. Cursor
+ * capture uses the same owned popup/control/capture target as virtual input,
+ * without moving the OS pointer or invoking a window procedure. */
+HWND nh_input_cursor_window(void)
+{
+    HWND root = nh_input_target_window();
+    if (!root || !nh_window_owned(root) || !nh_hidden_visible(root)) return NULL;
+    if (root == g_ddraw.hwnd) return root;
+    POINT screen = game_to_screen((int)InterlockedCompareExchange(&cursor_x, 0, 0),
+        (int)InterlockedCompareExchange(&cursor_y, 0, 0));
+    struct popup_context popup = {root, NULL, screen};
+    EnumWindows(find_popup_at, (LPARAM)&popup);
+    HWND capture = nh_hidden_get_capture();
+    if ((capture == root || IsChild(root, capture) || popup_for(capture, root)) &&
+        GetWindowThreadProcessId(capture, NULL) == g_ddraw.gui_thread_id &&
+        nh_hidden_visible(capture) && IsWindowEnabled(capture)) return capture;
+    HWND pressed = (HWND)virtual_capture.target;
+    if ((pressed == root || IsChild(root, pressed) || popup_for(pressed, root)) &&
+        nh_window_owned(pressed) && nh_hidden_visible(pressed) && IsWindowEnabled(pressed)) return pressed;
+    HWND target = popup.target ? popup.target : child_at(root, screen, 0);
+    return nh_window_owned(target) && GetWindowThreadProcessId(target, NULL) == g_ddraw.gui_thread_id ? target : NULL;
+}
+
 struct controls_context { char *json; uint32_t capacity, used, count, combo_queries; int truncated; HWND root; };
 
 static int query_control(HWND hwnd, UINT message, int32_t *value)
@@ -312,7 +339,9 @@ static void input_state(uint32_t id, int skip_controls)
         "\"dialogMessages\":%u,\"lastTargetHwnd\":%u,\"lastTargetId\":%u,\"dialogHwnd\":%u,"
         "\"focusHwnd\":%u,\"gameCaptureHwnd\":%u,\"redirectedCapturedReleases\":%u,"
         "\"consumedCapturedReleases\":%u,\"lastDeliveryQueueUs\":%llu,\"maxDeliveryQueueUs\":%llu,"
-        "\"lastHandlerUs\":%llu,\"maxHandlerUs\":%llu,\"directInput\":\"unsupported\",\"controls\":[",
+        "\"lastHandlerUs\":%llu,\"maxHandlerUs\":%llu,\"ownerDrawnWheels\":%u,\"ownerDrawnWheelFallbacks\":%u,"
+        "\"lastWheelTargetHwnd\":%u,\"lastWheelDelta\":%d,\"lastWheelTopBefore\":%d,\"lastWheelTopAfter\":%d,"
+        "\"directInput\":\"unsupported\",\"controls\":[",
         InterlockedCompareExchange(&cursor_x, 0, 0), InterlockedCompareExchange(&cursor_y, 0, 0), held,
         InterlockedCompareExchange(&cursor_reads, 0, 0), InterlockedCompareExchange(&key_reads, 0, 0),
         InterlockedCompareExchange(&async_key_reads, 0, 0), InterlockedCompareExchange(&cursor_writes, 0, 0),
@@ -323,7 +352,9 @@ static void input_state(uint32_t id, int skip_controls)
         (uint32_t)(uintptr_t)nh_input_get_focus(), (uint32_t)(uintptr_t)nh_hidden_get_capture(),
         redirected_captured_releases, consumed_captured_releases,
         (unsigned long long)last_delivery_queue_us, (unsigned long long)max_delivery_queue_us,
-        (unsigned long long)last_handler_us, (unsigned long long)max_handler_us);
+        (unsigned long long)last_handler_us, (unsigned long long)max_handler_us,
+        owner_drawn_wheels, owner_drawn_wheel_fallbacks, last_wheel_target,
+        last_wheel_delta, last_wheel_top_before, last_wheel_top_after);
     LeaveCriticalSection(&input_lock);
     struct controls_context controls = {json, sizeof(json), (uint32_t)strlen(json), 0, 0, 0, target};
     if (target && !skip_controls)
@@ -444,6 +475,69 @@ static void record_dialog_target(HWND target)
     LeaveCriticalSection(&input_lock);
 }
 
+static int route_owner_drawn_wheel(HWND root, HWND target, WPARAM wparam, LPARAM lparam, LRESULT *result)
+{
+    if (LOWORD(wparam) & (MK_SHIFT | MK_CONTROL)) return 0;
+    char class_name[64] = {0};
+    GetClassNameA(target, class_name, sizeof(class_name));
+    LONG style = GetWindowLongA(target, GWL_STYLE);
+    if (_stricmp(class_name, "ListBox") || (style & WS_VSCROLL) ||
+        !(style & (LBS_OWNERDRAWFIXED | LBS_OWNERDRAWVARIABLE))) return 0;
+    int before = (int)SendMessageA(target, LB_GETTOPINDEX, 0, 0);
+    int delta = (SHORT)HIWORD(wparam), after = before, fallback = 0;
+    EnterCriticalSection(&input_lock);
+    if (wheel_list != target) { wheel_list = target; wheel_remainder = 0; }
+    int accumulated = wheel_remainder + delta;
+    int notches = accumulated / WHEEL_DELTA;
+    wheel_remainder = accumulated % WHEEL_DELTA;
+    LeaveCriticalSection(&input_lock);
+    *result = SendMessageA(target, WM_MOUSEWHEEL, wparam, lparam);
+    int current = nh_input_target_window() == root && IsWindow(target) && nh_window_owned(target) &&
+        GetWindowThreadProcessId(target, NULL) == g_ddraw.gui_thread_id;
+    if (current)
+    {
+        after = (int)SendMessageA(target, LB_GETTOPINDEX, 0, 0);
+        /* Legacy owner-drawn lists without WS_VSCROLL can keep their displayed
+         * top index outside USER32. A stock wheel changes USER32's private index,
+         * which their original painter never reads. Keep the real wheel first;
+         * only its unchanged published index needs the original list setter. */
+        if (before >= 0 && after == before && notches)
+        {
+            int count = (int)SendMessageA(target, LB_GETCOUNT, 0, 0);
+            UINT lines = 3;
+            SystemParametersInfoA(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+            if (lines == WHEEL_PAGESCROLL)
+            {
+                RECT client = {0};
+                int height = (int)SendMessageA(target, LB_GETITEMHEIGHT, before, 0);
+                GetClientRect(target, &client);
+                lines = height > 0 ? max(1, client.bottom / height) : 1;
+            }
+            if (count > 0 && lines)
+            {
+                int64_t next = (int64_t)before - (int64_t)notches * min(lines, (UINT)count);
+                next = max(0, min(next, count - 1));
+                if (next != before)
+                {
+                    /* The original procedure owns range clamping, scrollbar
+                     * synchronization and invalidation. Selection is untouched. */
+                    SendMessageA(target, LB_SETTOPINDEX, (WPARAM)next, 0);
+                    after = (int)SendMessageA(target, LB_GETTOPINDEX, 0, 0);
+                    fallback = after != before;
+                }
+            }
+        }
+    }
+    EnterCriticalSection(&input_lock);
+    if (!current || after == -1)
+    { wheel_list = NULL; wheel_remainder = 0; after = -1; }
+    owner_drawn_wheels++; owner_drawn_wheel_fallbacks += fallback;
+    last_wheel_target = (uint32_t)(uintptr_t)target;
+    last_wheel_delta = delta; last_wheel_top_before = before; last_wheel_top_after = after;
+    LeaveCriticalSection(&input_lock);
+    return 1;
+}
+
 static LRESULT route_message(HWND main, UINT message, WPARAM wparam, LPARAM lparam)
 {
     HWND root = nh_input_target_window();
@@ -551,6 +645,9 @@ static LRESULT route_message(HWND main, UINT message, WPARAM wparam, LPARAM lpar
     }
     if (release) nh_input_capture_clear(&virtual_capture);
     record_dialog_target(target);
+    LRESULT wheel_result;
+    if (message == WM_MOUSEWHEEL && route_owner_drawn_wheel(root, target, wparam, lparam, &wheel_result))
+        return wheel_result;
     LRESULT result = SendMessageA(target, message, wparam, lparam);
     return result;
 }
@@ -626,6 +723,7 @@ void nh_input_disconnect(void)
     EnterCriticalSection(&input_lock);
     input_generation++;
     memset(queue, 0, sizeof(queue)); activated = 0; nh_input_capture_clear(&virtual_capture);
+    wheel_list = NULL; wheel_remainder = 0;
     /* Hidden logical focus belongs to the game lifetime, not the client.
      * Clearing it without WM_KILLFOCUS would desynchronize native controls. */
     if (!nh_hidden_active()) { virtual_focus = NULL; focus_known = 0; }

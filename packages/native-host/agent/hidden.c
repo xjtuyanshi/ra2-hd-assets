@@ -23,10 +23,13 @@ static __thread HDC scratch_dc;
 static __thread HWND scratch_root, scratch_window;
 static __thread struct { HWND window; int saved, begin_paint; } dc_routes[16];
 static __thread unsigned dc_route_count;
+static __thread HWND paint_calls[16];
+static __thread unsigned paint_call_depth;
 static volatile LONG paint_in_progress;
 static unsigned last_painted, last_owner_drawn, last_dc_acquires;
 static unsigned last_system_dc_paints, last_nonclient_paints;
 static unsigned last_update_rect_queries;
+static unsigned last_nested_window_updates;
 static volatile LONG last_paint_us, maximum_paint_us;
 static volatile LONG last_paint_root, last_paint_root_enabled, disabled_dialog_paints;
 static HWND captured;
@@ -308,10 +311,10 @@ void nh_hidden_diagnostics(char *json, uint32_t capacity)
     LONG paint_root = InterlockedCompareExchange(&last_paint_root, 0, 0);
     snprintf(json, capacity, "{\"enabled\":%s,\"desktopName\":\"%s\",\"desktopExpected\":\"%s\",\"desktopClass\":\"%s\",\"desktopHidden\":%s,\"clientOrigin\":[%ld,%ld],\"paintedControls\":%u,\"ownerDrawnControls\":%u,\"paintDcAcquires\":%u,"
         "\"lastPaintRootHwnd\":%u,\"lastPaintRootEnabled\":%s,\"disabledDialogPaints\":%ld,"
-        "\"systemDcPaints\":%u,\"nonclientPaints\":%u,\"paintUpdateRectQueries\":%u,\"lastPaintUs\":%ld,\"maxPaintUs\":%ld}",
+        "\"systemDcPaints\":%u,\"nonclientPaints\":%u,\"paintUpdateRectQueries\":%u,\"nestedUpdateWindowPaints\":%u,\"lastPaintUs\":%ld,\"maxPaintUs\":%ld}",
         nh_hidden_active() ? "true" : "false", desktop_name, desktop_expected, desktop_class, desktop_hidden ? "true" : "false", origin.x, origin.y, last_painted, last_owner_drawn, last_dc_acquires,
         (uint32_t)paint_root, paint_root ? InterlockedCompareExchange(&last_paint_root_enabled, 0, 0) ? "true" : "false" : "null",
-        InterlockedCompareExchange(&disabled_dialog_paints, 0, 0), last_system_dc_paints, last_nonclient_paints, last_update_rect_queries,
+        InterlockedCompareExchange(&disabled_dialog_paints, 0, 0), last_system_dc_paints, last_nonclient_paints, last_update_rect_queries, last_nested_window_updates,
         InterlockedCompareExchange(&last_paint_us, 0, 0), InterlockedCompareExchange(&maximum_paint_us, 0, 0));
 }
 
@@ -411,6 +414,50 @@ static int system_paint_dc(const char *class_name)
         !_stricmp(class_name, "Static") || !_stricmp(class_name, "ComboBox") ||
         !_stricmp(class_name, "ComboLBox") || !_stricmp(class_name, "ListBox") ||
         !_stricmp(class_name, "ScrollBar") || !_stricmp(class_name, "msctls_trackbar32");
+}
+
+int nh_hidden_update_window(HWND window)
+{
+    if (!painting || !scratch_dc || !scratch_root || !nh_hidden_owned(window) ||
+        GetCurrentThreadId() != g_ddraw.gui_thread_id ||
+        GetWindowThreadProcessId(window, NULL) != g_ddraw.gui_thread_id ||
+        (window != scratch_root && !IsChild(scratch_root, window))) return -1;
+    if (nh_window_target(NH_WINDOW_PAINT) != scratch_root || !nh_hidden_visible(window)) return 0;
+    for (unsigned i = 0; i < paint_call_depth; i++)
+        if (paint_calls[i] == window) return 1;
+    if (paint_call_depth >= sizeof(paint_calls) / sizeof(paint_calls[0])) return 0;
+    RECT client;
+    POINT origin = {0};
+    if (!GetClientRect(window, &client) || client.right <= 0 || client.bottom <= 0) return 0;
+    int saved = SaveDC(scratch_dc);
+    if (!saved) return 0;
+    HWND previous_window = scratch_window;
+    unsigned route_base = dc_route_count;
+    real_MapWindowPoints(window, g_ddraw.hwnd, &origin, 1);
+    /* A native parent can synchronously update a sibling while painting a
+     * child. Its requested client scope must not inherit that child's clip. */
+    SelectClipRgn(scratch_dc, NULL);
+    SetViewportOrgEx(scratch_dc, origin.x, origin.y, NULL);
+    IntersectClipRect(scratch_dc, client.left, client.top, client.right, client.bottom);
+    scratch_window = window;
+    char class_name[64] = {0};
+    GetClassNameA(window, class_name, sizeof(class_name));
+    LONG procedure = real_GetWindowLongA(window, GWL_WNDPROC);
+    nh_hidden_get_window_proc(window, &procedure);
+    LONG standard = (LONG)GetClassLongA(window, GCL_WNDPROC);
+    int supplied_dc = system_paint_dc(class_name) && procedure == standard;
+    /* Keep the native parent's paint transaction alive. Deferring this child
+     * until the outer control pass loses game-owned staging/publication state
+     * because hidden ancestors do not dispatch User32's UpdateWindow paint. */
+    paint_calls[paint_call_depth++] = window;
+    SendMessageA(window, WM_PAINT, supplied_dc ? (WPARAM)scratch_dc : 0, 0);
+    paint_call_depth--;
+    last_nested_window_updates++;
+    if (supplied_dc) last_system_dc_paints++;
+    while (dc_route_count > route_base) RestoreDC(scratch_dc, dc_routes[--dc_route_count].saved);
+    scratch_window = previous_window;
+    RestoreDC(scratch_dc, saved);
+    return 1;
 }
 
 static BOOL CALLBACK collect_paint_popup(HWND window, LPARAM context)
@@ -517,9 +564,11 @@ void nh_hidden_paint(void)
     scratch_dc = dc;
     scratch_root = state.root;
     dc_route_count = 0;
+    paint_call_depth = 0;
     last_painted = last_owner_drawn = last_dc_acquires = 0;
     last_system_dc_paints = last_nonclient_paints = 0;
     last_update_rect_queries = 0;
+    last_nested_window_updates = 0;
     int root_enabled = IsWindowEnabled(state.root) != 0;
     for (unsigned i = 0; i < state.count; i++)
     {
@@ -552,7 +601,9 @@ void nh_hidden_paint(void)
          * ordinary game message; only stock handlers need the explicit DC. */
         int supplied_dc = system_class && procedure == standard;
         InvalidateRect(window, NULL, FALSE);
+        paint_calls[paint_call_depth++] = window;
         SendMessageA(window, WM_PAINT, supplied_dc ? (WPARAM)dc : 0, 0);
+        paint_call_depth--;
         if (supplied_dc) last_system_dc_paints++;
         /* List scrolling and control borders belong to the nonclient paint
          * path. WM_PRINT supplies its DC directly without requiring any
@@ -628,6 +679,7 @@ void nh_hidden_paint(void)
     scratch_root = NULL;
     scratch_window = NULL;
     dc_route_count = 0;
+    paint_call_depth = 0;
     SelectObject(dc, previous_bitmap);
     DeleteDC(dc);
     DeleteObject(dib);

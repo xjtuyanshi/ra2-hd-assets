@@ -42,7 +42,9 @@ export interface NativeGamePolicy {
   setSpeed(memory: GuestMemory, value: number): number | null;
   /** Version-validated drawing-only patch. A false result keeps the game's original cursor. */
   setPointerDrawing?(memory: GuestMemory, enabled: boolean): boolean;
-  /** Read actual current cursor state independently of battlefield logic ticks (menus have none). */
+  /** Read cursor state independently of battlefield logic ticks (menus have none).
+   * Null confirms software absence; undefined is an unconfirmed sample. The
+   * native adapter retains validated art on undefined or failed reads. */
   readPointer?(
     read: (address: number, length: number) => Promise<Uint8Array>,
     width: number,

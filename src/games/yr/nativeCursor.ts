@@ -17,38 +17,57 @@ export function setYrNativePointerDrawing(memory: GuestMemory, enabled: boolean)
   return true;
 }
 
-/** Direct reads are isolated from the logic mirror, and revalidate the mutable presentation fields. */
+/** Null is an observed absence/hidden/software-off state. Undefined is an
+ * incomplete or inconsistent sample and must not erase validated cursor art. */
 export async function readYrNativePointer(
   read: (address: number, length: number) => Promise<Uint8Array>,
   width: number,
   height: number,
 ): Promise<VmFrame['pointer']> {
   const roots = await Promise.all([read(YR_SIDEBAR.mouse, 4), read(YR_SIDEBAR.mouseShape, 4)]);
+  if (roots.some((bytes) => bytes.length !== 4)) return undefined;
   const object = new DataView(roots[0]!.buffer, roots[0]!.byteOffset, 4).getUint32(0, true);
   const shape = new DataView(roots[1]!.buffer, roots[1]!.byteOffset, 4).getUint32(0, true);
-  if (object < 0x10000 || object & 3 || shape < 0x10000 || shape & 3) return null;
+  if (!object) return null;
+  if (object < 0x10000 || object & 3) return undefined;
   const first = await read(object, 0x44);
+  if (first.length !== 0x44) return undefined;
   const view = new DataView(first.buffer, first.byteOffset, first.byteLength);
-  if (
-    view.getUint32(0, true) !== 0x7f7b2c ||
-    view.getUint32(4, true) !== shape ||
-    view.getInt32(12, true) < 0 ||
-    !view.getUint8(0x10)
-  )
-    return null;
+  if (view.getUint32(0, true) !== 0x7f7b2c) return undefined;
+  if (view.getInt32(12, true) < 0 || !view.getUint8(0x10)) return null;
+  if (shape < 0x10000 || shape & 3 || view.getUint32(4, true) !== shape) return undefined;
   const header = await read(shape, 8);
+  if (header.length !== 8) return undefined;
   const sheet = new DataView(header.buffer, header.byteOffset, header.byteLength);
   const sheetWidth = sheet.getUint16(2, true),
     sheetHeight = sheet.getUint16(4, true);
-  const frame = view.getInt32(8, true),
-    hotspotX = view.getInt32(0x3c, true),
-    hotspotY = view.getInt32(0x40, true);
+  if (sheet.getUint16(0, true) !== 0 || sheetWidth < 1 || sheetWidth > 256 || sheetHeight < 1 || sheetHeight > 256)
+    return undefined;
+  const [latest, liveObject, liveShape] = await Promise.all([
+    read(object, 0x44),
+    read(YR_SIDEBAR.mouse, 4),
+    read(YR_SIDEBAR.mouseShape, 4),
+  ]);
+  if (latest.length !== 0x44 || liveObject.length !== 4 || liveShape.length !== 4) return undefined;
+  if (new DataView(liveObject.buffer, liveObject.byteOffset, 4).getUint32(0, true) !== object) return undefined;
+  const current = new DataView(latest.buffer, latest.byteOffset, latest.byteLength);
+  if (current.getUint32(0, true) !== 0x7f7b2c) return undefined;
+  if (current.getInt32(12, true) < 0 || !current.getUint8(0x10)) return null;
   if (
-    sheet.getUint16(0, true) !== 0 ||
-    sheetWidth < 1 ||
-    sheetWidth > 256 ||
-    sheetHeight < 1 ||
-    sheetHeight > 256 ||
+    new DataView(liveShape.buffer, liveShape.byteOffset, 4).getUint32(0, true) !== shape ||
+    current.getUint32(4, true) !== shape
+  )
+    return undefined;
+  // An animation frame may advance between READs without changing its sheet
+  // or hotspot. Validate the final frame against that same immutable header;
+  // never interpret ordinary animation as an authoritative hide. A changing
+  // hotspot still marks an unconfirmed cursor-type transition.
+  for (const offset of [0x3c, 0x40])
+    if (current.getUint32(offset, true) !== view.getUint32(offset, true)) return undefined;
+  const frame = current.getInt32(8, true),
+    hotspotX = current.getInt32(0x3c, true),
+    hotspotY = current.getInt32(0x40, true);
+  if (
     frame < 0 ||
     frame >= sheet.getUint16(6, true) ||
     hotspotX < 0 ||
@@ -56,23 +75,9 @@ export async function readYrNativePointer(
     hotspotY < 0 ||
     hotspotY > sheetHeight
   )
-    return null;
-  const [latest, liveObject, liveShape] = await Promise.all([
-    read(object, 0x44),
-    read(YR_SIDEBAR.mouse, 4),
-    read(YR_SIDEBAR.mouseShape, 4),
-  ]);
-  if (
-    new DataView(liveObject.buffer, liveObject.byteOffset, 4).getUint32(0, true) !== object ||
-    new DataView(liveShape.buffer, liveShape.byteOffset, 4).getUint32(0, true) !== shape
-  )
-    return null;
-  const current = new DataView(latest.buffer, latest.byteOffset, latest.byteLength);
-  for (const offset of [0, 4, 8, 0x3c, 0x40])
-    if (current.getUint32(offset, true) !== view.getUint32(offset, true)) return null;
-  if (current.getInt32(12, true) < 0 || !current.getUint8(0x10)) return null;
+    return undefined;
   const x = current.getInt32(0x14, true),
     y = current.getInt32(0x18, true);
-  if (x < 0 || x >= width || y < 0 || y >= height) return null;
+  if (x < 0 || x >= width || y < 0 || y >= height) return undefined;
   return { frame, x, y, hotspotX, hotspotY };
 }

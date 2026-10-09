@@ -17,6 +17,7 @@ import type { GameFileProvider } from '../../../src/resources/contracts';
 import { createYrNativeHouseTailDiscovery } from '../../../src/games/yr/nativeHost';
 import { YR_STATE_GLOBALS as YG, YR_STATE_OFFSETS as YO } from '../../../src/games/yr/stateReader';
 import { createGuestMemory, writeU32 } from '../../helpers/guestMemory';
+import type { VmFrame } from '../../../src/vm86/win32';
 
 function concat(...parts: Uint8Array[]): Uint8Array {
   const bytes = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
@@ -51,6 +52,8 @@ class FakeAgent implements NativeWebSocket {
   revisionSupport = false;
   subscriptionRevision = 0;
   surface = { width: 0, height: 0, bpp: 0, format: 'RGB565' };
+  cursorSnapshot = false;
+  cursorPayload: Uint8Array = new Uint8Array(28);
   constructor() {
     this.initial[0] = 7;
   }
@@ -78,6 +81,10 @@ class FakeAgent implements NativeWebSocket {
         this.emit(NativeMessageType.Error, request.id, new TextEncoder().encode('input unsupported'));
       else this.emit(request.type, request.id);
     } else if (request.type === NativeMessageType.InputState) {
+      if (this.cursorSnapshot && request.payload.length === 4 && u32(request.payload) === 2) {
+        this.emit(request.type, request.id, this.cursorPayload);
+        return;
+      }
       this.emit(
         request.type,
         request.id,
@@ -119,6 +126,7 @@ class FakeAgent implements NativeWebSocket {
           pageRemovals,
           maxBudgetUs,
           subscribeRevision,
+          ...(this.cursorSnapshot ? { cursorSnapshot: true } : {}),
         },
       }),
     );
@@ -246,6 +254,55 @@ describe('native core session and presenter lifecycle', () => {
     expect(frames.mock.calls[0]![0].pointer).toEqual(pointer);
     await flush();
     expect(readPointer).toHaveBeenCalledTimes(2);
+  });
+  it('keeps validated cursor art during uncertain reads and clears software on an authoritative mode exit', async () => {
+    const frames = vi.fn();
+    const { core, agent, policyFactory, scheduled } = setup({ onFrame: frames }, { pageCursor: false });
+    agent.surface = { width: 2, height: 1, bpp: 16, format: 'RGB565' };
+    agent.cursorSnapshot = true;
+    const factory = vi.mocked(policyFactory).getMockImplementation()!;
+    const pointer = { frame: 25, x: 1, y: 0, hotspotX: 0, hotspotY: 0 };
+    const readPointer = vi.fn(async (): Promise<VmFrame['pointer']> => pointer);
+    vi.mocked(policyFactory).mockImplementation((...args) => ({ ...factory(...args), readPointer }));
+    const pending = core.start();
+    agent.hello();
+    await pending;
+    const present = async (frame: number) => {
+      agent.picture(frame, frame === 1);
+      scheduled.shift()!();
+      await flush();
+      return frames.mock.calls.at(-1)![0] as VmFrame;
+    };
+    readPointer.mockResolvedValueOnce(undefined);
+    await present(1);
+    expect((await present(2)).pointer).toEqual(pointer);
+    readPointer.mockRejectedValueOnce(new Error('Temporary presentation READ failure'));
+    await present(3);
+    expect((await present(4)).pointer).toEqual(pointer);
+    expect(
+      agent.requests.filter(
+        (request) =>
+          request.type === NativeMessageType.InputState && request.payload.length === 4 && u32(request.payload) === 2,
+      ),
+    ).toHaveLength(0);
+    readPointer.mockResolvedValue(null);
+    const rgba = Uint8Array.from([4, 9, 2, 255]);
+    agent.cursorPayload = concat(encodeU32(123, 1, 1, 0, 0, 1, 0), rgba);
+    await present(5);
+    const hardware = await present(6);
+    expect(hardware.pointer).toBeNull();
+    expect(hardware.cursor?.rgba).toEqual(rgba);
+    // A malformed hardware sample preserves hardware only; it cannot revive
+    // the previous battlefield software cursor after a confirmed mode exit.
+    agent.cursorPayload = new Uint8Array(4);
+    const retainedHardware = await present(7);
+    expect(retainedHardware.pointer).toBeNull();
+    expect(retainedHardware.cursor?.handle).toBe(123);
+    agent.cursorPayload = new Uint8Array(28);
+    await present(8);
+    const hidden = await present(9);
+    expect(hidden.pointer).toBeNull();
+    expect(hidden.cursor).toBeUndefined();
   });
   it('coalesces 30000 pointer updates with one input in flight and preserves every event and position barrier', async () => {
     const statuses = vi.fn();

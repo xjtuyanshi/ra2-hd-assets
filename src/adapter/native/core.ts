@@ -339,22 +339,28 @@ export class NativeCore {
         width,
         height,
       );
-      const system =
-        !pointer && this.hello?.limits.cursorSnapshot
-          ? decodeCursorSnapshot(
-              await this.connection.request(NativeMessageType.InputState, encodeU32(NATIVE_INPUT_STATE_CURSOR)),
-            )
-          : undefined;
+      // An unconfirmed sample preserves the last actual art while the page
+      // continues moving it locally. Null explicitly leaves software mode.
+      if (pointer === undefined) return;
+      let system: VmFrame['cursor'];
+      if (pointer === null && this.hello?.limits.cursorSnapshot) {
+        try {
+          system = decodeCursorSnapshot(
+            await this.connection.request(NativeMessageType.InputState, encodeU32(NATIVE_INPUT_STATE_CURSOR)),
+          );
+        } catch {
+          // Software absence is authoritative even if the separate hardware
+          // read is unavailable. Retain only previously validated hardware.
+          system = this.systemCursor;
+        }
+      }
       if (!this.closed) {
         this.pointer = pointer;
         this.systemCursor = system;
       }
     } catch {
-      // Invalid/unavailable current state hides the page cursor; it never invents a cursor type.
-      if (!this.closed) {
-        this.pointer = null;
-        this.systemCursor = undefined;
-      }
+      // A failed READ is unavailable, not evidence that the game hid its
+      // pointer. Shutdown remains the owner of clearing retained session art.
     }
   }
 

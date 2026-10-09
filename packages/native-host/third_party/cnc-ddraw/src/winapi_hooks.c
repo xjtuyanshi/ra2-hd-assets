@@ -176,6 +176,9 @@ HCURSOR WINAPI fake_SetCursor(HCURSOR hCursor)
 {
     if (g_ddraw.ref && g_ddraw.hwnd)
     {
+        /* Publish provenance first so a concurrent snapshot cannot replace an
+         * explicit NULL selection with the registered class cursor. */
+        InterlockedExchange(&g_ddraw.cursor_selection_recorded, 1);
         HCURSOR cursor = (HCURSOR)InterlockedExchange((LONG*)&g_ddraw.old_cursor, (LONG)hCursor);
 
         if (!g_mouse_locked && !g_config.devmode)
@@ -984,6 +987,12 @@ BOOL WINAPI fake_GetUpdateRect(HWND hWnd, LPRECT rect, BOOL erase)
 {
     int scoped = nh_hidden_update_rect(hWnd, rect, erase);
     return scoped >= 0 ? scoped : real_GetUpdateRect(hWnd, rect, erase);
+}
+
+BOOL WINAPI fake_UpdateWindow(HWND hWnd)
+{
+    int scoped = nh_hidden_update_window(hWnd);
+    return scoped >= 0 ? scoped : real_UpdateWindow(hWnd);
 }
 
 BOOL WINAPI fake_EndPaint(HWND hWnd, const PAINTSTRUCT *paint)

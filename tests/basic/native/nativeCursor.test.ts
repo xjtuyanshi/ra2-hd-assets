@@ -51,8 +51,8 @@ describe('native game-selected cursor', () => {
     }
   });
 
-  it('rejects hidden, system-mode, invalid and changing current shape states', async () => {
-    const { memory, object, shape, read } = fixture();
+  it('distinguishes authoritative hidden/system states from incomplete or invalid samples', async () => {
+    const { memory, object, read } = fixture();
     writeU32(memory, object + 12, 0xffffffff);
     expect(await readYrNativePointer(read, 800, 600)).toBeNull();
     writeU32(memory, object + 12, 0);
@@ -60,8 +60,19 @@ describe('native game-selected cursor', () => {
     expect(await readYrNativePointer(read, 800, 600)).toBeNull();
     memory.bytes[object + 0x10] = 1;
     writeU32(memory, object + 0x3c, 33);
-    expect(await readYrNativePointer(read, 800, 600)).toBeNull();
+    expect(await readYrNativePointer(read, 800, 600)).toBeUndefined();
     writeU32(memory, object + 0x3c, 16);
+    expect(await readYrNativePointer(async () => new Uint8Array(), 800, 600)).toBeUndefined();
+    writeU32(memory, YR_SIDEBAR.mouse, 0);
+    expect(await readYrNativePointer(read, 800, 600)).toBeNull();
+    writeU32(memory, YR_SIDEBAR.mouse, object);
+    writeU32(memory, YR_SIDEBAR.mouseShape, 0);
+    memory.bytes[object + 0x10] = 0;
+    expect(await readYrNativePointer(read, 800, 600)).toBeNull();
+  });
+
+  it('uses the latest validated animation frame instead of reporting a transient hide', async () => {
+    const { memory, object, shape, read } = fixture();
     expect(
       await readYrNativePointer(
         async (address, length) => {
@@ -69,6 +80,40 @@ describe('native game-selected cursor', () => {
           if (address === shape) writeU32(memory, object + 8, 94);
           return bytes;
         },
+        800,
+        600,
+      ),
+    ).toEqual({ frame: 94, x: 320, y: 210, hotspotX: 16, hotspotY: 32 });
+  });
+
+  it('retains uncertainty for sheet/hotspot races while honoring a sampled software-mode exit', async () => {
+    const { memory, object, shape, read } = fixture();
+    const changeAfterHeader = (change: () => void) => async (address: number, length: number) => {
+      const bytes = await read(address, length);
+      if (address === shape) change();
+      return bytes;
+    };
+    expect(
+      await readYrNativePointer(
+        changeAfterHeader(() => writeU32(memory, object + 0x3c, 0)),
+        800,
+        600,
+      ),
+    ).toBeUndefined();
+    writeU32(memory, object + 0x3c, 16);
+    expect(
+      await readYrNativePointer(
+        changeAfterHeader(() => writeU32(memory, YR_SIDEBAR.mouseShape, shape + 16)),
+        800,
+        600,
+      ),
+    ).toBeUndefined();
+    writeU32(memory, YR_SIDEBAR.mouseShape, shape);
+    expect(
+      await readYrNativePointer(
+        changeAfterHeader(() => {
+          memory.bytes[object + 0x10] = 0;
+        }),
         800,
         600,
       ),

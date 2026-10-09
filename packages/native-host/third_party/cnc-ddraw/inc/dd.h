@@ -159,6 +159,8 @@ typedef struct CNCDDRAW
     BOOL isworms2;
     LONG upscale_hack_active;
     HCURSOR old_cursor;
+    /* Native-host bridge: NULL is an explicit game selection after SetCursor. */
+    LONG cursor_selection_recorded;
     int show_cursor_count;
     BOOL alt_key_down;
     BOOL bnet_active;

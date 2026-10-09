@@ -557,13 +557,14 @@ static int nh_receive(SOCKET socket, uint8_t *buffer) {
     else if (type == NH_INPUT || type == NH_INPUT_STATE || type == NH_CREDIT)
         nh_dispatch_input(type, id, buffer + 16, payload_length);
     else if (type == NH_DIAGNOSTICS) {
-        char fragment[2048], hidden_host[1024], picture[256], diagnostic[4096];
+        char fragment[2048], hidden_host[1024], picture[256], cursor[512], diagnostic[4608];
         if (payload_length) nh_error(id, "DIAGNOSTICS takes no payload");
         else {
             nh_mirror_diagnostics(fragment, sizeof(fragment));
             nh_hidden_diagnostics(hidden_host, sizeof(hidden_host));
             nh_picture_diagnostics(picture, sizeof(picture));
-            snprintf(diagnostic, sizeof(diagnostic), "{%s,\"gameThreadId\":%u,\"allocatedBytes\":%u,\"replyQueue\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"picture\":%s}", fragment, nh_game_thread_id(), nh_allocated, nh_reply_count, nh_hidden_active() ? "true" : "false", hidden_host, picture);
+            nh_cursor_diagnostics(cursor, sizeof(cursor));
+            snprintf(diagnostic, sizeof(diagnostic), "{%s,\"gameThreadId\":%u,\"allocatedBytes\":%u,\"replyQueue\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"picture\":%s,\"cursor\":%s}", fragment, nh_game_thread_id(), nh_allocated, nh_reply_count, nh_hidden_active() ? "true" : "false", hidden_host, picture, cursor);
             nh_send(type, id, diagnostic, (uint32_t)strlen(diagnostic));
         }
     } else nh_error(id, "Unsupported request type");

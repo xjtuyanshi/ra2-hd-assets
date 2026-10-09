@@ -16,6 +16,8 @@ int nh_hidden_painting(void);
 HDC nh_hidden_paint_dc(HWND window, int begin_paint, PAINTSTRUCT *paint);
 /* -1 preserves real User32; scoped forced paint exposes its actual full client. */
 int nh_hidden_update_rect(HWND window, RECT *rect, BOOL erase);
+/* Nested native UpdateWindow joins only the current hidden full-paint scope. */
+int nh_hidden_update_window(HWND window);
 /* -1 means a real DC; 0/1 are scoped failure/success and must not fall through. */
 int nh_hidden_finish_dc(HWND window, HDC dc, int end_paint);
 void nh_hidden_set_visible(HWND window, int visible);

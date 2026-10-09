@@ -20,7 +20,7 @@ typedef struct HOOKLISTDATA {
 
 /* Native-host bridge: focus/visibility/capture/scoped-paint entries and sentinel. */
 /* Native-host bridge: preserve the sentinel after virtual input/paint imports. */
-typedef struct HOOKLIST { char module_name[32]; HOOKLISTDATA data[53]; } HOOKLIST;
+typedef struct HOOKLIST { char module_name[32]; HOOKLISTDATA data[54]; } HOOKLIST;
 
 typedef BOOL(WINAPI* GETCURSORPOSPROC)(LPPOINT);
 typedef BOOL(WINAPI* CLIPCURSORPROC)(const RECT*);
@@ -71,6 +71,7 @@ typedef BOOL (WINAPI* ENDPAINTPROC)(HWND, const PAINTSTRUCT *);
 typedef HDC (WINAPI* GETDCPROC)(HWND);
 typedef int (WINAPI* RELEASEDCPROC)(HWND, HDC);
 typedef BOOL (WINAPI* GETUPDATERECTPROC)(HWND, LPRECT, BOOL);
+typedef BOOL (WINAPI* UPDATEWINDOWPROC)(HWND);
 typedef SHORT(WINAPI* GETKEYSTATEPROC)(int);
 typedef SHORT(WINAPI* GETASYNCKEYSTATEPROC)(int);
 
@@ -139,6 +140,7 @@ extern ENDPAINTPROC real_EndPaint;
 extern GETDCPROC real_GetDC;
 extern RELEASEDCPROC real_ReleaseDC;
 extern GETUPDATERECTPROC real_GetUpdateRect;
+extern UPDATEWINDOWPROC real_UpdateWindow;
 extern GETKEYSTATEPROC real_GetKeyState;
 extern GETASYNCKEYSTATEPROC real_GetAsyncKeyState;
 extern GETDEVICECAPSPROC real_GetDeviceCaps;

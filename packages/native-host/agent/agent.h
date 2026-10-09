@@ -69,6 +69,7 @@ void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pi
 void nh_dispatch_input(uint16_t type, uint32_t id, const uint8_t *payload, uint32_t length);
 void nh_input_disconnect(void);
 void nh_cursor_snapshot(uint32_t id, int x, int y);
+void nh_cursor_diagnostics(char *out, uint32_t capacity);
 int nh_input_key(int vk, SHORT *value, int asynchronous);
 int nh_input_cursor(LPPOINT point);
 int nh_input_set_cursor(int x, int y);
@@ -76,6 +77,7 @@ int nh_input_active(void);
 HWND WINAPI nh_input_get_focus(void);
 HWND WINAPI nh_input_get_active_window(void);
 HWND nh_input_target_window(void);
+HWND nh_input_cursor_window(void);
 int nh_input_focus_window(HWND window);
 int nh_input_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam, LRESULT *result);
 void nh_picture_sent(void);
