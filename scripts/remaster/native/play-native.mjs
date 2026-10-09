@@ -12,6 +12,7 @@ import {
   mkdtemp,
   readFile,
   rename,
+  stat,
   symlink,
   unlink,
   writeFile,
@@ -58,6 +59,36 @@ async function exists(path) {
     return true;
   } catch {
     return false;
+  }
+}
+
+export async function validateHdCache(environment) {
+  // Match Vite's cache root and the existing HD launcher's _library contract.
+  const cache = resolve(repository, environment.RA2_HD_CACHE_DIR || 'gameres/hd-cache');
+  const library = join(cache, '_library');
+  const info = await stat(library).catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw new Error(`无法读取高清缓存：${cache}。请检查文件夹的路径和访问权限。`, { cause: error });
+  });
+  if (!info?.isDirectory())
+    throw new Error(`找不到高清缓存：${cache}。请将 RA2_HD_CACHE_DIR 指向已有且包含 _library 文件夹的高清缓存。`);
+  await access(library, constants.R_OK | constants.X_OK).catch(() => {
+    throw new Error(`无法读取高清缓存：${cache}。请检查文件夹的访问权限。`);
+  });
+  return cache;
+}
+
+export async function waitForStartupCommand(item, milliseconds, message) {
+  let timer;
+  try {
+    await Promise.race([
+      item.done,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), milliseconds);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -216,12 +247,11 @@ function executableOnPath(name) {
 async function wineConfiguration(environment) {
   const bottle = environment.RA2_NATIVE_WINE_BOTTLE;
   const explicitPrefix = environment.RA2_NATIVE_WINE_PREFIX;
-  if (bottle && explicitPrefix)
-    throw new Error('Set one of RA2_NATIVE_WINE_BOTTLE or RA2_NATIVE_WINE_PREFIX, not both');
+  if (bottle && explicitPrefix) throw new Error('RA2_NATIVE_WINE_BOTTLE 和 RA2_NATIVE_WINE_PREFIX 只能设置一个。');
   const prefix = explicitPrefix || (!bottle && environment.WINEPREFIX);
   if (!bottle && !prefix)
     throw new Error(
-      'Set RA2_NATIVE_WINE_BOTTLE to an existing dedicated bottle, or RA2_NATIVE_WINE_PREFIX to an existing prefix',
+      '请将 RA2_NATIVE_WINE_BOTTLE 设置为已有的专用 Wine 容器名称，或用 RA2_NATIVE_WINE_PREFIX 指定已有的 Wine 文件夹。',
     );
   let wine = environment.RA2_NATIVE_WINE || executableOnPath('wine');
   if (!wine && process.platform === 'darwin') {
@@ -236,9 +266,10 @@ async function wineConfiguration(environment) {
       }
     }
   }
-  if (!wine) throw new Error('Wine was not found. Set RA2_NATIVE_WINE to the installed Wine/CrossOver executable');
-  await access(wine, constants.X_OK).catch(() => {
-    throw new Error(`Wine is not executable: ${wine}`);
+  if (!wine) throw new Error('找不到 Wine。请安装 Wine 或 CrossOver，并用 RA2_NATIVE_WINE 指定它的运行程序。');
+  await access(wine, constants.X_OK).catch((error) => {
+    if (error.code === 'ENOENT') throw new Error(`找不到 Wine 程序：${wine}。请检查 RA2_NATIVE_WINE 指定的路径。`);
+    throw new Error(`Wine 无法运行：${wine}。请检查 RA2_NATIVE_WINE 的路径和执行权限。`);
   });
   const scopeEnvironment = { ...environment };
   if (prefix) {
@@ -246,19 +277,19 @@ async function wineConfiguration(environment) {
     const stat = await lstat(absolutePrefix).catch(() => null);
     if (!stat?.isDirectory() || !(await exists(join(absolutePrefix, 'system.reg'))))
       throw new Error(
-        `Not an existing Wine prefix: ${absolutePrefix} (expected system.reg); the launcher does not create prefixes`,
+        `找不到已有的 Wine 文件夹：${absolutePrefix}（应包含 system.reg）。请检查 RA2_NATIVE_WINE_PREFIX；启动器不会创建 Wine 环境。`,
       );
     scopeEnvironment.WINEPREFIX = absolutePrefix;
   } else {
     if (bottle.includes('/') || bottle.includes('\\'))
-      throw new Error('RA2_NATIVE_WINE_BOTTLE must be a bottle name; use RA2_NATIVE_WINE_PREFIX for a path');
+      throw new Error('RA2_NATIVE_WINE_BOTTLE 应填写容器名称；文件夹路径请填写到 RA2_NATIVE_WINE_PREFIX。');
     // CrossOver's normal macOS bottle root, or its user-supplied search root.
     const bottleRoots = (
       environment.CX_BOTTLE_PATH || join(homedir(), 'Library/Application Support/CrossOver/Bottles')
     ).split(':');
     if (!(await Promise.all(bottleRoots.map((root) => exists(join(root, bottle, 'system.reg'))))).some(Boolean))
       throw new Error(
-        `Existing CrossOver bottle not found: ${bottle}. Set CX_BOTTLE_PATH for a custom bottle location or use RA2_NATIVE_WINE_PREFIX`,
+        `找不到已有的 CrossOver 容器：${bottle}。自定义位置请设置 CX_BOTTLE_PATH，或用 RA2_NATIVE_WINE_PREFIX 指定文件夹。`,
       );
     delete scopeEnvironment.WINEPREFIX;
   }
@@ -279,25 +310,28 @@ export async function runLauncher(arguments_, environment = process.env) {
     else throw new Error(`Unknown argument: ${argument}; use --help`);
   }
   if (!environment.RA2_NATIVE_GAME_DIR)
-    throw new Error('Set RA2_NATIVE_GAME_DIR to your separately owned game copy containing gamemd.exe');
+    throw new Error('没有设置游戏文件夹。请将 RA2_NATIVE_GAME_DIR 指向你拥有且包含 gamemd.exe 的游戏副本。');
   const gameDirectory = resolve(environment.RA2_NATIVE_GAME_DIR);
   const gameExecutable = join(gameDirectory, 'gamemd.exe');
-  if (!(await exists(gameExecutable)))
-    throw new Error(`Game executable missing: ${gameExecutable}. Supply your own game files; nothing is downloaded`);
-  const executableBytes = await readFile(gameExecutable);
+  const executableBytes = await readFile(gameExecutable).catch((error) => {
+    if (error.code === 'ENOENT')
+      throw new Error(`找不到游戏程序：${gameExecutable}。请检查 RA2_NATIVE_GAME_DIR，并提供你拥有的完整游戏文件。`);
+    throw new Error(`无法读取游戏程序：${gameExecutable}。请检查游戏文件和访问权限。`, { cause: error });
+  });
   const expectedIdentity = {
     size: executableBytes.length,
     sha256: createHash('sha256').update(executableBytes).digest('hex'),
   };
   const wine = await wineConfiguration(environment);
+  await validateHdCache(environment);
   const resolution = capNativeResolution(requestedSize ?? mainDisplaySize());
   const vite = join(repository, 'node_modules/vite/bin/vite.js');
-  if (!(await exists(vite)))
-    throw new Error('Installed repository dependencies are missing; prepare them before running this launcher');
+  if (!(await exists(vite))) throw new Error('启动器所需的本地组件缺失。请先完成项目准备，再运行启动器。');
 
   await mkdir(join(packageDirectory, 'build'), { recursive: true });
   const runDirectory = await mkdtemp(join(packageDirectory, 'build/play-'));
   await chmod(runDirectory, 0o700);
+  console.log('正在启动游戏；本次记录和文件备份的位置如下。');
   console.log(`Private launch logs and DLL backups: ${runDirectory}`);
   const stopPath = join(runDirectory, 'stop');
   const statusPath = join(runDirectory, 'status.json');
@@ -307,7 +341,7 @@ export async function runLauncher(arguments_, environment = process.env) {
   let cleanupPromise;
   let stopping = false;
   function start(command, args, options = {}) {
-    if (stopping) throw new Error('Launch cancelled');
+    if (stopping) throw new Error('启动已取消。');
     const child = spawn(command, args, {
       cwd: repository,
       env: wine.environment,
@@ -315,8 +349,14 @@ export async function runLauncher(arguments_, environment = process.env) {
       stdio: 'inherit',
       ...options,
     });
-    const item = { child, exited: false, error: null, code: null };
+    const item = { child, exited: false, closed: false, error: null, code: null };
     owned.add(item);
+    item.closedDone = new Promise((resolve) => {
+      child.once('close', () => {
+        item.closed = true;
+        resolve();
+      });
+    });
     item.done = new Promise((resolve) => {
       child.once('error', (error) => {
         item.error = error;
@@ -333,12 +373,14 @@ export async function runLauncher(arguments_, environment = process.env) {
   }
   async function complete(item) {
     await item.done;
-    if (stopping) throw new Error('Launch cancelled');
+    if (stopping) throw new Error('启动已取消。');
     if (item.error) throw item.error;
-    if (item.code !== 0) throw new Error(`Startup command exited ${item.code}`);
+    if (item.code !== 0) throw new Error(`启动步骤失败，退出码 ${item.code}。请查看本次启动记录。`);
   }
   function kill(item, signal) {
-    if (!item.exited && item.child.pid) {
+    // A command wrapper can exit while its owned descendants still hold the
+    // pipes open. Its detached group remains ours until those handles close.
+    if (!item.closed && item.child.pid) {
       try {
         process.kill(-item.child.pid, signal);
       } catch (error) {
@@ -355,9 +397,12 @@ export async function runLauncher(arguments_, environment = process.env) {
       // Never kill a whole Wine server, prefix, executable name or another page.
       if (launcher && !launcher.exited) await Promise.race([launcher.done, delay(5000, undefined, { ref: false })]);
       for (const item of owned) kill(item, 'SIGTERM');
-      await Promise.race([Promise.all([...owned].map((item) => item.done)), delay(1500, undefined, { ref: false })]);
+      await Promise.race([
+        Promise.all([...owned].map((item) => item.closedDone)),
+        delay(1500, undefined, { ref: false }),
+      ]);
       for (const item of owned) kill(item, 'SIGKILL');
-      await Promise.all([...owned].map((item) => item.done));
+      await Promise.all([...owned].map((item) => item.closedDone));
       if (installation) {
         const result = await installation.restore();
         console.log(result.reason);
@@ -387,6 +432,39 @@ export async function runLauncher(arguments_, environment = process.env) {
   process.on('SIGTERM', signalHandler);
   process.on('SIGHUP', signalHandler);
   try {
+    console.log('正在检查 Wine 是否能正常运行……');
+    let checkOutput = '';
+    let checkErrors = '';
+    const wineCheck = start(wine.wine, [...wine.args, 'cmd.exe', '/c', 'echo RA2_NATIVE_WINE_OK'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    wineCheck.child.stdout.setEncoding('utf8');
+    wineCheck.child.stderr.setEncoding('utf8');
+    wineCheck.child.stdout.on('data', (chunk) => {
+      checkOutput = (checkOutput + chunk).slice(-8192);
+    });
+    wineCheck.child.stderr.on('data', (chunk) => {
+      checkErrors = (checkErrors + chunk).slice(-8192);
+    });
+    try {
+      await waitForStartupCommand(
+        { done: wineCheck.closedDone },
+        30000,
+        'Wine 自检超过 30 秒仍未完成，游戏尚未启动。请检查 Wine 或 CrossOver 能否运行程序后再试；详情见 wine-check.log。',
+      );
+    } finally {
+      await writeFile(join(runDirectory, 'wine-check.log'), `${checkOutput}\n${checkErrors}`, { mode: 0o600 });
+    }
+    if (stopping) throw new Error('启动已取消。');
+    if (
+      wineCheck.error ||
+      wineCheck.code !== 0 ||
+      !checkOutput.split(/\r?\n/).some((line) => line.trim() === 'RA2_NATIVE_WINE_OK')
+    )
+      throw new Error(
+        'Wine 自检失败，游戏尚未启动。请检查 Wine 或 CrossOver 和所选容器是否能正常运行程序；详情见 wine-check.log。',
+      );
+    console.log('Wine 自检通过。');
     const dll = join(packageDirectory, 'build/ddraw.dll');
     const helper = join(packageDirectory, 'build/ra2launch.exe');
     if (!(await exists(dll))) await complete(start('bash', [join(packageDirectory, 'build.sh')]));
@@ -398,17 +476,25 @@ export async function runLauncher(arguments_, environment = process.env) {
     const token = randomBytes(32).toString('hex');
     async function windowsPath(path) {
       let output = '';
+      let truncated = false;
       const item = start(wine.wine, [...wine.args, 'winepath.exe', '-w', path], {
         stdio: ['ignore', 'pipe', 'inherit'],
       });
       item.child.stdout.setEncoding('utf8');
       item.child.stdout.on('data', (chunk) => {
-        output += chunk;
+        if (output.length + chunk.length > 65536) truncated = true;
+        else if (!truncated) output += chunk;
       });
+      await waitForStartupCommand(
+        { done: item.closedDone },
+        30000,
+        'Wine 无法在 30 秒内读取文件路径，游戏尚未启动。请检查 Wine 或 CrossOver 后再试。',
+      );
       await complete(item);
+      if (truncated) throw new Error('Wine 返回的文件路径超过安全范围，游戏尚未启动。请检查本次启动记录。');
       const result = output.trim();
       if (!/^(?:[a-z]:\\|\\\\)[^\r\n]*$/i.test(result))
-        throw new Error(`Wine could not map a supplied path; inspect launch logs`);
+        throw new Error('Wine 无法读取指定的文件路径。请查看本次启动记录。');
       return result;
     }
     const gamePath = await windowsPath(gameExecutable);
@@ -424,6 +510,7 @@ export async function runLauncher(arguments_, environment = process.env) {
     console.log(
       `Native resolution: ${resolution.width}x${resolution.height} (fixed for this session; ${configured.target})`,
     );
+    console.log(`本次游戏画面为 ${resolution.width}×${resolution.height}；需要改变尺寸时请退出并重新启动。`);
     installation = await installDll(dll, join(gameDirectory, 'ddraw.dll'), runDirectory);
     const { open } = await import('node:fs/promises');
     const pageLog = await open(join(runDirectory, 'page.log'), 'wx', 0o600);
@@ -438,12 +525,12 @@ export async function runLauncher(arguments_, environment = process.env) {
     }
     const startupDeadline = Date.now() + 30000;
     for (;;) {
-      if (stopping || page.exited) throw new Error('Development page exited during startup; inspect page.log');
+      if (stopping || page.exited) throw new Error('游戏页面在启动时退出。请查看本次记录中的 page.log。');
       try {
         const response = await fetch(origin, { signal: AbortSignal.timeout(1000) });
         if (response.ok) break;
       } catch {}
-      if (Date.now() >= startupDeadline) throw new Error('Development page startup timed out; inspect page.log');
+      if (Date.now() >= startupDeadline) throw new Error('游戏页面未能在 30 秒内启动。请查看本次记录中的 page.log。');
       await delay(100);
     }
     const gameLog = await open(join(runDirectory, 'wine.log'), 'wx', 0o600);
@@ -454,7 +541,7 @@ export async function runLauncher(arguments_, environment = process.env) {
       RA2_NATIVE_AGENT_ORIGIN: origin,
       // Visible operation is an explicit diagnostic comparison mode. Owner
       // launches retain hidden operation unless this exact opt-out is supplied.
-      RA2_NATIVE_AGENT_HIDDEN: process.env.RA2_NATIVE_AGENT_HIDDEN === '0' ? '0' : '1',
+      RA2_NATIVE_AGENT_HIDDEN: environment.RA2_NATIVE_AGENT_HIDDEN === '0' ? '0' : '1',
       WINEDLLOVERRIDES: `${wine.environment.WINEDLLOVERRIDES ? `${wine.environment.WINEDLLOVERRIDES};` : ''}ddraw=n,b`,
     };
     try {
@@ -469,7 +556,8 @@ export async function runLauncher(arguments_, environment = process.env) {
     const agentDeadline = Date.now() + 60000;
     let hello;
     for (;;) {
-      if (stopping || launcher.exited) throw new Error('Native launcher exited; inspect launcher.log and wine.log');
+      if (stopping || launcher.exited)
+        throw new Error('游戏未能正常启动或已退出。请查看本次记录中的 launcher.log 和 wine.log。');
       let client;
       let receivedHello = false;
       try {
@@ -490,7 +578,9 @@ export async function runLauncher(arguments_, environment = process.env) {
       } catch (error) {
         if (receivedHello) throw error;
         if (Date.now() >= agentDeadline)
-          throw new Error(`Native agent startup timed out: ${error.message}; inspect launcher.log and wine.log`);
+          throw new Error(
+            `游戏在 60 秒内没有进入可操作的主菜单：${error.message}。请查看本次记录中的 launcher.log 和 wine.log。`,
+          );
       } finally {
         if (client) {
           const closed = new Promise((resolve) => client.once('closed', resolve));
@@ -512,13 +602,13 @@ export async function runLauncher(arguments_, environment = process.env) {
     }).toString();
     console.log(`Native process ${hello.pid}; agent ${ports.agent}; page ${ports.page}`);
     console.log(`Play URL: ${url.href}`);
-    console.log('The page attaches directly to this owned game. Keep this terminal open; Ctrl-C stops this session.');
+    console.log('请在 Chrome 打开上面的游戏网址。保留本窗口；按 Ctrl-C 可退出本次游戏。');
     if (openBrowser) await complete(start('/usr/bin/open', ['-a', 'Google Chrome', url.href]));
     await Promise.race([launcher.done, page.done]);
-    if (!stopping && page.exited) throw new Error('Development page stopped; closing the owned game');
+    if (!stopping && page.exited) throw new Error('游戏页面已停止，正在关闭本次游戏。');
     if (!stopping && launcher.error) throw launcher.error;
     if (!stopping && launcher.code !== 0)
-      throw new Error(`Native launcher exited ${launcher.code}; inspect launch logs`);
+      throw new Error(`游戏启动器异常退出，退出码 ${launcher.code}。请查看本次启动记录。`);
   } finally {
     await cleanup();
     process.off('SIGINT', signalHandler);

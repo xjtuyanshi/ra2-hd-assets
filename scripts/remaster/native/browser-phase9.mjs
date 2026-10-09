@@ -13,15 +13,17 @@ import { chromium } from '@playwright/test';
 import { writePng, outputDirectory } from './artifacts.mjs';
 const wt = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const base = outputDirectory();
+const phase = process.env.NATIVE_BROWSER_PHASE || 'phase9';
+assert(/^phase[0-9]+$/.test(phase));
 const tag = process.argv[2] || 'hidden';
 assert(/^[a-zA-Z0-9_-]+$/.test(tag));
-const out = join(base, 'phase9', tag);
+const out = join(base, phase, tag);
 await mkdir(out, { recursive: true });
 await writeFile(join(out, 'harness-pid'), String(process.pid) + '\n');
 const config = JSON.parse(await readFile(join(base, 'run/owner-launch-smoke.json'), 'utf8'));
 const pause = resolve(base, '../play/_slots/PAUSE');
 const exists = async (p) => !!(await lstat(p).catch(() => null));
-const scopeDeadline = await readFile(join(base, 'phase9/deadline.json'), 'utf8')
+const scopeDeadline = await readFile(join(base, phase, 'deadline.json'), 'utf8')
   .then((t) => Date.parse(JSON.parse(t).deadlineAt))
   .catch(() => Infinity);
 let ownerConnectionCheckedAt = 0;
@@ -502,40 +504,56 @@ async function execute(c) {
     const p = await import('./phase9-page-pointer-observer.mjs');
     await p.streamPhase9PointerEvidenceThroughPhase7(page);
     const { runPhase7InputStream } = await import('./phase7-input-stream.mjs');
-    return runPhase7InputStream({
-      page,
-      cdp,
-      worker: worker(),
-      out,
-      record,
-      shot,
-      waitOwnerIdle: ownerIdle,
-      observeState: () =>
-        worker().evaluate(async () => {
-          const core = globalThis.__auditCore;
-          const nativeState = JSON.parse(
-            new TextDecoder().decode(await core.connection.request(14, new Uint8Array([1, 0, 0, 0]))),
-          );
-          const state = core.render?.previous;
-          return {
-            source: 'NativeCore completed render cache plus genuine minimal modal state',
-            nativeModal: nativeState.modal,
-            nativePictureFrame: core.connection.pictureDecoder.previous?.frame ?? null,
-            logicFrame: state?.frame ?? null,
-            localHouse: state?.localHouse ?? null,
-            ownAliveAssets:
-              state?.localHouse >= 0
-                ? (state.objects?.filter((object) => object.owner === state.localHouse && object.health > 0).length ??
-                  null)
-                : null,
-            pictureSize: [core.hello.surface.width, core.hello.surface.height],
-          };
-        }),
-      rate: c.rate,
-      seconds: c.seconds ?? 30,
-      label: c.label ?? 'stream',
-      ...c,
-    });
+    const monitor = c.rates
+      ? await (
+          await import('./phase10-match-rates.mjs')
+        ).startPhase10MatchRates({
+          page,
+          out,
+          record,
+          label: (c.label ?? 'stream') + '-rates',
+        })
+      : null;
+    let result, rates;
+    try {
+      result = await runPhase7InputStream({
+        page,
+        cdp,
+        worker: worker(),
+        out,
+        record,
+        shot,
+        waitOwnerIdle: ownerIdle,
+        observeState: () =>
+          worker().evaluate(async () => {
+            const core = globalThis.__auditCore;
+            const nativeState = JSON.parse(
+              new TextDecoder().decode(await core.connection.request(14, new Uint8Array([1, 0, 0, 0]))),
+            );
+            const state = core.render?.previous;
+            return {
+              source: 'NativeCore completed render cache plus genuine minimal modal state',
+              nativeModal: nativeState.modal,
+              nativePictureFrame: core.connection.pictureDecoder.previous?.frame ?? null,
+              logicFrame: state?.frame ?? null,
+              localHouse: state?.localHouse ?? null,
+              ownAliveAssets:
+                state?.localHouse >= 0
+                  ? (state.objects?.filter((object) => object.owner === state.localHouse && object.health > 0).length ??
+                    null)
+                  : null,
+              pictureSize: [core.hello.surface.width, core.hello.surface.height],
+            };
+          }),
+        rate: c.rate,
+        seconds: c.seconds ?? 30,
+        label: c.label ?? 'stream',
+        ...c,
+      });
+    } finally {
+      if (monitor) rates = await monitor.stop();
+    }
+    return monitor ? { stream: result, rates } : result;
   }
   if (c.action === 'sleep') {
     await delay(Math.min(c.ms, 60000));
@@ -720,11 +738,13 @@ try {
     });
   await wait('launcher URL', () => url, 120000);
   const cache = join(homedir(), 'Library/Caches/ms-playwright/chromium-1243');
-  const exe = join(
-    cache,
-    (await readdir(cache)).find((d) => d.startsWith('chrome-')),
-    'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-  );
+  const exe =
+    process.env.NATIVE_BROWSER_EXECUTABLE ||
+    join(
+      cache,
+      (await readdir(cache)).find((d) => d.startsWith('chrome-')),
+      'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+    );
   browser = await chromium.launch({
     headless: false,
     executablePath: exe,
@@ -832,6 +852,9 @@ try {
   await shot('main-menu');
   await record('ready', {
     tag,
+    phase,
+    browserExecutable: exe,
+    browserVersion: browser.version(),
     installedAgent: await dllIdentity(),
     viewport: await page.evaluate(() => ({
       width: innerWidth,

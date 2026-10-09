@@ -8,7 +8,10 @@ const STRIP_SIZE = 0xf94;
 const own = (state) => state.objects.filter((object) => object.owner === state.localHouse && object.health > 0);
 const powerTypes = /^(GAPOWR|NAPOWR|YAPOWR)$/;
 const barracksTypes = /^(GAPILE|NAHAND|YABRCK)$/;
+const refineryTypes = /^(GAREFN|NAREFN)$/;
+const warFactoryTypes = /^(GAWEAP|NAWEAP|YAWEAP)$/;
 const infantryTypes = /^(E1|E2|INIT)$/;
+const combatVehicleTypes = /^(MTNK|HTNK|LTNK)$/;
 const yardTypes = /^(GACNST|NACNST|YACNST)$/;
 const mcvTypes = /^(AMCV|MCV|SMCV|PCV)$/;
 const constructionComplete = (object) =>
@@ -120,7 +123,8 @@ export async function runPhase9BasePlay(api) {
     const object = raw.readUInt32LE(0x58);
     let type = null;
     if (object) {
-      const typePointer = await u32(object + (cameo.kind === 'building' ? 0x520 : 0x6c0));
+      const typeOffset = cameo.kind === 'building' ? 0x520 : cameo.kind === 'vehicle' ? 0x6c4 : 0x6c0;
+      const typePointer = await u32(object + typeOffset);
       if (typePointer >= 0x10000 && !(typePointer % 4))
         type = (await memory(typePointer + 0x24, 24)).toString('ascii').split('\0')[0];
     }
@@ -213,6 +217,12 @@ export async function runPhase9BasePlay(api) {
       [-130, 65],
       [70, -85],
       [-70, -85],
+      [180, 75],
+      [-180, 75],
+      [180, -75],
+      [-180, -75],
+      [0, 130],
+      [0, -130],
     ];
     const attempts = [];
     for (const anchorUid of anchors) {
@@ -277,6 +287,172 @@ export async function runPhase9BasePlay(api) {
       }
     }
     throw new Error(`The original game rejected every observed ${label} foundation: ${JSON.stringify(attempts)}`);
+  };
+
+  const trainAndMove = async (label, kind, types, tab, originUid) => {
+    let state = await openTab(tab);
+    const cameo = state.sidebar.cameos.find((value) => value.kind === kind && types.test(value.id) && !value.darkened);
+    if (!cameo) throw new Error(`The actual ${kind} tab has no enabled basic combat ${kind} cameo`);
+    const previousUnits = new Set(
+      own(state)
+        .filter((value) => value.kind === kind)
+        .map((value) => value.uid),
+    );
+    for (let index = 0; index < 3; index++) {
+      state = await peek();
+      const current = state.sidebar.cameos.find((value) => value.id === cameo.id);
+      if (!current) throw new Error(`The live ${kind} cameo disappeared while queuing units`);
+      await click(cameoPoint(current, state));
+      await record('base-' + label + '-train-click', { index: index + 1, id: cameo.id, frame: state.frame });
+    }
+    await shot(label + '-producing');
+    const trained = await stateWait(
+      'three newly trained owned ' + label,
+      (next) => {
+        const fresh = own(next).filter(
+          (value) => value.kind === kind && value.type === cameo.id && !previousUnits.has(value.uid),
+        );
+        return fresh.length >= 3 ? fresh.slice(0, 3) : null;
+      },
+      90000,
+    );
+    await record('base-' + label + '-trained', {
+      id: cameo.id,
+      units: trained.observed,
+      frame: trained.state.frame,
+      verified: true,
+    });
+    await shot(label + '-trained');
+    await select(trained.observed[0].uid);
+    await guard();
+    await api.page.keyboard.down('Shift');
+    try {
+      for (const unit of trained.observed.slice(1)) {
+        state = await peek();
+        const current = own(state).find((value) => value.uid === unit.uid);
+        if (!current) throw new Error('A newly trained unit was eliminated before group selection');
+        await click(project(current, state.view));
+      }
+    } finally {
+      await api.page.keyboard.up('Shift');
+    }
+    const selected = await stateWait('all newly trained units selected', (next) => {
+      const selectedUnits = own(next).filter(
+        (value) => value.selected && trained.observed.some((unit) => unit.uid === value.uid),
+      );
+      return selectedUnits.length === 3 ? selectedUnits : null;
+    });
+    // Stop the freshly spawned group through the original hotkey. Its native
+    // walking-out/rally motion must finish before it becomes the Move baseline.
+    const inputBeforeStop = await api.inputState();
+    await key('s');
+    const inputAfterStop = await api.inputState();
+    const stopSamples = [];
+    let lastStamp = null;
+    let lastFrame = null;
+    let matchingFrames = 0;
+    const stopped = await stateWait(
+      'trained group stopped with stable position and destination',
+      (next) => {
+        const units = trained.observed.map((before) => own(next).find((value) => value.uid === before.uid));
+        if (units.some((value) => !value?.selected)) return null;
+        const moving = units.some(
+          (value) => /^(Move|QMove)$/.test(value.mission) || /^(Move|QMove)$/.test(value.queuedMission ?? ''),
+        );
+        const stamp = JSON.stringify(units.map(({ uid, x, y, z, destination }) => ({ uid, x, y, z, destination })));
+        if (stopSamples.length < 100) stopSamples.push({ at: performance.now(), frame: next.frame, units, moving });
+        if (!moving && stamp === lastStamp && next.frame !== lastFrame) matchingFrames++;
+        else matchingFrames = 0;
+        lastStamp = stamp;
+        lastFrame = next.frame;
+        return matchingFrames >= 3 ? units : null;
+      },
+      15000,
+    );
+    await record('base-' + label + '-stopped-before-move', {
+      input: 'Ordinary trusted S hotkey',
+      inputBefore: inputBeforeStop,
+      inputAfter: inputAfterStop,
+      units: stopped.observed,
+      frame: stopped.state.frame,
+      samples: stopSamples,
+      verified: true,
+    });
+    await shot(label + '-stopped');
+    state = stopped.state;
+    const currentOrigin = own(state).find((value) => value.uid === originUid);
+    if (!currentOrigin) throw new Error(`The owned ${label} production building disappeared`);
+    const origin = project(currentOrigin, state.view);
+    const destinations = [
+      [190, 70],
+      [-190, 70],
+      [150, -100],
+      [-150, -100],
+      [0, 160],
+      [0, -140],
+    ].map(([dx, dy]) => ({ x: origin.x + dx, y: origin.y + dy }));
+    const destination = destinations.find(
+      (candidate) =>
+        tactical(candidate, state, 40) &&
+        state.objects.every(
+          (value) =>
+            value.health <= 0 ||
+            Math.hypot(candidate.x - project(value, state.view).x, candidate.y - project(value, state.view).y) >= 45,
+        ),
+    );
+    if (!destination) throw new Error('No visible unobstructed tactical destination for ordinary movement');
+    await shot(label + '-selected');
+    await click(destination);
+    const selectedByUid = new Map(stopped.observed.map((value) => [value.uid, value]));
+    const ordered = await stateWait(
+      'ordinary group Move accepted by every trained unit',
+      (next) => {
+        const units = trained.observed.map((before) => own(next).find((value) => value.uid === before.uid));
+        return units.every((value) => {
+          const before = value && selectedByUid.get(value.uid);
+          return (
+            before &&
+            value.destination?.kind === 'cell' &&
+            (/^(Move|QMove)$/.test(value.mission) || /^(Move|QMove)$/.test(value.queuedMission ?? '')) &&
+            (before.destination?.kind !== 'cell' ||
+              before.destination.x !== value.destination.x ||
+              before.destination.y !== value.destination.y)
+          );
+        })
+          ? units
+          : null;
+      },
+      8000,
+    );
+    await record('base-' + label + '-move-order', {
+      destination,
+      before: stopped.observed,
+      ordered: ordered.observed,
+      frame: ordered.state.frame,
+      verified: true,
+    });
+    const moved = await stateWait(
+      'all trained units actually change position after move order',
+      (next) => {
+        const units = trained.observed.map((before) => own(next).find((value) => value.uid === before.uid));
+        return units.every((value) => {
+          const before = value && selectedByUid.get(value.uid);
+          return before && (value.x !== before.x || value.y !== before.y);
+        })
+          ? units
+          : null;
+      },
+      15000,
+    );
+    await record('base-' + label + '-moved', {
+      destination,
+      before: stopped.observed,
+      after: moved.observed,
+      frame: moved.state.frame,
+      verified: true,
+    });
+    await shot(label + '-moved');
+    return { trained: trained.observed, moved: moved.observed, destination };
   };
 
   try {
@@ -346,171 +522,16 @@ export async function runPhase9BasePlay(api) {
     const barracks = await build('barracks', barracksTypes, [yard.uid, power.uid]);
     report.barracks = barracks;
 
-    state = await openTab(2);
-    const cameo = state.sidebar.cameos.find(
-      (value) => value.kind === 'infantry' && infantryTypes.test(value.id) && !value.darkened,
-    );
-    if (!cameo) throw new Error('The actual infantry tab has no enabled basic infantry cameo');
-    const previousUnits = new Set(
-      own(state)
-        .filter((value) => value.kind === 'infantry')
-        .map((value) => value.uid),
-    );
-    for (let index = 0; index < 3; index++) {
-      state = await peek();
-      const current = state.sidebar.cameos.find((value) => value.id === cameo.id);
-      if (!current) throw new Error('The live basic infantry cameo disappeared while queuing units');
-      await click(cameoPoint(current, state));
-      await record('base-train-click', { index: index + 1, id: cameo.id, frame: state.frame });
-    }
-    await shot('infantry-producing');
-    const trained = await stateWait(
-      'three newly trained owned infantry',
-      (next) => {
-        const fresh = own(next).filter(
-          (value) => value.kind === 'infantry' && value.type === cameo.id && !previousUnits.has(value.uid),
-        );
-        return fresh.length >= 3 ? fresh.slice(0, 3) : null;
-      },
-      90000,
-    );
-    report.trainedUnits = trained.observed;
-    await record('base-infantry-trained', {
-      id: cameo.id,
-      units: trained.observed,
-      frame: trained.state.frame,
-      verified: true,
-    });
-    await shot('infantry-trained');
-    await select(trained.observed[0].uid);
-    await guard();
-    await api.page.keyboard.down('Shift');
-    try {
-      for (const unit of trained.observed.slice(1)) {
-        state = await peek();
-        const current = own(state).find((value) => value.uid === unit.uid);
-        if (!current) throw new Error('A newly trained unit was eliminated before group selection');
-        await click(project(current, state.view));
-      }
-    } finally {
-      await api.page.keyboard.up('Shift');
-    }
-    const selected = await stateWait('all newly trained units selected', (next) => {
-      const selectedUnits = own(next).filter(
-        (value) => value.selected && trained.observed.some((unit) => unit.uid === value.uid),
-      );
-      return selectedUnits.length === 3 ? selectedUnits : null;
-    });
-    // Stop the freshly spawned group through the original hotkey. Its native
-    // walking-out/rally motion must finish before it becomes the Move baseline.
-    const inputBeforeStop = await api.inputState();
-    await key('s');
-    const inputAfterStop = await api.inputState();
-    const stopSamples = [];
-    let lastStamp = null;
-    let lastFrame = null;
-    let matchingFrames = 0;
-    const stopped = await stateWait(
-      'trained group stopped with stable position and destination',
-      (next) => {
-        const units = trained.observed.map((before) => own(next).find((value) => value.uid === before.uid));
-        if (units.some((value) => !value?.selected)) return null;
-        const moving = units.some(
-          (value) => /^(Move|QMove)$/.test(value.mission) || /^(Move|QMove)$/.test(value.queuedMission ?? ''),
-        );
-        const stamp = JSON.stringify(units.map(({ uid, x, y, z, destination }) => ({ uid, x, y, z, destination })));
-        if (stopSamples.length < 100) stopSamples.push({ at: performance.now(), frame: next.frame, units, moving });
-        if (!moving && stamp === lastStamp && next.frame !== lastFrame) matchingFrames++;
-        else matchingFrames = 0;
-        lastStamp = stamp;
-        lastFrame = next.frame;
-        return matchingFrames >= 3 ? units : null;
-      },
-      15000,
-    );
-    await record('base-infantry-stopped-before-move', {
-      input: 'Ordinary trusted S hotkey',
-      inputBefore: inputBeforeStop,
-      inputAfter: inputAfterStop,
-      units: stopped.observed,
-      frame: stopped.state.frame,
-      samples: stopSamples,
-      verified: true,
-    });
-    await shot('infantry-stopped');
-    state = stopped.state;
-    const currentBarracks = own(state).find((value) => value.uid === barracks.uid);
-    const origin = project(currentBarracks, state.view);
-    const destinations = [
-      [190, 70],
-      [-190, 70],
-      [150, -100],
-      [-150, -100],
-      [0, 160],
-      [0, -140],
-    ].map(([dx, dy]) => ({ x: origin.x + dx, y: origin.y + dy }));
-    const destination = destinations.find(
-      (candidate) =>
-        tactical(candidate, state, 40) &&
-        state.objects.every(
-          (value) =>
-            value.health <= 0 ||
-            Math.hypot(candidate.x - project(value, state.view).x, candidate.y - project(value, state.view).y) >= 45,
-        ),
-    );
-    if (!destination) throw new Error('No visible unobstructed tactical destination for ordinary movement');
-    await shot('infantry-selected');
-    await click(destination);
-    const selectedByUid = new Map(stopped.observed.map((value) => [value.uid, value]));
-    const ordered = await stateWait(
-      'ordinary group Move accepted by every trained unit',
-      (next) => {
-        const units = trained.observed.map((before) => own(next).find((value) => value.uid === before.uid));
-        return units.every((value) => {
-          const before = value && selectedByUid.get(value.uid);
-          return (
-            before &&
-            value.destination?.kind === 'cell' &&
-            (/^(Move|QMove)$/.test(value.mission) || /^(Move|QMove)$/.test(value.queuedMission ?? '')) &&
-            (before.destination?.kind !== 'cell' ||
-              before.destination.x !== value.destination.x ||
-              before.destination.y !== value.destination.y)
-          );
-        })
-          ? units
-          : null;
-      },
-      8000,
-    );
-    await record('base-infantry-move-order', {
-      destination,
-      before: stopped.observed,
-      ordered: ordered.observed,
-      frame: ordered.state.frame,
-      verified: true,
-    });
-    const moved = await stateWait(
-      'all trained units actually change position after move order',
-      (next) => {
-        const units = trained.observed.map((before) => own(next).find((value) => value.uid === before.uid));
-        return units.every((value) => {
-          const before = value && selectedByUid.get(value.uid);
-          return before && (value.x !== before.x || value.y !== before.y);
-        })
-          ? units
-          : null;
-      },
-      15000,
-    );
-    report.movedUnits = moved.observed;
-    await record('base-infantry-moved', {
-      destination,
-      before: stopped.observed,
-      after: moved.observed,
-      frame: moved.state.frame,
-      verified: true,
-    });
-    await shot('infantry-moved');
+    const infantry = await trainAndMove('infantry', 'infantry', infantryTypes, 2, barracks.uid);
+    report.trainedUnits = infantry.trained;
+    report.movedUnits = infantry.moved;
+    const refinery = await build('refinery', refineryTypes, [yard.uid, power.uid, barracks.uid]);
+    report.refinery = refinery;
+    const warFactory = await build('war-factory', warFactoryTypes, [yard.uid, power.uid, barracks.uid, refinery.uid]);
+    report.warFactory = warFactory;
+    const vehicles = await trainAndMove('vehicles', 'vehicle', combatVehicleTypes, 3, warFactory.uid);
+    report.trainedVehicles = vehicles.trained;
+    report.movedVehicles = vehicles.moved;
     report.met = true;
   } catch (error) {
     report.error = String(error);

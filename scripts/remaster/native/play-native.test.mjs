@@ -3,8 +3,8 @@ import { spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import {
@@ -13,6 +13,8 @@ import {
   installDll,
   nativeMainMenuReady,
   runLauncher,
+  validateHdCache,
+  waitForStartupCommand,
 } from './play-native.mjs';
 import { HD_PLAY_OPTIONS } from '../play-options.mjs';
 import {
@@ -146,6 +148,188 @@ test('temporary reservations close even when a startup poller connects before se
 test('missing game configuration produces a useful error before any startup', async () => {
   await assert.rejects(runLauncher([], {}), /RA2_NATIVE_GAME_DIR/);
 });
+
+test('missing HD library is reported in Chinese without changing the game copy', async (t) => {
+  const { dir, target } = await fixture(t);
+  await writeFile(target, 'player DLL');
+  await assert.rejects(validateHdCache({ RA2_HD_CACHE_DIR: dir }), /找不到高清缓存.*RA2_HD_CACHE_DIR/);
+  assert.equal(await readFile(target, 'utf8'), 'player DLL');
+  await mkdir(join(dir, '_library'));
+  assert.equal(await validateHdCache({ RA2_HD_CACHE_DIR: dir }), dir);
+});
+
+test('unreadable cache traversal remains different from a missing cache', async (t) => {
+  const { dir } = await fixture(t);
+  await symlink('_library', join(dir, '_library'));
+  await assert.rejects(validateHdCache({ RA2_HD_CACHE_DIR: dir }), (error) => {
+    assert.match(error.message, /无法读取高清缓存/);
+    assert.equal(error.cause.code, 'ELOOP');
+    return true;
+  });
+});
+
+test('relative cache configuration uses the same repository scope as the Vite child from another cwd', async (t) => {
+  const { dir } = await fixture(t);
+  await mkdir(join(dir, '_library'));
+  const launcher = join(repository, 'scripts/remaster/native/play-native.mjs');
+  const relativeCache = relative(repository, dir);
+  const child = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `const {validateHdCache}=await import(${JSON.stringify(pathToFileURL(launcher).href)}); console.log(await validateHdCache({RA2_HD_CACHE_DIR: ${JSON.stringify(relativeCache)}}));`,
+    ],
+    { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  let output = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    output += chunk;
+  });
+  const code = await new Promise((resolve) => child.once('close', resolve));
+  assert.equal(code, 0);
+  assert.equal(output.trim(), dir);
+});
+
+test('runLauncher reports missing game, Wine and cache prerequisites before starting any child', async (t) => {
+  const { dir, target } = await fixture(t);
+  const prefix = join(dir, 'prefix');
+  await mkdir(prefix);
+  await writeFile(join(prefix, 'system.reg'), 'synthetic prefix');
+  await writeFile(target, 'player DLL');
+  const wine = join(dir, 'mock-wine.mjs');
+  const calls = join(dir, 'calls.json');
+  await writeFile(
+    wine,
+    `#!${process.execPath}\nimport {writeFile} from 'node:fs/promises';\nawait writeFile(${JSON.stringify(calls)}, 'unexpected startup');\n`,
+    { mode: 0o755 },
+  );
+  const env = {
+    RA2_NATIVE_GAME_DIR: dir,
+    RA2_NATIVE_WINE_PREFIX: prefix,
+    RA2_NATIVE_WINE: wine,
+    RA2_HD_CACHE_DIR: dir,
+  };
+  await assert.rejects(runLauncher(['--size', '1280x720'], env), /找不到游戏程序/);
+  await writeFile(join(dir, 'gamemd.exe'), 'synthetic executable, never run');
+  await assert.rejects(
+    runLauncher(['--size', '1280x720'], { ...env, RA2_NATIVE_WINE: join(dir, 'missing-wine') }),
+    /找不到 Wine 程序/,
+  );
+  await assert.rejects(runLauncher(['--size', '1280x720'], env), /找不到高清缓存/);
+  await assert.rejects(lstat(calls), { code: 'ENOENT' });
+  await assert.rejects(lstat(join(dir, 'RA2MD.INI')), { code: 'ENOENT' });
+  assert.equal(await readFile(target, 'utf8'), 'player DLL');
+});
+
+test('an owned startup command has a bounded wait even when the child does not complete', async () => {
+  await assert.rejects(waitForStartupCommand({ done: new Promise(() => {}) }, 20, 'Wine 自检超时'), /Wine 自检超时/);
+  await waitForStartupCommand({ done: Promise.resolve() }, 20, 'unexpected timeout');
+});
+
+for (const scenario of [
+  {
+    name: 'failed self-check',
+    body: "console.error('synthetic Wine refusal');process.exitCode=7;",
+    message: /Wine 自检失败/,
+  },
+  { name: 'empty successful self-check', body: "console.error('synthetic empty reply');", message: /Wine 自检失败/ },
+  {
+    name: 'hung self-check',
+    body: "console.error('synthetic Wine hang');setInterval(()=>{},1000);",
+    message: /Wine 自检超过 30 秒/,
+  },
+  {
+    name: 'exited wrapper with inherited pipes',
+    body: `import {spawn} from 'node:child_process';const child=spawn(process.execPath,['-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:'inherit'});await appendFile(CALLS,JSON.stringify({args:['owned inherited-pipe child'],pid:child.pid})+'\\n');console.error('synthetic inherited pipe');child.unref();`,
+    message: /Wine 自检超过 30 秒/,
+  },
+  {
+    name: 'oversized path mapping',
+    body: "if(process.argv[2]==='cmd.exe')console.log('RA2_NATIVE_WINE_OK');else console.log('Z:'+ 'X'.repeat(131072));",
+    message: /Wine 返回的文件路径超过安全范围/,
+  },
+])
+  test(`runLauncher ${scenario.name} stops before game-file replacement`, { timeout: 45000 }, async (t) => {
+    const { dir, target } = await fixture(t);
+    const prefix = join(dir, 'prefix');
+    await mkdir(prefix);
+    await writeFile(join(prefix, 'system.reg'), 'synthetic prefix');
+    await mkdir(join(dir, '_library'));
+    await writeFile(join(dir, 'gamemd.exe'), 'synthetic executable, never run');
+    await writeFile(target, 'player DLL');
+    const wine = join(dir, 'mock-wine.mjs');
+    const calls = join(dir, 'calls.json');
+    await writeFile(
+      wine,
+      `#!${process.execPath}\nimport {appendFile} from 'node:fs/promises';\nconst CALLS=${JSON.stringify(calls)};await appendFile(CALLS, JSON.stringify({args:process.argv.slice(2), pid:process.pid})+'\\n');\n${scenario.body}\n`,
+      { mode: 0o755 },
+    );
+    const child = spawn(process.execPath, ['scripts/remaster/native/play-native.mjs', '--size', '1280x720'], {
+      cwd: repository,
+      env: {
+        ...process.env,
+        RA2_NATIVE_GAME_DIR: dir,
+        RA2_NATIVE_WINE_PREFIX: prefix,
+        RA2_NATIVE_WINE: wine,
+        RA2_NATIVE_WINE_BOTTLE: '',
+        RA2_HD_CACHE_DIR: dir,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let exited = false;
+    t.after(async () => {
+      if (exited) return;
+      if (!exited) {
+        child.kill('SIGINT');
+        await delay(2000);
+        if (!exited) child.kill('SIGKILL');
+      }
+      const recorded = await readFile(calls, 'utf8').catch(() => '');
+      for (const line of recorded.trim().split('\n').filter(Boolean)) {
+        const { pid } = JSON.parse(line);
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch (error) {
+          if (error.code !== 'ESRCH') throw error;
+        }
+      }
+    });
+    let output = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      output += chunk;
+    });
+    const code = await new Promise((resolve) =>
+      child.once('close', (code) => {
+        exited = true;
+        resolve(code);
+      }),
+    );
+    assert.equal(code, 1, output);
+    assert.match(output, scenario.message);
+    assert.doesNotMatch(output, /Play URL:/);
+    const records = (await readFile(calls, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(records[0].args, ['cmd.exe', '/c', 'echo RA2_NATIVE_WINE_OK']);
+    assert.equal(
+      records.length,
+      ['oversized path mapping', 'exited wrapper with inherited pipes'].includes(scenario.name) ? 2 : 1,
+    );
+    for (const { pid } of records) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    assert.equal(await readFile(target, 'utf8'), 'player DLL');
+    await assert.rejects(lstat(join(dir, 'RA2MD.INI')), { code: 'ENOENT' });
+    const runPath = output.match(/Private launch logs and DLL backups: (.+)/)[1];
+    if (scenario.name !== 'oversized path mapping')
+      assert.match(await readFile(join(runPath, 'wine-check.log'), 'utf8'), /synthetic/);
+  });
 
 test('native size parsing and main-display capping respect game and picture bounds', () => {
   assert.deepEqual(parseNativeSize('1512x982'), { width: 1512, height: 982 });
@@ -283,6 +467,7 @@ test(
     const prefix = join(dir, 'prefix');
     await mkdir(prefix);
     await writeFile(join(prefix, 'system.reg'), 'synthetic prefix');
+    await mkdir(join(dir, '_library'));
     await writeFile(join(dir, 'gamemd.exe'), 'synthetic executable, never run');
     await writeFile(target, 'player DLL preserved by lifecycle test');
     const wine = join(dir, 'mock-wine.mjs');
@@ -301,6 +486,9 @@ const args = process.argv.slice(2);
 const unix = (path) => path.slice(2).replaceAll('\\\\', '/');
 if (args[0] === 'winepath.exe') {
   console.log('Z:' + args[2].replaceAll('/', '\\\\'));
+} else if (args[0] === 'cmd.exe') {
+  console.log('synthetic noisy Wine self-check '.repeat(8192));
+  console.log('RA2_NATIVE_WINE_OK');
 } else {
   const value = (name) => unix(args[args.indexOf(name) + 1]);
   const stop = value('--stop-file');
@@ -340,6 +528,7 @@ if (args[0] === 'winepath.exe') {
         RA2_NATIVE_GAME_DIR: dir,
         RA2_NATIVE_WINE_PREFIX: prefix,
         RA2_NATIVE_WINE: wine,
+        RA2_HD_CACHE_DIR: dir,
         RA2_NATIVE_WINE_BOTTLE: '',
         WINEPREFIX: '',
       },
@@ -395,6 +584,9 @@ if (args[0] === 'winepath.exe') {
       await new Promise((resolve) => server.close(resolve));
     }
     const runPath = output.match(/Private launch logs and DLL backups: (.+)/)[1];
+    const checkLog = await readFile(join(runPath, 'wine-check.log'), 'utf8');
+    assert.ok(checkLog.length <= 16385);
+    assert.match(checkLog, /RA2_NATIVE_WINE_OK\n/);
     const status = JSON.parse(await readFile(join(runPath, 'status.json'), 'utf8'));
     assert.equal(status.running, false);
   },

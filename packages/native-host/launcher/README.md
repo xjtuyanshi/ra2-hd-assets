@@ -44,6 +44,16 @@ avoids discovery. `WINEPREFIX` is accepted when neither explicit scope variable
 is supplied. A game folder, scope and executable are required; the launcher
 never creates a Wine prefix or obtains game resources.
 
+The selected HD cache must already contain a readable `_library/` directory;
+without `RA2_HD_CACHE_DIR`, the cache root remains Vite's existing
+`gameres/hd-cache` default. Missing game files, Wine configuration and HD cache
+produce Chinese guidance before any game-file modification. Before building
+or mapping paths, the launcher runs a scoped Wine command-line self-check and
+requires its expected reply within 30 seconds. A failed or hung check leaves
+the game unstarted and records bounded output in private `wine-check.log`.
+Wine path mapping has the same bounded wait. These startup timeouts do not
+establish runtime performance or browser acceptance.
+
 `--open` opens **Google Chrome** explicitly. The printed URL goes straight to
 the supplied YR development resources and attaches to the running native game;
 no resource-picker or game-version clicks are needed. Both this launcher and
@@ -126,6 +136,9 @@ genuine modal-menu readiness, size bounds and byte-preserving INI configuration.
 Its process lifecycle
 check starts the real Vite server plus a synthetic authenticated agent, using
 temporary synthetic game/prefix files. It does not run Wine or a real game.
+It also checks missing cache guidance, startup wait cancellation and a failed
+synthetic Wine self-check that cannot proceed to path mapping, DLL replacement
+or resolution changes.
 
 An explicitly scoped real launcher smoke can run through the lead's Node runner:
 
