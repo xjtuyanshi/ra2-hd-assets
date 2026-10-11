@@ -32,7 +32,7 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    the HD view shows the current map, and once a second while a snapshot would go unused (no HD cache for the map, the
    view still loading, the bridge toggled off, or the VM not answering). A map whose HD view failed to load (no or an
    incomplete cache, the development server restarting, a WebGPU error) is tried again after 30 seconds and at the
-   next match on it, never on every poll. Such a match shows the original picture, complete and unkeyed, and the
+   next match on it, never on every poll. On the VM route such a match shows the original picture, complete and unkeyed, and the
    page says why in a notice at the top of the game frame (`#vm-hd-status`, styled like the upscale notice): that the
    map has no HD assets (the loader's `MapCacheMissingError`: no `manifest.json`) or that its HD view failed to load.
    The notice appears once per match, stays until the match has run for 12 seconds (the load already fails while the
@@ -48,6 +48,17 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    including when the game exits or the boot is cancelled. The toolbar's picture button and the `\\` key switch between
    the HD view and the original picture (the key is the page's only while a bridge runs; otherwise it reaches the
    game), as does `__hdBridge.toggle()` in the console; `__hdBridge.passthrough` shows the state.
+   Switching to the original picture closes passthrough even while native preflight has not yet opened a hole.
+   Disabled idle polls still track the match, but cannot re-enable the guest's render flags.
+   The native route covers only the tactical rectangle with a dark `#hd-curtain` from the battle video-mode switch
+   (synchronously in the frame callback) or first match snapshot. The view still prepares out of sight. Its first
+   reveal waits for accepted passthrough and a received native RGB565 picture carrying the terrain key, then fades
+   the curtain over 300 ms. A missing cache or failed load leaves a short retry/original-view instruction on the
+   curtain; only a commanded switch exposes the original startup battlefield. A state gap or read failure keeps
+   the last HD picture for 500 ms before returning to the original dialog/menu. Recovery resumes the same view,
+   waiting for passthrough again. `__hdBridge.timeline` includes curtain/fade times and a detached, bounded
+   page-session `transitions` history (`atMs`, ISO `time`, map, frame, from/to and reason); `transitionsOmitted`
+   explicitly counts records beyond 512. `__hdBridge.presentation` distinguishes HD, curtain and original modes.
 3. **Live view.** `packages/hd-renderer/src/live/liveView.ts` draws the snapshot: static map content (terrain, water,
    trees) from the map cache; overlays (walls, fences, ore, gems) and smudges (craters, scorch and burn marks) from
    independent live cell snapshots when available, otherwise from the map cache; every building/vehicle/infantry/aircraft from the snapshot using the
@@ -209,9 +220,10 @@ ends, so the view first heard of them in the match's first snapshot and spent th
 presents frames: 3.0 s building smooth voxel meshes (two freezes of 0.6 and 2.8 s), 1.2 s building shader graphs, and
 about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages arrived.
 
-- **The original picture stays until the view is complete.** The view is created while the game shows its loading
+- **The view prepares out of sight until it is complete.** The view is created while the game shows its loading
   screen and draws out of sight from then on (`LiveView.outOfSight`; the canvas is not displayed, there is no
-  transparent rectangle and no passthrough, so the game draws its own battlefield). It replaces the original picture
+  transparent rectangle and no passthrough, so the game draws its own battlefield). The VM route shows that picture;
+  the native route's tactical curtain hides it. The HD view replaces that picture or curtain
   once the match runs (logic frame 1 or later) and it has drawn three complete frames in a row
   (`LiveView.settledFrames`: every page, mesh, redraw projection and effect page the frame asked for was there). If
   that never happens the view is shown after 20 seconds with what it has, with a console warning. Once shown it stays
@@ -266,8 +278,14 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   bounds the decoded pages in existence) follows the same rule: first come, first served among waited-for pages,
   and a page loaded ahead takes its turn only when no waited-for page waits; the library's per-page upload carries
   the view's gate and the page's "loaded ahead" answer to both.
-  The indexed stand-in layers draw with shader graphs of their own ("indexed page through the palette": every
-  final layer draws HD art), and a graph's first layer costs six shader builds in the presenting thread plus
+  The indexed stand-in layers draw with shader graphs of their own. Final foreground layers use their HD page
+  when available; shadows and inclusive source-shadow body frames retain the indexed page. Building bodies,
+  bibs, build-ups and animation layers use HD even when their art says `Remapable=no`: the engine remaps every
+  building to its current owner's scheme, including Neutral. Encoded grey paint in the HD mask keeps its redraw
+  shading; where a page has no mask or contains baked coloured paint, `indexedHousePaint` recovers the owner's
+  ramp from the indexed source. Types without source house-colour pixels keep their full HD colour. This flag
+  shares the existing map-grade attribute, survives held pictures and is reset when a pooled sprite is reused.
+  A graph's first layer costs six shader builds in the presenting thread plus
   pipelines that are compiled off the frame, during which the layer draws nothing. The same holds for a final
   layer that is the first of its look in a shown view (HD art with or without a material page, with or without a
   lit-window mask): measured in a live match with the type library's HD pages 90 s late, conscripts were not drawn

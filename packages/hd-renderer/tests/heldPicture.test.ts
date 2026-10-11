@@ -18,6 +18,7 @@ function picture(pool: SpritePool, base: Vector3) {
   const body = pool.take(base, frame(2), 'lib:unit@live3', 0.4, false);
   body.nativeDepth = { mode: 'body', origin: [5, 7], base: 16 };
   body.opacity = 0.5;
+  body.indexedHousePaint = true;
   const layer = pool.take(
     base.clone().add(new Vector3(0.1, 0, -0.1)),
     frame(3, 1),
@@ -74,6 +75,7 @@ describe('the last complete picture of a sprite object', () => {
       expect(sprite.frame).toBe(was.frame);
       // The palette row carries the owner's colours: the kept picture wears them unchanged.
       expect(sprite.palette).toBe(was.palette);
+      expect(sprite.indexedHousePaint).toBe(was.indexedHousePaint);
       expect(sprite.anchor.distanceTo(was.anchor)).toBeLessThan(1e-9);
       expect(sprite.push).toBe(was.push);
       expect(sprite.shadow).toBe(was.shadow);

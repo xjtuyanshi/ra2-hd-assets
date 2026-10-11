@@ -228,6 +228,7 @@ export const englishMessages = {
   '游戏每秒实际推进的逻辑帧数，与当前速度档位应有的帧数（最近 5 秒）':
     'Logic frames the game advanced a second, and what the current speed setting allows (last 5 seconds)',
   ' · 窗口已变，刷新页面重新匹配': ' · window changed, reload to match again',
+  ' · 窗口已变，请重新运行启动器匹配': ' · window changed, restart the launcher to match again',
   主音量: 'Master volume',
   主音量读数: 'Master volume value',
   '快速开局…': 'Quick start…',
@@ -346,6 +347,7 @@ export const englishMessages = {
   '联机不可用：{0}。当前不支持断线续局，请退出对局后重新启动游戏。':
     'Multiplayer unavailable: {0}. Rejoining an interrupted match is unsupported. Leave the match and restart the game.',
   '初始化…': 'Initializing…',
+  '请打开控制栏并点击“全屏”': 'Open the controls and click “Fullscreen”',
   'HC --/s · 主线程阻塞 --': 'HC --/s · main-thread blocking --',
   生产模式不开放模型实验: 'Model experiments are unavailable in production',
   '启动层已就绪 · 其他资源 {0}/{1}：{2}': 'Startup files ready · other resources {0}/{1}: {2}',
@@ -390,6 +392,14 @@ export const englishMessages = {
   '超分未启动：当前使用 Canvas 2D，已回退原图': 'Upscaling inactive: using Canvas 2D and original pixels',
   '高清画面未启用：地图 {0} 没有高清素材，显示原版画面':
     'HD view off: map {0} has no HD assets; showing the original picture',
+  '正在准备高清战场…': 'Preparing the HD battlefield…',
+  '高清画面暂时不可用，按 \\ 查看原版': 'HD view unavailable; press \\ for the original picture',
+  '高清素材缺失，按 \\ 查看原版': 'HD assets missing; press \\ for the original picture',
+  '高清画面加载失败，按 \\ 查看原版': 'HD view failed to load; press \\ for the original picture',
+  '地图 {0} 没有高清素材，请准备素材或按 \\ 查看原版':
+    'Map {0} has no HD assets; prepare them or press \\ for the original picture',
+  '地图 {0} 高清画面加载失败，稍后自动重试；按 \\ 查看原版':
+    'HD view failed to load for map {0}; retrying shortly. Press \\ for the original picture',
   '高清画面加载失败：地图 {0} 显示原版画面，稍后自动重试':
     'HD view failed to load: map {0} shows the original picture; retrying shortly',
   浏览器无法创建游戏画面缓存上下文: 'Browser could not create a game-frame cache context',

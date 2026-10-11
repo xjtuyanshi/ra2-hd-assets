@@ -38,7 +38,7 @@ import {
 } from './gameInput';
 import { installRuntimeToolbar } from './runtimeToolbar';
 import { restoreCachedGameSource } from './gameSourcePicker';
-import { desktopPointerLock, nativeAutoStart } from './nativeStartup';
+import { desktopPointerLock, nativeAutoStart, prepareNativeViewport } from './nativeStartup';
 import { parseTrainingQuery, trainingHref } from './training/trainingQuery';
 import { supportedGame } from '../../../games/catalog';
 import { progressiveFilesOf } from '../../../adapter/progressiveFiles';
@@ -97,11 +97,14 @@ let gameFrameHeight = 600;
 let refitActiveCanvas: (frameWidth?: number, frameHeight?: number) => void = () => {};
 let canvasFitInstalled = false;
 let activeFitCleanup: (() => void) | null = null;
+let activeNativeViewportAbort: AbortController | null = null;
 /** The current session's resolution choice; the canvas fit shows a display-matched frame at whole device pixels. */
 let activeResolutionChoice: ResolutionChoice = null;
 
 export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const generation = ++pageGeneration;
+  activeNativeViewportAbort?.abort();
+  activeNativeViewportAbort = null;
   // Release the old presentation and size listeners before switching sessions so resize callbacks cannot retain prior closures.
   activeTrainingCleanup?.();
   activeHdCleanup?.();
@@ -337,6 +340,10 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
       return;
     }
     if (event.key === HD_VIEW_KEY && hdCleanup) {
+      if (event.repeat) {
+        event.preventDefault();
+        return;
+      }
       event.preventDefault();
       toggleHdView();
       return;
@@ -524,6 +531,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
 
   const releaseRuntime = async () => {
     runtimeReleased = true;
+    activeNativeViewportAbort?.abort();
+    activeNativeViewportAbort = null;
     nativeCursorFrames.dispose();
     nativeCursor?.destroy();
     nativeCursor = null;
@@ -643,6 +652,28 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
       return;
     }
   }
+  const viewportAbort = new AbortController();
+  activeNativeViewportAbort = viewportAbort;
+  let nativeViewport: GameResolution | null;
+  try {
+    nativeViewport = await prepareNativeViewport(canvas, viewportAbort.signal, (waiting) => {
+      updateBootOverlay({ phase: 'loading', detail: waiting ? t('请打开控制栏并点击“全屏”') : t('初始化…') });
+    });
+  } catch (error) {
+    if (viewportAbort.signal.aborted || generation !== pageGeneration) return;
+    showProblemPanel('error', error instanceof Error ? error.message : String(error));
+    await releaseRuntime();
+    return;
+  } finally {
+    if (activeNativeViewportAbort === viewportAbort) activeNativeViewportAbort = null;
+  }
+  if (generation !== pageGeneration || runtimeReleased) return;
+  if (nativeViewport) {
+    requestedResolution = nativeViewport;
+    activeResolutionChoice = DISPLAY_RESOLUTION;
+    toolbar.setResolution(activeResolutionChoice);
+    refitActiveCanvas();
+  }
   vm = await startSessionRuntime(
     () =>
       pageController.start(({ isCurrent }) =>
@@ -679,7 +710,10 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
               onFinishExited: finishExitedRuntime,
               onExposeRuntimeCallProbe: exposeRuntimeCallProbe,
               onAppendCall: appendCall,
-              onCursorFrame: nativeCursorFrames.onFrame,
+              onCursorFrame: (frame) => {
+                hdCleanup?.frame(frame);
+                nativeCursorFrames.onFrame(frame);
+              },
             }),
             isCurrent,
           ),
@@ -871,6 +905,8 @@ async function waitForDebugRouteReady(hasFrame: () => boolean): Promise<void> {
 
 /** React unmount and HMR share service destruction; the service layer no longer removes UI nodes. */
 export function stopVmPage(): void {
+  activeNativeViewportAbort?.abort();
+  activeNativeViewportAbort = null;
   ++pageGeneration;
   cancelSourceRequest();
   mapRequest.getSnapshot()?.finish(false);

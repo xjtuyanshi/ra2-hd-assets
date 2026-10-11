@@ -20,7 +20,7 @@ export interface RuntimeToolbar {
   /**
    * The fitted frame size, how many device pixels one of its pixels covers and how many would fill the stage (shown
    * under the resolution). `matched` is the size a display-matched session measured at its start (null otherwise): a
-   * frame of that size that no longer fits the window gets a hint to reload.
+   * frame of that size that no longer fits the window gets a hint to restart its size negotiation.
    */
   setDisplayScale(
     frameWidth: number,
@@ -261,7 +261,14 @@ export function installRuntimeToolbar(
           frameWidth,
           frameHeight,
           whole ? String(Math.round(scale)) : scale.toFixed(2),
-        ) + (stale ? t(' · 窗口已变，刷新页面重新匹配') : '');
+        ) +
+        (stale
+          ? t(
+              new URLSearchParams(window.location.search).get('backend') === 'native'
+                ? ' · 窗口已变，请重新运行启动器匹配'
+                : ' · 窗口已变，刷新页面重新匹配',
+            )
+          : '');
       if (status === model.resolutionStatus) return;
       model.resolutionStatus = status;
       publish();

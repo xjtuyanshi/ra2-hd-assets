@@ -52,6 +52,7 @@ export class SpritePool {
     instance.anchor.copy(anchor);
     instance.frame = frame;
     instance.palette = palette;
+    instance.indexedHousePaint = undefined;
     instance.push = push;
     instance.shadow = shadow;
     instance.opacity = undefined;

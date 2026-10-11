@@ -91,6 +91,7 @@ let launch,
   logTail = '',
   url,
   cleanupPromise;
+let beforeBuildings = false;
 let peakRss = 0;
 async function dllIdentity() {
   const path = join(config.RA2_NATIVE_GAME_DIR || process.env.RA2_NATIVE_GAME_DIR, 'ddraw.dll');
@@ -164,6 +165,25 @@ async function shot(label) {
     return { width: p.width, height: p.height, frame: p.frame, pixels: btoa(s) };
   });
   if (native) writePng(join(out, label + '-native.png'), { ...native, pixels: Buffer.from(native.pixels, 'base64') });
+  const hd = await page.evaluate(() => {
+    const h = window.__hdBridge;
+    return h
+      ? {
+          timeline: h.timeline,
+          presentation: h.presentation,
+          passthrough: h.passthrough,
+          pace: h.pace,
+          canvases: [...document.querySelectorAll('canvas')].map((c) => ({
+            id: c.id,
+            width: c.width,
+            height: c.height,
+            box: c.getBoundingClientRect().toJSON(),
+            display: getComputedStyle(c).display,
+          })),
+        }
+      : null;
+  });
+  await writeFile(join(out, label + '-hd.json'), JSON.stringify(hd, null, 2));
   const s = await state();
   await writeFile(join(out, label + '-controls.json'), JSON.stringify(s, null, 2));
   const combat = await page.evaluate(() => {
@@ -655,6 +675,96 @@ async function execute(c) {
     await writeFile(join(out, c.label + '.json'), JSON.stringify({ evidence, samples: result }, null, 2));
     return { evidence, count: result.length };
   }
+  if (c.action === 'picture-sequence') {
+    const directory = join(out, c.label);
+    await mkdir(directory, { recursive: true });
+    const samples = [];
+    await page.evaluate(() => {
+      window.__phase18NativeFrameSamples = [];
+      window.__phase18NativeFrameProbe = (frame) => {
+        const curtain = document.querySelector('#hd-curtain');
+        const style = curtain ? getComputedStyle(curtain) : null;
+        window.__phase18NativeFrameSamples.push({
+          atMs: performance.now(),
+          width: frame.width,
+          height: frame.height,
+          presentation: window.__hdBridge?.presentation,
+          curtain: style
+            ? { display: style.display, opacity: style.opacity, box: curtain.getBoundingClientRect().toJSON() }
+            : null,
+        });
+      };
+    });
+    const started = Date.now();
+    const action = c.steps ? execute({ action: 'batch', steps: c.steps }) : Promise.resolve();
+    // Retain an early input failure until the sequence is saved; it must not terminate the process before cleanup.
+    void action.catch(() => {});
+    while (Date.now() - started < (c.ms ?? 25000)) {
+      await ownerIdle();
+      const at = Date.now();
+      const capture = await cdp.send('Page.captureScreenshot', {
+        format: 'png',
+        fromSurface: true,
+        captureBeyondViewport: false,
+      });
+      const file = String(samples.length).padStart(4, '0') + '.png';
+      await writeFile(join(directory, file), Buffer.from(capture.data, 'base64'));
+      samples.push({
+        file,
+        at: new Date(at).toISOString(),
+        elapsedMs: at - started,
+        hd: await page.evaluate(() => ({
+          timeline: window.__hdBridge?.timeline,
+          presentation: window.__hdBridge?.presentation,
+          passthrough: window.__hdBridge?.passthrough,
+        })),
+      });
+      await delay(Math.max(0, (c.intervalMs ?? 100) - (Date.now() - at)));
+    }
+    const nativeFrames = await page.evaluate(() => {
+      delete window.__phase18NativeFrameProbe;
+      const s = window.__phase18NativeFrameSamples;
+      delete window.__phase18NativeFrameSamples;
+      return s;
+    });
+    await writeFile(join(directory, 'native-presented-frames.json'), JSON.stringify(nativeFrames, null, 2));
+    await writeFile(join(directory, 'sequence.json'), JSON.stringify(samples, null, 2));
+    await action;
+    await shot(c.label + '-settled');
+    return { frames: samples.length, elapsedMs: Date.now() - started, directory };
+  }
+  if (c.action === 'reload') {
+    beforeBuildings = c.beforeBuildings === true;
+    await page.reload();
+    if (new URL(page.url()).searchParams.get('native-fullscreen') === '1') {
+      const toggle = page.locator('#vm-controls-toggle');
+      if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+      await page.locator('#vm-fullscreen').click();
+      await wait('reattached real fullscreen gesture', () => page.evaluate(() => !!document.fullscreenElement));
+    }
+    await wait(
+      'reattached native picture',
+      async () =>
+        !!worker() && !!(await worker().evaluate(() => globalThis.__auditCore?.connection?.pictureDecoder?.previous)),
+    );
+    const probe = await import('./phase7-input-stream.mjs');
+    await probe.installPhase7InputProbe(page);
+    await probe.disableWorkerNetworkPayloadObservation(page);
+    const toggle = page.locator('#vm-controls-toggle');
+    if (
+      !(await page.evaluate(() => !!document.fullscreenElement)) &&
+      (await toggle.getAttribute('aria-expanded')) === 'true'
+    )
+      await toggle.click();
+    await delay(c.wait ?? 15000);
+    return shot(c.label);
+  }
+  if (c.action === 'window-maximized') {
+    const w = await cdp.send('Browser.getWindowForTarget');
+    await cdp.send('Browser.setWindowBounds', { windowId: w.windowId, bounds: { windowState: 'maximized' } });
+    await delay(1000);
+    return shot(c.label ?? 'window-maximized');
+  }
   if (c.action === 'shot') return shot(c.label);
   if (c.action === 'state') return state();
   if (c.action === 'click') {
@@ -1002,7 +1112,14 @@ try {
   }
   launch = spawn(
     process.execPath,
-    [join(wt, 'scripts/remaster/native/phase8-launch-trace.mjs'), '--size', '1728x1117'],
+    [
+      join(wt, 'scripts/remaster/native/phase8-launch-trace.mjs'),
+      ...(phase === 'phase18' && !tag.startsWith('baseline')
+        ? tag.startsWith('full')
+          ? ['--fullscreen']
+          : []
+        : ['--size', '1728x1117']),
+    ],
     {
       cwd: wt,
       env: { ...launchEnvironment, RA2_NATIVE_AGENT_HIDDEN: tag.startsWith('visible') ? '0' : '1' },
@@ -1046,6 +1163,20 @@ try {
     naturalWindowDimensions ? { viewport: null } : { viewport: { width: 1728, height: 1117 }, deviceScaleFactor: 2 },
   );
   await context.grantPermissions(['local-network-access'], { origin: new URL(url).origin });
+  await context.route('**/packages/hd-renderer/src/live/liveView.ts*', async (route) => {
+    if (!beforeBuildings) return route.continue();
+    const response = await route.fetch();
+    const source = await response.text();
+    const needle = 'const key = indexed && this.library.hasHdPage(page) ? -1 - page : page;';
+    assert(source.includes(needle), 'Original non-remapable building baseline route must match source');
+    await route.fulfill({
+      response,
+      body: source.replace(
+        needle,
+        'const key = (indexed || instance.indexedHousePaint === true) && this.library.hasHdPage(page) ? -1 - page : page;',
+      ),
+    });
+  });
   await context.route('**/src/adapter/vmWorker.ts*', async (route) => {
     const r = await route.fetch();
     const source = await r.text();
@@ -1077,7 +1208,7 @@ try {
       response: r,
       body: source.replace(
         needle,
-        'if (!destroyed) { backend.draw(...args); window.__phase7Presentation?.draw(args); }',
+        'if (!destroyed) { backend.draw(...args); window.__phase7Presentation?.draw(args); window.__phase18NativeFrameProbe?.(args[0]); }',
       ),
     });
   });
@@ -1111,10 +1242,37 @@ try {
   page.on('console', (m) => {
     if (m.type() === 'error') record('console-error', { text: m.text().slice(0, 1000) });
   });
+  const ownedWindowForSizing = await cdp.send('Browser.getWindowForTarget');
   const pageUrl = new URL(url);
   pageUrl.searchParams.set('game-speed', '3');
+  if (phase === 'phase18' && !tag.startsWith('baseline')) {
+    await cdp.send('Browser.setWindowBounds', {
+      windowId: ownedWindowForSizing.windowId,
+      bounds: { windowState: tag.startsWith('full') ? 'fullscreen' : 'maximized' },
+    });
+    await delay(1200);
+  }
   await page.goto(pageUrl.toString());
   await page.bringToFront();
+  if (phase === 'phase18' && tag.startsWith('full') && pageUrl.searchParams.get('native-fullscreen') === '1') {
+    const fullWindow = await cdp.send('Browser.getWindowForTarget');
+    await cdp.send('Browser.setWindowBounds', { windowId: fullWindow.windowId, bounds: { windowState: 'fullscreen' } });
+    await delay(1200);
+    const toggle = page.locator('#vm-controls-toggle');
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+    await page.locator('#vm-fullscreen').click();
+    await wait('startup real fullscreen gesture', () => page.evaluate(() => !!document.fullscreenElement));
+    await record(
+      'fullscreen-startup-area',
+      await page.evaluate(() => ({
+        width: innerWidth,
+        height: innerHeight,
+        dpr: devicePixelRatio,
+        display: { width: screen.width, height: screen.height },
+        fullscreenBox: document.fullscreenElement?.getBoundingClientRect().toJSON(),
+      })),
+    );
+  }
   const ownedWindow = await cdp.send('Browser.getWindowForTarget');
   if (!naturalWindowDimensions) {
     await page.setViewportSize({ width: 1728, height: 1117 });
@@ -1138,7 +1296,11 @@ try {
     120000,
   );
   const toggle = page.locator('#vm-controls-toggle');
-  if ((await toggle.getAttribute('aria-expanded')) === 'true') await toggle.click();
+  if (
+    !(await page.evaluate(() => !!document.fullscreenElement)) &&
+    (await toggle.getAttribute('aria-expanded')) === 'true'
+  )
+    await toggle.click();
   const { installPhase7InputProbe } = await import('./phase7-input-stream.mjs');
   await installPhase7InputProbe(page);
   try {

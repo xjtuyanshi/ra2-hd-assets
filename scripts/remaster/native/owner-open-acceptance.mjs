@@ -22,7 +22,7 @@ const { values: options } = parseArgs({
 if (options.help) {
   console.log(
     'owner-open-acceptance.mjs --out OUT [--config private.json] [--size WxH] [--hold-seconds 1..90] [--session-dir DIR]\n' +
-      'Starts play-native.sh --open in Google Chrome. Private OUT/browser/owner-open-current.json contains the exact URL and closeProofPath for CUA review. The default display size is used unless --size is supplied. Holds the ready page for 60 seconds by default; root must close the exact launch tab through CUA and write its closure proof. --session-dir opts into deadline.json/cancel guards and waiting for the owner connection to close before launch; the same guards stop this owned run after cancellation/expiry. Finally stops its owned launcher/game. This wrapper does not establish visible UI acceptance or control Chrome tabs.',
+      'Starts play-native.sh --open in Google Chrome. Private OUT/browser/owner-open-current.json contains the exact URL and closeProofPath for CUA review. The actual page area determines the game size unless --size is supplied. Holds the ready page for 60 seconds by default; root must close the exact launch tab through CUA and write its closure proof. --session-dir opts into deadline.json/cancel guards and waiting for the owner connection to close before launch; the same guards stop this owned run after cancellation/expiry. Finally stops its owned launcher/game. This wrapper does not establish visible UI acceptance or control Chrome tabs.',
   );
   process.exit(0);
 }
@@ -74,7 +74,7 @@ const report = {
   startedAt: new Date().toISOString(),
   phase: 'starting',
   holdSeconds,
-  requestedSize: options.size ?? 'primary-display-points',
+  requestedSize: options.size ?? 'actual-page-area',
   url: null,
   runDirectory: null,
   observedPid: null,
@@ -221,11 +221,42 @@ try {
   if (!report.runDirectory || !resolve(report.runDirectory).startsWith(runPrefix))
     throw new Error('Launcher returned an unexpected owned run directory');
   report.ports = { page: Number(url.port), agent: Number(agent.port) };
-  const status = JSON.parse(await readFile(join(report.runDirectory, 'status.json'), 'utf8'));
+  // Default launches print the URL before Chrome measures the page and the game
+  // starts. The CUA review window begins only after the original helper is
+  // running and the launcher has confirmed a usable menu, within the same
+  // startup deadline and owner/cancellation boundary as URL discovery.
+  let status;
+  let viewportStatus;
+  while (!exited && !interrupted && Date.now() < startupDeadline) {
+    if (boundary) await boundary.assertActive();
+    try {
+      status = JSON.parse(await readFile(join(report.runDirectory, 'status.json'), 'utf8'));
+      if (status.running === false) throw new Error('Owned game exited before the CUA review window');
+      if (url.searchParams.get('native-viewport') === '1')
+        viewportStatus = JSON.parse(await readFile(join(report.runDirectory, 'viewport-state.json'), 'utf8'));
+      if (boundary) await boundary.assertActive();
+      if (
+        status.running === true &&
+        status.handshake === true &&
+        (url.searchParams.get('native-viewport') !== '1' || viewportStatus?.ready === true)
+      )
+        break;
+    } catch (error) {
+      if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+    }
+    await delay(100);
+  }
   if (boundary) await boundary.assertActive();
-  report.observedPid = status.pid;
-  report.nativeResolution = url.searchParams.get('resolution');
-  report.gates.readyUrl = status.running === true && status.handshake === true;
+  report.observedPid = status?.pid ?? null;
+  report.nativeResolution = viewportStatus?.resolution
+    ? `${viewportStatus.resolution.width}x${viewportStatus.resolution.height}`
+    : url.searchParams.get('resolution');
+  report.gates.readyUrl =
+    !exited &&
+    !interrupted &&
+    status?.running === true &&
+    status.handshake === true &&
+    (url.searchParams.get('native-viewport') !== '1' || viewportStatus?.ready === true);
   if (!report.gates.readyUrl) throw new Error('Owned game did not report ready/running');
   report.phase = 'ready-for-cua';
   report.readyAt = new Date().toISOString();

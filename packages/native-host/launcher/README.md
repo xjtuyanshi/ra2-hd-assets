@@ -61,31 +61,44 @@ Wine path mapping has the same bounded wait. These startup timeouts do not
 establish runtime performance or browser acceptance.
 
 `--open` opens **Google Chrome** explicitly. The printed URL goes straight to
-the supplied YR development resources and attaches to the running native game;
+the supplied YR development resources and attaches to the owned native game;
 no resource-picker or game-version clicks are needed. Both this launcher and
 `scripts/remaster/play.sh` obtain the HD picture options from
 `scripts/remaster/play-options.mjs`, including the cinematic look, enhanced
 effects/water, remaster vehicles, HD vehicle projection and HD UI.
 
 `--size WxH` selects the native match resolution, for example
-`--size 1280x720`. Without it, the launcher measures the primary macOS display
-in **points**, not Retina pixels. Sizes conservatively reuse the repository's
-shared 800×600 through 2560×1600 session range and the existing native picture
-protocol's 2,097,152-pixel limit;
-an oversized display is reduced proportionally. The launcher prints the applied
+`--size 1280x720`. Without it, the launcher serves the page before starting the
+original game. The page reports its actual available play area and device pixel
+ratio through an authenticated loopback endpoint, and the launcher selects a
+logical size with two device pixels per game pixel. Odd page dimensions are
+preserved. Sizes must fit the repository's shared 800×600 through 2560×1600
+session range and the native picture protocol's 2,097,152-pixel limit;
+unsupported page dimensions produce a visible error instead of silently
+shrinking the picture. Explicit `--size` retains the existing proportional
+capping behavior and bypasses page measurement. The launcher prints the applied
 size and writes only `ScreenWidth`, `ScreenHeight` and `AllowHiResModes` in the
 supplied copy's `RA2MD.INI` **before** starting the game. It preserves unrelated
 settings, ANSI bytes, comments and line endings, refuses symlinks, Unicode BOMs
 and ambiguous INI case variants, and keeps
 an exclusive original backup in the private launch directory when changing an
 existing file. The selected resolution remains in that supplied copy after
-exit. A process with no macOS display access must provide `--size` explicitly.
+exit. A process without an interactive browser must provide `--size` explicitly.
+
+`--fullscreen` waits for the player to open the page controls and click the
+ordinary fullscreen button before reporting the first resolution. Browser
+fullscreen requires that user gesture; the page checks the actual fullscreen
+element instead of relying on a Chrome launch flag. Normal `--open` requests a
+maximized window, and the measured page area remains authoritative.
 
 The **native resolution is fixed for the session**. Resizing Chrome only scales
 the current picture; stop and relaunch with another `--size` to change the game
-resolution. The native main menu retains its original menu dimensions until a
-match begins. The v86 launcher's `resolution=display` boot-time behavior is
-unchanged; the native URL records its already applied explicit size.
+resolution, or omit `--size` to measure the new page area. Changing fullscreen or
+reloading the page after startup does not change the game's video mode. The
+native main menu retains its original menu dimensions until a match begins.
+The default native URL uses `resolution=display` and `native-viewport=1`; the
+page waits for the usable original main menu before attaching. Explicit sizes
+remain recorded in the URL. The v86 resolution behavior is unchanged.
 
 The entry point builds the DLL/helper only when missing, builds the existing
 relay library, and selects two currently free loopback ports in 15450–15459.

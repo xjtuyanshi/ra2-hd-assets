@@ -68,12 +68,14 @@ describe('live sprite buffers', () => {
     const source = sprite(2);
     const first = pool.take(source.anchor, source.frame, 'unit', 1, true, true, 2, 'full');
     first.gradeExempt = true;
+    first.indexedHousePaint = true;
     pool.begin();
     const second = pool.take(new Vector3(3, 4, 5), source.frame, 'unit', 0, false);
     expect(second).toBe(first);
     expect(second.anchor.toArray()).toEqual([3, 4, 5]);
     expect(second).toMatchObject({ flat: false, shadow: false, light: 1, lighting: 'ambient' });
     expect(second.gradeExempt).toBeUndefined();
+    expect(second.indexedHousePaint).toBeUndefined();
     expect(source.anchor.x).toBe(2);
   });
 
@@ -87,6 +89,22 @@ describe('live sprite buffers', () => {
     layer.setInstances([sprite(1, true)]);
     expect(buffers.anchor.array[5]).toBe(0);
     expect(buffers.flags.array[1]).toBe(1);
+    layer.mesh.geometry.dispose();
+    layer.mesh.dispose();
+  });
+
+  it('packs indexed house paint independently of map-grade exemption and clears it on reuse', () => {
+    const layer = new SpriteLayer(cache, [], 1);
+    const card = { ...sprite(1), indexedHousePaint: true };
+    const buffers = layer as unknown as Buffers;
+    layer.setInstances([card]);
+    expect(buffers.anchor.array[5]).toBe(2);
+    layer.setInstances([{ ...card, gradeExempt: true }]);
+    expect(buffers.anchor.array[5]).toBe(3);
+    layer.setInstances([{ ...sprite(1), gradeExempt: true }]);
+    expect(buffers.anchor.array[5]).toBe(1);
+    layer.setInstances([sprite(1)]);
+    expect(buffers.anchor.array[5]).toBe(0);
     layer.mesh.geometry.dispose();
     layer.mesh.dispose();
   });

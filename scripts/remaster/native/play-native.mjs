@@ -26,13 +26,13 @@ import { HD_PLAY_OPTIONS } from '../play-options.mjs';
 import {
   capNativeResolution,
   configureNativeResolution,
-  mainDisplaySize,
+  nativeViewportResolution,
   parseNativeSize,
 } from './native-resolution.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const packageDirectory = join(repository, 'packages/native-host');
-const help = `Usage: scripts/remaster/native/play-native.sh [--open] [--size WxH]
+const help = `Usage: scripts/remaster/native/play-native.sh [--open] [--fullscreen] [--size WxH]
 
 Required environment:
   RA2_NATIVE_GAME_DIR           Player-owned game copy containing gamemd.exe.
@@ -46,10 +46,13 @@ Optional environment:
 
 Starts a hidden native game and the local development page, attached directly to
 the supplied YR copy with the shared HD play look. --open opens Google Chrome.
---size defaults to the main macOS display's size in points, capped to supported
-game/picture bounds. Writes only the resolution keys in the supplied RA2MD.INI
-before start and retains its original backup. Native resolution stays fixed for
-the session; resizing Chrome scales its picture. Keep this terminal open.
+By default the page reports its real available area before the game starts, so
+each game pixel occupies two device pixels. --fullscreen waits for the page's
+ordinary fullscreen button before measurement; Chrome requires that user click.
+--size explicitly selects a fixed size and bypasses page measurement. Writes only
+the resolution keys in the supplied RA2MD.INI before start and retains its
+original backup. Native resolution stays fixed for the session; resizing Chrome
+after startup scales its picture. Keep this terminal open.
 Ctrl-C stops the owned game/page and restores a backed-up DLL. No downloads,
 bottle-wide shutdown, or game automation are performed.`;
 
@@ -329,10 +332,12 @@ export async function runLauncher(arguments_, environment = process.env) {
     return;
   }
   let openBrowser = false;
+  let fullscreenBrowser = false;
   let requestedSize = null;
   for (let index = 0; index < arguments_.length; index++) {
     const argument = arguments_[index];
     if (argument === '--open') openBrowser = true;
+    else if (argument === '--fullscreen') fullscreenBrowser = true;
     else if (argument === '--size') requestedSize = parseNativeSize(arguments_[++index]);
     else throw new Error(`Unknown argument: ${argument}; use --help`);
   }
@@ -351,7 +356,7 @@ export async function runLauncher(arguments_, environment = process.env) {
   };
   const wine = await wineConfiguration(environment);
   await validateHdCache(environment);
-  const resolution = capNativeResolution(requestedSize ?? mainDisplaySize());
+  let resolution = requestedSize ? capNativeResolution(requestedSize) : null;
   const vite = join(repository, 'node_modules/vite/bin/vite.js');
   if (!(await exists(vite))) throw new Error('启动器所需的本地组件缺失。请先完成项目准备，再运行启动器。');
 
@@ -363,6 +368,7 @@ export async function runLauncher(arguments_, environment = process.env) {
   const stopPath = join(runDirectory, 'stop');
   const statusPath = join(runDirectory, 'status.json');
   const sessionStatusPath = join(runDirectory, 'session-state.json');
+  const viewportStatusPath = join(runDirectory, 'viewport-state.json');
   async function publishSessionState(state) {
     const pending = sessionStatusPath + '.tmp';
     await writeFile(pending, JSON.stringify({ state }), { mode: 0o600 });
@@ -583,12 +589,6 @@ export async function runLauncher(arguments_, environment = process.env) {
     const gameRoot = join(runDirectory, 'game');
     await mkdir(gameRoot);
     await symlink(gameDirectory, join(gameRoot, 'ra2'), 'dir');
-    const configured = await configureNativeResolution(gameDirectory, runDirectory, resolution);
-    console.log(
-      `Native resolution: ${resolution.width}x${resolution.height} (fixed for this session; ${configured.target})`,
-    );
-    console.log(`本次游戏画面为 ${resolution.width}×${resolution.height}；需要改变尺寸时请退出并重新启动。`);
-    installation = await installDll(dll, join(gameDirectory, 'ddraw.dll'), runDirectory);
     const { open } = await import('node:fs/promises');
     const pageLog = await open(join(runDirectory, 'page.log'), 'wx', 0o600);
     try {
@@ -600,6 +600,7 @@ export async function runLauncher(arguments_, environment = process.env) {
           RA2_NATIVE_SESSION_STATUS: sessionStatusPath,
           RA2_NATIVE_LAUNCH_STATUS: statusPath,
           RA2_NATIVE_SESSION_TOKEN: token,
+          RA2_NATIVE_VIEWPORT_STATUS: requestedSize ? '' : viewportStatusPath,
         },
         stdio: ['ignore', pageLog.fd, pageLog.fd],
       });
@@ -616,6 +617,51 @@ export async function runLauncher(arguments_, environment = process.env) {
       if (Date.now() >= startupDeadline) throw new Error('游戏页面未能在 30 秒内启动。请查看本次记录中的 page.log。');
       await delay(100);
     }
+    const url = new URL(origin);
+    url.search = new URLSearchParams({
+      ...HD_PLAY_OPTIONS,
+      backend: 'native',
+      agent: agentUrl,
+      'agent-token': token,
+      'native-autostart': 'yr',
+      'native-viewport': requestedSize ? '0' : '1',
+      'native-fullscreen': fullscreenBrowser && !requestedSize ? '1' : '0',
+      resolution: resolution ? `${resolution.width}x${resolution.height}` : 'display',
+    }).toString();
+    async function openPage() {
+      if (openBrowser)
+        await complete(start('/usr/bin/open', ['-a', 'Google Chrome', url.href, '--args', '--start-maximized']));
+    }
+    let viewport;
+    if (!resolution) {
+      console.log(`Play URL: ${url.href}`);
+      console.log('请在 Chrome 打开上面的游戏网址；游戏将按页面实际大小启动。保留本窗口；按 Ctrl-C 可退出。');
+      if (fullscreenBrowser) console.log('请在页面左下角打开控制栏，点击“全屏”；游戏会在进入全屏后启动。');
+      await openPage();
+      const viewportDeadline = Date.now() + 120000;
+      for (;;) {
+        if (stopping || page.exited) throw new Error('游戏页面在测量画面时退出。请重新启动。');
+        try {
+          const status = JSON.parse(await readFile(viewportStatusPath, 'utf8'));
+          if (status.viewport) {
+            viewport = status.viewport;
+            resolution = nativeViewportResolution(viewport);
+            break;
+          }
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+        if (Date.now() >= viewportDeadline)
+          throw new Error('游戏页面没有在两分钟内完成画面测量。请在 Chrome 打开启动器给出的完整网址后重试。');
+        await delay(100);
+      }
+    }
+    const configured = await configureNativeResolution(gameDirectory, runDirectory, resolution);
+    console.log(
+      `Native resolution: ${resolution.width}x${resolution.height} (fixed for this session; ${configured.target})`,
+    );
+    console.log(`本次游戏画面为 ${resolution.width}×${resolution.height}；需要改变尺寸时请退出并重新启动。`);
+    installation = await installDll(dll, join(gameDirectory, 'ddraw.dll'), runDirectory);
     const gameLog = await open(join(runDirectory, 'wine.log'), 'wx', 0o600);
     const gameEnvironment = {
       ...wine.environment,
@@ -675,19 +721,17 @@ export async function runLauncher(arguments_, environment = process.env) {
       }
       await delay(100);
     }
-    const url = new URL(origin);
-    url.search = new URLSearchParams({
-      ...HD_PLAY_OPTIONS,
-      backend: 'native',
-      agent: agentUrl,
-      'agent-token': token,
-      'native-autostart': 'yr',
-      resolution: `${resolution.width}x${resolution.height}`,
-    }).toString();
+    if (viewport) {
+      const pending = `${viewportStatusPath}.tmp`;
+      await writeFile(pending, JSON.stringify({ viewport, ready: true, resolution }), { mode: 0o600 });
+      await rename(pending, viewportStatusPath);
+    }
     console.log(`Native process ${hello.pid}; agent ${ports.agent}; page ${ports.page}`);
-    console.log(`Play URL: ${url.href}`);
-    console.log('请在 Chrome 打开上面的游戏网址。保留本窗口；按 Ctrl-C 可退出本次游戏。');
-    if (openBrowser) await complete(start('/usr/bin/open', ['-a', 'Google Chrome', url.href]));
+    if (requestedSize) {
+      console.log(`Play URL: ${url.href}`);
+      console.log('请在 Chrome 打开上面的游戏网址。保留本窗口；按 Ctrl-C 可退出本次游戏。');
+      await openPage();
+    }
     await Promise.race([launcher.done, page.done, stopRequested]);
     if (!stopping && page.exited) throw new Error('游戏页面已停止，正在关闭本次游戏。');
     if (!stopping && launcher.error) throw launcher.error;

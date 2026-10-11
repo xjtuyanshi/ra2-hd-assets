@@ -15,7 +15,7 @@ export async function disableWorkerNetworkPayloadObservation(page) {
     throw new Error('Use in-process chromium.launch for bounded Worker payload observation');
   let disabled = 0;
   for (const info of sessions.values()) {
-    if (!info.workerFrame) continue;
+    if (!info.workerFrame || info.session._closed || info.session._crashed) continue;
     await info.session.send('Network.disable');
     disabled++;
   }

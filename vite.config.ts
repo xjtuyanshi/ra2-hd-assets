@@ -1,6 +1,6 @@
 import { defineConfig, type Plugin } from 'vite';
 import basicSsl from '@vitejs/plugin-basic-ssl';
-import { createReadStream, readFileSync, readdirSync, statSync, type Stats } from 'node:fs';
+import { createReadStream, readFileSync, readdirSync, renameSync, statSync, writeFileSync, type Stats } from 'node:fs';
 import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -33,6 +33,72 @@ function gameAssetsPlugin(): Plugin {
         ),
       );
       server.middlewares.use('/game', serveGameAsset);
+      // The native launcher waits for the real page area before starting the
+      // original game. This private endpoint never exposes paths or credentials.
+      server.middlewares.use('/__native/viewport', (req, res) => {
+        const viewportPath = process.env.RA2_NATIVE_VIEWPORT_STATUS;
+        const token = process.env.RA2_NATIVE_SESSION_TOKEN;
+        if (
+          !['GET', 'POST'].includes(req.method ?? '') ||
+          !viewportPath ||
+          !token ||
+          req.headers.authorization !== `Bearer ${token}` ||
+          req.socket.remoteAddress !== '127.0.0.1'
+        ) {
+          res.statusCode = 404;
+          res.end();
+          return;
+        }
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Content-Type', 'application/json');
+        if (req.method === 'GET') {
+          try {
+            const status = JSON.parse(readFileSync(viewportPath, 'utf8'));
+            res.end(JSON.stringify({ ready: status.ready === true, resolution: status.resolution ?? null }));
+          } catch {
+            res.end(JSON.stringify({ ready: false, resolution: null }));
+          }
+          return;
+        }
+        let body = '';
+        req.setEncoding('utf8');
+        req.on('data', (chunk) => {
+          body += chunk;
+          if (body.length > 512) req.destroy();
+        });
+        req.on('end', () => {
+          try {
+            const { width, height, dpr } = JSON.parse(body);
+            if (
+              ![width, height, dpr].every(Number.isFinite) ||
+              width <= 0 ||
+              width > 16384 ||
+              height <= 0 ||
+              height > 16384 ||
+              dpr < 0.5 ||
+              dpr > 8
+            )
+              throw new Error('Invalid viewport');
+            // The first report owns this launch's size; retries and resize
+            // notifications cannot replace it while the game is starting.
+            try {
+              const current = JSON.parse(readFileSync(viewportPath, 'utf8'));
+              if (current.viewport) {
+                res.end(JSON.stringify({ ready: current.ready === true, resolution: current.resolution ?? null }));
+                return;
+              }
+            } catch {}
+            writeFileSync(`${viewportPath}.tmp`, JSON.stringify({ viewport: { width, height, dpr }, ready: false }), {
+              mode: 0o600,
+            });
+            renameSync(`${viewportPath}.tmp`, viewportPath);
+            res.end(JSON.stringify({ ready: false, resolution: null }));
+          } catch {
+            res.statusCode = 400;
+            res.end('{}');
+          }
+        });
+      });
       // The launcher exposes only this run's coarse state, never its private
       // paths, process identity, credentials or helper diagnostics.
       server.middlewares.use('/__native/session', (req, res) => {

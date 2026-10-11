@@ -25,6 +25,7 @@ import {
   capNativeResolution,
   configureNativeResolution,
   nativeResolutionIniName,
+  nativeViewportResolution,
   parseNativeSize,
   patchNativeResolutionIni,
 } from './native-resolution.mjs';
@@ -406,6 +407,15 @@ test('native size parsing and main-display capping respect game and picture boun
   assert.throws(() => capNativeResolution({ width: 0, height: 600 }), /valid size/);
 });
 
+test('native viewport matching uses measured device pixels and keeps odd heights', () => {
+  assert.deepEqual(nativeViewportResolution({ width: 1728, height: 963, dpr: 2 }), { width: 1728, height: 963 });
+  assert.deepEqual(nativeViewportResolution({ width: 1728, height: 1117, dpr: 2 }), { width: 1728, height: 1117 });
+  assert.deepEqual(nativeViewportResolution({ width: 1728, height: 900, dpr: 1.5 }), { width: 1296, height: 675 });
+  assert.throws(() => nativeViewportResolution({ width: 2560, height: 1440, dpr: 2 }), /超出/);
+  assert.throws(() => nativeViewportResolution({ width: 700, height: 600, dpr: 2 }), /超出/);
+  assert.throws(() => nativeViewportResolution({ width: 1728, height: 963, dpr: 0 }), /有效/);
+});
+
 test('native resolution patch preserves unrelated ANSI bytes, comments, sections and line endings', () => {
   const before = Buffer.from(
     '; \xff player comment\r\n[Video]\r\n ScreenWidth = 800 ; width\r\nScreenHeight=600\r\nScreenWidth=1024\r\nAllowHiResModes=no\r\n[Options]\r\nGameSpeed=1\r\nSoundVolume=0.7\r\n',
@@ -580,19 +590,23 @@ if (args[0] === 'winepath.exe') {
 `,
         { mode: 0o755 },
       );
-      const child = spawn('bash', ['scripts/remaster/native/play-native.sh', '--size', '1280x720'], {
-        cwd: repository,
-        env: {
-          ...process.env,
-          RA2_NATIVE_GAME_DIR: dir,
-          RA2_NATIVE_WINE_PREFIX: prefix,
-          RA2_NATIVE_WINE: wine,
-          RA2_HD_CACHE_DIR: dir,
-          RA2_NATIVE_WINE_BOTTLE: '',
-          WINEPREFIX: '',
+      const child = spawn(
+        'bash',
+        ['scripts/remaster/native/play-native.sh', ...(stopFailure ? ['--size', '1280x720'] : ['--fullscreen'])],
+        {
+          cwd: repository,
+          env: {
+            ...process.env,
+            RA2_NATIVE_GAME_DIR: dir,
+            RA2_NATIVE_WINE_PREFIX: prefix,
+            RA2_NATIVE_WINE: wine,
+            RA2_HD_CACHE_DIR: dir,
+            RA2_NATIVE_WINE_BOTTLE: '',
+            WINEPREFIX: '',
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      );
       let output = '';
       child.stdout.setEncoding('utf8');
       child.stderr.setEncoding('utf8');
@@ -619,11 +633,38 @@ if (args[0] === 'winepath.exe') {
       assert.match(output, /Play URL: /, output);
       const url = new URL(output.match(/Play URL: (\S+)/)[1]);
       const runPath = output.match(/Private launch logs and DLL backups: (.+)/)[1];
+      if (!stopFailure) {
+        const endpoint = `${url.origin}/__native/viewport`;
+        const headers = { Authorization: `Bearer ${url.searchParams.get('agent-token')}` };
+        assert.equal((await fetch(endpoint)).status, 404);
+        assert.deepEqual(await (await fetch(endpoint, { headers })).json(), { ready: false, resolution: null });
+        assert.equal(await readFile(target, 'utf8'), 'player DLL preserved by lifecycle test');
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ width: 1728, height: 963, dpr: 2 }),
+        });
+        assert.equal(response.status, 200);
+        const readyDeadline = Date.now() + 30000;
+        while (!output.includes('Native process ') && !exited && Date.now() < readyDeadline) await delay(100);
+        assert.match(output, /Native process /, output);
+        assert.deepEqual(await (await fetch(endpoint, { headers })).json(), {
+          ready: true,
+          resolution: { width: 1728, height: 963 },
+        });
+        assert.match(await readFile(join(dir, 'RA2MD.INI'), 'utf8'), /ScreenWidth=1728\nScreenHeight=963/);
+      }
       assert.equal(url.searchParams.get('backend'), 'native');
       assert.equal(url.searchParams.get('native-autostart'), 'yr');
-      assert.equal(url.searchParams.get('resolution'), '1280x720');
+      assert.equal(url.searchParams.get('native-fullscreen'), stopFailure ? '0' : '1');
+      assert.equal(url.searchParams.get('resolution'), stopFailure ? '1280x720' : 'display');
       for (const [key, value] of Object.entries(HD_PLAY_OPTIONS)) assert.equal(url.searchParams.get(key), value);
-      assert.match(output, /Native resolution: 1280x720 \(fixed for this session/);
+      assert.match(
+        output,
+        stopFailure
+          ? /Native resolution: 1280x720 \(fixed for this session/
+          : /Native resolution: 1728x963 \(fixed for this session/,
+      );
       assert.match(url.searchParams.get('agent-token'), /^[a-f0-9]{64}$/);
       const listingResponse = await fetch(`${url.origin}/game/.list?dir=ra2`);
       assert.equal(listingResponse.status, 200);

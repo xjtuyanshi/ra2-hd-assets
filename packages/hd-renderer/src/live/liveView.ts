@@ -2795,10 +2795,9 @@ export class LiveView {
   }
 
   /**
-   * Queue a library frame on its atlas page (skipped while the page loads). `indexed` art is drawn from the indexed page
-   * with its palette even when the page has HD art: the offline HD pages bake house paint into the colours of art
-   * extracted as Remapable=no, so buildings that the engine remaps anyway (civilian CAOILD's roof in the Neutral grey)
-   * would keep the raw palette's red there.
+   * Queue a library frame on its atlas page (skipped while the page loads). `indexed` explicitly retains source art,
+   * including shadows whose HD rectangles are empty. Building foregrounds use HD regardless of Remapable=:
+   * indexedHousePaint recovers missing/baked house paint through the owner's palette without discarding the redraw.
    */
   private queue(batch: SpriteBatch, instance: ObjectSprite, indexed = false): void {
     const page = instance.frame.page ?? 0;
@@ -2903,12 +2902,11 @@ export class LiveView {
       const make = sprites[type.building!.buildup!]!;
       const mk = make.frames[buildup];
       const shadow = make.shadows?.[buildup];
-      const plain = !make.remap;
       if (shadow)
         this.queue(
           batch,
           this.spritePool.take(anchor, shadow, this.buildingPalette(make, visual.paletteKey), 0, true, true),
-          plain,
+          true,
         );
       if (mk && mk.rect[2] > 0) {
         const card = this.spritePool.take(
@@ -2926,7 +2924,8 @@ export class LiveView {
           undefined,
           this.cache.depthTemplate,
         );
-        this.queue(batch, card, plain);
+        card.indexedHousePaint = !make.remap;
+        this.queue(batch, card);
       }
       return false;
     }
@@ -2945,7 +2944,8 @@ export class LiveView {
         !this.cache.depthTemplate,
       );
       if (this.cache.depthTemplate) card.nativeDepth = { mode: 'ground', bonus: 2 };
-      this.queue(batch, card, !bib.remap);
+      card.indexedHousePaint = !bib.remap;
+      this.queue(batch, card);
     }
     const layers = type.building?.layers ?? EMPTY_LAYERS;
     // The native picture changes the delivery image one logic frame after the state (BuildingVisualHistory).
@@ -2973,7 +2973,7 @@ export class LiveView {
       this.queue(
         batch,
         this.spritePool.take(anchor, shadow, this.buildingPalette(bodyArt, visual.paletteKey), 0, true, true),
-        !bodyArt.remap,
+        true,
       );
     const bodyFrame =
       bodyArt.frames[shownBody] ?? (delivering ? bodyArt.shadows?.[shownBody - bodyArt.frames.length] : undefined);
@@ -3004,9 +3004,10 @@ export class LiveView {
         false,
       );
       card.nativeDepth = nativeDepth;
+      card.indexedHousePaint = !bodyArt.remap;
       // HD atlases intentionally clear shadow rectangles. An inclusive-cap source shadow used as a body
       // must sample its original indexed pixels instead of that empty HD rectangle.
-      this.queue(batch, card, !bodyArt.remap || shownBody >= bodyArt.frames.length);
+      this.queue(batch, card, shownBody >= bodyArt.frames.length);
     }
 
     if (delivering) {
@@ -3020,7 +3021,8 @@ export class LiveView {
           false,
         );
         if (this.cache.depthTemplate) interior.nativeDepth = { mode: 'ground', bonus: 1 };
-        this.queue(batch, interior, !door!.remap);
+        interior.indexedHousePaint = !door!.remap;
+        this.queue(batch, interior);
       }
     }
     const native = this.nativeBuildingAnims(object, type);
@@ -3121,7 +3123,7 @@ export class LiveView {
       this.queue(
         batch,
         this.spritePool.take(layerAnchor, layerShadow, this.buildingPalette(art, visual.paletteKey), 0, true, true),
-        !art.remap,
+        true,
       );
     if (!layerFrameArt || layerFrameArt.rect[2] <= 0) return;
     const card = this.spritePool.take(
@@ -3143,7 +3145,8 @@ export class LiveView {
         card.nativeDepth = { mode: 'ground', bonus: 1 };
       } else card.nativeDepth = attachedBodyDepth(nativeDepth, [dx, dy], dy * GROUND_DEPTH);
     }
-    this.queue(batch, card, !art.remap);
+    card.indexedHousePaint = !art.remap;
+    this.queue(batch, card);
   }
 
   /**

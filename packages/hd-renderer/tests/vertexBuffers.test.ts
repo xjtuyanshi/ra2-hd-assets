@@ -377,7 +377,12 @@ describe('r186 vertex and uniform binding budget', () => {
           const exemptionLines = fragmentShader.split('\n').filter((line) => line.includes('spriteGradeExempt'));
           const label = `${mesh.name}: ${hd ? 'HD' : 'indexed'}, ${materials ? 'materials' : 'plain'}`;
           // Compile the real TSL graph: uploading an attribute alone does not prove the fragment shader reads it.
-          expect(exemptionLines.join('\n'), label).toMatch(/spriteGradeExempt\s*=\s*\w+\.z;/);
+          // Strip the independent indexed-house-paint bit before deciding whether to bypass the map grade.
+          const gradeBit = exemptionLines
+            .join('\n')
+            .match(/spriteGradeExempt\s*=\s*\( (\w+)\.z - \( spriteIndexedHousePaint \* 2\.0 \) \);/);
+          expect(gradeBit, label).not.toBeNull();
+          expect(fragmentShader, label).toContain(`spriteIndexedHousePaint = step( 1.5, ${gradeBit![1]}.z );`);
           // The per-instance flag chooses the instance's own light alone (no map grade); default instances keep the
           // class grade: the map light read once, its alpha (the object level) plus the instance's extra light for
           // objects, its rgb times the instance light for terrain-class art.

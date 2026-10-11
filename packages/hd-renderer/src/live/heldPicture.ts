@@ -9,6 +9,7 @@ interface HeldSprite {
   delta: Vector3;
   frame: SpriteFrame;
   palette: string;
+  indexedHousePaint?: boolean;
   push: number;
   shadow: boolean;
   flat: boolean;
@@ -69,6 +70,7 @@ export class HeldPicture {
       to.delta.copy(from.anchor).sub(base);
       to.frame = from.frame;
       to.palette = from.palette;
+      to.indexedHousePaint = from.indexedHousePaint;
       to.push = from.push;
       to.shadow = from.shadow;
       to.flat = !!from.flat;
@@ -104,6 +106,7 @@ export class HeldPicture {
         sprite.painterPart,
       );
       instance.opacity = sprite.opacity;
+      instance.indexedHousePaint = sprite.indexedHousePaint;
       instance.infantryShadow = sprite.infantryShadow;
       instance.nativeDepth = sprite.nativeDepth;
       instance.depthWrite = sprite.depthWrite;

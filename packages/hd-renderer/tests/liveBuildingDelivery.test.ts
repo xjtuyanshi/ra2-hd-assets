@@ -90,7 +90,7 @@ function deliveryView() {
     view.libraryBuildingSprites(object, visual, batch, { frame, houses: [], objects: [object] });
     return { batch, cards: queued.mock.calls.map((call) => call[1]) };
   };
-  return { object, type, sprites, painter, state, view, draw, queued };
+  return { object, type, sprites, painter, state, visual, view, draw, queued };
 }
 
 describe('live delivery building image', () => {
@@ -307,21 +307,44 @@ describe('live delivery building image', () => {
     },
   );
 
-  it('retains palette/remap routing for replacement images and clamps empty pairs to the normal body', () => {
+  it('uses HD replacement foregrounds with indexed house paint and retains source shadows', () => {
     const h = deliveryView();
     h.object.unloading = 'door';
     h.sprites.deploy!.remap = false;
     h.sprites.door!.remap = false;
     h.state.library.hasHdPage = () => true;
     const { batch } = h.draw();
-    expect(batch.get(-1)!.map((card) => card.frame)).toEqual([
-      h.sprites.deploy!.shadows![0],
-      h.sprites.deploy!.frames[0],
-      h.sprites.door!.frames[0],
-    ]);
-    for (const card of batch.get(-1)!) expect(card.palette).toBe('lib:unit@house0');
+    expect(batch.get(-1)!.map((card) => card.frame)).toEqual([h.sprites.deploy!.shadows![0]]);
+    for (const art of [h.sprites.deploy!, h.sprites.door!]) {
+      expect(batch.get(0)!.find((card) => card.frame === art.frames[0])).toMatchObject({
+        palette: 'lib:unit@house0',
+        indexedHousePaint: true,
+      });
+    }
     h.sprites.door!.frames.length = 0;
     expect(h.draw().cards[2]!.frame).toBe(h.sprites.body!.frames[0]);
+  });
+
+  it('keeps non-remappable bodies, bibs, layers and make art in HD under neutral and captured house palettes', () => {
+    const h = deliveryView();
+    for (const sprite of Object.values(h.sprites)) sprite.remap = false;
+    h.state.library.hasHdPage = () => true;
+    for (const owner of ['neutral', 'capturingHouse']) {
+      h.state.cache.paletteRow.set(`lib:unit@${owner}`, 2);
+      h.visual.paletteKey = owner;
+      for (const building of [false, true]) {
+        h.object.buildState = building ? 'building' : 'done';
+        h.object.buildupFrame = building ? 0 : undefined;
+        const { batch, cards } = h.draw();
+        const foregrounds = cards.filter((card) => !card.shadow);
+        expect(foregrounds).toHaveLength(building ? 1 : 3);
+        expect(batch.get(-1)!.every((card) => card.shadow)).toBe(true);
+        expect(batch.get(0)).toEqual(foregrounds);
+        for (const card of foregrounds) {
+          expect(card).toMatchObject({ palette: `lib:unit@${owner}`, indexedHousePaint: true });
+        }
+      }
+    }
   });
 
   it.each(['building', 'selling'] as const)(

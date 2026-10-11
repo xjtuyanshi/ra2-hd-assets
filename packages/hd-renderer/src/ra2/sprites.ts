@@ -94,6 +94,8 @@ export interface SpriteInstance {
   frame: SpriteFrame;
   /** Palette row key; remappable art uses its house row (see paletteFor). */
   palette: string;
+  /** Recover house paint from the indexed source when an HD page has no encoded paint for this art. */
+  indexedHousePaint?: boolean;
   /** World units to pull the card towards the camera so terrain around the base never cuts it (see cardPush). */
   push: number;
   shadow: boolean;
@@ -377,7 +379,9 @@ class SpriteGraph {
       'flat',
       'either',
     );
-    const aGradeExempt: ShaderNode = aLighting.z.toVar('spriteGradeExempt');
+    // Two independent bits share this existing component; no extra instance attribute or vertex buffer is needed.
+    const indexedHousePaint: ShaderNode = step(1.5, aLighting.z).toVar('spriteIndexedHousePaint');
+    const aGradeExempt: ShaderNode = aLighting.z.sub(indexedHousePaint.mul(2)).toVar('spriteGradeExempt');
     const aFlags: ShaderNode = attribute('spriteFlags', 'vec4');
     const aOcclusion: ShaderNode = attribute('spriteOcclusion', 'vec4');
     const aNative: ShaderNode = attribute('spriteNative', 'vec4');
@@ -594,6 +598,8 @@ class SpriteGraph {
         const index: ShaderNode = float(0).toVar();
         const fill: ShaderNode = float(0).toVar();
         const fillWeight: ShaderNode = float(0).toVar();
+        const houseIndex: ShaderNode | null = features.hd ? float(0).toVar() : null;
+        const houseWeight: ShaderNode | null = features.hd ? float(0).toVar() : null;
         for (const oy of [-1, 0, 1]) {
           for (const ox of [-1, 0, 1]) {
             const k: ShaderNode = k0.add(vec2(ox, oy));
@@ -602,6 +608,11 @@ class SpriteGraph {
             const occupied: ShaderNode = step(0.5, i).mul(inside.x).mul(inside.y).toVar();
             const w: ShaderNode = weights(ox).x.mul(weights(oy).y).mul(occupied).toVar();
             coverage.addAssign(w);
+            if (houseIndex && houseWeight) {
+              const paintWeight: ShaderNode = w.mul(step(15.5, i)).mul(step(i, 31.5));
+              houseIndex.addAssign(i.mul(paintWeight));
+              houseWeight.addAssign(paintWeight);
+            }
             if (ox === 0 && oy === 0) {
               index.assign(i.mul(occupied));
             } else {
@@ -683,11 +694,28 @@ class SpriteGraph {
           art = vec4(lit.add(litGlow), litAlpha);
         } else {
           const hdArt: ShaderNode = texture(hdColour, atlasUv);
-          const paint: ShaderNode = texture(hdRemap, atlasUv).r;
+          const hdPaint: ShaderNode = texture(hdRemap, atlasUv).r;
+          const sourcePaint: ShaderNode = indexedHousePaint.mul(step(15.5, index)).mul(step(index, 31.5));
+          const paint: ShaderNode = max(hdPaint, sourcePaint);
           // House paint was written as grey(i) = 255 - (i - 16) * 15 in sRGB; invert it to a fractional remap index and
           // take the instance's house colours from its palette row, blending between neighbouring entries.
           const grey = pow(hdArt.g.max(0), 1 / 2.2).mul(255);
-          const remapIndex = clamp(float(16).add(float(255).sub(grey).div(15)), 16, 31);
+          const encodedIndex = clamp(float(16).add(float(255).sub(grey).div(15)), 16, 31);
+          // Buildings are remapped by the engine even when their art says Remapable=no. Some installed pages have
+          // encoded grey paint for these sprites (keep its redraw shading); older pages have an empty mask or bake
+          // the palette's red into a non-grey masked texel. Reuse the indexed taps for the owner's original ramp in
+          // those places, retaining the HD colour/detail everywhere else. The weighted ramp also covers mask fringes.
+          const nonGrey: ShaderNode = step(1e-6, max(hdArt.r.sub(hdArt.g).abs(), hdArt.g.sub(hdArt.b).abs()));
+          const indexedFallback: ShaderNode = max(
+            sourcePaint.mul(float(1).sub(step(1e-6, hdPaint))),
+            indexedHousePaint.mul(step(1e-6, hdPaint)).mul(nonGrey),
+          );
+          const originalIndex: ShaderNode = clamp(
+            select(houseWeight!.greaterThan(1e-6), houseIndex!.div(max(houseWeight!, 1e-6)), index),
+            16,
+            31,
+          );
+          const remapIndex = mix(encodedIndex, originalIndex, indexedFallback);
           const i0 = floor(remapIndex);
           let house: ShaderNode = mix(paletteColour(i0), paletteColour(i0.add(1).min(31)), remapIndex.sub(i0));
           if (features.paintSaturation < 1) {
@@ -1267,7 +1295,7 @@ export class SpriteLayer {
         this.anchor.setXYZ(i, s.anchor.x, s.anchor.y, s.anchor.z);
         this.anchor.setComponent(i, 3, s.lightSample?.[0] ?? s.anchor.x);
         this.anchor.setComponent(i, 4, s.lightSample?.[1] ?? s.anchor.z);
-        this.anchor.setComponent(i, 5, s.gradeExempt ? 1 : 0);
+        this.anchor.setComponent(i, 5, (s.gradeExempt ? 1 : 0) + (s.indexedHousePaint ? 2 : 0));
         const tinted = !s.shadow && !s.kind;
         this.anchor.setComponent(i, 6, tinted ? (s.tintLight ?? 1) : 1);
         this.anchor.setComponent(i, 7, tinted ? (s.tintColour ?? 0) : 0);

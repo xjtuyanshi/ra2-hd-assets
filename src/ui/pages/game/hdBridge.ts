@@ -1,4 +1,5 @@
 import type { VmShell } from '../../../adapter/vmShell';
+import type { VmFrame } from '../../../vm86/win32';
 import type { GameRenderEffects, GameRenderSidebar, GameRenderState } from '../../../games/renderState';
 import {
   RENDER_PASSTHROUGH,
@@ -49,10 +50,11 @@ import { t } from '../../shared/i18n/translate';
  * it, so a cache built while the page stays open is picked up without a reload. While a match runs on such a map the
  * host is told why the original picture is shown (`publishStatus`), once per match (see NOTICE_MS).
  *
- * A match does not start with a half-drawn battlefield. The view is created while the game shows its loading screen
- * and draws out of sight from then on; the original picture stays (no transparent rectangle, no passthrough) until
+ * A native match starts behind a dark tactical curtain as soon as the game's video mode changes. The view
+ * draws out of sight until
  * the match runs and the view has drawn REVEAL_SETTLED_FRAMES complete frames in a row (LiveView.settledFrames), or
- * until REVEAL_DEADLINE_MS have passed. What a match showed in its first minutes is remembered (hdWarmStore.ts) and
+ * until REVEAL_DEADLINE_MS have passed. The curtain fades only after passthrough is accepted and its key appears in
+ * a native picture. The VM route retains its original-picture preparation. What a match showed is remembered (hdWarmStore.ts) and
  * prepared during the next loading screen, so that wait is normally a few frames. Once shown, the view stays for the
  * match: art that loads later appears as it arrives.
  *
@@ -135,6 +137,10 @@ const SIDEBAR_WIDTH = 168;
 const COMMAND_BAR_HEIGHT = 32;
 /** After passthrough is switched off, frames the game already rendered may still carry the key colour. */
 const PASSTHROUGH_TRAIL_MS = 500;
+/** Brief state gaps (including other input windows) keep the last HD picture instead of flashing the original. */
+const STATE_HIDE_HOLD_MS = 500;
+/** Fade from the native startup curtain into the completed, keyed HD battlefield. */
+const CURTAIN_FADE_MS = 300;
 /**
  * Minimum time between two snapshot requests while the HD view shows the current map. Each request runs on the
  * emulator's thread (a snapshot whose logic frame moved on is read in full; an unchanged one comes back as the
@@ -224,6 +230,22 @@ export interface HdBridgeTimeline {
   revealReason: 'settled' | 'deadline' | null;
   /** Art still on its way when the view was shown (0 unless the deadline passed). */
   revealLoading: number;
+  /** Native tactical curtain and the completed fade; null on the VM route. */
+  curtainAt: number | null;
+  curtainLiftedAt: number | null;
+  /** Page-session history, including matches that ended before the current one. */
+  transitions: HdBridgeTransition[];
+  transitionsOmitted: number;
+}
+
+export interface HdBridgeTransition {
+  atMs: number;
+  time: string;
+  map: string | null;
+  frame: number;
+  from: 'original' | 'curtain' | 'hd';
+  to: 'original' | 'curtain' | 'hd';
+  reason: string;
 }
 
 /** Page-clock observations at the bridge boundary, independent of rAF and the game's target frame rate. */
@@ -338,6 +360,10 @@ const emptyTimeline = (map: string | null): HdBridgeTimeline => ({
   revealedAt: null,
   revealReason: null,
   revealLoading: 0,
+  curtainAt: null,
+  curtainLiftedAt: null,
+  transitions: [],
+  transitionsOmitted: 0,
 });
 
 /**
@@ -386,13 +412,18 @@ export interface HdBridgeScene {
  * Stops the bridge when called; `toggle` switches between the HD view and the original picture (true: HD shown);
  * `scene` describes the running match for the speed telemetry.
  */
-export type HdBridgeControl = (() => void) & { toggle(): boolean; scene(): HdBridgeScene | null };
+export type HdBridgeControl = (() => void) & {
+  toggle(): boolean;
+  scene(): HdBridgeScene | null;
+  /** Called synchronously for a native picture before it can be painted. */
+  frame(frame: VmFrame): void;
+};
 
 export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   if (host.frameRenderer.backend !== 'WebGL2') {
     // Canvas 2D draws every frame opaque: neither the key nor the transparent rectangle could show the HD view.
     console.warn('[HD] the HD bridge needs the WebGL2 frame renderer; showing the original picture');
-    return Object.assign(() => undefined, { toggle: () => false, scene: () => null });
+    return Object.assign(() => undefined, { toggle: () => false, scene: () => null, frame: () => undefined });
   }
   const params = new URLSearchParams(window.location.search);
   const canvas = document.createElement('canvas');
@@ -464,6 +495,30 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let shownFrames = 0;
   const paceMode = parseHdPace(params.get('hd-pace'));
   const native = host.vm.runtimeInfo?.backend === 'native';
+  const curtain = native ? document.createElement('div') : null;
+  if (curtain) {
+    curtain.id = 'hd-curtain';
+    Object.assign(curtain.style, {
+      position: 'absolute',
+      zIndex: '2',
+      pointerEvents: 'none',
+      display: 'none',
+      opacity: '1',
+      background: '#080b10',
+      color: '#c9d0d8',
+      alignItems: 'center',
+      justifyContent: 'center',
+      font: '16px/1.5 Arial, "Microsoft JhengHei", sans-serif',
+    });
+    host.screen.parentElement!.insertBefore(curtain, host.screen);
+  }
+  let curtainVisible = false;
+  let curtainFadeAt: number | null = null;
+  let nativeBattleSurface = false;
+  let nativeMenuSurface = false;
+  let keyFrameAt: number | null = null;
+  let hidePending: { at: number; reason: string } | null = null;
+  let presentation: HdBridgeTransition['to'] = 'original';
   /** Holds the shown view's frame rate (null with ?hd-pace=off: every display frame is drawn). */
   const pacer =
     paceMode.kind === 'off'
@@ -490,6 +545,24 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   /** Guest frame size when the current view finished loading: the loading screen's video mode, as a key. */
   let loadingFrame: string | null = null;
   let timeline = emptyTimeline(null);
+  const transitions: HdBridgeTransition[] = [];
+  let transitionsOmitted = 0;
+  const changePresentation = (to: HdBridgeTransition['to'], reason: string) => {
+    if (to === presentation) return;
+    const entry: HdBridgeTransition = {
+      atMs: performance.now(),
+      time: new Date().toISOString(),
+      map: matchMap ?? stateMap,
+      frame: stateFrame,
+      from: presentation,
+      to,
+      reason,
+    };
+    // Repeated toggles cannot retain an unbounded history in a forgotten page.
+    if (transitions.length < 512) transitions.push(entry);
+    else transitionsOmitted++;
+    presentation = to;
+  };
   // This bridge is a development entry, but keep the measurement buffers and read-only probe surface under DEV
   // as well: production builds neither collect records nor gain a game-state console interface.
   const diagnostics = import.meta.env.DEV
@@ -671,6 +744,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   /** Guest passthrough state: requested flags (0 = off) and whether the game accepted them. */
   let passthroughRequest = 0;
   let passthroughUnsupported = passthroughFlags === 0;
+  let passthroughSerial = 0;
+  let passthroughAcceptedAt: number | null = null;
   /** Key rectangle kept for PASSTHROUGH_TRAIL_MS after switching off (see PASSTHROUGH_TRAIL_MS). */
   let keyRect: FrameRect | null = null;
   let keyUntil = 0;
@@ -681,23 +756,37 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   const requestPassthrough = (flags: number) => {
     if (flags === passthroughRequest || (flags && passthroughUnsupported)) return;
     passthroughRequest = flags;
+    passthroughAcceptedAt = null;
+    keyFrameAt = null;
+    const serial = ++passthroughSerial;
     const requestedTimeline = timeline;
     if (flags) requestedTimeline.passthroughRequestedAt ??= performance.now();
     if (!flags) keyUntil = performance.now() + PASSTHROUGH_TRAIL_MS;
     void host.vm.setTacticalPassthrough(flags).then(
       (accepted) => {
         // After cleanup the renderer and presenter belong to a session that is being torn down.
-        if (stopped) return;
-        if (flags && accepted && timeline === requestedTimeline) timeline.passthroughAcceptedAt ??= performance.now();
+        if (stopped || serial !== passthroughSerial) return;
+        if (flags && accepted) {
+          passthroughAcceptedAt = performance.now();
+          if (timeline === requestedTimeline) timeline.passthroughAcceptedAt ??= passthroughAcceptedAt;
+        }
         if (flags && !accepted && passthroughRequest === flags) {
           passthroughUnsupported = true;
           passthroughRequest = 0;
           console.info('[HD] native overlay passthrough unavailable; making the whole tactical view transparent');
+          if (native) cover('passthrough-unavailable', t('高清画面暂时不可用，按 \\ 查看原版'));
         }
         if (!flags) keyUntil = performance.now() + PASSTHROUGH_TRAIL_MS;
         present();
       },
-      () => undefined,
+      () => {
+        if (stopped || serial !== passthroughSerial) return;
+        if (flags) {
+          passthroughUnsupported = true;
+          passthroughRequest = 0;
+          if (native) cover('passthrough-error', t('高清画面暂时不可用，按 \\ 查看原版'));
+        }
+      },
     );
   };
 
@@ -713,10 +802,11 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     host.invalidate();
   };
 
-  const setHole = (rect: FrameRect | null) => {
+  const setHole = (rect: FrameRect | null, reason = 'state-update') => {
     const next = enabled ? rect : null;
     if (JSON.stringify(next) === JSON.stringify(hole)) return;
     hole = next;
+    changePresentation(next ? 'hd' : curtainVisible ? 'curtain' : 'original', reason);
     requestPassthrough(hole ? passthroughFlags : 0);
     present();
   };
@@ -730,6 +820,85 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       return { x, y, width, height };
     }
     return { x: 0, y: 0, width: size.width - SIDEBAR_WIDTH, height: size.height - COMMAND_BAR_HEIGHT };
+  };
+
+  const layoutCurtain = () => {
+    const size = host.frameSize();
+    const rect = tacticalRect();
+    if (curtain && size && rect)
+      Object.assign(curtain.style, devicePixelBox(host.screen, size, window.devicePixelRatio || 1, rect).style);
+  };
+  const cover = (reason: string, text = t('正在准备高清战场…')) => {
+    if (!curtain || !enabled) return;
+    curtainVisible = true;
+    curtainFadeAt = null;
+    timeline.curtainAt ??= performance.now();
+    curtain.textContent = text;
+    curtain.style.display = 'flex';
+    curtain.style.opacity = '1';
+    layoutCurtain();
+    changePresentation('curtain', reason);
+  };
+  const clearCurtain = () => {
+    curtainVisible = false;
+    curtainFadeAt = null;
+    if (curtain) curtain.style.display = 'none';
+  };
+  const showHd = (reason: string) => {
+    // Idle snapshots still arrive while disabled; they must not re-enable the guest's render flags.
+    if (stopped || !enabled) return false;
+    const rect = tacticalRect();
+    if (!rect) return false;
+    if (native && passthroughFlags) {
+      // A successful memory write is followed by a native picture carrying the key. Until then an opaque old
+      // game frame could sit over the new HD canvas; leave the curtain in place rather than expose that frame.
+      if (passthroughUnsupported) return false;
+      requestPassthrough(passthroughFlags);
+      if (passthroughAcceptedAt === null || (keyable && (keyFrameAt ?? -Infinity) < passthroughAcceptedAt))
+        return false;
+    }
+    setHole(rect, reason);
+    if (curtainVisible && curtainFadeAt === null) curtainFadeAt = performance.now();
+    return true;
+  };
+  const hideForUnavailableState = (reason: string) => {
+    if (!native) {
+      setHole(null, reason);
+      return;
+    }
+    if (hole) hidePending ??= { at: performance.now(), reason };
+    // At startup a missing mirror must not lift the curtain onto the original battlefield.
+  };
+  const onNativeFrame = (picture: VmFrame) => {
+    if (stopped || !native) return;
+    const battleSurface = picture.width > 800 || picture.height > 600;
+    if (battleSurface) {
+      nativeMenuSurface = false;
+      if (!nativeBattleSurface && !revealed) cover('battle-video-mode');
+      nativeBattleSurface = true;
+    } else if (nativeBattleSurface && picture.width === 800 && picture.height === 600) {
+      nativeBattleSurface = false;
+      nativeMenuSurface = true;
+      hidePending = null;
+      clearCurtain();
+      setHole(null, 'menu-video-mode');
+      changePresentation('original', 'menu-video-mode');
+    }
+    if (!passthroughRequest || passthroughAcceptedAt === null || !picture.rgb565) return;
+    const rect = tacticalRect();
+    if (!rect) return;
+    // Any key pixel is evidence that this actual picture has applied terrain passthrough. Sparse native overlays
+    // may occupy a sample; the other positions stay key-coloured without scanning the framebuffer each frame.
+    for (const y of [0.25, 0.5, 0.75]) {
+      for (const x of [0.25, 0.5, 0.75]) {
+        const px = Math.floor(rect.x + rect.width * x);
+        const py = Math.floor(rect.y + rect.height * y);
+        if (picture.rgb565[py * picture.width + px] === RENDER_PASSTHROUGH_KEY_RGB565) {
+          keyFrameAt = performance.now();
+          return;
+        }
+      }
+    }
   };
 
   /** `mapId` is the key; `mapName` is the game's own spelling, for the cache URL and for messages. */
@@ -831,7 +1000,14 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         fallback = { map: mapId, frame: stateFrame, until: Infinity };
         // The loader's MapCacheMissingError: the map was never prepared, as opposed to a cache that fails to load.
         const missing = (error as { name?: unknown } | null)?.name === 'MapCacheMissingError';
-        if (enabled)
+        if (enabled && native) {
+          cover('load-error', missing ? t('高清素材缺失，按 \\ 查看原版') : t('高清画面加载失败，按 \\ 查看原版'));
+          publish(
+            missing
+              ? t('地图 {0} 没有高清素材，请准备素材或按 \\ 查看原版', mapName)
+              : t('地图 {0} 高清画面加载失败，稍后自动重试；按 \\ 查看原版', mapName),
+          );
+        } else if (enabled)
           publish(
             missing
               ? t('高清画面未启用：地图 {0} 没有高清素材，显示原版画面', mapName)
@@ -846,6 +1022,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   const onState = (state: GameRenderState | null) => {
     // A reply that was already in flight when the bridge stopped belongs to a session being torn down.
     if (stopped) return;
+    // A retained native mirror can outlive Abort/score's switch back to the menu video mode.
+    if (nativeMenuSurface) state = null;
     pollFailed = false;
     diagnostics?.state(state);
     latestState = state;
@@ -863,6 +1041,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     // same, starts out of sight again. A match that merely had no snapshot for a while (an in-game menu owned the
     // screen) goes on where it was: its view is complete, and hiding it would flash the original picture.
     if (state && mapId && (mapId !== matchMap || state.frame < matchFrame)) {
+      if (native) cover(mapId !== matchMap ? 'map-changed' : 'match-frame-restarted');
+      const curtainAt = curtainVisible ? timeline.curtainAt : null;
       revealed = false;
       waitingSince = null;
       warmed = false;
@@ -878,6 +1058,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       pacer?.reset();
       paceLast = null;
       timeline = { ...emptyTimeline(mapId), loadAt: timeline.map === mapId ? timeline.loadAt : null };
+      timeline.curtainAt = curtainAt;
       if (liveMap === mapId && live) timeline.readyAt = performance.now();
     }
     if (state && mapId) {
@@ -891,11 +1072,15 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (fallback && fallback.until === Infinity && stateFrame > fallback.frame)
       fallback.until = performance.now() + NOTICE_MS;
     if (!state || !mapId || !mapName || !state.view) {
-      setHole(null);
+      hideForUnavailableState(
+        !state ? 'state-unavailable' : !mapId || !mapName ? 'map-unavailable' : 'view-unavailable',
+      );
       return;
     }
+    hidePending = null;
+    if (native && !revealed && !curtainVisible) cover('match-detected');
     if (liveMap !== mapId || !live) {
-      setHole(null);
+      setHole(null, 'view-preparing');
       load(mapId, mapName);
       return;
     }
@@ -948,8 +1133,11 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       }
       if (grew) writeWarmTypes(storage, mapId, live.theater, [...matchTypes.values()]);
     }
-    // The original picture stays until tick() finds the view complete (see REVEAL_SETTLED_FRAMES).
-    setHole(revealed ? tacticalRect() : null);
+    // Native preparation stays behind its curtain; a recovered snapshot resumes the same HD view without settling again.
+    if (revealed) {
+      if (native && !hole && !curtainVisible) cover('state-restored');
+      showHd('state-restored');
+    } else setHole(null, 'view-preparing');
   };
 
   /**
@@ -964,6 +1152,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     waitingSince ??= now;
     const settled = live.settledFrames >= REVEAL_SETTLED_FRAMES;
     if (!settled && now - waitingSince < REVEAL_DEADLINE_MS) return;
+    if (!showHd(settled ? 'view-settled' : 'reveal-deadline')) return;
     revealed = true;
     live.outOfSight = false;
     timeline.revealedAt = now;
@@ -971,7 +1160,6 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     timeline.revealLoading = live.loadingArt();
     if (!settled)
       console.warn(`[HD] view shown after ${REVEAL_DEADLINE_MS / 1000} s with ${timeline.revealLoading} loads pending`);
-    setHole(tacticalRect());
     // Shown before it was complete: the frame drawn a moment ago was drawn for a view out of sight, which leaves out
     // what is not final (a voxel unit whose mesh is still being built). A shown view draws such a unit from its
     // stand-in, so draw once more: the first frame the player sees has every unit the game shows.
@@ -1003,7 +1191,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         pollFailed = true;
         latestState = null;
         ui?.update(null);
-        setHole(null);
+        hideForUnavailableState('state-reader-error');
       })
       .catch((error) => console.warn('[HD] could not apply the render state', error))
       .finally(() => {
@@ -1140,6 +1328,22 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     frame = requestAnimationFrame(tick);
     const now = performance.now();
     stallMonitor?.frame(now);
+    if (hidePending && now - hidePending.at >= STATE_HIDE_HOLD_MS) {
+      const reason = hidePending.reason;
+      hidePending = null;
+      clearCurtain();
+      setHole(null, reason);
+    }
+    if (curtainVisible) {
+      layoutCurtain();
+      if (curtainFadeAt !== null && curtain) {
+        curtain.style.opacity = `${Math.max(0, 1 - (now - curtainFadeAt) / CURTAIN_FADE_MS)}`;
+        if (now - curtainFadeAt >= CURTAIN_FADE_MS) {
+          timeline.curtainLiftedAt = now;
+          clearCurtain();
+        }
+      }
+    }
     // Take a due native request before drawing can delay its timer. The independent timer still delivers states
     // without display callbacks or ready art; both paths share the same minimum interval and outstanding request.
     if (native && enabled && !polling && now - lastPollAt >= NATIVE_POLL_MS) {
@@ -1199,7 +1403,12 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       }
       ui?.setEnabled(enabled && uiEnabled);
       if (!enabled) {
-        setHole(null);
+        hidePending = null;
+        clearCurtain();
+        // Native preflight can already be enabled before a hole exists, so setHole(null) may be a no-op.
+        requestPassthrough(0);
+        setHole(null, 'commanded-toggle');
+        changePresentation('original', 'commanded-toggle');
         // The original picture was asked for: nothing to explain.
         publish(null);
       }
@@ -1229,7 +1438,16 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     },
     /** When the current match's view loaded, prepared and was shown (copy; see HdBridgeTimeline). */
     get timeline(): HdBridgeTimeline {
-      return { ...timeline };
+      return { ...timeline, transitions: structuredClone(transitions), transitionsOmitted };
+    },
+    /** What currently covers the tactical view; separate from whether a GPU view has finished preparing. */
+    get presentation() {
+      return {
+        mode: presentation,
+        curtain: curtainVisible,
+        fading: curtainFadeAt !== null,
+        hidePending: !!hidePending,
+      };
     },
     /** Native overlay passthrough: requested guest flags (0 = off) and whether the key path is in use. */
     get passthrough() {
@@ -1261,6 +1479,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     stallMonitor?.dispose();
     stallMonitor = null;
     latestState = null;
+    hidePending = null;
+    clearCurtain();
+    changePresentation('original', 'bridge-stopped');
     if (passthroughRequest) void host.vm.setTacticalPassthrough(0).catch(() => undefined);
     // Pending polls, loads and passthrough replies check `stopped`; reset the rest so nothing refers to this session.
     passthroughRequest = 0;
@@ -1281,6 +1502,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     governor = null;
     publishTier(null);
     canvas.remove();
+    curtain?.remove();
     host.screen.style.position = screenStyle.position;
     host.screen.style.zIndex = screenStyle.zIndex;
     if (globals.__hdBridge === handle) delete globals.__hdBridge;
@@ -1301,7 +1523,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       pace: hdShown && pacer ? pacer.rate : null,
     };
   };
-  return Object.assign(stop, { toggle: () => handle.toggle(), scene });
+  return Object.assign(stop, { toggle: () => handle.toggle(), scene, frame: onNativeFrame });
 }
 
 function toSnapshot(state: GameRenderState): LiveSnapshot {

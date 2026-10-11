@@ -42,6 +42,30 @@ export function capNativeResolution(size) {
   return { width, height };
 }
 
+/** Match the measured browser area to the HD art's two device pixels per game pixel. */
+export function nativeViewportResolution(viewport) {
+  if (
+    !Number.isFinite(viewport?.width) ||
+    !Number.isFinite(viewport?.height) ||
+    !Number.isFinite(viewport?.dpr) ||
+    viewport.width <= 0 ||
+    viewport.height <= 0 ||
+    viewport.dpr < 0.5 ||
+    viewport.dpr > 8
+  )
+    throw new Error('游戏页面没有提供有效的画面尺寸。请重新打开启动器给出的页面。');
+  const size = {
+    width: Math.floor((viewport.width * viewport.dpr) / 2 + 1e-6),
+    height: Math.floor((viewport.height * viewport.dpr) / 2 + 1e-6),
+  };
+  const supported = capNativeResolution(size);
+  if (supported.width !== size.width || supported.height !== size.height)
+    throw new Error(
+      '当前浏览器画面尺寸超出游戏支持的范围。请使用至少 800×600 的页面，或用 --size 指定尺寸后重新启动。',
+    );
+  return size;
+}
+
 export function mainDisplaySize() {
   if (process.platform !== 'darwin')
     throw new Error('Automatic main-display sizing is supported on macOS; use --size WxH');
