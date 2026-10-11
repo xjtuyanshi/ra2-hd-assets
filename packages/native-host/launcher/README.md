@@ -26,7 +26,7 @@ This builds a 32-bit Windows GUI helper to the ignored
 toolchain and disables module fetching. `NATIVE_HOST_GO` selects another locally
 installed Go executable. The source requires no external Go modules.
 
-Use a separately owned game copy and an existing dedicated Wine prefix:
+Use a separately owned game copy and a dedicated Wine prefix:
 
 ```sh
 RA2_NATIVE_GAME_DIR="$GAME_COPY" \
@@ -41,14 +41,35 @@ For CrossOver, replace `RA2_NATIVE_WINE_PREFIX` with
 `CX_BOTTLE_PATH` supports a custom bottle root. Wine discovery uses `PATH` and
 macOS's installed CrossOver application metadata. Setting `RA2_NATIVE_WINE`
 avoids discovery. `WINEPREFIX` is accepted when neither explicit scope variable
-is supplied. A game folder, scope and executable are required; the launcher
-never creates a Wine prefix or obtains game resources.
+is supplied and requires an existing prefix. A game folder, scope and executable
+are required; the launcher obtains no game resources.
+
+An explicit `RA2_NATIVE_WINE_PREFIX` may point to a missing or empty folder.
+The launcher claims that folder with a private marker tied to its directory
+identity, initializes it, maps `G:` to the chosen game copy, registers the copy's
+`Blowfish.dll` with the 32-bit `syswow64\regsvr32.exe`, and verifies its stored
+32-bit COM path is `G:\Blowfish.dll`. Initialization is bounded to 240 seconds,
+registration to 90 seconds, and mapping/query commands to 40 seconds;
+Chinese failure guidance refers to private `wine-prefix.log`. Later launches may
+repeat this preparation only for a matching owned directory. Interrupted prefix
+initialization is retried until the registry and 32-bit tools are present and
+readable, even when the first attempt left `system.reg`. Existing prefixes
+without that marker are used unchanged, without automatic repair. Prefix
+symlinks and new prefixes inside CrossOver bottle roots are refused. The named
+CrossOver bottle path never enters this preparation. DirectDraw's native override
+remains scoped to the launched game process.
+Preparation also rejects CrossOver executables by their resolved installation
+path or wrapper code identity, including aliases and copied wrappers. CrossOver's
+wrapper chooses a bottle independently of `WINEPREFIX`; use a free Wine executable
+for a new dedicated prefix. Cancelling preparation immediately enters the existing
+owned-process shutdown instead of waiting for its startup timeout.
 
 The selected HD cache must already contain a readable `_library/` directory;
 without `RA2_HD_CACHE_DIR`, the cache root remains Vite's existing
 `gameres/hd-cache` default. Missing game files, Wine configuration and HD cache
-produce Chinese guidance before any game-file modification. Before building
-or mapping paths, the launcher runs a scoped Wine command-line self-check and
+produce Chinese guidance before any game-file modification. After any dedicated
+prefix preparation and before building or mapping launcher paths, it runs a
+scoped Wine command-line self-check and
 requires its expected reply within 30 seconds. A failed or hung check leaves
 the game unstarted and records bounded output in private `wine-check.log`.
 The exact successful reply is recognized incrementally, so later diagnostic
@@ -171,7 +192,8 @@ genuine modal-menu readiness, size bounds and byte-preserving INI configuration.
 Its process lifecycle
 check starts the real Vite server plus a synthetic authenticated agent, using
 temporary synthetic game/prefix files. It does not run Wine or a real game.
-It also checks missing cache guidance, startup wait cancellation and a failed
+It also checks dedicated-prefix ownership, CrossOver exclusion, mapped 32-bit
+Blowfish registration verification, missing cache guidance, startup wait cancellation and a failed
 synthetic Wine self-check that cannot proceed to path mapping, DLL replacement
 or resolution changes.
 

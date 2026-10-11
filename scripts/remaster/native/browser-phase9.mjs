@@ -19,9 +19,12 @@ const naturalWindowDimensions = process.env.NATIVE_BROWSER_USE_WINDOW_DIMENSIONS
 assert(/^phase[0-9]+$/.test(phase));
 const tag = process.argv[2] || 'hidden';
 assert(/^[a-zA-Z0-9_-]+$/.test(tag));
+const useViewportHandshake = naturalWindowDimensions && Number(phase.slice(5)) >= 18 && !tag.startsWith('baseline');
 const out = join(base, phase, tag);
 await mkdir(out, { recursive: true });
-await writeFile(join(out, 'harness-pid'), String(process.pid) + '\n');
+// A duplicated runner request must not start a second game against the same
+// artifacts and DLL backup. Evidence tags are single-use.
+await writeFile(join(out, 'harness-pid'), String(process.pid) + '\n', { flag: 'wx' });
 const config = JSON.parse(await readFile(join(base, 'run/owner-launch-smoke.json'), 'utf8'));
 const pause = resolve(base, '../play/_slots/PAUSE');
 const exists = async (p) =>
@@ -1114,11 +1117,7 @@ try {
     process.execPath,
     [
       join(wt, 'scripts/remaster/native/phase8-launch-trace.mjs'),
-      ...(phase === 'phase18' && !tag.startsWith('baseline')
-        ? tag.startsWith('full')
-          ? ['--fullscreen']
-          : []
-        : ['--size', '1728x1117']),
+      ...(useViewportHandshake ? (tag.startsWith('full') ? ['--fullscreen'] : []) : ['--size', '1728x1117']),
     ],
     {
       cwd: wt,
@@ -1245,7 +1244,7 @@ try {
   const ownedWindowForSizing = await cdp.send('Browser.getWindowForTarget');
   const pageUrl = new URL(url);
   pageUrl.searchParams.set('game-speed', '3');
-  if (phase === 'phase18' && !tag.startsWith('baseline')) {
+  if (useViewportHandshake) {
     await cdp.send('Browser.setWindowBounds', {
       windowId: ownedWindowForSizing.windowId,
       bounds: { windowState: tag.startsWith('full') ? 'fullscreen' : 'maximized' },
@@ -1254,7 +1253,7 @@ try {
   }
   await page.goto(pageUrl.toString());
   await page.bringToFront();
-  if (phase === 'phase18' && tag.startsWith('full') && pageUrl.searchParams.get('native-fullscreen') === '1') {
+  if (useViewportHandshake && tag.startsWith('full') && pageUrl.searchParams.get('native-fullscreen') === '1') {
     const fullWindow = await cdp.send('Browser.getWindowForTarget');
     await cdp.send('Browser.setWindowBounds', { windowId: fullWindow.windowId, bounds: { windowState: 'fullscreen' } });
     await delay(1200);
@@ -1383,6 +1382,13 @@ try {
   }
 } catch (e) {
   await record('fatal', { error: String(e.stack || e) });
+  if (page) {
+    const path = join(out, 'fatal-page.png');
+    await page
+      .screenshot({ path, timeout: 5000 })
+      .then(() => record('fatal-page', { path }))
+      .catch(() => {});
+  }
   process.exitCode = 1;
 } finally {
   await cleanup();

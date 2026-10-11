@@ -589,13 +589,15 @@ void hook_create(HOOKLIST* hooks, BOOL initial_hook)
     if (g_config.hook == 3 || g_config.hook == 4)
     {
         char game_exe_path[MAX_PATH] = { 0 };
+        char game_drive[_MAX_DRIVE] = { 0 };
         char game_dir[MAX_PATH] = { 0 };
 
         if (GetModuleFileNameA(NULL, game_exe_path, MAX_PATH))
         {
-            _splitpath(game_exe_path, NULL, game_dir, NULL, NULL);
+            _splitpath(game_exe_path, game_drive, game_dir, NULL, NULL);
 
             char mod_path[MAX_PATH] = { 0 };
+            char mod_drive[_MAX_DRIVE] = { 0 };
             char mod_dir[MAX_PATH] = { 0 };
             char mod_filename[MAX_PATH] = { 0 };
             HMODULE hmod = NULL;
@@ -612,7 +614,7 @@ void hook_create(HOOKLIST* hooks, BOOL initial_hook)
                         TRACE("Module %s = %p\n", mod_path, hmod);
                     }
 
-                    _splitpath(mod_path, NULL, mod_dir, mod_filename, NULL);
+                    _splitpath(mod_path, mod_drive, mod_dir, mod_filename, NULL);
 
                     /* Don't hook reshade/swiftshader/mesa3d */
                     if (_strcmpi(mod_filename, "opengl32") == 0 ||
@@ -624,7 +626,10 @@ void hook_create(HOOKLIST* hooks, BOOL initial_hook)
                         _strcmpi(mod_filename, "Shw32") == 0)
                         continue;
 
-                    BOOL is_local = _strnicmp(game_dir, mod_dir, strlen(game_dir)) == 0;
+                    /* Native-host bridge: a game at a mapped drive root must
+                     * not classify another drive's system DLLs as game-local. */
+                    BOOL is_local = _stricmp(game_drive, mod_drive) == 0 &&
+                        game_dir[0] && _strnicmp(game_dir, mod_dir, strlen(game_dir)) == 0;
                     BOOL wine_hook = IsWine() && _strcmpi(mod_filename, "mciavi32") == 0;
 
                     if (is_local ||
@@ -671,13 +676,15 @@ void hook_revert(HOOKLIST* hooks)
     if (g_config.hook == 3 || g_config.hook == 4)
     {
         char game_exe_path[MAX_PATH] = { 0 };
+        char game_drive[_MAX_DRIVE] = { 0 };
         char game_dir[MAX_PATH] = { 0 };
 
         if (GetModuleFileNameA(NULL, game_exe_path, MAX_PATH))
         {
-            _splitpath(game_exe_path, NULL, game_dir, NULL, NULL);
+            _splitpath(game_exe_path, game_drive, game_dir, NULL, NULL);
 
             char mod_path[MAX_PATH] = { 0 };
+            char mod_drive[_MAX_DRIVE] = { 0 };
             char mod_dir[MAX_PATH] = { 0 };
             char mod_filename[MAX_PATH] = { 0 };
             HMODULE hmod = NULL;
@@ -689,9 +696,12 @@ void hook_revert(HOOKLIST* hooks)
 
                 if (GetModuleFileNameA(hmod, mod_path, MAX_PATH))
                 {
-                    _splitpath(mod_path, NULL, mod_dir, mod_filename, NULL);
+                    _splitpath(mod_path, mod_drive, mod_dir, mod_filename, NULL);
 
-                    BOOL is_local = _strnicmp(game_dir, mod_dir, strlen(game_dir)) == 0;
+                    /* Native-host bridge: teardown uses the same complete
+                     * drive and directory boundary as hook installation. */
+                    BOOL is_local = _stricmp(game_drive, mod_drive) == 0 &&
+                        game_dir[0] && _strnicmp(game_dir, mod_dir, strlen(game_dir)) == 0;
                     BOOL wine_hook = IsWine() && _strcmpi(mod_filename, "mciavi32") == 0;
 
                     if (is_local ||

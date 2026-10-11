@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -12,10 +12,12 @@ import {
   findPorts,
   installDll,
   nativeMainMenuReady,
+  prepareWinePrefix,
   runLauncher,
   validateHdCache,
   waitForStartupCommand,
   wineCheckAcknowledgement,
+  wineConfiguration,
 } from './play-native.mjs';
 import { HD_PLAY_OPTIONS } from '../play-options.mjs';
 import { AgentClient } from './wire.mjs';
@@ -226,6 +228,254 @@ test('runLauncher reports missing game, Wine and cache prerequisites before star
   await assert.rejects(lstat(join(dir, 'RA2MD.INI')), { code: 'ENOENT' });
   assert.equal(await readFile(target, 'utf8'), 'player DLL');
 });
+
+test('only an explicitly selected missing or empty prefix is prepared; existing environments remain unchanged', async (t) => {
+  const { dir } = await fixture(t);
+  const prefix = join(dir, 'new-prefix');
+  const env = { RA2_NATIVE_WINE: process.execPath, RA2_NATIVE_WINE_PREFIX: prefix };
+  assert.equal((await wineConfiguration(env)).preparePrefix, prefix);
+  await assert.rejects(lstat(prefix), { code: 'ENOENT' });
+  await assert.rejects(wineConfiguration({ RA2_NATIVE_WINE: process.execPath, WINEPREFIX: prefix }), /首次创建/);
+  await mkdir(prefix);
+  assert.equal((await wineConfiguration(env)).preparePrefix, prefix);
+  await writeFile(join(prefix, 'system.reg'), 'existing user registry');
+  const configuration = await wineConfiguration(env);
+  assert.equal(configuration.preparePrefix, null);
+  await prepareWinePrefix(configuration, dir, async () => assert.fail('existing prefix was modified'));
+  assert.equal(await readFile(join(prefix, 'system.reg'), 'utf8'), 'existing user registry');
+  await assert.rejects(lstat(join(prefix, '.ra2-native-prefix.json')), { code: 'ENOENT' });
+});
+
+test('new dedicated prefix uses the mapped game drive and verifies the 32-bit Blowfish value before startup', async (t) => {
+  const { dir } = await fixture(t);
+  const prefix = join(dir, 'missing-parent', 'prefix');
+  const game = join(dir, '游戏副本');
+  await mkdir(game);
+  await writeFile(join(game, 'Blowfish.dll'), 'synthetic player component');
+  const env = { RA2_NATIVE_WINE: process.execPath, RA2_NATIVE_WINE_PREFIX: prefix };
+  const calls = [];
+  const command = async (args) => {
+    calls.push(args);
+    if (args[0] === 'wineboot.exe') {
+      await writeFile(join(prefix, 'system.reg'), 'synthetic owned registry');
+      await mkdir(join(prefix, 'dosdevices'));
+      const modules = join(prefix, 'drive_c/windows/syswow64');
+      await mkdir(modules, { recursive: true });
+      await writeFile(join(modules, 'regsvr32.exe'), 'synthetic 32-bit registration command');
+      await writeFile(join(modules, 'reg.exe'), 'synthetic 32-bit registry command');
+    }
+    if (args[0] === 'winepath.exe') return 'G:\\Blowfish.dll\r\n';
+    if (args[0] === 'reg.exe')
+      return 'HKEY_CLASSES_ROOT\\CLSID\\test\r\n    (Default)    REG_SZ    G:\\Blowfish.dll\r\n';
+    return '';
+  };
+  await prepareWinePrefix(await wineConfiguration(env), game, command, () => {});
+  assert.equal(await readlink(join(prefix, 'dosdevices/g:')), game);
+  assert.deepEqual(
+    calls.map((args) => args[0]),
+    ['wineboot.exe', 'winepath.exe', 'C:\\windows\\syswow64\\regsvr32.exe', 'reg.exe'],
+  );
+  assert.deepEqual(calls[2].slice(1), ['/s', 'G:\\Blowfish.dll']);
+  assert.deepEqual(calls[3].slice(-2), ['/ve', '/reg:32']);
+  assert.equal(JSON.parse(await readFile(join(prefix, '.ra2-native-prefix.json'), 'utf8')).winebootCompleted, true);
+  const secondGame = join(dir, 'another-game');
+  await mkdir(secondGame);
+  await writeFile(join(secondGame, 'Blowfish.dll'), 'another supplied component');
+  calls.length = 0;
+  await prepareWinePrefix(await wineConfiguration(env), secondGame, command, () => {});
+  assert.equal(
+    calls.some((args) => args[0] === 'wineboot.exe'),
+    false,
+  );
+  assert.equal(await readlink(join(prefix, 'dosdevices/g:')), secondGame);
+  await assert.rejects(
+    prepareWinePrefix(
+      await wineConfiguration(env),
+      secondGame,
+      async (args) =>
+        args[0] === 'winepath.exe' ? 'G:\\Blowfish.dll' : '(Default)    REG_SZ    Z:\\??\\Blowfish.dll\n',
+      () => {},
+    ),
+    /32 位 Blowfish 注册路径不正确/,
+  );
+});
+
+test('a failed first initialization that leaves system.reg is retried until its 32-bit files are complete', async (t) => {
+  const { dir } = await fixture(t);
+  const prefix = join(dir, 'prefix');
+  await writeFile(join(dir, 'Blowfish.dll'), 'synthetic player component');
+  const env = { RA2_NATIVE_WINE: process.execPath, RA2_NATIVE_WINE_PREFIX: prefix };
+  let attempts = 0;
+  const command = async (args) => {
+    if (args[0] === 'wineboot.exe') {
+      attempts++;
+      await writeFile(join(prefix, 'system.reg'), 'incomplete first registry');
+      if (attempts === 1) throw new Error('synthetic interrupted initialization');
+      await mkdir(join(prefix, 'dosdevices'));
+      const modules = join(prefix, 'drive_c/windows/syswow64');
+      await mkdir(modules, { recursive: true });
+      await writeFile(join(modules, 'regsvr32.exe'), 'synthetic 32-bit command');
+      await writeFile(join(modules, 'reg.exe'), 'synthetic 32-bit command');
+    }
+    if (args[0] === 'winepath.exe') return 'G:\\Blowfish.dll';
+    if (args[0] === 'reg.exe') return '(Default)    REG_SZ    G:\\Blowfish.dll\n';
+    return '';
+  };
+  await assert.rejects(
+    prepareWinePrefix(await wineConfiguration(env), dir, command, () => {}),
+    /interrupted initialization/,
+  );
+  assert.equal(JSON.parse(await readFile(join(prefix, '.ra2-native-prefix.json'), 'utf8')).winebootCompleted, false);
+  await prepareWinePrefix(await wineConfiguration(env), dir, command, () => {});
+  assert.equal(attempts, 2);
+  assert.equal(JSON.parse(await readFile(join(prefix, '.ra2-native-prefix.json'), 'utf8')).winebootCompleted, true);
+});
+
+test('foreign files, symlink prefixes and copied ownership markers cannot be claimed', async (t) => {
+  const { dir } = await fixture(t);
+  const prefix = join(dir, 'prefix');
+  await mkdir(prefix);
+  await writeFile(join(prefix, 'player-file'), 'preserve me');
+  const env = { RA2_NATIVE_WINE: process.execPath, RA2_NATIVE_WINE_PREFIX: prefix };
+  await assert.rejects(wineConfiguration(env), /找不到已有的 Wine 文件夹/);
+  await writeFile(join(prefix, '.ra2-native-prefix.json'), JSON.stringify({ version: 1, dev: 0, ino: 0 }));
+  await assert.rejects(wineConfiguration(env), /标记与目录不符/);
+  const alias = join(dir, 'alias');
+  await symlink(prefix, alias, 'dir');
+  await assert.rejects(wineConfiguration({ ...env, RA2_NATIVE_WINE_PREFIX: alias }), /不能是文件或链接/);
+  assert.equal(await readFile(join(prefix, 'player-file'), 'utf8'), 'preserve me');
+});
+
+test('CrossOver bottles and aliases to their root never enter dedicated-prefix preparation', async (t) => {
+  const { dir } = await fixture(t);
+  const root = join(dir, 'Bottles');
+  const bottle = join(root, 'player-bottle');
+  await mkdir(bottle, { recursive: true });
+  await writeFile(join(bottle, 'system.reg'), 'existing bottle registry');
+  const env = { RA2_NATIVE_WINE: process.execPath, CX_BOTTLE_PATH: root };
+  const configuration = await wineConfiguration({
+    ...env,
+    RA2_NATIVE_WINE_BOTTLE: 'player-bottle',
+    WINEPREFIX: '/unused',
+  });
+  assert.equal(configuration.preparePrefix, null);
+  assert.equal(configuration.environment.WINEPREFIX, undefined);
+  await assert.rejects(
+    wineConfiguration({ ...env, RA2_NATIVE_WINE_BOTTLE: 'player-bottle', RA2_NATIVE_WINE_PREFIX: bottle }),
+    /只能设置一个/,
+  );
+  await assert.rejects(
+    wineConfiguration({ ...env, RA2_NATIVE_WINE_PREFIX: join(root, 'new-bottle') }),
+    /不会为 CrossOver/,
+  );
+  await assert.rejects(
+    wineConfiguration({ ...env, RA2_NATIVE_WINE_PREFIX: join(root, '..another-bottle') }),
+    /不会为 CrossOver/,
+  );
+  const alias = join(dir, 'root-alias');
+  await symlink(root, alias, 'dir');
+  await assert.rejects(
+    wineConfiguration({ ...env, RA2_NATIVE_WINE_PREFIX: join(alias, 'new-bottle') }),
+    /不会为 CrossOver/,
+  );
+  assert.equal(await readFile(join(bottle, 'system.reg'), 'utf8'), 'existing bottle registry');
+});
+
+test('dedicated preparation refuses real CrossOver executable paths and copied wrapper identities', async (t) => {
+  const { dir } = await fixture(t);
+  const installed = join(dir, 'App/Contents/SharedSupport/CrossOver/bin/renamed-command');
+  await mkdir(dirname(installed), { recursive: true });
+  await writeFile(installed, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const alias = join(dir, 'ordinary-command');
+  await symlink(installed, alias);
+  const prefix = join(dir, 'new-prefix');
+  const env = { RA2_NATIVE_WINE: alias, RA2_NATIVE_WINE_PREFIX: prefix };
+  await assert.rejects(wineConfiguration(env), /CrossOver.*免费 Wine 的可执行文件/);
+  const copied = join(dir, 'copied-command');
+  await writeFile(copied, '#!/usr/bin/perl\n# CodeWeavers, Inc.\nCXBottle::setup_bottle_wineprefix($scope);\n', {
+    mode: 0o755,
+  });
+  await assert.rejects(wineConfiguration({ ...env, RA2_NATIVE_WINE: copied }), /CrossOver.*免费 Wine 的可执行文件/);
+  await assert.rejects(lstat(prefix), { code: 'ENOENT' });
+  await mkdir(prefix);
+  await writeFile(join(prefix, 'system.reg'), 'existing unowned registry');
+  assert.equal((await wineConfiguration({ ...env, RA2_NATIVE_WINE: copied })).preparePrefix, null);
+  assert.equal(
+    (await wineConfiguration({ RA2_NATIVE_WINE: alias, RA2_NATIVE_WINE_BOTTLE: 'new-prefix', CX_BOTTLE_PATH: dir }))
+      .preparePrefix,
+    null,
+  );
+});
+
+test(
+  'cancelling first-prefix initialization promptly kills its owned unresponsive command',
+  { timeout: 10000 },
+  async (t) => {
+    const { dir, target } = await fixture(t);
+    await writeFile(join(dir, 'gamemd.exe'), 'synthetic executable, never run');
+    await writeFile(join(dir, 'Blowfish.dll'), 'synthetic player component');
+    await writeFile(target, 'player DLL');
+    await mkdir(join(dir, '_library'));
+    const call = join(dir, 'command.json');
+    const wine = join(dir, 'mock-wine.mjs');
+    await writeFile(
+      wine,
+      `#!${process.execPath}\nimport {writeFile} from 'node:fs/promises';\nawait writeFile(${JSON.stringify(call)}, JSON.stringify({args:process.argv.slice(2),pid:process.pid}));\nprocess.on('SIGTERM',()=>{});setInterval(()=>{},1000);\n`,
+      { mode: 0o755 },
+    );
+    const child = spawn(process.execPath, ['scripts/remaster/native/play-native.mjs', '--size', '1280x720'], {
+      cwd: repository,
+      env: {
+        ...process.env,
+        RA2_NATIVE_GAME_DIR: dir,
+        RA2_NATIVE_WINE: wine,
+        RA2_NATIVE_WINE_PREFIX: join(dir, 'new-prefix'),
+        RA2_NATIVE_WINE_BOTTLE: '',
+        RA2_HD_CACHE_DIR: dir,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const closed = new Promise((resolve) => child.once('close', resolve));
+    let record;
+    t.after(async () => {
+      child.kill('SIGKILL');
+      if (record?.pid) {
+        try {
+          process.kill(-record.pid, 'SIGKILL');
+        } catch (error) {
+          if (error.code !== 'ESRCH') throw error;
+        }
+      }
+      await closed;
+    });
+    const readyDeadline = Date.now() + 3000;
+    while (!record) {
+      try {
+        record = JSON.parse(await readFile(call, 'utf8'));
+      } catch {}
+      if (Date.now() >= readyDeadline) assert.fail('synthetic initialization was not started');
+      await delay(10);
+    }
+    assert.deepEqual(record.args, ['wineboot.exe', '--init']);
+    const cancelStarted = Date.now();
+    child.kill('SIGINT');
+    let cancelTimer;
+    try {
+      await Promise.race([
+        closed,
+        new Promise((_, reject) => {
+          cancelTimer = setTimeout(() => reject(new Error('prefix cancellation waited for its startup timeout')), 5000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(cancelTimer);
+    }
+    assert.ok(Date.now() - cancelStarted < 5000);
+    assert.throws(() => process.kill(record.pid, 0), { code: 'ESRCH' });
+    assert.equal(await readFile(target, 'utf8'), 'player DLL');
+    await assert.rejects(lstat(join(dir, 'RA2MD.INI')), { code: 'ENOENT' });
+  },
+);
 
 test('an owned startup command has a bounded wait even when the child does not complete', async () => {
   await assert.rejects(waitForStartupCommand({ done: new Promise(() => {}) }, 20, 'Wine 自检超时'), /Wine 自检超时/);

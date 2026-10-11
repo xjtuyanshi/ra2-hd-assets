@@ -11,6 +11,9 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
+  readlink,
+  realpath,
   rename,
   stat,
   symlink,
@@ -18,7 +21,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AgentClient, Type } from './wire.mjs';
@@ -37,7 +40,8 @@ const help = `Usage: scripts/remaster/native/play-native.sh [--open] [--fullscre
 Required environment:
   RA2_NATIVE_GAME_DIR           Player-owned game copy containing gamemd.exe.
   RA2_NATIVE_WINE_BOTTLE        Existing CrossOver bottle name; or
-  RA2_NATIVE_WINE_PREFIX        Existing Wine prefix directory (WINEPREFIX also works).
+  RA2_NATIVE_WINE_PREFIX        Dedicated Wine directory; a missing/empty one is prepared.
+                               WINEPREFIX supports existing prefixes only.
 
 Optional environment:
   RA2_NATIVE_WINE               Wine executable; otherwise PATH/CrossOver discovery.
@@ -274,14 +278,208 @@ function executableOnPath(name) {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
-async function wineConfiguration(environment) {
+const prefixOwnerFile = '.ra2-native-prefix.json';
+const blowfishKey = 'HKCR\\CLSID\\{1440AD10-6AA8-11D1-B6F9-00A024DDAFD1}\\InprocServer32';
+
+async function inspectWinePrefix(prefix) {
+  const info = await lstat(prefix).catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw new Error(`无法读取 Wine 文件夹：${prefix}。请检查路径和访问权限。`, { cause: error });
+  });
+  if (!info) return { info: null, owner: null, owned: false, empty: true, initialized: false };
+  if (!info.isDirectory()) throw new Error(`Wine 文件夹必须是实际目录，不能是文件或链接：${prefix}。`);
+  const marker = join(prefix, prefixOwnerFile);
+  const markerInfo = await lstat(marker).catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw new Error(`无法读取 Wine 文件夹的启动器标记：${prefix}。请检查访问权限。`, { cause: error });
+  });
+  let owned = false;
+  let owner = null;
+  if (markerInfo) {
+    try {
+      if (!markerInfo.isFile()) throw new Error('Invalid owner file');
+      owner = JSON.parse(await readFile(marker, 'utf8'));
+    } catch (error) {
+      throw new Error(`Wine 文件夹的启动器标记无法读取；为保留已有环境，不会修改：${prefix}。`, { cause: error });
+    }
+    owned = owner?.version === 1 && owner.dev === info.dev && owner.ino === info.ino;
+    if (!owned) throw new Error(`Wine 文件夹的启动器标记与目录不符；不会修改：${prefix}。`);
+  }
+  return {
+    info,
+    owner,
+    owned,
+    empty:
+      (
+        await readdir(prefix).catch((error) => {
+          throw new Error(`无法读取 Wine 文件夹内容：${prefix}。请检查访问权限。`, { cause: error });
+        })
+      ).length === 0,
+    initialized: await exists(join(prefix, 'system.reg')),
+  };
+}
+
+async function assertDedicatedPrefix(prefix, environment) {
+  // Resolve existing ancestors too: an alias to a bottle root is still a bottle.
+  async function physicalPath(path) {
+    try {
+      return await realpath(path);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      const parent = dirname(path);
+      return parent === path ? path : join(await physicalPath(parent), basename(path));
+    }
+  }
+  const actual = await physicalPath(prefix);
+  const roots = [
+    join(homedir(), 'Library/Application Support/CrossOver/Bottles'),
+    ...(environment.CX_BOTTLE_PATH?.split(':') || []),
+  ];
+  for (const root of roots.filter(Boolean)) {
+    const distance = relative(await physicalPath(resolve(root)), actual);
+    if (distance === '' || (distance !== '..' && !distance.startsWith('..' + sep) && !isAbsolute(distance)))
+      throw new Error(`不会为 CrossOver 容器创建或修改 Wine 环境：${prefix}。请另选空的专用文件夹。`);
+  }
+  if (await exists(join(prefix, 'cxbottle.conf')))
+    throw new Error(`不会修改 CrossOver 容器：${prefix}。请另选空的专用 Wine 文件夹。`);
+}
+
+async function assertFreeWinePreparation(wine) {
+  const executable = await realpath(wine).catch((error) => {
+    throw new Error('无法确认 Wine 运行程序的实际路径。请将 RA2_NATIVE_WINE 指向免费 Wine 的可执行文件。', {
+      cause: error,
+    });
+  });
+  let crossover = /\/Contents\/SharedSupport\/CrossOver(?:\/|$)/i.test(executable);
+  if (!crossover) {
+    // The installed wrapper may be copied or reached through an unrelated alias.
+    // Match its product and bottle-selection code, rather than an executable name.
+    const info = await stat(executable);
+    if (info.isFile() && info.size <= 65536) {
+      const source = await readFile(executable, 'utf8');
+      crossover =
+        source.startsWith('#!') && /CodeWeavers/i.test(source) && /CXBottle::setup_bottle_wineprefix/.test(source);
+    }
+  }
+  if (crossover)
+    throw new Error(
+      '此 Wine 程序属于 CrossOver，不能用于准备独立 Wine 环境。请将 RA2_NATIVE_WINE 指向免费 Wine 的可执行文件；现有 CrossOver 容器请用 RA2_NATIVE_WINE_BOTTLE 启动。',
+    );
+}
+
+export async function prepareWinePrefix(configuration, gameDirectory, runCommand, notify = console.log) {
+  const prefix = configuration.preparePrefix;
+  if (!prefix) return;
+  await assertFreeWinePreparation(configuration.wine);
+  await assertDedicatedPrefix(prefix, configuration.environment);
+  const blowfish = join(gameDirectory, 'Blowfish.dll');
+  await access(blowfish, constants.R_OK).catch((error) => {
+    throw new Error(`无法读取游戏的 Blowfish.dll：${blowfish}。请提供完整游戏副本后重试。`, { cause: error });
+  });
+  let state = await inspectWinePrefix(prefix);
+  if (!state.owned) {
+    if (!state.empty) throw new Error(`Wine 文件夹已包含其他文件；启动器不会修改：${prefix}。请另选空文件夹。`);
+    if (!state.info) {
+      await mkdir(dirname(prefix), { recursive: true });
+      await mkdir(prefix, { mode: 0o700 });
+      state = await inspectWinePrefix(prefix);
+    }
+    const marker = join(prefix, prefixOwnerFile);
+    const owner =
+      JSON.stringify({ version: 1, dev: state.info.dev, ino: state.info.ino, winebootCompleted: false }) + '\n';
+    await writeFile(marker, owner, { flag: 'wx', mode: 0o600 });
+    const createdMarker = await lstat(marker);
+    // Do not initialize a directory another application populated while claiming it.
+    if ((await readdir(prefix)).some((name) => name !== prefixOwnerFile)) {
+      const current = await lstat(marker);
+      if (
+        current.isFile() &&
+        current.dev === createdMarker.dev &&
+        current.ino === createdMarker.ino &&
+        (await readFile(marker, 'utf8')) === owner
+      )
+        await unlink(marker);
+      throw new Error(`Wine 文件夹在准备时出现其他文件；已停止，未运行 Wine：${prefix}。`);
+    }
+    state = await inspectWinePrefix(prefix);
+  }
+  async function bootFilesReady() {
+    if (!(await lstat(join(prefix, 'dosdevices')).catch(() => null))?.isDirectory()) return false;
+    const files = ['system.reg', 'drive_c/windows/syswow64/regsvr32.exe', 'drive_c/windows/syswow64/reg.exe'];
+    return (
+      await Promise.all(
+        files.map(async (file) => {
+          try {
+            const path = join(prefix, file);
+            if (!(await stat(path)).isFile()) return false;
+            await access(path, constants.R_OK);
+            return true;
+          } catch {
+            return false;
+          }
+        }),
+      )
+    ).every(Boolean);
+  }
+  if (state.owner.winebootCompleted !== true || !(await bootFilesReady())) {
+    notify('首次使用：正在创建此启动器专用的 Wine 环境……');
+    await runCommand(['wineboot.exe', '--init'], 'Wine 环境创建失败。请检查 Wine 是否能运行；详情见 wine-prefix.log。');
+    if (!(await bootFilesReady()))
+      throw new Error('Wine 环境创建后缺少盘符、注册表或 32 位组件。请查看 wine-prefix.log，修复 Wine 后重试。');
+    const pending = join(prefix, `.ra2-native-prefix-${randomUUID()}.tmp`);
+    try {
+      await writeFile(pending, JSON.stringify({ ...state.owner, winebootCompleted: true }) + '\n', {
+        flag: 'wx',
+        mode: 0o600,
+      });
+      await rename(pending, join(prefix, prefixOwnerFile));
+    } finally {
+      await unlink(pending).catch((error) => {
+        if (error.code !== 'ENOENT') throw error;
+      });
+    }
+  }
+  const dosdevices = join(prefix, 'dosdevices');
+  const devicesInfo = await lstat(dosdevices).catch(() => null);
+  if (!devicesInfo?.isDirectory()) throw new Error('Wine 环境缺少实际的 dosdevices 文件夹。请查看 wine-prefix.log。');
+  notify('正在连接游戏文件夹，并准备游戏所需的组件……');
+  const drive = join(dosdevices, 'g:');
+  const driveInfo = await lstat(drive).catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (driveInfo && !driveInfo.isSymbolicLink())
+    throw new Error('专用 Wine 环境的 G: 已被其他文件占用；为保留文件，未修改。请另选空的 Wine 文件夹。');
+  if (driveInfo && (await readlink(drive)) !== gameDirectory) await unlink(drive);
+  if (!driveInfo || (await readlink(drive).catch(() => null)) !== gameDirectory)
+    await symlink(gameDirectory, drive, 'dir');
+  const mapped = (
+    await runCommand(['winepath.exe', '-w', blowfish], 'Wine 无法读取映射后的游戏组件路径。请查看 wine-prefix.log。')
+  ).trim();
+  if (mapped.toLowerCase() !== 'g:\\blowfish.dll')
+    throw new Error(`Wine 未将游戏组件映射为 G:\\Blowfish.dll（实际为 ${mapped}）。请查看 wine-prefix.log。`);
+  await runCommand(
+    ['C:\\windows\\syswow64\\regsvr32.exe', '/s', 'G:\\Blowfish.dll'],
+    '游戏的 32 位 Blowfish 组件注册失败。请检查完整游戏文件；详情见 wine-prefix.log。',
+  );
+  const registry = await runCommand(
+    ['reg.exe', 'query', blowfishKey, '/ve', '/reg:32'],
+    '无法核验游戏的 32 位 Blowfish 组件。请查看 wine-prefix.log。',
+  );
+  const values = [...registry.matchAll(/^[ \t]*[^\r\n]+?[ \t]+REG_SZ[ \t]+([^\r\n]+)$/gm)];
+  if (values.length !== 1 || values[0][1].trim().toLowerCase() !== 'g:\\blowfish.dll')
+    throw new Error('游戏的 32 位 Blowfish 注册路径不正确，游戏尚未启动。请查看 wine-prefix.log 后重试。');
+  notify('专用 Wine 环境和游戏组件已准备完成。');
+}
+
+export async function wineConfiguration(environment) {
   const bottle = environment.RA2_NATIVE_WINE_BOTTLE;
   const explicitPrefix = environment.RA2_NATIVE_WINE_PREFIX;
   if (bottle && explicitPrefix) throw new Error('RA2_NATIVE_WINE_BOTTLE 和 RA2_NATIVE_WINE_PREFIX 只能设置一个。');
   const prefix = explicitPrefix || (!bottle && environment.WINEPREFIX);
   if (!bottle && !prefix)
     throw new Error(
-      '请将 RA2_NATIVE_WINE_BOTTLE 设置为已有的专用 Wine 容器名称，或用 RA2_NATIVE_WINE_PREFIX 指定已有的 Wine 文件夹。',
+      '请将 RA2_NATIVE_WINE_BOTTLE 设置为已有的专用 Wine 容器名称，或用 RA2_NATIVE_WINE_PREFIX 指定专用 Wine 文件夹。',
     );
   let wine = environment.RA2_NATIVE_WINE || executableOnPath('wine');
   if (!wine && process.platform === 'darwin') {
@@ -302,12 +500,17 @@ async function wineConfiguration(environment) {
     throw new Error(`Wine 无法运行：${wine}。请检查 RA2_NATIVE_WINE 的路径和执行权限。`);
   });
   const scopeEnvironment = { ...environment };
+  let preparePrefix = null;
   if (prefix) {
     const absolutePrefix = resolve(prefix);
-    const stat = await lstat(absolutePrefix).catch(() => null);
-    if (!stat?.isDirectory() || !(await exists(join(absolutePrefix, 'system.reg'))))
+    const state = await inspectWinePrefix(absolutePrefix);
+    if (explicitPrefix && (state.owned || state.empty)) {
+      await assertFreeWinePreparation(wine);
+      await assertDedicatedPrefix(absolutePrefix, environment);
+      preparePrefix = absolutePrefix;
+    } else if (!state.initialized)
       throw new Error(
-        `找不到已有的 Wine 文件夹：${absolutePrefix}（应包含 system.reg）。请检查 RA2_NATIVE_WINE_PREFIX；启动器不会创建 Wine 环境。`,
+        `找不到已有的 Wine 文件夹：${absolutePrefix}（应包含 system.reg）。请检查路径；首次创建请用 RA2_NATIVE_WINE_PREFIX 指向空的专用文件夹。`,
       );
     scopeEnvironment.WINEPREFIX = absolutePrefix;
   } else {
@@ -323,10 +526,11 @@ async function wineConfiguration(environment) {
       );
     delete scopeEnvironment.WINEPREFIX;
   }
-  return { wine, args: bottle ? ['--bottle', bottle] : [], environment: scopeEnvironment };
+  return { wine, args: bottle ? ['--bottle', bottle] : [], environment: scopeEnvironment, preparePrefix };
 }
 
 export async function runLauncher(arguments_, environment = process.env) {
+  const launchStartedAt = Date.now();
   if (arguments_.includes('--help') || arguments_.includes('-h')) {
     console.log(help);
     return;
@@ -500,6 +704,44 @@ export async function runLauncher(arguments_, environment = process.env) {
   process.on('SIGTERM', signalHandler);
   process.on('SIGHUP', signalHandler);
   try {
+    await prepareWinePrefix(wine, gameDirectory, async (args, message) => {
+      if (stopping) throw new Error('启动已取消。');
+      let output = '';
+      let errors = '';
+      let truncated = false;
+      const item = start(wine.wine, [...wine.args, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+      item.child.stdout.setEncoding('utf8');
+      item.child.stderr.setEncoding('utf8');
+      item.child.stdout.on('data', (chunk) => {
+        if (output.length + chunk.length > 65536) truncated = true;
+        else if (!truncated) output += chunk;
+      });
+      item.child.stderr.on('data', (chunk) => {
+        errors = (errors + chunk).slice(-8192);
+      });
+      try {
+        // First initialization can install the prefix's built-in modules. Keep
+        // the existing live preparation bounds, separate from game readiness.
+        const timeoutMs = args[0] === 'wineboot.exe' ? 240000 : args[0].endsWith('regsvr32.exe') ? 90000 : 40000;
+        await waitForStartupCommand(
+          { done: Promise.race([item.closedDone, stopRequested]) },
+          timeoutMs,
+          `${message}（${timeoutMs / 1000} 秒内未完成）`,
+        );
+        if (stopping) throw new Error('启动已取消。');
+        if (item.error || item.code !== 0 || truncated) throw new Error(message, { cause: item.error });
+        return output;
+      } finally {
+        await writeFile(join(runDirectory, 'wine-prefix.log'), `${JSON.stringify(args)}\n${output}\n${errors}\n`, {
+          flag: 'a',
+          mode: 0o600,
+        });
+      }
+    }).catch((error) => {
+      throw new Error(`专用 Wine 环境准备失败：${error.message}。请检查文件夹权限；详情见 wine-prefix.log。`, {
+        cause: error,
+      });
+    });
     console.log('正在检查 Wine 是否能正常运行……');
     let checkOutput = '';
     let checkErrors = '';
@@ -704,6 +946,7 @@ export async function runLauncher(arguments_, environment = process.env) {
         const inputState = JSON.parse((await client.request(Type.INPUT_STATE)).toString());
         if (!nativeMainMenuReady(hello, inputState))
           throw new Error('Waiting for the usable original native main menu');
+        console.log(`Native main menu ready: ${Date.now() - launchStartedAt} ms since launcher start`);
         break;
       } catch (error) {
         if (receivedHello) throw error;
