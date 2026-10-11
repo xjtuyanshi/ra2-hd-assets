@@ -23,6 +23,45 @@ it('sparse missing pages throw and remain observable when a reader swallows the 
   expect(() => m.read_memory(0, 1)).toThrow(NativeMemoryMiss);
   expect(m.read_memory(4096, 2)).toEqual(new Uint8Array([17, 17]));
 });
+it('optional availability probes cannot poison strict reads, subscribe pages, or retain working-set pages', () => {
+  const requests: unknown[] = [],
+    m = new NativeMirrorMemory((ranges) => requests.push(ranges));
+  const available = m.accessor().isRangeAvailable!;
+  expect(available(0, 0)).toBe(false);
+  m.apply({ frame: 1, flags: 2, pages: [page(0x1000), page(0x2000), page(0xfffff000)] });
+  m.beginOperation();
+  expect(available(0x1fff, 2)).toBe(true);
+  expect(available(0x2fff, 2)).toBe(false);
+  expect(available(0xffffffff, 1)).toBe(true);
+  expect(available(0x100000000, 0)).toBe(true);
+  expect(available(0x4000, 0)).toBe(true);
+  expect(available(0x4001, 0)).toBe(true);
+  for (const [address, length] of [
+    [-1, 0],
+    [0, -1],
+    [1.5, 1],
+    [1, 1.5],
+    [NaN, 1],
+    [1, Infinity],
+    [0xffffffff, 2],
+    [0x100000001, 0],
+  ])
+    expect(available(address!, length!)).toBe(false);
+  expect(m.misses).toBe(0);
+  expect(m.operationMissed).toBe(false);
+  expect(m.operationRanges).toEqual([]);
+  expect(m.missingRanges).toEqual([]);
+  expect(requests).toEqual([]);
+  m.read_memory(0x1000, 1);
+  expect(m.operationRanges).toEqual([{ address: 0x1000, length: 4096 }]);
+  expect(() => m.read_memory(0x4000, 1)).toThrow(NativeMemoryMiss);
+  expect(m.operationMissed).toBe(true);
+  expect(available(0x2000, 1)).toBe(true);
+  expect(m.operationMissed).toBe(true);
+  expect(requests).toHaveLength(1);
+  m.apply({ frame: 2, flags: 1, pages: [] });
+  expect(available(0x1000, 1)).toBe(false);
+});
 it('cross-page read and frame updates retain exact bytes while incomplete snapshots are abandoned', () => {
   const m = new NativeMirrorMemory();
   m.apply({ frame: 8, flags: 2, pages: [page(4096, 17), page(8192, 33)] });

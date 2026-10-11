@@ -37,6 +37,39 @@ export interface GameRenderState {
    * while it cannot be read.
    */
   sidebar?: GameRenderSidebar | null;
+  /** Read-only overlay observations. Native drawing remains authoritative until an atomic replacement exists. */
+  battlefieldOverlay?: GameBattlefieldOverlayState | null;
+}
+
+/** Observed selection state, not a draw list: native screen anchors and occlusion are not yet captured. */
+export interface GameBattlefieldOverlayState {
+  frame: number;
+  presentation: 'native';
+  objects: GameBattlefieldOverlayObject[];
+  /** Host-side cost of this read only, including validation; never a simulation clock. */
+  readerMs: number;
+}
+
+export interface GameBattlefieldOverlayObject {
+  id: number;
+  uid: number;
+  kind: 'vehicle' | 'infantry' | 'building' | 'aircraft';
+  selected: true;
+  /** Original object location; a screen anchor must not be inferred from this alone. */
+  world: { x: number; y: number; z: number };
+  health: { current: number; maximum: number; ratio: number; colour: 'green' | 'yellow' | 'red' };
+  /** Engine group index and the actual displayed digit; null means confirmed unassigned. */
+  group: { index: number; label: string; colour: [number, number, number] } | null;
+  /** Cell dimensions only; these do not establish the building's rear-corner depth geometry. */
+  foundation?: { width: number; height: number };
+  /** Offsets from the native DrawHealthBar point, not from world or screen centre. */
+  mobileGeometry?: {
+    pipOrigin: { x: number; y: number };
+    borderOrigin: { x: number; y: number };
+    maximumPips: number;
+    filledPips: number;
+    pipStepX: number;
+  };
 }
 
 /** Scene-wide engine lighting, in fractional [Lighting] units rather than integer percentages/per-mille. */

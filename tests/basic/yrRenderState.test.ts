@@ -31,6 +31,14 @@ import {
   type YrState,
 } from '../../src/games/yr/stateReader';
 import { createGuestMemory } from '../helpers/guestMemory';
+import {
+  createYrBattlefieldOverlayReader,
+  readYrBattlefieldOverlays,
+  YR_BATTLEFIELD_OVERLAY as BFO,
+  YR_BATTLEFIELD_OVERLAY_SIGNATURES,
+} from '../../src/games/yr/battlefieldOverlayReader';
+import { YR_STARTUP_PAGE_HASH } from '../../src/games/yr/startupPage';
+import { NativeMirrorMemory } from '../../src/adapter/native/memory';
 
 /**
  * A reader clock on which every poll comes a second after the one before: past the shroud cadence and past the
@@ -1566,5 +1574,223 @@ describe('YR 1.001 render state for the HD bridge', () => {
     const memory = createGuestMemory();
     expect(createYrRenderStateReader(memory, memory.bytes.length, 'other')).toBeNull();
     await expect(YR_RUNTIME_HOOKS.createRenderStateReader!(memory, memory.bytes.length, 'other')).resolves.toBeNull();
+  });
+});
+
+/** Synthetic memory only: validated selection observations must never imply that native pixels can be disabled. */
+describe('YR battlefield overlay observations', () => {
+  function selectionImage() {
+    const memory = keyMemory(),
+      bytes = memory.bytes,
+      view = new DataView(bytes.buffer);
+    const items = 0xc00000,
+      rules = 0xc01000,
+      owner = 0xd00000;
+    for (const signature of YR_BATTLEFIELD_OVERLAY_SIGNATURES) bytes.set(signature.bytes, signature.address);
+    memory.u32(BFO.selected + 4, items);
+    memory.u32(BFO.selected + 16, 3);
+    memory.u32(BFO.selected + 8, 3);
+    memory.u32(G.houses + 4, items + 0x100);
+    memory.u32(G.houses + 16, 1);
+    memory.u32(G.houses + 8, 1);
+    memory.u32(items + 0x100, owner);
+    memory.u32(R.instance, rules);
+    view.setFloat64(rules + R.yellow, 0.5, true);
+    view.setFloat64(rules + R.red, 0.25, true);
+    bytes.set([10, 20, 30], owner + BFO.groupColour);
+    const definitions = [
+      [V.unit, O.unitType, V.unitType],
+      [V.infantry, O.infantryType, V.infantryType],
+      [V.building, O.buildingType, V.buildingType],
+    ] as const;
+    const pointers = definitions.map(([vtable, typeOffset, typeVtable], index) => {
+      const pointer = 0xc04000 + index * 0x1000,
+        type = 0xc10000 + index * 0x2000;
+      memory.u32(items + index * 4, pointer);
+      memory.u32(pointer, vtable);
+      memory.u32(pointer + O.uniqueId, index + 1);
+      memory.u32(pointer + typeOffset, type);
+      memory.u32(pointer + O.owner, owner);
+      bytes[pointer + O.isSelected] = 1;
+      memory.u32(pointer + O.health, index === 2 ? 25 : 75);
+      memory.u32(pointer + O.location, 256);
+      memory.u32(pointer + O.location + 4, 512);
+      memory.u32(pointer + 0x214, index === 0 ? 9 : -1);
+      memory.u32(type, typeVtable);
+      memory.u32(type + O.typeStrength, 100);
+      memory.u32(type + BFO.selectionBracketDelta, 2);
+      memory.u32(type + BFO.foundation, 4);
+      return pointer;
+    });
+    return { ...memory, pointers, accessor: createByteViewAccessor(bytes) };
+  }
+
+  it('reads units, infantry and buildings with native label, bar offsets and foundation semantics', () => {
+    const memory = selectionImage();
+    let clock = 0;
+    const state = readYrBattlefieldOverlays(memory.accessor, () => (clock += 0.25));
+    expect(state).toMatchObject({ frame: 100, presentation: 'native', readerMs: 0.25 });
+    expect(state!.objects[0]).toMatchObject({
+      group: { index: 9, label: '0', colour: [10, 20, 30] },
+      health: { current: 75, maximum: 100, ratio: 0.75, colour: 'green' },
+      mobileGeometry: { maximumPips: 17, filledPips: 12, pipOrigin: { x: -15, y: -23 } },
+    });
+    expect(state!.objects[1]).toMatchObject({
+      group: null,
+      mobileGeometry: { maximumPips: 8, filledPips: 6, borderOrigin: { x: 11, y: -23 } },
+    });
+    expect(state!.objects[2]).toMatchObject({
+      health: { ratio: 0.25, colour: 'red' },
+      foundation: { width: 2, height: 3 },
+    });
+    expect(state!.objects[2]!.mobileGeometry).toBeUndefined();
+    memory.u32(memory.pointers[2]! + O.health, 0);
+    expect(readYrBattlefieldOverlays(memory.accessor)!.objects[2]!.health.colour).toBe('green');
+  });
+
+  it('distinguishes confirmed empty selection from unavailable objects, fields, and stale membership', () => {
+    const memory = selectionImage();
+    const unavailable = {
+      ...memory.accessor,
+      bytes: (address: number, length: number) =>
+        address === memory.pointers[1] ? new Uint8Array(0) : memory.accessor.bytes(address, length),
+    };
+    expect(readYrBattlefieldOverlays(unavailable)).toBeNull();
+    memory.bytes[memory.pointers[1]! + O.isSelected] = 0;
+    expect(readYrBattlefieldOverlays(memory.accessor)).toBeNull();
+    memory.u32(BFO.selected + 16, 0);
+    expect(readYrBattlefieldOverlays(memory.accessor)?.objects).toEqual([]);
+    memory.u32(BFO.selected + 16, 0xffffffff);
+    expect(readYrBattlefieldOverlays(memory.accessor)).toBeNull();
+  });
+
+  it('returns unknown on inconsistent frame, bad group, invalid strength, and read failure', () => {
+    const memory = selectionImage();
+    memory.u32(memory.pointers[0]! + 0x214, 10);
+    expect(readYrBattlefieldOverlays(memory.accessor)).toBeNull();
+    memory.u32(memory.pointers[0]! + 0x214, 1);
+    memory.u32(memory.pointers[0]! + O.owner, 0xc10000); // Another fully readable allocation is not a house.
+    expect(readYrBattlefieldOverlays(memory.accessor)).toBeNull();
+    memory.u32(memory.pointers[0]! + 0x214, -1);
+    memory.u32(0xc10000 + O.typeStrength, 0);
+    expect(readYrBattlefieldOverlays(memory.accessor)).toBeNull();
+    memory.u32(0xc10000 + O.typeStrength, 100);
+    let frameReads = 0;
+    expect(
+      readYrBattlefieldOverlays({
+        ...memory.accessor,
+        bytes: (address, length) => {
+          if (address === G.frame && ++frameReads === 2) memory.frame(101);
+          return memory.accessor.bytes(address, length);
+        },
+      }),
+    ).toBeNull();
+    expect(
+      readYrBattlefieldOverlays({
+        ...memory.accessor,
+        bytes: () => {
+          throw new Error('unavailable');
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it('rejects impossible vector capacities without treating spare capacity as populated entries', () => {
+    const memory = selectionImage();
+    memory.u32(BFO.selected + 8, 2);
+    expect(readYrBattlefieldOverlays(memory.accessor)).toBeNull();
+    memory.u32(BFO.selected + 8, -1);
+    expect(readYrBattlefieldOverlays(memory.accessor)).toBeNull();
+    memory.u32(BFO.selected + 8, 100);
+    memory.u32(G.houses + 8, 0);
+    expect(readYrBattlefieldOverlays(memory.accessor)).toBeNull();
+    memory.u32(G.houses + 8, -1);
+    expect(readYrBattlefieldOverlays(memory.accessor)).toBeNull();
+    memory.u32(G.houses + 8, 40);
+    expect(readYrBattlefieldOverlays(memory.accessor)?.objects).toHaveLength(3);
+    memory.u32(BFO.selected + 16, 0);
+    memory.u32(BFO.selected + 8, 0);
+    expect(readYrBattlefieldOverlays(memory.accessor)?.objects).toEqual([]);
+    memory.u32(BFO.selected + 8, -1);
+    expect(readYrBattlefieldOverlays(memory.accessor)).toBeNull();
+    memory.u32(BFO.selected + 8, 0);
+    let descriptorReads = 0;
+    expect(
+      readYrBattlefieldOverlays({
+        ...memory.accessor,
+        bytes: (address, length) => {
+          if (address === BFO.selected && ++descriptorReads === 2) memory.u32(BFO.selected + 8, 10);
+          return memory.accessor.bytes(address, length);
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it('requires executable hash and all signatures without changing game memory', () => {
+    const memory = selectionImage(),
+      before = memory.bytes.slice();
+    expect(createYrBattlefieldOverlayReader(() => memory.accessor, 'other')).toBeNull();
+    const read = createYrBattlefieldOverlayReader(() => memory.accessor, YR_STARTUP_PAGE_HASH);
+    expect(read!()?.objects).toHaveLength(3);
+    expect(memory.bytes.every((byte, index) => byte === before[index])).toBe(true);
+    memory.bytes[YR_BATTLEFIELD_OVERLAY_SIGNATURES[0]!.address] ^= 1;
+    expect(createYrBattlefieldOverlayReader(() => memory.accessor, YR_STARTUP_PAGE_HASH)).toBeNull();
+  });
+
+  it('observes selection on cached world frames and publishes unknown instead of stale overlay data', () => {
+    const memory = selectionImage();
+    const readState = vi.fn(() => yrState(100));
+    const read = createYrRenderStateReaderFrom({
+      memory: () => memory.accessor,
+      readState,
+      createShroudReader: () => null,
+      createEffectsReader: () => null,
+      createOverlayReader: () => null,
+      createSmudgeReader: () => null,
+      createBattlefieldOverlayReader: () =>
+        createYrBattlefieldOverlayReader(() => memory.accessor, YR_STARTUP_PAGE_HASH),
+      now: () => 0,
+    });
+    const first = read()!;
+    expect(first.battlefieldOverlay?.objects).toHaveLength(3);
+    memory.bytes[memory.pointers[0]! + O.isSelected] = 0;
+    const unknown = read()!;
+    expect(unknown.objects).toBe(first.objects);
+    expect(unknown.battlefieldOverlay).toBeNull();
+    memory.u32(BFO.selected + 16, 0);
+    expect(read()!.battlefieldOverlay?.objects).toEqual([]);
+    expect(readState).toHaveBeenCalledTimes(1);
+  });
+
+  it('cannot invalidate the world operation when optional selected-object pages are missing', () => {
+    const fixture = selectionImage();
+    const mirror = new NativeMirrorMemory(() => {
+      throw new Error('Optional observation requested a subscription');
+    });
+    const pages = [
+      G.frame,
+      G.scenario,
+      G.houses,
+      BFO.selected,
+      R.instance,
+      0xc00000,
+      0xc02000,
+      0xc04000,
+      0xc10000,
+      0xd05000,
+    ];
+    mirror.apply({
+      frame: 100,
+      flags: 2,
+      pages: [...new Set(pages.map((address) => address & ~0xfff))].map((address) => ({
+        address,
+        bytes: fixture.bytes.slice(address, address + 4096),
+      })),
+    });
+    mirror.beginOperation();
+    expect(readYrBattlefieldOverlays(mirror.accessor())).toBeNull();
+    expect(mirror.operationMissed).toBe(false);
+    expect(mirror.misses).toBe(0);
+    expect(mirror.missingRanges).toEqual([]);
   });
 });

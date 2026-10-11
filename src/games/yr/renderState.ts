@@ -10,6 +10,7 @@ import type {
   GameRenderState,
   GameRenderSidebar,
   GameRenderStateReader,
+  GameBattlefieldOverlayState,
 } from '../renderState';
 import { createByteViewAccessor, type GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { YR_BUILDING_RENDER_OFFSETS, YR_BUILDING_RULES } from './buildingRenderState';
@@ -31,6 +32,7 @@ import {
 import { createYrOverlayReader, type ReadYrOverlayOptions, type YrOverlays } from './overlayReader';
 import { createYrSidebarReader } from './sidebarReader';
 import { readYrSceneLighting } from './sceneLighting';
+import { createYrBattlefieldOverlayReader } from './battlefieldOverlayReader';
 import { YR_UNIT_CARGO } from './unitCargoState';
 import { YR_TECHNO_TINT } from './technoTint';
 import { YR_TECHNO_VISIBILITY } from './technoVisibility';
@@ -75,6 +77,8 @@ export interface YrRenderStateSources {
   createSmudgeReader: () => ((options?: ReadYrSmudgeOptions) => YrSmudges | null) | null;
   /** Native interface polling is independent of the battlefield change key. */
   createSidebarReader?: () => (() => GameRenderSidebar | null) | null;
+  /** Read-only selection observations; no native drawing is suppressed by this reader. */
+  createBattlefieldOverlayReader?: () => (() => GameBattlefieldOverlayState | null) | null;
   /** Host polling clock only; never changes the guest's clock or logic frame. */
   now?: () => number;
 }
@@ -107,6 +111,7 @@ export function createYrRenderStateReader(
   size: number,
   hash: string,
   createAccessor?: () => GuestMemoryAccessor,
+  options: { battlefieldOverlays?: boolean } = {},
 ): GameRenderStateReader | null {
   const accessor = createAccessor ?? (() => createByteViewAccessor(memory.read_memory(0, size)));
   const readState = createYrStateReader(accessor, hash);
@@ -119,6 +124,9 @@ export function createYrRenderStateReader(
     createOverlayReader: () => createYrOverlayReader(accessor, hash),
     createSmudgeReader: () => createYrSmudgeReader(accessor, hash),
     createSidebarReader: () => createYrSidebarReader(accessor, hash),
+    ...(options.battlefieldOverlays && {
+      createBattlefieldOverlayReader: () => createYrBattlefieldOverlayReader(accessor, hash),
+    }),
   });
 }
 
@@ -128,6 +136,8 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
   let readOverlays: ReturnType<YrRenderStateSources['createOverlayReader']> = null;
   let readSmudges: ReturnType<YrRenderStateSources['createSmudgeReader']> = null;
   const readSidebar = sources.createSidebarReader?.() ?? null;
+  const readBattlefieldOverlay = sources.createBattlefieldOverlayReader?.() ?? null;
+  let battlefieldOverlay: GameBattlefieldOverlayState | null = null;
   let sidebar: GameRenderSidebar | null = null;
   let sidebarKey = 'null';
   const pollSidebar = () => {
@@ -141,7 +151,14 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
   };
   const publishSidebar = (snapshot: GameRenderState): GameRenderState => {
     const next = snapshot.map ? sidebar : null;
-    return !sources.createSidebarReader || snapshot.sidebar === next ? snapshot : { ...snapshot, sidebar: next };
+    const withSidebar =
+      !sources.createSidebarReader || snapshot.sidebar === next ? snapshot : { ...snapshot, sidebar: next };
+    return !sources.createBattlefieldOverlayReader
+      ? withSidebar
+      : {
+          ...withSidebar,
+          battlefieldOverlay: snapshot.map && battlefieldOverlay?.frame === snapshot.frame ? battlefieldOverlay : null,
+        };
   };
   let lastKey: number[] | null = null;
   let last: GameRenderState | null = null;
@@ -162,6 +179,8 @@ export function createYrRenderStateReaderFrom(sources: YrRenderStateSources): Ga
   const now = sources.now ?? (() => performance.now());
   return () => {
     pollSidebar();
+    // The observer deliberately bypasses the world-state cache: selection may change while logic is paused.
+    battlefieldOverlay = readBattlefieldOverlay?.() ?? null;
     let memory: GuestMemoryAccessor;
     try {
       memory = sources.memory();

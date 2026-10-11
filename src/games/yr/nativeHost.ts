@@ -16,6 +16,7 @@ import { installYrTacticalPassthrough } from './tacticalPassthrough';
 import { YR_GATHER_OFFSETS } from './unitGatherState';
 import { readYrNativePointer, setYrNativePointerDrawing } from './nativeCursor';
 import { readYrNativeMenuTexts } from './menuText';
+import { YR_BATTLEFIELD_OVERLAY, YR_BATTLEFIELD_OVERLAY_SIGNATURES } from './battlefieldOverlayReader';
 
 const PAGE_BYTES = 4096;
 const MAX_CELL_SLOTS = 512 * 512;
@@ -108,6 +109,7 @@ export const YR_NATIVE_RANGES: readonly NativeHostRange[] = Object.freeze([
   { address: 0x8192b8, length: 0xb0 }, // Building foundation width/height tables used by effect coordinates.
   { address: YR_MIND_CONTROL_GLOBALS.trigScale, length: 4 },
   { address: YR_MIND_CONTROL_GLOBALS.trig, length: 10240 * 4 },
+  ...YR_BATTLEFIELD_OVERLAY_SIGNATURES.map(({ address, bytes }) => ({ address, length: bytes.length })),
 ]);
 
 /**
@@ -121,6 +123,7 @@ export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.fr
   vector(G.infantry, 0x800, L.objectsPerKind),
   vector(G.buildings, 0x800, L.objectsPerKind),
   vector(G.aircraft, 0x800, L.objectsPerKind),
+  pointerList(YR_BATTLEFIELD_OVERLAY.selected, L.objectsPerKind * 4),
   vector(G.houses, YR_NATIVE_HOUSE_SPANS.prefixBytes, L.houses),
   memberPointer(G.houses, O.houseType, 0x130, L.houses), // Country ID and unit-speed multiplier at +0x12C.
   nestedVector(G.houses, 0x68, 0x800, L.objectsPerKind), // The sidebar's current owned-building list can reallocate.
@@ -323,7 +326,8 @@ export function createYrNativeHostPolicy(
     ranges: YR_NATIVE_RANGES,
     rules: YR_NATIVE_FOLLOW_RULES,
     additionalRanges: () => [...cells(), ...houses()],
-    createRenderReader: () => createYrRenderStateReader(memory, 0x100000000, hash, accessor),
+    createRenderReader: () =>
+      createYrRenderStateReader(memory, 0x100000000, hash, accessor, { battlefieldOverlays: true }),
     createCommandReader: () => createYrCommandStateReaderFrom(accessor, hash),
     createFrameReader: () => createYrFrameReader(memory, hash, metadata.verifiedNativeHook),
     installPassthrough: (transaction, reserve) => {

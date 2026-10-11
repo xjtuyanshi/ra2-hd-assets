@@ -534,9 +534,14 @@ export async function runPhase7InputStream({
   onInputCheckpoint,
   observeState,
   requireBattle = false,
+  selectionKeys = [],
 }) {
   assert([250, 1000].includes(rate), 'Phase7 mouse rates are 250 and 1000');
   assert(seconds >= 30 && seconds <= 600, 'Phase7 stream lasts 30 to 600 seconds');
+  assert(
+    Array.isArray(selectionKeys) && selectionKeys.every((key) => typeof key === 'string' && /^[0-9]$/.test(key)),
+    'Optional selection keys must be ordinary control-group digits',
+  );
   const evidence = await createPhase7EvidenceStream(join(out, `${label}-${rate}hz.ndjson`));
   const agent = typeof worker === 'function' ? worker() : worker;
   let nativeInputBaseline = null;
@@ -598,6 +603,8 @@ export async function runPhase7InputStream({
   let dragging = false;
   let rightHeld = false;
   let shiftHeld = false;
+  let selectionKeyHeld = null;
+  const selectionSequence = [];
   let ownerPaused = false;
   let pauseStartedAt = null;
   let pauseReason = null;
@@ -743,7 +750,14 @@ export async function runPhase7InputStream({
     await evidence.append({ kind: 'acceptance-memory', at: Date.now(), ...process.memoryUsage(), maxRssBytes });
     if (observeState) {
       try {
-        const observation = { kind: 'native-match-state', at: Date.now(), state: await observeState() };
+        const observation = {
+          kind: 'native-match-state',
+          at: Date.now(),
+          ...(selectionKeys.length
+            ? { latestSelectionInput: selectionSequence.length ? { ...selectionSequence.at(-1) } : null }
+            : {}),
+          state: await observeState(),
+        };
         firstNativeMatchState ??= observation;
         lastNativeMatchState = observation;
         nativeMatchStateSamples++;
@@ -970,6 +984,37 @@ export async function runPhase7InputStream({
           modifiers: 0,
         });
         shiftHeld = false;
+        if (selectionKeys.length) {
+          const key = selectionKeys[selectionSequence.length % selectionKeys.length];
+          const input = {
+            index: selectionSequence.length,
+            key,
+            actionBucket,
+            startedAt: Date.now(),
+            activeElapsedMs: activeElapsedMs(),
+            keyUpSent: false,
+          };
+          selectionSequence.push(input);
+          const keyFields = {
+            key,
+            code: `Digit${key}`,
+            windowsVirtualKeyCode: key.charCodeAt(0),
+            nativeVirtualKeyCode: key.charCodeAt(0),
+            modifiers: 0,
+          };
+          selectionKeyHeld = keyFields;
+          await ordinaryInput('Input.dispatchKeyEvent', { type: 'keyDown', ...keyFields });
+          try {
+            await delay(60);
+          } finally {
+            // Release an owned key even if the owner guard stops new input.
+            await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...keyFields });
+            selectionKeyHeld = null;
+            input.keyUpSent = true;
+            input.finishedAt = Date.now();
+            await evidence.append({ kind: 'selection-key-input', ...input });
+          }
+        }
       }
       if (emitted >= Math.floor((activeElapsedMs() * rate) / 1000)) await delay(1);
     }
@@ -1026,6 +1071,10 @@ export async function runPhase7InputStream({
           modifiers: 0,
         }),
       );
+    if (selectionKeyHeld)
+      await cleanupStep('release-selection-key', () =>
+        cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...selectionKeyHeld }),
+      );
     await delay(100);
     await cleanupStep('final-evidence-flush', flush);
     if (agent) {
@@ -1078,6 +1127,16 @@ export async function runPhase7InputStream({
     error: streamError,
     cleanupErrors,
     requireBattle,
+    ...(selectionKeys.length
+      ? {
+          selectionInput: {
+            keys: selectionKeys,
+            intervalMs: 2000,
+            sequence: selectionSequence,
+            source: 'Ordinary trusted CDP key events; actual selected counts belong to native-match-state evidence',
+          },
+        }
+      : {}),
     requestedHz: rate,
     requestedSeconds: seconds,
     actualSeconds: duration,

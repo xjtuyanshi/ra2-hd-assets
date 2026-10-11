@@ -230,6 +230,26 @@ export class NativeMirrorMemory implements GuestMemory {
   write_memory(_bytes: Uint8Array | number[], _address: number): never {
     throw new Error('Native mirror is read-only; use a buffered transaction');
   }
+  /** Advisory probes never participate in strict reader retry/subscription or working-set bookkeeping. */
+  isRangeAvailable(address: number, length: number): boolean {
+    if (
+      !this.complete ||
+      !Number.isSafeInteger(address) ||
+      !Number.isSafeInteger(length) ||
+      address < 0 ||
+      length < 0 ||
+      address + length > 0x100000000
+    )
+      return false;
+    if (length === 0) return true;
+    for (
+      let page = Math.floor(address / NATIVE_PAGE_SIZE) * NATIVE_PAGE_SIZE;
+      page < address + length;
+      page += NATIVE_PAGE_SIZE
+    )
+      if (!this.pages.has(page)) return false;
+    return true;
+  }
   accessor(size = 0x100000000): GuestMemoryAccessor {
     return {
       size,
@@ -238,6 +258,7 @@ export class NativeMirrorMemory implements GuestMemory {
       u32: (a) => this.scalar(a, 4),
       i32: (a) => this.scalar(a, 4, true),
       bytes: (a, n) => this.read_memory(a, n),
+      isRangeAvailable: (a, n) => a + n <= size && this.isRangeAvailable(a, n),
     };
   }
 }

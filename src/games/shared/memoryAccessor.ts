@@ -17,6 +17,12 @@ export interface GuestMemoryAccessor {
   /** Returns a copy, truncated at the end of guest memory. */
   bytes(address: number, length: number): Uint8Array;
   /**
+   * Optional non-mutating availability probe for advisory observers. False is unknown, never zero-filled data.
+   * Sparse implementations must not subscribe pages or alter strict-reader miss/working-set state here.
+   * Invalid ranges return false; a zero-length range is available within a complete address space.
+   */
+  isRangeAvailable?(address: number, length: number): boolean;
+  /**
    * The same memory as little-endian 32-bit words (index = address / 4): a live view, never a copy, present only
    * when the backing store is word-aligned on a little-endian host. For loops over thousands of fields whose range
    * the caller has validated: a word beyond the end reads as undefined, which callers must treat as 0 like `u32`.

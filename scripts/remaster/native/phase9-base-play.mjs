@@ -539,6 +539,12 @@ export async function runPhase9BasePlay(api) {
     report.powerPlant = power;
     const barracks = await build('barracks', barracksTypes, [yard.uid, power.uid]);
     report.barracks = barracks;
+    if (api.stopAfterBarracks) {
+      report.buildingsOnly = true;
+      report.partial = true;
+      report.stoppedAfter = 'barracks';
+      return report;
+    }
 
     if (!api.buildOnly) {
       const infantry = await trainAndMove('infantry', 'infantry', infantryTypes, 2, barracks.uid);

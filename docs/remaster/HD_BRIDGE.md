@@ -212,6 +212,14 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    Details and evidence: `docs/remaster/research/tactical-passthrough.md`,
    `scripts/remaster/bridge/verifyPassthrough.mts`.
 
+The native YR route also publishes optional `GameRenderState.battlefieldOverlay` observations through
+`src/games/yr/battlefieldOverlayReader.ts`: selected-object health, group digits/colors, native mobile-bar parameters,
+building foundation dimensions and reader CPU time. It validates the executable and field dependencies, rereads selection
+independently of the world-state cache, and returns null for unknown data. Advisory mirror availability checks never
+trigger subscriptions or invalidate an otherwise complete world read. These observations do not contain draw-atomic
+anchors, clipping or building occlusion and do not enable any replacement gate; all tactical overlays remain native.
+The selective replacement and fallback contract is specified in [HD battlefield overlays](HD_OVERLAYS.md).
+
 ## Match start
 
 A match must not open on a half-drawn or frozen battlefield. Measured on the base build (XMP29U2 skirmish, 1728x1080

@@ -532,6 +532,45 @@ async function execute(c) {
   }
   if (c.action === 'command-state') return worker().evaluate(() => globalThis.__auditCore.getCommandState());
   if (c.action === 'render-state') return worker().evaluate(() => globalThis.__auditCore.getRenderState());
+  if (c.action === 'overlay-state') {
+    assert(!webRoute, 'Overlay observations currently require the native route');
+    const iterations = c.iterations ?? 1;
+    assert(Number.isInteger(iterations) && iterations >= 1 && iterations <= 500);
+    return worker().evaluate(async (iterations) => {
+      const core = globalThis.__auditCore;
+      const state = await core.getRenderState();
+      const { createYrBattlefieldOverlayReader } = await import('/src/games/yr/battlefieldOverlayReader.ts');
+      const reader = createYrBattlefieldOverlayReader(() => core.memory.accessor(), core.hello.exe.sha256);
+      if (!reader) throw new Error('Current executable does not validate the overlay reader');
+      const samples = [];
+      let failed = 0;
+      let last = null;
+      for (let index = 0; index < iterations; index++) {
+        const value = reader();
+        if (!value) failed++;
+        else {
+          samples.push(value.readerMs);
+          last = value;
+        }
+      }
+      samples.sort((a, b) => a - b);
+      return {
+        scope:
+          'Repeated read-only measurements of the actual selected objects in one live mirror snapshot; not a match-rate measurement',
+        iterations,
+        failed,
+        mirrorFrame: core.memory.frame,
+        readerError: core.render?.error ?? null,
+        published: state?.battlefieldOverlay ?? null,
+        observed: last,
+        timingMs: {
+          mean: samples.length ? samples.reduce((a, b) => a + b, 0) / samples.length : null,
+          p95: samples.length ? samples[Math.ceil(samples.length * 0.95) - 1] : null,
+          max: samples.at(-1) ?? null,
+        },
+      };
+    }, iterations);
+  }
   if (c.action === 'ending-checkpoint') {
     const m = await import('./phase11-endings.mjs');
     return m.capturePhase11EndingCheckpoint({
@@ -627,6 +666,7 @@ async function execute(c) {
     const m = await import('./phase9-base-play.mjs');
     return m.runPhase9BasePlay({
       buildOnly: c.buildOnly ?? false,
+      stopAfterBarracks: c.stopAfterBarracks ?? false,
       page,
       click: (x, y, mode, button) => click(x, y, button ?? 'left'),
       point,
@@ -1052,6 +1092,10 @@ async function execute(c) {
               logicFrame: state?.frame ?? null,
               renderReaderError: core.render?.error ?? null,
               localHouse: state?.localHouse ?? null,
+              selectedCount: state?.battlefieldOverlay?.objects.length ?? null,
+              selectedObjects:
+                state?.battlefieldOverlay?.objects.map(({ uid, kind, group }) => ({ uid, kind, group })) ?? null,
+              overlayReaderMs: state?.battlefieldOverlay?.readerMs ?? null,
               ownAliveAssets:
                 state?.localHouse >= 0
                   ? (state.objects?.filter((object) => object.owner === state.localHouse && object.health > 0).length ??
