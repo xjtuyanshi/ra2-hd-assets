@@ -1378,6 +1378,7 @@ function toSnapshot(state: GameRenderState): LiveSnapshot {
       z: object.z,
       facingRaw: object.facingRaw,
       ...(object.turretFacingRaw !== undefined ? { turretFacingRaw: object.turretFacingRaw } : {}),
+      ...(object.turretIndex !== undefined ? { turretIndex: object.turretIndex } : {}),
       ...(object.buildState !== undefined ? { buildState: object.buildState } : {}),
       ...(object.buildupFrame !== undefined ? { buildupFrame: object.buildupFrame } : {}),
       ...(object.buildingFrame !== undefined ? { buildingFrame: object.buildingFrame } : {}),

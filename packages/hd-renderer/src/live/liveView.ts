@@ -61,6 +61,7 @@ import {
 } from '../ra2/fireEngulf';
 import { EFFECT_DECAL_LIFT, foundationPointPush, GROUND_DEPTH } from '../ra2/cardDepth';
 import { cargoLook } from '../ra2/cargoLook';
+import { selectVoxelTurretModel, selectedVoxelTurretIndex } from '../ra2/voxelTurrets';
 import {
   addRefineryFoundation,
   harvesterRefineryBonus,
@@ -137,6 +138,8 @@ export interface LiveObject {
   z: number;
   facingRaw: number;
   turretFacingRaw?: number;
+  /** Engine-selected multi-turret art; absent or zero uses the default turret. */
+  turretIndex?: number;
   health: number;
   isSelected: boolean;
   /** Native whole-object draw gate: suppress body, shadow and HD additions. */
@@ -467,6 +470,8 @@ interface Visual {
   type: string;
   /** The redraw page variant a voxel unit is painted with ('' or absent: the pages as drawn), see artVariant. */
   variant?: string;
+  /** Extracted turret selection actually drawn (zero when unavailable in an older cache). */
+  turretIndex?: number;
   paletteKey: string;
   root: Group;
   turret?: Group;
@@ -3473,19 +3478,22 @@ export class LiveView {
     const paletteKey = this.housePaletteKeys.get(colorIndex) ?? '';
     const artType = this.drawArt(object, paletteKey);
     const variant = artVariant(object);
+    const turretSource = object.turretIndex ? this.voxelSource(artType, paletteKey, variant, object.turretIndex) : null;
+    const turretIndex = turretSource ? selectedVoxelTurretIndex(turretSource.model) : 0;
     const existing = this.visuals.get(object.uid);
     const firstFrame = this.appearances.get(object.uid)?.frame ?? existing?.firstFrame ?? frame;
     if (existing) existing.firstFrame = firstFrame;
-    // Owner changes (capture, mind control), engine image changes and a change of page variant (a miner's load)
+    // Owner changes (capture, mind control), engine image/turret changes and a page variant (a miner's load)
     // rebuild the visual; pending art is retried. Only a voxel unit is painted with a variant: any other visual
     // stays as it is whatever its object carries.
     if (
       existing &&
       existing.type === artType &&
       existing.paletteKey === paletteKey &&
-      (existing.mode !== 'voxel' || (existing.variant ?? '') === variant)
+      (existing.mode !== 'voxel' ||
+        ((existing.variant ?? '') === variant && (existing.turretIndex ?? 0) === turretIndex))
     ) {
-      const source = existing.pending ? this.voxelSource(artType, paletteKey, variant) : null;
+      const source = existing.pending ? this.voxelSource(artType, paletteKey, variant, object.turretIndex) : null;
       if (!source || !this.voxelDrawable(source.model)) {
         this.warmAlternate(existing, paletteKey);
         return existing;
@@ -3534,7 +3542,7 @@ export class LiveView {
     if (type?.sprite && (object.kind === 'building' || object.kind === 'infantry' || type.shpUnit)) return true;
     if (object.kind === 'building' && this.cache.manifest.sprites[`${object.kind}:${artType}`]?.frames.length)
       return true;
-    const source = this.voxelSource(artType, paletteKey, artVariant(object));
+    const source = this.voxelSource(artType, paletteKey, artVariant(object), object.turretIndex);
     return !!source && this.voxelUnits.prepare(source.model, source.key, source.cacheKey, source.variant);
   }
 
@@ -3546,16 +3554,20 @@ export class LiveView {
     artType: string,
     paletteKey: string,
     variant = '',
+    turretIndex?: number,
   ): { model: VoxelModel; key: string; cacheKey: string; variant: string } | null {
     const libraryType = this.library?.type(artType);
     const fromMap = this.cache.voxels.get(artType);
     const fromLibrary = !fromMap && libraryType?.voxel ? this.library!.voxel(libraryType.voxel) : null;
-    const model = fromMap ?? fromLibrary;
-    if (!model) return null;
+    const original = fromMap ?? fromLibrary;
+    if (!original) return null;
+    const model = selectVoxelTurretModel(original, turretIndex);
     const basePalette = fromMap ? model.palette : this.libraryPalette(model.palette);
     const key = paletteFor(this.cache, basePalette, libraryType?.remap ?? true, paletteKey || undefined);
-    // A page variant is a geometry set of its own (same meshes, other materials), so it is part of the key.
-    return { model, key, cacheKey: variant ? `${artType}@${key}#${variant}` : `${artType}@${key}`, variant };
+    const selectedTurret = selectedVoxelTurretIndex(model);
+    const baseKey = `${artType}@${key}${selectedTurret ? `:turret${selectedTurret}` : ''}`;
+    // Turret geometry and redraw pages have independent selections and share the owner's palette row.
+    return { model, key, cacheKey: variant ? `${baseKey}#${variant}` : baseKey, variant };
   }
 
   /**
@@ -3601,7 +3613,7 @@ export class LiveView {
     if (object.kind === 'building' && this.cache.manifest.sprites[spriteId]?.frames.length)
       return { ...base, root: new Group(), mode: 'map-sprite', sprite: spriteId };
     const variant = artVariant(object);
-    const source = this.voxelSource(artType, paletteKey, variant);
+    const source = this.voxelSource(artType, paletteKey, variant, object.turretIndex);
     // Out of sight a kind waits for its mesh, and one not in the scene yet may have to wait a frame (admitNewArt);
     // it is pending like a model still loading. A shown view builds it at once (see voxelDrawable).
     if (
@@ -3610,7 +3622,15 @@ export class LiveView {
       (!this.outOfSight || this.voxelUnits.built(source.cacheKey) || this.admitNewArt())
     ) {
       const { root, turret } = this.voxelUnits.build(source.model, source.key, source.cacheKey, source.variant);
-      return { ...base, root, turret, mode: 'voxel', libraryType, variant };
+      return {
+        ...base,
+        root,
+        turret,
+        mode: 'voxel',
+        libraryType,
+        variant,
+        turretIndex: selectedVoxelTurretIndex(source.model),
+      };
     }
     // No art (yet): the object stays tracked but draws nothing (a block in its place would read as a real, oddly
     // coloured unit); library voxels whose file is still loading are retried on later frames.

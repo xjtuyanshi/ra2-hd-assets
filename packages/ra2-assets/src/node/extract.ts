@@ -478,7 +478,13 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
   for (const type of [...voxelTypes].sort()) {
     const { sec, image } = src.unitArtOf(type);
     const turretOffset = Number.parseInt(sec?.getString('TurretOffset', '0') ?? '0', 10) || 0;
-    const model = buildVoxelModel(type, unitVoxelParts(image, rulesBool(type, 'Turret')), turretOffset, inst, warn);
+    const model = buildVoxelModel(
+      type,
+      unitVoxelParts(image, rulesBool(type, 'Turret'), src.rulesGet(type, 'TurretCount'), warn),
+      turretOffset,
+      inst,
+      warn,
+    );
     if (model) {
       voxelModels.set(type, model);
       count('voxel');

@@ -7,6 +7,8 @@ real mouse and key input and read from the game's order state.
 
 ## Reader fields
 
+The IFV's engine-selected turret art is documented separately in [Numbered vehicle turrets](yr-unit-turrets.md).
+
 - Passengers: count at techno +0x114, newest passenger at +0x118. At 0x41532E the address of that pair is taken and
   the getter 0x473450 (`mov eax,[ecx+4]; ret`) is called; the routine around 0x473400 stores the new passenger there
   and increments the count. Live, the count of a flak track went 0, 1, 3 as three infantry entered. A unit inside a

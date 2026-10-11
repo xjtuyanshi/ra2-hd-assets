@@ -1850,7 +1850,8 @@ result alongside the library to enable it in LiveLibrary; the renderer does not 
   are separate rects.
 - `palettes/<key>.png`: 256x1 RGB palettes actually used (`iso`, `unit`, `theater`, custom art `Palette=` names).
 - `voxels/<TYPE>.json`: body/turret/barrel VXL sections with HVA frame 0 transforms, for every voxel unit or aircraft
-  the map places plus MTNK, HTNK, HARV, CMIN, SMCV and AMCV.
+  the map places plus MTNK, HTNK, HARV, CMIN, SMCV and AMCV. `parts` retains the default model; optional
+  `turretVariants` holds alternate turret/barrel parts keyed by the engine's zero-based index (1 and above).
 - `scenario-types.json` (`ScenarioTypesSidecar`), only when the scenario's own rules define or redefine types; see
   [Scenario types](#scenario-types-scenario-typesjson).
 
@@ -2201,6 +2202,14 @@ shading intact; a missing or unreadable tile warns once and leaves the surface n
   this rule holds the wrong BFRT model (`common/voxels/BFRT.json` with `"file":"sref.vxl"`), and any redraw page
   projected from it shows the wrong vehicle. Building, overlay, terrain and anim art keep following the art
   section's `Image=` (`artOf`, `animArt`); no stock building differs either way.
+- For `Turret=yes`, rules `TurretCount` includes the unnumbered default turret and numbered `<stem>turN` /
+  `<stem>barlN` VXL/HVA pairs. Map and library extraction keep the alternatives in `VoxelModel.turretVariants`,
+  separate from the default `parts`; the body is shared. Stock FV declares four modes, and its engineer repair arm
+  is `fvtur2`, matching `RepairTurretIndex=2`. Unused numbered files outside the declared count are not extracted.
+  Counts outside integer 0..18 produce a warning and extract only the default. Missing or unreadable required
+  turrets produce a warning and leave the entire variant absent, even if its barrel loads. Consumers retain
+  default art as a fallback for unavailable variants without claiming that the requested variant is present.
+  Old caches must re-extract the affected voxel model to supply these alternatives.
 - Type library only: art `Remapable=` applies to infantry and vehicles too (animals are not house-coloured); art
   `TerrainPalette=yes` is recorded but the unit palette is kept (the lamp art is colour noise with the iso palette).
 

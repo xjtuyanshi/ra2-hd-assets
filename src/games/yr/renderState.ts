@@ -46,6 +46,7 @@ import {
   isPlausiblePointer,
   readPointerVector,
   readYrUnitNativeHidden,
+  readYrUnitTurretIndex,
   type YrObjectState,
   type YrState,
 } from './stateReader';
@@ -368,6 +369,8 @@ function readChangeKey(
       span(pointer, 0x694, 0x698); // Building occupants.
       span(pointer, 0x6c0, 0x6c8); // Infantry type/sequence (unit/aircraft type).
       if (vtable === YR_STATE_VTABLES.unit) {
+        // Boarding/unloading can change turret art before the logic-frame counter advances.
+        word(readYrUnitTurretIndex(m, pointer, m.u32(pointer + o.unitType)) ?? -1);
         if (!isPlausiblePointer(m, pointer, o.unitUnloading + 1)) return null;
         word(m.u8(pointer + o.unitUnloading)); // Unloading can change the draw image within the same logic frame.
         word(m.u8(pointer + o.tethered));
@@ -546,6 +549,7 @@ function projectObject(
     z,
     facingRaw,
     turretFacingRaw,
+    turretIndex,
     renderOrder,
     tilt,
     buildState,
@@ -582,6 +586,7 @@ function projectObject(
     z,
     facingRaw,
     ...(turretFacingRaw !== undefined ? { turretFacingRaw } : {}),
+    ...(turretIndex !== undefined ? { turretIndex } : {}),
     ...(buildState !== undefined ? { buildState } : {}),
     ...(buildupFrame !== undefined ? { buildupFrame } : {}),
     ...(buildingFrame !== undefined ? { buildingFrame } : {}),

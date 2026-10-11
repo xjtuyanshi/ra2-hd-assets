@@ -10,8 +10,8 @@
  *     every name matching the engine's prefix pattern, whatever `NewTheater=` says (artFileCandidates; evidence in
  *     art.ts).
  *   - YR art `Palette=<name>` selects `<name><theater ext>.pal`, falling back to `<name>.pal`.
- *   - voxels: `<image>.vxl/.hva` body, `<image>tur` turret and `<image>barl` barrel for Turret=yes types; HVA frame 0
- *     matrices with the translation scaled by the section scale.
+ *   - voxels: `<image>.vxl/.hva` body, `<image>tur` turret and `<image>barl` barrel for Turret=yes types; TurretCount
+ *     adds numbered turret/barrel alternatives. HVA frame 0 matrices have translation scaled by section scale.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -356,17 +356,40 @@ export function decodeShp(shp: ShpFile): { x: number; y: number; cx: number; cy:
 export interface VoxelPartSpec {
   role: VoxelPart['role'];
   stem: string;
-  /** Warn when the VXL is missing (the body of a unit; building turrets). */
+  /** Nonzero engine turret index; omitted for the shared body and default turret/barrel. */
+  turretIndex?: number;
+  /** Warn when the VXL is missing; a failed required alternate part makes that whole variant unavailable. */
   required: boolean;
 }
 
-/** The body/turret/barrel parts of a rules voxel unit (`<image>`, `<image>tur`, `<image>barl`). */
-export function unitVoxelParts(image: string, hasTurret: boolean): VoxelPartSpec[] {
+/** Rules voxel parts; TurretCount includes the unnumbered default plus `<image>turN`/`<image>barlN`. */
+export function unitVoxelParts(
+  image: string,
+  hasTurret: boolean,
+  turretCount?: string | number,
+  warn: (m: string) => void = () => {},
+): VoxelPartSpec[] {
   const stem = image.toLowerCase();
   const parts: VoxelPartSpec[] = [{ role: 'body', stem, required: true }];
   if (hasTurret) {
     parts.push({ role: 'turret', stem: `${stem}tur`, required: false });
     parts.push({ role: 'barrel', stem: `${stem}barl`, required: false });
+    // The native type has 18 turret slots. Read the raw value instead of parseInt: malformed fractions or huge
+    // player/map INI values must not silently become valid modes or drive an unbounded extraction loop.
+    const count = turretCount === undefined ? 0 : Number(turretCount);
+    const decimal = typeof turretCount !== 'string' || /^[+-]?\d+$/.test(turretCount.trim());
+    if (!decimal || !Number.isSafeInteger(count) || count < 0 || count > 18) {
+      warn(
+        `voxel ${image}: invalid TurretCount=${String(turretCount)}; expected an integer from 0 to 18, using default turret only`,
+      );
+      return parts;
+    }
+    // YR's FV declares four modes: fvtur is index 0 and fvtur1/2/3 supply the other three. Do not scan for extra
+    // names: the install also contains unused numbered models beyond the declared count.
+    for (let turretIndex = 1; turretIndex < count; turretIndex++) {
+      parts.push({ role: 'turret', stem: `${stem}tur${turretIndex}`, turretIndex, required: true });
+      parts.push({ role: 'barrel', stem: `${stem}barl${turretIndex}`, turretIndex, required: false });
+    }
   }
   return parts;
 }
@@ -380,17 +403,26 @@ export function buildVoxelModel(
   warn: (m: string) => void,
 ): VoxelModel | undefined {
   const parts: VoxelPart[] = [];
+  const turretVariants: Record<string, VoxelPart[]> = {};
+  const failedVariants = new Set<number>();
   let normalsMode: number | undefined;
-  for (const { role, stem: name, required } of specs) {
+  for (const { role, stem: name, required, turretIndex } of specs) {
     let vxl: VxlFile | undefined;
     try {
       vxl = inst.vxl(`${name}.vxl`);
     } catch (err) {
       warn(`voxel ${id}: ${name}.vxl unreadable (${(err as Error).message})`);
+      if (required && turretIndex !== undefined) failedVariants.add(turretIndex);
       continue;
     }
     if (!vxl) {
       if (required) warn(`voxel ${id}: ${name}.vxl missing`);
+      if (required && turretIndex !== undefined) failedVariants.add(turretIndex);
+      continue;
+    }
+    if (required && turretIndex !== undefined && !vxl.sections.length) {
+      warn(`voxel ${id}: ${name}.vxl has no sections`);
+      failedVariants.add(turretIndex);
       continue;
     }
     let hva;
@@ -424,11 +456,23 @@ export function buildVoxelModel(
         normalsMode: s.normalsMode,
       };
     });
-    parts.push({ role, sections });
+    const target = turretIndex === undefined ? parts : (turretVariants[String(turretIndex)] ??= []);
+    target.push({ role, sections });
   }
+  // A barrel can load after its required turret failed. Keep that entire mode absent so renderers use their
+  // documented default-art fallback rather than treating an orphaned barrel as the requested turret.
+  for (const index of failedVariants) delete turretVariants[String(index)];
   if (!parts.length) return undefined;
   // The model-level mode is the first (body) section's; each section carries its own.
-  return { id, palette: 'unit', normalsMode: normalsMode ?? 4, parts, file: `${specs[0]!.stem}.vxl`, turretOffset };
+  return {
+    id,
+    palette: 'unit',
+    normalsMode: normalsMode ?? 4,
+    parts,
+    file: `${specs[0]!.stem}.vxl`,
+    turretOffset,
+    ...(Object.keys(turretVariants).length ? { turretVariants } : {}),
+  };
 }
 
 export interface PackedSprites {

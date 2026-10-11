@@ -914,6 +914,15 @@ selection, ownership and events. YR 1.001 UnitClass draw saves Type at `0x73D29C
 unloading HARV/CMIN draw HORV/CMON; absent or invalid fields and missing alternate art retain `type`. A rare poll
 inside the swap window can already see the unloading type for one snapshot. SCHP deployment is a separate policy.
 
+Optional object `turretIndex` forwards the engine-selected numbered vehicle turret independently of facing and
+rules type. YR publishes a validated `CurrentTurretNumber` for non-gattling multi-turret vehicles, including zero;
+unavailable fields remain absent. The map/type-library voxel model can contain optional `turretVariants` with
+alternate turret/barrel parts. LiveView keeps the shared hull, replaces those parts, and caches geometry by turret
+selection and owner palette. Older caches or unavailable variants retain the default model. Alternate turrets keep
+their own voxel material; only the hull receives the default HD projection, whose turret paint fits another shape.
+Boarding, unloading, repair and weapons remain original-engine behavior. See
+[numbered vehicle turret evidence](research/yr-unit-turrets.md).
+
 Optional object `underlay { art, frame, x, y, z }` is one frame of effect-library art the engine draws inside the
 object's own picture, right before its body: the art's canvas centre goes to the projection of the lepton point, the
 body covers it, and ground, overlays and shadows lie under it. YR emits it for the ore-gathering sparks

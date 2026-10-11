@@ -51,6 +51,7 @@ import type { HdRenderer } from '../src/HdRenderer';
 import type { HdWorld } from '../src/ra2/world';
 import type { Ra2Cache } from '../src/ra2/cache';
 import { voxelLookParams } from '../sandbox/look';
+import { selectVoxelTurretModel } from '../src/ra2/voxelTurrets';
 
 function manifest(turret = true): VoxelProjectionManifest {
   const part = (name: string) => ({
@@ -816,6 +817,51 @@ describe('projection loading and disposal', () => {
     for (const mesh of sources) expect((mesh.material as { name: string }).name).toContain('-projected');
     nodes.dispose();
   });
+  it.each([false, true])(
+    'projects only the hull of an alternate turret, with preloaded pages=%s',
+    async (preloaded) => {
+      mockAssets();
+      const nodes = new AtmosphereNodes();
+      const hd = {
+        nodes,
+        settings: { voxelLook: 'engine' },
+        terrainDepth: { setCaptured: vi.fn() },
+      } as unknown as HdRenderer;
+      const world = { nodes, voxelProjection: '/vehicles-hd' } as HdWorld;
+      const cache = { paletteRgb: new Map([['unit', new Uint8Array(768)]]) } as Ra2Cache;
+      const units = new VoxelUnits(hd, world, cache);
+      const source = {
+        ...model,
+        turretVariants: { '2': [{ role: 'turret' as const, sections: [syntheticSection(3)] }] },
+      };
+      const selected = selectVoxelTurretModel(source, 2);
+      if (preloaded) await voxelProjectionLibrary('/vehicles-hd', nodes).loadType(model.id);
+      const unit = units.build(selected, 'unit', `${model.id}@unit:turret2`);
+      const meshes: Mesh[] = [];
+      unit.root.traverse((object) => {
+        if (object instanceof Mesh && object.userData.painterDepth) meshes.push(object);
+      });
+      const turretMaterial = meshes[1]!.material;
+      units.pose(unit, { x: 512, y: 768, z: 104, facing: 1 }, 2);
+      units.setNativeDepth(unit, unit.root.position, 13);
+      await vi.waitFor(() => expect((meshes[0]!.material as { name: string }).name).toContain('-projected'));
+      expect(meshes).toHaveLength(2);
+      expect((meshes[1]!.material as { name: string }).name).not.toContain('-projected');
+      expect(unit.turret!.position.x).toBe(48 / 256);
+      expect(unit.turret!.rotation.y).toBe(-1);
+      // Returning to default uses the original projected gun, independently of the alternate's palette material.
+      const normal = units.build(source, 'unit', `${model.id}@unit`);
+      expect(((normal.turret!.children[0] as Mesh).material as { name: string }).name).toContain('-projected');
+      units.setNativeDepth(unit, unit.root.position, 0, false);
+      expect(meshes[1]!.material).toBe(turretMaterial);
+      const again = units.build(selected, 'unit', `${model.id}@unit:turret2`);
+      expect((again.turret!.children[0] as Mesh).geometry).toBe(meshes[1]!.geometry);
+      units.dispose(unit);
+      units.dispose(normal);
+      units.dispose(again);
+      nodes.dispose();
+    },
+  );
   it.each(['no projection library', 'a type absent from the index'])(
     'settles preparation at once with %s',
     async (kind) => {

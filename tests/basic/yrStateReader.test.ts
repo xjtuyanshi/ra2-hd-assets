@@ -17,6 +17,7 @@ import {
   readPointerVector,
   readUtf16Z,
   readYrState,
+  readYrUnitTurretIndex,
   readYrWaypoint,
   worldVectorToFacing,
 } from '../../src/games/yr/stateReader';
@@ -225,6 +226,70 @@ describe('YR 1.001 state reader', () => {
     m.i32(object + O.radioCapacity, capacity);
     return items;
   };
+
+  it('follows the engine-selected turret through boarding and unloading, preserving type and facing', () => {
+    const m = syntheticMemory();
+    const type = m.type(V.unitType, 'FV', 200, true);
+    const unit = m.object(V.unit, O.unitType, type, 0, { x: 256, y: 512, health: 200, uid: 1 });
+    m.vector(G.units, [unit]);
+    m.i32(type + O.typeTurretCount, 4);
+    m.facing(unit + O.secondaryFacing, 0xc000);
+    // Empty, engineer, empty, ordinary gunner, high-tech gunner, empty. The native engine owns these choices.
+    for (const index of [0, 2, 0, 1, 3, 0]) {
+      m.i32(unit + O.currentTurret, index);
+      expect(readYrState(createByteViewAccessor(m.bytes)).objects[0]).toMatchObject({
+        type: 'FV',
+        turretIndex: index,
+        turretFacingRaw: 0xc000,
+        health: 1,
+      });
+    }
+  });
+
+  it('omits numbered turret art for ordinary, gattling and invalid states without losing the vehicle', () => {
+    const m = syntheticMemory();
+    const type = m.type(V.unitType, 'FV', 200, true);
+    const unit = m.object(V.unit, O.unitType, type, 0, { x: 256, y: 512, health: 200, uid: 1 });
+    m.vector(G.units, [unit]);
+    for (const [count, index, gattling] of [
+      [0, 0, 0],
+      [-1, 0, 0],
+      [19, 0, 0],
+      [4, -1, 0],
+      [4, 4, 0],
+      [4, 0x7fffffff, 0],
+      [4, 2, 1],
+    ]) {
+      m.i32(type + O.typeTurretCount, count!);
+      m.i32(unit + O.currentTurret, index!);
+      m.u8(type + O.typeIsGattling, gattling!);
+      const object = readYrState(createByteViewAccessor(m.bytes)).objects[0];
+      expect(object).toMatchObject({ type: 'FV', uid: 1 });
+      expect(object).not.toHaveProperty('turretIndex');
+    }
+    m.i32(type + O.typeTurretCount, 18);
+    m.i32(unit + O.currentTurret, 17);
+    m.u8(type + O.typeIsGattling, 0);
+    expect(readYrState(createByteViewAccessor(m.bytes)).objects[0]!.turretIndex).toBe(17);
+  });
+
+  it('keeps an unavailable turret field distinct from the valid zero variant', () => {
+    const m = syntheticMemory();
+    const type = m.type(V.unitType, 'FV', 200, true);
+    const unit = m.object(V.unit, O.unitType, type, 0, { x: 256, y: 512, health: 200, uid: 1 });
+    m.i32(type + O.typeTurretCount, 4);
+    const memory = createByteViewAccessor(m.bytes);
+    expect(readYrUnitTurretIndex(memory, unit, type)).toBe(0);
+    for (const missing of [type + O.typeTurretCount, type + O.typeIsGattling, unit + O.currentTurret]) {
+      const unavailable: GuestMemoryAccessor = {
+        ...memory,
+        bytes: (address, length) => (address === missing ? new Uint8Array(0) : memory.bytes(address, length)),
+      };
+      expect(readYrUnitTurretIndex(unavailable, unit, type)).toBeUndefined();
+    }
+    expect(readYrUnitTurretIndex(memory, unit, 0)).toBeUndefined();
+    expect(readYrUnitTurretIndex(memory, memory.size - 4, type)).toBeUndefined();
+  });
 
   it.each([
     [16, -1],

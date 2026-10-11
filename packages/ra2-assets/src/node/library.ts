@@ -423,7 +423,11 @@ export function createTypeBuilder(
   const unitVoxel = (id: string): string | undefined => {
     const { sec, image } = src.unitArtOf(id);
     const turretOffset = Number.parseInt(sec?.getString('TurretOffset', '0') ?? '0', 10) || 0;
-    return voxelOf(id, unitVoxelParts(image, src.rulesBool(id, 'Turret')), turretOffset);
+    return voxelOf(
+      id,
+      unitVoxelParts(image, src.rulesBool(id, 'Turret'), src.rulesGet(id, 'TurretCount'), warn),
+      turretOffset,
+    );
   };
 
   // ---------------------------------------------------------------- buildings

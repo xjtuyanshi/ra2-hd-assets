@@ -11,7 +11,7 @@
  *   HdCacheManifest.mapSize, HdCacheManifest.visibleRect
  * - SpriteEntry.file, SpriteEntry.underlays, SpriteEntry.frameCount, SpriteEntry.sourceFrames, SpriteEntry.loop
  * - MapObject.drawOffset, MapObject.subCell, MapObject.flat, MapObject.health, MapObject.lighting
- * - VoxelModel.file, VoxelModel.turretOffset
+ * - VoxelModel.file, VoxelModel.turretOffset, VoxelModel.turretVariants
  * - SpriteFrame.page (atlas page for multi-page atlases such as the type library's; absent = 0)
  * Draw-order rules the preview (and the HD renderer) follow: tile diamonds by cell depth (x + y), then tile extra
  * graphics (cliff faces, banks) by the same depth, then `flat` objects (smudges, ore/gems, low bridges), then all
@@ -291,6 +291,13 @@ export interface VoxelModel {
   file?: string;
   /** Added: art `TurretOffset=` (leptons forward along the body's facing), 0 when absent. */
   turretOffset?: number;
+  /**
+   * Added: alternate turret/barrel parts keyed by the engine's zero-based turret index (1 and above). The shared
+   * body and default turret remain in `parts`, so older/static readers keep the original model. A missing entry
+   * means that variant's art is unavailable; consumers retain the default art as a fallback without claiming
+   * the requested variant is present.
+   */
+  turretVariants?: Record<string, VoxelPart[]>;
 }
 
 export interface VoxelPart {

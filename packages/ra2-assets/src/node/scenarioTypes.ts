@@ -11,7 +11,8 @@
  *
  * Both sides are built with the library extractor's own per-type code (createTypeBuilder), once over rulesmd.ini and
  * once over rulesmd.ini under the scenario, so the two cannot drift apart: a stock type is listed only when the two
- * records differ, and a donor is accepted only when its art-derived part is identical, voxel models included.
+ * records differ, and a donor is accepted only when its art-derived part is identical. Voxel donors may hold extra
+ * turret variants, but their default parts and every variant the scenario requests must match unchanged.
  */
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -81,8 +82,25 @@ class Side {
     return hash;
   }
 
+  /** A donor may contain unused variants; every requested part and all other model fields must still match. */
+  supportsVoxel(id: string | undefined, requested: Side, requestedId: string | undefined): boolean {
+    if (this.voxel(id) === requested.voxel(requestedId)) return true;
+    if (!id || !requestedId) return false;
+    const donor = this.builder.voxelModels.get(id);
+    const wanted = requested.builder.voxelModels.get(requestedId);
+    if (!donor || !wanted) return false;
+    const { turretVariants: donorVariants, ...donorBase } = donor;
+    const { turretVariants: wantedVariants, ...wantedBase } = wanted;
+    return (
+      JSON.stringify({ ...donorBase, id: '' }) === JSON.stringify({ ...wantedBase, id: '' }) &&
+      Object.entries(wantedVariants ?? {}).every(
+        ([index, parts]) => JSON.stringify(donorVariants?.[index]) === JSON.stringify(parts),
+      )
+    );
+  }
+
   /** The art-derived part of a record, voxel ids replaced by their content. */
-  art(type: LibraryType): string {
+  art(type: LibraryType, includeVoxel = true): string {
     const {
       turret: _turret,
       invisible: _invisible,
@@ -95,7 +113,11 @@ class Side {
       ...rest
     } = type;
     const { turretVoxel: _turretVoxel, ...body } = building ?? {};
-    return JSON.stringify({ ...rest, voxel: this.voxel(voxel), building: building ? body : undefined });
+    return JSON.stringify({
+      ...rest,
+      voxel: includeVoxel ? this.voxel(voxel) : undefined,
+      building: building ? body : undefined,
+    });
   }
 
   /** The whole record, voxel ids replaced by their content. */
@@ -141,9 +163,9 @@ export function collectScenarioTypes(
     const stockSet = new Set(stockIds.map(upper));
     const added = unique(scenario.readRegistry(list)).filter((id) => !stockSet.has(upper(id)));
     const stockOf = (wanted: (id: string) => boolean): string[] => stockIds.filter(wanted);
-    /** The stock voxel id whose model equals the scenario side's `voxel`, among `candidates` (stock voxel ids). */
+    /** A stock model with matching default art and every scenario variant, among `candidates` (stock voxel ids). */
     const stockVoxel = (voxel: string, candidates: (string | undefined)[]): string | undefined =>
-      candidates.find((c) => c !== undefined && stock.voxel(c) === scen.voxel(voxel));
+      candidates.find((c) => c !== undefined && stock.supportsVoxel(c, scen, voxel));
 
     for (const id of [...stockOf((s) => !!scenario.getSection(s)), ...added]) {
       if (types[id]) continue;
@@ -159,11 +181,13 @@ export function collectScenarioTypes(
       if (same && stock.full(same) === scen.full(built)) continue;
 
       const section = scen.section(kind, id);
-      const wanted = scen.art(built);
+      const wanted = scen.art(built, false);
       const donor = [...(isStock ? [id] : []), ...stockOf((s) => s !== id && stock.section(kind, s) === section)].find(
         (candidate) => {
           const record = stock.type(kind, candidate);
-          return !!record && stock.art(record) === wanted;
+          return (
+            !!record && stock.art(record, false) === wanted && stock.supportsVoxel(record.voxel, scen, built.voxel)
+          );
         },
       );
       if (!donor) {

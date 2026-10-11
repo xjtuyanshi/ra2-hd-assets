@@ -875,6 +875,45 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(unloading.objects[0]!.imageType).toBe('HORV');
   });
 
+  it('publishes turret swaps and recovered reads within one logic frame without changing previous snapshots', () => {
+    const memory = keyMemory();
+    const h = sources(memory);
+    const state = yrState(100);
+    state.objects[0]!.type = 'FV';
+    state.objects[0]!.turretIndex = 0;
+    h.readState.mockReturnValue(state);
+    const unit = memory.technos[0]!;
+    const type = 0xb5_0000;
+    memory.u32(unit, V.unit);
+    memory.u32(unit + O.unitType, type);
+    memory.u32(type + O.typeTurretCount, 4);
+    const empty = h.read()!;
+    expect(empty.objects[0]!.turretIndex).toBe(0);
+    expect(empty.objects[1]).not.toHaveProperty('turretIndex');
+    expect(h.read()).toBe(empty);
+    for (const index of [2, 0, 1, 3]) {
+      const previous = h.read()!;
+      memory.u32(unit + O.currentTurret, index);
+      state.objects[0]!.turretIndex = index;
+      const changed = h.read()!;
+      expect(changed).not.toBe(previous);
+      expect(changed.frame).toBe(empty.frame);
+      expect(changed.objects[0]!.turretIndex).toBe(index);
+      expect(structuredClone(changed)).toEqual(changed);
+      expect(h.read()).toBe(changed);
+    }
+    expect(empty.objects[0]!.turretIndex).toBe(0);
+    const selected = h.read()!;
+    memory.bytes[type + O.typeIsGattling] = 1;
+    delete state.objects[0]!.turretIndex;
+    const unavailable = h.read()!;
+    expect(unavailable).not.toBe(selected);
+    expect(unavailable.objects[0]).not.toHaveProperty('turretIndex');
+    memory.bytes[type + O.typeIsGattling] = 0;
+    state.objects[0]!.turretIndex = 3;
+    expect(h.read()!.objects[0]!.turretIndex).toBe(3);
+  });
+
   it('publishes the gather sparks as an underlay and follows the harvesting flag inside one logic frame', () => {
     const memory = keyMemory();
     const h = sources(memory);

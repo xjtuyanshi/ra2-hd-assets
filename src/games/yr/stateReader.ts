@@ -87,6 +87,8 @@ export const YR_STATE_OFFSETS = Object.freeze({
   primaryFacing: 0x388,
   /** TechnoClass::SecondaryFacing (FacingClass, the turret). */
   secondaryFacing: 0x3a0,
+  /** TechnoClass::CurrentTurretNumber; getter 0x70DCF0 reads this engine-selected art index. */
+  currentTurret: 0x124,
   /** UnitClass::Type (UnitTypeClass*). */
   unitType: 0x6c4,
   /** UnitClass::Unloading (bool); UnitClass draw tests it at 0x73D2B0. */
@@ -103,6 +105,10 @@ export const YR_STATE_OFFSETS = Object.freeze({
   typeStrength: 0xa0,
   /** TechnoTypeClass::Turret (bool). */
   typeTurret: 0xca1,
+  /** TechnoTypeClass::TurretCount; HasMultipleTurrets at 0x717880 tests this against zero. */
+  typeTurretCount: 0x808,
+  /** TechnoTypeClass::IsGattling; DrawAsVXL at 0x73B8F2 excludes it from numbered turret art. */
+  typeIsGattling: 0xcd5,
   /** UnitTypeClass::Harvester (bool); UnitClass draw tests it at 0x73D2A6. */
   unitTypeHarvester: 0xe0e,
   /** TechnoTypeClass::UnloadingClass (UnitTypeClass*); UnitClass draw reads it at 0x73D2BA. */
@@ -169,6 +175,8 @@ export const YR_STATE_LIMITS = Object.freeze({
   objectsPerKind: 16384,
   /** A layer can contain every techno kind as well as effects. */
   objectsPerLayer: 65536,
+  /** ObjectTypeClass::ChargerTurrets / ChargerBarrels each have 18 entries. */
+  turretVariants: 18,
   /** Lowest plausible heap pointer; the PE image sits at 0x400000 and the heap arena above it. */
   minPointer: 0x10000,
   /** |X|, |Y| in leptons: 512 cells is far beyond the largest map (MapClass allows at most 511 per axis). */
@@ -278,6 +286,8 @@ export interface YrObjectState {
   /** Turret facing 0..255 (same convention), only for types with Turret=yes. */
   turretFacing?: number;
   turretFacingRaw?: number;
+  /** Engine-selected numbered turret art; absent for ordinary turrets or an unavailable/invalid read. */
+  turretIndex?: number;
   /** Validated engine construction/sale state (H2); omitted on an implausible read. */
   buildState?: 'building' | 'selling' | 'done';
   /** Actual building make SHP frame, including engine sale/gate reversal. */
@@ -372,6 +382,28 @@ export function isPlausiblePointer(memory: GuestMemoryAccessor, pointer: number,
     (pointer & 3) === 0 &&
     pointer + span <= memory.size
   );
+}
+
+/**
+ * UnitClass::DrawAsVXL 0x73B8E3..0x73B90E and 0x73BC28..0x73BC43 select numbered turret/barrel art only when
+ * TurretCount is positive and IsGattling is false. Getter 0x70DCF0 returns CurrentTurretNumber (+0x124), written
+ * from the engine's weapon-to-turret mapping at 0x70DCAB/0x70DCC9. No passenger-name or weapon-index inference.
+ * Exact byte reads keep an unavailable field distinct from the valid default turret zero.
+ */
+export function readYrUnitTurretIndex(memory: GuestMemoryAccessor, unit: number, type: number): number | undefined {
+  const o = YR_STATE_OFFSETS;
+  if (!isPlausiblePointer(memory, unit, o.currentTurret + 4) || !isPlausiblePointer(memory, type, o.typeIsGattling + 1))
+    return undefined;
+  const counts = memory.bytes(type + o.typeTurretCount, 4);
+  if (counts.length !== 4) return undefined;
+  const count = new DataView(counts.buffer, counts.byteOffset, 4).getInt32(0, true);
+  if (count <= 0 || count > YR_STATE_LIMITS.turretVariants) return undefined;
+  const gattling = memory.bytes(type + o.typeIsGattling, 1);
+  if (gattling.length !== 1 || gattling[0] !== 0) return undefined;
+  const indices = memory.bytes(unit + o.currentTurret, 4);
+  if (indices.length !== 4) return undefined;
+  const index = new DataView(indices.buffer, indices.byteOffset, 4).getInt32(0, true);
+  return index >= 0 && index < count ? index : undefined;
 }
 
 /**
@@ -798,6 +830,8 @@ function readYrStateSnapshot(
       if (spec.kind === 'vehicle') {
         const tilt = readYrUnitTilt(memory, pointer, frame);
         if (tilt) object.tilt = tilt;
+        const turretIndex = readYrUnitTurretIndex(memory, pointer, typePointer);
+        if (turretIndex !== undefined) object.turretIndex = turretIndex;
       }
       if (history.tint) {
         const tint = readYrTechnoTint(memory, pointer, spec.kind, frame);

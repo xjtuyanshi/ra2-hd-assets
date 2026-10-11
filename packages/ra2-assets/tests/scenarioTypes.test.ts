@@ -22,7 +22,8 @@ import {
   type ScenarioTypesSidecar,
 } from '../src/library.ts';
 import { THEATERS } from '../src/theater.ts';
-import type { InstallView } from '../src/node/artSource.ts';
+import { unitVoxelParts, type InstallView } from '../src/node/artSource.ts';
+import type { VoxelModel } from '../src/manifest.ts';
 import { extractMap } from '../src/node/extract.ts';
 import { GameInstall } from '../src/node/install.ts';
 import { collectTypeLibrary } from '../src/node/library.ts';
@@ -335,6 +336,133 @@ describe('unit image stems', () => {
     expect(lib.voxelModels.get('ALIAS')!.file).toBe('sref.vxl');
     // Nothing was skipped: the only warnings are the fixture's missing HVA files and its empty [Colors].
     expect(lib.warnings.filter((w) => !/\.hva missing|no colour schemes/.test(w))).toEqual([]);
+  });
+});
+
+describe('numbered voxel turrets', () => {
+  const models = {
+    'mode.vxl': vxl('body', 50),
+    'modetur.vxl': vxl('default', 51),
+    'modetur1.vxl': vxl('gun', 52),
+    'modetur2.vxl': vxl('repair', 53),
+    'modebarl2.vxl': vxl('repair-barrel', 54),
+    'modetur3.vxl': vxl('tech', 55),
+    // An install can carry unused historical modes beyond TurretCount.
+    'modetur4.vxl': vxl('unused', 56),
+  };
+  function source(count: string | number = 4, missing?: keyof typeof models): InstallView {
+    const inst = install({
+      'rulesmd.ini': `[VehicleTypes]\n0=SWAP\n1=STATIC\n2=NO_TURRET\n[SWAP]\nImage=MODE\nTurret=yes\nTurretCount=${count}\n[STATIC]\nImage=MODE\nTurret=yes\n[NO_TURRET]\nImage=MODE\nTurretCount=4\n`,
+      'artmd.ini': '[MODE]\nVoxel=yes\nImage=WRONG\nTurretOffset=32\n',
+      [THEATERS.temperate.controlIni]: '[General]\nClearTile=0\n',
+    });
+    return Object.assign(inst, {
+      has: (n: string) => n.toLowerCase() !== missing && (n.toLowerCase() in models || n.endsWith('.pal')),
+      vxl: (n: string) =>
+        n.toLowerCase() === missing ? undefined : (models as Record<string, unknown>)[n.toLowerCase()],
+    }) as InstallView;
+  }
+  const names = (model: VoxelModel) => model.parts.flatMap((p) => p.sections.map((s) => s.name));
+
+  it.each([NaN, Infinity, -Infinity, 4.5, -1, 19, 1e12, '', '4.5', '4garbage', '1e300', '0x4'])(
+    'rejects invalid TurretCount %s before allocating alternate specs',
+    (count) => {
+      const warnings: string[] = [];
+      const parts = unitVoxelParts('MODE', true, count, (m) => warnings.push(m));
+      expect(parts.map((p) => p.stem)).toEqual(['mode', 'modetur', 'modebarl']);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(`invalid TurretCount=${String(count)}`);
+    },
+  );
+
+  it.each([undefined, 0, 1, 18, '18', ' 4 '])('accepts bounded TurretCount %s without warnings', (count) => {
+    const warnings: string[] = [];
+    const parts = unitVoxelParts('MODE', true, count, (m) => warnings.push(m));
+    expect(parts.length).toBe(3 + Math.max(0, Number(count ?? 0) - 1) * 2);
+    expect(warnings).toEqual([]);
+  });
+
+  it('preserves malformed raw INI counts instead of truncating them during library extraction', () => {
+    const lib = collectTypeLibrary(source('4.5'), 'temperate');
+    expect(lib.voxelModels.get('SWAP')!.turretVariants).toBeUndefined();
+    expect(lib.warnings.some((w) => w.includes('invalid TurretCount=4.5'))).toBe(true);
+  });
+
+  it('keeps the default model stable and extracts only rule-declared alternatives from the rules image', () => {
+    const lib = collectTypeLibrary(source(), 'temperate');
+    const model = lib.voxelModels.get('SWAP')!;
+    expect(names(model)).toEqual(['body', 'default']);
+    expect(model).toMatchObject({ file: 'mode.vxl', turretOffset: 32 });
+    expect(Object.keys(model.turretVariants!)).toEqual(['1', '2', '3']);
+    expect(model.turretVariants!['2']!.map((p) => p.role)).toEqual(['turret', 'barrel']);
+    expect(model.turretVariants!['2']!.flatMap((p) => p.sections.map((s) => s.name))).toEqual([
+      'repair',
+      'repair-barrel',
+    ]);
+    expect(names(lib.voxelModels.get('STATIC')!)).toEqual(['body', 'default']);
+    expect(lib.voxelModels.get('STATIC')!.turretVariants).toBeUndefined();
+    expect(names(lib.voxelModels.get('NO_TURRET')!)).toEqual(['body']);
+    expect(lib.voxelModels.get('NO_TURRET')!.turretVariants).toBeUndefined();
+  });
+
+  it('reports a missing declared turret without copying the default into that mode', () => {
+    const lib = collectTypeLibrary(source(4, 'modetur3.vxl'), 'temperate');
+    expect(Object.keys(lib.voxelModels.get('SWAP')!.turretVariants!)).toEqual(['1', '2']);
+    expect(lib.warnings).toContain('voxel SWAP: modetur3.vxl missing');
+    expect(names(lib.voxelModels.get('SWAP')!)).toEqual(['body', 'default']);
+  });
+
+  it.each(['missing', 'unreadable', 'empty'] as const)(
+    'does not publish an orphan barrel when its required turret is %s',
+    (failure) => {
+      const inst = source(4, failure === 'missing' ? 'modetur2.vxl' : undefined);
+      if (failure !== 'missing') {
+        const read = inst.vxl.bind(inst);
+        inst.vxl = (name) => {
+          if (name === 'modetur2.vxl') {
+            if (failure === 'unreadable') throw new Error('invalid voxel');
+            return { ...read(name)!, sections: [], sectionCount: 0 };
+          }
+          return read(name);
+        };
+      }
+      const lib = collectTypeLibrary(inst, 'temperate');
+      const model = lib.voxelModels.get('SWAP')!;
+      expect(Object.keys(model.turretVariants!)).toEqual(['1', '3']);
+      expect(names(model)).toEqual(['body', 'default']);
+      expect(lib.warnings.some((w) => w.startsWith('voxel SWAP: modetur2.vxl '))).toBe(true);
+    },
+  );
+
+  it.each([
+    { count: '2', variants: ['1'], invalid: false },
+    { count: '4.5', variants: [], invalid: true },
+    { count: '999999999999999999999999999999999999999999', variants: [], invalid: true },
+  ])('honours raw scenario TurretCount=$count in map extraction', ({ count, variants, invalid }) => {
+    const root = mkdtempSync(join(tmpdir(), 'ra2-turret-source-'));
+    const opened = Object.assign(source(), {
+      report: { mounted: [], missing: [], unreadable: [] },
+      tmp: () => undefined,
+    });
+    const spy = vi.spyOn(GameInstall, 'open').mockReturnValue(opened as unknown as GameInstall);
+    try {
+      const map = join(root, 'source.map');
+      writeFileSync(map, `[Map]\nTheater=TEMPERATE\n[SWAP]\nTurretCount=${count}\n`);
+      const result = extractMap({
+        gameDir: root,
+        map,
+        outDir: join(root, 'out'),
+        defaultVoxels: ['SWAP'],
+        log: () => {},
+      });
+      const model = JSON.parse(readFileSync(join(result.dir, result.manifest.voxels['SWAP']!), 'utf8')) as VoxelModel;
+      expect(names(model)).toEqual(['body', 'default']);
+      expect(Object.keys(model.turretVariants ?? {})).toEqual(variants);
+      expect(result.manifest.extractor!.warnings.some((w) => w.includes(`invalid TurretCount=${count}`))).toBe(invalid);
+    } finally {
+      spy.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

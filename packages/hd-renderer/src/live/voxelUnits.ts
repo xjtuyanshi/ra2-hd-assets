@@ -30,6 +30,7 @@ import { createSmoothVoxelPool, type SmoothSectionBuilder } from '../ra2/voxelSm
 import { projectionParts, voxelProjectionLibrary, type VoxelProjectionLibrary } from '../ra2/voxelProjection';
 import { setShadowContact } from '../ra2/voxelShadow';
 import type { VoxelCardTies } from '../ra2/voxelNativeDepth';
+import { selectedVoxelTurretIndex } from '../ra2/voxelTurrets';
 
 export interface VoxelUnitsOptions {
   voxelLook?: 'engine' | 'remaster';
@@ -229,13 +230,18 @@ export class VoxelUnits {
     this.geometries.set(cacheKey, parts);
     const projection = this.projections;
     if (!projection) return parts;
-    const required = projectionParts(parts);
-    if (projectVoxelMaterials(parts, palette, projection.get(model.id, required, variant), this.hd.nodes)) return parts;
+    // Alternate native turrets have different silhouettes: retain the HD hull, but never paint the default gun
+    // over a repair arm or another passenger's turret. Those parts keep their own palette/smooth material.
+    const projected = selectedVoxelTurretIndex(model) ? parts.filter((part) => part.role === 'body') : parts;
+    if (!projected.length) return parts;
+    const required = projectionParts(projected);
+    if (projectVoxelMaterials(projected, palette, projection.get(model.id, required, variant), this.hd.nodes))
+      return parts;
     const waiting = new Set<VoxelUnit>();
     const target = parts;
     this.pending.set(target, waiting);
     void projection.loadType(model.id, required, variant).then((asset) => {
-      if (projectVoxelMaterials(target, palette, asset, this.hd.nodes)) {
+      if (projectVoxelMaterials(projected, palette, asset, this.hd.nodes)) {
         const materials = new Map(target.map((part) => [part.geometry, part.material!]));
         for (const unit of waiting) {
           unit.root.traverse((mesh) => {

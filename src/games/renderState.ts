@@ -155,6 +155,8 @@ export interface GameRenderObject extends GameRenderPoint {
   facingRaw: number;
   /** Only for types with a turret. */
   turretFacingRaw?: number;
+  /** Engine-selected turret art variant (zero-based); absent for ordinary turrets or when unknown. */
+  turretIndex?: number;
   /** Engine construction/sale state; absent when the game cannot report it. */
   buildState?: 'building' | 'selling' | 'done';
   /** Actual make-art frame, with the engine's sale/gate reversal already applied. */

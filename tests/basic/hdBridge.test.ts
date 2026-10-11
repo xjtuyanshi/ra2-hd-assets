@@ -978,6 +978,39 @@ describe('HD bridge look parameters', () => {
 });
 
 describe('HD 桥状态机', () => {
+  it('forwards same-frame turret art changes, including zero and unknown', async () => {
+    const harness = setup();
+    const view = await goLive(harness);
+    const state = battle(3);
+    state.objects = [
+      {
+        id: 1,
+        uid: 11,
+        kind: 'vehicle',
+        type: 'FV',
+        owner: 0,
+        x: 100,
+        y: 200,
+        z: 0,
+        facingRaw: 0,
+        turretFacingRaw: 0x4000,
+        health: 1,
+        isSelected: true,
+      },
+    ];
+    for (const turretIndex of [0, 2, 0, 1, 3, undefined]) {
+      if (turretIndex === undefined) delete state.objects[0]!.turretIndex;
+      else state.objects[0]!.turretIndex = turretIndex;
+      harness.setState({ ...state });
+      await advance(16);
+      const object = view.push.mock.calls.at(-1)![0].objects[0];
+      expect(object).toMatchObject({ type: 'FV', turretFacingRaw: 0x4000 });
+      if (turretIndex === undefined) expect(object).not.toHaveProperty('turretIndex');
+      else expect(object.turretIndex).toBe(turretIndex);
+    }
+    harness.stop();
+  });
+
   it('forwards native body visibility and opacity, including same-frame changes and absent fields', async () => {
     const harness = setup();
     const view = await goLive(harness);
