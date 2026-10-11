@@ -990,12 +990,22 @@ try {
   await ownerIdle();
   dllBefore = await dllIdentity();
   await ownerIdle();
+  const launchEnvironment = { ...process.env, ...config };
+  // The runner's explicit free-Wine scope must override the saved CrossOver
+  // smoke configuration; never launch the two prefixes by accident.
+  if (process.env.RA2_NATIVE_WINE_FLAVOR === 'free') {
+    launchEnvironment.RA2_NATIVE_WINE = process.env.RA2_NATIVE_WINE;
+    launchEnvironment.RA2_NATIVE_WINE_PREFIX = process.env.RA2_NATIVE_WINE_PREFIX;
+    delete launchEnvironment.RA2_NATIVE_WINE_BOTTLE;
+    delete launchEnvironment.WINEPREFIX;
+    delete launchEnvironment.CX_BOTTLE_PATH;
+  }
   launch = spawn(
     process.execPath,
     [join(wt, 'scripts/remaster/native/phase8-launch-trace.mjs'), '--size', '1728x1117'],
     {
       cwd: wt,
-      env: { ...process.env, ...config, RA2_NATIVE_AGENT_HIDDEN: tag.startsWith('visible') ? '0' : '1' },
+      env: { ...launchEnvironment, RA2_NATIVE_AGENT_HIDDEN: tag.startsWith('visible') ? '0' : '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   );
