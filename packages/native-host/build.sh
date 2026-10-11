@@ -18,8 +18,22 @@ cp "$VENDOR_DIR/res.rc" "$BUILD_DIR/res.rc"
 
 CFLAGS=(-O2 -Wall -Werror -std=c99 -D_WIN32_WINNT=0x0601 -I"$VENDOR_DIR/inc" -I"$BUILD_DIR/inc" -I"$PACKAGE_DIR/agent"
   "-ffile-prefix-map=$PACKAGE_DIR=." -fno-ident)
+# Isolation builds retain the normal defaults unless explicitly disabled.
+for feature in AGENT LOGIC_HOOK HIDDEN INPUT PICTURE WEBSOCKET; do
+  variable="NATIVE_HOST_$feature"
+  value="${!variable:-1}"
+  if [[ "$value" != 0 && "$value" != 1 ]]; then
+    printf '%s must be 0 or 1\n' "$variable" >&2
+    exit 1
+  fi
+  CFLAGS+=("-DNH_ENABLE_$feature=$value")
+done
+sources=("$VENDOR_DIR"/src/*.c "$VENDOR_DIR"/src/*/*.c)
+if [[ "${NATIVE_HOST_AGENT:-1}" == 1 ]]; then
+  sources+=("$PACKAGE_DIR"/agent/*.c)
+fi
 objects=()
-for source in "$VENDOR_DIR"/src/*.c "$VENDOR_DIR"/src/*/*.c "$PACKAGE_DIR"/agent/*.c; do
+for source in "${sources[@]}"; do
   relative="${source#"$PACKAGE_DIR/"}"
   object="$BUILD_DIR/obj/${relative%.c}.o"
   mkdir -p "$(dirname "$object")"

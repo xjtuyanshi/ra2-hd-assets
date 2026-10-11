@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdint.h>
+#include "agent.h"
 
 /* Hidden mode is process configuration, independent of client lifetime. */
 void nh_hidden_configure(void);
@@ -36,5 +37,24 @@ HWND WINAPI nh_hidden_set_capture(HWND window);
 HWND WINAPI nh_hidden_get_capture(void);
 BOOL WINAPI nh_hidden_release_capture(void);
 BOOL WINAPI nh_hidden_end_dialog(HWND window, INT_PTR result);
+
+#if !NH_ENABLE_AGENT
+#define nh_hidden_configure() ((void)0)
+#define nh_hidden_install() ((void)0)
+#define nh_hidden_active() 0
+#define nh_hidden_owned(window) 0
+#define nh_hidden_visible(window) 0
+#define nh_hidden_paint() ((void)0)
+#define nh_hidden_paint_dc(window, begin_paint, paint) ((HDC)NULL)
+#define nh_hidden_update_rect(window, rect, erase) (-1)
+#define nh_hidden_update_window(window) (-1)
+#define nh_hidden_finish_dc(window, dc, end_paint) (-1)
+#define nh_hidden_initial_visibility(window, visible) ((void)(window), (void)(visible))
+#define nh_hidden_show_window real_ShowWindow
+#define nh_hidden_set_window_pos real_SetWindowPos
+#define nh_hidden_window_message(window, message, wparam, lparam, result) 0
+#define nh_hidden_set_window_proc(window, procedure, previous) 0
+#define nh_hidden_get_window_proc(window, procedure) 0
+#endif
 
 #endif

@@ -27,6 +27,16 @@ Compilation is serial. The pinned upstream version strings and PE link timestamp
 are stable; build output is `packages/native-host/build/ddraw.dll` and remains
 Git-ignored. The upstream source and Makefile are not modified by building.
 
+For fault isolation, `NATIVE_HOST_AGENT=0` builds only the vendored cnc-ddraw
+sources: no agent object is linked and agent-added import hooks are omitted.
+With the agent retained, each of `NATIVE_HOST_LOGIC_HOOK`, `NATIVE_HOST_HIDDEN`,
+`NATIVE_HOST_INPUT`, `NATIVE_HOST_PICTURE`, and `NATIVE_HOST_WEBSOCKET` can be set
+to `0` independently. All switches default to `1` and accept only `0` or `1`.
+Disabled logic/input/picture requests report refusal rather than success; a
+disabled WebSocket thread exposes no agent endpoint. Hidden isolation also
+omits hidden-mode import hooks and configuration changes. These are diagnostic
+builds, not launcher defaults; rebuild without the variables before normal use.
+
 Install only into a separately owned development copy of the game. Keep the
 previous stock DLL for comparison/rollback. Enable the native `ddraw` override
 in that copy's Wine bottle; the original game directory is never changed.
@@ -41,6 +51,10 @@ backup/restore behavior and local Go helper are documented in
 - A single authenticated binary WebSocket serves memory, mirror, RGB565 native
   pictures, input, and diagnostics over loopback. Configuration is explicit;
   absent configuration leaves the agent dormant.
+- The I/O worker retains its WebSocket SHA1 provider across connections and
+  releases it at worker shutdown. Per-request hash objects still have bounded
+  lifetimes. This avoids the provider unload after each upgrade that faults in
+  Wine 11 WoW64; executable identity hashing and authentication are unchanged.
 - Mirror sampling runs at the verified game logic hook. WebSocket I/O runs on a
   separate thread. Stream handoff has bounded mailboxes and applies backpressure
   without blocking the game.

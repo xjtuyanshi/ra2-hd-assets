@@ -93,8 +93,11 @@ SETWINDOWLONGWPROC real_SetWindowLongW;
 #endif
 
 /* Native-host bridge: saved originals let the existing hook teardown restore IAT entries. */
+#if NH_ENABLE_AGENT && NH_ENABLE_INPUT
 static GETFOREGROUNDWINDOWPROC native_real_GetFocus = GetFocus;
 static GETFOREGROUNDWINDOWPROC native_real_GetActiveWindow = GetActiveWindow;
+#endif
+#if NH_ENABLE_AGENT && NH_ENABLE_HIDDEN
 static HWND (WINAPI *native_real_SetFocus)(HWND) = SetFocus;
 static HWND (WINAPI *native_real_SetActiveWindow)(HWND) = SetActiveWindow;
 static BOOL (WINAPI *native_real_BringWindowToTop)(HWND) = BringWindowToTop;
@@ -103,6 +106,7 @@ static HWND (WINAPI *native_real_SetCapture)(HWND) = SetCapture;
 static HWND (WINAPI *native_real_GetCapture)(void) = GetCapture;
 static BOOL (WINAPI *native_real_ReleaseCapture)(void) = ReleaseCapture;
 static BOOL (WINAPI *native_real_EndDialog)(HWND, INT_PTR) = EndDialog;
+#endif
 
 HOOKLIST g_hook_hooklist[] =
 {
@@ -135,9 +139,12 @@ HOOKLIST g_hook_hooklist[] =
             { "GetTopWindow", (PROC)fake_GetTopWindow, (PROC*)&real_GetTopWindow, 0 },
             { "GetForegroundWindow", (PROC)fake_GetForegroundWindow, (PROC*)&real_GetForegroundWindow, 0 },
             /* Native-host bridge: the game also checks thread focus/activation. */
+#if NH_ENABLE_AGENT && NH_ENABLE_INPUT
             { "GetFocus", (PROC)nh_input_get_focus, (PROC*)&native_real_GetFocus, 0 },
             { "GetActiveWindow", (PROC)nh_input_get_active_window, (PROC*)&native_real_GetActiveWindow, 0 },
+#endif
             /* Native-host bridge: hidden sessions own only logical activation. */
+#if NH_ENABLE_AGENT && NH_ENABLE_HIDDEN
             { "SetFocus", (PROC)nh_hidden_set_focus, (PROC*)&native_real_SetFocus, 0 },
             { "SetActiveWindow", (PROC)nh_hidden_set_active_window, (PROC*)&native_real_SetActiveWindow, 0 },
             { "BringWindowToTop", (PROC)nh_hidden_bring_to_top, (PROC*)&native_real_BringWindowToTop, 0 },
@@ -146,6 +153,7 @@ HOOKLIST g_hook_hooklist[] =
             { "GetCapture", (PROC)nh_hidden_get_capture, (PROC*)&native_real_GetCapture, 0 },
             { "ReleaseCapture", (PROC)nh_hidden_release_capture, (PROC*)&native_real_ReleaseCapture, 0 },
             { "EndDialog", (PROC)nh_hidden_end_dialog, (PROC*)&native_real_EndDialog, 0 },
+#endif
             { "PeekMessageA", (PROC)fake_PeekMessageA, (PROC*)&real_PeekMessageA, 0 },
             { "GetMessageA", (PROC)fake_GetMessageA, (PROC*)&real_GetMessageA, 0 },
             { "GetWindowPlacement", (PROC)fake_GetWindowPlacement, (PROC*)&real_GetWindowPlacement, 0 },
@@ -154,12 +162,14 @@ HOOKLIST g_hook_hooklist[] =
             { "DefWindowProcA", (PROC)fake_DefWindowProcA, (PROC*)&real_DefWindowProcA, 0 },
             { "SetParent", (PROC)fake_SetParent, (PROC*)&real_SetParent, 0 },
             { "BeginPaint", (PROC)fake_BeginPaint, (PROC*)&real_BeginPaint, 0 },
+#if NH_ENABLE_AGENT && NH_ENABLE_HIDDEN
             { "EndPaint", (PROC)fake_EndPaint, (PROC*)&real_EndPaint, 0 },
             { "GetDC", (PROC)fake_GetDC, (PROC*)&real_GetDC, 0 },
             { "ReleaseDC", (PROC)fake_ReleaseDC, (PROC*)&real_ReleaseDC, 0 },
             /* Native-host bridge: hidden native controls query their paint region. */
             { "GetUpdateRect", (PROC)fake_GetUpdateRect, (PROC*)&real_GetUpdateRect, 0 },
             { "UpdateWindow", (PROC)fake_UpdateWindow, (PROC*)&real_UpdateWindow, 0 },
+#endif
             { "GetKeyState", (PROC)fake_GetKeyState, (PROC*)&real_GetKeyState, 0 },
             { "GetAsyncKeyState", (PROC)fake_GetAsyncKeyState, (PROC*)&real_GetAsyncKeyState, 0 },
             { "SetForegroundWindow", (PROC)fake_SetForegroundWindow, (PROC*)&real_SetForegroundWindow, 0 },
@@ -251,6 +261,7 @@ HOOKLIST g_hook_hooklist[] =
             { "", NULL, NULL, 0 }
         }
     },
+#if NH_ENABLE_AGENT && NH_ENABLE_INPUT
     {
         /* Native-host bridge: observe real film lifetime without changing playback. */
         "BINKW32.DLL",
@@ -260,6 +271,7 @@ HOOKLIST g_hook_hooklist[] =
             { "", NULL, NULL, 0 }
         }
     },
+#endif
     {
         "",
         {
@@ -735,6 +747,7 @@ void hook_revert(HOOKLIST* hooks)
 
 void hook_init()
 {
+#if NH_ENABLE_AGENT && NH_ENABLE_INPUT
     /* Native-host bridge: LoadLibrary hooks revisit this when Bink loads later.
      * Keep real exports before replacing the game imports; teardown uses the
      * same existing hook table to restore them. */
@@ -744,6 +757,7 @@ void hook_init()
         nh_real_bink_open = (nh_bink_open_proc)real_GetProcAddress(bink, "_BinkOpen@8");
         nh_real_bink_close = (nh_bink_close_proc)real_GetProcAddress(bink, "_BinkClose@4");
     }
+#endif
     if (!g_hook_active)
     {
         if (g_config.hook == 4 && hook_got_ddraw_import(GetModuleHandleA(NULL), TRUE))

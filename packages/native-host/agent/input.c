@@ -112,6 +112,7 @@ void WINAPI nh_movie_close(void *movie)
 
 int nh_input_active(void)
 {
+    if (!NH_ENABLE_INPUT) return 0;
     return nh_hidden_active() || (InterlockedCompareExchange(&enabled, 0, 0) && nh_connected());
 }
 
@@ -172,6 +173,7 @@ HWND nh_input_target_window(void)
 
 int nh_input_focus_window(HWND hwnd)
 {
+    if (!NH_ENABLE_INPUT) return 0;
     DWORD gui = g_ddraw.gui_thread_id;
     if (!gui || GetCurrentThreadId() != gui ||
         (hwnd && (!nh_window_owned(hwnd) || GetWindowThreadProcessId(hwnd, NULL) != gui))) return 0;
@@ -547,6 +549,12 @@ static int allowed_message(uint32_t message)
 void nh_dispatch_input(uint16_t type, uint32_t id, const uint8_t *payload, uint32_t length)
 {
     if (type == NH_CREDIT) { nh_picture_credit(id, payload, length); return; }
+    if (!NH_ENABLE_INPUT)
+    {
+        const char *error = "input disabled in this diagnostic build";
+        nh_send(NH_ERROR, id, error, (uint32_t)strlen(error));
+        return;
+    }
     initialize();
     if (type == NH_INPUT_STATE)
     {
@@ -821,6 +829,7 @@ static LRESULT route_message(HWND main, UINT message, WPARAM wparam, LPARAM lpar
 
 int nh_input_message(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, LRESULT *result)
 {
+    if (!NH_ENABLE_INPUT) return 0;
     (void)lparam;
     if (message != NH_WM_INPUT) return 0;
     *result = 0;

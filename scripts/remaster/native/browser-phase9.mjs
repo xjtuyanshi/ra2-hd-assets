@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded real-browser inspection. Commands are private review artifacts, never guest-state writes.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdir, readFile, writeFile, appendFile, readdir, lstat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, resolve, dirname } from 'node:path';
@@ -96,6 +96,9 @@ let launch,
   logTail = '',
   url,
   cleanupPromise;
+let launchStartedAtMs = null,
+  mainMenuObservedAtMs = null,
+  mainMenuControlsObserved = false;
 let beforeBuildings = false;
 let peakRss = 0;
 async function dllIdentity() {
@@ -1066,6 +1069,31 @@ async function execute(c) {
             }),
         })
       : null;
+    const gameMemory = [];
+    const sampleGameMemory = async (stage) => {
+      const ps = spawnSync('/bin/ps', ['-axo', 'pid=,rss=,command='], { encoding: 'utf8', timeout: 3000 });
+      const candidates = (ps.stdout || '')
+        .split('\n')
+        .map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/))
+        .filter((m) => m && /^(?:[^ \t]*[\\/])?gamemd\.exe(?:\s|$)/i.test(m[3]));
+      const match = ps.status === 0 && candidates.length === 1 ? candidates[0] : null;
+      const sample = {
+        at: new Date().toISOString(),
+        label: c.label ?? 'stream',
+        stage,
+        pid: match ? +match[1] : null,
+        rssBytes: match ? +match[2] * 1024 : null,
+        unknown: match ? null : ps.error?.message || `game process candidates: ${candidates.length}`,
+      };
+      gameMemory.push(sample);
+      await appendFile(join(out, 'game-process-memory.jsonl'), JSON.stringify(sample) + '\n');
+    };
+    if (monitor) await sampleGameMemory('start');
+    const memoryTimer = monitor
+      ? setInterval(() => {
+          sampleGameMemory('interval').catch(() => {});
+        }, 10000)
+      : null;
     let result, rates;
     try {
       result = await runPhase7InputStream({
@@ -1110,9 +1138,24 @@ async function execute(c) {
         ...c,
       });
     } finally {
-      if (monitor) rates = await monitor.stop();
+      if (memoryTimer) clearInterval(memoryTimer);
+      if (monitor) {
+        rates = await monitor.stop();
+        await sampleGameMemory('end');
+      }
     }
-    return monitor ? { stream: result, rates } : result;
+    const knownMemory = gameMemory.filter((sample) => sample.rssBytes !== null);
+    const gameProcessMemory = {
+      source: 'macOS ps RSS for the single gamemd.exe process in the runner-isolated game scope',
+      start: gameMemory[0] ?? null,
+      end: gameMemory.at(-1) ?? null,
+      minBytes: knownMemory.length ? Math.min(...knownMemory.map((sample) => sample.rssBytes)) : null,
+      maxBytes: knownMemory.length ? Math.max(...knownMemory.map((sample) => sample.rssBytes)) : null,
+      pids: [...new Set(knownMemory.map((sample) => sample.pid))],
+      knownSamples: knownMemory.length,
+      unknownSamples: gameMemory.length - knownMemory.length,
+    };
+    return monitor ? { stream: result, rates, gameProcessMemory } : result;
   }
   if (c.action === 'sleep') {
     await delay(Math.min(c.ms, 60000));
@@ -1317,13 +1360,14 @@ try {
     }
     // The runner's explicit free-Wine scope must override the saved CrossOver
     // smoke configuration; never launch the two prefixes by accident.
-    if (process.env.RA2_NATIVE_WINE_FLAVOR === 'free') {
+    if (['free', 'free-cx'].includes(process.env.RA2_NATIVE_WINE_FLAVOR)) {
       launchEnvironment.RA2_NATIVE_WINE = process.env.RA2_NATIVE_WINE;
       launchEnvironment.RA2_NATIVE_WINE_PREFIX = process.env.RA2_NATIVE_WINE_PREFIX;
       delete launchEnvironment.RA2_NATIVE_WINE_BOTTLE;
       delete launchEnvironment.WINEPREFIX;
       delete launchEnvironment.CX_BOTTLE_PATH;
     }
+    launchStartedAtMs = Date.now();
     launch = spawn(
       process.execPath,
       [
@@ -1440,7 +1484,7 @@ try {
   const initialWindow = await cdp.send('Browser.getWindowForTarget');
   await cdp.send('Browser.setWindowBounds', {
     windowId: initialWindow.windowId,
-    bounds: { width: 1728, height: 1117, windowState: 'normal' },
+    bounds: { left: 0, top: 30, width: 1728, height: 1117, windowState: 'normal' },
   });
   page.on('response', (r) => {
     if (r.status() >= 400) record('http-error', { status: r.status(), url: redact(r.url()) });
@@ -1520,9 +1564,9 @@ try {
       async () => {
         try {
           const input = await state();
+          mainMenuControlsObserved = !!input.controls?.some((c) => usable(c) && c.id === 1667);
           return (
-            input.controls?.some((c) => usable(c) && c.id === 1667) ||
-            (tag.startsWith('nativeintro') && input.moviePlaying === true && !input.modal)
+            mainMenuControlsObserved || (tag.startsWith('nativeintro') && input.moviePlaying === true && !input.modal)
           );
         } catch {
           return false;
@@ -1551,6 +1595,7 @@ try {
       async () => await worker().evaluate(() => !!globalThis.__auditCore.connection.pictureDecoder.previous),
       120000,
     );
+  if (!webRoute && mainMenuControlsObserved) mainMenuObservedAtMs = Date.now();
   await delay(1000);
   await shot(webRoute ? 'startup-ready' : 'main-menu');
   await record('ready', {
@@ -1560,6 +1605,11 @@ try {
     naturalWindowDimensions,
     browserVersion: browser.version(),
     installedAgent: webRoute ? null : await dllIdentity(),
+    launcherStartAt: launchStartedAtMs === null ? null : new Date(launchStartedAtMs).toISOString(),
+    mainMenuObservedAt: mainMenuObservedAtMs === null ? null : new Date(mainMenuObservedAtMs).toISOString(),
+    launcherStartToObservedMainMenuMs: mainMenuObservedAtMs === null ? null : mainMenuObservedAtMs - launchStartedAtMs,
+    mainMenuTimingSource:
+      'Usable native main-menu control and first decoded picture; upper bound includes browser startup; intro readiness excluded',
     viewport: await page.evaluate(() => ({
       width: innerWidth,
       height: innerHeight,

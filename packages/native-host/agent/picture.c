@@ -52,6 +52,12 @@ void nh_surface_info(uint32_t *width, uint32_t *height, uint32_t *bpp)
 
 void nh_picture_credit(uint32_t id, const uint8_t *payload, uint32_t length)
 {
+    if (!NH_ENABLE_PICTURE)
+    {
+        const char *error = "picture export disabled in this diagnostic build";
+        nh_send(NH_ERROR, id, error, (uint32_t)strlen(error));
+        return;
+    }
     uint32_t count = 0;
     if (length == 4) memcpy(&count, payload, 4);
     if (count != 1)
@@ -93,6 +99,7 @@ void nh_picture_credit(uint32_t id, const uint8_t *payload, uint32_t length)
 
 int nh_picture_message(HWND window, UINT message, WPARAM wparam)
 {
+    if (!NH_ENABLE_PICTURE) return 0;
     if (message != NH_WM_PICTURE && !(message == WM_TIMER && wparam == NH_WM_PICTURE)) return 0;
     if (InterlockedCompareExchange(&initialized, 0, 0) != 2) return 1;
     KillTimer(window, NH_WM_PICTURE);
@@ -162,6 +169,7 @@ static uint32_t encode_row(uint32_t offset, const uint16_t *row, uint32_t width)
 
 void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pitch, uint32_t bpp)
 {
+    if (!NH_ENABLE_PICTURE) return;
     InterlockedExchange(&surface_width, (LONG)width);
     InterlockedExchange(&surface_height, (LONG)height);
     InterlockedExchange(&surface_bpp, (LONG)bpp);

@@ -64,6 +64,9 @@ Every integration edit in C source is marked `Native-host bridge`.
   wrappers. The wrappers delegate without tracking when the agent is not
   configured. Existing IAT teardown restores the original imports. No film
   clock, decoder, resource or game input is changed.
+- `src/hook.c`: build-time isolation omits agent-added input, Bink, and hidden
+  paint/focus import hooks when their component is disabled, and omits all such
+  entries when building without agent objects. Default hook tables are unchanged.
 - `src/mouse.c`: suppress physical mouse lock/unlock work while virtual input is
   active, so it does not move or capture the real cursor.
 - `src/wndproc.c`: dispatch tagged, bounded remote input on the window's game

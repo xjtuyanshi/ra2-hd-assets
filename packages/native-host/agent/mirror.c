@@ -210,6 +210,7 @@ static int prepare_trampoline(void) {
     return 1;
 }
 static int switch_hook(int wanted) {
+    if (!NH_ENABLE_LOGIC_HOOK) return !wanted;
     struct suspended_threads threads;
     uint8_t found[sizeof(frame_signature)];
     int result = 0;

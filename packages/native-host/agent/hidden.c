@@ -188,6 +188,7 @@ void nh_hidden_install(void)
 
 void nh_hidden_configure(void)
 {
+    if (!NH_ENABLE_HIDDEN) return;
     char path[MAX_PATH] = {0}, value[16] = "1", *slash;
     if (!nh_agent_configured()) return;
     if (GetModuleFileNameA(NULL, path, sizeof(path)))

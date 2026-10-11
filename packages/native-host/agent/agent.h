@@ -3,6 +3,25 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdint.h>
+/* Build-time isolation only; ordinary builds preserve every agent feature. */
+#ifndef NH_ENABLE_AGENT
+#define NH_ENABLE_AGENT 1
+#endif
+#ifndef NH_ENABLE_LOGIC_HOOK
+#define NH_ENABLE_LOGIC_HOOK 1
+#endif
+#ifndef NH_ENABLE_HIDDEN
+#define NH_ENABLE_HIDDEN 1
+#endif
+#ifndef NH_ENABLE_INPUT
+#define NH_ENABLE_INPUT 1
+#endif
+#ifndef NH_ENABLE_PICTURE
+#define NH_ENABLE_PICTURE 1
+#endif
+#ifndef NH_ENABLE_WEBSOCKET
+#define NH_ENABLE_WEBSOCKET 1
+#endif
 /* All messages use LE: magic u32, version u16, type u16, id u32, payload bytes u32. */
 #define NH_MAGIC 0x3142484eu
 #define NH_VERSION 1
@@ -93,4 +112,18 @@ void nh_surface_info(uint32_t *width, uint32_t *height, uint32_t *bpp);
 void nh_picture_credit(uint32_t id, const uint8_t *payload, uint32_t length);
 void nh_picture_diagnostics(char *json, uint32_t capacity);
 int nh_picture_message(HWND window, UINT message, WPARAM wparam);
+#if !NH_ENABLE_AGENT
+/* A vendor-only build links no agent objects and takes the original API paths. */
+#define nh_agent_configure() ((void)0)
+#define nh_agent_start() ((void)0)
+#define nh_agent_stop() ((void)0)
+#define nh_present(...) ((void)0)
+#define nh_input_active() 0
+#define nh_input_cursor(point) 0
+#define nh_input_set_cursor(x, y) 0
+#define nh_input_key(vk, value, asynchronous) 0
+#define nh_input_message(window, message, wparam, lparam, result) 0
+#define nh_picture_message(window, message, wparam) 0
+#define nh_input_get_active_window() GetActiveWindow()
+#endif
 #endif

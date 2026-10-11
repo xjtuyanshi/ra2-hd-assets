@@ -43,6 +43,10 @@ static uint32_t nh_allocated;
 static char nh_token[129], nh_origin[256], nh_hash[65];
 static uint32_t nh_exe_size, nh_pe_timestamp;
 static uint16_t nh_port;
+/* The I/O worker owns this provider across authenticated upgrades. Wine 11
+ * WoW64 faults during the per-upgrade provider unload after SHA1 completes;
+ * retain the genuine provider until the owning worker shuts down. */
+static HCRYPTPROV nh_ws_provider;
 static int nh_flush(SOCKET socket, uint8_t **staging);
 
 static uint32_t nh_u32(const uint8_t *p) {
@@ -230,14 +234,12 @@ int nh_publish_move(uint16_t type, uint8_t **payload, uint32_t length) {
 }
 
 static int nh_crypto(ALG_ID algorithm, const void *bytes, DWORD length, uint8_t *digest, DWORD digest_length) {
-    HCRYPTPROV provider = 0;
     HCRYPTHASH hash = 0;
     int ok = 0;
-    if (!CryptAcquireContextA(&provider, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) return 0;
-    if (CryptCreateHash(provider, algorithm, 0, 0, &hash) && CryptHashData(hash, bytes, length, 0)
+    if (!nh_ws_provider && !CryptAcquireContextA(&nh_ws_provider, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) return 0;
+    if (CryptCreateHash(nh_ws_provider, algorithm, 0, 0, &hash) && CryptHashData(hash, bytes, length, 0)
         && CryptGetHashParam(hash, HP_HASHVAL, digest, &digest_length, 0)) ok = 1;
     if (hash) CryptDestroyHash(hash);
-    CryptReleaseContext(provider, 0);
     return ok;
 }
 
@@ -673,7 +675,8 @@ static DWORD WINAPI nh_io_thread(void *unused) {
         setsockopt(nh_client, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
         setsockopt(nh_client, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof(timeout));
         { BOOL nodelay = TRUE; setsockopt(nh_client, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay)); }
-        if (peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK) && nh_handshake(nh_client)) nh_session(nh_client, receive, &staging);
+        if (peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK) && nh_handshake(nh_client))
+            nh_session(nh_client, receive, &staging);
         nh_active_staging = NULL;
         InterlockedExchange(&nh_client_present, 0);
         shutdown(nh_client, SD_BOTH); closesocket(nh_client); nh_client = INVALID_SOCKET;
@@ -684,6 +687,10 @@ sockets_done:
     if (nh_listener != INVALID_SOCKET) { closesocket(nh_listener); nh_listener = INVALID_SOCKET; }
     WSACleanup();
 done:
+    if (nh_ws_provider) {
+        CryptReleaseContext(nh_ws_provider, 0);
+        nh_ws_provider = 0;
+    }
     InterlockedExchange(&nh_ready, 0); InterlockedExchange(&nh_running, 0);
     if (initialized) nh_clear_queue();
     free(receive); free(staging); for (i = 0; i < 2; i++) { free(nh_streams[i].bytes); nh_streams[i].bytes = NULL; }
@@ -694,6 +701,7 @@ done:
 }
 
 void nh_agent_start(void) {
+    if (!NH_ENABLE_WEBSOCKET) return;
     HANDLE thread;
     if (!nh_agent_configured()) nh_agent_configure();
     if (!nh_agent_configured()) return;
