@@ -1,6 +1,6 @@
 import type { GamePerformanceSample } from '../games/performance';
 import type { GameCommandState } from '../games/commandState';
-import type { GameRenderState } from '../games/renderState';
+import type { GameRenderPreparation, GameRenderState } from '../games/renderState';
 import { serveRelayPort, relayAddressCandidates, relayRoomFromPath } from 'relay-package/client';
 import { createBrowserEmulator } from '../platform/browser/emulator';
 import { BrowserEmulatorProbe } from '../platform/browser/emulatorProbe';
@@ -383,6 +383,10 @@ export class Win32GameVm implements VmShell {
 
   getRenderState(): Promise<GameRenderState | null> {
     return this.core.getRenderState();
+  }
+
+  getRenderPreparation(): Promise<GameRenderPreparation | null> {
+    return this.core.getRenderPreparation();
   }
 
   getCommandState(): Promise<GameCommandState | null> {

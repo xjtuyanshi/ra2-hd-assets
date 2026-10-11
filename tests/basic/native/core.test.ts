@@ -702,6 +702,26 @@ describe('native core session and presenter lifecycle', () => {
     expect(agent.count(NativeMessageType.Read)).toBe(0);
     expect(agent.closes).toBe(0);
   });
+  it('publishes only preparation hints before a battle mirror without unblocking battle readers', async () => {
+    const { core, agent, policyFactory, renderFactory } = setup();
+    agent.modal = true;
+    agent.threadId = 0;
+    agent.mirrorOnHook = false;
+    const hint = { map: { fileName: 'EARLY.MAP' }, theater: null, houses: null, localHouse: null };
+    const readRenderPreparation = vi.fn(async () => hint);
+    const factory = vi.mocked(policyFactory).getMockImplementation()!;
+    vi.mocked(policyFactory).mockImplementation((...args) => ({ ...factory(...args), readRenderPreparation }));
+    const start = core.start();
+    agent.hello();
+    await start;
+    expect(await core.getRenderPreparation()).toBe(hint);
+    expect(readRenderPreparation).toHaveBeenCalledOnce();
+    expect(core.memory.complete).toBe(false);
+    expect(await core.getRenderState()).toBeNull();
+    expect(renderFactory).not.toHaveBeenCalled();
+    await core.stop();
+    expect(await core.getRenderPreparation()).toBeNull();
+  });
   it('rejects unverified logic-owner metadata after menu warm-up instead of publishing a reader result', async () => {
     const { core, agent, renderFactory } = setup();
     agent.modal = true;
@@ -899,6 +919,57 @@ describe('native core session and presenter lifecycle', () => {
     expect(await core.getRenderState()).toBeNull();
     agent.modal = false;
     expect((await core.getRenderState())?.frame).toBe(7);
+  });
+  it('requires a new battle mirror after menu return even when the next counter is larger', async () => {
+    const { core, agent, policyFactory, mode } = setup();
+    const factory = vi.mocked(policyFactory).getMockImplementation()!;
+    vi.mocked(policyFactory).mockImplementation((...args) => ({
+      ...factory(...args),
+      menuSurface: { width: 2, height: 1 },
+      createCommandReader: () => () => ({
+        frame: args[0].frame!,
+        localHouse: 0,
+        view: null,
+        objects: [],
+        lastEvent: null,
+        sidebar: null,
+      }),
+    }));
+    const start = core.start();
+    agent.hello();
+    await start;
+    const picture = (width: number) =>
+      agent.emit(NativeMessageType.Picture, 0, concat(encodeU32(1, width, 1, 1, 0, 2), new Uint8Array([width, 0x80])));
+    picture(3);
+    agent.mirror(2, [], 0);
+    expect((await core.getRenderState())?.frame).toBe(7);
+    expect((await core.getCommandState())?.frame).toBe(2);
+    // An in-game modal retains the current match and resumes immediately.
+    agent.modal = true;
+    expect(await core.getRenderState()).toBeNull();
+    agent.modal = false;
+    expect((await core.getRenderState())?.frame).toBe(7);
+    picture(2);
+    expect(await core.getRenderState()).toBeNull();
+    expect(await core.getCommandState()).toBeNull();
+    // A final publication received while the menu owns the surface cannot authorize a later match.
+    agent.mirror(3, [], 0);
+    picture(3);
+    expect(await core.getRenderState()).toBeNull();
+    expect(await core.getCommandState()).toBeNull();
+    const next = agent.initial.slice();
+    next[0] = 9;
+    agent.mirror(100, [{ address: 0x1000, bytes: next }]);
+    expect((await core.getRenderState())?.frame).toBe(9);
+    expect((await core.getCommandState())?.frame).toBe(100);
+    mode.missing = true;
+    const oldRead = core.getRenderState();
+    await flush();
+    picture(2);
+    mode.missing = false;
+    agent.mirror(101, [], 0);
+    expect(await oldRead).toBeNull();
+    expect(await core.getRenderState()).toBeNull();
   });
   it('attaches during a real-film signal without a logic mirror and forwards only playback transitions', async () => {
     const playback = vi.fn();

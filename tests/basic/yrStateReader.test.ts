@@ -27,6 +27,7 @@ import { YR_BUILDING_RENDER_OFFSETS as B, YR_BUILDING_RULES as R } from '../../s
 import { YR_INFANTRY_RENDER_OFFSETS as I } from '../../src/games/yr/infantryRenderState';
 import { YR_TECHNO_TINT as TT, YR_TECHNO_TINT_SIGNATURES } from '../../src/games/yr/technoTint';
 import { YR_TECHNO_VISIBILITY as TV, YR_TECHNO_VISIBILITY_SIGNATURES } from '../../src/games/yr/technoVisibility';
+import { readYrNativeRenderPreparation, readYrVmRenderPreparation } from '../../src/games/yr/renderPreparation';
 
 /** Synthetic 16 MiB guest memory: enough for every YR 1.001 global and a small heap above 0xb00000. */
 function syntheticMemory() {
@@ -175,6 +176,68 @@ function battlefield() {
   m.vector(G.technos, [tank, limboMcv, badVtable, 0, soldier, yard]);
   return { m, player, ai, tank, limboMcv, soldier, yard, scenario };
 }
+
+describe('YR loading preparation hints', () => {
+  it('reads a scenario before objects or house arrays exist and keeps unknown fields unknown', async () => {
+    const m = syntheticMemory(),
+      scenario = m.alloc(0x3700);
+    m.u32(G.scenario, scenario);
+    m.ascii(scenario + O.scenarioFileName, '2Peaks');
+    m.i32(scenario + O.scenarioTheater, -1);
+    const read = (address: number, length: number) => m.bytes.slice(address, address + length);
+    const expected = { map: { fileName: '2Peaks' }, theater: null, houses: null, localHouse: null };
+    expect(await readYrNativeRenderPreparation(async (address, length) => read(address, length))).toEqual(expected);
+    expect(
+      readYrVmRenderPreparation({
+        read_memory: read,
+        write_memory: () => {
+          throw new Error('read only');
+        },
+      }),
+    ).toEqual(expected);
+  });
+
+  it('publishes validated house colours and local identity, but discards a scenario changing during reads', async () => {
+    const { m, scenario } = battlefield();
+    m.u32(G.houses + 8, 2);
+    const read = async (address: number, length: number) => m.bytes.slice(address, address + length);
+    expect(await readYrNativeRenderPreparation(read)).toEqual({
+      map: { fileName: 'XMP29U2.MAP' },
+      theater: 'urban',
+      houses: [
+        { index: 0, colorIndex: 3 },
+        { index: 1, colorIndex: 4 },
+      ],
+      localHouse: 0,
+    });
+    let descriptions = 0;
+    expect(
+      await readYrNativeRenderPreparation(async (address, length) => {
+        if (address === scenario + O.scenarioTheater && ++descriptions === 2)
+          m.ascii(scenario + O.scenarioFileName, 'NEXT.MAP');
+        return read(address, length);
+      }),
+    ).toBeNull();
+  });
+
+  it('retains valid map metadata when uninitialized house reads fail and rejects non-filename data', async () => {
+    const { m, scenario } = battlefield();
+    const read = async (address: number, length: number) => {
+      if (address === G.houses) throw new RangeError('temporarily unreadable');
+      return m.bytes.slice(address, address + length);
+    };
+    expect(await readYrNativeRenderPreparation(read)).toEqual({
+      map: { fileName: 'XMP29U2.MAP' },
+      theater: 'urban',
+      houses: null,
+      localHouse: null,
+    });
+    m.ascii(scenario + O.scenarioFileName, '../invalid.map');
+    expect(await readYrNativeRenderPreparation(read)).toBeNull();
+    m.bytes.fill(65, scenario + O.scenarioFileName, scenario + O.scenarioFileName + 0x104);
+    expect(await readYrNativeRenderPreparation(read)).toBeNull();
+  });
+});
 /** The synthetic layout must fit: every global lies inside the 16 MiB buffer. */
 function assertGlobalsFit(m: ReturnType<typeof syntheticMemory>) {
   for (const address of Object.values(G)) expect(address + 0x200).toBeLessThan(m.bytes.length);

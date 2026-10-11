@@ -1,6 +1,6 @@
 import type { GamePerformanceSample } from '../games/performance';
 import type { GameCommandState } from '../games/commandState';
-import type { GameRenderState } from '../games/renderState';
+import type { GameRenderPreparation, GameRenderState } from '../games/renderState';
 import type { VmDiagnosticAction, VmDiagnostics } from './vmDiagnostics';
 import type { PcmPlayOptions, PcmWaveFormat } from '../vm86/audio';
 import type { VmFrame, Win32Call, VmNetworkStatus } from '../vm86/win32';
@@ -73,6 +73,7 @@ export type MainToWorkerMessage =
   | { type: 'diagnostics'; action: VmDiagnosticAction; requestId: number }
   | { type: 'game-performance'; requestId: number }
   | { type: 'render-state'; requestId: number }
+  | { type: 'render-preparation'; requestId: number }
   | { type: 'command-state'; requestId: number }
   | { type: 'menu-snapshot'; requestId: number }
   | { type: 'attach-maps'; files: GameFileEntry[]; requestId: number }
@@ -100,6 +101,7 @@ export type WorkerToMainMessage =
   | { type: 'diagnostics-reply'; requestId: number; value: VmDiagnostics }
   | { type: 'game-performance-reply'; requestId: number; value: GamePerformanceSample | null }
   | { type: 'render-state-reply'; requestId: number; value: GameRenderState | null }
+  | { type: 'render-preparation-reply'; requestId: number; value: GameRenderPreparation | null }
   | { type: 'command-state-reply'; requestId: number; value: GameCommandState | null }
   | { type: 'menu-snapshot-reply'; requestId: number; value: MenuSnapshot | null }
   /** An omitted cell layer retains the preceding ordered reply's publication; explicit null clears it. */

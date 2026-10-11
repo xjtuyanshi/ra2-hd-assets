@@ -204,7 +204,13 @@ const HD_CACHE_DIR = resolve(
 const HD_CACHE_TYPES: Record<string, string> = { '.json': 'application/json', '.png': 'image/png' };
 
 /** Serve gameres/hd-cache (map names arrive in the game's own casing, e.g. RIVERRAM); never outside that root. */
-function serveHdCache(req: IncomingMessage, res: ServerResponse): void {
+export function serveHdCache(req: IncomingMessage, res: ServerResponse): void {
+  res.setHeader('Cache-Control', 'no-store');
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.statusCode = 405;
+    res.end();
+    return;
+  }
   let urlPath: string;
   try {
     urlPath = decodeURIComponent((req.url ?? '').split('?')[0]!);
@@ -215,6 +221,7 @@ function serveHdCache(req: IncomingMessage, res: ServerResponse): void {
   }
   const parts = urlPath.split('/').filter(Boolean);
   let current = HD_CACHE_DIR;
+  let file: Stats;
   try {
     if (!parts.length || parts.some((part) => part === '.' || part === '..')) throw new Error('bad path');
     for (const part of parts) {
@@ -223,13 +230,40 @@ function serveHdCache(req: IncomingMessage, res: ServerResponse): void {
       current = join(current, actual);
     }
     const inside = relative(HD_CACHE_DIR, current);
-    if (inside.startsWith('..') || isAbsolute(inside) || !statSync(current).isFile()) throw new Error('missing');
+    if (inside.startsWith('..') || isAbsolute(inside)) throw new Error('missing');
+    file = statSync(current);
+    if (!file.isFile()) throw new Error('missing');
   } catch {
     res.statusCode = 404;
     res.end('not found');
     return;
   }
+  // Reuse private browser bytes across launcher sessions, but validate every request so regenerated artwork is
+  // visible immediately. ctime and inode also change when an exporter preserves size/mtime or replaces a file.
+  const etag = `W/"${file.ino.toString(16)}-${file.size.toString(16)}-${file.mtimeMs.toString(16)}-${file.ctimeMs.toString(16)}"`;
+  res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
+  res.setHeader('ETag', etag);
+  res.setHeader('Last-Modified', file.mtime.toUTCString());
   res.setHeader('Content-Type', HD_CACHE_TYPES[extname(current).toLowerCase()] ?? 'application/octet-stream');
+  const tags = req.headers['if-none-match'];
+  const modifiedSince = req.headers['if-modified-since'];
+  const unchanged =
+    tags !== undefined
+      ? tags.split(',').some((tag) => tag.trim() === '*' || tag.trim().replace(/^W\//, '') === etag.slice(2))
+      : // Date-only validators lose subsecond precision; be conservative if the file changed within that second.
+        modifiedSince !== undefined &&
+        Number.isFinite(Date.parse(modifiedSince)) &&
+        file.mtimeMs <= Date.parse(modifiedSince);
+  if (unchanged) {
+    res.statusCode = 304;
+    res.end();
+    return;
+  }
+  res.setHeader('Content-Length', file.size);
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
   sendFile(res, current);
 }
 
@@ -247,7 +281,9 @@ function sendFile(res: ServerResponse, path: string, range?: { start: number; en
       res.destroy();
       return;
     }
-    for (const name of ['Content-Length', 'Content-Range', 'Accept-Ranges', 'Cache-Control']) res.removeHeader(name);
+    for (const name of ['Content-Length', 'Content-Range', 'Accept-Ranges', 'ETag', 'Last-Modified'])
+      res.removeHeader(name);
+    res.setHeader('Cache-Control', 'no-store');
     res.statusCode = 404;
     res.setHeader('Content-Type', 'text/plain');
     res.end('not found');

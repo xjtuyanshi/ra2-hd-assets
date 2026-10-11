@@ -367,6 +367,9 @@ export interface LiveActivity {
   pageUploads: number;
   /** Voxel meshes being built and redraw projections being fetched. */
   voxelMeshes: number;
+  /** Cumulative successful smooth section requests served from persistent storage / freshly built in this view. */
+  voxelCacheHits: number;
+  voxelMeshBuilds: number;
   /** Everything that was asked for and is not on screen yet (LiveView.loadingArt). */
   loadingArt: number;
   /** Shader modules and render pipelines the last frame had the backend create; null when they cannot be counted. */
@@ -1278,12 +1281,15 @@ export class LiveView {
   static async create(canvas: HTMLCanvasElement, options: LiveViewOptions): Promise<LiveView> {
     waterPreset.style = options.water ?? 'classic';
     // Only trees are static: overlays and smudges change during a match and are drawn by the view (cellLayer).
-    const world = await loadRa2World(options.mapBase, {
-      includeObject: (object) => object.kind === 'tree',
-      voxelLook: options.voxelLook,
-      smoothVoxel: options.smoothVoxel,
-      voxelProjection: options.voxelProjection,
-    });
+    const [world, requiredLimits] = await Promise.all([
+      loadRa2World(options.mapBase, {
+        includeObject: (object) => object.kind === 'tree',
+        voxelLook: options.voxelLook,
+        smoothVoxel: options.smoothVoxel,
+        voxelProjection: options.voxelProjection,
+      }),
+      HdRenderer.adapterLimits(),
+    ]);
     const cache = world.cache!;
     // The theater's type library (art for everything players can build), when it has been extracted.
     const library = options.libraryBase
@@ -1321,7 +1327,7 @@ export class LiveView {
     const hd = new HdRenderer(canvas, state, {
       nodes: world.nodes,
       forceWebGL: options.forceWebGL ?? false,
-      requiredLimits: await HdRenderer.adapterLimits(),
+      requiredLimits,
     });
     await hd.init(world);
     hd.setState(state);
@@ -1798,7 +1804,10 @@ export class LiveView {
     // Out of sight is the time to build: once when there is a scene at all (behind the game's loading screen), and
     // once more when the match's opening is in, so the passes and quality tiers have the shaders of its units too.
     if (this.hiddenFromSight && current && !this.hd.warming) {
-      const stage = current.snapshot.frame > 0 && this.settled >= 1 && !this.warmMerged ? 2 : 1;
+      const stage =
+        current.snapshot.frame !== WARM_FRAME && current.snapshot.frame > 0 && this.settled >= 1 && !this.warmMerged
+          ? 2
+          : 1;
       if (stage > this.warmStage) {
         this.warmStage = stage;
         this.effectSprites?.warm();
@@ -1852,6 +1861,36 @@ export class LiveView {
   }
 
   /**
+   * A failed load settles, but must not let the first HD frame omit the local player's units or building parts.
+   * Normal pending work is also covered by settledFrames; this additionally rejects permanently missing art.
+   * Other houses do not hold the local picture back, and objects the engine deliberately hides need no picture.
+   */
+  get localArtComplete(): boolean {
+    const snapshot = this.current?.snapshot;
+    const local = snapshot?.localHouse;
+    if (!snapshot || this.warming || this.warmMerged || local === undefined || local < 0) return false;
+    for (const object of snapshot.objects) {
+      if (object.owner !== local || object.nativeHidden) continue;
+      const visual = this.visuals.get(object.uid);
+      const type = visual?.libraryType ?? this.library?.type(object.imageType ?? object.type);
+      if (type?.invisible || this.cache.lights?.types[object.type]?.invisible) continue;
+      if (
+        !visual ||
+        visual.mode === 'placeholder' ||
+        visual.turretState === 'missing' ||
+        visual.turretState === 'loading'
+      )
+        return false;
+      if (visual.mode === 'library-sprite') {
+        const pages = type && this.library?.typePages(type);
+        if (!pages?.length || pages.some((page) => !this.library!.pageSettled(page) || this.library!.pageFailed(page)))
+          return false;
+      }
+    }
+    return true;
+  }
+
+  /**
    * Art that was asked for and is not on screen yet: files being fetched or decoded, voxel meshes being built,
    * objects that draw nothing until their model arrives. A model that failed to load is not counted: it will never
    * arrive, and the object is reported by diagnostics() instead.
@@ -1890,6 +1929,8 @@ export class LiveView {
     return {
       pageUploads: this.pageUploads.pending,
       voxelMeshes: this.voxelUnits.loading,
+      voxelCacheHits: this.voxelUnits.cacheHits,
+      voxelMeshBuilds: this.voxelUnits.meshBuilds,
       loadingArt: this.loadingArt(),
       shaders: compiled ? (counted ? compiled.shaders : 0) : null,
       pipelines: compiled ? (counted ? compiled.pipelines : 0) : null,
@@ -1932,17 +1973,18 @@ export class LiveView {
    * only as its loading screen ends, and a view that first hears of them then needs seconds to fetch their pages,
    * build their meshes and compile their shaders. One object of each listed kind (a building twice: standing and at
    * the first frame of its build-up) is drawn at the middle of the map, through the same code as a match snapshot,
-   * so exactly what a match would load is loaded and nothing else. The host keeps the view out of sight meanwhile
+   * so exactly what a match would load is loaded and nothing else. An empty list still prepares the map and shared
+   * effect shaders, before the first match of a fresh browser profile. The host keeps the view out of sight meanwhile
    * (`outOfSight`) and renders frames until `settledFrames` counts. The first match snapshot starts its own
    * timeline; a list that is not through by then stays alongside the match's first snapshots while they are out of
    * sight (see withWarmList). Nothing of a list is ever shown. Ignored once a match snapshot with objects is in.
    */
   warm(types: readonly LiveWarmType[]): void {
-    if (!types.length || (this.current && !this.warming && this.current.snapshot.objects.length)) return;
+    if (this.current && !this.warming && this.current.snapshot.objects.length) return;
     const extra = this.warmObjects(types, null);
     if (!extra) return;
     this.warming = true;
-    this.warmList = [...types];
+    this.warmList = types.length ? [...types] : null;
     this.warmFirstFrame = null;
     const [cx, cy, level] = extra.cell;
     this.push({

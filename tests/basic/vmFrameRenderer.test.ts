@@ -81,6 +81,8 @@ class FakeWebGl {
   readonly TRIANGLE_STRIP = 26;
   readonly COLOR_BUFFER_BIT = 27;
   readonly BLEND = 28;
+  readonly ZERO = 0;
+  readonly CONSTANT_ALPHA = 38;
   readonly SRC_ALPHA = 29;
   readonly ONE_MINUS_SRC_ALPHA = 30;
   readonly R16UI = 31;
@@ -197,7 +199,12 @@ class FakeWebGl {
   scissor(x: number, y: number, width: number, height: number): void {
     this.calls.push(`scissor:${x},${y},${width},${height}`);
   }
-  blendFunc(): void {}
+  blendFunc(...values: number[]): void {
+    this.calls.push(`blendFunc:${values.join(',')}`);
+  }
+  blendColor(...values: number[]): void {
+    this.calls.push(`blendColor:${values.join(',')}`);
+  }
   disable(): void {}
   deleteTexture(texture: unknown): void {
     this.deletedTextures.push(texture);
@@ -417,6 +424,26 @@ describe('VmFrameRenderer 生命周期', () => {
     const punch = gl.calls.slice(gl.calls.indexOf('colorMask:false,false,false,true'));
     expect(punch.slice(0, 3)).toEqual(['colorMask:false,false,false,true', 'clear', 'colorMask:true,true,true,true']);
     expect(punch).toContain('scissor:2,2,4,2');
+    renderer.destroy();
+  });
+
+  it('fades a live region with premultiplied RGB and alpha, before drawing the independent cursor', () => {
+    const gl = new FakeWebGl();
+    const renderer = createVmFrameRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement);
+    renderer.setOpacityRegion({ rect: { x: 1, y: 0, width: 2, height: 1 }, opacity: 0.5 });
+    renderer.setUpscaleMode('bicubic');
+    const frame = indexedFrame(4, 2);
+    gl.calls.length = 0;
+    renderer.draw(frame, 8, 4);
+    expect(gl.calls).toContain('scissor:2,2,4,2');
+    expect(gl.calls).toContain('blendColor:0,0,0,0.5');
+    expect(gl.calls).toContain(`blendFunc:${gl.ZERO},${gl.CONSTANT_ALPHA}`);
+    const draws = gl.calls.filter((call) => call === 'drawArrays').length;
+    renderer.setOpacityRegion(null);
+    gl.calls.length = 0;
+    renderer.draw(frame, 8, 4);
+    expect(gl.calls.some((call) => call.startsWith('blendColor:'))).toBe(false);
+    expect(gl.calls.filter((call) => call === 'drawArrays')).toHaveLength(draws - 1);
     renderer.destroy();
   });
 

@@ -115,14 +115,27 @@ export async function prepareNativeViewport(
   while (!status.ready) {
     if (performance.now() >= deadline) throw new Error('游戏没有完成启动。请查看启动器窗口中的提示后重新启动。');
     await pause(100);
-    status = await readStatus();
+    try {
+      status = await readStatus();
+    } catch {
+      // A busy launcher may miss one poll while Wine starts. Cancellation and
+      // the overall deadline still terminate this wait; a transient fetch does not.
+      signal?.throwIfAborted();
+      continue;
+    }
     if (!status.ready) {
-      const session = await fetch(new URL('/__native/session', window.location.href), {
-        headers,
-        cache: 'no-store',
-        signal: requestSignal(),
-      });
-      if (session.ok && (await session.json()).state !== 'running')
+      let sessionState: string | undefined;
+      try {
+        const session = await fetch(new URL('/__native/session', window.location.href), {
+          headers,
+          cache: 'no-store',
+          signal: requestSignal(),
+        });
+        if (session.ok) sessionState = (await session.json()).state;
+      } catch {
+        signal?.throwIfAborted();
+      }
+      if (sessionState === 'closed' || sessionState === 'failed')
         throw new Error('游戏启动已停止。请查看启动器窗口中的提示后重新启动。');
     }
   }

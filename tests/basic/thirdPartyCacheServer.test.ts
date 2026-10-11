@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -9,6 +9,45 @@ let directory: string | undefined;
 afterEach(async () => {
   if (directory) await rm(directory, { recursive: true, force: true });
   directory = undefined;
+  vi.unstubAllEnvs();
+});
+
+describe('private HD cache validation', () => {
+  it('reuses unchanged bytes but revalidates regenerated art even when size and mtime stay unchanged', async () => {
+    directory = await mkdtemp(join(tmpdir(), 'ra2-hd-cache-test-'));
+    const file = join(directory, 'Asset.json');
+    await writeFile(file, 'first');
+    await utimes(file, 10, 10);
+    vi.stubEnv('RA2_HD_CACHE_DIR', directory);
+    const { serveHdCache } = await import('../../vite.config');
+    const request = (headers: Record<string, string> = {}, url = '/asset.json') => {
+      const response = {
+        statusCode: 200,
+        headers: new Map<string, unknown>(),
+        setHeader(name: string, value: unknown) {
+          this.headers.set(name, value);
+        },
+        end() {},
+      };
+      serveHdCache({ url, method: 'HEAD', headers } as IncomingMessage, response as unknown as ServerResponse);
+      return response;
+    };
+    const first = request();
+    expect(first.headers.get('Cache-Control')).toBe('private, max-age=0, must-revalidate');
+    expect(first.headers.get('Content-Length')).toBe(5);
+    const etag = String(first.headers.get('ETag'));
+    expect(request({ 'if-none-match': etag }).statusCode).toBe(304);
+    expect(request({ 'if-modified-since': String(first.headers.get('Last-Modified')) }).statusCode).toBe(304);
+    await writeFile(file, 'other');
+    await utimes(file, 10, 10);
+    const changed = request({ 'if-none-match': etag, 'if-modified-since': 'Wed, 01 Jan 2100 00:00:00 GMT' });
+    expect(changed.statusCode).toBe(200);
+    expect(changed.headers.get('ETag')).not.toBe(etag);
+    const missing = request({}, '/missing.json');
+    expect(missing.statusCode).toBe(404);
+    expect(missing.headers.get('Cache-Control')).toBe('no-store');
+    expect(missing.headers.has('ETag')).toBe(false);
+  });
 });
 
 describe('开发主程序缓存端点', () => {

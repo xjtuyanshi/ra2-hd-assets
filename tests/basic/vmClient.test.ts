@@ -197,6 +197,14 @@ describe('WorkerVmClient RPC lifecycle', () => {
 
   it('HD 渲染状态 RPC：“未变化”回复复用上一份快照；直通开关带回写入结果', async () => {
     const { worker, client } = setup();
+    const preparing = client.getRenderPreparation();
+    const preparation = { map: { fileName: 'EARLY.MAP' }, theater: null, houses: null, localHouse: null };
+    worker.emit({
+      type: 'render-preparation-reply',
+      requestId: requestId(worker, 'render-preparation'),
+      value: preparation,
+    });
+    await expect(preparing).resolves.toBe(preparation);
     const snapshot: GameRenderState = {
       frame: 7,
       view: { x: 1, y: 2 },

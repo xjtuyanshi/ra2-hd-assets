@@ -94,6 +94,8 @@ interface FrameBackend {
    * through, while everything else (sidebar, cursor) still comes from the game. Needs a `transparent` renderer.
    */
   setTransparentRect(rect: FrameRect | null): void;
+  /** Fade a live frame region into a canvas below it; the cursor pass remains opaque. */
+  setOpacityRegion(region: { rect: FrameRect; opacity: number } | null): void;
   /** Independent covered regions, cleared after every frame path and before the cursor. */
   setTransparentRects(rects: readonly FrameRect[]): void;
   /** Optional native RGB interpolation region; only the keyed compositing path applies it. */
@@ -162,6 +164,7 @@ export function createVmFrameRenderer(
   let backend = createBackend(mode);
   let destroyed = false;
   let transparentRect: FrameRect | null = null;
+  let opacityRegion: { rect: FrameRect; opacity: number } | null = null;
   let transparentKey: FrameKey | null = null;
   let transparentRects: readonly FrameRect[] = [];
   let smoothRect: FrameRect | null = null;
@@ -191,6 +194,7 @@ export function createVmFrameRenderer(
       // Release old model GPU memory and frame caches to avoid accumulated resources or stale results after repeated switches.
       const replacement = createBackend(next);
       replacement.setTransparentRect(transparentRect);
+      replacement.setOpacityRegion(opacityRegion);
       replacement.setTransparentKey(transparentKey);
       replacement.setTransparentRects(transparentRects);
       replacement.setSmoothRect(smoothRect);
@@ -205,6 +209,10 @@ export function createVmFrameRenderer(
     setTransparentRect(rect) {
       transparentRect = rect;
       if (!destroyed) backend.setTransparentRect(rect);
+    },
+    setOpacityRegion(region) {
+      opacityRegion = region;
+      if (!destroyed) backend.setOpacityRegion(region);
     },
     setTransparentRects(rects) {
       transparentRects = rects.map((rect) => ({ ...rect }));
@@ -275,6 +283,7 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
   private readonly scalefx: ScalefxUpscale | null;
   private spatialStatus = t('插值放大：等待游戏画面（非 AI）');
   private transparentRect: FrameRect | null = null;
+  private opacityRegion: { rect: FrameRect; opacity: number } | null = null;
   private transparentKey: FrameKey | null = null;
   private transparentRects: readonly FrameRect[] = [];
   /** Created on first use of a key; one program per frame format. */
@@ -607,6 +616,10 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
     this.transparentRect = rect;
   }
 
+  setOpacityRegion(region: { rect: FrameRect; opacity: number } | null): void {
+    this.opacityRegion = region;
+  }
+
   setTransparentRects(rects: readonly FrameRect[]): void {
     this.transparentRects = rects;
   }
@@ -751,7 +764,7 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
       this.transparentKey || !this.transparentRect
         ? this.transparentRects
         : [this.transparentRect, ...this.transparentRects];
-    if (!rects.length) return;
+    if (!rects.length && !this.opacityRegion) return;
     const { gl } = this;
     const sx = targetWidth / frame.width;
     const sy = targetHeight / frame.height;
@@ -774,6 +787,22 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
       // GL scissor rectangles start at the bottom-left corner.
       gl.scissor(x0, targetHeight - y1, x1 - x0, y1 - y0);
       gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    const fade = this.opacityRegion;
+    if (fade) {
+      const scissor = frameRegionScissor(fade.rect, frame, { width: targetWidth, height: targetHeight });
+      if (scissor) {
+        gl.scissor(scissor.x, scissor.y, scissor.width, scissor.height);
+        // The browser composites this canvas as premultiplied alpha. Scale both RGB and alpha, or fading
+        // would brighten the battlefield. Source fragments are ignored; reuse an already compiled quad.
+        gl.useProgram(this.program);
+        this.bindQuad(this.program);
+        gl.enable(gl.BLEND);
+        gl.blendColor(0, 0, 0, Math.max(0, Math.min(1, fade.opacity)));
+        gl.blendFunc(gl.ZERO, gl.CONSTANT_ALPHA);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.disable(gl.BLEND);
+      }
     }
     gl.disable(gl.SCISSOR_TEST);
     gl.clearColor(9 / 255, 11 / 255, 16 / 255, 1);
@@ -888,6 +917,7 @@ class CanvasFrameRenderer implements FrameBackend {
    * startHdBridge therefore run the HD bridge (and the game's passthrough patches) only with the WebGL2 backend.
    */
   setTransparentRect(): void {}
+  setOpacityRegion(): void {}
   setTransparentRects(): void {}
   setSmoothRect(): void {}
   setTransparentKey(): void {}

@@ -16,6 +16,7 @@ import { installYrTacticalPassthrough } from './tacticalPassthrough';
 import { YR_GATHER_OFFSETS } from './unitGatherState';
 import { readYrNativePointer, setYrNativePointerDrawing } from './nativeCursor';
 import { readYrNativeMenuTexts } from './menuText';
+import { readYrNativeRenderPreparation } from './renderPreparation';
 import { YR_BATTLEFIELD_OVERLAY, YR_BATTLEFIELD_OVERLAY_SIGNATURES } from './battlefieldOverlayReader';
 
 const PAGE_BYTES = 4096;
@@ -325,6 +326,7 @@ export function createYrNativeHostPolicy(
   return {
     ranges: YR_NATIVE_RANGES,
     rules: YR_NATIVE_FOLLOW_RULES,
+    menuSurface: { width: 800, height: 600 },
     additionalRanges: () => [...cells(), ...houses()],
     createRenderReader: () =>
       createYrRenderStateReader(memory, 0x100000000, hash, accessor, { battlefieldOverlays: true }),
@@ -342,5 +344,6 @@ export function createYrNativeHostPolicy(
     setPointerDrawing: setYrNativePointerDrawing,
     readPointer: readYrNativePointer,
     readMenuTexts: readYrNativeMenuTexts,
+    readRenderPreparation: readYrNativeRenderPreparation,
   };
 }

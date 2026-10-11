@@ -50,15 +50,21 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    game), as does `__hdBridge.toggle()` in the console; `__hdBridge.passthrough` shows the state.
    Switching to the original picture closes passthrough even while native preflight has not yet opened a hole.
    Disabled idle polls still track the match, but cannot re-enable the guest's render flags.
-   The native route covers only the tactical rectangle with a dark `#hd-curtain` from the battle video-mode switch
-   (synchronously in the frame callback) or first match snapshot. The view still prepares out of sight. Its first
-   reveal waits for accepted passthrough and a received native RGB565 picture carrying the terrain key, then fades
-   the curtain over 300 ms. A missing cache or failed load leaves a short retry/original-view instruction on the
-   curtain; only a commanded switch exposes the original startup battlefield. A state gap or read failure keeps
-   the last HD picture for 500 ms before returning to the original dialog/menu. Recovery resumes the same view,
-   waiting for passthrough again. `__hdBridge.timeline` includes curtain/fade times and a detached, bounded
-   page-session `transitions` history (`atMs`, ISO `time`, map, frame, from/to and reason); `transitionsOmitted`
-   explicitly counts records beyond 512. `__hdBridge.presentation` distinguishes HD, curtain and original modes.
+   Both routes keep the original battlefield live, visible and interactive while HD prepares. A complete
+   scene cross-fades with the current original frames over 300 ms, once per match. No screenshot or cover is
+   used. `VmFrameRenderer.setOpacityRegion` scales the tactical region's premultiplied RGB and alpha together,
+   leaving the sidebar and independent pointer opaque. Passthrough is enabled after the fade; an actual keyed
+   native picture switches the original overlays back to full opacity. Before beginning the fade, a zero-flag
+   preflight installs and validates passthrough without changing the original picture; rejection keeps the original
+   visible and retries. Disabling passthrough also retries an unconfirmed zero write. The optional HD sidebar
+   remains hidden through preparation and joins only after the battlefield fade completes. A failed cache load leaves the original
+   picture with a small status notice. A state gap or read failure keeps the last HD picture for 500 ms before
+   returning to the original dialog/menu. A confirmed native menu video mode resets reveal state immediately,
+   while retaining prepared GPU assets for another match. Transient passthrough failures retry; they do not become
+   permanent unsupported flags. `__hdBridge.timeline` records the first battle picture, preparation and fade
+   timestamps plus a detached, bounded page-session `transitions` history (`atMs`, ISO `time`, map, frame,
+   from/to and reason); `transitionsOmitted` explicitly counts records beyond 512.
+
 3. **Live view.** `packages/hd-renderer/src/live/liveView.ts` draws the snapshot: static map content (terrain, water,
    trees) from the map cache; overlays (walls, fences, ore, gems) and smudges (craters, scorch and burn marks) from
    independent live cell snapshots when available, otherwise from the map cache; every building/vehicle/infantry/aircraft from the snapshot using the
@@ -228,14 +234,19 @@ ends, so the view first heard of them in the match's first snapshot and spent th
 presents frames: 3.0 s building smooth voxel meshes (two freezes of 0.6 and 2.8 s), 1.2 s building shader graphs, and
 about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages arrived.
 
-- **The view prepares out of sight until it is complete.** The view is created while the game shows its loading
-  screen and draws out of sight from then on (`LiveView.outOfSight`; the canvas is not displayed, there is no
-  transparent rectangle and no passthrough, so the game draws its own battlefield). The VM route shows that picture;
-  the native route's tactical curtain hides it. The HD view replaces that picture or curtain
-  once the match runs (logic frame 1 or later) and it has drawn three complete frames in a row
-  (`LiveView.settledFrames`: every page, mesh, redraw projection and effect page the frame asked for was there). If
-  that never happens the view is shown after 20 seconds with what it has, with a console warning. Once shown it stays
-  for the match; another match (the logic frame starts over, or another map) starts out of sight again.
+- **The view prepares without hiding play.** Both routes show the complete original battlefield from its first
+  frame, including native input, pointer, selection and sidebar. A validated early scenario hint
+  (`VmShell.getRenderPreparation`) may load and warm the map during menus or the game's own loading screen.
+  An empty browser profile prepares an empty offscreen scene for map/effect shaders; it does not invent units.
+  Remembered opening types add their art when available. A hint is never battle authority: a stale or wrong map
+  can only waste preparation. The HD scene replaces the
+  original only after a complete battle snapshot, complete local-player art and three complete consecutive frames
+  (`LiveView.settledFrames`: pages, meshes, redraw projections, effects and pipelines). `localArtComplete` also
+  rejects unknown local ownership or a failed/missing local unit, building page or turret after loading has ended.
+  Such a failure retains the original picture with a small notice. There is no deadline
+  that permits a partial scene. If preparation takes more than three seconds, the original remains playable
+  until a complete scene can cross-fade in. Once shown, HD stays for the match; a new match resets the reveal
+  state, including a confirmed menu return followed by a short second match on the same map.
 - **Nothing heavy on the presenting thread.** Smooth voxel meshes are built by a small pool of Workers
   (`packages/hd-renderer/src/ra2/voxelSmoothPool.ts`, `voxelSmoothWorker.ts`). Out of sight a model waits for its
   mesh; a **shown** view never does: a vehicle, aircraft, ship, building turret or voxel shell that appears while
@@ -244,9 +255,7 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   Worker answers (`VoxelUnits.build` / `adoptSmooth`; see the renderer README). Before that rule a new kind of
   vehicle was missing from the HD picture until its mesh arrived (measured: 281 presented frames, 7.2 s, for a War
   Miner on a loaded machine). The voxel model files themselves are fetched ahead once the opening is in
-  (`LiveLibrary.preloadVoxels`), so a new kind has a model in its first frame. When the view is shown by the
-  deadline below while art is still on its way, the bridge draws it once more as a shown view before the first
-  frame the player sees. Out of sight a sprite layer waits for its material
+  (`LiveLibrary.preloadVoxels`), so a new kind has a model in its first frame. Out of sight a sprite layer waits for its material
   page instead of being built twice. Decoded atlas pages are copied to the GPU in strips
   (`packages/hd-renderer/src/pageUpload.ts`) instead of 253 MiB in one call: 8 M pixels per frame while the view is
   shown (up to twice that when a frame comes late). Out of sight the bridge sets the pace: behind the loading screen
@@ -255,6 +264,12 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   each brings shaders that are built in the frame that first draws it, and a whole opening in one frame froze the
   page, the game's picture included, for a second) and the same 8 M pixels of pages per frame
   (`LiveView.hiddenUploadPixels`). Sprite material pages no longer keep their decoded bitmap after the upload.
+  The smooth-mesh Worker also keeps a content-addressed IndexedDB cache (`ra2-hd-smooth-meshes`). Its key includes
+  the complete voxel section, all smoothing options and the mesh algorithm version. It stores GPU-independent
+  typed arrays, commits them before transferring the result, and evicts least-recently-used entries above
+  128 MiB. Subsequent browser sessions can reuse complete meshes without recomputing them. Unavailable, denied,
+  corrupt or quota-limited storage only causes a normal rebuild; cache hits never relax scene completeness.
+  `LiveView.activity()` reports cumulative `voxelCacheHits` and `voxelMeshBuilds` for the current view.
 - **A sprite the game shows is never missing.** A page's sprite layer is built from its indexed page (about 2 MB)
   and its HD art (about 50 MB, 67 M pixels); the layer used to wait for both, so a building placed on a page nothing
   had drawn from yet had no picture at all until the HD art was decoded and uploaded (measured before this rule,
@@ -341,8 +356,8 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   the bridge starts (`VmFrameRenderer.prepareTransparentKey`), not inside the frame that first shows the view.
 
 `__hdBridge.timeline` (console) reports, in `performance.now()` milliseconds, when the current match's view loaded,
-was handed a list, first drew it completely, saw the first objects and the first logic frame, and was shown, and why
-(`settled` or `deadline`).
+was handed a list, first drew it completely, saw the first objects and the first logic frame, and began and ended
+the live-picture cross-fade. The only reveal reason is `settled`.
 
 In development, `__hdBridge.diagnostics` exposes the current `enabled`/`shown` flags, a detached copy of the last
 delivered render `state`, cumulative `counters`, and read-only `getCommandState()`, `getGamePerformance()`, `getPointerState()` and
@@ -489,7 +504,7 @@ the shown view draws it:
   Early timer callbacks rearm without reading, and a canceled callback cannot replace a newer timer. No missed
   polling slots are caught up in a burst. Native performance sampling also uses either polling opportunity while
   the HD view is shown. Display callbacks still own
-  drawing and art reveal; the existing settled-frame or 20-second reveal deadline is unchanged. The match timeline
+  drawing and art reveal; only complete settled frames can begin the live-picture cross-fade. The match timeline
   records first state arrival and passthrough request/acceptance separately from art readiness and reveal.
 - Emulator snapshots are polled no faster than frames are drawn (each one is read on the emulator's thread), and the
   frame-time safeguard above judges a view that is held to fewer frames by the interval it is held to, not by the

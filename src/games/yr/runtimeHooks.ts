@@ -42,7 +42,17 @@ const YR_HD_BRIDGE_HOOKS: Pick<
   | 'prepareRenderPassthrough'
   | 'preparePagePointer'
   | 'readMenuTexts'
+  | 'readRenderPreparation'
 > = {
+  async readRenderPreparation(memory, hash) {
+    if (import.meta.env.DEV) {
+      const { YR_STARTUP_PAGE_HASH } = await import('./startupPage');
+      if (hash !== YR_STARTUP_PAGE_HASH) return null;
+      const { readYrVmRenderPreparation } = await import('./renderPreparation');
+      return readYrVmRenderPreparation(memory);
+    }
+    return null;
+  },
   async readMenuTexts(memory, hwnds, hash) {
     if (import.meta.env.DEV) {
       const { YR_STARTUP_PAGE_HASH } = await import('./startupPage');

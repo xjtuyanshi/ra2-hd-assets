@@ -1,5 +1,5 @@
 import type { GuestMemory, VmFrame } from '../vm86/win32';
-import type { GameRenderStateReader } from './renderState';
+import type { GameRenderPreparation, GameRenderStateReader } from './renderState';
 import type { GameCommandStateReader } from './commandState';
 import type { GameFrameReader } from './performance';
 import type { RenderPassthroughControl } from './renderPassthrough';
@@ -31,7 +31,13 @@ export interface NativeHostMetadata {
 export interface NativeGamePolicy {
   readonly ranges: readonly NativeHostRange[];
   readonly rules: readonly NativeHostFollowRule[];
+  /** Returning from a different video mode to this game-owned menu surface ends the battle publication epoch. */
+  readonly menuSurface?: { width: number; height: number };
   additionalRanges?(): readonly NativeHostRange[];
+  /** Bounded direct reads during menus/loading, before the first logic-boundary mirror exists. */
+  readRenderPreparation?(
+    read: (address: number, length: number) => Promise<Uint8Array>,
+  ): Promise<GameRenderPreparation | null>;
   /** Current drawn control strings, read independently of battlefield ticks. */
   readMenuTexts?(
     read: (address: number, length: number) => Promise<Uint8Array>,

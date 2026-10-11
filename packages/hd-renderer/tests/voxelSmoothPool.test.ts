@@ -14,7 +14,9 @@ import { SmoothVoxelPool, createSmoothVoxelPool, type SmoothWorkerLike } from '.
 import { VoxelShadowMesh } from '../src/ra2/voxelShadow';
 import {
   answerSmoothSection,
+  answerSmoothSectionCached,
   smoothMeshBuffers,
+  type SmoothSectionCache,
   type SmoothSectionReply,
   type SmoothSectionRequest,
 } from '../src/ra2/voxelSmoothWorker';
@@ -90,6 +92,45 @@ describe('smooth voxel Worker', () => {
     });
     expect(reply).toMatchObject({ id: 3, error: expect.any(String) });
     expect(transfer).toEqual([]);
+  });
+
+  it('reuses complete meshes across worker instances and keys every section byte and option', async () => {
+    const stored = new Map<string, unknown>();
+    const cache: SmoothSectionCache = {
+      get: vi.fn(async (key) => structuredClone(stored.get(key))),
+      put: vi.fn(async (key, mesh) => {
+        stored.set(key, structuredClone(mesh));
+      }),
+    };
+    const request = { id: 1, section: syntheticSection(3), options: OPTIONS };
+    const first = await answerSmoothSectionCached(request, cache);
+    // Transferring the first answer cannot detach what was committed to storage.
+    const expected = structuredClone(first.reply);
+    structuredClone(first.reply, { transfer: first.transfer });
+    const again = await answerSmoothSectionCached({ ...structuredClone(request), id: 2 }, cache);
+    expect(again.reply).toEqual({ ...expected, id: 2, source: 'cache' });
+    expect(cache.put).toHaveBeenCalledTimes(1);
+    expect(again.transfer.every((buffer) => buffer.byteLength > 0)).toBe(true);
+    await answerSmoothSectionCached({ ...request, section: syntheticSection(4) }, cache);
+    await answerSmoothSectionCached({ ...request, options: { ...OPTIONS, bandOut: 0.1 } }, cache);
+    expect(stored.size).toBe(3);
+  });
+
+  it.each(['denied', 'corrupt', 'write-failed'] as const)('rebuilds when persistence is %s', async (failure) => {
+    const request = { id: 4, section: syntheticSection(3), options: OPTIONS };
+    const cache: SmoothSectionCache = {
+      get: async () => {
+        if (failure === 'denied') throw new Error('storage denied');
+        return failure === 'corrupt' ? { position: new Float32Array(3), pindex: new Float32Array(2) } : null;
+      },
+      put: async () => {
+        throw new Error('quota reached');
+      },
+    };
+    expect((await answerSmoothSectionCached(request, cache)).reply).toEqual({
+      ...answerSmoothSection(request).reply,
+      source: 'build',
+    });
   });
 });
 

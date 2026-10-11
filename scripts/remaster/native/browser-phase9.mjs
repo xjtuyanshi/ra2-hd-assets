@@ -100,6 +100,7 @@ let launchStartedAtMs = null,
   mainMenuObservedAtMs = null,
   mainMenuControlsObserved = false;
 let beforeBuildings = false;
+let hdCacheMode = null;
 let peakRss = 0;
 async function dllIdentity() {
   const path = join(config.RA2_NATIVE_GAME_DIR || process.env.RA2_NATIVE_GAME_DIR, 'ddraw.dll');
@@ -260,6 +261,9 @@ async function shot(label) {
           presentation: h.presentation,
           passthrough: h.passthrough,
           pace: h.pace,
+          activity: h.live?.activity(),
+          localArtComplete: h.live?.localArtComplete,
+          stalls: h.stalls,
           speedRecords: window.__speedTelemetry?.records ?? [],
           interface: {
             moviePlaying: document.querySelector('#screen')?.dataset.moviePlaying ?? null,
@@ -375,6 +379,20 @@ const usable = (c) => c.visible && c.enabled && c.rect?.[2] > c.rect?.[0];
 async function execute(c) {
   if (c.action === 'close') return { closing: true };
   await ownerIdle();
+  if (c.action === 'hd-cache-mode') {
+    if (hdCacheMode) await page.context().unroute('**/hd-cache/**', hdCacheMode);
+    hdCacheMode = c.mode === 'normal' ? null : async (route) => {
+      if (!c.match || route.request().url().includes(c.match)) {
+        if (c.mode === 'fail') return route.fulfill({ status: 503, body: 'Deliberate cache failure for acceptance' });
+        await delay(c.delayMs ?? 15000);
+      }
+      return route.continue();
+    };
+    if (hdCacheMode) await page.context().route('**/hd-cache/**', hdCacheMode);
+    else await cdp.send('Network.setCacheDisabled', { cacheDisabled: false });
+    return { mode: c.mode, match: c.match, delayMs: c.delayMs };
+  }
+  if (c.action === 'preparation-state') return worker().evaluate(() => globalThis.__auditCore.getRenderPreparation());
   if (c.action === 'launcher-stop-notice') {
     const label = c.label ?? 'launcher-closed';
     assert(/^[a-zA-Z0-9_-]+$/.test(label));
@@ -833,6 +851,7 @@ async function execute(c) {
         });
       };
     });
+    const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
     const started = Date.now();
     const action = c.steps ? execute({ action: 'batch', steps: c.steps }) : Promise.resolve();
     // Retain an early input failure until the sequence is saved; it must not terminate the process before cleanup.
@@ -841,20 +860,28 @@ async function execute(c) {
       await ownerIdle();
       const at = Date.now();
       const capture = await cdp.send('Page.captureScreenshot', {
-        format: 'png',
+        format: c.compact ? 'jpeg' : 'png',
+        ...(c.compact ? { quality: 75, clip: { x: 0, y: 0, ...viewport, scale: 0.5 } } : {}),
         fromSurface: true,
         captureBeyondViewport: false,
       });
-      const file = String(samples.length).padStart(4, '0') + '.png';
+      const file = String(samples.length).padStart(4, '0') + (c.compact ? '.jpg' : '.png');
       await writeFile(join(directory, file), Buffer.from(capture.data, 'base64'));
       samples.push({
         file,
         at: new Date(at).toISOString(),
         elapsedMs: at - started,
+        ...(c.logic ? { logic: await worker().evaluate(async () => {
+          const bytes = (await globalThis.__auditCore.connection.read(0xa8ed84, 4)).bytes;
+          return { frame: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true), atMs: performance.now(), timeOrigin: performance.timeOrigin };
+        }) } : {}),
         hd: await page.evaluate(() => ({
+          atMs: performance.now(),
           timeline: window.__hdBridge?.timeline,
           presentation: window.__hdBridge?.presentation,
           passthrough: window.__hdBridge?.passthrough,
+          activity: window.__hdBridge?.live?.activity(),
+          localArtComplete: window.__hdBridge?.live?.localArtComplete,
         })),
       });
       await delay(Math.max(0, (c.intervalMs ?? 100) - (Date.now() - at)));
@@ -867,6 +894,7 @@ async function execute(c) {
     });
     await writeFile(join(directory, 'native-presented-frames.json'), JSON.stringify(nativeFrames, null, 2));
     await writeFile(join(directory, 'sequence.json'), JSON.stringify(samples, null, 2));
+    await writeFile(join(directory, 'stalls.json'), JSON.stringify(await page.evaluate(() => window.__hdBridge?.stalls ?? null), null, 2));
     await action;
     await shot(c.label + '-settled');
     return { frames: samples.length, elapsedMs: Date.now() - started, directory };
@@ -1184,9 +1212,34 @@ async function execute(c) {
     return c.action === 'end' ? runBrowserEnd(api) : runBrowserBattleInput(api);
   }
   if (c.action === 'deploy-mcv') {
+    const requestedAt = Date.now();
     const before = await wait('genuine battle state before immediate deployment', async () => {
-      const value = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
-      return value?.view && value.localHouse >= 0 ? value : null;
+      const value = c.direct ? await worker().evaluate(async () => {
+        // Read only the opening MCV and camera, using the same pinned fields as
+        // yr/stateReader.ts. Input still goes through ordinary browser clicks.
+        // This avoids making a first-second click wait for the large HD mirror.
+        const core = globalThis.__auditCore;
+        if (!core.hello.exe.verified || core.hello.surface.width <= 800) return null;
+        const read = async (a, n) => (await core.connection.read(a, n)).bytes;
+        const u32 = (a, n = 0) => new DataView(a.buffer, a.byteOffset, a.byteLength).getUint32(n, true);
+        const i32 = (a, n = 0) => new DataView(a.buffer, a.byteOffset, a.byteLength).getInt32(n, true);
+        const [f, h, v, t] = await Promise.all([read(0xa8ed84, 4), read(0xa83d4c, 4), read(0x8b4108, 20), read(0x887324, 4)]);
+        const frame = u32(f), local = u32(h), count = u32(v, 16), items = u32(v, 4), tactical = u32(t);
+        if (!frame || frame > 900 || !local || !tactical || count < 1 || count > 512 || !items) return null;
+        const pointers = await read(items, count * 4);
+        const units = await Promise.all(Array.from({ length: count }, async (_, i) => {
+          const pointer = u32(pointers, i * 4);
+          if (pointer < 0x10000 || pointer % 4) return null;
+          const unit = await read(pointer, 0x6c8);
+          if (u32(unit) !== 0x7f5c70 || u32(unit, 0x21c) !== local || unit[0x81] || i32(unit, 0x6c) <= 0) return null;
+          const name = new TextDecoder().decode(await read(u32(unit, 0x6c4) + 0x24, 24)).split('\0')[0];
+          if (!/^(AMCV|MCV|SMCV|PCV)$/.test(name)) return null;
+          return { uid: u32(unit, 0x10), owner: local, type: name, health: i32(unit, 0x6c), x: i32(unit, 0x9c), y: i32(unit, 0xa0), z: i32(unit, 0xa4) };
+        }));
+        const camera = await read(tactical + 0xb0, 8);
+        return { frame, localHouse: local, objects: units.filter(Boolean), view: { x: i32(camera), y: i32(camera, 4) } };
+      }) : await worker().evaluate(() => globalThis.__auditCore.getCommandState());
+      return value?.view && value.localHouse >= 0 && value.objects.some((o) => o.owner === value.localHouse && o.health > 0 && /^(AMCV|MCV|SMCV|PCV)$/.test(o.type)) ? value : null;
     });
     const mcv = before.objects.find(
       (o) => o.owner === before.localHouse && o.health > 0 && /^(AMCV|MCV|SMCV|PCV)$/.test(o.type),
@@ -1202,9 +1255,17 @@ async function execute(c) {
       Math.trunc(mcv.z * zFactor + (mcv.z >= 728 ? 1 : 0) + 0.5) -
       before.view.y;
     await click(x, y);
-    await page.keyboard.down('d');
-    await delay(200);
-    await page.keyboard.up('d');
+    const selectedAt = Date.now();
+    if (c.clickDeploy) {
+      // A second ordinary click on the selected construction vehicle deploys it.
+      await delay(90);
+      await click(x, y);
+    } else {
+      await page.keyboard.down('d');
+      await delay(200);
+      await page.keyboard.up('d');
+    }
+    const inputAt = Date.now();
     const yard = await wait(
       'actual construction yard after ordinary D input',
       async () => {
@@ -1215,7 +1276,7 @@ async function execute(c) {
       },
       12000,
     );
-    await record('immediate-mcv-deployment', { mcv, point: [x, y], yard, actualGuestState: true });
+    await record('immediate-mcv-deployment', { requestedAt, selectedAt, inputAt, observedAt: Date.now(), input: c.clickDeploy ? 'two ordinary trusted clicks' : 'trusted click and D', beforeFrame: before.frame, mcv, point: [x, y], yard, actualGuestState: true });
     await shot('immediate-mcv-deployment');
     return { mcv, yard };
   }
@@ -1401,11 +1462,12 @@ try {
       (await readdir(cache)).find((d) => d.startsWith('chrome-')),
       'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
     );
-  browser = await chromium.launch({
+  const browserOptions = {
     headless: false,
     executablePath: exe,
     args: [
       '--window-size=1728,1117',
+      ...(tag.startsWith('full') ? ['--kiosk', '--start-fullscreen', '--window-position=0,0'] : []),
       '--enable-unsafe-webgpu',
       '--enable-gpu',
       '--use-angle=metal',
@@ -1413,12 +1475,24 @@ try {
       '--autoplay-policy=no-user-gesture-required',
       '--enable-webgpu-developer-features',
     ],
-  });
-  const context = await browser.newContext(
-    naturalWindowDimensions
+  };
+  const contextOptions = naturalWindowDimensions
       ? { viewport: null, locale: 'zh-CN' }
-      : { viewport: { width: 1728, height: 1117 }, deviceScaleFactor: 2, locale: 'zh-CN' },
-  );
+      : { viewport: { width: 1728, height: 1117 }, deviceScaleFactor: 2, locale: 'zh-CN' };
+  // A retained, isolated Chrome profile measures the player's second launch,
+  // including browser-owned caches. It never attaches to the owner's profile.
+  const profileName = process.argv[4];
+  if (profileName) assert(/^[a-zA-Z0-9_-]+$/.test(profileName));
+  let context;
+  if (profileName) {
+    context = await chromium.launchPersistentContext(join(base, phase, 'profiles', profileName), {
+      ...browserOptions, ...contextOptions,
+    });
+    browser = context.browser();
+  } else {
+    browser = await chromium.launch(browserOptions);
+    context = await browser.newContext(contextOptions);
+  }
   await context.grantPermissions(['local-network-access'], { origin: new URL(url).origin });
   await context.route('**/packages/hd-renderer/src/live/liveView.ts*', async (route) => {
     if (!beforeBuildings) return route.continue();
@@ -1481,8 +1555,27 @@ try {
   });
   page = await context.newPage();
   cdp = await context.newCDPSession(page);
+  if (profileName) {
+    // Playwright routing disables HTTP caching. Restore Chrome's own cache after
+    // the read-only observation routes are installed; record cache evidence.
+    await cdp.send('Network.enable');
+    await cdp.send('Network.setCacheDisabled', { cacheDisabled: false });
+    const resourceRequests = new Map();
+    cdp.on('Network.requestWillBeSent', (event) => {
+      if (event.request.url.includes('/hd-cache/')) resourceRequests.set(event.requestId, event.request.url);
+    });
+    cdp.on('Network.responseReceived', (event) => {
+      if (resourceRequests.has(event.requestId)) void record('hd-resource', {
+        url: event.response.url, atSeconds: event.timestamp,
+        diskCache: event.response.fromDiskCache ?? false,
+        serviceWorker: event.response.fromServiceWorker ?? false,
+        timing: event.response.timing,
+      });
+    });
+    cdp.on('Network.loadingFinished', (event) => resourceRequests.delete(event.requestId));
+  }
   const initialWindow = await cdp.send('Browser.getWindowForTarget');
-  await cdp.send('Browser.setWindowBounds', {
+  if (!tag.startsWith('full')) await cdp.send('Browser.setWindowBounds', {
     windowId: initialWindow.windowId,
     bounds: { left: 0, top: 30, width: 1728, height: 1117, windowState: 'normal' },
   });

@@ -122,6 +122,14 @@ export class VoxelUnits {
     return this.meshing.size + this.pending.size;
   }
 
+  /** Successful section requests served by persistent storage or freshly built, for startup diagnostics. */
+  get cacheHits(): number {
+    return this.smoothBuilder?.cacheHits ?? 0;
+  }
+  get meshBuilds(): number {
+    return this.smoothBuilder?.meshBuilds ?? 0;
+  }
+
   /** Placed units still drawn with a stand-in mesh (diagnostics: a healthy match counts down to 0 within seconds). */
   get standInUnits(): number {
     let count = 0;

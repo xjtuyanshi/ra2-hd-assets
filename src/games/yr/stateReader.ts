@@ -188,7 +188,7 @@ export type YrObjectKind = 'building' | 'vehicle' | 'infantry' | 'aircraft';
 export type YrTheater = 'temperate' | 'snow' | 'urban' | 'desert' | 'newurban' | 'lunar';
 
 /** TheaterType enum order (YRpp GeneralDefinitions.h): Temperate=0, Snow, Urban, Desert, NewUrban, Lunar=5. */
-const THEATERS: readonly YrTheater[] = ['temperate', 'snow', 'urban', 'desert', 'newurban', 'lunar'];
+export const YR_THEATERS: readonly YrTheater[] = ['temperate', 'snow', 'urban', 'desert', 'newurban', 'lunar'];
 
 export interface YrRect {
   x: number;
@@ -640,7 +640,7 @@ export function readYrMap(memory: GuestMemoryAccessor): YrMapState | null {
   const size = readRect(memory, YR_STATE_GLOBALS.map + YR_STATE_OFFSETS.mapRect);
   return {
     fileName: readAsciiZ(memory, scenario + YR_STATE_OFFSETS.scenarioFileName, 0x104),
-    theater: THEATERS[theater] ?? null,
+    theater: YR_THEATERS[theater] ?? null,
     width: size?.width ?? 0,
     height: size?.height ?? 0,
     size,

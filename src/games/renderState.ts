@@ -119,6 +119,16 @@ export interface GameRenderMap {
   fileName: string | null;
 }
 
+/** Read-only preparation hints, never evidence that a battle is active or ready to display. */
+export interface GameRenderPreparation {
+  map: { fileName: string };
+  /** Unknown until the scenario chooses its theater. */
+  theater: string | null;
+  /** Unknown while houses are not yet initialized; an empty array is a confirmed empty list. */
+  houses: GameRenderHouse[] | null;
+  localHouse: number | null;
+}
+
 export interface GameRenderHouse {
   /** What GameRenderObject.owner refers to. */
   index: number;

@@ -442,6 +442,23 @@ describe('live preparation pace', () => {
 });
 
 describe('warm-up out of sight', () => {
+  it('prepares shared scene pipelines with an empty warm scene but still warms the real opening later', () => {
+    const p = presentation(false);
+    const fields = p.view as unknown as {
+      outOfSight: boolean;
+      settled: number;
+      current: { snapshot: { frame: number } };
+    };
+    fields.outOfSight = true;
+    fields.settled = 0;
+    fields.current.snapshot.frame = Number.MAX_SAFE_INTEGER;
+    for (const at of [20, 30, 40]) p.view.render(at);
+    expect(p.hd.warm).toHaveBeenCalledTimes(1);
+    fields.current.snapshot.frame = 1;
+    p.view.render(50);
+    expect(p.hd.warm).toHaveBeenCalledTimes(2);
+  });
+
   it('warms once with the scene and once when the opening is in, and counts no warm frame as a frame of the match', () => {
     const p = presentation(false);
     const fields = p.view as unknown as {

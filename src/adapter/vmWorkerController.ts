@@ -1,6 +1,6 @@
 import type { GamePerformanceSample } from '../games/performance';
 import type { GameCommandState } from '../games/commandState';
-import type { GameRenderState } from '../games/renderState';
+import type { GameRenderPreparation, GameRenderState } from '../games/renderState';
 import { PortRelaySocket } from 'relay-package/client';
 import { createBrowserEmulator } from '../platform/browser/emulator';
 import { BrowserEmulatorProbe } from '../platform/browser/emulatorProbe';
@@ -44,6 +44,7 @@ export interface VmWorkerCore {
   getPointerState(): VmPointerState | null | Promise<VmPointerState | null>;
   getGamePerformance(): Promise<GamePerformanceSample | null>;
   getRenderState(): Promise<GameRenderState | null>;
+  getRenderPreparation?(): Promise<GameRenderPreparation | null>;
   getCommandState(): Promise<GameCommandState | null>;
   getMenuSnapshot?(): Promise<MenuSnapshot | null>;
   setGameSpeedFlag(value: number): number | null | Promise<number | null>;
@@ -309,6 +310,13 @@ export class VmWorkerController {
             type: 'menu-snapshot-reply',
             requestId: message.requestId,
             value: (await this.core?.getMenuSnapshot?.()) ?? null,
+          });
+          break;
+        case 'render-preparation':
+          this.post({
+            type: 'render-preparation-reply',
+            requestId: message.requestId,
+            value: (await this.core?.getRenderPreparation?.()) ?? null,
           });
           break;
         case 'render-state': {

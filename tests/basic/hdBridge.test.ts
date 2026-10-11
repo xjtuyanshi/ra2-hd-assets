@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VmShell } from '../../src/adapter/vmShell';
-import type { GameRenderState } from '../../src/games/renderState';
+import type { GameRenderState, GameRenderPreparation } from '../../src/games/renderState';
 import {
   parseHdPace,
   sidebarUpcomingTypes,
@@ -75,6 +75,7 @@ function fakeView() {
     resizePixels: vi.fn(),
     dispose: vi.fn(),
     settledFrames: 3,
+    localArtComplete: true,
     hd: {
       topEffectsEnabled: false,
       enableTopEffects: vi.fn(),
@@ -207,12 +208,19 @@ function setup(
     offsetLeft: 0,
     offsetTop: 0,
   };
-  const renderer = { backend, setTransparentKey: vi.fn(), setTransparentRect: vi.fn(), prepareTransparentKey: vi.fn() };
+  const renderer = {
+    backend,
+    setTransparentKey: vi.fn(),
+    setTransparentRect: vi.fn(),
+    setOpacityRegion: vi.fn(),
+    prepareTransparentKey: vi.fn(),
+  };
   let state: GameRenderState | null = null;
   let frameSize = { width: 800, height: 600 };
   const vm = {
     runtimeInfo: { backend: runtimeBackend },
     getRenderState: vi.fn(async (): Promise<GameRenderState | null> => state),
+    getRenderPreparation: vi.fn(async (): Promise<GameRenderPreparation | null> => null),
     setTacticalPassthrough: vi.fn(async (_flags: number) => true),
   };
   const status = vi.fn((_text: string | null) => undefined);
@@ -283,6 +291,9 @@ async function goLive(harness: ReturnType<typeof setup>, view = fakeView()) {
     harness.vm.runtimeInfo.backend === 'native' ? 17 : 16,
     harness.vm.runtimeInfo.backend === 'native' ? 3 : 2,
   );
+  // Preflight confirms zero flags before the first fade can begin.
+  await advance(17);
+  await advance(301);
   if (harness.vm.runtimeInfo.backend === 'native') {
     harness.nativeFrame();
     await advance(17);
@@ -1380,17 +1391,20 @@ describe('HD 桥状态机', () => {
     harness.stop();
   });
 
-  it('游戏拒绝直通：退回整个战术区透明', async () => {
+  it('keeps the original picture when passthrough preflight is unsupported, and retries it safely', async () => {
     const harness = setup();
     harness.vm.setTacticalPassthrough.mockResolvedValue(false);
     await goLive(harness);
-    expect(harness.vm.setTacticalPassthrough).toHaveBeenCalledWith(7);
-    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(null);
-    expect(harness.renderer.setTransparentRect).toHaveBeenLastCalledWith(TACTICAL);
-    expect(harness.bridge()?.passthrough).toEqual({ flags: 0, unsupported: true, keyed: false });
+    expect(harness.vm.setTacticalPassthrough.mock.calls.every(([flags]) => flags === 0)).toBe(true);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(harness.renderer.setTransparentKey.mock.calls.every(([key]) => key === null)).toBe(true);
+    expect(harness.bridge()?.passthrough).toEqual({ flags: 0, unsupported: false, keyed: false });
+    const attempts = harness.vm.setTacticalPassthrough.mock.calls.length;
+    await advance(251);
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenCalledTimes(attempts + 1);
+    expect(harness.bridge()!.timeline.revealedAt).toBeNull();
     harness.stop();
-    // Nothing was switched on in the guest, so cleanup has nothing to switch off.
-    expect(harness.vm.setTacticalPassthrough).toHaveBeenCalledTimes(1);
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
   });
 
   it('不含地形的类别组合没有键色像素：请求这些类别，但用透明矩形', async () => {
@@ -1411,6 +1425,7 @@ describe('HD 桥状态机', () => {
     harness.vm.getRenderState.mockImplementationOnce(() => new Promise((resolve) => (resolvePoll = resolve)));
     await advance(16);
     const passthroughCalls = harness.vm.setTacticalPassthrough.mock.calls.length;
+    const pollsAtStop = harness.polls();
 
     harness.stop();
     expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
@@ -1428,8 +1443,8 @@ describe('HD 桥状态机', () => {
     expect(view.push).toHaveBeenCalledTimes(1);
     expect(harness.renderer.setTransparentKey).toHaveBeenCalledTimes(keyCalls);
     expect(harness.vm.setTacticalPassthrough).toHaveBeenCalledTimes(passthroughCalls + 1);
-    // goLive: the load, the match snapshot, the frame that shows the view; then the poll left in flight.
-    expect(harness.polls()).toBe(4);
+    // Stop must cancel future polls, including one already left in flight.
+    expect(harness.polls()).toBe(pollsAtStop);
     harness.stop();
     expect(harness.vm.setTacticalPassthrough).toHaveBeenCalledTimes(passthroughCalls + 1);
   });
@@ -1450,7 +1465,7 @@ describe('HD 桥状态机', () => {
     await settle();
     expect(harness.renderer.setTransparentKey).toHaveBeenCalledTimes(keyCalls);
     expect(harness.renderer.setTransparentRect).toHaveBeenCalledTimes(rectCalls);
-    expect(harness.vm.setTacticalPassthrough.mock.calls.map(([flags]) => flags)).toEqual([7, 0]);
+    expect(harness.vm.setTacticalPassthrough.mock.calls.map(([flags]) => flags)).toEqual([0, 0]);
   });
 
   it('停止时仍在加载的视图创建后立即释放', async () => {
@@ -1645,7 +1660,8 @@ describe('HD bridge fallback notice', () => {
     await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
     expect(harness.status).toHaveBeenLastCalledWith(null);
     harness.setState(battle(2, 'BROKEN.MAP'));
-    await advance(16);
+    await advance(16, 2);
+    await advance(301);
     expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
     expect(harness.status).toHaveBeenCalledTimes(4);
     harness.stop();
@@ -1689,8 +1705,8 @@ describe('HD bridge fallback notice', () => {
     finish(view);
     await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
     harness.setState(battle(3, '2PEAKS.MAP'));
-    // One frame pushes the snapshot, the next finds the view complete and shows it.
-    await advance(1000, 2);
+    // Push, confirm zero flags, begin and complete the live-picture fade.
+    await advance(1000, 4);
     expect(view.dispose).not.toHaveBeenCalled();
     expect(view.push).toHaveBeenCalled();
     expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
@@ -1700,7 +1716,7 @@ describe('HD bridge fallback notice', () => {
 });
 
 describe('HD interface bridge wiring', () => {
-  it('updates before uncached-map returns, polls every 50 ms, A/B hides and cleanup disposes', async () => {
+  it('prepares sidebar snapshots while an uncached map keeps the original sidebar visible', async () => {
     const ui = { update: vi.fn(), setEnabled: vi.fn(), dispose: vi.fn() };
     hdUi.start.mockReturnValue(ui);
     liveView.create.mockRejectedValue(new Error('optional map cache absent'));
@@ -1721,19 +1737,41 @@ describe('HD interface bridge wiring', () => {
     expect(h.polls()).toBe(1);
     await advance(1);
     expect(h.polls()).toBe(2);
-    expect(h.bridge()?.ui.enabled).toBe(true);
+    expect(h.bridge()?.ui.enabled).toBe(false);
     expect(h.bridge()?.ui.toggle()).toBe(false);
     expect(ui.setEnabled).toHaveBeenLastCalledWith(false);
     h.bridge()?.ui.toggle();
     expect(h.bridge()?.toggle()).toBe(false);
     expect(ui.setEnabled).toHaveBeenLastCalledWith(false);
     h.bridge()?.toggle();
-    expect(ui.setEnabled).toHaveBeenLastCalledWith(true);
+    expect(ui.setEnabled).toHaveBeenLastCalledWith(false);
     h.vm.getRenderState.mockRejectedValueOnce(new Error('poll failed'));
     await advance(50);
     expect(ui.update).toHaveBeenLastCalledWith(null);
     h.stop();
     expect(ui.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('shows the HD sidebar only after the first battlefield fade, and hides it with the original-view switch', async () => {
+    const ui = { update: vi.fn(), setEnabled: vi.fn(), dispose: vi.fn() };
+    hdUi.start.mockReturnValue(ui);
+    const h = setup('?hd=1&hd-ui=1');
+    const view = fakeView();
+    liveView.create.mockResolvedValue(view);
+    h.setState({ ...battle(1), sidebar: hdSidebar() });
+    await advance(17);
+    await vi.waitFor(() => expect(h.bridge()?.live).toBe(view));
+    h.setState({ ...battle(2), sidebar: hdSidebar() });
+    await advance(17, 3);
+    expect(h.bridge()!.timeline.fadeStartedAt).not.toBeNull();
+    expect(ui.setEnabled).toHaveBeenLastCalledWith(false);
+    expect(h.bridge()!.ui.enabled).toBe(false);
+    await advance(301);
+    expect(ui.setEnabled).toHaveBeenLastCalledWith(true);
+    expect(h.bridge()!.ui.enabled).toBe(true);
+    h.stop.toggle();
+    expect(ui.setEnabled).toHaveBeenLastCalledWith(false);
+    h.stop();
   });
 
   it('does not load UI without hd-ui=1 or after immediate cleanup', async () => {
@@ -1879,6 +1917,35 @@ describe('art of what the sidebar announces', () => {
 });
 
 describe('HD bridge match start', () => {
+  it('warms an early map hint without treating it as a visible battle', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    const view = fakeView();
+    liveView.create.mockResolvedValue(view);
+    harness.vm.getRenderPreparation.mockResolvedValue({
+      map: { fileName: 'XMP29U2.MAP' },
+      theater: null,
+      houses: null,
+      localHouse: null,
+    });
+    await advance(17);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
+    await advance(17, 3);
+    expect(view.render).toHaveBeenCalled();
+    expect(harness.bridge()!.timeline.firstStateAt).toBeNull();
+    expect(harness.bridge()!.timeline.revealedAt).toBeNull();
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
+    // A different actual scenario supersedes the hint, without ever showing the prepared wrong map.
+    const actual = fakeView();
+    liveView.create.mockResolvedValue(actual);
+    harness.setState(battle(1, '2PEAKS.MAP'));
+    await advance(17);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(actual));
+    expect(view.dispose).toHaveBeenCalledOnce();
+    expect(harness.bridge()!.timeline.revealedAt).toBeNull();
+    harness.stop();
+  });
+
   const WARM_MAP = 'ra2-hd-warm:1:map:xmp29u2';
   const WARM_THEATER = 'ra2-hd-warm:1:theater:urban';
 
@@ -1891,6 +1958,27 @@ describe('HD bridge match start', () => {
     await advance(16, 2);
     return view;
   }
+
+  it("retains the original if complete loading still left one of the local player's objects without art", async () => {
+    const harness = setup();
+    const view = fakeView();
+    view.localArtComplete = false;
+    liveView.create.mockResolvedValue(view);
+    harness.setState({ ...battle(1), localHouse: 0 });
+    await advance(17);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
+    harness.setState({ ...battle(2), localHouse: 0 });
+    await advance(17, 4);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
+    expect(harness.status.mock.calls.at(-1)?.[0]).toContain('incomplete');
+    expect(harness.bridge()!.timeline.revealedAt).toBeNull();
+    view.localArtComplete = true;
+    await advance(17, 2);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    harness.stop();
+  });
 
   it('keeps the original picture until the view has drawn the running match completely', async () => {
     const harness = setup();
@@ -1916,7 +2004,8 @@ describe('HD bridge match start', () => {
     await advance(16, 2);
     expect(harness.hdCanvas.style.display).toBe('none');
     view.settledFrames = 3;
-    await advance(16);
+    await advance(16, 2);
+    await advance(301);
     expect(view.outOfSight).toBe(false);
     expect(harness.hdCanvas.style.display).toBe('block');
     expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(7);
@@ -1927,7 +2016,7 @@ describe('HD bridge match start', () => {
     harness.setState(battle(3));
     await advance(16, 3);
     expect(harness.hdCanvas.style.display).toBe('block');
-    expect(harness.vm.setTacticalPassthrough).toHaveBeenCalledTimes(1);
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenCalledTimes(2);
     harness.stop();
   });
 
@@ -1940,8 +2029,9 @@ describe('HD bridge match start', () => {
     expect([view.newArtPerFrame, view.hiddenUploadPixels]).toEqual([Infinity, Infinity]);
     expect(harness.hdCanvas.style.display).toBe('none');
     expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
-    expect(view.warm).not.toHaveBeenCalled();
-    expect(view.push).toHaveBeenCalled();
+    expect(view.warm).toHaveBeenCalledWith([]);
+    // Retain the generic warm scene until a real object exists; an empty load snapshot is not battle authority.
+    expect(view.push).not.toHaveBeenCalled();
     // Out of sight and complete, the view is drawn now and then, not sixty times a second.
     const drawn = view.render.mock.calls.length;
     await advance(16, 24);
@@ -1954,7 +2044,8 @@ describe('HD bridge match start', () => {
     expect([view.newArtPerFrame, view.hiddenUploadPixels]).toEqual([1, 8 << 20]);
     expect(harness.bridge()!.timeline.matchAt).toBeNull();
     harness.setState(battle(1));
-    await advance(16, 2);
+    await advance(16, 3);
+    await advance(301);
     expect(view.outOfSight).toBe(false);
     expect(harness.hdCanvas.style.display).toBe('block');
     expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
@@ -1985,7 +2076,7 @@ describe('HD bridge match start', () => {
     expect(harness.bridge()!.timeline).toMatchObject({ warmTypes: 2, revealedAt: null });
     expect(harness.bridge()!.timeline.warmSettledAt).not.toBeNull();
     harness.setState(battle(1));
-    await advance(16, 2);
+    await advance(16, 3);
     expect(view.push).toHaveBeenCalledTimes(1);
     expect(harness.hdCanvas.style.display).toBe('block');
     harness.stop();
@@ -2047,7 +2138,7 @@ describe('HD bridge match start', () => {
     expect(view.resizePixels).toHaveBeenCalledTimes(2);
     expect(view.resizePixels).toHaveBeenLastCalledWith(669, 575, 856, 736);
     harness.setState(battle(1));
-    await advance(16, 2);
+    await advance(16, 3);
     expect(harness.hdCanvas.style.display).toBe('block');
     // The first frame drawn in sight records the layout: it is the one to prepare for next time.
     await advance(16);
@@ -2062,7 +2153,7 @@ describe('HD bridge match start', () => {
     expect(view.resizePixels).toHaveBeenLastCalledWith(632, 568, 632, 568);
     expect(stored.has('ra2-hd-warm:1:layout')).toBe(false);
     harness.setState(battle(1));
-    await advance(16, 3);
+    await advance(16, 4);
     expect(JSON.parse(stored.get('ra2-hd-warm:1:layout')!)).toEqual([632, 568, 632, 568]);
     harness.stop();
   });
@@ -2087,37 +2178,28 @@ describe('HD bridge match start', () => {
     next.stop();
   });
 
-  it('shows the view after the deadline when its art never settles', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  it('keeps the live original picture indefinitely when art has not settled', async () => {
     const harness = setup();
     const view = fakeView();
     view.settledFrames = 0;
     view.loadingArt.mockReturnValue(2);
-    // What each frame was drawn for, and whether the canvas was on screen when it was drawn.
-    const drawn: { outOfSight: boolean; displayed: boolean }[] = [];
-    view.render.mockImplementation(() => {
-      drawn.push({ outOfSight: view.outOfSight, displayed: harness.hdCanvas.style.display === 'block' });
-    });
     liveView.create.mockResolvedValue(view);
     harness.setState(battle(1));
     await advance(16);
     await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
     harness.setState(battle(2));
     await advance(16, 2);
-    await advance(19_000);
+    await advance(30_000);
     expect(harness.hdCanvas.style.display).toBe('none');
-    expect(drawn.every((frame) => frame.outOfSight && !frame.displayed)).toBe(true);
-    await advance(1_100);
+    expect(harness.bridge()!.timeline.revealedAt).toBeNull();
+    expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
+    expect(view.outOfSight).toBe(true);
+    expect(harness.createElement).not.toHaveBeenCalledWith('div');
+    view.settledFrames = 3;
+    view.loadingArt.mockReturnValue(0);
+    await advance(16, 2);
     expect(harness.hdCanvas.style.display).toBe('block');
-    expect(harness.bridge()!.timeline).toMatchObject({ revealReason: 'deadline', revealLoading: 2 });
-    expect(warn).toHaveBeenCalledOnce();
-    // The view was incomplete when it was shown: it is drawn again as a shown view at once, so no frame drawn for a
-    // view out of sight (which leaves out units whose mesh is still being built) is ever on screen.
-    expect(drawn.some((frame) => !frame.outOfSight)).toBe(true);
-    expect(drawn.filter((frame) => frame.displayed).every((frame) => !frame.outOfSight)).toBe(true);
-    const shownFrom = drawn.findIndex((frame) => !frame.outOfSight);
-    expect(drawn[shownFrom]).toEqual({ outOfSight: false, displayed: true });
-    expect(drawn[shownFrom - 1]).toEqual({ outOfSight: true, displayed: false });
+    expect(harness.bridge()!.timeline.revealReason).toBe('settled');
     harness.stop();
   });
 
@@ -2189,174 +2271,164 @@ describe('HD bridge match start', () => {
   });
 });
 
-describe('native HD curtain', () => {
-  it('covers the tactical view synchronously on the first battle video frame, before a state or HD cache exists', async () => {
+describe('live original to HD transition', () => {
+  it('keeps the first battle picture entirely original before any snapshot or cache exists', async () => {
     const harness = setup('?hd=1', 'WebGL2', 'native');
     harness.setFrameSize(1280, 720);
     harness.nativeFrame(false);
-    expect(harness.curtain.style.display).toBe('flex');
-    expect(harness.curtain.style.opacity).toBe('1');
-    expect(harness.curtain.textContent).toContain('Preparing');
-    expect(harness.bridge()!.timeline.transitions).toMatchObject([
-      { from: 'original', to: 'curtain', reason: 'battle-video-mode', atMs: 1000 },
-    ]);
-    await advance(200);
+    expect(harness.createElement).not.toHaveBeenCalledWith('div');
+    expect(harness.bridge()!.timeline.firstBattleFrameAt).toBe(1000);
+    await advance(3200);
     expect(harness.hdCanvas.style.display).toBe('none');
-    expect(harness.curtain.style.display).toBe('flex');
+    expect(harness.vm.setTacticalPassthrough).not.toHaveBeenCalled();
+    expect(harness.bridge()!.timeline.transitions).toEqual([]);
     harness.stop();
-    expect(harness.curtain.remove).toHaveBeenCalledOnce();
   });
 
-  it('waits for passthrough acceptance and an actual keyed native picture, then fades for 300 ms', async () => {
+  it.each(['native', 'v86'] as const)(
+    'fades the current original frame before enabling overlays on %s',
+    async (backend) => {
+      const harness = setup('?hd=1', 'WebGL2', backend);
+      const view = fakeView();
+      liveView.create.mockResolvedValue(view);
+      harness.setState(battle(1));
+      await advance(17);
+      await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
+      harness.setState(battle(2));
+      await advance(17, 3);
+      const began = harness.bridge()!.timeline.fadeStartedAt!;
+      expect(began).not.toBeNull();
+      expect(harness.vm.setTacticalPassthrough.mock.calls.map(([flags]) => flags)).toEqual([0]);
+      expect(harness.renderer.setTransparentRect).toHaveBeenLastCalledWith(null);
+      await advance(150 - (clock - began));
+      expect(harness.renderer.setOpacityRegion).toHaveBeenLastCalledWith({ rect: TACTICAL, opacity: 0.5 });
+      expect(view.render).toHaveBeenCalled();
+      harness.setState(battle(20));
+      await advance(151);
+      expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(7);
+      expect(harness.renderer.setOpacityRegion).toHaveBeenLastCalledWith(null);
+      if (backend === 'native') {
+        expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(null);
+        harness.nativeFrame(false);
+        expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(null);
+        harness.nativeFrame();
+      }
+      expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
+      expect(harness.bridge()!.timeline.fadeFinishedAt! - began).toBe(301);
+      harness.stop();
+    },
+  );
+
+  it('retries transient preflight failures on the original and retries a rejected disable', async () => {
     const harness = setup('?hd=1', 'WebGL2', 'native');
-    harness.setFrameSize(1280, 720);
-    harness.nativeFrame(false);
-    let accept!: (value: boolean) => void;
-    harness.vm.setTacticalPassthrough.mockImplementation(() => new Promise((resolve) => (accept = resolve)));
     const view = fakeView();
     liveView.create.mockResolvedValue(view);
+    harness.vm.setTacticalPassthrough.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error('busy'));
     harness.setState(battle(1));
     await advance(17);
     await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
     harness.setState(battle(2));
     await advance(17, 3);
-    expect(harness.vm.setTacticalPassthrough).toHaveBeenCalledWith(7);
-    expect(harness.bridge()!.timeline.revealedAt).toBeNull();
-    expect(harness.curtain.style.opacity).toBe('1');
-    accept(true);
-    await settle();
-    harness.nativeFrame(false);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    await advance(251);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    await advance(251);
     await advance(17);
-    expect(harness.bridge()!.timeline.revealedAt).toBeNull();
+    expect(harness.bridge()!.passthrough.unsupported).toBe(false);
+    expect(harness.vm.setTacticalPassthrough.mock.calls.map(([flags]) => flags)).toEqual([0, 0, 0]);
+    await advance(301);
     harness.nativeFrame();
-    await advance(17);
-    expect(harness.hdCanvas.style.display).toBe('block');
-    expect(harness.curtain.style.opacity).toBe('1');
-    const first = harness.bridge()!.timeline;
-    expect(first.passthroughAcceptedAt).toBeLessThan(first.revealedAt!);
-    await advance(150);
-    expect(Number(harness.curtain.style.opacity)).toBeCloseTo(0.5);
-    await advance(151);
-    expect(harness.curtain.style.display).toBe('none');
-    expect(harness.bridge()!.timeline.curtainLiftedAt).toBeGreaterThan(first.revealedAt!);
-    expect(harness.bridge()!.timeline.transitions.some((entry) => entry.from === 'hd' && entry.to === 'original')).toBe(
-      false,
-    );
+    expect(harness.bridge()!.passthrough.keyed).toBe(true);
+    harness.vm.setTacticalPassthrough.mockRejectedValueOnce(new Error('late write'));
+    harness.stop.toggle();
+    await settle();
+    const attempts = harness.vm.setTacticalPassthrough.mock.calls.length;
+    await advance(251);
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenCalledTimes(attempts + 1);
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
     harness.stop();
   });
 
-  it('holds HD through a short state gap and records a longer gap and a commanded switch with their reasons', async () => {
+  it('resets reveal at a confirmed menu and fades a second match even when its first frame is higher', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    harness.nativeFrame(false);
+    const view = await goLive(harness);
+    expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    harness.setFrameSize(800, 600);
+    harness.nativeFrame(false);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    expect(view.outOfSight).toBe(true);
+    expect(harness.bridge()!.timeline.revealedAt).toBeNull();
+    harness.setFrameSize(1280, 720);
+    harness.nativeFrame(false);
+    view.settledFrames = 0;
+    harness.setState(battle(50));
+    await advance(17, 2);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    view.settledFrames = 3;
+    await advance(17);
+    expect(harness.bridge()!.timeline.fadeStartedAt).not.toBeNull();
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
+    await advance(301);
+    harness.nativeFrame();
+    expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    expect(liveView.create).toHaveBeenCalledTimes(1);
+    harness.stop();
+  });
+
+  it('discards a state reply that crossed an actual menu and second-battle video boundary', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    harness.nativeFrame(false);
+    const view = await goLive(harness);
+    let reply!: (state: GameRenderState) => void;
+    harness.vm.getRenderState.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          reply = resolve;
+        }),
+    );
+    await advance(17);
+    const pushes = view.push.mock.calls.length;
+    harness.setFrameSize(800, 600);
+    harness.nativeFrame(false);
+    harness.setFrameSize(1280, 720);
+    harness.nativeFrame(false);
+    reply(battle(9000));
+    await settle();
+    expect(view.push).toHaveBeenCalledTimes(pushes);
+    expect(harness.bridge()!.diagnostics.state).toBeNull();
+    expect(harness.bridge()!.timeline.firstStateAt).toBeNull();
+    expect(harness.bridge()!.timeline.revealedAt).toBeNull();
+    harness.setState(battle(30));
+    await advance(17);
+    expect(harness.bridge()!.diagnostics.state?.frame).toBe(30);
+    harness.stop();
+  });
+
+  it('holds HD over short state gaps and does not repeat the fade after a dialog or commanded toggle', async () => {
     const harness = setup('?hd=1', 'WebGL2', 'native');
     await goLive(harness);
-    await advance(320);
+    const fadeAt = harness.bridge()!.timeline.fadeStartedAt;
     harness.setState(null);
     await advance(200);
     expect(harness.bridge()!.diagnostics.shown).toBe(true);
-    harness.setState(battle(3));
-    await advance(17);
-    expect(harness.bridge()!.timeline.transitions.filter((entry) => entry.to === 'original')).toHaveLength(0);
-    harness.setState(null);
-    await advance(17);
-    await advance(499);
-    expect(harness.bridge()!.diagnostics.shown).toBe(true);
-    await advance(2);
+    await advance(501);
     expect(harness.bridge()!.diagnostics.shown).toBe(false);
-    expect(harness.bridge()!.timeline.transitions.at(-1)).toMatchObject({
-      from: 'hd',
-      to: 'original',
-      reason: 'state-unavailable',
-    });
     harness.setState(battle(4));
     await advance(17);
     harness.nativeFrame();
-    await advance(17);
     expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    expect(harness.bridge()!.timeline.fadeStartedAt).toBe(fadeAt);
     harness.stop.toggle();
-    expect(harness.bridge()!.timeline.transitions.at(-1)).toMatchObject({
-      from: 'hd',
-      to: 'original',
-      reason: 'commanded-toggle',
-    });
-    harness.stop();
-  });
-
-  it('keeps passthrough off through repeated idle polls after switching to the original picture', async () => {
-    vi.useFakeTimers();
-    const harness = setup('?hd=1', 'WebGL2', 'native');
-    await goLive(harness);
-    await advance(320);
-    const polls = harness.polls();
-    expect(harness.stop.toggle()).toBe(false);
+    await advance(1000, 2);
     expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
-    await advance(1000, 3);
-    expect(harness.polls()).toBeGreaterThanOrEqual(polls + 3);
-    expect(harness.vm.setTacticalPassthrough.mock.calls.map(([flags]) => flags)).toEqual([7, 0]);
-    expect(harness.bridge()!.passthrough).toMatchObject({ flags: 0, keyed: false });
-    expect(harness.bridge()!.diagnostics.shown).toBe(false);
-    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(null);
-    expect(harness.hdCanvas.style.display).toBe('none');
-    expect(harness.curtain.style.display).toBe('none');
-    harness.stop();
-  });
-
-  it('releases a restoration curtain when a modal takes the screen before a keyed frame arrives', async () => {
-    const harness = setup('?hd=1', 'WebGL2', 'native');
-    await goLive(harness);
-    await advance(320);
-    harness.setState(null);
-    await advance(17);
-    await advance(501);
-    expect(harness.bridge()!.timeline.transitions.at(-1)).toMatchObject({ to: 'original' });
-    await advance(501);
-    harness.setState(battle(3));
-    await advance(17);
-    // The dialog transition briefly exposes the retained match; its native picture has no tactical key.
-    harness.nativeFrame(false);
-    expect(harness.bridge()!.timeline.transitions.at(-1)).toMatchObject({ to: 'curtain' });
-    expect(harness.hdCanvas.style.display).toBe('none');
-    harness.setState(null);
-    await advance(17);
-    await advance(501);
-    expect(harness.curtain.style.display).toBe('none');
-    expect(harness.bridge()!.timeline.transitions.at(-1)).toMatchObject({ to: 'original' });
-    expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
+    harness.stop.toggle();
+    await advance(1000);
     harness.nativeFrame();
-    await advance(17);
-    expect(harness.hdCanvas.style.display).toBe('none');
-    harness.stop();
-  });
-
-  it('switches preflight passthrough off before a hole exists and ignores its late acceptance', async () => {
-    vi.useFakeTimers();
-    const harness = setup('?hd=1', 'WebGL2', 'native');
-    harness.setFrameSize(1280, 720);
-    harness.nativeFrame(false);
-    let accept!: (value: boolean) => void;
-    harness.vm.setTacticalPassthrough.mockImplementation((flags) =>
-      flags ? new Promise((resolve) => (accept = resolve)) : Promise.resolve(true),
-    );
-    const view = fakeView();
-    liveView.create.mockResolvedValue(view);
-    harness.setState(battle(1));
-    await advance(17);
-    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
-    harness.setState(battle(2));
-    await advance(17, 3);
-    expect(harness.bridge()!.passthrough.flags).toBe(7);
-    expect(harness.bridge()!.diagnostics.shown).toBe(false);
-    expect(harness.bridge()!.timeline.revealedAt).toBeNull();
-    expect(harness.stop.toggle()).toBe(false);
-    expect(harness.vm.setTacticalPassthrough.mock.calls.map(([flags]) => flags)).toEqual([7, 0]);
-    accept(true);
-    await settle();
-    harness.nativeFrame();
-    await advance(1000, 3);
-    expect(harness.bridge()!.passthrough).toMatchObject({ flags: 0, keyed: false });
-    expect(harness.bridge()!.timeline.passthroughAcceptedAt).toBeNull();
-    expect(harness.bridge()!.timeline.revealedAt).toBeNull();
-    expect(harness.curtain.style.display).toBe('none');
-    expect(harness.hdCanvas.style.display).toBe('none');
-    expect(harness.vm.setTacticalPassthrough.mock.calls.map(([flags]) => flags)).toEqual([7, 0]);
+    expect(harness.bridge()!.timeline.fadeStartedAt).toBe(fadeAt);
     harness.stop();
   });
 });

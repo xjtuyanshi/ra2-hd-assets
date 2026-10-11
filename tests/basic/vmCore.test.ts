@@ -282,7 +282,7 @@ describe('VmCore lifecycle orchestration', () => {
     }
   });
 
-  it('waits for persisted writes and actual storage removal before DeleteFile returns', async () => {
+  it.each([false, true])('waits for persistence and returns provider failure to DeleteFile (failure=%s)', async (removeFails) => {
     const emulator = new FakeEmulator();
     const fixture = source();
     const backing = new MemoryGameFileProvider();
@@ -297,14 +297,17 @@ describe('VmCore lifecycle orchestration', () => {
             };
           }),
       ),
-      remove: vi.fn(async (path: string) => (backing.files.delete(path) ? ('removed' as const) : ('missing' as const))),
+      remove: vi.fn(async (path: string) => {
+        if (removeFails) throw new Error('Storage unavailable');
+        return backing.files.delete(path) ? ('removed' as const) : ('missing' as const);
+      }),
     });
     let onFileWrite!: (path: string, bytes: Uint8Array) => void;
     let onFileDelete!: (path: string) => number;
     const dispatch = vi.fn(() => {
-      expect(fixture.files.hasKnownFile!('session.sav')).toBe(false);
-      expect(onFileDelete('session.sav')).toBe(0);
-      return { eax: 1 };
+      expect(fixture.files.hasKnownFile!('session.sav')).toBe(removeFails);
+      expect(onFileDelete('session.sav')).toBe(removeFails ? 5 : 0);
+      return { eax: removeFails ? 0 : 1 };
     });
     const shim = Object.assign(fakeShim(dispatch), {
       hasMountedFile: () => false,

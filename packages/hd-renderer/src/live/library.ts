@@ -90,19 +90,28 @@ export class LiveLibrary {
     }
     // HD pages recorded outside library.json (a sidecar written by a later tool, same shape as spriteAtlasesHd), so
     // library.json itself never has to be rewritten.
+    const [sidecar, palettes, windows, materials] = await Promise.all([
+      library.spriteAtlasesHd
+        ? null
+        : fetch(`${root}/sprites-hd.json`)
+            .then((r) => (r.ok ? r.json() : null))
+            .catch(() => null),
+      Promise.all(
+        Object.entries(library.palettes).map(
+          async ([key, file]) => [key, await readPalettePng(`${root}/${file}`)] as const,
+        ),
+      ),
+      fetchOptionalJson<WindowsIndex>(`${root}/windows.json`),
+      fetchOptionalJson(`${root}/normals.json`, validateLibrarySpriteMaterials),
+    ]);
     if (!library.spriteAtlasesHd) {
-      const sidecar = await fetch(`${root}/sprites-hd.json`)
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null);
       const pages = Array.isArray(sidecar)
         ? sidecar
         : (sidecar as { spriteAtlasesHd?: unknown } | null)?.spriteAtlasesHd;
       if (Array.isArray(pages)) library.spriteAtlasesHd = pages as TypeLibrary['spriteAtlasesHd'];
     }
-    for (const [key, file] of Object.entries(library.palettes))
-      addPalette(cache, LIBRARY_PALETTE_PREFIX + key, await readPalettePng(`${root}/${file}`));
-    const windows = await fetchOptionalJson<WindowsIndex>(`${root}/windows.json`);
-    const materials = await fetchOptionalJson(`${root}/normals.json`, validateLibrarySpriteMaterials);
+    // Palette rows keep manifest order even when the files arrive in another order.
+    for (const [key, palette] of palettes) addPalette(cache, LIBRARY_PALETTE_PREFIX + key, palette);
     for (const [index, page] of Object.entries(materials?.pages ?? {})) {
       const hd = library.spriteAtlasesHd?.[Number(index)];
       if (

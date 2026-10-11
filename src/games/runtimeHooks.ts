@@ -1,7 +1,7 @@
 import type { GameFrameReader } from './performance';
 import type { RenderPassthroughControl } from './renderPassthrough';
 import type { CreateGameCommandStateReader } from './commandState';
-import type { CreateGameRenderStateReader } from './renderState';
+import type { CreateGameRenderStateReader, GameRenderPreparation } from './renderState';
 import type { GuestMemory, VmFrame } from '../vm86/win32';
 
 export interface GamePagePointer {
@@ -14,6 +14,8 @@ export interface GamePagePointer {
  * Keep fixed addresses and game semantics in each game's directory; the adapter sees only these optional capabilities.
  */
 export interface GameRuntimeHooks {
+  /** Loading metadata for speculative asset preparation; never a visible battle snapshot. */
+  readRenderPreparation?(memory: GuestMemory, hash: string): Promise<GameRenderPreparation | null>;
   /** Read-only custom control strings; private message/data layouts belong to the selected game. */
   readMenuTexts?(memory: GuestMemory, hwnds: readonly number[], hash: string): Promise<ReadonlyMap<number, string>>;
   /** Opt-in page cursor: validate the executable, preserve input/shape ownership, and suppress only the final native blit. */

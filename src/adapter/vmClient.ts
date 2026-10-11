@@ -1,6 +1,6 @@
 import type { GamePerformanceSample } from '../games/performance';
 import type { GameCommandState } from '../games/commandState';
-import type { GameRenderState } from '../games/renderState';
+import type { GameRenderPreparation, GameRenderState } from '../games/renderState';
 import type { VmDiagnosticAction, VmDiagnostics, VmRuntimeInfo } from './vmDiagnostics';
 import { normalizeGameClockRate } from '../vm86/clock';
 import { AUDIO_DIAGNOSTICS_INTERVAL_MS, WebAudioPcmSink } from './audio';
@@ -207,6 +207,10 @@ export class WorkerVmClient implements VmShell {
     return this.request((requestId) => ({ type: 'render-state', requestId }));
   }
 
+  async getRenderPreparation(): Promise<GameRenderPreparation | null> {
+    return this.request((requestId) => ({ type: 'render-preparation', requestId }));
+  }
+
   async getCommandState(): Promise<GameCommandState | null> {
     return this.request((requestId) => ({ type: 'command-state', requestId }));
   }
@@ -391,6 +395,7 @@ export class WorkerVmClient implements VmShell {
         this.resolveRequest(message.requestId, this.lastRenderState);
         break;
       case 'game-performance-reply':
+      case 'render-preparation-reply':
       case 'command-state-reply':
       case 'menu-snapshot-reply':
       case 'diagnostics-reply':

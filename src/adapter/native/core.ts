@@ -5,7 +5,7 @@ import type {
   NativeHostMetadata,
   NativeHostRange,
 } from '../../games/nativeHost';
-import type { GameRenderState } from '../../games/renderState';
+import type { GameRenderPreparation, GameRenderState } from '../../games/renderState';
 import type { GameCommandState } from '../../games/commandState';
 import type { GameFrameCounters, GamePerformanceSample } from '../../games/performance';
 import type { RenderPassthroughControl } from '../../games/renderPassthrough';
@@ -214,6 +214,9 @@ export class NativeCore {
   private stateReads = 0;
   private lastMirrorFlags = 0;
   private previousLogicFrame: number | null = null;
+  private menuSurface: boolean | null = null;
+  private awaitingBattleMirror = false;
+  private readerEpoch = 0;
   private inputQueue: NativeInputOperation[] = [];
   private inputOutstanding = false;
   private pointer: VmFrame['pointer'] = null;
@@ -229,6 +232,7 @@ export class NativeCore {
   private inputStateReadPending: Promise<NativeInputState> | null = null;
   private inputState: NativeInputState = {};
   private menuSnapshotPending: Promise<MenuSnapshot | null> | null = null;
+  private renderPreparationPending: Promise<GameRenderPreparation | null> | null = null;
 
   constructor(
     private readonly callbacks: GameVmCallbacks,
@@ -335,6 +339,10 @@ export class NativeCore {
     }
     if (update.flags & 2) this.resetSerial++;
     this.completeRevision = update.subscriptionRevision ?? null;
+    if (this.previousLogicFrame !== null && update.frame < this.previousLogicFrame) this.invalidateBattleReaders();
+    // A retained complete mirror is not evidence for a second match. The new video mode must first be observed,
+    // followed by a complete logic-boundary publication; loading pictures alone cannot release old state.
+    if (this.menuSurface === false) this.awaitingBattleMirror = false;
     if (this.previousLogicFrame !== null && update.frame >= this.previousLogicFrame)
       this.callbacks.onLogicFrame?.(update.frame - this.previousLogicFrame);
     this.previousLogicFrame = update.frame;
@@ -348,6 +356,18 @@ export class NativeCore {
   }
   private pictureArrived(picture: NativePicture): void {
     if (this.closed || !this.running) return;
+    const menuSize = this.policy?.menuSurface;
+    if (
+      menuSize &&
+      (this.menuSurface !== null || picture.width !== menuSize.width || picture.height !== menuSize.height)
+    ) {
+      const isMenu = picture.width === menuSize.width && picture.height === menuSize.height;
+      if (isMenu !== this.menuSurface) {
+        this.menuSurface = isMenu;
+        this.awaitingBattleMirror = true;
+        this.invalidateBattleReaders();
+      }
+    }
     this.creditOutstanding = false;
     if (this.hello) this.hello.surface = { width: picture.width, height: picture.height, bpp: 16, format: 'RGB565' };
     const frame: VmFrame = {
@@ -706,12 +726,26 @@ export class NativeCore {
   private read<T>(slot: ReaderSlot<T>, factory: () => (() => T | null) | null): Promise<T | null> {
     return this.exclusive(() => this.readExclusive(slot, factory));
   }
+  private invalidateBattleReaders(): void {
+    this.readerEpoch++;
+    this.previousLogicFrame = null;
+    for (const slot of [this.render, this.command, this.frame]) {
+      slot.reader = null;
+      slot.previous = null;
+      slot.error = null;
+      slot.coldAt = undefined;
+    }
+    this.meter.reset();
+  }
   private async readExclusive<T>(slot: ReaderSlot<T>, factory: () => (() => T | null) | null): Promise<T | null> {
+    if (this.menuSurface === true || this.awaitingBattleMirror) return null;
     if (!this.running || !this.policy || !this.memory.complete || this.recovering) return slot.previous;
+    const epoch = this.readerEpoch;
     const at = performance.now();
     try {
       await this.preparePolicy();
       await this.expandPolicyRanges();
+      if (epoch !== this.readerEpoch) return null;
       // Refresh cached reader dependencies before retiring their old allocation footprint.
       let cold = !slot.reader || slot.coldAt === undefined || at - slot.coldAt >= 1000;
       if (cold) slot.reader = null;
@@ -729,6 +763,7 @@ export class NativeCore {
         },
         8,
       );
+      if (epoch !== this.readerEpoch) return null;
       if (this.memory.operationMissed) {
         slot.error = 'Native reader retry budget exhausted; retaining previous complete result';
         return slot.previous;
@@ -740,8 +775,9 @@ export class NativeCore {
         if (cold) slot.coldAt = performance.now();
         await this.subscribe([]);
       }
-      return result;
+      return epoch === this.readerEpoch ? result : null;
     } catch (error) {
+      if (epoch !== this.readerEpoch) return null;
       if (error instanceof NativeMemoryMiss || error instanceof NativeMirrorUnavailable) {
         slot.error = error.message;
         return slot.previous;
@@ -752,6 +788,20 @@ export class NativeCore {
       this.stateReadMs += performance.now() - at;
       this.stateReads++;
     }
+  }
+  async getRenderPreparation(): Promise<GameRenderPreparation | null> {
+    if (!this.running || this.closed || !this.policy?.readRenderPreparation) return null;
+    if (this.renderPreparationPending) return this.renderPreparationPending;
+    const pending = this.policy
+      .readRenderPreparation(async (address, length) => (await this.connection.read(address, length)).bytes)
+      .then((value) => (this.running && !this.closed ? value : null));
+    this.renderPreparationPending = pending;
+    void pending
+      .finally(() => {
+        if (this.renderPreparationPending === pending) this.renderPreparationPending = null;
+      })
+      .catch(() => undefined);
+    return pending;
   }
   async getRenderState(): Promise<GameRenderState | null> {
     if (!this.running) return null;

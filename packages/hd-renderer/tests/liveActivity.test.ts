@@ -85,7 +85,7 @@ function view(compiled: { at: number; shaders: number; pipelines: number } | nul
     current: { byUid: new Map(objects.map((o) => [o.uid, o])) },
     compiled,
     pageUploads: { pending: 2 },
-    voxelUnits: { loading: 1 },
+    voxelUnits: { loading: 1, cacheHits: 7, meshBuilds: 2 },
     library: { loading: 3 },
     effectArt: { loading: 0 },
     waitingArt: 0,
@@ -103,6 +103,8 @@ describe('what the view was busy with in its last frame', () => {
     expect(v.activity()).toEqual({
       pageUploads: 2,
       voxelMeshes: 1,
+      voxelCacheHits: 7,
+      voxelMeshBuilds: 2,
       // Three library files and one mesh.
       loadingArt: 4,
       shaders: 6,

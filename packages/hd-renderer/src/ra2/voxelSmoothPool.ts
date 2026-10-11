@@ -5,6 +5,9 @@ import type { SmoothSectionReply, SmoothSectionRequest } from './voxelSmoothWork
 /** Builds smooth section meshes somewhere other than the calling thread. */
 export interface SmoothSectionBuilder {
   build(section: VoxelSection, options: SmoothVoxelOptions): Promise<SmoothMeshData>;
+  /** Cumulative successful section results, when the builder reports their source. */
+  readonly cacheHits?: number;
+  readonly meshBuilds?: number;
 }
 
 /** The part of a Worker the pool uses (tests supply their own). */
@@ -43,6 +46,8 @@ export class SmoothVoxelPool implements SmoothSectionBuilder {
   private nextId = 1;
   private disposed = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  cacheHits = 0;
+  meshBuilds = 0;
 
   constructor(
     private readonly createWorker: () => SmoothWorkerLike,
@@ -120,8 +125,11 @@ export class SmoothVoxelPool implements SmoothSectionBuilder {
       const reply = event.data;
       if (!job || reply.id !== job.request.id) return;
       slot.job = null;
-      if ('mesh' in reply) job.resolve(reply.mesh);
-      else job.reject(new Error(reply.error));
+      if ('mesh' in reply) {
+        if (reply.source === 'cache') this.cacheHits++;
+        else this.meshBuilds++;
+        job.resolve(reply.mesh);
+      } else job.reject(new Error(reply.error));
       this.pump();
     };
     worker.onerror = (event) => {

@@ -3,6 +3,7 @@ import type {
   GameCommandState,
   GameCommandStateReader,
   GameRenderState,
+  GameRenderPreparation,
   GameRenderStateReader,
   RenderPassthroughControl,
 } from './renderState';
@@ -455,6 +456,16 @@ export class VmCore {
     );
   }
 
+  /** Read-only loading hints bypass battle visibility gates but never authorize a visible battlefield. */
+  async getRenderPreparation(): Promise<GameRenderPreparation | null> {
+    const emulator = this.emulator;
+    const read = this.source.game.runtimeHooks?.readRenderPreparation;
+    if (!emulator || !this.image || !read || this.currentPhase !== 'running') return null;
+    this.executableHash ??= import('../utils/sha256').then(({ sha256Hex }) => sha256Hex(this.source.executableBytes));
+    const hash = await this.executableHash;
+    return this.emulator === emulator && this.currentPhase === 'running' ? read(emulator, hash) : null;
+  }
+
   /**
    * Live battlefield snapshot for the HD renderer bridge (dev only). Reads guest memory through a view, never writes it.
    * The reader is created lazily and only once the game's own image validates, so polling during startup is harmless.
@@ -830,20 +841,28 @@ export class VmCore {
         const wide = imported.key.endsWith('W');
         const rawPath = wide ? this.readWideString(call.args[0]) : this.readCString(call.args[0]);
         const path = normalizeGuestPath(rawPath);
-        // A save close may still be persisting. Never let a late write recreate a file after successful removal.
-        await this.flushFiles();
-        const sync = this.syncGuestFile(call.args[0], wide);
-        if (sync) await sync;
-        let error = this.shim.inspectFileDeleteError(path);
-        if (!error) {
-          const result = this.source.files.remove ? await this.source.files.remove(rawPath) : 'read-only';
-          error = result === 'removed' ? 0 : result === 'missing' ? 2 : 5;
-          if (result !== 'read-only') {
-            this.rangePrefetch.clear();
-            // Removing a session override may reveal original input; only authoritative absence is cacheable.
-            if (result === 'missing') this.missingStaticGuestFiles.add(path);
-            else this.missingStaticGuestFiles.delete(path);
+        let error = 29; // ERROR_WRITE_FAULT while waiting for a preceding persisted save.
+        try {
+          // A save close may still be persisting. Never let a late write recreate a file after successful removal.
+          await this.flushFiles();
+          error = 5; // ERROR_ACCESS_DENIED if the provider cannot read or remove the requested file.
+          const sync = this.syncGuestFile(call.args[0], wide);
+          if (sync) await sync;
+          const guestError = this.shim.inspectFileDeleteError(path);
+          if (guestError) error = guestError;
+          else {
+            const result = this.source.files.remove ? await this.source.files.remove(rawPath) : 'read-only';
+            error = result === 'removed' ? 0 : result === 'missing' ? 2 : 5;
+            if (result !== 'read-only') {
+              this.rangePrefetch.clear();
+              // Removing a session override may reveal original input; only authoritative absence is cacheable.
+              if (result === 'missing') this.missingStaticGuestFiles.add(path);
+              else this.missingStaticGuestFiles.delete(path);
+            }
           }
+        } catch (cause) {
+          // Storage failure is a Win32 FALSE result for the game to handle, not a failed VM session.
+          console.warn('[files] DeleteFile storage operation failed', cause);
         }
         this.fileDeleteResult = { path, error };
       }

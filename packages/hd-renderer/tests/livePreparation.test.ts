@@ -415,18 +415,59 @@ describe('preparing art before the match', () => {
     }
   });
 
-  it('replaces an empty loading-screen snapshot, and does nothing with an empty list or a map without cells', () => {
+  it('prepares an empty scene before any match and replaces it without inventing match objects', () => {
     const { view, state } = timeline();
     view.warm([]);
-    expect(state.current).toBeNull();
+    expect(state.current!.snapshot.frame).toBe(Number.MAX_SAFE_INTEGER);
+    expect(state.current!.snapshot.objects).toEqual([]);
+    expect(state.current!.snapshot.houses).toEqual([]);
+    expect(view.localArtComplete).toBe(false);
     const loading: LiveSnapshot = { frame: 0, view: { x: 0, y: 0 }, houses: [], objects: [] };
     view.push(loading, 0);
+    expect(state.current!.snapshot).toBe(loading);
+    expect(state.previous).toBeNull();
     view.warm(TYPES);
     expect(state.current!.snapshot.objects).toHaveLength(5);
     const empty = timeline();
     empty.state.cache.exists.fill(0);
     empty.view.warm(TYPES);
     expect(empty.state.current).toBeNull();
+  });
+
+  it('keeps the original picture when settled art is missing for the local player', () => {
+    const { view, state } = timeline();
+    const own = vehicle(1, 'HTNK');
+    const enemy = vehicle(2, 'UNKNOWN', 1);
+    view.push({ frame: 1, view: null, localHouse: 0, houses: [], objects: [own, enemy] });
+    state.settled = 3;
+    Object.assign(state, { voxelUnits: { loading: 0 }, waitingArt: 0 });
+    expect(view.localArtComplete).toBe(false);
+    state.visuals.set(1, { type: 'HTNK', root: new Group(), mode: 'placeholder', pending: true });
+    expect(view.loadingArt()).toBe(0);
+    expect(view.localArtComplete).toBe(false);
+    const visual = { type: 'HTNK', root: new Group(), mode: 'voxel', turretState: 'missing' };
+    state.visuals.set(1, visual);
+    expect(view.localArtComplete).toBe(false);
+    visual.turretState = 'ready';
+    expect(view.localArtComplete).toBe(true);
+    own.nativeHidden = true;
+    state.visuals.delete(1);
+    expect(view.localArtComplete).toBe(true);
+  });
+
+  it('requires complete indexed pages for local sprite art even when a failed page has settled', () => {
+    const { view, state } = timeline();
+    view.push({ frame: 1, view: null, localHouse: 0, houses: [], objects: [vehicle(1, 'GAPOWR')] });
+    const type = { sprite: 'GAPOWR' } as LibraryType;
+    state.visuals.set(1, { type: 'GAPOWR', root: new Group(), mode: 'library-sprite', libraryType: type });
+    const pageFailed = vi.fn(() => true);
+    Object.assign(state, { library: { typePages: () => [2], pageSettled: () => true, pageFailed } });
+    expect(view.localArtComplete).toBe(false);
+    pageFailed.mockReturnValue(false);
+    expect(view.localArtComplete).toBe(true);
+    type.invisible = true;
+    pageFailed.mockReturnValue(true);
+    expect(view.localArtComplete).toBe(true);
   });
 
   it('lists each kind of the match once, with its owner colours and whether a civilian house owns it', () => {
