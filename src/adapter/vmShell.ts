@@ -4,6 +4,7 @@ import type { GameCommandState } from '../games/commandState';
 import type { GameRenderState } from '../games/renderState';
 import type { GuestMemRecordResult } from './memRecord';
 import type { VmDiagnosticAction, VmDiagnostics, VmRuntimeInfo } from './vmDiagnostics';
+import type { MenuSnapshot } from '../vm86/menuSnapshot';
 
 /** Final input coordinates in the shim and actual presentation-surface bounds. */
 export interface VmPointerState {
@@ -53,6 +54,8 @@ export interface VmShell extends SessionRuntime {
   setGameClockRate(rate: number): number;
   setMasterVolume(linear: number): void;
   getPointerState(): Promise<VmPointerState | null>;
+  /** Read-only dialog metadata for picture-only presentation; original controls retain all input. */
+  getMenuSnapshot?(): Promise<MenuSnapshot | null>;
   /** Read the actual logic frame rate on demand; return null if unsupported or unloaded. */
   getGamePerformance(): Promise<GamePerformanceSample | null>;
   /**

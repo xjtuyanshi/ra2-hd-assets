@@ -29,6 +29,7 @@ import { withGameResolutionOverride } from '../games/resolution';
 import { withGameSpeedOverride } from '../games/gameSpeed';
 import { randomMultiplayerName, validateMultiplayerName, withMultiplayerNameOverride } from '../games/multiplayerName';
 import { parseRa2RelayUrl, type Ra2NetworkConfig } from '../games/ra2/networkTransport';
+import type { MenuSnapshot } from '../vm86/menuSnapshot';
 
 export type { VmShell } from './vmShell';
 
@@ -386,6 +387,10 @@ export class Win32GameVm implements VmShell {
 
   getCommandState(): Promise<GameCommandState | null> {
     return this.core.getCommandState();
+  }
+
+  getMenuSnapshot(): Promise<MenuSnapshot | null> {
+    return this.core.getMenuSnapshot();
   }
 
   getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics> {

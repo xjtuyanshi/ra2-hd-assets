@@ -17,6 +17,7 @@ import {
   YR_EFFECTS_VTABLES as V,
 } from '../../src/games/yr/effectsReader';
 import { YR_STARTUP_PAGE_HASH } from '../../src/games/yr/startupPage';
+import { readYrNativeMenuTexts, readYrVmMenuTexts } from '../../src/games/yr/menuText';
 import { readYrUnitMovingNow, YR_GATHER_OFFSETS, YR_GATHER_LOCOMOTORS } from '../../src/games/yr/unitGatherState';
 import {
   createYrStateReader,
@@ -88,6 +89,42 @@ function covers(ranges: readonly { address: number; length: number }[], address:
 }
 
 describe('native YR policy and bulk cell discovery', () => {
+  it('reads actual UTF-16 control text through HWND hash collisions and rejects a changed native lifetime', async () => {
+    const memory = createGuestMemory();
+    const table = 0xac1b00,
+      buckets = 0xb90000,
+      first = 0xba0000,
+      second = 0xba1000,
+      text = 0xbb0ffc;
+    memory.write_memory([0x8b, 0x01, 0xc3], 0x600660);
+    [buckets, 2, 4, 2, 0, 0, 0x600660].forEach((value, index) => writeU32(memory, table + index * 4, value));
+    writeU32(memory, buckets + 4, first);
+    writeU32(memory, first, 101);
+    writeU32(memory, first + 0x204, second);
+    writeU32(memory, second, 105);
+    writeU32(memory, second + 0x2c, text);
+    const actual = '退出战斗';
+    memory.write_memory(
+      [...actual, '\0'].flatMap((char) => [char.charCodeAt(0) & 255, char.charCodeAt(0) >>> 8]),
+      text,
+    );
+    const write = vi.spyOn(memory, 'write_memory');
+    expect(readYrVmMenuTexts(memory, [105]).get(105)).toBe(actual);
+    expect(await readYrNativeMenuTexts(async (address, length) => memory.read_memory(address, length), [105])).toEqual(
+      new Map([[105, actual]]),
+    );
+    expect(write).not.toHaveBeenCalled();
+    let reads = 0;
+    const changed = await readYrNativeMenuTexts(
+      async (address, length) => {
+        if (address === table && ++reads === 2) writeU32(memory, second + 0x2c, 0xbb2000);
+        return memory.read_memory(address, length);
+      },
+      [105],
+    );
+    expect(changed.has(105)).toBe(false);
+  });
+
   it('covers all actual houses and cells while omitting the unused middle of each house allocation', () => {
     const source = createGuestMemory(),
       mirror = new NativeMirrorMemory(),

@@ -37,8 +37,22 @@ export function skipYrStartupMovies(memory: GuestMemory): boolean {
  */
 const YR_HD_BRIDGE_HOOKS: Pick<
   GameRuntimeHooks,
-  'createRenderStateReader' | 'createCommandStateReader' | 'prepareRenderPassthrough' | 'preparePagePointer'
+  | 'createRenderStateReader'
+  | 'createCommandStateReader'
+  | 'prepareRenderPassthrough'
+  | 'preparePagePointer'
+  | 'readMenuTexts'
 > = {
+  async readMenuTexts(memory, hwnds, hash) {
+    if (import.meta.env.DEV) {
+      const { YR_STARTUP_PAGE_HASH } = await import('./startupPage');
+      if (hash === YR_STARTUP_PAGE_HASH) {
+        const { readYrVmMenuTexts } = await import('./menuText');
+        return readYrVmMenuTexts(memory, hwnds);
+      }
+    }
+    return new Map();
+  },
   async preparePagePointer(memory, hash) {
     if (import.meta.env.DEV) {
       const { YR_STARTUP_PAGE_HASH } = await import('./startupPage');

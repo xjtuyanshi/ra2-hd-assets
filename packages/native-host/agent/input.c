@@ -375,10 +375,115 @@ static BOOL CALLBACK describe_popup(HWND hwnd, LPARAM context)
     return TRUE;
 }
 
+struct menu_context {
+    char *json;
+    uint32_t capacity, used, count;
+    int complete;
+    HWND root, focus;
+};
+
+static int menu_control_enabled(HWND window, HWND root)
+{
+    /* A modal can disable its owner while remaining usable itself. Include
+     * every child/owned-popup ancestor, but stop at this snapshot's dialog. */
+    for (unsigned depth = 0; window && depth < 32; depth++)
+    {
+        if (!IsWindowEnabled(window)) return 0;
+        if (window == root) return 1;
+        HWND parent = GetParent(window);
+        HWND next = parent ? parent : GetWindow(window, GW_OWNER);
+        if (next == window) return 0;
+        window = next;
+    }
+    return 0;
+}
+
+static BOOL CALLBACK describe_menu_control(HWND hwnd, LPARAM context)
+{
+    struct menu_context *state = (struct menu_context *)context;
+    if (state->count >= 128 || state->capacity - state->used < 4096)
+    { state->complete = 0; return FALSE; }
+    RECT rect;
+    if (!GetWindowRect(hwnd, &rect)) { state->complete = 0; return TRUE; }
+    POINT first = screen_to_game((POINT){rect.left, rect.top});
+    POINT last = screen_to_game((POINT){rect.right, rect.bottom});
+    char class_name[64] = {0}, class_json[128], title[1024] = {0}, title_json[2048];
+    if (!GetClassNameA(hwnd, class_name, sizeof(class_name))) state->complete = 0;
+    typedef int (WINAPI *GETCACHEDTEXT)(HWND, LPWSTR, int);
+    GETCACHEDTEXT cached_text = (GETCACHEDTEXT)GetProcAddress(GetModuleHandleA("user32.dll"), "InternalGetWindowText");
+    int text_complete = 0;
+    if (cached_text)
+    {
+        WCHAR wide[256] = {0};
+        int copied = cached_text(hwnd, wide, sizeof(wide) / sizeof(wide[0]));
+        text_complete = copied >= 0 && copied < 255 &&
+            WideCharToMultiByte(CP_UTF8, 0, wide, -1, title, sizeof(title), NULL, NULL) > 0;
+    }
+    /* Cached Unicode text avoids calling owner-drawn WM_GETTEXT handlers, which
+     * may report no text even though the original control owns a resource key. */
+    escaped(class_json, sizeof(class_json), class_name);
+    escaped(title_json, sizeof(title_json), title);
+    int visible = nh_hidden_visible(hwnd), pressed = 0;
+    if (visible && _stricmp(class_name, "Button") == 0)
+    {
+        int32_t button_state;
+        if (query_control(hwnd, BM_GETSTATE, &button_state)) pressed = (button_state & BST_PUSHED) != 0;
+        else state->complete = 0;
+    }
+    /* List contents are intentionally not guessed from the selected label.
+     * Until they can be captured completely, the whole screen stays original. */
+    if (visible && (_stricmp(class_name, "ListBox") == 0 || _stricmp(class_name, "ComboBox") == 0 ||
+        _stricmp(class_name, "ComboLBox") == 0)) state->complete = 0;
+    if (!text_complete) state->complete = 0;
+    state->used += (uint32_t)snprintf(state->json + state->used, state->capacity - state->used,
+        "%s{\"hwnd\":%u,\"parent\":%u,\"id\":%d,\"className\":\"%s\",\"style\":%u,"
+        "\"text\":\"%s\",\"textComplete\":%s,\"rect\":{\"x\":%ld,\"y\":%ld,\"width\":%ld,\"height\":%ld},"
+        "\"visible\":%s,\"enabled\":%s,\"focused\":%s,\"pressed\":%s}",
+        state->count ? "," : "", (uint32_t)(uintptr_t)hwnd, (uint32_t)(uintptr_t)GetParent(hwnd),
+        GetDlgCtrlID(hwnd), class_json, (uint32_t)GetWindowLongA(hwnd, GWL_STYLE), title_json,
+        text_complete ? "true" : "false", first.x, first.y, last.x - first.x, last.y - first.y,
+        visible ? "true" : "false", menu_control_enabled(hwnd, state->root) ? "true" : "false",
+        hwnd == state->focus ? "true" : "false", pressed ? "true" : "false");
+    state->count++;
+    return TRUE;
+}
+
+static BOOL CALLBACK describe_menu_popup(HWND hwnd, LPARAM context)
+{
+    struct menu_context *state = (struct menu_context *)context;
+    if (popup_for(hwnd, state->root)) return describe_menu_control(hwnd, context);
+    return TRUE;
+}
+
+static void menu_snapshot(uint32_t id)
+{
+    char json[65536];
+    HWND root = nh_window_target(NH_WINDOW_PAINT);
+    if (!root || root == g_ddraw.hwnd)
+    { nh_send(NH_INPUT_STATE, id, "null", 4); return; }
+    uint32_t width = 0, height = 0, bpp = 0;
+    nh_surface_info(&width, &height, &bpp);
+    EnterCriticalSection(&input_lock);
+    int tracking_failed = movie_tracking_failures != 0, playing = movie_active != 0;
+    LeaveCriticalSection(&input_lock);
+    snprintf(json, sizeof(json), "{\"width\":%u,\"height\":%u,\"dialogHwnd\":%u,\"moviePlaying\":%s,"
+        "\"pointer\":{\"x\":%ld,\"y\":%ld},\"controls\":[", width, height,
+        (uint32_t)(uintptr_t)root, tracking_failed ? "null" : playing ? "true" : "false",
+        InterlockedCompareExchange(&cursor_x, 0, 0), InterlockedCompareExchange(&cursor_y, 0, 0));
+    struct menu_context state = {json, sizeof(json), (uint32_t)strlen(json), 0, 1, root, nh_input_get_focus()};
+    describe_menu_control(root, (LPARAM)&state);
+    EnumChildWindows(root, describe_menu_control, (LPARAM)&state);
+    EnumWindows(describe_menu_popup, (LPARAM)&state);
+    if (root != nh_window_target(NH_WINDOW_PAINT) || !IsWindow(root)) state.complete = 0;
+    snprintf(json + state.used, sizeof(json) - state.used, "],\"complete\":%s}", state.complete ? "true" : "false");
+    nh_send(NH_INPUT_STATE, id, json, (uint32_t)strlen(json));
+}
+
 static void input_state(uint32_t id, int skip_controls)
 {
     char json[65536], held[1024];
     HWND target = nh_input_target_window();
+    HWND paint_target = nh_window_target(NH_WINDOW_PAINT);
     int modal = target && target != g_ddraw.hwnd;
     uint32_t used = 0;
     held[0] = 0;
@@ -399,7 +504,7 @@ static void input_state(uint32_t id, int skip_controls)
         "\"consumedCapturedReleases\":%u,\"lastDeliveryQueueUs\":%llu,\"maxDeliveryQueueUs\":%llu,"
         "\"lastHandlerUs\":%llu,\"maxHandlerUs\":%llu,\"ownerDrawnWheels\":%u,\"ownerDrawnWheelFallbacks\":%u,"
         "\"lastWheelTargetHwnd\":%u,\"lastWheelDelta\":%d,\"lastWheelTopBefore\":%d,\"lastWheelTopAfter\":%d,"
-        "\"directInput\":\"unsupported\",\"controls\":[",
+        "\"menuVisible\":%s,\"menuHwnd\":%u,\"directInput\":\"unsupported\",\"controls\":[",
         InterlockedCompareExchange(&cursor_x, 0, 0), InterlockedCompareExchange(&cursor_y, 0, 0), held,
         InterlockedCompareExchange(&cursor_reads, 0, 0), InterlockedCompareExchange(&key_reads, 0, 0),
         InterlockedCompareExchange(&async_key_reads, 0, 0), InterlockedCompareExchange(&cursor_writes, 0, 0),
@@ -414,7 +519,8 @@ static void input_state(uint32_t id, int skip_controls)
         (unsigned long long)last_delivery_queue_us, (unsigned long long)max_delivery_queue_us,
         (unsigned long long)last_handler_us, (unsigned long long)max_handler_us,
         owner_drawn_wheels, owner_drawn_wheel_fallbacks, last_wheel_target,
-        last_wheel_delta, last_wheel_top_before, last_wheel_top_after);
+        last_wheel_delta, last_wheel_top_before, last_wheel_top_after,
+        paint_target != g_ddraw.hwnd ? "true" : "false", (uint32_t)(uintptr_t)paint_target);
     LeaveCriticalSection(&input_lock);
     struct controls_context controls = {json, sizeof(json), (uint32_t)strlen(json), 0, 0, 0, target};
     if (target && !skip_controls)
@@ -446,14 +552,15 @@ void nh_dispatch_input(uint16_t type, uint32_t id, const uint8_t *payload, uint3
     {
         uint32_t flags = 0;
         if (length == 4) memcpy(&flags, payload, 4);
-        if ((length != 0 && length != 4) || (length == 4 && flags != 1 && flags != 2))
-        { error(id, "input state takes no payload, skip-controls flag one, or cursor-snapshot flag two"); return; }
+        if ((length != 0 && length != 4) || (length == 4 && flags != 1 && flags != 2 && flags != 3))
+        { error(id, "input state takes no payload or flags one (minimal), two (cursor), three (menu)"); return; }
         if (flags == 2)
         {
             nh_cursor_snapshot(id, (int)InterlockedCompareExchange(&cursor_x, 0, 0),
                 (int)InterlockedCompareExchange(&cursor_y, 0, 0));
             return;
         }
+        if (flags == 3) { menu_snapshot(id); return; }
         /* Frequent readers need modal ownership, not GUI control queries.
          * Empty requests retain the complete diagnostic response. */
         input_state(id, flags == 1);

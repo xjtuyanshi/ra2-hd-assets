@@ -168,11 +168,19 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   /** Game-speed telemetry of this session (development only, see speedTelemetry.ts); stopped with the runtime. */
   let speedCleanup: (() => void) | null = null;
   let nativeCursor: Awaited<ReturnType<(typeof import('./nativeCursor'))['createNativeCursor']>> = null;
+  let hdMenus: import('./hdMenus').HdMenus | null = null;
+  const menuAbort = new AbortController();
+  let hdViewEnabled = true;
   /** Game frames presented since the page started this session (the telemetry takes differences). */
   let presentedFrames = 0;
   /** Switch between the HD view and the original picture (toolbar button and the \\ key); no-op without a bridge. */
   const toggleHdView = () => {
-    if (hdCleanup) toolbar.setHdView(hdCleanup.toggle());
+    if (hdCleanup) {
+      const enabled = hdCleanup.toggle();
+      hdViewEnabled = enabled;
+      toolbar.setHdView(enabled);
+      hdMenus?.setEnabled(enabled);
+    }
   };
   let runtimeReleased = false;
   const calls: string[] = [];
@@ -413,6 +421,9 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     isReleased: () => runtimeReleased,
   });
   activeRendererCleanup = () => {
+    menuAbort.abort();
+    hdMenus?.dispose();
+    hdMenus = null;
     nativeCursorFrames.dispose();
     nativeCursor?.destroy();
     nativeCursor = null;
@@ -533,6 +544,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
 
   const releaseRuntime = async () => {
     runtimeReleased = true;
+    menuAbort.abort();
     activeNativeViewportAbort?.abort();
     activeNativeViewportAbort = null;
     nativeCursorFrames.dispose();
@@ -541,6 +553,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     // Stop the HD bridge while the VM still runs: it switches the game's passthrough off and must not keep polling (and
     // holding its GPU view) after the VM is gone.
     activeTrainingCleanup?.();
+    hdMenus?.dispose();
+    hdMenus = null;
     hdCleanup?.();
     if (activeHdCleanup === hdCleanup) activeHdCleanup = null;
     hdCleanup = null;
@@ -825,6 +839,29 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   }
   if (hdBridgeEnabled) {
     const bridgeVm = vm;
+    if (selectedGameId === 'yr' && new URLSearchParams(window.location.search).get('hd-menus') !== '0') {
+      void import('./hdMenus')
+        .then(async ({ startHdMenus }) => {
+          if (generation !== pageGeneration || runtimeReleased) return;
+          const menus = await startHdMenus({
+            screen: canvas,
+            vm: bridgeVm,
+            side: () => hdCleanup?.menuSide?.() ?? null,
+            pageCursorAvailable: () => nativeCursor !== null,
+            battleActive: () => hdCleanup?.battleActive?.() ?? false,
+            signal: menuAbort.signal,
+            pointerPosition: () => inputPointerPosition?.() ?? null,
+            frameSize: () =>
+              presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null,
+          });
+          if (generation !== pageGeneration || runtimeReleased) menus?.dispose();
+          else {
+            hdMenus = menus;
+            hdMenus?.setEnabled(hdViewEnabled);
+          }
+        })
+        .catch((error) => console.warn('[HD] Menu art unavailable; retaining original menus', error));
+    }
     void import('./hdBridge')
       .then(({ startHdBridge }) => {
         // The session may have been replaced, or released (game exit, boot cancel), while the module loaded.

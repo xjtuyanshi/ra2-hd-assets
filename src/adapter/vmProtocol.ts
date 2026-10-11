@@ -10,6 +10,7 @@ import type { VmAttachResult, VmPointerState } from './vmShell';
 import type { VmCallBatch, VmPhase } from '../app/session/runtimeEvents';
 import type { GameResolution } from '../games/resolution';
 import type { Ra2NetworkConfig } from '../games/ra2/networkTransport';
+import type { MenuSnapshot } from '../vm86/menuSnapshot';
 
 /** Main-thread/Worker message protocol. Array fields (PCM/frames/EXE) transfer ownership; a single FIFO channel preserves order. */
 
@@ -73,6 +74,7 @@ export type MainToWorkerMessage =
   | { type: 'game-performance'; requestId: number }
   | { type: 'render-state'; requestId: number }
   | { type: 'command-state'; requestId: number }
+  | { type: 'menu-snapshot'; requestId: number }
   | { type: 'attach-maps'; files: GameFileEntry[]; requestId: number }
   | { type: 'init'; config: VmInitConfig; requestId: number }
   | { type: 'wm'; m: number; w: number; l: number }
@@ -99,6 +101,7 @@ export type WorkerToMainMessage =
   | { type: 'game-performance-reply'; requestId: number; value: GamePerformanceSample | null }
   | { type: 'render-state-reply'; requestId: number; value: GameRenderState | null }
   | { type: 'command-state-reply'; requestId: number; value: GameCommandState | null }
+  | { type: 'menu-snapshot-reply'; requestId: number; value: MenuSnapshot | null }
   /** An omitted cell layer retains the preceding ordered reply's publication; explicit null clears it. */
   | {
       type: 'render-state-cells-unchanged';

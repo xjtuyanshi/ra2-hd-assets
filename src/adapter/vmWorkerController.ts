@@ -29,6 +29,7 @@ import { withGameSpeedOverride } from '../games/gameSpeed';
 import { SerialTaskQueue } from '../utils/serialTaskQueue';
 import { FrameBufferPool } from './frameBufferPool';
 import { supportedGame } from '../games/catalog';
+import type { MenuSnapshot } from '../vm86/menuSnapshot';
 
 export interface VmWorkerCore {
   getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics>;
@@ -44,6 +45,7 @@ export interface VmWorkerCore {
   getGamePerformance(): Promise<GamePerformanceSample | null>;
   getRenderState(): Promise<GameRenderState | null>;
   getCommandState(): Promise<GameCommandState | null>;
+  getMenuSnapshot?(): Promise<MenuSnapshot | null>;
   setGameSpeedFlag(value: number): number | null | Promise<number | null>;
   setTacticalPassthrough(flags: number): boolean | Promise<boolean>;
   /** Native picture credit is released only after presentation consumption. */
@@ -164,6 +166,7 @@ function requestIdOf(message: MainToWorkerMessage): number | undefined {
     case 'game-performance':
     case 'render-state':
     case 'command-state':
+    case 'menu-snapshot':
     case 'init':
     case 'state':
     case 'guest-speed-flag':
@@ -299,6 +302,13 @@ export class VmWorkerController {
             type: 'command-state-reply',
             requestId: message.requestId,
             value: (await this.core?.getCommandState()) ?? null,
+          });
+          break;
+        case 'menu-snapshot':
+          this.post({
+            type: 'menu-snapshot-reply',
+            requestId: message.requestId,
+            value: (await this.core?.getMenuSnapshot?.()) ?? null,
           });
           break;
         case 'render-state': {

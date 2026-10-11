@@ -1,3 +1,5 @@
+import type { MenuSnapshot } from '../../vm86/menuSnapshot';
+
 /** Loopback native-host wire format. No executable-specific facts belong here. */
 export const NATIVE_MAGIC = 0x3142484e;
 export const NATIVE_VERSION = 1;
@@ -9,6 +11,8 @@ export const NATIVE_NO_FRAME = 0xffffffff;
 export const NATIVE_INPUT_STATE_MINIMAL = 1;
 /** Request the current game-selected Win32 cursor bitmap without controls or input-counter side effects. */
 export const NATIVE_INPUT_STATE_CURSOR = 2;
+/** Read-only dialog tree for picture-only menu presentation. */
+export const NATIVE_INPUT_STATE_MENU = 3;
 
 export enum NativeMessageType {
   Hello = 1,
@@ -57,6 +61,7 @@ export interface NativeHello {
     maxBudgetUs?: number;
     subscribeRevision?: boolean;
     cursorSnapshot?: boolean;
+    menuSnapshot?: boolean;
   };
 }
 export interface NativeRange {
@@ -197,6 +202,63 @@ export function decodeJson(payload: Uint8Array): unknown {
   }
 }
 
+export function decodeMenuSnapshot(payload: Uint8Array): MenuSnapshot | null {
+  const value = decodeJson(payload) as MenuSnapshot | null;
+  if (value === null) return null;
+  const integer = (item: unknown) => typeof item === 'number' && Number.isSafeInteger(item);
+  if (
+    !value ||
+    !integer(value.width) ||
+    !integer(value.height) ||
+    value.width < 1 ||
+    value.height < 1 ||
+    value.width > 4096 ||
+    value.height > 4096 ||
+    !integer(value.dialogHwnd) ||
+    value.dialogHwnd <= 0 ||
+    typeof value.complete !== 'boolean' ||
+    (value.moviePlaying !== null && typeof value.moviePlaying !== 'boolean') ||
+    !value.pointer ||
+    !integer(value.pointer.x) ||
+    !integer(value.pointer.y) ||
+    !Array.isArray(value.controls) ||
+    value.controls.length > 128 ||
+    !value.controls.every(
+      (control) =>
+        control &&
+        integer(control.hwnd) &&
+        control.hwnd > 0 &&
+        integer(control.parent) &&
+        integer(control.id) &&
+        integer(control.style) &&
+        typeof control.className === 'string' &&
+        control.className.length <= 64 &&
+        typeof control.text === 'string' &&
+        control.text.length <= 4096 &&
+        typeof control.textComplete === 'boolean' &&
+        typeof control.visible === 'boolean' &&
+        typeof control.enabled === 'boolean' &&
+        typeof control.focused === 'boolean' &&
+        typeof control.pressed === 'boolean' &&
+        control.rect &&
+        Object.values(control.rect).length === 4 &&
+        integer(control.rect.x) &&
+        integer(control.rect.y) &&
+        integer(control.rect.width) &&
+        integer(control.rect.height) &&
+        control.rect.width >= 0 &&
+        control.rect.height >= 0 &&
+        (control.items === undefined ||
+          (Array.isArray(control.items) &&
+            control.items.length <= 4096 &&
+            control.items.every((item) => typeof item === 'string' && item.length <= 4096))) &&
+        (control.selection === undefined || control.selection === null || integer(control.selection)),
+    )
+  )
+    throw new NativeProtocolError('Invalid native menu snapshot');
+  return value;
+}
+
 export function decodeHello(payload: Uint8Array): NativeHello {
   const candidate = decodeJson(payload) as Partial<NativeHello> | null;
   const hello = candidate;
@@ -245,6 +307,8 @@ export function decodeHello(payload: Uint8Array): NativeHello {
     throw new NativeProtocolError('Invalid native subscription-revision capability');
   if (hello.limits.cursorSnapshot !== undefined && typeof hello.limits.cursorSnapshot !== 'boolean')
     throw new NativeProtocolError('Invalid native cursor-snapshot capability');
+  if (hello.limits.menuSnapshot !== undefined && typeof hello.limits.menuSnapshot !== 'boolean')
+    throw new NativeProtocolError('Invalid native menu-snapshot capability');
   if (
     hello.limits.maxBudgetUs !== undefined &&
     (!Number.isInteger(hello.limits.maxBudgetUs) || hello.limits.maxBudgetUs < 100 || hello.limits.maxBudgetUs > 20000)

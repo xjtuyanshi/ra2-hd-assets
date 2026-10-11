@@ -862,6 +862,37 @@ async function execute(c) {
   }
   if (c.action === 'shot') return shot(c.label);
   if (c.action === 'state') return state();
+  if (c.action === 'menu-state') {
+    return {
+      snapshot: await worker().evaluate(() => globalThis.__auditCore.getMenuSnapshot?.() ?? null),
+      layer: await page.locator('#hd-menus').evaluateAll((layers) =>
+        layers.map((layer) => ({
+          display: getComputedStyle(layer).display,
+          pointerEvents: getComputedStyle(layer).pointerEvents,
+          data: { ...layer.dataset },
+          width: layer.width,
+          height: layer.height,
+          box: layer.getBoundingClientRect().toJSON(),
+        })),
+      ),
+    };
+  }
+  if (c.action === 'press-control') {
+    const current = await state();
+    const control = current.controls.find((control) => usable(control) && control.id === c.id);
+    assert(control, 'Missing press control ' + c.id);
+    await page.mouse.move(
+      ...(await point((control.rect[0] + control.rect[2]) / 2, (control.rect[1] + control.rect[3]) / 2)),
+    );
+    await page.mouse.down();
+    try {
+      await delay(100);
+      await shot(c.label);
+      return await execute({ action: 'menu-state' });
+    } finally {
+      await page.mouse.up();
+    }
+  }
   if (c.action === 'locator-select') {
     assert(typeof c.selector === 'string' && c.selector, 'A page selector is required');
     await page.locator(c.selector).selectOption(c.value);
@@ -1237,7 +1268,7 @@ try {
     dllBefore = await dllIdentity();
     await ownerIdle();
     const launchEnvironment = { ...process.env, ...config };
-    if (phase === 'phase19' && (await exists(join(base, phase, 'farm', '_library')))) {
+    if (await exists(join(base, phase, 'farm', '_library'))) {
       launchEnvironment.RA2_HD_CACHE_DIR = join(base, phase, 'farm');
     }
     // The runner's explicit free-Wine scope must override the saved CrossOver

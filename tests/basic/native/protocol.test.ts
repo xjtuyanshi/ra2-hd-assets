@@ -8,6 +8,7 @@ import {
   encodePacket,
   encodeU32,
   decodeHello,
+  decodeMenuSnapshot,
   decodeMirror,
   encodeSubscription,
   encodeBatch,
@@ -85,6 +86,45 @@ describe('native binary protocol', () => {
     expect(() => decodeHello(json({ ...syntheticHello, exe: undefined }))).toThrow();
     expect(() => decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, pages: 4097 } }))).toThrow();
     expect(() => decodeHello(new Uint8Array([0xff]))).toThrow('UTF-8');
+  });
+  it('preserves unknown menu metadata for whole-picture fallback and rejects malformed rectangles', () => {
+    const snapshot = {
+      width: 800,
+      height: 600,
+      dialogHwnd: 12,
+      complete: false,
+      moviePlaying: null,
+      pointer: { x: 20, y: 30 },
+      controls: [
+        {
+          hwnd: 13,
+          parent: 12,
+          id: 100,
+          className: 'Button',
+          style: 0,
+          text: 'GUI:OriginalKey',
+          textComplete: false,
+          rect: { x: 10, y: 20, width: 30, height: 40 },
+          visible: true,
+          enabled: false,
+          focused: true,
+          pressed: false,
+        },
+      ],
+    };
+    expect(decodeMenuSnapshot(json(null))).toBeNull();
+    expect(decodeMenuSnapshot(json(snapshot))).toEqual(snapshot);
+    expect(() =>
+      decodeMenuSnapshot(
+        json({ ...snapshot, controls: [{ ...snapshot.controls[0], rect: { x: 10, y: 20, width: -1, height: 40 } }] }),
+      ),
+    ).toThrow('menu snapshot');
+    expect(() =>
+      decodeMenuSnapshot(json({ ...snapshot, controls: new Array(129).fill(snapshot.controls[0]) })),
+    ).toThrow('menu snapshot');
+    expect(() =>
+      decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, menuSnapshot: 1 } })),
+    ).toThrow('menu-snapshot');
   });
   it('encodes dynamic rules and rejects overflowing subscriptions before sending', () => {
     const bytes = encodeSubscription({

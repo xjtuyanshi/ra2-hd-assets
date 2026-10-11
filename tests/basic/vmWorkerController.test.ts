@@ -174,6 +174,9 @@ class FakeCore implements VmWorkerCore {
   async getCommandState(): Promise<null> {
     return null;
   }
+  async getMenuSnapshot(): Promise<null> {
+    return null;
+  }
   setTacticalPassthrough(flags: number): boolean {
     this.passthroughFlags.push(flags);
     return flags === 3;
@@ -274,6 +277,18 @@ function frame(value: number): VmFrame {
 }
 
 describe('VmWorkerController request-scoped errors', () => {
+  it('correlates a menu read interrupted by game exit without publishing a global fatal error', async () => {
+    const { controller, messages, core } = harness();
+    await controller.handleMessage({ type: 'init', config: config(), requestId: 1 });
+    vi.spyOn(core, 'getMenuSnapshot').mockRejectedValue(new Error('Native WebSocket closed'));
+    messages.length = 0;
+
+    await controller.handleMessage({ type: 'menu-snapshot', requestId: 29 });
+
+    expect(messages).toEqual([{ type: 'error', requestId: 29, message: 'Native WebSocket closed' }]);
+    expect(core.calls).not.toContain('stop');
+    controller.dispose();
+  });
   it('routes capture actions and correlates probe errors without stopping the VM', async () => {
     const { controller, messages, core } = harness();
     await controller.handleMessage({ type: 'init', config: config(), requestId: 1 });

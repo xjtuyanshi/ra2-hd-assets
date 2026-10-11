@@ -71,6 +71,68 @@ function getMessage(shim: Win32Shim): { eax: number; delayMs?: number } {
 }
 
 describe('消息队列', () => {
+  it('menu pictures receive copied screen coordinates and preserve native focus and input state', () => {
+    const memory = createGuestMemory();
+    const shim = createTestShim(memory);
+    expect(shim.inspectMenuSnapshot()).toBeNull();
+    writeAsciiZ(memory, CLASS_NAME, '#32770');
+    const dialog = callShim(shim, 'USER32.DLL!CreateWindowExA', [
+      0,
+      CLASS_NAME,
+      0,
+      0x1000_0000,
+      20,
+      30,
+      400,
+      300,
+      0,
+      0,
+      0,
+      0,
+    ]).eax;
+    writeAsciiZ(memory, CLASS_NAME, 'Button');
+    writeAsciiZ(memory, CLASS_NAME + 0x40, 'GUI:Resume');
+    const button = callShim(shim, 'USER32.DLL!CreateWindowExA', [
+      0,
+      CLASS_NAME,
+      CLASS_NAME + 0x40,
+      0x5000_0000,
+      10,
+      15,
+      120,
+      30,
+      dialog,
+      42,
+      0,
+      0,
+    ]).eax;
+    callShim(shim, 'USER32.DLL!SetFocus', [button]);
+    callShim(shim, 'USER32.DLL!SetCapture', [button]);
+    shim.setKeyState(1, true);
+    const control = shim.inspectMenuSnapshot()!.controls.find((entry) => entry.hwnd === button)!;
+    expect(control).toMatchObject({
+      id: 42,
+      text: 'GUI:Resume',
+      rect: { x: 30, y: 45, width: 120, height: 30 },
+      visible: true,
+      enabled: true,
+      focused: true,
+      pressed: true,
+    });
+    control.rect.x = 999;
+    control.text = 'changed outside the guest';
+    expect(shim.inspectMenuSnapshot()!.controls.find((entry) => entry.hwnd === button)).toMatchObject({
+      text: 'GUI:Resume',
+      rect: { x: 30, y: 45 },
+    });
+    expect(callShim(shim, 'USER32.DLL!GetFocus', []).eax).toBe(button);
+    expect(callShim(shim, 'USER32.DLL!GetCapture', []).eax).toBe(button);
+    callShim(shim, 'USER32.DLL!EnableWindow', [dialog, 0]);
+    expect(shim.inspectMenuSnapshot()!.controls.find((entry) => entry.hwnd === button)?.enabled).toBe(false);
+    callShim(shim, 'USER32.DLL!ShowWindow', [dialog, 0]);
+    expect(shim.inspectMenuSnapshot()).toBeNull();
+  });
+
   it('内置控件 subclass 可取得并恢复非零默认 WndProc', () => {
     const memory = createGuestMemory();
     const shim = createTestShim(memory);

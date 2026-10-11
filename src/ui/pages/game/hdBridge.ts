@@ -415,6 +415,10 @@ export interface HdBridgeScene {
 export type HdBridgeControl = (() => void) & {
   toggle(): boolean;
   scene(): HdBridgeScene | null;
+  /** Last observed faction art family; retained while a modal hides battlefield state. */
+  menuSide?(): number | null;
+  /** Reuse the already sampled battle ownership without another state read. */
+  battleActive?(): boolean;
   /** Called synchronously for a native picture before it can be painted. */
   frame(frame: VmFrame): void;
 };
@@ -460,6 +464,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let nativePollTimer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
   let enabled = true;
+  let menuSide: number | null = null;
   let ui: HdUi | null = null;
   let stallMonitor: HdStallMonitor | null = null;
   let uiEnabled = params.get('hd-ui') === '1';
@@ -1031,6 +1036,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     latestState = state;
     inBattle = !!state?.map;
     ui?.update(state?.sidebar ?? null);
+    if (state?.sidebar && state.sidebar.side >= 0) menuSide = state.sidebar.side;
     const mapName = state?.map?.fileName?.replace(/\.[^.]+$/, '') ?? null;
     const mapId = mapName?.toLowerCase() ?? null;
     // A new match on a map (coming from another map or from outside a battle, or the logic frame starting over) may
@@ -1528,7 +1534,13 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       pace: hdShown && pacer ? pacer.rate : null,
     };
   };
-  return Object.assign(stop, { toggle: () => handle.toggle(), scene, frame: onNativeFrame });
+  return Object.assign(stop, {
+    toggle: () => handle.toggle(),
+    scene,
+    frame: onNativeFrame,
+    menuSide: () => menuSide,
+    battleActive: () => inBattle,
+  });
 }
 
 function toSnapshot(state: GameRenderState): LiveSnapshot {

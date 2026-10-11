@@ -15,6 +15,7 @@ import { YR_STARTUP_PAGE_HASH } from './startupPage';
 import { installYrTacticalPassthrough } from './tacticalPassthrough';
 import { YR_GATHER_OFFSETS } from './unitGatherState';
 import { readYrNativePointer, setYrNativePointerDrawing } from './nativeCursor';
+import { readYrNativeMenuTexts } from './menuText';
 
 const PAGE_BYTES = 4096;
 const MAX_CELL_SLOTS = 512 * 512;
@@ -336,5 +337,6 @@ export function createYrNativeHostPolicy(
     setSpeed: writeYrGameSpeed,
     setPointerDrawing: setYrNativePointerDrawing,
     readPointer: readYrNativePointer,
+    readMenuTexts: readYrNativeMenuTexts,
   };
 }

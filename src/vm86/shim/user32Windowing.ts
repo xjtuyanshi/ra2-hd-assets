@@ -16,6 +16,7 @@ type User32MessageLoopBridge = {
   ): { eax: number };
   queueMessage(message: number, wParam: number, lParam: number, hwnd: number, generatedPaint?: boolean): void;
   isWindowInTree(hwnd: number, root: number): boolean;
+  isWindowTreeEnabled(hwnd: number): boolean;
 };
 
 const OWNER_DRAW_ACTIVE = 0x0006_0090;
@@ -573,6 +574,46 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
       const origin = this.screenOrigin(hwnd);
       const rect = this.windowRects.get(hwnd);
       return { x: origin.x, y: origin.y, width: rect?.width ?? 0, height: rect?.height ?? 0 };
+    }
+
+    /** Copies only: presentation cannot change guest controls, focus, capture or their coordinate space. */
+    inspectMenuSnapshot() {
+      const dialogHwnd = [...this.windowZOrder]
+        .reverse()
+        .find((hwnd) => this.windowClassNames.get(hwnd)?.toLowerCase() === '#32770' && this.isWindowTreeVisible(hwnd));
+      if (!dialogHwnd) return null;
+      const messages = this as unknown as User32MessageLoopBridge;
+      const controls = [...this.windows.keys()]
+        .filter((hwnd) => messages.isWindowInTree(hwnd, dialogHwnd))
+        .map((hwnd) => ({
+          hwnd,
+          parent: this.windowParents.get(hwnd) ?? 0,
+          id: this.controlIds.get(hwnd) ?? 0,
+          className: this.windowClassNames.get(hwnd) ?? '',
+          style: this.windowLongs.get(`${hwnd}:-16`) ?? 0,
+          text: this.windowTexts.get(hwnd) ?? '',
+          textComplete: true,
+          rect: this.screenRect(hwnd),
+          visible: this.isWindowTreeVisible(hwnd),
+          enabled: messages.isWindowTreeEnabled(hwnd),
+          focused: this.focusWindow === hwnd,
+          pressed: this.pressedButton === hwnd || (this.captureWindow === hwnd && this.keyStates.get(1) === true),
+          ...(this.controlItems.has(hwnd)
+            ? {
+                items: this.controlItems.get(hwnd)!.map((item) => item.text),
+                selection: this.controlSelections.get(hwnd) ?? -1,
+              }
+            : {}),
+        }));
+      return {
+        width: this.presentedWidth,
+        height: this.presentedHeight,
+        dialogHwnd,
+        complete: true,
+        moviePlaying: this.inspectMoviePlayback(),
+        pointer: { x: this.cursorX, y: this.cursorY },
+        controls,
+      };
     }
 
     protected dialogFontForWindow(hwnd: number): VmGdiFont | undefined {

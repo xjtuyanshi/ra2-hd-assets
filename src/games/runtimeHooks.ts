@@ -14,6 +14,8 @@ export interface GamePagePointer {
  * Keep fixed addresses and game semantics in each game's directory; the adapter sees only these optional capabilities.
  */
 export interface GameRuntimeHooks {
+  /** Read-only custom control strings; private message/data layouts belong to the selected game. */
+  readMenuTexts?(memory: GuestMemory, hwnds: readonly number[], hash: string): Promise<ReadonlyMap<number, string>>;
   /** Opt-in page cursor: validate the executable, preserve input/shape ownership, and suppress only the final native blit. */
   preparePagePointer?(memory: GuestMemory, hash: string): Promise<GamePagePointer | null>;
   /** Create a read-only native frame counter for explicit performance sampling; null for unsupported versions. */

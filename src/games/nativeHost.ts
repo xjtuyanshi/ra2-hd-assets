@@ -32,6 +32,11 @@ export interface NativeGamePolicy {
   readonly ranges: readonly NativeHostRange[];
   readonly rules: readonly NativeHostFollowRule[];
   additionalRanges?(): readonly NativeHostRange[];
+  /** Current drawn control strings, read independently of battlefield ticks. */
+  readMenuTexts?(
+    read: (address: number, length: number) => Promise<Uint8Array>,
+    hwnds: readonly number[],
+  ): Promise<ReadonlyMap<number, string>>;
   createRenderReader(): GameRenderStateReader | null;
   createCommandReader(): GameCommandStateReader | null;
   createFrameReader(): GameFrameReader | null;

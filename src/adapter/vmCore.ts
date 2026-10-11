@@ -58,6 +58,7 @@ import type { VmPointerState } from './vmShell';
 import type { GameVmCallbacks, VmStatus } from '../app/session/runtimeEvents';
 import type { VmExecutionProbe } from '../vm86/diagnostics';
 import type { VmDiagnosticAction, VmDiagnostics, VmUsage } from './vmDiagnostics';
+import type { MenuSnapshot } from '../vm86/menuSnapshot';
 
 const DEFAULT_GUEST_MEMORY_SIZE = 128 * 1024 * 1024;
 type PagePointer = Awaited<
@@ -514,6 +515,27 @@ export class VmCore {
       return null;
     }
     return this.meterStateRead(reader);
+  }
+
+  async getMenuSnapshot(): Promise<MenuSnapshot | null> {
+    if (this.currentPhase !== 'running') return null;
+    const snapshot = this.shim?.inspectMenuSnapshot() ?? null;
+    const read = this.source.game.runtimeHooks?.readMenuTexts;
+    if (!snapshot || !read || !this.emulator) return snapshot;
+    const emulator = this.emulator;
+    this.executableHash ??= import('../utils/sha256').then(({ sha256Hex }) => sha256Hex(this.source.executableBytes));
+    const texts = await read(
+      emulator,
+      snapshot.controls.map(({ hwnd }) => hwnd),
+      await this.executableHash,
+    );
+    if (this.emulator !== emulator || this.shim?.inspectMenuSnapshot()?.dialogHwnd !== snapshot.dialogHwnd) return null;
+    return {
+      ...snapshot,
+      controls: snapshot.controls.map((control) =>
+        texts.has(control.hwnd) ? { ...control, sourceText: control.text, text: texts.get(control.hwnd)! } : control,
+      ),
+    };
   }
 
   /** A state read for the page runs on the guest's thread: its time is part of the usage accounting. */

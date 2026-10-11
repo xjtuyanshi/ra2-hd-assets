@@ -13,6 +13,7 @@ import type { GameFileProvider } from '../../resources/contracts';
 import type { VmDiagnosticAction, VmDiagnostics } from '../vmDiagnostics';
 import type { GuestMemRecordResult } from '../memRecord';
 import type { VmPointerState } from '../vmShell';
+import type { MenuSnapshot } from '../../vm86/menuSnapshot';
 import type { VmFrame } from '../../vm86/win32';
 import { GamePerformanceMeter } from '../gamePerformance';
 import { NativeConnection, NativeConnectionLostError } from './connection';
@@ -22,7 +23,9 @@ import {
   NATIVE_PAGE_SIZE,
   NATIVE_INPUT_STATE_MINIMAL,
   NATIVE_INPUT_STATE_CURSOR,
+  NATIVE_INPUT_STATE_MENU,
   decodeCursorSnapshot,
+  decodeMenuSnapshot,
   decodeJson,
   encodeSubscription,
   encodeU32,
@@ -112,6 +115,8 @@ interface NativeInputOperation {
 }
 interface NativeInputState {
   modal?: boolean;
+  menuVisible?: boolean;
+  menuHwnd?: number;
   moviePlaying?: boolean | null;
   movieOpens?: number;
   movieTotalMs?: number;
@@ -222,6 +227,8 @@ export class NativeCore {
   private movieState: NativeInputState = {};
   private inputStateReadAt = -Infinity;
   private inputStateReadPending: Promise<NativeInputState> | null = null;
+  private inputState: NativeInputState = {};
+  private menuSnapshotPending: Promise<MenuSnapshot | null> | null = null;
 
   constructor(
     private readonly callbacks: GameVmCallbacks,
@@ -373,6 +380,7 @@ export class NativeCore {
   private observeInputState(state: NativeInputState): NativeInputState {
     this.inputStateReadAt = performance.now();
     if (this.closed) return state;
+    this.inputState = state;
     this.movieState = {
       moviePlaying: state.moviePlaying,
       movieOpens: state.movieOpens,
@@ -398,6 +406,52 @@ export class NativeCore {
     void pending
       .finally(() => {
         if (this.inputStateReadPending === pending) this.inputStateReadPending = null;
+      })
+      .catch(() => undefined);
+    return pending;
+  }
+
+  async getMenuSnapshot(): Promise<MenuSnapshot | null> {
+    if (
+      this.closed ||
+      !this.running ||
+      !this.hello?.limits.menuSnapshot ||
+      this.inputOutstanding ||
+      this.inputQueue.length
+    )
+      return null;
+    if (this.menuSnapshotPending) return this.menuSnapshotPending;
+    // Pictures and render-state reads already sample modal ownership. Reuse
+    // that lightweight observation; normal match play never queries controls.
+    const input = performance.now() - this.inputStateReadAt < 100 ? this.inputState : await this.readInputState();
+    if (!(input.menuVisible ?? input.modal) || this.inputOutstanding || this.inputQueue.length) return null;
+    if (this.menuSnapshotPending) return this.menuSnapshotPending;
+    const pending = this.connection
+      .request(NativeMessageType.InputState, encodeU32(NATIVE_INPUT_STATE_MENU))
+      .then(async (bytes) => {
+        // A pending GUI input can still replace this dialog. Its ACK only
+        // establishes delivery, not that its callback has finished painting.
+        if (this.closed || !this.running || this.inputOutstanding || this.inputQueue.length) return null;
+        const snapshot = decodeMenuSnapshot(bytes);
+        if (!snapshot || !this.policy?.readMenuTexts) return snapshot;
+        const texts = await this.policy.readMenuTexts(
+          async (address, length) => (await this.connection.read(address, length)).bytes,
+          snapshot.controls.map((control) => control.hwnd),
+        );
+        for (const control of snapshot.controls) {
+          if (!texts.has(control.hwnd)) continue;
+          control.sourceText = control.text;
+          control.text = texts.get(control.hwnd)!;
+          control.textComplete = true;
+        }
+        const current = await this.readInputState();
+        if (current.menuHwnd !== snapshot.dialogHwnd) snapshot.complete = false;
+        return this.closed || !this.running || this.inputOutstanding || this.inputQueue.length ? null : snapshot;
+      });
+    this.menuSnapshotPending = pending;
+    void pending
+      .finally(() => {
+        if (this.menuSnapshotPending === pending) this.menuSnapshotPending = null;
       })
       .catch(() => undefined);
     return pending;

@@ -16,8 +16,206 @@ import {
   type UiAssets,
 } from '../../packages/hd-renderer/src/ui/uiAssets';
 import { startHdUi } from '../../src/ui/pages/game/hdUi';
+import { startHdMenus } from '../../src/ui/pages/game/hdMenus';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
 import { hdSidebar } from '../helpers/hdSidebar';
+import { identifyYrHdMenu, yrMenuText } from '../../src/games/yr/hdMenus';
+import type { MenuControlSnapshot, MenuSnapshot } from '../../src/vm86/menuSnapshot';
+
+describe('HD menu atomic fallback', () => {
+  const control = (hwnd: number, id: number, className = 'Button'): MenuControlSnapshot => ({
+    hwnd,
+    id,
+    parent: 1,
+    className,
+    style: 0,
+    text: 'GUI:ResumeMission',
+    textComplete: true,
+    rect: { x: 640, y: 100, width: 125, height: 25 },
+    visible: true,
+    enabled: true,
+    focused: false,
+    pressed: false,
+  });
+  const snapshot = (): MenuSnapshot => ({
+    width: 1728,
+    height: 914,
+    dialogHwnd: 1,
+    complete: true,
+    moviePlaying: false,
+    pointer: { x: 0, y: 0 },
+    controls: [
+      { ...control(1, 0, '#32770'), parent: 0, rect: { x: 0, y: 0, width: 1728, height: 914 } },
+      control(2, 1670),
+      control(3, 1737),
+      control(4, 65535, 'Static'),
+    ],
+  });
+  it('retains the whole original dialog when any visible control is unknown or outside its picture', () => {
+    const complete = snapshot();
+    complete.controls[1]!.enabled = false;
+    expect(identifyYrHdMenu(complete)).toBe('quit');
+    const unknown = snapshot();
+    unknown.controls.push(control(5, 9999));
+    expect(identifyYrHdMenu(unknown)).toBeNull();
+    for (const rect of [
+      { x: 1727, y: 100, width: 125, height: 25 },
+      { x: Number.NaN, y: 100, width: 125, height: 25 },
+      { x: 640, y: 100, width: 0, height: 25 },
+    ]) {
+      const broken = snapshot();
+      broken.controls[1]!.rect = rect;
+      expect(identifyYrHdMenu(broken)).toBeNull();
+    }
+    const wrongRoot = snapshot();
+    wrongRoot.controls[0]!.rect.height = 599;
+    expect(identifyYrHdMenu(wrongRoot)).toBeNull();
+    const undersized = snapshot();
+    undersized.width = 800;
+    undersized.height = 600;
+    undersized.controls[0]!.rect = { x: 0, y: 0, width: 800, height: 600 };
+    expect(identifyYrHdMenu(undersized)).toBeNull();
+  });
+  it('refuses unresolved blank buttons and uses the game-drawn text when the cached title is blank', () => {
+    const button = { ...control(3, 1737), text: 'GUI:Blank' };
+    expect(yrMenuText(button, {})).toBeNull();
+    expect(yrMenuText(button, { 'gui:blank': '' })).toBeNull();
+    expect(yrMenuText({ ...button, sourceText: button.text, text: '退出' }, {})).toBe('退出');
+    const label = { ...control(4, 65535, 'Static'), text: 'GUI:Blank' };
+    expect(yrMenuText(label, { 'gui:blank': '' })).toBeNull();
+    expect(yrMenuText({ ...label, text: '' }, {})).toBeNull();
+    expect(yrMenuText({ ...label, sourceText: label.text, text: '' }, {})).toBe('');
+  });
+  it('keeps original menus before loading any overlay art when a separate page cursor is unavailable', async () => {
+    const fetch = vi.fn();
+    const getMenuSnapshot = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    const result = await startHdMenus({
+      screen: {} as HTMLCanvasElement,
+      vm: { getMenuSnapshot } as unknown as Parameters<typeof startHdMenus>[0]['vm'],
+      side: () => 0,
+      pageCursorAvailable: () => false,
+      frameSize: () => ({ width: 800, height: 600 }),
+    });
+    expect(result).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(getMenuSnapshot).not.toHaveBeenCalled();
+  });
+  it('keeps cancelled clicks visible and restores a no-op button only from a fresh post-input snapshot', async () => {
+    class MenuPointerEvent extends Event {
+      button = 0;
+      constructor(
+        type: string,
+        public clientX: number,
+        public clientY: number,
+        public buttons: number,
+      ) {
+        super(type);
+      }
+    }
+    class MenuKeyboardEvent extends Event {
+      constructor(public key: string) {
+        super('keydown');
+      }
+    }
+    vi.stubGlobal('PointerEvent', MenuPointerEvent);
+    vi.stubGlobal('KeyboardEvent', MenuKeyboardEvent);
+    const buttonArt = { normal: 'plate.png', hover: 'plate.png', pressed: 'plate.png', disabled: 'plate.png' };
+    vi.stubGlobal('fetch', async (url: string) => ({
+      ok: true,
+      json: async () =>
+        url.endsWith('menus.json')
+          ? {
+              version: 1,
+              strings: 'strings.json',
+              main: { shell: 'shell.png', buttons: buttonArt },
+              themes: { 0: { background: 'dialog.png', buttons: buttonArt } },
+            }
+          : { 'GUI:ResumeMission': '继续任务' },
+      blob: async () => new Blob(),
+    }));
+    vi.stubGlobal('createImageBitmap', async () => ({ close: vi.fn() }));
+    const canvas = {
+      style: {} as Record<string, string>,
+      dataset: {} as Record<string, string>,
+      width: 0,
+      height: 0,
+      setAttribute: vi.fn(),
+      getContext: () => recording().ctx,
+      remove: vi.fn(),
+    };
+    vi.stubGlobal('document', { createElement: () => canvas, pointerLockElement: null });
+    const frames: FrameRequestCallback[] = [];
+    const polls: (() => void)[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const windowEvents = Object.assign(new EventTarget(), {
+      devicePixelRatio: 2,
+      setTimeout: (callback: () => void) => polls.push(callback),
+    });
+    vi.stubGlobal('window', windowEvents);
+    const screen = Object.assign(new EventTarget(), {
+      offsetLeft: 0,
+      offsetTop: 0,
+      clientWidth: 1728,
+      clientHeight: 914,
+      parentElement: { appendChild: vi.fn() },
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 1728, height: 914 }),
+    });
+    const getMenuSnapshot = vi.fn(async () => snapshot());
+    const menus = await startHdMenus({
+      screen: screen as unknown as HTMLCanvasElement,
+      vm: { getMenuSnapshot } as unknown as Parameters<typeof startHdMenus>[0]['vm'],
+      side: () => 0,
+      pageCursorAvailable: () => true,
+      frameSize: () => ({ width: 1728, height: 914 }),
+    });
+    const paint = () => {
+      while (frames.length) frames.shift()!(0);
+    };
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('block');
+    screen.dispatchEvent(new MenuPointerEvent('pointerdown', 650, 110, 1));
+    screen.dispatchEvent(new MenuPointerEvent('pointerup', 900, 800, 0));
+    windowEvents.dispatchEvent(new MenuKeyboardEvent('Enter'));
+    paint();
+    expect(canvas.style.display).toBe('block');
+    let resolveOld!: (value: MenuSnapshot) => void;
+    getMenuSnapshot.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    polls.shift()!();
+    screen.dispatchEvent(new MenuPointerEvent('pointerdown', 650, 110, 1));
+    screen.dispatchEvent(new MenuPointerEvent('pointerup', 650, 110, 0));
+    expect(canvas.style.display).toBe('none');
+    resolveOld(snapshot());
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('none');
+    polls.shift()!();
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('block');
+    windowEvents.dispatchEvent(new MenuKeyboardEvent('Escape'));
+    expect(canvas.style.display).toBe('none');
+    polls.shift()!();
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('block');
+    menus!.dispose();
+  });
+});
 
 const fallback: UiAssets = { cameo: () => null, caption: () => null, chrome: () => null, cursor: () => null };
 const chrome: ChromeAssets = {

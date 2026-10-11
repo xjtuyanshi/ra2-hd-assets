@@ -15,6 +15,7 @@ import {
 import type { VmAttachResult, VmPointerState, VmShell } from './vmShell';
 import type { GameVmCallbacks } from '../app/session/runtimeEvents';
 import type { GameResolution } from '../games/resolution';
+import type { MenuSnapshot } from '../vm86/menuSnapshot';
 
 const PROBE_TIMEOUT_MS = 3000;
 const REQUEST_TIMEOUT_MS = 10000;
@@ -214,6 +215,10 @@ export class WorkerVmClient implements VmShell {
     return this.request((requestId) => ({ type: 'state', kind: 'pointer', requestId }));
   }
 
+  async getMenuSnapshot(): Promise<MenuSnapshot | null> {
+    return this.request((requestId) => ({ type: 'menu-snapshot', requestId }));
+  }
+
   async setGameSpeedFlag(value: number): Promise<number | null> {
     return this.request((requestId) => ({ type: 'guest-speed-flag', value, requestId }));
   }
@@ -387,6 +392,7 @@ export class WorkerVmClient implements VmShell {
         break;
       case 'game-performance-reply':
       case 'command-state-reply':
+      case 'menu-snapshot-reply':
       case 'diagnostics-reply':
       case 'state-reply':
         this.resolveRequest(message.requestId, message.value);
