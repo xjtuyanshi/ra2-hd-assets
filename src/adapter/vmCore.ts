@@ -60,6 +60,9 @@ import type { VmExecutionProbe } from '../vm86/diagnostics';
 import type { VmDiagnosticAction, VmDiagnostics, VmUsage } from './vmDiagnostics';
 
 const DEFAULT_GUEST_MEMORY_SIZE = 128 * 1024 * 1024;
+type PagePointer = Awaited<
+  ReturnType<NonNullable<NonNullable<GameSource['game']['runtimeHooks']>['preparePagePointer']>>
+>;
 /** Recording sample interval: v86 has no per-write hook, so modification counts approximate sampling windows, incrementing once per window. */
 const MEM_RECORD_SAMPLE_MS = 500;
 /** Tracked-address limit: bound the table for frequently changing heap/stack regions; after the limit, increment only existing entries. */
@@ -100,6 +103,8 @@ export interface VmCorePlatform {
   startupPage?: string;
   /** HD bridge opt-in: install the game's inert native overlay passthrough patches (GameRuntimeHooks). */
   renderPassthrough?: boolean;
+  /** A validated page atlas owns presentation; unsupported game hooks retain native drawing. */
+  pageCursor?: boolean;
   /** Fetch boot.bin firmware bytes with matching main-thread and Worker semantics. */
   fetchBytes(url: string): Promise<Uint8Array>;
   /** Frame emission scheduling: coalesce with rAF on the main thread; emit directly in Workers since postMessage is asynchronous. */
@@ -134,6 +139,7 @@ export class VmCore {
   private lastCallStack: { key: string; stack: number; returnAddress: number } | null = null;
   private readonly pendingFileWrites = new Set<Promise<void>>();
   private pendingFileWriteError: Error | null = null;
+  private fileDeleteResult: { path: string; error: number } | null = null;
   private gameClockRate = 1;
   private frameReader: Promise<GameFrameReader | null> | null = null;
   private executableHash: Promise<string> | null = null;
@@ -142,6 +148,8 @@ export class VmCore {
   private commandStateReader: Promise<GameCommandStateReader | null> | null = null;
   /** Control of the game's native overlay passthrough patches; null unless the platform opted in and they installed. */
   private renderPassthrough: RenderPassthroughControl | null = null;
+  private pagePointer: PagePointer = null;
+  private lastPointer: import('../vm86/win32').VmFrame['pointer'] = null;
   private readonly gamePerformance = new GamePerformanceMeter();
   /**
    * Accounting of this thread's time for development telemetry, created by the first `usage` diagnostics request
@@ -174,6 +182,7 @@ export class VmCore {
     }
   };
   private lastShellPageTitle = '';
+  private moviePlaying = false;
 
   constructor(
     private readonly callbacks: GameVmCallbacks,
@@ -265,6 +274,12 @@ export class VmCore {
       emulator.write_memory(staging.subarray(HYPERCALL_STACK, stubNext), HYPERCALL_STACK);
       emulator.write_memory(staging.subarray(image.imageBase, image.imageBase + image.sizeOfImage), image.imageBase);
       game.runtimeHooks?.prepareImage?.(emulator);
+      if (this.platform.pageCursor && game.runtimeHooks?.preparePagePointer) {
+        this.executableHash ??= import('../utils/sha256').then(({ sha256Hex }) =>
+          sha256Hex(this.source.executableBytes),
+        );
+        this.pagePointer = await game.runtimeHooks.preparePagePointer(emulator, await this.executableHash);
+      }
       // Startup patches own the static-stub tail after the import stubs, below the VGA window (see RESERVE_LIMIT).
       const reserve = (size: number): number => {
         const address = stubNext;
@@ -325,6 +340,11 @@ export class VmCore {
           game.fastFileMirrorTop === undefined ? undefined : Math.min(game.fastFileMirrorTop, guestMemoryBytes),
         fastFileMirrorFiles: game.fastFileMirrorFiles,
         onFrame: (frame) => {
+          if (this.pagePointer) {
+            const pointer = this.pagePointer.read(frame.width, frame.height);
+            if (pointer !== undefined) this.lastPointer = pointer;
+            frame.pointer = this.lastPointer;
+          }
           this.hasPresentedFrame = true;
           this.presentedFrames++;
           this.callbacks.onFrame?.(frame);
@@ -341,6 +361,7 @@ export class VmCore {
         // Shared by Workers and main-thread fallback; expose only the original campaign speed control without changing speed or the clock.
         commandLineArguments: game.commandLineArguments,
         onFileWrite: (path, bytes) => this.queueFileWrite(path, bytes),
+        onFileDelete: (path) => (this.fileDeleteResult?.path === path ? this.fileDeleteResult.error : 5),
         driveTypes: game.driveTypes,
       });
       let linkedEntry = image.entry;
@@ -427,7 +448,9 @@ export class VmCore {
     return this.gamePerformance.sample(
       counters,
       performance.now(),
-      this.currentPhase === 'running' && this.shim?.inspectShellPageTitle() === '',
+      this.currentPhase === 'running' &&
+        this.shim?.inspectShellPageTitle() === '' &&
+        !this.shim.inspectFullSizeDialogVisible(),
     );
   }
 
@@ -440,8 +463,8 @@ export class VmCore {
     const emulator = this.emulator;
     const create = this.source.game.runtimeHooks?.createRenderStateReader;
     if (!emulator || !this.image || !create || this.currentPhase !== 'running') return null;
-    // A shell page (main menu, in-game options, score screen) owns the screen: the battlefield is not what is shown.
-    if (this.shim?.inspectShellPageTitle() !== '') return null;
+    // Menus and full-size dialogs own the screen, including confirmations without a shell title control.
+    if (this.shim?.inspectShellPageTitle() !== '' || this.shim.inspectFullSizeDialogVisible()) return null;
     const pending = (this.renderStateReader ??= (async () => {
       this.executableHash ??= import('../utils/sha256').then(({ sha256Hex }) => sha256Hex(this.source.executableBytes));
       const hash = await this.executableHash;
@@ -466,13 +489,13 @@ export class VmCore {
 
   /**
    * Practice sessions (dev only): the local player's orders, read from guest memory through a view and never written.
-   * Created lazily like the render-state reader; a shell page (menu, options, score screen) yields null.
+   * Created lazily like the render-state reader; a shell page or full-size dialog yields null.
    */
   async getCommandState(): Promise<GameCommandState | null> {
     const emulator = this.emulator;
     const create = this.source.game.runtimeHooks?.createCommandStateReader;
     if (!emulator || !this.image || !create || this.currentPhase !== 'running') return null;
-    if (this.shim?.inspectShellPageTitle() !== '') return null;
+    if (this.shim?.inspectShellPageTitle() !== '' || this.shim.inspectFullSizeDialogVisible()) return null;
     const pending = (this.commandStateReader ??= (async () => {
       this.executableHash ??= import('../utils/sha256').then(({ sha256Hex }) => sha256Hex(this.source.executableBytes));
       const hash = await this.executableHash;
@@ -650,6 +673,9 @@ export class VmCore {
     this.hostYieldChannel?.port2.close();
     const emulator = this.emulator;
     const shim = this.shim;
+    this.pagePointer?.setDrawing(true);
+    this.pagePointer = null;
+    this.lastPointer = null;
     this.emulator = null;
     this.frameReader = null;
     this.renderStateReader = null;
@@ -775,6 +801,31 @@ export class VmCore {
         const sync = this.syncGuestFile(call.args[0]);
         if (sync) await sync;
       }
+      if (
+        (imported.key === 'KERNEL32.DLL!DeleteFileA' || imported.key === 'KERNEL32.DLL!DeleteFileW') &&
+        call.args[0]
+      ) {
+        const wide = imported.key.endsWith('W');
+        const rawPath = wide ? this.readWideString(call.args[0]) : this.readCString(call.args[0]);
+        const path = normalizeGuestPath(rawPath);
+        // A save close may still be persisting. Never let a late write recreate a file after successful removal.
+        await this.flushFiles();
+        const sync = this.syncGuestFile(call.args[0], wide);
+        if (sync) await sync;
+        let error = this.shim.inspectFileDeleteError(path);
+        if (!error) {
+          const result = this.source.files.remove ? await this.source.files.remove(rawPath) : 'read-only';
+          error = result === 'removed' ? 0 : result === 'missing' ? 2 : 5;
+          if (result !== 'read-only') {
+            this.rangePrefetch.clear();
+            // Removing a session override may reveal original input; only authoritative absence is cacheable.
+            if (result === 'missing') this.missingStaticGuestFiles.add(path);
+            else this.missingStaticGuestFiles.delete(path);
+          }
+        }
+        this.fileDeleteResult = { path, error };
+      }
+
       // Structured storage opens a UTF-16 path directly, without a preceding CreateFileA.
       // Wait for browser-backed saves on the first open, just like ordinary file APIs.
       if (imported.key === 'OLE32.DLL!StgOpenStorage' && call.args[0]) {
@@ -804,6 +855,12 @@ export class VmCore {
 
       const result = this.shim.dispatch(call);
       const shellPageTitle = this.shim.inspectShellPageTitle();
+      // The shim reports decoder lifetime while a visible menu retains input ownership.
+      const playing = this.shim.inspectMoviePlayback();
+      if (playing !== this.moviePlaying) {
+        this.moviePlaying = playing;
+        this.callbacks.onMoviePlayback?.(playing);
+      }
       if (shellPageTitle !== this.lastShellPageTitle) {
         this.lastShellPageTitle = shellPageTitle;
         this.callbacks.onShellPage?.(shellPageTitle);
@@ -860,6 +917,7 @@ export class VmCore {
         : '';
       this.status('error', `${message}${diagnostic}`);
     } finally {
+      this.fileDeleteResult = null;
       if (usage) {
         usage.guestWaitMs += waitedMs;
         usage.hostCallMs += performance.now() - startedAt - waitedMs;

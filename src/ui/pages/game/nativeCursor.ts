@@ -12,12 +12,15 @@ interface AtlasRect {
 export async function createNativeCursor(screen: HTMLCanvasElement, base = '/hd-cache/_ui/cursor') {
   const response = await fetch(`${base}/cursor.json`);
   if (!response.ok) return null;
-  const manifest = (await response.json()) as { version: number; file?: string; frames: AtlasRect[] };
+  const manifest = (await response.json()) as { version: number; file?: string; scale?: number; frames: AtlasRect[] };
+  const scale = manifest.scale ?? 1;
   if (
     manifest.version !== 1 ||
     !Array.isArray(manifest.frames) ||
     !manifest.frames.length ||
     manifest.frames.length > 4096 ||
+    !Number.isInteger(scale) ||
+    scale < 1 ||
     !/^[a-z0-9_-]+\.png$/i.test(manifest.file ?? 'cursor.png')
   )
     return null;
@@ -33,6 +36,8 @@ export async function createNativeCursor(screen: HTMLCanvasElement, base = '/hd-
         r.y >= 0 &&
         r.width > 0 &&
         r.height > 0 &&
+        r.width % scale === 0 &&
+        r.height % scale === 0 &&
         r.x + r.width <= bitmap.width &&
         r.y + r.height <= bitmap.height,
     )
@@ -49,7 +54,7 @@ export async function createNativeCursor(screen: HTMLCanvasElement, base = '/hd-
     pointerEvents: 'none',
     zIndex: '100',
     display: 'none',
-    imageRendering: 'pixelated',
+    imageRendering: scale > 1 ? 'auto' : 'pixelated',
     transformOrigin: '0 0',
   });
   screen.parentElement!.appendChild(canvas);
@@ -78,6 +83,9 @@ export async function createNativeCursor(screen: HTMLCanvasElement, base = '/hd-
     }
     const width = rect?.width ?? system!.width,
       height = rect?.height ?? system!.height;
+    const artScale = rect ? scale : 1;
+    const logicalWidth = width / artScale,
+      logicalHeight = height / artScale;
     const hx = pointer?.hotspotX ?? system!.hotspotX,
       hy = pointer?.hotspotY ?? system!.hotspotY;
     const key = pointer ? `s:${pointer.frame}` : 'w';
@@ -97,12 +105,12 @@ export async function createNativeCursor(screen: HTMLCanvasElement, base = '/hd-
     const box = currentCanvasRect(screen);
     const sx = box.width / frame.width,
       sy = box.height / frame.height;
-    canvas.style.width = `${width * sx}px`;
-    canvas.style.height = `${height * sy}px`;
+    canvas.style.width = `${logicalWidth * sx}px`;
+    canvas.style.height = `${logicalHeight * sy}px`;
     canvas.style.transform = `translate(${clientX - hx * sx}px, ${clientY - hy * sy}px)`;
     const left = clientX - hx * sx,
       top = clientY - hy * sy;
-    canvas.style.clipPath = `inset(${Math.max(0, box.top - top)}px ${Math.max(0, left + width * sx - box.left - box.width)}px ${Math.max(0, top + height * sy - box.top - box.height)}px ${Math.max(0, box.left - left)}px)`;
+    canvas.style.clipPath = `inset(${Math.max(0, box.top - top)}px ${Math.max(0, left + logicalWidth * sx - box.left - box.width)}px ${Math.max(0, top + logicalHeight * sy - box.top - box.height)}px ${Math.max(0, box.left - left)}px)`;
     canvas.style.display = 'block';
     screen.style.setProperty('cursor', 'none', 'important');
   };

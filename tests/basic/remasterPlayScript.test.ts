@@ -25,6 +25,7 @@ describe.skipIf(process.platform === 'win32')('scripts/remaster/play.sh', () => 
       'hd-vlook': 'remaster',
       'hd-vproj': 'vehicles-hd',
       'hd-ui': '1',
+      sr: '1',
       resolution: 'display',
       'game-speed': '3',
       'start-page': 'skirmish',
@@ -35,9 +36,9 @@ describe.skipIf(process.platform === 'win32')('scripts/remaster/play.sh', () => 
     expect(parseResolutionChoice(url.searchParams.get('resolution'), true)).toBe(DISPLAY_RESOLUTION);
   });
 
-  it('opens the original picture at exact pixels, at the main menu, on request', () => {
+  it('opens the original main-menu picture with spatial reconstruction on request', () => {
     const url = address(['--original', '--menu']);
-    expect(Object.fromEntries(url.searchParams)).toEqual({ resolution: 'display', 'game-speed': '3' });
+    expect(Object.fromEntries(url.searchParams)).toEqual({ resolution: 'display', 'game-speed': '3', sr: '1' });
   });
 
   it('opens the practice lesson list with the HD look and gives the backquote key to the game', () => {

@@ -59,6 +59,11 @@ Every integration edit in C source is marked `Native-host bridge`.
   Hook installation and teardown classify game-local modules by both drive and
   directory, so mapping a game folder to a drive root does not include system
   DLLs on another drive. Explicit upstream system-module exceptions are retained.
+- `src/hook.c`: retain real `BINKW32.DLL` `_BinkOpen@8` / `_BinkClose@4`
+  stdcall exports and observe their successful handle lifetimes through agent
+  wrappers. The wrappers delegate without tracking when the agent is not
+  configured. Existing IAT teardown restores the original imports. No film
+  clock, decoder, resource or game input is changed.
 - `src/mouse.c`: suppress physical mouse lock/unlock work while virtual input is
   active, so it does not move or capture the real cursor.
 - `src/wndproc.c`: dispatch tagged, bounded remote input on the window's game

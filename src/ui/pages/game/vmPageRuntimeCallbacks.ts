@@ -14,7 +14,7 @@ import type { FramePresenter } from '../../../graphics/framePresenter';
 import { measureRa2BattlefieldFrame, sampleVmFrameHash } from './debug/frameProbes';
 import { formatNetworkStatus } from './networkStatus';
 import { activeCheatGameForPhase } from './cheatGuides';
-import { gameRunning, networkStatus } from './state/uiState';
+import { gameRunning, networkStatus, movieSkip } from './state/uiState';
 import type { RuntimeToolbar } from './runtimeToolbar';
 import type { VmFrame } from '../../../vm86/win32';
 
@@ -81,6 +81,7 @@ export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameV
     },
     onStatus(next) {
       if (next.phase !== 'running') {
+        movieSkip.set(null);
         effects.stop();
       }
       setStatus(next);
@@ -92,6 +93,22 @@ export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameV
       // Switch the client shell with game state: running fills the window with gameplay; menus restore the content page and navigation bar.
       gameRunning.set(next.phase === 'running');
       if (next.phase === 'exited') queueMicrotask(() => void onFinishExited(next.detail));
+    },
+    onMoviePlayback(playing) {
+      canvas.dataset.moviePlaying = String(playing);
+      movieSkip.set(
+        playing
+          ? () => {
+              const vm = getVm();
+              if (!vm || canvas.dataset.moviePlaying !== 'true') return;
+              vm.setKeyState(27, true);
+              vm.postMessage(0x100, 27, 0x00010001);
+              vm.setKeyState(27, false);
+              vm.postMessage(0x101, 27, 0xc0010001);
+              canvas.focus();
+            }
+          : null,
+      );
     },
     onShellPage(title) {
       if (title) canvas.dataset.shellPage = title;

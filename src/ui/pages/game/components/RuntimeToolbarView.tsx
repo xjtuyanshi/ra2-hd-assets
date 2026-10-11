@@ -213,6 +213,9 @@ export function RuntimeToolbarView({
   const [cheats, setCheats] = useState(false);
   const [probe, setProbe] = useState(false);
   const [quickStart, setQuickStart] = useState(false);
+  // The native page attaches to an already-running process; startup-page hooks
+  // are owned by the VM route and cannot open native skirmish setup.
+  const quickStartAvailable = new URLSearchParams(window.location.search).get('backend') !== 'native';
   const [volume, setVolume] = useState(() => {
     try {
       const raw = localStorage.getItem('vm-master-volume');
@@ -409,15 +412,17 @@ export function RuntimeToolbarView({
           <input id="vm-volume-value" type="text" disabled readOnly value={`${volume}%`} aria-label={t('主音量读数')} />
         </div>
       </div>
-      <button
-        id="vm-quick-start"
-        className="toolbar-button"
-        type="button"
-        disabled={!!busy || !model.mapsAvailable || !callbacks.onQuickStart}
-        onClick={() => setQuickStart(true)}
-      >
-        {t('快速开局…')}{' '}
-      </button>
+      {quickStartAvailable && (
+        <button
+          id="vm-quick-start"
+          className="toolbar-button"
+          type="button"
+          disabled={!!busy || !model.mapsAvailable || !callbacks.onQuickStart}
+          onClick={() => setQuickStart(true)}
+        >
+          {t('快速开局…')}{' '}
+        </button>
+      )}
       {callbacks.onCollectPerformance && (
         <PerformanceDiagnostics collect={callbacks.onCollectPerformance} available={model.mapsAvailable} />
       )}

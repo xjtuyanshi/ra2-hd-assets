@@ -32,12 +32,21 @@ export interface ChromeManifest {
    * height); one that reaches lower is drawn only at the art's own frame height.
    */
   overlays?: { file: string; rect: Rect; anchor: 'sidebar' | 'commandBar' }[];
+  /** Fixed ends and a cropped repeating rail; dimensions are frame pixels, never stretched to fit the live width. */
+  commandBar?: {
+    scale: number;
+    left: { frame: number; file: string }[];
+    middle: string;
+    right: string;
+  };
 }
 
 export interface CursorManifest {
   version: 1;
   /** Relative atlas file; defaults to cursor.png. Frames include their transparent SHP bounding-box padding. */
   file?: string;
+  /** Atlas pixels per frame pixel; hotspots and pointer coordinates remain in frame pixels. Defaults to 1. */
+  scale?: number;
   frames: Rect[];
 }
 
@@ -52,6 +61,12 @@ export interface ChromeAssets {
   radar?: NonNullable<ChromeManifest['radar']> & { bitmap: ImageBitmap };
   controlImages?: (Omit<NonNullable<ChromeManifest['controlImages']>[number], 'file'> & { bitmap: ImageBitmap })[];
   overlays?: (Omit<NonNullable<ChromeManifest['overlays']>[number], 'file'> & { bitmap: ImageBitmap })[];
+  commandBar?: {
+    scale: number;
+    left: { frame: number; bitmap: ImageBitmap }[];
+    middle: ImageBitmap;
+    right: ImageBitmap;
+  };
 }
 
 /** Place an anchor's pieces without resampling; incompatible scales retain per-piece drawing. */
@@ -132,7 +147,7 @@ export interface UiAssets {
   cameo(id: string, image: string | null): ImageBitmap | null;
   caption(id: string, image: string | null): string | null;
   chrome(side: number): ChromeAssets | null;
-  cursor(frame: number): { bitmap: ImageBitmap; rect: Rect } | null;
+  cursor(frame: number): { bitmap: ImageBitmap; rect: Rect; scale?: number } | null;
 }
 
 /** One UI controller owns this cache and closes its bitmaps, including late results, on disposal. */
@@ -145,7 +160,7 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
   let indexStarted = false;
   let disposed = false;
   let cursorStarted = false;
-  let cursor: { bitmap: ImageBitmap; frames: Rect[] } | null = null;
+  let cursor: { bitmap: ImageBitmap; frames: Rect[]; scale: number } | null = null;
 
   // Both failures and 404s are cached for this controller's lifetime; no per-frame retry loops.
   const json = async <T>(path: string): Promise<T | null> => {
@@ -236,6 +251,41 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
       typeof file === 'string' && /^(?:[a-z0-9_-]+\/)?[a-z0-9_@-]+\.png$/i.test(file)
         ? bitmap(`${dir}/${file}`)
         : Promise.resolve(null);
+    const bar = manifest.commandBar;
+    if (
+      bar &&
+      Number.isInteger(bar.scale) &&
+      bar.scale > 0 &&
+      Array.isArray(bar.left) &&
+      bar.left.length &&
+      bar.left.every((entry) => entry && Number.isInteger(entry.frame) && entry.frame >= 0) &&
+      new Set(bar.left.map((entry) => entry.frame)).size === bar.left.length
+    ) {
+      void Promise.all([...bar.left.map((entry) => art(entry.file)), art(bar.middle), art(bar.right)]).then(
+        (loaded) => {
+          const middle = loaded[bar.left.length],
+            right = loaded[bar.left.length + 1];
+          const fits =
+            loaded.every(
+              (image) =>
+                image &&
+                image.width > 0 &&
+                image.height > 0 &&
+                image.width % bar.scale === 0 &&
+                image.height % bar.scale === 0,
+            ) &&
+            loaded.every((image) => image!.height === middle!.height) &&
+            bar.left.every((_, i) => loaded[i]!.width === loaded[0]!.width);
+          if (!disposed && fits)
+            assets.commandBar = {
+              scale: bar.scale,
+              left: bar.left.map(({ frame }, i) => ({ frame, bitmap: loaded[i]! })),
+              middle: middle!,
+              right: right!,
+            };
+        },
+      );
+    }
     const images = manifest.controlImages;
     if (Array.isArray(images) && images.length && images.length <= 64) {
       const keys = new Set(images.map((entry) => `${entry?.id}:${entry?.frame}`));
@@ -290,6 +340,9 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
         cursorStarted = true;
         void json<CursorManifest>(`${base}/cursor/cursor.json`).then(async (manifest) => {
           if (disposed || manifest?.version !== 1 || !Array.isArray(manifest.frames) || !manifest.frames.length) return;
+          const scale = manifest.scale ?? 1;
+          if (!Number.isInteger(scale) || scale < 1 || !/^[a-z0-9_-]+\.png$/i.test(manifest.file ?? 'cursor.png'))
+            return;
           const image = await bitmap(`${base}/cursor/${manifest.file ?? 'cursor.png'}`);
           if (disposed || !image) return;
           if (
@@ -302,16 +355,18 @@ export function createUiAssets(base = '/hd-cache/_ui'): UiAssets & { dispose(): 
                 r.y >= 0 &&
                 r.width > 0 &&
                 r.height > 0 &&
+                r.width % scale === 0 &&
+                r.height % scale === 0 &&
                 r.x + r.width <= image.width &&
                 r.y + r.height <= image.height,
             )
           ) {
-            cursor = { bitmap: image, frames: manifest.frames };
+            cursor = { bitmap: image, frames: manifest.frames, scale };
           }
         });
       }
       const rect = Number.isInteger(frame) && frame >= 0 ? cursor?.frames[frame] : null;
-      return cursor && rect ? { bitmap: cursor.bitmap, rect } : null;
+      return cursor && rect ? { bitmap: cursor.bitmap, rect, scale: cursor.scale } : null;
     },
     cameo(id, image) {
       const entry = cameoEntry(id, image);

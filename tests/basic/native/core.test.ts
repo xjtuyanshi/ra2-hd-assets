@@ -48,6 +48,7 @@ class FakeAgent implements NativeWebSocket {
   holdInput = false;
   pendingInput: NativePacket[] = [];
   modal = false;
+  moviePlaying: boolean | null | undefined;
   initial = new Uint8Array(NATIVE_PAGE_SIZE);
   revisionSupport = false;
   subscriptionRevision = 0;
@@ -94,6 +95,7 @@ class FakeAgent implements NativeWebSocket {
         // Legacy agents ignore request flags and still return full metadata.
         json({
           modal: this.modal,
+          moviePlaying: this.moviePlaying,
           x: 0,
           y: 0,
           lastMessage: 0,
@@ -897,6 +899,30 @@ describe('native core session and presenter lifecycle', () => {
     expect(await core.getRenderState()).toBeNull();
     agent.modal = false;
     expect((await core.getRenderState())?.frame).toBe(7);
+  });
+  it('attaches during a real-film signal without a logic mirror and forwards only playback transitions', async () => {
+    const playback = vi.fn();
+    const { core, agent } = setup({ onMoviePlayback: playback });
+    agent.moviePlaying = true;
+    agent.mirrorOnHook = false;
+    const start = core.start();
+    agent.hello();
+    await start;
+    expect(await core.getRenderState()).toBeNull();
+    expect(await core.getCommandState()).toBeNull();
+    expect(playback.mock.calls).toEqual([[true]]);
+    // A menu's animated background is also Bink, but its dialog owns Escape.
+    agent.modal = true;
+    expect(await core.getRenderState()).toBeNull();
+    expect(playback.mock.calls).toEqual([[true], [false]]);
+    agent.modal = false;
+    await core.getCommandState();
+    expect(playback.mock.calls).toEqual([[true], [false], [true]]);
+    agent.moviePlaying = false;
+    agent.mirror(1, [{ address: 0x1000, bytes: agent.initial }], 2);
+    expect((await core.getRenderState())?.frame).toBe(7);
+    await core.getCommandState();
+    expect(playback.mock.calls).toEqual([[true], [false], [true], [false]]);
   });
   it('requests lightweight modal checks for frequent readers and accepts legacy full-metadata replies', async () => {
     const { core, agent } = await started();

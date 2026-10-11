@@ -731,6 +731,8 @@ export function createYrSidebarReader(
         radarActive: radarStage === 2 || radarStage === 3 || (radarStage === 1 && activation === 1),
         controls: controls(m, rect(m, m.u32(YR_SIDEBAR.commandBar))),
         tabFrames: Array.from({ length: 4 }, (_, i) => gadgetFrame(m, YR_SIDEBAR.tabs + i * 0x60)),
+        // Tab::Draw 0x6D0C35/0x6D0C5B draws LENDCAP.SHP with frame 0, independent of toolbar expansion/gadgets.
+        commandBarLeftFrame: 0,
         modes: { repair: !!m.u8(S + 0x11b0), sell: !!m.u8(S + 0x11b1) },
         labels: { ready: label(m, 'TXT_READY'), hold: label(m, 'TXT_HOLD') },
         pointer: pointer(m, frameWidth, frameHeight),

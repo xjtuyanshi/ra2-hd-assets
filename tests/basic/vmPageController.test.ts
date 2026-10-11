@@ -119,6 +119,16 @@ describe('VmSessionController asynchronous lifecycle', () => {
     expect(firstShell.destroyCalls).toBe(1);
   });
 
+  it('ignores movie transitions from a replaced session', () => {
+    let current = true;
+    const onMoviePlayback = vi.fn();
+    const callbacks = guardVmCallbacks({ onMoviePlayback }, () => current);
+    callbacks.onMoviePlayback?.(true);
+    current = false;
+    callbacks.onMoviePlayback?.(false);
+    expect(onMoviePlayback).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
   it('does not consume frames from an invalidated page generation', () => {
     let current = true;
     const onFrame = vi.fn();

@@ -37,8 +37,21 @@ export function skipYrStartupMovies(memory: GuestMemory): boolean {
  */
 const YR_HD_BRIDGE_HOOKS: Pick<
   GameRuntimeHooks,
-  'createRenderStateReader' | 'createCommandStateReader' | 'prepareRenderPassthrough'
+  'createRenderStateReader' | 'createCommandStateReader' | 'prepareRenderPassthrough' | 'preparePagePointer'
 > = {
+  async preparePagePointer(memory, hash) {
+    if (import.meta.env.DEV) {
+      const { YR_STARTUP_PAGE_HASH } = await import('./startupPage');
+      if (hash !== YR_STARTUP_PAGE_HASH) return null;
+      const { readYrVmPointer, setYrNativePointerDrawing } = await import('./nativeCursor');
+      if (!setYrNativePointerDrawing(memory, false)) return null;
+      return {
+        read: (width, height) => readYrVmPointer(memory, width, height),
+        setDrawing: (enabled) => setYrNativePointerDrawing(memory, enabled),
+      };
+    }
+    return null;
+  },
   async createRenderStateReader(memory, size, hash) {
     if (import.meta.env.DEV) {
       const { createYrRenderStateReader } = await import('./renderState');

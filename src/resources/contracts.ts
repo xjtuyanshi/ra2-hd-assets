@@ -1,3 +1,5 @@
+export type GameFileRemoveResult = 'removed' | 'missing' | 'read-only';
+
 export interface GameFileProvider {
   readonly label: string;
   /** Invalidate dynamic directories/persistence indexes without affecting this provider's pending-write snapshots. */
@@ -18,6 +20,8 @@ export interface GameFileProvider {
   /** Read a specified range of a large file, fetching sparse MIX pages on demand during movie playback. */
   readRange?(path: string, offset: number, length: number): Promise<Uint8Array | null>;
   write(path: string, bytes: Uint8Array): Promise<void>;
+  /** Remove only owned session/writeback bytes. Original resources remain untouched; unsupported providers deny removal. */
+  remove?(path: string): Promise<GameFileRemoveResult>;
   flush(): Promise<void>;
   /** List immediate child names with original case; an empty string denotes the root. Return null if unsupported. */
   list(directory: string): Promise<string[] | null>;

@@ -2,13 +2,20 @@ import type { GameFrameReader } from './performance';
 import type { RenderPassthroughControl } from './renderPassthrough';
 import type { CreateGameCommandStateReader } from './commandState';
 import type { CreateGameRenderStateReader } from './renderState';
-import type { GuestMemory } from '../vm86/win32';
+import type { GuestMemory, VmFrame } from '../vm86/win32';
+
+export interface GamePagePointer {
+  read(width: number, height: number): VmFrame['pointer'];
+  setDrawing(enabled: boolean): boolean;
+}
 
 /**
  * Game runtime extensions callable by the VM core.
  * Keep fixed addresses and game semantics in each game's directory; the adapter sees only these optional capabilities.
  */
 export interface GameRuntimeHooks {
+  /** Opt-in page cursor: validate the executable, preserve input/shape ownership, and suppress only the final native blit. */
+  preparePagePointer?(memory: GuestMemory, hash: string): Promise<GamePagePointer | null>;
   /** Create a read-only native frame counter for explicit performance sampling; null for unsupported versions. */
   createFrameReader?(memory: GuestMemory, hash: string): GameFrameReader | null;
   /**

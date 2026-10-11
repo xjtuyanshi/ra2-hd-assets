@@ -1,4 +1,4 @@
-import type { GameFileProvider } from '../contracts';
+import type { GameFileProvider, GameFileRemoveResult } from '../contracts';
 import { normalizeGuestPath } from '../../vm86/paths';
 
 /** Map a parent subdirectory to an independent game root, hiding the parent from the VM. */
@@ -44,6 +44,10 @@ export class ScopedGameFileProvider implements GameFileProvider {
 
   write(path: string, bytes: Uint8Array): Promise<void> {
     return this.parent.write(this.path(path), bytes);
+  }
+
+  remove(path: string): Promise<GameFileRemoveResult> {
+    return this.parent.remove?.(this.path(path)) ?? Promise.resolve('read-only');
   }
 
   flush(): Promise<void> {

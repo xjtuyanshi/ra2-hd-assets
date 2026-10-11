@@ -8,7 +8,7 @@ afterEach(() => {
   for (const cursor of active.splice(0)) cursor.destroy();
   vi.unstubAllGlobals();
 });
-function setup() {
+function setup(scale = 1) {
   let box = { left: 10, top: 20, width: 1600, height: 900 };
   const values = new Map([['cursor', 'crosshair']]),
     priorities = new Map([['cursor', 'important']]);
@@ -51,7 +51,7 @@ function setup() {
       disconnect = disconnect;
     },
   );
-  const bitmap = { width: 110, height: 43, close: vi.fn() };
+  const bitmap = { width: 110 * scale, height: 43 * scale, close: vi.fn() };
   vi.stubGlobal(
     'createImageBitmap',
     vi.fn(async () => bitmap),
@@ -64,9 +64,10 @@ function setup() {
             ok: true,
             json: async () => ({
               version: 1,
+              scale,
               frames: [
-                { x: 0, y: 0, width: 55, height: 43 },
-                { x: 55, y: 0, width: 55, height: 43 },
+                { x: 0, y: 0, width: 55 * scale, height: 43 * scale },
+                { x: 55 * scale, y: 0, width: 55 * scale, height: 43 * scale },
               ],
             }),
           }
@@ -101,21 +102,25 @@ function setup() {
 }
 
 describe('native page cursor presentation ownership', () => {
-  it('places the exact hotspot on the browser pointer synchronously at unequal x/y scales and clips the frame edge', async () => {
-    const f = setup(),
-      cursor = (await createNativeCursor(f.screen as unknown as HTMLCanvasElement))!;
-    active.push(cursor);
-    expect(f.values.get('cursor')).toBe('none');
-    cursor.update(f.frame);
-    f.pointer('pointermove');
-    expect(f.overlay.style.transform).toBe('translate(446px, 288.5px)');
-    expect(f.overlay.style.width).toBe('110px');
-    expect(f.overlay.style.height).toBe('64.5px');
-    f.pointer('pointerdown', 10, 20);
-    expect(f.overlay.style.transform).toBe('translate(-44px, -11.5px)');
-    expect(f.overlay.style.clipPath).toBe('inset(31.5px 0px 0px 54px)');
-    expect(f.ctx.drawImage).toHaveBeenCalledOnce();
-  });
+  it.each([1, 2])(
+    'places a %sx atlas at its unchanged hotspot and logical size, including the clipped edge',
+    async (scale) => {
+      const f = setup(scale),
+        cursor = (await createNativeCursor(f.screen as unknown as HTMLCanvasElement))!;
+      active.push(cursor);
+      expect(f.values.get('cursor')).toBe('none');
+      cursor.update(f.frame);
+      f.pointer('pointermove');
+      expect(f.overlay.style.transform).toBe('translate(446px, 288.5px)');
+      expect(f.overlay.style.width).toBe('110px');
+      expect(f.overlay.style.height).toBe('64.5px');
+      expect([f.overlay.width, f.overlay.height]).toEqual([55 * scale, 43 * scale]);
+      f.pointer('pointerdown', 10, 20);
+      expect(f.overlay.style.transform).toBe('translate(-44px, -11.5px)');
+      expect(f.overlay.style.clipPath).toBe('inset(31.5px 0px 0px 54px)');
+      expect(f.ctx.drawImage).toHaveBeenCalledOnce();
+    },
+  );
 
   it('uses the actual hardware cursor RGBA and hotspot instead of a stock arrow', async () => {
     const f = setup(),

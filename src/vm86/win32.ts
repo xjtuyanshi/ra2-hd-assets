@@ -199,6 +199,8 @@ export interface Win32ShimOptions {
   textRasterizer?: Win32TextRasterizer;
   /** Notify the host to persist on writable-file close or explicit flush; bytes is an independent snapshot. */
   onFileWrite?: (path: string, bytes: Uint8Array) => void;
+  /** Host removal completed before dispatch; return a Win32 error code, or zero after actual deletion. */
+  onFileDelete?: (path: string) => number;
   /** Actual executable name exposed by guest GetCommandLine/GetModuleFileName. */
   moduleName?: string;
   /** GetCommandLineA argument suffix, independent of the module path and never affecting GetModuleFileNameA. */

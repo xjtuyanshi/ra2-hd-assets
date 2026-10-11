@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import { DirectoryGameFileProvider } from '../../src/platform/browser/files/directory';
 import { HttpGameFileProvider } from '../../src/platform/browser/files/http';
+import { SessionGameFileProvider } from '../../src/platform/browser/files/sessionFiles';
 import { MemoryGameFileProvider } from '../../src/resources/providers/memory';
 import { ScopedGameFileProvider } from '../../src/resources/providers/scoped';
 import { listSavePaths } from '../../src/adapter/saveTransfer';
@@ -23,7 +24,7 @@ function expectBytes(actual: Uint8Array | null, expected: Uint8Array, label: str
 }
 
 /*
- * IndexedDB fake: implements only the open/create/get/put/getAllKeys operations used by HttpGameFileProvider.
+ * IndexedDB fake: implements only the open/create/get/put/delete/getAllKeys operations used by file providers.
  * Each script run gets a fresh database; providers using the same database name share a store.
  */
 
@@ -43,9 +44,12 @@ type FakeDatabase = {
     mode?: 'readonly' | 'readwrite',
   ): {
     oncomplete?: () => void;
+    onabort?: () => void;
+    error?: DOMException;
     objectStore(storeName: string): {
       get(key: string): FakeRequest<ArrayBuffer | undefined>;
       put(value: ArrayBuffer, key: string): FakeRequest<void>;
+      delete(key: string): FakeRequest<void>;
       getAllKeys(): FakeRequest<IDBValidKey[]>;
     };
   };
@@ -55,8 +59,8 @@ function asyncRequest<T>(result: T): FakeRequest<T> {
   return { result, error: null, onsuccess: null, onerror: null, onupgradeneeded: null };
 }
 
-function installFakeIndexedDb(): { getCalls: number; getAllKeysCalls: number } {
-  const metrics = { getCalls: 0, getAllKeysCalls: 0 };
+function installFakeIndexedDb(): { getCalls: number; getAllKeysCalls: number; abortDeletes: boolean } {
+  const metrics = { getCalls: 0, getAllKeysCalls: 0, abortDeletes: false };
   const databases = new Map<string, FakeDatabase>();
   const fakeIndexedDb = {
     open(name: string): FakeRequest<FakeDatabase> {
@@ -76,7 +80,11 @@ function installFakeIndexedDb(): { getCalls: number; getAllKeysCalls: number } {
   return metrics;
 }
 
-function createFakeDatabase(metrics: { getCalls: number; getAllKeysCalls: number }): FakeDatabase {
+function createFakeDatabase(metrics: {
+  getCalls: number;
+  getAllKeysCalls: number;
+  abortDeletes: boolean;
+}): FakeDatabase {
   const stores = new Map<string, Map<string, ArrayBuffer>>();
   return {
     stores,
@@ -111,6 +119,22 @@ function createFakeDatabase(metrics: { getCalls: number; getAllKeysCalls: number
               });
               return request;
             },
+            delete(key: string) {
+              const request = asyncRequest(undefined);
+              queueMicrotask(() => {
+                request.onsuccess?.();
+                queueMicrotask(() => {
+                  if (metrics.abortDeletes) {
+                    transaction.error = new DOMException('delete aborted', 'AbortError');
+                    transaction.onabort?.();
+                  } else {
+                    store.delete(key);
+                    transaction.oncomplete?.();
+                  }
+                });
+              });
+              return request;
+            },
             getAllKeys() {
               metrics.getAllKeysCalls++;
               const request = asyncRequest([...store.keys()]);
@@ -126,6 +150,69 @@ function createFakeDatabase(metrics: { getCalls: number; getAllKeysCalls: number
 }
 
 describe('HttpGameFileProvider（IndexedDB 持久化）', () => {
+  it('会话存档删除在事务提交后生效，跨实例不重现；原 HTTP 资源不可删除', async () => {
+    installFakeIndexedDb();
+    const previousFetch = globalThis.fetch;
+    const requests: string[] = [];
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.startsWith('/game/.list')) return new Response('["game.exe"]', { status: 200 });
+      if (url === '/game/game.exe') return new Response(new Uint8Array([1, 2]));
+      if (url === '/game/failed.sav') return new Response(null, { status: 500 });
+      return new Response(null, { status: 404 });
+    };
+    try {
+      const first = new HttpGameFileProvider();
+      const write = first.write('slot.sav', new Uint8Array());
+      const deletion = first.remove('SLOT.SAV');
+      await write;
+      expect(await deletion).toBe('removed');
+      expect(await first.read('slot.sav')).toBeNull();
+      expect(await first.list('')).toEqual(['game.exe']);
+      expect(first.hasKnownFile('slot.sav')).toBe(false);
+      const fresh = new HttpGameFileProvider();
+      expect(await fresh.read('slot.sav')).toBeNull();
+      expect(await fresh.remove('game.exe')).toBe('read-only');
+      expect(await fresh.remove('absent.sav')).toBe('missing');
+      await expect(fresh.remove('failed.sav')).rejects.toThrow('HTTP 500');
+      expect(await fresh.read('game.exe')).toEqual(new Uint8Array([1, 2]));
+      expect(requests.every((url) => url.startsWith('/game/'))).toBe(true);
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  });
+  it('删除事务在请求成功后中止仍失败，保留内存与持久字节并可重试', async () => {
+    const database = installFakeIndexedDb();
+    const provider = new HttpGameFileProvider();
+    await provider.write('slot.sav', new Uint8Array([7]));
+    database.abortDeletes = true;
+    await expect(provider.remove('slot.sav')).rejects.toThrow('delete aborted');
+    expect(await provider.read('slot.sav')).toEqual(new Uint8Array([7]));
+    expect(await new HttpGameFileProvider().read('slot.sav')).toEqual(new Uint8Array([7]));
+    database.abortDeletes = false;
+    expect(await provider.remove('slot.sav')).toBe('removed');
+  });
+  it('导入包原始文件不删除，当前写入和已持久化存档可删除', async () => {
+    installFakeIndexedDb();
+    const source = new Uint8Array([1]);
+    const session = new SessionGameFileProvider('package', new Map([['game.exe', source]]));
+    expect(await session.remove('game.exe')).toBe('read-only');
+    await session.write('game.exe', new Uint8Array([2]));
+    expect(await session.remove('game.exe')).toBe('removed');
+    expect(await session.read('game.exe')).toEqual(source);
+    const write = session.write('save.sav', new Uint8Array([3]));
+    const deletion = session.remove('save.sav');
+    await write;
+    expect(await deletion).toBe('removed');
+    expect(await session.read('save.sav')).toBeNull();
+    await session.write('persisted.sav', new Uint8Array([4]));
+    const fresh = new SessionGameFileProvider('package', new Map());
+    expect(await fresh.remove('persisted.sav')).toBe('removed');
+    expect(await fresh.read('persisted.sav')).toBeNull();
+    expect(await new SessionGameFileProvider('package', new Map()).read('persisted.sav')).toBeNull();
+    expect(source).toEqual(new Uint8Array([1]));
+  });
   it('写后同实例读、flush 后跨实例读、缺失回退 HTTP、list 合并 IndexedDB 键', async () => {
     const idb = installFakeIndexedDb();
     const path = `Save/fs-smoke-${process.pid}.sav`;

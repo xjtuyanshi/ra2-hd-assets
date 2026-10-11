@@ -32,4 +32,6 @@ export interface GameVmCallbacks {
   onLogicFrame?: (count: number) => void;
   /** RA2/YR shell-title changes, such as GUI:MainMenu/CampaignMenu, for UI diagnostics and browser regressions. */
   onShellPage?: (title: string) => void;
+  /** Movie lifetime from decoder open/close calls, independent of menus and clocks. */
+  onMoviePlayback?: (playing: boolean) => void;
 }

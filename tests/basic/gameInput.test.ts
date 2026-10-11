@@ -68,6 +68,29 @@ function setup(search = '', locked = true) {
 }
 
 describe('桌面鼠标跟手性', () => {
+  it('keeps page cursor CSS ownership when web absolute input is installed after a warm frame', () => {
+    const h = setup('', false);
+    installed!.cleanup();
+    const setProperty = vi.fn();
+    Object.assign(h.canvas.style, {
+      getPropertyValue: () => 'none',
+      getPropertyPriority: () => 'important',
+      setProperty,
+    });
+    installed = installGameInput(
+      h.canvas as unknown as HTMLCanvasElement,
+      h.vm as unknown as VmShell,
+      false,
+      h.present,
+      () => ({ width: 800, height: 600 }),
+      { pageOwnsCursor: true },
+    );
+    expect(setProperty).not.toHaveBeenCalled();
+    h.pointer('pointerdown', { clientX: 27, clientY: 21 });
+    expect(installed.pointerPosition()).toEqual({ x: 27, y: 21 });
+    installed.cleanup();
+    expect(setProperty).not.toHaveBeenCalled();
+  });
   it('publishes detached read-only local coordinates before a coalesced guest move, with absolute/locked and resize support', () => {
     const h = setup('', false);
     expect(installed!.pointerPosition()).toBeNull();

@@ -2,7 +2,7 @@ import { SessionGameFileProvider } from '../platform/browser/files/sessionFiles'
 import { normalizeGuestPath } from '../vm86/paths';
 import { OverlayGameFileProvider } from '../resources/providers/overlay';
 import { ScopedGameFileProvider } from '../resources/providers/scoped';
-import { type GameFileProvider } from '../resources/contracts';
+import { type GameFileProvider, type GameFileRemoveResult } from '../resources/contracts';
 
 export interface ResourceLoadStatus {
   phase: 'loading' | 'complete' | 'error';
@@ -72,7 +72,7 @@ export class ProgressiveGameFileProvider extends SessionGameFileProvider {
     if (this.complete) return;
     const name = normalizeGuestPath(path);
     if (!this.files.has(name) && this.inventory.has(name)) this.loaded++;
-    if (!this.written.has(name)) this.files.set(name, bytes);
+    this.seedOriginalFile(name, bytes);
     this.pending.get(name)?.resolve();
     this.pending.delete(name);
     this.updateStatus(this.detail);
@@ -137,10 +137,15 @@ export class ProgressiveGameFileProvider extends SessionGameFileProvider {
     const name = normalizeGuestPath(path);
     if (!this.files.has(name) && this.inventory.has(name)) this.loaded++;
     this.written.add(name);
-    this.files.set(name, bytes.slice());
     this.pending.get(name)?.resolve();
     this.pending.delete(name);
     await super.write(path, bytes);
+  }
+  override async remove(path: string): Promise<GameFileRemoveResult> {
+    const name = normalizeGuestPath(path);
+    const result = await super.remove(path);
+    if (result === 'removed') this.written.delete(name);
+    return result === 'missing' && this.inventory.has(name) ? 'read-only' : result;
   }
   override async list(directory: string): Promise<string[]> {
     const prefix = normalizeGuestPath(directory);

@@ -2,7 +2,7 @@
 # Start the HD remaster for play: the development server of this checkout plus a browser on the HD page.
 #
 #   scripts/remaster/play.sh              HD picture, skirmish setup as the first page
-#   scripts/remaster/play.sh --original   the original picture at exact 2x pixels (no HD bridge)
+#   scripts/remaster/play.sh --original   the original picture with spatial reconstruction (no HD bridge)
 #   scripts/remaster/play.sh --menu       start at the game's main menu instead of the skirmish setup
 #   scripts/remaster/play.sh --train      practice lessons: the lesson list (docs/remaster/TRAINING.md); builds the
 #                                         practice scenarios below <main checkout>/gameres/s2x/play/train on first use
@@ -65,6 +65,8 @@ esac
 if [ "$mode" = hd ]; then
   hd_query="$(node "$here/scripts/remaster/play-options.mjs")" || exit 1
   query="$hd_query&$query"
+else
+  query="$query&sr=1"
 fi
 url="http://localhost:$port/?$query"
 if [ "$print" = 1 ]; then echo "$url"; exit 0; fi

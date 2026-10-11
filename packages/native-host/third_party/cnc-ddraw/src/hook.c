@@ -252,6 +252,15 @@ HOOKLIST g_hook_hooklist[] =
         }
     },
     {
+        /* Native-host bridge: observe real film lifetime without changing playback. */
+        "BINKW32.DLL",
+        {
+            { "_BinkOpen@8", (PROC)nh_movie_open, (PROC*)&nh_real_bink_open, HOOK_SKIP_2 },
+            { "_BinkClose@4", (PROC)nh_movie_close, (PROC*)&nh_real_bink_close, HOOK_SKIP_2 },
+            { "", NULL, NULL, 0 }
+        }
+    },
+    {
         "",
         {
             { "", NULL, NULL, 0 }
@@ -726,6 +735,15 @@ void hook_revert(HOOKLIST* hooks)
 
 void hook_init()
 {
+    /* Native-host bridge: LoadLibrary hooks revisit this when Bink loads later.
+     * Keep real exports before replacing the game imports; teardown uses the
+     * same existing hook table to restore them. */
+    HMODULE bink = GetModuleHandleA("BINKW32.DLL");
+    if (bink)
+    {
+        nh_real_bink_open = (nh_bink_open_proc)real_GetProcAddress(bink, "_BinkOpen@8");
+        nh_real_bink_close = (nh_bink_close_proc)real_GetProcAddress(bink, "_BinkClose@4");
+    }
     if (!g_hook_active)
     {
         if (g_config.hook == 4 && hook_got_ddraw_import(GetModuleHandleA(NULL), TRUE))

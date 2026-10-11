@@ -34,6 +34,12 @@ static HWND wheel_list;
 static int wheel_remainder;
 static uint32_t owner_drawn_wheels, owner_drawn_wheel_fallbacks, last_wheel_target;
 static int last_wheel_delta, last_wheel_top_before = -1, last_wheel_top_after = -1;
+nh_bink_open_proc nh_real_bink_open;
+nh_bink_close_proc nh_real_bink_close;
+struct movie_playback { void *handle; LARGE_INTEGER opened_at; struct movie_playback *next; };
+static struct movie_playback *movies;
+static uint32_t movie_opens, movie_active, movie_tracking_failures;
+static uint64_t movie_total_us;
 
 static void initialize(void)
 {
@@ -43,6 +49,8 @@ static void initialize(void)
         QueryPerformanceFrequency(&input_frequency);
         InterlockedExchange(&initialized, 2);
     }
+    /* Movie opens can precede the first browser request on another thread. */
+    while (InterlockedCompareExchange(&initialized, 0, 0) != 2) Sleep(0);
 }
 
 static uint64_t elapsed_us(LARGE_INTEGER start)
@@ -51,6 +59,55 @@ static uint64_t elapsed_us(LARGE_INTEGER start)
     QueryPerformanceCounter(&now);
     return input_frequency.QuadPart > 0 ?
         (uint64_t)((now.QuadPart - start.QuadPart) * 1000000 / input_frequency.QuadPart) : 0;
+}
+
+void *WINAPI nh_movie_open(const char *name, uint32_t flags)
+{
+    nh_bink_open_proc original = nh_real_bink_open;
+    if (!original) original = (nh_bink_open_proc)real_GetProcAddress(GetModuleHandleA("BINKW32.DLL"), "_BinkOpen@8");
+    if (!original) return NULL;
+    void *handle = original(name, flags);
+    if (!handle || !nh_agent_configured()) return handle;
+    initialize();
+    struct movie_playback *entry = HeapAlloc(GetProcessHeap(), 0, sizeof(*entry));
+    LARGE_INTEGER opened_at;
+    QueryPerformanceCounter(&opened_at);
+    EnterCriticalSection(&input_lock);
+    movie_opens++;
+    if (entry)
+    {
+        entry->handle = handle;
+        entry->opened_at = opened_at;
+        entry->next = movies;
+        movies = entry;
+        movie_active++;
+    }
+    else movie_tracking_failures++;
+    LeaveCriticalSection(&input_lock);
+    return handle;
+}
+
+void WINAPI nh_movie_close(void *movie)
+{
+    nh_bink_close_proc original = nh_real_bink_close;
+    if (!original) original = (nh_bink_close_proc)real_GetProcAddress(GetModuleHandleA("BINKW32.DLL"), "_BinkClose@4");
+    if (!original) return;
+    original(movie);
+    if (!movie || !nh_agent_configured()) return;
+    initialize();
+    struct movie_playback *closed = NULL;
+    EnterCriticalSection(&input_lock);
+    for (struct movie_playback **link = &movies; *link; link = &(*link)->next)
+    {
+        if ((*link)->handle != movie) continue;
+        closed = *link;
+        *link = closed->next;
+        movie_active--;
+        movie_total_us += elapsed_us(closed->opened_at);
+        break;
+    }
+    LeaveCriticalSection(&input_lock);
+    if (closed) HeapFree(GetProcessHeap(), 0, closed);
 }
 
 int nh_input_active(void)
@@ -336,6 +393,7 @@ static void input_state(uint32_t id, int skip_controls)
         "\"asyncKeyReads\":%ld,\"cursorWrites\":%ld,\"acceptedInputs\":%u,\"deliveredMessages\":%u,"
         "\"lastMessage\":%u,\"lastKeyMessage\":%u,\"lastKeyVirtualKey\":%u,\"injectedKeyReads\":%ld,"
         "\"lastInjectedKey\":%ld,\"cursorLastReadX\":%ld,\"cursorLastReadY\":%ld,\"modal\":%s,"
+        "\"moviePlaying\":%s,\"movieOpens\":%u,\"movieTotalMs\":%llu,\"movieTrackingFailures\":%u,"
         "\"dialogMessages\":%u,\"lastTargetHwnd\":%u,\"lastTargetId\":%u,\"dialogHwnd\":%u,"
         "\"focusHwnd\":%u,\"gameCaptureHwnd\":%u,\"redirectedCapturedReleases\":%u,"
         "\"consumedCapturedReleases\":%u,\"lastDeliveryQueueUs\":%llu,\"maxDeliveryQueueUs\":%llu,"
@@ -348,6 +406,8 @@ static void input_state(uint32_t id, int skip_controls)
         accepted, delivered, last_message, last_key_message, last_key,
         InterlockedCompareExchange(&injected_key_reads, 0, 0), InterlockedCompareExchange(&last_injected_key, 0, 0),
         InterlockedCompareExchange(&cursor_last_read_x, 0, 0), InterlockedCompareExchange(&cursor_last_read_y, 0, 0), modal ? "true" : "false",
+        movie_tracking_failures ? "null" : movie_active ? "true" : "false", movie_opens,
+        (unsigned long long)(movie_total_us / 1000), movie_tracking_failures,
         dialog_messages, last_target, last_target_id, (uint32_t)(uintptr_t)(modal ? target : NULL),
         (uint32_t)(uintptr_t)nh_input_get_focus(), (uint32_t)(uintptr_t)nh_hidden_get_capture(),
         redirected_captured_releases, consumed_captured_releases,

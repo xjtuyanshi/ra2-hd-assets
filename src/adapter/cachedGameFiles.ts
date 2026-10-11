@@ -174,6 +174,10 @@ export class CachedGameFileProvider extends SessionGameFileProvider {
   override hasKnownFile(path: string): boolean | null {
     return this.names.has(normalizeGuestPath(path)) || super.hasKnownFile(path);
   }
+  override async remove(path: string): Promise<'removed' | 'missing' | 'read-only'> {
+    const result = await super.remove(path);
+    return result === 'missing' && this.names.has(normalizeGuestPath(path)) ? 'read-only' : result;
+  }
   private blob(path: string): Promise<Blob | null> {
     const name = normalizeGuestPath(path);
     if (!this.names.has(name)) return Promise.resolve(null);

@@ -68,6 +68,24 @@ export function withShimFiles<TBase extends Constructor<ShimState>>(Base: TBase)
       return normalized ? this.files.has(normalized) || this.sharedFileMirrors.has(normalized) : false;
     }
 
+    /** Deletion cannot target directories or an open handle; the async host checks storage separately. */
+    inspectFileDeleteError(path: string): number {
+      const normalized = normalizeGuestPath(path);
+      if (!normalized || this.isVirtualDirectory(normalized)) return 5;
+      if ([...this.fileHandles.values()].some((file) => file.path === normalized)) return 32;
+      return this.hasMountedFile(normalized) ? 0 : 2;
+    }
+
+    /** Drop every canonical representation after storage confirms removal or absence. Open handles are preflighted. */
+    protected forgetMountedFile(path: string): void {
+      this.files.delete(path);
+      this.sharedFileMirrors.delete(path);
+      this.fileLogicalSizes.delete(path);
+      this.rangeBackedFiles.delete(path);
+      this.sparseFileRanges.delete(path);
+      this.fileTimes.delete(path);
+    }
+
     /** The host may mount original resources into the synchronous Win32 file layer on demand while the VM runs. */
     mountFile(path: string, bytes: Uint8Array, takeOwnership = false, logicalSize = bytes.length): void {
       const normalized = normalizeGuestPath(path);

@@ -32,6 +32,43 @@ describe('MemoryGameFileProvider', () => {
     expect(await provider.read('save/slot01.sav')).toEqual(new Uint8Array([9, 8, 7, 6]));
     await provider.flush();
   });
+  it('只删除会话写入；零字节存档消失，覆盖原文件后删除恢复原字节', async () => {
+    const original = new Uint8Array([1, 2]);
+    const provider = new MemoryGameFileProvider(new Map([['game.exe', original]]));
+    expect(await provider.remove('GAME.EXE')).toBe('read-only');
+    expect(await provider.remove('missing.sav')).toBe('missing');
+    await provider.write('Save/empty.sav', new Uint8Array());
+    expect(await provider.remove('save\\EMPTY.SAV')).toBe('removed');
+    expect(await provider.read('save/empty.sav')).toBeNull();
+    expect(await provider.list('save')).toEqual([]);
+    await provider.write('game.exe', new Uint8Array([9]));
+    expect(await provider.remove('game.exe')).toBe('removed');
+    expect(await provider.read('game.exe')).toEqual(original);
+    expect(original).toEqual(new Uint8Array([1, 2]));
+    expect(await provider.remove('game.exe')).toBe('read-only');
+  });
+  it('作用域和叠加层保持删除范围，原资源与不支持删除的父层均拒绝', async () => {
+    const base = new MemoryGameFileProvider(new Map([['ra2/game.exe', new Uint8Array([1])]]));
+    const scoped = new ScopedGameFileProvider(base, 'ra2');
+    const overlay = new OverlayGameFileProvider(scoped, new Map([['movies.mix', new Uint8Array([2])]]), 'overlay');
+    await overlay.write('save.sav', new Uint8Array([7]));
+    expect(await overlay.remove('SAVE.SAV')).toBe('removed');
+    expect(await base.read('ra2/save.sav')).toBeNull();
+    expect(await overlay.remove('movies.mix')).toBe('read-only');
+    expect(await overlay.remove('game.exe')).toBe('read-only');
+    expect(await overlay.read('movies.mix')).toEqual(new Uint8Array([2]));
+    const unsupported = new ScopedGameFileProvider(
+      {
+        label: base.label,
+        read: base.read.bind(base),
+        write: base.write.bind(base),
+        flush: base.flush.bind(base),
+        list: base.list.bind(base),
+      },
+      'ra2',
+    );
+    expect(await unsupported.remove('save.sav')).toBe('read-only');
+  });
 });
 
 describe('discoverGameSources', () => {

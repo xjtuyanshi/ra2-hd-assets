@@ -16,6 +16,25 @@ scripts/remaster/native/play-native.sh --open
 
 Use `RA2_NATIVE_WINE_PREFIX="$WINE_PREFIX"` instead of a named CrossOver bottle for plain Wine. The launcher builds missing local binaries, backs up the supplied copy's existing DLL before replacement, uses two free allowed ports and a fresh token, starts the hidden owned game and loopback page, and prints the exact private URL. `--open` opens Google Chrome; the page automatically selects the supplied YR resources and attaches to that game. The HD options are shared with `scripts/remaster/play.sh` through `scripts/remaster/play-options.mjs`. Exit stops only processes it created and conditionally restores its DLL. It obtains no resources. Native Wine process ownership and browser rendering require a real owner run; build and synthetic lifecycle checks are separate evidence.
 
+Both owner launchers enable the existing single-pass `sr=1` reconstruction for the original menus/dialogs and
+original-picture view. It does not run in the HD view's keyed overlay path. The native toolbar omits Quick start:
+the page attaches to an existing game process, so the VM startup-page hook cannot open its skirmish setup.
+
+### Film controls
+
+An attached page shows **跳过影片** and **也可以按 Esc** during observed Bink playback outside a visible menu/dialog.
+The web route checks actual shell visibility; the native route checks the visible dialog that owns input.
+The main menu also plays Bink animation, so an open decoder alone must not offer Escape there. The button sends the ordinary Escape key state and
+`WM_KEYDOWN`/`WM_KEYUP` messages. With pointer lock, the first physical Esc releases the browser pointer; press
+Esc again to reach the game, or click the button after releasing the pointer. No timed key injection or clock
+change is used. Web static and dynamic Bink Open/Close calls retain the same host lifecycle boundary. Native
+successful opens and matching closes provide `INPUT_STATE.moviePlaying`, `movieOpens` and completed
+`movieTotalMs`, retained from process launch across page attachments. After the same PID, executable identity and
+hidden-window validation as menu startup, the launcher also accepts observed successful playback with no visible
+input-owning dialog as usable input. It logs film readiness separately in Chinese and releases the page to show
+the skip control before the main menu; the existing startup timeout and ordinary menu gate remain unchanged.
+Films completed before attachment have no page button; the retained counters measure those completed lifetimes.
+
 ### Free Wine and first-run setup
 
 The free-Wine evaluation uses Gcenx/macOS_Wine_builds `wine-stable 11.0_1`. Its bundle declares macOS 10.15 or later, contains Intel 64-bit Wine processes, and supplies 32-bit Windows modules through the new WoW64 mode. Those bundle properties do not establish game compatibility on another Mac. Use an explicitly selected executable and a dedicated prefix; never reuse a CrossOver bottle or run both game backends together.
@@ -136,7 +155,7 @@ The adapter owns the socket, sparse pages, request timeouts, frame credits, retr
 
 Sparse reads never synthesize zero bytes. `NativeMemoryMiss` subscribes the absent pages. Even if an existing optional reader catches that exception, the operation records the miss, discards the entire result and recreates its reader factories. Reader retries use complete mirror frames; asynchronous direct reads never contaminate the frame image. An installer runs against a private transaction image, buffers every write and restarts the whole operation after fetching absent pages or obtaining allocations. Only a successful complete operation submits an atomic compare-and-write batch. An uncertain commit reply retains executable reservations to avoid dangling jumps.
 
-Attachment at an owned native menu becomes ready for pictures and input without waiting for a nonexistent logic tick. It keeps the mirror incomplete and returns null reader results until the game publishes a complete battle mirror. At that point the backend obtains the actual logic-thread ID and verified hook metadata before creating readers or enabling game patches. `awaitingLogicMirror` in native diagnostics identifies this menu warm-up state. Attachment outside an owned menu still requires the first complete mirror within the existing startup timeout; an invalid match stream is not accepted as menu readiness.
+Attachment at an owned native menu or an observed Bink film becomes ready for pictures and input without waiting for a nonexistent logic tick. It keeps the mirror incomplete and returns null reader results until the game publishes a complete battle mirror. At that point the backend obtains the actual logic-thread ID and verified hook metadata before creating readers or enabling game patches. `awaitingLogicMirror` in native diagnostics identifies this menu/film warm-up state. Attachment outside an owned menu or observed film still requires the first complete mirror within the existing startup timeout; an invalid match stream is not accepted as menu readiness.
 
 The logic hook validates the pinned executable identity and its full instruction signature before installing a removable detour at the frame counter store. The detour preserves general registers, flags and x87/SSE state. Frame-counter readers validate the actual native detour metadata instead of pretending the patched bytes remain original. Passthrough uses the existing YR installer with an explicit native thread guard, leaving the v86 guard unchanged. Agent-owned stub/data allocations remain alive until process exit; disconnected clients must not leave entry-site patches enabled or erase storage referenced by an in-flight guest call.
 

@@ -11,6 +11,7 @@ import {
   assertOwnedExecutableIdentity,
   findPorts,
   installDll,
+  nativeFilmReady,
   nativeMainMenuReady,
   prepareWinePrefix,
   runLauncher,
@@ -776,6 +777,20 @@ test('readiness waits for a real modal menu with a visible enabled control insid
   assert.equal(nativeMainMenuReady(hello, { ...state, controls: [{ ...state.controls[0], enabled: false }] }), false);
 });
 
+test('film readiness accepts observed successful playback outside a modal and rejects unknown or closed playback', () => {
+  const hello = { surface: { width: 800, height: 600 } };
+  const state = { modal: false, moviePlaying: true, movieOpens: 1 };
+  assert.equal(nativeFilmReady(hello, state), true);
+  assert.equal(nativeFilmReady(hello, { ...state, modal: true }), false);
+  assert.equal(nativeFilmReady(hello, { ...state, modal: undefined }), false);
+  assert.equal(nativeFilmReady(hello, { ...state, moviePlaying: false }), false);
+  assert.equal(nativeFilmReady(hello, { ...state, moviePlaying: null }), false);
+  assert.equal(nativeFilmReady(hello, { ...state, movieOpens: 0 }), false);
+  assert.equal(nativeFilmReady(hello, { ...state, movieOpens: undefined }), false);
+  assert.equal(nativeFilmReady({ surface: { width: 0, height: 600 } }, state), false);
+  assert.equal(nativeFilmReady({}, state), false);
+});
+
 for (const stopFailure of [false, true])
   test(
     `CLI lifecycle uses real Vite plus a synthetic authenticated agent; ${stopFailure ? 'failed stop-file delivery still restores its DLL and frees both ports' : 'SIGINT restores only its DLL and frees both ports'}`,
@@ -825,8 +840,15 @@ if (args[0] === 'winepath.exe') {
     socket.on('message', (raw) => {
       const request = decodePacket(raw);
       if (request.type === Type.INPUT_STATE) socket.send(packet(Type.INPUT_STATE, request.id,
-        Buffer.from(JSON.stringify({modal:true, controlsTruncated:false,
-          controls:[{id:1667, visible:true, enabled:true, rect:[80,60,300,90]}]}))));
+        Buffer.from(JSON.stringify(${JSON.stringify(
+          stopFailure
+            ? { modal: false, moviePlaying: true, movieOpens: 1, controls: [] }
+            : {
+                modal: true,
+                controlsTruncated: false,
+                controls: [{ id: 1667, visible: true, enabled: true, rect: [80, 60, 300, 90] }],
+              },
+        )}))));
     });
   });
   await writeFile(status, JSON.stringify({pid:123456, handshake:true, running:true}));
@@ -881,6 +903,10 @@ if (args[0] === 'winepath.exe') {
       const deadline = Date.now() + 30000;
       while (!output.includes('Play URL: ') && !exited && Date.now() < deadline) await delay(100);
       assert.match(output, /Play URL: /, output);
+      if (stopFailure) {
+        assert.match(output, /影片已经开始播放.*Chrome.*跳过影片/);
+        assert.doesNotMatch(output, /Native main menu ready/);
+      }
       const url = new URL(output.match(/Play URL: (\S+)/)[1]);
       const runPath = output.match(/Private launch logs and DLL backups: (.+)/)[1];
       if (!stopFailure) {

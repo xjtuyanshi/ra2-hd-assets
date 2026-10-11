@@ -82,8 +82,31 @@ export function ScreenStatus() {
     resource = useStore(state.resourceStatus);
   const upscale = useStore(state.upscaleStatus);
   const hd = useStore(state.hdStatus);
+  const skipMovie = useStore(state.movieSkip);
   return (
     <>
+      {skipMovie && (
+        <aside
+          id="vm-movie-skip"
+          style={{
+            position: 'absolute',
+            top: 24,
+            right: 24,
+            zIndex: 20,
+            padding: '14px 20px',
+            background: 'rgba(12,16,24,.94)',
+            color: 'white',
+            border: '2px solid #ffd166',
+            borderRadius: 8,
+          }}
+        >
+          <button id="vm-skip-movie" onClick={skipMovie} style={{ fontSize: 20, padding: '8px 24px' }}>
+            {t('跳过影片')}
+          </button>
+          <p style={{ margin: '8px 0 0' }}>{t('也可以按 Esc')}</p>
+          <p style={{ margin: '4px 0 0' }}>{t('鼠标锁定时，先按 Esc 解锁，再点按钮或再按 Esc。')}</p>
+        </aside>
+      )}
       <output id="vm-upscale-status" role="status" aria-live="polite" hidden={upscale === null}>
         {upscale && localizeText(upscale)}
       </output>

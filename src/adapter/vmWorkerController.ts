@@ -471,6 +471,7 @@ export class VmWorkerController {
         this.callBatchLogicFrames += count;
       },
       onShellPage: (title) => this.post({ type: 'shell-page', title }),
+      onMoviePlayback: (playing) => this.post({ type: 'movie-playback', playing }),
     };
     if (config.native) {
       if (!import.meta.env.DEV || config.provider.kind !== 'native')
@@ -555,6 +556,7 @@ export class VmWorkerController {
       ),
       startupPage: config.startupPage,
       renderPassthrough: config.renderPassthrough,
+      pageCursor: config.pageCursor,
       fetchBytes: this.dependencies.fetchBytes,
       scheduleFrame: (emit) => this.scheduleFrameWithBackpressure(emit),
       deferFrameSnapshot: true,

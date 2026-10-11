@@ -35,6 +35,8 @@ export interface Sidebar {
   radarActive: boolean;
   controls?: { id: string; rect: Rect; frame: number }[];
   tabFrames?: number[];
+  /** Exact source frame of the command background's left end; absent when unsupported. */
+  commandBarLeftFrame?: number;
   modes: { repair: boolean; sell: boolean };
   labels: { ready: string | null; hold: string | null };
   pointer?: { x: number; y: number; frame: number; hotspot: { x: number; y: number } } | null;
@@ -157,6 +159,40 @@ export function chromeSlices(
 
 type Chrome = NonNullable<ReturnType<UiAssets['chrome']>>;
 
+/** Lay out fixed ends and repeat the rail without stretching its final partial tile. All destinations are frame pixels. */
+export function commandBarTiles(
+  width: number,
+  art: NonNullable<Chrome['commandBar']>,
+  frame: number,
+): { bitmap: ImageBitmap; source: Rect; target: Rect }[] {
+  const left = art.left.find((entry) => entry.frame === frame)?.bitmap;
+  if (!left || !Number.isInteger(width)) return [];
+  const scale = art.scale,
+    height = left.height / scale;
+  const leftWidth = left.width / scale,
+    rightWidth = art.right.width / scale,
+    middleWidth = art.middle.width / scale;
+  if (width < leftWidth + rightWidth || !(middleWidth > 0)) return [];
+  const piece = (bitmap: ImageBitmap, x: number, w = bitmap.width / scale) => ({
+    bitmap,
+    source: { x: 0, y: 0, width: w * scale, height: bitmap.height },
+    target: { x, y: 0, width: w, height },
+  });
+  const result = [piece(left, 0)];
+  for (let x = leftWidth; x < width - rightWidth; x += middleWidth)
+    result.push(piece(art.middle, x, Math.min(middleWidth, width - rightWidth - x)));
+  result.push(piece(art.right, width - rightWidth));
+  return result;
+}
+
+function liveCommandBar(sidebar: Sidebar, chrome: Chrome) {
+  const bar = sidebar.layout.commandBar,
+    art = chrome.commandBar;
+  if (!bar || !art || sidebar.commandBarLeftFrame === undefined) return [];
+  const tiles = commandBarTiles(bar.width, art, sidebar.commandBarLeftFrame);
+  return tiles.length && tiles[0]!.target.height === bar.height ? tiles : [];
+}
+
 /** The art of one native control state: a single image made for exactly this gadget size, else its atlas frame. */
 function controlArt(
   chrome: Chrome | null,
@@ -206,6 +242,7 @@ export function transparentRects(sidebar: Sidebar, assets: UiAssets): Rect[] {
   if (chrome) {
     const slices = chromeLayout(sidebar, chrome);
     let covered = [...slices.sidebar, ...slices.commandBar].map((slice) => slice.target).filter(valid);
+    if (liveCommandBar(sidebar, chrome).length) covered.push(l.commandBar!);
     const preserve: Rect[] = [];
     if (sidebar.radarActive) preserve.push(inflate(l.radar, 1));
     // New snapshots expose exact button state; never hide an unsupported/missing state with static chrome.
@@ -342,7 +379,15 @@ export function drawSidebar(
     fill(l.sidebar, '#101216');
     if (l.commandBar) fill(l.commandBar, '#101216');
     const slices = chromeLayout(sidebar, chrome);
+    const commandTiles = liveCommandBar(sidebar, chrome);
     for (const name of ['sidebar', 'commandBar'] as const) {
+      if (name === 'commandBar' && commandTiles.length) {
+        for (const { bitmap, source, target } of commandTiles) {
+          const p = rect({ ...target, x: l.commandBar!.x + target.x, y: l.commandBar!.y + target.y });
+          ctx.drawImage(bitmap, source.x, source.y, source.width, source.height, p.x, p.y, p.width, p.height);
+        }
+        continue;
+      }
       const anchor = name === 'sidebar' ? l.sidebar : l.commandBar;
       if (!anchor || !slices[name].length) continue;
       const composite = chrome.composites?.[name];
@@ -767,8 +812,8 @@ export function drawPointer(
   const art = assets.cursor(pointer.frame);
   const x = art ? local.x - pointer.hotspot.x : local.x;
   const y = art ? local.y - pointer.hotspot.y : local.y;
-  const width = art?.rect.width ?? 16,
-    height = art?.rect.height ?? 22;
+  const width = art ? art.rect.width / (art.scale ?? 1) : 16,
+    height = art ? art.rect.height / (art.scale ?? 1) : 22;
   if (!covered.some((r) => x < r.x + r.width && x + width > r.x && y < r.y + r.height && y + height > r.y)) return;
   ctx.save();
   ctx.beginPath();
@@ -776,7 +821,7 @@ export function drawPointer(
   ctx.clip();
   if (art) {
     const r = art.rect;
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = (art.scale ?? 1) > 1;
     ctx.drawImage(art.bitmap, r.x, r.y, r.width, r.height, x, y, width, height);
   } else {
     ctx.translate(x, y);

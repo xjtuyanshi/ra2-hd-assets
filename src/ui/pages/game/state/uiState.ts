@@ -38,6 +38,8 @@ export interface TrainingLessonState {
 }
 export const trainingPanel = createStore<TrainingMenuState | TrainingLessonState | null>(null);
 export const gameRunning = createStore(false);
+/** The runtime owns visibility; user action only sends the game's Escape input. */
+export const movieSkip = createStore<(() => void) | null>(null);
 export const mainPanel = createStore<{ phase: 'blocked' | 'error' | 'exited'; detail: string } | null>(null);
 export interface BootState {
   game: Pick<SupportedGame, 'id' | 'title'>;

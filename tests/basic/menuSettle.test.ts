@@ -112,3 +112,65 @@ describe('菜单壳页呈现静默合并', () => {
     expect(page.frames).toHaveLength(2);
   });
 });
+
+describe('Full-size dialog display ownership', () => {
+  it('untitled abort confirmation owns the frame without changing shell-page identity', () => {
+    const page = setup(false);
+    writeAsciiZ(page.memory, 0x50_000, '#32770');
+    const parent = callShim(page.shim, 'USER32.DLL!CreateWindowExA', [
+      0,
+      0x50_000,
+      0,
+      0x1000_0000,
+      0,
+      0,
+      W,
+      H,
+      0,
+      0,
+      0,
+      0,
+    ]).eax;
+    writeAsciiZ(page.memory, 0x50_100, 'Button');
+    const dialog = callShim(page.shim, 'USER32.DLL!CreateWindowExA', [
+      0,
+      0x50_000,
+      0,
+      0x5000_0000,
+      0,
+      0,
+      W,
+      H,
+      parent,
+      0,
+      0,
+      0,
+    ]).eax;
+    for (const id of [1670, 1737]) {
+      callShim(page.shim, 'USER32.DLL!CreateWindowExA', [
+        0,
+        0x50_100,
+        0,
+        0x5000_0000,
+        W - 145,
+        100,
+        125,
+        25,
+        dialog,
+        id,
+        0,
+        0,
+      ]);
+    }
+    expect(page.shim.inspectShellPageTitle()).toBe('');
+    expect(page.shim.inspectFullSizeDialogVisible()).toBe(true);
+    callShim(page.shim, 'USER32.DLL!ShowWindow', [parent, 0]);
+    expect(page.shim.inspectFullSizeDialogVisible()).toBe(false);
+    callShim(page.shim, 'USER32.DLL!ShowWindow', [parent, 5]);
+    expect(page.shim.inspectFullSizeDialogVisible()).toBe(true);
+    callShim(page.shim, 'USER32.DLL!DestroyWindow', [parent]);
+    expect(page.shim.inspectFullSizeDialogVisible()).toBe(false);
+    callShim(page.shim, 'USER32.DLL!CreateWindowExA', [0, 0x50_000, 0, 0x1000_0000, 0, 0, W - 1, H, 0, 0, 0, 0]);
+    expect(page.shim.inspectFullSizeDialogVisible()).toBe(false);
+  });
+});

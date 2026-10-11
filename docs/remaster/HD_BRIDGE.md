@@ -26,7 +26,7 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    `src/games/yr/smudgeReader.ts` (cell craters and burn marks), and `src/games/yr/effectsReader.ts` (anims,
    projectiles, lasers, electric bolts and particle systems); the shroud and effects readers are created once a map is
    loaded. All of them only read guest memory, validate every pointer and refuse any executable other than the pinned
-   YR 1.001 build. The VM core returns null while a shell page (menus, in-game options, score screen) owns the screen.
+   YR 1.001 build. The VM core returns null while a shell page (menus, in-game options, score screen) or a visible full-size Win32 dialog owns the screen, including confirmations without a title control. This display check does not change shell-page input routing or composition.
 2. **Page bridge.** `src/ui/pages/game/hdBridge.ts` polls the state, loads the HD world for `state.map.fileName` from
    `/hd-cache/<map>/` and keeps an HD canvas under the game canvas. Polls run at most about 60 times a second while
    the HD view shows the current map, and once a second while a snapshot would go unused (no HD cache for the map, the
@@ -691,12 +691,16 @@ device pixels. Any other scale resamples every texel: a 1152x744 game filling a 
 server and opens the HD page with the approved look, `resolution=display`, `game-speed=3` (the original scale's normal
 speed; the page's own startup default is the fastest, see
 [the startup configuration](../RA2_COMMAND_LINE_AND_SPAWNER.md#current-startup-configuration)) and the skirmish setup as
-the first page; `--original` opens the original picture at exact pixels instead, `--train` opens the practice lessons
+the first page; `--original` opens the original picture without the HD bridge, `--train` opens the practice lessons
 ([Practice lessons](TRAINING.md)), `--print` only prints the address. It
 reads the player's game from `RA2_GAME_ROOT` (default `game/`), the HD cache from `RA2_HD_CACHE_DIR` (default: the
 newest play cache under `gameres/` that holds `_library/`) and the starting speed from `RA2_PLAY_SPEED`, and names
 the stall log for the development server in `RA2_PERF_LOG` (default `gameres/s2x/play/perfmon/stalls.jsonl` under
 the main checkout; `0` for none).
+
+Both owner launchers select `sr=1`: single-pass anti-ringing Catmull-Rom reconstruction for original menus,
+dialogs and the original-picture view. It preserves exact source pixels at 1:1 or when shrinking, and leaves the
+HD view's keyed overlay path unchanged. The toolbar can switch reconstruction off for comparison.
 
 ## Stall recorder
 
@@ -803,10 +807,21 @@ The `#hd-ui` canvas sits immediately before `#screen`, at z-index 0 above `#hd-s
 whole device pixels with one buffer pixel each, and receives no input. The WebGL2 frame renderer clears the covered rectangles after every
 frame path (plain, upscaled or keyed), before its independent native cursor pass. These extra rectangles are
 independent of the tactical key/hole. All pointer and keyboard input continues to reach the original game.
-The read-only native `sidebar.pointer` supplies cursor sheet frame and resolved hotspot; the input controller's
-read-only position accessor supplies low-latency guest coordinates when available. The cursor is drawn last,
-clipped to the exact covered union, including partial intersections at its edges. Outside that union the native
-software cursor remains visible. Missing cursor art uses a vector arrow; unknown/hidden pointer state draws none.
+Without the optional page cursor, the read-only native `sidebar.pointer` supplies cursor sheet frame and resolved
+hotspot; the input controller's read-only position accessor supplies low-latency guest coordinates when available.
+The cursor is drawn last, clipped to the exact covered union, including partial intersections at its edges. Outside
+that union the native software cursor remains visible. Missing cursor art uses a vector arrow; unknown/hidden
+pointer state draws none.
+
+The development YR page can instead load a complete cursor atlas before attaching either backend. On the web route,
+the optional `GameRuntimeHooks.preparePagePointer` validates the pinned executable hash and `WWMouse::Draw` signature
+before suppressing only that final software-cursor blit. Main-thread and Worker frames then carry synchronously
+sampled `VmFrame.pointer` metadata; an inconsistent sample retains the last confirmed state, while null is an
+observed hidden/off state. The native route uses the same pointer validation through its asynchronous READs.
+`#native-page-cursor` presents the atlas at the local pointer immediately and covers the whole game canvas in HD
+and original view; the sidebar controller omits its own pointer copy. Missing/invalid page art or an unsupported
+game hook retains game drawing. Menu/dialog Win32 cursors remain the actual resource bitmap and hotspot, independent
+of the software atlas: the supplied 2x MOUSE art does not replace the original 32x32 menu arrow.
 The optional `sidebar.tooltip` supplies the native frame rectangle and copied UTF-16 text, including native cost
 lines and line breaks. That rectangle is added to the transparent regions while shown and filled with an HD tooltip.
 
@@ -830,8 +845,15 @@ Optional art lives under the local HD cache's `_ui/` directory:
   builds it (`chromeSlices` in `packages/hd-renderer/src/ui/sidebarView.ts`): the part above the cameo strip stays,
   the strip shows as many rows as the live layout has (extra rows reuse the art's inner rows), and the part under the
   strip follows the strip's bottom. That needs the game's row rule, published as the optional `layout.stripReserve`
-  (YR: `sidebarReader.ts`), and the anchor's art in one composite. An anchor whose width differs from the art (the
-  command bar of a wider frame is assembled from both ends) gets no chrome: its native picture stays visible.
+  (YR: `sidebarReader.ts`), and the anchor's art in one composite. A fixed-width anchor whose width differs from the
+  art gets no chrome: its native picture stays visible unless the responsive command background below is available.
+  Optional `commandBar` is `{ "scale": 2, "left": [{ "frame": 0, "file": "ui3/left0@2x.png" }],
+"middle": "ui3/middle@2x.png", "right": "ui3/right@2x.png" }`. Every image must load and share its art scale and
+  height before the replacement publishes. The left/right caps retain their frame-pixel sizes; the middle repeats
+  between them and its last tile is cropped from the left edge, never stretched. `commandBarLeftFrame` selects the
+  source cap frame from the game snapshot (pinned YR draws frame 0; see research/sidebar-ui.md). The live bar rectangle
+  owns the placement and transparent region at any fitting width. Independent command-button art is drawn afterward
+  at the original gadget rectangles; unsupported states retain their native pixels and no hit area changes.
   Optional `tabs` is `{ "file": "tabs.png", "scale": 4, "frames": [
 { "tab": 0, "state": "normal", "rect": { "x": 0, "y": 0, "width": 112, "height": 108 } } ] }`.
   Each rectangle is in atlas pixels and includes the whole native tab canvas with transparency; it is scaled into
@@ -844,7 +866,10 @@ Optional art lives under the local HD cache's `_ui/` directory:
   `packages/ra2-assets/python/ui_chrome.py tabs-sheet` / `tabs-pack` as described in the asset package README.
 - `_ui/cursor/cursor.json`: `{ "version": 1, "frames": [{ "x": 0, "y": 0, "width": 55, "height": 43 }] }`.
   Rectangles index `cursor.png` (or optional relative `file`). Each frame includes transparent bounding-box padding;
-  hotspots remain runtime data. Export with `pnpm hd:ui -- cursor --game "$RA2_INSTALL" --out "$HD_CACHE/_ui/cursor"`.
+  optional positive integer `scale` is atlas pixels per frame pixel and defaults to 1. With `scale: 2`, a 110x86
+  atlas rectangle still occupies 55x43 frame pixels. The page copies those art pixels directly to its cursor backing
+  canvas; only final CSS/DPR presentation resamples when needed. Hotspots remain unchanged frame-pixel runtime data.
+  Export with `pnpm hd:ui -- cursor --game "$RA2_INSTALL" --out "$HD_CACHE/_ui/cursor"`.
   This YR build uses `MOUSE.SHA` and `MOUSEPAL.PAL`; CLI `--shape`/`--palette` can select other supplied files.
 
 Manifests and bitmaps load lazily. Missing files (including 404 responses) are remembered for the controller's

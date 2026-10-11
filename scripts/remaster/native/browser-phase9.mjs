@@ -18,6 +18,7 @@ const phase = process.env.NATIVE_BROWSER_PHASE || 'phase9';
 const naturalWindowDimensions = process.env.NATIVE_BROWSER_USE_WINDOW_DIMENSIONS === '1';
 assert(/^phase[0-9]+$/.test(phase));
 const tag = process.argv[2] || 'hidden';
+const webRoute = tag.startsWith('web');
 assert(/^[a-zA-Z0-9_-]+$/.test(tag));
 const useViewportHandshake = naturalWindowDimensions && Number(phase.slice(5)) >= 18 && !tag.startsWith('baseline');
 const out = join(base, phase, tag);
@@ -26,6 +27,7 @@ await mkdir(out, { recursive: true });
 // artifacts and DLL backup. Evidence tags are single-use.
 await writeFile(join(out, 'harness-pid'), String(process.pid) + '\n', { flag: 'wx' });
 const config = JSON.parse(await readFile(join(base, 'run/owner-launch-smoke.json'), 'utf8'));
+if (phase === 'phase19' && tag.startsWith('nativeintro')) config.RA2_NATIVE_GAME_DIR = join(base, phase, 'native-game');
 const pause = resolve(base, '../play/_slots/PAUSE');
 const exists = async (p) =>
   lstat(p)
@@ -138,9 +140,57 @@ async function wait(label, fn, ms = 60000) {
 }
 const worker = () => page.workers().find((w) => /vmWorker/.test(w.url()));
 const state = () =>
-  worker().evaluate(async () =>
-    JSON.parse(new TextDecoder().decode(await globalThis.__auditCore.connection.request(14))),
-  );
+  webRoute
+    ? worker().evaluate(() => {
+        const core = globalThis.__auditCore;
+        const shim = core.shim;
+        const windows = shim.inspectWindowState();
+        const byHandle = new Map(windows.map((window) => [window.hwnd, window]));
+        const items = new Map(shim.inspectControlItems().map((control) => [control.hwnd, control]));
+        const controls = windows.map((window) => {
+          let x = window.rect?.x ?? 0,
+            y = window.rect?.y ?? 0;
+          let visible = (window.style & 0x10000000) !== 0;
+          let enabled = (window.style & 0x08000000) === 0;
+          let parent = window.parent;
+          const seen = new Set([window.hwnd]);
+          while (parent && !seen.has(parent)) {
+            seen.add(parent);
+            const ancestor = byHandle.get(parent);
+            if (!ancestor) break;
+            x += ancestor.rect?.x ?? 0;
+            y += ancestor.rect?.y ?? 0;
+            visible &&= (ancestor.style & 0x10000000) !== 0;
+            enabled &&= (ancestor.style & 0x08000000) === 0;
+            parent = ancestor.parent;
+          }
+          const content = items.get(window.hwnd);
+          return {
+            hwnd: window.hwnd,
+            parent: window.parent,
+            id: window.id,
+            class: window.className,
+            text: window.text,
+            visible,
+            enabled,
+            rect: window.rect ? [x, y, x + window.rect.width, y + window.rect.height] : null,
+            ...(content ? { combo: { selection: content.selection, items: content.items } } : {}),
+          };
+        });
+        return {
+          route: 'web',
+          moviePlaying: shim.inspectMoviePlayback(),
+          nativeBinkPlaybackOpens: shim.nativeBinkPlaybackOpens,
+          nativeBinkPlaybackActive: shim.nativeBinkPlaybackActive,
+          title: shim.inspectShellPageTitle(),
+          pointer: core.getPointerState(),
+          fullSizeDialogVisible: shim.inspectFullSizeDialogVisible?.() ?? null,
+          controls,
+        };
+      })
+    : worker().evaluate(async () =>
+        JSON.parse(new TextDecoder().decode(await globalThis.__auditCore.connection.request(14))),
+      );
 async function shot(label) {
   assert(/^[a-zA-Z0-9_-]+$/.test(label));
   const path = join(out, label + '.png');
@@ -150,6 +200,37 @@ async function shot(label) {
     captureBeyondViewport: false,
   });
   await writeFile(path, Buffer.from(capture.data, 'base64'));
+  if (webRoute) {
+    const hd = await page.evaluate(() => {
+      const h = window.__hdBridge;
+      return {
+        timeline: h?.timeline ?? null,
+        presentation: h?.presentation ?? null,
+        speedRecords: window.__speedTelemetry?.records ?? [],
+        ui: { enabled: h?.ui?.enabled ?? false, state: h?.ui?.state ?? null },
+        canvases: [...document.querySelectorAll('canvas')].map((canvas) => ({
+          id: canvas.id,
+          width: canvas.width,
+          height: canvas.height,
+          box: canvas.getBoundingClientRect().toJSON(),
+          display: getComputedStyle(canvas).display,
+        })),
+        filmButton: document.querySelector('#vm-skip-movie, #vm-movie-skip')?.getBoundingClientRect().toJSON() ?? null,
+        movieUi: document.querySelector('#vm-movie-skip')
+          ? {
+              text: document.querySelector('#vm-movie-skip').textContent,
+              display: getComputedStyle(document.querySelector('#vm-movie-skip')).display,
+              canvasDataset: { ...document.querySelector('#screen').dataset },
+            }
+          : null,
+        viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
+      };
+    });
+    await writeFile(join(out, label + '-hd.json'), JSON.stringify(hd, null, 2));
+    await writeFile(join(out, label + '-controls.json'), JSON.stringify(await state(), null, 2));
+    await record('screenshot', { label, path, route: 'web', viewport: hd.viewport });
+    return path;
+  }
   const m = await import('./phase9-page-pointer-observer.mjs');
   await m.installPhase9PagePointerObserver(page);
   await m.setPhase9PointerScene(page, label);
@@ -176,6 +257,14 @@ async function shot(label) {
           presentation: h.presentation,
           passthrough: h.passthrough,
           pace: h.pace,
+          speedRecords: window.__speedTelemetry?.records ?? [],
+          interface: {
+            moviePlaying: document.querySelector('#screen')?.dataset.moviePlaying ?? null,
+            movieHint: document.querySelector('#vm-movie-skip')?.textContent ?? null,
+            quickStartVisible:
+              !!document.querySelector('#vm-quick-start') &&
+              getComputedStyle(document.querySelector('#vm-quick-start')).display !== 'none',
+          },
           canvases: [...document.querySelectorAll('canvas')].map((c) => ({
             id: c.id,
             width: c.width,
@@ -260,7 +349,10 @@ async function shot(label) {
 }
 async function point(x, y) {
   const b = await page.locator('#screen').boundingBox();
-  const s = await worker().evaluate(() => globalThis.__auditCore.hello.surface);
+  const s = await worker().evaluate(
+    (web) => (web ? globalThis.__auditCore.getPointerState() : globalThis.__auditCore.hello.surface),
+    webRoute,
+  );
   return [b.x + (x * b.width) / s.width, b.y + (y * b.height) / s.height];
 }
 async function click(x, y, button = 'left') {
@@ -770,6 +862,18 @@ async function execute(c) {
   }
   if (c.action === 'shot') return shot(c.label);
   if (c.action === 'state') return state();
+  if (c.action === 'locator-select') {
+    assert(typeof c.selector === 'string' && c.selector, 'A page selector is required');
+    await page.locator(c.selector).selectOption(c.value);
+    await delay(c.wait ?? 700);
+    return c.label ? shot(c.label) : state();
+  }
+  if (c.action === 'locator-click') {
+    assert(typeof c.selector === 'string' && c.selector, 'A page selector is required');
+    await page.locator(c.selector).click();
+    await delay(c.wait ?? 700);
+    return c.label ? shot(c.label) : state();
+  }
   if (c.action === 'click') {
     let x = c.x,
       y = c.y;
@@ -1077,7 +1181,12 @@ async function cleanup() {
         ? null
         : JSON.stringify(await dllIdentity().catch(() => ({ unreadable: true }))) === JSON.stringify(dllBefore);
     const portsReleased = url
-      ? await Promise.all([new URL(url).port, new URL(new URL(url).searchParams.get('agent')).port].map(portReleased))
+      ? await Promise.all(
+          (webRoute
+            ? [new URL(url).port]
+            : [new URL(url).port, new URL(new URL(url).searchParams.get('agent')).port]
+          ).map(portReleased),
+        )
       : null;
     const osHighwaterRssBytes = process.resourceUsage().maxRSS * 1024;
     peakRss = Math.max(peakRss, osHighwaterRssBytes);
@@ -1101,42 +1210,70 @@ for (const signal of ['SIGINT', 'SIGTERM'])
   });
 try {
   await ownerIdle();
-  dllBefore = await dllIdentity();
-  await ownerIdle();
-  const launchEnvironment = { ...process.env, ...config };
-  // The runner's explicit free-Wine scope must override the saved CrossOver
-  // smoke configuration; never launch the two prefixes by accident.
-  if (process.env.RA2_NATIVE_WINE_FLAVOR === 'free') {
-    launchEnvironment.RA2_NATIVE_WINE = process.env.RA2_NATIVE_WINE;
-    launchEnvironment.RA2_NATIVE_WINE_PREFIX = process.env.RA2_NATIVE_WINE_PREFIX;
-    delete launchEnvironment.RA2_NATIVE_WINE_BOTTLE;
-    delete launchEnvironment.WINEPREFIX;
-    delete launchEnvironment.CX_BOTTLE_PATH;
-  }
-  launch = spawn(
-    process.execPath,
-    [
-      join(wt, 'scripts/remaster/native/phase8-launch-trace.mjs'),
-      ...(useViewportHandshake ? (tag.startsWith('full') ? ['--fullscreen'] : []) : ['--size', '1728x1117']),
-    ],
-    {
-      cwd: wt,
-      env: { ...launchEnvironment, RA2_NATIVE_AGENT_HIDDEN: tag.startsWith('visible') ? '0' : '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-  launchExit = new Promise((r) => launch.once('exit', (code, signal) => r({ code, signal })));
-  for (const s of [launch.stdout, launch.stderr])
-    s.on('data', (chunk) => {
-      const text = chunk.toString();
-      appendFile(join(out, 'launcher.log'), redact(text)).catch(() => {});
-      logTail = (logTail + text).slice(-32768);
-      const p = logTail.match(/Private launch logs and DLL backups: (.+)/);
-      if (p) privateDir = p[1];
-      const u = logTail.match(/http:\/\/127\.0\.0\.1:\d+\/\?[^\s]+/);
-      if (u) url = u[0];
+  if (webRoute) {
+    const root = resolve(wt, '../..');
+    process.env.RA2_DEV_HTTP = '1';
+    process.env.RA2_GAME_ROOT ||= join(base, phase, 'web-game');
+    process.env.RA2_THIRD_PARTY_CACHE_DIR ||= join(root, '.tmp-third-party');
+    process.env.RA2_HD_CACHE_DIR ||= (await exists(join(base, phase, 'farm', '_library')))
+      ? join(base, phase, 'farm')
+      : config.RA2_HD_CACHE_DIR;
+    const { createServer } = await import('vite');
+    server = await createServer({
+      root: wt,
+      configFile: join(wt, 'vite.config.ts'),
+      configLoader: 'runner',
+      cacheDir: join(out, 'vite-cache'),
+      server: { port: 15451, strictPort: true, host: '127.0.0.1' },
     });
-  await wait('launcher URL', () => url, 120000);
+    await server.listen();
+    const { HD_PLAY_OPTIONS } = await import('../play-options.mjs');
+    const options = new URLSearchParams(HD_PLAY_OPTIONS);
+    if (tag.startsWith('webbefore')) options.set('sr', '0');
+    const query = options.toString();
+    url = `http://127.0.0.1:15451/?${query}&resolution=display&lang=zh`;
+    await record('web-server', { checkout: wt, gameRoot: process.env.RA2_GAME_ROOT, route: 'web' });
+  } else {
+    dllBefore = await dllIdentity();
+    await ownerIdle();
+    const launchEnvironment = { ...process.env, ...config };
+    if (phase === 'phase19' && (await exists(join(base, phase, 'farm', '_library')))) {
+      launchEnvironment.RA2_HD_CACHE_DIR = join(base, phase, 'farm');
+    }
+    // The runner's explicit free-Wine scope must override the saved CrossOver
+    // smoke configuration; never launch the two prefixes by accident.
+    if (process.env.RA2_NATIVE_WINE_FLAVOR === 'free') {
+      launchEnvironment.RA2_NATIVE_WINE = process.env.RA2_NATIVE_WINE;
+      launchEnvironment.RA2_NATIVE_WINE_PREFIX = process.env.RA2_NATIVE_WINE_PREFIX;
+      delete launchEnvironment.RA2_NATIVE_WINE_BOTTLE;
+      delete launchEnvironment.WINEPREFIX;
+      delete launchEnvironment.CX_BOTTLE_PATH;
+    }
+    launch = spawn(
+      process.execPath,
+      [
+        join(wt, 'scripts/remaster/native/phase8-launch-trace.mjs'),
+        ...(useViewportHandshake ? (tag.startsWith('full') ? ['--fullscreen'] : []) : ['--size', '1728x1117']),
+      ],
+      {
+        cwd: wt,
+        env: { ...launchEnvironment, RA2_NATIVE_AGENT_HIDDEN: tag.startsWith('visible') ? '0' : '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    launchExit = new Promise((r) => launch.once('exit', (code, signal) => r({ code, signal })));
+    for (const s of [launch.stdout, launch.stderr])
+      s.on('data', (chunk) => {
+        const text = chunk.toString();
+        appendFile(join(out, 'launcher.log'), redact(text)).catch(() => {});
+        logTail = (logTail + text).slice(-32768);
+        const p = logTail.match(/Private launch logs and DLL backups: (.+)/);
+        if (p) privateDir = p[1];
+        const u = logTail.match(/http:\/\/127\.0\.0\.1:\d+\/\?[^\s]+/);
+        if (u) url = u[0];
+      });
+    await wait('launcher URL', () => url, 120000);
+  }
   const cache = join(homedir(), 'Library/Caches/ms-playwright/chromium-1243');
   const exe =
     process.env.NATIVE_BROWSER_EXECUTABLE ||
@@ -1159,7 +1296,9 @@ try {
     ],
   });
   const context = await browser.newContext(
-    naturalWindowDimensions ? { viewport: null } : { viewport: { width: 1728, height: 1117 }, deviceScaleFactor: 2 },
+    naturalWindowDimensions
+      ? { viewport: null, locale: 'zh-CN' }
+      : { viewport: { width: 1728, height: 1117 }, deviceScaleFactor: 2, locale: 'zh-CN' },
   );
   await context.grantPermissions(['local-network-access'], { origin: new URL(url).origin });
   await context.route('**/packages/hd-renderer/src/live/liveView.ts*', async (route) => {
@@ -1253,6 +1392,17 @@ try {
   }
   await page.goto(pageUrl.toString());
   await page.bringToFront();
+  if (webRoute) {
+    await page.locator('button.development-source').click();
+    const yr = page.locator('.detected-games button').filter({ hasText: /Yuri|尤里/i });
+    await wait(
+      'development game choice',
+      async () =>
+        (await yr.isVisible()) || (!!worker() && !!(await worker().evaluate(() => globalThis.__auditCore?.shim))),
+      120000,
+    );
+    if (await yr.isVisible()) await yr.click();
+  }
   if (useViewportHandshake && tag.startsWith('full') && pageUrl.searchParams.get('native-fullscreen') === '1') {
     const fullWindow = await cdp.send('Browser.getWindowForTarget');
     await cdp.send('Browser.setWindowBounds', { windowId: fullWindow.windowId, bounds: { windowState: 'fullscreen' } });
@@ -1283,17 +1433,29 @@ try {
     });
   }
   await delay(1000);
-  await wait(
-    'native main menu',
-    async () => {
-      try {
-        return (await state()).controls?.some((c) => usable(c) && c.id === 1667);
-      } catch {
-        return false;
-      }
-    },
-    120000,
-  );
+  if (webRoute) {
+    await wait(
+      'web Worker and shim',
+      async () => !!worker() && !!(await worker().evaluate(() => globalThis.__auditCore?.shim)),
+      120000,
+    );
+  } else {
+    await wait(
+      'native main menu',
+      async () => {
+        try {
+          const input = await state();
+          return (
+            input.controls?.some((c) => usable(c) && c.id === 1667) ||
+            (tag.startsWith('nativeintro') && input.moviePlaying === true && !input.modal)
+          );
+        } catch {
+          return false;
+        }
+      },
+      120000,
+    );
+  }
   const toggle = page.locator('#vm-controls-toggle');
   if (
     !(await page.evaluate(() => !!document.fullscreenElement)) &&
@@ -1308,20 +1470,21 @@ try {
   } catch (e) {
     await record('payload-probe-unavailable', { error: String(e) });
   }
-  await wait(
-    'first native picture on page',
-    async () => await worker().evaluate(() => !!globalThis.__auditCore.connection.pictureDecoder.previous),
-    120000,
-  );
+  if (!webRoute)
+    await wait(
+      'first native picture on page',
+      async () => await worker().evaluate(() => !!globalThis.__auditCore.connection.pictureDecoder.previous),
+      120000,
+    );
   await delay(1000);
-  await shot('main-menu');
+  await shot(webRoute ? 'startup-ready' : 'main-menu');
   await record('ready', {
     tag,
     phase,
     browserExecutable: exe,
     naturalWindowDimensions,
     browserVersion: browser.version(),
-    installedAgent: await dllIdentity(),
+    installedAgent: webRoute ? null : await dllIdentity(),
     viewport: await page.evaluate(() => ({
       width: innerWidth,
       height: innerHeight,
@@ -1351,7 +1514,7 @@ try {
       },
     })),
     browserWindow: await cdp.send('Browser.getWindowForTarget'),
-    hello: await worker().evaluate(() => globalThis.__auditCore.hello),
+    hello: webRoute ? await state() : await worker().evaluate(() => globalThis.__auditCore.hello),
   });
   await writeFile(join(out, 'ready'), 'ready\n');
   const until = Math.min(Date.now() + 23 * 60000, scopeDeadline);

@@ -35,6 +35,7 @@ export const RA2_ABI: Record<string, number> = {
   'KERNEL32.DLL!SetFileTime': 16,
   'KERNEL32.DLL!CopyFileA': 12,
   'KERNEL32.DLL!DeleteFileA': 4,
+  'KERNEL32.DLL!DeleteFileW': 4,
   'KERNEL32.DLL!lstrcatA': 8,
   'KERNEL32.DLL!lstrcpyA': 8,
   'KERNEL32.DLL!SetCurrentDirectoryA': 4,

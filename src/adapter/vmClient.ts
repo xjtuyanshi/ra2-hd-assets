@@ -27,7 +27,7 @@ export interface WorkerVmClientOptions {
   startupPage?: string;
   /** HD bridge opt-in: install the game's inert native overlay passthrough patches (dev `?hd=1`). */
   renderPassthrough?: boolean;
-  /** Development native cursor presentation; unavailable page art can preserve the game-drawn cursor. */
+  /** Development page cursor presentation; unavailable page art preserves the game-drawn cursor on either backend. */
   nativePageCursor?: boolean;
   /** In-memory resolution overlay injected into RA2.INI/RA2MD.INI at startup. */
   resolution?: GameResolution | null;
@@ -334,6 +334,9 @@ export class WorkerVmClient implements VmShell {
       }
       case 'status':
         this.callbacks.onStatus?.({ phase: message.phase, detail: message.detail });
+        break;
+      case 'movie-playback':
+        this.callbacks.onMoviePlayback?.(message.playing);
         break;
       case 'shell-page':
         this.callbacks.onShellPage?.(message.title);

@@ -18,6 +18,7 @@ export function withShimGuestDll<TBase extends Constructor<ShimFilesChain>>(Base
     protected readonly directGuestDllImportStubs = new Map<PeImport, Uint8Array>();
     protected readonly vtables = new Map<string, number>();
     protected readonly loadedGuestDlls = new Map<string, LoadedGuestDll>();
+    private readonly guestDllLifecycleStubs = new Map<string, number>();
 
     resolveDynamicImport(id: number): PeImport | undefined {
       return this.dynamicImports.get(id);
@@ -137,6 +138,23 @@ export function withShimGuestDll<TBase extends Constructor<ShimFilesChain>>(Base
 
     protected guestDllByHandle(handle: number): LoadedGuestDll | undefined {
       return [...this.loadedGuestDlls.values()].find((module) => module.base === handle >>> 0);
+    }
+
+    protected resolveGuestDllExport(module: LoadedGuestDll, name: string): number {
+      const target = module.exports.get(name);
+      if (!target) return 0;
+      // Dynamic lookup must preserve the same Bink Open/Close decisions as
+      // static imports. Per-frame decoder calls remain direct guest exports.
+      if (module.name === 'binkw32.dll' && (name === '_BinkOpen@8' || name === '_BinkClose@4')) {
+        const key = `${module.base}!${name}`;
+        let stub = this.guestDllLifecycleStubs.get(key);
+        if (stub === undefined) {
+          stub = this.registerDynamicWin32Import('BINKW32.DLL', name, name === '_BinkOpen@8' ? 8 : 4);
+          this.guestDllLifecycleStubs.set(key, stub);
+        }
+        return stub;
+      }
+      return target;
     }
 
     /**

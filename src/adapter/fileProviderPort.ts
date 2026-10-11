@@ -1,15 +1,15 @@
-import type { GameFileProvider } from '../resources/contracts';
+import type { GameFileProvider, GameFileRemoveResult } from '../resources/contracts';
 import { normalizeGuestPath } from '../vm86/paths';
 
 type Request = {
   id: number;
-  method: 'read' | 'readPrefix' | 'readRange' | 'list' | 'write' | 'flush';
+  method: 'read' | 'readPrefix' | 'readRange' | 'list' | 'write' | 'remove' | 'flush';
   path: string;
   offset?: number;
   length?: number;
   bytes?: Uint8Array;
 };
-type Result = Uint8Array | { bytes: Uint8Array; totalSize: number } | string[] | null | void;
+type Result = Uint8Array | { bytes: Uint8Array; totalSize: number } | string[] | GameFileRemoveResult | null | void;
 type Response = { id: number; value?: Result; error?: string };
 
 /**
@@ -30,6 +30,9 @@ export function serveFileProvider(provider: GameFileProvider, port: MessagePort)
           break;
         case 'write':
           await provider.write(path, bytes!);
+          break;
+        case 'remove':
+          value = provider.remove ? await provider.remove(path) : 'read-only';
           break;
         case 'flush':
           await provider.flush?.();
@@ -52,7 +55,12 @@ export function serveFileProvider(provider: GameFileProvider, port: MessagePort)
           throw new Error('未知文件请求');
       }
       if (closed) return;
-      const buffer = value instanceof Uint8Array ? value.buffer : value && 'bytes' in value ? value.bytes.buffer : null;
+      const buffer =
+        value instanceof Uint8Array
+          ? value.buffer
+          : value && typeof value === 'object' && 'bytes' in value
+            ? value.bytes.buffer
+            : null;
       port.postMessage({ id, value }, buffer instanceof ArrayBuffer ? [buffer] : []);
     } catch (error) {
       if (!closed) port.postMessage({ id, error: error instanceof Error ? error.message : String(error) });
@@ -74,6 +82,7 @@ export class PortGameFileProvider implements GameFileProvider {
   private closed = false;
   private readonly pending = new Map<number, { resolve: (value: Result) => void; reject: (error: Error) => void }>();
   private readonly names: Set<string>;
+  private readonly uncertainNames = new Set<string>();
   constructor(
     readonly label: string,
     private readonly port: MessagePort,
@@ -95,6 +104,7 @@ export class PortGameFileProvider implements GameFileProvider {
   }
   hasKnownFile(path: string): boolean | null {
     const name = normalizeGuestPath(path);
+    if (this.uncertainNames.has(name)) return null;
     return this.names.has(name) ? true : name.includes('/') ? null : false;
   }
   private request(message: Omit<Request, 'id'>): Promise<Result> {
@@ -128,6 +138,20 @@ export class PortGameFileProvider implements GameFileProvider {
   async write(path: string, bytes: Uint8Array): Promise<void> {
     await this.request({ method: 'write', path, bytes });
     this.names.add(normalizeGuestPath(path));
+    this.uncertainNames.delete(normalizeGuestPath(path));
+  }
+  async remove(path: string): Promise<GameFileRemoveResult> {
+    const result = (await this.request({ method: 'remove', path })) as GameFileRemoveResult;
+    const name = normalizeGuestPath(path);
+    if (result === 'removed') {
+      this.names.delete(name);
+      // Removing writeback may reveal an original resource; the port has no synchronous source index.
+      this.uncertainNames.add(name);
+    } else if (result === 'missing') {
+      this.names.delete(name);
+      this.uncertainNames.delete(name);
+    }
+    return result;
   }
   async flush(): Promise<void> {
     await this.request({ method: 'flush', path: '' });

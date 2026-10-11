@@ -1,4 +1,4 @@
-import type { GameFileProvider } from '../contracts';
+import type { GameFileProvider, GameFileRemoveResult } from '../contracts';
 import { normalizeGuestPath } from '../../vm86/paths';
 
 /** Overlay memory files over underlying provider reads; writes and persistence still use the underlying provider. */
@@ -93,6 +93,13 @@ export class OverlayGameFileProvider implements GameFileProvider {
   write(path: string, bytes: Uint8Array): Promise<void> {
     if (this.shadowOverlayWrites && this.overlay.has(normalizeGuestPath(path))) return Promise.resolve();
     return this.parent.write(path, bytes);
+  }
+
+  async remove(path: string): Promise<GameFileRemoveResult> {
+    const normalized = normalizeGuestPath(path);
+    if (this.shadowOverlayWrites && this.overlay.has(normalized)) return 'read-only';
+    const result = this.parent.remove ? await this.parent.remove(path) : 'read-only';
+    return result === 'missing' && this.overlay.has(normalized) ? 'read-only' : result;
   }
 
   flush(): Promise<void> {

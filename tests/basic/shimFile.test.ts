@@ -2,7 +2,12 @@
  * Win32Shim file-layer unit tests with fake guest memory: mounting/_lopen/_lread/_llseek/_lclose, CreateFileA dispositions and error codes, onFileWrite writeback, and guest fast-mirror tables.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { FAST_FILE_ENTRY_BYTES, FAST_FILE_HANDLE_BASE, FAST_FILE_TABLE } from '../../src/vm86/shim/state';
+import {
+  FAST_FILE_ENTRY_BYTES,
+  FAST_FILE_HANDLE_BASE,
+  FAST_FILE_TABLE,
+  type LoadedGuestDll,
+} from '../../src/vm86/shim/state';
 import {
   callShim,
   createGuestMemory,
@@ -64,6 +69,47 @@ function lopen(shim: Win32Shim, memory: FakeGuestMemory, path: string, flags = 0
 function lread(shim: Win32Shim, handle: number, count: number): number {
   return callShim(shim, 'KERNEL32.DLL!_lread', [handle, BUF, count]).eax;
 }
+
+describe('guest DLL export lookup', () => {
+  it('keeps dynamic Bink lifecycle calls observable while decoder calls remain direct', () => {
+    const memory = createGuestMemory();
+    const shim = createTestShim(memory);
+    const base = 0x0040_0000;
+    const modules = (shim as unknown as { loadedGuestDlls: Map<string, LoadedGuestDll> }).loadedGuestDlls;
+    modules.set('binkw32.dll', {
+      name: 'binkw32.dll',
+      base,
+      size: 0x1000,
+      entry: 0,
+      initialized: true,
+      exports: new Map([
+        ['_BinkOpen@8', base + 0x100],
+        ['_BinkClose@4', base + 0x200],
+        ['_BinkDoFrame@4', base + 0x300],
+      ]),
+    });
+    const lookup = (name: string) => {
+      writeAsciiZ(memory, STR, name);
+      return callShim(shim, 'KERNEL32.DLL!GetProcAddress', [base, STR]).eax;
+    };
+    for (const [name, target, argBytes] of [
+      ['_BinkOpen@8', base + 0x100, 8],
+      ['_BinkClose@4', base + 0x200, 4],
+    ] as const) {
+      const stub = lookup(name);
+      expect(stub).not.toBe(target);
+      expect(lookup(name)).toBe(stub);
+      const imported = [
+        ...(
+          shim as unknown as { dynamicImports: Map<number, { stub: number; key: string; argBytes: number }> }
+        ).dynamicImports.values(),
+      ].find((entry) => entry.stub === stub);
+      expect(imported).toMatchObject({ key: `BINKW32.DLL!${name}`, argBytes });
+    }
+    expect(lookup('_BinkDoFrame@4')).toBe(base + 0x300);
+    expect(lookup('_Missing@0')).toBe(0);
+  });
+});
 
 describe('_lopen/_lread/_llseek/_lclose', () => {
   it('读挂载文件：顺序读、seek 后续读、EOF 归 0', () => {
@@ -156,6 +202,66 @@ describe('_lopen/_lread/_llseek/_lclose', () => {
     // writeFile failure returns -1 (dispatch has not yet truncated to u32).
     expect(callShim(shim, 'KERNEL32.DLL!_lwrite', [handle, BUF, 1]).eax).toBe(-1);
     expect(callShim(shim, 'KERNEL32.DLL!GetLastError').eax).toBe(5);
+  });
+});
+
+describe('DeleteFile session state', () => {
+  it('removes zero-byte files and cached enumeration, then permits recreation', () => {
+    const memory = createGuestMemory();
+    const remove = vi.fn(() => 0);
+    const shim = createTestShim(memory, { onFileDelete: remove });
+    shim.mountFile('zero.sav', new Uint8Array());
+    shim.setFileSearchResults('*.sav', [{ path: 'zero.sav', size: 0 }]);
+    writeAsciiZ(memory, STR, 'ZERO.SAV');
+    expect(callShim(shim, 'KERNEL32.DLL!DeleteFileA', [STR]).eax).toBe(1);
+    expect(remove).toHaveBeenCalledWith('zero.sav');
+    expect(shim.hasMountedFile('zero.sav')).toBe(false);
+    expect(shim.getMountedFileBytes('zero.sav')).toBeUndefined();
+    writeAsciiZ(memory, STR, '*.sav');
+    expect(callShim(shim, 'KERNEL32.DLL!FindFirstFileA', [STR, INFO]).eax).toBe(INVALID);
+    writeAsciiZ(memory, STR, 'zero.sav');
+    const handle = callShim(shim, 'KERNEL32.DLL!_lcreat', [STR, 0]).eax;
+    expect(handle).not.toBe(INVALID);
+    expect(callShim(shim, 'KERNEL32.DLL!_lclose', [handle]).eax).toBe(0);
+    expect(shim.hasMountedFile('zero.sav')).toBe(true);
+  });
+
+  it('distinguishes missing, read-only storage, directories and open handles', () => {
+    const memory = createGuestMemory();
+    const remove = vi.fn(() => 5);
+    const shim = createTestShim(memory, { onFileDelete: remove });
+    writeAsciiZ(memory, STR, 'missing.sav');
+    expect(callShim(shim, 'KERNEL32.DLL!DeleteFileA', [STR]).eax).toBe(0);
+    expect(callShim(shim, 'KERNEL32.DLL!GetLastError').eax).toBe(2);
+    expect(remove).not.toHaveBeenCalled();
+    shim.mountFile('source.sav', new Uint8Array([1]));
+    writeAsciiZ(memory, STR, 'source.sav');
+    expect(callShim(shim, 'KERNEL32.DLL!DeleteFileA', [STR]).eax).toBe(0);
+    expect(callShim(shim, 'KERNEL32.DLL!GetLastError').eax).toBe(5);
+    expect(shim.getMountedFileBytes('source.sav')).toEqual(new Uint8Array([1]));
+    remove.mockClear();
+    const handle = lopen(shim, memory, 'source.sav');
+    expect(callShim(shim, 'KERNEL32.DLL!DeleteFileA', [STR]).eax).toBe(0);
+    expect(callShim(shim, 'KERNEL32.DLL!GetLastError').eax).toBe(32);
+    expect(remove).not.toHaveBeenCalled();
+    callShim(shim, 'KERNEL32.DLL!_lclose', [handle]);
+    writeAsciiZ(memory, STR, 'C:\\GAME');
+    expect(callShim(shim, 'KERNEL32.DLL!DeleteFileA', [STR]).eax).toBe(0);
+    expect(callShim(shim, 'KERNEL32.DLL!GetLastError').eax).toBe(5);
+  });
+
+  it('wide paths preserve Unicode and authoritative missing storage clears stale mounts', () => {
+    const memory = createGuestMemory();
+    const shim = createTestShim(memory, { onFileDelete: () => 2 });
+    const path = '存档.sav';
+    shim.mountFile(path, new Uint8Array([1]));
+    memory.write_memory(
+      [...path, '\0'].flatMap((char) => [char.charCodeAt(0) & 255, char.charCodeAt(0) >>> 8]),
+      STR,
+    );
+    expect(callShim(shim, 'KERNEL32.DLL!DeleteFileW', [STR]).eax).toBe(0);
+    expect(callShim(shim, 'KERNEL32.DLL!GetLastError').eax).toBe(2);
+    expect(shim.hasMountedFile(path)).toBe(false);
   });
 });
 

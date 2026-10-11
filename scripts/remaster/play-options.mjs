@@ -11,6 +11,9 @@ export const HD_PLAY_OPTIONS = Object.freeze({
   'hd-vlook': 'remaster',
   'hd-vproj': 'vehicles-hd',
   'hd-ui': '1',
+  // Single-pass reconstruction of the original menus/dialogs; HD passthrough
+  // keeps its separate 1:1 overlay path and does not run this filter.
+  sr: '1',
 });
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href)

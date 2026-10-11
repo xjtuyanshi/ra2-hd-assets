@@ -390,6 +390,8 @@ export interface GameRenderSidebar {
   controls?: { id: string; rect: GameRenderRect; frame: number }[];
   /** Exact native ShapeButton frames, including disabled, pressed and flashing phase. */
   tabFrames?: number[];
+  /** Native source frame for the command background's left cap; absent when unknown. */
+  commandBarLeftFrame?: number;
   /** Repair / sell cursor modes armed from the sidebar buttons. */
   modes: { repair: boolean; sell: boolean };
   /** Cameo captions in the game's language (e.g. "Ready", "On Hold"), null when they could not be read. */

@@ -186,6 +186,19 @@ export function nativeMainMenuReady(hello, state) {
   );
 }
 
+export function nativeFilmReady(hello, state) {
+  // moviePlaying is true only while successfully opened native Bink handles
+  // remain active. Main-menu animation cannot bypass the visible-dialog gate.
+  return (
+    hello.surface?.width > 0 &&
+    hello.surface?.height > 0 &&
+    state.modal === false &&
+    state.moviePlaying === true &&
+    Number.isSafeInteger(state.movieOpens) &&
+    state.movieOpens > 0
+  );
+}
+
 // Every overwritten file has a verified, exclusive backup first. Restoration
 // is conditional on unchanged installed bytes, so later player changes survive.
 export async function installDll(source, target, runDirectory) {
@@ -942,17 +955,23 @@ export async function runLauncher(arguments_, environment = process.env) {
         if (!!hello.hiddenHost?.enabled !== (gameEnvironment.RA2_NATIVE_AGENT_HIDDEN === '1'))
           throw new Error('游戏未能完成启动：游戏窗口显示模式与本次设置不一致。请查看本次启动记录。');
         assertOwnedExecutableIdentity(hello, expectedIdentity);
-        receivedHello = false; // A valid identity can precede the native menu.
+        receivedHello = false; // A valid identity can precede usable native input.
         const inputState = JSON.parse((await client.request(Type.INPUT_STATE)).toString());
-        if (!nativeMainMenuReady(hello, inputState))
-          throw new Error('Waiting for the usable original native main menu');
-        console.log(`Native main menu ready: ${Date.now() - launchStartedAt} ms since launcher start`);
+        if (nativeMainMenuReady(hello, inputState)) {
+          console.log(`Native main menu ready: ${Date.now() - launchStartedAt} ms since launcher start`);
+        } else if (nativeFilmReady(hello, inputState)) {
+          console.log(
+            `影片已经开始播放，可以在 Chrome 页面点击“跳过影片”（启动后 ${Date.now() - launchStartedAt} 毫秒）。`,
+          );
+        } else {
+          throw new Error('Waiting for the usable original native main menu or film');
+        }
         break;
       } catch (error) {
         if (receivedHello) throw error;
         if (Date.now() >= agentDeadline)
           throw new Error(
-            `游戏在 60 秒内没有进入可操作的主菜单：${error.message}。请查看本次记录中的 launcher.log 和 wine.log。`,
+            `游戏在 60 秒内没有进入可操作的主菜单或影片：${error.message}。请查看本次记录中的 launcher.log 和 wine.log。`,
           );
       } finally {
         if (client) {

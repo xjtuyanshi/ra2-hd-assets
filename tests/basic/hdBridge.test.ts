@@ -2299,6 +2299,33 @@ describe('native HD curtain', () => {
     harness.stop();
   });
 
+  it('releases a restoration curtain when a modal takes the screen before a keyed frame arrives', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    await goLive(harness);
+    await advance(320);
+    harness.setState(null);
+    await advance(17);
+    await advance(501);
+    expect(harness.bridge()!.timeline.transitions.at(-1)).toMatchObject({ to: 'original' });
+    await advance(501);
+    harness.setState(battle(3));
+    await advance(17);
+    // The dialog transition briefly exposes the retained match; its native picture has no tactical key.
+    harness.nativeFrame(false);
+    expect(harness.bridge()!.timeline.transitions.at(-1)).toMatchObject({ to: 'curtain' });
+    expect(harness.hdCanvas.style.display).toBe('none');
+    harness.setState(null);
+    await advance(17);
+    await advance(501);
+    expect(harness.curtain.style.display).toBe('none');
+    expect(harness.bridge()!.timeline.transitions.at(-1)).toMatchObject({ to: 'original' });
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
+    harness.nativeFrame();
+    await advance(17);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    harness.stop();
+  });
+
   it('switches preflight passthrough off before a hole exists and ignores its late acceptance', async () => {
     vi.useFakeTimers();
     const harness = setup('?hd=1', 'WebGL2', 'native');

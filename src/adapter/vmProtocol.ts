@@ -27,6 +27,8 @@ export interface VmInitConfig {
   startupPage?: string;
   /** HD bridge opt-in: install the game's inert native overlay passthrough patches before the entry point. */
   renderPassthrough?: boolean;
+  /** Validated page cursor art is available before game startup. */
+  pageCursor?: boolean;
   /**
    * File backend: directory handles (transferred/cloned), session-package memory files (online ZIP extraction results transferred with the message), or a development HTTP provider marker.
    * Provider instances cannot be structured-cloned; rebuild and rediscover in the Worker, also rebuilding the game's sourceTransform. Directory overlays contain online-package layers above the directory, innermost first with later layers overriding earlier ones, matching the page's Overlay-chain precedence.
@@ -113,6 +115,7 @@ export type WorkerToMainMessage =
   | { type: 'probe'; ready: true }
   | { type: 'status'; phase: VmPhase; detail: string }
   | { type: 'shell-page'; title: string }
+  | { type: 'movie-playback'; playing: boolean }
   | { type: 'call-batch'; batch: VmCallBatch }
   | { type: 'blocked'; call: Win32Call }
   | { type: 'frame'; frameId: number; frame: VmFrame }

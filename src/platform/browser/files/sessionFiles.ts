@@ -1,6 +1,7 @@
 import { normalizeGuestPath } from '../../../vm86/paths';
 import { MemoryGameFileProvider } from '../../../resources/providers/memory';
 import { IndexedDbWriteCache } from './writeCache';
+import type { GameFileRemoveResult } from '../../../resources/contracts';
 
 /**
  * Session memory-package provider: own extracted data without copying and slice on demand for reads.
@@ -46,8 +47,17 @@ export class SessionGameFileProvider extends MemoryGameFileProvider {
   async write(path: string, bytes: Uint8Array): Promise<void> {
     const normalized = normalizeGuestPath(path);
     if (!normalized) throw new Error('拒绝写入空游戏路径');
-    await super.write(path, bytes);
-    await this.writeCache.write(normalized, bytes);
+    const memory = super.write(path, bytes);
+    await Promise.all([memory, this.writeCache.write(normalized, bytes)]);
+  }
+
+  override async remove(path: string): Promise<GameFileRemoveResult> {
+    const normalized = normalizeGuestPath(path);
+    const before = this.files.get(normalized);
+    const persisted = await this.writeCache.remove(normalized);
+    // A later write already owns a newer snapshot and a later persistence operation.
+    const memory = this.files.get(normalized) === before ? await super.remove(normalized) : 'missing';
+    return persisted || memory === 'removed' ? 'removed' : memory;
   }
 
   async list(directory: string): Promise<string[] | null> {

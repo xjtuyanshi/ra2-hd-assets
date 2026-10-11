@@ -866,7 +866,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       setHole(null, reason);
       return;
     }
-    if (hole) hidePending ??= { at: performance.now(), reason };
+    // A restored snapshot can show the curtain while waiting for a new keyed picture, before a hole exists.
+    // If a dialog takes the screen again in that interval, it must release that curtain as well as the HD view.
+    if (hole || (revealed && curtainVisible)) hidePending ??= { at: performance.now(), reason };
     // At startup a missing mirror must not lift the curtain onto the original battlefield.
   };
   const onNativeFrame = (picture: VmFrame) => {
@@ -1333,6 +1335,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       hidePending = null;
       clearCurtain();
       setHole(null, reason);
+      // A restoration curtain may have requested passthrough without opening a hole, so setHole can be a no-op.
+      requestPassthrough(0);
+      changePresentation('original', reason);
     }
     if (curtainVisible) {
       layoutCurtain();

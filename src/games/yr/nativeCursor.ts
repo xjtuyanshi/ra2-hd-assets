@@ -19,42 +19,45 @@ export function setYrNativePointerDrawing(memory: GuestMemory, enabled: boolean)
 
 /** Null is an observed absence/hidden/software-off state. Undefined is an
  * incomplete or inconsistent sample and must not erase validated cursor art. */
-export async function readYrNativePointer(
-  read: (address: number, length: number) => Promise<Uint8Array>,
+/** Synchronous VM samples and asynchronous native READs share the same validation and consistency boundaries. */
+function* pointerSample(
   width: number,
   height: number,
-): Promise<VmFrame['pointer']> {
-  const roots = await Promise.all([read(YR_SIDEBAR.mouse, 4), read(YR_SIDEBAR.mouseShape, 4)]);
+): Generator<readonly (readonly [number, number])[], VmFrame['pointer'], Uint8Array[]> {
+  const roots = yield [
+    [YR_SIDEBAR.mouse, 4],
+    [YR_SIDEBAR.mouseShape, 4],
+  ];
   if (roots.some((bytes) => bytes.length !== 4)) return undefined;
   const object = new DataView(roots[0]!.buffer, roots[0]!.byteOffset, 4).getUint32(0, true);
   const shape = new DataView(roots[1]!.buffer, roots[1]!.byteOffset, 4).getUint32(0, true);
   if (!object) return null;
   if (object < 0x10000 || object & 3) return undefined;
-  const first = await read(object, 0x44);
+  const first = (yield [[object, 0x44]])[0]!;
   if (first.length !== 0x44) return undefined;
   const view = new DataView(first.buffer, first.byteOffset, first.byteLength);
   if (view.getUint32(0, true) !== 0x7f7b2c) return undefined;
   if (view.getInt32(12, true) < 0 || !view.getUint8(0x10)) return null;
   if (shape < 0x10000 || shape & 3 || view.getUint32(4, true) !== shape) return undefined;
-  const header = await read(shape, 8);
+  const header = (yield [[shape, 8]])[0]!;
   if (header.length !== 8) return undefined;
   const sheet = new DataView(header.buffer, header.byteOffset, header.byteLength);
   const sheetWidth = sheet.getUint16(2, true),
     sheetHeight = sheet.getUint16(4, true);
   if (sheet.getUint16(0, true) !== 0 || sheetWidth < 1 || sheetWidth > 256 || sheetHeight < 1 || sheetHeight > 256)
     return undefined;
-  const [latest, liveObject, liveShape] = await Promise.all([
-    read(object, 0x44),
-    read(YR_SIDEBAR.mouse, 4),
-    read(YR_SIDEBAR.mouseShape, 4),
-  ]);
-  if (latest.length !== 0x44 || liveObject.length !== 4 || liveShape.length !== 4) return undefined;
-  if (new DataView(liveObject.buffer, liveObject.byteOffset, 4).getUint32(0, true) !== object) return undefined;
-  const current = new DataView(latest.buffer, latest.byteOffset, latest.byteLength);
+  const [latest, liveObject, liveShape] = yield [
+    [object, 0x44],
+    [YR_SIDEBAR.mouse, 4],
+    [YR_SIDEBAR.mouseShape, 4],
+  ];
+  if (latest!.length !== 0x44 || liveObject!.length !== 4 || liveShape!.length !== 4) return undefined;
+  if (new DataView(liveObject!.buffer, liveObject!.byteOffset, 4).getUint32(0, true) !== object) return undefined;
+  const current = new DataView(latest!.buffer, latest!.byteOffset, latest!.byteLength);
   if (current.getUint32(0, true) !== 0x7f7b2c) return undefined;
   if (current.getInt32(12, true) < 0 || !current.getUint8(0x10)) return null;
   if (
-    new DataView(liveShape.buffer, liveShape.byteOffset, 4).getUint32(0, true) !== shape ||
+    new DataView(liveShape!.buffer, liveShape!.byteOffset, 4).getUint32(0, true) !== shape ||
     current.getUint32(4, true) !== shape
   )
     return undefined;
@@ -80,4 +83,29 @@ export async function readYrNativePointer(
     y = current.getInt32(0x18, true);
   if (x < 0 || x >= width || y < 0 || y >= height) return undefined;
   return { frame, x, y, hotspotX, hotspotY };
+}
+
+/** Native transport uses concurrent reads within each consistency boundary. */
+export async function readYrNativePointer(
+  read: (address: number, length: number) => Promise<Uint8Array>,
+  width: number,
+  height: number,
+): Promise<VmFrame['pointer']> {
+  const sample = pointerSample(width, height);
+  let step = sample.next();
+  while (!step.done)
+    step = sample.next(await Promise.all(step.value.map(([address, length]) => read(address, length))));
+  return step.value;
+}
+
+/** VM frames sample synchronously while guest execution is suspended on the host call. */
+export function readYrVmPointer(memory: GuestMemory, width: number, height: number): VmFrame['pointer'] {
+  const sample = pointerSample(width, height);
+  try {
+    let step = sample.next();
+    while (!step.done) step = sample.next(step.value.map(([address, length]) => memory.read_memory(address, length)));
+    return step.value;
+  } catch {
+    return undefined;
+  }
 }

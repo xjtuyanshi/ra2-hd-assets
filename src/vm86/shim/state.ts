@@ -394,6 +394,11 @@ export class ShimState {
     }
   }
 
+  /** Synthetic completed placeholders are not films. Native decoding has matched open/close boundaries. */
+  inspectMoviePlayback(): boolean {
+    return this.nativeBinkPlaybackActive && !this.isShellVisible();
+  }
+
   inspectCallbackState(): VmCallbackState | null {
     return this.lastCallbackState;
   }
@@ -401,6 +406,16 @@ export class ShimState {
   /** Current RA2 shell title resource key, letting state-driven input tests await actual menu creation. */
   inspectShellPageTitle(): string {
     return this.shellPageTitle;
+  }
+
+  /** Full-size dialogs own the displayed frame even when they have no shell title control. */
+  inspectFullSizeDialogVisible(): boolean {
+    for (const [hwnd, className] of this.windowClassNames) {
+      if (className.toLowerCase() !== '#32770' || !this.isWindowTreeVisible(hwnd)) continue;
+      const rect = this.windowRects.get(hwnd);
+      if (rect && rect.width >= this.displayWidth && rect.height >= this.displayHeight) return true;
+    }
+    return false;
   }
 
   /** A window is actually visible only if it and every ancestor have WS_VISIBLE. */
@@ -422,16 +437,11 @@ export class ShimState {
     if (titleControlId !== undefined) {
       if (!this.shellPageTitle) return false;
       for (const [hwnd, id] of this.controlIds) {
-        if (id === titleControlId && ((this.windowLongs.get(`${hwnd}:-16`) ?? 0) & 0x1000_0000) !== 0) return true;
+        if (id === titleControlId && this.isWindowTreeVisible(hwnd)) return true;
       }
       return false;
     }
-    for (const [hwnd, className] of this.windowClassNames) {
-      if (className.toLowerCase() !== '#32770' || !this.isWindowTreeVisible(hwnd)) continue;
-      const rect = this.windowRects.get(hwnd);
-      if (rect && rect.width >= this.displayWidth && rect.height >= this.displayHeight) return true;
-    }
-    return false;
+    return this.inspectFullSizeDialogVisible();
   }
 
   /**

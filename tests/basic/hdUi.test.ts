@@ -3,6 +3,7 @@ import {
   CREDITS_BOTTOM,
   CREDITS_TOP,
   chromeSlices,
+  commandBarTiles,
   clockWashOf,
   drawPointer,
   drawSidebar,
@@ -633,28 +634,35 @@ describe('HD chrome at another frame size', () => {
 });
 
 describe('HD software cursor', () => {
-  it('clips the atlas frame to precisely the covered union, including a cursor whose hotspot is outside it', () => {
-    const s = hdSidebar();
-    s.pointer = { x: 660, y: 250, frame: 7, hotspot: { x: 2, y: 3 } };
-    const image = { width: 100, height: 100 } as ImageBitmap;
-    const cursor = vi.fn(() => ({ bitmap: image, rect: { x: 32, y: 16, width: 16, height: 16 } }));
-    const { ctx, calls } = recording();
-    const covered = transparentRects(s, fallback);
-    drawPointer(ctx, s, { ...fallback, cursor }, covered);
-    expect(cursor).toHaveBeenCalledWith(7);
-    expect(calls.filter((c) => c.name === 'rect').map((c) => c.args)).toEqual(
-      covered.map((r) => [r.x, r.y, r.width, r.height]),
-    );
-    const index = calls.findIndex((c) => c.name === 'drawImage');
-    expect(calls[index - 1]?.name).toBe('clip');
-    expect(calls[index]?.args).toEqual([image, 32, 16, 16, 16, 658, 247, 16, 16]);
-    calls.length = 0;
-    drawPointer(ctx, s, { ...fallback, cursor }, covered, { x: 500, y: 100 });
-    expect(calls).toHaveLength(0);
-    drawPointer(ctx, s, { ...fallback, cursor }, covered, { x: 770, y: 250 });
-    expect(calls.find((c) => c.name === 'drawImage')?.args.slice(-4)).toEqual([768, 247, 16, 16]);
-    expect(s.pointer.x).toBe(660);
-  });
+  it.each([1, 2])(
+    'clips a %sx atlas to precisely the covered union without scaling its hotspot or logical size',
+    (scale) => {
+      const s = hdSidebar();
+      s.pointer = { x: 660, y: 250, frame: 7, hotspot: { x: 2, y: 3 } };
+      const image = { width: 100, height: 100 } as ImageBitmap;
+      const cursor = vi.fn(() => ({
+        bitmap: image,
+        rect: { x: 32, y: 16, width: 16 * scale, height: 16 * scale },
+        scale,
+      }));
+      const { ctx, calls } = recording();
+      const covered = transparentRects(s, fallback);
+      drawPointer(ctx, s, { ...fallback, cursor }, covered);
+      expect(cursor).toHaveBeenCalledWith(7);
+      expect(calls.filter((c) => c.name === 'rect').map((c) => c.args)).toEqual(
+        covered.map((r) => [r.x, r.y, r.width, r.height]),
+      );
+      const index = calls.findIndex((c) => c.name === 'drawImage');
+      expect(calls[index - 1]?.name).toBe('clip');
+      expect(calls[index]?.args).toEqual([image, 32, 16, 16 * scale, 16 * scale, 658, 247, 16, 16]);
+      calls.length = 0;
+      drawPointer(ctx, s, { ...fallback, cursor }, covered, { x: 500, y: 100 });
+      expect(calls).toHaveLength(0);
+      drawPointer(ctx, s, { ...fallback, cursor }, covered, { x: 770, y: 250 });
+      expect(calls.find((c) => c.name === 'drawImage')?.args.slice(-4)).toEqual([768, 247, 16, 16]);
+      expect(s.pointer.x).toBe(660);
+    },
+  );
   it('uses a clipped vector arrow for missing art and respects hidden/unknown pointer state', () => {
     const s = hdSidebar(),
       { ctx, calls } = recording();
@@ -950,7 +958,7 @@ describe('optional HD UI art cache', () => {
     const assets = createUiAssets();
     expect(assets.cursor(1)).toBeNull();
     await settle();
-    expect(assets.cursor(1)).toEqual({ bitmap: image, rect: { x: 16, y: 0, width: 16, height: 16 } });
+    expect(assets.cursor(1)).toEqual({ bitmap: image, rect: { x: 16, y: 0, width: 16, height: 16 }, scale: 1 });
     expect(assets.cursor(-1)).toBeNull();
     expect(assets.cursor(2)).toBeNull();
     expect(fetcher.mock.calls.map(([path]) => path)).toEqual([
@@ -1146,6 +1154,52 @@ describe('native control and radar atlas presentation', () => {
       rect: { x: frame * 24, y: 0, width: 24, height: 24 },
     })),
   };
+  const commandArt = {
+    scale: 2,
+    left: [0, 1, 2].map((frame) => ({ frame, bitmap: { width: 88, height: 64 } as ImageBitmap })),
+    middle: { width: 128, height: 64 } as ImageBitmap,
+    right: { width: 88, height: 64 } as ImageBitmap,
+  };
+  it.each([88, 89, 800, 1280, 1560, 2560])(
+    'keeps both end caps fixed and crops the repeated rail at width %s',
+    (width) => {
+      for (const frame of [0, 1, 2]) {
+        const tiles = commandBarTiles(width, commandArt, frame);
+        expect(tiles[0]).toMatchObject({
+          bitmap: commandArt.left[frame]!.bitmap,
+          target: { x: 0, y: 0, width: 44, height: 32 },
+        });
+        expect(tiles.at(-1)).toMatchObject({
+          bitmap: commandArt.right,
+          target: { x: width - 44, y: 0, width: 44, height: 32 },
+        });
+        let edge = 44;
+        for (const tile of tiles.slice(1, -1)) {
+          expect(tile.bitmap).toBe(commandArt.middle);
+          expect(tile.target.x).toBe(edge);
+          expect(tile.source.width).toBe(tile.target.width * 2);
+          expect(tile.target.width).toBeLessThanOrEqual(64);
+          edge += tile.target.width;
+        }
+        expect(edge).toBe(width - 44);
+      }
+    },
+  );
+  it('clears the live wide bar and paints independent command buttons above its HD background', () => {
+    const s = hdSidebar();
+    s.frame.width = 1728;
+    s.layout.commandBar = { x: 0, y: 568, width: 1560, height: 32 };
+    s.commandBarLeftFrame = 0;
+    s.controls = [{ id: 'command7', rect: { x: 123, y: 575, width: 24, height: 24 }, frame: 1 }];
+    const assets = { ...fallback, chrome: () => ({ ...chrome, controls: atlas, commandBar: commandArt }) };
+    expect(transparentRects(s, assets)).toContainEqual(s.layout.commandBar);
+    const { ctx, calls } = recording();
+    drawSidebar(ctx, s, assets, { scale: 2, time: 0 });
+    const drawOrder = calls.filter((call) => call.name === 'drawImage').map((call) => call.args[0]);
+    expect(drawOrder.indexOf(bitmap)).toBeGreaterThan(drawOrder.indexOf(commandArt.right));
+    s.commandBarLeftFrame = 9;
+    expect(transparentRects(s, assets)).not.toContainEqual(s.layout.commandBar);
+  });
   it.each([0, 1, 2])('draws every native state at its live rectangle on side %s', (side) => {
     const s = hdSidebar();
     s.side = side;
@@ -1485,6 +1539,36 @@ describe('chrome extras: single control images and overlays', () => {
     expect(closes).toHaveLength(4);
     for (const close of closes) expect(close).toHaveBeenCalledOnce();
   });
+  it.each([false, true])(
+    'publishes a responsive bar only when every source image is complete (missing %s)',
+    async (missing) => {
+      const commandBar = {
+        scale: 2,
+        left: [0, 1, 2].map((frame) => ({ frame, file: `ui3/left${frame}@2x.png` })),
+        middle: 'ui3/middle@2x.png',
+        right: 'ui3/right@2x.png',
+      };
+      const { closes } = serve(
+        manifest({ commandBar }),
+        {
+          'left0@2x.png': [88, 64],
+          'left1@2x.png': [88, 64],
+          'left2@2x.png': [88, 64],
+          'middle@2x.png': [128, 64],
+          'right@2x.png': [88, 64],
+        },
+        missing ? ['middle@2x.png'] : [],
+      );
+      const assets = createUiAssets();
+      assets.chrome(0);
+      await settle();
+      expect(assets.chrome(0)?.pieces).toHaveLength(1);
+      expect(!!assets.chrome(0)?.commandBar).toBe(!missing);
+      if (!missing) expect(assets.chrome(0)?.commandBar?.left.map((entry) => entry.frame)).toEqual([0, 1, 2]);
+      assets.dispose();
+      for (const close of closes) expect(close).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each([
     ['a missing control image', {}, ['left-link-frame1@2x.png'], 'controlImages'],

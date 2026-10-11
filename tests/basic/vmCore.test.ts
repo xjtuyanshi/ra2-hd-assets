@@ -136,6 +136,8 @@ function fakeShim(dispatch: () => unknown = () => null): Win32Shim {
     dispose: vi.fn(),
     dispatch,
     inspectShellPageTitle: () => '',
+    inspectFullSizeDialogVisible: () => false,
+    inspectMoviePlayback: () => false,
     inspectHeapState: () => ({
       liveBytes: 0,
       freeBytes: 0,
@@ -274,6 +276,72 @@ describe('VmCore lifecycle orchestration', () => {
       writeU32(emulator, HYPERCALL_REQUEST, 999);
       await (core as unknown as { poll(): Promise<void> }).poll();
       expect(read).toHaveBeenCalledWith(path);
+      expect(dispatch).toHaveBeenCalledOnce();
+    } finally {
+      await core.destroy();
+    }
+  });
+
+  it('waits for persisted writes and actual storage removal before DeleteFile returns', async () => {
+    const emulator = new FakeEmulator();
+    const fixture = source();
+    const backing = new MemoryGameFileProvider();
+    let finishWrite!: () => Promise<void>;
+    fixture.files = Object.assign(backing, {
+      write: vi.fn(
+        (path: string, bytes: Uint8Array) =>
+          new Promise<void>((resolve) => {
+            finishWrite = async () => {
+              backing.files.set(path, bytes.slice());
+              resolve();
+            };
+          }),
+      ),
+      remove: vi.fn(async (path: string) => (backing.files.delete(path) ? ('removed' as const) : ('missing' as const))),
+    });
+    let onFileWrite!: (path: string, bytes: Uint8Array) => void;
+    let onFileDelete!: (path: string) => number;
+    const dispatch = vi.fn(() => {
+      expect(fixture.files.hasKnownFile!('session.sav')).toBe(false);
+      expect(onFileDelete('session.sav')).toBe(0);
+      return { eax: 1 };
+    });
+    const shim = Object.assign(fakeShim(dispatch), {
+      hasMountedFile: () => false,
+      mountFile: vi.fn(),
+      inspectFileDeleteError: () => 0,
+      prepareGuestThreadReturn: () => 0,
+      resolveDynamicImport: () => ({
+        id: 999,
+        key: 'KERNEL32.DLL!DeleteFileA',
+        dll: 'KERNEL32.DLL',
+        name: 'DeleteFileA',
+        argBytes: 4,
+        slot: 0,
+        stub: 0,
+      }),
+    });
+    const hooks = platform(emulator, new FakeAudio(), () => shim);
+    hooks.createShim = (_memory, options) => {
+      onFileWrite = options!.onFileWrite!;
+      onFileDelete = options!.onFileDelete!;
+      return shim;
+    };
+    const core = new VmCore({}, fixture, hooks);
+    try {
+      await core.start();
+      onFileWrite('session.sav', new Uint8Array([1]));
+      emulator.write_memory(new TextEncoder().encode('session.sav\0'), 0x3000);
+      writeU32(emulator, HYPERCALL_STACK, 0x2000);
+      writeU32(emulator, 0x2004, 0x3000);
+      writeU32(emulator, HYPERCALL_REQUEST, 999);
+      const pending = (core as unknown as { poll(): Promise<void> }).poll();
+      await Promise.resolve();
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(fixture.files.remove).not.toHaveBeenCalled();
+      await finishWrite();
+      await pending;
+      expect(fixture.files.remove).toHaveBeenCalledWith('session.sav');
       expect(dispatch).toHaveBeenCalledOnce();
     } finally {
       await core.destroy();
@@ -536,6 +604,32 @@ describe('VmCore HD bridge opt-in', () => {
     fixture.game = { ...fixture.game, ...game, runtimeHooks: hooks };
     return fixture;
   }
+  it('samples an opt-in game pointer on real emitted frames, retains inconsistent samples, and restores drawing on teardown', async () => {
+    const pointer = { frame: 7, x: 32, y: 44, hotspotX: 27, hotspotY: 21 };
+    const read = vi.fn().mockReturnValueOnce(pointer).mockReturnValueOnce(undefined).mockReturnValueOnce(null);
+    const restore = vi.fn(() => true);
+    const prepare = vi.fn(async () => ({ read, setDrawing: restore }));
+    const hooks = platform(new FakeEmulator(), new FakeAudio(), () => fakeShim());
+    hooks.pageCursor = true;
+    let emit: (frame: import('../../src/vm86/win32').VmFrame) => void = () => {};
+    hooks.createShim = (_memory, options) => {
+      emit = (frame) => options?.onFrame?.(frame);
+      return fakeShim();
+    };
+    const receive = vi.fn();
+    const core = new VmCore({ onFrame: receive }, hooked({ preparePagePointer: prepare }), hooks);
+    try {
+      await core.start();
+      for (let i = 0; i < 3; i++)
+        emit({ width: 800, height: 600, pixels: new Uint8Array(), palette: new Uint8Array() });
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(read).toHaveBeenCalledWith(800, 600);
+      expect(receive.mock.calls.map(([frame]) => frame.pointer)).toEqual([pointer, pointer, null]);
+    } finally {
+      await core.destroy();
+    }
+    expect(restore).toHaveBeenCalledWith(true);
+  });
 
   function control(configAddress = 0): RenderPassthroughControl & { set: ReturnType<typeof vi.fn> } {
     return {
@@ -677,7 +771,11 @@ describe('VmCore HD bridge opt-in', () => {
     const reader = vi.fn(() => snapshot);
     const create = vi.fn(async (): Promise<GameRenderStateReader | null> => reader);
     let title = '';
-    const shim = Object.assign(fakeShim(), { inspectShellPageTitle: () => title });
+    let fullSizeDialogVisible = false;
+    const shim = Object.assign(fakeShim(), {
+      inspectShellPageTitle: () => title,
+      inspectFullSizeDialogVisible: () => fullSizeDialogVisible,
+    });
     const core = new VmCore(
       {},
       hooked({ createRenderStateReader: create }),
@@ -690,6 +788,10 @@ describe('VmCore HD bridge opt-in', () => {
       expect(await core.getRenderState()).toBeNull();
       expect(create).not.toHaveBeenCalled();
       title = '';
+      fullSizeDialogVisible = true;
+      expect(await core.getRenderState()).toBeNull();
+      expect(create).not.toHaveBeenCalled();
+      fullSizeDialogVisible = false;
       create.mockResolvedValueOnce(null);
       expect(await core.getRenderState()).toBeNull();
       create.mockRejectedValueOnce(new Error('module failed to load'));

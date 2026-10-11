@@ -15,7 +15,7 @@ export function createNativeCursorFrames(host: {
       // picture must not reacquire CSS after the page overlay restored it.
       if (disposed || host.isReleased()) return;
       const pageCursor = host.pageCursor();
-      if (pageCursor) {
+      if (pageCursor && 'pointer' in frame) {
         pageCursor.update({ ...frame });
         delete frame.cursor;
       } else if ('pointer' in frame) {

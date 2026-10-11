@@ -314,6 +314,12 @@ export function withKernel32<TBase extends Constructor<ShimGraphicsChain>>(Base:
           return { eax: this.getTimeFormatA(a[1] ?? 0, a[2] ?? 0, a[3] ?? 0, a[4] ?? 0, (a[5] ?? 0) | 0) };
         case 'KERNEL32.DLL!CreateFileA':
           return { eax: this.openFile(a) };
+        case 'KERNEL32.DLL!DeleteFileA':
+          return { eax: this.deleteFilePath(this.readCString(a[0] ?? 0)) };
+        case 'KERNEL32.DLL!DeleteFileW':
+          return {
+            eax: this.deleteFilePath(String.fromCharCode(...this.readWideUnits(a[0] ?? 0, -1)).replace(/\0$/, '')),
+          };
         case 'KERNEL32.DLL!FindFirstFileA': {
           if (!a[0] || !a[1]) {
             this.lastError = 87;
@@ -1083,8 +1089,30 @@ export function withKernel32<TBase extends Constructor<ShimGraphicsChain>>(Base:
         }
         return 0;
       }
-      return module.exports.get(name) ?? 0;
+      return this.resolveGuestDllExport(module, name);
     }
+    protected deleteFilePath(rawPath: string): number {
+      const path = normalizeGuestPath(rawPath);
+      const preflight = this.inspectFileDeleteError(path);
+      if (preflight) {
+        this.lastError = preflight;
+        return 0;
+      }
+      const error = this.options.onFileDelete?.(path) ?? 0;
+      if (error === 0 || error === 2) {
+        this.forgetMountedFile(path);
+        // Already-open searches retain their snapshots; the next search must not resurrect deleted metadata.
+        for (const [pattern, entries] of this.fileSearchListings) {
+          this.fileSearchListings.set(
+            pattern,
+            entries.filter((entry) => normalizeGuestPath(entry.path) !== path),
+          );
+        }
+      }
+      this.lastError = error;
+      return error === 0 ? 1 : 0;
+    }
+
     protected openFile(args: number[]): number {
       const rawPath = this.readCString(args[0] ?? 0);
       // Drive-root paths, including C: with or without a trailing backslash and the root backslash alone, probe drive existence.

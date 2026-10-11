@@ -107,6 +107,9 @@ export function guardVmCallbacks(callbacks: GameVmCallbacks, isCurrent: () => bo
     onLogicFrame: (count) => {
       if (isCurrent()) callbacks.onLogicFrame?.(count);
     },
+    onMoviePlayback: (playing) => {
+      if (isCurrent()) callbacks.onMoviePlayback?.(playing);
+    },
     onShellPage: (title) => {
       if (isCurrent()) callbacks.onShellPage?.(title);
     },

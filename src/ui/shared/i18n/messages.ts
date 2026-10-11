@@ -47,6 +47,10 @@ export const englishMessages = {
   'AI 不可用，回退原图：{0}': 'AI unavailable; showing original pixels: {0}',
   'CNN 纹理/帧缓冲分配失败': 'Could not allocate CNN texture/framebuffer',
   'CNN 帧缓冲不可用': 'CNN framebuffer unavailable',
+  跳过影片: 'Skip movie',
+  '也可以按 Esc': 'You can also press Esc',
+  '鼠标锁定时，先按 Esc 解锁，再点按钮或再按 Esc。':
+    'When the pointer is locked, press Esc to unlock it, then click the button or press Esc again.',
   运行状态与控制: 'Runtime status and controls',
   调试信息: 'Debug information',
   '正在加载资源选择器…': 'Loading resource picker…',

@@ -8,6 +8,7 @@ export class IndexedDbWriteCache {
   private persistedKeysPromise: Promise<Set<string>> | null = null;
   private persistedKeysSnapshot: Set<string> | null = null;
   private generation = 0;
+  private mutationChain: Promise<void> = Promise.resolve();
 
   invalidate(): void {
     this.generation++;
@@ -37,10 +38,14 @@ export class IndexedDbWriteCache {
     });
   }
 
-  async write(path: string, bytes: Uint8Array): Promise<void> {
+  write(path: string, bytes: Uint8Array): Promise<void> {
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    return this.mutate(() => this.writeNow(path, buffer));
+  }
+
+  private async writeNow(path: string, buffer: ArrayBuffer): Promise<void> {
     const database = await this.database();
     if (!database) return;
-    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
     await new Promise<void>((resolve, reject) => {
       const transaction = database.transaction(DEVELOPMENT_FILE_STORE, 'readwrite');
       // Request success does not mean transaction commit; quota exhaustion or later abort must fail the save.
@@ -51,6 +56,40 @@ export class IndexedDbWriteCache {
       request.onerror = () => reject(request.error);
     });
     (await this.keys()).add(path);
+  }
+
+  /** Delete only this writeback store, after preceding writes commit; never touch resource-package caches. */
+  remove(path: string): Promise<boolean> {
+    return this.mutate(async () => {
+      const database = await this.database();
+      if (!database) return false;
+      let existed = false;
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction(DEVELOPMENT_FILE_STORE, 'readwrite');
+        transaction.oncomplete = () => resolve();
+        transaction.onabort = () => reject(transaction.error ?? new DOMException('删除事务已中止', 'AbortError'));
+        transaction.onerror = () => reject(transaction.error ?? new Error('删除事务失败'));
+        const store = transaction.objectStore(DEVELOPMENT_FILE_STORE);
+        const request = store.get(path);
+        request.onsuccess = () => {
+          existed = request.result !== undefined;
+          const deletion = store.delete(path);
+          deletion.onerror = () => reject(deletion.error);
+        };
+        request.onerror = () => reject(request.error);
+      });
+      (await this.keys()).delete(path);
+      return existed;
+    });
+  }
+
+  private mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = this.mutationChain.then(operation);
+    this.mutationChain = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    return pending;
   }
 
   keys(): Promise<Set<string>> {

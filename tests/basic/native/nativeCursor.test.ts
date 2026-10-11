@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { decodeCursorSnapshot, encodeU32, NativeProtocolError } from '../../../src/adapter/native/protocol';
-import { readYrNativePointer, setYrNativePointerDrawing } from '../../../src/games/yr/nativeCursor';
+import { readYrNativePointer, readYrVmPointer, setYrNativePointerDrawing } from '../../../src/games/yr/nativeCursor';
 import { YR_SIDEBAR } from '../../../src/games/yr/sidebarReader';
 import { createGuestMemory, writeU32 } from '../../helpers/guestMemory';
 
@@ -30,6 +30,28 @@ function fixture() {
 }
 
 describe('native game-selected cursor', () => {
+  it('gives synchronous VM frames the same pointer state and hidden/invalid distinctions as native READs', async () => {
+    const { memory, object, read } = fixture();
+    for (const visible of [1, 0]) {
+      memory.bytes[object + 0x10] = visible;
+      expect(readYrVmPointer(memory, 800, 600)).toEqual(await readYrNativePointer(read, 800, 600));
+    }
+    memory.bytes[object + 0x10] = 1;
+    writeU32(memory, object + 0x3c, 99);
+    expect(readYrVmPointer(memory, 800, 600)).toBeUndefined();
+    expect(
+      readYrVmPointer(
+        {
+          read_memory: () => {
+            throw new Error('out of bounds');
+          },
+          write_memory: () => {},
+        },
+        800,
+        600,
+      ),
+    ).toBeUndefined();
+  });
   it('removes only the validated Draw body and restores it without touching adjacent code', () => {
     const memory = createGuestMemory();
     memory.write_memory([0xbb, ...ORIGINAL, 0xaa], DRAW - 1);

@@ -110,6 +110,13 @@ interface NativeInputOperation {
   c: number;
   position: boolean;
 }
+interface NativeInputState {
+  modal?: boolean;
+  moviePlaying?: boolean | null;
+  movieOpens?: number;
+  movieTotalMs?: number;
+  movieTrackingFailures?: number;
+}
 
 function mergeRanges(ranges: readonly NativeHostRange[]): NativeRange[] {
   const sorted = ranges
@@ -211,6 +218,10 @@ export class NativeCore {
   private pointerUndo: NativeWrite[] = [];
   private systemCursor: VmFrame['cursor'];
   private failing = false;
+  private moviePlaying = false;
+  private movieState: NativeInputState = {};
+  private inputStateReadAt = -Infinity;
+  private inputStateReadPending: Promise<NativeInputState> | null = null;
 
   constructor(
     private readonly callbacks: GameVmCallbacks,
@@ -348,11 +359,48 @@ export class NativeCore {
         : {}),
     };
     this.refreshPointer(picture);
+    // Films and menus can supply pictures without an HD render-state poll.
+    // Reuse a pending lightweight query and skip it when another reader just
+    // sampled, keeping this observation independent of timers and key input.
+    if (performance.now() - this.inputStateReadAt >= 16) void this.readInputState().catch(() => undefined);
     this.scheduleFrame(() => {
       if (this.closed || !this.running) return;
       this.hostFrames++;
       this.callbacks.onFrame?.(frame);
     });
+  }
+
+  private observeInputState(state: NativeInputState): NativeInputState {
+    this.inputStateReadAt = performance.now();
+    if (this.closed) return state;
+    this.movieState = {
+      moviePlaying: state.moviePlaying,
+      movieOpens: state.movieOpens,
+      movieTotalMs: state.movieTotalMs,
+      movieTrackingFailures: state.movieTrackingFailures,
+    };
+    // The main menu also keeps a Bink handle for its animated background.
+    // A visible dialog owns input there; Escape must never be offered as a film skip.
+    const playing = state.moviePlaying === true && !state.modal;
+    if (typeof state.moviePlaying === 'boolean' && this.moviePlaying !== playing) {
+      this.moviePlaying = playing;
+      this.callbacks.onMoviePlayback?.(this.moviePlaying);
+    }
+    return state;
+  }
+
+  private readInputState(): Promise<NativeInputState> {
+    if (this.inputStateReadPending) return this.inputStateReadPending;
+    const pending = this.connection
+      .request(NativeMessageType.InputState, encodeU32(NATIVE_INPUT_STATE_MINIMAL))
+      .then((bytes) => this.observeInputState(decodeJson(bytes) as NativeInputState));
+    this.inputStateReadPending = pending;
+    void pending
+      .finally(() => {
+        if (this.inputStateReadPending === pending) this.inputStateReadPending = null;
+      })
+      .catch(() => undefined);
+    return pending;
   }
 
   private refreshPointer(picture: NativePicture): void {
@@ -448,11 +496,13 @@ export class NativeCore {
         );
         if (!this.pointerSuppressed) throw new Error('Native cursor drawing signature is unsupported');
       }
-      const input = decodeJson(await this.connection.request(NativeMessageType.InputState)) as { modal?: boolean };
+      const input = this.observeInputState(
+        decodeJson(await this.connection.request(NativeMessageType.InputState)) as NativeInputState,
+      );
       // A menu has native pictures and input but no logic-frame callbacks. Do
       // not manufacture a mirror or a logic-thread ID to make it attachable.
       // An attachment outside a menu still requires a complete initial mirror.
-      if (!this.memory.complete && !input.modal) await this.nextMirror();
+      if (!this.memory.complete && !input.modal && !input.moviePlaying) await this.nextMirror();
       if (this.memory.complete) await this.preparePolicy();
       if (this.options.pageCursor !== undefined && this.hello.surface.width > 0 && this.hello.surface.height > 0)
         await this.readCurrentPointer(this.hello.surface.width, this.hello.surface.height);
@@ -651,26 +701,14 @@ export class NativeCore {
   }
   async getRenderState(): Promise<GameRenderState | null> {
     if (!this.running) return null;
-    if (
-      (
-        decodeJson(
-          await this.connection.request(NativeMessageType.InputState, encodeU32(NATIVE_INPUT_STATE_MINIMAL)),
-        ) as { modal?: boolean }
-      ).modal
-    )
-      return null;
+    const input = await this.readInputState();
+    if (input.modal || input.moviePlaying) return null;
     return this.read(this.render, () => this.policy!.createRenderReader());
   }
   async getCommandState(): Promise<GameCommandState | null> {
     if (!this.running) return null;
-    if (
-      (
-        decodeJson(
-          await this.connection.request(NativeMessageType.InputState, encodeU32(NATIVE_INPUT_STATE_MINIMAL)),
-        ) as { modal?: boolean }
-      ).modal
-    )
-      return null;
+    const input = await this.readInputState();
+    if (input.modal || input.moviePlaying) return null;
     return this.read(this.command, () => this.policy!.createCommandReader());
   }
   async getGamePerformance(): Promise<GamePerformanceSample | null> {
@@ -771,13 +809,14 @@ export class NativeCore {
   }
   async getPointerState(): Promise<VmPointerState | null> {
     if (!this.running || !this.hello) return null;
-    const state = decodeJson(await this.connection.request(NativeMessageType.InputState)) as {
+    const state = decodeJson(await this.connection.request(NativeMessageType.InputState)) as NativeInputState & {
       x: number;
       y: number;
       lastKeyMessage: number;
       lastKeyVirtualKey: number;
       lastMessage: number;
     };
+    this.observeInputState(state);
     const surface = this.hello.surface;
     return {
       x: state.x,
@@ -841,6 +880,7 @@ export class NativeCore {
         frames: this.hostFrames,
         inputQueueLength: this.inputQueue.length,
         inputOutstanding: this.inputOutstanding,
+        ...this.movieState,
         cursor: {
           pagePresentation: this.pointerSuppressed,
           software: this.pointer ?? null,

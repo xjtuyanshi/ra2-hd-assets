@@ -80,6 +80,13 @@ HWND nh_input_target_window(void);
 HWND nh_input_cursor_window(void);
 int nh_input_focus_window(HWND window);
 int nh_input_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam, LRESULT *result);
+/* Bink's 32-bit decorated imports retain their original stdcall ABI. */
+typedef void *(WINAPI *nh_bink_open_proc)(const char *name, uint32_t flags);
+typedef void (WINAPI *nh_bink_close_proc)(void *movie);
+extern nh_bink_open_proc nh_real_bink_open;
+extern nh_bink_close_proc nh_real_bink_close;
+void *WINAPI nh_movie_open(const char *name, uint32_t flags);
+void WINAPI nh_movie_close(void *movie);
 void nh_picture_sent(void);
 void nh_picture_disconnect(void);
 void nh_surface_info(uint32_t *width, uint32_t *height, uint32_t *bpp);

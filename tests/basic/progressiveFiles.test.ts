@@ -21,6 +21,9 @@ describe('两层资源存在性和等待语义', () => {
     expect(await first).toEqual(new Uint8Array([7]));
     await second;
     expect(provider.status().loaded).toBe(1);
+    expect(await provider.remove('a')).toBe('removed');
+    expect(await provider.read('a')).toEqual(new Uint8Array([9]));
+    expect(await provider.remove('a')).toBe('read-only');
   });
   it('目录先完整可见，读取尚未解出的文件等待，空文件和缺失不同', async () => {
     const files = make();
@@ -96,6 +99,31 @@ describe('两层资源存在性和等待语义', () => {
 });
 
 describe('Worker 文件独立端口', () => {
+  it('不支持删除的源拒绝，删除源错误通过端口传回而非伪装缺失', async () => {
+    const source = make([]);
+    const provider = {
+      label: source.label,
+      read: source.read.bind(source),
+      write: source.write.bind(source),
+      flush: source.flush.bind(source),
+      list: source.list.bind(source),
+    };
+    const channel = new MessageChannel();
+    const close = serveFileProvider(provider, channel.port1);
+    const remote = new PortGameFileProvider('远端', channel.port2, []);
+    try {
+      expect(await remote.remove('slot.sav')).toBe('read-only');
+      Object.assign(provider, {
+        remove: async () => {
+          throw new Error('delete denied by storage');
+        },
+      });
+      await expect(remote.remove('slot.sav')).rejects.toThrow('delete denied by storage');
+    } finally {
+      remote.dispose();
+      close();
+    }
+  });
   it('端口等待后台文件，transfer 不拆走源字节，写回和分段仍正确', async () => {
     const source = make(['maps01.mix']);
     const channel = new MessageChannel();
@@ -114,6 +142,12 @@ describe('Worker 文件独立端口', () => {
       await remote.write('save.sav', new Uint8Array([7]));
       expect(await source.read('save.sav')).toEqual(new Uint8Array([7]));
       await remote.flush();
+      expect(await remote.remove('SAVE.SAV')).toBe('removed');
+      expect(remote.hasKnownFile('save.sav')).toBeNull();
+      expect(await source.read('save.sav')).toBeNull();
+      expect(await remote.list('')).not.toContain('save.sav');
+      expect(await remote.remove('maps01.mix')).toBe('read-only');
+      expect(await remote.read('maps01.mix')).toEqual(new Uint8Array([1, 2, 3]));
     } finally {
       remote.dispose();
       close();

@@ -1,4 +1,4 @@
-import type { GameFileProvider } from '../../../resources/contracts';
+import type { GameFileProvider, GameFileRemoveResult } from '../../../resources/contracts';
 import { normalizeGuestPath } from '../../../vm86/paths';
 import { IndexedDbWriteCache } from './writeCache';
 
@@ -207,6 +207,20 @@ export class HttpGameFileProvider implements GameFileProvider {
 
   async flush(): Promise<void> {
     await Promise.all([...this.pendingWrites]);
+  }
+
+  async remove(path: string): Promise<GameFileRemoveResult> {
+    const normalized = normalizeGuestPath(path);
+    const snapshot = this.writes.get(normalized);
+    const persisted = await this.writeCache.remove(normalized);
+    if (snapshot || persisted) {
+      if (this.writes.get(normalized) === snapshot) this.writes.delete(normalized);
+      this.invalidateCache();
+      return 'removed';
+    }
+    // Resolve existence through the ordinary prefix read. HTTP errors remain failures,
+    // and an unavailable directory index cannot become a fabricated missing result.
+    return (await this.readPrefix(normalized, 1)) === null ? 'missing' : 'read-only';
   }
 
   async list(directory: string): Promise<string[] | null> {

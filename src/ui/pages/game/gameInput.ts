@@ -222,6 +222,8 @@ export interface GameInputObservation {
 }
 
 export interface GameInputOptions {
+  /** An independent page presenter already owns cursor visibility, even before input installation. */
+  pageOwnsCursor?: boolean;
   /**
    * Where Shift + left button is replaced by ten plain clicks (the page's build-queue convenience). Without it the
    * repeat applies everywhere, which also swallows the game's own Shift + click (add to the selection); a game passes
@@ -264,9 +266,9 @@ export function installGameInput(
   canvas.style.userSelect = 'none';
   const removers: Array<() => void> = [];
   // The emulator uses the browser's hardware cursor on menus in absolute mode.
-  // Native sessions own the exact cursor art in the page or frame presenter and
-  // must keep their CSS ownership when input is installed after a warm frame.
-  if (!lockDesktopMouse && vm.runtimeInfo?.backend !== 'native') {
+  // A page presenter and native frames own the exact cursor art; installing
+  // input after a warm frame must not briefly re-enable the browser's arrow.
+  if (!lockDesktopMouse && !options.pageOwnsCursor && vm.runtimeInfo?.backend !== 'native') {
     const previousCursor = canvas.style.getPropertyValue('cursor');
     const previousCursorPriority = canvas.style.getPropertyPriority('cursor');
     canvas.style.setProperty('cursor', 'default', 'important');

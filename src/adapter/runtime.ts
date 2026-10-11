@@ -148,6 +148,7 @@ export async function createVmShell(
         fallbackReason: null,
       },
       options.renderPassthrough,
+      options.nativePageCursor,
     );
   }
   const handle = directoryHandleOf(source.files);
@@ -205,6 +206,7 @@ export async function createVmShell(
     ...(options.gameSpeed !== undefined ? { gameSpeed: options.gameSpeed } : {}),
     startupPage: options.startupPage,
     ...(options.renderPassthrough ? { renderPassthrough: true } : {}),
+    ...(options.nativePageCursor ? { pageCursor: true } : {}),
     ...(ra2Network ? { ra2Network } : {}),
     fastFileRead:
       typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('fast-files') !== '0',
@@ -266,6 +268,7 @@ export async function createVmShell(
       options.startupPage,
       runtimeInfo,
       options.renderPassthrough,
+      options.nativePageCursor,
     );
   }
 }
@@ -293,6 +296,7 @@ export class Win32GameVm implements VmShell {
       fallbackReason: null,
     },
     renderPassthrough = false,
+    pageCursor = false,
   ) {
     this.fileProvider = source.files;
     const probe = new BrowserEmulatorProbe();
@@ -303,6 +307,7 @@ export class Win32GameVm implements VmShell {
       ...gameVmConfiguration(source.game, callbacks.onNetworkStatus, ra2Network),
       startupPage,
       renderPassthrough,
+      pageCursor,
       fetchBytes,
       scheduleFrame: (emit) => {
         window.requestAnimationFrame(emit);

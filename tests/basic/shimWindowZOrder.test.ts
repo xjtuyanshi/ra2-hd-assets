@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { callShim, createGuestMemory, createTestShim, writeAsciiZ } from '../helpers/guestMemory';
 
 describe('window enumeration in Z order', () => {
-  function setup() {
+  function setup(gameId?: 'ra2' | 'yr') {
     const memory = createGuestMemory();
-    const shim = createTestShim(memory);
+    const shim = createTestShim(memory, { gameId });
     writeAsciiZ(memory, 0x300000, 'Static');
-    const create = (parent = 0) =>
+    const create = (parent = 0, controlId = 0) =>
       callShim(shim, 'USER32.DLL!CreateWindowExA', [
         0,
         0x300000,
@@ -17,7 +17,7 @@ describe('window enumeration in Z order', () => {
         100,
         40,
         parent,
-        0,
+        controlId,
         0,
         0,
       ]).eax;
@@ -25,8 +25,30 @@ describe('window enumeration in Z order', () => {
     const top = (parent: number) => callShim(shim, 'USER32.DLL!GetTopWindow', [parent]).eax;
     const move = (hwnd: number, after: number) =>
       callShim(shim, 'USER32.DLL!SetWindowPos', [hwnd, after, 0, 0, 0, 0, 0x13]);
-    return { shim, create, get, top, move };
+    return { shim, memory, create, get, top, move };
   }
+
+  it('shows movie controls only with decoder playback and no actually visible shell page', () => {
+    const { shim, memory, create } = setup('yr');
+    const decoder = shim as unknown as { nativeBinkPlaybackActive: boolean; shellPageTitle: string };
+    decoder.nativeBinkPlaybackActive = true;
+    expect(shim.inspectMoviePlayback()).toBe(true);
+    const menu = create();
+    const title = create(menu, 1684);
+    writeAsciiZ(memory, 0x310000, 'GUI:MainMenu');
+    callShim(shim, 'USER32.DLL!SetWindowTextA', [title, 0x310000]);
+    // The actual dialog parser records this title; this fixture isolates its
+    // visibility ancestry from decoder execution and resource templates.
+    decoder.shellPageTitle = 'GUI:MainMenu';
+    expect(shim.inspectMoviePlayback()).toBe(false);
+    callShim(shim, 'USER32.DLL!ShowWindow', [menu, 0]);
+    expect(shim.inspectMoviePlayback()).toBe(true);
+    callShim(shim, 'USER32.DLL!ShowWindow', [menu, 5]);
+    expect(shim.inspectMoviePlayback()).toBe(false);
+    decoder.nativeBinkPlaybackActive = false;
+    callShim(shim, 'USER32.DLL!ShowWindow', [menu, 0]);
+    expect(shim.inspectMoviePlayback()).toBe(false);
+  });
 
   it('enumerates the save confirmation above its older sibling page, excluding other parents', () => {
     const { create, get, top } = setup();

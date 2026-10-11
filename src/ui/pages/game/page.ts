@@ -19,6 +19,7 @@ import {
   cancelSourceRequest,
   mapRequest,
   gameRunning,
+  movieSkip,
 } from './state/uiState';
 import { createVmShell, type VmShell } from '../../../adapter/runtime';
 import type { VmStatus } from '../../../app/session/runtimeEvents';
@@ -103,6 +104,7 @@ let activeResolutionChoice: ResolutionChoice = null;
 
 export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const generation = ++pageGeneration;
+  movieSkip.set(null);
   activeNativeViewportAbort?.abort();
   activeNativeViewportAbort = null;
   // Release the old presentation and size listeners before switching sessions so resize callbacks cannot retain prior closures.
@@ -617,6 +619,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
       () => ({ width: gameFrameWidth, height: gameFrameHeight }),
       {
         metaAsControl,
+        pageOwnsCursor: nativeCursor !== null,
         ...(buildStrip === undefined ? {} : { shiftClickRepeat: (x, _y, frame) => x >= frame.width - buildStrip }),
         observe: (observation) => inputObserver?.(observation),
       },
@@ -638,7 +641,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
 
   if (
     import.meta.env.DEV &&
-    new URLSearchParams(window.location.search).get('backend') === 'native' &&
+    (new URLSearchParams(window.location.search).get('backend') === 'native' ||
+      (hdBridgeEnabled && gameSource?.game.id === 'yr')) &&
     new URLSearchParams(window.location.search).get('native-cursor') !== 'game'
   ) {
     try {
@@ -833,7 +837,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
           invalidate: () => presenter.invalidate(),
           frameSize: () => (presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null),
           pointerPosition: () => inputPointerPosition?.() ?? null,
-          pageCursor: () => (vm?.runtimeInfo.backend === 'native' ? nativeCursor !== null : undefined),
+          pageCursor: () => (nativeCursor !== null ? true : vm?.runtimeInfo.backend === 'native' ? false : undefined),
           publishStatus: (text) => hdStatus.set(text),
           publishQuality: (tier, tiers) => toolbar.setHdQuality(tier, tiers),
           publishStalls: (count, longestMs) => toolbar.setStalls(count, longestMs),
@@ -937,6 +941,7 @@ export function stopVmPage(): void {
   hotkeySheet.set(null);
   gameFocus.set(null);
   gameRunning.set(false);
+  movieSkip.set(null);
   void pageController.destroy();
 }
 if (import.meta.hot) import.meta.hot.dispose(stopVmPage);

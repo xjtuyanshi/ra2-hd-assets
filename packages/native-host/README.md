@@ -60,6 +60,13 @@ backup/restore behavior and local Go helper are documented in
   exposes accepted/delivered/API-consumption counters and bounded control IDs,
   text, geometry, bounded Combo selection/list diagnostics and routing counters. DirectInput is explicitly unsupported.
   Native dialog/battle interactions and browser overlays require live acceptance.
+- Configured sessions observe successful Bink opens and their matching closes.
+  `INPUT_STATE` adds `moviePlaying`, `movieOpens` and completed `movieTotalMs`,
+  retained across browser connections so films before page attachment can be
+  measured. `movieTrackingFailures` reports unavailable allocation evidence;
+  in that case `moviePlaying` is unknown (`null`). Picture delivery and existing
+  state queries forward observed playback transitions to the page, with no
+  timer-generated keys or altered playback clocks.
 - Request/reply concurrency is bounded with backpressure. Pending work waits for
   room; input success follows GUI consumption of its cursor/key state before
   original callbacks that may enter a modal loop. Native reply mailbox pressure

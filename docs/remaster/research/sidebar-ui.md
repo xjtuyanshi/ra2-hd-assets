@@ -140,6 +140,12 @@ The expanded byte is `S+0x5544`; `0x6D0DCD..0x6D0DE3` draws `0xB0CCB0` when expa
 `0xB0CC40` otherwise. Those are published as `commandCollapse`/`commandExpand`. Command image keys
 remain numeric (`command0`..`command24`), avoiding invented semantic command names.
 
+`Tab::Draw` loads the left-cap shape pointer at `0x6D0C35` from `0xB0FA3C` and passes the zeroed EBP as its source
+frame at `0x6D0C5B`; `0x6D0C2D..0x6D0C5F` does not select a hover or expansion frame. The loader at
+`0x72FB71..0x72FB7C` resolves `0x844D30` to `LENDCAP.SHP` and stores that pointer. The reader therefore publishes
+`commandBarLeftFrame: 0`; the additional stock art frames are not an inferred state mapping. Responsive chrome
+keeps the live command gadget rectangles and source frames independent of the background.
+
 The loader at `0x6D0F24..0x6D0F5A` formats `Button%02d.SHP` from string `0x842828` and retains
 source pointers in `0xB0C148`. Original-art extraction uses the existing side-archive/palette priority;
 both toolbar toggles receive the `BTTNBKGD.SHP` pointer from `0xB0FA90`
