@@ -416,6 +416,7 @@ async function execute(c) {
     });
   }
   if (c.action === 'command-state') return worker().evaluate(() => globalThis.__auditCore.getCommandState());
+  if (c.action === 'render-state') return worker().evaluate(() => globalThis.__auditCore.getRenderState());
   if (c.action === 'ending-checkpoint') {
     const m = await import('./phase11-endings.mjs');
     return m.capturePhase11EndingCheckpoint({
@@ -475,7 +476,7 @@ async function execute(c) {
       shot,
     });
   }
-  if (c.action === 'attack-visible') {
+  if (c.action === 'attack-visible' || c.action === 'fight-to-victory') {
     const { attackVisibleEnemyBuilding } = await import('./browser-combat-attack.mjs');
     const readBytes = (a, n) =>
       worker().evaluate(
@@ -500,12 +501,17 @@ async function execute(c) {
         return worker().evaluate(() => globalThis.__auditCore.getCommandState());
       },
       combatUnits: true,
+      selectedGroup: c.action === 'fight-to-victory' || c.selectedGroup === true,
+      seconds: c.seconds ?? 600,
+      inputState: state,
+      ownerIdle,
       alliedHouses: Array.from({ length: 6 }, (_, index) => index).filter((index) => mask & (1 << index)),
     });
   }
   if (c.action === 'base-play') {
     const m = await import('./phase9-base-play.mjs');
     return m.runPhase9BasePlay({
+      buildOnly: c.buildOnly ?? false,
       page,
       click: (x, y, mode, button) => click(x, y, button ?? 'left'),
       point,
@@ -726,7 +732,7 @@ async function execute(c) {
     return target;
   }
   if (c.action === 'key') {
-    await page.keyboard.press(c.key);
+    await page.keyboard.press(c.key, { delay: 100 });
     await delay(c.wait ?? 700);
     return c.label ? shot(c.label) : state();
   }

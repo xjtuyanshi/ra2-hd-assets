@@ -344,11 +344,21 @@ export async function runPhase9BasePlay(api) {
         await api.page.keyboard.up('Shift');
       }
     }
-    const selected = await stateWait('all newly trained units selected', (next) => {
+    let retrySelectionAt = performance.now() + 750;
+    const selected = await wait('all newly trained units selected', async () => {
+      const next = await api.commandState();
+      if (!next?.view) return null;
       const selectedUnits = own(next).filter(
         (value) => value.selected && trained.observed.some((unit) => unit.uid === value.uid),
       );
-      return selectedUnits.length === 3 ? selectedUnits : null;
+      if (selectedUnits.length === 3) return { state: next, observed: selectedUnits };
+      // Newly created vehicles can still be leaving the factory when P first
+      // runs. A later exit does not automatically join the earlier selection.
+      if (kind === 'vehicle' && performance.now() >= retrySelectionAt) {
+        await key('p');
+        retrySelectionAt = performance.now() + 750;
+      }
+      return null;
     });
     // Stop the freshly spawned group through the original hotkey. Its native
     // walking-out/rally motion must finish before it becomes the Move baseline.
@@ -530,17 +540,22 @@ export async function runPhase9BasePlay(api) {
     const barracks = await build('barracks', barracksTypes, [yard.uid, power.uid]);
     report.barracks = barracks;
 
-    const infantry = await trainAndMove('infantry', 'infantry', infantryTypes, 2, barracks.uid);
-    report.trainedUnits = infantry.trained;
-    report.movedUnits = infantry.moved;
+    if (!api.buildOnly) {
+      const infantry = await trainAndMove('infantry', 'infantry', infantryTypes, 2, barracks.uid);
+      report.trainedUnits = infantry.trained;
+      report.movedUnits = infantry.moved;
+    }
     const refinery = await build('refinery', refineryTypes, [yard.uid, power.uid, barracks.uid]);
     report.refinery = refinery;
     const warFactory = await build('war-factory', warFactoryTypes, [yard.uid, power.uid, barracks.uid, refinery.uid]);
     report.warFactory = warFactory;
-    const vehicles = await trainAndMove('vehicles', 'vehicle', combatVehicleTypes, 3, warFactory.uid);
-    report.trainedVehicles = vehicles.trained;
-    report.movedVehicles = vehicles.moved;
-    report.met = true;
+    if (!api.buildOnly) {
+      const vehicles = await trainAndMove('vehicles', 'vehicle', combatVehicleTypes, 3, warFactory.uid);
+      report.trainedVehicles = vehicles.trained;
+      report.movedVehicles = vehicles.moved;
+    }
+    report.buildingsOnly = !!api.buildOnly;
+    report.met = !api.buildOnly;
   } catch (error) {
     report.error = String(error);
     report.lastState = await api.commandState().catch(() => null);
