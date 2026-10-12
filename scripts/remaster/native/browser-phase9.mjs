@@ -2,7 +2,7 @@
 // Bounded real-browser inspection. Commands are private review artifacts, never guest-state writes.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdir, readFile, writeFile, appendFile, readdir, lstat } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, appendFile, readdir, lstat, symlink, unlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,10 @@ const tag = process.argv[2] || 'hidden';
 const webRoute = tag.startsWith('web');
 const fullWindow = tag.startsWith('full') || tag.startsWith('webfull');
 const gameSpeed = process.argv[5] ?? '3';
+const stagedFarmPattern = /^(?:phase20\/farm|phase24\/(?:[a-zA-Z0-9_-]+\/)*farm)$/;
+const stagedFarmName = process.argv[6] ?? null;
+assert(stagedFarmName === null || stagedFarmPattern.test(stagedFarmName), 'Use a private staged atlas farm');
+const stagedFarmRoot = stagedFarmName === null ? null : resolve(base, stagedFarmName);
 assert(/^[0-6]$/.test(gameSpeed), 'Game speed must use the original 0..6 scale');
 assert(/^[a-zA-Z0-9_-]+$/.test(tag));
 const useViewportHandshake = naturalWindowDimensions && Number(phase.slice(5)) >= 18 && !tag.startsWith('baseline');
@@ -39,6 +43,7 @@ const exists = async (p) =>
       if (error.code === 'ENOENT') return false;
       throw error;
     });
+if (stagedFarmRoot) assert(await exists(join(stagedFarmRoot, '_library')), 'Staged farm has no type library');
 const scopeDeadline = await readFile(join(base, phase, 'deadline.json'), 'utf8')
   .then((t) => Date.parse(JSON.parse(t).deadlineAt))
   .catch(() => Infinity);
@@ -94,6 +99,7 @@ let launch,
   privateDir,
   server,
   browser,
+  context,
   page,
   cdp,
   logTail = '',
@@ -104,6 +110,9 @@ let launchStartedAtMs = null,
   mainMenuControlsObserved = false;
 let beforeBuildings = false;
 let hdCacheMode = null;
+let hdAtlasLayerRoute = null;
+let servedFarmRoot = null;
+let hdAtlasAlias = null;
 let peakRss = 0;
 async function dllIdentity() {
   const path = join(config.RA2_NATIVE_GAME_DIR || process.env.RA2_NATIVE_GAME_DIR, 'ddraw.dll');
@@ -269,6 +278,19 @@ async function shot(label) {
           localArtComplete: h.live?.localArtComplete,
           stalls: h.stalls,
           speedRecords: window.__speedTelemetry?.records ?? [],
+          preparationNotice: (() => {
+            const notice = document.querySelector('#vm-hd-status');
+            if (!notice) return null;
+            const style = getComputedStyle(notice);
+            return {
+              text: notice.textContent,
+              hidden: notice.hidden,
+              display: style.display,
+              fontSize: style.fontSize,
+              box: notice.getBoundingClientRect().toJSON(),
+              language: document.documentElement.lang,
+            };
+          })(),
           interface: {
             moviePlaying: document.querySelector('#screen')?.dataset.moviePlaying ?? null,
             movieHint: document.querySelector('#vm-movie-skip')?.textContent ?? null,
@@ -383,6 +405,147 @@ const usable = (c) => c.visible && c.enabled && c.rect?.[2] > c.rect?.[0];
 async function execute(c) {
   if (c.action === 'close') return { closing: true };
   await ownerIdle();
+  if (c.action === 'hd-atlas-layer') {
+    assert(
+      typeof c.layer === 'string' && stagedFarmPattern.test(c.layer),
+      'Atlas comparison layers must be staged farms under the private output directory',
+    );
+    const layerRoot = resolve(base, c.layer);
+    assert(await exists(join(layerRoot, '_library')), 'Staged atlas layer has no type library');
+    assert(servedFarmRoot?.startsWith(base + '/'), 'Atlas comparison requires a served private farm');
+    const theater = await page.evaluate(() => window.__hdBridge?.live?.library?.library.theater);
+    assert(typeof theater === 'string' && /^[a-z]+$/.test(theater), 'A loaded live theatre is required');
+    const selectedLibrary = JSON.parse(await readFile(join(layerRoot, '_library', theater, 'library.json'), 'utf8'));
+    const refs = selectedLibrary.spriteAtlasesHd;
+    assert(Array.isArray(refs), 'Staged type library has no HD atlas references');
+    const types = c.types ?? ['CAOILD', 'CAAIRP', 'CATEXS03', 'GACNST', 'GAPOWR', 'GAPILE', 'NAPOWR'];
+    assert(
+      Array.isArray(types) && types.length && types.every((type) => /^[A-Z0-9_]+$/.test(type)),
+      'Building type IDs required',
+    );
+    const targets = types.map((id) => {
+      const type = selectedLibrary.types[id];
+      assert(type?.kind === 'building' && type.sprite, `Staged building ${id} is missing`);
+      const sprites = [type.sprite, type.building?.bib, type.building?.buildup, type.deployingAnim];
+      for (const layer of type.building?.layers ?? []) sprites.push(layer.sprite, layer.damagedSprite);
+      const pages = new Set();
+      for (const name of sprites.filter(Boolean)) {
+        const sprite = selectedLibrary.sprites[name];
+        assert(sprite, `Staged building sprite ${name} is missing`);
+        for (const frame of sprite.frames) if (frame.rect[2] > 0 && frame.rect[3] > 0) pages.add(frame.page ?? 0);
+      }
+      assert(pages.size, `Staged building ${id} has no foreground frames`);
+      const standing = selectedLibrary.sprites[type.sprite].frames[0];
+      assert(standing?.rect[2] > 0 && standing.rect[3] > 0, `Staged building ${id} has no standing frame`);
+      return { id, standingPage: standing.page ?? 0, pages: [...pages].sort((a, b) => a - b) };
+    });
+    const pages = [...new Set(targets.flatMap((target) => target.pages))].sort((a, b) => a - b);
+    if (hdAtlasAlias) await unlink(hdAtlasAlias);
+    const aliasName = `.native-atlas-${tag}`;
+    hdAtlasAlias = join(servedFarmRoot, aliasName);
+    await symlink(layerRoot, hdAtlasAlias, 'dir');
+    if (hdAtlasLayerRoute) await page.context().unroute('**/hd-cache/**', hdAtlasLayerRoute);
+    hdAtlasLayerRoute = async (route) => {
+      const resource = new URL(route.request().url());
+      const pathname = decodeURIComponent(resource.pathname);
+      const prefix = '/hd-cache/';
+      if (!pathname.startsWith(prefix) || !pathname.endsWith('.png')) return route.fallback();
+      const file = resolve(layerRoot, pathname.slice(prefix.length));
+      if (!file.startsWith(layerRoot + '/')) return route.fulfill({ status: 400, body: 'Invalid staged asset path' });
+      // The existing cache server streams the staged page; large PNGs never cross Playwright's fulfilment channel.
+      resource.pathname = `${prefix}${aliasName}/${pathname.slice(prefix.length)}`;
+      return route.continue({ url: resource.href });
+    };
+    await page.context().route('**/hd-cache/**', hdAtlasLayerRoute);
+    const proof = await page.evaluate(
+      async ({ layer, refs, pages, targets }) => {
+        const live = window.__hdBridge?.live;
+        const library = live?.library;
+        if (!live || !library?.hdPages || !library.uploadPage)
+          throw new Error('A loaded live type library is required');
+        const loaded = (index) => {
+          const atlas = library.hdPages.get(index);
+          return !!atlas && typeof atlas === 'object' && !!atlas.color && !!atlas.remap;
+        };
+        for (const target of targets) {
+          const atlas = library.hdPages.get(target.standingPage);
+          if (!atlas || typeof atlas !== 'object' || !atlas.color || !atlas.remap)
+            throw new Error(`Standing body of ${target.id} is not loaded (atlas ${target.standingPage})`);
+        }
+        const loadedPages = pages.filter(loaded);
+        const deferred = pages
+          .filter((index) => !loaded(index))
+          .map((index) => ({
+            index,
+            state: typeof library.hdPages.get(index) === 'string' ? library.hdPages.get(index) : 'not requested',
+          }));
+        const { withDecodedPage } = await import('/packages/hd-renderer/src/pageUpload.ts');
+        const stamp = Date.now();
+        const previousRefs = library.library.spriteAtlasesHd;
+        for (let index = 0; index < previousRefs.length; index++) {
+          const before = previousRefs[index];
+          const after = refs[index];
+          if (!before && !after) continue;
+          if (
+            !before ||
+            !after ||
+            before.width !== after.width ||
+            before.height !== after.height ||
+            before.scale !== after.scale
+          )
+            throw new Error(`Staged atlas ${index} changes geometry`);
+        }
+        const updated = [];
+        const upload = library.uploadPage;
+        // Existing materials keep their Texture objects; the view's gate bounds sequential page uploads.
+        for (const index of loadedPages) {
+          const atlas = library.hdPages.get(index);
+          const ref = refs[index];
+          for (const [texture, file] of [
+            [atlas.color, ref.file],
+            [atlas.remap, ref.remap],
+          ]) {
+            const asset = await fetch(`${library.base}/${file}?native-atlas-layer=${stamp}`);
+            if (!asset.ok) throw new Error(`Staged atlas ${file}: HTTP ${asset.status}`);
+            await withDecodedPage(await asset.blob(), upload, async (bitmap) => {
+              if (bitmap.width !== ref.width || bitmap.height !== ref.height) {
+                bitmap.close();
+                throw new Error(`Staged atlas ${file} changes dimensions`);
+              }
+              texture.image = bitmap;
+              texture.needsUpdate = true;
+              try {
+                await upload(texture);
+              } finally {
+                bitmap.close();
+                texture.image = { width: ref.width, height: ref.height };
+              }
+            });
+          }
+          updated.push({ index, file: ref.file, remap: ref.remap, width: ref.width, height: ref.height });
+        }
+        library.library.spriteAtlasesHd = refs;
+        library.revision++;
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        return {
+          layer,
+          theater: library.library.theater,
+          targets,
+          deferred,
+          scope:
+            'Standing-building comparison; unloaded animation and rubble pages use the selected route when requested.',
+          updated,
+          activity: live.activity(),
+          presentation: window.__hdBridge.presentation,
+        };
+      },
+      { layer: c.layer, refs, pages, targets },
+    );
+    await record('hd-atlas-layer', proof);
+    await delay(c.wait ?? 700);
+    if (c.label) await shot(c.label);
+    return proof;
+  }
   if (c.action === 'hd-cache-mode') {
     if (hdCacheMode) await page.context().unroute('**/hd-cache/**', hdCacheMode);
     hdCacheMode =
@@ -901,6 +1064,19 @@ async function execute(c) {
           passthrough: window.__hdBridge?.passthrough,
           activity: window.__hdBridge?.live?.activity(),
           localArtComplete: window.__hdBridge?.live?.localArtComplete,
+          preparationNotice: (() => {
+            const notice = document.querySelector('#vm-hd-status');
+            if (!notice) return null;
+            const style = getComputedStyle(notice);
+            return {
+              text: notice.textContent,
+              hidden: notice.hidden,
+              display: style.display,
+              fontSize: style.fontSize,
+              box: notice.getBoundingClientRect().toJSON(),
+              language: document.documentElement.lang,
+            };
+          })(),
         })),
       });
       await delay(Math.max(0, (c.intervalMs ?? 100) - (Date.now() - at)));
@@ -1059,9 +1235,11 @@ async function execute(c) {
           o.health > 0 &&
           (c.uid !== undefined
             ? o.uid === c.uid
-            : c.own
-              ? o.owner === state.localHouse && o.kind === 'vehicle'
-              : o.owner !== state.localHouse && /^(HTNK|MTNK|LTNK|E1|E2|INIT)$/.test(o.type)),
+            : c.type !== undefined
+              ? o.type === c.type && (!c.own || o.owner === state.localHouse)
+              : c.own
+                ? o.owner === state.localHouse && o.kind === 'vehicle'
+                : o.owner !== state.localHouse && /^(HTNK|MTNK|LTNK|E1|E2|INIT)$/.test(o.type)),
       )
       .map((o) => ({
         object: o,
@@ -1072,6 +1250,18 @@ async function execute(c) {
     assert(target, 'No requested real object in tactical view');
     await record('pointer-object-target', { label: c.label, view: state.view, factor, ...target });
     await page.mouse.move(...(await point(target.x, target.y)));
+    if (c.select === true) {
+      await click(target.x, target.y);
+      const selected = await wait('actual selected object ' + target.object.uid, () =>
+        worker().evaluate(
+          async (uid) =>
+            (await globalThis.__auditCore.getCommandState())?.objects.find((o) => o.uid === uid && o.selected),
+          target.object.uid,
+        ),
+      );
+      assert.equal(selected.uid, target.object.uid);
+      await record('object-selected', { input: 'Trusted browser mouse click', object: selected });
+    }
     await delay(400);
     await shot(c.label);
     return target;
@@ -1429,8 +1619,23 @@ async function cleanup() {
   if (cleanupPromise) return cleanupPromise;
   return (cleanupPromise = (async () => {
     clearInterval(rssTimer);
+    if (context) {
+      let routeTimer;
+      const routes = await Promise.race([
+        context.unrouteAll({ behavior: 'ignoreErrors' }).then(
+          () => 'removed',
+          (error) => String(error),
+        ),
+        new Promise((resolve) => {
+          routeTimer = setTimeout(() => resolve('timeout after 2000 ms'), 2000);
+        }),
+      ]);
+      clearTimeout(routeTimer);
+      await record('route-cleanup', { status: routes });
+    }
     await browser?.close().catch(() => {});
     await server?.close().catch(() => {});
+    if (hdAtlasAlias) await unlink(hdAtlasAlias).catch(() => {});
     if (privateDir) await writeFile(join(privateDir, 'stop'), 'stop\n').catch(() => {});
     launch?.kill('SIGINT');
     const exit = await Promise.race([launchExit, delay(18000).then(() => ({ timeout: true }))]);
@@ -1479,9 +1684,12 @@ try {
     process.env.RA2_DEV_HTTP = '1';
     process.env.RA2_GAME_ROOT ||= join(base, phase, 'web-game');
     process.env.RA2_THIRD_PARTY_CACHE_DIR ||= join(root, '.tmp-third-party');
-    process.env.RA2_HD_CACHE_DIR ||= (await exists(join(base, phase, 'farm', '_library')))
-      ? join(base, phase, 'farm')
-      : config.RA2_HD_CACHE_DIR;
+    if (stagedFarmRoot) process.env.RA2_HD_CACHE_DIR = stagedFarmRoot;
+    else
+      process.env.RA2_HD_CACHE_DIR ||= (await exists(join(base, phase, 'farm', '_library')))
+        ? join(base, phase, 'farm')
+        : config.RA2_HD_CACHE_DIR;
+    servedFarmRoot = resolve(process.env.RA2_HD_CACHE_DIR);
     const { createServer } = await import('vite');
     server = await createServer({
       root: wt,
@@ -1501,9 +1709,11 @@ try {
     dllBefore = await dllIdentity();
     await ownerIdle();
     const launchEnvironment = { ...process.env, ...config };
-    if (await exists(join(base, phase, 'farm', '_library'))) {
+    if (stagedFarmRoot) launchEnvironment.RA2_HD_CACHE_DIR = stagedFarmRoot;
+    else if (await exists(join(base, phase, 'farm', '_library'))) {
       launchEnvironment.RA2_HD_CACHE_DIR = join(base, phase, 'farm');
     }
+    servedFarmRoot = resolve(launchEnvironment.RA2_HD_CACHE_DIR);
     // The runner's explicit free-Wine scope must override the saved CrossOver
     // smoke configuration; never launch the two prefixes by accident.
     if (['free', 'free-cx'].includes(process.env.RA2_NATIVE_WINE_FLAVOR)) {
@@ -1568,7 +1778,6 @@ try {
   // including browser-owned caches. It never attaches to the owner's profile.
   const profileName = process.argv[4];
   if (profileName) assert(/^[a-zA-Z0-9_-]+$/.test(profileName));
-  let context;
   if (profileName) {
     context = await chromium.launchPersistentContext(join(base, phase, 'profiles', profileName), {
       ...browserOptions,
@@ -1640,6 +1849,9 @@ try {
     });
   });
   page = await context.newPage();
+  page.on('crash', () => void record('browser-page-crashed', { cleanup: !!cleanupPromise }));
+  page.on('close', () => void record('browser-page-closed', { cleanup: !!cleanupPromise }));
+  browser.on('disconnected', () => void record('browser-disconnected', { cleanup: !!cleanupPromise }));
   cdp = await context.newCDPSession(page);
   if (profileName) {
     // Playwright routing disables HTTP caching. Restore Chrome's own cache after

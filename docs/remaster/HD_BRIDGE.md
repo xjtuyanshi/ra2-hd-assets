@@ -309,10 +309,13 @@ about 0.6 s uploading 8192 px atlas pages, while objects appeared as their pages
   the view's gate and the page's "loaded ahead" answer to both.
   The indexed stand-in layers draw with shader graphs of their own. Final foreground layers use their HD page
   when available; shadows and inclusive source-shadow body frames retain the indexed page. Building bodies,
-  bibs, build-ups and animation layers use HD even when their art says `Remapable=no`: the engine remaps every
-  building to its current owner's scheme, including Neutral. Encoded grey paint in the HD mask keeps its redraw
+  bibs, build-ups and animation layers use HD even when their art says `Remapable=no`: ordinary unit/custom-palette
+  buildings use their current owner's scheme, including Neutral. Encoded grey paint in the HD mask keeps its redraw
   shading; where a page has no mask or contains baked coloured paint, `indexedHousePaint` recovers the owner's
-  ramp from the indexed source. Types without source house-colour pixels keep their full HD colour. This flag
+  ramp from the indexed source. ISO-palette building art uses its source palette without an owner ramp or indexed
+  fallback (YR 1.001's `TerrainPalette` draw branch selects CellClass +0x34 at `0x4D1ED2` and `0x705EC7`). This
+  follows the resolved sprite palette contract; the raw art flag alone does not reinterpret existing unit-palette
+  lamp caches. Types without source house-colour pixels keep their full HD colour. This flag
   shares the existing map-grade attribute, survives held pictures and is reset when a pooled sprite is reused.
   A graph's first layer costs six shader builds in the presenting thread plus
   pipelines that are compiled off the frame, during which the layer draws nothing. The same holds for a final

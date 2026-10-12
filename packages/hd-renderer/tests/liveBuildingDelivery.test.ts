@@ -157,6 +157,28 @@ describe('live delivery building image', () => {
     },
   );
 
+  it.each(['unit', 'iso', 'lib'] as const)(
+    'keeps the %s building source palette contract for body, bib, layers and buildup',
+    (palette) => {
+      const h = deliveryView();
+      h.state.cache.paletteRow.set(`lib:${palette}`, 2);
+      h.state.cache.paletteRow.set(`lib:${palette}@house0`, 3);
+      for (const art of Object.values(h.sprites)) {
+        art.palette = palette;
+        art.remap = false;
+      }
+      const expected = palette === 'iso' ? 'lib:iso' : `lib:${palette}@house0`;
+      for (const state of ['done', 'building'] as const) {
+        h.object.buildState = state;
+        h.object.buildupFrame = state === 'building' ? 0 : undefined;
+        const cards = h.draw().cards.filter((card) => !card.shadow);
+        expect(cards.length).toBeGreaterThan(0);
+        expect(cards.every((card) => card.palette === expected)).toBe(true);
+        expect(cards.every((card) => card.indexedHousePaint === (palette !== 'iso'))).toBe(true);
+      }
+    },
+  );
+
   it('keeps legacy building profiles only when the template is absent', () => {
     const h = deliveryView();
     h.object.unloading = 'door';

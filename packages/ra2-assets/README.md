@@ -1229,8 +1229,8 @@ silhouette does not move. `walls-xfer` accepts the same options followed by wall
 piece `k % 16`. `dmg-xfer` (same options) takes `INTACT,DAMAGED` sprite pairs and details each damaged loop frame
 from the model-sheet patch of the same intact frame (sources starting with `sheet`) where the 1x indices match.
 `index-paint` (same options) takes sprites and re-encodes chromatic, unpainted texels over 1x palette indices 16-31
-as house paint on the grey ramp of the sprite's own palette ramp: the live renderer draws every building sprite with
-the owner's remap, while posting only keeps paint where the baseline remap page had it. `fix-hue [--hue 38] JOBDIR...`
+as house paint on the grey ramp of the sprite's own palette ramp: the live renderer draws unit/custom-palette building
+sprites with the owner's remap (ISO source contracts keep the original non-house palette), while posting only keeps paint where the baseline remap page had it. `fix-hue [--hue 38] JOBDIR...`
 restores a fixed paint hue that an image model drifted to blue or violet in a sheet's `raw.png` (else `output.png`),
 keeping the first original as `*_prefix.png`.
 The transfers preserve model-owned patches, including patches without a `.src`; only sources starting with `xfer` may be
@@ -2173,7 +2173,9 @@ shading intact; a missing or unreadable tile warns once and leaves the surface n
 - Tiles: engine tile-set walk from `[TileSet0000]`; `0xffff`, out-of-range tiles, empty sub-tiles and cells missing
   from IsoMapPack5 inside the `[Map] Size` rhombus become the `[General] ClearTile` template.
 - Palettes: tiles, trees, rocks, low bridges and smudges use `iso<th>.pal`; ore and gems use `<theater>.pal`;
-  buildings, infantry, vehicles, voxels, walls and ore mines use `unit<th>.pal` with house remap (indices 16..31).
+  ordinary buildings, infantry, vehicles, voxels, walls and ore mines use `unit<th>.pal` with house remap (indices 16..31).
+  A resolved ISO building-art contract instead uses the original terrain palette without house remap; CITY06's
+  `TerrainPalette=true` draw branch selects CellClass +0x34 in YR 1.001 (`0x4D1ED2`, `0x705EC7`).
   Each choice was checked by rendering the art with all candidate palettes.
 - Draw points (`MapObject.drawOffset`): overlays, smudges, buildings and tiberium trees put the SHP canvas centre on
   the cell's top corner (measured from ore frames and building foundations); rocks (`IsARock=yes`), other trees,
@@ -2211,7 +2213,9 @@ shading intact; a missing or unreadable tile warns once and leaves the surface n
   default art as a fallback for unavailable variants without claiming that the requested variant is present.
   Old caches must re-extract the affected voxel model to supply these alternatives.
 - Type library only: art `Remapable=` applies to infantry and vehicles too (animals are not house-coloured); art
-  `TerrainPalette=yes` is recorded but the unit palette is kept (the lamp art is colour noise with the iso palette).
+  `TerrainPalette=yes` is recorded while the extractor retains its historical unit-palette default (lamp art is colour
+  noise with ISO). A caller may supply an independently resolved ISO source contract, as for CITY06; the live renderer
+  then keeps that palette without owner remap. The raw flag alone does not reinterpret other existing lamp contracts.
 
 ## Effect art sidecar (`<out>/_library/common/effects/`)
 

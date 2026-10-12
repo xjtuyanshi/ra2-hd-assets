@@ -2913,8 +2913,9 @@ export class LiveView {
 
   /**
    * A building's library art: bib, shadow, native body frame and its independently damaged animation layers;
-   * while it is being built, its make anim instead. Buildings always wear their owner's colour scheme (the engine
-   * remaps every building, e.g. civilian CAOILD shows the Neutral scheme's light grey), whatever art Remapable= says.
+   * while it is being built, its make anim instead. Unit-palette buildings wear their owner's colour scheme (the engine
+   * remaps unit-palette buildings, e.g. civilian CAOILD shows Neutral light grey), whatever art Remapable= says.
+   * ISO-palette building art uses the cell's terrain converter and keeps its original palette ramp.
    */
   private libraryBuildingSprites(
     object: LiveObject,
@@ -2966,7 +2967,7 @@ export class LiveView {
           undefined,
           this.cache.depthTemplate,
         );
-        card.indexedHousePaint = !make.remap;
+        card.indexedHousePaint = !make.remap && make.palette !== 'iso';
         this.queue(batch, card);
       }
       return false;
@@ -2986,7 +2987,7 @@ export class LiveView {
         !this.cache.depthTemplate,
       );
       if (this.cache.depthTemplate) card.nativeDepth = { mode: 'ground', bonus: 2 };
-      card.indexedHousePaint = !bib.remap;
+      card.indexedHousePaint = !bib.remap && bib.palette !== 'iso';
       this.queue(batch, card);
     }
     const layers = type.building?.layers ?? EMPTY_LAYERS;
@@ -3046,7 +3047,7 @@ export class LiveView {
         false,
       );
       card.nativeDepth = nativeDepth;
-      card.indexedHousePaint = !bodyArt.remap;
+      card.indexedHousePaint = !bodyArt.remap && bodyArt.palette !== 'iso';
       // HD atlases intentionally clear shadow rectangles. An inclusive-cap source shadow used as a body
       // must sample its original indexed pixels instead of that empty HD rectangle.
       this.queue(batch, card, shownBody >= bodyArt.frames.length);
@@ -3063,7 +3064,7 @@ export class LiveView {
           false,
         );
         if (this.cache.depthTemplate) interior.nativeDepth = { mode: 'ground', bonus: 1 };
-        interior.indexedHousePaint = !door!.remap;
+        interior.indexedHousePaint = !door!.remap && door!.palette !== 'iso';
         this.queue(batch, interior);
       }
     }
@@ -3118,7 +3119,9 @@ export class LiveView {
   }
 
   private buildingPalette(art: { palette: string }, owner: string): string {
-    return paletteFor(this.cache, this.libraryPalette(art.palette), true, owner || undefined);
+    // The source ISO contract uses CellClass's terrain converter without a house
+    // ramp (YR 1.001: BuildingType +0x1702; drawing at 0x4D1ED2 / 0x705EC7).
+    return paletteFor(this.cache, this.libraryPalette(art.palette), art.palette !== 'iso', owner || undefined);
   }
 
   private buildingLayerSprites(
@@ -3187,7 +3190,7 @@ export class LiveView {
         card.nativeDepth = { mode: 'ground', bonus: 1 };
       } else card.nativeDepth = attachedBodyDepth(nativeDepth, [dx, dy], dy * GROUND_DEPTH);
     }
-    card.indexedHousePaint = !art.remap;
+    card.indexedHousePaint = !art.remap && art.palette !== 'iso';
     this.queue(batch, card);
   }
 
