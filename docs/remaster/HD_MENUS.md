@@ -23,6 +23,8 @@ Unknown, missing and truncated fields are distinct; none may silently become an 
 Native: `packages/native-host/agent/input.c` publishes dialog controls with hidden logical visibility preserved.
 `src/vm86/menuSnapshot.ts` owns the route-neutral DTO; adapter native/core and Worker transport carry it.
 Later list/combo/slider messages need bounded game-thread queries; timeout means incomplete.
+Button-state queries share one 10 ms allowance per snapshot and stop after the first timeout,
+so a busy GUI cannot delay transport input, reads and credits once for every button.
 The first slice exports buttons/static text only; complete list/slider/edit publication is remaining work.
 Dialog identity is rechecked; atomic frame/dialog generation remains pending for asynchronous transitions.
 Emulator: `src/vm86/shim/user32Windowing.ts` snapshots the original shim windows, controls and state.
@@ -31,6 +33,10 @@ Emulator: `src/vm86/shim/user32Windowing.ts` snapshots the original shim windows
 Generic control transport stays in adapter/shim; shared picture/text composition stays in presentation code.
 Ordinary battle probes return null without control enumeration, text reads or menu drawing; dispose timers/bitmaps on exit.
 Passive pointer observation may schedule visuals; it must not consume events or alter native focus/capture.
+Native position-only input may overlap snapshot reads. Clicks, keys and wheel input remain barriers;
+an input revision also rejects snapshots whose text read overlaps an already acknowledged activation.
+Without an activation, an incomplete read of an otherwise identical dialog tree retains the last complete
+snapshot and the 80 ms poll cadence. A changed tree, changed root or null still exposes the original picture.
 
 ## Art and text production
 
@@ -50,9 +56,13 @@ Native animation and original art not yet redrawn remain explicitly identified l
 ## Atomic fallback and validation
 
 Validate the whole active screen signature, all visible controls, required text/state and loaded artwork first.
-Unknown screen/control, missing theme/art/text or incomplete enumeration hides the whole layer; stale-generation rejection is pending.
+Unknown screen/control, missing theme/art/text or incomplete enumeration hides the whole layer;
+atomic picture/dialog generation pairing remains pending.
 Never cover only understood buttons while an unknown popup or list remains underneath.
-During transitions keep the original frame until one complete matching snapshot and art set are ready.
+Activating pointer releases, Escape, focused-button Space and default-button Enter hide the layer immediately.
+A changed complete dialog tree may restore it on the next poll; an unchanged tree requires two consecutive
+fresh snapshots, allowing no-op buttons to recover while rejecting the first responsive pre-swap tree.
+This stabilization does not prove picture identity for a longer posted or animated transition.
 Preserve existing HD/original switching; no overlay may survive after its dialog closes or session stops.
 Compare original and HD at 1:1 at 1728x1117 points/DPR 2; inspect every button/state and highest-risk child route.
 Measure unchanged native hit positions, animation, menu response and same-scene game speed on current code.

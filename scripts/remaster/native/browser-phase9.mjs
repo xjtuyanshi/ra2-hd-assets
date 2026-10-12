@@ -1259,8 +1259,12 @@ async function execute(c) {
   }
   if (c.action === 'reload') {
     beforeBuildings = c.beforeBuildings === true;
-    await page.reload();
-    if (new URL(page.url()).searchParams.get('native-fullscreen') === '1') {
+    if (c.fullscreenRequested !== undefined) {
+      const target = new URL(page.url());
+      target.searchParams.set('native-fullscreen', c.fullscreenRequested ? '1' : '0');
+      await page.goto(target.href);
+    } else await page.reload();
+    if (c.reenterFullscreen === true) {
       const toggle = page.locator('#vm-controls-toggle');
       if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
       await page.locator('#vm-fullscreen').click();
@@ -1285,7 +1289,11 @@ async function execute(c) {
   }
   if (c.action === 'window-maximized') {
     const w = await cdp.send('Browser.getWindowForTarget');
-    await cdp.send('Browser.setWindowBounds', { windowId: w.windowId, bounds: { windowState: 'maximized' } });
+    if (c.width !== undefined || c.height !== undefined) {
+      assert(Number.isSafeInteger(c.width) && Number.isSafeInteger(c.height), 'Explicit window dimensions required');
+      await cdp.send('Browser.setWindowBounds', { windowId: w.windowId, bounds: { windowState: 'normal' } });
+      await cdp.send('Browser.setWindowBounds', { windowId: w.windowId, bounds: { width: c.width, height: c.height } });
+    } else await cdp.send('Browser.setWindowBounds', { windowId: w.windowId, bounds: { windowState: 'maximized' } });
     await delay(1000);
     return shot(c.label ?? 'window-maximized');
   }
@@ -1443,6 +1451,23 @@ async function execute(c) {
     return calibratePhase7Cursor({ page, out, label: c.label, area: c.area, shot });
   }
   if (c.action === 'stream') {
+    if (c.menuFrames)
+      await page.evaluate(() => {
+        const probe = (window.__menuFrameProof = { active: true, frames: 0, hidden: 0, samples: [] });
+        const tick = () => {
+          if (!probe.active) return;
+          const layer = document.querySelector('#hd-menus');
+          const visible = layer && getComputedStyle(layer).display !== 'none';
+          probe.frames++;
+          if (!visible) {
+            probe.hidden++;
+            if (probe.samples.length < 20)
+              probe.samples.push({ at: performance.now(), data: layer ? { ...layer.dataset } : null });
+          }
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
     const p = await import('./phase9-page-pointer-observer.mjs');
     await p.streamPhase9PointerEvidenceThroughPhase7(page);
     const { runPhase7InputStream } = await import('./phase7-input-stream.mjs');
@@ -1542,6 +1567,15 @@ async function execute(c) {
         ...c,
       });
     } finally {
+      if (c.menuFrames) {
+        const proof = await page.evaluate(() => {
+          const proof = window.__menuFrameProof;
+          proof.active = false;
+          return proof;
+        });
+        await writeFile(join(out, (c.label ?? 'stream') + '-menu-frames.json'), JSON.stringify(proof, null, 2));
+        await record('menu-frame-proof', proof);
+      }
       if (memoryTimer) clearInterval(memoryTimer);
       if (monitor) {
         rates = await monitor.stop();
@@ -2058,7 +2092,7 @@ try {
   const pageUrl = new URL(url);
   pageUrl.searchParams.set('game-speed', gameSpeed);
   if (viewChoice) pageUrl.searchParams.set('resolution', viewChoice);
-  if (useViewportHandshake) {
+  if (useViewportHandshake && !tag.startsWith('window')) {
     await cdp.send('Browser.setWindowBounds', {
       windowId: ownedWindowForSizing.windowId,
       bounds: { windowState: fullWindow ? 'fullscreen' : 'maximized' },
@@ -2096,6 +2130,14 @@ try {
     const fullWindow = await cdp.send('Browser.getWindowForTarget');
     await cdp.send('Browser.setWindowBounds', { windowId: fullWindow.windowId, bounds: { windowState: 'fullscreen' } });
     await delay(1200);
+    // macOS can acknowledge CDP's request while retaining a maximized window. A real OS fullscreen gesture must
+    // complete before the page negotiates the game's fixed video mode; a DOM-only fullscreen flag is insufficient.
+    await record('os-fullscreen-needed', { window: await cdp.send('Browser.getWindowForTarget') });
+    await wait(
+      'actual macOS fullscreen window before measurement',
+      () => page.evaluate(() => outerHeight === screen.height && outerWidth === screen.width),
+      120000,
+    );
     const toggle = page.locator('#vm-controls-toggle');
     if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
     await page.locator('#vm-fullscreen').click();

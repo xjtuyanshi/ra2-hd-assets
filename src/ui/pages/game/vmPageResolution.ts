@@ -108,9 +108,10 @@ export function resolveResolutionViewScale(
   stage: Element | null,
   devicePixelRatio: number,
   negotiatedFrame: GameResolution | null,
+  measuredArea?: { width: number; height: number },
 ): number | undefined {
   const selected = resolutionViewScale(choice);
-  const rect = stage?.getBoundingClientRect();
+  const rect = measuredArea ?? stage?.getBoundingClientRect();
   if (selected === null || !rect || !negotiatedFrame) return undefined;
   const fit = Math.min(
     (rect.width * devicePixelRatio) / negotiatedFrame.width,

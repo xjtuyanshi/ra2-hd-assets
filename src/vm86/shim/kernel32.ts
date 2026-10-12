@@ -1098,7 +1098,8 @@ export function withKernel32<TBase extends Constructor<ShimGraphicsChain>>(Base:
         this.lastError = preflight;
         return 0;
       }
-      const error = this.options.onFileDelete?.(path) ?? 0;
+      // Without host removal support, the mounted snapshot must remain intact.
+      const error = this.options.onFileDelete?.(path) ?? 120; // ERROR_CALL_NOT_IMPLEMENTED
       if (error === 0 || error === 2) {
         this.forgetMountedFile(path);
         // Already-open searches retain their snapshots; the next search must not resurrect deleted metadata.

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,10 +11,14 @@ test('explicit page seeds preserve overlap, overflow and the last x86 page', () 
   const source = join(directory, 'test.c');
   const binary = join(directory, 'test');
   const include = resolve(fileURLToPath(new URL('../../../packages/native-host/agent/', import.meta.url)));
+  const capacity = readFileSync(join(include, 'agent.h'), 'utf8').match(/^#define NH_MAX_PAGES (.+)$/m)?.[1];
+  assert.ok(capacity);
   writeFileSync(
     source,
     `
-#define NH_MAX_PAGES 4096u
+#define NH_MAX_MESSAGE (32u * 1024u * 1024u)
+#define NH_MAX_SAMPLES 64u
+#define NH_MAX_PAGES ${capacity}
 #define NH_PAGE_SIZE 4096u
 #define NH_MIRROR_HASH_SIZE 16384u
 #include "mirror-pages.h"
@@ -22,6 +26,18 @@ test('explicit page seeds preserve overlap, overflow and the last x86 page', () 
 static struct nh_page_seed seed;
 
 int main(void) {
+    assert(NH_MAX_PAGES == 8112u);
+    assert(24u + (NH_MAX_PAGES + NH_MAX_SAMPLES) * (NH_PAGE_SIZE + 8u) <= NH_MAX_MESSAGE);
+    assert(24u + (NH_MAX_PAGES + 1u + NH_MAX_SAMPLES) * (NH_PAGE_SIZE + 8u) > NH_MAX_MESSAGE);
+    nh_page_seed_init(&seed);
+    nh_page_seed_range(&seed, 0x1000u, 4097u * NH_PAGE_SIZE, NH_MAX_PAGES);
+    assert(!seed.flags && seed.count == 4097);
+    nh_page_seed_init(&seed);
+    nh_page_seed_range(&seed, 0x1000u, NH_MAX_PAGES * NH_PAGE_SIZE, NH_MAX_PAGES);
+    assert(!seed.flags && seed.count == NH_MAX_PAGES);
+    nh_page_seed_range(&seed, (NH_MAX_PAGES + 1u) * NH_PAGE_SIZE, 1, NH_MAX_PAGES);
+    assert(seed.flags == 1 && seed.count == NH_MAX_PAGES);
+
     nh_page_seed_init(&seed);
     nh_page_seed_range(&seed, 0x1fffu, 2, 4096);
     nh_page_seed_range(&seed, 0x1000u, 8192, 4096);

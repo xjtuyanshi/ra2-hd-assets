@@ -19,6 +19,7 @@ export async function prepareNativeViewport(
   devicePixelsPerGamePixel = 3,
   requestedFrame: { width: number; height: number } | null = null,
   followIni = false,
+  onNegotiatedViewport?: (viewport: { width: number; height: number; dpr: number }) => void,
 ): Promise<{ width: number; height: number } | null> {
   const query = new URLSearchParams(window.location.search);
   if (!nativeAutoStart(window.location.search) || query.get('native-viewport') !== '1') return null;
@@ -43,7 +44,20 @@ export async function prepareNativeViewport(
       };
       signal?.addEventListener('abort', abort, { once: true });
     });
-  if (query.get('native-fullscreen') === '1' && !document.fullscreenElement?.contains(canvas)) {
+  type Status = {
+    ready?: boolean;
+    resolution?: { width?: number; height?: number } | null;
+    viewport?: { width?: number; height?: number; dpr?: number } | null;
+  };
+  const readStatus = async (): Promise<Status> => {
+    const response = await fetch(endpoint, { headers, cache: 'no-store', signal: requestSignal() });
+    if (!response.ok) throw new Error('无法连接本次启动器。请关闭页面并重新启动。');
+    return response.json();
+  };
+  let status = await readStatus();
+  // A running game's video mode is already fixed. Reloads only reattach; the
+  // fullscreen gesture is needed before measuring a new launch, not to resume one.
+  if (!status.ready && query.get('native-fullscreen') === '1' && !document.fullscreenElement?.contains(canvas)) {
     signal?.throwIfAborted();
     onFullscreenWait?.(true);
     try {
@@ -74,13 +88,6 @@ export async function prepareNativeViewport(
       onFullscreenWait?.(false);
     }
   }
-  type Status = { ready?: boolean; resolution?: { width?: number; height?: number } | null };
-  const readStatus = async (): Promise<Status> => {
-    const response = await fetch(endpoint, { headers, cache: 'no-store', signal: requestSignal() });
-    if (!response.ok) throw new Error('无法连接本次启动器。请关闭页面并重新启动。');
-    return response.json();
-  };
-  let status = await readStatus();
   if (!status.ready) {
     // Wait for initial layout, including the native launch's collapsed toolbar,
     // before reporting the stage. Do not substitute screen dimensions or round
@@ -150,5 +157,13 @@ export async function prepareNativeViewport(
   const { width, height } = status.resolution ?? {};
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || !width || !height)
     throw new Error('启动器没有返回有效的游戏画面尺寸。请重新启动。');
+  const { width: pageWidth, height: pageHeight, dpr } = status.viewport ?? {};
+  if (
+    typeof pageWidth === 'number' &&
+    typeof pageHeight === 'number' &&
+    typeof dpr === 'number' &&
+    [pageWidth, pageHeight, dpr].every((value) => Number.isFinite(value) && value > 0)
+  )
+    onNegotiatedViewport?.({ width: pageWidth, height: pageHeight, dpr });
   return { width, height };
 }

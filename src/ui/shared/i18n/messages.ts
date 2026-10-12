@@ -239,6 +239,8 @@ export const englishMessages = {
     'Logic frames the game advanced a second, and what the current speed setting allows (last 5 seconds)',
   ' · 窗口已变，刷新页面重新匹配': ' · window changed, reload to match again',
   ' · 窗口已变，请重新运行启动器匹配': ' · window changed, restart the launcher to match again',
+  '页面大小已改变。请恢复启动时的窗口大小，或结束对局后关闭启动器，再按当前窗口大小重新启动。':
+    'The page size changed. Restore the original window size, or finish the match, close the launcher, and start it again at the current window size.',
   主音量: 'Master volume',
   主音量读数: 'Master volume value',
   '快速开局…': 'Quick start…',

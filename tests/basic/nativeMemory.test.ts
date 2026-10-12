@@ -1,4 +1,5 @@
 import { expect, it } from 'vitest';
+import { NATIVE_MAX_PAGES } from '../../src/adapter/native/protocol';
 import {
   NativeMirrorMemory,
   NativeMemoryMiss,
@@ -11,6 +12,20 @@ import {
 function page(address: number, value = 0) {
   return { address, bytes: new Uint8Array(4096).fill(value) };
 }
+it('publishes a complete 4097-page image without substituting or losing the last page', () => {
+  const memory = new NativeMirrorMemory(),
+    bytes = new Uint8Array(4096).fill(0x52);
+  expect(
+    memory.apply({
+      frame: 12,
+      flags: 2,
+      pages: Array.from({ length: 4097 }, (_, index) => ({ address: index * 4096, bytes })),
+    }),
+  ).toBe(true);
+  expect(memory.complete).toBe(true);
+  expect(memory.read_memory(4096 * 4096, 1)[0]).toBe(0x52);
+  expect(memory.publishedRanges).toEqual([{ address: 0, length: 4097 * 4096 }]);
+});
 it('sparse missing pages throw and remain observable when a reader swallows the exception', () => {
   const m = new NativeMirrorMemory();
   m.apply({ frame: 3, flags: 2, pages: [page(4096, 17)] });
@@ -94,7 +109,12 @@ it('malformed pages and removals cannot partially change a published frame or it
     { frame: 2, flags: 8, pages: [], removedPages: [0x1000, 0x1000] },
     { frame: 2, flags: 8, pages: [], removedPages: [0x2000, 0x1000] },
     { frame: 2, flags: 8, pages: [page(0x1000)], removedPages: [0x1000] },
-    { frame: 2, flags: 8, pages: [], removedPages: Array.from({ length: 4097 }, (_, index) => index * 4096) },
+    {
+      frame: 2,
+      flags: 8,
+      pages: [],
+      removedPages: Array.from({ length: NATIVE_MAX_PAGES + 1 }, (_, index) => index * 4096),
+    },
     { frame: 2, flags: 0, pages: [], removedPages: [0x1000] },
   ]) {
     expect(() => m.apply(update)).toThrow();

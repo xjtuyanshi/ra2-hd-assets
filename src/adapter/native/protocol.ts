@@ -4,8 +4,11 @@ import type { MenuSnapshot } from '../../vm86/menuSnapshot';
 export const NATIVE_MAGIC = 0x3142484e;
 export const NATIVE_VERSION = 1;
 export const NATIVE_MAX_MESSAGE = 32 * 1024 * 1024;
-export const NATIVE_MAX_PAGES = 4096;
 export const NATIVE_PAGE_SIZE = 4096;
+/** Reserve complete removal membership and the largest 64 direct samples within the unchanged wire limit. */
+export const NATIVE_MAX_PAGES = Math.floor(
+  (NATIVE_MAX_MESSAGE - 24 - 64 * (NATIVE_PAGE_SIZE + 8)) / (NATIVE_PAGE_SIZE + 8),
+);
 export const NATIVE_NO_FRAME = 0xffffffff;
 /** Skip cross-thread control metadata while retaining modal/input state. Empty payload stays full. */
 export const NATIVE_INPUT_STATE_MINIMAL = 1;

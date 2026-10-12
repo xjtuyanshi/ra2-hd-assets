@@ -6,6 +6,7 @@ import {
   parseResolutionChoice,
   resolutionChoiceValue,
   resolveResolutionChoice,
+  resolveResolutionViewScale,
   storeResolutionChoice,
 } from '../../src/ui/pages/game/vmPageResolution';
 
@@ -27,6 +28,17 @@ const stage = (width: number, height: number) =>
   ({ getBoundingClientRect: () => ({ width, height }) }) as unknown as Element;
 
 describe('分辨率选择', () => {
+  it('retains the negotiated scale after reloading a smaller native window', () => {
+    expect(
+      resolveResolutionViewScale(
+        'wide',
+        stage(1728, 920),
+        2,
+        { width: 1728, height: 1116 },
+        { width: 1728, height: 1117 },
+      ),
+    ).toBe(2);
+  });
   it('解析预设、匹配窗口与跟随 INI；自定义尺寸只在显式允许时接受', () => {
     expect(parseResolutionChoice('1440x900')).toEqual({ width: 1440, height: 900 });
     expect(parseResolutionChoice('display')).toBe(DISPLAY_RESOLUTION);

@@ -35,6 +35,7 @@ export interface RuntimeToolbar {
     fillScale: number,
     matched: GameResolution | null,
     preferredScale?: number,
+    nativeAreaChanged?: boolean,
   ): void;
   setReShadeMode(mode: ReShadeMode): void;
   setUpscaleMode(mode: UpscaleMode): void;
@@ -108,6 +109,7 @@ export function installRuntimeToolbar(
     cheatGame: null,
     resolution: '',
     resolutionStatus: '',
+    viewportNotice: '',
     stalls: '',
     gameSpeed: '',
     rate: 1,
@@ -259,7 +261,7 @@ export function installRuntimeToolbar(
       model.resolution = resolutionChoiceValue(choice);
       publish();
     },
-    setDisplayScale(frameWidth, frameHeight, scale, fillScale, matched, preferredScale) {
+    setDisplayScale(frameWidth, frameHeight, scale, fillScale, matched, preferredScale, nativeAreaChanged = false) {
       const whole = Math.abs(scale - Math.round(scale)) < 1e-6;
       const stale = displayMatchIsStale(
         matched,
@@ -282,8 +284,12 @@ export function installRuntimeToolbar(
                 : ' · 窗口已变，刷新页面重新匹配',
             )
           : '');
-      if (status === model.resolutionStatus) return;
+      const viewportNotice = nativeAreaChanged
+        ? t('页面大小已改变。请恢复启动时的窗口大小，或结束对局后关闭启动器，再按当前窗口大小重新启动。')
+        : '';
+      if (status === model.resolutionStatus && viewportNotice === model.viewportNotice) return;
       model.resolutionStatus = status;
+      model.viewportNotice = viewportNotice;
       publish();
     },
     pressClockRate,

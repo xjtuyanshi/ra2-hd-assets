@@ -59,6 +59,8 @@ export interface ToolbarModel {
   resolution: string;
   /** Frame size and device pixels per frame pixel of the current canvas fit. */
   resolutionStatus?: string;
+  /** A negotiated native viewport changed; visible even with the controls collapsed. */
+  viewportNotice?: string;
   /** Stalls of the current match ("卡顿 N 次，最长 X 秒"), empty while there were none or no recorder runs. */
   stalls?: string;
   /** Logic rate reached and allowed ("游戏速度 实际 X / 应有 Y"), empty outside a battle or without telemetry. */
@@ -281,6 +283,14 @@ export function RuntimeToolbarView({
   };
   return (
     <>
+      {model.viewportNotice &&
+        canvas.closest('#screen-frame') &&
+        createPortal(
+          <p id="native-viewport-notice" role="status">
+            {model.viewportNotice}
+          </p>,
+          canvas.closest('#screen-frame')!,
+        )}
       <button
         id="vm-controls-toggle"
         className="toolbar-button"

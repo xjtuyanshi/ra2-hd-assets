@@ -206,6 +206,22 @@ describe('_lopen/_lread/_llseek/_lclose', () => {
 });
 
 describe('DeleteFile session state', () => {
+  it.each(['A', 'W'])('rejects DeleteFile%s without host removal support and preserves mounted data', (suffix) => {
+    const memory = createGuestMemory();
+    const shim = createTestShim(memory);
+    shim.mountFile('session.sav', new Uint8Array([1, 2]));
+    const path = 'session.sav';
+    if (suffix === 'W')
+      memory.write_memory(
+        [...path, '\0'].flatMap((char) => [char.charCodeAt(0), 0]),
+        STR,
+      );
+    else writeAsciiZ(memory, STR, path);
+    expect(callShim(shim, `KERNEL32.DLL!DeleteFile${suffix}`, [STR]).eax).toBe(0);
+    expect(callShim(shim, 'KERNEL32.DLL!GetLastError').eax).toBe(120);
+    expect(shim.getMountedFileBytes(path)).toEqual(new Uint8Array([1, 2]));
+  });
+
   it('removes zero-byte files and cached enumeration, then permits recreation', () => {
     const memory = createGuestMemory();
     const remove = vi.fn(() => 0);

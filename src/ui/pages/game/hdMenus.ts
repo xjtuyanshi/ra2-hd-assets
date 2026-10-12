@@ -79,6 +79,8 @@ export async function startHdMenus(
     let timer: number | undefined;
     let request: number | null = null;
     let inputRevision = 0;
+    let transitionTree: string | null = null;
+    let transitionCandidate: string | null = null;
     let localPointer: { x: number; y: number } | null = null;
     let down = false;
     let pressedControl: number | null = null;
@@ -206,19 +208,62 @@ export async function startHdMenus(
     const schedule = () => {
       if (!disposed && request === null) request = requestAnimationFrame(render);
     };
+    const dialogTree = (value: MenuSnapshot) =>
+      JSON.stringify([
+        value.dialogHwnd,
+        value.width,
+        value.height,
+        value.controls.map(({ hwnd, parent, id, className, style, text, textComplete, rect, visible, enabled }) => [
+          hwnd,
+          parent,
+          id,
+          className,
+          style,
+          text,
+          textComplete,
+          rect,
+          visible,
+          enabled,
+        ]),
+      ]);
     const poll = async () => {
       const revision = inputRevision;
       try {
         const next = enabled && !host.battleActive?.() ? await host.vm.getMenuSnapshot!() : null;
         if (!disposed && revision === inputRevision) {
-          snapshot = next;
+          // A bounded native state query can time out while pointer input is
+          // flowing through an unchanged dialog. Keep its verified picture,
+          // but never retain it over a changed tree, null or an activation.
+          const verifiedNext =
+            transitionTree === null &&
+            snapshot?.complete &&
+            next &&
+            !next.complete &&
+            dialogTree(next) === dialogTree(snapshot)
+              ? snapshot
+              : next;
+          const tree = verifiedNext?.complete ? dialogTree(verifiedNext) : null;
+          // The native ACK precedes a handler's posted/animated dialog swap.
+          // A new tree is usable immediately; an unchanged no-op dialog needs
+          // two fresh observations before its HD picture is restored.
+          if (transitionTree !== null && (!tree || (tree === transitionTree && tree !== transitionCandidate))) {
+            transitionCandidate = tree;
+            snapshot = null;
+          } else {
+            transitionTree = null;
+            transitionCandidate = null;
+            snapshot = verifiedNext;
+          }
           schedule();
         }
       } catch {
-        snapshot = null;
-        hide('snapshot-unavailable');
+        if (!disposed && revision === inputRevision) {
+          snapshot = null;
+          transitionCandidate = null;
+          hide('snapshot-unavailable');
+        }
       }
-      if (!disposed) timer = window.setTimeout(poll, snapshot ? 80 : 250);
+      if (!disposed) timer = window.setTimeout(poll, snapshot || transitionTree !== null ? 80 : 250);
     };
     const pointer = (event: PointerEvent) => {
       if (!snapshot) return;
@@ -275,7 +320,11 @@ export async function startHdMenus(
           (event.key === 'Escape' ||
             (['Enter', ' '].includes(event.key) &&
               snapshot.controls.some(
-                (control) => control.className === 'Button' && control.visible && control.enabled && control.focused,
+                (control) =>
+                  control.className === 'Button' &&
+                  control.visible &&
+                  control.enabled &&
+                  (control.focused || (event.key === 'Enter' && ((control.style & 0xf) === 1 || control.id === 1))),
               )));
       }
       if (!activates) {
@@ -283,6 +332,8 @@ export async function startHdMenus(
         return;
       }
       inputRevision++;
+      transitionTree = snapshot ? dialogTree(snapshot) : transitionTree;
+      transitionCandidate = null;
       snapshot = null;
       hide('input-transition');
     };

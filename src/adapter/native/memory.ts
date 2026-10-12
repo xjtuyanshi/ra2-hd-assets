@@ -1,5 +1,6 @@
 import type { GuestMemory } from '../../vm86/win32';
 import type { GuestMemoryAccessor } from '../../games/shared/memoryAccessor';
+import { NATIVE_MAX_PAGES } from './protocol';
 
 export const NATIVE_PAGE_SIZE = 4096;
 export interface NativePage {
@@ -84,8 +85,8 @@ export class NativeMirrorMemory implements GuestMemory {
       (update.flags & 8 && update.flags & 2) ||
       (update.flags & 8 && update.removedPages === undefined) ||
       (update.removedPages !== undefined && !(update.flags & 8)) ||
-      removed.length > 4096 ||
-      update.pages.length > 4096
+      removed.length > NATIVE_MAX_PAGES ||
+      update.pages.length > NATIVE_MAX_PAGES
     )
       throw new Error('Invalid mirror removal bounds');
     let previous = -1;
@@ -276,7 +277,7 @@ export function coalesceNativePages(pages: readonly number[]): NativeRange[] {
 export class NativeReaderWorkingSet {
   private learned = new Set<number>();
   private owners = new Map<unknown, Set<number>>();
-  constructor(private readonly maxPages = 4096) {}
+  constructor(private readonly maxPages = NATIVE_MAX_PAGES) {}
   private pages(ranges: readonly NativeRange[]): Set<number> {
     const pages = new Set<number>();
     for (const range of ranges) {

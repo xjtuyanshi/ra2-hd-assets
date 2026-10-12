@@ -89,6 +89,58 @@ function covers(ranges: readonly { address: number; length: number }[], address:
 }
 
 describe('native YR policy and bulk cell discovery', () => {
+  it('captures active effect type bodies and bullet metadata without reserving unused animation types', () => {
+    const source = createGuestMemory(),
+      types = 0xba0000,
+      active = 0xbb0000,
+      used = 0xc00000,
+      unused = 0xc04000,
+      bullet = 0xbb1000,
+      weapon = 0xc08000,
+      warhead = 0xc0c000;
+    writeU32(source, YR_NATIVE_EFFECT_TYPE_ARRAYS.anim + 4, types);
+    writeU32(source, YR_NATIVE_EFFECT_TYPE_ARRAYS.anim + 16, 2);
+    writeU32(source, types, used);
+    writeU32(source, types + 4, unused);
+    writeU32(source, E.anims + 4, 0xba1000);
+    writeU32(source, E.anims + 16, 1);
+    writeU32(source, 0xba1000, active);
+    writeU32(source, active + O.animType, used);
+    writeU32(source, E.bullets + 4, 0xba2000);
+    writeU32(source, E.bullets + 16, 1);
+    writeU32(source, 0xba2000, bullet);
+    writeU32(source, bullet + O.bulletWeapon, weapon);
+    writeU32(source, bullet + O.bulletWarhead, warhead);
+    const pages = policyPages(source);
+    expect(pages.has(used)).toBe(true);
+    expect(pages.has(unused)).toBe(false);
+    expect(pages.has(weapon)).toBe(true);
+    expect(pages.has(warhead)).toBe(true);
+    expect(pages.has(types)).toBe(true);
+  });
+
+  it('captures live type bodies without reserving pages for every unused building type', () => {
+    const source = createGuestMemory(),
+      types = 0xba0000,
+      live = 0xbb0000,
+      used = 0xc00000,
+      unused = 0xc04000;
+    writeU32(source, 0xa83c68 + 4, types);
+    writeU32(source, 0xa83c68 + 16, 2);
+    writeU32(source, types, used);
+    writeU32(source, types + 4, unused);
+    writeU32(source, G.buildings + 4, 0xba1000);
+    writeU32(source, G.buildings + 16, 1);
+    writeU32(source, 0xba1000, live);
+    writeU32(source, live + S.buildingType, used);
+    const pages = policyPages(source);
+    expect(pages.has(used)).toBe(true);
+    expect(pages.has(used + 4096)).toBe(true);
+    expect(pages.has(unused)).toBe(false);
+    expect(pages.has(unused + 4096)).toBe(false);
+    expect(pages.has(types)).toBe(true);
+  });
+
   it('reads actual UTF-16 control text through HWND hash collisions and rejects a changed native lifetime', async () => {
     const memory = createGuestMemory();
     const table = 0xac1b00,
@@ -458,9 +510,9 @@ describe('native YR policy and bulk cell discovery', () => {
     writeU32(memory, G.map + 0x12c, 1);
     expect(discover).toThrow('coordinate bounds');
   });
-  it('prepopulates effect types and follows current nested production allocations at each native frame', () => {
+  it('captures complete effect type tables and current nested production allocations at each native frame', () => {
     for (const source of Object.values(YR_NATIVE_EFFECT_TYPE_ARRAYS))
-      expect(YR_NATIVE_FOLLOW_RULES.some((rule) => rule.kind === 2 && rule.source === source)).toBe(true);
+      expect(YR_NATIVE_FOLLOW_RULES).toContainEqual({ kind: 3, source, bytes: 4, maxCount: 4096, stride: 4 });
     expect(YR_NATIVE_FOLLOW_RULES).toContainEqual({
       kind: 4,
       source: 0xa80208,
@@ -533,7 +585,7 @@ describe('native YR policy and bulk cell discovery', () => {
       mirror.beginOperation();
       return readYrEffects(mirror.accessor(), { particles: true });
     };
-    expect(capture(1).particleSystems).toEqual([]); // type is present before its first instance
+    expect(capture(1).particleSystems).toEqual([]); // the complete type table exists before its first instance
     vector(E.particleSystems, 0xc20000, [system]);
     const particle = (address: number, x: number) => {
       writeU32(source, address, V.particle);

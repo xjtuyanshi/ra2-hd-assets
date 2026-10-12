@@ -382,7 +382,25 @@ struct menu_context {
     uint32_t capacity, used, count;
     int complete;
     HWND root, focus;
+    LARGE_INTEGER query_started;
+    int button_queries_failed;
 };
+
+static int menu_button_state(struct menu_context *state, HWND hwnd, int32_t *value)
+{
+    if (state->button_queries_failed) return 0;
+    uint64_t used = elapsed_us(state->query_started);
+    /* All buttons share one 10 ms allowance on the transport owner. A busy
+     * GUI cannot charge another timeout for each child or delay later input,
+     * memory reads and picture credits by an entire dialog's button count. */
+    UINT remaining_ms = used < 10000 ? (UINT)((10000 - used) / 1000) : 0;
+    DWORD_PTR result;
+    if (!remaining_ms || !SendMessageTimeoutA(hwnd, BM_GETSTATE, 0, 0,
+        SMTO_ABORTIFHUNG | SMTO_BLOCK, remaining_ms, &result))
+    { state->button_queries_failed = 1; return 0; }
+    *value = (int32_t)result;
+    return 1;
+}
 
 static int menu_control_enabled(HWND window, HWND root)
 {
@@ -429,7 +447,7 @@ static BOOL CALLBACK describe_menu_control(HWND hwnd, LPARAM context)
     if (visible && _stricmp(class_name, "Button") == 0)
     {
         int32_t button_state;
-        if (query_control(hwnd, BM_GETSTATE, &button_state)) pressed = (button_state & BST_PUSHED) != 0;
+        if (menu_button_state(state, hwnd, &button_state)) pressed = (button_state & BST_PUSHED) != 0;
         else state->complete = 0;
     }
     /* List contents are intentionally not guessed from the selected label.
@@ -472,7 +490,10 @@ static void menu_snapshot(uint32_t id)
         "\"pointer\":{\"x\":%ld,\"y\":%ld},\"controls\":[", width, height,
         (uint32_t)(uintptr_t)root, tracking_failed ? "null" : playing ? "true" : "false",
         InterlockedCompareExchange(&cursor_x, 0, 0), InterlockedCompareExchange(&cursor_y, 0, 0));
-    struct menu_context state = {json, sizeof(json), (uint32_t)strlen(json), 0, 1, root, nh_input_get_focus()};
+    struct menu_context state = {0};
+    state.json = json; state.capacity = sizeof(json); state.used = (uint32_t)strlen(json);
+    state.complete = 1; state.root = root; state.focus = nh_input_get_focus();
+    QueryPerformanceCounter(&state.query_started);
     describe_menu_control(root, (LPARAM)&state);
     EnumChildWindows(root, describe_menu_control, (LPARAM)&state);
     EnumWindows(describe_menu_popup, (LPARAM)&state);

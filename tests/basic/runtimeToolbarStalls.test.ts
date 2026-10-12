@@ -20,6 +20,17 @@ function toolbar() {
 }
 
 describe('toolbar line for the stalls of the current match', () => {
+  it('publishes a resize notice independently of the collapsed controls and clears it on restoration', () => {
+    const t = toolbar();
+    Object.assign(window, { location: { search: '?backend=native' } });
+    const matched = { width: 1728, height: 1116 };
+    t.bar.setDisplayScale(1728, 1116, 2, 2, matched, 2, true);
+    expect(toolbarState.getSnapshot()?.model.viewportNotice).toMatch(/启动器|launcher/);
+    t.bar.setDisplayScale(1728, 1116, 2, 2, matched, 2, false);
+    expect(toolbarState.getSnapshot()?.model.viewportNotice).toBe('');
+    t.end();
+  });
+
   it('says how many and how long the longest was, in the catalog wording of both languages', () => {
     expect(createTranslator('zh-CN')('卡顿 {0} 次，最长 {1} 秒', 3, '1.7')).toBe('卡顿 3 次，最长 1.7 秒');
     expect(createTranslator('en')('卡顿 {0} 次，最长 {1} 秒', 3, '1.7')).toBe('Stalls: 3, longest 1.7 s');

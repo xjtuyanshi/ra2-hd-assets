@@ -54,7 +54,15 @@ function gameAssetsPlugin(): Plugin {
         if (req.method === 'GET') {
           try {
             const status = JSON.parse(readFileSync(viewportPath, 'utf8'));
-            res.end(JSON.stringify({ ready: status.ready === true, resolution: status.resolution ?? null }));
+            res.end(
+              JSON.stringify({
+                ready: status.ready === true,
+                resolution: status.resolution ?? null,
+                viewport: status.viewport
+                  ? { width: status.viewport.width, height: status.viewport.height, dpr: status.viewport.dpr }
+                  : null,
+              }),
+            );
           } catch {
             res.end(JSON.stringify({ ready: false, resolution: null }));
           }
@@ -94,7 +102,17 @@ function gameAssetsPlugin(): Plugin {
             try {
               const current = JSON.parse(readFileSync(viewportPath, 'utf8'));
               if (current.viewport) {
-                res.end(JSON.stringify({ ready: current.ready === true, resolution: current.resolution ?? null }));
+                res.end(
+                  JSON.stringify({
+                    ready: current.ready === true,
+                    resolution: current.resolution ?? null,
+                    viewport: {
+                      width: current.viewport.width,
+                      height: current.viewport.height,
+                      dpr: current.viewport.dpr,
+                    },
+                  }),
+                );
                 return;
               }
             } catch {}

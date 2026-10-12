@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { desktopPointerLock, nativeAutoStart, prepareNativeViewport } from '../../src/ui/pages/game/nativeStartup';
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -40,6 +41,47 @@ describe('native launcher startup', () => {
     expect(desktopPointerLock('', 'v86')).toBe(true);
     expect(desktopPointerLock('?mouse-lock=1', 'native')).toBe(true);
     expect(desktopPointerLock('?mouse-lock=0', 'v86')).toBe(false);
+  });
+  it('reattaches to a ready fullscreen launch without waiting for a new fullscreen gesture', async () => {
+    const { fetch, canvas } = viewportFixture();
+    vi.useFakeTimers();
+    window.location.search += '&native-fullscreen=1';
+    vi.stubGlobal('document', {
+      fullscreenElement: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    const waiting = vi.fn();
+    fetch.mockResolvedValueOnce(Response.json({ ready: true, resolution: { width: 1728, height: 1117 } }));
+    const outcome = prepareNativeViewport(canvas, undefined, waiting).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    await vi.runAllTimersAsync();
+    expect(await outcome).toEqual({ value: { width: 1728, height: 1117 } });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(waiting).not.toHaveBeenCalled();
+  });
+  it('retains the negotiated page area when a ready game is reloaded into a smaller window', async () => {
+    const { fetch, canvas } = viewportFixture();
+    vi.stubGlobal('window', { ...window, innerHeight: 920 });
+    Object.assign(canvas, {
+      closest: () => ({ getBoundingClientRect: () => ({ width: 1728, height: 920 }) }),
+    });
+    const negotiated = vi.fn();
+    fetch.mockResolvedValueOnce(
+      Response.json({
+        ready: true,
+        resolution: { width: 1728, height: 1117 },
+        viewport: { width: 1728, height: 1117, dpr: 2 },
+      }),
+    );
+    await expect(prepareNativeViewport(canvas, undefined, undefined, 2, null, false, negotiated)).resolves.toEqual({
+      width: 1728,
+      height: 1117,
+    });
+    expect(negotiated).toHaveBeenCalledExactlyOnceWith({ width: 1728, height: 1117, dpr: 2 });
+    expect(fetch).toHaveBeenCalledOnce();
   });
   it('continues the startup wait after a transient viewport poll failure', async () => {
     const { fetch, canvas } = viewportFixture();

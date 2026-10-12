@@ -535,6 +535,7 @@ export async function runPhase7InputStream({
   observeState,
   requireBattle = false,
   selectionKeys = [],
+  pointerOnly = false,
 }) {
   assert([250, 1000].includes(rate), 'Phase7 mouse rates are 250 and 1000');
   assert(seconds >= 30 && seconds <= 600, 'Phase7 stream lasts 30 to 600 seconds');
@@ -914,7 +915,7 @@ export async function runPhase7InputStream({
       const failedSend = sent.find((result) => result.status === 'rejected');
       if (failedSend) throw failedSend.reason;
       const actionBucket = Math.floor(activeElapsedMs() / 2000);
-      if (actionBucket !== lastActionBucket) {
+      if (!pointerOnly && actionBucket !== lastActionBucket) {
         lastActionBucket = actionBucket;
         const point = css(clickPoint ?? { x: area.x + area.width * 0.5, y: area.y + area.height * 0.5 });
         await ordinaryInput('Input.dispatchMouseEvent', {

@@ -4,6 +4,11 @@ import { NativeMirrorMemory, NativeReaderWorkingSet } from '../../../src/adapter
 const page = (address: number) => ({ address, bytes: new Uint8Array(4096) });
 
 describe('native reader allocation working set', () => {
+  it('retains a 4097-page strict working set within the negotiated wire-capacity ceiling', () => {
+    const working = new NativeReaderWorkingSet();
+    working.learn('render', [{ address: 0x10000, length: 4097 * 4096 }]);
+    expect(working.ranges).toEqual([{ address: 0x10000, length: 4097 * 4096 }]);
+  });
   it('records all requested pages including a caught cross-page miss', () => {
     const memory = new NativeMirrorMemory();
     memory.apply({ frame: 1, flags: 2, pages: [page(0x10000)] });

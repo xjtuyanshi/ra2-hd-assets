@@ -199,6 +199,8 @@ export class NativeCore {
   private policyPrepared = false;
   private policyPreparation: Promise<void> | null = null;
   private recovering = false;
+  private checkingCaptureFault = false;
+  private capacityRecoveryEpoch = -1;
   private recoveryAttempts = 0;
   private recoveryWindowAt = 0;
   private subscriptionTail: Promise<void> = Promise.resolve();
@@ -219,6 +221,8 @@ export class NativeCore {
   private readerEpoch = 0;
   private inputQueue: NativeInputOperation[] = [];
   private inputOutstanding = false;
+  private inputOutstandingChangesMenu = false;
+  private menuInputRevision = 0;
   private pointer: VmFrame['pointer'] = null;
   private pointerReadPending = false;
   private pointerReadPicture: NativePicture | null = null;
@@ -335,6 +339,7 @@ export class NativeCore {
     this.connection.notify(NativeMessageType.Ack, encodeU32(update.frame));
     if (!complete) {
       if (update.flags & 4 && this.running) void this.recoverInvalidMirror();
+      else if (update.flags & 1 && this.running) void this.recoverCaptureCapacity();
       return;
     }
     if (update.flags & 2) this.resetSerial++;
@@ -432,26 +437,22 @@ export class NativeCore {
   }
 
   async getMenuSnapshot(): Promise<MenuSnapshot | null> {
-    if (
-      this.closed ||
-      !this.running ||
-      !this.hello?.limits.menuSnapshot ||
-      this.inputOutstanding ||
-      this.inputQueue.length
-    )
-      return null;
+    if (this.closed || !this.running || !this.hello?.limits.menuSnapshot || this.menuInputPending()) return null;
     if (this.menuSnapshotPending) return this.menuSnapshotPending;
+    const inputRevision = this.menuInputRevision;
     // Pictures and render-state reads already sample modal ownership. Reuse
     // that lightweight observation; normal match play never queries controls.
     const input = performance.now() - this.inputStateReadAt < 100 ? this.inputState : await this.readInputState();
-    if (!(input.menuVisible ?? input.modal) || this.inputOutstanding || this.inputQueue.length) return null;
+    if (!(input.menuVisible ?? input.modal) || this.menuInputPending() || inputRevision !== this.menuInputRevision)
+      return null;
     if (this.menuSnapshotPending) return this.menuSnapshotPending;
     const pending = this.connection
       .request(NativeMessageType.InputState, encodeU32(NATIVE_INPUT_STATE_MENU))
       .then(async (bytes) => {
         // A pending GUI input can still replace this dialog. Its ACK only
         // establishes delivery, not that its callback has finished painting.
-        if (this.closed || !this.running || this.inputOutstanding || this.inputQueue.length) return null;
+        if (this.closed || !this.running || this.menuInputPending() || inputRevision !== this.menuInputRevision)
+          return null;
         const snapshot = decodeMenuSnapshot(bytes);
         if (!snapshot || !this.policy?.readMenuTexts) return snapshot;
         const texts = await this.policy.readMenuTexts(
@@ -466,7 +467,9 @@ export class NativeCore {
         }
         const current = await this.readInputState();
         if (current.menuHwnd !== snapshot.dialogHwnd) snapshot.complete = false;
-        return this.closed || !this.running || this.inputOutstanding || this.inputQueue.length ? null : snapshot;
+        return this.closed || !this.running || this.menuInputPending() || inputRevision !== this.menuInputRevision
+          ? null
+          : snapshot;
       });
     this.menuSnapshotPending = pending;
     void pending
@@ -475,6 +478,13 @@ export class NativeCore {
       })
       .catch(() => undefined);
     return pending;
+  }
+
+  private menuInputPending(): boolean {
+    // Pointer positions change hover feedback without replacing the dialog.
+    // Clicks, wheel and keys remain barriers, even if their ACK arrives while
+    // the snapshot's asynchronous text read is still in progress.
+    return this.inputOutstandingChangesMenu || this.inputQueue.some((operation) => !operation.position);
   }
 
   private refreshPointer(picture: NativePicture): void {
@@ -673,8 +683,9 @@ export class NativeCore {
     nextMirror: () => this.nextMirror(),
   };
 
-  private async expandPolicyRanges(): Promise<void> {
+  private async expandPolicyRanges(epoch = this.readerEpoch): Promise<void> {
     for (let attempt = 0; attempt < 8; attempt++) {
+      if (epoch !== this.readerEpoch) return;
       this.memory.beginOperation();
       let additional: readonly NativeHostRange[] | undefined;
       try {
@@ -684,6 +695,7 @@ export class NativeCore {
       }
       if (this.memory.operationMissed) {
         await this.subscribe(this.memory.missingRanges, 'policy');
+        if (epoch !== this.readerEpoch) return;
         await this.nextMirror();
         continue;
       }
@@ -699,7 +711,34 @@ export class NativeCore {
     }
     throw new NativeMemoryMiss(this.memory.missingRanges);
   }
-  private async recoverInvalidMirror(): Promise<void> {
+  private async recoverCaptureCapacity(): Promise<void> {
+    if (this.checkingCaptureFault || this.recovering || this.closed || this.capacityRecoveryEpoch === this.readerEpoch)
+      return;
+    this.checkingCaptureFault = true;
+    const epoch = this.readerEpoch;
+    try {
+      const diagnostics = decodeJson(await this.connection.request(NativeMessageType.Diagnostics)) as {
+        lastMirrorFault?: { reason?: number; value?: number; limit?: number };
+      };
+      const fault = diagnostics?.lastMirrorFault;
+      // A time-budget miss is transient. Only the agent's actual page/seed capacity fault retires allocations.
+      if (
+        epoch === this.readerEpoch &&
+        fault &&
+        (fault.reason === 2 || fault.reason === 7) &&
+        fault.limit === this.hello?.limits.pages &&
+        fault.value === fault.limit
+      ) {
+        this.capacityRecoveryEpoch = epoch;
+        await this.recoverInvalidMirror(true);
+      }
+    } catch {
+      // An unavailable diagnostic is not a capacity diagnosis; a later publication can try again.
+    } finally {
+      this.checkingCaptureFault = false;
+    }
+  }
+  private async recoverInvalidMirror(capacity = false): Promise<void> {
     if (this.recovering || this.closed || !this.policy || !this.hello) return;
     this.recovering = true;
     const now = performance.now();
@@ -708,13 +747,16 @@ export class NativeCore {
       this.recoveryAttempts = 0;
     }
     try {
-      if (++this.recoveryAttempts > 3)
+      if (!capacity && ++this.recoveryAttempts > 3)
         throw new Error('Native mirror repeatedly contains invalid pages; attachment stopped');
       this.workingSet.clear();
       this.additionalRanges = [];
       this.subscribed = [];
       this.subscribedRules = [];
-      this.render.reader = this.command.reader = this.frame.reader = null;
+      for (const slot of [this.render, this.command, this.frame]) {
+        slot.reader = null;
+        if (capacity) slot.previous = null;
+      }
       this.policy = this.createPolicy(this.memory, this.metadata, this.hello.exe.sha256);
       await this.subscribe([]);
     } catch (error) {
@@ -729,6 +771,17 @@ export class NativeCore {
   private invalidateBattleReaders(): void {
     this.readerEpoch++;
     this.previousLogicFrame = null;
+    // An incomplete reader never reaches working-set retirement. End its allocation scope at the actual video
+    // mode/frame epoch instead, before the next map can inherit freed or over-capacity pages.
+    this.workingSet.clear();
+    this.additionalRanges = [];
+    if (this.policy && this.hello) {
+      this.policy = this.createPolicy(this.memory, this.metadata, this.hello.exe.sha256);
+      void this.subscribe([]).catch((error) => {
+        if (!(error instanceof NativeMirrorUnavailable))
+          this.fail(error instanceof Error ? error : new Error(String(error)));
+      });
+    }
     for (const slot of [this.render, this.command, this.frame]) {
       slot.reader = null;
       slot.previous = null;
@@ -744,7 +797,7 @@ export class NativeCore {
     const at = performance.now();
     try {
       await this.preparePolicy();
-      await this.expandPolicyRanges();
+      await this.expandPolicyRanges(epoch);
       if (epoch !== this.readerEpoch) return null;
       // Refresh cached reader dependencies before retiring their old allocation footprint.
       let cold = !slot.reader || slot.coldAt === undefined || at - slot.coldAt >= 1000;
@@ -752,6 +805,7 @@ export class NativeCore {
       const result = await readNativeWithRetry(
         this.memory,
         () => {
+          if (epoch !== this.readerEpoch) return null;
           slot.reader ??= factory();
           return slot.reader?.() ?? null;
         },
@@ -872,6 +926,7 @@ export class NativeCore {
   private input(kind: number, a: number, b: number, c: number): void {
     if (!this.running || this.closed) return;
     const position = kind === 3 || (kind === 1 && a === 0x0200);
+    if (!position) this.menuInputRevision++;
     const operation = { kind, a, b, c, position };
     const trailing = this.inputQueue.at(-1);
     if (position && trailing?.position) {
@@ -888,6 +943,7 @@ export class NativeCore {
     const operation = this.inputQueue.shift();
     if (!operation) return;
     this.inputOutstanding = true;
+    this.inputOutstandingChangesMenu = !operation.position;
     void this.connection
       .request(
         NativeMessageType.Input,
@@ -895,10 +951,12 @@ export class NativeCore {
       )
       .then(() => {
         this.inputOutstanding = false;
+        this.inputOutstandingChangesMenu = false;
         this.drainInput();
       })
       .catch((error) => {
         this.inputOutstanding = false;
+        this.inputOutstandingChangesMenu = false;
         this.fail(error instanceof Error ? error : new Error(String(error)));
       });
   }

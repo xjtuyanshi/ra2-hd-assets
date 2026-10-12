@@ -108,6 +108,16 @@ let activeDisplayScale: number | undefined;
 export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const generation = ++pageGeneration;
   let requestedResolution: GameResolution | null = null;
+  let nativeArea: { width: number; height: number; dpr: number } | null = null;
+  const readArea = () => {
+    const area = canvas.closest('#stage')?.getBoundingClientRect();
+    const fullscreen = document.fullscreenElement?.contains(canvas);
+    return {
+      width: fullscreen ? window.innerWidth : (area?.width ?? window.innerWidth),
+      height: fullscreen ? window.innerHeight : (area?.height ?? window.innerHeight),
+      dpr: window.devicePixelRatio || 1,
+    };
+  };
   movieSkip.set(null);
   activeNativeViewportAbort?.abort();
   activeNativeViewportAbort = null;
@@ -150,6 +160,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
             fillScale,
             resolutionViewScale(activeResolutionChoice) !== null ? requestedResolution : null,
             activeDisplayScale,
+            nativeArea !== null && JSON.stringify(nativeArea) !== JSON.stringify(readArea()),
           ),
       },
     );
@@ -699,6 +710,9 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
       resolutionViewScale(activeResolutionChoice) ?? 3,
       typeof activeResolutionChoice === 'object' ? activeResolutionChoice : null,
       activeResolutionChoice === null,
+      (area) => {
+        nativeArea = area;
+      },
     );
   } catch (error) {
     if (viewportAbort.signal.aborted || generation !== pageGeneration) return;
@@ -709,13 +723,15 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     if (activeNativeViewportAbort === viewportAbort) activeNativeViewportAbort = null;
   }
   if (generation !== pageGeneration || runtimeReleased) return;
+  if (nativeAutoStart(window.location.search) && !nativeArea) nativeArea = readArea();
   if (nativeViewport) {
     requestedResolution = nativeViewport;
     activeDisplayScale = resolveResolutionViewScale(
       activeResolutionChoice,
       canvas.closest('#stage'),
-      window.devicePixelRatio || 1,
+      nativeArea?.dpr ?? (window.devicePixelRatio || 1),
       requestedResolution,
+      nativeArea ?? undefined,
     );
     toolbar.setResolution(activeResolutionChoice);
     refitActiveCanvas();

@@ -86,7 +86,7 @@ const indirect = (
   stride: pointerOffset + childOffset * 0x10000,
 });
 
-/** Constructor-verified type arrays of the pinned executable; effect types exist before their first instance. */
+/** Constructor-verified type arrays of the pinned executable; pointer tables exist before their first instance. */
 export const YR_NATIVE_EFFECT_TYPE_ARRAYS = Object.freeze({
   anim: 0x8b4150, // AnimTypeClass ctor 0x42777E..0x4277C6.
   bullet: 0xa83c80, // BulletTypeClass ctor 0x46BD33..0x46BD7B.
@@ -138,19 +138,24 @@ export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.fr
   pointer(0x8871e0, 0x1900), // RulesClass/Settings instance, used by tint/detail and speed policies.
   // Discovery subscribes the actual capacity's entire pointer table after a strict coherent read.
   pointer(G.map + YR_SHROUD_OFFSETS.cellItems, 4),
-  vector(0xa83c68, 0x1800, 4096), // BuildingTypeClass::Array.
-  vector(0xa8e348, 0x1000, 4096), // InfantryTypeClass::Array.
-  vector(0xa83ce0, 0x1000, 4096), // UnitTypeClass::Array.
-  vector(0xa8b218, 0x1000, 4096), // AircraftTypeClass::Array.
+  // A large map needs its complete cell image. Unused global techno types must not consume the same capture
+  // capacity: follow live objects' types coherently, and let strict sidebar reads subscribe the additional types
+  // and name strings they actually use. Pointer tables still expose every legitimate production type.
+  ...[0xa83c68, 0xa8e348, 0xa83ce0, 0xa8b218].map((source) => pointerList(source, 4096)),
+  memberPointer(G.buildings, O.buildingType, 0x1800, L.objectsPerKind),
+  memberPointer(G.infantry, O.infantryType, 0x1000, L.objectsPerKind),
+  memberPointer(G.units, O.unitType, 0x1000, L.objectsPerKind),
+  memberPointer(G.aircraft, O.aircraftType, 0x1000, L.objectsPerKind),
   vector(0xa83d80, 0x2c0, 255), // OverlayTypeClass::Array.
   vector(0xa8ec18, 0x40, 0x8000), // SmudgeTypeClass::Array.
   vector(0xa8e330, 0xe8, 4096), // SuperWeaponTypeClass::Array resolved by the sidebar.
-  vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.anim, 0x36c, 4096),
-  vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.bullet, 0x2ac, 4096),
-  vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.particleSystem, 0x2b8, 4096),
-  vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.voxelAnim, 0x40, 4096),
-  vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.weapon, 0x40, 4096),
-  vector(YR_NATIVE_EFFECT_TYPE_ARRAYS.warhead, 0x40, 4096),
+  ...Object.values(YR_NATIVE_EFFECT_TYPE_ARRAYS).map((source) => pointerList(source, 4096)),
+  memberPointer(YR_EFFECTS_GLOBALS.anims, YR_EFFECTS_OFFSETS.animType, 0x36c, 8192),
+  memberPointer(YR_EFFECTS_GLOBALS.bullets, YR_EFFECTS_OFFSETS.bulletType, 0x2ac, 4096),
+  memberPointer(YR_EFFECTS_GLOBALS.bullets, YR_EFFECTS_OFFSETS.bulletWeapon, 0x40, 4096),
+  memberPointer(YR_EFFECTS_GLOBALS.bullets, YR_EFFECTS_OFFSETS.bulletWarhead, 0x40, 4096),
+  memberPointer(YR_EFFECTS_GLOBALS.particleSystems, YR_EFFECTS_OFFSETS.particleSystemType, 0x2b8, 2048),
+  memberPointer(YR_EFFECTS_GLOBALS.voxelAnims, YR_EFFECTS_OFFSETS.voxelAnimType, 0x40, 4096),
   vector(0xa83dc8, 0xa8, 65536), // ParticleClass ctor 0x62B786..0x62B7CF; coordinates are read through +0xA7.
   vector(YR_EFFECTS_GLOBALS.anims, 0x1b0, 8192),
   vector(YR_EFFECTS_GLOBALS.bullets, 0x160, 4096),
@@ -175,7 +180,7 @@ export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.fr
     indirect(7, G.houses, offset, 0x40, 0x64, 4096), // FactoryClass queue of type pointers.
     indirect(8, G.houses, offset, 0x58, 0x800, L.houses), // In-production object may not yet belong to a global live array.
   ]),
-  ...[0xa83c68, 0xa8e348, 0xa83ce0, 0xa8b218, 0xa8e330].map((source) => memberPointer(source, 0x60, 512, 4096)),
+  memberPointer(0xa8e330, 0x60, 512, 4096),
   // Layer observers read membership/order only. Child classes have different allocation sizes and their own rules;
   // following a blanket body span here can cross an allocation's final committed page (notably short-lived anims).
   ...Array.from({ length: 5 }, (_, index) => pointerList(G.renderLayers + index * 0x18, L.objectsPerLayer)),

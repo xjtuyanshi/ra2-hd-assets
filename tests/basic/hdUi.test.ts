@@ -170,7 +170,7 @@ describe('HD menu atomic fallback', () => {
       parentElement: { appendChild: vi.fn() },
       getBoundingClientRect: () => ({ left: 0, top: 0, width: 1728, height: 914 }),
     });
-    const getMenuSnapshot = vi.fn(async () => snapshot());
+    const getMenuSnapshot = vi.fn(async (): Promise<MenuSnapshot | null> => snapshot());
     const menus = await startHdMenus({
       screen: screen as unknown as HTMLCanvasElement,
       vm: { getMenuSnapshot } as unknown as Parameters<typeof startHdMenus>[0]['vm'],
@@ -181,6 +181,30 @@ describe('HD menu atomic fallback', () => {
     const paint = () => {
       while (frames.length) frames.shift()!(0);
     };
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('block');
+    const incomplete = snapshot();
+    incomplete.complete = false;
+    getMenuSnapshot.mockResolvedValueOnce(incomplete);
+    polls.shift()!();
+    await settle();
+    paint();
+    // A bounded state query may time out while the same menu still exists.
+    // Retain the last verified picture; a changed root or a real null does
+    // not authorize retention and must expose the current original picture.
+    expect(canvas.style.display).toBe('block');
+    getMenuSnapshot.mockResolvedValueOnce({ ...incomplete, dialogHwnd: 10 });
+    polls.shift()!();
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('none');
+    getMenuSnapshot.mockResolvedValueOnce(null);
+    polls.shift()!();
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('none');
+    polls.shift()!();
     await settle();
     paint();
     expect(canvas.style.display).toBe('block');
@@ -207,9 +231,42 @@ describe('HD menu atomic fallback', () => {
     polls.shift()!();
     await settle();
     paint();
+    // An ACK only consumes the click: a responsive old dialog can remain
+    // available for the first post-click poll while its swap is posted.
+    expect(canvas.style.display).toBe('none');
+    polls.shift()!();
+    await settle();
+    paint();
     expect(canvas.style.display).toBe('block');
     windowEvents.dispatchEvent(new MenuKeyboardEvent('Escape'));
     expect(canvas.style.display).toBe('none');
+    polls.shift()!();
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('none');
+    polls.shift()!();
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('block');
+    const defaultButton = snapshot();
+    defaultButton.controls[1]!.style = 1; // BS_DEFPUSHBUTTON, with focus elsewhere.
+    getMenuSnapshot.mockResolvedValue(defaultButton);
+    polls.shift()!();
+    await settle();
+    paint();
+    windowEvents.dispatchEvent(new MenuKeyboardEvent('Enter'));
+    expect(canvas.style.display).toBe('none');
+    polls.shift()!();
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('none');
+    const newDialog = snapshot();
+    newDialog.dialogHwnd = 10;
+    newDialog.controls[0]!.hwnd = 10;
+    newDialog.controls.slice(1).forEach((control) => {
+      control.parent = 10;
+    });
+    getMenuSnapshot.mockResolvedValue(newDialog);
     polls.shift()!();
     await settle();
     paint();

@@ -3,6 +3,7 @@ import {
   NativeMessageType,
   NativePictureDecoder,
   NATIVE_MAX_MESSAGE,
+  NATIVE_MAX_PAGES,
   NATIVE_PAGE_SIZE,
   decodePacket,
   encodePacket,
@@ -84,7 +85,9 @@ describe('native binary protocol', () => {
         .verified,
     ).toBe(false);
     expect(() => decodeHello(json({ ...syntheticHello, exe: undefined }))).toThrow();
-    expect(() => decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, pages: 4097 } }))).toThrow();
+    expect(() =>
+      decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, pages: NATIVE_MAX_PAGES + 1 } })),
+    ).toThrow();
     expect(() => decodeHello(new Uint8Array([0xff]))).toThrow('UTF-8');
   });
   it('preserves unknown menu metadata for whole-picture fallback and rejects malformed rectangles', () => {
@@ -144,12 +147,32 @@ describe('native binary protocol', () => {
         sampleCount: 0,
       }),
     ).toThrow('wraps');
-    expect(() => encodeSubscription({ ranges: [], rules: [], maxPages: 4097, budgetUs: 500, sampleCount: 0 })).toThrow(
-      'bounds',
-    );
+    expect(() =>
+      encodeSubscription({ ranges: [], rules: [], maxPages: NATIVE_MAX_PAGES + 1, budgetUs: 500, sampleCount: 0 }),
+    ).toThrow('bounds');
     expect(() => encodeSubscription({ ranges: [], rules: [], maxPages: 1, budgetUs: 20001, sampleCount: 0 })).toThrow(
       'bounds',
     );
+  });
+  it('accepts a complete 4097-page mirror within the existing wire limit', () => {
+    const bytes = new Uint8Array(NATIVE_PAGE_SIZE).fill(0x52),
+      payload = concat(
+        encodeU32(12, 2 | 16, 4097, 0),
+        ...Array.from({ length: 4097 }, (_, index) => [encodeU32(index * NATIVE_PAGE_SIZE), bytes]).flat(),
+        encodeU32(1),
+      );
+    expect(payload.byteLength).toBeLessThan(NATIVE_MAX_MESSAGE);
+    expect(decodeMirror(payload).pages).toHaveLength(4097);
+  });
+  it('derives its page bound from the unchanged maximum wire-capacity budget', () => {
+    const metadataBytes = 16 + 4 + 4,
+      sampleBytes = 64 * (8 + NATIVE_PAGE_SIZE),
+      pageBytes = NATIVE_PAGE_SIZE + 4 + 4,
+      expected = Math.floor((NATIVE_MAX_MESSAGE - metadataBytes - sampleBytes) / pageBytes);
+    expect(NATIVE_MAX_MESSAGE).toBe(32 * 1024 * 1024);
+    expect(NATIVE_MAX_PAGES).toBe(expected);
+    expect(metadataBytes + sampleBytes + NATIVE_MAX_PAGES * pageBytes).toBeLessThanOrEqual(NATIVE_MAX_MESSAGE);
+    expect(metadataBytes + sampleBytes + (NATIVE_MAX_PAGES + 1) * pageBytes).toBeGreaterThan(NATIVE_MAX_MESSAGE);
   });
   it('preserves nested follow offsets in the five-word rule layout and validates optional capabilities', () => {
     const rules = ([4, 5, 6, 7, 8] as const).map((kind) => ({

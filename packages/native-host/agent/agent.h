@@ -26,7 +26,8 @@
 #define NH_MAGIC 0x3142484eu
 #define NH_VERSION 1
 #define NH_MAX_MESSAGE (32u * 1024u * 1024u)
-#define NH_MAX_PAGES 4096u
+/* Full page updates, removals and the largest protocol samples fit the unchanged 32 MiB packet. */
+#define NH_MAX_PAGES ((NH_MAX_MESSAGE - 24u - NH_MAX_SAMPLES * (NH_PAGE_SIZE + 8u)) / (NH_PAGE_SIZE + 8u))
 #define NH_MAX_RULES 256u
 #define NH_MAX_RANGES 4096u
 #define NH_MAX_SAMPLES 64u
