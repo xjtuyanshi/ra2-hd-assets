@@ -699,9 +699,18 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     published = text;
     host.publishStatus?.(text);
   };
+  const preparationNotice = t('正在准备高清战场…');
   const clearFallback = () => {
     fallback = null;
-    publish(null);
+    // A missing snapshot can clear a fallback while the actual battlefield still prepares.
+    if (published !== preparationNotice) publish(null);
+  };
+  const syncPreparationNotice = () => {
+    // An actual native battlefield, not an early map hint, owns this notice. It never covers play or replaces
+    // a missing-cache/incomplete-art explanation, and a completed reveal does not reannounce on state gaps.
+    const waiting = native && enabled && nativeBattleSurface && !revealed && !fallback && !pollFailed;
+    if (waiting && published === null) publish(preparationNotice);
+    else if (!waiting && published === preparationNotice) publish(null);
   };
   // The production graph walker follows page.ts -> hdBridge.ts, so the import itself must be under DEV.
   if (import.meta.env.DEV && params.get('hd-ui') === '1') {
@@ -791,8 +800,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
 
   /** Apply hole/key/canvas visibility without ever replacing the original with an incomplete scene. */
   const present = () => {
-    const keyedReady =
-      passthroughAcceptedAt !== null && (!native || (keyFrameAt ?? -Infinity) >= passthroughAcceptedAt);
+    const keyedReady = passthroughAcceptedAt !== null && (keyFrameAt ?? -Infinity) >= passthroughAcceptedAt;
     const keyed = !!hole && fadeFinished && keyable && !passthroughUnsupported && keyedReady;
     if (keyed) keyRect = hole;
     const trailing = !hole && !!keyRect && performance.now() < keyUntil;
@@ -836,8 +844,6 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       // Installing the validated passthrough patches with zero flags leaves every original pixel intact.
       // Unsupported runtimes and transient install failures must never begin a fade that could lose overlays.
       requestPassthrough(0);
-      const began = timeline.firstBattleFrameAt ?? timeline.matchAt;
-      if (began !== null && performance.now() - began >= 3000) publish(t('高清暂不可用，原版可继续游玩'));
       return false;
     }
     if (fade) {
@@ -856,47 +862,51 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     }
     if (hole || passthroughRequest) hidePending ??= { at: performance.now(), reason };
   };
-  const onNativeFrame = (picture: VmFrame) => {
-    if (stopped || !native) return;
-    const battleSurface = picture.width > 800 || picture.height > 600;
-    if (battleSurface) {
-      if (!nativeBattleSurface) battleEpoch++;
-      nativeMenuSurface = false;
-      timeline.firstBattleFrameAt ??= performance.now();
-      nativeBattleSurface = true;
-    } else if (nativeBattleSurface && picture.width === 800 && picture.height === 600) {
-      battleEpoch++;
-      nativeBattleSurface = false;
-      nativeMenuSurface = true;
-      hidePending = null;
-      setHole(null, 'menu-video-mode');
-      requestPassthrough(0);
-      // This actual unkeyed menu picture has already replaced every trailing keyed battlefield frame.
-      keyRect = null;
-      keyUntil = 0;
-      present();
-      // A confirmed menu surface ends the match, including a short one whose successor has a larger frame
-      // number. Keep GPU assets but never carry its revealed state or last pushed picture into another match.
-      revealed = false;
-      fadeStartedAt = null;
-      fadeFinished = false;
-      matchMap = null;
-      matchFrame = 0;
-      stateMap = null;
-      stateFrame = 0;
-      latestState = null;
-      pushed = null;
-      prematch = true;
-      warmed = false;
-      if (live) live.outOfSight = true;
-      timeline = emptyTimeline(null);
-      changePresentation('original', 'menu-video-mode');
+  const onGameFrame = (picture: VmFrame) => {
+    if (stopped) return;
+    if (native) {
+      const battleSurface = picture.width > 800 || picture.height > 600;
+      if (battleSurface) {
+        if (!nativeBattleSurface) battleEpoch++;
+        nativeMenuSurface = false;
+        timeline.firstBattleFrameAt ??= performance.now();
+        nativeBattleSurface = true;
+      } else if (nativeBattleSurface && picture.width === 800 && picture.height === 600) {
+        battleEpoch++;
+        nativeBattleSurface = false;
+        nativeMenuSurface = true;
+        hidePending = null;
+        setHole(null, 'menu-video-mode');
+        requestPassthrough(0);
+        // This actual unkeyed menu picture has already replaced every trailing keyed battlefield frame.
+        keyRect = null;
+        keyUntil = 0;
+        present();
+        // A confirmed menu surface ends the match, including a short one whose successor has a larger frame
+        // number. Keep GPU assets but never carry its revealed state or last pushed picture into another match.
+        revealed = false;
+        fadeStartedAt = null;
+        fadeFinished = false;
+        matchMap = null;
+        matchFrame = 0;
+        stateMap = null;
+        stateFrame = 0;
+        latestState = null;
+        pushed = null;
+        prematch = true;
+        warmed = false;
+        if (live) live.outOfSight = true;
+        timeline = emptyTimeline(null);
+        changePresentation('original', 'menu-video-mode');
+      }
+      syncPreparationNotice();
     }
     if (!passthroughRequest || passthroughAcceptedAt === null || !picture.rgb565) return;
     const rect = tacticalRect();
     if (!rect) return;
-    // Any key pixel is evidence that this actual picture has applied terrain passthrough. Sparse native overlays
-    // may occupy a sample; the other positions stay key-coloured without scanning the framebuffer each frame.
+    // Both runtimes acknowledge the configuration write before a rendered frame applies it. Keep the full HD
+    // hole until an actual key pixel proves the switch; otherwise an older opaque frame briefly covers HD again.
+    // Sparse game overlays may occupy a sample; the other positions stay key-coloured without scanning the frame.
     for (const y of [0.25, 0.5, 0.75]) {
       for (const x of [0.25, 0.5, 0.75]) {
         const px = Math.floor(rect.x + rect.width * x);
@@ -1377,6 +1387,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     const now = performance.now();
     stallMonitor?.frame(now);
     prepareEarly(now);
+    syncPreparationNotice();
     if (hidePending && now - hidePending.at >= STATE_HIDE_HOLD_MS) {
       const reason = hidePending.reason;
       hidePending = null;
@@ -1524,6 +1535,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (nativePollTimer !== null) clearTimeout(nativePollTimer);
     nativePollTimer = null;
     clearFallback();
+    publish(null);
     ui?.dispose();
     ui = null;
     stallMonitor?.dispose();
@@ -1575,7 +1587,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   return Object.assign(stop, {
     toggle: () => handle.toggle(),
     scene,
-    frame: onNativeFrame,
+    frame: onGameFrame,
     menuSide: () => menuSide,
     battleActive: () => inBattle,
   });

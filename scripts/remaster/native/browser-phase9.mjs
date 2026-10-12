@@ -19,6 +19,9 @@ const naturalWindowDimensions = process.env.NATIVE_BROWSER_USE_WINDOW_DIMENSIONS
 assert(/^phase[0-9]+$/.test(phase));
 const tag = process.argv[2] || 'hidden';
 const webRoute = tag.startsWith('web');
+const fullWindow = tag.startsWith('full') || tag.startsWith('webfull');
+const gameSpeed = process.argv[5] ?? '3';
+assert(/^[0-6]$/.test(gameSpeed), 'Game speed must use the original 0..6 scale');
 assert(/^[a-zA-Z0-9_-]+$/.test(tag));
 const useViewportHandshake = naturalWindowDimensions && Number(phase.slice(5)) >= 18 && !tag.startsWith('baseline');
 const out = join(base, phase, tag);
@@ -188,6 +191,7 @@ const state = () =>
           nativeBinkPlaybackActive: shim.nativeBinkPlaybackActive,
           title: shim.inspectShellPageTitle(),
           pointer: core.getPointerState(),
+          modal: shim.inspectFullSizeDialogVisible(),
           fullSizeDialogVisible: shim.inspectFullSizeDialogVisible?.() ?? null,
           controls,
         };
@@ -381,13 +385,17 @@ async function execute(c) {
   await ownerIdle();
   if (c.action === 'hd-cache-mode') {
     if (hdCacheMode) await page.context().unroute('**/hd-cache/**', hdCacheMode);
-    hdCacheMode = c.mode === 'normal' ? null : async (route) => {
-      if (!c.match || route.request().url().includes(c.match)) {
-        if (c.mode === 'fail') return route.fulfill({ status: 503, body: 'Deliberate cache failure for acceptance' });
-        await delay(c.delayMs ?? 15000);
-      }
-      return route.continue();
-    };
+    hdCacheMode =
+      c.mode === 'normal'
+        ? null
+        : async (route) => {
+            if (!c.match || route.request().url().includes(c.match)) {
+              if (c.mode === 'fail')
+                return route.fulfill({ status: 503, body: 'Deliberate cache failure for acceptance' });
+              await delay(c.delayMs ?? 15000);
+            }
+            return route.continue();
+          };
     if (hdCacheMode) await page.context().route('**/hd-cache/**', hdCacheMode);
     else await cdp.send('Network.setCacheDisabled', { cacheDisabled: false });
     return { mode: c.mode, match: c.match, delayMs: c.delayMs };
@@ -871,10 +879,21 @@ async function execute(c) {
         file,
         at: new Date(at).toISOString(),
         elapsedMs: at - started,
-        ...(c.logic ? { logic: await worker().evaluate(async () => {
-          const bytes = (await globalThis.__auditCore.connection.read(0xa8ed84, 4)).bytes;
-          return { frame: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true), atMs: performance.now(), timeOrigin: performance.timeOrigin };
-        }) } : {}),
+        ...(c.logic
+          ? {
+              logic: await worker().evaluate(async (web) => {
+                const core = globalThis.__auditCore;
+                const bytes = web
+                  ? core.emulator.read_memory(0xa8ed84, 4).slice()
+                  : (await core.connection.read(0xa8ed84, 4)).bytes;
+                return {
+                  frame: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true),
+                  atMs: performance.now(),
+                  timeOrigin: performance.timeOrigin,
+                };
+              }, webRoute),
+            }
+          : {}),
         hd: await page.evaluate(() => ({
           atMs: performance.now(),
           timeline: window.__hdBridge?.timeline,
@@ -894,7 +913,10 @@ async function execute(c) {
     });
     await writeFile(join(directory, 'native-presented-frames.json'), JSON.stringify(nativeFrames, null, 2));
     await writeFile(join(directory, 'sequence.json'), JSON.stringify(samples, null, 2));
-    await writeFile(join(directory, 'stalls.json'), JSON.stringify(await page.evaluate(() => window.__hdBridge?.stalls ?? null), null, 2));
+    await writeFile(
+      join(directory, 'stalls.json'),
+      JSON.stringify(await page.evaluate(() => window.__hdBridge?.stalls ?? null), null, 2),
+    );
     await action;
     await shot(c.label + '-settled');
     return { frames: samples.length, elapsedMs: Date.now() - started, directory };
@@ -980,10 +1002,14 @@ async function execute(c) {
     let x = c.x,
       y = c.y;
     if (c.id !== undefined || c.text) {
-      const s = await state();
-      const control = s.controls.find(
-        (v) => usable(v) && (c.id !== undefined ? v.id === c.id : new RegExp(c.text, 'i').test(v.text)),
-      );
+      const findControl = async () => {
+        const s = await state();
+        return s.controls.find(
+          (v) => usable(v) && (c.id !== undefined ? v.id === c.id : new RegExp(c.text, 'i').test(v.text)),
+        );
+      };
+      const control =
+        c.waitForControl === true ? await wait('control ' + JSON.stringify(c), findControl) : await findControl();
       assert(control, 'Missing control ' + JSON.stringify(c));
       [x, y] = [(control.rect[0] + control.rect[2]) / 2, (control.rect[1] + control.rect[3]) / 2];
       if (control.class === 'ComboBox') x = control.rect[2] - 8;
@@ -1198,8 +1224,11 @@ async function execute(c) {
       commandState: () => worker().evaluate(() => globalThis.__auditCore.getCommandState()),
       readBytes: (a, n) =>
         worker().evaluate(
-          async ([a, n]) => Array.from((await globalThis.__auditCore.connection.read(a, n)).bytes),
-          [a, n],
+          async ([a, n, web]) => {
+            const core = globalThis.__auditCore;
+            return Array.from(web ? core.emulator.read_memory(a, n).slice() : (await core.connection.read(a, n)).bytes);
+          },
+          [a, n, webRoute],
         ),
       inputState: state,
       shot,
@@ -1214,41 +1243,86 @@ async function execute(c) {
   if (c.action === 'deploy-mcv') {
     const requestedAt = Date.now();
     const before = await wait('genuine battle state before immediate deployment', async () => {
-      const value = c.direct ? await worker().evaluate(async () => {
-        // Read only the opening MCV and camera, using the same pinned fields as
-        // yr/stateReader.ts. Input still goes through ordinary browser clicks.
-        // This avoids making a first-second click wait for the large HD mirror.
-        const core = globalThis.__auditCore;
-        if (!core.hello.exe.verified || core.hello.surface.width <= 800) return null;
-        const read = async (a, n) => (await core.connection.read(a, n)).bytes;
-        const u32 = (a, n = 0) => new DataView(a.buffer, a.byteOffset, a.byteLength).getUint32(n, true);
-        const i32 = (a, n = 0) => new DataView(a.buffer, a.byteOffset, a.byteLength).getInt32(n, true);
-        const [f, h, v, t] = await Promise.all([read(0xa8ed84, 4), read(0xa83d4c, 4), read(0x8b4108, 20), read(0x887324, 4)]);
-        const frame = u32(f), local = u32(h), count = u32(v, 16), items = u32(v, 4), tactical = u32(t);
-        if (!frame || frame > 900 || !local || !tactical || count < 1 || count > 512 || !items) return null;
-        const pointers = await read(items, count * 4);
-        const units = await Promise.all(Array.from({ length: count }, async (_, i) => {
-          const pointer = u32(pointers, i * 4);
-          if (pointer < 0x10000 || pointer % 4) return null;
-          const unit = await read(pointer, 0x6c8);
-          if (u32(unit) !== 0x7f5c70 || u32(unit, 0x21c) !== local || unit[0x81] || i32(unit, 0x6c) <= 0) return null;
-          const name = new TextDecoder().decode(await read(u32(unit, 0x6c4) + 0x24, 24)).split('\0')[0];
-          if (!/^(AMCV|MCV|SMCV|PCV)$/.test(name)) return null;
-          return { uid: u32(unit, 0x10), owner: local, type: name, health: i32(unit, 0x6c), x: i32(unit, 0x9c), y: i32(unit, 0xa0), z: i32(unit, 0xa4) };
-        }));
-        const camera = await read(tactical + 0xb0, 8);
-        return { frame, localHouse: local, objects: units.filter(Boolean), view: { x: i32(camera), y: i32(camera, 4) } };
-      }) : await worker().evaluate(() => globalThis.__auditCore.getCommandState());
-      return value?.view && value.localHouse >= 0 && value.objects.some((o) => o.owner === value.localHouse && o.health > 0 && /^(AMCV|MCV|SMCV|PCV)$/.test(o.type)) ? value : null;
+      const value = c.direct
+        ? await worker().evaluate(async (web) => {
+            // Read only the opening MCV and camera, using the same pinned fields as
+            // yr/stateReader.ts. Input still goes through ordinary browser clicks.
+            // This avoids making a first-second click wait for the large HD mirror.
+            const core = globalThis.__auditCore;
+            if (web) {
+              // The same pinned YR 1.001 image as the state reader; the hash is produced by VmCore, never injected.
+              if (
+                !core.emulator ||
+                (await core.executableHash) !== '7b8a068535d6af06845edf95ae829b113d00c02909330e16f197426cd7db94b6' ||
+                !(core.getPointerState()?.width > 800) ||
+                core.shim.inspectShellPageTitle() !== '' ||
+                core.shim.inspectFullSizeDialogVisible()
+              )
+                return null;
+            } else if (!core.hello.exe.verified || core.hello.surface.width <= 800) return null;
+            const read = async (a, n) =>
+              web ? core.emulator.read_memory(a, n).slice() : (await core.connection.read(a, n)).bytes;
+            const u32 = (a, n = 0) => new DataView(a.buffer, a.byteOffset, a.byteLength).getUint32(n, true);
+            const i32 = (a, n = 0) => new DataView(a.buffer, a.byteOffset, a.byteLength).getInt32(n, true);
+            const [f, h, v, t] = await Promise.all([
+              read(0xa8ed84, 4),
+              read(0xa83d4c, 4),
+              read(0x8b4108, 20),
+              read(0x887324, 4),
+            ]);
+            const frame = u32(f),
+              local = u32(h),
+              count = u32(v, 16),
+              items = u32(v, 4),
+              tactical = u32(t);
+            if (!frame || frame > 900 || !local || !tactical || count < 1 || count > 512 || !items) return null;
+            const pointers = await read(items, count * 4);
+            const units = await Promise.all(
+              Array.from({ length: count }, async (_, i) => {
+                const pointer = u32(pointers, i * 4);
+                if (pointer < 0x10000 || pointer % 4) return null;
+                const unit = await read(pointer, 0x6c8);
+                if (u32(unit) !== 0x7f5c70 || u32(unit, 0x21c) !== local || unit[0x81] || i32(unit, 0x6c) <= 0)
+                  return null;
+                const name = new TextDecoder().decode(await read(u32(unit, 0x6c4) + 0x24, 24)).split('\0')[0];
+                if (!/^(AMCV|MCV|SMCV|PCV)$/.test(name)) return null;
+                return {
+                  uid: u32(unit, 0x10),
+                  owner: local,
+                  type: name,
+                  health: i32(unit, 0x6c),
+                  x: i32(unit, 0x9c),
+                  y: i32(unit, 0xa0),
+                  z: i32(unit, 0xa4),
+                };
+              }),
+            );
+            const camera = await read(tactical + 0xb0, 8);
+            return {
+              frame,
+              localHouse: local,
+              objects: units.filter(Boolean),
+              view: { x: i32(camera), y: i32(camera, 4) },
+            };
+          }, webRoute)
+        : await worker().evaluate(() => globalThis.__auditCore.getCommandState());
+      return value?.view &&
+        value.localHouse >= 0 &&
+        value.objects.some((o) => o.owner === value.localHouse && o.health > 0 && /^(AMCV|MCV|SMCV|PCV)$/.test(o.type))
+        ? value
+        : null;
     });
     const mcv = before.objects.find(
       (o) => o.owner === before.localHouse && o.health > 0 && /^(AMCV|MCV|SMCV|PCV)$/.test(o.type),
     );
     assert(mcv, 'No actual local MCV');
-    const zFactor = await worker().evaluate(async () => {
-      const bytes = (await globalThis.__auditCore.connection.read(0xb0cd48, 8)).bytes;
+    const zFactor = await worker().evaluate(async (web) => {
+      const core = globalThis.__auditCore;
+      const bytes = web
+        ? core.emulator.read_memory(0xb0cd48, 8).slice()
+        : (await core.connection.read(0xb0cd48, 8)).bytes;
       return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getFloat64(0, true);
-    });
+    }, webRoute);
     const x = Math.trunc((30 * (mcv.x - mcv.y)) / 256) - before.view.x;
     const y =
       Math.trunc((15 * (mcv.x + mcv.y)) / 256) -
@@ -1276,8 +1350,19 @@ async function execute(c) {
       },
       12000,
     );
-    await record('immediate-mcv-deployment', { requestedAt, selectedAt, inputAt, observedAt: Date.now(), input: c.clickDeploy ? 'two ordinary trusted clicks' : 'trusted click and D', beforeFrame: before.frame, mcv, point: [x, y], yard, actualGuestState: true });
-    await shot('immediate-mcv-deployment');
+    await record('immediate-mcv-deployment', {
+      requestedAt,
+      selectedAt,
+      inputAt,
+      observedAt: Date.now(),
+      input: c.clickDeploy ? 'two ordinary trusted clicks' : 'trusted click and D',
+      beforeFrame: before.frame,
+      mcv,
+      point: [x, y],
+      yard,
+      actualGuestState: true,
+    });
+    if (c.shot !== false) await shot('immediate-mcv-deployment');
     return { mcv, yard };
   }
   if (c.action === 'match-state')
@@ -1433,7 +1518,7 @@ try {
       process.execPath,
       [
         join(wt, 'scripts/remaster/native/phase8-launch-trace.mjs'),
-        ...(useViewportHandshake ? (tag.startsWith('full') ? ['--fullscreen'] : []) : ['--size', '1728x1117']),
+        ...(useViewportHandshake ? (fullWindow ? ['--fullscreen'] : []) : ['--size', '1728x1117']),
       ],
       {
         cwd: wt,
@@ -1467,7 +1552,7 @@ try {
     executablePath: exe,
     args: [
       '--window-size=1728,1117',
-      ...(tag.startsWith('full') ? ['--kiosk', '--start-fullscreen', '--window-position=0,0'] : []),
+      ...(fullWindow ? ['--kiosk', '--start-fullscreen', '--window-position=0,0'] : []),
       '--enable-unsafe-webgpu',
       '--enable-gpu',
       '--use-angle=metal',
@@ -1477,8 +1562,8 @@ try {
     ],
   };
   const contextOptions = naturalWindowDimensions
-      ? { viewport: null, locale: 'zh-CN' }
-      : { viewport: { width: 1728, height: 1117 }, deviceScaleFactor: 2, locale: 'zh-CN' };
+    ? { viewport: null, locale: 'zh-CN' }
+    : { viewport: { width: 1728, height: 1117 }, deviceScaleFactor: 2, locale: 'zh-CN' };
   // A retained, isolated Chrome profile measures the player's second launch,
   // including browser-owned caches. It never attaches to the owner's profile.
   const profileName = process.argv[4];
@@ -1486,7 +1571,8 @@ try {
   let context;
   if (profileName) {
     context = await chromium.launchPersistentContext(join(base, phase, 'profiles', profileName), {
-      ...browserOptions, ...contextOptions,
+      ...browserOptions,
+      ...contextOptions,
     });
     browser = context.browser();
   } else {
@@ -1565,20 +1651,23 @@ try {
       if (event.request.url.includes('/hd-cache/')) resourceRequests.set(event.requestId, event.request.url);
     });
     cdp.on('Network.responseReceived', (event) => {
-      if (resourceRequests.has(event.requestId)) void record('hd-resource', {
-        url: event.response.url, atSeconds: event.timestamp,
-        diskCache: event.response.fromDiskCache ?? false,
-        serviceWorker: event.response.fromServiceWorker ?? false,
-        timing: event.response.timing,
-      });
+      if (resourceRequests.has(event.requestId))
+        void record('hd-resource', {
+          url: event.response.url,
+          atSeconds: event.timestamp,
+          diskCache: event.response.fromDiskCache ?? false,
+          serviceWorker: event.response.fromServiceWorker ?? false,
+          timing: event.response.timing,
+        });
     });
     cdp.on('Network.loadingFinished', (event) => resourceRequests.delete(event.requestId));
   }
   const initialWindow = await cdp.send('Browser.getWindowForTarget');
-  if (!tag.startsWith('full')) await cdp.send('Browser.setWindowBounds', {
-    windowId: initialWindow.windowId,
-    bounds: { left: 0, top: 30, width: 1728, height: 1117, windowState: 'normal' },
-  });
+  if (!fullWindow)
+    await cdp.send('Browser.setWindowBounds', {
+      windowId: initialWindow.windowId,
+      bounds: { left: 0, top: 30, width: 1728, height: 1117, windowState: 'normal' },
+    });
   page.on('response', (r) => {
     if (r.status() >= 400) record('http-error', { status: r.status(), url: redact(r.url()) });
   });
@@ -1594,17 +1683,31 @@ try {
   });
   const ownedWindowForSizing = await cdp.send('Browser.getWindowForTarget');
   const pageUrl = new URL(url);
-  pageUrl.searchParams.set('game-speed', '3');
+  pageUrl.searchParams.set('game-speed', gameSpeed);
   if (useViewportHandshake) {
     await cdp.send('Browser.setWindowBounds', {
       windowId: ownedWindowForSizing.windowId,
-      bounds: { windowState: tag.startsWith('full') ? 'fullscreen' : 'maximized' },
+      bounds: { windowState: fullWindow ? 'fullscreen' : 'maximized' },
     });
     await delay(1200);
   }
   await page.goto(pageUrl.toString());
   await page.bringToFront();
   if (webRoute) {
+    if (useViewportHandshake && fullWindow) {
+      // The web session fixes its display-matched resolution when the game is selected.
+      // Recheck the real window after navigation, before that resolution is measured.
+      const webWindow = await cdp.send('Browser.getWindowForTarget');
+      await cdp.send('Browser.setWindowBounds', {
+        windowId: webWindow.windowId,
+        bounds: { windowState: 'fullscreen' },
+      });
+      await delay(1200);
+      await record('web-game-selection-area', {
+        browserWindow: await cdp.send('Browser.getWindowForTarget'),
+        viewport: await page.evaluate(() => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })),
+      });
+    }
     await page.locator('button.development-source').click();
     const yr = page.locator('.detected-games button').filter({ hasText: /Yuri|尤里/i });
     await wait(
@@ -1615,7 +1718,7 @@ try {
     );
     if (await yr.isVisible()) await yr.click();
   }
-  if (useViewportHandshake && tag.startsWith('full') && pageUrl.searchParams.get('native-fullscreen') === '1') {
+  if (useViewportHandshake && fullWindow && pageUrl.searchParams.get('native-fullscreen') === '1') {
     const fullWindow = await cdp.send('Browser.getWindowForTarget');
     await cdp.send('Browser.setWindowBounds', { windowId: fullWindow.windowId, bounds: { windowState: 'fullscreen' } });
     await delay(1200);

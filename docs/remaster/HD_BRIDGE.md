@@ -52,12 +52,18 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    Disabled idle polls still track the match, but cannot re-enable the guest's render flags.
    Both routes keep the original battlefield live, visible and interactive while HD prepares. A complete
    scene cross-fades with the current original frames over 300 ms, once per match. No screenshot or cover is
-   used. `VmFrameRenderer.setOpacityRegion` scales the tactical region's premultiplied RGB and alpha together,
+   used. Native preparation shows a noninteractive status notice in the page's language at 16 CSS pixels;
+   an early map hint does not show it in menus. The notice clears on HD reveal, a menu return, or bridge stop,
+   and yields to cache/art failure explanations. `VmFrameRenderer.setOpacityRegion` scales the tactical region's
+   premultiplied RGB and alpha together,
    leaving the sidebar and independent pointer opaque. Passthrough is enabled after the fade; an actual keyed
-   native picture switches the original overlays back to full opacity. Before beginning the fade, a zero-flag
+   game picture switches the original overlays back to full opacity on both routes. A passthrough acknowledgement
+   alone cannot replace that picture: its configuration only takes effect in a subsequent game frame.
+   Before beginning the fade, a zero-flag
    preflight installs and validates passthrough without changing the original picture; rejection keeps the original
    visible and retries. Disabling passthrough also retries an unconfirmed zero write. The optional HD sidebar
-   remains hidden through preparation and joins only after the battlefield fade completes. A failed cache load leaves the original
+   preloads its chrome from sidebar snapshots while hidden and joins only after the battlefield fade completes
+   and that chrome is ready; incomplete chrome leaves the game's sidebar intact. A failed cache load leaves the original
    picture with a small status notice. A state gap or read failure keeps the last HD picture for 500 ms before
    returning to the original dialog/menu. A confirmed native menu video mode resets reveal state immediately,
    while retaining prepared GPU assets for another match. Transient passthrough failures retry; they do not become

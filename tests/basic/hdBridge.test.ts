@@ -16,6 +16,7 @@ import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
 import type { VmFrame } from '../../src/vm86/win32';
 import { hdSidebar } from '../helpers/hdSidebar';
 import { createWebGpuFrameCapture } from '../../src/graphics/webGpuFrameCapture';
+import { initializeWorkerLocale } from '../../src/ui/shared/i18n/translate';
 
 // The bridge loads LiveView (three.js, WebGPU) through a dynamic import; a stub stands in for it.
 const liveView = vi.hoisted(() => ({ create: vi.fn() }));
@@ -294,8 +295,8 @@ async function goLive(harness: ReturnType<typeof setup>, view = fakeView()) {
   // Preflight confirms zero flags before the first fade can begin.
   await advance(17);
   await advance(301);
+  harness.nativeFrame();
   if (harness.vm.runtimeInfo.backend === 'native') {
-    harness.nativeFrame();
     await advance(17);
     expect(harness.bridge()!.diagnostics.shown).toBe(true);
   }
@@ -303,6 +304,7 @@ async function goLive(harness: ReturnType<typeof setup>, view = fakeView()) {
 }
 
 afterEach(() => {
+  initializeWorkerLocale('en');
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -1662,6 +1664,7 @@ describe('HD bridge fallback notice', () => {
     harness.setState(battle(2, 'BROKEN.MAP'));
     await advance(16, 2);
     await advance(301);
+    harness.nativeFrame();
     expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
     expect(harness.status).toHaveBeenCalledTimes(4);
     harness.stop();
@@ -1709,6 +1712,7 @@ describe('HD bridge fallback notice', () => {
     await advance(1000, 4);
     expect(view.dispose).not.toHaveBeenCalled();
     expect(view.push).toHaveBeenCalled();
+    harness.nativeFrame();
     expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
     expect(harness.status).not.toHaveBeenCalledWith(expect.any(String));
     harness.stop();
@@ -2009,6 +2013,7 @@ describe('HD bridge match start', () => {
     expect(view.outOfSight).toBe(false);
     expect(harness.hdCanvas.style.display).toBe('block');
     expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(7);
+    harness.nativeFrame();
     expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
     expect(harness.bridge()!.timeline).toMatchObject({ map: 'xmp29u2', revealReason: 'settled', revealLoading: 0 });
     // Shown for the match: art that loads later no longer hides the view.
@@ -2048,6 +2053,7 @@ describe('HD bridge match start', () => {
     await advance(301);
     expect(view.outOfSight).toBe(false);
     expect(harness.hdCanvas.style.display).toBe('block');
+    harness.nativeFrame();
     expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
     harness.stop();
   });
@@ -2246,6 +2252,7 @@ describe('HD bridge match start', () => {
     await advance(16);
     expect(harness.hdCanvas.style.display).toBe('block');
     expect(view.outOfSight).toBe(false);
+    harness.nativeFrame();
     expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
     harness.stop();
   });
@@ -2272,6 +2279,65 @@ describe('HD bridge match start', () => {
 });
 
 describe('live original to HD transition', () => {
+  it.each([
+    ['en', 'Preparing the HD battlefield…'],
+    ['zh-CN', '正在准备高清战场…'],
+  ] as const)('shows a preparation notice in %s only on the actual native battlefield', async (locale, notice) => {
+    initializeWorkerLocale(locale);
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    const view = fakeView();
+    view.settledFrames = 0;
+    liveView.create.mockResolvedValue(view);
+    harness.vm.getRenderPreparation.mockResolvedValue({
+      map: { fileName: 'XMP29U2.MAP' },
+      theater: null,
+      houses: null,
+      localHouse: null,
+    });
+    await advance(17);
+    await vi.waitFor(() => expect(harness.bridge()?.live).toBe(view));
+    expect(harness.status).not.toHaveBeenCalled();
+    harness.setFrameSize(1280, 720);
+    harness.nativeFrame(false);
+    expect(harness.status).toHaveBeenLastCalledWith(notice);
+    harness.nativeFrame(false);
+    expect(harness.status).toHaveBeenCalledTimes(1);
+    harness.setState(battle(1));
+    await advance(17, 3);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(harness.createElement).not.toHaveBeenCalledWith('div');
+    view.settledFrames = 3;
+    harness.setState(battle(2));
+    await advance(17, 3);
+    expect(harness.bridge()!.timeline.revealedAt).not.toBeNull();
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    harness.stop();
+  });
+
+  it('clears the native preparation notice when disabled, returned to menus, or stopped', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    harness.nativeFrame(false);
+    expect(harness.status).toHaveBeenLastCalledWith('Preparing the HD battlefield…');
+    await advance(17, 3);
+    expect(harness.status).toHaveBeenCalledTimes(1);
+    expect(harness.stop.toggle()).toBe(false);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    expect(harness.stop.toggle()).toBe(true);
+    await advance(17);
+    expect(harness.status).toHaveBeenLastCalledWith('Preparing the HD battlefield…');
+    harness.setFrameSize(800, 600);
+    harness.nativeFrame(false);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    await advance(17, 3);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    harness.setFrameSize(1280, 720);
+    harness.nativeFrame(false);
+    expect(harness.status).toHaveBeenLastCalledWith('Preparing the HD battlefield…');
+    harness.stop();
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+  });
+
   it('keeps the first battle picture entirely original before any snapshot or cache exists', async () => {
     const harness = setup('?hd=1', 'WebGL2', 'native');
     harness.setFrameSize(1280, 720);
@@ -2307,13 +2373,16 @@ describe('live original to HD transition', () => {
       await advance(151);
       expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(7);
       expect(harness.renderer.setOpacityRegion).toHaveBeenLastCalledWith(null);
-      if (backend === 'native') {
-        expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(null);
-        harness.nativeFrame(false);
-        expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(null);
-        harness.nativeFrame();
-      }
+      // An acknowledged configuration write does not mean the next delivered picture is keyed yet.
+      // The original frame must stay fully transparent after the fade until a real keyed frame arrives.
+      expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(null);
+      expect(harness.renderer.setTransparentRect).toHaveBeenLastCalledWith(TACTICAL);
+      harness.nativeFrame(false);
+      expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(null);
+      expect(harness.renderer.setTransparentRect).toHaveBeenLastCalledWith(TACTICAL);
+      harness.nativeFrame();
       expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(KEY);
+      expect(harness.renderer.setTransparentRect).toHaveBeenLastCalledWith(null);
       expect(harness.bridge()!.timeline.fadeFinishedAt! - began).toBe(301);
       harness.stop();
     },

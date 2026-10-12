@@ -89,6 +89,9 @@ canvas {
   text-align: center;
   pointer-events: none;
 }
+#vm-hd-status {
+  font-size: 16px;
+}
 #vm-upscale-status[hidden],
 #vm-hd-status[hidden] {
   display: none;

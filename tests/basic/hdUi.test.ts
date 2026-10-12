@@ -16,6 +16,7 @@ import {
   type UiAssets,
 } from '../../packages/hd-renderer/src/ui/uiAssets';
 import { startHdUi } from '../../src/ui/pages/game/hdUi';
+import * as uiAssetsModule from '../../packages/hd-renderer/src/ui/uiAssets';
 import { startHdMenus } from '../../src/ui/pages/game/hdMenus';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
 import { hdSidebar } from '../helpers/hdSidebar';
@@ -1248,11 +1249,14 @@ describe('optional HD UI art cache', () => {
 });
 
 describe('HD UI controller', () => {
-  it('tracks the screen box/DPR, changes holes only on region changes and cancels/removes on disable/dispose', () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({ ok: false })),
-    );
+  it('prepares hidden chrome, retains original pixels until ready and owns drawing through disable/dispose', () => {
+    let chromeReady = false;
+    const chromeAsset = vi.fn(() => (chromeReady ? chrome : null));
+    vi.spyOn(uiAssetsModule, 'createUiAssets').mockReturnValue({
+      ...fallback,
+      chrome: chromeAsset,
+      dispose: vi.fn(),
+    });
     const { ctx, calls } = recording();
     const remove = vi.fn();
     const canvas = { style: {} as Record<string, string>, width: 0, height: 0, getContext: () => ctx, remove };
@@ -1285,6 +1289,18 @@ describe('HD UI controller', () => {
     };
     const ui = startHdUi(host);
     const s = hdSidebar();
+    ui.setEnabled(false);
+    ui.update(s);
+    expect(chromeAsset).toHaveBeenCalledWith(s.side);
+    expect(canvas.style.display).toBe('none');
+    expect(setTransparentRects).not.toHaveBeenCalled();
+    expect(scheduled.size).toBe(0);
+    ui.setEnabled(true);
+    ui.update(s);
+    expect(canvas.style.display).toBe('none');
+    expect(setTransparentRects).not.toHaveBeenCalled();
+    expect(scheduled.size).toBe(0);
+    chromeReady = true;
     ui.update(s);
     expect(insert).toHaveBeenCalledWith(canvas, host.screen);
     const first = scheduled.get(1)!;
@@ -1305,10 +1321,10 @@ describe('HD UI controller', () => {
     expect(setTransparentRects).toHaveBeenCalledTimes(1);
     s.tooltip = { rect: { x: 590, y: 280, width: 100, height: 30 }, text: 'Native\n$600' };
     ui.update(s);
-    expect(setTransparentRects).toHaveBeenLastCalledWith(transparentRects(s, fallback));
+    expect(setTransparentRects).toHaveBeenLastCalledWith(transparentRects(s, withChrome));
     s.tooltip = null;
     ui.update(s);
-    expect(setTransparentRects).toHaveBeenLastCalledWith(transparentRects(s, fallback));
+    expect(setTransparentRects).toHaveBeenLastCalledWith(transparentRects(s, withChrome));
     pageCursor = false;
     ui.update(s);
     expect(canvas.style.display).toBe('none');
@@ -1318,7 +1334,7 @@ describe('HD UI controller', () => {
     pageCursor = undefined;
     ui.update(s);
     expect(canvas.style.display).toBe('block');
-    expect(setTransparentRects).toHaveBeenLastCalledWith(transparentRects(s, fallback));
+    expect(setTransparentRects).toHaveBeenLastCalledWith(transparentRects(s, withChrome));
     expect(scheduled.size).toBe(1);
     ui.setEnabled(false);
     expect(canvas.style.display).toBe('none');

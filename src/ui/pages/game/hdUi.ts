@@ -40,7 +40,14 @@ export function startHdUi(host: {
     host.frameRenderer.setTransparentRects(rects);
     host.invalidate();
   };
-  const visible = () => !!ctx && enabled && !!sidebar && !!host.frameSize() && host.pageCursor?.() !== false;
+  const visible = () =>
+    !!ctx &&
+    enabled &&
+    !!sidebar &&
+    sidebar.side >= 0 &&
+    !!assets.chrome(sidebar.side) &&
+    !!host.frameSize() &&
+    host.pageCursor?.() !== false;
   const sync = () => {
     const show = visible();
     canvas.style.display = show ? 'block' : 'none';
@@ -89,6 +96,9 @@ export function startHdUi(host: {
     update(next) {
       if (!disposed) {
         sidebar = next;
+        // Prepare chrome while the original sidebar is still visible, including during the battlefield fade.
+        // An absent or incomplete cache keeps the game's pixels instead of exposing procedural placeholders.
+        if (sidebar && sidebar.side >= 0) assets.chrome(sidebar.side);
         sync();
       }
     },
