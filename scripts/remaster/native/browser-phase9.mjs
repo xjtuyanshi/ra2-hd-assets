@@ -36,7 +36,8 @@ await mkdir(out, { recursive: true });
 // artifacts and DLL backup. Evidence tags are single-use.
 await writeFile(join(out, 'harness-pid'), String(process.pid) + '\n', { flag: 'wx' });
 const config = JSON.parse(await readFile(join(base, 'run/owner-launch-smoke.json'), 'utf8'));
-if (phase === 'phase19' && tag.startsWith('nativeintro')) config.RA2_NATIVE_GAME_DIR = join(base, phase, 'native-game');
+if (['phase19', 'phase26'].includes(phase) && tag.startsWith('nativeintro'))
+  config.RA2_NATIVE_GAME_DIR = join(base, phase, 'native-game');
 const pause = resolve(base, '../play/_slots/PAUSE');
 const exists = async (p) =>
   lstat(p)
@@ -116,6 +117,48 @@ let hdAtlasLayerRoute = null;
 let servedFarmRoot = null;
 let hdAtlasAlias = null;
 let peakRss = 0;
+let acceptanceRates = null;
+let humanPointer = { x: 0, y: 0 };
+let directMouseMove;
+// Session 26 observes ordinary pointer travel, including moves made by the
+// reused battle helpers. Other sessions retain their existing input protocol.
+async function humanMove(x, y, options) {
+  if (phase !== 'phase26') return directMouseMove(x, y, options);
+  const start = { ...humanPointer };
+  const duration = (Math.hypot(x - start.x, y - start.y) / 600) * 1000;
+  const steps = Math.max(1, Math.ceil(duration / 8));
+  const began = performance.now();
+  for (let index = 1; index <= steps; index++) {
+    const due = began + (duration * index) / steps;
+    if (due > performance.now()) await delay(due - performance.now());
+    const fraction = index / steps;
+    humanPointer = { x: start.x + (x - start.x) * fraction, y: start.y + (y - start.y) * fraction };
+    await directMouseMove(humanPointer.x, humanPointer.y);
+  }
+}
+async function locatorClick(locator) {
+  if (phase !== 'phase26') return locator.click();
+  await locator.waitFor({ state: 'visible' });
+  const box = await locator.boundingBox();
+  assert(box && box.width > 0 && box.height > 0, 'Visible page input target required');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  try {
+    await delay(40);
+  } finally {
+    await page.mouse.up();
+  }
+}
+const readBytes = (address, length) =>
+  worker().evaluate(
+    async ([address, length, web]) => {
+      const core = globalThis.__auditCore;
+      return Array.from(
+        web ? core.emulator.read_memory(address, length).slice() : (await core.connection.read(address, length)).bytes,
+      );
+    },
+    [address, length, webRoute],
+  );
 async function dllIdentity() {
   const path = join(config.RA2_NATIVE_GAME_DIR || process.env.RA2_NATIVE_GAME_DIR, 'ddraw.dll');
   const info = await lstat(path).catch((e) => {
@@ -407,6 +450,48 @@ const usable = (c) => c.visible && c.enabled && c.rect?.[2] > c.rect?.[0];
 async function execute(c) {
   if (c.action === 'close') return { closing: true };
   await ownerIdle();
+  if (c.action === 'rates-start') {
+    assert(phase === 'phase26' && !acceptanceRates, 'Session 26 has one owned match observer');
+    const { startPhase10MatchRates } = await import('./phase10-match-rates.mjs');
+    acceptanceRates = await startPhase10MatchRates({
+      page,
+      out,
+      record,
+      label: c.label ?? 'played-match',
+      externallyDismissedDialogs: true,
+      readNativeLogicEndpoint: () =>
+        worker().evaluate(async (web) => {
+          const core = globalThis.__auditCore;
+          const bytes = web
+            ? core.emulator.read_memory(0xa8ed84, 4).slice()
+            : (await core.connection.read(0xa8ed84, 4)).bytes;
+          if (bytes.byteLength !== 4) throw new Error('Incomplete actual game frame counter');
+          return {
+            frame: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true),
+            atMs: performance.now(),
+            timeOrigin: performance.timeOrigin,
+            clockContext: 'worker',
+            fresh: true,
+            source: web ? 'Read-only actual v86 guest frame counter' : 'Direct validated native frame counter reply',
+          };
+        }, webRoute),
+    });
+    await acceptanceRates.inputCheckpoint('start', {
+      label: c.label ?? 'played-match',
+      rate: null,
+      input: 'Continuous time-paced pointer paths and ordinary played actions; not a fixed-rate stress stream',
+    });
+    return { observing: true };
+  }
+  if (c.action === 'rates-stop') {
+    assert(phase === 'phase26' && acceptanceRates, 'Owned played-match observer required');
+    await acceptanceRates.inputCheckpoint('end', { completed: c.completed !== false });
+    const result = await acceptanceRates.stop();
+    acceptanceRates = null;
+    const transitions = await page.evaluate(() => window.__hdBridge?.timeline ?? null);
+    await writeFile(join(out, (c.label ?? 'played-match') + '-transitions.json'), JSON.stringify(transitions, null, 2));
+    return { ...result, transitions };
+  }
   if (c.action === 'hd-atlas-layer') {
     assert(
       typeof c.layer === 'string' && stagedFarmPattern.test(c.layer),
@@ -691,10 +776,10 @@ async function execute(c) {
     const toggle = page.locator('#vm-controls-toggle');
     if ((await toggle.getAttribute('aria-expanded')) !== 'true') {
       await ownerIdle();
-      await toggle.click();
+      await locatorClick(toggle);
     }
     await ownerIdle();
-    await page.locator('#vm-fullscreen').click();
+    await locatorClick(page.locator('#vm-fullscreen'));
     await wait('actual page fullscreen', () => page.evaluate(() => !!document.fullscreenElement));
     return shot(c.label ?? 'fullscreen');
   }
@@ -973,22 +1058,13 @@ async function execute(c) {
         await ownerIdle();
         return worker().evaluate(() => globalThis.__auditCore.getCommandState());
       },
-      readBytes: (a, n) =>
-        worker().evaluate(
-          async ([a, n]) => Array.from((await globalThis.__auditCore.connection.read(a, n)).bytes),
-          [a, n],
-        ),
+      readBytes,
       record,
       shot,
     });
   }
   if (c.action === 'attack-visible' || c.action === 'fight-to-victory') {
     const { attackVisibleEnemyBuilding } = await import('./browser-combat-attack.mjs');
-    const readBytes = (a, n) =>
-      worker().evaluate(
-        async ([a, n]) => Array.from((await globalThis.__auditCore.connection.read(a, n)).bytes),
-        [a, n],
-      );
     const current = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
     assert(current?.localHouse >= 0 && current.localHouse <= 5, 'Actual six-player local house required');
     const vector = Buffer.from(await readBytes(0xa80228, 20));
@@ -1023,11 +1099,7 @@ async function execute(c) {
       click: (x, y, mode, button) => click(x, y, button ?? 'left'),
       point,
       commandState: () => worker().evaluate(() => globalThis.__auditCore.getCommandState()),
-      readBytes: (a, n) =>
-        worker().evaluate(
-          async ([a, n]) => Array.from((await globalThis.__auditCore.connection.read(a, n)).bytes),
-          [a, n],
-        ),
+      readBytes,
       inputState: state,
       shot,
       record,
@@ -1266,8 +1338,8 @@ async function execute(c) {
     } else await page.reload();
     if (c.reenterFullscreen === true) {
       const toggle = page.locator('#vm-controls-toggle');
-      if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
-      await page.locator('#vm-fullscreen').click();
+      if ((await toggle.getAttribute('aria-expanded')) !== 'true') await locatorClick(toggle);
+      await locatorClick(page.locator('#vm-fullscreen'));
       await wait('reattached real fullscreen gesture', () => page.evaluate(() => !!document.fullscreenElement));
     }
     await wait(
@@ -1283,7 +1355,7 @@ async function execute(c) {
       !(await page.evaluate(() => !!document.fullscreenElement)) &&
       (await toggle.getAttribute('aria-expanded')) === 'true'
     )
-      await toggle.click();
+      await locatorClick(toggle);
     await delay(c.wait ?? 15000);
     return shot(c.label);
   }
@@ -1338,7 +1410,7 @@ async function execute(c) {
   }
   if (c.action === 'locator-click') {
     assert(typeof c.selector === 'string' && c.selector, 'A page selector is required');
-    await page.locator(c.selector).click();
+    await locatorClick(page.locator(c.selector));
     await delay(c.wait ?? 700);
     return c.label ? shot(c.label) : state();
   }
@@ -1393,10 +1465,7 @@ async function execute(c) {
   }
   if (c.action === 'hover-object') {
     const state = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
-    const factor = await worker().evaluate(async () => {
-      const b = (await globalThis.__auditCore.connection.read(0xb0cd48, 8)).bytes;
-      return new DataView(b.buffer, b.byteOffset, b.byteLength).getFloat64(0, true);
-    });
+    const factor = Buffer.from(await readBytes(0xb0cd48, 8)).readDoubleLE();
     const candidates = state.objects
       .filter(
         (o) =>
@@ -1750,9 +1819,14 @@ async function execute(c) {
     return { mcv, yard };
   }
   if (c.action === 'match-state')
-    return worker().evaluate(async () => {
+    return worker().evaluate(async (web) => {
       const core = globalThis.__auditCore;
-      const read = async (a, n) => new DataView((await core.connection.read(a, n)).bytes.buffer);
+      const bytes = async (a, n) =>
+        web ? core.emulator.read_memory(a, n).slice() : (await core.connection.read(a, n)).bytes;
+      const read = async (a, n) => {
+        const value = await bytes(a, n);
+        return new DataView(value.buffer, value.byteOffset, value.byteLength);
+      };
       const v = await read(0xa80228, 20),
         count = v.getInt32(16, true),
         items = v.getUint32(4, true),
@@ -1760,12 +1834,12 @@ async function execute(c) {
         houses = [];
       for (let i = 0; i < count; i++) {
         const p = pointers.getUint32(i * 4, true);
-        const name = new TextDecoder().decode((await core.connection.read(p + 0x15ff4, 21)).bytes).split('\0')[0];
-        const human = (await core.connection.read(p + 0x1ec, 1)).bytes[0] !== 0;
+        const name = new TextDecoder().decode(await bytes(p + 0x15ff4, 21)).split('\0')[0];
+        const human = (await bytes(p + 0x1ec, 1))[0] !== 0;
         const allies = (await read(p + 0x5788, 4)).getUint32(0, true);
         // The same pinned HouseClass::Defeated field used by ending checkpoints.
         // Record every player so a surviving local house is never mistaken for a win.
-        const originalDefeatedByte = (await core.connection.read(p + 0x1f5, 1)).bytes[0];
+        const originalDefeatedByte = (await bytes(p + 0x1f5, 1))[0];
         houses.push({ index: i, pointer: p, name, human, allies, originalDefeatedByte });
       }
       const localPointer = (await read(0xa83d4c, 4)).getUint32(0, true);
@@ -1778,7 +1852,7 @@ async function execute(c) {
         performance: await core.getGamePerformance(),
         houses,
       };
-    });
+    }, webRoute);
   if (c.action === 'battle')
     return worker().evaluate(async () => {
       const core = globalThis.__auditCore;
@@ -1813,6 +1887,10 @@ async function cleanup() {
   if (cleanupPromise) return cleanupPromise;
   return (cleanupPromise = (async () => {
     clearInterval(rssTimer);
+    if (acceptanceRates) {
+      await acceptanceRates.stop().catch((error) => record('played-match-observer-cleanup-error', String(error)));
+      acceptanceRates = null;
+    }
     if (context) {
       let routeTimer;
       const routes = await Promise.race([
@@ -2044,6 +2122,17 @@ try {
     });
   });
   page = await context.newPage();
+  directMouseMove = page.mouse.move.bind(page.mouse);
+  if (phase === 'phase26') {
+    page.mouse.move = humanMove;
+    for (const method of ['click', 'dblclick']) {
+      const direct = page.mouse[method].bind(page.mouse);
+      page.mouse[method] = async (x, y, options) => {
+        await humanMove(x, y);
+        return direct(x, y, options);
+      };
+    }
+  }
   page.on('crash', () => void record('browser-page-crashed', { cleanup: !!cleanupPromise }));
   page.on('close', () => void record('browser-page-closed', { cleanup: !!cleanupPromise }));
   browser.on('disconnected', () => void record('browser-disconnected', { cleanup: !!cleanupPromise }));
@@ -2116,7 +2205,7 @@ try {
         viewport: await page.evaluate(() => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })),
       });
     }
-    await page.locator('button.development-source').click();
+    await locatorClick(page.locator('button.development-source'));
     const yr = page.locator('.detected-games button').filter({ hasText: /Yuri|尤里/i });
     await wait(
       'development game choice',
@@ -2124,7 +2213,7 @@ try {
         (await yr.isVisible()) || (!!worker() && !!(await worker().evaluate(() => globalThis.__auditCore?.shim))),
       120000,
     );
-    if (await yr.isVisible()) await yr.click();
+    if (await yr.isVisible()) await locatorClick(yr);
   }
   if (useViewportHandshake && fullWindow && pageUrl.searchParams.get('native-fullscreen') === '1') {
     const fullWindow = await cdp.send('Browser.getWindowForTarget');
@@ -2139,8 +2228,8 @@ try {
       120000,
     );
     const toggle = page.locator('#vm-controls-toggle');
-    if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
-    await page.locator('#vm-fullscreen').click();
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') await locatorClick(toggle);
+    await locatorClick(page.locator('#vm-fullscreen'));
     await wait('startup real fullscreen gesture', () => page.evaluate(() => !!document.fullscreenElement));
     await record(
       'fullscreen-startup-area',
@@ -2192,7 +2281,7 @@ try {
     !(await page.evaluate(() => !!document.fullscreenElement)) &&
     (await toggle.getAttribute('aria-expanded')) === 'true'
   )
-    await toggle.click();
+    await locatorClick(toggle);
   const { installPhase7InputProbe } = await import('./phase7-input-stream.mjs');
   await installPhase7InputProbe(page);
   try {
