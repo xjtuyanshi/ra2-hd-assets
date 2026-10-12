@@ -216,12 +216,32 @@ describe('按显示器匹配的帧尺寸', () => {
     }
   });
 
+  it('经典和适中保持所选倍率并把原版部分直接画到设备分辨率', () => {
+    for (const [scale, width, height] of [
+      [3, 1152, 608],
+      [2.5, 1382, 730],
+    ] as const) {
+      expect(match(1728, 914, 2, scale)).toEqual({ width, height });
+      expect(
+        calculateCanvasFit({
+          stageWidth: 1728,
+          stageHeight: 914,
+          frameWidth: width,
+          frameHeight: height,
+          devicePixelRatio: 2,
+          integerScale: true,
+          preferredScale: scale,
+        }),
+      ).toMatchObject({ scale, backingWidth: width * scale, backingHeight: height * scale });
+    }
+  });
+
   it('窗口太小时退到 1 倍或最小尺寸，太大时取上限', () => {
     // 1280x720 device pixels: 640x360 at 2x is below the minimum, so one frame pixel per device pixel.
     expect(match(1280, 720, 1)).toEqual({ width: 1280, height: 720 });
     expect(match(700, 500, 1)).toEqual({ width: 800, height: 600 });
     expect(match(3008, 1692, 2)).toEqual({ width: 2560, height: 1600 });
     expect(match(0, 500, 1)).toBeNull();
-    expect(match(1728, 1080, 2, 1.5)).toBeNull();
+    expect(match(1728, 1080, 2, Number.NaN)).toBeNull();
   });
 });

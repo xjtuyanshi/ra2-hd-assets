@@ -12,6 +12,8 @@ export interface CanvasFitInput {
    * size would be a worse picture than a resampled one.
    */
   integerScale?: boolean;
+  /** Requested device scale for a negotiated frame, including fractional HD view choices. */
+  preferredScale?: number;
 }
 
 export interface CanvasFitResult {
@@ -62,12 +64,19 @@ export function calculateCanvasFit(input: CanvasFitInput): CanvasFitResult | nul
   // CSS must use the exact fit scale. The backing store may stay at the
   // minimum render scale, but flooring the CSS scale would crop tiny stages.
   const whole = Math.floor(exactScale + 1e-9);
+  const preferredScale = isPositiveFinite(input.preferredScale ?? Number.NaN) ? input.preferredScale : undefined;
   const cssScale =
-    (input.integerScale && whole >= 2) || (whole >= 1 && exactScale - whole <= whole * INTEGER_SNAP)
-      ? whole
-      : exactScale;
+    preferredScale !== undefined
+      ? Math.min(preferredScale, exactScale)
+      : (input.integerScale && whole >= 2) || (whole >= 1 && exactScale - whole <= whole * INTEGER_SNAP)
+        ? whole
+        : exactScale;
   const backingScale =
-    cssScale >= 1 ? Math.min(MAX_BACKING_SCALE, Math.ceil(cssScale)) : Math.max(MIN_BACKING_SCALE, cssScale);
+    preferredScale !== undefined
+      ? cssScale
+      : cssScale >= 1
+        ? Math.min(MAX_BACKING_SCALE, Math.ceil(cssScale))
+        : Math.max(MIN_BACKING_SCALE, cssScale);
 
   return {
     cssWidth: Math.round(input.frameWidth * cssScale) / input.devicePixelRatio,
@@ -90,14 +99,14 @@ export interface DisplayMatchInput {
   stageWidth: number;
   stageHeight: number;
   devicePixelRatio: number;
-  /** Device pixels one frame pixel should cover (a whole number, e.g. 2 for art made at twice the frame's scale). */
+  /** Device pixels one frame pixel should cover (e.g. 2 or 2.5 for art made at twice the frame's scale). */
   devicePixelsPerFramePixel: number;
   limits: FrameSizeLimits;
 }
 
 /**
- * The largest frame size that fills a stage with every frame pixel on exactly `devicePixelsPerFramePixel` device pixels
- * (even numbers, within `limits`). A stage too small for that scale uses the next smaller whole scale; one too small
+ * The largest frame size that fills a stage with every frame pixel at the requested `devicePixelsPerFramePixel` device scale
+ * (even numbers, within `limits`). A stage too small for that scale uses a smaller half-step scale; one too small
  * for scale 1 gets the minimum size, and one larger than the maximum gets the maximum (the canvas fit then leaves a
  * border instead of stretching). Null for unusable input.
  */
@@ -107,14 +116,14 @@ export function displayMatchedFrameSize(input: DisplayMatchInput): { width: numb
     !isPositiveFinite(input.stageWidth) ||
     !isPositiveFinite(input.stageHeight) ||
     !isPositiveFinite(input.devicePixelRatio) ||
-    !Number.isInteger(input.devicePixelsPerFramePixel) ||
+    !Number.isFinite(input.devicePixelsPerFramePixel) ||
     input.devicePixelsPerFramePixel < 1
   ) {
     return null;
   }
   const deviceWidth = Math.floor(input.stageWidth * input.devicePixelRatio + 1e-6);
   const deviceHeight = Math.floor(input.stageHeight * input.devicePixelRatio + 1e-6);
-  for (let scale = input.devicePixelsPerFramePixel; scale >= 1; scale--) {
+  for (let scale = input.devicePixelsPerFramePixel; scale >= 1; scale = Math.max(0, scale - 0.5)) {
     const width = Math.min(limits.maxWidth, Math.floor(deviceWidth / scale)) & ~1;
     const height = Math.min(limits.maxHeight, Math.floor(deviceHeight / scale)) & ~1;
     if (width >= limits.minWidth && height >= limits.minHeight) return { width, height };

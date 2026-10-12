@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { DISPLAY_RESOLUTION, parseResolutionChoice } from '../../src/ui/pages/game/vmPageResolution';
+import { parseResolutionChoice } from '../../src/ui/pages/game/vmPageResolution';
 import { parseGameSpeed } from '../../src/games/gameSpeed';
 import { parseTrainingQuery } from '../../src/ui/pages/game/training/trainingQuery';
 
@@ -14,7 +14,7 @@ const address = (args: string[], env: Record<string, string> = {}) =>
   );
 
 describe.skipIf(process.platform === 'win32')('scripts/remaster/play.sh', () => {
-  it('opens the HD page with the approved look, the display-matched resolution and the skirmish setup', () => {
+  it('opens the HD page with the approved look and leaves the remembered view to the page', () => {
     const url = address([], { RA2_PLAY_PORT: '15999' });
     expect(url.origin).toBe('http://localhost:15999');
     expect(Object.fromEntries(url.searchParams)).toEqual({
@@ -26,14 +26,21 @@ describe.skipIf(process.platform === 'win32')('scripts/remaster/play.sh', () => 
       'hd-vproj': 'vehicles-hd',
       'hd-ui': '1',
       sr: '1',
-      resolution: 'display',
       'game-speed': '3',
       'start-page': 'skirmish',
     });
     // The page must understand the speed the launcher sends: 3 is the original scale's normal speed.
     expect(parseGameSpeed(url.searchParams.get('game-speed'))).toBe(3);
     // The page must understand the resolution value the launcher sends.
-    expect(parseResolutionChoice(url.searchParams.get('resolution'), true)).toBe(DISPLAY_RESOLUTION);
+    expect(parseResolutionChoice(url.searchParams.get('resolution'), true)).toBeUndefined();
+  });
+
+  it('passes each explicit view choice without changing the play look', () => {
+    for (const choice of ['classic', 'moderate', 'wide']) {
+      const url = address(['--view', choice]);
+      expect(parseResolutionChoice(url.searchParams.get('resolution'))).toBe(choice);
+      expect(url.searchParams.get('hd')).toBe('1');
+    }
   });
 
   it('opens the original main-menu picture with spatial reconstruction on request', () => {

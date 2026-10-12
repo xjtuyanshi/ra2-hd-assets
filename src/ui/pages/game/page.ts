@@ -53,10 +53,12 @@ import { createVmRuntimeCallbacks } from './vmPageRuntimeCallbacks';
 import { createNativeCursorFrames } from './nativeCursorFrames';
 import { createVmPageToolbarActions } from './vmPageToolbarActions';
 import {
-  DISPLAY_RESOLUTION,
   loadStoredResolutionChoice,
   parseResolutionChoice,
   resolveResolutionChoice,
+  resolutionViewScale,
+  resolveResolutionViewScale,
+  storeResolutionChoice,
   type ResolutionChoice,
 } from './vmPageResolution';
 import type { GameResolution } from '../../../games/resolution';
@@ -101,9 +103,11 @@ let activeFitCleanup: (() => void) | null = null;
 let activeNativeViewportAbort: AbortController | null = null;
 /** The current session's resolution choice; the canvas fit shows a display-matched frame at whole device pixels. */
 let activeResolutionChoice: ResolutionChoice = null;
+let activeDisplayScale: number | undefined;
 
 export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const generation = ++pageGeneration;
+  let requestedResolution: GameResolution | null = null;
   movieSkip.set(null);
   activeNativeViewportAbort?.abort();
   activeNativeViewportAbort = null;
@@ -117,6 +121,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   activeFitCleanup = null;
   canvasFitInstalled = false;
   activeResolutionChoice = null;
+  activeDisplayScale = undefined;
   await pageController.destroy();
   if (generation !== pageGeneration) return;
   activeVm = null;
@@ -132,14 +137,19 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
         presenter.invalidate();
       },
       {
-        integerScale: () => activeResolutionChoice === DISPLAY_RESOLUTION,
+        integerScale: () => resolutionViewScale(activeResolutionChoice) !== null,
+        preferredScale: () =>
+          requestedResolution?.width === gameFrameWidth && requestedResolution?.height === gameFrameHeight
+            ? activeDisplayScale
+            : undefined,
         onFit: (width, height, scale, fillScale) =>
           toolbar.setDisplayScale(
             width,
             height,
             scale,
             fillScale,
-            activeResolutionChoice === DISPLAY_RESOLUTION ? requestedResolution : null,
+            resolutionViewScale(activeResolutionChoice) !== null ? requestedResolution : null,
+            activeDisplayScale,
           ),
       },
     );
@@ -217,7 +227,6 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   let inputPointerPosition: (() => Readonly<{ x: number; y: number }> | null) | null = null;
   let gameSource: GameSource | null = null;
   let selectedGameId: SupportedGameId | null = null;
-  let requestedResolution: GameResolution | null = null;
   let changeGameSource = async () => {
     await forgetGameDirectory();
     window.location.reload();
@@ -494,15 +503,22 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     if (generation === pageGeneration) hotkeySheet.set(sheet);
   });
   // ?resolution= (a size, `display` or `ini`) wins for this page load; otherwise the stored toolbar choice. Without
-  // either, the HD bridge defaults to the display-matched size: its art has two texels per game pixel and is only shown
-  // texel for pixel when one game pixel covers two device pixels.
+  // either, the HD bridge uses classic framing (three device pixels per game pixel).
   const urlChoice = parseResolutionChoice(new URLSearchParams(window.location.search).get('resolution'), true);
+  if (urlChoice === 'classic' || urlChoice === 'moderate' || urlChoice === 'wide')
+    storeResolutionChoice(selectedGameId, urlChoice);
   const storedChoice = urlChoice === undefined ? loadStoredResolutionChoice(selectedGameId) : urlChoice;
-  activeResolutionChoice = storedChoice === undefined ? (hdBridgeRequested ? DISPLAY_RESOLUTION : null) : storedChoice;
+  activeResolutionChoice = storedChoice === undefined ? (hdBridgeRequested ? 'classic' : null) : storedChoice;
   requestedResolution = resolveResolutionChoice(
     activeResolutionChoice,
     canvas.closest('#stage'),
     window.devicePixelRatio || 1,
+  );
+  activeDisplayScale = resolveResolutionViewScale(
+    activeResolutionChoice,
+    canvas.closest('#stage'),
+    window.devicePixelRatio || 1,
+    requestedResolution,
   );
   toolbar.setResolution(activeResolutionChoice);
   refitActiveCanvas();
@@ -674,9 +690,16 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   activeNativeViewportAbort = viewportAbort;
   let nativeViewport: GameResolution | null;
   try {
-    nativeViewport = await prepareNativeViewport(canvas, viewportAbort.signal, (waiting) => {
-      updateBootOverlay({ phase: 'loading', detail: waiting ? t('请打开控制栏并点击“全屏”') : t('初始化…') });
-    });
+    nativeViewport = await prepareNativeViewport(
+      canvas,
+      viewportAbort.signal,
+      (waiting) => {
+        updateBootOverlay({ phase: 'loading', detail: waiting ? t('请打开控制栏并点击“全屏”') : t('初始化…') });
+      },
+      resolutionViewScale(activeResolutionChoice) ?? 3,
+      typeof activeResolutionChoice === 'object' ? activeResolutionChoice : null,
+      activeResolutionChoice === null,
+    );
   } catch (error) {
     if (viewportAbort.signal.aborted || generation !== pageGeneration) return;
     showProblemPanel('error', error instanceof Error ? error.message : String(error));
@@ -688,7 +711,12 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   if (generation !== pageGeneration || runtimeReleased) return;
   if (nativeViewport) {
     requestedResolution = nativeViewport;
-    activeResolutionChoice = DISPLAY_RESOLUTION;
+    activeDisplayScale = resolveResolutionViewScale(
+      activeResolutionChoice,
+      canvas.closest('#stage'),
+      window.devicePixelRatio || 1,
+      requestedResolution,
+    );
     toolbar.setResolution(activeResolutionChoice);
     refitActiveCanvas();
   }

@@ -6,7 +6,13 @@ import type { UpscaleMode } from './vmFrameRenderer';
 import type { ProbeImage } from './experiments/modelProbe';
 import type { CheatGuideGameId } from './cheatGuides';
 import type { GameResolution } from '../../../games/resolution';
-import { displayMatchIsStale, resolutionChoiceValue, type ResolutionChoice } from './vmPageResolution';
+import {
+  displayMatchIsStale,
+  parseResolutionChoice,
+  resolutionViewScale,
+  resolutionChoiceValue,
+  type ResolutionChoice,
+} from './vmPageResolution';
 
 export interface RuntimeToolbar {
   getPerformanceSettings(): Pick<ToolbarModel, 'rate' | 'resolution' | 'upscaleMode' | 'reshadeMode'>;
@@ -28,6 +34,7 @@ export interface RuntimeToolbar {
     scale: number,
     fillScale: number,
     matched: GameResolution | null,
+    preferredScale?: number,
   ): void;
   setReShadeMode(mode: ReShadeMode): void;
   setUpscaleMode(mode: UpscaleMode): void;
@@ -252,9 +259,15 @@ export function installRuntimeToolbar(
       model.resolution = resolutionChoiceValue(choice);
       publish();
     },
-    setDisplayScale(frameWidth, frameHeight, scale, fillScale, matched) {
+    setDisplayScale(frameWidth, frameHeight, scale, fillScale, matched, preferredScale) {
       const whole = Math.abs(scale - Math.round(scale)) < 1e-6;
-      const stale = displayMatchIsStale(matched, { width: frameWidth, height: frameHeight }, scale, fillScale);
+      const stale = displayMatchIsStale(
+        matched,
+        { width: frameWidth, height: frameHeight },
+        scale,
+        fillScale,
+        preferredScale ?? resolutionViewScale(parseResolutionChoice(model.resolution) ?? null) ?? 2,
+      );
       const status =
         t(
           '{0}×{1} · 每像素 {2} 设备像素',

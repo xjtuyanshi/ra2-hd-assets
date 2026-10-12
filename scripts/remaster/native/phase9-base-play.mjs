@@ -539,13 +539,6 @@ export async function runPhase9BasePlay(api) {
     report.powerPlant = power;
     const barracks = await build('barracks', barracksTypes, [yard.uid, power.uid]);
     report.barracks = barracks;
-    if (api.stopAfterBarracks) {
-      report.buildingsOnly = true;
-      report.partial = true;
-      report.stoppedAfter = 'barracks';
-      return report;
-    }
-
     if (!api.buildOnly) {
       const infantry = await trainAndMove('infantry', 'infantry', infantryTypes, 2, barracks.uid);
       report.trainedUnits = infantry.trained;
@@ -553,6 +546,11 @@ export async function runPhase9BasePlay(api) {
     }
     const refinery = await build('refinery', refineryTypes, [yard.uid, power.uid, barracks.uid]);
     report.refinery = refinery;
+    if (api.stopAfter === 'refinery') {
+      report.buildingsOnly = true;
+      report.stoppedAfter = 'refinery';
+      return report;
+    }
     const warFactory = await build('war-factory', warFactoryTypes, [yard.uid, power.uid, barracks.uid, refinery.uid]);
     report.warFactory = warFactory;
     if (!api.buildOnly) {

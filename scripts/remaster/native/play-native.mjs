@@ -30,12 +30,14 @@ import {
   capNativeResolution,
   configureNativeResolution,
   nativeViewportResolution,
+  nativeIniResolution,
+  nativeResolutionIniName,
   parseNativeSize,
 } from './native-resolution.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const packageDirectory = join(repository, 'packages/native-host');
-const help = `Usage: scripts/remaster/native/play-native.sh [--open] [--fullscreen] [--size WxH]
+const help = `Usage: scripts/remaster/native/play-native.sh [--open] [--fullscreen] [--size WxH] [--view classic|moderate|wide]
 
 Required environment:
   RA2_NATIVE_GAME_DIR           Player-owned game copy containing gamemd.exe.
@@ -51,7 +53,7 @@ Optional environment:
 Starts a hidden native game and the local development page, attached directly to
 the supplied YR copy with the shared HD play look. --open opens Google Chrome.
 By default the page reports its real available area before the game starts, so
-each game pixel occupies two device pixels. --fullscreen waits for the page's
+the remembered view uses 3 (classic), 2.5 (moderate) or 2 (wide) device pixels per game pixel; classic is the first-run default. --fullscreen waits for the page's
 ordinary fullscreen button before measurement; Chrome requires that user click.
 --size explicitly selects a fixed size and bypasses page measurement. Writes only
 the resolution keys in the supplied RA2MD.INI before start and retains its
@@ -551,12 +553,17 @@ export async function runLauncher(arguments_, environment = process.env) {
   let openBrowser = false;
   let fullscreenBrowser = false;
   let requestedSize = null;
+  let requestedView = null;
   for (let index = 0; index < arguments_.length; index++) {
     const argument = arguments_[index];
     if (argument === '--open') openBrowser = true;
     else if (argument === '--fullscreen') fullscreenBrowser = true;
     else if (argument === '--size') requestedSize = parseNativeSize(arguments_[++index]);
-    else throw new Error(`Unknown argument: ${argument}; use --help`);
+    else if (argument === '--view') {
+      requestedView = arguments_[++index];
+      if (!['classic', 'moderate', 'wide'].includes(requestedView))
+        throw new Error('视野请选择 classic（经典）、moderate（适中）或 wide（宽）。');
+    } else throw new Error(`Unknown argument: ${argument}; use --help`);
   }
   if (!environment.RA2_NATIVE_GAME_DIR)
     throw new Error('没有设置游戏文件夹。请将 RA2_NATIVE_GAME_DIR 指向你拥有且包含 gamemd.exe 的游戏副本。');
@@ -881,7 +888,11 @@ export async function runLauncher(arguments_, environment = process.env) {
       'native-autostart': 'yr',
       'native-viewport': requestedSize ? '0' : '1',
       'native-fullscreen': fullscreenBrowser && !requestedSize ? '1' : '0',
-      resolution: resolution ? `${resolution.width}x${resolution.height}` : 'display',
+      ...(resolution
+        ? { resolution: `${resolution.width}x${resolution.height}` }
+        : requestedView
+          ? { resolution: requestedView }
+          : {}),
     }).toString();
     async function openPage() {
       if (openBrowser)
@@ -900,7 +911,17 @@ export async function runLauncher(arguments_, environment = process.env) {
           const status = JSON.parse(await readFile(viewportStatusPath, 'utf8'));
           if (status.viewport) {
             viewport = status.viewport;
-            resolution = nativeViewportResolution(viewport);
+            const ini = viewport.followIni
+              ? nativeIniResolution(
+                  await readFile(join(gameDirectory, nativeResolutionIniName(await readdir(gameDirectory)))).catch(
+                    (error) => {
+                      if (error.code === 'ENOENT') return Buffer.alloc(0);
+                      throw error;
+                    },
+                  ),
+                )
+              : null;
+            resolution = nativeViewportResolution(viewport, ini);
             break;
           }
         } catch (error) {

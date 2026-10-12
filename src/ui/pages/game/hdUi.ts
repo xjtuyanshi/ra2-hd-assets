@@ -71,8 +71,8 @@ export function startHdUi(host: {
     sync();
     const size = host.frameSize();
     if (!visible() || !size || !ctx || !sidebar) return;
-    // The game canvas's own box on whole device pixels, one buffer pixel each: the 2x interface art is then drawn
-    // texel for pixel when a game pixel covers two device pixels, and never resampled by the compositor.
+    // Keep one buffer pixel per device pixel at every view scale. Supplied art is sampled directly at that size;
+    // the compositor never stretches a 2x intermediate canvas, and 3x chrome stays texel for pixel at scale 3.
     const box = devicePixelBox(host.screen, size, window.devicePixelRatio || 1);
     Object.assign(canvas.style, box.style);
     if (canvas.width !== box.width) canvas.width = box.width;

@@ -125,6 +125,8 @@ export async function startHdMenus(
       if (canvas.height !== box.height) canvas.height = box.height;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'low';
       ctx.scale(canvas.width / size.width, canvas.height / size.height);
       if (screen === 'main') ctx.drawImage(images.get(art.main.shell)!, 0, 0, 800, 600);
       else {

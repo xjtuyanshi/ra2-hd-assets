@@ -14,7 +14,7 @@ import type { FrameEffectController } from '../../../app/session/frameEffectCont
 import type { FramePresenter } from '../../../graphics/framePresenter';
 import type { VmFrameRenderer } from './vmFrameRenderer';
 import type { RuntimeToolbar, RuntimeToolbarCallbacks } from './runtimeToolbar';
-import { DISPLAY_RESOLUTION, parseResolutionChoice, storeResolutionChoice } from './vmPageResolution';
+import { resolutionViewScale, parseResolutionChoice, storeResolutionChoice } from './vmPageResolution';
 import { collectPerformanceReport } from './performanceDiagnostics';
 import { upscaleStatus } from './state/uiState';
 import { sendCheatKey, sendCheatSequence } from './input';
@@ -137,7 +137,9 @@ export function createVmPageToolbarActions(deps: VmPageToolbarActionDeps): Runti
         url.searchParams.delete('resolution');
         window.history.replaceState(window.history.state, '', url);
       }
-      setRequestedResolution(choice === DISPLAY_RESOLUTION ? null : choice);
+      if (new URLSearchParams(window.location.search).get('backend') === 'native')
+        throw new Error(t('视野已记住。请关闭游戏和启动器，再启动一次以应用新视野。'));
+      setRequestedResolution(resolutionViewScale(choice) !== null ? null : (choice as GameResolution | null));
       await onRestartForResolution();
     },
     onVolume(linear) {

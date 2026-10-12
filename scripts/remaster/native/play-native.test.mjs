@@ -27,6 +27,7 @@ import {
   NATIVE_RESOLUTION_LIMITS,
   capNativeResolution,
   configureNativeResolution,
+  nativeIniResolution,
   nativeResolutionIniName,
   nativeViewportResolution,
   parseNativeSize,
@@ -658,13 +659,46 @@ test('native size parsing and main-display capping respect game and picture boun
   assert.throws(() => capNativeResolution({ width: 0, height: 600 }), /valid size/);
 });
 
-test('native viewport matching uses measured device pixels and keeps odd heights', () => {
-  assert.deepEqual(nativeViewportResolution({ width: 1728, height: 963, dpr: 2 }), { width: 1728, height: 963 });
-  assert.deepEqual(nativeViewportResolution({ width: 1728, height: 1117, dpr: 2 }), { width: 1728, height: 1117 });
-  assert.deepEqual(nativeViewportResolution({ width: 1728, height: 900, dpr: 1.5 }), { width: 1296, height: 675 });
+test('native viewport matching resolves view choices and supported even sizes', () => {
+  assert.deepEqual(nativeViewportResolution({ width: 1728, height: 963, dpr: 2 }), { width: 1728, height: 962 });
+  assert.deepEqual(nativeViewportResolution({ width: 1728, height: 1117, dpr: 2 }), { width: 1728, height: 1116 });
+  assert.deepEqual(nativeViewportResolution({ width: 1728, height: 900, dpr: 1.5 }), { width: 1296, height: 674 });
   assert.throws(() => nativeViewportResolution({ width: 2560, height: 1440, dpr: 2 }), /超出/);
-  assert.throws(() => nativeViewportResolution({ width: 700, height: 600, dpr: 2 }), /超出/);
+  assert.deepEqual(nativeViewportResolution({ width: 700, height: 600, dpr: 2 }), { width: 932, height: 800 });
+  assert.deepEqual(nativeViewportResolution({ width: 1728, height: 914, dpr: 2, devicePixelsPerGamePixel: 3 }), {
+    width: 1152,
+    height: 608,
+  });
+  assert.deepEqual(nativeViewportResolution({ width: 1728, height: 914, dpr: 2, devicePixelsPerGamePixel: 2.5 }), {
+    width: 1382,
+    height: 730,
+  });
+  assert.deepEqual(nativeViewportResolution({ width: 500, height: 300, dpr: 1, devicePixelsPerGamePixel: 3 }), {
+    width: 800,
+    height: 600,
+  });
+  const viewport = { width: 1728, height: 914, dpr: 2, frameWidth: 1024, frameHeight: 768 };
+  assert.deepEqual(nativeViewportResolution(viewport), { width: 1024, height: 768 });
+  assert.deepEqual(nativeViewportResolution({ ...viewport, followIni: true }, { width: 1280, height: 960 }), {
+    width: 1280,
+    height: 960,
+  });
+  assert.throws(() => nativeViewportResolution({ ...viewport, frameWidth: 799 }), /超出/);
+  assert.throws(() => nativeViewportResolution({ ...viewport, frameHeight: 768.5 }), /无效/);
   assert.throws(() => nativeViewportResolution({ width: 1728, height: 963, dpr: 0 }), /有效/);
+});
+
+test('native INI resolution follows only the video section with defaults for missing dimensions', () => {
+  assert.deepEqual(nativeIniResolution(Buffer.alloc(0)), { width: 800, height: 600 });
+  assert.deepEqual(
+    nativeIniResolution(
+      Buffer.from(
+        '[Options]\r\nScreenWidth=1920\r\n[VIDEO]\r\nscreenwidth = 1024 ; width\r\nScreenHeight=768\r\n[Audio]\r\nScreenHeight=900\r\n',
+      ),
+    ),
+    { width: 1024, height: 768 },
+  );
+  assert.deepEqual(nativeIniResolution(Buffer.from('[Video]\nScreenWidth=1280\n')), { width: 1280, height: 600 });
 });
 
 test('native resolution patch preserves unrelated ANSI bytes, comments, sections and line endings', () => {
@@ -926,20 +960,20 @@ if (args[0] === 'winepath.exe') {
         assert.match(output, /Native process /, output);
         assert.deepEqual(await (await fetch(endpoint, { headers })).json(), {
           ready: true,
-          resolution: { width: 1728, height: 963 },
+          resolution: { width: 1728, height: 962 },
         });
-        assert.match(await readFile(join(dir, 'RA2MD.INI'), 'utf8'), /ScreenWidth=1728\nScreenHeight=963/);
+        assert.match(await readFile(join(dir, 'RA2MD.INI'), 'utf8'), /ScreenWidth=1728\nScreenHeight=962/);
       }
       assert.equal(url.searchParams.get('backend'), 'native');
       assert.equal(url.searchParams.get('native-autostart'), 'yr');
       assert.equal(url.searchParams.get('native-fullscreen'), stopFailure ? '0' : '1');
-      assert.equal(url.searchParams.get('resolution'), stopFailure ? '1280x720' : 'display');
+      assert.equal(url.searchParams.get('resolution'), stopFailure ? '1280x720' : null);
       for (const [key, value] of Object.entries(HD_PLAY_OPTIONS)) assert.equal(url.searchParams.get(key), value);
       assert.match(
         output,
         stopFailure
           ? /Native resolution: 1280x720 \(fixed for this session/
-          : /Native resolution: 1728x963 \(fixed for this session/,
+          : /Native resolution: 1728x962 \(fixed for this session/,
       );
       assert.match(url.searchParams.get('agent-token'), /^[a-f0-9]{64}$/);
       const listingResponse = await fetch(`${url.origin}/game/.list?dir=ra2`);

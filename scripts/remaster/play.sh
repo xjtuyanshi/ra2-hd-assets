@@ -8,8 +8,8 @@
 #                                         practice scenarios below <main checkout>/gameres/s2x/play/train on first use
 #   scripts/remaster/play.sh --print      only print the address (nothing is started)
 #
-# The game resolution is matched to the browser window when the game starts (one game pixel = two device pixels, the
-# scale the 2x HD art is made for): maximise the window or make it fullscreen BEFORE choosing the game, and reload the
+# --view classic|moderate|wide selects 3|2.5|2 device pixels per game pixel (first-run default classic).
+# The remembered view is matched to the browser window when the game starts: maximise the window or make it fullscreen BEFORE choosing the game, and reload the
 # page after changing the window. Close the terminal window (or press Ctrl+C) to stop the server.
 #
 # Environment (all optional):
@@ -40,18 +40,24 @@ main="$here"
 mode=hd
 page=skirmish
 print=0
-for arg in "$@"; do
+view=""
+while [ "$#" -gt 0 ]; do
+  arg="$1"
+  shift
   case "$arg" in
     --original) mode=original ;;
     --menu) page=menu ;;
     --train) page=train ;;
     --print) print=1 ;;
+    --view) view="${1:-}"; [ "$#" -gt 0 ] && shift; case "$view" in classic|moderate|wide) ;; *) echo "视野请选择 classic（经典）、moderate（适中）或 wide（宽）。" >&2; exit 2 ;; esac ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
 
 port="${RA2_PLAY_PORT:-15400}"
-query="resolution=display"
+query=""
+[ "$mode" = original ] && query="resolution=display"
+[ -n "$view" ] && query="resolution=$view"
 # The page's own startup default is the fastest speed; play starts at the normal one (about 20 logic frames a second).
 speed="${RA2_PLAY_SPEED:-3}"
 case "$speed" in

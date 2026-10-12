@@ -698,32 +698,39 @@ choice of rate, and `hd-pipelines=sync` switches the asynchronous pipeline compi
 
 ## Display scale
 
-The HD art has two texels per game pixel, so it is only shown texel for pixel when one game pixel covers exactly two
-device pixels. Any other scale resamples every texel: a 1152x744 game filling a 3456x2160 screen stretches the art
-1.45 times, and a window with a device pixel ratio of 1 shows no more pixels than the original.
+The view choice controls framing independently of HD rendering resolution. **经典** (`resolution=classic`) uses
+three device pixels per game pixel, **适中** (`resolution=moderate`) uses 2.5, and **宽** (`resolution=wide`) uses two.
+Classic is the default when the player has never selected a view; `resolution=display` remains a legacy alias for
+Wide. The page remembers the selected view between sessions. Both owner launchers accept `--view classic|moderate|wide`.
 
-- `?resolution=display` (toolbar: "match window") computes the game resolution at every start from the stage the
-  canvas is fitted into: half its device pixels, even numbers, within `GAME_RESOLUTION_LIMITS` (`src/games/resolution.ts`:
-  the 800x600 the shell pages are laid out for up to the 2560x1600 the display-mode shim accepts); a stage too small
-  for two device pixels per game pixel uses one. It is the default for `?hd=1` while the player has never chosen a
-  resolution, and is passed to the game as the usual in-memory INI overlay. `?resolution=WxH` requests any size within
-  the limits, `?resolution=ini` the game's own INI; the parameter wins over the stored toolbar choice for that page load,
-  and choosing in the toolbar removes it from the address.
-- The size is measured once, when the game starts: put the window in its final state (maximised or fullscreen) first.
-  The canvas fit then shows a display-matched frame at whole device pixels per game pixel (`calculateCanvasFit` with
-  `integerScale`), leaving a border instead of resampling; the toolbar shows the frame size and scale under the
-  resolution and suggests a reload when a matched frame no longer fits its window. The shell pages keep their own
-  800x600 frame and are shown at their own whole scale.
+- Each display-matched choice divides the available stage's device pixels by its scale and rounds the game frame
+  down to even dimensions within `GAME_RESOLUTION_LIMITS` (`src/games/resolution.ts`, 800x600 through 2560x1600).
+  The smallest supported usable game frame is 800x600. If a small window cannot fit that minimum at the selected
+  scale, the frame uses a smaller fitting scale; a window smaller than the minimum still fits the complete frame.
+  On a 1728x914-point play area at DPR 2, the calculated Classic / Moderate / Wide frames are 1152x608 / 1382x730 /
+  1728x914. A 1728x1117-point fullscreen area gives Classic 1152x744. These are sizing examples, not runtime evidence.
+  Classic is closest to the original 1024x768 framing on that display. Increasing the logical frame reveals more map
+  cells and more sidebar rows; the sidebar width and command-bar height remain the game's own frame-pixel sizes.
+- The size is measured once, when the game starts: put the window in its final state first. The fit uses the chosen
+  scale, including 2.5, and can leave a small border from even rounding. Native sessions need a launcher restart to
+  apply a different view or a newly sized window; the page explains this in Chinese. Native menus retain their
+  original frame dimensions until battle starts. On the web route the selected view applies at the next game start.
+  `resolution=WxH` still requests an explicit frame and `resolution=ini` the game's own INI. An explicit URL choice
+  wins over the stored choice for that page load; changing the page control removes that URL override.
 - The HD canvas and the HD interface canvas are laid out on whole device pixels with one drawing-buffer pixel each
   (`devicePixelBox.ts`, `LiveView.resizePixels`), up to a budget of 10 million pixels; the device pixel ratio is not
-  capped. Interpolated scrolling stays on the drawing buffer's pixel grid (`snapToPixelGrid`), and post passes whose
-  radii are given in view pixels follow the device pixels per game pixel (`HdRenderer.setBufferScale`).
+  capped. Meshes are rasterized at that device resolution at every view scale. HD colour textures use linear
+  magnification; Canvas 2D interface art requests smooth bilinear sampling in Chrome, so 2x art enlarges without
+  nearest-neighbour blocks or cubic edge overshoot. Supplied 3x sidebar art is texel for pixel at Classic's scale 3.
+  This does not invent missing image detail: visual inspection at 1:1 must decide whether the enlarged 2x terrain,
+  buildings, infantry and effects need higher-scale art. Interpolated scrolling stays on the drawing buffer's pixel
+  grid (`snapToPixelGrid`), and post-pass radii follow the view scale (`HdRenderer.setBufferScale`).
 
 `scripts/remaster/play.sh` (or a double click on `scripts/remaster/play.command` on macOS) starts the development
-server and opens the HD page with the approved look, `resolution=display`, `game-speed=3` (the original scale's normal
+server and opens the HD page with the approved look, the remembered view (Classic initially), `game-speed=3` (the original scale's normal
 speed; the page's own startup default is the fastest, see
 [the startup configuration](../RA2_COMMAND_LINE_AND_SPAWNER.md#current-startup-configuration)) and the skirmish setup as
-the first page; `--original` opens the original picture without the HD bridge, `--train` opens the practice lessons
+the first page; `--view classic|moderate|wide` explicitly selects the framing, `--original` opens the original picture without the HD bridge, `--train` opens the practice lessons
 ([Practice lessons](TRAINING.md)), `--print` only prints the address. It
 reads the player's game from `RA2_GAME_ROOT` (default `game/`), the HD cache from `RA2_HD_CACHE_DIR` (default: the
 newest play cache under `gameres/` that holds `_library/`) and the starting speed from `RA2_PLAY_SPEED`, and names
@@ -852,8 +859,11 @@ sampled `VmFrame.pointer` metadata; an inconsistent sample retains the last conf
 observed hidden/off state. The native route uses the same pointer validation through its asynchronous READs.
 `#native-page-cursor` presents the atlas at the local pointer immediately and covers the whole game canvas in HD
 and original view; the sidebar controller omits its own pointer copy. Missing/invalid page art or an unsupported
-game hook retains game drawing. Menu/dialog Win32 cursors remain the actual resource bitmap and hotspot, independent
-of the software atlas: the supplied 2x MOUSE art does not replace the original 32x32 menu arrow.
+game hook retains game drawing. This worktree's launchers automatically use its staged 2x software atlas if present;
+`RA2_HD_CURSOR_DIR` can select another cursor directory, or `0` to retain the selected cache's cursor files. The
+pointer's game-space size and hotspot follow the view scale in both pictures. Menu/dialog Win32 cursors remain the
+actual resource bitmap and hotspot, independent of the software atlas: the staged layer does not redraw the original
+32x32 menu arrow, and 13 remaining atlas frames still need a 2x redraw.
 The optional `sidebar.tooltip` supplies the native frame rectangle and copied UTF-16 text, including native cost
 lines and line breaks. That rectangle is added to the transparent regions while shown and filled with an HD tooltip.
 

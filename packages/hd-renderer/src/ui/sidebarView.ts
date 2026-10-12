@@ -364,7 +364,9 @@ export function drawSidebar(
   ctx.save();
   ctx.scale(opts.scale, opts.scale);
   ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
+  // Bilinear sampling in Chrome enlarges 2x art at fractional/3x view scales without cubic edge overshoot.
+  // Supplied 3x chrome remains one art texel per device pixel at the classic scale.
+  ctx.imageSmoothingQuality = 'low';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
   const chrome = assets.chrome(sidebar.side);

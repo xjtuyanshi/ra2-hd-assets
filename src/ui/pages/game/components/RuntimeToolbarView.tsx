@@ -74,6 +74,9 @@ export interface ToolbarModel {
   hdQualityTiers?: number;
 }
 const resolutions = [
+  'classic',
+  'moderate',
+  'wide',
   '',
   DISPLAY_RESOLUTION,
   '800x600',
@@ -85,7 +88,15 @@ const resolutions = [
   '1920x1080',
 ];
 const resolutionLabel = (value: string) =>
-  value === '' ? t('跟随 INI') : value === DISPLAY_RESOLUTION ? t('匹配窗口（清晰 1:1）') : value.replace('x', '×');
+  value === 'classic'
+    ? t('视野：经典')
+    : value === 'moderate'
+      ? t('视野：适中')
+      : value === 'wide' || value === DISPLAY_RESOLUTION
+        ? t('视野：宽')
+        : value === ''
+          ? t('跟随 INI')
+          : value.replace('x', '×');
 const errorText = (error: unknown) => localizeText(error instanceof Error ? error.message : String(error));
 function CheatContent({ game, callbacks }: { game: CheatGuideGameId | null; callbacks: RuntimeToolbarCallbacks }) {
   const [status, setStatus] = useState(t('页面只报告已交给 VM，不代表游戏接受。'));
@@ -371,7 +382,7 @@ export function RuntimeToolbarView({
         ))}
       </div>
       <div className="resolution-controls resolution-size-controls">
-        <span className="label">{t('分辨率')}</span>
+        <span className="label">{t('视野 / 分辨率')}</span>
         <GameSelect
           id="vm-resolution"
           label={t('游戏分辨率')}

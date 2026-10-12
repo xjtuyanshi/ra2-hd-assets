@@ -42,8 +42,8 @@ export function capNativeResolution(size) {
   return { width, height };
 }
 
-/** Match the measured browser area to the HD art's two device pixels per game pixel. */
-export function nativeViewportResolution(viewport) {
+/** Resolve a selected view scale against the measured browser area and supported video modes. */
+export function nativeViewportResolution(viewport, iniResolution = null) {
   if (
     !Number.isFinite(viewport?.width) ||
     !Number.isFinite(viewport?.height) ||
@@ -54,16 +54,52 @@ export function nativeViewportResolution(viewport) {
     viewport.dpr > 8
   )
     throw new Error('游戏页面没有提供有效的画面尺寸。请重新打开启动器给出的页面。');
-  const size = {
-    width: Math.floor((viewport.width * viewport.dpr) / 2 + 1e-6),
-    height: Math.floor((viewport.height * viewport.dpr) / 2 + 1e-6),
-  };
+  const fixed = viewport.followIni
+    ? iniResolution
+    : viewport.frameWidth !== undefined
+      ? { width: viewport.frameWidth, height: viewport.frameHeight }
+      : null;
+  if (fixed) {
+    if (!Number.isSafeInteger(fixed.width) || !Number.isSafeInteger(fixed.height))
+      throw new Error('游戏分辨率无效。请重新选择画面大小。');
+    const supported = capNativeResolution(fixed);
+    if (supported.width !== fixed.width || supported.height !== fixed.height)
+      throw new Error('游戏分辨率超出支持的范围。请重新选择画面大小。');
+    return fixed;
+  }
+  const requestedScale = viewport.devicePixelsPerGamePixel ?? 2;
+  if (![2, 2.5, 3].includes(requestedScale)) throw new Error('不支持的视野档位。请选经典、适中或宽。');
+  let size;
+  for (let scale = requestedScale; scale >= 1; scale -= 0.5) {
+    size = {
+      width: Math.floor((viewport.width * viewport.dpr) / scale + 1e-6) & ~1,
+      height: Math.floor((viewport.height * viewport.dpr) / scale + 1e-6) & ~1,
+    };
+    if (size.width >= 800 && size.height >= 600) break;
+  }
+  if (size.width < 800 || size.height < 600) size = { width: 800, height: 600 };
   const supported = capNativeResolution(size);
   if (supported.width !== size.width || supported.height !== size.height)
     throw new Error(
       '当前浏览器画面尺寸超出游戏支持的范围。请使用至少 800×600 的页面，或用 --size 指定尺寸后重新启动。',
     );
   return size;
+}
+
+export function nativeIniResolution(bytes) {
+  let inVideo = false;
+  const dimensions = { width: 800, height: 600 };
+  for (const line of Buffer.from(bytes)
+    .toString('latin1')
+    .split(/\r\n|\r|\n/)) {
+    const section = /^\s*\[([^\]]+)\]/.exec(line);
+    if (section) inVideo = section[1].toLowerCase() === 'video';
+    else if (inVideo) {
+      const key = /^\s*(ScreenWidth|ScreenHeight)\s*=\s*(\d+)/i.exec(line);
+      if (key) dimensions[key[1].toLowerCase() === 'screenwidth' ? 'width' : 'height'] = Number(key[2]);
+    }
+  }
+  return dimensions;
 }
 
 export function mainDisplaySize() {

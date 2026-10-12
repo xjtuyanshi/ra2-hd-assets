@@ -91,12 +91,14 @@ effects/water, remaster vehicles, HD vehicle projection and HD UI.
 `--size WxH` selects the native match resolution, for example
 `--size 1280x720`. Without it, the launcher serves the page before starting the
 original game. The page reports its actual available play area and device pixel
-ratio through an authenticated loopback endpoint, and the launcher selects a
-logical size with two device pixels per game pixel. Odd page dimensions are
-preserved. Sizes must fit the repository's shared 800×600 through 2560×1600
-session range and the native picture protocol's 2,097,152-pixel limit;
-unsupported page dimensions produce a visible error instead of silently
-shrinking the picture. Explicit `--size` retains the existing proportional
+ratio and remembered view through an authenticated loopback endpoint. The page
+offers **视野：经典 / 适中 / 宽**: `classic` / `moderate` / `wide` use 3 / 2.5 / 2
+device pixels per game pixel, with Classic initially selected. `--view classic|moderate|wide`
+selects that framing explicitly on both launch routes; `resolution=display` remains
+a legacy Wide alias. Frames round down to even dimensions. A small window uses a
+smaller fitting scale when necessary to keep the minimum usable 800×600 frame.
+Sizes must fit the shared 800×600 through 2560×1600 session range and the native
+picture protocol's 2,097,152-pixel limit. Explicit `--size` retains the existing proportional
 capping behavior and bypasses page measurement. The launcher prints the applied
 size and writes only `ScreenWidth`, `ScreenHeight` and `AllowHiResModes` in the
 supplied copy's `RA2MD.INI` **before** starting the game. It preserves unrelated
@@ -112,14 +114,25 @@ fullscreen requires that user gesture; the page checks the actual fullscreen
 element instead of relying on a Chrome launch flag. Normal `--open` requests a
 maximized window, and the measured page area remains authoritative.
 
-The **native resolution is fixed for the session**. Resizing Chrome only scales
-the current picture; stop and relaunch with another `--size` to change the game
-resolution, or omit `--size` to measure the new page area. Changing fullscreen or
+The **native resolution is fixed for the session**. The page remembers a changed
+view and explains in Chinese that it applies after restarting the launcher.
+Resizing Chrome only scales the current picture; stop and relaunch to measure
+the new page area, or provide another `--size`. Changing fullscreen or
 reloading the page after startup does not change the game's video mode. The
 native main menu retains its original menu dimensions until a match begins.
-The default native URL uses `resolution=display` and `native-viewport=1`; the
+The native URL records the selected view and uses `native-viewport=1`; the
 page waits for the usable original main menu before attaching. Explicit sizes
-remain recorded in the URL. The v86 resolution behavior is unchanged.
+remain recorded in the URL. On a 1728×914-point play area at DPR 2 the calculated
+Classic / Moderate / Wide frames are 1152×608 / 1382×730 / 1728×914; 1728×1117
+fullscreen gives Classic 1152×744. Classic is closest to original 1024×768
+framing on that display. Wider frames show more map and sidebar rows; HD canvases
+still render at device resolution. These examples are sizing rules, not acceptance evidence.
+
+This worktree automatically uses the staged 2x page-cursor atlas when present,
+keeping the selected HD cache unchanged. `RA2_HD_CURSOR_DIR` selects a different
+cursor-art directory; `RA2_HD_CURSOR_DIR=0` uses the selected cache's cursor files.
+Cursor dimensions and hotspot follow the chosen view scale. The original menu
+arrow and 13 remaining atlas frames still require a 2x redraw.
 
 The entry point builds the DLL/helper only when missing, builds the existing
 relay library, and selects two currently free loopback ports in 15450–15459.

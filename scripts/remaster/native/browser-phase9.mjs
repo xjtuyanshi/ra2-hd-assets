@@ -21,6 +21,8 @@ const tag = process.argv[2] || 'hidden';
 const webRoute = tag.startsWith('web');
 const fullWindow = tag.startsWith('full') || tag.startsWith('webfull');
 const gameSpeed = process.argv[5] ?? '3';
+const viewChoice = process.argv[7] ?? null;
+assert(viewChoice === null || ['classic', 'moderate', 'wide'].includes(viewChoice), 'Use a player view choice');
 const stagedFarmPattern = /^(?:phase20\/farm|phase24\/(?:[a-zA-Z0-9_-]+\/)*farm)$/;
 const stagedFarmName = process.argv[6] ?? null;
 assert(stagedFarmName === null || stagedFarmPattern.test(stagedFarmName), 'Use a private staged atlas farm');
@@ -723,6 +725,164 @@ async function execute(c) {
     });
   }
   if (c.action === 'command-state') return worker().evaluate(() => globalThis.__auditCore.getCommandState());
+  if (c.action === 'scale-proof') {
+    assert(typeof c.label === 'string' && /^[a-zA-Z0-9_-]+$/.test(c.label), 'A screenshot label is required');
+    let command = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
+    assert(command?.view && command.sidebar, 'A real battle with its native sidebar is required');
+    const tab = command.sidebar.layout.tabs[0];
+    if (command.sidebar.activeTab !== 0) {
+      await click(tab.x + tab.width / 2, tab.y + tab.height / 2);
+      command = await wait('building sidebar tab', async () => {
+        const next = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
+        return next?.sidebar?.activeTab === 0 ? next : null;
+      });
+    }
+    const projectionFactor = await worker().evaluate(async (web) => {
+      const core = globalThis.__auditCore;
+      const bytes = web
+        ? core.emulator.read_memory(0xb0cd48, 8).slice()
+        : (await core.connection.read(0xb0cd48, 8)).bytes;
+      return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getFloat64(0, true);
+    }, webRoute);
+    const frame = command.sidebar.frame;
+    const layout = command.sidebar.layout;
+    const tactical = {
+      x: layout.sidebar.x === 0 ? layout.sidebar.width : 0,
+      y: 0,
+      width: frame.width - layout.sidebar.width,
+      height: layout.commandBar?.y ?? frame.height,
+    };
+    const project = (object) => ({
+      x: Math.trunc((30 * (object.x - object.y)) / 256) - command.view.x,
+      y:
+        Math.trunc((15 * (object.x + object.y)) / 256) -
+        Math.trunc(object.z * projectionFactor + (object.z >= 728 ? 1 : 0) + 0.5) -
+        command.view.y,
+    });
+    const owned = command.objects.filter((object) => object.owner === command.localHouse && object.health > 0);
+    const onScreen = (object) => {
+      const p = project(object);
+      return p.x > tactical.x + 30 && p.x < tactical.x + tactical.width - 30 && p.y > 50 && p.y < tactical.height - 30;
+    };
+    const targets = [
+      [
+        'building',
+        owned.find((object) => /^(GAWEAP|NAWEAP|YAWEAP)$/.test(object.type) && onScreen(object)) ??
+          owned.find((object) => object.kind === 'building' && onScreen(object)),
+      ],
+      ['infantry', owned.find((object) => object.kind === 'infantry' && onScreen(object))],
+      ['tank', owned.find((object) => /^(MTNK|HTNK|LTNK)$/.test(object.type) && onScreen(object))],
+    ].map(([category, object]) => ({ category, object: object ?? null, point: object ? project(object) : null }));
+    // Move away from every scroll edge and leave the actual page-drawn pointer in this full-page capture.
+    const pointer = { x: Math.round(tactical.x + tactical.width * 0.58), y: Math.round(tactical.height * 0.5) };
+    await page.mouse.move(...(await point(pointer.x, pointer.y)));
+    await delay(400);
+    const screen = await page.evaluate(() => ({
+      box: document.querySelector('#screen').getBoundingClientRect().toJSON(),
+      dpr: devicePixelRatio,
+      width: innerWidth,
+      height: innerHeight,
+      pointer: [...document.querySelectorAll('canvas')]
+        .filter((canvas) => /cursor|pointer/.test(canvas.id))
+        .map((canvas) => ({
+          id: canvas.id,
+          width: canvas.width,
+          height: canvas.height,
+          box: canvas.getBoundingClientRect().toJSON(),
+        })),
+    }));
+    const cells = await worker().evaluate(
+      async ({ web, tactical }) => {
+        const core = globalThis.__auditCore;
+        const render = await core.getRenderState();
+        const shroud = render?.shroud;
+        let centers = 0,
+          unshrouded = 0;
+        if (shroud && render.view) {
+          for (let index = 0; index < shroud.cells.length; index++) {
+            if (shroud.cells[index] === 255) continue;
+            const x = shroud.originX + (index % shroud.width);
+            const y = shroud.originY + Math.floor(index / shroud.width);
+            const px = 30 * (x - y) - render.view.x;
+            const py = 15 * (x + y) - render.view.y;
+            if (
+              px >= tactical.x &&
+              px < tactical.x + tactical.width &&
+              py >= tactical.y &&
+              py < tactical.y + tactical.height
+            ) {
+              centers++;
+              if (shroud.cells[index] > 0) unshrouded++;
+            }
+          }
+        }
+        return {
+          map: render?.map,
+          view: render?.view,
+          centers: shroud ? centers : null,
+          unshrouded: shroud ? unshrouded : null,
+          definition:
+            'Actual map cells whose level-zero projected centers lie inside the tactical rectangle; elevation and partial boundary diamonds are not counted',
+        };
+      },
+      { web: webRoute, tactical },
+    );
+    const physical = (rect) => ({
+      x: Math.round((screen.box.x + (rect.x * screen.box.width) / frame.width) * screen.dpr),
+      y: Math.round((screen.box.y + (rect.y * screen.box.height) / frame.height) * screen.dpr),
+      width: Math.round(((rect.width * screen.box.width) / frame.width) * screen.dpr),
+      height: Math.round(((rect.height * screen.box.height) / frame.height) * screen.dpr),
+    });
+    const cropRects = targets.map(({ category, object, point: p }) => ({
+      category,
+      object,
+      rect: p
+        ? physical(
+            category === 'building'
+              ? { x: p.x - 125, y: p.y - 155, width: 250, height: 190 }
+              : category === 'tank'
+                ? { x: p.x - 45, y: p.y - 55, width: 90, height: 85 }
+                : { x: p.x - 22, y: p.y - 55, width: 44, height: 70 },
+          )
+        : null,
+    }));
+    cropRects.push({
+      category: 'sidebar',
+      rect: physical({
+        x: layout.strip.x,
+        y: layout.strip.y,
+        width: layout.cameoPitch.x * 2,
+        height: layout.cameoPitch.y * 2,
+      }),
+    });
+    cropRects.push({
+      category: 'pointer',
+      rect: physical({ x: pointer.x - 15, y: pointer.y - 15, width: 65, height: 65 }),
+    });
+    const screenshot = await shot(c.label);
+    const proof = {
+      screenshot,
+      viewChoice,
+      logicalFrame: frame,
+      tactical,
+      mapCells: cells,
+      sidebarRows: Math.floor((frame.height - layout.strip.y - (layout.stripReserve ?? 0)) / layout.cameoPitch.y),
+      sidebar: command.sidebar,
+      view: command.view,
+      localHouse: command.localHouse,
+      owned: owned.map(({ uid, type, kind, x, y, z }) => ({ uid, type, kind, x, y, z })),
+      devicePixelsPerGamePixel: {
+        x: (screen.box.width * screen.dpr) / frame.width,
+        y: (screen.box.height * screen.dpr) / frame.height,
+      },
+      screen,
+      cropRects,
+      cropContract: 'Coordinates in the full-page PNG device pixels; crop without resampling or enhancement',
+    };
+    await writeFile(join(out, c.label + '-scale.json'), JSON.stringify(proof, null, 2));
+    await record('scale-proof', proof);
+    return proof;
+  }
   if (c.action === 'render-state') return worker().evaluate(() => globalThis.__auditCore.getRenderState());
   if (c.action === 'overlay-state') {
     assert(!webRoute, 'Overlay observations currently require the native route');
@@ -858,7 +1018,7 @@ async function execute(c) {
     const m = await import('./phase9-base-play.mjs');
     return m.runPhase9BasePlay({
       buildOnly: c.buildOnly ?? false,
-      stopAfterBarracks: c.stopAfterBarracks ?? false,
+      stopAfter: c.stopAfter ?? null,
       page,
       click: (x, y, mode, button) => click(x, y, button ?? 'left'),
       point,
@@ -1703,7 +1863,7 @@ try {
     const options = new URLSearchParams(HD_PLAY_OPTIONS);
     if (tag.startsWith('webbefore')) options.set('sr', '0');
     const query = options.toString();
-    url = `http://127.0.0.1:15451/?${query}&resolution=display&lang=zh`;
+    url = `http://127.0.0.1:15451/?${query}&resolution=${viewChoice ?? 'display'}&lang=zh`;
     await record('web-server', { checkout: wt, gameRoot: process.env.RA2_GAME_ROOT, route: 'web' });
   } else {
     dllBefore = await dllIdentity();
@@ -1729,6 +1889,7 @@ try {
       [
         join(wt, 'scripts/remaster/native/phase8-launch-trace.mjs'),
         ...(useViewportHandshake ? (fullWindow ? ['--fullscreen'] : []) : ['--size', '1728x1117']),
+        ...(viewChoice ? ['--view', viewChoice] : []),
       ],
       {
         cwd: wt,
@@ -1896,6 +2057,7 @@ try {
   const ownedWindowForSizing = await cdp.send('Browser.getWindowForTarget');
   const pageUrl = new URL(url);
   pageUrl.searchParams.set('game-speed', gameSpeed);
+  if (viewChoice) pageUrl.searchParams.set('resolution', viewChoice);
   if (useViewportHandshake) {
     await cdp.send('Browser.setWindowBounds', {
       windowId: ownedWindowForSizing.windowId,

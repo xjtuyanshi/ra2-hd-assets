@@ -30,6 +30,9 @@ describe('分辨率选择', () => {
   it('解析预设、匹配窗口与跟随 INI；自定义尺寸只在显式允许时接受', () => {
     expect(parseResolutionChoice('1440x900')).toEqual({ width: 1440, height: 900 });
     expect(parseResolutionChoice('display')).toBe(DISPLAY_RESOLUTION);
+    expect(parseResolutionChoice('classic')).toBe('classic');
+    expect(parseResolutionChoice('moderate')).toBe('moderate');
+    expect(parseResolutionChoice('wide')).toBe('wide');
     expect(parseResolutionChoice('')).toBeNull();
     expect(parseResolutionChoice('ini')).toBeNull();
     expect(parseResolutionChoice(null)).toBeUndefined();
@@ -50,6 +53,8 @@ describe('分辨率选择', () => {
     expect(loadStoredResolutionChoice('yr')).toBeNull();
     storeResolutionChoice('yr', DISPLAY_RESOLUTION);
     expect(loadStoredResolutionChoice('yr')).toBe(DISPLAY_RESOLUTION);
+    storeResolutionChoice('yr', 'moderate');
+    expect(loadStoredResolutionChoice('yr')).toBe('moderate');
     storeResolutionChoice('yr', { width: 1280, height: 720 });
     expect(loadStoredResolutionChoice('yr')).toEqual({ width: 1280, height: 720 });
     expect(loadStoredResolutionChoice('ra2')).toBeUndefined();
@@ -67,6 +72,9 @@ describe('分辨率选择', () => {
       height: 768,
     });
     expect(resolveResolutionChoice(null, stage(1728, 1080), 2)).toBeNull();
+    expect(resolveResolutionChoice('classic', stage(1728, 914), 2)).toEqual({ width: 1152, height: 608 });
+    expect(resolveResolutionChoice('classic', stage(1728, 1117), 2)).toEqual({ width: 1152, height: 744 });
+    expect(resolveResolutionChoice('moderate', stage(1728, 914), 2)).toEqual({ width: 1382, height: 730 });
   });
 
   it('只在匹配尺寸的画面不再贴合窗口时提示刷新；菜单页等其他尺寸不提示', () => {

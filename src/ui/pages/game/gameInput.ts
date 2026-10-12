@@ -92,6 +92,7 @@ export type GameFrameSizeProvider = () => GameFrameSize;
 export interface CanvasFitOptions {
   /** Whole device pixels per frame pixel whenever the stage has room (see CanvasFitInput.integerScale). */
   integerScale?(): boolean;
+  preferredScale?(): number | undefined;
   /**
    * The fitted frame size, its device pixels per frame pixel and the scale that would fill the stage, whenever a fit
    * ran.
@@ -139,6 +140,7 @@ export function installCanvasFit(
       frameHeight: nextFrameHeight,
       devicePixelRatio: window.devicePixelRatio || 1,
       integerScale: options.integerScale?.() ?? false,
+      preferredScale: options.preferredScale?.(),
     });
     if (!fit) return;
     // Like onResized, not during the install-time fit: the page's callbacks may not exist yet.

@@ -16,6 +16,9 @@ export async function prepareNativeViewport(
   canvas: HTMLCanvasElement,
   signal?: AbortSignal,
   onFullscreenWait?: (waiting: boolean) => void,
+  devicePixelsPerGamePixel = 3,
+  requestedFrame: { width: number; height: number } | null = null,
+  followIni = false,
 ): Promise<{ width: number; height: number } | null> {
   const query = new URLSearchParams(window.location.search);
   if (!nativeAutoStart(window.location.search) || query.get('native-viewport') !== '1') return null;
@@ -105,7 +108,12 @@ export async function prepareNativeViewport(
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify(viewport),
+      body: JSON.stringify({
+        ...viewport,
+        devicePixelsPerGamePixel,
+        ...(requestedFrame ? { frameWidth: requestedFrame.width, frameHeight: requestedFrame.height } : {}),
+        ...(followIni ? { followIni: true } : {}),
+      }),
       signal: requestSignal(),
     });
     if (!response.ok) throw new Error('启动器无法读取页面大小。请关闭页面并重新启动。');

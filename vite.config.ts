@@ -1,7 +1,7 @@
 import { defineConfig, type Plugin } from 'vite';
 import basicSsl from '@vitejs/plugin-basic-ssl';
 import { createReadStream, readFileSync, readdirSync, renameSync, statSync, writeFileSync, type Stats } from 'node:fs';
-import { extname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
@@ -68,7 +68,8 @@ function gameAssetsPlugin(): Plugin {
         });
         req.on('end', () => {
           try {
-            const { width, height, dpr } = JSON.parse(body);
+            const { width, height, dpr, devicePixelsPerGamePixel, frameWidth, frameHeight, followIni } =
+              JSON.parse(body);
             if (
               ![width, height, dpr].every(Number.isFinite) ||
               width <= 0 ||
@@ -76,7 +77,16 @@ function gameAssetsPlugin(): Plugin {
               height <= 0 ||
               height > 16384 ||
               dpr < 0.5 ||
-              dpr > 8
+              dpr > 8 ||
+              (devicePixelsPerGamePixel !== undefined && ![2, 2.5, 3].includes(devicePixelsPerGamePixel)) ||
+              (followIni !== undefined && typeof followIni !== 'boolean') ||
+              ((frameWidth !== undefined || frameHeight !== undefined) &&
+                (!Number.isSafeInteger(frameWidth) ||
+                  !Number.isSafeInteger(frameHeight) ||
+                  frameWidth < 800 ||
+                  frameHeight < 600 ||
+                  frameWidth > 2560 ||
+                  frameHeight > 1600))
             )
               throw new Error('Invalid viewport');
             // The first report owns this launch's size; retries and resize
@@ -88,9 +98,21 @@ function gameAssetsPlugin(): Plugin {
                 return;
               }
             } catch {}
-            writeFileSync(`${viewportPath}.tmp`, JSON.stringify({ viewport: { width, height, dpr }, ready: false }), {
-              mode: 0o600,
-            });
+            writeFileSync(
+              `${viewportPath}.tmp`,
+              JSON.stringify({
+                viewport: {
+                  width,
+                  height,
+                  dpr,
+                  ...(devicePixelsPerGamePixel === undefined ? {} : { devicePixelsPerGamePixel }),
+                  ...(frameWidth === undefined ? {} : { frameWidth, frameHeight }),
+                  ...(followIni === undefined ? {} : { followIni }),
+                },
+                ready: false,
+              }),
+              { mode: 0o600 },
+            );
             renameSync(`${viewportPath}.tmp`, viewportPath);
             res.end(JSON.stringify({ ready: false, resolution: null }));
           } catch {
@@ -201,9 +223,30 @@ function attachRa2NetworkRelay(server: RelayHostServer): void {
 const HD_CACHE_DIR = resolve(
   process.env.RA2_HD_CACHE_DIR || fileURLToPath(new URL('./gameres/hd-cache', import.meta.url)),
 );
+// The private native-host worktree stages its pointer art separately so both
+// launchers can use it without replacing or rewriting the owner's base cache.
+const repositoryDirectory = fileURLToPath(new URL('.', import.meta.url));
+const stagedCursorDirectory =
+  basename(repositoryDirectory) === 'native-host' && basename(dirname(repositoryDirectory)) === '.worktrees'
+    ? resolve(repositoryDirectory, '../../gameres/s2x/native/phase19/farm-layer/_ui/cursor')
+    : undefined;
+const cursorDirectory = process.env.RA2_HD_CURSOR_DIR ?? stagedCursorDirectory;
+const HD_CURSOR_DIR = (() => {
+  if (!cursorDirectory || cursorDirectory === '0') return null;
+  const directory = resolve(cursorDirectory);
+  try {
+    // Keep the manifest and atlas in one layer; a partially supplied layer must
+    // not pair different-scale metadata with the base cache's original atlas.
+    return statSync(join(directory, 'cursor.json')).isFile() && statSync(join(directory, 'cursor.png')).isFile()
+      ? directory
+      : null;
+  } catch {
+    return null;
+  }
+})();
 const HD_CACHE_TYPES: Record<string, string> = { '.json': 'application/json', '.png': 'image/png' };
 
-/** Serve gameres/hd-cache (map names arrive in the game's own casing, e.g. RIVERRAM); never outside that root. */
+/** Serve the private cache and optional cursor layer, preserving game-owned filename casing. */
 export function serveHdCache(req: IncomingMessage, res: ServerResponse): void {
   res.setHeader('Cache-Control', 'no-store');
   if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -220,16 +263,19 @@ export function serveHdCache(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
   const parts = urlPath.split('/').filter(Boolean);
-  let current = HD_CACHE_DIR;
+  const cursorLayer = HD_CURSOR_DIR && parts[0]?.toLowerCase() === '_ui' && parts[1]?.toLowerCase() === 'cursor';
+  const root = cursorLayer ? HD_CURSOR_DIR! : HD_CACHE_DIR;
+  const fileParts = cursorLayer ? parts.slice(2) : parts;
+  let current = root;
   let file: Stats;
   try {
-    if (!parts.length || parts.some((part) => part === '.' || part === '..')) throw new Error('bad path');
-    for (const part of parts) {
+    if (!fileParts.length || parts.some((part) => part === '.' || part === '..')) throw new Error('bad path');
+    for (const part of fileParts) {
       const actual = readdirSync(current).find((name) => name.toLowerCase() === part.toLowerCase());
       if (!actual) throw new Error('missing');
       current = join(current, actual);
     }
-    const inside = relative(HD_CACHE_DIR, current);
+    const inside = relative(root, current);
     if (inside.startsWith('..') || isAbsolute(inside)) throw new Error('missing');
     file = statSync(current);
     if (!file.isFile()) throw new Error('missing');

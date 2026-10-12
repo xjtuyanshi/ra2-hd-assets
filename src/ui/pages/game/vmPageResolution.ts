@@ -20,21 +20,25 @@ export const DISPLAY_RESOLUTION = 'display';
 const INI_RESOLUTION = 'ini';
 
 /**
- * What the player picked: a preset, the game's own INI (null), or 'display': a size computed at every start so that
- * one game pixel covers exactly DISPLAY_DEVICE_PIXELS device pixels of the window the game starts in.
+ * A fixed resolution, the game's INI (null), or a remembered view scale measured at session start.
+ * Legacy 'display' retains the wide two-device-pixel view.
  */
-export type ResolutionChoice = GameResolution | typeof DISPLAY_RESOLUTION | null;
+export const VIEW_SCALES = { classic: 3, moderate: 2.5, wide: 2 } as const;
+export type ViewChoice = keyof typeof VIEW_SCALES;
+export type ResolutionChoice = GameResolution | typeof DISPLAY_RESOLUTION | ViewChoice | null;
+
+export function resolutionViewScale(choice: ResolutionChoice): number | null {
+  return choice === DISPLAY_RESOLUTION ? 2 : typeof choice === 'string' ? VIEW_SCALES[choice] : null;
+}
 
 /**
- * Device pixels per game pixel of the display-matched choice. The HD remaster art has two texels per game pixel, so it
- * is only shown texel for pixel at this scale; the original picture gets exact 2x pixels. Windows too small for it use
- * scale 1 (see displayMatchedFrameSize).
+ * Legacy display choice; the three named views use VIEW_SCALES.
  */
 export const DISPLAY_DEVICE_PIXELS = 2;
 
 /** Toolbar select value of a choice. */
 export function resolutionChoiceValue(choice: ResolutionChoice): string {
-  return choice === DISPLAY_RESOLUTION ? DISPLAY_RESOLUTION : choice ? gameResolutionValue(choice) : '';
+  return typeof choice === 'string' ? choice : choice ? gameResolutionValue(choice) : '';
 }
 
 /**
@@ -45,6 +49,7 @@ export function parseResolutionChoice(value: string | null, custom = false): Res
   if (value === null) return undefined;
   if (value === '' || value === INI_RESOLUTION) return null;
   if (value === DISPLAY_RESOLUTION) return DISPLAY_RESOLUTION;
+  if (Object.hasOwn(VIEW_SCALES, value)) return value as ViewChoice;
   const preset = parseGameResolution(value);
   if (preset) return preset;
   const match = custom ? /^(\d{3,4})x(\d{3,4})$/.exec(value) : null;
@@ -81,16 +86,39 @@ export function resolveResolutionChoice(
   stage: Element | null,
   devicePixelRatio: number,
 ): GameResolution | null {
-  if (choice !== DISPLAY_RESOLUTION) return choice;
+  const scale = resolutionViewScale(choice);
+  if (scale === null) return choice as GameResolution | null;
   const rect = stage?.getBoundingClientRect();
   if (!rect) return null;
   return displayMatchedFrameSize({
     stageWidth: rect.width,
     stageHeight: rect.height,
     devicePixelRatio,
-    devicePixelsPerFramePixel: DISPLAY_DEVICE_PIXELS,
+    devicePixelsPerFramePixel: scale,
     limits: GAME_RESOLUTION_LIMITS,
   });
+}
+
+/**
+ * The effective scale negotiated at startup. Store this result for the session: recalculating it after a resize
+ * would mistake a changed window for the original small-window fallback. Even frame rounding leaves a tiny border.
+ */
+export function resolveResolutionViewScale(
+  choice: ResolutionChoice,
+  stage: Element | null,
+  devicePixelRatio: number,
+  negotiatedFrame: GameResolution | null,
+): number | undefined {
+  const selected = resolutionViewScale(choice);
+  const rect = stage?.getBoundingClientRect();
+  if (selected === null || !rect || !negotiatedFrame) return undefined;
+  const fit = Math.min(
+    (rect.width * devicePixelRatio) / negotiatedFrame.width,
+    (rect.height * devicePixelRatio) / negotiatedFrame.height,
+  );
+  if (!Number.isFinite(fit) || fit <= 0) return undefined;
+  for (let scale = selected; scale >= 1; scale -= 0.5) if (scale <= fit + 1e-6) return scale;
+  return fit;
 }
 
 /**
@@ -104,8 +132,8 @@ export function displayMatchIsStale(
   frame: GameResolution,
   scale: number,
   fillScale: number,
+  preferredScale = DISPLAY_DEVICE_PIXELS,
 ): boolean {
   if (!matched || frame.width !== matched.width || frame.height !== matched.height) return false;
-  const whole = Math.abs(scale - Math.round(scale)) < 1e-6;
-  return !whole || fillScale > scale * 1.1;
+  return Math.abs(scale - preferredScale) > 1e-6 || fillScale > scale * 1.1;
 }
