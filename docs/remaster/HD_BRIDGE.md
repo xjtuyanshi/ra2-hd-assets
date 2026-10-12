@@ -490,7 +490,13 @@ the shown view draws it:
 
 - It holds the view to a frame rate in whole display frames, by the time since the last drawn frame (within 10 %):
   at 60 a 120 Hz display draws every second frame and a 165 Hz display every third (55 a second); a 60 Hz display
-  draws every frame. No display rate is configured.
+  draws every frame. Before gameplay the page measures 64 stable, visible, focused animation-frame intervals and
+  retains their median as the display-cadence reference. Below 55 Hz it gives one nonblocking Chinese notice with
+  the measured rate and the macOS display-settings path. This is a browser cadence estimate, not a physical
+  scan-out measurement; later workload stalls do not lower the reference. At 47.95 Hz the first pacing level draws
+  every refresh and reports 47.95 frames/s. The quality governor uses that same reference, so an on-time refresh
+  below 60 Hz does not reduce picture quality. Missed refreshes still count as rendering deficits. Before the
+  startup reference is available the pacer estimates from its own callbacks.
 - Once a second while the view is shown, the bridge asks the emulator for its counters (`getDiagnostics('usage')`,
   one request on its thread) and hands the pacer what the game reached: its logic rate against the rate its speed
   setting allows (`GameFrameCounters.targetFps`) and the share of its thread it spent in waits it asked for. Behind
@@ -542,7 +548,7 @@ windows of the same case; none of it is done.
 
 `?hd-pace=<rate>` holds a fixed rate (10 to 240; `cap` is 60) whatever the game does, and `?hd-pace=off` draws on
 every display frame as before the pacer existed, both for measurements. `__hdBridge.pace` shows the mode, the level,
-the rate and how many display frames lie between two drawn ones; the speed telemetry's records carry the rate as
+the attainable whole-refresh rate and how many display frames lie between two drawn ones; the speed telemetry's records carry the rate as
 `hdPace`. The native picture over the view (sidebar, radar, selection brackets, health bars, text), the HD interface
 layer and the cursor are not paced: they keep their own rate.
 
@@ -713,9 +719,12 @@ Wide. The page remembers the selected view between sessions. Both owner launcher
   cells and more sidebar rows; the sidebar width and command-bar height remain the game's own frame-pixel sizes.
 - Owner launchers measure the window at the Start click; ordinary web imports retain their runtime-start measurement.
   The fit uses the chosen scale, including 2.5, and can leave a small border from even rounding. Later window or zoom
-  changes immediately fit the picture to the page and rerasterize HD at device pixels within the buffer budget.
-  The game resolution stays stable during a match, then updates at a recognized main menu; the native launcher
-  restarts its owned game and the web page reloads. Native menus retain their original frame dimensions until battle
+  changes immediately fit the picture to the page. Canvas backing sizes follow after 200 ms at a stable size;
+  HD then rerasterizes at device pixels within the buffer budget. Clarity sample spacing changes through a uniform,
+  without rebuilding the post-processing graph for the new scale.
+  The game resolution stays stable until the player presses the resize/restart button in an out-of-match menu.
+  The button states the approximately 20-second wait; nothing restarts automatically, including on return from battle.
+  The native launcher restarts its owned game and the web page reloads. Native menus retain their original frame dimensions until battle
   starts. A selected view applies at the next game start.
   `resolution=WxH` still requests an explicit frame and `resolution=ini` the game's own INI. An explicit URL choice
   wins over the stored choice for that page load; changing the page control removes that URL override.
@@ -736,7 +745,7 @@ the first page; `--view classic|moderate|wide` explicitly selects the framing, `
 ([Practice lessons](TRAINING.md)), `--print` only prints the address. Ordinary HD play adds `play-start=1`:
 `scripts/remaster/play.sh --view classic --print` prints a URL that asks for Start after resource selection or
 restoration. The click measures the window and removes only that one-time parameter from the current URL, so an
-internal menu-resize reload remains automatic. Each new launcher URL carries the gate again; no browser-profile
+player-requested menu-resize reload does not ask for a second Start click. Each new launcher URL carries the gate again; no browser-profile
 acceptance is persisted. Training, `--original`, and ordinary web imports without the parameter keep their flow. It
 reads the player's game from `RA2_GAME_ROOT` (default `game/`), the HD cache from `RA2_HD_CACHE_DIR` (default: the
 newest play cache under `gameres/` that holds `_library/`) and the starting speed from `RA2_PLAY_SPEED`, and names

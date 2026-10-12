@@ -21,12 +21,11 @@ const tag = process.argv[2] || 'hidden';
 const webRoute = tag.startsWith('web');
 const fullWindow = tag.startsWith('full') || tag.startsWith('webfull');
 const gameSpeed = process.argv[5] ?? '3';
-const feelSettings =
-  phase === 'phase32'
-    ? await readFile(join(base, phase, `${tag}-settings.json`), 'utf8')
-        .then(JSON.parse)
-        .catch(() => ({}))
-    : {};
+const feelSettings = ['phase32', 'phase33'].includes(phase)
+  ? await readFile(join(base, phase, `${tag}-settings.json`), 'utf8')
+      .then(JSON.parse)
+      .catch(() => ({}))
+  : {};
 const viewChoice = process.argv[7] ?? feelSettings.view ?? null;
 assert(viewChoice === null || ['classic', 'moderate', 'wide'].includes(viewChoice), 'Use a player view choice');
 const stagedFarmPattern = /^(?:phase20\/farm|phase24\/(?:[a-zA-Z0-9_-]+\/)*farm)$/;
@@ -130,7 +129,7 @@ let directMouseMove;
 // Session 26 observes ordinary pointer travel, including moves made by the
 // reused battle helpers. Other sessions retain their existing input protocol.
 async function humanMove(x, y, options) {
-  if (phase === 'phase32') {
+  if (['phase32', 'phase33'].includes(phase)) {
     const readPointer = () =>
       page.evaluate(() => {
         const canvas = document.querySelector('#screen');
@@ -498,7 +497,10 @@ const usable = (c) => c.visible && c.enabled && c.rect?.[2] > c.rect?.[0];
 async function execute(c) {
   if (c.action === 'close') return { closing: true };
   await ownerIdle();
+  if (phase === 'phase33') await page.bringToFront();
   if (c.action === 'feel-start') {
+    if (c.hdOnly)
+      await wait('visible HD scene', () => page.evaluate(() => !!window.__hdBridge?.diagnostics?.shown), 60000);
     const { installPhase7InputProbe } = await import('./phase7-input-stream.mjs');
     await installPhase7InputProbe(page);
     await page.evaluate(() => {
@@ -575,6 +577,9 @@ async function execute(c) {
         longTasks: p.tasks,
         gaps: p.gaps,
         animationFrameIntervals: p.animationFrames,
+        focused: document.hasFocus(),
+        visible: !document.hidden,
+        notice: document.querySelector('#display-refresh-notice')?.textContent ?? null,
         pace: window.__hdBridge?.pace ?? null,
         stalls: window.__hdBridge?.stalls ?? null,
         telemetry: window.__feelTelemetry?.records ?? null,
@@ -617,9 +622,20 @@ async function execute(c) {
         }));
         const after = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
         const screenshot = await shot(`${c.label ?? 'drag'}-${edge}`);
-        proof.push({ edge, before: before?.view, after: after?.view, observation, screenshot });
+        let originalScreenshot = null;
+        if (phase === 'phase33') {
+          await page.keyboard.press('\\');
+          await delay(300);
+          originalScreenshot = await shot(`${c.label ?? 'drag'}-${edge}-original`);
+          await page.keyboard.press('\\');
+        }
+        proof.push({ edge, before: before?.view, after: after?.view, observation, screenshot, originalScreenshot });
       } finally {
         await page.mouse.up();
+      }
+      if (phase === 'phase33') {
+        await delay(600);
+        await shot(`${c.label ?? 'drag'}-${edge}-released`);
       }
     }
     await writeFile(join(out, `${c.label ?? 'drag'}-edges.json`), JSON.stringify(proof, null, 2));
@@ -661,7 +677,7 @@ async function execute(c) {
     return { seconds: (performance.now() - began) / 1000, scrollActions: actions };
   }
   if (c.action === 'rates-start') {
-    assert(['phase26', 'phase32'].includes(phase) && !acceptanceRates, 'One owned match observer required');
+    assert(['phase26', 'phase32', 'phase33'].includes(phase) && !acceptanceRates, 'One owned match observer required');
     const { startPhase10MatchRates } = await import('./phase10-match-rates.mjs');
     acceptanceRates = await startPhase10MatchRates({
       page,
@@ -694,7 +710,10 @@ async function execute(c) {
     return { observing: true };
   }
   if (c.action === 'rates-stop') {
-    assert(['phase26', 'phase32'].includes(phase) && acceptanceRates, 'Owned played-match observer required');
+    assert(
+      ['phase26', 'phase32', 'phase33'].includes(phase) && acceptanceRates,
+      'Owned played-match observer required',
+    );
     await acceptanceRates.inputCheckpoint('end', { completed: c.completed !== false });
     const result = await acceptanceRates.stop();
     acceptanceRates = null;
@@ -1571,7 +1590,16 @@ async function execute(c) {
   }
   if (c.action === 'window-maximized') {
     const w = await cdp.send('Browser.getWindowForTarget');
-    if (c.width !== undefined || c.height !== undefined) {
+    if (c.sizes) {
+      assert(Array.isArray(c.sizes) && c.sizes.length <= 30, 'Bounded browser window resize sequence required');
+      await cdp.send('Browser.setWindowBounds', { windowId: w.windowId, bounds: { windowState: 'normal' } });
+      for (const [width, height] of c.sizes) {
+        await ownerIdle();
+        assert(Number.isSafeInteger(width) && Number.isSafeInteger(height), 'Explicit window dimensions required');
+        await cdp.send('Browser.setWindowBounds', { windowId: w.windowId, bounds: { width, height } });
+        await delay(50);
+      }
+    } else if (c.width !== undefined || c.height !== undefined) {
       assert(Number.isSafeInteger(c.width) && Number.isSafeInteger(c.height), 'Explicit window dimensions required');
       await cdp.send('Browser.setWindowBounds', { windowId: w.windowId, bounds: { windowState: 'normal' } });
       await cdp.send('Browser.setWindowBounds', { windowId: w.windowId, bounds: { width: c.width, height: c.height } });
@@ -1579,7 +1607,7 @@ async function execute(c) {
     await delay(Math.min(c.wait ?? 1000, 60000));
     return shot(c.label ?? 'window-maximized');
   }
-  if (c.action === 'shot') return shot(c.label);
+  if (c.action === 'shot') return shot(c.label, c.simple === true);
   if (c.action === 'state') return state();
   if (c.action === 'menu-state') {
     return {
@@ -1622,7 +1650,7 @@ async function execute(c) {
     assert(typeof c.selector === 'string' && c.selector, 'A page selector is required');
     await locatorClick(page.locator(c.selector));
     await delay(c.wait ?? 700);
-    return c.label ? shot(c.label) : state();
+    return c.label ? shot(c.label, c.simple === true) : state();
   }
   if (c.action === 'click') {
     let x = c.x,
@@ -2178,8 +2206,8 @@ try {
   if (webRoute) {
     const root = resolve(wt, '../..');
     process.env.RA2_DEV_HTTP = '1';
-    if (phase === 'phase32') process.env.RA2_PERF_LOG = join(out, 'session-feel.jsonl');
-    process.env.RA2_GAME_ROOT ||= join(base, phase, 'web-game');
+    if (['phase32', 'phase33'].includes(phase)) process.env.RA2_PERF_LOG = join(out, 'session-feel.jsonl');
+    process.env.RA2_GAME_ROOT ||= feelSettings.webGameRoot || join(base, phase, 'web-game');
     process.env.RA2_THIRD_PARTY_CACHE_DIR ||= join(root, '.tmp-third-party');
     if (stagedFarmRoot) process.env.RA2_HD_CACHE_DIR = stagedFarmRoot;
     else
@@ -2350,7 +2378,7 @@ try {
       ),
     });
   });
-  if (phase === 'phase32')
+  if (['phase32', 'phase33'].includes(phase))
     await context.route('**/src/ui/pages/game/hdBridge.ts*', async (route) => {
       const response = await route.fetch();
       const source = await response.text();
@@ -2370,7 +2398,7 @@ try {
   });
   page = await context.newPage();
   directMouseMove = page.mouse.move.bind(page.mouse);
-  if (phase === 'phase26' || phase === 'phase32') {
+  if (phase === 'phase26' || ['phase32', 'phase33'].includes(phase)) {
     page.mouse.move = humanMove;
     for (const method of ['click', 'dblclick']) {
       const direct = page.mouse[method].bind(page.mouse);
@@ -2435,6 +2463,7 @@ try {
   pageUrl.searchParams.set('game-speed', gameSpeed);
   if (viewChoice) pageUrl.searchParams.set('resolution', viewChoice);
   if (feelSettings.playStart) pageUrl.searchParams.set('play-start', '1');
+  if (feelSettings.gameCursor) pageUrl.searchParams.set('native-cursor', 'game');
   if (useViewportHandshake && !tag.startsWith('window') && !feelSettings.smallWindow) {
     await cdp.send('Browser.setWindowBounds', {
       windowId: ownedWindowForSizing.windowId,
@@ -2507,7 +2536,7 @@ try {
     });
   }
   await delay(1000);
-  if (phase === 'phase32') {
+  if (['phase32', 'phase33'].includes(phase)) {
     const start = page.getByRole('button', { name: '开始', exact: true });
     if (!webRoute || feelSettings.playStart)
       await wait(
@@ -2531,6 +2560,13 @@ try {
         })),
         browserWindow: await cdp.send('Browser.getWindowForTarget'),
       });
+      if (phase === 'phase33') {
+        await page
+          .locator('#display-refresh-notice')
+          .waitFor({ state: 'visible', timeout: 8000 })
+          .catch(() => {});
+        await page.screenshot({ path: join(out, 'startup-refresh-notice.png') });
+      }
       await locatorClick(start);
     }
   }
@@ -2645,7 +2681,7 @@ try {
           JSON.stringify({ ok: false, error: String(e.stack || e) }, null, 2),
         );
         await record('command-error', { file, error: String(e) });
-        if (phase === 'phase32') {
+        if (['phase32', 'phase33'].includes(phase)) {
           await writeFile(join(out, 'paused-command'), file + '\n');
           while (!(await exists(join(out, 'resume'))) && !(await exists(join(out, 'cancel')))) {
             await ownerIdle();

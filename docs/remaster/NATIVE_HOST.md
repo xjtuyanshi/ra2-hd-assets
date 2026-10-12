@@ -94,8 +94,10 @@ launcher changes only resolution keys in the supplied copy's `RA2MD.INI`, preser
 retains an original backup. Symlinks, Unicode BOM files and ambiguous INI case variants are refused before rewriting.
 The chosen resolution persists in that copy. Resizing Chrome, changing zoom or entering fullscreen immediately fits
 the picture to the page, with HD backing at device pixels within the renderer buffer limit. During a match the game
-resolution stays stable. On return to a recognized menu, a changed page area automatically restarts the owned game
-with the newly measured resolution and a Chinese notice. Menu resizing follows the same path after a short debounce.
+resolution stays stable. After a page-area change, a recognized out-of-match menu offers an explicit restart button (about 20 seconds).
+Only pressing it restarts the owned game
+with the newly measured resolution and a Chinese notice. Menu and battle pictures scale immediately; drawing
+buffers update once the area has been stable for 200 ms. The web route reuses its validated resource source and canvas context for this explicit restart, including non-persisted directory sources. An unfinished or failed archive extraction keeps the current session and its resource status; the restart button becomes available after extraction completes.
 This returns to the main menu; unstarted skirmish choices are not retained. The launcher keeps its existing server,
 authentication token and final cleanup ownership across these restarts. Native menus retain the original aspect ratio. A
 launcher without an interactive browser must use `--size` explicitly. Measured URLs carry the selected resolution
@@ -360,7 +362,11 @@ logic snapshots used by shown HD draws, pointer-event-to-cursor-update latency a
 opportunity, long-task overlap, window/picture dimensions, DPR and window changes. Original-view distinctness is
 explicitly marked as received picture versions, not proven logic states. Canvas draw submissions and a following
 animation callback do not establish physical display scan-out timestamps. Frame mode changes separate reporting
-windows; hidden periods remain identified by visibility and window-change records.
+windows; hidden periods remain identified by visibility and window-change records. The page measures a stable,
+focused startup animation cadence, reports a nonblocking Chinese notice below 55 Hz once per page, and records
+that reference plus callbacks, focus duration and submitted frames per estimated display refresh. This is a browser
+estimate; physical display mode and scan-out remain separate evidence. A later rendering slowdown never reduces
+this reference to conceal missed refreshes.
 
 Long intervals retain bounded activity snapshots for art/page uploads, voxel work and shader/pipeline creation;
 omitted stall detail is counted. These counters identify concurrent work rather than proving causality. Native

@@ -16,6 +16,11 @@ afterEach(() => {
 });
 
 function setup(search = '', locked = true, options: GameInputOptions = {}) {
+  const hints: {
+    textContent?: string;
+    remove: ReturnType<typeof vi.fn>;
+    classList: { add: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> };
+  }[] = [];
   const canvas = Object.assign(new EventTarget(), {
     style: {},
     tabIndex: 0,
@@ -31,7 +36,11 @@ function setup(search = '', locked = true, options: GameInputOptions = {}) {
     activeElement: canvas,
     fullscreenElement: null,
     hidden: false,
-    createElement: () => ({ remove: vi.fn(), classList: { add: vi.fn(), remove: vi.fn() } }),
+    createElement: () => {
+      const hint = { remove: vi.fn(), classList: { add: vi.fn(), remove: vi.fn() } };
+      hints.push(hint);
+      return hint;
+    },
     exitPointerLock: vi.fn(),
   });
   vi.stubGlobal('document', doc);
@@ -76,10 +85,42 @@ function setup(search = '', locked = true, options: GameInputOptions = {}) {
     frames.clear();
     callbacks.forEach((callback) => callback(0));
   };
-  return { canvas, doc, vm, present, pointer, frames, flush };
+  return { canvas, doc, vm, present, pointer, frames, flush, hints };
 }
 
 describe('桌面鼠标跟手性', () => {
+  it('explains escape once for the page, across relocking and reinstalling game input', () => {
+    const h = setup('', false);
+    expect(h.hints[0]!.classList.add).not.toHaveBeenCalled();
+    h.doc.pointerLockElement = h.canvas;
+    document.dispatchEvent(new Event('pointerlockchange'));
+    expect(h.hints[0]!.textContent).toContain('Esc');
+    expect(h.hints[0]!.classList.add).toHaveBeenCalledOnce();
+    h.doc.pointerLockElement = null;
+    document.dispatchEvent(new Event('pointerlockchange'));
+    h.doc.pointerLockElement = h.canvas;
+    document.dispatchEvent(new Event('pointerlockchange'));
+    expect(h.hints[0]!.classList.add).toHaveBeenCalledOnce();
+    installed!.cleanup();
+    installed = installGameInput(h.canvas as unknown as HTMLCanvasElement, h.vm as unknown as VmShell);
+    expect(h.hints[1]!.classList.add).not.toHaveBeenCalled();
+  });
+
+  it('waits for fullscreen keyboard-lock permission before explaining the actual escape gesture', async () => {
+    const h = setup('', false);
+    let grant!: () => void;
+    const keyboard = { lock: vi.fn(() => new Promise<void>((resolve) => (grant = resolve))), unlock: vi.fn() };
+    vi.stubGlobal('navigator', { platform: 'Win32', userAgent: 'Windows', keyboard });
+    installed!.cleanup();
+    Object.assign(h.doc, { fullscreenElement: { contains: () => true }, pointerLockElement: h.canvas });
+    installed = installGameInput(h.canvas as unknown as HTMLCanvasElement, h.vm as unknown as VmShell);
+    expect(h.hints[1]!.classList.add).not.toHaveBeenCalled();
+    grant();
+    await Promise.resolve();
+    expect(h.hints[1]!.textContent).toContain('Esc');
+    expect(h.hints[1]!.classList.add).toHaveBeenCalledOnce();
+  });
+
   it('keeps page cursor CSS ownership when web absolute input is installed after a warm frame', () => {
     const h = setup('', false);
     installed!.cleanup();

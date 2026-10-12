@@ -37,6 +37,8 @@ export interface RuntimeToolbar {
     preferredScale?: number,
     nativeAreaChanged?: boolean,
   ): void;
+  setViewportRestart(available: boolean): void;
+  setRefreshNotice(message: string): void;
   setReShadeMode(mode: ReShadeMode): void;
   setUpscaleMode(mode: UpscaleMode): void;
   setMapsAvailable(available: boolean): void;
@@ -64,6 +66,7 @@ export interface RuntimeToolbar {
 
 export interface RuntimeToolbarCallbacks {
   onCollectPerformance?(signal: AbortSignal, progress: (remainingSeconds: number) => void): Promise<string>;
+  onViewportRestart?(): Promise<void>;
   onClockRate(rate: number): void;
   onResolution(value: string): Promise<void>;
   /** Switch between the HD view and the original picture. */
@@ -110,6 +113,8 @@ export function installRuntimeToolbar(
     resolution: '',
     resolutionStatus: '',
     viewportNotice: '',
+    viewportRestart: false,
+    refreshNotice: '',
     stalls: '',
     gameSpeed: '',
     rate: 1,
@@ -187,6 +192,16 @@ export function installRuntimeToolbar(
       upscaleMode: model.upscaleMode,
       reshadeMode: model.reshadeMode,
     }),
+    setViewportRestart(available) {
+      if (model.viewportRestart === available) return;
+      model.viewportRestart = available;
+      publish();
+    },
+    setRefreshNotice(message) {
+      if (model.refreshNotice === message) return;
+      model.refreshNotice = message;
+      publish();
+    },
     setRendererDetail(detail) {
       model.rendererDetail = detail;
       publish();
@@ -276,8 +291,8 @@ export function installRuntimeToolbar(
           frameWidth,
           frameHeight,
           whole ? String(Math.round(scale)) : scale.toFixed(2),
-        ) + (stale ? t(' · 已铺满窗口，返回菜单后自动调整') : '');
-      const viewportNotice = nativeAreaChanged ? t('画面已随窗口调整；返回菜单后会自动匹配新的游戏尺寸。') : '';
+        ) + (stale ? t(' · 已铺满窗口，可在菜单重新匹配') : '');
+      const viewportNotice = nativeAreaChanged ? t('画面已铺满窗口；可在菜单按新窗口大小重新启动。') : '';
       if (status === model.resolutionStatus && viewportNotice === model.viewportNotice) return;
       model.resolutionStatus = status;
       model.viewportNotice = viewportNotice;

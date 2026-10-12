@@ -183,6 +183,7 @@ function setup(
   search = '?hd=1',
   backend: VmFrameRenderer['backend'] = 'WebGL2',
   runtimeBackend: 'v86' | 'native' = 'v86',
+  displayRefreshMs?: () => number | null,
 ) {
   clock = 1000;
   frames = [];
@@ -236,6 +237,7 @@ function setup(
     publishStatus: status,
     publishQuality: quality,
     publishStalls: stalls,
+    displayRefreshMs,
   });
   return {
     stop,
@@ -910,10 +912,40 @@ describe('HD bridge canvas layout', () => {
     // A 6400x4800 device-pixel rectangle is over the budget: the buffer shrinks, the CSS box does not.
     Object.assign(harness.screen, { getBoundingClientRect: () => ({ left: 10, top: 0, width: 4050.7, height: 3038 }) });
     await advance(16);
+    await advance(200);
     const [width, height] = view.resizePixels.mock.lastCall as number[];
     expect(width! * height!).toBeLessThanOrEqual(10_000_000 * 1.001);
     expect(width! / height!).toBeCloseTo(632 / 568, 2);
     expect(Number.parseFloat(harness.hdCanvas.style.width!)).toBeCloseTo((4050.7 * 632) / 800, 0);
+    harness.stop();
+  });
+
+  it('scales the visible picture through a drag and changes the backing only after the final size is stable', async () => {
+    const harness = setup('?hd=1&hd-pace=off');
+    const view = await goLive(harness);
+    await advance(16);
+    const before = view.resizePixels.mock.calls.length;
+    for (let step = 1; step <= 4; step++) {
+      Object.assign(harness.screen, { clientWidth: 800 + step * 100, clientHeight: 600 + step * 75 });
+      await advance(80);
+      expect(harness.hdCanvas.style.width).toBe(`${632 * (1 + step / 8)}px`);
+      expect(view.resizePixels).toHaveBeenCalledTimes(before);
+    }
+    await advance(199);
+    expect(view.resizePixels).toHaveBeenCalledTimes(before);
+    await advance(1);
+    expect(view.resizePixels).toHaveBeenCalledTimes(before + 1);
+    expect(view.resizePixels).toHaveBeenLastCalledWith(948, 852, 632, 568);
+    // A position-only change retains its buffer, as does returning to the applied size during a pending drag.
+    harness.screen.offsetLeft = 10;
+    await advance(16);
+    expect(harness.hdCanvas.style.left).toBe('10px');
+    expect(view.resizePixels).toHaveBeenCalledTimes(before + 1);
+    harness.screen.clientWidth = 1280;
+    await advance(16);
+    harness.screen.clientWidth = 1200;
+    await advance(240);
+    expect(view.resizePixels).toHaveBeenCalledTimes(before + 1);
     harness.stop();
   });
 });
@@ -2900,6 +2932,19 @@ describe('HD bridge frame pacing', () => {
     expect(harness.bridge()?.pace).toEqual({ mode: 'fixed', level: 0, levels: 1, rate: 30, stride: 2 });
     // Display frames 50 ms apart: the view cannot keep even its held rate, and gives up its passes.
     await advance(50, 120);
+    expect(view.hd.quality).toBeGreaterThan(0);
+    harness.stop();
+  });
+
+  it('keeps full quality at a measured 47.95 Hz refresh, but still sees missed display refreshes', async () => {
+    const refresh = 1000 / 47.95;
+    const harness = setup('?hd=1', 'WebGL2', 'v86', () => refresh);
+    const view = await goLive(harness);
+    harness.setState(battle(3));
+    expect((await count(harness, view, refresh, 480)).drawn).toBe(480);
+    expect(harness.bridge()?.pace).toMatchObject({ rate: 47.95, stride: 1 });
+    expect(view.hd.quality).toBe(0);
+    await advance(refresh * 2, 120);
     expect(view.hd.quality).toBeGreaterThan(0);
     harness.stop();
   });

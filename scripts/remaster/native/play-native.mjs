@@ -936,7 +936,9 @@ export async function runLauncher(arguments_, environment = process.env) {
     }
     const configured = await configureNativeResolution(gameDirectory, runDirectory, resolution);
     console.log(`Native resolution: ${resolution.width}x${resolution.height} (current game; ${configured.target})`);
-    console.log(`本次游戏画面为 ${resolution.width}×${resolution.height}；改变窗口后，菜单会自动调整，对局会先铺满。`);
+    console.log(
+      `本次游戏画面为 ${resolution.width}×${resolution.height}；改变窗口后画面会先铺满；可在菜单点击按钮，按新窗口大小重开。`,
+    );
     installation = await installDll(dll, join(gameDirectory, 'ddraw.dll'), runDirectory);
     const gameEnvironment = {
       ...wine.environment,

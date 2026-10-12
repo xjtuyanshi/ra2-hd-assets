@@ -61,6 +61,8 @@ export interface ToolbarModel {
   resolutionStatus?: string;
   /** A negotiated native viewport changed; visible even with the controls collapsed. */
   viewportNotice?: string;
+  viewportRestart?: boolean;
+  refreshNotice?: string;
   /** Stalls of the current match ("卡顿 N 次，最长 X 秒"), empty while there were none or no recorder runs. */
   stalls?: string;
   /** Logic rate reached and allowed ("游戏速度 实际 X / 应有 Y"), empty outside a battle or without telemetry. */
@@ -287,7 +289,12 @@ export function RuntimeToolbarView({
         canvas.closest('#screen-frame') &&
         createPortal(
           <p id="native-viewport-notice" role="status">
-            {model.viewportNotice}
+            {model.viewportNotice}{' '}
+            {model.viewportRestart && callbacks.onViewportRestart && (
+              <button type="button" onClick={() => void callbacks.onViewportRestart?.()}>
+                {t('按现在的窗口大小重新启动游戏，约 20 秒')}
+              </button>
+            )}
           </p>,
           canvas.closest('#screen-frame')!,
         )}

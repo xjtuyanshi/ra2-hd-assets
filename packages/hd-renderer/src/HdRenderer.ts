@@ -363,6 +363,8 @@ export function applyLookPreset(settings: HdSettings, preset: LookPreset): numbe
 /** Clarity band (CSS px, sigma): above CLARITY_FINE (pixel-scale texture) and below CLARITY_SIGMA (whole faces). */
 const CLARITY_FINE = 1.25;
 const CLARITY_SIGMA = 5;
+/** Stable kernels at the authored 2x scale; a uniform changes sample spacing when the display is resized. */
+const CLARITY_KERNEL_SCALE = 2;
 
 /** Exposure adaptation never lifts the frame by more than this factor. */
 const MAX_ADAPT = 2.2;
@@ -669,6 +671,7 @@ export class HdRenderer {
   private pipelineNodes: { dispose(): void }[] = [];
   private readonly bloomStrength = uniform(0.55);
   private readonly clarityAmount = uniform(0);
+  private readonly claritySampleScale = uniform(1);
   /** Bloom threshold on the unexposed scene (see frame()). */
   private readonly bloomThreshold = uniform(NIGHT_BLOOM_THRESHOLD);
   private readonly blackLift = uniform(new Color(0, 0, 0));
@@ -1015,7 +1018,7 @@ export class HdRenderer {
    */
   setBufferScale(scale: number | null): void {
     this.bufferScale = scale !== null && Number.isFinite(scale) && scale > 0 ? scale : null;
-    if (this.pipeline && this.pipelineKey !== this.settingsPipelineKey()) this.buildPipeline();
+    this.claritySampleScale.value = this.viewPixelScale() / CLARITY_KERNEL_SCALE;
   }
 
   /** Drawing-buffer pixels per view pixel (see setBufferScale). */
@@ -1042,8 +1045,8 @@ export class HdRenderer {
       sharpness,
       debugView,
       debugView === 'none' && hasCinematicGrade(this.settings),
-      // The clarity pass exists only while it is on; its blur radius follows the drawing buffer's pixel scale.
-      this.settings.clarity > 0 ? Math.round(this.viewPixelScale() * 4) : 0,
+      // Sample spacing follows the buffer scale through a uniform, without replacing the graph during a resize.
+      this.settings.clarity > 0,
     ];
     // No extra key/graph branch for faithful: preserve its original output path exactly.
     if (emissiveOverlayEnabled(this.settings, emissiveMrtSupported(this.renderer))) key.push('emissive');
@@ -1230,11 +1233,23 @@ export class HdRenderer {
     if (this.settings.clarity > 0 && debugView === 'none') {
       // Band-pass (difference of two half-resolution blurs): faces, crevices and canopy masses a few CSS px and up gain
       // contrast while pixel-scale texture (brick, asphalt grain) is left as it is; the plain unsharp mask doubled it.
-      const ratio = this.viewPixelScale();
+      this.claritySampleScale.value = this.viewPixelScale() / CLARITY_KERNEL_SCALE;
       // Both blurs read one copy of the picture: handed the expression, each drew a full-size copy of its own.
       const picture: ShaderNode = convertToTexture(display);
-      const fine: ShaderNode = gaussianBlur(picture, null, (CLARITY_FINE * ratio) / 2, { resolutionScale: 0.5 });
-      const broad: ShaderNode = gaussianBlur(picture, null, (CLARITY_SIGMA * ratio) / 2, { resolutionScale: 0.5 });
+      // Keep kernel weights and materials stable. Scaling the sample offsets preserves the blur's scene radius;
+      // encoding the scale in sigma instead rebuilt four shaders on every sufficiently large window-size change.
+      const fine: ShaderNode = gaussianBlur(
+        picture,
+        this.claritySampleScale,
+        (CLARITY_FINE * CLARITY_KERNEL_SCALE) / 2,
+        { resolutionScale: 0.5 },
+      );
+      const broad: ShaderNode = gaussianBlur(
+        picture,
+        this.claritySampleScale,
+        (CLARITY_SIGMA * CLARITY_KERNEL_SCALE) / 2,
+        { resolutionScale: 0.5 },
+      );
       nodes.push(fine, broad);
       const luma = vec3(0.2126, 0.7152, 0.0722);
       const lum = dot(display.rgb, luma);

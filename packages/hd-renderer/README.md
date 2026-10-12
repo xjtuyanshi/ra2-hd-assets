@@ -163,8 +163,10 @@ shaders are built in the frame that first draws them).
 The post graph is rebuilt (new materials for every post pass, about half a second of shader building) only when
 its settings change. `setTopEffectsVisible` therefore adds the top-layer pass with the first visible top-layer art
 and keeps it; while no such art is visible the pass is not drawn and its empty target composites as zeros.
-`enableTopEffects()` adds it ahead of time. The clarity pass's blur radius follows the buffer scale, so a host should
-lay the view out at its final size before the first frame (`resizePixels`), not at a temporary one.
+`enableTopEffects()` adds it ahead of time. The clarity pass retains fixed Gaussian kernels at the authored 2x scale
+and changes their sample spacing through a uniform when the buffer scale changes. Resizing therefore preserves
+the post graph and its compiled shaders; render targets still resize to the current buffer. Hosts should lay the
+view out at its final size before the first frame (`resizePixels`) to avoid temporary render-target allocations.
 
 Asset-free state-isolation tests and the irradiance microbenchmark can be run with the existing root tools:
 

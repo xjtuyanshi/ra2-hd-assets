@@ -71,7 +71,8 @@ canvas {
 #screen-frame {
   position: relative;
 }
-#native-viewport-notice {
+#native-viewport-notice,
+#display-refresh-notice {
   position: absolute;
   right: 12px;
   bottom: 42px;
@@ -84,6 +85,26 @@ canvas {
   border: 1px solid #a98c4d;
   font-size: 14px;
   pointer-events: none;
+}
+#native-viewport-notice {
+  top: 42px;
+  bottom: auto;
+  right: auto;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100% - 32px);
+  font-size: 12px;
+}
+#native-viewport-notice button {
+  pointer-events: auto;
+  cursor: pointer;
+  padding: 3px 8px;
+}
+#display-refresh-notice {
+  top: 10px;
+  bottom: auto;
+  z-index: 10001;
 }
 /* Inside the fullscreen container and ignoring mouse input, status hints do not affect game clicks or pointer locking. */
 #vm-upscale-status,

@@ -1,5 +1,73 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { calculateCanvasFit, displayMatchedFrameSize } from '../../src/ui/pages/game/canvasFit';
+import { installCanvasFit } from '../../src/ui/pages/game/gameInput';
+
+describe('HD canvas resize lifecycle', () => {
+  it('fits CSS immediately, waits for a stable area to allocate backing, and cancels a pending resize on destroy', () => {
+    vi.useFakeTimers();
+    const area = { width: 800, height: 600 };
+    const stage = { getBoundingClientRect: () => area };
+    const canvas = {
+      width: 1,
+      height: 1,
+      style: { width: '', height: '', aspectRatio: '' },
+      closest: () => stage,
+      getBoundingClientRect: () => ({
+        left: 0,
+        top: 0,
+        width: Number.parseFloat(canvas.style.width),
+        height: Number.parseFloat(canvas.style.height),
+      }),
+    };
+    vi.stubGlobal('window', { devicePixelRatio: 1.5, setTimeout, clearTimeout });
+    vi.stubGlobal('document', Object.assign(new EventTarget(), { fullscreenElement: null }));
+    vi.stubGlobal('matchMedia', () => new EventTarget());
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const redraw = vi.fn();
+    const fit = installCanvasFit(canvas as unknown as HTMLCanvasElement, () => ({ width: 800, height: 600 }), redraw, {
+      fillStage: () => true,
+      devicePixelBacking: () => true,
+    });
+    try {
+      expect([canvas.width, canvas.height]).toEqual([1200, 900]);
+      expect(redraw).not.toHaveBeenCalled();
+      Object.assign(area, { width: 900, height: 675 });
+      fit();
+      expect(canvas.style.width).toBe('900px');
+      expect(canvas.width).toBe(1200);
+      vi.advanceTimersByTime(100);
+      Object.assign(area, { width: 1000, height: 750 });
+      fit();
+      expect(canvas.style.width).toBe('1000px');
+      vi.advanceTimersByTime(199);
+      expect(canvas.width).toBe(1200);
+      vi.advanceTimersByTime(1);
+      expect([canvas.width, canvas.height]).toEqual([1500, 1125]);
+      expect(redraw).toHaveBeenCalledTimes(1);
+      // A real game video-mode switch cannot wait on an old logical coordinate space.
+      Object.assign(area, { width: 900, height: 675 });
+      fit(640, 480);
+      expect(canvas.width).toBe(1350);
+      expect(redraw).toHaveBeenCalledTimes(2);
+      Object.assign(area, { width: 1200, height: 900 });
+      fit();
+      fit.destroy();
+      vi.advanceTimersByTime(1000);
+      expect(canvas.width).toBe(1350);
+      expect(redraw).toHaveBeenCalledTimes(2);
+    } finally {
+      fit.destroy();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+});
 
 describe('canvas 等比适配', () => {
   it('fills an enlarged owner window at DPR 1.5 despite the original negotiated scale', () => {

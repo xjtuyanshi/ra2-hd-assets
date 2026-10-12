@@ -15,6 +15,9 @@ let canvasFitObserver: ResizeObserver | null = null;
 let canvasDprQuery: MediaQueryList | null = null;
 let canvasDprFitListener: (() => void) | null = null;
 let canvasFullscreenFitListener: (() => void) | null = null;
+// Input can be reinstalled when the game restarts; the page's canvas owns this
+// one-time explanation without retaining a removed canvas or another page.
+const pointerLockHintShown = new WeakSet<HTMLCanvasElement>();
 
 /**
  * Page shortcuts bypass game injection in installGameInput keydown/keyup and are handled centrally here.
@@ -115,6 +118,19 @@ export function installCanvasFit(
   const initialFrame = getFrameSize();
   let activeFrameWidth = initialFrame.width;
   let activeFrameHeight = initialFrame.height;
+  let backingTimer: number | null = null;
+  let pendingBacking: { width: number; height: number } | null = null;
+  const clearBackingTimer = () => {
+    if (backingTimer !== null) window.clearTimeout(backingTimer);
+    backingTimer = null;
+    pendingBacking = null;
+  };
+  const resizeBacking = (width: number, height: number) => {
+    if (canvas.width === width && canvas.height === height) return;
+    canvas.width = width;
+    canvas.height = height;
+    if (ready) onResized?.();
+  };
   const fit = (nextFrameWidth = activeFrameWidth, nextFrameHeight = activeFrameHeight) => {
     if (
       !Number.isFinite(nextFrameWidth) ||
@@ -125,6 +141,7 @@ export function installCanvasFit(
       return;
     // Store frame dimensions before reading stage geometry so a first frame arriving before stage layout completes
     // still gives the next ResizeObserver callback the latest aspect ratio instead of stale 800x600.
+    const frameChanged = activeFrameWidth !== nextFrameWidth || activeFrameHeight !== nextFrameHeight;
     activeFrameWidth = nextFrameWidth;
     activeFrameHeight = nextFrameHeight;
     // Scaling reference: #stage in normal layout, where flex fills available space and rect is the maximum area;
@@ -163,15 +180,26 @@ export function installCanvasFit(
     const backingChanged = canvas.width !== width || canvas.height !== height;
     const cssChanged = canvas.style.width !== cssWidth || canvas.style.height !== cssHeight;
     const aspectChanged = canvas.style.aspectRatio !== aspectRatio;
-    if (backingChanged) {
-      canvas.width = width;
-      canvas.height = height;
-    }
     if (cssChanged) {
       canvas.style.width = cssWidth;
       canvas.style.height = cssHeight;
     }
     if (aspectChanged) canvas.style.aspectRatio = aspectRatio;
+    // CSS scales the existing picture on every drag step. Allocate HD-sized buffers only once the area is stable;
+    // game video-mode changes and the first frame still apply immediately so their coordinate spaces agree.
+    if (backingChanged && ready && devicePixelBacking && !frameChanged) {
+      if (pendingBacking?.width !== width || pendingBacking.height !== height) {
+        clearBackingTimer();
+        pendingBacking = { width, height };
+        backingTimer = window.setTimeout(() => {
+          clearBackingTimer();
+          if (ready) resizeBacking(width, height);
+        }, 200);
+      }
+    } else {
+      clearBackingTimer();
+      if (backingChanged) resizeBacking(width, height);
+    }
     if (!backingChanged && !cssChanged && !aspectChanged) {
       // Skip resetting unchanged dimensions, such as returning to the same scale after fullscreen; even assigning the same canvas.width
       // clears its bitmap and needlessly flashes a frame. Refresh only the potentially moved rect cache.
@@ -181,8 +209,6 @@ export function installCanvasFit(
     // Refresh the rect cache synchronously for frequent mousePosition reads; see currentCanvasRect.
     // This is the only canvas-layout-box mutation point, including fullscreen transitions.
     refreshCanvasRect(canvas);
-    // Only backing resets clear the bitmap and require immediate redraw; CSS-only scaling preserves it.
-    if (backingChanged && ready) onResized?.();
   };
   canvasFitObserver?.disconnect();
   canvasFitObserver = new ResizeObserver(() => fit());
@@ -218,6 +244,7 @@ export function installCanvasFit(
   return Object.assign(fit, {
     destroy() {
       ready = false;
+      clearBackingTimer();
       observer.disconnect();
       dprQuery.removeEventListener('change', dprChanged);
       document.removeEventListener('fullscreenchange', fitEnvironmentChange);
@@ -1294,21 +1321,15 @@ export function installGameInput(
   canvas.parentElement?.appendChild(lockHint);
   removers.push(() => lockHint.remove());
   let keyboardLockState: KeyboardLockState = 'inactive';
-  let shownLockHintState: KeyboardLockState | null = null;
   const showLockHint = () => {
-    // Explain each actual keyboard-lock mode once, not on every click after Esc.
-    if (shownLockHintState === keyboardLockState) return;
-    shownLockHintState = keyboardLockState;
+    // Wait for the actual escape behavior, not the browser's permission request.
+    if (document.pointerLockElement !== canvas || keyboardLockState === 'pending' || pointerLockHintShown.has(canvas))
+      return;
+    pointerLockHintShown.add(canvas);
     const message =
       keyboardLockState === 'active'
         ? 'Esc 已交给游戏 · 长按 Esc 释放鼠标，或打开游戏菜单'
-        : keyboardLockState === 'pending'
-          ? '正在申请 Esc 捕获权限…'
-          : keyboardLockState === 'unavailable'
-            ? '浏览器不支持 Esc 捕获，Esc 仍由浏览器优先处理'
-            : keyboardLockState === 'denied'
-              ? 'Esc 捕获未获授权，Esc 仍由浏览器优先处理'
-              : '鼠标已限制在游戏里 · 按 Esc 释放鼠标，再点游戏继续';
+        : '鼠标已限制在游戏里 · 按 Esc 释放鼠标，再点游戏继续';
     lockHint.textContent = vm.runtimeInfo?.backend === 'native' ? message : t(message);
     lockHint.classList.remove('show');
     void lockHint.offsetWidth;

@@ -22,11 +22,23 @@ export function Toolbar() {
   const props = useStore(state.toolbarState);
   const collapsed = useStore(state.controlsCollapsed);
   const boot = useStore(state.bootState);
-  if (boot?.start) return null;
+  const stage = props?.canvas.closest('#stage');
   return (
-    <nav id="vm-controls" aria-label={t('运行状态与控制')} className={collapsed ? 'collapsed' : undefined}>
-      {props && <RuntimeToolbarView {...props} />}
-    </nav>
+    <>
+      {props?.model.refreshNotice &&
+        stage &&
+        createPortal(
+          <p id="display-refresh-notice" role="status">
+            {props.model.refreshNotice}
+          </p>,
+          stage,
+        )}
+      {!boot?.start && (
+        <nav id="vm-controls" aria-label={t('运行状态与控制')} className={collapsed ? 'collapsed' : undefined}>
+          {props && <RuntimeToolbarView {...props} />}
+        </nav>
+      )}
+    </>
   );
 }
 export function DebugRegion() {

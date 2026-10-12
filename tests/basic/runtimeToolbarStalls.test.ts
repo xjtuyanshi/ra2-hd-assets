@@ -25,7 +25,9 @@ describe('toolbar line for the stalls of the current match', () => {
     Object.assign(window, { location: { search: '?backend=native' } });
     const matched = { width: 1728, height: 1116 };
     t.bar.setDisplayScale(1728, 1116, 2, 2, matched, 2, true);
-    expect(toolbarState.getSnapshot()?.model.viewportNotice).toMatch(/返回菜单后会自动匹配|update automatically on return to the menu/);
+    expect(toolbarState.getSnapshot()?.model.viewportNotice).toMatch(
+      /可在菜单按新窗口大小重新启动|Restart at its new size from a menu/,
+    );
     t.bar.setDisplayScale(1728, 1116, 2, 2, matched, 2, false);
     expect(toolbarState.getSnapshot()?.model.viewportNotice).toBe('');
     t.end();

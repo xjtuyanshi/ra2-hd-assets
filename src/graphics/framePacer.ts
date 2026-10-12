@@ -25,6 +25,8 @@
  *    setting) has nothing to fall behind: the pacer returns to its first level.
  */
 export interface FramePacerOptions {
+  /** A display cadence measured before drawing became busy; null lets the pacer estimate from its callbacks. */
+  displayRefreshMs?(): number | null;
   /** Whether drawing competes with the workload's scheduler. Independent workloads recover the cap on target. */
   sharedDrawingScheduler?: boolean;
   /** Frame rates the view may be held to, fastest first. Default [60, 40, 30]. */
@@ -69,6 +71,7 @@ export interface WorkloadSample {
 const REFRESH_WINDOW = 32;
 
 export class FramePacer {
+  private readonly displayRefreshMs: FramePacerOptions['displayRefreshMs'];
   private readonly sharedDrawingScheduler: boolean;
   private readonly rates: readonly number[];
   private readonly intervals: readonly number[];
@@ -103,6 +106,7 @@ export class FramePacer {
   private readonly needed: number[];
 
   constructor(options: FramePacerOptions = {}) {
+    this.displayRefreshMs = options.displayRefreshMs;
     this.sharedDrawingScheduler = options.sharedDrawingScheduler ?? true;
     const rates = options.rates ?? [60, 40, 30];
     if (!rates.length || rates.some((rate, index) => !(rate > 0) || (index > 0 && rate >= rates[index - 1]!)))
@@ -133,14 +137,22 @@ export class FramePacer {
     return this.intervals.length;
   }
 
-  /** Frame rate of the level in use (what the view is held to at most). */
+  /** Frame rate the level can actually draw in whole refreshes, or its configured cap before refresh is known. */
   get rate(): number {
-    return this.rates[this.current]!;
+    const interval = this.measuredRefreshMs === null ? null : this.pacedIntervalMs;
+    return interval === null ? this.rates[this.current]! : Math.round(100_000 / interval) / 100;
   }
 
-  /** Shortest interval between display frames seen lately, or null before two were seen. */
+  /** Startup display reference, or the shortest recent callback interval while no reference is available. */
   get refreshMs(): number | null {
+    const measured = this.measuredRefreshMs;
+    if (measured !== null) return measured;
     return this.seen.length ? Math.min(...this.seen) : null;
+  }
+
+  private get measuredRefreshMs(): number | null {
+    const measured = this.displayRefreshMs?.();
+    return measured !== null && measured !== undefined && measured > 1 && measured < 100 ? measured : null;
   }
 
   /**
@@ -176,7 +188,11 @@ export class FramePacer {
     if (
       drawnAt !== null &&
       frameTimeMs >= drawnAt &&
-      frameTimeMs - drawnAt < this.intervals[this.current]! / this.tolerance
+      frameTimeMs - drawnAt <
+        (this.measuredRefreshMs === null
+          ? this.intervals[this.current]!
+          : (this.pacedIntervalMs ?? this.intervals[this.current]!)) /
+          this.tolerance
     )
       return false;
     this.drawnAt = frameTimeMs;

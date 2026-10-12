@@ -1,11 +1,13 @@
 import type { SpeedRecord } from './speedTelemetry';
 import type { HdStallActivity } from './hdStallMonitor';
+import type { DisplayRefreshSnapshot } from '../../../graphics/displayRefresh';
 
 export interface SessionFeelHost {
   screen: HTMLCanvasElement;
   backend: 'native' | 'v86';
   scene(): { hdShown: boolean; map: string | null } | null;
   activity(): HdStallActivity | null;
+  display?(): DisplayRefreshSnapshot;
 }
 
 /** Draw submissions, not display scan-out: browsers do not expose physical presentation timestamps for canvas. */
@@ -23,6 +25,8 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
   }[] = [];
   let omittedStalls = 0;
   let distinctStates = 0;
+  let submittedFrames = 0;
+  let displayStart = host.display?.() ?? null;
   let lastState: number | null = null;
   let lastFrame = 0;
   let lastMode = '';
@@ -65,6 +69,7 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
       },
       screen: { width: screen.width, height: screen.height },
       visible: !document.hidden,
+      focused: document.hasFocus(),
     };
   };
   const changed = () => {
@@ -115,6 +120,13 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
       };
     });
     const scene = host.scene();
+    const display = host.display?.() ?? null;
+    const visibleMs = display && displayStart ? display.visibleMs - displayStart.visibleMs : null;
+    const displayCallbacks = display && displayStart ? display.callbacks - displayStart.callbacks : null;
+    const refreshes =
+      visibleMs !== null && display?.refreshHz !== null && display?.refreshHz !== undefined
+        ? (visibleMs * display.refreshHz) / 1000
+        : null;
     const record = {
       kind: 'feel',
       time: new Date().toISOString(),
@@ -128,6 +140,30 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
       map: scene?.map ?? null,
       ...view(),
       frameIntervalsMs: summary(intervals),
+      display: display
+        ? {
+            reference: 'startup-visible-focused-rAF-cadence; not-physical-scanout',
+            refreshHz: display.refreshHz === null ? null : round(display.refreshHz),
+            refreshMs: display.refreshMs === null ? null : round(display.refreshMs),
+            measuredAtMs: display.measuredAtMs,
+            samples: display.samples,
+            visibleMs: visibleMs === null ? null : round(visibleMs),
+            focusedMs: displayStart ? round(display.focusedMs - displayStart.focusedMs) : null,
+            callbacks: displayCallbacks,
+            callbacksPerS:
+              visibleMs !== null && visibleMs > 0 && displayCallbacks !== null
+                ? round((displayCallbacks * 1000) / visibleMs)
+                : null,
+            estimatedRefreshes: refreshes === null ? null : round(refreshes),
+            submittedFrames,
+            submittedFramesPerRefresh:
+              refreshes !== null && refreshes > 0 ? Math.round((submittedFrames / refreshes) * 10000) / 10000 : null,
+            submittedFramesPerCallback:
+              displayCallbacks !== null && displayCallbacks > 0
+                ? Math.round((submittedFrames / displayCallbacks) * 10000) / 10000
+                : null,
+          }
+        : null,
       distinctStatesPerS: round((distinctStates * 1000) / elapsed),
       distinctStateBasis: lastMode === 'hd' ? 'drawn-logic-frame' : 'received-picture-version-not-proven-logic-state',
       pointerDrawMs: summary(pointerDraw),
@@ -153,6 +189,7 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
       windowChanges: changes.splice(0),
       unexplained: [
         'GPU/compositor scheduling not directly observed',
+        'focus and visibility do not prove the window is unobscured',
         'activity counters overlap stalls; they do not prove causality',
       ],
     };
@@ -160,6 +197,8 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
     if (records.length > 120) records.shift();
     intervals.length = pointerDraw.length = pointerPaintOpportunity.length = stalls.length = 0;
     distinctStates = omittedStalls = 0;
+    submittedFrames = 0;
+    displayStart = display;
     // Keep a task crossing the reporting boundary for the next draw's gap.
     while (tasks.length && tasks[0].start + tasks[0].duration < now - 1000) tasks.shift();
     start = now;
@@ -200,6 +239,7 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
       if (mode === 'original' && lastMode === mode && lastState === state) return;
       if (lastMode && lastMode !== mode) flush();
       const now = performance.now();
+      submittedFrames++;
       if (lastFrame && lastMode === mode) {
         const gap = now - lastFrame;
         intervals.push(gap);

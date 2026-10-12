@@ -78,7 +78,7 @@ export async function prepareWebPlayViewport(
     return null;
   return waitForStartViewport(canvas, signal, onStartWait, {
     beforeMeasure: () => {
-      // Internal menu resize reloads can continue automatically. A new launcher URL always supplies a fresh gate.
+      // Explicit menu restarts reuse this page without another gate. A new launcher URL supplies a fresh gate.
       const url = new URL(window.location.href);
       url.searchParams.delete('play-start');
       window.history.replaceState(window.history.state, '', url);

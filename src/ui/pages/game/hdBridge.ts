@@ -70,6 +70,8 @@ export interface HdBridgeHost {
   /** Read-only local input position; cursor shape always comes from the guest snapshot. */
   pointerPosition?(): Readonly<{ x: number; y: number }> | null;
   pageCursor?(): boolean | undefined;
+  /** Startup display cadence, independent of later drawing stalls. */
+  displayRefreshMs?(): number | null;
   /**
    * Show a short localized notice over the game picture, or clear it with null: why the running match shows the
    * original picture instead of the HD view (the map has no HD cache, or its view failed to load).
@@ -519,6 +521,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     paceMode.kind === 'off'
       ? null
       : new FramePacer({
+          displayRefreshMs: host.displayRefreshMs,
           rates: paceMode.kind === 'fixed' ? [paceMode.rate] : PACE_RATES,
           sharedDrawingScheduler: !native,
         });
@@ -743,6 +746,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   }
   let frame = 0;
   let lastLayout = '';
+  let appliedBuffer: HdShownLayout | null = null;
+  let pendingBuffer: { key: string; since: number } | null = null;
   const passthroughFlags = parsePassthroughFlags(params.get('hd-passthrough'));
   /** Only the terrain category fills the tactical view with the key colour; without it no pixel could be keyed. */
   const keyable = (passthroughFlags & RENDER_PASSTHROUGH.terrain) !== 0;
@@ -987,6 +992,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         pushed = null;
         upcomingKey = '';
         lastLayout = '';
+        appliedBuffer = null;
+        pendingBuffer = null;
         governor =
           params.get('hd-governor') === '0'
             ? null
@@ -1342,11 +1349,11 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   /**
    * The interval between two drawn frames as the frame-time safeguard should judge it. A view the pacer holds to
    * fewer frames than the safeguard's budget (30 a second while the game is behind, 55 on a 165 Hz display) is on
-   * time when it keeps that pace: its intervals are scaled to the budget. A view that draws every display frame, or
-   * is paced at the budget itself, is judged as it is.
+   * time when it keeps that pace: its intervals are scaled to the budget. The same applies to a display below
+   * 60 Hz even when every refresh is drawn; its startup cadence is not a rendering deficit.
    */
   const judgedInterval = (intervalMs: number) => {
-    const paced = pacer && pacer.stride > 1 ? pacer.pacedIntervalMs : null;
+    const paced = pacer && pacer.stride > 1 ? pacer.pacedIntervalMs : (host.displayRefreshMs?.() ?? null);
     return paced !== null && paced > FRAME_BUDGET_MS ? (intervalMs * FRAME_BUDGET_MS) / paced : intervalMs;
   };
 
@@ -1372,15 +1379,33 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     // the frame size changes (or the match runs), prepare for the layout of the last match instead.
     if (!shown && shownLayout && stateFrame < 1 && `${size.width}x${size.height}` === loadingFrame)
       buffer = shownLayout;
+    // Follow the window immediately through CSS, retaining the current picture throughout a resize drag.
+    Object.assign(canvas.style, box.style);
+    const key = buffer.join();
+    if (key === lastLayout) {
+      pendingBuffer = null;
+      // First reveal can reuse a size prepared out of sight; remember it even without a buffer allocation.
+      if (shown && !buffer.every((value, index) => value === shownLayout?.[index])) {
+        shownLayout = buffer;
+        writeShownLayout(storage, buffer);
+      }
+      return;
+    }
+    // Only a display-size change waits. A new scene or game video mode needs the matching camera immediately,
+    // and hidden preparation must compile at its target size before the picture is revealed.
+    if (shown && appliedBuffer && buffer[2] === appliedBuffer[2] && buffer[3] === appliedBuffer[3]) {
+      const now = performance.now();
+      if (pendingBuffer?.key !== key) pendingBuffer = { key, since: now };
+      if (now - pendingBuffer.since < 200) return;
+    }
+    pendingBuffer = null;
+    lastLayout = key;
+    appliedBuffer = buffer;
     // What the view is shown with is what the next loading screen prepares for.
     if (shown && !buffer.every((value, index) => value === shownLayout?.[index])) {
       shownLayout = buffer;
       writeShownLayout(storage, buffer);
     }
-    const key = [...buffer, ...Object.values(box.style)].join();
-    if (key === lastLayout) return;
-    lastLayout = key;
-    Object.assign(canvas.style, box.style);
     live.resizePixels(...buffer);
   };
 

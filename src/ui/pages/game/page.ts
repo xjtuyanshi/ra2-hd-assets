@@ -47,6 +47,7 @@ import { supportedGame } from '../../../games/catalog';
 import { progressiveFilesOf } from '../../../adapter/progressiveFiles';
 import { VmSessionController, guardVmCallbacks } from '../../../app/session/vmSessionController';
 import { startSessionRuntime } from '../../../app/session/startSessionRuntime';
+import { startDisplayRefresh } from '../../../graphics/displayRefresh';
 import { FramePresenter } from '../../../graphics/framePresenter';
 import { forgetGameDirectory } from '../../../platform/browser/files/directoryAccess';
 import { type GameSource } from '../../../games/source';
@@ -68,6 +69,7 @@ import { parseGameSpeed } from '../../../games/gameSpeed';
 import type { HdBridgeControl } from './hdBridge';
 
 let activeVm: VmShell | null = null;
+let refreshNoticeShown = false;
 const pageController = new VmSessionController();
 let activeKeyHandler: ((event: KeyboardEvent) => void) | null = null;
 let activeInputCleanup: (() => void) | null = null;
@@ -113,6 +115,8 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
   let nativeArea: { width: number; height: number; dpr: number } | null = null;
   let resizeTimer: number | undefined;
   let resizeBusy = false;
+  let refreshNoticeTimer: number | undefined;
+  let restartForViewport = async () => {};
   const readArea = () => {
     const area = canvas.closest('#stage')?.getBoundingClientRect();
     const fullscreen = document.fullscreenElement?.contains(canvas);
@@ -287,39 +291,50 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
   const scheduleRender = () => presenter.schedule();
   activeToolbarCleanup?.();
   const toolbar = installRuntimeToolbar(
-    createVmPageToolbarActions({
-      canvas,
-      debugAutoOpen,
-      presenter,
-      effects,
-      frameRenderer,
-      getToolbar: () => toolbar,
-      getVm: () => vm,
-      getStatus: () => status,
-      getExitHandled: () => exitHandled,
-      getSelectedGameId: () => selectedGameId,
-      getGameSource: () => gameSource,
-      setRequestedClockRate: (rate) => {
-        requestedClockRate = rate;
-      },
-      setRequestedResolution: (resolution) => {
-        requestedResolution = resolution;
-      },
-      setRequestedVolume: (linear) => {
-        requestedVolume = linear;
-      },
-      setPerformanceLine: (summary) => {
-        performanceLine = summary;
-      },
-      onRestartForResolution: () => restartForResolution(),
-      onToggleHdView: () => toggleHdView(),
-      onChangeGameSource: () => changeGameSource(),
-      onSchedulePerformanceRender: () => schedulePerformanceRender(),
-    }),
+    {
+      ...createVmPageToolbarActions({
+        canvas,
+        debugAutoOpen,
+        presenter,
+        effects,
+        frameRenderer,
+        getToolbar: () => toolbar,
+        getVm: () => vm,
+        getStatus: () => status,
+        getExitHandled: () => exitHandled,
+        getSelectedGameId: () => selectedGameId,
+        getGameSource: () => gameSource,
+        setRequestedClockRate: (rate) => {
+          requestedClockRate = rate;
+        },
+        setRequestedResolution: (resolution) => {
+          requestedResolution = resolution;
+        },
+        setRequestedVolume: (linear) => {
+          requestedVolume = linear;
+        },
+        setPerformanceLine: (summary) => {
+          performanceLine = summary;
+        },
+        onRestartForResolution: () => restartForResolution(),
+        onToggleHdView: () => toggleHdView(),
+        onChangeGameSource: () => changeGameSource(),
+        onSchedulePerformanceRender: () => schedulePerformanceRender(),
+      }),
+      onViewportRestart: () => restartForViewport(),
+    },
     canvas,
     frameRenderer.backend,
     frameRenderer.detail,
   );
+  const displayRefresh = startDisplayRefresh((sample) => {
+    if (refreshNoticeShown || sample.refreshHz === null || sample.refreshHz >= 55) return;
+    refreshNoticeShown = true;
+    toolbar.setRefreshNotice(
+      t('当前屏幕约 {0} Hz；可在 系统设置 → 显示器 → 刷新率 调整。', sample.refreshHz.toFixed(1)),
+    );
+    refreshNoticeTimer = window.setTimeout(() => toolbar.setRefreshNotice(''), 12000);
+  });
   upscaleStatus.set(frameRenderer.upscaleStatus);
   toolbar.setUpscaleMode(frameRenderer.upscaleMode);
   activeToolbarCleanup = () => {
@@ -452,6 +467,8 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
   });
   activeRendererCleanup = () => {
     window.clearInterval(resizeTimer);
+    window.clearTimeout(refreshNoticeTimer);
+    displayRefresh.dispose();
     speedCleanup?.();
     speedCleanup = null;
     feelTelemetry?.dispose();
@@ -588,6 +605,8 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
     runtimeReleased = true;
     menuAbort.abort();
     window.clearInterval(resizeTimer);
+    window.clearTimeout(refreshNoticeTimer);
+    displayRefresh.dispose();
     activeNativeViewportAbort?.abort();
     activeNativeViewportAbort = null;
     nativeCursorFrames.dispose();
@@ -779,7 +798,8 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
     if (activeNativeViewportAbort === viewportAbort) activeNativeViewportAbort = null;
   }
   if (generation !== pageGeneration || runtimeReleased) return;
-  if (nativeAutoStart(window.location.search) && !nativeArea) nativeArea = readArea();
+  if (!nativeArea && (nativeAutoStart(window.location.search) || resolutionViewScale(activeResolutionChoice) !== null))
+    nativeArea = readArea();
   if (nativeViewport) {
     requestedResolution = nativeViewport;
     activeDisplayScale = resolveResolutionViewScale(
@@ -891,46 +911,52 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
     if (!problemPanelShown) presenter.destroy();
     return;
   }
-  // Resize the picture immediately; change the game's video mode only after a
-  // out-of-match menu surface (or a complete known main menu). Never restart a running battle, including
-  // its pause/options dialogs. A native restart keeps the launcher and its server.
+  // Resizing only scales the picture. Re-negotiate the game's video mode on
+  // the player's explicit menu action; pause/options dialogs never allow it.
   if (resolutionViewScale(activeResolutionChoice) !== null) {
     const initialArea = nativeArea ?? readArea();
-    let lastArea = JSON.stringify(readArea());
-    let changedAt = performance.now();
-    resizeTimer = window.setInterval(() => {
-      if (runtimeReleased || resizeBusy || !vm) return;
-      const area = readArea();
-      const key = JSON.stringify(area);
-      if (key !== lastArea) {
-        lastArea = key;
-        changedAt = performance.now();
-      }
-      if (key === JSON.stringify(initialArea) || performance.now() - changedAt < 750) return;
-      resizeBusy = true;
-      void (async () => {
-        const menu = await vm!.getMenuSnapshot?.();
-        if (!menu) return;
-        const main = identifyYrHdMenu(menu) === 'main';
-        const native = vm!.runtimeInfo.backend === 'native';
-        const nativeMenuMode =
-          native &&
-          requestedResolution &&
+    let menuCheckPending = false;
+    const canRestartInMenu = async () => {
+      if (!vm || runtimeReleased || resizeBusy || generation !== pageGeneration) return false;
+      // Incomplete archive providers are cancelled on release; keep their current session until extraction finishes.
+      const resources = progressiveFilesOf(gameSource!.files);
+      if (resources && resources.status().phase !== 'complete') return false;
+      const currentVm = vm;
+      const menu = await currentVm.getMenuSnapshot?.();
+      if (!menu || vm !== currentVm || runtimeReleased || resizeBusy || generation !== pageGeneration) return false;
+      return (
+        identifyYrHdMenu(menu) === 'main' ||
+        (vm.runtimeInfo.backend === 'native' &&
+          requestedResolution !== null &&
           (requestedResolution.width > 800 || requestedResolution.height > 600) &&
           menu.width === 800 &&
           menu.height === 600 &&
           gameFrameWidth === 800 &&
-          gameFrameHeight === 600;
-        if (!main && !nativeMenuMode) return;
-        if (runtimeReleased || generation !== pageGeneration) return;
+          gameFrameHeight === 600)
+      );
+    };
+    restartForViewport = async () => {
+      if (JSON.stringify(initialArea) === JSON.stringify(readArea())) return;
+      const menuAvailable = await canRestartInMenu().catch((error) => {
+        console.warn('[viewport] Menu state unavailable:', error);
+        return false;
+      });
+      if (!menuAvailable) return;
+      if (resizeBusy || runtimeReleased || generation !== pageGeneration) return;
+      resizeBusy = true;
+      toolbar.setViewportRestart(false);
+      try {
+        const native = vm!.runtimeInfo.backend === 'native';
         const nextArea = readArea();
-        await releaseRuntime(native);
+        // Reuse the validated source and canvas context. Reloading loses unpersisted directory/HTTP selections.
+        await releaseRuntime(true);
+        if (generation !== pageGeneration) return;
         bootState.set({
           game: gameSource!.game,
-          status: { phase: 'loading', detail: '窗口大小已改变，正在调整画面并重新打开菜单…' },
+          status: { phase: 'loading', detail: '正在按现在的窗口大小重新启动游戏，约 20 秒…' },
           cancel: async () => {
             viewportAbort.abort();
-            bootState.set(null);
+            stopVmPage();
             mainPanel.set({ phase: 'exited', detail: '调整已停止。请重新打开本次启动器的页面。' });
           },
         });
@@ -948,21 +974,35 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
           });
           if (!response.ok) throw new Error('无法按新的窗口大小重开菜单。请重新启动启动器。');
         }
-        if (!viewportAbort.signal.aborted) {
-          if (native) await startVmPage(canvas, gameSource!);
-          else window.location.reload();
+        if (!viewportAbort.signal.aborted && generation === pageGeneration) {
+          await startVmPage(canvas, gameSource!);
         }
-      })()
-        .catch((error) => {
-          if (viewportAbort.signal.aborted) return;
-          if (!runtimeReleased) console.warn('[viewport] Menu resize postponed:', error);
-          else {
-            bootState.set(null);
-            mainPanel.set({ phase: 'error', detail: error instanceof Error ? error.message : String(error) });
+      } catch (error) {
+        if (!viewportAbort.signal.aborted && generation === pageGeneration) {
+          bootState.set(null);
+          mainPanel.set({ phase: 'error', detail: error instanceof Error ? error.message : String(error) });
+        }
+      } finally {
+        resizeBusy = false;
+      }
+    };
+    resizeTimer = window.setInterval(() => {
+      const changed = JSON.stringify(initialArea) !== JSON.stringify(readArea());
+      if (!changed || runtimeReleased || resizeBusy) {
+        toolbar.setViewportRestart(false);
+        return;
+      }
+      if (menuCheckPending) return;
+      menuCheckPending = true;
+      void canRestartInMenu()
+        .then((available) => {
+          if (!runtimeReleased && generation === pageGeneration) {
+            toolbar.setViewportRestart(available && JSON.stringify(initialArea) !== JSON.stringify(readArea()));
           }
         })
+        .catch((error) => console.warn('[viewport] Menu state unavailable:', error))
         .finally(() => {
-          resizeBusy = false;
+          menuCheckPending = false;
         });
     }, 500);
   }
@@ -1024,6 +1064,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
         if (generation !== pageGeneration || runtimeReleased) return;
         feelTelemetry = startSessionFeelTelemetry({
           screen: canvas,
+          display: () => displayRefresh.snapshot(),
           backend: telemetryVm.runtimeInfo?.backend === 'native' ? 'native' : 'v86',
           scene: () => hdCleanup?.scene() ?? null,
           activity: () => hdCleanup?.activity?.() ?? null,
@@ -1094,6 +1135,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
         hdCleanup = activeHdCleanup = startHdBridge({
           vm: bridgeVm,
           screen: canvas,
+          displayRefreshMs: () => displayRefresh.snapshot().refreshMs,
           frameRenderer,
           invalidate: () => presenter.invalidate(),
           frameSize: () => (presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null),

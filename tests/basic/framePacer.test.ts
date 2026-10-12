@@ -95,6 +95,36 @@ describe('which display frames a paced view draws', () => {
     expect(pacer.levels).toBe(1);
   });
 
+  it('draws every 47.95 Hz refresh on target and reports the display rate rather than a 60 Hz cap', () => {
+    const refresh = 1000 / 47.95;
+    const pacer = new FramePacer({ sharedDrawingScheduler: false, displayRefreshMs: () => refresh });
+    const steady = run(pacer, refresh, 5000);
+    expect(steady.drawn).toBe(steady.frames);
+    expect(pacer.rate).toBe(47.95);
+    expect(pacer.stride).toBe(1);
+    pacer.sample(game(40, null));
+    pacer.sample(game(40, null));
+    expect(pacer.stride).toBe(2);
+    expect(pacer.sample(game(62.5, null))).toBe(0);
+    const recovered = run(pacer, refresh, 5000, steady.end);
+    expect(recovered.drawn).toBe(recovered.frames);
+    expect(pacer.rate).toBe(47.95);
+  });
+
+  it('keeps the measured display reference when callbacks are missed, with shared-scheduler protection intact', () => {
+    const refresh = 1000 / 47.95;
+    const pacer = new FramePacer({ displayRefreshMs: () => refresh });
+    run(pacer, refresh * 2, 5000);
+    expect(pacer.refreshMs).toBe(refresh);
+    expect(pacer.rate).toBe(47.95);
+    pacer.sample(game(55));
+    pacer.sample(game(55));
+    expect(pacer.level).toBe(1);
+    expect(pacer.stride).toBe(2);
+    for (let i = 0; i < 20; i++) pacer.sample(game(62.5, 0.01));
+    expect(pacer.level).toBe(1);
+  });
+
   it('rejects rates that are not positive and descending', () => {
     expect(() => new FramePacer({ rates: [] })).toThrow(RangeError);
     expect(() => new FramePacer({ rates: [30, 60] })).toThrow(RangeError);

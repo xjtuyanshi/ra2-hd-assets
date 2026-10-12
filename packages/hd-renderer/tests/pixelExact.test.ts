@@ -76,7 +76,7 @@ describe('pixel-exact live view', () => {
 });
 
 describe('HdRenderer buffer scale', () => {
-  it('keys the clarity pass on drawing-buffer pixels per view pixel and rebuilds only when that changes', () => {
+  it('keeps clarity kernels and the post graph while changing sample spacing with the drawing-buffer scale', () => {
     vi.stubGlobal('window', { devicePixelRatio: 2 });
     const canvas = {
       width: 1,
@@ -91,24 +91,34 @@ describe('HdRenderer buffer scale', () => {
       settingsPipelineKey(): string;
       pipeline: { dispose(): void } | null;
       pipelineNodes: { dispose(): void }[];
+      claritySampleScale: { value: number };
     };
     try {
       applyLookPreset(hd.settings, 'cinematic');
       internal.buildPipeline();
       const build = vi.spyOn(internal, 'buildPipeline');
       const ratioKey = internal.settingsPipelineKey();
+      const pipeline = internal.pipeline;
+      const nodes = internal.pipelineNodes;
       // The renderer's own pixel ratio (2 here) is the default: the same scale given explicitly changes nothing.
       hd.setBufferScale(2);
+      expect(internal.claritySampleScale.value).toBe(1);
       expect(internal.settingsPipelineKey()).toBe(ratioKey);
       expect(build).not.toHaveBeenCalled();
       hd.setBufferScale(3);
-      expect(internal.settingsPipelineKey()).not.toBe(ratioKey);
-      expect(build).toHaveBeenCalledTimes(1);
+      expect(internal.settingsPipelineKey()).toBe(ratioKey);
+      expect(internal.claritySampleScale.value).toBe(1.5);
+      expect(build).not.toHaveBeenCalled();
       hd.setBufferScale(3);
-      expect(build).toHaveBeenCalledTimes(1);
+      expect(build).not.toHaveBeenCalled();
+      hd.setBufferScale(1.25);
+      expect(internal.claritySampleScale.value).toBe(0.625);
       hd.setBufferScale(null);
       expect(internal.settingsPipelineKey()).toBe(ratioKey);
-      expect(build).toHaveBeenCalledTimes(2);
+      expect(internal.claritySampleScale.value).toBe(1);
+      expect(build).not.toHaveBeenCalled();
+      expect(internal.pipeline).toBe(pipeline);
+      expect(internal.pipelineNodes).toBe(nodes);
       // Without the clarity pass nothing in the pipeline depends on the scale.
       hd.settings.clarity = 0;
       internal.buildPipeline();
