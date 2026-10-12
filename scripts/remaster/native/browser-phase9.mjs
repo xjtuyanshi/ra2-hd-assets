@@ -21,7 +21,7 @@ const tag = process.argv[2] || 'hidden';
 const webRoute = tag.startsWith('web');
 const fullWindow = tag.startsWith('full') || tag.startsWith('webfull');
 const gameSpeed = process.argv[5] ?? '3';
-const feelSettings = ['phase32', 'phase33'].includes(phase)
+const feelSettings = ['phase26', 'phase32', 'phase33'].includes(phase)
   ? await readFile(join(base, phase, `${tag}-settings.json`), 'utf8')
       .then(JSON.parse)
       .catch(() => ({}))
@@ -128,8 +128,21 @@ let humanPointer = { x: 0, y: 0 };
 let directMouseMove;
 // Session 26 observes ordinary pointer travel, including moves made by the
 // reused battle helpers. Other sessions retain their existing input protocol.
+async function timedHumanMove(x, y) {
+  const start = { ...humanPointer };
+  const duration = (Math.hypot(x - start.x, y - start.y) / 600) * 1000;
+  const steps = Math.max(1, Math.ceil(duration / 8));
+  const began = performance.now();
+  for (let index = 1; index <= steps; index++) {
+    const due = began + (duration * index) / steps;
+    if (due > performance.now()) await delay(due - performance.now());
+    const fraction = index / steps;
+    humanPointer = { x: start.x + (x - start.x) * fraction, y: start.y + (y - start.y) * fraction };
+    await directMouseMove(humanPointer.x, humanPointer.y);
+  }
+}
 async function humanMove(x, y, options) {
-  if (['phase32', 'phase33'].includes(phase)) {
+  if (['phase26', 'phase32', 'phase33'].includes(phase)) {
     const readPointer = () =>
       page.evaluate(() => {
         const canvas = document.querySelector('#screen');
@@ -144,6 +157,7 @@ async function humanMove(x, y, options) {
       });
     let actual = await readPointer();
     if (!actual.locked || !actual.point || !actual.width || !actual.height) {
+      if (phase === 'phase26') return timedHumanMove(x, y);
       humanPointer = { x, y };
       return directMouseMove(x, y, options);
     }
@@ -158,25 +172,18 @@ async function humanMove(x, y, options) {
       const dx = ((wanted.x - actual.point.x) * actual.box.width) / actual.width;
       const dy = ((wanted.y - actual.point.y) * actual.box.height) / actual.height;
       if (Math.abs(dx) < 0.8 && Math.abs(dy) < 0.8) return;
-      humanPointer = { x: humanPointer.x + dx, y: humanPointer.y + dy };
-      await directMouseMove(humanPointer.x, humanPointer.y, attempt ? undefined : options);
+      const target = { x: humanPointer.x + dx, y: humanPointer.y + dy };
+      if (phase === 'phase26') await timedHumanMove(target.x, target.y);
+      else {
+        humanPointer = target;
+        await directMouseMove(humanPointer.x, humanPointer.y, attempt ? undefined : options);
+      }
       actual = await readPointer();
       if (!actual.locked || !actual.point) return;
     }
     return;
   }
-  if (phase !== 'phase26') return directMouseMove(x, y, options);
-  const start = { ...humanPointer };
-  const duration = (Math.hypot(x - start.x, y - start.y) / 600) * 1000;
-  const steps = Math.max(1, Math.ceil(duration / 8));
-  const began = performance.now();
-  for (let index = 1; index <= steps; index++) {
-    const due = began + (duration * index) / steps;
-    if (due > performance.now()) await delay(due - performance.now());
-    const fraction = index / steps;
-    humanPointer = { x: start.x + (x - start.x) * fraction, y: start.y + (y - start.y) * fraction };
-    await directMouseMove(humanPointer.x, humanPointer.y);
-  }
+  return directMouseMove(x, y, options);
 }
 async function locatorClick(locator) {
   if (phase !== 'phase26') return locator.click();
@@ -497,7 +504,7 @@ const usable = (c) => c.visible && c.enabled && c.rect?.[2] > c.rect?.[0];
 async function execute(c) {
   if (c.action === 'close') return { closing: true };
   await ownerIdle();
-  if (phase === 'phase33') await page.bringToFront();
+  if (['phase26', 'phase33'].includes(phase)) await page.bringToFront();
   if (c.action === 'feel-start') {
     if (c.hdOnly)
       await wait('visible HD scene', () => page.evaluate(() => !!window.__hdBridge?.diagnostics?.shown), 60000);
@@ -623,7 +630,7 @@ async function execute(c) {
         const after = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
         const screenshot = await shot(`${c.label ?? 'drag'}-${edge}`);
         let originalScreenshot = null;
-        if (phase === 'phase33') {
+        if (['phase26', 'phase33'].includes(phase)) {
           await page.keyboard.press('\\');
           await delay(300);
           originalScreenshot = await shot(`${c.label ?? 'drag'}-${edge}-original`);
@@ -633,7 +640,7 @@ async function execute(c) {
       } finally {
         await page.mouse.up();
       }
-      if (phase === 'phase33') {
+      if (['phase26', 'phase33'].includes(phase)) {
         await delay(600);
         await shot(`${c.label ?? 'drag'}-${edge}-released`);
       }
@@ -2206,7 +2213,7 @@ try {
   if (webRoute) {
     const root = resolve(wt, '../..');
     process.env.RA2_DEV_HTTP = '1';
-    if (['phase32', 'phase33'].includes(phase)) process.env.RA2_PERF_LOG = join(out, 'session-feel.jsonl');
+    if (['phase26', 'phase32', 'phase33'].includes(phase)) process.env.RA2_PERF_LOG = join(out, 'session-feel.jsonl');
     process.env.RA2_GAME_ROOT ||= feelSettings.webGameRoot || join(base, phase, 'web-game');
     process.env.RA2_THIRD_PARTY_CACHE_DIR ||= join(root, '.tmp-third-party');
     if (stagedFarmRoot) process.env.RA2_HD_CACHE_DIR = stagedFarmRoot;
@@ -2378,7 +2385,7 @@ try {
       ),
     });
   });
-  if (['phase32', 'phase33'].includes(phase))
+  if (['phase26', 'phase32', 'phase33'].includes(phase))
     await context.route('**/src/ui/pages/game/hdBridge.ts*', async (route) => {
       const response = await route.fetch();
       const source = await response.text();
@@ -2536,7 +2543,7 @@ try {
     });
   }
   await delay(1000);
-  if (['phase32', 'phase33'].includes(phase)) {
+  if (['phase26', 'phase32', 'phase33'].includes(phase)) {
     const start = page.getByRole('button', { name: '开始', exact: true });
     if (!webRoute || feelSettings.playStart)
       await wait(
@@ -2560,7 +2567,7 @@ try {
         })),
         browserWindow: await cdp.send('Browser.getWindowForTarget'),
       });
-      if (phase === 'phase33') {
+      if (['phase26', 'phase33'].includes(phase)) {
         await page
           .locator('#display-refresh-notice')
           .waitFor({ state: 'visible', timeout: 8000 })
@@ -2681,7 +2688,7 @@ try {
           JSON.stringify({ ok: false, error: String(e.stack || e) }, null, 2),
         );
         await record('command-error', { file, error: String(e) });
-        if (['phase32', 'phase33'].includes(phase)) {
+        if (['phase26', 'phase32', 'phase33'].includes(phase)) {
           await writeFile(join(out, 'paused-command'), file + '\n');
           while (!(await exists(join(out, 'resume'))) && !(await exists(join(out, 'cancel')))) {
             await ownerIdle();
