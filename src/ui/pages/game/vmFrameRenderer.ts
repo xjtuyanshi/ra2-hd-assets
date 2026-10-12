@@ -75,6 +75,8 @@ const isFsrMode = (mode: UpscaleMode): FsrMode | null =>
   mode === 'fsr' || mode === 'fsr-rcas' || mode === 'fsr-rcas-soft' ? mode : null;
 
 export interface VmFrameRenderer extends FrameBackend {
+  /** Release owned GPU objects; a replacement session on the same canvas may retain its browser context. */
+  destroy(preserveContext?: boolean): void;
   readonly upscaleMode: UpscaleMode;
   setUpscaleMode(mode: UpscaleMode): void;
   /** The caller supplies the effect; the renderer owns its GPU resources. null disables and releases it. */
@@ -232,7 +234,7 @@ export function createVmFrameRenderer(
     draw(...args) {
       if (!destroyed) backend.draw(...args);
     },
-    destroy() {
+    destroy(preserveContext = false) {
       if (destroyed) return;
       destroyed = true;
       postProcess?.destroy();
@@ -240,7 +242,7 @@ export function createVmFrameRenderer(
       backend.destroy();
       // This closure owns the context shared across backends; changing modes replaces only the pipeline, so release the context only here.
       // Backend destroy() must not call loseContext, or the next backend would receive an already lost context.
-      gl?.getExtension('WEBGL_lose_context')?.loseContext();
+      if (!preserveContext) gl?.getExtension('WEBGL_lose_context')?.loseContext();
     },
   };
 }

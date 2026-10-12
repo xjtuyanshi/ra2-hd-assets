@@ -12,6 +12,8 @@ export interface CanvasFitInput {
    * size would be a worse picture than a resampled one.
    */
   integerScale?: boolean;
+  /** Fill the available area even when a negotiated art scale would leave margins. */
+  fillStage?: boolean;
   /** Requested device scale for a negotiated frame, including fractional HD view choices. */
   preferredScale?: number;
 }
@@ -65,8 +67,9 @@ export function calculateCanvasFit(input: CanvasFitInput): CanvasFitResult | nul
   // minimum render scale, but flooring the CSS scale would crop tiny stages.
   const whole = Math.floor(exactScale + 1e-9);
   const preferredScale = isPositiveFinite(input.preferredScale ?? Number.NaN) ? input.preferredScale : undefined;
-  const cssScale =
-    preferredScale !== undefined
+  const cssScale = input.fillStage
+    ? exactScale
+    : preferredScale !== undefined
       ? Math.min(preferredScale, exactScale)
       : (input.integerScale && whole >= 2) || (whole >= 1 && exactScale - whole <= whole * INTEGER_SNAP)
         ? whole

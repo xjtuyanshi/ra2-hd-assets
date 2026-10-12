@@ -25,6 +25,7 @@ describe.skipIf(process.platform === 'win32')('scripts/remaster/play.sh', () => 
       'hd-vlook': 'remaster',
       'hd-vproj': 'vehicles-hd',
       'hd-ui': '1',
+      'play-start': '1',
       sr: '1',
       'game-speed': '3',
       'start-page': 'skirmish',

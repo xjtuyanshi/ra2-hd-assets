@@ -9,8 +9,8 @@
 #   scripts/remaster/play.sh --print      only print the address (nothing is started)
 #
 # --view classic|moderate|wide selects 3|2.5|2 device pixels per game pixel (first-run default classic).
-# The remembered view is matched to the browser window when the game starts: maximise the window or make it fullscreen BEFORE choosing the game, and reload the
-# page after changing the window. Close the terminal window (or press Ctrl+C) to stop the server.
+# HD play asks the player to size the window before Start, then measures that click. Later window changes fill the
+# picture immediately and restart at the next main menu. Close the terminal window (or press Ctrl+C) to stop the server.
 #
 # Environment (all optional):
 #   RA2_GAME_ROOT      folder that holds the player's own game in ra2/   (default: <main checkout>/game)
@@ -71,6 +71,7 @@ esac
 if [ "$mode" = hd ]; then
   hd_query="$(node "$here/scripts/remaster/play-options.mjs")" || exit 1
   query="$hd_query&$query"
+  [ "$page" != train ] && query="$query&play-start=1"
 else
   query="$query&sr=1"
 fi

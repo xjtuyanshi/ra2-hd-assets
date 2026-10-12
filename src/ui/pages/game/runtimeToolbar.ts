@@ -276,17 +276,8 @@ export function installRuntimeToolbar(
           frameWidth,
           frameHeight,
           whole ? String(Math.round(scale)) : scale.toFixed(2),
-        ) +
-        (stale
-          ? t(
-              new URLSearchParams(window.location.search).get('backend') === 'native'
-                ? ' · 窗口已变，请重新运行启动器匹配'
-                : ' · 窗口已变，刷新页面重新匹配',
-            )
-          : '');
-      const viewportNotice = nativeAreaChanged
-        ? t('页面大小已改变。请恢复启动时的窗口大小，或结束对局后关闭启动器，再按当前窗口大小重新启动。')
-        : '';
+        ) + (stale ? t(' · 已铺满窗口，返回菜单后自动调整') : '');
+      const viewportNotice = nativeAreaChanged ? t('画面已随窗口调整；返回菜单后会自动匹配新的游戏尺寸。') : '';
       if (status === model.resolutionStatus && viewportNotice === model.viewportNotice) return;
       model.resolutionStatus = status;
       model.viewportNotice = viewportNotice;

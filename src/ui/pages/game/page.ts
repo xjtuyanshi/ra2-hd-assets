@@ -40,6 +40,8 @@ import {
 import { installRuntimeToolbar } from './runtimeToolbar';
 import { restoreCachedGameSource } from './gameSourcePicker';
 import { desktopPointerLock, nativeAutoStart, prepareNativeViewport } from './nativeStartup';
+import { prepareWebPlayViewport } from './playStartup';
+import { identifyYrHdMenu } from '../../../games/yr/hdMenus';
 import { parseTrainingQuery, trainingHref } from './training/trainingQuery';
 import { supportedGame } from '../../../games/catalog';
 import { progressiveFilesOf } from '../../../adapter/progressiveFiles';
@@ -105,10 +107,12 @@ let activeNativeViewportAbort: AbortController | null = null;
 let activeResolutionChoice: ResolutionChoice = null;
 let activeDisplayScale: number | undefined;
 
-export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
+export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: GameSource): Promise<void> {
   const generation = ++pageGeneration;
   let requestedResolution: GameResolution | null = null;
   let nativeArea: { width: number; height: number; dpr: number } | null = null;
+  let resizeTimer: number | undefined;
+  let resizeBusy = false;
   const readArea = () => {
     const area = canvas.closest('#stage')?.getBoundingClientRect();
     const fullscreen = document.fullscreenElement?.contains(canvas);
@@ -147,11 +151,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
         presenter.invalidate();
       },
       {
-        integerScale: () => resolutionViewScale(activeResolutionChoice) !== null,
-        preferredScale: () =>
-          requestedResolution?.width === gameFrameWidth && requestedResolution?.height === gameFrameHeight
-            ? activeDisplayScale
-            : undefined,
+        fillStage: () => true,
+        devicePixelBacking: () => hdBridgeRequested,
         onFit: (width, height, scale, fillScale) =>
           toolbar.setDisplayScale(
             width,
@@ -188,6 +189,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   let hdCleanup: HdBridgeControl | null = null;
   /** Game-speed telemetry of this session (development only, see speedTelemetry.ts); stopped with the runtime. */
   let speedCleanup: (() => void) | null = null;
+  let feelTelemetry: ReturnType<(typeof import('./sessionFeelTelemetry'))['startSessionFeelTelemetry']> | null = null;
   let nativeCursor: Awaited<ReturnType<(typeof import('./nativeCursor'))['createNativeCursor']>> = null;
   let hdMenus: import('./hdMenus').HdMenus | null = null;
   const menuAbort = new AbortController();
@@ -236,6 +238,12 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   let vm: VmShell | null = null;
   let adaptInputResolution: ((width: number, height: number) => void) | null = null;
   let inputPointerPosition: (() => Readonly<{ x: number; y: number }> | null) | null = null;
+  let releaseInputPointerLock: (() => void) | null = null;
+  let softwarePointerActive = false;
+  let pointerMenuPending = false;
+  let pointerMenuActive = false;
+  let pointerMenuCheck: Promise<void> | null = null;
+  let pointerMenuCheckedAt = 0;
   let gameSource: GameSource | null = null;
   let selectedGameId: SupportedGameId | null = null;
   let changeGameSource = async () => {
@@ -252,6 +260,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
       effects.publishStatus(frameRenderer.upscaleStatus);
       presentedFrames++;
       toolbar.recordPresentedFrame();
+      feelTelemetry?.frame('original', presenter.frameVersion);
+      if (!nativeCursor) feelTelemetry?.pointerDrawn();
     },
     tick: () => renderDebug(),
   });
@@ -441,6 +451,11 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     isReleased: () => runtimeReleased,
   });
   activeRendererCleanup = () => {
+    window.clearInterval(resizeTimer);
+    speedCleanup?.();
+    speedCleanup = null;
+    feelTelemetry?.dispose();
+    feelTelemetry = null;
     menuAbort.abort();
     hdMenus?.dispose();
     hdMenus = null;
@@ -472,7 +487,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const cachedSource =
     trainingQuery || nativeAutoStart(window.location.search) ? null : await restoreCachedGameSource().catch(() => null);
   if (generation !== pageGeneration) return;
-  gameSource = cachedSource ?? (await selectGameFiles());
+  gameSource = resumedSource ?? cachedSource ?? (await selectGameFiles());
   if (generation !== pageGeneration) {
     progressiveFilesOf(gameSource.files)?.cancel();
     return;
@@ -569,9 +584,10 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     }
   };
 
-  const releaseRuntime = async () => {
+  const releaseRuntime = async (preserveFullscreen = false) => {
     runtimeReleased = true;
     menuAbort.abort();
+    window.clearInterval(resizeTimer);
     activeNativeViewportAbort?.abort();
     activeNativeViewportAbort = null;
     nativeCursorFrames.dispose();
@@ -590,6 +606,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     toolbar.setStalls(0, 0);
     speedCleanup?.();
     speedCleanup = null;
+    feelTelemetry?.dispose();
+    feelTelemetry = null;
     toolbar.setGameSpeed(null);
     setSessionShortcutKey(HD_VIEW_KEY, false);
     effects.stop();
@@ -598,7 +616,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     activeResourceCleanup?.();
     activeResourceCleanup = null;
     if (document.pointerLockElement === canvas) await document.exitPointerLock();
-    await leaveGameFullscreen();
+    if (!preserveFullscreen) await leaveGameFullscreen();
     bootState.set(null);
     helpVisible.set(false);
     hotkeySheetVisible.set(false);
@@ -612,6 +630,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     if (activeVm === vm) activeVm = null;
     debugState.set(null);
     await pageController.destroy();
+    if (preserveFullscreen) frameRenderer.destroy(true);
     presenter.destroy();
     activeToolbarCleanup?.();
     activeToolbarCleanup = null;
@@ -646,10 +665,8 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     // Overlay RA2's Win32 hardware cursor as a small independent framebuffer texture; it remains visible after Pointer Lock
     // hides the system cursor and moves without retransmitting the whole frame. At screen edges, clamp the logical
     // cursor to current guest-frame bounds for sustained edge scrolling; ?mouse-lock=0 restores absolute coordinates.
-    // Native menus consume absolute browser positions, including a press with
-    // no preceding move. Pointer Lock discards those positions and interprets
-    // automation/browser-pane movement as deltas from the previous press.
-    // Keep the emulator's established default and allow explicit relative input.
+    // Both backends receive the same confined logical coordinates. Absolute
+    // input is an explicit accessibility/development choice, never a native default.
     const lockDesktopMouse = desktopPointerLock(window.location.search, startedVm.runtimeInfo.backend);
     const buildStrip = gameSource.game.buildStripWidth;
     const installedInput = installGameInput(
@@ -661,6 +678,11 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
       {
         metaAsControl,
         pageOwnsCursor: nativeCursor !== null,
+        lockPointerOnDown: () =>
+          startedVm.runtimeInfo.backend === 'native' || (!pointerMenuActive && (hdCleanup?.battleActive?.() ?? false)),
+        canLockPointer: () =>
+          startedVm.runtimeInfo.backend !== 'native' ||
+          (!pointerMenuActive && ((hdCleanup?.battleActive?.() ?? false) || softwarePointerActive)),
         ...(buildStrip === undefined ? {} : { shiftClickRepeat: (x, _y, frame) => x >= frame.width - buildStrip }),
         observe: (observation) => inputObserver?.(observation),
       },
@@ -668,11 +690,13 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
     const pointerProbeTimer = debugAutoOpen ? window.setInterval(refreshPointerProbe, 250) : null;
     adaptInputResolution = installedInput.adaptResolution;
     inputPointerPosition = installedInput.pointerPosition;
+    releaseInputPointerLock = installedInput.releasePointerLock;
     const cleanupTouch = installAdaptiveTouchControls(canvas, startedVm);
     const cleanupWake = installWakeLock();
     activeInputCleanup = () => {
       adaptInputResolution = null;
       inputPointerPosition = null;
+      releaseInputPointerLock = null;
       installedInput.cleanup();
       if (pointerProbeTimer !== null) window.clearInterval(pointerProbeTimer);
       cleanupTouch();
@@ -688,7 +712,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   ) {
     try {
       const { createNativeCursor } = await import('./nativeCursor');
-      nativeCursor = await createNativeCursor(canvas);
+      nativeCursor = await createNativeCursor(canvas, undefined, () => feelTelemetry?.pointerDrawn());
     } catch (error) {
       console.warn('[native] Cursor art unavailable; retaining game cursor', error);
     }
@@ -700,7 +724,38 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   const viewportAbort = new AbortController();
   activeNativeViewportAbort = viewportAbort;
   let nativeViewport: GameResolution | null;
+  const showStart = (start: (() => void) | null) => {
+    const boot = bootState.getSnapshot();
+    if (boot)
+      bootState.set({
+        ...boot,
+        start: start ?? undefined,
+        status: {
+          phase: 'loading',
+          detail: start ? '把窗口调到你想要的大小——建议最大化——然后点「开始」' : '正在启动游戏…',
+        },
+      });
+  };
   try {
+    const webViewport = await prepareWebPlayViewport(canvas, viewportAbort.signal, showStart);
+    if (webViewport) {
+      nativeArea = webViewport;
+      requestedResolution = resolveResolutionChoice(
+        activeResolutionChoice,
+        canvas.closest('#stage'),
+        webViewport.dpr,
+        webViewport,
+      );
+      activeDisplayScale = resolveResolutionViewScale(
+        activeResolutionChoice,
+        canvas.closest('#stage'),
+        webViewport.dpr,
+        requestedResolution,
+        webViewport,
+      );
+      toolbar.setResolution(activeResolutionChoice);
+      refitActiveCanvas();
+    }
     nativeViewport = await prepareNativeViewport(
       canvas,
       viewportAbort.signal,
@@ -713,6 +768,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
       (area) => {
         nativeArea = area;
       },
+      showStart,
     );
   } catch (error) {
     if (viewportAbort.signal.aborted || generation !== pageGeneration) return;
@@ -773,6 +829,38 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
               onExposeRuntimeCallProbe: exposeRuntimeCallProbe,
               onAppendCall: appendCall,
               onCursorFrame: (frame) => {
+                if ('pointer' in frame && frame.pointer !== undefined) {
+                  // Hidden software art is not proof of a menu. Confirm modal
+                  // ownership before releasing confinement, including in-game
+                  // options; transient hide/read misses keep a combat drag held.
+                  if (softwarePointerActive && frame.pointer === null) pointerMenuPending = true;
+                  if (frame.pointer !== null) {
+                    pointerMenuPending = false;
+                    pointerMenuActive = false;
+                  }
+                  softwarePointerActive = frame.pointer !== null;
+                  if (
+                    pointerMenuPending &&
+                    !pointerMenuCheck &&
+                    performance.now() - pointerMenuCheckedAt >= 100 &&
+                    vm?.getMenuSnapshot
+                  ) {
+                    pointerMenuCheckedAt = performance.now();
+                    pointerMenuCheck = vm
+                      .getMenuSnapshot()
+                      .then((menu) => {
+                        if (!runtimeReleased && pointerMenuPending && menu?.complete && menu.dialogHwnd) {
+                          pointerMenuPending = false;
+                          pointerMenuActive = true;
+                          releaseInputPointerLock?.();
+                        }
+                      })
+                      .catch(() => undefined)
+                      .finally(() => {
+                        pointerMenuCheck = null;
+                      });
+                  }
+                }
                 hdCleanup?.frame(frame);
                 nativeCursorFrames.onFrame(frame);
               },
@@ -802,6 +890,81 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   if (!vm) {
     if (!problemPanelShown) presenter.destroy();
     return;
+  }
+  // Resize the picture immediately; change the game's video mode only after a
+  // out-of-match menu surface (or a complete known main menu). Never restart a running battle, including
+  // its pause/options dialogs. A native restart keeps the launcher and its server.
+  if (resolutionViewScale(activeResolutionChoice) !== null) {
+    const initialArea = nativeArea ?? readArea();
+    let lastArea = JSON.stringify(readArea());
+    let changedAt = performance.now();
+    resizeTimer = window.setInterval(() => {
+      if (runtimeReleased || resizeBusy || !vm) return;
+      const area = readArea();
+      const key = JSON.stringify(area);
+      if (key !== lastArea) {
+        lastArea = key;
+        changedAt = performance.now();
+      }
+      if (key === JSON.stringify(initialArea) || performance.now() - changedAt < 750) return;
+      resizeBusy = true;
+      void (async () => {
+        const menu = await vm!.getMenuSnapshot?.();
+        if (!menu) return;
+        const main = identifyYrHdMenu(menu) === 'main';
+        const native = vm!.runtimeInfo.backend === 'native';
+        const nativeMenuMode =
+          native &&
+          requestedResolution &&
+          (requestedResolution.width > 800 || requestedResolution.height > 600) &&
+          menu.width === 800 &&
+          menu.height === 600 &&
+          gameFrameWidth === 800 &&
+          gameFrameHeight === 600;
+        if (!main && !nativeMenuMode) return;
+        if (runtimeReleased || generation !== pageGeneration) return;
+        const nextArea = readArea();
+        await releaseRuntime(native);
+        bootState.set({
+          game: gameSource!.game,
+          status: { phase: 'loading', detail: '窗口大小已改变，正在调整画面并重新打开菜单…' },
+          cancel: async () => {
+            viewportAbort.abort();
+            bootState.set(null);
+            mainPanel.set({ phase: 'exited', detail: '调整已停止。请重新打开本次启动器的页面。' });
+          },
+        });
+        if (native) {
+          const query = new URLSearchParams(window.location.search);
+          const response = await fetch(new URL('/__native/viewport', window.location.href), {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${query.get('agent-token')}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ...nextArea,
+              devicePixelsPerGamePixel: resolutionViewScale(activeResolutionChoice),
+              restart: true,
+            }),
+            signal: AbortSignal.any([viewportAbort.signal, AbortSignal.timeout(5000)]),
+          });
+          if (!response.ok) throw new Error('无法按新的窗口大小重开菜单。请重新启动启动器。');
+        }
+        if (!viewportAbort.signal.aborted) {
+          if (native) await startVmPage(canvas, gameSource!);
+          else window.location.reload();
+        }
+      })()
+        .catch((error) => {
+          if (viewportAbort.signal.aborted) return;
+          if (!runtimeReleased) console.warn('[viewport] Menu resize postponed:', error);
+          else {
+            bootState.set(null);
+            mainPanel.set({ phase: 'error', detail: error instanceof Error ? error.message : String(error) });
+          }
+        })
+        .finally(() => {
+          resizeBusy = false;
+        });
+    }, 500);
   }
   if (panelCreated) vm.setCallTracing(true);
   vm.setGameClockRate(requestedClockRate);
@@ -856,18 +1019,34 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
   // route exists in a production build. It runs with or without the HD bridge.
   if (import.meta.env.DEV) {
     const telemetryVm = vm;
-    void import('./speedTelemetry')
-      .then(({ startSpeedTelemetry }) => {
+    void Promise.all([import('./speedTelemetry'), import('./sessionFeelTelemetry')])
+      .then(([{ startSpeedTelemetry }, { startSessionFeelTelemetry }]) => {
         if (generation !== pageGeneration || runtimeReleased) return;
+        feelTelemetry = startSessionFeelTelemetry({
+          screen: canvas,
+          backend: telemetryVm.runtimeInfo?.backend === 'native' ? 'native' : 'v86',
+          scene: () => hdCleanup?.scene() ?? null,
+          activity: () => hdCleanup?.activity?.() ?? null,
+        });
         const telemetry = startSpeedTelemetry({
           diagnostics: () => telemetryVm.getDiagnostics('usage'),
           presentedFrames: () => presentedFrames,
           frameSize: () => (presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null),
           scene: () => hdCleanup?.scene() ?? null,
           publish: (actual, target) => toolbar.setGameSpeed(actual, target),
-          endpoint: telemetryVm.runtimeInfo?.backend === 'native' ? null : undefined,
+          observe: (record, diagnostics) => feelTelemetry?.speed(record, diagnostics.native),
         });
-        const globals = window as unknown as { __speedTelemetry?: { readonly records: unknown[] } };
+        const globals = window as unknown as {
+          __speedTelemetry?: { readonly records: unknown[] };
+          __feelTelemetry?: { readonly records: unknown[]; flush(): void };
+        };
+        const feelHandle = {
+          get records() {
+            return feelTelemetry?.records() ?? [];
+          },
+          flush: () => feelTelemetry?.flush(),
+        };
+        globals.__feelTelemetry = feelHandle;
         const handle = {
           get records() {
             return telemetry.records();
@@ -877,6 +1056,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
         speedCleanup = () => {
           telemetry.dispose();
           if (globals.__speedTelemetry === handle) delete globals.__speedTelemetry;
+          if (globals.__feelTelemetry === feelHandle) delete globals.__feelTelemetry;
         };
       })
       .catch((error) => console.warn('[speed] telemetry unavailable', error));
@@ -922,6 +1102,7 @@ export async function startVmPage(canvas: HTMLCanvasElement): Promise<void> {
           publishStatus: (text) => hdStatus.set(text),
           publishQuality: (tier, tiers) => toolbar.setHdQuality(tier, tiers),
           publishStalls: (count, longestMs) => toolbar.setStalls(count, longestMs),
+          presented: (frame) => feelTelemetry?.frame('hd', frame),
         });
         // Only a running bridge has a view to switch: the button appears and the key stops reaching the game.
         toolbar.setHdView(true);

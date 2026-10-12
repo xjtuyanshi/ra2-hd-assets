@@ -77,6 +77,29 @@ export class NativeConnection {
   private errors = new Set<(error: Error) => void>();
   private pictureDecoder = new NativePictureDecoder();
   private readonly timeoutMs: number;
+  private decodeCounters = { pictureMs: 0, pictures: 0, pictureMaxMs: 0, mirrorMs: 0, mirrors: 0, mirrorMaxMs: 0 };
+  private slowDecodes: { kind: string; startEpochMs: number; durationMs: number }[] = [];
+
+  decodeDiagnostics() {
+    return { ...this.decodeCounters, recent: this.slowDecodes.slice() };
+  }
+
+  private timeDecode(kind: 'picture' | 'mirror', started: number): void {
+    const duration = performance.now() - started;
+    if (kind === 'picture') {
+      this.decodeCounters.pictureMs += duration;
+      this.decodeCounters.pictures++;
+      this.decodeCounters.pictureMaxMs = Math.max(this.decodeCounters.pictureMaxMs, duration);
+    } else {
+      this.decodeCounters.mirrorMs += duration;
+      this.decodeCounters.mirrors++;
+      this.decodeCounters.mirrorMaxMs = Math.max(this.decodeCounters.mirrorMaxMs, duration);
+    }
+    if (duration >= 5) {
+      this.slowDecodes.push({ kind, startEpochMs: performance.timeOrigin + started, durationMs: duration });
+      if (this.slowDecodes.length > 32) this.slowDecodes.shift();
+    }
+  }
 
   constructor(private readonly options: NativeConnectionOptions) {
     this.timeoutMs = options.timeoutMs ?? 5000;
@@ -183,10 +206,14 @@ export class NativeConnection {
       return;
     }
     if (packet.type === NativeMessageType.Mirror) {
+      const started = performance.now();
       const update = decodeMirror(packet.payload);
+      this.timeDecode('mirror', started);
       for (const handler of this.mirrors) handler(update);
     } else if (packet.type === NativeMessageType.Picture) {
+      const started = performance.now();
       const picture = this.pictureDecoder.apply(packet.payload);
+      this.timeDecode('picture', started);
       for (const handler of this.pictures) handler(picture);
     } else if (packet.type === NativeMessageType.Error) {
       const error = new Error(new TextDecoder().decode(packet.payload));

@@ -102,6 +102,21 @@ function setup(scale = 1) {
 }
 
 describe('native page cursor presentation ownership', () => {
+  it('retains a startup lock position through the first frame and a resized page without another move', async () => {
+    const f = setup();
+    f.doc.pointerLockElement = f.screen;
+    const cursor = (await createNativeCursor(f.screen as unknown as HTMLCanvasElement))!;
+    active.push(cursor);
+    cursor.position(400, 300, true);
+    cursor.update(f.frame);
+    expect(f.overlay.style.display).toBe('block');
+    expect(f.overlay.style.transform).toBe('translate(756px, 438.5px)');
+    f.resize({ left: 0, top: 0, width: 2000, height: 1500 });
+    expect(f.overlay.style.transform).toBe('translate(932.5px, 697.5px)');
+    f.pointer('pointerleave');
+    expect(f.overlay.style.display).toBe('block');
+  });
+
   it.each([1, 2])(
     'places a %sx atlas at its unchanged hotspot and logical size, including the clipped edge',
     async (scale) => {
@@ -175,6 +190,8 @@ describe('native page cursor presentation ownership', () => {
     expect(f.overlay.style.transform).toBe('translate(156px, 288.5px)');
     f.pointer('pointermove', 900, 800);
     expect(f.overlay.style.transform).toBe('translate(156px, 288.5px)');
+    f.pointer('pointercancel');
+    expect(f.overlay.style.display).toBe('block');
     f.doc.pointerLockElement = null;
     f.doc.dispatchEvent(new Event('pointerlockchange'));
     expect(f.overlay.style.display).toBe('none');

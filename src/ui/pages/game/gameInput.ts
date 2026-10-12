@@ -93,6 +93,10 @@ export interface CanvasFitOptions {
   /** Whole device pixels per frame pixel whenever the stage has room (see CanvasFitInput.integerScale). */
   integerScale?(): boolean;
   preferredScale?(): number | undefined;
+  /** Fill the available stage rather than retaining the launch-time pixel scale. */
+  fillStage?(): boolean;
+  /** Render at the fitted device-pixel size while CSS independently fills a resized play area. */
+  devicePixelBacking?(): boolean;
   /**
    * The fitted frame size, its device pixels per frame pixel and the scale that would fill the stage, whenever a fit
    * ran.
@@ -141,12 +145,18 @@ export function installCanvasFit(
       devicePixelRatio: window.devicePixelRatio || 1,
       integerScale: options.integerScale?.() ?? false,
       preferredScale: options.preferredScale?.(),
+      fillStage: options.fillStage?.(),
     });
     if (!fit) return;
     // Like onResized, not during the install-time fit: the page's callbacks may not exist yet.
     if (ready) options.onFit?.(activeFrameWidth, activeFrameHeight, fit.scale, fit.fillScale);
-    const width = fit.backingWidth;
-    const height = fit.backingHeight;
+    const devicePixelBacking = options.devicePixelBacking?.() ?? false;
+    const width = devicePixelBacking
+      ? Math.max(1, Math.round(fit.cssWidth * (window.devicePixelRatio || 1)))
+      : fit.backingWidth;
+    const height = devicePixelBacking
+      ? Math.max(1, Math.round(fit.cssHeight * (window.devicePixelRatio || 1)))
+      : fit.backingHeight;
     const cssWidth = `${fit.cssWidth}px`;
     const cssHeight = `${fit.cssHeight}px`;
     const aspectRatio = `${activeFrameWidth} / ${activeFrameHeight}`;
@@ -183,25 +193,36 @@ export function installCanvasFit(
   if (canvasDprQuery && canvasDprFitListener) {
     canvasDprQuery.removeEventListener('change', canvasDprFitListener);
   }
-  canvasDprQuery = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
-  canvasDprQuery.addEventListener('change', fitEnvironmentChange);
-  canvasDprFitListener = fitEnvironmentChange;
+  let dprQuery: MediaQueryList;
+  const observeDpr = () => {
+    dprQuery?.removeEventListener('change', dprChanged);
+    dprQuery = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    dprQuery.addEventListener('change', dprChanged);
+    canvasDprQuery = dprQuery;
+  };
+  const dprChanged = () => {
+    // A query for the old DPR stays false after the first change. Re-arm it so
+    // later zoom/display changes also refit even when the CSS area is unchanged.
+    observeDpr();
+    fit();
+  };
+  observeDpr();
+  canvasDprFitListener = dprChanged;
   // Refit on immersive fullscreen transitions because fullscreen-box dimensions are independent of normal layout.
   if (canvasFullscreenFitListener) document.removeEventListener('fullscreenchange', canvasFullscreenFitListener);
   document.addEventListener('fullscreenchange', fitEnvironmentChange);
   canvasFullscreenFitListener = fitEnvironmentChange;
   fit();
   ready = true;
-  const observer = canvasFitObserver,
-    query = canvasDprQuery;
+  const observer = canvasFitObserver;
   return Object.assign(fit, {
     destroy() {
       ready = false;
       observer.disconnect();
-      query.removeEventListener('change', fitEnvironmentChange);
+      dprQuery.removeEventListener('change', dprChanged);
       document.removeEventListener('fullscreenchange', fitEnvironmentChange);
       if (canvasFitObserver === observer) canvasFitObserver = null;
-      if (canvasDprQuery === query) {
+      if (canvasDprQuery === dprQuery) {
         canvasDprQuery = null;
         canvasDprFitListener = null;
       }
@@ -226,6 +247,10 @@ export interface GameInputObservation {
 export interface GameInputOptions {
   /** An independent page presenter already owns cursor visibility, even before input installation. */
   pageOwnsCursor?: boolean;
+  /** A runtime may keep modal menus absolute and confine only an active battlefield. */
+  canLockPointer?: () => boolean;
+  /** Confine a first held battle drag immediately; modal-menu clicks retain after-up locking. */
+  lockPointerOnDown?: () => boolean;
   /**
    * Where Shift + left button is replaced by ten plain clicks (the page's build-queue convenience). Without it the
    * repeat applies everywhere, which also swallows the game's own Shift + click (add to the selection); a game passes
@@ -247,6 +272,8 @@ export interface InstalledGameInput {
   adaptResolution(width: number, height: number): void;
   /** Latest locally tracked guest coordinates, copied for presentation without dispatching input. */
   pointerPosition(): Readonly<{ x: number; y: number }> | null;
+  /** Release confinement when the presentation owner confirms entry into a menu. */
+  releasePointerLock(): void;
   cleanup(): void;
 }
 
@@ -288,12 +315,15 @@ export function installGameInput(
   let logicalFrameWidth = initialFrame.width;
   let logicalFrameHeight = initialFrame.height;
   let pointerLockPending = false;
+  let pointerLockRevision = 0;
+  let inputDisposed = false;
   let desktopMoveFrame: number | null = null;
   let pendingDesktopMove: { x: number; y: number; lParam: number; wParam: number } | null = null;
   // Deliver the first desktop click's complete DOWN/UP pair in the same absolute-coordinate mode.
   // Locking immediately in pointerdown makes some Chromium/Windows combinations switch to relative coordinates
   // between the events or cancel pointerup, breaking menus that rely on WM_LBUTTONUP.
   let lockAfterPointerUp = false;
+  let lockOnDownGesture = false;
   let lastCtrlPrimaryDispatch: { at: number; lParam: number } | null = null;
   let compatibilityCtrlPrimaryActive = false;
   const hostPlatform = `${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`;
@@ -832,6 +862,7 @@ export function installGameInput(
 
   const releaseInput = () => {
     lockAfterPointerUp = false;
+    lockOnDownGesture = false;
     compatibilityCtrlPrimaryActive = false;
     cancelDesktopMove();
     cancelTouchGesture();
@@ -842,8 +873,9 @@ export function installGameInput(
   };
 
   const requestMouseLock = async () => {
-    if (pointerLockPending || document.pointerLockElement === canvas) return;
+    if (inputDisposed || pointerLockPending || document.pointerLockElement === canvas) return;
     pointerLockPending = true;
+    const revision = ++pointerLockRevision;
     try {
       // Windows Chromium does not allow the same pointer in Pointer Capture and Pointer Lock simultaneously.
       // The initial locking click releases capture before pointerup; locked events remain directed to the canvas.
@@ -855,11 +887,21 @@ export function installGameInput(
         if (!rawMouse || !(error instanceof DOMException)) throw error;
         await canvas.requestPointerLock();
       }
+      if ((inputDisposed || revision !== pointerLockRevision) && document.pointerLockElement === canvas)
+        document.exitPointerLock();
     } catch (error) {
       console.warn(t('[VM input] 浏览器拒绝鼠标锁定'), error);
     } finally {
       pointerLockPending = false;
     }
+  };
+
+  const releasePointerLock = () => {
+    pointerLockRevision++;
+    lockAfterPointerUp = false;
+    if (document.pointerLockElement !== canvas) return;
+    releaseInput();
+    document.exitPointerLock();
   };
 
   const finishDesktopPointerUp = (event: PointerEvent, desktopMouse: boolean) => {
@@ -915,7 +957,15 @@ export function installGameInput(
         lastCtrlPrimaryDispatch = { at: performance.now(), lParam };
       }
       const desktopMouse = event.pointerType === 'mouse';
-      if (lockDesktopMouse && desktopMouse && document.pointerLockElement !== canvas) lockAfterPointerUp = true;
+      // Freeze this policy for the gesture: returning to a menu must not lose its physical UP.
+      lockOnDownGesture = desktopMouse && (options.lockPointerOnDown?.() ?? false);
+      if (
+        lockDesktopMouse &&
+        desktopMouse &&
+        document.pointerLockElement !== canvas &&
+        (options.canLockPointer?.() ?? true)
+      )
+        lockAfterPointerUp = true;
       mouseFlags |= info.flag;
       vm.setKeyState(info.vk, true);
       const repeat =
@@ -929,9 +979,25 @@ export function installGameInput(
         vm.postMessage(info.down, modifierFlags(event), lParam);
       }
       notify('pointerdown', `Mouse${button}`, lParam);
-      // Always capture before locking so the initial pointerup returns to the same canvas before Pointer Lock;
-      // after locking, events already remain directed to the canvas.
-      if (!desktopMouse || document.pointerLockElement !== canvas) {
+      const lockFromDown = lockAfterPointerUp && lockOnDownGesture;
+      if (lockFromDown) {
+        // Battles must confine the very first held drag. Request without
+        // Pointer Capture: Chromium cannot own the same pointer in both modes.
+        // A real mouseup listener below preserves UP if the browser switches its
+        // PointerEvent stream while the request is pending.
+        lockAfterPointerUp = false;
+        void requestMouseLock().then(() => {
+          if (inputDisposed || !mouseFlags || document.pointerLockElement === canvas) return;
+          try {
+            canvas.setPointerCapture(event.pointerId);
+          } catch {
+            // The physical release may have already ended this pointer.
+          }
+        });
+      }
+      // The after-up mode captures its complete initial menu click. The immediate
+      // battle mode instead leaves capture free for Pointer Lock acquisition.
+      if (!lockFromDown && (!desktopMouse || document.pointerLockElement !== canvas)) {
         try {
           canvas.setPointerCapture(event.pointerId);
         } catch {
@@ -1020,6 +1086,23 @@ export function installGameInput(
     }
     event.preventDefault();
   });
+  on(window, 'mouseup', (event) => {
+    if (!lockOnDownGesture || !mouseFlags) return;
+    // Lock acquisition can end the initial PointerEvent sequence in Chromium.
+    // This fallback consumes only the real physical mouseup, after the ordinary
+    // pointerup has had first refusal; already released buttons never repeat.
+    const button = normalizePointerButton(event.button, physicalControl(event), hostPlatform, event.buttons);
+    const info = pointerButton(button);
+    if (!info || !(mouseFlags & info.flag)) return;
+    flushDesktopMove();
+    const lParam = mouseLParam(event);
+    mouseFlags &= ~info.flag;
+    vm.setKeyState(info.vk, false);
+    if (info.vk === 0x01 && shiftBurstTimer !== null) return;
+    vm.postMessage(info.up, modifierFlags(event), lParam);
+    notify('pointerup', `Mouse${button}`, lParam);
+    if (event.buttons === 0) releaseMouseButtons(lParam);
+  });
   on(
     canvas,
     'pointercancel',
@@ -1032,6 +1115,9 @@ export function installGameInput(
         return;
       }
       if (!event.isPrimary) return;
+      // Acquiring lock can cancel capture without releasing the physical button.
+      // The real mouseup fallback, blur or lock exit still releases that button.
+      if (lockOnDownGesture && pointerLockPending) return;
       normalizedPointerButtons.delete(event.pointerId);
       lockAfterPointerUp = false;
       cancelShiftBurst();
@@ -1046,7 +1132,7 @@ export function installGameInput(
     // Cancel pending touch timers here, or a right-click could fire after every finger has left.
     if (touchGesture && event.pointerId === touchGesture.pointerId) cancelTouchGesture();
     // Pointer Lock actively ends capture; this does not mean the player released the button.
-    if (document.pointerLockElement !== canvas) releaseMouseButtons();
+    if (document.pointerLockElement !== canvas && !(lockOnDownGesture && pointerLockPending)) releaseMouseButtons();
   });
   on(canvas, 'dblclick', (event) => {
     // USER32 already generates Win32 double-clicks from two physical clicks and class styles; suppress only browser defaults here.
@@ -1208,17 +1294,22 @@ export function installGameInput(
   canvas.parentElement?.appendChild(lockHint);
   removers.push(() => lockHint.remove());
   let keyboardLockState: KeyboardLockState = 'inactive';
+  let shownLockHintState: KeyboardLockState | null = null;
   const showLockHint = () => {
-    lockHint.textContent =
+    // Explain each actual keyboard-lock mode once, not on every click after Esc.
+    if (shownLockHintState === keyboardLockState) return;
+    shownLockHintState = keyboardLockState;
+    const message =
       keyboardLockState === 'active'
-        ? t('Esc 已交给游戏 · 长按 Esc 退出锁定 · F11 退出全屏')
+        ? 'Esc 已交给游戏 · 长按 Esc 释放鼠标，或打开游戏菜单'
         : keyboardLockState === 'pending'
-          ? t('正在申请 Esc 捕获权限…')
+          ? '正在申请 Esc 捕获权限…'
           : keyboardLockState === 'unavailable'
-            ? t('浏览器不支持 Esc 捕获，Esc 仍由浏览器优先处理')
+            ? '浏览器不支持 Esc 捕获，Esc 仍由浏览器优先处理'
             : keyboardLockState === 'denied'
-              ? t('Esc 捕获未获授权，Esc 仍由浏览器优先处理')
-              : t('鼠标已锁定 · Esc 解锁 · 全屏可申请将 Esc 交给游戏');
+              ? 'Esc 捕获未获授权，Esc 仍由浏览器优先处理'
+              : '鼠标已限制在游戏里 · 按 Esc 释放鼠标，再点游戏继续';
+    lockHint.textContent = vm.runtimeInfo?.backend === 'native' ? message : t(message);
     lockHint.classList.remove('show');
     void lockHint.offsetWidth;
     lockHint.classList.add('show');
@@ -1258,14 +1349,21 @@ export function installGameInput(
   };
   document.addEventListener('pointerlockchange', pointerLockChanged);
   removers.push(() => document.removeEventListener('pointerlockchange', pointerLockChanged));
+  // The startup screen can obtain confinement from its Start gesture before
+  // the runtime is ready. Adopt that existing lock without requiring another click.
+  if (document.pointerLockElement === canvas) pointerLockChanged();
 
   return {
     adaptResolution,
     pointerPosition: () => (pointerTracked ? { x: Math.floor(logicalMouseX), y: Math.floor(logicalMouseY) } : null),
+    releasePointerLock,
     cleanup() {
+      inputDisposed = true;
+      pointerLockRevision++;
       pointerTracked = false;
       releaseInput();
       removers.splice(0).forEach((remove) => remove());
+      canvas.parentElement?.classList.remove('pointer-locked');
       if (document.pointerLockElement === canvas) {
         document.exitPointerLock();
       }

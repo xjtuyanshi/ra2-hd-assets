@@ -2,6 +2,21 @@ import { describe, expect, it } from 'vitest';
 import { calculateCanvasFit, displayMatchedFrameSize } from '../../src/ui/pages/game/canvasFit';
 
 describe('canvas 等比适配', () => {
+  it('fills an enlarged owner window at DPR 1.5 despite the original negotiated scale', () => {
+    const fit = calculateCanvasFit({
+      stageWidth: 2741,
+      stageHeight: 1603,
+      frameWidth: 1152,
+      frameHeight: 608,
+      devicePixelRatio: 1.5,
+      integerScale: true,
+      preferredScale: 3,
+      fillStage: true,
+    })!;
+    expect(fit.cssWidth).toBeCloseTo(2741, 0);
+    expect(fit.scale).toBeGreaterThan(3);
+    expect(fit.scale).toBe(fit.fillScale);
+  });
   it('按 1440×900 帧适配宽舞台并保持 16:10', () => {
     const result = calculateCanvasFit({
       stageWidth: 1920,

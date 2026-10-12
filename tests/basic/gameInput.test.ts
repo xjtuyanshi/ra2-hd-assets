@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { installGameInput, setSessionShortcutKey, type InstalledGameInput } from '../../src/ui/pages/game/gameInput';
+import {
+  installGameInput,
+  setSessionShortcutKey,
+  type GameInputOptions,
+  type InstalledGameInput,
+} from '../../src/ui/pages/game/gameInput';
 import type { VmShell } from '../../src/adapter/runtime';
 
 let installed: InstalledGameInput | undefined;
@@ -10,7 +15,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function setup(search = '', locked = true) {
+function setup(search = '', locked = true, options: GameInputOptions = {}) {
   const canvas = Object.assign(new EventTarget(), {
     style: {},
     tabIndex: 0,
@@ -41,7 +46,14 @@ function setup(search = '', locked = true) {
   vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
   const vm = { setCursorPosition: vi.fn(), postMessage: vi.fn(), setKeyState: vi.fn() };
   const present = vi.fn();
-  installed = installGameInput(canvas as unknown as HTMLCanvasElement, vm as unknown as VmShell, true, present);
+  installed = installGameInput(
+    canvas as unknown as HTMLCanvasElement,
+    vm as unknown as VmShell,
+    true,
+    present,
+    undefined,
+    options,
+  );
   const pointer = (type: string, fields: Record<string, number> = {}) => {
     const event = Object.assign(new Event(type, { cancelable: true }), {
       pointerType: 'mouse',
@@ -209,7 +221,11 @@ describe('桌面鼠标跟手性', () => {
     expect(vm.setCursorPosition).toHaveBeenLastCalledWith(407, 301);
     expect(vm.postMessage).toHaveBeenLastCalledWith(0x200, 0, (301 << 16) | 407);
     expect(vm.postMessage).toHaveBeenCalledTimes(2);
-    expect(present).toHaveBeenCalledTimes(2); // flush neither presents twice nor rolls back the cursor
+    expect(present.mock.calls).toEqual([
+      [400, 300, true], // Adopt the lock already acquired by the startup gesture.
+      [403, 302, true],
+      [407, 301, true],
+    ]); // The flush neither presents twice nor rolls back the cursor.
   });
 
   it('单次移动不在帧尾重复投递，下一帧的首个移动仍立即发送', () => {
@@ -287,6 +303,125 @@ describe('桌面鼠标跟手性', () => {
     canvas.dispatchEvent(new Event('blur'));
     flush();
     expect(vm.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps a locked drag held at all four edges and through capture loss', () => {
+    const { canvas, vm, present, pointer, flush } = setup();
+    pointer('pointerdown', { buttons: 1 });
+    for (const [movementX, movementY, x, y] of [
+      [-2000, 0, 0, 300],
+      [2000, 0, 799, 300],
+      [0, -2000, 799, 0],
+      [0, 2000, 799, 599],
+    ]) {
+      pointer('pointermove', { movementX: movementX!, movementY: movementY!, buttons: 1 });
+      flush();
+      expect(present).toHaveBeenLastCalledWith(x, y, true);
+      expect(vm.postMessage).toHaveBeenLastCalledWith(0x200, 1, (y! << 16) | x!);
+      canvas.dispatchEvent(new Event('lostpointercapture'));
+      expect(vm.postMessage.mock.calls.filter(([message]) => message === 0x202)).toHaveLength(0);
+    }
+    pointer('pointerup');
+    expect(vm.postMessage).toHaveBeenLastCalledWith(0x202, 0, (599 << 16) | 799);
+  });
+
+  it('a confirmed menu releases the held button before releasing confinement', () => {
+    const { doc, vm, pointer, flush } = setup();
+    pointer('pointerdown', { buttons: 1 });
+    pointer('pointermove', { movementX: 10, buttons: 1 });
+    installed!.releasePointerLock();
+    expect(vm.postMessage).toHaveBeenLastCalledWith(0x202, 0, (300 << 16) | 410);
+    expect(doc.exitPointerLock).toHaveBeenCalledOnce();
+    const count = vm.postMessage.mock.calls.length;
+    flush();
+    expect(vm.postMessage).toHaveBeenCalledTimes(count);
+  });
+
+  it('keeps menu presses absolute, then acquires confinement after a complete battle click', () => {
+    let inBattle = false;
+    const { canvas, vm, pointer } = setup('', false, { canLockPointer: () => inBattle });
+    pointer('pointerdown', { clientX: 55, clientY: 66, buttons: 1 });
+    pointer('pointerup', { clientX: 55, clientY: 66 });
+    expect(canvas.requestPointerLock).not.toHaveBeenCalled();
+    expect(vm.postMessage).toHaveBeenLastCalledWith(0x202, 0, (66 << 16) | 55);
+    inBattle = true;
+    pointer('pointerdown', { buttons: 1 });
+    expect(canvas.requestPointerLock).not.toHaveBeenCalled();
+    pointer('pointerup');
+    expect(canvas.requestPointerLock).toHaveBeenCalledOnce();
+  });
+
+  it('locks after a web menu click but immediately on a battle drag after Esc', async () => {
+    let inBattle = false;
+    const { canvas, doc, vm, pointer } = setup('', false, { lockPointerOnDown: () => inBattle });
+    pointer('pointerdown', { buttons: 1 });
+    expect(canvas.requestPointerLock).not.toHaveBeenCalled();
+    pointer('pointerup');
+    expect(canvas.requestPointerLock).toHaveBeenCalledOnce();
+    await Promise.resolve();
+    doc.pointerLockElement = canvas;
+    document.dispatchEvent(new Event('pointerlockchange'));
+    doc.pointerLockElement = null;
+    document.dispatchEvent(new Event('pointerlockchange'));
+    inBattle = true;
+    pointer('pointerdown', { buttons: 1 });
+    expect(canvas.requestPointerLock).toHaveBeenCalledTimes(2);
+    inBattle = false;
+    pointer('pointercancel', { buttons: 1 });
+    expect(vm.postMessage.mock.calls.filter(([message]) => message === 0x202)).toHaveLength(1);
+    window.dispatchEvent(
+      Object.assign(new Event('mouseup'), { button: 0, buttons: 0, ctrlKey: false, shiftKey: false }),
+    );
+    expect(vm.postMessage.mock.calls.filter(([message]) => message === 0x202)).toHaveLength(2);
+  });
+
+  it('does not leave a late granted lock behind after the input owner was destroyed', async () => {
+    const { canvas, doc, pointer } = setup('', false);
+    let grant!: () => void;
+    canvas.requestPointerLock.mockImplementation(() => new Promise<void>((resolve) => (grant = resolve)));
+    pointer('pointerdown', { buttons: 1 });
+    pointer('pointerup');
+    installed!.cleanup();
+    doc.pointerLockElement = canvas;
+    grant();
+    await Promise.resolve();
+    expect(doc.exitPointerLock).toHaveBeenCalledOnce();
+  });
+
+  it('confines the first native battle drag on DOWN and preserves its UP through the lock transition', async () => {
+    const { canvas, doc, vm, pointer, flush } = setup('', false, {
+      canLockPointer: () => true,
+      lockPointerOnDown: () => true,
+    });
+    let grant!: () => void;
+    canvas.requestPointerLock.mockImplementation(() => new Promise<void>((resolve) => (grant = resolve)));
+    pointer('pointerdown', { buttons: 1 });
+    expect(canvas.requestPointerLock).toHaveBeenCalledOnce();
+    expect(canvas.setPointerCapture).not.toHaveBeenCalled();
+    canvas.dispatchEvent(new Event('lostpointercapture'));
+    pointer('pointercancel', { buttons: 1 });
+    expect(vm.postMessage.mock.calls.filter(([message]) => message === 0x202)).toHaveLength(0);
+    doc.pointerLockElement = canvas;
+    grant();
+    await Promise.resolve();
+    pointer('pointermove', { movementX: -2000, buttons: 1 });
+    flush();
+    expect(vm.postMessage).toHaveBeenLastCalledWith(0x200, 1, 300 << 16);
+    const mouseUp = () =>
+      window.dispatchEvent(
+        Object.assign(new Event('mouseup'), {
+          button: 0,
+          buttons: 0,
+          movementX: 0,
+          movementY: 0,
+          ctrlKey: false,
+          shiftKey: false,
+        }),
+      );
+    mouseUp();
+    pointer('pointerup');
+    mouseUp();
+    expect(vm.postMessage.mock.calls.filter(([message]) => message === 0x202)).toEqual([[0x202, 0, 300 << 16]]);
   });
 
   it.each(['', '?raw-mouse=0', '?raw-mouse=1'])('Windows 锁定沿用系统调整，原始计数须显式开启：%s', (search) => {

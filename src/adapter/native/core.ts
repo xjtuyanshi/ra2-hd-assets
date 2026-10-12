@@ -214,6 +214,9 @@ export class NativeCore {
   private hostFrames = 0;
   private stateReadMs = 0;
   private stateReads = 0;
+  private stateReadCpuMs = 0;
+  private stateReadCpuMaxMs = 0;
+  private readerOperations: { startEpochMs: number; durationMs: number }[] = [];
   private lastMirrorFlags = 0;
   private previousLogicFrame: number | null = null;
   private menuSurface: boolean | null = null;
@@ -806,8 +809,20 @@ export class NativeCore {
         this.memory,
         () => {
           if (epoch !== this.readerEpoch) return null;
-          slot.reader ??= factory();
-          return slot.reader?.() ?? null;
+          const started = performance.now();
+          try {
+            slot.reader ??= factory();
+            return slot.reader?.() ?? null;
+          } finally {
+            // Excludes asynchronous subscription waits: those remain in stateReadMs.
+            const duration = performance.now() - started;
+            this.stateReadCpuMs += duration;
+            this.stateReadCpuMaxMs = Math.max(this.stateReadCpuMaxMs, duration);
+            if (duration >= 5) {
+              this.readerOperations.push({ startEpochMs: performance.timeOrigin + started, durationMs: duration });
+              if (this.readerOperations.length > 32) this.readerOperations.shift();
+            }
+          }
         },
         slot.previous,
         { ...this.host, subscribe: (ranges) => this.subscribe(ranges, slot) },
@@ -1039,6 +1054,10 @@ export class NativeCore {
         readerErrors: { render: this.render.error, command: this.command.error, performance: this.frame.error },
         stateReadMs: this.stateReadMs,
         stateReads: this.stateReads,
+        stateReadCpuMs: this.stateReadCpuMs,
+        stateReadCpuMaxMs: this.stateReadCpuMaxMs,
+        readerOperations: this.readerOperations.slice(),
+        decode: this.connection.decodeDiagnostics(),
         frames: this.hostFrames,
         inputQueueLength: this.inputQueue.length,
         inputOutstanding: this.inputOutstanding,

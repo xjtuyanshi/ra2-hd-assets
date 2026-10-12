@@ -108,18 +108,21 @@ an exclusive original backup in the private launch directory when changing an
 existing file. The selected resolution remains in that supplied copy after
 exit. A process without an interactive browser must provide `--size` explicitly.
 
-`--fullscreen` waits for the player to open the page controls and click the
-ordinary fullscreen button before reporting the first resolution. Browser
-fullscreen requires that user gesture; the page checks the actual fullscreen
-element instead of relying on a Chrome launch flag. Normal `--open` requests a
-maximized window, and the measured page area remains authoritative.
+Before automatic sizing starts the original game, the page asks the player in
+Chinese to choose their window size and press Start. That click measures the
+actual play area. `--fullscreen` uses the same gesture to enter fullscreen
+before measuring; the page checks the actual fullscreen element instead of
+relying on a Chrome launch flag. Normal `--open` requests a maximized window.
 
-The **native resolution is fixed for the session**. The page remembers a changed
-view and explains in Chinese that it applies after restarting the launcher.
-Resizing Chrome only scales the current picture; stop and relaunch to measure
-the new page area, or provide another `--size`. Changing fullscreen or
-reloading the page after startup does not change the game's video mode. The
-native main menu retains its original menu dimensions until a match begins.
+Resizing Chrome immediately fits the existing picture into the page. During a
+match its logical video mode is preserved; once the page confirms a menu it
+can request an automatic restart at the new size. The launcher stops only its
+owned helper/game, waits for its agent port to close, and starts a new helper
+under the same token and page server. It retains the installed DLL until final
+shutdown. Each resize keeps its preceding INI backup and a fresh helper log in
+`resize-N/` within the original private run directory; the Wine log is appended.
+An explicit `--size` remains fixed. The native main menu retains its original
+menu dimensions until a match begins.
 The native URL records the selected view and uses `native-viewport=1`; the
 page waits for the usable original main menu before attaching. Explicit sizes
 remain recorded in the URL. On a 1728×914-point play area at DPR 2 the calculated

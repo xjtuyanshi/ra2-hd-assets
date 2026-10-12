@@ -57,6 +57,7 @@ function gameAssetsPlugin(): Plugin {
             res.end(
               JSON.stringify({
                 ready: status.ready === true,
+                restarting: status.restarting === true,
                 resolution: status.resolution ?? null,
                 viewport: status.viewport
                   ? { width: status.viewport.width, height: status.viewport.height, dpr: status.viewport.dpr }
@@ -76,7 +77,7 @@ function gameAssetsPlugin(): Plugin {
         });
         req.on('end', () => {
           try {
-            const { width, height, dpr, devicePixelsPerGamePixel, frameWidth, frameHeight, followIni } =
+            const { width, height, dpr, devicePixelsPerGamePixel, frameWidth, frameHeight, followIni, restart } =
               JSON.parse(body);
             if (
               ![width, height, dpr].every(Number.isFinite) ||
@@ -88,6 +89,7 @@ function gameAssetsPlugin(): Plugin {
               dpr > 8 ||
               (devicePixelsPerGamePixel !== undefined && ![2, 2.5, 3].includes(devicePixelsPerGamePixel)) ||
               (followIni !== undefined && typeof followIni !== 'boolean') ||
+              (restart !== undefined && typeof restart !== 'boolean') ||
               ((frameWidth !== undefined || frameHeight !== undefined) &&
                 (!Number.isSafeInteger(frameWidth) ||
                   !Number.isSafeInteger(frameHeight) ||
@@ -101,10 +103,11 @@ function gameAssetsPlugin(): Plugin {
             // notifications cannot replace it while the game is starting.
             try {
               const current = JSON.parse(readFileSync(viewportPath, 'utf8'));
-              if (current.viewport) {
+              if (current.viewport && !(restart === true && current.ready === true)) {
                 res.end(
                   JSON.stringify({
                     ready: current.ready === true,
+                    restarting: current.restarting === true,
                     resolution: current.resolution ?? null,
                     viewport: {
                       width: current.viewport.width,
@@ -128,11 +131,12 @@ function gameAssetsPlugin(): Plugin {
                   ...(followIni === undefined ? {} : { followIni }),
                 },
                 ready: false,
+                restarting: restart === true,
               }),
               { mode: 0o600 },
             );
             renameSync(`${viewportPath}.tmp`, viewportPath);
-            res.end(JSON.stringify({ ready: false, resolution: null }));
+            res.end(JSON.stringify({ ready: false, restarting: restart === true, resolution: null }));
           } catch {
             res.statusCode = 400;
             res.end('{}');
@@ -159,7 +163,7 @@ function gameAssetsPlugin(): Plugin {
         res.setHeader('Content-Type', 'application/json');
         try {
           let { state } = JSON.parse(readFileSync(statusPath, 'utf8'));
-          if (!['running', 'closed', 'failed'].includes(state)) throw new Error('Invalid launch status');
+          if (!['running', 'restarting', 'closed', 'failed'].includes(state)) throw new Error('Invalid launch status');
           if (state === 'running' && process.env.RA2_NATIVE_LAUNCH_STATUS) {
             // The helper observes process exit before its Wine wrapper exits.
             // Read its atomic status so normal quit does not race that wrapper.
@@ -182,6 +186,10 @@ function gameAssetsPlugin(): Plugin {
       // names, one JSON line each (speed records carry `kind: "speed"`); without it both routes answer 404.
       server.middlewares.use(
         '/__perf/stalls',
+        createStallLogHandler(process.env.RA2_PERF_LOG ? resolve(process.env.RA2_PERF_LOG) : undefined),
+      );
+      server.middlewares.use(
+        '/__perf/feel',
         createStallLogHandler(process.env.RA2_PERF_LOG ? resolve(process.env.RA2_PERF_LOG) : undefined),
       );
       server.middlewares.use(

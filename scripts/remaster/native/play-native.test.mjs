@@ -663,7 +663,7 @@ test('native viewport matching resolves view choices and supported even sizes', 
   assert.deepEqual(nativeViewportResolution({ width: 1728, height: 963, dpr: 2 }), { width: 1728, height: 962 });
   assert.deepEqual(nativeViewportResolution({ width: 1728, height: 1117, dpr: 2 }), { width: 1728, height: 1116 });
   assert.deepEqual(nativeViewportResolution({ width: 1728, height: 900, dpr: 1.5 }), { width: 1296, height: 674 });
-  assert.throws(() => nativeViewportResolution({ width: 2560, height: 1440, dpr: 2 }), /超出/);
+  assert.deepEqual(nativeViewportResolution({ width: 2560, height: 1440, dpr: 2 }), { width: 1930, height: 1086 });
   assert.deepEqual(nativeViewportResolution({ width: 700, height: 600, dpr: 2 }), { width: 932, height: 800 });
   assert.deepEqual(nativeViewportResolution({ width: 1728, height: 914, dpr: 2, devicePixelsPerGamePixel: 3 }), {
     width: 1152,
@@ -960,9 +960,35 @@ if (args[0] === 'winepath.exe') {
         assert.match(output, /Native process /, output);
         assert.deepEqual(await (await fetch(endpoint, { headers })).json(), {
           ready: true,
+          restarting: false,
           resolution: { width: 1728, height: 962 },
+          viewport: { width: 1728, height: 963, dpr: 2 },
         });
         assert.match(await readFile(join(dir, 'RA2MD.INI'), 'utf8'), /ScreenWidth=1728\nScreenHeight=962/);
+        const resize = await fetch(endpoint, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ width: 2056, height: 1240, dpr: 1.5, devicePixelsPerGamePixel: 3, restart: true }),
+        });
+        assert.equal(resize.status, 200);
+        assert.equal((await resize.json()).restarting, true);
+        const resizedDeadline = Date.now() + 30000;
+        let resized;
+        do {
+          resized = await (await fetch(endpoint, { headers })).json();
+          if (resized.ready) break;
+          await delay(100);
+        } while (!exited && Date.now() < resizedDeadline);
+        assert.deepEqual(resized, {
+          ready: true,
+          restarting: false,
+          resolution: { width: 1028, height: 620 },
+          viewport: { width: 2056, height: 1240, dpr: 1.5 },
+        });
+        assert.match(await readFile(join(dir, 'RA2MD.INI'), 'utf8'), /ScreenWidth=1028\nScreenHeight=620/);
+        assert.match(await readFile(join(runPath, 'resize-1', 'RA2MD.original.ini'), 'utf8'), /ScreenWidth=1728/);
+        assert.equal((await lstat(join(runPath, 'launcher.log'))).isFile(), true);
+        assert.equal((await lstat(join(runPath, 'resize-1', 'launcher.log'))).isFile(), true);
       }
       assert.equal(url.searchParams.get('backend'), 'native');
       assert.equal(url.searchParams.get('native-autostart'), 'yr');
@@ -972,8 +998,8 @@ if (args[0] === 'winepath.exe') {
       assert.match(
         output,
         stopFailure
-          ? /Native resolution: 1280x720 \(fixed for this session/
-          : /Native resolution: 1728x962 \(fixed for this session/,
+          ? /Native resolution: 1280x720 \(current game/
+          : /Native resolution: 1728x962 \(current game/,
       );
       assert.match(url.searchParams.get('agent-token'), /^[a-f0-9]{64}$/);
       const listingResponse = await fetch(`${url.origin}/game/.list?dir=ra2`);

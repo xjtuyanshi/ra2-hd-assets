@@ -290,6 +290,24 @@ describe('VmFrameRenderer 生命周期', () => {
     renderer.destroy();
   });
 
+  it('releases the old session GPU objects while retaining a context for an in-place restart', () => {
+    const gl = new FakeWebGl();
+    const canvas = { width: 20, height: 10, dataset: {}, getContext: vi.fn(() => gl) };
+    const first = createVmFrameRenderer(canvas as unknown as HTMLCanvasElement);
+    first.destroy(true);
+    expect(gl.deletedPrograms).toHaveLength(4);
+    expect(gl.deletedTextures).toHaveLength(4);
+    expect(gl.loseContextCalls).toHaveLength(0);
+    // The presenter and the old page cleanup both dispose the same old renderer.
+    first.destroy();
+    expect(gl.loseContextCalls).toHaveLength(0);
+    const next = createVmFrameRenderer(canvas as unknown as HTMLCanvasElement);
+    next.draw(indexedFrame(), 20, 10);
+    expect(next.backend).toBe('WebGL2');
+    next.destroy();
+    expect(gl.loseContextCalls).toHaveLength(1);
+  });
+
   it('Canvas 2D 同时覆盖 indexed/RGBA 帧，并在 destroy 后静默 no-op', () => {
     const canvas = new FakeCanvas();
     vi.stubGlobal('document', { createElement: () => new FakeCanvas() });

@@ -21,6 +21,8 @@ const CustomMapDialog = lazy(() => import('./CustomMapDialog').then((module) => 
 export function Toolbar() {
   const props = useStore(state.toolbarState);
   const collapsed = useStore(state.controlsCollapsed);
+  const boot = useStore(state.bootState);
+  if (boot?.start) return null;
   return (
     <nav id="vm-controls" aria-label={t('运行状态与控制')} className={collapsed ? 'collapsed' : undefined}>
       {props && <RuntimeToolbarView {...props} />}

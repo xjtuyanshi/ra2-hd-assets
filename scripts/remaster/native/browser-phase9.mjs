@@ -21,7 +21,13 @@ const tag = process.argv[2] || 'hidden';
 const webRoute = tag.startsWith('web');
 const fullWindow = tag.startsWith('full') || tag.startsWith('webfull');
 const gameSpeed = process.argv[5] ?? '3';
-const viewChoice = process.argv[7] ?? null;
+const feelSettings =
+  phase === 'phase32'
+    ? await readFile(join(base, phase, `${tag}-settings.json`), 'utf8')
+        .then(JSON.parse)
+        .catch(() => ({}))
+    : {};
+const viewChoice = process.argv[7] ?? feelSettings.view ?? null;
 assert(viewChoice === null || ['classic', 'moderate', 'wide'].includes(viewChoice), 'Use a player view choice');
 const stagedFarmPattern = /^(?:phase20\/farm|phase24\/(?:[a-zA-Z0-9_-]+\/)*farm)$/;
 const stagedFarmName = process.argv[6] ?? null;
@@ -47,6 +53,7 @@ const exists = async (p) =>
       throw error;
     });
 if (stagedFarmRoot) assert(await exists(join(stagedFarmRoot, '_library')), 'Staged farm has no type library');
+const harnessDeadline = Date.now() + 22 * 60000;
 const scopeDeadline = await readFile(join(base, phase, 'deadline.json'), 'utf8')
   .then((t) => Date.parse(JSON.parse(t).deadlineAt))
   .catch(() => Infinity);
@@ -67,7 +74,7 @@ async function ownerIdle(options = {}) {
       await options.onBlocked?.();
       throw new Error('Owned acceptance cancelled');
     }
-    if (Date.now() > scopeDeadline) {
+    if (Date.now() > Math.min(scopeDeadline, harnessDeadline)) {
       await options.onBlocked?.();
       throw new Error('Bounded task deadline reached');
     }
@@ -123,6 +130,42 @@ let directMouseMove;
 // Session 26 observes ordinary pointer travel, including moves made by the
 // reused battle helpers. Other sessions retain their existing input protocol.
 async function humanMove(x, y, options) {
+  if (phase === 'phase32') {
+    const readPointer = () =>
+      page.evaluate(() => {
+        const canvas = document.querySelector('#screen');
+        const frame = window.__phase7Presentation?.latestFrame;
+        return {
+          locked: !!document.pointerLockElement,
+          point: window.__phase32Pointer,
+          box: canvas?.getBoundingClientRect().toJSON(),
+          width: frame?.width,
+          height: frame?.height,
+        };
+      });
+    let actual = await readPointer();
+    if (!actual.locked || !actual.point || !actual.width || !actual.height) {
+      humanPointer = { x, y };
+      return directMouseMove(x, y, options);
+    }
+    const wanted = {
+      x: Math.max(0, Math.min(actual.width - 1, ((x - actual.box.x) * actual.width) / actual.box.width)),
+      y: Math.max(0, Math.min(actual.height - 1, ((y - actual.box.y) * actual.height) / actual.box.height)),
+    };
+    // CDP movement deltas under Chrome page zoom differ from its absolute CSS
+    // coordinates. Observe the page's actual logical cursor between ordinary
+    // trusted movements; never set or bypass the game's input coordinates.
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const dx = ((wanted.x - actual.point.x) * actual.box.width) / actual.width;
+      const dy = ((wanted.y - actual.point.y) * actual.box.height) / actual.height;
+      if (Math.abs(dx) < 0.8 && Math.abs(dy) < 0.8) return;
+      humanPointer = { x: humanPointer.x + dx, y: humanPointer.y + dy };
+      await directMouseMove(humanPointer.x, humanPointer.y, attempt ? undefined : options);
+      actual = await readPointer();
+      if (!actual.locked || !actual.point) return;
+    }
+    return;
+  }
   if (phase !== 'phase26') return directMouseMove(x, y, options);
   const start = { ...humanPointer };
   const duration = (Math.hypot(x - start.x, y - start.y) / 600) * 1000;
@@ -253,7 +296,7 @@ const state = () =>
     : worker().evaluate(async () =>
         JSON.parse(new TextDecoder().decode(await globalThis.__auditCore.connection.request(14))),
       );
-async function shot(label) {
+async function shot(label, simple = false) {
   assert(/^[a-zA-Z0-9_-]+$/.test(label));
   const path = join(out, label + '.png');
   const capture = await cdp.send('Page.captureScreenshot', {
@@ -262,11 +305,16 @@ async function shot(label) {
     captureBeyondViewport: false,
   });
   await writeFile(path, Buffer.from(capture.data, 'base64'));
+  if (simple) {
+    await record('screenshot-lite', { label, path });
+    return path;
+  }
   if (webRoute) {
     const hd = await page.evaluate(() => {
       const h = window.__hdBridge;
       return {
         timeline: h?.timeline ?? null,
+        pace: h?.pace ?? null,
         presentation: h?.presentation ?? null,
         speedRecords: window.__speedTelemetry?.records ?? [],
         ui: { enabled: h?.ui?.enabled ?? false, state: h?.ui?.state ?? null },
@@ -450,8 +498,170 @@ const usable = (c) => c.visible && c.enabled && c.rect?.[2] > c.rect?.[0];
 async function execute(c) {
   if (c.action === 'close') return { closing: true };
   await ownerIdle();
+  if (c.action === 'feel-start') {
+    const { installPhase7InputProbe } = await import('./phase7-input-stream.mjs');
+    await installPhase7InputProbe(page);
+    await page.evaluate(() => {
+      const probe = {
+        startedAt: performance.now(),
+        frames: [],
+        animationFrames: [],
+        pointer: [],
+        tasks: [],
+        gaps: [],
+        previous: null,
+        previousAnimationFrame: null,
+      };
+      const animate = (at) => {
+        if (probe.previousAnimationFrame !== null) probe.animationFrames.push(at - probe.previousAnimationFrame);
+        probe.previousAnimationFrame = at;
+        probe.raf = requestAnimationFrame(animate);
+      };
+      probe.raf = requestAnimationFrame(animate);
+      probe.present = (route) => {
+        const at = performance.now();
+        if (probe.previous !== null) {
+          const gap = at - probe.previous;
+          probe.frames.push(gap);
+          if (gap > 25)
+            probe.gaps.push({ at, gapMs: gap, route, activity: window.__hdBridge?.live?.activity?.() ?? null });
+        }
+        probe.previous = at;
+      };
+      const pointer = (event) => {
+        const at = performance.now();
+        requestAnimationFrame(() =>
+          probe.pointer.push({
+            handlerMs: at - event.timeStamp,
+            nextPaintOpportunityMs: performance.now() - event.timeStamp,
+          }),
+        );
+      };
+      document.addEventListener('pointermove', pointer, { passive: true });
+      const observer = new PerformanceObserver((entries) => {
+        for (const task of entries.getEntries())
+          probe.tasks.push({ startTime: task.startTime, duration: task.duration, name: task.name });
+      });
+      observer.observe({ entryTypes: ['longtask'] });
+      probe.stop = () => {
+        document.removeEventListener('pointermove', pointer);
+        observer.disconnect();
+        cancelAnimationFrame(probe.raf);
+      };
+      window.__phase32Feel = probe;
+    });
+    return execute({ action: 'rates-start', label: c.label ?? 'feel-rates' });
+  }
+  if (c.action === 'feel-stop') {
+    const rates = await execute({ action: 'rates-stop', label: c.label ?? 'feel-rates' });
+    const evidence = await page.evaluate(() => {
+      const p = window.__phase32Feel;
+      p.stop();
+      const values = [...p.frames].sort((a, b) => a - b);
+      const percentile = (f) => (values.length ? values[Math.ceil(values.length * f) - 1] : null);
+      const result = {
+        source: 'Actual completed visible HD draws or classic presenter draws; browser scanout is not instrumented',
+        seconds: (performance.now() - p.startedAt) / 1000,
+        intervals: {
+          n: values.length,
+          p50: percentile(0.5),
+          p95: percentile(0.95),
+          p99: percentile(0.99),
+          over25: values.filter((v) => v > 25).length,
+          over50: values.filter((v) => v > 50).length,
+          over100: values.filter((v) => v > 100).length,
+        },
+        pointer: p.pointer,
+        longTasks: p.tasks,
+        gaps: p.gaps,
+        animationFrameIntervals: p.animationFrames,
+        pace: window.__hdBridge?.pace ?? null,
+        stalls: window.__hdBridge?.stalls ?? null,
+        telemetry: window.__feelTelemetry?.records ?? null,
+        viewport: {
+          width: innerWidth,
+          height: innerHeight,
+          dpr: devicePixelRatio,
+          screen: { width: screen.width, height: screen.height },
+        },
+      };
+      delete window.__phase32Feel;
+      return result;
+    });
+    await writeFile(
+      join(out, `${c.label ?? 'feel'}-measurements.json`),
+      JSON.stringify({ ...evidence, rates }, null, 2),
+    );
+    return { ...evidence, pointer: { count: evidence.pointer.length }, gaps: { count: evidence.gaps.length }, rates };
+  }
+  if (c.action === 'feel-edges') {
+    const proof = [];
+    for (const edge of ['left', 'right', 'top', 'bottom']) {
+      const box = await page.locator('#screen').boundingBox();
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 40 });
+      const before = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
+      const target = {
+        left: [box.x - 80, box.y + box.height / 2],
+        right: [box.x + box.width + 80, box.y + box.height / 2],
+        top: [box.x + box.width / 2, box.y - 80],
+        bottom: [box.x + box.width / 2, box.y + box.height + 80],
+      }[edge];
+      await page.mouse.down();
+      try {
+        await page.mouse.move(...target, { steps: 80 });
+        await delay(600);
+        const observation = await page.evaluate(() => ({
+          locked: !!document.pointerLockElement,
+          pointer: window.__phase7InputProbe?.latest,
+          cursor: document.querySelector('#native-page-cursor')?.getBoundingClientRect().toJSON(),
+        }));
+        const after = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
+        const screenshot = await shot(`${c.label ?? 'drag'}-${edge}`);
+        proof.push({ edge, before: before?.view, after: after?.view, observation, screenshot });
+      } finally {
+        await page.mouse.up();
+      }
+    }
+    await writeFile(join(out, `${c.label ?? 'drag'}-edges.json`), JSON.stringify(proof, null, 2));
+    return proof;
+  }
+  if (c.action === 'feel-play') {
+    const began = performance.now();
+    const seconds = Math.max(1, Math.min(c.seconds ?? 300, 600));
+    let nextAction = 0,
+      actions = 0;
+    while (performance.now() - began < seconds * 1000) {
+      await ownerIdle();
+      const box = await page.locator('#screen').boundingBox();
+      const segmentStart = performance.now();
+      while (performance.now() - segmentStart < 1200) {
+        const t = (performance.now() - began) / 1000;
+        await cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved',
+          x: box.x + box.width * (0.42 + 0.23 * Math.sin(t * 1.3)),
+          y: box.y + box.height * (0.48 + 0.25 * Math.cos(t * 0.9)),
+          buttons: 0,
+        });
+        humanPointer = {
+          x: box.x + box.width * (0.42 + 0.23 * Math.sin(t * 1.3)),
+          y: box.y + box.height * (0.48 + 0.25 * Math.cos(t * 0.9)),
+        };
+        await delay(8);
+      }
+      if (performance.now() >= nextAction) {
+        const keys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'];
+        await page.keyboard.down(keys[actions % keys.length]);
+        await delay(300);
+        await page.keyboard.up(keys[actions % keys.length]);
+        if (actions % 4 === 0) await shot(`feel-playing-${actions}`, true);
+        actions++;
+        nextAction = performance.now() + 12000;
+      }
+    }
+    return { seconds: (performance.now() - began) / 1000, scrollActions: actions };
+  }
   if (c.action === 'rates-start') {
-    assert(phase === 'phase26' && !acceptanceRates, 'Session 26 has one owned match observer');
+    assert(['phase26', 'phase32'].includes(phase) && !acceptanceRates, 'One owned match observer required');
     const { startPhase10MatchRates } = await import('./phase10-match-rates.mjs');
     acceptanceRates = await startPhase10MatchRates({
       page,
@@ -484,7 +694,7 @@ async function execute(c) {
     return { observing: true };
   }
   if (c.action === 'rates-stop') {
-    assert(phase === 'phase26' && acceptanceRates, 'Owned played-match observer required');
+    assert(['phase26', 'phase32'].includes(phase) && acceptanceRates, 'Owned played-match observer required');
     await acceptanceRates.inputCheckpoint('end', { completed: c.completed !== false });
     const result = await acceptanceRates.stop();
     acceptanceRates = null;
@@ -1366,7 +1576,7 @@ async function execute(c) {
       await cdp.send('Browser.setWindowBounds', { windowId: w.windowId, bounds: { windowState: 'normal' } });
       await cdp.send('Browser.setWindowBounds', { windowId: w.windowId, bounds: { width: c.width, height: c.height } });
     } else await cdp.send('Browser.setWindowBounds', { windowId: w.windowId, bounds: { windowState: 'maximized' } });
-    await delay(1000);
+    await delay(Math.min(c.wait ?? 1000, 60000));
     return shot(c.label ?? 'window-maximized');
   }
   if (c.action === 'shot') return shot(c.label);
@@ -1448,14 +1658,28 @@ async function execute(c) {
     const before = await state();
     const control = before.controls.find((v) => usable(v) && v.id === c.id && v.class === 'ComboBox');
     assert(control, 'Missing real combo ' + c.id);
+    if (control.combo?.selection === c.index) return control;
     await click(control.rect[2] - 8, (control.rect[1] + control.rect[3]) / 2);
-    await delay(100);
-    await page.keyboard.press('Home');
-    for (let i = 0; i < c.index; i++) {
-      await ownerIdle();
-      await page.keyboard.press('ArrowDown');
+    await delay(150);
+    const opened = await state();
+    const popup = opened.controls.find(
+      (v) => usable(v) && v.class.toLowerCase() === 'combodropwin' && Math.abs(v.rect[0] - control.rect[0]) < 2,
+    );
+    if (popup) {
+      // The pinned native skirmish controls draw 23-pixel rows. Their custom
+      // popup does not take keyboard focus, so select its actual visible row.
+      const rowY = popup.rect[1] + 11 + c.index * 23;
+      assert(rowY < popup.rect[3], 'Requested native combo row must be visible');
+      await shot(`combo-${c.id}-open`);
+      await click((popup.rect[0] + popup.rect[2]) / 2, rowY);
+    } else {
+      await page.keyboard.press('Home');
+      for (let i = 0; i < c.index; i++) {
+        await ownerIdle();
+        await page.keyboard.press('ArrowDown');
+      }
+      await page.keyboard.press('Enter');
     }
-    await page.keyboard.press('Enter');
     await delay(300);
     const after = await state();
     const selected = after.controls.find((v) => v.hwnd === control.hwnd);
@@ -1954,6 +2178,7 @@ try {
   if (webRoute) {
     const root = resolve(wt, '../..');
     process.env.RA2_DEV_HTTP = '1';
+    if (phase === 'phase32') process.env.RA2_PERF_LOG = join(out, 'session-feel.jsonl');
     process.env.RA2_GAME_ROOT ||= join(base, phase, 'web-game');
     process.env.RA2_THIRD_PARTY_CACHE_DIR ||= join(root, '.tmp-third-party');
     if (stagedFarmRoot) process.env.RA2_HD_CACHE_DIR = stagedFarmRoot;
@@ -2052,7 +2277,18 @@ try {
   const profileName = process.argv[4];
   if (profileName) assert(/^[a-zA-Z0-9_-]+$/.test(profileName));
   if (profileName) {
-    context = await chromium.launchPersistentContext(join(base, phase, 'profiles', profileName), {
+    const profilePath = join(base, phase, 'profiles', profileName);
+    if (feelSettings.zoom) {
+      const preferencesPath = join(profilePath, 'Default', 'Preferences');
+      await mkdir(dirname(preferencesPath), { recursive: true });
+      const preferences = await readFile(preferencesPath, 'utf8')
+        .then(JSON.parse)
+        .catch(() => ({}));
+      preferences.partition ??= {};
+      preferences.partition.default_zoom_level = { x: Math.log(feelSettings.zoom) / Math.log(1.2) };
+      await writeFile(preferencesPath, JSON.stringify(preferences));
+    }
+    context = await chromium.launchPersistentContext(profilePath, {
       ...browserOptions,
       ...contextOptions,
     });
@@ -2095,7 +2331,10 @@ try {
     assert(source.includes(needle));
     await route.fulfill({
       response: r,
-      body: source.replaceAll(needle, needle + ' window.__phase7InputProbe?.position(x,y);'),
+      body: source.replaceAll(
+        needle,
+        needle + ' window.__phase7InputProbe?.position(x,y); window.__phase32Pointer = {x,y};',
+      ),
     });
   });
   await context.route('**/src/ui/pages/game/vmFrameRenderer.ts*', async (route) => {
@@ -2107,10 +2346,18 @@ try {
       response: r,
       body: source.replace(
         needle,
-        'if (!destroyed) { backend.draw(...args); window.__phase7Presentation?.draw(args); window.__phase18NativeFrameProbe?.(args[0]); }',
+        'if (!destroyed) { backend.draw(...args); window.__phase7Presentation?.draw(args); window.__phase18NativeFrameProbe?.(args[0]); if (!window.__hdBridge?.diagnostics?.shown) window.__phase32Feel?.present("classic"); }',
       ),
     });
   });
+  if (phase === 'phase32')
+    await context.route('**/src/ui/pages/game/hdBridge.ts*', async (route) => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const needle = 'counters.shownFrames++;';
+      assert(source.includes(needle), 'Visible HD draw observation must match current source');
+      await route.fulfill({ response, body: source.replace(needle, needle + ' window.__phase32Feel?.present("hd");') });
+    });
   await context.route('**/src/ui/pages/game/nativeCursor.ts*', async (route) => {
     const response = await route.fetch();
     const source = await response.text();
@@ -2123,7 +2370,7 @@ try {
   });
   page = await context.newPage();
   directMouseMove = page.mouse.move.bind(page.mouse);
-  if (phase === 'phase26') {
+  if (phase === 'phase26' || phase === 'phase32') {
     page.mouse.move = humanMove;
     for (const method of ['click', 'dblclick']) {
       const direct = page.mouse[method].bind(page.mouse);
@@ -2162,7 +2409,13 @@ try {
   if (!fullWindow)
     await cdp.send('Browser.setWindowBounds', {
       windowId: initialWindow.windowId,
-      bounds: { left: 0, top: 30, width: 1728, height: 1117, windowState: 'normal' },
+      bounds: {
+        left: 0,
+        top: 30,
+        width: feelSettings.width ?? 1728,
+        height: feelSettings.height ?? 1117,
+        windowState: 'normal',
+      },
     });
   page.on('response', (r) => {
     if (r.status() >= 400) record('http-error', { status: r.status(), url: redact(r.url()) });
@@ -2181,7 +2434,8 @@ try {
   const pageUrl = new URL(url);
   pageUrl.searchParams.set('game-speed', gameSpeed);
   if (viewChoice) pageUrl.searchParams.set('resolution', viewChoice);
-  if (useViewportHandshake && !tag.startsWith('window')) {
+  if (feelSettings.playStart) pageUrl.searchParams.set('play-start', '1');
+  if (useViewportHandshake && !tag.startsWith('window') && !feelSettings.smallWindow) {
     await cdp.send('Browser.setWindowBounds', {
       windowId: ownedWindowForSizing.windowId,
       bounds: { windowState: fullWindow ? 'fullscreen' : 'maximized' },
@@ -2253,6 +2507,33 @@ try {
     });
   }
   await delay(1000);
+  if (phase === 'phase32') {
+    const start = page.getByRole('button', { name: '开始', exact: true });
+    if (!webRoute || feelSettings.playStart)
+      await wait(
+        'player start gate or attached native runtime',
+        async () => (await start.isVisible()) || !!worker(),
+        30000,
+      );
+    if (await start.isVisible()) {
+      const startCapture = await cdp.send('Page.captureScreenshot', {
+        format: 'png',
+        fromSurface: true,
+        captureBeyondViewport: false,
+      });
+      await writeFile(join(out, 'before-start.png'), Buffer.from(startCapture.data, 'base64'));
+      await record('player-start-gate', {
+        viewport: await page.evaluate(() => ({
+          width: innerWidth,
+          height: innerHeight,
+          dpr: devicePixelRatio,
+          screen: { width: screen.width, height: screen.height },
+        })),
+        browserWindow: await cdp.send('Browser.getWindowForTarget'),
+      });
+      await locatorClick(start);
+    }
+  }
   if (webRoute) {
     await wait(
       'web Worker and shim',
@@ -2343,14 +2624,14 @@ try {
     hello: webRoute ? await state() : await worker().evaluate(() => globalThis.__auditCore.hello),
   });
   await writeFile(join(out, 'ready'), 'ready\n');
-  const until = Math.min(Date.now() + 23 * 60000, scopeDeadline);
+  const until = Math.min(harnessDeadline, scopeDeadline);
   const done = new Set();
   while (Date.now() < until) {
     if (await exists(join(out, 'cancel'))) break;
     const files = (await readdir(out)).filter((f) => /^command-[0-9]+\.json$/.test(f)).sort();
     let close = false;
     for (const file of files) {
-      if (done.has(file)) continue;
+      if (done.has(file) || !(await exists(join(out, file)))) continue;
       done.add(file);
       const cmd = JSON.parse(await readFile(join(out, file), 'utf8'));
       try {
@@ -2364,6 +2645,15 @@ try {
           JSON.stringify({ ok: false, error: String(e.stack || e) }, null, 2),
         );
         await record('command-error', { file, error: String(e) });
+        if (phase === 'phase32') {
+          await writeFile(join(out, 'paused-command'), file + '\n');
+          while (!(await exists(join(out, 'resume'))) && !(await exists(join(out, 'cancel')))) {
+            await ownerIdle();
+            await delay(250);
+          }
+          await unlink(join(out, 'resume')).catch(() => {});
+          await unlink(join(out, 'paused-command')).catch(() => {});
+        }
       }
     }
     if (close) break;

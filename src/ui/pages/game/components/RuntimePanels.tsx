@@ -92,9 +92,46 @@ export function ExitPanel({ detail }: { detail: string }) {
   );
 }
 
-export function BootView({ game, status, cancel }: BootState) {
+export function BootView({ game, status, cancel, start }: BootState) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  if (start)
+    return (
+      <div
+        id="vm-boot"
+        style={{
+          position: 'fixed',
+          inset: 0,
+          zIndex: 10000,
+          background: '#111821',
+          color: '#f4f6fa',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 24,
+          pointerEvents: 'auto',
+        }}
+      >
+        <p style={{ maxWidth: '80vw', fontSize: 24, lineHeight: 1.7, textAlign: 'center', margin: 0 }}>
+          把窗口调到你想要的大小——建议最大化——然后点「开始」
+        </p>
+        <button
+          id="native-start"
+          type="button"
+          onClick={start}
+          style={{ fontSize: 24, padding: '14px 64px', cursor: 'pointer' }}
+        >
+          开始
+        </button>
+        <button type="button" onClick={() => void cancel()} style={{ fontSize: 16, padding: '8px 24px' }}>
+          取消启动
+        </button>
+        <p style={{ position: 'absolute', bottom: 16, fontSize: 12, opacity: 0.65 }}>
+          本项目与 EA 无关，未获 EA 认可。游戏文件由玩家自行提供。
+        </p>
+      </div>
+    );
   return (
     <div id="vm-boot">
       <div className="vm-boot-icon" aria-hidden="true">
@@ -106,6 +143,7 @@ export function BootView({ game, status, cancel }: BootState) {
         {status.phase === 'running' ? t('加载资源') : status.phase === 'ready' ? t('内存就绪') : t('启动中')}
       </div>
       <div className="vm-boot-detail">{localizeText(error || status.detail)}</div>
+
       <button
         type="button"
         className="toolbar-button"

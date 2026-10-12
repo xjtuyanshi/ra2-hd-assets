@@ -47,6 +47,8 @@ export interface SpeedTelemetryHost {
    * `actual` null clears the line (no battle running).
    */
   publish?(actual: number | null, target: number | null | undefined): void;
+  /** Share the already sampled counters with session diagnostics; never add a second VM request. */
+  observe?(record: SpeedRecord, diagnostics: VmDiagnostics): void;
   /** Where records go; default '/__perf/speed'. Null keeps records and toolbar updates local. */
   endpoint?: string | null;
   /** Window length; default SPEED_INTERVAL_MS. */
@@ -289,6 +291,7 @@ export function startSpeedTelemetry(host: SpeedTelemetryHost): SpeedTelemetry {
         if (history.length > SPEED_HISTORY) history.shift();
         shown = true;
         host.publish?.(record.logicFps, current.targetFps);
+        host.observe?.(record, diagnostics);
         if (sinkGone || endpoint === null) return;
         void environment.post(endpoint, JSON.stringify([record])).then(
           (result) => {

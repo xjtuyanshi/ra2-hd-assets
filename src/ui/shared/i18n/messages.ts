@@ -237,10 +237,9 @@ export const englishMessages = {
   '游戏速度 实际 {0}': 'Game speed: {0} frames/s',
   '游戏每秒实际推进的逻辑帧数，与当前速度档位应有的帧数（最近 5 秒）':
     'Logic frames the game advanced a second, and what the current speed setting allows (last 5 seconds)',
-  ' · 窗口已变，刷新页面重新匹配': ' · window changed, reload to match again',
-  ' · 窗口已变，请重新运行启动器匹配': ' · window changed, restart the launcher to match again',
-  '页面大小已改变。请恢复启动时的窗口大小，或结束对局后关闭启动器，再按当前窗口大小重新启动。':
-    'The page size changed. Restore the original window size, or finish the match, close the launcher, and start it again at the current window size.',
+  ' · 已铺满窗口，返回菜单后自动调整': ' · picture fitted; game size updates on return to the menu',
+  '画面已随窗口调整；返回菜单后会自动匹配新的游戏尺寸。':
+    'The picture now fits the window. The game size will update automatically on return to the menu.',
   主音量: 'Master volume',
   主音量读数: 'Master volume value',
   '快速开局…': 'Quick start…',
@@ -310,13 +309,13 @@ export const englishMessages = {
   'UltraSharp ONNX 输出尺寸符号不匹配': 'Unexpected UltraSharp ONNX output dimension symbols',
   '[VM UI] 全屏请求被拒绝': '[VM UI] Fullscreen request denied',
   '[VM input] 浏览器拒绝鼠标锁定': '[VM input] Browser denied pointer lock',
-  'Esc 已交给游戏 · 长按 Esc 退出锁定 · F11 退出全屏':
-    'Esc goes to the game · Hold Esc to unlock · F11 exits fullscreen',
+  'Esc 已交给游戏 · 长按 Esc 释放鼠标，或打开游戏菜单':
+    'Esc goes to the game · Hold Esc or open the game menu to release the pointer',
   '正在申请 Esc 捕获权限…': 'Requesting Esc capture permission…',
   '浏览器不支持 Esc 捕获，Esc 仍由浏览器优先处理': 'Esc capture is unsupported; the browser still handles Esc first',
   'Esc 捕获未获授权，Esc 仍由浏览器优先处理': 'Esc capture was not authorized; the browser still handles Esc first',
-  '鼠标已锁定 · Esc 解锁 · 全屏可申请将 Esc 交给游戏':
-    'Pointer locked · Esc to unlock · Fullscreen can request Esc for the game',
+  '鼠标已限制在游戏里 · 按 Esc 释放鼠标，再点游戏继续':
+    'Pointer confined to the game · Press Esc to release it, then click the game to continue',
   '先选择游戏资源；只包含一个版本时自动启动，包含两个版本时再选择要玩的游戏。':
     'Select game resources first. One complete version starts automatically; choose a game when both versions are present.',
   已取消: 'Canceled',

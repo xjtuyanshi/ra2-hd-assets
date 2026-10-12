@@ -79,11 +79,7 @@ export function nativeViewportResolution(viewport, iniResolution = null) {
   }
   if (size.width < 800 || size.height < 600) size = { width: 800, height: 600 };
   const supported = capNativeResolution(size);
-  if (supported.width !== size.width || supported.height !== size.height)
-    throw new Error(
-      '当前浏览器画面尺寸超出游戏支持的范围。请使用至少 800×600 的页面，或用 --size 指定尺寸后重新启动。',
-    );
-  return size;
+  return { width: supported.width & ~1, height: supported.height & ~1 };
 }
 
 export function nativeIniResolution(bytes) {

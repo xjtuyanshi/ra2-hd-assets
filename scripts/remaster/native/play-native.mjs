@@ -54,11 +54,11 @@ Starts a hidden native game and the local development page, attached directly to
 the supplied YR copy with the shared HD play look. --open opens Google Chrome.
 By default the page reports its real available area before the game starts, so
 the remembered view uses 3 (classic), 2.5 (moderate) or 2 (wide) device pixels per game pixel; classic is the first-run default. --fullscreen waits for the page's
-ordinary fullscreen button before measurement; Chrome requires that user click.
+Start button before measurement; Chrome requires that user click for fullscreen.
 --size explicitly selects a fixed size and bypasses page measurement. Writes only
 the resolution keys in the supplied RA2MD.INI before start and retains its
-original backup. Native resolution stays fixed for the session; resizing Chrome
-after startup scales its picture. Keep this terminal open.
+original backup. Resizing Chrome scales the current match immediately; in a menu
+the page can restart this owned game at the new size. Keep this terminal open.
 Ctrl-C stops the owned game/page and restores a backed-up DLL. No downloads,
 bottle-wide shutdown, or game automation are performed.`;
 
@@ -545,7 +545,6 @@ export async function wineConfiguration(environment) {
 }
 
 export async function runLauncher(arguments_, environment = process.env) {
-  const launchStartedAt = Date.now();
   if (arguments_.includes('--help') || arguments_.includes('-h')) {
     console.log(help);
     return;
@@ -593,6 +592,8 @@ export async function runLauncher(arguments_, environment = process.env) {
   const statusPath = join(runDirectory, 'status.json');
   const sessionStatusPath = join(runDirectory, 'session-state.json');
   const viewportStatusPath = join(runDirectory, 'viewport-state.json');
+  const feelLogPath = join(runDirectory, 'session-feel.jsonl');
+  await writeFile(feelLogPath, '', { mode: 0o600 });
   async function publishSessionState(state) {
     const pending = sessionStatusPath + '.tmp';
     await writeFile(pending, JSON.stringify({ state }), { mode: 0o600 });
@@ -859,6 +860,7 @@ export async function runLauncher(arguments_, environment = process.env) {
           ...wine.environment,
           RA2_DEV_HTTP: '1',
           RA2_GAME_ROOT: gameRoot,
+          RA2_PERF_LOG: feelLogPath,
           RA2_NATIVE_SESSION_STATUS: sessionStatusPath,
           RA2_NATIVE_LAUNCH_STATUS: statusPath,
           RA2_NATIVE_SESSION_TOKEN: token,
@@ -899,46 +901,43 @@ export async function runLauncher(arguments_, environment = process.env) {
         await complete(start('/usr/bin/open', ['-a', 'Google Chrome', url.href, '--args', '--start-maximized']));
     }
     let viewport;
+    async function resolutionForViewport(nextViewport) {
+      const ini = nextViewport.followIni
+        ? nativeIniResolution(
+            await readFile(join(gameDirectory, nativeResolutionIniName(await readdir(gameDirectory)))).catch(
+              (error) => {
+                if (error.code === 'ENOENT') return Buffer.alloc(0);
+                throw error;
+              },
+            ),
+          )
+        : null;
+      return nativeViewportResolution(nextViewport, ini);
+    }
     if (!resolution) {
       console.log(`Play URL: ${url.href}`);
       console.log('请在 Chrome 打开上面的游戏网址；游戏将按页面实际大小启动。保留本窗口；按 Ctrl-C 可退出。');
-      if (fullscreenBrowser) console.log('请在页面左下角打开控制栏，点击“全屏”；游戏会在进入全屏后启动。');
+      if (fullscreenBrowser) console.log('请在页面点击“开始”；浏览器进入全屏后，游戏会按实际画面大小启动。');
       await openPage();
-      const viewportDeadline = Date.now() + 120000;
       for (;;) {
         if (stopping || page.exited) throw new Error('游戏页面在测量画面时退出。请重新启动。');
         try {
           const status = JSON.parse(await readFile(viewportStatusPath, 'utf8'));
           if (status.viewport) {
             viewport = status.viewport;
-            const ini = viewport.followIni
-              ? nativeIniResolution(
-                  await readFile(join(gameDirectory, nativeResolutionIniName(await readdir(gameDirectory)))).catch(
-                    (error) => {
-                      if (error.code === 'ENOENT') return Buffer.alloc(0);
-                      throw error;
-                    },
-                  ),
-                )
-              : null;
-            resolution = nativeViewportResolution(viewport, ini);
+            resolution = await resolutionForViewport(viewport);
             break;
           }
         } catch (error) {
           if (error.code !== 'ENOENT') throw error;
         }
-        if (Date.now() >= viewportDeadline)
-          throw new Error('游戏页面没有在两分钟内完成画面测量。请在 Chrome 打开启动器给出的完整网址后重试。');
         await delay(100);
       }
     }
     const configured = await configureNativeResolution(gameDirectory, runDirectory, resolution);
-    console.log(
-      `Native resolution: ${resolution.width}x${resolution.height} (fixed for this session; ${configured.target})`,
-    );
-    console.log(`本次游戏画面为 ${resolution.width}×${resolution.height}；需要改变尺寸时请退出并重新启动。`);
+    console.log(`Native resolution: ${resolution.width}x${resolution.height} (current game; ${configured.target})`);
+    console.log(`本次游戏画面为 ${resolution.width}×${resolution.height}；改变窗口后，菜单会自动调整，对局会先铺满。`);
     installation = await installDll(dll, join(gameDirectory, 'ddraw.dll'), runDirectory);
-    const gameLog = await open(join(runDirectory, 'wine.log'), 'wx', 0o600);
     const gameEnvironment = {
       ...wine.environment,
       RA2_NATIVE_AGENT_PORT: String(ports.agent),
@@ -949,73 +948,151 @@ export async function runLauncher(arguments_, environment = process.env) {
       RA2_NATIVE_AGENT_HIDDEN: environment.RA2_NATIVE_AGENT_HIDDEN === '0' ? '0' : '1',
       WINEDLLOVERRIDES: `${wine.environment.WINEDLLOVERRIDES ? `${wine.environment.WINEDLLOVERRIDES};` : ''}ddraw=n,b`,
     };
-    try {
-      launcher = start(
-        wine.wine,
-        [...wine.args, helper, '--stop-file', stopFile, '--status-file', statusFile, '--log', logFile, gamePath],
-        { env: gameEnvironment, stdio: ['ignore', gameLog.fd, gameLog.fd] },
-      );
-    } finally {
-      await gameLog.close();
-    }
-    const agentDeadline = Date.now() + 60000;
-    let hello;
-    for (;;) {
-      if (stopping || launcher.exited)
-        throw new Error('游戏未能正常启动或已退出。请查看本次记录中的 launcher.log 和 wine.log。');
-      let client;
-      let receivedHello = false;
+    async function launchOwnedGame(ownedLogFile = logFile) {
+      const gameStartedAt = Date.now();
+      const gameLog = await open(join(runDirectory, 'wine.log'), 'a', 0o600);
       try {
-        const status = JSON.parse(await readFile(statusPath, 'utf8'));
-        if (!status.handshake || !status.running) throw new Error('Waiting for original launcher handshake');
-        client = new AgentClient(agentUrl, token, origin);
-        hello = await client.connect();
-        receivedHello = true;
-        if (hello.pid !== status.pid)
-          throw new Error('游戏未能完成启动：连接到的游戏进程与本次启动的进程不一致。请查看本次启动记录。');
-        if (!!hello.hiddenHost?.enabled !== (gameEnvironment.RA2_NATIVE_AGENT_HIDDEN === '1'))
-          throw new Error('游戏未能完成启动：游戏窗口显示模式与本次设置不一致。请查看本次启动记录。');
-        assertOwnedExecutableIdentity(hello, expectedIdentity);
-        receivedHello = false; // A valid identity can precede usable native input.
-        const inputState = JSON.parse((await client.request(Type.INPUT_STATE)).toString());
-        if (nativeMainMenuReady(hello, inputState)) {
-          console.log(`Native main menu ready: ${Date.now() - launchStartedAt} ms since launcher start`);
-        } else if (nativeFilmReady(hello, inputState)) {
-          console.log(
-            `影片已经开始播放，可以在 Chrome 页面点击“跳过影片”（启动后 ${Date.now() - launchStartedAt} 毫秒）。`,
-          );
-        } else {
-          throw new Error('Waiting for the usable original native main menu or film');
-        }
-        break;
-      } catch (error) {
-        if (receivedHello) throw error;
-        if (Date.now() >= agentDeadline)
-          throw new Error(
-            `游戏在 60 秒内没有进入可操作的主菜单或影片：${error.message}。请查看本次记录中的 launcher.log 和 wine.log。`,
-          );
+        launcher = start(
+          wine.wine,
+          [...wine.args, helper, '--stop-file', stopFile, '--status-file', statusFile, '--log', ownedLogFile, gamePath],
+          { env: gameEnvironment, stdio: ['ignore', gameLog.fd, gameLog.fd] },
+        );
       } finally {
-        if (client) {
-          const closed = new Promise((resolve) => client.once('closed', resolve));
-          client.close();
-          await Promise.race([closed, delay(1000, undefined, { ref: false })]);
-          if (client.ws.readyState !== 3) client.ws.terminate();
-        }
+        await gameLog.close();
       }
-      await delay(100);
+      const agentDeadline = Date.now() + 60000;
+      let hello;
+      for (;;) {
+        if (stopping || launcher.exited)
+          throw new Error('游戏未能正常启动或已退出。请查看本次记录中的 launcher.log 和 wine.log。');
+        let client;
+        let receivedHello = false;
+        try {
+          const status = JSON.parse(await readFile(statusPath, 'utf8'));
+          if (!status.handshake || !status.running) throw new Error('Waiting for original launcher handshake');
+          client = new AgentClient(agentUrl, token, origin);
+          hello = await client.connect();
+          receivedHello = true;
+          if (hello.pid !== status.pid)
+            throw new Error('游戏未能完成启动：连接到的游戏进程与本次启动的进程不一致。请查看本次启动记录。');
+          if (!!hello.hiddenHost?.enabled !== (gameEnvironment.RA2_NATIVE_AGENT_HIDDEN === '1'))
+            throw new Error('游戏未能完成启动：游戏窗口显示模式与本次设置不一致。请查看本次启动记录。');
+          assertOwnedExecutableIdentity(hello, expectedIdentity);
+          receivedHello = false; // A valid identity can precede usable native input.
+          const inputState = JSON.parse((await client.request(Type.INPUT_STATE)).toString());
+          if (nativeMainMenuReady(hello, inputState)) {
+            console.log(`Native main menu ready: ${Date.now() - gameStartedAt} ms since game start`);
+          } else if (nativeFilmReady(hello, inputState)) {
+            console.log(
+              `影片已经开始播放，可以在 Chrome 页面点击“跳过影片”（启动后 ${Date.now() - gameStartedAt} 毫秒）。`,
+            );
+          } else {
+            throw new Error('Waiting for the usable original native main menu or film');
+          }
+          break;
+        } catch (error) {
+          if (receivedHello) throw error;
+          if (Date.now() >= agentDeadline)
+            throw new Error(
+              `游戏在 60 秒内没有进入可操作的主菜单或影片：${error.message}。请查看本次记录中的 launcher.log 和 wine.log。`,
+            );
+        } finally {
+          if (client) {
+            const closed = new Promise((resolve) => client.once('closed', resolve));
+            client.close();
+            await Promise.race([closed, delay(1000, undefined, { ref: false })]);
+            if (client.ws.readyState !== 3) client.ws.terminate();
+          }
+        }
+        await delay(100);
+      }
+      if (viewport) {
+        const pending = `${viewportStatusPath}.tmp`;
+        await writeFile(pending, JSON.stringify({ viewport, ready: true, resolution }), { mode: 0o600 });
+        await rename(pending, viewportStatusPath);
+      }
+      console.log(`Native process ${hello.pid}; agent ${ports.agent}; page ${ports.page}`);
     }
-    if (viewport) {
-      const pending = `${viewportStatusPath}.tmp`;
-      await writeFile(pending, JSON.stringify({ viewport, ready: true, resolution }), { mode: 0o600 });
-      await rename(pending, viewportStatusPath);
-    }
-    console.log(`Native process ${hello.pid}; agent ${ports.agent}; page ${ports.page}`);
+    await launchOwnedGame();
     if (requestedSize) {
       console.log(`Play URL: ${url.href}`);
       console.log('请在 Chrome 打开上面的游戏网址。保留本窗口；按 Ctrl-C 可退出本次游戏。');
       await openPage();
     }
-    await Promise.race([launcher.done, page.done, stopRequested]);
+    async function waitForViewportRestart(current) {
+      while (!stopping && !current.exited && !page.exited) {
+        if (!requestedSize) {
+          const state = JSON.parse(await readFile(viewportStatusPath, 'utf8'));
+          if (state.restarting === true && state.ready === false && state.viewport) return state.viewport;
+        }
+        await delay(100);
+      }
+      return null;
+    }
+    async function stopOwnedGameForResize() {
+      const current = launcher;
+      await writeFile(stopPath, 'stop\n', { mode: 0o600 });
+      await Promise.race([current.done, delay(5000, undefined, { ref: false })]);
+      // The private helper owns precisely one game. A wrapper can outlive it;
+      // close only this detached group, never a bottle-wide Wine server.
+      kill(current, 'SIGTERM');
+      await Promise.race([current.closedDone, delay(1500, undefined, { ref: false })]);
+      kill(current, 'SIGKILL');
+      await waitForStartupCommand(
+        { done: current.closedDone },
+        5000,
+        '调整窗口时旧游戏未能关闭。请查看本次启动记录后重新启动。',
+      );
+      const { createServer } = await import('node:net');
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        if (stopping) return;
+        const reservation = createServer((socket) => socket.destroy());
+        try {
+          await new Promise((resolve, reject) => {
+            reservation.once('error', reject);
+            reservation.listen({ host: '127.0.0.1', port: ports.agent, exclusive: true }, resolve);
+          });
+          await new Promise((resolve) => reservation.close(resolve));
+          break;
+        } catch (error) {
+          if (error.code !== 'EADDRINUSE') throw error;
+          if (Date.now() >= deadline) throw new Error('调整窗口时旧游戏仍占用连接。请查看本次启动记录后重新启动。');
+          await delay(100);
+        }
+      }
+      if (stopping) return;
+      // Completed old helpers can no longer write these private files. Reuse
+      // their mapped paths, while keeping the installed DLL and page untouched.
+      for (const path of [stopPath, statusPath])
+        await unlink(path).catch((error) => {
+          if (error.code !== 'ENOENT') throw error;
+        });
+    }
+    let resizeCount = 0;
+    for (;;) {
+      const nextViewport = await Promise.race([
+        launcher.done.then(() => null),
+        page.done.then(() => null),
+        stopRequested.then(() => null),
+        waitForViewportRestart(launcher),
+      ]);
+      if (!nextViewport || stopping || page.exited || launcher.exited) break;
+      const nextResolution = await resolutionForViewport(nextViewport);
+      await publishSessionState('restarting');
+      console.log('窗口大小改变了，正在重新打开菜单，请稍等……');
+      await stopOwnedGameForResize();
+      if (stopping) break;
+      const resizeDirectory = join(runDirectory, `resize-${++resizeCount}`);
+      await mkdir(resizeDirectory, { mode: 0o700 });
+      await configureNativeResolution(gameDirectory, resizeDirectory, nextResolution);
+      resolution = nextResolution;
+      viewport = nextViewport;
+      const resizeLogFile = await windowsPath(join(resizeDirectory, 'launcher.log'));
+      await launchOwnedGame(resizeLogFile);
+      await publishSessionState('running');
+      console.log(`菜单已按新窗口重新打开：${resolution.width}×${resolution.height}。`);
+    }
     if (!stopping && page.exited) throw new Error('游戏页面已停止，正在关闭本次游戏。');
     if (!stopping && launcher.error) throw launcher.error;
     if (!stopping && launcher.code !== 0)

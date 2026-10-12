@@ -20,6 +20,16 @@ Both owner launchers enable the existing single-pass `sr=1` reconstruction for t
 original-picture view. It does not run in the HD view's keyed overlay path. The native toolbar omits Quick start:
 the page attaches to an existing game process, so the VM startup-page hook cannot open its skirmish setup.
 
+The HD web owner entry, `scripts/remaster/play.sh` (or `play.command`), adds `play-start=1` only for ordinary
+HD play, including `--menu`; `--train` and `--original` keep their existing startup flow. For example,
+`scripts/remaster/play.sh --view classic --print` prints the same gated URL without starting a server or browser.
+After resources are selected or restored, its Start screen measures the window at the click. That click removes
+only `play-start` from the current URL, preserving other query fields, the fragment and history state, before
+measurement. A later internal menu-resize reload therefore continues automatically; a new launcher URL always
+requires Start again, including in an existing browser profile. No persistent bypass flag is stored. Ordinary
+web imports without this explicit parameter are unchanged. Native ready-page reloads instead retain their
+launcher-negotiated size and baseline, as described below.
+
 ### Film controls
 
 An attached page shows **跳过影片** and **也可以按 Esc** during observed Bink playback outside a visible menu/dialog.
@@ -64,8 +74,9 @@ Dedicated-prefix preparation requires a free Wine executable. The resolved Cross
 
 The launcher checks the selected cache's readable `_library/` directory, preserving Vite's `gameres/hd-cache` default when `RA2_HD_CACHE_DIR` is absent. Missing game, Wine and cache prerequisites produce Chinese guidance. After any dedicated-prefix preparation, a scoped Wine command-line self-check must return its expected reply within 30 seconds before builds, launcher-path mapping or game-file changes; bounded output stays in private `wine-check.log`. The exact successful reply line is recognized as it arrives, independently of later diagnostic output retained in that log. A separate private `wine-check.json` records the observed acknowledgement, completion, exit code and any failure without altering stdout; evidence collection uses that observation and falls back to the retained log only for older launches with no JSON. Wine path mapping is also bounded to 30 seconds. Game/menu readiness retains its 60-second wait and reports Chinese failure guidance with the private launch logs, including missing, different or unsupported executable identities and mismatched process/visibility state. These are startup failure bounds, separate from browser acceptance targets.
 
-By default the launcher serves and opens the page before starting the original game. The page reports its actual
-available play area, device pixel ratio and remembered view through an authenticated loopback endpoint. The views
+By default the launcher serves and opens a plain Chinese start screen before starting the original game. The player
+adjusts the window and clicks Start; that click measures the available play area, device pixel ratio and remembered
+view through an authenticated loopback endpoint. Waiting for this choice has no startup timeout. The views
 are **经典** / **适中** / **宽**, respectively `resolution=classic|moderate|wide` and 3 / 2.5 / 2 device pixels per
 game pixel; Classic is the initial default and `resolution=display` remains a Wide alias. Both launch routes accept
 `--view classic|moderate|wide` to select a view explicitly. The game frame is rounded down to even dimensions and
@@ -75,25 +86,28 @@ play area with DPR 2, the calculated Classic / Moderate / Wide frames are 1152×
 the sizing rule, not browser acceptance. Larger logical frames reveal more map and sidebar rows; HD drawing buffers
 still cover device pixels at all three scales, including smooth enlargement of 2x art and supplied 3x sidebar art.
 
-The native supported range remains 800×600 through 2560×1600 and at most 2,097,152 game pixels. `--size WxH`, for
-example `--size 1280x720`, explicitly selects a fixed resolution and bypasses page measurement. `--fullscreen` asks
-the player to press the existing page fullscreen control before measurement; the page waits for an actual fullscreen
-element. Browser fullscreen requires this ordinary user gesture. Normal `--open` requests a maximized window. The
+The native supported range remains 800×600 through 2560×1600 and at most 2,097,152 game pixels. Measured frames
+are capped within this range; the picture still scales to the available page area. `--size WxH`, for
+example `--size 1280x720`, explicitly selects a fixed resolution and bypasses page measurement. `--fullscreen` requests
+page fullscreen from the Start click before measurement. Browser fullscreen requires this ordinary user gesture. Normal `--open` requests a maximized window. The
 launcher changes only resolution keys in the supplied copy's `RA2MD.INI`, preserves other ANSI bytes/settings and
 retains an original backup. Symlinks, Unicode BOM files and ambiguous INI case variants are refused before rewriting.
-The chosen resolution persists in that copy. **Native resolution is fixed after startup:** the page remembers a new
-view and says in Chinese to stop and restart the launcher to apply it. Resizing Chrome or changing fullscreen after
-measurement only scales the current frame. Native menus retain their original dimensions until battle starts. A
+The chosen resolution persists in that copy. Resizing Chrome, changing zoom or entering fullscreen immediately fits
+the picture to the page, with HD backing at device pixels within the renderer buffer limit. During a match the game
+resolution stays stable. On return to a recognized menu, a changed page area automatically restarts the owned game
+with the newly measured resolution and a Chinese notice. Menu resizing follows the same path after a short debounce.
+This returns to the main menu; unstarted skirmish choices are not retained. The launcher keeps its existing server,
+authentication token and final cleanup ownership across these restarts. Native menus retain the original aspect ratio. A
 launcher without an interactive browser must use `--size` explicitly. Measured URLs carry the selected resolution
 view and `native-viewport=1`; the page waits for the original main menu before attaching its native adapter.
 
 The authenticated viewport status adds the original measured `viewport` (`width`, `height`, `dpr`) alongside
-`ready` and `resolution`. Retried reports return that same baseline rather than replacing it. A ready-page reload
-uses the saved area to detect later window changes and preserve the original display scale; it skips the fullscreen
-gesture and does not renegotiate the running game's video mode. The page helper still returns only the game frame
-size and supplies the measured baseline through an optional callback.
+`ready`, `restarting` and `resolution`. Ordinary retried reports retain the baseline; an authenticated explicit
+restart request replaces it and clears readiness until the new owned game reaches its menu. A ready-page reload uses
+the saved area to detect subsequent window changes without repeating the Start gesture. The page helper returns the
+game frame size and supplies the measured baseline through an optional callback.
 
-Native sessions use absolute browser mouse coordinates by default, equivalent to `mouse-lock=0`, so menu clicks work even without a preceding move. `mouse-lock=1` explicitly opts into relative Pointer Lock. The emulator keeps its established Pointer Lock default. The page's key/input path still owns its normal cleanup and release behavior.
+Native menus use absolute browser mouse coordinates so ordinary menu clicks retain their hit testing. During a match, a canvas click acquires Pointer Lock and the page draws the pointer within the game picture. A confirmed native menu releases the lock; transient game-cursor hiding does not. The Chinese hint describes Escape and the game menu as exits. `mouse-lock=0` remains an explicit diagnostic opt-out. The emulator keeps its established Pointer Lock default. The page input path owns held-button release, focus loss, pending lock requests and teardown.
 
 Native page cursor presentation defaults on when the player's cursor atlas is available. `native-cursor=game` preserves the original game-drawn cursor. This explicit fallback, also used when cursor art is unavailable, keeps the original sidebar pixels instead of the HD sidebar replacement so clipping cannot combine local cursor art with game-position fragments; the HD battlefield remains enabled. The UI capability is tri-state: undefined for emulator/legacy behavior, true for native page presentation, false for native picture fallback. The page positions its independent cursor bitmap directly from pointer events; native input delivery is responsible only for the game's hit-testing and next requested cursor shape. The pinned YR policy validates the complete `WWMouse::Draw` prologue at `0x7B93F0` before replacing its drawing-only body with `ret 12`. Shape selection, animation, visibility, hotspot resolution and save-under remain game-owned. The atomic patch journal restores the prologue on normal shutdown and disconnected-client teardown. Current software-cursor metadata uses independent READ requests, with mutable pointer/shape/frame/hotspot revalidation, so static menus do not require fabricated logic callbacks. A latest animation frame is accepted against the same sheet header when the sheet and hotspot remain stable. The reader returns `null` for observed absence, hidden state or software-mode exit, and `undefined` for incomplete or inconsistent samples. Undefined or failed reads retain the last validated art while page pointer positioning continues; confirmed software absence switches to hardware snapshots where supported. The software-mode byte at `WWMouse+0x10` prevents stale battlefield cursor state from replacing a menu hardware cursor. Battlefield art comes from the existing `MOUSE.SHA` and `MOUSEPAL.PAL` atlas export; menu hardware art comes from the actual game-selected Win32 cursor handle. Only before any intercepted `SetCursor` selection, extraction reads the actual `GCL_HCURSOR` resource from the owned virtual input target's registered class/parent chain. An explicit `SetCursor(NULL)` remains hidden. The recorded-selection flag follows the existing DirectDraw lifecycle; visibility and selection are revalidated, and no default cursor resource is manufactured.
 
@@ -332,3 +346,25 @@ The owner launcher above performs the startup sequence and owns cleanup. The fol
 The Worker path is required; native connection errors must not silently start v86. Emulator file attachment/persistence, clock-rate control, memory-change recording, call tracing and browser audio volume have no native implementation: explicit unsupported values/errors are returned. The native game's audio remains in the native process. Hidden windows and dialog routing are implemented; until measured, their live status is UNVERIFIED. The lead must separately validate browser HD compositing, mouse/cursor alignment, menu/options/quit overlays, picture toggling and browser local-network permission. Native Node script results do not establish browser presentation or hardware acceptance.
 
 `NATIVE_OUT="$OUT" node scripts/remaster/native/phase12-launcher-failures.mjs` checks the current CLI's missing game folder, Wine executable and HD cache messages against the private development-copy configuration. An optional numbered phase argument selects that session's output and deadline; for example, append `phase13` to use `phase13/deadline.json`. It honors cancellation and waits for the shared owner connection and pause marker before every CLI invocation. Each invocation preloads a guard that refuses subprocess creation; Wine, build tools, game processes and browser servers must remain unstarted. Private reports retain the real Chinese error output, exit status, guard records, source hashes and unchanged executable/DLL/INI/configuration identities. This bounded prerequisite review does not exercise a game that fails to come up after a successful real Wine self-check; that startup failure remains UNVERIFIED until separately observed in an exclusive owned run.
+
+## Owner session performance log
+
+The owner launcher creates a private `session-feel.jsonl` beside `page.log` in every run directory and configures
+`RA2_PERF_LOG` for that file. The existing same-origin development log handler accepts the page's five-second
+`feel`, `speed` and stall records; logging failures never block gameplay. The page keeps the latest 120
+summaries for inspection through `__feelTelemetry.records`, and releases its observer, listeners and timer with
+the session. `__feelTelemetry.flush()` closes the current reporting window without changing gameplay.
+
+Feel records contain draw-submission interval p50/p95/p99 and counts above 25/50/100 ms, the count of different
+logic snapshots used by shown HD draws, pointer-event-to-cursor-update latency and the next animation-frame
+opportunity, long-task overlap, window/picture dimensions, DPR and window changes. Original-view distinctness is
+explicitly marked as received picture versions, not proven logic states. Canvas draw submissions and a following
+animation callback do not establish physical display scan-out timestamps. Frame mode changes separate reporting
+windows; hidden periods remain identified by visibility and window-change records.
+
+Long intervals retain bounded activity snapshots for art/page uploads, voxel work and shader/pipeline creation;
+omitted stall detail is counted. These counters identify concurrent work rather than proving causality. Native
+records also carry cumulative picture/mirror decode CPU and synchronous reader CPU, with recent slow operations
+in epoch milliseconds so they can be compared with the page clock. Existing `stateReadMs` includes asynchronous
+subscription waits and must not be interpreted as CPU time. GPU/compositor scheduling and unexplained intervals
+remain explicitly unknown. This instrumentation does not by itself establish smoothness or a completed match.

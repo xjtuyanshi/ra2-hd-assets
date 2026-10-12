@@ -1,3 +1,5 @@
+import { measurePlayViewport, waitForStartViewport } from './playStartup';
+
 /** The explicit development launcher attaches only to its supplied Yuri's Revenge copy. */
 export function nativeAutoStart(search: string, dev: boolean = import.meta.env.DEV): 'yr' | null {
   if (!dev) return null;
@@ -5,10 +7,10 @@ export function nativeAutoStart(search: string, dev: boolean = import.meta.env.D
   return query.get('backend') === 'native' && query.get('native-autostart') === 'yr' ? 'yr' : null;
 }
 
-/** Native canvas presses carry absolute positions; explicit relative input remains available. */
-export function desktopPointerLock(search: string, backend: string | undefined): boolean {
+/** Both desktop backends confine the page-drawn pointer; explicit absolute input remains available. */
+export function desktopPointerLock(search: string, _backend: string | undefined): boolean {
   const preference = new URLSearchParams(search).get('mouse-lock');
-  return preference === null ? backend !== 'native' : preference !== '0';
+  return preference !== '0';
 }
 
 /** Measure the real play area before the launcher chooses the original game's video mode. */
@@ -20,6 +22,7 @@ export async function prepareNativeViewport(
   requestedFrame: { width: number; height: number } | null = null,
   followIni = false,
   onNegotiatedViewport?: (viewport: { width: number; height: number; dpr: number }) => void,
+  onStartWait?: (start: (() => void) | null) => void,
 ): Promise<{ width: number; height: number } | null> {
   const query = new URLSearchParams(window.location.search);
   if (!nativeAutoStart(window.location.search) || query.get('native-viewport') !== '1') return null;
@@ -46,6 +49,7 @@ export async function prepareNativeViewport(
     });
   type Status = {
     ready?: boolean;
+    restarting?: boolean;
     resolution?: { width?: number; height?: number } | null;
     viewport?: { width?: number; height?: number; dpr?: number } | null;
   };
@@ -55,63 +59,13 @@ export async function prepareNativeViewport(
     return response.json();
   };
   let status = await readStatus();
-  // A running game's video mode is already fixed. Reloads only reattach; the
-  // fullscreen gesture is needed before measuring a new launch, not to resume one.
-  if (!status.ready && query.get('native-fullscreen') === '1' && !document.fullscreenElement?.contains(canvas)) {
-    signal?.throwIfAborted();
-    onFullscreenWait?.(true);
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const cleanup = () => {
-          document.removeEventListener('fullscreenchange', changed);
-          signal?.removeEventListener('abort', abort);
-          window.clearTimeout(timer);
-        };
-        const changed = () => {
-          if (!document.fullscreenElement?.contains(canvas)) return;
-          cleanup();
-          resolve();
-        };
-        const abort = () => {
-          cleanup();
-          reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
-        };
-        const timer = window.setTimeout(() => {
-          cleanup();
-          reject(new Error('尚未进入全屏。请重新启动后点击页面控制栏中的“全屏”按钮。'));
-        }, 110000);
-        document.addEventListener('fullscreenchange', changed);
-        signal?.addEventListener('abort', abort, { once: true });
-        changed();
-      });
-    } finally {
-      onFullscreenWait?.(false);
-    }
-  }
-  if (!status.ready) {
-    // Wait for initial layout, including the native launch's collapsed toolbar,
-    // before reporting the stage. Do not substitute screen dimensions or round
-    // odd heights to even numbers: either would leave a border or shrink the art.
-    const measure = () => {
-      const rect = canvas.closest('#stage')?.getBoundingClientRect();
-      const fullscreen = document.fullscreenElement?.contains(canvas);
-      return {
-        width: fullscreen ? window.innerWidth : (rect?.width ?? window.innerWidth),
-        height: fullscreen ? window.innerHeight : (rect?.height ?? window.innerHeight),
-        dpr: window.devicePixelRatio || 1,
-      };
-    };
-    let viewport = measure();
-    let stableAt = performance.now();
-    const layoutDeadline = stableAt + 3000;
-    while (performance.now() - stableAt < 300 && performance.now() < layoutDeadline) {
-      await pause(50);
-      const next = measure();
-      if (next.width !== viewport.width || next.height !== viewport.height || next.dpr !== viewport.dpr) {
-        stableAt = performance.now();
-        viewport = next;
-      }
-    }
+  if (!status.ready && !status.restarting) {
+    const viewport = onStartWait
+      ? await waitForStartViewport(canvas, signal, onStartWait, {
+          fullscreen: query.get('native-fullscreen') === '1',
+          onFullscreenWait,
+        })
+      : measurePlayViewport(canvas);
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },

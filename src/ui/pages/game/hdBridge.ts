@@ -8,7 +8,7 @@ import {
 } from '../../../games/renderPassthrough';
 import type { FrameRect, VmFrameRenderer } from './vmFrameRenderer';
 import type { HdUi } from './hdUi';
-import type { HdStallMonitor } from './hdStallMonitor';
+import type { HdStallMonitor, HdStallActivity } from './hdStallMonitor';
 import { devicePixelBox } from './devicePixelBox';
 import type { LookPreset } from '../../../../packages/hd-renderer/src/HdRenderer';
 import type { LiveSnapshot, LiveView, LiveWarmType } from '../../../../packages/hd-renderer/src/live/liveView';
@@ -85,6 +85,8 @@ export interface HdBridgeHost {
    * such gap in ms; (0, 0) when another match begins (see hdStallMonitor.ts).
    */
   publishStalls?(count: number, longestMs: number): void;
+  /** A shown HD canvas draw and the logic snapshot it used. */
+  presented?(frame: number): void;
 }
 
 /**
@@ -420,6 +422,8 @@ export type HdBridgeControl = (() => void) & {
   menuSide?(): number | null;
   /** Reuse the already sampled battle ownership without another state read. */
   battleActive?(): boolean;
+  /** Only sampled when a frame interval is long, never in every pointer event. */
+  activity?(): HdStallActivity | null;
   /** Called synchronously for a native picture before it can be painted. */
   frame(frame: VmFrame): void;
 };
@@ -733,7 +737,6 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
           match: () => ({ map: stateMap, frame: stateFrame, shown: revealed && !!hole }),
           activity: () => live?.activity() ?? null,
           publish: (count, longestMs) => host.publishStalls?.(count, longestMs),
-          endpoint: native ? null : undefined,
         });
       })
       .catch((error) => console.warn('[HD] stall recorder unavailable', error));
@@ -1427,6 +1430,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         live.render();
         diagnostics?.draw(enabled && revealed && !!hole);
         shownFrames++;
+        if (enabled && revealed && hole) host.presented?.(pushed?.frame ?? stateFrame);
         publishTier(live.hd.quality);
       }
       // Not while the view is being switched off (the key colour's trail): the game repaints its whole picture then.
@@ -1590,6 +1594,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     frame: onGameFrame,
     menuSide: () => menuSide,
     battleActive: () => inBattle,
+    activity: () => live?.activity() ?? null,
   });
 }
 

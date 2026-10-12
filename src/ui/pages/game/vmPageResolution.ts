@@ -79,16 +79,17 @@ export function storeResolutionChoice(gameId: SupportedGameId, choice: Resolutio
 
 /**
  * The resolution a choice means right now. 'display' measures `stage` (the element the game canvas is fitted into);
- * without a measurable stage it falls back to the INI.
+ * A captured Start-click area takes precedence over a later stage layout; without either it follows the INI.
  */
 export function resolveResolutionChoice(
   choice: ResolutionChoice,
   stage: Element | null,
   devicePixelRatio: number,
+  measuredArea?: { width: number; height: number },
 ): GameResolution | null {
   const scale = resolutionViewScale(choice);
   if (scale === null) return choice as GameResolution | null;
-  const rect = stage?.getBoundingClientRect();
+  const rect = measuredArea ?? stage?.getBoundingClientRect();
   if (!rect) return null;
   return displayMatchedFrameSize({
     stageWidth: rect.width,

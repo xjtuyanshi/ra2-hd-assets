@@ -711,10 +711,12 @@ Wide. The page remembers the selected view between sessions. Both owner launcher
   1728x914. A 1728x1117-point fullscreen area gives Classic 1152x744. These are sizing examples, not runtime evidence.
   Classic is closest to the original 1024x768 framing on that display. Increasing the logical frame reveals more map
   cells and more sidebar rows; the sidebar width and command-bar height remain the game's own frame-pixel sizes.
-- The size is measured once, when the game starts: put the window in its final state first. The fit uses the chosen
-  scale, including 2.5, and can leave a small border from even rounding. Native sessions need a launcher restart to
-  apply a different view or a newly sized window; the page explains this in Chinese. Native menus retain their
-  original frame dimensions until battle starts. On the web route the selected view applies at the next game start.
+- Owner launchers measure the window at the Start click; ordinary web imports retain their runtime-start measurement.
+  The fit uses the chosen scale, including 2.5, and can leave a small border from even rounding. Later window or zoom
+  changes immediately fit the picture to the page and rerasterize HD at device pixels within the buffer budget.
+  The game resolution stays stable during a match, then updates at a recognized main menu; the native launcher
+  restarts its owned game and the web page reloads. Native menus retain their original frame dimensions until battle
+  starts. A selected view applies at the next game start.
   `resolution=WxH` still requests an explicit frame and `resolution=ini` the game's own INI. An explicit URL choice
   wins over the stored choice for that page load; changing the page control removes that URL override.
 - The HD canvas and the HD interface canvas are laid out on whole device pixels with one drawing-buffer pixel each
@@ -731,7 +733,11 @@ server and opens the HD page with the approved look, the remembered view (Classi
 speed; the page's own startup default is the fastest, see
 [the startup configuration](../RA2_COMMAND_LINE_AND_SPAWNER.md#current-startup-configuration)) and the skirmish setup as
 the first page; `--view classic|moderate|wide` explicitly selects the framing, `--original` opens the original picture without the HD bridge, `--train` opens the practice lessons
-([Practice lessons](TRAINING.md)), `--print` only prints the address. It
+([Practice lessons](TRAINING.md)), `--print` only prints the address. Ordinary HD play adds `play-start=1`:
+`scripts/remaster/play.sh --view classic --print` prints a URL that asks for Start after resource selection or
+restoration. The click measures the window and removes only that one-time parameter from the current URL, so an
+internal menu-resize reload remains automatic. Each new launcher URL carries the gate again; no browser-profile
+acceptance is persisted. Training, `--original`, and ordinary web imports without the parameter keep their flow. It
 reads the player's game from `RA2_GAME_ROOT` (default `game/`), the HD cache from `RA2_HD_CACHE_DIR` (default: the
 newest play cache under `gameres/` that holds `_library/`) and the starting speed from `RA2_PLAY_SPEED`, and names
 the stall log for the development server in `RA2_PERF_LOG` (default `gameres/s2x/play/perfmon/stalls.jsonl` under

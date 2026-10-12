@@ -9,7 +9,11 @@ interface AtlasRect {
 }
 
 /** The page owns this small composited bitmap. Pointer events never wait for the native input or picture path. */
-export async function createNativeCursor(screen: HTMLCanvasElement, base = '/hd-cache/_ui/cursor') {
+export async function createNativeCursor(
+  screen: HTMLCanvasElement,
+  base = '/hd-cache/_ui/cursor',
+  onDraw?: () => void,
+) {
   const response = await fetch(`${base}/cursor.json`);
   if (!response.ok) return null;
   const manifest = (await response.json()) as { version: number; file?: string; scale?: number; frames: AtlasRect[] };
@@ -68,6 +72,7 @@ export async function createNativeCursor(screen: HTMLCanvasElement, base = '/hd-
   let inside = false;
   let clientX = 0,
     clientY = 0;
+  let lockedPosition: { x: number; y: number } | null = null;
   let lastArt = '';
   let lastSystem: VmFrame['cursor'] | null;
   const oldCursor = screen.style.getPropertyValue('cursor');
@@ -103,6 +108,10 @@ export async function createNativeCursor(screen: HTMLCanvasElement, base = '/hd-
       lastSystem = system;
     }
     const box = currentCanvasRect(screen);
+    if (lockedPosition && document.pointerLockElement === screen) {
+      clientX = box.left + (lockedPosition.x * box.width) / frame.width;
+      clientY = box.top + (lockedPosition.y * box.height) / frame.height;
+    }
     const sx = box.width / frame.width,
       sy = box.height / frame.height;
     canvas.style.width = `${logicalWidth * sx}px`;
@@ -113,6 +122,7 @@ export async function createNativeCursor(screen: HTMLCanvasElement, base = '/hd-
     canvas.style.clipPath = `inset(${Math.max(0, box.top - top)}px ${Math.max(0, left + logicalWidth * sx - box.left - box.width)}px ${Math.max(0, top + logicalHeight * sy - box.top - box.height)}px ${Math.max(0, box.left - left)}px)`;
     canvas.style.display = 'block';
     screen.style.setProperty('cursor', 'none', 'important');
+    onDraw?.();
   };
   // Own layout observation even when used without installCanvasFit. Share the
   // per-canvas cache with input, while keeping layout reads off pointermove.
@@ -126,23 +136,30 @@ export async function createNativeCursor(screen: HTMLCanvasElement, base = '/hd-
   const move = (event: PointerEvent) => {
     if (event.pointerType !== 'mouse') return;
     if (document.pointerLockElement === screen) return;
+    lockedPosition = null;
     if (event.type === 'pointerenter') refreshCanvasRect(screen);
     inside = true;
     clientX = event.clientX;
     clientY = event.clientY;
     render();
   };
-  const leave = () => {
+  const leave = (event?: Event) => {
+    if (event?.type === 'pointerleave' && document.pointerLockElement === screen) return;
     inside = false;
     render();
   };
   const lockChanged = () => {
-    if (document.pointerLockElement !== screen) leave();
+    if (document.pointerLockElement !== screen) {
+      lockedPosition = null;
+      leave();
+    }
   };
   const visibilityChanged = () => {
     if (document.hidden) leave();
   };
   const canceled = (event: PointerEvent) => {
+    // Acquiring Pointer Lock can end the absolute PointerEvent stream. The locked cursor still belongs here.
+    if (document.pointerLockElement === screen) return;
     if (event.pointerType === 'mouse') leave();
   };
   for (const type of ['pointermove', 'pointerdown', 'pointerup', 'pointerenter'] as const)
@@ -157,11 +174,11 @@ export async function createNativeCursor(screen: HTMLCanvasElement, base = '/hd-
   document.addEventListener('fullscreenchange', layoutChanged);
   return {
     position(x: number, y: number, visible: boolean) {
-      if (!frame || document.pointerLockElement !== screen) return;
-      const box = currentCanvasRect(screen);
+      if (document.pointerLockElement !== screen) return;
+      // Start can lock before the first picture arrives. Keep logical position
+      // so that first picture and subsequent resizes draw it without a new move.
+      lockedPosition = { x, y };
       inside = visible;
-      clientX = box.left + (x * box.width) / frame.width;
-      clientY = box.top + (y * box.height) / frame.height;
       render();
     },
     update(next: VmFrame) {
