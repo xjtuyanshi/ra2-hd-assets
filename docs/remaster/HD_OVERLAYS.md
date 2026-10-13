@@ -130,7 +130,9 @@ locks and one text lock must all belong to the same transaction. Other writes ke
 returns, every pixel of the complete marker must match the original fill, outline and glyph bits before any
 replacement is published. Page rectangles reproduce the outline and glyph row runs; no browser font is substituted.
 Unsupported fills, fonts, clipping, failed reads or interrupted transactions retain the whole native marker.
-Buildings and passenger/ammo pips remain whole and native. `DIAGNOSTICS.drawJournal` reports readiness, capture/rejection/invalidation counts,
+Building marks and passenger/ammo pips retain their complete native pixels. The existing HD scene still supplies
+building bodies; this does not establish whole-building native fallback or correct rear-corner occlusion.
+`DIAGNOSTICS.drawJournal` reports readiness, capture/rejection/invalidation counts,
 paired pictures and source/present mismatches. Conservative invalidation can leave only a subset of otherwise
 supported bars eligible in a given draw. Disconnect closes capture, leaving inert observers and their executable
 storage owned until process exit. Live screenshots and measurements must establish actual coverage and fidelity.
