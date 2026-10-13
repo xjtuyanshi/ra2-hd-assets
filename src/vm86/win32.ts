@@ -42,6 +42,7 @@ import {
 import { type PcmPlayOptions, type PcmWaveFormat } from './audio';
 import type { DplayTransportFactory } from './shim/dplayTransport';
 import type { GameShimProfile } from './shim/gameProfile';
+import type { FrameOverlayJournal } from '../graphics/frameOverlayData';
 
 const GUEST_BINK_VIDEO_EXPORTS = new Set([
   '_BinkSetSoundSystem@8',
@@ -110,6 +111,11 @@ export interface VmFrame {
   rgba?: Uint8Array;
   /** Compact RGB565 when host controls need no composition; no row padding, allowing direct integer-texture upload. */
   rgb565?: Uint16Array;
+  /** Native picture identity, independent of the simulation frame counter. */
+  matchGeneration?: number;
+  drawGeneration?: number;
+  /** Matched clean picture and explicit vector primitives; rgb565 always retains the complete native fallback. */
+  overlayJournal?: FrameOverlayJournal;
   /** A native dialog owns the whole picture, including while its controls are disabled for a transition. */
   menuVisible?: boolean;
   /** Current native software-cursor sheet frame; position is presentation-independent from the picture pixels. */

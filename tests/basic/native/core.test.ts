@@ -61,6 +61,7 @@ class FakeAgent implements NativeWebSocket {
   subscriptionRevision = 0;
   surface = { width: 0, height: 0, bpp: 0, format: 'RGB565' };
   cursorSnapshot = false;
+  drawJournal = false;
   cursorPayload: Uint8Array = new Uint8Array(28);
   cursorError: string | null = null;
   constructor() {
@@ -152,6 +153,7 @@ class FakeAgent implements NativeWebSocket {
           mirrorWindow: this.mirrorWindow,
           ...(this.cursorSnapshot ? { cursorSnapshot: true } : {}),
           menuSnapshot: true,
+          ...(this.drawJournal ? { drawJournal: true } : {}),
         },
       }),
     );
@@ -1064,6 +1066,47 @@ describe('native core session and presenter lifecycle', () => {
     await start;
     const subscription = agent.requests.find((request) => request.type === NativeMessageType.Subscribe)!;
     expect(u32(subscription.payload, 16)).toBe(0);
+  });
+  it('keeps unrequested native draw observation disabled even when the host supports it', async () => {
+    const { core, agent } = setup();
+    agent.drawJournal = true;
+    const start = core.start();
+    agent.hello();
+    await start;
+    expect(agent.requests.find((request) => request.type === NativeMessageType.Credit)?.payload).toEqual(encodeU32(1));
+  });
+  it('negotiates atomic draw journals and forwards the matched planes without changing the native fallback', async () => {
+    const frames = vi.fn();
+    const { core, agent, scheduled } = setup({ onFrame: frames }, { drawJournal: true });
+    agent.drawJournal = true;
+    const start = core.start();
+    agent.hello();
+    await start;
+    expect(agent.requests.find((request) => request.type === NativeMessageType.Credit)?.payload).toEqual(
+      encodeU32(1, 1),
+    );
+    const commands = json([
+      { kind: 'rect', x: 0, y: 0, width: 1, height: 1, colour: 0x7e0, clip: { x: 0, y: 0, width: 2, height: 1 } },
+    ]);
+    agent.emit(
+      NativeMessageType.Picture,
+      0,
+      concat(
+        encodeU32(80, 2, 1, 1, 0, 2),
+        new Uint8Array([2, 0x80]),
+        encodeU32(0x314a564f, 32 + commands.length + 4, 2, 7, 2, 1, 1, commands.length),
+        commands,
+        new Uint8Array([0, 0, 1, 0]),
+      ),
+    );
+    scheduled.shift()!();
+    const frame = frames.mock.calls[0]![0] as VmFrame;
+    expect(frame).toMatchObject({ matchGeneration: 2, drawGeneration: 7 });
+    expect([...frame.rgb565!]).toEqual([0xf81f, 0xf81f]);
+    expect([...frame.overlayJournal!.cleanRgb565]).toEqual([0, 1]);
+    agent.picture(81, false);
+    scheduled.shift()!();
+    expect(frames.mock.calls[1]![0].overlayJournal).toBeUndefined();
   });
   it('attaches pictures and protocol input at a menu, then prepares readers only from a real battle mirror', async () => {
     const statuses = vi.fn(),

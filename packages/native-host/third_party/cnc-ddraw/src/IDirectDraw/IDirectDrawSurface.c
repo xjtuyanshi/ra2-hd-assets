@@ -1,4 +1,6 @@
 #include <initguid.h>
+/* Native-host bridge: optional surface-lifetime fence. */
+#include "agent.h"
 #include "IDirectDrawSurface.h"
 #include "IDirectDrawGammaControl.h"
 #include "ddsurface.h"
@@ -84,6 +86,8 @@ ULONG __stdcall IDirectDrawSurface__Release(IDirectDrawSurfaceImpl* This)
 
     if (This->ref == 0)
     {
+        /* Native host: close any capture before freeing or recycling its pixels. */
+        nh_draw_journal_surface_write(dds_GetBuffer(This), This->size, NH_DRAW_RELEASE);
         TRACE("     Released (%p)\n", This);
 
         if (g_ddraw.ref && (This->caps & DDSCAPS_PRIMARYSURFACE))

@@ -509,6 +509,7 @@ void nh_logic_tick(void) {
             InterlockedCompareExchange(&game_thread_id, (LONG)teb_thread, 0);
     }
     InterlockedIncrement(&logic_frames);
+    nh_draw_journal_tick();
     if (!enabled || !nh_connected() || initialized != 2) return;
     if (!TryEnterCriticalSection(&state_lock)) { InterlockedIncrement(&hook_lock_skips); return; }
     frame = nh_current_frame();

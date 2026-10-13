@@ -2,6 +2,8 @@ import { frameRegionFilterShader, frameRegionScissor } from '../../../graphics/f
 import { t } from '../../shared/i18n/translate';
 import type { FramePostProcess } from '../../../graphics/framePostProcess';
 import type { VmFrame } from '../../../vm86/win32';
+import { validFrameOverlay } from '../../../graphics/frameOverlayData';
+import { FrameOverlayPass } from '../../../graphics/frameOverlay';
 import { spatialUpscaleShader } from './spatialUpscale';
 import { fsrRcasShader, fsrUpscaleShader } from './fsrUpscale';
 import { ScalefxUpscale } from './scalefxUpscale';
@@ -292,6 +294,9 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
   private smoothRect: FrameRect | null = null;
   private readonly smoothPrograms = new Map<string, { program: WebGLProgram; rect: WebGLUniformLocation | null }>();
   private keyPrograms: Record<'indexed' | 'rgba' | 'rgb565', KeyProgram> | null = null;
+  private overlayPass: FrameOverlayPass | null = null;
+  private overlaySource: VmFrame | null = null;
+  private overlayPicture: VmFrame | null = null;
 
   get upscaleStatus(): string | null {
     return this.ai?.status ?? (this.spatialUpscale || this.fsr || this.scalefx ? this.spatialStatus : null);
@@ -531,7 +536,17 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
     if (this.destroyed) return;
     const { gl } = this;
     if (this.transparentKey) {
-      this.drawKeyed(frame, this.transparentKey, targetWidth, targetHeight);
+      const replacement = this.prepareOverlay(frame);
+      this.drawKeyed(replacement ?? frame, this.transparentKey, targetWidth, targetHeight);
+      if (replacement) {
+        try {
+          this.overlayPass!.draw();
+        } catch {
+          // The original plane is complete even when device rendering fails after preparation.
+          this.drawKeyed(frame, this.transparentKey, targetWidth, targetHeight);
+          this.overlayPicture = null;
+        }
+      }
       this.drawSmoothRegion(frame, targetWidth, targetHeight);
       this.punchTransparentRect(frame, targetWidth, targetHeight);
       this.drawCursor(frameCursor(cursorFrame), cursorFrame, cursorPresentation);
@@ -612,6 +627,22 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
     this.postProcess(targetWidth, targetHeight);
     this.punchTransparentRect(frame, targetWidth, targetHeight);
     this.drawCursor(frameCursor(cursorFrame), cursorFrame, cursorPresentation);
+  }
+
+  private prepareOverlay(frame: VmFrame): VmFrame | null {
+    if (this.overlaySource === frame) return this.overlayPicture;
+    this.overlaySource = frame;
+    this.overlayPicture = null;
+    const journal = frame.overlayJournal;
+    if (!journal || !validFrameOverlay(frame, journal)) return null;
+    try {
+      this.overlayPass ??= new FrameOverlayPass(this.gl);
+      this.overlayPass.prepare(journal.commands, frame.width, frame.height);
+      this.overlayPicture = { ...frame, rgb565: journal.cleanRgb565, overlayJournal: undefined };
+      return this.overlayPicture;
+    } catch {
+      return null;
+    }
   }
 
   setTransparentRect(rect: FrameRect | null): void {
@@ -845,6 +876,10 @@ class WebGlIndexedFrameRenderer implements FrameBackend {
       this.gl.deleteFramebuffer(this.rcas.framebuffer);
     }
     this.scalefx?.destroy();
+    this.overlayPass?.destroy();
+    this.overlayPass = null;
+    this.overlaySource = null;
+    this.overlayPicture = null;
     this.uploadedFrame = null;
     this.uploadedCursor = null;
   }

@@ -30,11 +30,12 @@ for feature in AGENT LOGIC_HOOK HIDDEN INPUT PICTURE WEBSOCKET; do
 done
 sources=("$VENDOR_DIR"/src/*.c "$VENDOR_DIR"/src/*/*.c)
 if [[ "${NATIVE_HOST_AGENT:-1}" == 1 ]]; then
-  sources+=("$PACKAGE_DIR"/agent/*.c)
+  sources+=("$PACKAGE_DIR"/agent/*.c "$PACKAGE_DIR/../../src/games/yr/nativeDrawJournal.c")
 fi
 objects=()
 for source in "${sources[@]}"; do
   relative="${source#"$PACKAGE_DIR/"}"
+  if [[ "$relative" == ../* ]]; then relative="game/yr/$(basename "$source")"; fi
   object="$BUILD_DIR/obj/${relative%.c}.o"
   mkdir -p "$(dirname "$object")"
   "$CC" "${CFLAGS[@]}" -c "$source" -o "$object"

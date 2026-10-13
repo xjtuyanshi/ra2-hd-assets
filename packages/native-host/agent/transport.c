@@ -650,7 +650,7 @@ static int nh_receive(SOCKET socket, uint8_t *buffer) {
     else if (type == NH_DIAGNOSTICS) {
         /* One I/O owner, with no recursive receive. Keep large formatting buffers
          * off the receive stack used by every high-frequency input and ACK. */
-        static char fragment[8192], hidden_host[1024], picture[256], cursor[512], trace[49152], diagnostic[65536];
+        static char fragment[8192], hidden_host[1024], picture[256], draw_journal[4096], cursor[512], trace[49152], diagnostic[65536];
         if (payload_length) nh_error(id, "DIAGNOSTICS takes no payload");
         else {
             LARGE_INTEGER format_started, format_finished;
@@ -658,9 +658,10 @@ static int nh_receive(SOCKET socket, uint8_t *buffer) {
             nh_mirror_diagnostics(fragment, sizeof(fragment));
             nh_hidden_diagnostics(hidden_host, sizeof(hidden_host));
             nh_picture_diagnostics(picture, sizeof(picture));
+            nh_draw_journal_diagnostics(draw_journal, sizeof(draw_journal));
             nh_cursor_diagnostics(cursor, sizeof(cursor));
             nh_trace_diagnostics(trace, sizeof(trace));
-            snprintf(diagnostic, sizeof(diagnostic), "{%s,\"gameThreadId\":%u,\"allocatedBytes\":%u,\"replyQueue\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"picture\":%s,\"cursor\":%s,\"mirrorMessagesSent\":%llu,\"mirrorQueueUs\":%llu,\"mirrorSendUs\":%llu,\"mirrorQueueMaxUs\":%u,\"mirrorSendMaxUs\":%u,\"diagnosticFormatCount\":%llu,\"diagnosticFormatUs\":%llu,\"diagnosticFormatLastUs\":%u,\"diagnosticFormatMaxUs\":%u,%s}", fragment, nh_game_thread_id(), nh_allocated, nh_reply_count, nh_hidden_active() ? "true" : "false", hidden_host, picture, cursor,
+            snprintf(diagnostic, sizeof(diagnostic), "{%s,\"gameThreadId\":%u,\"allocatedBytes\":%u,\"replyQueue\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"picture\":%s,\"drawJournal\":%s,\"cursor\":%s,\"mirrorMessagesSent\":%llu,\"mirrorQueueUs\":%llu,\"mirrorSendUs\":%llu,\"mirrorQueueMaxUs\":%u,\"mirrorSendMaxUs\":%u,\"diagnosticFormatCount\":%llu,\"diagnosticFormatUs\":%llu,\"diagnosticFormatLastUs\":%u,\"diagnosticFormatMaxUs\":%u,%s}", fragment, nh_game_thread_id(), nh_allocated, nh_reply_count, nh_hidden_active() ? "true" : "false", hidden_host, picture, draw_journal, cursor,
                 (unsigned long long)nh_mirrors_sent, (unsigned long long)nh_mirror_queue_us,
                 (unsigned long long)nh_mirror_send_us, nh_mirror_queue_max_us, nh_mirror_send_max_us,
                 (unsigned long long)nh_diagnostic_count, (unsigned long long)nh_diagnostic_us,
@@ -736,7 +737,7 @@ static void nh_session(SOCKET socket, uint8_t *receive, uint8_t **staging) {
     nh_packet packet;
     nh_surface_info(&width, &height, &bpp);
     nh_hidden_diagnostics(hidden_host, sizeof(hidden_host));
-    snprintf(hello, sizeof(hello), "{\"protocol\":%u,\"pid\":%lu,\"gameThreadId\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"exe\":{\"size\":%u,\"peTimestamp\":%u,\"sha256\":\"%s\",\"verified\":%s},\"surface\":{\"width\":%u,\"height\":%u,\"bpp\":%u,\"format\":\"RGB565\"},\"limits\":{\"messageBytes\":%u,\"pages\":%u,\"rules\":%u,\"pageRemovals\":true,\"subscribeRevision\":true,\"mirrorWindow\":2,\"cursorSnapshot\":true,\"menuSnapshot\":true,\"maxBudgetUs\":%u,\"followRuleKinds\":[1,2,3,4,5,6,7,8]}}",
+    snprintf(hello, sizeof(hello), "{\"protocol\":%u,\"pid\":%lu,\"gameThreadId\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"exe\":{\"size\":%u,\"peTimestamp\":%u,\"sha256\":\"%s\",\"verified\":%s},\"surface\":{\"width\":%u,\"height\":%u,\"bpp\":%u,\"format\":\"RGB565\"},\"limits\":{\"messageBytes\":%u,\"pages\":%u,\"rules\":%u,\"pageRemovals\":true,\"subscribeRevision\":true,\"mirrorWindow\":2,\"cursorSnapshot\":true,\"menuSnapshot\":true,\"drawJournal\":true,\"maxBudgetUs\":%u,\"followRuleKinds\":[1,2,3,4,5,6,7,8]}}",
         NH_VERSION, (unsigned long)GetCurrentProcessId(), nh_game_thread_id(), nh_hidden_active() ? "true" : "false", hidden_host, nh_exe_size, nh_pe_timestamp, nh_hash,
         nh_identity_verified() ? "true" : "false", width, height, bpp, NH_MAX_MESSAGE, NH_MAX_PAGES, NH_MAX_RULES, NH_MIRROR_MAX_BUDGET_US);
     memset(&packet, 0, sizeof(packet)); packet.type = NH_HELLO; packet.length = (uint32_t)strlen(hello); packet.bytes = (uint8_t *)hello;

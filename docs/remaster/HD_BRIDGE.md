@@ -235,8 +235,35 @@ The native YR route also publishes optional `GameRenderState.battlefieldOverlay`
 building foundation dimensions and reader CPU time. It validates the executable and field dependencies, rereads selection
 independently of the world-state cache, and returns null for unknown data. Advisory mirror availability checks never
 trigger subscriptions or invalidate an otherwise complete world read. These observations do not contain draw-atomic
-anchors, clipping or building occlusion and do not enable any replacement gate; all tactical overlays remain native.
+anchors, clipping or building occlusion and do not enable any replacement gate.
 The selective replacement and fallback contract is specified in [HD battlefield overlays](HD_OVERLAYS.md).
+
+Native pictures can separately carry an optional `VmFrame.overlayJournal`, negotiated through the native Picture
+protocol. Native draw capture is an explicit `native-draw-journal=1` development-page option, off by default.
+Its match/draw generations, complete clean RGB565 plane and ordered rectangle/convex-polygon commands
+belong to the same picture; asynchronous `GameRenderState` observations cannot supply this authority. The original
+`VmFrame.rgb565` remains an independent full fallback. `VmFrameRenderer` uses the clean plane only in its keyed
+WebGL path after validating every command and preparing the device-resolution vector pass, then draws those vectors
+before the independent cursor. A generation mismatch, unsupported command, incomplete plane or reported GPU error
+keeps the original plane. Original view and Canvas 2D retain native marks. No replacement is synthesized from
+selected-object world positions, HD art bounds or guessed pixel erasure.
+The YR native producer preserves every original call and captures verified mobile health-border/tick leaves.
+Source-defined rectangular strokes and cells use the actual native colors; exact before/after leaf snapshots
+construct the clean plane. A border requires an entirely keyed background, keeping retained previous bars and
+overlapping native marks native. The actual successful `CopyPart` supplies a validated one-to-one translation
+from the tactical surface into a complete primary snapshot, including the sidebar. Its entire copied region must
+match the source, and the complete native primary must match the owned pixels used for Picture encoding. Exactly
+one verified software copy or matching plain, non-aliased cnc-ddraw `Blt` must perform that transfer.
+Existing controlled DSurface blit wrappers are accepted only after validating their full template, owned allocations,
+thread owner, marker, zero gate depth and original targets. A validated empty sidebar draw may retain candidates;
+later unclassified writes still invalidate them. Known foreign software writers are tracked from destination lock
+through actual unlock completion; a changing writer generation or an active writer rejects the publication.
+Unknown foreign DSurface locks and nonempty foreign DirectDraw writes disable replacement for the process after installation,
+even outside an active capture or client opt-in period.
+The optional trailer encodes changed clean rows against
+that same packet's native fallback, without a separate inter-frame clean baseline. Group numbers, building brackets
+and passenger/ammo pips stay native. Conservative invalidation may retain native bars even when their shapes are
+supported; diagnostics alone do not establish visible replacement, completeness or runtime performance acceptance.
 
 ## Match start
 

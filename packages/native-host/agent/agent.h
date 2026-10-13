@@ -121,6 +121,24 @@ void nh_picture_disconnect(void);
 void nh_surface_info(uint32_t *width, uint32_t *height, uint32_t *bpp);
 void nh_picture_credit(uint32_t id, const uint8_t *payload, uint32_t length);
 void nh_picture_diagnostics(char *json, uint32_t capacity);
+void nh_draw_journal_request(int enabled);
+void nh_draw_journal_disconnect(void);
+void nh_draw_journal_tick(void);
+void nh_draw_journal_picture(void);
+void nh_draw_journal_diagnostics(char *out, uint32_t capacity);
+int nh_draw_journal_defer_picture(void);
+uint32_t nh_draw_journal_append(uint8_t *out, uint32_t offset, uint32_t capacity,
+    const void *pixels, uint32_t width, uint32_t height, uint32_t pitch);
+enum nh_draw_write_kind { NH_DRAW_BLT = 1, NH_DRAW_BLT_FAST, NH_DRAW_FLIP,
+    NH_DRAW_DC, NH_DRAW_REBIND, NH_DRAW_RELEASE, NH_DRAW_LOCK };
+struct nh_draw_copy {
+    const void *source, *destination, *source_pixels, *destination_pixels;
+    uint32_t source_pitch, destination_pitch;
+    int32_t source_rect[4], destination_rect[4];
+};
+int nh_draw_journal_surface_copy(const struct nh_draw_copy *copy);
+void nh_draw_journal_surface_write(const void *pixels, uint32_t bytes, uint32_t kind);
+uint32_t nh_picture_encode_row(uint8_t *out, uint32_t offset, const uint16_t *row, uint32_t width);
 int nh_picture_message(HWND window, UINT message, WPARAM wparam);
 #if !NH_ENABLE_AGENT
 /* A vendor-only build links no agent objects and takes the original API paths. */
@@ -128,6 +146,8 @@ int nh_picture_message(HWND window, UINT message, WPARAM wparam);
 #define nh_agent_start() ((void)0)
 #define nh_agent_stop() ((void)0)
 #define nh_present(...) ((void)0)
+#define nh_draw_journal_surface_write(...) ((void)0)
+#define nh_draw_journal_surface_copy(...) 0
 #define nh_input_active() 0
 #define nh_input_cursor(point) 0
 #define nh_input_set_cursor(x, y) 0

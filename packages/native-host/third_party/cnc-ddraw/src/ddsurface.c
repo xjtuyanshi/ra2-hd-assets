@@ -237,6 +237,22 @@ HRESULT dds_Blt(
     void* dst_buf = dds_GetBuffer(This);
     void* src_buf = dds_GetBuffer(src_surface);
 
+    /* Native host: only this exact, unclipped plain copy can be classified as
+     * the game's observed final transfer. All other destination writes fence. */
+    int classified_copy = 0;
+    if (dwFlags == DDBLT_WAIT && !lpDDBltFx && !is_stretch_blt &&
+        src_surface && src_surface != This && This->bpp == 16 && src_surface->bpp == 16 &&
+        src_buf && dst_buf && src_w > 0 && src_h > 0 && src_w == dst_w && src_h == dst_h)
+    {
+        struct nh_draw_copy copy = {
+            src_surface, This, src_buf, dst_buf, src_surface->pitch, This->pitch,
+            { src_x, src_y, src_w, src_h }, { dst_x, dst_y, dst_w, dst_h }
+        };
+        classified_copy = nh_draw_journal_surface_copy(&copy);
+    }
+    if (!classified_copy)
+        nh_draw_journal_surface_write(dst_buf, This->size, NH_DRAW_BLT);
+
     if (dst_buf && (dwFlags & DDBLT_COLORFILL) && lpDDBltFx && dst_w > 0 && dst_h > 0)
     {
         if (This->bpp == 24)
@@ -572,6 +588,9 @@ HRESULT dds_BltFast(
     void* dst_buf = dds_GetBuffer(This);
     void* src_buf = dds_GetBuffer(src_surface);
 
+    /* Native host: fence destination mutation, including aliased custom buffers. */
+    nh_draw_journal_surface_write(dst_buf, This->size, NH_DRAW_BLT_FAST);
+
     if (src_surface && dst_w > 0 && dst_h > 0)
     {
         if (This->bpp != src_surface->bpp ||
@@ -814,6 +833,8 @@ HRESULT dds_EnumAttachedSurfaces(
 
 HRESULT dds_Flip(IDirectDrawSurfaceImpl* This, IDirectDrawSurfaceImpl* lpDDSurfaceTargetOverride, DWORD dwFlags)
 {
+    /* Native host: external access or rebinding can change the captured plane. */
+    nh_draw_journal_surface_write(dds_GetBuffer(This), This->size, NH_DRAW_FLIP);
     dbg_dump_dds_flip_flags(dwFlags);
 
     if (This->backbuffer && !This->skip_flip && !(g_config.carma95_hack && g_ddraw.height == 200))
@@ -946,6 +967,9 @@ HRESULT dds_GetDC(IDirectDrawSurfaceImpl* This, HDC FAR* lpHDC)
 
         return DDERR_INVALIDPARAMS;
     }
+
+    /* Native host: exposing a writable DC invalidates captured pixels. */
+    nh_draw_journal_surface_write(dds_GetBuffer(This), This->size, NH_DRAW_DC);
 
     RGBQUAD* data =
         This->palette ? This->palette->data_rgb :
@@ -1289,6 +1313,8 @@ HRESULT dds_GetDDInterface(IDirectDrawSurfaceImpl* This, LPVOID* lplpDD)
 
 HRESULT dds_SetSurfaceDesc(IDirectDrawSurfaceImpl* This, LPDDSURFACEDESC2 lpDDSD, DWORD dwFlags)
 {
+    /* Native host: external access or rebinding can change the captured plane. */
+    nh_draw_journal_surface_write(dds_GetBuffer(This), This->size, NH_DRAW_REBIND);
     dbg_dump_dds_flags(lpDDSD->dwFlags);
     dbg_dump_dds_caps(lpDDSD->ddsCaps.dwCaps);
 

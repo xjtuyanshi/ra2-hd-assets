@@ -637,6 +637,7 @@ export class VmWorkerController {
     const transfers: Transferable[] = [frame.pixels.buffer, frame.palette.buffer];
     if (frame.rgba) transfers.push(frame.rgba.buffer);
     if (frame.rgb565) transfers.push(frame.rgb565.buffer);
+    if (frame.overlayJournal) transfers.push(frame.overlayJournal.cleanRgb565.buffer);
     if (frame.cursor) transfers.push(frame.cursor.rgba.buffer);
     this.post({ type: 'frame', frameId, frame }, transfers);
   }

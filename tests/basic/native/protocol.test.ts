@@ -335,6 +335,77 @@ describe('native binary protocol', () => {
   });
 });
 
+describe('atomic native overlay publications', () => {
+  const commands = [
+    { kind: 'rect', x: 0, y: 0, width: 1, height: 1, colour: 0x7e0, clip: { x: 0, y: 0, width: 3, height: 1 } },
+  ];
+  function journal(overrides: { width?: number; flags?: number; generation?: number } = {}) {
+    const metadata = json(commands);
+    return concat(
+      encodeU32(
+        0x314a564f,
+        32 + metadata.length + 6,
+        7,
+        overrides.generation ?? 12,
+        overrides.width ?? 3,
+        1,
+        overrides.flags ?? 1,
+        metadata.length,
+      ),
+      metadata,
+      words(0xf81f, 2, 3),
+    );
+  }
+  it('keeps original and clean planes independently owned and never carries a journal into a later delta', () => {
+    const decoder = new NativePictureDecoder();
+    const decoded = decoder.apply(concat(picture(42, 3, 1, [[0, words(3, 1, 2, 3)]]), journal()));
+    expect(decoded.overlayJournal).toMatchObject({ matchGeneration: 7, drawGeneration: 12, commands });
+    expect([...decoded.pixels]).toEqual([1, 2, 3]);
+    expect([...decoded.overlayJournal!.cleanRgb565]).toEqual([0xf81f, 2, 3]);
+    decoded.overlayJournal!.cleanRgb565.fill(9);
+    decoded.pixels.fill(8);
+    const next = decoder.apply(picture(43, 3, 1, []));
+    expect([...next.pixels]).toEqual([1, 2, 3]);
+    expect(next.overlayJournal).toBeUndefined();
+  });
+  it('retains the native fallback for mismatched, incomplete, unknown and truncated journals', () => {
+    const decoder = new NativePictureDecoder();
+    for (const suffix of [
+      journal({ width: 4 }),
+      journal({ flags: 0 }),
+      journal({ generation: 0 }),
+      journal().subarray(0, 31),
+      journal().subarray(0, -1),
+      encodeU32(0),
+    ]) {
+      const decoded = decoder.apply(concat(picture(42, 3, 1, [[0, words(3, 1, 2, 3)]]), suffix));
+      expect(decoded.overlayJournal).toBeUndefined();
+      expect([...decoded.pixels]).toEqual([1, 2, 3]);
+    }
+    expect([...decoder.apply(picture(43, 3, 1, [])).pixels]).toEqual([1, 2, 3]);
+  });
+  it('decodes compressed clean rows against this packet and rejects bad rows without damaging fallback', () => {
+    const decoder = new NativePictureDecoder(),
+      metadata = json(commands);
+    const rows = concat(encodeU32(1, 0, 6), words(0x8001, 1, 9));
+    const header = encodeU32(0x314a564f, 32 + metadata.length + rows.length, 7, 12, 2, 2, 3, metadata.length);
+    const base = picture(42, 2, 2, [
+      [0, words(2, 1, 2)],
+      [1, words(2, 3, 4)],
+    ]);
+    const decoded = decoder.apply(concat(base, header, metadata, rows));
+    expect([...decoded.pixels]).toEqual([1, 2, 3, 4]);
+    expect([...decoded.overlayJournal!.cleanRgb565]).toEqual([0xf81f, 9, 3, 4]);
+    const changed = decoder.apply(concat(picture(43, 2, 2, [[1, words(2, 8, 7)]]), header, metadata, rows));
+    expect([...changed.overlayJournal!.cleanRgb565]).toEqual([0xf81f, 9, 8, 7]);
+    const badRows = rows.slice();
+    new DataView(badRows.buffer).setUint32(4, 2, true);
+    const rejected = decoder.apply(concat(picture(44, 2, 2, []), header, metadata, badRows));
+    expect(rejected.overlayJournal).toBeUndefined();
+    expect([...rejected.pixels]).toEqual([1, 2, 8, 7]);
+  });
+});
+
 describe('native RGB565 picture decoding', () => {
   it('decodes a complete Wide fullscreen frame and preserves its baseline after an oversized delta', () => {
     const decoder = new NativePictureDecoder();

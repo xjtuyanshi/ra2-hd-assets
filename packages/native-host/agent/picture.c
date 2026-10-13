@@ -58,14 +58,16 @@ void nh_picture_credit(uint32_t id, const uint8_t *payload, uint32_t length)
         nh_send(NH_ERROR, id, error, (uint32_t)strlen(error));
         return;
     }
-    uint32_t count = 0;
-    if (length == 4) memcpy(&count, payload, 4);
-    if (count != 1)
+    uint32_t count = 0, options = 0;
+    if (length == 4 || length == 8) memcpy(&count, payload, 4);
+    if (length == 8) memcpy(&options, payload + 4, 4);
+    if (count != 1 || options & ~1u)
     {
         const char *error = "picture credit must be exactly one";
         nh_send(NH_ERROR, id, error, (uint32_t)strlen(error));
         return;
     }
+    nh_draw_journal_request((options & 1u) != 0);
     LONG bpp = InterlockedCompareExchange(&surface_bpp, 0, 0);
     if (bpp && bpp != 16)
     {
@@ -135,6 +137,7 @@ void nh_picture_sent(void)
 
 void nh_picture_disconnect(void)
 {
+    nh_draw_journal_disconnect();
     if (InterlockedCompareExchange(&initialized, 0, 0) != 2) return;
     EnterCriticalSection(&picture_lock);
     credit = in_flight = baseline_valid = 0;
@@ -147,7 +150,7 @@ static void put32(uint32_t *offset, uint32_t value)
     *offset += 4;
 }
 
-static uint32_t encode_row(uint32_t offset, const uint16_t *row, uint32_t width)
+uint32_t nh_picture_encode_row(uint8_t *output, uint32_t offset, const uint16_t *row, uint32_t width)
 {
     uint32_t x = 0;
     while (x < width)
@@ -156,11 +159,11 @@ static uint32_t encode_row(uint32_t offset, const uint16_t *row, uint32_t width)
         int key = row[x] == 0xf81f;
         while (x < width && x - first < 0x7fff && (row[x] == 0xf81f) == key) x++;
         uint16_t tag = (uint16_t)(x - first) | (key ? 0x8000 : 0);
-        memcpy(encoded + offset, &tag, 2);
+        memcpy(output + offset, &tag, 2);
         offset += 2;
         if (!key)
         {
-            memcpy(encoded + offset, row + first, (x - first) * 2);
+            memcpy(output + offset, row + first, (x - first) * 2);
             offset += (x - first) * 2;
         }
     }
@@ -184,6 +187,8 @@ void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pi
         LeaveCriticalSection(&picture_lock);
         return;
     }
+    if (nh_draw_journal_defer_picture()) { LeaveCriticalSection(&picture_lock); return; }
+    nh_draw_journal_picture();
     LARGE_INTEGER encoding_start;
     QueryPerformanceCounter(&encoding_start);
     uint32_t pixels_count = width * height;
@@ -229,12 +234,15 @@ void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pi
         uint32_t length_at = offset;
         put32(&offset, 0);
         uint32_t row_start = offset;
-        offset = encode_row(offset, target, width);
+        offset = nh_picture_encode_row(encoded, offset, target, width);
         uint32_t row_length = offset - row_start;
         memcpy(encoded + length_at, &row_length, 4);
         rows++;
     }
     memcpy(encoded + 12, &rows, 4);
+    /* Match the owned native plane that was actually encoded, not a surface
+     * which could change while the packet is being assembled. */
+    offset = nh_draw_journal_append(encoded, offset, NH_MAX_MESSAGE, pending_pixels, width, height, width * 2);
     uint32_t duration = elapsed_us(encoding_start);
     InterlockedIncrement(&captures);
     InterlockedExchange(&last_encode_us, (LONG)duration);

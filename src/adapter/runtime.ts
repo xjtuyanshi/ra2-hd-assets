@@ -100,6 +100,7 @@ export async function createVmShell(
         url,
         token,
         pageCursor: options.nativePageCursor ?? nativeQuery.get('native-cursor') !== 'game',
+        ...(nativeQuery.get('native-draw-journal') === '1' ? { drawJournal: true } : {}),
         sessionStatusUrl: new URL('/__native/session', window.location.href).href,
       },
       provider: { kind: 'native' },

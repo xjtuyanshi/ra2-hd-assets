@@ -87,6 +87,18 @@ Every integration edit in C source is marked `Native-host bridge`.
 - `README.md`: replaced with this provenance/change inventory; the original was
   renamed to `README.upstream.md` without editing its contents.
 
-All agent implementation lives in `../../agent/`. The rest of the copied
+- `src/ddsurface.c`: native draw-journal capture observes destination writes,
+  writable DC access and surface rebinding before mutation, including buffer
+  aliases. Its plain 16-bit, unscaled `DDBLT_WAIT` copy can be classified by the
+  journal only after message handling and clipping, with the actual source,
+  destination, rectangles and strides. Every other copy retains the write fence.
+  These optional observations retain every original DirectDraw operation.
+- `src/IDirectDraw/IDirectDrawSurface.c`: invalidates capture before the last
+  reference releases a surface buffer, preventing a recycled address from being
+  treated as the earlier draw plane.
+
+Transport and surface access implementation lives in `../../agent/`; executable
+addresses, draw signatures and semantic overlay geometry live in the YR game
+module `../../../../src/games/yr/nativeDrawJournal.c`. The rest of the copied
 upstream files are unchanged. No game executable, game art, frame, or recording
 belongs in this directory.

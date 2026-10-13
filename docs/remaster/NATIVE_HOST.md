@@ -193,8 +193,8 @@ One WebSocket carries requests, replies and streaming updates. All application m
 | 5 Free         | Agent-owned allocation address; empty success.                                                                                                                      |
 | 6 Subscribe    | rangeCount, ruleCount, maxPages, budgetUs, sampleCount; ranges `(address,length)`; rules `(kind,source,bytes,maxCount,stride)`. Replaces the prior subscription.    |
 | 7 Mirror       | frame, flags, pageCount, sampleCount; each page address then 4096 bytes; each independent direct sample address, length, bytes                                      |
-| 8 Credit       | Exactly one; asks for the current or next primary-surface picture.                                                                                                  |
-| 9 Picture      | frame, width, height, rowCount; changed rows `(y,encodedLength,segments)`                                                                                           |
+| 8 Credit       | Count u32, exactly one; optional negotiated options u32, bit 0 requests draw-journal capture. Asks for the current or next primary-surface picture.                 |
+| 9 Picture      | frame, width, height, rowCount; changed rows `(y,encodedLength,segments)`; optional negotiated draw-journal trailer                                                 |
 | 10 Input       | kind, a, b, c; kind 1 = postMessage, 2 = key state, 3 = cursor position; empty success                                                                              |
 | 11 Diagnostics | Empty request; JSON counters including logicFrames, mirrorBytes, hookUs, hookMaxUs, droppedUpdates, truncation, frameHook and gameThreadId                          |
 | 12 Hook        | Boolean u32; enable/disable the version-checked frame hook.                                                                                                         |
@@ -251,6 +251,46 @@ The optional `hello.limits.mirrorWindow=2` permits two outstanding complete publ
 The optional `hello.limits.maxBudgetUs` advertises the agent's supported capture budget, bounded by 20000 μs. NativeCore and reader-smoke request at most 12000 μs from capable agents and retain the 4000 μs budget when the field is absent. A nearly 4096-page full-map bootstrap requires copying and serializing roughly 16 MiB at one boundary; the original 4000 μs cap can truncate that complete initial image before any useful delta exists. Subsequent allocation changes use page-removal deltas to avoid repeating that bootstrap. The negotiated budget remains explicit; overruns continue to fail the update and remain visible in diagnostics.
 
 Picture rows contain u16 segments. Bit 15 selects a run of RGB565 key colour `0xf81f`; bits 0–14 give a nonzero pixel count. Literal runs are followed by that many u16 pixels. A row must decode to exactly the width. The first picture and every size change contain all rows. The client keeps one credit outstanding; an early credit at the agent coalesces into one pending current/next picture. An in-flight delta is never replaced, and its exact baseline advances only after successful sending. A credit also wakes the native GUI owner to capture the actual current primary, so an already drawn static menu does not wait for another presentation. Nonblocking primary/surface locks and GUI timer retries defer contention without a busy error or retry cutoff. The encoded picture buffer moves into the bounded mailbox without an additional payload copy. `DIAGNOSTICS.picture` reports capture count, last/maximum encoding microseconds, last payload bytes and changed rows; it does not measure browser presentation. Surface creation, reconfiguration and final teardown belong to the game GUI owner; foreign-thread DirectDraw lifecycle changes are unsupported.
+
+The optional `hello.limits.drawJournal=true` accepts an eight-byte Credit `[1, options]`, where bit 0 requests native
+draw capture; all other option bits are rejected. A four-byte Credit `[1]` retains the original protocol and
+disables capture. One outstanding credit, the native row baseline and the message-size budget are unchanged.
+The development page opts in only with `native-draw-journal=1`; the ordinary launcher keeps this capture off.
+A replacement-capable producer may append a complete journal after the final encoded row. Its eight-u32 header is
+`magic=0x314A564F, trailerBytes, matchGeneration, drawGeneration, width, height, flags, jsonBytes`, followed by
+the UTF-8 JSON command array and clean-plane data. With `flags=1`, that data is exactly `width*height*2`
+little-endian RGB565 bytes. With `flags=3`, it is `rowCount:u32` followed by changed rows using the Picture row
+encoding above. Each omitted clean row comes from the complete native fallback decoded from this same packet,
+never an earlier clean plane; a zero-row clean delta is valid. Trailer length includes its header, generations are
+nonzero, and dimensions must match the native picture. JSON is bounded to 1 MiB and 4096 commands.
+Each command carries native RGB565 `colour`, an integer source-coordinate `clip` rectangle,
+and either `kind: 'rect'` with `x,y,width,height`, or `kind: 'polygon'` with 3–32 convex ordered points.
+No glyph font, game address, inferred world anchor or asset lookup is part of this generic contract.
+
+The decoder validates native rows independently and owns their baseline. An unknown, malformed or incomplete optional
+trailer is discarded without losing those native pixels or failing the connection. `NativeCore` forwards a decoded
+journal and its match/draw identity on the same `VmFrame`; the Worker transfers the separately owned clean buffer.
+The keyed WebGL renderer validates every primitive and the complete pair before using the clean plane, retaining
+the native plane on validation or reported GPU failure. Other frame backends and original view use the native plane.
+
+The YR producer in `src/games/yr/nativeDrawJournal.c` captures the verified mobile health-border and tick leaves
+described in [HD battlefield overlays](HD_OVERLAYS.md). Original calls still run. An accepted capture uses their
+before/after pixels to reconstruct a separate clean plane and emits semantic rectangular border/tick geometry with
+the actual native RGB565 colors. Each border requires an entirely keyed background so old or overlapping marks
+cannot remain underneath its replacement. A validated successful `CopyPart` supplies equal-sized source/destination
+rectangles and the translation into a complete primary snapshot. The copied region must match its source, and that
+whole native primary must match the owned Picture-encoding pixels. The transfer accepts exactly one observed software
+copy or a matching plain cnc-ddraw `Blt`, with no effects, scaling or aliased memory. Existing HD blit wrappers are recognized only
+through their complete controlled template; a validated empty sidebar callback preserves candidates. Later
+unclassified surface writes, unsupported shapes, failed reads, incomplete captures or unequal pixels discard that
+candidate. Known foreign software writers are tracked through their real destination unlock; active writers or a
+changed writer generation reject the publication. Unknown foreign DSurface locks or nonempty foreign DirectDraw writes
+disable replacement for the process after installation, including outside active capture or client opt-in periods.
+Buildings, control-group digits and
+passenger/ammo pips remain native. The producer uses `flags=3` so unchanged clean rows need no second pixel copy
+on the wire. `DIAGNOSTICS.drawJournal` includes `replacementReady`, captured/rejected/invalidated element counts,
+paired pictures and source/present mismatches; these diagnostics do not establish visual or speed acceptance.
+Disconnect closes capture; installed inert observers retain their executable storage until the native process exits.
 
 Request concurrency and native reply mailboxes retain their existing bounds. Busy work waits for room instead of producing a limit error or disconnect. The I/O owner drains reply pressure; other reply producers wait outside locks. A genuine disconnected socket or malformed request remains an error. Queued-request time is separate from the existing timeout for a request actually sent over the socket.
 

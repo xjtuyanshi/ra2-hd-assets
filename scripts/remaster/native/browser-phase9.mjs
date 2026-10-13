@@ -1879,7 +1879,7 @@ end tell`,
     assert(!webRoute, 'Overlay observations currently require the native route');
     const iterations = c.iterations ?? 1;
     assert(Number.isInteger(iterations) && iterations >= 1 && iterations <= 500);
-    return worker().evaluate(async (iterations) => {
+    const observed = await worker().evaluate(async (iterations) => {
       const core = globalThis.__auditCore;
       const state = await core.getRenderState();
       const { createYrBattlefieldOverlayReader } = await import('/src/games/yr/battlefieldOverlayReader.ts');
@@ -1913,6 +1913,98 @@ end tell`,
         },
       };
     }, iterations);
+    const presentation = await page.evaluate(async () => {
+      const { validFrameOverlay } = await import('/src/graphics/frameOverlayData.ts');
+      const { FrameOverlayPass } = await import('/src/graphics/frameOverlay.ts');
+      if (!window.__phase27OverlayGpu) {
+        const gpu = { attempts: 0, succeeded: 0, failed: 0, lastFailure: null };
+        const draw = FrameOverlayPass.prototype.draw;
+        FrameOverlayPass.prototype.draw = function (...args) {
+          gpu.attempts++;
+          try {
+            const result = draw.apply(this, args);
+            gpu.succeeded++;
+            return result;
+          } catch (error) {
+            gpu.failed++;
+            try {
+              gpu.lastFailure = String(error);
+            } catch {
+              gpu.lastFailure = 'Unprintable overlay failure';
+            }
+            throw error;
+          }
+        };
+        window.__phase27OverlayGpu = gpu;
+      }
+      const gpu = window.__phase27OverlayGpu;
+      const before = { ...gpu };
+      const probe = window.__phase7Presentation;
+      let captured = null;
+      const originalDraw = probe?.draw;
+      const captureDraw = function (...args) {
+        const result = originalDraw.apply(this, args);
+        // Frame buffers can be returned to the Worker before the next draw.
+        // Snapshot once while this completed draw still owns its native pixels.
+        if (!captured) {
+          try {
+            const frame = args[0]?.[0];
+            if (frame?.width && frame?.height) {
+              const journal = frame.overlayJournal;
+              const native = frame.rgb565;
+              const clean = journal?.cleanRgb565;
+              let changedPixels = null;
+              if (native instanceof Uint16Array && clean instanceof Uint16Array && native.length === clean.length) {
+                changedPixels = 0;
+                for (let index = 0; index < native.length; index++) if (native[index] !== clean[index]) changedPixels++;
+              }
+              captured = {
+                available: true,
+                scope: 'Synchronous completed-draw snapshot before frame recycling; no visual acceptance',
+                dimensions: { width: frame.width, height: frame.height },
+                nativePixelLength: native?.length ?? null,
+                matchGeneration: frame.matchGeneration ?? null,
+                drawGeneration: frame.drawGeneration ?? null,
+                journal: journal
+                  ? {
+                      dimensions: { width: journal.width, height: journal.height },
+                      matchGeneration: journal.matchGeneration,
+                      drawGeneration: journal.drawGeneration,
+                      commandCount: journal.commands.length,
+                      cleanPixelLength: clean?.length ?? null,
+                      changedPixels,
+                      passedValidation: validFrameOverlay(frame, journal),
+                    }
+                  : null,
+              };
+            }
+          } catch {
+            captured = { available: false, reason: 'Read-only draw observation failed' };
+          }
+        }
+        return result;
+      };
+      if (probe && originalDraw) probe.draw = captureDraw;
+      try {
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      } finally {
+        if (probe?.draw === captureDraw) probe.draw = originalDraw;
+      }
+      const gpuDraw = {
+        ...gpu,
+        twoAnimationFrames: {
+          attempts: gpu.attempts - before.attempts,
+          succeeded: gpu.succeeded - before.succeeded,
+          failed: gpu.failed - before.failed,
+        },
+        scope: 'Original FrameOverlayPass.draw returned after its WebGL error check; not display scanout',
+      };
+      return {
+        ...(captured ?? { available: false, reason: 'No completed draw in two animation frames' }),
+        gpuDraw,
+      };
+    });
+    return { ...observed, presentation };
   }
   if (c.action === 'ending-checkpoint') {
     const m = await import('./phase11-endings.mjs');
@@ -2014,6 +2106,8 @@ end tell`,
       buildOnly: c.buildOnly ?? false,
       buildRadar: c.buildRadar ?? false,
       stopAfter: c.stopAfter ?? null,
+      trainInfantryCount: c.trainInfantryCount,
+      trainVehicleCount: c.trainVehicleCount,
       page,
       click: (x, y, mode, button) => click(x, y, button ?? 'left'),
       point,
@@ -2278,9 +2372,11 @@ end tell`,
   }
   if (c.action === 'reload') {
     beforeBuildings = c.beforeBuildings === true;
-    if (c.fullscreenRequested !== undefined) {
+    if (c.fullscreenRequested !== undefined || c.drawJournal !== undefined) {
       const target = new URL(page.url());
-      target.searchParams.set('native-fullscreen', c.fullscreenRequested ? '1' : '0');
+      if (c.fullscreenRequested !== undefined)
+        target.searchParams.set('native-fullscreen', c.fullscreenRequested ? '1' : '0');
+      if (c.drawJournal !== undefined) target.searchParams.set('native-draw-journal', c.drawJournal ? '1' : '0');
       await page.goto(target.href);
     } else await page.reload();
     if (c.reenterFullscreen === true) {
@@ -2386,7 +2482,14 @@ end tell`,
       [x, y] = [(control.rect[0] + control.rect[2]) / 2, (control.rect[1] + control.rect[3]) / 2];
       if (control.class === 'ComboBox') x = control.rect[2] - 8;
     }
-    await click(x, y, c.button);
+    const modifiers = c.modifiers ?? [];
+    assert(Array.isArray(modifiers) && modifiers.every((key) => ['Control', 'Shift', 'Alt'].includes(key)));
+    try {
+      for (const key of modifiers) await page.keyboard.down(key);
+      await click(x, y, c.button);
+    } finally {
+      for (const key of [...modifiers].reverse()) await page.keyboard.up(key);
+    }
     await delay(c.wait ?? 700);
     return c.label ? shot(c.label) : state();
   }

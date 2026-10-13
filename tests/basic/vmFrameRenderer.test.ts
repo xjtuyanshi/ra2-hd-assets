@@ -5,6 +5,8 @@ import { parsePassthroughFlags } from '../../src/ui/pages/game/hdBridge';
 import { AiUpscale } from '../../src/ui/pages/game/aiUpscale';
 import { fsrUpscaleMode, spatialUpscaleEnabled } from '../../src/ui/pages/game/spatialUpscale';
 import type { VmFrame } from '../../src/vm86/win32';
+import { validFrameOverlay, type FrameOverlayJournal } from '../../src/graphics/frameOverlayData';
+import { frameOverlayVertices } from '../../src/graphics/frameOverlay';
 
 class FakeCanvas {
   width = 0;
@@ -60,6 +62,9 @@ class FakeWebGl {
   readonly LINK_STATUS = 5;
   readonly ARRAY_BUFFER = 6;
   readonly STATIC_DRAW = 7;
+  readonly DYNAMIC_DRAW = 39;
+  readonly TRIANGLES = 40;
+  readonly NO_ERROR = 0;
   readonly FLOAT = 8;
   readonly TEXTURE0 = 10;
   readonly TEXTURE1 = 11;
@@ -130,6 +135,17 @@ class FakeWebGl {
   }
   createBuffer(): object {
     return {};
+  }
+  createVertexArray(): object {
+    return {};
+  }
+  bindVertexArray(): void {}
+  deleteVertexArray(): void {}
+  getError(): number {
+    return this.NO_ERROR;
+  }
+  isContextLost(): boolean {
+    return false;
   }
   createFramebuffer(): object {
     return {};
@@ -232,6 +248,111 @@ function indexedFrame(width = 2, height = 1): VmFrame {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe('atomic native overlay presentation', () => {
+  function picture(): VmFrame {
+    const frame = {
+      ...indexedFrame(4, 4),
+      rgb565: new Uint16Array(16).fill(0xffff),
+      matchGeneration: 7,
+      drawGeneration: 91,
+    };
+    const overlayJournal: FrameOverlayJournal = {
+      matchGeneration: 7,
+      drawGeneration: 91,
+      width: 4,
+      height: 4,
+      cleanRgb565: new Uint16Array(16).fill(0xf81f),
+      commands: [
+        { kind: 'rect', x: 1, y: 1, width: 2, height: 1, colour: 0x7e0, clip: { x: 0, y: 0, width: 4, height: 4 } },
+      ],
+    };
+    return { ...frame, overlayJournal };
+  }
+
+  it('selects the clean plane only with a complete matched journal and keyed HD output', () => {
+    const gl = new FakeWebGl();
+    const renderer = createVmFrameRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement);
+    const frame = picture();
+    renderer.draw(frame, 8, 8);
+    expect(gl.uploads.at(-1)?.at(-1)).toBe(frame.rgb565);
+    renderer.setTransparentKey({ rect: { x: 0, y: 0, width: 4, height: 4 }, rgb565: 0xf81f });
+    renderer.draw(frame, 8, 8);
+    expect(gl.uploads.at(-1)?.at(-1)).toBe(frame.overlayJournal!.cleanRgb565);
+    renderer.setTransparentKey(null);
+    renderer.draw(frame, 8, 8);
+    expect(gl.uploads.at(-1)?.at(-1)).toBe(frame.rgb565);
+    expect(frame.rgb565![0]).toBe(0xffff);
+    renderer.destroy();
+  });
+
+  it.each([
+    'generation',
+    'unknown-match',
+    'unknown-draw',
+    'incomplete',
+    'unknown-command',
+    'device-failure',
+    'device-allocation',
+    'device-draw',
+    'context-lost',
+  ] as const)('keeps every original pixel on %s', (failure) => {
+    const gl = new FakeWebGl();
+    const renderer = createVmFrameRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement);
+    renderer.setTransparentKey({ rect: { x: 0, y: 0, width: 4, height: 4 }, rgb565: 0xf81f });
+    const frame = picture();
+    if (failure === 'generation') frame.drawGeneration!++;
+    if (failure === 'unknown-match') frame.matchGeneration = frame.overlayJournal!.matchGeneration = 0;
+    if (failure === 'unknown-draw') frame.drawGeneration = frame.overlayJournal!.drawGeneration = 0;
+    if (failure === 'incomplete') frame.overlayJournal!.cleanRgb565 = new Uint16Array(15);
+    if (failure === 'unknown-command') frame.overlayJournal!.commands = [{ kind: 'text' } as never];
+    if (failure === 'device-failure')
+      vi.spyOn(gl, 'createVertexArray').mockImplementation(() => {
+        throw new Error('lost');
+      });
+    if (failure === 'device-allocation') vi.spyOn(gl, 'getError').mockReturnValueOnce(0x505);
+    if (failure === 'device-draw') vi.spyOn(gl, 'getError').mockReturnValueOnce(0).mockReturnValueOnce(0x502);
+    if (failure === 'context-lost') vi.spyOn(gl, 'isContextLost').mockReturnValue(true);
+    renderer.draw(frame, 8, 8);
+    expect(gl.uploads.at(-1)?.at(-1)).toBe(frame.rgb565);
+    renderer.destroy();
+  });
+
+  it('clips vectors in source coordinates and expands native colour exactly', () => {
+    const data = frameOverlayVertices(
+      [{ kind: 'rect', x: -2, y: 1, width: 5, height: 2, colour: 0x7e0, clip: { x: 1, y: 0, width: 3, height: 2 } }],
+      4,
+      4,
+    );
+    expect(data.length).toBe(30);
+    for (let index = 0; index < data.length; index += 5) {
+      expect(data[index]).toBeGreaterThanOrEqual(-0.5);
+      expect(data[index]).toBeLessThanOrEqual(0.5);
+      expect(data[index + 1]).toBeGreaterThanOrEqual(0);
+      expect(data[index + 1]).toBeLessThanOrEqual(0.5);
+      expect([...data.slice(index + 2, index + 5)]).toEqual([0, 1, 0]);
+    }
+  });
+
+  it('rejects concave or self-intersecting polygons instead of drawing an incorrect fan', () => {
+    const frame = picture(),
+      journal = frame.overlayJournal!;
+    journal.commands = [
+      {
+        kind: 'polygon',
+        colour: 0xffff,
+        clip: { x: 0, y: 0, width: 4, height: 4 },
+        points: [
+          { x: 0, y: 0 },
+          { x: 4, y: 4 },
+          { x: 0, y: 4 },
+          { x: 4, y: 0 },
+        ],
+      },
+    ];
+    expect(validFrameOverlay(frame, journal)).toBe(false);
+  });
 });
 
 describe('VmFrameRenderer 生命周期', () => {

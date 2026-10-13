@@ -1,4 +1,5 @@
 import type { MenuSnapshot } from '../../vm86/menuSnapshot';
+import type { FrameOverlayJournal } from '../../graphics/frameOverlayData';
 
 /** Loopback native-host wire format. No executable-specific facts belong here. */
 export const NATIVE_MAGIC = 0x3142484e;
@@ -69,6 +70,7 @@ export interface NativeHello {
     mirrorWindow?: 1 | 2;
     cursorSnapshot?: boolean;
     menuSnapshot?: boolean;
+    drawJournal?: boolean;
   };
 }
 export interface NativeRange {
@@ -108,6 +110,8 @@ export interface NativePicture {
   width: number;
   height: number;
   pixels: Uint16Array;
+  /** Optional replacement and native fallback travel in the same publication. */
+  overlayJournal?: FrameOverlayJournal;
 }
 export interface NativeBatchWrite {
   address: number;
@@ -319,6 +323,8 @@ export function decodeHello(payload: Uint8Array): NativeHello {
     throw new NativeProtocolError('Invalid native cursor-snapshot capability');
   if (hello.limits.menuSnapshot !== undefined && typeof hello.limits.menuSnapshot !== 'boolean')
     throw new NativeProtocolError('Invalid native menu-snapshot capability');
+  if (hello.limits.drawJournal !== undefined && typeof hello.limits.drawJournal !== 'boolean')
+    throw new NativeProtocolError('Invalid native draw-journal capability');
   if (
     hello.limits.maxBudgetUs !== undefined &&
     (!Number.isInteger(hello.limits.maxBudgetUs) || hello.limits.maxBudgetUs < 100 || hello.limits.maxBudgetUs > 20000)
@@ -527,38 +533,107 @@ export class NativePictureDecoder {
     const matching = this.previous?.width === width && this.previous.height === height;
     if (!matching && rowCount !== height) throw new NativeProtocolError('First picture must contain every row');
     const pixels = matching ? this.previous!.pixels.slice() : new Uint16Array(width * height);
-    const seen = new Set<number>();
-    let offset = 16;
-    for (let row = 0; row < rowCount; row++) {
-      if (offset + 8 > payload.byteLength) throw new NativeProtocolError('Truncated picture row');
-      const y = source.getUint32(offset, true),
-        encodedBytes = source.getUint32(offset + 4, true);
-      offset += 8;
-      if (y >= height || seen.has(y) || encodedBytes < 2 || offset + encodedBytes > payload.byteLength)
-        throw new NativeProtocolError('Invalid picture row');
-      seen.add(y);
-      const end = offset + encodedBytes;
-      let x = 0;
-      while (offset < end) {
-        if (offset + 2 > end) throw new NativeProtocolError('Truncated picture segment');
-        const tag = source.getUint16(offset, true),
-          count = tag & 0x7fff;
-        offset += 2;
-        if (!count || x + count > width) throw new NativeProtocolError('Invalid picture run');
-        if (tag & 0x8000) pixels.fill(0xf81f, y * width + x, y * width + x + count);
-        else {
-          if (offset + count * 2 > end) throw new NativeProtocolError('Truncated literal pixels');
-          for (let index = 0; index < count; index++)
-            pixels[y * width + x + index] = source.getUint16(offset + index * 2, true);
-          offset += count * 2;
-        }
-        x += count;
-      }
-      if (x !== width) throw new NativeProtocolError('Picture row does not cover its width');
-    }
-    if (offset !== payload.byteLength) throw new NativeProtocolError('Trailing picture bytes');
+    const offset = decodePictureRows(payload, 16, rowCount, width, height, pixels);
+    // The original picture is the independent fallback. An optional journal must
+    // never poison its row baseline or turn an unsupported overlay into an error.
+    const overlayJournal =
+      offset < payload.byteLength ? decodePictureJournal(payload.subarray(offset), width, height, pixels) : undefined;
     // Keep a private baseline: consumers may transfer or mutate the returned pixels.
     this.previous = { frame, width, height, pixels: pixels.slice() };
-    return { frame, width, height, pixels };
+    return { frame, width, height, pixels, ...(overlayJournal ? { overlayJournal } : {}) };
   }
+}
+
+/** Unknown, truncated and incomplete replacement publications retain the complete native frame. */
+function decodePictureJournal(
+  bytes: Uint8Array,
+  width: number,
+  height: number,
+  nativePixels: Uint16Array,
+): FrameOverlayJournal | undefined {
+  if (bytes.byteLength < 32) return undefined;
+  const source = view(bytes);
+  const jsonLength = source.getUint32(28, true);
+  const flags = source.getUint32(24, true);
+  if (
+    source.getUint32(0, true) !== 0x314a564f ||
+    source.getUint32(4, true) !== bytes.byteLength ||
+    !source.getUint32(8, true) ||
+    !source.getUint32(12, true) ||
+    source.getUint32(16, true) !== width ||
+    source.getUint32(20, true) !== height ||
+    (flags !== 1 && flags !== 3) ||
+    jsonLength > 1024 * 1024 ||
+    32 + jsonLength > bytes.byteLength
+  )
+    return undefined;
+  try {
+    const commands = decodeJson(bytes.subarray(32, 32 + jsonLength)) as FrameOverlayJournal['commands'];
+    if (!Array.isArray(commands) || !commands.length || commands.length > 4096) return undefined;
+    let cleanRgb565: Uint16Array;
+    const body = 32 + jsonLength;
+    if (flags === 1) {
+      if (body + width * height * 2 !== bytes.byteLength) return undefined;
+      cleanRgb565 = new Uint16Array(width * height);
+      for (let index = 0; index < cleanRgb565.length; index++)
+        cleanRgb565[index] = source.getUint16(body + index * 2, true);
+    } else {
+      if (body + 4 > bytes.byteLength) return undefined;
+      const rows = source.getUint32(body, true);
+      if (rows > height) return undefined;
+      // Relative only to the fallback in this packet, never a previous clean picture.
+      cleanRgb565 = nativePixels.slice();
+      if (decodePictureRows(bytes, body + 4, rows, width, height, cleanRgb565) !== bytes.byteLength) return undefined;
+    }
+    return {
+      matchGeneration: source.getUint32(8, true),
+      drawGeneration: source.getUint32(12, true),
+      width,
+      height,
+      cleanRgb565,
+      commands,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function decodePictureRows(
+  payload: Uint8Array,
+  offset: number,
+  rowCount: number,
+  width: number,
+  height: number,
+  pixels: Uint16Array,
+): number {
+  const source = view(payload),
+    seen = new Set<number>();
+  for (let row = 0; row < rowCount; row++) {
+    if (offset + 8 > payload.byteLength) throw new NativeProtocolError('Truncated picture row');
+    const y = source.getUint32(offset, true),
+      encodedBytes = source.getUint32(offset + 4, true);
+    offset += 8;
+    if (y >= height || seen.has(y) || encodedBytes < 2 || offset + encodedBytes > payload.byteLength)
+      throw new NativeProtocolError('Invalid picture row');
+    seen.add(y);
+    const end = offset + encodedBytes;
+    let x = 0;
+    while (offset < end) {
+      if (offset + 2 > end) throw new NativeProtocolError('Truncated picture segment');
+      const tag = source.getUint16(offset, true),
+        count = tag & 0x7fff;
+      offset += 2;
+      if (!count || x + count > width) throw new NativeProtocolError('Invalid picture run');
+      if (tag & 0x8000) pixels.fill(0xf81f, y * width + x, y * width + x + count);
+      else {
+        if (offset + count * 2 > end) throw new NativeProtocolError('Truncated literal pixels');
+        for (let index = 0; index < count; index++)
+          pixels[y * width + x + index] = source.getUint16(offset + index * 2, true);
+        offset += count * 2;
+      }
+      x += count;
+    }
+    if (x !== width) throw new NativeProtocolError('Picture row does not cover its width');
+  }
+  return offset;
 }

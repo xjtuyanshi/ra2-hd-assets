@@ -57,6 +57,8 @@ class NativeMirrorUnavailable extends Error {
 export interface NativeCoreOptions extends NativeConnectionOptions {
   renderPassthrough?: boolean;
   pageCursor?: boolean;
+  /** Development opt-in until native clean-plane coverage is complete. */
+  drawJournal?: boolean;
   sessionStatusUrl?: string;
 }
 export type NativeGamePolicyFactory = (
@@ -574,6 +576,13 @@ export class NativeCore {
       pixels: new Uint8Array(),
       palette: new Uint8Array(),
       rgb565: picture.pixels,
+      ...(picture.overlayJournal
+        ? {
+            matchGeneration: picture.overlayJournal.matchGeneration,
+            drawGeneration: picture.overlayJournal.drawGeneration,
+            overlayJournal: picture.overlayJournal,
+          }
+        : {}),
       ...(this.options.pageCursor !== undefined
         ? {
             pointer: this.pointer,
@@ -1360,7 +1369,8 @@ export class NativeCore {
   requestNextFrame(): void {
     if (!this.running || this.closed || this.creditOutstanding) return;
     this.creditOutstanding = true;
-    void this.connection.request(NativeMessageType.Credit, encodeU32(1)).catch((error) => {
+    const credit = this.options.drawJournal && this.hello?.limits.drawJournal ? encodeU32(1, 1) : encodeU32(1);
+    void this.connection.request(NativeMessageType.Credit, credit).catch((error) => {
       this.creditOutstanding = false;
       this.fail(error instanceof Error ? error : new Error(String(error)));
     });
