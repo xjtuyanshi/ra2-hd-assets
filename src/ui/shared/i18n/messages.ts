@@ -237,8 +237,9 @@ export const englishMessages = {
   '游戏速度 实际 {0}': 'Game speed: {0} frames/s',
   '游戏每秒实际推进的逻辑帧数，与当前速度档位应有的帧数（最近 5 秒）':
     'Logic frames the game advanced a second, and what the current speed setting allows (last 5 seconds)',
-  ' · 已铺满窗口，可在菜单重新匹配': ' · picture fitted; resize the game from a menu',
-  '画面已铺满窗口；可在菜单按新窗口大小重新启动。': 'The picture fits the window. Restart at its new size from a menu.',
+  ' · 窗口已改变，可在菜单重新匹配': ' · window changed; resize the game from a menu',
+  '窗口大小已改变；可回菜单按当前大小重开，让画面铺满。':
+    'The window size changed. Restart from a menu to fit the new size.',
   '按现在的窗口大小重新启动游戏，约 20 秒': 'Restart at this window size, about 20 seconds',
   '当前屏幕约 {0} Hz；可在 系统设置 → 显示器 → 刷新率 调整。':
     'This display is about {0} Hz; adjust it in System Settings → Displays → Refresh Rate.',

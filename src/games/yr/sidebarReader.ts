@@ -172,7 +172,9 @@ function controls(
         const index = m.i32(YR_SIDEBAR.commandSlots + slot * 4);
         if (index < 0 || index >= 25 || seen.has(index)) continue;
         seen.add(index);
-        add(`command${index}`, YR_SIDEBAR.commandButtons + index * 0x60);
+        // 0x6D1012 chooses the positioned gadget; 0x6D108E binds Button<slot>.SHP to it.
+        // Disabled/reordered commands make the source slot differ from the gadget index.
+        add(`command${slot}`, YR_SIDEBAR.commandButtons + index * 0x60);
       }
     }
     // 0x6D0DCD..0x6D0DE3 selects exactly one toolbar toggle.

@@ -96,12 +96,17 @@ export async function inspect(worker, options = {}) {
       const stateBytes = await core.connection.request(14);
       report.bytes += stateBytes.byteLength;
       const state = JSON.parse(new TextDecoder().decode(stateBytes));
-      const controls = (state.controls ?? [])
+      const selected = (state.controls ?? [])
         .filter(
           (c) => c.visible && (selectedIds ? selectedIds.has(c.id) : /^(?:Static|msctls_trackbar32)$/i.test(c.class)),
         )
         .slice(0, report.limits.controls);
-      report.inputRootHwnd = state.targetHwnd ?? state.rootHwnd ?? null;
+      const parents = new Set(selected.map((c) => c.parentHwnd));
+      const controls = [
+        ...selected,
+        ...(state.controls ?? []).filter((c) => parents.has(c.hwnd) && !selected.includes(c)),
+      ].slice(0, report.limits.controls);
+      report.inputRootHwnd = state.dialogHwnd ?? state.targetHwnd ?? state.rootHwnd ?? null;
       report.availableRelevantControls = (state.controls ?? []).filter(
         (c) => c.visible && /^(?:Static|msctls_trackbar32)$/i.test(c.class),
       ).length;
@@ -148,6 +153,8 @@ export async function inspect(worker, options = {}) {
             substringCount: u32(0x80),
             substringOrigin: u32(0x8c),
             animationEnabled: u8(0xa8),
+            transitionKind: u32(0xb0),
+            transitionEnabled: u8(0xbd),
             paintSuppressed: u8(0xbc),
             commonPaintStage: u32(0x1fc),
           };

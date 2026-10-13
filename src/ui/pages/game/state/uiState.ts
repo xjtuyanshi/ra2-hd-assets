@@ -45,7 +45,7 @@ export interface BootState {
   game: Pick<SupportedGame, 'id' | 'title'>;
   status: VmStatus;
   cancel(): Promise<void>;
-  start?: () => void;
+  start?: (fullscreen?: boolean) => void;
 }
 export const bootState = createStore<BootState | null>(null);
 export interface StatusState {

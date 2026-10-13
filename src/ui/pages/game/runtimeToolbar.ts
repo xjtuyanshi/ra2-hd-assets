@@ -38,6 +38,8 @@ export interface RuntimeToolbar {
     nativeAreaChanged?: boolean,
   ): void;
   setViewportRestart(available: boolean): void;
+  /** Actual battle state; an unavailable menu snapshot does not imply a battle. */
+  setViewportBattle(active: boolean): void;
   setRefreshNotice(message: string): void;
   setReShadeMode(mode: ReShadeMode): void;
   setUpscaleMode(mode: UpscaleMode): void;
@@ -114,6 +116,7 @@ export function installRuntimeToolbar(
     resolutionStatus: '',
     viewportNotice: '',
     viewportRestart: false,
+    viewportBattle: false,
     refreshNotice: '',
     stalls: '',
     gameSpeed: '',
@@ -195,6 +198,11 @@ export function installRuntimeToolbar(
     setViewportRestart(available) {
       if (model.viewportRestart === available) return;
       model.viewportRestart = available;
+      publish();
+    },
+    setViewportBattle(active) {
+      if (model.viewportBattle === active) return;
+      model.viewportBattle = active;
       publish();
     },
     setRefreshNotice(message) {
@@ -291,8 +299,8 @@ export function installRuntimeToolbar(
           frameWidth,
           frameHeight,
           whole ? String(Math.round(scale)) : scale.toFixed(2),
-        ) + (stale ? t(' · 已铺满窗口，可在菜单重新匹配') : '');
-      const viewportNotice = nativeAreaChanged ? t('画面已铺满窗口；可在菜单按新窗口大小重新启动。') : '';
+        ) + (stale ? t(' · 窗口已改变，可在菜单重新匹配') : '');
+      const viewportNotice = nativeAreaChanged ? '窗口大小已改变；可回菜单按当前大小重开，让画面铺满。' : '';
       if (status === model.resolutionStatus && viewportNotice === model.viewportNotice) return;
       model.resolutionStatus = status;
       model.viewportNotice = viewportNotice;

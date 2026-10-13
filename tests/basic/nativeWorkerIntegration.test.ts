@@ -114,6 +114,29 @@ describe('native Worker composition and existing protocol seam', () => {
       f.controller.dispose();
     }
   });
+  it('preserves a cancelled startup rejection without reviving a global error after stop', async () => {
+    vi.stubEnv('DEV', true);
+    const f = fixture();
+    let rejectStart!: (error: Error) => void;
+    vi.mocked(f.core.start).mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectStart = reject;
+        }),
+    );
+    try {
+      await f.controller.handleMessage({ type: 'init', config: nativeConfig(), requestId: 1 });
+      const pending = f.controller.handleMessage({ type: 'control', action: 'start', requestId: 2 });
+      await Promise.resolve();
+      await f.controller.handleMessage({ type: 'control', action: 'stop', requestId: 3 });
+      rejectStart(new Error('Native session stopped'));
+      await pending;
+      expect(f.messages).toContainEqual({ type: 'error', requestId: 2, message: 'Native session stopped' });
+      expect(f.messages.some((message) => message.type === 'status' && message.phase === 'error')).toBe(false);
+    } finally {
+      f.controller.dispose();
+    }
+  });
   it('awaits asynchronous native pointer/speed/patch replies and exposes unsupported attachment/persistence', async () => {
     vi.stubEnv('DEV', true);
     const f = fixture();

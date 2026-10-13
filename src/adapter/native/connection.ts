@@ -14,7 +14,7 @@ import {
 } from './protocol';
 import type { NativeHello, NativeMirrorUpdate, NativePicture, NativeBatchWrite } from './protocol';
 
-/** Only transport loss is eligible for the launcher's independently confirmed exit status. */
+/** Transport loss or timeout is eligible for the launcher's independently confirmed exit status. */
 export class NativeConnectionLostError extends Error {
   constructor(message: string) {
     super(message);
@@ -131,7 +131,10 @@ export class NativeConnection {
     this.connecting = new Promise<NativeHello>((resolve, reject) => {
       this.resolveHello = resolve;
       this.rejectHello = reject;
-      this.helloTimer = setTimeout(() => this.fail(new Error('Native hello timed out')), this.timeoutMs);
+      this.helloTimer = setTimeout(
+        () => this.fail(new NativeConnectionLostError('Native hello timed out')),
+        this.timeoutMs,
+      );
       try {
         const create =
           this.options.createWebSocket ?? ((address: string) => new WebSocket(address) as unknown as NativeWebSocket);
@@ -271,7 +274,9 @@ export class NativeConnection {
             : setTimeout(() => {
                 this.pending.delete(id);
                 this.notifications.delete(id);
-                const error = new Error(`Native request ${queued.type} timed out; host completion is unknown`);
+                const error = new NativeConnectionLostError(
+                  `Native request ${queued.type} timed out; host completion is unknown`,
+                );
                 if (queued.reject) queued.reject(error);
                 else this.reportError(error);
                 this.drain();

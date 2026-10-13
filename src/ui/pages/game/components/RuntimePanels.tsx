@@ -114,15 +114,23 @@ export function BootView({ game, status, cancel, start }: BootState) {
         }}
       >
         <p style={{ maxWidth: '80vw', fontSize: 24, lineHeight: 1.7, textAlign: 'center', margin: 0 }}>
-          把窗口调到你想要的大小——建议最大化——然后点「开始」
+          全屏开始会让游戏画面匹配整个屏幕。
         </p>
         <button
           id="native-start"
           type="button"
-          onClick={start}
+          onClick={() => start(true)}
           style={{ fontSize: 24, padding: '14px 64px', cursor: 'pointer' }}
         >
-          开始
+          全屏开始
+        </button>
+        <button
+          id="native-start-window"
+          type="button"
+          onClick={() => start(false)}
+          style={{ fontSize: 16, padding: '8px 24px' }}
+        >
+          按当前窗口开始
         </button>
         <button type="button" onClick={() => void cancel()} style={{ fontSize: 16, padding: '8px 24px' }}>
           取消启动

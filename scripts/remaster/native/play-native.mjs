@@ -604,6 +604,8 @@ export async function runLauncher(arguments_, environment = process.env) {
   let installation;
   let launcher;
   let page;
+  let terminalEndpoint;
+  let terminalToken;
   let cleanupPromise;
   let stopping = false;
   let normalClosure = false;
@@ -666,6 +668,21 @@ export async function runLauncher(arguments_, environment = process.env) {
       await publishSessionState(normalClosure ? 'closed' : 'failed').catch((error) =>
         console.error(`无法更新关闭提示，仍会关闭本次游戏：${error.message}`),
       );
+      let terminalDeliveryError;
+      if (page && !page.exited && terminalEndpoint) {
+        try {
+          const response = await fetch(terminalEndpoint, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${terminalToken}` },
+            redirect: 'error',
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const terminal = await response.json();
+          if (terminal.state !== (normalClosure ? 'closed' : 'failed')) throw new Error('关闭通知状态不一致');
+        } catch (error) {
+          terminalDeliveryError = new Error(`无法发送游戏关闭通知：${error.message}`, { cause: error });
+        }
+      }
       await writeFile(stopPath, 'stop\n', { mode: 0o600 }).catch((error) =>
         console.error(`无法写入停止请求，将继续关闭本次游戏：${error.message}`),
       );
@@ -683,9 +700,6 @@ export async function runLauncher(arguments_, environment = process.env) {
       ]);
       for (const item of gameItems) kill(item, 'SIGKILL');
       await Promise.all(gameItems.map((item) => item.closedDone));
-      // Allow the existing 1500 ms classification window and the following
-      // fullscreen/React paint to finish after native handles have closed.
-      if (page && !page.exited) await delay(2000);
       if (page) {
         kill(page, 'SIGTERM');
         await Promise.race([page.closedDone, delay(1500, undefined, { ref: false })]);
@@ -696,6 +710,7 @@ export async function runLauncher(arguments_, environment = process.env) {
         const result = await installation.restore();
         console.log(result.reason);
       }
+      if (terminalDeliveryError) throw terminalDeliveryError;
     })();
     return cleanupPromise;
   }
@@ -708,9 +723,8 @@ export async function runLauncher(arguments_, environment = process.env) {
     // Let the current file transaction finish before final restoration. Killing
     // finite startup/page children breaks awaited work; the helper gets its own
     // targeted stop request and keeps its job handle until the game exits.
-    void writeFile(stopPath, 'stop\n', { mode: 0o600 }).catch((error) =>
-      console.error(`停止请求失败，将继续关闭本次游戏：${error.message}`),
-    );
+    // cleanup publishes the authoritative closed state before requesting game
+    // shutdown. Do not write the stop file here: that reverses the ordering.
     for (const item of owned) {
       if (item !== launcher && item !== page) {
         try {
@@ -820,6 +834,7 @@ export async function runLauncher(arguments_, environment = process.env) {
     const origin = `http://127.0.0.1:${ports.page}`;
     const agentUrl = `ws://127.0.0.1:${ports.agent}`;
     const token = randomBytes(32).toString('hex');
+    terminalToken = token;
     async function windowsPath(path) {
       let output = '';
       let truncated = false;
@@ -881,6 +896,7 @@ export async function runLauncher(arguments_, environment = process.env) {
       if (Date.now() >= startupDeadline) throw new Error('游戏页面未能在 30 秒内启动。请查看本次记录中的 page.log。');
       await delay(100);
     }
+    terminalEndpoint = new URL('/__native/session?flush=terminal', origin);
     const url = new URL(origin);
     url.search = new URLSearchParams({
       ...HD_PLAY_OPTIONS,
@@ -937,7 +953,7 @@ export async function runLauncher(arguments_, environment = process.env) {
     const configured = await configureNativeResolution(gameDirectory, runDirectory, resolution);
     console.log(`Native resolution: ${resolution.width}x${resolution.height} (current game; ${configured.target})`);
     console.log(
-      `本次游戏画面为 ${resolution.width}×${resolution.height}；改变窗口后画面会先铺满；可在菜单点击按钮，按新窗口大小重开。`,
+      `本次游戏画面为 ${resolution.width}×${resolution.height}；改变窗口后画面可能留黑边；可在菜单点击按钮，按新窗口大小重开。`,
     );
     installation = await installDll(dll, join(gameDirectory, 'ddraw.dll'), runDirectory);
     const gameEnvironment = {

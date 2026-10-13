@@ -23,7 +23,7 @@ the page attaches to an existing game process, so the VM startup-page hook canno
 The HD web owner entry, `scripts/remaster/play.sh` (or `play.command`), adds `play-start=1` only for ordinary
 HD play, including `--menu`; `--train` and `--original` keep their existing startup flow. For example,
 `scripts/remaster/play.sh --view classic --print` prints the same gated URL without starting a server or browser.
-After resources are selected or restored, its Start screen measures the window at the click. That click removes
+After resources are selected or restored, its main Fullscreen Start button enters page fullscreen and waits for stable dimensions before measuring; a smaller Window Start button measures the current window. Either choice removes
 only `play-start` from the current URL, preserving other query fields, the fragment and history state, before
 measurement. A later internal menu-resize reload therefore continues automatically; a new launcher URL always
 requires Start again, including in an existing browser profile. No persistent bypass flag is stored. Ordinary
@@ -75,8 +75,8 @@ Dedicated-prefix preparation requires a free Wine executable. The resolved Cross
 The launcher checks the selected cache's readable `_library/` directory, preserving Vite's `gameres/hd-cache` default when `RA2_HD_CACHE_DIR` is absent. Missing game, Wine and cache prerequisites produce Chinese guidance. After any dedicated-prefix preparation, a scoped Wine command-line self-check must return its expected reply within 30 seconds before builds, launcher-path mapping or game-file changes; bounded output stays in private `wine-check.log`. The exact successful reply line is recognized as it arrives, independently of later diagnostic output retained in that log. A separate private `wine-check.json` records the observed acknowledgement, completion, exit code and any failure without altering stdout; evidence collection uses that observation and falls back to the retained log only for older launches with no JSON. Wine path mapping is also bounded to 30 seconds. Game/menu readiness retains its 60-second wait and reports Chinese failure guidance with the private launch logs, including missing, different or unsupported executable identities and mismatched process/visibility state. These are startup failure bounds, separate from browser acceptance targets.
 
 By default the launcher serves and opens a plain Chinese start screen before starting the original game. The player
-adjusts the window and clicks Start; that click measures the available play area, device pixel ratio and remembered
-view through an authenticated loopback endpoint. Waiting for this choice has no startup timeout. The views
+clicks Fullscreen Start to enter fullscreen, wait for stable dimensions, and then measure the available play area, device pixel ratio and remembered
+view through an authenticated loopback endpoint. A smaller Window Start button starts at the current size. Waiting for this choice has no startup timeout. The views
 are **经典** / **适中** / **宽**, respectively `resolution=classic|moderate|wide` and 3 / 2.5 / 2 device pixels per
 game pixel; Classic is the initial default and `resolution=display` remains a Wide alias. Both launch routes accept
 `--view classic|moderate|wide` to select a view explicitly. The game frame is rounded down to even dimensions and
@@ -89,12 +89,11 @@ still cover device pixels at all three scales, including smooth enlargement of 2
 The native supported range remains 800×600 through 2560×1600 and at most 2,097,152 game pixels. Measured frames
 are capped within this range; the picture still scales to the available page area. `--size WxH`, for
 example `--size 1280x720`, explicitly selects a fixed resolution and bypasses page measurement. `--fullscreen` requests
-page fullscreen from the Start click before measurement. Browser fullscreen requires this ordinary user gesture. Normal `--open` requests a maximized window. The
+page fullscreen before measurement; the main start button always requests it and the smaller button explicitly opts out. Browser fullscreen requires this ordinary user gesture. Normal `--open` requests a maximized window. The
 launcher changes only resolution keys in the supplied copy's `RA2MD.INI`, preserves other ANSI bytes/settings and
 retains an original backup. Symlinks, Unicode BOM files and ambiguous INI case variants are refused before rewriting.
-The chosen resolution persists in that copy. Resizing Chrome, changing zoom or entering fullscreen immediately fits
-the picture to the page, with HD backing at device pixels within the renderer buffer limit. During a match the game
-resolution stays stable. After a page-area change, a recognized out-of-match menu offers an explicit restart button (about 20 seconds).
+The chosen resolution persists in that copy. Resizing Chrome, changing zoom or leaving fullscreen scales the centred picture proportionally, with plain black bars if the aspect ratios differ and HD backing at device pixels within the renderer buffer limit. During a match the game
+resolution stays stable and pointer lock confines input to the picture. A brief Chinese size-change notice appears once; the menu offers the restart again. After a page-area change, a recognized out-of-match menu offers an explicit restart button (about 20 seconds).
 Only pressing it restarts the owned game
 with the newly measured resolution and a Chinese notice. Menu and battle pictures scale immediately; drawing
 buffers update once the area has been stable for 200 ms. The web route reuses its validated resource source and canvas context for this explicit restart, including non-persisted directory sources. An unfinished or failed archive extraction keeps the current session and its resource status; the restart button becomes available after extraction completes.
@@ -108,6 +107,15 @@ The authenticated viewport status adds the original measured `viewport` (`width`
 restart request replaces it and clears readiness until the new owned game reaches its menu. A ready-page reload uses
 the saved area to detect subsequent window changes without repeating the Start gesture. The page helper returns the
 game frame size and supplies the measured baseline through an optional callback.
+
+Normal closure uses an already-established authenticated response, not a page-server grace period. Before opening
+its native socket, the Worker establishes `GET /__native/session?wait=terminal` and validates its response headers.
+The body remains pending until the launcher publishes `closed` or `failed`. Cleanup then posts to
+`/__native/session?flush=terminal`; the server ends all waiting responses and acknowledges only after they have
+flushed. Only then does the launcher close its owned game and page server. A frozen Worker can consume its retained
+terminal body after the server has gone, without a new HTTP request. An explicitly destroyed session aborts its
+observer. The ordinary authenticated GET remains an immediate snapshot. Failed, malformed, or disconnected status
+responses never count as a normal exit, and failure to flush is reported by the launcher after cleanup.
 
 Native menus use absolute browser mouse coordinates so ordinary menu clicks retain their hit testing. During a match, a canvas click acquires Pointer Lock and the page draws the pointer within the game picture. A confirmed native menu releases the lock; transient game-cursor hiding does not. The Chinese hint describes Escape and the game menu as exits. `mouse-lock=0` remains an explicit diagnostic opt-out. The emulator keeps its established Pointer Lock default. The page input path owns held-button release, focus loss, pending lock requests and teardown.
 
@@ -236,6 +244,12 @@ focus and native `BM_GETSTATE` pressed state. Flag `1` adds `menuVisible` and `m
 Enabledness includes ancestors through the current dialog, without inheriting its disabled modal owner.
 The adapter reuses this lightweight observation and requests control metadata only while a menu is visible;
 ordinary match play does not enumerate or query controls. The reply is `null` when no dialog owns the picture.
+The adapter carries the latest lightweight paint-owner observation on `VmFrame.menuVisible`.
+A visible dialog suppresses battle and command snapshots even while disabled for its native entrance.
+The presentation bridge immediately makes that entire native picture opaque and rejects older pending
+battle replies until dialog ownership ends; the transient missing-snapshot grace period does not apply.
+This observation is not a frame-synchronized paint-root identity. Unknown or unsupported HD dialog layouts,
+including small native frames, still retain the whole original dialog.
 Enumeration is bounded to 128 controls and 64 KiB. Changed dialog ownership, failed or truncated metadata,
 and visible lists whose complete item text is unavailable set `complete=false`; the whole original picture
 must remain visible. Cached `GUI:` resource keys are not translated or invented by the native agent.

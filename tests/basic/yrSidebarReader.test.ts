@@ -596,12 +596,40 @@ describe('native HD UI gadget states', () => {
     }
     expect(f.read()?.controls?.map((c) => c.id)).toEqual(['commandExpand']);
     f.u8(S + 0x5544, 1);
-    expect(f.read()?.controls?.map((c) => c.id)).toEqual(['command24', 'commandCollapse']);
+    expect(f.read()?.controls?.map((c) => c.id)).toEqual(['command0', 'commandCollapse']);
     f.u8(G.tabs + 0x1e, 1);
     f.u8(G.tabs + 0x60 + 0x40, 1);
     f.u8(G.tabs + 0x60 + 0x34, 1);
     expect(f.read()?.tabFrames).toEqual([2, 3, 0, 0]);
     f.i32(G.commandBar, 0);
     expect(f.read()?.controls).toEqual([]);
+  });
+  it('keeps command source images with their positioned gadgets when a command is hidden or reordered', () => {
+    const f = fixture();
+    for (let i = 0; i < 25; i++) f.i32(G.commandSlots + i * 4, -1);
+    f.u8(S + 0x5544, 1);
+    const order = [0, 1, -1, 2, 5, 3, 4];
+    for (const [slot, index] of order.entries()) {
+      f.i32(G.commandSlots + slot * 4, index);
+      if (index < 0) continue;
+      const at = G.commandButtons + index * 0x60;
+      f.i32(at, 0x7e0000);
+      f.rect(at + 0xc, 20 + index * 30, 712, 24, 24);
+      f.i32(at + 0x58, 0xcc0000 + slot * 0x100);
+      f.u8(at + 0x1e, Number(slot === 4));
+    }
+    expect(f.read()?.controls).toEqual(
+      order.flatMap((index, slot) =>
+        index < 0
+          ? []
+          : [
+              {
+                id: `command${slot}`,
+                rect: { x: 20 + index * 30, y: 712, width: 24, height: 24 },
+                frame: slot === 4 ? 2 : 0,
+              },
+            ],
+      ),
+    );
   });
 });

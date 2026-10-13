@@ -110,6 +110,8 @@ export interface VmFrame {
   rgba?: Uint8Array;
   /** Compact RGB565 when host controls need no composition; no row padding, allowing direct integer-texture upload. */
   rgb565?: Uint16Array;
+  /** A native dialog owns the whole picture, including while its controls are disabled for a transition. */
+  menuVisible?: boolean;
   /** Current native software-cursor sheet frame; position is presentation-independent from the picture pixels. */
   pointer?: {
     frame: number;

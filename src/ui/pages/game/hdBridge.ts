@@ -509,6 +509,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let fadeFinished = false;
   let nativeBattleSurface = false;
   let nativeMenuSurface = false;
+  let nativeDialogSurface = false;
   let battleEpoch = 0;
   let preparationMap: string | null = null;
   let preparationAsking = false;
@@ -715,7 +716,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   const syncPreparationNotice = () => {
     // An actual native battlefield, not an early map hint, owns this notice. It never covers play or replaces
     // a missing-cache/incomplete-art explanation, and a completed reveal does not reannounce on state gaps.
-    const waiting = native && enabled && nativeBattleSurface && !revealed && !fallback && !pollFailed;
+    const waiting =
+      native && enabled && nativeBattleSurface && !nativeDialogSurface && !revealed && !fallback && !pollFailed;
     if (waiting && published === null) publish(preparationNotice);
     else if (!waiting && published === preparationNotice) publish(null);
   };
@@ -845,7 +847,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   };
 
   const showHd = (reason: string, fade = false) => {
-    if (stopped || !enabled) return false;
+    if (stopped || !enabled || nativeDialogSurface) return false;
     const rect = tacticalRect();
     if (!rect) return false;
     if (fade && passthroughFlags && passthroughConfirmed !== 0) {
@@ -873,6 +875,18 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   const onGameFrame = (picture: VmFrame) => {
     if (stopped) return;
     if (native) {
+      nativeDialogSurface = picture.menuVisible === true;
+      if (nativeDialogSurface) {
+        // Dialogs keep the battle's video mode. Their native background and
+        // question text must be opaque immediately, without the missing-state
+        // grace period or the keyed battlefield's trailing frame.
+        hidePending = null;
+        setHole(null, 'native-dialog-surface');
+        if (passthroughEverRequested) requestPassthrough(0);
+        keyRect = null;
+        keyUntil = 0;
+        present();
+      }
       const battleSurface = picture.width > 800 || picture.height > 600;
       if (battleSurface) {
         if (!nativeBattleSurface) battleEpoch++;
@@ -1080,7 +1094,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     // A reply that was already in flight when the bridge stopped belongs to a session being torn down.
     if (stopped) return;
     // A retained native mirror can outlive Abort/score's switch back to the menu video mode.
-    if (nativeMenuSurface) state = null;
+    if (nativeMenuSurface || nativeDialogSurface) state = null;
     pollFailed = false;
     diagnostics?.state(state);
     latestState = state;
@@ -1618,7 +1632,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     scene,
     frame: onGameFrame,
     menuSide: () => menuSide,
-    battleActive: () => inBattle,
+    battleActive: () => inBattle && !nativeDialogSurface,
     activity: () => live?.activity() ?? null,
   });
 }

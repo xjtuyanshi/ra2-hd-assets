@@ -51,6 +51,8 @@ export interface NativeGamePolicy {
     reserve: (size: number, alignment?: number) => number,
   ): RenderPassthroughControl | null;
   setSpeed(memory: GuestMemory, value: number): number | null;
+  /** Version-validated presentation compatibility for physically hidden native windows only. */
+  prepareHiddenPresentation?(memory: GuestMemory): boolean;
   /** Version-validated drawing-only patch. A false result keeps the game's original cursor. */
   setPointerDrawing?(memory: GuestMemory, enabled: boolean): boolean;
   /** Read cursor state independently of battlefield logic ticks (menus have none).

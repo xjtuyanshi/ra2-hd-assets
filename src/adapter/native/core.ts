@@ -231,8 +231,12 @@ export class NativeCore {
   private pointerReadPicture: NativePicture | null = null;
   private pointerSuppressed = false;
   private pointerUndo: NativeWrite[] = [];
+  private hiddenPresentationUndo: NativeWrite[] = [];
   private systemCursor: VmFrame['cursor'];
-  private failing = false;
+  private failure: Promise<boolean | null> | null = null;
+  private stopping: Promise<void> | null = null;
+  private sessionStatusAbort: AbortController | null = null;
+  private sessionTerminal: Promise<boolean> | null = null;
   private moviePlaying = false;
   private movieState: NativeInputState = {};
   private inputStateReadAt = -Infinity;
@@ -255,55 +259,54 @@ export class NativeCore {
     this.phase = phase;
     this.callbacks.onStatus?.({ phase, detail });
   }
-  private fail(error: Error): void {
-    if (this.closed || this.failing) return;
-    this.failing = true;
-    const shouldStop = this.running;
+  private fail(error: Error): Promise<boolean | null> {
+    if (this.failure) return this.failure;
+    if (this.closed) return Promise.resolve(null);
     this.running = false;
     this.rejectWaiters(error);
-    void (async () => {
-      const normalExit = error instanceof NativeConnectionLostError && (await this.launcherClosedNormally());
+    this.failure = (async () => {
+      const normalExit =
+        (error instanceof NativeConnectionLostError || error instanceof NativeMirrorUnavailable) &&
+        (await this.sessionTerminal);
+      // Explicit cancellation owns teardown, including aborting the observer.
+      // Its aborted body must not revive this older transport failure as error.
+      if (this.closed || this.stopping) return null;
       if (!normalExit) this.status('error', error.message);
-      if (shouldStop)
-        await this.stop().catch((cleanup) => {
-          if (!normalExit) console.warn('[native] Error cleanup:', cleanup);
-        });
+      await this.stop().catch((cleanup) => {
+        if (!normalExit) console.warn('[native] Error cleanup:', cleanup);
+      });
       this.status(normalExit ? 'exited' : 'error', normalExit ? '游戏已关闭' : error.message);
+      return normalExit === true;
     })();
+    return this.failure;
   }
-  private async launcherClosedNormally(): Promise<boolean> {
-    // Socket loss alone cannot distinguish quitting from a crash. Only the
-    // authenticated status of this launch can turn it into a normal exit.
-    if (!this.hello || !this.options.sessionStatusUrl) return false;
+  private async observeLauncherClosure(): Promise<void> {
+    // Establish the authenticated response before opening the native socket.
+    // Its terminal body can then wait in the browser network layer while this
+    // Worker is frozen; closure never depends on a later HTTP request or timer.
+    if (!this.options.sessionStatusUrl) return;
     let url: URL;
     try {
       url = new URL(this.options.sessionStatusUrl);
     } catch {
-      return false;
+      throw new Error('启动器状态网址无效。请重新运行启动器。');
     }
-    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !/^1545[0-9]$/.test(url.port)) return false;
-    const abort = new AbortController();
-    const timeout = setTimeout(() => abort.abort(), 1500);
-    try {
-      while (!abort.signal.aborted) {
-        const response = await fetch(url, {
-          signal: abort.signal,
-          cache: 'no-store',
-          redirect: 'error',
-          headers: { Authorization: `Bearer ${this.options.token}` },
-        });
-        if (!response.ok) return false;
-        const status = (await response.json()) as { state?: unknown };
-        if (status.state === 'closed') return true;
-        if (status.state !== 'running') return false;
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-    } catch {
-      // Missing status, a stopped page server, and invalid replies remain errors.
-    } finally {
-      clearTimeout(timeout);
-    }
-    return false;
+    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !/^1545[0-9]$/.test(url.port))
+      throw new Error('启动器状态网址无效。请重新运行启动器。');
+    url.searchParams.set('wait', 'terminal');
+    this.sessionStatusAbort = new AbortController();
+    const response = await fetch(url, {
+      signal: this.sessionStatusAbort.signal,
+      cache: 'no-store',
+      redirect: 'error',
+      headers: { Authorization: `Bearer ${this.options.token}` },
+    });
+    if (!response.ok || response.headers.get('X-Native-Session-Wait') !== 'terminal')
+      throw new Error('无法建立本次启动器的关闭通知。请重新运行启动器。');
+    this.sessionTerminal = response
+      .json()
+      .then((status: { state?: unknown }) => status.state === 'closed')
+      .catch(() => false);
   }
   private rejectWaiters(error: Error): void {
     for (const waiter of this.waiters) {
@@ -401,6 +404,7 @@ export class NativeCore {
     this.scheduleFrame(() => {
       if (this.closed || !this.running) return;
       this.hostFrames++;
+      frame.menuVisible = !!(this.inputState.menuVisible || this.inputState.modal);
       this.callbacks.onFrame?.(frame);
     });
   }
@@ -550,6 +554,8 @@ export class NativeCore {
       this.connection.onPicture((picture) => this.pictureArrived(picture)),
     );
     try {
+      if (this.options.sessionStatusUrl) await this.observeLauncherClosure();
+      if (this.closed) return;
       this.hello = await this.connection.connect();
       if (!this.hello.exe.verified) throw new Error('Native executable identity is unsupported');
       if (this.selectedExecutable?.length) {
@@ -564,6 +570,25 @@ export class NativeCore {
       await this.subscribe([]);
       await this.connection.request(NativeMessageType.Hook, encodeU32(1));
       this.hookStarted = true;
+      if (this.hello.hidden === true && this.policy.prepareHiddenPresentation) {
+        const prepared = await runNativeTransaction(
+          this.memory,
+          (transaction) => this.policy!.prepareHiddenPresentation!(transaction),
+          {
+            ...this.host,
+            commit: async (writes) => {
+              if (!writes.length) return;
+              await this.connection.batch(writes);
+              this.hiddenPresentationUndo = writes.map((write) => ({
+                address: write.address,
+                expected: write.bytes.slice(),
+                bytes: write.expected.slice(),
+              }));
+            },
+          },
+        );
+        if (!prepared) throw new Error('Native hidden presentation signature is unsupported');
+      }
       if (this.options.pageCursor && this.policy.setPointerDrawing && this.policy.readPointer) {
         this.pointerSuppressed = await runNativeTransaction(
           this.memory,
@@ -598,9 +623,10 @@ export class NativeCore {
       this.requestNextFrame();
     } catch (error) {
       const reason = error instanceof Error ? error : new Error(String(error));
-      this.fail(reason);
-      // Startup may have installed the hook before an invalid/incomplete mirror was observed.
-      await this.stop().catch(() => undefined);
+      // A page reopened while the launcher is closing may lose the transport
+      // before hello. Share the same terminal decision instead of returning a
+      // second startup error which can overwrite a confirmed normal exit.
+      if ((await this.fail(reason)) === true) return;
       throw reason;
     }
   }
@@ -875,13 +901,13 @@ export class NativeCore {
   async getRenderState(): Promise<GameRenderState | null> {
     if (!this.running) return null;
     const input = await this.readInputState();
-    if (input.modal || input.moviePlaying) return null;
+    if (input.menuVisible || input.modal || input.moviePlaying) return null;
     return this.read(this.render, () => this.policy!.createRenderReader());
   }
   async getCommandState(): Promise<GameCommandState | null> {
     if (!this.running) return null;
     const input = await this.readInputState();
-    if (input.modal || input.moviePlaying) return null;
+    if (input.menuVisible || input.modal || input.moviePlaying) return null;
     return this.read(this.command, () => this.policy!.createCommandReader());
   }
   async getGamePerformance(): Promise<GamePerformanceSample | null> {
@@ -1152,14 +1178,26 @@ export class NativeCore {
     };
   }
 
-  async stop(): Promise<void> {
-    if (this.closed) return;
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
+    if (this.closed) return Promise.resolve();
+    this.stopping = this.stopOwnedSession();
+    return this.stopping;
+  }
+
+  private async stopOwnedSession(): Promise<void> {
+    this.sessionStatusAbort?.abort();
+    this.sessionStatusAbort = null;
     this.running = false;
     this.inputQueue.length = 0;
     this.pointerReadPicture = null;
     await this.operationTail;
     let cleanupError: unknown;
     try {
+      if (this.hiddenPresentationUndo.length) {
+        await this.connection.batch(this.hiddenPresentationUndo);
+        this.hiddenPresentationUndo = [];
+      }
       if (this.pointerUndo.length) {
         await this.connection.batch(this.pointerUndo);
         this.pointerUndo = [];

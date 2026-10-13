@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { desktopPointerLock, nativeAutoStart, prepareNativeViewport } from '../../src/ui/pages/game/nativeStartup';
-import { prepareWebPlayViewport } from '../../src/ui/pages/game/playStartup';
+import { prepareWebPlayViewport, waitForStartViewport } from '../../src/ui/pages/game/playStartup';
 import { resolveResolutionChoice } from '../../src/ui/pages/game/vmPageResolution';
 
 afterEach(() => {
@@ -62,6 +62,72 @@ describe('native launcher startup', () => {
     await expect(result).resolves.toEqual({ width: 1368, height: 800 });
     expect(JSON.parse(fetch.mock.calls[1]![1].body)).toMatchObject({ width: 2741, height: 1603, dpr: 1.5 });
     expect(start).toBeNull();
+  });
+  it('measures only after the fullscreen animation settles and honors an explicit window choice', async () => {
+    const { canvas } = viewportFixture();
+    vi.useFakeTimers();
+    let now = 0,
+      frames = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    vi.stubGlobal('requestAnimationFrame', (next: (at: number) => void) =>
+      setTimeout(() => {
+        now += 100;
+        frames++;
+        window.innerWidth = frames < 4 ? 1800 + frames * 100 : 2741;
+        window.innerHeight = frames < 4 ? 1200 : 1772;
+        next(now);
+      }, 1),
+    );
+    const target = {
+      contains: () => true,
+      requestFullscreen: vi.fn(async () => {
+        Object.assign(document, { fullscreenElement: target });
+      }),
+    };
+    Object.assign(canvas, { focus: vi.fn(), parentElement: target });
+    let start: ((fullscreen?: boolean) => void) | null = null;
+    const result = waitForStartViewport(canvas, undefined, (next) => {
+      start = next;
+    });
+    start!(true);
+    await vi.runAllTimersAsync();
+    await expect(result).resolves.toEqual({ width: 2741, height: 1772, dpr: 2 });
+    expect(frames).toBeGreaterThanOrEqual(7);
+    expect(target.requestFullscreen).toHaveBeenCalledOnce();
+    Object.assign(document, { fullscreenElement: null });
+    const windowResult = waitForStartViewport(
+      canvas,
+      undefined,
+      (next) => {
+        start = next;
+      },
+      { fullscreen: true },
+    );
+    start!(false);
+    await expect(windowResult).resolves.toEqual({ width: 1728, height: 1117, dpr: 2 });
+    expect(target.requestFullscreen).toHaveBeenCalledOnce();
+  });
+  it('does not start a process if cancelled during the fullscreen transition', async () => {
+    const { fetch, canvas } = viewportFixture();
+    const controller = new AbortController();
+    let fullscreenReady!: () => void;
+    const target = {
+      requestFullscreen: () =>
+        new Promise<void>((resolve) => {
+          fullscreenReady = resolve;
+        }),
+    };
+    Object.assign(canvas, { focus: vi.fn(), parentElement: target });
+    let start: ((fullscreen?: boolean) => void) | null = null;
+    const result = waitForStartViewport(canvas, controller.signal, (next) => {
+      start = next;
+    });
+    start!(true);
+    const assertion = expect(result).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    fullscreenReady();
+    await assertion;
+    expect(fetch).not.toHaveBeenCalled();
   });
   it('reattaches to a ready fullscreen launch without waiting for a new fullscreen gesture', async () => {
     const { fetch, canvas } = viewportFixture();

@@ -51,6 +51,7 @@ export interface NativePacket {
 }
 export interface NativeHello {
   protocol: number;
+  hidden?: boolean;
   pid: number;
   gameThreadId: number;
   exe: { size: number; peTimestamp: number; sha256: string; verified: boolean };

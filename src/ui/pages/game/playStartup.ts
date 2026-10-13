@@ -18,7 +18,7 @@ export function measurePlayViewport(canvas: HTMLCanvasElement): PlayViewport {
 export function waitForStartViewport(
   canvas: HTMLCanvasElement,
   signal: AbortSignal | undefined,
-  onStartWait: (start: (() => void) | null) => void,
+  onStartWait: (start: ((fullscreen?: boolean) => void) | null) => void,
   options: {
     fullscreen?: boolean;
     onFullscreenWait?: (waiting: boolean) => void;
@@ -34,28 +34,49 @@ export function waitForStartViewport(
     };
     signal?.throwIfAborted();
     signal?.addEventListener('abort', abort, { once: true });
-    onStartWait(() => {
+    onStartWait((fullscreen = options.fullscreen ?? false) => {
       if (started) return;
       started = true;
-      signal?.removeEventListener('abort', abort);
       onStartWait(null);
       canvas.focus();
       const finish = () => {
-        try {
-          options.beforeMeasure?.();
-          resolve(measurePlayViewport(canvas));
-        } catch (error) {
-          reject(error);
-        }
+        signal?.throwIfAborted();
+        options.beforeMeasure?.();
+        resolve(measurePlayViewport(canvas));
       };
-      if (options.fullscreen && !document.fullscreenElement?.contains(canvas)) {
-        options.onFullscreenWait?.(true);
-        const target = canvas.parentElement ?? canvas;
-        void target
-          .requestFullscreen()
-          .then(finish, finish)
-          .finally(() => options.onFullscreenWait?.(false));
-      } else finish();
+      const begin = async () => {
+        if (fullscreen) {
+          options.onFullscreenWait?.(true);
+          const target = canvas.parentElement ?? canvas;
+          if (!document.fullscreenElement?.contains(canvas)) await target.requestFullscreen();
+          // macOS resolves requestFullscreen before its animated window size has settled.
+          // Keep the launch handshake behind actual stable dimensions, including browser zoom.
+          const deadline = performance.now() + 5000;
+          let last = '',
+            stableSince = performance.now();
+          while (true) {
+            signal?.throwIfAborted();
+            await new Promise<void>((next) => requestAnimationFrame(() => next()));
+            const now = performance.now();
+            const size = JSON.stringify(measurePlayViewport(canvas));
+            if (size !== last) {
+              last = size;
+              stableSince = now;
+            }
+            if (now - stableSince >= 300) break;
+            if (now >= deadline) throw new Error('全屏尺寸尚未稳定，请重新打开页面后再试。');
+          }
+          if (!document.fullscreenElement?.contains(canvas))
+            throw new Error('全屏已退出，请重新打开页面后选择启动方式。');
+        }
+        finish();
+      };
+      void begin()
+        .catch(reject)
+        .finally(() => {
+          signal?.removeEventListener('abort', abort);
+          options.onFullscreenWait?.(false);
+        });
     });
   });
 }
@@ -64,7 +85,7 @@ export function waitForStartViewport(
 export async function prepareWebPlayViewport(
   canvas: HTMLCanvasElement,
   signal: AbortSignal | undefined,
-  onStartWait: (start: (() => void) | null) => void,
+  onStartWait: (start: ((fullscreen?: boolean) => void) | null) => void,
   dev = import.meta.env.DEV,
 ): Promise<PlayViewport | null> {
   const query = new URLSearchParams(window.location.search);

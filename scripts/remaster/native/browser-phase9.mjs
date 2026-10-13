@@ -21,7 +21,7 @@ const tag = process.argv[2] || 'hidden';
 const webRoute = tag.startsWith('web');
 const fullWindow = tag.startsWith('full') || tag.startsWith('webfull');
 const gameSpeed = process.argv[5] ?? '3';
-const feelSettings = ['phase26', 'phase32', 'phase33'].includes(phase)
+const feelSettings = ['phase26', 'phase32', 'phase33', 'phase34'].includes(phase)
   ? await readFile(join(base, phase, `${tag}-settings.json`), 'utf8')
       .then(JSON.parse)
       .catch(() => ({}))
@@ -52,7 +52,7 @@ const exists = async (p) =>
       throw error;
     });
 if (stagedFarmRoot) assert(await exists(join(stagedFarmRoot, '_library')), 'Staged farm has no type library');
-const harnessDeadline = Date.now() + 22 * 60000;
+const harnessDeadline = Date.now() + 45 * 60000;
 const scopeDeadline = await readFile(join(base, phase, 'deadline.json'), 'utf8')
   .then((t) => Date.parse(JSON.parse(t).deadlineAt))
   .catch(() => Infinity);
@@ -108,6 +108,8 @@ let launch,
   privateDir,
   server,
   browser,
+  ownedChrome,
+  ownedChromeExit,
   context,
   page,
   cdp,
@@ -126,6 +128,73 @@ let peakRss = 0;
 let acceptanceRates = null;
 let humanPointer = { x: 0, y: 0 };
 let directMouseMove;
+async function activateOwnedChrome(label) {
+  if (phase !== 'phase34' || !ownedChrome) return;
+  await ownerIdle();
+  assert(
+    Number.isSafeInteger(ownedChrome.pid) && ownedChrome.exitCode === null && ownedChrome.signalCode === null,
+    'Live owned Chrome process required for native activation',
+  );
+  // Activate this process's real macOS window/Space, never the owner's Chrome
+  // by application name. CDP focus emulation would fake visibility and prevent
+  // Chrome from entering native fullscreen.
+  const activation = spawnSync(
+    '/usr/bin/osascript',
+    [
+      '-l',
+      'JavaScript',
+      '-e',
+      `ObjC.import('AppKit'); const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${ownedChrome.pid}); if (!app.activateWithOptions(3)) throw new Error('Owned Chrome activation failed');`,
+    ],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  assert(
+    activation.status === 0,
+    activation.stderr?.trim() || String(activation.error ?? 'Owned Chrome activation failed'),
+  );
+  await ownerIdle();
+  await page.bringToFront();
+  await wait('owned Chrome page actually visible', () => page.evaluate(() => !document.hidden), 10000);
+  await record('owned-chrome-activated', {
+    label,
+    pid: ownedChrome.pid,
+    page: await page.evaluate(() => ({
+      hidden: document.hidden,
+      focused: document.hasFocus(),
+      outerWidth,
+      outerHeight,
+      width: innerWidth,
+      height: innerHeight,
+    })),
+  });
+}
+async function setInitialWindowBounds() {
+  const initialWindow = await cdp.send('Browser.getWindowForTarget');
+  if (fullWindow) return;
+  const width = feelSettings.width ?? 1728,
+    height = feelSettings.height ?? 1117;
+  await ownerIdle();
+  // Chrome ignores dimensions in the same command that leaves fullscreen.
+  await cdp.send('Browser.setWindowBounds', { windowId: initialWindow.windowId, bounds: { windowState: 'normal' } });
+  await wait(
+    'initial browser window restored',
+    async () => (await cdp.send('Browser.getWindowForTarget')).bounds.windowState === 'normal',
+    10000,
+  );
+  await cdp.send('Browser.setWindowBounds', {
+    windowId: initialWindow.windowId,
+    bounds: { left: 0, top: 30, width, height },
+  });
+  if (phase === 'phase34' && feelSettings.smallWindow)
+    await wait(
+      'initial small browser window dimensions',
+      async () => {
+        const { bounds } = await cdp.send('Browser.getWindowForTarget');
+        return bounds.width === width && bounds.height === height && bounds.windowState === 'normal';
+      },
+      10000,
+    );
+}
 // Session 26 observes ordinary pointer travel, including moves made by the
 // reused battle helpers. Other sessions retain their existing input protocol.
 async function timedHumanMove(x, y) {
@@ -142,7 +211,7 @@ async function timedHumanMove(x, y) {
   }
 }
 async function humanMove(x, y, options) {
-  if (['phase26', 'phase32', 'phase33'].includes(phase)) {
+  if (['phase26', 'phase32', 'phase33', 'phase34'].includes(phase)) {
     const readPointer = () =>
       page.evaluate(() => {
         const canvas = document.querySelector('#screen');
@@ -157,7 +226,7 @@ async function humanMove(x, y, options) {
       });
     let actual = await readPointer();
     if (!actual.locked || !actual.point || !actual.width || !actual.height) {
-      if (phase === 'phase26') return timedHumanMove(x, y);
+      if (['phase26', 'phase34'].includes(phase)) return timedHumanMove(x, y);
       humanPointer = { x, y };
       return directMouseMove(x, y, options);
     }
@@ -173,7 +242,7 @@ async function humanMove(x, y, options) {
       const dy = ((wanted.y - actual.point.y) * actual.box.height) / actual.height;
       if (Math.abs(dx) < 0.8 && Math.abs(dy) < 0.8) return;
       const target = { x: humanPointer.x + dx, y: humanPointer.y + dy };
-      if (phase === 'phase26') await timedHumanMove(target.x, target.y);
+      if (['phase26', 'phase34'].includes(phase)) await timedHumanMove(target.x, target.y);
       else {
         humanPointer = target;
         await directMouseMove(humanPointer.x, humanPointer.y, attempt ? undefined : options);
@@ -504,7 +573,8 @@ const usable = (c) => c.visible && c.enabled && c.rect?.[2] > c.rect?.[0];
 async function execute(c) {
   if (c.action === 'close') return { closing: true };
   await ownerIdle();
-  if (['phase26', 'phase33'].includes(phase)) await page.bringToFront();
+  if (phase === 'phase34') await activateOwnedChrome(c.action);
+  else if (['phase26', 'phase33'].includes(phase)) await page.bringToFront();
   if (c.action === 'feel-start') {
     if (c.hdOnly)
       await wait('visible HD scene', () => page.evaluate(() => !!window.__hdBridge?.diagnostics?.shown), 60000);
@@ -630,7 +700,7 @@ async function execute(c) {
         const after = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
         const screenshot = await shot(`${c.label ?? 'drag'}-${edge}`);
         let originalScreenshot = null;
-        if (['phase26', 'phase33'].includes(phase)) {
+        if (['phase26', 'phase33', 'phase34'].includes(phase)) {
           await page.keyboard.press('\\');
           await delay(300);
           originalScreenshot = await shot(`${c.label ?? 'drag'}-${edge}-original`);
@@ -640,7 +710,7 @@ async function execute(c) {
       } finally {
         await page.mouse.up();
       }
-      if (['phase26', 'phase33'].includes(phase)) {
+      if (['phase26', 'phase33', 'phase34'].includes(phase)) {
         await delay(600);
         await shot(`${c.label ?? 'drag'}-${edge}-released`);
       }
@@ -684,7 +754,10 @@ async function execute(c) {
     return { seconds: (performance.now() - began) / 1000, scrollActions: actions };
   }
   if (c.action === 'rates-start') {
-    assert(['phase26', 'phase32', 'phase33'].includes(phase) && !acceptanceRates, 'One owned match observer required');
+    assert(
+      ['phase26', 'phase32', 'phase33', 'phase34'].includes(phase) && !acceptanceRates,
+      'One owned match observer required',
+    );
     const { startPhase10MatchRates } = await import('./phase10-match-rates.mjs');
     acceptanceRates = await startPhase10MatchRates({
       page,
@@ -718,7 +791,7 @@ async function execute(c) {
   }
   if (c.action === 'rates-stop') {
     assert(
-      ['phase26', 'phase32', 'phase33'].includes(phase) && acceptanceRates,
+      ['phase26', 'phase32', 'phase33', 'phase34'].includes(phase) && acceptanceRates,
       'Owned played-match observer required',
     );
     await acceptanceRates.inputCheckpoint('end', { completed: c.completed !== false });
@@ -891,7 +964,54 @@ async function execute(c) {
     const label = c.label ?? 'launcher-closed';
     assert(/^[a-zA-Z0-9_-]+$/.test(label));
     assert(privateDir, 'Owned launcher private directory required');
-    await writeFile(join(privateDir, 'stop'), 'stop\n', { mode: 0o600 });
+    let frozen;
+    if (c.freezeWorkerMs) {
+      assert(c.via === 'sigint' && c.freezeWorkerMs === 15000, 'Bounded frozen-worker shutdown case required');
+      const debug = await browser.newBrowserCDPSession();
+      const targets = await debug.send('Target.getTargets');
+      const target = targets.targetInfos.find((item) => item.type === 'worker' && item.url === worker().url());
+      assert(target, 'Actual native Worker debug target required');
+      const { sessionId } = await debug.send('Target.attachToTarget', { targetId: target.targetId, flatten: false });
+      let serial = 0,
+        paused = false;
+      const pending = new Map();
+      debug.on('Target.receivedMessageFromTarget', (event) => {
+        if (event.sessionId !== sessionId) return;
+        const message = JSON.parse(event.message);
+        if (message.method === 'Debugger.paused') paused = true;
+        if (message.id) {
+          const item = pending.get(message.id);
+          pending.delete(message.id);
+          if (message.error) item?.reject(new Error(message.error.message));
+          else item?.resolve(message.result);
+        }
+      });
+      const send = (method) =>
+        new Promise((resolve, reject) => {
+          const id = ++serial;
+          pending.set(id, { resolve, reject });
+          void debug
+            .send('Target.sendMessageToTarget', { sessionId, message: JSON.stringify({ id, method }) })
+            .catch(reject);
+        });
+      await send('Debugger.enable');
+      await send('Debugger.pause');
+      await wait('real Worker debugger pause', () => paused, 5000);
+      frozen = { debug, sessionId, send };
+      await record('worker-frozen-before-stop', { target: target.targetId, durationMs: c.freezeWorkerMs });
+    }
+    if (c.via === 'sigint') launch.kill('SIGINT');
+    else if (c.via !== 'game') await writeFile(join(privateDir, 'stop'), 'stop\n', { mode: 0o600 });
+    if (frozen) {
+      try {
+        await delay(c.freezeWorkerMs);
+        await record('launcher-before-worker-resume', { exitCode: launch.exitCode, signal: launch.signalCode });
+      } finally {
+        await frozen.send('Debugger.resume');
+        await frozen.debug.send('Target.detachFromTarget', { sessionId: frozen.sessionId });
+        await frozen.debug.detach();
+      }
+    }
     try {
       await wait(
         'Chinese normal close notice',
@@ -1565,6 +1685,34 @@ async function execute(c) {
     await shot(c.label + '-settled');
     return { frames: samples.length, elapsedMs: Date.now() - started, directory };
   }
+  if (c.action === 'reopen-tab') {
+    const reopenUrl = page.url();
+    await page.close();
+    await delay(1000);
+    page = await context.newPage();
+    directMouseMove = page.mouse.move.bind(page.mouse);
+    page.mouse.move = humanMove;
+    page.on('pageerror', (error) => void record('pageerror', { error: String(error) }));
+    page.on('dialog', (dialog) => {
+      void record('javascript-dialog', { type: dialog.type(), message: dialog.message() });
+      void dialog.dismiss();
+    });
+    cdp = await context.newCDPSession(page);
+    await page.goto(reopenUrl);
+    await page.bringToFront();
+    await wait(
+      'reopened tab native picture',
+      async () =>
+        !!worker() && !!(await worker().evaluate(() => globalThis.__auditCore?.connection.pictureDecoder.previous)),
+      60000,
+    );
+    const { installPhase7InputProbe, disableWorkerNetworkPayloadObservation } =
+      await import('./phase7-input-stream.mjs');
+    await installPhase7InputProbe(page);
+    await disableWorkerNetworkPayloadObservation(page);
+    await delay(1500);
+    return shot(c.label ?? 'reopened-tab');
+  }
   if (c.action === 'reload') {
     beforeBuildings = c.beforeBuildings === true;
     if (c.fullscreenRequested !== undefined) {
@@ -2164,7 +2312,23 @@ async function cleanup() {
       clearTimeout(routeTimer);
       await record('route-cleanup', { status: routes });
     }
-    await browser?.close().catch(() => {});
+    if (ownedChrome) {
+      // A CDP connection's close only disconnects. Close this privately spawned
+      // browser through its own connection, then reap only the child we own.
+      if (browser?.isConnected())
+        await Promise.race([
+          browser
+            .newBrowserCDPSession()
+            .then((session) => session.send('Browser.close'))
+            .catch(() => {}),
+          delay(2000),
+        ]);
+      await browser?.close().catch(() => {});
+      if ((await Promise.race([ownedChromeExit, delay(5000).then(() => null)])) === null) {
+        ownedChrome.kill('SIGTERM');
+        if ((await Promise.race([ownedChromeExit, delay(3000).then(() => null)])) === null) ownedChrome.kill('SIGKILL');
+      }
+    } else await browser?.close().catch(() => {});
     await server?.close().catch(() => {});
     if (hdAtlasAlias) await unlink(hdAtlasAlias).catch(() => {});
     if (privateDir) await writeFile(join(privateDir, 'stop'), 'stop\n').catch(() => {});
@@ -2196,6 +2360,12 @@ async function cleanup() {
       exit,
       status,
       browserClosed: !browser?.isConnected(),
+      ...(ownedChrome
+        ? {
+            ownedChromeExited: ownedChrome.exitCode !== null || ownedChrome.signalCode !== null,
+            ownedChromeDebugPortReleased: await portReleased(15458),
+          }
+        : {}),
       dllRestored,
       portsReleased,
       peakRssBytes: peakRss,
@@ -2213,7 +2383,8 @@ try {
   if (webRoute) {
     const root = resolve(wt, '../..');
     process.env.RA2_DEV_HTTP = '1';
-    if (['phase26', 'phase32', 'phase33'].includes(phase)) process.env.RA2_PERF_LOG = join(out, 'session-feel.jsonl');
+    if (['phase26', 'phase32', 'phase33', 'phase34'].includes(phase))
+      process.env.RA2_PERF_LOG = join(out, 'session-feel.jsonl');
     process.env.RA2_GAME_ROOT ||= feelSettings.webGameRoot || join(base, phase, 'web-game');
     process.env.RA2_THIRD_PARTY_CACHE_DIR ||= join(root, '.tmp-third-party');
     if (stagedFarmRoot) process.env.RA2_HD_CACHE_DIR = stagedFarmRoot;
@@ -2311,8 +2482,8 @@ try {
   // including browser-owned caches. It never attaches to the owner's profile.
   const profileName = process.argv[4];
   if (profileName) assert(/^[a-zA-Z0-9_-]+$/.test(profileName));
-  if (profileName) {
-    const profilePath = join(base, phase, 'profiles', profileName);
+  if (profileName || phase === 'phase34') {
+    const profilePath = profileName ? join(base, phase, 'profiles', profileName) : join(out, 'chrome-profile');
     if (feelSettings.zoom) {
       const preferencesPath = join(profilePath, 'Default', 'Preferences');
       await mkdir(dirname(preferencesPath), { recursive: true });
@@ -2323,11 +2494,64 @@ try {
       preferences.partition.default_zoom_level = { x: Math.log(feelSettings.zoom) / Math.log(1.2) };
       await writeFile(preferencesPath, JSON.stringify(preferences));
     }
-    context = await chromium.launchPersistentContext(profilePath, {
-      ...browserOptions,
-      ...contextOptions,
-    });
-    browser = context.browser();
+    if (phase === 'phase34') {
+      // Playwright focus emulation marks the tab as visibly captured. Chrome
+      // consequently accepts DOM fullscreen without enlarging the OS window.
+      // Attach without those overrides so the player's Start click exercises
+      // genuine fullscreen; neither screen dimensions nor focus are emulated.
+      assert(await portReleased(15458), 'Private Chrome debug port 15458 must be free');
+      let endpoint = null;
+      ownedChrome = spawn(
+        exe,
+        [
+          ...browserOptions.args,
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--lang=zh-CN',
+          `--user-data-dir=${profilePath}`,
+          '--remote-debugging-address=127.0.0.1',
+          '--remote-debugging-port=15458',
+          'about:blank',
+        ],
+        { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      ownedChromeExit = new Promise((resolve) => {
+        ownedChrome.once('exit', (code, signal) => resolve({ code, signal }));
+        ownedChrome.once('error', (error) => resolve({ error: String(error) }));
+      });
+      for (const stream of [ownedChrome.stdout, ownedChrome.stderr])
+        stream.on('data', (chunk) => {
+          const text = chunk.toString();
+          endpoint ||= text.match(/DevTools listening on (ws:\/\/127\.0\.0\.1:15458\/devtools\/browser\/[\w-]+)/)?.[1];
+          appendFile(join(out, 'chrome.log'), text).catch(() => {});
+        });
+      await wait(
+        'owned Chrome debugging endpoint',
+        () => {
+          assert(
+            ownedChrome.exitCode === null && ownedChrome.signalCode === null,
+            'Owned Chrome exited before connection',
+          );
+          return endpoint;
+        },
+        30000,
+      );
+      browser = await chromium.connectOverCDP(endpoint, { noDefaults: true });
+      context = browser.contexts()[0];
+      assert(context, 'Owned Chrome default context is required');
+      await record('owned-chrome-connection', {
+        pid: ownedChrome.pid,
+        profilePath,
+        debugPort: 15458,
+        noDefaults: true,
+      });
+    } else {
+      context = await chromium.launchPersistentContext(profilePath, {
+        ...browserOptions,
+        ...contextOptions,
+      });
+      browser = context.browser();
+    }
   } else {
     browser = await chromium.launch(browserOptions);
     context = await browser.newContext(contextOptions);
@@ -2385,7 +2609,7 @@ try {
       ),
     });
   });
-  if (['phase26', 'phase32', 'phase33'].includes(phase))
+  if (['phase26', 'phase32', 'phase33', 'phase34'].includes(phase))
     await context.route('**/src/ui/pages/game/hdBridge.ts*', async (route) => {
       const response = await route.fetch();
       const source = await response.text();
@@ -2405,7 +2629,7 @@ try {
   });
   page = await context.newPage();
   directMouseMove = page.mouse.move.bind(page.mouse);
-  if (phase === 'phase26' || ['phase32', 'phase33'].includes(phase)) {
+  if (['phase26', 'phase34'].includes(phase) || ['phase32', 'phase33', 'phase34'].includes(phase)) {
     page.mouse.move = humanMove;
     for (const method of ['click', 'dblclick']) {
       const direct = page.mouse[method].bind(page.mouse);
@@ -2440,18 +2664,8 @@ try {
     });
     cdp.on('Network.loadingFinished', (event) => resourceRequests.delete(event.requestId));
   }
-  const initialWindow = await cdp.send('Browser.getWindowForTarget');
-  if (!fullWindow)
-    await cdp.send('Browser.setWindowBounds', {
-      windowId: initialWindow.windowId,
-      bounds: {
-        left: 0,
-        top: 30,
-        width: feelSettings.width ?? 1728,
-        height: feelSettings.height ?? 1117,
-        windowState: 'normal',
-      },
-    });
+  await activateOwnedChrome('initial-window');
+  await setInitialWindowBounds();
   page.on('response', (r) => {
     if (r.status() >= 400) record('http-error', { status: r.status(), url: redact(r.url()) });
   });
@@ -2479,7 +2693,8 @@ try {
     await delay(1200);
   }
   await page.goto(pageUrl.toString());
-  await page.bringToFront();
+  if (phase === 'phase34') await activateOwnedChrome('startup-page');
+  else await page.bringToFront();
   if (webRoute) {
     if (useViewportHandshake && fullWindow) {
       // The web session fixes its display-matched resolution when the game is selected.
@@ -2543,8 +2758,8 @@ try {
     });
   }
   await delay(1000);
-  if (['phase26', 'phase32', 'phase33'].includes(phase)) {
-    const start = page.getByRole('button', { name: '开始', exact: true });
+  if (['phase26', 'phase32', 'phase33', 'phase34'].includes(phase)) {
+    const start = page.locator(feelSettings.fullscreenStart ? '#native-start' : '#native-start-window');
     if (!webRoute || feelSettings.playStart)
       await wait(
         'player start gate or attached native runtime',
@@ -2552,6 +2767,10 @@ try {
         30000,
       );
     if (await start.isVisible()) {
+      if (phase === 'phase34') {
+        await activateOwnedChrome('before-start');
+        if (feelSettings.smallWindow) await setInitialWindowBounds();
+      }
       const startCapture = await cdp.send('Page.captureScreenshot', {
         format: 'png',
         fromSurface: true,
@@ -2567,7 +2786,7 @@ try {
         })),
         browserWindow: await cdp.send('Browser.getWindowForTarget'),
       });
-      if (['phase26', 'phase33'].includes(phase)) {
+      if (['phase26', 'phase33', 'phase34'].includes(phase)) {
         await page
           .locator('#display-refresh-notice')
           .waitFor({ state: 'visible', timeout: 8000 })
@@ -2688,7 +2907,7 @@ try {
           JSON.stringify({ ok: false, error: String(e.stack || e) }, null, 2),
         );
         await record('command-error', { file, error: String(e) });
-        if (['phase26', 'phase32', 'phase33'].includes(phase)) {
+        if (['phase26', 'phase32', 'phase33', 'phase34'].includes(phase)) {
           await writeFile(join(out, 'paused-command'), file + '\n');
           while (!(await exists(join(out, 'resume'))) && !(await exists(join(out, 'cancel')))) {
             await ownerIdle();

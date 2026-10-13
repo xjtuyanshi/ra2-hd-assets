@@ -743,7 +743,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
   const viewportAbort = new AbortController();
   activeNativeViewportAbort = viewportAbort;
   let nativeViewport: GameResolution | null;
-  const showStart = (start: (() => void) | null) => {
+  const showStart = (start: ((fullscreen?: boolean) => void) | null) => {
     const boot = bootState.getSnapshot();
     if (boot)
       bootState.set({
@@ -751,7 +751,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
         start: start ?? undefined,
         status: {
           phase: 'loading',
-          detail: start ? '把窗口调到你想要的大小——建议最大化——然后点「开始」' : '正在启动游戏…',
+          detail: start ? '全屏开始会让游戏画面匹配整个屏幕，也可以按当前窗口大小开始。' : '正在启动游戏…',
         },
       });
   };
@@ -779,7 +779,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
       canvas,
       viewportAbort.signal,
       (waiting) => {
-        updateBootOverlay({ phase: 'loading', detail: waiting ? t('请打开控制栏并点击“全屏”') : t('初始化…') });
+        updateBootOverlay({ phase: 'loading', detail: waiting ? '正在进入全屏并匹配画面…' : t('初始化…') });
       },
       resolutionViewScale(activeResolutionChoice) ?? 3,
       typeof activeResolutionChoice === 'object' ? activeResolutionChoice : null,
@@ -987,6 +987,9 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
       }
     };
     resizeTimer = window.setInterval(() => {
+      // Menu availability is asynchronous. Keep the one-time battle hint tied
+      // to an observed battle, not the initial false value of that menu check.
+      toolbar.setViewportBattle(hdCleanup?.battleActive?.() ?? false);
       const changed = JSON.stringify(initialArea) !== JSON.stringify(readArea());
       if (!changed || runtimeReleased || resizeBusy) {
         toolbar.setViewportRestart(false);

@@ -135,7 +135,11 @@ The reader publishes these numbers in `tabFrames` and each `controls` entry with
 The executable constructs 25 inline command gadgets at `0xB0C1C0`, stride `0x60`
 (`0x6CFBA2..0x6CFBB7`). `Tab::Draw` visits the 25-element order table at `0xB0CB78`, accepting
 indices 0..24 (`0x6D0D4F..0x6D0D8A`); it does not draw all allocated objects. The reader keeps this
-order, ignores out-of-range/duplicate slots and absent/unconstructed shapes, and reads each live rectangle.
+order, ignores out-of-range/duplicate gadget indices and absent/unconstructed shapes, and reads each live rectangle.
+The order-table position is the source command, while its value selects the positioned gadget: setup reads the
+gadget index at `0x6D1012`, then binds the source shape from `0xB0C148 + slot*4` at `0x6D108E..0x6D109C`.
+The reader therefore publishes `command<slot>`, not `command<gadget index>`. When a command is hidden or moved,
+using the gadget index as the image key puts another command's icon on the live action's rectangle.
 The expanded byte is `S+0x5544`; `0x6D0DCD..0x6D0DE3` draws `0xB0CCB0` when expanded and
 `0xB0CC40` otherwise. Those are published as `commandCollapse`/`commandExpand`. Command image keys
 remain numeric (`command0`..`command24`), avoiding invented semantic command names.

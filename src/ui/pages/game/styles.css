@@ -57,7 +57,7 @@ body {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  background: radial-gradient(circle, #171b1d 0, #090b0c 68%);
+  background: #000;
 }
 canvas {
   display: block;

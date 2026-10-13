@@ -14,10 +14,10 @@ import type { NativePacket } from '../../../src/adapter/native/protocol';
 import type { GameRenderState } from '../../../src/games/renderState';
 import type { GameVmCallbacks } from '../../../src/app/session/runtimeEvents';
 import type { GameFileProvider } from '../../../src/resources/contracts';
-import { createYrNativeHouseTailDiscovery } from '../../../src/games/yr/nativeHost';
+import { createYrNativeHouseTailDiscovery, prepareYrHiddenPresentation } from '../../../src/games/yr/nativeHost';
 import { YR_STATE_GLOBALS as YG, YR_STATE_OFFSETS as YO } from '../../../src/games/yr/stateReader';
 import { createGuestMemory, writeU32 } from '../../helpers/guestMemory';
-import type { VmFrame } from '../../../src/vm86/win32';
+import type { GuestMemory, VmFrame } from '../../../src/vm86/win32';
 import type { MenuSnapshot } from '../../../src/vm86/menuSnapshot';
 
 function concat(...parts: Uint8Array[]): Uint8Array {
@@ -44,12 +44,14 @@ class FakeAgent implements NativeWebSocket {
   closes = 0;
   mirrorOnHook = true;
   hookEnabled = false;
+  hidden = false;
   threadId = 77;
   mirrorFault: { reason: number; stage: number; rule: number; value: number; limit: number } | null = null;
   refuseInput = false;
   holdInput = false;
   pendingInput: NativePacket[] = [];
   modal = false;
+  menuVisible: boolean | undefined;
   menuSnapshot: MenuSnapshot | null = null;
   moviePlaying: boolean | null | undefined;
   initial = new Uint8Array(NATIVE_PAGE_SIZE);
@@ -106,6 +108,7 @@ class FakeAgent implements NativeWebSocket {
         // Legacy agents ignore request flags and still return full metadata.
         json({
           modal: this.modal,
+          menuVisible: this.menuVisible,
           menuHwnd: this.menuSnapshot?.dialogHwnd,
           moviePlaying: this.moviePlaying,
           x: 0,
@@ -134,6 +137,7 @@ class FakeAgent implements NativeWebSocket {
         protocol: 1,
         pid: 10,
         gameThreadId: 0,
+        hidden: this.hidden,
         exe: { size: 1000, peTimestamp: 123, sha256: 'a'.repeat(64), verified },
         surface: this.surface,
         limits: {
@@ -249,6 +253,51 @@ afterEach(async () => {
 });
 
 describe('native core session and presenter lifecycle', () => {
+  it.each([false, true])(
+    'bounds hidden presentation patches to hidden=%s and restores them on stop',
+    async (hidden) => {
+      const { core, agent, policyFactory } = setup();
+      agent.hidden = hidden;
+      const factory = vi.mocked(policyFactory).getMockImplementation()!;
+      const prepare = vi.fn((memory: GuestMemory) => {
+        memory.write_memory(Uint8Array.of(9), 0x1000);
+        return true;
+      });
+      vi.mocked(policyFactory).mockImplementation((...args) => ({
+        ...factory(...args),
+        prepareHiddenPresentation: prepare,
+      }));
+      const pending = core.start();
+      agent.hello();
+      await pending;
+      expect(prepare).toHaveBeenCalledTimes(hidden ? 1 : 0);
+      expect(agent.count(NativeMessageType.Batch)).toBe(hidden ? 1 : 0);
+      await core.stop();
+      const batches = agent.requests.filter((request) => request.type === NativeMessageType.Batch);
+      expect(batches).toHaveLength(hidden ? 2 : 0);
+      if (hidden) {
+        expect([...batches[0]!.payload.slice(12)]).toEqual([7, 9]);
+        expect([...batches[1]!.payload.slice(12)]).toEqual([9, 7]);
+      }
+    },
+  );
+
+  it('rejects an unrecognized YR static painter without changing its executable bytes', () => {
+    const memory = createGuestMemory();
+    const address = 0x615a73;
+    const original = Uint8Array.from([0x8a, 0x86, 0xa8, 0, 0, 0, 0x84, 0xc0, 0x0f, 0x84, 0xce, 0, 0, 0]);
+    memory.write_memory(original, address);
+    memory.bytes[address] ^= 1;
+    const mismatched = memory.read_memory(address, original.length).slice();
+    expect(prepareYrHiddenPresentation(memory)).toBe(false);
+    expect(memory.read_memory(address, original.length)).toEqual(mismatched);
+    memory.write_memory(original, address);
+    expect(prepareYrHiddenPresentation(memory)).toBe(true);
+    expect(memory.read_memory(address, 8)).toEqual(original.slice(0, 8));
+    expect(memory.read_memory(address + 8, 6)).toEqual(new Uint8Array(6).fill(0x90));
+    expect(prepareYrHiddenPresentation(memory)).toBe(true);
+  });
+
   it('primes genuine cursor metadata before the first fallback picture without suppressing the game cursor', async () => {
     const frames = vi.fn();
     const { core, agent, policyFactory, scheduled } = setup({ onFrame: frames }, { pageCursor: false });
@@ -1008,16 +1057,24 @@ describe('native core session and presenter lifecycle', () => {
     expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'error' });
     expect(agent.closes).toBe(1);
   });
-  it('reports normal exit only when this authenticated launcher confirms closure', async () => {
+  it('reports normal exit from the already established authenticated response without another request', async () => {
     for (const closingInput of [false, true]) {
       const statuses = vi.fn();
-      const fetchStatus = vi.fn().mockResolvedValue(new Response(JSON.stringify({ state: 'closed' })));
+      const fetchStatus = vi.fn().mockResolvedValue(
+        Response.json(
+          { state: 'closed' },
+          {
+            headers: { 'X-Native-Session-Wait': 'terminal' },
+          },
+        ),
+      );
       vi.stubGlobal('fetch', fetchStatus);
       const { core, agent } = setup(
         { onStatus: statuses },
         { sessionStatusUrl: 'http://127.0.0.1:15451/__native/session' },
       );
       const start = core.start();
+      await flush();
       agent.hello();
       await start;
       if (closingInput) {
@@ -1025,8 +1082,8 @@ describe('native core session and presenter lifecycle', () => {
         core.setCursorPosition(12, 34);
       } else agent.onclose?.({});
       await flush();
-      expect(fetchStatus).toHaveBeenCalledWith(
-        new URL('http://127.0.0.1:15451/__native/session'),
+      expect(fetchStatus).toHaveBeenCalledExactlyOnceWith(
+        new URL('http://127.0.0.1:15451/__native/session?wait=terminal'),
         expect.objectContaining({ headers: { Authorization: `Bearer ${'a'.repeat(32)}` }, redirect: 'error' }),
       );
       expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'exited', detail: '游戏已关闭' });
@@ -1034,22 +1091,164 @@ describe('native core session and presenter lifecycle', () => {
       expect(await core.getRenderState()).toBeNull();
     }
   });
-  it('keeps failed or unavailable launcher status as a transport error', async () => {
-    for (const result of [new Response(JSON.stringify({ state: 'failed' })), new Response('{}', { status: 503 })]) {
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(result));
+  it('opens native transport only after terminal response headers and waits for its body without a deadline', async () => {
+    let establish!: (response: Response) => void;
+    let body!: ReadableStreamDefaultController<Uint8Array>;
+    const fetchStatus = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          establish = resolve;
+        }),
+    );
+    vi.stubGlobal('fetch', fetchStatus);
+    const statuses = vi.fn();
+    const { core, agent } = setup(
+      { onStatus: statuses },
+      { sessionStatusUrl: 'http://127.0.0.1:15451/__native/session' },
+    );
+    const start = core.start();
+    await flush();
+    expect(agent.onmessage).toBeNull();
+    establish(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            body = controller;
+          },
+        }),
+        {
+          headers: { 'X-Native-Session-Wait': 'terminal' },
+        },
+      ),
+    );
+    await flush();
+    agent.hello();
+    await start;
+    agent.onclose?.({});
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(statuses.mock.calls.map(([status]) => status.phase)).not.toContain('error');
+    body.enqueue(new TextEncoder().encode(JSON.stringify({ state: 'closed' })));
+    body.close();
+    vi.useRealTimers();
+    await flush();
+    expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'exited' });
+    expect(fetchStatus).toHaveBeenCalledOnce();
+  });
+  it('does not overwrite confirmed closure with a startup error when reopening before hello', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json(
+          { state: 'closed' },
+          {
+            headers: { 'X-Native-Session-Wait': 'terminal' },
+          },
+        ),
+      ),
+    );
+    const statuses = vi.fn();
+    const { core, agent } = setup(
+      { onStatus: statuses },
+      { sessionStatusUrl: 'http://127.0.0.1:15451/__native/session' },
+    );
+    const start = core.start();
+    await flush();
+    agent.onerror?.({});
+    await start;
+    expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'exited' });
+    expect(statuses.mock.calls.map(([status]) => status.phase)).not.toContain('error');
+  });
+  it('keeps a failed terminal body as a transport error and aborts the observer on explicit stop', async () => {
+    for (const state of ['failed', 'invalid']) {
+      let signal!: AbortSignal;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation((_url, options) => {
+          signal = options.signal;
+          return Promise.resolve(Response.json({ state }, { headers: { 'X-Native-Session-Wait': 'terminal' } }));
+        }),
+      );
       const statuses = vi.fn();
       const { core, agent } = setup(
         { onStatus: statuses },
         { sessionStatusUrl: 'http://127.0.0.1:15451/__native/session' },
       );
       const start = core.start();
+      await flush();
       agent.hello();
       await start;
       agent.onerror?.({});
       await flush();
       expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'error', detail: 'Native WebSocket error' });
       expect(statuses.mock.calls.map(([status]) => status.phase)).not.toContain('exited');
+      expect(signal.aborted).toBe(true);
     }
+  });
+  it('does not revive a pending transport failure after explicit cancellation, including before hello', async () => {
+    for (const beforeHello of [false, true]) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation((_url, options) =>
+          Promise.resolve(
+            new Response(
+              new ReadableStream({
+                start(controller) {
+                  options.signal.addEventListener('abort', () => controller.error(new Error('cancelled')));
+                },
+              }),
+              { headers: { 'X-Native-Session-Wait': 'terminal' } },
+            ),
+          ),
+        ),
+      );
+      const statuses = vi.fn();
+      const { core, agent } = setup(
+        { onStatus: statuses },
+        { sessionStatusUrl: 'http://127.0.0.1:15451/__native/session' },
+      );
+      const start = core.start();
+      await flush();
+      if (!beforeHello) {
+        agent.hello();
+        await start;
+      }
+      const cancelledStart = beforeHello ? expect(start).rejects.toThrow('closed') : Promise.resolve();
+      agent.onclose?.({});
+      await core.stop().catch(() => undefined);
+      await cancelledStart;
+      await flush();
+      expect(statuses.mock.calls.map(([status]) => status.phase)).not.toContain('error');
+      expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'stopped' });
+    }
+  });
+  it('lets confirmed closure win when a frozen hello timeout runs before socket close', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json(
+          { state: 'closed' },
+          {
+            headers: { 'X-Native-Session-Wait': 'terminal' },
+          },
+        ),
+      ),
+    );
+    vi.useFakeTimers();
+    const statuses = vi.fn();
+    const { core } = setup({ onStatus: statuses }, { sessionStatusUrl: 'http://127.0.0.1:15451/__native/session' });
+    const start = core.start();
+    await flush();
+    await vi.advanceTimersByTimeAsync(100);
+    await start;
+    expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'exited' });
+    expect(statuses.mock.calls.map(([status]) => status.phase)).not.toContain('error');
+  });
+  it('does not open native transport when the terminal observer cannot be established', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 503 })));
+    const { core, agent } = setup({}, { sessionStatusUrl: 'http://127.0.0.1:15451/__native/session' });
+    await expect(core.start()).rejects.toThrow('关闭通知');
+    expect(agent.onmessage).toBeNull();
   });
   it('hides HD state while a native modal owns the surface', async () => {
     const { core, agent } = await started();
@@ -1057,6 +1256,11 @@ describe('native core session and presenter lifecycle', () => {
     agent.modal = true;
     expect(await core.getRenderState()).toBeNull();
     agent.modal = false;
+    expect((await core.getRenderState())?.frame).toBe(7);
+    // A disabled transition dialog owns painting before it accepts input.
+    agent.menuVisible = true;
+    expect(await core.getRenderState()).toBeNull();
+    agent.menuVisible = false;
     expect((await core.getRenderState())?.frame).toBe(7);
   });
   it('requires a new battle mirror after menu return even when the next counter is larger', async () => {

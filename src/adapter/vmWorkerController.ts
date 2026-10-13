@@ -209,6 +209,7 @@ export class VmWorkerController {
   private pendingFrameEmit: (() => void) | null = null;
   private readonly frameBuffers = new FrameBufferPool();
   private frameScheduleGeneration = 0;
+  private stopGeneration = 0;
   private readonly dependencies: Required<
     Pick<VmWorkerControllerDependencies, 'discoverSources' | 'applyResolution' | 'createCore' | 'fetchBytes'>
   > &
@@ -250,6 +251,7 @@ export class VmWorkerController {
   }
 
   async handleMessage(message: MainToWorkerMessage): Promise<void> {
+    const stopGeneration = this.stopGeneration;
     try {
       switch (message.type) {
         case 'init':
@@ -263,6 +265,7 @@ export class VmWorkerController {
             await this.handleStart();
             this.post({ type: 'control-done', action: 'start', requestId: message.requestId });
           } else {
+            this.stopGeneration++;
             this.frameScheduleGeneration++;
             this.inFlightFrameId = 0;
             this.pendingFrameEmit = null;
@@ -417,7 +420,10 @@ export class VmWorkerController {
           ? { type: 'error', message: errorMessage(error) }
           : { type: 'error', requestId, message: errorMessage(error) },
       );
-      if (message.type === 'init' || (message.type === 'control' && message.action === 'start')) {
+      if (
+        message.type === 'init' ||
+        (message.type === 'control' && message.action === 'start' && stopGeneration === this.stopGeneration)
+      ) {
         this.post({ type: 'status', phase: 'error', detail: errorMessage(error) });
       }
     }

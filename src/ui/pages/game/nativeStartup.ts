@@ -22,7 +22,7 @@ export async function prepareNativeViewport(
   requestedFrame: { width: number; height: number } | null = null,
   followIni = false,
   onNegotiatedViewport?: (viewport: { width: number; height: number; dpr: number }) => void,
-  onStartWait?: (start: (() => void) | null) => void,
+  onStartWait?: (start: ((fullscreen?: boolean) => void) | null) => void,
 ): Promise<{ width: number; height: number } | null> {
   const query = new URLSearchParams(window.location.search);
   if (!nativeAutoStart(window.location.search) || query.get('native-viewport') !== '1') return null;

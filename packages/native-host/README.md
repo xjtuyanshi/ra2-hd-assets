@@ -114,6 +114,12 @@ genuine native control painting: original game/control `WM_PAINT` handlers
 render into a private DIB copied from the actual current primary. Scoped
 `GetDC`/`BeginPaint` imports and paired release/end calls target that scratch HDC
 only during synchronous hidden control painting.
+The browser's verified YR policy applies a hidden-only, instruction-checked
+presentation fix for animated static text whose one-shot dialog entrance did
+not enable its animation. It lets the original native text painter continue,
+including its actual string, substring progression, font, color and position.
+It neither replaces text nor changes the game's dialog controls. Session stop
+restores the checked original bytes; visible native sessions do not apply it.
 Stock system control procedures receive that DC directly through `WM_PAINT`.
 Game subclasses receive the ordinary message and retain their primary paint;
 passing their forwarded stock procedure a DC could overwrite genuine native

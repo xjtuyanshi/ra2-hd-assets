@@ -318,6 +318,27 @@ export function createYrNativeHouseTailDiscovery(
   };
 }
 
+/** YR's mode-1 Static painter waits for the dialog's one-shot entrance
+ * transition to enable its text animation. Hidden nested dialog painting can
+ * finish that first-paint stage without entering the transition; later paints
+ * then skip otherwise valid, visible title text forever (0x615A7B).
+ * Continue the original painter when the animation was not enabled. It still
+ * owns the actual string, substring progression, font, color and placement.
+ * This drawing-only compatibility is installed only for a hidden native host. */
+export function prepareYrHiddenPresentation(memory: GuestMemory): boolean {
+  const address = 0x615a73;
+  const original = Uint8Array.from([0x8a, 0x86, 0xa8, 0, 0, 0, 0x84, 0xc0, 0x0f, 0x84, 0xce, 0, 0, 0]);
+  const patched = original.slice();
+  patched.fill(0x90, 8);
+  const current = memory.read_memory(address, original.length);
+  const equal = (value: Uint8Array) =>
+    current.length === value.length && current.every((byte, index) => byte === value[index]);
+  if (equal(patched)) return true;
+  if (!equal(original)) return false;
+  memory.write_memory(patched, address);
+  return true;
+}
+
 /** Native session composition; caller must verify the agent's full executable hash before selecting this policy. */
 export function createYrNativeHostPolicy(
   memory: GuestMemory,
@@ -346,6 +367,7 @@ export function createYrNativeHostPolicy(
       return result.ok ? result.control : null;
     },
     setSpeed: writeYrGameSpeed,
+    prepareHiddenPresentation: prepareYrHiddenPresentation,
     setPointerDrawing: setYrNativePointerDrawing,
     readPointer: readYrNativePointer,
     readMenuTexts: readYrNativeMenuTexts,

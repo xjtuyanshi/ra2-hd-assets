@@ -25,9 +25,20 @@ describe('toolbar line for the stalls of the current match', () => {
     Object.assign(window, { location: { search: '?backend=native' } });
     const matched = { width: 1728, height: 1116 };
     t.bar.setDisplayScale(1728, 1116, 2, 2, matched, 2, true);
-    expect(toolbarState.getSnapshot()?.model.viewportNotice).toMatch(
-      /可在菜单按新窗口大小重新启动|Restart at its new size from a menu/,
+    expect(toolbarState.getSnapshot()?.model.viewportNotice).toBe(
+      '窗口大小已改变；可回菜单按当前大小重开，让画面铺满。',
     );
+    // Resize can arrive before an asynchronous menu read. A missing restart
+    // button must not consume the separate one-time battle notice.
+    expect(toolbarState.getSnapshot()?.model).toMatchObject({ viewportRestart: false, viewportBattle: false });
+    t.bar.setViewportRestart(true);
+    expect(toolbarState.getSnapshot()?.model).toMatchObject({ viewportRestart: true, viewportBattle: false });
+    t.bar.setViewportRestart(false);
+    t.bar.setViewportBattle(true);
+    expect(toolbarState.getSnapshot()?.model).toMatchObject({ viewportRestart: false, viewportBattle: true });
+    t.bar.setViewportBattle(false);
+    t.bar.setViewportRestart(true);
+    expect(toolbarState.getSnapshot()?.model).toMatchObject({ viewportRestart: true, viewportBattle: false });
     t.bar.setDisplayScale(1728, 1116, 2, 2, matched, 2, false);
     expect(toolbarState.getSnapshot()?.model.viewportNotice).toBe('');
     t.end();

@@ -258,10 +258,11 @@ function setup(
     setFrameSize(width: number, height: number) {
       frameSize = { width, height };
     },
-    nativeFrame(keyed = true) {
+    nativeFrame(keyed = true, menuVisible?: boolean) {
       stop.frame({
         ...frameSize,
         rgb565: new Uint16Array(frameSize.width * frameSize.height).fill(keyed ? 0xf81f : 0),
+        menuVisible,
       } as VmFrame);
     },
     polls: () => vm.getRenderState.mock.calls.length,
@@ -2311,6 +2312,30 @@ describe('HD bridge match start', () => {
 });
 
 describe('live original to HD transition', () => {
+  it('shows a whole small native dialog immediately and rejects an older battle reply', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(966, 608);
+    const view = await goLive(harness);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    harness.nativeFrame(false, true);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(null);
+    expect(harness.renderer.setTransparentRect).toHaveBeenLastCalledWith(null);
+    expect(harness.stop.battleActive?.()).toBe(false);
+    // The previous battle read can finish while the dialog is disabled for its entrance.
+    harness.setState(battle(300));
+    await advance(17, 3);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
+    // Closing the dialog resumes the already prepared match without a new view.
+    harness.nativeFrame(false, false);
+    harness.setState(battle(301));
+    await advance(17, 3);
+    expect(harness.hdCanvas.style.display).toBe('block');
+    expect(harness.bridge()?.live).toBe(view);
+    harness.stop();
+  });
+
   it.each([
     ['en', 'Preparing the HD battlefield…'],
     ['zh-CN', '正在准备高清战场…'],

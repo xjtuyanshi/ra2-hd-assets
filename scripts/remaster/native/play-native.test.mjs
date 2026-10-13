@@ -997,9 +997,7 @@ if (args[0] === 'winepath.exe') {
       for (const [key, value] of Object.entries(HD_PLAY_OPTIONS)) assert.equal(url.searchParams.get(key), value);
       assert.match(
         output,
-        stopFailure
-          ? /Native resolution: 1280x720 \(current game/
-          : /Native resolution: 1728x962 \(current game/,
+        stopFailure ? /Native resolution: 1280x720 \(current game/ : /Native resolution: 1728x962 \(current game/,
       );
       assert.match(url.searchParams.get('agent-token'), /^[a-f0-9]{64}$/);
       const listingResponse = await fetch(`${url.origin}/game/.list?dir=ra2`);
@@ -1016,26 +1014,24 @@ if (args[0] === 'winepath.exe') {
       assert.equal((await fetch(statusUrl)).status, 404);
       const statusOptions = { headers: { Authorization: `Bearer ${url.searchParams.get('agent-token')}` } };
       assert.deepEqual(await (await fetch(statusUrl, statusOptions)).json(), { state: 'running' });
-      // Keep the synthetic native transport open until owned-group teardown,
-      // mirroring Wine handles which can outlive the helper's exit status.
+      assert.equal((await fetch(`${statusUrl}?flush=terminal`, { ...statusOptions, method: 'POST' })).status, 409);
+      assert.equal((await fetch(`${statusUrl}?flush=terminal`, { method: 'POST' })).status, 404);
+      // Establish headers before native attachment; intentionally do not consume
+      // the terminal body until the launcher and both servers have exited.
+      const terminal = await fetch(`${statusUrl}?wait=terminal`, statusOptions);
+      assert.equal(terminal.headers.get('X-Native-Session-Wait'), 'terminal');
+      const abandoned = new AbortController();
+      await fetch(`${statusUrl}?wait=terminal`, { ...statusOptions, signal: abandoned.signal });
+      abandoned.abort();
       const agent = new AgentClient(url.searchParams.get('agent'), url.searchParams.get('agent-token'), url.origin);
       t.after(() => agent.close());
       const nativeClosed = new Promise((resolve) => agent.once('closed', resolve));
       await agent.connect();
       if (stopFailure) await symlink(join(dir, 'missing-stop-parent', 'stop'), join(runPath, 'stop'));
       child.kill('SIGINT');
-      const noticeDeadline = Date.now() + 1000;
-      let closure;
-      do {
-        closure = await (await fetch(statusUrl, statusOptions)).json();
-        if (closure.state === 'closed') break;
-        await delay(20);
-      } while (Date.now() < noticeDeadline);
-      assert.deepEqual(closure, { state: 'closed' });
       await nativeClosed;
-      await delay(200);
-      assert.deepEqual(await (await fetch(statusUrl, statusOptions)).json(), { state: 'closed' });
       assert.equal(await exit, 0, output);
+      assert.deepEqual(await terminal.json(), { state: 'closed' });
       assert.equal(await readFile(target, 'utf8'), 'player DLL preserved by lifecycle test');
       for (const port of [+url.port, +new URL(url.searchParams.get('agent')).port]) {
         const server = createServer();

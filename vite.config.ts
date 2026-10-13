@@ -145,11 +145,12 @@ function gameAssetsPlugin(): Plugin {
       });
       // The launcher exposes only this run's coarse state, never its private
       // paths, process identity, credentials or helper diagnostics.
+      const terminalObservers = new Set<ServerResponse>();
       server.middlewares.use('/__native/session', (req, res) => {
         const statusPath = process.env.RA2_NATIVE_SESSION_STATUS;
         const token = process.env.RA2_NATIVE_SESSION_TOKEN;
         if (
-          req.method !== 'GET' ||
+          !['GET', 'POST'].includes(req.method ?? '') ||
           !statusPath ||
           !token ||
           req.headers.authorization !== `Bearer ${token}` ||
@@ -162,6 +163,7 @@ function gameAssetsPlugin(): Plugin {
         res.setHeader('Cache-Control', 'no-store');
         res.setHeader('Content-Type', 'application/json');
         try {
+          const query = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams;
           let { state } = JSON.parse(readFileSync(statusPath, 'utf8'));
           if (!['running', 'restarting', 'closed', 'failed'].includes(state)) throw new Error('Invalid launch status');
           if (state === 'running' && process.env.RA2_NATIVE_LAUNCH_STATUS) {
@@ -172,6 +174,37 @@ function gameAssetsPlugin(): Plugin {
               if (game.running === false) state = game.exitCode === 0 ? 'closed' : 'failed';
             } catch {
               // Unavailable helper state never confirms a normal exit.
+            }
+          }
+          if (req.method === 'POST') {
+            if (query.get('flush') !== 'terminal' || !['closed', 'failed'].includes(state)) {
+              res.statusCode = 409;
+              res.end('{}');
+              return;
+            }
+            // Flush the already-established responses before acknowledging the
+            // launcher. Frozen Workers need not execute JS for their browser's
+            // network layer to retain this terminal body after server shutdown.
+            void Promise.all(
+              [...terminalObservers].map(
+                (observer) =>
+                  new Promise<void>((resolve) => {
+                    terminalObservers.delete(observer);
+                    observer.once('finish', resolve);
+                    observer.once('close', resolve);
+                    observer.end(JSON.stringify({ state }));
+                  }),
+              ),
+            ).then(() => res.end(JSON.stringify({ state })));
+            return;
+          }
+          if (query.get('wait') === 'terminal') {
+            res.setHeader('X-Native-Session-Wait', 'terminal');
+            res.flushHeaders();
+            if (!['closed', 'failed'].includes(state)) {
+              terminalObservers.add(res);
+              res.once('close', () => terminalObservers.delete(res));
+              return;
             }
           }
           res.end(JSON.stringify({ state }));
