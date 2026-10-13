@@ -13,6 +13,8 @@ import type { SupportedGameId } from '../../../games/catalog';
 import { displayMatchedFrameSize } from './canvasFit';
 
 const STORED_RESOLUTION_PREFIX = 'vm-resolution-';
+const STORED_VIEW_DEFAULT_PREFIX = 'vm-resolution-default-';
+const VIEW_DEFAULT_VERSION = 'wide-v1';
 
 /** Toolbar/URL value of the display-matched choice. */
 export const DISPLAY_RESOLUTION = 'display';
@@ -24,6 +26,7 @@ const INI_RESOLUTION = 'ini';
  * Legacy 'display' retains the wide two-device-pixel view.
  */
 export const VIEW_SCALES = { classic: 3, moderate: 2.5, wide: 2 } as const;
+export const DEFAULT_VIEW_CHOICE = 'wide';
 export type ViewChoice = keyof typeof VIEW_SCALES;
 export type ResolutionChoice = GameResolution | typeof DISPLAY_RESOLUTION | ViewChoice | null;
 
@@ -59,7 +62,17 @@ export function parseResolutionChoice(value: string | null, custom = false): Res
 /** The stored choice, or undefined when the player never chose (or storage is unavailable). */
 export function loadStoredResolutionChoice(gameId: SupportedGameId): ResolutionChoice | undefined {
   try {
-    return parseResolutionChoice(window.localStorage.getItem(`${STORED_RESOLUTION_PREFIX}${gameId}`));
+    const choice = parseResolutionChoice(window.localStorage.getItem(`${STORED_RESOLUTION_PREFIX}${gameId}`));
+    // Earlier builds could remember the former Classic default without recording whether it was explicitly
+    // selected. Move that unversioned value to Wide once; all new toolbar/URL choices record this version.
+    if (
+      choice === 'classic' &&
+      window.localStorage.getItem(`${STORED_VIEW_DEFAULT_PREFIX}${gameId}`) !== VIEW_DEFAULT_VERSION
+    ) {
+      storeResolutionChoice(gameId, DEFAULT_VIEW_CHOICE);
+      return DEFAULT_VIEW_CHOICE;
+    }
+    return choice;
   } catch {
     return undefined;
   }
@@ -72,8 +85,9 @@ export function storeResolutionChoice(gameId: SupportedGameId, choice: Resolutio
       `${STORED_RESOLUTION_PREFIX}${gameId}`,
       resolutionChoiceValue(choice) || INI_RESOLUTION,
     );
+    window.localStorage.setItem(`${STORED_VIEW_DEFAULT_PREFIX}${gameId}`, VIEW_DEFAULT_VERSION);
   } catch {
-    // Persistence may be unavailable in private mode; safely fall back to the original INI after this restart.
+    // Persistence may be unavailable in private mode; the page's default still applies after this restart.
   }
 }
 
@@ -115,8 +129,8 @@ export function resolveResolutionViewScale(
   const rect = measuredArea ?? stage?.getBoundingClientRect();
   if (selected === null || !rect || !negotiatedFrame) return undefined;
   const fit = Math.min(
-    (rect.width * devicePixelRatio) / negotiatedFrame.width,
-    (rect.height * devicePixelRatio) / negotiatedFrame.height,
+    Math.round(rect.width * devicePixelRatio) / negotiatedFrame.width,
+    Math.round(rect.height * devicePixelRatio) / negotiatedFrame.height,
   );
   if (!Number.isFinite(fit) || fit <= 0) return undefined;
   for (let scale = selected; scale >= 1; scale -= 0.5) if (scale <= fit + 1e-6) return scale;

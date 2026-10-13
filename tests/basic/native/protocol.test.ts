@@ -4,6 +4,7 @@ import {
   NativePictureDecoder,
   NATIVE_MAX_MESSAGE,
   NATIVE_MAX_PAGES,
+  NATIVE_MAX_PICTURE_PIXELS,
   NATIVE_PAGE_SIZE,
   decodePacket,
   encodePacket,
@@ -313,6 +314,21 @@ describe('native binary protocol', () => {
 });
 
 describe('native RGB565 picture decoding', () => {
+  it('decodes a complete Wide fullscreen frame and preserves its baseline after an oversized delta', () => {
+    const decoder = new NativePictureDecoder();
+    const width = 2056,
+      height = 1290;
+    const rows: [number, Uint8Array][] = Array.from({ length: height }, (_, y) => [y, words(0x8000 | width)]);
+    const initial = decoder.apply(picture(1, width, height, rows));
+    expect(initial.pixels).toHaveLength(width * height);
+    expect(initial.pixels[width * height - 1]).toBe(0xf81f);
+    expect(NATIVE_MAX_PICTURE_PIXELS).toBe(3 * 1024 * 1024);
+    expect(NATIVE_MAX_PICTURE_PIXELS * 4 + 4096 * 8 + 16).toBeLessThan(NATIVE_MAX_MESSAGE);
+    expect(() => decoder.apply(picture(2, 2048, 1537, []))).toThrow('dimensions');
+    const next = decoder.apply(picture(3, width, height, [[height - 1, words(1, 0x1234, 0x8000 | (width - 1))]]));
+    expect(next.pixels[(height - 1) * width]).toBe(0x1234);
+    expect(next.pixels[0]).toBe(0xf81f);
+  });
   it('reconstructs sparse row deltas and key runs while keeping the baseline private', () => {
     const decoder = new NativePictureDecoder();
     const initial = decoder.apply(

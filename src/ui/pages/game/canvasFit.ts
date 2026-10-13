@@ -59,9 +59,11 @@ export function calculateCanvasFit(input: CanvasFitInput): CanvasFitResult | nul
     return null;
   }
 
+  // Match the integral display raster, including fractional CSS dimensions at browser zoom. Flooring first can
+  // lose a whole even-sized game column; fitting against the unrounded CSS extent can then resample a 2x frame.
   const exactScale = Math.min(
-    (input.stageWidth * input.devicePixelRatio) / input.frameWidth,
-    (input.stageHeight * input.devicePixelRatio) / input.frameHeight,
+    Math.round(input.stageWidth * input.devicePixelRatio) / input.frameWidth,
+    Math.round(input.stageHeight * input.devicePixelRatio) / input.frameHeight,
   );
   // CSS must use the exact fit scale. The backing store may stay at the
   // minimum render scale, but flooring the CSS scale would crop tiny stages.
@@ -124,8 +126,8 @@ export function displayMatchedFrameSize(input: DisplayMatchInput): { width: numb
   ) {
     return null;
   }
-  const deviceWidth = Math.floor(input.stageWidth * input.devicePixelRatio + 1e-6);
-  const deviceHeight = Math.floor(input.stageHeight * input.devicePixelRatio + 1e-6);
+  const deviceWidth = Math.round(input.stageWidth * input.devicePixelRatio);
+  const deviceHeight = Math.round(input.stageHeight * input.devicePixelRatio);
   for (let scale = input.devicePixelsPerFramePixel; scale >= 1; scale = Math.max(0, scale - 0.5)) {
     const width = Math.min(limits.maxWidth, Math.floor(deviceWidth / scale)) & ~1;
     const height = Math.min(limits.maxHeight, Math.floor(deviceHeight / scale)) & ~1;

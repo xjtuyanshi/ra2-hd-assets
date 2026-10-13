@@ -177,7 +177,7 @@ void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pi
      * primaries before their control pass commits. Publish the completed
      * current primary after that pass, retaining all native dialog controls. */
     if (nh_hidden_painting() || !nh_connected() || !pixels || bpp != 16 || !width || !height || width > 4096 || height > 4096 ||
-        pitch < width * 2 || (uint64_t)width * height > 2u * 1024u * 1024u ||
+        pitch < width * 2 || (uint64_t)width * height > NH_MAX_PICTURE_PIXELS ||
         InterlockedCompareExchange(&initialized, 0, 0) != 2 || !TryEnterCriticalSection(&picture_lock)) return;
     if (!credit || in_flight)
     {

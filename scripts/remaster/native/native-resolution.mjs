@@ -5,14 +5,14 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-// Conservatively reuse the repository's shared session resolution range, further
-// bounded by the native picture protocol (agent/picture.c and NativePictureDecoder).
+// Reuse the shared session axis limits. The independent picture allocation bound
+// covers a 2056x1290 Wide frame; keep it aligned with agent.h and NativePictureDecoder.
 export const NATIVE_RESOLUTION_LIMITS = Object.freeze({
   minWidth: 800,
   minHeight: 600,
   maxWidth: 2560,
   maxHeight: 1600,
-  maxPixels: 2 * 1024 * 1024,
+  maxPixels: 3 * 1024 * 1024,
 });
 
 export function parseNativeSize(value) {
@@ -69,11 +69,14 @@ export function nativeViewportResolution(viewport, iniResolution = null) {
   }
   const requestedScale = viewport.devicePixelsPerGamePixel ?? 2;
   if (![2, 2.5, 3].includes(requestedScale)) throw new Error('不支持的视野档位。请选经典、适中或宽。');
+  // CSS viewport dimensions can be fractional or integer-rounded at browser zoom; the display raster is integral.
+  const deviceWidth = Math.round(viewport.width * viewport.dpr);
+  const deviceHeight = Math.round(viewport.height * viewport.dpr);
   let size;
   for (let scale = requestedScale; scale >= 1; scale -= 0.5) {
     size = {
-      width: Math.floor((viewport.width * viewport.dpr) / scale + 1e-6) & ~1,
-      height: Math.floor((viewport.height * viewport.dpr) / scale + 1e-6) & ~1,
+      width: Math.floor(deviceWidth / scale) & ~1,
+      height: Math.floor(deviceHeight / scale) & ~1,
     };
     if (size.width >= 800 && size.height >= 600) break;
   }

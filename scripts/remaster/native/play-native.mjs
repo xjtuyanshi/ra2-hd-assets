@@ -53,8 +53,11 @@ Optional environment:
 Starts a hidden native game and the local development page, attached directly to
 the supplied YR copy with the shared HD play look. --open opens Google Chrome.
 By default the page reports its real available area before the game starts, so
-the remembered view uses 3 (classic), 2.5 (moderate) or 2 (wide) device pixels per game pixel; classic is the first-run default. --fullscreen waits for the page's
-Start button before measurement; Chrome requires that user click for fullscreen.
+the remembered view uses 3 (classic), 2.5 (moderate) or 2 (wide) device pixels per
+game pixel; wide is the default. The page migrates an old remembered classic
+choice to wide once; explicitly choosing classic again remembers it.
+--fullscreen waits for the page's Start button before measurement; Chrome
+requires that user click for fullscreen.
 --size explicitly selects a fixed size and bypasses page measurement. Writes only
 the resolution keys in the supplied RA2MD.INI before start and retains its
 original backup. Resizing Chrome scales the current match immediately; in a menu

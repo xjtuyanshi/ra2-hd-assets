@@ -78,15 +78,19 @@ By default the launcher serves and opens a plain Chinese start screen before sta
 clicks Fullscreen Start to enter fullscreen, wait for stable dimensions, and then measure the available play area, device pixel ratio and remembered
 view through an authenticated loopback endpoint. A smaller Window Start button starts at the current size. Waiting for this choice has no startup timeout. The views
 are **经典** / **适中** / **宽**, respectively `resolution=classic|moderate|wide` and 3 / 2.5 / 2 device pixels per
-game pixel; Classic is the initial default and `resolution=display` remains a Wide alias. Both launch routes accept
-`--view classic|moderate|wide` to select a view explicitly. The game frame is rounded down to even dimensions and
+game pixel; Wide is the default and `resolution=display` remains a Wide alias. Both launch routes accept
+`--view classic|moderate|wide` to select a view explicitly. They leave the default to the shared page so that later
+explicit choices remain remembered. Each game's old unversioned stored Classic choice migrates to Wide once;
+the old format did not distinguish the prior default from an explicit choice. Selecting Classic again, in the
+toolbar or with `--view classic`, records the new preference version and keeps Classic on later starts. Moderate,
+fixed resolutions and the explicit INI choice are preserved. The game frame is rounded down to even dimensions and
 uses a smaller fitting scale if the window cannot fit the minimum 800×600 at the requested scale. At a 1728×914-point
 play area with DPR 2, the calculated Classic / Moderate / Wide frames are 1152×608 / 1382×730 / 1728×914; fullscreen
 1728×1117 gives Classic 1152×744, closest to original 1024×768 framing on that display. These dimensions describe
 the sizing rule, not browser acceptance. Larger logical frames reveal more map and sidebar rows; HD drawing buffers
 still cover device pixels at all three scales, including smooth enlargement of 2x art and supplied 3x sidebar art.
 
-The native supported range remains 800×600 through 2560×1600 and at most 2,097,152 game pixels. Measured frames
+The native supported range remains 800×600 through 2560×1600, with a 3,145,728 game-pixel allocation bound. Measured frames
 are capped within this range; the picture still scales to the available page area. `--size WxH`, for
 example `--size 1280x720`, explicitly selects a fixed resolution and bypasses page measurement. `--fullscreen` requests
 page fullscreen before measurement; the main start button always requests it and the smaller button explicitly opts out. Browser fullscreen requires this ordinary user gesture. Normal `--open` requests a maximized window. The
@@ -101,6 +105,22 @@ This returns to the main menu; unstarted skirmish choices are not retained. The 
 authentication token and final cleanup ownership across these restarts. Native menus retain the original aspect ratio. A
 launcher without an interactive browser must use `--size` explicitly. Measured URLs carry the selected resolution
 view and `native-viewport=1`; the page waits for the original main menu before attaching its native adapter.
+
+The former 2,097,152-pixel area guard bounded the native picture encoder's two RGB565 baselines and the browser
+decoder's image allocations; it was not a game-engine or mirror limit. The launcher, agent and decoder now share
+the larger area bound so a 2056×1290 Wide frame (2,652,240 game pixels) is not reduced. Its two native RGB565
+baselines use 10,608,960 bytes together, and the conservative picture payload bound is 10,619,296 bytes including
+row headers. Even the new maximum area needs less than 12.1 MiB for that payload, inside the unchanged 32 MiB
+transport mailbox. Mirror page/rule/message budgets are unchanged. The hidden painter's existing 4096-axis and
+32 MiB per-image checks also admit this frame, including its 32-bit DIB path. The 2560×1600 axis limits originate
+in the shared session/video-mode policy and are already sufficient; raising them is unnecessary. These source
+bounds establish allocation safety, while real-game compatibility and speed still require browser acceptance.
+
+The HD backing and optional GPU readback budgets are 12,000,000 pixels. A full 4112×2580 device-pixel page is
+10,608,960 pixels (42,435,840 bytes for one RGBA8 image); the tactical backing excludes the sidebar and command
+bar. This permits one backing pixel per device pixel at Wide without reducing the buffer to meet the old
+10,000,000-pixel ceiling. Larger displays retain proportional budget capping. At 75% browser zoom, multiply the
+enlarged CSS dimensions by DPR 1.5 to obtain these device dimensions; macOS display points are not CSS pixels.
 
 The authenticated viewport status adds the original measured `viewport` (`width`, `height`, `dpr`) alongside
 `ready`, `restarting` and `resolution`. Ordinary retried reports retain the baseline; an authenticated explicit

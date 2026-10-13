@@ -66,7 +66,8 @@ const BUFFER_MAP_READ = 1;
 const BUFFER_COPY_DST = 8;
 const MAP_READ = 1;
 const MAX_DIMENSION = 16_384;
-const MAX_PIXELS = 10_000_000;
+// Match the HD bridge's bounded backing size, including a full 4112x2580 page.
+const MAX_PIXELS = 12_000_000;
 const MAX_BUFFER_BYTES = 48 * 1024 * 1024;
 const TIMEOUT_MS = 10_000;
 const FORMATS = new Set(['rgba8unorm', 'rgba8unorm-srgb', 'bgra8unorm', 'bgra8unorm-srgb']);

@@ -1419,4 +1419,55 @@ describe('native core session and presenter lifecycle', () => {
     expect(agent.closes).toBe(1);
     expect(agent.count(NativeMessageType.Credit)).toBe(0);
   });
+  it('resumes after an invalid-mirror recovery wait expires while retaining the transport exit handshake', async () => {
+    let terminal!: ReadableStreamDefaultController<Uint8Array>;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              terminal = controller;
+            },
+          }),
+          { headers: { 'X-Native-Session-Wait': 'terminal' } },
+        ),
+      ),
+    );
+    const statuses = vi.fn();
+    const { core, agent } = setup(
+      { onStatus: statuses },
+      { sessionStatusUrl: 'http://127.0.0.1:15451/__native/session' },
+    );
+    const start = core.start();
+    await flush();
+    agent.hello(true, true);
+    await start;
+    expect((await core.getRenderState())?.frame).toBe(7);
+    vi.useFakeTimers();
+    agent.mirror(2, [], 4);
+    await flush();
+    expect(agent.count(NativeMessageType.Subscribe)).toBe(2);
+    await vi.advanceTimersByTimeAsync(8000);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      lastReaderError: expect.stringContaining('No complete native mirror'),
+    });
+    const fresh = agent.initial.slice();
+    fresh[0] = 42;
+    agent.mirror(3, [{ address: 0x1000, bytes: fresh }], 2);
+    expect((await core.getRenderState())?.frame).toBe(42);
+    const inputs = agent.count(NativeMessageType.Input);
+    core.setKeyState(65, true);
+    await flush();
+    expect(agent.count(NativeMessageType.Input)).toBe(inputs + 1);
+    expect(agent.closes).toBe(0);
+    agent.onclose?.({});
+    await flush();
+    expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'running' });
+    terminal.enqueue(json({ state: 'closed' }));
+    terminal.close();
+    await flush();
+    expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'exited', detail: '游戏已关闭' });
+    expect(statuses.mock.calls.map(([status]) => status.phase)).not.toContain('error');
+  });
 });

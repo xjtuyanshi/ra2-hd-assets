@@ -171,7 +171,8 @@ const LOAD_RETRY_MS = 30_000;
  * roughly 100 bytes per pixel, so a larger rectangle (a 5K display, a browser zoomed far in) renders at this budget and
  * is scaled up by the compositor instead of exhausting GPU memory.
  */
-const MAX_BUFFER_PIXELS = 10_000_000;
+// A 4112x2580 device-pixel page needs 10,608,960 pixels before excluding the sidebar.
+const MAX_BUFFER_PIXELS = 12_000_000;
 /**
  * How long the notice that a match shows the original picture stays up once the match is running. It is information
  * for the start of a match, not a banner for all of it: it returns at the next match on a map without an HD view, not

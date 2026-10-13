@@ -793,9 +793,26 @@ describe('submitted WebGPU frame readback ownership', () => {
     await expect(capture.request()).rejects.toThrow('disposed');
   });
 
+  it('admits a full Wide device-pixel readback inside the unchanged byte budget', async () => {
+    const gpu = fakeGpuFrame();
+    Object.assign(gpu.texture, { width: 4112, height: 2580 });
+    const capture = createWebGpuFrameCapture(() => ({ backend: gpu.backend, metadata: null }));
+    const result = capture.request();
+    const cancelled = expect(result).rejects.toThrow('review cancelled');
+    capture.draw(null);
+    expect(gpu.device.createBuffer).toHaveBeenCalledWith({
+      label: 'HD next-draw readback',
+      size: 16640 * 2580,
+      usage: 9,
+    });
+    capture.cancel('review cancelled');
+    await cancelled;
+    capture.dispose();
+  });
+
   it.each([
     { change: { width: 0 }, error: 'dimensions' },
-    { change: { width: 10001, height: 1000 }, error: 'dimensions' },
+    { change: { width: 12001, height: 1000 }, error: 'dimensions' },
     { change: { format: 'rgba16float' }, error: 'format' },
     { change: { usage: 16 }, error: 'COPY_SRC' },
     { change: { sampleCount: 4 }, error: 'dimensions' },
@@ -875,6 +892,20 @@ describe('submitted WebGPU frame readback ownership', () => {
 });
 
 describe('HD bridge canvas layout', () => {
+  it('keeps the full 2056x1290 Wide frame at device pixels under Chrome 75% zoom', async () => {
+    const harness = setup('?hd=1&hd-rect=0,0,2056,1290');
+    harness.setFrameSize(2056, 1290);
+    (window as unknown as { devicePixelRatio: number }).devicePixelRatio = 1.5;
+    Object.assign(harness.screen, {
+      offsetParent: { getBoundingClientRect: () => ({ left: 0, top: 0 }), clientLeft: 0, clientTop: 0 },
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 4112 / 1.5, height: 2580 / 1.5 }),
+    });
+    const view = await goLive(harness);
+    await advance(16);
+    expect(view.resizePixels).toHaveBeenLastCalledWith(4112, 2580, 2056, 1290);
+    harness.stop();
+  });
+
   it('covers the tactical rectangle on whole device pixels with one buffer pixel per device pixel', async () => {
     const harness = setup();
     // A 1728x1080 game fitted at two device pixels per game pixel on a DPR-2 display, 20.25 CSS px from the top.
@@ -915,7 +946,7 @@ describe('HD bridge canvas layout', () => {
     await advance(16);
     await advance(200);
     const [width, height] = view.resizePixels.mock.lastCall as number[];
-    expect(width! * height!).toBeLessThanOrEqual(10_000_000 * 1.001);
+    expect(width! * height!).toBeLessThanOrEqual(12_000_000 * 1.001);
     expect(width! / height!).toBeCloseTo(632 / 568, 2);
     expect(Number.parseFloat(harness.hdCanvas.style.width!)).toBeCloseTo((4050.7 * 632) / 800, 0);
     harness.stop();

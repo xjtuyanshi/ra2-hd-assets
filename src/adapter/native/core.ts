@@ -789,7 +789,11 @@ export class NativeCore {
       this.policy = this.createPolicy(this.memory, this.metadata, this.hello.exe.sha256);
       await this.subscribe([]);
     } catch (error) {
-      this.fail(error instanceof Error ? error : new Error(String(error)));
+      if (error instanceof NativeMirrorUnavailable) {
+        // The replacement subscription can still publish after this wait expires.
+        // Keep pictures/input alive; only a transport failure owns the exit handshake.
+        for (const slot of [this.render, this.command, this.frame]) slot.error = error.message;
+      } else this.fail(error instanceof Error ? error : new Error(String(error)));
     } finally {
       this.recovering = false;
     }

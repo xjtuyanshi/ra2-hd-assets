@@ -7,9 +7,11 @@ export interface PlayViewport {
 export function measurePlayViewport(canvas: HTMLCanvasElement): PlayViewport {
   const rect = canvas.closest('#stage')?.getBoundingClientRect();
   const fullscreen = document.fullscreenElement?.contains(canvas);
+  // innerWidth/innerHeight round to CSS integers. Keep the actual fractional fullscreen box at browser zoom.
+  const fullscreenRect = fullscreen ? document.fullscreenElement!.getBoundingClientRect() : null;
   return {
-    width: fullscreen ? window.innerWidth : (rect?.width ?? window.innerWidth),
-    height: fullscreen ? window.innerHeight : (rect?.height ?? window.innerHeight),
+    width: fullscreenRect?.width ?? rect?.width ?? window.innerWidth,
+    height: fullscreenRect?.height ?? rect?.height ?? window.innerHeight,
     dpr: window.devicePixelRatio || 1,
   };
 }

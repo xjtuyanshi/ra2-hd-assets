@@ -1166,6 +1166,39 @@ async function execute(c) {
     });
   }
   if (c.action === 'command-state') return worker().evaluate(() => globalThis.__auditCore.getCommandState());
+  if (c.action === 'memory-snapshot') {
+    const processList = spawnSync('/bin/ps', ['-axo', 'pid=,rss=,command='], { encoding: 'utf8', timeout: 3000 });
+    const games = (processList.stdout || '')
+      .split('\n')
+      .map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/))
+      .filter(
+        (match) => match && /(?:^|[\\/\s])gamemd\.exe(?:\s|$)/i.test(match[3]) && !/ra2launch\.exe/i.test(match[3]),
+      );
+    return {
+      at: new Date().toISOString(),
+      source:
+        'Read-only macOS game RSS and Chrome page JS heap; GPU and Worker allocations are not included in JS heap',
+      gameRssBytes: processList.status === 0 && games.length === 1 ? +games[0][2] * 1024 : null,
+      gamePid: games.length === 1 ? +games[0][1] : null,
+      gameUnknown: games.length === 1 ? null : `Game candidates: ${games.length}`,
+      page: await page.evaluate(() => ({
+        heap: performance.memory
+          ? {
+              usedBytes: performance.memory.usedJSHeapSize,
+              totalBytes: performance.memory.totalJSHeapSize,
+              limitBytes: performance.memory.jsHeapSizeLimit,
+            }
+          : null,
+        resolution: localStorage.getItem('vm-resolution-yr'),
+        resolutionDefault: localStorage.getItem('vm-resolution-default-yr'),
+        canvases: [...document.querySelectorAll('canvas')].map((canvas) => ({
+          id: canvas.id,
+          width: canvas.width,
+          height: canvas.height,
+        })),
+      })),
+    };
+  }
   if (c.action === 'scale-proof') {
     assert(typeof c.label === 'string' && /^[a-zA-Z0-9_-]+$/.test(c.label), 'A screenshot label is required');
     let command = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
@@ -1980,7 +2013,7 @@ async function execute(c) {
       const candidates = (ps.stdout || '')
         .split('\n')
         .map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/))
-        .filter((m) => m && /^(?:[^ \t]*[\\/])?gamemd\.exe(?:\s|$)/i.test(m[3]));
+        .filter((m) => m && /(?:^|[\\/\s])gamemd\.exe(?:\s|$)/i.test(m[3]) && !/ra2launch\.exe/i.test(m[3]));
       const match = ps.status === 0 && candidates.length === 1 ? candidates[0] : null;
       const sample = {
         at: new Date().toISOString(),
@@ -2406,7 +2439,7 @@ try {
     const options = new URLSearchParams(HD_PLAY_OPTIONS);
     if (tag.startsWith('webbefore')) options.set('sr', '0');
     const query = options.toString();
-    url = `http://127.0.0.1:15451/?${query}&resolution=${viewChoice ?? 'display'}&lang=zh`;
+    url = `http://127.0.0.1:15451/?${query}${viewChoice ? `&resolution=${viewChoice}` : ''}&lang=zh`;
     await record('web-server', { checkout: wt, gameRoot: process.env.RA2_GAME_ROOT, route: 'web' });
   } else {
     dllBefore = await dllIdentity();
@@ -2557,6 +2590,19 @@ try {
     context = await browser.newContext(contextOptions);
   }
   await context.grantPermissions(['local-network-access'], { origin: new URL(url).origin });
+  if (feelSettings.legacyView) {
+    assert(['classic', 'moderate', 'wide'].includes(feelSettings.legacyView));
+    await context.addInitScript((choice) => {
+      if (sessionStorage.getItem('phase36-legacy-seeded')) return;
+      localStorage.setItem('vm-resolution-yr', choice);
+      localStorage.removeItem('vm-resolution-default-yr');
+      sessionStorage.setItem('phase36-legacy-seeded', '1');
+    }, feelSettings.legacyView);
+    await record('legacy-view-fixture', {
+      choice: feelSettings.legacyView,
+      source: 'Isolated test profile legacy preference; no game-state changes',
+    });
+  }
   await context.route('**/packages/hd-renderer/src/live/liveView.ts*', async (route) => {
     if (!beforeBuildings) return route.continue();
     const response = await route.fetch();

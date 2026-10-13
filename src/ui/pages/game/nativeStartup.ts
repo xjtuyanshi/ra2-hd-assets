@@ -18,7 +18,7 @@ export async function prepareNativeViewport(
   canvas: HTMLCanvasElement,
   signal?: AbortSignal,
   onFullscreenWait?: (waiting: boolean) => void,
-  devicePixelsPerGamePixel = 3,
+  devicePixelsPerGamePixel = 2,
   requestedFrame: { width: number; height: number } | null = null,
   followIni = false,
   onNegotiatedViewport?: (viewport: { width: number; height: number; dpr: number }) => void,

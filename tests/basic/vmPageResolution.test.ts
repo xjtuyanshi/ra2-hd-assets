@@ -28,6 +28,12 @@ const stage = (width: number, height: number) =>
   ({ getBoundingClientRect: () => ({ width, height }) }) as unknown as Element;
 
 describe('分辨率选择', () => {
+  it.each([2741, 2741.3333])('retains exact Wide scale for a rounded device raster at CSS width %s', (width) => {
+    const area = { width, height: 1720 };
+    const frame = resolveResolutionChoice('wide', null, 1.5, area);
+    expect(frame).toEqual({ width: 2056, height: 1290 });
+    expect(resolveResolutionViewScale('wide', null, 1.5, frame, area)).toBe(2);
+  });
   it('retains the negotiated scale after reloading a smaller native window', () => {
     expect(
       resolveResolutionViewScale(
@@ -73,6 +79,28 @@ describe('分辨率选择', () => {
     // A value another build stored is treated as never chosen instead of being passed to the game.
     values.set('vm-resolution-yr', '1366x768');
     expect(loadStoredResolutionChoice('yr')).toBeUndefined();
+  });
+
+  it('migrates the old remembered Classic default once and retains later explicit views', () => {
+    const values = stubStorage();
+    values.set('vm-resolution-yr', 'classic');
+    expect(loadStoredResolutionChoice('yr')).toBe('wide');
+    expect(values.get('vm-resolution-yr')).toBe('wide');
+    expect(loadStoredResolutionChoice('yr')).toBe('wide');
+    storeResolutionChoice('yr', 'classic');
+    expect(loadStoredResolutionChoice('yr')).toBe('classic');
+    values.set('vm-resolution-ra2', 'classic');
+    expect(loadStoredResolutionChoice('ra2')).toBe('wide');
+    expect(loadStoredResolutionChoice('yr')).toBe('classic');
+  });
+
+  it('preserves existing non-Classic choices during default migration', () => {
+    const values = stubStorage();
+    for (const choice of ['moderate', 'wide', 'display', 'ini', '1280x720']) {
+      values.set('vm-resolution-yr', choice);
+      expect(loadStoredResolutionChoice('yr')).toEqual(parseResolutionChoice(choice));
+      expect(values.get('vm-resolution-yr')).toBe(choice);
+    }
   });
 
   it('匹配窗口按启动时的舞台与设备像素比换算；其余选择原样返回', () => {

@@ -1,4 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
+import { spawnSync } from 'node:child_process';
 
 // YR 1.001 observations already used by browser-battle-input.mjs. All writes
 // belong to the ordinary browser input path, never these memory addresses.
@@ -35,6 +36,20 @@ export async function runPhase9BasePlay(api) {
   const record = async (name, proof) => {
     report.steps.push({ name, at: new Date().toISOString(), ...proof });
     await api.record?.(name, proof);
+  };
+  const memorySnapshot = async (stage) => {
+    const result = spawnSync('/bin/ps', ['-axo', 'pid=,rss=,command='], { encoding: 'utf8', timeout: 3000 });
+    const candidates = (result.stdout || '')
+      .split('\n')
+      .map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/))
+      .filter((match) => match && /(?:^|[\\/\s])gamemd\.exe(?:\s|$)/i.test(match[3]))
+      .map((match) => ({ pid: +match[1], rssBytes: +match[2] * 1024, command: match[3] }));
+    await record('base-process-memory', {
+      stage,
+      source: 'Read-only macOS ps; preserve wrapper candidates for review',
+      candidates,
+      status: result.status,
+    });
   };
   const shot = async (label) => {
     const path = await api.shot(`base-${label}`);
@@ -474,6 +489,7 @@ export async function runPhase9BasePlay(api) {
   };
 
   try {
+    await memorySnapshot('start');
     if ((await api.inputState()).modal) throw new Error('A genuine battle must be resumed before base play');
     const zFactor = (await memory(0xb0cd48, 8)).readDoubleLE();
     if (!Number.isFinite(zFactor) || zFactor <= 0 || zFactor > 4)
@@ -537,6 +553,11 @@ export async function runPhase9BasePlay(api) {
     await shot('yard');
     const power = await build('power-plant', powerTypes, [yard.uid]);
     report.powerPlant = power;
+    if (api.stopAfter === 'power-plant') {
+      report.buildingsOnly = true;
+      report.stoppedAfter = 'power-plant';
+      return report;
+    }
     const barracks = await build('barracks', barracksTypes, [yard.uid, power.uid]);
     report.barracks = barracks;
     if (!api.buildOnly) {
@@ -566,6 +587,7 @@ export async function runPhase9BasePlay(api) {
     await shot('failure').catch(() => {});
     await record('base-play-failed', { error: report.error, lastState: report.lastState, met: false });
   } finally {
+    await memorySnapshot('end');
     await api.page.keyboard.up('Shift').catch(() => {});
     await api.page.keyboard.up('d').catch(() => {});
     await api.page.mouse.up({ button: 'left' }).catch(() => {});

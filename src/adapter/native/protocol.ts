@@ -4,6 +4,8 @@ import type { MenuSnapshot } from '../../vm86/menuSnapshot';
 export const NATIVE_MAGIC = 0x3142484e;
 export const NATIVE_VERSION = 1;
 export const NATIVE_MAX_MESSAGE = 32 * 1024 * 1024;
+// RGB565 allocation bound, matching NH_MAX_PICTURE_PIXELS; the wire budget stays unchanged.
+export const NATIVE_MAX_PICTURE_PIXELS = 3 * 1024 * 1024;
 export const NATIVE_PAGE_SIZE = 4096;
 /** Reserve complete removal membership and the largest 64 direct samples within the unchanged wire limit. */
 export const NATIVE_MAX_PAGES = Math.floor(
@@ -500,7 +502,14 @@ export class NativePictureDecoder {
       width = source.getUint32(4, true),
       height = source.getUint32(8, true);
     const rowCount = source.getUint32(12, true);
-    if (!width || !height || width > 4096 || height > 4096 || width * height > 2 * 1024 * 1024 || rowCount > height) {
+    if (
+      !width ||
+      !height ||
+      width > 4096 ||
+      height > 4096 ||
+      width * height > NATIVE_MAX_PICTURE_PIXELS ||
+      rowCount > height
+    ) {
       throw new NativeProtocolError('Invalid picture dimensions');
     }
     const matching = this.previous?.width === width && this.previous.height === height;

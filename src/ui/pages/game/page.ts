@@ -40,7 +40,7 @@ import {
 import { installRuntimeToolbar } from './runtimeToolbar';
 import { restoreCachedGameSource } from './gameSourcePicker';
 import { desktopPointerLock, nativeAutoStart, prepareNativeViewport } from './nativeStartup';
-import { prepareWebPlayViewport } from './playStartup';
+import { measurePlayViewport, prepareWebPlayViewport } from './playStartup';
 import { identifyYrHdMenu } from '../../../games/yr/hdMenus';
 import { parseTrainingQuery, trainingHref } from './training/trainingQuery';
 import { supportedGame } from '../../../games/catalog';
@@ -56,6 +56,7 @@ import { createVmRuntimeCallbacks } from './vmPageRuntimeCallbacks';
 import { createNativeCursorFrames } from './nativeCursorFrames';
 import { createVmPageToolbarActions } from './vmPageToolbarActions';
 import {
+  DEFAULT_VIEW_CHOICE,
   loadStoredResolutionChoice,
   parseResolutionChoice,
   resolveResolutionChoice,
@@ -117,15 +118,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
   let resizeBusy = false;
   let refreshNoticeTimer: number | undefined;
   let restartForViewport = async () => {};
-  const readArea = () => {
-    const area = canvas.closest('#stage')?.getBoundingClientRect();
-    const fullscreen = document.fullscreenElement?.contains(canvas);
-    return {
-      width: fullscreen ? window.innerWidth : (area?.width ?? window.innerWidth),
-      height: fullscreen ? window.innerHeight : (area?.height ?? window.innerHeight),
-      dpr: window.devicePixelRatio || 1,
-    };
-  };
+  const readArea = () => measurePlayViewport(canvas);
   movieSkip.set(null);
   activeNativeViewportAbort?.abort();
   activeNativeViewportAbort = null;
@@ -546,12 +539,12 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
     if (generation === pageGeneration) hotkeySheet.set(sheet);
   });
   // ?resolution= (a size, `display` or `ini`) wins for this page load; otherwise the stored toolbar choice. Without
-  // either, the HD bridge uses classic framing (three device pixels per game pixel).
+  // either, the HD bridge uses Wide framing (two device pixels per game pixel).
   const urlChoice = parseResolutionChoice(new URLSearchParams(window.location.search).get('resolution'), true);
   if (urlChoice === 'classic' || urlChoice === 'moderate' || urlChoice === 'wide')
     storeResolutionChoice(selectedGameId, urlChoice);
   const storedChoice = urlChoice === undefined ? loadStoredResolutionChoice(selectedGameId) : urlChoice;
-  activeResolutionChoice = storedChoice === undefined ? (hdBridgeRequested ? 'classic' : null) : storedChoice;
+  activeResolutionChoice = storedChoice === undefined ? (hdBridgeRequested ? DEFAULT_VIEW_CHOICE : null) : storedChoice;
   requestedResolution = resolveResolutionChoice(
     activeResolutionChoice,
     canvas.closest('#stage'),
@@ -781,7 +774,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
       (waiting) => {
         updateBootOverlay({ phase: 'loading', detail: waiting ? '正在进入全屏并匹配画面…' : t('初始化…') });
       },
-      resolutionViewScale(activeResolutionChoice) ?? 3,
+      resolutionViewScale(activeResolutionChoice) ?? 2,
       typeof activeResolutionChoice === 'object' ? activeResolutionChoice : null,
       activeResolutionChoice === null,
       (area) => {

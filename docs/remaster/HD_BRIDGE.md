@@ -706,11 +706,18 @@ choice of rate, and `hd-pipelines=sync` switches the asynchronous pipeline compi
 
 The view choice controls framing independently of HD rendering resolution. **经典** (`resolution=classic`) uses
 three device pixels per game pixel, **适中** (`resolution=moderate`) uses 2.5, and **宽** (`resolution=wide`) uses two.
-Classic is the default when the player has never selected a view; `resolution=display` remains a legacy alias for
-Wide. The page remembers the selected view between sessions. Both owner launchers accept `--view classic|moderate|wide`.
+Wide is the default when the player has never selected a view; `resolution=display` remains a legacy alias for
+Wide. The page remembers the selected view between sessions. Both owner launchers accept `--view classic|moderate|wide`
+and otherwise defer to this shared page preference. Old unversioned stored Classic choices migrate to Wide once,
+per game, because their storage format could not distinguish the old default from an explicit choice. New toolbar
+and URL choices record the current default version, so selecting Classic again persists. Moderate, fixed resolutions
+and an explicit INI choice remain unchanged.
 
 - Each display-matched choice divides the available stage's device pixels by its scale and rounds the game frame
   down to even dimensions within `GAME_RESOLUTION_LIMITS` (`src/games/resolution.ts`, 800x600 through 2560x1600).
+  Fullscreen measurement retains the element's fractional CSS box. Both resolution negotiation and canvas fitting
+  round that box to integral device pixels before dividing: at 75% zoom, 2741.3333 CSS pixels (or the rounded 2741
+  reported by `innerWidth`) at DPR 1.5 represent 4112 device pixels and exactly 2056 game pixels in Wide.
   The smallest supported usable game frame is 800x600. If a small window cannot fit that minimum at the selected
   scale, the frame uses a smaller fitting scale; a window smaller than the minimum still fits the complete frame.
   On a 1728x914-point play area at DPR 2, the calculated Classic / Moderate / Wide frames are 1152x608 / 1382x730 /
@@ -729,7 +736,7 @@ Wide. The page remembers the selected view between sessions. Both owner launcher
   `resolution=WxH` still requests an explicit frame and `resolution=ini` the game's own INI. An explicit URL choice
   wins over the stored choice for that page load; changing the page control removes that URL override.
 - The HD canvas and the HD interface canvas are laid out on whole device pixels with one drawing-buffer pixel each
-  (`devicePixelBox.ts`, `LiveView.resizePixels`), up to a budget of 10 million pixels; the device pixel ratio is not
+  (`devicePixelBox.ts`, `LiveView.resizePixels`), up to a budget of 12 million pixels; the device pixel ratio is not
   capped. Meshes are rasterized at that device resolution at every view scale. HD colour textures use linear
   magnification; Canvas 2D interface art requests smooth bilinear sampling in Chrome, so 2x art enlarges without
   nearest-neighbour blocks or cubic edge overshoot. Supplied 3x sidebar art is texel for pixel at Classic's scale 3.
@@ -738,7 +745,7 @@ Wide. The page remembers the selected view between sessions. Both owner launcher
   grid (`snapToPixelGrid`), and post-pass radii follow the view scale (`HdRenderer.setBufferScale`).
 
 `scripts/remaster/play.sh` (or a double click on `scripts/remaster/play.command` on macOS) starts the development
-server and opens the HD page with the approved look, the remembered view (Classic initially), `game-speed=3` (the original scale's normal
+server and opens the HD page with the approved look, the remembered view (Wide initially), `game-speed=3` (the original scale's normal
 speed; the page's own startup default is the fastest, see
 [the startup configuration](../RA2_COMMAND_LINE_AND_SPAWNER.md#current-startup-configuration)) and the skirmish setup as
 the first page; `--view classic|moderate|wide` explicitly selects the framing, `--original` opens the original picture without the HD bridge, `--train` opens the practice lessons

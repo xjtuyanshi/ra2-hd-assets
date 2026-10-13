@@ -26,6 +26,9 @@
 #define NH_MAGIC 0x3142484eu
 #define NH_VERSION 1
 #define NH_MAX_MESSAGE (32u * 1024u * 1024u)
+/* Bound RGB565 baseline/pending allocations independently of the wire mailbox.
+ * Three Mi pixels cover a 2056x1290 Wide frame; keep NativePictureDecoder aligned. */
+#define NH_MAX_PICTURE_PIXELS (3u * 1024u * 1024u)
 /* Full page updates, removals and the largest protocol samples fit the unchanged 32 MiB packet. */
 #define NH_MAX_PAGES ((NH_MAX_MESSAGE - 24u - NH_MAX_SAMPLES * (NH_PAGE_SIZE + 8u)) / (NH_PAGE_SIZE + 8u))
 #define NH_MAX_RULES 256u

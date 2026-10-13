@@ -644,6 +644,8 @@ for (const scenario of [
 test('native size parsing and main-display capping respect game and picture bounds', () => {
   assert.deepEqual(parseNativeSize('1512x982'), { width: 1512, height: 982 });
   assert.deepEqual(capNativeResolution({ width: 1512, height: 982 }), { width: 1512, height: 982 });
+  assert.deepEqual(capNativeResolution({ width: 2056, height: 1290 }), { width: 2056, height: 1290 });
+  assert.deepEqual(capNativeResolution({ width: 2056, height: 1114 }), { width: 2056, height: 1114 });
   for (const size of [
     { width: 5120, height: 2880 },
     { width: 99999, height: 600 },
@@ -663,7 +665,13 @@ test('native viewport matching resolves view choices and supported even sizes', 
   assert.deepEqual(nativeViewportResolution({ width: 1728, height: 963, dpr: 2 }), { width: 1728, height: 962 });
   assert.deepEqual(nativeViewportResolution({ width: 1728, height: 1117, dpr: 2 }), { width: 1728, height: 1116 });
   assert.deepEqual(nativeViewportResolution({ width: 1728, height: 900, dpr: 1.5 }), { width: 1296, height: 674 });
-  assert.deepEqual(nativeViewportResolution({ width: 2560, height: 1440, dpr: 2 }), { width: 1930, height: 1086 });
+  assert.deepEqual(nativeViewportResolution({ width: 2560, height: 1440, dpr: 2 }), { width: 2364, height: 1330 });
+  // Chrome at 75% reports CSS dimensions enlarged by 4/3 and DPR 1.5; their product is device pixels.
+  for (const width of [2741, 2741.3333, (2056 * 4) / 3])
+    assert.deepEqual(nativeViewportResolution({ width, height: 1720, dpr: 1.5 }), {
+      width: 2056,
+      height: 1290,
+    });
   assert.deepEqual(nativeViewportResolution({ width: 700, height: 600, dpr: 2 }), { width: 932, height: 800 });
   assert.deepEqual(nativeViewportResolution({ width: 1728, height: 914, dpr: 2, devicePixelsPerGamePixel: 3 }), {
     width: 1152,

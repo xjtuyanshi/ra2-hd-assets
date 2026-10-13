@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { desktopPointerLock, nativeAutoStart, prepareNativeViewport } from '../../src/ui/pages/game/nativeStartup';
-import { prepareWebPlayViewport, waitForStartViewport } from '../../src/ui/pages/game/playStartup';
+import { measurePlayViewport, prepareWebPlayViewport, waitForStartViewport } from '../../src/ui/pages/game/playStartup';
 import { resolveResolutionChoice } from '../../src/ui/pages/game/vmPageResolution';
 
 afterEach(() => {
@@ -80,6 +80,7 @@ describe('native launcher startup', () => {
     );
     const target = {
       contains: () => true,
+      getBoundingClientRect: () => ({ width: window.innerWidth, height: window.innerHeight }),
       requestFullscreen: vi.fn(async () => {
         Object.assign(document, { fullscreenElement: target });
       }),
@@ -106,6 +107,19 @@ describe('native launcher startup', () => {
     start!(false);
     await expect(windowResult).resolves.toEqual({ width: 1728, height: 1117, dpr: 2 });
     expect(target.requestFullscreen).toHaveBeenCalledOnce();
+  });
+  it('keeps fractional fullscreen dimensions at 75 percent browser zoom', () => {
+    const { canvas } = viewportFixture();
+    Object.assign(window, { innerWidth: 2741, innerHeight: 1720, devicePixelRatio: 1.5 });
+    Object.assign(document, {
+      fullscreenElement: {
+        contains: () => true,
+        getBoundingClientRect: () => ({ width: 2741.3333, height: 1720 }),
+      },
+    });
+    const area = measurePlayViewport(canvas);
+    expect(area).toEqual({ width: 2741.3333, height: 1720, dpr: 1.5 });
+    expect(resolveResolutionChoice('wide', null, area.dpr, area)).toEqual({ width: 2056, height: 1290 });
   });
   it('does not start a process if cancelled during the fullscreen transition', async () => {
     const { fetch, canvas } = viewportFixture();
@@ -183,7 +197,7 @@ describe('native launcher startup', () => {
       width: 1728,
       height: 1117,
       dpr: 2,
-      devicePixelsPerGamePixel: 3,
+      devicePixelsPerGamePixel: 2,
     });
   });
   it.each([

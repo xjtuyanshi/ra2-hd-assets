@@ -299,6 +299,23 @@ describe('按显示器匹配的帧尺寸', () => {
     }
   });
 
+  it.each([2741, 2741.3333])('keeps the 4112-pixel fullscreen raster at CSS width %s and DPR 1.5', (width) => {
+    const size = match(width, 1720, 1.5)!;
+    expect(size).toEqual({ width: 2056, height: 1290 });
+    const fit = calculateCanvasFit({
+      stageWidth: width,
+      stageHeight: 1720,
+      frameWidth: size.width,
+      frameHeight: size.height,
+      devicePixelRatio: 1.5,
+      preferredScale: 2,
+      fillStage: true,
+    })!;
+    expect(fit).toMatchObject({ scale: 2, fillScale: 2, backingWidth: 4112, backingHeight: 2580 });
+    expect(fit.cssWidth * 1.5).toBe(4112);
+    expect(fit.cssHeight * 1.5).toBe(2580);
+  });
+
   it('经典和适中保持所选倍率并把原版部分直接画到设备分辨率', () => {
     for (const [scale, width, height] of [
       [3, 1152, 608],

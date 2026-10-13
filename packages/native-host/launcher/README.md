@@ -93,12 +93,19 @@ effects/water, remaster vehicles, HD vehicle projection and HD UI.
 original game. The page reports its actual available play area and device pixel
 ratio and remembered view through an authenticated loopback endpoint. The page
 offers **视野：经典 / 适中 / 宽**: `classic` / `moderate` / `wide` use 3 / 2.5 / 2
-device pixels per game pixel, with Classic initially selected. `--view classic|moderate|wide`
+device pixels per game pixel, with Wide initially selected. Each game's old unversioned
+remembered Classic choice migrates to Wide once. Explicitly selecting Classic again
+records the new preference version and keeps that choice on later starts; Moderate,
+fixed sizes and the INI choice remain unchanged. `--view classic|moderate|wide`
 selects that framing explicitly on both launch routes; `resolution=display` remains
-a legacy Wide alias. Frames round down to even dimensions. A small window uses a
+a legacy Wide alias. Fullscreen measurement retains fractional CSS dimensions;
+both launch routes round those to integral device pixels before calculating the
+even-sized game frame. A small window uses a
 smaller fitting scale when necessary to keep the minimum usable 800×600 frame.
 Sizes must fit the shared 800×600 through 2560×1600 session range and the native
-picture protocol's 2,097,152-pixel limit. Explicit `--size` retains the existing proportional
+picture protocol's 3,145,728-pixel allocation limit. This admits a 2056×1290 Wide
+frame and its 4112×2580 device-pixel view at 75% browser zoom (DPR 1.5); the HD
+backing budget is 12,000,000 pixels. Explicit `--size` retains the existing proportional
 capping behavior and bypasses page measurement. The launcher prints the applied
 size and writes only `ScreenWidth`, `ScreenHeight` and `AllowHiResModes` in the
 supplied copy's `RA2MD.INI` **before** starting the game. It preserves unrelated

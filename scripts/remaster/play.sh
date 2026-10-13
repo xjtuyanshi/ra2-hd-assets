@@ -8,7 +8,8 @@
 #                                         practice scenarios below <main checkout>/gameres/s2x/play/train on first use
 #   scripts/remaster/play.sh --print      only print the address (nothing is started)
 #
-# --view classic|moderate|wide selects 3|2.5|2 device pixels per game pixel (first-run default classic).
+# --view classic|moderate|wide selects 3|2.5|2 device pixels per game pixel (default wide).
+# The page migrates old remembered classic choices to wide once; a newly chosen classic remains remembered.
 # HD play asks the player to size the window before Start, then measures that click. Later window changes fill the
 # picture immediately and restart at the next main menu. Close the terminal window (or press Ctrl+C) to stop the server.
 #
